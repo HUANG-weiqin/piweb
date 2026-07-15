@@ -28,8 +28,12 @@ export type ChatAction =
 
 const id = () => crypto.randomUUID();
 
+function lastMessage(messages: ChatMessage[]): ChatMessage | undefined {
+  return messages[messages.length - 1];
+}
+
 function ensureAssistant(messages: ChatMessage[]): ChatMessage[] {
-  if (messages.at(-1)?.role === "assistant") return messages;
+  if (lastMessage(messages)?.role === "assistant") return messages;
   return [...messages, { id: id(), role: "assistant", text: "", thinking: "", tools: [] }];
 }
 
@@ -53,7 +57,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     const delta = event.assistantMessageEvent;
     if (delta?.type !== "text_delta" && delta?.type !== "thinking_delta") return state;
     const messages = ensureAssistant(state.messages);
-    const last = messages.at(-1)!;
+    const last = lastMessage(messages)!;
     const updated = delta.type === "text_delta"
       ? { ...last, text: last.text + String(delta.delta ?? "") }
       : { ...last, thinking: last.thinking + String(delta.delta ?? "") };
@@ -62,14 +66,14 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
 
   if (event.type === "tool_execution_start") {
     const messages = ensureAssistant(state.messages);
-    const last = messages.at(-1)!;
+    const last = lastMessage(messages)!;
     const tool: ToolItem = { id: String(event.toolCallId), name: String(event.toolName), args: event.args, status: "running" };
     return { ...state, messages: [...messages.slice(0, -1), { ...last, tools: [...last.tools, tool] }] };
   }
 
   if (event.type === "tool_execution_update" || event.type === "tool_execution_end") {
     const messages = ensureAssistant(state.messages);
-    const last = messages.at(-1)!;
+    const last = lastMessage(messages)!;
     let status: ToolItem["status"] = "running";
     if (event.type === "tool_execution_end") status = event.isError ? "error" : "done";
     const tools = last.tools.map((tool) => {

@@ -10,9 +10,19 @@ function statusIcon(status: ToolItem["status"]): string {
   return "!";
 }
 
+function compactLabel(name: string): string {
+  const content = ` ${name} `;
+  const width = 38;
+  if (content.length >= width) return content;
+  const side = Math.max(0, Math.floor((width - content.length) / 2));
+  const left = "-".repeat(side);
+  const right = "-".repeat(Math.max(0, width - content.length - side));
+  return `${left}${content}${right}`;
+}
+
 export function ToolCard({ tool }: { tool: ToolItem }) {
   return <details className={`tool tool-${tool.status}`}>
-    <summary><span>{statusIcon(tool.status)}</span> {tool.name}</summary>
+    <summary><span>{statusIcon(tool.status)}</span> <span className="tool-title">{compactLabel(tool.name)}</span></summary>
     {tool.args !== undefined && <pre>{printable(tool.args)}</pre>}
     {tool.result !== undefined && <pre>{printable(tool.result)}</pre>}
   </details>;

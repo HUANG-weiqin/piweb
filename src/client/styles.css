@@ -48,7 +48,10 @@ button, .primary-link { border: 0; border-radius: 9px; padding: 9px 12px; color:
 .markdown code { font-family: "Cascadia Code", Consolas, monospace; }
 .markdown :not(pre) > code { background: #e8e6df; border-radius: 4px; padding: 2px 5px; }
 .thinking, .tool { margin: 8px 0; border: 1px solid var(--line); border-radius: 9px; color: var(--muted); }
-.thinking summary, .tool summary { padding: 8px 11px; cursor: pointer; font-size: 13px; }
+.thinking summary, .tool summary { padding: 8px 11px; cursor: pointer; font-size: 13px; list-style: none; }
+.tool summary::-webkit-details-marker { display: none; }
+.tool summary::marker { content: ""; }
+.tool-title { display: block; width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-family: "Cascadia Code", Consolas, monospace; letter-spacing: 0.02em; color: var(--muted); }
 .thinking > div { padding: 0 11px 10px; white-space: pre-wrap; font-size: 13px; }
 .tool pre { margin: 0 10px 10px; max-height: 280px; }
 .tool-running summary span { color: #c28b1a; }.tool-done summary span { color: #278653; }.tool-error summary span { color: var(--danger); }

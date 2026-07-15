@@ -14,7 +14,12 @@ export function Chat({ chat, model, cwd, online, onSend, onAbort, onSettings, on
 }) {
   const [text, setText] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
-  useEffect(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), [chat.messages]);
+  useEffect(() => {
+    const target = endRef.current;
+    if (typeof target?.scrollIntoView === "function") {
+      target.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [chat.messages]);
   const send = () => {
     const value = text.trim();
     if (!value || chat.busy || !model) return;

@@ -6,12 +6,13 @@ import { Chat } from "./components/Chat";
 import { ConnectionDrawer } from "./components/ConnectionDrawer";
 import { Setup } from "./components/Setup";
 import { PiSocket } from "./lib/socket";
+import { readStoredString, writeStoredString } from "./lib/storage";
 
 const CWD_KEY = "piweb.lastCwd";
 
 export function App() {
   const [online, setOnline] = useState(false);
-  const [startupCwd, setStartupCwd] = useState(() => localStorage.getItem(CWD_KEY) ?? "");
+  const [startupCwd, setStartupCwd] = useState(() => readStoredString(CWD_KEY));
   const [activeCwd, setActiveCwd] = useState("");
   const activeCwdRef = useRef("");
   const [state, setState] = useState<PublicState>();
@@ -34,7 +35,7 @@ export function App() {
         setState(event.state);
         setActiveCwd(event.state.cwd);
         activeCwdRef.current = event.state.cwd;
-        localStorage.setItem(CWD_KEY, event.state.cwd);
+        writeStoredString(CWD_KEY, event.state.cwd);
         setError("");
         if (!event.state.selectedModel && !autoOpened.current) {
           autoOpened.current = true;
