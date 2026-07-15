@@ -7,7 +7,7 @@ export function Chat({ chat, model, cwd, online, onSend, onAbort, onSettings, on
   model?: { provider: string; id: string };
   cwd: string;
   online: boolean;
-  onSend(text: string): void;
+  onSend(text: string): boolean;
   onAbort(): void;
   onSettings(): void;
   onChangeCwd(): void;
@@ -23,8 +23,8 @@ export function Chat({ chat, model, cwd, online, onSend, onAbort, onSettings, on
   const send = () => {
     const value = text.trim();
     if (!value || chat.busy || !model) return;
-    setText("");
-    onSend(value);
+    const accepted = onSend(value);
+    if (accepted) setText("");
   };
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); send(); }

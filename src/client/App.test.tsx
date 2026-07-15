@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ClientCommand, ServerEvent } from "../shared/protocol";
 import { App } from "./App";
@@ -24,8 +24,7 @@ vi.mock("./lib/socket", () => ({
     }
 
     send(command: ClientCommand) {
-      socketMock.send(command);
-      return true;
+      return socketMock.send(command);
     }
 
     close() {}
@@ -70,5 +69,30 @@ describe("App", () => {
     }));
 
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeInTheDocument();
+  });
+
+  it("does not add a message when prompt sending fails", () => {
+    socketMock.send.mockReturnValue(false);
+
+    render(<App />);
+
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+
+    const input = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
+    fireEvent.change(input, { target: { value: "hello" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(screen.queryAllByText("hello", { selector: "article" })).toHaveLength(0);
+    expect(input).toHaveValue("hello");
   });
 });

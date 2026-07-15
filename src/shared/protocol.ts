@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 
 export const MAX_MESSAGE_BYTES = 1_000_000;
 const required = z.string().trim().min(1);
@@ -59,7 +60,7 @@ export type AuthRequest =
 export type ServerEvent =
   | { type: "hello"; startupCwd: string }
   | { type: "state"; state: PublicState }
-  | { type: "session_event"; event: unknown }
+  | { type: "session_event"; event: AgentSessionEvent }
   | { type: "auth_request"; requestId: string; request: AuthRequest }
   | { type: "auth_progress"; message: string }
   | { type: "auth_complete"; provider: string }

@@ -1,3 +1,5 @@
+import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+
 export interface ToolItem {
   id: string;
   name: string;
@@ -20,9 +22,10 @@ export interface ChatState {
 }
 
 export const initialChatState: ChatState = { messages: [], busy: false };
+
 export type ChatAction =
   | { type: "sent"; text: string }
-  | { type: "pi"; event: any }
+  | { type: "pi"; event: AgentSessionEvent }
   | { type: "error"; message: string }
   | { type: "reset" };
 
@@ -49,7 +52,6 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   };
 
   const event = action.event;
-  if (!event || typeof event.type !== "string") return state;
   if (event.type === "agent_start") return { ...state, busy: true, messages: ensureAssistant(state.messages) };
   if (event.type === "agent_settled") return { ...state, busy: false };
 

@@ -5,7 +5,7 @@ describe("chatReducer", () => {
   it("streams assistant text", () => {
     let state = chatReducer(initialChatState, { type: "sent", text: "hello" });
     state = chatReducer(state, { type: "pi", event: { type: "agent_start" } });
-    state = chatReducer(state, { type: "pi", event: { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "hi" } } });
+    state = chatReducer(state, { type: "pi", event: { type: "message_update", message: {} as any, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "hi", partial: {} as any } } });
     expect(state.messages.at(-1)?.text).toBe("hi");
   });
 
@@ -21,7 +21,7 @@ describe("chatReducer", () => {
 
     try {
       let state = chatReducer(initialChatState, { type: "pi", event: { type: "agent_start" } });
-      state = chatReducer(state, { type: "pi", event: { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "hi" } } });
+      state = chatReducer(state, { type: "pi", event: { type: "message_update", message: {} as any, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "hi", partial: {} as any } } });
 
       expect(state.messages[state.messages.length - 1]?.text).toBe("hi");
     } finally {

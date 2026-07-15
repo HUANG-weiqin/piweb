@@ -59,8 +59,10 @@ export function App() {
     return () => socket.close();
   }, []);
 
-  const send = (command: ClientCommand) => {
-    if (!socketRef.current?.send(command)) setError("本地服务未连接");
+  const send = (command: ClientCommand): boolean => {
+    const ok = socketRef.current?.send(command) ?? false;
+    if (!ok) setError("本地服务未连接");
+    return ok;
   };
   const initialize = (cwd: string) => {
     setError("");
@@ -70,9 +72,12 @@ export function App() {
     dispatch({ type: "reset" });
     send({ type: "initialize", cwd });
   };
-  const sendPrompt = (text: string) => {
-    dispatch({ type: "sent", text });
-    send({ type: "prompt", text });
+  const sendPrompt = (text: string): boolean => {
+    const trimmed = text.trim();
+    if (!trimmed) return false;
+    const ok = send({ type: "prompt", text: trimmed });
+    if (ok) dispatch({ type: "sent", text: trimmed });
+    return ok;
   };
 
   if (!activeCwd || !state) return <>

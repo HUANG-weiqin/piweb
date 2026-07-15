@@ -5,6 +5,7 @@ describe("isAllowedOrigin", () => {
   it("allows local browser origins", () => {
     expect(isAllowedOrigin("http://127.0.0.1:5173")).toBe(true);
     expect(isAllowedOrigin("http://localhost:31415")).toBe(true);
+    expect(isAllowedOrigin("https://127.0.0.1:5173")).toBe(true);
   });
 
   it("rejects remote and malformed origins", () => {
