@@ -75,4 +75,33 @@ describe("Message", () => {
     expect(screen.getByRole("button", { name: "收起到最近 4 条" })).toBeInTheDocument();
     expect(screen.getByText(/old-1\.md/)).toBeInTheDocument();
   });
+
+  it("shows tools before assistant markdown text", () => {
+    const message: ChatMessage = {
+      id: "3",
+      role: "assistant",
+      text: "最终回复：已完成分析。",
+      thinking: "",
+      tools: [
+        {
+          id: "1",
+          name: "read",
+          args: { path: "src/index.ts" },
+          result: { ok: true },
+          status: "done",
+        },
+      ],
+    };
+
+    const { container } = render(<Message message={message} />);
+
+    const article = container.querySelector("article") as HTMLElement;
+    const firstBlock = article.querySelector(".tools, .markdown") as HTMLElement;
+    const secondBlock = firstBlock?.nextElementSibling as HTMLElement | null;
+
+    expect(firstBlock).toHaveClass("tools");
+    expect(secondBlock).toHaveClass("markdown");
+    expect(screen.getByText("工具调用（1）")).toBeInTheDocument();
+    expect(screen.getByText("最终回复：已完成分析。")).toBeInTheDocument();
+  });
 });

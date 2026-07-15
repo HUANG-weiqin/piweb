@@ -28,7 +28,7 @@ export function Message({ message }: { message: ChatMessage }) {
   const html = DOMPurify.sanitize(marked.parse(message.text || (message.tools.length ? "" : "…"), { async: false }) as string);
   return <article className="message assistant">
     {message.thinking && <details className="thinking"><summary>思考过程</summary><div>{message.thinking}</div></details>}
-    {message.text || !message.tools.length ? <div className="markdown" dangerouslySetInnerHTML={{ __html: html }} /> : null}
     {message.tools.length ? <ToolsPanel tools={message.tools} /> : null}
+    {message.text || !message.tools.length ? <div className="markdown" dangerouslySetInnerHTML={{ __html: html }} /> : null}
   </article>;
 }
