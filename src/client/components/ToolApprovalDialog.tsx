@@ -63,9 +63,10 @@ export function ToolApprovalDialog({
       aria-label="工具执行审批"
       tabIndex={-1}
     >
-      <header>
+      <header className="modal-header">
         <div>
-          <h2>允许执行工具？</h2>
+          <p className="eyebrow">TOOL APPROVAL</p>
+          <h2>允许这次工具调用？</h2>
           <p className="progress"><code>{request.toolName}</code>{pendingCount > 1 ? ` · 另有 ${pendingCount - 1} 项等待` : ""}</p>
         </div>
       </header>
@@ -86,7 +87,7 @@ export function ToolApprovalDialog({
           disabled={disabled}
           onClick={() => decide("deny")}
         >
-          拒绝
+          拒绝此次工具
         </button>
         <button disabled={disabled} onClick={() => decide("allow")}>
           {submitting ? "正在提交…" : "允许一次"}

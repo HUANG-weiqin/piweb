@@ -18,6 +18,7 @@ import type {
 import { AuthFlowBroker } from "./auth-flow.js";
 import { projectConversationHistorySnapshot } from "./conversation-history.js";
 import { validateCwd } from "./cwd.js";
+import { ExtensionUIBroker } from "./extension-ui.js";
 import {
   PiRuntime,
   type CreatedPiSession,
@@ -59,6 +60,7 @@ interface ActiveSession {
   projectHandle: ProjectStoreHandle;
   conversationId: string;
   conversationLease: ConversationLease;
+  lifecycleAbort: AbortController;
   dispose: () => Promise<void>;
   unsubscribe: () => void;
   unsubscribeProject: () => void;
@@ -89,6 +91,7 @@ type QueuedCommand = Exclude<ClientCommand, {
     | "auth_response"
     | "cancel_auth"
     | "close_session"
+    | "extension_ui_response"
     | "initialize"
     | "prompt"
     | "tool_approval_response";
@@ -108,10 +111,10 @@ function queuedCommandScope(command: QueuedCommand): "session" | "epoch" | "glob
     case "set_thinking":
     case "set_tool_mode":
     case "rename_conversation":
+    case "set_api_key":
       return "session";
     case "login_oauth":
       return "epoch";
-    case "set_api_key":
     case "logout":
     case "refresh_models":
       return "global";
@@ -128,12 +131,14 @@ export class PiConnection {
   private readonly operations = new SerialTaskQueue();
   private readonly unsubscribeRuntime: () => void;
   private readonly toolApprovals: ToolApprovalBroker;
+  private readonly extensionUI: ExtensionUIBroker;
   private active?: ActiveSession;
   private activeRun?: RunTicket;
   private authFlow?: AuthFlowBroker;
   private requestedSessionId?: string;
   private readonly usedSessionIds = new Set<string>();
   private readonly runIdsBySession = new Map<string, Set<string>>();
+  private readonly usedCommandIds = new Set<string>();
   private readonly usedAuthFlowIds = new Set<string>();
   private readonly pendingAuthFlowIds = new Set<string>();
   private readonly cancelledAuthFlowIds = new Set<string>();
@@ -150,6 +155,7 @@ export class PiConnection {
     private readonly projectRuns: ProjectRunCoordinator = new ProjectRunCoordinator(),
   ) {
     this.toolApprovals = new ToolApprovalBroker(() => this.publishState());
+    this.extensionUI = new ExtensionUIBroker(emit);
     this.unsubscribeRuntime = runtime.subscribe(() => this.publishState());
   }
 
@@ -180,6 +186,10 @@ export class PiConnection {
       seedToolMode,
     );
     const project = projectHandle.store;
+    const lifecycleAbort = new AbortController();
+    const abortLifecycle = () => lifecycleAbort.abort();
+    signal.addEventListener("abort", abortLifecycle, { once: true });
+    if (signal.aborted) lifecycleAbort.abort();
     let selected: SelectedConversation | undefined;
     let created: CreatedPiSession | undefined;
     let ownershipTransferred = false;
@@ -195,6 +205,12 @@ export class PiConnection {
       if (this.disposed || generation !== this.generation || signal.aborted) return;
       created = await this.runtime.createSession(project.cwd, {
         sessionManager: selected.sessionManager,
+        extensionUI: this.extensionUI.context({
+          sessionId,
+          generation,
+          signal: lifecycleAbort.signal,
+        }),
+        extensionAbort: () => this.abortFromExtension(sessionId, generation),
         toolCallGate: (input) => this.authorizeToolCall(
           sessionId,
           generation,
@@ -235,6 +251,7 @@ export class PiConnection {
         projectHandle,
         conversationId: selected.conversationId,
         conversationLease: selected.lease,
+        lifecycleAbort,
         dispose: created.dispose,
         unsubscribe,
         unsubscribeProject,
@@ -270,7 +287,9 @@ export class PiConnection {
       }
       throw error;
     } finally {
+      signal.removeEventListener("abort", abortLifecycle);
       if (!ownershipTransferred) {
+        lifecycleAbort.abort();
         selected?.lease.release();
         projectHandle.release();
       }
@@ -336,6 +355,10 @@ export class PiConnection {
       this.toolApprovals.respond(command);
       return Promise.resolve();
     }
+    if (command.type === "extension_ui_response") {
+      this.extensionUI.respond(command);
+      return Promise.resolve();
+    }
     if (command.type === "auth_response") {
       if (this.authFlow?.id === command.authFlowId) this.authFlow.respond(command);
       return Promise.resolve();
@@ -396,6 +419,12 @@ export class PiConnection {
         }
       });
     }
+    if (command.type === "select_model" || command.type === "set_api_key") {
+      if (this.usedCommandIds.has(command.commandId)) {
+        return Promise.reject(new Error("Command ID was already used on this connection"));
+      }
+      this.usedCommandIds.add(command.commandId);
+    }
     if (command.type === "prompt") return this.queuePrompt(command);
     if (command.type === "login_oauth") {
       if (this.usedAuthFlowIds.has(command.authFlowId)) {
@@ -419,6 +448,21 @@ export class PiConnection {
           return;
         }
         await this.execute(command);
+        if (command.type === "select_model") {
+          this.emit({
+            type: "command_complete",
+            operation: command.type,
+            commandId: command.commandId,
+            sessionId: command.sessionId,
+          });
+        } else if (command.type === "set_api_key") {
+          this.emit({
+            type: "command_complete",
+            operation: command.type,
+            commandId: command.commandId,
+            sessionId: command.sessionId,
+          });
+        }
       } finally {
         if (command.type === "login_oauth") {
           this.pendingAuthFlowIds.delete(command.authFlowId);
@@ -482,6 +526,12 @@ export class PiConnection {
       }
 
       const active = this.requireActive();
+      if (this.isExtensionCommand(active.session, command.text)) {
+        this.finishRun(ticket, "failed");
+        throw new Error(
+          "Extension slash commands are not supported until their detached Agent turns can be owned safely",
+        );
+      }
       ticket.toolMode ??= active.project.toolMode;
       const projectRunLease = this.projectRuns.registerRun(
         active.cwd,
@@ -516,17 +566,53 @@ export class PiConnection {
   }
 
   private async selectModel(provider: string, modelId: string): Promise<void> {
-    const model = this.requireActive().modelRegistry.find(provider, modelId);
+    const active = this.requireActive();
+    const model = active.modelRegistry.find(provider, modelId);
     if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
-    await this.requireSession().setModel(model);
-    await this.flushSettings();
+    const partialFailures: unknown[] = [];
+    try {
+      await active.session.setModel(model);
+    } catch (error) {
+      if (active.session.model !== model) throw error;
+      partialFailures.push(error);
+    }
+    const settingsFailures = await this.flushSettings();
     this.publishState();
+    for (const failure of settingsFailures) {
+      this.emitError("settings", failure, active.id);
+    }
+    if (partialFailures.length > 0) {
+      const details = partialFailures.map((error) => this.errorMessage(error)).join("; ");
+      this.emitError(
+        "settings",
+        `模型已用于当前会话，但会话记录或默认设置可能未保存：${details}`,
+        active.id,
+      );
+    }
   }
 
   private async setThinking(level: ThinkingLevel): Promise<void> {
-    this.requireSession().setThinkingLevel(level);
-    await this.flushSettings();
+    const active = this.requireActive();
+    const previousLevel = active.session.thinkingLevel;
+    let partialFailure: unknown;
+    try {
+      active.session.setThinkingLevel(level);
+    } catch (error) {
+      if (active.session.thinkingLevel === previousLevel) throw error;
+      partialFailure = error;
+    }
+    const settingsFailures = await this.flushSettings();
     this.publishState();
+    for (const failure of settingsFailures) {
+      this.emitError("settings", failure, active.id);
+    }
+    if (partialFailure) {
+      this.emitError(
+        "settings",
+        `思考级别已用于当前会话，但会话记录或默认设置可能未保存：${this.errorMessage(partialFailure)}`,
+        active.id,
+      );
+    }
   }
 
   private async setToolMode(mode: ToolMode): Promise<void> {
@@ -539,9 +625,28 @@ export class PiConnection {
     if (active.conversationId !== conversationId) {
       throw new Error("Conversation is not active");
     }
-    active.session.setSessionName(name);
-    await active.project.refreshConversations();
+    const normalizedName = name.replace(/[\r\n]+/g, " ").trim();
+    const partialFailures: unknown[] = [];
+    try {
+      active.session.setSessionName(name);
+    } catch (error) {
+      if (active.sessionManager.getSessionName() !== normalizedName) throw error;
+      partialFailures.push(error);
+    }
+    try {
+      await active.project.refreshConversations();
+    } catch (error) {
+      partialFailures.push(error);
+    }
     this.publishState();
+    if (partialFailures.length > 0) {
+      const details = partialFailures.map((error) => this.errorMessage(error)).join("; ");
+      this.emitError(
+        "settings",
+        `对话名称已用于当前会话，但可能未保存到项目历史：${details}`,
+        active.id,
+      );
+    }
   }
 
   private async setApiKey(provider: string, key: string): Promise<void> {
@@ -703,21 +808,38 @@ export class PiConnection {
     return this.active;
   }
 
-  private async flushSettings(): Promise<void> {
+  private async flushSettings(): Promise<unknown[]> {
+    let failure: unknown;
     try {
       await this.requireSettings().flush();
-    } finally {
-      this.reportNativeErrors();
+    } catch (error) {
+      failure = error;
     }
-  }
-
-  private reportNativeErrors(): void {
+    const failures: unknown[] = [];
+    const reported = new Set<unknown>();
     for (const error of this.runtime.authStorage.drainErrors()) {
+      reported.add(error);
       this.emitError("auth", error);
     }
     for (const item of this.active?.settings.drainErrors() ?? []) {
+      reported.add(item.error);
+      failures.push(item.error);
+    }
+    if (failure && !reported.has(failure)) failures.push(failure);
+    return failures;
+  }
+
+  private reportNativeErrors(): Set<unknown> {
+    const reported = new Set<unknown>();
+    for (const error of this.runtime.authStorage.drainErrors()) {
+      reported.add(error);
+      this.emitError("auth", error);
+    }
+    for (const item of this.active?.settings.drainErrors() ?? []) {
+      reported.add(item.error);
       this.emitError("settings", item.error, this.active?.id);
     }
+    return reported;
   }
 
   private isActiveSession(sessionId: string, generation: number): boolean {
@@ -731,7 +853,27 @@ export class PiConnection {
   private onSessionEvent(sessionId: string, generation: number, event: AgentSessionEvent): void {
     if (!this.isActiveSession(sessionId, generation)) return;
     const run = this.activeRun;
-    if (!run || run.sessionId !== sessionId || run.generation !== generation) return;
+    if (
+      !run
+      || run.sessionId !== sessionId
+      || run.generation !== generation
+      || run.phase === "queued"
+    ) {
+      if (event.type === "agent_start") {
+        const active = this.active;
+        if (active?.id === sessionId && active.generation === generation) {
+          void active.session.abort().catch((error) => {
+            this.emitError("session", error, sessionId);
+          });
+          this.emitError(
+            "session",
+            "An extension started an Agent turn outside the workbench run lifecycle; it was stopped",
+            sessionId,
+          );
+        }
+      }
+      return;
+    }
 
     for (const projected of run.projector.project(event)) {
       this.emit({ type: "session_event", sessionId, runId: run.id, event: projected });
@@ -935,6 +1077,7 @@ export class PiConnection {
   ): void {
     if (this.activeRun !== ticket) return;
     this.toolApprovals.cancelRun(ticket.sessionId, ticket.id);
+    this.extensionUI.cancelScope(ticket.sessionId, ticket.generation);
     this.activeRun = undefined;
     ticket.projectRunLease?.release();
     ticket.projectRunLease = undefined;
@@ -958,8 +1101,32 @@ export class PiConnection {
     return this.cancelRun(ticket);
   }
 
+  private abortFromExtension(sessionId: string, generation: number): void {
+    const ticket = this.activeRun;
+    if (
+      !ticket
+      || ticket.sessionId !== sessionId
+      || ticket.generation !== generation
+    ) {
+      return;
+    }
+    void this.cancelRun(ticket).catch((error) => {
+      this.emitError("session", error, sessionId);
+    });
+  }
+
+  private isExtensionCommand(session: AgentSession, text: string): boolean {
+    if (!text.startsWith("/")) return false;
+    const spaceIndex = text.indexOf(" ");
+    const commandName = spaceIndex === -1
+      ? text.slice(1)
+      : text.slice(1, spaceIndex);
+    return session.extensionRunner.getCommand(commandName) !== undefined;
+  }
+
   private cancelRun(ticket: RunTicket): Promise<void> {
     if (this.activeRun !== ticket) return Promise.resolve();
+    this.extensionUI.cancelScope(ticket.sessionId, ticket.generation);
     if (ticket.phase === "queued") {
       ticket.phase = "cancelling";
       this.toolApprovals.cancelRun(ticket.sessionId, ticket.id);
@@ -1018,6 +1185,7 @@ export class PiConnection {
     if (bundle.disposePromise) return bundle.disposePromise;
     bundle.disposePromise = (async () => {
       const failures: unknown[] = [];
+      bundle.lifecycleAbort.abort();
       try {
         bundle.unsubscribe();
       } catch (error) {
@@ -1064,6 +1232,7 @@ export class PiConnection {
     this.unsubscribeRuntime();
     this.cancelAuth();
     this.toolApprovals.cancelAll();
+    this.extensionUI.cancelAll();
     const ticket = this.activeRun;
     const cancel = ticket ? this.cancelRun(ticket).catch(() => undefined) : Promise.resolve();
     this.disposePromise = this.operations.run(async () => {

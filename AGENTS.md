@@ -6,8 +6,10 @@ Pi Web 是本机优先的极简 Agent 工作台。当前目标不是复制 Pi �
 
 - 复用 Pi SDK 的模型、认证、工具和 Agent 循环。
 - 工作台拥有自己的稳定协议、会话生命周期和 UI 投影。
+- 只实现必须由工作台拥有的状态与控制语义；能被成熟外部工具完整替代的能力不重复建设。
 - 默认只监听 loopback；不要把当前安全模型扩展到远程访问。
 - 项目身份、工具模式和 Pi JSONL 对话由项目内 `.piweb/` 持久化；OS 级隔离仍是后续能力。
+- 项目信任决定必须来自用户级 Pi trust store 或当前交互；项目内文件不能让项目自证可信。
 
 代码标识使用英文；面向用户和项目知识页优先使用中文。
 
@@ -20,24 +22,36 @@ Pi Web 是本机优先的极简 Agent 工作台。当前目标不是复制 Pi �
 
 ## 架构硬边界
 
+- 新功能先判断它是否必须参与 Agent 生命周期、权限决策、持久会话或协议关联；如果不需要，并且外部工具可以完整替代，就不进入工作台核心。
+- Git 负责 diff、历史、回滚和分支；编辑器负责文件浏览与人工编辑；终端负责通用交互式 shell。工作台最多提供浅层交接，不维护第二份真相。
 - `src/shared/protocol.ts` 是浏览器与服务端的唯一线协议；浏览器不得导入 Pi SDK 事件类型。
 - `PiRuntime` 进程级共享 `AuthStorage` 与基线 `ModelRegistry`，每个 session 另有隔离的模型目录；所有认证/模型缓存修改必须从串行入口经过。
 - 项目扩展可以注册工具、hooks 和静态 provider 配置；在引入 worker/进程隔离前，必须拒绝进程全局的 `streamSimple` 与 OAuth provider 注册。
+- 项目资源必须在 trust resolution 后加载；默认 `SettingsManager` 不得以 `projectTrusted=true` 启动。
 - 允许的 provider 配置必须先深快照再交给 SDK，不能保留扩展传入的可变对象引用。
 - `ProjectStoreRegistry` 按 canonical cwd 在活动 handle 生命周期内复用项目 store，末次 release 后逐出；`.piweb/project.json` 是 durable manifest，`.piweb/sessions` 是受控 Pi sessionDir。
 - `PiConnection` 原子持有一个 session bundle：`sessionId + project handle + conversationId + SessionManager + writer lease + settings + modelRegistry + AgentSession + dispose + unsubscribe`。
 - `projectId`、`conversationId`、`sessionId` 和 `runId` 属于不同生命周期，禁止合并或互相替代。
 - 同一进程内一个 `canonical cwd + conversationId` 只能有一个 writer lease；租约必须在 Pi `open()` 前取得，并在所有失败/关闭路径释放。
 - 已有对话重连可有界等待旧 lease；等待必须 FIFO、可取消，不能通过第二个 writer 解决。
+- Pi `SessionManager.listAll()` 不是完整性证明：宿主必须验证受控目录内全部常规 JSONL 的尾换行、有限 JSON 数值、header、经迁移后的 entry payload/tree，并要求磁盘全集与 SDK 索引按规范路径和 conversationId 一一对应；任何遗漏、损坏、重复或扫描期变化都 fail closed。
 - 项目切 read_only 必须经过共享 `ProjectRunCoordinator`：同步封锁/取消旧 run，等它们结算后才能持久化和确认。
 - 浏览器不是 transcript owner；恢复必须从服务端 `conversation_snapshot` hydrate，localStorage 只保存目录和安全偏好。
 - 客户端收到匹配的 history snapshot 前不得发送 prompt；state 提交和历史恢复是两个观察边界。
+- `WebSocket.send()` 不是 prompt 提交点。只有匹配 sessionId + runId 的 `run_queued` 才能清空草稿并投影 user message；确认前断线必须保留草稿、恢复历史后提示核对，禁止自动重发。
 - 普通会话操作串行执行；`abort`、认证响应、认证取消和生命周期失效走控制通道，session dispose 排回 actor 队列。
 - 所有 session command/state/event 都带 `sessionId`；run command/event 还带 `runId`。客户端必须丢弃不匹配的身份。
+- 会让界面等待配置结果的命令必须有精确关联身份；当前 API Key 与模型选择使用 sessionId + 连接内一次性 commandId，不能把任意 PublicState 刷新当作成功回执。
+- Pi 的模型切换不是持久化事务：command success 以目标 model 已进入当前 AgentSession 为准，后续 session/settings 写入失败要单独报告，不能谎称运行态未切换。
+- Pi 的 thinking/name setter 也有相同的“内存先变更”顺序；新增 SDK 状态 setter 接入前必须核对源码顺序并用后置条件测试覆盖部分提交。
 - OAuth 命令与事件都带 `authFlowId`；取消必须覆盖 active 和尚在 actor 队列中的 flow。
 - SDK 事件只能在服务端 `SessionEventProjector` 内转换成工作台事件。
 - 不要直接开放 `AgentSession.reload()`；扩展 hook 当前与服务进程同生死，真正的超时/崩溃隔离属于 worker runtime。
+- 扩展 UI 只桥接 `select/confirm/input/editor/notify`；响应是控制命令，必须按 sessionId/requestId 精确匹配并在 timeout、abort、reinitialize、disconnect 时结算。
+- 扩展 command 的 session replacement 操作必须 fail closed。当前 slash command 也必须拒绝，直到 detached Agent turn 有明确的 host run ownership。
 - `PiConnection.activeRun` 是 queued/running/cancelling 的唯一服务端真相；`PublicState.busy` 只能由它派生，聊天 reducer 不维护第二份 busy。
+- AgentSession 创建后的 owner bind、host gate、startup 校验和 extension error 投影必须处于统一清理边界；成功创建后任一步失败都要 teardown session 并逐出 registry owner。
+- 同步 emitter 驱动的 OAuth/extension UI rendezvous 必须先登记 pending 再 emit；emit 或监听注册失败也不能留下 waiter、registry owner 或阻断其余 session teardown。
 - 工具授权必须位于项目扩展 `tool_call` hook 之后、真实 `tool.execute` 之前；响应必须走控制通道，不能排进 prompt 正占用的 actor 队列。
 - 待审批项只从 `PublicState.activeRun.pendingApprovals` 投影；浏览器弹窗和工具卡都不是授权真相。
 - 工具 gate 启用时固定使用 sequential execution，避免 SDK parallel preflight 在 abort 后执行已积累的 thunk。

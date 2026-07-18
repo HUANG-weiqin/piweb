@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
 import type { ChatState } from "../chat/reducer";
 import { Message } from "./Message";
 
@@ -14,6 +20,10 @@ interface ChatProps {
   cwd: string;
   online: boolean;
   conversationReady: boolean;
+  draft: string;
+  submitting: boolean;
+  promptNotice?: string;
+  onDraftChange(text: string): void;
   onSend(text: string): boolean;
   onAbort(): void;
   onSettings(): void;
@@ -25,7 +35,7 @@ function formatContextUsage({
   contextWindow,
   contextSource,
 }: Pick<ChatProps, "contextTokenCount" | "contextWindow" | "contextSource">): string {
-  if (contextTokenCount == null) return "当前上下文：未知（compaction 后需新回合刷新）";
+  if (contextTokenCount == null) return "未知，将在下一轮更新";
   const prefix = contextSource === "estimated" ? "估算 " : "";
   const window = contextWindow?.toLocaleString("zh-CN") ?? "?";
   return `${prefix}${contextTokenCount.toLocaleString("zh-CN")} / ${window}`;
@@ -43,28 +53,62 @@ export function Chat({
   cwd,
   online,
   conversationReady,
+  draft,
+  submitting,
+  promptNotice,
+  onDraftChange,
   onSend,
   onAbort,
   onSettings,
   onChangeCwd,
 }: ChatProps) {
+  const bottomThreshold = 96;
   const contextTokenText = formatContextUsage({ contextTokenCount, contextWindow, contextSource });
   let composerPlaceholder = "给 Pi 发送消息…";
   if (!conversationReady) composerPlaceholder = "正在恢复项目对话…";
   else if (!model) composerPlaceholder = "请先登录并选择模型";
-  const [text, setText] = useState("");
+  const transcriptRef = useRef<HTMLElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const followOutputRef = useRef(true);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   useEffect(() => {
-    const target = endRef.current;
-    if (typeof target?.scrollIntoView === "function") {
-      target.scrollIntoView({ behavior: "smooth" });
+    if (followOutputRef.current) {
+      const target = endRef.current;
+      if (typeof target?.scrollIntoView === "function") {
+        target.scrollIntoView({ block: "end" });
+      }
+      setShowJumpToLatest(false);
+    } else {
+      setShowJumpToLatest(true);
     }
   }, [chat.messages]);
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.min(Math.max(textarea.scrollHeight, 42), 180)}px`;
+  }, [draft]);
+  const handleTranscriptScroll = () => {
+    const transcript = transcriptRef.current;
+    if (!transcript) return;
+    const distanceFromBottom =
+      transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight;
+    followOutputRef.current = distanceFromBottom <= bottomThreshold;
+    if (followOutputRef.current) setShowJumpToLatest(false);
+  };
+  const jumpToLatest = () => {
+    followOutputRef.current = true;
+    setShowJumpToLatest(false);
+    const target = endRef.current;
+    if (typeof target?.scrollIntoView === "function") {
+      target.scrollIntoView({ behavior: "smooth", block: "end" });
+    }
+  };
   const send = () => {
-    const value = text.trim();
-    if (!value || busy || !model || !online || !conversationReady) return;
-    const accepted = onSend(value);
-    if (accepted) setText("");
+    const value = draft.trim();
+    if (!value || busy || submitting || !model || !online || !conversationReady) return;
+    onSend(value);
   };
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); send(); }
@@ -76,7 +120,12 @@ export function Chat({
       <button className="model-button" onClick={onSettings}>{model ? `${model.provider} / ${model.id}` : "选择模型"}<span>⌄</span></button>
     </header>
     {!online && <div className="banner">本地服务已断开，正在重连…</div>}
-    <section className="transcript" aria-live="polite">
+    <section
+      ref={transcriptRef}
+      className="transcript"
+      aria-live="polite"
+      onScroll={handleTranscriptScroll}
+    >
       {historyTruncated && <div className="history-note">
         较早或过长的显示内容已省略；完整记录仍保存在项目中。
       </div>}
@@ -84,14 +133,30 @@ export function Chat({
       {chat.messages.map((message) => <Message key={message.id} message={message} />)}
       <div ref={endRef} />
     </section>
-    <div className="composer-wrap"><div className="composer">
-      <textarea aria-label="给 Pi 发送消息" value={text} onChange={(e) => setText(e.target.value)} onKeyDown={keyDown} placeholder={composerPlaceholder} disabled={!online || !conversationReady || !model} rows={1} />
-      {busy ? <button className="send stop" onClick={onAbort} aria-label="停止">■</button> : <button className="send" onClick={send} disabled={!online || !conversationReady || !model || !text.trim()} aria-label="发送">↑</button>}
+    <div className="composer-wrap">
+      {showJumpToLatest && <button
+        type="button"
+        className="jump-latest"
+        onClick={jumpToLatest}
+      >
+        ↓ 回到最新消息
+      </button>}
+      {submitting && !promptNotice && <div
+        className="composer-notice pending"
+        role="status"
+      >
+        正在确认服务端已接收…
+      </div>}
+      {promptNotice && <div className="composer-notice" role="alert">{promptNotice}</div>}
+      <div className="composer">
+        <textarea ref={textareaRef} aria-label="给 Pi 发送消息" value={draft} onChange={(e) => onDraftChange(e.target.value)} onKeyDown={keyDown} placeholder={composerPlaceholder} disabled={!online || !conversationReady || !model || submitting} rows={1} />
+        {busy ? <button className="send stop" onClick={onAbort} aria-label="停止">■</button> : <button className="send" onClick={send} disabled={!online || !conversationReady || !model || submitting || !draft.trim()} aria-label="发送">↑</button>}
+      </div>
+      <div className="composer-meta">
+        <small className="session-stats billed-stat">累计 Token：{billedTokenCount.toLocaleString("zh-CN")}</small>
+        <small className="session-stats context-stat">上下文：{contextTokenText}</small>
+        <small className="composer-tip">Enter 发送 · Shift+Enter 换行 · 对话随项目自动保存</small>
+      </div>
     </div>
-    <div className="composer-meta">
-      <small className="session-stats">累计计费 token：{billedTokenCount.toLocaleString("zh-CN")}</small>
-      <small className="session-stats">上下文 token：{contextTokenText}</small>
-      <small className="composer-tip">Enter 发送 · Shift+Enter 换行 · 对话随项目自动保存</small>
-    </div></div>
   </main>;
 }

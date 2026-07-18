@@ -2,6 +2,7 @@ node_modules/
 dist-client/
 dist-server/
 coverage/
+.piweb/
 *.log
 *.pid
 .DS_Store

@@ -19,8 +19,15 @@ export class AuthFlowBroker {
       return Promise.reject(new Error("Authentication cancelled"));
     }
     const requestId = randomUUID();
-    this.emit({ type: "auth_request", authFlowId: this.id, requestId, request });
-    return new Promise((resolve, reject) => this.pending.set(requestId, { resolve, reject }));
+    return new Promise((resolve, reject) => {
+      this.pending.set(requestId, { resolve, reject });
+      try {
+        this.emit({ type: "auth_request", authFlowId: this.id, requestId, request });
+      } catch (error) {
+        this.pending.delete(requestId);
+        reject(error);
+      }
+    });
   }
 
   readonly callbacks: OAuthLoginCallbacks = {

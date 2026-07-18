@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -107,6 +107,90 @@ describe("PiRuntime session ownership", () => {
     await explicitSession.dispose();
   });
 
+  it("resolves project trust before loading protected project resources", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-trust-project-"));
+    const agentDir = await mkdtemp(join(tmpdir(), "piweb-runtime-trust-agent-"));
+    await mkdir(join(cwd, ".pi"), { recursive: true });
+    await writeFile(join(cwd, ".pi", "settings.json"), "{}\n", "utf8");
+    const remembered = new Map<string, boolean>();
+    let offeredOptions: string[] = [];
+    const authStorage = AuthStorage.inMemory();
+    const runtime = new PiRuntime({
+      authStorage,
+      modelRegistry: ModelRegistry.inMemory(authStorage),
+      createModelRegistry: (storage) => ModelRegistry.inMemory(storage),
+      createSettings: (projectCwd) => SettingsManager.create(
+        projectCwd,
+        agentDir,
+        { projectTrusted: false },
+      ),
+      createServices: (options) => createAgentSessionServices({
+        ...options,
+        agentDir,
+      }),
+      projectTrustStore: {
+        get: (projectCwd) => remembered.get(projectCwd) ?? null,
+        set: (projectCwd, trusted) => {
+          if (trusted === null) remembered.delete(projectCwd);
+          else remembered.set(projectCwd, trusted);
+        },
+      },
+    });
+    const created = await runtime.createSession(cwd, {
+      extensionUI: {
+        select: async (_title, options) => {
+          offeredOptions = options;
+          return options.find((option) => option === "信任此项目并记住");
+        },
+        confirm: async () => false,
+        input: async () => undefined,
+        editor: async () => undefined,
+        notify: () => undefined,
+      },
+    });
+
+    expect(offeredOptions).toEqual([
+      "信任此项目并记住",
+      "仅本次信任",
+      "不信任此项目并记住",
+      "仅本次不信任",
+    ]);
+    expect(remembered.get(cwd)).toBe(true);
+    expect(created.settings.isProjectTrusted()).toBe(true);
+    await created.dispose();
+  });
+
+  it("fails project trust closed when protected resources have no interactive decision", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-untrusted-project-"));
+    const agentDir = await mkdtemp(join(tmpdir(), "piweb-runtime-untrusted-agent-"));
+    await mkdir(join(cwd, ".pi"), { recursive: true });
+    await writeFile(join(cwd, ".pi", "settings.json"), "{}\n", "utf8");
+    const authStorage = AuthStorage.inMemory();
+    const runtime = new PiRuntime({
+      authStorage,
+      modelRegistry: ModelRegistry.inMemory(authStorage),
+      createModelRegistry: (storage) => ModelRegistry.inMemory(storage),
+      createSettings: (projectCwd) => SettingsManager.create(
+        projectCwd,
+        agentDir,
+        { projectTrusted: false },
+      ),
+      createServices: (options) => createAgentSessionServices({
+        ...options,
+        agentDir,
+      }),
+      projectTrustStore: {
+        get: () => null,
+        set: () => undefined,
+      },
+    });
+
+    const created = await runtime.createSession(cwd);
+
+    expect(created.settings.isProjectTrusted()).toBe(false);
+    await created.dispose();
+  });
+
   it("registers project providers before restoring a persisted model", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-restore-provider-"));
     const authStorage = AuthStorage.inMemory();
@@ -190,6 +274,88 @@ describe("PiRuntime session ownership", () => {
     expect(ownerRefreshes).toBe(0);
   });
 
+  it.each([
+    {
+      stage: "model binding",
+      expectedError: "model binding failed",
+      installFailure(created: Awaited<ReturnType<typeof createAgentSession>>) {
+        created.session.modelRegistry.find = () => {
+          throw new Error("model binding failed");
+        };
+      },
+      toolCallGate: undefined,
+    },
+    {
+      stage: "tool gate installation",
+      expectedError: "tool gate installation failed",
+      installFailure(created: Awaited<ReturnType<typeof createAgentSession>>) {
+        const nativeAgent = created.session.agent;
+        Object.defineProperty(created.session, "agent", {
+          configurable: true,
+          value: new Proxy(nativeAgent, {
+            set(target, property, value, receiver) {
+              if (property === "beforeToolCall") {
+                throw new Error("tool gate installation failed");
+              }
+              return Reflect.set(target, property, value, receiver);
+            },
+          }),
+        });
+      },
+      toolCallGate: async () => undefined,
+    },
+    {
+      stage: "extension load error projection",
+      expectedError: "extension error projection failed",
+      installFailure(created: Awaited<ReturnType<typeof createAgentSession>>) {
+        Object.defineProperty(created.extensionsResult, "errors", {
+          configurable: true,
+          get: () => {
+            throw new Error("extension error projection failed");
+          },
+        });
+      },
+      toolCallGate: undefined,
+    },
+  ])("cleans up a created session when $stage fails", async ({
+    expectedError,
+    installFailure,
+    toolCallGate,
+  }) => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-assembly-failure-"));
+    let disposals = 0;
+    let ownerRefreshes = 0;
+    const runtime = testRuntime(
+      () => [],
+      async (created) => {
+        const nativeDispose = created.session.dispose.bind(created.session);
+        created.session.dispose = () => {
+          disposals++;
+          nativeDispose();
+        };
+        const registry = created.session.modelRegistry;
+        const nativeRefresh = registry.refresh.bind(registry);
+        registry.refresh = () => {
+          ownerRefreshes++;
+          nativeRefresh();
+        };
+        installFailure(created);
+      },
+    );
+
+    await expect(runtime.createSession(cwd, { toolCallGate })).rejects.toThrow(expectedError);
+    const refreshError = await runtime.refreshConfiguration().then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    expect({ disposals, ownerRefreshes, refreshError }).toEqual({
+      disposals: 1,
+      ownerRefreshes: 0,
+      refreshError: undefined,
+    });
+  });
+
   it("binds extension lifecycle, surfaces errors, and isolates project providers", async () => {
     const cwdA = await mkdtemp(join(tmpdir(), "piweb-runtime-a-"));
     const cwdB = await mkdtemp(join(tmpdir(), "piweb-runtime-b-"));
@@ -239,6 +405,66 @@ describe("PiRuntime session ownership", () => {
     await sessionA.dispose();
     expect(shutdowns).toBe(1);
     await sessionB.dispose();
+  });
+
+  it("binds portable extension UI in rpc mode and fails closed for host-owned session actions", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-extension-ui-"));
+    const observations: unknown[] = [];
+    const runtime = testRuntime(() => [
+      (pi: ExtensionAPI) => {
+        pi.on("session_start", async (_event, ctx) => {
+          observations.push(ctx.mode, ctx.hasUI);
+          observations.push(await ctx.ui.select("Profile", ["safe", "fast"]));
+          observations.push(await ctx.ui.confirm("Confirm", "Continue?"));
+          observations.push(await ctx.ui.input("Name"));
+          observations.push(await ctx.ui.editor("Draft", "seed"));
+          ctx.ui.notify("ready", "info");
+        });
+        pi.registerCommand("host-actions", {
+          description: "exercise host-owned actions",
+          handler: async (_args, ctx) => {
+            observations.push(await ctx.newSession());
+            observations.push(await ctx.fork("entry"));
+            observations.push(await ctx.navigateTree("entry"));
+            observations.push(await ctx.switchSession("session.jsonl"));
+            try {
+              await ctx.reload();
+            } catch (error) {
+              observations.push(error instanceof Error ? error.message : String(error));
+            }
+          },
+        });
+      },
+    ]);
+    const notifications: string[] = [];
+    const created = await runtime.createSession(cwd, {
+      extensionUI: {
+        select: async () => "safe",
+        confirm: async () => true,
+        input: async () => "Ada",
+        editor: async (_title, prefill) => `${prefill}:edited`,
+        notify: (message) => notifications.push(message),
+      },
+    });
+
+    await created.activateExtensions();
+    await created.session.prompt("/host-actions");
+
+    expect(observations).toEqual([
+      "rpc",
+      true,
+      "safe",
+      true,
+      "Ada",
+      "seed:edited",
+      { cancelled: true },
+      { cancelled: true },
+      { cancelled: true },
+      { cancelled: true },
+      "Extension reload is not supported by this workbench",
+    ]);
+    expect(notifications).toEqual(["ready"]);
+    await created.dispose();
   });
 
   it("fails initialization when an extension requests a process-global provider", async () => {
@@ -490,6 +716,62 @@ describe("PiRuntime session ownership", () => {
     await expect(created.dispose()).rejects.toThrow("Failed to dispose Pi session");
     expect(shutdowns).toBe(1);
     await runtime.refreshConfiguration();
+  });
+
+  it("continues teardown when extension error listener registration fails", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-listener-cleanup-"));
+    let aborts = 0;
+    let waits = 0;
+    let disposals = 0;
+    let ownerRefreshes = 0;
+    const runtime = testRuntime(
+      () => [],
+      async (created) => {
+        const nativeAbort = created.session.abort.bind(created.session);
+        created.session.abort = async () => {
+          aborts++;
+          await nativeAbort();
+        };
+        const nativeWait = created.session.waitForIdle.bind(created.session);
+        created.session.waitForIdle = async () => {
+          waits++;
+          await nativeWait();
+        };
+        const nativeDispose = created.session.dispose.bind(created.session);
+        created.session.dispose = () => {
+          disposals++;
+          nativeDispose();
+        };
+        Object.defineProperty(created.session, "isStreaming", {
+          configurable: true,
+          get: () => true,
+        });
+        created.session.extensionRunner.onError = () => {
+          throw new Error("extension error listener registration failed");
+        };
+        const registry = created.session.modelRegistry;
+        const nativeRefresh = registry.refresh.bind(registry);
+        registry.refresh = () => {
+          ownerRefreshes++;
+          nativeRefresh();
+        };
+      },
+    );
+    const created = await runtime.createSession(cwd);
+
+    const disposalError = await created.dispose().then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await runtime.refreshConfiguration();
+
+    expect(disposalError).toBeInstanceOf(AggregateError);
+    expect({ aborts, waits, disposals, ownerRefreshes }).toEqual({
+      aborts: 1,
+      waits: 1,
+      disposals: 1,
+      ownerRefreshes: 0,
+    });
   });
 
   it("runs extension tool hooks before the host gate and forces sequential execution", async () => {

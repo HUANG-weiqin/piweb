@@ -10,14 +10,14 @@ describe("Setup", () => {
   it("starts with the entered working directory", () => {
     const start = vi.fn();
     render(<Setup initialCwd={"E:\\work"} online onStart={start} />);
-    fireEvent.click(screen.getByRole("button", { name: "开始" }));
+    fireEvent.click(screen.getByRole("button", { name: "进入项目" }));
     expect(start).toHaveBeenCalledWith("E:\\work");
   });
 
   it("updates the field when the server provides its startup directory", () => {
     const view = render(<Setup initialCwd="" online onStart={() => undefined} />);
     view.rerender(<Setup initialCwd={"E:\\work"} online onStart={() => undefined} />);
-    expect(screen.getByRole("textbox", { name: "工作目录" })).toHaveValue("E:\\work");
+    expect(screen.getByRole("textbox", { name: "项目目录" })).toHaveValue("E:\\work");
   });
 
   it("disables start while offline", () => {

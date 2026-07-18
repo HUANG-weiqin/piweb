@@ -11,6 +11,7 @@
 `PiRuntime` 是进程级对象：
 
 - 唯一持有共享 `AuthStorage` 与基线 `ModelRegistry`。
+- 持有 Pi 用户级 `ProjectTrustStore`；受保护的项目资源在 trust resolution 前不能进入最终 resource loader。
 - 为每个 session 创建独立 `ModelRegistry`，隔离 cwd 扩展的静态模型、base URL 和 headers。
 - 串行执行认证/模型配置变更。
 - 变更后 reload/refresh，并通知活动连接发布新状态。
@@ -33,19 +34,29 @@
 - generation 使创建中被关闭的 session 变成 stale，并在完成后立即 dispose。
 - `activeRun` 是唯一 run 状态机：queued / running / cancelling；busy 只由它派生。
 - `ToolApprovalBroker` 是连接级一次性授权 rendezvous；pending 审批只投影在当前 activeRun。
+- `ExtensionUIBroker` 是连接级交互 rendezvous；它能在 active bundle commit 前服务 `session_start`/trust 请求，并由 session generation 的 AbortSignal 结算。
 
 ## 决策
 
 - cwd 校验通过后，旧 bundle 会完整 shutdown/dispose，再创建新 runtime；这样两个工作区的扩展不会重叠运行。新 runtime 创建失败时连接保持无 active session。
 - initialize 先取得 refcounted project handle，按 new/recent/open 选择 conversation，并在 Pi `open()` 前取得或等待 writer lease；任何 stale/失败路径都要取消等待并释放资源。
+- `createAgentSession` 一旦返回，owner bind、host tool gate 安装、startup provider 校验和 extension load error 投影都必须位于同一个失败清理边界；其中任何一步抛错都 teardown 已创建的 AgentSession 并从进程 registry 集合逐出 owner。
 - 持久 conversation、连接 sessionId 和 runId 是不同身份；同一 conversation 重连时必须分配新 sessionId。
 - prompt 在 actor 队列中等待完整运行结束，配置与重初始化不会穿过运行过程。
+- API Key 在共享配置队列完成后才确认；凭据本身影响所有项目，但发起命令必须仍属于提交时的 active session/generation，避免迟到页面修改全局认证。模型选择以“目标模型已成为当前 AgentSession 的实际 model”为提交点。Pi 的 `setModel()` 会依次改运行态、追加 session entry、排队默认设置写入，并非原子事务；若运行态已切换但后续步骤失败，服务端确认模型已应用并在最新 state 之后另发 settings error，只有提交点前的失败才回 command error。
+- 两类设置结果都带原 sessionId + commandId，连接内复用 commandId 会被拒绝。
+- 同构扫描确认 `setThinkingLevel()` 和 `setSessionName()` 也会先改内存再持久化；工作台同样以实际 session 后置条件为准，发布新 state 并单独报告持久化风险。相对地，`AuthStorage.set/remove` 与 `ProjectStore.setToolMode` 都是持久写成功后才替换内存状态，不需要这种部分提交适配。
 - prompt 在入队前先注册 run ticket，因此 abort 可以取消 queued prompt；重复 abort 复用同一个 SDK abort promise。
+- 注册不可复用 runId、安装 active RunTicket 后立即发送 `run_queued`；它既是生命周期事件，也是浏览器提交 user draft 的唯一服务端接收回执。
 - SDK 异步 preflight 结束时会再次检查 run ticket；若期间已取消，会在真正启动 agent 前阻断。
 - AgentSession 构造完成后，工作台在 SDK extension hook 外再包一层 host tool gate；扩展先修改/阻止，工作台再用最终 validated args 决策。
 - gate 启用时固定 sequential tool execution，避免 parallel preflight 在等待后续审批时积累尚未执行的已授权调用。
 - read_only 对非读取工具硬拒绝；workspace_write 仅自动允许真实路径仍属于 cwd 的 edit/write。
-- 创建后显式 `bindExtensions(mode=print)`；session_start/resources_discover 会运行，扩展错误会绑定到当前 run 或 session。
+- 生产 `SettingsManager` 先以 `projectTrusted=false` 创建。无受保护资源时直接继续；有资源时先读用户级 trust store/global default，必要时通过浏览器选择，再由 SDK 二阶段 resource reload 加载或跳过项目设置、skills 与 extensions。
+- 创建后显式 `bindExtensions(mode=rpc)`；只把 `select/confirm/input/editor/notify` 接到 Web UI，TUI 定制仍继承 SDK no-op。session_start/resources_discover 会运行，扩展错误会绑定到当前 run 或 session。
+- extension UI response 绕过 actor queue；request 绑定 sessionId/generation，timeout、扩展 AbortSignal、run stop、reinitialize、close 和 disconnect 都按 Pi 默认值结算。
+- extension command 的 new/fork/tree/switch 返回 cancelled，reload 明确报 unsupported；当前入口拒绝 extension slash command，避免 handler 的 detached turn 越过 activeRun ownership。
+- 无 activeRun（或 run 尚 queued）却出现 `agent_start` 时立即 abort；这是一条防止扩展旁路启动 Agent turn 的兜底不变量。
 - SDK 报告的 extension load errors 也会进入 session 错误，不能只监听运行期 runner errors。
 - initialize 在 bundle 创建完成前就建立目标 epoch，因此同一 WebSocket 中紧随其后的 prompt 会排队，不会静默丢失。
 - commit 后先发布小体积 PublicState，再发布低频 project snapshot 与有界 history snapshot；恢复历史不能依赖 SDK 重放旧事件。
@@ -63,7 +74,7 @@
 
 ## 认知模型
 
-共享配置归进程，会话归 actor，socket 归传输。任何新增状态都应先决定属于哪一层，再决定由哪条队列修改。
+共享配置与 trust 归进程，会话归 actor，临时交互归 session generation，socket 归传输。任何新增状态都应先决定属于哪一层，再决定由哪条队列修改。
 
 ## 入口
 
@@ -78,18 +89,24 @@
 ## 坑点
 
 - OAuth login 会等待浏览器回答；认证回答和取消不能排在 login 后面的同一队列，否则会死锁。
+- OAuth/extension UI 这类同步 emitter 的请求必须先登记 pending waiter 再发事件；emit 抛错时要删除 waiter 并拒绝请求，避免同步回答丢失或残留悬挂状态。
+- 项目信任和 extension hook 也可能在 active bundle commit 前等待浏览器；扩展 UI 回答同样不能排 actor queue，也不能要求 PublicState 已存在。
 - OAuth flow 由 authFlowId 关联；pending/cancelled tombstone 保证在 flow 创建前收到的 cancel 也能阻止它启动。
 - approval response 必须绕过 actor queue；sessionId/runId/approvalId 不精确匹配时只能 no-op。
 - `tool_execution_start` 发生在 SDK 参数校验与授权之前，不能解释成副作用已经开始。
 - sessionId/runId 不得复用，否则迟到命令会形成 ABA；连接 actor 会显式拒绝复用。
 - `close` 与 `error` 都可能触发 dispose，清理必须幂等。
+- teardown 的错误监听注册/注销本身也可能抛错；它们不能阻止 abort、等待运行结束和 dispose，所有失败应在完整清理后聚合报告。
+- 调用 Pi 的状态 setter 后不能把任意 throw 直接解释成“没有生效”；先核对 AgentSession / SessionManager 后置条件，再区分提交前失败与提交后持久化风险。
 - `SessionManager.open()` 可能迁移文件且对不存在路径不可靠报错；必须从服务端受控索引解析 ID，并在 open 之前持有 lease。
 - Node 的 `server.close()` 不会替你关闭已升级的 WebSocket；退出流程必须同时关闭 socket server handle。
 - 多连接配置同步依赖所有修改都经过 `PiRuntime.updateConfiguration()`。
 - 不要直接开放 `AgentSession.reload()`；其全局 provider reset 绕过工作台所有权边界。需要 reload 时先设计 runtime 协调入口。
+- extension `confirm` 只是扩展业务交互，不是 host 工具授权；真实副作用仍必须经过工作台 tool gate。
+- trust decision 不能写入项目 `.piweb`；否则恶意仓库可以随自身内容一起声明自己可信。
 - 项目扩展当前在服务进程内运行；无法安全强杀一个不返回的同步/异步 hook。只允许可信扩展，worker/子进程隔离是开放超时与动态 provider 的前置条件。
 - writer lease 目前只覆盖同一服务进程；两个进程同时写同一 JSONL 仍不安全。
-- Pi 的 `listAll()` 会静默跳过部分坏 JSONL；目标对话必须在 `SessionManager.open()` 前由宿主验证完整尾换行、JSON 和 header identity。
+- Pi 的 `listAll()` 会静默跳过部分坏 JSONL，也可能为合法 JSON 中的非有限数值生成无效日期，或接受缺少 tree 字段的 entry。项目索引必须由宿主验证目录内全部常规 JSONL 的 JSON-safe 数值、当前 entry payload/tree，并要求磁盘全集与 SDK 索引按路径/identity 精确覆盖。只验证目标对话仍会让 `recent` 静默回退到另一条或新建。
 
 ## 关联模块
 

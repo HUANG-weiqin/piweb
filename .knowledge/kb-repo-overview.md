@@ -27,16 +27,19 @@ while 连接存在:
   客户端过滤旧身份并按 run 更新视图
 ```
 
-状态分四层：
+状态分五层：
 
-- 进程态：Pi 认证存储、基线模型目录及其配置修改队列。
+- 进程态：Pi 认证存储、用户级 project trust、基线模型目录及其配置修改队列。
 - 项目态：`.piweb` manifest、Pi JSONL 对话索引和 conversation writer lease。
 - session 态：cwd 隔离的模型目录、扩展生命周期、SessionManager 和 AgentSession。
 - 连接态：当前 session bundle、activeRun ticket、OAuth flow、命令队列和生命周期 generation。
+- 临时交互态：extension UI request/response，绑定 session generation，不进入持久对话。
 
 ## 决策
 
 - Pi SDK 是 Agent 实现来源，工作台不复制 provider、tool 或 retry 逻辑。
+- 工作台只拥有 Agent 运行必须共享的状态与控制边界；可由 Git、编辑器、终端等成熟工具完整替代的能力留在外部。
+- 不内建第二套 diff/history/revert、文件管理器或通用终端。未来若需要，只做无状态交接或薄集成。
 - 当前 AgentSession 使用项目自有 sessionDir 的 `SessionManager`；持久 conversation 与临时 session epoch 明确分离。
 - WebSocket 只做传输；会话身份和 SDK 事件都不能由 socket 隐式定义。
 - 远程访问和 OS 级隔离仍需单独设计；持久化与工具审批都不能替代 sandbox。
@@ -50,6 +53,8 @@ while 连接存在:
 3. 一个把事件确定性投影成 UI 的状态机。
 
 模型目录、OAuth 交互、Markdown 和样式都是必要工程，但不是运行核心。
+
+判断一个新功能是否应进入核心，只问三件事：它是否拥有不可替代的状态、是否参与安全控制、是否必须跨重连恢复。三者都是否时，优先交给现有工具。
 
 ## 入口
 
@@ -71,6 +76,7 @@ while 连接存在:
 - 不要在 client/shared 中重新引入 `AgentSessionEvent`。
 - 不要在认证变更时新建第二份 `AuthStorage` 或绕过 `PiRuntime`。
 - 不要把 Pi SDK 的动态 API/OAuth registry 当成 session 局部状态；它们是进程全局的，当前策略是拒绝项目扩展注册。
+- 不要以默认 trusted 的 SettingsManager 读取陌生项目；trust 必须在项目可执行资源加载前解析，且不能由 `.piweb` 持有。
 
 ## 关联模块
 

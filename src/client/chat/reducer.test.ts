@@ -59,8 +59,23 @@ describe("chatReducer", () => {
     ]);
   });
 
+  it("projects an accepted prompt once per run identity", () => {
+    const accepted = {
+      type: "prompt_accepted" as const,
+      runId: RUN_1,
+      text: "hello",
+    };
+    const once = chatReducer(initialChatState, accepted);
+    const twice = chatReducer(once, accepted);
+
+    expect(twice).toBe(once);
+    expect(twice.messages).toEqual([
+      expect.objectContaining({ role: "user", runId: RUN_1, text: "hello" }),
+    ]);
+  });
+
   it("streams assistant text", () => {
-    let state = chatReducer(initialChatState, { type: "sent", runId: RUN_1, text: "hello" });
+    let state = chatReducer(initialChatState, { type: "prompt_accepted", runId: RUN_1, text: "hello" });
     state = chatReducer(state, { type: "session", runId: RUN_1, event: { type: "run_started" } });
     state = chatReducer(state, { type: "session", runId: RUN_1, event: { type: "text_delta", delta: "hi" } });
     expect(state.messages.at(-1)?.text).toBe("hi");
@@ -90,11 +105,11 @@ describe("chatReducer", () => {
   });
 
   it("accumulates assistant total token usage as session tokens", () => {
-    let state = chatReducer(initialChatState, { type: "sent", runId: RUN_1, text: "hello" });
+    let state = chatReducer(initialChatState, { type: "prompt_accepted", runId: RUN_1, text: "hello" });
     state = chatReducer(state, { type: "session", runId: RUN_1, event: { type: "run_started" } });
     state = chatReducer(state, { type: "session", runId: RUN_1, event: { type: "usage", usage: usage(25) } });
 
-    state = chatReducer(state, { type: "sent", runId: RUN_2, text: "hello again" });
+    state = chatReducer(state, { type: "prompt_accepted", runId: RUN_2, text: "hello again" });
     state = chatReducer(state, { type: "session", runId: RUN_2, event: { type: "run_started" } });
     state = chatReducer(state, { type: "session", runId: RUN_2, event: { type: "usage", usage: usage(23) } });
 
@@ -103,7 +118,7 @@ describe("chatReducer", () => {
   });
 
   it("accumulates usage from multiple assistant calls in one agent run", () => {
-    let state = chatReducer(initialChatState, { type: "sent", runId: RUN_1, text: "use a tool" });
+    let state = chatReducer(initialChatState, { type: "prompt_accepted", runId: RUN_1, text: "use a tool" });
     state = chatReducer(state, { type: "session", runId: RUN_1, event: { type: "run_started" } });
 
     for (const total of [25, 23]) {
@@ -119,7 +134,7 @@ describe("chatReducer", () => {
   });
 
   it("uses the final assistant message when no streaming delta arrived", () => {
-    let state = chatReducer(initialChatState, { type: "sent", runId: RUN_1, text: "hello" });
+    let state = chatReducer(initialChatState, { type: "prompt_accepted", runId: RUN_1, text: "hello" });
     state = chatReducer(state, { type: "session", runId: RUN_1, event: { type: "run_started" } });
     state = chatReducer(state, {
       type: "session",
@@ -145,8 +160,8 @@ describe("chatReducer", () => {
   });
 
   it("routes interleaved text to the assistant for each run", () => {
-    let state = chatReducer(initialChatState, { type: "sent", runId: RUN_1, text: "first" });
-    state = chatReducer(state, { type: "sent", runId: RUN_2, text: "second" });
+    let state = chatReducer(initialChatState, { type: "prompt_accepted", runId: RUN_1, text: "first" });
+    state = chatReducer(state, { type: "prompt_accepted", runId: RUN_2, text: "second" });
     state = chatReducer(state, {
       type: "session",
       runId: RUN_2,
@@ -172,8 +187,8 @@ describe("chatReducer", () => {
   });
 
   it("routes interleaved tools and usage even when tool call ids overlap", () => {
-    let state = chatReducer(initialChatState, { type: "sent", runId: RUN_1, text: "first" });
-    state = chatReducer(state, { type: "sent", runId: RUN_2, text: "second" });
+    let state = chatReducer(initialChatState, { type: "prompt_accepted", runId: RUN_1, text: "first" });
+    state = chatReducer(state, { type: "prompt_accepted", runId: RUN_2, text: "second" });
     for (const runId of [RUN_2, RUN_1]) {
       state = chatReducer(state, {
         type: "session",

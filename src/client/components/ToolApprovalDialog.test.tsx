@@ -32,7 +32,7 @@ describe("ToolApprovalDialog", () => {
     />);
 
     expect(screen.getByRole("dialog", { name: "工具执行审批" })).toHaveTextContent("outside");
-    expect(screen.getByRole("button", { name: "拒绝" })).toHaveFocus();
+    expect(screen.getByRole("button", { name: "拒绝此次工具" })).toHaveFocus();
     fireEvent.click(screen.getByRole("button", { name: "允许一次" }));
     fireEvent.click(screen.getByRole("button", { name: "允许一次" }));
     fireEvent.click(screen.getByRole("button", { name: "停止本次运行" }));
@@ -88,7 +88,7 @@ describe("ToolApprovalDialog", () => {
       onAbort={() => undefined}
     />);
 
-    expect(screen.getByRole("button", { name: "拒绝" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "拒绝此次工具" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "允许一次" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "正在停止…" })).toBeDisabled();
   });
@@ -110,7 +110,7 @@ describe("ToolApprovalDialog", () => {
 
     const background = screen.getByRole("button", { name: "背景操作" });
     background.focus();
-    expect(screen.getByRole("button", { name: "拒绝" })).toHaveFocus();
+    expect(screen.getByRole("button", { name: "拒绝此次工具" })).toHaveFocus();
     fireEvent.keyDown(document, { key: "Escape" });
     expect(decide).toHaveBeenCalledWith("deny");
   });

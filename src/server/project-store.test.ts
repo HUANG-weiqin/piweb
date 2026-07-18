@@ -309,6 +309,89 @@ describe("ProjectStore", () => {
     await expect(readFile(sessionFile, "utf8")).resolves.toBe(malformed);
   });
 
+  it("fails closed when Pi's index silently omits a corrupt recent conversation", async () => {
+    const cwd = await createTemporaryDirectory("piweb-omitted-session-");
+    const store = await ProjectStore.open(cwd, "workspace_write");
+    const recent = await store.createConversation();
+    const fallback = await store.createConversation();
+    const recentFile = recent.getSessionFile()!;
+    await writeFile(recentFile, '{"type":"session"\n');
+    await store.setLastConversation(recent.getSessionId());
+
+    await expect(SessionManager.listAll(store.sessionDir)).resolves.toEqual([
+      expect.objectContaining({ id: fallback.getSessionId() }),
+    ]);
+    await expect(store.refreshConversations()).rejects.toThrow(
+      "invalid JSON on line 1",
+    );
+    expect(store.lastConversationId).toBe(recent.getSessionId());
+  });
+
+  it("fails closed when a JSON number produces an invalid Pi summary date", async () => {
+    const cwd = await createTemporaryDirectory("piweb-non-finite-session-");
+    const store = await ProjectStore.open(cwd, "workspace_write");
+    const recent = await store.createConversation();
+    const fallback = await store.createConversation();
+    const recentFile = recent.getSessionFile()!;
+    const header = await readFile(recentFile, "utf8");
+    await writeFile(
+      recentFile,
+      `${header}{"type":"message","id":"deadbeef","parentId":null,"timestamp":"2026-01-01T00:00:00.000Z","message":{"role":"user","content":"recent","timestamp":1e999}}\n`,
+    );
+    await store.setLastConversation(recent.getSessionId());
+
+    const information = await SessionManager.listAll(store.sessionDir);
+    expect(information).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: recent.getSessionId(),
+        modified: expect.any(Date),
+      }),
+      expect.objectContaining({ id: fallback.getSessionId() }),
+    ]));
+    expect(
+      information.find(({ id }) => id === recent.getSessionId())?.modified.getTime(),
+    ).toBeNaN();
+    await expect(store.refreshConversations()).rejects.toThrow(
+      "non-finite JSON number",
+    );
+    expect(store.lastConversationId).toBe(recent.getSessionId());
+  });
+
+  it("rejects an invalid SDK summary instead of filtering out a conversation", async () => {
+    const cwd = await createTemporaryDirectory("piweb-invalid-summary-");
+    const store = await ProjectStore.open(cwd, "workspace_write");
+    const conversation = await store.createConversation();
+    const sessionFile = conversation.getSessionFile()!;
+    vi.spyOn(SessionManager, "listAll").mockResolvedValueOnce([
+      sessionInformation(sessionFile, conversation.getSessionId(), {
+        modified: new Date(Number.NaN),
+      }),
+    ]);
+
+    await expect(store.refreshConversations()).rejects.toThrow(
+      "invalid session dates",
+    );
+    expect(store.listConversations()).toEqual([
+      expect.objectContaining({ id: conversation.getSessionId() }),
+    ]);
+  });
+
+  it("rejects a structurally invalid Pi entry instead of restoring empty history", async () => {
+    const cwd = await createTemporaryDirectory("piweb-invalid-entry-");
+    const store = await ProjectStore.open(cwd, "workspace_write");
+    const conversation = await store.createConversation();
+    const sessionFile = conversation.getSessionFile()!;
+    const header = await readFile(sessionFile, "utf8");
+    await writeFile(sessionFile, `${header}{"type":"custom"}\n`);
+
+    await expect(SessionManager.listAll(store.sessionDir)).resolves.toEqual([
+      expect.objectContaining({ id: conversation.getSessionId() }),
+    ]);
+    await expect(
+      store.openConversation(conversation.getSessionId()),
+    ).rejects.toThrow("invalid session entry");
+  });
+
   it("validates a non-empty matching Pi header before opening a listed file", async () => {
     const cwd = await createTemporaryDirectory("piweb-invalid-header-");
     const store = await ProjectStore.open(cwd, "workspace_write");
@@ -349,6 +432,7 @@ describe("ProjectStore", () => {
         version: 3,
         id: conversationId,
         timestamp: new Date().toISOString(),
+        cwd: 42,
       })}\n`,
     ];
 

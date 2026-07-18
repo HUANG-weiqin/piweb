@@ -102,6 +102,7 @@ export function attachSocketServer(
         const sessionId = "sessionId" in command ? command.sessionId : undefined;
         const runId = "runId" in command ? command.runId : undefined;
         const authFlowId = "authFlowId" in command ? command.authFlowId : undefined;
+        const commandId = "commandId" in command ? command.commandId : undefined;
         void connection.handle(command).catch((error) => safeSend(socket, {
           type: "error",
           scope: "command",
@@ -109,6 +110,7 @@ export function attachSocketServer(
           sessionId,
           runId,
           authFlowId,
+          commandId,
           message: error instanceof Error ? error.message : String(error),
         }));
       } catch (error) {

@@ -84,6 +84,30 @@ describe("isAllowedOrigin", () => {
       scope: "protocol",
     });
 
+    const commandId = randomUUID();
+    const settingSessionId = randomUUID();
+    socket.send(JSON.stringify({
+      type: "set_api_key",
+      commandId,
+      sessionId: settingSessionId,
+      provider: "missing",
+      key: "secret",
+    }));
+    const settingError = nextEvent(socket);
+    socket.send(JSON.stringify({
+      type: "set_api_key",
+      commandId,
+      sessionId: settingSessionId,
+      provider: "missing",
+      key: "secret",
+    }));
+    await expect(settingError).resolves.toMatchObject({
+      type: "error",
+      scope: "command",
+      operation: "set_api_key",
+      commandId,
+    });
+
     const sessionId = randomUUID();
     const commandError = nextEvent(socket);
     socket.send(JSON.stringify({

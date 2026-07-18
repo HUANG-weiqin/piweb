@@ -20,7 +20,6 @@ import {
   sep,
 } from "node:path";
 import {
-  CURRENT_SESSION_VERSION,
   SessionManager,
   type SessionInfo,
 } from "@earendil-works/pi-coding-agent";
@@ -28,6 +27,7 @@ import type {
   ConversationSummary,
   ToolMode,
 } from "../shared/protocol.js";
+import { validatePiSessionFile } from "./session-file.js";
 
 const MANIFEST_VERSION = 1;
 const PROJECT_STATE_DIRECTORY = ".piweb";
@@ -187,91 +187,6 @@ function parseManifest(raw: string, manifestPath: string): ProjectManifestV1 {
   }
 }
 
-function parseAndValidateSessionFile(
-  raw: string,
-  sessionPath: string,
-  expectedConversationId: string,
-): void {
-  if (raw.trim().length === 0) {
-    throw new Error(`Session file is empty: ${sessionPath}`);
-  }
-  if (!raw.endsWith("\n")) {
-    throw new Error(`Session file must end with a newline: ${sessionPath}`);
-  }
-
-  const lines = raw.split("\n");
-  let header: unknown;
-  for (let index = 0; index < lines.length - 1; index += 1) {
-    const line = lines[index]!;
-    if (line.trim().length === 0) {
-      if (index === 0) {
-        throw new Error(`Session file has an invalid header: ${sessionPath}`);
-      }
-      continue;
-    }
-
-    let entry: unknown;
-    try {
-      entry = JSON.parse(line);
-    } catch (error) {
-      throw new Error(
-        `Session file has invalid JSON on line ${index + 1}: ${sessionPath}`,
-        { cause: error },
-      );
-    }
-    if (index === 0) header = entry;
-  }
-
-  if (
-    typeof header !== "object" ||
-    header === null ||
-    Array.isArray(header)
-  ) {
-    throw new Error(`Session file has an invalid header: ${sessionPath}`);
-  }
-
-  const record = header as Record<string, unknown>;
-  if (record.type !== "session") {
-    throw new Error(`Session file has an invalid header: ${sessionPath}`);
-  }
-  if (
-    record.version !== undefined &&
-    (!Number.isInteger(record.version) ||
-      (record.version as number) < 1 ||
-      (record.version as number) > CURRENT_SESSION_VERSION)
-  ) {
-    throw new Error(
-      `Session file has an unsupported header version: ${sessionPath}`,
-    );
-  }
-  if (
-    typeof record.id !== "string" ||
-    !SESSION_ID_PATTERN.test(record.id) ||
-    record.id !== expectedConversationId
-  ) {
-    throw new Error(
-      `Session file identity does not match conversation ${expectedConversationId}: ${sessionPath}`,
-    );
-  }
-  if (!isCanonicalIsoDate(record.timestamp)) {
-    throw new Error(
-      `Session file has an invalid header timestamp: ${sessionPath}`,
-    );
-  }
-  if (typeof record.cwd !== "string" || record.cwd.length === 0) {
-    throw new Error(`Session file has an invalid header cwd: ${sessionPath}`);
-  }
-  if (
-    record.parentSession !== undefined &&
-    (typeof record.parentSession !== "string" ||
-      record.parentSession.length === 0)
-  ) {
-    throw new Error(
-      `Session file has an invalid parent session: ${sessionPath}`,
-    );
-  }
-}
-
 async function writeManifestAtomically(
   manifestPath: string,
   manifest: ProjectManifestV1,
@@ -374,11 +289,13 @@ function summariesEqual(
 
 function toConversationSummary(
   information: SessionInfo,
-): ConversationSummary | undefined {
+): ConversationSummary {
   const createdAt = information.created.getTime();
   const updatedAt = information.modified.getTime();
   if (!Number.isFinite(createdAt) || !Number.isFinite(updatedAt)) {
-    return undefined;
+    throw new Error(
+      `Pi returned invalid session dates for conversation ${information.id}`,
+    );
   }
 
   return {
@@ -546,9 +463,6 @@ export class ProjectStore {
     const information = await this.listSafeSessionInformation();
     const conversations = information
       .map(toConversationSummary)
-      .filter(
-        (summary): summary is ConversationSummary => summary !== undefined,
-      )
       .sort((first, second) => {
         const byModified =
           Date.parse(second.updatedAt) - Date.parse(first.updatedAt);
@@ -610,7 +524,7 @@ export class ProjectStore {
     }
 
     const safePath = await this.resolveSafeSessionPath(match.path);
-    parseAndValidateSessionFile(
+    validatePiSessionFile(
       await readFile(safePath, "utf8"),
       safePath,
       conversationId,
@@ -664,8 +578,71 @@ export class ProjectStore {
   }
 
   private async listSafeSessionInformation(): Promise<SessionInfo[]> {
+    const pathsBeforeScan = await this.listSafeSessionPaths();
+    const information = await SessionManager.listAll(this.sessionDir);
+    const pathsAfterScan = await this.listSafeSessionPaths();
+    const beforeIdentities = new Set(pathsBeforeScan.map(pathIdentity));
+    const afterIdentities = new Set(pathsAfterScan.map(pathIdentity));
+    if (
+      beforeIdentities.size !== afterIdentities.size
+      || [...beforeIdentities].some((path) => !afterIdentities.has(path))
+    ) {
+      throw new Error("Project session directory changed while it was being scanned");
+    }
+
+    const validatedByPath = new Map<string, string>();
+    const pathsByConversation = new Map<string, string>();
+    for (const sessionPath of pathsAfterScan) {
+      const conversationId = validatePiSessionFile(
+        await readFile(sessionPath, "utf8"),
+        sessionPath,
+      );
+      const previousPath = pathsByConversation.get(conversationId);
+      if (
+        previousPath !== undefined
+        && !pathsAreIdentical(previousPath, sessionPath)
+      ) {
+        throw new Error(
+          `Duplicate conversation identity ${conversationId}: ${previousPath} and ${sessionPath}`,
+        );
+      }
+      pathsByConversation.set(conversationId, sessionPath);
+      validatedByPath.set(pathIdentity(sessionPath), conversationId);
+    }
+
+    const indexedPaths = new Set<string>();
+    for (const session of information) {
+      const safePath = await this.resolveSafeSessionPath(session.path);
+      const pathKey = pathIdentity(safePath);
+      const validatedId = validatedByPath.get(pathKey);
+      if (validatedId === undefined) {
+        throw new Error(`Pi indexed an unknown project session file: ${safePath}`);
+      }
+      if (validatedId !== session.id) {
+        throw new Error(
+          `Pi indexed session ${session.id} with mismatched file identity ${validatedId}: ${safePath}`,
+        );
+      }
+      if (indexedPaths.has(pathKey)) {
+        throw new Error(`Pi indexed a project session file more than once: ${safePath}`);
+      }
+      indexedPaths.add(pathKey);
+    }
+    if (indexedPaths.size !== validatedByPath.size) {
+      const omittedPath = [...validatedByPath.keys()].find(
+        (path) => !indexedPaths.has(path),
+      );
+      throw new Error(
+        `Pi omitted a valid project session file from its index: ${String(omittedPath)}`,
+      );
+    }
+    return information;
+  }
+
+  private async listSafeSessionPaths(): Promise<string[]> {
     await this.assertSessionDirectorySafe();
     const entries = await readdir(this.sessionDir, { withFileTypes: true });
+    const paths: string[] = [];
     for (const entry of entries) {
       if (!entry.name.endsWith(".jsonl")) continue;
       const entryPath = join(this.sessionDir, entry.name);
@@ -680,25 +657,10 @@ export class ProjectStore {
           `Session entry resolves outside its project-owned path: ${entryPath} -> ${canonicalPath}`,
         );
       }
+      paths.push(canonicalPath);
     }
-
-    const information = await SessionManager.listAll(this.sessionDir);
     await this.assertSessionDirectorySafe();
-    const pathsByConversation = new Map<string, string>();
-    for (const session of information) {
-      const safePath = await this.resolveSafeSessionPath(session.path);
-      const previousPath = pathsByConversation.get(session.id);
-      if (
-        previousPath !== undefined
-        && !pathsAreIdentical(previousPath, safePath)
-      ) {
-        throw new Error(
-          `Duplicate conversation identity ${session.id}: ${previousPath} and ${safePath}`,
-        );
-      }
-      pathsByConversation.set(session.id, safePath);
-    }
-    return information;
+    return paths;
   }
 
   private assertLexicallyInsideSessionDirectory(path: string): void {

@@ -51,7 +51,10 @@ export function useModalFocus<T extends HTMLElement>(
     if (!active) return;
     const container = containerRef.current;
     if (!container) return;
-    (focusableElements(container)[0] ?? container).focus();
+    const preferred = container.querySelector<HTMLElement>(
+      "[data-modal-autofocus]:not([disabled])",
+    );
+    (preferred ?? focusableElements(container)[0] ?? container).focus();
   }, [active, identity]);
 
   useEffect(() => {

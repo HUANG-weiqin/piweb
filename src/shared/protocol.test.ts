@@ -5,12 +5,14 @@ const sessionId = "88f3af1d-d21d-40a0-b3c3-0f27593f274a";
 const runId = "6ff77ba8-6c29-45a7-9851-e9054d706df2";
 const authFlowId = "597eb8f8-2aa8-444a-ac04-681a3c483fac";
 const approvalId = "86de79b8-0a40-4644-a0c2-49e2aa3e1baa";
+const extensionRequestId = "a81ab25f-041e-4559-b890-04c0eeb476e4";
+const commandId = "b55e4225-e07f-4874-b760-015f7982d999";
 const conversationId = "0198f775-88f3-7af1-9c6a-3176f775912a";
 const projectId = "f25ee8d8-34f0-4c30-a045-b2a69f2e28bd";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(4);
+    expect(PROTOCOL_VERSION).toBe(5);
   });
 
   it("accepts supported commands", () => {
@@ -31,7 +33,14 @@ describe("parseClientCommand", () => {
       decision: "allow",
     }).type).toBe("tool_approval_response");
     expect(parseClientCommand({
+      type: "extension_ui_response",
+      sessionId,
+      requestId: extensionRequestId,
+      response: { kind: "confirm", confirmed: true },
+    }).type).toBe("extension_ui_response");
+    expect(parseClientCommand({
       type: "select_model",
+      commandId,
       sessionId,
       provider: "openai",
       modelId: "gpt",
@@ -48,7 +57,13 @@ describe("parseClientCommand", () => {
       conversationId,
       name: "Architecture",
     }).type).toBe("rename_conversation");
-    expect(parseClientCommand({ type: "set_api_key", provider: "openai", key: "secret" }).type).toBe("set_api_key");
+    expect(parseClientCommand({
+      type: "set_api_key",
+      commandId,
+      sessionId,
+      provider: "openai",
+      key: "secret",
+    }).type).toBe("set_api_key");
     expect(parseClientCommand({ type: "login_oauth", authFlowId, provider: "openai" }).type).toBe("login_oauth");
     expect(parseClientCommand({ type: "auth_response", authFlowId, requestId: "1", value: "code" }).type).toBe("auth_response");
     expect(parseClientCommand({ type: "cancel_auth", authFlowId }).type).toBe("cancel_auth");
@@ -66,7 +81,26 @@ describe("parseClientCommand", () => {
       approvalId: "not-a-uuid",
       decision: "allow",
     })).toThrow();
+    expect(() => parseClientCommand({
+      type: "extension_ui_response",
+      sessionId,
+      requestId: extensionRequestId,
+      response: { kind: "select", value: "x".repeat(501) },
+    })).toThrow();
     expect(() => parseClientCommand({ type: "select_model", provider: "openai", modelId: "gpt" })).toThrow();
+    expect(() => parseClientCommand({
+      type: "set_api_key",
+      commandId: "not-a-uuid",
+      sessionId,
+      provider: "openai",
+      key: "secret",
+    })).toThrow();
+    expect(() => parseClientCommand({
+      type: "set_api_key",
+      commandId,
+      provider: "openai",
+      key: "secret",
+    })).toThrow();
     expect(() => parseClientCommand({ type: "set_thinking", level: "high" })).toThrow();
     expect(() => parseClientCommand({
       type: "set_tool_mode",
@@ -183,12 +217,40 @@ describe("parseClientCommand", () => {
       event: { type: "run_finished", outcome: "aborted" },
     }).type).toBe("session_event");
     expect(parseServerEvent({
+      type: "extension_ui_request",
+      sessionId,
+      requestId: extensionRequestId,
+      request: {
+        kind: "select",
+        title: "Choose",
+        options: ["one", "two"],
+      },
+    }).type).toBe("extension_ui_request");
+    expect(parseServerEvent({
+      type: "extension_ui_closed",
+      sessionId,
+      requestId: extensionRequestId,
+    }).type).toBe("extension_ui_closed");
+    expect(parseServerEvent({
+      type: "extension_ui_notification",
+      sessionId,
+      level: "info",
+      message: "ready",
+    }).type).toBe("extension_ui_notification");
+    expect(parseServerEvent({
+      type: "command_complete",
+      operation: "select_model",
+      commandId,
+      sessionId,
+    }).type).toBe("command_complete");
+    expect(parseServerEvent({
       type: "error",
       message: "failed",
       scope: "command",
       operation: "prompt",
       sessionId,
       runId,
+      commandId,
     }).type).toBe("error");
     expect(parseServerEvent({
       type: "auth_progress",
@@ -206,6 +268,18 @@ describe("parseClientCommand", () => {
       sessionId,
       runId,
       event: { type: "run_finished" },
+    })).toThrow();
+    expect(() => parseServerEvent({
+      type: "command_complete",
+      operation: "select_model",
+      commandId,
+    })).toThrow();
+    expect(() => parseServerEvent({
+      type: "error",
+      scope: "command",
+      operation: "set_api_key",
+      commandId,
+      message: "failed",
     })).toThrow();
     expect(() => parseServerEvent({
       type: "error",

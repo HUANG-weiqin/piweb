@@ -31,6 +31,8 @@ const RUN_A = "ba39f161-b67f-47c9-9285-e391427ed7d0";
 const RUN_B = "65feacc3-00b4-45bd-80ee-5e18bc32f7dc";
 const AUTH_A = "597eb8f8-2aa8-444a-ac04-681a3c483fac";
 const AUTH_B = "2dfbf332-bc37-44f8-8af8-d497976a8a30";
+const COMMAND_A = "b55e4225-e07f-4874-b760-015f7982d999";
+const COMMAND_B = "8ee64aa3-c8a8-4e21-b521-66029ce3673b";
 
 interface FakeSession extends AgentSession {
   abortCalls: number;
@@ -58,6 +60,9 @@ function fakeSession(settings = fakeSettings()): FakeSession {
     messages: [],
     thinkingLevel: "off",
     settingsManager: settings,
+    extensionRunner: {
+      getCommand: () => undefined,
+    },
     subscribe: function (listener: (event: AgentSessionEvent) => void) {
       this.eventListener = listener;
       return () => {
@@ -73,7 +78,9 @@ function fakeSession(settings = fakeSettings()): FakeSession {
       this.disposed = true;
     },
     setModel: async () => undefined,
-    setThinkingLevel: () => undefined,
+    setThinkingLevel: function (level: string) {
+      Object.assign(this, { thinkingLevel: level });
+    },
     setSessionName: function (name: string) {
       this.persistentManager?.appendSessionInfo(name);
     },
@@ -103,12 +110,14 @@ class FakeRuntime implements PiRuntimeLike {
 
   readonly createCalls: string[] = [];
   readonly created: FakeSession[] = [];
+  lastCreateOptions?: CreatePiSessionOptions;
   create: (cwd: string) => Promise<FakeCreatedSession> = async () => {
     const settings = fakeSettings();
     const session = fakeSession(settings);
     this.created.push(session);
     return { session, settings };
   };
+  activate: (options: CreatePiSessionOptions) => Promise<void> = async () => undefined;
   refresh: () => Promise<void> = async () => undefined;
   extensionErrorHandler?: (error: ExtensionError) => void;
   readonly startupExtensionErrors: ExtensionError[] = [];
@@ -120,6 +129,7 @@ class FakeRuntime implements PiRuntimeLike {
     options: CreatePiSessionOptions = {},
   ): Promise<CreatedPiSession> {
     this.createCalls.push(cwd);
+    this.lastCreateOptions = options;
     const created = await this.create(cwd);
     created.session.toolCallGate = options.toolCallGate;
     created.session.persistentManager = options.sessionManager;
@@ -128,7 +138,7 @@ class FakeRuntime implements PiRuntimeLike {
     return {
       ...created,
       modelRegistry: this.modelRegistry,
-      activateExtensions: async () => undefined,
+      activateExtensions: () => this.activate(options),
       activateExtensionErrors: (handler) => {
         activatedHandler = handler;
         this.extensionErrorHandler = handler;
@@ -413,6 +423,134 @@ describe("PiConnection lifecycle", () => {
       sessionId: SESSION_A,
       message: expect.stringContaining("module could not be loaded"),
     });
+  });
+
+  it("round-trips extension UI during activation before committing public state", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-extension-ui-activation-"));
+    const runtime = new FakeRuntime();
+    const interactionStarted = deferred();
+    let confirmed: boolean | undefined;
+    runtime.activate = async (options) => {
+      if (!options.extensionUI) throw new Error("extension UI was not bound");
+      const response = options.extensionUI.confirm("Trust helper", "Continue?");
+      interactionStarted.resolve();
+      confirmed = await response;
+    };
+    const events: ServerEvent[] = [];
+    const connection = new PiConnection((event) => events.push(event), runtime);
+
+    const initialization = connection.handle({
+      type: "initialize",
+      sessionId: SESSION_A,
+      cwd,
+    });
+    await interactionStarted.promise;
+
+    const request = events.find(
+      (event) => event.type === "extension_ui_request",
+    );
+    if (!request || request.type !== "extension_ui_request") {
+      throw new Error("extension UI request was not emitted");
+    }
+    expect(events.some((event) => event.type === "state")).toBe(false);
+
+    await connection.handle({
+      type: "extension_ui_response",
+      sessionId: SESSION_A,
+      requestId: request.requestId,
+      response: { kind: "confirm", confirmed: true },
+    });
+    await initialization;
+
+    expect(confirmed).toBe(true);
+    expect(events.map((event) => event.type)).toEqual([
+      "extension_ui_request",
+      "extension_ui_closed",
+      "state",
+      "project_snapshot",
+      "conversation_snapshot",
+    ]);
+    await connection.dispose();
+  });
+
+  it("closes a run-owned extension dialog when the run is aborted", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-extension-ui-abort-"));
+    const runtime = new FakeRuntime();
+    const events: ServerEvent[] = [];
+    const connection = new PiConnection((event) => events.push(event), runtime);
+    await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
+    const promptStarted = deferred();
+    let confirmed: boolean | undefined;
+    runtime.created[0]!.prompt = async () => {
+      const ui = runtime.lastCreateOptions?.extensionUI;
+      if (!ui) throw new Error("extension UI was not bound");
+      const response = ui.confirm("Blocking hook", "Continue?");
+      promptStarted.resolve();
+      confirmed = await response;
+    };
+
+    const prompt = connection.handle({
+      type: "prompt",
+      sessionId: SESSION_A,
+      runId: RUN_A,
+      text: "work",
+    });
+    await promptStarted.promise;
+    await connection.handle({
+      type: "abort",
+      sessionId: SESSION_A,
+      runId: RUN_A,
+    });
+    await prompt;
+
+    expect(confirmed).toBe(false);
+    expect(events.some((event) => event.type === "extension_ui_closed")).toBe(true);
+    expect(events).toContainEqual({
+      type: "session_event",
+      sessionId: SESSION_A,
+      runId: RUN_A,
+      event: { type: "run_finished", outcome: "aborted" },
+    });
+    await connection.dispose();
+  });
+
+  it("rejects extension slash commands before they can escape run ownership", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-extension-command-"));
+    const runtime = new FakeRuntime();
+    let promptCalls = 0;
+    runtime.create = async () => {
+      const settings = fakeSettings();
+      const session = fakeSession(settings);
+      session.prompt = async () => {
+        promptCalls++;
+      };
+      Object.assign(session.extensionRunner, {
+        getCommand: (name: string) => name === "detached"
+          ? { invocationName: "detached" }
+          : undefined,
+      });
+      runtime.created.push(session);
+      return { session, settings };
+    };
+    const events: ServerEvent[] = [];
+    const connection = new PiConnection((event) => events.push(event), runtime);
+    await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
+
+    await expect(connection.handle({
+      type: "prompt",
+      sessionId: SESSION_A,
+      runId: RUN_A,
+      text: "/detached",
+    })).rejects.toThrow("Extension slash commands are not supported");
+
+    expect(promptCalls).toBe(0);
+    expect(events).toContainEqual({
+      type: "session_event",
+      sessionId: SESSION_A,
+      runId: RUN_A,
+      event: { type: "run_finished", outcome: "failed" },
+    });
+    await connection.dispose();
   });
 
   it("disposes a session that finishes creating after close_session", async () => {
@@ -806,6 +944,7 @@ describe("PiConnection lifecycle", () => {
   });
 
   it("drains a native auth error on the operation that produced it", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-api-key-error-"));
     const runtime = new FakeRuntime();
     const nativeErrors: Error[] = [];
     Object.assign(runtime.modelRegistry, {
@@ -821,9 +960,12 @@ describe("PiConnection lifecycle", () => {
     });
     const events: ServerEvent[] = [];
     const connection = new PiConnection((event) => events.push(event), runtime);
+    await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
 
     await expect(connection.handle({
       type: "set_api_key",
+      commandId: COMMAND_A,
+      sessionId: SESSION_A,
       provider: "provider",
       key: "secret",
     })).rejects.toThrow("credential write failed");
@@ -832,9 +974,203 @@ describe("PiConnection lifecycle", () => {
     expect(events.filter((event) => event.type === "error" && event.scope === "auth")).toEqual([
       expect.objectContaining({ message: "credential write failed" }),
     ]);
+    expect(events.some((event) => event.type === "command_complete")).toBe(false);
   });
 
-  it("drains a settings error even when flush throws", async () => {
+  it("acknowledges an API Key command only after it completes", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-api-key-complete-"));
+    const runtime = new FakeRuntime();
+    Object.assign(runtime.modelRegistry, {
+      getAll: () => [{ provider: "provider" }],
+    });
+    Object.assign(runtime.authStorage, {
+      set: () => undefined,
+    });
+    const events: ServerEvent[] = [];
+    const connection = new PiConnection((event) => events.push(event), runtime);
+    await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
+
+    await connection.handle({
+      type: "set_api_key",
+      commandId: COMMAND_A,
+      sessionId: SESSION_A,
+      provider: "provider",
+      key: "secret",
+    });
+
+    expect(events).toContainEqual({
+      type: "command_complete",
+      operation: "set_api_key",
+      commandId: COMMAND_A,
+      sessionId: SESSION_A,
+    });
+  });
+
+  it("does not apply API Key commands from stale or unknown sessions", async () => {
+    const cwdA = await mkdtemp(join(tmpdir(), "piweb-api-key-session-a-"));
+    const cwdB = await mkdtemp(join(tmpdir(), "piweb-api-key-session-b-"));
+    const runtime = new FakeRuntime();
+    const credentials: unknown[] = [];
+    Object.assign(runtime.modelRegistry, {
+      getAll: () => [{ provider: "provider" }],
+    });
+    Object.assign(runtime.authStorage, {
+      set: (_provider: string, credential: unknown) => credentials.push(credential),
+    });
+    const events: ServerEvent[] = [];
+    const connection = new PiConnection((event) => events.push(event), runtime);
+    await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd: cwdA });
+    await connection.handle({ type: "initialize", sessionId: SESSION_B, cwd: cwdB });
+
+    await connection.handle({
+      type: "set_api_key",
+      commandId: COMMAND_A,
+      sessionId: SESSION_A,
+      provider: "provider",
+      key: "from-stale-session",
+    });
+    await connection.handle({
+      type: "set_api_key",
+      commandId: COMMAND_B,
+      sessionId: SESSION_C,
+      provider: "provider",
+      key: "from-unknown-session",
+    });
+
+    expect(credentials).toEqual([]);
+    expect(events.some((event) => event.type === "command_complete")).toBe(false);
+    await connection.dispose();
+  });
+
+  it("acknowledges a model selection only after the matching session is updated", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-select-model-"));
+    const runtime = new FakeRuntime();
+    const model = {
+      provider: "provider",
+      id: "model-2",
+      name: "Model 2",
+      contextWindow: 4_096,
+    };
+    Object.assign(runtime.modelRegistry, {
+      getAll: () => [model],
+      getAvailable: () => [model],
+      find: (provider: string, modelId: string) => (
+        provider === model.provider && modelId === model.id ? model : undefined
+      ),
+    });
+    let selectedModel: unknown;
+    runtime.create = async () => {
+      const settings = fakeSettings();
+      const session = fakeSession(settings);
+      session.setModel = async (selected) => {
+        selectedModel = selected;
+      };
+      runtime.created.push(session);
+      return { session, settings };
+    };
+    const events: ServerEvent[] = [];
+    const connection = new PiConnection((event) => events.push(event), runtime);
+    await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
+
+    await connection.handle({
+      type: "select_model",
+      commandId: COMMAND_A,
+      sessionId: SESSION_A,
+      provider: model.provider,
+      modelId: model.id,
+    });
+
+    expect(events.at(-1)).toEqual({
+      type: "command_complete",
+      operation: "select_model",
+      commandId: COMMAND_A,
+      sessionId: SESSION_A,
+    });
+    expect(selectedModel).toBe(model);
+  });
+
+  it("reports a partially persisted model switch as applied to the active session", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-select-model-partial-"));
+    const runtime = new FakeRuntime();
+    const model = {
+      provider: "provider",
+      id: "model-2",
+      name: "Model 2",
+      contextWindow: 4_096,
+    };
+    Object.assign(runtime.modelRegistry, {
+      getAll: () => [model],
+      getAvailable: () => [model],
+      find: () => model,
+    });
+    runtime.create = async () => {
+      const settings = fakeSettings();
+      const session = fakeSession(settings);
+      session.setModel = async (selected) => {
+        Object.assign(session, { model: selected });
+        throw new Error("session model entry could not be written");
+      };
+      runtime.created.push(session);
+      return { session, settings };
+    };
+    const events: ServerEvent[] = [];
+    const connection = new PiConnection((event) => events.push(event), runtime);
+    await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
+
+    await expect(connection.handle({
+      type: "select_model",
+      commandId: COMMAND_A,
+      sessionId: SESSION_A,
+      provider: model.provider,
+      modelId: model.id,
+    })).resolves.toBeUndefined();
+
+    expect(events).toContainEqual({
+      type: "command_complete",
+      operation: "select_model",
+      commandId: COMMAND_A,
+      sessionId: SESSION_A,
+    });
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "error",
+      scope: "settings",
+      sessionId: SESSION_A,
+      message: expect.stringContaining("模型已用于当前会话"),
+    }));
+  });
+
+  it("rejects a reused setting command ID without applying it twice", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-api-key-command-id-"));
+    const runtime = new FakeRuntime();
+    const credentials: unknown[] = [];
+    Object.assign(runtime.modelRegistry, {
+      getAll: () => [{ provider: "provider" }],
+    });
+    Object.assign(runtime.authStorage, {
+      set: (_provider: string, credential: unknown) => credentials.push(credential),
+    });
+    const connection = new PiConnection(() => undefined, runtime);
+    await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
+
+    await connection.handle({
+      type: "set_api_key",
+      commandId: COMMAND_B,
+      sessionId: SESSION_A,
+      provider: "provider",
+      key: "first",
+    });
+    await expect(connection.handle({
+      type: "set_api_key",
+      commandId: COMMAND_B,
+      sessionId: SESSION_A,
+      provider: "provider",
+      key: "second",
+    })).rejects.toThrow("already used");
+
+    expect(credentials).toEqual([{ type: "api_key", key: "first" }]);
+  });
+
+  it("keeps an applied thinking level when its default setting cannot be flushed", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-settings-error-"));
     const runtime = new FakeRuntime();
     const settingsErrors: Array<{ error: Error }> = [];
@@ -859,12 +1195,57 @@ describe("PiConnection lifecycle", () => {
       type: "set_thinking",
       sessionId: SESSION_A,
       level: "high",
-    })).rejects.toThrow("settings write failed");
+    })).resolves.toBeUndefined();
+
+    expect(events.at(-1)).toMatchObject({
+      type: "error",
+      scope: "settings",
+      sessionId: SESSION_A,
+      message: "settings write failed",
+    });
+
     await connection.handle({ type: "refresh_models" });
 
+    expect(latestState(events).thinkingLevel).toBe("high");
     expect(events.filter((event) => event.type === "error" && event.scope === "settings")).toEqual([
       expect.objectContaining({ sessionId: SESSION_A, message: "settings write failed" }),
     ]);
+  });
+
+  it("keeps an in-memory conversation name when its session entry cannot be persisted", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-rename-partial-"));
+    const runtime = new FakeRuntime();
+    const events: ServerEvent[] = [];
+    const connection = new PiConnection((event) => events.push(event), runtime);
+    await connection.handle({
+      type: "initialize",
+      sessionId: SESSION_A,
+      cwd,
+      conversation: { kind: "new" },
+    });
+    const initial = latestState(events);
+    const manager = runtime.created[0]?.persistentManager;
+    if (!manager) throw new Error("persistent SessionManager was not provided");
+    Object.assign(manager, {
+      _persist: () => {
+        throw new Error("session name entry could not be written");
+      },
+    });
+
+    await expect(connection.handle({
+      type: "rename_conversation",
+      sessionId: SESSION_A,
+      conversationId: initial.conversationId,
+      name: "Renamed in memory",
+    })).resolves.toBeUndefined();
+
+    expect(latestState(events).conversationName).toBe("Renamed in memory");
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "error",
+      scope: "settings",
+      sessionId: SESSION_A,
+      message: expect.stringContaining("对话名称已用于当前会话"),
+    }));
   });
 
   it("cancels an active OAuth flow so a new session is not blocked", async () => {
@@ -1522,12 +1903,22 @@ describe("PiConnection lifecycle", () => {
     manager.appendMessage(agentMessage({
       role: "assistant",
       content: [{ type: "text", text: "remembered" }],
+      api: "test-api",
+      provider: "test-provider",
+      model: "test-model",
       usage: {
         input: 2,
         output: 1,
         cacheRead: 0,
         cacheWrite: 0,
         totalTokens: 3,
+        cost: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: 0,
+        },
       },
       stopReason: "stop",
       timestamp: 2,

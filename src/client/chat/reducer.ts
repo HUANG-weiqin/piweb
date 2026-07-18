@@ -30,7 +30,7 @@ export interface ChatState {
 export const initialChatState: ChatState = { messages: [], sessionTokens: 0 };
 
 export type ChatAction =
-  | { type: "sent"; runId: string; text: string }
+  | { type: "prompt_accepted"; runId: string; text: string }
   | { type: "session"; runId: string; event: SessionEvent }
   | { type: "error"; runId: string; message: string }
   | { type: "hydrate"; messages: ConversationHistoryMessage[] }
@@ -114,7 +114,11 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       ),
     };
   }
-  if (action.type === "sent") return {
+  if (action.type === "prompt_accepted") {
+    if (state.messages.some((message) => (
+      message.role === "user" && message.runId === action.runId
+    ))) return state;
+    return {
     messages: [...state.messages, {
       id: id(),
       runId: action.runId,
@@ -124,7 +128,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       tools: [],
     }],
     sessionTokens: state.sessionTokens,
-  };
+    };
+  }
   if (action.type === "error") return {
     messages: [...state.messages, {
       id: id(),

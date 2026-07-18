@@ -1,13 +1,49 @@
 import { z } from "zod";
 
 export const MAX_MESSAGE_BYTES = 1_000_000;
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
 const conversationIdSchema = z.string().uuid();
 const runIdSchema = z.string().uuid();
 const authFlowIdSchema = z.string().uuid();
 const approvalIdSchema = z.string().uuid();
+const extensionUIRequestIdSchema = z.string().uuid();
+const commandIdSchema = z.string().uuid();
+
+export const extensionUIRequestSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("select"),
+    title: z.string().max(500),
+    options: z.array(z.string().max(500)).max(100),
+  }),
+  z.object({
+    kind: z.literal("confirm"),
+    title: z.string().max(500),
+    message: z.string().max(20_000),
+  }),
+  z.object({
+    kind: z.literal("input"),
+    title: z.string().max(500),
+    placeholder: z.string().max(2_000).optional(),
+  }),
+  z.object({
+    kind: z.literal("editor"),
+    title: z.string().max(500),
+    prefill: z.string().max(200_000).optional(),
+  }),
+]);
+
+export const extensionUIResponseSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("cancel") }),
+  z.object({ kind: z.literal("select"), value: z.string().max(500) }),
+  z.object({ kind: z.literal("confirm"), confirmed: z.boolean() }),
+  z.object({ kind: z.literal("input"), value: z.string().max(200_000) }),
+  z.object({ kind: z.literal("editor"), value: z.string().max(200_000) }),
+]);
+
+export type ExtensionUIRequest = z.infer<typeof extensionUIRequestSchema>;
+export type ExtensionUIResponse = z.infer<typeof extensionUIResponseSchema>;
 
 export const clientCommandSchema = z.discriminatedUnion("type", [
   z.object({
@@ -36,7 +72,14 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
     decision: z.enum(["allow", "deny"]),
   }),
   z.object({
+    type: z.literal("extension_ui_response"),
+    sessionId: sessionIdSchema,
+    requestId: extensionUIRequestIdSchema,
+    response: extensionUIResponseSchema,
+  }),
+  z.object({
     type: z.literal("select_model"),
+    commandId: commandIdSchema,
     sessionId: sessionIdSchema,
     provider: required,
     modelId: required,
@@ -57,7 +100,13 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
     conversationId: conversationIdSchema,
     name: required.max(120),
   }),
-  z.object({ type: z.literal("set_api_key"), provider: required, key: required.max(32_768) }),
+  z.object({
+    type: z.literal("set_api_key"),
+    commandId: commandIdSchema,
+    sessionId: sessionIdSchema,
+    provider: required,
+    key: required.max(32_768),
+  }),
   z.object({ type: z.literal("login_oauth"), authFlowId: authFlowIdSchema, provider: required }),
   z.object({ type: z.literal("logout"), provider: required }),
   z.object({ type: z.literal("auth_response"), authFlowId: authFlowIdSchema, requestId: required, value: z.string().optional(), selectedId: z.string().optional(), cancelled: z.boolean().optional() }),
@@ -67,6 +116,7 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
 ]);
 
 export type ClientCommand = z.infer<typeof clientCommandSchema>;
+export type AcknowledgedSettingOperation = "select_model" | "set_api_key";
 export type ThinkingLevel = Extract<ClientCommand, { type: "set_thinking" }>["level"];
 export type ToolMode = Extract<ClientCommand, { type: "set_tool_mode" }>["mode"];
 
@@ -207,9 +257,28 @@ export type ServerEvent =
       truncated: boolean;
     }
   | { type: "session_event"; sessionId: string; runId: string; event: SessionEvent }
+  | {
+      type: "extension_ui_request";
+      sessionId: string;
+      requestId: string;
+      request: ExtensionUIRequest;
+    }
+  | { type: "extension_ui_closed"; sessionId: string; requestId: string }
+  | {
+      type: "extension_ui_notification";
+      sessionId: string;
+      level: "info" | "warning" | "error";
+      message: string;
+    }
   | { type: "auth_request"; authFlowId: string; requestId: string; request: AuthRequest }
   | { type: "auth_progress"; authFlowId: string; message: string }
   | { type: "auth_complete"; authFlowId: string; provider: string }
+  | {
+      type: "command_complete";
+      operation: AcknowledgedSettingOperation;
+      commandId: string;
+      sessionId: string;
+    }
   | {
       type: "error";
       message: string;
@@ -218,6 +287,7 @@ export type ServerEvent =
       sessionId?: string;
       runId?: string;
       authFlowId?: string;
+      commandId?: string;
     };
 
 const thinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -344,6 +414,7 @@ const commandTypeSchema = z.enum([
   "prompt",
   "abort",
   "tool_approval_response",
+  "extension_ui_response",
   "select_model",
   "set_thinking",
   "set_tool_mode",
@@ -356,7 +427,7 @@ const commandTypeSchema = z.enum([
   "refresh_models",
   "close_session",
 ]);
-export const serverEventSchema: z.ZodType<ServerEvent> = z.discriminatedUnion("type", [
+const serverEventUnionSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("hello"),
     protocolVersion: z.number().int().nonnegative(),
@@ -405,6 +476,23 @@ export const serverEventSchema: z.ZodType<ServerEvent> = z.discriminatedUnion("t
     event: sessionEventSchema,
   }),
   z.object({
+    type: z.literal("extension_ui_request"),
+    sessionId: sessionIdSchema,
+    requestId: extensionUIRequestIdSchema,
+    request: extensionUIRequestSchema,
+  }),
+  z.object({
+    type: z.literal("extension_ui_closed"),
+    sessionId: sessionIdSchema,
+    requestId: extensionUIRequestIdSchema,
+  }),
+  z.object({
+    type: z.literal("extension_ui_notification"),
+    sessionId: sessionIdSchema,
+    level: z.enum(["info", "warning", "error"]),
+    message: z.string().max(20_000),
+  }),
+  z.object({
     type: z.literal("auth_request"),
     authFlowId: authFlowIdSchema,
     requestId: z.string(),
@@ -413,6 +501,12 @@ export const serverEventSchema: z.ZodType<ServerEvent> = z.discriminatedUnion("t
   z.object({ type: z.literal("auth_progress"), authFlowId: authFlowIdSchema, message: z.string() }),
   z.object({ type: z.literal("auth_complete"), authFlowId: authFlowIdSchema, provider: z.string() }),
   z.object({
+    type: z.literal("command_complete"),
+    operation: z.enum(["select_model", "set_api_key"]),
+    commandId: commandIdSchema,
+    sessionId: sessionIdSchema,
+  }),
+  z.object({
     type: z.literal("error"),
     message: z.string(),
     scope: z.enum(["auth", "command", "protocol", "session", "settings"]),
@@ -420,8 +514,26 @@ export const serverEventSchema: z.ZodType<ServerEvent> = z.discriminatedUnion("t
     sessionId: sessionIdSchema.optional(),
     runId: runIdSchema.optional(),
     authFlowId: authFlowIdSchema.optional(),
+    commandId: commandIdSchema.optional(),
   }),
 ]);
+
+export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.superRefine(
+  (event, context) => {
+    if (
+      event.type === "error"
+      && event.commandId
+      && (event.operation === "select_model" || event.operation === "set_api_key")
+      && !event.sessionId
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Setting command errors require a sessionId",
+        path: ["sessionId"],
+      });
+    }
+  },
+);
 
 function parseMessage(input: unknown): unknown {
   if (typeof input !== "string") return input;

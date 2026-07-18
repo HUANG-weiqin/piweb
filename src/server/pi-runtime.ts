@@ -4,14 +4,19 @@ import {
   createAgentSessionFromServices,
   createAgentSessionServices,
   getAgentDir,
+  hasTrustRequiringProjectResources,
   ModelRegistry,
+  ProjectTrustStore,
   SessionManager,
   SettingsManager,
   type AgentSession,
   type CreateAgentSessionOptions,
   type CreateAgentSessionResult,
+  type ExtensionCommandContextActions,
   type ExtensionError,
+  type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
+import type { PortableExtensionUI } from "./extension-ui.js";
 import { SerialTaskQueue } from "./serial-task-queue.js";
 
 type SessionFactory = (options: CreateAgentSessionOptions) => Promise<CreateAgentSessionResult>;
@@ -31,6 +36,8 @@ export type ToolCallGate = (
 export interface CreatePiSessionOptions {
   toolCallGate?: ToolCallGate;
   sessionManager?: SessionManager;
+  extensionUI?: PortableExtensionUI;
+  extensionAbort?: () => void;
 }
 
 export interface CreatedPiSession {
@@ -60,7 +67,13 @@ export interface PiRuntimeOptions {
   createSession?: SessionFactory;
   createServices?: typeof createAgentSessionServices;
   createSessionFromServices?: typeof createAgentSessionFromServices;
+  projectTrustStore?: Pick<ProjectTrustStore, "get" | "set">;
 }
+
+const TRUST_PROJECT_AND_REMEMBER = "信任此项目并记住";
+const TRUST_PROJECT_ONCE = "仅本次信任";
+const DECLINE_PROJECT_AND_REMEMBER = "不信任此项目并记住";
+const DECLINE_PROJECT_ONCE = "仅本次不信任";
 
 function freezeStableJsonValue(value: unknown): void {
   const visiting = new WeakSet<object>();
@@ -233,15 +246,18 @@ export class PiRuntime implements PiRuntimeLike {
   private readonly sessionFactory?: SessionFactory;
   private readonly servicesFactory: typeof createAgentSessionServices;
   private readonly sessionFromServicesFactory: typeof createAgentSessionFromServices;
+  private readonly projectTrustStore: Pick<ProjectTrustStore, "get" | "set">;
 
   constructor(options: PiRuntimeOptions = {}) {
     this.authStorage = options.authStorage ?? AuthStorage.create();
     this.modelRegistry = options.modelRegistry ?? ModelRegistry.create(this.authStorage);
     this.createModelRegistry = options.createModelRegistry ?? ((authStorage) => ModelRegistry.create(authStorage));
-    this.createSettings = options.createSettings ?? ((cwd) => SettingsManager.create(cwd, getAgentDir()));
+    this.createSettings = options.createSettings
+      ?? ((cwd) => SettingsManager.create(cwd, getAgentDir(), { projectTrusted: false }));
     this.sessionFactory = options.createSession;
     this.servicesFactory = options.createServices ?? createAgentSessionServices;
     this.sessionFromServicesFactory = options.createSessionFromServices ?? createAgentSessionFromServices;
+    this.projectTrustStore = options.projectTrustStore ?? new ProjectTrustStore(getAgentDir());
   }
 
   async createSession(cwd: string, options: CreatePiSessionOptions = {}): Promise<CreatedPiSession> {
@@ -252,6 +268,8 @@ export class PiRuntime implements PiRuntimeLike {
     this.sessionRegistries.add(owner);
     let settings: SettingsManager;
     let created: CreateAgentSessionResult;
+    let createdSession: AgentSession | undefined;
+    let pendingExtensionErrors: ExtensionError[];
     try {
       settings = this.createSettings(cwd);
       const sessionManager = options.sessionManager ?? SessionManager.inMemory(cwd);
@@ -270,6 +288,13 @@ export class PiRuntime implements PiRuntimeLike {
           authStorage: this.authStorage,
           modelRegistry: owner.registry,
           settingsManager: settings,
+          resourceLoaderReloadOptions: {
+            resolveProjectTrust: () => this.resolveProjectTrust(
+              cwd,
+              settings,
+              options.extensionUI,
+            ),
+          },
         });
         settings = services.settingsManager;
         created = await this.sessionFromServicesFactory({
@@ -277,38 +302,43 @@ export class PiRuntime implements PiRuntimeLike {
           sessionManager,
         });
       }
+      createdSession = created.session;
+      owner.bindSession(createdSession);
+      if (options.toolCallGate) {
+        this.installToolCallGate(createdSession, options.toolCallGate);
+      }
+
+      const startupProviderErrors = owner.takeStartupProviderErrors();
+      if (startupProviderErrors.length > 0) {
+        throw new AggregateError(
+          startupProviderErrors,
+          `Extension provider registration failed: ${startupProviderErrors
+            .map((error) => error.message)
+            .join("; ")}`,
+        );
+      }
+      pendingExtensionErrors = created.extensionsResult.errors.map((error) => ({
+        extensionPath: error.path,
+        event: "load",
+        error: error.error,
+      }));
     } catch (error) {
+      const failures: unknown[] = [error];
+      if (createdSession) {
+        try {
+          await this.teardownAgentSession(createdSession, false);
+        } catch (teardownError) {
+          failures.push(teardownError);
+        }
+      }
       this.sessionRegistries.delete(owner);
+      if (failures.length > 1) {
+        throw new AggregateError(failures, "Failed to initialize Pi session");
+      }
       throw error;
     }
     const { session } = created;
-    owner.bindSession(session);
-    if (options.toolCallGate) {
-      this.installToolCallGate(session, options.toolCallGate);
-    }
 
-    const startupProviderErrors = owner.takeStartupProviderErrors();
-    if (startupProviderErrors.length > 0) {
-      const failures: unknown[] = [...startupProviderErrors];
-      try {
-        await this.teardownAgentSession(session, false);
-      } catch (error) {
-        failures.push(error);
-      }
-      this.sessionRegistries.delete(owner);
-      throw new AggregateError(
-        failures,
-        `Extension provider registration failed: ${startupProviderErrors
-          .map((error) => error.message)
-          .join("; ")}`,
-      );
-    }
-
-    const pendingExtensionErrors: ExtensionError[] = created.extensionsResult.errors.map((error) => ({
-      extensionPath: error.path,
-      event: "load",
-      error: error.error,
-    }));
     let extensionErrorHandler: ((error: ExtensionError) => void) | undefined;
     let activationAttempted = false;
     const dispose = this.createSessionDisposer(session, owner, () => activationAttempted);
@@ -320,8 +350,27 @@ export class PiRuntime implements PiRuntimeLike {
       modelRegistry: owner.registry,
       activateExtensions: () => {
         activationAttempted = true;
+        const commandContextActions: ExtensionCommandContextActions = {
+          waitForIdle: () => session.waitForIdle(),
+          newSession: async () => ({ cancelled: true }),
+          fork: async () => ({ cancelled: true }),
+          navigateTree: async () => ({ cancelled: true }),
+          switchSession: async () => ({ cancelled: true }),
+          reload: async () => {
+            throw new Error("Extension reload is not supported by this workbench");
+          },
+        };
+        const uiContext: ExtensionUIContext | undefined = options.extensionUI
+          ? {
+              ...session.extensionRunner.getUIContext(),
+              ...options.extensionUI,
+            }
+          : undefined;
         activationPromise ??= session.bindExtensions({
-          mode: "print",
+          uiContext,
+          mode: uiContext ? "rpc" : "print",
+          commandContextActions,
+          abortHandler: options.extensionAbort,
           onError: (error) => {
             if (extensionErrorHandler) extensionErrorHandler(error);
             else pendingExtensionErrors.push(error);
@@ -415,6 +464,50 @@ export class PiRuntime implements PiRuntimeLike {
     };
   }
 
+  private async resolveProjectTrust(
+    cwd: string,
+    settings: SettingsManager,
+    ui: PortableExtensionUI | undefined,
+  ): Promise<boolean> {
+    if (!hasTrustRequiringProjectResources(cwd)) return true;
+    const saved = this.projectTrustStore.get(cwd);
+    if (saved !== null) {
+      if (!saved) {
+        ui?.notify("项目资源未受信任，已跳过项目设置、skills 和 extensions。", "warning");
+      }
+      return saved;
+    }
+
+    switch (settings.getDefaultProjectTrust()) {
+      case "always": return true;
+      case "never":
+        ui?.notify("项目资源未受信任，已跳过项目设置、skills 和 extensions。", "warning");
+        return false;
+      case "ask": break;
+    }
+    if (!ui) return false;
+
+    const selected = await ui.select(
+      `是否信任项目资源？\n${cwd}`,
+      [
+        TRUST_PROJECT_AND_REMEMBER,
+        TRUST_PROJECT_ONCE,
+        DECLINE_PROJECT_AND_REMEMBER,
+        DECLINE_PROJECT_ONCE,
+      ],
+    );
+    if (selected === TRUST_PROJECT_AND_REMEMBER) {
+      this.projectTrustStore.set(cwd, true);
+      return true;
+    }
+    if (selected === TRUST_PROJECT_ONCE) return true;
+    if (selected === DECLINE_PROJECT_AND_REMEMBER) {
+      this.projectTrustStore.set(cwd, false);
+    }
+    ui.notify("项目资源未受信任，已跳过项目设置、skills 和 extensions。", "warning");
+    return false;
+  }
+
   private createSessionDisposer(
     session: AgentSession,
     owner: SessionModelRegistry,
@@ -440,11 +533,16 @@ export class PiRuntime implements PiRuntimeLike {
 
   private async teardownAgentSession(session: AgentSession, emitShutdown: boolean): Promise<void> {
     const failures: unknown[] = [];
-    const stopListening = session.extensionRunner.onError((error) => {
-      failures.push(new Error(
-        `Extension error in ${error.event} (${error.extensionPath}): ${error.error}`,
-      ));
-    });
+    let stopListening: (() => void) | undefined;
+    try {
+      stopListening = session.extensionRunner.onError((error) => {
+        failures.push(new Error(
+          `Extension error in ${error.event} (${error.extensionPath}): ${error.error}`,
+        ));
+      });
+    } catch (error) {
+      failures.push(error);
+    }
     try {
       if (session.isStreaming) {
         try {
@@ -466,7 +564,11 @@ export class PiRuntime implements PiRuntimeLike {
         failures.push(error);
       }
     } finally {
-      stopListening();
+      try {
+        stopListening?.();
+      } catch (error) {
+        failures.push(error);
+      }
     }
     if (failures.length > 0) {
       throw new AggregateError(failures, "Failed to tear down AgentSession");

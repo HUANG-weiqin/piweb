@@ -52,7 +52,7 @@ initialize(cwd, target)
 → canonicalize cwd
 → ProjectStoreRegistry.acquireProject()
 → 校验 .piweb 与 sessions 不是 symlink/junction
-→ refreshConversations()，使用 SessionManager.listAll(custom sessionDir)
+→ refreshConversations()，枚举并验证全部 JSONL，再与 SessionManager.listAll(custom sessionDir) 一一核对
 → 选择 new / recent / exact open
 → 在 open 前取得/等待 conversation writer lease
 → SessionManager.create/open(..., current cwd override)
@@ -70,13 +70,14 @@ Project store handle 按 canonical cwd 引用计数；最后一个活动 bundle 
 ## Pi SessionManager 边界
 
 - 使用项目自有的 custom `sessionDir`；不能依赖 Pi 默认 cwd 编码目录作为 project key。
-- 列举使用 `SessionManager.listAll(sessionDir)`，避免项目移动后被旧 header cwd 过滤。
-- 打开时第三个参数传当前 canonical cwd；JSONL header 保留原 cwd，运行态使用新位置。
+- 列举使用 `SessionManager.listAll(sessionDir)`，避免项目移动后被旧 header cwd 过滤；但不能信任它的完整性，因为 SDK 会静默跳过部分损坏文件。
+- 每次索引刷新都先后快照受控目录中的全部常规 `.jsonl`，目录在 SDK 扫描期间变化会 fail closed。宿主完整读取每个文件，验证尾换行、逐行 JSON、有限数值、header identity，以及经 Pi 内存迁移后的 entry payload / tree 引用；随后要求 SDK 索引与该磁盘全集按规范路径和 ID 精确一一对应。
+- 打开时第三个参数传当前 canonical cwd；JSONL header 保留原 cwd，运行态使用新位置。旧会话允许 header cwd 缺失或为空，但存在时必须是字符串。
 - 新 Pi manager 默认要到首条 assistant 消息才创建文件。工作台为“空对话立即可见”预写合法 header 后丢弃 pending manager，再用公开 `open()` 重开。
 - `SessionManager` 没有 flush/close/fsync，也没有内建锁；正常 append 是同步 JSONL 写入。
 - SDK 打开旧格式时可能原地迁移，因此 writer lease 必须先于 `open()`。
 - 重连打开已有对话时最多等待旧 writer lease 5 秒；等待队列 FIFO 且随 initialize/connection 的 AbortSignal 取消。真正的并发 writer 不会因重连而被绕过。
-- `open()` 前宿主验证文件非空、以换行结束、每条非空 JSONL 可解析且首 header 身份匹配。crash partial tail 会 fail closed，不能让下一次 append 粘到坏尾部。
+- `open()` 前宿主再次验证文件非空、以换行结束、每条非空 JSONL 可解析、所有数值有限、首 header 身份匹配，并且 entry ID 唯一、parent/label 引用有效、compaction 保留点属于当前分支祖先链。branch summary 可引用已有节点，或使用 Pi 合法的 `parentId=null + fromId=root` 哨兵。crash partial tail 或“合法 JSON、非法 Pi entry”都会 fail closed，不能被 SDK 静默跳过或恢复成空历史。
 - 第一版只有进程内租约；跨进程文件锁尚未实现。
 
 ## 项目权限模式
@@ -106,14 +107,14 @@ Project store handle 按 canonical cwd 引用计数；最后一个活动 bundle 
 
 - initialize、extension activation 或 stale generation 失败时必须 dispose 新 runtime 并释放 lease。
 - close/reinitialize/disconnect 先使 epoch 失效和取消 run，再串行 dispose bundle；conversation lease 和 project handle 即使 dispose 失败也会结算。
-- 项目清单无效、状态目录是链接、JSONL 是链接、日志截断/损坏或身份在 open 时变化都会 fail closed，原文件不被“修复”覆盖。
+- 项目清单无效、状态目录是链接、JSONL 是链接、日志截断/损坏、非有限 JSON 数值、畸形 entry/tree、Pi 索引遗漏/错配或身份在 open 时变化都会 fail closed，原文件不被“修复”覆盖，也不能静默回退到另一条 recent 对话或新建对话。
 - 断线会停止当前 run；此前 Pi 已 append 的 transcript 保留，重连用新 sessionId 打开同一 conversation。
 - `lastConversationId` 只是恢复提示；索引是派生状态，丢失/陈旧时可从 sessionDir 重建。
 
 ## 当前边界
 
 - 没有分页、archive/delete、fork/import、附件和跨设备同步。
-- 每次索引刷新仍由 Pi `listAll()` 扫描该项目全部 JSONL；长期项目需要在引入分页时一并设计增量 catalog。
+- 每次索引刷新会由宿主完整验证该项目全部 JSONL，并由 Pi `listAll()` 再扫描一次；这是第一版用完整性换简单性的选择。长期项目需要在引入分页时一并设计增量 catalog 和等价的完整性证明。
 - 没有跨进程 writer lock 和断电级 durability。
 - Pi JSONL header eager materialization 依赖锁定 SDK 的 v3 session format；升级 SDK 时必须用测试验证 header/open/list 行为。
 - `.piweb` 可能包含敏感内容；Git 忽略策略由项目所有者决定。
@@ -121,6 +122,7 @@ Project store handle 按 canonical cwd 引用计数；最后一个活动 bundle 
 ## 入口
 
 - `src/server/project-store.ts`
+- `src/server/session-file.ts`
 - `src/server/project-snapshot.ts`
 - `src/server/conversation-history.ts`
 - `src/server/pi-service.ts`
