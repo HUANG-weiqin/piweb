@@ -24,4 +24,14 @@ describe("Setup", () => {
     render(<Setup initialCwd={"E:\\work"} online={false} onStart={() => undefined} />);
     expect(screen.getByRole("button")).toBeDisabled();
   });
+
+  it("shows a fatal connection label when provided", () => {
+    render(<Setup
+      initialCwd={"E:\\work"}
+      online={false}
+      unavailableLabel="协议不兼容"
+      onStart={() => undefined}
+    />);
+    expect(screen.getByRole("button", { name: "协议不兼容" })).toBeDisabled();
+  });
 });

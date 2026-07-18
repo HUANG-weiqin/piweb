@@ -5,6 +5,7 @@ function printable(value: unknown): string {
 }
 
 function statusIcon(status: ToolItem["status"]): string {
+  if (status === "pending") return "○";
   if (status === "running") return "●";
   if (status === "done") return "✓";
   return "!";

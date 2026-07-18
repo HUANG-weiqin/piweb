@@ -1,4 +1,4 @@
-import type { ClientCommand, ServerEvent } from "../../shared/protocol";
+import { parseServerEvent, type ClientCommand, type ServerEvent } from "../../shared/protocol";
 
 export class PiSocket {
   private socket?: WebSocket;
@@ -12,17 +12,41 @@ export class PiSocket {
 
   connect(): void {
     this.stopped = false;
+    if (this.reconnectTimer !== undefined) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    this.socket = new WebSocket(`${protocol}//${location.host}/ws`);
-    this.socket.onopen = () => this.onStatus(true);
-    this.socket.onmessage = (message) => {
-      try { this.onEvent(JSON.parse(String(message.data)) as ServerEvent); } catch { /* Ignore malformed server data. */ }
+    const socket = new WebSocket(`${protocol}//${location.host}/ws`);
+    this.socket = socket;
+    socket.onopen = () => {
+      if (this.socket !== socket) return;
+      this.onStatus(true);
     };
-    this.socket.onclose = () => {
+    socket.onmessage = (message) => {
+      if (this.socket !== socket) return;
+      try {
+        this.onEvent(parseServerEvent(String(message.data)));
+      } catch {
+        this.onEvent({
+          type: "error",
+          scope: "protocol",
+          message: "服务端发送了无法解析的协议消息",
+        });
+      }
+    };
+    socket.onclose = () => {
+      if (this.socket !== socket) return;
+      this.socket = undefined;
       this.onStatus(false);
-      if (!this.stopped) this.reconnectTimer = window.setTimeout(() => this.connect(), 1200);
+      if (!this.stopped) {
+        this.reconnectTimer = window.setTimeout(() => {
+          this.reconnectTimer = undefined;
+          if (!this.stopped) this.connect();
+        }, 1200);
+      }
     };
-    this.socket.onerror = () => this.socket?.close();
+    socket.onerror = () => socket.close();
   }
 
   send(command: ClientCommand): boolean {
@@ -33,7 +57,10 @@ export class PiSocket {
 
   close(): void {
     this.stopped = true;
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this.reconnectTimer !== undefined) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
     this.socket?.close();
   }
 }

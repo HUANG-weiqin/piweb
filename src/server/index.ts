@@ -17,10 +17,29 @@ const server = app.listen(port, host, () => {
   console.log(`Pi Web: http://${host}:${port}`);
 });
 
-attachSocketServer(server, process.cwd());
+const socketServer = attachSocketServer(server, process.cwd());
+
+let shutdownPromise: Promise<void> | undefined;
+
+function closeHttpServer(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+  });
+}
 
 function shutdown(): void {
-  server.close(() => process.exit(0));
+  shutdownPromise ??= Promise.all([
+    closeHttpServer(),
+    socketServer.close(),
+  ]).then(
+    () => {
+      process.exitCode = 0;
+    },
+    (error) => {
+      console.error("Failed to shut down cleanly", error);
+      process.exitCode = 1;
+    },
+  );
 }
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);

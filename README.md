@@ -1,6 +1,6 @@
 # Pi Web
 
-一个本机专用的极简 Pi Web UI。它直接嵌入官方 `@earendil-works/pi-coding-agent` SDK，不重新实现模型、认证、工具或 Agent 循环。
+一个本机专用的极简 Agent 工作台基座。它直接嵌入官方 `@earendil-works/pi-coding-agent` SDK，不重新实现模型、认证、工具或 Agent 循环；工作台只负责会话生命周期、稳定协议和 Web UI。
 
 ## 第一版能力
 
@@ -10,8 +10,57 @@
 - 使用 Pi 默认编码工具：`read`、`bash`、`edit`、`write`
 - 模型和思考级别写入 Pi 原生 `settings.json`
 - 工作目录由启动页面指定
-- 对话使用 `SessionManager.inMemory()`，不会生成会话 JSONL
+- 每个项目在 `.piweb/` 中持久保存项目清单和 Pi JSONL 对话
+- 支持恢复最近对话、新建、切换和重命名；项目移动后历史仍可打开
+- 断线重连会有界等待旧连接释放对话；损坏或 crash 截断的 JSONL 在打开前 fail closed，不会继续粘连写入
+- 进程级共享 Pi 认证与模型目录，多浏览器连接不会各自持有陈旧缓存
+- 项目扩展会绑定 `session_start` / `session_shutdown`，扩展错误会进入工作台错误与 run 终态
+- 每个 session 使用隔离的模型目录，项目扩展注册的静态模型或代理不会污染其他工作区
+- 使用版本化、运行时校验的工作台协议，不向浏览器透传 Pi SDK 原生事件
+- 使用不可复用的 sessionId / runId 隔离切目录、关闭、重连和迟到命令
+- run 显式区分 queued / running / cancelling；停止可以取消尚未执行的 prompt
+- 工具权限支持“工作区可写”和“只读”两种服务端会话模式
+- 工作区可写模式自动允许项目内 `edit/write`，项目外写入、`bash` 和未知扩展工具逐次审批
+- 只读模式只允许 `read/grep/find/ls`，其他工具由服务端直接阻止
+- 多窗口共享项目切到只读时会先取消并结算旧运行，再确认持久模式，迟到许可不能继续执行
+- 审批绑定 sessionId / runId / approvalId，停止、切目录和断线都会使等待中的许可失效
+- 审批只展示并执行同一份已锁定参数；无法完整展示的超大或不稳定参数会直接阻止
+- OAuth request/progress/response/cancel 使用 authFlowId 关联，取消后的迟到帧不会复活旧流程
+- 展示累计计费 token，并区分上下文 token 的 measured / estimated / unknown 来源
 - 仅监听 `127.0.0.1`
+
+## 核心运行机制
+
+```text
+浏览器命令
+→ WebSocket 协议校验
+→ ProjectStore 按 canonical cwd 打开项目和持久对话
+→ PiConnection 按 sessionId/runId 控制临时连接 epoch、run ticket 与工具许可
+→ Pi SDK Agent 循环（扩展 hook → 工作台策略 → 工具执行）
+→ 服务端投影低频项目索引、历史快照和高频运行事件
+→ 浏览器按 sessionId/runId/authFlowId 过滤
+→ reducer 按 runId 生成对话视图
+```
+
+共享认证和模型状态由进程级 `PiRuntime` 持有；项目身份、权限模式和对话文件由 `ProjectStore` 持有；每个浏览器连接只拥有当前 `AgentSession` 的临时运行 bundle。`abort`、认证回调和生命周期失效走独立控制通道；资源清理仍回到 actor 队列，因此既能及时取消，也不会与普通操作并发销毁。
+
+持久身份与传输身份刻意分开：
+
+- `projectId`：随 `.piweb/project.json` 移动的项目身份。
+- `conversationId`：Pi JSONL 对话身份。
+- `sessionId`：一次浏览器连接 bundle 的不可复用 epoch。
+- `runId`：一次 prompt 执行身份。
+
+项目布局：
+
+```text
+<project>/.piweb/
+  project.json
+  sessions/
+    *.jsonl
+```
+
+`.piweb` 不保存 API Key；认证仍使用 Pi 的全局目录。Agent 的 `edit/write` 工具不能直接修改 `.piweb`，但工作台宿主可在只读工具模式下继续保存对话。
 
 ## 要求
 
@@ -42,10 +91,12 @@ npm start
 ## 使用
 
 1. 输入 Agent 工作目录并开始。
-2. 如果还没有可用模型，页面会自动打开“模型与登录”。
+2. 如果还没有可用模型，页面会自动打开“工作台设置”。
 3. API Key 会通过 Pi 的 `AuthStorage` 保存；网页不会回显或在浏览器中保存 Key。
 4. 对于 ChatGPT、Claude 或 GitHub Copilot 等订阅，点击“订阅登录”，按 Pi 返回的原生授权步骤操作。
-5. 选择模型后即可聊天。模型拥有 Pi 默认文件与命令工具，请只选择你信任的工作目录。
+5. 在“工具权限”中选择“工作区可写”或“只读”。
+6. 可在“项目对话”中新建、切换或命名对话。
+7. 选择模型后即可聊天；命令、项目外写入和未知扩展工具会在执行前请求一次性许可。
 
 ## 配置复用
 
@@ -56,7 +107,31 @@ npm start
 - `~/.pi/agent/settings.json`
 - 当前工作目录中的 Pi 资源、skills、extensions 和上下文文件
 
-浏览器只在 `localStorage` 中保存最后一次工作目录，键名为 `piweb.lastCwd`。消息和 Key 均不会写入浏览器存储。
+浏览器只在 `localStorage` 中保存最后一次工作目录和安全模式偏好，键名分别为 `piweb.lastCwd` 与 `piweb.toolMode`。消息、会话索引、审批和 Key 均不会写入浏览器存储；消息真相位于项目 `.piweb/sessions`。
+
+Pi 会话格式与 SDK 用法可参考官方 [SDK 文档](https://pi.dev/docs/latest/sdk) 和 [Session format](https://pi.dev/docs/latest/session-format)。本项目运行时行为以 `package.json` 锁定版本的实际类型与源码为准。
+
+## 当前边界
+
+- 刷新、断线或服务重启后会恢复当前项目最近一次对话；断线仍会停止正在运行的 prompt。
+- 第一版只有新建、最近恢复、切换和重命名；尚无分页、归档/删除、分支、导入、附件或多设备同步。
+- 浏览器首版最多投影最近 200 个对话索引，并限制单次历史快照大小；完整 JSONL 不会因 UI 截断而删除。
+- 项目索引当前仍会扫描该项目的全部 JSONL；超长生命周期项目的增量 catalog 与分页留到下一阶段一起设计。
+- 同一服务进程内会独占一个 conversation writer；尚无跨进程文件锁，不要让两个 Pi Web 服务同时写同一个对话。
+- Pi JSONL 使用同步 append 但不执行 `fsync`；它保证正常进程生命周期内可恢复，不承诺断电级 durability。
+- `.piweb` 可能包含敏感对话内容。是否提交版本控制由项目决定；不希望跟踪时请将 `.piweb/` 加入仓库忽略规则。
+- 工具审批不是 sandbox：可信项目扩展仍可绕开 LLM 工具入口直接访问文件或启动进程。
+- 工作区路径判断会解析已有符号链接，但本机文件系统仍存在检查与执行之间的竞态；不可信或无人值守任务需要容器/VM 等 OS 隔离。
+- 为避免等待后续审批时积累已授权的并行工具，启用工作台 gate 的 session 第一版固定为顺序工具执行。
+- 项目扩展的自定义 `streamSimple` 和 OAuth provider 暂不启用；Pi SDK 将它们注册到进程全局，需等 worker/进程隔离后再安全开放。
+- 项目扩展仍在服务进程内执行；第一版只适合可信扩展，阻塞式扩展 hook 也会阻塞对应 session。完整故障隔离需要后续 worker/子进程 runtime。
+- 当前安全模型只适用于可信本机用户和可信工作目录。
+
+这些是后续版本要显式设计的能力，不应通过绕过现有生命周期或协议边界临时拼接。
+
+## 项目导航
+
+未来修改先读 [AGENTS.md](AGENTS.md) 和 [`.knowledge/INDEX.md`](.knowledge/INDEX.md)。核心知识页分别描述线协议、服务端运行时与客户端状态投影。
 
 ## 验证
 
@@ -70,4 +145,4 @@ npm run build
 
 ## 安全边界
 
-这是本机工具，不适合通过反向代理、局域网或公网暴露。服务端会拒绝非 localhost 来源的 WebSocket 连接，但 Pi Agent 本身拥有文件修改及命令执行能力。
+这是本机工具，不适合通过反向代理、局域网或公网暴露。服务端会拒绝非 localhost 来源的 WebSocket 连接。工具策略降低误操作风险，但 Pi Agent 和可信扩展仍以启动服务的用户权限运行。

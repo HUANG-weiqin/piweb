@@ -12,6 +12,7 @@ afterEach(() => {
 describe("Message", () => {
   const toolsMessage: ChatMessage = {
     id: "1",
+    runId: "run-1",
     role: "assistant",
     text: "",
     thinking: "",
@@ -28,6 +29,7 @@ describe("Message", () => {
 
   const manyToolsMessage: ChatMessage = {
     id: "2",
+    runId: "run-2",
     role: "assistant",
     text: "",
     thinking: "",
@@ -79,6 +81,7 @@ describe("Message", () => {
   it("shows tools before assistant markdown text", () => {
     const message: ChatMessage = {
       id: "3",
+      runId: "run-3",
       role: "assistant",
       text: "最终回复：已完成分析。",
       thinking: "",

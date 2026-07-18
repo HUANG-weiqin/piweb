@@ -1,6 +1,13 @@
 import { useEffect, useState, type FormEvent } from "react";
 
-export function Setup({ initialCwd, online, onStart }: { initialCwd: string; online: boolean; onStart(cwd: string): void }) {
+interface SetupProps {
+  initialCwd: string;
+  online: boolean;
+  unavailableLabel?: string;
+  onStart(cwd: string): void;
+}
+
+export function Setup({ initialCwd, online, unavailableLabel, onStart }: SetupProps) {
   const [cwd, setCwd] = useState(initialCwd);
   useEffect(() => {
     if (initialCwd) setCwd(initialCwd);
@@ -13,10 +20,10 @@ export function Setup({ initialCwd, online, onStart }: { initialCwd: string; onl
     <form className="setup-card" onSubmit={submit}>
       <div className="logo">π</div>
       <h1>Pi Web</h1>
-      <p>选择 Agent 的工作目录。对话仅保存在内存中。</p>
+      <p>选择 Agent 的工作目录。对话会保存在项目的 .piweb 目录中。</p>
       <label htmlFor="cwd">工作目录</label>
       <input id="cwd" value={cwd} onChange={(e) => setCwd(e.target.value)} placeholder="E:\\projects\\app" autoFocus spellCheck={false} />
-      <button disabled={!online || !cwd.trim()}>{online ? "开始" : "正在连接本地服务…"}</button>
+      <button disabled={!online || !cwd.trim()}>{online ? "开始" : unavailableLabel ?? "正在连接本地服务…"}</button>
     </form>
   </main>;
 }

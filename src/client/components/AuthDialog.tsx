@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import type { AuthRequest } from "../../shared/protocol";
+import { useModalFocus } from "../lib/use-modal-focus";
 
 export function AuthDialog({ requestId, request, progress, onRespond, onCancel }: {
   requestId?: string;
@@ -10,6 +11,12 @@ export function AuthDialog({ requestId, request, progress, onRespond, onCancel }
 }) {
   const [value, setValue] = useState("");
   useEffect(() => setValue(""), [requestId]);
+  const visible = Boolean(request || progress);
+  const focusRef = useModalFocus<HTMLElement>(
+    visible,
+    requestId ?? `progress:${progress ?? ""}`,
+    onCancel,
+  );
   if (!request && !progress) return null;
 
   const submit = (event: FormEvent) => {
@@ -18,7 +25,7 @@ export function AuthDialog({ requestId, request, progress, onRespond, onCancel }
   };
 
   return <div className="modal-backdrop" role="presentation">
-    <section className="modal" role="dialog" aria-modal="true" aria-label="订阅登录">
+    <section ref={focusRef} className="modal" role="dialog" aria-modal="true" aria-label="订阅登录" tabIndex={-1}>
       <h2>订阅登录</h2>
       {progress && <p className="progress">{progress}</p>}
       {request?.kind === "auth" && <>
