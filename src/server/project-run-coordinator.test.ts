@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { ToolMode } from "../shared/protocol.js";
 import { ProjectRunCoordinator } from "./project-run-coordinator.js";
 
 function deferred(): { promise: Promise<void>; resolve(): void } {
@@ -43,7 +44,7 @@ describe("ProjectRunCoordinator", () => {
     const calls: string[] = [];
     const project = {
       cwd,
-      setToolMode: async (mode: "read_only" | "workspace_write") => {
+      setToolMode: async (mode: ToolMode) => {
         calls.push(mode);
         if (mode === "read_only") {
           readOnlyStarted.resolve();
@@ -53,13 +54,52 @@ describe("ProjectRunCoordinator", () => {
     };
 
     const readOnly = coordinator.transitionToolMode(project, "read_only");
-    const writable = coordinator.transitionToolMode(project, "workspace_write");
+    const fullAccess = coordinator.transitionToolMode(project, "full_access");
     await readOnlyStarted.promise;
 
     expect(calls).toEqual(["read_only"]);
     releaseReadOnly.resolve();
-    await Promise.all([readOnly, writable]);
+    await Promise.all([readOnly, fullAccess]);
 
-    expect(calls).toEqual(["read_only", "workspace_write"]);
+    expect(calls).toEqual(["read_only", "full_access"]);
+  });
+
+  it("installs a read-only barrier even behind a queued full-access change", async () => {
+    const coordinator = new ProjectRunCoordinator();
+    const cwd = "E:\\work";
+    const fullAccessStarted = deferred();
+    const releaseFullAccess = deferred();
+    const readOnlyStarted = deferred();
+    const releaseReadOnly = deferred();
+    const project = {
+      cwd,
+      toolMode: "read_only" as const,
+      setToolMode: async (mode: ToolMode) => {
+        if (mode === "full_access") {
+          fullAccessStarted.resolve();
+          await releaseFullAccess.promise;
+        } else {
+          readOnlyStarted.resolve();
+          await releaseReadOnly.promise;
+        }
+      },
+    };
+
+    const fullAccess = coordinator.transitionToolMode(project, "full_access");
+    await fullAccessStarted.promise;
+    const readOnly = coordinator.transitionToolMode(project, "read_only");
+
+    expect(coordinator.isRestrictionPending(cwd)).toBe(true);
+    expect(coordinator.registerRun(cwd, () => undefined)).toBeUndefined();
+
+    releaseFullAccess.resolve();
+    await readOnlyStarted.promise;
+    expect(coordinator.isRestrictionPending(cwd)).toBe(true);
+    expect(coordinator.registerRun(cwd, () => undefined)).toBeUndefined();
+
+    releaseReadOnly.resolve();
+    await Promise.all([fullAccess, readOnly]);
+    expect(coordinator.isRestrictionPending(cwd)).toBe(false);
+    coordinator.registerRun(cwd, () => undefined)?.release();
   });
 });

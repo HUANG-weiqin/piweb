@@ -1,6 +1,6 @@
 # 项目与持久会话
 
-`updated: 2026-07-18`
+`updated: 2026-07-19`
 
 ## 这个模块是干什么的
 
@@ -38,12 +38,12 @@ runId           ephemeral，一次 prompt
   "version": 1,
   "projectId": "<uuid>",
   "createdAt": "<canonical ISO timestamp>",
-  "toolMode": "read_only | workspace_write",
+  "toolMode": "read_only | full_access",
   "lastConversationId": "<optional Pi session id>"
 }
 ```
 
-未知字段、非法版本和非法值都 fail closed，不会自动覆盖坏清单。清单变更经过 store 内串行队列，并用同目录临时文件加 rename 替换。
+未知字段、非法版本和非法值都 fail closed，不会自动覆盖坏清单。旧版 `workspace_write` 是唯一兼容迁移：打开时映射为 `full_access` 并立即原子重写，运行时 API 和线协议不再接受该值。清单变更经过 store 内串行队列，并用同目录临时文件加 rename 替换。
 
 ## 打开循环
 
@@ -65,6 +65,14 @@ initialize(cwd, target)
 
 显式 `open` 只接受浏览器从服务端索引获得的 conversationId。服务端重新列举受控目录并解析文件路径，不能接受客户端文件路径。Pi 的 `open(nonexistent)` 会创建 manager 而不是可靠报错，所以必须先证明目标存在。
 
+删除同样只接受 conversationId，并遵守 Pi 的活动会话边界：
+
+- 当前 active conversation 不可直接删除；用户先新建或切换，确保旧 AgentSession 已 dispose 并释放 writer lease。
+- 非当前目标先 fail-fast 取得 `canonical cwd + conversationId` 独占 lease；另一窗口仍在使用时明确失败，不等待后突然删除。
+- 删除与索引刷新共用同一串行队列。服务端完整校验 sessions 目录、由 ID 解析内部常规 JSONL、复验 header identity，再执行精确单文件 `unlink`；不级联 parent/child 会话。
+- `lastConversationId` 只在仍等于目标时清除，避免覆盖另一连接刚提交的最近对话。删除成功后更新派生缓存并通过项目订阅发布新 snapshot。
+- 删除不存在的干净目标是幂等成功；目录损坏、链接、身份错配或文件系统拒绝删除仍 fail closed。
+
 Project store handle 按 canonical cwd 引用计数；最后一个活动 bundle 或初始化释放 handle 后，registry 会逐出内存 store。相同路径随后代表一个新项目时必须重新读取磁盘身份，不能让服务进程缓存反向覆盖项目生命周期。
 
 ## Pi SessionManager 边界
@@ -85,12 +93,12 @@ Project store handle 按 canonical cwd 引用计数；最后一个活动 bundle 
 `toolMode` 属于项目 manifest，不属于浏览器或单次 AgentSession：
 
 - `initialize(toolMode=read_only)` 是安全 ceiling，可收紧持久模式。
-- `initialize(toolMode=workspace_write)` 不能扩大已持久的 read_only。
+- `initialize(toolMode=full_access)` 不能扩大已持久的 read_only。
 - 权限扩大只能通过当前 session 的 `set_tool_mode`，成功原子落盘后再由 state 确认。
 - run 在入队/启动时捕获模式；项目后来收紧会立即生效，后来放宽不会扩大已经排队的 run。
-- `ProjectRunCoordinator` 在 read_only 转换开始时同步阻止新旧可写许可、取消同项目所有旧 run，并等这些 run 释放项目 run lease 后才落盘和确认只读。UI 收到 read_only 时，旧授权已经不能继续悬空。
+- `ProjectRunCoordinator` 在 read_only 转换开始时同步阻止新 run、取消同项目所有旧 run，并等这些 run 释放项目 run lease 后才落盘和确认只读。UI 收到 read_only 时，旧 full-access run 已经结算。
 
-`.piweb` 是宿主保留目录。Agent 内置 `edit/write` 即使在 workspace_write 中也硬拒绝直接路径或 symlink alias；宿主保存 transcript 不受 Agent 只读模式影响。
+`.piweb` 是宿主持久目录。Agent 在 read_only 中不能写入，但宿主保存 transcript 不受只读模式影响；full_access 不额外保护该目录。
 
 ## 浏览器投影
 
@@ -113,7 +121,7 @@ Project store handle 按 canonical cwd 引用计数；最后一个活动 bundle 
 
 ## 当前边界
 
-- 没有分页、archive/delete、fork/import、附件和跨设备同步。
+- 没有分页、archive、批量删除、fork/import、附件和跨设备同步。
 - 每次索引刷新会由宿主完整验证该项目全部 JSONL，并由 Pi `listAll()` 再扫描一次；这是第一版用完整性换简单性的选择。长期项目需要在引入分页时一并设计增量 catalog 和等价的完整性证明。
 - 没有跨进程 writer lock 和断电级 durability。
 - Pi JSONL header eager materialization 依赖锁定 SDK 的 v3 session format；升级 SDK 时必须用测试验证 header/open/list 行为。

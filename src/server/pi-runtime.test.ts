@@ -5,6 +5,7 @@ import {
   AuthStorage,
   createAgentSession,
   createAgentSessionServices,
+  createReadTool,
   DefaultResourceLoader,
   ModelRegistry,
   SessionManager,
@@ -84,6 +85,67 @@ function testRuntime(
 }
 
 describe("PiRuntime session ownership", () => {
+  it("activates Pi's structured read-only tools by default", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-read-tools-"));
+    const runtime = testRuntime(() => []);
+
+    const created = await runtime.createSession(cwd);
+
+    expect(created.session.getActiveToolNames()).toEqual(expect.arrayContaining([
+      "read",
+      "grep",
+      "find",
+      "ls",
+      "bash",
+      "edit",
+      "write",
+    ]));
+    await created.dispose();
+  });
+
+  it("reports an extension that shadows read as a non-builtin tool", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-shadowed-read-"));
+    const runtime = testRuntime(() => [
+      (pi) => {
+        const originalRead = createReadTool(cwd);
+        pi.registerTool({
+          name: "read",
+          label: "shadowed read",
+          description: originalRead.description,
+          parameters: originalRead.parameters,
+          execute: (toolCallId, params, signal, onUpdate) => (
+            originalRead.execute(toolCallId, params, signal, onUpdate)
+          ),
+        });
+      },
+    ]);
+    let toolSource = "";
+    const created = await runtime.createSession(cwd, {
+      toolCallGate: (input) => {
+        toolSource = input.toolSource;
+        return { block: true, reason: "source captured" };
+      },
+    });
+    await created.activateExtensions();
+    created.activateExtensionErrors(() => undefined);
+    const hook = created.session.agent.beforeToolCall;
+    if (!hook) throw new Error("tool hook was not installed");
+    type HookContext = Parameters<typeof hook>[0];
+
+    await hook({
+      toolCall: {
+        type: "toolCall",
+        id: "tool-shadowed-read",
+        name: "read",
+        arguments: { path: "README.md" },
+      },
+      args: { path: "README.md" },
+    } as unknown as HookContext, new AbortController().signal);
+
+    expect(toolSource).not.toBe("builtin");
+    await created.dispose();
+  });
+
   it("defaults to an in-memory manager and passes an explicit manager through", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-manager-"));
     const managers: SessionManager[] = [];
@@ -838,7 +900,10 @@ describe("PiRuntime session ownership", () => {
       },
       args: writeArgs,
     } as unknown as HookContext);
-    expect(missingSignal).toEqual({ block: true, reason: "Tool approval is unavailable" });
+    expect(missingSignal).toEqual({
+      block: true,
+      reason: "Tool execution guard is unavailable",
+    });
     expect(gated).toHaveLength(1);
     await created.dispose();
   });
@@ -884,7 +949,7 @@ describe("PiRuntime session ownership", () => {
     });
     await expect(within(hook(context), 200)).resolves.toEqual({
       block: true,
-      reason: "Tool approval is unavailable",
+      reason: "Tool execution guard is unavailable",
     });
     expect(extensionCalls).toBe(0);
     expect(gateCalls).toBe(0);

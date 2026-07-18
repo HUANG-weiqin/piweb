@@ -4,7 +4,6 @@ import { parseClientCommand, parseServerEvent, PROTOCOL_VERSION } from "./protoc
 const sessionId = "88f3af1d-d21d-40a0-b3c3-0f27593f274a";
 const runId = "6ff77ba8-6c29-45a7-9851-e9054d706df2";
 const authFlowId = "597eb8f8-2aa8-444a-ac04-681a3c483fac";
-const approvalId = "86de79b8-0a40-4644-a0c2-49e2aa3e1baa";
 const extensionRequestId = "a81ab25f-041e-4559-b890-04c0eeb476e4";
 const commandId = "b55e4225-e07f-4874-b760-015f7982d999";
 const conversationId = "0198f775-88f3-7af1-9c6a-3176f775912a";
@@ -12,26 +11,24 @@ const projectId = "f25ee8d8-34f0-4c30-a045-b2a69f2e28bd";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(5);
+    expect(PROTOCOL_VERSION).toBe(10);
   });
 
   it("accepts supported commands", () => {
     expect(parseClientCommand({
+      type: "browse_directory",
+      commandId,
+      path: "E:\\work",
+    }).type).toBe("browse_directory");
+    expect(parseClientCommand({
       type: "initialize",
       sessionId,
       cwd: "E:\\work",
-      toolMode: "read_only",
+      toolMode: "full_access",
       conversation: { kind: "open", conversationId },
-    })).toMatchObject({ type: "initialize", toolMode: "read_only" });
+    })).toMatchObject({ type: "initialize", toolMode: "full_access" });
     expect(parseClientCommand({ type: "prompt", sessionId, runId, text: "hello" }).type).toBe("prompt");
     expect(parseClientCommand({ type: "abort", sessionId, runId }).type).toBe("abort");
-    expect(parseClientCommand({
-      type: "tool_approval_response",
-      sessionId,
-      runId,
-      approvalId,
-      decision: "allow",
-    }).type).toBe("tool_approval_response");
     expect(parseClientCommand({
       type: "extension_ui_response",
       sessionId,
@@ -49,7 +46,7 @@ describe("parseClientCommand", () => {
     expect(parseClientCommand({
       type: "set_tool_mode",
       sessionId,
-      mode: "read_only",
+      mode: "full_access",
     }).type).toBe("set_tool_mode");
     expect(parseClientCommand({
       type: "rename_conversation",
@@ -57,6 +54,12 @@ describe("parseClientCommand", () => {
       conversationId,
       name: "Architecture",
     }).type).toBe("rename_conversation");
+    expect(parseClientCommand({
+      type: "delete_conversation",
+      commandId,
+      sessionId,
+      conversationId,
+    }).type).toBe("delete_conversation");
     expect(parseClientCommand({
       type: "set_api_key",
       commandId,
@@ -74,13 +77,6 @@ describe("parseClientCommand", () => {
     expect(() => parseClientCommand({ type: "prompt", sessionId, runId, text: "  " })).toThrow();
     expect(() => parseClientCommand({ type: "prompt", text: "hello" })).toThrow();
     expect(() => parseClientCommand({ type: "abort", sessionId, runId: "not-a-uuid" })).toThrow();
-    expect(() => parseClientCommand({
-      type: "tool_approval_response",
-      sessionId,
-      runId,
-      approvalId: "not-a-uuid",
-      decision: "allow",
-    })).toThrow();
     expect(() => parseClientCommand({
       type: "extension_ui_response",
       sessionId,
@@ -119,9 +115,29 @@ describe("parseClientCommand", () => {
       conversationId,
       name: " ",
     })).toThrow();
+    expect(() => parseClientCommand({
+      type: "delete_conversation",
+      commandId: "not-a-uuid",
+      sessionId,
+      conversationId,
+    })).toThrow();
     expect(() => parseClientCommand({ type: "close_session" })).toThrow();
     expect(() => parseClientCommand({ type: "login_oauth", provider: "openai" })).toThrow();
     expect(() => parseClientCommand({ type: "invented" })).toThrow();
+  });
+
+  it("rejects the removed workspace mode", () => {
+    expect(() => parseClientCommand({
+      type: "initialize",
+      sessionId,
+      cwd: "E:\\work",
+      toolMode: "workspace_write",
+    })).toThrow();
+    expect(() => parseClientCommand({
+      type: "set_tool_mode",
+      sessionId,
+      mode: "workspace_write",
+    })).toThrow();
   });
 
   it("rejects oversized socket messages", () => {
@@ -140,6 +156,25 @@ describe("parseClientCommand", () => {
       runId,
       event: { type: "invented" },
     })).toThrow();
+    expect(parseServerEvent({
+      type: "directory_listing",
+      commandId,
+      path: "E:\\work",
+      parentPath: "E:\\",
+      directories: [{
+        name: "project",
+        path: "E:\\work\\project",
+      }],
+      truncated: false,
+    }).type).toBe("directory_listing");
+    expect(() => parseServerEvent({
+      type: "directory_listing",
+      commandId: "not-a-uuid",
+      path: "E:\\work",
+      parentPath: null,
+      directories: [],
+      truncated: false,
+    })).toThrow();
   });
 
   it("validates run correlation on state, events, outcomes, and errors", () => {
@@ -154,15 +189,9 @@ describe("parseClientCommand", () => {
         activeRun: {
           id: runId,
           phase: "running",
-          pendingApprovals: [{
-            approvalId,
-            toolCallId: "tool-1",
-            toolName: "bash",
-            args: { command: "npm test" },
-          }],
         },
         thinkingLevel: "off",
-        toolMode: "workspace_write",
+        toolMode: "full_access",
         availableThinkingLevels: ["off"],
         providers: [],
       },
@@ -244,6 +273,12 @@ describe("parseClientCommand", () => {
       sessionId,
     }).type).toBe("command_complete");
     expect(parseServerEvent({
+      type: "command_complete",
+      operation: "delete_conversation",
+      commandId,
+      sessionId,
+    }).type).toBe("command_complete");
+    expect(parseServerEvent({
       type: "error",
       message: "failed",
       scope: "command",
@@ -301,7 +336,21 @@ describe("parseClientCommand", () => {
         conversationId,
         cwd: "E:\\work",
         busy: true,
-        activeRun: { id: runId, phase: "invented", pendingApprovals: [] },
+        activeRun: { id: runId, phase: "invented" },
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        providers: [],
+      },
+    })).toThrow();
+    expect(() => parseServerEvent({
+      type: "state",
+      state: {
+        sessionId,
+        projectId,
+        conversationId,
+        cwd: "E:\\work",
+        busy: false,
         thinkingLevel: "off",
         toolMode: "workspace_write",
         availableThinkingLevels: ["off"],

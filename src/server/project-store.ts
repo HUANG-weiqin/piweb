@@ -102,7 +102,8 @@ function isNodeError(error: unknown, code: string): boolean {
 }
 
 function isToolMode(value: unknown): value is ToolMode {
-  return value === "read_only" || value === "workspace_write";
+  return value === "read_only"
+    || value === "full_access";
 }
 
 function assertToolMode(value: unknown): asserts value is ToolMode {
@@ -129,7 +130,12 @@ function assertSessionId(value: unknown, field: string): asserts value is string
   }
 }
 
-function parseManifest(raw: string, manifestPath: string): ProjectManifestV1 {
+interface ParsedManifest {
+  manifest: ProjectManifestV1;
+  migratedLegacyToolMode: boolean;
+}
+
+function parseManifest(raw: string, manifestPath: string): ParsedManifest {
   let value: unknown;
   try {
     value = JSON.parse(raw);
@@ -165,19 +171,24 @@ function parseManifest(raw: string, manifestPath: string): ProjectManifestV1 {
     if (!isCanonicalIsoDate(record.createdAt)) {
       throw new Error("createdAt must be a canonical ISO timestamp");
     }
-    assertToolMode(record.toolMode);
+    const migratedLegacyToolMode = record.toolMode === "workspace_write";
+    const toolMode = migratedLegacyToolMode ? "full_access" : record.toolMode;
+    assertToolMode(toolMode);
     if (record.lastConversationId !== undefined) {
       assertSessionId(record.lastConversationId, "lastConversationId");
     }
 
     return {
-      version: MANIFEST_VERSION,
-      projectId: record.projectId,
-      createdAt: record.createdAt,
-      toolMode: record.toolMode,
-      ...(record.lastConversationId === undefined
-        ? {}
-        : { lastConversationId: record.lastConversationId }),
+      manifest: {
+        version: MANIFEST_VERSION,
+        projectId: record.projectId,
+        createdAt: record.createdAt,
+        toolMode,
+        ...(record.lastConversationId === undefined
+          ? {}
+          : { lastConversationId: record.lastConversationId }),
+      },
+      migratedLegacyToolMode,
     };
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
@@ -308,6 +319,19 @@ function toConversationSummary(
   };
 }
 
+function toConversationSummaries(
+  information: readonly SessionInfo[],
+): ConversationSummary[] {
+  return information
+    .map(toConversationSummary)
+    .sort((first, second) => {
+      const byModified =
+        Date.parse(second.updatedAt) - Date.parse(first.updatedAt);
+      if (byModified !== 0) return byModified;
+      return second.id.localeCompare(first.id);
+    });
+}
+
 export class ProjectStore {
   readonly id: string;
   readonly cwd: string;
@@ -347,7 +371,11 @@ export class ProjectStore {
 
     let manifest: ProjectManifestV1;
     try {
-      manifest = parseManifest(await readFile(manifestPath, "utf8"), manifestPath);
+      const parsed = parseManifest(await readFile(manifestPath, "utf8"), manifestPath);
+      manifest = parsed.manifest;
+      if (parsed.migratedLegacyToolMode) {
+        await writeManifestAtomically(manifestPath, manifest);
+      }
     } catch (error) {
       if (!isNodeError(error, "ENOENT")) throw error;
       await mkdir(sessionDir, { recursive: true });
@@ -451,30 +479,21 @@ export class ProjectStore {
   }
 
   refreshConversations(): Promise<ConversationSummary[]> {
-    const result = this.refreshTail.then(() => this.scanConversations());
-    this.refreshTail = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    return result;
+    return this.enqueueConversationOperation(() => this.scanConversations());
   }
 
   private async scanConversations(): Promise<ConversationSummary[]> {
     const information = await this.listSafeSessionInformation();
-    const conversations = information
-      .map(toConversationSummary)
-      .sort((first, second) => {
-        const byModified =
-          Date.parse(second.updatedAt) - Date.parse(first.updatedAt);
-        if (byModified !== 0) return byModified;
-        return second.id.localeCompare(first.id);
-      });
+    const conversations = toConversationSummaries(information);
+    this.replaceConversations(conversations);
+    return this.listConversations();
+  }
 
+  private replaceConversations(conversations: ConversationSummary[]): void {
     if (!summariesEqual(this.conversations, conversations)) {
       this.conversations = conversations;
       this.emit();
     }
-    return this.listConversations();
   }
 
   async createConversation(conversationId?: string): Promise<SessionManager> {
@@ -541,6 +560,56 @@ export class ProjectStore {
     }
     await this.setLastConversation(conversationId);
     return conversation;
+  }
+
+  deleteConversation(conversationId: string): Promise<void> {
+    assertSessionId(conversationId, "conversationId");
+    return this.enqueueConversationOperation(async () => {
+      const information = await this.listSafeSessionInformation();
+      const match = information.find(({ id }) => id === conversationId);
+      const retained = toConversationSummaries(
+        information.filter(({ id }) => id !== conversationId),
+      );
+
+      let safePath: string | undefined;
+      if (match !== undefined) {
+        safePath = await this.resolveSafeSessionPath(match.path);
+        validatePiSessionFile(
+          await readFile(safePath, "utf8"),
+          safePath,
+          conversationId,
+        );
+      }
+
+      await this.clearLastConversationIf(conversationId);
+      if (safePath !== undefined) await unlink(safePath);
+      this.replaceConversations(retained);
+    });
+  }
+
+  private clearLastConversationIf(conversationId: string): Promise<void> {
+    return this.enqueueWrite(async () => {
+      if (this.manifest.lastConversationId !== conversationId) return;
+      await this.assertStateDirectorySafe();
+      const next: ProjectManifestV1 = {
+        version: MANIFEST_VERSION,
+        projectId: this.manifest.projectId,
+        createdAt: this.manifest.createdAt,
+        toolMode: this.manifest.toolMode,
+      };
+      await writeManifestAtomically(this.manifestPath, next);
+      this.manifest = next;
+      this.emit();
+    });
+  }
+
+  private enqueueConversationOperation<T>(task: () => Promise<T>): Promise<T> {
+    const result = this.refreshTail.then(task);
+    this.refreshTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   private enqueueWrite(task: () => Promise<void>): Promise<void> {

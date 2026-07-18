@@ -1,17 +1,24 @@
-import { useEffect, useState, type FormEvent } from "react";
+import type { FormEvent } from "react";
 
 interface SetupProps {
-  initialCwd: string;
+  cwd: string;
   online: boolean;
+  pickingDirectory: boolean;
   unavailableLabel?: string;
+  onCwdChange(cwd: string): void;
+  onPickDirectory(): void;
   onStart(cwd: string): void;
 }
 
-export function Setup({ initialCwd, online, unavailableLabel, onStart }: SetupProps) {
-  const [cwd, setCwd] = useState(initialCwd);
-  useEffect(() => {
-    if (initialCwd) setCwd(initialCwd);
-  }, [initialCwd]);
+export function Setup({
+  cwd,
+  online,
+  pickingDirectory,
+  unavailableLabel,
+  onCwdChange,
+  onPickDirectory,
+  onStart,
+}: SetupProps) {
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (cwd.trim()) onStart(cwd.trim());
@@ -30,16 +37,32 @@ export function Setup({ initialCwd, online, unavailableLabel, onStart }: SetupPr
       </p>
       <div className="field">
         <label htmlFor="cwd">项目目录</label>
-        <input
-          id="cwd"
-          value={cwd}
-          onChange={(event) => setCwd(event.target.value)}
-          placeholder="E:\\projects\\app"
-          autoFocus
-          spellCheck={false}
-        />
+        <div className="setup-directory-row">
+          <input
+            id="cwd"
+            value={cwd}
+            onChange={(event) => onCwdChange(event.target.value)}
+            placeholder="E:\\projects\\app"
+            autoFocus
+            spellCheck={false}
+          />
+          <button
+            type="button"
+            className="ghost setup-directory-button"
+            disabled={!online || pickingDirectory}
+            aria-busy={pickingDirectory}
+            aria-haspopup="dialog"
+            aria-expanded={pickingDirectory}
+            onClick={onPickDirectory}
+          >
+            {pickingDirectory ? "正在选择…" : "选择文件夹"}
+          </button>
+        </div>
+        <span className="setup-directory-hint">
+          浏览文件夹，或直接粘贴绝对路径
+        </span>
       </div>
-      <button disabled={!online || !cwd.trim()}>
+      <button disabled={!online || pickingDirectory || !cwd.trim()}>
         {online ? "进入项目" : unavailableLabel ?? "正在连接本地服务…"}
       </button>
       <p className="setup-footnote">

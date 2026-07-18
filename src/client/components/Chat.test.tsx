@@ -6,10 +6,6 @@ import type { ChatState } from "../chat/reducer";
 import { Chat } from "./Chat";
 
 const emptyChat: ChatState = { messages: [], sessionTokens: 0 };
-const originalScrollIntoView = Object.getOwnPropertyDescriptor(
-  HTMLElement.prototype,
-  "scrollIntoView",
-);
 
 function view(chat: ChatState, draft = "") {
   return <Chat
@@ -37,34 +33,18 @@ function view(chat: ChatState, draft = "") {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
-  if (originalScrollIntoView) {
-    Object.defineProperty(
-      HTMLElement.prototype,
-      "scrollIntoView",
-      originalScrollIntoView,
-    );
-  } else {
-    Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
-  }
 });
 
 describe("Chat", () => {
-  it("does not drag the reader to the bottom while new output streams", () => {
-    const scrollIntoView = vi.fn();
-    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
-      configurable: true,
-      value: scrollIntoView,
-    });
+  it("scrolls the transcript itself to the actual bottom while following output", () => {
     const rendered = render(view(emptyChat));
     const transcript = document.querySelector<HTMLElement>(".transcript");
     if (!transcript) throw new Error("transcript not rendered");
+    const scrollTo = vi.fn();
     Object.defineProperties(transcript, {
       scrollHeight: { configurable: true, value: 1_000 },
-      clientHeight: { configurable: true, value: 200 },
-      scrollTop: { configurable: true, writable: true, value: 200 },
+      scrollTo: { configurable: true, value: scrollTo },
     });
-    fireEvent.scroll(transcript);
-    scrollIntoView.mockClear();
 
     rendered.rerender(view({
       messages: [{
@@ -78,11 +58,40 @@ describe("Chat", () => {
       sessionTokens: 0,
     }));
 
-    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(scrollTo).toHaveBeenCalledWith({ top: 1_000 });
+    expect(screen.queryByRole("button", { name: "↓ 回到最新消息" })).not.toBeInTheDocument();
+  });
+
+  it("does not drag the reader to the bottom while new output streams", () => {
+    const rendered = render(view(emptyChat));
+    const transcript = document.querySelector<HTMLElement>(".transcript");
+    if (!transcript) throw new Error("transcript not rendered");
+    const scrollTo = vi.fn();
+    Object.defineProperties(transcript, {
+      scrollHeight: { configurable: true, value: 1_000 },
+      clientHeight: { configurable: true, value: 200 },
+      scrollTop: { configurable: true, writable: true, value: 200 },
+      scrollTo: { configurable: true, value: scrollTo },
+    });
+    fireEvent.scroll(transcript);
+
+    rendered.rerender(view({
+      messages: [{
+        id: "assistant-1",
+        runId: "run-1",
+        role: "assistant",
+        text: "new output",
+        thinking: "",
+        tools: [],
+      }],
+      sessionTokens: 0,
+    }));
+
+    expect(scrollTo).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "↓ 回到最新消息" }));
-    expect(scrollIntoView).toHaveBeenCalledWith({
+    expect(scrollTo).toHaveBeenCalledWith({
       behavior: "smooth",
-      block: "end",
+      top: 1_000,
     });
   });
 

@@ -1,6 +1,6 @@
 # Pi Web Knowledge Index
 
-`updated: 2026-07-18`
+`updated: 2026-07-19`
 
 知识库只记录长期稳定的架构事实、决策和坑点，不记录某次任务进度。
 
@@ -13,7 +13,7 @@
 | [kb-server-runtime.md](kb-server-runtime.md) | 修改 Pi SDK、认证、模型缓存、会话或并发控制 |
 | [kb-project-sessions.md](kb-project-sessions.md) | 修改 `.piweb`、项目身份、持久对话、恢复、索引或租约 |
 | [kb-client-state.md](kb-client-state.md) | 修改 React App、聊天 reducer、重连和 UI 状态 |
-| [kb-tool-policy.md](kb-tool-policy.md) | 修改只读模式、工作区写入边界、工具审批或 SDK gate |
+| [kb-tool-policy.md](kb-tool-policy.md) | 修改只读/全部授权模式、工具来源判断或 SDK gate |
 | [_templet.md](_templet.md) | 新知识页模板 |
 
 ## 模块图

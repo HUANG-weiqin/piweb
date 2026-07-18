@@ -88,7 +88,7 @@ export function ExtensionDialog({
 
       {request.kind === "confirm" && <>
         <p id={descriptionId} className="extension-message">{request.message}</p>
-        <div className="approval-actions">
+        <div className="extension-actions">
           <button
             className="ghost"
             disabled={!online || submitted}

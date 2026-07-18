@@ -303,6 +303,14 @@ export class PiRuntime implements PiRuntimeLike {
         });
       }
       createdSession = created.session;
+      createdSession.setActiveToolsByName([
+        ...new Set([
+          ...createdSession.getActiveToolNames(),
+          "grep",
+          "find",
+          "ls",
+        ]),
+      ]);
       owner.bindSession(createdSession);
       if (options.toolCallGate) {
         this.installToolCallGate(createdSession, options.toolCallGate);
@@ -434,7 +442,7 @@ export class PiRuntime implements PiRuntimeLike {
     session.agent.toolExecution = "sequential";
     session.agent.beforeToolCall = async (context, signal) => {
       if (!signal) {
-        return { block: true, reason: "Tool approval is unavailable" };
+        return { block: true, reason: "Tool execution guard is unavailable" };
       }
       if (signal.aborted) {
         return { block: true, reason: "Run cancelled before tool execution" };

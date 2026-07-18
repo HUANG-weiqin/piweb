@@ -168,7 +168,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       id: String(event.toolCallId),
       name: String(event.toolName),
       args: event.args,
-      // Pi emits tool_execution_start before validation and host approval.
+      // Pi emits tool_execution_start before host policy validation.
       status: "pending",
     };
     return {

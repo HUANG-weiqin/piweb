@@ -1387,80 +1387,51 @@ describe("PiConnection lifecycle", () => {
     expect(loginCalls).toBe(0);
   });
 
-  it("waits for an exactly scoped approval before executing a risky tool", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-tool-approval-"));
+  it("runs commands directly in full access and blocks them in read-only mode", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-tool-mode-command-"));
     const runtime = new FakeRuntime();
     const settings = fakeSettings();
     const session = fakeSession(settings);
-    const approvalPublished = deferred();
-    let executions = 0;
+    const decisions: Array<{ block?: boolean; reason?: string } | undefined> = [];
     session.prompt = async () => {
-      const decision = await session.toolCallGate?.({
-        toolCallId: "tool-bash",
+      decisions.push(await session.toolCallGate?.({
+        toolCallId: `tool-bash-${decisions.length}`,
         toolName: "bash",
         toolSource: "builtin",
         args: { command: "npm test" },
         signal: new AbortController().signal,
-      });
-      if (!decision?.block) executions++;
+      }));
     };
     runtime.create = async () => {
       runtime.created.push(session);
       return { session, settings };
     };
     const events: ServerEvent[] = [];
-    const connection = new PiConnection((event) => {
-      events.push(event);
-      if (
-        event.type === "state"
-        && event.state.activeRun?.pendingApprovals.length
-      ) {
-        approvalPublished.resolve();
-      }
-    }, runtime);
+    const connection = new PiConnection((event) => events.push(event), runtime);
     await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
 
-    const prompt = connection.handle({
+    await connection.handle({
       type: "prompt",
       sessionId: SESSION_A,
       runId: RUN_A,
       text: "run a command",
     });
-    await approvalPublished.promise;
-    const approval = latestState(events).activeRun?.pendingApprovals[0];
-    if (!approval) throw new Error("approval not published");
-    expect(executions).toBe(0);
-
     await connection.handle({
-      type: "tool_approval_response",
-      sessionId: SESSION_B,
-      runId: RUN_A,
-      approvalId: approval.approvalId,
-      decision: "allow",
+      type: "set_tool_mode",
+      sessionId: SESSION_A,
+      mode: "read_only",
     });
     await connection.handle({
-      type: "tool_approval_response",
+      type: "prompt",
       sessionId: SESSION_A,
       runId: RUN_B,
-      approvalId: approval.approvalId,
-      decision: "allow",
+      text: "try the command again",
     });
-    expect(latestState(events).activeRun?.pendingApprovals).toHaveLength(1);
-    expect(executions).toBe(0);
 
-    await connection.handle({
-      type: "tool_approval_response",
-      sessionId: SESSION_A,
-      runId: RUN_A,
-      approvalId: approval.approvalId,
-      decision: "allow",
-    });
-    await prompt;
-
-    expect(executions).toBe(1);
-    expect(latestState(events)).toMatchObject({
-      busy: false,
-      activeRun: undefined,
+    expect(decisions[0]).toBeUndefined();
+    expect(decisions[1]).toMatchObject({
+      block: true,
+      reason: expect.stringContaining("Pi 原生"),
     });
   });
 
@@ -1525,77 +1496,13 @@ describe("PiConnection lifecycle", () => {
     });
   });
 
-  it("blocks execution when the original arguments change while approval is pending", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-tool-approval-mutation-"));
+  it("does not block full access when arguments are too large for the wire preview", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-tool-preview-oversized-"));
     const runtime = new FakeRuntime();
     const settings = fakeSettings();
     const session = fakeSession(settings);
-    const args = { command: "npm test" };
-    const approvalPublished = deferred();
-    let gateDecision: Awaited<ReturnType<ToolCallGate>>;
-    let executions = 0;
-    session.prompt = async () => {
-      gateDecision = await session.toolCallGate?.({
-        toolCallId: "tool-mutated",
-        toolName: "bash",
-        toolSource: "builtin",
-        args,
-        signal: new AbortController().signal,
-      });
-      if (!gateDecision?.block) executions++;
-    };
-    runtime.create = async () => {
-      runtime.created.push(session);
-      return { session, settings };
-    };
-    const events: ServerEvent[] = [];
-    const connection = new PiConnection((event) => {
-      events.push(event);
-      if (
-        event.type === "state"
-        && event.state.activeRun?.pendingApprovals.length
-      ) {
-        approvalPublished.resolve();
-      }
-    }, runtime);
-    await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
-
-    const prompt = connection.handle({
-      type: "prompt",
-      sessionId: SESSION_A,
-      runId: RUN_A,
-      text: "run a mutable command",
-    });
-    await approvalPublished.promise;
-    const approval = latestState(events).activeRun?.pendingApprovals[0];
-    if (!approval) throw new Error("approval not published");
-    expect(approval.args).toEqual({ command: "npm test" });
-
-    args.command = "npm test && remove-dangerous-files";
-    await connection.handle({
-      type: "tool_approval_response",
-      sessionId: SESSION_A,
-      runId: RUN_A,
-      approvalId: approval.approvalId,
-      decision: "allow",
-    });
-    await prompt;
-
-    expect(gateDecision).toMatchObject({
-      block: true,
-      reason: expect.stringMatching(/changed/i),
-    });
-    expect(executions).toBe(0);
-  });
-
-  it("hard-blocks arguments whose dangerous suffix would be hidden past 200 KB", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-tool-approval-oversized-"));
-    const runtime = new FakeRuntime();
-    const settings = fakeSettings();
-    const session = fakeSession(settings);
-    const dangerousSuffix = " && remove-dangerous-files";
     const args = {
-      command: `${"x".repeat(200_001)}${dangerousSuffix}`,
+      command: "x".repeat(200_001),
     };
     let gateDecision: Awaited<ReturnType<ToolCallGate>>;
     let executions = 0;
@@ -1614,22 +1521,7 @@ describe("PiConnection lifecycle", () => {
       return { session, settings };
     };
     const events: ServerEvent[] = [];
-    let approvalArgs: unknown;
-    let connection!: PiConnection;
-    connection = new PiConnection((event) => {
-      events.push(event);
-      if (event.type !== "state") return;
-      const approval = event.state.activeRun?.pendingApprovals[0];
-      if (!approval) return;
-      approvalArgs = approval.args;
-      void connection.handle({
-        type: "tool_approval_response",
-        sessionId: SESSION_A,
-        runId: RUN_A,
-        approvalId: approval.approvalId,
-        decision: "allow",
-      });
-    }, runtime);
+    const connection = new PiConnection((event) => events.push(event), runtime);
     await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
 
     await connection.handle({
@@ -1639,85 +1531,20 @@ describe("PiConnection lifecycle", () => {
       text: "run an oversized command",
     });
 
-    expect(approvalArgs).toBeUndefined();
-    expect(events.some((event) => (
+    expect(events.find((event) => (
       event.type === "session_event"
       && event.event.type === "tool_prepared"
-    ))).toBe(false);
-    expect(gateDecision).toMatchObject({ block: true });
-    expect(executions).toBe(0);
+    ))).toMatchObject({
+      event: {
+        type: "tool_prepared",
+        toolCallId: "tool-oversized",
+      },
+    });
+    expect(gateDecision).toBeUndefined();
+    expect(executions).toBe(1);
   });
 
-  it("cancels a pending approval on abort and ignores a late allow", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-tool-approval-abort-"));
-    const runtime = new FakeRuntime();
-    const settings = fakeSettings();
-    const session = fakeSession(settings);
-    const controller = new AbortController();
-    const approvalPublished = deferred();
-    let executions = 0;
-    session.prompt = async () => {
-      const decision = await session.toolCallGate?.({
-        toolCallId: "tool-write",
-        toolName: "write",
-        toolSource: "builtin",
-        args: { path: join(tmpdir(), "outside.ts"), content: "unsafe" },
-        signal: controller.signal,
-      });
-      if (!decision?.block) executions++;
-    };
-    session.abort = async () => {
-      session.abortCalls++;
-      controller.abort();
-    };
-    runtime.create = async () => {
-      runtime.created.push(session);
-      return { session, settings };
-    };
-    const events: ServerEvent[] = [];
-    const connection = new PiConnection((event) => {
-      events.push(event);
-      if (
-        event.type === "state"
-        && event.state.activeRun?.pendingApprovals.length
-      ) {
-        approvalPublished.resolve();
-      }
-    }, runtime);
-    await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
-
-    const prompt = connection.handle({
-      type: "prompt",
-      sessionId: SESSION_A,
-      runId: RUN_A,
-      text: "write outside",
-    });
-    await approvalPublished.promise;
-    const approval = latestState(events).activeRun?.pendingApprovals[0];
-    if (!approval) throw new Error("approval not published");
-
-    await connection.handle({ type: "abort", sessionId: SESSION_A, runId: RUN_A });
-    await prompt;
-    await connection.handle({
-      type: "tool_approval_response",
-      sessionId: SESSION_A,
-      runId: RUN_A,
-      approvalId: approval.approvalId,
-      decision: "allow",
-    });
-
-    expect(executions).toBe(0);
-    expect(session.abortCalls).toBe(1);
-    expect(events.filter((event) => (
-      event.type === "session_event"
-      && event.runId === RUN_A
-      && event.event.type === "run_finished"
-    ))).toEqual([
-      expect.objectContaining({ event: { type: "run_finished", outcome: "aborted" } }),
-    ]);
-  });
-
-  it("auto-allows project writes and hard-blocks them after switching to read-only", async () => {
+  it("allows writes in full access and blocks them after switching to read-only", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-tool-mode-"));
     const runtime = new FakeRuntime();
     const settings = fakeSettings();
@@ -1739,7 +1566,7 @@ describe("PiConnection lifecycle", () => {
     const events: ServerEvent[] = [];
     const connection = new PiConnection((event) => events.push(event), runtime);
     await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
-    expect(latestState(events).toolMode).toBe("workspace_write");
+    expect(latestState(events).toolMode).toBe("full_access");
 
     await connection.handle({
       type: "prompt",
@@ -1765,10 +1592,6 @@ describe("PiConnection lifecycle", () => {
       reason: expect.stringContaining("只读模式"),
     });
     expect(latestState(events).toolMode).toBe("read_only");
-    expect(events.some((event) => (
-      event.type === "state"
-      && (event.state.activeRun?.pendingApprovals.length ?? 0) > 0
-    ))).toBe(false);
   });
 
   it("cancels project runs before acknowledging read-only on another connection", async () => {
@@ -1777,21 +1600,19 @@ describe("PiConnection lifecycle", () => {
     const projectRuns = new ProjectRunCoordinator();
     const firstRuntime = new FakeRuntime();
     const firstSession = fakeSession();
-    const approvalPublished = deferred();
-    const gateReturned = deferred();
+    const promptStarted = deferred();
+    const abortCalled = deferred();
     const finishPrompt = deferred();
-    let executions = 0;
     firstSession.prompt = async () => {
-      const decision = await firstSession.toolCallGate?.({
-        toolCallId: "tool-shared-bash",
-        toolName: "bash",
-        toolSource: "builtin",
-        args: { command: "npm test" },
-        signal: new AbortController().signal,
-      });
-      if (!decision?.block) executions++;
-      gateReturned.resolve();
+      firstSession.isStreaming = true;
+      promptStarted.resolve();
       await finishPrompt.promise;
+      firstSession.isStreaming = false;
+    };
+    firstSession.abort = async () => {
+      firstSession.abortCalls++;
+      firstSession.isStreaming = false;
+      abortCalled.resolve();
     };
     firstRuntime.create = async () => {
       firstRuntime.created.push(firstSession);
@@ -1799,15 +1620,7 @@ describe("PiConnection lifecycle", () => {
     };
     const firstEvents: ServerEvent[] = [];
     const first = new PiConnection(
-      (event) => {
-        firstEvents.push(event);
-        if (
-          event.type === "state"
-          && event.state.activeRun?.pendingApprovals.length
-        ) {
-          approvalPublished.resolve();
-        }
-      },
+      (event) => firstEvents.push(event),
       firstRuntime,
       undefined,
       projects,
@@ -1840,9 +1653,7 @@ describe("PiConnection lifecycle", () => {
       runId: RUN_A,
       text: "run a command",
     });
-    await approvalPublished.promise;
-    const approval = latestState(firstEvents).activeRun?.pendingApprovals[0];
-    if (!approval) throw new Error("approval not published");
+    await promptStarted.promise;
 
     let modeSettled = false;
     const modeChange = second.handle({
@@ -1852,25 +1663,91 @@ describe("PiConnection lifecycle", () => {
     }).then(() => {
       modeSettled = true;
     });
-    await gateReturned.promise;
+    await abortCalled.promise;
 
     expect(firstSession.abortCalls).toBe(1);
     expect(modeSettled).toBe(false);
-    expect(executions).toBe(0);
+    expect(latestState(firstEvents).toolMode).toBe("full_access");
 
     finishPrompt.resolve();
     await Promise.all([prompt, modeChange]);
-    await first.handle({
-      type: "tool_approval_response",
-      sessionId: SESSION_A,
-      runId: RUN_A,
-      approvalId: approval.approvalId,
-      decision: "allow",
-    });
 
-    expect(executions).toBe(0);
     expect(latestState(firstEvents).toolMode).toBe("read_only");
     expect(latestState(secondEvents).toolMode).toBe("read_only");
+    await Promise.all([first.dispose(), second.dispose()]);
+  });
+
+  it("does not expand the permission snapshot of an already running turn", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-tool-mode-snapshot-"));
+    const projects = new ProjectStoreRegistry();
+    const projectRuns = new ProjectRunCoordinator();
+    const firstRuntime = new FakeRuntime();
+    const firstSession = fakeSession();
+    const promptStarted = deferred();
+    const runTool = deferred();
+    let gateDecision: Awaited<ReturnType<ToolCallGate>>;
+    firstSession.prompt = async () => {
+      promptStarted.resolve();
+      await runTool.promise;
+      gateDecision = await firstSession.toolCallGate?.({
+        toolCallId: "tool-snapshot-bash",
+        toolName: "bash",
+        toolSource: "builtin",
+        args: { command: "npm test" },
+        signal: new AbortController().signal,
+      });
+    };
+    firstRuntime.create = async () => {
+      firstRuntime.created.push(firstSession);
+      return { session: firstSession, settings: firstSession.settingsManager };
+    };
+    const first = new PiConnection(
+      () => undefined,
+      firstRuntime,
+      undefined,
+      projects,
+      projectRuns,
+    );
+    const second = new PiConnection(
+      () => undefined,
+      new FakeRuntime(),
+      undefined,
+      projects,
+      projectRuns,
+    );
+    await first.handle({
+      type: "initialize",
+      sessionId: SESSION_A,
+      cwd,
+      toolMode: "read_only",
+      conversation: { kind: "new" },
+    });
+    await second.handle({
+      type: "initialize",
+      sessionId: SESSION_B,
+      cwd,
+      conversation: { kind: "new" },
+    });
+
+    const prompt = first.handle({
+      type: "prompt",
+      sessionId: SESSION_A,
+      runId: RUN_A,
+      text: "run later",
+    });
+    await promptStarted.promise;
+    await second.handle({
+      type: "set_tool_mode",
+      sessionId: SESSION_B,
+      mode: "full_access",
+    });
+    runTool.resolve();
+    await prompt;
+
+    expect(gateDecision).toMatchObject({
+      block: true,
+      reason: expect.stringContaining("Pi 原生"),
+    });
     await Promise.all([first.dispose(), second.dispose()]);
   });
 
@@ -1948,7 +1825,7 @@ describe("PiConnection lifecycle", () => {
       type: "initialize",
       sessionId: SESSION_B,
       cwd,
-      toolMode: "workspace_write",
+      toolMode: "full_access",
       conversation: { kind: "recent" },
     });
 
@@ -1985,6 +1862,113 @@ describe("PiConnection lifecycle", () => {
       ],
     });
     await second.dispose();
+  });
+
+  it("deletes an inactive conversation but refuses to delete the active writer", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-delete-session-"));
+    const projects = new ProjectStoreRegistry();
+    const events: ServerEvent[] = [];
+    const connection = new PiConnection(
+      (event) => events.push(event),
+      new FakeRuntime(),
+      undefined,
+      projects,
+    );
+
+    await connection.handle({
+      type: "initialize",
+      sessionId: SESSION_A,
+      cwd,
+      conversation: { kind: "new" },
+    });
+    const firstConversationId = latestState(events).conversationId;
+    await connection.handle({
+      type: "initialize",
+      sessionId: SESSION_B,
+      cwd,
+      conversation: { kind: "new" },
+    });
+    const activeConversationId = latestState(events).conversationId;
+
+    await connection.handle({
+      type: "delete_conversation",
+      commandId: COMMAND_A,
+      sessionId: SESSION_B,
+      conversationId: firstConversationId,
+    });
+
+    expect(events).toContainEqual({
+      type: "command_complete",
+      operation: "delete_conversation",
+      commandId: COMMAND_A,
+      sessionId: SESSION_B,
+    });
+    const project = await projects.acquireProject(cwd, "full_access");
+    expect(project.store.listConversations().map(({ id }) => id)).toEqual([
+      activeConversationId,
+    ]);
+    await expect(
+      project.store.openConversation(firstConversationId),
+    ).rejects.toThrow("Conversation not found");
+    project.release();
+
+    await expect(connection.handle({
+      type: "delete_conversation",
+      commandId: COMMAND_B,
+      sessionId: SESSION_B,
+      conversationId: activeConversationId,
+    })).rejects.toThrow("active");
+
+    expect(latestState(events).conversationId).toBe(activeConversationId);
+    await connection.dispose();
+  });
+
+  it("refuses to delete a conversation leased by another connection", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-delete-leased-session-"));
+    const projects = new ProjectStoreRegistry();
+    const firstEvents: ServerEvent[] = [];
+    const first = new PiConnection(
+      (event) => firstEvents.push(event),
+      new FakeRuntime(),
+      undefined,
+      projects,
+    );
+    const second = new PiConnection(
+      () => undefined,
+      new FakeRuntime(),
+      undefined,
+      projects,
+    );
+
+    await first.handle({
+      type: "initialize",
+      sessionId: SESSION_A,
+      cwd,
+      conversation: { kind: "new" },
+    });
+    const leasedConversationId = latestState(firstEvents).conversationId;
+    await second.handle({
+      type: "initialize",
+      sessionId: SESSION_B,
+      cwd,
+      conversation: { kind: "new" },
+    });
+
+    await expect(second.handle({
+      type: "delete_conversation",
+      commandId: COMMAND_A,
+      sessionId: SESSION_B,
+      conversationId: leasedConversationId,
+    })).rejects.toThrow("already leased");
+
+    await first.handle({ type: "close_session", sessionId: SESSION_A });
+    await expect(second.handle({
+      type: "delete_conversation",
+      commandId: COMMAND_B,
+      sessionId: SESSION_B,
+      conversationId: leasedConversationId,
+    })).resolves.toBeUndefined();
+    await Promise.all([first.dispose(), second.dispose()]);
   });
 
   it("waits for the old conversation owner during reconnect", async () => {

@@ -27,9 +27,10 @@ function projectKey(cwd: string): string {
  * Coordinates the boundary between project-wide permission changes and runs
  * owned by individual WebSocket connections.
  *
- * A read-only transition becomes restrictive synchronously, cancels every run
- * that began under the old project policy, and is only persisted/acknowledged
- * after those runs have settled.
+ * Every read-only request establishes its barrier synchronously, even if the
+ * manifest still says read-only while an earlier full-access request is
+ * queued. The barrier cancels existing runs and stays active until they settle
+ * and the read-only write completes.
  */
 export class ProjectRunCoordinator {
   private readonly states = new Map<string, ProjectRunState>();
@@ -76,9 +77,10 @@ export class ProjectRunCoordinator {
   ): Promise<void> {
     const key = projectKey(project.cwd);
     const state = this.stateFor(key);
+    const restrictive = mode === "read_only";
     let runsToSettle: RegisteredRun[] = [];
 
-    if (mode === "read_only") {
+    if (restrictive) {
       state.pendingRestrictions++;
       runsToSettle = [...state.runs];
       for (const run of runsToSettle) {
@@ -96,12 +98,12 @@ export class ProjectRunCoordinator {
       .catch(() => undefined)
       .then(async () => {
         try {
-          if (mode === "read_only") {
+          if (restrictive) {
             await Promise.all(runsToSettle.map((run) => run.done));
           }
           await project.setToolMode(mode);
         } finally {
-          if (mode === "read_only") state.pendingRestrictions--;
+          if (restrictive) state.pendingRestrictions--;
         }
       });
     state.transitionTail = transition;

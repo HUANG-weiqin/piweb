@@ -1,5 +1,4 @@
 import {
-  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -68,16 +67,24 @@ export function Chat({
   if (!conversationReady) composerPlaceholder = "正在恢复项目对话…";
   else if (!model) composerPlaceholder = "请先登录并选择模型";
   const transcriptRef = useRef<HTMLElement>(null);
-  const endRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const followOutputRef = useRef(true);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
-  useEffect(() => {
+  const scrollToLatest = (behavior?: ScrollBehavior) => {
+    const transcript = transcriptRef.current;
+    if (!transcript) return;
+    if (typeof transcript.scrollTo === "function") {
+      transcript.scrollTo({
+        top: transcript.scrollHeight,
+        ...(behavior ? { behavior } : {}),
+      });
+    } else {
+      transcript.scrollTop = transcript.scrollHeight;
+    }
+  };
+  useLayoutEffect(() => {
     if (followOutputRef.current) {
-      const target = endRef.current;
-      if (typeof target?.scrollIntoView === "function") {
-        target.scrollIntoView({ block: "end" });
-      }
+      scrollToLatest();
       setShowJumpToLatest(false);
     } else {
       setShowJumpToLatest(true);
@@ -100,10 +107,7 @@ export function Chat({
   const jumpToLatest = () => {
     followOutputRef.current = true;
     setShowJumpToLatest(false);
-    const target = endRef.current;
-    if (typeof target?.scrollIntoView === "function") {
-      target.scrollIntoView({ behavior: "smooth", block: "end" });
-    }
+    scrollToLatest("smooth");
   };
   const send = () => {
     const value = draft.trim();
@@ -131,7 +135,6 @@ export function Chat({
       </div>}
       {!chat.messages.length && <div className="empty"><div>π</div><h1>想做点什么？</h1><p>Pi 可以读取、修改文件并执行命令。</p></div>}
       {chat.messages.map((message) => <Message key={message.id} message={message} />)}
-      <div ref={endRef} />
     </section>
     <div className="composer-wrap">
       {showJumpToLatest && <button

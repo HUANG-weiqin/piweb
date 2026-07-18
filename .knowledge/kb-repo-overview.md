@@ -1,6 +1,6 @@
 # 仓库总览
 
-`updated: 2026-07-18`
+`updated: 2026-07-19`
 
 ## 这个模块是干什么的
 
@@ -33,7 +33,7 @@ while 连接存在:
 - 项目态：`.piweb` manifest、Pi JSONL 对话索引和 conversation writer lease。
 - session 态：cwd 隔离的模型目录、扩展生命周期、SessionManager 和 AgentSession。
 - 连接态：当前 session bundle、activeRun ticket、OAuth flow、命令队列和生命周期 generation。
-- 临时交互态：extension UI request/response，绑定 session generation，不进入持久对话。
+- 临时交互态：pre-session 目录浏览请求绑定 socket/commandId；extension UI request/response 绑定 session generation。两者都不进入持久对话。
 
 ## 决策
 
@@ -42,7 +42,7 @@ while 连接存在:
 - 不内建第二套 diff/history/revert、文件管理器或通用终端。未来若需要，只做无状态交接或薄集成。
 - 当前 AgentSession 使用项目自有 sessionDir 的 `SessionManager`；持久 conversation 与临时 session epoch 明确分离。
 - WebSocket 只做传输；会话身份和 SDK 事件都不能由 socket 隐式定义。
-- 远程访问和 OS 级隔离仍需单独设计；持久化与工具审批都不能替代 sandbox。
+- 远程访问和 OS 级隔离仍需单独设计；持久化与二元工具模式都不能替代 sandbox。
 
 ## 认知模型
 

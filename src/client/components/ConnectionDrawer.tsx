@@ -26,6 +26,7 @@ interface ConnectionDrawerProps {
   onNewConversation(): void;
   onOpenConversation(conversationId: string): void;
   onRenameConversation(name: string): void;
+  onDeleteConversation(conversationId: string): boolean;
   onKey(provider: string, key: string): string | undefined;
   onOAuth(provider: string): void;
   onLogout(provider: string): void;
@@ -84,6 +85,7 @@ export function ConnectionDrawer({
   onNewConversation,
   onOpenConversation,
   onRenameConversation,
+  onDeleteConversation,
   onKey,
   onOAuth,
   onLogout,
@@ -112,10 +114,22 @@ export function ConnectionDrawer({
   const [modelError, setModelError] = useState("");
   const [search, setSearch] = useState("");
   const [conversationName, setConversationName] = useState(state.conversationName ?? "");
+  const [confirmDeleteConversationId, setConfirmDeleteConversationId] = useState("");
 
   useEffect(() => {
     setConversationName(state.conversationName ?? "");
   }, [state.conversationId, state.conversationName]);
+
+  useEffect(() => {
+    if (
+      open
+      && confirmDeleteConversationId
+      && conversations.some(({ id }) => id === confirmDeleteConversationId)
+    ) {
+      return;
+    }
+    setConfirmDeleteConversationId("");
+  }, [confirmDeleteConversationId, conversations, open]);
 
   useEffect(() => {
     if (providerId && state.providers.some((provider) => provider.id === providerId)) return;
@@ -253,6 +267,9 @@ export function ConnectionDrawer({
     const name = conversationName.trim();
     if (name && name !== state.conversationName) onRenameConversation(name);
   };
+  const deleteCandidate = conversations.find(
+    ({ id }) => id === confirmDeleteConversationId,
+  );
   const chooseProvider = (nextProviderId: string) => {
     setProviderId(nextProviderId);
     setSearch("");
@@ -496,13 +513,13 @@ export function ConnectionDrawer({
             disabled={toolModeBusy}
             onChange={(event) => onToolMode(event.target.value as ToolMode)}
           >
-            <option value="workspace_write">工作区可写</option>
+            <option value="full_access">全部授权</option>
             <option value="read_only">只读</option>
           </select>
           <p className="setting-note">
             {state.toolMode === "read_only"
-              ? "仅允许读取与搜索；写入、命令和未知工具会被阻止。"
-              : "项目内写入自动允许；项目外写入、命令和未知工具需要审批。"}
+              ? "仅允许 Pi 原生 read、grep、find 和 ls；命令、写入及扩展工具均被阻止。"
+              : "所有工具和命令直接执行，不会询问；可以修改项目外文件。"}
           </p>
         </div>
       </section>
@@ -532,18 +549,61 @@ export function ConnectionDrawer({
           {conversations.map((conversation) => {
             const selected = conversation.id === state.conversationId;
             const label = conversation.name || conversation.preview || "新对话";
-            return <button
-              type="button"
+            return <div
               key={conversation.id}
-              className={selected ? "conversation selected" : "conversation"}
-              disabled={conversationBusy || selected}
-              onClick={() => onOpenConversation(conversation.id)}
+              className={selected ? "conversation-row selected" : "conversation-row"}
             >
-              <span>{label}<small>{conversation.messageCount} 条消息</small></span>
-              {selected && <b>当前</b>}
-            </button>;
+              <button
+                type="button"
+                className="conversation"
+                disabled={conversationBusy || selected}
+                aria-label={selected ? `当前对话 ${label}` : `打开对话 ${label}`}
+                aria-current={selected ? "true" : undefined}
+                onClick={() => onOpenConversation(conversation.id)}
+              >
+                <span>{label}<small>{conversation.messageCount} 条消息</small></span>
+                {selected && <b>当前</b>}
+              </button>
+              {!selected && <button
+                type="button"
+                className="conversation-delete ghost danger"
+                aria-label={`删除对话 ${label}`}
+                disabled={!online || conversationBusy}
+                onClick={() => setConfirmDeleteConversationId(conversation.id)}
+              >
+                删除
+              </button>}
+            </div>;
           })}
         </div>
+        <p className="setting-note">当前对话需先新建或切换后删除。</p>
+        {deleteCandidate && <div className="credential-confirm" role="alert">
+          <p>
+            永久删除“{deleteCandidate.name || deleteCandidate.preview || "新对话"}”？此操作无法撤销。
+          </p>
+          <div className="provider-actions">
+            <button
+              type="button"
+              className="ghost"
+              disabled={conversationBusy}
+              onClick={() => setConfirmDeleteConversationId("")}
+            >
+              保留
+            </button>
+            <button
+              type="button"
+              className="danger-button"
+              disabled={!online || conversationBusy}
+              onClick={() => {
+                if (onDeleteConversation(deleteCandidate.id)) {
+                  setConfirmDeleteConversationId("");
+                }
+              }}
+            >
+              永久删除
+            </button>
+          </div>
+        </div>}
         {conversationIndexTruncated && <p className="setting-note">
           当前仅显示最近的对话，较旧或过长的索引内容已省略。
         </p>}

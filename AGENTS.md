@@ -25,6 +25,7 @@ Pi Web 是本机优先的极简 Agent 工作台。当前目标不是复制 Pi �
 - 新功能先判断它是否必须参与 Agent 生命周期、权限决策、持久会话或协议关联；如果不需要，并且外部工具可以完整替代，就不进入工作台核心。
 - Git 负责 diff、历史、回滚和分支；编辑器负责文件浏览与人工编辑；终端负责通用交互式 shell。工作台最多提供浅层交接，不维护第二份真相。
 - `src/shared/protocol.ts` 是浏览器与服务端的唯一线协议；浏览器不得导入 Pi SDK 事件类型。
+- initialize 前的只读目录浏览属于 socket control，不属于 PiConnection actor；必须用一次性 commandId 关联有界列表。浏览 `path` 不是项目 cwd，不得创建项目状态或触发资源加载；用户确认后仍由 initialize 独立校验。
 - `PiRuntime` 进程级共享 `AuthStorage` 与基线 `ModelRegistry`，每个 session 另有隔离的模型目录；所有认证/模型缓存修改必须从串行入口经过。
 - 项目扩展可以注册工具、hooks 和静态 provider 配置；在引入 worker/进程隔离前，必须拒绝进程全局的 `streamSimple` 与 OAuth provider 注册。
 - 项目资源必须在 trust resolution 后加载；默认 `SettingsManager` 不得以 `projectTrusted=true` 启动。
@@ -34,6 +35,7 @@ Pi Web 是本机优先的极简 Agent 工作台。当前目标不是复制 Pi �
 - `projectId`、`conversationId`、`sessionId` 和 `runId` 属于不同生命周期，禁止合并或互相替代。
 - 同一进程内一个 `canonical cwd + conversationId` 只能有一个 writer lease；租约必须在 Pi `open()` 前取得，并在所有失败/关闭路径释放。
 - 已有对话重连可有界等待旧 lease；等待必须 FIFO、可取消，不能通过第二个 writer 解决。
+- 删除只接受 conversationId：active conversation 必须拒绝，非当前目标必须 fail-fast 取得独占 writer lease，并在完整路径/identity 校验后精确 unlink 单个 JSONL；删除与索引刷新共用串行边界。
 - Pi `SessionManager.listAll()` 不是完整性证明：宿主必须验证受控目录内全部常规 JSONL 的尾换行、有限 JSON 数值、header、经迁移后的 entry payload/tree，并要求磁盘全集与 SDK 索引按规范路径和 conversationId 一一对应；任何遗漏、损坏、重复或扫描期变化都 fail closed。
 - 项目切 read_only 必须经过共享 `ProjectRunCoordinator`：同步封锁/取消旧 run，等它们结算后才能持久化和确认。
 - 浏览器不是 transcript owner；恢复必须从服务端 `conversation_snapshot` hydrate，localStorage 只保存目录和安全偏好。
@@ -52,11 +54,10 @@ Pi Web 是本机优先的极简 Agent 工作台。当前目标不是复制 Pi �
 - `PiConnection.activeRun` 是 queued/running/cancelling 的唯一服务端真相；`PublicState.busy` 只能由它派生，聊天 reducer 不维护第二份 busy。
 - AgentSession 创建后的 owner bind、host gate、startup 校验和 extension error 投影必须处于统一清理边界；成功创建后任一步失败都要 teardown session 并逐出 registry owner。
 - 同步 emitter 驱动的 OAuth/extension UI rendezvous 必须先登记 pending 再 emit；emit 或监听注册失败也不能留下 waiter、registry owner 或阻断其余 session teardown。
-- 工具授权必须位于项目扩展 `tool_call` hook 之后、真实 `tool.execute` 之前；响应必须走控制通道，不能排进 prompt 正占用的 actor 队列。
-- 待审批项只从 `PublicState.activeRun.pendingApprovals` 投影；浏览器弹窗和工具卡都不是授权真相。
-- 工具 gate 启用时固定使用 sequential execution，避免 SDK parallel preflight 在 abort 后执行已积累的 thunk。
-- `read_only` 是服务端硬拒绝；`workspace_write` 只自动允许 `source=builtin` 且真实目标仍在 cwd 内的 `edit/write`。扩展可以覆盖内置名称，策略不能只按 toolName 判断。
-- `.piweb` 是宿主保留状态，即使在 `workspace_write` 中也不得由 Agent `edit/write`；只读模式不阻止宿主持久化。
+- 工具策略必须位于项目扩展 `tool_call` hook 之后、真实 `tool.execute` 之前，并按 run 启动快照、当前项目模式和收紧屏障取最严格结果。
+- 工具 gate 启用时固定使用 sequential execution，避免 SDK parallel preflight 在 abort 或模式收紧后执行已积累的 thunk。
+- `read_only` 只允许 `source=builtin` 的 Pi 原生 `read/grep/find/ls`；命令、写入、未知工具及扩展同名工具都由服务端硬拒绝。`full_access` 直接允许所有工具。
+- `.piweb` 是宿主持久状态；只读模式不阻止宿主保存，但 `full_access` 也不会替 Agent 额外保护该目录。
 - 项目列表和历史是低频、有界协议快照，不能重新塞回每个高频 `PublicState` 更新。
 
 ## Agent 分工

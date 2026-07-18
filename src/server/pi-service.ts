@@ -15,6 +15,7 @@ import type {
   ThinkingLevel,
   ToolMode,
 } from "../shared/protocol.js";
+import { mostRestrictiveToolMode } from "../shared/tool-mode.js";
 import { AuthFlowBroker } from "./auth-flow.js";
 import { projectConversationHistorySnapshot } from "./conversation-history.js";
 import { validateCwd } from "./cwd.js";
@@ -42,10 +43,9 @@ import { SessionEventProjector, snapshotWireValue } from "./session-events.js";
 import { resolveContextUsage } from "./session-usage.js";
 import {
   defaultToolPolicy,
-  ToolApprovalBroker,
   type ToolPolicy,
   type ToolPolicyDecision,
-} from "./tool-approval.js";
+} from "./tool-policy.js";
 
 interface ActiveSession {
   id: string;
@@ -85,7 +85,8 @@ interface SelectedConversation {
   lease: ConversationLease;
 }
 
-type QueuedCommand = Exclude<ClientCommand, {
+type ConnectionCommand = Exclude<ClientCommand, { type: "browse_directory" }>;
+type QueuedCommand = Exclude<ConnectionCommand, {
   type:
     | "abort"
     | "auth_response"
@@ -93,8 +94,7 @@ type QueuedCommand = Exclude<ClientCommand, {
     | "close_session"
     | "extension_ui_response"
     | "initialize"
-    | "prompt"
-    | "tool_approval_response";
+    | "prompt";
 }>;
 type ConversationTarget = NonNullable<
   Extract<ClientCommand, { type: "initialize" }>["conversation"]
@@ -111,6 +111,7 @@ function queuedCommandScope(command: QueuedCommand): "session" | "epoch" | "glob
     case "set_thinking":
     case "set_tool_mode":
     case "rename_conversation":
+    case "delete_conversation":
     case "set_api_key":
       return "session";
     case "login_oauth":
@@ -130,7 +131,6 @@ function isCancelling(ticket: RunTicket): boolean {
 export class PiConnection {
   private readonly operations = new SerialTaskQueue();
   private readonly unsubscribeRuntime: () => void;
-  private readonly toolApprovals: ToolApprovalBroker;
   private readonly extensionUI: ExtensionUIBroker;
   private active?: ActiveSession;
   private activeRun?: RunTicket;
@@ -154,7 +154,6 @@ export class PiConnection {
     private readonly projects: ProjectStoreRegistry = new ProjectStoreRegistry(),
     private readonly projectRuns: ProjectRunCoordinator = new ProjectRunCoordinator(),
   ) {
-    this.toolApprovals = new ToolApprovalBroker(() => this.publishState());
     this.extensionUI = new ExtensionUIBroker(emit);
     this.unsubscribeRuntime = runtime.subscribe(() => this.publishState());
   }
@@ -197,8 +196,9 @@ export class PiConnection {
       // Initialize carries a safety ceiling, not permission to expand a
       // durable project setting. A lost acknowledgement therefore cannot
       // silently restore write permission on reconnect.
-      if (seedToolMode === "read_only" && project.toolMode !== "read_only") {
-        await this.projectRuns.transitionToolMode(project, "read_only");
+      const initialMode = mostRestrictiveToolMode(project.toolMode, seedToolMode);
+      if (initialMode !== project.toolMode) {
+        await this.projectRuns.transitionToolMode(project, initialMode);
       }
       if (this.disposed || generation !== this.generation || signal.aborted) return;
       selected = await this.selectConversation(project, target, signal);
@@ -214,7 +214,6 @@ export class PiConnection {
         toolCallGate: (input) => this.authorizeToolCall(
           sessionId,
           generation,
-          project.cwd,
           input,
         ),
       });
@@ -349,12 +348,8 @@ export class PiConnection {
     }
   }
 
-  handle(command: ClientCommand): Promise<void> {
+  handle(command: ConnectionCommand): Promise<void> {
     if (command.type === "abort") return this.abort(command.sessionId, command.runId);
-    if (command.type === "tool_approval_response") {
-      this.toolApprovals.respond(command);
-      return Promise.resolve();
-    }
     if (command.type === "extension_ui_response") {
       this.extensionUI.respond(command);
       return Promise.resolve();
@@ -395,7 +390,7 @@ export class PiConnection {
             command.cwd,
             command.sessionId,
             generation,
-            command.toolMode ?? "workspace_write",
+            command.toolMode ?? "full_access",
             command.conversation ?? { kind: "recent" },
             initializationAbort.signal,
           );
@@ -419,7 +414,11 @@ export class PiConnection {
         }
       });
     }
-    if (command.type === "select_model" || command.type === "set_api_key") {
+    if (
+      command.type === "select_model"
+      || command.type === "set_api_key"
+      || command.type === "delete_conversation"
+    ) {
       if (this.usedCommandIds.has(command.commandId)) {
         return Promise.reject(new Error("Command ID was already used on this connection"));
       }
@@ -448,14 +447,11 @@ export class PiConnection {
           return;
         }
         await this.execute(command);
-        if (command.type === "select_model") {
-          this.emit({
-            type: "command_complete",
-            operation: command.type,
-            commandId: command.commandId,
-            sessionId: command.sessionId,
-          });
-        } else if (command.type === "set_api_key") {
+        if (
+          command.type === "select_model"
+          || command.type === "set_api_key"
+          || command.type === "delete_conversation"
+        ) {
           this.emit({
             type: "command_complete",
             operation: command.type,
@@ -479,6 +475,8 @@ export class PiConnection {
       case "set_tool_mode": return this.setToolMode(command.mode);
       case "rename_conversation":
         return this.renameConversation(command.conversationId, command.name);
+      case "delete_conversation":
+        return this.deleteConversation(command.conversationId);
       case "set_api_key": return this.setApiKey(command.provider, command.key);
       case "login_oauth": return this.loginOAuth(command.provider, command.authFlowId);
       case "logout": return this.logout(command.provider);
@@ -649,6 +647,19 @@ export class PiConnection {
     }
   }
 
+  private async deleteConversation(conversationId: string): Promise<void> {
+    const active = this.requireActive();
+    if (active.conversationId === conversationId) {
+      throw new Error("Cannot delete the active conversation");
+    }
+    const lease = this.projects.acquireConversation(active.cwd, conversationId);
+    try {
+      await active.project.deleteConversation(conversationId);
+    } finally {
+      lease.release();
+    }
+  }
+
   private async setApiKey(provider: string, key: string): Promise<void> {
     this.assertKnownProvider(provider);
     await this.updateConfiguration(() => {
@@ -732,7 +743,6 @@ export class PiConnection {
       activeRun: activeRun ? {
         id: activeRun.id,
         phase: activeRun.phase,
-        pendingApprovals: this.toolApprovals.requestsFor(active.id, activeRun.id),
       } : undefined,
       selectedModel: session.model && registry.hasConfiguredAuth(session.model)
         ? { provider: session.model.provider, id: session.model.id }
@@ -919,7 +929,6 @@ export class PiConnection {
   private async authorizeToolCall(
     sessionId: string,
     generation: number,
-    cwd: string,
     input: ToolCallGateInput,
   ): Promise<{ block?: boolean; reason?: string } | undefined> {
     const ticket = this.activeRun;
@@ -933,41 +942,29 @@ export class PiConnection {
       return { block: true, reason: "No active run owns this tool call" };
     }
     const active = this.requireActive();
-    let argsSnapshot: ReturnType<typeof snapshotWireValue>;
+    let preparedArgs: unknown;
     try {
-      argsSnapshot = snapshotWireValue(input.args);
+      preparedArgs = snapshotWireValue(input.args).value;
     } catch {
-      return {
-        block: true,
-        reason: "Tool arguments could not be displayed exactly; execution was blocked",
-      };
+      preparedArgs = undefined;
     }
-    const argumentsChanged = (): boolean => {
-      try {
-        return snapshotWireValue(input.args).serialized !== argsSnapshot.serialized;
-      } catch {
-        return true;
-      }
-    };
     this.emitRun(ticket, {
       type: "tool_prepared",
       toolCallId: input.toolCallId,
-      args: argsSnapshot.value,
+      ...(preparedArgs === undefined ? {} : { args: preparedArgs }),
     });
 
     let policy: ToolPolicyDecision;
     try {
       policy = await this.toolPolicy({
-        cwd,
-        mode: ticket.toolMode !== "workspace_write"
-          || active.project.toolMode === "read_only"
-          || this.projectRuns.isRestrictionPending(cwd)
+        mode: this.projectRuns.isRestrictionPending(active.cwd)
           ? "read_only"
-          : "workspace_write",
-        toolCallId: input.toolCallId,
+          : mostRestrictiveToolMode(
+              ticket.toolMode ?? "read_only",
+              active.project.toolMode,
+            ),
         toolName: input.toolName,
         toolSource: input.toolSource,
-        args: argsSnapshot.value,
       });
     } catch (error) {
       this.emitError("session", `Tool policy failed: ${this.errorMessage(error)}`, sessionId);
@@ -982,61 +979,8 @@ export class PiConnection {
       return { block: true, reason: "Run cancelled before tool execution" };
     }
 
-    if (policy.action === "allow") {
-      return argumentsChanged()
-        ? { block: true, reason: "Tool arguments changed after authorization; execution was blocked" }
-        : undefined;
-    }
     if (policy.action === "deny") {
       return { block: true, reason: policy.reason };
-    }
-    if (policy.action !== "ask") {
-      return { block: true, reason: "Tool policy returned an invalid decision" };
-    }
-    if (argumentsChanged()) {
-      return {
-        block: true,
-        reason: "Tool arguments changed before approval; execution was blocked",
-      };
-    }
-
-    let decision: "allow" | "deny";
-    try {
-      decision = await this.toolApprovals.request({
-        sessionId,
-        runId: ticket.id,
-        toolCallId: input.toolCallId,
-        toolName: input.toolName,
-        args: argsSnapshot.value,
-        reason: policy.reason,
-        signal: input.signal,
-      });
-    } catch (error) {
-      this.emitError("session", `Tool approval failed: ${this.errorMessage(error)}`, sessionId);
-      return { block: true, reason: "Tool approval failed; execution was blocked" };
-    }
-    if (
-      decision !== "allow"
-      || input.signal?.aborted
-      || this.activeRun !== ticket
-      || ticket.phase !== "running"
-      || !this.isActiveSession(sessionId, generation)
-    ) {
-      const cancelled = input.signal?.aborted
-        || this.activeRun !== ticket
-        || ticket.phase !== "running";
-      return {
-        block: true,
-        reason: cancelled
-          ? "Run cancelled before tool execution"
-          : "User denied tool execution",
-      };
-    }
-    if (argumentsChanged()) {
-      return {
-        block: true,
-        reason: "Tool arguments changed after approval; execution was blocked",
-      };
     }
     return undefined;
   }
@@ -1076,7 +1020,6 @@ export class PiConnection {
     outcome: Extract<SessionEvent, { type: "run_finished" }>["outcome"],
   ): void {
     if (this.activeRun !== ticket) return;
-    this.toolApprovals.cancelRun(ticket.sessionId, ticket.id);
     this.extensionUI.cancelScope(ticket.sessionId, ticket.generation);
     this.activeRun = undefined;
     ticket.projectRunLease?.release();
@@ -1129,14 +1072,12 @@ export class PiConnection {
     this.extensionUI.cancelScope(ticket.sessionId, ticket.generation);
     if (ticket.phase === "queued") {
       ticket.phase = "cancelling";
-      this.toolApprovals.cancelRun(ticket.sessionId, ticket.id);
       this.finishRun(ticket, "aborted");
       return Promise.resolve();
     }
     if (ticket.phase === "cancelling") return ticket.abortPromise ?? Promise.resolve();
 
     ticket.phase = "cancelling";
-    this.toolApprovals.cancelRun(ticket.sessionId, ticket.id);
     this.publishState();
     const active = this.active;
     if (!active || active.id !== ticket.sessionId || active.generation !== ticket.generation) {
@@ -1231,7 +1172,6 @@ export class PiConnection {
     this.initializationAbort = undefined;
     this.unsubscribeRuntime();
     this.cancelAuth();
-    this.toolApprovals.cancelAll();
     this.extensionUI.cancelAll();
     const ticket = this.activeRun;
     const cancel = ticket ? this.cancelRun(ticket).catch(() => undefined) : Promise.resolve();

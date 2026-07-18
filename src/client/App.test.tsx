@@ -12,8 +12,6 @@ import {
 import { App } from "./App";
 
 const RUN_ID = "13f17393-974b-49a0-9c6a-3176f775912a";
-const APPROVAL_A = "8f310256-f2ab-481d-8ca2-f20a43392ba3";
-const APPROVAL_B = "68aaf24e-0bb5-4e64-ad5f-fffe4503324e";
 const PROJECT_ID = "f25ee8d8-34f0-4c30-a045-b2a69f2e28bd";
 const CONVERSATION_ID = "0198f775-88f3-7af1-9c6a-3176f775912a";
 const CONVERSATION_B = "6a04656b-72d9-43ae-b1a8-5754cfa2b7cf";
@@ -136,6 +134,118 @@ function startFromSetup(): string {
 }
 
 describe("App", () => {
+  it("browses folders in-app and selects only from the matching listing", () => {
+    render(<App />);
+    const input = screen.getByRole("textbox", { name: "项目目录" });
+    fireEvent.change(input, { target: { value: "E:\\typed" } });
+    fireEvent.click(screen.getByRole("button", { name: "选择文件夹" }));
+
+    const command = latestCommand("browse_directory");
+    expect(command.path).toBe("E:\\typed");
+    expect(screen.getByRole("dialog", { name: "选择项目目录" })).toBeInTheDocument();
+    expect(socketMock.send).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "initialize" }),
+    );
+
+    act(() => socketMock.emit?.({
+      type: "directory_listing",
+      commandId: RUN_ID,
+      path: "E:\\stale",
+      parentPath: "E:\\",
+      directories: [],
+      truncated: false,
+    }));
+    expect(screen.queryByText("E:\\stale")).not.toBeInTheDocument();
+    act(() => socketMock.emit?.({
+      type: "error",
+      scope: "command",
+      operation: "browse_directory",
+      commandId: RUN_ID,
+      message: "stale listing error",
+    }));
+    expect(screen.queryByText("stale listing error")).not.toBeInTheDocument();
+
+    act(() => socketMock.emit?.({
+      type: "directory_listing",
+      commandId: command.commandId,
+      path: "E:\\typed",
+      parentPath: "E:\\",
+      directories: [{
+        name: "child",
+        path: "E:\\typed\\child",
+      }],
+      truncated: false,
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "打开文件夹 child" }));
+    const childCommand = latestCommand("browse_directory");
+    expect(childCommand.path).toBe("E:\\typed\\child");
+
+    act(() => socketMock.emit?.({
+      type: "directory_listing",
+      commandId: childCommand.commandId,
+      path: "E:\\typed\\child",
+      parentPath: "E:\\typed",
+      directories: [],
+      truncated: false,
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "选择当前文件夹" }));
+
+    expect(input).toHaveValue("E:\\typed\\child");
+    expect(screen.queryByRole("dialog", { name: "选择项目目录" })).not.toBeInTheDocument();
+    expect(socketMock.send).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "initialize" }),
+    );
+  });
+
+  it("keeps the typed setup path when in-app selection is cancelled", () => {
+    render(<App />);
+    const input = screen.getByRole("textbox", { name: "项目目录" });
+    fireEvent.change(input, { target: { value: "E:\\typed" } });
+    fireEvent.click(screen.getByRole("button", { name: "选择文件夹" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+
+    expect(input).toHaveValue("E:\\typed");
+    expect(screen.getByRole("button", { name: "选择文件夹" })).toBeEnabled();
+    expect(screen.queryByRole("dialog", { name: "选择项目目录" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the directory browser usable after a correlated listing error", () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "选择文件夹" }));
+    const command = latestCommand("browse_directory");
+
+    act(() => socketMock.emit?.({
+      type: "error",
+      scope: "command",
+      operation: "browse_directory",
+      commandId: command.commandId,
+      message: "无法读取这个目录",
+    }));
+
+    expect(screen.getByRole("dialog", { name: "选择项目目录" })).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("无法读取这个目录");
+    fireEvent.click(screen.getByRole("button", { name: "打开启动目录" }));
+    const fallbackCommand = latestCommand("browse_directory");
+    expect(fallbackCommand.commandId).not.toBe(command.commandId);
+    expect(fallbackCommand.path).toBeUndefined();
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(screen.getByRole("button", { name: "选择文件夹" })).toBeEnabled();
+  });
+
+  it("closes transient directory browsing when the socket disconnects", () => {
+    render(<App />);
+    const input = screen.getByRole("textbox", { name: "项目目录" });
+    fireEvent.change(input, { target: { value: "E:\\typed" } });
+    fireEvent.click(screen.getByRole("button", { name: "选择文件夹" }));
+    expect(screen.getByRole("dialog", { name: "选择项目目录" })).toBeInTheDocument();
+
+    act(() => socketMock.status?.(false));
+
+    expect(screen.queryByRole("dialog", { name: "选择项目目录" })).not.toBeInTheDocument();
+    expect(input).toHaveValue("E:\\typed");
+  });
+
   it("does not enable commands before a compatible protocol handshake", () => {
     socketMock.helloVersion = PROTOCOL_VERSION + 1;
 
@@ -157,6 +267,40 @@ describe("App", () => {
     expect(screen.getByRole("textbox", { name: "项目目录" })).toHaveValue("E:\\default");
   });
 
+  it("starts new projects with full access by default", () => {
+    render(<App />);
+
+    startFromSetup();
+
+    expect(latestCommand("initialize")).toMatchObject({
+      toolMode: "full_access",
+    });
+  });
+
+  it("migrates the removed workspace mode to full access", () => {
+    localStorage.setItem("piweb.toolMode", "workspace_write");
+    render(<App />);
+    const sessionId = startFromSetup();
+
+    expect(latestCommand("initialize")).toMatchObject({
+      toolMode: "full_access",
+    });
+
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        providers: [],
+      },
+    }));
+    expect(localStorage.getItem("piweb.toolMode")).toBe("full_access");
+  });
+
   it("still enters chat when saving the last working directory fails", () => {
     vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
       throw new Error("localStorage blocked");
@@ -172,7 +316,7 @@ describe("App", () => {
         cwd: "E:\\work",
         busy: false,
         thinkingLevel: "off",
-        toolMode: "workspace_write",
+        toolMode: "full_access",
         availableThinkingLevels: ["off"],
         providers: [],
       },
@@ -263,7 +407,7 @@ describe("App", () => {
         cwd: "E:\\work",
         busy: false,
         thinkingLevel: "off",
-        toolMode: "workspace_write",
+        toolMode: "full_access",
         availableThinkingLevels: ["off"],
         selectedModel: { provider: "provider", id: "model" },
         providers: [],
@@ -299,7 +443,7 @@ describe("App", () => {
         cwd: "E:\\work",
         busy: false,
         thinkingLevel: "off",
-        toolMode: "workspace_write",
+        toolMode: "full_access",
         availableThinkingLevels: ["off"],
         providers: [{
           id: "provider",
@@ -342,7 +486,7 @@ describe("App", () => {
         cwd: "E:\\work",
         busy: false,
         thinkingLevel: "off",
-        toolMode: "workspace_write",
+        toolMode: "full_access",
         availableThinkingLevels: ["off"],
         selectedModel: { provider: "provider", id: "model" },
         providers: [],
@@ -367,7 +511,7 @@ describe("App", () => {
         cwd: "E:\\work",
         busy: false,
         thinkingLevel: "off",
-        toolMode: "workspace_write",
+        toolMode: "full_access",
         availableThinkingLevels: ["off"],
         selectedModel: { provider: "provider", id: "model" },
         providers: [],
@@ -413,7 +557,7 @@ describe("App", () => {
         cwd: "E:\\work",
         busy: false,
         thinkingLevel: "off",
-        toolMode: "workspace_write",
+        toolMode: "full_access",
         availableThinkingLevels: ["off"],
         selectedModel: { provider: "provider", id: "model" },
         providers: [],
@@ -446,7 +590,7 @@ describe("App", () => {
         cwd: "E:\\work",
         busy: false,
         thinkingLevel: "off",
-        toolMode: "workspace_write",
+        toolMode: "full_access",
         availableThinkingLevels: ["off"],
         selectedModel: { provider: "provider", id: "model" },
         providers: [],
@@ -471,7 +615,7 @@ describe("App", () => {
         cwd: "E:\\work",
         busy: false,
         thinkingLevel: "off",
-        toolMode: "workspace_write",
+        toolMode: "full_access",
         availableThinkingLevels: ["off"],
         selectedModel: { provider: "provider", id: "model" },
         providers: [],
@@ -493,7 +637,7 @@ describe("App", () => {
           cwd: "E:\\work",
           busy: false,
           thinkingLevel: "off",
-          toolMode: "workspace_write",
+          toolMode: "full_access",
           availableThinkingLevels: ["off"],
           selectedModel: { provider: "provider", id: "model" },
           providers: [],
@@ -517,7 +661,7 @@ describe("App", () => {
         cwd: "E:\\work",
         busy: false,
         thinkingLevel: "off",
-        toolMode: "workspace_write",
+        toolMode: "full_access",
         availableThinkingLevels: ["off"],
         selectedModel: { provider: "provider", id: "model" },
         providers: [],
@@ -576,7 +720,7 @@ describe("App", () => {
         cwd: "E:\\work",
         busy: false,
         thinkingLevel: "off",
-        toolMode: "workspace_write",
+        toolMode: "full_access",
         availableThinkingLevels: ["off"],
         selectedModel: { provider: "provider", id: "model" },
         providers: [],
@@ -625,7 +769,7 @@ describe("App", () => {
         cwd: "E:\\work",
         busy: false,
         thinkingLevel: "off",
-        toolMode: "workspace_write",
+        toolMode: "full_access",
         availableThinkingLevels: ["off"],
         selectedModel: { provider: "provider", id: "model" },
         providers: [],
@@ -654,13 +798,83 @@ describe("App", () => {
       truncated: false,
     }));
     fireEvent.click(screen.getByRole("button", { name: /provider \/ model/ }));
-    fireEvent.click(screen.getByRole("button", { name: /Older work/ }));
+    fireEvent.click(screen.getByRole("button", {
+      name: "打开对话 Older work",
+    }));
 
     expect(latestCommand("initialize")).toMatchObject({
       cwd: "E:\\work",
       conversation: { kind: "open", conversationId: CONVERSATION_B },
     });
     expect(latestCommand("initialize").sessionId).not.toBe(sessionId);
+  });
+
+  it("deletes a non-current project conversation with a correlated command", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_ID,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+    act(() => socketMock.emit?.({
+      type: "project_snapshot",
+      sessionId,
+      projectId: PROJECT_ID,
+      conversationId: CONVERSATION_ID,
+      conversations: [{
+        id: CONVERSATION_ID,
+        name: "Current",
+        preview: "current",
+        createdAt: "2026-07-18T12:00:00.000Z",
+        updatedAt: "2026-07-18T12:01:00.000Z",
+        messageCount: 2,
+      }, {
+        id: CONVERSATION_B,
+        name: "Older work",
+        preview: "older",
+        createdAt: "2026-07-17T12:00:00.000Z",
+        updatedAt: "2026-07-17T12:01:00.000Z",
+        messageCount: 4,
+      }],
+      truncated: false,
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: /provider \/ model/ }));
+    fireEvent.click(screen.getByRole("button", {
+      name: "删除对话 Older work",
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
+
+    const command = latestCommand("delete_conversation");
+    expect(command).toMatchObject({
+      sessionId,
+      conversationId: CONVERSATION_B,
+    });
+    expect(screen.getByRole("button", {
+      name: "删除对话 Older work",
+    })).toBeDisabled();
+
+    act(() => socketMock.emit?.({
+      type: "command_complete",
+      operation: "delete_conversation",
+      commandId: command.commandId,
+      sessionId,
+    }));
+    expect(screen.getByText("对话已删除")).toBeInTheDocument();
+    expect(screen.getByRole("button", {
+      name: "删除对话 Older work",
+    })).toBeEnabled();
   });
 
   it("does not unlock a running prompt for an unrelated settings error", () => {
@@ -674,7 +888,7 @@ describe("App", () => {
         cwd: "E:\\work",
         busy: true,
         thinkingLevel: "off",
-        toolMode: "workspace_write",
+        toolMode: "full_access",
         availableThinkingLevels: ["off"],
         selectedModel: { provider: "provider", id: "model" },
         providers: [],
@@ -703,7 +917,7 @@ describe("App", () => {
         cwd: "E:\\work",
         busy: false,
         thinkingLevel: "off",
-        toolMode: "workspace_write",
+        toolMode: "full_access",
         availableThinkingLevels: ["off"],
         selectedModel: { provider: "provider", id: "model" },
         providers: [],
@@ -756,7 +970,7 @@ describe("App", () => {
         cwd: "E:\\work",
         busy: false,
         thinkingLevel: "off",
-        toolMode: "workspace_write",
+        toolMode: "full_access",
         availableThinkingLevels: ["off"],
         selectedModel: { provider: "provider", id: "model" },
         providers: [],
@@ -802,7 +1016,7 @@ describe("App", () => {
         cwd: "E:\\work",
         busy: false,
         thinkingLevel: "off",
-        toolMode: "workspace_write",
+        toolMode: "full_access",
         availableThinkingLevels: ["off"],
         selectedModel: { provider: "provider", id: "model" },
         providers: [],
@@ -831,7 +1045,7 @@ describe("App", () => {
         cwd: "E:\\work",
         busy: false,
         thinkingLevel: "off",
-        toolMode: "workspace_write",
+        toolMode: "full_access",
         availableThinkingLevels: ["off"],
         selectedModel: { provider: "provider", id: "model" },
         providers: [{
@@ -893,50 +1107,6 @@ describe("App", () => {
     });
   });
 
-  it("derives tool approval from current run state and sends an exactly scoped response", () => {
-    render(<App />);
-    const sessionId = startFromSetup();
-    const runId = "13f17393-974b-49a0-9c6a-3176f775912a";
-    const approvalId = "8f310256-f2ab-481d-8ca2-f20a43392ba3";
-    act(() => socketMock.emit?.({
-      type: "state",
-      state: {
-        sessionId,
-        cwd: "E:\\work",
-        busy: true,
-        activeRun: {
-          id: runId,
-          phase: "running",
-          pendingApprovals: [{
-            approvalId,
-            toolCallId: "tool-1",
-            toolName: "bash",
-            args: { command: "npm test" },
-            reason: "此工具将执行本地命令。",
-          }],
-        },
-        thinkingLevel: "off",
-        toolMode: "workspace_write",
-        availableThinkingLevels: ["off"],
-        selectedModel: { provider: "provider", id: "model" },
-        providers: [],
-      },
-    }));
-
-    expect(screen.getByRole("dialog", { name: "工具执行审批" })).toHaveTextContent("npm test");
-    fireEvent.click(screen.getByRole("button", { name: "允许一次" }));
-
-    expect(latestCommand("tool_approval_response")).toEqual({
-      type: "tool_approval_response",
-      sessionId,
-      runId,
-      approvalId,
-      decision: "allow",
-    });
-    fireEvent.click(screen.getByRole("button", { name: "停止本次运行" }));
-    expect(latestCommand("abort")).toEqual({ type: "abort", sessionId, runId });
-  });
-
   it("changes the server-owned tool mode from the connection drawer", () => {
     render(<App />);
     const sessionId = startFromSetup();
@@ -947,7 +1117,7 @@ describe("App", () => {
         cwd: "E:\\work",
         busy: false,
         thinkingLevel: "off",
-        toolMode: "workspace_write",
+        toolMode: "full_access",
         availableThinkingLevels: ["off"],
         selectedModel: { provider: "provider", id: "model" },
         providers: [],
@@ -990,6 +1160,86 @@ describe("App", () => {
     });
   });
 
+  it("persists full access only after the server confirms the expansion", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "read_only",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: /provider \/ model/ }));
+    fireEvent.change(screen.getByRole("combobox", { name: "工具权限" }), {
+      target: { value: "full_access" },
+    });
+
+    expect(latestCommand("set_tool_mode")).toEqual({
+      type: "set_tool_mode",
+      sessionId,
+      mode: "full_access",
+    });
+    expect(localStorage.getItem("piweb.toolMode")).toBe("read_only");
+
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+
+    expect(localStorage.getItem("piweb.toolMode")).toBe("full_access");
+  });
+
+  it("keeps a full-access to read-only restriction across reconnect", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+    fireEvent.click(screen.getByRole("button", { name: /provider \/ model/ }));
+    fireEvent.change(screen.getByRole("combobox", { name: "工具权限" }), {
+      target: { value: "read_only" },
+    });
+
+    expect(localStorage.getItem("piweb.toolMode")).toBe("read_only");
+    act(() => socketMock.emit?.({
+      type: "hello",
+      protocolVersion: PROTOCOL_VERSION,
+      startupCwd: "E:\\default",
+    }));
+
+    expect(latestCommand("initialize")).toMatchObject({
+      cwd: "E:\\work",
+      toolMode: "read_only",
+    });
+  });
+
   it("does not mistake an unrelated state refresh for API Key success", () => {
     render(<App />);
     const sessionId = startFromSetup();
@@ -1007,7 +1257,7 @@ describe("App", () => {
         cwd: "E:\\work",
         busy: false,
         thinkingLevel: "off",
-        toolMode: "workspace_write",
+        toolMode: "full_access",
         availableThinkingLevels: ["off"],
         providers: [provider],
       },
@@ -1027,7 +1277,7 @@ describe("App", () => {
         cwd: "E:\\work",
         busy: false,
         thinkingLevel: "off",
-        toolMode: "workspace_write",
+        toolMode: "full_access",
         availableThinkingLevels: ["off"],
         providers: [{ ...provider }],
       },
@@ -1058,7 +1308,7 @@ describe("App", () => {
         cwd: "E:\\work",
         busy: false,
         thinkingLevel: "off",
-        toolMode: "workspace_write",
+        toolMode: "full_access",
         availableThinkingLevels: ["off"],
         selectedModel: { provider: "provider", id: "model" },
         providers: [],
@@ -1072,40 +1322,6 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: /provider \/ model/ }));
 
     expect(screen.getByRole("combobox", { name: "工具权限" })).toBeDisabled();
-  });
-
-  it("keeps restrictive mode intent across a lost acknowledgement and reconnect", () => {
-    render(<App />);
-    const sessionId = startFromSetup();
-    act(() => socketMock.emit?.({
-      type: "state",
-      state: {
-        sessionId,
-        cwd: "E:\\work",
-        busy: false,
-        thinkingLevel: "off",
-        toolMode: "workspace_write",
-        availableThinkingLevels: ["off"],
-        selectedModel: { provider: "provider", id: "model" },
-        providers: [],
-      },
-    }));
-    fireEvent.click(screen.getByRole("button", { name: /provider \/ model/ }));
-    fireEvent.change(screen.getByRole("combobox", { name: "工具权限" }), {
-      target: { value: "read_only" },
-    });
-    expect(localStorage.getItem("piweb.toolMode")).toBe("read_only");
-
-    act(() => socketMock.emit?.({
-      type: "hello",
-      protocolVersion: PROTOCOL_VERSION,
-      startupCwd: "E:\\default",
-    }));
-
-    expect(latestCommand("initialize")).toMatchObject({
-      cwd: "E:\\work",
-      toolMode: "read_only",
-    });
   });
 
   it("does not assume a permission expansion succeeded before acknowledgement", () => {
@@ -1126,7 +1342,7 @@ describe("App", () => {
     }));
     fireEvent.click(screen.getByRole("button", { name: /provider \/ model/ }));
     fireEvent.change(screen.getByRole("combobox", { name: "工具权限" }), {
-      target: { value: "workspace_write" },
+      target: { value: "full_access" },
     });
 
     act(() => socketMock.emit?.({
@@ -1138,92 +1354,6 @@ describe("App", () => {
     expect(latestCommand("initialize")).toMatchObject({
       cwd: "E:\\work",
       toolMode: "read_only",
-    });
-  });
-
-  it("hides an invalid pending approval while the transport is offline", () => {
-    render(<App />);
-    const sessionId = startFromSetup();
-    act(() => socketMock.emit?.({
-      type: "state",
-      state: {
-        sessionId,
-        cwd: "E:\\work",
-        busy: true,
-        activeRun: {
-          id: RUN_ID,
-          phase: "running",
-          pendingApprovals: [{
-            approvalId: APPROVAL_A,
-            toolCallId: "tool-a",
-            toolName: "bash",
-            args: { command: "npm test" },
-          }],
-        },
-        thinkingLevel: "off",
-        toolMode: "workspace_write",
-        availableThinkingLevels: ["off"],
-        selectedModel: { provider: "provider", id: "model" },
-        providers: [],
-      },
-    }));
-    expect(screen.getByRole("dialog", { name: "工具执行审批" })).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeEnabled();
-
-    act(() => socketMock.status?.(false));
-
-    expect(screen.queryByRole("dialog", { name: "工具执行审批" })).not.toBeInTheDocument();
-    expect(screen.getByText("本地服务已断开，正在重连…")).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeDisabled();
-  });
-
-  it("requires a fresh gesture before deciding the next queued approval", () => {
-    render(<App />);
-    const sessionId = startFromSetup();
-    const stateWith = (pendingApprovals: NonNullable<Extract<ServerEvent, { type: "state" }>["state"]["activeRun"]>["pendingApprovals"]): TestServerEvent => ({
-      type: "state",
-      state: {
-        sessionId,
-        cwd: "E:\\work",
-        busy: true,
-        activeRun: {
-          id: RUN_ID,
-          phase: "running",
-          pendingApprovals,
-        },
-        thinkingLevel: "off",
-        toolMode: "workspace_write",
-        availableThinkingLevels: ["off"],
-        selectedModel: { provider: "provider", id: "model" },
-        providers: [],
-      },
-    });
-    const approvalA = {
-      approvalId: APPROVAL_A,
-      toolCallId: "tool-a",
-      toolName: "bash",
-      args: { command: "first" },
-    };
-    const approvalB = {
-      approvalId: APPROVAL_B,
-      toolCallId: "tool-b",
-      toolName: "bash",
-      args: { command: "second" },
-    };
-    act(() => socketMock.emit?.(stateWith([approvalA, approvalB])));
-    fireEvent.click(screen.getByRole("button", { name: "允许一次" }));
-    act(() => socketMock.emit?.(stateWith([approvalB])));
-
-    fireEvent.click(screen.getByRole("button", { name: "允许一次" }));
-    expect(socketMock.send.mock.calls
-      .map(([command]) => command)
-      .filter((command) => command.type === "tool_approval_response")).toHaveLength(1);
-
-    fireEvent.click(screen.getByRole("button", { name: "处理下一项" }));
-    fireEvent.click(screen.getByRole("button", { name: "允许一次" }));
-    expect(latestCommand("tool_approval_response")).toMatchObject({
-      approvalId: APPROVAL_B,
-      runId: RUN_ID,
     });
   });
 

@@ -1,13 +1,12 @@
 import { z } from "zod";
 
 export const MAX_MESSAGE_BYTES = 1_000_000;
-export const PROTOCOL_VERSION = 5;
+export const PROTOCOL_VERSION = 10;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
 const conversationIdSchema = z.string().uuid();
 const runIdSchema = z.string().uuid();
 const authFlowIdSchema = z.string().uuid();
-const approvalIdSchema = z.string().uuid();
 const extensionUIRequestIdSchema = z.string().uuid();
 const commandIdSchema = z.string().uuid();
 
@@ -47,10 +46,15 @@ export type ExtensionUIResponse = z.infer<typeof extensionUIResponseSchema>;
 
 export const clientCommandSchema = z.discriminatedUnion("type", [
   z.object({
+    type: z.literal("browse_directory"),
+    commandId: commandIdSchema,
+    path: required.max(4096).optional(),
+  }),
+  z.object({
     type: z.literal("initialize"),
     sessionId: sessionIdSchema,
     cwd: required.max(4096),
-    toolMode: z.enum(["read_only", "workspace_write"]).optional(),
+    toolMode: z.enum(["read_only", "full_access"]).optional(),
     conversation: z.discriminatedUnion("kind", [
       z.object({ kind: z.literal("recent") }),
       z.object({ kind: z.literal("new") }),
@@ -64,13 +68,6 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
     text: required.max(200_000),
   }),
   z.object({ type: z.literal("abort"), sessionId: sessionIdSchema, runId: runIdSchema }),
-  z.object({
-    type: z.literal("tool_approval_response"),
-    sessionId: sessionIdSchema,
-    runId: runIdSchema,
-    approvalId: approvalIdSchema,
-    decision: z.enum(["allow", "deny"]),
-  }),
   z.object({
     type: z.literal("extension_ui_response"),
     sessionId: sessionIdSchema,
@@ -92,13 +89,19 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("set_tool_mode"),
     sessionId: sessionIdSchema,
-    mode: z.enum(["read_only", "workspace_write"]),
+    mode: z.enum(["read_only", "full_access"]),
   }),
   z.object({
     type: z.literal("rename_conversation"),
     sessionId: sessionIdSchema,
     conversationId: conversationIdSchema,
     name: required.max(120),
+  }),
+  z.object({
+    type: z.literal("delete_conversation"),
+    commandId: commandIdSchema,
+    sessionId: sessionIdSchema,
+    conversationId: conversationIdSchema,
   }),
   z.object({
     type: z.literal("set_api_key"),
@@ -117,6 +120,9 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
 
 export type ClientCommand = z.infer<typeof clientCommandSchema>;
 export type AcknowledgedSettingOperation = "select_model" | "set_api_key";
+export type AcknowledgedCommandOperation =
+  | AcknowledgedSettingOperation
+  | "delete_conversation";
 export type ThinkingLevel = Extract<ClientCommand, { type: "set_thinking" }>["level"];
 export type ToolMode = Extract<ClientCommand, { type: "set_tool_mode" }>["mode"];
 
@@ -165,7 +171,6 @@ export interface PublicState {
   activeRun?: {
     id: string;
     phase: "queued" | "running" | "cancelling";
-    pendingApprovals: ToolApprovalRequest[];
   };
   selectedModel?: { provider: string; id: string };
   thinkingLevel: ThinkingLevel;
@@ -184,14 +189,6 @@ export type AuthRequest =
   | { kind: "device"; userCode: string; verificationUri: string; expiresInSeconds?: number }
   | { kind: "prompt" | "manual"; message: string; placeholder?: string; allowEmpty?: boolean }
   | { kind: "select"; message: string; options: Array<{ id: string; label: string }> };
-
-export interface ToolApprovalRequest {
-  approvalId: string;
-  toolCallId: string;
-  toolName: string;
-  args?: unknown;
-  reason?: string;
-}
 
 export interface ConversationHistoryTool {
   toolCallId: string;
@@ -219,6 +216,16 @@ export interface ConversationSummary {
   messageCount: number;
 }
 
+export interface DirectoryListing {
+  path: string;
+  parentPath: string | null;
+  directories: Array<{
+    name: string;
+    path: string;
+  }>;
+  truncated: boolean;
+}
+
 /**
  * Stable workbench events consumed by the browser.
  * Pi SDK events are projected into this small contract on the server.
@@ -240,6 +247,7 @@ export type ErrorScope = "auth" | "command" | "protocol" | "session" | "settings
 
 export type ServerEvent =
   | { type: "hello"; protocolVersion: number; startupCwd: string }
+  | ({ type: "directory_listing"; commandId: string } & DirectoryListing)
   | { type: "state"; state: PublicState }
   | {
       type: "project_snapshot";
@@ -275,7 +283,7 @@ export type ServerEvent =
   | { type: "auth_complete"; authFlowId: string; provider: string }
   | {
       type: "command_complete";
-      operation: AcknowledgedSettingOperation;
+      operation: AcknowledgedCommandOperation;
       commandId: string;
       sessionId: string;
     }
@@ -332,17 +340,10 @@ const publicStateSchema: z.ZodType<PublicState> = z.object({
   activeRun: z.object({
     id: runIdSchema,
     phase: z.enum(["queued", "running", "cancelling"]),
-    pendingApprovals: z.array(z.object({
-      approvalId: approvalIdSchema,
-      toolCallId: z.string(),
-      toolName: z.string(),
-      args: z.unknown().optional(),
-      reason: z.string().optional(),
-    })),
   }).optional(),
   selectedModel: z.object({ provider: z.string(), id: z.string() }).optional(),
   thinkingLevel: thinkingLevelSchema,
-  toolMode: z.enum(["read_only", "workspace_write"]),
+  toolMode: z.enum(["read_only", "full_access"]),
   availableThinkingLevels: z.array(thinkingLevelSchema),
   providers: z.array(publicProviderSchema),
   registryError: z.string().optional(),
@@ -410,15 +411,16 @@ const sessionEventSchema: z.ZodType<SessionEvent> = z.discriminatedUnion("type",
   z.object({ type: z.literal("usage"), usage: tokenUsageSchema }),
 ]);
 const commandTypeSchema = z.enum([
+  "browse_directory",
   "initialize",
   "prompt",
   "abort",
-  "tool_approval_response",
   "extension_ui_response",
   "select_model",
   "set_thinking",
   "set_tool_mode",
   "rename_conversation",
+  "delete_conversation",
   "set_api_key",
   "login_oauth",
   "logout",
@@ -432,6 +434,17 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     type: z.literal("hello"),
     protocolVersion: z.number().int().nonnegative(),
     startupCwd: z.string(),
+  }),
+  z.object({
+    type: z.literal("directory_listing"),
+    commandId: commandIdSchema,
+    path: required.max(4096),
+    parentPath: required.max(4096).nullable(),
+    directories: z.array(z.object({
+      name: z.string().min(1).max(1024),
+      path: required.max(4096),
+    })).max(500),
+    truncated: z.boolean(),
   }),
   z.object({ type: z.literal("state"), state: publicStateSchema }),
   z.object({
@@ -502,7 +515,7 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("auth_complete"), authFlowId: authFlowIdSchema, provider: z.string() }),
   z.object({
     type: z.literal("command_complete"),
-    operation: z.enum(["select_model", "set_api_key"]),
+    operation: z.enum(["select_model", "set_api_key", "delete_conversation"]),
     commandId: commandIdSchema,
     sessionId: sessionIdSchema,
   }),
@@ -523,7 +536,11 @@ export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.
     if (
       event.type === "error"
       && event.commandId
-      && (event.operation === "select_model" || event.operation === "set_api_key")
+      && (
+        event.operation === "select_model"
+        || event.operation === "set_api_key"
+        || event.operation === "delete_conversation"
+      )
       && !event.sessionId
     ) {
       context.addIssue({

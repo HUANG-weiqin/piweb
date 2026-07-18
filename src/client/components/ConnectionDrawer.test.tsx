@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PublicState } from "../../shared/protocol";
 import { ConnectionDrawer } from "./ConnectionDrawer";
@@ -16,7 +16,7 @@ const state: PublicState = {
   cwd: "E:\\work",
   busy: false,
   thinkingLevel: "off",
-  toolMode: "workspace_write",
+  toolMode: "full_access",
   availableThinkingLevels: ["off", "low"],
   providers: [{
     id: "test",
@@ -52,6 +52,7 @@ function drawerProps(overrides: Partial<Parameters<typeof ConnectionDrawer>[0]> 
     onNewConversation: () => undefined,
     onOpenConversation: () => undefined,
     onRenameConversation: () => undefined,
+    onDeleteConversation: () => true,
     onKey: () => commandId,
     onOAuth: () => undefined,
     onLogout: () => undefined,
@@ -76,7 +77,23 @@ describe("ConnectionDrawer", () => {
     expect(screen.queryByText("locked")).not.toBeInTheDocument();
     expect(screen.getByRole("option", { name: "低" })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "high" })).not.toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "工作区可写" })).toBeInTheDocument();
+    expect(within(screen.getByRole("combobox", { name: "工具权限" }))
+      .getAllByRole("option")
+      .map((option) => option.textContent)).toEqual(["全部授权", "只读"]);
+  });
+
+  it("explains that full access executes tools without prompting", () => {
+    renderDrawer({ state: { ...state, toolMode: "full_access" } });
+
+    expect(screen.getByText(/直接执行，不会询问/)).toBeInTheDocument();
+    expect(screen.getByText(/项目外文件/)).toBeInTheDocument();
+  });
+
+  it("limits read-only mode to Pi's native reading tools", () => {
+    renderDrawer({ state: { ...state, toolMode: "read_only" } });
+
+    expect(screen.getByText(/read、grep、find 和 ls/)).toBeInTheDocument();
+    expect(screen.getByText(/命令.*被阻止/)).toBeInTheDocument();
   });
 
   it("does not crash if the browser briefly receives state from an older server", () => {
@@ -112,13 +129,55 @@ describe("ConnectionDrawer", () => {
       onRenameConversation: renameConversation,
     });
 
-    fireEvent.click(screen.getByRole("button", { name: /older work/ }));
+    fireEvent.click(screen.getByRole("button", {
+      name: "打开对话 older work",
+    }));
     expect(openConversation).toHaveBeenCalledWith("conversation-2");
     fireEvent.change(screen.getByRole("textbox", { name: "当前对话名称" }), {
       target: { value: "Renamed" },
     });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
     expect(renameConversation).toHaveBeenCalledWith("Renamed");
+  });
+
+  it("confirms before deleting a non-current conversation", () => {
+    const deleteConversation = vi.fn(() => true);
+    renderDrawer({
+      conversations: [
+        ...conversations,
+        {
+          id: "conversation-2",
+          name: "Older work",
+          preview: "older",
+          createdAt: "2026-07-17T12:00:00.000Z",
+          updatedAt: "2026-07-17T12:01:00.000Z",
+          messageCount: 4,
+        },
+      ],
+      onDeleteConversation: deleteConversation,
+    });
+
+    expect(screen.queryByRole("button", {
+      name: "删除对话 Current",
+    })).not.toBeInTheDocument();
+    expect(screen.getByText("当前对话需先新建或切换后删除。")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", {
+      name: "删除对话 Older work",
+    }));
+    expect(deleteConversation).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "永久删除“Older work”？此操作无法撤销。",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "保留" }));
+    expect(screen.queryByText(/永久删除“Older work”/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", {
+      name: "删除对话 Older work",
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
+    expect(deleteConversation).toHaveBeenCalledWith("conversation-2");
   });
 
   it("shows models only for the provider the user chose", () => {

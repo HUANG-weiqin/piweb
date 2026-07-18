@@ -5,21 +5,23 @@ import {
   type AuthRequest,
   type ClientCommand,
   type ConversationSummary,
+  type DirectoryListing,
   type PublicState,
   type ServerEvent,
   type ThinkingLevel,
   type ToolMode,
 } from "../shared/protocol";
+import { isToolModeRestriction } from "../shared/tool-mode";
 import { chatReducer, initialChatState } from "./chat/reducer";
 import { AuthDialog } from "./components/AuthDialog";
 import { Chat } from "./components/Chat";
 import { ConnectionDrawer } from "./components/ConnectionDrawer";
+import { DirectoryBrowserDialog } from "./components/DirectoryBrowserDialog";
 import {
   ExtensionDialog,
   type PendingExtensionUI,
 } from "./components/ExtensionDialog";
 import { Setup } from "./components/Setup";
-import { ToolApprovalDialog } from "./components/ToolApprovalDialog";
 import { PiSocket } from "./lib/socket";
 import { readStoredString, writeStoredString } from "./lib/storage";
 
@@ -32,29 +34,48 @@ interface PendingPrompt {
   text: string;
 }
 
+interface PendingConversationDeletion {
+  commandId: string;
+  conversationId: string;
+}
+
+interface DirectoryBrowserState {
+  commandId: string;
+  listing?: DirectoryListing;
+  error: string;
+}
+
+function storedToolMode(): ToolMode {
+  return readStoredString(TOOL_MODE_KEY) === "read_only"
+    ? "read_only"
+    : "full_access";
+}
+
 export function App() {
   const [transportOnline, setTransportOnline] = useState(false);
   const [protocolReady, setProtocolReady] = useState(false);
   const [protocolError, setProtocolError] = useState("");
-  const [startupCwd, setStartupCwd] = useState(() => readStoredString(CWD_KEY));
+  const [setupCwd, setSetupCwd] = useState(() => readStoredString(CWD_KEY));
   const [activeCwd, setActiveCwd] = useState("");
   const activeCwdRef = useRef("");
   const sessionIdRef = useRef("");
   const conversationIdRef = useRef("");
-  const toolModeRef = useRef<ToolMode>(
-    readStoredString(TOOL_MODE_KEY) === "read_only" ? "read_only" : "workspace_write",
-  );
+  const toolModeRef = useRef<ToolMode>(storedToolMode());
   const confirmedToolModeRef = useRef<ToolMode>(toolModeRef.current);
-  const pendingToolModeRef = useRef<ToolMode | "">("");
+  const pendingToolModeRef = useRef<ToolMode | undefined>(undefined);
   const authFlowIdRef = useRef("");
   const [draft, setDraft] = useState("");
   const [pendingPrompt, setPendingPrompt] = useState<PendingPrompt>();
   const pendingPromptRef = useRef<PendingPrompt | undefined>(undefined);
+  const [pendingConversationDeletion, setPendingConversationDeletionState] =
+    useState<PendingConversationDeletion>();
+  const pendingConversationDeletionRef =
+    useRef<PendingConversationDeletion | undefined>(undefined);
+  const [directoryBrowser, setDirectoryBrowserState] = useState<DirectoryBrowserState>();
+  const directoryBrowserRef = useRef<DirectoryBrowserState | undefined>(undefined);
   const [promptNotice, setPromptNotice] = useState("");
   const [outstandingRunId, setOutstandingRunId] = useState("");
   const outstandingRunIdRef = useRef("");
-  const [submittingApprovalId, setSubmittingApprovalId] = useState("");
-  const submittingApprovalIdRef = useRef("");
   const [state, setState] = useState<PublicState>();
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [conversationIndexTruncated, setConversationIndexTruncated] = useState(false);
@@ -91,6 +112,16 @@ export function App() {
     pendingPromptRef.current = prompt;
     setPendingPrompt(prompt);
   };
+  const updatePendingConversationDeletion = (
+    pending: PendingConversationDeletion | undefined,
+  ) => {
+    pendingConversationDeletionRef.current = pending;
+    setPendingConversationDeletionState(pending);
+  };
+  const updateDirectoryBrowser = (next: DirectoryBrowserState | undefined) => {
+    directoryBrowserRef.current = next;
+    setDirectoryBrowserState(next);
+  };
   const acceptPendingPrompt = (sessionId: string, runId: string) => {
     const pending = pendingPromptRef.current;
     if (
@@ -109,10 +140,6 @@ export function App() {
     setPromptNotice(
       "发送状态未确认。内容已保留；请先查看恢复后的对话，确认没有出现后再重试。",
     );
-  };
-  const updateSubmittingApprovalId = (approvalId: string) => {
-    submittingApprovalIdRef.current = approvalId;
-    setSubmittingApprovalId(approvalId);
   };
   const updateConversationReady = (ready: boolean) => {
     conversationReadyRef.current = ready;
@@ -144,9 +171,10 @@ export function App() {
           sessionIdRef.current = "";
           conversationIdRef.current = "";
           authFlowIdRef.current = "";
+          updateDirectoryBrowser(undefined);
           markPendingPromptUnconfirmed();
+          updatePendingConversationDeletion(undefined);
           updateOutstandingRunId("");
-          updateSubmittingApprovalId("");
           setAuth({});
           clearSessionProjection();
           dispatch({ type: "reset" });
@@ -156,13 +184,12 @@ export function App() {
         }
         setProtocolError("");
         setProtocolReady(true);
-        setStartupCwd((current) => current || event.startupCwd);
+        setSetupCwd((current) => current || event.startupCwd);
         if (activeCwdRef.current) {
           const sessionId = crypto.randomUUID();
           sessionIdRef.current = sessionId;
           authFlowIdRef.current = "";
           updateOutstandingRunId("");
-          updateSubmittingApprovalId("");
           setAuth({});
           dispatch({ type: "reset" });
           clearSessionProjection();
@@ -176,6 +203,19 @@ export function App() {
               : { kind: "recent" },
           });
         }
+      } else if (event.type === "directory_listing") {
+        const current = directoryBrowserRef.current;
+        if (!current || event.commandId !== current.commandId) return;
+        updateDirectoryBrowser({
+          commandId: "",
+          error: "",
+          listing: {
+            path: event.path,
+            parentPath: event.parentPath,
+            directories: event.directories,
+            truncated: event.truncated,
+          },
+        });
       } else if (event.type === "state") {
         if (!sessionIdRef.current || event.state.sessionId !== sessionIdRef.current) return;
         if (event.state.conversationId !== conversationIdRef.current) {
@@ -186,23 +226,18 @@ export function App() {
         if (event.state.activeRun?.id === outstandingRunIdRef.current) {
           updateOutstandingRunId("");
         }
-        if (
-          submittingApprovalIdRef.current
-          && !event.state.activeRun?.pendingApprovals.some((approval) => (
-            approval.approvalId === submittingApprovalIdRef.current
-          ))
-        ) {
-          updateSubmittingApprovalId("");
-        }
         setActiveCwd(event.state.cwd);
         activeCwdRef.current = event.state.cwd;
+        setSetupCwd(event.state.cwd);
         writeStoredString(CWD_KEY, event.state.cwd);
         confirmedToolModeRef.current = event.state.toolMode;
         if (pendingToolModeRef.current === event.state.toolMode) {
-          pendingToolModeRef.current = "";
+          pendingToolModeRef.current = undefined;
         }
-        const reconnectMode = pendingToolModeRef.current === "read_only"
-          ? "read_only"
+        const pendingToolMode = pendingToolModeRef.current;
+        const reconnectMode = pendingToolMode
+          && isToolModeRestriction(event.state.toolMode, pendingToolMode)
+          ? pendingToolMode
           : event.state.toolMode;
         toolModeRef.current = reconnectMode;
         writeStoredString(TOOL_MODE_KEY, reconnectMode);
@@ -266,6 +301,17 @@ export function App() {
         setAuth({});
       } else if (event.type === "command_complete") {
         if (event.sessionId !== sessionIdRef.current) return;
+        if (event.operation === "delete_conversation") {
+          const pending = pendingConversationDeletionRef.current;
+          if (!pending || pending.commandId !== event.commandId) return;
+          updatePendingConversationDeletion(undefined);
+          setNotification({
+            id: ++notificationIdRef.current,
+            level: "info",
+            message: "对话已删除",
+          });
+          return;
+        }
         setSettingResult({
           operation: event.operation,
           commandId: event.commandId,
@@ -275,6 +321,26 @@ export function App() {
       } else if (event.type === "error") {
         if (event.sessionId && event.sessionId !== sessionIdRef.current) return;
         if (event.authFlowId && event.authFlowId !== authFlowIdRef.current) return;
+        if (event.operation === "browse_directory") {
+          const current = directoryBrowserRef.current;
+          if (!current || event.commandId !== current.commandId) return;
+          updateDirectoryBrowser({
+            ...current,
+            commandId: "",
+            error: event.message,
+          });
+          return;
+        }
+        if (
+          event.operation === "delete_conversation"
+          && event.commandId
+        ) {
+          const pending = pendingConversationDeletionRef.current;
+          if (!pending || pending.commandId !== event.commandId) return;
+          updatePendingConversationDeletion(undefined);
+          setError(`删除对话失败：${event.message}`);
+          return;
+        }
         let promptRejectedBeforeAcceptance = false;
         if (
           event.scope === "command"
@@ -328,9 +394,13 @@ export function App() {
       if (!connected) {
         setProtocolReady(false);
         setSettingResult(undefined);
+        updateDirectoryBrowser(undefined);
         markPendingPromptUnconfirmed();
+        if (pendingConversationDeletionRef.current) {
+          updatePendingConversationDeletion(undefined);
+          setError("删除状态未确认，请检查项目对话列表后重试。");
+        }
         updateOutstandingRunId("");
-        updateSubmittingApprovalId("");
         authFlowIdRef.current = "";
         setAuth({});
         setExtensionUI([]);
@@ -364,6 +434,32 @@ export function App() {
     return ok;
   };
   const clearSettingResult = useCallback(() => setSettingResult(undefined), []);
+  const browseDirectory = (path?: string) => {
+    const current = directoryBrowserRef.current;
+    const commandId = crypto.randomUUID();
+    const next: DirectoryBrowserState = {
+      commandId,
+      listing: current?.listing,
+      error: "",
+    };
+    updateDirectoryBrowser(next);
+    setError("");
+    if (!send({
+      type: "browse_directory",
+      commandId,
+      ...(path ? { path } : {}),
+    })) {
+      updateDirectoryBrowser({
+        ...next,
+        commandId: "",
+        error: "本地服务未连接",
+      });
+    }
+  };
+  const openDirectoryBrowser = () => {
+    const path = setupCwd.trim();
+    browseDirectory(path || undefined);
+  };
   const initialize = (
     cwd: string,
     conversation: Extract<ClientCommand, { type: "initialize" }>["conversation"] = {
@@ -384,7 +480,6 @@ export function App() {
       : "";
     authFlowIdRef.current = "";
     updateOutstandingRunId("");
-    updateSubmittingApprovalId("");
     setAuth({});
     autoOpened.current = false;
     dispatch({ type: "reset" });
@@ -421,17 +516,14 @@ export function App() {
     if (sessionId && runId) send({ type: "abort", sessionId, runId });
   };
   const online = transportOnline && protocolReady;
-  const toolApprovalRequest = online ? state?.activeRun?.pendingApprovals[0] : undefined;
-  const authModalVisible = !toolApprovalRequest && Boolean(auth.request || auth.progress);
+  const authModalVisible = Boolean(auth.request || auth.progress);
   const extensionPending = online
-    && !toolApprovalRequest
     && !authModalVisible
     && !settingsDialogOpen
     ? extensionUI[0]
     : undefined;
   const blockingModalVisible = Boolean(
-    toolApprovalRequest
-    || authModalVisible
+    authModalVisible
     || extensionPending,
   );
   const extensionDialog = <ExtensionDialog
@@ -472,11 +564,27 @@ export function App() {
 
   if (!activeCwd || !state) return <>
     <Setup
-      initialCwd={startupCwd}
+      cwd={setupCwd}
       online={online}
+      pickingDirectory={Boolean(directoryBrowser)}
       unavailableLabel={protocolError ? "协议不兼容" : undefined}
+      onCwdChange={setSetupCwd}
+      onPickDirectory={openDirectoryBrowser}
       onStart={initialize}
     />
+    {directoryBrowser && <DirectoryBrowserDialog
+      listing={directoryBrowser.listing}
+      loading={Boolean(directoryBrowser.commandId)}
+      error={directoryBrowser.error || undefined}
+      online={online}
+      onNavigate={browseDirectory}
+      onOpenStartup={() => browseDirectory()}
+      onSelect={(path) => {
+        setSetupCwd(path);
+        updateDirectoryBrowser(undefined);
+      }}
+      onClose={() => updateDirectoryBrowser(undefined)}
+    />}
     {extensionDialog}
     {feedback}
   </>;
@@ -514,8 +622,8 @@ export function App() {
         setDraft("");
         setPromptNotice("");
         updatePendingPrompt(undefined);
+        updatePendingConversationDeletion(undefined);
         updateOutstandingRunId("");
-        updateSubmittingApprovalId("");
         setAuth({});
         setActiveCwd("");
         clearSessionProjection();
@@ -529,7 +637,11 @@ export function App() {
       open={drawer && !blockingModalVisible}
       online={online}
       toolModeBusy={state.busy || Boolean(outstandingRunId)}
-      conversationBusy={state.busy || Boolean(outstandingRunId)}
+      conversationBusy={
+        state.busy
+        || Boolean(outstandingRunId)
+        || Boolean(pendingConversationDeletion)
+      }
       settingResult={settingResult}
       onClose={() => setDrawer(false)}
       onNewConversation={() => initialize(state.cwd, { kind: "new" })}
@@ -548,6 +660,30 @@ export function App() {
             name,
           });
         }
+      }}
+      onDeleteConversation={(conversationId) => {
+        const sessionId = sessionIdRef.current;
+        if (
+          !sessionId
+          || conversationId === state.conversationId
+          || pendingConversationDeletionRef.current
+        ) {
+          return false;
+        }
+        const commandId = crypto.randomUUID();
+        const pending = { commandId, conversationId };
+        updatePendingConversationDeletion(pending);
+        setError("");
+        if (send({
+          type: "delete_conversation",
+          commandId,
+          sessionId,
+          conversationId,
+        })) {
+          return true;
+        }
+        updatePendingConversationDeletion(undefined);
+        return false;
       }}
       onKey={(provider, key) => {
         const commandId = crypto.randomUUID();
@@ -588,12 +724,13 @@ export function App() {
         const sessionId = sessionIdRef.current;
         if (!sessionId) return;
         pendingToolModeRef.current = mode;
-        if (mode === "read_only") {
+        const restrictive = isToolModeRestriction(confirmedToolModeRef.current, mode);
+        if (restrictive) {
           toolModeRef.current = mode;
           writeStoredString(TOOL_MODE_KEY, mode);
         }
-        if (!send({ type: "set_tool_mode", sessionId, mode }) && mode === "workspace_write") {
-          pendingToolModeRef.current = "";
+        if (!send({ type: "set_tool_mode", sessionId, mode }) && !restrictive) {
+          pendingToolModeRef.current = undefined;
         }
       }} />
     <AuthDialog {...auth} visible={authModalVisible} onRespond={(requestId, response) => {
@@ -605,37 +742,6 @@ export function App() {
       authFlowIdRef.current = "";
       setAuth({});
     }} />
-    <ToolApprovalDialog
-      request={toolApprovalRequest}
-      pendingCount={state.activeRun?.pendingApprovals.length ?? 0}
-      online={online}
-      cancelling={state.activeRun?.phase === "cancelling"}
-      submitting={submittingApprovalId === state.activeRun?.pendingApprovals[0]?.approvalId}
-      onDecision={(decision) => {
-        const sessionId = sessionIdRef.current;
-        const activeRun = state.activeRun;
-        const approval = activeRun?.pendingApprovals[0];
-        if (
-          sessionId
-          && activeRun
-          && approval
-          && submittingApprovalIdRef.current !== approval.approvalId
-        ) {
-          updateSubmittingApprovalId(approval.approvalId);
-          const accepted = send({
-            type: "tool_approval_response",
-            sessionId,
-            runId: activeRun.id,
-            approvalId: approval.approvalId,
-            decision,
-          });
-          if (!accepted) updateSubmittingApprovalId("");
-          return accepted;
-        }
-        return false;
-      }}
-      onAbort={abortCurrentRun}
-    />
     {extensionDialog}
     {feedback}
   </>;
