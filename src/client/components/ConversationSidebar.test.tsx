@@ -163,8 +163,9 @@ describe("ConversationSidebar", () => {
       const status = screen.getByRole("status", {
         name: kind === "queued" ? "排队中" : "运行中",
       });
-      expect(status).toHaveClass("conversation-activity-spinner");
       expect(status).toHaveClass(`activity-${kind}`);
+      expect(status.querySelector(".conversation-activity-spinner"))
+        .toBeInTheDocument();
     },
   );
 
@@ -281,6 +282,49 @@ describe("ConversationSidebar", () => {
     fireEvent.click(screen.getByRole("button", { name: "展开会话栏" }));
     expect(onToggleCollapsed).toHaveBeenLastCalledWith(false);
     expect(screen.getByRole("button", { name: "新建会话" })).toBeInTheDocument();
+    expect(screen.queryByRole("separator", { name: "调整会话栏宽度" }))
+      .not.toBeInTheDocument();
+  });
+
+  it("resizes the expanded sidebar within fixed pointer and keyboard bounds", () => {
+    render(
+      <ConversationSidebar
+        conversations={[baseConversation]}
+        collapsed={false}
+        truncated={false}
+        online
+        onToggleCollapsed={vi.fn()}
+        onSelect={vi.fn()}
+        onCreate={vi.fn()}
+        onRename={vi.fn()}
+        onDelete={vi.fn(() => true)}
+      />,
+    );
+
+    const sidebar = screen.getByRole("complementary", { name: "项目会话栏" });
+    const handle = screen.getByRole("separator", { name: "调整会话栏宽度" });
+    expect(handle).toHaveAttribute("aria-valuemin", "240");
+    expect(handle).toHaveAttribute("aria-valuemax", "420");
+    expect(handle).toHaveAttribute("aria-valuenow", "286");
+    expect(sidebar.style.getPropertyValue("--conversation-sidebar-width"))
+      .toBe("286px");
+
+    fireEvent.keyDown(handle, { key: "ArrowRight" });
+    expect(handle).toHaveAttribute("aria-valuenow", "302");
+    expect(sidebar.style.getPropertyValue("--conversation-sidebar-width"))
+      .toBe("302px");
+
+    fireEvent.keyDown(handle, { key: "End" });
+    expect(handle).toHaveAttribute("aria-valuenow", "420");
+    fireEvent.pointerDown(handle, { button: 0, clientX: 420, pointerId: 1 });
+    fireEvent.pointerMove(handle, { clientX: 700, pointerId: 1 });
+    fireEvent.pointerUp(handle, { pointerId: 1 });
+    expect(handle).toHaveAttribute("aria-valuenow", "420");
+
+    fireEvent.keyDown(handle, { key: "Home" });
+    expect(handle).toHaveAttribute("aria-valuenow", "240");
+    expect(sidebar.style.getPropertyValue("--conversation-sidebar-width"))
+      .toBe("240px");
   });
 
   it("confirms deletion for the current idle conversation and blocks active deletion", () => {

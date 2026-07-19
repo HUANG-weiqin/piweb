@@ -741,8 +741,7 @@ pre {
   border-radius: 8px;
 }
 
-.markdown pre,
-.tool pre {
+.markdown pre {
   max-width: 100%;
   overflow: auto;
   padding: 12px;
@@ -763,7 +762,6 @@ pre {
 }
 
 .thinking,
-.tool,
 .tools {
   margin: 8px 0;
   border: 1px solid var(--line);
@@ -772,57 +770,97 @@ pre {
   background: color-mix(in srgb, var(--panel) 48%, transparent);
 }
 
-.thinking summary,
-.tool summary,
-.tools summary {
+.thinking > summary,
+.tools > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 8px 11px;
   cursor: pointer;
   font-size: 13px;
   list-style: none;
 }
 
-.tool summary,
-.tools summary {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-}
-
-.thinking summary::-webkit-details-marker,
-.tool summary::-webkit-details-marker,
-.tools summary::-webkit-details-marker {
+.thinking > summary::-webkit-details-marker,
+.tool > summary::-webkit-details-marker,
+.tools > summary::-webkit-details-marker {
   display: none;
 }
 
-.tool summary::marker,
-.tools summary::marker {
+.thinking > summary::marker,
+.tool > summary::marker,
+.tools > summary::marker {
   content: "";
 }
 
-.tool-title {
+.thinking > summary {
+  font-weight: 650;
+}
+
+.thinking-live,
+.thinking-complete {
+  display: inline-grid;
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+}
+
+.thinking-complete {
+  color: var(--success);
+  font-size: 12px;
+}
+
+.thinking-spinner,
+.tool-spinner {
   display: block;
-  width: 100%;
-  overflow: hidden;
-  color: var(--muted);
-  font-family: "Cascadia Code", Consolas, monospace;
-  letter-spacing: 0.02em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  width: 14px;
+  height: 14px;
+  border: 2px solid color-mix(in srgb, currentColor 22%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: agent-activity-spin 850ms linear infinite;
+}
+
+.thinking.is-active > summary {
+  color: color-mix(in srgb, var(--warning) 86%, currentColor);
+}
+
+.thinking-chevron,
+.tools-chevron,
+.tool-chevron {
+  margin-left: auto;
+  transition: transform 160ms ease;
+}
+
+.thinking[open] > summary .thinking-chevron,
+.tools[open] > summary .tools-chevron,
+.tool[open] > summary .tool-chevron {
+  transform: rotate(180deg);
 }
 
 .thinking > div {
-  padding: 0 11px 10px;
+  padding: 1px 37px 11px;
   font-size: 13px;
+  line-height: 1.6;
   white-space: pre-wrap;
 }
 
+.tools > summary {
+  min-height: 38px;
+}
+
+.tools-title {
+  font-weight: 650;
+}
+
 .tool-stack {
-  max-height: min(220px, 40vh);
+  max-height: min(360px, 48vh);
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 4px 4px 8px;
+  gap: 7px;
+  padding: 4px 7px 9px;
 }
 
 .tool-stack::-webkit-scrollbar {
@@ -848,26 +886,178 @@ pre {
   font-size: 12px;
 }
 
-.tools > .tool {
-  margin: 4px 6px 0;
+.tool {
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--line) 88%, transparent);
+  border-radius: 9px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--panel-strong) 72%, transparent);
 }
 
-.tool pre {
+.tool > summary {
+  display: flex;
+  min-height: 46px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.tool > summary:hover {
+  background: color-mix(in srgb, var(--soft) 58%, transparent);
+}
+
+.tool-status {
+  display: inline-grid;
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border-radius: 7px;
+  background: var(--soft);
+}
+
+.tool-status-symbol {
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.tool-summary {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 9px;
+}
+
+.tool-summary strong {
+  flex: 0 0 auto;
+  color: color-mix(in srgb, currentColor 88%, var(--accent));
+  font-size: 13px;
+  font-weight: 680;
+}
+
+.tool-target {
+  overflow: hidden;
+  color: var(--muted);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-body {
+  border-top: 1px solid color-mix(in srgb, var(--line) 74%, transparent);
+  background: color-mix(in srgb, var(--soft) 24%, transparent);
+}
+
+.tool-section {
+  padding: 11px 12px 12px;
+}
+
+.tool-section + .tool-section {
+  border-top: 1px solid color-mix(in srgb, var(--line) 66%, transparent);
+}
+
+.tool-section h4,
+.tool-result-details h5 {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+}
+
+.tool-result-details {
+  margin-top: 10px;
+}
+
+.tool-fields {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+}
+
+.tool-field {
+  display: grid;
+  grid-template-columns: minmax(84px, 0.25fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+}
+
+.tool-field dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.tool-field dd {
+  min-width: 0;
+  margin: 0;
+  color: color-mix(in srgb, currentColor 90%, var(--accent));
+  font-size: 12px;
+}
+
+.tool-value {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.tool-value-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 20px;
+}
+
+.tool-value-list > li {
+  padding-left: 2px;
+}
+
+.tool-value-list .tool-fields {
+  padding: 8px 9px;
+  border: 1px solid color-mix(in srgb, var(--line) 76%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+}
+
+.tool-text {
   max-height: 280px;
-  margin: 0 10px 10px;
+  max-width: 100%;
+  overflow: auto;
+  margin: 0;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--line) 82%, transparent);
+  border-radius: 8px;
+  color: color-mix(in srgb, currentColor 90%, var(--accent));
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  scrollbar-width: thin;
+  white-space: pre-wrap;
 }
 
-.tool-pending summary span,
-.tool-running summary span {
+.tool-pending .tool-status,
+.tool-running .tool-status {
   color: #b98014;
+  background: color-mix(in srgb, var(--warning-soft) 72%, transparent);
 }
 
-.tool-done summary span {
+.tool-done .tool-status {
   color: var(--success);
+  background: color-mix(in srgb, var(--success-soft) 72%, transparent);
 }
 
-.tool-error summary span {
+.tool-error .tool-status {
   color: var(--danger);
+  background: color-mix(in srgb, var(--danger-soft) 72%, transparent);
+}
+
+@keyframes agent-activity-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .history-note {
@@ -1085,7 +1275,7 @@ pre {
 .conversation-sidebar {
   position: relative;
   z-index: 8;
-  width: 286px;
+  width: var(--conversation-sidebar-width, 286px);
   height: 100vh;
   height: 100dvh;
   display: grid;
@@ -1098,6 +1288,35 @@ pre {
 
 .conversation-sidebar.collapsed {
   width: 58px;
+}
+
+.conversation-sidebar-resize-handle {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  right: -5px;
+  width: 10px;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.conversation-sidebar-resize-handle::after {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 4px;
+  width: 2px;
+  content: "";
+  background: color-mix(in srgb, var(--focus) 32%, transparent);
+  opacity: 0.18;
+  transition: opacity 120ms ease;
+}
+
+.conversation-sidebar-resize-handle:hover::after,
+.conversation-sidebar-resize-handle:focus-visible::after,
+.conversation-sidebar-resize-handle:active::after {
+  opacity: 0.72;
 }
 
 .conversation-sidebar-header,
@@ -1229,8 +1448,21 @@ pre {
 }
 
 .conversation-activity-spinner {
+  display: block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid color-mix(in srgb, currentColor 22%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: agent-activity-spin 850ms linear infinite;
+}
+
+.activity-queued {
+  color: var(--warning);
+}
+
+.activity-running {
   color: var(--success);
-  animation: conversation-spin 900ms linear infinite;
 }
 
 .activity-waiting {
@@ -1245,12 +1477,6 @@ pre {
   color: var(--on-accent);
   background: var(--warning);
   font-weight: 900;
-}
-
-@keyframes conversation-spin {
-  to {
-    transform: rotate(360deg);
-  }
 }
 
 .conversation-sidebar-role,
@@ -2581,6 +2807,10 @@ pre {
     box-shadow: 18px 0 52px rgb(18 16 12 / 28%);
   }
 
+  .conversation-sidebar-resize-handle {
+    display: none;
+  }
+
   .conversation-sidebar.collapsed {
     width: 48px;
     height: 64px;
@@ -2749,7 +2979,9 @@ pre {
     transition-duration: 0.01ms !important;
   }
 
-  .conversation-activity-spinner {
+  .conversation-activity-spinner,
+  .thinking-spinner,
+  .tool-spinner {
     animation: none !important;
   }
 }

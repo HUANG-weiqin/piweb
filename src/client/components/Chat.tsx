@@ -11,6 +11,7 @@ import {
   type ConversationCompactionMarker,
   type ConversationMessageCard,
   type ConversationRoleSnapshot,
+  type PublicState,
   type ThinkingLevel,
   type TokenUsage,
   type ToolMode,
@@ -29,6 +30,7 @@ interface ChatProps {
   chat: ChatState;
   historyTruncated: boolean;
   busy: boolean;
+  activeRun?: PublicState["activeRun"];
   sessionTokenUsage?: TokenUsage;
   contextTokenCount: number | null | undefined;
   contextWindow: number | null | undefined;
@@ -151,6 +153,7 @@ export function Chat({
   chat,
   historyTruncated,
   busy,
+  activeRun,
   sessionTokenUsage,
   contextTokenCount,
   contextWindow,
@@ -338,6 +341,13 @@ export function Chat({
               || Boolean(rewindingMessageId)
             }
             rewinding={rewindingMessageId === block.message.id}
+            activeThinking={
+              activeRun?.id === block.message.runId
+              && activeRun.phase === "running"
+              && !block.message.tools.some((tool) => (
+                tool.status === "pending" || tool.status === "running"
+              ))
+            }
           />)}
     </section>
     <div className="composer-wrap">

@@ -15,7 +15,10 @@ function ToolsPanel({ tools }: { tools: ChatMessage["tools"] }) {
   const hiddenToolsCount = hasOverflow && !showAllTools ? tools.length - visibleTools.length : 0;
 
   return <details className="tools">
-    <summary>工具调用（{tools.length}）</summary>
+    <summary>
+      <span className="tools-title">工具调用（{tools.length}）</span>
+      <span className="tools-chevron" aria-hidden="true">⌄</span>
+    </summary>
     <div className="tool-stack">
       {!!hiddenToolsCount && <p className="tool-stack-note">已折叠 {hiddenToolsCount} 条更早工具调用</p>}
       {visibleTools.map((tool) => <ToolCard key={tool.id} tool={tool} />)}
@@ -31,6 +34,7 @@ export function Message({
   onRewind,
   rewindDisabled = false,
   rewinding = false,
+  activeThinking = false,
 }: {
   message: ChatMessage;
   sessionCards?: ConversationMessageCard[];
@@ -38,6 +42,7 @@ export function Message({
   onRewind?(messageId: string): void;
   rewindDisabled?: boolean;
   rewinding?: boolean;
+  activeThinking?: boolean;
 }) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
 
@@ -109,7 +114,22 @@ export function Message({
     { async: false },
   ) as string);
   return <article className="message assistant">
-    {message.thinking && <details className="thinking"><summary>思考过程</summary><div>{message.thinking}</div></details>}
+    {message.thinking && <details className={`thinking${activeThinking ? " is-active" : ""}`}>
+      <summary>
+        {activeThinking
+          ? <span
+              className="thinking-live"
+              role="status"
+              aria-label="Agent 正在思考"
+            >
+              <span className="thinking-spinner" aria-hidden="true" />
+            </span>
+          : <span className="thinking-complete" aria-hidden="true">✓</span>}
+        <span>{activeThinking ? "正在思考" : "思考过程"}</span>
+        <span className="thinking-chevron" aria-hidden="true">⌄</span>
+      </summary>
+      <div>{message.thinking}</div>
+    </details>}
     {message.tools.length ? <ToolsPanel tools={message.tools} /> : null}
     {sessionCards.length > 0 && <section
       className="session-message-stack"

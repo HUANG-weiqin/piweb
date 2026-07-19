@@ -1,9 +1,28 @@
-import { useEffect, useState } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent,
+  type PointerEvent,
+} from "react";
 import type {
   ConversationActivity,
   ConversationSummary,
 } from "../../shared/protocol";
 import { useModalFocus } from "../lib/use-modal-focus";
+
+const DEFAULT_SIDEBAR_WIDTH = 286;
+const MIN_SIDEBAR_WIDTH = 240;
+const MAX_SIDEBAR_WIDTH = 420;
+const SIDEBAR_KEYBOARD_STEP = 16;
+
+function clampSidebarWidth(width: number): number {
+  return Math.min(
+    MAX_SIDEBAR_WIDTH,
+    Math.max(MIN_SIDEBAR_WIDTH, width),
+  );
+}
 
 export interface ConversationSidebarProps {
   conversations: ConversationSummary[];
@@ -87,29 +106,21 @@ function ActivityIndicator({
 }: {
   activity: ConversationActivity | undefined;
 }) {
+  if (activity?.kind === "queued" || activity?.kind === "running") {
+    const label = activity.kind === "queued" ? "排队中" : "运行中";
+    return (
+      <span
+        className={`conversation-activity-indicator activity-${activity.kind}`}
+        role="status"
+        aria-label={label}
+        title={label}
+      >
+        <span className="conversation-activity-spinner" aria-hidden="true" />
+      </span>
+    );
+  }
+
   switch (activity?.kind) {
-    case "queued":
-      return (
-        <span
-          className="conversation-activity-indicator conversation-activity-spinner activity-queued"
-          role="status"
-          aria-label="排队中"
-          title="排队中"
-        >
-          ◌
-        </span>
-      );
-    case "running":
-      return (
-        <span
-          className="conversation-activity-indicator conversation-activity-spinner activity-running"
-          role="status"
-          aria-label="运行中"
-          title="运行中"
-        >
-          ◌
-        </span>
-      );
     case "waiting":
       return (
         <span
@@ -271,6 +282,12 @@ export function ConversationSidebar({
   onRename,
   onDelete,
 }: ConversationSidebarProps) {
+  const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
+  const resizeState = useRef<{
+    pointerId: number;
+    startX: number;
+    startWidth: number;
+  } | undefined>(undefined);
   const [confirmDeleteConversationId, setConfirmDeleteConversationId] = useState("");
   const [renameConversationId, setRenameConversationId] = useState("");
   const [renameDraft, setRenameDraft] = useState("");
@@ -290,6 +307,33 @@ export function ConversationSidebar({
   const renameBlocked = !online || renameCandidateActive;
   const renameUnchanged =
     renameCandidate ? renameName === titleOf(renameCandidate) : false;
+  const sidebarStyle = {
+    "--conversation-sidebar-width": `${sidebarWidth}px`,
+  } as CSSProperties;
+  const startResize = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    resizeState.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: sidebarWidth,
+    };
+    event.preventDefault();
+  };
+  const resizeWithKeyboard = (event: KeyboardEvent<HTMLDivElement>) => {
+    let nextWidth: number | undefined;
+    if (event.key === "ArrowLeft") {
+      nextWidth = sidebarWidth - SIDEBAR_KEYBOARD_STEP;
+    } else if (event.key === "ArrowRight") {
+      nextWidth = sidebarWidth + SIDEBAR_KEYBOARD_STEP;
+    } else if (event.key === "Home") {
+      nextWidth = MIN_SIDEBAR_WIDTH;
+    } else if (event.key === "End") {
+      nextWidth = MAX_SIDEBAR_WIDTH;
+    }
+    if (nextWidth === undefined) return;
+    event.preventDefault();
+    setSidebarWidth(clampSidebarWidth(nextWidth));
+  };
   const closeDeleteDialog = () => {
     if (!pendingDeletionId) setConfirmDeleteConversationId("");
   };
@@ -310,6 +354,31 @@ export function ConversationSidebar({
     setConfirmDeleteConversationId("");
   }, [confirmDeleteConversationId, deleteCandidate]);
   useEffect(() => {
+    const continueResize = (event: globalThis.PointerEvent) => {
+      const resize = resizeState.current;
+      if (!resize || resize.pointerId !== event.pointerId) return;
+      setSidebarWidth(clampSidebarWidth(
+        resize.startWidth + event.clientX - resize.startX,
+      ));
+    };
+    const finishResize = (event: globalThis.PointerEvent) => {
+      if (resizeState.current?.pointerId === event.pointerId) {
+        resizeState.current = undefined;
+      }
+    };
+    window.addEventListener("pointermove", continueResize);
+    window.addEventListener("pointerup", finishResize);
+    window.addEventListener("pointercancel", finishResize);
+    return () => {
+      window.removeEventListener("pointermove", continueResize);
+      window.removeEventListener("pointerup", finishResize);
+      window.removeEventListener("pointercancel", finishResize);
+    };
+  }, []);
+  useEffect(() => {
+    if (collapsed) resizeState.current = undefined;
+  }, [collapsed]);
+  useEffect(() => {
     if (!renameConversationId || renameCandidate) return;
     setRenameConversationId("");
   }, [renameConversationId, renameCandidate]);
@@ -325,6 +394,7 @@ export function ConversationSidebar({
     <aside
       className={`conversation-sidebar${collapsed ? " collapsed" : ""}`}
       aria-label="项目会话栏"
+      style={sidebarStyle}
     >
       <header className="conversation-sidebar-header">
         {!collapsed && <h2>会话</h2>}
@@ -374,6 +444,20 @@ export function ConversationSidebar({
           {!collapsed && <span>新建会话</span>}
         </button>
       </footer>
+      {!collapsed && <div
+        className="conversation-sidebar-resize-handle"
+        role="separator"
+        aria-label="调整会话栏宽度"
+        aria-orientation="vertical"
+        aria-valuemin={MIN_SIDEBAR_WIDTH}
+        aria-valuemax={MAX_SIDEBAR_WIDTH}
+        aria-valuenow={sidebarWidth}
+        aria-valuetext={`${sidebarWidth} 像素`}
+        tabIndex={0}
+        title="拖动调整会话栏宽度"
+        onKeyDown={resizeWithKeyboard}
+        onPointerDown={startResize}
+      />}
     </aside>
     {deleteCandidate && <div
       className="modal-backdrop"

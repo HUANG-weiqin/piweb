@@ -40,7 +40,7 @@ ServerEvent
 - 项目空态和用户点击“新建会话”都进入完整 `RoleSelectionPage`。页面初始不选 default；显式选择可用角色并收到 create attach 前，不渲染 Chat/composer。
 - 对话列表来自 `project_snapshot`，角色来自 `role_catalog_snapshot`，恢复消息/卡片来自 `conversation_snapshot`；它们的 truncated 提示必须可见，localStorage 不是数据 fallback。
 - `project_snapshot` 同时投影持久创建来源；侧栏只为 `createdBy.kind=conversation` 的会话在标题旁显示紧凑 `Agent` 徽标，用户创建与来源未知的旧会话不显示，列表仍保持扁平。
-- 扁平可折叠 `ConversationSidebar` 是项目会话的唯一列表/新建/打开/改名/删除控制面；模型连接抽屉不维护第二套会话入口。running/queued/cancelling/waiting 的活跃项优先，再按 attention 和最后活跃时间排序；spinner、沙漏、attention、unread 与 temporary 都来自服务端投影。
+- 扁平可折叠 `ConversationSidebar` 是项目会话的唯一列表/新建/打开/改名/删除控制面；模型连接抽屉不维护第二套会话入口。桌面展开态可通过右边缘在 240–420px 内横向调整，折叠态与 600px 以下窄屏不提供 resize handle。running/queued/cancelling/waiting 的活跃项优先，再按 attention 和最后活跃时间排序；running/queued 使用与思考状态同尺寸、同转速的环形 spinner，沙漏、attention、unread 与 temporary 都来自服务端投影。
 - 后台 actor 的创建、运行或完成只能更新侧栏/通知，不能改变 current focus、draft 或 transcript。用户在当前会话 running 时仍可切换观察。
 - 删除以 sessionId + commandId 保持单一 pending 状态，匹配的 `command_complete` / error 才能结算；普通 snapshot 只更新列表，不能冒充删除回执。断线属于未知结果，应清除等待态并提示用户重新核对。
 - state 只说明 focused runtime 已提交，不说明历史已经 hydrate；`conversationReady` 必须等匹配 focus 三元身份的 snapshot，期间 composer 和 `sendPrompt` 双重禁用，避免 hydrate 覆盖刚发送的本地消息。
@@ -60,6 +60,7 @@ ServerEvent
 - OAuth、API Key 和 extension UI 同时出现时只展示一个模态边界；隐藏不等于丢弃输入草稿，只有 request 更换、权威 closed/cancel 或连接生命周期结束才清理。
 - transcript 仅在用户位于底部附近时跟随流式输出；跟随时必须滚动 transcript 容器到真实 `scrollHeight`，不能滚动 padding 之前的占位节点。用户向上阅读后显示“回到最新消息”，不能用每个 delta 强制抢走滚动位置。composer 是受控草稿并按内容在有界高度内增长。
 - transcript 使用 14px 的紧凑正文，并与 composer 共用响应式内容宽度：从原有 780px 阅读宽度随视口扩展，最高 1280px；窄屏仍由最小侧边距接管，不能产生横向溢出。assistant Markdown 的标题、段落、嵌套列表、引用、表格和代码只在 `.markdown` 内建立统一阅读节奏；宽表格与长代码由自身横向滚动承接，不能撑宽 transcript。
+- 当前 active run 的思考卡片用低干扰 spinner 表达“正在思考”，历史思考只显示完成态；工具卡片默认收起并以本地化动作、目标和状态概括调用，展开后按字段递归展示最终 args/result，内置工具优先提取文本输出，Agent 会话工具优先展示结构化 details，不能把宿主 JSON 包装直接暴露给用户。
 - 每条 user 与 assistant 正文在既有消息间距中提供低干扰操作组：复制按钮读取原始文本/Markdown，不复制渲染后的 HTML；“回到此处”先明确确认将彻底删除本条及之后所有消息。运行中、恢复未完成或已有截断 pending 时禁用破坏性按钮。
 - 截断只维护一个 `sessionId + commandId + conversationId + messageId` pending；客户端不先行 splice transcript，只接受匹配 focus 的服务端 snapshot 作为新内容，再用匹配 commandId 的 completion/error 结算等待态。等待期间 composer、切换和新建会话禁用；断线属于未知结果，必须提示恢复后核对。
 - 认证、设置和扩展交互拥有模态焦点边界。

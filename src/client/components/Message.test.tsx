@@ -59,8 +59,31 @@ describe("Message", () => {
     fireEvent.click(summary);
     const details = screen.getByText("工具调用（1）").closest("details") as HTMLDetailsElement;
     expect(details.open).toBe(true);
-    expect(screen.getByText(/\"path\"/)).toBeInTheDocument();
-    expect(screen.getByText(/\"ok\": true/)).toBeInTheDocument();
+    expect(screen.getByText("路径")).toBeInTheDocument();
+    expect(screen.getByText("成功")).toBeInTheDocument();
+  });
+
+  it("animates the thinking indicator only for the active Agent run", () => {
+    const message: ChatMessage = {
+      id: "thinking-1",
+      runId: "run-thinking",
+      role: "assistant",
+      text: "",
+      thinking: "正在检查现有实现。",
+      tools: [],
+    };
+    const { rerender } = render(
+      <Message message={message} activeThinking />,
+    );
+
+    expect(screen.getByRole("status", { name: "Agent 正在思考" })).toBeInTheDocument();
+    expect(screen.getByText("正在思考")).toBeInTheDocument();
+
+    rerender(<Message message={message} />);
+
+    expect(screen.queryByRole("status", { name: "Agent 正在思考" }))
+      .not.toBeInTheDocument();
+    expect(screen.getByText("思考过程")).toBeInTheDocument();
   });
 
   it("collapses long tool lists and can expand to show all calls", () => {
@@ -75,7 +98,7 @@ describe("Message", () => {
     fireEvent.click(screen.getByRole("button", { name: "展开全部 6 条" }));
 
     expect(screen.getByRole("button", { name: "收起到最近 4 条" })).toBeInTheDocument();
-    expect(screen.getByText(/old-1\.md/)).toBeInTheDocument();
+    expect(screen.getAllByText(/old-1\.md/).length).toBeGreaterThan(0);
   });
 
   it("shows tools before assistant markdown text", () => {

@@ -1321,6 +1321,7 @@ export function App() {
               chat={chat}
               historyTruncated={historyTruncated}
               busy={state.busy || Boolean(outstandingRunId)}
+              activeRun={state.activeRun}
               sessionTokenUsage={state.sessionTokenUsage}
               contextTokenCount={state.contextUsage?.tokens}
               contextWindow={state.contextUsage?.contextWindow}
