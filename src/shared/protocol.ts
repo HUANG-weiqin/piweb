@@ -9,7 +9,10 @@ export const MAX_ROLE_SYSTEM_PROMPT_BYTES = 128 * 1024;
 export const MAX_PROJECT_CONVERSATIONS = 100;
 export const MAX_PROJECT_CONVERSATION_NAME_CHARACTERS = 120;
 export const MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS = 500;
-export const PROTOCOL_VERSION = 12;
+export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
+export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
+export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
+export const PROTOCOL_VERSION = 13;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
 const conversationIdSchema = z.string().uuid();
@@ -179,6 +182,16 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
     level: z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]),
   }),
   z.object({
+    type: z.literal("set_compaction_threshold"),
+    commandId: commandIdSchema,
+    sessionId: sessionIdSchema,
+    conversationId: conversationIdSchema,
+    focusId: focusIdSchema,
+    percent: z.number().int()
+      .min(MIN_COMPACTION_THRESHOLD_PERCENT)
+      .max(MAX_COMPACTION_THRESHOLD_PERCENT),
+  }),
+  z.object({
     type: z.literal("set_tool_mode"),
     sessionId: sessionIdSchema,
     mode: z.enum(["read_only", "full_access"]),
@@ -258,6 +271,7 @@ export type ClientCommand = z.infer<typeof clientCommandSchema>;
 export type AcknowledgedSettingOperation = "select_model" | "set_api_key";
 export type AcknowledgedCommandOperation =
   | AcknowledgedSettingOperation
+  | "set_compaction_threshold"
   | "delete_conversation"
   | "create_role"
   | "update_role"
@@ -326,6 +340,8 @@ export interface PublicState {
   sessionTokenUsage?: TokenUsage;
   /** 当前上下文 token；compaction 后无可靠 usage 时显式保留 unknown。 */
   contextUsage?: PublicContextUsage;
+  /** 当前会话自动压缩触发阈值。 */
+  compactionThresholdPercent?: number;
 }
 
 export type AuthRequest =
@@ -631,6 +647,10 @@ const publicStateSchema: z.ZodType<PublicState> = z.object({
   registryError: z.string().optional(),
   sessionTokenUsage: tokenUsageSchema.optional(),
   contextUsage: publicContextUsageSchema.optional(),
+  compactionThresholdPercent: z.number().int()
+    .min(MIN_COMPACTION_THRESHOLD_PERCENT)
+    .max(MAX_COMPACTION_THRESHOLD_PERCENT)
+    .optional(),
 });
 const authRequestSchema: z.ZodType<AuthRequest> = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("auth"), url: z.string(), instructions: z.string().optional() }),
@@ -702,6 +722,7 @@ const commandTypeSchema = z.enum([
   "extension_ui_response",
   "select_model",
   "set_thinking",
+  "set_compaction_threshold",
   "set_tool_mode",
   "rename_conversation",
   "delete_conversation",
@@ -970,6 +991,7 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     operation: z.enum([
       "select_model",
       "set_api_key",
+      "set_compaction_threshold",
       "delete_conversation",
       "create_role",
       "update_role",

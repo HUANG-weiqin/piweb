@@ -341,6 +341,7 @@ export function projectConversationItems(
       reserved.kind === "conversation_meta"
       || reserved.kind === "run_settlement"
       || reserved.kind === "meta_operation"
+      || reserved.kind === "compaction_threshold"
     ) {
       continue;
     }

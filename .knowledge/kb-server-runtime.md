@@ -29,9 +29,10 @@
 
 `RoleCatalog` 是进程级用户角色目录：
 
-- 严格读写 `<Pi agent dir>/piweb/roles.json`，固定保留可编辑但不可删除的 default；
+- 严格读写 `<Pi agent dir>/piweb/roles.json`；首次初始化赠送可编辑、可删除的“默认 / 默认角色”普通模板，删除后不自动重建；v2 只迁移未改过的旧默认文案，不覆盖用户已编辑的名称或简介；
 - 用共享模型目录动态计算模板可用性；
 - 创建会话时返回完整不可变角色快照，不把模板对象引用交给 session。
+- 未携带角色快照的旧会话迁移为独立“旧会话”快照；可复用其历史模型或任一现存角色模型，但不依赖、也不重建已删除的初始化模板。
 
 `ProjectSessionCoordinator` 是 conversation 生命周期拥有者：
 
@@ -60,6 +61,7 @@
 - `createAgentSession` 一旦返回，owner bind、host tool gate 安装、startup provider/固定模型校验和 extension load error 投影都必须位于同一个失败清理边界；其中任何一步抛错都 teardown 已创建的 AgentSession 并释放 actor lease。
 - 持久 conversation、连接 observation sessionId、focusId 和 runId 是不同身份；同一 conversation 重连或重新 focus 都必须分配新传输身份。
 - prompt、inbox custom messages 和 abort 都由 ConversationActor 的 active run ownership 控制；浏览器 attach/detach 不穿过或中止运行过程。
+- 自动压缩阈值属于 conversation actor：缺省 70%，从 `piweb.compaction_threshold.v1` 恢复；每轮正常结束后用 Pi 的 context usage 检查百分比并触发标准 `compact()`，不改动同时影响摘要预算的 `reserveTokens`。更新只追加非上下文 custom entry，运行中的本轮结算会读取最新阈值。
 - API Key 在共享配置队列完成后才确认；凭据本身影响所有项目，但发起命令必须仍属于提交时的 observation session/generation，避免迟到页面修改全局认证。会话模型由角色快照固定，中途 `select_model` 明确拒绝；actor 重开时再次校验实际模型，不能 SDK fallback。
 - API Key、角色 CRUD 和删除等需要结算的操作都带原 sessionId + commandId，连接内复用 commandId 会被拒绝。
 - `setThinkingLevel()` 和 `setSessionName()` 会先改内存再持久化；工作台以 actor 实际后置条件为准，发布新 state 并单独报告持久化风险。相对地，`AuthStorage.set/remove` 与 `ProjectStore.setToolMode` 都是持久写成功后才替换内存状态，不需要这种部分提交适配。

@@ -1,4 +1,8 @@
 import { z } from "zod";
+import {
+  MAX_COMPACTION_THRESHOLD_PERCENT,
+  MIN_COMPACTION_THRESHOLD_PERCENT,
+} from "../shared/protocol.js";
 
 export const CONVERSATION_META_CUSTOM_TYPE =
   "piweb.conversation_meta.v1";
@@ -10,6 +14,8 @@ export const RUN_SETTLEMENT_CUSTOM_TYPE =
   "piweb.run_settlement.v1";
 export const META_OPERATION_CUSTOM_TYPE =
   "piweb.meta_operation.v1";
+export const COMPACTION_THRESHOLD_CUSTOM_TYPE =
+  "piweb.compaction_threshold.v1";
 
 export const MAX_ROLE_NAME_CHARACTERS = 80;
 export const MAX_ROLE_DESCRIPTION_CHARACTERS = 1_000;
@@ -187,6 +193,18 @@ const conversationMetaSchema = z.object({
 const conversationMetaEntrySchema = z.object({
   customType: z.literal(CONVERSATION_META_CUSTOM_TYPE),
   data: conversationMetaSchema,
+}).strict();
+
+const compactionThresholdSchema = z.object({
+  percent: z.number().int()
+    .min(MIN_COMPACTION_THRESHOLD_PERCENT)
+    .max(MAX_COMPACTION_THRESHOLD_PERCENT),
+  updatedAt: canonicalTimestampSchema("updatedAt"),
+}).strict();
+
+const compactionThresholdEntrySchema = z.object({
+  customType: z.literal(COMPACTION_THRESHOLD_CUSTOM_TYPE),
+  data: compactionThresholdSchema,
 }).strict();
 
 const conversationKindSchema = z.enum([
@@ -412,6 +430,10 @@ export type RunSettlementEntry =
 export type MetaOperation = z.infer<typeof metaOperationSchema>;
 export type MetaOperationEntry =
   z.infer<typeof metaOperationEntrySchema>;
+export type CompactionThreshold =
+  z.infer<typeof compactionThresholdSchema>;
+export type CompactionThresholdEntry =
+  z.infer<typeof compactionThresholdEntrySchema>;
 
 export interface CustomEntryAppender {
   appendCustomEntry(customType: string, data?: unknown): string;
@@ -437,6 +459,10 @@ export type ReservedConversationEntry =
   | {
       kind: "meta_operation";
       entry: MetaOperationEntry;
+    }
+  | {
+      kind: "compaction_threshold";
+      entry: CompactionThresholdEntry;
     };
 
 export interface ReservedConversationAggregate {
@@ -445,6 +471,7 @@ export interface ReservedConversationAggregate {
   deliveredMessageIds: string[];
   runSettlements: RunSettlement[];
   metaOperations: MetaOperation[];
+  compactionThreshold?: CompactionThreshold;
 }
 
 export function parseConversationReferenceSnapshot(
@@ -536,6 +563,21 @@ export function createMetaOperationEntry(
   });
 }
 
+export function parseCompactionThresholdEntry(
+  value: unknown,
+): CompactionThresholdEntry {
+  return compactionThresholdEntrySchema.parse(value);
+}
+
+export function createCompactionThresholdEntry(
+  data: CompactionThreshold,
+): CompactionThresholdEntry {
+  return parseCompactionThresholdEntry({
+    customType: COMPACTION_THRESHOLD_CUSTOM_TYPE,
+    data,
+  });
+}
+
 /**
  * Appends a validated deep snapshot to Pi's non-context custom-entry path.
  *
@@ -548,7 +590,8 @@ export function appendReservedCustomEntry(
     | ConversationMetaEntry
     | ConversationCardEntry
     | RunSettlementEntry
-    | MetaOperationEntry,
+    | MetaOperationEntry
+    | CompactionThresholdEntry,
 ): string {
   const reserved = parseReservedConversationEntry(value);
   if (
@@ -645,6 +688,12 @@ export function parseReservedConversationEntry(
     return {
       kind: "meta_operation",
       entry: parseMetaOperationEntry(payload),
+    };
+  }
+  if (customType === COMPACTION_THRESHOLD_CUSTOM_TYPE) {
+    return {
+      kind: "compaction_threshold",
+      entry: parseCompactionThresholdEntry(payload),
     };
   }
   throw new Error(`Unknown piweb reserved custom type: ${customType}`);
@@ -774,6 +823,7 @@ export function aggregateReservedConversationEntries(
   const deliveredMessageIds = new Set<string>();
   const runSettlements = new Map<string, RunSettlement>();
   const metaOperations = new Map<string, MetaOperation>();
+  let compactionThreshold: CompactionThreshold | undefined;
 
   for (const value of values) {
     const reserved = parseReservedConversationEntry(value);
@@ -866,6 +916,19 @@ export function aggregateReservedConversationEntries(
       metaOperations.set(incoming.operationId, incoming);
       continue;
     }
+    if (reserved.kind === "compaction_threshold") {
+      if (
+        compactionThreshold
+        && Date.parse(reserved.entry.data.updatedAt)
+          < Date.parse(compactionThreshold.updatedAt)
+      ) {
+        throw new Error(
+          "Piweb compaction threshold updatedAt cannot regress",
+        );
+      }
+      compactionThreshold = reserved.entry.data;
+      continue;
+    }
 
     const incoming = reserved.entry.data;
     const existing = runSettlements.get(incoming.runId);
@@ -902,5 +965,8 @@ export function aggregateReservedConversationEntries(
     deliveredMessageIds: [...deliveredMessageIds],
     runSettlements: [...runSettlements.values()],
     metaOperations: [...metaOperations.values()],
+    ...(compactionThreshold === undefined
+      ? {}
+      : { compactionThreshold }),
   };
 }

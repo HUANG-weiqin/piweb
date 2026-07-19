@@ -37,6 +37,8 @@ function view(
     role={role}
     thinkingLevel="off"
     availableThinkingLevels={["off", "high"]}
+    compactionThresholdPercent={70}
+    compactionThresholdBusy={false}
     toolMode="full_access"
     toolModeBusy={false}
     cwd="E:\\work"
@@ -49,6 +51,7 @@ function view(
     onAbort={() => undefined}
     onSettings={() => undefined}
     onThinking={() => undefined}
+    onCompactionThreshold={() => true}
     onToolMode={() => undefined}
     onChangeCwd={() => undefined}
     {...overrides}
@@ -222,6 +225,43 @@ describe("Chat", () => {
 
     expect(onThinking).toHaveBeenCalledWith("high");
     expect(onToolMode).toHaveBeenCalledWith("read_only");
+  });
+
+  it("expands the compaction threshold on demand and saves on release", () => {
+    const onCompactionThreshold = vi.fn(() => true);
+    render(view(emptyChat, "", undefined, { onCompactionThreshold }));
+    const toggle = screen.getByRole("button", {
+      name: "自动压缩 70%",
+    });
+
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("slider", {
+      name: "会话自动压缩阈值",
+    })).not.toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    const slider = screen.getByRole("slider", {
+      name: "会话自动压缩阈值",
+    });
+
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(slider).toHaveAttribute("min", "20");
+    expect(slider).toHaveAttribute("max", "90");
+    expect(screen.getByText("70%", { selector: ".compaction-threshold-value" }))
+      .toBeInTheDocument();
+
+    fireEvent.change(slider, { target: { value: "55" } });
+    expect(screen.getByText("55%", { selector: ".compaction-threshold-value" }))
+      .toBeInTheDocument();
+    expect(onCompactionThreshold).not.toHaveBeenCalled();
+
+    fireEvent.pointerUp(slider);
+    expect(onCompactionThreshold).toHaveBeenCalledWith(55);
+
+    fireEvent.click(toggle);
+    expect(screen.queryByRole("slider", {
+      name: "会话自动压缩阈值",
+    })).not.toBeInTheDocument();
   });
 
   it("keeps completed outgoing session work above the final assistant text", () => {

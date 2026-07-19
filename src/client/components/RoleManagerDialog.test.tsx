@@ -81,8 +81,8 @@ function renderManager(overrides: Partial<Parameters<typeof RoleManagerDialog>[0
   const props: Parameters<typeof RoleManagerDialog>[0] = {
     open: true,
     roles: [
-      role("reviewer", "Reviewer"),
       role("default", "Default"),
+      role("reviewer", "Reviewer"),
     ],
     providers,
     onClose: () => undefined,
@@ -95,13 +95,15 @@ function renderManager(overrides: Partial<Parameters<typeof RoleManagerDialog>[0
 }
 
 describe("RoleManagerDialog", () => {
-  it("keeps the editable default role first and never offers to delete it", () => {
-    renderManager();
+  it("lets the seeded role be edited and deleted like any other role", () => {
+    const remove = vi.fn();
+    renderManager({ onDelete: remove });
 
     const roleButtons = screen.getAllByRole("button", { name: /编辑角色/ });
     expect(roleButtons[0]).toHaveAccessibleName("编辑角色 Default");
     expect(screen.getByRole("textbox", { name: "角色名称" })).toBeEnabled();
-    expect(screen.queryByRole("button", { name: "删除角色" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "删除角色" }));
+    expect(remove).toHaveBeenCalledWith("default", 1);
   });
 
   it("only offers configured available models while preserving the current invalid model", () => {

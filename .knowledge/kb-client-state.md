@@ -46,12 +46,13 @@ ServerEvent
 - state 只说明 focused runtime 已提交，不说明历史已经 hydrate；`conversationReady` 必须等匹配 focus 三元身份的 snapshot，期间 composer 和 `sendPrompt` 双重禁用，避免 hydrate 覆盖刚发送的本地消息。
 - user、assistant、tool、usage 和 prompt error 全部按 runId 路由，不能更新“最后一条消息”来猜归属。
 - OAuth UI 只接收当前 authFlowId；取消或新 flow 之后的旧 request/progress/complete 一律忽略。
-- 右侧抽屉只负责“提供商 → 凭据 → 可用模型”的连接状态，不承载项目权限、会话生命周期或 Agent 行为控制。项目工具权限位于工作台顶栏和新会话角色选择页；当前会话的思考级别靠近 composer；角色管理只从新会话角色选择流程进入；会话改名位于左侧会话栏。
+- 右侧抽屉只负责“提供商 → 凭据 → 可用模型”的连接状态，不承载项目权限、会话生命周期或 Agent 行为控制。项目工具权限位于工作台顶栏和新会话角色选择页；当前会话的思考级别与自动压缩阈值靠近 composer；角色管理只从新会话角色选择流程进入；会话改名位于左侧会话栏。
 - 会话不再中途选择模型。角色管理只列已配置提供商当前可用模型，并把 provider/model 固定到模板。角色表单还显式控制“允许管理会话”：新建角色默认关闭，编辑时按模板原值显示；关闭意味着 Agent 完全看不到工作台会话工具。
 - Pi 凭据属于当前用户并由所有项目共享；移除凭据必须明确提示全局影响并二次确认。空模型列表的恢复动作必须真的发送 `refresh_models`，不能用“重新打开设置”冒充刷新。
 - API Key 保存和角色 CRUD 只由匹配 sessionId + operation + commandId 的 `command_complete` / error 结算；任何中途 state/catalog 刷新都不能关闭等待态。角色 update/delete 同时带 expectedRevision。
-- default 在角色管理中固定置顶，没有删除按钮，但允许编辑。失效模板保留原 provider/model 展示，不能静默换成其它模型。
+- 初始化“默认”模板在角色管理中与其它角色相同，可编辑、可删除。失效模板保留原 provider/model 展示，不能静默换成其它模型。
 - Chat composer 底部显示会话固化角色 pill；详情展示快照 revision、简介、prompt、模型和会话管理能力，不提供切换操作。
+- Chat 在 composer 下方显示会话级自动压缩滑条：20%–90%，默认 70%；拖动只预览，松手或键盘调整结束才发送一次精确关联命令，等待相同 commandId 结算期间禁用控件。
 - 跨会话消息使用独立 `SessionMessageCard`。卡片默认收起，只用一行显示方向、对端会话和状态；用户主动展开后才显示来源/目标标题、角色、短句柄、正文、结果与打开入口，状态更新不能擅自展开卡片。reducer 用 cardId 原地 upsert，并保持卡片在 transcript 中原来的位置；紧跟 assistant 的 outgoing/incoming 卡片在渲染时都归入同一回复的执行区，固定显示在工具调用之后、最终正文之前，完成或送达更新不能占据回答下方。没有可关联 assistant 的卡片仍按独立时间点展示。打开入口只由卡片自身的服务端 `peerExists` 决定，不能用截断侧栏做存在性判断。相关 peer 仍存在时可直接打开，临时会话删除后入口消失。
 - extension UI 可在首个 state 前出现，因此对话框必须位于 Setup/Chat 之外的 session-scoped overlay；协调模式只把当前 focus 路由到浏览器，后台请求通过侧栏 attention 提示，不抢焦点。
 - extension request 按到达顺序排队，server closed event、initialize、session change 或 disconnect 都会移除 stale 项；浏览器只回答当前 sessionId。

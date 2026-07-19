@@ -71,7 +71,8 @@ describe("RoleCatalog", () => {
 
     expect(snapshot).toMatchObject({
       revision: 1,
-      name: "Default",
+      name: "默认",
+      description: "默认角色",
       systemPrompt: "",
       canManageSessions: false,
     });

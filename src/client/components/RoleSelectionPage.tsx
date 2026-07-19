@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import type { RoleTemplate, ToolMode } from "../../shared/protocol";
 import { ProjectToolModeControl } from "./ProjectToolModeControl";
 
@@ -12,14 +12,6 @@ export interface RoleSelectionPageProps {
   onSettings?(): void;
   onToolMode(mode: ToolMode): void;
   onChangeProject?(): void;
-}
-
-function orderedRoles(roles: readonly RoleTemplate[]): RoleTemplate[] {
-  return [...roles].sort((left, right) => {
-    if (left.id === "default") return -1;
-    if (right.id === "default") return 1;
-    return 0;
-  });
 }
 
 function roleModelLabel(role: RoleTemplate): string {
@@ -39,7 +31,6 @@ export function RoleSelectionPage({
   onChangeProject,
 }: RoleSelectionPageProps) {
   const [selectedRoleId, setSelectedRoleId] = useState("");
-  const displayedRoles = useMemo(() => orderedRoles(roles), [roles]);
   const selectedRole = roles.find(({ id }) => id === selectedRoleId);
 
   useEffect(() => {
@@ -92,7 +83,7 @@ export function RoleSelectionPage({
     </header>
 
     <section className="role-card-grid" aria-label="可选角色">
-      {displayedRoles.map((role) => {
+      {roles.map((role) => {
         const selected = role.id === selectedRoleId;
         const unavailable = !role.available;
         const className = [
@@ -111,7 +102,6 @@ export function RoleSelectionPage({
         >
           <span className="role-card-heading">
             <strong>{role.name}</strong>
-            {role.id === "default" && <span className="status-badge">默认</span>}
           </span>
           <span className="role-card-description">
             {role.description || "暂无角色简介"}
@@ -122,7 +112,17 @@ export function RoleSelectionPage({
           </span>}
         </button>;
       })}
-      {displayedRoles.length === 0 && <div className="setting-empty">
+      {onManageRoles && <button
+        type="button"
+        className="role-card role-card-add"
+        aria-label="添加角色"
+        disabled={pending}
+        onClick={onManageRoles}
+      >
+        <span className="role-card-add-icon" aria-hidden="true">＋</span>
+        <strong>添加角色</strong>
+      </button>}
+      {roles.length === 0 && !onManageRoles && <div className="setting-empty">
         <strong>还没有可选择的角色</strong>
         <p>先在角色管理中配置一个可用角色和模型。</p>
       </div>}

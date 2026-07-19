@@ -5,12 +5,15 @@ import type {
   ExtensionError,
   ModelRegistry,
   SessionManager as SessionManagerType,
+} from "@earendil-works/pi-coding-agent";
+import {
+  SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import type { ToolMode } from "../shared/protocol.js";
 import type { ConversationMeta } from "./conversation-meta.js";
+import { aggregateReservedConversationEntries } from "./conversation-meta.js";
 import {
   ConversationActor,
   type ConversationActorEvent,
@@ -56,6 +59,8 @@ function deferred<T = void>(): Deferred<T> {
 
 interface FakeSession extends AgentSession {
   abortCalls: number;
+  compactCalls: number;
+  contextPercent: number | null;
   disposeCalls: number;
   eventListener?: (event: AgentSessionEvent) => void;
   toolCallGate?: ToolCallGate;
@@ -63,19 +68,18 @@ interface FakeSession extends AgentSession {
 }
 
 function fakeSettings(): SettingsManager {
-  return {
-    flush: async () => undefined,
-    drainErrors: () => [],
-  } as unknown as SettingsManager;
+  return SettingsManager.inMemory();
 }
 
 function fakeSession(): FakeSession {
   const session = {
     abortCalls: 0,
+    compactCalls: 0,
+    contextPercent: 0,
     disposeCalls: 0,
     isStreaming: false,
     messages: [],
-    model: { provider: "test", id: "model" },
+    model: { provider: "test", id: "model", contextWindow: 1_000 },
     thinkingLevel: "off",
     extensionRunner: {
       getCommand: () => undefined,
@@ -87,6 +91,20 @@ function fakeSession(): FakeSession {
     abort: async function () {
       this.abortCalls++;
       this.isStreaming = false;
+    },
+    getContextUsage: function () {
+      return {
+        tokens: this.contextPercent === null
+          ? null
+          : this.contextPercent * 10,
+        contextWindow: 1_000,
+        percent: this.contextPercent,
+      };
+    },
+    compact: async function () {
+      this.compactCalls++;
+      this.contextPercent = null;
+      return {};
     },
     dispose: function () {
       this.disposeCalls++;
@@ -280,6 +298,26 @@ function nativeEvent(value: unknown): AgentSessionEvent {
 }
 
 describe("ConversationActor", () => {
+  it("persists and triggers a per-conversation compaction threshold", async () => {
+    const fixture = await openActor();
+
+    expect(fixture.actor.getCompactionThresholdPercent()).toBe(70);
+
+    fixture.actor.setCompactionThresholdPercent(55);
+    fixture.runtime.session.contextPercent = 60;
+    await fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "compact after this turn",
+      origin: "browser",
+    });
+
+    expect(fixture.runtime.session.compactCalls).toBe(1);
+    expect(aggregateReservedConversationEntries(
+      fixture.manager.getEntries(),
+    ).compactionThreshold?.percent).toBe(55);
+    await fixture.actor.dispose();
+  });
+
   it("publishes queued synchronously and permits only one active run", async () => {
     const fixture = await openActor();
     const promptStarted = deferred();

@@ -1,15 +1,18 @@
 import {
+  useEffect,
   useLayoutEffect,
   useRef,
   useState,
   type KeyboardEvent,
 } from "react";
-import type {
-  ConversationMessageCard,
-  ConversationRoleSnapshot,
-  ThinkingLevel,
-  TokenUsage,
-  ToolMode,
+import {
+  MAX_COMPACTION_THRESHOLD_PERCENT,
+  MIN_COMPACTION_THRESHOLD_PERCENT,
+  type ConversationMessageCard,
+  type ConversationRoleSnapshot,
+  type ThinkingLevel,
+  type TokenUsage,
+  type ToolMode,
 } from "../../shared/protocol";
 import type {
   ChatItem,
@@ -34,6 +37,8 @@ interface ChatProps {
   role?: ConversationRoleSnapshot;
   thinkingLevel: ThinkingLevel;
   availableThinkingLevels?: ThinkingLevel[];
+  compactionThresholdPercent: number;
+  compactionThresholdBusy: boolean;
   toolMode: ToolMode;
   toolModeBusy: boolean;
   cwd: string;
@@ -47,6 +52,7 @@ interface ChatProps {
   onAbort(): void;
   onSettings(): void;
   onThinking(level: ThinkingLevel): void;
+  onCompactionThreshold(percent: number): boolean;
   onToolMode(mode: ToolMode): void;
   onChangeCwd(): void;
   onOpenConversation?(conversationId: string): void;
@@ -148,6 +154,8 @@ export function Chat({
   role,
   thinkingLevel,
   availableThinkingLevels,
+  compactionThresholdPercent,
+  compactionThresholdBusy,
   toolMode,
   toolModeBusy,
   cwd,
@@ -161,6 +169,7 @@ export function Chat({
   onAbort,
   onSettings,
   onThinking,
+  onCompactionThreshold,
   onToolMode,
   onChangeCwd,
   onOpenConversation,
@@ -181,6 +190,15 @@ export function Chat({
   const followOutputRef = useRef(true);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [roleDetailsOpen, setRoleDetailsOpen] = useState(false);
+  const [compactionThresholdOpen, setCompactionThresholdOpen] = useState(false);
+  const [compactionThresholdDraft, setCompactionThresholdDraft] =
+    useState(compactionThresholdPercent);
+  const requestedCompactionThreshold = useRef(compactionThresholdPercent);
+  useEffect(() => {
+    if (compactionThresholdBusy) return;
+    setCompactionThresholdDraft(compactionThresholdPercent);
+    requestedCompactionThreshold.current = compactionThresholdPercent;
+  }, [compactionThresholdBusy, compactionThresholdPercent]);
   const items = chat.items ?? chat.messages.map((message) => ({
     kind: "message" as const,
     ...message,
@@ -229,6 +247,17 @@ export function Chat({
     const value = draft.trim();
     if (!value || busy || submitting || !model || !online || !conversationReady) return;
     onSend(value);
+  };
+  const commitCompactionThreshold = () => {
+    if (
+      compactionThresholdBusy
+      || compactionThresholdDraft === requestedCompactionThreshold.current
+    ) return;
+    if (onCompactionThreshold(compactionThresholdDraft)) {
+      requestedCompactionThreshold.current = compactionThresholdDraft;
+    } else {
+      setCompactionThresholdDraft(compactionThresholdPercent);
+    }
   };
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); send(); }
@@ -295,6 +324,30 @@ export function Chat({
         <textarea ref={textareaRef} aria-label="给 Pi 发送消息" value={draft} onChange={(e) => onDraftChange(e.target.value)} onKeyDown={keyDown} placeholder={composerPlaceholder} disabled={!online || !conversationReady || !model || submitting} rows={1} />
         {busy ? <button className="send stop" onClick={onAbort} aria-label="停止">■</button> : <button className="send" onClick={send} disabled={!online || !conversationReady || !model || submitting || !draft.trim()} aria-label="发送">↑</button>}
       </div>
+      {compactionThresholdOpen && <label
+          id="compaction-threshold-panel"
+          className="compaction-threshold-control"
+          title={`上下文达到 ${compactionThresholdDraft}% 时自动压缩`}
+        >
+          <span>自动压缩阈值</span>
+          <input
+            type="range"
+            aria-label="会话自动压缩阈值"
+            min={MIN_COMPACTION_THRESHOLD_PERCENT}
+            max={MAX_COMPACTION_THRESHOLD_PERCENT}
+            step={1}
+            value={compactionThresholdDraft}
+            disabled={!online || !conversationReady || compactionThresholdBusy}
+            onChange={(event) =>
+              setCompactionThresholdDraft(Number(event.target.value))}
+            onPointerUp={commitCompactionThreshold}
+            onKeyUp={commitCompactionThreshold}
+            onBlur={commitCompactionThreshold}
+          />
+          <span className="compaction-threshold-value">
+            {compactionThresholdDraft}%
+          </span>
+        </label>}
       <div className="composer-meta">
         {role && <button
           type="button"
@@ -305,6 +358,17 @@ export function Chat({
           <span>{role.name}</span>
           <small>{role.model.id}</small>
         </button>}
+        <button
+          type="button"
+          className="compaction-threshold-toggle"
+          aria-expanded={compactionThresholdOpen}
+          aria-controls="compaction-threshold-panel"
+          title={`上下文达到 ${compactionThresholdDraft}% 时自动压缩`}
+          onClick={() => setCompactionThresholdOpen((open) => !open)}
+        >
+          <span>自动压缩 {compactionThresholdDraft}%</span>
+          <span aria-hidden="true">{compactionThresholdOpen ? "⌃" : "⌄"}</span>
+        </button>
         <label className="thinking-level-control">
           <span>思考</span>
           <select

@@ -24,7 +24,7 @@ const roleId = "f23db1e6-c657-4dac-8b7e-a14fdecc5f21";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(12);
+    expect(PROTOCOL_VERSION).toBe(13);
   });
 
   it("accepts supported commands", () => {
@@ -117,6 +117,14 @@ describe("parseClientCommand", () => {
     }).type).toBe("select_model");
     expect(parseClientCommand({ type: "set_thinking", sessionId, level: "high" }).type).toBe("set_thinking");
     expect(parseClientCommand({
+      type: "set_compaction_threshold",
+      commandId,
+      sessionId,
+      conversationId,
+      focusId,
+      percent: 70,
+    }).type).toBe("set_compaction_threshold");
+    expect(parseClientCommand({
       type: "set_tool_mode",
       sessionId,
       mode: "full_access",
@@ -171,6 +179,22 @@ describe("parseClientCommand", () => {
       key: "secret",
     })).toThrow();
     expect(() => parseClientCommand({ type: "set_thinking", level: "high" })).toThrow();
+    expect(() => parseClientCommand({
+      type: "set_compaction_threshold",
+      commandId,
+      sessionId,
+      conversationId,
+      focusId,
+      percent: 19,
+    })).toThrow();
+    expect(() => parseClientCommand({
+      type: "set_compaction_threshold",
+      commandId,
+      sessionId,
+      conversationId,
+      focusId,
+      percent: 91,
+    })).toThrow();
     expect(() => parseClientCommand({
       type: "set_tool_mode",
       sessionId,

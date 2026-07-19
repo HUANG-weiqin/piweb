@@ -971,6 +971,17 @@ export class ProjectSessionCoordinator {
     });
   }
 
+  setCompactionThreshold(
+    handle: ProjectSessionHandle,
+    conversationId: string,
+    percent: number,
+  ): void {
+    const context = this.requireContext(handle);
+    this.requireActor(context, conversationId)
+      .setCompactionThresholdPercent(percent);
+    this.emit(context, { type: "project_changed" });
+  }
+
   abort(
     handle: ProjectSessionHandle,
     conversationId: string,
@@ -1310,28 +1321,29 @@ export class ProjectSessionCoordinator {
       return cloneProfile(aggregate.conversationMeta);
     }
 
-    const defaultRole = this.roles.getRoleTemplate("default");
     const legacyModel = manager.buildSessionContext().model;
+    const fallbackModel = this.roles.listRoles()
+      .find((role) => role.model !== null)?.model ?? null;
     const model = legacyModel === null
-      ? defaultRole.model
+      ? fallbackModel
       : {
           provider: legacyModel.provider,
           id: legacyModel.modelId,
         };
     if (model === null) {
       throw new Error(
-        "The legacy conversation has no model and the default role has no model",
+        "The legacy conversation has no model and no role model is available",
       );
     }
     const profile: ConversationMeta = {
       role: {
-        id: defaultRole.id,
-        revision: defaultRole.revision,
-        name: defaultRole.name,
-        description: defaultRole.description,
+        id: "default",
+        revision: 1,
+        name: "旧会话",
+        description: "从旧版本迁移的会话",
         systemPrompt: "",
         model: { ...model },
-        canManageSessions: defaultRole.canManageSessions,
+        canManageSessions: false,
       },
       lifecycle: { kind: "normal" },
       createdBy: { kind: "user" },

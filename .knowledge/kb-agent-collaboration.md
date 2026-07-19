@@ -18,11 +18,11 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
 ## 角色
 
 - `RoleStore` 是用户级严格 v1 文件，默认路径为 `<Pi agent dir>/piweb/roles.json`；项目文件不能修改角色目录。
-- 角色包含稳定 ID、revision、名称、简介、system prompt、固定 provider/model，以及 `canManageSessions` 能力。写入原子串行，更新使用 expected revision，损坏、未知字段和未知版本 fail closed。会话编排严格 opt-in：旧角色缺少能力字段、内置 default 首次创建和 UI 新建角色都默认关闭，只有用户明确打开才启用。
-- 固定 `default` 角色首次打开时创建，可以编辑但不能删除；它只是普通可选项，不会自动为新会话选中。
+- 角色包含稳定 ID、revision、名称、简介、system prompt、固定 provider/model，以及 `canManageSessions` 能力。写入原子串行，更新使用 expected revision，损坏、未知字段和未知版本 fail closed。会话编排严格 opt-in：旧角色缺少能力字段、初始化“默认”模板和 UI 新建角色都默认关闭，只有用户明确打开才启用。
+- 初始化“默认 / 默认角色”只是首次展示模板，可以像其它角色一样编辑、删除，删除后不会重建；新会话仍必须显式选择角色。
 - `RoleCatalog` 用当前项目 actor 的 session-local 模型目录动态计算模板是否可用，因此项目静态 provider 也能参与选择；空项目使用 coordinator 持有的 project model catalog，它经过相同 trust/resource/provider 校验，但不会创建隐藏 AgentSession。角色 CRUD、模型列表和 API Key provider 校验都使用这条项目目录；真正创建还会由 `PiRuntime` 在项目资源加载后再次校验固定模型。
 - 新会话把完整角色修订（包括会话管理能力）复制到 `piweb.conversation_meta.v1`。之后修改或删除模板不会改变旧会话；角色 prompt 追加到会话 system prompt，实际模型必须与快照完全一致，SDK fallback 会被拒绝。旧 conversation metadata 缺少能力字段时按关闭迁移。
-- 旧会话第一次在独占 writer lease 下打开时迁移为 default 快照；其 system prompt 固定为空，并尽量保留旧分支模型，避免改变既有行为。
+- 旧会话第一次在独占 writer lease 下打开时迁移为独立“旧会话”快照；其 system prompt 固定为空，并尽量保留旧分支模型，不依赖初始化模板。
 
 ## Actor 所有权
 
@@ -85,6 +85,7 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
 - 已进入模型上下文的 user、assistant、tool 和 incoming custom message 都是 append-only；新的宿主提示只附加到以后收到的新消息，不能回填或重写旧 entry。
 - 角色完整修订已冻结在 conversation metadata 中；重新打开会话仍使用同一角色 prompt 和模型，角色模板后续编辑不会改变既有会话的 system prompt。
 - 卡片状态、run settlement、meta operation 和 conversation metadata 使用普通 `custom` entry；SDK 的 `buildSessionContext()` 会忽略它们，因此状态更新既不改旧消息，也不污染模型缓存前缀。
+- 会话自动压缩阈值同样使用普通 `piweb.compaction_threshold.v1` custom entry 保存；缺省为 70%，允许 20%–90%，最后一条有效记录生效，不进入模型上下文。
 - 两个明确例外会有意改变模型输入：Pi 在上下文逼近上限时追加 compaction summary 并以摘要替换活动上下文，以及重新启动后项目资源本身发生变化导致基础 system prompt 变化。前者是继续运行所需，后者反映用户真实修改；工作台不为提高命中率伪装旧项目状态。
 
 ## 临时会话

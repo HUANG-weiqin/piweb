@@ -703,6 +703,54 @@ pre {
   font-size: 13px;
 }
 
+.compaction-threshold-control {
+  display: grid;
+  grid-template-columns: max-content minmax(120px, 1fr) 38px;
+  align-items: center;
+  gap: 9px;
+  margin: 7px 4px 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.compaction-threshold-control input {
+  width: 100%;
+  min-height: 18px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--focus);
+  cursor: pointer;
+}
+
+.compaction-threshold-control input:disabled {
+  cursor: default;
+}
+
+.compaction-threshold-value {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.compaction-threshold-toggle {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border: 1px solid color-mix(in srgb, var(--line) 88%, transparent);
+  border-radius: 999px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--panel) 78%, transparent);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.compaction-threshold-toggle:hover {
+  color: var(--text);
+  background: var(--soft);
+}
+
 .composer-meta {
   display: flex;
   align-items: center;
@@ -1102,6 +1150,22 @@ pre {
 .role-card.unavailable {
   border-color: color-mix(in srgb, var(--danger) 28%, var(--line));
   opacity: 0.76;
+}
+
+.role-card-add {
+  min-height: 110px;
+  align-items: center;
+  justify-content: center;
+  border-style: dashed;
+  color: var(--muted);
+  text-align: center;
+  box-shadow: none;
+}
+
+.role-card-add-icon {
+  font-size: 42px;
+  font-weight: 300;
+  line-height: 1;
 }
 
 .role-card-heading {

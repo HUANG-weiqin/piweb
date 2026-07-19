@@ -63,14 +63,6 @@ const emptyDraft: RoleDraft = {
   canManageSessions: false,
 };
 
-function orderedRoles(roles: readonly RoleTemplate[]): RoleTemplate[] {
-  return [...roles].sort((left, right) => {
-    if (left.id === "default") return -1;
-    if (right.id === "default") return 1;
-    return 0;
-  });
-}
-
 function roleDraft(role: RoleTemplate): RoleDraft {
   return {
     name: role.name,
@@ -131,8 +123,7 @@ export function RoleManagerDialog({
   onUpdate,
   onDelete,
 }: RoleManagerDialogProps) {
-  const sortedRoles = useMemo(() => orderedRoles(roles), [roles]);
-  const initialRole = sortedRoles[0];
+  const initialRole = roles[0];
   const [selectedRoleId, setSelectedRoleId] = useState(
     initialRole?.id ?? NEW_ROLE_ID,
   );
@@ -145,7 +136,7 @@ export function RoleManagerDialog({
     ? NEW_ROLE_ID
     : selectedRole
       ? `${selectedRole.id}:${selectedRole.revision}`
-      : `missing:${selectedRoleId}:${sortedRoles[0]?.id ?? ""}`;
+      : `missing:${selectedRoleId}:${roles[0]?.id ?? ""}`;
   const modelOptions = useMemo(
     () => availableModelOptions(providers),
     [providers],
@@ -162,7 +153,7 @@ export function RoleManagerDialog({
       setDraft(roleDraft(selectedRole));
       return;
     }
-    const next = sortedRoles[0];
+    const next = roles[0];
     setSelectedRoleId(next?.id ?? NEW_ROLE_ID);
     setDraft(next ? roleDraft(next) : emptyDraft);
   }, [draftSourceKey]);
@@ -258,7 +249,7 @@ export function RoleManagerDialog({
           >
             新建角色
           </button>
-          {sortedRoles.map((role) => <button
+          {roles.map((role) => <button
             type="button"
             key={role.id}
             className={[
@@ -271,10 +262,7 @@ export function RoleManagerDialog({
             disabled={operationBusy}
             onClick={() => selectRole(role)}
           >
-            <span>
-              <strong>{role.name}</strong>
-              {role.id === "default" && <small>默认</small>}
-            </span>
+            <span><strong>{role.name}</strong></span>
             {!role.available && <small>{role.unavailableReason ?? "当前不可用"}</small>}
           </button>)}
         </aside>
@@ -367,7 +355,7 @@ export function RoleManagerDialog({
           </p>}
 
           <div className="role-manager-actions">
-            {!creating && selectedRole?.id !== "default" && <button
+            {!creating && <button
               type="button"
               className="danger-button"
               disabled={operationBusy}

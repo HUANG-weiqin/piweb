@@ -437,6 +437,79 @@ describe("App", () => {
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeInTheDocument();
   });
 
+  it("saves the focused conversation compaction threshold on slider release", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+        compactionThresholdPercent: 70,
+      },
+    }));
+    fireEvent.click(screen.getByRole("button", {
+      name: "自动压缩 70%",
+    }));
+    const slider = screen.getByRole("slider", {
+      name: "会话自动压缩阈值",
+    });
+
+    fireEvent.change(slider, { target: { value: "55" } });
+    fireEvent.pointerUp(slider);
+    const command = latestCommand("set_compaction_threshold");
+
+    expect(command).toMatchObject({
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      percent: 55,
+    });
+    expect(slider).toBeDisabled();
+
+    act(() => socketMock.emit?.({
+      type: "command_complete",
+      operation: "set_compaction_threshold",
+      commandId: "3d227a2c-2f51-4811-8844-e8e566b09f05",
+      sessionId,
+    }));
+    expect(slider).toBeDisabled();
+
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+          compactionThresholdPercent: 55,
+        },
+      });
+      socketMock.emit?.({
+        type: "command_complete",
+        operation: "set_compaction_threshold",
+        commandId: command.commandId,
+        sessionId,
+      });
+    });
+    expect(slider).toBeEnabled();
+    expect(screen.getByText("55%", {
+      selector: ".compaction-threshold-value",
+    }))
+      .toBeInTheDocument();
+  });
+
   it("answers extension UI requested during initialization before the first state", () => {
     render(<App />);
     const sessionId = startFromSetup();
@@ -2134,8 +2207,8 @@ describe("App", () => {
       sessionId,
     }));
     expect(screen.getByRole("status")).toHaveTextContent("角色已保存");
-    expect(screen.queryByRole("button", { name: "删除角色" }))
-      .not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "删除角色" }))
+      .toBeInTheDocument();
   });
 
   it("ignores callbacks from a socket instance disposed by StrictMode", () => {

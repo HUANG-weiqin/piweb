@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import {
+  DEFAULT_COMPACTION_THRESHOLD_PERCENT,
   PROTOCOL_VERSION,
   type AcknowledgedSettingOperation,
   type AuthRequest,
@@ -49,6 +50,10 @@ interface PendingPrompt {
 interface PendingConversationDeletion {
   commandId: string;
   conversationId: string;
+}
+
+interface PendingCompactionThreshold {
+  commandId: string;
 }
 
 interface DirectoryBrowserState {
@@ -113,6 +118,10 @@ export function App() {
     useState<PendingConversationDeletion>();
   const pendingConversationDeletionRef =
     useRef<PendingConversationDeletion | undefined>(undefined);
+  const [pendingCompactionThreshold, setPendingCompactionThresholdState] =
+    useState<PendingCompactionThreshold>();
+  const pendingCompactionThresholdRef =
+    useRef<PendingCompactionThreshold | undefined>(undefined);
   const [directoryBrowser, setDirectoryBrowserState] = useState<DirectoryBrowserState>();
   const directoryBrowserRef = useRef<DirectoryBrowserState | undefined>(undefined);
   const [promptNotice, setPromptNotice] = useState("");
@@ -172,6 +181,12 @@ export function App() {
     pendingConversationDeletionRef.current = pending;
     setPendingConversationDeletionState(pending);
   };
+  const updatePendingCompactionThreshold = (
+    pending: PendingCompactionThreshold | undefined,
+  ) => {
+    pendingCompactionThresholdRef.current = pending;
+    setPendingCompactionThresholdState(pending);
+  };
   const updateDirectoryBrowser = (next: DirectoryBrowserState | undefined) => {
     directoryBrowserRef.current = next;
     setDirectoryBrowserState(next);
@@ -208,6 +223,7 @@ export function App() {
     conversationId: string | undefined,
     focusId: string | undefined,
   ) => {
+    updatePendingCompactionThreshold(undefined);
     projectIdRef.current = projectId;
     if (!conversationId || !focusId) {
       focusRef.current = undefined;
@@ -275,6 +291,7 @@ export function App() {
     setExtensionUI([]);
     setNotification(undefined);
     setSettingResult(undefined);
+    updatePendingCompactionThreshold(undefined);
     setRoleOperationResult(undefined);
     updatePendingRoleOperation(undefined);
     setSettingsDialogOpen(false);
@@ -588,6 +605,12 @@ export function App() {
         setAuth({});
       } else if (event.type === "command_complete") {
         if (event.sessionId !== sessionIdRef.current) return;
+        if (event.operation === "set_compaction_threshold") {
+          const pending = pendingCompactionThresholdRef.current;
+          if (!pending || pending.commandId !== event.commandId) return;
+          updatePendingCompactionThreshold(undefined);
+          return;
+        }
         if (event.operation === "delete_conversation") {
           const pending = pendingConversationDeletionRef.current;
           if (!pending || pending.commandId !== event.commandId) return;
@@ -671,6 +694,16 @@ export function App() {
             commandId: "",
             error: event.message,
           });
+          return;
+        }
+        if (
+          event.operation === "set_compaction_threshold"
+          && event.commandId
+        ) {
+          const pending = pendingCompactionThresholdRef.current;
+          if (!pending || pending.commandId !== event.commandId) return;
+          updatePendingCompactionThreshold(undefined);
+          setError(`修改自动压缩阈值失败：${event.message}`);
           return;
         }
         if (
@@ -1017,6 +1050,24 @@ export function App() {
     const sessionId = sessionIdRef.current;
     if (sessionId) send({ type: "set_thinking", sessionId, level });
   };
+  const setCompactionThreshold = (percent: number): boolean => {
+    const focus = focusRef.current;
+    if (!focus || pendingCompactionThresholdRef.current) return false;
+    const commandId = crypto.randomUUID();
+    updatePendingCompactionThreshold({
+      commandId,
+    });
+    if (send({
+      type: "set_compaction_threshold",
+      commandId,
+      sessionId: focus.sessionId,
+      conversationId: focus.conversationId,
+      focusId: focus.focusId,
+      percent,
+    })) return true;
+    updatePendingCompactionThreshold(undefined);
+    return false;
+  };
   const setProjectToolMode = (mode: ToolMode) => {
     const sessionId = sessionIdRef.current;
     if (!sessionId) return;
@@ -1190,6 +1241,11 @@ export function App() {
               role={conversationRole}
               thinkingLevel={state.thinkingLevel}
               availableThinkingLevels={state.availableThinkingLevels}
+              compactionThresholdPercent={
+                state.compactionThresholdPercent
+                ?? DEFAULT_COMPACTION_THRESHOLD_PERCENT
+              }
+              compactionThresholdBusy={Boolean(pendingCompactionThreshold)}
               toolMode={state.toolMode}
               toolModeBusy={state.busy || Boolean(outstandingRunId)}
               cwd={state.cwd}
@@ -1206,6 +1262,7 @@ export function App() {
               onAbort={abortCurrentRun}
               onSettings={() => setDrawer(true)}
               onThinking={setThinkingLevel}
+              onCompactionThreshold={setCompactionThreshold}
               onToolMode={setProjectToolMode}
               onChangeCwd={closeProject}
               onOpenConversation={focusConversation}

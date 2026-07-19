@@ -8,7 +8,7 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
-export const ROLE_STORE_VERSION = 1;
+export const ROLE_STORE_VERSION = 2;
 export const MAX_ROLE_COUNT = 64;
 export const MAX_ROLE_NAME_CHARACTERS = 80;
 export const MAX_ROLE_DESCRIPTION_CHARACTERS = 1_000;
@@ -38,9 +38,14 @@ export interface RoleTemplateV1 extends RoleDraft {
   updatedAt: string;
 }
 
-interface RoleStoreDocumentV1 {
+interface RoleStoreDocument {
   version: typeof ROLE_STORE_VERSION;
   roles: RoleTemplateV1[];
+}
+
+interface ParsedRoleStoreDocument {
+  document: RoleStoreDocument;
+  migrated: boolean;
 }
 
 export interface RoleStoreSnapshot {
@@ -264,15 +269,12 @@ function assertUniqueRoles(roles: readonly RoleTemplateV1[]): void {
     }
     names.add(name);
   }
-  if (!ids.has("default")) {
-    throw new Error('roles must contain the "default" role');
-  }
 }
 
 function parseRoleStoreDocument(
   raw: string,
   rolesPath: string,
-): RoleStoreDocumentV1 {
+): ParsedRoleStoreDocument {
   let value: unknown;
   try {
     value = JSON.parse(raw);
@@ -284,8 +286,8 @@ function parseRoleStoreDocument(
 
   try {
     assertExactObject(value, ["version", "roles"], "role store");
-    if (value.version !== ROLE_STORE_VERSION) {
-      throw new Error(`version must be ${ROLE_STORE_VERSION}`);
+    if (value.version !== 1 && value.version !== ROLE_STORE_VERSION) {
+      throw new Error(`version must be 1 or ${ROLE_STORE_VERSION}`);
     }
     if (!Array.isArray(value.roles)) {
       throw new Error("roles must be an array");
@@ -296,8 +298,11 @@ function parseRoleStoreDocument(
     const roles = value.roles.map(parseRoleTemplate);
     assertUniqueRoles(roles);
     return {
-      version: ROLE_STORE_VERSION,
-      roles,
+      document: {
+        version: ROLE_STORE_VERSION,
+        roles: value.version === 1 ? migrateV1Roles(roles) : roles,
+      },
+      migrated: value.version === 1,
     };
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
@@ -305,6 +310,33 @@ function parseRoleStoreDocument(
       cause: error,
     });
   }
+}
+
+function migrateV1Roles(roles: readonly RoleTemplateV1[]): RoleTemplateV1[] {
+  const defaultRole = roles.find(({ id }) => id === "default");
+  if (!defaultRole) return roles.map(cloneRole);
+  const hasDefaultNameConflict = roles.some((role) => (
+    role.id !== "default"
+    && normalizedRoleName(role.name) === normalizedRoleName("默认")
+  ));
+  const shouldMigrateDefault = (
+    defaultRole.name === "Default"
+    && defaultRole.description === ""
+    && defaultRole.revision < Number.MAX_SAFE_INTEGER
+    && !hasDefaultNameConflict
+  );
+  if (!shouldMigrateDefault) return roles.map(cloneRole);
+
+  const migratedAt = new Date().toISOString();
+  return roles.map((role) => role.id === "default"
+    ? {
+        ...role,
+        revision: role.revision + 1,
+        name: "默认",
+        description: "默认角色",
+        updatedAt: migratedAt,
+      }
+    : cloneRole(role));
 }
 
 function cloneModel(
@@ -320,7 +352,7 @@ function cloneRole(role: RoleTemplateV1): RoleTemplateV1 {
   };
 }
 
-function cloneDocument(document: RoleStoreDocumentV1): RoleStoreDocumentV1 {
+function cloneDocument(document: RoleStoreDocument): RoleStoreDocument {
   return {
     version: ROLE_STORE_VERSION,
     roles: document.roles.map(cloneRole),
@@ -350,7 +382,7 @@ function modelsAreEqual(
 
 async function writeRoleStoreAtomically(
   rolesPath: string,
-  document: RoleStoreDocumentV1,
+  document: RoleStoreDocument,
 ): Promise<void> {
   const temporaryPath = join(
     dirname(rolesPath),
@@ -376,12 +408,12 @@ export class RoleStore {
   readonly rolesPath: string;
 
   private readonly listeners = new Set<RoleStoreListener>();
-  private document: RoleStoreDocumentV1;
+  private document: RoleStoreDocument;
   private writeTail: Promise<void> = Promise.resolve();
 
   private constructor(
     rolesPath: string,
-    document: RoleStoreDocumentV1,
+    document: RoleStoreDocument,
   ) {
     this.rolesPath = rolesPath;
     this.document = document;
@@ -393,12 +425,16 @@ export class RoleStore {
   ): Promise<RoleStore> {
     await mkdir(dirname(rolesPath), { recursive: true });
 
-    let document: RoleStoreDocumentV1;
+    let document: RoleStoreDocument;
     try {
-      document = parseRoleStoreDocument(
+      const parsed = parseRoleStoreDocument(
         await readFile(rolesPath, "utf8"),
         rolesPath,
       );
+      document = parsed.document;
+      if (parsed.migrated) {
+        await writeRoleStoreAtomically(rolesPath, document);
+      }
     } catch (error) {
       if (!isNodeError(error, "ENOENT")) throw error;
       const model = parseModelReference(initialModel, "initialModel");
@@ -408,8 +444,8 @@ export class RoleStore {
         roles: [{
           id: "default",
           revision: 1,
-          name: "Default",
-          description: "",
+          name: "默认",
+          description: "默认角色",
           systemPrompt: "",
           model,
           canManageSessions: false,
@@ -469,7 +505,7 @@ export class RoleStore {
         createdAt: timestamp,
         updatedAt: timestamp,
       };
-      const next: RoleStoreDocumentV1 = {
+      const next: RoleStoreDocument = {
         version: ROLE_STORE_VERSION,
         roles: [...this.document.roles, role],
       };
@@ -523,9 +559,6 @@ export class RoleStore {
   async deleteRole(roleId: string, expectedRevision: number): Promise<void> {
     assertRoleId(roleId, "roleId");
     assertRevision(expectedRevision, "expectedRevision");
-    if (roleId === "default") {
-      throw new Error("The default role cannot be deleted");
-    }
     return this.enqueueWrite(async () => {
       const index = this.document.roles.findIndex(({ id }) => id === roleId);
       if (index < 0) {
@@ -563,7 +596,7 @@ export class RoleStore {
     return result;
   }
 
-  private async commit(document: RoleStoreDocumentV1): Promise<void> {
+  private async commit(document: RoleStoreDocument): Promise<void> {
     await writeRoleStoreAtomically(this.rolesPath, document);
     this.document = cloneDocument(document);
     this.emit();

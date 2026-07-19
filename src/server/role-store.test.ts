@@ -15,6 +15,7 @@ import {
   MAX_ROLE_DESCRIPTION_CHARACTERS,
   MAX_ROLE_NAME_CHARACTERS,
   MAX_ROLE_SYSTEM_PROMPT_BYTES,
+  ROLE_STORE_VERSION,
   RoleStore,
   type RoleDraft,
   type RoleModelReference,
@@ -53,8 +54,8 @@ function persistedDefault(
   return {
     id: "default",
     revision: 1,
-    name: "Default",
-    description: "",
+    name: "默认",
+    description: "默认角色",
     systemPrompt: "",
     model: initialModel,
     canManageSessions: false,
@@ -93,7 +94,7 @@ describe("RoleStore", () => {
 
     const persisted = JSON.parse(await readFile(rolesPath, "utf8")) as unknown;
     expect(persisted).toEqual({
-      version: 1,
+      version: ROLE_STORE_VERSION,
       roles: [persistedDefault()],
     });
 
@@ -102,6 +103,51 @@ describe("RoleStore", () => {
       id: "ignored",
     });
     expect(reopened.listRoles()).toEqual([persistedDefault()]);
+  });
+
+  it("migrates the untouched v1 default copy without overwriting later edits", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-19T11:00:00.000Z"));
+    const rolesPath = await createRolesPath("piweb-role-store-v1-default-");
+    await mkdir(dirname(rolesPath), { recursive: true });
+    await writeFile(rolesPath, `${JSON.stringify({
+      version: 1,
+      roles: [persistedDefault({
+        revision: 3,
+        name: "Default",
+        description: "",
+      })],
+    }, null, 2)}\n`, "utf8");
+
+    const store = await RoleStore.open(rolesPath, initialModel);
+
+    expect(store.getRole("default")).toEqual(persistedDefault({
+      revision: 4,
+      updatedAt: "2026-07-19T11:00:00.000Z",
+    }));
+    expect(JSON.parse(await readFile(rolesPath, "utf8"))).toEqual({
+      version: ROLE_STORE_VERSION,
+      roles: [persistedDefault({
+        revision: 4,
+        updatedAt: "2026-07-19T11:00:00.000Z",
+      })],
+    });
+
+    const editedRolesPath = await createRolesPath(
+      "piweb-role-store-v1-edited-default-",
+    );
+    await mkdir(dirname(editedRolesPath), { recursive: true });
+    const editedDefault = persistedDefault({
+      name: "General",
+      description: "",
+    });
+    await writeFile(editedRolesPath, `${JSON.stringify({
+      version: 1,
+      roles: [editedDefault],
+    }, null, 2)}\n`, "utf8");
+
+    const editedStore = await RoleStore.open(editedRolesPath, initialModel);
+    expect(editedStore.getRole("default")).toEqual(editedDefault);
   });
 
   it("keeps a model-less default when no initial model is available", async () => {
@@ -127,16 +173,12 @@ describe("RoleStore", () => {
     expect(store.getRole("default")?.canManageSessions).toBe(false);
   });
 
-  it("allows editing default, increments its revision, and never deletes it", async () => {
+  it("allows editing and deleting the seeded role without recreating it", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-19T10:00:00.000Z"));
     const rolesPath = await createRolesPath("piweb-role-store-edit-default-");
     const store = await RoleStore.open(rolesPath, initialModel);
     const before = store.getRole("default")!;
-
-    await expect(store.deleteRole("default", 1)).rejects.toThrow(
-      "The default role cannot be deleted",
-    );
 
     vi.setSystemTime(new Date("2026-07-19T11:00:00.000Z"));
     const updated = await store.updateRole("default", 1, {
@@ -158,8 +200,12 @@ describe("RoleStore", () => {
       updatedAt: "2026-07-19T11:00:00.000Z",
     });
     expect(store.listRoles()).toHaveLength(1);
+
+    await store.deleteRole("default", updated.revision);
+    expect(store.listRoles()).toEqual([]);
+
     const reopened = await RoleStore.open(rolesPath, null);
-    expect(reopened.getRole("default")).toEqual(updated);
+    expect(reopened.listRoles()).toEqual([]);
   });
 
   it("creates UUID roles and enforces case-insensitive unique names", async () => {
@@ -299,7 +345,7 @@ describe("RoleStore", () => {
     fetched.model!.id = "mutated model";
 
     expect(store.getRole("default")).toMatchObject({
-      name: "Default",
+      name: "默认",
       model: initialModel,
     });
   });
@@ -307,7 +353,7 @@ describe("RoleStore", () => {
   it("fails closed on corrupt, unknown, or structurally invalid v1 files", async () => {
     const invalidDocuments: unknown[] = [
       "{",
-      { version: 2, roles: [persistedDefault()] },
+      { version: 3, roles: [persistedDefault()] },
       { version: 1, roles: [persistedDefault()], extra: true },
       {
         version: 1,

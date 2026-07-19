@@ -34,7 +34,7 @@ const projectControlProps = {
 };
 
 describe("RoleSelectionPage", () => {
-  it("puts the default role first without selecting it", () => {
+  it("preserves role order without selecting one", () => {
     const start = vi.fn();
     render(<RoleSelectionPage
       {...projectControlProps}
@@ -46,14 +46,39 @@ describe("RoleSelectionPage", () => {
     />);
 
     const cards = screen.getAllByRole("button", { name: /选择角色/ });
-    expect(cards[0]).toHaveAccessibleName("选择角色 Default");
+    expect(cards[0]).toHaveAccessibleName("选择角色 Reviewer");
+    expect(cards[1]).toHaveAccessibleName("选择角色 Default");
     expect(cards[0]).toHaveAttribute("aria-pressed", "false");
     expect(screen.getByRole("button", { name: "开始新会话" })).toBeDisabled();
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
 
     fireEvent.click(cards[0]!);
     fireEvent.click(screen.getByRole("button", { name: "开始新会话" }));
-    expect(start).toHaveBeenCalledWith("default");
+    expect(start).toHaveBeenCalledWith("reviewer");
+  });
+
+  it("places an add-role card after existing roles and opens role management", () => {
+    const manageRoles = vi.fn();
+    render(<RoleSelectionPage
+      {...projectControlProps}
+      roles={[
+        role("default", "Default"),
+        role("reviewer", "Reviewer"),
+      ]}
+      onStart={() => undefined}
+      onManageRoles={manageRoles}
+    />);
+
+    const grid = screen.getByRole("region", { name: "可选角色" });
+    const cards = within(grid).getAllByRole("button");
+    expect(cards.map((card) => card.getAttribute("aria-label"))).toEqual([
+      "选择角色 Default",
+      "选择角色 Reviewer",
+      "添加角色",
+    ]);
+
+    fireEvent.click(cards.at(-1)!);
+    expect(manageRoles).toHaveBeenCalledOnce();
   });
 
   it("disables unavailable roles and explains why", () => {
@@ -80,10 +105,12 @@ describe("RoleSelectionPage", () => {
   });
 
   it("locks role selection while creation is pending", () => {
+    const manageRoles = vi.fn();
     const view = render(<RoleSelectionPage
       {...projectControlProps}
       roles={[role("default", "Default")]}
       onStart={() => undefined}
+      onManageRoles={manageRoles}
     />);
     fireEvent.click(screen.getByRole("button", { name: "选择角色 Default" }));
 
@@ -92,9 +119,11 @@ describe("RoleSelectionPage", () => {
       roles={[role("default", "Default")]}
       pending
       onStart={() => undefined}
+      onManageRoles={manageRoles}
     />);
 
     expect(screen.getByRole("button", { name: "选择角色 Default" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "添加角色" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "正在创建会话…" })).toBeDisabled();
   });
 

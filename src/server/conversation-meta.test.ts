@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import {
+  COMPACTION_THRESHOLD_CUSTOM_TYPE,
   CONVERSATION_CARD_CUSTOM_TYPE,
   CONVERSATION_MESSAGE_CUSTOM_TYPE,
   CONVERSATION_META_CUSTOM_TYPE,
@@ -13,12 +14,14 @@ import {
   RUN_SETTLEMENT_CUSTOM_TYPE,
   aggregateReservedConversationEntries,
   appendReservedCustomEntry,
+  createCompactionThresholdEntry,
   createConversationCardEntry,
   createConversationMessageEntry,
   createConversationMetaEntry,
   createMetaOperationEntry,
   createRunSettlementEntry,
   parseConversationCardEntry,
+  parseCompactionThresholdEntry,
   parseConversationMessageEntry,
   parseConversationMetaEntry,
   parseMetaOperationEntry,
@@ -142,6 +145,36 @@ describe("conversation reserved entries", () => {
     value.role.name = "mutated";
     expect(entry.data.role.name).toBe("Worker");
     expect(parseConversationMetaEntry(entry)).toEqual(entry);
+  });
+
+  it("keeps the latest valid conversation compaction threshold", () => {
+    const initial = createCompactionThresholdEntry({
+      percent: 70,
+      updatedAt: timestamp,
+    });
+    const changed = createCompactionThresholdEntry({
+      percent: 55,
+      updatedAt: "2026-07-19T10:01:00.000Z",
+    });
+
+    expect(initial.customType).toBe(COMPACTION_THRESHOLD_CUSTOM_TYPE);
+    expect(parseCompactionThresholdEntry(initial)).toEqual(initial);
+    expect(aggregateReservedConversationEntries([
+      initial,
+      changed,
+    ]).compactionThreshold).toEqual(changed.data);
+    expect(() => createCompactionThresholdEntry({
+      percent: 19,
+      updatedAt: timestamp,
+    })).toThrow(/percent/i);
+    expect(() => createCompactionThresholdEntry({
+      percent: 91,
+      updatedAt: timestamp,
+    })).toThrow(/percent/i);
+    expect(() => aggregateReservedConversationEntries([
+      changed,
+      initial,
+    ])).toThrow(/updatedAt cannot regress/i);
   });
 
   it("keeps session management disabled for legacy conversation metadata", () => {

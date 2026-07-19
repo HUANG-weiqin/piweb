@@ -149,6 +149,7 @@ function queuedCommandScope(command: QueuedCommand): "session" | "epoch" | "glob
   switch (command.type) {
     case "select_model":
     case "set_thinking":
+    case "set_compaction_threshold":
     case "set_tool_mode":
     case "rename_conversation":
     case "delete_conversation":
@@ -991,6 +992,21 @@ export class PiConnection {
       case "set_thinking":
         await this.setCoordinatedThinking(command.level);
         return;
+      case "set_compaction_threshold": {
+        const view = this.requireCoordinatedFocus(
+          command.sessionId,
+          command.conversationId,
+          command.focusId,
+        );
+        const { coordinator } = await this.requireCoordination();
+        coordinator.setCompactionThreshold(
+          view.handle,
+          command.conversationId,
+          command.percent,
+        );
+        this.emitCommandComplete(command);
+        return;
+      }
       case "set_tool_mode": {
         const view = this.requireCoordinatedView(command.sessionId);
         await this.projectRuns.transitionToolMode(
@@ -1169,6 +1185,7 @@ export class PiConnection {
           | "create_role"
           | "update_role"
           | "delete_role"
+          | "set_compaction_threshold"
           | "set_api_key";
       }
     >,
@@ -1352,6 +1369,7 @@ export class PiConnection {
         total: stats.tokens.total,
       },
       contextUsage,
+      compactionThresholdPercent: actor.getCompactionThresholdPercent(),
     };
   }
 
@@ -1691,6 +1709,10 @@ export class PiConnection {
     switch (command.type) {
       case "select_model": return this.selectModel(command.provider, command.modelId);
       case "set_thinking": return this.setThinking(command.level);
+      case "set_compaction_threshold":
+        throw new Error(
+          "set_compaction_threshold requires persistent project coordination",
+        );
       case "set_tool_mode": return this.setToolMode(command.mode);
       case "rename_conversation":
         return this.renameConversation(command.conversationId, command.name);

@@ -31,6 +31,7 @@ import {
   PiConnection,
 } from "./pi-service.js";
 import {
+  aggregateReservedConversationEntries,
   appendReservedCustomEntry,
   createConversationCardEntry,
 } from "./conversation-meta.js";
@@ -60,6 +61,7 @@ type FakeCreatedSession = Pick<CreatedPiSession, "session" | "settings">;
 
 function fakeSettings(): SettingsManager {
   return {
+    applyOverrides: () => undefined,
     flush: async () => undefined,
     drainErrors: () => [],
   } as unknown as SettingsManager;
@@ -2145,6 +2147,50 @@ describe("PiConnection lifecycle", () => {
 });
 
 describe("PiConnection coordinated project view", () => {
+  it("persists and acknowledges the focused conversation compaction threshold", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        roleId: "default",
+      });
+      const focused = latestState(harness.events);
+      expect(focused.compactionThresholdPercent).toBe(70);
+      const commandId = randomUUID();
+
+      await harness.connection.handle({
+        type: "set_compaction_threshold",
+        commandId,
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+        percent: 55,
+      });
+
+      expect(latestState(harness.events).compactionThresholdPercent).toBe(55);
+      expect(harness.events).toContainEqual({
+        type: "command_complete",
+        operation: "set_compaction_threshold",
+        commandId,
+        sessionId: SESSION_A,
+      });
+      expect(aggregateReservedConversationEntries(
+        harness.runtime.created[0]!.persistentManager!.getEntries(),
+      ).compactionThreshold?.percent).toBe(55);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
   it("opens an empty project without implicitly creating a conversation", async () => {
     const harness = await coordinatedConnectionHarness();
     const commandId = randomUUID();
@@ -3396,13 +3442,38 @@ describe("PiConnection coordinated project view", () => {
         commandId: deleteCommandId,
         sessionId: SESSION_A,
       });
-      await expect(harness.connection.handle({
+      const afterReviewerDelete = harness.events.findLast(
+        (event) => event.type === "role_catalog_snapshot",
+      );
+      if (afterReviewerDelete?.type !== "role_catalog_snapshot") {
+        throw new Error("role catalog after delete was not published");
+      }
+      const seededRole = afterReviewerDelete.roles.find(
+        ({ id }) => id === "default",
+      );
+      expect(seededRole).toBeDefined();
+
+      const deleteSeededCommandId = randomUUID();
+      await harness.connection.handle({
         type: "delete_role",
-        commandId: randomUUID(),
+        commandId: deleteSeededCommandId,
         sessionId: SESSION_A,
         roleId: "default",
-        expectedRevision: 1,
-      })).rejects.toThrow("default");
+        expectedRevision: seededRole!.revision,
+      });
+      expect(harness.events).toContainEqual({
+        type: "command_complete",
+        operation: "delete_role",
+        commandId: deleteSeededCommandId,
+        sessionId: SESSION_A,
+      });
+      const emptyCatalog = harness.events.findLast(
+        (event) => event.type === "role_catalog_snapshot",
+      );
+      expect(emptyCatalog).toMatchObject({
+        type: "role_catalog_snapshot",
+        roles: [],
+      });
     } finally {
       await harness.cleanup();
     }

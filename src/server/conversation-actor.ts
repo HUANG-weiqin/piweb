@@ -6,14 +6,17 @@ import type {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import type {
-  ConversationActivity,
-  SessionEvent,
-  ToolMode,
+import {
+  DEFAULT_COMPACTION_THRESHOLD_PERCENT,
+  type ConversationActivity,
+  type SessionEvent,
+  type ToolMode,
 } from "../shared/protocol.js";
 import { mostRestrictiveToolMode } from "../shared/tool-mode.js";
 import {
   aggregateReservedConversationEntries,
+  appendReservedCustomEntry,
+  createCompactionThresholdEntry,
   createConversationMetaEntry,
   createConversationMessageEntry,
   createRunSettlementEntry,
@@ -236,6 +239,7 @@ export class ConversationActor {
   private readonly listeners = new Set<ConversationActorListener>();
   private readonly usedRunIds = new Set<string>();
   private readonly profileSnapshot: ConversationMeta;
+  private compactionThresholdPercent: number;
 
   private created?: CreatedPiSession;
   private unsubscribeSession?: () => void;
@@ -260,11 +264,13 @@ export class ConversationActor {
     this.cancelRunScope = options.cancelRunScope;
     this.now = options.now ?? (() => new Date());
     this.profileSnapshot = createConversationMetaEntry(options.profile).data;
-    for (
-      const settlement of aggregateReservedConversationEntries(
-        this.sessionManager.getEntries(),
-      ).runSettlements
-    ) {
+    const reserved = aggregateReservedConversationEntries(
+      this.sessionManager.getEntries(),
+    );
+    this.compactionThresholdPercent =
+      reserved.compactionThreshold?.percent
+      ?? DEFAULT_COMPACTION_THRESHOLD_PERCENT;
+    for (const settlement of reserved.runSettlements) {
       this.usedRunIds.add(settlement.runId);
     }
     this.persistSettlementCallback = options.persistSettlement
@@ -356,6 +362,19 @@ export class ConversationActor {
 
   get modelRegistry(): ModelRegistry {
     return this.requireCreated().modelRegistry;
+  }
+
+  getCompactionThresholdPercent(): number {
+    return this.compactionThresholdPercent;
+  }
+
+  setCompactionThresholdPercent(percent: number): void {
+    const entry = createCompactionThresholdEntry({
+      percent,
+      updatedAt: this.now().toISOString(),
+    });
+    appendReservedCustomEntry(this.sessionManager, entry);
+    this.compactionThresholdPercent = entry.data.percent;
   }
 
   dynamicProviderNames(): ReadonlySet<string> {
@@ -703,6 +722,8 @@ export class ConversationActor {
       if (projectedFailure) throw new Error(projectedFailure);
       if (isCancelling(ticket) || ticket.projector.aborted) {
         outcome = "aborted";
+      } else {
+        await this.compactAtThreshold(ticket);
       }
     } catch (error) {
       if (isCancelling(ticket) || this.activeRun !== ticket) {
@@ -715,6 +736,20 @@ export class ConversationActor {
 
     if (failure !== undefined) this.emitError(failure, ticket.id);
     await this.settleRun(ticket, outcome);
+  }
+
+  private async compactAtThreshold(ticket: RunTicket): Promise<void> {
+    const usage = this.session.getContextUsage?.();
+    if (
+      usage?.percent === null
+      || usage?.percent === undefined
+      || usage.percent < this.compactionThresholdPercent
+    ) return;
+    try {
+      await this.session.compact();
+    } catch (error) {
+      this.emitError(error, ticket.id);
+    }
   }
 
   private settleRun(

@@ -80,6 +80,7 @@ interface ReceivedCustomMessage {
 
 function fakeSettings(): SettingsManager {
   return {
+    applyOverrides: () => undefined,
     flush: async () => undefined,
     drainErrors: () => [],
   } as unknown as SettingsManager;
@@ -3256,6 +3257,53 @@ describe("ProjectSessionCoordinator", () => {
       runId: processingRunId,
       outcome: "completed",
     }));
+  });
+
+  it("migrates a legacy conversation after the seeded role was deleted", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-legacy-without-role-"));
+    temporaryDirectories.push(cwd);
+    const runtime = new FakeRuntime();
+    const roles = await RoleCatalog.open(
+      runtime,
+      join(cwd, "user", "roles.json"),
+    );
+    const seeded = roles.getRoleTemplate("default");
+    await roles.deleteRole(seeded.id, seeded.revision);
+    expect(roles.listRoles()).toEqual([]);
+
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversationId = randomUUID();
+    const legacy = await store.createConversation(conversationId);
+    legacy.appendModelChange("test", "model-a");
+
+    const coordinator = new ProjectSessionCoordinator(runtime, roles);
+    const handle = await coordinator.acquireProject(cwd, "full_access");
+    fixtures.push({
+      cwd,
+      runtime,
+      roles,
+      registry: new ProjectStoreRegistry(),
+      coordinator,
+      handle,
+    });
+
+    const opened = await coordinator.openConversation(
+      handle,
+      conversationId,
+      { updateRecent: false },
+    );
+    expect(
+      aggregateReservedConversationEntries(
+        opened.sessionManager.getEntries(),
+      ).conversationMeta,
+    ).toMatchObject({
+      role: {
+        id: "default",
+        name: "旧会话",
+        model: { provider: "test", id: "model-a" },
+        canManageSessions: false,
+      },
+    });
   });
 
   it("recovers a processing start_session with its exact task, role, and run only once", async () => {
