@@ -252,7 +252,11 @@ describe("projectConversationHistory", () => {
       timestamp: 1,
     }));
     const incoming = createConversationMessageEntry({
-      content: "Parser review complete",
+      content: [
+        "Parser review complete",
+        "",
+        "生命周期提醒：这段内容只供 Agent 使用。",
+      ].join("\n"),
       display: true,
       details: {
         messageId: randomUUID(),
@@ -296,6 +300,7 @@ describe("projectConversationHistory", () => {
         sentAt: incoming.details.sentAt,
       }),
     ]);
+    expect(JSON.stringify(items)).not.toContain("生命周期提醒");
 
     const snapshot = projectConversationItemsSnapshot(manager);
     expect(snapshot.items).toEqual(items);

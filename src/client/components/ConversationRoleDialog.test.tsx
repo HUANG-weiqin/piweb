@@ -17,6 +17,7 @@ const role: ConversationRoleSnapshot = {
     provider: "openai",
     id: "gpt-5",
   },
+  canManageSessions: true,
 };
 
 describe("ConversationRoleDialog", () => {
@@ -29,6 +30,7 @@ describe("ConversationRoleDialog", () => {
       .toBeInTheDocument();
     expect(screen.getByText("openai / gpt-5")).toBeInTheDocument();
     expect(screen.getByText("修订 7")).toBeInTheDocument();
+    expect(screen.getByText("允许")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /切换/ })).not.toBeInTheDocument();
   });
 

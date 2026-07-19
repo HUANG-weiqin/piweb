@@ -1,3 +1,4 @@
+import { useId, useState } from "react";
 import type {
   ConversationMessageCard,
   SessionMessageEndpoint,
@@ -54,6 +55,9 @@ export function SessionMessageCard({
   const peer = card.direction === "incoming" ? card.from : card.to;
   const canOpen = onOpenConversation !== undefined
     && card.peerExists === true;
+  const [expanded, setExpanded] = useState(false);
+  const detailsId = useId();
+  const peerTitle = peer.title?.trim() || "未命名会话";
 
   return (
     <article
@@ -61,51 +65,69 @@ export function SessionMessageCard({
         "session-message-card",
         `direction-${card.direction}`,
         `state-${card.state}`,
+        expanded ? "is-expanded" : "is-collapsed",
       ].join(" ")}
       aria-label={`${directionLabel}的会话消息`}
       data-card-id={card.cardId}
       data-message-id={card.messageId}
     >
       <header className="session-message-header">
-        <span className="session-message-direction">{directionLabel}</span>
-        <span
-          className="session-message-status"
-          role="status"
-          aria-label={`消息状态：${statusLabel}`}
+        <button
+          type="button"
+          className="session-message-toggle"
+          aria-expanded={expanded}
+          aria-controls={detailsId}
+          aria-label={`${expanded ? "收起" : "展开"}${directionLabel}的会话消息：${peerTitle}`}
+          onClick={() => setExpanded((current) => !current)}
         >
-          {statusLabel}
-        </span>
+          <span className="session-message-direction">{directionLabel}</span>
+          <span className="session-message-peer">
+            {card.direction === "incoming" ? "来自" : "发给"} {peerTitle}
+          </span>
+          <span
+            className="session-message-status"
+            role="status"
+            aria-label={`消息状态：${statusLabel}`}
+          >
+            {statusLabel}
+          </span>
+          <span className="session-message-chevron" aria-hidden="true">⌄</span>
+        </button>
       </header>
 
-      <div className="session-message-route">
-        <Endpoint endpoint={card.from} kind="from" />
-        <span className="session-message-route-arrow" aria-hidden="true">→</span>
-        <Endpoint endpoint={card.to} kind="to" />
-      </div>
+      {expanded && (
+        <div id={detailsId} className="session-message-details">
+          <div className="session-message-route">
+            <Endpoint endpoint={card.from} kind="from" />
+            <span className="session-message-route-arrow" aria-hidden="true">→</span>
+            <Endpoint endpoint={card.to} kind="to" />
+          </div>
 
-      <p className="session-message-body">{card.body}</p>
+          <p className="session-message-body">{card.body}</p>
 
-      {card.result !== undefined && (
-        <section className="session-message-result" aria-label="会话消息结果">
-          <strong>结果</strong>
-          <p>{card.result}</p>
-        </section>
+          {card.result !== undefined && (
+            <section className="session-message-result" aria-label="会话消息结果">
+              <strong>结果</strong>
+              <p>{card.result}</p>
+            </section>
+          )}
+
+          <footer className="session-message-footer">
+            <time className="session-message-updated" dateTime={card.updatedAt}>
+              {card.updatedAt}
+            </time>
+            {canOpen && (
+              <button
+                type="button"
+                className="session-message-open"
+                onClick={() => onOpenConversation(peer.conversationId)}
+              >
+                打开会话
+              </button>
+            )}
+          </footer>
+        </div>
       )}
-
-      <footer className="session-message-footer">
-        <time className="session-message-updated" dateTime={card.updatedAt}>
-          {card.updatedAt}
-        </time>
-        {canOpen && (
-          <button
-            type="button"
-            className="session-message-open"
-            onClick={() => onOpenConversation(peer.conversationId)}
-          >
-            打开会话
-          </button>
-        )}
-      </footer>
     </article>
   );
 }

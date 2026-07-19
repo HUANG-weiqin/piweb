@@ -2,8 +2,6 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import type {
   AcknowledgedSettingOperation,
   PublicState,
-  ThinkingLevel,
-  ToolMode,
 } from "../../shared/protocol";
 import { useModalFocus } from "../lib/use-modal-focus";
 
@@ -11,8 +9,6 @@ interface ConnectionDrawerProps {
   state: PublicState;
   open: boolean;
   online: boolean;
-  toolModeBusy: boolean;
-  conversationBusy: boolean;
   settingResult?: {
     operation: AcknowledgedSettingOperation;
     commandId: string;
@@ -20,27 +16,13 @@ interface ConnectionDrawerProps {
     message: string;
   };
   onClose(): void;
-  onManageRoles?(): void;
-  onRenameConversation(name: string): void;
   onKey(provider: string, key: string): string | undefined;
   onOAuth(provider: string): void;
   onLogout(provider: string): void;
   onRefresh(): void;
   onClearSettingResult(): void;
   onKeyDialogChange(open: boolean): void;
-  onThinking(level: ThinkingLevel): void;
-  onToolMode(mode: ToolMode): void;
 }
-
-const thinkingLabels: Record<ThinkingLevel, string> = {
-  off: "关闭",
-  minimal: "极低",
-  low: "低",
-  medium: "中",
-  high: "高",
-  xhigh: "很高",
-  max: "最高",
-};
 
 function initialProviderId(state: PublicState): string {
   if (
@@ -69,20 +51,14 @@ export function ConnectionDrawer({
   state,
   open,
   online,
-  toolModeBusy,
-  conversationBusy,
   settingResult,
   onClose,
-  onManageRoles,
-  onRenameConversation,
   onKey,
   onOAuth,
   onLogout,
   onRefresh,
   onClearSettingResult,
   onKeyDialogChange,
-  onThinking,
-  onToolMode,
 }: ConnectionDrawerProps) {
   const [providerId, setProviderId] = useState(() => initialProviderId(state));
   const [keyProviderId, setKeyProviderId] = useState("");
@@ -96,11 +72,6 @@ export function ConnectionDrawer({
   const [savedKeyProviderId, setSavedKeyProviderId] = useState("");
   const [confirmLogoutProviderId, setConfirmLogoutProviderId] = useState("");
   const [search, setSearch] = useState("");
-  const [conversationName, setConversationName] = useState(state.conversationName ?? "");
-
-  useEffect(() => {
-    setConversationName(state.conversationName ?? "");
-  }, [state.conversationId, state.conversationName]);
 
   useEffect(() => {
     if (providerId && state.providers.some((provider) => provider.id === providerId)) return;
@@ -218,11 +189,6 @@ export function ConnectionDrawer({
     const commandId = onKey(keyProvider.id, value);
     if (commandId) setSavingKey({ providerId: keyProvider.id, commandId });
   };
-  const submitConversationName = (event: FormEvent) => {
-    event.preventDefault();
-    const name = conversationName.trim();
-    if (name && name !== state.conversationName) onRenameConversation(name);
-  };
   const chooseProvider = (nextProviderId: string) => {
     setProviderId(nextProviderId);
     setSearch("");
@@ -247,14 +213,14 @@ export function ConnectionDrawer({
       role={keyProvider ? undefined : "dialog"}
       aria-modal={keyProvider ? undefined : true}
       aria-hidden={keyProvider ? true : undefined}
-      aria-label="工作台设置"
+      aria-label="模型连接"
       tabIndex={-1}
     >
       <header className="drawer-header">
         <div>
-          <p className="eyebrow">PROJECT WORKBENCH</p>
-          <h2>设置</h2>
-          <p>本机模型连接与当前项目行为</p>
+          <p className="eyebrow">MODEL CONNECTIONS</p>
+          <h2>模型连接</h2>
+          <p>连接服务提供商并查看可用模型</p>
         </div>
         <button className="icon-button" onClick={onClose} aria-label="关闭">×</button>
       </header>
@@ -429,72 +395,6 @@ export function ConnectionDrawer({
           </div>
         </div>
       </section>
-
-      <section className="settings-section">
-        <h3>Agent 行为</h3>
-        {onManageRoles && <button
-          type="button"
-          className="role-manager-entry"
-          onClick={onManageRoles}
-        >
-          管理角色
-        </button>}
-        <div className="setting-field">
-          <label htmlFor="thinking-level">思考级别</label>
-          <select
-            id="thinking-level"
-            value={state.thinkingLevel}
-            onChange={(event) => onThinking(event.target.value as ThinkingLevel)}
-          >
-            {(state.availableThinkingLevels ?? [state.thinkingLevel]).map((level) => (
-              <option key={level} value={level}>{thinkingLabels[level]}</option>
-            ))}
-          </select>
-        </div>
-        <div className="setting-field">
-          <label htmlFor="tool-mode">工具权限</label>
-          <select
-            id="tool-mode"
-            aria-label="工具权限"
-            value={state.toolMode}
-            disabled={toolModeBusy}
-            onChange={(event) => onToolMode(event.target.value as ToolMode)}
-          >
-            <option value="full_access">全部授权</option>
-            <option value="read_only">只读</option>
-          </select>
-          <p className="setting-note">
-            {state.toolMode === "read_only"
-              ? "仅允许 Pi 原生 read、grep、find 和 ls；命令、写入及扩展工具均被阻止。"
-              : "所有工具和命令直接执行，不会询问；可以修改项目外文件。"}
-          </p>
-        </div>
-      </section>
-
-      {state.conversationId && <section className="settings-section">
-        <h3>当前会话</h3>
-        <form className="conversation-name" onSubmit={submitConversationName}>
-          <input
-            aria-label="当前会话名称"
-            value={conversationName}
-            disabled={conversationBusy}
-            maxLength={120}
-            placeholder="给当前会话命名"
-            onChange={(event) => setConversationName(event.target.value)}
-          />
-          <button
-            type="submit"
-            disabled={
-              conversationBusy
-              || !conversationName.trim()
-              || conversationName.trim() === state.conversationName
-            }
-          >保存</button>
-        </form>
-        <p className="setting-note">
-          新建、打开和删除会话统一在左侧会话栏中完成。
-        </p>
-      </section>}
     </aside>
     {keyProvider && <div className="modal-backdrop" role="presentation"><form
       ref={keyFocusRef}

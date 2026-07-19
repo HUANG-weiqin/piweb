@@ -66,16 +66,19 @@ describe("RoleCatalog", () => {
       description: "changed",
       systemPrompt: "new prompt",
       model: model("provider", "model-a"),
+      canManageSessions: false,
     });
 
     expect(snapshot).toMatchObject({
       revision: 1,
       name: "Default",
       systemPrompt: "",
+      canManageSessions: false,
     });
     expect(catalog.getConversationRole("default")).toMatchObject({
       revision: 2,
       name: "Updated",
+      canManageSessions: false,
     });
   });
 
@@ -94,6 +97,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "",
       model: model("provider", "missing"),
+      canManageSessions: true,
     })).rejects.toThrow("unavailable in the current project");
 
     models.available = [model("provider", "missing")];
@@ -102,6 +106,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "",
       model: model("provider", "missing"),
+      canManageSessions: true,
     });
     models.available = [];
     expect(catalog.listRoles()[0]).toMatchObject({
@@ -125,6 +130,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "",
       model: model("extension", "project-model"),
+      canManageSessions: false,
     })).rejects.toThrow("unavailable in the current project");
 
     const created = await catalog.createRole({
@@ -132,6 +138,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "",
       model: model("extension", "project-model"),
+      canManageSessions: false,
     }, projectModels);
 
     expect(catalog.listRoles(projectModels)).toContainEqual(
@@ -152,6 +159,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "",
       model: model("extension", "missing"),
+      canManageSessions: false,
     }, projectModels)).rejects.toThrow("unavailable in the current project");
 
     await expect(catalog.updateRole(created.id, created.revision, {
@@ -159,6 +167,7 @@ describe("RoleCatalog", () => {
       description: "The project provider is temporarily unavailable.",
       systemPrompt: "Keep the frozen model.",
       model: model("extension", "project-model"),
+      canManageSessions: true,
     }, { getAvailable: () => [] })).resolves.toMatchObject({
       name: "Renamed project role",
       model: model("extension", "project-model"),
@@ -176,6 +185,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "Review.",
       model: model("provider", "model-a"),
+      canManageSessions: false,
     });
     expect(listener).toHaveBeenCalledTimes(1);
     expect(listener.mock.calls[0]?.[0]).toContainEqual(

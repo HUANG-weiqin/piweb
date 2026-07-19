@@ -51,6 +51,7 @@ function metadata() {
         provider: "openai",
         id: "gpt-5.6",
       },
+      canManageSessions: true,
     },
     lifecycle: {
       kind: "temporary" as const,
@@ -141,6 +142,16 @@ describe("conversation reserved entries", () => {
     value.role.name = "mutated";
     expect(entry.data.role.name).toBe("Worker");
     expect(parseConversationMetaEntry(entry)).toEqual(entry);
+  });
+
+  it("keeps session management disabled for legacy conversation metadata", () => {
+    const value = metadata();
+    const { canManageSessions: _omitted, ...legacyRole } = value.role;
+
+    expect(parseConversationMetaEntry({
+      customType: CONVERSATION_META_CUSTOM_TYPE,
+      data: { ...value, role: legacyRole },
+    }).data.role.canManageSessions).toBe(false);
   });
 
   it("rejects unknown, incomplete, and over-limit conversation metadata", () => {
@@ -450,6 +461,36 @@ describe("conversation reserved entries", () => {
         details: incoming.details,
       }),
     ]);
+
+    const contextBeforeHostState = structuredClone(
+      manager.buildSessionContext().messages,
+    );
+    const card = createConversationCardEntry({
+      cardId: randomUUID(),
+      kind: "message",
+      body: "Inspect the stable prefix",
+      fromSnapshot: peer(),
+      toSnapshot: peer(),
+      state: "queued",
+      messageId: randomUUID(),
+      updatedAt: timestamp,
+    });
+    appendReservedCustomEntry(manager, card);
+    appendReservedCustomEntry(manager, createConversationCardEntry({
+      ...card.data,
+      state: "completed",
+      result: "done",
+      updatedAt: "2026-07-19T10:01:00.000Z",
+    }));
+    appendReservedCustomEntry(manager, createRunSettlementEntry({
+      runId: randomUUID(),
+      outcome: "completed",
+      finalText: "done",
+      settledAt: "2026-07-19T10:02:00.000Z",
+    }));
+    expect(manager.buildSessionContext().messages).toEqual(
+      contextBeforeHostState,
+    );
   });
 
   it("accepts Pi legacy conversation IDs but rejects a reserved nested custom carrier", () => {

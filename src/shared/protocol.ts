@@ -9,7 +9,7 @@ export const MAX_ROLE_SYSTEM_PROMPT_BYTES = 128 * 1024;
 export const MAX_PROJECT_CONVERSATIONS = 100;
 export const MAX_PROJECT_CONVERSATION_NAME_CHARACTERS = 120;
 export const MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS = 500;
-export const PROTOCOL_VERSION = 11;
+export const PROTOCOL_VERSION = 12;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
 const conversationIdSchema = z.string().uuid();
@@ -74,6 +74,7 @@ const roleInputSchema = z.object({
     "role.systemPrompt",
   ),
   model: roleModelSchema.nullable(),
+  canManageSessions: z.boolean(),
 });
 
 export const extensionUIRequestSchema = z.discriminatedUnion("kind", [
@@ -362,6 +363,7 @@ export interface RoleTemplate {
   description: string;
   systemPrompt: string;
   model: RoleModelSelection | null;
+  canManageSessions: boolean;
   createdAt: string;
   updatedAt: string;
   available: boolean;
@@ -375,6 +377,7 @@ export interface ConversationRoleSnapshot {
   description: string;
   systemPrompt: string;
   model: RoleModelSelection;
+  canManageSessions: boolean;
 }
 
 export type ConversationActivity =
@@ -429,6 +432,10 @@ export type ConversationHistoryItem =
   | ({ kind: "message" } & ConversationHistoryMessage)
   | ConversationMessageCard;
 
+export type ConversationCreatedBy =
+  | { kind: "user" }
+  | { kind: "conversation"; conversationId: string };
+
 export interface ConversationSummary {
   id: string;
   name?: string;
@@ -441,6 +448,7 @@ export interface ConversationSummary {
   attention?: boolean;
   unread?: boolean;
   temporary?: boolean;
+  createdBy?: ConversationCreatedBy;
 }
 
 export interface DirectoryListing {
@@ -724,6 +732,7 @@ const roleTemplateSchema: z.ZodType<RoleTemplate> = z.object({
     "role.systemPrompt",
   ),
   model: roleModelSchema.nullable(),
+  canManageSessions: z.boolean(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
   available: z.boolean(),
@@ -745,6 +754,7 @@ const conversationRoleSnapshotSchema: z.ZodType<ConversationRoleSnapshot> = z.ob
     "role.systemPrompt",
   ),
   model: roleModelSchema,
+  canManageSessions: z.boolean(),
 });
 const conversationRoleSummarySchema: z.ZodType<
   Omit<ConversationRoleSnapshot, "systemPrompt">
@@ -760,6 +770,7 @@ const conversationRoleSummarySchema: z.ZodType<
     "role.description",
   ),
   model: roleModelSchema,
+  canManageSessions: z.boolean(),
 });
 const conversationActivitySchema: z.ZodType<ConversationActivity> = z.discriminatedUnion(
   "kind",
@@ -892,6 +903,15 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
       attention: z.boolean().optional(),
       unread: z.boolean().optional(),
       temporary: z.boolean().optional(),
+      createdBy: z.discriminatedUnion("kind", [
+        z.object({
+          kind: z.literal("user"),
+        }),
+        z.object({
+          kind: z.literal("conversation"),
+          conversationId: conversationIdSchema,
+        }),
+      ]).optional(),
     })).max(MAX_PROJECT_CONVERSATIONS),
     truncated: z.boolean(),
   }),

@@ -42,6 +42,7 @@ function draft(
     description: "",
     systemPrompt: "",
     model: initialModel,
+    canManageSessions: false,
     ...overrides,
   };
 }
@@ -56,6 +57,7 @@ function persistedDefault(
     description: "",
     systemPrompt: "",
     model: initialModel,
+    canManageSessions: false,
     createdAt: "2026-07-19T10:00:00.000Z",
     updatedAt: "2026-07-19T10:00:00.000Z",
     ...overrides,
@@ -110,6 +112,21 @@ describe("RoleStore", () => {
     expect(store.getRole("default")?.model).toBeNull();
   });
 
+  it("keeps session management disabled for roles written before the capability field existed", async () => {
+    const rolesPath = await createRolesPath("piweb-role-store-legacy-capability-");
+    await mkdir(dirname(rolesPath), { recursive: true });
+    const legacyRole = persistedDefault();
+    const { canManageSessions: _omitted, ...legacyFields } = legacyRole;
+    await writeFile(rolesPath, `${JSON.stringify({
+      version: 1,
+      roles: [legacyFields],
+    }, null, 2)}\n`, "utf8");
+
+    const store = await RoleStore.open(rolesPath, null);
+
+    expect(store.getRole("default")?.canManageSessions).toBe(false);
+  });
+
   it("allows editing default, increments its revision, and never deletes it", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-19T10:00:00.000Z"));
@@ -127,6 +144,7 @@ describe("RoleStore", () => {
       description: "General purpose",
       systemPrompt: "Be concise.",
       model: { provider: "other-provider", id: "other-model" },
+      canManageSessions: false,
     });
 
     expect(updated).toEqual({
@@ -136,6 +154,7 @@ describe("RoleStore", () => {
       description: "General purpose",
       systemPrompt: "Be concise.",
       model: { provider: "other-provider", id: "other-model" },
+      canManageSessions: false,
       updatedAt: "2026-07-19T11:00:00.000Z",
     });
     expect(store.listRoles()).toHaveLength(1);

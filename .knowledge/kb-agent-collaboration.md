@@ -18,10 +18,10 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
 ## 角色
 
 - `RoleStore` 是用户级严格 v1 文件，默认路径为 `<Pi agent dir>/piweb/roles.json`；项目文件不能修改角色目录。
-- 角色包含稳定 ID、revision、名称、简介、system prompt 和固定 provider/model。写入原子串行，更新使用 expected revision，损坏、未知字段和未知版本 fail closed。
+- 角色包含稳定 ID、revision、名称、简介、system prompt、固定 provider/model，以及 `canManageSessions` 能力。写入原子串行，更新使用 expected revision，损坏、未知字段和未知版本 fail closed。会话编排严格 opt-in：旧角色缺少能力字段、内置 default 首次创建和 UI 新建角色都默认关闭，只有用户明确打开才启用。
 - 固定 `default` 角色首次打开时创建，可以编辑但不能删除；它只是普通可选项，不会自动为新会话选中。
 - `RoleCatalog` 用当前项目 actor 的 session-local 模型目录动态计算模板是否可用，因此项目静态 provider 也能参与选择；空项目使用 coordinator 持有的 project model catalog，它经过相同 trust/resource/provider 校验，但不会创建隐藏 AgentSession。角色 CRUD、模型列表和 API Key provider 校验都使用这条项目目录；真正创建还会由 `PiRuntime` 在项目资源加载后再次校验固定模型。
-- 新会话把完整角色修订复制到 `piweb.conversation_meta.v1`。之后修改或删除模板不会改变旧会话；角色 prompt 追加到会话 system prompt，实际模型必须与快照完全一致，SDK fallback 会被拒绝。
+- 新会话把完整角色修订（包括会话管理能力）复制到 `piweb.conversation_meta.v1`。之后修改或删除模板不会改变旧会话；角色 prompt 追加到会话 system prompt，实际模型必须与快照完全一致，SDK fallback 会被拒绝。旧 conversation metadata 缺少能力字段时按关闭迁移。
 - 旧会话第一次在独占 writer lease 下打开时迁移为 default 快照；其 system prompt 固定为空，并尽量保留旧分支模型，避免改变既有行为。
 
 ## Actor 所有权
@@ -72,13 +72,20 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
 - busy 目标不会被打断；消息保持 queued，等当前 run 结算后泵送。
 - inbox commit 是取消边界：commit 前取消可拒绝，commit 后即使来源 run 随即取消，目标 pump 仍继续；同步启动失败会有界重试一次并保留 durable sidecar。
 - 同一目标严格按 `sentAt + messageId` 泵送，新的 idle-target send 也必须先经过项目 inbox pump，不能越过更早的 queued 消息。
-- inbox 每次最多批量投递 8 条，目标 LLM 会收到来源标题、角色、完整 conversationId、正文和回复工具提示。
+- inbox 每次最多批量投递 8 条。允许管理会话的目标 LLM 会收到来源标题、角色、完整 conversationId、正文、回复工具提示，以及“自行管理所创建会话生命周期”的提醒；关闭能力的角色只收到来源元信息和正文，不会看到任何会话工具名称或管理提示。隐藏提示只存在于 Agent 上下文，浏览器卡片仍只从 `details.body` 投影用户可见正文。
 - incoming 消息使用 `piweb.conversation_message.v1` 并进入目标上下文；outgoing/委派状态使用 `piweb.conversation_card.v1`，只用于投影。
 - 同一 `cardId` 的后续 entry 原地覆盖卡片状态；浏览器和重启恢复不会刷出多张重复卡。
 - 每个 run 先追加 `piweb.run_settlement.v1`，记录精确 `runId/outcome/finalText`，再通知 waiter 和 inbox 清理。等待与临时回传不能从“最后一条 assistant”猜结果。
 - 重启会扫描 inbox 与 reserved JSONL：修复 inbox 已提交但来源仍是 sending 的卡片，恢复 processing run、临时结果和目标 pump；已经 durable settled 的 run 不会重复执行。
 - terminal sender card 必须先于 sidecar 删除；两步间崩溃时，残留 sidecar 可在重启后完成对账。
 - 删除 conversation 会先持久化 target tombstone，再把只以它为目标的 pending inbox 对应 sender card 终结并清理；tombstone 在内存中也是 open/create/pump/send 的硬 fence，删除事务中的后到消息被明确拒绝，它此前发出的 outbound envelope 仍会继续送达。JSONL 删除完成后 tombstone 会幂等回收；若进程在这两步之间退出，下次项目打开先恢复 fence，再完成删除或只清理目标已不存在且没有 pending 消息的完成标记，避免重新打开目标或长期编排耗尽固定 tombstone 数量。
+
+## 上下文前缀与缓存
+
+- 已进入模型上下文的 user、assistant、tool 和 incoming custom message 都是 append-only；新的宿主提示只附加到以后收到的新消息，不能回填或重写旧 entry。
+- 角色完整修订已冻结在 conversation metadata 中；重新打开会话仍使用同一角色 prompt 和模型，角色模板后续编辑不会改变既有会话的 system prompt。
+- 卡片状态、run settlement、meta operation 和 conversation metadata 使用普通 `custom` entry；SDK 的 `buildSessionContext()` 会忽略它们，因此状态更新既不改旧消息，也不污染模型缓存前缀。
+- 两个明确例外会有意改变模型输入：Pi 在上下文逼近上限时追加 compaction summary 并以摘要替换活动上下文，以及重新启动后项目资源本身发生变化导致基础 system prompt 变化。前者是继续运行所需，后者反映用户真实修改；工作台不为提高命中率伪装旧项目状态。
 
 ## 临时会话
 
@@ -89,9 +96,9 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
 - initial run 失败、中止或没有最终回复时，同样持久回传失败消息，但保留会话并标记 attention；
 - 后续重试的成功 run 不会误触发初始委派的自动删除。
 
-## 九个 Agent meta 工具
+## Agent meta 工具
 
-每个 actor 固定注入：
+只有 frozen role 的 `canManageSessions=true` 时，actor 才注入完整九个工具：
 
 ```text
 list_roles
@@ -105,6 +112,8 @@ abort_session
 delete_session
 ```
 
+`canManageSessions=false` 时工具列表是空数组，不注册占位工具，也不向模型提供名称、参数、说明、回复工具提示或生命周期管理提示。该决定只读取 conversation role snapshot；后续编辑角色模板不会改变已存在会话的工具 schema，因此不会破坏既有会话的缓存前缀。
+
 - 工具闭包绑定来源 conversation 和当前 canonical project，不接受 cwd/projectId，不能跨项目。
 - Agent 只能查看和选择角色，不能 CRUD 角色、改认证/trust、换既有会话角色或模型。
 - `start_session` 必须给 role 和 task，创建平级普通/临时会话；它在冻结角色、初始 task 和固定 runId 被可靠接受并调度后返回 `conversationId + runId`。目标空闲时立即取得 run ticket；若更早的 run 抢先则持久等待泵送。两种情况都不会隐式等待或挂起调用者。
@@ -114,7 +123,7 @@ delete_session
 - `delete_session` 拒绝 self 和 busy 目标；需要先 abort、等待结算，再删除。删除 intent/result 以 `piweb.meta_operation.v1` 持久化，相同 toolCall 重放不能改删另一个目标。
 - `start_session` 的角色、task、title 和 temporary 进入 sender card 指纹，相同 toolCall 改 payload 会冲突而不是谎报成功。
 - `peek_session` 不启动 inactive 目标的模型/扩展，不移动 recent；只返回 user/assistant 可见正文和会话卡片，过滤 thinking/tool/auth/internal，最多 20 项且完整 JSON 不超过 256 KiB。inactive inspection 与删除共用 lifecycle 边界，因此短暂 writer lease 会先释放，删除不会留下只能靠重启恢复的 tombstone。
-- 列表和正文同样有界；Agent 看到稳定完整 conversationId，而 UI 可另显示短句柄。
+- 列表和正文同样有界；Agent 看到稳定完整 conversationId，而 UI 可另显示短句柄。`list_sessions` 的每项显式返回 durable `createdBy` 与观察者相对的 `createdByMe`，并支持 `scope=created_by_me`，让 Agent 无需依赖对话记忆即可找回自己负责的会话；尚未迁移、确实没有 conversation profile 的旧条目如实标为 `createdBy.kind=unknown`。
 
 meta 工具仍经过项目扩展 hook、run ownership 和宿主 tool gate。它们不是 builtin 只读工具，因此完整 Agent 编排只在 `full_access` 可用，`read_only` 语义不变。
 

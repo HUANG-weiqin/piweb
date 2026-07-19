@@ -237,6 +237,7 @@ function defaultRole(overrides: Partial<RoleTemplate> = {}): RoleTemplate {
     description: "General purpose",
     systemPrompt: "Be useful.",
     model: { provider: "provider", id: "model" },
+    canManageSessions: true,
     createdAt: "2026-07-19T12:00:00.000Z",
     updatedAt: "2026-07-19T12:00:00.000Z",
     available: true,
@@ -508,7 +509,7 @@ describe("App", () => {
     expect(screen.getByRole("status")).toHaveTextContent("项目资源已跳过");
   });
 
-  it("temporarily hides the settings drawer while an extension interaction owns focus", () => {
+  it("temporarily hides the model drawer while an extension interaction owns focus", () => {
     render(<App />);
     const sessionId = startFromSetup();
     act(() => socketMock.emit?.({
@@ -525,7 +526,7 @@ describe("App", () => {
       },
     }));
     fireEvent.click(screen.getByRole("button", { name: /provider \/ model/ }));
-    expect(screen.getByRole("dialog", { name: "工作台设置" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "模型连接" })).toBeInTheDocument();
 
     act(() => socketMock.emit?.({
       type: "extension_ui_request",
@@ -533,7 +534,7 @@ describe("App", () => {
       requestId: EXTENSION_REQUEST_A,
       request: { kind: "confirm", title: "Extension question", message: "Continue?" },
     }));
-    expect(screen.queryByRole("dialog", { name: "工作台设置" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "模型连接" })).not.toBeInTheDocument();
     expect(screen.getByRole("dialog", { name: "Extension question" })).toBeInTheDocument();
 
     act(() => socketMock.emit?.({
@@ -541,7 +542,7 @@ describe("App", () => {
       sessionId,
       requestId: EXTENSION_REQUEST_A,
     }));
-    expect(screen.getByRole("dialog", { name: "工作台设置" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "模型连接" })).toBeInTheDocument();
   });
 
   it("does not discard a Key entry when an extension interaction arrives", () => {
@@ -1293,7 +1294,7 @@ describe("App", () => {
     });
   });
 
-  it("changes the server-owned tool mode from the connection drawer", () => {
+  it("changes the server-owned project tool mode from the workspace header", () => {
     render(<App />);
     const sessionId = startFromSetup();
     act(() => socketMock.emit?.({
@@ -1310,8 +1311,7 @@ describe("App", () => {
       },
     }));
 
-    fireEvent.click(screen.getByRole("button", { name: /provider \/ model/ }));
-    fireEvent.change(screen.getByRole("combobox", { name: "工具权限" }), {
+    fireEvent.change(screen.getByRole("combobox", { name: "项目工具权限" }), {
       target: { value: "read_only" },
     });
 
@@ -1363,8 +1363,7 @@ describe("App", () => {
       },
     }));
 
-    fireEvent.click(screen.getByRole("button", { name: /provider \/ model/ }));
-    fireEvent.change(screen.getByRole("combobox", { name: "工具权限" }), {
+    fireEvent.change(screen.getByRole("combobox", { name: "项目工具权限" }), {
       target: { value: "full_access" },
     });
 
@@ -1408,8 +1407,7 @@ describe("App", () => {
         providers: [],
       },
     }));
-    fireEvent.click(screen.getByRole("button", { name: /provider \/ model/ }));
-    fireEvent.change(screen.getByRole("combobox", { name: "工具权限" }), {
+    fireEvent.change(screen.getByRole("combobox", { name: "项目工具权限" }), {
       target: { value: "read_only" },
     });
 
@@ -1505,9 +1503,8 @@ describe("App", () => {
       target: { value: "start work" },
     });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
-    fireEvent.click(screen.getByRole("button", { name: /provider \/ model/ }));
 
-    expect(screen.getByRole("combobox", { name: "工具权限" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "项目工具权限" })).toBeDisabled();
   });
 
   it("does not assume a permission expansion succeeded before acknowledgement", () => {
@@ -1526,8 +1523,7 @@ describe("App", () => {
         providers: [],
       },
     }));
-    fireEvent.click(screen.getByRole("button", { name: /provider \/ model/ }));
-    fireEvent.change(screen.getByRole("combobox", { name: "工具权限" }), {
+    fireEvent.change(screen.getByRole("combobox", { name: "项目工具权限" }), {
       target: { value: "full_access" },
     });
 
@@ -2046,6 +2042,11 @@ describe("App", () => {
     }));
     expect(screen.getByRole("status", { name: "消息状态：已排队" }))
       .toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "打开会话" }))
+      .not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", {
+      name: "展开发出的会话消息：B",
+    }));
     expect(screen.getByRole("button", { name: "打开会话" }))
       .toBeInTheDocument();
 
@@ -2110,7 +2111,7 @@ describe("App", () => {
         roles: [defaultRole()],
       });
     });
-    fireEvent.click(screen.getByRole("button", { name: /provider \/ model/ }));
+    fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
     fireEvent.click(screen.getByRole("button", { name: "管理角色" }));
     fireEvent.change(screen.getByRole("textbox", { name: "角色名称" }), {
       target: { value: "Edited default" },

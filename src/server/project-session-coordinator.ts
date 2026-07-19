@@ -32,6 +32,7 @@ import {
 import {
   createMetaTools,
   type MetaToolService,
+  type MetaToolSessionScope,
 } from "./meta-tools.js";
 import type {
   CreatedProjectModelCatalog,
@@ -61,6 +62,10 @@ import {
 
 const MAX_BATCH_MESSAGES = 8;
 const MAX_COMPLETION_CACHE = 256;
+const INBOX_LIFECYCLE_GUIDANCE = [
+  "生命周期提醒：你负责管理自己创建的会话生命周期；普通会话不会被系统自动终止或删除。",
+  "收到结果后，请自行决定继续工作、等待运行、终止活动运行或删除空闲会话。临时会话仅在成功回传后自动删除，失败时会保留。",
+].join("\n");
 
 export type ProjectSessionCoordinatorEvent =
   | ConversationActorEvent
@@ -188,6 +193,29 @@ function cloneSettlement(settlement: RunSettlement): RunSettlement {
 
 function cloneProfile(profile: ConversationMeta): ConversationMeta {
   return structuredClone(profile);
+}
+
+interface MetaSessionCreationProjection {
+  createdBy: ConversationMeta["createdBy"] | { kind: "unknown" };
+  createdByMe: boolean;
+}
+
+function sessionCreationProjection(
+  profile: ConversationMeta | undefined,
+  sourceConversationId: string,
+): MetaSessionCreationProjection {
+  if (!profile) {
+    return {
+      createdBy: { kind: "unknown" as const },
+      createdByMe: false,
+    };
+  }
+  return {
+    createdBy: structuredClone(profile.createdBy),
+    createdByMe:
+      profile.createdBy.kind === "conversation"
+      && profile.createdBy.conversationId === sourceConversationId,
+  };
 }
 
 function temporarySettlementIsReturnable(
@@ -680,8 +708,10 @@ export class ProjectSessionCoordinator {
                 name: profile.role.name,
                 description: profile.role.description,
                 model: { ...profile.role.model },
+                canManageSessions: profile.role.canManageSessions,
               },
               temporary: profile.lifecycle.kind === "temporary",
+              createdBy: structuredClone(profile.createdBy),
             }),
         activity,
         attention: context.attention.has(summary.id),
@@ -1226,6 +1256,7 @@ export class ProjectSessionCoordinator {
         workbenchCustomTools: createMetaTools(
           conversationId,
           this.metaService(context),
+          profile.role.canManageSessions,
         ),
       },
       persistSettlement: (settlement, sessionManager) => {
@@ -1300,6 +1331,7 @@ export class ProjectSessionCoordinator {
         description: defaultRole.description,
         systemPrompt: "",
         model: { ...model },
+        canManageSessions: defaultRole.canManageSessions,
       },
       lifecycle: { kind: "normal" },
       createdBy: { kind: "user" },
@@ -1332,6 +1364,7 @@ export class ProjectSessionCoordinator {
           sourceConversationId,
           input.limit,
           input.cursor,
+          input.scope,
         );
         return sessions;
       },
@@ -1578,8 +1611,40 @@ export class ProjectSessionCoordinator {
     sourceConversationId: string,
     limit: number,
     cursor?: string,
+    scope: MetaToolSessionScope = "all",
   ) {
     const summaries = await this.listSessions(new ProjectSessionHandle(context));
+    const missingProfileIds = summaries
+      .filter((summary) => (
+        !context.actors.has(summary.id)
+        && !context.profiles.has(summary.id)
+      ))
+      .map(({ id }) => id);
+    if (missingProfileIds.length > 0) {
+      const inspections = await context.project.inspectConversations(
+        missingProfileIds,
+      );
+      for (const [conversationId, inspection] of inspections) {
+        if (inspection.conversationMeta) {
+          context.profiles.set(
+            conversationId,
+            cloneProfile(inspection.conversationMeta),
+          );
+        }
+      }
+    }
+    const candidates = summaries.map((summary) => {
+      const profile =
+        context.actors.get(summary.id)?.profile
+        ?? context.profiles.get(summary.id);
+      return {
+        summary,
+        creation: sessionCreationProjection(profile, sourceConversationId),
+      };
+    });
+    const scoped = scope === "created_by_me"
+      ? candidates.filter(({ creation }) => creation.createdByMe)
+      : candidates;
     let offset = 0;
     if (cursor) {
       const parsed = Number.parseInt(
@@ -1591,9 +1656,9 @@ export class ProjectSessionCoordinator {
       }
       offset = parsed;
     }
-    const selected = summaries.slice(offset, offset + limit);
+    const selected = scoped.slice(offset, offset + limit);
     return {
-      sessions: selected.map((summary) => ({
+      sessions: selected.map(({ summary, creation }) => ({
         conversationId: summary.id,
         title: summary.name || summary.preview || "未命名会话",
         role: summary.role,
@@ -1602,8 +1667,9 @@ export class ProjectSessionCoordinator {
         attention: summary.attention ?? false,
         temporary: summary.temporary ?? false,
         self: summary.id === sourceConversationId,
+        ...creation,
       })),
-      nextCursor: offset + selected.length < summaries.length
+      nextCursor: offset + selected.length < scoped.length
         ? Buffer.from(String(offset + selected.length), "utf8")
             .toString("base64url")
         : undefined,
@@ -1618,6 +1684,9 @@ export class ProjectSessionCoordinator {
     const summaries = await this.listSessions(new ProjectSessionHandle(context));
     const summary = summaries.find(({ id }) => id === conversationId);
     if (!summary) throw new Error(`Conversation not found: ${conversationId}`);
+    const profile =
+      context.actors.get(summary.id)?.profile
+      ?? context.profiles.get(summary.id);
     return {
       conversationId,
       title: summary.name || summary.preview || "未命名会话",
@@ -1626,6 +1695,7 @@ export class ProjectSessionCoordinator {
       lastActiveAt: summary.updatedAt,
       temporary: summary.temporary ?? false,
       self: conversationId === sourceConversationId,
+      ...sessionCreationProjection(profile, sourceConversationId),
     };
   }
 
@@ -2017,8 +2087,14 @@ export class ProjectSessionCoordinator {
                 `来源句柄：${envelope.fromConversationId}`,
                 "",
                 envelope.body,
-                "",
-                `如需回复，请调用 send_session_message 并使用 conversationId ${envelope.fromConversationId}。`,
+                ...(target.profile.role.canManageSessions
+                  ? [
+                      "",
+                      `如需回复，请调用 send_session_message 并使用 conversationId ${envelope.fromConversationId}。`,
+                      "",
+                      INBOX_LIFECYCLE_GUIDANCE,
+                    ]
+                  : []),
               ].join("\n");
               const message = createConversationMessageEntry({
                 content,

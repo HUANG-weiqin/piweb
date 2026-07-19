@@ -1,7 +1,9 @@
 import { useState } from "react";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
+import type { ConversationMessageCard } from "../../shared/protocol";
 import type { ChatMessage } from "../chat/reducer";
+import { SessionMessageCard } from "./SessionMessageCard";
 import { ToolCard } from "./ToolCard";
 
 const TOOL_PREVIEW_LIMIT = 4;
@@ -22,13 +24,35 @@ function ToolsPanel({ tools }: { tools: ChatMessage["tools"] }) {
   </details>;
 }
 
-export function Message({ message }: { message: ChatMessage }) {
+export function Message({
+  message,
+  sessionCards = [],
+  onOpenConversation,
+}: {
+  message: ChatMessage;
+  sessionCards?: ConversationMessageCard[];
+  onOpenConversation?(conversationId: string): void;
+}) {
   if (message.role === "user") return <article className="message user">{message.text}</article>;
   if (message.role === "error") return <article className="message error">{message.text}</article>;
-  const html = DOMPurify.sanitize(marked.parse(message.text || (message.tools.length ? "" : "…"), { async: false }) as string);
+  const hasActivity = message.tools.length > 0 || sessionCards.length > 0;
+  const html = DOMPurify.sanitize(marked.parse(
+    message.text || (hasActivity ? "" : "…"),
+    { async: false },
+  ) as string);
   return <article className="message assistant">
     {message.thinking && <details className="thinking"><summary>思考过程</summary><div>{message.thinking}</div></details>}
     {message.tools.length ? <ToolsPanel tools={message.tools} /> : null}
-    {message.text || !message.tools.length ? <div className="markdown" dangerouslySetInnerHTML={{ __html: html }} /> : null}
+    {sessionCards.length > 0 && <section
+      className="session-message-stack"
+      aria-label="会话协作"
+    >
+      {sessionCards.map((card) => <SessionMessageCard
+        key={card.cardId}
+        card={card}
+        onOpenConversation={onOpenConversation}
+      />)}
+    </section>}
+    {message.text || !hasActivity ? <div className="markdown" dangerouslySetInnerHTML={{ __html: html }} /> : null}
   </article>;
 }

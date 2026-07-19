@@ -2,7 +2,10 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ConversationRoleSnapshot } from "../../shared/protocol";
+import type {
+  ConversationMessageCard,
+  ConversationRoleSnapshot,
+} from "../../shared/protocol";
 import type { ChatState } from "../chat/reducer";
 import { Chat } from "./Chat";
 
@@ -23,6 +26,10 @@ function view(
     contextSource="measured"
     model={{ provider: "provider", id: "model" }}
     role={role}
+    thinkingLevel="off"
+    availableThinkingLevels={["off", "high"]}
+    toolMode="full_access"
+    toolModeBusy={false}
     cwd="E:\\work"
     online
     conversationReady
@@ -32,6 +39,8 @@ function view(
     onSend={() => true}
     onAbort={() => undefined}
     onSettings={() => undefined}
+    onThinking={() => undefined}
+    onToolMode={() => undefined}
     onChangeCwd={() => undefined}
   />;
 }
@@ -122,6 +131,7 @@ describe("Chat", () => {
       description: "Reviews changes",
       systemPrompt: "Review exact evidence.",
       model: { provider: "provider", id: "model" },
+      canManageSessions: true,
     };
     render(view(emptyChat, "", role));
 
@@ -133,5 +143,132 @@ describe("Chat", () => {
       .toHaveTextContent("Review exact evidence.");
     expect(screen.queryByRole("button", { name: /切换/ }))
       .not.toBeInTheDocument();
+  });
+
+  it("keeps run thinking beside the composer and project permission in the topbar", () => {
+    const onThinking = vi.fn();
+    const onToolMode = vi.fn();
+    render(<Chat
+      {...view(emptyChat).props}
+      onThinking={onThinking}
+      onToolMode={onToolMode}
+    />);
+
+    fireEvent.change(screen.getByRole("combobox", { name: "思考级别" }), {
+      target: { value: "high" },
+    });
+    fireEvent.change(screen.getByRole("combobox", {
+      name: "项目工具权限",
+    }), {
+      target: { value: "read_only" },
+    });
+
+    expect(onThinking).toHaveBeenCalledWith("high");
+    expect(onToolMode).toHaveBeenCalledWith("read_only");
+  });
+
+  it("keeps completed outgoing session work above the final assistant text", () => {
+    const card: ConversationMessageCard = {
+      kind: "session_message",
+      id: "session-message:11111111-1111-4111-8111-111111111111",
+      cardId: "11111111-1111-4111-8111-111111111111",
+      direction: "outgoing",
+      state: "completed",
+      body: "Review the implementation",
+      from: {
+        conversationId: "source",
+        role: { id: "lead", name: "Lead" },
+      },
+      to: {
+        conversationId: "target",
+        title: "Review",
+        role: { id: "reviewer", name: "Reviewer" },
+      },
+      sentAt: "2026-07-19T10:00:00.000Z",
+      updatedAt: "2026-07-19T10:01:00.000Z",
+      result: "Review complete",
+    };
+    const { container } = render(view({
+      messages: [],
+      items: [{
+        kind: "message",
+        id: "user-1",
+        runId: "run-1",
+        role: "user",
+        text: "Delegate the review",
+        thinking: "",
+        tools: [],
+      }, {
+        kind: "message",
+        id: "assistant-1",
+        runId: "run-1",
+        role: "assistant",
+        text: "最终回复",
+        thinking: "",
+        tools: [{
+          id: "tool-1",
+          name: "start_session",
+          status: "done",
+        }],
+      }, card],
+      sessionTokens: 0,
+    }));
+
+    const assistant = container.querySelector(".message.assistant");
+    const renderedCard = container.querySelector(
+      `[data-card-id="${card.cardId}"]`,
+    );
+    expect(renderedCard?.closest(".message.assistant")).toBe(assistant);
+    expect(
+      Array.from(assistant?.children ?? []).map(
+        (element) => element.className,
+      ),
+    ).toEqual(["tools", "session-message-stack", "markdown"]);
+  });
+
+  it("keeps incoming session messages above the final assistant text", () => {
+    const card: ConversationMessageCard = {
+      kind: "session_message",
+      id: "session-message:22222222-2222-4222-8222-222222222222",
+      cardId: "22222222-2222-4222-8222-222222222222",
+      direction: "incoming",
+      state: "delivered",
+      body: "Review complete",
+      from: {
+        conversationId: "source",
+        title: "Review",
+        role: { id: "reviewer", name: "Reviewer" },
+      },
+      to: {
+        conversationId: "target",
+        role: { id: "lead", name: "Lead" },
+      },
+      sentAt: "2026-07-19T10:01:00.000Z",
+      updatedAt: "2026-07-19T10:01:00.000Z",
+    };
+    const { container } = render(view({
+      messages: [],
+      items: [{
+        kind: "message",
+        id: "assistant-1",
+        runId: "run-1",
+        role: "assistant",
+        text: "最终回复",
+        thinking: "",
+        tools: [],
+      }, card],
+      sessionTokens: 0,
+    }));
+
+    const assistant = container.querySelector(".message.assistant");
+    const renderedCard = container.querySelector(
+      `[data-card-id="${card.cardId}"]`,
+    );
+    expect(renderedCard?.closest(".message.assistant")).toBe(assistant);
+    expect(
+      Array.from(assistant?.children ?? []).map(
+        (element) => element.className,
+      ),
+    ).toEqual(["session-message-stack", "markdown"]);
   });
 });

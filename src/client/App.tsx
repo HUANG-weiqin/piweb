@@ -1003,6 +1003,36 @@ export function App() {
     updatePendingConversationDeletion(undefined);
     return false;
   };
+  const renameConversation = (conversationId: string, name: string) => {
+    const sessionId = sessionIdRef.current;
+    if (!sessionId) return;
+    send({
+      type: "rename_conversation",
+      sessionId,
+      conversationId,
+      name,
+    });
+  };
+  const setThinkingLevel = (level: ThinkingLevel) => {
+    const sessionId = sessionIdRef.current;
+    if (sessionId) send({ type: "set_thinking", sessionId, level });
+  };
+  const setProjectToolMode = (mode: ToolMode) => {
+    const sessionId = sessionIdRef.current;
+    if (!sessionId) return;
+    pendingToolModeRef.current = mode;
+    const restrictive = isToolModeRestriction(
+      confirmedToolModeRef.current,
+      mode,
+    );
+    if (restrictive) {
+      toolModeRef.current = mode;
+      writeStoredString(TOOL_MODE_KEY, mode);
+    }
+    if (!send({ type: "set_tool_mode", sessionId, mode }) && !restrictive) {
+      pendingToolModeRef.current = undefined;
+    }
+  };
   const beginRoleOperation = (
     operation: PendingRoleOperation["operation"],
     command: RoleCommandInput,
@@ -1131,6 +1161,7 @@ export function App() {
         onToggleCollapsed={setSidebarCollapsed}
         onSelect={focusConversation}
         onCreate={() => setSelectingRole(true)}
+        onRename={renameConversation}
         onDelete={deleteConversation}
       />
       <div className="workbench-main">
@@ -1138,9 +1169,12 @@ export function App() {
           ? <RoleSelectionPage
               roles={roles}
               pending={creatingConversation}
+              toolMode={state.toolMode}
+              toolModeBusy={state.busy || Boolean(outstandingRunId)}
               onStart={createConversation}
               onManageRoles={() => setRoleManagerOpen(true)}
               onSettings={() => setDrawer(true)}
+              onToolMode={setProjectToolMode}
               onChangeProject={closeProject}
             />
           : <Chat
@@ -1153,6 +1187,10 @@ export function App() {
               contextSource={state.contextUsage?.source}
               model={state.selectedModel}
               role={conversationRole}
+              thinkingLevel={state.thinkingLevel}
+              availableThinkingLevels={state.availableThinkingLevels}
+              toolMode={state.toolMode}
+              toolModeBusy={state.busy || Boolean(outstandingRunId)}
               cwd={state.cwd}
               online={online}
               conversationReady={conversationReady}
@@ -1166,6 +1204,8 @@ export function App() {
               onSend={sendPrompt}
               onAbort={abortCurrentRun}
               onSettings={() => setDrawer(true)}
+              onThinking={setThinkingLevel}
+              onToolMode={setProjectToolMode}
               onChangeCwd={closeProject}
               onOpenConversation={focusConversation}
             />}
@@ -1175,29 +1215,8 @@ export function App() {
       state={state}
       open={drawer && !blockingModalVisible}
       online={online}
-      toolModeBusy={state.busy || Boolean(outstandingRunId)}
-      conversationBusy={
-        state.busy
-        || Boolean(outstandingRunId)
-        || Boolean(pendingConversationDeletion)
-      }
       settingResult={settingResult}
       onClose={() => setDrawer(false)}
-      onManageRoles={() => {
-        setDrawer(false);
-        setRoleManagerOpen(true);
-      }}
-      onRenameConversation={(name) => {
-        const sessionId = sessionIdRef.current;
-        if (sessionId && state.conversationId) {
-          send({
-            type: "rename_conversation",
-            sessionId,
-            conversationId: state.conversationId,
-            name,
-          });
-        }
-      }}
       onKey={(provider, key) => {
         const commandId = crypto.randomUUID();
         const sessionId = sessionIdRef.current;
@@ -1220,23 +1239,7 @@ export function App() {
       onRefresh={() => send({ type: "refresh_models" })}
       onClearSettingResult={clearSettingResult}
       onKeyDialogChange={setSettingsDialogOpen}
-      onThinking={(level: ThinkingLevel) => {
-        const sessionId = sessionIdRef.current;
-        if (sessionId) send({ type: "set_thinking", sessionId, level });
-      }}
-      onToolMode={(mode: ToolMode) => {
-        const sessionId = sessionIdRef.current;
-        if (!sessionId) return;
-        pendingToolModeRef.current = mode;
-        const restrictive = isToolModeRestriction(confirmedToolModeRef.current, mode);
-        if (restrictive) {
-          toolModeRef.current = mode;
-          writeStoredString(TOOL_MODE_KEY, mode);
-        }
-        if (!send({ type: "set_tool_mode", sessionId, mode }) && !restrictive) {
-          pendingToolModeRef.current = undefined;
-        }
-      }} />
+    />
     <RoleManagerDialog
       open={roleManagerOpen && !blockingModalVisible}
       roles={roles}

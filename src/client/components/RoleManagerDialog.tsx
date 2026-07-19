@@ -23,6 +23,7 @@ export interface RoleDraft {
   description: string;
   systemPrompt: string;
   model: RoleModelSelection | null;
+  canManageSessions: boolean;
 }
 
 export interface PendingRoleOperation {
@@ -59,6 +60,7 @@ const emptyDraft: RoleDraft = {
   description: "",
   systemPrompt: "",
   model: null,
+  canManageSessions: false,
 };
 
 function orderedRoles(roles: readonly RoleTemplate[]): RoleTemplate[] {
@@ -75,6 +77,7 @@ function roleDraft(role: RoleTemplate): RoleDraft {
     description: role.description,
     systemPrompt: role.systemPrompt,
     model: role.model === null ? null : { ...role.model },
+    canManageSessions: role.canManageSessions,
   };
 }
 
@@ -331,6 +334,22 @@ export function RoleManagerDialog({
             </select>
             <p className="setting-note">仅列出已配置提供商当前可用的模型。</p>
           </div>
+          <label className="role-capability-switch">
+            <span>
+              <strong>允许管理会话</strong>
+              <small>
+                开启后可查看和控制项目中的其他会话；关闭后不会向此角色提供任何会话管理工具。
+              </small>
+            </span>
+            <input
+              type="checkbox"
+              role="switch"
+              checked={draft.canManageSessions}
+              disabled={operationBusy}
+              onChange={(event) =>
+                updateDraft("canManageSessions", event.target.checked)}
+            />
+          </label>
 
           {exactResult && <p
             className={exactResult.ok ? "inline-status success" : "inline-status error"}

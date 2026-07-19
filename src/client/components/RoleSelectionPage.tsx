@@ -1,12 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
-import type { RoleTemplate } from "../../shared/protocol";
+import type { RoleTemplate, ToolMode } from "../../shared/protocol";
+import { ProjectToolModeControl } from "./ProjectToolModeControl";
 
 export interface RoleSelectionPageProps {
   roles: RoleTemplate[];
   pending?: boolean;
+  toolMode: ToolMode;
+  toolModeBusy: boolean;
   onStart(roleId: string): void;
   onManageRoles?(): void;
   onSettings?(): void;
+  onToolMode(mode: ToolMode): void;
   onChangeProject?(): void;
 }
 
@@ -26,9 +30,12 @@ function roleModelLabel(role: RoleTemplate): string {
 export function RoleSelectionPage({
   roles,
   pending = false,
+  toolMode,
+  toolModeBusy,
   onStart,
   onManageRoles,
   onSettings,
+  onToolMode,
   onChangeProject,
 }: RoleSelectionPageProps) {
   const [selectedRoleId, setSelectedRoleId] = useState("");
@@ -52,6 +59,11 @@ export function RoleSelectionPage({
         <p>角色和模型会在会话创建时固定，之后不能切换。</p>
       </div>
       <div className="role-selection-header-actions">
+        <ProjectToolModeControl
+          mode={toolMode}
+          disabled={toolModeBusy}
+          onChange={onToolMode}
+        />
         {onChangeProject && <button
           type="button"
           className="ghost"
@@ -66,7 +78,7 @@ export function RoleSelectionPage({
           disabled={pending}
           onClick={onSettings}
         >
-          连接与权限
+          模型连接
         </button>}
         {onManageRoles && <button
           type="button"

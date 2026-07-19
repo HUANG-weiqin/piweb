@@ -37,18 +37,38 @@ const outgoingCard: ConversationMessageCard = {
 afterEach(cleanup);
 
 describe("SessionMessageCard", () => {
-  it("renders an outgoing route, endpoint identities, body and status", () => {
+  it("renders a compact outgoing summary and hides details by default", () => {
     const { container } = render(<SessionMessageCard card={outgoingCard} />);
     const card = screen.getByRole("article", { name: "发出的会话消息" });
 
-    expect(card).toHaveClass("session-message-card", "direction-outgoing", "state-queued");
+    expect(card).toHaveClass(
+      "session-message-card",
+      "direction-outgoing",
+      "state-queued",
+      "is-collapsed",
+    );
     expect(card).toHaveAttribute("data-card-id", "card-1");
     expect(within(card).getByText("发出")).toBeInTheDocument();
     expect(within(card).getByRole("status", { name: "消息状态：已排队" })).toHaveTextContent("已排队");
+    expect(within(card).getByText("发给 审查会话")).toBeInTheDocument();
+    expect(within(card).queryByText("主控会话")).not.toBeInTheDocument();
+    expect(within(card).queryByText("请检查会话恢复路径。")).not.toBeInTheDocument();
+
+    fireEvent.click(
+      within(card).getByRole("button", {
+        name: "展开发出的会话消息：审查会话",
+      }),
+    );
+
+    expect(card).toHaveClass("is-expanded");
+    expect(
+      within(card).getByRole("button", {
+        name: "收起发出的会话消息：审查会话",
+      }),
+    ).toHaveAttribute("aria-expanded", "true");
     expect(within(card).getByText("主控会话")).toBeInTheDocument();
     expect(within(card).getByText("负责人")).toBeInTheDocument();
     expect(within(card).getByText("#source-1")).toBeInTheDocument();
-    expect(within(card).getByText("审查会话")).toBeInTheDocument();
     expect(within(card).getByText("审查员")).toBeInTheDocument();
     expect(within(card).getByText("#target-8")).toBeInTheDocument();
     expect(within(card).getByText("请检查会话恢复路径。")).toBeInTheDocument();
@@ -69,11 +89,11 @@ describe("SessionMessageCard", () => {
 
     expect(screen.getByRole("article", { name: "收到的会话消息" })).toHaveClass("direction-incoming");
     expect(screen.getByText("收到")).toBeInTheDocument();
-    expect(screen.getByText("未命名会话")).toBeInTheDocument();
+    expect(screen.getByText("来自 未命名会话")).toBeInTheDocument();
     expect(screen.getByRole("status", { name: "消息状态：已送达" })).toBeInTheDocument();
   });
 
-  it("updates one card in place when its cardId receives a result", () => {
+  it("updates one collapsed card in place without forcing its result open", () => {
     const { container, rerender } = render(<SessionMessageCard card={outgoingCard} />);
 
     rerender(
@@ -89,9 +109,18 @@ describe("SessionMessageCard", () => {
 
     expect(container.querySelectorAll("[data-card-id='card-1']")).toHaveLength(1);
     expect(screen.getByRole("status", { name: "消息状态：已完成" })).toBeInTheDocument();
+    expect(screen.queryByText("恢复测试全部通过。")).not.toBeInTheDocument();
+    expect(screen.queryByText("结果")).not.toBeInTheDocument();
+    expect(screen.queryByText("已排队")).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "展开发出的会话消息：审查会话",
+      }),
+    );
+
     expect(screen.getByText("恢复测试全部通过。")).toBeInTheDocument();
     expect(screen.getByText("结果")).toBeInTheDocument();
-    expect(screen.queryByText("已排队")).not.toBeInTheDocument();
   });
 
   it("opens the peer session only while that conversation still exists", () => {
@@ -103,6 +132,11 @@ describe("SessionMessageCard", () => {
       />,
     );
 
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "展开发出的会话消息：审查会话",
+      }),
+    );
     fireEvent.click(screen.getByRole("button", { name: "打开会话" }));
     expect(openConversation).toHaveBeenCalledWith(
       outgoingCard.to.conversationId,
@@ -132,6 +166,11 @@ describe("SessionMessageCard", () => {
       />,
     );
 
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "展开收到的会话消息：主控会话",
+      }),
+    );
     fireEvent.click(screen.getByRole("button", { name: "打开会话" }));
     expect(openConversation).toHaveBeenCalledWith(
       outgoingCard.from.conversationId,

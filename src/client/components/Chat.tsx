@@ -4,10 +4,20 @@ import {
   useState,
   type KeyboardEvent,
 } from "react";
-import type { ConversationRoleSnapshot } from "../../shared/protocol";
-import type { ChatState } from "../chat/reducer";
+import type {
+  ConversationMessageCard,
+  ConversationRoleSnapshot,
+  ThinkingLevel,
+  ToolMode,
+} from "../../shared/protocol";
+import type {
+  ChatItem,
+  ChatMessage,
+  ChatState,
+} from "../chat/reducer";
 import { ConversationRoleDialog } from "./ConversationRoleDialog";
 import { Message } from "./Message";
+import { ProjectToolModeControl } from "./ProjectToolModeControl";
 import { SessionMessageCard } from "./SessionMessageCard";
 
 interface ChatProps {
@@ -20,6 +30,10 @@ interface ChatProps {
   contextSource: "measured" | "estimated" | "unknown" | undefined;
   model?: { provider: string; id: string };
   role?: ConversationRoleSnapshot;
+  thinkingLevel: ThinkingLevel;
+  availableThinkingLevels?: ThinkingLevel[];
+  toolMode: ToolMode;
+  toolModeBusy: boolean;
   cwd: string;
   online: boolean;
   conversationReady: boolean;
@@ -30,8 +44,45 @@ interface ChatProps {
   onSend(text: string): boolean;
   onAbort(): void;
   onSettings(): void;
+  onThinking(level: ThinkingLevel): void;
+  onToolMode(mode: ToolMode): void;
   onChangeCwd(): void;
   onOpenConversation?(conversationId: string): void;
+}
+
+const thinkingLabels: Record<ThinkingLevel, string> = {
+  off: "关闭",
+  minimal: "极低",
+  low: "低",
+  medium: "中",
+  high: "高",
+  xhigh: "很高",
+  max: "最高",
+};
+
+type TranscriptBlock =
+  | {
+      kind: "message";
+      message: ChatMessage;
+      sessionCards: ConversationMessageCard[];
+    }
+  | ConversationMessageCard;
+
+function transcriptBlocks(items: ChatItem[]): TranscriptBlock[] {
+  const blocks: TranscriptBlock[] = [];
+  for (const item of items) {
+    if (item.kind === "session_message") {
+      const previous = blocks.at(-1);
+      if (previous?.kind === "message" && previous.message.role === "assistant") {
+        previous.sessionCards.push(item);
+        continue;
+      }
+    }
+    blocks.push(item.kind === "message"
+      ? { kind: "message", message: item, sessionCards: [] }
+      : item);
+  }
+  return blocks;
 }
 
 function formatContextUsage({
@@ -55,6 +106,10 @@ export function Chat({
   contextSource,
   model,
   role,
+  thinkingLevel,
+  availableThinkingLevels,
+  toolMode,
+  toolModeBusy,
   cwd,
   online,
   conversationReady,
@@ -65,6 +120,8 @@ export function Chat({
   onSend,
   onAbort,
   onSettings,
+  onThinking,
+  onToolMode,
   onChangeCwd,
   onOpenConversation,
 }: ChatProps) {
@@ -82,6 +139,7 @@ export function Chat({
     kind: "message" as const,
     ...message,
   }));
+  const blocks = transcriptBlocks(items);
   const scrollToLatest = (behavior?: ScrollBehavior) => {
     const transcript = transcriptRef.current;
     if (!transcript) return;
@@ -133,7 +191,20 @@ export function Chat({
   return <main className="app-shell">
     <header className="topbar">
       <button className="brand" onClick={onChangeCwd}><span>π</span><span>Pi Web<small title={cwd}>{cwd}</small></span></button>
-      <button className="model-button" onClick={onSettings}>{model ? `${model.provider} / ${model.id}` : "选择模型"}<span>⌄</span></button>
+      <div className="topbar-controls">
+        <ProjectToolModeControl
+          mode={toolMode}
+          disabled={toolModeBusy}
+          onChange={onToolMode}
+        />
+        <button
+          className="model-button"
+          title="模型连接"
+          onClick={onSettings}
+        >
+          {model ? `${model.provider} / ${model.id}` : "模型连接"}<span>⌄</span>
+        </button>
+      </div>
     </header>
     {!online && <div className="banner">本地服务已断开，正在重连…</div>}
     <section
@@ -145,14 +216,19 @@ export function Chat({
       {historyTruncated && <div className="history-note">
         较早或过长的显示内容已省略；完整记录仍保存在项目中。
       </div>}
-      {!items.length && <div className="empty"><div>π</div><h1>想做点什么？</h1><p>Pi 可以读取、修改文件并执行命令。</p></div>}
-      {items.map((item) => item.kind === "session_message"
+      {!blocks.length && <div className="empty"><div>π</div><h1>想做点什么？</h1><p>Pi 可以读取、修改文件并执行命令。</p></div>}
+      {blocks.map((block) => block.kind === "session_message"
         ? <SessionMessageCard
-            key={`card:${item.cardId}`}
-            card={item}
+            key={`card:${block.cardId}`}
+            card={block}
             onOpenConversation={onOpenConversation}
           />
-        : <Message key={`message:${item.id}`} message={item} />)}
+        : <Message
+            key={`message:${block.message.id}`}
+            message={block.message}
+            sessionCards={block.sessionCards}
+            onOpenConversation={onOpenConversation}
+          />)}
     </section>
     <div className="composer-wrap">
       {showJumpToLatest && <button
@@ -183,6 +259,20 @@ export function Chat({
           <span>{role.name}</span>
           <small>{role.model.provider} / {role.model.id}</small>
         </button>}
+        <label className="thinking-level-control">
+          <span>思考</span>
+          <select
+            aria-label="思考级别"
+            value={thinkingLevel}
+            disabled={!online}
+            onChange={(event) =>
+              onThinking(event.target.value as ThinkingLevel)}
+          >
+            {(availableThinkingLevels ?? [thinkingLevel]).map((level) => (
+              <option key={level} value={level}>{thinkingLabels[level]}</option>
+            ))}
+          </select>
+        </label>
         <small className="session-stats billed-stat">累计 Token：{billedTokenCount.toLocaleString("zh-CN")}</small>
         <small className="session-stats context-stat">上下文：{contextTokenText}</small>
         <small className="composer-tip">Enter 发送 · Shift+Enter 换行 · 对话随项目自动保存</small>

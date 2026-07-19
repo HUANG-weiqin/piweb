@@ -605,18 +605,38 @@ export class ProjectStore {
   async inspectConversation(
     conversationId: string,
   ): Promise<PiSessionFileInspection> {
-    assertSessionId(conversationId, "conversationId");
-    const information = await this.listSafeSessionInformation();
-    const match = information.find(({ id }) => id === conversationId);
-    if (match === undefined) {
-      throw new Error(`Conversation not found: ${conversationId}`);
+    const inspections = await this.inspectConversations([conversationId]);
+    return inspections.get(conversationId)!;
+  }
+
+  async inspectConversations(
+    conversationIds: readonly string[],
+  ): Promise<Map<string, PiSessionFileInspection>> {
+    const uniqueConversationIds = [...new Set(conversationIds)];
+    for (const conversationId of uniqueConversationIds) {
+      assertSessionId(conversationId, "conversationId");
     }
-    const safePath = await this.resolveSafeSessionPath(match.path);
-    return inspectPiSessionFile(
-      await readFile(safePath, "utf8"),
-      safePath,
-      conversationId,
+    const information = await this.listSafeSessionInformation();
+    const informationById = new Map(
+      information.map((item) => [item.id, item]),
     );
+    const inspections = new Map<string, PiSessionFileInspection>();
+    for (const conversationId of uniqueConversationIds) {
+      const match = informationById.get(conversationId);
+      if (match === undefined) {
+        throw new Error(`Conversation not found: ${conversationId}`);
+      }
+      const safePath = await this.resolveSafeSessionPath(match.path);
+      inspections.set(
+        conversationId,
+        inspectPiSessionFile(
+          await readFile(safePath, "utf8"),
+          safePath,
+          conversationId,
+        ),
+      );
+    }
+    return inspections;
   }
 
   deleteConversation(conversationId: string): Promise<void> {

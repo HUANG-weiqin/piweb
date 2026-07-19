@@ -19,6 +19,7 @@ function role(
     description: `${name} description`,
     systemPrompt: `${name} prompt`,
     model: { provider: "openai", id: "gpt-5" },
+    canManageSessions: true,
     createdAt: "2026-07-19T12:00:00.000Z",
     updatedAt: "2026-07-19T12:00:00.000Z",
     available: true,
@@ -26,10 +27,17 @@ function role(
   };
 }
 
+const projectControlProps = {
+  toolMode: "full_access" as const,
+  toolModeBusy: false,
+  onToolMode: () => undefined,
+};
+
 describe("RoleSelectionPage", () => {
   it("puts the default role first without selecting it", () => {
     const start = vi.fn();
     render(<RoleSelectionPage
+      {...projectControlProps}
       roles={[
         role("reviewer", "Reviewer"),
         role("default", "Default"),
@@ -50,6 +58,7 @@ describe("RoleSelectionPage", () => {
 
   it("disables unavailable roles and explains why", () => {
     render(<RoleSelectionPage
+      {...projectControlProps}
       roles={[
         role("offline", "Offline specialist", {
           available: false,
@@ -71,12 +80,14 @@ describe("RoleSelectionPage", () => {
 
   it("locks role selection while creation is pending", () => {
     const view = render(<RoleSelectionPage
+      {...projectControlProps}
       roles={[role("default", "Default")]}
       onStart={() => undefined}
     />);
     fireEvent.click(screen.getByRole("button", { name: "选择角色 Default" }));
 
     view.rerender(<RoleSelectionPage
+      {...projectControlProps}
       roles={[role("default", "Default")]}
       pending
       onStart={() => undefined}
@@ -89,16 +100,25 @@ describe("RoleSelectionPage", () => {
   it("keeps provider settings and project switching reachable before a role exists", () => {
     const settings = vi.fn();
     const changeProject = vi.fn();
+    const changeToolMode = vi.fn();
     render(<RoleSelectionPage
+      {...projectControlProps}
       roles={[]}
       onStart={() => undefined}
       onSettings={settings}
+      onToolMode={changeToolMode}
       onChangeProject={changeProject}
     />);
 
-    fireEvent.click(screen.getByRole("button", { name: "连接与权限" }));
+    fireEvent.click(screen.getByRole("button", { name: "模型连接" }));
+    fireEvent.change(screen.getByRole("combobox", {
+      name: "项目工具权限",
+    }), {
+      target: { value: "read_only" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "切换项目" }));
     expect(settings).toHaveBeenCalledOnce();
+    expect(changeToolMode).toHaveBeenCalledWith("read_only");
     expect(changeProject).toHaveBeenCalledOnce();
     expect(screen.queryByRole("textbox", { name: "给 Pi 发送消息" }))
       .not.toBeInTheDocument();

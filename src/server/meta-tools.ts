@@ -10,11 +10,17 @@ export interface MetaToolSessionRef {
   runId?: string;
 }
 
+export type MetaToolSessionScope = "all" | "created_by_me";
+
 export interface MetaToolService {
   listRoles(sourceConversationId: string): Promise<unknown>;
   listSessions(
     sourceConversationId: string,
-    input: { limit: number; cursor?: string },
+    input: {
+      limit: number;
+      cursor?: string;
+      scope?: MetaToolSessionScope;
+    },
   ): Promise<unknown>;
   currentSession(sourceConversationId: string): Promise<unknown>;
   peekSession(
@@ -81,7 +87,9 @@ function assertConversationBody(value: string, field: string): void {
 export function createMetaTools(
   sourceConversationId: string,
   service: MetaToolService,
+  canManageSessions = true,
 ): ToolDefinition[] {
+  if (!canManageSessions) return [];
   return [
     defineTool({
       name: "list_roles",
@@ -98,16 +106,21 @@ export function createMetaTools(
       name: "list_sessions",
       label: "List sessions",
       description:
-        "List flat project sessions with stable handles, titles, roles, last activity, attention, and exact active run identities. The current session is marked as self.",
+        "List flat project sessions with stable handles, titles, roles, creator identity, createdByMe, last activity, attention, and exact active run identities. The current session is marked as self. Use scope=created_by_me to list only sessions started by this Agent.",
       promptSnippet: "Inspect all project session metadata.",
       parameters: Type.Object({
         limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
         cursor: Type.Optional(Type.String({ maxLength: 512 })),
+        scope: Type.Optional(Type.Union([
+          Type.Literal("all"),
+          Type.Literal("created_by_me"),
+        ])),
       }, { additionalProperties: false }),
       async execute(_toolCallId, input) {
         return result(await service.listSessions(sourceConversationId, {
           limit: input.limit ?? 50,
           ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+          ...(input.scope === undefined ? {} : { scope: input.scope }),
         }));
       },
     }),

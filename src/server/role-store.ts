@@ -28,6 +28,7 @@ export interface RoleDraft {
   description: string;
   systemPrompt: string;
   model: RoleModelReference | null;
+  canManageSessions: boolean;
 }
 
 export interface RoleTemplateV1 extends RoleDraft {
@@ -162,7 +163,7 @@ function parseModelReference(
 function parseRoleDraft(value: unknown, label: string): RoleDraft {
   assertExactObject(
     value,
-    ["name", "description", "systemPrompt", "model"],
+    ["name", "description", "systemPrompt", "model", "canManageSessions"],
     label,
   );
   assertBoundedString(
@@ -183,11 +184,15 @@ function parseRoleDraft(value: unknown, label: string): RoleDraft {
     `${label}.systemPrompt`,
     MAX_ROLE_SYSTEM_PROMPT_BYTES,
   );
+  if (typeof value.canManageSessions !== "boolean") {
+    throw new Error(`${label}.canManageSessions must be a boolean`);
+  }
   return {
     name: value.name,
     description: value.description,
     systemPrompt: value.systemPrompt,
     model: parseModelReference(value.model, `${label}.model`),
+    canManageSessions: value.canManageSessions,
   };
 }
 
@@ -205,6 +210,7 @@ function parseRoleTemplate(
       "description",
       "systemPrompt",
       "model",
+      "canManageSessions",
       "createdAt",
       "updatedAt",
     ],
@@ -231,6 +237,8 @@ function parseRoleTemplate(
       description: value.description,
       systemPrompt: value.systemPrompt,
       model: value.model,
+      // Session orchestration is opt-in for roles written before this field.
+      canManageSessions: value.canManageSessions ?? false,
     }, label),
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
@@ -328,6 +336,7 @@ function draftsAreEqual(
     && role.description === draft.description
     && role.systemPrompt === draft.systemPrompt
     && modelsAreEqual(role.model, draft.model)
+    && role.canManageSessions === draft.canManageSessions
   );
 }
 
@@ -403,6 +412,7 @@ export class RoleStore {
           description: "",
           systemPrompt: "",
           model,
+          canManageSessions: false,
           createdAt: timestamp,
           updatedAt: timestamp,
         }],

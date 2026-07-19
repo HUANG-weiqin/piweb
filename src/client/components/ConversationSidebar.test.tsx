@@ -18,6 +18,7 @@ const baseConversation: ConversationSummary = {
     name: "架构师",
     description: "负责系统设计",
     model: { provider: "openai", id: "gpt-5" },
+    canManageSessions: true,
   },
   activity: { kind: "idle" },
 };
@@ -45,6 +46,7 @@ describe("ConversationSidebar", () => {
         onToggleCollapsed={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn()}
+        onRename={vi.fn()}
         onDelete={vi.fn(() => true)}
       />,
     );
@@ -59,6 +61,42 @@ describe("ConversationSidebar", () => {
     expect(screen.getByText("#01234567")).toBeInTheDocument();
     expect(screen.getByText("#fedcba98")).toBeInTheDocument();
     expect(screen.getAllByText("最后活跃", { exact: false })).toHaveLength(2);
+  });
+
+  it("marks only conversations created by an Agent", () => {
+    render(
+      <ConversationSidebar
+        conversations={[
+          {
+            ...baseConversation,
+            createdBy: { kind: "user" },
+          },
+          {
+            ...baseConversation,
+            id: "agent-created-12345678",
+            name: "Agent 调研",
+            createdBy: {
+              kind: "conversation",
+              conversationId: baseConversation.id,
+            },
+          },
+        ]}
+        collapsed={false}
+        truncated={false}
+        online
+        onToggleCollapsed={vi.fn()}
+        onSelect={vi.fn()}
+        onCreate={vi.fn()}
+        onRename={vi.fn()}
+        onDelete={vi.fn(() => true)}
+      />,
+    );
+
+    const badge = screen.getByTitle("由 Agent 创建");
+    expect(badge).toHaveTextContent("Agent");
+    expect(screen.getAllByText("Agent")).toHaveLength(1);
+    expect(badge.closest("[data-conversation-id]"))
+      .toHaveAttribute("data-conversation-id", "agent-created-12345678");
   });
 
   it("orders active work before attention and the remaining flat conversations", () => {
@@ -86,6 +124,7 @@ describe("ConversationSidebar", () => {
         onToggleCollapsed={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn()}
+        onRename={vi.fn()}
         onDelete={vi.fn(() => true)}
       />,
     );
@@ -116,6 +155,7 @@ describe("ConversationSidebar", () => {
           onToggleCollapsed={vi.fn()}
           onSelect={vi.fn()}
           onCreate={vi.fn()}
+          onRename={vi.fn()}
           onDelete={vi.fn(() => true)}
         />,
       );
@@ -147,6 +187,7 @@ describe("ConversationSidebar", () => {
         onToggleCollapsed={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn()}
+        onRename={vi.fn()}
         onDelete={vi.fn(() => true)}
       />,
     );
@@ -171,6 +212,7 @@ describe("ConversationSidebar", () => {
         onToggleCollapsed={vi.fn()}
         onSelect={onSelect}
         onCreate={vi.fn()}
+        onRename={vi.fn()}
         onDelete={vi.fn(() => true)}
       />,
     );
@@ -192,6 +234,7 @@ describe("ConversationSidebar", () => {
         onToggleCollapsed={vi.fn()}
         onSelect={onSelect}
         onCreate={vi.fn()}
+        onRename={vi.fn()}
         onDelete={vi.fn(() => true)}
       />,
     );
@@ -210,6 +253,7 @@ describe("ConversationSidebar", () => {
         onToggleCollapsed={onToggleCollapsed}
         onSelect={vi.fn()}
         onCreate={onCreate}
+        onRename={vi.fn()}
         onDelete={vi.fn(() => true)}
       />,
     );
@@ -228,6 +272,7 @@ describe("ConversationSidebar", () => {
         onToggleCollapsed={onToggleCollapsed}
         onSelect={vi.fn()}
         onCreate={onCreate}
+        onRename={vi.fn()}
         onDelete={vi.fn(() => true)}
       />,
     );
@@ -258,6 +303,7 @@ describe("ConversationSidebar", () => {
         onToggleCollapsed={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn()}
+        onRename={vi.fn()}
         onDelete={onDelete}
       />,
     );
@@ -277,6 +323,32 @@ describe("ConversationSidebar", () => {
     expect(onDelete).toHaveBeenCalledWith(baseConversation.id);
   });
 
+  it("renames an idle conversation from its sidebar lifecycle actions", () => {
+    const onRename = vi.fn();
+    render(
+      <ConversationSidebar
+        conversations={[baseConversation]}
+        collapsed={false}
+        truncated={false}
+        online
+        onToggleCollapsed={vi.fn()}
+        onSelect={vi.fn()}
+        onCreate={vi.fn()}
+        onRename={onRename}
+        onDelete={vi.fn(() => true)}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "重命名会话 接口设计" }));
+    expect(screen.getByRole("dialog", { name: "重命名会话" })).toBeInTheDocument();
+    const nameInput = screen.getByRole("textbox", { name: "会话名称" });
+    expect(nameInput).toHaveValue("接口设计");
+
+    fireEvent.change(nameInput, { target: { value: "新名称" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存名称" }));
+    expect(onRename).toHaveBeenCalledWith(baseConversation.id, "新名称");
+  });
+
   it("blocks deletion while the focused runtime is busy even before its summary refreshes", () => {
     render(
       <ConversationSidebar
@@ -289,11 +361,14 @@ describe("ConversationSidebar", () => {
         onToggleCollapsed={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn()}
+        onRename={vi.fn()}
         onDelete={vi.fn(() => true)}
       />,
     );
 
     expect(screen.getByRole("button", { name: "删除会话 接口设计" }))
+      .toBeDisabled();
+    expect(screen.getByRole("button", { name: "重命名会话 接口设计" }))
       .toBeDisabled();
   });
 
@@ -307,6 +382,7 @@ describe("ConversationSidebar", () => {
         onToggleCollapsed={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn()}
+        onRename={vi.fn()}
         onDelete={vi.fn(() => true)}
       />,
     );

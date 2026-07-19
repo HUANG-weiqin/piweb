@@ -47,6 +47,7 @@ function cloneConversationRole(
     description: role.description,
     systemPrompt: role.systemPrompt,
     model: { ...role.model },
+    canManageSessions: role.canManageSessions,
   };
 }
 

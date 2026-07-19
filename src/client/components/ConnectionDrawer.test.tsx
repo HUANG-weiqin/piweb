@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PublicState } from "../../shared/protocol";
 import { ConnectionDrawer } from "./ConnectionDrawer";
@@ -35,18 +35,13 @@ function drawerProps(overrides: Partial<Parameters<typeof ConnectionDrawer>[0]> 
     state,
     open: true,
     online: true,
-    toolModeBusy: false,
-    conversationBusy: false,
     onClose: () => undefined,
-    onRenameConversation: () => undefined,
     onKey: () => commandId,
     onOAuth: () => undefined,
     onLogout: () => undefined,
     onRefresh: () => undefined,
     onClearSettingResult: () => undefined,
     onKeyDialogChange: () => undefined,
-    onThinking: () => undefined,
-    onToolMode: () => undefined,
     ...overrides,
   } satisfies Parameters<typeof ConnectionDrawer>[0];
 }
@@ -60,25 +55,23 @@ describe("ConnectionDrawer", () => {
     renderDrawer();
     expect(screen.getByText("Ready")).toBeInTheDocument();
     expect(screen.queryByText("locked")).not.toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "低" })).toBeInTheDocument();
-    expect(screen.queryByRole("option", { name: "high" })).not.toBeInTheDocument();
-    expect(within(screen.getByRole("combobox", { name: "工具权限" }))
-      .getAllByRole("option")
-      .map((option) => option.textContent)).toEqual(["全部授权", "只读"]);
   });
 
-  it("explains that full access executes tools without prompting", () => {
-    renderDrawer({ state: { ...state, toolMode: "full_access" } });
+  it("contains only provider connection and model catalog controls", () => {
+    renderDrawer();
 
-    expect(screen.getByText(/直接执行，不会询问/)).toBeInTheDocument();
-    expect(screen.getByText(/项目外文件/)).toBeInTheDocument();
-  });
-
-  it("limits read-only mode to Pi's native reading tools", () => {
-    renderDrawer({ state: { ...state, toolMode: "read_only" } });
-
-    expect(screen.getByText(/read、grep、find 和 ls/)).toBeInTheDocument();
-    expect(screen.getByText(/命令.*被阻止/)).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "模型连接" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "提供商" }))
+      .toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "工具权限" }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "思考级别" }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "当前会话名称" }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "管理角色" }))
+      .not.toBeInTheDocument();
   });
 
   it("does not crash if the browser briefly receives state from an older server", () => {
@@ -90,28 +83,10 @@ describe("ConnectionDrawer", () => {
     const close = vi.fn();
     renderDrawer({ onClose: close });
 
-    expect(screen.getByRole("dialog", { name: "工作台设置" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "模型连接" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "关闭" })).toHaveFocus();
     fireEvent.keyDown(document, { key: "Escape" });
     expect(close).toHaveBeenCalledOnce();
-  });
-
-  it("renames the current conversation without owning list navigation", () => {
-    const renameConversation = vi.fn();
-    renderDrawer({
-      onRenameConversation: renameConversation,
-    });
-
-    expect(screen.queryByRole("button", { name: /新建会话/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /打开会话/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /删除会话/ })).not.toBeInTheDocument();
-    expect(screen.getByText(/统一在左侧会话栏中完成/)).toBeInTheDocument();
-
-    fireEvent.change(screen.getByRole("textbox", { name: "当前会话名称" }), {
-      target: { value: "Renamed" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
-    expect(renameConversation).toHaveBeenCalledWith("Renamed");
   });
 
   it("shows models only for the provider the user chose", () => {
@@ -154,17 +129,12 @@ describe("ConnectionDrawer", () => {
     expect(current).toHaveAttribute("aria-current", "true");
   });
 
-  it("keeps model choices read-only and opens role management for changes", () => {
-    const onManageRoles = vi.fn();
-    renderDrawer({ onManageRoles });
-
+  it("keeps model choices read-only", () => {
+    renderDrawer();
     const model = screen.getByRole("button", {
       name: /Ready.*在角色中选择/,
     });
     expect(model).toBeDisabled();
-
-    fireEvent.click(screen.getByRole("button", { name: "管理角色" }));
-    expect(onManageRoles).toHaveBeenCalledOnce();
   });
 
   it("keeps an API Key private and waits for an exact command acknowledgement", () => {

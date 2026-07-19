@@ -25,6 +25,7 @@ function role(
     description: `${name} description`,
     systemPrompt: `${name} prompt`,
     model: { provider: "alpha", id: "good" },
+    canManageSessions: true,
     createdAt: "2026-07-19T12:00:00.000Z",
     updatedAt: "2026-07-19T12:00:00.000Z",
     available: true,
@@ -141,6 +142,7 @@ describe("RoleManagerDialog", () => {
       description: "Default description",
       systemPrompt: "Default prompt",
       model: { provider: "alpha", id: "good" },
+      canManageSessions: true,
     });
     expect(screen.getByRole("button", { name: "编辑角色 Default" }))
       .toBeInTheDocument();
@@ -179,6 +181,8 @@ describe("RoleManagerDialog", () => {
     renderManager({ onCreate: create, onDelete: remove });
 
     fireEvent.click(screen.getByRole("button", { name: "新建角色" }));
+    expect(screen.getByRole("switch", { name: /允许管理会话/ }))
+      .not.toBeChecked();
     fireEvent.change(screen.getByRole("textbox", { name: "角色名称" }), {
       target: { value: "Researcher" },
     });
@@ -198,6 +202,7 @@ describe("RoleManagerDialog", () => {
       description: "Finds primary sources",
       systemPrompt: "Use primary sources.",
       model: { provider: "alpha", id: "good" },
+      canManageSessions: false,
     });
     expect(screen.queryByRole("button", { name: "编辑角色 Researcher" }))
       .not.toBeInTheDocument();
@@ -207,6 +212,24 @@ describe("RoleManagerDialog", () => {
     expect(remove).toHaveBeenCalledWith("reviewer", 1);
     expect(screen.getByRole("button", { name: "编辑角色 Reviewer" }))
       .toBeInTheDocument();
+  });
+
+  it("edits the role-level session management capability explicitly", () => {
+    const update = vi.fn();
+    renderManager({ onUpdate: update });
+    const capability = screen.getByRole("switch", {
+      name: /允许管理会话/,
+    });
+    expect(capability).toBeChecked();
+
+    fireEvent.click(capability);
+    fireEvent.click(screen.getByRole("button", { name: "保存角色" }));
+
+    expect(update).toHaveBeenCalledWith(
+      "default",
+      1,
+      expect.objectContaining({ canManageSessions: false }),
+    );
   });
 
   it("only renders a result matching the exact pending command", () => {

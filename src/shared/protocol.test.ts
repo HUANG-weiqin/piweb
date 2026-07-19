@@ -24,7 +24,7 @@ const roleId = "f23db1e6-c657-4dac-8b7e-a14fdecc5f21";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(11);
+    expect(PROTOCOL_VERSION).toBe(12);
   });
 
   it("accepts supported commands", () => {
@@ -63,6 +63,7 @@ describe("parseClientCommand", () => {
         description: "Finds lifecycle bugs",
         systemPrompt: "Review the implementation.",
         model: { provider: "openai", id: "gpt" },
+        canManageSessions: false,
       },
     }).type).toBe("create_role");
     expect(parseClientCommand({
@@ -76,6 +77,7 @@ describe("parseClientCommand", () => {
         description: "",
         systemPrompt: "",
         model: null,
+        canManageSessions: true,
       },
     }).type).toBe("update_role");
     expect(parseClientCommand({
@@ -209,6 +211,7 @@ describe("parseClientCommand", () => {
         description: "",
         systemPrompt: "",
         model: null,
+        canManageSessions: false,
       },
     })).toThrow();
     expect(() => parseClientCommand({
@@ -257,6 +260,7 @@ describe("parseClientCommand", () => {
         description: "",
         systemPrompt: exactPrompt,
         model: null,
+        canManageSessions: false,
       },
     })).toMatchObject({
       type: "create_role",
@@ -271,6 +275,7 @@ describe("parseClientCommand", () => {
         description: "",
         systemPrompt: `${exactPrompt}é`,
         model: null,
+        canManageSessions: false,
       },
     })).toThrow("UTF-8");
   });
@@ -286,6 +291,7 @@ describe("parseClientCommand", () => {
         description: "d".repeat(MAX_ROLE_DESCRIPTION_CHARACTERS),
         systemPrompt: "",
         model: null,
+        canManageSessions: false,
       },
     })).toMatchObject({
       type: "create_role",
@@ -300,6 +306,7 @@ describe("parseClientCommand", () => {
         description: "",
         systemPrompt: "",
         model: null,
+        canManageSessions: false,
       },
     })).toThrow("80 characters");
     expect(() => parseClientCommand({
@@ -311,6 +318,7 @@ describe("parseClientCommand", () => {
         description: "d".repeat(MAX_ROLE_DESCRIPTION_CHARACTERS + 1),
         systemPrompt: "",
         model: null,
+        canManageSessions: false,
       },
     })).toThrow("1000 characters");
   });
@@ -428,12 +436,13 @@ describe("parseClientCommand", () => {
         description: "",
         systemPrompt: "",
         model: { provider: "openai", id: "gpt" },
+        canManageSessions: true,
         createdAt: "2026-07-18T12:00:00.000Z",
         updatedAt: "2026-07-18T12:00:00.000Z",
         available: true,
       }],
     }).type).toBe("role_catalog_snapshot");
-    expect(parseServerEvent({
+    const projectSnapshot = parseServerEvent({
       type: "project_snapshot",
       sessionId,
       projectId,
@@ -450,14 +459,27 @@ describe("parseClientCommand", () => {
             name: "Default",
             description: "",
             model: { provider: "openai", id: "gpt" },
+            canManageSessions: true,
           },
           activity: { kind: "running", runId },
           attention: false,
           unread: true,
           temporary: false,
+          createdBy: {
+            kind: "conversation",
+            conversationId: targetConversationId,
+          },
       }],
       truncated: false,
-    }).type).toBe("project_snapshot");
+    });
+    expect(projectSnapshot.type).toBe("project_snapshot");
+    if (projectSnapshot.type !== "project_snapshot") {
+      throw new Error("project snapshot not parsed");
+    }
+    expect(projectSnapshot.conversations[0]?.createdBy).toEqual({
+      kind: "conversation",
+      conversationId: targetConversationId,
+    });
     expect(parseServerEvent({
       type: "conversation_snapshot",
       sessionId,
@@ -470,6 +492,7 @@ describe("parseClientCommand", () => {
         description: "",
         systemPrompt: "",
         model: { provider: "openai", id: "gpt" },
+        canManageSessions: true,
       },
       items: [{
         kind: "session_message",
@@ -669,6 +692,7 @@ describe("parseClientCommand", () => {
       description: "",
       systemPrompt,
       model: { provider: "openai", id: "gpt" },
+      canManageSessions: index === 0,
       createdAt: "2026-07-18T12:00:00.000Z",
       updatedAt: "2026-07-18T12:00:00.000Z",
       available: true,

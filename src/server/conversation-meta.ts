@@ -151,6 +151,8 @@ const roleSnapshotSchema = z.object({
       "role.model.id must not be blank",
     ),
   }).strict(),
+  // Session orchestration is opt-in for metadata written before this field.
+  canManageSessions: z.boolean().default(false),
 }).strict();
 
 const lifecycleSchema = z.discriminatedUnion("kind", [

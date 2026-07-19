@@ -392,6 +392,14 @@ async function createFixture(
     runtime,
     join(cwd, "user", "roles.json"),
   );
+  const defaultRole = roles.getRoleTemplate("default");
+  await roles.updateRole("default", defaultRole.revision, {
+    name: defaultRole.name,
+    description: defaultRole.description,
+    systemPrompt: defaultRole.systemPrompt,
+    model: defaultRole.model,
+    canManageSessions: true,
+  });
   const coordinator = new ProjectSessionCoordinator(
     runtime,
     roles,
@@ -686,6 +694,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Reviews lifecycle code",
       systemPrompt: "Review the first revision.",
       model: { provider: "test", id: "model-a" },
+      canManageSessions: false,
     });
 
     const first = await fixture.coordinator.createUserConversation(
@@ -697,6 +706,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Reviews concurrency",
       systemPrompt: "Review the second revision.",
       model: { provider: "test", id: "model-b" },
+      canManageSessions: true,
     });
     const second = await fixture.coordinator.createUserConversation(
       fixture.handle,
@@ -708,17 +718,37 @@ describe("ProjectSessionCoordinator", () => {
       name: "Reviewer",
       systemPrompt: "Review the first revision.",
       model: { provider: "test", id: "model-a" },
+      canManageSessions: false,
     });
     expect(fixture.runtime.createOptions.get(first.conversationId)).toMatchObject({
       roleSystemPrompt: "Review the first revision.",
       model: { provider: "test", id: "model-a" },
     });
+    expect(
+      fixture.runtime.createOptions.get(first.conversationId)
+        ?.workbenchCustomTools,
+    ).toEqual([]);
     expect(second.profile.role).toMatchObject({
       revision: 2,
       name: "Senior reviewer",
       systemPrompt: "Review the second revision.",
       model: { provider: "test", id: "model-b" },
+      canManageSessions: true,
     });
+    expect(
+      fixture.runtime.createOptions.get(second.conversationId)
+        ?.workbenchCustomTools?.map(({ name }) => name),
+    ).toEqual([
+      "list_roles",
+      "list_sessions",
+      "current_session",
+      "peek_session",
+      "start_session",
+      "send_session_message",
+      "wait_for_session",
+      "abort_session",
+      "delete_session",
+    ]);
     expect(first.profile.role).not.toEqual(second.profile.role);
   });
 
@@ -762,6 +792,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Uses a project extension provider",
       systemPrompt: "Use the project provider.",
       model: projectModel,
+      canManageSessions: false,
     }, runtime.sessionModelRegistry);
     const source = await fixture.coordinator.createUserConversation(
       fixture.handle,
@@ -961,8 +992,14 @@ describe("ProjectSessionCoordinator", () => {
     ).toEqual({ kind: "running", runId: first.runId });
     expect(
       (await fixture.coordinator.listSessions(fixture.handle))
-        .find(({ id }) => id === first.conversationId)?.attention,
-    ).toBe(false);
+        .find(({ id }) => id === first.conversationId),
+    ).toMatchObject({
+      attention: false,
+      createdBy: {
+        kind: "conversation",
+        conversationId: source.conversationId,
+      },
+    });
     expect(
       aggregateReservedConversationEntries(
         fixture.runtime.control(source.conversationId).manager.getEntries(),
@@ -1057,6 +1094,119 @@ describe("ProjectSessionCoordinator", () => {
           === "idle",
       "the independent target cleanup",
     );
+  });
+
+  it("shows which sessions the current Agent created and filters them explicitly", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default", title: "Coordinator" },
+    );
+    const userSession = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default", title: "User session" },
+    );
+    const otherAgent = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default", title: "Other coordinator" },
+    );
+    const ownTarget = await fixture.coordinator.startPeerSession(
+      fixture.handle,
+      source.conversationId,
+      startInput({
+        title: "Owned target",
+        idempotencyKey: "owned-target",
+      }),
+    );
+    const otherTarget = await fixture.coordinator.startPeerSession(
+      fixture.handle,
+      otherAgent.conversationId,
+      startInput({
+        title: "Other target",
+        idempotencyKey: "other-target",
+      }),
+    );
+    const sourceControl = fixture.runtime.control(source.conversationId);
+
+    const all = await executeTool(
+      sourceControl,
+      "list_sessions",
+      "list-all-origins",
+      { limit: 20 },
+    ) as {
+      sessions: Array<{
+        conversationId: string;
+        createdBy: unknown;
+        createdByMe: boolean;
+      }>;
+    };
+    const byId = new Map(
+      all.sessions.map((session) => [session.conversationId, session]),
+    );
+
+    expect(byId.get(source.conversationId)).toMatchObject({
+      createdBy: { kind: "user" },
+      createdByMe: false,
+    });
+    expect(byId.get(userSession.conversationId)).toMatchObject({
+      createdBy: { kind: "user" },
+      createdByMe: false,
+    });
+    expect(byId.get(ownTarget.conversationId)).toMatchObject({
+      createdBy: {
+        kind: "conversation",
+        conversationId: source.conversationId,
+      },
+      createdByMe: true,
+    });
+    expect(byId.get(otherTarget.conversationId)).toMatchObject({
+      createdBy: {
+        kind: "conversation",
+        conversationId: otherAgent.conversationId,
+      },
+      createdByMe: false,
+    });
+
+    const owned = await executeTool(
+      sourceControl,
+      "list_sessions",
+      "list-owned-only",
+      { limit: 20, scope: "created_by_me" },
+    ) as { sessions: Array<{ conversationId: string }> };
+    expect(owned.sessions.map(({ conversationId }) => conversationId))
+      .toEqual([ownTarget.conversationId]);
+
+    await fixture.coordinator.close();
+    const restarted = new ProjectSessionCoordinator(
+      fixture.runtime,
+      fixture.roles,
+      fixture.registry,
+    );
+    const restartedHandle = await restarted.acquireProject(
+      fixture.cwd,
+      "full_access",
+    );
+    fixture.coordinator = restarted;
+    fixture.handle = restartedHandle;
+    await restarted.openConversation(
+      restartedHandle,
+      source.conversationId,
+      { updateRecent: false },
+    );
+    const restartedContext = (restartedHandle as unknown as {
+      context: { profiles: Map<string, ConversationMeta> };
+    }).context;
+    restartedContext.profiles.delete(ownTarget.conversationId);
+
+    const recoveredOwned = await executeTool(
+      fixture.runtime.control(source.conversationId),
+      "list_sessions",
+      "list-owned-after-restart",
+      { limit: 20, scope: "created_by_me" },
+    ) as { sessions: Array<{ conversationId: string }> };
+    expect(
+      recoveredOwned.sessions.map(({ conversationId }) => conversationId),
+    ).toEqual([ownTarget.conversationId]);
   });
 
   it("keeps a start_session committed while target creation is finishing after source cancellation", async () => {
@@ -1180,6 +1330,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Must not replace the frozen start request",
       systemPrompt: "Use a different role.",
       model: { provider: "test", id: "model-a" },
+      canManageSessions: false,
     });
     const original = startInput({
       task: "Keep this request stable",
@@ -1236,6 +1387,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "The originally selected role",
       systemPrompt: "Use the original role prompt.",
       model: { provider: "test", id: "model-a" },
+      canManageSessions: false,
     });
     const input = startInput({
       roleId: role.id,
@@ -1278,6 +1430,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "A later role definition",
       systemPrompt: "Use the rewritten role prompt.",
       model: { provider: "test", id: "model-b" },
+      canManageSessions: true,
     });
     fixture.runtime.beforeCreateSession = undefined;
     const restarted = new ProjectSessionCoordinator(
@@ -1427,6 +1580,9 @@ describe("ProjectSessionCoordinator", () => {
       content: expect.stringContaining("Handle this after the current task"),
       triggerTurn: true,
     });
+    expect(
+      fixture.runtime.control(target.conversationId).received[0]?.content,
+    ).toContain("你负责管理自己创建的会话生命周期");
     expect(fixture.runtime.control(target.conversationId).abortCalls).toBe(0);
     expect(
       (await fixture.coordinator.listSessions(fixture.handle))
@@ -1478,6 +1634,48 @@ describe("ProjectSessionCoordinator", () => {
     expect(
       fixture.runtime.control(target.conversationId).received[0]?.content,
     ).toContain("This message is already durable");
+  });
+
+  it("does not mention session tools in messages delivered to a role without session management", async () => {
+    const fixture = await createFixture();
+    const restrictedRole = await fixture.roles.createRole({
+      name: "Focused worker",
+      description: "Works only in its own session",
+      systemPrompt: "Complete the assigned work.",
+      model: { provider: "test", id: "model-a" },
+      canManageSessions: false,
+    });
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: restrictedRole.id },
+    );
+    fixture.runtime.control(target.conversationId).enqueue(
+      completesWith("handled without orchestration"),
+    );
+
+    await executeTool(
+      fixture.runtime.control(source.conversationId),
+      "send_session_message",
+      "send-restricted",
+      {
+        conversationId: target.conversationId,
+        message: "Handle this locally",
+      },
+    );
+    await waitUntil(
+      () => fixture.runtime.control(target.conversationId).received.length === 1,
+      "the restricted target to receive its message",
+    );
+
+    const content =
+      fixture.runtime.control(target.conversationId).received[0]?.content;
+    expect(content).toContain("Handle this locally");
+    expect(content).not.toContain("send_session_message");
+    expect(content).not.toContain("生命周期提醒");
   });
 
   it("retries one synchronous inbox dispatch failure without requiring a restart", async () => {
@@ -3076,6 +3274,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Must survive the processing crash boundary",
       systemPrompt: "Use the frozen processing recovery prompt.",
       model: { provider: "test", id: "model-b" },
+      canManageSessions: false,
     });
     const role = roles.getConversationRole(roleTemplate.id);
     const store = await ProjectStore.open(cwd, "full_access");

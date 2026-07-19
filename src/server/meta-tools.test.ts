@@ -47,6 +47,15 @@ describe("createMetaTools", () => {
     ]);
   });
 
+  it("exposes no orchestration tool metadata when the frozen role disallows it", () => {
+    const fake = service();
+
+    expect(createMetaTools(sourceConversationId, fake, false)).toEqual([]);
+    expect(Object.values(fake).every((method) => (
+      vi.mocked(method).mock.calls.length === 0
+    ))).toBe(true);
+  });
+
   it("binds source identity and returns start_session without adding a wait", async () => {
     const fake = service();
     const tools = createMetaTools(sourceConversationId, fake);
@@ -158,6 +167,24 @@ describe("createMetaTools", () => {
     expect(fake.peekSession).toHaveBeenCalledWith(
       sourceConversationId,
       { conversationId: "target", limit: 6 },
+    );
+  });
+
+  it("forwards the created-by-me session scope", async () => {
+    const fake = service();
+    const tools = createMetaTools(sourceConversationId, fake);
+
+    await tool(tools, "list_sessions").execute(
+      "list-created",
+      { scope: "created_by_me" },
+      undefined,
+      undefined,
+      {} as never,
+    );
+
+    expect(fake.listSessions).toHaveBeenCalledWith(
+      sourceConversationId,
+      { limit: 50, scope: "created_by_me" },
     );
   });
 

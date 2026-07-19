@@ -2252,6 +2252,7 @@ describe("PiConnection coordinated project view", () => {
             provider: projectModel.provider,
             id: projectModel.id,
           },
+          canManageSessions: false,
         },
       });
       expect(harness.events).toContainEqual({
@@ -3242,6 +3243,7 @@ describe("PiConnection coordinated project view", () => {
             provider: projectModel.provider,
             id: projectModel.id,
           },
+          canManageSessions: false,
         },
       });
       await vi.waitFor(() => {
@@ -3297,6 +3299,7 @@ describe("PiConnection coordinated project view", () => {
             provider: projectModel.provider,
             id: projectModel.id,
           },
+          canManageSessions: true,
         },
       })).resolves.toBeUndefined();
 
@@ -3332,6 +3335,7 @@ describe("PiConnection coordinated project view", () => {
             provider: projectModel.provider,
             id: "missing",
           },
+          canManageSessions: true,
         },
       })).rejects.toThrow("unavailable in the current project");
     } finally {
@@ -3359,6 +3363,7 @@ describe("PiConnection coordinated project view", () => {
           description: "Reviews changes",
           systemPrompt: "Review carefully.",
           model: { provider: "test", id: "model" },
+          canManageSessions: false,
         },
       });
       expect(harness.events).toContainEqual({
