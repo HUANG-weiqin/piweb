@@ -127,6 +127,7 @@ describe("ConnectionDrawer", () => {
     const current = screen.getByRole("button", { name: /Ready.*当前/ });
     expect(current).toBeDisabled();
     expect(current).toHaveAttribute("aria-current", "true");
+    expect(screen.queryByText("test / ready")).not.toBeInTheDocument();
   });
 
   it("keeps model choices read-only", () => {

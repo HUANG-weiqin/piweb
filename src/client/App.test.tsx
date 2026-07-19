@@ -525,7 +525,7 @@ describe("App", () => {
         providers: [],
       },
     }));
-    fireEvent.click(screen.getByRole("button", { name: /provider \/ model/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^model\s*⌄$/ }));
     expect(screen.getByRole("dialog", { name: "模型连接" })).toBeInTheDocument();
 
     act(() => socketMock.emit?.({
@@ -1244,7 +1244,7 @@ describe("App", () => {
         }],
       },
     }));
-    fireEvent.click(screen.getByRole("button", { name: /provider \/ model/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^model\s*⌄$/ }));
     fireEvent.click(screen.getByRole("button", { name: "登录订阅账户" }));
     const first = latestCommand("login_oauth");
     fireEvent.click(screen.getByRole("button", { name: "取消登录" }));

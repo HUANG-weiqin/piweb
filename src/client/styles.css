@@ -731,6 +731,39 @@ pre {
   white-space: nowrap;
 }
 
+.context-stat {
+  position: relative;
+  cursor: help;
+}
+
+.token-tooltip {
+  position: absolute;
+  bottom: calc(100% + 9px);
+  left: 0;
+  z-index: 5;
+  display: grid;
+  min-width: max-content;
+  gap: 4px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--text);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  font-size: 12px;
+  line-height: 1.35;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(3px);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.context-stat:hover .token-tooltip,
+.context-stat:focus-visible .token-tooltip {
+  opacity: 1;
+  transform: translateY(0);
+}
+
 .composer-tip {
   margin-left: auto;
   color: var(--muted);
@@ -2325,7 +2358,6 @@ pre {
     justify-content: flex-start;
   }
 
-  .billed-stat,
   .composer-tip {
     display: none;
   }

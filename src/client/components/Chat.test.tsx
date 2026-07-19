@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   ConversationMessageCard,
@@ -15,14 +16,22 @@ function view(
   chat: ChatState,
   draft = "",
   role?: ConversationRoleSnapshot,
+  overrides: Partial<ComponentProps<typeof Chat>> = {},
 ) {
   return <Chat
     chat={chat}
     historyTruncated={false}
     busy={false}
-    billedTokenCount={0}
+    sessionTokenUsage={{
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: 0,
+    }}
     contextTokenCount={0}
     contextWindow={100_000}
+    contextPercent={0}
     contextSource="measured"
     model={{ provider: "provider", id: "model" }}
     role={role}
@@ -42,6 +51,7 @@ function view(
     onThinking={() => undefined}
     onToolMode={() => undefined}
     onChangeCwd={() => undefined}
+    {...overrides}
   />;
 }
 
@@ -123,6 +133,49 @@ describe("Chat", () => {
     expect(textarea).toHaveStyle({ height: "120px" });
   });
 
+  it("shows only compact context usage until token details are requested", () => {
+    render(view(emptyChat, "", undefined, {
+      contextTokenCount: 63_771,
+      contextWindow: 372_000,
+      contextPercent: 17.14,
+      sessionTokenUsage: {
+        input: 131_451,
+        output: 10_202,
+        cacheRead: 1_122_816,
+        cacheWrite: 0,
+        total: 1_264_469,
+      },
+    }));
+
+    const summary = screen.getByText("上下文：63.8k / 372k（17%）", {
+      selector: ".context-summary",
+    });
+    expect(summary.parentElement).toHaveClass("context-stat");
+    expect(screen.queryByText(/累计 Token/)).not.toBeInTheDocument();
+
+    const tooltip = screen.getByRole("tooltip");
+    expect(tooltip).toHaveTextContent("上下文：63.8k / 372k（17%）");
+    expect(tooltip).toHaveTextContent("累计处理：1.26M");
+    expect(tooltip).toHaveTextContent("普通输入：131k");
+    expect(tooltip).toHaveTextContent("缓存读取：1.12M");
+    expect(tooltip).toHaveTextContent("输出：10.2k");
+    expect(tooltip).not.toHaveTextContent("缓存写入");
+  });
+
+  it("includes cache writes in the tooltip when present", () => {
+    render(view(emptyChat, "", undefined, {
+      sessionTokenUsage: {
+        input: 1_000,
+        output: 100,
+        cacheRead: 2_000,
+        cacheWrite: 500,
+        total: 3_600,
+      },
+    }));
+
+    expect(screen.getByRole("tooltip")).toHaveTextContent("缓存写入：500");
+  });
+
   it("shows the frozen role at the composer footer and opens read-only details", () => {
     const role: ConversationRoleSnapshot = {
       id: "default",
@@ -134,6 +187,10 @@ describe("Chat", () => {
       canManageSessions: true,
     };
     render(view(emptyChat, "", role));
+
+    expect(screen.getByRole("button", { name: /^model\s*⌄$/ }))
+      .toBeInTheDocument();
+    expect(screen.queryByText("provider / model")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", {
       name: "查看会话角色 Reviewer",

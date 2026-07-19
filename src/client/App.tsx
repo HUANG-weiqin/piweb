@@ -1181,9 +1181,10 @@ export function App() {
               chat={chat}
               historyTruncated={historyTruncated}
               busy={state.busy || Boolean(outstandingRunId)}
-              billedTokenCount={state.sessionTokenUsage?.total ?? chat.sessionTokens}
+              sessionTokenUsage={state.sessionTokenUsage}
               contextTokenCount={state.contextUsage?.tokens}
               contextWindow={state.contextUsage?.contextWindow}
+              contextPercent={state.contextUsage?.percent}
               contextSource={state.contextUsage?.source}
               model={state.selectedModel}
               role={conversationRole}

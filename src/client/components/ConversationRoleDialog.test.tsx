@@ -28,7 +28,8 @@ describe("ConversationRoleDialog", () => {
     expect(screen.getByText("Reviews risky changes")).toBeInTheDocument();
     expect(screen.getByText("Inspect the exact diff before drawing conclusions."))
       .toBeInTheDocument();
-    expect(screen.getByText("openai / gpt-5")).toBeInTheDocument();
+    expect(screen.getByText("gpt-5")).toBeInTheDocument();
+    expect(screen.queryByText(/openai \//)).not.toBeInTheDocument();
     expect(screen.getByText("修订 7")).toBeInTheDocument();
     expect(screen.getByText("允许")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /切换/ })).not.toBeInTheDocument();

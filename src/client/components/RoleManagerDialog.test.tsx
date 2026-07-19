@@ -121,9 +121,11 @@ describe("RoleManagerDialog", () => {
     expect(select).toHaveValue(JSON.stringify(["alpha", "retired"]));
     const options = within(select).getAllByRole("option");
     expect(options.map((option) => option.textContent)).toEqual([
-      "当前不可用 · alpha / retired",
-      "Alpha · Good · alpha / good",
+      "当前不可用 · retired",
+      "Good",
     ]);
+    expect(within(select).getByRole("group", { name: "Alpha" }))
+      .toBeInTheDocument();
     expect(screen.queryByRole("option", { name: /Offline/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("option", { name: /Hidden/ })).not.toBeInTheDocument();
   });

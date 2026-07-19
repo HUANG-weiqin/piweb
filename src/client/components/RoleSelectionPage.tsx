@@ -24,7 +24,7 @@ function orderedRoles(roles: readonly RoleTemplate[]): RoleTemplate[] {
 
 function roleModelLabel(role: RoleTemplate): string {
   if (role.model === null) return "尚未选择模型";
-  return `${role.model.provider} / ${role.model.id}`;
+  return role.model.id;
 }
 
 export function RoleSelectionPage({

@@ -55,7 +55,7 @@ export function ConversationRoleDialog({
         </div>
         <div>
           <dt>模型</dt>
-          <dd>{role.model.provider} / {role.model.id}</dd>
+          <dd>{role.model.id}</dd>
         </div>
         <div>
           <dt>模板版本</dt>

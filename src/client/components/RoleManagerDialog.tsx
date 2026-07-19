@@ -103,7 +103,7 @@ function availableModelOptions(
         value: modelValue(model),
         provider: model.provider,
         id: model.id,
-        label: `${provider.name} · ${model.name} · ${model.provider} / ${model.id}`,
+        label: model.name,
       }));
   });
 }
@@ -323,14 +323,22 @@ export function RoleManagerDialog({
                 value={modelValue(draft.model)}
                 disabled
               >
-                当前不可用 · {draft.model.provider} / {draft.model.id}
+                当前不可用 · {draft.model.id}
               </option>}
-              {modelOptions.map((option) => <option
-                key={option.value}
-                value={option.value}
-              >
-                {option.label}
-              </option>)}
+              {providers.map((provider) => {
+                const options = modelOptions.filter(
+                  (option) => option.provider === provider.id,
+                );
+                if (options.length === 0) return null;
+                return <optgroup key={provider.id} label={provider.name}>
+                  {options.map((option) => <option
+                    key={option.value}
+                    value={option.value}
+                  >
+                    {option.label}
+                  </option>)}
+                </optgroup>;
+              })}
             </select>
             <p className="setting-note">仅列出已配置提供商当前可用的模型。</p>
           </div>

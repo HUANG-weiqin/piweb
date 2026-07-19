@@ -8,6 +8,7 @@ import type {
   ConversationMessageCard,
   ConversationRoleSnapshot,
   ThinkingLevel,
+  TokenUsage,
   ToolMode,
 } from "../../shared/protocol";
 import type {
@@ -24,9 +25,10 @@ interface ChatProps {
   chat: ChatState;
   historyTruncated: boolean;
   busy: boolean;
-  billedTokenCount: number;
+  sessionTokenUsage?: TokenUsage;
   contextTokenCount: number | null | undefined;
   contextWindow: number | null | undefined;
+  contextPercent: number | null | undefined;
   contextSource: "measured" | "estimated" | "unknown" | undefined;
   model?: { provider: string; id: string };
   role?: ConversationRoleSnapshot;
@@ -48,6 +50,16 @@ interface ChatProps {
   onToolMode(mode: ToolMode): void;
   onChangeCwd(): void;
   onOpenConversation?(conversationId: string): void;
+}
+
+function formatCompactTokens(tokens: number): string {
+  const format = (value: number) => new Intl.NumberFormat("en-US", {
+    maximumSignificantDigits: 3,
+    useGrouping: false,
+  }).format(value);
+  if (tokens >= 1_000_000) return `${format(tokens / 1_000_000)}M`;
+  if (tokens >= 1_000) return `${format(tokens / 1_000)}k`;
+  return Math.round(tokens).toLocaleString("zh-CN");
 }
 
 const thinkingLabels: Record<ThinkingLevel, string> = {
@@ -88,21 +100,49 @@ function transcriptBlocks(items: ChatItem[]): TranscriptBlock[] {
 function formatContextUsage({
   contextTokenCount,
   contextWindow,
+  contextPercent,
   contextSource,
-}: Pick<ChatProps, "contextTokenCount" | "contextWindow" | "contextSource">): string {
+}: Pick<
+  ChatProps,
+  "contextTokenCount" | "contextWindow" | "contextPercent" | "contextSource"
+>): string {
   if (contextTokenCount == null) return "未知，将在下一轮更新";
   const prefix = contextSource === "estimated" ? "估算 " : "";
-  const window = contextWindow?.toLocaleString("zh-CN") ?? "?";
-  return `${prefix}${contextTokenCount.toLocaleString("zh-CN")} / ${window}`;
+  const tokens = formatCompactTokens(contextTokenCount);
+  const window = contextWindow == null ? "?" : formatCompactTokens(contextWindow);
+  const percent = contextPercent == null ? "" : `（${Math.round(contextPercent)}%）`;
+  return `${prefix}${tokens} / ${window}${percent}`;
+}
+
+function getSessionTokenUsage(chat: ChatState, usage?: TokenUsage): TokenUsage {
+  if (usage) return usage;
+  const aggregate = chat.messages.reduce<TokenUsage>((total, message) => ({
+    input: total.input + (message.usage?.input ?? 0),
+    output: total.output + (message.usage?.output ?? 0),
+    cacheRead: total.cacheRead + (message.usage?.cacheRead ?? 0),
+    cacheWrite: total.cacheWrite + (message.usage?.cacheWrite ?? 0),
+    total: total.total + (message.usage?.total ?? 0),
+  }), {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    total: 0,
+  });
+  return {
+    ...aggregate,
+    total: aggregate.total || chat.sessionTokens,
+  };
 }
 
 export function Chat({
   chat,
   historyTruncated,
   busy,
-  billedTokenCount,
+  sessionTokenUsage,
   contextTokenCount,
   contextWindow,
+  contextPercent,
   contextSource,
   model,
   role,
@@ -126,7 +166,13 @@ export function Chat({
   onOpenConversation,
 }: ChatProps) {
   const bottomThreshold = 96;
-  const contextTokenText = formatContextUsage({ contextTokenCount, contextWindow, contextSource });
+  const contextTokenText = formatContextUsage({
+    contextTokenCount,
+    contextWindow,
+    contextPercent,
+    contextSource,
+  });
+  const tokenUsage = getSessionTokenUsage(chat, sessionTokenUsage);
   let composerPlaceholder = "给 Pi 发送消息…";
   if (!conversationReady) composerPlaceholder = "正在恢复项目对话…";
   else if (!model) composerPlaceholder = "请先登录并选择模型";
@@ -202,7 +248,7 @@ export function Chat({
           title="模型连接"
           onClick={onSettings}
         >
-          {model ? `${model.provider} / ${model.id}` : "模型连接"}<span>⌄</span>
+          {model?.id ?? "模型连接"}<span>⌄</span>
         </button>
       </div>
     </header>
@@ -257,7 +303,7 @@ export function Chat({
           onClick={() => setRoleDetailsOpen(true)}
         >
           <span>{role.name}</span>
-          <small>{role.model.provider} / {role.model.id}</small>
+          <small>{role.model.id}</small>
         </button>}
         <label className="thinking-level-control">
           <span>思考</span>
@@ -273,8 +319,23 @@ export function Chat({
             ))}
           </select>
         </label>
-        <small className="session-stats billed-stat">累计 Token：{billedTokenCount.toLocaleString("zh-CN")}</small>
-        <small className="session-stats context-stat">上下文：{contextTokenText}</small>
+        <small
+          className="session-stats context-stat"
+          tabIndex={0}
+          aria-describedby="token-usage-tooltip"
+        >
+          <span className="context-summary">上下文：{contextTokenText}</span>
+          <span className="token-tooltip" id="token-usage-tooltip" role="tooltip">
+            <span>上下文：{contextTokenText}</span>
+            <span>累计处理：{formatCompactTokens(tokenUsage.total)}</span>
+            <span>普通输入：{formatCompactTokens(tokenUsage.input)}</span>
+            <span>缓存读取：{formatCompactTokens(tokenUsage.cacheRead)}</span>
+            {tokenUsage.cacheWrite > 0 && (
+              <span>缓存写入：{formatCompactTokens(tokenUsage.cacheWrite)}</span>
+            )}
+            <span>输出：{formatCompactTokens(tokenUsage.output)}</span>
+          </span>
+        </small>
         <small className="composer-tip">Enter 发送 · Shift+Enter 换行 · 对话随项目自动保存</small>
       </div>
     </div>

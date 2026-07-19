@@ -74,7 +74,8 @@ describe("RoleSelectionPage", () => {
     });
     expect(card).toBeDisabled();
     expect(card).toHaveClass("unavailable");
-    expect(within(card).getByText("acme / retired-model")).toBeInTheDocument();
+    expect(within(card).getByText("retired-model")).toBeInTheDocument();
+    expect(within(card).queryByText(/acme \//)).not.toBeInTheDocument();
     expect(within(card).getByText("模型当前不可用")).toBeInTheDocument();
   });
 

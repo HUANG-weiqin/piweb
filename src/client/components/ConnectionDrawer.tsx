@@ -232,7 +232,7 @@ export function ConnectionDrawer({
             <strong>{currentModel?.name ?? state.selectedModel?.id ?? "尚未选择"}</strong>
             <small>
               {state.selectedModel
-                ? `${state.selectedModel.provider} / ${state.selectedModel.id}`
+                ? state.selectedModel.id
                 : "连接一个提供商，然后选择模型"}
             </small>
           </div>
@@ -376,7 +376,7 @@ export function ConnectionDrawer({
               const selected = state.selectedModel?.provider === model.provider
                 && state.selectedModel.id === model.id;
               const metadata = [
-                `${model.provider} / ${model.id}`,
+                model.id === model.name ? "" : model.id,
                 model.reasoning ? "支持推理" : "",
                 formatContextWindow(model.contextWindow),
               ].filter(Boolean).join(" · ");
