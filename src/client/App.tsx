@@ -52,6 +52,12 @@ interface PendingConversationDeletion {
   conversationId: string;
 }
 
+interface PendingConversationTruncation {
+  commandId: string;
+  conversationId: string;
+  messageId: string;
+}
+
 interface PendingCompactionThreshold {
   commandId: string;
 }
@@ -118,6 +124,10 @@ export function App() {
     useState<PendingConversationDeletion>();
   const pendingConversationDeletionRef =
     useRef<PendingConversationDeletion | undefined>(undefined);
+  const [pendingConversationTruncation, setPendingConversationTruncationState] =
+    useState<PendingConversationTruncation>();
+  const pendingConversationTruncationRef =
+    useRef<PendingConversationTruncation | undefined>(undefined);
   const [pendingCompactionThreshold, setPendingCompactionThresholdState] =
     useState<PendingCompactionThreshold>();
   const pendingCompactionThresholdRef =
@@ -181,6 +191,12 @@ export function App() {
     pendingConversationDeletionRef.current = pending;
     setPendingConversationDeletionState(pending);
   };
+  const updatePendingConversationTruncation = (
+    pending: PendingConversationTruncation | undefined,
+  ) => {
+    pendingConversationTruncationRef.current = pending;
+    setPendingConversationTruncationState(pending);
+  };
   const updatePendingCompactionThreshold = (
     pending: PendingCompactionThreshold | undefined,
   ) => {
@@ -224,6 +240,7 @@ export function App() {
     focusId: string | undefined,
   ) => {
     updatePendingCompactionThreshold(undefined);
+    updatePendingConversationTruncation(undefined);
     projectIdRef.current = projectId;
     if (!conversationId || !focusId) {
       focusRef.current = undefined;
@@ -292,6 +309,7 @@ export function App() {
     setNotification(undefined);
     setSettingResult(undefined);
     updatePendingCompactionThreshold(undefined);
+    updatePendingConversationTruncation(undefined);
     setRoleOperationResult(undefined);
     updatePendingRoleOperation(undefined);
     setSettingsDialogOpen(false);
@@ -362,6 +380,7 @@ export function App() {
           updateDirectoryBrowser(undefined);
           markPendingPromptUnconfirmed();
           updatePendingConversationDeletion(undefined);
+          updatePendingConversationTruncation(undefined);
           updateOutstandingRunId("");
           setAuth({});
           clearSessionProjection();
@@ -645,6 +664,17 @@ export function App() {
           });
           return;
         }
+        if (event.operation === "truncate_conversation") {
+          const pending = pendingConversationTruncationRef.current;
+          if (!pending || pending.commandId !== event.commandId) return;
+          updatePendingConversationTruncation(undefined);
+          setNotification({
+            id: ++notificationIdRef.current,
+            level: "info",
+            message: "已回到所选消息之前",
+          });
+          return;
+        }
         if (
           event.operation === "create_role"
           || event.operation === "update_role"
@@ -714,6 +744,16 @@ export function App() {
           if (!pending || pending.commandId !== event.commandId) return;
           updatePendingConversationDeletion(undefined);
           setError(`删除对话失败：${event.message}`);
+          return;
+        }
+        if (
+          event.operation === "truncate_conversation"
+          && event.commandId
+        ) {
+          const pending = pendingConversationTruncationRef.current;
+          if (!pending || pending.commandId !== event.commandId) return;
+          updatePendingConversationTruncation(undefined);
+          setError(`回到此处失败：${event.message}`);
           return;
         }
         if (
@@ -826,6 +866,10 @@ export function App() {
           updatePendingConversationDeletion(undefined);
           setError("删除状态未确认，请检查项目对话列表后重试。");
         }
+        if (pendingConversationTruncationRef.current) {
+          updatePendingConversationTruncation(undefined);
+          setError("回到此处的状态未确认，请检查恢复后的对话再重试。");
+        }
         updateOutstandingRunId("");
         authFlowIdRef.current = "";
         setAuth({});
@@ -926,6 +970,7 @@ export function App() {
     const trimmed = text.trim();
     if (!trimmed) return false;
     if (!conversationReadyRef.current) return false;
+    if (pendingConversationTruncationRef.current) return false;
     const sessionId = sessionIdRef.current;
     const focus = focusRef.current;
     if (!sessionId || !focus) return false;
@@ -972,7 +1017,11 @@ export function App() {
   };
   const focusConversation = (conversationId: string) => {
     const sessionId = sessionIdRef.current;
-    if (!sessionId || pendingFocusRef.current) return;
+    if (
+      !sessionId
+      || pendingFocusRef.current
+      || pendingConversationTruncationRef.current
+    ) return;
     if (focusRef.current?.conversationId === conversationId) {
       setSelectingRole(false);
       return;
@@ -991,7 +1040,11 @@ export function App() {
   };
   const createConversation = (roleId: string) => {
     const sessionId = sessionIdRef.current;
-    if (!sessionId || pendingFocusRef.current) return;
+    if (
+      !sessionId
+      || pendingFocusRef.current
+      || pendingConversationTruncationRef.current
+    ) return;
     const commandId = crypto.randomUUID();
     updatePendingFocus({ commandId, operation: "create_conversation" });
     setError("");
@@ -1018,6 +1071,7 @@ export function App() {
         && (Boolean(state?.busy) || Boolean(outstandingRunIdRef.current))
       )
       || pendingConversationDeletionRef.current
+      || pendingConversationTruncationRef.current
     ) {
       return false;
     }
@@ -1045,6 +1099,40 @@ export function App() {
       conversationId,
       name,
     });
+  };
+  const truncateConversation = (messageId: string): boolean => {
+    const focus = focusRef.current;
+    if (
+      !focus
+      || !conversationReadyRef.current
+      || Boolean(state?.busy)
+      || Boolean(outstandingRunIdRef.current)
+      || Boolean(pendingPromptRef.current)
+      || Boolean(pendingConversationTruncationRef.current)
+      || Boolean(pendingConversationDeletionRef.current)
+    ) {
+      return false;
+    }
+    const commandId = crypto.randomUUID();
+    const pending = {
+      commandId,
+      conversationId: focus.conversationId,
+      messageId,
+    };
+    updatePendingConversationTruncation(pending);
+    setError("");
+    if (send({
+      type: "truncate_conversation",
+      commandId,
+      sessionId: focus.sessionId,
+      conversationId: focus.conversationId,
+      focusId: focus.focusId,
+      messageId,
+    })) {
+      return true;
+    }
+    updatePendingConversationTruncation(undefined);
+    return false;
   };
   const setThinkingLevel = (level: ThinkingLevel) => {
     const sessionId = sessionIdRef.current;
@@ -1112,6 +1200,7 @@ export function App() {
     setPromptNotice("");
     updatePendingPrompt(undefined);
     updatePendingConversationDeletion(undefined);
+    updatePendingConversationTruncation(undefined);
     updateOutstandingRunId("");
     setAuth({});
     setActiveCwd("");
@@ -1266,6 +1355,8 @@ export function App() {
               onToolMode={setProjectToolMode}
               onChangeCwd={closeProject}
               onOpenConversation={focusConversation}
+              onRewind={truncateConversation}
+              rewindingMessageId={pendingConversationTruncation?.messageId}
             />}
       </div>
     </div>

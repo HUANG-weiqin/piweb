@@ -74,6 +74,11 @@ function fakeSession(settings = fakeSettings()): FakeSession {
     isStreaming: false,
     model: { provider: "test", id: "model", contextWindow: 1000 },
     messages: [],
+    agent: {
+      state: {
+        messages: [],
+      },
+    },
     thinkingLevel: "off",
     settingsManager: settings,
     extensionRunner: {
@@ -2186,6 +2191,86 @@ describe("PiConnection coordinated project view", () => {
       expect(aggregateReservedConversationEntries(
         harness.runtime.created[0]!.persistentManager!.getEntries(),
       ).compactionThreshold?.percent).toBe(55);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("publishes the physically rewound snapshot before acknowledging the command", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        roleId: "default",
+      });
+      const focused = latestState(harness.events);
+      const manager = harness.runtime.created[0]!.persistentManager!;
+      const retainedId = manager.appendMessage({
+        role: "user",
+        content: "retained",
+        timestamp: 1,
+      });
+      const selectedId = manager.appendMessage({
+        role: "user",
+        content: "selected",
+        timestamp: 2,
+      });
+      manager.appendMessage({
+        role: "user",
+        content: "later",
+        timestamp: 3,
+      });
+      const commandId = randomUUID();
+      const eventStart = harness.events.length;
+
+      await harness.connection.handle({
+        type: "truncate_conversation",
+        commandId,
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+        messageId: selectedId,
+      });
+
+      const commandEvents = harness.events.slice(eventStart);
+      const snapshotIndex = commandEvents.findIndex(
+        (event) => event.type === "conversation_snapshot",
+      );
+      const completionIndex = commandEvents.findIndex(
+        (event) => event.type === "command_complete",
+      );
+      expect(snapshotIndex).toBeGreaterThanOrEqual(0);
+      expect(completionIndex).toBeGreaterThan(snapshotIndex);
+      expect(commandEvents[snapshotIndex]).toMatchObject({
+        type: "conversation_snapshot",
+        items: [
+          expect.objectContaining({
+            kind: "message",
+            id: retainedId,
+            role: "user",
+            text: "retained",
+          }),
+        ],
+      });
+      expect(commandEvents[completionIndex]).toEqual({
+        type: "command_complete",
+        operation: "truncate_conversation",
+        commandId,
+        sessionId: SESSION_A,
+      });
+      expect(manager.getEntries().map(({ id }) => id)).toEqual([
+        expect.any(String),
+        retainedId,
+      ]);
     } finally {
       await harness.cleanup();
     }

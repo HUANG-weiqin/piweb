@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen, fireEvent } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessage } from "../chat/reducer";
 import { Message } from "./Message";
 
@@ -106,5 +106,129 @@ describe("Message", () => {
     expect(secondBlock).toHaveClass("markdown");
     expect(screen.getByText("工具调用（1）")).toBeInTheDocument();
     expect(screen.getByText("最终回复：已完成分析。")).toBeInTheDocument();
+  });
+
+  it("preserves rich markdown structure for scoped transcript styling", () => {
+    const message: ChatMessage = {
+      id: "4",
+      runId: "run-4",
+      role: "assistant",
+      text: [
+        "# 主标题",
+        "",
+        "第一段。",
+        "",
+        "第二段包含[链接](https://example.com)和 `inline()`。",
+        "",
+        "## 列表",
+        "",
+        "- 一级",
+        "  - 二级",
+        "",
+        "> 清晰的引用内容。",
+        "",
+        "| 内容类别 | 一个普通 roguelike 通常有多少 | 按当前模式的行数估算 |",
+        "| --- | --- | --- |",
+        "| **物品类型** | 50-200（武器、盔甲、药水、卷轴、法杖、戒指……） | 50×50行 = **2,500-10,000行**（仅 blueprint） |",
+        "| **技能/法术** | 20-50 | 20×15行 = **300-750行** |",
+        "| **状态效果** | 30-80（中毒、燃烧、冰冻、加速、致盲……） | 30×10行 = **300-800行**（不包括交互） |",
+        "| **敌人类型** | 20-50（每种有不同 AI/行为） | **当前没有 AI 系统，需要从零建** |",
+        "| **物品-状态交互** | 有机关联（火把+油=爆炸、冰+湿=冻结） | **当前模式需要每个组合写 handler → O(n²)** |",
+        "| **被动能力/天赋** | 30-80 | 需要新的机制类型 |",
+        "",
+        "```ts",
+        "const wideValue = true;",
+        "```",
+      ].join("\n"),
+      thinking: "",
+      tools: [],
+    };
+
+    const { container } = render(<Message message={message} />);
+    const markdown = container.querySelector(".markdown") as HTMLElement;
+    const table = screen.getByRole("table");
+
+    expect(markdown).toContainElement(screen.getByRole("heading", { level: 1, name: "主标题" }));
+    expect(markdown).toContainElement(screen.getByRole("heading", { level: 2, name: "列表" }));
+    expect(markdown.querySelectorAll(":scope > p")).toHaveLength(2);
+    expect(markdown.querySelector("ul ul")).toHaveTextContent("二级");
+    expect(markdown.querySelector("blockquote")).toHaveTextContent("清晰的引用内容。");
+    expect(markdown).toContainElement(table);
+    expect(table.querySelectorAll("tbody tr")).toHaveLength(6);
+    expect(table.querySelector("tbody td strong")).toHaveTextContent("物品类型");
+    expect(screen.getByRole("link", { name: "链接" })).toHaveAttribute("href", "https://example.com");
+    expect(markdown.querySelector("pre code")).toHaveTextContent("const wideValue = true;");
+  });
+
+  it("copies the assistant's original markdown and reports success", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const message: ChatMessage = {
+      id: "5",
+      runId: "run-5",
+      role: "assistant",
+      text: "**原始 Markdown**",
+      thinking: "",
+      tools: [],
+    };
+
+    render(<Message message={message} />);
+    fireEvent.click(screen.getByRole("button", { name: "复制 Agent 回复" }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("**原始 Markdown**"));
+    expect(screen.getByRole("button", { name: "已复制 Agent 回复" })).toBeInTheDocument();
+  });
+
+  it("offers copy and confirmed rewind for a user message", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const onRewind = vi.fn();
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const message: ChatMessage = {
+      id: "user-entry",
+      runId: "run-6",
+      role: "user",
+      text: "用户原文",
+      thinking: "",
+      tools: [],
+    };
+
+    render(<Message message={message} onRewind={onRewind} />);
+    fireEvent.click(screen.getByRole("button", { name: "复制用户消息" }));
+    fireEvent.click(screen.getByRole("button", {
+      name: "回到此处，删除这条及之后的消息",
+    }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("用户原文"));
+    expect(window.confirm).toHaveBeenCalledWith(
+      "将彻底删除这条消息以及之后的所有消息，且无法恢复。确定回到此处吗？",
+    );
+    expect(onRewind).toHaveBeenCalledWith("user-entry");
+  });
+
+  it("does not rewind when destructive confirmation is cancelled", () => {
+    const onRewind = vi.fn();
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    const message: ChatMessage = {
+      id: "assistant:entry",
+      runId: "run-7",
+      role: "assistant",
+      text: "Agent 回复",
+      thinking: "",
+      tools: [],
+    };
+
+    render(<Message message={message} onRewind={onRewind} />);
+    fireEvent.click(screen.getByRole("button", {
+      name: "回到此处，删除这条及之后的消息",
+    }));
+
+    expect(onRewind).not.toHaveBeenCalled();
   });
 });

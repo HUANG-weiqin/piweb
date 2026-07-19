@@ -321,6 +321,66 @@ describe("ProjectStore", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("physically truncates the selected message and every later entry", async () => {
+    const cwd = await createTemporaryDirectory("piweb-truncate-conversation-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversation = await store.createConversation();
+    const retainedId = conversation.appendMessage({
+      role: "user",
+      content: "retained",
+      timestamp: 1,
+    });
+    const selectedId = conversation.appendMessage({
+      role: "user",
+      content: "selected",
+      timestamp: 2,
+    });
+    conversation.appendMessage({
+      role: "user",
+      content: "later",
+      timestamp: 3,
+    });
+    const sessionFile = conversation.getSessionFile()!;
+
+    await expect(store.truncateConversation(
+      conversation.getSessionId(),
+      selectedId,
+    )).resolves.toBe(sessionFile);
+
+    const persisted = (await readFile(sessionFile, "utf8"))
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line) as { id?: string });
+    expect(persisted.map(({ id }) => id)).toEqual([
+      conversation.getHeader()?.id,
+      retainedId,
+    ]);
+    const reopened = await store.openConversation(
+      conversation.getSessionId(),
+      { updateRecent: false },
+    );
+    expect(reopened.getEntries().map(({ id }) => id)).toEqual([retainedId]);
+  });
+
+  it("fails closed without rewriting when the truncation anchor is not a message", async () => {
+    const cwd = await createTemporaryDirectory(
+      "piweb-invalid-truncate-anchor-",
+    );
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversation = await store.createConversation();
+    const customId = conversation.appendCustomEntry("test.anchor", {
+      value: true,
+    });
+    const sessionFile = conversation.getSessionFile()!;
+    const before = await readFile(sessionFile, "utf8");
+
+    await expect(store.truncateConversation(
+      conversation.getSessionId(),
+      customId,
+    )).rejects.toThrow(/message/i);
+    await expect(readFile(sessionFile, "utf8")).resolves.toBe(before);
+  });
+
   it("serializes deletion behind an older refresh and only clears the matching recent pointer", async () => {
     const cwd = await createTemporaryDirectory("piweb-delete-refresh-race-");
     const store = await ProjectStore.open(cwd, "full_access");

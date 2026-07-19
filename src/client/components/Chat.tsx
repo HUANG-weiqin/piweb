@@ -57,6 +57,8 @@ interface ChatProps {
   onToolMode(mode: ToolMode): void;
   onChangeCwd(): void;
   onOpenConversation?(conversationId: string): void;
+  onRewind(messageId: string): boolean;
+  rewindingMessageId?: string;
 }
 
 function formatCompactTokens(tokens: number): string {
@@ -177,6 +179,8 @@ export function Chat({
   onToolMode,
   onChangeCwd,
   onOpenConversation,
+  onRewind,
+  rewindingMessageId,
 }: ChatProps) {
   const bottomThreshold = 96;
   const contextTokenText = formatContextUsage({
@@ -188,6 +192,7 @@ export function Chat({
   const tokenUsage = getSessionTokenUsage(chat, sessionTokenUsage);
   let composerPlaceholder = "给 Pi 发送消息…";
   if (!conversationReady) composerPlaceholder = "正在恢复项目对话…";
+  else if (rewindingMessageId) composerPlaceholder = "正在回到所选消息…";
   else if (!model) composerPlaceholder = "请先登录并选择模型";
   const transcriptRef = useRef<HTMLElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -249,7 +254,15 @@ export function Chat({
   };
   const send = () => {
     const value = draft.trim();
-    if (!value || busy || submitting || !model || !online || !conversationReady) return;
+    if (
+      !value
+      || busy
+      || submitting
+      || rewindingMessageId
+      || !model
+      || !online
+      || !conversationReady
+    ) return;
     onSend(value);
   };
   const commitCompactionThreshold = () => {
@@ -316,6 +329,15 @@ export function Chat({
             message={block.message}
             sessionCards={block.sessionCards}
             onOpenConversation={onOpenConversation}
+            onRewind={onRewind}
+            rewindDisabled={
+              busy
+              || submitting
+              || !online
+              || !conversationReady
+              || Boolean(rewindingMessageId)
+            }
+            rewinding={rewindingMessageId === block.message.id}
           />)}
     </section>
     <div className="composer-wrap">
@@ -332,10 +354,16 @@ export function Chat({
       >
         正在确认服务端已接收…
       </div>}
+      {rewindingMessageId && <div
+        className="composer-notice pending"
+        role="status"
+      >
+        正在彻底删除所选消息及之后的内容…
+      </div>}
       {promptNotice && <div className="composer-notice" role="alert">{promptNotice}</div>}
       <div className="composer">
-        <textarea ref={textareaRef} aria-label="给 Pi 发送消息" value={draft} onChange={(e) => onDraftChange(e.target.value)} onKeyDown={keyDown} placeholder={composerPlaceholder} disabled={!online || !conversationReady || !model || submitting} rows={1} />
-        {busy ? <button className="send stop" onClick={onAbort} aria-label="停止">■</button> : <button className="send" onClick={send} disabled={!online || !conversationReady || !model || submitting || !draft.trim()} aria-label="发送">↑</button>}
+        <textarea ref={textareaRef} aria-label="给 Pi 发送消息" value={draft} onChange={(e) => onDraftChange(e.target.value)} onKeyDown={keyDown} placeholder={composerPlaceholder} disabled={!online || !conversationReady || !model || submitting || Boolean(rewindingMessageId)} rows={1} />
+        {busy ? <button className="send stop" onClick={onAbort} aria-label="停止">■</button> : <button className="send" onClick={send} disabled={!online || !conversationReady || !model || submitting || Boolean(rewindingMessageId) || !draft.trim()} aria-label="发送">↑</button>}
       </div>
       {compactionThresholdOpen && <label
           id="compaction-threshold-panel"

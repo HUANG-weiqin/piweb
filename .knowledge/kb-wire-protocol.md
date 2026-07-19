@@ -40,8 +40,9 @@ ClientCommand
 - 工具模式只有 `read_only | full_access`，由项目 manifest 持有；initialize 的 read_only 只可收紧，权限扩大必须走 `set_tool_mode` 并等待 state 确认。协议没有逐工具询问命令或待回答状态。
 - `rename_conversation` 同时匹配当前 sessionId 和目标 conversationId。
 - `delete_conversation` 携带 sessionId、一次性 commandId 和目标 conversationId；浏览器不能提交文件路径。成功和失败都用同一 sessionId + commandId 精确结算。
+- `truncate_conversation` 携带一次性 commandId、精确 `sessionId + conversationId + focusId` 和 snapshot 中的 durable messageId。assistant 聚合 ID 使用 `assistant:<entryId>`，仅由服务端剥离前缀并解析物理锚点；成功前服务端先发布截断后的完整 focused snapshot，再发送同 commandId 的完成事件，客户端不得本地猜测删除结果。
 - 角色 CRUD 使用 `create_role/update_role/delete_role + sessionId + commandId`；create/update 的 role payload 包含 `canManageSessions`，update/delete 还携带 expectedRevision，不能用迟到 snapshot 冒充提交成功。初始化模板没有删除特权。
-- 会话模型和会话管理能力都来自不可变角色快照。v14 仍保留 `select_model` 命令形状用于明确错误，但协调运行路径会拒绝中途换模型；API Key 命令仍按 sessionId + commandId 精确结算。
+- 会话模型和会话管理能力都来自不可变角色快照。v15 仍保留 `select_model` 命令形状用于明确错误，但协调运行路径会拒绝中途换模型；API Key 命令仍按 sessionId + commandId 精确结算。
 - `set_compaction_threshold` 携带一次性 commandId 和精确 `sessionId + conversationId + focusId`，只接受 20–90 的整数百分比；`PublicState.compactionThresholdPercent` 是当前会话权威值，成功或失败必须按 commandId 精确结算。
 - 高频 `PublicState` 不携带完整项目索引；项目空态允许 conversation/focus/model/runtime 字段缺席。`project_snapshot` 低频发布扁平会话列表及 role/activity/attention/unread/temporary，最多 100 项且整帧不超过 750,000 UTF-8 bytes；保留顺序优先 current、active、attention、unread，再按最后活跃时间。字段裁剪、条数省略或帧预算省略都会置 `truncated=true`。
 - `role_catalog_snapshot` 独立发布用户级角色目录；最多 64 个角色，名称/简介与 durable store 一致按 80/1000 个 Unicode 字符校验，system prompt 按 128 KiB UTF-8 校验。客户端命令帧仍限制为 1 MB；服务端事件使用独立的 64 MiB 上限，以容纳最坏情况下 JSON 转义后的完整有界角色目录。socket 序列化后还会执行同一发送上限，超限只发送一条固定 protocol error，不能递归发送浏览器必然拒绝的原帧。

@@ -78,6 +78,13 @@ initialize(cwd, target)
 - `lastConversationId` 只在仍等于目标时清除，避免覆盖另一连接刚提交的最近对话。删除成功后更新派生缓存并通过项目订阅发布新 snapshot。
 - 删除不存在的干净目标是幂等成功；目录损坏、链接、身份错配或文件系统拒绝删除仍 fail closed。
 
+“回到此处”是当前 conversation 内的物理后缀截断，不是 branch 或浏览器隐藏：
+
+- snapshot 的 user ID 直接对应 Pi message entry，assistant 聚合 ID 的 `assistant:` 后缀对应该聚合首个物理 message entry；所选 entry 本身和它之后的所有 JSONL entry 都被删除，更早行保持字节不变。
+- 只允许 idle actor 执行；目标还有 queued/processing inbox 时拒绝，避免截断恢复账本后重复投递。已经送达其它 conversation 的外部效果不回滚。
+- store 在项目会话串行边界内完整验证原文件与候选前缀，复验路径及扫描期间文件身份，写临时文件后原子替换；候选不是 message、文件变化、链接、损坏或身份错配都不覆盖原文件。
+- durable 替换后，同一 actor 必须 reload SessionManager，并从其 active context 重建 Agent 内存 messages、runId 集合和压缩阈值。若磁盘已提交但内存同步失败，actor 进入 fatal 状态，禁止用旧 parent 继续追加。
+
 Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 在项目 actor 生命周期内保留一个共享 handle，socket server 关闭时统一释放。registry 末次 release 后逐出 store；相同路径随后代表一个新项目时必须重新读取磁盘身份，不能让缓存反向覆盖项目生命周期。
 
 ## Conversation profile 与 reserved entries

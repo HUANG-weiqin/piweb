@@ -153,6 +153,7 @@ function queuedCommandScope(command: QueuedCommand): "session" | "epoch" | "glob
     case "set_tool_mode":
     case "rename_conversation":
     case "delete_conversation":
+    case "truncate_conversation":
     case "focus_conversation":
     case "create_conversation":
     case "create_role":
@@ -1053,6 +1054,27 @@ export class PiConnection {
         this.emitCommandComplete(command);
         return;
       }
+      case "truncate_conversation": {
+        const view = this.requireCoordinatedFocus(
+          command.sessionId,
+          command.conversationId,
+          command.focusId,
+        );
+        const { coordinator } = await this.requireCoordination();
+        const entryId = command.messageId.startsWith("assistant:")
+          ? command.messageId.slice("assistant:".length)
+          : command.messageId;
+        await coordinator.truncateConversation(
+          view.handle,
+          command.conversationId,
+          entryId,
+        );
+        this.publishCoordinatedState();
+        this.publishProjectSnapshotCoordinated();
+        this.publishFocusedConversationSnapshot();
+        this.emitCommandComplete(command);
+        return;
+      }
       case "create_role": {
         const view = this.requireCoordinatedView(command.sessionId);
         const { coordinator, roles } = await this.requireCoordination();
@@ -1182,6 +1204,7 @@ export class PiConnection {
       {
         type:
           | "delete_conversation"
+          | "truncate_conversation"
           | "create_role"
           | "update_role"
           | "delete_role"
@@ -1718,6 +1741,10 @@ export class PiConnection {
         return this.renameConversation(command.conversationId, command.name);
       case "delete_conversation":
         return this.deleteConversation(command.conversationId);
+      case "truncate_conversation":
+        throw new Error(
+          "truncate_conversation requires persistent project coordination",
+        );
       case "focus_conversation":
       case "create_conversation":
       case "create_role":

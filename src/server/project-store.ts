@@ -664,6 +664,76 @@ export class ProjectStore {
     });
   }
 
+  truncateConversation(
+    conversationId: string,
+    entryId: string,
+  ): Promise<string> {
+    assertSessionId(conversationId, "conversationId");
+    assertSessionId(entryId, "entryId");
+    return this.enqueueConversationOperation(async () => {
+      const information = await this.listSafeSessionInformation();
+      const match = information.find(({ id }) => id === conversationId);
+      if (match === undefined) {
+        throw new Error(`Conversation not found: ${conversationId}`);
+      }
+      const safePath = await this.resolveSafeSessionPath(match.path);
+      const before = await stat(safePath, { bigint: true });
+      const raw = await readFile(safePath, "utf8");
+      validatePiSessionFile(raw, safePath, conversationId);
+      const lines = raw.split("\n");
+      const entryLine = lines.findIndex((line, index) => {
+        if (index === 0 || line.trim().length === 0) return false;
+        const entry = JSON.parse(line) as { id?: unknown };
+        return entry.id === entryId;
+      });
+      if (entryLine < 1) {
+        throw new Error(`Conversation message not found: ${entryId}`);
+      }
+      const anchor = JSON.parse(lines[entryLine]!) as {
+        type?: unknown;
+      };
+      if (anchor.type !== "message") {
+        throw new Error(`Truncation anchor is not a message: ${entryId}`);
+      }
+      const next = `${lines.slice(0, entryLine).join("\n")}\n`;
+      validatePiSessionFile(next, safePath, conversationId);
+
+      const temporaryPath = join(
+        this.sessionDir,
+        `.${basename(safePath)}.${randomUUID()}.truncate.tmp`,
+      );
+      this.assertLexicallyInsideSessionDirectory(temporaryPath);
+      try {
+        await writeFile(temporaryPath, next, {
+          encoding: "utf8",
+          flag: "wx",
+        });
+        const current = await stat(safePath, { bigint: true });
+        if (
+          before.dev !== current.dev
+          || before.ino !== current.ino
+          || before.size !== current.size
+          || before.mtimeNs !== current.mtimeNs
+        ) {
+          throw new Error(
+            `Conversation changed while it was being truncated: ${conversationId}`,
+          );
+        }
+        const currentSafePath = await this.resolveSafeSessionPath(safePath);
+        if (!pathsAreIdentical(currentSafePath, safePath)) {
+          throw new Error(
+            `Conversation path changed while it was being truncated: ${conversationId}`,
+          );
+        }
+        await rename(temporaryPath, safePath);
+      } finally {
+        await unlink(temporaryPath).catch(() => undefined);
+      }
+      await this.scanConversations();
+      return safePath;
+    });
+  }
+
   private clearLastConversationIf(conversationId: string): Promise<void> {
     return this.enqueueWrite(async () => {
       if (this.manifest.lastConversationId !== conversationId) return;

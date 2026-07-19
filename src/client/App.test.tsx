@@ -510,6 +510,103 @@ describe("App", () => {
       .toBeInTheDocument();
   });
 
+  it("copies and rewinds user or Agent messages with an exact command acknowledgement", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    render(<App />);
+    const sessionId = startFromSetup();
+    const userMessageId = "91bbd4c8-29ff-4598-b672-e62354411398";
+    const assistantEntryId = "323f17e4-4d9f-4642-a22d-b007ca75765a";
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.emit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        items: [{
+          kind: "message",
+          id: userMessageId,
+          role: "user",
+          text: "需要保留吗？",
+          thinking: "",
+          tools: [],
+        }, {
+          kind: "message",
+          id: `assistant:${assistantEntryId}`,
+          role: "assistant",
+          text: "**Agent 原文**",
+          thinking: "",
+          tools: [],
+        }],
+        truncated: false,
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "复制用户消息" }));
+    expect(writeText).toHaveBeenCalledWith("需要保留吗？");
+    expect(screen.getByRole("button", { name: "复制 Agent 回复" }))
+      .toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole("button", {
+      name: "回到此处，删除这条及之后的消息",
+    })[1]!);
+    const command = latestCommand("truncate_conversation");
+    expect(command).toMatchObject({
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      messageId: `assistant:${assistantEntryId}`,
+    });
+    expect(screen.getByText("正在彻底删除所选消息及之后的内容…"))
+      .toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toBeDisabled();
+
+    act(() => {
+      socketMock.emit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        items: [{
+          kind: "message",
+          id: userMessageId,
+          role: "user",
+          text: "需要保留吗？",
+          thinking: "",
+          tools: [],
+        }],
+        truncated: false,
+      });
+      socketMock.emit?.({
+        type: "command_complete",
+        operation: "truncate_conversation",
+        commandId: command.commandId,
+        sessionId,
+      });
+    });
+
+    expect(screen.queryByText("Agent 原文")).not.toBeInTheDocument();
+    expect(screen.getByText("已回到所选消息之前")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toBeEnabled();
+  });
+
   it("answers extension UI requested during initialization before the first state", () => {
     render(<App />);
     const sessionId = startFromSetup();

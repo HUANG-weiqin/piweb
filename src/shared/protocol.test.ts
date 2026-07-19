@@ -21,10 +21,11 @@ const projectId = "f25ee8d8-34f0-4c30-a045-b2a69f2e28bd";
 const focusId = "ef01fdc2-8f55-4125-a22d-b0b764b4546b";
 const targetConversationId = "cbcd831e-599b-40d6-9252-e79939ca49f4";
 const roleId = "f23db1e6-c657-4dac-8b7e-a14fdecc5f21";
+const messageId = "assistant:96b960be-b6bb-4a19-9cf2-78e77cb69425";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(14);
+    expect(PROTOCOL_VERSION).toBe(15);
   });
 
   it("accepts supported commands", () => {
@@ -142,6 +143,14 @@ describe("parseClientCommand", () => {
       conversationId,
     }).type).toBe("delete_conversation");
     expect(parseClientCommand({
+      type: "truncate_conversation",
+      commandId,
+      sessionId,
+      conversationId,
+      focusId,
+      messageId,
+    }).type).toBe("truncate_conversation");
+    expect(parseClientCommand({
       type: "set_api_key",
       commandId,
       sessionId,
@@ -249,6 +258,14 @@ describe("parseClientCommand", () => {
       commandId: "not-a-uuid",
       sessionId,
       conversationId,
+    })).toThrow();
+    expect(() => parseClientCommand({
+      type: "truncate_conversation",
+      commandId,
+      sessionId,
+      conversationId,
+      focusId,
+      messageId: "assistant:",
     })).toThrow();
     expect(() => parseClientCommand({ type: "close_session" })).toThrow();
     expect(() => parseClientCommand({ type: "login_oauth", provider: "openai" })).toThrow();

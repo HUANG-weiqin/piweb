@@ -28,14 +28,82 @@ export function Message({
   message,
   sessionCards = [],
   onOpenConversation,
+  onRewind,
+  rewindDisabled = false,
+  rewinding = false,
 }: {
   message: ChatMessage;
   sessionCards?: ConversationMessageCard[];
   onOpenConversation?(conversationId: string): void;
+  onRewind?(messageId: string): void;
+  rewindDisabled?: boolean;
+  rewinding?: boolean;
 }) {
-  if (message.role === "user") return <article className="message user">{message.text}</article>;
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+
+  async function copyMessage() {
+    try {
+      await navigator.clipboard.writeText(message.text);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+  }
+
   if (message.role === "error") return <article className="message error">{message.text}</article>;
+  const isUser = message.role === "user";
   const hasActivity = message.tools.length > 0 || sessionCards.length > 0;
+  let copyLabel = isUser ? "复制用户消息" : "复制 Agent 回复";
+  let copyTitle = isUser ? "复制用户原文" : "复制原始 Markdown";
+  let copyText = "复制";
+  let copySymbol = "⧉";
+  if (copyState === "copied") {
+    copyLabel = isUser ? "已复制用户消息" : "已复制 Agent 回复";
+    copyTitle = "已复制";
+    copyText = "已复制";
+    copySymbol = "✓";
+  } else if (copyState === "failed") {
+    copyLabel = isUser ? "复制用户消息失败" : "复制 Agent 回复失败";
+    copyTitle = "复制失败，请重试";
+    copyText = "重试";
+    copySymbol = "!";
+  }
+  const actions = (message.text || onRewind) ? <div className="message-actions">
+    {message.text ? <button
+      type="button"
+      className={`message-action message-copy ${copyState}`}
+      aria-label={copyLabel}
+      title={copyTitle}
+      onClick={() => void copyMessage()}
+      onBlur={() => setCopyState("idle")}
+      onMouseLeave={() => setCopyState("idle")}
+    >
+      <span aria-hidden="true">{copySymbol}</span>
+      {copyText}
+    </button> : null}
+    {onRewind ? <button
+      type="button"
+      className="message-action message-rewind"
+      aria-label="回到此处，删除这条及之后的消息"
+      title="彻底删除这条消息以及之后的所有消息"
+      disabled={rewindDisabled || rewinding}
+      onClick={() => {
+        if (!window.confirm(
+          "将彻底删除这条消息以及之后的所有消息，且无法恢复。确定回到此处吗？",
+        )) return;
+        onRewind(message.id);
+      }}
+    >
+      <span aria-hidden="true">↶</span>
+      {rewinding ? "处理中…" : "回到此处"}
+    </button> : null}
+  </div> : null;
+  if (isUser) {
+    return <article className="message user">
+      {message.text}
+      {actions}
+    </article>;
+  }
   const html = DOMPurify.sanitize(marked.parse(
     message.text || (hasActivity ? "" : "…"),
     { async: false },
@@ -54,5 +122,6 @@ export function Message({
       />)}
     </section>}
     {message.text || !hasActivity ? <div className="markdown" dangerouslySetInnerHTML={{ __html: html }} /> : null}
+    {actions}
   </article>;
 }

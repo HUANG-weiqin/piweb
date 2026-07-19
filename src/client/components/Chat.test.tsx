@@ -54,6 +54,7 @@ function view(
     onCompactionThreshold={() => true}
     onToolMode={() => undefined}
     onChangeCwd={() => undefined}
+    onRewind={() => true}
     {...overrides}
   />;
 }
@@ -356,7 +357,7 @@ describe("Chat", () => {
       Array.from(assistant?.children ?? []).map(
         (element) => element.className,
       ),
-    ).toEqual(["tools", "session-message-stack", "markdown"]);
+    ).toEqual(["tools", "session-message-stack", "markdown", "message-actions"]);
   });
 
   it("keeps incoming session messages above the final assistant text", () => {
@@ -402,6 +403,6 @@ describe("Chat", () => {
       Array.from(assistant?.children ?? []).map(
         (element) => element.className,
       ),
-    ).toEqual(["session-message-stack", "markdown"]);
+    ).toEqual(["session-message-stack", "markdown", "message-actions"]);
   });
 });

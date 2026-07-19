@@ -461,6 +461,7 @@ pre {
 }
 
 .message.user {
+  position: relative;
   width: fit-content;
   max-width: 80%;
   margin-left: auto;
@@ -475,6 +476,68 @@ pre {
   padding: 10px 12px;
   border-left: 3px solid var(--danger);
   border-radius: 0 9px 9px 0;
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.message.assistant {
+  position: relative;
+}
+
+.message-actions {
+  position: absolute;
+  right: 0;
+  bottom: -23px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.message-action {
+  display: inline-flex;
+  min-height: 22px;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-color: transparent;
+  border-radius: 6px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 11px;
+  font-weight: 650;
+  opacity: 0.42;
+  transition:
+    color 120ms ease,
+    background-color 120ms ease,
+    border-color 120ms ease,
+    opacity 120ms ease;
+}
+
+.message:hover .message-action,
+.message-action:focus-visible {
+  opacity: 1;
+}
+
+.message-action:not(:disabled):hover {
+  border-color: var(--line);
+  color: inherit;
+  background: var(--soft);
+}
+
+.message-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.28;
+}
+
+.message-copy.copied {
+  color: var(--success);
+}
+
+.message-copy.failed {
+  color: var(--danger);
+}
+
+.message-rewind:not(:disabled):hover {
   color: var(--danger);
   background: var(--danger-soft);
 }
@@ -497,6 +560,11 @@ pre {
   background: color-mix(in srgb, var(--line) 78%, transparent);
 }
 
+.markdown {
+  min-width: 0;
+  color: color-mix(in srgb, currentColor 94%, var(--muted));
+}
+
 .markdown > :first-child {
   margin-top: 0;
 }
@@ -505,20 +573,193 @@ pre {
   margin-bottom: 0;
 }
 
+.markdown p,
+.markdown blockquote,
+.markdown ul,
+.markdown ol,
+.markdown dl,
+.markdown table,
+.markdown pre,
+.markdown hr {
+  margin: 0 0 1em;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4,
+.markdown h5,
+.markdown h6 {
+  margin: 1.55em 0 0.55em;
+  color: inherit;
+  font-weight: 720;
+  letter-spacing: -0.025em;
+  line-height: 1.28;
+}
+
+.markdown h1 {
+  padding-bottom: 0.28em;
+  border-bottom: 1px solid var(--line);
+  font-size: 1.6em;
+}
+
+.markdown h2 {
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  font-size: 1.35em;
+}
+
+.markdown h3 {
+  font-size: 1.16em;
+}
+
+.markdown h4 {
+  font-size: 1.04em;
+}
+
+.markdown h5,
+.markdown h6 {
+  font-size: 0.95em;
+}
+
+.markdown h6 {
+  color: var(--muted);
+}
+
+.markdown ul,
+.markdown ol {
+  padding-inline-start: 1.55em;
+}
+
+.markdown li + li {
+  margin-top: 0.32em;
+}
+
+.markdown li > ul,
+.markdown li > ol {
+  margin: 0.32em 0 0;
+}
+
+.markdown li > p {
+  margin: 0.22em 0;
+}
+
+.markdown li > p:first-child {
+  margin-top: 0;
+}
+
+.markdown li > p:last-child {
+  margin-bottom: 0;
+}
+
+.markdown li::marker {
+  color: color-mix(in srgb, var(--muted) 88%, currentColor);
+  font-weight: 650;
+}
+
+.markdown input[type="checkbox"] {
+  width: 0.95em;
+  height: 0.95em;
+  min-height: 0;
+  margin: 0 0.45em 0 0;
+  padding: 0;
+  accent-color: var(--accent);
+  vertical-align: -0.08em;
+}
+
+.markdown blockquote {
+  padding: 0.15em 0 0.15em 1em;
+  border-left: 3px solid color-mix(in srgb, var(--line-strong) 72%, transparent);
+  color: var(--muted);
+}
+
+.markdown blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown a {
+  color: color-mix(in srgb, var(--accent) 78%, #286da8);
+  font-weight: 550;
+  text-decoration-color: color-mix(in srgb, currentColor 42%, transparent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+}
+
+.markdown a:hover {
+  text-decoration-color: currentColor;
+}
+
+.markdown hr {
+  height: 1px;
+  border: 0;
+  background: var(--line);
+}
+
+.markdown table {
+  display: block;
+  width: max-content;
+  min-width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  border-spacing: 0;
+  scrollbar-width: thin;
+}
+
+.markdown th,
+.markdown td {
+  min-width: 7.5em;
+  padding: 0.55em 0.75em;
+  border: 1px solid color-mix(in srgb, var(--line-strong) 42%, var(--line));
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown th {
+  border-bottom-color: var(--line-strong);
+  background: var(--soft);
+  font-weight: 700;
+}
+
+.markdown tbody td:first-child {
+  color: color-mix(in srgb, currentColor 92%, var(--muted));
+  font-weight: 650;
+}
+
+.markdown tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--soft) 48%, transparent);
+}
+
+.markdown tbody tr:hover td {
+  background: color-mix(in srgb, var(--soft) 78%, transparent);
+}
+
+.markdown img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+}
+
 .markdown pre,
 .tool pre {
+  max-width: 100%;
   overflow: auto;
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--soft);
   font-size: 13px;
+  line-height: 1.55;
+  scrollbar-width: thin;
 }
 
 .markdown :not(pre) > code {
   padding: 2px 5px;
   border-radius: 5px;
   background: var(--soft);
+  font-size: 0.92em;
+  overflow-wrap: anywhere;
 }
 
 .thinking,

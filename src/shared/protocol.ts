@@ -12,7 +12,7 @@ export const MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS = 500;
 export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
-export const PROTOCOL_VERSION = 14;
+export const PROTOCOL_VERSION = 15;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
 const conversationIdSchema = z.string().uuid();
@@ -21,6 +21,15 @@ const focusIdSchema = z.string().uuid();
 const authFlowIdSchema = z.string().uuid();
 const extensionUIRequestIdSchema = z.string().uuid();
 const commandIdSchema = z.string().uuid();
+const conversationMessageIdSchema = z.string().min(1).max(256).refine(
+  (value) => {
+    const anchor = value.startsWith("assistant:")
+      ? value.slice("assistant:".length)
+      : value;
+    return /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/.test(anchor);
+  },
+  "messageId must identify a durable conversation message",
+);
 const utf8Bytes = (value: string) =>
   new TextEncoder().encode(value).byteLength;
 const boundedUtf8String = (
@@ -209,6 +218,14 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
     conversationId: conversationIdSchema,
   }),
   z.object({
+    type: z.literal("truncate_conversation"),
+    commandId: commandIdSchema,
+    sessionId: sessionIdSchema,
+    conversationId: conversationIdSchema,
+    focusId: focusIdSchema,
+    messageId: conversationMessageIdSchema,
+  }),
+  z.object({
     type: z.literal("create_role"),
     commandId: commandIdSchema,
     sessionId: sessionIdSchema,
@@ -273,6 +290,7 @@ export type AcknowledgedCommandOperation =
   | AcknowledgedSettingOperation
   | "set_compaction_threshold"
   | "delete_conversation"
+  | "truncate_conversation"
   | "create_role"
   | "update_role"
   | "delete_role";
@@ -734,6 +752,7 @@ const commandTypeSchema = z.enum([
   "set_tool_mode",
   "rename_conversation",
   "delete_conversation",
+  "truncate_conversation",
   "create_role",
   "update_role",
   "delete_role",
@@ -1007,6 +1026,7 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
       "set_api_key",
       "set_compaction_threshold",
       "delete_conversation",
+      "truncate_conversation",
       "create_role",
       "update_role",
       "delete_role",
@@ -1118,6 +1138,7 @@ export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.
         event.operation === "select_model"
         || event.operation === "set_api_key"
         || event.operation === "delete_conversation"
+        || event.operation === "truncate_conversation"
       )
       && !event.sessionId
     ) {

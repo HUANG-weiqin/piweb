@@ -106,6 +106,11 @@ class FakeSessionControl {
     this.session = {
       isStreaming: false,
       messages: [],
+      agent: {
+        state: {
+          messages: [],
+        },
+      },
       model: options.model === undefined
         ? { provider: "test", id: "model-a" }
         : { ...options.model },
@@ -648,6 +653,80 @@ describe("ProjectSessionCoordinator", () => {
     expect(
       fixture.coordinator.modelRegistryForProject(fixture.handle),
     ).toBe(catalogRegistry);
+  });
+
+  it("rewinds the live actor and durable session from the selected message", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const retainedId = actor.sessionManager.appendMessage({
+      role: "user",
+      content: "retained",
+      timestamp: 1,
+    });
+    const selectedId = actor.sessionManager.appendMessage({
+      role: "user",
+      content: "selected",
+      timestamp: 2,
+    });
+    actor.sessionManager.appendMessage({
+      role: "user",
+      content: "later",
+      timestamp: 3,
+    });
+
+    await fixture.coordinator.truncateConversation(
+      fixture.handle,
+      actor.conversationId,
+      selectedId,
+    );
+
+    expect(actor.sessionManager.getEntries().map(({ id }) => id)).toEqual([
+      expect.any(String),
+      retainedId,
+    ]);
+    expect(actor.session.agent.state.messages).toEqual(
+      actor.sessionManager.buildSessionContext().messages,
+    );
+  });
+
+  it("rejects rewind while the selected conversation is running", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const selectedId = actor.sessionManager.appendMessage({
+      role: "user",
+      content: "do not remove while running",
+      timestamp: 1,
+    });
+    const started = deferred();
+    const release = deferred();
+    fixture.runtime.control(actor.conversationId).enqueue(
+      blocksUntil(started, release),
+    );
+    const completion = fixture.coordinator.prompt(
+      fixture.handle,
+      actor.conversationId,
+      randomUUID(),
+      "run",
+    );
+    await started.promise;
+
+    await expect(fixture.coordinator.truncateConversation(
+      fixture.handle,
+      actor.conversationId,
+      selectedId,
+    )).rejects.toThrow(/busy/i);
+    expect(actor.sessionManager.getEntries().some(
+      ({ id }) => id === selectedId,
+    )).toBe(true);
+
+    release.resolve();
+    await completion;
   });
 
   it("settles and disposes a model catalog that finishes during close", async () => {

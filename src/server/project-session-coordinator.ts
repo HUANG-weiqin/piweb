@@ -1004,6 +1004,32 @@ export class ProjectSessionCoordinator {
     });
   }
 
+  async truncateConversation(
+    handle: ProjectSessionHandle,
+    conversationId: string,
+    entryId: string,
+  ): Promise<void> {
+    const context = this.requireContext(handle);
+    await this.runLifecycle(context, async () => {
+      const actor = await this.getOrOpenActor(context, conversationId);
+      if (actor.getActivity().kind !== "idle") {
+        throw new Error(
+          "Cannot rewind a busy conversation; abort and wait first",
+        );
+      }
+      const pending = await context.inbox.list({
+        toConversationId: conversationId,
+      });
+      if (pending.length > 0) {
+        throw new Error(
+          "Cannot rewind while this conversation has pending cross-session messages",
+        );
+      }
+      await actor.truncateFromMessage(entryId);
+      this.emit(context, { type: "project_changed" });
+    });
+  }
+
   async deleteConversation(
     handle: ProjectSessionHandle,
     conversationId: string,

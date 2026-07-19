@@ -99,7 +99,10 @@ export interface ConversationActorCompletion {
 export interface ConversationActorOpenOptions {
   conversationId: string;
   profile: ConversationMeta;
-  project: Pick<ProjectStore, "cwd" | "toolMode" | "refreshConversations">;
+  project: Pick<
+    ProjectStore,
+    "cwd" | "toolMode" | "refreshConversations" | "truncateConversation"
+  >;
   sessionManager: SessionManager;
   conversationLease: ConversationLease;
   runtime: PiRuntimeLike;
@@ -245,6 +248,7 @@ export class ConversationActor {
   private unsubscribeSession?: () => void;
   private activeRun?: RunTicket;
   private opening = true;
+  private truncating = false;
   private disposing = false;
   private disposed = false;
   private fatalError?: Error;
@@ -375,6 +379,57 @@ export class ConversationActor {
     });
     appendReservedCustomEntry(this.sessionManager, entry);
     this.compactionThresholdPercent = entry.data.percent;
+  }
+
+  truncateFromMessage(entryId: string): Promise<void> {
+    this.assertUsable();
+    if (this.activeRun) {
+      return Promise.reject(
+        new Error("Cannot rewind a busy conversation; abort and wait first"),
+      );
+    }
+    if (this.truncating) {
+      return Promise.reject(new Error("Conversation rewind is already running"));
+    }
+    this.truncating = true;
+    return this.operations.run(async () => {
+      let persisted = false;
+      try {
+        this.assertUsable();
+        if (this.activeRun) {
+          throw new Error(
+            "Cannot rewind a busy conversation; abort and wait first",
+          );
+        }
+        const sessionFile = await this.project.truncateConversation(
+          this.conversationId,
+          entryId,
+        );
+        persisted = true;
+        this.sessionManager.setSessionFile(sessionFile);
+        const reserved = aggregateReservedConversationEntries(
+          this.sessionManager.getEntries(),
+        );
+        this.compactionThresholdPercent =
+          reserved.compactionThreshold?.percent
+          ?? DEFAULT_COMPACTION_THRESHOLD_PERCENT;
+        this.usedRunIds.clear();
+        for (const settlement of reserved.runSettlements) {
+          this.usedRunIds.add(settlement.runId);
+        }
+        this.session.agent.state.messages =
+          this.sessionManager.buildSessionContext().messages;
+      } catch (error) {
+        if (!persisted) throw error;
+        this.fatalError = error instanceof Error
+          ? error
+          : new Error(String(error));
+        this.emitError(this.fatalError, undefined, true);
+        throw this.fatalError;
+      } finally {
+        this.truncating = false;
+      }
+    });
   }
 
   dynamicProviderNames(): ReadonlySet<string> {
@@ -513,6 +568,9 @@ export class ConversationActor {
     execute: (ticket: RunTicket) => Promise<void>,
   ): Promise<RunSettlement> {
     this.assertUsable();
+    if (this.truncating) {
+      throw new Error("Conversation is being rewound");
+    }
     if (this.activeRun) throw new Error("Agent is already running");
     if (this.usedRunIds.has(input.runId)) {
       throw new Error("Run ID was already used in this conversation actor");
