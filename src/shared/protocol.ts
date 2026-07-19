@@ -12,7 +12,7 @@ export const MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS = 500;
 export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
-export const PROTOCOL_VERSION = 13;
+export const PROTOCOL_VERSION = 14;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
 const conversationIdSchema = z.string().uuid();
@@ -444,8 +444,16 @@ export interface ConversationMessageCard {
   peerExists?: boolean;
 }
 
+export interface ConversationCompactionMarker {
+  kind: "compaction";
+  id: string;
+  timestamp: string;
+  tokensBefore: number;
+}
+
 export type ConversationHistoryItem =
   | ({ kind: "message" } & ConversationHistoryMessage)
+  | ConversationCompactionMarker
   | ConversationMessageCard;
 
 export type ConversationCreatedBy =
@@ -836,6 +844,12 @@ const conversationHistoryMessageSchema = z.object({
 const conversationHistoryItemSchema: z.ZodType<ConversationHistoryItem> =
   z.discriminatedUnion("kind", [
     conversationHistoryMessageSchema.extend({ kind: z.literal("message") }),
+    z.object({
+      kind: z.literal("compaction"),
+      id: z.string(),
+      timestamp: z.string().datetime(),
+      tokensBefore: z.number().finite().nonnegative(),
+    }),
     z.object({
       kind: z.literal("session_message"),
       id: z.string(),

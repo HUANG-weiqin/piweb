@@ -371,6 +371,107 @@ describe("projectConversationHistory", () => {
     ]);
   });
 
+  it("projects durable compaction entries as transcript boundaries", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    const firstKeptEntryId = manager.appendMessage(message({
+      role: "user",
+      content: "first question",
+      timestamp: 1,
+    }));
+    manager.appendMessage(message({
+      role: "assistant",
+      content: [{ type: "text", text: "first answer" }],
+      usage: { totalTokens: 63_771 },
+      stopReason: "stop",
+      timestamp: 2,
+    }));
+    const compactionId = manager.appendCompaction(
+      "durable summary",
+      firstKeptEntryId,
+      63_771,
+    );
+    manager.appendMessage(message({
+      role: "user",
+      content: "after compaction",
+      timestamp: 3,
+    }));
+
+    expect(projectConversationItems(manager)).toEqual([
+      expect.objectContaining({
+        kind: "message",
+        role: "user",
+        text: "first question",
+      }),
+      expect.objectContaining({
+        kind: "message",
+        role: "assistant",
+        text: "first answer",
+      }),
+      expect.objectContaining({
+        kind: "compaction",
+        id: compactionId,
+        tokensBefore: 63_771,
+      }),
+      expect.objectContaining({
+        kind: "message",
+        role: "user",
+        text: "after compaction",
+      }),
+    ]);
+    expect(projectAgentConversationPeek(manager).items).toEqual([
+      expect.objectContaining({ kind: "message", text: "first question" }),
+      expect.objectContaining({ kind: "message", text: "first answer" }),
+      expect.objectContaining({ kind: "message", text: "after compaction" }),
+    ]);
+  });
+
+  it("keeps a compaction boundary when older oversized turns are omitted", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    let firstKeptEntryId = "";
+    for (let index = 0; index < 8; index += 1) {
+      const entryId = manager.appendMessage(message({
+        role: "user",
+        content: `before-${index}-${"问".repeat(80_000)}`,
+        timestamp: index * 2,
+      }));
+      firstKeptEntryId ||= entryId;
+      manager.appendMessage(message({
+        role: "assistant",
+        content: [{
+          type: "text",
+          text: `answer-${index}-${"答".repeat(80_000)}`,
+        }],
+        usage: { totalTokens: 10_000 },
+        stopReason: "stop",
+        timestamp: index * 2 + 1,
+      }));
+    }
+    const compactionId = manager.appendCompaction(
+      "durable summary",
+      firstKeptEntryId,
+      80_000,
+    );
+    manager.appendMessage(message({
+      role: "user",
+      content: "after compaction",
+      timestamp: 20,
+    }));
+
+    const snapshot = projectConversationItemsSnapshot(manager);
+    expect(snapshot.truncated).toBe(true);
+    expect(snapshot.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: "compaction",
+        id: compactionId,
+      }),
+      expect.objectContaining({
+        kind: "message",
+        role: "user",
+        text: "after compaction",
+      }),
+    ]));
+  });
+
   it("fails closed instead of rendering unknown piweb reserved records", () => {
     const manager = SessionManager.inMemory("E:\\work");
     manager.appendCustomEntry("piweb.future.v2", {});

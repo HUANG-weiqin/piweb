@@ -24,7 +24,7 @@ const roleId = "f23db1e6-c657-4dac-8b7e-a14fdecc5f21";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(13);
+    expect(PROTOCOL_VERSION).toBe(14);
   });
 
   it("accepts supported commands", () => {
@@ -518,26 +518,34 @@ describe("parseClientCommand", () => {
         model: { provider: "openai", id: "gpt" },
         canManageSessions: true,
       },
-      items: [{
-        kind: "session_message",
-        id: "card-entry-1",
-        cardId: "6790e721-6f5c-4692-8949-4d3fd2cf0dfc",
-        direction: "incoming",
-        state: "queued",
-        body: "Please review the actor.",
-        from: {
-          conversationId: targetConversationId,
-          title: "Coordinator",
-          role: { id: "default", name: "Default" },
+      items: [
+        {
+          kind: "session_message",
+          id: "card-entry-1",
+          cardId: "6790e721-6f5c-4692-8949-4d3fd2cf0dfc",
+          direction: "incoming",
+          state: "queued",
+          body: "Please review the actor.",
+          from: {
+            conversationId: targetConversationId,
+            title: "Coordinator",
+            role: { id: "default", name: "Default" },
+          },
+          to: {
+            conversationId,
+            role: { id: roleId, name: "Reviewer" },
+          },
+          sentAt: "2026-07-18T12:00:00.000Z",
+          updatedAt: "2026-07-18T12:00:01.000Z",
+          peerExists: true,
         },
-        to: {
-          conversationId,
-          role: { id: roleId, name: "Reviewer" },
+        {
+          kind: "compaction",
+          id: "compaction-entry-1",
+          timestamp: "2026-07-18T12:01:00.000Z",
+          tokensBefore: 63_771,
         },
-        sentAt: "2026-07-18T12:00:00.000Z",
-        updatedAt: "2026-07-18T12:00:01.000Z",
-        peerExists: true,
-      }],
+      ],
       truncated: false,
     }).type).toBe("conversation_snapshot");
     expect(parseServerEvent({

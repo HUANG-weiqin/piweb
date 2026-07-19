@@ -264,6 +264,42 @@ describe("Chat", () => {
     })).not.toBeInTheDocument();
   });
 
+  it("renders a compaction divider between the surrounding messages", () => {
+    const { container } = render(view({
+      messages: [],
+      items: [{
+        kind: "message",
+        id: "assistant-before",
+        runId: "run-before",
+        role: "assistant",
+        text: "压缩前的回复",
+        thinking: "",
+        tools: [],
+      }, {
+        kind: "compaction",
+        id: "compaction-1",
+        timestamp: "2026-07-19T10:00:00.000Z",
+        tokensBefore: 63_771,
+      }, {
+        kind: "message",
+        id: "user-after",
+        runId: "run-after",
+        role: "user",
+        text: "压缩后的问题",
+        thinking: "",
+        tools: [],
+      }],
+      sessionTokens: 0,
+    }));
+
+    const transcript = container.querySelector(".transcript");
+    expect(
+      Array.from(transcript?.children ?? []).map((element) => element.className),
+    ).toEqual(["message assistant", "compaction-marker", "message user"]);
+    expect(screen.getByRole("separator", { name: "上下文已压缩" }))
+      .toHaveTextContent("上下文已压缩");
+  });
+
   it("keeps completed outgoing session work above the final assistant text", () => {
     const card: ConversationMessageCard = {
       kind: "session_message",

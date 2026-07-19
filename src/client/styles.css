@@ -477,6 +477,24 @@ pre {
   background: var(--danger-soft);
 }
 
+.compaction-marker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 15px 0;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.compaction-marker::before,
+.compaction-marker::after {
+  content: "";
+  height: 1px;
+  flex: 1;
+  background: color-mix(in srgb, var(--line) 78%, transparent);
+}
+
 .markdown > :first-child {
   margin-top: 0;
 }

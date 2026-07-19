@@ -149,9 +149,10 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 - `PublicState` 是高频、小体积运行状态。
 - `role_catalog_snapshot` 是低频用户角色目录及当前可用性。
 - `project_snapshot` 是低频扁平会话索引，包含固化 role 摘要、activity、attention 和 temporary；后台 actor 变化不会切换 current focus。
-- `conversation_snapshot` 是当前 focus 的一次性 active-branch 投影，包含固化角色和 message/session-message discriminated items，并限制总字节以及单消息/tool/card payload。
+- `conversation_snapshot` 是当前 focus 的一次性 active-branch 投影，包含固化角色和 message/session-message/compaction discriminated items，并限制总字节以及单消息/tool/card payload。`compaction` 直接来自 Pi 的持久条目，位于压缩发生处；它作为独立小型 turn 保留，避免较早的大消息被截断时连分界线一起丢失。
 - `truncated=true` 只表示 UI 投影省略；不会删除 JSONL。
 - live run 仍按 runId 发送增量，卡片按 cardId upsert；恢复时 reducer 用 snapshot 原子 hydrate。两者都必须匹配 `sessionId + conversationId + focusId`，匹配快照到达前 composer 保持禁用。
+- Agent 的 `peek_session` 有意省略 compaction 分界项；它是用户界面元信息，不应增加 peer Agent 上下文。
 
 ## 故障语义
 

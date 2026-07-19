@@ -1,4 +1,5 @@
 import type {
+  ConversationCompactionMarker,
   ConversationHistoryItem,
   ConversationHistoryMessage,
   ConversationMessageCard,
@@ -29,7 +30,10 @@ export interface ChatMessage {
 }
 
 export type ChatMessageItem = { kind: "message" } & ChatMessage;
-export type ChatItem = ChatMessageItem | ConversationMessageCard;
+export type ChatItem =
+  | ChatMessageItem
+  | ConversationCompactionMarker
+  | ConversationMessageCard;
 
 export interface ChatFocus {
   sessionId: string;
@@ -148,14 +152,13 @@ function historyMessageToItem(
 }
 
 function historyItemToChatItem(item: ConversationHistoryItem): ChatItem {
-  if (item.kind === "session_message") return item;
+  if (item.kind !== "message") return item;
   return historyMessageToItem(item);
 }
 
 function itemIdentity(item: ChatItem): string {
-  return item.kind === "session_message"
-    ? `card:${item.cardId}`
-    : `message:${item.id}`;
+  if (item.kind === "session_message") return `card:${item.cardId}`;
+  return `${item.kind}:${item.id}`;
 }
 
 function upsertItem(items: ChatItem[], next: ChatItem): ChatItem[] {

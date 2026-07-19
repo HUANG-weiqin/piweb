@@ -102,6 +102,34 @@ describe("chatReducer", () => {
     expect(state.sessionTokens).toBe(9);
   });
 
+  it("hydrates a durable compaction boundary without treating it as a message", () => {
+    let state = chatReducer(initialChatState, {
+      type: "focus_changed",
+      ...FOCUS_A_1,
+    });
+    state = chatReducer(state, {
+      type: "hydrate",
+      ...FOCUS_A_1,
+      items: [
+        historyMessage("before", "assistant", "before"),
+        {
+          kind: "compaction",
+          id: "compaction-1",
+          timestamp: "2026-07-19T10:00:00.000Z",
+          tokensBefore: 63_771,
+        },
+        historyMessage("after", "user", "after"),
+      ],
+    });
+
+    expect(state.items?.map((item) => item.kind)).toEqual([
+      "message",
+      "compaction",
+      "message",
+    ]);
+    expect(state.messages.map(({ id }) => id)).toEqual(["before", "after"]);
+  });
+
   it("clears the old transcript when a new focus is attached", () => {
     let state = chatReducer(initialChatState, {
       type: "focus_changed",

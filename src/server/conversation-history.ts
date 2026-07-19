@@ -323,6 +323,19 @@ export function projectConversationItems(
         physicalIndexById.get(anchorId) ?? Number.MAX_SAFE_INTEGER,
     };
   });
+  for (const entry of sessionManager.getBranch()) {
+    if (entry.type !== "compaction") continue;
+    positionedItems.push({
+      item: {
+        kind: "compaction",
+        id: entry.id,
+        timestamp: entry.timestamp,
+        tokensBefore: entry.tokensBefore,
+      },
+      physicalIndex:
+        physicalIndexById.get(entry.id) ?? Number.MAX_SAFE_INTEGER,
+    });
+  }
   const cardsById = new Map<string, {
     positionedIndex: number;
     direction: ConversationMessageCard["direction"];
@@ -402,6 +415,9 @@ function compactConversationItem(
       truncated: compacted.truncated,
     };
   }
+  if (item.kind === "compaction") {
+    return { item: { ...item }, truncated: false };
+  }
 
   const body = clipUtf8(item.body, MAX_HISTORY_TEXT_BYTES);
   const result = item.result === undefined
@@ -435,7 +451,7 @@ export type AgentConversationPeekItem =
 
 function agentPeekItem(
   item: ConversationHistoryItem,
-): AgentConversationPeekItem {
+): AgentConversationPeekItem | undefined {
   if (item.kind === "message") {
     return {
       kind: "message",
@@ -443,6 +459,7 @@ function agentPeekItem(
       text: item.text,
     };
   }
+  if (item.kind === "compaction") return;
   return { ...item };
 }
 
@@ -466,10 +483,12 @@ export function projectAgentConversationPeek(
   );
   const projected = projectConversationItems(sessionManager)
     .map(compactConversationItem)
-    .map(({ item, truncated }) => ({
-      item: agentPeekItem(item),
-      truncated,
-    }));
+    .flatMap(({ item, truncated }) => {
+      const visibleItem = agentPeekItem(item);
+      return visibleItem === undefined
+        ? []
+        : [{ item: visibleItem, truncated }];
+    });
   const candidates = limit === 0 ? [] : projected.slice(-limit);
   const selected: AgentConversationPeekItem[] = [];
   let compacted = false;
@@ -520,6 +539,7 @@ export function projectConversationItemsSnapshot(
         item.item.kind === "message"
         && item.item.role === "user"
       )
+      || item.item.kind === "compaction"
       || turns.length === 0
     ) {
       turns.push([item]);

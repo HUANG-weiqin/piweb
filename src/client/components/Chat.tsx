@@ -8,6 +8,7 @@ import {
 import {
   MAX_COMPACTION_THRESHOLD_PERCENT,
   MIN_COMPACTION_THRESHOLD_PERCENT,
+  type ConversationCompactionMarker,
   type ConversationMessageCard,
   type ConversationRoleSnapshot,
   type ThinkingLevel,
@@ -84,6 +85,7 @@ type TranscriptBlock =
       message: ChatMessage;
       sessionCards: ConversationMessageCard[];
     }
+  | ConversationCompactionMarker
   | ConversationMessageCard;
 
 function transcriptBlocks(items: ChatItem[]): TranscriptBlock[] {
@@ -96,9 +98,11 @@ function transcriptBlocks(items: ChatItem[]): TranscriptBlock[] {
         continue;
       }
     }
-    blocks.push(item.kind === "message"
-      ? { kind: "message", message: item, sessionCards: [] }
-      : item);
+    if (item.kind === "message") {
+      blocks.push({ kind: "message", message: item, sessionCards: [] });
+    } else {
+      blocks.push(item);
+    }
   }
   return blocks;
 }
@@ -292,13 +296,22 @@ export function Chat({
         较早或过长的显示内容已省略；完整记录仍保存在项目中。
       </div>}
       {!blocks.length && <div className="empty"><div>π</div><h1>想做点什么？</h1><p>Pi 可以读取、修改文件并执行命令。</p></div>}
-      {blocks.map((block) => block.kind === "session_message"
-        ? <SessionMessageCard
+      {blocks.map((block) => block.kind === "compaction"
+        ? <div
+            key={`compaction:${block.id}`}
+            className="compaction-marker"
+            role="separator"
+            aria-label="上下文已压缩"
+          >
+            <span>上下文已压缩</span>
+          </div>
+        : block.kind === "session_message"
+          ? <SessionMessageCard
             key={`card:${block.cardId}`}
             card={block}
             onOpenConversation={onOpenConversation}
           />
-        : <Message
+          : <Message
             key={`message:${block.message.id}`}
             message={block.message}
             sessionCards={block.sessionCards}
