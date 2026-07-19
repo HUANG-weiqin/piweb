@@ -59,6 +59,7 @@ ServerEvent
 - extension request 按到达顺序排队，server closed event、initialize、session change 或 disconnect 都会移除 stale 项；浏览器只回答当前 sessionId。
 - OAuth、API Key 和 extension UI 同时出现时只展示一个模态边界；隐藏不等于丢弃输入草稿，只有 request 更换、权威 closed/cancel 或连接生命周期结束才清理。
 - transcript 仅在用户位于底部附近时跟随流式输出；跟随时必须滚动 transcript 容器到真实 `scrollHeight`，不能滚动 padding 之前的占位节点。用户向上阅读后显示“回到最新消息”，不能用每个 delta 强制抢走滚动位置。composer 是受控草稿并按内容在有界高度内增长。
+- transcript 使用 14px 的紧凑正文，并与 composer 共用响应式内容宽度：从原有 780px 阅读宽度随视口扩展，最高 1280px；窄屏仍由最小侧边距接管，不能产生横向溢出。
 - 认证、设置和扩展交互拥有模态焦点边界。
 - 工具模式的服务端 state 是执行真相；限制到 `read_only` 的本地意图立即持久化，放宽到 `full_access` 只能在服务端确认后持久化，重连不得在 ack 间隙扩大权限。
 - PiSocket 的每个回调捕获创建它的 socket；旧 socket 以及 React effect 已销毁的旧 PiSocket 实例都不得操作当前连接。
