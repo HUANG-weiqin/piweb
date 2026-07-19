@@ -1,0 +1,319 @@
+// @vitest-environment jsdom
+import "@testing-library/jest-dom/vitest";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ConversationSummary } from "../../shared/protocol";
+import { ConversationSidebar } from "./ConversationSidebar";
+
+const baseConversation: ConversationSummary = {
+  id: "01234567-89ab-cdef-0123-456789abcdef",
+  name: "接口设计",
+  preview: "整理服务端边界",
+  createdAt: "2026-07-19T08:00:00.000Z",
+  updatedAt: "2026-07-19T09:00:00.000Z",
+  messageCount: 4,
+  role: {
+    id: "architect",
+    revision: 1,
+    name: "架构师",
+    description: "负责系统设计",
+    model: { provider: "openai", id: "gpt-5" },
+  },
+  activity: { kind: "idle" },
+};
+
+afterEach(cleanup);
+
+describe("ConversationSidebar", () => {
+  it("renders one flat list with title, role, short handle and last active time", () => {
+    render(
+      <ConversationSidebar
+        conversations={[
+          baseConversation,
+          {
+            ...baseConversation,
+            id: "fedcba98-7654-3210-fedc-ba9876543210",
+            name: undefined,
+            preview: "测试恢复流程",
+            role: undefined,
+          },
+        ]}
+        currentConversationId={baseConversation.id}
+        collapsed={false}
+        truncated={false}
+        online
+        onToggleCollapsed={vi.fn()}
+        onSelect={vi.fn()}
+        onCreate={vi.fn()}
+        onDelete={vi.fn(() => true)}
+      />,
+    );
+
+    const navigation = screen.getByRole("navigation", { name: "项目会话" });
+    expect(within(navigation).getAllByRole("list")).toHaveLength(1);
+    expect(within(navigation).getAllByRole("listitem")).toHaveLength(2);
+    expect(screen.getByText("接口设计")).toBeInTheDocument();
+    expect(screen.getByText("测试恢复流程")).toBeInTheDocument();
+    expect(screen.getByText("架构师")).toBeInTheDocument();
+    expect(screen.getByText("角色加载中")).toBeInTheDocument();
+    expect(screen.getByText("#01234567")).toBeInTheDocument();
+    expect(screen.getByText("#fedcba98")).toBeInTheDocument();
+    expect(screen.getAllByText("最后活跃", { exact: false })).toHaveLength(2);
+  });
+
+  it("orders active work before attention and the remaining flat conversations", () => {
+    const attention = {
+      ...baseConversation,
+      id: "attention-123456",
+      name: "需要处理",
+      attention: true,
+      updatedAt: "2026-07-19T07:00:00.000Z",
+    };
+    const running = {
+      ...baseConversation,
+      id: "running-12345678",
+      name: "正在运行",
+      activity: { kind: "running", runId: "run-1" } as const,
+      updatedAt: "2026-07-19T10:00:00.000Z",
+    };
+
+    render(
+      <ConversationSidebar
+        conversations={[baseConversation, running, attention]}
+        collapsed={false}
+        truncated={false}
+        online
+        onToggleCollapsed={vi.fn()}
+        onSelect={vi.fn()}
+        onCreate={vi.fn()}
+        onDelete={vi.fn(() => true)}
+      />,
+    );
+
+    const rows = screen.getAllByRole("listitem");
+    expect(rows.map((row) => within(row).getByRole("button", {
+      name: /(?:打开|当前)会话/,
+    }).textContent)).toEqual([
+      expect.stringContaining("正在运行"),
+      expect.stringContaining("需要处理"),
+      expect.stringContaining("接口设计"),
+    ]);
+    expect(rows.every((row) => within(row).queryByRole("list") === null)).toBe(true);
+  });
+
+  it.each(["queued", "running"] as const)(
+    "uses a semantic spinner for %s conversations",
+    (kind) => {
+      render(
+        <ConversationSidebar
+          conversations={[{
+            ...baseConversation,
+            activity: { kind, runId: "run-1" },
+          }]}
+          collapsed={false}
+          truncated={false}
+          online
+          onToggleCollapsed={vi.fn()}
+          onSelect={vi.fn()}
+          onCreate={vi.fn()}
+          onDelete={vi.fn(() => true)}
+        />,
+      );
+
+      const status = screen.getByRole("status", {
+        name: kind === "queued" ? "排队中" : "运行中",
+      });
+      expect(status).toHaveClass("conversation-activity-spinner");
+      expect(status).toHaveClass(`activity-${kind}`);
+    },
+  );
+
+  it("shows an hourglass only for explicit waiting and highlights attention", () => {
+    render(
+      <ConversationSidebar
+        conversations={[{
+          ...baseConversation,
+          attention: true,
+          activity: {
+            kind: "waiting",
+            runId: "run-1",
+            targetConversationId: "target",
+            targetRunId: "run-2",
+          },
+        }]}
+        collapsed={false}
+        truncated={false}
+        online
+        onToggleCollapsed={vi.fn()}
+        onSelect={vi.fn()}
+        onCreate={vi.fn()}
+        onDelete={vi.fn(() => true)}
+      />,
+    );
+
+    expect(screen.getByRole("status", { name: "等待其他会话" })).toHaveTextContent("⌛");
+    expect(screen.queryByRole("status", { name: /排队中|运行中/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "需要处理" })).toBeInTheDocument();
+    expect(screen.getByRole("listitem")).toHaveClass("needs-attention");
+  });
+
+  it("keeps running conversations navigable and never selects on a background update", () => {
+    const onSelect = vi.fn();
+    const { rerender } = render(
+      <ConversationSidebar
+        conversations={[{
+          ...baseConversation,
+          activity: { kind: "running", runId: "run-1" },
+        }]}
+        collapsed={false}
+        truncated={false}
+        online
+        onToggleCollapsed={vi.fn()}
+        onSelect={onSelect}
+        onCreate={vi.fn()}
+        onDelete={vi.fn(() => true)}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /打开会话 接口设计/ }));
+    expect(onSelect).toHaveBeenCalledWith(baseConversation.id);
+
+    onSelect.mockClear();
+    rerender(
+      <ConversationSidebar
+        conversations={[{
+          ...baseConversation,
+          activity: { kind: "idle" },
+          updatedAt: "2026-07-19T11:00:00.000Z",
+        }]}
+        collapsed={false}
+        truncated={false}
+        online
+        onToggleCollapsed={vi.fn()}
+        onSelect={onSelect}
+        onCreate={vi.fn()}
+        onDelete={vi.fn(() => true)}
+      />,
+    );
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("is controlled when collapsed and keeps an explicit create action at the bottom", () => {
+    const onToggleCollapsed = vi.fn();
+    const onCreate = vi.fn();
+    const { rerender } = render(
+      <ConversationSidebar
+        conversations={[baseConversation]}
+        collapsed={false}
+        truncated={false}
+        online
+        onToggleCollapsed={onToggleCollapsed}
+        onSelect={vi.fn()}
+        onCreate={onCreate}
+        onDelete={vi.fn(() => true)}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "收起会话栏" }));
+    expect(onToggleCollapsed).toHaveBeenCalledWith(true);
+    fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
+    expect(onCreate).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <ConversationSidebar
+        conversations={[baseConversation]}
+        collapsed
+        truncated={false}
+        online
+        onToggleCollapsed={onToggleCollapsed}
+        onSelect={vi.fn()}
+        onCreate={onCreate}
+        onDelete={vi.fn(() => true)}
+      />,
+    );
+    expect(screen.getByRole("complementary", { name: "项目会话栏" })).toHaveClass("collapsed");
+    expect(screen.queryByRole("navigation", { name: "项目会话" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "展开会话栏" }));
+    expect(onToggleCollapsed).toHaveBeenLastCalledWith(false);
+    expect(screen.getByRole("button", { name: "新建会话" })).toBeInTheDocument();
+  });
+
+  it("confirms deletion for the current idle conversation and blocks active deletion", () => {
+    const onDelete = vi.fn(() => true);
+    render(
+      <ConversationSidebar
+        conversations={[
+          baseConversation,
+          {
+            ...baseConversation,
+            id: "running-12345678",
+            name: "正在运行",
+            activity: { kind: "running", runId: "run-1" },
+          },
+        ]}
+        currentConversationId={baseConversation.id}
+        collapsed={false}
+        truncated={false}
+        online
+        onToggleCollapsed={vi.fn()}
+        onSelect={vi.fn()}
+        onCreate={vi.fn()}
+        onDelete={onDelete}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "删除会话 接口设计" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "删除会话 正在运行" })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "删除会话 接口设计" }));
+    expect(onDelete).not.toHaveBeenCalled();
+    expect(screen.getByRole("alertdialog", { name: "确认删除会话" }))
+      .toHaveTextContent("此操作无法撤销");
+    fireEvent.click(screen.getByRole("button", { name: "保留" }));
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "删除会话 接口设计" }));
+    fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
+    expect(onDelete).toHaveBeenCalledWith(baseConversation.id);
+  });
+
+  it("blocks deletion while the focused runtime is busy even before its summary refreshes", () => {
+    render(
+      <ConversationSidebar
+        conversations={[baseConversation]}
+        currentConversationId={baseConversation.id}
+        busyConversationId={baseConversation.id}
+        collapsed={false}
+        truncated={false}
+        online
+        onToggleCollapsed={vi.fn()}
+        onSelect={vi.fn()}
+        onCreate={vi.fn()}
+        onDelete={vi.fn(() => true)}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "删除会话 接口设计" }))
+      .toBeDisabled();
+  });
+
+  it("projects unread as a low-emphasis dot and owns the truncated-list hint", () => {
+    render(
+      <ConversationSidebar
+        conversations={[{ ...baseConversation, unread: true }]}
+        collapsed={false}
+        truncated
+        online
+        onToggleCollapsed={vi.fn()}
+        onSelect={vi.fn()}
+        onCreate={vi.fn()}
+        onDelete={vi.fn(() => true)}
+      />,
+    );
+
+    const unread = screen.getByRole("status", { name: "未读消息" });
+    expect(unread).toHaveClass("conversation-unread-indicator");
+    expect(unread).toBeEmptyDOMElement();
+    expect(screen.getByText("仅显示最近会话")).toBeInTheDocument();
+  });
+});

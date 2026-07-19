@@ -30,9 +30,29 @@ SDK validated args
 
 - `full_access` 允许所有工具和命令，不区分来源或目标位置；项目外路径和 `.piweb` 也不额外拦截。
 - `read_only` 只允许 `source=builtin` 的 Pi 原生 `read / grep / find / ls`。
-- `read_only` 直接拒绝 `bash / edit / write / unknown` 以及任何扩展工具。
+- `read_only` 直接拒绝 `bash / edit / write / unknown`、扩展工具以及工作台 meta 工具。
 - 扩展可以用 `read` 等名称覆盖内置工具；策略必须同时检查最终 `toolName` 和 SDK `ToolInfo.sourceInfo.source`，不能只按名称放行。
 - Agent 的 `read_only` 只限制经过 Pi 工具入口的调用；工作台宿主仍会写 manifest 和 transcript。
+
+## Agent 编排工具
+
+每个 ConversationActor 注入 9 个宿主 meta 工具：
+
+```text
+list_roles / list_sessions / current_session / peek_session
+start_session / send_session_message / wait_for_session
+abort_session / delete_session
+```
+
+它们仍是 Agent 工具调用，不是绕过 gate 的内部 RPC：
+
+- 项目 extension `tool_call` hook 先观察/变换调用，宿主再按最终工具 identity 与 run ownership 决策；
+- 工具闭包固定来源 conversation 和 canonical project，参数不能提交 cwd/projectId；
+- `read_only` 不因 list/peek 看似只读而部分开放整套控制面，第一版统一拒绝 meta 工具；
+- `full_access` 才允许 Agent 创建、通信、等待、中止和删除 peer conversation，但 self delete、self abort/wait、busy delete、stale runId 等生命周期约束仍由 coordinator 独立校验；
+- 用户从 UI 发起的角色管理、焦点切换和宿主持久化不经过 Agent tool gate，仍受协议身份与各自串行边界约束。
+
+`full_access` 是执行许可，不是无限生命周期权限。meta 能力只限当前项目，不能修改角色目录、认证、trust 或既有会话的角色/模型。
 
 ## 生命周期
 
@@ -56,6 +76,9 @@ SDK validated args
 - `src/server/tool-policy.ts`
 - `src/server/pi-runtime.ts`
 - `src/server/pi-service.ts`
+- `src/server/conversation-actor.ts`
+- `src/server/project-session-coordinator.ts`
+- `src/server/meta-tools.ts`
 - `src/server/project-run-coordinator.ts`
 - `src/shared/protocol.ts`
 - 对应的 `*.test.ts`
@@ -66,3 +89,4 @@ SDK validated args
 - [kb-wire-protocol.md](kb-wire-protocol.md)
 - [kb-client-state.md](kb-client-state.md)
 - [kb-project-sessions.md](kb-project-sessions.md)
+- [kb-agent-collaboration.md](kb-agent-collaboration.md)

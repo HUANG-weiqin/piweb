@@ -12,6 +12,7 @@
 | [kb-wire-protocol.md](kb-wire-protocol.md) | 修改 WebSocket 命令、事件、版本或 session epoch |
 | [kb-server-runtime.md](kb-server-runtime.md) | 修改 Pi SDK、认证、模型缓存、会话或并发控制 |
 | [kb-project-sessions.md](kb-project-sessions.md) | 修改 `.piweb`、项目身份、持久对话、恢复、索引或租约 |
+| [kb-agent-collaboration.md](kb-agent-collaboration.md) | 修改角色、conversation actor、跨会话消息、等待或临时会话 |
 | [kb-client-state.md](kb-client-state.md) | 修改 React App、聊天 reducer、重连和 UI 状态 |
 | [kb-tool-policy.md](kb-tool-policy.md) | 修改只读/全部授权模式、工具来源判断或 SDK gate |
 | [_templet.md](_templet.md) | 新知识页模板 |
@@ -23,9 +24,12 @@ src/client
   ↕ src/shared/protocol.ts
 src/server/socket-server.ts
   → PiRuntime（进程共享）
+  → RoleCatalog（用户级角色目录）
   → ProjectStoreRegistry（按项目共享）
-  → PiConnection（每连接会话 actor）
-  → Pi SDK AgentSession
+  → ProjectSessionCoordinator（按项目共享 conversation actor）
+      → ConversationActor（每持久会话一个）
+          → Pi SDK AgentSession
+  → PiConnection（每连接项目观察与焦点）
 ```
 
 ## 维护规则

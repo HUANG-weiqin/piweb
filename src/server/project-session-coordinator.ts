@@ -1,0 +1,3036 @@
+import { createHash, randomUUID } from "node:crypto";
+import { join } from "node:path";
+import type {
+  ConversationActivity,
+  ConversationSummary,
+  ToolMode,
+} from "../shared/protocol.js";
+import {
+  aggregateReservedConversationEntries,
+  appendReservedCustomEntry,
+  createConversationCardEntry,
+  createConversationMetaEntry,
+  createConversationMessageEntry,
+  createMetaOperationEntry,
+  createRunSettlementEntry,
+  MAX_CONVERSATION_BODY_BYTES,
+  type ConversationCard,
+  type ConversationMeta,
+  type ConversationReferenceSnapshot,
+  type MetaOperation,
+  type RunSettlement,
+} from "./conversation-meta.js";
+import {
+  ConversationActor,
+  type ConversationActorCompletion,
+  type ConversationActorEvent,
+} from "./conversation-actor.js";
+import {
+  projectAgentConversationPeek,
+  projectConversationItemsSnapshot,
+} from "./conversation-history.js";
+import {
+  createMetaTools,
+  type MetaToolService,
+} from "./meta-tools.js";
+import type {
+  CreatedProjectModelCatalog,
+  PiRuntimeLike,
+} from "./pi-runtime.js";
+import type { PortableExtensionUI } from "./extension-ui.js";
+import {
+  ProjectInbox,
+  type InboxEnvelope,
+  type InboxEnvelopeInput,
+} from "./project-inbox.js";
+import {
+  ProjectStoreRegistry,
+  type ProjectStore,
+  type ProjectStoreHandle,
+} from "./project-store.js";
+import { ProjectRunCoordinator } from "./project-run-coordinator.js";
+import {
+  RoleCatalog,
+  type RoleCatalogModelRegistry,
+} from "./role-catalog.js";
+import { SerialTaskQueue } from "./serial-task-queue.js";
+import {
+  defaultToolPolicy,
+  type ToolPolicy,
+} from "./tool-policy.js";
+
+const MAX_BATCH_MESSAGES = 8;
+const MAX_COMPLETION_CACHE = 256;
+
+export type ProjectSessionCoordinatorEvent =
+  | ConversationActorEvent
+  | { type: "project_changed" };
+
+export type ProjectSessionCoordinatorListener = (
+  event: ProjectSessionCoordinatorEvent,
+) => void;
+
+interface CompletionWaiter {
+  resolve(settlement: RunSettlement): void;
+  reject(error: Error): void;
+  signal?: AbortSignal;
+  abortListener?: () => void;
+}
+
+interface ProjectContext {
+  readonly key: string;
+  readonly project: ProjectStore;
+  readonly projectHandle: ProjectStoreHandle;
+  readonly inbox: ProjectInbox;
+  readonly actors: Map<string, ConversationActor>;
+  readonly actorOpenings: Map<string, Promise<ConversationActor>>;
+  readonly actorUnsubscribes: Map<string, () => void>;
+  readonly profiles: Map<string, ConversationMeta>;
+  readonly attention: Set<string>;
+  readonly deleting: Set<string>;
+  readonly listeners: Set<ProjectSessionCoordinatorListener>;
+  readonly waiters: Map<string, Set<CompletionWaiter>>;
+  readonly completions: Map<string, RunSettlement>;
+  readonly processingBatches: Map<string, InboxEnvelope[]>;
+  readonly failedBatchRetries: Set<string>;
+  readonly failedDispatchRetries: Set<string>;
+  readonly extensionUIRouters: Map<string, ConversationExtensionUIRouter>;
+  readonly lifecycle: SerialTaskQueue;
+  readonly backgroundTasks: Set<Promise<void>>;
+  readonly unsubscribeProject: () => void;
+  modelCatalog?: CreatedProjectModelCatalog;
+  modelCatalogOpening?: Promise<CreatedProjectModelCatalog>;
+  references: number;
+  closing: boolean;
+}
+
+export class ProjectSessionHandle {
+  private released = false;
+
+  constructor(readonly context: ProjectContext) {}
+
+  get project(): ProjectStore {
+    return this.context.project;
+  }
+
+  get isReleased(): boolean {
+    return this.released;
+  }
+
+  release(): void {
+    if (this.released) return;
+    this.released = true;
+    this.context.references = Math.max(0, this.context.references - 1);
+  }
+}
+
+export interface CreateUserConversationInput {
+  roleId: string;
+  title?: string;
+  extensionUI?: PortableExtensionUI;
+}
+
+export interface StartPeerSessionInput {
+  roleId: string;
+  task: string;
+  title?: string;
+  temporary: boolean;
+  idempotencyKey: string;
+}
+
+function contextKey(cwd: string): string {
+  return process.platform === "win32" ? cwd.toLowerCase() : cwd;
+}
+
+function completionKey(conversationId: string, runId: string): string {
+  return `${conversationId.length}:${conversationId}:${runId}`;
+}
+
+function dispatchRetryKey(
+  conversationId: string,
+  envelopes: readonly InboxEnvelope[],
+): string {
+  const first = envelopes[0];
+  if (!first) throw new Error("Cannot dispatch an empty inbox batch");
+  return `${conversationId.length}:${conversationId}:${first.messageId}`;
+}
+
+function deterministicUuid(namespace: string, value: string): string {
+  const bytes = createHash("sha256")
+    .update(namespace)
+    .update("\0")
+    .update(value)
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20),
+  ].join("-");
+}
+
+function normalizedTitle(title: string | undefined, fallback: string): string {
+  const value = (title ?? fallback)
+    .replace(/[\r\n]+/g, " ")
+    .trim();
+  if (!value) return "新会话";
+  return [...value].slice(0, 80).join("");
+}
+
+function cloneSettlement(settlement: RunSettlement): RunSettlement {
+  return { ...settlement };
+}
+
+function cloneProfile(profile: ConversationMeta): ConversationMeta {
+  return structuredClone(profile);
+}
+
+function temporarySettlementIsReturnable(
+  settlement: RunSettlement,
+): settlement is RunSettlement & { finalText: string } {
+  return settlement.outcome === "completed"
+    && settlement.finalText !== null
+    && settlement.finalText.trim().length > 0
+    && Buffer.byteLength(settlement.finalText, "utf8")
+      <= MAX_CONVERSATION_BODY_BYTES;
+}
+
+function abortError(message: string): Error {
+  const error = new Error(message);
+  error.name = "AbortError";
+  return error;
+}
+
+function raceWithAbort<T>(
+  operation: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T> {
+  if (!signal) return operation;
+  if (signal.aborted) {
+    return Promise.reject(abortError("Operation was aborted"));
+  }
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (settle: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      settle();
+    };
+    const onAbort = () => {
+      finish(() => reject(abortError("Operation was aborted")));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    void operation.then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error)),
+    );
+  });
+}
+
+function startRequestFingerprint(input: StartPeerSessionInput): string {
+  return createHash("sha256").update(JSON.stringify([
+    input.roleId,
+    input.task,
+    input.title ?? null,
+    input.temporary,
+  ])).digest("hex");
+}
+
+interface RoutedDialogOptions {
+  signal?: AbortSignal;
+  timeout?: number;
+}
+
+interface PendingExtensionUIRoute {
+  defaultValue: unknown;
+  invoke(delegate: PortableExtensionUI): Promise<unknown>;
+  resolve(value: unknown): void;
+  reject(error: unknown): void;
+  invoked: boolean;
+  signal?: AbortSignal;
+  abortListener?: () => void;
+  timer?: ReturnType<typeof setTimeout>;
+}
+
+class ConversationExtensionUIRouter {
+  private readonly delegates = new Map<symbol, PortableExtensionUI>();
+  private readonly pending = new Set<PendingExtensionUIRoute>();
+  private closed = false;
+
+  readonly ui: PortableExtensionUI = {
+    select: (title, options, dialogOptions) => this.route(
+      undefined,
+      dialogOptions,
+      (delegate, routedOptions) =>
+        delegate.select(title, options, routedOptions),
+    ),
+    confirm: (title, message, dialogOptions) => this.route(
+      false,
+      dialogOptions,
+      (delegate, routedOptions) =>
+        delegate.confirm(title, message, routedOptions),
+    ),
+    input: (title, placeholder, dialogOptions) => this.route(
+      undefined,
+      dialogOptions,
+      (delegate, routedOptions) =>
+        delegate.input(title, placeholder, routedOptions),
+    ),
+    editor: (title, prefill) => this.route(
+      undefined,
+      undefined,
+      (delegate) => delegate.editor(title, prefill),
+    ),
+    notify: (message, level) => {
+      if (this.closed) return;
+      const delegate = this.current();
+      if (!delegate) {
+        this.onUnavailable();
+        return;
+      }
+      delegate.notify(message, level);
+    },
+  };
+
+  constructor(private readonly onUnavailable: () => void) {}
+
+  attach(delegate: PortableExtensionUI): () => void {
+    if (this.closed) return () => undefined;
+    const token = Symbol("conversation-extension-ui");
+    this.delegates.set(token, delegate);
+    this.flush(delegate);
+    let attached = true;
+    return () => {
+      if (!attached) return;
+      attached = false;
+      this.delegates.delete(token);
+    };
+  }
+
+  clear(): void {
+    this.closed = true;
+    this.delegates.clear();
+    for (const request of [...this.pending]) {
+      this.settle(request, request.defaultValue);
+    }
+  }
+
+  private current(): PortableExtensionUI | undefined {
+    return [...this.delegates.values()].at(-1);
+  }
+
+  private route<Result>(
+    defaultValue: Result,
+    options: RoutedDialogOptions | undefined,
+    invoke: (
+      delegate: PortableExtensionUI,
+      options: RoutedDialogOptions | undefined,
+    ) => Promise<Result>,
+  ): Promise<Result> {
+    if (this.closed) return Promise.resolve(defaultValue);
+    if (
+      options?.signal?.aborted
+      || (
+        options?.timeout !== undefined
+        && Number.isFinite(options.timeout)
+        && options.timeout <= 0
+      )
+    ) {
+      return Promise.resolve(defaultValue);
+    }
+    return new Promise<Result>((resolve, reject) => {
+      const startedAt = Date.now();
+      const request: PendingExtensionUIRoute = {
+        defaultValue,
+        invoke: (nextDelegate) => {
+          const remaining = options?.timeout === undefined
+            ? undefined
+            : Math.max(0, options.timeout - (Date.now() - startedAt));
+          return invoke(nextDelegate, {
+            ...(options?.signal === undefined
+              ? {}
+              : { signal: options.signal }),
+            ...(remaining === undefined ? {} : { timeout: remaining }),
+          });
+        },
+        resolve: (value) => resolve(value as Result),
+        reject,
+        invoked: false,
+        ...(options?.signal === undefined
+          ? {}
+          : { signal: options.signal }),
+      };
+      if (request.signal) {
+        request.abortListener = () => {
+          this.settle(request, request.defaultValue);
+        };
+        request.signal.addEventListener(
+          "abort",
+          request.abortListener,
+          { once: true },
+        );
+      }
+      if (
+        options?.timeout !== undefined
+        && Number.isFinite(options.timeout)
+        && options.timeout > 0
+      ) {
+        request.timer = setTimeout(
+          () => this.settle(request, request.defaultValue),
+          Math.min(options.timeout, 2_147_483_647),
+        );
+      }
+      this.pending.add(request);
+      if (request.signal?.aborted) {
+        this.settle(request, request.defaultValue);
+        return;
+      }
+      const delegate = this.current();
+      if (delegate) {
+        this.invoke(request, delegate);
+      } else {
+        this.onUnavailable();
+      }
+    });
+  }
+
+  private flush(delegate: PortableExtensionUI): void {
+    for (const request of [...this.pending]) {
+      this.invoke(request, delegate);
+    }
+  }
+
+  private invoke(
+    request: PendingExtensionUIRoute,
+    delegate: PortableExtensionUI,
+  ): void {
+    if (!this.pending.has(request) || request.invoked) return;
+    request.invoked = true;
+    let operation: Promise<unknown>;
+    try {
+      operation = request.invoke(delegate);
+    } catch (error) {
+      this.fail(request, error);
+      return;
+    }
+    void operation.then(
+      (value) => this.settle(request, value),
+      (error) => this.fail(request, error),
+    );
+  }
+
+  private settle(request: PendingExtensionUIRoute, value: unknown): void {
+    if (!this.pending.has(request)) return;
+    this.remove(request);
+    request.resolve(value);
+  }
+
+  private fail(request: PendingExtensionUIRoute, error: unknown): void {
+    if (!this.pending.has(request)) return;
+    this.remove(request);
+    request.reject(error);
+  }
+
+  private remove(request: PendingExtensionUIRoute): void {
+    this.pending.delete(request);
+    if (request.timer) clearTimeout(request.timer);
+    if (request.signal && request.abortListener) {
+      request.signal.removeEventListener("abort", request.abortListener);
+    }
+  }
+}
+
+export class ProjectSessionCoordinator {
+  private readonly contexts = new Map<string, ProjectContext>();
+  private readonly contextOpenings = new Map<string, Promise<ProjectContext>>();
+  private readonly projectAcquisitions = new Set<Promise<ProjectSessionHandle>>();
+  private closing = false;
+  private disposed = false;
+  private closePromise?: Promise<void>;
+
+  constructor(
+    private readonly runtime: PiRuntimeLike,
+    private readonly roles: RoleCatalog,
+    private readonly projects: ProjectStoreRegistry = new ProjectStoreRegistry(),
+    private readonly projectRuns: ProjectRunCoordinator = new ProjectRunCoordinator(),
+    private readonly toolPolicy: ToolPolicy = defaultToolPolicy,
+    private readonly now: () => Date = () => new Date(),
+  ) {}
+
+  async acquireProject(
+    cwd: string,
+    seedToolMode: ToolMode,
+  ): Promise<ProjectSessionHandle> {
+    this.assertOpen();
+    const acquisition = this.acquireProjectInternal(cwd, seedToolMode);
+    this.projectAcquisitions.add(acquisition);
+    try {
+      return await acquisition;
+    } finally {
+      this.projectAcquisitions.delete(acquisition);
+    }
+  }
+
+  private async acquireProjectInternal(
+    cwd: string,
+    seedToolMode: ToolMode,
+  ): Promise<ProjectSessionHandle> {
+    const acquired = await this.projects.acquireProject(cwd, seedToolMode);
+    if (this.disposed) {
+      acquired.release();
+      this.assertOpen();
+    }
+    const key = contextKey(acquired.store.cwd);
+    const existing = this.contexts.get(key);
+    if (existing) {
+      acquired.release();
+      this.assertOpen();
+      if (existing.closing) {
+        throw new Error("Project context is closing");
+      }
+      existing.references++;
+      return new ProjectSessionHandle(existing);
+    }
+
+    const pending = this.contextOpenings.get(key);
+    if (pending) {
+      acquired.release();
+      const context = await pending;
+      this.assertOpen();
+      if (context.closing) throw new Error("Project context is closing");
+      context.references++;
+      return new ProjectSessionHandle(context);
+    }
+
+    const opening = this.openProjectContext(key, acquired);
+    this.contextOpenings.set(key, opening);
+    try {
+      const context = await opening;
+      this.assertOpen();
+      if (context.closing) throw new Error("Project context is closing");
+      return new ProjectSessionHandle(context);
+    } finally {
+      if (this.contextOpenings.get(key) === opening) {
+        this.contextOpenings.delete(key);
+      }
+    }
+  }
+
+  private async openProjectContext(
+    key: string,
+    projectHandle: ProjectStoreHandle,
+  ): Promise<ProjectContext> {
+    const project = projectHandle.store;
+    let unsubscribeProject: (() => void) | undefined;
+    try {
+      const inbox = await ProjectInbox.open(join(project.stateDir, "inbox"));
+      const contextDraft = {
+        key,
+        project,
+        projectHandle,
+        inbox,
+        actors: new Map(),
+        actorOpenings: new Map(),
+        actorUnsubscribes: new Map(),
+        profiles: new Map(),
+        attention: new Set(),
+        deleting: new Set(),
+        listeners: new Set(),
+        waiters: new Map(),
+        completions: new Map(),
+        processingBatches: new Map(),
+        failedBatchRetries: new Set(),
+        failedDispatchRetries: new Set(),
+        extensionUIRouters: new Map(),
+        lifecycle: new SerialTaskQueue(),
+        backgroundTasks: new Set(),
+        unsubscribeProject: () => undefined,
+        references: 1,
+        closing: false,
+      } satisfies ProjectContext;
+      unsubscribeProject = project.subscribe(() => {
+        this.emit(contextDraft, { type: "project_changed" });
+      });
+      const context: ProjectContext = {
+        ...contextDraft,
+        unsubscribeProject,
+      };
+      const conversations = await project.refreshConversations();
+      await inbox.pruneCompletedTargetTombstones(
+        new Set(conversations.map(({ id }) => id)),
+      );
+      for (const conversationId of await inbox.listDeletedTargets()) {
+        context.deleting.add(conversationId);
+      }
+      this.assertOpen();
+      this.contexts.set(key, context);
+      this.trackBackground(
+        context,
+        this.runLifecycle(context, () => this.recoverProject(context)),
+      );
+      return context;
+    } catch (error) {
+      unsubscribeProject?.();
+      projectHandle.release();
+      throw error;
+    }
+  }
+
+  subscribe(
+    handle: ProjectSessionHandle,
+    listener: ProjectSessionCoordinatorListener,
+  ): () => void {
+    const context = this.requireContext(handle);
+    context.listeners.add(listener);
+    let subscribed = true;
+    return () => {
+      if (!subscribed) return;
+      subscribed = false;
+      context.listeners.delete(listener);
+    };
+  }
+
+  listRoles(modelRegistry?: RoleCatalogModelRegistry) {
+    return this.roles.listRoles(modelRegistry);
+  }
+
+  async ensureProjectModelCatalog(
+    handle: ProjectSessionHandle,
+    extensionUI?: PortableExtensionUI,
+  ) {
+    const context = this.requireContext(handle);
+    if (context.modelCatalog) return context.modelCatalog.modelRegistry;
+
+    const pending = context.modelCatalogOpening;
+    if (pending) {
+      const catalog = await pending;
+      if (context.closing || this.disposed) {
+        throw new Error("Project context is closing");
+      }
+      return catalog.modelRegistry;
+    }
+
+    const createCatalog = this.runtime.createProjectModelCatalog;
+    const opening = (async () => {
+      const catalog = await createCatalog.call(
+        this.runtime,
+        context.project.cwd,
+        {
+          ...(extensionUI === undefined ? {} : { extensionUI }),
+        },
+      );
+      if (context.closing || this.disposed) {
+        await catalog.dispose();
+        throw new Error(
+          "Project context closed while its model catalog was opening",
+        );
+      }
+      context.modelCatalog = catalog;
+      return catalog;
+    })();
+    context.modelCatalogOpening = opening;
+    try {
+      const catalog = await opening;
+      if (context.closing || this.disposed) {
+        throw new Error("Project context is closing");
+      }
+      return catalog.modelRegistry;
+    } finally {
+      if (context.modelCatalogOpening === opening) {
+        context.modelCatalogOpening = undefined;
+      }
+    }
+  }
+
+  modelRegistryForProject(handle: ProjectSessionHandle) {
+    const context = this.requireContext(handle);
+    for (const actor of context.actors.values()) {
+      if (!actor.getState().disposed) return actor.modelRegistry;
+    }
+    return context.modelCatalog?.modelRegistry ?? this.runtime.modelRegistry;
+  }
+
+  async listSessions(
+    handle: ProjectSessionHandle,
+  ): Promise<ConversationSummary[]> {
+    const context = this.requireContext(handle);
+    const summaries = await context.project.refreshConversations();
+    return summaries.map((summary) => {
+      const actor = context.actors.get(summary.id);
+      const profile = actor?.profile ?? context.profiles.get(summary.id);
+      const activity = actor?.getActivity() ?? { kind: "idle" };
+      return {
+        ...summary,
+        ...(profile === undefined
+          ? {}
+          : {
+              role: {
+                id: profile.role.id,
+                revision: profile.role.revision,
+                name: profile.role.name,
+                description: profile.role.description,
+                model: { ...profile.role.model },
+              },
+              temporary: profile.lifecycle.kind === "temporary",
+            }),
+        activity,
+        attention: context.attention.has(summary.id),
+      };
+    });
+  }
+
+  async openConversation(
+    handle: ProjectSessionHandle,
+    conversationId: string,
+    options: { updateRecent?: boolean } = {},
+  ): Promise<ConversationActor> {
+    const context = this.requireContext(handle);
+    const actor = await this.getOrOpenActor(context, conversationId);
+    if (context.deleting.has(conversationId) || actor.getState().disposed) {
+      throw new Error(`Conversation is being deleted: ${conversationId}`);
+    }
+    if (options.updateRecent !== false) {
+      await context.project.setLastConversation(conversationId);
+      context.attention.delete(conversationId);
+      this.emit(context, { type: "project_changed" });
+    }
+    return actor;
+  }
+
+  async createUserConversation(
+    handle: ProjectSessionHandle,
+    input: CreateUserConversationInput,
+  ): Promise<ConversationActor> {
+    const context = this.requireContext(handle);
+    return this.runLifecycle(context, async () => {
+      const conversationId = randomUUID();
+      const detachExtensionUI = input.extensionUI
+        ? this.extensionUIRouter(context, conversationId)
+            .attach(input.extensionUI)
+        : undefined;
+      const profile: ConversationMeta = {
+        role: this.roles.getConversationRole(input.roleId),
+        lifecycle: { kind: "normal" },
+        createdBy: { kind: "user" },
+      };
+      try {
+        const actor = await this.createConversationActor(
+          context,
+          conversationId,
+          profile,
+          input.title,
+        );
+        await context.project.setLastConversation(actor.conversationId);
+        return actor;
+      } finally {
+        detachExtensionUI?.();
+      }
+    });
+  }
+
+  attachExtensionUI(
+    handle: ProjectSessionHandle,
+    conversationId: string,
+    extensionUI: PortableExtensionUI,
+  ): () => void {
+    const context = this.requireContext(handle);
+    if (context.deleting.has(conversationId)) {
+      throw new Error(`Conversation is being deleted: ${conversationId}`);
+    }
+    return this.extensionUIRouter(context, conversationId).attach(extensionUI);
+  }
+
+  async startPeerSession(
+    handle: ProjectSessionHandle,
+    sourceConversationId: string,
+    input: StartPeerSessionInput,
+    signal?: AbortSignal,
+  ): Promise<{ conversationId: string; runId: string; temporary: boolean }> {
+    const context = this.requireContext(handle);
+    return this.runLifecycle(context, async () => {
+      this.throwIfAborted(signal);
+      const source = this.requireActor(context, sourceConversationId);
+      const conversationId = deterministicUuid(
+        "piweb.start.conversation",
+        input.idempotencyKey,
+      );
+      const runId = deterministicUuid("piweb.start.run", input.idempotencyKey);
+      const delegationId = deterministicUuid(
+        "piweb.start.delegation",
+        input.idempotencyKey,
+      );
+      const returnMessageId = deterministicUuid(
+        "piweb.start.return",
+        input.idempotencyKey,
+      );
+      const messageId = deterministicUuid(
+        "piweb.start.message",
+        input.idempotencyKey,
+      );
+      const cardId = deterministicUuid(
+        "piweb.start.card",
+        input.idempotencyKey,
+      );
+      const requestFingerprint = startRequestFingerprint(input);
+
+      let existingCard = aggregateReservedConversationEntries(
+        source.sessionManager.getEntries(),
+      ).cards.find((card) => card.cardId === cardId);
+      let recoveredEnvelope = existingCard
+        ? await context.inbox.get(messageId)
+        : undefined;
+      if (existingCard) {
+        if (
+          existingCard.kind !== "delegation_task"
+          || existingCard.body !== input.task
+          || existingCard.delegationId !== delegationId
+          || existingCard.toSnapshot.conversationId !== conversationId
+          || existingCard.requestFingerprint !== requestFingerprint
+        ) {
+          throw new Error(
+            "start_session idempotency key conflicts with an earlier request",
+          );
+        }
+        if (existingCard.state !== "sending") {
+          return {
+            conversationId,
+            runId,
+            temporary: input.temporary,
+          };
+        }
+      }
+
+      const targetTitle = normalizedTitle(input.title, input.task);
+      const requestedRole = existingCard?.requestedRole
+        ?? this.roles.getConversationRole(input.roleId);
+      if (requestedRole.id !== input.roleId) {
+        throw new Error(
+          "start_session idempotency key conflicts with an earlier request",
+        );
+      }
+      if (!existingCard) {
+        const sentAt = this.now().toISOString();
+        existingCard = {
+          cardId,
+          kind: "delegation_task",
+          body: input.task,
+          fromSnapshot: this.endpoint(context, source),
+          toSnapshot: {
+            conversationId,
+            title: targetTitle,
+            role: {
+              id: requestedRole.id,
+              name: requestedRole.name,
+            },
+          },
+          state: "sending",
+          messageId,
+          delegationId,
+          requestFingerprint,
+          requestedRole,
+          updatedAt: sentAt,
+        };
+        this.appendCard(source, existingCard);
+      }
+
+      let target = context.actors.get(conversationId);
+      if (!target) {
+        const known = context.project.listConversations()
+          .some(({ id }) => id === conversationId);
+        if (known) {
+          target = await this.getOrOpenActor(context, conversationId);
+        } else {
+          const profile: ConversationMeta = {
+            role: requestedRole,
+            lifecycle: input.temporary
+              ? {
+                  kind: "temporary",
+                  callerConversationId: sourceConversationId,
+                  delegationId,
+                  returnMessageId,
+                  initialRunId: runId,
+                }
+              : { kind: "normal" },
+            createdBy: {
+              kind: "conversation",
+              conversationId: sourceConversationId,
+            },
+          };
+          target = await this.createConversationActor(
+            context,
+            conversationId,
+            profile,
+            targetTitle,
+          );
+        }
+      }
+      const lifecycle = target.profile.lifecycle;
+      const lifecycleMatches = input.temporary
+        ? (
+            lifecycle.kind === "temporary"
+            && lifecycle.callerConversationId === sourceConversationId
+            && lifecycle.delegationId === delegationId
+            && lifecycle.initialRunId === runId
+          )
+        : lifecycle.kind === "normal";
+      if (
+        JSON.stringify(target.profile.role) !== JSON.stringify(requestedRole)
+        || !lifecycleMatches
+      ) {
+        throw new Error(
+          "start_session idempotency key conflicts with an existing conversation",
+        );
+      }
+      const queued = await this.enqueueEnvelope(context, source, target, {
+        messageId,
+        cardId,
+        sentAt: recoveredEnvelope?.sentAt ?? existingCard.updatedAt,
+        kind: "delegation_task",
+        body: input.task,
+        delegationId,
+        requestFingerprint,
+        requestedRole,
+        processingRunId: runId,
+      });
+      const activity = target.getActivity();
+      if (activity.kind === "idle") {
+        const settled = this.findSettlement(context, target, runId);
+        if (!settled) {
+          await this.dispatchBatch(
+            context,
+            target,
+            [queued.envelope],
+            runId,
+          );
+        }
+      }
+      return {
+        conversationId,
+        runId,
+        temporary: input.temporary,
+      };
+    });
+  }
+
+  prompt(
+    handle: ProjectSessionHandle,
+    conversationId: string,
+    runId: string,
+    text: string,
+  ): Promise<RunSettlement> {
+    const context = this.requireContext(handle);
+    if (context.deleting.has(conversationId)) {
+      return Promise.reject(
+        new Error(`Conversation is being deleted: ${conversationId}`),
+      );
+    }
+    return this.requireActor(context, conversationId).startPrompt({
+      runId,
+      text,
+      origin: "browser",
+    });
+  }
+
+  abort(
+    handle: ProjectSessionHandle,
+    conversationId: string,
+    runId: string,
+  ): Promise<void> {
+    const context = this.requireContext(handle);
+    return this.requireActor(context, conversationId).abort(runId);
+  }
+
+  async renameConversation(
+    handle: ProjectSessionHandle,
+    conversationId: string,
+    title: string,
+  ): Promise<void> {
+    const context = this.requireContext(handle);
+    await this.runLifecycle(context, async () => {
+      const actor = await this.getOrOpenActor(context, conversationId);
+      actor.session.setSessionName(normalizedTitle(title, "新会话"));
+      await context.project.refreshConversations();
+    });
+  }
+
+  async deleteConversation(
+    handle: ProjectSessionHandle,
+    conversationId: string,
+  ): Promise<boolean> {
+    const context = this.requireContext(handle);
+    if (!this.reserveDeletion(context, conversationId)) return false;
+    return this.runLifecycle(context, () =>
+      this.deleteConversationInternal(
+        context,
+        conversationId,
+        false,
+        true,
+      )
+    );
+  }
+
+  conversationHistory(
+    handle: ProjectSessionHandle,
+    conversationId: string,
+  ) {
+    const context = this.requireContext(handle);
+    const actor = this.requireActor(context, conversationId);
+    return projectConversationItemsSnapshot(actor.sessionManager);
+  }
+
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.closing = true;
+    this.disposed = true;
+    const lifecycleClosures = new Map<ProjectContext, Promise<void>>();
+    for (const context of this.contexts.values()) {
+      context.closing = true;
+      lifecycleClosures.set(context, context.lifecycle.close());
+    }
+    this.closePromise = (async () => {
+      const failures: unknown[] = [];
+      await Promise.allSettled([...this.projectAcquisitions]);
+      this.projectAcquisitions.clear();
+      await Promise.allSettled([...this.contextOpenings.values()]);
+      this.contextOpenings.clear();
+      for (const context of this.contexts.values()) {
+        for (const router of context.extensionUIRouters.values()) {
+          router.clear();
+        }
+        for (const waiters of context.waiters.values()) {
+          for (const waiter of waiters) {
+            this.detachWaiter(waiter);
+            waiter.reject(new Error("Project session coordinator is closed"));
+          }
+        }
+        context.waiters.clear();
+        await (
+          lifecycleClosures.get(context)
+          ?? context.lifecycle.close()
+        );
+        if (context.modelCatalogOpening) {
+          await Promise.allSettled([context.modelCatalogOpening]);
+        }
+        if (context.modelCatalog) {
+          try {
+            await context.modelCatalog.dispose();
+          } catch (error) {
+            failures.push(error);
+          }
+          context.modelCatalog = undefined;
+        }
+        await Promise.allSettled([...context.actorOpenings.values()]);
+        for (const actor of context.actors.values()) {
+          try {
+            await actor.dispose();
+          } catch (error) {
+            failures.push(error);
+          }
+        }
+        await Promise.allSettled([...context.actorOpenings.values()]);
+        await this.drainBackground(context);
+        context.extensionUIRouters.clear();
+        try {
+          context.unsubscribeProject();
+        } catch (error) {
+          failures.push(error);
+        }
+        context.projectHandle.release();
+        context.listeners.clear();
+      }
+      this.contexts.clear();
+      if (failures.length > 0) {
+        throw new AggregateError(
+          failures,
+          "Failed to close project session coordinator",
+        );
+      }
+    })();
+    return this.closePromise;
+  }
+
+  private createConversationActor(
+    context: ProjectContext,
+    conversationId: string,
+    profile: ConversationMeta,
+    title?: string,
+  ): Promise<ConversationActor> {
+    if (context.closing || this.disposed) {
+      return Promise.reject(new Error("Project context is closing"));
+    }
+    if (context.deleting.has(conversationId)) {
+      return Promise.reject(
+        new Error(`Conversation is being deleted: ${conversationId}`),
+      );
+    }
+    const existing = context.actors.get(conversationId);
+    if (existing) {
+      return Promise.reject(
+        new Error(`Conversation is already active: ${conversationId}`),
+      );
+    }
+    const opening = context.actorOpenings.get(conversationId);
+    if (opening) return opening;
+    const creation = this.createOwnedConversationActor(
+      context,
+      conversationId,
+      profile,
+      title,
+    );
+    context.actorOpenings.set(conversationId, creation);
+    void creation.finally(() => {
+      if (context.actorOpenings.get(conversationId) === creation) {
+        context.actorOpenings.delete(conversationId);
+      }
+    }).catch(() => undefined);
+    return creation;
+  }
+
+  private async createOwnedConversationActor(
+    context: ProjectContext,
+    conversationId: string,
+    profile: ConversationMeta,
+    title?: string,
+  ): Promise<ConversationActor> {
+    const lease = this.projects.acquireConversation(
+      context.project.cwd,
+      conversationId,
+    );
+    let manager;
+    let actor: ConversationActor | undefined;
+    try {
+      manager = await context.project.createConversation(
+        conversationId,
+        profile,
+        { updateRecent: profile.createdBy.kind === "user" },
+      );
+      actor = await this.openOwnedActor(
+        context,
+        conversationId,
+        manager,
+        lease,
+        profile,
+      );
+      if (title) actor.session.setSessionName(title);
+      await context.project.refreshConversations();
+      return actor;
+    } catch (error) {
+      let deletion;
+      try {
+        if (actor) {
+          context.actorUnsubscribes.get(conversationId)?.();
+          context.actorUnsubscribes.delete(conversationId);
+          context.actors.delete(conversationId);
+          context.profiles.delete(conversationId);
+          deletion = await actor.dispose({
+            transferLeaseForDeletion: true,
+          });
+        } else {
+          lease.release();
+          const cleanup = this.projects.acquireConversation(
+            context.project.cwd,
+            conversationId,
+          );
+          deletion = cleanup.upgradeToDeletion();
+        }
+        await context.project.deleteConversation(conversationId);
+      } catch {
+        // Preserve the original creation failure.
+      } finally {
+        deletion?.release();
+      }
+      throw error;
+    }
+  }
+
+  private getOrOpenActor(
+    context: ProjectContext,
+    conversationId: string,
+  ): Promise<ConversationActor> {
+    if (context.closing || this.disposed) {
+      return Promise.reject(new Error("Project context is closing"));
+    }
+    if (context.deleting.has(conversationId)) {
+      return Promise.reject(
+        new Error(`Conversation is being deleted: ${conversationId}`),
+      );
+    }
+    const existing = context.actors.get(conversationId);
+    if (existing) return Promise.resolve(existing);
+    const opening = context.actorOpenings.get(conversationId);
+    if (opening) return opening;
+
+    const promise = (async () => {
+      const lease = await this.projects.acquireConversationWhenAvailable(
+        context.project.cwd,
+        conversationId,
+      );
+      try {
+        const manager = await context.project.openConversation(
+          conversationId,
+          { updateRecent: false },
+        );
+        const profile = this.loadOrMigrateProfile(manager);
+        return await this.openOwnedActor(
+          context,
+          conversationId,
+          manager,
+          lease,
+          profile,
+        );
+      } catch (error) {
+        lease.release();
+        throw error;
+      }
+    })();
+    context.actorOpenings.set(conversationId, promise);
+    void promise.finally(() => {
+      if (context.actorOpenings.get(conversationId) === promise) {
+        context.actorOpenings.delete(conversationId);
+      }
+    }).catch(() => undefined);
+    return promise;
+  }
+
+  private async openOwnedActor(
+    context: ProjectContext,
+    conversationId: string,
+    manager: Awaited<ReturnType<ProjectStore["openConversation"]>>,
+    lease: ReturnType<ProjectStoreRegistry["acquireConversation"]>,
+    profile: ConversationMeta,
+  ): Promise<ConversationActor> {
+    let actor!: ConversationActor;
+    actor = await ConversationActor.open({
+      conversationId,
+      profile,
+      project: context.project,
+      sessionManager: manager,
+      conversationLease: lease,
+      runtime: this.runtime,
+      projectRuns: this.projectRuns,
+      toolPolicy: this.toolPolicy,
+      createSessionOptions: {
+        model: { ...profile.role.model },
+        roleSystemPrompt: profile.role.systemPrompt,
+        extensionUI: this.extensionUIRouter(context, conversationId).ui,
+        workbenchCustomTools: createMetaTools(
+          conversationId,
+          this.metaService(context),
+        ),
+      },
+      persistSettlement: (settlement, sessionManager) => {
+        appendReservedCustomEntry(
+          sessionManager,
+          createRunSettlementEntry(settlement),
+        );
+      },
+      onCompletion: (completion) => {
+        this.onActorCompletion(context, actor, completion);
+      },
+    });
+    if (
+      context.closing
+      || this.disposed
+      || context.deleting.has(conversationId)
+    ) {
+      await actor.dispose();
+      throw new Error(
+        context.deleting.has(conversationId)
+          ? `Conversation is being deleted: ${conversationId}`
+          : "Project context closed while conversation was opening",
+      );
+    }
+    context.actors.set(conversationId, actor);
+    context.profiles.set(conversationId, cloneProfile(profile));
+    const unsubscribe = actor.subscribe((event) => {
+      if (event.type === "error") context.attention.add(conversationId);
+      this.emit(context, event);
+    });
+    context.actorUnsubscribes.set(conversationId, unsubscribe);
+    this.emit(context, { type: "project_changed" });
+    this.trackBackground(context, this.recoverTemporary(context, actor));
+    this.trackBackground(
+      context,
+      this.runLifecycle(
+        context,
+        () => this.pumpTarget(context, conversationId),
+      ),
+    );
+    return actor;
+  }
+
+  private loadOrMigrateProfile(
+    manager: Awaited<ReturnType<ProjectStore["openConversation"]>>,
+  ): ConversationMeta {
+    const aggregate = aggregateReservedConversationEntries(
+      manager.getEntries(),
+    );
+    if (aggregate.conversationMeta) {
+      return cloneProfile(aggregate.conversationMeta);
+    }
+
+    const defaultRole = this.roles.getRoleTemplate("default");
+    const legacyModel = manager.buildSessionContext().model;
+    const model = legacyModel === null
+      ? defaultRole.model
+      : {
+          provider: legacyModel.provider,
+          id: legacyModel.modelId,
+        };
+    if (model === null) {
+      throw new Error(
+        "The legacy conversation has no model and the default role has no model",
+      );
+    }
+    const profile: ConversationMeta = {
+      role: {
+        id: defaultRole.id,
+        revision: defaultRole.revision,
+        name: defaultRole.name,
+        description: defaultRole.description,
+        systemPrompt: "",
+        model: { ...model },
+      },
+      lifecycle: { kind: "normal" },
+      createdBy: { kind: "user" },
+    };
+    appendReservedCustomEntry(
+      manager,
+      createConversationMetaEntry(profile),
+    );
+    return profile;
+  }
+
+  private metaService(context: ProjectContext): MetaToolService {
+    return {
+      listRoles: async (sourceConversationId) =>
+        this.roles.listRoles(
+          this.requireActor(context, sourceConversationId).modelRegistry,
+        ).map((role) => ({
+          id: role.id,
+          name: role.name,
+          description: role.description,
+          model: role.model,
+          available: role.available,
+          ...(role.unavailableReason
+            ? { unavailableReason: role.unavailableReason }
+            : {}),
+        })),
+      listSessions: async (sourceConversationId, input) => {
+        const sessions = await this.listSessionsForMeta(
+          context,
+          sourceConversationId,
+          input.limit,
+          input.cursor,
+        );
+        return sessions;
+      },
+      currentSession: async (sourceConversationId) =>
+        this.describeSession(context, sourceConversationId, sourceConversationId),
+      peekSession: async (_sourceConversationId, input) => ({
+        conversationId: input.conversationId,
+        ...await this.runLifecycle(context, () => {
+          if (context.deleting.has(input.conversationId)) {
+            throw new Error(
+              `Conversation is being deleted: ${input.conversationId}`,
+            );
+          }
+          return this.peekSession(
+            context,
+            input.conversationId,
+            input.limit,
+          );
+        }),
+      }),
+      startSession: (
+        sourceConversationId,
+        input,
+        signal,
+      ) => this.startPeerSession(
+        new ProjectSessionHandle(context),
+        sourceConversationId,
+        input,
+        signal,
+      ),
+      sendSessionMessage: (
+        sourceConversationId,
+        input,
+        signal,
+      ) => this.sendSessionMessage(
+        context,
+        sourceConversationId,
+        input.conversationId,
+        input.message,
+        input.idempotencyKey,
+        signal,
+      ),
+      waitForSession: (
+        sourceConversationId,
+        input,
+        signal,
+      ) => {
+        if (!input.runId) {
+          throw new Error("wait_for_session requires an exact runId");
+        }
+        return this.waitForSession(
+          context,
+          sourceConversationId,
+          input.conversationId,
+          input.runId,
+          signal,
+        );
+      },
+      abortSession: async (sourceConversationId, input) => {
+        if (sourceConversationId === input.conversationId) {
+          throw new Error("An Agent cannot abort its own current run");
+        }
+        return this.runLifecycle(context, async () => {
+          const source = this.requireActor(context, sourceConversationId);
+          const operationId = deterministicUuid(
+            "piweb.abort.operation",
+            input.idempotencyKey,
+          );
+          const existing = aggregateReservedConversationEntries(
+            source.sessionManager.getEntries(),
+          ).metaOperations.find(
+            (operation) => operation.operationId === operationId,
+          );
+          if (
+            existing
+            && (
+              existing.kind !== "abort_session"
+              || existing.targetConversationId !== input.conversationId
+              || existing.runId !== input.runId
+            )
+          ) {
+            throw new Error(
+              "abort_session idempotency key conflicts with an earlier request",
+            );
+          }
+          if (existing?.kind === "abort_session") {
+            if (existing.state === "completed") {
+              return { ...existing.result };
+            }
+            if (existing.result.aborted) {
+              const target = context.actors.get(input.conversationId);
+              const activity = target?.getActivity();
+              if (
+                target
+                && activity
+                && activity.kind !== "idle"
+                && activity.runId === input.runId
+              ) {
+                await target.abort(input.runId);
+              }
+            }
+            appendReservedCustomEntry(
+              source.sessionManager,
+              createMetaOperationEntry({
+                ...existing,
+                state: "completed",
+                updatedAt: this.now().toISOString(),
+              }),
+            );
+            return { ...existing.result };
+          }
+
+          const target = await this.getOrOpenActor(
+            context,
+            input.conversationId,
+          );
+          const activity = target.getActivity();
+          const result = (
+            activity.kind !== "idle"
+            && activity.runId === input.runId
+          )
+            ? { aborted: true as const }
+            : {
+                aborted: false as const,
+                reason: "run_not_active" as const,
+              };
+          const startedAt = this.now().toISOString();
+          appendReservedCustomEntry(
+            source.sessionManager,
+            createMetaOperationEntry({
+              operationId,
+              kind: "abort_session",
+              targetConversationId: input.conversationId,
+              runId: input.runId,
+              result,
+              state: "started",
+              updatedAt: startedAt,
+            }),
+          );
+          if (result.aborted) await target.abort(input.runId);
+          appendReservedCustomEntry(
+            source.sessionManager,
+            createMetaOperationEntry({
+              operationId,
+              kind: "abort_session",
+              targetConversationId: input.conversationId,
+              runId: input.runId,
+              result,
+              state: "completed",
+              updatedAt: this.now().toISOString(),
+            }),
+          );
+          return { ...result };
+        });
+      },
+      deleteSession: async (sourceConversationId, input) => {
+        if (sourceConversationId === input.conversationId) {
+          throw new Error("An Agent cannot delete its own session");
+        }
+        if (!this.reserveDeletion(context, input.conversationId)) {
+          throw new Error(
+            `Conversation is being deleted: ${input.conversationId}`,
+          );
+        }
+        let deletionOwnsReservation = false;
+        return this.runLifecycle(context, async () => {
+          const source = this.requireActor(context, sourceConversationId);
+          const operationId = deterministicUuid(
+            "piweb.delete.operation",
+            input.idempotencyKey,
+          );
+          const existing = aggregateReservedConversationEntries(
+            source.sessionManager.getEntries(),
+          ).metaOperations.find(
+            (operation) => operation.operationId === operationId,
+          );
+          if (
+            existing
+            && (
+              existing.kind !== "delete_session"
+              || existing.targetConversationId !== input.conversationId
+            )
+          ) {
+            throw new Error(
+              "delete_session idempotency key conflicts with an earlier request",
+            );
+          }
+          if (
+            existing?.kind === "delete_session"
+            && existing.state === "completed"
+          ) {
+            return { deleted: existing.deleted };
+          }
+
+          if (!existing) {
+            appendReservedCustomEntry(
+              source.sessionManager,
+              createMetaOperationEntry({
+                operationId,
+                kind: "delete_session",
+                targetConversationId: input.conversationId,
+                state: "started",
+                updatedAt: this.now().toISOString(),
+              }),
+            );
+          }
+          const targetExists = context.actors.has(input.conversationId)
+            || context.project.listConversations().some(
+              ({ id }) => id === input.conversationId,
+            );
+          const resumedAfterDeletion = existing !== undefined && !targetExists;
+          deletionOwnsReservation = !resumedAfterDeletion;
+          const deleted = resumedAfterDeletion
+            ? true
+            : await this.deleteConversationInternal(
+                context,
+                input.conversationId,
+                false,
+                true,
+              );
+          appendReservedCustomEntry(
+            source.sessionManager,
+            createMetaOperationEntry({
+              operationId,
+              kind: "delete_session",
+              targetConversationId: input.conversationId,
+              state: "completed",
+              deleted,
+              updatedAt: this.now().toISOString(),
+            }),
+          );
+          return { deleted };
+        }).finally(() => {
+          if (!deletionOwnsReservation) {
+            context.deleting.delete(input.conversationId);
+          }
+        });
+      },
+    };
+  }
+
+  private async listSessionsForMeta(
+    context: ProjectContext,
+    sourceConversationId: string,
+    limit: number,
+    cursor?: string,
+  ) {
+    const summaries = await this.listSessions(new ProjectSessionHandle(context));
+    let offset = 0;
+    if (cursor) {
+      const parsed = Number.parseInt(
+        Buffer.from(cursor, "base64url").toString("utf8"),
+        10,
+      );
+      if (!Number.isSafeInteger(parsed) || parsed < 0) {
+        throw new Error("Invalid session cursor");
+      }
+      offset = parsed;
+    }
+    const selected = summaries.slice(offset, offset + limit);
+    return {
+      sessions: selected.map((summary) => ({
+        conversationId: summary.id,
+        title: summary.name || summary.preview || "未命名会话",
+        role: summary.role,
+        activity: summary.activity,
+        lastActiveAt: summary.updatedAt,
+        attention: summary.attention ?? false,
+        temporary: summary.temporary ?? false,
+        self: summary.id === sourceConversationId,
+      })),
+      nextCursor: offset + selected.length < summaries.length
+        ? Buffer.from(String(offset + selected.length), "utf8")
+            .toString("base64url")
+        : undefined,
+    };
+  }
+
+  private async describeSession(
+    context: ProjectContext,
+    conversationId: string,
+    sourceConversationId: string,
+  ) {
+    const summaries = await this.listSessions(new ProjectSessionHandle(context));
+    const summary = summaries.find(({ id }) => id === conversationId);
+    if (!summary) throw new Error(`Conversation not found: ${conversationId}`);
+    return {
+      conversationId,
+      title: summary.name || summary.preview || "未命名会话",
+      role: summary.role,
+      activity: summary.activity,
+      lastActiveAt: summary.updatedAt,
+      temporary: summary.temporary ?? false,
+      self: conversationId === sourceConversationId,
+    };
+  }
+
+  private async peekSession(
+    context: ProjectContext,
+    conversationId: string,
+    limit: number,
+  ): Promise<ReturnType<typeof projectAgentConversationPeek>> {
+    const active = context.actors.get(conversationId);
+    if (active) {
+      return projectAgentConversationPeek(active.sessionManager, limit);
+    }
+    const opening = context.actorOpenings.get(conversationId);
+    if (opening) {
+      const actor = await opening;
+      return projectAgentConversationPeek(actor.sessionManager, limit);
+    }
+
+    const lease = await this.projects.acquireConversationWhenAvailable(
+      context.project.cwd,
+      conversationId,
+    );
+    try {
+      const manager = await context.project.openConversation(
+        conversationId,
+        { updateRecent: false },
+      );
+      return projectAgentConversationPeek(manager, limit);
+    } finally {
+      lease.release();
+    }
+  }
+
+  private async sendSessionMessage(
+    context: ProjectContext,
+    sourceConversationId: string,
+    targetConversationId: string,
+    message: string,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ) {
+    return this.runLifecycle(context, async () => {
+      this.throwIfAborted(signal);
+      if (sourceConversationId === targetConversationId) {
+        throw new Error("Use the current conversation directly instead of messaging itself");
+      }
+      const source = this.requireActor(context, sourceConversationId);
+      const messageId = deterministicUuid("piweb.message", idempotencyKey);
+      const cardId = deterministicUuid("piweb.card", idempotencyKey);
+      const existingCard = aggregateReservedConversationEntries(
+        source.sessionManager.getEntries(),
+      ).cards.find((card) => card.cardId === cardId);
+      const recoveredEnvelope = existingCard
+        ? await context.inbox.get(messageId)
+        : undefined;
+      if (
+        existingCard
+        && (
+          existingCard.kind !== "message"
+          || existingCard.body !== message
+          || existingCard.toSnapshot.conversationId !== targetConversationId
+        )
+      ) {
+        throw new Error(
+          "send_session_message idempotency key conflicts with an earlier request",
+        );
+      }
+      if (existingCard && existingCard.state !== "sending") {
+        if (recoveredEnvelope?.state === "processing") {
+          return {
+            status: "processing",
+            messageId,
+            conversationId: targetConversationId,
+            runId: recoveredEnvelope.processingRunId,
+          };
+        }
+        return {
+          status: recoveredEnvelope ? "queued" : existingCard.state,
+          messageId,
+          conversationId: targetConversationId,
+          ...(existingCard.runId === undefined
+            ? {}
+            : { runId: existingCard.runId }),
+        };
+      }
+      const target = await this.getOrOpenActor(context, targetConversationId);
+      this.throwIfAborted(signal);
+      const queued = await this.enqueueEnvelope(context, source, target, {
+        messageId,
+        cardId,
+        sentAt: recoveredEnvelope?.sentAt ?? this.now().toISOString(),
+        kind: "message",
+        body: message,
+      });
+      const envelope = queued.envelope;
+      if (
+        queued.status === "existing"
+        && envelope.state === "processing"
+      ) {
+        return {
+          status: "processing",
+          messageId: envelope.messageId,
+          conversationId: targetConversationId,
+          runId: envelope.processingRunId,
+        };
+      }
+      if (target.getActivity().kind === "idle") {
+        await this.pumpTarget(context, targetConversationId);
+      }
+      const stored = await context.inbox.get(envelope.messageId);
+      if (stored?.state === "processing") {
+        return {
+          status: "processing",
+          messageId: envelope.messageId,
+          conversationId: targetConversationId,
+          runId: stored.processingRunId,
+        };
+      }
+      const latestCard = aggregateReservedConversationEntries(
+        source.sessionManager.getEntries(),
+      ).cards.find(({ cardId: candidate }) => candidate === cardId);
+      if (!stored && latestCard && latestCard.state !== "queued") {
+        return {
+          status: latestCard.state,
+          messageId: envelope.messageId,
+          conversationId: targetConversationId,
+          ...(latestCard.runId === undefined
+            ? {}
+            : { runId: latestCard.runId }),
+        };
+      }
+      const activity = target.getActivity();
+      this.emit(context, { type: "project_changed" });
+      return {
+        status: "queued",
+        messageId: envelope.messageId,
+        conversationId: targetConversationId,
+        ...(activity.kind === "idle"
+          ? {}
+          : { activeRunId: activity.runId }),
+      };
+    });
+  }
+
+  private async enqueueEnvelope(
+    context: ProjectContext,
+    source: ConversationActor,
+    target: ConversationActor,
+    input: Pick<
+      InboxEnvelopeInput,
+      "messageId" | "cardId" | "sentAt" | "kind" | "body" | "delegationId"
+    > & {
+      processingRunId?: string;
+      requestFingerprint?: string;
+      requestedRole?: ConversationMeta["role"];
+    },
+  ): Promise<{
+    status: "created" | "existing";
+    envelope: InboxEnvelope;
+  }> {
+    const fromSnapshot = this.endpoint(context, source);
+    const toSnapshot = this.endpoint(context, target);
+    const existingCard = aggregateReservedConversationEntries(
+      source.sessionManager.getEntries(),
+    ).cards.find(({ cardId }) => cardId === input.cardId);
+    const baseCard: ConversationCard = existingCard ?? {
+        cardId: input.cardId,
+        kind: input.kind,
+        body: input.body,
+        fromSnapshot,
+        toSnapshot,
+        state: "sending",
+        messageId: input.messageId,
+        ...(input.delegationId === undefined
+          ? {}
+          : { delegationId: input.delegationId }),
+        ...(input.requestFingerprint === undefined
+          ? {}
+          : { requestFingerprint: input.requestFingerprint }),
+        ...(input.requestedRole === undefined
+          ? {}
+          : { requestedRole: input.requestedRole }),
+        updatedAt: input.sentAt,
+      };
+    this.appendCard(source, baseCard);
+    const result = await context.inbox.put({
+      messageId: input.messageId,
+      cardId: input.cardId,
+      fromConversationId: source.conversationId,
+      toConversationId: target.conversationId,
+      sentAt: input.sentAt,
+      kind: input.kind,
+      body: input.body,
+      ...(input.delegationId === undefined
+        ? {}
+        : { delegationId: input.delegationId }),
+      ...(input.requestFingerprint === undefined
+        ? {}
+        : { requestFingerprint: input.requestFingerprint }),
+      fromSnapshot,
+      toSnapshot,
+    });
+    const envelope = input.processingRunId === undefined
+      ? result.envelope
+      : await context.inbox.updateState(result.envelope.messageId, {
+          state: "processing",
+          processingRunId: input.processingRunId,
+        });
+    this.appendCard(source, {
+      ...baseCard,
+      state: "queued",
+      updatedAt: this.now().toISOString(),
+    });
+    this.emit(context, { type: "project_changed" });
+    return {
+      status: result.status,
+      envelope,
+    };
+  }
+
+  private endpoint(
+    context: ProjectContext,
+    actor: ConversationActor,
+  ): ConversationReferenceSnapshot {
+    const summary = context.project.listConversations()
+      .find(({ id }) => id === actor.conversationId);
+    return {
+      conversationId: actor.conversationId,
+      ...(summary?.name ? { title: summary.name } : {}),
+      role: {
+        id: actor.profile.role.id,
+        name: actor.profile.role.name,
+      },
+    };
+  }
+
+  private appendCard(actor: ConversationActor, card: ConversationCard): void {
+    appendReservedCustomEntry(
+      actor.sessionManager,
+      createConversationCardEntry(card),
+    );
+  }
+
+  private appendSourceCardState(
+    context: ProjectContext,
+    envelope: InboxEnvelope,
+    state: ConversationCard["state"],
+    runId?: string,
+    result?: string,
+  ): void {
+    const source = context.actors.get(envelope.fromConversationId);
+    if (!source) return;
+    const existing = aggregateReservedConversationEntries(
+      source.sessionManager.getEntries(),
+    ).cards.find(({ cardId }) => cardId === envelope.cardId);
+    if (
+      existing?.state === state
+      && existing.runId === runId
+      && existing.result === result
+    ) {
+      return;
+    }
+    this.appendCard(source, {
+      ...(existing ?? {
+        cardId: envelope.cardId,
+        kind: envelope.kind,
+        body: envelope.body,
+        fromSnapshot: envelope.fromSnapshot,
+        toSnapshot: envelope.toSnapshot,
+        messageId: envelope.messageId,
+        ...(envelope.delegationId === undefined
+          ? {}
+          : { delegationId: envelope.delegationId }),
+      }),
+      state,
+      ...(runId === undefined ? {} : { runId }),
+      ...(result === undefined ? {} : { result }),
+      updatedAt: this.now().toISOString(),
+    });
+  }
+
+  private async appendTerminalSourceCardState(
+    context: ProjectContext,
+    envelope: InboxEnvelope,
+    state: "completed" | "failed" | "aborted",
+    runId?: string,
+    result?: string,
+  ): Promise<void> {
+    const append = (manager: ConversationActor["sessionManager"]) => {
+      const existing = aggregateReservedConversationEntries(
+        manager.getEntries(),
+      ).cards.find(({ cardId }) => cardId === envelope.cardId);
+      if (
+        existing?.state === state
+        && existing.runId === runId
+        && existing.result === result
+      ) {
+        return;
+      }
+      appendReservedCustomEntry(
+        manager,
+        createConversationCardEntry({
+          ...(existing ?? {
+            cardId: envelope.cardId,
+            kind: envelope.kind,
+            body: envelope.body,
+            fromSnapshot: envelope.fromSnapshot,
+            toSnapshot: envelope.toSnapshot,
+            messageId: envelope.messageId,
+            ...(envelope.delegationId === undefined
+              ? {}
+              : { delegationId: envelope.delegationId }),
+          }),
+          state,
+          ...(runId === undefined ? {} : { runId }),
+          ...(result === undefined ? {} : { result }),
+          updatedAt: this.now().toISOString(),
+        }),
+      );
+    };
+
+    const activeSource = context.actors.get(envelope.fromConversationId);
+    if (activeSource) {
+      append(activeSource.sessionManager);
+      return;
+    }
+    const sourceExists = (await context.project.refreshConversations())
+      .some(({ id }) => id === envelope.fromConversationId);
+    if (!sourceExists) return;
+
+    const lease = await this.projects.acquireConversationWhenAvailable(
+      context.project.cwd,
+      envelope.fromConversationId,
+    );
+    try {
+      const manager = await context.project.openConversation(
+        envelope.fromConversationId,
+        { updateRecent: false },
+      );
+      append(manager);
+    } finally {
+      lease.release();
+    }
+  }
+
+  private async dispatchBatch(
+    context: ProjectContext,
+    target: ConversationActor,
+    envelopes: InboxEnvelope[],
+    runId: string,
+    deliveredMessageIds: ReadonlySet<string> = new Set(),
+  ): Promise<void> {
+    if (target.getActivity().kind !== "idle") {
+      throw new Error(`Conversation is already running: ${target.conversationId}`);
+    }
+    for (const envelope of envelopes) {
+      if (
+        envelope.state !== "processing"
+        || envelope.processingRunId !== runId
+      ) {
+        await context.inbox.updateState(envelope.messageId, {
+          state: "processing",
+          processingRunId: runId,
+        });
+      }
+    }
+    const processing = envelopes.map((envelope) => ({
+      ...envelope,
+      state: "processing" as const,
+      processingRunId: runId,
+    }));
+    context.processingBatches.set(
+      completionKey(target.conversationId, runId),
+      processing,
+    );
+    let completion: Promise<RunSettlement>;
+    try {
+      const undelivered = processing.filter(
+        ({ messageId }) => !deliveredMessageIds.has(messageId),
+      );
+      completion = undelivered.length === 0
+        ? target.resumeMessages({ runId })
+        : target.startMessages({
+            runId,
+            messages: undelivered.map((envelope) => {
+              const content = [
+                `来自会话：${envelope.fromSnapshot.title ?? "未命名会话"}`,
+                `来源角色：${envelope.fromSnapshot.role.name}`,
+                `来源句柄：${envelope.fromConversationId}`,
+                "",
+                envelope.body,
+                "",
+                `如需回复，请调用 send_session_message 并使用 conversationId ${envelope.fromConversationId}。`,
+              ].join("\n");
+              const message = createConversationMessageEntry({
+                content,
+                display: true,
+                details: {
+                  messageId: envelope.messageId,
+                  cardId: envelope.cardId,
+                  sentAt: envelope.sentAt,
+                  kind: envelope.kind,
+                  body: envelope.body,
+                  fromSnapshot: envelope.fromSnapshot,
+                  toSnapshot: envelope.toSnapshot,
+                  ...(envelope.replyToMessageId === undefined
+                    ? {}
+                    : { replyToMessageId: envelope.replyToMessageId }),
+                  ...(envelope.delegationId === undefined
+                    ? {}
+                    : { delegationId: envelope.delegationId }),
+                },
+              });
+              return {
+                content: message.content,
+                display: message.display,
+                details: message.details,
+              };
+            }),
+        });
+      for (const envelope of processing) {
+        this.appendSourceCardState(
+          context,
+          envelope,
+          "running",
+          runId,
+        );
+      }
+    } catch (error) {
+      context.processingBatches.delete(
+        completionKey(target.conversationId, runId),
+      );
+      for (const envelope of envelopes) {
+        await context.inbox.updateState(
+          envelope.messageId,
+          envelope.state === "processing"
+            ? {
+                state: "processing",
+                processingRunId: envelope.processingRunId!,
+              }
+            : { state: "queued" },
+        );
+      }
+      const retryKey = dispatchRetryKey(
+        target.conversationId,
+        envelopes,
+      );
+      context.attention.add(target.conversationId);
+      this.emit(context, {
+        type: "error",
+        conversationId: target.conversationId,
+        runId,
+        message: error instanceof Error ? error.message : String(error),
+        fatal: false,
+      });
+      if (
+        !context.closing
+        && !context.failedDispatchRetries.has(retryKey)
+      ) {
+        context.failedDispatchRetries.add(retryKey);
+        this.trackBackground(
+          context,
+          this.runLifecycle(context, () =>
+            this.pumpTarget(context, target.conversationId)
+          ),
+        );
+      }
+      return;
+    }
+    this.trackBackground(context, completion.then(
+      () => undefined,
+      (error) => this.runLifecycle(context, () => this.recoverFailedBatch(
+        context,
+        target.conversationId,
+        runId,
+        error,
+      )),
+    ));
+  }
+
+  private async finishBatch(
+    context: ProjectContext,
+    targetConversationId: string,
+    runId: string,
+    settlement: RunSettlement,
+  ): Promise<void> {
+    const key = completionKey(targetConversationId, runId);
+    const envelopes = context.processingBatches.get(key) ?? [];
+    context.processingBatches.delete(key);
+    context.failedBatchRetries.delete(key);
+    if (envelopes.length > 0) {
+      context.failedDispatchRetries.delete(
+        dispatchRetryKey(targetConversationId, envelopes),
+      );
+    }
+    for (const envelope of envelopes) {
+      const state = settlement.outcome === "completed"
+        ? "completed"
+        : settlement.outcome;
+      await this.appendTerminalSourceCardState(
+        context,
+        envelope,
+        state,
+        runId,
+        settlement.finalText ?? undefined,
+      );
+      await context.inbox.delete(envelope.messageId);
+    }
+    this.emit(context, { type: "project_changed" });
+  }
+
+  private async recoverFailedBatch(
+    context: ProjectContext,
+    targetConversationId: string,
+    runId: string,
+    error: unknown,
+  ): Promise<void> {
+    const key = completionKey(targetConversationId, runId);
+    context.processingBatches.delete(key);
+    context.attention.add(targetConversationId);
+    this.emit(context, {
+      type: "error",
+      conversationId: targetConversationId,
+      runId,
+      message: error instanceof Error ? error.message : String(error),
+      fatal: true,
+    });
+    if (context.failedBatchRetries.has(key) || context.closing) return;
+    context.failedBatchRetries.add(key);
+
+    const failedActor = context.actors.get(targetConversationId);
+    if (failedActor) {
+      context.actorUnsubscribes.get(targetConversationId)?.();
+      context.actorUnsubscribes.delete(targetConversationId);
+      await failedActor.dispose();
+      if (context.actors.get(targetConversationId) === failedActor) {
+        context.actors.delete(targetConversationId);
+      }
+    }
+    await this.getOrOpenActor(context, targetConversationId);
+    await this.pumpTarget(context, targetConversationId);
+  }
+
+  private onActorCompletion(
+    context: ProjectContext,
+    actor: ConversationActor,
+    completion: ConversationActorCompletion,
+  ): void {
+    this.recordCompletion(
+      context,
+      actor.conversationId,
+      completion.settlement,
+    );
+    if (context.closing) return;
+    this.trackBackground(context, this.runLifecycle(context, async () => {
+      await this.finishBatch(
+        context,
+        actor.conversationId,
+        completion.settlement.runId,
+        completion.settlement,
+      );
+      await this.handleTemporaryCompletion(
+        context,
+        actor,
+        completion.settlement,
+      );
+      if (context.actors.get(actor.conversationId) === actor) {
+        await this.pumpTarget(context, actor.conversationId);
+      }
+    }).catch((error) => {
+      context.attention.add(actor.conversationId);
+      this.emit(context, {
+        type: "error",
+        conversationId: actor.conversationId,
+        runId: completion.settlement.runId,
+        message: error instanceof Error ? error.message : String(error),
+        fatal: false,
+      });
+    }));
+  }
+
+  private recordCompletion(
+    context: ProjectContext,
+    conversationId: string,
+    settlement: RunSettlement,
+  ): void {
+    const key = completionKey(conversationId, settlement.runId);
+    if (!context.completions.has(key)) {
+      context.completions.set(key, cloneSettlement(settlement));
+      while (context.completions.size > MAX_COMPLETION_CACHE) {
+        const oldest = context.completions.keys().next().value as
+          | string
+          | undefined;
+        if (oldest === undefined) break;
+        context.completions.delete(oldest);
+      }
+    }
+    const waiters = context.waiters.get(key);
+    if (!waiters) return;
+    context.waiters.delete(key);
+    for (const waiter of waiters) {
+      this.detachWaiter(waiter);
+      waiter.resolve(cloneSettlement(settlement));
+    }
+  }
+
+  private async waitForSession(
+    context: ProjectContext,
+    sourceConversationId: string,
+    targetConversationId: string,
+    runId: string,
+    signal?: AbortSignal,
+  ): Promise<RunSettlement> {
+    if (sourceConversationId === targetConversationId) {
+      throw new Error("An Agent cannot wait for its own current run");
+    }
+    this.throwIfAborted(signal);
+    const source = this.requireActor(context, sourceConversationId);
+    const ownership = source.currentRunOwnership();
+    if (!ownership) {
+      throw new Error("No running source turn owns this wait");
+    }
+    const cached = context.completions.get(
+      completionKey(targetConversationId, runId),
+    );
+    if (cached) return cloneSettlement(cached);
+    const activeTarget = context.actors.get(targetConversationId);
+    if (activeTarget) {
+      const activeSettlement = this.findSettlement(
+        context,
+        activeTarget,
+        runId,
+      );
+      if (activeSettlement) return activeSettlement;
+    } else {
+      const inspection = await context.project.inspectConversation(
+        targetConversationId,
+      );
+      this.throwIfAborted(signal);
+      const durable = inspection.runSettlements.find(
+        (settlement) => settlement.runId === runId,
+      );
+      if (durable) return cloneSettlement(durable);
+    }
+    const target = await raceWithAbort(
+      this.getOrOpenActor(context, targetConversationId),
+      signal,
+    );
+    this.throwIfAborted(signal);
+    const existing = this.findSettlement(context, target, runId);
+    if (existing) return existing;
+
+    return source.withWaiting(
+      ownership,
+      { conversationId: targetConversationId, runId },
+      async () => {
+        const completion = new Promise<RunSettlement>((resolve, reject) => {
+          const key = completionKey(targetConversationId, runId);
+          const waiter: CompletionWaiter = {
+            resolve,
+            reject,
+            ...(signal === undefined ? {} : { signal }),
+          };
+          if (signal) {
+            waiter.abortListener = () => {
+              const waiting = context.waiters.get(key);
+              waiting?.delete(waiter);
+              if (waiting?.size === 0) context.waiters.delete(key);
+              this.detachWaiter(waiter);
+              reject(abortError("Session wait was aborted"));
+            };
+            signal.addEventListener("abort", waiter.abortListener, {
+              once: true,
+            });
+            if (signal.aborted) {
+              waiter.abortListener();
+              return;
+            }
+          }
+          let waiters = context.waiters.get(key);
+          if (!waiters) {
+            waiters = new Set();
+            context.waiters.set(key, waiters);
+          }
+          waiters.add(waiter);
+
+          const raced = this.findSettlement(context, target, runId);
+          if (raced) {
+            waiters.delete(waiter);
+            if (waiters.size === 0) context.waiters.delete(key);
+            this.detachWaiter(waiter);
+            resolve(raced);
+          }
+        });
+        return completion;
+      },
+    );
+  }
+
+  private findSettlement(
+    context: ProjectContext,
+    target: ConversationActor,
+    runId: string,
+  ): RunSettlement | undefined {
+    const cached = context.completions.get(
+      completionKey(target.conversationId, runId),
+    );
+    if (cached) return cloneSettlement(cached);
+    const aggregate = aggregateReservedConversationEntries(
+      target.sessionManager.getEntries(),
+    );
+    const durable = aggregate.runSettlements.find(
+      (settlement) => settlement.runId === runId,
+    );
+    return durable ? cloneSettlement(durable) : undefined;
+  }
+
+  private observeSettlement(
+    context: ProjectContext,
+    target: ConversationActor,
+    runId: string,
+  ): Promise<RunSettlement> {
+    const existing = this.findSettlement(context, target, runId);
+    if (existing) return Promise.resolve(existing);
+    return new Promise<RunSettlement>((resolve, reject) => {
+      const key = completionKey(target.conversationId, runId);
+      const waiter: CompletionWaiter = { resolve, reject };
+      let waiters = context.waiters.get(key);
+      if (!waiters) {
+        waiters = new Set();
+        context.waiters.set(key, waiters);
+      }
+      waiters.add(waiter);
+      const raced = this.findSettlement(context, target, runId);
+      if (!raced) return;
+      waiters.delete(waiter);
+      if (waiters.size === 0) context.waiters.delete(key);
+      resolve(raced);
+    });
+  }
+
+  private async handleTemporaryCompletion(
+    context: ProjectContext,
+    actor: ConversationActor,
+    settlement: RunSettlement,
+  ): Promise<void> {
+    const lifecycle = actor.profile.lifecycle;
+    if (
+      lifecycle.kind !== "temporary"
+      || settlement.runId !== lifecycle.initialRunId
+    ) {
+      return;
+    }
+    if (settlement.reportedAt !== undefined) {
+      if (temporarySettlementIsReturnable(settlement)) {
+        await this.deleteConversationInternal(
+          context,
+          actor.conversationId,
+          true,
+        );
+      } else {
+        context.attention.add(actor.conversationId);
+        this.emit(context, { type: "project_changed" });
+      }
+      return;
+    }
+
+    const successful = temporarySettlementIsReturnable(settlement);
+    const oversized = settlement.outcome === "completed"
+      && settlement.finalText !== null
+      && settlement.finalText.trim().length > 0
+      && !successful;
+    const caller = await this.getOrOpenActor(
+      context,
+      lifecycle.callerConversationId,
+    );
+    await this.enqueueEnvelope(context, actor, caller, {
+      messageId: lifecycle.returnMessageId,
+      cardId: deterministicUuid(
+        "piweb.return.card",
+        lifecycle.returnMessageId,
+      ),
+      sentAt: this.now().toISOString(),
+      kind: successful
+        ? "delegation_result"
+        : "delegation_failure",
+      body: successful
+        ? settlement.finalText!
+        : oversized
+          ? `临时会话已经完成，但最终回复超过 ${
+              MAX_CONVERSATION_BODY_BYTES
+            } 字节的自动回传上限；会话已保留，请打开查看。`
+          : `临时会话未成功完成：${settlement.outcome}${
+              settlement.finalText === null ? "，且没有 Agent 回复" : ""
+            }`,
+      delegationId: lifecycle.delegationId,
+    });
+    const reported = createRunSettlementEntry({
+      ...settlement,
+      reportedAt: this.now().toISOString(),
+      returnMessageId: lifecycle.returnMessageId,
+    }).data;
+    appendReservedCustomEntry(
+      actor.sessionManager,
+      createRunSettlementEntry(reported),
+    );
+    if (caller.getActivity().kind === "idle") {
+      await this.pumpTarget(context, caller.conversationId);
+    }
+    if (successful) {
+      await this.deleteConversationInternal(
+        context,
+        actor.conversationId,
+        true,
+      );
+    } else {
+      context.attention.add(actor.conversationId);
+      this.emit(context, { type: "project_changed" });
+    }
+  }
+
+  private async recoverTemporary(
+    context: ProjectContext,
+    actor: ConversationActor,
+  ): Promise<void> {
+    if (context.closing) return;
+    const lifecycle = actor.profile.lifecycle;
+    if (lifecycle.kind !== "temporary") return;
+    const settlement = aggregateReservedConversationEntries(
+      actor.sessionManager.getEntries(),
+    ).runSettlements.find(({ runId }) => runId === lifecycle.initialRunId);
+    if (!settlement) return;
+    await this.runLifecycle(context, () =>
+      this.handleTemporaryCompletion(context, actor, settlement)
+    );
+  }
+
+  private async recoverProject(context: ProjectContext): Promise<void> {
+    if (context.closing) return;
+    let summaries = await context.project.refreshConversations();
+    const existingIds = new Set(summaries.map(({ id }) => id));
+    for (const conversationId of await context.inbox.listDeletedTargets()) {
+      if (context.closing) return;
+      if (!existingIds.has(conversationId)) {
+        await context.inbox.clearTargetTombstone(conversationId);
+        context.deleting.delete(conversationId);
+        continue;
+      }
+      try {
+        await this.deleteConversationInternal(
+          context,
+          conversationId,
+          true,
+          true,
+        );
+      } catch {
+        context.attention.add(conversationId);
+      }
+    }
+    const blockedTargets = new Set(
+      await context.inbox.listDeletedTargets(),
+    );
+    const pending = await context.inbox.list();
+    summaries = await context.project.refreshConversations();
+    const startedAbortOperations: Array<{
+      sourceConversationId: string;
+      operation: Extract<
+        MetaOperation,
+        { kind: "abort_session"; state: "started" }
+      >;
+    }> = [];
+    const actorIds = new Set(
+      pending
+        .filter(({ toConversationId }) =>
+          !blockedTargets.has(toConversationId)
+        )
+        .map(({ toConversationId }) => toConversationId),
+    );
+    for (const summary of summaries) {
+      if (context.closing) return;
+      if (blockedTargets.has(summary.id)) {
+        context.attention.add(summary.id);
+        continue;
+      }
+      try {
+        const inspection = await context.project.inspectConversation(
+          summary.id,
+        );
+        for (const operation of inspection.metaOperations) {
+          if (
+            operation.kind === "abort_session"
+            && operation.state === "started"
+            && operation.result.aborted
+          ) {
+            startedAbortOperations.push({
+              sourceConversationId: summary.id,
+              operation,
+            });
+          }
+        }
+        const profile = inspection.conversationMeta;
+        if (!profile) continue;
+        context.profiles.set(summary.id, cloneProfile(profile));
+        const lifecycle = profile.lifecycle;
+        if (
+          lifecycle.kind === "temporary"
+          && inspection.runSettlements.some(
+            ({ runId }) => runId === lifecycle.initialRunId,
+          )
+        ) {
+          actorIds.add(summary.id);
+        }
+      } catch {
+        context.attention.add(summary.id);
+      }
+    }
+
+    for (const recovery of startedAbortOperations) {
+      if (context.closing) return;
+      try {
+        await this.recoverStartedAbortOperation(context, recovery);
+      } catch {
+        context.attention.add(recovery.sourceConversationId);
+        context.attention.add(
+          recovery.operation.targetConversationId,
+        );
+      }
+    }
+
+    for (const envelope of pending) {
+      if (context.closing) return;
+      if (blockedTargets.has(envelope.toConversationId)) continue;
+      try {
+        const source = await this.getOrOpenActor(
+          context,
+          envelope.fromConversationId,
+        );
+        const card = aggregateReservedConversationEntries(
+          source.sessionManager.getEntries(),
+        ).cards.find(({ cardId }) => cardId === envelope.cardId);
+        if (!card || card.state === "sending") {
+          this.appendCard(source, {
+            ...(card ?? {
+              cardId: envelope.cardId,
+              kind: envelope.kind,
+              body: envelope.body,
+              fromSnapshot: envelope.fromSnapshot,
+              toSnapshot: envelope.toSnapshot,
+            }),
+            state: envelope.state === "processing" ? "running" : "queued",
+            messageId: envelope.messageId,
+            ...(envelope.delegationId === undefined
+              ? {}
+              : { delegationId: envelope.delegationId }),
+            ...(envelope.requestFingerprint === undefined
+              ? {}
+              : { requestFingerprint: envelope.requestFingerprint }),
+            ...(envelope.processingRunId === undefined
+              ? {}
+              : { runId: envelope.processingRunId }),
+            updatedAt: this.now().toISOString(),
+          });
+        }
+      } catch {
+        // A deleted source must not prevent the durable target delivery.
+      }
+    }
+
+    for (const actorId of actorIds) {
+      if (context.closing) return;
+      try {
+        await this.getOrOpenActor(context, actorId);
+      } catch {
+        context.attention.add(actorId);
+      }
+    }
+    this.emit(context, { type: "project_changed" });
+  }
+
+  private async recoverStartedAbortOperation(
+    context: ProjectContext,
+    recovery: {
+      sourceConversationId: string;
+      operation: Extract<
+        MetaOperation,
+        { kind: "abort_session"; state: "started" }
+      >;
+    },
+  ): Promise<void> {
+    const { sourceConversationId, operation } = recovery;
+    const targetExists = context.project.listConversations().some(
+      ({ id }) => id === operation.targetConversationId,
+    );
+    if (targetExists) {
+      let recoveredSettlement: RunSettlement | undefined;
+      await this.withConversationManager(
+        context,
+        operation.targetConversationId,
+        async (manager) => {
+          recoveredSettlement = aggregateReservedConversationEntries(
+            manager.getEntries(),
+          ).runSettlements.find(
+            ({ runId }) => runId === operation.runId,
+          );
+        },
+      );
+      const targetActor = context.actors.get(
+        operation.targetConversationId,
+      );
+      const targetActivity = targetActor?.getActivity();
+      if (
+        !recoveredSettlement
+        && targetActor
+        && targetActivity
+        && targetActivity.kind !== "idle"
+        && targetActivity.runId === operation.runId
+      ) {
+        const completion = this.observeSettlement(
+          context,
+          targetActor,
+          operation.runId,
+        );
+        await targetActor.abort(operation.runId);
+        recoveredSettlement = await completion;
+      }
+      const interrupted = (await context.inbox.list({
+        toConversationId: operation.targetConversationId,
+      })).filter(
+        (envelope) =>
+          envelope.state === "processing"
+          && envelope.processingRunId === operation.runId,
+      );
+      if (!recoveredSettlement && interrupted.length > 0) {
+        recoveredSettlement = createRunSettlementEntry({
+          runId: operation.runId,
+          outcome: "aborted",
+          finalText: null,
+          settledAt: this.now().toISOString(),
+        }).data;
+        await this.withConversationManager(
+          context,
+          operation.targetConversationId,
+          async (manager) => {
+            appendReservedCustomEntry(
+              manager,
+              createRunSettlementEntry(recoveredSettlement!),
+            );
+          },
+        );
+        this.recordCompletion(
+          context,
+          operation.targetConversationId,
+          recoveredSettlement,
+        );
+      }
+      if (recoveredSettlement && interrupted.length > 0) {
+        context.processingBatches.set(
+          completionKey(
+            operation.targetConversationId,
+            operation.runId,
+          ),
+          interrupted,
+        );
+        await this.finishBatch(
+          context,
+          operation.targetConversationId,
+          operation.runId,
+          recoveredSettlement,
+        );
+        const target = context.actors.get(
+          operation.targetConversationId,
+        );
+        if (target) {
+          await this.handleTemporaryCompletion(
+            context,
+            target,
+            recoveredSettlement,
+          );
+        }
+      }
+    }
+
+    await this.withConversationManager(
+      context,
+      sourceConversationId,
+      async (manager) => {
+        const existing = aggregateReservedConversationEntries(
+          manager.getEntries(),
+        ).metaOperations.find(
+          ({ operationId }) => operationId === operation.operationId,
+        );
+        if (
+          existing?.kind === "abort_session"
+          && existing.state === "started"
+        ) {
+          appendReservedCustomEntry(
+            manager,
+            createMetaOperationEntry({
+              ...existing,
+              state: "completed",
+              updatedAt: this.now().toISOString(),
+            }),
+          );
+        }
+      },
+    );
+  }
+
+  private async withConversationManager<T>(
+    context: ProjectContext,
+    conversationId: string,
+    work: (
+      manager: ConversationActor["sessionManager"],
+    ) => Promise<T> | T,
+  ): Promise<T> {
+    const active = context.actors.get(conversationId);
+    if (active) return work(active.sessionManager);
+    let actor: ConversationActor;
+    try {
+      actor = await this.getOrOpenActor(context, conversationId);
+    } catch (openError) {
+      if (
+        context.closing
+        || this.disposed
+        || context.deleting.has(conversationId)
+      ) {
+        throw openError;
+      }
+      const lease = await this.projects.acquireConversationWhenAvailable(
+        context.project.cwd,
+        conversationId,
+      );
+      try {
+        const manager = await context.project.openConversation(
+          conversationId,
+          { updateRecent: false },
+        );
+        return await work(manager);
+      } finally {
+        lease.release();
+      }
+    }
+    return await work(actor.sessionManager);
+  }
+
+  private async pumpTarget(
+    context: ProjectContext,
+    conversationId: string,
+  ): Promise<void> {
+    if (context.closing || context.deleting.has(conversationId)) return;
+    const actor = context.actors.get(conversationId);
+    if (!actor || actor.getActivity().kind !== "idle") return;
+    const pending = await context.inbox.list({
+      toConversationId: conversationId,
+    });
+    if (context.closing || context.deleting.has(conversationId)) return;
+    if (pending.length === 0) return;
+
+    const aggregate = aggregateReservedConversationEntries(
+      actor.sessionManager.getEntries(),
+    );
+    const delivered = new Set(aggregate.deliveredMessageIds);
+    const first = pending[0]!;
+    let runId: string;
+    if (first.state === "processing") {
+      runId = first.processingRunId!;
+    } else if (
+      actor.profile.lifecycle.kind === "temporary"
+      && first.kind === "delegation_task"
+      && first.delegationId === actor.profile.lifecycle.delegationId
+    ) {
+      runId = actor.profile.lifecycle.initialRunId;
+    } else {
+      runId = randomUUID();
+    }
+    const batch = pending
+      .filter((envelope) => first.state === "processing"
+        ? (
+            envelope.state === "processing"
+            && envelope.processingRunId === runId
+          )
+        : envelope.state === "queued")
+      .slice(0, MAX_BATCH_MESSAGES);
+    const settled = aggregate.runSettlements.find(
+      (settlement) => settlement.runId === runId,
+    );
+    if (settled) {
+      context.processingBatches.set(
+        completionKey(conversationId, runId),
+        batch,
+      );
+      await this.finishBatch(
+        context,
+        conversationId,
+        runId,
+        settled,
+      );
+      await this.pumpTarget(context, conversationId);
+      return;
+    }
+    await this.dispatchBatch(
+      context,
+      actor,
+      batch,
+      runId,
+      delivered,
+    );
+  }
+
+  private async deleteConversationInternal(
+    context: ProjectContext,
+    conversationId: string,
+    allowTemporaryActor = false,
+    deletionReserved = false,
+  ): Promise<boolean> {
+    if (deletionReserved) {
+      if (!context.deleting.has(conversationId)) {
+        throw new Error(
+          `Conversation deletion reservation was lost: ${conversationId}`,
+        );
+      }
+    } else if (!this.reserveDeletion(context, conversationId)) {
+      return false;
+    }
+    const known = context.project.listConversations()
+      .some(({ id }) => id === conversationId);
+    if (!known && !context.actors.has(conversationId)) {
+      try {
+        await context.inbox.clearTargetTombstone(conversationId);
+        return false;
+      } finally {
+        context.deleting.delete(conversationId);
+      }
+    }
+    const actor = context.actors.get(conversationId);
+    if (
+      actor
+      && actor.getActivity().kind !== "idle"
+      && !allowTemporaryActor
+    ) {
+      context.deleting.delete(conversationId);
+      throw new Error("Cannot delete a busy conversation; abort and wait first");
+    }
+    let deletionLease;
+    let durableDeletionIntent = false;
+    try {
+      await context.inbox.markTargetDeleted(
+        conversationId,
+        this.now().toISOString(),
+      );
+      durableDeletionIntent = true;
+      const pending = await context.inbox.list({
+        toConversationId: conversationId,
+      });
+      for (const envelope of pending) {
+        await this.appendTerminalSourceCardState(
+          context,
+          envelope,
+          "failed",
+          envelope.processingRunId,
+          "目标会话已删除，消息未被处理。",
+        );
+        await context.inbox.delete(envelope.messageId);
+      }
+      if (actor) {
+        context.actorUnsubscribes.get(conversationId)?.();
+        context.actorUnsubscribes.delete(conversationId);
+        deletionLease = await actor.dispose({
+          transferLeaseForDeletion: true,
+        });
+        context.actors.delete(conversationId);
+      } else {
+        const writer = this.projects.acquireConversation(
+          context.project.cwd,
+          conversationId,
+        );
+        deletionLease = writer.upgradeToDeletion();
+      }
+      if (!deletionLease) {
+        throw new Error("Conversation deletion lease was not transferred");
+      }
+      await context.inbox.tombstoneTarget(conversationId);
+      await context.project.deleteConversation(conversationId);
+      await context.inbox.clearTargetTombstone(conversationId);
+      durableDeletionIntent = false;
+      context.extensionUIRouters.get(conversationId)?.clear();
+      context.extensionUIRouters.delete(conversationId);
+      context.profiles.delete(conversationId);
+      context.attention.delete(conversationId);
+      this.emit(context, { type: "project_changed" });
+      return true;
+    } finally {
+      deletionLease?.release();
+      if (!durableDeletionIntent) {
+        context.deleting.delete(conversationId);
+      }
+    }
+  }
+
+  private reserveDeletion(
+    context: ProjectContext,
+    conversationId: string,
+  ): boolean {
+    if (context.deleting.has(conversationId)) return false;
+    context.deleting.add(conversationId);
+    return true;
+  }
+
+  private detachWaiter(waiter: CompletionWaiter): void {
+    if (waiter.signal && waiter.abortListener) {
+      waiter.signal.removeEventListener("abort", waiter.abortListener);
+    }
+  }
+
+  private extensionUIRouter(
+    context: ProjectContext,
+    conversationId: string,
+  ): ConversationExtensionUIRouter {
+    let router = context.extensionUIRouters.get(conversationId);
+    if (router) return router;
+    router = new ConversationExtensionUIRouter(() => {
+      context.attention.add(conversationId);
+      this.emit(context, { type: "project_changed" });
+    });
+    context.extensionUIRouters.set(conversationId, router);
+    return router;
+  }
+
+  private requireActor(
+    context: ProjectContext,
+    conversationId: string,
+  ): ConversationActor {
+    const actor = context.actors.get(conversationId);
+    if (!actor) throw new Error(`Conversation is not active: ${conversationId}`);
+    return actor;
+  }
+
+  private requireContext(handle: ProjectSessionHandle): ProjectContext {
+    this.assertOpen();
+    const context = handle.context;
+    if (
+      handle.isReleased
+      || context.closing
+      || this.contexts.get(context.key) !== context
+    ) {
+      throw new Error("Project session handle is closed");
+    }
+    return context;
+  }
+
+  private runLifecycle<T>(
+    context: ProjectContext,
+    task: () => Promise<T> | T,
+  ): Promise<T> {
+    return context.lifecycle.run(() => {
+      if (context.closing || this.disposed) {
+        throw new Error("Project context is closing");
+      }
+      return task();
+    });
+  }
+
+  private trackBackground(
+    context: ProjectContext,
+    task: Promise<void>,
+  ): void {
+    const tracked = task.catch((error) => {
+      if (!context.closing) {
+        this.emit(context, { type: "project_changed" });
+      }
+      throw error;
+    });
+    context.backgroundTasks.add(tracked);
+    void tracked.finally(() => {
+      context.backgroundTasks.delete(tracked);
+    }).catch(() => undefined);
+  }
+
+  private async drainBackground(context: ProjectContext): Promise<void> {
+    while (context.backgroundTasks.size > 0) {
+      await Promise.allSettled([...context.backgroundTasks]);
+    }
+  }
+
+  private emit(
+    context: ProjectContext,
+    event: ProjectSessionCoordinatorEvent,
+  ): void {
+    if (this.disposed) return;
+    for (const listener of [...context.listeners]) {
+      try {
+        listener(event);
+      } catch {
+        // Observers cannot roll back actor or durable project state.
+      }
+    }
+  }
+
+  private throwIfAborted(signal: AbortSignal | undefined): void {
+    if (signal?.aborted) throw abortError("Operation was aborted");
+  }
+
+  private assertOpen(): void {
+    if (this.closing || this.disposed) {
+      throw new Error("Project session coordinator is closed");
+    }
+  }
+}

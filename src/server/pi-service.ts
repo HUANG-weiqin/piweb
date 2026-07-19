@@ -9,6 +9,9 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type {
   ClientCommand,
+  ConversationActivity,
+  ConversationHistoryItem,
+  ConversationSummary,
   PublicState,
   ServerEvent,
   SessionEvent,
@@ -17,7 +20,11 @@ import type {
 } from "../shared/protocol.js";
 import { mostRestrictiveToolMode } from "../shared/tool-mode.js";
 import { AuthFlowBroker } from "./auth-flow.js";
-import { projectConversationHistorySnapshot } from "./conversation-history.js";
+import {
+  projectConversationHistorySnapshot,
+  projectConversationItemsSnapshot,
+} from "./conversation-history.js";
+import type { ConversationActor } from "./conversation-actor.js";
 import { validateCwd } from "./cwd.js";
 import { ExtensionUIBroker } from "./extension-ui.js";
 import {
@@ -37,7 +44,13 @@ import {
   ProjectRunCoordinator,
   type ProjectRunLease,
 } from "./project-run-coordinator.js";
+import {
+  ProjectSessionCoordinator,
+  type ProjectSessionCoordinatorEvent,
+  type ProjectSessionHandle,
+} from "./project-session-coordinator.js";
 import { projectConversationIndex } from "./project-snapshot.js";
+import type { RoleCatalog } from "./role-catalog.js";
 import { SerialTaskQueue } from "./serial-task-queue.js";
 import { SessionEventProjector, snapshotWireValue } from "./session-events.js";
 import { resolveContextUsage } from "./session-usage.js";
@@ -59,6 +72,7 @@ interface ActiveSession {
   project: ProjectStore;
   projectHandle: ProjectStoreHandle;
   conversationId: string;
+  focusId: string;
   conversationLease: ConversationLease;
   lifecycleAbort: AbortController;
   dispose: () => Promise<void>;
@@ -71,6 +85,8 @@ interface RunTicket {
   id: string;
   sessionId: string;
   generation: number;
+  conversationId: string;
+  focusId: string;
   phase: "queued" | "running" | "cancelling";
   toolMode?: ToolMode;
   projector: SessionEventProjector;
@@ -83,6 +99,30 @@ interface SelectedConversation {
   conversationId: string;
   sessionManager: SessionManager;
   lease: ConversationLease;
+}
+
+export interface PiConnectionCoordination {
+  coordinator: ProjectSessionCoordinator;
+  roles: RoleCatalog;
+}
+
+export type PiConnectionCoordinationProvider =
+  () => Promise<PiConnectionCoordination>;
+
+interface CoordinatedProjectView {
+  sessionId: string;
+  generation: number;
+  extensionScope: number;
+  coordinator: ProjectSessionCoordinator;
+  handle: ProjectSessionHandle;
+  unsubscribeProject: () => void;
+  unsubscribeExtensionUI: () => void;
+  actor?: ConversationActor;
+  conversationId?: string;
+  focusId?: string;
+  readonly seenMessageCounts: Map<string, number>;
+  readonly unreadConversationIds: Set<string>;
+  projectSnapshotInitialized: boolean;
 }
 
 type ConnectionCommand = Exclude<ClientCommand, { type: "browse_directory" }>;
@@ -112,6 +152,11 @@ function queuedCommandScope(command: QueuedCommand): "session" | "epoch" | "glob
     case "set_tool_mode":
     case "rename_conversation":
     case "delete_conversation":
+    case "focus_conversation":
+    case "create_conversation":
+    case "create_role":
+    case "update_role":
+    case "delete_role":
     case "set_api_key":
       return "session";
     case "login_oauth":
@@ -128,10 +173,74 @@ function isCancelling(ticket: RunTicket): boolean {
   return ticket.phase === "cancelling";
 }
 
+export const MAX_PROJECT_SNAPSHOT_BYTES = 750_000;
+
+type ProjectSnapshotEvent = Extract<
+  ServerEvent,
+  { type: "project_snapshot" }
+>;
+
+function boundedProjectSnapshotEvent(input: {
+  sessionId: string;
+  projectId: string;
+  conversationId?: string;
+  conversations: readonly ConversationSummary[];
+}): ProjectSnapshotEvent {
+  const index = projectConversationIndex(
+    input.conversations,
+    input.conversationId,
+  );
+  const event: ProjectSnapshotEvent = {
+    type: "project_snapshot",
+    sessionId: input.sessionId,
+    projectId: input.projectId,
+    ...(input.conversationId === undefined
+      ? {}
+      : { conversationId: input.conversationId }),
+    conversations: [...index.conversations],
+    truncated: index.truncated,
+  };
+  while (
+    event.conversations.length > 0
+    && Buffer.byteLength(JSON.stringify(event), "utf8")
+      > MAX_PROJECT_SNAPSHOT_BYTES
+  ) {
+    event.conversations.pop();
+    event.truncated = true;
+  }
+  if (
+    Buffer.byteLength(JSON.stringify(event), "utf8")
+      > MAX_PROJECT_SNAPSHOT_BYTES
+  ) {
+    throw new Error("Project snapshot envelope exceeds its wire budget");
+  }
+  return event;
+}
+
+function projectConversationPeerExistence(
+  items: readonly ConversationHistoryItem[],
+  conversationIds: ReadonlySet<string>,
+): ConversationHistoryItem[] {
+  return items.map((item) => {
+    if (item.kind !== "session_message") return item;
+    const peer = item.direction === "incoming" ? item.from : item.to;
+    return {
+      ...item,
+      peerExists: conversationIds.has(peer.conversationId),
+    };
+  });
+}
+
 export class PiConnection {
   private readonly operations = new SerialTaskQueue();
   private readonly unsubscribeRuntime: () => void;
   private readonly extensionUI: ExtensionUIBroker;
+  private coordinationReady?: Promise<PiConnectionCoordination>;
+  private unsubscribeRoles?: () => void;
+  private coordinatedView?: CoordinatedProjectView;
+  private projectSnapshotGeneration = 0;
+  private extensionScope = 0;
+  private readonly focusedItemFingerprints = new Map<string, string>();
   private active?: ActiveSession;
   private activeRun?: RunTicket;
   private authFlow?: AuthFlowBroker;
@@ -153,13 +262,21 @@ export class PiConnection {
     private readonly toolPolicy: ToolPolicy = defaultToolPolicy,
     private readonly projects: ProjectStoreRegistry = new ProjectStoreRegistry(),
     private readonly projectRuns: ProjectRunCoordinator = new ProjectRunCoordinator(),
+    private readonly coordinationProvider?: PiConnectionCoordinationProvider,
   ) {
     this.extensionUI = new ExtensionUIBroker(emit);
-    this.unsubscribeRuntime = runtime.subscribe(() => this.publishState());
+    this.unsubscribeRuntime = runtime.subscribe(() => {
+      if (this.coordinationProvider) {
+        this.publishCoordinatedState();
+        this.publishRoleCatalog();
+      } else {
+        this.publishState();
+      }
+    });
   }
 
   get sessionId(): string | undefined {
-    return this.active?.id;
+    return this.coordinatedView?.sessionId ?? this.active?.id;
   }
 
   private async initialize(
@@ -249,6 +366,7 @@ export class PiConnection {
         project,
         projectHandle,
         conversationId: selected.conversationId,
+        focusId: randomUUID(),
         conversationLease: selected.lease,
         lifecycleAbort,
         dispose: created.dispose,
@@ -267,6 +385,7 @@ export class PiConnection {
         type: "conversation_snapshot",
         sessionId,
         conversationId: selected.conversationId,
+        focusId: this.active.focusId,
         messages: history.messages,
         truncated: history.truncated,
       });
@@ -349,6 +468,9 @@ export class PiConnection {
   }
 
   handle(command: ConnectionCommand): Promise<void> {
+    if (this.coordinationProvider) {
+      return this.handleCoordinated(command);
+    }
     if (command.type === "abort") return this.abort(command.sessionId, command.runId);
     if (command.type === "extension_ui_response") {
       this.extensionUI.respond(command);
@@ -468,6 +590,1103 @@ export class PiConnection {
     });
   }
 
+  private handleCoordinated(command: ConnectionCommand): Promise<void> {
+    if (command.type === "extension_ui_response") {
+      this.extensionUI.respond(command);
+      return Promise.resolve();
+    }
+    if (command.type === "auth_response") {
+      if (this.authFlow?.id === command.authFlowId) {
+        this.authFlow.respond(command);
+      }
+      return Promise.resolve();
+    }
+    if (command.type === "cancel_auth") {
+      this.cancelAuth(command.authFlowId);
+      return Promise.resolve();
+    }
+    if (command.type === "close_session") {
+      return this.closeCoordinatedSession(command.sessionId);
+    }
+    if (command.type === "abort") {
+      try {
+        const view = this.requireCoordinatedFocus(
+          command.sessionId,
+          command.conversationId,
+          command.focusId,
+        );
+        return this.requireCoordination().then(({ coordinator }) =>
+          coordinator.abort(
+            view.handle,
+            command.conversationId,
+            command.runId,
+          )
+        );
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    }
+    if (command.type === "prompt") {
+      try {
+        const view = this.requireCoordinatedFocus(
+          command.sessionId,
+          command.conversationId,
+          command.focusId,
+        );
+        const runIds = this.runIdsBySession.get(command.sessionId);
+        if (!runIds) {
+          return Promise.reject(new Error("Session was not initialized"));
+        }
+        if (runIds.has(command.runId)) {
+          return Promise.reject(
+            new Error("Run ID was already used in this session"),
+          );
+        }
+        runIds.add(command.runId);
+        return this.requireCoordination().then(({ coordinator }) =>
+          coordinator.prompt(
+            view.handle,
+            command.conversationId,
+            command.runId,
+            command.text,
+          )
+        ).then(() => undefined);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    }
+    if (command.type === "initialize") {
+      return this.beginCoordinatedInitialization(command);
+    }
+
+    const commandId = "commandId" in command
+      ? command.commandId
+      : undefined;
+    if (commandId !== undefined) {
+      if (this.usedCommandIds.has(commandId)) {
+        return Promise.reject(
+          new Error("Command ID was already used on this connection"),
+        );
+      }
+      this.usedCommandIds.add(commandId);
+    }
+    if (command.type === "login_oauth") {
+      if (this.usedAuthFlowIds.has(command.authFlowId)) {
+        return Promise.reject(
+          new Error("Auth flow ID was already used on this connection"),
+        );
+      }
+      this.cancelAuth();
+      this.usedAuthFlowIds.add(command.authFlowId);
+      this.pendingAuthFlowIds.add(command.authFlowId);
+    }
+
+    const generation = this.generation;
+    return this.operations.run(async () => {
+      try {
+        this.assertOpen();
+        if (
+          "sessionId" in command
+          && !this.isCoordinatedSession(command.sessionId, generation)
+        ) {
+          throw new Error("Session was not initialized");
+        }
+        if (
+          command.type === "login_oauth"
+          && this.cancelledAuthFlowIds.has(command.authFlowId)
+        ) {
+          return;
+        }
+        await this.executeCoordinated(command);
+      } finally {
+        if (command.type === "login_oauth") {
+          this.pendingAuthFlowIds.delete(command.authFlowId);
+          this.cancelledAuthFlowIds.delete(command.authFlowId);
+        }
+      }
+    });
+  }
+
+  private beginCoordinatedInitialization(
+    command: Extract<ClientCommand, { type: "initialize" }>,
+  ): Promise<void> {
+    if (this.usedSessionIds.has(command.sessionId)) {
+      return Promise.reject(
+        new Error("Session ID was already used on this connection"),
+      );
+    }
+    if (command.commandId !== undefined) {
+      if (this.usedCommandIds.has(command.commandId)) {
+        return Promise.reject(
+          new Error("Command ID was already used on this connection"),
+        );
+      }
+      this.usedCommandIds.add(command.commandId);
+    }
+
+    this.initializationAbort?.abort();
+    const initializationAbort = new AbortController();
+    this.initializationAbort = initializationAbort;
+    this.usedSessionIds.add(command.sessionId);
+    this.runIdsBySession.set(command.sessionId, new Set());
+    const generation = ++this.generation;
+    this.requestedSessionId = command.sessionId;
+    this.cancelAuth();
+
+    return this.operations.run(async () => {
+      this.assertOpen();
+      if (generation !== this.generation) return;
+      await this.detachCoordinatedView();
+      try {
+        await this.initializeCoordinated(
+          command,
+          generation,
+          initializationAbort.signal,
+        );
+      } catch (error) {
+        if (
+          initializationAbort.signal.aborted
+          || generation !== this.generation
+          || this.disposed
+        ) {
+          return;
+        }
+        this.requestedSessionId = undefined;
+        await this.detachCoordinatedView();
+        throw error;
+      } finally {
+        if (this.initializationAbort === initializationAbort) {
+          this.initializationAbort = undefined;
+        }
+      }
+    });
+  }
+
+  private async initializeCoordinated(
+    command: Extract<ClientCommand, { type: "initialize" }>,
+    generation: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const cwd = await validateCwd(command.cwd);
+    this.throwIfAborted(signal);
+    const { coordinator } = await this.requireCoordination();
+    this.throwIfAborted(signal);
+    const handle = await coordinator.acquireProject(
+      cwd,
+      command.toolMode ?? "full_access",
+    );
+    let transferred = false;
+    let extensionScope: number | undefined;
+    let unsubscribeProject: (() => void) | undefined;
+    let unsubscribeExtensionUI: (() => void) | undefined;
+    try {
+      const safeMode = mostRestrictiveToolMode(
+        handle.project.toolMode,
+        command.toolMode ?? "full_access",
+      );
+      if (safeMode !== handle.project.toolMode) {
+        await this.projectRuns.transitionToolMode(handle.project, safeMode);
+      }
+      this.throwIfAborted(signal);
+
+      const target = command.conversation ?? { kind: "recent" as const };
+      extensionScope = ++this.extensionScope;
+      const extensionUI = this.extensionUI.context({
+        sessionId: command.sessionId,
+        generation: extensionScope,
+        signal,
+      });
+      await coordinator.ensureProjectModelCatalog(handle, extensionUI);
+      this.throwIfAborted(signal);
+      let actor: ConversationActor | undefined;
+      if (target.kind === "open") {
+        unsubscribeExtensionUI = coordinator.attachExtensionUI(
+          handle,
+          target.conversationId,
+          extensionUI,
+        );
+        actor = await coordinator.openConversation(
+          handle,
+          target.conversationId,
+        );
+      } else if (target.kind === "new") {
+        if (!target.roleId) {
+          throw new Error(
+            "A role must be selected before creating a conversation",
+          );
+        }
+        actor = await coordinator.createUserConversation(handle, {
+          roleId: target.roleId,
+          extensionUI,
+        });
+        unsubscribeExtensionUI = coordinator.attachExtensionUI(
+          handle,
+          actor.conversationId,
+          extensionUI,
+        );
+      } else {
+        const sessions = await coordinator.listSessions(handle);
+        const knownIds = new Set(sessions.map(({ id }) => id));
+        const conversationId = handle.project.lastConversationId
+          && knownIds.has(handle.project.lastConversationId)
+          ? handle.project.lastConversationId
+          : sessions[0]?.id;
+        if (conversationId !== undefined) {
+          unsubscribeExtensionUI = coordinator.attachExtensionUI(
+            handle,
+            conversationId,
+            extensionUI,
+          );
+          actor = await coordinator.openConversation(handle, conversationId);
+        }
+      }
+      this.throwIfAborted(signal);
+      if (
+        this.disposed
+        || generation !== this.generation
+        || this.requestedSessionId !== command.sessionId
+      ) {
+        return;
+      }
+
+      const view: CoordinatedProjectView = {
+        sessionId: command.sessionId,
+        generation,
+        extensionScope,
+        coordinator,
+        handle,
+        unsubscribeProject: () => undefined,
+        unsubscribeExtensionUI: unsubscribeExtensionUI ?? (() => undefined),
+        seenMessageCounts: new Map(),
+        unreadConversationIds: new Set(),
+        projectSnapshotInitialized: false,
+        ...(actor === undefined
+          ? {}
+          : {
+              actor,
+              conversationId: actor.conversationId,
+              focusId: randomUUID(),
+            }),
+      };
+      unsubscribeProject = coordinator.subscribe(handle, (event) => {
+        this.onCoordinatedProjectEvent(view, event);
+      });
+      view.unsubscribeProject = unsubscribeProject;
+      this.coordinatedView = view;
+      transferred = true;
+      if (command.commandId !== undefined) {
+        this.emitFocusAttached(
+          view,
+          "initialize",
+          command.commandId,
+        );
+      }
+      this.publishCoordinatedState();
+      this.publishProjectSnapshotCoordinated();
+      this.publishRoleCatalog();
+      this.publishFocusedConversationSnapshot();
+    } finally {
+      if (!transferred) {
+        unsubscribeExtensionUI?.();
+        unsubscribeProject?.();
+        if (extensionScope !== undefined) {
+          this.extensionUI.cancelScope(command.sessionId, extensionScope);
+        }
+        handle.release();
+      }
+    }
+  }
+
+  private async executeCoordinated(
+    command: Exclude<
+      ConnectionCommand,
+      | { type: "abort" }
+      | { type: "auth_response" }
+      | { type: "cancel_auth" }
+      | { type: "close_session" }
+      | { type: "extension_ui_response" }
+      | { type: "initialize" }
+      | { type: "prompt" }
+    >,
+  ): Promise<void> {
+    switch (command.type) {
+      case "focus_conversation": {
+        const view = this.requireCoordinatedView(command.sessionId);
+        const { coordinator } = await this.requireCoordination();
+        const extensionScope = ++this.extensionScope;
+        let detachExtensionUI: (() => void) | undefined;
+        let transferred = false;
+        try {
+          detachExtensionUI = coordinator.attachExtensionUI(
+            view.handle,
+            command.conversationId,
+            this.extensionUI.context({
+              sessionId: view.sessionId,
+              generation: extensionScope,
+            }),
+          );
+          const actor = await coordinator.openConversation(
+            view.handle,
+            command.conversationId,
+          );
+          this.attachCoordinatedFocus(
+            view,
+            actor,
+            "focus_conversation",
+            command.commandId,
+            detachExtensionUI,
+            extensionScope,
+          );
+          transferred = true;
+        } finally {
+          if (!transferred) {
+            detachExtensionUI?.();
+            this.extensionUI.cancelScope(view.sessionId, extensionScope);
+          }
+        }
+        return;
+      }
+      case "create_conversation": {
+        const view = this.requireCoordinatedView(command.sessionId);
+        const { coordinator } = await this.requireCoordination();
+        const extensionScope = ++this.extensionScope;
+        const extensionUI = this.extensionUI.context({
+          sessionId: view.sessionId,
+          generation: extensionScope,
+        });
+        let detachExtensionUI: (() => void) | undefined;
+        let transferred = false;
+        try {
+          const actor = await coordinator.createUserConversation(view.handle, {
+            roleId: command.roleId,
+            ...(command.title === undefined ? {} : { title: command.title }),
+            extensionUI,
+          });
+          detachExtensionUI = coordinator.attachExtensionUI(
+            view.handle,
+            actor.conversationId,
+            extensionUI,
+          );
+          this.attachCoordinatedFocus(
+            view,
+            actor,
+            "create_conversation",
+            command.commandId,
+            detachExtensionUI,
+            extensionScope,
+          );
+          transferred = true;
+        } finally {
+          if (!transferred) {
+            detachExtensionUI?.();
+            this.extensionUI.cancelScope(view.sessionId, extensionScope);
+          }
+        }
+        return;
+      }
+      case "select_model":
+        throw new Error(
+          "Conversation model is fixed by its role and cannot be changed",
+        );
+      case "set_thinking":
+        await this.setCoordinatedThinking(command.level);
+        return;
+      case "set_tool_mode": {
+        const view = this.requireCoordinatedView(command.sessionId);
+        await this.projectRuns.transitionToolMode(
+          view.handle.project,
+          command.mode,
+        );
+        this.publishCoordinatedState();
+        this.publishProjectSnapshotCoordinated();
+        return;
+      }
+      case "rename_conversation": {
+        const view = this.requireCoordinatedView(command.sessionId);
+        const { coordinator } = await this.requireCoordination();
+        await coordinator.renameConversation(
+          view.handle,
+          command.conversationId,
+          command.name,
+        );
+        this.publishCoordinatedState();
+        this.publishProjectSnapshotCoordinated();
+        return;
+      }
+      case "delete_conversation": {
+        const view = this.requireCoordinatedView(command.sessionId);
+        const { coordinator } = await this.requireCoordination();
+        await coordinator.deleteConversation(
+          view.handle,
+          command.conversationId,
+        );
+        if (view.conversationId === command.conversationId) {
+          this.extensionUI.cancelScope(
+            view.sessionId,
+            view.extensionScope,
+          );
+          view.unsubscribeExtensionUI();
+          view.unsubscribeExtensionUI = () => undefined;
+          view.actor = undefined;
+          view.conversationId = undefined;
+          view.focusId = undefined;
+          this.focusedItemFingerprints.clear();
+          this.publishCoordinatedState();
+        }
+        this.publishProjectSnapshotCoordinated();
+        this.emitCommandComplete(command);
+        return;
+      }
+      case "create_role": {
+        const view = this.requireCoordinatedView(command.sessionId);
+        const { coordinator, roles } = await this.requireCoordination();
+        await roles.createRole(
+          command.role,
+          view.actor?.modelRegistry
+            ?? coordinator.modelRegistryForProject(view.handle),
+        );
+        this.publishRoleCatalog();
+        this.emitCommandComplete(command);
+        return;
+      }
+      case "update_role": {
+        const view = this.requireCoordinatedView(command.sessionId);
+        const { coordinator, roles } = await this.requireCoordination();
+        await roles.updateRole(
+          command.roleId,
+          command.expectedRevision,
+          command.role,
+          view.actor?.modelRegistry
+            ?? coordinator.modelRegistryForProject(view.handle),
+        );
+        this.publishRoleCatalog();
+        this.emitCommandComplete(command);
+        return;
+      }
+      case "delete_role": {
+        const { roles } = await this.requireCoordination();
+        await roles.deleteRole(
+          command.roleId,
+          command.expectedRevision,
+        );
+        this.publishRoleCatalog();
+        this.emitCommandComplete(command);
+        return;
+      }
+      case "set_api_key":
+        await this.setApiKey(command.provider, command.key);
+        this.emitCommandComplete(command);
+        return;
+      case "login_oauth":
+        await this.loginOAuth(command.provider, command.authFlowId);
+        return;
+      case "logout":
+        await this.logout(command.provider);
+        return;
+      case "refresh_models":
+        await this.refreshModels();
+        return;
+      default:
+        return assertNever(command);
+    }
+  }
+
+  private requireCoordination(): Promise<PiConnectionCoordination> {
+    this.assertOpen();
+    if (!this.coordinationProvider) {
+      return Promise.reject(
+        new Error("Project session coordination is unavailable"),
+      );
+    }
+    this.coordinationReady ??= this.coordinationProvider().then(
+      (coordination) => {
+        if (this.disposed) {
+          throw new Error("Connection is closed");
+        }
+        this.unsubscribeRoles ??= coordination.roles.subscribe(() => {
+          this.publishRoleCatalog();
+        });
+        return coordination;
+      },
+    );
+    return this.coordinationReady;
+  }
+
+  private attachCoordinatedFocus(
+    view: CoordinatedProjectView,
+    actor: ConversationActor,
+    operation: "focus_conversation" | "create_conversation",
+    commandId: string,
+    unsubscribeExtensionUI: () => void,
+    extensionScope: number,
+  ): void {
+    if (this.coordinatedView !== view) {
+      throw new Error("Project observation changed before focus attached");
+    }
+    this.extensionUI.cancelScope(view.sessionId, view.extensionScope);
+    view.unsubscribeExtensionUI();
+    view.unsubscribeExtensionUI = unsubscribeExtensionUI;
+    view.extensionScope = extensionScope;
+    view.actor = actor;
+    view.conversationId = actor.conversationId;
+    view.focusId = randomUUID();
+    view.unreadConversationIds.delete(actor.conversationId);
+    this.focusedItemFingerprints.clear();
+    this.emitFocusAttached(view, operation, commandId);
+    this.publishCoordinatedState();
+    this.publishProjectSnapshotCoordinated();
+    this.publishRoleCatalog();
+    this.publishFocusedConversationSnapshot();
+  }
+
+  private emitFocusAttached(
+    view: CoordinatedProjectView,
+    operation: "initialize" | "focus_conversation" | "create_conversation",
+    commandId: string,
+  ): void {
+    if (this.coordinatedView !== view || this.disposed) return;
+    this.emit({
+      type: "focus_attached",
+      operation,
+      commandId,
+      sessionId: view.sessionId,
+      projectId: view.handle.project.id,
+      ...(view.conversationId === undefined || view.focusId === undefined
+        ? {}
+        : {
+            conversationId: view.conversationId,
+            focusId: view.focusId,
+          }),
+    });
+  }
+
+  private emitCommandComplete(
+    command: Extract<
+      ClientCommand,
+      {
+        type:
+          | "delete_conversation"
+          | "create_role"
+          | "update_role"
+          | "delete_role"
+          | "set_api_key";
+      }
+    >,
+  ): void {
+    this.emit({
+      type: "command_complete",
+      operation: command.type,
+      commandId: command.commandId,
+      sessionId: command.sessionId,
+    });
+  }
+
+  private onCoordinatedProjectEvent(
+    view: CoordinatedProjectView,
+    event: ProjectSessionCoordinatorEvent,
+  ): void {
+    if (this.coordinatedView !== view || this.disposed) return;
+    if (event.type === "project_changed") {
+      if (view.actor?.getState().disposed === true) {
+        const deleted = view.conversationId !== undefined
+          && !view.handle.project.listConversations().some(
+            ({ id }) => id === view.conversationId,
+          );
+        if (deleted) {
+          const conversationId = view.conversationId;
+          const focusId = view.focusId;
+          if (conversationId !== undefined && focusId !== undefined) {
+            this.extensionUI.cancelScope(
+              view.sessionId,
+              view.extensionScope,
+            );
+            view.unsubscribeExtensionUI();
+            view.unsubscribeExtensionUI = () => undefined;
+            view.actor = undefined;
+            view.conversationId = undefined;
+            view.focusId = undefined;
+            this.focusedItemFingerprints.clear();
+            this.emit({
+              type: "focus_invalidated",
+              sessionId: view.sessionId,
+              projectId: view.handle.project.id,
+              conversationId,
+              focusId,
+              reason: "deleted",
+            });
+            this.publishCoordinatedState();
+          }
+        }
+      } else {
+        this.publishCoordinatedState();
+        this.publishFocusedConversationItems();
+      }
+      this.publishProjectSnapshotCoordinated();
+      return;
+    }
+
+    const focused = event.conversationId === view.conversationId
+      && view.focusId !== undefined;
+    if (
+      !focused
+      && (event.type === "completion" || event.type === "error")
+    ) {
+      view.unreadConversationIds.add(event.conversationId);
+    }
+    if (
+      event.type === "session_event"
+      && focused
+      && view.focusId !== undefined
+    ) {
+      this.emit({
+        type: "session_event",
+        sessionId: view.sessionId,
+        conversationId: event.conversationId,
+        focusId: view.focusId,
+        runId: event.runId,
+        event: event.event,
+      });
+    } else if (event.type === "error" && focused) {
+      this.emit({
+        type: "error",
+        scope: "session",
+        sessionId: view.sessionId,
+        conversationId: event.conversationId,
+        focusId: view.focusId,
+        ...(event.runId === undefined ? {} : { runId: event.runId }),
+        message: event.message,
+      });
+    }
+    if (
+      event.type === "activity"
+      || event.type === "completion"
+      || event.type === "error"
+    ) {
+      this.publishProjectSnapshotCoordinated();
+    }
+    if (focused && event.type !== "session_event") {
+      this.publishCoordinatedState();
+    }
+    if (focused && event.type === "completion") {
+      this.publishFocusedConversationSnapshot();
+    }
+  }
+
+  private publishCoordinatedState(): void {
+    const view = this.coordinatedView;
+    if (
+      this.disposed
+      || !view
+      || view.sessionId !== this.requestedSessionId
+      || view.generation !== this.generation
+    ) {
+      return;
+    }
+    this.emit({ type: "state", state: this.coordinatedState(view) });
+  }
+
+  private coordinatedState(view: CoordinatedProjectView): PublicState {
+    const actor = view.actor;
+    const activity = actor?.getActivity() ?? { kind: "idle" as const };
+    const registry = actor?.modelRegistry
+      ?? view.coordinator.modelRegistryForProject(view.handle);
+    const available = registry.getAvailable();
+    const oauthProviders = new Map(
+      this.runtime.authStorage.getOAuthProviders()
+        .map((provider) => [provider.id, provider.name]),
+    );
+    const base: PublicState = {
+      sessionId: view.sessionId,
+      projectId: view.handle.project.id,
+      cwd: view.handle.project.cwd,
+      busy: activity.kind !== "idle",
+      ...(actor === undefined
+        ? {}
+        : {
+            conversationId: actor.conversationId,
+            focusId: view.focusId,
+            conversationName:
+              actor.sessionManager.getSessionName() ?? undefined,
+            selectedModel: { ...actor.profile.role.model },
+          }),
+      ...(activity.kind === "idle"
+        ? {}
+        : {
+            activeRun: this.publicActiveRun(activity),
+          }),
+      thinkingLevel: (
+        actor?.session.thinkingLevel ?? "off"
+      ) as ThinkingLevel,
+      toolMode: view.handle.project.toolMode,
+      availableThinkingLevels: (
+        actor?.session.getAvailableThinkingLevels() ?? ["off"]
+      ) as ThinkingLevel[],
+      providers: buildPublicProviders({
+        models: registry.getAll(),
+        availableKeys: new Set(
+          available.map((model) => `${model.provider}/${model.id}`),
+        ),
+        oauthProviders,
+        displayName: (provider) =>
+          registry.getProviderDisplayName(provider),
+        authStatus: (provider) =>
+          registry.getProviderAuthStatus(provider),
+      }),
+      registryError: registry.getError(),
+    };
+    if (!actor) return base;
+
+    const stats = actor.session.getSessionStats();
+    const contextUsage = resolveContextUsage({
+      contextWindow: actor.session.model?.contextWindow ?? null,
+      messages: actor.session.messages,
+      nativeUsage: stats.contextUsage,
+    });
+    return {
+      ...base,
+      sessionTokenUsage: {
+        input: stats.tokens.input,
+        output: stats.tokens.output,
+        cacheRead: stats.tokens.cacheRead,
+        cacheWrite: stats.tokens.cacheWrite,
+        total: stats.tokens.total,
+      },
+      contextUsage,
+    };
+  }
+
+  private publicActiveRun(
+    activity: Exclude<ConversationActivity, { kind: "idle" }>,
+  ): NonNullable<PublicState["activeRun"]> {
+    if (activity.kind !== "waiting") {
+      return {
+        id: activity.runId,
+        phase: activity.kind,
+      };
+    }
+    return {
+      id: activity.runId,
+      phase: "waiting",
+      waitingFor: {
+        conversationId: activity.targetConversationId,
+        runId: activity.targetRunId,
+      },
+    };
+  }
+
+  private publishProjectSnapshotCoordinated(): void {
+    const view = this.coordinatedView;
+    if (
+      this.disposed
+      || !view
+      || view.sessionId !== this.requestedSessionId
+      || view.generation !== this.generation
+    ) {
+      return;
+    }
+    const requestGeneration = ++this.projectSnapshotGeneration;
+    void this.requireCoordination().then(({ coordinator }) =>
+      coordinator.listSessions(view.handle)
+    ).then((conversations) => {
+      if (
+        this.disposed
+        || this.coordinatedView !== view
+        || requestGeneration !== this.projectSnapshotGeneration
+      ) {
+        return;
+      }
+      const liveConversationIds = new Set(
+        conversations.map(({ id }) => id),
+      );
+      for (const conversation of conversations) {
+        const previousCount = view.seenMessageCounts.get(conversation.id);
+        if (conversation.id === view.conversationId) {
+          view.unreadConversationIds.delete(conversation.id);
+        } else if (
+          (
+            previousCount !== undefined
+              ? conversation.messageCount > previousCount
+              : (
+                  view.projectSnapshotInitialized
+                  && conversation.messageCount > 0
+                )
+          )
+        ) {
+          view.unreadConversationIds.add(conversation.id);
+        }
+        view.seenMessageCounts.set(
+          conversation.id,
+          conversation.messageCount,
+        );
+      }
+      for (const conversationId of view.seenMessageCounts.keys()) {
+        if (liveConversationIds.has(conversationId)) continue;
+        view.seenMessageCounts.delete(conversationId);
+        view.unreadConversationIds.delete(conversationId);
+      }
+      view.projectSnapshotInitialized = true;
+      this.emit(boundedProjectSnapshotEvent({
+        sessionId: view.sessionId,
+        projectId: view.handle.project.id,
+        conversations: conversations.map((conversation) => ({
+          ...conversation,
+          unread: view.unreadConversationIds.has(conversation.id),
+        })),
+        ...(view.conversationId === undefined
+          ? {}
+          : { conversationId: view.conversationId }),
+      }));
+    }).catch((error) => {
+      if (this.coordinatedView === view && !this.disposed) {
+        this.emitError("session", error, view.sessionId);
+      }
+    });
+  }
+
+  private publishRoleCatalog(): void {
+    const view = this.coordinatedView;
+    if (
+      this.disposed
+      || !view
+      || view.sessionId !== this.requestedSessionId
+      || view.generation !== this.generation
+    ) {
+      return;
+    }
+    void this.requireCoordination().then(({ coordinator }) => {
+      if (this.coordinatedView !== view || this.disposed) return;
+      this.emit({
+        type: "role_catalog_snapshot",
+        sessionId: view.sessionId,
+        projectId: view.handle.project.id,
+        roles: coordinator.listRoles(
+          view.actor?.modelRegistry
+            ?? coordinator.modelRegistryForProject(view.handle),
+        ),
+      });
+    }).catch((error) => {
+      if (this.coordinatedView === view && !this.disposed) {
+        this.emitError("settings", error, view.sessionId);
+      }
+    });
+  }
+
+  private publishFocusedConversationSnapshot(): void {
+    const view = this.coordinatedView;
+    const actor = view?.actor;
+    if (
+      this.disposed
+      || !view
+      || !actor
+      || view.conversationId !== actor.conversationId
+      || view.focusId === undefined
+    ) {
+      return;
+    }
+    try {
+      const history = projectConversationItemsSnapshot(
+        actor.sessionManager,
+      );
+      const items = projectConversationPeerExistence(
+        history.items,
+        new Set(
+          view.handle.project.listConversations().map(({ id }) => id),
+        ),
+      );
+      this.focusedItemFingerprints.clear();
+      for (const item of items) {
+        this.focusedItemFingerprints.set(item.id, JSON.stringify(item));
+      }
+      this.emit({
+        type: "conversation_snapshot",
+        sessionId: view.sessionId,
+        conversationId: actor.conversationId,
+        focusId: view.focusId,
+        role: actor.profile.role,
+        items,
+        truncated: history.truncated,
+      });
+    } catch (error) {
+      this.emitError("session", error, view.sessionId);
+    }
+  }
+
+  private publishFocusedConversationItems(): void {
+    const view = this.coordinatedView;
+    const actor = view?.actor;
+    if (
+      this.disposed
+      || !view
+      || !actor
+      || view.conversationId !== actor.conversationId
+      || view.focusId === undefined
+    ) {
+      return;
+    }
+    try {
+      const items = projectConversationPeerExistence(
+        projectConversationItemsSnapshot(actor.sessionManager).items,
+        new Set(
+          view.handle.project.listConversations().map(({ id }) => id),
+        ),
+      );
+      for (const item of items) {
+        if (item.kind !== "session_message") continue;
+        const fingerprint = JSON.stringify(item);
+        if (this.focusedItemFingerprints.get(item.id) === fingerprint) {
+          continue;
+        }
+        this.focusedItemFingerprints.set(item.id, fingerprint);
+        this.emit({
+          type: "conversation_item",
+          sessionId: view.sessionId,
+          conversationId: actor.conversationId,
+          focusId: view.focusId,
+          item,
+        });
+      }
+    } catch (error) {
+      this.emitError("session", error, view.sessionId);
+    }
+  }
+
+  private async setCoordinatedThinking(
+    level: ThinkingLevel,
+  ): Promise<void> {
+    const view = this.requireCoordinatedView();
+    const actor = view.actor;
+    if (!actor) throw new Error("Choose a conversation first");
+    const previousLevel = actor.session.thinkingLevel;
+    let partialFailure: unknown;
+    try {
+      actor.session.setThinkingLevel(level);
+    } catch (error) {
+      if (actor.session.thinkingLevel === previousLevel) throw error;
+      partialFailure = error;
+    }
+    const failures = await this.flushActorSettings(actor);
+    this.publishCoordinatedState();
+    for (const failure of failures) {
+      this.emitError("settings", failure, view.sessionId);
+    }
+    if (partialFailure) {
+      this.emitError(
+        "settings",
+        `思考级别已用于当前会话，但会话记录或默认设置可能未保存：${
+          this.errorMessage(partialFailure)
+        }`,
+        view.sessionId,
+      );
+    }
+  }
+
+  private async flushActorSettings(
+    actor: ConversationActor,
+  ): Promise<unknown[]> {
+    let failure: unknown;
+    try {
+      await actor.settings.flush();
+    } catch (error) {
+      failure = error;
+    }
+    const failures: unknown[] = [];
+    const reported = new Set<unknown>();
+    for (const error of this.runtime.authStorage.drainErrors()) {
+      reported.add(error);
+      this.emitError("auth", error);
+    }
+    for (const item of actor.settings.drainErrors()) {
+      reported.add(item.error);
+      failures.push(item.error);
+    }
+    if (failure && !reported.has(failure)) failures.push(failure);
+    return failures;
+  }
+
+  private requireCoordinatedView(
+    sessionId?: string,
+  ): CoordinatedProjectView {
+    const view = this.coordinatedView;
+    if (
+      !view
+      || view.generation !== this.generation
+      || view.sessionId !== this.requestedSessionId
+      || (sessionId !== undefined && view.sessionId !== sessionId)
+    ) {
+      throw new Error("Session was not initialized");
+    }
+    return view;
+  }
+
+  private requireCoordinatedFocus(
+    sessionId: string,
+    conversationId: string,
+    focusId: string,
+  ): CoordinatedProjectView {
+    const view = this.requireCoordinatedView(sessionId);
+    if (
+      !view.actor
+      || view.conversationId !== conversationId
+      || view.focusId !== focusId
+    ) {
+      throw new Error("Conversation focus is stale or no longer attached");
+    }
+    return view;
+  }
+
+  private isCoordinatedSession(
+    sessionId: string,
+    generation: number,
+  ): boolean {
+    const view = this.coordinatedView;
+    return !this.disposed
+      && this.requestedSessionId === sessionId
+      && this.generation === generation
+      && view?.sessionId === sessionId
+      && view.generation === generation;
+  }
+
+  private closeCoordinatedSession(sessionId: string): Promise<void> {
+    if (this.requestedSessionId !== sessionId) return Promise.resolve();
+    this.generation++;
+    this.requestedSessionId = undefined;
+    this.initializationAbort?.abort();
+    this.initializationAbort = undefined;
+    this.cancelAuth();
+    return this.operations.run(() => this.detachCoordinatedView());
+  }
+
+  private async detachCoordinatedView(): Promise<void> {
+    const view = this.coordinatedView;
+    if (!view) return;
+    this.coordinatedView = undefined;
+    this.projectSnapshotGeneration++;
+    this.focusedItemFingerprints.clear();
+    const failures: unknown[] = [];
+    this.extensionUI.cancelScope(view.sessionId, view.extensionScope);
+    try {
+      view.unsubscribeExtensionUI();
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      view.unsubscribeProject();
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      view.handle.release();
+    } catch (error) {
+      failures.push(error);
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        "Failed to detach project observation",
+      );
+    }
+  }
+
   private async execute(command: QueuedCommand): Promise<void> {
     switch (command.type) {
       case "select_model": return this.selectModel(command.provider, command.modelId);
@@ -477,6 +1696,12 @@ export class PiConnection {
         return this.renameConversation(command.conversationId, command.name);
       case "delete_conversation":
         return this.deleteConversation(command.conversationId);
+      case "focus_conversation":
+      case "create_conversation":
+      case "create_role":
+      case "update_role":
+      case "delete_role":
+        throw new Error(`${command.type} is unavailable until project coordination is initialized`);
       case "set_api_key": return this.setApiKey(command.provider, command.key);
       case "login_oauth": return this.loginOAuth(command.provider, command.authFlowId);
       case "logout": return this.logout(command.provider);
@@ -505,6 +1730,9 @@ export class PiConnection {
       id: command.runId,
       sessionId: command.sessionId,
       generation,
+      conversationId:
+        command.conversationId ?? this.active?.conversationId ?? "",
+      focusId: command.focusId ?? this.active?.focusId ?? "",
       phase: "queued",
       toolMode: this.active?.id === command.sessionId
         && this.active.generation === generation
@@ -709,8 +1937,18 @@ export class PiConnection {
 
   private assertKnownProvider(provider: string, includeOAuth = false): void {
     const active = this.active;
-    const registry = active?.modelRegistry ?? this.runtime.modelRegistry;
+    const view = this.coordinatedView;
+    const actor = view?.actor;
+    const registry =
+      actor?.modelRegistry
+      ?? active?.modelRegistry
+      ?? (
+        view
+          ? view.coordinator.modelRegistryForProject(view.handle)
+          : this.runtime.modelRegistry
+      );
     const modelProvider = registry.getAll().some((model) => model.provider === provider)
+      || actor?.dynamicProviderNames().has(provider) === true
       || active?.dynamicProviderNames().has(provider) === true;
     const oauthProvider = includeOAuth && this.isVisibleOAuthProvider(provider);
     if (!modelProvider && !oauthProvider) throw new Error(`Provider not found: ${provider}`);
@@ -737,6 +1975,7 @@ export class PiConnection {
       sessionId: active.id,
       projectId: active.project.id,
       conversationId: active.conversationId,
+      focusId: active.focusId,
       conversationName: active.sessionManager.getSessionName() ?? undefined,
       cwd: active.cwd,
       busy: Boolean(activeRun),
@@ -791,18 +2030,12 @@ export class PiConnection {
     ) {
       return;
     }
-    const index = projectConversationIndex(
-      active.project.listConversations(),
-      active.conversationId,
-    );
-    this.emit({
-      type: "project_snapshot",
+    this.emit(boundedProjectSnapshotEvent({
       sessionId: active.id,
       projectId: active.project.id,
       conversationId: active.conversationId,
-      conversations: index.conversations,
-      truncated: index.truncated,
-    });
+      conversations: active.project.listConversations(),
+    }));
   }
 
   private requireSession(): AgentSession {
@@ -845,9 +2078,15 @@ export class PiConnection {
       reported.add(error);
       this.emitError("auth", error);
     }
-    for (const item of this.active?.settings.drainErrors() ?? []) {
+    const settings =
+      this.coordinatedView?.actor?.settings ?? this.active?.settings;
+    for (const item of settings?.drainErrors() ?? []) {
       reported.add(item.error);
-      this.emitError("settings", item.error, this.active?.id);
+      this.emitError(
+        "settings",
+        item.error,
+        this.coordinatedView?.sessionId ?? this.active?.id,
+      );
     }
     return reported;
   }
@@ -886,7 +2125,14 @@ export class PiConnection {
     }
 
     for (const projected of run.projector.project(event)) {
-      this.emit({ type: "session_event", sessionId, runId: run.id, event: projected });
+      this.emit({
+        type: "session_event",
+        sessionId,
+        conversationId: run.conversationId,
+        focusId: run.focusId,
+        runId: run.id,
+        event: projected,
+      });
     }
     if (event.type === "agent_start" || event.type === "agent_settled" || event.type === "agent_end" || event.type === "message_end") {
       this.publishState();
@@ -1010,6 +2256,8 @@ export class PiConnection {
     this.emit({
       type: "session_event",
       sessionId: ticket.sessionId,
+      conversationId: ticket.conversationId,
+      focusId: ticket.focusId,
       runId: ticket.id,
       event,
     });
@@ -1164,6 +2412,9 @@ export class PiConnection {
   }
 
   dispose(): Promise<void> {
+    if (this.coordinationProvider) {
+      return this.disposeCoordinated();
+    }
     if (this.disposePromise) return this.disposePromise;
     this.disposed = true;
     this.generation++;
@@ -1181,6 +2432,24 @@ export class PiConnection {
       this.active = undefined;
       if (active) await this.disposeBundle(active);
     });
+    return this.disposePromise;
+  }
+
+  private disposeCoordinated(): Promise<void> {
+    if (this.disposePromise) return this.disposePromise;
+    this.disposed = true;
+    this.generation++;
+    this.requestedSessionId = undefined;
+    this.initializationAbort?.abort();
+    this.initializationAbort = undefined;
+    this.unsubscribeRuntime();
+    this.unsubscribeRoles?.();
+    this.unsubscribeRoles = undefined;
+    this.cancelAuth();
+    this.extensionUI.cancelAll();
+    this.disposePromise = this.operations.run(() =>
+      this.detachCoordinatedView()
+    );
     return this.disposePromise;
   }
 }

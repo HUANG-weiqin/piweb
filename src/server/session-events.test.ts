@@ -53,6 +53,7 @@ describe("SessionEventProjector", () => {
         usage: { totalTokens: 1 },
       },
     }))[0]).toEqual({ type: "text_replaced", text: "final" });
+    expect(projector.finalText).toBe("final");
   });
 
   it("tracks only the final assistant error after SDK retries", () => {

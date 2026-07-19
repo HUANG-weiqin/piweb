@@ -4,8 +4,11 @@ import {
   useState,
   type KeyboardEvent,
 } from "react";
+import type { ConversationRoleSnapshot } from "../../shared/protocol";
 import type { ChatState } from "../chat/reducer";
+import { ConversationRoleDialog } from "./ConversationRoleDialog";
 import { Message } from "./Message";
+import { SessionMessageCard } from "./SessionMessageCard";
 
 interface ChatProps {
   chat: ChatState;
@@ -16,6 +19,7 @@ interface ChatProps {
   contextWindow: number | null | undefined;
   contextSource: "measured" | "estimated" | "unknown" | undefined;
   model?: { provider: string; id: string };
+  role?: ConversationRoleSnapshot;
   cwd: string;
   online: boolean;
   conversationReady: boolean;
@@ -27,6 +31,7 @@ interface ChatProps {
   onAbort(): void;
   onSettings(): void;
   onChangeCwd(): void;
+  onOpenConversation?(conversationId: string): void;
 }
 
 function formatContextUsage({
@@ -49,6 +54,7 @@ export function Chat({
   contextWindow,
   contextSource,
   model,
+  role,
   cwd,
   online,
   conversationReady,
@@ -60,6 +66,7 @@ export function Chat({
   onAbort,
   onSettings,
   onChangeCwd,
+  onOpenConversation,
 }: ChatProps) {
   const bottomThreshold = 96;
   const contextTokenText = formatContextUsage({ contextTokenCount, contextWindow, contextSource });
@@ -70,6 +77,11 @@ export function Chat({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const followOutputRef = useRef(true);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const [roleDetailsOpen, setRoleDetailsOpen] = useState(false);
+  const items = chat.items ?? chat.messages.map((message) => ({
+    kind: "message" as const,
+    ...message,
+  }));
   const scrollToLatest = (behavior?: ScrollBehavior) => {
     const transcript = transcriptRef.current;
     if (!transcript) return;
@@ -89,7 +101,7 @@ export function Chat({
     } else {
       setShowJumpToLatest(true);
     }
-  }, [chat.messages]);
+  }, [chat.items, chat.messages]);
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
@@ -133,8 +145,14 @@ export function Chat({
       {historyTruncated && <div className="history-note">
         较早或过长的显示内容已省略；完整记录仍保存在项目中。
       </div>}
-      {!chat.messages.length && <div className="empty"><div>π</div><h1>想做点什么？</h1><p>Pi 可以读取、修改文件并执行命令。</p></div>}
-      {chat.messages.map((message) => <Message key={message.id} message={message} />)}
+      {!items.length && <div className="empty"><div>π</div><h1>想做点什么？</h1><p>Pi 可以读取、修改文件并执行命令。</p></div>}
+      {items.map((item) => item.kind === "session_message"
+        ? <SessionMessageCard
+            key={`card:${item.cardId}`}
+            card={item}
+            onOpenConversation={onOpenConversation}
+          />
+        : <Message key={`message:${item.id}`} message={item} />)}
     </section>
     <div className="composer-wrap">
       {showJumpToLatest && <button
@@ -156,10 +174,24 @@ export function Chat({
         {busy ? <button className="send stop" onClick={onAbort} aria-label="停止">■</button> : <button className="send" onClick={send} disabled={!online || !conversationReady || !model || submitting || !draft.trim()} aria-label="发送">↑</button>}
       </div>
       <div className="composer-meta">
+        {role && <button
+          type="button"
+          className="conversation-role-pill"
+          aria-label={`查看会话角色 ${role.name}`}
+          onClick={() => setRoleDetailsOpen(true)}
+        >
+          <span>{role.name}</span>
+          <small>{role.model.provider} / {role.model.id}</small>
+        </button>}
         <small className="session-stats billed-stat">累计 Token：{billedTokenCount.toLocaleString("zh-CN")}</small>
         <small className="session-stats context-stat">上下文：{contextTokenText}</small>
         <small className="composer-tip">Enter 发送 · Shift+Enter 换行 · 对话随项目自动保存</small>
       </div>
     </div>
+    {role && <ConversationRoleDialog
+      open={roleDetailsOpen}
+      role={role}
+      onClose={() => setRoleDetailsOpen(false)}
+    />}
   </main>;
 }

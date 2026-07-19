@@ -27,7 +27,15 @@ import type {
   ConversationSummary,
   ToolMode,
 } from "../shared/protocol.js";
-import { validatePiSessionFile } from "./session-file.js";
+import {
+  createConversationMetaEntry,
+  type ConversationMeta,
+} from "./conversation-meta.js";
+import {
+  inspectPiSessionFile,
+  validatePiSessionFile,
+  type PiSessionFileInspection,
+} from "./session-file.js";
 
 const MANIFEST_VERSION = 1;
 const PROJECT_STATE_DIRECTORY = ".piweb";
@@ -58,6 +66,11 @@ export interface ProjectStoreSnapshot {
 }
 
 export interface ConversationLease {
+  release(): void;
+  upgradeToDeletion(): ConversationDeletionLease;
+}
+
+export interface ConversationDeletionLease {
   release(): void;
 }
 
@@ -496,7 +509,11 @@ export class ProjectStore {
     }
   }
 
-  async createConversation(conversationId?: string): Promise<SessionManager> {
+  async createConversation(
+    conversationId?: string,
+    conversationMeta?: ConversationMeta,
+    options: { updateRecent?: boolean } = {},
+  ): Promise<SessionManager> {
     if (conversationId !== undefined) {
       assertSessionId(conversationId, "conversationId");
     }
@@ -520,22 +537,39 @@ export class ProjectStore {
       );
     }
     this.assertLexicallyInsideSessionDirectory(sessionFile);
+    if (conversationMeta !== undefined) {
+      const meta = createConversationMetaEntry(conversationMeta);
+      pending.appendCustomEntry(meta.customType, meta.data);
+    }
 
-    await writeFile(sessionFile, `${JSON.stringify(header)}\n`, {
+    const initialEntries = [
+      header,
+      ...pending.getEntries(),
+    ];
+    await writeFile(
+      sessionFile,
+      `${initialEntries.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+      {
       encoding: "utf8",
       flag: "wx",
-    });
+      },
+    );
     const conversation = SessionManager.open(
       sessionFile,
       this.sessionDir,
       this.cwd,
     );
-    await this.setLastConversation(conversation.getSessionId());
+    if (options.updateRecent !== false) {
+      await this.setLastConversation(conversation.getSessionId());
+    }
     await this.refreshConversations();
     return conversation;
   }
 
-  async openConversation(conversationId: string): Promise<SessionManager> {
+  async openConversation(
+    conversationId: string,
+    options: { updateRecent?: boolean } = {},
+  ): Promise<SessionManager> {
     const information = await this.listSafeSessionInformation();
     const match = information.find(({ id }) => id === conversationId);
     if (match === undefined) {
@@ -558,8 +592,31 @@ export class ProjectStore {
         `Conversation identity changed while opening: ${conversationId}`,
       );
     }
-    await this.setLastConversation(conversationId);
+    if (options.updateRecent !== false) {
+      await this.setLastConversation(conversationId);
+    }
     return conversation;
+  }
+
+  /**
+   * Reads host-owned metadata without opening a writable Pi SessionManager or
+   * changing the project's recent-conversation pointer.
+   */
+  async inspectConversation(
+    conversationId: string,
+  ): Promise<PiSessionFileInspection> {
+    assertSessionId(conversationId, "conversationId");
+    const information = await this.listSafeSessionInformation();
+    const match = information.find(({ id }) => id === conversationId);
+    if (match === undefined) {
+      throw new Error(`Conversation not found: ${conversationId}`);
+    }
+    const safePath = await this.resolveSafeSessionPath(match.path);
+    return inspectPiSessionFile(
+      await readFile(safePath, "utf8"),
+      safePath,
+      conversationId,
+    );
   }
 
   deleteConversation(conversationId: string): Promise<void> {
@@ -915,25 +972,59 @@ export class ProjectStoreRegistry {
     token: symbol,
   ): ConversationLease {
     let released = false;
+    let upgraded = false;
+    return {
+      release: () => {
+        if (released || upgraded) return;
+        released = true;
+        this.releaseConversationLease(key, state, token);
+      },
+      upgradeToDeletion: () => {
+        if (released || upgraded) {
+          throw new Error("Conversation lease is no longer owned");
+        }
+        if (this.leases.get(key) !== state || state.owner !== token) {
+          throw new Error("Conversation lease ownership changed");
+        }
+        upgraded = true;
+        return this.createConversationDeletionLease(key, state, token);
+      },
+    };
+  }
+
+  private createConversationDeletionLease(
+    key: string,
+    state: ConversationLeaseState,
+    token: symbol,
+  ): ConversationDeletionLease {
+    let released = false;
     return {
       release: () => {
         if (released) return;
         released = true;
-        if (this.leases.get(key) !== state || state.owner !== token) return;
-
-        const waiter = state.waiters.shift();
-        if (waiter === undefined) {
-          this.leases.delete(key);
-          return;
-        }
-
-        state.owner = waiter.token;
-        this.settleConversationWaiter(waiter);
-        waiter.resolve(
-          this.createConversationLease(key, state, waiter.token),
-        );
+        this.releaseConversationLease(key, state, token);
       },
     };
+  }
+
+  private releaseConversationLease(
+    key: string,
+    state: ConversationLeaseState,
+    token: symbol,
+  ): void {
+    if (this.leases.get(key) !== state || state.owner !== token) return;
+
+    const waiter = state.waiters.shift();
+    if (waiter === undefined) {
+      this.leases.delete(key);
+      return;
+    }
+
+    state.owner = waiter.token;
+    this.settleConversationWaiter(waiter);
+    waiter.resolve(
+      this.createConversationLease(key, state, waiter.token),
+    );
   }
 
   private cancelConversationWaiter(

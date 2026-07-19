@@ -3,6 +3,7 @@ import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
 import {
   MAX_MESSAGE_BYTES,
+  MAX_SERVER_EVENT_BYTES,
   parseClientCommand,
   PROTOCOL_VERSION,
   type ClientCommand,
@@ -14,8 +15,13 @@ import {
 } from "./directory-browser.js";
 import { PiRuntime, type PiRuntimeLike } from "./pi-runtime.js";
 import { ProjectRunCoordinator } from "./project-run-coordinator.js";
-import { PiConnection } from "./pi-service.js";
+import { ProjectSessionCoordinator } from "./project-session-coordinator.js";
+import {
+  PiConnection,
+  type PiConnectionCoordination,
+} from "./pi-service.js";
 import { ProjectStoreRegistry } from "./project-store.js";
+import { RoleCatalog } from "./role-catalog.js";
 
 export interface SocketServerHandle {
   readonly sockets: WebSocketServer;
@@ -43,20 +49,31 @@ export function isAllowedOrigin(
   }
 }
 
-function safeSend(socket: WebSocket, event: ServerEvent): void {
+const SERVER_EVENT_SERIALIZATION_ERROR = JSON.stringify({
+  type: "error",
+  scope: "protocol",
+  message: "A server event could not be serialized",
+} satisfies ServerEvent);
+const SERVER_EVENT_SIZE_ERROR = JSON.stringify({
+  type: "error",
+  scope: "protocol",
+  message: "A server event exceeded the protocol frame limit",
+} satisfies ServerEvent);
+
+export function safeSend(
+  socket: WebSocket,
+  event: ServerEvent,
+  maximumBytes = MAX_SERVER_EVENT_BYTES,
+): void {
   if (socket.readyState !== WebSocket.OPEN) return;
   let payload: string;
   try {
     payload = JSON.stringify(event);
   } catch {
-    if (event.type !== "error") {
-      safeSend(socket, {
-        type: "error",
-        scope: "protocol",
-        message: "A server event could not be serialized",
-      });
-    }
-    return;
+    payload = SERVER_EVENT_SERIALIZATION_ERROR;
+  }
+  if (Buffer.byteLength(payload, "utf8") > maximumBytes) {
+    payload = SERVER_EVENT_SIZE_ERROR;
   }
   try {
     socket.send(payload);
@@ -76,7 +93,21 @@ export function attachSocketServer(
   const connectionDisposals = new Map<PiConnection, Promise<void>>();
   const projects = new ProjectStoreRegistry();
   const projectRuns = new ProjectRunCoordinator();
+  let coordinationPromise: Promise<PiConnectionCoordination> | undefined;
   let closePromise: Promise<void> | undefined;
+
+  const coordination = (): Promise<PiConnectionCoordination> => {
+    coordinationPromise ??= RoleCatalog.open(runtime).then((roles) => ({
+      roles,
+      coordinator: new ProjectSessionCoordinator(
+        runtime,
+        roles,
+        projects,
+        projectRuns,
+      ),
+    }));
+    return coordinationPromise;
+  };
 
   const disposeConnection = (socket: WebSocket, connection: PiConnection): Promise<void> => {
     connections.delete(socket);
@@ -109,6 +140,7 @@ export function attachSocketServer(
       undefined,
       projects,
       projectRuns,
+      coordination,
     );
     connections.set(socket, connection);
     const directoryBrowserState: DirectoryBrowserState = {
@@ -139,6 +171,10 @@ export function attachSocketServer(
         }
         const sessionId = "sessionId" in command ? command.sessionId : undefined;
         const runId = "runId" in command ? command.runId : undefined;
+        const conversationId = "conversationId" in command
+          ? command.conversationId
+          : undefined;
+        const focusId = "focusId" in command ? command.focusId : undefined;
         const authFlowId = "authFlowId" in command ? command.authFlowId : undefined;
         const commandId = "commandId" in command ? command.commandId : undefined;
         void connection.handle(command).catch((error) => safeSend(socket, {
@@ -147,6 +183,9 @@ export function attachSocketServer(
           operation: command.type,
           sessionId,
           runId,
+          ...(conversationId === undefined || focusId === undefined
+            ? {}
+            : { conversationId, focusId }),
           authFlowId,
           commandId,
           message: error instanceof Error ? error.message : String(error),
@@ -189,9 +228,21 @@ export function attachSocketServer(
         for (const socket of sockets.clients) socket.terminate();
         const results = await Promise.allSettled(disposals);
         await socketsClosed;
-        const failures = results
+        const failures: unknown[] = results
           .filter((result): result is PromiseRejectedResult => result.status === "rejected")
           .map((result) => result.reason);
+        if (coordinationPromise) {
+          try {
+            const { coordinator, roles } = await coordinationPromise;
+            try {
+              await coordinator.close();
+            } finally {
+              roles.dispose();
+            }
+          } catch (error) {
+            failures.push(error);
+          }
+        }
         if (failures.length > 0) {
           throw new AggregateError(failures, "Failed to dispose WebSocket connections");
         }

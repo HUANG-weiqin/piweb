@@ -1,9 +1,27 @@
 import { describe, expect, it } from "vitest";
-import type { TokenUsage } from "../../shared/protocol";
+import type {
+  ConversationHistoryItem,
+  ConversationMessageCard,
+  TokenUsage,
+} from "../../shared/protocol";
 import { chatReducer, initialChatState } from "./reducer";
 
 const RUN_1 = "run-1";
 const RUN_2 = "run-2";
+const FOCUS_A_1 = {
+  sessionId: "11111111-1111-4111-8111-111111111111",
+  conversationId: "conversation-a",
+  focusId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+};
+const FOCUS_A_2 = {
+  ...FOCUS_A_1,
+  focusId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2",
+};
+const FOCUS_B = {
+  sessionId: FOCUS_A_1.sessionId,
+  conversationId: "conversation-b",
+  focusId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+};
 
 function usage(total: number): TokenUsage {
   return {
@@ -15,7 +33,225 @@ function usage(total: number): TokenUsage {
   };
 }
 
+function historyMessage(
+  id: string,
+  role: "user" | "assistant",
+  text: string,
+  total = 0,
+): ConversationHistoryItem {
+  return {
+    kind: "message",
+    id,
+    role,
+    text,
+    thinking: "",
+    tools: [],
+    ...(total > 0 ? { usage: usage(total) } : {}),
+  };
+}
+
+function sessionMessageCard(
+  state: ConversationMessageCard["state"] = "queued",
+): ConversationMessageCard {
+  return {
+    kind: "session_message",
+    id: `entry-${state}`,
+    cardId: "card-1",
+    direction: "outgoing",
+    state,
+    body: "review the recovery path",
+    from: {
+      conversationId: "conversation-a",
+      title: "lead",
+      role: { id: "lead", name: "Lead" },
+    },
+    to: {
+      conversationId: "conversation-b",
+      title: "review",
+      role: { id: "reviewer", name: "Reviewer" },
+    },
+    sentAt: "2026-07-19T08:00:00.000Z",
+    updatedAt: "2026-07-19T08:01:00.000Z",
+    ...(state === "completed" ? { result: "all good" } : {}),
+  };
+}
+
 describe("chatReducer", () => {
+  it("hydrates message and session-message items only for the attached focus", () => {
+    let state = chatReducer(initialChatState, {
+      type: "focus_changed",
+      ...FOCUS_A_1,
+    });
+    state = chatReducer(state, {
+      type: "hydrate",
+      ...FOCUS_A_1,
+      items: [
+        historyMessage("user-1", "user", "inspect"),
+        sessionMessageCard(),
+        historyMessage("assistant-1", "assistant", "done", 9),
+      ],
+    });
+
+    expect(state.focus).toEqual(FOCUS_A_1);
+    expect(state.items?.map((item) => item.kind)).toEqual([
+      "message",
+      "session_message",
+      "message",
+    ]);
+    expect(state.messages.map(({ id }) => id)).toEqual(["user-1", "assistant-1"]);
+    expect(state.sessionTokens).toBe(9);
+  });
+
+  it("clears the old transcript when a new focus is attached", () => {
+    let state = chatReducer(initialChatState, {
+      type: "focus_changed",
+      ...FOCUS_A_1,
+    });
+    state = chatReducer(state, {
+      type: "hydrate",
+      ...FOCUS_A_1,
+      items: [historyMessage("user-1", "user", "old")],
+    });
+
+    state = chatReducer(state, { type: "focus_changed", ...FOCUS_B });
+
+    expect(state.focus).toEqual(FOCUS_B);
+    expect(state.items).toEqual([]);
+    expect(state.messages).toEqual([]);
+    expect(state.sessionTokens).toBe(0);
+  });
+
+  it("rejects the first A snapshot after an A to B to A focus cycle", () => {
+    let state = chatReducer(initialChatState, {
+      type: "focus_changed",
+      ...FOCUS_A_1,
+    });
+    state = chatReducer(state, { type: "focus_changed", ...FOCUS_B });
+    state = chatReducer(state, { type: "focus_changed", ...FOCUS_A_2 });
+
+    const stale = chatReducer(state, {
+      type: "hydrate",
+      ...FOCUS_A_1,
+      items: [historyMessage("stale", "assistant", "stale A")],
+    });
+    expect(stale).toBe(state);
+
+    const current = chatReducer(stale, {
+      type: "hydrate",
+      ...FOCUS_A_2,
+      items: [historyMessage("current", "assistant", "current A")],
+    });
+    expect(current.items).toEqual([
+      expect.objectContaining({ id: "current", text: "current A" }),
+    ]);
+  });
+
+  it("updates a live card in place by cardId and preserves its position", () => {
+    let state = chatReducer(initialChatState, {
+      type: "focus_changed",
+      ...FOCUS_A_1,
+    });
+    state = chatReducer(state, {
+      type: "hydrate",
+      ...FOCUS_A_1,
+      items: [
+        historyMessage("before", "user", "before"),
+        sessionMessageCard(),
+        historyMessage("after", "assistant", "after"),
+      ],
+    });
+
+    state = chatReducer(state, {
+      type: "conversation_item",
+      ...FOCUS_A_1,
+      item: sessionMessageCard("completed"),
+    });
+
+    expect(state.items).toHaveLength(3);
+    expect(state.items?.[1]).toMatchObject({
+      kind: "session_message",
+      cardId: "card-1",
+      state: "completed",
+      result: "all good",
+    });
+    expect(state.items?.map(({ id }) => id)).toEqual([
+      "before",
+      "entry-completed",
+      "after",
+    ]);
+  });
+
+  it("drops live items and run events with the wrong session, conversation, or focus", () => {
+    let state = chatReducer(initialChatState, {
+      type: "focus_changed",
+      ...FOCUS_A_2,
+    });
+    const wrongIdentities = [
+      { ...FOCUS_A_2, sessionId: "22222222-2222-4222-8222-222222222222" },
+      { ...FOCUS_A_2, conversationId: "conversation-b" },
+      { ...FOCUS_A_2, focusId: FOCUS_A_1.focusId },
+    ];
+
+    for (const identity of wrongIdentities) {
+      const before = state;
+      state = chatReducer(state, {
+        type: "conversation_item",
+        ...identity,
+        item: sessionMessageCard(),
+      });
+      expect(state).toBe(before);
+      state = chatReducer(state, {
+        type: "session",
+        ...identity,
+        runId: RUN_1,
+        event: { type: "text_delta", delta: "stale" },
+      });
+      expect(state).toBe(before);
+    }
+
+    state = chatReducer(state, {
+      type: "session",
+      ...FOCUS_A_2,
+      runId: RUN_1,
+      event: { type: "text_delta", delta: "current" },
+    });
+    expect(state.messages).toEqual([
+      expect.objectContaining({ role: "assistant", text: "current" }),
+    ]);
+  });
+
+  it("projects a scoped accepted prompt once and rejects a stale focus", () => {
+    let state = chatReducer(initialChatState, {
+      type: "focus_changed",
+      ...FOCUS_A_2,
+    });
+    state = chatReducer(state, {
+      type: "prompt_accepted",
+      ...FOCUS_A_2,
+      runId: RUN_1,
+      text: "current",
+    });
+    const once = state;
+    state = chatReducer(state, {
+      type: "prompt_accepted",
+      ...FOCUS_A_2,
+      runId: RUN_1,
+      text: "duplicate",
+    });
+    expect(state).toBe(once);
+
+    state = chatReducer(state, {
+      type: "prompt_accepted",
+      ...FOCUS_A_1,
+      runId: RUN_2,
+      text: "stale",
+    });
+    expect(state).toBe(once);
+    expect(state.messages).toEqual([
+      expect.objectContaining({ role: "user", runId: RUN_1, text: "current" }),
+    ]);
+  });
+
   it("hydrates a detached persistent history snapshot", () => {
     const state = chatReducer(initialChatState, {
       type: "hydrate",

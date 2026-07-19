@@ -1,14 +1,80 @@
 import { z } from "zod";
 
 export const MAX_MESSAGE_BYTES = 1_000_000;
-export const PROTOCOL_VERSION = 10;
+export const MAX_SERVER_EVENT_BYTES = 64 * 1024 * 1024;
+export const MAX_ROLE_COUNT = 64;
+export const MAX_ROLE_NAME_CHARACTERS = 80;
+export const MAX_ROLE_DESCRIPTION_CHARACTERS = 1_000;
+export const MAX_ROLE_SYSTEM_PROMPT_BYTES = 128 * 1024;
+export const MAX_PROJECT_CONVERSATIONS = 100;
+export const MAX_PROJECT_CONVERSATION_NAME_CHARACTERS = 120;
+export const MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS = 500;
+export const PROTOCOL_VERSION = 11;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
 const conversationIdSchema = z.string().uuid();
 const runIdSchema = z.string().uuid();
+const focusIdSchema = z.string().uuid();
 const authFlowIdSchema = z.string().uuid();
 const extensionUIRequestIdSchema = z.string().uuid();
 const commandIdSchema = z.string().uuid();
+const utf8Bytes = (value: string) =>
+  new TextEncoder().encode(value).byteLength;
+const boundedUtf8String = (
+  maximumBytes: number,
+  field: string,
+) => z.string().superRefine((value, context) => {
+  if (utf8Bytes(value) <= maximumBytes) return;
+  context.addIssue({
+    code: z.ZodIssueCode.custom,
+    message: `${field} must be at most ${maximumBytes} UTF-8 bytes`,
+  });
+});
+const boundedCharactersString = (
+  maximumCharacters: number,
+  field: string,
+) => z.string().superRefine((value, context) => {
+  if ([...value].length <= maximumCharacters) return;
+  context.addIssue({
+    code: z.ZodIssueCode.custom,
+    message:
+      `${field} must be at most ${maximumCharacters} characters`,
+  });
+});
+const requiredBoundedCharactersString = (
+  maximumCharacters: number,
+  field: string,
+) => z.string().trim().min(1).superRefine((value, context) => {
+  if ([...value].length <= maximumCharacters) return;
+  context.addIssue({
+    code: z.ZodIssueCode.custom,
+    message:
+      `${field} must be at most ${maximumCharacters} characters`,
+  });
+});
+const roleIdSchema = required.max(128).refine(
+  (value) => value === "default" || z.string().uuid().safeParse(value).success,
+  'roleId must be "default" or a UUID',
+);
+const roleModelSchema = z.object({
+  provider: required.max(200),
+  id: required.max(500),
+});
+const roleInputSchema = z.object({
+  name: requiredBoundedCharactersString(
+    MAX_ROLE_NAME_CHARACTERS,
+    "role.name",
+  ),
+  description: boundedCharactersString(
+    MAX_ROLE_DESCRIPTION_CHARACTERS,
+    "role.description",
+  ),
+  systemPrompt: boundedUtf8String(
+    MAX_ROLE_SYSTEM_PROMPT_BYTES,
+    "role.systemPrompt",
+  ),
+  model: roleModelSchema.nullable(),
+});
 
 export const extensionUIRequestSchema = z.discriminatedUnion("kind", [
   z.object({
@@ -44,7 +110,7 @@ export const extensionUIResponseSchema = z.discriminatedUnion("kind", [
 export type ExtensionUIRequest = z.infer<typeof extensionUIRequestSchema>;
 export type ExtensionUIResponse = z.infer<typeof extensionUIResponseSchema>;
 
-export const clientCommandSchema = z.discriminatedUnion("type", [
+const clientCommandUnionSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("browse_directory"),
     commandId: commandIdSchema,
@@ -52,22 +118,47 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
   }),
   z.object({
     type: z.literal("initialize"),
+    commandId: commandIdSchema.optional(),
     sessionId: sessionIdSchema,
     cwd: required.max(4096),
     toolMode: z.enum(["read_only", "full_access"]).optional(),
     conversation: z.discriminatedUnion("kind", [
       z.object({ kind: z.literal("recent") }),
-      z.object({ kind: z.literal("new") }),
+      z.object({
+        kind: z.literal("new"),
+        roleId: roleIdSchema.optional(),
+      }),
       z.object({ kind: z.literal("open"), conversationId: conversationIdSchema }),
     ]).optional(),
   }),
   z.object({
+    type: z.literal("focus_conversation"),
+    commandId: commandIdSchema,
+    sessionId: sessionIdSchema,
+    conversationId: conversationIdSchema,
+  }),
+  z.object({
+    type: z.literal("create_conversation"),
+    commandId: commandIdSchema,
+    sessionId: sessionIdSchema,
+    roleId: roleIdSchema,
+    title: required.max(120).optional(),
+  }),
+  z.object({
     type: z.literal("prompt"),
     sessionId: sessionIdSchema,
+    conversationId: conversationIdSchema,
+    focusId: commandIdSchema,
     runId: runIdSchema,
     text: required.max(200_000),
   }),
-  z.object({ type: z.literal("abort"), sessionId: sessionIdSchema, runId: runIdSchema }),
+  z.object({
+    type: z.literal("abort"),
+    sessionId: sessionIdSchema,
+    conversationId: conversationIdSchema,
+    focusId: commandIdSchema,
+    runId: runIdSchema,
+  }),
   z.object({
     type: z.literal("extension_ui_response"),
     sessionId: sessionIdSchema,
@@ -104,6 +195,27 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
     conversationId: conversationIdSchema,
   }),
   z.object({
+    type: z.literal("create_role"),
+    commandId: commandIdSchema,
+    sessionId: sessionIdSchema,
+    role: roleInputSchema,
+  }),
+  z.object({
+    type: z.literal("update_role"),
+    commandId: commandIdSchema,
+    sessionId: sessionIdSchema,
+    roleId: roleIdSchema,
+    expectedRevision: z.number().int().positive(),
+    role: roleInputSchema,
+  }),
+  z.object({
+    type: z.literal("delete_role"),
+    commandId: commandIdSchema,
+    sessionId: sessionIdSchema,
+    roleId: roleIdSchema,
+    expectedRevision: z.number().int().positive(),
+  }),
+  z.object({
     type: z.literal("set_api_key"),
     commandId: commandIdSchema,
     sessionId: sessionIdSchema,
@@ -118,11 +230,37 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("close_session"), sessionId: sessionIdSchema }),
 ]);
 
+export const clientCommandSchema = clientCommandUnionSchema.superRefine(
+  (command, context) => {
+    if (command.type === "initialize" && command.commandId === undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "initialize requires an exact commandId",
+        path: ["commandId"],
+      });
+    }
+    if (
+      command.type === "initialize"
+      && command.conversation?.kind === "new"
+      && command.conversation.roleId === undefined
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "A role must be selected before creating a conversation",
+        path: ["conversation", "roleId"],
+      });
+    }
+  },
+);
+
 export type ClientCommand = z.infer<typeof clientCommandSchema>;
 export type AcknowledgedSettingOperation = "select_model" | "set_api_key";
 export type AcknowledgedCommandOperation =
   | AcknowledgedSettingOperation
-  | "delete_conversation";
+  | "delete_conversation"
+  | "create_role"
+  | "update_role"
+  | "delete_role";
 export type ThinkingLevel = Extract<ClientCommand, { type: "set_thinking" }>["level"];
 export type ToolMode = Extract<ClientCommand, { type: "set_tool_mode" }>["mode"];
 
@@ -164,13 +302,18 @@ export interface PublicContextUsage {
 export interface PublicState {
   sessionId: string;
   projectId: string;
-  conversationId: string;
+  conversationId?: string;
+  focusId?: string;
   conversationName?: string;
   cwd: string;
   busy: boolean;
   activeRun?: {
     id: string;
-    phase: "queued" | "running" | "cancelling";
+    phase: "queued" | "running" | "waiting" | "cancelling";
+    waitingFor?: {
+      conversationId: string;
+      runId: string;
+    };
   };
   selectedModel?: { provider: string; id: string };
   thinkingLevel: ThinkingLevel;
@@ -207,6 +350,85 @@ export interface ConversationHistoryMessage {
   usage?: TokenUsage;
 }
 
+export interface RoleModelSelection {
+  provider: string;
+  id: string;
+}
+
+export interface RoleTemplate {
+  id: string;
+  revision: number;
+  name: string;
+  description: string;
+  systemPrompt: string;
+  model: RoleModelSelection | null;
+  createdAt: string;
+  updatedAt: string;
+  available: boolean;
+  unavailableReason?: string;
+}
+
+export interface ConversationRoleSnapshot {
+  id: string;
+  revision: number;
+  name: string;
+  description: string;
+  systemPrompt: string;
+  model: RoleModelSelection;
+}
+
+export type ConversationActivity =
+  | { kind: "idle" }
+  | { kind: "queued" | "running" | "cancelling"; runId: string }
+  | {
+      kind: "waiting";
+      runId: string;
+      targetConversationId: string;
+      targetRunId: string;
+    };
+
+export interface SessionMessageEndpoint {
+  conversationId: string;
+  title?: string;
+  role: {
+    id: string;
+    name: string;
+  };
+}
+
+export interface ConversationMessageCard {
+  kind: "session_message";
+  id: string;
+  cardId: string;
+  direction: "incoming" | "outgoing";
+  state:
+    | "sending"
+    | "queued"
+    | "delivered"
+    | "running"
+    | "waiting"
+    | "completed"
+    | "failed"
+    | "aborted";
+  body: string;
+  from: SessionMessageEndpoint;
+  to: SessionMessageEndpoint;
+  sentAt: string;
+  updatedAt: string;
+  messageId?: string;
+  delegationId?: string;
+  runId?: string;
+  result?: string;
+  /**
+   * Browser projection only. Durable cards do not own peer lifecycle state.
+   */
+  peerExists?: boolean;
+}
+
+export type ConversationHistoryItem =
+  | ({ kind: "message" } & ConversationHistoryMessage)
+  | ConversationMessageCard;
+
 export interface ConversationSummary {
   id: string;
   name?: string;
@@ -214,6 +436,11 @@ export interface ConversationSummary {
   createdAt: string;
   updatedAt: string;
   messageCount: number;
+  role?: Omit<ConversationRoleSnapshot, "systemPrompt">;
+  activity?: ConversationActivity;
+  attention?: boolean;
+  unread?: boolean;
+  temporary?: boolean;
 }
 
 export interface DirectoryListing {
@@ -250,10 +477,33 @@ export type ServerEvent =
   | ({ type: "directory_listing"; commandId: string } & DirectoryListing)
   | { type: "state"; state: PublicState }
   | {
-      type: "project_snapshot";
+      type: "focus_attached";
+      operation: "initialize" | "focus_conversation" | "create_conversation";
+      commandId: string;
+      sessionId: string;
+      projectId: string;
+      focusId?: string;
+      conversationId?: string;
+    }
+  | {
+      type: "focus_invalidated";
       sessionId: string;
       projectId: string;
       conversationId: string;
+      focusId: string;
+      reason: "deleted";
+    }
+  | {
+      type: "role_catalog_snapshot";
+      sessionId: string;
+      projectId: string;
+      roles: RoleTemplate[];
+    }
+  | {
+      type: "project_snapshot";
+      sessionId: string;
+      projectId: string;
+      conversationId?: string;
       conversations: ConversationSummary[];
       truncated: boolean;
     }
@@ -261,10 +511,27 @@ export type ServerEvent =
       type: "conversation_snapshot";
       sessionId: string;
       conversationId: string;
-      messages: ConversationHistoryMessage[];
+      focusId: string;
+      role?: ConversationRoleSnapshot;
+      messages?: ConversationHistoryMessage[];
+      items?: ConversationHistoryItem[];
       truncated: boolean;
     }
-  | { type: "session_event"; sessionId: string; runId: string; event: SessionEvent }
+  | {
+      type: "session_event";
+      sessionId: string;
+      runId: string;
+      conversationId: string;
+      focusId: string;
+      event: SessionEvent;
+    }
+  | {
+      type: "conversation_item";
+      sessionId: string;
+      conversationId: string;
+      focusId: string;
+      item: ConversationHistoryItem;
+    }
   | {
       type: "extension_ui_request";
       sessionId: string;
@@ -294,6 +561,8 @@ export type ServerEvent =
       operation?: ClientCommand["type"];
       sessionId?: string;
       runId?: string;
+      conversationId?: string;
+      focusId?: string;
       authFlowId?: string;
       commandId?: string;
     };
@@ -333,13 +602,18 @@ const publicContextUsageSchema: z.ZodType<PublicContextUsage> = z.object({
 const publicStateSchema: z.ZodType<PublicState> = z.object({
   sessionId: sessionIdSchema,
   projectId: z.string().uuid(),
-  conversationId: conversationIdSchema,
+  conversationId: conversationIdSchema.optional(),
+  focusId: focusIdSchema.optional(),
   conversationName: z.string().optional(),
   cwd: z.string(),
   busy: z.boolean(),
   activeRun: z.object({
     id: runIdSchema,
-    phase: z.enum(["queued", "running", "cancelling"]),
+    phase: z.enum(["queued", "running", "waiting", "cancelling"]),
+    waitingFor: z.object({
+      conversationId: conversationIdSchema,
+      runId: runIdSchema,
+    }).optional(),
   }).optional(),
   selectedModel: z.object({ provider: z.string(), id: z.string() }).optional(),
   thinkingLevel: thinkingLevelSchema,
@@ -413,6 +687,8 @@ const sessionEventSchema: z.ZodType<SessionEvent> = z.discriminatedUnion("type",
 const commandTypeSchema = z.enum([
   "browse_directory",
   "initialize",
+  "focus_conversation",
+  "create_conversation",
   "prompt",
   "abort",
   "extension_ui_response",
@@ -421,6 +697,9 @@ const commandTypeSchema = z.enum([
   "set_tool_mode",
   "rename_conversation",
   "delete_conversation",
+  "create_role",
+  "update_role",
+  "delete_role",
   "set_api_key",
   "login_oauth",
   "logout",
@@ -429,6 +708,129 @@ const commandTypeSchema = z.enum([
   "refresh_models",
   "close_session",
 ]);
+const roleTemplateSchema: z.ZodType<RoleTemplate> = z.object({
+  id: roleIdSchema,
+  revision: z.number().int().positive(),
+  name: requiredBoundedCharactersString(
+    MAX_ROLE_NAME_CHARACTERS,
+    "role.name",
+  ),
+  description: boundedCharactersString(
+    MAX_ROLE_DESCRIPTION_CHARACTERS,
+    "role.description",
+  ),
+  systemPrompt: boundedUtf8String(
+    MAX_ROLE_SYSTEM_PROMPT_BYTES,
+    "role.systemPrompt",
+  ),
+  model: roleModelSchema.nullable(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+  available: z.boolean(),
+  unavailableReason: z.string().max(2_000).optional(),
+});
+const conversationRoleSnapshotSchema: z.ZodType<ConversationRoleSnapshot> = z.object({
+  id: roleIdSchema,
+  revision: z.number().int().positive(),
+  name: requiredBoundedCharactersString(
+    MAX_ROLE_NAME_CHARACTERS,
+    "role.name",
+  ),
+  description: boundedCharactersString(
+    MAX_ROLE_DESCRIPTION_CHARACTERS,
+    "role.description",
+  ),
+  systemPrompt: boundedUtf8String(
+    MAX_ROLE_SYSTEM_PROMPT_BYTES,
+    "role.systemPrompt",
+  ),
+  model: roleModelSchema,
+});
+const conversationRoleSummarySchema: z.ZodType<
+  Omit<ConversationRoleSnapshot, "systemPrompt">
+> = z.object({
+  id: roleIdSchema,
+  revision: z.number().int().positive(),
+  name: requiredBoundedCharactersString(
+    MAX_ROLE_NAME_CHARACTERS,
+    "role.name",
+  ),
+  description: boundedCharactersString(
+    MAX_ROLE_DESCRIPTION_CHARACTERS,
+    "role.description",
+  ),
+  model: roleModelSchema,
+});
+const conversationActivitySchema: z.ZodType<ConversationActivity> = z.discriminatedUnion(
+  "kind",
+  [
+    z.object({ kind: z.literal("idle") }),
+    z.object({ kind: z.literal("queued"), runId: runIdSchema }),
+    z.object({ kind: z.literal("running"), runId: runIdSchema }),
+    z.object({ kind: z.literal("cancelling"), runId: runIdSchema }),
+    z.object({
+      kind: z.literal("waiting"),
+      runId: runIdSchema,
+      targetConversationId: conversationIdSchema,
+      targetRunId: runIdSchema,
+    }),
+  ],
+);
+const sessionMessageEndpointSchema: z.ZodType<SessionMessageEndpoint> = z.object({
+  conversationId: conversationIdSchema,
+  title: z.string().max(120).optional(),
+  role: z.object({
+    id: roleIdSchema,
+    name: requiredBoundedCharactersString(
+      MAX_ROLE_NAME_CHARACTERS,
+      "role.name",
+    ),
+  }),
+});
+const conversationHistoryMessageSchema = z.object({
+  id: z.string(),
+  role: z.enum(["user", "assistant"]),
+  text: z.string(),
+  thinking: z.string(),
+  tools: z.array(z.object({
+    toolCallId: z.string(),
+    toolName: z.string(),
+    args: z.unknown().optional(),
+    result: z.unknown().optional(),
+    status: z.enum(["done", "error"]),
+  })),
+  usage: tokenUsageSchema.optional(),
+});
+const conversationHistoryItemSchema: z.ZodType<ConversationHistoryItem> =
+  z.discriminatedUnion("kind", [
+    conversationHistoryMessageSchema.extend({ kind: z.literal("message") }),
+    z.object({
+      kind: z.literal("session_message"),
+      id: z.string(),
+      cardId: z.string().uuid(),
+      direction: z.enum(["incoming", "outgoing"]),
+      state: z.enum([
+        "sending",
+        "queued",
+        "delivered",
+        "running",
+        "waiting",
+        "completed",
+        "failed",
+        "aborted",
+      ]),
+      body: z.string().max(200_000),
+      from: sessionMessageEndpointSchema,
+      to: sessionMessageEndpointSchema,
+      sentAt: z.string().datetime(),
+      updatedAt: z.string().datetime(),
+      messageId: z.string().uuid().optional(),
+      delegationId: z.string().uuid().optional(),
+      runId: runIdSchema.optional(),
+      result: z.string().max(200_000).optional(),
+      peerExists: z.boolean(),
+    }),
+  ]);
 const serverEventUnionSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("hello"),
@@ -448,45 +850,75 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("state"), state: publicStateSchema }),
   z.object({
-    type: z.literal("project_snapshot"),
+    type: z.literal("focus_attached"),
+    operation: z.enum(["initialize", "focus_conversation", "create_conversation"]),
+    commandId: commandIdSchema,
+    sessionId: sessionIdSchema,
+    projectId: z.string().uuid(),
+    focusId: focusIdSchema.optional(),
+    conversationId: conversationIdSchema.optional(),
+  }),
+  z.object({
+    type: z.literal("focus_invalidated"),
     sessionId: sessionIdSchema,
     projectId: z.string().uuid(),
     conversationId: conversationIdSchema,
+    focusId: focusIdSchema,
+    reason: z.literal("deleted"),
+  }),
+  z.object({
+    type: z.literal("role_catalog_snapshot"),
+    sessionId: sessionIdSchema,
+    projectId: z.string().uuid(),
+    roles: z.array(roleTemplateSchema).max(MAX_ROLE_COUNT),
+  }),
+  z.object({
+    type: z.literal("project_snapshot"),
+    sessionId: sessionIdSchema,
+    projectId: z.string().uuid(),
+    conversationId: conversationIdSchema.optional(),
     conversations: z.array(z.object({
       id: conversationIdSchema,
-      name: z.string().optional(),
-      preview: z.string(),
+      name: z.string()
+        .max(MAX_PROJECT_CONVERSATION_NAME_CHARACTERS)
+        .optional(),
+      preview: z.string()
+        .max(MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS),
       createdAt: z.string().datetime(),
       updatedAt: z.string().datetime(),
       messageCount: z.number().int().nonnegative(),
-    })),
+      role: conversationRoleSummarySchema.optional(),
+      activity: conversationActivitySchema.optional(),
+      attention: z.boolean().optional(),
+      unread: z.boolean().optional(),
+      temporary: z.boolean().optional(),
+    })).max(MAX_PROJECT_CONVERSATIONS),
     truncated: z.boolean(),
   }),
   z.object({
     type: z.literal("conversation_snapshot"),
     sessionId: sessionIdSchema,
     conversationId: conversationIdSchema,
-    messages: z.array(z.object({
-      id: z.string(),
-      role: z.enum(["user", "assistant"]),
-      text: z.string(),
-      thinking: z.string(),
-      tools: z.array(z.object({
-        toolCallId: z.string(),
-        toolName: z.string(),
-        args: z.unknown().optional(),
-        result: z.unknown().optional(),
-        status: z.enum(["done", "error"]),
-      })),
-      usage: tokenUsageSchema.optional(),
-    })),
+    focusId: focusIdSchema,
+    role: conversationRoleSnapshotSchema.optional(),
+    messages: z.array(conversationHistoryMessageSchema).optional(),
+    items: z.array(conversationHistoryItemSchema).optional(),
     truncated: z.boolean(),
   }),
   z.object({
     type: z.literal("session_event"),
     sessionId: sessionIdSchema,
     runId: runIdSchema,
+    conversationId: conversationIdSchema,
+    focusId: focusIdSchema,
     event: sessionEventSchema,
+  }),
+  z.object({
+    type: z.literal("conversation_item"),
+    sessionId: sessionIdSchema,
+    conversationId: conversationIdSchema,
+    focusId: focusIdSchema,
+    item: conversationHistoryItemSchema,
   }),
   z.object({
     type: z.literal("extension_ui_request"),
@@ -515,7 +947,14 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("auth_complete"), authFlowId: authFlowIdSchema, provider: z.string() }),
   z.object({
     type: z.literal("command_complete"),
-    operation: z.enum(["select_model", "set_api_key", "delete_conversation"]),
+    operation: z.enum([
+      "select_model",
+      "set_api_key",
+      "delete_conversation",
+      "create_role",
+      "update_role",
+      "delete_role",
+    ]),
     commandId: commandIdSchema,
     sessionId: sessionIdSchema,
   }),
@@ -526,6 +965,8 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     operation: commandTypeSchema.optional(),
     sessionId: sessionIdSchema.optional(),
     runId: runIdSchema.optional(),
+    conversationId: conversationIdSchema.optional(),
+    focusId: focusIdSchema.optional(),
     authFlowId: authFlowIdSchema.optional(),
     commandId: commandIdSchema.optional(),
   }),
@@ -533,6 +974,87 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
 
 export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.superRefine(
   (event, context) => {
+    if (
+      event.type === "conversation_snapshot"
+      && (
+        (event.messages === undefined)
+        === (event.items === undefined)
+      )
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "conversation_snapshot requires exactly one of messages or items",
+        path: ["items"],
+      });
+    }
+    if (
+      event.type === "focus_attached"
+      && ((event.focusId === undefined) !== (event.conversationId === undefined))
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "focusId and conversationId must either both be present or both be absent",
+        path: ["focusId"],
+      });
+    }
+    if (
+      event.type === "focus_attached"
+      && event.operation !== "initialize"
+      && (event.focusId === undefined || event.conversationId === undefined)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `${event.operation} must attach an exact conversation focus`,
+        path: ["focusId"],
+      });
+    }
+    if (
+      event.type === "state"
+      && (
+        (event.state.focusId === undefined)
+        !== (event.state.conversationId === undefined)
+      )
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "state focusId and conversationId must either both be present or both be absent",
+        path: ["state", "focusId"],
+      });
+    }
+    if (
+      event.type === "error"
+      && (
+        (event.focusId === undefined)
+        !== (event.conversationId === undefined)
+      )
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "error focusId and conversationId must either both be present or both be absent",
+        path: ["focusId"],
+      });
+    }
+    if (
+      event.type === "error"
+      && event.scope === "command"
+      && (event.operation === "prompt" || event.operation === "abort")
+      && (
+        event.sessionId === undefined
+        || event.runId === undefined
+        || event.conversationId === undefined
+        || event.focusId === undefined
+      )
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          `${event.operation} command errors require the complete run focus identity`,
+        path: ["focusId"],
+      });
+    }
     if (
       event.type === "error"
       && event.commandId
@@ -552,16 +1074,16 @@ export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.
   },
 );
 
-function parseMessage(input: unknown): unknown {
+function parseMessage(input: unknown, maximumBytes: number): unknown {
   if (typeof input !== "string") return input;
-  if (new TextEncoder().encode(input).byteLength > MAX_MESSAGE_BYTES) throw new Error("Message is too large");
+  if (utf8Bytes(input) > maximumBytes) throw new Error("Message is too large");
   return JSON.parse(input);
 }
 
 export function parseClientCommand(input: unknown): ClientCommand {
-  return clientCommandSchema.parse(parseMessage(input));
+  return clientCommandSchema.parse(parseMessage(input, MAX_MESSAGE_BYTES));
 }
 
 export function parseServerEvent(input: unknown): ServerEvent {
-  return serverEventSchema.parse(parseMessage(input));
+  return serverEventSchema.parse(parseMessage(input, MAX_SERVER_EVENT_BYTES));
 }

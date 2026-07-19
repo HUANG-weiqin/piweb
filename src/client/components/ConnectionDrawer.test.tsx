@@ -30,34 +30,19 @@ const state: PublicState = {
   }],
 };
 
-const conversations = [{
-  id: "conversation-1",
-  name: "Current",
-  preview: "hello",
-  createdAt: "2026-07-18T12:00:00.000Z",
-  updatedAt: "2026-07-18T12:01:00.000Z",
-  messageCount: 2,
-}];
-
 function drawerProps(overrides: Partial<Parameters<typeof ConnectionDrawer>[0]> = {}) {
   return {
     state,
-    conversations,
-    conversationIndexTruncated: false,
     open: true,
     online: true,
     toolModeBusy: false,
     conversationBusy: false,
     onClose: () => undefined,
-    onNewConversation: () => undefined,
-    onOpenConversation: () => undefined,
     onRenameConversation: () => undefined,
-    onDeleteConversation: () => true,
     onKey: () => commandId,
     onOAuth: () => undefined,
     onLogout: () => undefined,
     onRefresh: () => undefined,
-    onModel: () => commandId,
     onClearSettingResult: () => undefined,
     onKeyDialogChange: () => undefined,
     onThinking: () => undefined,
@@ -111,73 +96,22 @@ describe("ConnectionDrawer", () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
-  it("switches and renames project conversations", () => {
-    const openConversation = vi.fn();
+  it("renames the current conversation without owning list navigation", () => {
     const renameConversation = vi.fn();
     renderDrawer({
-      conversations: [
-        ...conversations,
-        {
-          id: "conversation-2",
-          preview: "older work",
-          createdAt: "2026-07-17T12:00:00.000Z",
-          updatedAt: "2026-07-17T12:01:00.000Z",
-          messageCount: 1,
-        },
-      ],
-      onOpenConversation: openConversation,
       onRenameConversation: renameConversation,
     });
 
-    fireEvent.click(screen.getByRole("button", {
-      name: "打开对话 older work",
-    }));
-    expect(openConversation).toHaveBeenCalledWith("conversation-2");
-    fireEvent.change(screen.getByRole("textbox", { name: "当前对话名称" }), {
+    expect(screen.queryByRole("button", { name: /新建会话/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /打开会话/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /删除会话/ })).not.toBeInTheDocument();
+    expect(screen.getByText(/统一在左侧会话栏中完成/)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "当前会话名称" }), {
       target: { value: "Renamed" },
     });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
     expect(renameConversation).toHaveBeenCalledWith("Renamed");
-  });
-
-  it("confirms before deleting a non-current conversation", () => {
-    const deleteConversation = vi.fn(() => true);
-    renderDrawer({
-      conversations: [
-        ...conversations,
-        {
-          id: "conversation-2",
-          name: "Older work",
-          preview: "older",
-          createdAt: "2026-07-17T12:00:00.000Z",
-          updatedAt: "2026-07-17T12:01:00.000Z",
-          messageCount: 4,
-        },
-      ],
-      onDeleteConversation: deleteConversation,
-    });
-
-    expect(screen.queryByRole("button", {
-      name: "删除对话 Current",
-    })).not.toBeInTheDocument();
-    expect(screen.getByText("当前对话需先新建或切换后删除。")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", {
-      name: "删除对话 Older work",
-    }));
-    expect(deleteConversation).not.toHaveBeenCalled();
-    expect(screen.getByRole("alert")).toHaveTextContent(
-      "永久删除“Older work”？此操作无法撤销。",
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "保留" }));
-    expect(screen.queryByText(/永久删除“Older work”/)).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", {
-      name: "删除对话 Older work",
-    }));
-    fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
-    expect(deleteConversation).toHaveBeenCalledWith("conversation-2");
   });
 
   it("shows models only for the provider the user chose", () => {
@@ -218,6 +152,19 @@ describe("ConnectionDrawer", () => {
     const current = screen.getByRole("button", { name: /Ready.*当前/ });
     expect(current).toBeDisabled();
     expect(current).toHaveAttribute("aria-current", "true");
+  });
+
+  it("keeps model choices read-only and opens role management for changes", () => {
+    const onManageRoles = vi.fn();
+    renderDrawer({ onManageRoles });
+
+    const model = screen.getByRole("button", {
+      name: /Ready.*在角色中选择/,
+    });
+    expect(model).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "管理角色" }));
+    expect(onManageRoles).toHaveBeenCalledOnce();
   });
 
   it("keeps an API Key private and waits for an exact command acknowledgement", () => {

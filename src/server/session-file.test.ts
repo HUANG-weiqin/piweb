@@ -1,11 +1,57 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { validatePiSessionFile } from "./session-file.js";
+import {
+  CONVERSATION_CARD_CUSTOM_TYPE,
+  CONVERSATION_MESSAGE_CUSTOM_TYPE,
+  CONVERSATION_META_CUSTOM_TYPE,
+  RUN_SETTLEMENT_CUSTOM_TYPE,
+  createConversationCardEntry,
+  createConversationMessageEntry,
+  createConversationMetaEntry,
+  createRunSettlementEntry,
+} from "./conversation-meta.js";
+import {
+  inspectPiSessionFile,
+  validatePiSessionFile,
+} from "./session-file.js";
 
 const timestamp = "2026-01-01T00:00:00.000Z";
 
 function serialize(entries: unknown[]): string {
   return `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
+}
+
+function peer(conversationId = randomUUID()) {
+  return {
+    conversationId,
+    title: "Worker",
+    role: {
+      id: "default",
+      name: "Worker",
+    },
+  };
+}
+
+function metadata() {
+  return {
+    role: {
+      id: "default",
+      revision: 1,
+      name: "Worker",
+      description: "",
+      systemPrompt: "",
+      model: {
+        provider: "openai",
+        id: "gpt-5.6",
+      },
+    },
+    lifecycle: {
+      kind: "normal" as const,
+    },
+    createdBy: {
+      kind: "user" as const,
+    },
+  };
 }
 
 describe("validatePiSessionFile", () => {
@@ -208,5 +254,293 @@ describe("validatePiSessionFile", () => {
       "cross-branch-compaction.jsonl",
       conversationId,
     )).toThrow("firstKeptEntryId is not an ancestor");
+  });
+
+  it("inspects every physical branch and returns latest reserved state", () => {
+    const conversationId = randomUUID();
+    const cardId = randomUUID();
+    const messageId = randomUUID();
+    const runId = randomUUID();
+    const firstCard = createConversationCardEntry({
+      cardId,
+      kind: "delegation_task",
+      body: "Inspect the project",
+      fromSnapshot: peer(conversationId),
+      toSnapshot: peer(),
+      state: "queued",
+      messageId,
+      runId,
+      updatedAt: "2026-01-01T00:01:00.000Z",
+    });
+    const finalCard = createConversationCardEntry({
+      ...firstCard.data,
+      state: "completed",
+      result: "Done",
+      updatedAt: "2026-01-01T00:04:00.000Z",
+    });
+    const incoming = createConversationMessageEntry({
+      content: "Inspect the project",
+      display: true,
+      details: {
+        messageId,
+        cardId: randomUUID(),
+        sentAt: "2026-01-01T00:02:00.000Z",
+        kind: "message",
+        body: "Inspect the project",
+        fromSnapshot: peer(),
+        toSnapshot: peer(conversationId),
+      },
+    });
+    const settlement = createRunSettlementEntry({
+      runId,
+      outcome: "completed",
+      finalText: "Done",
+      settledAt: "2026-01-01T00:03:00.000Z",
+    });
+    const meta = createConversationMetaEntry(metadata());
+    const base = (
+      type: string,
+      id: string,
+      parentId: string | null,
+      entryTimestamp = timestamp,
+    ) => ({
+      type,
+      id,
+      parentId,
+      timestamp: entryTimestamp,
+    });
+    const session = serialize([
+      {
+        type: "session",
+        version: 3,
+        id: conversationId,
+        timestamp,
+        cwd: "E:\\work",
+      },
+      {
+        ...base("custom", "00000001", null),
+        customType: CONVERSATION_META_CUSTOM_TYPE,
+        data: meta.data,
+      },
+      {
+        ...base("custom", "00000002", "00000001"),
+        customType: CONVERSATION_CARD_CUSTOM_TYPE,
+        data: firstCard.data,
+      },
+      {
+        ...base("custom_message", "00000003", "00000001"),
+        customType: CONVERSATION_MESSAGE_CUSTOM_TYPE,
+        content: incoming.content,
+        display: incoming.display,
+        details: incoming.details,
+      },
+      {
+        ...base("custom", "00000004", "00000003"),
+        customType: RUN_SETTLEMENT_CUSTOM_TYPE,
+        data: settlement.data,
+      },
+      {
+        ...base(
+          "custom",
+          "00000005",
+          "00000002",
+          "2026-01-01T00:05:00.000Z",
+        ),
+        customType: CONVERSATION_CARD_CUSTOM_TYPE,
+        data: finalCard.data,
+      },
+    ]);
+
+    expect(inspectPiSessionFile(
+      session,
+      "reserved.jsonl",
+      conversationId,
+    )).toEqual({
+      conversationId,
+      conversationMeta: meta.data,
+      cards: [finalCard.data],
+      deliveredMessageIds: [messageId],
+      runSettlements: [settlement.data],
+      metaOperations: [],
+      lastActivityAt: "2026-01-01T00:05:00.000Z",
+    });
+    expect(validatePiSessionFile(
+      session,
+      "reserved.jsonl",
+      conversationId,
+    )).toBe(conversationId);
+  });
+
+  it("fails closed when physical card updates rewrite identity or regress state", () => {
+    const conversationId = randomUUID();
+    const initial = createConversationCardEntry({
+      cardId: randomUUID(),
+      kind: "delegation_task",
+      body: "Keep this durable identity",
+      fromSnapshot: peer(conversationId),
+      toSnapshot: peer(),
+      state: "queued",
+      messageId: randomUUID(),
+      delegationId: randomUUID(),
+      requestFingerprint: "a".repeat(64),
+      requestedRole: metadata().role,
+      updatedAt: "2026-01-01T00:01:00.000Z",
+    });
+    const sessionWith = (update: ReturnType<
+      typeof createConversationCardEntry
+    >) => serialize([
+      {
+        type: "session",
+        version: 3,
+        id: conversationId,
+        timestamp,
+        cwd: "E:\\work",
+      },
+      {
+        type: "custom",
+        id: "00000001",
+        parentId: null,
+        timestamp: initial.data.updatedAt,
+        customType: CONVERSATION_CARD_CUSTOM_TYPE,
+        data: initial.data,
+      },
+      {
+        type: "custom",
+        id: "00000002",
+        parentId: "00000001",
+        timestamp: update.data.updatedAt,
+        customType: CONVERSATION_CARD_CUSTOM_TYPE,
+        data: update.data,
+      },
+    ]);
+
+    expect(() => inspectPiSessionFile(
+      sessionWith(createConversationCardEntry({
+        ...initial.data,
+        requestedRole: {
+          ...initial.data.requestedRole!,
+          systemPrompt: "A rewritten prompt",
+        },
+        updatedAt: "2026-01-01T00:02:00.000Z",
+      })),
+      "mutated-card.jsonl",
+      conversationId,
+    )).toThrow(/card identity/i);
+    expect(() => validatePiSessionFile(
+      sessionWith(createConversationCardEntry({
+        ...initial.data,
+        state: "sending",
+        updatedAt: "2026-01-01T00:02:00.000Z",
+      })),
+      "regressed-card.jsonl",
+      conversationId,
+    )).toThrow(/state cannot regress/i);
+  });
+
+  it("fails closed for unknown or incorrectly-carried reserved entries", () => {
+    const conversationId = randomUUID();
+    const header = {
+      type: "session",
+      version: 3,
+      id: conversationId,
+      timestamp,
+      cwd: "E:\\work",
+    };
+    const base = {
+      id: "00000001",
+      parentId: null,
+      timestamp,
+    };
+
+    expect(() => inspectPiSessionFile(serialize([
+      header,
+      {
+        ...base,
+        type: "custom",
+        customType: "piweb.future.v2",
+        data: {},
+      },
+    ]), "unknown.jsonl")).toThrow(/unknown piweb reserved/i);
+
+    expect(() => inspectPiSessionFile(serialize([
+      header,
+      {
+        ...base,
+        type: "custom",
+        customType: CONVERSATION_MESSAGE_CUSTOM_TYPE,
+        data: {},
+      },
+    ]), "wrong-carrier.jsonl")).toThrow();
+
+    expect(() => inspectPiSessionFile(serialize([
+      header,
+      {
+        ...base,
+        type: "message",
+        message: {
+          role: "custom",
+          customType: CONVERSATION_MESSAGE_CUSTOM_TYPE,
+          content: "hidden",
+          display: true,
+        },
+      },
+    ]), "nested-carrier.jsonl")).toThrow(/nested message\.role=custom/i);
+  });
+
+  it("detects duplicate delivery identities even when one is off the active branch", () => {
+    const conversationId = randomUUID();
+    const incoming = createConversationMessageEntry({
+      content: "message",
+      display: true,
+      details: {
+        messageId: randomUUID(),
+        cardId: randomUUID(),
+        sentAt: timestamp,
+        kind: "message",
+        body: "message",
+        fromSnapshot: peer(),
+        toSnapshot: peer(conversationId),
+      },
+    });
+    const rawIncoming = (
+      id: string,
+      parentId: string | null,
+    ) => ({
+      type: "custom_message",
+      id,
+      parentId,
+      timestamp,
+      customType: CONVERSATION_MESSAGE_CUSTOM_TYPE,
+      content: incoming.content,
+      display: incoming.display,
+      details: incoming.details,
+    });
+    const session = serialize([
+      {
+        type: "session",
+        version: 3,
+        id: conversationId,
+        timestamp,
+        cwd: "E:\\work",
+      },
+      rawIncoming("00000001", null),
+      rawIncoming("00000002", null),
+      {
+        type: "message",
+        id: "00000003",
+        parentId: "00000001",
+        timestamp,
+        message: {
+          role: "user",
+          content: "active branch",
+          timestamp: 1,
+        },
+      },
+    ]);
+
+    expect(() => inspectPiSessionFile(
+      session,
+      "duplicate-delivery.jsonl",
+    )).toThrow(/duplicate delivered piweb messageId/i);
   });
 });

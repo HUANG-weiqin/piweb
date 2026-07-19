@@ -11,7 +11,10 @@ const clientDir = resolve(dirname(fileURLToPath(import.meta.url)), "../../dist-c
 app.disable("x-powered-by");
 app.get("/health", (_request, response) => response.json({ ok: true }));
 app.use(express.static(clientDir, { index: false }));
-app.get("/{*path}", (_request, response) => response.sendFile(resolve(clientDir, "index.html")));
+app.get("/{*path}", (_request, response) => response.sendFile(
+  resolve(clientDir, "index.html"),
+  { dotfiles: "allow" },
+));
 
 const server = app.listen(port, host, () => {
   console.log(`Pi Web: http://${host}:${port}`);

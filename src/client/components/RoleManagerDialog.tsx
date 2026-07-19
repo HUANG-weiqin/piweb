@@ -1,0 +1,375 @@
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+} from "react";
+import type {
+  PublicProvider,
+  RoleModelSelection,
+  RoleTemplate,
+} from "../../shared/protocol";
+import { useModalFocus } from "../lib/use-modal-focus";
+
+const NEW_ROLE_ID = "__new__";
+
+export type RoleOperation =
+  | "create_role"
+  | "update_role"
+  | "delete_role";
+
+export interface RoleDraft {
+  name: string;
+  description: string;
+  systemPrompt: string;
+  model: RoleModelSelection | null;
+}
+
+export interface PendingRoleOperation {
+  operation: RoleOperation;
+  commandId: string;
+}
+
+export interface RoleOperationResult extends PendingRoleOperation {
+  ok: boolean;
+  message: string;
+}
+
+export interface RoleManagerDialogProps {
+  open: boolean;
+  roles: RoleTemplate[];
+  providers: PublicProvider[];
+  pending?: PendingRoleOperation;
+  result?: RoleOperationResult;
+  onClose(): void;
+  onCreate(role: RoleDraft): void;
+  onUpdate(roleId: string, expectedRevision: number, role: RoleDraft): void;
+  onDelete(roleId: string, expectedRevision: number): void;
+}
+
+interface ModelOption {
+  value: string;
+  provider: string;
+  id: string;
+  label: string;
+}
+
+const emptyDraft: RoleDraft = {
+  name: "",
+  description: "",
+  systemPrompt: "",
+  model: null,
+};
+
+function orderedRoles(roles: readonly RoleTemplate[]): RoleTemplate[] {
+  return [...roles].sort((left, right) => {
+    if (left.id === "default") return -1;
+    if (right.id === "default") return 1;
+    return 0;
+  });
+}
+
+function roleDraft(role: RoleTemplate): RoleDraft {
+  return {
+    name: role.name,
+    description: role.description,
+    systemPrompt: role.systemPrompt,
+    model: role.model === null ? null : { ...role.model },
+  };
+}
+
+function modelValue(model: RoleModelSelection): string {
+  return JSON.stringify([model.provider, model.id]);
+}
+
+function sameModel(
+  left: RoleModelSelection,
+  right: RoleModelSelection,
+): boolean {
+  return left.provider === right.provider && left.id === right.id;
+}
+
+function availableModelOptions(
+  providers: readonly PublicProvider[],
+): ModelOption[] {
+  return providers.flatMap((provider) => {
+    if (!provider.configured) return [];
+    return provider.models
+      .filter((model) => model.available)
+      .map((model) => ({
+        value: modelValue(model),
+        provider: model.provider,
+        id: model.id,
+        label: `${provider.name} · ${model.name} · ${model.provider} / ${model.id}`,
+      }));
+  });
+}
+
+function matchesPending(
+  pending: PendingRoleOperation | undefined,
+  result: RoleOperationResult | undefined,
+): result is RoleOperationResult {
+  return Boolean(
+    pending
+    && result
+    && pending.operation === result.operation
+    && pending.commandId === result.commandId,
+  );
+}
+
+export function RoleManagerDialog({
+  open,
+  roles,
+  providers,
+  pending,
+  result,
+  onClose,
+  onCreate,
+  onUpdate,
+  onDelete,
+}: RoleManagerDialogProps) {
+  const sortedRoles = useMemo(() => orderedRoles(roles), [roles]);
+  const initialRole = sortedRoles[0];
+  const [selectedRoleId, setSelectedRoleId] = useState(
+    initialRole?.id ?? NEW_ROLE_ID,
+  );
+  const [draft, setDraft] = useState<RoleDraft>(
+    initialRole ? roleDraft(initialRole) : emptyDraft,
+  );
+  const selectedRole = roles.find(({ id }) => id === selectedRoleId);
+  const creating = selectedRoleId === NEW_ROLE_ID;
+  const draftSourceKey = creating
+    ? NEW_ROLE_ID
+    : selectedRole
+      ? `${selectedRole.id}:${selectedRole.revision}`
+      : `missing:${selectedRoleId}:${sortedRoles[0]?.id ?? ""}`;
+  const modelOptions = useMemo(
+    () => availableModelOptions(providers),
+    [providers],
+  );
+  const exactResult = matchesPending(pending, result) ? result : undefined;
+  const operationBusy = Boolean(pending && !exactResult);
+
+  useEffect(() => {
+    if (creating) {
+      setDraft(emptyDraft);
+      return;
+    }
+    if (selectedRole) {
+      setDraft(roleDraft(selectedRole));
+      return;
+    }
+    const next = sortedRoles[0];
+    setSelectedRoleId(next?.id ?? NEW_ROLE_ID);
+    setDraft(next ? roleDraft(next) : emptyDraft);
+  }, [draftSourceKey]);
+
+  const close = operationBusy ? undefined : onClose;
+  const focusRef = useModalFocus<HTMLElement>(
+    open,
+    "role-manager",
+    close,
+  );
+  if (!open) return null;
+
+  const selectRole = (role: RoleTemplate) => {
+    if (operationBusy) return;
+    setSelectedRoleId(role.id);
+    setDraft(roleDraft(role));
+  };
+  const selectNewRole = () => {
+    if (operationBusy) return;
+    setSelectedRoleId(NEW_ROLE_ID);
+    setDraft(emptyDraft);
+  };
+  const updateDraft = <K extends keyof RoleDraft>(
+    key: K,
+    value: RoleDraft[K],
+  ) => setDraft((current) => ({ ...current, [key]: value }));
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    if (operationBusy || !draft.name.trim() || draft.model === null) return;
+    const nextDraft: RoleDraft = {
+      ...draft,
+      name: draft.name.trim(),
+      model: { ...draft.model },
+    };
+    if (creating) {
+      onCreate(nextDraft);
+    } else if (selectedRole) {
+      onUpdate(selectedRole.id, selectedRole.revision, nextDraft);
+    }
+  };
+  const selectModel = (value: string) => {
+    const model = modelOptions.find((option) => option.value === value);
+    if (model) {
+      updateDraft("model", { provider: model.provider, id: model.id });
+      return;
+    }
+    if (draft.model && modelValue(draft.model) === value) return;
+    updateDraft("model", null);
+  };
+  const currentModelAvailable = draft.model !== null
+    && modelOptions.some((option) => sameModel(option, draft.model!));
+  const modelSelectValue = draft.model === null ? "" : modelValue(draft.model);
+
+  return <div
+    className="modal-backdrop"
+    role="presentation"
+    onMouseDown={(event) => event.target === event.currentTarget && close?.()}
+  >
+    <section
+      ref={focusRef}
+      className="modal role-manager-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-label="管理角色"
+      aria-busy={operationBusy}
+      tabIndex={-1}
+    >
+      <header className="modal-header">
+        <div>
+          <p className="eyebrow">AGENT ROLES</p>
+          <h2>管理角色</h2>
+          <p>角色模板会在新会话创建时复制为不可变快照。</p>
+        </div>
+        <button
+          type="button"
+          className="icon-button"
+          aria-label="关闭角色管理"
+          disabled={operationBusy}
+          onClick={onClose}
+        >
+          ×
+        </button>
+      </header>
+
+      <div className="role-manager-layout">
+        <aside className="role-manager-list" aria-label="角色列表">
+          <button
+            type="button"
+            className={creating ? "role-manager-new selected" : "role-manager-new"}
+            disabled={operationBusy}
+            aria-pressed={creating}
+            onClick={selectNewRole}
+          >
+            新建角色
+          </button>
+          {sortedRoles.map((role) => <button
+            type="button"
+            key={role.id}
+            className={[
+              "role-manager-item",
+              role.id === selectedRoleId ? "selected" : "",
+              role.available ? "" : "unavailable",
+            ].filter(Boolean).join(" ")}
+            aria-label={`编辑角色 ${role.name}`}
+            aria-pressed={role.id === selectedRoleId}
+            disabled={operationBusy}
+            onClick={() => selectRole(role)}
+          >
+            <span>
+              <strong>{role.name}</strong>
+              {role.id === "default" && <small>默认</small>}
+            </span>
+            {!role.available && <small>{role.unavailableReason ?? "当前不可用"}</small>}
+          </button>)}
+        </aside>
+
+        <form className="role-manager-form" onSubmit={submit}>
+          <div className="setting-field">
+            <label htmlFor="role-name">角色名称</label>
+            <input
+              id="role-name"
+              value={draft.name}
+              maxLength={80}
+              disabled={operationBusy}
+              onChange={(event) => updateDraft("name", event.target.value)}
+            />
+          </div>
+          <div className="setting-field">
+            <label htmlFor="role-description">角色简介</label>
+            <textarea
+              id="role-description"
+              value={draft.description}
+              maxLength={1_000}
+              disabled={operationBusy}
+              onChange={(event) => updateDraft("description", event.target.value)}
+            />
+          </div>
+          <div className="setting-field">
+            <label htmlFor="role-system-prompt">专属提示词</label>
+            <textarea
+              id="role-system-prompt"
+              className="role-system-prompt"
+              value={draft.systemPrompt}
+              disabled={operationBusy}
+              onChange={(event) => updateDraft("systemPrompt", event.target.value)}
+            />
+          </div>
+          <div className="setting-field">
+            <label htmlFor="role-model">角色模型</label>
+            <select
+              id="role-model"
+              value={modelSelectValue}
+              disabled={operationBusy}
+              onChange={(event) => selectModel(event.target.value)}
+            >
+              {draft.model === null && <option value="">选择模型…</option>}
+              {draft.model !== null && !currentModelAvailable && <option
+                value={modelValue(draft.model)}
+                disabled
+              >
+                当前不可用 · {draft.model.provider} / {draft.model.id}
+              </option>}
+              {modelOptions.map((option) => <option
+                key={option.value}
+                value={option.value}
+              >
+                {option.label}
+              </option>)}
+            </select>
+            <p className="setting-note">仅列出已配置提供商当前可用的模型。</p>
+          </div>
+
+          {exactResult && <p
+            className={exactResult.ok ? "inline-status success" : "inline-status error"}
+            role={exactResult.ok ? "status" : "alert"}
+          >
+            {exactResult.message || (exactResult.ok ? "角色已保存" : "操作失败")}
+          </p>}
+
+          <div className="role-manager-actions">
+            {!creating && selectedRole?.id !== "default" && <button
+              type="button"
+              className="danger-button"
+              disabled={operationBusy}
+              onClick={() => selectedRole
+                && onDelete(selectedRole.id, selectedRole.revision)}
+            >
+              {operationBusy && pending?.operation === "delete_role"
+                ? "正在删除…"
+                : "删除角色"}
+            </button>}
+            <button
+              type="submit"
+              disabled={
+                operationBusy
+                || !draft.name.trim()
+                || draft.model === null
+              }
+            >
+              {operationBusy && pending?.operation === "create_role"
+                ? "正在创建…"
+                : operationBusy && pending?.operation === "update_role"
+                  ? "正在保存…"
+                  : creating
+                    ? "创建角色"
+                    : "保存角色"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </section>
+  </div>;
+}

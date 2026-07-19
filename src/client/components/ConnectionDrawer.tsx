@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import type {
   AcknowledgedSettingOperation,
-  ConversationSummary,
   PublicState,
   ThinkingLevel,
   ToolMode,
@@ -10,8 +9,6 @@ import { useModalFocus } from "../lib/use-modal-focus";
 
 interface ConnectionDrawerProps {
   state: PublicState;
-  conversations: ConversationSummary[];
-  conversationIndexTruncated: boolean;
   open: boolean;
   online: boolean;
   toolModeBusy: boolean;
@@ -23,15 +20,12 @@ interface ConnectionDrawerProps {
     message: string;
   };
   onClose(): void;
-  onNewConversation(): void;
-  onOpenConversation(conversationId: string): void;
+  onManageRoles?(): void;
   onRenameConversation(name: string): void;
-  onDeleteConversation(conversationId: string): boolean;
   onKey(provider: string, key: string): string | undefined;
   onOAuth(provider: string): void;
   onLogout(provider: string): void;
   onRefresh(): void;
-  onModel(provider: string, modelId: string): string | undefined;
   onClearSettingResult(): void;
   onKeyDialogChange(open: boolean): void;
   onThinking(level: ThinkingLevel): void;
@@ -67,30 +61,24 @@ function formatContextWindow(tokens: number): string {
   return `${tokens} 上下文`;
 }
 
-function modelActionLabel(pending: boolean, selected: boolean): string {
-  if (pending) return "切换中…";
-  return selected ? "当前" : "选择";
+function modelActionLabel(selected: boolean): string {
+  return selected ? "当前会话" : "在角色中选择";
 }
 
 export function ConnectionDrawer({
   state,
-  conversations,
-  conversationIndexTruncated,
   open,
   online,
   toolModeBusy,
   conversationBusy,
   settingResult,
   onClose,
-  onNewConversation,
-  onOpenConversation,
+  onManageRoles,
   onRenameConversation,
-  onDeleteConversation,
   onKey,
   onOAuth,
   onLogout,
   onRefresh,
-  onModel,
   onClearSettingResult,
   onKeyDialogChange,
   onThinking,
@@ -107,29 +95,12 @@ export function ConnectionDrawer({
   }>();
   const [savedKeyProviderId, setSavedKeyProviderId] = useState("");
   const [confirmLogoutProviderId, setConfirmLogoutProviderId] = useState("");
-  const [pendingModel, setPendingModel] = useState<{
-    modelKey: string;
-    commandId: string;
-  }>();
-  const [modelError, setModelError] = useState("");
   const [search, setSearch] = useState("");
   const [conversationName, setConversationName] = useState(state.conversationName ?? "");
-  const [confirmDeleteConversationId, setConfirmDeleteConversationId] = useState("");
 
   useEffect(() => {
     setConversationName(state.conversationName ?? "");
   }, [state.conversationId, state.conversationName]);
-
-  useEffect(() => {
-    if (
-      open
-      && confirmDeleteConversationId
-      && conversations.some(({ id }) => id === confirmDeleteConversationId)
-    ) {
-      return;
-    }
-    setConfirmDeleteConversationId("");
-  }, [confirmDeleteConversationId, conversations, open]);
 
   useEffect(() => {
     if (providerId && state.providers.some((provider) => provider.id === providerId)) return;
@@ -163,17 +134,6 @@ export function ConnectionDrawer({
   ]);
 
   useEffect(() => {
-    if (
-      !pendingModel
-      || settingResult?.operation !== "select_model"
-      || settingResult.commandId !== pendingModel.commandId
-    ) return;
-    setPendingModel(undefined);
-    setModelError(settingResult.ok ? "" : settingResult.message || "模型切换失败");
-    onClearSettingResult();
-  }, [onClearSettingResult, pendingModel, settingResult]);
-
-  useEffect(() => {
     if (online) return;
     if (savingKey) {
       setSavingKey(undefined);
@@ -181,12 +141,8 @@ export function ConnectionDrawer({
       setShowKey(false);
       setKeyError("连接已断开，无法确认 Key 是否保存；请重连后重试。");
     }
-    if (pendingModel) {
-      setPendingModel(undefined);
-      setModelError("连接已断开，模型切换未确认。");
-    }
     onClearSettingResult();
-  }, [online, onClearSettingResult, pendingModel, savingKey]);
+  }, [online, onClearSettingResult, savingKey]);
 
   const selectedProvider = state.providers.find((provider) => provider.id === providerId);
   const keyProvider = state.providers.find((provider) => provider.id === keyProviderId);
@@ -267,16 +223,11 @@ export function ConnectionDrawer({
     const name = conversationName.trim();
     if (name && name !== state.conversationName) onRenameConversation(name);
   };
-  const deleteCandidate = conversations.find(
-    ({ id }) => id === confirmDeleteConversationId,
-  );
   const chooseProvider = (nextProviderId: string) => {
     setProviderId(nextProviderId);
     setSearch("");
     setSavedKeyProviderId("");
     setConfirmLogoutProviderId("");
-    setPendingModel(undefined);
-    setModelError("");
     onClearSettingResult();
   };
   const openKeyDialog = (nextProviderId: string) => {
@@ -289,18 +240,6 @@ export function ConnectionDrawer({
     onKeyDialogChange(true);
     onClearSettingResult();
   };
-  const chooseModel = (modelProvider: string, modelId: string) => {
-    const modelKey = `${modelProvider}/${modelId}`;
-    const selectedModelKey = state.selectedModel
-      ? `${state.selectedModel.provider}/${state.selectedModel.id}`
-      : "";
-    if (pendingModel?.modelKey === modelKey || selectedModelKey === modelKey) return;
-    setModelError("");
-    onClearSettingResult();
-    const commandId = onModel(modelProvider, modelId);
-    if (commandId) setPendingModel({ modelKey, commandId });
-  };
-
   return <div className="drawer-backdrop" role="presentation" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
     <aside
       ref={drawerFocusRef}
@@ -429,7 +368,10 @@ export function ConnectionDrawer({
         <div className="setting-step">
           <div className="step-heading">
             <span className="step-number">2</span>
-            <div><h3>模型</h3><p>仅显示所选提供商当前可用的模型</p></div>
+            <div>
+              <h3>模型目录</h3>
+              <p>会话模型由创建时的角色固定，这里只展示当前可用模型</p>
+            </div>
           </div>
           {selectedProvider?.configured && availableModels.length > 0 && <input
             className="search"
@@ -467,7 +409,6 @@ export function ConnectionDrawer({
               const modelKey = `${model.provider}/${model.id}`;
               const selected = state.selectedModel?.provider === model.provider
                 && state.selectedModel.id === model.id;
-              const pending = pendingModel?.modelKey === modelKey;
               const metadata = [
                 `${model.provider} / ${model.id}`,
                 model.reasoning ? "支持推理" : "",
@@ -477,21 +418,27 @@ export function ConnectionDrawer({
                 type="button"
                 key={modelKey}
                 aria-current={selected ? "true" : undefined}
-                disabled={!online || state.busy || selected || Boolean(pendingModel)}
+                disabled
                 className={selected ? "model selected" : "model"}
-                onClick={() => chooseModel(model.provider, model.id)}
+                title="请在角色管理中为新会话选择模型"
               >
                 <span><strong>{model.name}</strong><small>{metadata}</small></span>
-                <b>{modelActionLabel(pending, selected)}</b>
+                <b>{modelActionLabel(selected)}</b>
               </button>;
             })}
           </div>
-          {modelError && <p className="inline-status error" role="alert">{modelError}</p>}
         </div>
       </section>
 
       <section className="settings-section">
         <h3>Agent 行为</h3>
+        {onManageRoles && <button
+          type="button"
+          className="role-manager-entry"
+          onClick={onManageRoles}
+        >
+          管理角色
+        </button>}
         <div className="setting-field">
           <label htmlFor="thinking-level">思考级别</label>
           <select
@@ -524,16 +471,15 @@ export function ConnectionDrawer({
         </div>
       </section>
 
-      <section className="settings-section"><div className="section-heading"><h3>项目对话</h3>
-        <button type="button" disabled={conversationBusy} onClick={onNewConversation}>新建对话</button>
-      </div>
+      {state.conversationId && <section className="settings-section">
+        <h3>当前会话</h3>
         <form className="conversation-name" onSubmit={submitConversationName}>
           <input
-            aria-label="当前对话名称"
+            aria-label="当前会话名称"
             value={conversationName}
             disabled={conversationBusy}
             maxLength={120}
-            placeholder="给当前对话命名"
+            placeholder="给当前会话命名"
             onChange={(event) => setConversationName(event.target.value)}
           />
           <button
@@ -545,69 +491,10 @@ export function ConnectionDrawer({
             }
           >保存</button>
         </form>
-        <div className="conversation-list">
-          {conversations.map((conversation) => {
-            const selected = conversation.id === state.conversationId;
-            const label = conversation.name || conversation.preview || "新对话";
-            return <div
-              key={conversation.id}
-              className={selected ? "conversation-row selected" : "conversation-row"}
-            >
-              <button
-                type="button"
-                className="conversation"
-                disabled={conversationBusy || selected}
-                aria-label={selected ? `当前对话 ${label}` : `打开对话 ${label}`}
-                aria-current={selected ? "true" : undefined}
-                onClick={() => onOpenConversation(conversation.id)}
-              >
-                <span>{label}<small>{conversation.messageCount} 条消息</small></span>
-                {selected && <b>当前</b>}
-              </button>
-              {!selected && <button
-                type="button"
-                className="conversation-delete ghost danger"
-                aria-label={`删除对话 ${label}`}
-                disabled={!online || conversationBusy}
-                onClick={() => setConfirmDeleteConversationId(conversation.id)}
-              >
-                删除
-              </button>}
-            </div>;
-          })}
-        </div>
-        <p className="setting-note">当前对话需先新建或切换后删除。</p>
-        {deleteCandidate && <div className="credential-confirm" role="alert">
-          <p>
-            永久删除“{deleteCandidate.name || deleteCandidate.preview || "新对话"}”？此操作无法撤销。
-          </p>
-          <div className="provider-actions">
-            <button
-              type="button"
-              className="ghost"
-              disabled={conversationBusy}
-              onClick={() => setConfirmDeleteConversationId("")}
-            >
-              保留
-            </button>
-            <button
-              type="button"
-              className="danger-button"
-              disabled={!online || conversationBusy}
-              onClick={() => {
-                if (onDeleteConversation(deleteCandidate.id)) {
-                  setConfirmDeleteConversationId("");
-                }
-              }}
-            >
-              永久删除
-            </button>
-          </div>
-        </div>}
-        {conversationIndexTruncated && <p className="setting-note">
-          当前仅显示最近的对话，较旧或过长的索引内容已省略。
-        </p>}
-      </section>
+        <p className="setting-note">
+          新建、打开和删除会话统一在左侧会话栏中完成。
+        </p>
+      </section>}
     </aside>
     {keyProvider && <div className="modal-backdrop" role="presentation"><form
       ref={keyFocusRef}

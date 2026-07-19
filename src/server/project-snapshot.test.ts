@@ -59,6 +59,42 @@ describe("projectConversationIndex", () => {
 
     expect(snapshot.truncated).toBe(true);
     expect(snapshot.conversations).toHaveLength(MAX_PROJECT_CONVERSATIONS);
-    expect(snapshot.conversations.at(-1)?.id).toBe(active.id);
+    expect(snapshot.conversations[0]?.id).toBe(active.id);
+  });
+
+  it("prioritizes the current, active, attention, and unread conversations", () => {
+    const source = Array.from(
+      { length: MAX_PROJECT_CONVERSATIONS + 20 },
+      (_, index) => ({
+        ...conversation(index),
+        name: `Conversation ${index}`,
+        preview: `Preview ${index}`,
+        updatedAt: new Date(
+          Date.UTC(2026, 6, 18, 12, 0, index),
+        ).toISOString(),
+      }),
+    );
+    const current = source.at(-1)!;
+    const active = source.at(-2)!;
+    const attention = source.at(-3)!;
+    const unread = source.at(-4)!;
+    active.activity = { kind: "running", runId: active.id };
+    attention.attention = true;
+    unread.unread = true;
+
+    const snapshot = projectConversationIndex(source, current.id);
+    const retainedIds = new Set(snapshot.conversations.map(({ id }) => id));
+
+    expect(snapshot.conversations.slice(0, 4).map(({ id }) => id)).toEqual([
+      current.id,
+      active.id,
+      attention.id,
+      unread.id,
+    ]);
+    expect(retainedIds.has(current.id)).toBe(true);
+    expect(retainedIds.has(active.id)).toBe(true);
+    expect(retainedIds.has(attention.id)).toBe(true);
+    expect(retainedIds.has(unread.id)).toBe(true);
+    expect(snapshot.truncated).toBe(true);
   });
 });

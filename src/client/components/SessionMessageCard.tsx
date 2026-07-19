@@ -1,0 +1,111 @@
+import type {
+  ConversationMessageCard,
+  SessionMessageEndpoint,
+} from "../../shared/protocol";
+
+const STATE_LABELS: Record<ConversationMessageCard["state"], string> = {
+  sending: "发送中",
+  queued: "已排队",
+  delivered: "已送达",
+  running: "处理中",
+  waiting: "等待中",
+  completed: "已完成",
+  failed: "失败",
+  aborted: "已终止",
+};
+
+function shortHandle(conversationId: string): string {
+  return `#${conversationId.slice(0, 8)}`;
+}
+
+function Endpoint({
+  endpoint,
+  kind,
+}: {
+  endpoint: SessionMessageEndpoint;
+  kind: "from" | "to";
+}) {
+  const label = kind === "from" ? "来源会话" : "目标会话";
+  return (
+    <section className={`session-message-endpoint endpoint-${kind}`} aria-label={label}>
+      <strong className="session-message-endpoint-title">
+        {endpoint.title?.trim() || "未命名会话"}
+      </strong>
+      <span className="session-message-endpoint-role">{endpoint.role.name}</span>
+      <span
+        className="session-message-endpoint-handle"
+        title={endpoint.conversationId}
+      >
+        {shortHandle(endpoint.conversationId)}
+      </span>
+    </section>
+  );
+}
+
+export function SessionMessageCard({
+  card,
+  onOpenConversation,
+}: {
+  card: ConversationMessageCard;
+  onOpenConversation?(conversationId: string): void;
+}) {
+  const directionLabel = card.direction === "incoming" ? "收到" : "发出";
+  const statusLabel = STATE_LABELS[card.state];
+  const peer = card.direction === "incoming" ? card.from : card.to;
+  const canOpen = onOpenConversation !== undefined
+    && card.peerExists === true;
+
+  return (
+    <article
+      className={[
+        "session-message-card",
+        `direction-${card.direction}`,
+        `state-${card.state}`,
+      ].join(" ")}
+      aria-label={`${directionLabel}的会话消息`}
+      data-card-id={card.cardId}
+      data-message-id={card.messageId}
+    >
+      <header className="session-message-header">
+        <span className="session-message-direction">{directionLabel}</span>
+        <span
+          className="session-message-status"
+          role="status"
+          aria-label={`消息状态：${statusLabel}`}
+        >
+          {statusLabel}
+        </span>
+      </header>
+
+      <div className="session-message-route">
+        <Endpoint endpoint={card.from} kind="from" />
+        <span className="session-message-route-arrow" aria-hidden="true">→</span>
+        <Endpoint endpoint={card.to} kind="to" />
+      </div>
+
+      <p className="session-message-body">{card.body}</p>
+
+      {card.result !== undefined && (
+        <section className="session-message-result" aria-label="会话消息结果">
+          <strong>结果</strong>
+          <p>{card.result}</p>
+        </section>
+      )}
+
+      <footer className="session-message-footer">
+        <time className="session-message-updated" dateTime={card.updatedAt}>
+          {card.updatedAt}
+        </time>
+        {canOpen && (
+          <button
+            type="button"
+            className="session-message-open"
+            onClick={() => onOpenConversation(peer.conversationId)}
+          >
+            打开会话
+          </button>
+        )}
+      </footer>
+    </article>
+  );
+}

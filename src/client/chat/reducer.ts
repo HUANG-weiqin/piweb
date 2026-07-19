@@ -1,5 +1,7 @@
 import type {
+  ConversationHistoryItem,
   ConversationHistoryMessage,
+  ConversationMessageCard,
   SessionEvent,
   TokenUsage,
 } from "../../shared/protocol";
@@ -12,6 +14,10 @@ export interface ToolItem {
   status: "pending" | "running" | "done" | "error";
 }
 
+/**
+ * Compatibility shape consumed by the existing Message component.
+ * New transcript code should use ChatItem and branch on `kind`.
+ */
 export interface ChatMessage {
   id: string;
   runId: string;
@@ -22,32 +28,172 @@ export interface ChatMessage {
   usage?: TokenUsage;
 }
 
-export interface ChatState {
-  messages: ChatMessage[];
-  sessionTokens: number;
+export type ChatMessageItem = { kind: "message" } & ChatMessage;
+export type ChatItem = ChatMessageItem | ConversationMessageCard;
+
+export interface ChatFocus {
+  sessionId: string;
+  conversationId: string;
+  focusId: string;
 }
 
-export const initialChatState: ChatState = { messages: [], sessionTokens: 0 };
+export interface ChatState {
+  /**
+   * The ordered transcript. Cards and ordinary messages share this one
+   * projection so a card update cannot jump to the end of the conversation.
+   *
+   * Optional only until the existing Chat component finishes migrating from
+   * its message-only test fixtures. Reducer-produced states always set it.
+   */
+  items?: ChatItem[];
+  /**
+   * Temporary compatibility projection for existing message-only consumers.
+   * It is always derived from `items`.
+   */
+  messages: ChatMessage[];
+  sessionTokens: number;
+  focus?: ChatFocus;
+}
+
+export const initialChatState: ChatState = {
+  items: [],
+  messages: [],
+  sessionTokens: 0,
+};
+
+type OptionalFocus = Partial<ChatFocus>;
 
 export type ChatAction =
-  | { type: "prompt_accepted"; runId: string; text: string }
-  | { type: "session"; runId: string; event: SessionEvent }
-  | { type: "error"; runId: string; message: string }
+  | ({ type: "focus_changed" } & ChatFocus)
+  | ({ type: "hydrate"; items: ConversationHistoryItem[] } & ChatFocus)
+  // Compatibility for the old App while focus-aware wiring lands.
   | { type: "hydrate"; messages: ConversationHistoryMessage[] }
+  | ({ type: "conversation_item"; item: ConversationHistoryItem } & ChatFocus)
+  | ({ type: "prompt_accepted"; runId: string; text: string } & OptionalFocus)
+  | ({ type: "session"; runId: string; event: SessionEvent } & OptionalFocus)
+  | ({ type: "error"; runId: string; message: string } & OptionalFocus)
   | { type: "reset" };
 
 const id = () => crypto.randomUUID();
 
-function ensureAssistant(
-  messages: ChatMessage[],
-  runId: string,
-): { messages: ChatMessage[]; index: number } {
-  const existingIndex = messages.findIndex((message) => (
-    message.role === "assistant" && message.runId === runId
-  ));
-  if (existingIndex >= 0) return { messages, index: existingIndex };
+function isMessage(item: ChatItem): item is ChatMessageItem {
+  return item.kind === "message";
+}
 
-  const assistant: ChatMessage = {
+function messagesFrom(items: ChatItem[]): ChatMessage[] {
+  return items.filter(isMessage);
+}
+
+function itemsFrom(state: ChatState): ChatItem[] {
+  if (state.items) return state.items;
+  return state.messages.map((message) => ({ kind: "message", ...message }));
+}
+
+function withItems(
+  state: ChatState,
+  items: ChatItem[],
+  sessionTokens = state.sessionTokens,
+): ChatState {
+  return {
+    ...state,
+    items,
+    messages: messagesFrom(items),
+    sessionTokens,
+  };
+}
+
+function sameFocus(left: ChatFocus | undefined, right: ChatFocus): boolean {
+  return left?.sessionId === right.sessionId
+    && left.conversationId === right.conversationId
+    && left.focusId === right.focusId;
+}
+
+function hasCompleteFocus(action: OptionalFocus): action is ChatFocus {
+  return typeof action.sessionId === "string"
+    && typeof action.conversationId === "string"
+    && typeof action.focusId === "string";
+}
+
+/**
+ * Legacy unscoped events are accepted only before a focus-aware App attaches.
+ * Once a focus exists, every live mutation must carry the complete identity.
+ */
+function matchesCurrentFocus(state: ChatState, action: OptionalFocus): boolean {
+  const hasAnyFocusPart = action.sessionId !== undefined
+    || action.conversationId !== undefined
+    || action.focusId !== undefined;
+  if (!hasAnyFocusPart) return state.focus === undefined;
+  return hasCompleteFocus(action) && sameFocus(state.focus, action);
+}
+
+function historyMessageToItem(
+  message: ConversationHistoryMessage,
+): ChatMessageItem {
+  return {
+    kind: "message",
+    id: message.id,
+    runId: `history:${message.id}`,
+    role: message.role,
+    text: message.text,
+    thinking: message.thinking,
+    tools: message.tools.map((tool) => ({
+      id: tool.toolCallId,
+      name: tool.toolName,
+      args: tool.args,
+      result: tool.result,
+      status: tool.status,
+    })),
+    usage: message.usage,
+  };
+}
+
+function historyItemToChatItem(item: ConversationHistoryItem): ChatItem {
+  if (item.kind === "session_message") return item;
+  return historyMessageToItem(item);
+}
+
+function itemIdentity(item: ChatItem): string {
+  return item.kind === "session_message"
+    ? `card:${item.cardId}`
+    : `message:${item.id}`;
+}
+
+function upsertItem(items: ChatItem[], next: ChatItem): ChatItem[] {
+  const identity = itemIdentity(next);
+  const existingIndex = items.findIndex((item) => itemIdentity(item) === identity);
+  if (existingIndex < 0) return [...items, next];
+  return [
+    ...items.slice(0, existingIndex),
+    next,
+    ...items.slice(existingIndex + 1),
+  ];
+}
+
+function normalizeHistory(items: ConversationHistoryItem[]): ChatItem[] {
+  return items.reduce<ChatItem[]>(
+    (current, item) => upsertItem(current, historyItemToChatItem(item)),
+    [],
+  );
+}
+
+function tokenTotal(items: ChatItem[]): number {
+  return items.reduce(
+    (total, item) => total + (isMessage(item) ? (item.usage?.total ?? 0) : 0),
+    0,
+  );
+}
+
+function ensureAssistant(
+  items: ChatItem[],
+  runId: string,
+): { items: ChatItem[]; index: number } {
+  const existingIndex = items.findIndex((item) => (
+    isMessage(item) && item.role === "assistant" && item.runId === runId
+  ));
+  if (existingIndex >= 0) return { items, index: existingIndex };
+
+  const assistant: ChatMessageItem = {
+    kind: "message",
     id: id(),
     runId,
     role: "assistant",
@@ -55,27 +201,29 @@ function ensureAssistant(
     thinking: "",
     tools: [],
   };
-  const userIndex = messages.findIndex((message) => (
-    message.role === "user" && message.runId === runId
+  const userIndex = items.findIndex((item) => (
+    isMessage(item) && item.role === "user" && item.runId === runId
   ));
-  const index = userIndex >= 0 ? userIndex + 1 : messages.length;
+  const index = userIndex >= 0 ? userIndex + 1 : items.length;
   return {
-    messages: [...messages.slice(0, index), assistant, ...messages.slice(index)],
+    items: [...items.slice(0, index), assistant, ...items.slice(index)],
     index,
   };
 }
 
 function updateAssistant(
-  messages: ChatMessage[],
+  items: ChatItem[],
   runId: string,
-  update: (message: ChatMessage) => ChatMessage,
-): ChatMessage[] {
-  const target = ensureAssistant(messages, runId);
-  const assistant = update(target.messages[target.index]!);
+  update: (message: ChatMessageItem) => ChatMessageItem,
+): ChatItem[] {
+  const target = ensureAssistant(items, runId);
+  const current = target.items[target.index];
+  if (!current || !isMessage(current)) return target.items;
+  const assistant = update(current);
   return [
-    ...target.messages.slice(0, target.index),
+    ...target.items.slice(0, target.index),
     assistant,
-    ...target.messages.slice(target.index + 1),
+    ...target.items.slice(target.index + 1),
   ];
 }
 
@@ -91,76 +239,98 @@ function addUsage(current: TokenUsage | undefined, next: TokenUsage): TokenUsage
 
 export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   if (action.type === "reset") return initialChatState;
-  if (action.type === "hydrate") {
+
+  if (action.type === "focus_changed") {
+    if (sameFocus(state.focus, action)) return state;
     return {
-      messages: action.messages.map((message) => ({
-        id: message.id,
-        runId: `history:${message.id}`,
-        role: message.role,
-        text: message.text,
-        thinking: message.thinking,
-        tools: message.tools.map((tool) => ({
-          id: tool.toolCallId,
-          name: tool.toolName,
-          args: tool.args,
-          result: tool.result,
-          status: tool.status,
-        })),
-        usage: message.usage,
-      })),
-      sessionTokens: action.messages.reduce(
-        (total, message) => total + (message.usage?.total ?? 0),
-        0,
-      ),
+      ...state,
+      focus: {
+        sessionId: action.sessionId,
+        conversationId: action.conversationId,
+        focusId: action.focusId,
+      },
+      items: [],
+      messages: [],
+      sessionTokens: 0,
     };
   }
+
+  if (action.type === "hydrate") {
+    if ("items" in action) {
+      if (state.focus && !sameFocus(state.focus, action)) return state;
+      const items = normalizeHistory(action.items);
+      return {
+        ...withItems(state, items, tokenTotal(items)),
+        focus: {
+          sessionId: action.sessionId,
+          conversationId: action.conversationId,
+          focusId: action.focusId,
+        },
+      };
+    }
+
+    if (state.focus) return state;
+    const items = action.messages.map(historyMessageToItem);
+    return withItems(state, items, tokenTotal(items));
+  }
+
+  if (action.type === "conversation_item") {
+    if (!matchesCurrentFocus(state, action)) return state;
+    const items = upsertItem(itemsFrom(state), historyItemToChatItem(action.item));
+    return withItems(state, items, tokenTotal(items));
+  }
+
+  if (!matchesCurrentFocus(state, action)) return state;
+
   if (action.type === "prompt_accepted") {
-    if (state.messages.some((message) => (
-      message.role === "user" && message.runId === action.runId
+    const items = itemsFrom(state);
+    if (items.some((item) => (
+      isMessage(item) && item.role === "user" && item.runId === action.runId
     ))) return state;
-    return {
-    messages: [...state.messages, {
+    return withItems(state, [...items, {
+      kind: "message",
       id: id(),
       runId: action.runId,
       role: "user",
       text: action.text,
       thinking: "",
       tools: [],
-    }],
-    sessionTokens: state.sessionTokens,
-    };
+    }]);
   }
-  if (action.type === "error") return {
-    messages: [...state.messages, {
+
+  if (action.type === "error") {
+    return withItems(state, [...itemsFrom(state), {
+      kind: "message",
       id: id(),
       runId: action.runId,
       role: "error",
       text: action.message,
       thinking: "",
       tools: [],
-    }],
-    sessionTokens: state.sessionTokens,
-  };
+    }]);
+  }
 
   const event = action.event;
   if (event.type === "run_started") {
-    return { ...state, messages: ensureAssistant(state.messages, action.runId).messages };
+    return withItems(state, ensureAssistant(itemsFrom(state), action.runId).items);
   }
   if (event.type === "run_queued" || event.type === "run_finished") return state;
 
-  if (event.type === "text_delta" || event.type === "text_replaced" || event.type === "thinking_delta") {
-    return {
-      ...state,
-      messages: updateAssistant(state.messages, action.runId, (assistant) => {
-        if (event.type === "text_delta") {
-          return { ...assistant, text: assistant.text + event.delta };
-        }
-        if (event.type === "text_replaced") {
-          return { ...assistant, text: event.text };
-        }
-        return { ...assistant, thinking: assistant.thinking + event.delta };
-      }),
-    };
+  if (
+    event.type === "text_delta"
+    || event.type === "text_replaced"
+    || event.type === "thinking_delta"
+  ) {
+    const items = updateAssistant(itemsFrom(state), action.runId, (assistant) => {
+      if (event.type === "text_delta") {
+        return { ...assistant, text: assistant.text + event.delta };
+      }
+      if (event.type === "text_replaced") {
+        return { ...assistant, text: event.text };
+      }
+      return { ...assistant, thinking: assistant.thinking + event.delta };
+    });
+    return withItems(state, items);
   }
 
   if (event.type === "tool_started") {
@@ -171,19 +341,19 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       // Pi emits tool_execution_start before host policy validation.
       status: "pending",
     };
-    return {
-      ...state,
-      messages: updateAssistant(state.messages, action.runId, (assistant) => ({
+    return withItems(
+      state,
+      updateAssistant(itemsFrom(state), action.runId, (assistant) => ({
         ...assistant,
         tools: [...assistant.tools, tool],
       })),
-    };
+    );
   }
 
   if (event.type === "tool_prepared") {
-    return {
-      ...state,
-      messages: updateAssistant(state.messages, action.runId, (assistant) => ({
+    return withItems(
+      state,
+      updateAssistant(itemsFrom(state), action.runId, (assistant) => ({
         ...assistant,
         tools: assistant.tools.map((tool) => (
           tool.id === String(event.toolCallId)
@@ -191,33 +361,30 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             : tool
         )),
       })),
-    };
+    );
   }
 
   if (event.type === "tool_updated" || event.type === "tool_finished") {
     let status: ToolItem["status"] = "running";
     if (event.type === "tool_finished") status = event.isError ? "error" : "done";
-    return {
-      ...state,
-      messages: updateAssistant(state.messages, action.runId, (assistant) => ({
+    return withItems(
+      state,
+      updateAssistant(itemsFrom(state), action.runId, (assistant) => ({
         ...assistant,
         tools: assistant.tools.map((tool) => {
           if (tool.id !== String(event.toolCallId)) return tool;
           return { ...tool, result: event.result, status };
         }),
       })),
-    };
+    );
   }
 
   if (event.type === "usage") {
-    return {
-      ...state,
-      messages: updateAssistant(state.messages, action.runId, (assistant) => ({
-        ...assistant,
-        usage: addUsage(assistant.usage, event.usage),
-      })),
-      sessionTokens: state.sessionTokens + event.usage.total,
-    };
+    const items = updateAssistant(itemsFrom(state), action.runId, (assistant) => ({
+      ...assistant,
+      usage: addUsage(assistant.usage, event.usage),
+    }));
+    return withItems(state, items, state.sessionTokens + event.usage.total);
   }
 
   return state;

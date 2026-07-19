@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { parseClientCommand, parseServerEvent, PROTOCOL_VERSION } from "./protocol.js";
+import {
+  MAX_MESSAGE_BYTES,
+  MAX_ROLE_COUNT,
+  MAX_ROLE_DESCRIPTION_CHARACTERS,
+  MAX_ROLE_NAME_CHARACTERS,
+  MAX_ROLE_SYSTEM_PROMPT_BYTES,
+  MAX_SERVER_EVENT_BYTES,
+  parseClientCommand,
+  parseServerEvent,
+  PROTOCOL_VERSION,
+} from "./protocol.js";
 
 const sessionId = "88f3af1d-d21d-40a0-b3c3-0f27593f274a";
 const runId = "6ff77ba8-6c29-45a7-9851-e9054d706df2";
@@ -8,10 +18,13 @@ const extensionRequestId = "a81ab25f-041e-4559-b890-04c0eeb476e4";
 const commandId = "b55e4225-e07f-4874-b760-015f7982d999";
 const conversationId = "0198f775-88f3-7af1-9c6a-3176f775912a";
 const projectId = "f25ee8d8-34f0-4c30-a045-b2a69f2e28bd";
+const focusId = "ef01fdc2-8f55-4125-a22d-b0b764b4546b";
+const targetConversationId = "cbcd831e-599b-40d6-9252-e79939ca49f4";
+const roleId = "f23db1e6-c657-4dac-8b7e-a14fdecc5f21";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(10);
+    expect(PROTOCOL_VERSION).toBe(11);
   });
 
   it("accepts supported commands", () => {
@@ -22,13 +35,71 @@ describe("parseClientCommand", () => {
     }).type).toBe("browse_directory");
     expect(parseClientCommand({
       type: "initialize",
+      commandId,
       sessionId,
       cwd: "E:\\work",
       toolMode: "full_access",
       conversation: { kind: "open", conversationId },
     })).toMatchObject({ type: "initialize", toolMode: "full_access" });
-    expect(parseClientCommand({ type: "prompt", sessionId, runId, text: "hello" }).type).toBe("prompt");
-    expect(parseClientCommand({ type: "abort", sessionId, runId }).type).toBe("abort");
+    expect(parseClientCommand({
+      type: "create_conversation",
+      commandId,
+      sessionId,
+      roleId,
+      title: "Review the runtime",
+    }).type).toBe("create_conversation");
+    expect(parseClientCommand({
+      type: "focus_conversation",
+      commandId,
+      sessionId,
+      conversationId,
+    }).type).toBe("focus_conversation");
+    expect(parseClientCommand({
+      type: "create_role",
+      commandId,
+      sessionId,
+      role: {
+        name: "Reviewer",
+        description: "Finds lifecycle bugs",
+        systemPrompt: "Review the implementation.",
+        model: { provider: "openai", id: "gpt" },
+      },
+    }).type).toBe("create_role");
+    expect(parseClientCommand({
+      type: "update_role",
+      commandId,
+      sessionId,
+      roleId,
+      expectedRevision: 1,
+      role: {
+        name: "Reviewer",
+        description: "",
+        systemPrompt: "",
+        model: null,
+      },
+    }).type).toBe("update_role");
+    expect(parseClientCommand({
+      type: "delete_role",
+      commandId,
+      sessionId,
+      roleId,
+      expectedRevision: 2,
+    }).type).toBe("delete_role");
+    expect(parseClientCommand({
+      type: "prompt",
+      sessionId,
+      conversationId,
+      focusId: commandId,
+      runId,
+      text: "hello",
+    }).type).toBe("prompt");
+    expect(parseClientCommand({
+      type: "abort",
+      sessionId,
+      conversationId,
+      focusId: commandId,
+      runId,
+    }).type).toBe("abort");
     expect(parseClientCommand({
       type: "extension_ui_response",
       sessionId,
@@ -110,6 +181,37 @@ describe("parseClientCommand", () => {
       conversation: { kind: "open", conversationId: "not-a-uuid" },
     })).toThrow();
     expect(() => parseClientCommand({
+      type: "initialize",
+      sessionId,
+      cwd: "E:\\work",
+      conversation: { kind: "recent" },
+    })).toThrow("commandId");
+    expect(() => parseClientCommand({
+      type: "initialize",
+      sessionId,
+      cwd: "E:\\work",
+      conversation: { kind: "new" },
+    })).toThrow("role");
+    expect(() => parseClientCommand({
+      type: "create_conversation",
+      commandId,
+      sessionId,
+      roleId: " ",
+    })).toThrow();
+    expect(() => parseClientCommand({
+      type: "update_role",
+      commandId,
+      sessionId,
+      roleId,
+      expectedRevision: 0,
+      role: {
+        name: "Reviewer",
+        description: "",
+        systemPrompt: "",
+        model: null,
+      },
+    })).toThrow();
+    expect(() => parseClientCommand({
       type: "rename_conversation",
       sessionId,
       conversationId,
@@ -142,6 +244,75 @@ describe("parseClientCommand", () => {
 
   it("rejects oversized socket messages", () => {
     expect(() => parseClientCommand("x".repeat(1_000_001))).toThrow("too large");
+  });
+
+  it("aligns role prompts with the durable 128 KiB UTF-8 boundary", () => {
+    const exactPrompt = "é".repeat(MAX_ROLE_SYSTEM_PROMPT_BYTES / 2);
+    expect(parseClientCommand({
+      type: "create_role",
+      commandId,
+      sessionId,
+      role: {
+        name: "Reviewer",
+        description: "",
+        systemPrompt: exactPrompt,
+        model: null,
+      },
+    })).toMatchObject({
+      type: "create_role",
+      role: { systemPrompt: exactPrompt },
+    });
+    expect(() => parseClientCommand({
+      type: "create_role",
+      commandId,
+      sessionId,
+      role: {
+        name: "Reviewer",
+        description: "",
+        systemPrompt: `${exactPrompt}é`,
+        model: null,
+      },
+    })).toThrow("UTF-8");
+  });
+
+  it("aligns role name and description character limits with durable storage", () => {
+    const exactUnicodeName = "😀".repeat(MAX_ROLE_NAME_CHARACTERS);
+    expect(parseClientCommand({
+      type: "create_role",
+      commandId,
+      sessionId,
+      role: {
+        name: exactUnicodeName,
+        description: "d".repeat(MAX_ROLE_DESCRIPTION_CHARACTERS),
+        systemPrompt: "",
+        model: null,
+      },
+    })).toMatchObject({
+      type: "create_role",
+      role: { name: exactUnicodeName },
+    });
+    expect(() => parseClientCommand({
+      type: "create_role",
+      commandId,
+      sessionId,
+      role: {
+        name: `${exactUnicodeName}😀`,
+        description: "",
+        systemPrompt: "",
+        model: null,
+      },
+    })).toThrow("80 characters");
+    expect(() => parseClientCommand({
+      type: "create_role",
+      commandId,
+      sessionId,
+      role: {
+        name: "Reviewer",
+        description: "d".repeat(MAX_ROLE_DESCRIPTION_CHARACTERS + 1),
+        systemPrompt: "",
+        model: null,
+      },
+    })).toThrow("1000 characters");
   });
 
   it("validates server events at the browser boundary", () => {
@@ -183,12 +354,30 @@ describe("parseClientCommand", () => {
       state: {
         sessionId,
         projectId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        providers: [],
+      },
+    }).type).toBe("state");
+    expect(parseServerEvent({
+      type: "state",
+      state: {
+        sessionId,
+        projectId,
         conversationId,
+        focusId,
         cwd: "E:\\work",
         busy: true,
         activeRun: {
           id: runId,
-          phase: "running",
+          phase: "waiting",
+          waitingFor: {
+            conversationId: targetConversationId,
+            runId: "e509167a-1cc3-4bb9-bb0d-845bf94d9c99",
+          },
         },
         thinkingLevel: "off",
         toolMode: "full_access",
@@ -196,6 +385,54 @@ describe("parseClientCommand", () => {
         providers: [],
       },
     }).type).toBe("state");
+    expect(parseServerEvent({
+      type: "focus_attached",
+      operation: "focus_conversation",
+      commandId,
+      sessionId,
+      projectId,
+      focusId,
+      conversationId,
+    }).type).toBe("focus_attached");
+    expect(parseServerEvent({
+      type: "focus_attached",
+      operation: "initialize",
+      commandId,
+      sessionId,
+      projectId,
+    }).type).toBe("focus_attached");
+    expect(parseServerEvent({
+      type: "focus_invalidated",
+      sessionId,
+      projectId,
+      conversationId,
+      focusId,
+      reason: "deleted",
+    }).type).toBe("focus_invalidated");
+    expect(() => parseServerEvent({
+      type: "focus_attached",
+      operation: "focus_conversation",
+      commandId,
+      sessionId,
+      projectId,
+      focusId,
+    })).toThrow();
+    expect(parseServerEvent({
+      type: "role_catalog_snapshot",
+      sessionId,
+      projectId,
+      roles: [{
+        id: "default",
+        revision: 1,
+        name: "Default",
+        description: "",
+        systemPrompt: "",
+        model: { provider: "openai", id: "gpt" },
+        createdAt: "2026-07-18T12:00:00.000Z",
+        updatedAt: "2026-07-18T12:00:00.000Z",
+        available: true,
+      }],
+    }).type).toBe("role_catalog_snapshot");
     expect(parseServerEvent({
       type: "project_snapshot",
       sessionId,
@@ -207,6 +444,17 @@ describe("parseClientCommand", () => {
           createdAt: "2026-07-18T12:00:00.000Z",
           updatedAt: "2026-07-18T12:01:00.000Z",
           messageCount: 1,
+          role: {
+            id: "default",
+            revision: 1,
+            name: "Default",
+            description: "",
+            model: { provider: "openai", id: "gpt" },
+          },
+          activity: { kind: "running", runId },
+          attention: false,
+          unread: true,
+          temporary: false,
       }],
       truncated: false,
     }).type).toBe("project_snapshot");
@@ -214,12 +462,34 @@ describe("parseClientCommand", () => {
       type: "conversation_snapshot",
       sessionId,
       conversationId,
-      messages: [{
-        id: "message-1",
-        role: "user",
-        text: "hello",
-        thinking: "",
-        tools: [],
+      focusId,
+      role: {
+        id: "default",
+        revision: 1,
+        name: "Default",
+        description: "",
+        systemPrompt: "",
+        model: { provider: "openai", id: "gpt" },
+      },
+      items: [{
+        kind: "session_message",
+        id: "card-entry-1",
+        cardId: "6790e721-6f5c-4692-8949-4d3fd2cf0dfc",
+        direction: "incoming",
+        state: "queued",
+        body: "Please review the actor.",
+        from: {
+          conversationId: targetConversationId,
+          title: "Coordinator",
+          role: { id: "default", name: "Default" },
+        },
+        to: {
+          conversationId,
+          role: { id: roleId, name: "Reviewer" },
+        },
+        sentAt: "2026-07-18T12:00:00.000Z",
+        updatedAt: "2026-07-18T12:00:01.000Z",
+        peerExists: true,
       }],
       truncated: false,
     }).type).toBe("conversation_snapshot");
@@ -227,12 +497,16 @@ describe("parseClientCommand", () => {
       type: "session_event",
       sessionId,
       runId,
+      conversationId,
+      focusId,
       event: { type: "run_queued" },
     }).type).toBe("session_event");
     expect(parseServerEvent({
       type: "session_event",
       sessionId,
       runId,
+      conversationId,
+      focusId,
       event: {
         type: "tool_prepared",
         toolCallId: "tool-1",
@@ -243,6 +517,8 @@ describe("parseClientCommand", () => {
       type: "session_event",
       sessionId,
       runId,
+      conversationId,
+      focusId,
       event: { type: "run_finished", outcome: "aborted" },
     }).type).toBe("session_event");
     expect(parseServerEvent({
@@ -285,6 +561,8 @@ describe("parseClientCommand", () => {
       operation: "prompt",
       sessionId,
       runId,
+      conversationId,
+      focusId,
       commandId,
     }).type).toBe("error");
     expect(parseServerEvent({
@@ -322,7 +600,28 @@ describe("parseClientCommand", () => {
       scope: "command",
       operation: "prompt",
       sessionId,
-      runId: "not-a-uuid",
+      runId,
+    })).toThrow();
+    expect(() => parseServerEvent({
+      type: "session_event",
+      sessionId,
+      runId,
+      conversationId,
+      event: { type: "run_started" },
+    })).toThrow();
+    expect(() => parseServerEvent({
+      type: "focus_attached",
+      operation: "focus_conversation",
+      commandId,
+      sessionId,
+      projectId,
+    })).toThrow();
+    expect(() => parseServerEvent({
+      type: "focus_invalidated",
+      sessionId,
+      projectId,
+      conversationId,
+      reason: "deleted",
     })).toThrow();
     expect(() => parseServerEvent({
       type: "auth_complete",
@@ -356,6 +655,93 @@ describe("parseClientCommand", () => {
         availableThinkingLevels: ["off"],
         providers: [],
       },
+    })).toThrow();
+  });
+
+  it("keeps client frames at 1 MB while accepting a bounded full role catalog", () => {
+    const systemPrompt = "x".repeat(MAX_ROLE_SYSTEM_PROMPT_BYTES);
+    const roles = Array.from({ length: MAX_ROLE_COUNT }, (_, index) => ({
+      id: index === 0
+        ? "default"
+        : `00000000-0000-4000-8000-${index.toString(16).padStart(12, "0")}`,
+      revision: 1,
+      name: `Role ${index}`,
+      description: "",
+      systemPrompt,
+      model: { provider: "openai", id: "gpt" },
+      createdAt: "2026-07-18T12:00:00.000Z",
+      updatedAt: "2026-07-18T12:00:00.000Z",
+      available: true,
+    }));
+    const payload = JSON.stringify({
+      type: "role_catalog_snapshot",
+      sessionId,
+      projectId,
+      roles,
+    });
+
+    expect(new TextEncoder().encode(payload).byteLength)
+      .toBeGreaterThan(MAX_MESSAGE_BYTES);
+    expect(new TextEncoder().encode(payload).byteLength)
+      .toBeLessThan(MAX_SERVER_EVENT_BYTES);
+    expect(parseServerEvent(payload)).toMatchObject({
+      type: "role_catalog_snapshot",
+      roles: { length: MAX_ROLE_COUNT },
+    });
+    expect(() => parseClientCommand("x".repeat(MAX_MESSAGE_BYTES + 1)))
+      .toThrow("too large");
+  });
+
+  it("requires exactly one focused history projection and bounded project fields", () => {
+    const message = {
+      id: "message-1",
+      role: "user" as const,
+      text: "hello",
+      thinking: "",
+      tools: [],
+    };
+    expect(() => parseServerEvent({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId,
+      focusId,
+      messages: [message],
+      items: [{ kind: "message", ...message }],
+      truncated: false,
+    })).toThrow("exactly one");
+    expect(() => parseServerEvent({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId,
+      focusId,
+      truncated: false,
+    })).toThrow("exactly one");
+    expect(() => parseServerEvent({
+      type: "project_snapshot",
+      sessionId,
+      projectId,
+      conversations: Array.from({ length: 101 }, (_, index) => ({
+        id: `00000000-0000-4000-8000-${index.toString(16).padStart(12, "0")}`,
+        preview: "",
+        createdAt: "2026-07-18T12:00:00.000Z",
+        updatedAt: "2026-07-18T12:00:00.000Z",
+        messageCount: 0,
+      })),
+      truncated: true,
+    })).toThrow();
+    expect(() => parseServerEvent({
+      type: "project_snapshot",
+      sessionId,
+      projectId,
+      conversations: [{
+        id: conversationId,
+        name: "n".repeat(121),
+        preview: "",
+        createdAt: "2026-07-18T12:00:00.000Z",
+        updatedAt: "2026-07-18T12:00:00.000Z",
+        messageCount: 0,
+      }],
+      truncated: true,
     })).toThrow();
   });
 });

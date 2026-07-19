@@ -1,14 +1,38 @@
+import { randomUUID } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-coding-agent";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import {
+  MAX_AGENT_PEEK_BYTES,
+  MAX_AGENT_PEEK_ITEMS,
   MAX_HISTORY_SNAPSHOT_BYTES,
+  projectAgentConversationPeek,
+  projectConversationItems,
+  projectConversationItemsSnapshot,
   projectConversationHistory,
   projectConversationHistorySnapshot,
 } from "./conversation-history.js";
+import {
+  appendReservedCustomEntry,
+  createConversationCardEntry,
+  createConversationMessageEntry,
+  createConversationMetaEntry,
+  createRunSettlementEntry,
+} from "./conversation-meta.js";
 
 function message(value: unknown): AgentMessage {
   return value as AgentMessage;
+}
+
+function peer(conversationId = randomUUID()) {
+  return {
+    conversationId,
+    title: "Worker",
+    role: {
+      id: "default",
+      name: "Worker",
+    },
+  };
 }
 
 describe("projectConversationHistory", () => {
@@ -205,5 +229,283 @@ describe("projectConversationHistory", () => {
     expect(snapshot.truncated).toBe(true);
     expect(snapshot.messages[0]?.role).toBe("user");
     expect(snapshot.messages.at(-1)?.text).toContain("answer-7");
+  });
+
+  it("hydrates incoming and outgoing session-message cards beside wrapped messages", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    const outgoing = createConversationCardEntry({
+      cardId: randomUUID(),
+      kind: "delegation_task",
+      body: "Review the parser",
+      fromSnapshot: peer(),
+      toSnapshot: peer(),
+      state: "queued",
+      messageId: randomUUID(),
+      delegationId: randomUUID(),
+      runId: randomUUID(),
+      updatedAt: "2026-07-19T10:00:00.000Z",
+    });
+    appendReservedCustomEntry(manager, outgoing);
+    manager.appendMessage(message({
+      role: "user",
+      content: "Continue locally",
+      timestamp: 1,
+    }));
+    const incoming = createConversationMessageEntry({
+      content: "Parser review complete",
+      display: true,
+      details: {
+        messageId: randomUUID(),
+        cardId: randomUUID(),
+        sentAt: "2026-07-19T10:01:00.000Z",
+        kind: "delegation_result",
+        body: "Parser review complete",
+        fromSnapshot: peer(),
+        toSnapshot: peer(),
+        delegationId: randomUUID(),
+      },
+    });
+    manager.appendCustomMessageEntry(
+      incoming.customType,
+      incoming.content,
+      incoming.display,
+      incoming.details,
+    );
+
+    const items = projectConversationItems(manager);
+    expect(items).toEqual([
+      expect.objectContaining({
+        kind: "session_message",
+        cardId: outgoing.data.cardId,
+        direction: "outgoing",
+        state: "queued",
+        body: "Review the parser",
+        sentAt: outgoing.data.updatedAt,
+      }),
+      expect.objectContaining({
+        kind: "message",
+        role: "user",
+        text: "Continue locally",
+      }),
+      expect.objectContaining({
+        kind: "session_message",
+        cardId: incoming.details.cardId,
+        direction: "incoming",
+        state: "delivered",
+        body: "Parser review complete",
+        sentAt: incoming.details.sentAt,
+      }),
+    ]);
+
+    const snapshot = projectConversationItemsSnapshot(manager);
+    expect(snapshot.items).toEqual(items);
+    expect(snapshot.messages).toEqual(projectConversationHistory(manager));
+    expect(snapshot.truncated).toBe(false);
+  });
+
+  it("updates a repeated card in place and hides host-only reserved records", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    const initial = createConversationCardEntry({
+      cardId: randomUUID(),
+      kind: "delegation_task",
+      body: "Implement the parser",
+      fromSnapshot: peer(),
+      toSnapshot: peer(),
+      state: "queued",
+      messageId: randomUUID(),
+      updatedAt: "2026-07-19T10:00:00.000Z",
+    });
+    appendReservedCustomEntry(manager, initial);
+    manager.appendMessage(message({
+      role: "user",
+      content: "Work in parallel",
+      timestamp: 1,
+    }));
+    appendReservedCustomEntry(manager, createConversationCardEntry({
+      ...initial.data,
+      state: "completed",
+      result: "Parser complete",
+      updatedAt: "2026-07-19T10:02:00.000Z",
+    }));
+    appendReservedCustomEntry(manager, createConversationMetaEntry({
+      role: {
+        id: "default",
+        revision: 1,
+        name: "Worker",
+        description: "",
+        systemPrompt: "",
+        model: {
+          provider: "openai",
+          id: "gpt-5.6",
+        },
+      },
+      lifecycle: { kind: "normal" },
+      createdBy: { kind: "user" },
+    }));
+    appendReservedCustomEntry(manager, createRunSettlementEntry({
+      runId: randomUUID(),
+      outcome: "completed",
+      finalText: "Internal settlement",
+      settledAt: "2026-07-19T10:03:00.000Z",
+    }));
+
+    expect(projectConversationItems(manager)).toEqual([
+      expect.objectContaining({
+        kind: "session_message",
+        cardId: initial.data.cardId,
+        state: "completed",
+        result: "Parser complete",
+        sentAt: initial.data.updatedAt,
+        updatedAt: "2026-07-19T10:02:00.000Z",
+      }),
+      expect.objectContaining({
+        kind: "message",
+        role: "user",
+        text: "Work in parallel",
+      }),
+    ]);
+  });
+
+  it("fails closed instead of rendering unknown piweb reserved records", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    manager.appendCustomEntry("piweb.future.v2", {});
+
+    expect(() => projectConversationItems(manager)).toThrow(
+      /unknown piweb reserved/i,
+    );
+  });
+
+  it("projects only visible message text and session-message cards for Agent peek", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    manager.appendMessage(message({
+      role: "user",
+      content: "Inspect this",
+      timestamp: 1,
+    }));
+    manager.appendMessage(message({
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "private chain" },
+        {
+          type: "toolCall",
+          id: "tool-private",
+          name: "read",
+          arguments: { secret: "private args" },
+        },
+        { type: "text", text: "Visible answer" },
+      ],
+      usage: { totalTokens: 9 },
+      stopReason: "toolUse",
+      timestamp: 2,
+    }));
+    manager.appendMessage(message({
+      role: "toolResult",
+      toolCallId: "tool-private",
+      toolName: "read",
+      content: [{ type: "text", text: "private tool result" }],
+      isError: false,
+      timestamp: 3,
+    }));
+    appendReservedCustomEntry(manager, createConversationMetaEntry({
+      role: {
+        id: "default",
+        revision: 1,
+        name: "Worker",
+        description: "",
+        systemPrompt: "internal prompt",
+        model: { provider: "openai", id: "gpt-5.6" },
+      },
+      lifecycle: { kind: "normal" },
+      createdBy: { kind: "user" },
+    }));
+    manager.appendCustomMessageEntry(
+      "provider.auth.request",
+      "private auth prompt",
+      true,
+      { token: "private auth token" },
+    );
+    const card = createConversationCardEntry({
+      cardId: randomUUID(),
+      kind: "message",
+      body: "Visible peer message",
+      fromSnapshot: peer(),
+      toSnapshot: peer(),
+      state: "delivered",
+      messageId: randomUUID(),
+      updatedAt: "2026-07-19T10:00:00.000Z",
+    });
+    appendReservedCustomEntry(manager, card);
+
+    const peek = projectAgentConversationPeek(manager);
+    expect(peek).toMatchObject({
+      truncated: false,
+      items: [
+        {
+          kind: "message",
+          role: "user",
+          text: "Inspect this",
+        },
+        {
+          kind: "message",
+          role: "assistant",
+          text: "Visible answer",
+        },
+        {
+          kind: "session_message",
+          cardId: card.data.cardId,
+          body: "Visible peer message",
+        },
+      ],
+    });
+    const serialized = JSON.stringify(peek);
+    expect(serialized).not.toContain("private chain");
+    expect(serialized).not.toContain("private args");
+    expect(serialized).not.toContain("private tool result");
+    expect(serialized).not.toContain("internal prompt");
+    expect(serialized).not.toContain("private auth");
+    expect(serialized).not.toContain("usage");
+  });
+
+  it("bounds Agent peek to the newest 20 items", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    for (let index = 0; index < 30; index += 1) {
+      manager.appendMessage(message({
+        role: "user",
+        content: `question-${index}`,
+        timestamp: index,
+      }));
+    }
+
+    const peek = projectAgentConversationPeek(manager, 100);
+    expect(peek.truncated).toBe(true);
+    expect(peek.items).toHaveLength(MAX_AGENT_PEEK_ITEMS);
+    expect(peek.items[0]).toMatchObject({
+      kind: "message",
+      text: "question-10",
+    });
+    expect(peek.items.at(-1)).toMatchObject({
+      kind: "message",
+      text: "question-29",
+    });
+  });
+
+  it("bounds the complete serialized Agent peek snapshot to 256 KiB", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    for (let index = 0; index < 20; index += 1) {
+      manager.appendMessage(message({
+        role: "user",
+        content: `question-${index}-${"问".repeat(20_000)}`,
+        timestamp: index,
+      }));
+    }
+
+    const peek = projectAgentConversationPeek(manager);
+    expect(peek.truncated).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(peek), "utf8"))
+      .toBeLessThanOrEqual(MAX_AGENT_PEEK_BYTES);
+    expect(peek.items.at(-1)).toMatchObject({
+      kind: "message",
+      text: expect.stringContaining("question-19"),
+    });
   });
 });

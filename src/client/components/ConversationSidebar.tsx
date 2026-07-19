@@ -1,0 +1,369 @@
+import { useEffect, useState } from "react";
+import type {
+  ConversationActivity,
+  ConversationSummary,
+} from "../../shared/protocol";
+import { useModalFocus } from "../lib/use-modal-focus";
+
+export interface ConversationSidebarProps {
+  conversations: ConversationSummary[];
+  truncated: boolean;
+  currentConversationId?: string;
+  busyConversationId?: string;
+  collapsed: boolean;
+  online: boolean;
+  pendingDeletionId?: string;
+  onToggleCollapsed(collapsed: boolean): void;
+  onSelect(conversationId: string): void;
+  onCreate(): void;
+  onDelete(conversationId: string): boolean;
+}
+
+function shortHandle(conversationId: string): string {
+  return `#${conversationId.slice(0, 8)}`;
+}
+
+function titleOf(conversation: ConversationSummary): string {
+  return conversation.name?.trim()
+    || conversation.preview.trim()
+    || "新会话";
+}
+
+function formatLastActive(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) return value;
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
+function activityRank(activity: ConversationActivity | undefined): number {
+  switch (activity?.kind) {
+    case "running": return 0;
+    case "queued": return 1;
+    case "cancelling": return 2;
+    case "waiting": return 3;
+    default: return 4;
+  }
+}
+
+function orderedConversations(conversations: ConversationSummary[]): ConversationSummary[] {
+  return conversations
+    .map((conversation, index) => ({ conversation, index }))
+    .sort((left, right) => {
+      const activeDifference =
+        Number(activityRank(right.conversation.activity) < 4)
+        - Number(activityRank(left.conversation.activity) < 4);
+      if (activeDifference !== 0) return activeDifference;
+
+      const attentionDifference =
+        Number(Boolean(right.conversation.attention))
+        - Number(Boolean(left.conversation.attention));
+      if (attentionDifference !== 0) return attentionDifference;
+
+      const activityDifference =
+        activityRank(left.conversation.activity)
+        - activityRank(right.conversation.activity);
+      if (activityDifference !== 0) return activityDifference;
+
+      const updatedDifference =
+        Date.parse(right.conversation.updatedAt)
+        - Date.parse(left.conversation.updatedAt);
+      if (Number.isFinite(updatedDifference) && updatedDifference !== 0) {
+        return updatedDifference;
+      }
+      return left.index - right.index;
+    })
+    .map(({ conversation }) => conversation);
+}
+
+function ActivityIndicator({
+  activity,
+}: {
+  activity: ConversationActivity | undefined;
+}) {
+  switch (activity?.kind) {
+    case "queued":
+      return (
+        <span
+          className="conversation-activity-indicator conversation-activity-spinner activity-queued"
+          role="status"
+          aria-label="排队中"
+          title="排队中"
+        >
+          ◌
+        </span>
+      );
+    case "running":
+      return (
+        <span
+          className="conversation-activity-indicator conversation-activity-spinner activity-running"
+          role="status"
+          aria-label="运行中"
+          title="运行中"
+        >
+          ◌
+        </span>
+      );
+    case "waiting":
+      return (
+        <span
+          className="conversation-activity-indicator activity-waiting"
+          role="status"
+          aria-label="等待其他会话"
+          title="等待其他会话"
+        >
+          ⌛
+        </span>
+      );
+    case "cancelling":
+      return (
+        <span
+          className="conversation-activity-indicator activity-cancelling"
+          role="status"
+          aria-label="正在终止"
+          title="正在终止"
+        >
+          ■
+        </span>
+      );
+    default:
+      return null;
+  }
+}
+
+function ConversationRow({
+  conversation,
+  selected,
+  online,
+  deletionPending,
+  deletionBlocked,
+  busy,
+  onSelect,
+  onRequestDelete,
+}: {
+  conversation: ConversationSummary;
+  selected: boolean;
+  online: boolean;
+  deletionPending: boolean;
+  deletionBlocked: boolean;
+  busy: boolean;
+  onSelect(conversationId: string): void;
+  onRequestDelete(conversationId: string): void;
+}) {
+  const title = titleOf(conversation);
+  const active = busy || (conversation.activity?.kind ?? "idle") !== "idle";
+  const classes = [
+    "conversation-sidebar-item",
+    `activity-${conversation.activity?.kind ?? "idle"}`,
+    selected ? "selected" : "",
+    conversation.attention ? "needs-attention" : "",
+    conversation.unread ? "has-unread" : "",
+    conversation.temporary ? "is-temporary" : "",
+  ].filter(Boolean).join(" ");
+
+  return (
+    <li className={classes} data-conversation-id={conversation.id}>
+      <button
+        type="button"
+        className="conversation-sidebar-conversation"
+        aria-current={selected ? "page" : undefined}
+        aria-label={selected ? `当前会话 ${title}` : `打开会话 ${title}`}
+        onClick={() => onSelect(conversation.id)}
+      >
+        <span className="conversation-sidebar-primary">
+          <span className="conversation-sidebar-title">{title}</span>
+          <span className="conversation-sidebar-indicators">
+            <ActivityIndicator activity={conversation.activity} />
+            {conversation.attention && (
+              <span
+                className="conversation-attention-indicator"
+                role="status"
+                aria-label="需要处理"
+                title="需要处理"
+              >
+                !
+              </span>
+            )}
+            {conversation.unread && (
+              <span
+                className="conversation-unread-indicator"
+                role="status"
+                aria-label="未读消息"
+                title="未读消息"
+              />
+            )}
+          </span>
+        </span>
+        <span className="conversation-sidebar-identity">
+          <span className="conversation-sidebar-role">
+            {conversation.role?.name ?? "角色加载中"}
+          </span>
+          <span
+            className="conversation-sidebar-handle"
+            title={conversation.id}
+          >
+            {shortHandle(conversation.id)}
+          </span>
+          {conversation.temporary && (
+            <span className="conversation-temporary-badge">临时</span>
+          )}
+        </span>
+        <time
+          className="conversation-sidebar-updated"
+          dateTime={conversation.updatedAt}
+        >
+          最后活跃 {formatLastActive(conversation.updatedAt)}
+        </time>
+      </button>
+      <button
+        type="button"
+        className="conversation-sidebar-delete ghost danger"
+        aria-label={`删除会话 ${title}`}
+        disabled={!online || deletionBlocked || active}
+        title={active ? "活跃会话需先终止并等待结算" : "删除会话"}
+        onClick={() => onRequestDelete(conversation.id)}
+      >
+        {deletionPending ? "删除中" : "删除"}
+      </button>
+    </li>
+  );
+}
+
+export function ConversationSidebar({
+  conversations,
+  truncated,
+  currentConversationId,
+  busyConversationId,
+  collapsed,
+  online,
+  pendingDeletionId,
+  onToggleCollapsed,
+  onSelect,
+  onCreate,
+  onDelete,
+}: ConversationSidebarProps) {
+  const [confirmDeleteConversationId, setConfirmDeleteConversationId] = useState("");
+  const deleteCandidate = conversations.find(
+    ({ id }) => id === confirmDeleteConversationId,
+  );
+  const deleteCandidateActive =
+    deleteCandidate?.id === busyConversationId
+    || (deleteCandidate?.activity?.kind ?? "idle") !== "idle";
+  const closeDeleteDialog = () => {
+    if (!pendingDeletionId) setConfirmDeleteConversationId("");
+  };
+  const deleteFocusRef = useModalFocus<HTMLDivElement>(
+    Boolean(deleteCandidate),
+    confirmDeleteConversationId,
+    closeDeleteDialog,
+  );
+
+  useEffect(() => {
+    if (!confirmDeleteConversationId || deleteCandidate) return;
+    setConfirmDeleteConversationId("");
+  }, [confirmDeleteConversationId, deleteCandidate]);
+
+  return <>
+    <aside
+      className={`conversation-sidebar${collapsed ? " collapsed" : ""}`}
+      aria-label="项目会话栏"
+    >
+      <header className="conversation-sidebar-header">
+        {!collapsed && <h2>会话</h2>}
+        <button
+          type="button"
+          className="conversation-sidebar-toggle"
+          aria-label={collapsed ? "展开会话栏" : "收起会话栏"}
+          aria-expanded={!collapsed}
+          onClick={() => onToggleCollapsed(!collapsed)}
+        >
+          {collapsed ? "›" : "‹"}
+        </button>
+      </header>
+
+      {!collapsed && (
+        <nav className="conversation-sidebar-navigation" aria-label="项目会话">
+          <ul className="conversation-sidebar-list">
+            {orderedConversations(conversations).map((conversation) => (
+              <ConversationRow
+                key={conversation.id}
+                conversation={conversation}
+                selected={conversation.id === currentConversationId}
+                online={online}
+                deletionPending={pendingDeletionId === conversation.id}
+                deletionBlocked={Boolean(pendingDeletionId)}
+                busy={conversation.id === busyConversationId}
+                onSelect={onSelect}
+                onRequestDelete={setConfirmDeleteConversationId}
+              />
+            ))}
+          </ul>
+          {truncated && <p className="conversation-sidebar-truncated">
+            仅显示最近会话
+          </p>}
+        </nav>
+      )}
+
+      <footer className="conversation-sidebar-footer">
+        <button
+          type="button"
+          className="conversation-sidebar-create"
+          aria-label="新建会话"
+          onClick={onCreate}
+        >
+          <span aria-hidden="true">＋</span>
+          {!collapsed && <span>新建会话</span>}
+        </button>
+      </footer>
+    </aside>
+    {deleteCandidate && <div
+      className="modal-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) closeDeleteDialog();
+      }}
+    >
+      <div
+        ref={deleteFocusRef}
+        className="modal conversation-delete-dialog"
+        role="alertdialog"
+        aria-modal="true"
+        aria-label="确认删除会话"
+        tabIndex={-1}
+      >
+        <h2>永久删除会话？</h2>
+        <p>
+          “{titleOf(deleteCandidate)}”及其历史将被永久删除，此操作无法撤销。
+        </p>
+        <div className="provider-actions">
+          <button
+            type="button"
+            className="ghost"
+            data-modal-autofocus
+            disabled={Boolean(pendingDeletionId)}
+            onClick={() => setConfirmDeleteConversationId("")}
+          >
+            保留
+          </button>
+          <button
+            type="button"
+            className="danger-button"
+            disabled={!online || Boolean(pendingDeletionId) || deleteCandidateActive}
+            onClick={() => {
+              if (onDelete(deleteCandidate.id)) {
+                setConfirmDeleteConversationId("");
+              }
+            }}
+          >
+            永久删除
+          </button>
+        </div>
+      </div>
+    </div>}
+  </>;
+}

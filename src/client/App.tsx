@@ -4,9 +4,11 @@ import {
   type AcknowledgedSettingOperation,
   type AuthRequest,
   type ClientCommand,
+  type ConversationRoleSnapshot,
   type ConversationSummary,
   type DirectoryListing,
   type PublicState,
+  type RoleTemplate,
   type ServerEvent,
   type ThinkingLevel,
   type ToolMode,
@@ -16,12 +18,20 @@ import { chatReducer, initialChatState } from "./chat/reducer";
 import { AuthDialog } from "./components/AuthDialog";
 import { Chat } from "./components/Chat";
 import { ConnectionDrawer } from "./components/ConnectionDrawer";
+import { ConversationSidebar } from "./components/ConversationSidebar";
 import { DirectoryBrowserDialog } from "./components/DirectoryBrowserDialog";
 import {
   ExtensionDialog,
   type PendingExtensionUI,
 } from "./components/ExtensionDialog";
 import { Setup } from "./components/Setup";
+import {
+  RoleManagerDialog,
+  type PendingRoleOperation,
+  type RoleDraft,
+  type RoleOperationResult,
+} from "./components/RoleManagerDialog";
+import { RoleSelectionPage } from "./components/RoleSelectionPage";
 import { PiSocket } from "./lib/socket";
 import { readStoredString, writeStoredString } from "./lib/storage";
 
@@ -32,6 +42,8 @@ interface PendingPrompt {
   sessionId: string;
   runId: string;
   text: string;
+  conversationId?: string;
+  focusId?: string;
 }
 
 interface PendingConversationDeletion {
@@ -44,6 +56,32 @@ interface DirectoryBrowserState {
   listing?: DirectoryListing;
   error: string;
 }
+
+interface ActiveFocus {
+  sessionId: string;
+  projectId: string;
+  conversationId: string;
+  focusId: string;
+}
+
+interface PendingFocus {
+  commandId: string;
+  operation: "initialize" | "focus_conversation" | "create_conversation";
+}
+
+type RoleCommandInput =
+  | { type: "create_role"; role: RoleDraft }
+  | {
+      type: "update_role";
+      roleId: string;
+      expectedRevision: number;
+      role: RoleDraft;
+    }
+  | {
+      type: "delete_role";
+      roleId: string;
+      expectedRevision: number;
+    };
 
 function storedToolMode(): ToolMode {
   return readStoredString(TOOL_MODE_KEY) === "read_only"
@@ -59,7 +97,11 @@ export function App() {
   const [activeCwd, setActiveCwd] = useState("");
   const activeCwdRef = useRef("");
   const sessionIdRef = useRef("");
+  const projectIdRef = useRef("");
   const conversationIdRef = useRef("");
+  const focusRef = useRef<ActiveFocus | undefined>(undefined);
+  const pendingFocusRef = useRef<PendingFocus | undefined>(undefined);
+  const pendingFocusedStateRef = useRef<PublicState | undefined>(undefined);
   const toolModeRef = useRef<ToolMode>(storedToolMode());
   const confirmedToolModeRef = useRef<ToolMode>(toolModeRef.current);
   const pendingToolModeRef = useRef<ToolMode | undefined>(undefined);
@@ -78,11 +120,23 @@ export function App() {
   const outstandingRunIdRef = useRef("");
   const [state, setState] = useState<PublicState>();
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [roles, setRoles] = useState<RoleTemplate[]>([]);
+  const [conversationRole, setConversationRole] =
+    useState<ConversationRoleSnapshot>();
   const [conversationIndexTruncated, setConversationIndexTruncated] = useState(false);
   const [historyTruncated, setHistoryTruncated] = useState(false);
   const [conversationReady, setConversationReady] = useState(false);
   const conversationReadyRef = useRef(false);
   const [drawer, setDrawer] = useState(false);
+  const [roleManagerOpen, setRoleManagerOpen] = useState(false);
+  const [selectingRole, setSelectingRole] = useState(false);
+  const [creatingConversation, setCreatingConversation] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [pendingRoleOperation, setPendingRoleOperation] =
+    useState<PendingRoleOperation>();
+  const pendingRoleOperationRef = useRef<PendingRoleOperation | undefined>(undefined);
+  const [roleOperationResult, setRoleOperationResult] =
+    useState<RoleOperationResult>();
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [error, setError] = useState("");
   const [settingResult, setSettingResult] = useState<{
@@ -122,14 +176,80 @@ export function App() {
     directoryBrowserRef.current = next;
     setDirectoryBrowserState(next);
   };
+  const updatePendingFocus = (pending: PendingFocus | undefined) => {
+    if (pending) pendingFocusedStateRef.current = undefined;
+    pendingFocusRef.current = pending;
+    setCreatingConversation(pending?.operation === "create_conversation");
+  };
+  const updatePendingRoleOperation = (
+    pending: PendingRoleOperation | undefined,
+  ) => {
+    pendingRoleOperationRef.current = pending;
+    setPendingRoleOperation(pending);
+  };
+  const matchesFocus = (
+    sessionId: string,
+    conversationId: string | undefined,
+    focusId: string | undefined,
+  ) => {
+    const focus = focusRef.current;
+    if (!focus) {
+      return sessionId === sessionIdRef.current
+        && conversationId === conversationIdRef.current
+        && focusId === undefined;
+    }
+    return sessionId === focus.sessionId
+      && conversationId === focus.conversationId
+      && focusId === focus.focusId;
+  };
+  const attachFocus = (
+    sessionId: string,
+    projectId: string,
+    conversationId: string | undefined,
+    focusId: string | undefined,
+  ) => {
+    projectIdRef.current = projectId;
+    if (!conversationId || !focusId) {
+      focusRef.current = undefined;
+      conversationIdRef.current = "";
+      setConversationRole(undefined);
+      setHistoryTruncated(false);
+      updateConversationReady(false);
+      setSelectingRole(true);
+      dispatch({ type: "reset" });
+      return;
+    }
+    const changedConversation = conversationIdRef.current !== conversationId;
+    const focus = { sessionId, projectId, conversationId, focusId };
+    focusRef.current = focus;
+    conversationIdRef.current = conversationId;
+    setConversationRole(undefined);
+    setHistoryTruncated(false);
+    updateConversationReady(false);
+    setSelectingRole(false);
+    if (changedConversation) {
+      setDraft("");
+      setPromptNotice("");
+      updatePendingPrompt(undefined);
+    }
+    updateOutstandingRunId("");
+    dispatch({ type: "focus_changed", ...focus });
+  };
   const acceptPendingPrompt = (sessionId: string, runId: string) => {
     const pending = pendingPromptRef.current;
     if (
       !pending
       || pending.sessionId !== sessionId
       || pending.runId !== runId
+      || pending.conversationId !== focusRef.current?.conversationId
+      || pending.focusId !== focusRef.current?.focusId
     ) return;
-    dispatch({ type: "prompt_accepted", runId, text: pending.text });
+    dispatch({
+      type: "prompt_accepted",
+      runId,
+      text: pending.text,
+      ...(focusRef.current ?? {}),
+    });
     setDraft("");
     setPromptNotice("");
     updatePendingPrompt(undefined);
@@ -148,13 +268,62 @@ export function App() {
   const clearSessionProjection = () => {
     setState(undefined);
     setConversations([]);
+    setRoles([]);
+    setConversationRole(undefined);
     setConversationIndexTruncated(false);
     setHistoryTruncated(false);
     setExtensionUI([]);
     setNotification(undefined);
     setSettingResult(undefined);
+    setRoleOperationResult(undefined);
+    updatePendingRoleOperation(undefined);
     setSettingsDialogOpen(false);
+    setRoleManagerOpen(false);
+    setSelectingRole(false);
+    updatePendingFocus(undefined);
+    pendingFocusedStateRef.current = undefined;
+    focusRef.current = undefined;
+    projectIdRef.current = "";
     updateConversationReady(false);
+  };
+  const applyPublicState = (nextState: PublicState) => {
+    const currentFocus = focusRef.current;
+    if (nextState.conversationId !== conversationIdRef.current) {
+      updateConversationReady(false);
+    }
+    setState(nextState);
+    projectIdRef.current = nextState.projectId;
+    if (!currentFocus) {
+      conversationIdRef.current = nextState.conversationId ?? "";
+      setSelectingRole(!nextState.conversationId);
+    }
+    if (nextState.activeRun?.id === outstandingRunIdRef.current) {
+      updateOutstandingRunId("");
+    }
+    setActiveCwd(nextState.cwd);
+    activeCwdRef.current = nextState.cwd;
+    setSetupCwd(nextState.cwd);
+    writeStoredString(CWD_KEY, nextState.cwd);
+    confirmedToolModeRef.current = nextState.toolMode;
+    if (pendingToolModeRef.current === nextState.toolMode) {
+      pendingToolModeRef.current = undefined;
+    }
+    const pendingToolMode = pendingToolModeRef.current;
+    const reconnectMode = pendingToolMode
+      && isToolModeRestriction(nextState.toolMode, pendingToolMode)
+      ? pendingToolMode
+      : nextState.toolMode;
+    toolModeRef.current = reconnectMode;
+    writeStoredString(TOOL_MODE_KEY, reconnectMode);
+    setError(nextState.registryError ?? "");
+    if (
+      nextState.conversationId
+      && !nextState.selectedModel
+      && !autoOpened.current
+    ) {
+      autoOpened.current = true;
+      setDrawer(true);
+    }
   };
 
   useEffect(() => {
@@ -169,7 +338,9 @@ export function App() {
           setTransportOnline(false);
           setProtocolError(message);
           sessionIdRef.current = "";
+          projectIdRef.current = "";
           conversationIdRef.current = "";
+          focusRef.current = undefined;
           authFlowIdRef.current = "";
           updateDirectoryBrowser(undefined);
           markPendingPromptUnconfirmed();
@@ -187,14 +358,17 @@ export function App() {
         setSetupCwd((current) => current || event.startupCwd);
         if (activeCwdRef.current) {
           const sessionId = crypto.randomUUID();
+          const commandId = crypto.randomUUID();
           sessionIdRef.current = sessionId;
           authFlowIdRef.current = "";
           updateOutstandingRunId("");
           setAuth({});
           dispatch({ type: "reset" });
           clearSessionProjection();
+          updatePendingFocus({ commandId, operation: "initialize" });
           socket.send({
             type: "initialize",
+            commandId,
             sessionId,
             cwd: activeCwdRef.current,
             toolMode: toolModeRef.current,
@@ -218,58 +392,171 @@ export function App() {
         });
       } else if (event.type === "state") {
         if (!sessionIdRef.current || event.state.sessionId !== sessionIdRef.current) return;
-        if (event.state.conversationId !== conversationIdRef.current) {
-          updateConversationReady(false);
+        const currentFocus = focusRef.current;
+        if (
+          currentFocus
+          && (
+            event.state.conversationId !== currentFocus.conversationId
+            || event.state.focusId !== currentFocus.focusId
+          )
+        ) {
+          if (pendingFocusRef.current && event.state.conversationId && event.state.focusId) {
+            pendingFocusedStateRef.current = event.state;
+          }
+          return;
         }
-        setState(event.state);
-        conversationIdRef.current = event.state.conversationId;
-        if (event.state.activeRun?.id === outstandingRunIdRef.current) {
-          updateOutstandingRunId("");
+        if (
+          !currentFocus
+          && event.state.focusId
+          && event.state.conversationId
+        ) {
+          if (pendingFocusRef.current) pendingFocusedStateRef.current = event.state;
+          return;
         }
-        setActiveCwd(event.state.cwd);
-        activeCwdRef.current = event.state.cwd;
-        setSetupCwd(event.state.cwd);
-        writeStoredString(CWD_KEY, event.state.cwd);
-        confirmedToolModeRef.current = event.state.toolMode;
-        if (pendingToolModeRef.current === event.state.toolMode) {
-          pendingToolModeRef.current = undefined;
+        applyPublicState(event.state);
+      } else if (event.type === "focus_attached") {
+        if (event.sessionId !== sessionIdRef.current) return;
+        const pending = pendingFocusRef.current;
+        if (
+          !pending
+          || pending.commandId !== event.commandId
+          || pending.operation !== event.operation
+        ) return;
+        updatePendingFocus(undefined);
+        attachFocus(
+          event.sessionId,
+          event.projectId,
+          event.conversationId,
+          event.focusId,
+        );
+        const pendingState = pendingFocusedStateRef.current;
+        pendingFocusedStateRef.current = undefined;
+        if (
+          pendingState
+          && pendingState.sessionId === event.sessionId
+          && pendingState.projectId === event.projectId
+          && pendingState.conversationId === event.conversationId
+          && pendingState.focusId === event.focusId
+        ) {
+          applyPublicState(pendingState);
+        } else {
+          setState((current) => current
+            ? {
+                ...current,
+                projectId: event.projectId,
+                ...(event.conversationId && event.focusId
+                  ? {
+                      conversationId: event.conversationId,
+                      focusId: event.focusId,
+                    }
+                  : {
+                      conversationId: undefined,
+                      focusId: undefined,
+                      conversationName: undefined,
+                      selectedModel: undefined,
+                      activeRun: undefined,
+                      busy: false,
+                    }),
+              }
+            : current);
         }
-        const pendingToolMode = pendingToolModeRef.current;
-        const reconnectMode = pendingToolMode
-          && isToolModeRestriction(event.state.toolMode, pendingToolMode)
-          ? pendingToolMode
-          : event.state.toolMode;
-        toolModeRef.current = reconnectMode;
-        writeStoredString(TOOL_MODE_KEY, reconnectMode);
-        setError(event.state.registryError ?? "");
-        if (!event.state.selectedModel && !autoOpened.current) {
-          autoOpened.current = true;
-          setDrawer(true);
-        }
+      } else if (event.type === "focus_invalidated") {
+        const focus = focusRef.current;
+        if (
+          !focus
+          || event.sessionId !== sessionIdRef.current
+          || event.sessionId !== focus.sessionId
+          || event.projectId !== focus.projectId
+          || event.conversationId !== focus.conversationId
+          || event.focusId !== focus.focusId
+        ) return;
+        attachFocus(
+          event.sessionId,
+          event.projectId,
+          undefined,
+          undefined,
+        );
+        setState((current) => current
+          ? {
+              ...current,
+              conversationId: undefined,
+              focusId: undefined,
+              conversationName: undefined,
+              selectedModel: undefined,
+              activeRun: undefined,
+              busy: false,
+            }
+          : current);
+        setDraft("");
+        setPromptNotice("");
+        updatePendingPrompt(undefined);
+        updateOutstandingRunId("");
+        setExtensionUI([]);
+      } else if (event.type === "role_catalog_snapshot") {
+        if (
+          event.sessionId !== sessionIdRef.current
+          || (projectIdRef.current && event.projectId !== projectIdRef.current)
+        ) return;
+        projectIdRef.current = event.projectId;
+        setRoles(event.roles);
       } else if (event.type === "project_snapshot") {
         if (
           event.sessionId !== sessionIdRef.current
-          || event.conversationId !== conversationIdRef.current
+          || (projectIdRef.current && event.projectId !== projectIdRef.current)
         ) return;
+        projectIdRef.current = event.projectId;
         setConversations(event.conversations);
         setConversationIndexTruncated(event.truncated);
       } else if (event.type === "conversation_snapshot") {
-        if (
-          event.sessionId !== sessionIdRef.current
-          || event.conversationId !== conversationIdRef.current
-        ) return;
-        dispatch({ type: "hydrate", messages: event.messages });
+        if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;
+        const focus = focusRef.current;
+        if (focus) {
+          dispatch({
+            type: "hydrate",
+            sessionId: focus.sessionId,
+            conversationId: focus.conversationId,
+            focusId: focus.focusId,
+            items: event.items
+              ?? (event.messages ?? []).map((message) => ({
+                kind: "message" as const,
+                ...message,
+              })),
+          });
+        } else {
+          dispatch({ type: "hydrate", messages: event.messages ?? [] });
+        }
+        setConversationRole(event.role);
         setHistoryTruncated(event.truncated);
         updateConversationReady(true);
       } else if (event.type === "session_event") {
-        if (event.sessionId !== sessionIdRef.current) return;
+        if (!matchesFocus(
+          event.sessionId,
+          event.conversationId,
+          event.focusId,
+        )) return;
         if (event.event.type === "run_queued") {
           acceptPendingPrompt(event.sessionId, event.runId);
         }
         if (event.event.type === "run_finished" && event.runId === outstandingRunIdRef.current) {
           updateOutstandingRunId("");
         }
-        dispatch({ type: "session", runId: event.runId, event: event.event });
+        dispatch({
+          type: "session",
+          runId: event.runId,
+          event: event.event,
+          ...(focusRef.current ?? {}),
+        });
+      } else if (event.type === "conversation_item") {
+        if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;
+        const focus = focusRef.current;
+        if (!focus) return;
+        dispatch({
+          type: "conversation_item",
+          sessionId: focus.sessionId,
+          conversationId: focus.conversationId,
+          focusId: focus.focusId,
+          item: event.item,
+        });
       } else if (event.type === "extension_ui_request") {
         if (event.sessionId !== sessionIdRef.current) return;
         setExtensionUI((current) => (
@@ -305,10 +592,54 @@ export function App() {
           const pending = pendingConversationDeletionRef.current;
           if (!pending || pending.commandId !== event.commandId) return;
           updatePendingConversationDeletion(undefined);
+          if (focusRef.current?.conversationId === pending.conversationId) {
+            attachFocus(
+              event.sessionId,
+              projectIdRef.current,
+              undefined,
+              undefined,
+            );
+            setState((current) => current
+              ? {
+                  ...current,
+                  conversationId: undefined,
+                  focusId: undefined,
+                  conversationName: undefined,
+                  selectedModel: undefined,
+                  activeRun: undefined,
+                  busy: false,
+                }
+              : current);
+            setDraft("");
+            setPromptNotice("");
+            updatePendingPrompt(undefined);
+            setExtensionUI([]);
+          }
           setNotification({
             id: ++notificationIdRef.current,
             level: "info",
             message: "对话已删除",
+          });
+          return;
+        }
+        if (
+          event.operation === "create_role"
+          || event.operation === "update_role"
+          || event.operation === "delete_role"
+        ) {
+          const pending = pendingRoleOperationRef.current;
+          if (
+            !pending
+            || pending.operation !== event.operation
+            || pending.commandId !== event.commandId
+          ) return;
+          pendingRoleOperationRef.current = undefined;
+          setRoleOperationResult({
+            ...pending,
+            ok: true,
+            message: event.operation === "delete_role"
+              ? "角色已删除"
+              : "角色已保存",
           });
           return;
         }
@@ -320,6 +651,17 @@ export function App() {
         });
       } else if (event.type === "error") {
         if (event.sessionId && event.sessionId !== sessionIdRef.current) return;
+        if (
+          (event.conversationId !== undefined || event.focusId !== undefined)
+          && (
+            event.sessionId === undefined
+            || !matchesFocus(
+              event.sessionId,
+              event.conversationId,
+              event.focusId,
+            )
+          )
+        ) return;
         if (event.authFlowId && event.authFlowId !== authFlowIdRef.current) return;
         if (event.operation === "browse_directory") {
           const current = directoryBrowserRef.current;
@@ -341,6 +683,42 @@ export function App() {
           setError(`删除对话失败：${event.message}`);
           return;
         }
+        if (
+          (event.operation === "initialize"
+            || event.operation === "focus_conversation"
+            || event.operation === "create_conversation")
+          && event.commandId
+        ) {
+          const pending = pendingFocusRef.current;
+          if (
+            !pending
+            || pending.commandId !== event.commandId
+            || pending.operation !== event.operation
+          ) return;
+          updatePendingFocus(undefined);
+          setError(event.message);
+          return;
+        }
+        if (
+          (event.operation === "create_role"
+            || event.operation === "update_role"
+            || event.operation === "delete_role")
+          && event.commandId
+        ) {
+          const pending = pendingRoleOperationRef.current;
+          if (
+            !pending
+            || pending.commandId !== event.commandId
+            || pending.operation !== event.operation
+          ) return;
+          pendingRoleOperationRef.current = undefined;
+          setRoleOperationResult({
+            ...pending,
+            ok: false,
+            message: event.message,
+          });
+          return;
+        }
         let promptRejectedBeforeAcceptance = false;
         if (
           event.scope === "command"
@@ -352,6 +730,8 @@ export function App() {
             pending
             && pending.sessionId === sessionIdRef.current
             && pending.runId === event.runId
+            && pending.conversationId === event.conversationId
+            && pending.focusId === event.focusId
           ) {
             promptRejectedBeforeAcceptance = true;
             updatePendingPrompt(undefined);
@@ -383,8 +763,21 @@ export function App() {
         }
         if (event.scope === "command" && event.operation === "prompt" && activeCwdRef.current) {
           if (event.runId === outstandingRunIdRef.current) updateOutstandingRunId("");
-          if (event.runId && !promptRejectedBeforeAcceptance) {
-            dispatch({ type: "error", runId: event.runId, message: event.message });
+          if (
+            event.runId
+            && event.sessionId
+            && event.conversationId
+            && event.focusId
+            && !promptRejectedBeforeAcceptance
+          ) {
+            dispatch({
+              type: "error",
+              runId: event.runId,
+              message: event.message,
+              sessionId: event.sessionId,
+              conversationId: event.conversationId,
+              focusId: event.focusId,
+            });
           }
         }
       }
@@ -467,6 +860,7 @@ export function App() {
     },
   ) => {
     const sessionId = crypto.randomUUID();
+    const commandId = crypto.randomUUID();
     setError("");
     setDraft("");
     setPromptNotice("");
@@ -475,6 +869,8 @@ export function App() {
     setActiveCwd(cwd);
     activeCwdRef.current = cwd;
     sessionIdRef.current = sessionId;
+    projectIdRef.current = "";
+    focusRef.current = undefined;
     conversationIdRef.current = conversation?.kind === "open"
       ? conversation.conversationId
       : "";
@@ -483,8 +879,10 @@ export function App() {
     setAuth({});
     autoOpened.current = false;
     dispatch({ type: "reset" });
+    updatePendingFocus({ commandId, operation: "initialize" });
     send({
       type: "initialize",
+      commandId,
       sessionId,
       cwd,
       toolMode: toolModeRef.current,
@@ -496,13 +894,28 @@ export function App() {
     if (!trimmed) return false;
     if (!conversationReadyRef.current) return false;
     const sessionId = sessionIdRef.current;
-    if (!sessionId) return false;
+    const focus = focusRef.current;
+    if (!sessionId || !focus) return false;
+    if (focus && focus.sessionId !== sessionId) return false;
     const runId = crypto.randomUUID();
-    const pending = { sessionId, runId, text: trimmed };
+    const pending = {
+      sessionId,
+      runId,
+      text: trimmed,
+      conversationId: focus?.conversationId,
+      focusId: focus?.focusId,
+    };
     setPromptNotice("");
     updatePendingPrompt(pending);
     updateOutstandingRunId(runId);
-    const ok = send({ type: "prompt", sessionId, runId, text: trimmed });
+    const ok = send({
+      type: "prompt",
+      sessionId,
+      conversationId: focus.conversationId,
+      focusId: focus.focusId,
+      runId,
+      text: trimmed,
+    });
     if (!ok) {
       updatePendingPrompt(undefined);
       updateOutstandingRunId("");
@@ -513,7 +926,117 @@ export function App() {
   const abortCurrentRun = () => {
     const runId = outstandingRunIdRef.current || state?.activeRun?.id;
     const sessionId = sessionIdRef.current;
-    if (sessionId && runId) send({ type: "abort", sessionId, runId });
+    const focus = focusRef.current;
+    if (sessionId && runId && focus) {
+      send({
+        type: "abort",
+        sessionId,
+        conversationId: focus.conversationId,
+        focusId: focus.focusId,
+        runId,
+      });
+    }
+  };
+  const focusConversation = (conversationId: string) => {
+    const sessionId = sessionIdRef.current;
+    if (!sessionId || pendingFocusRef.current) return;
+    if (focusRef.current?.conversationId === conversationId) {
+      setSelectingRole(false);
+      return;
+    }
+    const commandId = crypto.randomUUID();
+    updatePendingFocus({ commandId, operation: "focus_conversation" });
+    setError("");
+    if (!send({
+      type: "focus_conversation",
+      commandId,
+      sessionId,
+      conversationId,
+    })) {
+      updatePendingFocus(undefined);
+    }
+  };
+  const createConversation = (roleId: string) => {
+    const sessionId = sessionIdRef.current;
+    if (!sessionId || pendingFocusRef.current) return;
+    const commandId = crypto.randomUUID();
+    updatePendingFocus({ commandId, operation: "create_conversation" });
+    setError("");
+    if (!send({
+      type: "create_conversation",
+      commandId,
+      sessionId,
+      roleId,
+    })) {
+      updatePendingFocus(undefined);
+    }
+  };
+  const deleteConversation = (conversationId: string): boolean => {
+    const sessionId = sessionIdRef.current;
+    const conversation = conversations.find(({ id }) => id === conversationId);
+    const deletingFocusedConversation =
+      focusRef.current?.conversationId === conversationId;
+    if (
+      !sessionId
+      || !conversation
+      || (conversation.activity?.kind ?? "idle") !== "idle"
+      || (
+        deletingFocusedConversation
+        && (Boolean(state?.busy) || Boolean(outstandingRunIdRef.current))
+      )
+      || pendingConversationDeletionRef.current
+    ) {
+      return false;
+    }
+    const commandId = crypto.randomUUID();
+    const pending = { commandId, conversationId };
+    updatePendingConversationDeletion(pending);
+    setError("");
+    if (send({
+      type: "delete_conversation",
+      commandId,
+      sessionId,
+      conversationId,
+    })) {
+      return true;
+    }
+    updatePendingConversationDeletion(undefined);
+    return false;
+  };
+  const beginRoleOperation = (
+    operation: PendingRoleOperation["operation"],
+    command: RoleCommandInput,
+  ) => {
+    const sessionId = sessionIdRef.current;
+    if (!sessionId || pendingRoleOperationRef.current) return;
+    const commandId = crypto.randomUUID();
+    const pending = { operation, commandId };
+    updatePendingRoleOperation(pending);
+    setRoleOperationResult(undefined);
+    setError("");
+    if (!send({ ...command, commandId, sessionId } as ClientCommand)) {
+      updatePendingRoleOperation(undefined);
+    }
+  };
+  const closeProject = () => {
+    const sessionId = sessionIdRef.current;
+    if (sessionId) send({ type: "close_session", sessionId });
+    activeCwdRef.current = "";
+    sessionIdRef.current = "";
+    projectIdRef.current = "";
+    conversationIdRef.current = "";
+    focusRef.current = undefined;
+    authFlowIdRef.current = "";
+    setDraft("");
+    setPromptNotice("");
+    updatePendingPrompt(undefined);
+    updatePendingConversationDeletion(undefined);
+    updateOutstandingRunId("");
+    setAuth({});
+    setActiveCwd("");
+    clearSessionProjection();
+    autoOpened.current = false;
+    dispatch({ type: "reset" });
   };
   const online = transportOnline && protocolReady;
   const authModalVisible = Boolean(auth.request || auth.progress);
@@ -589,51 +1112,67 @@ export function App() {
     {feedback}
   </>;
 
+  const showRoleSelection = selectingRole || !state.conversationId;
+
   return <>
-    <Chat
-      chat={chat}
-      historyTruncated={historyTruncated}
-      busy={state.busy || Boolean(outstandingRunId)}
-      billedTokenCount={state.sessionTokenUsage?.total ?? chat.sessionTokens}
-      contextTokenCount={state.contextUsage?.tokens}
-      contextWindow={state.contextUsage?.contextWindow}
-      contextSource={state.contextUsage?.source}
-      model={state.selectedModel}
-      cwd={state.cwd}
-      online={online}
-      conversationReady={conversationReady}
-      draft={draft}
-      submitting={Boolean(pendingPrompt)}
-      promptNotice={promptNotice || undefined}
-      onDraftChange={(text) => {
-        setDraft(text);
-        if (promptNotice) setPromptNotice("");
-      }}
-      onSend={sendPrompt}
-      onAbort={abortCurrentRun}
-      onSettings={() => setDrawer(true)}
-      onChangeCwd={() => {
-        const sessionId = sessionIdRef.current;
-        if (sessionId) send({ type: "close_session", sessionId });
-        activeCwdRef.current = "";
-        sessionIdRef.current = "";
-        conversationIdRef.current = "";
-        authFlowIdRef.current = "";
-        setDraft("");
-        setPromptNotice("");
-        updatePendingPrompt(undefined);
-        updatePendingConversationDeletion(undefined);
-        updateOutstandingRunId("");
-        setAuth({});
-        setActiveCwd("");
-        clearSessionProjection();
-        autoOpened.current = false;
-        dispatch({ type: "reset" });
-      }} />
+    <div className="workbench">
+      <ConversationSidebar
+        conversations={conversations}
+        truncated={conversationIndexTruncated}
+        currentConversationId={showRoleSelection
+          ? undefined
+          : state.conversationId}
+        busyConversationId={
+          state.busy || outstandingRunId ? state.conversationId : undefined
+        }
+        collapsed={sidebarCollapsed}
+        online={online}
+        pendingDeletionId={pendingConversationDeletion?.conversationId}
+        onToggleCollapsed={setSidebarCollapsed}
+        onSelect={focusConversation}
+        onCreate={() => setSelectingRole(true)}
+        onDelete={deleteConversation}
+      />
+      <div className="workbench-main">
+        {showRoleSelection
+          ? <RoleSelectionPage
+              roles={roles}
+              pending={creatingConversation}
+              onStart={createConversation}
+              onManageRoles={() => setRoleManagerOpen(true)}
+              onSettings={() => setDrawer(true)}
+              onChangeProject={closeProject}
+            />
+          : <Chat
+              chat={chat}
+              historyTruncated={historyTruncated}
+              busy={state.busy || Boolean(outstandingRunId)}
+              billedTokenCount={state.sessionTokenUsage?.total ?? chat.sessionTokens}
+              contextTokenCount={state.contextUsage?.tokens}
+              contextWindow={state.contextUsage?.contextWindow}
+              contextSource={state.contextUsage?.source}
+              model={state.selectedModel}
+              role={conversationRole}
+              cwd={state.cwd}
+              online={online}
+              conversationReady={conversationReady}
+              draft={draft}
+              submitting={Boolean(pendingPrompt)}
+              promptNotice={promptNotice || undefined}
+              onDraftChange={(text) => {
+                setDraft(text);
+                if (promptNotice) setPromptNotice("");
+              }}
+              onSend={sendPrompt}
+              onAbort={abortCurrentRun}
+              onSettings={() => setDrawer(true)}
+              onChangeCwd={closeProject}
+              onOpenConversation={focusConversation}
+            />}
+      </div>
+    </div>
     <ConnectionDrawer
       state={state}
-      conversations={conversations}
-      conversationIndexTruncated={conversationIndexTruncated}
       open={drawer && !blockingModalVisible}
       online={online}
       toolModeBusy={state.busy || Boolean(outstandingRunId)}
@@ -644,15 +1183,13 @@ export function App() {
       }
       settingResult={settingResult}
       onClose={() => setDrawer(false)}
-      onNewConversation={() => initialize(state.cwd, { kind: "new" })}
-      onOpenConversation={(conversationId) => {
-        if (conversationId !== state.conversationId) {
-          initialize(state.cwd, { kind: "open", conversationId });
-        }
+      onManageRoles={() => {
+        setDrawer(false);
+        setRoleManagerOpen(true);
       }}
       onRenameConversation={(name) => {
         const sessionId = sessionIdRef.current;
-        if (sessionId) {
+        if (sessionId && state.conversationId) {
           send({
             type: "rename_conversation",
             sessionId,
@@ -660,30 +1197,6 @@ export function App() {
             name,
           });
         }
-      }}
-      onDeleteConversation={(conversationId) => {
-        const sessionId = sessionIdRef.current;
-        if (
-          !sessionId
-          || conversationId === state.conversationId
-          || pendingConversationDeletionRef.current
-        ) {
-          return false;
-        }
-        const commandId = crypto.randomUUID();
-        const pending = { commandId, conversationId };
-        updatePendingConversationDeletion(pending);
-        setError("");
-        if (send({
-          type: "delete_conversation",
-          commandId,
-          sessionId,
-          conversationId,
-        })) {
-          return true;
-        }
-        updatePendingConversationDeletion(undefined);
-        return false;
       }}
       onKey={(provider, key) => {
         const commandId = crypto.randomUUID();
@@ -705,15 +1218,6 @@ export function App() {
       }}
       onLogout={(provider) => send({ type: "logout", provider })}
       onRefresh={() => send({ type: "refresh_models" })}
-      onModel={(provider, modelId) => {
-        const commandId = crypto.randomUUID();
-        setSettingResult(undefined);
-        const sessionId = sessionIdRef.current;
-        return sessionId
-          && send({ type: "select_model", commandId, sessionId, provider, modelId })
-          ? commandId
-          : undefined;
-      }}
       onClearSettingResult={clearSettingResult}
       onKeyDialogChange={setSettingsDialogOpen}
       onThinking={(level: ThinkingLevel) => {
@@ -733,6 +1237,35 @@ export function App() {
           pendingToolModeRef.current = undefined;
         }
       }} />
+    <RoleManagerDialog
+      open={roleManagerOpen && !blockingModalVisible}
+      roles={roles}
+      providers={state.providers}
+      pending={pendingRoleOperation}
+      result={roleOperationResult}
+      onClose={() => {
+        setRoleManagerOpen(false);
+        updatePendingRoleOperation(undefined);
+        setRoleOperationResult(undefined);
+      }}
+      onCreate={(role: RoleDraft) => beginRoleOperation(
+        "create_role",
+        { type: "create_role", role },
+      )}
+      onUpdate={(roleId, expectedRevision, role: RoleDraft) =>
+        beginRoleOperation("update_role", {
+          type: "update_role",
+          roleId,
+          expectedRevision,
+          role,
+        })}
+      onDelete={(roleId, expectedRevision) =>
+        beginRoleOperation("delete_role", {
+          type: "delete_role",
+          roleId,
+          expectedRevision,
+        })}
+    />
     <AuthDialog {...auth} visible={authModalVisible} onRespond={(requestId, response) => {
       const authFlowId = authFlowIdRef.current;
       if (authFlowId) send({ type: "auth_response", authFlowId, requestId, ...response });

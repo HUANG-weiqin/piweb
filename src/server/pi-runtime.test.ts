@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   AuthStorage,
   createAgentSession,
+  createAgentSessionFromServices,
   createAgentSessionServices,
   createReadTool,
   DefaultResourceLoader,
@@ -49,6 +50,15 @@ function providerModel(id: string) {
   };
 }
 
+function workbenchTool(cwd: string, name = "workbench_meta") {
+  return {
+    ...createReadTool(cwd),
+    name,
+    label: name,
+    description: "A workbench-owned test tool.",
+  };
+}
+
 function testRuntime(
   extensionsFor: (cwd: string) => InlineExtension[],
   afterCreate?: (
@@ -62,6 +72,19 @@ function testRuntime(
     modelRegistry: ModelRegistry.inMemory(authStorage),
     createModelRegistry: (storage) => ModelRegistry.inMemory(storage),
     createSettings: () => SettingsManager.inMemory(),
+    createServices: (options) => createAgentSessionServices({
+      ...options,
+      agentDir: options.cwd,
+      resourceLoaderOptions: {
+        ...options.resourceLoaderOptions,
+        noExtensions: true,
+        noSkills: true,
+        noPromptTemplates: true,
+        noThemes: true,
+        noContextFiles: true,
+        extensionFactories: extensionsFor(options.cwd),
+      },
+    }),
     createSession: async (options) => {
       const cwd = options.cwd ?? process.cwd();
       const settingsManager = options.settingsManager ?? SettingsManager.inMemory();
@@ -167,6 +190,282 @@ describe("PiRuntime session ownership", () => {
     expect(managers[1]).toBe(manager);
     expect(explicitSession.session.sessionManager).toBe(manager);
     await explicitSession.dispose();
+  });
+
+  it("passes a fixed authenticated model and workbench tools through the direct factory", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-direct-role-"));
+    const authStorage = AuthStorage.inMemory();
+    const tools = [workbenchTool(cwd)];
+    let received: CreateAgentSessionOptions | undefined;
+    const runtime = new PiRuntime({
+      authStorage,
+      modelRegistry: ModelRegistry.inMemory(authStorage),
+      createModelRegistry: (storage) => {
+        const registry = ModelRegistry.inMemory(storage);
+        registry.registerProvider("role-provider", {
+          baseUrl: "https://example.invalid/v1",
+          apiKey: "role-key",
+          api: "openai-completions",
+          models: [providerModel("role-model")],
+        });
+        return registry;
+      },
+      createSettings: () => SettingsManager.inMemory(),
+      createSession: async (options) => {
+        received = options;
+        const resourceLoader = new DefaultResourceLoader({
+          cwd,
+          agentDir: cwd,
+          settingsManager: options.settingsManager,
+          noExtensions: true,
+          noSkills: true,
+          noPromptTemplates: true,
+          noThemes: true,
+          noContextFiles: true,
+        });
+        await resourceLoader.reload();
+        return createAgentSession({ ...options, resourceLoader });
+      },
+    });
+
+    const created = await runtime.createSession(cwd, {
+      model: { provider: "role-provider", id: "role-model" },
+      workbenchCustomTools: tools,
+    });
+
+    expect(received?.model).toBe(created.modelRegistry.find("role-provider", "role-model"));
+    expect(received?.customTools).toBe(tools);
+    expect(created.session.model).toMatchObject({
+      provider: "role-provider",
+      id: "role-model",
+    });
+    expect(created.session.getActiveToolNames()).toContain("workbench_meta");
+
+    created.modelRegistry.unregisterProvider("role-provider");
+    await runtime.refreshConfiguration();
+    expect(created.session.model).toMatchObject({
+      provider: "role-provider",
+      id: "role-model",
+    });
+    await created.dispose();
+  });
+
+  it("loads project providers before resolving a fixed role model and appends the role prompt", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-services-role-"));
+    const authStorage = AuthStorage.inMemory();
+    const tools = [workbenchTool(cwd)];
+    let received: Parameters<typeof createAgentSessionFromServices>[0] | undefined;
+    const runtime = new PiRuntime({
+      authStorage,
+      modelRegistry: ModelRegistry.inMemory(authStorage),
+      createModelRegistry: (storage) => ModelRegistry.inMemory(storage),
+      createSettings: () => SettingsManager.inMemory(),
+      createServices: (options) => createAgentSessionServices({
+        ...options,
+        agentDir: cwd,
+        resourceLoaderOptions: {
+          ...options.resourceLoaderOptions,
+          noExtensions: true,
+          noSkills: true,
+          noPromptTemplates: true,
+          noThemes: true,
+          noContextFiles: true,
+          appendSystemPrompt: ["project append prompt"],
+          extensionFactories: [
+            (pi) => {
+              pi.registerProvider("project-role-provider", {
+                baseUrl: "https://example.invalid/v1",
+                apiKey: "project-role-key",
+                api: "openai-completions",
+                models: [providerModel("project-role-model")],
+              });
+            },
+          ],
+        },
+      }),
+      createSessionFromServices: async (options) => {
+        received = options;
+        return createAgentSessionFromServices(options);
+      },
+    });
+
+    const created = await runtime.createSession(cwd, {
+      model: { provider: "project-role-provider", id: "project-role-model" },
+      roleSystemPrompt: "role append prompt",
+      workbenchCustomTools: tools,
+    });
+
+    expect(received?.model).toBe(
+      created.modelRegistry.find("project-role-provider", "project-role-model"),
+    );
+    expect(received?.customTools).toBe(tools);
+    expect(created.session.systemPrompt).toContain("project append prompt");
+    expect(created.session.systemPrompt).toContain("role append prompt");
+    expect(created.session.systemPrompt.indexOf("project append prompt")).toBeLessThan(
+      created.session.systemPrompt.indexOf("role append prompt"),
+    );
+    expect(created.session.getActiveToolNames()).toContain("workbench_meta");
+    await created.dispose();
+  });
+
+  it("loads a project model catalog without creating or activating an AgentSession", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-project-catalog-"));
+    const authStorage = AuthStorage.inMemory();
+    let catalogRefreshes = 0;
+    let sessionCreations = 0;
+    let sessionStarts = 0;
+    const runtime = new PiRuntime({
+      authStorage,
+      modelRegistry: ModelRegistry.inMemory(authStorage),
+      createModelRegistry: (storage) => {
+        const registry = ModelRegistry.inMemory(storage);
+        const nativeRefresh = registry.refresh.bind(registry);
+        registry.refresh = () => {
+          catalogRefreshes++;
+          nativeRefresh();
+        };
+        return registry;
+      },
+      createSettings: () => SettingsManager.inMemory(),
+      createServices: (options) => createAgentSessionServices({
+        ...options,
+        agentDir: cwd,
+        resourceLoaderOptions: {
+          ...options.resourceLoaderOptions,
+          noExtensions: true,
+          noSkills: true,
+          noPromptTemplates: true,
+          noThemes: true,
+          noContextFiles: true,
+          extensionFactories: [
+            (pi) => {
+              pi.registerProvider("catalog-provider", {
+                baseUrl: "https://example.invalid/v1",
+                apiKey: "catalog-key",
+                api: "openai-completions",
+                models: [providerModel("catalog-model")],
+              });
+              pi.on("session_start", () => {
+                sessionStarts++;
+              });
+            },
+          ],
+        },
+      }),
+      createSessionFromServices: async (options) => {
+        sessionCreations++;
+        return createAgentSessionFromServices(options);
+      },
+    });
+
+    const catalog = await runtime.createProjectModelCatalog(cwd);
+    expect(catalog.modelRegistry.find(
+      "catalog-provider",
+      "catalog-model",
+    )).toBeDefined();
+    expect(catalog.modelRegistry.getAvailable()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        provider: "catalog-provider",
+        id: "catalog-model",
+      }),
+    ]));
+    expect(catalog.dynamicProviderNames()).toContain("catalog-provider");
+    expect({ sessionCreations, sessionStarts }).toEqual({
+      sessionCreations: 0,
+      sessionStarts: 0,
+    });
+
+    await runtime.refreshConfiguration();
+    expect(catalogRefreshes).toBe(1);
+    expect(catalog.modelRegistry.find(
+      "catalog-provider",
+      "catalog-model",
+    )).toBeDefined();
+
+    await catalog.dispose();
+    await catalog.dispose();
+    await runtime.refreshConfiguration();
+    expect(catalogRefreshes).toBe(1);
+  });
+
+  it("fails closed before direct session creation when the fixed model is missing or unauthenticated", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-role-model-guard-"));
+    let factoryCalls = 0;
+    const authStorage = AuthStorage.inMemory();
+    const runtime = new PiRuntime({
+      authStorage,
+      modelRegistry: ModelRegistry.inMemory(authStorage),
+      createModelRegistry: (storage) => {
+        const registry = ModelRegistry.inMemory(storage);
+        registry.registerProvider("unconfigured-role-provider", {
+          baseUrl: "https://example.invalid/v1",
+          apiKey: "$PIWEB_RUNTIME_TEST_KEY_THAT_IS_NOT_CONFIGURED",
+          api: "openai-completions",
+          models: [providerModel("unconfigured-role-model")],
+        });
+        return registry;
+      },
+      createSettings: () => SettingsManager.inMemory(),
+      createSession: async (options) => {
+        factoryCalls++;
+        return createAgentSession(options);
+      },
+    });
+
+    await expect(runtime.createSession(cwd, {
+      model: { provider: "missing-provider", id: "missing-model" },
+    })).rejects.toThrow("is not available");
+    await expect(runtime.createSession(cwd, {
+      model: {
+        provider: "unconfigured-role-provider",
+        id: "unconfigured-role-model",
+      },
+    })).rejects.toThrow("has no configured authentication");
+    expect(factoryCalls).toBe(0);
+  });
+
+  it("tears down when a session factory falls back from the fixed role model", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-role-fallback-"));
+    const authStorage = AuthStorage.inMemory();
+    let disposals = 0;
+    const runtime = new PiRuntime({
+      authStorage,
+      modelRegistry: ModelRegistry.inMemory(authStorage),
+      createModelRegistry: (storage) => {
+        const registry = ModelRegistry.inMemory(storage);
+        registry.registerProvider("fixed-role-provider", {
+          baseUrl: "https://example.invalid/v1",
+          apiKey: "fixed-key",
+          api: "openai-completions",
+          models: [
+            providerModel("fixed-role-model"),
+            providerModel("fallback-model"),
+          ],
+        });
+        return registry;
+      },
+      createSettings: () => SettingsManager.inMemory(),
+      createSession: async (options) => {
+        const created = await createAgentSession(options);
+        const fallback = created.session.modelRegistry.find(
+          "fixed-role-provider",
+          "fallback-model",
+        );
+        if (!fallback) throw new Error("fallback model missing");
+        created.session.agent.state.model = fallback;
+        const nativeDispose = created.session.dispose.bind(created.session);
+        created.session.dispose = () => {
+          disposals++;
+          nativeDispose();
+        };
+        return created;
+      },
+    });
+
+    await expect(runtime.createSession(cwd, {
+      model: { provider: "fixed-role-provider", id: "fixed-role-model" },
+    })).rejects.toThrow("did not retain its fixed model");
+    expect(disposals).toBe(1);
   });
 
   it("resolves project trust before loading protected project resources", async () => {
@@ -548,6 +847,9 @@ describe("PiRuntime session ownership", () => {
         ]
       : []);
 
+    await expect(runtime.createProjectModelCatalog(cwdA)).rejects.toThrow(
+      "Extension provider registration failed",
+    );
     await expect(runtime.createSession(cwdA)).rejects.toThrow(
       "Extension provider registration failed",
     );

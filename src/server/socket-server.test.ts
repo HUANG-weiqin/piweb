@@ -11,12 +11,24 @@ import { describe, expect, it } from "vitest";
 import { parseServerEvent, PROTOCOL_VERSION, type ServerEvent } from "../shared/protocol.js";
 import type { DirectoryBrowser } from "./directory-browser.js";
 import type { CreatedPiSession, PiRuntimeLike } from "./pi-runtime.js";
-import { attachSocketServer, isAllowedOrigin } from "./socket-server.js";
+import {
+  attachSocketServer,
+  isAllowedOrigin,
+  safeSend,
+} from "./socket-server.js";
 
 class SocketTestRuntime implements PiRuntimeLike {
   readonly authStorage = {} as AuthStorage;
   readonly modelRegistry = {} as ModelRegistry;
   subscribers = 0;
+
+  async createProjectModelCatalog() {
+    return {
+      modelRegistry: this.modelRegistry,
+      dynamicProviderNames: () => new Set<string>(),
+      dispose: async () => undefined,
+    };
+  }
 
   createSession(): Promise<CreatedPiSession> {
     throw new Error("not used");
@@ -237,9 +249,11 @@ describe("isAllowedOrigin", () => {
     });
 
     const sessionId = randomUUID();
+    const initializeCommandId = randomUUID();
     const commandError = nextEvent(socket);
     socket.send(JSON.stringify({
       type: "initialize",
+      commandId: initializeCommandId,
       sessionId,
       cwd: join(tmpdir(), `piweb-missing-${randomUUID()}`),
     }));
@@ -248,6 +262,59 @@ describe("isAllowedOrigin", () => {
       scope: "command",
       operation: "initialize",
       sessionId,
+      commandId: initializeCommandId,
+    });
+
+    for (const operation of [
+      "focus_conversation",
+      "delete_conversation",
+      "rename_conversation",
+    ] as const) {
+      const correlatedCommandId = randomUUID();
+      const correlatedError = nextEvent(socket);
+      socket.send(JSON.stringify({
+        type: operation,
+        commandId: correlatedCommandId,
+        sessionId,
+        conversationId: randomUUID(),
+        ...(operation === "rename_conversation"
+          ? { name: "renamed" }
+          : {}),
+      }));
+      await expect(correlatedError).resolves.toEqual(expect.objectContaining({
+        type: "error",
+        scope: "command",
+        operation,
+        sessionId,
+        ...(operation === "rename_conversation"
+          ? {}
+          : { commandId: correlatedCommandId }),
+      }));
+      const parsed = await correlatedError;
+      expect(parsed).not.toHaveProperty("conversationId");
+      expect(parsed).not.toHaveProperty("focusId");
+    }
+
+    const promptConversationId = randomUUID();
+    const promptFocusId = randomUUID();
+    const promptRunId = randomUUID();
+    const promptError = nextEvent(socket);
+    socket.send(JSON.stringify({
+      type: "prompt",
+      sessionId,
+      conversationId: promptConversationId,
+      focusId: promptFocusId,
+      runId: promptRunId,
+      text: "retain the exact rejected focus",
+    }));
+    await expect(promptError).resolves.toMatchObject({
+      type: "error",
+      scope: "command",
+      operation: "prompt",
+      sessionId,
+      conversationId: promptConversationId,
+      focusId: promptFocusId,
+      runId: promptRunId,
     });
 
     const clientClosed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
@@ -256,5 +323,32 @@ describe("isAllowedOrigin", () => {
     });
     await Promise.all([socketServer.close(), httpClosed, clientClosed]);
     expect(runtime.subscribers).toBe(0);
+  });
+});
+
+describe("safeSend", () => {
+  it("replaces an oversized server frame with one fixed protocol error", () => {
+    const sent: string[] = [];
+    const socket = {
+      readyState: WebSocket.OPEN,
+      send(payload: string) {
+        sent.push(payload);
+      },
+    } as unknown as WebSocket;
+
+    safeSend(socket, {
+      type: "extension_ui_notification",
+      sessionId: randomUUID(),
+      level: "info",
+      message: "x".repeat(1_000),
+    }, 256);
+
+    expect(sent).toHaveLength(1);
+    expect(Buffer.byteLength(sent[0]!, "utf8")).toBeLessThanOrEqual(256);
+    expect(parseServerEvent(sent[0])).toEqual({
+      type: "error",
+      scope: "protocol",
+      message: "A server event exceeded the protocol frame limit",
+    });
   });
 });

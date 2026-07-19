@@ -2,12 +2,17 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ConversationRoleSnapshot } from "../../shared/protocol";
 import type { ChatState } from "../chat/reducer";
 import { Chat } from "./Chat";
 
 const emptyChat: ChatState = { messages: [], sessionTokens: 0 };
 
-function view(chat: ChatState, draft = "") {
+function view(
+  chat: ChatState,
+  draft = "",
+  role?: ConversationRoleSnapshot,
+) {
   return <Chat
     chat={chat}
     historyTruncated={false}
@@ -17,6 +22,7 @@ function view(chat: ChatState, draft = "") {
     contextWindow={100_000}
     contextSource="measured"
     model={{ provider: "provider", id: "model" }}
+    role={role}
     cwd="E:\\work"
     online
     conversationReady
@@ -106,5 +112,26 @@ describe("Chat", () => {
     rendered.rerender(view(emptyChat, "first line\nsecond line\nthird line"));
 
     expect(textarea).toHaveStyle({ height: "120px" });
+  });
+
+  it("shows the frozen role at the composer footer and opens read-only details", () => {
+    const role: ConversationRoleSnapshot = {
+      id: "default",
+      revision: 3,
+      name: "Reviewer",
+      description: "Reviews changes",
+      systemPrompt: "Review exact evidence.",
+      model: { provider: "provider", id: "model" },
+    };
+    render(view(emptyChat, "", role));
+
+    fireEvent.click(screen.getByRole("button", {
+      name: "查看会话角色 Reviewer",
+    }));
+
+    expect(screen.getByRole("dialog", { name: "会话角色" }))
+      .toHaveTextContent("Review exact evidence.");
+    expect(screen.queryByRole("button", { name: /切换/ }))
+      .not.toBeInTheDocument();
   });
 });

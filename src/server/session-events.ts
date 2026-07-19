@@ -280,6 +280,10 @@ export class SessionEventProjector {
     return this.finalAborted;
   }
 
+  get finalText(): string | null {
+    return this.completedText.length === 0 ? null : this.completedText;
+  }
+
   project(event: AgentSessionEvent): SessionEvent[] {
     if (event.type === "agent_start") {
       this.completedText = "";

@@ -1,12 +1,21 @@
 import type { SessionManager } from "@earendil-works/pi-coding-agent";
 import type {
+  ConversationHistoryItem,
   ConversationHistoryMessage,
   ConversationHistoryTool,
+  ConversationMessageCard,
   TokenUsage,
 } from "../shared/protocol.js";
+import {
+  parseReservedConversationEntry,
+  type ConversationCard,
+  type ConversationMessageEntry,
+} from "./conversation-meta.js";
 import { toWireValue } from "./session-events.js";
 
 export const MAX_HISTORY_SNAPSHOT_BYTES = 750_000;
+export const MAX_AGENT_PEEK_BYTES = 256 * 1024;
+export const MAX_AGENT_PEEK_ITEMS = 20;
 const MAX_HISTORY_TEXT_BYTES = 80_000;
 const MAX_HISTORY_TOOL_VALUE_BYTES = 8_000;
 const MAX_HISTORY_TOOLS_PER_MESSAGE = 20;
@@ -236,6 +245,323 @@ export function projectConversationHistory(
     tools: message.tools.map((tool): ConversationHistoryTool => ({ ...tool })),
     usage: message.usage ? { ...message.usage } : undefined,
   }));
+}
+
+function projectOutgoingCard(
+  card: ConversationCard,
+  sentAt: string,
+): ConversationMessageCard {
+  return {
+    kind: "session_message",
+    id: `session-message:${card.cardId}`,
+    cardId: card.cardId,
+    direction: "outgoing",
+    state: card.state,
+    body: card.body,
+    from: card.fromSnapshot,
+    to: card.toSnapshot,
+    sentAt,
+    updatedAt: card.updatedAt,
+    ...(card.messageId === undefined
+      ? {}
+      : { messageId: card.messageId }),
+    ...(card.delegationId === undefined
+      ? {}
+      : { delegationId: card.delegationId }),
+    ...(card.runId === undefined ? {} : { runId: card.runId }),
+    ...(card.result === undefined ? {} : { result: card.result }),
+  };
+}
+
+function projectIncomingCard(
+  entry: ConversationMessageEntry,
+): ConversationMessageCard {
+  const message = entry.details;
+  return {
+    kind: "session_message",
+    id: `session-message:${message.cardId}`,
+    cardId: message.cardId,
+    direction: "incoming",
+    state: "delivered",
+    body: message.body,
+    from: message.fromSnapshot,
+    to: message.toSnapshot,
+    sentAt: message.sentAt,
+    updatedAt: message.sentAt,
+    messageId: message.messageId,
+    ...(message.delegationId === undefined
+      ? {}
+      : { delegationId: message.delegationId }),
+  };
+}
+
+/**
+ * Projects the active conversational branch together with host-owned message
+ * cards. Reserved records are scanned from every physical entry because card
+ * state and delivery identity remain durable even when Pi changes branches.
+ */
+export function projectConversationItems(
+  sessionManager: Pick<SessionManager, "getBranch" | "getEntries">,
+): ConversationHistoryItem[] {
+  const physicalEntries = sessionManager.getEntries();
+  const physicalIndexById = new Map(
+    physicalEntries.map((entry, index) => [entry.id, index]),
+  );
+  const positionedItems: Array<{
+    item: ConversationHistoryItem;
+    physicalIndex: number;
+  }> = projectConversationHistory(sessionManager).map((message) => {
+    const anchorId = message.role === "assistant"
+      ? message.id.slice("assistant:".length)
+      : message.id;
+    return {
+      item: {
+        kind: "message",
+        ...message,
+      },
+      physicalIndex:
+        physicalIndexById.get(anchorId) ?? Number.MAX_SAFE_INTEGER,
+    };
+  });
+  const cardsById = new Map<string, {
+    positionedIndex: number;
+    direction: ConversationMessageCard["direction"];
+  }>();
+
+  for (
+    let physicalIndex = 0;
+    physicalIndex < physicalEntries.length;
+    physicalIndex += 1
+  ) {
+    const reserved = parseReservedConversationEntry(
+      physicalEntries[physicalIndex],
+    );
+    if (reserved === undefined) continue;
+    if (
+      reserved.kind === "conversation_meta"
+      || reserved.kind === "run_settlement"
+      || reserved.kind === "meta_operation"
+    ) {
+      continue;
+    }
+
+    const cardId = reserved.kind === "conversation_card"
+      ? reserved.entry.data.cardId
+      : reserved.entry.details.cardId;
+    const direction = reserved.kind === "conversation_card"
+      ? "outgoing"
+      : "incoming";
+    const existing = cardsById.get(cardId);
+    if (existing !== undefined && existing.direction !== direction) {
+      throw new Error(
+        `Piweb conversation card ${cardId} changes direction`,
+      );
+    }
+
+    if (existing === undefined) {
+      const item = reserved.kind === "conversation_card"
+        ? projectOutgoingCard(
+            reserved.entry.data,
+            reserved.entry.data.updatedAt,
+          )
+        : projectIncomingCard(reserved.entry);
+      cardsById.set(cardId, {
+        positionedIndex: positionedItems.length,
+        direction,
+      });
+      positionedItems.push({ item, physicalIndex });
+      continue;
+    }
+
+    const positioned = positionedItems[existing.positionedIndex]!;
+    positioned.item = reserved.kind === "conversation_card"
+      ? projectOutgoingCard(
+          reserved.entry.data,
+          (positioned.item as ConversationMessageCard).sentAt,
+        )
+      : projectIncomingCard(reserved.entry);
+  }
+
+  return positionedItems
+    .sort((left, right) => left.physicalIndex - right.physicalIndex)
+    .map(({ item }) => item);
+}
+
+function compactConversationItem(
+  item: ConversationHistoryItem,
+): { item: ConversationHistoryItem; truncated: boolean } {
+  if (item.kind === "message") {
+    const { kind: _kind, ...message } = item;
+    const compacted = compactHistoryMessage(message);
+    return {
+      item: {
+        kind: "message",
+        ...compacted.message,
+      },
+      truncated: compacted.truncated,
+    };
+  }
+
+  const body = clipUtf8(item.body, MAX_HISTORY_TEXT_BYTES);
+  const result = item.result === undefined
+    ? undefined
+    : clipUtf8(item.result, MAX_HISTORY_TEXT_BYTES);
+  return {
+    item: {
+      ...item,
+      body: body.value,
+      ...(result === undefined ? {} : { result: result.value }),
+    },
+    truncated: body.truncated || result?.truncated === true,
+  };
+}
+
+function historyMessageFromItem(
+  item: ConversationHistoryItem,
+): ConversationHistoryMessage | undefined {
+  if (item.kind !== "message") return;
+  const { kind: _kind, ...message } = item;
+  return message;
+}
+
+export type AgentConversationPeekItem =
+  | {
+      kind: "message";
+      role: "user" | "assistant";
+      text: string;
+    }
+  | ConversationMessageCard;
+
+function agentPeekItem(
+  item: ConversationHistoryItem,
+): AgentConversationPeekItem {
+  if (item.kind === "message") {
+    return {
+      kind: "message",
+      role: item.role,
+      text: item.text,
+    };
+  }
+  return { ...item };
+}
+
+/**
+ * Produces the bounded, user-visible tail exposed to peer Agents. It deliberately
+ * omits thinking, tool/auth payloads, usage, and host-only reserved records.
+ */
+export function projectAgentConversationPeek(
+  sessionManager: Pick<SessionManager, "getBranch" | "getEntries">,
+  requestedLimit = MAX_AGENT_PEEK_ITEMS,
+): {
+  items: AgentConversationPeekItem[];
+  truncated: boolean;
+} {
+  const finiteLimit = Number.isFinite(requestedLimit)
+    ? Math.floor(requestedLimit)
+    : MAX_AGENT_PEEK_ITEMS;
+  const limit = Math.max(
+    0,
+    Math.min(finiteLimit, MAX_AGENT_PEEK_ITEMS),
+  );
+  const projected = projectConversationItems(sessionManager)
+    .map(compactConversationItem)
+    .map(({ item, truncated }) => ({
+      item: agentPeekItem(item),
+      truncated,
+    }));
+  const candidates = limit === 0 ? [] : projected.slice(-limit);
+  const selected: AgentConversationPeekItem[] = [];
+  let compacted = false;
+
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    const candidate = candidates[index]!;
+    const nextItems = [candidate.item, ...selected];
+    const nextSnapshot = {
+      items: nextItems,
+      // "false" is one serialized byte longer than "true", so it is the
+      // conservative bound regardless of the final truncation state.
+      truncated: false,
+    };
+    if (
+      Buffer.byteLength(JSON.stringify(nextSnapshot), "utf8")
+      > MAX_AGENT_PEEK_BYTES
+    ) {
+      compacted = true;
+      break;
+    }
+    selected.unshift(candidate.item);
+    compacted ||= candidate.truncated;
+  }
+
+  const truncated =
+    compacted
+    || selected.length !== projected.length;
+  return { items: selected, truncated };
+}
+
+/**
+ * Produces a bounded mixed-item snapshot while retaining the legacy messages
+ * projection for callers that have not adopted cards yet.
+ */
+export function projectConversationItemsSnapshot(
+  sessionManager: Pick<SessionManager, "getBranch" | "getEntries">,
+): {
+  messages: ConversationHistoryMessage[];
+  items: ConversationHistoryItem[];
+  truncated: boolean;
+} {
+  const projected = projectConversationItems(sessionManager)
+    .map(compactConversationItem);
+  const turns: Array<typeof projected> = [];
+  for (const item of projected) {
+    if (
+      (
+        item.item.kind === "message"
+        && item.item.role === "user"
+      )
+      || turns.length === 0
+    ) {
+      turns.push([item]);
+    } else {
+      turns.at(-1)!.push(item);
+    }
+  }
+
+  const selectedTurns: ConversationHistoryItem[][] = [];
+  let bytes = 2;
+  let truncated = projected.some((item) => item.truncated);
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index]!.map(({ item }) => item);
+    const turnBytes = turn.reduce(
+      (total, item, itemIndex) => (
+        total
+        + Buffer.byteLength(JSON.stringify(item), "utf8")
+        + (itemIndex > 0 ? 1 : 0)
+      ),
+      0,
+    );
+    const nextBytes =
+      bytes + turnBytes + (selectedTurns.length > 0 ? 1 : 0);
+    if (nextBytes > MAX_HISTORY_SNAPSHOT_BYTES) {
+      truncated = true;
+      break;
+    }
+    selectedTurns.push(turn);
+    bytes = nextBytes;
+  }
+
+  const items = selectedTurns.reverse().flat();
+  if (items.length !== projected.length) truncated = true;
+  return {
+    messages: items
+      .map(historyMessageFromItem)
+      .filter(
+        (message): message is ConversationHistoryMessage =>
+          message !== undefined,
+      ),
+    items,
+    truncated,
+  };
 }
 
 /**

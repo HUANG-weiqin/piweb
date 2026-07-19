@@ -10,19 +10,28 @@
 - 复用 `~/.pi/agent/auth.json` 中的 API Key 和订阅登录
 - 支持 Pi 公开的全部 API Key 提供商及 OAuth 订阅提供商
 - 使用 Pi 默认编码工具：`read`、`grep`、`find`、`ls`、`bash`、`edit`、`write`
-- 模型和思考级别写入 Pi 原生 `settings.json`
+- 用户可定义 Agent 角色：名称、简介、专属提示词和已配置提供商的固定模型
+- 永久保留可编辑、不可删除的 default 角色；新会话仍必须显式选角色，不会自动套用 default
+- 角色和模型在会话创建时固化，模板后续编辑不会追溯，也不能在会话中途切换
+- 思考级别仍写入 Pi 原生 `settings.json`
 - 工作目录可在启动页用工作台内置的只读文件夹浏览器选择，也保留绝对路径手输
-- 每个项目在 `.piweb/` 中持久保存项目清单和 Pi JSONL 对话
-- 支持恢复最近对话、新建、切换、重命名和永久删除非当前对话；项目移动后历史仍可打开
-- 断线重连会有界等待旧连接释放对话；损坏、crash 截断或结构上不是 Pi entry tree 的 JSONL 在索引与打开前 fail closed，不会静默换会话、恢复成空历史或继续粘连写入
+- 每个项目在 `.piweb/` 中持久保存项目清单、Pi JSONL 对话和跨会话 inbox
+- 可收缩的扁平左侧会话栏是唯一会话控制面，展示角色、稳定句柄、最后活跃时间、运行 spinner、等待沙漏、attention、未读和临时标记
+- 支持恢复最近对话、新建、切换观察、重命名和永久删除 idle 对话；切换焦点或断线不会中止后台 Agent
+- 损坏、crash 截断或结构上不是 Pi entry tree 的 JSONL，以及畸形 inbox/角色元数据，在索引与打开前 fail closed
+- Agent 拥有 9 个项目内 meta 工具，可列出角色/会话、查看自身与近期消息、创建 peer、互发消息、精确等待/中止 run 和删除 idle peer
+- Agent 创建会话默认不挂起调用者；它可以继续并行、显式等待，或让另一会话稍后主动回信
+- 临时会话成功后先持久回传精确初始 run 结果再自动删除；失败、中止或无回复会回传失败并保留目标
+- 跨会话消息是目标 Agent 的一等输入，并在双方 transcript 中显示可打开相关会话的独立消息卡片；busy 目标不会被打断
 - 进程级共享 Pi 认证与模型目录，多浏览器连接不会各自持有陈旧缓存
 - 项目存在受保护的 `.pi` / `.agents` 资源时，会在加载前询问信任；长期决定写入用户级 Pi trust store，项目不能自证可信
 - 项目扩展会绑定 `session_start` / `session_shutdown`，扩展错误会进入工作台错误与 run 终态
 - 项目扩展可通过 Web UI 使用 `select / confirm / input / editor / notify`；等待回答、停止、切目录和断线都有明确结算
 - 每个 session 使用隔离的模型目录，项目扩展注册的静态模型或代理不会污染其他工作区
+- 空项目会先加载一个不创建隐藏 AgentSession 的项目模型目录，因此项目扩展模型可用于管理角色、保存 Key 和创建第一条会话
 - 使用版本化、运行时校验的工作台协议，不向浏览器透传 Pi SDK 原生事件
 - 使用不可复用的 sessionId / runId 隔离切目录、关闭、重连和迟到命令
-- run 显式区分 queued / running / cancelling；停止可以取消尚未执行的 prompt
+- run 显式区分 queued / running / waiting / cancelling；停止可以取消尚未执行的 prompt
 - 消息只有在服务端明确接收后才进入对话并清空输入框；确认前断线会保留草稿、恢复历史后提示核对，不会自动重复执行
 - 流式输出只在用户位于底部时自动跟随；向上阅读时可一键回到最新消息，输入框会随内容有界增长
 - 工具权限只保留“全部授权”和“只读”两个项目级模式
@@ -38,21 +47,23 @@
 ```text
 浏览器命令
 → WebSocket 协议校验
-→ ProjectStore 按 canonical cwd 打开项目和持久对话
-→ PiConnection 按 sessionId/runId 控制临时连接 epoch、run ticket 与工具策略
+→ PiConnection 建立项目观察 session 与 conversation focus
+→ ProjectSessionCoordinator 按 canonical cwd 管理项目 actor/inbox
+→ ConversationActor 按 conversationId 独占 Pi SessionManager 与 activeRun
 → Pi SDK Agent 循环（扩展 hook → 工作台策略 → 工具执行）
-→ 服务端投影低频项目索引、历史快照和高频运行事件
-→ 浏览器按 sessionId/runId/authFlowId 过滤
-→ reducer 按 runId 生成对话视图
+→ 服务端持久 settlement/card 并投影项目索引、focused history 和 live event
+→ 浏览器按 sessionId/projectId 与 conversationId/focusId/runId 过滤
+→ reducer 按 runId/cardId 生成当前 transcript
 ```
 
-共享认证、模型状态和用户级项目信任由进程级 `PiRuntime` 持有；项目身份、权限模式和对话文件由 `ProjectStore` 持有；每个浏览器连接只拥有当前 `AgentSession` 的临时运行 bundle。`abort`、认证回调、扩展 UI 回答和生命周期失效走独立控制通道；资源清理仍回到 actor 队列，因此既能及时取消，也不会与普通操作并发销毁。
+共享认证、模型状态和用户级项目信任由进程级 `PiRuntime` 持有；用户角色由 `RoleCatalog` 持有；项目身份、权限模式、对话文件和 inbox 由项目存储持有。`ProjectSessionCoordinator` 让每个持久 conversation 对应唯一 `ConversationActor`，不依附浏览器连接；PiConnection 只观察项目并把当前 focus 的扩展 UI 路由到浏览器。`abort`、认证回调、扩展 UI 回答和生命周期失效走独立控制通道，资源清理仍回到 actor/coordinator 串行边界。
 
 持久身份与传输身份刻意分开：
 
 - `projectId`：随 `.piweb/project.json` 移动的项目身份。
 - `conversationId`：Pi JSONL 对话身份。
-- `sessionId`：一次浏览器连接 bundle 的不可复用 epoch。
+- `sessionId`：一次浏览器项目观察的不可复用 epoch。
+- `focusId`：一次 conversation attach 的不可复用身份；用于阻断快速切换产生的 ABA。
 - `runId`：一次 prompt 执行身份。
 
 项目布局：
@@ -62,9 +73,11 @@
   project.json
   sessions/
     *.jsonl
+  inbox/
+    *.json
 ```
 
-`.piweb` 不保存 API Key；认证仍使用 Pi 的全局目录。只读模式下 Agent 不能写入它，但工作台宿主仍会保存清单和对话；全部授权模式不会额外保护 `.piweb`。
+角色目录位于 `<Pi agent dir>/piweb/roles.json`，不随项目复制。`.piweb` 不保存 API Key；认证仍使用 Pi 的全局目录。只读模式下 Agent 不能写入它，但工作台宿主仍会保存清单、对话和 inbox；全部授权模式不会额外保护 `.piweb`。
 
 ## 要求
 
@@ -96,12 +109,12 @@ npm start
 
 1. 点击“选择文件夹”选取 Agent 工作目录，或手动输入绝对路径，然后进入项目。
 2. 若目录含项目级 Pi 资源，先决定是否信任；拒绝后仍可聊天，但项目设置、skills 和 extensions 会被跳过。
-3. 如果还没有可用模型，页面会自动打开“工作台设置”。
-4. 先选择提供商，再使用 API Key 或订阅登录；Key 通过 Pi 的 `AuthStorage` 保存，网页不会回显或在浏览器中保存。
-5. 保存 Key 和切换模型会等待该次命令的明确结果；断线或失败不会伪装成成功。订阅账户按 Pi 返回的原生授权步骤操作。
-6. 在“工具权限”中选择“全部授权”或“只读”。
-7. 可在“项目对话”中新建、切换、命名或永久删除对话；当前对话需先新建或切换，避免删除仍在写入的 JSONL。
-8. 选择模型后即可聊天。若消息发送确认前断线，先查看恢复后的对话是否已有该消息，再手动决定是否重试。
+3. 如果还没有可用模型，先在“连接与权限”中选择提供商并用 API Key 或订阅登录；Key 通过 Pi 的 `AuthStorage` 保存，网页不会回显或写入浏览器存储。
+4. 打开“管理角色”，为 default 或新角色填写简介、专属提示词和模型。角色保存只在该命令收到明确回执后完成。
+5. 在角色选择页显式点选一个可用角色，再创建会话；选择前没有 composer，创建后角色和模型不可更换。
+6. 在“工具权限”中选择“全部授权”或“只读”。Agent 的多会话 meta 工具只在全部授权下可用。
+7. 用左侧会话栏查看、新建和切换平级会话；后台会话继续运行，不会抢走当前焦点。
+8. 若消息发送确认前断线，先查看恢复后的对话是否已有该消息，再手动决定是否重试。
 
 ## 配置复用
 
@@ -113,16 +126,17 @@ npm start
 - `~/.pi/agent/trust.json`
 - 当前工作目录中的 Pi 资源、skills 和 extensions（仅在项目受信任后）；普通上下文文件仍按 Pi 规则加载
 
-浏览器只在 `localStorage` 中保存最后一次工作目录和工具模式偏好，键名分别为 `piweb.lastCwd` 与 `piweb.toolMode`。消息、会话索引和 Key 均不会写入浏览器存储；消息真相位于项目 `.piweb/sessions`。
+浏览器只在 `localStorage` 中保存最后一次工作目录和工具模式偏好，键名分别为 `piweb.lastCwd` 与 `piweb.toolMode`。角色、消息、会话索引、inbox 和 Key 均不会写入浏览器存储；角色真相在用户级目录，消息真相在项目 `.piweb/`。
 
 Pi 会话格式与 SDK 用法可参考官方 [SDK 文档](https://pi.dev/docs/latest/sdk) 和 [Session format](https://pi.dev/docs/latest/session-format)。本项目运行时行为以 `package.json` 锁定版本的实际类型与源码为准。
 
 ## 当前边界
 
-- 刷新、断线或服务重启后会恢复当前项目最近一次对话；断线仍会停止正在运行的 prompt。
-- 第一版支持新建、最近恢复、切换、重命名和单条永久删除；尚无分页、归档、批量删除、分支、导入、附件或多设备同步。
-- 活动对话不会直接删除；先新建或切换后，列表会提供带二次确认的删除入口。
-- 浏览器首版最多投影最近 200 个对话索引，并限制单次历史快照大小；完整 JSONL 不会因 UI 截断而删除。
+- 刷新或断线后会用新观察/focus 身份恢复当前项目；coordinator-owned 后台 run 不因浏览器离开而停止。服务进程重启会中止内存中的运行，但从 durable settlement/inbox 恢复明确状态。
+- 所有会话永远扁平；第一版没有父子树、固定 orchestrator 或持久 subagent 层级。
+- 第一版支持新建、最近恢复、切换、重命名和单条永久删除；尚无 archive、批量删除、分支、导入、附件或多设备同步。
+- busy 对话不能删除；Agent 还不能删除自身。用户界面会要求先切换/确认，Agent 必须先精确 abort、等待结算再 delete。
+- 浏览器限制单次历史和卡片投影大小；完整 JSONL 不会因 UI 截断而删除。Agent 的 list/peek 同样有独立上限。
 - 项目索引当前会完整验证全部 JSONL，并与 Pi 的索引结果一一核对；超长生命周期项目的增量 catalog 与分页留到下一阶段一起设计。
 - 同一服务进程内会独占一个 conversation writer；尚无跨进程文件锁，不要让两个 Pi Web 服务同时写同一个对话。
 - Pi JSONL 使用同步 append 但不执行 `fsync`；它保证正常进程生命周期内可恢复，不承诺断电级 durability。
@@ -132,6 +146,7 @@ Pi 会话格式与 SDK 用法可参考官方 [SDK 文档](https://pi.dev/docs/la
 - 为避免 parallel preflight 在取消或模式收紧后启动已积累的工具，启用工作台 gate 的 session 第一版固定为顺序工具执行。
 - 项目扩展的自定义 `streamSimple` 和 OAuth provider 暂不启用；Pi SDK 将它们注册到进程全局，需等 worker/进程隔离后再安全开放。
 - 扩展 UI 首版只桥接可移植的对话原语；terminal input、widget、theme、header/footer 和 custom TUI 组件保持不可用。
+- 扩展 UI 只在线路上路由到当前浏览器 focus；后台 conversation 的交互请求保持 pending 并标记 attention，用户聚焦后再弹出回答，不会自动抢焦点。
 - 扩展 slash command 暂时显式拒绝：其 handler 可脱离当前 prompt 启动新 Agent turn，在有专门的 run ownership 方案前不能伪装成安全支持。prompt template 与 skill expansion 不受此限制。
 - 项目扩展仍在服务进程内执行；第一版只适合可信扩展，阻塞式扩展 hook 也会阻塞对应 session。完整故障隔离需要后续 worker/子进程 runtime。
 - 项目信任只阻止目录在批准前加载可执行资源，不是 sandbox；仓库文本仍可能包含 prompt injection。
@@ -142,7 +157,7 @@ Pi 会话格式与 SDK 用法可参考官方 [SDK 文档](https://pi.dev/docs/la
 
 ## 项目导航
 
-未来修改先读 [AGENTS.md](AGENTS.md) 和 [`.knowledge/INDEX.md`](.knowledge/INDEX.md)。核心知识页分别描述线协议、服务端运行时与客户端状态投影。
+未来修改先读 [AGENTS.md](AGENTS.md) 和 [`.knowledge/INDEX.md`](.knowledge/INDEX.md)。多 Agent 的角色、actor、inbox、临时会话和 9 个工具集中记录在 [Agent 协作知识页](.knowledge/kb-agent-collaboration.md)。
 
 ## 验证
 

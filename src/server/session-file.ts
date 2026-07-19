@@ -3,6 +3,13 @@ import {
   migrateSessionEntries,
   type FileEntry,
 } from "@earendil-works/pi-coding-agent";
+import {
+  aggregateReservedConversationEntries,
+  type ConversationCard,
+  type ConversationMeta,
+  type MetaOperation,
+  type RunSettlement,
+} from "./conversation-meta.js";
 
 const SESSION_ID_PATTERN =
   /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
@@ -28,6 +35,16 @@ const USER_CONTENT_TYPES = new Set(["text", "image"]);
 const ASSISTANT_CONTENT_TYPES = new Set(["text", "thinking", "toolCall"]);
 
 type UnknownRecord = Record<string, unknown>;
+
+export interface PiSessionFileInspection {
+  conversationId: string;
+  conversationMeta?: ConversationMeta;
+  cards: ConversationCard[];
+  deliveredMessageIds: string[];
+  runSettlements: RunSettlement[];
+  metaOperations: MetaOperation[];
+  lastActivityAt: string;
+}
 
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -335,11 +352,11 @@ function assertFiniteJsonNumbers(
   }
 }
 
-export function validatePiSessionFile(
+export function inspectPiSessionFile(
   raw: string,
   sessionPath: string,
   expectedConversationId?: string,
-): string {
+): PiSessionFileInspection {
   if (raw.trim().length === 0) {
     throw new Error(`Session file is empty: ${sessionPath}`);
   }
@@ -444,5 +461,42 @@ export function validatePiSessionFile(
       );
     }
   }
-  return header.id;
+
+  let reserved;
+  try {
+    reserved = aggregateReservedConversationEntries(values.slice(1));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Session file has an invalid piweb reserved entry: ${detail}: ${sessionPath}`,
+      { cause: error },
+    );
+  }
+
+  let lastActivityAt = header.timestamp;
+  for (let index = 1; index < values.length; index += 1) {
+    const entry = values[index] as UnknownRecord;
+    const entryTimestamp = entry.timestamp as string;
+    if (Date.parse(entryTimestamp) > Date.parse(lastActivityAt)) {
+      lastActivityAt = entryTimestamp;
+    }
+  }
+
+  return {
+    conversationId: header.id,
+    ...reserved,
+    lastActivityAt,
+  };
+}
+
+export function validatePiSessionFile(
+  raw: string,
+  sessionPath: string,
+  expectedConversationId?: string,
+): string {
+  return inspectPiSessionFile(
+    raw,
+    sessionPath,
+    expectedConversationId,
+  ).conversationId;
 }

@@ -17,6 +17,10 @@ import {
   type SessionInfo,
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  CONVERSATION_META_CUSTOM_TYPE,
+  type ConversationMeta,
+} from "./conversation-meta.js";
 import { ProjectStore, ProjectStoreRegistry } from "./project-store.js";
 
 const temporaryDirectories: string[] = [];
@@ -224,6 +228,70 @@ describe("ProjectStore", () => {
     const reopened = await store.openConversation(conversation.getSessionId());
     expect(reopened.getEntries()).toEqual([]);
     expect(reopened.getCwd()).toBe(store.cwd);
+  });
+
+  it("creates the header and immutable role metadata in one initial file", async () => {
+    const cwd = await createTemporaryDirectory("piweb-meta-conversation-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversationId = randomUUID();
+    const meta: ConversationMeta = {
+      role: {
+        id: "971080c4-e889-4860-a10f-26fdaffaee32",
+        revision: 3,
+        name: "Reviewer",
+        description: "Reviews lifecycle code",
+        systemPrompt: "Review carefully.",
+        model: { provider: "provider", id: "model" },
+      },
+      lifecycle: { kind: "normal" },
+      createdBy: { kind: "user" },
+    };
+
+    const conversation = await store.createConversation(
+      conversationId,
+      meta,
+    );
+    const sessionFile = conversation.getSessionFile();
+    if (!sessionFile) throw new Error("conversation did not expose its session file");
+    const persisted = (await readFile(sessionFile, "utf8"))
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+
+    expect(persisted).toHaveLength(2);
+    expect(persisted[0]).toEqual(conversation.getHeader());
+    expect(persisted[1]).toMatchObject({
+      type: "custom",
+      parentId: null,
+      customType: CONVERSATION_META_CUSTOM_TYPE,
+      data: meta,
+    });
+    expect(conversation.getEntries()).toHaveLength(1);
+  });
+
+  it("can create a background conversation without changing durable recent", async () => {
+    const cwd = await createTemporaryDirectory(
+      "piweb-background-conversation-",
+    );
+    const store = await ProjectStore.open(cwd, "full_access");
+    const foreground = await store.createConversation();
+    const background = await store.createConversation(
+      randomUUID(),
+      undefined,
+      { updateRecent: false },
+    );
+
+    expect(background.getSessionId()).not.toBe(foreground.getSessionId());
+    expect(store.lastConversationId).toBe(foreground.getSessionId());
+    await expect(ProjectStore.open(cwd, "read_only")).resolves.toMatchObject({
+      lastConversationId: foreground.getSessionId(),
+    });
+    expect(store.listConversations().map(({ id }) => id)).toEqual(
+      expect.arrayContaining([
+        foreground.getSessionId(),
+        background.getSessionId(),
+      ]),
+    );
   });
 
   it("deletes exactly one persisted conversation and clears a stale recent pointer", async () => {
@@ -712,6 +780,34 @@ describe("ProjectStoreRegistry", () => {
     const second = await secondWaiting;
     expect(order).toEqual(["first", "second"]);
     second.release();
+  });
+
+  it("atomically upgrades a writer lease for deletion without waking openers", async () => {
+    const cwd = await createTemporaryDirectory("piweb-conversation-delete-");
+    const registry = new ProjectStoreRegistry();
+    const conversationId = randomUUID();
+    const writer = registry.acquireConversation(cwd, conversationId);
+    let openerResolved = false;
+    const opener = registry
+      .acquireConversationWhenAvailable(cwd, conversationId)
+      .then((lease) => {
+        openerResolved = true;
+        return lease;
+      });
+
+    const deletion = writer.upgradeToDeletion();
+    writer.release();
+    await Promise.resolve();
+
+    expect(openerResolved).toBe(false);
+    expect(() =>
+      registry.acquireConversation(cwd, conversationId),
+    ).toThrow("already leased");
+
+    deletion.release();
+    const nextWriter = await opener;
+    expect(openerResolved).toBe(true);
+    nextWriter.release();
   });
 
   it("removes cancelled waiters without allowing later callers to jump the queue", async () => {

@@ -15,6 +15,7 @@ import {
   type ExtensionCommandContextActions,
   type ExtensionError,
   type ExtensionUIContext,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { PortableExtensionUI } from "./extension-ui.js";
 import { SerialTaskQueue } from "./serial-task-queue.js";
@@ -38,6 +39,12 @@ export interface CreatePiSessionOptions {
   sessionManager?: SessionManager;
   extensionUI?: PortableExtensionUI;
   extensionAbort?: () => void;
+  model?: {
+    provider: string;
+    id: string;
+  };
+  roleSystemPrompt?: string;
+  workbenchCustomTools?: ToolDefinition[];
 }
 
 export interface CreatedPiSession {
@@ -50,10 +57,24 @@ export interface CreatedPiSession {
   dispose(): Promise<void>;
 }
 
+export interface CreateProjectModelCatalogOptions {
+  extensionUI?: PortableExtensionUI;
+}
+
+export interface CreatedProjectModelCatalog {
+  modelRegistry: ModelRegistry;
+  dynamicProviderNames(): ReadonlySet<string>;
+  dispose(): Promise<void>;
+}
+
 export interface PiRuntimeLike {
   readonly authStorage: AuthStorage;
   readonly modelRegistry: ModelRegistry;
   createSession(cwd: string, options?: CreatePiSessionOptions): Promise<CreatedPiSession>;
+  createProjectModelCatalog(
+    cwd: string,
+    options?: CreateProjectModelCatalogOptions,
+  ): Promise<CreatedProjectModelCatalog>;
   updateConfiguration<T>(change: () => Promise<T> | T): Promise<T>;
   refreshConfiguration(): Promise<void>;
   subscribe(listener: () => void): () => void;
@@ -157,6 +178,7 @@ class SessionModelRegistry {
   constructor(
     authStorage: AuthStorage,
     createRegistry: (authStorage: AuthStorage) => ModelRegistry,
+    private readonly fixedModel?: Readonly<{ provider: string; id: string }>,
   ) {
     this.registry = createRegistry(authStorage);
     this.nativeRegister = this.registry.registerProvider.bind(this.registry);
@@ -220,6 +242,22 @@ class SessionModelRegistry {
     const session = this.session;
     const current = session?.model;
     if (!current) return;
+    if (this.fixedModel) {
+      if (
+        current.provider !== this.fixedModel.provider
+        || current.id !== this.fixedModel.id
+      ) {
+        return;
+      }
+      const replacement = this.registry.find(
+        this.fixedModel.provider,
+        this.fixedModel.id,
+      );
+      if (replacement && replacement !== current) {
+        session.agent.state.model = replacement;
+      }
+      return;
+    }
     const replacement = this.registry.find(current.provider, current.id)
       ?? this.registry.getAvailable()[0]
       ?? this.registry.getAll()[0];
@@ -260,10 +298,68 @@ export class PiRuntime implements PiRuntimeLike {
     this.projectTrustStore = options.projectTrustStore ?? new ProjectTrustStore(getAgentDir());
   }
 
-  async createSession(cwd: string, options: CreatePiSessionOptions = {}): Promise<CreatedPiSession> {
+  async createProjectModelCatalog(
+    cwd: string,
+    options: CreateProjectModelCatalogOptions = {},
+  ): Promise<CreatedProjectModelCatalog> {
     const owner = new SessionModelRegistry(
       this.authStorage,
       this.createModelRegistry,
+    );
+    this.sessionRegistries.add(owner);
+    try {
+      const settings = this.createSettings(cwd);
+      await this.servicesFactory({
+        cwd,
+        agentDir: getAgentDir(),
+        authStorage: this.authStorage,
+        modelRegistry: owner.registry,
+        settingsManager: settings,
+        resourceLoaderReloadOptions: {
+          resolveProjectTrust: () => this.resolveProjectTrust(
+            cwd,
+            settings,
+            options.extensionUI,
+          ),
+        },
+      });
+      const startupProviderErrors = owner.takeStartupProviderErrors();
+      if (startupProviderErrors.length > 0) {
+        throw new AggregateError(
+          startupProviderErrors,
+          `Extension provider registration failed: ${startupProviderErrors
+            .map((error) => error.message)
+            .join("; ")}`,
+        );
+      }
+    } catch (error) {
+      this.sessionRegistries.delete(owner);
+      throw error;
+    }
+
+    let disposePromise: Promise<void> | undefined;
+    return {
+      modelRegistry: owner.registry,
+      dynamicProviderNames: () => owner.names(),
+      dispose: () => {
+        disposePromise ??= Promise.resolve().then(() => {
+          this.sessionRegistries.delete(owner);
+        });
+        return disposePromise;
+      },
+    };
+  }
+
+  async createSession(cwd: string, options: CreatePiSessionOptions = {}): Promise<CreatedPiSession> {
+    const fixedModelReference = options.model
+      ? { provider: options.model.provider, id: options.model.id }
+      : undefined;
+    const roleSystemPrompt = options.roleSystemPrompt;
+    const workbenchCustomTools = options.workbenchCustomTools;
+    const owner = new SessionModelRegistry(
+      this.authStorage,
+      this.createModelRegistry,
+      fixedModelReference,
     );
     this.sessionRegistries.add(owner);
     let settings: SettingsManager;
@@ -274,12 +370,17 @@ export class PiRuntime implements PiRuntimeLike {
       settings = this.createSettings(cwd);
       const sessionManager = options.sessionManager ?? SessionManager.inMemory(cwd);
       if (this.sessionFactory) {
+        const fixedModel = fixedModelReference
+          ? this.resolveFixedModel(owner.registry, fixedModelReference)
+          : undefined;
         created = await this.sessionFactory({
           cwd,
           authStorage: this.authStorage,
           modelRegistry: owner.registry,
           settingsManager: settings,
           sessionManager,
+          model: fixedModel,
+          customTools: workbenchCustomTools,
         });
       } else {
         const services = await this.servicesFactory({
@@ -288,6 +389,14 @@ export class PiRuntime implements PiRuntimeLike {
           authStorage: this.authStorage,
           modelRegistry: owner.registry,
           settingsManager: settings,
+          resourceLoaderOptions: roleSystemPrompt
+            ? {
+                appendSystemPromptOverride: (base) => [
+                  ...base,
+                  roleSystemPrompt,
+                ],
+              }
+            : undefined,
           resourceLoaderReloadOptions: {
             resolveProjectTrust: () => this.resolveProjectTrust(
               cwd,
@@ -297,9 +406,14 @@ export class PiRuntime implements PiRuntimeLike {
           },
         });
         settings = services.settingsManager;
+        const fixedModel = fixedModelReference
+          ? this.resolveFixedModel(services.modelRegistry, fixedModelReference)
+          : undefined;
         created = await this.sessionFromServicesFactory({
           services,
           sessionManager,
+          model: fixedModel,
+          customTools: workbenchCustomTools,
         });
       }
       createdSession = created.session;
@@ -309,9 +423,30 @@ export class PiRuntime implements PiRuntimeLike {
           "grep",
           "find",
           "ls",
+          ...(workbenchCustomTools?.map((tool) => tool.name) ?? []),
         ]),
       ]);
       owner.bindSession(createdSession);
+      if (
+        fixedModelReference
+        && (
+          createdSession.model?.provider !== fixedModelReference.provider
+          || createdSession.model.id !== fixedModelReference.id
+        )
+      ) {
+        throw new Error(
+          `Pi session did not retain its fixed model ${fixedModelReference.provider}/${fixedModelReference.id}`,
+        );
+      }
+      const activeToolNames = new Set(createdSession.getActiveToolNames());
+      const inactiveWorkbenchTool = workbenchCustomTools?.find(
+        (tool) => !activeToolNames.has(tool.name),
+      );
+      if (inactiveWorkbenchTool) {
+        throw new Error(
+          `Pi session did not activate workbench tool "${inactiveWorkbenchTool.name}"`,
+        );
+      }
       if (options.toolCallGate) {
         this.installToolCallGate(createdSession, options.toolCallGate);
       }
@@ -425,6 +560,24 @@ export class PiRuntime implements PiRuntimeLike {
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  private resolveFixedModel(
+    registry: ModelRegistry,
+    reference: Readonly<{ provider: string; id: string }>,
+  ) {
+    const model = registry.find(reference.provider, reference.id);
+    if (!model) {
+      throw new Error(
+        `Fixed model ${reference.provider}/${reference.id} is not available in this session`,
+      );
+    }
+    if (!registry.hasConfiguredAuth(model)) {
+      throw new Error(
+        `Fixed model ${reference.provider}/${reference.id} has no configured authentication`,
+      );
+    }
+    return model;
   }
 
   private notify(): void {
