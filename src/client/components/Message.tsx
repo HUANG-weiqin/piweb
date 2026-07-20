@@ -1,9 +1,6 @@
 import {
   memo,
-  useEffect,
-  useLayoutEffect,
   useMemo,
-  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -15,147 +12,6 @@ import { SessionMessageCard } from "./SessionMessageCard";
 import { ToolCard } from "./ToolCard";
 
 const TOOL_PREVIEW_LIMIT = 4;
-const STREAMING_TEXT_GRAPHEME_INTERVAL_MS = 14;
-const STREAMING_TEXT_MAX_GRAPHEMES_PER_FRAME = 2;
-const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, {
-  granularity: "grapheme",
-});
-
-function advanceGraphemeOffset(
-  text: string,
-  offset: number,
-  count: number,
-): number {
-  let nextOffset = offset;
-  const segments = GRAPHEME_SEGMENTER.segment(text);
-  for (let index = 0; index < count && nextOffset < text.length; index += 1) {
-    const segment = segments.containing(nextOffset);
-    if (!segment) break;
-    nextOffset = segment.index + segment.segment.length;
-  }
-  return nextOffset;
-}
-
-class StreamingTextAnimator {
-  private animationFrame: number | undefined;
-  private lastUpdateTime: number | undefined;
-
-  public targetText: string;
-  public currentText: string;
-
-  constructor(
-    text: string,
-    private readonly setText: (text: string) => void,
-  ) {
-    this.targetText = text;
-    this.currentText = text;
-  }
-
-  start(): void {
-    if (
-      this.animationFrame !== undefined
-      || this.currentText === this.targetText
-    ) return;
-    this.lastUpdateTime = undefined;
-    this.animationFrame = window.requestAnimationFrame(this.animate);
-  }
-
-  stop(): void {
-    if (this.animationFrame === undefined) return;
-    window.cancelAnimationFrame(this.animationFrame);
-    this.animationFrame = undefined;
-  }
-
-  snapTo(text: string): void {
-    this.stop();
-    this.targetText = text;
-    this.currentText = text;
-    this.setText(text);
-  }
-
-  private animate = (currentTime: number) => {
-    this.animationFrame = undefined;
-    if (!this.targetText.startsWith(this.currentText)) {
-      this.snapTo(this.targetText);
-      return;
-    }
-    if (this.currentText.length >= this.targetText.length) return;
-
-    this.lastUpdateTime ??=
-      currentTime - STREAMING_TEXT_GRAPHEME_INTERVAL_MS;
-    const elapsed = Math.max(0, currentTime - this.lastUpdateTime);
-    const graphemesToAdd = Math.min(
-      STREAMING_TEXT_MAX_GRAPHEMES_PER_FRAME,
-      Math.floor(elapsed / STREAMING_TEXT_GRAPHEME_INTERVAL_MS),
-    );
-    if (graphemesToAdd > 0) {
-      const nextOffset = advanceGraphemeOffset(
-        this.targetText,
-        this.currentText.length,
-        graphemesToAdd,
-      );
-      this.currentText = this.targetText.slice(0, nextOffset);
-      this.lastUpdateTime +=
-        graphemesToAdd * STREAMING_TEXT_GRAPHEME_INTERVAL_MS;
-      this.setText(this.currentText);
-    }
-    if (this.currentText !== this.targetText) {
-      this.animationFrame = window.requestAnimationFrame(this.animate);
-    }
-  };
-}
-
-function prefersReducedMotion(): boolean {
-  return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
-    ?? false;
-}
-
-function useSmoothStreamingText(
-  text: string,
-  streaming: boolean,
-  onReveal?: () => void,
-): string {
-  const [displayedText, setDisplayedText] = useState(text);
-  const animatorRef = useRef<StreamingTextAnimator | undefined>(undefined);
-  const smoothingSession = useRef(streaming);
-  const lastReportedText = useRef(text);
-  if (!animatorRef.current) {
-    animatorRef.current = new StreamingTextAnimator(text, setDisplayedText);
-  }
-
-  useLayoutEffect(() => {
-    if (displayedText === lastReportedText.current) return;
-    lastReportedText.current = displayedText;
-    if (smoothingSession.current) onReveal?.();
-  }, [displayedText, onReveal]);
-
-  useLayoutEffect(() => {
-    const animator = animatorRef.current;
-    if (!animator) return;
-    const preservesVisiblePrefix = text.startsWith(animator.currentText);
-    animator.targetText = text;
-
-    const reducedMotion = prefersReducedMotion();
-    if (reducedMotion || !preservesVisiblePrefix) {
-      smoothingSession.current = streaming && !reducedMotion;
-      animator.snapTo(text);
-      return;
-    }
-    if (streaming) smoothingSession.current = true;
-    if (smoothingSession.current) {
-      animator.start();
-    } else {
-      animator.snapTo(text);
-    }
-    if (!streaming && animator.currentText === text) {
-      smoothingSession.current = false;
-    }
-  }, [displayedText, streaming, text]);
-
-  useEffect(() => () => animatorRef.current?.stop(), []);
-
-  return displayedText;
-}
 
 function renderMarkdown(markdown: string): string {
   return DOMPurify.sanitize(marked.parse(markdown, { async: false }) as string);
@@ -188,8 +44,7 @@ interface MessageProps {
   rewindDisabled?: boolean;
   rewinding?: boolean;
   activeThinking?: boolean;
-  smoothStreamingText?: boolean;
-  onStreamingTextReveal?(): void;
+  streamingText?: boolean;
 }
 
 function sameSessionCards(
@@ -209,8 +64,7 @@ function sameMessageProps(previous: MessageProps, next: MessageProps): boolean {
     && previous.rewindDisabled === next.rewindDisabled
     && previous.rewinding === next.rewinding
     && previous.activeThinking === next.activeThinking
-    && previous.smoothStreamingText === next.smoothStreamingText
-    && previous.onStreamingTextReveal === next.onStreamingTextReveal;
+    && previous.streamingText === next.streamingText;
 }
 
 function MessageView({
@@ -221,16 +75,10 @@ function MessageView({
   rewindDisabled = false,
   rewinding = false,
   activeThinking = false,
-  smoothStreamingText = false,
-  onStreamingTextReveal,
+  streamingText = false,
 }: MessageProps) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const [thinkingOpen, setThinkingOpen] = useState(false);
-  const displayedText = useSmoothStreamingText(
-    message.text,
-    smoothStreamingText,
-    onStreamingTextReveal,
-  );
 
   async function copyMessage() {
     try {
@@ -243,14 +91,12 @@ function MessageView({
 
   const isUser = message.role === "user";
   const hasActivity = message.tools.length > 0 || sessionCards.length > 0;
-  const showingStreamingText = message.role === "assistant"
-    && !prefersReducedMotion()
-    && (smoothStreamingText || displayedText !== message.text);
+  const showingStreamingText = message.role === "assistant" && streamingText;
   const html = useMemo(
     () => message.role === "assistant" && !showingStreamingText
-      ? renderMarkdown(displayedText || (hasActivity ? "" : "…"))
+      ? renderMarkdown(message.text || (hasActivity ? "" : "…"))
       : "",
-    [displayedText, hasActivity, message.role, showingStreamingText],
+    [hasActivity, message.role, message.text, showingStreamingText],
   );
   const thinkingHtml = useMemo(
     () => thinkingOpen && message.thinking ? renderMarkdown(message.thinking) : "",
@@ -310,10 +156,10 @@ function MessageView({
     </article>;
   }
   let responseBody: ReactNode = null;
-  if (displayedText || !hasActivity) {
+  if (message.text || !hasActivity) {
     responseBody = showingStreamingText
       ? <div className="markdown streaming-markdown">
-          {displayedText || (hasActivity ? "" : "…")}
+          {message.text || (hasActivity ? "" : "…")}
         </div>
       : <div className="markdown" dangerouslySetInnerHTML={{ __html: html }} />;
   }

@@ -64,20 +64,6 @@ function view(
   />;
 }
 
-function mockAnimationFrames() {
-  vi.stubGlobal(
-    "requestAnimationFrame",
-    (callback: FrameRequestCallback) => window.setTimeout(
-      () => callback(Date.now()),
-      16,
-    ),
-  );
-  vi.stubGlobal(
-    "cancelAnimationFrame",
-    (handle: number) => window.clearTimeout(handle),
-  );
-}
-
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -283,9 +269,8 @@ describe("Chat", () => {
     expect(screen.queryByRole("button", { name: "↓ 回到最新消息" })).not.toBeInTheDocument();
   });
 
-  it("reveals a coalesced text delta across animation frames", () => {
+  it("renders the latest received text after one millisecond", () => {
     vi.useFakeTimers();
-    mockAnimationFrames();
     const firstChat: ChatState = {
       messages: [{
         id: "assistant-1",
@@ -329,37 +314,17 @@ describe("Chat", () => {
     expect(screen.getByText("第一段")).toBeInTheDocument();
     expect(screen.queryByText(completeText)).not.toBeInTheDocument();
 
-    act(() => vi.advanceTimersByTime(32));
+    act(() => vi.advanceTimersByTime(1));
 
-    expect(markdown).toHaveTextContent("第一段");
-    expect(markdown).not.toHaveTextContent(completeText);
-    scrollTo.mockClear();
-
-    act(() => vi.advanceTimersByTime(16));
-
-    expect(markdown.textContent?.startsWith("第一段")).toBe(true);
-    expect(markdown.textContent?.length).toBeGreaterThan("第一段".length);
-    expect(markdown).not.toHaveTextContent(completeText);
+    expect(markdown).toHaveTextContent(completeText);
     expect(scrollTo).toHaveBeenCalledWith({
       behavior: "smooth",
       top: 468,
     });
-
-    rendered.rerender(view({
-      ...firstChat,
-      messages: [{ ...firstChat.messages[0], text: completeText }],
-    }));
-
-    expect(markdown).not.toHaveTextContent(completeText);
-
-    act(() => vi.advanceTimersByTime(360));
-
-    expect(markdown).toHaveTextContent(completeText);
   });
 
-  it("keeps pacing an uncoalesced final burst when the run finishes", () => {
+  it("shows the final received burst immediately when the run finishes", () => {
     vi.useFakeTimers();
-    mockAnimationFrames();
     const firstMessage = {
       id: "assistant-final-burst",
       runId: "run-final-burst",
@@ -383,18 +348,11 @@ describe("Chat", () => {
       messages: [{ ...firstMessage, text: completeText }],
     }));
 
-    expect(screen.queryByText(completeText)).not.toBeInTheDocument();
-    expect(rendered.container.querySelector(".streaming-markdown"))
-      .toHaveTextContent("已经显示");
-
-    act(() => vi.advanceTimersByTime(500));
-
     expect(screen.getByText(completeText)).toBeInTheDocument();
   });
 
-  it("uses a cheap text node while revealing and renders markdown once settled", () => {
+  it("uses a cheap text node while receiving and renders markdown once settled", () => {
     vi.useFakeTimers();
-    mockAnimationFrames();
     const firstMessage = {
       id: "assistant-markdown",
       runId: "run-markdown",
@@ -420,8 +378,7 @@ describe("Chat", () => {
       busy: true,
       activeRun: { id: "run-markdown", phase: "running" },
     }));
-    act(() => vi.advanceTimersByTime(32));
-    act(() => vi.advanceTimersByTime(240));
+    act(() => vi.advanceTimersByTime(1));
 
     const streamingText = rendered.container.querySelector(
       ".message.assistant .streaming-markdown",
@@ -433,87 +390,9 @@ describe("Chat", () => {
       ...firstChat,
       messages: [{ ...firstMessage, text: completeText }],
     }));
-    act(() => vi.advanceTimersByTime(16));
-
     expect(rendered.container.querySelector(".streaming-markdown"))
       .not.toBeInTheDocument();
     expect(screen.getByText("完成")).toHaveProperty("tagName", "STRONG");
-  });
-
-  it("paces a large streamed burst without revealing a block per frame", () => {
-    vi.useFakeTimers();
-    mockAnimationFrames();
-    const firstMessage = {
-      id: "assistant-paced",
-      runId: "run-paced",
-      role: "assistant" as const,
-      text: "起",
-      thinking: "",
-      tools: [],
-    };
-    const firstChat: ChatState = {
-      messages: [firstMessage],
-      sessionTokens: 0,
-    };
-    const rendered = render(view(firstChat, "", undefined, {
-      busy: true,
-      activeRun: { id: "run-paced", phase: "running" },
-    }));
-    const completeText = `起${"流畅".repeat(100)}`;
-
-    rendered.rerender(view({
-      ...firstChat,
-      messages: [{ ...firstMessage, text: completeText }],
-    }, "", undefined, {
-      busy: true,
-      activeRun: { id: "run-paced", phase: "running" },
-    }));
-    act(() => vi.advanceTimersByTime(32));
-    act(() => vi.advanceTimersByTime(16));
-
-    const streamingText = rendered.container.querySelector(
-      ".message.assistant .streaming-markdown",
-    );
-    const visibleGraphemes = Array.from(
-      new Intl.Segmenter(undefined, { granularity: "grapheme" })
-        .segment(streamingText?.textContent ?? ""),
-    ).length;
-    expect(visibleGraphemes).toBeGreaterThan(1);
-    expect(visibleGraphemes).toBeLessThanOrEqual(3);
-  });
-
-  it("never reveals a partial grapheme while streaming", () => {
-    vi.useFakeTimers();
-    mockAnimationFrames();
-    const firstMessage = {
-      id: "assistant-grapheme",
-      runId: "run-grapheme",
-      role: "assistant" as const,
-      text: "起",
-      thinking: "",
-      tools: [],
-    };
-    const firstChat: ChatState = {
-      messages: [firstMessage],
-      sessionTokens: 0,
-    };
-    const rendered = render(view(firstChat, "", undefined, {
-      busy: true,
-      activeRun: { id: "run-grapheme", phase: "running" },
-    }));
-
-    rendered.rerender(view({
-      ...firstChat,
-      messages: [{ ...firstMessage, text: "起👨‍👩‍👧‍👦结束" }],
-    }, "", undefined, {
-      busy: true,
-      activeRun: { id: "run-grapheme", phase: "running" },
-    }));
-    act(() => vi.advanceTimersByTime(32));
-    act(() => vi.advanceTimersByTime(16));
-
-    expect(rendered.container.querySelector(".streaming-markdown"))
-      .toHaveTextContent("起👨‍👩‍👧‍👦");
   });
 
   it("only exposes disabled rewind on user messages while the Agent runs", () => {
@@ -547,9 +426,8 @@ describe("Chat", () => {
     expect(rewindButtons[0]?.closest("article")).toHaveClass("user");
   });
 
-  it("shows an active tool without flushing buffered text", () => {
+  it("shows an active tool together with the latest received text", () => {
     vi.useFakeTimers();
-    mockAnimationFrames();
     const firstMessage = {
       id: "assistant-1",
       runId: "run-1",
@@ -575,9 +453,6 @@ describe("Chat", () => {
       busy: true,
       activeRun: { id: "run-1", phase: "running" },
     }));
-    act(() => vi.advanceTimersByTime(48));
-    expect(screen.queryByText(completeText)).not.toBeInTheDocument();
-
     rendered.rerender(view({
       ...firstChat,
       messages: [{
@@ -593,103 +468,10 @@ describe("Chat", () => {
       busy: true,
       activeRun: { id: "run-1", phase: "running" },
     }));
-    act(() => vi.advanceTimersByTime(32));
+    act(() => vi.advanceTimersByTime(1));
 
     expect(screen.getByText("工具调用（1）")).toBeInTheDocument();
-    expect(screen.queryByText(completeText)).not.toBeInTheDocument();
-
-    act(() => vi.advanceTimersByTime(400));
-
     expect(screen.getByText(completeText)).toBeInTheDocument();
-  });
-
-  it("smoothly adopts a final correction that preserves the visible prefix", () => {
-    vi.useFakeTimers();
-    mockAnimationFrames();
-    const firstMessage = {
-      id: "assistant-corrected",
-      runId: "run-corrected",
-      role: "assistant" as const,
-      text: "起",
-      thinking: "",
-      tools: [],
-    };
-    const firstChat: ChatState = {
-      messages: [firstMessage],
-      sessionTokens: 0,
-    };
-    const rendered = render(view(firstChat, "", undefined, {
-      busy: true,
-      activeRun: { id: "run-corrected", phase: "running" },
-    }));
-    const streamedTarget = `起${"原始流式内容".repeat(12)}`;
-
-    rendered.rerender(view({
-      ...firstChat,
-      messages: [{ ...firstMessage, text: streamedTarget }],
-    }, "", undefined, {
-      busy: true,
-      activeRun: { id: "run-corrected", phase: "running" },
-    }));
-    act(() => vi.advanceTimersByTime(32));
-    act(() => vi.advanceTimersByTime(32));
-
-    const streamingText = rendered.container.querySelector(
-      ".message.assistant .streaming-markdown",
-    );
-    const visiblePrefix = streamingText?.textContent ?? "";
-    expect(visiblePrefix.length).toBeGreaterThan(1);
-    const correctedText = `${visiblePrefix}校准后的尾部会继续平滑显示。`;
-
-    rendered.rerender(view({
-      ...firstChat,
-      messages: [{ ...firstMessage, text: correctedText }],
-    }));
-
-    expect(screen.queryByText(correctedText)).not.toBeInTheDocument();
-
-    act(() => vi.advanceTimersByTime(400));
-
-    expect(screen.getByText(correctedText)).toBeInTheDocument();
-  });
-
-  it("immediately adopts a final correction that replaces visible text", () => {
-    vi.useFakeTimers();
-    mockAnimationFrames();
-    const firstMessage = {
-      id: "assistant-replaced",
-      runId: "run-replaced",
-      role: "assistant" as const,
-      text: "旧",
-      thinking: "",
-      tools: [],
-    };
-    const firstChat: ChatState = {
-      messages: [firstMessage],
-      sessionTokens: 0,
-    };
-    const rendered = render(view(firstChat, "", undefined, {
-      busy: true,
-      activeRun: { id: "run-replaced", phase: "running" },
-    }));
-
-    rendered.rerender(view({
-      ...firstChat,
-      messages: [{ ...firstMessage, text: "旧内容仍在流式输出" }],
-    }, "", undefined, {
-      busy: true,
-      activeRun: { id: "run-replaced", phase: "running" },
-    }));
-    act(() => vi.advanceTimersByTime(32));
-    act(() => vi.advanceTimersByTime(32));
-
-    const correctedText = "完全不同的最终文本";
-    rendered.rerender(view({
-      ...firstChat,
-      messages: [{ ...firstMessage, text: correctedText }],
-    }));
-
-    expect(screen.getByText(correctedText)).toBeInTheDocument();
   });
 
   it("grows the controlled composer with its content", () => {

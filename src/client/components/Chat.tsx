@@ -30,7 +30,7 @@ import { SessionMessageCard } from "./SessionMessageCard";
 
 type QueuedPromptStatus = "queued" | "submitting" | "attention";
 
-const STREAM_RENDER_INTERVAL_MS = 32;
+const STREAM_RENDER_INTERVAL_MS = 1;
 const FOLLOW_COMFORT_LIMIT_PX = 96;
 const FOLLOW_COMFORT_TARGET_PX = 32;
 const FOLLOW_REATTACH_LIMIT_PX = 2;
@@ -345,10 +345,6 @@ export function Chat({
       "smooth",
     );
   }, [scrollTranscript]);
-  const followStreamingTextReveal = useCallback(() => {
-    if (!followOutputRef.current) return;
-    followLatest();
-  }, [followLatest]);
   useLayoutEffect(() => {
     if (followOutputRef.current) {
       followLatest();
@@ -484,8 +480,7 @@ export function Chat({
           }
           rewinding={rewindingMessageId === block.message.id}
           activeThinking={isStreamingMessage && !hasActiveTool}
-          smoothStreamingText={isStreamingMessage && !hasActiveTool}
-          onStreamingTextReveal={followStreamingTextReveal}
+          streamingText={isStreamingMessage}
         />;
       })}
       {compacting && <div
