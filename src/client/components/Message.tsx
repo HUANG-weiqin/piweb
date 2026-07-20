@@ -113,7 +113,6 @@ function prefersReducedMotion(): boolean {
 function useSmoothStreamingText(
   text: string,
   streaming: boolean,
-  flush: boolean,
   onReveal?: () => void,
 ): string {
   const [displayedText, setDisplayedText] = useState(text);
@@ -133,14 +132,12 @@ function useSmoothStreamingText(
   useLayoutEffect(() => {
     const animator = animatorRef.current;
     if (!animator) return;
-    const previousTarget = animator.targetText;
-    const appendOnly = text.startsWith(previousTarget)
-      && text.startsWith(animator.currentText);
+    const preservesVisiblePrefix = text.startsWith(animator.currentText);
     animator.targetText = text;
 
     const reducedMotion = prefersReducedMotion();
-    if (flush || reducedMotion || !appendOnly) {
-      smoothingSession.current = streaming && !flush && !reducedMotion;
+    if (reducedMotion || !preservesVisiblePrefix) {
+      smoothingSession.current = streaming && !reducedMotion;
       animator.snapTo(text);
       return;
     }
@@ -153,7 +150,7 @@ function useSmoothStreamingText(
     if (!streaming && animator.currentText === text) {
       smoothingSession.current = false;
     }
-  }, [displayedText, flush, streaming, text]);
+  }, [displayedText, streaming, text]);
 
   useEffect(() => () => animatorRef.current?.stop(), []);
 
@@ -192,7 +189,6 @@ interface MessageProps {
   rewinding?: boolean;
   activeThinking?: boolean;
   smoothStreamingText?: boolean;
-  flushStreamingText?: boolean;
   onStreamingTextReveal?(): void;
 }
 
@@ -214,7 +210,6 @@ function sameMessageProps(previous: MessageProps, next: MessageProps): boolean {
     && previous.rewinding === next.rewinding
     && previous.activeThinking === next.activeThinking
     && previous.smoothStreamingText === next.smoothStreamingText
-    && previous.flushStreamingText === next.flushStreamingText
     && previous.onStreamingTextReveal === next.onStreamingTextReveal;
 }
 
@@ -227,7 +222,6 @@ function MessageView({
   rewinding = false,
   activeThinking = false,
   smoothStreamingText = false,
-  flushStreamingText = false,
   onStreamingTextReveal,
 }: MessageProps) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
@@ -235,7 +229,6 @@ function MessageView({
   const displayedText = useSmoothStreamingText(
     message.text,
     smoothStreamingText,
-    flushStreamingText,
     onStreamingTextReveal,
   );
 

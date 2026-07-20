@@ -512,7 +512,7 @@ describe("Chat", () => {
     expect(rewindButtons[0]?.closest("article")).toHaveClass("user");
   });
 
-  it("flushes buffered text before an active tool is shown", () => {
+  it("shows an active tool without flushing buffered text", () => {
     vi.useFakeTimers();
     mockAnimationFrames();
     const firstMessage = {
@@ -560,8 +560,101 @@ describe("Chat", () => {
     }));
     act(() => vi.advanceTimersByTime(32));
 
-    expect(screen.getByText(completeText)).toBeInTheDocument();
     expect(screen.getByText("工具调用（1）")).toBeInTheDocument();
+    expect(screen.queryByText(completeText)).not.toBeInTheDocument();
+
+    act(() => vi.advanceTimersByTime(400));
+
+    expect(screen.getByText(completeText)).toBeInTheDocument();
+  });
+
+  it("smoothly adopts a final correction that preserves the visible prefix", () => {
+    vi.useFakeTimers();
+    mockAnimationFrames();
+    const firstMessage = {
+      id: "assistant-corrected",
+      runId: "run-corrected",
+      role: "assistant" as const,
+      text: "起",
+      thinking: "",
+      tools: [],
+    };
+    const firstChat: ChatState = {
+      messages: [firstMessage],
+      sessionTokens: 0,
+    };
+    const rendered = render(view(firstChat, "", undefined, {
+      busy: true,
+      activeRun: { id: "run-corrected", phase: "running" },
+    }));
+    const streamedTarget = `起${"原始流式内容".repeat(12)}`;
+
+    rendered.rerender(view({
+      ...firstChat,
+      messages: [{ ...firstMessage, text: streamedTarget }],
+    }, "", undefined, {
+      busy: true,
+      activeRun: { id: "run-corrected", phase: "running" },
+    }));
+    act(() => vi.advanceTimersByTime(32));
+    act(() => vi.advanceTimersByTime(32));
+
+    const streamingText = rendered.container.querySelector(
+      ".message.assistant .streaming-markdown",
+    );
+    const visiblePrefix = streamingText?.textContent ?? "";
+    expect(visiblePrefix.length).toBeGreaterThan(1);
+    const correctedText = `${visiblePrefix}校准后的尾部会继续平滑显示。`;
+
+    rendered.rerender(view({
+      ...firstChat,
+      messages: [{ ...firstMessage, text: correctedText }],
+    }));
+
+    expect(screen.queryByText(correctedText)).not.toBeInTheDocument();
+
+    act(() => vi.advanceTimersByTime(400));
+
+    expect(screen.getByText(correctedText)).toBeInTheDocument();
+  });
+
+  it("immediately adopts a final correction that replaces visible text", () => {
+    vi.useFakeTimers();
+    mockAnimationFrames();
+    const firstMessage = {
+      id: "assistant-replaced",
+      runId: "run-replaced",
+      role: "assistant" as const,
+      text: "旧",
+      thinking: "",
+      tools: [],
+    };
+    const firstChat: ChatState = {
+      messages: [firstMessage],
+      sessionTokens: 0,
+    };
+    const rendered = render(view(firstChat, "", undefined, {
+      busy: true,
+      activeRun: { id: "run-replaced", phase: "running" },
+    }));
+
+    rendered.rerender(view({
+      ...firstChat,
+      messages: [{ ...firstMessage, text: "旧内容仍在流式输出" }],
+    }, "", undefined, {
+      busy: true,
+      activeRun: { id: "run-replaced", phase: "running" },
+    }));
+    act(() => vi.advanceTimersByTime(32));
+    act(() => vi.advanceTimersByTime(32));
+
+    const correctedText = "完全不同的最终文本";
+    rendered.rerender(view({
+      ...firstChat,
+      messages: [{ ...firstMessage, text: correctedText }],
+    }));
+
+    expect(screen.getByText(correctedText)).toBeInTheDocument();
   });
 
   it("grows the controlled composer with its content", () => {

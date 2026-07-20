@@ -485,7 +485,6 @@ export function Chat({
           rewinding={rewindingMessageId === block.message.id}
           activeThinking={isStreamingMessage && !hasActiveTool}
           smoothStreamingText={isStreamingMessage && !hasActiveTool}
-          flushStreamingText={isActiveMessage && hasActiveTool}
           onStreamingTextReveal={followStreamingTextReveal}
         />;
       })}
