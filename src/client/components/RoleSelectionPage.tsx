@@ -70,13 +70,20 @@ export function RoleSelectionPage({
           <span className="role-card-actions">
             {onManageRole && <button
               type="button"
-              className="role-card-action ghost"
+              className="role-card-action"
               aria-label={`管理角色 ${role.name}`}
               title="管理角色"
               disabled={pending}
               onClick={() => onManageRole(role.id)}
             >
-              <span aria-hidden="true">⚙</span>
+              <svg
+                className="role-card-action-icon"
+                viewBox="0 0 24 24"
+                aria-hidden="true"
+              >
+                <path d="M12 8.25a3.75 3.75 0 1 0 0 7.5 3.75 3.75 0 0 0 0-7.5Z" />
+                <path d="M19.2 13.7a7.6 7.6 0 0 0 .05-1.7 7.6 7.6 0 0 0-.05-1.7l2-1.55-2-3.5-2.45 1a7.8 7.8 0 0 0-2.95-1.7L13.45 2h-4l-.35 2.55a7.8 7.8 0 0 0-2.95 1.7l-2.45-1-2 3.5 2 1.55a7.6 7.6 0 0 0-.05 1.7 7.6 7.6 0 0 0 .05 1.7l-2 1.55 2 3.5 2.45-1a7.8 7.8 0 0 0 2.95 1.7L9.45 22h4l.35-2.55a7.8 7.8 0 0 0 2.95-1.7l2.45 1 2-3.5-2-1.55Z" />
+              </svg>
             </button>}
             <button
               type="button"
@@ -88,7 +95,13 @@ export function RoleSelectionPage({
               disabled={pending || unavailable}
               onClick={() => onStart(role.id)}
             >
-              <span aria-hidden="true">▶</span>
+              <svg
+                className="role-card-action-icon role-card-start-icon"
+                viewBox="0 0 24 24"
+                aria-hidden="true"
+              >
+                <path d="m8 5 11 7-11 7V5Z" />
+              </svg>
             </button>
           </span>
         </article>;

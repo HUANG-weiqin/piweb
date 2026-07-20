@@ -2056,11 +2056,41 @@ pre {
   display: grid;
   place-items: center;
   padding: 0;
-  font-size: 16px;
+  border: 0;
+  border-radius: 999px;
+  color: var(--muted);
+  background: transparent;
+}
+
+.role-card-action:not(:disabled):hover {
+  color: var(--accent);
+  background: var(--soft);
+}
+
+.role-card-action:not(:disabled):active {
+  transform: none;
+}
+
+.role-card-action-icon {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.5;
 }
 
 .role-card-start {
-  padding-left: 2px;
+  color: var(--accent);
+}
+
+.role-card-start-icon {
+  width: 19px;
+  height: 19px;
+  margin-left: 2px;
+  fill: currentColor;
+  stroke: none;
 }
 
 .modal.role-manager-dialog {
