@@ -13,7 +13,7 @@ export const MAX_PROMPT_CHARACTERS = 200_000;
 export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
-export const PROTOCOL_VERSION = 17;
+export const PROTOCOL_VERSION = 18;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
 const conversationIdSchema = z.string().uuid();
@@ -218,6 +218,14 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
     focusId: focusIdSchema,
   }),
   z.object({
+    type: z.literal("switch_conversation_role"),
+    commandId: commandIdSchema,
+    sessionId: sessionIdSchema,
+    conversationId: conversationIdSchema,
+    focusId: focusIdSchema,
+    roleId: roleIdSchema,
+  }),
+  z.object({
     type: z.literal("rename_conversation"),
     sessionId: sessionIdSchema,
     conversationId: conversationIdSchema,
@@ -303,6 +311,7 @@ export type AcknowledgedCommandOperation =
   | "steer"
   | "set_compaction_threshold"
   | "compact_context"
+  | "switch_conversation_role"
   | "delete_conversation"
   | "truncate_conversation"
   | "create_role"
@@ -778,6 +787,7 @@ const commandTypeSchema = z.enum([
   "set_thinking",
   "set_compaction_threshold",
   "compact_context",
+  "switch_conversation_role",
   "rename_conversation",
   "delete_conversation",
   "truncate_conversation",

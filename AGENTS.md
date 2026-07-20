@@ -37,7 +37,7 @@ Pi Web 是本机优先的极简 Agent 工作台。当前目标不是复制 Pi �
 - 已有对话重连可有界等待旧 lease；等待必须 FIFO、可取消，不能通过第二个 writer 解决。
 - 删除只接受 conversationId：active conversation 必须拒绝，非当前目标必须 fail-fast 取得独占 writer lease，并在完整路径/identity 校验后精确 unlink 单个 JSONL；删除与索引刷新共用串行边界。
 - Pi `SessionManager.listAll()` 不是完整性证明：宿主必须验证受控目录内全部常规 JSONL 的尾换行、有限 JSON 数值、header、经迁移后的 entry payload/tree，并要求磁盘全集与 SDK 索引按规范路径和 conversationId 一一对应；任何遗漏、损坏、重复或扫描期变化都 fail closed。
-- 工具权限属于用户级角色模板，并在新 conversation 创建时冻结到角色快照；新角色和旧角色迁移默认 `read_only`，模板后续编辑不得改变已有会话。
+- 工具权限属于用户级角色模板，并进入 conversation 当前角色快照；新角色和旧角色迁移默认 `read_only`，模板后续编辑不得自动改变已有会话。用户只可在会话空闲时显式应用一个当前可用角色，宿主必须追加角色变更记录并用同一 SessionManager 重建运行时；失败要恢复上一角色或将 actor 置为 fatal。
 - 浏览器不是 transcript owner；恢复必须从服务端 `conversation_snapshot` hydrate，localStorage 只保存目录和安全偏好。
 - 客户端收到匹配的 history snapshot 前不得发送 prompt；state 提交和历史恢复是两个观察边界。
 - `WebSocket.send()` 不是 prompt 提交点。只有匹配 sessionId + runId 的 `run_queued` 才能清空草稿并投影 user message；确认前断线必须保留草稿、恢复历史后提示核对，禁止自动重发。
@@ -55,6 +55,7 @@ Pi Web 是本机优先的极简 Agent 工作台。当前目标不是复制 Pi �
 - AgentSession 创建后的 owner bind、host gate、startup 校验和 extension error 投影必须处于统一清理边界；成功创建后任一步失败都要 teardown session 并逐出 registry owner。
 - 同步 emitter 驱动的 OAuth/extension UI rendezvous 必须先登记 pending 再 emit；emit 或监听注册失败也不能留下 waiter、registry owner 或阻断其余 session teardown。
 - 工具策略必须位于项目扩展 `tool_call` hook 之后、真实 `tool.execute` 之前，并只按 run 启动时冻结的 conversation role 权限决策。
+- 会话角色切换命令必须精确匹配 `sessionId + conversationId + focusId + commandId`；busy 会话拒绝，切换不能改变 conversationId、历史、lifecycle 或 createdBy。
 - 工具 gate 启用时固定使用 sequential execution，避免 SDK parallel preflight 在 abort 或模式收紧后执行已积累的 thunk。
 - `read_only` 只允许 `source=builtin` 的 Pi 原生 `read/grep/find/ls`；命令、写入、未知工具及扩展同名工具都由服务端硬拒绝。`full_access` 直接允许所有工具。
 - `.piweb` 是宿主持久状态；只读模式不阻止宿主保存，但 `full_access` 也不会替 Agent 额外保护该目录。

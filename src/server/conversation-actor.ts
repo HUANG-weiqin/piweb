@@ -9,6 +9,7 @@ import type {
 import {
   DEFAULT_COMPACTION_THRESHOLD_PERCENT,
   type ConversationActivity,
+  type ConversationRoleSnapshot,
   type SessionEvent,
   type ToolMode,
 } from "../shared/protocol.js";
@@ -18,6 +19,7 @@ import {
   createCompactionThresholdEntry,
   createConversationMetaEntry,
   createConversationMessageEntry,
+  createConversationRoleChangeEntry,
   createRunSettlementEntry,
   RUN_SETTLEMENT_CUSTOM_TYPE,
   type ConversationMeta,
@@ -230,7 +232,7 @@ export class ConversationActor {
   private readonly runtime: PiRuntimeLike;
   private readonly projectRuns: ProjectRunCoordinator;
   private readonly toolPolicy: ToolPolicy;
-  private readonly createSessionOptions:
+  private createSessionOptions:
     ConversationActorOpenOptions["createSessionOptions"];
   private readonly persistSettlementCallback:
     NonNullable<ConversationActorOpenOptions["persistSettlement"]>;
@@ -241,7 +243,7 @@ export class ConversationActor {
   private readonly operations = new SerialTaskQueue();
   private readonly listeners = new Set<ConversationActorListener>();
   private readonly usedRunIds = new Set<string>();
-  private readonly profileSnapshot: ConversationMeta;
+  private profileSnapshot: ConversationMeta;
   private compactionThresholdPercent: number;
 
   private created?: CreatedPiSession;
@@ -249,6 +251,7 @@ export class ConversationActor {
   private activeRun?: RunTicket;
   private opening = true;
   private truncating = false;
+  private switchingRole = false;
   private disposing = false;
   private disposed = false;
   private fatalError?: Error;
@@ -297,31 +300,12 @@ export class ConversationActor {
     }
 
     let actor: ConversationActor | undefined;
-    let created: CreatedPiSession | undefined;
     try {
       const openingActor = new ConversationActor(options);
       actor = openingActor;
-      created = await openingActor.runtime.createSession(
-        openingActor.project.cwd,
-        {
-          ...openingActor.createSessionOptions,
-          sessionManager: openingActor.sessionManager,
-          toolCallGate: (input) => openingActor.authorizeToolCall(input),
-          extensionAbort: () => {
-            void openingActor.abortCurrentRun().catch((error) => {
-              openingActor.emitError(error);
-            });
-          },
-        },
+      const pendingErrors = await openingActor.startRuntimeSession(
+        openingActor.createSessionOptions,
       );
-      openingActor.created = created;
-      await created.activateExtensions();
-      openingActor.unsubscribeSession = created.session.subscribe((event) => {
-        openingActor.onSessionEvent(event);
-      });
-      const pendingErrors = created.activateExtensionErrors((error) => {
-        openingActor.handleExtensionError(error);
-      });
       openingActor.opening = false;
       for (const error of pendingErrors) {
         openingActor.handleExtensionError(error);
@@ -329,13 +313,6 @@ export class ConversationActor {
       return openingActor;
     } catch (error) {
       const failures: unknown[] = [error];
-      if (created) {
-        try {
-          await created.dispose();
-        } catch (disposeError) {
-          failures.push(disposeError);
-        }
-      }
       try {
         options.conversationLease.release();
       } catch (leaseError) {
@@ -396,6 +373,95 @@ export class ConversationActor {
         );
       }
       await this.session.compact();
+    });
+  }
+
+  switchRole(
+    role: ConversationRoleSnapshot,
+    createSessionOptions:
+      ConversationActorOpenOptions["createSessionOptions"],
+  ): Promise<void> {
+    this.assertUsable();
+    if (this.activeRun) {
+      return Promise.reject(
+        new Error("Cannot switch the role of a busy conversation"),
+      );
+    }
+    if (this.switchingRole) {
+      return Promise.reject(
+        new Error("Conversation role switch is already running"),
+      );
+    }
+    this.switchingRole = true;
+    return this.operations.run(async () => {
+      const previousProfile = this.profileSnapshot;
+      const previousOptions = this.createSessionOptions;
+      const nextProfile = createConversationMetaEntry({
+        ...previousProfile,
+        role,
+      }).data;
+      let persisted = false;
+      try {
+        this.assertUsable();
+        if (this.activeRun) {
+          throw new Error("Cannot switch the role of a busy conversation");
+        }
+        if (
+          JSON.stringify(previousProfile.role)
+          === JSON.stringify(nextProfile.role)
+        ) {
+          return;
+        }
+
+        await this.stopRuntimeSession();
+        appendReservedCustomEntry(
+          this.sessionManager,
+          createConversationRoleChangeEntry({
+            role: nextProfile.role,
+            changedAt: this.now().toISOString(),
+          }),
+        );
+        persisted = true;
+        this.profileSnapshot = nextProfile;
+        this.createSessionOptions = createSessionOptions;
+        const pendingErrors = await this.startRuntimeSession(
+          createSessionOptions,
+        );
+        for (const error of pendingErrors) this.handleExtensionError(error);
+      } catch (error) {
+        const failures: unknown[] = [error];
+        try {
+          if (this.created) await this.stopRuntimeSession();
+          if (persisted) {
+            appendReservedCustomEntry(
+              this.sessionManager,
+              createConversationRoleChangeEntry({
+                role: previousProfile.role,
+                changedAt: this.now().toISOString(),
+              }),
+            );
+          }
+          this.profileSnapshot = previousProfile;
+          this.createSessionOptions = previousOptions;
+          const pendingErrors = await this.startRuntimeSession(
+            previousOptions,
+          );
+          for (const pendingError of pendingErrors) {
+            this.handleExtensionError(pendingError);
+          }
+        } catch (rollbackError) {
+          failures.push(rollbackError);
+          this.fatalError = new AggregateError(
+            failures,
+            "Failed to switch conversation role and restore its previous runtime",
+          );
+          this.emitError(this.fatalError, undefined, true);
+        }
+        if (failures.length > 1) throw this.fatalError;
+        throw error;
+      } finally {
+        this.switchingRole = false;
+      }
     });
   }
 
@@ -629,6 +695,9 @@ export class ConversationActor {
     this.assertUsable();
     if (this.truncating) {
       throw new Error("Conversation is being rewound");
+    }
+    if (this.switchingRole) {
+      throw new Error("Conversation role is being switched");
     }
     if (this.activeRun) throw new Error("Agent is already running");
     if (this.usedRunIds.has(input.runId)) {
@@ -1175,5 +1244,83 @@ export class ConversationActor {
   private requireCreated(): CreatedPiSession {
     if (!this.created) throw new Error("Conversation actor is closed");
     return this.created;
+  }
+
+  private async startRuntimeSession(
+    createSessionOptions:
+      ConversationActorOpenOptions["createSessionOptions"],
+  ): Promise<readonly ExtensionError[]> {
+    let created: CreatedPiSession | undefined;
+    let unsubscribe: (() => void) | undefined;
+    try {
+      created = await this.runtime.createSession(
+        this.project.cwd,
+        {
+          ...createSessionOptions,
+          sessionManager: this.sessionManager,
+          toolCallGate: (input) => this.authorizeToolCall(input),
+          extensionAbort: () => {
+            void this.abortCurrentRun().catch((error) => {
+              this.emitError(error);
+            });
+          },
+        },
+      );
+      this.created = created;
+      await created.activateExtensions();
+      unsubscribe = created.session.subscribe((event) => {
+        this.onSessionEvent(event);
+      });
+      this.unsubscribeSession = unsubscribe;
+      return created.activateExtensionErrors((error) => {
+        this.handleExtensionError(error);
+      });
+    } catch (error) {
+      const failures: unknown[] = [error];
+      try {
+        unsubscribe?.();
+      } catch (unsubscribeError) {
+        failures.push(unsubscribeError);
+      }
+      this.unsubscribeSession = undefined;
+      this.created = undefined;
+      if (created) {
+        try {
+          await created.dispose();
+        } catch (disposeError) {
+          failures.push(disposeError);
+        }
+      }
+      if (failures.length > 1) {
+        throw new AggregateError(
+          failures,
+          "Failed to create and clean up conversation runtime",
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async stopRuntimeSession(): Promise<void> {
+    const failures: unknown[] = [];
+    try {
+      this.unsubscribeSession?.();
+    } catch (error) {
+      failures.push(error);
+    }
+    this.unsubscribeSession = undefined;
+    const created = this.created;
+    this.created = undefined;
+    try {
+      await created?.dispose();
+    } catch (error) {
+      failures.push(error);
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        "Failed to stop conversation runtime",
+      );
+    }
   }
 }

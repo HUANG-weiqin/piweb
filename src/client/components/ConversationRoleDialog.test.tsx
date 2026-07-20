@@ -20,10 +20,25 @@ const role: ConversationRoleSnapshot = {
   toolMode: "read_only",
   canManageSessions: true,
 };
+const roles = [{
+  ...role,
+  model: { ...role.model },
+  createdAt: "2026-07-20T00:00:00.000Z",
+  updatedAt: "2026-07-20T00:00:00.000Z",
+  available: true,
+}];
 
 describe("ConversationRoleDialog", () => {
-  it("shows the complete frozen role snapshot without a switch action", () => {
-    render(<ConversationRoleDialog open role={role} onClose={() => undefined} />);
+  it("shows the complete role snapshot and disables reapplying the same revision", () => {
+    render(<ConversationRoleDialog
+      open
+      role={role}
+      roles={roles}
+      switchDisabled={false}
+      switching={false}
+      onSwitch={() => true}
+      onClose={() => undefined}
+    />);
 
     expect(screen.getByRole("dialog", { name: "会话角色" })).toHaveTextContent("Reviewer");
     expect(screen.getByText("Reviews risky changes")).toBeInTheDocument();
@@ -33,7 +48,35 @@ describe("ConversationRoleDialog", () => {
     expect(screen.queryByText(/openai \//)).not.toBeInTheDocument();
     expect(screen.getByText("修订 7")).toBeInTheDocument();
     expect(screen.getByText("允许")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /切换/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "应用角色" })).toBeDisabled();
+  });
+
+  it("applies another available role only while switching is enabled", () => {
+    const onSwitch = vi.fn(() => true);
+    const alternative = {
+      ...roles[0]!,
+      id: "21f01ca1-e28e-4f5e-bb46-442a2fdadafd",
+      revision: 1,
+      name: "Builder",
+    };
+    render(<ConversationRoleDialog
+      open
+      role={role}
+      roles={[...roles, alternative]}
+      switchDisabled={false}
+      switching={false}
+      onSwitch={onSwitch}
+      onClose={() => undefined}
+    />);
+
+    fireEvent.change(screen.getByRole("combobox", {
+      name: "选择新的会话角色",
+    }), {
+      target: { value: alternative.id },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "应用角色" }));
+
+    expect(onSwitch).toHaveBeenCalledWith(alternative.id);
   });
 
   it("closes without modifying the snapshot", () => {
@@ -41,6 +84,10 @@ describe("ConversationRoleDialog", () => {
     const view = render(<ConversationRoleDialog
       open
       role={role}
+      roles={roles}
+      switchDisabled={false}
+      switching={false}
+      onSwitch={() => true}
       onClose={close}
     />);
 
@@ -50,6 +97,10 @@ describe("ConversationRoleDialog", () => {
     view.rerender(<ConversationRoleDialog
       open={false}
       role={role}
+      roles={roles}
+      switchDisabled={false}
+      switching={false}
+      onSwitch={() => true}
       onClose={close}
     />);
     expect(screen.queryByRole("dialog", { name: "会话角色" }))

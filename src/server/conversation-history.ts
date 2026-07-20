@@ -352,6 +352,7 @@ export function projectConversationItems(
     if (reserved === undefined) continue;
     if (
       reserved.kind === "conversation_meta"
+      || reserved.kind === "conversation_role_change"
       || reserved.kind === "run_settlement"
       || reserved.kind === "meta_operation"
       || reserved.kind === "compaction_threshold"

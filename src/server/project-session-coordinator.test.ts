@@ -841,6 +841,127 @@ describe("ProjectSessionCoordinator", () => {
     expect(first.profile.role).not.toEqual(second.profile.role);
   });
 
+  it("switches an idle conversation to a durable role snapshot and rebuilds its runtime", async () => {
+    const fixture = await createFixture();
+    const role = await fixture.roles.createRole({
+      name: "Builder",
+      description: "Builds the selected change",
+      systemPrompt: "Implement the requested change.",
+      model: { provider: "test", id: "model-b" },
+      toolMode: "full_access",
+      canManageSessions: true,
+    });
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default", title: "Switch me" },
+    );
+    const previousRuntime = fixture.runtime.control(actor.conversationId);
+
+    const switched = await fixture.coordinator.switchConversationRole(
+      fixture.handle,
+      actor.conversationId,
+      role.id,
+    );
+
+    expect(switched).toBe(actor);
+    expect(previousRuntime.disposeCalls).toBe(1);
+    expect(actor.profile.role).toMatchObject({
+      id: role.id,
+      revision: role.revision,
+      name: "Builder",
+      model: { provider: "test", id: "model-b" },
+      toolMode: "full_access",
+      canManageSessions: true,
+    });
+    expect(fixture.runtime.createOptions.get(actor.conversationId))
+      .toMatchObject({
+        model: { provider: "test", id: "model-b" },
+        roleSystemPrompt: "Implement the requested change.",
+      });
+    expect(
+      aggregateReservedConversationEntries(
+        actor.sessionManager.getEntries(),
+      ).conversationMeta?.role.id,
+    ).toBe(role.id);
+    expect(
+      (await fixture.coordinator.listSessions(fixture.handle))
+        .find(({ id }) => id === actor.conversationId)?.role?.id,
+    ).toBe(role.id);
+  });
+
+  it("rejects switching the role of a running conversation", async () => {
+    const fixture = await createFixture();
+    const role = await fixture.roles.createRole({
+      name: "Builder",
+      description: "",
+      systemPrompt: "",
+      model: { provider: "test", id: "model-b" },
+      toolMode: "read_only",
+      canManageSessions: false,
+    });
+    const started = deferred();
+    const release = deferred();
+    fixture.runtime.nextSessionBehaviors.push([
+      blocksUntil(started, release),
+    ]);
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const running = fixture.coordinator.prompt(
+      fixture.handle,
+      actor.conversationId,
+      randomUUID(),
+      "keep running",
+    );
+    await started.promise;
+
+    await expect(fixture.coordinator.switchConversationRole(
+      fixture.handle,
+      actor.conversationId,
+      role.id,
+    )).rejects.toThrow(/busy conversation/i);
+    expect(actor.profile.role.id).toBe("default");
+
+    release.resolve();
+    await running;
+  });
+
+  it("restores the previous role when the replacement runtime cannot open", async () => {
+    const fixture = await createFixture();
+    const role = await fixture.roles.createRole({
+      name: "Unavailable at activation",
+      description: "",
+      systemPrompt: "This runtime will fail.",
+      model: { provider: "test", id: "model-b" },
+      toolMode: "full_access",
+      canManageSessions: false,
+    });
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    fixture.runtime.beforeCreateSession = async (_conversationId, options) => {
+      if (options.model?.id === "model-b") {
+        throw new Error("replacement activation failed");
+      }
+    };
+
+    await expect(fixture.coordinator.switchConversationRole(
+      fixture.handle,
+      actor.conversationId,
+      role.id,
+    )).rejects.toThrow("replacement activation failed");
+
+    expect(actor.profile.role.id).toBe("default");
+    expect(actor.session.model?.id).toBe("model-a");
+    expect(
+      aggregateReservedConversationEntries(
+        actor.sessionManager.getEntries(),
+      ).conversationMeta?.role.id,
+    ).toBe("default");
+  });
+
   it("removes the durable conversation when fixed-model session creation fails", async () => {
     const fixture = await createFixture();
     fixture.runtime.beforeCreateSession = async () => {

@@ -35,6 +35,9 @@ function view(
     contextSource="measured"
     model={{ provider: "provider", id: "model" }}
     role={role}
+    roles={[]}
+    roleSwitchDisabled={false}
+    roleSwitching={false}
     thinkingLevel="off"
     availableThinkingLevels={["off", "high"]}
     compactionThresholdPercent={70}
@@ -54,6 +57,7 @@ function view(
     onThinking={() => undefined}
     onCompactionThreshold={() => true}
     onCompact={() => true}
+    onSwitchRole={() => true}
     onChangeCwd={() => undefined}
     onRewind={() => true}
     {...overrides}
@@ -252,7 +256,7 @@ describe("Chat", () => {
     expect(screen.getByRole("tooltip")).toHaveTextContent("缓存写入：500");
   });
 
-  it("shows the frozen role at the composer footer and opens read-only details", () => {
+  it("shows the current role at the composer footer and opens its details", () => {
     const role: ConversationRoleSnapshot = {
       id: "default",
       revision: 3,
@@ -275,8 +279,7 @@ describe("Chat", () => {
 
     expect(screen.getByRole("dialog", { name: "会话角色" }))
       .toHaveTextContent("Review exact evidence.");
-    expect(screen.queryByRole("button", { name: /切换/ }))
-      .not.toBeInTheDocument();
+    expect(screen.getByText("更换角色")).toBeInTheDocument();
   });
 
   it("keeps run thinking beside the composer without a project permission control", () => {

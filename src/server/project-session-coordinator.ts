@@ -37,6 +37,7 @@ import {
 } from "./meta-tools.js";
 import type {
   CreatedProjectModelCatalog,
+  CreatePiSessionOptions,
   PiRuntimeLike,
 } from "./pi-runtime.js";
 import type { PortableExtensionUI } from "./extension-ui.js";
@@ -761,6 +762,35 @@ export class ProjectSessionCoordinator {
     return actor;
   }
 
+  async switchConversationRole(
+    handle: ProjectSessionHandle,
+    conversationId: string,
+    roleId: string,
+  ): Promise<ConversationActor> {
+    const context = this.requireContext(handle);
+    const actor = this.requireActor(context, conversationId);
+    const template = this.roles.listRoles(actor.modelRegistry)
+      .find(({ id }) => id === roleId);
+    if (!template) throw new Error(`Role not found: ${roleId}`);
+    if (!template.available) {
+      throw new Error(
+        template.unavailableReason ?? `Role is unavailable: ${roleId}`,
+      );
+    }
+    const role = this.roles.getConversationRole(roleId);
+    const profile = {
+      ...actor.profile,
+      role,
+    };
+    await actor.switchRole(
+      role,
+      this.createActorSessionOptions(context, conversationId, profile),
+    );
+    context.profiles.set(conversationId, cloneProfile(actor.profile));
+    this.emit(context, { type: "project_changed" });
+    return actor;
+  }
+
   async createUserConversation(
     handle: ProjectSessionHandle,
     input: CreateUserConversationInput,
@@ -1334,16 +1364,11 @@ export class ProjectSessionCoordinator {
       runtime: this.runtime,
       projectRuns: this.projectRuns,
       toolPolicy: this.toolPolicy,
-      createSessionOptions: {
-        model: { ...profile.role.model },
-        roleSystemPrompt: profile.role.systemPrompt,
-        extensionUI: this.extensionUIRouter(context, conversationId).ui,
-        workbenchCustomTools: createMetaTools(
-          conversationId,
-          this.metaService(context),
-          profile.role.canManageSessions,
-        ),
-      },
+      createSessionOptions: this.createActorSessionOptions(
+        context,
+        conversationId,
+        profile,
+      ),
       persistSettlement: (settlement, sessionManager) => {
         appendReservedCustomEntry(
           sessionManager,
@@ -1383,6 +1408,23 @@ export class ProjectSessionCoordinator {
       ),
     );
     return actor;
+  }
+
+  private createActorSessionOptions(
+    context: ProjectContext,
+    conversationId: string,
+    profile: ConversationMeta,
+  ): CreatePiSessionOptions {
+    return {
+      model: { ...profile.role.model },
+      roleSystemPrompt: profile.role.systemPrompt,
+      extensionUI: this.extensionUIRouter(context, conversationId).ui,
+      workbenchCustomTools: createMetaTools(
+        conversationId,
+        this.metaService(context),
+        profile.role.canManageSessions,
+      ),
+    };
   }
 
   private loadOrMigrateProfile(

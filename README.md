@@ -11,8 +11,8 @@
 - 支持 Pi 公开的全部 API Key 提供商及 OAuth 订阅提供商
 - 使用 Pi 默认编码工具：`read`、`grep`、`find`、`ls`、`bash`、`edit`、`write`
 - 用户可定义 Agent 角色：名称、简介、专属提示词和已配置提供商的固定模型
-- 永久保留可编辑、不可删除的 default 角色；新会话仍必须显式选角色，不会自动套用 default
-- 角色和模型在会话创建时固化，模板后续编辑不会追溯，也不能在会话中途切换
+- 首次提供可编辑、可删除的 default 角色；新会话仍必须显式选角色，不会自动套用 default
+- 模板后续编辑不会自动追溯到已有会话；会话空闲时可显式应用任一当前可用角色，并从下一轮整体切换模型、提示词与权限
 - 思考级别仍写入 Pi 原生 `settings.json`
 - 工作目录可在启动页用工作台内置的只读文件夹浏览器选择，也保留绝对路径手输
 - 每个项目在 `.piweb/` 中持久保存项目清单、Pi JSONL 对话和跨会话 inbox
@@ -56,7 +56,7 @@
 → reducer 按 runId/cardId 生成当前 transcript
 ```
 
-共享认证、模型状态和用户级项目信任由进程级 `PiRuntime` 持有；用户角色由 `RoleCatalog` 持有；项目身份、权限模式、对话文件和 inbox 由项目存储持有。`ProjectSessionCoordinator` 让每个持久 conversation 对应唯一 `ConversationActor`，不依附浏览器连接；PiConnection 只观察项目并把当前 focus 的扩展 UI 路由到浏览器。`abort`、认证回调、扩展 UI 回答和生命周期失效走独立控制通道，资源清理仍回到 actor/coordinator 串行边界。
+共享认证、模型状态和用户级项目信任由进程级 `PiRuntime` 持有；用户角色模板由 `RoleCatalog` 持有；项目身份、conversation 当前角色快照、对话文件和 inbox 由项目存储持有。`ProjectSessionCoordinator` 让每个持久 conversation 对应唯一 `ConversationActor`，不依附浏览器连接；PiConnection 只观察项目并把当前 focus 的扩展 UI 路由到浏览器。`abort`、认证回调、扩展 UI 回答和生命周期失效走独立控制通道，资源清理仍回到 actor/coordinator 串行边界。
 
 持久身份与传输身份刻意分开：
 
@@ -111,7 +111,7 @@ npm start
 2. 若目录含项目级 Pi 资源，先决定是否信任；拒绝后仍可聊天，但项目设置、skills 和 extensions 会被跳过。
 3. 如果还没有可用模型，先在“连接与权限”中选择提供商并用 API Key 或订阅登录；Key 通过 Pi 的 `AuthStorage` 保存，网页不会回显或写入浏览器存储。
 4. 打开“管理角色”，为 default 或新角色填写简介、专属提示词和模型。角色保存只在该命令收到明确回执后完成。
-5. 在角色选择页显式点选一个可用角色，再创建会话；选择前没有 composer，创建后角色和模型不可更换。
+5. 在角色选择页显式点选一个可用角色，再创建会话；选择前没有 composer。创建后可从 composer 底部的角色详情在会话空闲时应用另一角色。
 6. 在“工具权限”中选择“全部授权”或“只读”。Agent 的多会话 meta 工具只在全部授权下可用。
 7. 用左侧会话栏查看、新建和切换平级会话；后台会话继续运行，不会抢走当前焦点。
 8. 若消息发送确认前断线，先查看恢复后的对话是否已有该消息，再手动决定是否重试。

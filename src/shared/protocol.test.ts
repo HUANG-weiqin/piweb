@@ -25,7 +25,7 @@ const messageId = "assistant:96b960be-b6bb-4a19-9cf2-78e77cb69425";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(17);
+    expect(PROTOCOL_VERSION).toBe(18);
   });
 
   it("accepts supported commands", () => {
@@ -143,6 +143,14 @@ describe("parseClientCommand", () => {
       focusId,
     }).type).toBe("compact_context");
     expect(parseClientCommand({
+      type: "switch_conversation_role",
+      commandId,
+      sessionId,
+      conversationId,
+      focusId,
+      roleId,
+    }).type).toBe("switch_conversation_role");
+    expect(parseClientCommand({
       type: "rename_conversation",
       sessionId,
       conversationId,
@@ -222,6 +230,14 @@ describe("parseClientCommand", () => {
       sessionId,
       conversationId,
       focusId: "not-a-uuid",
+    })).toThrow();
+    expect(() => parseClientCommand({
+      type: "switch_conversation_role",
+      commandId,
+      sessionId,
+      conversationId,
+      focusId,
+      roleId: "missing-role",
     })).toThrow();
     expect(() => parseClientCommand({
       type: "initialize",

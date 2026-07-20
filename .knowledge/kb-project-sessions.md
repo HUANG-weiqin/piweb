@@ -59,7 +59,7 @@ initialize(cwd, target)
 → recent 可返回项目空态；open 选择 exact conversation；new 必须显式 roleId
 → coordinator singleflight 取得/等待 writer lease
 → SessionManager.create/open(..., current cwd override)
-→ 创建或读取不可变 conversation profile
+→ 创建或读取 conversation profile 与其追加式角色变更
 → PiRuntime 用固定 role model/prompt/tools 创建 ConversationActor
 → PiConnection attach observer 并分配 focusId
 → state + role/project snapshot + focused conversation snapshot
@@ -89,7 +89,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 
 ## Conversation profile 与 reserved entries
 
-新对话在 header 后、AgentSession 创建前写唯一 `piweb.conversation_meta.v1`：
+新对话在 header 后、AgentSession 创建前写唯一 base `piweb.conversation_meta.v1`：
 
 - 完整角色 `id/revision/name/description/systemPrompt/model`；
 - `normal` 或 `temporary` lifecycle；
@@ -97,6 +97,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 
 同一 JSONL 还可包含：
 
+- `piweb.conversation_role_change.v1`：用户在 idle 边界显式应用的新完整角色快照，最后一条有效记录成为当前角色；
 - `piweb.conversation_card.v1`：发送方可见的 outgoing/委派状态；
 - `piweb.conversation_message.v1`：进入目标 LLM context 的 incoming 消息；
 - `piweb.run_settlement.v1`：精确 run outcome、final text 与临时回传报告标记；
@@ -139,7 +140,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 
 ## 旧项目权限字段
 
-严格 v1 manifest 仍保留 `toolMode`，用于兼容旧项目与非协调内部路径；当前 v17 协调运行不再把它当作工具权限真相，也不提供修改它的线协议。工具权限属于用户级角色模板，并在创建 conversation 时冻结到角色快照；旧 manifest 的值不能扩大或收紧当前 `ConversationActor`。
+严格 v1 manifest 仍保留 `toolMode`，用于兼容旧项目与非协调内部路径；当前 v18 协调运行不再把它当作工具权限真相，也不提供修改它的线协议。工具权限属于用户级角色模板，并进入 conversation 当前角色快照；旧 manifest 的值不能扩大或收紧当前 `ConversationActor`。
 
 `.piweb` 是宿主持久目录。Agent 在 read_only 中不能写入，但宿主保存 transcript 不受只读模式影响；full_access 不额外保护该目录。
 

@@ -544,6 +544,118 @@ describe("App", () => {
     expect(screen.getByText("上下文已压缩")).toBeInTheDocument();
   });
 
+  it("switches an idle focused conversation role with exact command correlation", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    const nextRole = defaultRole({
+      id: "21f01ca1-e28e-4f5e-bb46-442a2fdadafd",
+      revision: 2,
+      name: "Builder",
+      systemPrompt: "Build carefully.",
+      toolMode: "full_access",
+    });
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.emit?.({
+        type: "role_catalog_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        roles: [defaultRole(), nextRole],
+      });
+      socketMock.emit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        role: {
+          id: "default",
+          revision: 1,
+          name: "Default",
+          description: "General purpose",
+          systemPrompt: "Be useful.",
+          model: { provider: "provider", id: "model" },
+          toolMode: "read_only",
+          canManageSessions: true,
+        },
+        messages: [],
+        truncated: false,
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", {
+      name: "查看会话角色 Default",
+    }));
+    fireEvent.change(screen.getByRole("combobox", {
+      name: "选择新的会话角色",
+    }), {
+      target: { value: nextRole.id },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "应用角色" }));
+
+    const command = latestCommand("switch_conversation_role");
+    expect(command).toMatchObject({
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      roleId: nextRole.id,
+    });
+    expect(screen.getByRole("button", { name: "正在更换…" })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toBeDisabled();
+
+    act(() => socketMock.emit?.({
+      type: "command_complete",
+      operation: "switch_conversation_role",
+      commandId: "3d227a2c-2f51-4811-8844-e8e566b09f05",
+      sessionId,
+    }));
+    expect(screen.getByRole("button", { name: "正在更换…" })).toBeDisabled();
+
+    act(() => {
+      socketMock.emit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        role: {
+          id: nextRole.id,
+          revision: nextRole.revision,
+          name: nextRole.name,
+          description: nextRole.description,
+          systemPrompt: nextRole.systemPrompt,
+          model: nextRole.model!,
+          toolMode: nextRole.toolMode,
+          canManageSessions: nextRole.canManageSessions,
+        },
+        messages: [],
+        truncated: false,
+      });
+      socketMock.emit?.({
+        type: "command_complete",
+        operation: "switch_conversation_role",
+        commandId: command.commandId,
+        sessionId,
+      });
+    });
+
+    expect(screen.getByText("会话角色已更换")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Builder" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toBeEnabled();
+  });
+
   it("copies and rewinds user or Agent messages with an exact command acknowledgement", async () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     const writeText = vi.fn().mockResolvedValue(undefined);

@@ -1990,6 +1990,22 @@ pre {
   margin: 0;
 }
 
+.conversation-role-switch {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin: 0 0 20px;
+}
+
+.conversation-role-switch label,
+.conversation-role-switch small {
+  grid-column: 1 / -1;
+}
+
+.conversation-role-switch small {
+  color: var(--muted);
+}
+
 .role-prompt-preview {
   max-height: 220px;
   overflow-y: auto;

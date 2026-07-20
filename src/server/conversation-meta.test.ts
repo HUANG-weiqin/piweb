@@ -6,6 +6,7 @@ import {
   CONVERSATION_CARD_CUSTOM_TYPE,
   CONVERSATION_MESSAGE_CUSTOM_TYPE,
   CONVERSATION_META_CUSTOM_TYPE,
+  CONVERSATION_ROLE_CHANGE_CUSTOM_TYPE,
   MAX_CONVERSATION_BODY_BYTES,
   MAX_CONVERSATION_MESSAGE_CONTENT_BYTES,
   MAX_ROLE_SYSTEM_PROMPT_BYTES,
@@ -18,12 +19,14 @@ import {
   createConversationCardEntry,
   createConversationMessageEntry,
   createConversationMetaEntry,
+  createConversationRoleChangeEntry,
   createMetaOperationEntry,
   createRunSettlementEntry,
   parseConversationCardEntry,
   parseCompactionThresholdEntry,
   parseConversationMessageEntry,
   parseConversationMetaEntry,
+  parseConversationRoleChangeEntry,
   parseMetaOperationEntry,
   parseReservedConversationEntry,
   parseRunSettlementEntry,
@@ -176,6 +179,30 @@ describe("conversation reserved entries", () => {
       changed,
       initial,
     ])).toThrow(/updatedAt cannot regress/i);
+  });
+
+  it("applies durable role changes after the base conversation metadata", () => {
+    const initial = createConversationMetaEntry(metadata());
+    const changed = createConversationRoleChangeEntry({
+      role: {
+        ...initial.data.role,
+        revision: 4,
+        name: "Builder",
+        toolMode: "full_access",
+      },
+      changedAt: "2026-07-19T10:01:00.000Z",
+    });
+
+    expect(changed.customType).toBe(CONVERSATION_ROLE_CHANGE_CUSTOM_TYPE);
+    expect(parseConversationRoleChangeEntry(changed)).toEqual(changed);
+    expect(aggregateReservedConversationEntries([
+      initial,
+      changed,
+    ]).conversationMeta?.role).toEqual(changed.data.role);
+    expect(() => aggregateReservedConversationEntries([
+      changed,
+      initial,
+    ])).toThrow(/before conversation metadata/i);
   });
 
   it("keeps session management disabled for legacy conversation metadata", () => {

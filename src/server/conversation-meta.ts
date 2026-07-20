@@ -16,6 +16,8 @@ export const META_OPERATION_CUSTOM_TYPE =
   "piweb.meta_operation.v1";
 export const COMPACTION_THRESHOLD_CUSTOM_TYPE =
   "piweb.compaction_threshold.v1";
+export const CONVERSATION_ROLE_CHANGE_CUSTOM_TYPE =
+  "piweb.conversation_role_change.v1";
 
 export const MAX_ROLE_NAME_CHARACTERS = 80;
 export const MAX_ROLE_DESCRIPTION_CHARACTERS = 1_000;
@@ -195,6 +197,16 @@ const conversationMetaSchema = z.object({
 const conversationMetaEntrySchema = z.object({
   customType: z.literal(CONVERSATION_META_CUSTOM_TYPE),
   data: conversationMetaSchema,
+}).strict();
+
+const conversationRoleChangeSchema = z.object({
+  role: roleSnapshotSchema,
+  changedAt: canonicalTimestampSchema("changedAt"),
+}).strict();
+
+const conversationRoleChangeEntrySchema = z.object({
+  customType: z.literal(CONVERSATION_ROLE_CHANGE_CUSTOM_TYPE),
+  data: conversationRoleChangeSchema,
 }).strict();
 
 const compactionThresholdSchema = z.object({
@@ -419,6 +431,10 @@ export type ConversationCreatedBy = z.infer<typeof createdBySchema>;
 export type ConversationMeta = z.infer<typeof conversationMetaSchema>;
 export type ConversationMetaEntry =
   z.infer<typeof conversationMetaEntrySchema>;
+export type ConversationRoleChange =
+  z.infer<typeof conversationRoleChangeSchema>;
+export type ConversationRoleChangeEntry =
+  z.infer<typeof conversationRoleChangeEntrySchema>;
 export type ConversationCard = z.infer<typeof conversationCardSchema>;
 export type ConversationCardEntry =
   z.infer<typeof conversationCardEntrySchema>;
@@ -445,6 +461,10 @@ export type ReservedConversationEntry =
   | {
       kind: "conversation_meta";
       entry: ConversationMetaEntry;
+    }
+  | {
+      kind: "conversation_role_change";
+      entry: ConversationRoleChangeEntry;
     }
   | {
       kind: "conversation_card";
@@ -493,6 +513,21 @@ export function createConversationMetaEntry(
 ): ConversationMetaEntry {
   return parseConversationMetaEntry({
     customType: CONVERSATION_META_CUSTOM_TYPE,
+    data,
+  });
+}
+
+export function parseConversationRoleChangeEntry(
+  value: unknown,
+): ConversationRoleChangeEntry {
+  return conversationRoleChangeEntrySchema.parse(value);
+}
+
+export function createConversationRoleChangeEntry(
+  data: ConversationRoleChange,
+): ConversationRoleChangeEntry {
+  return parseConversationRoleChangeEntry({
+    customType: CONVERSATION_ROLE_CHANGE_CUSTOM_TYPE,
     data,
   });
 }
@@ -590,6 +625,7 @@ export function appendReservedCustomEntry(
   appender: CustomEntryAppender,
   value:
     | ConversationMetaEntry
+    | ConversationRoleChangeEntry
     | ConversationCardEntry
     | RunSettlementEntry
     | MetaOperationEntry
@@ -666,6 +702,12 @@ export function parseReservedConversationEntry(
     return {
       kind: "conversation_meta",
       entry: parseConversationMetaEntry(payload),
+    };
+  }
+  if (customType === CONVERSATION_ROLE_CHANGE_CUSTOM_TYPE) {
+    return {
+      kind: "conversation_role_change",
+      entry: parseConversationRoleChangeEntry(payload),
     };
   }
   if (customType === CONVERSATION_CARD_CUSTOM_TYPE) {
@@ -826,6 +868,7 @@ export function aggregateReservedConversationEntries(
   const runSettlements = new Map<string, RunSettlement>();
   const metaOperations = new Map<string, MetaOperation>();
   let compactionThreshold: CompactionThreshold | undefined;
+  let roleChangedAt: string | undefined;
 
   for (const value of values) {
     const reserved = parseReservedConversationEntry(value);
@@ -835,6 +878,25 @@ export function aggregateReservedConversationEntries(
         throw new Error("Duplicate piweb conversation metadata");
       }
       conversationMeta = reserved.entry.data;
+      continue;
+    }
+    if (reserved.kind === "conversation_role_change") {
+      if (conversationMeta === undefined) {
+        throw new Error(
+          "Piweb conversation role changed before conversation metadata",
+        );
+      }
+      if (
+        roleChangedAt !== undefined
+        && Date.parse(reserved.entry.data.changedAt) < Date.parse(roleChangedAt)
+      ) {
+        throw new Error("Piweb conversation role changedAt cannot regress");
+      }
+      conversationMeta = {
+        ...conversationMeta,
+        role: reserved.entry.data.role,
+      };
+      roleChangedAt = reserved.entry.data.changedAt;
       continue;
     }
     if (reserved.kind === "conversation_card") {

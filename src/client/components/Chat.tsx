@@ -12,6 +12,7 @@ import {
   type ConversationMessageCard,
   type ConversationRoleSnapshot,
   type PublicState,
+  type RoleTemplate,
   type ThinkingLevel,
   type TokenUsage,
 } from "../../shared/protocol";
@@ -46,6 +47,9 @@ interface ChatProps {
   contextSource: "measured" | "estimated" | "unknown" | undefined;
   model?: { provider: string; id: string };
   role?: ConversationRoleSnapshot;
+  roles: RoleTemplate[];
+  roleSwitchDisabled: boolean;
+  roleSwitching: boolean;
   thinkingLevel: ThinkingLevel;
   availableThinkingLevels?: ThinkingLevel[];
   compactionThresholdPercent: number;
@@ -71,6 +75,7 @@ interface ChatProps {
   onThinking(level: ThinkingLevel): void;
   onCompactionThreshold(percent: number): boolean;
   onCompact(): boolean;
+  onSwitchRole(roleId: string): boolean;
   onChangeCwd(): void;
   onOpenConversation?(conversationId: string): void;
   onRewind(messageId: string): boolean;
@@ -175,6 +180,9 @@ export function Chat({
   contextSource,
   model,
   role,
+  roles,
+  roleSwitchDisabled,
+  roleSwitching,
   thinkingLevel,
   availableThinkingLevels,
   compactionThresholdPercent,
@@ -196,6 +204,7 @@ export function Chat({
   onThinking,
   onCompactionThreshold,
   onCompact,
+  onSwitchRole,
   onChangeCwd,
   onOpenConversation,
   onRewind,
@@ -422,10 +431,10 @@ export function Chat({
       </div>}
       {promptNotice && <div className="composer-notice" role="alert">{promptNotice}</div>}
       <div className="composer">
-        <textarea ref={textareaRef} aria-label="给 Pi 发送消息" value={draft} onChange={(e) => onDraftChange(e.target.value)} onKeyDown={keyDown} placeholder={composerPlaceholder} disabled={!online || !conversationReady || !model || submitting || Boolean(rewindingMessageId)} rows={1} />
+        <textarea ref={textareaRef} aria-label="给 Pi 发送消息" value={draft} onChange={(e) => onDraftChange(e.target.value)} onKeyDown={keyDown} placeholder={composerPlaceholder} disabled={!online || !conversationReady || !model || submitting || roleSwitching || Boolean(rewindingMessageId)} rows={1} />
         <div className="composer-actions">
           {busy && <button className="send stop" onClick={onAbort} aria-label="停止">■</button>}
-          <button className="send" onClick={send} disabled={!online || !conversationReady || !model || submitting || Boolean(rewindingMessageId) || !draft.trim()} aria-label="发送">↑</button>
+          <button className="send" onClick={send} disabled={!online || !conversationReady || !model || submitting || roleSwitching || Boolean(rewindingMessageId) || !draft.trim()} aria-label="发送">↑</button>
         </div>
       </div>
       {compactionThresholdOpen && <label
@@ -519,6 +528,10 @@ export function Chat({
     {role && <ConversationRoleDialog
       open={roleDetailsOpen}
       role={role}
+      roles={roles}
+      switchDisabled={roleSwitchDisabled}
+      switching={roleSwitching}
+      onSwitch={onSwitchRole}
       onClose={() => setRoleDetailsOpen(false)}
     />}
   </main>;

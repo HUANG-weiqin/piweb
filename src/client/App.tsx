@@ -81,6 +81,11 @@ interface PendingContextCompaction {
   commandId: string;
 }
 
+interface PendingConversationRoleSwitch {
+  commandId: string;
+  roleId: string;
+}
+
 interface DirectoryBrowserState {
   commandId: string;
   listing?: DirectoryListing;
@@ -153,6 +158,10 @@ export function App() {
     useState<PendingContextCompaction>();
   const pendingContextCompactionRef =
     useRef<PendingContextCompaction | undefined>(undefined);
+  const [pendingConversationRoleSwitch, setPendingConversationRoleSwitchState] =
+    useState<PendingConversationRoleSwitch>();
+  const pendingConversationRoleSwitchRef =
+    useRef<PendingConversationRoleSwitch | undefined>(undefined);
   const [directoryBrowser, setDirectoryBrowserState] = useState<DirectoryBrowserState>();
   const directoryBrowserRef = useRef<DirectoryBrowserState | undefined>(undefined);
   const [promptNotice, setPromptNotice] = useState("");
@@ -264,6 +273,12 @@ export function App() {
   ) => {
     pendingContextCompactionRef.current = pending;
     setPendingContextCompactionState(pending);
+  };
+  const updatePendingConversationRoleSwitch = (
+    pending: PendingConversationRoleSwitch | undefined,
+  ) => {
+    pendingConversationRoleSwitchRef.current = pending;
+    setPendingConversationRoleSwitchState(pending);
   };
   const updateDirectoryBrowser = (next: DirectoryBrowserState | undefined) => {
     directoryBrowserRef.current = next;
@@ -409,6 +424,7 @@ export function App() {
     setSettingResult(undefined);
     updatePendingCompactionThreshold(undefined);
     updatePendingContextCompaction(undefined);
+    updatePendingConversationRoleSwitch(undefined);
     updatePendingConversationTruncation(undefined);
     setRoleOperationResult(undefined);
     updatePendingRoleOperation(undefined);
@@ -744,6 +760,17 @@ export function App() {
           });
           return;
         }
+        if (event.operation === "switch_conversation_role") {
+          const pending = pendingConversationRoleSwitchRef.current;
+          if (!pending || pending.commandId !== event.commandId) return;
+          updatePendingConversationRoleSwitch(undefined);
+          setNotification({
+            id: ++notificationIdRef.current,
+            level: "info",
+            message: "会话角色已更换",
+          });
+          return;
+        }
         if (event.operation === "delete_conversation") {
           const pending = pendingConversationDeletionRef.current;
           if (!pending || pending.commandId !== event.commandId) return;
@@ -860,6 +887,16 @@ export function App() {
           if (!pending || pending.commandId !== event.commandId) return;
           updatePendingContextCompaction(undefined);
           setError(`手动压缩上下文失败：${event.message}`);
+          return;
+        }
+        if (
+          event.operation === "switch_conversation_role"
+          && event.commandId
+        ) {
+          const pending = pendingConversationRoleSwitchRef.current;
+          if (!pending || pending.commandId !== event.commandId) return;
+          updatePendingConversationRoleSwitch(undefined);
+          setError(`更换会话角色失败：${event.message}`);
           return;
         }
         if (
@@ -1034,6 +1071,10 @@ export function App() {
         if (pendingConversationTruncationRef.current) {
           updatePendingConversationTruncation(undefined);
           setError("回到此处的状态未确认，请检查恢复后的对话再重试。");
+        }
+        if (pendingConversationRoleSwitchRef.current) {
+          updatePendingConversationRoleSwitch(undefined);
+          setError("角色更换状态未确认，请检查恢复后的会话角色再重试。");
         }
         updateOutstandingRunId("");
         authFlowIdRef.current = "";
@@ -1224,7 +1265,11 @@ export function App() {
   };
   const submitPrompt = (text: string): boolean => {
     const trimmed = text.trim();
-    if (!trimmed || !conversationReadyRef.current) return false;
+    if (
+      !trimmed
+      || !conversationReadyRef.current
+      || pendingConversationRoleSwitchRef.current
+    ) return false;
     if (trimmed.length > MAX_PROMPT_CHARACTERS) {
       setPromptNotice(`单条消息最多 ${MAX_PROMPT_CHARACTERS.toLocaleString()} 个字符。`);
       return false;
@@ -1293,6 +1338,7 @@ export function App() {
       || Boolean(pendingGuidance)
       || Boolean(pendingConversationTruncation)
       || Boolean(pendingConversationDeletion)
+      || Boolean(pendingConversationRoleSwitch)
       || Boolean(pendingFocusRef.current)
     ) {
       return;
@@ -1312,6 +1358,7 @@ export function App() {
     conversationReady,
     outstandingRunId,
     pendingConversationDeletion,
+    pendingConversationRoleSwitch,
     pendingConversationTruncation,
     pendingGuidance,
     pendingPrompt,
@@ -1343,6 +1390,7 @@ export function App() {
       || pendingConversationTruncationRef.current
       || pendingPromptRef.current
       || pendingGuidanceRef.current
+      || pendingConversationRoleSwitchRef.current
     ) return;
     if (focusRef.current?.conversationId === conversationId) {
       setSelectingRole(false);
@@ -1368,6 +1416,7 @@ export function App() {
       || pendingConversationTruncationRef.current
       || pendingPromptRef.current
       || pendingGuidanceRef.current
+      || pendingConversationRoleSwitchRef.current
     ) return;
     const commandId = crypto.randomUUID();
     updatePendingFocus({ commandId, operation: "create_conversation" });
@@ -1396,6 +1445,7 @@ export function App() {
       )
       || pendingConversationDeletionRef.current
       || pendingConversationTruncationRef.current
+      || pendingConversationRoleSwitchRef.current
     ) {
       return false;
     }
@@ -1497,6 +1547,39 @@ export function App() {
     updatePendingContextCompaction(undefined);
     return false;
   };
+  const switchConversationRole = (roleId: string): boolean => {
+    const focus = focusRef.current;
+    if (
+      !focus
+      || !conversationReadyRef.current
+      || Boolean(state?.busy)
+      || Boolean(outstandingRunIdRef.current)
+      || Boolean(pendingPromptRef.current)
+      || Boolean(pendingGuidanceRef.current)
+      || queuedPromptsRef.current.length > 0
+      || Boolean(pendingConversationRoleSwitchRef.current)
+      || Boolean(pendingConversationTruncationRef.current)
+      || Boolean(pendingConversationDeletionRef.current)
+    ) {
+      return false;
+    }
+    const pending = {
+      commandId: crypto.randomUUID(),
+      roleId,
+    };
+    updatePendingConversationRoleSwitch(pending);
+    setError("");
+    if (send({
+      type: "switch_conversation_role",
+      commandId: pending.commandId,
+      sessionId: focus.sessionId,
+      conversationId: focus.conversationId,
+      focusId: focus.focusId,
+      roleId,
+    })) return true;
+    updatePendingConversationRoleSwitch(undefined);
+    return false;
+  };
   const beginRoleOperation = (
     operation: PendingRoleOperation["operation"],
     command: RoleCommandInput,
@@ -1528,6 +1611,7 @@ export function App() {
     clearAllQueuedPrompts();
     updatePendingConversationDeletion(undefined);
     updatePendingConversationTruncation(undefined);
+    updatePendingConversationRoleSwitch(undefined);
     updateOutstandingRunId("");
     setAuth({});
     setActiveCwd("");
@@ -1653,6 +1737,17 @@ export function App() {
               contextSource={state.contextUsage?.source}
               model={state.selectedModel}
               role={conversationRole}
+              roles={roles}
+              roleSwitchDisabled={
+                state.busy
+                || Boolean(outstandingRunId)
+                || Boolean(pendingPrompt)
+                || Boolean(pendingGuidance)
+                || queuedPrompts.length > 0
+                || Boolean(pendingConversationTruncation)
+                || Boolean(pendingConversationDeletion)
+              }
+              roleSwitching={Boolean(pendingConversationRoleSwitch)}
               thinkingLevel={state.thinkingLevel}
               availableThinkingLevels={state.availableThinkingLevels}
               compactionThresholdPercent={
@@ -1688,6 +1783,7 @@ export function App() {
               onThinking={setThinkingLevel}
               onCompactionThreshold={setCompactionThreshold}
               onCompact={compactContext}
+              onSwitchRole={switchConversationRole}
               onChangeCwd={closeProject}
               onOpenConversation={focusConversation}
               onRewind={truncateConversation}

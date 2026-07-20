@@ -158,6 +158,7 @@ function queuedCommandScope(command: QueuedCommand): "session" | "epoch" | "glob
     case "set_thinking":
     case "set_compaction_threshold":
     case "compact_context":
+    case "switch_conversation_role":
     case "rename_conversation":
     case "delete_conversation":
     case "truncate_conversation":
@@ -1066,6 +1067,24 @@ export class PiConnection {
         this.emitCommandComplete(command);
         return;
       }
+      case "switch_conversation_role": {
+        const view = this.requireCoordinatedFocus(
+          command.sessionId,
+          command.conversationId,
+          command.focusId,
+        );
+        const { coordinator } = await this.requireCoordination();
+        view.actor = await coordinator.switchConversationRole(
+          view.handle,
+          command.conversationId,
+          command.roleId,
+        );
+        this.publishCoordinatedState();
+        this.publishProjectSnapshotCoordinated();
+        this.publishFocusedConversationSnapshot();
+        this.emitCommandComplete(command);
+        return;
+      }
       case "rename_conversation": {
         const view = this.requireCoordinatedView(command.sessionId);
         const { coordinator } = await this.requireCoordination();
@@ -1259,6 +1278,7 @@ export class PiConnection {
           | "steer"
           | "set_compaction_threshold"
           | "compact_context"
+          | "switch_conversation_role"
           | "set_api_key";
       }
     >,
@@ -1798,6 +1818,10 @@ export class PiConnection {
       case "compact_context":
         throw new Error(
           "compact_context requires persistent project coordination",
+        );
+      case "switch_conversation_role":
+        throw new Error(
+          "switch_conversation_role requires persistent project coordination",
         );
       case "rename_conversation":
         return this.renameConversation(command.conversationId, command.name);

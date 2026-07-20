@@ -2335,6 +2335,64 @@ describe("PiConnection coordinated project view", () => {
     }
   });
 
+  it("switches the exact focused conversation role before acknowledging it", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      const role = await harness.roles.createRole({
+        name: "Reviewer",
+        description: "Reviews the current conversation",
+        systemPrompt: "Review carefully.",
+        model: { provider: "test", id: "model" },
+        toolMode: "full_access",
+        canManageSessions: false,
+      });
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        roleId: "default",
+      });
+      const focused = latestState(harness.events);
+      const commandId = randomUUID();
+
+      await harness.connection.handle({
+        type: "switch_conversation_role",
+        commandId,
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+        roleId: role.id,
+      });
+
+      expect(latestState(harness.events).toolMode).toBe("full_access");
+      expect(harness.events.findLast(
+        (event) => event.type === "conversation_snapshot",
+      )).toMatchObject({
+        type: "conversation_snapshot",
+        role: {
+          id: role.id,
+          revision: role.revision,
+          name: "Reviewer",
+        },
+      });
+      expect(harness.events).toContainEqual({
+        type: "command_complete",
+        operation: "switch_conversation_role",
+        commandId,
+        sessionId: SESSION_A,
+      });
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
   it("publishes the physically rewound snapshot before acknowledging the command", async () => {
     const harness = await coordinatedConnectionHarness();
     try {
