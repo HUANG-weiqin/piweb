@@ -269,8 +269,7 @@ describe("Chat", () => {
     expect(screen.queryByRole("button", { name: "↓ 回到最新消息" })).not.toBeInTheDocument();
   });
 
-  it("renders the latest received text after one millisecond", () => {
-    vi.useFakeTimers();
+  it("renders the latest received text immediately", () => {
     const firstChat: ChatState = {
       messages: [{
         id: "assistant-1",
@@ -311,11 +310,6 @@ describe("Chat", () => {
       activeRun: { id: "run-1", phase: "running" },
     }));
 
-    expect(screen.getByText("第一段")).toBeInTheDocument();
-    expect(screen.queryByText(completeText)).not.toBeInTheDocument();
-
-    act(() => vi.advanceTimersByTime(1));
-
     expect(markdown).toHaveTextContent(completeText);
     expect(scrollTo).toHaveBeenCalledWith({
       behavior: "smooth",
@@ -324,7 +318,6 @@ describe("Chat", () => {
   });
 
   it("shows the final received burst immediately when the run finishes", () => {
-    vi.useFakeTimers();
     const firstMessage = {
       id: "assistant-final-burst",
       runId: "run-final-burst",
@@ -352,7 +345,6 @@ describe("Chat", () => {
   });
 
   it("uses a cheap text node while receiving and renders markdown once settled", () => {
-    vi.useFakeTimers();
     const firstMessage = {
       id: "assistant-markdown",
       runId: "run-markdown",
@@ -378,8 +370,6 @@ describe("Chat", () => {
       busy: true,
       activeRun: { id: "run-markdown", phase: "running" },
     }));
-    act(() => vi.advanceTimersByTime(1));
-
     const streamingText = rendered.container.querySelector(
       ".message.assistant .streaming-markdown",
     );
@@ -427,7 +417,6 @@ describe("Chat", () => {
   });
 
   it("shows an active tool together with the latest received text", () => {
-    vi.useFakeTimers();
     const firstMessage = {
       id: "assistant-1",
       runId: "run-1",
@@ -468,8 +457,6 @@ describe("Chat", () => {
       busy: true,
       activeRun: { id: "run-1", phase: "running" },
     }));
-    act(() => vi.advanceTimersByTime(1));
-
     expect(screen.getByText("工具调用（1）")).toBeInTheDocument();
     expect(screen.getByText(completeText)).toBeInTheDocument();
   });

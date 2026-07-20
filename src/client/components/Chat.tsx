@@ -30,7 +30,6 @@ import { SessionMessageCard } from "./SessionMessageCard";
 
 type QueuedPromptStatus = "queued" | "submitting" | "attention";
 
-const STREAM_RENDER_INTERVAL_MS = 1;
 const FOLLOW_COMFORT_LIMIT_PX = 96;
 const FOLLOW_COMFORT_TARGET_PX = 32;
 const FOLLOW_REATTACH_LIMIT_PX = 2;
@@ -38,37 +37,6 @@ const COMPACT_NUMBER_FORMAT = new Intl.NumberFormat("en-US", {
   maximumSignificantDigits: 3,
   useGrouping: false,
 });
-
-function useStreamingChat(chat: ChatState, streaming: boolean): ChatState {
-  const [renderedChat, setRenderedChat] = useState(chat);
-  const latestChat = useRef(chat);
-  const renderTimer = useRef<number | undefined>(undefined);
-
-  useLayoutEffect(() => {
-    latestChat.current = chat;
-    if (!streaming) {
-      if (renderTimer.current !== undefined) {
-        window.clearTimeout(renderTimer.current);
-        renderTimer.current = undefined;
-      }
-      setRenderedChat(chat);
-      return;
-    }
-    if (renderTimer.current !== undefined || renderedChat === chat) return;
-    renderTimer.current = window.setTimeout(() => {
-      renderTimer.current = undefined;
-      setRenderedChat(latestChat.current);
-    }, STREAM_RENDER_INTERVAL_MS);
-  }, [chat, renderedChat, streaming]);
-
-  useEffect(() => () => {
-    if (renderTimer.current !== undefined) {
-      window.clearTimeout(renderTimer.current);
-    }
-  }, []);
-
-  return streaming ? renderedChat : chat;
-}
 
 function distanceFromBottom(transcript: HTMLElement): number {
   return Math.max(
@@ -278,10 +246,6 @@ export function Chat({
     setCompactionThresholdDraft(compactionThresholdPercent);
     requestedCompactionThreshold.current = compactionThresholdPercent;
   }, [compactionThresholdBusy, compactionThresholdPercent]);
-  const transcriptChat = useStreamingChat(
-    chat,
-    activeRun?.phase === "running",
-  );
   const contextTokenText = useMemo(() => formatContextUsage({
     contextTokenCount,
     contextWindow,
@@ -289,15 +253,15 @@ export function Chat({
     contextSource,
   }), [contextPercent, contextSource, contextTokenCount, contextWindow]);
   const tokenUsage = useMemo(
-    () => getSessionTokenUsage(transcriptChat, sessionTokenUsage),
-    [sessionTokenUsage, transcriptChat],
+    () => getSessionTokenUsage(chat, sessionTokenUsage),
+    [chat, sessionTokenUsage],
   );
   const items = useMemo(
-    () => transcriptChat.items ?? transcriptChat.messages.map((message) => ({
+    () => chat.items ?? chat.messages.map((message) => ({
       kind: "message" as const,
       ...message,
     })),
-    [transcriptChat.items, transcriptChat.messages],
+    [chat.items, chat.messages],
   );
   const blocks = useMemo(() => transcriptBlocks(items), [items]);
   const openConversationRef = useRef(onOpenConversation);
@@ -355,7 +319,7 @@ export function Chat({
     if (transcriptRef.current) {
       lastScrollTopRef.current = transcriptRef.current.scrollTop;
     }
-  }, [compacting, followLatest, transcriptChat]);
+  }, [chat, compacting, followLatest]);
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
