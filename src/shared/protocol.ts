@@ -306,17 +306,21 @@ export const clientCommandSchema = clientCommandUnionSchema.superRefine(
 
 export type ClientCommand = z.infer<typeof clientCommandSchema>;
 export type AcknowledgedSettingOperation = "select_model" | "set_api_key";
+const ACKNOWLEDGED_COMMAND_OPERATIONS = [
+  "select_model",
+  "set_api_key",
+  "steer",
+  "set_compaction_threshold",
+  "compact_context",
+  "switch_conversation_role",
+  "delete_conversation",
+  "truncate_conversation",
+  "create_role",
+  "update_role",
+  "delete_role",
+] as const;
 export type AcknowledgedCommandOperation =
-  | AcknowledgedSettingOperation
-  | "steer"
-  | "set_compaction_threshold"
-  | "compact_context"
-  | "switch_conversation_role"
-  | "delete_conversation"
-  | "truncate_conversation"
-  | "create_role"
-  | "update_role"
-  | "delete_role";
+  typeof ACKNOWLEDGED_COMMAND_OPERATIONS[number];
 export type ThinkingLevel = Extract<ClientCommand, { type: "set_thinking" }>["level"];
 export type ToolMode = "read_only" | "full_access";
 
@@ -548,6 +552,13 @@ export type SessionEvent =
   | { type: "usage"; usage: TokenUsage };
 
 export type ErrorScope = "auth" | "command" | "protocol" | "session" | "settings";
+const FOCUS_ATTACHED_OPERATIONS = [
+  "initialize",
+  "focus_conversation",
+  "create_conversation",
+] as const;
+export type FocusAttachedOperation =
+  typeof FOCUS_ATTACHED_OPERATIONS[number];
 
 export type ServerEvent =
   | { type: "hello"; protocolVersion: number; startupCwd: string }
@@ -555,7 +566,7 @@ export type ServerEvent =
   | { type: "state"; state: PublicState }
   | {
       type: "focus_attached";
-      operation: "initialize" | "focus_conversation" | "create_conversation";
+      operation: FocusAttachedOperation;
       commandId: string;
       sessionId: string;
       projectId: string;
@@ -957,7 +968,7 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("state"), state: publicStateSchema }),
   z.object({
     type: z.literal("focus_attached"),
-    operation: z.enum(["initialize", "focus_conversation", "create_conversation"]),
+    operation: z.enum(FOCUS_ATTACHED_OPERATIONS),
     commandId: commandIdSchema,
     sessionId: sessionIdSchema,
     projectId: z.string().uuid(),
@@ -1062,17 +1073,7 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("auth_complete"), authFlowId: authFlowIdSchema, provider: z.string() }),
   z.object({
     type: z.literal("command_complete"),
-    operation: z.enum([
-      "select_model",
-      "steer",
-      "set_api_key",
-      "set_compaction_threshold",
-      "delete_conversation",
-      "truncate_conversation",
-      "create_role",
-      "update_role",
-      "delete_role",
-    ]),
+    operation: z.enum(ACKNOWLEDGED_COMMAND_OPERATIONS),
     commandId: commandIdSchema,
     sessionId: sessionIdSchema,
   }),

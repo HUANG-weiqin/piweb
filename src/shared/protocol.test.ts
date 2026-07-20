@@ -902,3 +902,22 @@ describe("parseClientCommand", () => {
     })).toThrow();
   });
 });
+
+describe("parseServerEvent", () => {
+  it.each([
+    "compact_context",
+    "switch_conversation_role",
+  ] as const)("accepts the %s completion emitted by the server", (operation) => {
+    expect(parseServerEvent({
+      type: "command_complete",
+      operation,
+      commandId,
+      sessionId,
+    })).toEqual({
+      type: "command_complete",
+      operation,
+      commandId,
+      sessionId,
+    });
+  });
+});

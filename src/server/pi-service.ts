@@ -8,10 +8,12 @@ import type {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import type {
+  AcknowledgedCommandOperation,
   ClientCommand,
   ConversationActivity,
   ConversationHistoryItem,
   ConversationSummary,
+  FocusAttachedOperation,
   PublicState,
   ServerEvent,
   SessionEvent,
@@ -1246,7 +1248,7 @@ export class PiConnection {
 
   private emitFocusAttached(
     view: CoordinatedProjectView,
-    operation: "initialize" | "focus_conversation" | "create_conversation",
+    operation: FocusAttachedOperation,
     commandId: string,
   ): void {
     if (this.coordinatedView !== view || this.disposed) return;
@@ -1266,22 +1268,7 @@ export class PiConnection {
   }
 
   private emitCommandComplete(
-    command: Extract<
-      ClientCommand,
-      {
-        type:
-          | "delete_conversation"
-          | "truncate_conversation"
-          | "create_role"
-          | "update_role"
-          | "delete_role"
-          | "steer"
-          | "set_compaction_threshold"
-          | "compact_context"
-          | "switch_conversation_role"
-          | "set_api_key";
-      }
-    >,
+    command: Extract<ClientCommand, { type: AcknowledgedCommandOperation }>,
   ): void {
     this.emit({
       type: "command_complete",
