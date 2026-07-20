@@ -225,6 +225,9 @@ function latestCommand<T extends ClientCommand["type"]>(
 }
 
 function startFromSetup(): string {
+  if (!screen.queryByRole("textbox", { name: "项目目录" })) {
+    fireEvent.click(screen.getByRole("button", { name: "开启工作区" }));
+  }
   fireEvent.click(screen.getByRole("button", { name: "进入项目" }));
   return latestSessionId();
 }
@@ -247,8 +250,131 @@ function defaultRole(overrides: Partial<RoleTemplate> = {}): RoleTemplate {
 }
 
 describe("App", () => {
+  it("shows an empty workbench before the first workspace is opened", () => {
+    render(<App />);
+
+    expect(screen.getByRole("navigation", { name: "工作区" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "项目会话栏" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "还没有打开工作区" }))
+      .toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "项目目录" }))
+      .not.toBeInTheDocument();
+    expect(socketMock.send).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "initialize" }),
+    );
+  });
+
+  it("remembers an opened workspace and restores the last one on startup", () => {
+    localStorage.setItem("piweb.workspaces", JSON.stringify([
+      "E:\\first",
+      "E:\\last",
+    ]));
+    localStorage.setItem("piweb.lastCwd", "E:\\last");
+
+    render(<App />);
+
+    expect(latestCommand("initialize")).toMatchObject({
+      cwd: "E:\\last",
+      conversation: { kind: "recent" },
+    });
+    expect(screen.getByRole("button", { name: "打开工作区 last" }))
+      .toHaveAttribute("aria-current", "true");
+  });
+
+  it("switches workspaces through the left rail", () => {
+    localStorage.setItem("piweb.workspaces", JSON.stringify([
+      "E:\\first",
+      "E:\\second",
+    ]));
+    localStorage.setItem("piweb.lastCwd", "E:\\first");
+    render(<App />);
+    const firstSessionId = latestCommand("initialize").sessionId;
+
+    fireEvent.click(screen.getByRole("button", {
+      name: "打开工作区 second",
+    }));
+
+    expect(socketMock.send).toHaveBeenCalledWith({
+      type: "close_session",
+      sessionId: firstSessionId,
+    });
+    expect(latestCommand("initialize")).toMatchObject({
+      cwd: "E:\\second",
+      conversation: { kind: "recent" },
+    });
+    expect(localStorage.getItem("piweb.lastCwd")).toBe("E:\\second");
+  });
+
+  it("keeps a missing workspace visible and allows switching away", () => {
+    socketMock.autoFocus = false;
+    localStorage.setItem("piweb.workspaces", JSON.stringify([
+      "E:\\missing",
+      "E:\\other",
+    ]));
+    localStorage.setItem("piweb.lastCwd", "E:\\missing");
+    render(<App />);
+    const missing = latestCommand("initialize");
+
+    act(() => socketMock.emit?.({
+      type: "error",
+      scope: "command",
+      operation: "initialize",
+      commandId: missing.commandId,
+      sessionId: missing.sessionId,
+      message: "Directory does not exist",
+    }));
+
+    expect(screen.getByRole("heading", { name: "工作区不可用" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("button", {
+      name: "打开工作区 missing（不可用）",
+    })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", {
+      name: "打开工作区 other",
+    }));
+    expect(latestCommand("initialize").cwd).toBe("E:\\other");
+    expect(JSON.parse(localStorage.getItem("piweb.workspaces") ?? "[]"))
+      .toEqual(["E:\\missing", "E:\\other"]);
+  });
+
+  it("removes an unavailable workspace and opens the remaining workspace", () => {
+    socketMock.autoFocus = false;
+    localStorage.setItem("piweb.workspaces", JSON.stringify([
+      "E:\\other",
+      "E:\\missing",
+    ]));
+    localStorage.setItem("piweb.lastCwd", "E:\\missing");
+    render(<App />);
+    const missing = latestCommand("initialize");
+
+    act(() => socketMock.emit?.({
+      type: "error",
+      scope: "command",
+      operation: "initialize",
+      commandId: missing.commandId,
+      sessionId: missing.sessionId,
+      message: "Directory does not exist",
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "从列表移除" }));
+
+    expect(latestCommand("initialize")).toMatchObject({
+      cwd: "E:\\other",
+      conversation: { kind: "recent" },
+    });
+    expect(JSON.parse(localStorage.getItem("piweb.workspaces") ?? "[]"))
+      .toEqual(["E:\\other"]);
+    expect(localStorage.getItem("piweb.lastCwd")).toBe("E:\\other");
+    expect(screen.queryByRole("button", {
+      name: /打开工作区 missing/,
+    })).not.toBeInTheDocument();
+  });
+
   it("browses folders in-app and selects only from the matching listing", () => {
     render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "开启工作区" }));
     const input = screen.getByRole("textbox", { name: "项目目录" });
     fireEvent.change(input, { target: { value: "E:\\typed" } });
     fireEvent.click(screen.getByRole("button", { name: "选择文件夹" }));
@@ -312,6 +438,7 @@ describe("App", () => {
 
   it("keeps the typed setup path when in-app selection is cancelled", () => {
     render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "开启工作区" }));
     const input = screen.getByRole("textbox", { name: "项目目录" });
     fireEvent.change(input, { target: { value: "E:\\typed" } });
     fireEvent.click(screen.getByRole("button", { name: "选择文件夹" }));
@@ -325,6 +452,7 @@ describe("App", () => {
 
   it("keeps the directory browser usable after a correlated listing error", () => {
     render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "开启工作区" }));
     fireEvent.click(screen.getByRole("button", { name: "选择文件夹" }));
     const command = latestCommand("browse_directory");
 
@@ -348,6 +476,7 @@ describe("App", () => {
 
   it("closes transient directory browsing when the socket disconnects", () => {
     render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "开启工作区" }));
     const input = screen.getByRole("textbox", { name: "项目目录" });
     fireEvent.change(input, { target: { value: "E:\\typed" } });
     fireEvent.click(screen.getByRole("button", { name: "选择文件夹" }));
@@ -364,6 +493,7 @@ describe("App", () => {
 
     render(<App />);
 
+    fireEvent.click(screen.getByRole("button", { name: "开启工作区" }));
     expect(screen.getByText(/协议版本不兼容/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "协议不兼容" })).toBeDisabled();
     expect(socketMock.send).not.toHaveBeenCalled();
@@ -377,6 +507,7 @@ describe("App", () => {
 
     render(<App />);
 
+    fireEvent.click(screen.getByRole("button", { name: "开启工作区" }));
     expect(screen.getByRole("textbox", { name: "项目目录" })).toHaveValue("E:\\default");
   });
 
@@ -1075,6 +1206,10 @@ describe("App", () => {
       },
     }));
     fireEvent.click(screen.getByRole("button", { name: /Pi Web/ }));
+    fireEvent.change(screen.getByRole("textbox", { name: "项目目录" }), {
+      target: { value: "E:\\other" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "进入项目" }));
 
     act(() => {
       socketMock.emit?.({
@@ -1098,7 +1233,8 @@ describe("App", () => {
       });
     });
 
-    expect(screen.getByRole("textbox", { name: "项目目录" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "正在打开工作区" }))
+      .toBeInTheDocument();
     expect(screen.queryByText("stale response")).not.toBeInTheDocument();
   });
 
@@ -1480,6 +1616,10 @@ describe("App", () => {
 
     expect(screen.getByRole("button", { name: "发送" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Pi Web/ }));
+    fireEvent.change(screen.getByRole("textbox", { name: "项目目录" }), {
+      target: { value: "E:\\other" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "进入项目" }));
     expect(latestCommand("close_session")).toEqual({ type: "close_session", sessionId });
   });
 
@@ -1758,6 +1898,7 @@ describe("App", () => {
       startupCwd: "E:\\default",
     }));
 
+    fireEvent.click(screen.getByRole("button", { name: "添加工作区" }));
     expect(screen.getByRole("textbox", { name: "项目目录" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "协议不兼容" })).toBeDisabled();
     expect(screen.queryByRole("textbox", { name: "给 Pi 发送消息" })).not.toBeInTheDocument();
@@ -1980,7 +2121,8 @@ describe("App", () => {
         providers: [],
       },
     }));
-    expect(screen.getByRole("textbox", { name: "项目目录" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "正在打开工作区" }))
+      .toBeInTheDocument();
 
     act(() => socketMock.rawEmit?.({
       type: "focus_attached",
@@ -2507,7 +2649,7 @@ describe("App", () => {
       });
     });
 
-    expect(screen.getByRole("button", { name: "进入项目" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "开启工作区" })).toBeEnabled();
     expect(screen.queryByText(/协议版本不兼容/)).not.toBeInTheDocument();
   });
 });

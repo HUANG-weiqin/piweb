@@ -297,7 +297,7 @@ pre {
   height: 100vh;
   height: 100dvh;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto auto minmax(0, 1fr);
   overflow: hidden;
 }
 
@@ -1412,7 +1412,232 @@ pre {
   text-align: right;
 }
 
-/* Project conversations */
+/* Workspaces and project conversations */
+
+.workspace-rail {
+  position: relative;
+  z-index: 10;
+  width: 60px;
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 8px;
+  border-right: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel) 97%, transparent);
+}
+
+.workspace-rail-brand {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font: 700 23px Georgia, serif;
+}
+
+.workspace-rail-list {
+  min-height: 0;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  overflow-y: auto;
+  padding: 2px;
+  scrollbar-width: none;
+}
+
+.workspace-rail-list::-webkit-scrollbar {
+  display: none;
+}
+
+.workspace-rail-item,
+.workspace-rail-add {
+  width: 40px;
+  min-height: 40px;
+  padding: 0;
+  border-radius: 10px;
+}
+
+.workspace-rail-item {
+  --workspace-tone: var(--accent);
+  position: relative;
+  flex: 0 0 auto;
+  border-color: color-mix(in srgb, var(--workspace-tone) 55%, var(--line));
+  color: color-mix(in srgb, var(--workspace-tone) 82%, white);
+  background: color-mix(in srgb, var(--workspace-tone) 78%, #171717);
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.workspace-rail-item:not(:disabled):hover {
+  background: color-mix(in srgb, var(--workspace-tone) 88%, #171717);
+}
+
+.workspace-rail-item.active {
+  border-color: var(--panel);
+  box-shadow:
+    0 0 0 2px var(--line-strong),
+    0 6px 16px rgb(28 25 19 / 16%);
+}
+
+.workspace-rail-item.unavailable {
+  filter: saturate(0.45);
+  opacity: 0.68;
+}
+
+.workspace-rail-warning {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  border: 2px solid var(--panel);
+  border-radius: 999px;
+  color: white;
+  background: var(--danger-solid);
+  font: 800 10px/1 Inter, sans-serif;
+}
+
+.workspace-rail-item.tone-0 { --workspace-tone: #356ca7; }
+.workspace-rail-item.tone-1 { --workspace-tone: #a04f1b; }
+.workspace-rail-item.tone-2 { --workspace-tone: #6e479a; }
+.workspace-rail-item.tone-3 { --workspace-tone: #287666; }
+.workspace-rail-item.tone-4 { --workspace-tone: #8d6420; }
+.workspace-rail-item.tone-5 { --workspace-tone: #9b3f65; }
+.workspace-rail-item.tone-6 { --workspace-tone: #526f2c; }
+.workspace-rail-item.tone-7 { --workspace-tone: #47627e; }
+
+.workspace-rail-add {
+  flex: 0 0 auto;
+  border-color: transparent;
+  color: var(--muted);
+  background: transparent;
+  font-size: 25px;
+  font-weight: 350;
+}
+
+.workspace-rail-add:not(:disabled):hover {
+  color: var(--accent);
+  background: var(--soft);
+}
+
+.workspace-placeholder {
+  min-width: 0;
+  height: 100vh;
+  height: 100dvh;
+  display: grid;
+  place-items: center;
+  overflow: auto;
+  padding: 32px;
+}
+
+.workspace-placeholder-content {
+  width: min(520px, 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.workspace-placeholder-content h1 {
+  color: inherit;
+  font-size: clamp(26px, 4vw, 38px);
+}
+
+.workspace-placeholder-content > p:not(.eyebrow) {
+  max-width: 440px;
+  line-height: 1.7;
+}
+
+.workspace-placeholder-content code {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: var(--soft);
+  font-size: 12px;
+}
+
+.workspace-placeholder-mark {
+  width: 58px;
+  height: 58px;
+  display: grid;
+  place-items: center;
+  margin-bottom: 4px;
+  border-radius: 17px;
+  color: var(--on-accent);
+  background: var(--accent);
+  box-shadow: var(--shadow-sm);
+  font: 700 32px Georgia, serif;
+}
+
+.workspace-placeholder-mark.warning {
+  background: var(--danger-solid);
+  font: 800 28px Inter, sans-serif;
+}
+
+.workspace-placeholder-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.workspace-opening-spinner {
+  width: 36px;
+  height: 36px;
+  margin-bottom: 8px;
+  border: 3px solid color-mix(in srgb, var(--muted) 20%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: agent-activity-spin 850ms linear infinite;
+}
+
+.workspace-setup-dialog {
+  position: relative;
+  width: min(520px, 100%);
+}
+
+.workspace-setup-dialog .setup-shell {
+  min-height: 0;
+  padding: 0;
+}
+
+.workspace-setup-dialog .setup-card {
+  width: 100%;
+  background: var(--panel);
+  box-shadow: var(--shadow-lg);
+}
+
+.workspace-setup-close {
+  position: absolute;
+  z-index: 2;
+  top: 14px;
+  right: 14px;
+  width: 34px;
+  min-height: 34px;
+  padding: 0;
+  border-color: var(--line);
+  color: var(--muted);
+  background: var(--soft);
+  font-size: 20px;
+}
+
+.workspace-setup-close:not(:disabled):hover {
+  color: var(--accent);
+  background: var(--soft-hover);
+}
 
 .conversation-sidebar {
   position: relative;
@@ -2956,11 +3181,21 @@ pre {
     display: block;
   }
 
-  .conversation-sidebar {
+  .workspace-rail {
     position: fixed;
     top: 0;
     bottom: 0;
     left: 0;
+    width: 52px;
+    padding-right: 6px;
+    padding-left: 6px;
+  }
+
+  .conversation-sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 52px;
     width: min(86vw, 320px);
     box-shadow: 18px 0 52px rgb(18 16 12 / 28%);
   }
@@ -2980,6 +3215,11 @@ pre {
 
   .conversation-sidebar.collapsed .conversation-sidebar-footer {
     display: none;
+  }
+
+  .workbench-main,
+  .workspace-placeholder {
+    margin-left: 52px;
   }
 
   .workbench-main .topbar {
@@ -3024,6 +3264,10 @@ pre {
 
   .setup-shell {
     padding: 14px;
+  }
+
+  .workspace-setup-dialog .setup-shell {
+    padding: 0;
   }
 
   .setup-card {
@@ -3138,6 +3382,7 @@ pre {
   }
 
   .conversation-activity-spinner,
+  .workspace-opening-spinner,
   .compaction-spinner,
   .thinking-spinner,
   .tool-spinner {

@@ -32,11 +32,55 @@ import {
   type RoleOperationResult,
 } from "./components/RoleManagerDialog";
 import { RoleSelectionPage } from "./components/RoleSelectionPage";
+import {
+  WorkspaceRail,
+  workspaceKey,
+} from "./components/WorkspaceRail";
+import { WorkspacePlaceholder } from "./components/WorkspacePlaceholder";
 import { PiSocket } from "./lib/socket";
 import { readStoredString, writeStoredString } from "./lib/storage";
+import { useModalFocus } from "./lib/use-modal-focus";
 
 const CWD_KEY = "piweb.lastCwd";
+const WORKSPACES_KEY = "piweb.workspaces";
+const MAX_WORKSPACES = 30;
 const MAX_QUEUED_PROMPTS = 20;
+
+interface InitialWorkspaceState {
+  workspaces: string[];
+  activeCwd: string;
+}
+
+function loadInitialWorkspaceState(): InitialWorkspaceState {
+  const legacyCwd = readStoredString(CWD_KEY).trim();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readStoredString(WORKSPACES_KEY) || "[]");
+  } catch {
+    parsed = [];
+  }
+  const workspaces: string[] = [];
+  const seen = new Set<string>();
+  if (Array.isArray(parsed)) {
+    for (const value of parsed) {
+      if (typeof value !== "string" || !value.trim()) continue;
+      const cwd = value.trim();
+      const key = workspaceKey(cwd);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      workspaces.push(cwd);
+      if (workspaces.length === MAX_WORKSPACES) break;
+    }
+  }
+  if (legacyCwd && !seen.has(workspaceKey(legacyCwd))) {
+    workspaces.unshift(legacyCwd);
+    if (workspaces.length > MAX_WORKSPACES) workspaces.pop();
+  }
+  const activeCwd = workspaces.find(
+    (cwd) => workspaceKey(cwd) === workspaceKey(legacyCwd),
+  ) ?? workspaces[0] ?? "";
+  return { workspaces, activeCwd };
+}
 
 interface PendingPrompt {
   sessionId: string;
@@ -119,12 +163,18 @@ type RoleCommandInput =
     };
 
 export function App() {
+  const [initialWorkspaces] = useState(loadInitialWorkspaceState);
   const [transportOnline, setTransportOnline] = useState(false);
   const [protocolReady, setProtocolReady] = useState(false);
   const [protocolError, setProtocolError] = useState("");
-  const [setupCwd, setSetupCwd] = useState(() => readStoredString(CWD_KEY));
-  const [activeCwd, setActiveCwd] = useState("");
-  const activeCwdRef = useRef("");
+  const [workspaces, setWorkspaces] = useState(initialWorkspaces.workspaces);
+  const workspacesRef = useRef(initialWorkspaces.workspaces);
+  const [unavailableWorkspaceKeys, setUnavailableWorkspaceKeys] =
+    useState<Set<string>>(new Set());
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [setupCwd, setSetupCwd] = useState(initialWorkspaces.activeCwd);
+  const [activeCwd, setActiveCwd] = useState(initialWorkspaces.activeCwd);
+  const activeCwdRef = useRef(initialWorkspaces.activeCwd);
   const sessionIdRef = useRef("");
   const projectIdRef = useRef("");
   const conversationIdRef = useRef("");
@@ -214,6 +264,39 @@ export function App() {
   const updatePendingPrompt = (prompt: PendingPrompt | undefined) => {
     pendingPromptRef.current = prompt;
     setPendingPrompt(prompt);
+  };
+  const rememberWorkspace = (cwd: string) => {
+    const current = workspacesRef.current;
+    const key = workspaceKey(cwd);
+    const existingIndex = current.findIndex(
+      (candidate) => workspaceKey(candidate) === key,
+    );
+    const next = existingIndex === -1
+      ? [...current, cwd].slice(-MAX_WORKSPACES)
+      : current.map((candidate, index) =>
+          index === existingIndex ? cwd : candidate
+        );
+    workspacesRef.current = next;
+    setWorkspaces(next);
+    writeStoredString(WORKSPACES_KEY, JSON.stringify(next));
+  };
+  const markWorkspaceAvailable = (cwd: string) => {
+    const key = workspaceKey(cwd);
+    setUnavailableWorkspaceKeys((current) => {
+      if (!current.has(key)) return current;
+      const next = new Set(current);
+      next.delete(key);
+      return next;
+    });
+  };
+  const markWorkspaceUnavailable = (cwd: string) => {
+    const key = workspaceKey(cwd);
+    setUnavailableWorkspaceKeys((current) => {
+      if (current.has(key)) return current;
+      const next = new Set(current);
+      next.add(key);
+      return next;
+    });
   };
   const updatePendingGuidance = (
     guidance: PendingGuidance | undefined,
@@ -454,6 +537,8 @@ export function App() {
     setActiveCwd(nextState.cwd);
     activeCwdRef.current = nextState.cwd;
     setSetupCwd(nextState.cwd);
+    rememberWorkspace(nextState.cwd);
+    markWorkspaceAvailable(nextState.cwd);
     writeStoredString(CWD_KEY, nextState.cwd);
     setError(nextState.registryError ?? "");
     if (
@@ -932,6 +1017,9 @@ export function App() {
             || pending.operation !== event.operation
           ) return;
           updatePendingFocus(undefined);
+          if (event.operation === "initialize" && activeCwdRef.current) {
+            markWorkspaceUnavailable(activeCwdRef.current);
+          }
           setError(event.message);
           return;
         }
@@ -1142,6 +1230,7 @@ export function App() {
       kind: "recent",
     },
   ) => {
+    const normalizedCwd = cwd.trim();
     const sessionId = crypto.randomUUID();
     const commandId = crypto.randomUUID();
     setError("");
@@ -1151,8 +1240,11 @@ export function App() {
     updatePendingGuidance(undefined);
     clearAllQueuedPrompts();
     clearSessionProjection();
-    setActiveCwd(cwd);
-    activeCwdRef.current = cwd;
+    setSetupOpen(false);
+    rememberWorkspace(normalizedCwd);
+    writeStoredString(CWD_KEY, normalizedCwd);
+    setActiveCwd(normalizedCwd);
+    activeCwdRef.current = normalizedCwd;
     sessionIdRef.current = sessionId;
     projectIdRef.current = "";
     focusRef.current = undefined;
@@ -1169,7 +1261,7 @@ export function App() {
       type: "initialize",
       commandId,
       sessionId,
-      cwd,
+      cwd: normalizedCwd,
       conversation,
     });
   };
@@ -1595,30 +1687,70 @@ export function App() {
       updatePendingRoleOperation(undefined);
     }
   };
-  const closeProject = () => {
+  const switchWorkspace = (cwd: string) => {
+    if (
+      workspaceKey(cwd) === workspaceKey(activeCwdRef.current)
+      && state
+    ) {
+      setSetupOpen(false);
+      updateDirectoryBrowser(undefined);
+      return;
+    }
+    const sessionId = sessionIdRef.current;
+    if (sessionId) send({ type: "close_session", sessionId });
+    initialize(cwd);
+  };
+  const removeWorkspace = (cwd: string) => {
+    const key = workspaceKey(cwd);
+    const next = workspacesRef.current.filter(
+      (candidate) => workspaceKey(candidate) !== key,
+    );
+    workspacesRef.current = next;
+    setWorkspaces(next);
+    writeStoredString(WORKSPACES_KEY, JSON.stringify(next));
+    setUnavailableWorkspaceKeys((current) => {
+      if (!current.has(key)) return current;
+      const updated = new Set(current);
+      updated.delete(key);
+      return updated;
+    });
+    if (workspaceKey(activeCwdRef.current) !== key) return;
+
+    const fallback = next.at(-1);
+    if (fallback) {
+      switchWorkspace(fallback);
+      return;
+    }
+
     const sessionId = sessionIdRef.current;
     if (sessionId) send({ type: "close_session", sessionId });
     activeCwdRef.current = "";
     sessionIdRef.current = "";
-    projectIdRef.current = "";
     conversationIdRef.current = "";
     focusRef.current = undefined;
-    authFlowIdRef.current = "";
-    setDraft("");
-    setPromptNotice("");
-    updatePendingPrompt(undefined);
-    updatePendingGuidance(undefined);
-    clearAllQueuedPrompts();
-    updatePendingConversationDeletion(undefined);
-    updatePendingConversationTruncation(undefined);
-    updatePendingConversationRoleSwitch(undefined);
-    updateOutstandingRunId("");
-    setAuth({});
+    writeStoredString(CWD_KEY, "");
     setActiveCwd("");
+    setSetupCwd("");
+    setError("");
     clearSessionProjection();
-    autoOpened.current = false;
     dispatch({ type: "reset" });
   };
+  const openWorkspaceDialog = () => {
+    setSetupCwd(activeCwdRef.current || setupCwd);
+    setSetupOpen(true);
+    setDrawer(false);
+    setRoleManagerOpen(false);
+    if (!protocolError) setError("");
+  };
+  const closeWorkspaceDialog = () => {
+    setSetupOpen(false);
+    updateDirectoryBrowser(undefined);
+  };
+  const workspaceSetupFocusRef = useModalFocus<HTMLElement>(
+    setupOpen && !directoryBrowser,
+    setupOpen ? "workspace-setup" : "",
+    closeWorkspaceDialog,
+  );
   const online = transportOnline && protocolReady;
   const authModalVisible = Boolean(auth.request || auth.progress);
   const extensionPending = online
@@ -1628,7 +1760,8 @@ export function App() {
     : undefined;
   const blockingModalVisible = Boolean(
     authModalVisible
-    || extensionPending,
+    || extensionPending
+    || setupOpen
   );
   const extensionDialog = <ExtensionDialog
     pending={extensionUI[0]}
@@ -1666,29 +1799,83 @@ export function App() {
     </div>}
   </div>;
 
+  const workspaceRail = <WorkspaceRail
+    workspaces={workspaces}
+    activeCwd={activeCwd}
+    unavailable={unavailableWorkspaceKeys}
+    onSelect={switchWorkspace}
+    onAdd={openWorkspaceDialog}
+  />;
+  const workspaceSetupDialog = setupOpen && <div
+    className="modal-backdrop workspace-setup-backdrop"
+    role="presentation"
+    onMouseDown={(event) => {
+      if (event.target === event.currentTarget) closeWorkspaceDialog();
+    }}
+  >
+    <section
+      ref={workspaceSetupFocusRef}
+      className="workspace-setup-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-label="开启工作区"
+      tabIndex={-1}
+    >
+      <button
+        type="button"
+        className="workspace-setup-close"
+        aria-label="关闭开启工作区"
+        onClick={closeWorkspaceDialog}
+      >×</button>
+      <Setup
+        cwd={setupCwd}
+        online={online}
+        pickingDirectory={Boolean(directoryBrowser)}
+        unavailableLabel={protocolError ? "协议不兼容" : undefined}
+        onCwdChange={setSetupCwd}
+        onPickDirectory={openDirectoryBrowser}
+        onStart={switchWorkspace}
+      />
+    </section>
+  </div>;
+  const directoryBrowserDialog = directoryBrowser && <DirectoryBrowserDialog
+    listing={directoryBrowser.listing}
+    loading={Boolean(directoryBrowser.commandId)}
+    error={directoryBrowser.error || undefined}
+    online={online}
+    onNavigate={browseDirectory}
+    onOpenStartup={() => browseDirectory()}
+    onSelect={(path) => {
+      setSetupCwd(path);
+      updateDirectoryBrowser(undefined);
+    }}
+    onClose={() => updateDirectoryBrowser(undefined)}
+  />;
+
   if (!activeCwd || !state) return <>
-    <Setup
-      cwd={setupCwd}
-      online={online}
-      pickingDirectory={Boolean(directoryBrowser)}
-      unavailableLabel={protocolError ? "协议不兼容" : undefined}
-      onCwdChange={setSetupCwd}
-      onPickDirectory={openDirectoryBrowser}
-      onStart={initialize}
-    />
-    {directoryBrowser && <DirectoryBrowserDialog
-      listing={directoryBrowser.listing}
-      loading={Boolean(directoryBrowser.commandId)}
-      error={directoryBrowser.error || undefined}
-      online={online}
-      onNavigate={browseDirectory}
-      onOpenStartup={() => browseDirectory()}
-      onSelect={(path) => {
-        setSetupCwd(path);
-        updateDirectoryBrowser(undefined);
-      }}
-      onClose={() => updateDirectoryBrowser(undefined)}
-    />}
+    <div className="workbench">
+      {workspaceRail}
+      <ConversationSidebar
+        conversations={[]}
+        truncated={false}
+        collapsed={sidebarCollapsed}
+        online={false}
+        onToggleCollapsed={setSidebarCollapsed}
+        onSelect={() => undefined}
+        onCreate={() => undefined}
+        onRename={() => undefined}
+        onDelete={() => false}
+      />
+      <WorkspacePlaceholder
+        cwd={activeCwd}
+        unavailable={unavailableWorkspaceKeys.has(workspaceKey(activeCwd))}
+        onOpen={openWorkspaceDialog}
+        onRemove={() => removeWorkspace(activeCwd)}
+        onRetry={() => switchWorkspace(activeCwd)}
+      />
+    </div>
+    {workspaceSetupDialog}
+    {directoryBrowserDialog}
     {extensionDialog}
     {feedback}
   </>;
@@ -1699,6 +1886,7 @@ export function App() {
 
   return <>
     <div className="workbench">
+      {workspaceRail}
       <ConversationSidebar
         conversations={conversations}
         truncated={conversationIndexTruncated}
@@ -1725,7 +1913,7 @@ export function App() {
               onStart={createConversation}
               onManageRoles={() => setRoleManagerOpen(true)}
               onSettings={() => setDrawer(true)}
-              onChangeProject={closeProject}
+              onChangeProject={openWorkspaceDialog}
             />
           : <Chat
               chat={chat}
@@ -1787,7 +1975,7 @@ export function App() {
               onCompactionThreshold={setCompactionThreshold}
               onCompact={compactContext}
               onSwitchRole={switchConversationRole}
-              onChangeCwd={closeProject}
+              onChangeCwd={openWorkspaceDialog}
               onOpenConversation={focusConversation}
               onRewind={truncateConversation}
               rewindingMessageId={pendingConversationTruncation?.messageId}
@@ -1861,6 +2049,8 @@ export function App() {
       authFlowIdRef.current = "";
       setAuth({});
     }} />
+    {workspaceSetupDialog}
+    {directoryBrowserDialog}
     {extensionDialog}
     {feedback}
   </>;

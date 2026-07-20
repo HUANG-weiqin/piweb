@@ -23,7 +23,7 @@ export function Setup({
     event.preventDefault();
     if (cwd.trim()) onStart(cwd.trim());
   };
-  return <main className="setup-shell">
+  return <div className="setup-shell">
     <form className="setup-card" onSubmit={submit}>
       <div className="setup-brand">
         <div className="logo">π</div>
@@ -40,6 +40,7 @@ export function Setup({
         <div className="setup-directory-row">
           <input
             id="cwd"
+            data-modal-autofocus
             value={cwd}
             onChange={(event) => onCwdChange(event.target.value)}
             placeholder="E:\\projects\\app"
@@ -70,5 +71,5 @@ export function Setup({
         {online ? "本地服务已就绪" : "等待本地服务"}
       </p>
     </form>
-  </main>;
+  </div>;
 }

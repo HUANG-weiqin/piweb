@@ -34,8 +34,9 @@ ServerEvent
 - 当前 transcript 身份是 `sessionId + conversationId + focusId`。即使 conversationId 再次相同，旧 focus 的 state/snapshot/live item 也必须丢弃。
 - projectId/conversationId 随精确 `focus_attached` 提交；重连用新 sessionId 显式 `open` 当前 durable conversation，若尚未知 ID 才请求 `recent`。
 - WebSocket transport open 与协议握手 ready 是两个状态；版本不兼容会失效 session/run/auth 并禁止发送。
-- 启动页目录输入由 App 受控；内置目录浏览器只展示服务端确认过的临时浏览位置，不自动 initialize。导航结果按一次性 commandId 匹配；只有用户点击“选择当前文件夹”才替换输入，取消保留原值，错误可回到服务启动目录，断线会关闭临时浏览状态。
-- 切目录先发送 `close_session`，随后清空本地 epoch；旧 state/event 一律忽略。
+- 工作区窄栏是浏览器本地的快速入口，只把最近目录列表与最后使用目录保存在 localStorage，不成为项目身份、信任或会话真相。首次没有记录时仍渲染完整工作台空态；握手后自动 initialize 最后工作区，用户确认切换时先发送 `close_session`，再生成新 observation epoch，旧 state/event 一律忽略。
+- 开启工作区对话框的目录输入由 App 受控；内置目录浏览器只展示服务端确认过的临时浏览位置，不自动 initialize。导航结果按一次性 commandId 匹配；只有用户点击“选择当前文件夹”才替换输入，取消保留原值，错误可回到服务启动目录，断线会关闭临时浏览状态。
+- 最近工作区不能把 initialize 成功当作目录永远存在。相关 initialize 失败时保留该入口并标记不可用，让用户重试、重新选择目录、切换其它工作区或显式从列表移除；不能因为一次失败自动删除本地记录。
 - 新建/切换对话复用同一 project observation sessionId，只更新 focusId。只有匹配 commandId 的 `focus_attached` 才提交本地 focus；pending state 暂存到 ack 后再应用。
 - 当前会话被其它 Agent 删除时，客户端只接受精确匹配当前 `sessionId + projectId + conversationId + focusId` 的 `focus_invalidated`，原子清空 transcript、角色、草稿、pending prompt 和 extension UI，并回到角色选择页；迟到或其它 focus 的失效事件必须忽略。
 - 项目空态和用户点击“新建会话”都进入完整 `RoleSelectionPage`。页面初始不选 default；显式选择可用角色并收到 create attach 前，不渲染 Chat/composer。
@@ -86,6 +87,8 @@ ServerEvent
 - `src/client/components/RoleManagerDialog.tsx`
 - `src/client/components/SessionMessageCard.tsx`
 - `src/client/components/Setup.tsx`
+- `src/client/components/WorkspaceRail.tsx`
+- `src/client/components/WorkspacePlaceholder.tsx`
 - `src/client/App.test.tsx`
 - `src/client/chat/reducer.test.ts`
 

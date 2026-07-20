@@ -438,6 +438,7 @@ export function ConversationSidebar({
           type="button"
           className="conversation-sidebar-create"
           aria-label="新建会话"
+          disabled={!online}
           onClick={onCreate}
         >
           <span aria-hidden="true">＋</span>
