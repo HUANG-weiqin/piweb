@@ -415,7 +415,7 @@ export function Chat({
     {!online && <div className="banner">本地服务已断开，正在重连…</div>}
     <section
       ref={transcriptRef}
-      className="transcript"
+      className={`transcript${blocks.length ? " has-content" : ""}`}
       aria-live="polite"
       onScroll={handleTranscriptScroll}
       onWheel={handleTranscriptWheel}
@@ -540,30 +540,6 @@ export function Chat({
           <button className="send" onClick={send} disabled={!online || !conversationReady || !model || submitting || compacting || roleSwitching || Boolean(rewindingMessageId) || !draft.trim()} aria-label="发送">↑</button>
         </div>
       </div>
-      {compactionThresholdOpen && <label
-          id="compaction-threshold-panel"
-          className="compaction-threshold-control"
-          title={`上下文达到 ${compactionThresholdDraft}% 时自动压缩`}
-        >
-          <span>自动压缩阈值</span>
-          <input
-            type="range"
-            aria-label="会话自动压缩阈值"
-            min={MIN_COMPACTION_THRESHOLD_PERCENT}
-            max={MAX_COMPACTION_THRESHOLD_PERCENT}
-            step={1}
-            value={compactionThresholdDraft}
-            disabled={!online || !conversationReady || compactionThresholdBusy}
-            onChange={(event) =>
-              setCompactionThresholdDraft(Number(event.target.value))}
-            onPointerUp={commitCompactionThreshold}
-            onKeyUp={commitCompactionThreshold}
-            onBlur={commitCompactionThreshold}
-          />
-          <span className="compaction-threshold-value">
-            {compactionThresholdDraft}%
-          </span>
-        </label>}
       <div className="composer-meta">
         {role && <button
           type="button"
@@ -574,26 +550,6 @@ export function Chat({
           <span>{role.name}</span>
           <small>{role.model.id}</small>
         </button>}
-        <button
-          type="button"
-          className="compaction-threshold-toggle"
-          aria-expanded={compactionThresholdOpen}
-          aria-controls="compaction-threshold-panel"
-          title={`上下文达到 ${compactionThresholdDraft}% 时自动压缩`}
-          onClick={() => setCompactionThresholdOpen((open) => !open)}
-        >
-          <span>自动压缩 {compactionThresholdDraft}%</span>
-          <span aria-hidden="true">{compactionThresholdOpen ? "⌃" : "⌄"}</span>
-        </button>
-        <button
-          type="button"
-          className="compaction-threshold-toggle"
-          aria-label="手动压缩上下文"
-          disabled={!online || !conversationReady || busy || compacting}
-          onClick={onCompact}
-        >
-          {compacting ? "正在压缩…" : "手动压缩"}
-        </button>
         <label className="thinking-level-control">
           <span>思考</span>
           <select
@@ -608,23 +564,75 @@ export function Chat({
             ))}
           </select>
         </label>
-        <small
-          className="session-stats context-stat"
-          tabIndex={0}
-          aria-describedby="token-usage-tooltip"
+        <div
+          className="context-management"
+          role="group"
+          aria-label="上下文管理"
         >
-          <span className="context-summary">上下文：{contextTokenText}</span>
-          <span className="token-tooltip" id="token-usage-tooltip" role="tooltip">
-            <span>上下文：{contextTokenText}</span>
-            <span>累计处理：{formatCompactTokens(tokenUsage.total)}</span>
-            <span>普通输入：{formatCompactTokens(tokenUsage.input)}</span>
-            <span>缓存读取：{formatCompactTokens(tokenUsage.cacheRead)}</span>
-            {tokenUsage.cacheWrite > 0 && (
-              <span>缓存写入：{formatCompactTokens(tokenUsage.cacheWrite)}</span>
-            )}
-            <span>输出：{formatCompactTokens(tokenUsage.output)}</span>
-          </span>
-        </small>
+          <div className="context-management-actions">
+            <small
+              className="session-stats context-stat"
+              tabIndex={0}
+              aria-describedby="token-usage-tooltip"
+            >
+              <span className="context-summary">上下文：{contextTokenText}</span>
+              <span className="token-tooltip" id="token-usage-tooltip" role="tooltip">
+                <span>上下文：{contextTokenText}</span>
+                <span>累计处理：{formatCompactTokens(tokenUsage.total)}</span>
+                <span>普通输入：{formatCompactTokens(tokenUsage.input)}</span>
+                <span>缓存读取：{formatCompactTokens(tokenUsage.cacheRead)}</span>
+                {tokenUsage.cacheWrite > 0 && (
+                  <span>缓存写入：{formatCompactTokens(tokenUsage.cacheWrite)}</span>
+                )}
+                <span>输出：{formatCompactTokens(tokenUsage.output)}</span>
+              </span>
+            </small>
+            <button
+              type="button"
+              className="compaction-threshold-toggle"
+              aria-expanded={compactionThresholdOpen}
+              aria-controls="compaction-threshold-panel"
+              title={`上下文达到 ${compactionThresholdDraft}% 时自动压缩`}
+              onClick={() => setCompactionThresholdOpen((open) => !open)}
+            >
+              <span>自动压缩 {compactionThresholdDraft}%</span>
+              <span aria-hidden="true">{compactionThresholdOpen ? "⌃" : "⌄"}</span>
+            </button>
+            <button
+              type="button"
+              className="compaction-threshold-toggle"
+              aria-label="手动压缩上下文"
+              disabled={!online || !conversationReady || busy || compacting}
+              onClick={onCompact}
+            >
+              {compacting ? "正在压缩…" : "手动压缩"}
+            </button>
+          </div>
+          {compactionThresholdOpen && <label
+            id="compaction-threshold-panel"
+            className="compaction-threshold-control"
+            title={`上下文达到 ${compactionThresholdDraft}% 时自动压缩`}
+          >
+            <span>自动压缩阈值</span>
+            <input
+              type="range"
+              aria-label="会话自动压缩阈值"
+              min={MIN_COMPACTION_THRESHOLD_PERCENT}
+              max={MAX_COMPACTION_THRESHOLD_PERCENT}
+              step={1}
+              value={compactionThresholdDraft}
+              disabled={!online || !conversationReady || compactionThresholdBusy}
+              onChange={(event) =>
+                setCompactionThresholdDraft(Number(event.target.value))}
+              onPointerUp={commitCompactionThreshold}
+              onKeyUp={commitCompactionThreshold}
+              onBlur={commitCompactionThreshold}
+            />
+            <span className="compaction-threshold-value">
+              {compactionThresholdDraft}%
+            </span>
+          </label>}
+        </div>
         <small className="composer-tip">Enter 发送 · Shift+Enter 换行 · 对话随项目自动保存</small>
       </div>
     </div>

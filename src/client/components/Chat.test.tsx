@@ -239,6 +239,7 @@ describe("Chat", () => {
       sessionTokens: 0,
     }));
 
+    expect(transcript).toHaveClass("has-content");
     expect(scrollTo).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "↓ 回到最新消息" }));
     expect(scrollTo).toHaveBeenCalledWith({
@@ -383,6 +384,36 @@ describe("Chat", () => {
     expect(screen.getByText("更换角色")).toBeInTheDocument();
   });
 
+  it("orders role and thinking before a unified context management group", () => {
+    const role: ConversationRoleSnapshot = {
+      id: "researcher",
+      revision: 1,
+      name: "研究员",
+      description: "Researches evidence",
+      systemPrompt: "Research exact evidence.",
+      model: { provider: "provider", id: "model" },
+      toolMode: "read_only",
+      canManageSessions: false,
+    };
+    const { container } = render(view(emptyChat, "", role));
+    const meta = container.querySelector(".composer-meta");
+    const children = Array.from(meta?.children ?? []);
+    const contextManagement = screen.getByRole("group", {
+      name: "上下文管理",
+    });
+
+    expect(children[0]).toHaveClass("conversation-role-pill");
+    expect(children[1]).toHaveClass("thinking-level-control");
+    expect(children[2]).toBe(contextManagement);
+    expect(contextManagement).toContainElement(container.querySelector(".context-stat"));
+    expect(contextManagement).toContainElement(screen.getByRole("button", {
+      name: "自动压缩 70%",
+    }));
+    expect(contextManagement).toContainElement(screen.getByRole("button", {
+      name: "手动压缩上下文",
+    }));
+  });
+
   it("keeps run thinking beside the composer without a project permission control", () => {
     const onThinking = vi.fn();
     render(<Chat
@@ -416,6 +447,8 @@ describe("Chat", () => {
     });
 
     expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("group", { name: "上下文管理" }))
+      .toContainElement(slider);
     expect(slider).toHaveAttribute("min", "20");
     expect(slider).toHaveAttribute("max", "90");
     expect(screen.getByText("70%", { selector: ".compaction-threshold-value" }))

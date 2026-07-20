@@ -436,6 +436,10 @@ pre {
   scrollbar-gutter: stable;
 }
 
+.transcript.has-content {
+  padding-bottom: 270px;
+}
+
 .empty {
   min-height: 55vh;
   display: flex;
@@ -1348,10 +1352,30 @@ pre {
 
 .composer-meta {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-start;
   gap: 7px;
   margin: 8px auto 0;
+}
+
+.context-management {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  padding-left: 7px;
+  border-left: 1px solid color-mix(in srgb, var(--line) 74%, transparent);
+}
+
+.context-management-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.context-management .compaction-threshold-control {
+  margin: 0 4px;
 }
 
 .thinking-level-control {
