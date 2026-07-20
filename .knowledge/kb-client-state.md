@@ -64,8 +64,8 @@ ServerEvent
 - 流式 transcript 以约 32ms 的稳定节拍合并高频投影，避免每个 token 都触发 Markdown 重排。跟随态不是硬锁定 `scrollHeight`：有内容的 transcript 在 composer 上方保留至少约三至四行正文的安全距离，最新内容先在更宽松的舒适区自然向下生长，越过下沿后再平滑回到区内。任何向上滚轮或实际向上位移都立即把滚动控制权交还用户；脱离后新 delta 不得改变 `scrollTop`，只显示“回到最新消息”，直到用户精确回到底部或主动点击按钮才重新跟随。composer 是受控草稿并按内容在有界高度内增长。
 - transcript 使用 14px 的紧凑正文，并与 composer 共用响应式内容宽度：从原有 780px 阅读宽度随视口扩展，最高 1280px；窄屏仍由最小侧边距接管，不能产生横向溢出。assistant Markdown 的标题、段落、嵌套列表、引用、表格和代码只在 `.markdown` 内建立统一阅读节奏；宽表格与长代码由自身横向滚动承接，不能撑宽 transcript。
 - 思考与工具调用区使用“分隔线标题 + 无外框内容”的低干扰折叠样式。当前 active run 的思考标题用 spinner 表达“正在思考”，历史思考只显示完成态；思考正文必须复用 assistant 正文的 Markdown 解析、清洗与排版。工具调用区整体默认收起，展开后每个工具仍是独立折叠项，以本地化动作、目标和状态概括调用；展开单项后按字段递归展示最终 args/result，内置工具优先提取文本输出，Agent 会话工具优先展示结构化 details，不能把宿主 JSON 包装直接暴露给用户。
-- 每条 user 与 assistant 正文在既有消息间距中提供低干扰操作组：复制按钮读取原始文本/Markdown，不复制渲染后的 HTML；“回到此处”先明确确认将彻底删除本条及之后所有消息。操作组必须使用内容宽度且禁止换行，不能被短 user bubble 压成竖排。运行中、恢复未完成、存在排队 prompt 或已有截断 pending 时禁用破坏性按钮。
-- 截断只维护一个 `sessionId + commandId + conversationId + messageId` pending；客户端不先行 splice transcript，只接受匹配 focus 的服务端 snapshot 作为新内容，再用匹配 commandId 的 completion/error 结算等待态。等待期间 composer、切换和新建会话禁用；断线属于未知结果，必须提示恢复后核对。
+- 每条 user 与 assistant 正文在既有消息间距中提供低干扰复制按钮，读取原始文本/Markdown 而不是渲染后的 HTML；“回到此处”只属于 user 消息，并先明确确认将彻底删除本条及之后所有消息。操作组必须使用内容宽度且禁止换行，不能被短 user bubble 压成竖排。运行中、恢复未完成、存在排队 prompt 或已有截断 pending 时禁用破坏性按钮。
+- 截断只维护一个 `sessionId + commandId + conversationId + messageId` pending；命令成功发出后，composer 立即用所选 user 原文覆盖现有草稿，但客户端不先行 splice transcript，只接受匹配 focus 的服务端 snapshot 作为新内容，再用匹配 commandId 的 completion/error 结算等待态。命令未能发出时不得改写草稿。等待期间 composer、切换和新建会话禁用；断线属于未知结果，必须提示恢复后核对。
 - 认证、设置和扩展交互拥有模态焦点边界。
 - 会话角色快照中的工具权限是执行真相；客户端不保存全局工具模式偏好，也不提供项目级权限切换。
 - PiSocket 的每个回调捕获创建它的 socket；旧 socket 以及 React effect 已销毁的旧 PiSocket 实例都不得操作当前连接。

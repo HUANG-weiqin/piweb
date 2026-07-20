@@ -43,7 +43,7 @@ export function Message({
   message: ChatMessage;
   sessionCards?: ConversationMessageCard[];
   onOpenConversation?(conversationId: string): void;
-  onRewind?(messageId: string): void;
+  onRewind?(messageId: string, text: string): void;
   rewindDisabled?: boolean;
   rewinding?: boolean;
   activeThinking?: boolean;
@@ -77,7 +77,8 @@ export function Message({
     copyText = "重试";
     copySymbol = "!";
   }
-  const actions = (message.text || onRewind) ? <div className="message-actions">
+  const rewindUserMessage = isUser ? onRewind : undefined;
+  const actions = (message.text || rewindUserMessage) ? <div className="message-actions">
     {message.text ? <button
       type="button"
       className={`message-action message-copy ${copyState}`}
@@ -90,7 +91,7 @@ export function Message({
       <span aria-hidden="true">{copySymbol}</span>
       {copyText}
     </button> : null}
-    {onRewind ? <button
+    {rewindUserMessage ? <button
       type="button"
       className="message-action message-rewind"
       aria-label="回到此处，删除这条及之后的消息"
@@ -100,7 +101,7 @@ export function Message({
         if (!window.confirm(
           "将彻底删除这条消息以及之后的所有消息，且无法恢复。确定回到此处吗？",
         )) return;
-        onRewind(message.id);
+        rewindUserMessage(message.id, message.text);
       }}
     >
       <span aria-hidden="true">↶</span>

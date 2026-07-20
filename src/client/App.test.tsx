@@ -812,7 +812,7 @@ describe("App", () => {
       .toBeEnabled();
   });
 
-  it("copies and rewinds user or Agent messages with an exact command acknowledgement", async () => {
+  it("rewinds only a user message and restores its text over the current draft", async () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
@@ -864,35 +864,31 @@ describe("App", () => {
     expect(writeText).toHaveBeenCalledWith("需要保留吗？");
     expect(screen.getByRole("button", { name: "复制 Agent 回复" }))
       .toBeInTheDocument();
+    const input = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
+    fireEvent.change(input, { target: { value: "现有草稿会被覆盖" } });
 
-    fireEvent.click(screen.getAllByRole("button", {
+    const rewind = screen.getByRole("button", {
       name: "回到此处，删除这条及之后的消息",
-    })[1]!);
+    });
+    fireEvent.click(rewind);
     const command = latestCommand("truncate_conversation");
     expect(command).toMatchObject({
       sessionId,
       conversationId: CONVERSATION_ID,
       focusId: FOCUS_A,
-      messageId: `assistant:${assistantEntryId}`,
+      messageId: userMessageId,
     });
     expect(screen.getByText("正在彻底删除所选消息及之后的内容…"))
       .toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
-      .toBeDisabled();
+    expect(input).toBeDisabled();
+    expect(input).toHaveValue("需要保留吗？");
 
     act(() => {
       socketMock.emit?.({
         type: "conversation_snapshot",
         sessionId,
         conversationId: CONVERSATION_ID,
-        items: [{
-          kind: "message",
-          id: userMessageId,
-          role: "user",
-          text: "需要保留吗？",
-          thinking: "",
-          tools: [],
-        }],
+        items: [],
         truncated: false,
       });
       socketMock.emit?.({
@@ -905,8 +901,11 @@ describe("App", () => {
 
     expect(screen.queryByText("Agent 原文")).not.toBeInTheDocument();
     expect(screen.getByText("已回到所选消息之前")).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
-      .toBeEnabled();
+    const restoredInput = screen.getByRole("textbox", {
+      name: "给 Pi 发送消息",
+    });
+    expect(restoredInput).toBeEnabled();
+    expect(restoredInput).toHaveValue("需要保留吗？");
   });
 
   it("answers extension UI requested during initialization before the first state", () => {

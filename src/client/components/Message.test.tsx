@@ -264,17 +264,35 @@ describe("Message", () => {
     expect(window.confirm).toHaveBeenCalledWith(
       "将彻底删除这条消息以及之后的所有消息，且无法恢复。确定回到此处吗？",
     );
-    expect(onRewind).toHaveBeenCalledWith("user-entry");
+    expect(onRewind).toHaveBeenCalledWith("user-entry", "用户原文");
   });
 
-  it("does not rewind when destructive confirmation is cancelled", () => {
+  it("does not offer rewind for an assistant message", () => {
     const onRewind = vi.fn();
-    vi.spyOn(window, "confirm").mockReturnValue(false);
     const message: ChatMessage = {
       id: "assistant:entry",
       runId: "run-7",
       role: "assistant",
       text: "Agent 回复",
+      thinking: "",
+      tools: [],
+    };
+
+    render(<Message message={message} onRewind={onRewind} />);
+
+    expect(screen.queryByRole("button", {
+      name: "回到此处，删除这条及之后的消息",
+    })).not.toBeInTheDocument();
+  });
+
+  it("does not rewind a user message when confirmation is cancelled", () => {
+    const onRewind = vi.fn();
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    const message: ChatMessage = {
+      id: "user-entry",
+      runId: "run-8",
+      role: "user",
+      text: "用户原文",
       thinking: "",
       tools: [],
     };

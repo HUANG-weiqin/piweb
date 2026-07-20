@@ -122,7 +122,7 @@ interface ChatProps {
   onSwitchRole(roleId: string): boolean;
   onChangeCwd(): void;
   onOpenConversation?(conversationId: string): void;
-  onRewind(messageId: string): boolean;
+  onRewind(messageId: string, text: string): boolean;
   rewindingMessageId?: string;
 }
 
@@ -444,7 +444,7 @@ export function Chat({
             message={block.message}
             sessionCards={block.sessionCards}
             onOpenConversation={onOpenConversation}
-            onRewind={onRewind}
+            onRewind={block.message.role === "user" ? onRewind : undefined}
             rewindDisabled={
               busy
               || submitting

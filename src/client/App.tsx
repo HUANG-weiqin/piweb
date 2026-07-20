@@ -1568,7 +1568,7 @@ export function App() {
       name,
     });
   };
-  const truncateConversation = (messageId: string): boolean => {
+  const truncateConversation = (messageId: string, text: string): boolean => {
     const focus = focusRef.current;
     if (
       !focus
@@ -1599,6 +1599,8 @@ export function App() {
       focusId: focus.focusId,
       messageId,
     })) {
+      setDraft(text);
+      setPromptNotice("");
       return true;
     }
     updatePendingConversationTruncation(undefined);
