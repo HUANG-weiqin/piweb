@@ -190,9 +190,19 @@ function ensureAssistant(
   items: ChatItem[],
   runId: string,
 ): { items: ChatItem[]; index: number } {
-  const existingIndex = items.findIndex((item) => (
-    isMessage(item) && item.role === "assistant" && item.runId === runId
-  ));
+  let existingIndex = -1;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (
+      item
+      && isMessage(item)
+      && item.role === "assistant"
+      && item.runId === runId
+    ) {
+      existingIndex = index;
+      break;
+    }
+  }
   if (existingIndex >= 0) return { items, index: existingIndex };
 
   const assistant: ChatMessageItem = {
@@ -316,6 +326,44 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   const event = action.event;
   if (event.type === "run_started") {
     return withItems(state, ensureAssistant(itemsFrom(state), action.runId).items);
+  }
+  if (event.type === "user_message") {
+    const items = itemsFrom(state);
+    if (items.some((item) => item.id === event.projectionId)) return state;
+    return withItems(state, [...items, {
+      kind: "message",
+      id: event.projectionId,
+      runId: action.runId,
+      role: "user",
+      text: event.text,
+      thinking: "",
+      tools: [],
+    }]);
+  }
+  if (event.type === "assistant_message_started") {
+    const items = itemsFrom(state);
+    if (items.some((item) => item.id === event.projectionId)) return state;
+    const last = items.at(-1);
+    if (
+      last
+      && isMessage(last)
+      && last.role === "assistant"
+      && last.runId === action.runId
+      && !last.text
+      && !last.thinking
+      && last.tools.length === 0
+    ) {
+      return state;
+    }
+    return withItems(state, [...items, {
+      kind: "message",
+      id: event.projectionId,
+      runId: action.runId,
+      role: "assistant",
+      text: "",
+      thinking: "",
+      tools: [],
+    }]);
   }
   if (event.type === "run_queued" || event.type === "run_finished") return state;
 

@@ -9,10 +9,11 @@ export const MAX_ROLE_SYSTEM_PROMPT_BYTES = 128 * 1024;
 export const MAX_PROJECT_CONVERSATIONS = 100;
 export const MAX_PROJECT_CONVERSATION_NAME_CHARACTERS = 120;
 export const MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS = 500;
+export const MAX_PROMPT_CHARACTERS = 200_000;
 export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
-export const PROTOCOL_VERSION = 15;
+export const PROTOCOL_VERSION = 16;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
 const conversationIdSchema = z.string().uuid();
@@ -163,7 +164,16 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
     conversationId: conversationIdSchema,
     focusId: commandIdSchema,
     runId: runIdSchema,
-    text: required.max(200_000),
+    text: required.max(MAX_PROMPT_CHARACTERS),
+  }),
+  z.object({
+    type: z.literal("steer"),
+    commandId: commandIdSchema,
+    sessionId: sessionIdSchema,
+    conversationId: conversationIdSchema,
+    focusId: focusIdSchema,
+    runId: runIdSchema,
+    text: required.max(MAX_PROMPT_CHARACTERS),
   }),
   z.object({
     type: z.literal("abort"),
@@ -288,6 +298,7 @@ export type ClientCommand = z.infer<typeof clientCommandSchema>;
 export type AcknowledgedSettingOperation = "select_model" | "set_api_key";
 export type AcknowledgedCommandOperation =
   | AcknowledgedSettingOperation
+  | "steer"
   | "set_compaction_threshold"
   | "delete_conversation"
   | "truncate_conversation"
@@ -511,6 +522,8 @@ export type SessionEvent =
   | { type: "run_queued" }
   | { type: "run_started" }
   | { type: "run_finished"; outcome: "completed" | "aborted" | "failed" }
+  | { type: "user_message"; projectionId: string; text: string }
+  | { type: "assistant_message_started"; projectionId: string }
   | { type: "text_delta"; delta: string }
   | { type: "text_replaced"; text: string }
   | { type: "thinking_delta"; delta: string }
@@ -711,6 +724,15 @@ const sessionEventSchema: z.ZodType<SessionEvent> = z.discriminatedUnion("type",
     type: z.literal("run_finished"),
     outcome: z.enum(["completed", "aborted", "failed"]),
   }),
+  z.object({
+    type: z.literal("user_message"),
+    projectionId: z.string().uuid(),
+    text: z.string().max(MAX_PROMPT_CHARACTERS),
+  }),
+  z.object({
+    type: z.literal("assistant_message_started"),
+    projectionId: z.string().uuid(),
+  }),
   z.object({ type: z.literal("text_delta"), delta: z.string() }),
   z.object({ type: z.literal("text_replaced"), text: z.string() }),
   z.object({ type: z.literal("thinking_delta"), delta: z.string() }),
@@ -744,6 +766,7 @@ const commandTypeSchema = z.enum([
   "focus_conversation",
   "create_conversation",
   "prompt",
+  "steer",
   "abort",
   "extension_ui_response",
   "select_model",
@@ -1023,6 +1046,7 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     type: z.literal("command_complete"),
     operation: z.enum([
       "select_model",
+      "steer",
       "set_api_key",
       "set_compaction_threshold",
       "delete_conversation",
@@ -1133,9 +1157,28 @@ export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.
     }
     if (
       event.type === "error"
+      && event.scope === "command"
+      && event.operation === "steer"
+      && (
+        event.sessionId === undefined
+        || event.commandId === undefined
+        || event.runId === undefined
+        || event.conversationId === undefined
+        || event.focusId === undefined
+      )
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "steer command errors require the complete command and run focus identity",
+        path: ["focusId"],
+      });
+    }
+    if (
+      event.type === "error"
       && event.commandId
       && (
         event.operation === "select_model"
+        || event.operation === "steer"
         || event.operation === "set_api_key"
         || event.operation === "delete_conversation"
         || event.operation === "truncate_conversation"

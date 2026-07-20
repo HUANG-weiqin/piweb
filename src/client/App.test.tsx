@@ -1312,6 +1312,207 @@ describe("App", () => {
     expect(latestCommand("close_session")).toEqual({ type: "close_session", sessionId });
   });
 
+  it("aggregates waiting messages into one guidance command as soon as the run can accept it", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+
+    const input = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
+    fireEvent.change(input, { target: { value: "first task" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    const first = latestCommand("prompt");
+    act(() => {
+      socketMock.emit?.({
+        type: "session_event",
+        sessionId,
+        runId: first.runId,
+        event: { type: "run_queued" },
+      });
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: true,
+          activeRun: { id: first.runId, phase: "queued" },
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+    });
+
+    expect(screen.getByRole("button", { name: "停止" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "发送" })).toBeInTheDocument();
+    fireEvent.change(input, { target: { value: "second task" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    fireEvent.change(input, { target: { value: "third task" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(input).toHaveValue("");
+    expect(screen.getByRole("region", { name: "待发送消息" }))
+      .toHaveTextContent("接下来处理 2 条");
+    expect(socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "prompt",
+    )).toHaveLength(1);
+    expect(socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "steer",
+    )).toHaveLength(0);
+
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: true,
+          activeRun: { id: first.runId, phase: "running" },
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+    });
+
+    const guidanceCommands = socketMock.send.mock.calls
+      .map(([command]) => command)
+      .filter((command): command is Extract<ClientCommand, { type: "steer" }> =>
+        command.type === "steer"
+      );
+    expect(guidanceCommands).toHaveLength(1);
+    const guidance = guidanceCommands[0]!;
+    expect(guidance).toMatchObject({
+      conversationId: CONVERSATION_ID,
+      runId: first.runId,
+      text: "second task\n\nthird task",
+    });
+    expect(screen.getByRole("region", { name: "待发送消息" }))
+      .toHaveTextContent("正在提交");
+
+    act(() => {
+      socketMock.emit?.({
+        type: "command_complete",
+        operation: "steer",
+        commandId: guidance.commandId,
+        sessionId,
+      });
+    });
+    expect(screen.queryByRole("region", { name: "待发送消息" }))
+      .not.toBeInTheDocument();
+  });
+
+  it("keeps busy prompt queues isolated while switching conversations", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: true,
+          activeRun: { id: RUN_ID, phase: "queued" },
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.emit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_ID,
+        conversations: [{
+          id: CONVERSATION_ID,
+          name: "A",
+          preview: "",
+          createdAt: "2026-07-19T08:00:00.000Z",
+          updatedAt: "2026-07-19T08:00:00.000Z",
+          messageCount: 0,
+          activity: { kind: "queued", runId: RUN_ID },
+        }, {
+          id: CONVERSATION_B,
+          name: "B",
+          preview: "",
+          createdAt: "2026-07-19T08:00:00.000Z",
+          updatedAt: "2026-07-19T09:00:00.000Z",
+          messageCount: 0,
+          activity: { kind: "idle" },
+        }],
+        truncated: false,
+      });
+    });
+
+    const input = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
+    fireEvent.change(input, { target: { value: "only for A" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(screen.getByRole("region", { name: "待发送消息" }))
+      .toHaveTextContent("only for A");
+
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+    expect(screen.queryByRole("region", { name: "待发送消息" }))
+      .not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 A" }));
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+    act(() => socketMock.emit?.({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      messages: [],
+      truncated: false,
+    }));
+
+    expect(latestCommand("prompt")).toMatchObject({
+      conversationId: CONVERSATION_ID,
+      text: "only for A",
+    });
+  });
+
   it("only a matching prompt error clears the outstanding run", () => {
     render(<App />);
     const sessionId = startFromSetup();

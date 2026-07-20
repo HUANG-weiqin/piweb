@@ -169,6 +169,7 @@ interface RunTicket {
   readonly ownership: ConversationRunOwnership;
   readonly projector: SessionEventProjector;
   readonly completion: Deferred<RunSettlement>;
+  readonly guidanceDeliveries: Deferred<void>[];
   phase: "queued" | "running" | "waiting" | "cancelling";
   waitingFor?: ConversationWaitingTarget;
   waitingEpoch?: symbol;
@@ -536,6 +537,47 @@ export class ConversationActor {
     );
   }
 
+  steer(runId: string, text: string): Promise<void> {
+    this.assertUsable();
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return Promise.reject(new Error("Steering text must not be empty"));
+    }
+    if (this.isExtensionCommand(trimmed)) {
+      return Promise.reject(
+        new Error("Extension slash commands cannot steer an active Agent run"),
+      );
+    }
+    const ticket = this.activeRun;
+    if (
+      !ticket
+      || ticket.id !== runId
+      || (ticket.phase !== "running" && ticket.phase !== "waiting")
+    ) {
+      return Promise.reject(
+        new Error("The target run is not currently able to accept guidance"),
+      );
+    }
+
+    const delivery = deferred<void>();
+    ticket.guidanceDeliveries.push(delivery);
+
+    // AgentSession.steer queues synchronously before its promise resolves. Do
+    // not route this through the actor operation queue: that queue is occupied
+    // by the active run until settlement. The command itself settles only when
+    // the SDK later emits the queued user message into this exact run.
+    const queued = this.session.steer(trimmed);
+    return Promise.all([queued, delivery.promise]).then(
+      () => undefined,
+      (error) => {
+        const index = ticket.guidanceDeliveries.indexOf(delivery);
+        if (index >= 0) ticket.guidanceDeliveries.splice(index, 1);
+        delivery.reject(error);
+        throw error;
+      },
+    );
+  }
+
   /**
    * Restarts the exact inbox run after its durable custom messages were
    * appended but the process stopped before a settlement was recorded.
@@ -586,8 +628,11 @@ export class ConversationActor {
       id: input.runId,
       origin: input.origin,
       ownership,
-      projector: new SessionEventProjector(),
+      projector: new SessionEventProjector({
+        suppressNextUserMessage: input.origin === "browser",
+      }),
       completion: deferred<RunSettlement>(),
+      guidanceDeliveries: [],
       phase: "queued",
       toolMode: this.project.toolMode,
     };
@@ -620,6 +665,9 @@ export class ConversationActor {
     ownership: ConversationRunOwnership,
     target: ConversationWaitingTarget,
   ): () => void {
+    // SAFETY: one run has one visible waiting target because gated tool
+    // execution is sequential. Parallel blocking tools would require a
+    // multi-wait activity model instead of overwriting this single phase.
     const ticket = this.requireOwnedRunningTicket(ownership);
     const waitingEpoch = Symbol(`${target.conversationId}:${target.runId}`);
     ticket.phase = "waiting";
@@ -835,6 +883,11 @@ export class ConversationActor {
     // Ordering is intentional: durable truth precedes the permission lease,
     // browser terminal projection, and coordinator lifecycle reactions.
     await this.persistSettlementCallback(settlement, this.sessionManager);
+    for (const guidance of ticket.guidanceDeliveries.splice(0)) {
+      guidance.reject(
+        new Error("Run ended before queued guidance was delivered"),
+      );
+    }
     ticket.projectRunLease?.release();
     ticket.projectRunLease = undefined;
     this.cancelScope(ticket.id);
@@ -878,6 +931,9 @@ export class ConversationActor {
       ticket.projectRunLease = undefined;
     }
     if (this.activeRun === ticket) this.activeRun = undefined;
+    for (const guidance of ticket.guidanceDeliveries.splice(0)) {
+      guidance.reject(error);
+    }
     this.fatalError = error instanceof Error
       ? error
       : new Error(String(error));
@@ -903,7 +959,10 @@ export class ConversationActor {
     ticket.waitingFor = undefined;
     ticket.waitingEpoch = undefined;
     this.emitActivity();
-    ticket.abortPromise = Promise.resolve().then(() => this.session.abort());
+    ticket.abortPromise = Promise.resolve().then(() => {
+      this.session.clearQueue();
+      return this.session.abort();
+    });
     return ticket.abortPromise;
   }
 
@@ -930,6 +989,9 @@ export class ConversationActor {
     }
 
     for (const projected of ticket.projector.project(event)) {
+      if (projected.type === "user_message") {
+        ticket.guidanceDeliveries.shift()?.resolve();
+      }
       this.emitSessionEvent(ticket, projected);
     }
   }

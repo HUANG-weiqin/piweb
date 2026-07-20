@@ -345,6 +345,53 @@ describe("chatReducer", () => {
     expect(state.messages.at(-1)?.text).toBe("hi");
   });
 
+  it("keeps guidance and the following assistant segment in transcript order", () => {
+    let state = chatReducer(initialChatState, {
+      type: "prompt_accepted",
+      runId: RUN_1,
+      text: "initial",
+    });
+    state = chatReducer(state, {
+      type: "session",
+      runId: RUN_1,
+      event: { type: "run_started" },
+    });
+    state = chatReducer(state, {
+      type: "session",
+      runId: RUN_1,
+      event: { type: "text_delta", delta: "before" },
+    });
+    state = chatReducer(state, {
+      type: "session",
+      runId: RUN_1,
+      event: {
+        type: "user_message",
+        projectionId: "e285717e-e53c-45ec-a40d-0d5f11d8b9d0",
+        text: "change direction",
+      },
+    });
+    state = chatReducer(state, {
+      type: "session",
+      runId: RUN_1,
+      event: {
+        type: "assistant_message_started",
+        projectionId: "095a5c5d-93d6-48e7-9532-ea1e299b7f86",
+      },
+    });
+    state = chatReducer(state, {
+      type: "session",
+      runId: RUN_1,
+      event: { type: "text_delta", delta: "after" },
+    });
+
+    expect(state.messages.map(({ role, text }) => ({ role, text }))).toEqual([
+      { role: "user", text: "initial" },
+      { role: "assistant", text: "before" },
+      { role: "user", text: "change direction" },
+      { role: "assistant", text: "after" },
+    ]);
+  });
+
   it("tracks tool lifecycle", () => {
     let state = chatReducer(initialChatState, { type: "session", runId: RUN_1, event: { type: "tool_started", toolCallId: "1", toolName: "read", args: { path: "a" } } });
     expect(state.messages.at(-1)?.tools[0]).toMatchObject({

@@ -69,13 +69,13 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
 → 删除 sidecar
 ```
 
-- busy 目标不会被打断；消息保持 queued，等当前 run 结算后泵送。
+- busy 目标通常不会被打断；消息保持 queued，等当前 run 结算后泵送。唯一的同 run rendezvous 是：目标正通过 `wait_for_session` 等待发送者的这个精确 run 时，durable envelope 会先标为 processing，再作为 SDK steering message 注入目标当前 turn，并直接结算该 wait；目标无需先结束 run 才能读到回复。
 - inbox commit 是取消边界：commit 前取消可拒绝，commit 后即使来源 run 随即取消，目标 pump 仍继续；同步启动失败会有界重试一次并保留 durable sidecar。
 - 同一目标严格按 `sentAt + messageId` 泵送，新的 idle-target send 也必须先经过项目 inbox pump，不能越过更早的 queued 消息。
 - inbox 每次最多批量投递 8 条。允许管理会话的目标 LLM 会收到来源标题、角色、完整 conversationId、正文、回复工具提示，以及“自行管理所创建会话生命周期”的提醒；关闭能力的角色只收到来源元信息和正文，不会看到任何会话工具名称或管理提示。隐藏提示只存在于 Agent 上下文，浏览器卡片仍只从 `details.body` 投影用户可见正文。
 - incoming 消息使用 `piweb.conversation_message.v1` 并进入目标上下文；outgoing/委派状态使用 `piweb.conversation_card.v1`，只用于投影。
 - 同一 `cardId` 的后续 entry 原地覆盖卡片状态；浏览器和重启恢复不会刷出多张重复卡。
-- 每个 run 先追加 `piweb.run_settlement.v1`，记录精确 `runId/outcome/finalText`，再通知 waiter 和 inbox 清理。等待与临时回传不能从“最后一条 assistant”猜结果。
+- 每个 run 先追加 `piweb.run_settlement.v1`，记录精确 `runId/outcome/finalText`，再通知 waiter 和 inbox 清理。等待返回 durable settlement 或精确目标 run 主动发来的 message metadata；消息正文只通过 incoming custom message 注入一次，不能在 tool result 再复制一份。等待与临时回传不能从“最后一条 assistant”猜结果。
 - 重启会扫描 inbox 与 reserved JSONL：修复 inbox 已提交但来源仍是 sending 的卡片，恢复 processing run、临时结果和目标 pump；已经 durable settled 的 run 不会重复执行。
 - terminal sender card 必须先于 sidecar 删除；两步间崩溃时，残留 sidecar 可在重启后完成对账。
 - 删除 conversation 会先持久化 target tombstone，再把只以它为目标的 pending inbox 对应 sender card 终结并清理；tombstone 在内存中也是 open/create/pump/send 的硬 fence，删除事务中的后到消息被明确拒绝，它此前发出的 outbound envelope 仍会继续送达。JSONL 删除完成后 tombstone 会幂等回收；若进程在这两步之间退出，下次项目打开先恢复 fence，再完成删除或只清理目标已不存在且没有 pending 消息的完成标记，避免重新打开目标或长期编排耗尽固定 tombstone 数量。
@@ -118,8 +118,8 @@ delete_session
 - 工具闭包绑定来源 conversation 和当前 canonical project，不接受 cwd/projectId，不能跨项目。
 - Agent 只能查看和选择角色，不能 CRUD 角色、改认证/trust、换既有会话角色或模型。
 - `start_session` 必须给 role 和 task，创建平级普通/临时会话；它在冻结角色、初始 task 和固定 runId 被可靠接受并调度后返回 `conversationId + runId`。目标空闲时立即取得 run ticket；若更早的 run 抢先则持久等待泵送。两种情况都不会隐式等待或挂起调用者。
-- `send_session_message` 在持久接收后返回；busy 目标仍保持当前 run。
-- `wait_for_session` 绑定精确 `conversationId + runId`，先读 durable settlement，再 observe-or-subscribe；只有它会把来源 run 显示为 waiting，取消和异常都恢复 phase。
+- `send_session_message` 在持久接收后返回；busy 目标仍保持当前 run。若目标正在等待发送者的精确 run，则返回 `delivered_to_wait`，消息直接进入目标当前 turn，发送者仍可继续运行。
+- `wait_for_session` 绑定精确 `conversationId + runId`，先读 durable settlement，再 observe-or-subscribe；它等待“精确 run 的下一件相关事件”，可能返回 settlement，也可能先返回 `outcome=message` metadata。消息到达后若仍需最终结果，Agent 可再次等待。活动 session waiter 同时构成 wait-for graph，新增边若会形成任意长度环则在注册前拒绝；取消、异常和消息 rendezvous 都必须注销 waiter 并恢复 phase。
 - `abort_session` 只匹配精确目标 run；stale runId 不会中止后来的 run。其精确目标与已决定结果也写入来源会话的 `piweb.meta_operation.v1`，同一 tool call 在结算或重启后重放仍返回原结果；若进程在 started intent 后崩溃，恢复会先精确中止/结算该 run，再允许 inbox pump 继续。
 - `delete_session` 拒绝 self 和 busy 目标；需要先 abort、等待结算，再删除。删除 intent/result 以 `piweb.meta_operation.v1` 持久化，相同 toolCall 重放不能改删另一个目标。
 - `start_session` 的角色、task、title 和 temporary 进入 sender card 指纹，相同 toolCall 改 payload 会冲突而不是谎报成功。

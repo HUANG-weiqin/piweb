@@ -46,8 +46,11 @@ function view(
     conversationReady
     draft={draft}
     submitting={false}
+    queuedPrompts={[]}
     onDraftChange={() => undefined}
     onSend={() => true}
+    onRemoveQueuedPrompt={() => undefined}
+    onRetryQueuedPrompt={() => undefined}
     onAbort={() => undefined}
     onSettings={() => undefined}
     onThinking={() => undefined}
@@ -65,6 +68,68 @@ afterEach(() => {
 });
 
 describe("Chat", () => {
+  it("keeps send and stop available while the Agent is busy", () => {
+    const onSend = vi.fn(() => true);
+    const onAbort = vi.fn();
+    render(view(emptyChat, "next instruction", undefined, {
+      busy: true,
+      activeRun: {
+        id: "run-1",
+        phase: "running",
+      },
+      onSend,
+      onAbort,
+    }));
+
+    const input = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
+    expect(input).toBeEnabled();
+    expect(input).toHaveAttribute(
+      "placeholder",
+      "发送后将引导当前任务…",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(onSend).toHaveBeenCalledWith("next instruction");
+
+    fireEvent.click(screen.getByRole("button", { name: "停止" }));
+    expect(onAbort).toHaveBeenCalledOnce();
+  });
+
+  it("shows queued prompts compactly and exposes retry or removal", () => {
+    const onRemoveQueuedPrompt = vi.fn();
+    const onRetryQueuedPrompt = vi.fn();
+    render(view(emptyChat, "", undefined, {
+      queuedPrompts: [{
+        id: "queued-1",
+        text: "Review the test failure after the current run.",
+        status: "queued",
+      }, {
+        id: "queued-2",
+        text: "This delivery needs confirmation.",
+        status: "attention",
+      }],
+      onRemoveQueuedPrompt,
+      onRetryQueuedPrompt,
+    }));
+
+    const queue = screen.getByRole("region", { name: "待发送消息" });
+    expect(queue).toHaveTextContent("接下来处理 2 条");
+    expect(queue).toHaveTextContent(
+      "Review the test failure after the current run.",
+    );
+    expect(queue).toHaveTextContent("需要确认");
+
+    fireEvent.click(screen.getByRole("button", {
+      name: "重试排队消息 This delivery needs confirmation.",
+    }));
+    expect(onRetryQueuedPrompt).toHaveBeenCalledWith("queued-2");
+
+    fireEvent.click(screen.getByRole("button", {
+      name: "移除排队消息 Review the test failure after the current run.",
+    }));
+    expect(onRemoveQueuedPrompt).toHaveBeenCalledWith("queued-1");
+  });
+
   it("scrolls the transcript itself to the actual bottom while following output", () => {
     const rendered = render(view(emptyChat));
     const transcript = document.querySelector<HTMLElement>(".transcript");

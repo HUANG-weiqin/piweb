@@ -25,7 +25,7 @@ const messageId = "assistant:96b960be-b6bb-4a19-9cf2-78e77cb69425";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(15);
+    expect(PROTOCOL_VERSION).toBe(16);
   });
 
   it("accepts supported commands", () => {
@@ -96,6 +96,15 @@ describe("parseClientCommand", () => {
       runId,
       text: "hello",
     }).type).toBe("prompt");
+    expect(parseClientCommand({
+      type: "steer",
+      commandId,
+      sessionId,
+      conversationId,
+      focusId,
+      runId,
+      text: "change direction",
+    }).type).toBe("steer");
     expect(parseClientCommand({
       type: "abort",
       sessionId,
@@ -580,6 +589,18 @@ describe("parseClientCommand", () => {
       conversationId,
       focusId,
       event: {
+        type: "user_message",
+        projectionId: commandId,
+        text: "change direction",
+      },
+    }).type).toBe("session_event");
+    expect(parseServerEvent({
+      type: "session_event",
+      sessionId,
+      runId,
+      conversationId,
+      focusId,
+      event: {
         type: "tool_prepared",
         toolCallId: "tool-1",
         args: { path: "changed-by-extension.ts" },
@@ -616,6 +637,12 @@ describe("parseClientCommand", () => {
     }).type).toBe("extension_ui_notification");
     expect(parseServerEvent({
       type: "command_complete",
+      operation: "steer",
+      commandId,
+      sessionId,
+    }).type).toBe("command_complete");
+    expect(parseServerEvent({
+      type: "command_complete",
       operation: "select_model",
       commandId,
       sessionId,
@@ -631,6 +658,17 @@ describe("parseClientCommand", () => {
       message: "failed",
       scope: "command",
       operation: "prompt",
+      sessionId,
+      runId,
+      conversationId,
+      focusId,
+      commandId,
+    }).type).toBe("error");
+    expect(parseServerEvent({
+      type: "error",
+      message: "stale run",
+      scope: "command",
+      operation: "steer",
       sessionId,
       runId,
       conversationId,
@@ -673,6 +711,16 @@ describe("parseClientCommand", () => {
       operation: "prompt",
       sessionId,
       runId,
+    })).toThrow();
+    expect(() => parseServerEvent({
+      type: "error",
+      message: "failed",
+      scope: "command",
+      operation: "steer",
+      sessionId,
+      runId,
+      conversationId,
+      focusId,
     })).toThrow();
     expect(() => parseServerEvent({
       type: "session_event",

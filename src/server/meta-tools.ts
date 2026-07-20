@@ -185,7 +185,7 @@ export function createMetaTools(
       name: "send_session_message",
       label: "Send session message",
       description:
-        "Durably send a first-class session message to a peer. A busy target is not interrupted; it processes the message after its current run settles.",
+        "Durably send a first-class session message to a peer. A busy target normally processes it after its current run settles. If that peer is waiting for this exact run, the message resolves that wait immediately while this run may continue.",
       promptSnippet: "Send a durable message to another Agent session.",
       parameters: Type.Object({
         conversationId: Type.String({ minLength: 1, maxLength: 256 }),
@@ -207,7 +207,7 @@ export function createMetaTools(
       name: "wait_for_session",
       label: "Wait for session",
       description:
-        "Explicitly wait for one exact target conversationId and runId. If it already settled, returns immediately. This is the only operation that puts the current Agent run into the visible waiting state.",
+        "Explicitly wait for the next relevant event from one exact target conversationId and runId. Returns either that run's durable settlement or message metadata while the message itself is injected into the current turn; call again if a message arrives but final settlement is still required. Cyclic conversation waits are rejected.",
       promptSnippet: "Wait for one exact peer run when its result is required now.",
       parameters: Type.Object({
         conversationId: Type.String({ minLength: 1, maxLength: 256 }),

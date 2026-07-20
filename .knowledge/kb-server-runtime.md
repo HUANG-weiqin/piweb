@@ -48,7 +48,7 @@
 
 - 原子持有 `sessionId + project handle + focused conversationId/focusId + project observer + focused extension UI route`。
 - 普通命令进入 `SerialTaskQueue`。
-- `abort`、`auth_response`、`cancel_auth`、`close_session` 可立即中断。
+- `abort`、`steer`、`auth_response`、`cancel_auth`、`close_session` 走控制通道；steer 必须在当前 run 尚占用 actor operation queue 时即可注入。
 - generation 使创建中的 project observation 变成 stale；detach 只释放观察 handle，不 dispose 后台 actor。
 - 每次 attach 分配新 focusId；PiConnection 只向浏览器转发匹配当前 focus 的 transcript/run event，项目级 activity 仍通过 snapshot 更新。
 - `ExtensionUIBroker` 是连接级临时 rendezvous，每次 focus 使用独立 scope；后台 actor 缺少 UI delegate 时由 conversation router 保留请求并进入 attention，聚焦后再接入 broker，不抢焦点。切换 focus 会取消旧 scope，旧对话框不能在新会话界面继续回答。
@@ -60,13 +60,14 @@
 - initialize 的 `recent` 在空项目中提交项目空态，不创建隐含 default conversation。open 复用已有 actor；new 必须先解析可用角色并在 AgentSession 创建前持久写入角色/lifecycle metadata。
 - `createAgentSession` 一旦返回，owner bind、host tool gate 安装、startup provider/固定模型校验和 extension load error 投影都必须位于同一个失败清理边界；其中任何一步抛错都 teardown 已创建的 AgentSession 并释放 actor lease。
 - 持久 conversation、连接 observation sessionId、focusId 和 runId 是不同身份；同一 conversation 重连或重新 focus 都必须分配新传输身份。
-- prompt、inbox custom messages 和 abort 都由 ConversationActor 的 active run ownership 控制；浏览器 attach/detach 不穿过或中止运行过程。
+- prompt、运行中 steer、inbox custom messages 和 abort 都由 ConversationActor 的 active run ownership 控制；浏览器 attach/detach 不穿过或中止运行过程。steer 只接受精确 `running | waiting` run，不能再额外依赖 SDK 的 `isStreaming` 投影：actor 会先公布 running，SDK 标志随后才可能追上，而 Pi 原生 steering queue 已能安全接收。引导在当前 assistant turn 工具结束、下一次模型调用前生效，不创建第二个 RunTicket。Actor 为每个浏览器 steer 保留 FIFO delivery waiter，只有对应 user message 的 SDK 事件进入当前 run 后才确认命令；run 先结算或取消会拒绝所有未投递 waiter。
 - 自动压缩阈值属于 conversation actor：缺省 70%，从 `piweb.compaction_threshold.v1` 恢复；每轮正常结束后用 Pi 的 context usage 检查百分比并触发标准 `compact()`，不改动同时影响摘要预算的 `reserveTokens`。更新只追加非上下文 custom entry，运行中的本轮结算会读取最新阈值。成功 compact 产生的 Pi 原生持久条目会在 completion snapshot 中投影为用户可见分界线，不另存第二份压缩状态。
 - API Key 在共享配置队列完成后才确认；凭据本身影响所有项目，但发起命令必须仍属于提交时的 observation session/generation，避免迟到页面修改全局认证。会话模型由角色快照固定，中途 `select_model` 明确拒绝；actor 重开时再次校验实际模型，不能 SDK fallback。
 - API Key、角色 CRUD 和删除等需要结算的操作都带原 sessionId + commandId，连接内复用 commandId 会被拒绝。
 - 会话“回到此处”由 project lifecycle、ConversationActor operation queue 和 ProjectStore 原子截断共同完成；busy 或存在待处理 inbox 时拒绝。只有 durable JSONL 与同一 AgentSession 内存 context 都同步后，PiConnection 才依次发布 focused snapshot 和 command completion。
 - `setThinkingLevel()` 和 `setSessionName()` 会先改内存再持久化；工作台以 actor 实际后置条件为准，发布新 state 并单独报告持久化风险。相对地，`AuthStorage.set/remove` 与 `ProjectStore.setToolMode` 都是持久写成功后才替换内存状态，不需要这种部分提交适配。
 - browser prompt 或 inbox run 在入队前先同步注册 actor run ticket，因此 abort 可以取消 queued prompt；精确 abort 复用同一个 SDK abort promise，错误 runId 不能影响后来的 run。
+- 取消 run 必须先清空 SDK 尚未消费的 steering/follow-up queue 再 abort；否则旧引导可能跨越结算边界污染下一次 prompt。持久跨会话消息仍由 inbox delivery marker 决定是否重投，不能把 SDK 内存队列当成 durable truth。
 - 注册不可复用 runId、安装 active RunTicket 后立即发送 `run_queued`；它既是生命周期事件，也是浏览器提交 user draft 的唯一服务端接收回执。
 - SDK 异步 preflight 结束时会再次检查 run ticket；若期间已取消，会在真正启动 agent 前阻断。
 - AgentSession 构造完成后，工作台在 SDK extension hook 外再包一层 host tool gate；扩展先修改/阻止，工作台再用最终 validated args 决策。

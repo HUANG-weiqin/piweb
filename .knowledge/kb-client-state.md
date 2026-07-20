@@ -29,6 +29,7 @@ ServerEvent
 - `outstandingRunId` 只覆盖“浏览器已交给 WebSocket、服务端运行状态尚未被观察到”的本地传输间隙，并为 Stop 提供 runId；匹配的 PublicState、terminal 或 error 会结算它，它不伪装成 Agent 状态。
 - `PiSocket.send() === true` 只表示浏览器 transport 接受了帧，不表示服务端接受 prompt。只有匹配 focus 三元身份 + runId 的 `run_queued` 才是接收提交点：此时才能清空草稿并把 user message 投影进 transcript。
 - prompt 接收确认前断线属于 unknown outcome。客户端保留内存草稿、重连恢复 durable conversation 后提示用户核对，绝不自动重发；显式切项目、新建或打开另一对话会清掉草稿，避免跨生命周期泄漏。
+- 当前 focus busy 时 composer 仍可发送；消息先进入按 conversationId 隔离的浏览器内存 FIFO。当前 run 进入 `running | waiting` 后，客户端立即把队首连续“等待中”条目用空行聚合成一个 `steer` 批次，而不是等待 idle 或为每条消息新建 run；`queued | cancelling` 暂不注入。批次以自己的 commandId 和精确 active runId 等待 `command_complete(steer)`，确认前条目仍保留并显示提交中，断线或拒绝则整批转为“需要确认”。若 run 已结算，剩余连续条目同样聚合成一个普通 prompt，并仍以 `run_queued` 确认。切换会话只切换当前队列投影，不能把 A 的等待消息发到 B；关闭项目会清空全部内存队列，localStorage 不成为消息真相。
 - 每次 initialize 或重连生成新的 observation sessionId；每次 initialize/open/create/focus 由服务端返回新的 focusId。
 - 当前 transcript 身份是 `sessionId + conversationId + focusId`。即使 conversationId 再次相同，旧 focus 的 state/snapshot/live item 也必须丢弃。
 - projectId/conversationId 随精确 `focus_attached` 提交；重连用新 sessionId 显式 `open` 当前 durable conversation，若尚未知 ID 才请求 `recent`。
@@ -44,7 +45,7 @@ ServerEvent
 - 后台 actor 的创建、运行或完成只能更新侧栏/通知，不能改变 current focus、draft 或 transcript。用户在当前会话 running 时仍可切换观察。
 - 删除以 sessionId + commandId 保持单一 pending 状态，匹配的 `command_complete` / error 才能结算；普通 snapshot 只更新列表，不能冒充删除回执。断线属于未知结果，应清除等待态并提示用户重新核对。
 - state 只说明 focused runtime 已提交，不说明历史已经 hydrate；`conversationReady` 必须等匹配 focus 三元身份的 snapshot，期间 composer 和 `sendPrompt` 双重禁用，避免 hydrate 覆盖刚发送的本地消息。
-- user、assistant、tool、usage 和 prompt error 全部按 runId 路由，不能更新“最后一条消息”来猜归属。
+- tool、usage、prompt error 与停止仍按 runId 路由；但一个 run 可因 steering 包含多个 `assistant → user → assistant` 消息段。live projector 显式发送 user message 与 assistant segment start，reducer 只在该 run 的最新 assistant 段内追加 delta/tool，不能把“run 生命周期”误作“单个气泡生命周期”。
 - OAuth UI 只接收当前 authFlowId；取消或新 flow 之后的旧 request/progress/complete 一律忽略。
 - 右侧抽屉只负责“提供商 → 凭据 → 可用模型”的连接状态，不承载项目权限、会话生命周期或 Agent 行为控制。项目工具权限位于工作台顶栏和新会话角色选择页；当前会话的思考级别与自动压缩阈值靠近 composer；角色管理只从新会话角色选择流程进入；会话改名位于左侧会话栏。
 - 会话不再中途选择模型。角色管理只列已配置提供商当前可用模型，并把 provider/model 固定到模板。角色表单还显式控制“允许管理会话”：新建角色默认关闭，编辑时按模板原值显示；关闭意味着 Agent 完全看不到工作台会话工具。
@@ -61,7 +62,7 @@ ServerEvent
 - transcript 仅在用户位于底部附近时跟随流式输出；跟随时必须滚动 transcript 容器到真实 `scrollHeight`，不能滚动 padding 之前的占位节点。用户向上阅读后显示“回到最新消息”，不能用每个 delta 强制抢走滚动位置。composer 是受控草稿并按内容在有界高度内增长。
 - transcript 使用 14px 的紧凑正文，并与 composer 共用响应式内容宽度：从原有 780px 阅读宽度随视口扩展，最高 1280px；窄屏仍由最小侧边距接管，不能产生横向溢出。assistant Markdown 的标题、段落、嵌套列表、引用、表格和代码只在 `.markdown` 内建立统一阅读节奏；宽表格与长代码由自身横向滚动承接，不能撑宽 transcript。
 - 当前 active run 的思考卡片用低干扰 spinner 表达“正在思考”，历史思考只显示完成态；工具卡片默认收起并以本地化动作、目标和状态概括调用，展开后按字段递归展示最终 args/result，内置工具优先提取文本输出，Agent 会话工具优先展示结构化 details，不能把宿主 JSON 包装直接暴露给用户。
-- 每条 user 与 assistant 正文在既有消息间距中提供低干扰操作组：复制按钮读取原始文本/Markdown，不复制渲染后的 HTML；“回到此处”先明确确认将彻底删除本条及之后所有消息。运行中、恢复未完成或已有截断 pending 时禁用破坏性按钮。
+- 每条 user 与 assistant 正文在既有消息间距中提供低干扰操作组：复制按钮读取原始文本/Markdown，不复制渲染后的 HTML；“回到此处”先明确确认将彻底删除本条及之后所有消息。操作组必须使用内容宽度且禁止换行，不能被短 user bubble 压成竖排。运行中、恢复未完成、存在排队 prompt 或已有截断 pending 时禁用破坏性按钮。
 - 截断只维护一个 `sessionId + commandId + conversationId + messageId` pending；客户端不先行 splice transcript，只接受匹配 focus 的服务端 snapshot 作为新内容，再用匹配 commandId 的 completion/error 结算等待态。等待期间 composer、切换和新建会话禁用；断线属于未知结果，必须提示恢复后核对。
 - 认证、设置和扩展交互拥有模态焦点边界。
 - 工具模式的服务端 state 是执行真相；限制到 `read_only` 的本地意图立即持久化，放宽到 `full_access` 只能在服务端确认后持久化，重连不得在 ack 间隙扩大权限。

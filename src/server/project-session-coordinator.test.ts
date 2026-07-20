@@ -92,6 +92,7 @@ class FakeSessionControl {
   readonly behaviors: SessionBehavior[] = [];
   abortCalls = 0;
   disposeCalls = 0;
+  skipNextCustomMessagePersistence = false;
   listener?: (event: AgentSessionEvent) => void;
   abortCurrent?: () => void;
   readonly session: AgentSession;
@@ -126,6 +127,10 @@ class FakeSessionControl {
         message: Parameters<AgentSession["sendCustomMessage"]>[0],
         sendOptions: Parameters<AgentSession["sendCustomMessage"]>[1],
       ) => {
+        if (control.skipNextCustomMessagePersistence) {
+          control.skipNextCustomMessagePersistence = false;
+          return;
+        }
         const received = {
           customType: message.customType,
           content: String(message.content),
@@ -146,6 +151,7 @@ class FakeSessionControl {
         control.abortCalls++;
         control.abortCurrent?.();
       },
+      clearQueue: () => undefined,
       dispose: () => {
         control.disposeCalls++;
       },
@@ -2308,6 +2314,350 @@ describe("ProjectSessionCoordinator", () => {
       expect(source.getActivity()).toEqual({ kind: "idle" });
     },
   );
+
+  it("delivers a child message directly into an exact caller wait", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const child = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const childStarted = deferred();
+    const releaseChild = deferred();
+    fixture.runtime.control(child.conversationId).enqueue(
+      blocksUntil(childStarted, releaseChild, "reply through the awaited run"),
+    );
+    const childRunId = randomUUID();
+    const childCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      child.conversationId,
+      childRunId,
+      "prepare a reply",
+    );
+    await childStarted.promise;
+
+    let waited: RunSettlement | undefined;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      waited = await executeTool(
+        control,
+        "wait_for_session",
+        "wait-for-child-reply",
+        {
+          conversationId: child.conversationId,
+          runId: childRunId,
+        },
+      ) as RunSettlement;
+      control.emitFinal("caller resumed");
+    });
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      randomUUID(),
+      "wait for the child",
+    );
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the caller to enter its exact wait",
+    );
+
+    await expect(executeTool(
+      fixture.runtime.control(child.conversationId),
+      "send_session_message",
+      "circular-child-reply",
+      {
+        conversationId: caller.conversationId,
+        message: "Reply while the child keeps working.",
+      },
+    )).resolves.toMatchObject({
+      status: "delivered_to_wait",
+      conversationId: caller.conversationId,
+    });
+
+    await expect(callerCompletion).resolves.toMatchObject({
+      outcome: "completed",
+    });
+    expect(waited).toMatchObject({
+      outcome: "message",
+      conversationId: child.conversationId,
+      runId: childRunId,
+    });
+    expect(child.getActivity()).toMatchObject({
+      kind: "running",
+      runId: childRunId,
+    });
+    expect(
+      aggregateReservedConversationEntries(
+        caller.sessionManager.getEntries(),
+      ).deliveredMessageIds,
+    ).toHaveLength(1);
+    expect(
+      fixture.runtime.control(caller.conversationId).received[0]?.content,
+    ).toContain("Reply while the child keeps working.");
+    expect((await coordinatorInbox(fixture.handle).list({
+      toConversationId: caller.conversationId,
+    }))).toHaveLength(0);
+
+    releaseChild.resolve();
+    await expect(childCompletion).resolves.toMatchObject({
+      runId: childRunId,
+      outcome: "completed",
+    });
+  });
+
+  it("requeues a rendezvous message until the target records its delivery marker", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const child = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const childStarted = deferred();
+    const releaseChild = deferred();
+    fixture.runtime.control(child.conversationId).enqueue(
+      blocksUntil(childStarted, releaseChild, "child finished later"),
+    );
+    const childRunId = randomUUID();
+    const childCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      child.conversationId,
+      childRunId,
+      "prepare a recoverable reply",
+    );
+    await childStarted.promise;
+
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      await executeTool(
+        control,
+        "wait_for_session",
+        "wait-before-delivery-marker",
+        {
+          conversationId: child.conversationId,
+          runId: childRunId,
+        },
+      );
+      control.emitFinal("caller settled before the steering marker");
+    });
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      randomUUID(),
+      "wait for a steering reply",
+    );
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the recoverable caller wait",
+    );
+    fixture.runtime.control(caller.conversationId)
+      .skipNextCustomMessagePersistence = true;
+
+    await expect(executeTool(
+      fixture.runtime.control(child.conversationId),
+      "send_session_message",
+      "message-before-marker",
+      {
+        conversationId: caller.conversationId,
+        message: "Do not lose this before its delivery marker.",
+      },
+    )).resolves.toMatchObject({ status: "delivered_to_wait" });
+    await expect(callerCompletion).resolves.toMatchObject({
+      outcome: "completed",
+    });
+    await waitUntil(
+      async () => (
+        await coordinatorInbox(fixture.handle).list({
+          toConversationId: caller.conversationId,
+        })
+      ).length === 0,
+      "the unmarked rendezvous message to be requeued and delivered",
+    );
+    expect(
+      fixture.runtime.control(caller.conversationId).received[0]?.content,
+    ).toContain("Do not lose this before its delivery marker.");
+    expect(
+      aggregateReservedConversationEntries(
+        caller.sessionManager.getEntries(),
+      ).deliveredMessageIds,
+    ).toHaveLength(1);
+
+    releaseChild.resolve();
+    await expect(childCompletion).resolves.toMatchObject({
+      runId: childRunId,
+      outcome: "completed",
+    });
+  });
+
+  it("falls back to the durable inbox when a wait is cancelled during delivery", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const child = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const childStarted = deferred();
+    const releaseChild = deferred();
+    fixture.runtime.control(child.conversationId).enqueue(
+      blocksUntil(childStarted, releaseChild, "child done"),
+    );
+    const childRunId = randomUUID();
+    const childCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      child.conversationId,
+      childRunId,
+      "prepare a cancellable reply",
+    );
+    await childStarted.promise;
+
+    const waitAbort = new AbortController();
+    const keepCallerRunning = deferred();
+    let waitError: unknown;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      try {
+        await executeTool(
+          control,
+          "wait_for_session",
+          "cancelled-wait",
+          {
+            conversationId: child.conversationId,
+            runId: childRunId,
+          },
+          waitAbort.signal,
+        );
+      } catch (error) {
+        waitError = error;
+      }
+      await keepCallerRunning.promise;
+      control.emitFinal("caller handled cancellation");
+    });
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      randomUUID(),
+      "wait until cancelled",
+    );
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the cancellable wait",
+    );
+
+    const inbox = coordinatorInbox(fixture.handle);
+    waitAbort.abort();
+    await waitUntil(
+      () => caller.getActivity().kind === "running",
+      "the cancelled wait to restore its caller",
+    );
+    const sending = executeTool(
+      fixture.runtime.control(child.conversationId),
+      "send_session_message",
+      "cancelled-rendezvous-message",
+      {
+        conversationId: caller.conversationId,
+        message: "Preserve this after the wait cancellation.",
+      },
+    );
+
+    await expect(sending).resolves.toMatchObject({
+      status: "queued",
+      conversationId: caller.conversationId,
+    });
+    expect(waitError).toMatchObject({ name: "AbortError" });
+    expect(caller.getActivity().kind).toBe("running");
+    expect((await inbox.list({
+      toConversationId: caller.conversationId,
+    }))).toHaveLength(1);
+
+    keepCallerRunning.resolve();
+    await expect(callerCompletion).resolves.toMatchObject({
+      outcome: "completed",
+    });
+    releaseChild.resolve();
+    await expect(childCompletion).resolves.toMatchObject({
+      outcome: "completed",
+    });
+  });
+
+  it("rejects a wait edge that would close a conversation cycle", async () => {
+    const fixture = await createFixture();
+    const first = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const second = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const firstStarted = deferred();
+    const secondStarted = deferred();
+    const releaseFirst = deferred();
+    const releaseSecond = deferred();
+    fixture.runtime.control(first.conversationId).enqueue(
+      blocksUntil(firstStarted, releaseFirst, "first completed"),
+    );
+    fixture.runtime.control(second.conversationId).enqueue(
+      blocksUntil(secondStarted, releaseSecond, "second completed"),
+    );
+    const firstRunId = randomUUID();
+    const secondRunId = randomUUID();
+    const firstCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      first.conversationId,
+      firstRunId,
+      "first work",
+    );
+    const secondCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      second.conversationId,
+      secondRunId,
+      "second work",
+    );
+    await Promise.all([firstStarted.promise, secondStarted.promise]);
+
+    const firstWait = executeTool(
+      fixture.runtime.control(first.conversationId),
+      "wait_for_session",
+      "first-waits-second",
+      {
+        conversationId: second.conversationId,
+        runId: secondRunId,
+      },
+    );
+    await waitUntil(
+      () => first.getActivity().kind === "waiting",
+      "the first wait edge",
+    );
+    await expect(executeTool(
+      fixture.runtime.control(second.conversationId),
+      "wait_for_session",
+      "second-waits-first",
+      {
+        conversationId: first.conversationId,
+        runId: firstRunId,
+      },
+    )).rejects.toThrow("would create a conversation wait cycle");
+
+    releaseSecond.resolve();
+    await expect(secondCompletion).resolves.toMatchObject({
+      runId: secondRunId,
+      outcome: "completed",
+    });
+    await expect(firstWait).resolves.toMatchObject({
+      runId: secondRunId,
+      outcome: "completed",
+    });
+    releaseFirst.resolve();
+    await expect(firstCompletion).resolves.toMatchObject({
+      runId: firstRunId,
+      outcome: "completed",
+    });
+  });
 
   it("aborts wait_for_session while the target actor is still opening without leaking waiting state", async () => {
     const runtime = new FakeRuntime();

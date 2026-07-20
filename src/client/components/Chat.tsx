@@ -26,6 +26,16 @@ import { Message } from "./Message";
 import { ProjectToolModeControl } from "./ProjectToolModeControl";
 import { SessionMessageCard } from "./SessionMessageCard";
 
+type QueuedPromptStatus = "queued" | "submitting" | "attention";
+
+function queuedPromptStatusLabel(status: QueuedPromptStatus): string {
+  switch (status) {
+    case "submitting": return "正在提交";
+    case "attention": return "需要确认";
+    case "queued": return "等待中";
+  }
+}
+
 interface ChatProps {
   chat: ChatState;
   historyTruncated: boolean;
@@ -49,9 +59,16 @@ interface ChatProps {
   conversationReady: boolean;
   draft: string;
   submitting: boolean;
+  queuedPrompts: Array<{
+    id: string;
+    text: string;
+    status: QueuedPromptStatus;
+  }>;
   promptNotice?: string;
   onDraftChange(text: string): void;
   onSend(text: string): boolean;
+  onRemoveQueuedPrompt(id: string): void;
+  onRetryQueuedPrompt(id: string): void;
   onAbort(): void;
   onSettings(): void;
   onThinking(level: ThinkingLevel): void;
@@ -172,9 +189,12 @@ export function Chat({
   conversationReady,
   draft,
   submitting,
+  queuedPrompts,
   promptNotice,
   onDraftChange,
   onSend,
+  onRemoveQueuedPrompt,
+  onRetryQueuedPrompt,
   onAbort,
   onSettings,
   onThinking,
@@ -197,6 +217,7 @@ export function Chat({
   if (!conversationReady) composerPlaceholder = "正在恢复项目对话…";
   else if (rewindingMessageId) composerPlaceholder = "正在回到所选消息…";
   else if (!model) composerPlaceholder = "请先登录并选择模型";
+  else if (busy) composerPlaceholder = "发送后将引导当前任务…";
   const transcriptRef = useRef<HTMLElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const followOutputRef = useRef(true);
@@ -259,7 +280,6 @@ export function Chat({
     const value = draft.trim();
     if (
       !value
-      || busy
       || submitting
       || rewindingMessageId
       || !model
@@ -358,6 +378,45 @@ export function Chat({
       >
         ↓ 回到最新消息
       </button>}
+      {queuedPrompts.length > 0 && <section
+        className="prompt-queue"
+        aria-label="待发送消息"
+      >
+        <header>
+          <span>接下来处理 {queuedPrompts.length} 条</span>
+          <small>可接收时合并为一次引导</small>
+        </header>
+        <ol>
+          {queuedPrompts.map((prompt) => <li
+            key={prompt.id}
+            className={`prompt-queue-item ${prompt.status}`}
+          >
+            <span className="prompt-queue-text" title={prompt.text}>
+              {prompt.text}
+            </span>
+            <span className="prompt-queue-status">
+              {queuedPromptStatusLabel(prompt.status)}
+            </span>
+            <span className="prompt-queue-actions">
+              {prompt.status === "attention" && <button
+                type="button"
+                aria-label={`重试排队消息 ${prompt.text}`}
+                onClick={() => onRetryQueuedPrompt(prompt.id)}
+              >
+                重试
+              </button>}
+              <button
+                type="button"
+                aria-label={`移除排队消息 ${prompt.text}`}
+                disabled={prompt.status === "submitting"}
+                onClick={() => onRemoveQueuedPrompt(prompt.id)}
+              >
+                ×
+              </button>
+            </span>
+          </li>)}
+        </ol>
+      </section>}
       {submitting && !promptNotice && <div
         className="composer-notice pending"
         role="status"
@@ -373,7 +432,10 @@ export function Chat({
       {promptNotice && <div className="composer-notice" role="alert">{promptNotice}</div>}
       <div className="composer">
         <textarea ref={textareaRef} aria-label="给 Pi 发送消息" value={draft} onChange={(e) => onDraftChange(e.target.value)} onKeyDown={keyDown} placeholder={composerPlaceholder} disabled={!online || !conversationReady || !model || submitting || Boolean(rewindingMessageId)} rows={1} />
-        {busy ? <button className="send stop" onClick={onAbort} aria-label="停止">■</button> : <button className="send" onClick={send} disabled={!online || !conversationReady || !model || submitting || Boolean(rewindingMessageId) || !draft.trim()} aria-label="发送">↑</button>}
+        <div className="composer-actions">
+          {busy && <button className="send stop" onClick={onAbort} aria-label="停止">■</button>}
+          <button className="send" onClick={send} disabled={!online || !conversationReady || !model || submitting || Boolean(rewindingMessageId) || !draft.trim()} aria-label="发送">↑</button>
+        </div>
       </div>
       {compactionThresholdOpen && <label
           id="compaction-threshold-panel"

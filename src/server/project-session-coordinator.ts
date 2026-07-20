@@ -15,6 +15,7 @@ import {
   createRunSettlementEntry,
   MAX_CONVERSATION_BODY_BYTES,
   type ConversationCard,
+  type ConversationMessageEntry,
   type ConversationMeta,
   type ConversationReferenceSnapshot,
   type MetaOperation,
@@ -75,12 +76,34 @@ export type ProjectSessionCoordinatorListener = (
   event: ProjectSessionCoordinatorEvent,
 ) => void;
 
-interface CompletionWaiter {
-  resolve(settlement: RunSettlement): void;
+interface WaiterBase {
   reject(error: Error): void;
   signal?: AbortSignal;
   abortListener?: () => void;
 }
+
+interface SessionMessageWaitResult {
+  outcome: "message";
+  conversationId: string;
+  runId: string;
+  messageId: string;
+  sentAt: string;
+}
+
+interface CompletionWaiter extends WaiterBase {
+  kind: "completion";
+  resolve(settlement: RunSettlement): void;
+}
+
+interface SessionWaiter extends WaiterBase {
+  kind: "session";
+  waitingConversationId: string;
+  targetConversationId: string;
+  targetRunId: string;
+  resolve(result: RunSettlement | SessionMessageWaitResult): void;
+}
+
+type ProjectWaiter = CompletionWaiter | SessionWaiter;
 
 interface ProjectContext {
   readonly key: string;
@@ -94,7 +117,7 @@ interface ProjectContext {
   readonly attention: Set<string>;
   readonly deleting: Set<string>;
   readonly listeners: Set<ProjectSessionCoordinatorListener>;
-  readonly waiters: Map<string, Set<CompletionWaiter>>;
+  readonly waiters: Map<string, Set<ProjectWaiter>>;
   readonly completions: Map<string, RunSettlement>;
   readonly processingBatches: Map<string, InboxEnvelope[]>;
   readonly failedBatchRetries: Set<string>;
@@ -971,6 +994,21 @@ export class ProjectSessionCoordinator {
     });
   }
 
+  steer(
+    handle: ProjectSessionHandle,
+    conversationId: string,
+    runId: string,
+    text: string,
+  ): Promise<void> {
+    const context = this.requireContext(handle);
+    if (context.deleting.has(conversationId)) {
+      return Promise.reject(
+        new Error(`Conversation is being deleted: ${conversationId}`),
+      );
+    }
+    return this.requireActor(context, conversationId).steer(runId, text);
+  }
+
   setCompactionThreshold(
     handle: ProjectSessionHandle,
     conversationId: string,
@@ -1821,6 +1859,7 @@ export class ProjectSessionCoordinator {
       }
       const target = await this.getOrOpenActor(context, targetConversationId);
       this.throwIfAborted(signal);
+      const sourceRun = source.currentRunOwnership();
       const queued = await this.enqueueEnvelope(context, source, target, {
         messageId,
         cardId,
@@ -1838,6 +1877,23 @@ export class ProjectSessionCoordinator {
           messageId: envelope.messageId,
           conversationId: targetConversationId,
           runId: envelope.processingRunId,
+        };
+      }
+      if (
+        sourceRun
+        && await this.deliverEnvelopeToWaitingRun(
+          context,
+          target,
+          envelope,
+          sourceRun.runId,
+        )
+      ) {
+        const activity = target.getActivity();
+        return {
+          status: "delivered_to_wait",
+          messageId: envelope.messageId,
+          conversationId: targetConversationId,
+          ...(activity.kind === "idle" ? {} : { runId: activity.runId }),
         };
       }
       if (target.getActivity().kind === "idle") {
@@ -1876,6 +1932,77 @@ export class ProjectSessionCoordinator {
           : { activeRunId: activity.runId }),
       };
     });
+  }
+
+  private async deliverEnvelopeToWaitingRun(
+    context: ProjectContext,
+    target: ConversationActor,
+    envelope: InboxEnvelope,
+    sourceRunId: string,
+  ): Promise<boolean> {
+    const key = completionKey(envelope.fromConversationId, sourceRunId);
+    const waiters = context.waiters.get(key);
+    const waiter = [...(waiters ?? [])].find(
+      (candidate): candidate is SessionWaiter =>
+        candidate.kind === "session"
+        && candidate.waitingConversationId === target.conversationId
+        && candidate.targetConversationId === envelope.fromConversationId
+        && candidate.targetRunId === sourceRunId,
+    );
+    if (!waiter || !waiters) return false;
+
+    const initialActivity = target.getActivity();
+    if (
+      initialActivity.kind !== "waiting"
+      || initialActivity.targetConversationId !== envelope.fromConversationId
+      || initialActivity.targetRunId !== sourceRunId
+    ) {
+      return false;
+    }
+    waiters.delete(waiter);
+    if (waiters.size === 0) context.waiters.delete(key);
+    this.detachWaiter(waiter);
+    const processingKey = completionKey(
+      target.conversationId,
+      initialActivity.runId,
+    );
+    try {
+      const message = this.createDeliveredMessageEntry(target, envelope);
+      await target.session.sendCustomMessage(message, {
+        triggerTurn: false,
+        deliverAs: "steer",
+      });
+      const processing = context.processingBatches.get(processingKey) ?? [];
+      if (!processing.some(
+        ({ messageId }) => messageId === envelope.messageId,
+      )) {
+        context.processingBatches.set(
+          processingKey,
+          [...processing, envelope],
+        );
+      }
+      this.appendSourceCardState(
+        context,
+        envelope,
+        "delivered",
+      );
+      const result: SessionMessageWaitResult = {
+        outcome: "message",
+        conversationId: envelope.fromConversationId,
+        runId: sourceRunId,
+        messageId: envelope.messageId,
+        sentAt: envelope.sentAt,
+      };
+      waiter.resolve(result);
+      this.emit(context, { type: "project_changed" });
+      return true;
+    } catch (error) {
+      const failure = error instanceof Error
+        ? error
+        : new Error(String(error));
+      waiter.reject(failure);
+      throw failure;
+    }
   }
 
   private async enqueueEnvelope(
@@ -1975,6 +2102,46 @@ export class ProjectSessionCoordinator {
       actor.sessionManager,
       createConversationCardEntry(card),
     );
+  }
+
+  private createDeliveredMessageEntry(
+    target: ConversationActor,
+    envelope: InboxEnvelope,
+  ): ConversationMessageEntry {
+    const content = [
+      `来自会话：${envelope.fromSnapshot.title ?? "未命名会话"}`,
+      `来源角色：${envelope.fromSnapshot.role.name}`,
+      `来源句柄：${envelope.fromConversationId}`,
+      "",
+      envelope.body,
+      ...(target.profile.role.canManageSessions
+        ? [
+            "",
+            `如需回复，请调用 send_session_message 并使用 conversationId ${envelope.fromConversationId}。`,
+            "",
+            INBOX_LIFECYCLE_GUIDANCE,
+          ]
+        : []),
+    ].join("\n");
+    return createConversationMessageEntry({
+      content,
+      display: true,
+      details: {
+        messageId: envelope.messageId,
+        cardId: envelope.cardId,
+        sentAt: envelope.sentAt,
+        kind: envelope.kind,
+        body: envelope.body,
+        fromSnapshot: envelope.fromSnapshot,
+        toSnapshot: envelope.toSnapshot,
+        ...(envelope.replyToMessageId === undefined
+          ? {}
+          : { replyToMessageId: envelope.replyToMessageId }),
+        ...(envelope.delegationId === undefined
+          ? {}
+          : { delegationId: envelope.delegationId }),
+      },
+    });
   }
 
   private appendSourceCardState(
@@ -2119,40 +2286,10 @@ export class ProjectSessionCoordinator {
         : target.startMessages({
             runId,
             messages: undelivered.map((envelope) => {
-              const content = [
-                `来自会话：${envelope.fromSnapshot.title ?? "未命名会话"}`,
-                `来源角色：${envelope.fromSnapshot.role.name}`,
-                `来源句柄：${envelope.fromConversationId}`,
-                "",
-                envelope.body,
-                ...(target.profile.role.canManageSessions
-                  ? [
-                      "",
-                      `如需回复，请调用 send_session_message 并使用 conversationId ${envelope.fromConversationId}。`,
-                      "",
-                      INBOX_LIFECYCLE_GUIDANCE,
-                    ]
-                  : []),
-              ].join("\n");
-              const message = createConversationMessageEntry({
-                content,
-                display: true,
-                details: {
-                  messageId: envelope.messageId,
-                  cardId: envelope.cardId,
-                  sentAt: envelope.sentAt,
-                  kind: envelope.kind,
-                  body: envelope.body,
-                  fromSnapshot: envelope.fromSnapshot,
-                  toSnapshot: envelope.toSnapshot,
-                  ...(envelope.replyToMessageId === undefined
-                    ? {}
-                    : { replyToMessageId: envelope.replyToMessageId }),
-                  ...(envelope.delegationId === undefined
-                    ? {}
-                    : { delegationId: envelope.delegationId }),
-                },
-              });
+              const message = this.createDeliveredMessageEntry(
+                target,
+                envelope,
+              );
               return {
                 content: message.content,
                 display: message.display,
@@ -2235,7 +2372,18 @@ export class ProjectSessionCoordinator {
         dispatchRetryKey(targetConversationId, envelopes),
       );
     }
+    const target = context.actors.get(targetConversationId);
+    const deliveredMessageIds = new Set(
+      target
+        ? aggregateReservedConversationEntries(
+            target.sessionManager.getEntries(),
+          ).deliveredMessageIds
+        : [],
+    );
     for (const envelope of envelopes) {
+      if (!deliveredMessageIds.has(envelope.messageId)) {
+        if (envelope.state === "queued") continue;
+      }
       const state = settlement.outcome === "completed"
         ? "completed"
         : settlement.outcome;
@@ -2352,7 +2500,7 @@ export class ProjectSessionCoordinator {
     targetConversationId: string,
     runId: string,
     signal?: AbortSignal,
-  ): Promise<RunSettlement> {
+  ): Promise<RunSettlement | SessionMessageWaitResult> {
     if (sourceConversationId === targetConversationId) {
       throw new Error("An Agent cannot wait for its own current run");
     }
@@ -2391,16 +2539,31 @@ export class ProjectSessionCoordinator {
     this.throwIfAborted(signal);
     const existing = this.findSettlement(context, target, runId);
     if (existing) return existing;
+    if (this.hasWaitPath(
+      context,
+      targetConversationId,
+      sourceConversationId,
+    )) {
+      throw new Error(
+        `Waiting for ${targetConversationId} would create a conversation wait cycle`,
+      );
+    }
 
     return source.withWaiting(
       ownership,
       { conversationId: targetConversationId, runId },
       async () => {
-        const completion = new Promise<RunSettlement>((resolve, reject) => {
+        const completion = new Promise<
+          RunSettlement | SessionMessageWaitResult
+        >((resolve, reject) => {
           const key = completionKey(targetConversationId, runId);
-          const waiter: CompletionWaiter = {
+          const waiter: SessionWaiter = {
+            kind: "session",
             resolve,
             reject,
+            waitingConversationId: sourceConversationId,
+            targetConversationId,
+            targetRunId: runId,
             ...(signal === undefined ? {} : { signal }),
           };
           if (signal) {
@@ -2466,7 +2629,11 @@ export class ProjectSessionCoordinator {
     if (existing) return Promise.resolve(existing);
     return new Promise<RunSettlement>((resolve, reject) => {
       const key = completionKey(target.conversationId, runId);
-      const waiter: CompletionWaiter = { resolve, reject };
+      const waiter: CompletionWaiter = {
+        kind: "completion",
+        resolve,
+        reject,
+      };
       let waiters = context.waiters.get(key);
       if (!waiters) {
         waiters = new Set();
@@ -3048,7 +3215,33 @@ export class ProjectSessionCoordinator {
     return true;
   }
 
-  private detachWaiter(waiter: CompletionWaiter): void {
+  private hasWaitPath(
+    context: ProjectContext,
+    fromConversationId: string,
+    toConversationId: string,
+  ): boolean {
+    const pending = [fromConversationId];
+    const visited = new Set<string>();
+    while (pending.length > 0) {
+      const current = pending.pop()!;
+      if (current === toConversationId) return true;
+      if (visited.has(current)) continue;
+      visited.add(current);
+      for (const waiters of context.waiters.values()) {
+        for (const waiter of waiters) {
+          if (
+            waiter.kind === "session"
+            && waiter.waitingConversationId === current
+          ) {
+            pending.push(waiter.targetConversationId);
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  private detachWaiter(waiter: ProjectWaiter): void {
     if (waiter.signal && waiter.abortListener) {
       waiter.signal.removeEventListener("abort", waiter.abortListener);
     }

@@ -134,7 +134,8 @@ type QueuedCommand = Exclude<ConnectionCommand, {
     | "close_session"
     | "extension_ui_response"
     | "initialize"
-    | "prompt";
+    | "prompt"
+    | "steer";
 }>;
 type ConversationTarget = NonNullable<
   Extract<ClientCommand, { type: "initialize" }>["conversation"]
@@ -487,6 +488,11 @@ export class PiConnection {
       return Promise.resolve();
     }
     if (command.type === "close_session") return this.closeSession(command.sessionId);
+    if (command.type === "steer") {
+      return Promise.reject(
+        new Error("steer requires persistent project coordination"),
+      );
+    }
     if (command.type === "initialize") {
       if (this.usedSessionIds.has(command.sessionId)) {
         return Promise.reject(new Error("Session ID was already used on this connection"));
@@ -653,6 +659,33 @@ export class PiConnection {
             command.text,
           )
         ).then(() => undefined);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    }
+    if (command.type === "steer") {
+      try {
+        if (this.usedCommandIds.has(command.commandId)) {
+          return Promise.reject(
+            new Error("Command ID was already used on this connection"),
+          );
+        }
+        this.usedCommandIds.add(command.commandId);
+        const view = this.requireCoordinatedFocus(
+          command.sessionId,
+          command.conversationId,
+          command.focusId,
+        );
+        return this.requireCoordination().then(({ coordinator }) =>
+          coordinator.steer(
+            view.handle,
+            command.conversationId,
+            command.runId,
+            command.text,
+          )
+        ).then(() => {
+          this.emitCommandComplete(command);
+        });
       } catch (error) {
         return Promise.reject(error);
       }
@@ -909,6 +942,7 @@ export class PiConnection {
       | { type: "extension_ui_response" }
       | { type: "initialize" }
       | { type: "prompt" }
+      | { type: "steer" }
     >,
   ): Promise<void> {
     switch (command.type) {
@@ -1208,6 +1242,7 @@ export class PiConnection {
           | "create_role"
           | "update_role"
           | "delete_role"
+          | "steer"
           | "set_compaction_threshold"
           | "set_api_key";
       }

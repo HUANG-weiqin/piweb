@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { types as nodeTypes } from "node:util";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import type { SessionEvent, TokenUsage } from "../shared/protocol.js";
@@ -41,6 +42,21 @@ function projectAssistantText(message: unknown): string {
     .map((item) => {
       const block = record(item);
       return block?.type === "text" && typeof block.text === "string" ? block.text : "";
+    })
+    .join("");
+}
+
+function projectUserText(message: unknown): string {
+  const value = record(message);
+  if (value?.role !== "user") return "";
+  if (typeof value.content === "string") return value.content;
+  if (!Array.isArray(value.content)) return "";
+  return value.content
+    .map((item) => {
+      const block = record(item);
+      return block?.type === "text" && typeof block.text === "string"
+        ? block.text
+        : "";
     })
     .join("");
 }
@@ -263,14 +279,21 @@ export function toWireValue(value: unknown): unknown {
 
 /**
  * Stateful adapter from Pi's event model to the workbench wire contract.
- * The browser receives one assistant bubble per agent run, so final messages
- * calibrate the text assembled from streaming deltas.
+ * A run may contain multiple assistant segments separated by user steering;
+ * final messages calibrate the current segment while finalText spans the run.
  */
 export class SessionEventProjector {
-  private completedText = "";
+  private runCompletedText = "";
+  private segmentCompletedText = "";
   private currentMessageText = "";
   private finalErrorMessage?: string;
   private finalAborted = false;
+  private needsAssistantSegment = true;
+  private suppressNextUserMessage: boolean;
+
+  constructor(options: { suppressNextUserMessage?: boolean } = {}) {
+    this.suppressNextUserMessage = options.suppressNextUserMessage === true;
+  }
 
   get errorMessage(): string | undefined {
     return this.finalErrorMessage;
@@ -281,15 +304,17 @@ export class SessionEventProjector {
   }
 
   get finalText(): string | null {
-    return this.completedText.length === 0 ? null : this.completedText;
+    return this.runCompletedText.length === 0 ? null : this.runCompletedText;
   }
 
   project(event: AgentSessionEvent): SessionEvent[] {
     if (event.type === "agent_start") {
-      this.completedText = "";
+      this.runCompletedText = "";
+      this.segmentCompletedText = "";
       this.currentMessageText = "";
       this.finalErrorMessage = undefined;
       this.finalAborted = false;
+      this.needsAssistantSegment = true;
       return [];
     }
 
@@ -297,9 +322,28 @@ export class SessionEventProjector {
       return [];
     }
 
+    if (event.type === "message_start" && event.message.role === "user") {
+      if (this.suppressNextUserMessage) {
+        this.suppressNextUserMessage = false;
+        return [];
+      }
+      const text = projectUserText(event.message);
+      this.segmentCompletedText = "";
+      this.currentMessageText = "";
+      this.needsAssistantSegment = true;
+      return text
+        ? [{ type: "user_message", projectionId: randomUUID(), text }]
+        : [];
+    }
+
     if (event.type === "message_start" && event.message.role === "assistant") {
       this.currentMessageText = "";
-      return [];
+      if (!this.needsAssistantSegment) return [];
+      this.needsAssistantSegment = false;
+      return [{
+        type: "assistant_message_started",
+        projectionId: randomUUID(),
+      }];
     }
 
     if (event.type === "message_update") {
@@ -309,7 +353,9 @@ export class SessionEventProjector {
       }
       if (delta.type !== "text_delta") return [];
 
-      const prefix = this.completedText && !this.currentMessageText ? "\n\n" : "";
+      const prefix = this.segmentCompletedText && !this.currentMessageText
+        ? "\n\n"
+        : "";
       const text = String(delta.delta ?? "");
       this.currentMessageText += text;
       return [{ type: "text_delta", delta: prefix + text }];
@@ -323,13 +369,23 @@ export class SessionEventProjector {
         : undefined;
       this.finalAborted = message?.stopReason === "aborted";
       const finalMessageText = projectAssistantText(event.message);
-      const streamedRunText = joinMessageText(this.completedText, this.currentMessageText);
-      const finalRunText = joinMessageText(this.completedText, finalMessageText);
+      const streamedSegmentText = joinMessageText(
+        this.segmentCompletedText,
+        this.currentMessageText,
+      );
+      const finalSegmentText = joinMessageText(
+        this.segmentCompletedText,
+        finalMessageText,
+      );
 
-      if (finalRunText !== streamedRunText) {
-        projected.push({ type: "text_replaced", text: finalRunText });
+      if (finalSegmentText !== streamedSegmentText) {
+        projected.push({ type: "text_replaced", text: finalSegmentText });
       }
-      this.completedText = finalRunText;
+      this.segmentCompletedText = finalSegmentText;
+      this.runCompletedText = joinMessageText(
+        this.runCompletedText,
+        finalMessageText,
+      );
       this.currentMessageText = "";
 
       const usage = projectUsage(event.message.usage);

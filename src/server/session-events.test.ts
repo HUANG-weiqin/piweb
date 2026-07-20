@@ -80,6 +80,64 @@ describe("SessionEventProjector", () => {
     }));
     expect(projector.errorMessage).toBeUndefined();
   });
+
+  it("splits assistant output around delivered steering messages", () => {
+    const projector = new SessionEventProjector({
+      suppressNextUserMessage: true,
+    });
+    projector.project(nativeEvent({ type: "agent_start" }));
+
+    expect(projector.project(nativeEvent({
+      type: "message_start",
+      message: { role: "user", content: [{ type: "text", text: "initial" }] },
+    }))).toEqual([]);
+    expect(projector.project(nativeEvent({
+      type: "message_start",
+      message: { role: "assistant", content: [] },
+    }))).toEqual([{
+      type: "assistant_message_started",
+      projectionId: expect.any(String),
+    }]);
+    projector.project(nativeEvent({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "before guidance" }],
+      },
+    }));
+
+    expect(projector.project(nativeEvent({
+      type: "message_start",
+      message: {
+        role: "user",
+        content: [{ type: "text", text: "change direction" }],
+      },
+    }))).toEqual([{
+      type: "user_message",
+      projectionId: expect.any(String),
+      text: "change direction",
+    }]);
+    expect(projector.project(nativeEvent({
+      type: "message_start",
+      message: { role: "assistant", content: [] },
+    }))).toEqual([{
+      type: "assistant_message_started",
+      projectionId: expect.any(String),
+    }]);
+    expect(projector.project(nativeEvent({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "after guidance" }],
+      },
+    }))).toContainEqual({
+      type: "text_replaced",
+      text: "after guidance",
+    });
+    expect(projector.finalText).toBe(
+      "before guidance\n\nafter guidance",
+    );
+  });
 });
 
 describe("toWireValue", () => {

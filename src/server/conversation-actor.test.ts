@@ -61,8 +61,10 @@ interface FakeSession extends AgentSession {
   abortCalls: number;
   compactCalls: number;
   contextPercent: number | null;
+  clearQueueCalls: number;
   disposeCalls: number;
   eventListener?: (event: AgentSessionEvent) => void;
+  steerCalls: string[];
   toolCallGate?: ToolCallGate;
   promptImplementation(text: string): Promise<void>;
 }
@@ -76,7 +78,9 @@ function fakeSession(): FakeSession {
     abortCalls: 0,
     compactCalls: 0,
     contextPercent: 0,
+    clearQueueCalls: 0,
     disposeCalls: 0,
+    steerCalls: [],
     isStreaming: false,
     messages: [],
     model: { provider: "test", id: "model", contextWindow: 1_000 },
@@ -87,6 +91,13 @@ function fakeSession(): FakeSession {
     promptImplementation: async () => undefined,
     prompt: function (text: string) {
       return this.promptImplementation(text);
+    },
+    steer: async function (text: string) {
+      this.steerCalls.push(text);
+    },
+    clearQueue: function () {
+      this.clearQueueCalls++;
+      return { steering: [], followUp: [] };
     },
     abort: async function () {
       this.abortCalls++;
@@ -361,6 +372,62 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
+  it("steers the exact active run even before the SDK streaming flag catches up", async () => {
+    const fixture = await openActor();
+    const promptStarted = deferred();
+    const promptFinished = deferred();
+    fixture.runtime.session.promptImplementation = async () => {
+      promptStarted.resolve();
+      await promptFinished.promise;
+    };
+
+    const completion = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "inspect",
+      origin: "browser",
+    });
+    await promptStarted.promise;
+    fixture.runtime.session.eventListener?.({
+      type: "message_start",
+      message: {
+        role: "user",
+        content: [{ type: "text", text: "inspect" }],
+        timestamp: Date.now(),
+      },
+    } as AgentSessionEvent);
+
+    await expect(fixture.actor.steer(RUN_B, "wrong run"))
+      .rejects.toThrow("not currently able");
+    expect(fixture.runtime.session.isStreaming).toBe(false);
+    const guidance = fixture.actor.steer(RUN_A, "  change direction  ");
+    expect(fixture.runtime.session.steerCalls).toEqual(["change direction"]);
+    fixture.runtime.session.eventListener?.({
+      type: "message_start",
+      message: {
+        role: "user",
+        content: [{ type: "text", text: "change direction" }],
+        timestamp: Date.now(),
+      },
+    } as AgentSessionEvent);
+    await expect(guidance).resolves.toBeUndefined();
+
+    const undelivered = fixture.actor.steer(RUN_A, "one more change");
+    fixture.runtime.session.abort = async () => {
+      fixture.runtime.session.abortCalls++;
+      fixture.runtime.session.isStreaming = false;
+      promptFinished.resolve();
+    };
+    await fixture.actor.abort(RUN_A);
+    await expect(undelivered).rejects.toThrow(
+      "Run ended before queued guidance was delivered",
+    );
+    await completion;
+    expect(fixture.runtime.session.clearQueueCalls).toBe(1);
+    await expect(fixture.actor.steer(RUN_A, "too late"))
+      .rejects.toThrow("not currently able");
+    await fixture.actor.dispose();
+  });
+
   it("ignores a wrong abort run id and aborts the owned run", async () => {
     const fixture = await openActor();
     const promptStarted = deferred();
@@ -388,6 +455,7 @@ describe("ConversationActor", () => {
     });
 
     await fixture.actor.abort(RUN_A);
+    expect(fixture.runtime.session.clearQueueCalls).toBe(1);
     await expect(completion).resolves.toMatchObject({
       runId: RUN_A,
       outcome: "aborted",

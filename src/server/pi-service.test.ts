@@ -53,6 +53,7 @@ interface FakeSession extends AgentSession {
   abortCalls: number;
   disposed: boolean;
   eventListener?: (event: AgentSessionEvent) => void;
+  steerCalls: string[];
   toolCallGate?: ToolCallGate;
   persistentManager?: SessionManager;
 }
@@ -71,6 +72,7 @@ function fakeSession(settings = fakeSettings()): FakeSession {
   const session = {
     abortCalls: 0,
     disposed: false,
+    steerCalls: [],
     isStreaming: false,
     model: { provider: "test", id: "model", contextWindow: 1000 },
     messages: [],
@@ -91,6 +93,10 @@ function fakeSession(settings = fakeSettings()): FakeSession {
       };
     },
     prompt: async () => undefined,
+    steer: async function (text: string) {
+      this.steerCalls.push(text);
+    },
+    clearQueue: () => ({ steering: [], followUp: [] }),
     abort: async function () {
       this.abortCalls++;
       this.isStreaming = false;
@@ -2152,6 +2158,94 @@ describe("PiConnection lifecycle", () => {
 });
 
 describe("PiConnection coordinated project view", () => {
+  it("acknowledges guidance only after the exact active run accepts it", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const promptStarted = deferred();
+    const promptGate = deferred();
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        roleId: "default",
+      });
+      const focused = latestState(harness.events);
+      const session = harness.runtime.created[0]!;
+      session.prompt = async () => {
+        session.isStreaming = true;
+        session.eventListener?.(nativeEvent({ type: "agent_start" }));
+        session.eventListener?.(nativeEvent({
+          type: "message_start",
+          message: {
+            role: "user",
+            content: [{ type: "text", text: "initial" }],
+          },
+        }));
+        promptStarted.resolve();
+        await promptGate.promise;
+        session.isStreaming = false;
+      };
+      const running = harness.connection.handle({
+        type: "prompt",
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+        runId: RUN_A,
+        text: "initial",
+      });
+      await promptStarted.promise;
+      const commandId = randomUUID();
+
+      const guiding = harness.connection.handle({
+        type: "steer",
+        commandId,
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+        runId: RUN_A,
+        text: "change direction",
+      });
+
+      await vi.waitFor(() => {
+        expect(session.steerCalls).toEqual(["change direction"]);
+      });
+      expect(harness.events).not.toContainEqual(
+        expect.objectContaining({
+          type: "command_complete",
+          operation: "steer",
+          commandId,
+        }),
+      );
+      session.eventListener?.(nativeEvent({
+        type: "message_start",
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "change direction" }],
+        },
+      }));
+      await guiding;
+      expect(harness.events).toContainEqual({
+        type: "command_complete",
+        operation: "steer",
+        commandId,
+        sessionId: SESSION_A,
+      });
+
+      promptGate.resolve();
+      await running;
+    } finally {
+      promptGate.resolve();
+      await harness.cleanup();
+    }
+  });
+
   it("persists and acknowledges the focused conversation compaction threshold", async () => {
     const harness = await coordinatedConnectionHarness();
     try {
