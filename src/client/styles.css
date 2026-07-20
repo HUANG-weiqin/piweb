@@ -603,6 +603,11 @@ pre {
   color: color-mix(in srgb, currentColor 94%, var(--muted));
 }
 
+.streaming-markdown {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .markdown > :first-child {
   margin-top: 0;
 }

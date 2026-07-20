@@ -1,6 +1,8 @@
 import {
+  useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent,
@@ -32,6 +34,10 @@ const STREAM_RENDER_INTERVAL_MS = 32;
 const FOLLOW_COMFORT_LIMIT_PX = 96;
 const FOLLOW_COMFORT_TARGET_PX = 32;
 const FOLLOW_REATTACH_LIMIT_PX = 2;
+const COMPACT_NUMBER_FORMAT = new Intl.NumberFormat("en-US", {
+  maximumSignificantDigits: 3,
+  useGrouping: false,
+});
 
 function useStreamingChat(chat: ChatState, streaming: boolean): ChatState {
   const [renderedChat, setRenderedChat] = useState(chat);
@@ -127,10 +133,7 @@ interface ChatProps {
 }
 
 function formatCompactTokens(tokens: number): string {
-  const format = (value: number) => new Intl.NumberFormat("en-US", {
-    maximumSignificantDigits: 3,
-    useGrouping: false,
-  }).format(value);
+  const format = (value: number) => COMPACT_NUMBER_FORMAT.format(value);
   if (tokens >= 1_000_000) return `${format(tokens / 1_000_000)}M`;
   if (tokens >= 1_000) return `${format(tokens / 1_000)}k`;
   return Math.round(tokens).toLocaleString("zh-CN");
@@ -254,13 +257,6 @@ export function Chat({
   onRewind,
   rewindingMessageId,
 }: ChatProps) {
-  const contextTokenText = formatContextUsage({
-    contextTokenCount,
-    contextWindow,
-    contextPercent,
-    contextSource,
-  });
-  const tokenUsage = getSessionTokenUsage(chat, sessionTokenUsage);
   let composerPlaceholder = "给 Pi 发送消息…";
   if (!conversationReady) composerPlaceholder = "正在恢复项目对话…";
   else if (rewindingMessageId) composerPlaceholder = "正在回到所选消息…";
@@ -286,12 +282,37 @@ export function Chat({
     chat,
     activeRun?.phase === "running",
   );
-  const items = transcriptChat.items ?? transcriptChat.messages.map((message) => ({
-    kind: "message" as const,
-    ...message,
-  }));
-  const blocks = transcriptBlocks(items);
-  const scrollTranscript = (top: number, behavior?: ScrollBehavior) => {
+  const contextTokenText = useMemo(() => formatContextUsage({
+    contextTokenCount,
+    contextWindow,
+    contextPercent,
+    contextSource,
+  }), [contextPercent, contextSource, contextTokenCount, contextWindow]);
+  const tokenUsage = useMemo(
+    () => getSessionTokenUsage(transcriptChat, sessionTokenUsage),
+    [sessionTokenUsage, transcriptChat],
+  );
+  const items = useMemo(
+    () => transcriptChat.items ?? transcriptChat.messages.map((message) => ({
+      kind: "message" as const,
+      ...message,
+    })),
+    [transcriptChat.items, transcriptChat.messages],
+  );
+  const blocks = useMemo(() => transcriptBlocks(items), [items]);
+  const openConversationRef = useRef(onOpenConversation);
+  const rewindRef = useRef(onRewind);
+  useLayoutEffect(() => {
+    openConversationRef.current = onOpenConversation;
+    rewindRef.current = onRewind;
+  }, [onOpenConversation, onRewind]);
+  const handleOpenConversation = useCallback((conversationId: string) => {
+    openConversationRef.current?.(conversationId);
+  }, []);
+  const handleRewind = useCallback((messageId: string, text: string) => {
+    rewindRef.current(messageId, text);
+  }, []);
+  const scrollTranscript = useCallback((top: number, behavior?: ScrollBehavior) => {
     const transcript = transcriptRef.current;
     if (!transcript) return;
     if (typeof transcript.scrollTo === "function") {
@@ -302,13 +323,13 @@ export function Chat({
     } else {
       transcript.scrollTop = top;
     }
-  };
-  const scrollToLatest = (behavior?: ScrollBehavior) => {
+  }, []);
+  const scrollToLatest = useCallback((behavior?: ScrollBehavior) => {
     const transcript = transcriptRef.current;
     if (!transcript) return;
     scrollTranscript(transcript.scrollHeight, behavior);
-  };
-  const followLatest = () => {
+  }, [scrollTranscript]);
+  const followLatest = useCallback(() => {
     const transcript = transcriptRef.current;
     if (
       !transcript
@@ -323,11 +344,11 @@ export function Chat({
       ),
       "smooth",
     );
-  };
-  const followStreamingTextReveal = () => {
+  }, [scrollTranscript]);
+  const followStreamingTextReveal = useCallback(() => {
     if (!followOutputRef.current) return;
     followLatest();
-  };
+  }, [followLatest]);
   useLayoutEffect(() => {
     if (followOutputRef.current) {
       followLatest();
@@ -338,7 +359,7 @@ export function Chat({
     if (transcriptRef.current) {
       lastScrollTopRef.current = transcriptRef.current.scrollTop;
     }
-  }, [transcriptChat, compacting]);
+  }, [compacting, followLatest, transcriptChat]);
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
@@ -440,7 +461,7 @@ export function Chat({
         if (block.kind === "session_message") return <SessionMessageCard
           key={`card:${block.cardId}`}
           card={block}
-          onOpenConversation={onOpenConversation}
+          onOpenConversation={handleOpenConversation}
         />;
         const isActiveMessage = activeRun?.id === block.message.runId;
         const hasActiveTool = block.message.tools.some((tool) => (
@@ -452,8 +473,8 @@ export function Chat({
           key={`message:${block.message.id}`}
           message={block.message}
           sessionCards={block.sessionCards}
-          onOpenConversation={onOpenConversation}
-          onRewind={block.message.role === "user" ? onRewind : undefined}
+          onOpenConversation={handleOpenConversation}
+          onRewind={block.message.role === "user" ? handleRewind : undefined}
           rewindDisabled={
             busy
             || submitting

@@ -1,4 +1,12 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 import type { ConversationMessageCard } from "../../shared/protocol";
@@ -171,18 +179,7 @@ function ToolsPanel({ tools }: { tools: ChatMessage["tools"] }) {
   </details>;
 }
 
-export function Message({
-  message,
-  sessionCards = [],
-  onOpenConversation,
-  onRewind,
-  rewindDisabled = false,
-  rewinding = false,
-  activeThinking = false,
-  smoothStreamingText = false,
-  flushStreamingText = false,
-  onStreamingTextReveal,
-}: {
+interface MessageProps {
   message: ChatMessage;
   sessionCards?: ConversationMessageCard[];
   onOpenConversation?(conversationId: string): void;
@@ -193,8 +190,44 @@ export function Message({
   smoothStreamingText?: boolean;
   flushStreamingText?: boolean;
   onStreamingTextReveal?(): void;
-}) {
+}
+
+function sameSessionCards(
+  previous: ConversationMessageCard[] | undefined,
+  next: ConversationMessageCard[] | undefined,
+): boolean {
+  if (previous === next) return true;
+  if (!previous || !next || previous.length !== next.length) return false;
+  return previous.every((card, index) => card === next[index]);
+}
+
+function sameMessageProps(previous: MessageProps, next: MessageProps): boolean {
+  return previous.message === next.message
+    && sameSessionCards(previous.sessionCards, next.sessionCards)
+    && previous.onOpenConversation === next.onOpenConversation
+    && previous.onRewind === next.onRewind
+    && previous.rewindDisabled === next.rewindDisabled
+    && previous.rewinding === next.rewinding
+    && previous.activeThinking === next.activeThinking
+    && previous.smoothStreamingText === next.smoothStreamingText
+    && previous.flushStreamingText === next.flushStreamingText
+    && previous.onStreamingTextReveal === next.onStreamingTextReveal;
+}
+
+function MessageView({
+  message,
+  sessionCards = [],
+  onOpenConversation,
+  onRewind,
+  rewindDisabled = false,
+  rewinding = false,
+  activeThinking = false,
+  smoothStreamingText = false,
+  flushStreamingText = false,
+  onStreamingTextReveal,
+}: MessageProps) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const [thinkingOpen, setThinkingOpen] = useState(false);
   const displayedText = useSmoothStreamingText(
     message.text,
     smoothStreamingText,
@@ -213,15 +246,18 @@ export function Message({
 
   const isUser = message.role === "user";
   const hasActivity = message.tools.length > 0 || sessionCards.length > 0;
+  const showingStreamingText = message.role === "assistant"
+    && !prefersReducedMotion()
+    && (smoothStreamingText || displayedText !== message.text);
   const html = useMemo(
-    () => message.role === "assistant"
+    () => message.role === "assistant" && !showingStreamingText
       ? renderMarkdown(displayedText || (hasActivity ? "" : "…"))
       : "",
-    [displayedText, hasActivity, message.role],
+    [displayedText, hasActivity, message.role, showingStreamingText],
   );
   const thinkingHtml = useMemo(
-    () => message.thinking ? renderMarkdown(message.thinking) : "",
-    [message.thinking],
+    () => thinkingOpen && message.thinking ? renderMarkdown(message.thinking) : "",
+    [message.thinking, thinkingOpen],
   );
   if (message.role === "error") return <article className="message error">{message.text}</article>;
   let copyLabel = isUser ? "复制用户消息" : "复制 Agent 回复";
@@ -276,9 +312,23 @@ export function Message({
       {actions}
     </article>;
   }
+  let responseBody: ReactNode = null;
+  if (displayedText || !hasActivity) {
+    responseBody = showingStreamingText
+      ? <div className="markdown streaming-markdown">
+          {displayedText || (hasActivity ? "" : "…")}
+        </div>
+      : <div className="markdown" dangerouslySetInnerHTML={{ __html: html }} />;
+  }
   return <article className="message assistant">
-    {message.thinking && <details className={`thinking${activeThinking ? " is-active" : ""}`}>
-      <summary>
+    {message.thinking && <details
+      className={`thinking${activeThinking ? " is-active" : ""}`}
+      open={thinkingOpen}
+    >
+      <summary onClick={(event) => {
+        event.preventDefault();
+        setThinkingOpen((open) => !open);
+      }}>
         {activeThinking
           ? <span
               className="thinking-live"
@@ -291,10 +341,10 @@ export function Message({
         <span>{activeThinking ? "正在思考" : "思考过程"}</span>
         <span className="thinking-chevron" aria-hidden="true">⌄</span>
       </summary>
-      <div
+      {thinkingOpen && <div
         className="thinking-body markdown"
         dangerouslySetInnerHTML={{ __html: thinkingHtml }}
-      />
+      />}
     </details>}
     {message.tools.length ? <ToolsPanel tools={message.tools} /> : null}
     {sessionCards.length > 0 && <section
@@ -307,7 +357,9 @@ export function Message({
         onOpenConversation={onOpenConversation}
       />)}
     </section>}
-    {displayedText || !hasActivity ? <div className="markdown" dangerouslySetInnerHTML={{ __html: html }} /> : null}
+    {responseBody}
     {actions}
   </article>;
 }
+
+export const Message = memo(MessageView, sameMessageProps);

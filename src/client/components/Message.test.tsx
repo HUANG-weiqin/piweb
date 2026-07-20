@@ -110,6 +110,9 @@ describe("Message", () => {
     };
 
     const { container } = render(<Message message={message} />);
+    expect(container.querySelector(".thinking-body.markdown")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("思考过程"));
     const thinking = container.querySelector(".thinking-body.markdown") as HTMLElement;
 
     expect(thinking).toContainElement(screen.getByRole("heading", { level: 2, name: "分析" }));

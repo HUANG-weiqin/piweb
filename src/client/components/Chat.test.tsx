@@ -357,6 +357,54 @@ describe("Chat", () => {
     expect(markdown).toHaveTextContent(completeText);
   });
 
+  it("uses a cheap text node while revealing and renders markdown once settled", () => {
+    vi.useFakeTimers();
+    mockAnimationFrames();
+    const firstMessage = {
+      id: "assistant-markdown",
+      runId: "run-markdown",
+      role: "assistant" as const,
+      text: "开始",
+      thinking: "",
+      tools: [],
+    };
+    const firstChat: ChatState = {
+      messages: [firstMessage],
+      sessionTokens: 0,
+    };
+    const rendered = render(view(firstChat, "", undefined, {
+      busy: true,
+      activeRun: { id: "run-markdown", phase: "running" },
+    }));
+    const completeText = "开始，逐字显示到 **完成**。";
+
+    rendered.rerender(view({
+      ...firstChat,
+      messages: [{ ...firstMessage, text: completeText }],
+    }, "", undefined, {
+      busy: true,
+      activeRun: { id: "run-markdown", phase: "running" },
+    }));
+    act(() => vi.advanceTimersByTime(32));
+    act(() => vi.advanceTimersByTime(240));
+
+    const streamingText = rendered.container.querySelector(
+      ".message.assistant .streaming-markdown",
+    );
+    expect(streamingText).toHaveTextContent(completeText);
+    expect(streamingText?.querySelector("strong")).not.toBeInTheDocument();
+
+    rendered.rerender(view({
+      ...firstChat,
+      messages: [{ ...firstMessage, text: completeText }],
+    }));
+    act(() => vi.advanceTimersByTime(16));
+
+    expect(rendered.container.querySelector(".streaming-markdown"))
+      .not.toBeInTheDocument();
+    expect(screen.getByText("完成")).toHaveProperty("tagName", "STRONG");
+  });
+
   it("flushes buffered text before an active tool is shown", () => {
     vi.useFakeTimers();
     mockAnimationFrames();
