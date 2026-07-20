@@ -96,6 +96,15 @@ function renderManager(overrides: Partial<Parameters<typeof RoleManagerDialog>[0
 }
 
 describe("RoleManagerDialog", () => {
+  it("opens the role requested by its card", () => {
+    renderManager({ initialRoleId: "reviewer" });
+
+    expect(screen.getByRole("button", { name: "编辑角色 Reviewer" }))
+      .toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("textbox", { name: "角色名称" }))
+      .toHaveValue("Reviewer");
+  });
+
   it("lets the seeded role be edited and deleted like any other role", () => {
     const remove = vi.fn();
     renderManager({ onDelete: remove });

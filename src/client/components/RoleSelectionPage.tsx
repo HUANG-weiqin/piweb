@@ -1,13 +1,12 @@
-import { useEffect, useState } from "react";
 import type { RoleTemplate } from "../../shared/protocol";
 
 export interface RoleSelectionPageProps {
   roles: RoleTemplate[];
   pending?: boolean;
   onStart(roleId: string): void;
-  onManageRoles?(): void;
+  onManageRole?(roleId: string): void;
+  onAddRole?(): void;
   onSettings?(): void;
-  onChangeProject?(): void;
 }
 
 function roleModelLabel(role: RoleTemplate): string {
@@ -19,22 +18,10 @@ export function RoleSelectionPage({
   roles,
   pending = false,
   onStart,
-  onManageRoles,
+  onManageRole,
+  onAddRole,
   onSettings,
-  onChangeProject,
 }: RoleSelectionPageProps) {
-  const [selectedRoleId, setSelectedRoleId] = useState("");
-  const selectedRole = roles.find(({ id }) => id === selectedRoleId);
-
-  useEffect(() => {
-    if (selectedRole?.available) return;
-    setSelectedRoleId("");
-  }, [selectedRole]);
-
-  const start = () => {
-    if (!pending && selectedRole?.available) onStart(selectedRole.id);
-  };
-
   return <main className="role-selection-page">
     <header className="role-selection-header">
       <div>
@@ -42,51 +29,29 @@ export function RoleSelectionPage({
         <h1>选择这个会话的角色</h1>
         <p>角色和模型会作为会话的初始配置；会话空闲时可在角色详情中更换。</p>
       </div>
-      <div className="role-selection-header-actions">
-        {onChangeProject && <button
-          type="button"
-          className="ghost"
-          disabled={pending}
-          onClick={onChangeProject}
-        >
-          切换项目
-        </button>}
-        {onSettings && <button
+      {onSettings && <div className="role-selection-header-actions">
+        <button
           type="button"
           className="ghost"
           disabled={pending}
           onClick={onSettings}
         >
           模型连接
-        </button>}
-        {onManageRoles && <button
-          type="button"
-          className="ghost"
-          disabled={pending}
-          onClick={onManageRoles}
-        >
-          管理角色
-        </button>}
-      </div>
+        </button>
+      </div>}
     </header>
 
     <section className="role-card-grid" aria-label="可选角色">
       {roles.map((role) => {
-        const selected = role.id === selectedRoleId;
         const unavailable = !role.available;
         const className = [
           "role-card",
-          selected ? "selected" : "",
           unavailable ? "unavailable" : "",
         ].filter(Boolean).join(" ");
-        return <button
-          type="button"
+        return <article
           key={role.id}
           className={className}
-          aria-label={`选择角色 ${role.name}`}
-          aria-pressed={selected}
-          disabled={pending || unavailable}
-          onClick={() => setSelectedRoleId(role.id)}
+          aria-label={`角色 ${role.name}`}
         >
           <span className="role-card-heading">
             <strong>{role.name}</strong>
@@ -102,32 +67,46 @@ export function RoleSelectionPage({
           {unavailable && <span className="inline-status error">
             {role.unavailableReason ?? "此角色当前不可用"}
           </span>}
-        </button>;
+          <span className="role-card-actions">
+            {onManageRole && <button
+              type="button"
+              className="role-card-action ghost"
+              aria-label={`管理角色 ${role.name}`}
+              title="管理角色"
+              disabled={pending}
+              onClick={() => onManageRole(role.id)}
+            >
+              <span aria-hidden="true">⚙</span>
+            </button>}
+            <button
+              type="button"
+              className="role-card-action role-card-start"
+              aria-label={`使用 ${role.name} 开始会话`}
+              title={unavailable
+                ? role.unavailableReason ?? "此角色当前不可用"
+                : "开始会话"}
+              disabled={pending || unavailable}
+              onClick={() => onStart(role.id)}
+            >
+              <span aria-hidden="true">▶</span>
+            </button>
+          </span>
+        </article>;
       })}
-      {onManageRoles && <button
+      {onAddRole && <button
         type="button"
         className="role-card role-card-add"
         aria-label="添加角色"
         disabled={pending}
-        onClick={onManageRoles}
+        onClick={onAddRole}
       >
         <span className="role-card-add-icon" aria-hidden="true">＋</span>
         <strong>添加角色</strong>
       </button>}
-      {roles.length === 0 && !onManageRoles && <div className="setting-empty">
+      {roles.length === 0 && !onAddRole && <div className="setting-empty">
         <strong>还没有可选择的角色</strong>
         <p>先在角色管理中配置一个可用角色和模型。</p>
       </div>}
     </section>
-
-    <footer className="role-selection-actions">
-      <button
-        type="button"
-        disabled={pending || !selectedRole?.available}
-        onClick={start}
-      >
-        {pending ? "正在创建会话…" : "开始新会话"}
-      </button>
-    </footer>
   </main>;
 }

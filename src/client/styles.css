@@ -1982,23 +1982,24 @@ pre {
   align-items: stretch;
   gap: 12px;
   padding: 20px;
-  border-color: var(--line);
+  border: 1px solid var(--line);
+  border-radius: 10px;
   color: inherit;
   background: var(--panel);
   text-align: left;
   box-shadow: var(--shadow-sm);
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    transform 120ms ease;
 }
 
-.role-card:not(:disabled):hover {
+.role-card:not(.role-card-add):hover,
+.role-card-add:not(:disabled):hover {
   color: inherit;
   background: var(--panel-strong);
   border-color: var(--line-strong);
   transform: translateY(-2px);
-}
-
-.role-card.selected {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
 .role-card.unavailable {
@@ -2042,18 +2043,24 @@ pre {
   font-family: "Cascadia Code", Consolas, monospace;
 }
 
-.role-selection-actions {
-  position: sticky;
-  bottom: 0;
+.role-card-actions {
   display: flex;
   justify-content: flex-end;
-  margin-top: auto;
-  padding: 14px 0;
-  background: linear-gradient(transparent, var(--canvas) 28%);
+  gap: 7px;
+  margin-top: 2px;
 }
 
-.role-selection-actions button {
-  min-width: 180px;
+.role-card-action {
+  width: 38px;
+  min-height: 36px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  font-size: 16px;
+}
+
+.role-card-start {
+  padding-left: 2px;
 }
 
 .modal.role-manager-dialog {

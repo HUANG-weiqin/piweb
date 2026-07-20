@@ -1530,7 +1530,7 @@ describe("App", () => {
       .toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "给 Pi 发送消息" }))
       .not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "选择角色 Default" }))
+    expect(screen.getByRole("button", { name: "使用 Default 开始会话" }))
       .toBeInTheDocument();
     expect(screen.getByText("对话已删除")).toBeInTheDocument();
   });
@@ -2086,14 +2086,17 @@ describe("App", () => {
       ([command]) => command.type === "create_conversation",
     )).toBe(false);
 
-    fireEvent.click(screen.getByRole("button", { name: "选择角色 Default" }));
-    fireEvent.click(screen.getByRole("button", { name: "开始新会话" }));
+    fireEvent.click(screen.getByRole("button", {
+      name: "使用 Default 开始会话",
+    }));
 
     expect(latestCommand("create_conversation")).toMatchObject({
       sessionId,
       roleId: "default",
     });
-    expect(screen.getByRole("button", { name: "正在创建会话…" })).toBeDisabled();
+    expect(screen.getByRole("button", {
+      name: "使用 Default 开始会话",
+    })).toBeDisabled();
     expect(screen.queryByRole("textbox", { name: "给 Pi 发送消息" }))
       .not.toBeInTheDocument();
   });
@@ -2609,7 +2612,7 @@ describe("App", () => {
       });
     });
     fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
-    fireEvent.click(screen.getByRole("button", { name: "管理角色" }));
+    fireEvent.click(screen.getByRole("button", { name: "管理角色 Default" }));
     fireEvent.change(screen.getByRole("textbox", { name: "角色名称" }), {
       target: { value: "Edited default" },
     });

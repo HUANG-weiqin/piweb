@@ -228,6 +228,8 @@ export function App() {
   const conversationReadyRef = useRef(false);
   const [drawer, setDrawer] = useState(false);
   const [roleManagerOpen, setRoleManagerOpen] = useState(false);
+  const [roleManagerInitialRoleId, setRoleManagerInitialRoleId] =
+    useState<string | null>();
   const [selectingRole, setSelectingRole] = useState(false);
   const [creatingConversation, setCreatingConversation] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -1911,9 +1913,15 @@ export function App() {
               roles={roles}
               pending={creatingConversation}
               onStart={createConversation}
-              onManageRoles={() => setRoleManagerOpen(true)}
+              onManageRole={(roleId) => {
+                setRoleManagerInitialRoleId(roleId);
+                setRoleManagerOpen(true);
+              }}
+              onAddRole={() => {
+                setRoleManagerInitialRoleId(null);
+                setRoleManagerOpen(true);
+              }}
               onSettings={() => setDrawer(true)}
-              onChangeProject={openWorkspaceDialog}
             />
           : <Chat
               chat={chat}
@@ -2015,6 +2023,7 @@ export function App() {
       open={roleManagerOpen && !blockingModalVisible}
       roles={roles}
       providers={state.providers}
+      initialRoleId={roleManagerInitialRoleId}
       pending={pendingRoleOperation}
       result={roleOperationResult}
       onClose={() => {

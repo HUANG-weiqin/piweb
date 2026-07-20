@@ -41,6 +41,7 @@ export interface RoleManagerDialogProps {
   open: boolean;
   roles: RoleTemplate[];
   providers: PublicProvider[];
+  initialRoleId?: string | null;
   pending?: PendingRoleOperation;
   result?: RoleOperationResult;
   onClose(): void;
@@ -74,6 +75,14 @@ function roleDraft(role: RoleTemplate): RoleDraft {
     toolMode: role.toolMode,
     canManageSessions: role.canManageSessions,
   };
+}
+
+function requestedRole(
+  roles: readonly RoleTemplate[],
+  initialRoleId: string | null | undefined,
+): RoleTemplate | undefined {
+  if (initialRoleId === null) return undefined;
+  return roles.find(({ id }) => id === initialRoleId) ?? roles[0];
 }
 
 function modelValue(model: RoleModelSelection): string {
@@ -119,6 +128,7 @@ export function RoleManagerDialog({
   open,
   roles,
   providers,
+  initialRoleId,
   pending,
   result,
   onClose,
@@ -126,7 +136,7 @@ export function RoleManagerDialog({
   onUpdate,
   onDelete,
 }: RoleManagerDialogProps) {
-  const initialRole = roles[0];
+  const initialRole = requestedRole(roles, initialRoleId);
   const [selectedRoleId, setSelectedRoleId] = useState(
     initialRole?.id ?? NEW_ROLE_ID,
   );
@@ -160,6 +170,13 @@ export function RoleManagerDialog({
     setSelectedRoleId(next?.id ?? NEW_ROLE_ID);
     setDraft(next ? roleDraft(next) : emptyDraft);
   }, [draftSourceKey]);
+
+  useEffect(() => {
+    if (!open) return;
+    const nextRole = requestedRole(roles, initialRoleId);
+    setSelectedRoleId(nextRole?.id ?? NEW_ROLE_ID);
+    setDraft(nextRole ? roleDraft(nextRole) : emptyDraft);
+  }, [open, initialRoleId]);
 
   const close = operationBusy ? undefined : onClose;
   const focusRef = useModalFocus<HTMLElement>(
