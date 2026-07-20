@@ -40,7 +40,7 @@ export function RoleSelectionPage({
       <div>
         <p className="eyebrow">NEW CONVERSATION</p>
         <h1>选择这个会话的角色</h1>
-        <p>角色和模型会在会话创建时固定，之后不能切换。</p>
+        <p>角色和模型会作为会话的初始配置；会话空闲时可在角色详情中更换。</p>
       </div>
       <div className="role-selection-header-actions">
         {onChangeProject && <button

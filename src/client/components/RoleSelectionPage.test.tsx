@@ -45,6 +45,9 @@ describe("RoleSelectionPage", () => {
     expect(cards[0]).toHaveAttribute("aria-pressed", "false");
     expect(screen.getByRole("button", { name: "开始新会话" })).toBeDisabled();
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.getByText(
+      "角色和模型会作为会话的初始配置；会话空闲时可在角色详情中更换。",
+    )).toBeInTheDocument();
 
     fireEvent.click(cards[0]!);
     fireEvent.click(screen.getByRole("button", { name: "开始新会话" }));
