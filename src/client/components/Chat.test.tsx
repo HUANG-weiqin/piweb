@@ -357,6 +357,41 @@ describe("Chat", () => {
     expect(markdown).toHaveTextContent(completeText);
   });
 
+  it("keeps pacing an uncoalesced final burst when the run finishes", () => {
+    vi.useFakeTimers();
+    mockAnimationFrames();
+    const firstMessage = {
+      id: "assistant-final-burst",
+      runId: "run-final-burst",
+      role: "assistant" as const,
+      text: "已经显示",
+      thinking: "",
+      tools: [],
+    };
+    const firstChat: ChatState = {
+      messages: [firstMessage],
+      sessionTokens: 0,
+    };
+    const rendered = render(view(firstChat, "", undefined, {
+      busy: true,
+      activeRun: { id: "run-final-burst", phase: "running" },
+    }));
+    const completeText = "已经显示，但结束前又收到了尚未经过合并层投影的一大段最终内容。";
+
+    rendered.rerender(view({
+      ...firstChat,
+      messages: [{ ...firstMessage, text: completeText }],
+    }));
+
+    expect(screen.queryByText(completeText)).not.toBeInTheDocument();
+    expect(rendered.container.querySelector(".streaming-markdown"))
+      .toHaveTextContent("已经显示");
+
+    act(() => vi.advanceTimersByTime(500));
+
+    expect(screen.getByText(completeText)).toBeInTheDocument();
+  });
+
   it("uses a cheap text node while revealing and renders markdown once settled", () => {
     vi.useFakeTimers();
     mockAnimationFrames();

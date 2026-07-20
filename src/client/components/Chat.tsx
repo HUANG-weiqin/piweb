@@ -67,7 +67,7 @@ function useStreamingChat(chat: ChatState, streaming: boolean): ChatState {
     }
   }, []);
 
-  return renderedChat;
+  return streaming ? renderedChat : chat;
 }
 
 function distanceFromBottom(transcript: HTMLElement): number {
