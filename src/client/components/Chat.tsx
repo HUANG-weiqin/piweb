@@ -221,6 +221,7 @@ export function Chat({
   let composerPlaceholder = "给 Pi 发送消息…";
   if (!conversationReady) composerPlaceholder = "正在恢复项目对话…";
   else if (rewindingMessageId) composerPlaceholder = "正在回到所选消息…";
+  else if (compacting) composerPlaceholder = "正在压缩上下文…";
   else if (!model) composerPlaceholder = "请先登录并选择模型";
   else if (busy) composerPlaceholder = "发送后将引导当前任务…";
   const transcriptRef = useRef<HTMLElement>(null);
@@ -261,7 +262,7 @@ export function Chat({
     } else {
       setShowJumpToLatest(true);
     }
-  }, [chat.items, chat.messages]);
+  }, [chat.items, chat.messages, compacting]);
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
@@ -286,6 +287,7 @@ export function Chat({
     if (
       !value
       || submitting
+      || compacting
       || rewindingMessageId
       || !model
       || !online
@@ -369,6 +371,17 @@ export function Chat({
               ))
             }
           />)}
+      {compacting && <div
+        className="compaction-progress"
+        role="status"
+        aria-label="正在压缩上下文"
+      >
+        <span className="compaction-spinner" aria-hidden="true" />
+        <span className="compaction-progress-copy">
+          <strong>正在压缩上下文</strong>
+          <small>整理较早消息并保留关键信息…</small>
+        </span>
+      </div>}
     </section>
     <div className="composer-wrap">
       {showJumpToLatest && <button
@@ -431,10 +444,10 @@ export function Chat({
       </div>}
       {promptNotice && <div className="composer-notice" role="alert">{promptNotice}</div>}
       <div className="composer">
-        <textarea ref={textareaRef} aria-label="给 Pi 发送消息" value={draft} onChange={(e) => onDraftChange(e.target.value)} onKeyDown={keyDown} placeholder={composerPlaceholder} disabled={!online || !conversationReady || !model || submitting || roleSwitching || Boolean(rewindingMessageId)} rows={1} />
+        <textarea ref={textareaRef} aria-label="给 Pi 发送消息" value={draft} onChange={(e) => onDraftChange(e.target.value)} onKeyDown={keyDown} placeholder={composerPlaceholder} disabled={!online || !conversationReady || !model || submitting || compacting || roleSwitching || Boolean(rewindingMessageId)} rows={1} />
         <div className="composer-actions">
           {busy && <button className="send stop" onClick={onAbort} aria-label="停止">■</button>}
-          <button className="send" onClick={send} disabled={!online || !conversationReady || !model || submitting || roleSwitching || Boolean(rewindingMessageId) || !draft.trim()} aria-label="发送">↑</button>
+          <button className="send" onClick={send} disabled={!online || !conversationReady || !model || submitting || compacting || roleSwitching || Boolean(rewindingMessageId) || !draft.trim()} aria-label="发送">↑</button>
         </div>
       </div>
       {compactionThresholdOpen && <label

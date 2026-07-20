@@ -1405,6 +1405,7 @@ export class PiConnection {
             conversationName:
               actor.sessionManager.getSessionName() ?? undefined,
             selectedModel: { ...actor.profile.role.model },
+            compacting: actor.isCompacting(),
           }),
       ...(activity.kind === "idle"
         ? {}

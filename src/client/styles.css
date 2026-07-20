@@ -563,6 +563,37 @@ pre {
   background: color-mix(in srgb, var(--line) 78%, transparent);
 }
 
+.compaction-progress {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin: 14px 0;
+  padding: 11px 13px;
+  border: 1px solid color-mix(in srgb, var(--warning) 24%, var(--line));
+  border-radius: 12px;
+  color: color-mix(in srgb, var(--warning) 82%, currentColor);
+  background: color-mix(in srgb, var(--warning) 7%, var(--surface));
+}
+
+.compaction-spinner {
+  flex: 0 0 auto;
+}
+
+.compaction-progress-copy {
+  display: grid;
+  gap: 2px;
+}
+
+.compaction-progress-copy strong {
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.compaction-progress-copy small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .markdown {
   min-width: 0;
   color: color-mix(in srgb, currentColor 94%, var(--muted));
@@ -814,6 +845,7 @@ pre {
   font-size: 12px;
 }
 
+.compaction-spinner,
 .thinking-spinner,
 .tool-spinner {
   display: block;
@@ -3106,6 +3138,7 @@ pre {
   }
 
   .conversation-activity-spinner,
+  .compaction-spinner,
   .thinking-spinner,
   .tool-spinner {
     animation: none !important;

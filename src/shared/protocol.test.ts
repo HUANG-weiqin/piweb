@@ -446,12 +446,16 @@ describe("parseClientCommand", () => {
         projectId,
         cwd: "E:\\work",
         busy: false,
+        compacting: true,
         thinkingLevel: "off",
         toolMode: "full_access",
         availableThinkingLevels: ["off"],
         providers: [],
       },
-    }).type).toBe("state");
+    })).toMatchObject({
+      type: "state",
+      state: { compacting: true },
+    });
     expect(parseServerEvent({
       type: "state",
       state: {

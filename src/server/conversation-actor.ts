@@ -58,6 +58,7 @@ export interface ConversationActorState {
   conversationId: string;
   profile: ConversationMeta;
   activity: ConversationActivity;
+  compacting: boolean;
   fatalError?: string;
   disposed: boolean;
 }
@@ -73,6 +74,11 @@ export type ConversationActorEvent =
       type: "activity";
       conversationId: string;
       activity: ConversationActivity;
+    }
+  | {
+      type: "compaction";
+      conversationId: string;
+      compacting: boolean;
     }
   | {
       type: "completion";
@@ -250,6 +256,7 @@ export class ConversationActor {
   private unsubscribeSession?: () => void;
   private activeRun?: RunTicket;
   private opening = true;
+  private compacting = false;
   private truncating = false;
   private switchingRole = false;
   private disposing = false;
@@ -349,6 +356,10 @@ export class ConversationActor {
     return this.compactionThresholdPercent;
   }
 
+  isCompacting(): boolean {
+    return this.compacting;
+  }
+
   setCompactionThresholdPercent(percent: number): void {
     const entry = createCompactionThresholdEntry({
       percent,
@@ -365,6 +376,14 @@ export class ConversationActor {
         new Error("Cannot compact a busy conversation; abort and wait first"),
       );
     }
+    if (this.compacting) {
+      return Promise.reject(new Error("Conversation is already compacting"));
+    }
+    if (this.truncating || this.switchingRole) {
+      return Promise.reject(
+        new Error("Conversation cannot compact during another operation"),
+      );
+    }
     return this.operations.run(async () => {
       this.assertUsable();
       if (this.activeRun) {
@@ -372,7 +391,7 @@ export class ConversationActor {
           "Cannot compact a busy conversation; abort and wait first",
         );
       }
-      await this.session.compact();
+      await this.compactSession();
     });
   }
 
@@ -385,6 +404,11 @@ export class ConversationActor {
     if (this.activeRun) {
       return Promise.reject(
         new Error("Cannot switch the role of a busy conversation"),
+      );
+    }
+    if (this.compacting) {
+      return Promise.reject(
+        new Error("Cannot switch the role while compacting"),
       );
     }
     if (this.switchingRole) {
@@ -472,6 +496,9 @@ export class ConversationActor {
         new Error("Cannot rewind a busy conversation; abort and wait first"),
       );
     }
+    if (this.compacting) {
+      return Promise.reject(new Error("Cannot rewind while compacting"));
+    }
     if (this.truncating) {
       return Promise.reject(new Error("Conversation rewind is already running"));
     }
@@ -546,6 +573,7 @@ export class ConversationActor {
       conversationId: this.conversationId,
       profile: this.profile,
       activity: this.getActivity(),
+      compacting: this.compacting,
       ...(this.fatalError === undefined
         ? {}
         : { fatalError: this.fatalError.message }),
@@ -698,6 +726,9 @@ export class ConversationActor {
     }
     if (this.switchingRole) {
       throw new Error("Conversation role is being switched");
+    }
+    if (this.compacting) {
+      throw new Error("Conversation is compacting");
     }
     if (this.activeRun) throw new Error("Agent is already running");
     if (this.usedRunIds.has(input.runId)) {
@@ -938,9 +969,23 @@ export class ConversationActor {
       || usage.percent < this.compactionThresholdPercent
     ) return;
     try {
-      await this.session.compact();
+      await this.compactSession();
     } catch (error) {
       this.emitError(error, ticket.id);
+    }
+  }
+
+  private async compactSession(): Promise<void> {
+    if (this.compacting) {
+      throw new Error("Conversation is already compacting");
+    }
+    this.compacting = true;
+    this.emitCompaction();
+    try {
+      await this.session.compact();
+    } finally {
+      this.compacting = false;
+      this.emitCompaction();
     }
   }
 
@@ -1193,6 +1238,14 @@ export class ConversationActor {
       type: "activity",
       conversationId: this.conversationId,
       activity: cloneActivity(this.getActivity()),
+    });
+  }
+
+  private emitCompaction(): void {
+    this.emit({
+      type: "compaction",
+      conversationId: this.conversationId,
+      compacting: this.compacting,
     });
   }
 

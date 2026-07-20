@@ -1694,6 +1694,8 @@ export function App() {
   </>;
 
   const showRoleSelection = selectingRole || !state.conversationId;
+  const conversationCompacting =
+    state.compacting === true || Boolean(pendingContextCompaction);
 
   return <>
     <div className="workbench">
@@ -1746,6 +1748,7 @@ export function App() {
                 || queuedPrompts.length > 0
                 || Boolean(pendingConversationTruncation)
                 || Boolean(pendingConversationDeletion)
+                || conversationCompacting
               }
               roleSwitching={Boolean(pendingConversationRoleSwitch)}
               thinkingLevel={state.thinkingLevel}
@@ -1755,7 +1758,7 @@ export function App() {
                 ?? DEFAULT_COMPACTION_THRESHOLD_PERCENT
               }
               compactionThresholdBusy={Boolean(pendingCompactionThreshold)}
-              compacting={Boolean(pendingContextCompaction)}
+              compacting={conversationCompacting}
               cwd={state.cwd}
               online={online}
               conversationReady={conversationReady}

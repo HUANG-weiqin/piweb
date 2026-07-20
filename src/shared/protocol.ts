@@ -367,6 +367,7 @@ export interface PublicState {
   conversationName?: string;
   cwd: string;
   busy: boolean;
+  compacting?: boolean;
   activeRun?: {
     id: string;
     phase: "queued" | "running" | "waiting" | "cancelling";
@@ -695,6 +696,7 @@ const publicStateSchema: z.ZodType<PublicState> = z.object({
   conversationName: z.string().optional(),
   cwd: z.string(),
   busy: z.boolean(),
+  compacting: z.boolean().optional(),
   activeRun: z.object({
     id: runIdSchema,
     phase: z.enum(["queued", "running", "waiting", "cancelling"]),

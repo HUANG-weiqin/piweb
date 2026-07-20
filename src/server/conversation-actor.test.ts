@@ -60,6 +60,7 @@ function deferred<T = void>(): Deferred<T> {
 interface FakeSession extends AgentSession {
   abortCalls: number;
   compactCalls: number;
+  compactImplementation(): Promise<unknown>;
   contextPercent: number | null;
   clearQueueCalls: number;
   disposeCalls: number;
@@ -77,6 +78,7 @@ function fakeSession(): FakeSession {
   const session = {
     abortCalls: 0,
     compactCalls: 0,
+    compactImplementation: async () => ({}),
     contextPercent: 0,
     clearQueueCalls: 0,
     disposeCalls: 0,
@@ -114,8 +116,9 @@ function fakeSession(): FakeSession {
     },
     compact: async function () {
       this.compactCalls++;
+      const result = await this.compactImplementation();
       this.contextPercent = null;
-      return {};
+      return result;
     },
     dispose: function () {
       this.disposeCalls++;
@@ -327,6 +330,49 @@ describe("ConversationActor", () => {
     expect(aggregateReservedConversationEntries(
       fixture.manager.getEntries(),
     ).compactionThreshold?.percent).toBe(55);
+    await fixture.actor.dispose();
+  });
+
+  it("publishes automatic compaction progress while compacting after a run", async () => {
+    const fixture = await openActor();
+    const compactionStarted = deferred();
+    const finishCompaction = deferred();
+    fixture.runtime.session.contextPercent = 80;
+    fixture.runtime.session.compactImplementation = async () => {
+      compactionStarted.resolve();
+      await finishCompaction.promise;
+      return {};
+    };
+
+    const running = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "compact after this turn",
+      origin: "browser",
+    });
+    await compactionStarted.promise;
+
+    expect(fixture.actor.getState().compacting).toBe(true);
+    expect(fixture.events.filter(({ type }) => type === "compaction"))
+      .toEqual([{
+        type: "compaction",
+        conversationId: CONVERSATION_ID,
+        compacting: true,
+      }]);
+
+    finishCompaction.resolve();
+    await running;
+
+    expect(fixture.actor.getState().compacting).toBe(false);
+    expect(fixture.events.filter(({ type }) => type === "compaction"))
+      .toEqual([{
+        type: "compaction",
+        conversationId: CONVERSATION_ID,
+        compacting: true,
+      }, {
+        type: "compaction",
+        conversationId: CONVERSATION_ID,
+        compacting: false,
+      }]);
     await fixture.actor.dispose();
   });
 
@@ -871,8 +917,20 @@ describe("ConversationActor", () => {
 
   it("manually compacts only while the conversation is idle", async () => {
     const fixture = await openActor();
+    const compactionStarted = deferred();
+    const finishCompaction = deferred();
+    fixture.runtime.session.compactImplementation = async () => {
+      compactionStarted.resolve();
+      await finishCompaction.promise;
+      return {};
+    };
 
-    await fixture.actor.compactContext();
+    const compaction = fixture.actor.compactContext();
+    await compactionStarted.promise;
+    expect(fixture.actor.getState().compacting).toBe(true);
+    finishCompaction.resolve();
+    await compaction;
+    expect(fixture.actor.getState().compacting).toBe(false);
     expect(fixture.runtime.session.compactCalls).toBe(1);
 
     let finishPrompt!: () => void;

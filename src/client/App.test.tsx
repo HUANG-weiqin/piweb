@@ -533,6 +533,8 @@ describe("App", () => {
       focusId: FOCUS_A,
     });
     expect(button).toBeDisabled();
+    expect(screen.getByRole("status", { name: "正在压缩上下文" }))
+      .toBeInTheDocument();
 
     act(() => socketMock.emit?.({
       type: "command_complete",
@@ -542,6 +544,29 @@ describe("App", () => {
     }));
     expect(button).toBeEnabled();
     expect(screen.getByText("上下文已压缩")).toBeInTheDocument();
+  });
+
+  it("projects automatic compaction progress from focused state", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: true,
+        compacting: true,
+        thinkingLevel: "off",
+        toolMode: "read_only",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+
+    expect(screen.getByRole("status", { name: "正在压缩上下文" }))
+      .toBeInTheDocument();
   });
 
   it("switches an idle focused conversation role with exact command correlation", () => {

@@ -79,6 +79,20 @@ describe("Chat", () => {
     expect(onCompact).toHaveBeenCalledOnce();
   });
 
+  it("shows animated compaction progress inside the transcript", () => {
+    const { container } = render(view(emptyChat, "", undefined, {
+      compacting: true,
+    }));
+
+    const progress = screen.getByRole("status", {
+      name: "正在压缩上下文",
+    });
+    expect(progress).toHaveTextContent("正在压缩上下文");
+    expect(container.querySelector(".transcript")?.lastElementChild)
+      .toBe(progress);
+    expect(progress.querySelector(".compaction-spinner")).toBeInTheDocument();
+  });
+
   it("keeps send and stop available while the Agent is busy", () => {
     const onSend = vi.fn(() => true);
     const onAbort = vi.fn();
