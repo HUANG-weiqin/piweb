@@ -324,6 +324,10 @@ export function Chat({
       "smooth",
     );
   };
+  const followStreamingTextReveal = () => {
+    if (!followOutputRef.current) return;
+    followLatest();
+  };
   useLayoutEffect(() => {
     if (followOutputRef.current) {
       followLatest();
@@ -424,43 +428,46 @@ export function Chat({
         较早或过长的显示内容已省略；完整记录仍保存在项目中。
       </div>}
       {!blocks.length && <div className="empty"><div>π</div><h1>想做点什么？</h1><p>Pi 可以读取、修改文件并执行命令。</p></div>}
-      {blocks.map((block) => block.kind === "compaction"
-        ? <div
-            key={`compaction:${block.id}`}
-            className="compaction-marker"
-            role="separator"
-            aria-label="上下文已压缩"
-          >
-            <span>上下文已压缩</span>
-          </div>
-        : block.kind === "session_message"
-          ? <SessionMessageCard
-            key={`card:${block.cardId}`}
-            card={block}
-            onOpenConversation={onOpenConversation}
-          />
-          : <Message
-            key={`message:${block.message.id}`}
-            message={block.message}
-            sessionCards={block.sessionCards}
-            onOpenConversation={onOpenConversation}
-            onRewind={block.message.role === "user" ? onRewind : undefined}
-            rewindDisabled={
-              busy
-              || submitting
-              || !online
-              || !conversationReady
-              || Boolean(rewindingMessageId)
-            }
-            rewinding={rewindingMessageId === block.message.id}
-            activeThinking={
-              activeRun?.id === block.message.runId
-              && activeRun.phase === "running"
-              && !block.message.tools.some((tool) => (
-                tool.status === "pending" || tool.status === "running"
-              ))
-            }
-          />)}
+      {blocks.map((block) => {
+        if (block.kind === "compaction") return <div
+          key={`compaction:${block.id}`}
+          className="compaction-marker"
+          role="separator"
+          aria-label="上下文已压缩"
+        >
+          <span>上下文已压缩</span>
+        </div>;
+        if (block.kind === "session_message") return <SessionMessageCard
+          key={`card:${block.cardId}`}
+          card={block}
+          onOpenConversation={onOpenConversation}
+        />;
+        const isActiveMessage = activeRun?.id === block.message.runId;
+        const hasActiveTool = block.message.tools.some((tool) => (
+          tool.status === "pending" || tool.status === "running"
+        ));
+        const isStreamingMessage = isActiveMessage
+          && activeRun?.phase === "running";
+        return <Message
+          key={`message:${block.message.id}`}
+          message={block.message}
+          sessionCards={block.sessionCards}
+          onOpenConversation={onOpenConversation}
+          onRewind={block.message.role === "user" ? onRewind : undefined}
+          rewindDisabled={
+            busy
+            || submitting
+            || !online
+            || !conversationReady
+            || Boolean(rewindingMessageId)
+          }
+          rewinding={rewindingMessageId === block.message.id}
+          activeThinking={isStreamingMessage && !hasActiveTool}
+          smoothStreamingText={isStreamingMessage && !hasActiveTool}
+          flushStreamingText={isActiveMessage && hasActiveTool}
+          onStreamingTextReveal={followStreamingTextReveal}
+        />;
+      })}
       {compacting && <div
         className="compaction-progress"
         role="status"

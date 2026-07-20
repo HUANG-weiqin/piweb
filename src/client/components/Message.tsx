@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 import type { ConversationMessageCard } from "../../shared/protocol";
@@ -7,6 +7,146 @@ import { SessionMessageCard } from "./SessionMessageCard";
 import { ToolCard } from "./ToolCard";
 
 const TOOL_PREVIEW_LIMIT = 4;
+const STREAMING_TEXT_DRAIN_MS = 180;
+const STREAMING_TEXT_MAX_CHAR_INTERVAL_MS = 10;
+const STREAMING_TEXT_MAX_CHARS_PER_FRAME = 12;
+
+function advanceTextOffset(text: string, offset: number, count: number): number {
+  let nextOffset = offset;
+  for (let index = 0; index < count && nextOffset < text.length; index += 1) {
+    const codePoint = text.codePointAt(nextOffset);
+    nextOffset += codePoint !== undefined && codePoint > 0xffff ? 2 : 1;
+  }
+  return nextOffset;
+}
+
+class StreamingTextAnimator {
+  private animationFrame: number | undefined;
+  private lastUpdateTime = 0;
+
+  public targetText: string;
+  public currentText: string;
+
+  constructor(
+    text: string,
+    private readonly setText: (text: string) => void,
+  ) {
+    this.targetText = text;
+    this.currentText = text;
+  }
+
+  start(): void {
+    if (
+      this.animationFrame !== undefined
+      || this.currentText === this.targetText
+    ) return;
+    this.lastUpdateTime = Date.now();
+    this.animationFrame = window.requestAnimationFrame(this.animate);
+  }
+
+  stop(): void {
+    if (this.animationFrame === undefined) return;
+    window.cancelAnimationFrame(this.animationFrame);
+    this.animationFrame = undefined;
+  }
+
+  snapTo(text: string): void {
+    this.stop();
+    this.targetText = text;
+    this.currentText = text;
+    this.setText(text);
+  }
+
+  private animate = () => {
+    this.animationFrame = undefined;
+    if (!this.targetText.startsWith(this.currentText)) {
+      this.snapTo(this.targetText);
+      return;
+    }
+    const remainingChars = this.targetText.length - this.currentText.length;
+    if (remainingChars <= 0) return;
+
+    const currentTime = Date.now();
+    const elapsed = currentTime - this.lastUpdateTime;
+    const timePerChar = Math.min(
+      STREAMING_TEXT_MAX_CHAR_INTERVAL_MS,
+      STREAMING_TEXT_DRAIN_MS / remainingChars,
+    );
+    const charsToAdd = Math.min(
+      remainingChars,
+      STREAMING_TEXT_MAX_CHARS_PER_FRAME,
+      Math.floor(elapsed / timePerChar),
+    );
+    if (charsToAdd > 0) {
+      const nextOffset = advanceTextOffset(
+        this.targetText,
+        this.currentText.length,
+        charsToAdd,
+      );
+      this.currentText = this.targetText.slice(0, nextOffset);
+      this.lastUpdateTime = currentTime - (elapsed - charsToAdd * timePerChar);
+      this.setText(this.currentText);
+    }
+    if (this.currentText !== this.targetText) {
+      this.animationFrame = window.requestAnimationFrame(this.animate);
+    }
+  };
+}
+
+function prefersReducedMotion(): boolean {
+  return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+    ?? false;
+}
+
+function useSmoothStreamingText(
+  text: string,
+  streaming: boolean,
+  flush: boolean,
+  onReveal?: () => void,
+): string {
+  const [displayedText, setDisplayedText] = useState(text);
+  const animatorRef = useRef<StreamingTextAnimator | undefined>(undefined);
+  const smoothingSession = useRef(streaming);
+  const lastReportedText = useRef(text);
+  if (!animatorRef.current) {
+    animatorRef.current = new StreamingTextAnimator(text, setDisplayedText);
+  }
+
+  useLayoutEffect(() => {
+    if (displayedText === lastReportedText.current) return;
+    lastReportedText.current = displayedText;
+    if (smoothingSession.current) onReveal?.();
+  }, [displayedText, onReveal]);
+
+  useLayoutEffect(() => {
+    const animator = animatorRef.current;
+    if (!animator) return;
+    const previousTarget = animator.targetText;
+    const appendOnly = text.startsWith(previousTarget)
+      && text.startsWith(animator.currentText);
+    animator.targetText = text;
+
+    const reducedMotion = prefersReducedMotion();
+    if (flush || reducedMotion || !appendOnly) {
+      smoothingSession.current = streaming && !flush && !reducedMotion;
+      animator.snapTo(text);
+      return;
+    }
+    if (streaming) smoothingSession.current = true;
+    if (smoothingSession.current) {
+      animator.start();
+    } else {
+      animator.snapTo(text);
+    }
+    if (!streaming && animator.currentText === text) {
+      smoothingSession.current = false;
+    }
+  }, [displayedText, flush, streaming, text]);
+
+  useEffect(() => () => animatorRef.current?.stop(), []);
+
+  return displayedText;
+}
 
 function renderMarkdown(markdown: string): string {
   return DOMPurify.sanitize(marked.parse(markdown, { async: false }) as string);
@@ -39,6 +179,9 @@ export function Message({
   rewindDisabled = false,
   rewinding = false,
   activeThinking = false,
+  smoothStreamingText = false,
+  flushStreamingText = false,
+  onStreamingTextReveal,
 }: {
   message: ChatMessage;
   sessionCards?: ConversationMessageCard[];
@@ -47,8 +190,17 @@ export function Message({
   rewindDisabled?: boolean;
   rewinding?: boolean;
   activeThinking?: boolean;
+  smoothStreamingText?: boolean;
+  flushStreamingText?: boolean;
+  onStreamingTextReveal?(): void;
 }) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const displayedText = useSmoothStreamingText(
+    message.text,
+    smoothStreamingText,
+    flushStreamingText,
+    onStreamingTextReveal,
+  );
 
   async function copyMessage() {
     try {
@@ -59,9 +211,19 @@ export function Message({
     }
   }
 
-  if (message.role === "error") return <article className="message error">{message.text}</article>;
   const isUser = message.role === "user";
   const hasActivity = message.tools.length > 0 || sessionCards.length > 0;
+  const html = useMemo(
+    () => message.role === "assistant"
+      ? renderMarkdown(displayedText || (hasActivity ? "" : "…"))
+      : "",
+    [displayedText, hasActivity, message.role],
+  );
+  const thinkingHtml = useMemo(
+    () => message.thinking ? renderMarkdown(message.thinking) : "",
+    [message.thinking],
+  );
+  if (message.role === "error") return <article className="message error">{message.text}</article>;
   let copyLabel = isUser ? "复制用户消息" : "复制 Agent 回复";
   let copyTitle = isUser ? "复制用户原文" : "复制原始 Markdown";
   let copyText = "复制";
@@ -114,8 +276,6 @@ export function Message({
       {actions}
     </article>;
   }
-  const html = renderMarkdown(message.text || (hasActivity ? "" : "…"));
-  const thinkingHtml = message.thinking ? renderMarkdown(message.thinking) : "";
   return <article className="message assistant">
     {message.thinking && <details className={`thinking${activeThinking ? " is-active" : ""}`}>
       <summary>
@@ -147,7 +307,7 @@ export function Message({
         onOpenConversation={onOpenConversation}
       />)}
     </section>}
-    {message.text || !hasActivity ? <div className="markdown" dangerouslySetInnerHTML={{ __html: html }} /> : null}
+    {displayedText || !hasActivity ? <div className="markdown" dangerouslySetInnerHTML={{ __html: html }} /> : null}
     {actions}
   </article>;
 }

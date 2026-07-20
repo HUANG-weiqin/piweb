@@ -64,9 +64,24 @@ function view(
   />;
 }
 
+function mockAnimationFrames() {
+  vi.stubGlobal(
+    "requestAnimationFrame",
+    (callback: FrameRequestCallback) => window.setTimeout(
+      () => callback(Date.now()),
+      16,
+    ),
+  );
+  vi.stubGlobal(
+    "cancelAnimationFrame",
+    (handle: number) => window.clearTimeout(handle),
+  );
+}
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   vi.useRealTimers();
 });
 
@@ -268,8 +283,9 @@ describe("Chat", () => {
     expect(screen.queryByRole("button", { name: "↓ 回到最新消息" })).not.toBeInTheDocument();
   });
 
-  it("coalesces rapid transcript updates while a run is streaming", () => {
+  it("reveals a coalesced text delta across animation frames", () => {
     vi.useFakeTimers();
+    mockAnimationFrames();
     const firstChat: ChatState = {
       messages: [{
         id: "assistant-1",
@@ -285,21 +301,112 @@ describe("Chat", () => {
       busy: true,
       activeRun: { id: "run-1", phase: "running" },
     }));
+    const markdown = rendered.container.querySelector<HTMLElement>(
+      ".message.assistant .markdown",
+    );
+    if (!markdown) throw new Error("assistant markdown not rendered");
+    const transcript = rendered.container.querySelector<HTMLElement>(
+      ".transcript",
+    );
+    if (!transcript) throw new Error("transcript not rendered");
+    const scrollTo = vi.fn();
+    Object.defineProperties(transcript, {
+      scrollHeight: { configurable: true, value: 1_000 },
+      clientHeight: { configurable: true, value: 500 },
+      scrollTop: { configurable: true, writable: true, value: 360 },
+      scrollTo: { configurable: true, value: scrollTo },
+    });
+    const completeText = "第一段，继续快速输出，直到形成完整的一句话。";
 
     rendered.rerender(view({
       ...firstChat,
-      messages: [{ ...firstChat.messages[0], text: "第一段，继续快速输出" }],
+      messages: [{ ...firstChat.messages[0], text: completeText }],
     }, "", undefined, {
       busy: true,
       activeRun: { id: "run-1", phase: "running" },
     }));
 
     expect(screen.getByText("第一段")).toBeInTheDocument();
-    expect(screen.queryByText("第一段，继续快速输出")).not.toBeInTheDocument();
+    expect(screen.queryByText(completeText)).not.toBeInTheDocument();
 
     act(() => vi.advanceTimersByTime(32));
 
-    expect(screen.getByText("第一段，继续快速输出")).toBeInTheDocument();
+    expect(markdown).toHaveTextContent("第一段");
+    expect(markdown).not.toHaveTextContent(completeText);
+    scrollTo.mockClear();
+
+    act(() => vi.advanceTimersByTime(16));
+
+    expect(markdown.textContent?.startsWith("第一段")).toBe(true);
+    expect(markdown.textContent?.length).toBeGreaterThan("第一段".length);
+    expect(markdown).not.toHaveTextContent(completeText);
+    expect(scrollTo).toHaveBeenCalledWith({
+      behavior: "smooth",
+      top: 468,
+    });
+
+    rendered.rerender(view({
+      ...firstChat,
+      messages: [{ ...firstChat.messages[0], text: completeText }],
+    }));
+
+    expect(markdown).not.toHaveTextContent(completeText);
+
+    act(() => vi.advanceTimersByTime(240));
+
+    expect(markdown).toHaveTextContent(completeText);
+  });
+
+  it("flushes buffered text before an active tool is shown", () => {
+    vi.useFakeTimers();
+    mockAnimationFrames();
+    const firstMessage = {
+      id: "assistant-1",
+      runId: "run-1",
+      role: "assistant" as const,
+      text: "准备",
+      thinking: "",
+      tools: [],
+    };
+    const firstChat: ChatState = {
+      messages: [firstMessage],
+      sessionTokens: 0,
+    };
+    const rendered = render(view(firstChat, "", undefined, {
+      busy: true,
+      activeRun: { id: "run-1", phase: "running" },
+    }));
+    const completeText = "准备完成，马上调用工具读取项目文件。";
+
+    rendered.rerender(view({
+      ...firstChat,
+      messages: [{ ...firstMessage, text: completeText }],
+    }, "", undefined, {
+      busy: true,
+      activeRun: { id: "run-1", phase: "running" },
+    }));
+    act(() => vi.advanceTimersByTime(48));
+    expect(screen.queryByText(completeText)).not.toBeInTheDocument();
+
+    rendered.rerender(view({
+      ...firstChat,
+      messages: [{
+        ...firstMessage,
+        text: completeText,
+        tools: [{
+          id: "tool-1",
+          name: "read",
+          status: "running",
+        }],
+      }],
+    }, "", undefined, {
+      busy: true,
+      activeRun: { id: "run-1", phase: "running" },
+    }));
+    act(() => vi.advanceTimersByTime(32));
+
+    expect(screen.getByText(completeText)).toBeInTheDocument();
+    expect(screen.getByText("工具调用（1）")).toBeInTheDocument();
   });
 
   it("grows the controlled composer with its content", () => {
