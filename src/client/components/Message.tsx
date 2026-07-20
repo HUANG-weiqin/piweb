@@ -8,6 +8,10 @@ import { ToolCard } from "./ToolCard";
 
 const TOOL_PREVIEW_LIMIT = 4;
 
+function renderMarkdown(markdown: string): string {
+  return DOMPurify.sanitize(marked.parse(markdown, { async: false }) as string);
+}
+
 function ToolsPanel({ tools }: { tools: ChatMessage["tools"] }) {
   const [showAllTools, setShowAllTools] = useState(false);
   const hasOverflow = tools.length > TOOL_PREVIEW_LIMIT;
@@ -109,10 +113,8 @@ export function Message({
       {actions}
     </article>;
   }
-  const html = DOMPurify.sanitize(marked.parse(
-    message.text || (hasActivity ? "" : "…"),
-    { async: false },
-  ) as string);
+  const html = renderMarkdown(message.text || (hasActivity ? "" : "…"));
+  const thinkingHtml = message.thinking ? renderMarkdown(message.thinking) : "";
   return <article className="message assistant">
     {message.thinking && <details className={`thinking${activeThinking ? " is-active" : ""}`}>
       <summary>
@@ -128,7 +130,10 @@ export function Message({
         <span>{activeThinking ? "正在思考" : "思考过程"}</span>
         <span className="thinking-chevron" aria-hidden="true">⌄</span>
       </summary>
-      <div>{message.thinking}</div>
+      <div
+        className="thinking-body markdown"
+        dangerouslySetInnerHTML={{ __html: thinkingHtml }}
+      />
     </details>}
     {message.tools.length ? <ToolsPanel tools={message.tools} /> : null}
     {sessionCards.length > 0 && <section

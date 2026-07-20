@@ -52,13 +52,19 @@ describe("Message", () => {
     expect(screen.getByText("工具调用（1）")).toBeInTheDocument();
   });
 
-  it("expands tool details when user clicks the tools summary", () => {
-    render(<Message message={toolsMessage} />);
+  it("expands the tool group while keeping each tool independently collapsible", () => {
+    const { container } = render(<Message message={toolsMessage} />);
 
     const summary = screen.getByText("工具调用（1）") as HTMLElement;
     fireEvent.click(summary);
     const details = screen.getByText("工具调用（1）").closest("details") as HTMLDetailsElement;
+    const tool = container.querySelector("details.tool") as HTMLDetailsElement;
     expect(details.open).toBe(true);
+    expect(tool.open).toBe(false);
+
+    fireEvent.click(tool.querySelector("summary") as HTMLElement);
+
+    expect(tool.open).toBe(true);
     expect(screen.getByText("路径")).toBeInTheDocument();
     expect(screen.getByText("成功")).toBeInTheDocument();
   });
@@ -84,6 +90,32 @@ describe("Message", () => {
     expect(screen.queryByRole("status", { name: "Agent 正在思考" }))
       .not.toBeInTheDocument();
     expect(screen.getByText("思考过程")).toBeInTheDocument();
+  });
+
+  it("renders thinking content through the sanitized markdown pipeline", () => {
+    const message: ChatMessage = {
+      id: "thinking-markdown",
+      runId: "run-thinking-markdown",
+      role: "assistant",
+      text: "",
+      thinking: [
+        "## 分析",
+        "",
+        "- 检查状态",
+        "- 执行 `typecheck`",
+        "",
+        "<script>alert('unsafe')</script>",
+      ].join("\n"),
+      tools: [],
+    };
+
+    const { container } = render(<Message message={message} />);
+    const thinking = container.querySelector(".thinking-body.markdown") as HTMLElement;
+
+    expect(thinking).toContainElement(screen.getByRole("heading", { level: 2, name: "分析" }));
+    expect(thinking.querySelector("ul")).toHaveTextContent("检查状态");
+    expect(thinking.querySelector("code")).toHaveTextContent("typecheck");
+    expect(thinking.querySelector("script")).not.toBeInTheDocument();
   });
 
   it("collapses long tool lists and can expand to show all calls", () => {
