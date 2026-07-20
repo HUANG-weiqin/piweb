@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -67,6 +67,7 @@ function view(
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 describe("Chat", () => {
@@ -155,13 +156,15 @@ describe("Chat", () => {
     expect(onRemoveQueuedPrompt).toHaveBeenCalledWith("queued-1");
   });
 
-  it("scrolls the transcript itself to the actual bottom while following output", () => {
+  it("lets streamed output grow inside the follow comfort zone", () => {
     const rendered = render(view(emptyChat));
     const transcript = document.querySelector<HTMLElement>(".transcript");
     if (!transcript) throw new Error("transcript not rendered");
     const scrollTo = vi.fn();
     Object.defineProperties(transcript, {
       scrollHeight: { configurable: true, value: 1_000 },
+      clientHeight: { configurable: true, value: 500 },
+      scrollTop: { configurable: true, writable: true, value: 460 },
       scrollTo: { configurable: true, value: scrollTo },
     });
 
@@ -177,22 +180,52 @@ describe("Chat", () => {
       sessionTokens: 0,
     }));
 
-    expect(scrollTo).toHaveBeenCalledWith({ top: 1_000 });
+    expect(scrollTo).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "↓ 回到最新消息" })).not.toBeInTheDocument();
   });
 
-  it("does not drag the reader to the bottom while new output streams", () => {
+  it("softly catches up after streamed output crosses the comfort zone", () => {
     const rendered = render(view(emptyChat));
     const transcript = document.querySelector<HTMLElement>(".transcript");
     if (!transcript) throw new Error("transcript not rendered");
     const scrollTo = vi.fn();
     Object.defineProperties(transcript, {
       scrollHeight: { configurable: true, value: 1_000 },
-      clientHeight: { configurable: true, value: 200 },
-      scrollTop: { configurable: true, writable: true, value: 200 },
+      clientHeight: { configurable: true, value: 500 },
+      scrollTop: { configurable: true, writable: true, value: 360 },
       scrollTo: { configurable: true, value: scrollTo },
     });
-    fireEvent.scroll(transcript);
+
+    rendered.rerender(view({
+      messages: [{
+        id: "assistant-1",
+        runId: "run-1",
+        role: "assistant",
+        text: "new output",
+        thinking: "",
+        tools: [],
+      }],
+      sessionTokens: 0,
+    }));
+
+    expect(scrollTo).toHaveBeenCalledWith({
+      behavior: "smooth",
+      top: 468,
+    });
+  });
+
+  it("immediately releases scroll control when the reader wheels upward", () => {
+    const rendered = render(view(emptyChat));
+    const transcript = document.querySelector<HTMLElement>(".transcript");
+    if (!transcript) throw new Error("transcript not rendered");
+    const scrollTo = vi.fn();
+    Object.defineProperties(transcript, {
+      scrollHeight: { configurable: true, value: 1_000 },
+      clientHeight: { configurable: true, value: 500 },
+      scrollTop: { configurable: true, writable: true, value: 498 },
+      scrollTo: { configurable: true, value: scrollTo },
+    });
+    fireEvent.wheel(transcript, { deltaY: -4 });
 
     rendered.rerender(view({
       messages: [{
@@ -212,6 +245,60 @@ describe("Chat", () => {
       behavior: "smooth",
       top: 1_000,
     });
+  });
+
+  it("reattaches only after the reader returns all the way to the bottom", () => {
+    render(view(emptyChat));
+    const transcript = document.querySelector<HTMLElement>(".transcript");
+    if (!transcript) throw new Error("transcript not rendered");
+    Object.defineProperties(transcript, {
+      scrollHeight: { configurable: true, value: 1_000 },
+      clientHeight: { configurable: true, value: 500 },
+      scrollTop: { configurable: true, writable: true, value: 498 },
+    });
+    fireEvent.wheel(transcript, { deltaY: -4 });
+
+    transcript.scrollTop = 490;
+    fireEvent.scroll(transcript);
+    expect(screen.getByRole("button", { name: "↓ 回到最新消息" })).toBeInTheDocument();
+
+    transcript.scrollTop = 500;
+    fireEvent.scroll(transcript);
+    expect(screen.queryByRole("button", { name: "↓ 回到最新消息" })).not.toBeInTheDocument();
+  });
+
+  it("coalesces rapid transcript updates while a run is streaming", () => {
+    vi.useFakeTimers();
+    const firstChat: ChatState = {
+      messages: [{
+        id: "assistant-1",
+        runId: "run-1",
+        role: "assistant",
+        text: "第一段",
+        thinking: "",
+        tools: [],
+      }],
+      sessionTokens: 0,
+    };
+    const rendered = render(view(firstChat, "", undefined, {
+      busy: true,
+      activeRun: { id: "run-1", phase: "running" },
+    }));
+
+    rendered.rerender(view({
+      ...firstChat,
+      messages: [{ ...firstChat.messages[0], text: "第一段，继续快速输出" }],
+    }, "", undefined, {
+      busy: true,
+      activeRun: { id: "run-1", phase: "running" },
+    }));
+
+    expect(screen.getByText("第一段")).toBeInTheDocument();
+    expect(screen.queryByText("第一段，继续快速输出")).not.toBeInTheDocument();
+
+    act(() => vi.advanceTimersByTime(32));
+
+    expect(screen.getByText("第一段，继续快速输出")).toBeInTheDocument();
   });
 
   it("grows the controlled composer with its content", () => {

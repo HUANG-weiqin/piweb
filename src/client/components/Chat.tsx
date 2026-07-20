@@ -4,6 +4,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
+  type WheelEvent,
 } from "react";
 import {
   MAX_COMPACTION_THRESHOLD_PERCENT,
@@ -26,6 +27,49 @@ import { Message } from "./Message";
 import { SessionMessageCard } from "./SessionMessageCard";
 
 type QueuedPromptStatus = "queued" | "submitting" | "attention";
+
+const STREAM_RENDER_INTERVAL_MS = 32;
+const FOLLOW_COMFORT_LIMIT_PX = 96;
+const FOLLOW_COMFORT_TARGET_PX = 32;
+const FOLLOW_REATTACH_LIMIT_PX = 2;
+
+function useStreamingChat(chat: ChatState, streaming: boolean): ChatState {
+  const [renderedChat, setRenderedChat] = useState(chat);
+  const latestChat = useRef(chat);
+  const renderTimer = useRef<number | undefined>(undefined);
+
+  useLayoutEffect(() => {
+    latestChat.current = chat;
+    if (!streaming) {
+      if (renderTimer.current !== undefined) {
+        window.clearTimeout(renderTimer.current);
+        renderTimer.current = undefined;
+      }
+      setRenderedChat(chat);
+      return;
+    }
+    if (renderTimer.current !== undefined || renderedChat === chat) return;
+    renderTimer.current = window.setTimeout(() => {
+      renderTimer.current = undefined;
+      setRenderedChat(latestChat.current);
+    }, STREAM_RENDER_INTERVAL_MS);
+  }, [chat, renderedChat, streaming]);
+
+  useEffect(() => () => {
+    if (renderTimer.current !== undefined) {
+      window.clearTimeout(renderTimer.current);
+    }
+  }, []);
+
+  return renderedChat;
+}
+
+function distanceFromBottom(transcript: HTMLElement): number {
+  return Math.max(
+    0,
+    transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight,
+  );
+}
 
 function queuedPromptStatusLabel(status: QueuedPromptStatus): string {
   switch (status) {
@@ -210,7 +254,6 @@ export function Chat({
   onRewind,
   rewindingMessageId,
 }: ChatProps) {
-  const bottomThreshold = 96;
   const contextTokenText = formatContextUsage({
     contextTokenCount,
     contextWindow,
@@ -227,6 +270,7 @@ export function Chat({
   const transcriptRef = useRef<HTMLElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const followOutputRef = useRef(true);
+  const lastScrollTopRef = useRef(0);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [roleDetailsOpen, setRoleDetailsOpen] = useState(false);
   const [compactionThresholdOpen, setCompactionThresholdOpen] = useState(false);
@@ -238,44 +282,89 @@ export function Chat({
     setCompactionThresholdDraft(compactionThresholdPercent);
     requestedCompactionThreshold.current = compactionThresholdPercent;
   }, [compactionThresholdBusy, compactionThresholdPercent]);
-  const items = chat.items ?? chat.messages.map((message) => ({
+  const transcriptChat = useStreamingChat(
+    chat,
+    activeRun?.phase === "running",
+  );
+  const items = transcriptChat.items ?? transcriptChat.messages.map((message) => ({
     kind: "message" as const,
     ...message,
   }));
   const blocks = transcriptBlocks(items);
-  const scrollToLatest = (behavior?: ScrollBehavior) => {
+  const scrollTranscript = (top: number, behavior?: ScrollBehavior) => {
     const transcript = transcriptRef.current;
     if (!transcript) return;
     if (typeof transcript.scrollTo === "function") {
       transcript.scrollTo({
-        top: transcript.scrollHeight,
+        top,
         ...(behavior ? { behavior } : {}),
       });
     } else {
-      transcript.scrollTop = transcript.scrollHeight;
+      transcript.scrollTop = top;
     }
+  };
+  const scrollToLatest = (behavior?: ScrollBehavior) => {
+    const transcript = transcriptRef.current;
+    if (!transcript) return;
+    scrollTranscript(transcript.scrollHeight, behavior);
+  };
+  const followLatest = () => {
+    const transcript = transcriptRef.current;
+    if (
+      !transcript
+      || distanceFromBottom(transcript) <= FOLLOW_COMFORT_LIMIT_PX
+    ) return;
+    scrollTranscript(
+      Math.max(
+        0,
+        transcript.scrollHeight
+          - transcript.clientHeight
+          - FOLLOW_COMFORT_TARGET_PX,
+      ),
+      "smooth",
+    );
   };
   useLayoutEffect(() => {
     if (followOutputRef.current) {
-      scrollToLatest();
+      followLatest();
       setShowJumpToLatest(false);
     } else {
       setShowJumpToLatest(true);
     }
-  }, [chat.items, chat.messages, compacting]);
+    if (transcriptRef.current) {
+      lastScrollTopRef.current = transcriptRef.current.scrollTop;
+    }
+  }, [transcriptChat, compacting]);
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
     textarea.style.height = "auto";
     textarea.style.height = `${Math.min(Math.max(textarea.scrollHeight, 42), 180)}px`;
   }, [draft]);
+  const stopFollowingOutput = () => {
+    followOutputRef.current = false;
+    setShowJumpToLatest(true);
+  };
+  const handleTranscriptWheel = (event: WheelEvent<HTMLElement>) => {
+    if (event.deltaY < 0) stopFollowingOutput();
+  };
   const handleTranscriptScroll = () => {
     const transcript = transcriptRef.current;
     if (!transcript) return;
-    const distanceFromBottom =
-      transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight;
-    followOutputRef.current = distanceFromBottom <= bottomThreshold;
-    if (followOutputRef.current) setShowJumpToLatest(false);
+    const scrollTop = transcript.scrollTop;
+    const movedUp = scrollTop < lastScrollTopRef.current;
+    lastScrollTopRef.current = scrollTop;
+    if (movedUp) {
+      stopFollowingOutput();
+      return;
+    }
+    if (
+      !followOutputRef.current
+      && distanceFromBottom(transcript) <= FOLLOW_REATTACH_LIMIT_PX
+    ) {
+      followOutputRef.current = true;
+      setShowJumpToLatest(false);
+    }
   };
   const jumpToLatest = () => {
     followOutputRef.current = true;
@@ -329,6 +418,7 @@ export function Chat({
       className="transcript"
       aria-live="polite"
       onScroll={handleTranscriptScroll}
+      onWheel={handleTranscriptWheel}
     >
       {historyTruncated && <div className="history-note">
         较早或过长的显示内容已省略；完整记录仍保存在项目中。
