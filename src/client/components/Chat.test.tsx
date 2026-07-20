@@ -385,6 +385,69 @@ describe("Chat", () => {
     expect(screen.getByText("完成")).toHaveProperty("tagName", "STRONG");
   });
 
+  it("folds the previous Agent reply only after the latest reply finishes", () => {
+    const previousMessage = {
+      id: "assistant-previous",
+      runId: "run-previous",
+      role: "assistant" as const,
+      text: "上一条完整回复",
+      thinking: "上一条思考",
+      tools: [{
+        id: "tool-previous",
+        name: "read",
+        status: "done" as const,
+      }],
+    };
+    const latestMessage = {
+      id: "assistant-latest",
+      runId: "run-latest",
+      role: "assistant" as const,
+      text: "正在生成最新回复",
+      thinking: "最新思考",
+      tools: [],
+    };
+    const rendered = render(view({
+      messages: [previousMessage, latestMessage],
+      sessionTokens: 0,
+    }, "", undefined, {
+      busy: true,
+      activeRun: { id: "run-latest", phase: "running" },
+    }));
+    const assistantMessages = () => Array.from(
+      rendered.container.querySelectorAll<HTMLElement>(".message.assistant"),
+    );
+
+    expect(assistantMessages()[0]?.querySelector(".assistant-response"))
+      .not.toBeInTheDocument();
+    expect(assistantMessages()[1]?.querySelector(".assistant-response"))
+      .not.toBeInTheDocument();
+
+    rendered.rerender(view({
+      messages: [previousMessage, {
+        ...latestMessage,
+        text: "最新回复已经完成",
+      }],
+      sessionTokens: 0,
+    }));
+
+    const foldedReply = assistantMessages()[0]?.querySelector<HTMLDetailsElement>(
+      ".assistant-response",
+    );
+    expect(foldedReply).toBeInTheDocument();
+    expect(foldedReply).not.toHaveAttribute("open");
+    expect(foldedReply).toHaveTextContent("上一条完整回复");
+    expect(foldedReply?.querySelector(".thinking")).toBeInTheDocument();
+    expect(foldedReply?.querySelector(".tools")).toBeInTheDocument();
+    expect(foldedReply?.querySelector(".message-actions")).toBeInTheDocument();
+    expect(assistantMessages()[1]?.querySelector(".assistant-response"))
+      .not.toBeInTheDocument();
+
+    const foldedSummary = foldedReply?.querySelector("summary");
+    if (!foldedSummary) throw new Error("folded Agent summary not rendered");
+    fireEvent.click(foldedSummary);
+    expect(foldedReply).toHaveAttribute("open");
+  });
+
   it("only exposes disabled rewind on user messages while the Agent runs", () => {
     render(view({
       messages: [{

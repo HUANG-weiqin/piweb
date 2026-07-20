@@ -810,6 +810,11 @@ pre {
   color: var(--muted);
 }
 
+.assistant-response {
+  color: var(--muted);
+}
+
+.assistant-response > summary,
 .thinking > summary,
 .tools > summary {
   display: flex;
@@ -822,6 +827,8 @@ pre {
   list-style: none;
 }
 
+.assistant-response > summary::before,
+.assistant-response > summary::after,
 .thinking > summary::before,
 .thinking > summary::after,
 .tools > summary::before,
@@ -833,18 +840,21 @@ pre {
   background: color-mix(in srgb, var(--line-strong) 58%, transparent);
 }
 
+.assistant-response > summary::-webkit-details-marker,
 .thinking > summary::-webkit-details-marker,
 .tool > summary::-webkit-details-marker,
 .tools > summary::-webkit-details-marker {
   display: none;
 }
 
+.assistant-response > summary::marker,
 .thinking > summary::marker,
 .tool > summary::marker,
 .tools > summary::marker {
   content: "";
 }
 
+.assistant-response-title,
 .thinking > summary {
   font-weight: 650;
 }
@@ -879,6 +889,7 @@ pre {
   color: color-mix(in srgb, var(--warning) 86%, currentColor);
 }
 
+.assistant-response-chevron,
 .thinking-chevron,
 .tools-chevron,
 .tool-chevron {
@@ -889,10 +900,16 @@ pre {
   margin-left: auto;
 }
 
+.assistant-response[open] > summary .assistant-response-chevron,
 .thinking[open] > summary .thinking-chevron,
 .tools[open] > summary .tools-chevron,
 .tool[open] > summary .tool-chevron {
   transform: rotate(180deg);
+}
+
+.assistant-response-body {
+  padding-top: 4px;
+  color: var(--text);
 }
 
 .thinking > .thinking-body {

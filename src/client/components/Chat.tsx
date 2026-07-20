@@ -264,6 +264,30 @@ export function Chat({
     [chat.items, chat.messages],
   );
   const blocks = useMemo(() => transcriptBlocks(items), [items]);
+  const activeRunId = activeRun?.id;
+  const expandedAssistantMessageIds = useMemo(() => {
+    const assistantMessages = blocks.flatMap((block) => (
+      block.kind === "message" && block.message.role === "assistant"
+        ? [block.message]
+        : []
+    ));
+    const latestMessage = assistantMessages.at(-1);
+    if (!latestMessage) return new Set<string>();
+
+    const activeMessageIndex = activeRunId
+      ? assistantMessages.findIndex((message) => message.runId === activeRunId)
+      : -1;
+    if (activeMessageIndex < 0) return new Set([latestMessage.id]);
+
+    const expandedIds = new Set(
+      assistantMessages
+        .filter((message) => message.runId === activeRunId)
+        .map((message) => message.id),
+    );
+    const previousMessage = assistantMessages[activeMessageIndex - 1];
+    if (previousMessage) expandedIds.add(previousMessage.id);
+    return expandedIds;
+  }, [activeRunId, blocks]);
   const openConversationRef = useRef(onOpenConversation);
   const rewindRef = useRef(onRewind);
   useLayoutEffect(() => {
@@ -445,6 +469,10 @@ export function Chat({
           rewinding={rewindingMessageId === block.message.id}
           activeThinking={isStreamingMessage && !hasActiveTool}
           streamingText={isStreamingMessage}
+          collapsed={
+            block.message.role === "assistant"
+            && !expandedAssistantMessageIds.has(block.message.id)
+          }
         />;
       })}
       {compacting && <div

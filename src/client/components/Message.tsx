@@ -45,6 +45,7 @@ interface MessageProps {
   rewinding?: boolean;
   activeThinking?: boolean;
   streamingText?: boolean;
+  collapsed?: boolean;
 }
 
 function sameSessionCards(
@@ -64,7 +65,8 @@ function sameMessageProps(previous: MessageProps, next: MessageProps): boolean {
     && previous.rewindDisabled === next.rewindDisabled
     && previous.rewinding === next.rewinding
     && previous.activeThinking === next.activeThinking
-    && previous.streamingText === next.streamingText;
+    && previous.streamingText === next.streamingText
+    && previous.collapsed === next.collapsed;
 }
 
 function MessageView({
@@ -76,6 +78,7 @@ function MessageView({
   rewinding = false,
   activeThinking = false,
   streamingText = false,
+  collapsed = false,
 }: MessageProps) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const [thinkingOpen, setThinkingOpen] = useState(false);
@@ -163,7 +166,7 @@ function MessageView({
         </div>
       : <div className="markdown" dangerouslySetInnerHTML={{ __html: html }} />;
   }
-  return <article className="message assistant">
+  const assistantContent = <>
     {message.thinking && <details
       className={`thinking${activeThinking ? " is-active" : ""}`}
       open={thinkingOpen}
@@ -202,6 +205,15 @@ function MessageView({
     </section>}
     {responseBody}
     {actions}
+  </>;
+  return <article className="message assistant">
+    {collapsed ? <details className="assistant-response">
+      <summary>
+        <span className="assistant-response-title">Agent 回复</span>
+        <span className="assistant-response-chevron" aria-hidden="true">⌄</span>
+      </summary>
+      <div className="assistant-response-body">{assistantContent}</div>
+    </details> : assistantContent}
   </article>;
 }
 
