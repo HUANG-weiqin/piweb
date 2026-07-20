@@ -14,7 +14,7 @@ import { useModalFocus } from "../lib/use-modal-focus";
 
 const DEFAULT_SIDEBAR_WIDTH = 286;
 const MIN_SIDEBAR_WIDTH = 240;
-const MAX_SIDEBAR_WIDTH = 420;
+const MAX_SIDEBAR_WIDTH = 640;
 const SIDEBAR_KEYBOARD_STEP = 16;
 
 function clampSidebarWidth(width: number): number {

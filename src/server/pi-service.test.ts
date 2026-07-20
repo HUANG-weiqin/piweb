@@ -51,6 +51,7 @@ const COMMAND_B = "8ee64aa3-c8a8-4e21-b521-66029ce3673b";
 
 interface FakeSession extends AgentSession {
   abortCalls: number;
+  compactCalls: number;
   disposed: boolean;
   eventListener?: (event: AgentSessionEvent) => void;
   steerCalls: string[];
@@ -71,6 +72,7 @@ function fakeSettings(): SettingsManager {
 function fakeSession(settings = fakeSettings()): FakeSession {
   const session = {
     abortCalls: 0,
+    compactCalls: 0,
     disposed: false,
     steerCalls: [],
     isStreaming: false,
@@ -100,6 +102,10 @@ function fakeSession(settings = fakeSettings()): FakeSession {
     abort: async function () {
       this.abortCalls++;
       this.isStreaming = false;
+    },
+    compact: async function () {
+      this.compactCalls++;
+      return {};
     },
     dispose: function () {
       this.disposed = true;
@@ -2290,6 +2296,45 @@ describe("PiConnection coordinated project view", () => {
     }
   });
 
+  it("manually compacts the exact focused conversation and acknowledges it", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        roleId: "default",
+      });
+      const focused = latestState(harness.events);
+      const commandId = randomUUID();
+
+      await harness.connection.handle({
+        type: "compact_context",
+        commandId,
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+      });
+
+      expect(harness.runtime.created[0]!.compactCalls).toBe(1);
+      expect(harness.events).toContainEqual({
+        type: "command_complete",
+        operation: "compact_context",
+        commandId,
+        sessionId: SESSION_A,
+      });
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
   it("publishes the physically rewound snapshot before acknowledging the command", async () => {
     const harness = await coordinatedConnectionHarness();
     try {
@@ -2477,6 +2522,7 @@ describe("PiConnection coordinated project view", () => {
             provider: projectModel.provider,
             id: projectModel.id,
           },
+          toolMode: "read_only",
           canManageSessions: false,
         },
       });
@@ -3468,6 +3514,7 @@ describe("PiConnection coordinated project view", () => {
             provider: projectModel.provider,
             id: projectModel.id,
           },
+          toolMode: "read_only",
           canManageSessions: false,
         },
       });
@@ -3524,6 +3571,7 @@ describe("PiConnection coordinated project view", () => {
             provider: projectModel.provider,
             id: projectModel.id,
           },
+          toolMode: "full_access",
           canManageSessions: true,
         },
       })).resolves.toBeUndefined();
@@ -3560,6 +3608,7 @@ describe("PiConnection coordinated project view", () => {
             provider: projectModel.provider,
             id: "missing",
           },
+          toolMode: "full_access",
           canManageSessions: true,
         },
       })).rejects.toThrow("unavailable in the current project");
@@ -3588,6 +3637,7 @@ describe("PiConnection coordinated project view", () => {
           description: "Reviews changes",
           systemPrompt: "Review carefully.",
           model: { provider: "test", id: "model" },
+          toolMode: "read_only",
           canManageSessions: false,
         },
       });

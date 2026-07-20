@@ -1,6 +1,6 @@
 # 客户端状态
 
-`updated: 2026-07-19`
+`updated: 2026-07-20`
 
 ## 这个模块是干什么的
 
@@ -47,13 +47,14 @@ ServerEvent
 - state 只说明 focused runtime 已提交，不说明历史已经 hydrate；`conversationReady` 必须等匹配 focus 三元身份的 snapshot，期间 composer 和 `sendPrompt` 双重禁用，避免 hydrate 覆盖刚发送的本地消息。
 - tool、usage、prompt error 与停止仍按 runId 路由；但一个 run 可因 steering 包含多个 `assistant → user → assistant` 消息段。live projector 显式发送 user message 与 assistant segment start，reducer 只在该 run 的最新 assistant 段内追加 delta/tool，不能把“run 生命周期”误作“单个气泡生命周期”。
 - OAuth UI 只接收当前 authFlowId；取消或新 flow 之后的旧 request/progress/complete 一律忽略。
-- 右侧抽屉只负责“提供商 → 凭据 → 可用模型”的连接状态，不承载项目权限、会话生命周期或 Agent 行为控制。项目工具权限位于工作台顶栏和新会话角色选择页；当前会话的思考级别与自动压缩阈值靠近 composer；角色管理只从新会话角色选择流程进入；会话改名位于左侧会话栏。
-- 会话不再中途选择模型。角色管理只列已配置提供商当前可用模型，并把 provider/model 固定到模板。角色表单还显式控制“允许管理会话”：新建角色默认关闭，编辑时按模板原值显示；关闭意味着 Agent 完全看不到工作台会话工具。
+- 右侧抽屉只负责“提供商 → 凭据 → 可用模型”的连接状态，不承载权限、会话生命周期或 Agent 行为控制。当前会话的思考级别与压缩控制靠近 composer；角色管理只从新会话角色选择流程进入；会话改名位于左侧会话栏。
+- 会话不再中途选择模型或权限。角色管理只列已配置提供商当前可用模型，并把 provider/model 与工具权限固定到模板；新角色工具权限默认只读。角色表单还显式控制“允许管理会话”：新建角色默认关闭，编辑时按模板原值显示；关闭意味着 Agent 完全看不到工作台会话工具。
 - Pi 凭据属于当前用户并由所有项目共享；移除凭据必须明确提示全局影响并二次确认。空模型列表的恢复动作必须真的发送 `refresh_models`，不能用“重新打开设置”冒充刷新。
 - API Key 保存和角色 CRUD 只由匹配 sessionId + operation + commandId 的 `command_complete` / error 结算；任何中途 state/catalog 刷新都不能关闭等待态。角色 update/delete 同时带 expectedRevision。
 - 初始化“默认”模板在角色管理中与其它角色相同，可编辑、可删除。失效模板保留原 provider/model 展示，不能静默换成其它模型。
-- Chat composer 底部显示会话固化角色 pill；详情展示快照 revision、简介、prompt、模型和会话管理能力，不提供切换操作。
+- Chat composer 底部显示会话固化角色 pill；详情展示快照 revision、简介、prompt、模型、工具权限和会话管理能力，不提供切换操作。
 - Chat 在 composer 底部现有控制行显示“自动压缩 N%”按钮，默认不增加 transcript 高度；点击后才展开 20%–90% 的会话级滑条，默认 70%。拖动只预览，松手或键盘调整结束才发送一次精确关联命令，等待相同 commandId 结算期间禁用控件。
+- 同一控制行提供“手动压缩”按钮；只在在线、history 已恢复且会话空闲时启用，提交后等待精确 `compact_context` commandId 结算，不能把普通 state 刷新当成成功。
 - 成功压缩后，completion snapshot 会把 Pi active branch 的持久 `compaction` 项 hydrate 为“上下文已压缩”分界线；它不属于 message、不会计入消息/token 投影，也不会被相邻会话卡片吸收到 assistant 回答中。
 - 跨会话消息使用独立 `SessionMessageCard`。卡片默认收起，只用一行显示方向、对端会话和状态；用户主动展开后才显示来源/目标标题、角色、短句柄、正文、结果与打开入口，状态更新不能擅自展开卡片。reducer 用 cardId 原地 upsert，并保持卡片在 transcript 中原来的位置；紧跟 assistant 的 outgoing/incoming 卡片在渲染时都归入同一回复的执行区，固定显示在工具调用之后、最终正文之前，完成或送达更新不能占据回答下方。没有可关联 assistant 的卡片仍按独立时间点展示。打开入口只由卡片自身的服务端 `peerExists` 决定，不能用截断侧栏做存在性判断。相关 peer 仍存在时可直接打开，临时会话删除后入口消失。
 - extension UI 可在首个 state 前出现，因此对话框必须位于 Setup/Chat 之外的 session-scoped overlay；协调模式只把当前 focus 路由到浏览器，后台请求通过侧栏 attention 提示，不抢焦点。
@@ -65,7 +66,7 @@ ServerEvent
 - 每条 user 与 assistant 正文在既有消息间距中提供低干扰操作组：复制按钮读取原始文本/Markdown，不复制渲染后的 HTML；“回到此处”先明确确认将彻底删除本条及之后所有消息。操作组必须使用内容宽度且禁止换行，不能被短 user bubble 压成竖排。运行中、恢复未完成、存在排队 prompt 或已有截断 pending 时禁用破坏性按钮。
 - 截断只维护一个 `sessionId + commandId + conversationId + messageId` pending；客户端不先行 splice transcript，只接受匹配 focus 的服务端 snapshot 作为新内容，再用匹配 commandId 的 completion/error 结算等待态。等待期间 composer、切换和新建会话禁用；断线属于未知结果，必须提示恢复后核对。
 - 认证、设置和扩展交互拥有模态焦点边界。
-- 工具模式的服务端 state 是执行真相；限制到 `read_only` 的本地意图立即持久化，放宽到 `full_access` 只能在服务端确认后持久化，重连不得在 ack 间隙扩大权限。
+- 会话角色快照中的工具权限是执行真相；客户端不保存全局工具模式偏好，也不提供项目级权限切换。
 - PiSocket 的每个回调捕获创建它的 socket；旧 socket 以及 React effect 已销毁的旧 PiSocket 实例都不得操作当前连接。
 - SDK 的 tool_started 投影代表 preflight 已观察到调用，工具卡先显示 pending；后续 `tool_prepared` 用扩展变换后的最终参数校准展示。
 - 服务端累计 token 优先，reducer 累计值只作为旧状态或短暂缺失时的 fallback。

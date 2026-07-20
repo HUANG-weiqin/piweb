@@ -43,6 +43,7 @@ function draft(
     description: "",
     systemPrompt: "",
     model: initialModel,
+    toolMode: "read_only",
     canManageSessions: false,
     ...overrides,
   };
@@ -58,6 +59,7 @@ function persistedDefault(
     description: "默认角色",
     systemPrompt: "",
     model: initialModel,
+    toolMode: "read_only",
     canManageSessions: false,
     createdAt: "2026-07-19T10:00:00.000Z",
     updatedAt: "2026-07-19T10:00:00.000Z",
@@ -158,19 +160,28 @@ describe("RoleStore", () => {
     expect(store.getRole("default")?.model).toBeNull();
   });
 
-  it("keeps session management disabled for roles written before the capability field existed", async () => {
+  it("defaults legacy role capabilities and tool permission closed", async () => {
     const rolesPath = await createRolesPath("piweb-role-store-legacy-capability-");
     await mkdir(dirname(rolesPath), { recursive: true });
     const legacyRole = persistedDefault();
-    const { canManageSessions: _omitted, ...legacyFields } = legacyRole;
+    const {
+      canManageSessions: _omittedCapability,
+      toolMode: _omittedToolMode,
+      ...legacyFields
+    } = legacyRole;
     await writeFile(rolesPath, `${JSON.stringify({
-      version: 1,
+      version: 2,
       roles: [legacyFields],
     }, null, 2)}\n`, "utf8");
 
     const store = await RoleStore.open(rolesPath, null);
 
     expect(store.getRole("default")?.canManageSessions).toBe(false);
+    expect(store.getRole("default")?.toolMode).toBe("read_only");
+    expect(JSON.parse(await readFile(rolesPath, "utf8"))).toMatchObject({
+      version: ROLE_STORE_VERSION,
+      roles: [{ toolMode: "read_only" }],
+    });
   });
 
   it("allows editing and deleting the seeded role without recreating it", async () => {
@@ -186,6 +197,7 @@ describe("RoleStore", () => {
       description: "General purpose",
       systemPrompt: "Be concise.",
       model: { provider: "other-provider", id: "other-model" },
+      toolMode: "read_only",
       canManageSessions: false,
     });
 
@@ -353,7 +365,7 @@ describe("RoleStore", () => {
   it("fails closed on corrupt, unknown, or structurally invalid v1 files", async () => {
     const invalidDocuments: unknown[] = [
       "{",
-      { version: 3, roles: [persistedDefault()] },
+      { version: 4, roles: [persistedDefault()] },
       { version: 1, roles: [persistedDefault()], extra: true },
       {
         version: 1,

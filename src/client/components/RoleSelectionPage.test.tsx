@@ -19,6 +19,7 @@ function role(
     description: `${name} description`,
     systemPrompt: `${name} prompt`,
     model: { provider: "openai", id: "gpt-5" },
+    toolMode: "read_only",
     canManageSessions: true,
     createdAt: "2026-07-19T12:00:00.000Z",
     updatedAt: "2026-07-19T12:00:00.000Z",
@@ -27,17 +28,10 @@ function role(
   };
 }
 
-const projectControlProps = {
-  toolMode: "full_access" as const,
-  toolModeBusy: false,
-  onToolMode: () => undefined,
-};
-
 describe("RoleSelectionPage", () => {
   it("preserves role order without selecting one", () => {
     const start = vi.fn();
     render(<RoleSelectionPage
-      {...projectControlProps}
       roles={[
         role("reviewer", "Reviewer"),
         role("default", "Default"),
@@ -60,7 +54,6 @@ describe("RoleSelectionPage", () => {
   it("places an add-role card after existing roles and opens role management", () => {
     const manageRoles = vi.fn();
     render(<RoleSelectionPage
-      {...projectControlProps}
       roles={[
         role("default", "Default"),
         role("reviewer", "Reviewer"),
@@ -83,7 +76,6 @@ describe("RoleSelectionPage", () => {
 
   it("disables unavailable roles and explains why", () => {
     render(<RoleSelectionPage
-      {...projectControlProps}
       roles={[
         role("offline", "Offline specialist", {
           available: false,
@@ -99,7 +91,7 @@ describe("RoleSelectionPage", () => {
     });
     expect(card).toBeDisabled();
     expect(card).toHaveClass("unavailable");
-    expect(within(card).getByText("retired-model")).toBeInTheDocument();
+    expect(within(card).getByText(/retired-model/)).toBeInTheDocument();
     expect(within(card).queryByText(/acme \//)).not.toBeInTheDocument();
     expect(within(card).getByText("模型当前不可用")).toBeInTheDocument();
   });
@@ -107,7 +99,6 @@ describe("RoleSelectionPage", () => {
   it("locks role selection while creation is pending", () => {
     const manageRoles = vi.fn();
     const view = render(<RoleSelectionPage
-      {...projectControlProps}
       roles={[role("default", "Default")]}
       onStart={() => undefined}
       onManageRoles={manageRoles}
@@ -115,7 +106,6 @@ describe("RoleSelectionPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "选择角色 Default" }));
 
     view.rerender(<RoleSelectionPage
-      {...projectControlProps}
       roles={[role("default", "Default")]}
       pending
       onStart={() => undefined}
@@ -130,25 +120,16 @@ describe("RoleSelectionPage", () => {
   it("keeps provider settings and project switching reachable before a role exists", () => {
     const settings = vi.fn();
     const changeProject = vi.fn();
-    const changeToolMode = vi.fn();
     render(<RoleSelectionPage
-      {...projectControlProps}
       roles={[]}
       onStart={() => undefined}
       onSettings={settings}
-      onToolMode={changeToolMode}
       onChangeProject={changeProject}
     />);
 
     fireEvent.click(screen.getByRole("button", { name: "模型连接" }));
-    fireEvent.change(screen.getByRole("combobox", {
-      name: "项目工具权限",
-    }), {
-      target: { value: "read_only" },
-    });
     fireEvent.click(screen.getByRole("button", { name: "切换项目" }));
     expect(settings).toHaveBeenCalledOnce();
-    expect(changeToolMode).toHaveBeenCalledWith("read_only");
     expect(changeProject).toHaveBeenCalledOnce();
     expect(screen.queryByRole("textbox", { name: "给 Pi 发送消息" }))
       .not.toBeInTheDocument();

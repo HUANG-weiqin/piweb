@@ -17,6 +17,7 @@ const role: ConversationRoleSnapshot = {
     provider: "openai",
     id: "gpt-5",
   },
+  toolMode: "read_only",
   canManageSessions: true,
 };
 

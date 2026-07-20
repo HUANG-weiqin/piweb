@@ -13,9 +13,7 @@ import {
   type RoleTemplate,
   type ServerEvent,
   type ThinkingLevel,
-  type ToolMode,
 } from "../shared/protocol";
-import { isToolModeRestriction } from "../shared/tool-mode";
 import { chatReducer, initialChatState } from "./chat/reducer";
 import { AuthDialog } from "./components/AuthDialog";
 import { Chat } from "./components/Chat";
@@ -38,7 +36,6 @@ import { PiSocket } from "./lib/socket";
 import { readStoredString, writeStoredString } from "./lib/storage";
 
 const CWD_KEY = "piweb.lastCwd";
-const TOOL_MODE_KEY = "piweb.toolMode";
 const MAX_QUEUED_PROMPTS = 20;
 
 interface PendingPrompt {
@@ -80,6 +77,10 @@ interface PendingCompactionThreshold {
   commandId: string;
 }
 
+interface PendingContextCompaction {
+  commandId: string;
+}
+
 interface DirectoryBrowserState {
   commandId: string;
   listing?: DirectoryListing;
@@ -112,12 +113,6 @@ type RoleCommandInput =
       expectedRevision: number;
     };
 
-function storedToolMode(): ToolMode {
-  return readStoredString(TOOL_MODE_KEY) === "read_only"
-    ? "read_only"
-    : "full_access";
-}
-
 export function App() {
   const [transportOnline, setTransportOnline] = useState(false);
   const [protocolReady, setProtocolReady] = useState(false);
@@ -131,9 +126,6 @@ export function App() {
   const focusRef = useRef<ActiveFocus | undefined>(undefined);
   const pendingFocusRef = useRef<PendingFocus | undefined>(undefined);
   const pendingFocusedStateRef = useRef<PublicState | undefined>(undefined);
-  const toolModeRef = useRef<ToolMode>(storedToolMode());
-  const confirmedToolModeRef = useRef<ToolMode>(toolModeRef.current);
-  const pendingToolModeRef = useRef<ToolMode | undefined>(undefined);
   const authFlowIdRef = useRef("");
   const [draft, setDraft] = useState("");
   const [pendingPrompt, setPendingPrompt] = useState<PendingPrompt>();
@@ -157,6 +149,10 @@ export function App() {
     useState<PendingCompactionThreshold>();
   const pendingCompactionThresholdRef =
     useRef<PendingCompactionThreshold | undefined>(undefined);
+  const [pendingContextCompaction, setPendingContextCompactionState] =
+    useState<PendingContextCompaction>();
+  const pendingContextCompactionRef =
+    useRef<PendingContextCompaction | undefined>(undefined);
   const [directoryBrowser, setDirectoryBrowserState] = useState<DirectoryBrowserState>();
   const directoryBrowserRef = useRef<DirectoryBrowserState | undefined>(undefined);
   const [promptNotice, setPromptNotice] = useState("");
@@ -262,6 +258,12 @@ export function App() {
   ) => {
     pendingCompactionThresholdRef.current = pending;
     setPendingCompactionThresholdState(pending);
+  };
+  const updatePendingContextCompaction = (
+    pending: PendingContextCompaction | undefined,
+  ) => {
+    pendingContextCompactionRef.current = pending;
+    setPendingContextCompactionState(pending);
   };
   const updateDirectoryBrowser = (next: DirectoryBrowserState | undefined) => {
     directoryBrowserRef.current = next;
@@ -406,6 +408,7 @@ export function App() {
     setNotification(undefined);
     setSettingResult(undefined);
     updatePendingCompactionThreshold(undefined);
+    updatePendingContextCompaction(undefined);
     updatePendingConversationTruncation(undefined);
     setRoleOperationResult(undefined);
     updatePendingRoleOperation(undefined);
@@ -436,17 +439,6 @@ export function App() {
     activeCwdRef.current = nextState.cwd;
     setSetupCwd(nextState.cwd);
     writeStoredString(CWD_KEY, nextState.cwd);
-    confirmedToolModeRef.current = nextState.toolMode;
-    if (pendingToolModeRef.current === nextState.toolMode) {
-      pendingToolModeRef.current = undefined;
-    }
-    const pendingToolMode = pendingToolModeRef.current;
-    const reconnectMode = pendingToolMode
-      && isToolModeRestriction(nextState.toolMode, pendingToolMode)
-      ? pendingToolMode
-      : nextState.toolMode;
-    toolModeRef.current = reconnectMode;
-    writeStoredString(TOOL_MODE_KEY, reconnectMode);
     setError(nextState.registryError ?? "");
     if (
       nextState.conversationId
@@ -505,7 +497,6 @@ export function App() {
             commandId,
             sessionId,
             cwd: activeCwdRef.current,
-            toolMode: toolModeRef.current,
             conversation: conversationIdRef.current
               ? { kind: "open", conversationId: conversationIdRef.current }
               : { kind: "recent" },
@@ -742,6 +733,17 @@ export function App() {
           updatePendingCompactionThreshold(undefined);
           return;
         }
+        if (event.operation === "compact_context") {
+          const pending = pendingContextCompactionRef.current;
+          if (!pending || pending.commandId !== event.commandId) return;
+          updatePendingContextCompaction(undefined);
+          setNotification({
+            id: ++notificationIdRef.current,
+            level: "info",
+            message: "上下文已压缩",
+          });
+          return;
+        }
         if (event.operation === "delete_conversation") {
           const pending = pendingConversationDeletionRef.current;
           if (!pending || pending.commandId !== event.commandId) return;
@@ -851,6 +853,13 @@ export function App() {
           if (!pending || pending.commandId !== event.commandId) return;
           updatePendingCompactionThreshold(undefined);
           setError(`修改自动压缩阈值失败：${event.message}`);
+          return;
+        }
+        if (event.operation === "compact_context" && event.commandId) {
+          const pending = pendingContextCompactionRef.current;
+          if (!pending || pending.commandId !== event.commandId) return;
+          updatePendingContextCompaction(undefined);
+          setError(`手动压缩上下文失败：${event.message}`);
           return;
         }
         if (
@@ -1120,7 +1129,6 @@ export function App() {
       commandId,
       sessionId,
       cwd,
-      toolMode: toolModeRef.current,
       conversation,
     });
   };
@@ -1474,21 +1482,20 @@ export function App() {
     updatePendingCompactionThreshold(undefined);
     return false;
   };
-  const setProjectToolMode = (mode: ToolMode) => {
-    const sessionId = sessionIdRef.current;
-    if (!sessionId) return;
-    pendingToolModeRef.current = mode;
-    const restrictive = isToolModeRestriction(
-      confirmedToolModeRef.current,
-      mode,
-    );
-    if (restrictive) {
-      toolModeRef.current = mode;
-      writeStoredString(TOOL_MODE_KEY, mode);
-    }
-    if (!send({ type: "set_tool_mode", sessionId, mode }) && !restrictive) {
-      pendingToolModeRef.current = undefined;
-    }
+  const compactContext = (): boolean => {
+    const focus = focusRef.current;
+    if (!focus || pendingContextCompactionRef.current) return false;
+    const pending = { commandId: crypto.randomUUID() };
+    updatePendingContextCompaction(pending);
+    if (send({
+      type: "compact_context",
+      commandId: pending.commandId,
+      sessionId: focus.sessionId,
+      conversationId: focus.conversationId,
+      focusId: focus.focusId,
+    })) return true;
+    updatePendingContextCompaction(undefined);
+    return false;
   };
   const beginRoleOperation = (
     operation: PendingRoleOperation["operation"],
@@ -1629,12 +1636,9 @@ export function App() {
           ? <RoleSelectionPage
               roles={roles}
               pending={creatingConversation}
-              toolMode={state.toolMode}
-              toolModeBusy={state.busy || Boolean(outstandingRunId)}
               onStart={createConversation}
               onManageRoles={() => setRoleManagerOpen(true)}
               onSettings={() => setDrawer(true)}
-              onToolMode={setProjectToolMode}
               onChangeProject={closeProject}
             />
           : <Chat
@@ -1656,8 +1660,7 @@ export function App() {
                 ?? DEFAULT_COMPACTION_THRESHOLD_PERCENT
               }
               compactionThresholdBusy={Boolean(pendingCompactionThreshold)}
-              toolMode={state.toolMode}
-              toolModeBusy={state.busy || Boolean(outstandingRunId)}
+              compacting={Boolean(pendingContextCompaction)}
               cwd={state.cwd}
               online={online}
               conversationReady={conversationReady}
@@ -1684,7 +1687,7 @@ export function App() {
               onSettings={() => setDrawer(true)}
               onThinking={setThinkingLevel}
               onCompactionThreshold={setCompactionThreshold}
-              onToolMode={setProjectToolMode}
+              onCompact={compactContext}
               onChangeCwd={closeProject}
               onOpenConversation={focusConversation}
               onRewind={truncateConversation}

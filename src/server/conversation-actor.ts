@@ -12,7 +12,6 @@ import {
   type SessionEvent,
   type ToolMode,
 } from "../shared/protocol.js";
-import { mostRestrictiveToolMode } from "../shared/tool-mode.js";
 import {
   aggregateReservedConversationEntries,
   appendReservedCustomEntry,
@@ -382,6 +381,24 @@ export class ConversationActor {
     this.compactionThresholdPercent = entry.data.percent;
   }
 
+  compactContext(): Promise<void> {
+    this.assertUsable();
+    if (this.activeRun) {
+      return Promise.reject(
+        new Error("Cannot compact a busy conversation; abort and wait first"),
+      );
+    }
+    return this.operations.run(async () => {
+      this.assertUsable();
+      if (this.activeRun) {
+        throw new Error(
+          "Cannot compact a busy conversation; abort and wait first",
+        );
+      }
+      await this.session.compact();
+    });
+  }
+
   truncateFromMessage(entryId: string): Promise<void> {
     this.assertUsable();
     if (this.activeRun) {
@@ -634,7 +651,7 @@ export class ConversationActor {
       completion: deferred<RunSettlement>(),
       guidanceDeliveries: [],
       phase: "queued",
-      toolMode: this.project.toolMode,
+      toolMode: this.profileSnapshot.role.toolMode,
     };
     this.activeRun = ticket;
     this.emitSessionEvent(ticket, { type: "run_queued" });
@@ -1038,12 +1055,7 @@ export class ConversationActor {
     let policy: ToolPolicyDecision;
     try {
       policy = await this.toolPolicy({
-        mode: this.projectRuns.isRestrictionPending(this.project.cwd)
-          ? "read_only"
-          : mostRestrictiveToolMode(
-              ticket.toolMode,
-              this.project.toolMode,
-            ),
+        mode: ticket.toolMode,
         toolName: input.toolName,
         toolSource: input.toolSource,
       });

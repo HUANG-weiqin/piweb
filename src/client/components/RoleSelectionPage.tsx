@@ -1,16 +1,12 @@
 import { useEffect, useState } from "react";
-import type { RoleTemplate, ToolMode } from "../../shared/protocol";
-import { ProjectToolModeControl } from "./ProjectToolModeControl";
+import type { RoleTemplate } from "../../shared/protocol";
 
 export interface RoleSelectionPageProps {
   roles: RoleTemplate[];
   pending?: boolean;
-  toolMode: ToolMode;
-  toolModeBusy: boolean;
   onStart(roleId: string): void;
   onManageRoles?(): void;
   onSettings?(): void;
-  onToolMode(mode: ToolMode): void;
   onChangeProject?(): void;
 }
 
@@ -22,12 +18,9 @@ function roleModelLabel(role: RoleTemplate): string {
 export function RoleSelectionPage({
   roles,
   pending = false,
-  toolMode,
-  toolModeBusy,
   onStart,
   onManageRoles,
   onSettings,
-  onToolMode,
   onChangeProject,
 }: RoleSelectionPageProps) {
   const [selectedRoleId, setSelectedRoleId] = useState("");
@@ -50,11 +43,6 @@ export function RoleSelectionPage({
         <p>角色和模型会在会话创建时固定，之后不能切换。</p>
       </div>
       <div className="role-selection-header-actions">
-        <ProjectToolModeControl
-          mode={toolMode}
-          disabled={toolModeBusy}
-          onChange={onToolMode}
-        />
         {onChangeProject && <button
           type="button"
           className="ghost"
@@ -106,7 +94,11 @@ export function RoleSelectionPage({
           <span className="role-card-description">
             {role.description || "暂无角色简介"}
           </span>
-          <small className="role-card-model">{roleModelLabel(role)}</small>
+          <small className="role-card-model">
+            {roleModelLabel(role)} · {
+              role.toolMode === "full_access" ? "全部授权" : "只读"
+            }
+          </small>
           {unavailable && <span className="inline-status error">
             {role.unavailableReason ?? "此角色当前不可用"}
           </span>}

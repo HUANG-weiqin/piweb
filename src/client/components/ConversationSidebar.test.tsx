@@ -18,6 +18,7 @@ const baseConversation: ConversationSummary = {
     name: "架构师",
     description: "负责系统设计",
     model: { provider: "openai", id: "gpt-5" },
+    toolMode: "read_only",
     canManageSessions: true,
   },
   activity: { kind: "idle" },
@@ -304,7 +305,7 @@ describe("ConversationSidebar", () => {
     const sidebar = screen.getByRole("complementary", { name: "项目会话栏" });
     const handle = screen.getByRole("separator", { name: "调整会话栏宽度" });
     expect(handle).toHaveAttribute("aria-valuemin", "240");
-    expect(handle).toHaveAttribute("aria-valuemax", "420");
+    expect(handle).toHaveAttribute("aria-valuemax", "640");
     expect(handle).toHaveAttribute("aria-valuenow", "286");
     expect(sidebar.style.getPropertyValue("--conversation-sidebar-width"))
       .toBe("286px");
@@ -315,11 +316,11 @@ describe("ConversationSidebar", () => {
       .toBe("302px");
 
     fireEvent.keyDown(handle, { key: "End" });
-    expect(handle).toHaveAttribute("aria-valuenow", "420");
-    fireEvent.pointerDown(handle, { button: 0, clientX: 420, pointerId: 1 });
-    fireEvent.pointerMove(handle, { clientX: 700, pointerId: 1 });
+    expect(handle).toHaveAttribute("aria-valuenow", "640");
+    fireEvent.pointerDown(handle, { button: 0, clientX: 640, pointerId: 1 });
+    fireEvent.pointerMove(handle, { clientX: 900, pointerId: 1 });
     fireEvent.pointerUp(handle, { pointerId: 1 });
-    expect(handle).toHaveAttribute("aria-valuenow", "420");
+    expect(handle).toHaveAttribute("aria-valuenow", "640");
 
     fireEvent.keyDown(handle, { key: "Home" });
     expect(handle).toHaveAttribute("aria-valuenow", "240");

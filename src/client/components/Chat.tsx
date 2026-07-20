@@ -14,7 +14,6 @@ import {
   type PublicState,
   type ThinkingLevel,
   type TokenUsage,
-  type ToolMode,
 } from "../../shared/protocol";
 import type {
   ChatItem,
@@ -23,7 +22,6 @@ import type {
 } from "../chat/reducer";
 import { ConversationRoleDialog } from "./ConversationRoleDialog";
 import { Message } from "./Message";
-import { ProjectToolModeControl } from "./ProjectToolModeControl";
 import { SessionMessageCard } from "./SessionMessageCard";
 
 type QueuedPromptStatus = "queued" | "submitting" | "attention";
@@ -52,8 +50,7 @@ interface ChatProps {
   availableThinkingLevels?: ThinkingLevel[];
   compactionThresholdPercent: number;
   compactionThresholdBusy: boolean;
-  toolMode: ToolMode;
-  toolModeBusy: boolean;
+  compacting?: boolean;
   cwd: string;
   online: boolean;
   conversationReady: boolean;
@@ -73,7 +70,7 @@ interface ChatProps {
   onSettings(): void;
   onThinking(level: ThinkingLevel): void;
   onCompactionThreshold(percent: number): boolean;
-  onToolMode(mode: ToolMode): void;
+  onCompact(): boolean;
   onChangeCwd(): void;
   onOpenConversation?(conversationId: string): void;
   onRewind(messageId: string): boolean;
@@ -182,8 +179,7 @@ export function Chat({
   availableThinkingLevels,
   compactionThresholdPercent,
   compactionThresholdBusy,
-  toolMode,
-  toolModeBusy,
+  compacting = false,
   cwd,
   online,
   conversationReady,
@@ -199,7 +195,7 @@ export function Chat({
   onSettings,
   onThinking,
   onCompactionThreshold,
-  onToolMode,
+  onCompact,
   onChangeCwd,
   onOpenConversation,
   onRewind,
@@ -307,11 +303,6 @@ export function Chat({
     <header className="topbar">
       <button className="brand" onClick={onChangeCwd}><span>π</span><span>Pi Web<small title={cwd}>{cwd}</small></span></button>
       <div className="topbar-controls">
-        <ProjectToolModeControl
-          mode={toolMode}
-          disabled={toolModeBusy}
-          onChange={onToolMode}
-        />
         <button
           className="model-button"
           title="模型连接"
@@ -481,6 +472,15 @@ export function Chat({
         >
           <span>自动压缩 {compactionThresholdDraft}%</span>
           <span aria-hidden="true">{compactionThresholdOpen ? "⌃" : "⌄"}</span>
+        </button>
+        <button
+          type="button"
+          className="compaction-threshold-toggle"
+          aria-label="手动压缩上下文"
+          disabled={!online || !conversationReady || busy || compacting}
+          onClick={onCompact}
+        >
+          {compacting ? "正在压缩…" : "手动压缩"}
         </button>
         <label className="thinking-level-control">
           <span>思考</span>

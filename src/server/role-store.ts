@@ -8,7 +8,7 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
-export const ROLE_STORE_VERSION = 2;
+export const ROLE_STORE_VERSION = 3;
 export const MAX_ROLE_COUNT = 64;
 export const MAX_ROLE_NAME_CHARACTERS = 80;
 export const MAX_ROLE_DESCRIPTION_CHARACTERS = 1_000;
@@ -28,6 +28,7 @@ export interface RoleDraft {
   description: string;
   systemPrompt: string;
   model: RoleModelReference | null;
+  toolMode: "read_only" | "full_access";
   canManageSessions: boolean;
 }
 
@@ -168,7 +169,14 @@ function parseModelReference(
 function parseRoleDraft(value: unknown, label: string): RoleDraft {
   assertExactObject(
     value,
-    ["name", "description", "systemPrompt", "model", "canManageSessions"],
+    [
+      "name",
+      "description",
+      "systemPrompt",
+      "model",
+      "toolMode",
+      "canManageSessions",
+    ],
     label,
   );
   assertBoundedString(
@@ -192,11 +200,15 @@ function parseRoleDraft(value: unknown, label: string): RoleDraft {
   if (typeof value.canManageSessions !== "boolean") {
     throw new Error(`${label}.canManageSessions must be a boolean`);
   }
+  if (value.toolMode !== "read_only" && value.toolMode !== "full_access") {
+    throw new Error(`${label}.toolMode must be read_only or full_access`);
+  }
   return {
     name: value.name,
     description: value.description,
     systemPrompt: value.systemPrompt,
     model: parseModelReference(value.model, `${label}.model`),
+    toolMode: value.toolMode,
     canManageSessions: value.canManageSessions,
   };
 }
@@ -204,6 +216,7 @@ function parseRoleDraft(value: unknown, label: string): RoleDraft {
 function parseRoleTemplate(
   value: unknown,
   index: number,
+  legacyPermissions: boolean,
 ): RoleTemplateV1 {
   const label = `roles[${index}]`;
   assertExactObject(
@@ -215,6 +228,7 @@ function parseRoleTemplate(
       "description",
       "systemPrompt",
       "model",
+      "toolMode",
       "canManageSessions",
       "createdAt",
       "updatedAt",
@@ -242,6 +256,8 @@ function parseRoleTemplate(
       description: value.description,
       systemPrompt: value.systemPrompt,
       model: value.model,
+      // Role permissions are fail-closed for stores written before v3.
+      toolMode: value.toolMode ?? (legacyPermissions ? "read_only" : undefined),
       // Session orchestration is opt-in for roles written before this field.
       canManageSessions: value.canManageSessions ?? false,
     }, label),
@@ -286,8 +302,8 @@ function parseRoleStoreDocument(
 
   try {
     assertExactObject(value, ["version", "roles"], "role store");
-    if (value.version !== 1 && value.version !== ROLE_STORE_VERSION) {
-      throw new Error(`version must be 1 or ${ROLE_STORE_VERSION}`);
+    if (![1, 2, ROLE_STORE_VERSION].includes(value.version as number)) {
+      throw new Error(`version must be 1, 2 or ${ROLE_STORE_VERSION}`);
     }
     if (!Array.isArray(value.roles)) {
       throw new Error("roles must be an array");
@@ -295,14 +311,15 @@ function parseRoleStoreDocument(
     if (value.roles.length > MAX_ROLE_COUNT) {
       throw new Error(`roles must contain at most ${MAX_ROLE_COUNT} roles`);
     }
-    const roles = value.roles.map(parseRoleTemplate);
+    const roles = value.roles.map((role, index) =>
+      parseRoleTemplate(role, index, value.version !== ROLE_STORE_VERSION));
     assertUniqueRoles(roles);
     return {
       document: {
         version: ROLE_STORE_VERSION,
         roles: value.version === 1 ? migrateV1Roles(roles) : roles,
       },
-      migrated: value.version === 1,
+      migrated: value.version !== ROLE_STORE_VERSION,
     };
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
@@ -368,6 +385,7 @@ function draftsAreEqual(
     && role.description === draft.description
     && role.systemPrompt === draft.systemPrompt
     && modelsAreEqual(role.model, draft.model)
+    && role.toolMode === draft.toolMode
     && role.canManageSessions === draft.canManageSessions
   );
 }
@@ -448,6 +466,7 @@ export class RoleStore {
           description: "默认角色",
           systemPrompt: "",
           model,
+          toolMode: "read_only",
           canManageSessions: false,
           createdAt: timestamp,
           updatedAt: timestamp,

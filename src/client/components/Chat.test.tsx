@@ -39,8 +39,6 @@ function view(
     availableThinkingLevels={["off", "high"]}
     compactionThresholdPercent={70}
     compactionThresholdBusy={false}
-    toolMode="full_access"
-    toolModeBusy={false}
     cwd="E:\\work"
     online
     conversationReady
@@ -55,7 +53,7 @@ function view(
     onSettings={() => undefined}
     onThinking={() => undefined}
     onCompactionThreshold={() => true}
-    onToolMode={() => undefined}
+    onCompact={() => true}
     onChangeCwd={() => undefined}
     onRewind={() => true}
     {...overrides}
@@ -68,6 +66,15 @@ afterEach(() => {
 });
 
 describe("Chat", () => {
+  it("offers manual context compaction below the composer", () => {
+    const onCompact = vi.fn(() => true);
+    render(view(emptyChat, "", undefined, { onCompact }));
+
+    fireEvent.click(screen.getByRole("button", { name: "手动压缩上下文" }));
+
+    expect(onCompact).toHaveBeenCalledOnce();
+  });
+
   it("keeps send and stop available while the Agent is busy", () => {
     const onSend = vi.fn(() => true);
     const onAbort = vi.fn();
@@ -253,6 +260,7 @@ describe("Chat", () => {
       description: "Reviews changes",
       systemPrompt: "Review exact evidence.",
       model: { provider: "provider", id: "model" },
+      toolMode: "read_only",
       canManageSessions: true,
     };
     render(view(emptyChat, "", role));
@@ -271,26 +279,19 @@ describe("Chat", () => {
       .not.toBeInTheDocument();
   });
 
-  it("keeps run thinking beside the composer and project permission in the topbar", () => {
+  it("keeps run thinking beside the composer without a project permission control", () => {
     const onThinking = vi.fn();
-    const onToolMode = vi.fn();
     render(<Chat
       {...view(emptyChat).props}
       onThinking={onThinking}
-      onToolMode={onToolMode}
     />);
 
     fireEvent.change(screen.getByRole("combobox", { name: "思考级别" }), {
       target: { value: "high" },
     });
-    fireEvent.change(screen.getByRole("combobox", {
-      name: "项目工具权限",
-    }), {
-      target: { value: "read_only" },
-    });
-
     expect(onThinking).toHaveBeenCalledWith("high");
-    expect(onToolMode).toHaveBeenCalledWith("read_only");
+    expect(screen.queryByRole("combobox", { name: "项目工具权限" }))
+      .not.toBeInTheDocument();
   });
 
   it("expands the compaction threshold on demand and saves on release", () => {

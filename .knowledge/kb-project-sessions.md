@@ -1,6 +1,6 @@
 # 项目与持久会话
 
-`updated: 2026-07-19`
+`updated: 2026-07-20`
 
 ## 这个模块是干什么的
 
@@ -137,15 +137,9 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 - `open()` 前宿主再次验证文件非空、以换行结束、每条非空 JSONL 可解析、所有数值有限、首 header 身份匹配，并且 entry ID 唯一、parent/label 引用有效、compaction 保留点属于当前分支祖先链。branch summary 可引用已有节点，或使用 Pi 合法的 `parentId=null + fromId=root` 哨兵。crash partial tail 或“合法 JSON、非法 Pi entry”都会 fail closed，不能被 SDK 静默跳过或恢复成空历史。
 - 第一版只有进程内租约；跨进程文件锁尚未实现。
 
-## 项目权限模式
+## 旧项目权限字段
 
-`toolMode` 属于项目 manifest，不属于浏览器或单次 AgentSession：
-
-- `initialize(toolMode=read_only)` 是安全 ceiling，可收紧持久模式。
-- `initialize(toolMode=full_access)` 不能扩大已持久的 read_only。
-- 权限扩大只能通过当前 session 的 `set_tool_mode`，成功原子落盘后再由 state 确认。
-- run 在入队/启动时捕获模式；项目后来收紧会立即生效，后来放宽不会扩大已经排队的 run。
-- `ProjectRunCoordinator` 在 read_only 转换开始时同步阻止新 run、取消同项目所有旧 run，并等这些 run 释放项目 run lease 后才落盘和确认只读。UI 收到 read_only 时，旧 full-access run 已经结算。
+严格 v1 manifest 仍保留 `toolMode`，用于兼容旧项目与非协调内部路径；当前 v17 协调运行不再把它当作工具权限真相，也不提供修改它的线协议。工具权限属于用户级角色模板，并在创建 conversation 时冻结到角色快照；旧 manifest 的值不能扩大或收紧当前 `ConversationActor`。
 
 `.piweb` 是宿主持久目录。Agent 在 read_only 中不能写入，但宿主保存 transcript 不受只读模式影响；full_access 不额外保护该目录。
 

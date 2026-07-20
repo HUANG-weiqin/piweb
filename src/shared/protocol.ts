@@ -13,7 +13,7 @@ export const MAX_PROMPT_CHARACTERS = 200_000;
 export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
-export const PROTOCOL_VERSION = 16;
+export const PROTOCOL_VERSION = 17;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
 const conversationIdSchema = z.string().uuid();
@@ -87,6 +87,7 @@ const roleInputSchema = z.object({
     "role.systemPrompt",
   ),
   model: roleModelSchema.nullable(),
+  toolMode: z.enum(["read_only", "full_access"]),
   canManageSessions: z.boolean(),
 });
 
@@ -135,7 +136,6 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
     commandId: commandIdSchema.optional(),
     sessionId: sessionIdSchema,
     cwd: required.max(4096),
-    toolMode: z.enum(["read_only", "full_access"]).optional(),
     conversation: z.discriminatedUnion("kind", [
       z.object({ kind: z.literal("recent") }),
       z.object({
@@ -211,9 +211,11 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
       .max(MAX_COMPACTION_THRESHOLD_PERCENT),
   }),
   z.object({
-    type: z.literal("set_tool_mode"),
+    type: z.literal("compact_context"),
+    commandId: commandIdSchema,
     sessionId: sessionIdSchema,
-    mode: z.enum(["read_only", "full_access"]),
+    conversationId: conversationIdSchema,
+    focusId: focusIdSchema,
   }),
   z.object({
     type: z.literal("rename_conversation"),
@@ -300,13 +302,14 @@ export type AcknowledgedCommandOperation =
   | AcknowledgedSettingOperation
   | "steer"
   | "set_compaction_threshold"
+  | "compact_context"
   | "delete_conversation"
   | "truncate_conversation"
   | "create_role"
   | "update_role"
   | "delete_role";
 export type ThinkingLevel = Extract<ClientCommand, { type: "set_thinking" }>["level"];
-export type ToolMode = Extract<ClientCommand, { type: "set_tool_mode" }>["mode"];
+export type ToolMode = "read_only" | "full_access";
 
 export interface PublicModel {
   provider: string;
@@ -408,6 +411,7 @@ export interface RoleTemplate {
   description: string;
   systemPrompt: string;
   model: RoleModelSelection | null;
+  toolMode: ToolMode;
   canManageSessions: boolean;
   createdAt: string;
   updatedAt: string;
@@ -422,6 +426,7 @@ export interface ConversationRoleSnapshot {
   description: string;
   systemPrompt: string;
   model: RoleModelSelection;
+  toolMode: ToolMode;
   canManageSessions: boolean;
 }
 
@@ -772,7 +777,7 @@ const commandTypeSchema = z.enum([
   "select_model",
   "set_thinking",
   "set_compaction_threshold",
-  "set_tool_mode",
+  "compact_context",
   "rename_conversation",
   "delete_conversation",
   "truncate_conversation",
@@ -803,6 +808,7 @@ const roleTemplateSchema: z.ZodType<RoleTemplate> = z.object({
     "role.systemPrompt",
   ),
   model: roleModelSchema.nullable(),
+  toolMode: z.enum(["read_only", "full_access"]),
   canManageSessions: z.boolean(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
@@ -825,6 +831,7 @@ const conversationRoleSnapshotSchema: z.ZodType<ConversationRoleSnapshot> = z.ob
     "role.systemPrompt",
   ),
   model: roleModelSchema,
+  toolMode: z.enum(["read_only", "full_access"]),
   canManageSessions: z.boolean(),
 });
 const conversationRoleSummarySchema: z.ZodType<
@@ -841,6 +848,7 @@ const conversationRoleSummarySchema: z.ZodType<
     "role.description",
   ),
   model: roleModelSchema,
+  toolMode: z.enum(["read_only", "full_access"]),
   canManageSessions: z.boolean(),
 });
 const conversationActivitySchema: z.ZodType<ConversationActivity> = z.discriminatedUnion(

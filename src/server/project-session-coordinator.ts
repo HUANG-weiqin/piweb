@@ -731,6 +731,7 @@ export class ProjectSessionCoordinator {
                 name: profile.role.name,
                 description: profile.role.description,
                 model: { ...profile.role.model },
+                toolMode: profile.role.toolMode,
                 canManageSessions: profile.role.canManageSessions,
               },
               temporary: profile.lifecycle.kind === "temporary",
@@ -1017,6 +1018,15 @@ export class ProjectSessionCoordinator {
     const context = this.requireContext(handle);
     this.requireActor(context, conversationId)
       .setCompactionThresholdPercent(percent);
+    this.emit(context, { type: "project_changed" });
+  }
+
+  async compactContext(
+    handle: ProjectSessionHandle,
+    conversationId: string,
+  ): Promise<void> {
+    const context = this.requireContext(handle);
+    await this.requireActor(context, conversationId).compactContext();
     this.emit(context, { type: "project_changed" });
   }
 
@@ -1407,6 +1417,7 @@ export class ProjectSessionCoordinator {
         description: "从旧版本迁移的会话",
         systemPrompt: "",
         model: { ...model },
+        toolMode: "read_only",
         canManageSessions: false,
       },
       lifecycle: { kind: "normal" },

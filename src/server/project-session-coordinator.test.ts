@@ -410,6 +410,7 @@ async function createFixture(
     description: defaultRole.description,
     systemPrompt: defaultRole.systemPrompt,
     model: defaultRole.model,
+    toolMode: "full_access",
     canManageSessions: true,
   });
   const coordinator = new ProjectSessionCoordinator(
@@ -780,6 +781,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Reviews lifecycle code",
       systemPrompt: "Review the first revision.",
       model: { provider: "test", id: "model-a" },
+      toolMode: "read_only",
       canManageSessions: false,
     });
 
@@ -792,6 +794,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Reviews concurrency",
       systemPrompt: "Review the second revision.",
       model: { provider: "test", id: "model-b" },
+      toolMode: "full_access",
       canManageSessions: true,
     });
     const second = await fixture.coordinator.createUserConversation(
@@ -878,6 +881,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Uses a project extension provider",
       systemPrompt: "Use the project provider.",
       model: projectModel,
+      toolMode: "read_only",
       canManageSessions: false,
     }, runtime.sessionModelRegistry);
     const source = await fixture.coordinator.createUserConversation(
@@ -1416,6 +1420,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Must not replace the frozen start request",
       systemPrompt: "Use a different role.",
       model: { provider: "test", id: "model-a" },
+      toolMode: "read_only",
       canManageSessions: false,
     });
     const original = startInput({
@@ -1473,6 +1478,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "The originally selected role",
       systemPrompt: "Use the original role prompt.",
       model: { provider: "test", id: "model-a" },
+      toolMode: "read_only",
       canManageSessions: false,
     });
     const input = startInput({
@@ -1516,6 +1522,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "A later role definition",
       systemPrompt: "Use the rewritten role prompt.",
       model: { provider: "test", id: "model-b" },
+      toolMode: "full_access",
       canManageSessions: true,
     });
     fixture.runtime.beforeCreateSession = undefined;
@@ -1729,6 +1736,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Works only in its own session",
       systemPrompt: "Complete the assigned work.",
       model: { provider: "test", id: "model-a" },
+      toolMode: "read_only",
       canManageSessions: false,
     });
     const source = await fixture.coordinator.createUserConversation(
@@ -3751,6 +3759,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Must survive the processing crash boundary",
       systemPrompt: "Use the frozen processing recovery prompt.",
       model: { provider: "test", id: "model-b" },
+      toolMode: "read_only",
       canManageSessions: false,
     });
     const role = roles.getConversationRole(roleTemplate.id);

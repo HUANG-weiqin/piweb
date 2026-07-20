@@ -1,6 +1,6 @@
 # Pi Web Knowledge Index
 
-`updated: 2026-07-19`
+`updated: 2026-07-20`
 
 知识库只记录长期稳定的架构事实、决策和坑点，不记录某次任务进度。
 

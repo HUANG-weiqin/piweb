@@ -66,6 +66,7 @@ describe("RoleCatalog", () => {
       description: "changed",
       systemPrompt: "new prompt",
       model: model("provider", "model-a"),
+      toolMode: "read_only",
       canManageSessions: false,
     });
 
@@ -98,6 +99,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "",
       model: model("provider", "missing"),
+      toolMode: "read_only",
       canManageSessions: true,
     })).rejects.toThrow("unavailable in the current project");
 
@@ -107,6 +109,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "",
       model: model("provider", "missing"),
+      toolMode: "read_only",
       canManageSessions: true,
     });
     models.available = [];
@@ -131,6 +134,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "",
       model: model("extension", "project-model"),
+      toolMode: "read_only",
       canManageSessions: false,
     })).rejects.toThrow("unavailable in the current project");
 
@@ -139,6 +143,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "",
       model: model("extension", "project-model"),
+      toolMode: "read_only",
       canManageSessions: false,
     }, projectModels);
 
@@ -160,6 +165,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "",
       model: model("extension", "missing"),
+      toolMode: "read_only",
       canManageSessions: false,
     }, projectModels)).rejects.toThrow("unavailable in the current project");
 
@@ -168,6 +174,7 @@ describe("RoleCatalog", () => {
       description: "The project provider is temporarily unavailable.",
       systemPrompt: "Keep the frozen model.",
       model: model("extension", "project-model"),
+      toolMode: "full_access",
       canManageSessions: true,
     }, { getAvailable: () => [] })).resolves.toMatchObject({
       name: "Renamed project role",
@@ -186,6 +193,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "Review.",
       model: model("provider", "model-a"),
+      toolMode: "read_only",
       canManageSessions: false,
     });
     expect(listener).toHaveBeenCalledTimes(1);

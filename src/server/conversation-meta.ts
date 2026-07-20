@@ -157,6 +157,8 @@ const roleSnapshotSchema = z.object({
       "role.model.id must not be blank",
     ),
   }).strict(),
+  // Conversation snapshots written before role permissions default closed.
+  toolMode: z.enum(["read_only", "full_access"]).default("read_only"),
   // Session orchestration is opt-in for metadata written before this field.
   canManageSessions: z.boolean().default(false),
 }).strict();

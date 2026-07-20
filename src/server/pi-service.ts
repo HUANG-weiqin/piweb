@@ -126,6 +126,11 @@ interface CoordinatedProjectView {
 }
 
 type ConnectionCommand = Exclude<ClientCommand, { type: "browse_directory" }>;
+type LegacySetToolModeCommand = {
+  type: "set_tool_mode";
+  sessionId: string;
+  mode: ToolMode;
+};
 type QueuedCommand = Exclude<ConnectionCommand, {
   type:
     | "abort"
@@ -147,11 +152,12 @@ function assertNever(value: never): never {
 }
 
 function queuedCommandScope(command: QueuedCommand): "session" | "epoch" | "global" {
+  if ((command as { type: string }).type === "set_tool_mode") return "session";
   switch (command.type) {
     case "select_model":
     case "set_thinking":
     case "set_compaction_threshold":
-    case "set_tool_mode":
+    case "compact_context":
     case "rename_conversation":
     case "delete_conversation":
     case "truncate_conversation":
@@ -520,7 +526,8 @@ export class PiConnection {
             command.cwd,
             command.sessionId,
             generation,
-            command.toolMode ?? "full_access",
+            (command as typeof command & { toolMode?: ToolMode }).toolMode
+              ?? "full_access",
             command.conversation ?? { kind: "recent" },
             initializationAbort.signal,
           );
@@ -806,22 +813,12 @@ export class PiConnection {
     this.throwIfAborted(signal);
     const { coordinator } = await this.requireCoordination();
     this.throwIfAborted(signal);
-    const handle = await coordinator.acquireProject(
-      cwd,
-      command.toolMode ?? "full_access",
-    );
+    const handle = await coordinator.acquireProject(cwd, "read_only");
     let transferred = false;
     let extensionScope: number | undefined;
     let unsubscribeProject: (() => void) | undefined;
     let unsubscribeExtensionUI: (() => void) | undefined;
     try {
-      const safeMode = mostRestrictiveToolMode(
-        handle.project.toolMode,
-        command.toolMode ?? "full_access",
-      );
-      if (safeMode !== handle.project.toolMode) {
-        await this.projectRuns.transitionToolMode(handle.project, safeMode);
-      }
       this.throwIfAborted(signal);
 
       const target = command.conversation ?? { kind: "recent" as const };
@@ -945,6 +942,17 @@ export class PiConnection {
       | { type: "steer" }
     >,
   ): Promise<void> {
+    if ((command as { type: string }).type === "set_tool_mode") {
+      const legacy = command as unknown as LegacySetToolModeCommand;
+      const view = this.requireCoordinatedView(legacy.sessionId);
+      await this.projectRuns.transitionToolMode(
+        view.handle.project,
+        legacy.mode,
+      );
+      this.publishCoordinatedState();
+      this.publishProjectSnapshotCoordinated();
+      return;
+    }
     switch (command.type) {
       case "focus_conversation": {
         const view = this.requireCoordinatedView(command.sessionId);
@@ -1042,14 +1050,20 @@ export class PiConnection {
         this.emitCommandComplete(command);
         return;
       }
-      case "set_tool_mode": {
-        const view = this.requireCoordinatedView(command.sessionId);
-        await this.projectRuns.transitionToolMode(
-          view.handle.project,
-          command.mode,
+      case "compact_context": {
+        const view = this.requireCoordinatedFocus(
+          command.sessionId,
+          command.conversationId,
+          command.focusId,
+        );
+        const { coordinator } = await this.requireCoordination();
+        await coordinator.compactContext(
+          view.handle,
+          command.conversationId,
         );
         this.publishCoordinatedState();
-        this.publishProjectSnapshotCoordinated();
+        this.publishFocusedConversationSnapshot();
+        this.emitCommandComplete(command);
         return;
       }
       case "rename_conversation": {
@@ -1244,6 +1258,7 @@ export class PiConnection {
           | "delete_role"
           | "steer"
           | "set_compaction_threshold"
+          | "compact_context"
           | "set_api_key";
       }
     >,
@@ -1392,7 +1407,7 @@ export class PiConnection {
       thinkingLevel: (
         actor?.session.thinkingLevel ?? "off"
       ) as ThinkingLevel,
-      toolMode: view.handle.project.toolMode,
+      toolMode: actor?.profile.role.toolMode ?? "read_only",
       availableThinkingLevels: (
         actor?.session.getAvailableThinkingLevels() ?? ["off"]
       ) as ThinkingLevel[],
@@ -1764,6 +1779,15 @@ export class PiConnection {
   }
 
   private async execute(command: QueuedCommand): Promise<void> {
+    if ((command as { type: string }).type === "set_tool_mode") {
+      const legacy = command as unknown as LegacySetToolModeCommand;
+      await this.projectRuns.transitionToolMode(
+        this.requireActive().project,
+        legacy.mode,
+      );
+      this.publishState();
+      return;
+    }
     switch (command.type) {
       case "select_model": return this.selectModel(command.provider, command.modelId);
       case "set_thinking": return this.setThinking(command.level);
@@ -1771,7 +1795,10 @@ export class PiConnection {
         throw new Error(
           "set_compaction_threshold requires persistent project coordination",
         );
-      case "set_tool_mode": return this.setToolMode(command.mode);
+      case "compact_context":
+        throw new Error(
+          "compact_context requires persistent project coordination",
+        );
       case "rename_conversation":
         return this.renameConversation(command.conversationId, command.name);
       case "delete_conversation":
@@ -1923,11 +1950,6 @@ export class PiConnection {
         active.id,
       );
     }
-  }
-
-  private async setToolMode(mode: ToolMode): Promise<void> {
-    await this.projectRuns.transitionToolMode(this.requireActive().project, mode);
-    this.publishState();
   }
 
   private async renameConversation(conversationId: string, name: string): Promise<void> {

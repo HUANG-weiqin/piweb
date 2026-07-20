@@ -23,6 +23,7 @@ export interface RoleDraft {
   description: string;
   systemPrompt: string;
   model: RoleModelSelection | null;
+  toolMode: "read_only" | "full_access";
   canManageSessions: boolean;
 }
 
@@ -60,6 +61,7 @@ const emptyDraft: RoleDraft = {
   description: "",
   systemPrompt: "",
   model: null,
+  toolMode: "read_only",
   canManageSessions: false,
 };
 
@@ -69,6 +71,7 @@ function roleDraft(role: RoleTemplate): RoleDraft {
     description: role.description,
     systemPrompt: role.systemPrompt,
     model: role.model === null ? null : { ...role.model },
+    toolMode: role.toolMode,
     canManageSessions: role.canManageSessions,
   };
 }
@@ -329,6 +332,24 @@ export function RoleManagerDialog({
               })}
             </select>
             <p className="setting-note">仅列出已配置提供商当前可用的模型。</p>
+          </div>
+          <div className="setting-field">
+            <label htmlFor="role-tool-mode">工具权限</label>
+            <select
+              id="role-tool-mode"
+              value={draft.toolMode}
+              disabled={operationBusy}
+              onChange={(event) => updateDraft(
+                "toolMode",
+                event.target.value as RoleDraft["toolMode"],
+              )}
+            >
+              <option value="read_only">只读</option>
+              <option value="full_access">全部授权</option>
+            </select>
+            <p className="setting-note">
+              新角色默认只读；权限会随角色复制到新会话并固定。
+            </p>
           </div>
           <label className="role-capability-switch">
             <span>

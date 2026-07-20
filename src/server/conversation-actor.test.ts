@@ -10,7 +10,7 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ToolMode } from "../shared/protocol.js";
 import type { ConversationMeta } from "./conversation-meta.js";
 import { aggregateReservedConversationEntries } from "./conversation-meta.js";
@@ -248,6 +248,7 @@ function profile(): ConversationMeta {
         provider: "test",
         id: "model",
       },
+      toolMode: "read_only",
     },
     lifecycle: { kind: "normal" },
     createdBy: { kind: "user" },
@@ -831,12 +832,12 @@ describe("ConversationActor", () => {
     expect(lease.releases).toBe(1);
   });
 
-  it("keeps the existing project tool policy and run mode snapshot", async () => {
+  it("uses the frozen role tool policy instead of mutable project state", async () => {
     const fixture = await openActor();
     const decisions: Array<
       { block?: boolean; reason?: string } | undefined
     > = [];
-    fixture.project.toolMode = "read_only";
+    fixture.project.toolMode = "full_access";
     fixture.runtime.session.promptImplementation = async () => {
       decisions.push(await fixture.runtime.createOptions?.toolCallGate?.({
         toolCallId: "write-call",
@@ -866,5 +867,31 @@ describe("ConversationActor", () => {
     });
     expect(decisions[1]).toBeUndefined();
     await fixture.actor.dispose();
+  });
+
+  it("manually compacts only while the conversation is idle", async () => {
+    const fixture = await openActor();
+
+    await fixture.actor.compactContext();
+    expect(fixture.runtime.session.compactCalls).toBe(1);
+
+    let finishPrompt!: () => void;
+    fixture.runtime.session.promptImplementation = () => new Promise<void>(
+      (resolve) => {
+        finishPrompt = resolve;
+      },
+    );
+    const running = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "stay busy",
+      origin: "browser",
+    });
+    await vi.waitFor(() => expect(fixture.actor.getActivity().kind).toBe("running"));
+
+    await expect(fixture.actor.compactContext()).rejects.toThrow(
+      "Cannot compact a busy conversation",
+    );
+    finishPrompt();
+    await running;
   });
 });

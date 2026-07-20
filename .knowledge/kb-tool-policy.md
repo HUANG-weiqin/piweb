@@ -1,6 +1,6 @@
 # 工具权限
 
-`updated: 2026-07-19`
+`updated: 2026-07-20`
 
 ## 这个模块是干什么的
 
@@ -21,10 +21,10 @@ SDK validated args
 
 ## 状态所有权
 
-- `ProjectStore.toolMode` 是当前项目的 `read_only | full_access` 持久权威值。
-- run ticket 捕获启动时模式；项目随后收紧立即生效，随后放宽不能扩大已排队或运行的 run。
-- `ProjectRunCoordinator` 是跨连接收紧屏障。任何 `read_only` 请求都会同步封锁新 run、取消项目旧 run，并在它们结算后才持久化和确认模式。
-- 浏览器只提交模式选择并观察服务端 state，不参与单次工具决策。
+- `RoleStore.toolMode` 是角色模板的 `read_only | full_access` 持久权威值；新角色和旧角色迁移都默认 `read_only`。
+- 创建 conversation 时工具权限进入不可变角色快照；run ticket 再捕获该快照，之后编辑角色模板不会改变已有会话或运行中的 run。
+- `ProjectStore.toolMode` 只为旧 manifest / 非协调运行路径保留兼容读取，不参与当前 `ConversationActor` 的工具决策；v17 线协议不再接受 `initialize.toolMode` 或 `set_tool_mode`。
+- 浏览器只在角色设置中编辑模板权限，不参与单次工具决策。
 
 ## 策略
 
@@ -57,8 +57,7 @@ abort_session / delete_session
 ## 生命周期
 
 - 每个工具调用必须由当前 running ticket 拥有；无 active run、旧 generation 或已经取消的调用直接阻止。
-- 有 read-only 收紧正在结算时，有效模式立即视为 `read_only`。
-- 否则有效模式取 run 启动快照和当前项目模式中更严格的一档。
+- 有效模式只取 run 启动时冻结的 conversation role 权限。
 - SDK gate 缺少 AbortSignal 或策略异常时 fail closed。
 - missing / pre-aborted signal 必须在进入项目扩展 hook 前阻止；hook 返回后再次检查取消。
 - 扩展处理后的参数必须是稳定的普通 JSON 数据，并在进入 host gate 前原地递归冻结。

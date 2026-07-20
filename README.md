@@ -126,7 +126,7 @@ npm start
 - `~/.pi/agent/trust.json`
 - 当前工作目录中的 Pi 资源、skills 和 extensions（仅在项目受信任后）；普通上下文文件仍按 Pi 规则加载
 
-浏览器只在 `localStorage` 中保存最后一次工作目录和工具模式偏好，键名分别为 `piweb.lastCwd` 与 `piweb.toolMode`。角色、消息、会话索引、inbox 和 Key 均不会写入浏览器存储；角色真相在用户级目录，消息真相在项目 `.piweb/`。
+浏览器只在 `localStorage` 中保存最后一次工作目录（`piweb.lastCwd`）。角色、工具权限、消息、会话索引、inbox 和 Key 均不会写入浏览器存储；角色与权限真相在用户级角色目录，消息真相在项目 `.piweb/`。
 
 Pi 会话格式与 SDK 用法可参考官方 [SDK 文档](https://pi.dev/docs/latest/sdk) 和 [Session format](https://pi.dev/docs/latest/session-format)。本项目运行时行为以 `package.json` 锁定版本的实际类型与源码为准。
 

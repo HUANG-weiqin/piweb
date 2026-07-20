@@ -237,6 +237,7 @@ function defaultRole(overrides: Partial<RoleTemplate> = {}): RoleTemplate {
     description: "General purpose",
     systemPrompt: "Be useful.",
     model: { provider: "provider", id: "model" },
+    toolMode: "read_only",
     canManageSessions: true,
     createdAt: "2026-07-19T12:00:00.000Z",
     updatedAt: "2026-07-19T12:00:00.000Z",
@@ -379,24 +380,20 @@ describe("App", () => {
     expect(screen.getByRole("textbox", { name: "项目目录" })).toHaveValue("E:\\default");
   });
 
-  it("starts new projects with full access by default", () => {
+  it("starts projects without a global tool permission", () => {
     render(<App />);
 
     startFromSetup();
 
-    expect(latestCommand("initialize")).toMatchObject({
-      toolMode: "full_access",
-    });
+    expect(latestCommand("initialize")).not.toHaveProperty("toolMode");
   });
 
-  it("migrates the removed workspace mode to full access", () => {
+  it("ignores the removed global tool-mode preference", () => {
     localStorage.setItem("piweb.toolMode", "workspace_write");
     render(<App />);
     const sessionId = startFromSetup();
 
-    expect(latestCommand("initialize")).toMatchObject({
-      toolMode: "full_access",
-    });
+    expect(latestCommand("initialize")).not.toHaveProperty("toolMode");
 
     act(() => socketMock.emit?.({
       type: "state",
@@ -410,7 +407,7 @@ describe("App", () => {
         providers: [],
       },
     }));
-    expect(localStorage.getItem("piweb.toolMode")).toBe("full_access");
+    expect(localStorage.getItem("piweb.toolMode")).toBe("workspace_write");
   });
 
   it("still enters chat when saving the last working directory fails", () => {
@@ -508,6 +505,43 @@ describe("App", () => {
       selector: ".compaction-threshold-value",
     }))
       .toBeInTheDocument();
+  });
+
+  it("manually compacts only the exact focused conversation", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "read_only",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+
+    const button = screen.getByRole("button", { name: "手动压缩上下文" });
+    fireEvent.click(button);
+    const command = latestCommand("compact_context");
+    expect(command).toMatchObject({
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+    });
+    expect(button).toBeDisabled();
+
+    act(() => socketMock.emit?.({
+      type: "command_complete",
+      operation: "compact_context",
+      commandId: command.commandId,
+      sessionId,
+    }));
+    expect(button).toBeEnabled();
+    expect(screen.getByText("上下文已压缩")).toBeInTheDocument();
   });
 
   it("copies and rewinds user or Agent messages with an exact command acknowledgement", async () => {
@@ -1665,136 +1699,6 @@ describe("App", () => {
     });
   });
 
-  it("changes the server-owned project tool mode from the workspace header", () => {
-    render(<App />);
-    const sessionId = startFromSetup();
-    act(() => socketMock.emit?.({
-      type: "state",
-      state: {
-        sessionId,
-        cwd: "E:\\work",
-        busy: false,
-        thinkingLevel: "off",
-        toolMode: "full_access",
-        availableThinkingLevels: ["off"],
-        selectedModel: { provider: "provider", id: "model" },
-        providers: [],
-      },
-    }));
-
-    fireEvent.change(screen.getByRole("combobox", { name: "项目工具权限" }), {
-      target: { value: "read_only" },
-    });
-
-    expect(latestCommand("set_tool_mode")).toEqual({
-      type: "set_tool_mode",
-      sessionId,
-      mode: "read_only",
-    });
-
-    act(() => socketMock.emit?.({
-      type: "state",
-      state: {
-        sessionId,
-        cwd: "E:\\work",
-        busy: false,
-        thinkingLevel: "off",
-        toolMode: "read_only",
-        availableThinkingLevels: ["off"],
-        selectedModel: { provider: "provider", id: "model" },
-        providers: [],
-      },
-    }));
-    act(() => socketMock.emit?.({
-      type: "hello",
-      protocolVersion: PROTOCOL_VERSION,
-      startupCwd: "E:\\default",
-    }));
-    expect(latestCommand("initialize")).toMatchObject({
-      cwd: "E:\\work",
-      toolMode: "read_only",
-      conversation: { kind: "open", conversationId: CONVERSATION_ID },
-    });
-  });
-
-  it("persists full access only after the server confirms the expansion", () => {
-    render(<App />);
-    const sessionId = startFromSetup();
-    act(() => socketMock.emit?.({
-      type: "state",
-      state: {
-        sessionId,
-        cwd: "E:\\work",
-        busy: false,
-        thinkingLevel: "off",
-        toolMode: "read_only",
-        availableThinkingLevels: ["off"],
-        selectedModel: { provider: "provider", id: "model" },
-        providers: [],
-      },
-    }));
-
-    fireEvent.change(screen.getByRole("combobox", { name: "项目工具权限" }), {
-      target: { value: "full_access" },
-    });
-
-    expect(latestCommand("set_tool_mode")).toEqual({
-      type: "set_tool_mode",
-      sessionId,
-      mode: "full_access",
-    });
-    expect(localStorage.getItem("piweb.toolMode")).toBe("read_only");
-
-    act(() => socketMock.emit?.({
-      type: "state",
-      state: {
-        sessionId,
-        cwd: "E:\\work",
-        busy: false,
-        thinkingLevel: "off",
-        toolMode: "full_access",
-        availableThinkingLevels: ["off"],
-        selectedModel: { provider: "provider", id: "model" },
-        providers: [],
-      },
-    }));
-
-    expect(localStorage.getItem("piweb.toolMode")).toBe("full_access");
-  });
-
-  it("keeps a full-access to read-only restriction across reconnect", () => {
-    render(<App />);
-    const sessionId = startFromSetup();
-    act(() => socketMock.emit?.({
-      type: "state",
-      state: {
-        sessionId,
-        cwd: "E:\\work",
-        busy: false,
-        thinkingLevel: "off",
-        toolMode: "full_access",
-        availableThinkingLevels: ["off"],
-        selectedModel: { provider: "provider", id: "model" },
-        providers: [],
-      },
-    }));
-    fireEvent.change(screen.getByRole("combobox", { name: "项目工具权限" }), {
-      target: { value: "read_only" },
-    });
-
-    expect(localStorage.getItem("piweb.toolMode")).toBe("read_only");
-    act(() => socketMock.emit?.({
-      type: "hello",
-      protocolVersion: PROTOCOL_VERSION,
-      startupCwd: "E:\\default",
-    }));
-
-    expect(latestCommand("initialize")).toMatchObject({
-      cwd: "E:\\work",
-      toolMode: "read_only",
-    });
-  });
-
   it("does not mistake an unrelated state refresh for API Key success", () => {
     render(<App />);
     const sessionId = startFromSetup();
@@ -1851,63 +1755,6 @@ describe("App", () => {
     expect(screen.getByRole("dialog", { name: "Provider API Key" })).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("credential write failed");
     expect(screen.queryByText(/API Key 已保存/)).not.toBeInTheDocument();
-  });
-
-  it("disables tool-mode changes immediately after a prompt is sent", () => {
-    render(<App />);
-    const sessionId = startFromSetup();
-    act(() => socketMock.emit?.({
-      type: "state",
-      state: {
-        sessionId,
-        cwd: "E:\\work",
-        busy: false,
-        thinkingLevel: "off",
-        toolMode: "full_access",
-        availableThinkingLevels: ["off"],
-        selectedModel: { provider: "provider", id: "model" },
-        providers: [],
-      },
-    }));
-
-    fireEvent.change(screen.getByRole("textbox", { name: "给 Pi 发送消息" }), {
-      target: { value: "start work" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "发送" }));
-
-    expect(screen.getByRole("combobox", { name: "项目工具权限" })).toBeDisabled();
-  });
-
-  it("does not assume a permission expansion succeeded before acknowledgement", () => {
-    render(<App />);
-    const sessionId = startFromSetup();
-    act(() => socketMock.emit?.({
-      type: "state",
-      state: {
-        sessionId,
-        cwd: "E:\\work",
-        busy: false,
-        thinkingLevel: "off",
-        toolMode: "read_only",
-        availableThinkingLevels: ["off"],
-        selectedModel: { provider: "provider", id: "model" },
-        providers: [],
-      },
-    }));
-    fireEvent.change(screen.getByRole("combobox", { name: "项目工具权限" }), {
-      target: { value: "full_access" },
-    });
-
-    act(() => socketMock.emit?.({
-      type: "hello",
-      protocolVersion: PROTOCOL_VERSION,
-      startupCwd: "E:\\default",
-    }));
-
-    expect(latestCommand("initialize")).toMatchObject({
-      cwd: "E:\\work",
-      toolMode: "read_only",
-    });
   });
 
   it("opens an empty project on explicit role selection without exposing a composer", () => {

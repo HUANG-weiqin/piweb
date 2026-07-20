@@ -66,6 +66,10 @@ export function ConversationRoleDialog({
           <dd>{role.canManageSessions ? "允许" : "不允许"}</dd>
         </div>
         <div>
+          <dt>工具权限</dt>
+          <dd>{role.toolMode === "full_access" ? "全部授权" : "只读"}</dd>
+        </div>
+        <div>
           <dt>专属提示词</dt>
           <dd className="role-prompt-preview">{role.systemPrompt || "未设置专属提示词"}</dd>
         </div>

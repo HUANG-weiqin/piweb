@@ -25,7 +25,7 @@ const messageId = "assistant:96b960be-b6bb-4a19-9cf2-78e77cb69425";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(16);
+    expect(PROTOCOL_VERSION).toBe(17);
   });
 
   it("accepts supported commands", () => {
@@ -39,9 +39,8 @@ describe("parseClientCommand", () => {
       commandId,
       sessionId,
       cwd: "E:\\work",
-      toolMode: "full_access",
       conversation: { kind: "open", conversationId },
-    })).toMatchObject({ type: "initialize", toolMode: "full_access" });
+    })).toMatchObject({ type: "initialize" });
     expect(parseClientCommand({
       type: "create_conversation",
       commandId,
@@ -64,6 +63,7 @@ describe("parseClientCommand", () => {
         description: "Finds lifecycle bugs",
         systemPrompt: "Review the implementation.",
         model: { provider: "openai", id: "gpt" },
+        toolMode: "read_only",
         canManageSessions: false,
       },
     }).type).toBe("create_role");
@@ -78,6 +78,7 @@ describe("parseClientCommand", () => {
         description: "",
         systemPrompt: "",
         model: null,
+        toolMode: "full_access",
         canManageSessions: true,
       },
     }).type).toBe("update_role");
@@ -135,10 +136,12 @@ describe("parseClientCommand", () => {
       percent: 70,
     }).type).toBe("set_compaction_threshold");
     expect(parseClientCommand({
-      type: "set_tool_mode",
+      type: "compact_context",
+      commandId,
       sessionId,
-      mode: "full_access",
-    }).type).toBe("set_tool_mode");
+      conversationId,
+      focusId,
+    }).type).toBe("compact_context");
     expect(parseClientCommand({
       type: "rename_conversation",
       sessionId,
@@ -214,9 +217,11 @@ describe("parseClientCommand", () => {
       percent: 91,
     })).toThrow();
     expect(() => parseClientCommand({
-      type: "set_tool_mode",
+      type: "compact_context",
+      commandId,
       sessionId,
-      mode: "unrestricted",
+      conversationId,
+      focusId: "not-a-uuid",
     })).toThrow();
     expect(() => parseClientCommand({
       type: "initialize",
@@ -253,6 +258,7 @@ describe("parseClientCommand", () => {
         description: "",
         systemPrompt: "",
         model: null,
+        toolMode: "read_only",
         canManageSessions: false,
       },
     })).toThrow();
@@ -293,6 +299,11 @@ describe("parseClientCommand", () => {
       sessionId,
       mode: "workspace_write",
     })).toThrow();
+    expect(() => parseClientCommand({
+      type: "set_tool_mode",
+      sessionId,
+      mode: "full_access",
+    })).toThrow();
   });
 
   it("rejects oversized socket messages", () => {
@@ -310,6 +321,7 @@ describe("parseClientCommand", () => {
         description: "",
         systemPrompt: exactPrompt,
         model: null,
+        toolMode: "read_only",
         canManageSessions: false,
       },
     })).toMatchObject({
@@ -325,6 +337,7 @@ describe("parseClientCommand", () => {
         description: "",
         systemPrompt: `${exactPrompt}é`,
         model: null,
+        toolMode: "read_only",
         canManageSessions: false,
       },
     })).toThrow("UTF-8");
@@ -341,6 +354,7 @@ describe("parseClientCommand", () => {
         description: "d".repeat(MAX_ROLE_DESCRIPTION_CHARACTERS),
         systemPrompt: "",
         model: null,
+        toolMode: "read_only",
         canManageSessions: false,
       },
     })).toMatchObject({
@@ -356,6 +370,7 @@ describe("parseClientCommand", () => {
         description: "",
         systemPrompt: "",
         model: null,
+        toolMode: "read_only",
         canManageSessions: false,
       },
     })).toThrow("80 characters");
@@ -368,6 +383,7 @@ describe("parseClientCommand", () => {
         description: "d".repeat(MAX_ROLE_DESCRIPTION_CHARACTERS + 1),
         systemPrompt: "",
         model: null,
+        toolMode: "read_only",
         canManageSessions: false,
       },
     })).toThrow("1000 characters");
@@ -486,6 +502,7 @@ describe("parseClientCommand", () => {
         description: "",
         systemPrompt: "",
         model: { provider: "openai", id: "gpt" },
+        toolMode: "read_only",
         canManageSessions: true,
         createdAt: "2026-07-18T12:00:00.000Z",
         updatedAt: "2026-07-18T12:00:00.000Z",
@@ -509,6 +526,7 @@ describe("parseClientCommand", () => {
             name: "Default",
             description: "",
             model: { provider: "openai", id: "gpt" },
+            toolMode: "read_only",
             canManageSessions: true,
           },
           activity: { kind: "running", runId },
@@ -542,6 +560,7 @@ describe("parseClientCommand", () => {
         description: "",
         systemPrompt: "",
         model: { provider: "openai", id: "gpt" },
+        toolMode: "read_only",
         canManageSessions: true,
       },
       items: [
@@ -789,6 +808,7 @@ describe("parseClientCommand", () => {
       description: "",
       systemPrompt,
       model: { provider: "openai", id: "gpt" },
+      toolMode: "read_only",
       canManageSessions: index === 0,
       createdAt: "2026-07-18T12:00:00.000Z",
       updatedAt: "2026-07-18T12:00:00.000Z",

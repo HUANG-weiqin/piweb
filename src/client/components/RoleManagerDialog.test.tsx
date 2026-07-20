@@ -25,6 +25,7 @@ function role(
     description: `${name} description`,
     systemPrompt: `${name} prompt`,
     model: { provider: "alpha", id: "good" },
+    toolMode: "full_access",
     canManageSessions: true,
     createdAt: "2026-07-19T12:00:00.000Z",
     updatedAt: "2026-07-19T12:00:00.000Z",
@@ -146,6 +147,7 @@ describe("RoleManagerDialog", () => {
       description: "Default description",
       systemPrompt: "Default prompt",
       model: { provider: "alpha", id: "good" },
+      toolMode: "full_access",
       canManageSessions: true,
     });
     expect(screen.getByRole("button", { name: "编辑角色 Default" }))
@@ -187,6 +189,8 @@ describe("RoleManagerDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "新建角色" }));
     expect(screen.getByRole("switch", { name: /允许管理会话/ }))
       .not.toBeChecked();
+    expect(screen.getByRole("combobox", { name: "工具权限" }))
+      .toHaveValue("read_only");
     fireEvent.change(screen.getByRole("textbox", { name: "角色名称" }), {
       target: { value: "Researcher" },
     });
@@ -206,6 +210,7 @@ describe("RoleManagerDialog", () => {
       description: "Finds primary sources",
       systemPrompt: "Use primary sources.",
       model: { provider: "alpha", id: "good" },
+      toolMode: "read_only",
       canManageSessions: false,
     });
     expect(screen.queryByRole("button", { name: "编辑角色 Researcher" }))
@@ -233,6 +238,22 @@ describe("RoleManagerDialog", () => {
       "default",
       1,
       expect.objectContaining({ canManageSessions: false }),
+    );
+  });
+
+  it("edits tool permission as part of the role snapshot", () => {
+    const update = vi.fn();
+    renderManager({ onUpdate: update });
+
+    fireEvent.change(screen.getByRole("combobox", { name: "工具权限" }), {
+      target: { value: "read_only" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存角色" }));
+
+    expect(update).toHaveBeenCalledWith(
+      "default",
+      1,
+      expect.objectContaining({ toolMode: "read_only" }),
     );
   });
 

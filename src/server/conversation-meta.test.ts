@@ -54,6 +54,7 @@ function metadata() {
         provider: "openai",
         id: "gpt-5.6",
       },
+      toolMode: "read_only" as const,
       canManageSessions: true,
     },
     lifecycle: {
