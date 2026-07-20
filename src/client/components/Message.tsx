@@ -15,22 +15,30 @@ import { SessionMessageCard } from "./SessionMessageCard";
 import { ToolCard } from "./ToolCard";
 
 const TOOL_PREVIEW_LIMIT = 4;
-const STREAMING_TEXT_DRAIN_MS = 180;
-const STREAMING_TEXT_MAX_CHAR_INTERVAL_MS = 10;
-const STREAMING_TEXT_MAX_CHARS_PER_FRAME = 12;
+const STREAMING_TEXT_GRAPHEME_INTERVAL_MS = 14;
+const STREAMING_TEXT_MAX_GRAPHEMES_PER_FRAME = 2;
+const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, {
+  granularity: "grapheme",
+});
 
-function advanceTextOffset(text: string, offset: number, count: number): number {
+function advanceGraphemeOffset(
+  text: string,
+  offset: number,
+  count: number,
+): number {
   let nextOffset = offset;
+  const segments = GRAPHEME_SEGMENTER.segment(text);
   for (let index = 0; index < count && nextOffset < text.length; index += 1) {
-    const codePoint = text.codePointAt(nextOffset);
-    nextOffset += codePoint !== undefined && codePoint > 0xffff ? 2 : 1;
+    const segment = segments.containing(nextOffset);
+    if (!segment) break;
+    nextOffset = segment.index + segment.segment.length;
   }
   return nextOffset;
 }
 
 class StreamingTextAnimator {
   private animationFrame: number | undefined;
-  private lastUpdateTime = 0;
+  private lastUpdateTime: number | undefined;
 
   public targetText: string;
   public currentText: string;
@@ -48,7 +56,7 @@ class StreamingTextAnimator {
       this.animationFrame !== undefined
       || this.currentText === this.targetText
     ) return;
-    this.lastUpdateTime = Date.now();
+    this.lastUpdateTime = undefined;
     this.animationFrame = window.requestAnimationFrame(this.animate);
   }
 
@@ -65,34 +73,30 @@ class StreamingTextAnimator {
     this.setText(text);
   }
 
-  private animate = () => {
+  private animate = (currentTime: number) => {
     this.animationFrame = undefined;
     if (!this.targetText.startsWith(this.currentText)) {
       this.snapTo(this.targetText);
       return;
     }
-    const remainingChars = this.targetText.length - this.currentText.length;
-    if (remainingChars <= 0) return;
+    if (this.currentText.length >= this.targetText.length) return;
 
-    const currentTime = Date.now();
-    const elapsed = currentTime - this.lastUpdateTime;
-    const timePerChar = Math.min(
-      STREAMING_TEXT_MAX_CHAR_INTERVAL_MS,
-      STREAMING_TEXT_DRAIN_MS / remainingChars,
+    this.lastUpdateTime ??=
+      currentTime - STREAMING_TEXT_GRAPHEME_INTERVAL_MS;
+    const elapsed = Math.max(0, currentTime - this.lastUpdateTime);
+    const graphemesToAdd = Math.min(
+      STREAMING_TEXT_MAX_GRAPHEMES_PER_FRAME,
+      Math.floor(elapsed / STREAMING_TEXT_GRAPHEME_INTERVAL_MS),
     );
-    const charsToAdd = Math.min(
-      remainingChars,
-      STREAMING_TEXT_MAX_CHARS_PER_FRAME,
-      Math.floor(elapsed / timePerChar),
-    );
-    if (charsToAdd > 0) {
-      const nextOffset = advanceTextOffset(
+    if (graphemesToAdd > 0) {
+      const nextOffset = advanceGraphemeOffset(
         this.targetText,
         this.currentText.length,
-        charsToAdd,
+        graphemesToAdd,
       );
       this.currentText = this.targetText.slice(0, nextOffset);
-      this.lastUpdateTime = currentTime - (elapsed - charsToAdd * timePerChar);
+      this.lastUpdateTime +=
+        graphemesToAdd * STREAMING_TEXT_GRAPHEME_INTERVAL_MS;
       this.setText(this.currentText);
     }
     if (this.currentText !== this.targetText) {

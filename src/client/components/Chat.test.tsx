@@ -352,7 +352,7 @@ describe("Chat", () => {
 
     expect(markdown).not.toHaveTextContent(completeText);
 
-    act(() => vi.advanceTimersByTime(240));
+    act(() => vi.advanceTimersByTime(360));
 
     expect(markdown).toHaveTextContent(completeText);
   });
@@ -403,6 +403,113 @@ describe("Chat", () => {
     expect(rendered.container.querySelector(".streaming-markdown"))
       .not.toBeInTheDocument();
     expect(screen.getByText("完成")).toHaveProperty("tagName", "STRONG");
+  });
+
+  it("paces a large streamed burst without revealing a block per frame", () => {
+    vi.useFakeTimers();
+    mockAnimationFrames();
+    const firstMessage = {
+      id: "assistant-paced",
+      runId: "run-paced",
+      role: "assistant" as const,
+      text: "起",
+      thinking: "",
+      tools: [],
+    };
+    const firstChat: ChatState = {
+      messages: [firstMessage],
+      sessionTokens: 0,
+    };
+    const rendered = render(view(firstChat, "", undefined, {
+      busy: true,
+      activeRun: { id: "run-paced", phase: "running" },
+    }));
+    const completeText = `起${"流畅".repeat(100)}`;
+
+    rendered.rerender(view({
+      ...firstChat,
+      messages: [{ ...firstMessage, text: completeText }],
+    }, "", undefined, {
+      busy: true,
+      activeRun: { id: "run-paced", phase: "running" },
+    }));
+    act(() => vi.advanceTimersByTime(32));
+    act(() => vi.advanceTimersByTime(16));
+
+    const streamingText = rendered.container.querySelector(
+      ".message.assistant .streaming-markdown",
+    );
+    const visibleGraphemes = Array.from(
+      new Intl.Segmenter(undefined, { granularity: "grapheme" })
+        .segment(streamingText?.textContent ?? ""),
+    ).length;
+    expect(visibleGraphemes).toBeGreaterThan(1);
+    expect(visibleGraphemes).toBeLessThanOrEqual(3);
+  });
+
+  it("never reveals a partial grapheme while streaming", () => {
+    vi.useFakeTimers();
+    mockAnimationFrames();
+    const firstMessage = {
+      id: "assistant-grapheme",
+      runId: "run-grapheme",
+      role: "assistant" as const,
+      text: "起",
+      thinking: "",
+      tools: [],
+    };
+    const firstChat: ChatState = {
+      messages: [firstMessage],
+      sessionTokens: 0,
+    };
+    const rendered = render(view(firstChat, "", undefined, {
+      busy: true,
+      activeRun: { id: "run-grapheme", phase: "running" },
+    }));
+
+    rendered.rerender(view({
+      ...firstChat,
+      messages: [{ ...firstMessage, text: "起👨‍👩‍👧‍👦结束" }],
+    }, "", undefined, {
+      busy: true,
+      activeRun: { id: "run-grapheme", phase: "running" },
+    }));
+    act(() => vi.advanceTimersByTime(32));
+    act(() => vi.advanceTimersByTime(16));
+
+    expect(rendered.container.querySelector(".streaming-markdown"))
+      .toHaveTextContent("起👨‍👩‍👧‍👦");
+  });
+
+  it("only exposes disabled rewind on user messages while the Agent runs", () => {
+    render(view({
+      messages: [{
+        id: "user-rewind",
+        runId: "run-rewind",
+        role: "user",
+        text: "从这里继续",
+        thinking: "",
+        tools: [],
+      }, {
+        id: "assistant-rewind",
+        runId: "run-rewind",
+        role: "assistant",
+        text: "正在处理",
+        thinking: "",
+        tools: [],
+      }],
+      sessionTokens: 0,
+    }, "", undefined, {
+      busy: true,
+      activeRun: { id: "run-rewind", phase: "running" },
+    }));
+
+    const rewindButtons = screen.getAllByRole("button", {
+      name: "回到此处，删除这条及之后的消息",
+    });
+    expect(rewindButtons).toHaveLength(1);
+    expect(rewindButtons[0]).toBeDisabled();
+    expect(rewindButtons[0]?.closest("article")).toHaveClass("user");
   });
 
   it("flushes buffered text before an active tool is shown", () => {
