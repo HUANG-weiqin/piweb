@@ -10,6 +10,7 @@ import {
   type ConversationSummary,
   type DirectoryListing,
   type PublicState,
+  type ProjectActivitySummary,
   type RoleTemplate,
   type ServerEvent,
   type ThinkingLevel,
@@ -210,6 +211,10 @@ export function App() {
   const [protocolError, setProtocolError] = useState("");
   const [workspaces, setWorkspaces] = useState(initialWorkspaces.workspaces);
   const workspacesRef = useRef(initialWorkspaces.workspaces);
+  const [projectActivityByWorkspace, setProjectActivityByWorkspace] =
+    useState<Map<string, ProjectActivitySummary>>(new Map());
+  const [projectActivityTruncated, setProjectActivityTruncated] =
+    useState(false);
   const [unavailableWorkspaceKeys, setUnavailableWorkspaceKeys] =
     useState<Set<string>>(new Set());
   const [setupOpen, setSetupOpen] = useState(false);
@@ -685,6 +690,8 @@ export function App() {
           const message = `协议版本不兼容：服务端 ${event.protocolVersion}，客户端 ${PROTOCOL_VERSION}`;
           setProtocolReady(false);
           setTransportOnline(false);
+          setProjectActivityByWorkspace(new Map());
+          setProjectActivityTruncated(false);
           setProtocolError(message);
           sessionIdRef.current = "";
           projectIdRef.current = "";
@@ -862,6 +869,11 @@ export function App() {
         ) return;
         projectIdRef.current = event.projectId;
         setRoles(event.roles);
+      } else if (event.type === "project_activity_snapshot") {
+        setProjectActivityByWorkspace(new Map(
+          event.projects.map((project) => [workspaceKey(project.cwd), project]),
+        ));
+        setProjectActivityTruncated(event.truncated);
       } else if (event.type === "project_snapshot") {
         if (
           event.sessionId !== sessionIdRef.current
@@ -1343,6 +1355,8 @@ export function App() {
       setTransportOnline(connected);
       if (!connected) {
         setProtocolReady(false);
+        setProjectActivityByWorkspace(new Map());
+        setProjectActivityTruncated(false);
         setSettingResult(undefined);
         updateDirectoryBrowser(undefined);
         markPendingPromptUnconfirmed();
@@ -2073,6 +2087,8 @@ export function App() {
     workspaces={workspaces}
     activeCwd={activeCwd}
     unavailable={unavailableWorkspaceKeys}
+    activityByWorkspace={projectActivityByWorkspace}
+    activityCatalogTruncated={projectActivityTruncated}
     onSelect={switchWorkspace}
     onAdd={openWorkspaceDialog}
   />;

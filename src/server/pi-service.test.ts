@@ -2418,6 +2418,15 @@ describe("PiConnection coordinated project view", () => {
         focusId: refocusedFirst.focusId,
       });
       await compactionStarted.promise;
+      expect(harness.events.findLast(
+        (event) => event.type === "project_activity_snapshot",
+      )).toMatchObject({
+        type: "project_activity_snapshot",
+        projects: [expect.objectContaining({
+          cwd: harness.cwd,
+          busyConversationCount: 1,
+        })],
+      });
 
       const focusSecondId = randomUUID();
       focusing = harness.connection.handle({
@@ -2469,6 +2478,15 @@ describe("PiConnection coordinated project view", () => {
 
       finishCompaction.resolve();
       await compacting;
+      expect(harness.events.findLast(
+        (event) => event.type === "project_activity_snapshot",
+      )).toMatchObject({
+        type: "project_activity_snapshot",
+        projects: [expect.objectContaining({
+          cwd: harness.cwd,
+          busyConversationCount: 0,
+        })],
+      });
       expect(harness.events.filter(
         (event) => event.type === "conversation_snapshot",
       ).length).toBeGreaterThan(snapshotsBeforeCompletion);
@@ -3730,6 +3748,15 @@ describe("PiConnection coordinated project view", () => {
         text: "work in project A",
       });
       await startedA.promise;
+      expect(harness.events.findLast(
+        (event) => event.type === "project_activity_snapshot",
+      )).toMatchObject({
+        type: "project_activity_snapshot",
+        projects: [expect.objectContaining({
+          cwd: harness.cwd,
+          busyConversationCount: 1,
+        })],
+      });
 
       await harness.connection.handle({
         type: "initialize",
@@ -3770,6 +3797,22 @@ describe("PiConnection coordinated project view", () => {
         text: "work in project B",
       });
       await startedB.promise;
+      const bothProjectsActive = harness.events.findLast(
+        (event) => event.type === "project_activity_snapshot",
+      );
+      if (bothProjectsActive?.type !== "project_activity_snapshot") {
+        throw new Error("global project activity was not published");
+      }
+      expect(bothProjectsActive.projects).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          cwd: harness.cwd,
+          busyConversationCount: 1,
+        }),
+        expect.objectContaining({
+          cwd: cwdB,
+          busyConversationCount: 1,
+        }),
+      ]));
 
       const reopenA = randomUUID();
       await harness.connection.handle({
@@ -3801,6 +3844,22 @@ describe("PiConnection coordinated project view", () => {
           busy: false,
         });
       });
+      const projectASettled = harness.events.findLast(
+        (event) => event.type === "project_activity_snapshot",
+      );
+      if (projectASettled?.type !== "project_activity_snapshot") {
+        throw new Error("settled project activity was not published");
+      }
+      expect(projectASettled.projects).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          cwd: harness.cwd,
+          busyConversationCount: 0,
+        }),
+        expect.objectContaining({
+          cwd: cwdB,
+          busyConversationCount: 1,
+        }),
+      ]));
 
       const sessionD = randomUUID();
       await harness.connection.handle({
@@ -4214,12 +4273,30 @@ describe("PiConnection coordinated project view", () => {
           ]),
         });
       });
+      expect(harness.events.findLast(
+        (event) => event.type === "project_activity_snapshot",
+      )).toMatchObject({
+        type: "project_activity_snapshot",
+        projects: [expect.objectContaining({
+          cwd: harness.cwd,
+          attentionConversationCount: 1,
+        })],
+      });
 
       await harness.connection.handle({
         type: "focus_conversation",
         commandId: randomUUID(),
         sessionId: SESSION_A,
         conversationId: firstAttach.conversationId,
+      });
+      expect(harness.events.findLast(
+        (event) => event.type === "project_activity_snapshot",
+      )).toMatchObject({
+        type: "project_activity_snapshot",
+        projects: [expect.objectContaining({
+          cwd: harness.cwd,
+          attentionConversationCount: 0,
+        })],
       });
       await vi.waitFor(() => {
         expect(harness.events).toContainEqual(expect.objectContaining({

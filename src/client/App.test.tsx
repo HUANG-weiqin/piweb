@@ -316,6 +316,58 @@ describe("App", () => {
     expect(localStorage.getItem("piweb.lastCwd")).toBe("E:\\second");
   });
 
+  it("keeps global project activity visible across workspace switches", () => {
+    localStorage.setItem("piweb.workspaces", JSON.stringify([
+      "E:\\first",
+      "E:\\second",
+      "E:\\omitted",
+    ]));
+    localStorage.setItem("piweb.lastCwd", "E:\\first");
+    render(<App />);
+
+    act(() => socketMock.emit?.({
+      type: "project_activity_snapshot",
+      projects: [{
+        projectId: PROJECT_ID,
+        cwd: "E:\\first",
+        busyConversationCount: 1,
+        attentionConversationCount: 0,
+      }, {
+        projectId: "8177b28d-c21d-40c2-b45f-6714ae096421",
+        cwd: "E:\\second",
+        busyConversationCount: 0,
+        attentionConversationCount: 2,
+      }],
+      truncated: true,
+    }));
+
+    expect(screen.getByRole("button", {
+      name: "打开工作区 first（1 个会话忙碌中）",
+    })).toBeInTheDocument();
+    const second = screen.getByRole("button", {
+      name: "打开工作区 second（2 个会话需要注意）",
+    });
+    fireEvent.click(second);
+
+    expect(screen.getByRole("button", {
+      name: "打开工作区 first（1 个会话忙碌中）",
+    })).toBeInTheDocument();
+    expect(screen.getByRole("button", {
+      name: "打开工作区 second（2 个会话需要注意）",
+    })).toHaveAttribute("aria-current", "true");
+    expect(screen.getByRole("button", {
+      name: "打开工作区 omitted（活动状态未知）",
+    })).toBeInTheDocument();
+
+    act(() => socketMock.status?.(false));
+    expect(screen.getByRole("button", { name: "打开工作区 first" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "打开工作区 second" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "打开工作区 omitted" }))
+      .toBeInTheDocument();
+  });
+
   it("keeps a missing workspace visible and allows switching away", () => {
     socketMock.autoFocus = false;
     localStorage.setItem("piweb.workspaces", JSON.stringify([

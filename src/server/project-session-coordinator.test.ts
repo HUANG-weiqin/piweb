@@ -13,7 +13,8 @@ import type {
   SettingsManager,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ProjectActivitySummary } from "../shared/protocol.js";
 import {
   CONVERSATION_CARD_CUSTOM_TYPE,
   aggregateReservedConversationEntries,
@@ -185,6 +186,16 @@ class FakeSessionControl {
         role: "assistant",
         content: [{ type: "text", text }],
         stopReason: "stop",
+      },
+    } as unknown as AgentSessionEvent);
+  }
+
+  emitTextDelta(delta: string): void {
+    this.listener?.({
+      type: "message_update",
+      assistantMessageEvent: {
+        type: "text_delta",
+        delta,
       },
     } as unknown as AgentSessionEvent);
   }
@@ -490,6 +501,83 @@ function deterministicTestUuid(namespace: string, value: string): string {
 }
 
 describe("ProjectSessionCoordinator", () => {
+  it("does not rescan project activity for streaming session deltas", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const started = deferred();
+    const release = deferred();
+    fixture.runtime.control(actor.conversationId).enqueue(
+      blocksUntil(started, release),
+    );
+    const run = fixture.coordinator.prompt(
+      fixture.handle,
+      actor.conversationId,
+      randomUUID(),
+      "stream without rescanning the global project catalog",
+    );
+    await started.promise;
+    const internals = fixture.coordinator as unknown as {
+      projectActivitySummary(context: unknown): unknown;
+    };
+    const summary = vi.spyOn(internals, "projectActivitySummary");
+
+    fixture.runtime.control(actor.conversationId).emitTextDelta("delta");
+
+    expect(summary).not.toHaveBeenCalled();
+    release.resolve();
+    await run;
+  });
+
+  it("bounds the global activity catalog and prioritizes actionable projects", async () => {
+    const fixture = await createFixture();
+    const internals = fixture.coordinator as unknown as {
+      updateProjectActivitySummary(
+        key: string,
+        summary: ProjectActivitySummary,
+        touchCatalog?: boolean,
+      ): boolean;
+    };
+    for (let index = 0; index < 101; index++) {
+      internals.updateProjectActivitySummary(`project-${index}`, {
+        projectId: `project-${index}`,
+        cwd: `E:\\project-${index.toString().padStart(3, "0")}`,
+        busyConversationCount: index === 100 ? 1 : 0,
+        attentionConversationCount: index === 99 ? 1 : 0,
+      });
+    }
+
+    const snapshot = fixture.coordinator.projectActivitySnapshot();
+
+    expect(snapshot.truncated).toBe(true);
+    expect(snapshot.projects).toHaveLength(100);
+    expect(snapshot.projects[0]).toMatchObject({
+      projectId: "project-100",
+      busyConversationCount: 1,
+    });
+    expect(snapshot.projects[1]).toMatchObject({
+      projectId: "project-99",
+      attentionConversationCount: 1,
+    });
+
+    const omitted = {
+      projectId: "project-0",
+      cwd: "E:\\project-000",
+      busyConversationCount: 0,
+      attentionConversationCount: 0,
+    };
+    expect(snapshot.projects).not.toContainEqual(omitted);
+    expect(internals.updateProjectActivitySummary(
+      "project-0",
+      omitted,
+      true,
+    )).toBe(true);
+    expect(fixture.coordinator.projectActivitySnapshot().projects)
+      .toContainEqual(omitted);
+  });
+
   it("singleflights concurrent acquireProject calls for the same canonical cwd", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-project-singleflight-"));
     temporaryDirectories.push(cwd);

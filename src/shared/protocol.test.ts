@@ -25,7 +25,7 @@ const messageId = "assistant:96b960be-b6bb-4a19-9cf2-78e77cb69425";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(20);
+    expect(PROTOCOL_VERSION).toBe(21);
   });
 
   it("accepts supported commands", () => {
@@ -608,6 +608,25 @@ describe("parseClientCommand", () => {
       conversationId: targetConversationId,
     });
     expect(parseServerEvent({
+      type: "project_activity_snapshot",
+      projects: [{
+        projectId,
+        cwd: "E:\\project-a",
+        busyConversationCount: 2,
+        attentionConversationCount: 1,
+      }],
+      truncated: false,
+    })).toEqual({
+      type: "project_activity_snapshot",
+      projects: [{
+        projectId,
+        cwd: "E:\\project-a",
+        busyConversationCount: 2,
+        attentionConversationCount: 1,
+      }],
+      truncated: false,
+    });
+    expect(parseServerEvent({
       type: "conversation_snapshot",
       sessionId,
       conversationId,
@@ -935,6 +954,16 @@ describe("parseClientCommand", () => {
         createdAt: "2026-07-18T12:00:00.000Z",
         updatedAt: "2026-07-18T12:00:00.000Z",
         messageCount: 0,
+      })),
+      truncated: true,
+    })).toThrow();
+    expect(() => parseServerEvent({
+      type: "project_activity_snapshot",
+      projects: Array.from({ length: 101 }, (_, index) => ({
+        projectId: `00000000-0000-4000-8000-${index.toString(16).padStart(12, "0")}`,
+        cwd: `E:\\project-${index}`,
+        busyConversationCount: 0,
+        attentionConversationCount: 0,
       })),
       truncated: true,
     })).toThrow();

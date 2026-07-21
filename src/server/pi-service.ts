@@ -256,6 +256,7 @@ export class PiConnection {
   private readonly extensionUI: ExtensionUIBroker;
   private coordinationReady?: Promise<PiConnectionCoordination>;
   private unsubscribeRoles?: () => void;
+  private unsubscribeProjectActivity?: () => void;
   private coordinatedView?: CoordinatedProjectView;
   private projectSnapshotRefresh?: ProjectSnapshotRefresh;
   private extensionScope = 0;
@@ -1345,6 +1346,15 @@ export class PiConnection {
         this.unsubscribeRoles ??= coordination.roles.subscribe(() => {
           this.publishRoleCatalog();
         });
+        this.unsubscribeProjectActivity ??=
+          coordination.coordinator.subscribeProjectActivity((snapshot) => {
+            if (this.disposed) return;
+            this.emit({
+              type: "project_activity_snapshot",
+              projects: [...snapshot.projects],
+              truncated: snapshot.truncated,
+            });
+          });
         return coordination;
       },
     );
@@ -2791,6 +2801,8 @@ export class PiConnection {
     this.unsubscribeRuntime();
     this.unsubscribeRoles?.();
     this.unsubscribeRoles = undefined;
+    this.unsubscribeProjectActivity?.();
+    this.unsubscribeProjectActivity = undefined;
     this.cancelAuth();
     this.extensionUI.cancelAll();
     this.disposePromise = this.operations.run(() =>

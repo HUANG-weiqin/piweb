@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
-import type {
-  ConversationActivity,
-  ConversationSummary,
-  ToolMode,
+import {
+  MAX_PROJECT_ACTIVITY_SUMMARIES,
+  type ConversationActivity,
+  type ConversationSummary,
+  type ProjectActivitySummary,
+  type ToolMode,
 } from "../shared/protocol.js";
 import {
   aggregateReservedConversationEntries,
@@ -76,6 +78,20 @@ export type ProjectSessionCoordinatorEvent =
 export type ProjectSessionCoordinatorListener = (
   event: ProjectSessionCoordinatorEvent,
 ) => void;
+
+export interface ProjectActivityCatalogSnapshot {
+  projects: readonly ProjectActivitySummary[];
+  truncated: boolean;
+}
+
+export type ProjectActivityListener = (
+  snapshot: ProjectActivityCatalogSnapshot,
+) => void;
+
+interface CachedProjectActivity {
+  summary: ProjectActivitySummary;
+  revision: number;
+}
 
 interface WaiterBase {
   reject(error: Error): void;
@@ -170,6 +186,36 @@ export interface StartPeerSessionInput {
 
 function contextKey(cwd: string): string {
   return process.platform === "win32" ? cwd.toLowerCase() : cwd;
+}
+
+function compareProjectActivity(
+  left: ProjectActivitySummary,
+  right: ProjectActivitySummary,
+): number {
+  return right.busyConversationCount - left.busyConversationCount
+    || right.attentionConversationCount - left.attentionConversationCount
+    || left.cwd.localeCompare(right.cwd);
+}
+
+function isLowerProjectActivityPriority(
+  left: CachedProjectActivity,
+  right: CachedProjectActivity,
+): boolean {
+  if (
+    left.summary.busyConversationCount
+    !== right.summary.busyConversationCount
+  ) {
+    return left.summary.busyConversationCount
+      < right.summary.busyConversationCount;
+  }
+  if (
+    left.summary.attentionConversationCount
+    !== right.summary.attentionConversationCount
+  ) {
+    return left.summary.attentionConversationCount
+      < right.summary.attentionConversationCount;
+  }
+  return left.revision < right.revision;
 }
 
 function completionKey(conversationId: string, runId: string): string {
@@ -507,6 +553,12 @@ export class ProjectSessionCoordinator {
   private readonly contexts = new Map<string, ProjectContext>();
   private readonly contextOpenings = new Map<string, Promise<ProjectContext>>();
   private readonly projectAcquisitions = new Set<Promise<ProjectSessionHandle>>();
+  private readonly projectActivityListeners = new Set<ProjectActivityListener>();
+  private readonly projectActivitySummaries =
+    new Map<string, ProjectActivitySummary>();
+  private readonly projectActivityCatalog =
+    new Map<string, CachedProjectActivity>();
+  private projectActivityRevision = 0;
   private closing = false;
   private disposed = false;
   private closePromise?: Promise<void>;
@@ -552,6 +604,7 @@ export class ProjectSessionCoordinator {
         throw new Error("Project context is closing");
       }
       existing.references++;
+      this.publishProjectActivityIfChanged(existing, true);
       return new ProjectSessionHandle(existing);
     }
 
@@ -562,6 +615,7 @@ export class ProjectSessionCoordinator {
       this.assertOpen();
       if (context.closing) throw new Error("Project context is closing");
       context.references++;
+      this.publishProjectActivityIfChanged(context, true);
       return new ProjectSessionHandle(context);
     }
 
@@ -627,6 +681,7 @@ export class ProjectSessionCoordinator {
       }
       this.assertOpen();
       this.contexts.set(key, context);
+      this.publishProjectActivityIfChanged(context);
       this.trackBackground(
         context,
         this.runLifecycle(context, () => this.recoverProject(context)),
@@ -650,6 +705,33 @@ export class ProjectSessionCoordinator {
       if (!subscribed) return;
       subscribed = false;
       context.listeners.delete(listener);
+    };
+  }
+
+  subscribeProjectActivity(listener: ProjectActivityListener): () => void {
+    this.assertOpen();
+    this.projectActivityListeners.add(listener);
+    this.notifyProjectActivityListener(
+      listener,
+      this.projectActivitySnapshot(),
+    );
+    let subscribed = true;
+    return () => {
+      if (!subscribed) return;
+      subscribed = false;
+      this.projectActivityListeners.delete(listener);
+    };
+  }
+
+  projectActivitySnapshot(): ProjectActivityCatalogSnapshot {
+    this.assertOpen();
+    const projects = [...this.projectActivityCatalog.values()]
+      .map(({ summary }) => ({ ...summary }))
+      .sort(compareProjectActivity);
+    return {
+      projects,
+      truncated:
+        this.projectActivitySummaries.size > this.projectActivityCatalog.size,
     };
   }
 
@@ -1221,6 +1303,9 @@ export class ProjectSessionCoordinator {
         context.listeners.clear();
       }
       this.contexts.clear();
+      this.projectActivityListeners.clear();
+      this.projectActivitySummaries.clear();
+      this.projectActivityCatalog.clear();
       if (failures.length > 0) {
         throw new AggregateError(
           failures,
@@ -3409,12 +3494,102 @@ export class ProjectSessionCoordinator {
     event: ProjectSessionCoordinatorEvent,
   ): void {
     if (this.disposed) return;
+    if (event.type !== "session_event") {
+      this.publishProjectActivityIfChanged(context);
+    }
     for (const listener of [...context.listeners]) {
       try {
         listener(event);
       } catch {
         // Observers cannot roll back actor or durable project state.
       }
+    }
+  }
+
+  private projectActivitySummary(
+    context: ProjectContext,
+  ): ProjectActivitySummary {
+    let busyConversationCount = 0;
+    for (const actor of context.actors.values()) {
+      if (
+        actor.isCompacting()
+        || actor.getActivity().kind !== "idle"
+      ) {
+        busyConversationCount++;
+      }
+    }
+    return {
+      projectId: context.project.id,
+      cwd: context.project.cwd,
+      busyConversationCount,
+      attentionConversationCount: context.attention.size,
+    };
+  }
+
+  private publishProjectActivityIfChanged(
+    context: ProjectContext,
+    touchCatalog = false,
+  ): void {
+    if (
+      this.disposed
+      || this.contexts.get(context.key) !== context
+    ) return;
+    const summary = this.projectActivitySummary(context);
+    if (!this.updateProjectActivitySummary(
+      context.key,
+      summary,
+      touchCatalog,
+    )) return;
+    if (this.projectActivityListeners.size === 0) return;
+    const snapshot = this.projectActivitySnapshot();
+    for (const listener of [...this.projectActivityListeners]) {
+      this.notifyProjectActivityListener(listener, snapshot);
+    }
+  }
+
+  private updateProjectActivitySummary(
+    key: string,
+    summary: ProjectActivitySummary,
+    touchCatalog = false,
+  ): boolean {
+    const previous = this.projectActivitySummaries.get(key);
+    if (
+      previous?.busyConversationCount === summary.busyConversationCount
+      && previous.attentionConversationCount
+        === summary.attentionConversationCount
+      && (!touchCatalog || this.projectActivityCatalog.has(key))
+    ) return false;
+    this.projectActivitySummaries.set(key, summary);
+    const cached = {
+      summary,
+      revision: ++this.projectActivityRevision,
+    } satisfies CachedProjectActivity;
+    this.projectActivityCatalog.set(key, cached);
+    if (
+      this.projectActivityCatalog.size <= MAX_PROJECT_ACTIVITY_SUMMARIES
+    ) return true;
+
+    let lowestKey: string | undefined;
+    let lowest: CachedProjectActivity | undefined;
+    for (const [candidateKey, candidate] of this.projectActivityCatalog) {
+      if (candidateKey === key) continue;
+      if (!lowest || isLowerProjectActivityPriority(candidate, lowest)) {
+        lowestKey = candidateKey;
+        lowest = candidate;
+      }
+    }
+    if (lowestKey !== undefined) this.projectActivityCatalog.delete(lowestKey);
+    return true;
+  }
+
+  private notifyProjectActivityListener(
+    listener: ProjectActivityListener,
+    snapshot: ProjectActivityCatalogSnapshot,
+  ): void {
+    try {
+      listener(snapshot);
+    } catch {
+      // Observers cannot roll back actor or durable project state.
     }
   }
 

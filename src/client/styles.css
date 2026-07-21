@@ -1563,6 +1563,43 @@ pre {
   font: 800 10px/1 Inter, sans-serif;
 }
 
+.workspace-rail-busy {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--panel);
+  border-radius: 999px;
+  background: var(--success);
+}
+
+.workspace-rail-attention,
+.workspace-rail-unknown {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  border: 2px solid var(--panel);
+  border-radius: 999px;
+  color: white;
+}
+
+.workspace-rail-attention {
+  min-width: 16px;
+  padding: 0 3px;
+  background: var(--warning);
+  font: 800 9px/1 Inter, sans-serif;
+}
+
+.workspace-rail-unknown {
+  width: 16px;
+  background: var(--muted);
+  font: 800 10px/1 Inter, sans-serif;
+}
+
 .workspace-rail-item.tone-0 { --workspace-tone: #356ca7; }
 .workspace-rail-item.tone-1 { --workspace-tone: #a04f1b; }
 .workspace-rail-item.tone-2 { --workspace-tone: #6e479a; }

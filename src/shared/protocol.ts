@@ -7,13 +7,14 @@ export const MAX_ROLE_NAME_CHARACTERS = 80;
 export const MAX_ROLE_DESCRIPTION_CHARACTERS = 1_000;
 export const MAX_ROLE_SYSTEM_PROMPT_BYTES = 128 * 1024;
 export const MAX_PROJECT_CONVERSATIONS = 100;
+export const MAX_PROJECT_ACTIVITY_SUMMARIES = 100;
 export const MAX_PROJECT_CONVERSATION_NAME_CHARACTERS = 120;
 export const MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS = 500;
 export const MAX_PROMPT_CHARACTERS = 200_000;
 export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
-export const PROTOCOL_VERSION = 20;
+export const PROTOCOL_VERSION = 21;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
 const conversationIdSchema = z.string().uuid();
@@ -554,6 +555,13 @@ export interface ConversationSummary {
   createdBy?: ConversationCreatedBy;
 }
 
+export interface ProjectActivitySummary {
+  projectId: string;
+  cwd: string;
+  busyConversationCount: number;
+  attentionConversationCount: number;
+}
+
 export interface DirectoryListing {
   path: string;
   parentPath: string | null;
@@ -625,6 +633,11 @@ export type ServerEvent =
       projectId: string;
       conversationId?: string;
       conversations: ConversationSummary[];
+      truncated: boolean;
+    }
+  | {
+      type: "project_activity_snapshot";
+      projects: ProjectActivitySummary[];
       truncated: boolean;
     }
   | {
@@ -1056,6 +1069,16 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
         }),
       ]).optional(),
     })).max(MAX_PROJECT_CONVERSATIONS),
+    truncated: z.boolean(),
+  }),
+  z.object({
+    type: z.literal("project_activity_snapshot"),
+    projects: z.array(z.object({
+      projectId: z.string().uuid(),
+      cwd: required.max(4096),
+      busyConversationCount: z.number().int().nonnegative(),
+      attentionConversationCount: z.number().int().nonnegative(),
+    })).max(MAX_PROJECT_ACTIVITY_SUMMARIES),
     truncated: z.boolean(),
   }),
   z.object({

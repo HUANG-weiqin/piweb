@@ -40,6 +40,7 @@
 - 按 `canonical cwd + conversationId` singleflight 打开唯一 `ConversationActor`；
 - actor 持有 `SessionManager + writer lease + settings/model registry + AgentSession + activeRun`，与 WebSocket 是否连接无关；
 - inbox、完成 ledger、waiter、临时回传和删除都经过项目/actor 串行边界；
+- 维护进程级项目活动目录，每个 context 的摘要独立缓存，只在 busy/compacting/attention 汇总真正变化时通知全局 observer；高频 `session_event` 不触发目录扫描，可发布目录始终限制为 100 项，遗漏项目一旦变化就进入目录并优先替换最旧的低活动项；
 - server close 会同步封闭新 acquisition 与项目 lifecycle queue；已排队但未开始的 task 在持久写前失败，队列完全 drain 后才 dispose 尚在打开的 actor/catalog、全部后台 actor、项目 model catalog 并释放共享项目 handle。
 
 只读目录浏览属于 socket server 的 pre-session 控制边界：每次请求只枚举指定位置的一层子目录，结果按 commandId 返回；它不进入 `PiConnection` actor，也不参与项目或会话持久化。
@@ -51,6 +52,7 @@
 - `abort`、`steer`、`auth_response`、`cancel_auth`、`close_session` 走控制通道；steer 必须在当前 run 尚占用 actor operation queue 时即可注入。
 - generation 使创建中的 project observation 变成 stale；detach 只释放观察 handle，不 dispose 后台 actor。不同 cwd 的 project context 与 conversation actor 各自持有运行状态，单个浏览器连接切换项目只替换观察投影，不能 abort 或 dispose 其它项目仍在执行的 run。
 - 每次 attach 分配新 focusId；PiConnection 只向浏览器转发匹配当前 focus 的 transcript/run event，项目级 activity 仍通过 snapshot 更新。
+- PiConnection 对 coordinator 的全局项目活动目录只订阅一次，并独立发布不带当前 sessionId/focusId 的 `project_activity_snapshot`；切换 cwd 只替换当前详细投影，不会失去其它已加载项目的活动摘要。
 - `ExtensionUIBroker` 是连接级临时 rendezvous，每次 focus 使用独立 scope 和 AbortController；后台 actor 缺少 UI delegate 时由 conversation router 保留请求并进入 attention，聚焦后再接入 broker，不抢焦点。focus/create 的 controller 在命令进入串行队列前登记，后续 focus、initialize、close 或 disconnect 会先同步 abort，再排队 detach，避免 extension activation 等浏览器对话框、而取消操作反过来等待同一队列的死锁。成功 attach 后该 controller 转交给 view 并取消旧 scope；切换失败则保留原 view controller，使原会话 UI 仍可继续使用。create 在 activation 后观察到 abort 时必须在同一 project lifecycle 内删除刚创建的 conversation/actor，不能留下无 attach 回执的幽灵会话。
 
 ## 决策
