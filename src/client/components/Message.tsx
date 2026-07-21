@@ -122,7 +122,9 @@ function MessageView({
     copySymbol = "!";
   }
   const rewindUserMessage = isUser ? onRewind : undefined;
-  const actions = (message.text || rewindUserMessage) ? <div className="message-actions">
+  const actions = (message.text || rewindUserMessage) ? <div
+    className={`message-actions${isUser ? "" : " assistant-message-actions"}`}
+  >
     {message.text ? <button
       type="button"
       className={`message-action message-copy ${copyState}`}

@@ -499,6 +499,11 @@ pre {
   white-space: nowrap;
 }
 
+.assistant-message-actions {
+  right: auto;
+  left: 0;
+}
+
 .message-action {
   display: inline-flex;
   flex: 0 0 auto;

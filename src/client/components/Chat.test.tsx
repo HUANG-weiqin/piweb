@@ -786,7 +786,12 @@ describe("Chat", () => {
       Array.from(assistant?.children ?? []).map(
         (element) => element.className,
       ),
-    ).toEqual(["tools", "session-message-stack", "markdown", "message-actions"]);
+    ).toEqual([
+      "tools",
+      "session-message-stack",
+      "markdown",
+      "message-actions assistant-message-actions",
+    ]);
   });
 
   it("keeps incoming session messages above the final assistant text", () => {
@@ -832,6 +837,10 @@ describe("Chat", () => {
       Array.from(assistant?.children ?? []).map(
         (element) => element.className,
       ),
-    ).toEqual(["session-message-stack", "markdown", "message-actions"]);
+    ).toEqual([
+      "session-message-stack",
+      "markdown",
+      "message-actions assistant-message-actions",
+    ]);
   });
 });

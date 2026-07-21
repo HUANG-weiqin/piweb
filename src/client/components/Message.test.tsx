@@ -234,7 +234,9 @@ describe("Message", () => {
     };
 
     render(<Message message={message} />);
-    fireEvent.click(screen.getByRole("button", { name: "复制 Agent 回复" }));
+    const copyButton = screen.getByRole("button", { name: "复制 Agent 回复" });
+    expect(copyButton.parentElement).toHaveClass("assistant-message-actions");
+    fireEvent.click(copyButton);
 
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("**原始 Markdown**"));
     expect(screen.getByRole("button", { name: "已复制 Agent 回复" })).toBeInTheDocument();
@@ -258,7 +260,9 @@ describe("Message", () => {
     };
 
     render(<Message message={message} onRewind={onRewind} />);
-    fireEvent.click(screen.getByRole("button", { name: "复制用户消息" }));
+    const copyButton = screen.getByRole("button", { name: "复制用户消息" });
+    expect(copyButton.parentElement).not.toHaveClass("assistant-message-actions");
+    fireEvent.click(copyButton);
     fireEvent.click(screen.getByRole("button", {
       name: "回到此处，删除这条及之后的消息",
     }));
