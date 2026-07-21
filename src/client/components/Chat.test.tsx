@@ -436,9 +436,13 @@ describe("Chat", () => {
     expect(foldedReply).toBeInTheDocument();
     expect(foldedReply).not.toHaveAttribute("open");
     expect(foldedReply).toHaveTextContent("上一条完整回复");
-    expect(foldedReply?.querySelector(".thinking")).toBeInTheDocument();
-    expect(foldedReply?.querySelector(".tools")).toBeInTheDocument();
-    expect(foldedReply?.querySelector(".message-actions")).toBeInTheDocument();
+    expect(foldedReply?.querySelector(".thinking")).not.toBeInTheDocument();
+    expect(foldedReply?.querySelector(".tools")).not.toBeInTheDocument();
+    expect(foldedReply?.querySelector(".message-actions")).not.toBeInTheDocument();
+    expect(assistantMessages()[0]?.querySelector(".thinking")).toBeInTheDocument();
+    expect(assistantMessages()[0]?.querySelector(".tools")).toBeInTheDocument();
+    expect(assistantMessages()[0]?.querySelector(".message-actions"))
+      .toBeInTheDocument();
     expect(assistantMessages()[1]?.querySelector(".assistant-response"))
       .not.toBeInTheDocument();
 

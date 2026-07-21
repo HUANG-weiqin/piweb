@@ -166,7 +166,7 @@ function MessageView({
         </div>
       : <div className="markdown" dangerouslySetInnerHTML={{ __html: html }} />;
   }
-  const assistantContent = <>
+  return <article className="message assistant">
     {message.thinking && <details
       className={`thinking${activeThinking ? " is-active" : ""}`}
       open={thinkingOpen}
@@ -203,17 +203,14 @@ function MessageView({
         onOpenConversation={onOpenConversation}
       />)}
     </section>}
-    {responseBody}
-    {actions}
-  </>;
-  return <article className="message assistant">
-    {collapsed ? <details className="assistant-response">
+    {collapsed && responseBody ? <details className="assistant-response">
       <summary>
-        <span className="assistant-response-title">Agent 回复</span>
+        <span className="assistant-response-title">回复正文</span>
         <span className="assistant-response-chevron" aria-hidden="true">⌄</span>
       </summary>
-      <div className="assistant-response-body">{assistantContent}</div>
-    </details> : assistantContent}
+      <div className="assistant-response-body">{responseBody}</div>
+    </details> : responseBody}
+    {actions}
   </article>;
 }
 
