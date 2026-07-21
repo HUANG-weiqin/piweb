@@ -434,12 +434,17 @@ export interface ConversationHistoryTool {
   status: "done" | "error";
 }
 
+export type ConversationHistoryMessagePart =
+  | { kind: "text" | "thinking"; offset: number; length: number }
+  | { kind: "tool"; toolCallId: string };
+
 export interface ConversationHistoryMessage {
   id: string;
   role: "user" | "assistant";
   text: string;
   thinking: string;
   tools: ConversationHistoryTool[];
+  parts?: ConversationHistoryMessagePart[];
   usage?: TokenUsage;
 }
 
@@ -960,6 +965,17 @@ const conversationHistoryMessageSchema = z.object({
     result: z.unknown().optional(),
     status: z.enum(["done", "error"]),
   })),
+  parts: z.array(z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.enum(["text", "thinking"]),
+      offset: z.number().int().nonnegative(),
+      length: z.number().int().positive(),
+    }),
+    z.object({
+      kind: z.literal("tool"),
+      toolCallId: z.string(),
+    }),
+  ])).max(200).optional(),
   usage: tokenUsageSchema.optional(),
 });
 const conversationHistoryItemSchema: z.ZodType<ConversationHistoryItem> =

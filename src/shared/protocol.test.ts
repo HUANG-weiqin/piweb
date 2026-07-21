@@ -928,6 +928,39 @@ describe("parseClientCommand", () => {
       thinking: "",
       tools: [],
     };
+    expect(parseServerEvent({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId,
+      focusId,
+      items: [{
+        kind: "message",
+        id: "assistant-ordered",
+        role: "assistant",
+        text: "answer",
+        thinking: "plan",
+        tools: [{
+          toolCallId: "tool-1",
+          toolName: "read",
+          status: "done",
+        }],
+        parts: [
+          { kind: "thinking", offset: 0, length: 4 },
+          { kind: "tool", toolCallId: "tool-1" },
+          { kind: "text", offset: 0, length: 6 },
+        ],
+      }],
+      truncated: false,
+    })).toMatchObject({
+      type: "conversation_snapshot",
+      items: [{
+        parts: [
+          { kind: "thinking" },
+          { kind: "tool" },
+          { kind: "text" },
+        ],
+      }],
+    });
     expect(() => parseServerEvent({
       type: "conversation_snapshot",
       sessionId,

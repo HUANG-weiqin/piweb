@@ -1,4 +1,5 @@
 import {
+  Fragment,
   memo,
   useMemo,
   useRef,
@@ -7,9 +8,12 @@ import {
 } from "react";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
-import type { ConversationMessageCard } from "../../shared/protocol";
-import type { ChatMessage } from "../chat/reducer";
-import { SessionMessageCard } from "./SessionMessageCard";
+import {
+  orderedMessageParts,
+  type ChatMessage,
+  type ChatMessagePart,
+  type ToolItem,
+} from "../chat/reducer";
 import { ToolCard } from "./ToolCard";
 
 const TOOL_PREVIEW_LIMIT = 4;
@@ -159,10 +163,146 @@ function ToolsPanel({ tools }: { tools: ChatMessage["tools"] }) {
   </details>;
 }
 
+function ThinkingPanel({
+  text,
+  active,
+}: {
+  text: string;
+  active: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const html = useMemo(
+    () => open ? renderMarkdown(text) : "",
+    [open, text],
+  );
+
+  return <details className={`thinking${active ? " is-active" : ""}`} open={open}>
+    <summary onClick={(event) => {
+      event.preventDefault();
+      setOpen((current) => !current);
+    }}>
+      {active
+        ? <span
+            className="thinking-live"
+            role="status"
+            aria-label="Agent 正在思考"
+          >
+            <span className="thinking-spinner" aria-hidden="true" />
+          </span>
+        : <span className="thinking-complete" aria-hidden="true">✓</span>}
+      <span>{active ? "正在思考" : "思考过程"}</span>
+      <span className="thinking-chevron" aria-hidden="true">⌄</span>
+    </summary>
+    {open && <div
+      className="thinking-body markdown"
+      dangerouslySetInnerHTML={{ __html: html }}
+    />}
+  </details>;
+}
+
+type AssistantBlock =
+  | { kind: "text"; text: string }
+  | { kind: "activity"; parts: ChatMessagePart[] };
+
+function assistantBlocks(parts: ChatMessagePart[]): AssistantBlock[] {
+  const blocks: AssistantBlock[] = [];
+  for (const part of parts) {
+    const previous = blocks[blocks.length - 1];
+    if (part.kind === "text") {
+      if (previous?.kind === "text") {
+        previous.text = previous.text
+          ? `${previous.text}\n\n${part.text}`
+          : part.text;
+      } else {
+        blocks.push({ kind: "text", text: part.text });
+      }
+      continue;
+    }
+    if (previous?.kind === "activity") {
+      previous.parts.push(part);
+    } else {
+      blocks.push({ kind: "activity", parts: [part] });
+    }
+  }
+  return blocks;
+}
+
+type ActivityRun =
+  | { kind: "thinking"; text: string }
+  | { kind: "tools"; tools: ToolItem[] };
+
+function findLastIndex<T>(
+  items: T[],
+  predicate: (item: T) => boolean,
+): number {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (predicate(items[index]!)) return index;
+  }
+  return -1;
+}
+
+function activityRuns(
+  parts: ChatMessagePart[],
+  tools: ToolItem[],
+): ActivityRun[] {
+  const toolsById = new Map(tools.map((tool) => [tool.id, tool]));
+  const runs: ActivityRun[] = [];
+  for (const part of parts) {
+    const previous = runs[runs.length - 1];
+    if (part.kind === "thinking") {
+      if (previous?.kind === "thinking") {
+        previous.text = previous.text
+          ? `${previous.text}\n\n${part.text}`
+          : part.text;
+      } else {
+        runs.push({ kind: "thinking", text: part.text });
+      }
+      continue;
+    }
+    if (part.kind !== "tool") continue;
+    const tool = toolsById.get(part.toolId);
+    if (!tool) continue;
+    if (previous?.kind === "tools") {
+      previous.tools.push(tool);
+    } else {
+      runs.push({ kind: "tools", tools: [tool] });
+    }
+  }
+  return runs;
+}
+
+function ActivityGroup({
+  parts,
+  tools,
+  activeThinking,
+}: {
+  parts: ChatMessagePart[];
+  tools: ToolItem[];
+  activeThinking: boolean;
+}) {
+  const runs = activityRuns(parts, tools);
+  const lastThinkingIndex = findLastIndex(
+    runs,
+    (run) => run.kind === "thinking",
+  );
+  return <section className="assistant-activity-group">
+    {runs.map((run, index) => run.kind === "thinking"
+      ? <ThinkingPanel
+          key={`thinking:${index}`}
+          text={run.text}
+          active={activeThinking && index === lastThinkingIndex}
+        />
+      : <ToolsPanel key={`tools:${index}`} tools={run.tools} />)}
+  </section>;
+}
+
+const MarkdownBlock = memo(function MarkdownBlock({ text }: { text: string }) {
+  const html = useMemo(() => renderMarkdown(text), [text]);
+  return <div className="markdown" dangerouslySetInnerHTML={{ __html: html }} />;
+});
+
 interface MessageProps {
   message: ChatMessage;
-  sessionCards?: ConversationMessageCard[];
-  onOpenConversation?(conversationId: string): void;
   onRewind?(messageId: string, text: string): void;
   rewindDisabled?: boolean;
   rewinding?: boolean;
@@ -171,19 +311,8 @@ interface MessageProps {
   collapsed?: boolean;
 }
 
-function sameSessionCards(
-  previous: ConversationMessageCard[] | undefined,
-  next: ConversationMessageCard[] | undefined,
-): boolean {
-  if (previous === next) return true;
-  if (!previous || !next || previous.length !== next.length) return false;
-  return previous.every((card, index) => card === next[index]);
-}
-
 function sameMessageProps(previous: MessageProps, next: MessageProps): boolean {
   return previous.message === next.message
-    && sameSessionCards(previous.sessionCards, next.sessionCards)
-    && previous.onOpenConversation === next.onOpenConversation
     && previous.onRewind === next.onRewind
     && previous.rewindDisabled === next.rewindDisabled
     && previous.rewinding === next.rewinding
@@ -194,8 +323,6 @@ function sameMessageProps(previous: MessageProps, next: MessageProps): boolean {
 
 function MessageView({
   message,
-  sessionCards = [],
-  onOpenConversation,
   onRewind,
   rewindDisabled = false,
   rewinding = false,
@@ -204,7 +331,6 @@ function MessageView({
   collapsed = false,
 }: MessageProps) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
-  const [thinkingOpen, setThinkingOpen] = useState(false);
 
   async function copyMessage() {
     try {
@@ -216,18 +342,6 @@ function MessageView({
   }
 
   const isUser = message.role === "user";
-  const hasActivity = message.tools.length > 0 || sessionCards.length > 0;
-  const showingStreamingText = message.role === "assistant" && streamingText;
-  const html = useMemo(
-    () => message.role === "assistant" && !showingStreamingText
-      ? renderMarkdown(message.text || (hasActivity ? "" : "…"))
-      : "",
-    [hasActivity, message.role, message.text, showingStreamingText],
-  );
-  const thinkingHtml = useMemo(
-    () => thinkingOpen && message.thinking ? renderMarkdown(message.thinking) : "",
-    [message.thinking, thinkingOpen],
-  );
   if (message.role === "error") return <article className="message error">{message.text}</article>;
   let copyLabel = isUser ? "复制用户消息" : "复制 Agent 回复";
   let copyTitle = isUser ? "复制用户原文" : "复制原始 Markdown";
@@ -283,59 +397,43 @@ function MessageView({
       {actions}
     </article>;
   }
-  let responseBody: ReactNode = null;
-  if (message.text || !hasActivity) {
-    responseBody = showingStreamingText
+  const blocks = assistantBlocks(orderedMessageParts(message));
+  const hasActivity = blocks.some((block) => block.kind === "activity");
+  if (blocks.length === 0) blocks.push({ kind: "text", text: "" });
+  const lastTextIndex = findLastIndex(blocks, (block) => block.kind === "text");
+  const lastActivityIndex = findLastIndex(
+    blocks,
+    (block) => block.kind === "activity",
+  );
+
+  function renderResponseBody(text: string, index: number): ReactNode {
+    const showingStreamingText = streamingText && index === lastTextIndex;
+    const body = showingStreamingText
       ? <StreamingMarkdown
-          text={message.text}
+          text={text}
           placeholder={hasActivity ? undefined : "…"}
         />
-      : <div className="markdown" dangerouslySetInnerHTML={{ __html: html }} />;
-  }
-  return <article className="message assistant">
-    {message.thinking && <details
-      className={`thinking${activeThinking ? " is-active" : ""}`}
-      open={thinkingOpen}
-    >
-      <summary onClick={(event) => {
-        event.preventDefault();
-        setThinkingOpen((open) => !open);
-      }}>
-        {activeThinking
-          ? <span
-              className="thinking-live"
-              role="status"
-              aria-label="Agent 正在思考"
-            >
-              <span className="thinking-spinner" aria-hidden="true" />
-            </span>
-          : <span className="thinking-complete" aria-hidden="true">✓</span>}
-        <span>{activeThinking ? "正在思考" : "思考过程"}</span>
-        <span className="thinking-chevron" aria-hidden="true">⌄</span>
-      </summary>
-      {thinkingOpen && <div
-        className="thinking-body markdown"
-        dangerouslySetInnerHTML={{ __html: thinkingHtml }}
-      />}
-    </details>}
-    {message.tools.length ? <ToolsPanel tools={message.tools} /> : null}
-    {sessionCards.length > 0 && <section
-      className="session-message-stack"
-      aria-label="会话协作"
-    >
-      {sessionCards.map((card) => <SessionMessageCard
-        key={card.cardId}
-        card={card}
-        onOpenConversation={onOpenConversation}
-      />)}
-    </section>}
-    {collapsed && responseBody ? <details className="assistant-response">
+      : <MarkdownBlock text={text || (hasActivity ? "" : "…")} />;
+    return collapsed && text ? <details className="assistant-response">
       <summary>
         <span className="assistant-response-title">回复正文</span>
         <span className="assistant-response-chevron" aria-hidden="true">⌄</span>
       </summary>
-      <div className="assistant-response-body">{responseBody}</div>
-    </details> : responseBody}
+      <div className="assistant-response-body">{body}</div>
+    </details> : body;
+  }
+
+  return <article className="message assistant">
+    {blocks.map((block, index) => block.kind === "text"
+      ? <Fragment key={`text:${index}`}>
+          {renderResponseBody(block.text, index)}
+        </Fragment>
+      : <ActivityGroup
+          key={`activity:${index}`}
+          parts={block.parts}
+          tools={message.tools}
+          activeThinking={activeThinking && index === lastActivityIndex}
+        />)}
     {actions}
   </article>;
 }

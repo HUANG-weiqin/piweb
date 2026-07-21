@@ -819,6 +819,10 @@ pre {
   color: var(--muted);
 }
 
+.assistant-activity-group {
+  display: grid;
+}
+
 .assistant-response {
   color: var(--muted);
 }
@@ -2414,19 +2418,6 @@ pre {
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--panel);
-}
-
-.session-message-stack {
-  display: grid;
-  gap: 6px;
-  margin: 8px 0;
-}
-
-.session-message-stack .session-message-card,
-.session-message-stack .session-message-card.is-expanded {
-  width: 100%;
-  max-width: none;
-  margin: 0;
 }
 
 .session-message-card.is-expanded {

@@ -5,6 +5,7 @@ import {
   snapshotWireValue,
   toWireValue,
 } from "./session-events.js";
+import { CONVERSATION_MESSAGE_CUSTOM_TYPE } from "./conversation-meta.js";
 
 function nativeEvent(event: unknown): AgentSessionEvent {
   return event as AgentSessionEvent;
@@ -137,6 +138,72 @@ describe("SessionEventProjector", () => {
     expect(projector.finalText).toBe(
       "before guidance\n\nafter guidance",
     );
+  });
+
+  it("splits live assistant output around a delivered session message", () => {
+    const projector = new SessionEventProjector();
+    projector.project(nativeEvent({ type: "agent_start" }));
+    projector.project(nativeEvent({
+      type: "message_start",
+      message: { role: "assistant", content: [] },
+    }));
+    projector.project(nativeEvent({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "before peer message" }],
+      },
+    }));
+
+    expect(projector.project(nativeEvent({
+      type: "message_start",
+      message: {
+        role: "custom",
+        customType: CONVERSATION_MESSAGE_CUSTOM_TYPE,
+        content: "hidden lifecycle guidance",
+      },
+    }))).toEqual([]);
+    expect(projector.project(nativeEvent({
+      type: "message_start",
+      message: { role: "assistant", content: [] },
+    }))).toEqual([{
+      type: "assistant_message_started",
+      projectionId: expect.any(String),
+    }]);
+    expect(projector.project(nativeEvent({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "after peer message" }],
+      },
+    }))).toContainEqual({
+      type: "text_replaced",
+      text: "after peer message",
+    });
+  });
+
+  it("starts every physical assistant segment so timeline boundaries stay observable", () => {
+    const projector = new SessionEventProjector();
+    projector.project(nativeEvent({ type: "agent_start" }));
+    projector.project(nativeEvent({
+      type: "message_start",
+      message: { role: "assistant", content: [] },
+    }));
+    projector.project(nativeEvent({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "first physical message" }],
+      },
+    }));
+
+    expect(projector.project(nativeEvent({
+      type: "message_start",
+      message: { role: "assistant", content: [] },
+    }))).toEqual([{
+      type: "assistant_message_started",
+      projectionId: expect.any(String),
+    }]);
   });
 });
 

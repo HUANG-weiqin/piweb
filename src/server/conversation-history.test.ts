@@ -308,6 +308,204 @@ describe("projectConversationHistory", () => {
     expect(snapshot.truncated).toBe(false);
   });
 
+  it("splits restored assistant bubbles across incoming messages and compaction", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    const firstKeptEntryId = manager.appendMessage(message({
+      role: "user",
+      content: "Start a long task",
+      timestamp: 1,
+    }));
+    manager.appendMessage(message({
+      role: "assistant",
+      content: [{ type: "text", text: "Before the peer reply" }],
+      usage: { totalTokens: 10 },
+      stopReason: "stop",
+      timestamp: 2,
+    }));
+    const incoming = createConversationMessageEntry({
+      content: "Peer result",
+      display: true,
+      details: {
+        messageId: randomUUID(),
+        cardId: randomUUID(),
+        sentAt: "2026-07-19T10:01:00.000Z",
+        kind: "delegation_result",
+        body: "Peer result",
+        fromSnapshot: peer(),
+        toSnapshot: peer(),
+      },
+    });
+    manager.appendCustomMessageEntry(
+      incoming.customType,
+      incoming.content,
+      incoming.display,
+      incoming.details,
+    );
+    manager.appendMessage(message({
+      role: "assistant",
+      content: [{ type: "text", text: "After the peer reply" }],
+      usage: { totalTokens: 20 },
+      stopReason: "stop",
+      timestamp: 3,
+    }));
+    const compactionId = manager.appendCompaction(
+      "durable summary",
+      firstKeptEntryId,
+      30,
+    );
+    manager.appendMessage(message({
+      role: "assistant",
+      content: [{ type: "text", text: "After compaction" }],
+      usage: { totalTokens: 5 },
+      stopReason: "stop",
+      timestamp: 4,
+    }));
+
+    expect(projectConversationItems(manager)).toEqual([
+      expect.objectContaining({
+        kind: "message",
+        role: "user",
+        text: "Start a long task",
+      }),
+      expect.objectContaining({
+        kind: "message",
+        role: "assistant",
+        text: "Before the peer reply",
+      }),
+      expect.objectContaining({
+        kind: "session_message",
+        cardId: incoming.details.cardId,
+      }),
+      expect.objectContaining({
+        kind: "message",
+        role: "assistant",
+        text: "After the peer reply",
+      }),
+      expect.objectContaining({
+        kind: "compaction",
+        id: compactionId,
+      }),
+      expect.objectContaining({
+        kind: "message",
+        role: "assistant",
+        text: "After compaction",
+      }),
+    ]);
+  });
+
+  it("preserves assistant part order around an outgoing session card", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    manager.appendMessage(message({
+      role: "user",
+      content: "Delegate and continue",
+      timestamp: 1,
+    }));
+    manager.appendMessage(message({
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "Plan the delegation" },
+        {
+          type: "toolCall",
+          id: "tool-1",
+          name: "start_session",
+          arguments: { task: "Review it" },
+        },
+      ],
+      usage: { totalTokens: 10 },
+      stopReason: "toolUse",
+      timestamp: 2,
+    }));
+    const outgoing = createConversationCardEntry({
+      cardId: randomUUID(),
+      kind: "delegation_task",
+      body: "Review it",
+      fromSnapshot: peer(),
+      toSnapshot: peer(),
+      state: "queued",
+      messageId: randomUUID(),
+      updatedAt: "2026-07-19T10:00:00.000Z",
+    });
+    appendReservedCustomEntry(manager, outgoing);
+    manager.appendMessage(message({
+      role: "toolResult",
+      toolCallId: "tool-1",
+      toolName: "start_session",
+      content: [{ type: "text", text: "started" }],
+      isError: false,
+      timestamp: 3,
+    }));
+    manager.appendMessage(message({
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "Continue locally" },
+        {
+          type: "toolCall",
+          id: "tool-2",
+          name: "read",
+          arguments: { path: "README.md" },
+        },
+      ],
+      usage: { totalTokens: 20 },
+      stopReason: "toolUse",
+      timestamp: 4,
+    }));
+    manager.appendMessage(message({
+      role: "toolResult",
+      toolCallId: "tool-2",
+      toolName: "read",
+      content: [{ type: "text", text: "read" }],
+      isError: false,
+      timestamp: 5,
+    }));
+    appendReservedCustomEntry(manager, createConversationCardEntry({
+      ...outgoing.data,
+      state: "completed",
+      result: "Review complete",
+      updatedAt: "2026-07-19T10:01:00.000Z",
+    }));
+    manager.appendMessage(message({
+      role: "assistant",
+      content: [{ type: "text", text: "Finished locally" }],
+      usage: { totalTokens: 5 },
+      stopReason: "stop",
+      timestamp: 6,
+    }));
+
+    expect(projectConversationItems(manager)).toEqual([
+      expect.objectContaining({ kind: "message", role: "user" }),
+      expect.objectContaining({
+        kind: "message",
+        role: "assistant",
+        parts: [
+          { kind: "thinking", offset: 0, length: 19 },
+          { kind: "tool", toolCallId: "tool-1" },
+        ],
+        tools: [expect.objectContaining({
+          toolCallId: "tool-1",
+          status: "done",
+        })],
+      }),
+      expect.objectContaining({
+        kind: "session_message",
+        cardId: outgoing.data.cardId,
+        state: "completed",
+      }),
+      expect.objectContaining({
+        kind: "message",
+        role: "assistant",
+        parts: [
+          { kind: "thinking", offset: 0, length: 16 },
+          { kind: "tool", toolCallId: "tool-2" },
+          { kind: "text", offset: 0, length: 16 },
+        ],
+        tools: [expect.objectContaining({
+          toolCallId: "tool-2",
+          status: "done",
+        })],
+      }),
+    ]);
+  });
+
   it("updates a repeated card in place and hides host-only reserved records", () => {
     const manager = SessionManager.inMemory("E:\\work");
     const initial = createConversationCardEntry({

@@ -3075,7 +3075,7 @@ describe("PiConnection coordinated project view", () => {
     }
   });
 
-  it("projects card peer existence from the complete durable project index", async () => {
+  it("projects peer existence and repairs missing card titles from the durable project index", async () => {
     const harness = await coordinatedConnectionHarness();
     let externalHandle:
       Awaited<ReturnType<ProjectSessionCoordinator["acquireProject"]>>
@@ -3146,7 +3146,6 @@ describe("PiConnection coordinated project view", () => {
           body: "review this",
           fromSnapshot: {
             conversationId: source.conversationId,
-            title: "source",
             role: {
               id: source.profile.role.id,
               name: source.profile.role.name,
@@ -3154,7 +3153,6 @@ describe("PiConnection coordinated project view", () => {
           },
           toSnapshot: {
             conversationId: target.conversationId,
-            title: "target",
             role: {
               id: target.profile.role.id,
               name: target.profile.role.name,
@@ -3188,6 +3186,8 @@ describe("PiConnection coordinated project view", () => {
           kind: "session_message",
           cardId,
           peerExists: true,
+          from: expect.objectContaining({ title: "source" }),
+          to: expect.objectContaining({ title: "target" }),
         }),
       ]));
 

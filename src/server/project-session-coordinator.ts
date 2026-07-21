@@ -53,6 +53,7 @@ import {
   type ProjectStore,
   type ProjectStoreHandle,
 } from "./project-store.js";
+import { conversationDisplayTitle } from "./project-snapshot.js";
 import { ProjectRunCoordinator } from "./project-run-coordinator.js";
 import {
   RoleCatalog,
@@ -1903,7 +1904,7 @@ export class ProjectSessionCoordinator {
     return {
       sessions: selected.map(({ summary, creation }) => ({
         conversationId: summary.id,
-        title: summary.name || summary.preview || "未命名会话",
+        title: conversationDisplayTitle(summary) ?? "未命名会话",
         role: summary.role,
         activity: summary.activity,
         lastActiveAt: summary.updatedAt,
@@ -1932,7 +1933,7 @@ export class ProjectSessionCoordinator {
       ?? context.profiles.get(summary.id);
     return {
       conversationId,
-      title: summary.name || summary.preview || "未命名会话",
+      title: conversationDisplayTitle(summary) ?? "未命名会话",
       role: summary.role,
       activity: summary.activity,
       lastActiveAt: summary.updatedAt,
@@ -2254,9 +2255,12 @@ export class ProjectSessionCoordinator {
   ): ConversationReferenceSnapshot {
     const summary = context.project.listConversations()
       .find(({ id }) => id === actor.conversationId);
+    const title = summary === undefined
+      ? undefined
+      : conversationDisplayTitle(summary);
     return {
       conversationId: actor.conversationId,
-      ...(summary?.name ? { title: summary.name } : {}),
+      ...(title ? { title } : {}),
       role: {
         id: actor.profile.role.id,
         name: actor.profile.role.name,

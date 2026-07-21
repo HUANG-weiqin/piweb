@@ -1,6 +1,6 @@
 # 线协议
 
-`updated: 2026-07-21`
+`updated: 2026-07-22`
 
 ## 这个模块是干什么的
 
@@ -50,14 +50,14 @@ ClientCommand
 - `set_compaction_threshold` 携带一次性 commandId 和精确 `sessionId + conversationId + focusId`，只接受 20–90 的整数百分比；`PublicState.compactionThresholdPercent` 是当前会话权威值，成功或失败必须按 commandId 精确结算。
 - 高频 `PublicState` 不携带完整项目索引；项目空态允许 conversation/focus/model/runtime 字段缺席。`project_snapshot` 低频发布扁平会话列表及 role/activity/attention/unread/temporary，最多 100 项且整帧不超过 750,000 UTF-8 bytes；保留顺序优先 current、active、attention、unread，再按最后活跃时间。字段裁剪、条数省略或帧预算省略都会置 `truncated=true`。
 - `role_catalog_snapshot` 独立发布用户级角色目录；最多 64 个角色，名称/简介与 durable store 一致按 80/1000 个 Unicode 字符校验，system prompt 按 128 KiB UTF-8 校验。客户端命令帧仍限制为 1 MB；服务端事件使用独立的 64 MiB 上限，以容纳最坏情况下 JSON 转义后的完整有界角色目录。socket 序列化后还会执行同一发送上限，超限只发送一条固定 protocol error，不能递归发送浏览器必然拒绝的原帧。
-- `conversation_snapshot` 携带固化角色，并且必须在有界 `ConversationHistoryItem[]` 与兼容 `messages[]` 中二选一，禁止重复发送两份 transcript。普通 user/assistant 是 `message`，跨会话 incoming/outgoing 是 `session_message`，Pi active branch 上的持久压缩记录是 `compaction` 分界项。
+- `conversation_snapshot` 携带固化角色，并且必须在有界 `ConversationHistoryItem[]` 与兼容 `messages[]` 中二选一，禁止重复发送两份 transcript。普通 user/assistant 是 `message`，跨会话 incoming/outgoing 是 `session_message`，Pi active branch 上的持久压缩记录是 `compaction` 分界项。assistant message 额外用有界 `parts` 保存 text/thinking span 与 toolCallId 的原始顺序；span 只引用已有聚合字符串，不能在线路上复制整段正文或思考。
 - live 卡片使用 `conversation_item`，同 cardId 幂等更新；它不能伪装成某个 run 的文本 delta。
 - wire 上的 `session_message.peerExists` 由服务端基于完整 durable 项目 ID 集合计算，不依赖可能截断的 `project_snapshot`；它只控制 peer 跳转入口，不写回 durable 卡片。
 - snapshot 的 `truncated` 都只表示浏览器投影省略，不能解释成 durable 数据被删除。
 - sessionId、focusId 和 acknowledged commandId 在一个连接内不可复用，runId 在一个 session 内不可复用；它们是关联身份，不承诺任意网络命令的 exactly-once。
 - `run_queued → run_started → run_finished(outcome)` 由工作台适配层合成，不把 SDK 的 agent lifecycle 当成线协议真相。
 - `run_queued` 还有明确的接收回执语义：服务端已校验身份、占用不可复用 runId、安装 active RunTicket，并接受该 prompt 进入 actor 队列。浏览器只有收到精确匹配 focus 三元身份 + runId 的这一帧，才能清草稿并投影本地 user message。
-- runId 描述执行生命周期，不描述气泡生命周期。steer 被 SDK 真正取用时，projector 用 `user_message` 和 `assistant_message_started` 标出同一 run 内的新消息段；后续文本、思考、工具和 usage 仍归该 run，但 reducer 写入最新 assistant 段。最终 focused snapshot 继续以 Pi 的 durable message entry 为准。
+- runId 描述执行生命周期，不描述气泡生命周期。projector 为每条物理 assistant message 发送 `assistant_message_started`，steer 被 SDK 真正取用时另用 `user_message` 标出同一 run 内的新用户段；后续文本、思考、工具和 usage 仍归该 run，但 reducer 只写入最新 assistant 段。UI 可以合并没有 card/compaction/user 边界的同 run 相邻段，最终 focused snapshot 仍以 Pi durable entry 的 ordered parts 为准。
 - `WebSocket.send()` 不是协议提交点。确认前断线是 unknown outcome；当前协议没有 prompt 查询或幂等重放，因此客户端必须保留草稿、恢复历史后让用户核对，不能自动重试。
 - 错误包含 `scope`，命令错误可包含 `operation`；需要精确结算的设置错误还必须携带 sessionId + commandId。通用设置错误不能结束一次运行。
 - context usage 保留 `measured | estimated | unknown` 来源，不把未知伪装成精确数字。

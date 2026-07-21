@@ -136,13 +136,13 @@ describe("Message", () => {
     expect(screen.getAllByText(/old-1\.md/).length).toBeGreaterThan(0);
   });
 
-  it("shows tools before assistant markdown text", () => {
+  it("renders text and consecutive activity groups in assistant part order", () => {
     const message: ChatMessage = {
       id: "3",
       runId: "run-3",
       role: "assistant",
-      text: "最终回复：已完成分析。",
-      thinking: "",
+      text: "先解释。\n\n最终回复。",
+      thinking: "第一次思考\n\n第二次思考",
       tools: [
         {
           id: "1",
@@ -151,19 +151,40 @@ describe("Message", () => {
           result: { ok: true },
           status: "done",
         },
+        {
+          id: "2",
+          name: "grep",
+          args: { pattern: "timeline" },
+          result: { ok: true },
+          status: "done",
+        },
+      ],
+      parts: [
+        { kind: "text", text: "先解释。" },
+        { kind: "thinking", text: "第一次思考" },
+        { kind: "tool", toolId: "1" },
+        { kind: "thinking", text: "第二次思考" },
+        { kind: "tool", toolId: "2" },
+        { kind: "text", text: "最终回复。" },
       ],
     };
 
     const { container } = render(<Message message={message} />);
 
     const article = container.querySelector("article") as HTMLElement;
-    const firstBlock = article.querySelector(".tools, .markdown") as HTMLElement;
-    const secondBlock = firstBlock?.nextElementSibling as HTMLElement | null;
-
-    expect(firstBlock).toHaveClass("tools");
-    expect(secondBlock).toHaveClass("markdown");
-    expect(screen.getByText("工具调用（1）")).toBeInTheDocument();
-    expect(screen.getByText("最终回复：已完成分析。")).toBeInTheDocument();
+    expect(Array.from(article.children).map((element) => element.className))
+      .toEqual([
+        "markdown",
+        "assistant-activity-group",
+        "markdown",
+        "message-actions assistant-message-actions",
+      ]);
+    const activity = article.querySelector(".assistant-activity-group");
+    expect(Array.from(activity?.children ?? []).map((element) => element.className))
+      .toEqual(["thinking", "tools", "thinking", "tools"]);
+    expect(screen.getAllByText("工具调用（1）")).toHaveLength(2);
+    expect(screen.getByText("先解释。")).toBeInTheDocument();
+    expect(screen.getByText("最终回复。")).toBeInTheDocument();
   });
 
   it("preserves rich markdown structure for scoped transcript styling", () => {

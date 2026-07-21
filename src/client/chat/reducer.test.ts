@@ -415,6 +415,124 @@ describe("chatReducer", () => {
     expect(state.messages.at(-1)?.tools[0].status).toBe("done");
   });
 
+  it("records live assistant parts in arrival order around a session card", () => {
+    let state = chatReducer(initialChatState, {
+      type: "focus_changed",
+      ...FOCUS_A_1,
+    });
+    state = chatReducer(state, {
+      type: "session",
+      runId: RUN_1,
+      event: { type: "run_started" },
+      ...FOCUS_A_1,
+    });
+    state = chatReducer(state, {
+      type: "session",
+      runId: RUN_1,
+      event: { type: "thinking_delta", delta: "Plan the delegation" },
+      ...FOCUS_A_1,
+    });
+    state = chatReducer(state, {
+      type: "session",
+      runId: RUN_1,
+      event: {
+        type: "tool_started",
+        toolCallId: "tool-1",
+        toolName: "start_session",
+        args: {},
+      },
+      ...FOCUS_A_1,
+    });
+    state = chatReducer(state, {
+      type: "conversation_item",
+      item: sessionMessageCard(),
+      ...FOCUS_A_1,
+    });
+    state = chatReducer(state, {
+      type: "session",
+      runId: RUN_1,
+      event: {
+        type: "assistant_message_started",
+        projectionId: "assistant-after-card",
+      },
+      ...FOCUS_A_1,
+    });
+    state = chatReducer(state, {
+      type: "session",
+      runId: RUN_1,
+      event: { type: "thinking_delta", delta: "Continue locally" },
+      ...FOCUS_A_1,
+    });
+    state = chatReducer(state, {
+      type: "session",
+      runId: RUN_1,
+      event: { type: "text_delta", delta: "Finished locally" },
+      ...FOCUS_A_1,
+    });
+
+    expect(state.items).toEqual([
+      expect.objectContaining({
+        kind: "message",
+        role: "assistant",
+        parts: [
+          { kind: "thinking", text: "Plan the delegation" },
+          { kind: "tool", toolId: "tool-1" },
+        ],
+      }),
+      expect.objectContaining({ kind: "session_message", cardId: "card-1" }),
+      expect.objectContaining({
+        kind: "message",
+        role: "assistant",
+        parts: [
+          { kind: "thinking", text: "Continue locally" },
+          { kind: "text", text: "Finished locally" },
+        ],
+      }),
+    ]);
+  });
+
+  it("moves an unused run placeholder past a newly observed timeline boundary", () => {
+    let state = chatReducer(initialChatState, {
+      type: "focus_changed",
+      ...FOCUS_A_1,
+    });
+    state = chatReducer(state, {
+      type: "session",
+      runId: RUN_1,
+      event: { type: "run_started" },
+      ...FOCUS_A_1,
+    });
+    state = chatReducer(state, {
+      type: "conversation_item",
+      item: sessionMessageCard(),
+      ...FOCUS_A_1,
+    });
+    state = chatReducer(state, {
+      type: "session",
+      runId: RUN_1,
+      event: {
+        type: "assistant_message_started",
+        projectionId: "assistant-after-boundary",
+      },
+      ...FOCUS_A_1,
+    });
+    state = chatReducer(state, {
+      type: "session",
+      runId: RUN_1,
+      event: { type: "text_delta", delta: "After the boundary" },
+      ...FOCUS_A_1,
+    });
+
+    expect(state.items).toEqual([
+      expect.objectContaining({ kind: "session_message", cardId: "card-1" }),
+      expect.objectContaining({
+        kind: "message",
+        id: "assistant-after-boundary",
+        text: "After the boundary",
+      }),
+    ]);
+  });
+
   it("accumulates assistant total token usage as session tokens", () => {
     let state = chatReducer(initialChatState, { type: "prompt_accepted", runId: RUN_1, text: "hello" });
     state = chatReducer(state, { type: "session", runId: RUN_1, event: { type: "run_started" } });

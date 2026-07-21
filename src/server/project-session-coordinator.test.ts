@@ -1832,6 +1832,66 @@ describe("ProjectSessionCoordinator", () => {
     expect(reopened.lastConversationId).toBe(source.conversationId);
   });
 
+  it("captures the preview title when an unnamed conversation sends a message", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    source.sessionManager.appendMessage({
+      role: "user",
+      content: "Investigate the rendering pipeline",
+      timestamp: 1,
+    });
+    await fixture.handle.project.refreshConversations();
+    expect(
+      fixture.handle.project.listConversations()
+        .find(({ id }) => id === source.conversationId)?.preview,
+    ).toBe("Investigate the rendering pipeline");
+    fixture.runtime.control(target.conversationId).enqueue(
+      completesWith("message handled"),
+    );
+
+    await executeTool(
+      fixture.runtime.control(source.conversationId),
+      "send_session_message",
+      "send-with-preview-title",
+      {
+        conversationId: target.conversationId,
+        message: "Keep the source title on this card",
+      },
+    );
+    await waitUntil(
+      () => fixture.runtime.control(target.conversationId).received.length === 1,
+      "the titled message to be delivered",
+    );
+
+    expect(
+      fixture.runtime.control(target.conversationId).received[0]?.details,
+    ).toMatchObject({
+      fromSnapshot: {
+        conversationId: source.conversationId,
+        title: "Investigate the rendering pipeline",
+      },
+      toSnapshot: {
+        conversationId: target.conversationId,
+      },
+    });
+    expect(
+      aggregateReservedConversationEntries(source.sessionManager.getEntries())
+        .cards.find(({ body }) => body === "Keep the source title on this card"),
+    ).toMatchObject({
+      fromSnapshot: {
+        conversationId: source.conversationId,
+        title: "Investigate the rendering pipeline",
+      },
+    });
+  });
+
   it("durably queues a message for a busy target without interrupting its current run", async () => {
     const fixture = await createFixture();
     const source = await fixture.coordinator.createUserConversation(

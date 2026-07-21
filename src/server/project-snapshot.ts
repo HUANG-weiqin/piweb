@@ -7,6 +7,20 @@ import {
 
 export { MAX_PROJECT_CONVERSATIONS };
 
+export function conversationDisplayTitle(
+  conversation: Pick<ConversationSummary, "name" | "preview">,
+): string | undefined {
+  const title = conversation.name?.trim() || conversation.preview.trim();
+  if (!title) return undefined;
+  const characters = [...title];
+  if (characters.length <= MAX_PROJECT_CONVERSATION_NAME_CHARACTERS) {
+    return title;
+  }
+  return `${characters
+    .slice(0, MAX_PROJECT_CONVERSATION_NAME_CHARACTERS - 1)
+    .join("")}…`;
+}
+
 function clip(value: string, maxLength: number): { value: string; truncated: boolean } {
   if (value.length <= maxLength) return { value, truncated: false };
   return {

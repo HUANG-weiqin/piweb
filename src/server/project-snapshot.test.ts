@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ConversationSummary } from "../shared/protocol.js";
 import {
+  conversationDisplayTitle,
   MAX_PROJECT_CONVERSATIONS,
   projectConversationIndex,
 } from "./project-snapshot.js";
@@ -17,6 +18,21 @@ function conversation(index: number): ConversationSummary {
 }
 
 describe("projectConversationIndex", () => {
+  it("derives a bounded display title from the name or preview", () => {
+    expect(conversationDisplayTitle({
+      name: "  Explicit name  ",
+      preview: "Ignored preview",
+    })).toBe("Explicit name");
+    expect(conversationDisplayTitle({
+      preview: "  Preview title  ",
+    })).toBe("Preview title");
+    const clipped = conversationDisplayTitle({
+      preview: "会".repeat(140),
+    });
+    expect([...(clipped ?? "")]).toHaveLength(120);
+    expect(clipped?.endsWith("…")).toBe(true);
+  });
+
   it("bounds the browser projection without mutating the durable index", () => {
     const source = Array.from(
       { length: MAX_PROJECT_CONVERSATIONS + 1 },

@@ -1,6 +1,6 @@
 # 客户端状态
 
-`updated: 2026-07-21`
+`updated: 2026-07-22`
 
 ## 这个模块是干什么的
 
@@ -59,14 +59,14 @@ ServerEvent
 - Chat 在 composer 底部现有控制行显示“自动压缩 N%”按钮，默认不增加 transcript 高度；点击后才展开 20%–90% 的会话级滑条，默认 70%。拖动只预览，松手或键盘调整结束才发送一次精确关联命令，等待相同 commandId 结算期间禁用控件。
 - 同一控制行提供“手动压缩”按钮；只在在线、history 已恢复且会话空闲时启用，提交后等待精确 `compact_context` commandId 结算，不能把普通 state 刷新当成成功。手动 pending 按 conversationId 保存，当前 UI 只投影当前 conversation；A 的后台压缩不能让 B 显示 spinner，迟到 completion/error 仍按 commandId 回收 A，且结算前即使已切到 B 也不能删除 A。该 pending 与服务端 `PublicState.compacting` 共同驱动 transcript 底部的动态“正在压缩上下文”状态，因此点击后立即反馈，自动压缩与重连中的压缩也使用同一投影；压缩期间 composer 和角色切换禁用。
 - 成功压缩后，completion snapshot 会把 Pi active branch 的持久 `compaction` 项 hydrate 为“上下文已压缩”分界线；它不属于 message、不会计入消息/token 投影，也不会被相邻会话卡片吸收到 assistant 回答中。
-- 跨会话消息使用独立 `SessionMessageCard`。卡片默认收起，只用一行显示方向、对端会话和状态；用户主动展开后才显示来源/目标标题、角色、短句柄、正文、结果与打开入口，状态更新不能擅自展开卡片。reducer 用 cardId 原地 upsert，并保持卡片在 transcript 中原来的位置；紧跟 assistant 的 outgoing/incoming 卡片在渲染时都归入同一回复的执行区，固定显示在工具调用之后、最终正文之前，完成或送达更新不能占据回答下方。没有可关联 assistant 的卡片仍按独立时间点展示。打开入口只由卡片自身的服务端 `peerExists` 决定，不能用截断侧栏做存在性判断。相关 peer 仍存在时可直接打开，临时会话删除后入口消失。
+- 跨会话消息使用独立 `SessionMessageCard`。卡片默认收起，只用一行显示方向、对端会话和状态；用户主动展开后才显示来源/目标标题、角色、短句柄、正文、结果与打开入口，状态更新不能擅自展开卡片。reducer 用 cardId 原地 upsert，incoming/outgoing 都作为独立时间点穿插在 transcript 中；历史恢复只在 cardId 首次出现时切断 assistant 聚合，后续状态记录只更新原卡片，不能重复切段或跳到回答末尾。压缩记录同样是时间线边界。新卡片端点标题优先固化显式名称，否则使用有界首条消息 preview；服务端 wire 投影会从完整项目索引补齐旧卡片缺失的端点标题，但不改写 durable JSONL。打开入口只由卡片自身的服务端 `peerExists` 决定，不能用截断侧栏做存在性判断。相关 peer 仍存在时可直接打开，临时会话删除后入口消失。
 - extension UI 可在首个 state 前出现，因此对话框必须位于 Setup/Chat 之外的 session-scoped overlay；协调模式只把当前 focus 路由到浏览器，后台请求通过侧栏 attention 提示，不抢焦点。
 - extension request 按到达顺序排队，server closed event、initialize、session change 或 disconnect 都会移除 stale 项；浏览器只回答当前 sessionId。
 - OAuth、API Key 和 extension UI 同时出现时只展示一个模态边界；隐藏不等于丢弃输入草稿，只有 request 更换、权威 closed/cancel 或连接生命周期结束才清理。
 - 流式 transcript 不做浏览器端计时合并，reducer 收到网络投影后立即把最新权威文本交给 React；assistant 正文在流式期间按稳定 Markdown block 与当前活动尾部拆分：已经由空行或闭合代码围栏确定的 block 单独解析并保持稳定引用，尚未完成的尾部使用保留空白的纯文本连续显示；append-only delta 只让 splitter 消费新增完整行，`text_replaced` 或其它非追加校准会重置 splitter；run 结束后立即用收到的最终全文切换一次安全 Markdown。这个模型优先保证低延迟和连续输出，避免每个 delta 重新解析整篇文本，也不通过前端动画重播；历史消息、transcript block 和 token fallback 投影必须保留稳定引用或 memo 化，不能让当前 delta 重渲染整段历史；折叠的思考内容只在用户展开后解析。跟随滚动由每次文本提交驱动。跟随态不是硬锁定 `scrollHeight`：有内容的 transcript 在 composer 上方保留至少约三至四行正文的安全距离，最新内容先在更宽松的舒适区自然向下生长，越过下沿后再平滑回到区内。任何向上滚轮或实际向上位移都立即把滚动控制权交还用户；脱离后新 delta 不得改变 `scrollTop`，只显示“回到最新消息”，直到用户精确回到底部或主动点击按钮才重新跟随。主动点击必须立即提交到底部，不能使用会被后续 delta 重定向的平滑动画；被动舒适区跟随仍可平滑滚动。composer 是受控草稿并按内容在有界高度内增长。
 - 新 `sessionId + conversationId + focusId` 的 transcript 与同一 focus 的增量更新属于两个滚动观察边界：前者必须等匹配 snapshot hydrate 后无动画地直接定位到最新消息，不能从顶部复用被动跟随动画；后者才使用舒适区平滑跟随。重新打开同一 conversation 仍会获得新 focusId，因此也必须重新执行一次即时初始定位。
 - transcript 使用 14px 的紧凑正文，并与 composer 共用响应式内容宽度：从原有 780px 阅读宽度随视口扩展，最高 1280px；窄屏仍由最小侧边距接管，不能产生横向溢出。assistant Markdown 的标题、段落、嵌套列表、引用、表格和代码只在 `.markdown` 内建立统一阅读节奏；宽表格与长代码由自身横向滚动承接，不能撑宽 transcript。
-- 思考与工具调用区使用“分隔线标题 + 无外框内容”的低干扰折叠样式。当前 active run 的思考标题用 spinner 表达“正在思考”，历史思考只显示完成态；思考正文必须复用 assistant 正文的 Markdown 解析、清洗与排版。工具调用区整体默认收起，展开后每个工具仍是独立折叠项，以本地化动作、目标和状态概括调用；展开单项后按字段递归展示最终 args/result，内置工具优先提取文本输出，Agent 会话工具优先展示结构化 details，不能把宿主 JSON 包装直接暴露给用户。历史 Agent 的回复正文也使用同一分隔线折叠语言，思考、工具、会话协作卡片和消息操作仍留在折叠区外；idle 时只保持最后一条 Agent 回复正文展开，新 run 期间同时保持当前 run 的全部 assistant 段及它之前最近一条回复正文展开，直到 run 完成后才折叠旧正文。
+- assistant 的正文、思考和工具调用按真实到达顺序保存为 ordered parts；连续正文合并为正文块，连续思考或工具调用合并为原有“分隔线标题 + 无外框内容”的低干扰折叠区，即使只有一项也默认收起。正文、跨会话卡片和压缩项都会打断 activity 聚合，不能再把整轮思考/工具统一提到回复顶部。当前 active run 的末段思考标题用 spinner 表达“正在思考”，历史思考只显示完成态；思考正文复用 Markdown 解析、清洗与排版。工具区展开后每个工具仍是独立折叠项，以本地化动作、目标和状态概括调用；展开单项后按字段递归展示最终 args/result，内置工具优先提取文本输出，Agent 会话工具优先展示结构化 details，不能把宿主 JSON 包装直接暴露给用户。历史 Agent 的回复正文仍使用同一分隔线折叠语言；idle 时只保持最后一条 Agent 回复正文展开，新 run 期间同时保持当前 run 的相邻物理 assistant 段及它之前最近一条回复正文展开，直到 run 完成后才折叠旧正文。
 - 每条 user 与 assistant 正文在既有消息间距中提供低干扰复制按钮，读取原始文本/Markdown 而不是渲染后的 HTML；assistant 操作组位于消息左下方，user 操作组保持右下方。“回到此处”只属于 user 消息，并先明确确认将彻底删除本条及之后所有消息。操作组必须使用内容宽度且禁止换行，不能被短 user bubble 压成竖排。运行中、恢复未完成、存在排队 prompt 或已有截断 pending 时禁用破坏性按钮。
 - 截断只维护一个 `sessionId + commandId + conversationId + messageId` pending；命令成功发出后，composer 立即用所选 user 原文覆盖现有草稿，但客户端不先行 splice transcript，只接受匹配 focus 的服务端 snapshot 作为新内容，再用匹配 commandId 的 completion/error 结算等待态。命令未能发出时不得改写草稿。等待期间 composer、切换和新建会话禁用；断线属于未知结果，必须提示恢复后核对。
 - 认证、设置和扩展交互拥有模态焦点边界。
@@ -107,6 +107,7 @@ ServerEvent
 - 不要在 `WebSocket.send()` 成功后清空 composer 或插入 user message；这会在帧未到达服务端时制造不可恢复的数据丢失窗口。
 - 目录列表中的 `path` 只是浏览投影，不是项目 cwd；不要在用户确认和 initialize 校验前创建项目状态、加载资源或持久化会话。
 - 后台 project snapshot 不能通过 conversationId 过滤；focused transcript event 也不能只按 conversationId 接收。两者处在不同观察边界。
+- `message.text/thinking/tools` 是复制、token 与旧快照兼容投影，不再携带顺序语义。只有确实没有 `parts` 的旧快照可以退回历史固定布局；任何新实时或恢复路径都必须生成 ordered parts，不能再次从三个聚合字段猜时间顺序。
 
 ## 关联模块
 

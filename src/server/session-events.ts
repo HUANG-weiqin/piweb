@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { types as nodeTypes } from "node:util";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import type { SessionEvent, TokenUsage } from "../shared/protocol.js";
+import { CONVERSATION_MESSAGE_CUSTOM_TYPE } from "./conversation-meta.js";
 
 const MAX_WIRE_VALUE_BYTES = 200_000;
 const TRUNCATED_PREVIEW_CHARS = 50_000;
@@ -288,7 +289,6 @@ export class SessionEventProjector {
   private currentMessageText = "";
   private finalErrorMessage?: string;
   private finalAborted = false;
-  private needsAssistantSegment = true;
   private suppressNextUserMessage: boolean;
 
   constructor(options: { suppressNextUserMessage?: boolean } = {}) {
@@ -314,11 +314,20 @@ export class SessionEventProjector {
       this.currentMessageText = "";
       this.finalErrorMessage = undefined;
       this.finalAborted = false;
-      this.needsAssistantSegment = true;
       return [];
     }
 
     if (event.type === "agent_settled") {
+      return [];
+    }
+
+    if (
+      event.type === "message_start"
+      && event.message.role === "custom"
+      && event.message.customType === CONVERSATION_MESSAGE_CUSTOM_TYPE
+    ) {
+      this.segmentCompletedText = "";
+      this.currentMessageText = "";
       return [];
     }
 
@@ -330,16 +339,14 @@ export class SessionEventProjector {
       const text = projectUserText(event.message);
       this.segmentCompletedText = "";
       this.currentMessageText = "";
-      this.needsAssistantSegment = true;
       return text
         ? [{ type: "user_message", projectionId: randomUUID(), text }]
         : [];
     }
 
     if (event.type === "message_start" && event.message.role === "assistant") {
+      this.segmentCompletedText = "";
       this.currentMessageText = "";
-      if (!this.needsAssistantSegment) return [];
-      this.needsAssistantSegment = false;
       return [{
         type: "assistant_message_started",
         projectionId: randomUUID(),

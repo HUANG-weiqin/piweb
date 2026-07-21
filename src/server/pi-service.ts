@@ -17,6 +17,7 @@ import type {
   PublicState,
   ServerEvent,
   SessionEvent,
+  SessionMessageEndpoint,
   ThinkingLevel,
   ToolMode,
 } from "../shared/protocol.js";
@@ -51,7 +52,10 @@ import {
   type ProjectSessionCoordinatorEvent,
   type ProjectSessionHandle,
 } from "./project-session-coordinator.js";
-import { projectConversationIndex } from "./project-snapshot.js";
+import {
+  conversationDisplayTitle,
+  projectConversationIndex,
+} from "./project-snapshot.js";
 import type { RoleCatalog } from "./role-catalog.js";
 import { SerialTaskQueue } from "./serial-task-queue.js";
 import { SessionEventProjector, snapshotWireValue } from "./session-events.js";
@@ -236,16 +240,32 @@ function boundedProjectSnapshotEvent(input: {
   return event;
 }
 
-function projectConversationPeerExistence(
+function projectConversationPeers(
   items: readonly ConversationHistoryItem[],
-  conversationIds: ReadonlySet<string>,
+  conversations: readonly ConversationSummary[],
 ): ConversationHistoryItem[] {
+  const summaries = new Map(
+    conversations.map((conversation) => [conversation.id, conversation]),
+  );
+  const enrichTitle = (
+    endpoint: SessionMessageEndpoint,
+  ): SessionMessageEndpoint => {
+    if (endpoint.title?.trim()) return endpoint;
+    const summary = summaries.get(endpoint.conversationId);
+    if (!summary) return endpoint;
+    const title = conversationDisplayTitle(summary);
+    return title === undefined ? endpoint : { ...endpoint, title };
+  };
   return items.map((item) => {
     if (item.kind !== "session_message") return item;
-    const peer = item.direction === "incoming" ? item.from : item.to;
+    const from = enrichTitle(item.from);
+    const to = enrichTitle(item.to);
+    const peer = item.direction === "incoming" ? from : to;
     return {
       ...item,
-      peerExists: conversationIds.has(peer.conversationId),
+      from,
+      to,
+      peerExists: summaries.has(peer.conversationId),
     };
   });
 }
@@ -1759,11 +1779,9 @@ export class PiConnection {
       const history = projectConversationItemsSnapshot(
         actor.sessionManager,
       );
-      const items = projectConversationPeerExistence(
+      const items = projectConversationPeers(
         history.items,
-        new Set(
-          view.handle.project.listConversations().map(({ id }) => id),
-        ),
+        view.handle.project.listConversations(),
       );
       this.focusedItemFingerprints.clear();
       for (const item of items) {
@@ -1796,11 +1814,9 @@ export class PiConnection {
       return;
     }
     try {
-      const items = projectConversationPeerExistence(
+      const items = projectConversationPeers(
         projectConversationItemsSnapshot(actor.sessionManager).items,
-        new Set(
-          view.handle.project.listConversations().map(({ id }) => id),
-        ),
+        view.handle.project.listConversations(),
       );
       for (const item of items) {
         if (item.kind !== "session_message") continue;

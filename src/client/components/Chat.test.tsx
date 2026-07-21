@@ -843,7 +843,7 @@ describe("Chat", () => {
       .toHaveTextContent("上下文已压缩");
   });
 
-  it("keeps completed outgoing session work above the final assistant text", () => {
+  it("keeps outgoing session messages at their transcript timepoint", () => {
     const card: ConversationMessageCard = {
       kind: "session_message",
       id: "session-message:11111111-1111-4111-8111-111111111111",
@@ -876,38 +876,46 @@ describe("Chat", () => {
         tools: [],
       }, {
         kind: "message",
-        id: "assistant-1",
+        id: "assistant-before",
         runId: "run-1",
         role: "assistant",
-        text: "最终回复",
+        text: "",
         thinking: "",
         tools: [{
           id: "tool-1",
           name: "start_session",
           status: "done",
         }],
-      }, card],
+      }, card, {
+        kind: "message",
+        id: "assistant-after",
+        runId: "run-1",
+        role: "assistant",
+        text: "最终回复",
+        thinking: "",
+        tools: [],
+      }],
       sessionTokens: 0,
     }));
 
-    const assistant = container.querySelector(".message.assistant");
     const renderedCard = container.querySelector(
       `[data-card-id="${card.cardId}"]`,
     );
-    expect(renderedCard?.closest(".message.assistant")).toBe(assistant);
+    expect(renderedCard?.closest(".message.assistant")).toBeNull();
+    const transcript = container.querySelector(".transcript");
     expect(
-      Array.from(assistant?.children ?? []).map(
+      Array.from(transcript?.children ?? []).map(
         (element) => element.className,
       ),
     ).toEqual([
-      "tools",
-      "session-message-stack",
-      "markdown",
-      "message-actions assistant-message-actions",
+      "message user",
+      "message assistant",
+      "session-message-card direction-outgoing state-completed is-collapsed",
+      "message assistant",
     ]);
   });
 
-  it("keeps incoming session messages above the final assistant text", () => {
+  it("keeps incoming session messages at their transcript timepoint", () => {
     const card: ConversationMessageCard = {
       kind: "session_message",
       id: "session-message:22222222-2222-4222-8222-222222222222",
@@ -931,29 +939,34 @@ describe("Chat", () => {
       messages: [],
       items: [{
         kind: "message",
-        id: "assistant-1",
+        id: "assistant-before",
         runId: "run-1",
         role: "assistant",
-        text: "最终回复",
+        text: "收到消息前",
         thinking: "",
         tools: [],
-      }, card],
+      }, card, {
+        kind: "message",
+        id: "assistant-after",
+        runId: "run-1",
+        role: "assistant",
+        text: "收到消息后",
+        thinking: "",
+        tools: [],
+      }],
       sessionTokens: 0,
     }));
 
-    const assistant = container.querySelector(".message.assistant");
+    const transcript = container.querySelector(".transcript");
+    const assistants = container.querySelectorAll(".message.assistant");
     const renderedCard = container.querySelector(
       `[data-card-id="${card.cardId}"]`,
     );
-    expect(renderedCard?.closest(".message.assistant")).toBe(assistant);
-    expect(
-      Array.from(assistant?.children ?? []).map(
-        (element) => element.className,
-      ),
-    ).toEqual([
-      "session-message-stack",
-      "markdown",
-      "message-actions assistant-message-actions",
+    expect(renderedCard?.closest(".message.assistant")).toBeNull();
+    expect(Array.from(transcript?.children ?? [])).toEqual([
+      assistants[0],
+      renderedCard,
+      assistants[1],
     ]);
   });
 });

@@ -47,6 +47,17 @@ describe("createMetaTools", () => {
     ]);
   });
 
+  it("guides Agents to reuse suitable normal sessions before creating duplicates", () => {
+    const startSession = tool(
+      createMetaTools(sourceConversationId, service()),
+      "start_session",
+    );
+
+    expect(startSession.promptGuidelines).toContain(
+      "Before starting a normal session, first call list_sessions with scope=created_by_me. Reuse a suitable existing session with send_session_message, and create a new normal session only when none fits the responsibility.",
+    );
+  });
+
   it("exposes no orchestration tool metadata when the frozen role disallows it", () => {
     const fake = service();
 

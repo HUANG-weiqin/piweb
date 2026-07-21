@@ -15,6 +15,10 @@ export interface ToolItem {
   status: "pending" | "running" | "done" | "error";
 }
 
+export type ChatMessagePart =
+  | { kind: "text" | "thinking"; text: string }
+  | { kind: "tool"; toolId: string };
+
 /**
  * Compatibility shape consumed by the existing Message component.
  * New transcript code should use ChatItem and branch on `kind`.
@@ -26,7 +30,23 @@ export interface ChatMessage {
   text: string;
   thinking: string;
   tools: ToolItem[];
+  parts?: ChatMessagePart[];
   usage?: TokenUsage;
+}
+
+export function orderedMessageParts(message: ChatMessage): ChatMessagePart[] {
+  if (message.parts !== undefined) return message.parts;
+  // Compatibility only: snapshots written before ordered parts used this UI order.
+  return [
+    ...(message.thinking
+      ? [{ kind: "thinking" as const, text: message.thinking }]
+      : []),
+    ...message.tools.map((tool) => ({
+      kind: "tool" as const,
+      toolId: tool.id,
+    })),
+    ...(message.text ? [{ kind: "text" as const, text: message.text }] : []),
+  ];
 }
 
 export type ChatMessageItem = { kind: "message" } & ChatMessage;
@@ -84,6 +104,20 @@ function isMessage(item: ChatItem): item is ChatMessageItem {
   return item.kind === "message";
 }
 
+function isEmptyAssistantPlaceholder(
+  item: ChatItem,
+  runId: string,
+): item is ChatMessageItem {
+  return isMessage(item)
+    && item.role === "assistant"
+    && item.runId === runId
+    && !item.text
+    && !item.thinking
+    && item.tools.length === 0
+    && (item.parts?.length ?? 0) === 0
+    && item.usage === undefined;
+}
+
 function messagesFrom(items: ChatItem[]): ChatMessage[] {
   return items.filter(isMessage);
 }
@@ -132,11 +166,22 @@ function matchesCurrentFocus(state: ChatState, action: OptionalFocus): boolean {
 
 function historyMessageToItem(
   message: ConversationHistoryMessage,
+  runId = `history:${message.id}`,
 ): ChatMessageItem {
+  const parts = message.parts?.flatMap((part): ChatMessagePart[] => {
+    if (part.kind === "tool") {
+      return message.tools.some((tool) => tool.toolCallId === part.toolCallId)
+        ? [{ kind: "tool", toolId: part.toolCallId }]
+        : [];
+    }
+    const aggregate = part.kind === "text" ? message.text : message.thinking;
+    const text = aggregate.slice(part.offset, part.offset + part.length);
+    return text ? [{ kind: part.kind, text }] : [];
+  });
   return {
     kind: "message",
     id: message.id,
-    runId: `history:${message.id}`,
+    runId,
     role: message.role,
     text: message.text,
     thinking: message.thinking,
@@ -147,6 +192,7 @@ function historyMessageToItem(
       result: tool.result,
       status: tool.status,
     })),
+    ...(parts === undefined ? {} : { parts }),
     usage: message.usage,
   };
 }
@@ -173,10 +219,18 @@ function upsertItem(items: ChatItem[], next: ChatItem): ChatItem[] {
 }
 
 function normalizeHistory(items: ConversationHistoryItem[]): ChatItem[] {
-  return items.reduce<ChatItem[]>(
-    (current, item) => upsertItem(current, historyItemToChatItem(item)),
-    [],
-  );
+  let normalized: ChatItem[] = [];
+  let historyRunId: string | undefined;
+  for (const item of items) {
+    if (item.kind === "message" && item.role === "user") {
+      historyRunId = `history:${item.id}`;
+    }
+    const next = item.kind === "message"
+      ? historyMessageToItem(item, historyRunId)
+      : item;
+    normalized = upsertItem(normalized, next);
+  }
+  return normalized;
 }
 
 function tokenTotal(items: ChatItem[]): number {
@@ -213,6 +267,7 @@ function ensureAssistant(
     text: "",
     thinking: "",
     tools: [],
+    parts: [],
   };
   const userIndex = items.findIndex((item) => (
     isMessage(item) && item.role === "user" && item.runId === runId
@@ -250,6 +305,43 @@ function addUsage(current: TokenUsage | undefined, next: TokenUsage): TokenUsage
   };
 }
 
+function appendPart(
+  parts: ChatMessagePart[] | undefined,
+  part: ChatMessagePart,
+): ChatMessagePart[] {
+  const current = parts ?? [];
+  if (part.kind !== "tool" && !part.text) return current;
+  const last = current[current.length - 1];
+  if (
+    part.kind !== "tool"
+    && last?.kind === part.kind
+  ) {
+    return [
+      ...current.slice(0, -1),
+      { kind: part.kind, text: last.text + part.text },
+    ];
+  }
+  return [...current, part];
+}
+
+function replaceTextParts(
+  parts: ChatMessagePart[] | undefined,
+  text: string,
+): ChatMessagePart[] {
+  const current = parts ?? [];
+  const firstTextIndex = current.findIndex((part) => part.kind === "text");
+  if (firstTextIndex < 0) {
+    return text ? [...current, { kind: "text", text }] : current;
+  }
+  let replaced = false;
+  return current.flatMap((part): ChatMessagePart[] => {
+    if (part.kind !== "text") return [part];
+    if (replaced) return [];
+    replaced = true;
+    return text ? [{ kind: "text", text }] : [];
+  });
+}
+
 export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   if (action.type === "reset") return initialChatState;
 
@@ -283,7 +375,10 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     }
 
     if (state.focus) return state;
-    const items = action.messages.map(historyMessageToItem);
+    const items = normalizeHistory(action.messages.map((message) => ({
+      kind: "message",
+      ...message,
+    })));
     return withItems(state, items, tokenTotal(items));
   }
 
@@ -308,6 +403,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       text: action.text,
       thinking: "",
       tools: [],
+      parts: [],
     }]);
   }
 
@@ -320,6 +416,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       text: action.message,
       thinking: "",
       tools: [],
+      parts: [],
     }]);
   }
 
@@ -338,24 +435,23 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       text: event.text,
       thinking: "",
       tools: [],
+      parts: [],
     }]);
   }
   if (event.type === "assistant_message_started") {
     const items = itemsFrom(state);
     if (items.some((item) => item.id === event.projectionId)) return state;
-    const last = items.at(-1);
-    if (
-      last
-      && isMessage(last)
-      && last.role === "assistant"
-      && last.runId === action.runId
-      && !last.text
-      && !last.thinking
-      && last.tools.length === 0
-    ) {
-      return state;
-    }
-    return withItems(state, [...items, {
+    const placeholderIndex = items.findIndex((item) => (
+      isEmptyAssistantPlaceholder(item, action.runId)
+    ));
+    if (placeholderIndex === items.length - 1) return state;
+    const currentItems = placeholderIndex < 0
+      ? items
+      : [
+          ...items.slice(0, placeholderIndex),
+          ...items.slice(placeholderIndex + 1),
+        ];
+    return withItems(state, [...currentItems, {
       kind: "message",
       id: event.projectionId,
       runId: action.runId,
@@ -363,6 +459,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       text: "",
       thinking: "",
       tools: [],
+      parts: [],
     }]);
   }
   if (event.type === "run_queued" || event.type === "run_finished") return state;
@@ -374,12 +471,30 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   ) {
     const items = updateAssistant(itemsFrom(state), action.runId, (assistant) => {
       if (event.type === "text_delta") {
-        return { ...assistant, text: assistant.text + event.delta };
+        return {
+          ...assistant,
+          text: assistant.text + event.delta,
+          parts: appendPart(assistant.parts, {
+            kind: "text",
+            text: event.delta,
+          }),
+        };
       }
       if (event.type === "text_replaced") {
-        return { ...assistant, text: event.text };
+        return {
+          ...assistant,
+          text: event.text,
+          parts: replaceTextParts(assistant.parts, event.text),
+        };
       }
-      return { ...assistant, thinking: assistant.thinking + event.delta };
+      return {
+        ...assistant,
+        thinking: assistant.thinking + event.delta,
+        parts: appendPart(assistant.parts, {
+          kind: "thinking",
+          text: event.delta,
+        }),
+      };
     });
     return withItems(state, items);
   }
@@ -397,6 +512,10 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       updateAssistant(itemsFrom(state), action.runId, (assistant) => ({
         ...assistant,
         tools: [...assistant.tools, tool],
+        parts: appendPart(assistant.parts, {
+          kind: "tool",
+          toolId: tool.id,
+        }),
       })),
     );
   }

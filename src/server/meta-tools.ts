@@ -159,6 +159,7 @@ export function createMetaTools(
         "Start a flat peer Agent session with a selected role and initial task. Returns as soon as the request is durably accepted and scheduled; another run may already own the target, and this operation never waits for completion. Set temporary only when a successful initial result should be returned and the target then deleted automatically.",
       promptSnippet: "Start another Agent session without blocking this run.",
       promptGuidelines: [
+        "Before starting a normal session, first call list_sessions with scope=created_by_me. Reuse a suitable existing session with send_session_message, and create a new normal session only when none fits the responsibility.",
         "After start_session, choose explicitly whether to keep working, call wait_for_session, or finish and receive a later session message.",
       ],
       parameters: Type.Object({

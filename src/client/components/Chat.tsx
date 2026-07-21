@@ -19,10 +19,11 @@ import {
   type ThinkingLevel,
   type TokenUsage,
 } from "../../shared/protocol";
-import type {
-  ChatItem,
-  ChatMessage,
-  ChatState,
+import {
+  orderedMessageParts,
+  type ChatItem,
+  type ChatMessage,
+  type ChatState,
 } from "../chat/reducer";
 import { THINKING_LEVEL_LABELS } from "../lib/thinking-level";
 import { ConversationRoleDialog } from "./ConversationRoleDialog";
@@ -121,23 +122,63 @@ type TranscriptBlock =
   | {
       kind: "message";
       message: ChatMessage;
-      sessionCards: ConversationMessageCard[];
     }
   | ConversationCompactionMarker
   | ConversationMessageCard;
 
+function appendParagraph(current: string, next: string): string {
+  if (!next) return current;
+  return current ? `${current}\n\n${next}` : next;
+}
+
+function mergeUsage(
+  left: TokenUsage | undefined,
+  right: TokenUsage | undefined,
+): TokenUsage | undefined {
+  if (!left) return right;
+  if (!right) return left;
+  return {
+    input: left.input + right.input,
+    output: left.output + right.output,
+    cacheRead: left.cacheRead + right.cacheRead,
+    cacheWrite: left.cacheWrite + right.cacheWrite,
+    total: left.total + right.total,
+  };
+}
+
+function mergeAssistantMessages(
+  left: ChatMessage,
+  right: ChatMessage,
+): ChatMessage {
+  return {
+    ...left,
+    runId: right.runId,
+    text: appendParagraph(left.text, right.text),
+    thinking: appendParagraph(left.thinking, right.thinking),
+    tools: [...left.tools, ...right.tools],
+    parts: [
+      ...orderedMessageParts(left),
+      ...orderedMessageParts(right),
+    ],
+    usage: mergeUsage(left.usage, right.usage),
+  };
+}
+
 function transcriptBlocks(items: ChatItem[]): TranscriptBlock[] {
   const blocks: TranscriptBlock[] = [];
   for (const item of items) {
-    if (item.kind === "session_message") {
+    if (item.kind === "message") {
       const previous = blocks.at(-1);
-      if (previous?.kind === "message" && previous.message.role === "assistant") {
-        previous.sessionCards.push(item);
+      if (
+        item.role === "assistant"
+        && previous?.kind === "message"
+        && previous.message.role === "assistant"
+        && previous.message.runId === item.runId
+      ) {
+        previous.message = mergeAssistantMessages(previous.message, item);
         continue;
       }
-    }
-    if (item.kind === "message") {
-      blocks.push({ kind: "message", message: item, sessionCards: [] });
+      blocks.push({ kind: "message", message: item });
     } else {
       blocks.push(item);
     }
@@ -466,8 +507,6 @@ export function Chat({
         return <Message
           key={`message:${block.message.id}`}
           message={block.message}
-          sessionCards={block.sessionCards}
-          onOpenConversation={handleOpenConversation}
           onRewind={block.message.role === "user" ? handleRewind : undefined}
           rewindDisabled={
             busy

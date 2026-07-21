@@ -2,6 +2,7 @@ import type { SessionManager } from "@earendil-works/pi-coding-agent";
 import type {
   ConversationHistoryItem,
   ConversationHistoryMessage,
+  ConversationHistoryMessagePart,
   ConversationHistoryTool,
   ConversationMessageCard,
   TokenUsage,
@@ -19,6 +20,7 @@ export const MAX_AGENT_PEEK_ITEMS = 20;
 const MAX_HISTORY_TEXT_BYTES = 80_000;
 const MAX_HISTORY_TOOL_VALUE_BYTES = 8_000;
 const MAX_HISTORY_TOOLS_PER_MESSAGE = 20;
+const MAX_HISTORY_PARTS_PER_MESSAGE = 200;
 const MAX_HISTORY_ID_BYTES = 500;
 const OMITTED_TOOL_VALUE = "[历史工具数据过大，已省略]";
 
@@ -101,6 +103,22 @@ function compactToolValue(value: unknown): { value: unknown; truncated: boolean 
   return { value: OMITTED_TOOL_VALUE, truncated: true };
 }
 
+function fallbackHistoryParts(
+  text: string,
+  thinking: string,
+  tools: ConversationHistoryTool[],
+): ConversationHistoryMessagePart[] {
+  const parts: ConversationHistoryMessagePart[] = [];
+  if (thinking) {
+    parts.push({ kind: "thinking", offset: 0, length: thinking.length });
+  }
+  for (const tool of tools) {
+    parts.push({ kind: "tool", toolCallId: tool.toolCallId });
+  }
+  if (text) parts.push({ kind: "text", offset: 0, length: text.length });
+  return parts;
+}
+
 function compactHistoryMessage(
   message: ConversationHistoryMessage,
 ): { message: ConversationHistoryMessage; truncated: boolean } {
@@ -112,6 +130,7 @@ function compactHistoryMessage(
     || text.truncated
     || thinking.truncated
     || selectedTools.length !== message.tools.length;
+  const compactedToolIds = new Map<string, string>();
   const tools = selectedTools.map((tool) => {
     const toolCallId = clipUtf8(tool.toolCallId, MAX_HISTORY_ID_BYTES);
     const toolName = clipUtf8(tool.toolName, MAX_HISTORY_ID_BYTES);
@@ -122,6 +141,7 @@ function compactHistoryMessage(
       || args.truncated
       || result.truncated;
     if (toolTruncated) truncated = true;
+    compactedToolIds.set(tool.toolCallId, toolCallId.value);
     return {
       toolCallId: toolCallId.value,
       toolName: toolName.value,
@@ -130,6 +150,48 @@ function compactHistoryMessage(
       status: tool.status,
     };
   });
+  const selectedParts = message.parts?.slice(0, MAX_HISTORY_PARTS_PER_MESSAGE);
+  let partsLostOrder = selectedParts !== undefined
+    && selectedParts.length !== message.parts?.length;
+  if (partsLostOrder) {
+    truncated = true;
+  }
+  const compactedParts = selectedParts?.flatMap((part): ConversationHistoryMessagePart[] => {
+    if (part.kind === "tool") {
+      const toolCallId = compactedToolIds.get(part.toolCallId);
+      if (toolCallId === undefined) {
+        truncated = true;
+        partsLostOrder = true;
+        return [];
+      }
+      return [{ kind: "tool", toolCallId }];
+    }
+    const aggregateLength = part.kind === "text"
+      ? text.value.length
+      : thinking.value.length;
+    if (part.offset >= aggregateLength) {
+      truncated = true;
+      partsLostOrder = true;
+      return [];
+    }
+    const length = Math.min(part.length, aggregateLength - part.offset);
+    if (length <= 0) {
+      truncated = true;
+      partsLostOrder = true;
+      return [];
+    }
+    if (length !== part.length) {
+      truncated = true;
+      partsLostOrder = true;
+    }
+    return [{ kind: part.kind, offset: part.offset, length }];
+  });
+  let parts = compactedParts;
+  if (message.parts === undefined) {
+    parts = undefined;
+  } else if (partsLostOrder) {
+    parts = fallbackHistoryParts(text.value, thinking.value, tools);
+  }
   return {
     message: {
       ...message,
@@ -137,6 +199,7 @@ function compactHistoryMessage(
       text: text.value,
       thinking: thinking.value,
       tools,
+      ...(parts === undefined ? {} : { parts }),
       usage: message.usage ? { ...message.usage } : undefined,
     },
     truncated,
@@ -144,15 +207,16 @@ function compactHistoryMessage(
 }
 
 /**
- * Projects the selected Pi session branch into the same coarse bubbles used by
- * the live workbench: one user bubble followed by one aggregate assistant
- * bubble for all model/tool turns until the next user message.
+ * Projects the selected Pi session branch into replayable timeline segments.
+ * Aggregate fields remain available for copy/token views, while `parts` records
+ * the original assistant text/thinking/tool order without duplicating strings.
  */
 export function projectConversationHistory(
   sessionManager: Pick<SessionManager, "getBranch">,
 ): ConversationHistoryMessage[] {
   const messages: ConversationHistoryMessage[] = [];
   let assistant: ConversationHistoryMessage | undefined;
+  const seenCardIds = new Set<string>();
 
   const requireAssistant = (entryId: string): ConversationHistoryMessage => {
     assistant ??= {
@@ -161,12 +225,32 @@ export function projectConversationHistory(
       text: "",
       thinking: "",
       tools: [],
+      parts: [],
     };
     if (!messages.includes(assistant)) messages.push(assistant);
     return assistant;
   };
 
   for (const entry of sessionManager.getBranch()) {
+    if (entry.type === "compaction") {
+      assistant = undefined;
+      continue;
+    }
+    const reserved = parseReservedConversationEntry(entry);
+    if (reserved?.kind === "conversation_message") {
+      assistant = undefined;
+      seenCardIds.add(reserved.entry.details.cardId);
+      continue;
+    }
+    if (reserved?.kind === "conversation_card") {
+      const cardId = reserved.entry.data.cardId;
+      if (!seenCardIds.has(cardId)) assistant = undefined;
+      seenCardIds.add(cardId);
+      continue;
+    }
+    if (entry.type === "custom" || entry.type === "custom_message") {
+      continue;
+    }
     if (entry.type !== "message") continue;
     const message = record(entry.message);
     if (!message) continue;
@@ -188,10 +272,34 @@ export function projectConversationHistory(
       if (Array.isArray(message.content)) {
         for (const item of message.content) {
           const block = record(item);
-          if (block?.type === "text" && typeof block.text === "string") {
+          if (
+            block?.type === "text"
+            && typeof block.text === "string"
+            && block.text.length > 0
+          ) {
+            const offset = target.text
+              ? target.text.length + 2
+              : 0;
             target.text = appendParagraph(target.text, block.text);
-          } else if (block?.type === "thinking" && typeof block.thinking === "string") {
+            target.parts?.push({
+              kind: "text",
+              offset,
+              length: block.text.length,
+            });
+          } else if (
+            block?.type === "thinking"
+            && typeof block.thinking === "string"
+            && block.thinking.length > 0
+          ) {
+            const offset = target.thinking
+              ? target.thinking.length + 2
+              : 0;
             target.thinking = appendParagraph(target.thinking, block.thinking);
+            target.parts?.push({
+              kind: "thinking",
+              offset,
+              length: block.thinking.length,
+            });
           } else if (
             block?.type === "toolCall"
             && typeof block.id === "string"
@@ -203,6 +311,7 @@ export function projectConversationHistory(
               args: toWireValue(block.arguments),
               status: "error",
             });
+            target.parts?.push({ kind: "tool", toolCallId: block.id });
           }
         }
       }
@@ -211,9 +320,18 @@ export function projectConversationHistory(
         message.stopReason === "error"
         && typeof message.errorMessage === "string"
       ) {
+        const offset = target.text ? target.text.length + 2 : 0;
+        const failureText = `运行失败：${message.errorMessage}`;
         target.text = appendParagraph(target.text, `运行失败：${message.errorMessage}`);
+        target.parts?.push({
+          kind: "text",
+          offset,
+          length: failureText.length,
+        });
       } else if (message.stopReason === "aborted") {
+        const offset = target.text ? target.text.length + 2 : 0;
         target.text = appendParagraph(target.text, "运行已中止。");
+        target.parts?.push({ kind: "text", offset, length: 6 });
       }
       continue;
     }
@@ -222,7 +340,11 @@ export function projectConversationHistory(
       message.role === "toolResult"
       && typeof message.toolCallId === "string"
     ) {
-      const target = requireAssistant(entry.id);
+      let target = [...messages].reverse().find((item) =>
+        item.role === "assistant"
+        && item.tools.some((tool) => tool.toolCallId === message.toolCallId)
+      );
+      target ??= requireAssistant(entry.id);
       let tool = target.tools.find((item) => item.toolCallId === message.toolCallId);
       if (!tool) {
         tool = {
@@ -231,6 +353,10 @@ export function projectConversationHistory(
           status: "error",
         };
         target.tools.push(tool);
+        target.parts?.push({
+          kind: "tool",
+          toolCallId: message.toolCallId,
+        });
       }
       tool.result = toWireValue({
         content: message.content,
@@ -243,6 +369,7 @@ export function projectConversationHistory(
   return messages.map((message) => ({
     ...message,
     tools: message.tools.map((tool): ConversationHistoryTool => ({ ...tool })),
+    parts: message.parts?.map((part) => ({ ...part })),
     usage: message.usage ? { ...message.usage } : undefined,
   }));
 }
