@@ -46,6 +46,15 @@ function distanceFromBottom(transcript: HTMLElement): number {
   );
 }
 
+function sameChatFocus(
+  left: ChatState["focus"],
+  right: ChatState["focus"],
+): boolean {
+  return left?.sessionId === right?.sessionId
+    && left?.conversationId === right?.conversationId
+    && left?.focusId === right?.focusId;
+}
+
 function queuedPromptStatusLabel(status: QueuedPromptStatus): string {
   switch (status) {
     case "submitting": return "正在提交";
@@ -226,6 +235,7 @@ export function Chat({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const followOutputRef = useRef(true);
   const lastScrollTopRef = useRef(0);
+  const positionedFocusRef = useRef<ChatState["focus"]>(undefined);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [roleDetailsOpen, setRoleDetailsOpen] = useState(false);
   const [compactionThresholdOpen, setCompactionThresholdOpen] = useState(false);
@@ -325,7 +335,16 @@ export function Chat({
     );
   }, [scrollTranscript]);
   useLayoutEffect(() => {
-    if (followOutputRef.current) {
+    const focusNeedsInitialPosition = chat.focus
+      && !sameChatFocus(positionedFocusRef.current, chat.focus);
+    if (focusNeedsInitialPosition) {
+      followOutputRef.current = true;
+      setShowJumpToLatest(false);
+      if (conversationReady) {
+        scrollToLatest();
+        positionedFocusRef.current = chat.focus;
+      }
+    } else if (followOutputRef.current) {
       followLatest();
       setShowJumpToLatest(false);
     } else {
@@ -334,7 +353,7 @@ export function Chat({
     if (transcriptRef.current) {
       lastScrollTopRef.current = transcriptRef.current.scrollTop;
     }
-  }, [chat, compacting, followLatest]);
+  }, [chat, compacting, conversationReady, followLatest, scrollToLatest]);
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
