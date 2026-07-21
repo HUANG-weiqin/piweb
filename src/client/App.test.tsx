@@ -13,6 +13,7 @@ import {
 import { App } from "./App";
 
 const RUN_ID = "13f17393-974b-49a0-9c6a-3176f775912a";
+const RUN_B = "65feacc3-00b4-45bd-80ee-5e18bc32f7dc";
 const PROJECT_ID = "f25ee8d8-34f0-4c30-a045-b2a69f2e28bd";
 const CONVERSATION_ID = "0198f775-88f3-7af1-9c6a-3176f775912a";
 const CONVERSATION_B = "6a04656b-72d9-43ae-b1a8-5754cfa2b7cf";
@@ -1469,6 +1470,94 @@ describe("App", () => {
     })).toBeEnabled();
   });
 
+  it("does not carry a pending deletion into another workspace", () => {
+    localStorage.setItem("piweb.workspaces", JSON.stringify([
+      "E:\\first",
+      "E:\\second",
+    ]));
+    localStorage.setItem("piweb.lastCwd", "E:\\first");
+    render(<App />);
+    const firstSessionId = latestCommand("initialize").sessionId;
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId: firstSessionId,
+          cwd: "E:\\first",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.emit?.({
+        type: "project_snapshot",
+        sessionId: firstSessionId,
+        projectId: PROJECT_ID,
+        conversations: [{
+          id: CONVERSATION_ID,
+          name: "Current",
+          preview: "",
+          createdAt: "2026-07-18T12:00:00.000Z",
+          updatedAt: "2026-07-18T12:01:00.000Z",
+          messageCount: 0,
+          activity: { kind: "idle" },
+        }, {
+          id: CONVERSATION_B,
+          name: "Delete me",
+          preview: "",
+          createdAt: "2026-07-17T12:00:00.000Z",
+          updatedAt: "2026-07-17T12:01:00.000Z",
+          messageCount: 0,
+          activity: { kind: "idle" },
+        }],
+        truncated: false,
+      });
+    });
+    fireEvent.click(screen.getByRole("button", { name: "删除会话 Delete me" }));
+    fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
+    expect(screen.getByRole("button", { name: "删除会话 Delete me" }))
+      .toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "打开工作区 second" }));
+    const secondSessionId = latestCommand("initialize").sessionId;
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId: secondSessionId,
+          cwd: "E:\\second",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.emit?.({
+        type: "project_snapshot",
+        sessionId: secondSessionId,
+        projectId: PROJECT_ID,
+        conversations: [{
+          id: CONVERSATION_B,
+          name: "Second project",
+          preview: "",
+          createdAt: "2026-07-20T12:00:00.000Z",
+          updatedAt: "2026-07-20T12:01:00.000Z",
+          messageCount: 0,
+          activity: { kind: "idle" },
+        }],
+        truncated: false,
+      });
+    });
+
+    expect(screen.getByRole("button", { name: "删除会话 Second project" }))
+      .toBeEnabled();
+  });
+
   it("deletes the focused idle conversation and returns to explicit role selection", () => {
     render(<App />);
     const sessionId = startFromSetup();
@@ -1824,6 +1913,291 @@ describe("App", () => {
       conversationId: CONVERSATION_ID,
       text: "only for A",
     });
+  });
+
+  it("allows switching conversations while guidance delivery is pending", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: true,
+          activeRun: { id: RUN_ID, phase: "running" },
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.emit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_ID,
+        conversations: [{
+          id: CONVERSATION_ID,
+          name: "A",
+          preview: "",
+          createdAt: "2026-07-19T08:00:00.000Z",
+          updatedAt: "2026-07-19T08:00:00.000Z",
+          messageCount: 0,
+          activity: { kind: "running", runId: RUN_ID },
+        }, {
+          id: CONVERSATION_B,
+          name: "B",
+          preview: "",
+          createdAt: "2026-07-19T08:00:00.000Z",
+          updatedAt: "2026-07-19T09:00:00.000Z",
+          messageCount: 0,
+          activity: { kind: "idle" },
+        }],
+        truncated: false,
+      });
+    });
+
+    const input = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
+    fireEvent.change(input, { target: { value: "guide A" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    const guidance = latestCommand("steer");
+    expect(screen.getByRole("region", { name: "待发送消息" }))
+      .toHaveTextContent("正在提交");
+
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    expect(latestCommand("focus_conversation").conversationId)
+      .toBe(CONVERSATION_B);
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: true,
+        activeRun: { id: RUN_B, phase: "running" },
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+    expect(screen.queryByRole("region", { name: "待发送消息" }))
+      .not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "给 Pi 发送消息" }), {
+      target: { value: "guide B" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    const guidanceB = latestCommand("steer");
+    expect(guidanceB).toMatchObject({
+      conversationId: CONVERSATION_B,
+      runId: RUN_B,
+    });
+
+    act(() => socketMock.emit?.({
+      type: "command_complete",
+      operation: "steer",
+      commandId: guidance.commandId,
+      sessionId,
+    }));
+    expect(screen.getByRole("region", { name: "待发送消息" }))
+      .toHaveTextContent("正在提交");
+    act(() => socketMock.emit?.({
+      type: "command_complete",
+      operation: "steer",
+      commandId: guidanceB.commandId,
+      sessionId,
+    }));
+    expect(screen.queryByRole("region", { name: "待发送消息" }))
+      .not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 A" }));
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: true,
+        activeRun: { id: RUN_ID, phase: "running" },
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+    expect(screen.queryByRole("region", { name: "待发送消息" }))
+      .not.toBeInTheDocument();
+  });
+
+  it("freezes focus-bound controls as soon as a conversation switch starts", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: true,
+          activeRun: { id: RUN_ID, phase: "running" },
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.emit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_ID,
+        conversations: [{
+          id: CONVERSATION_ID,
+          name: "A",
+          preview: "",
+          createdAt: "2026-07-19T08:00:00.000Z",
+          updatedAt: "2026-07-19T08:00:00.000Z",
+          messageCount: 0,
+          activity: { kind: "idle" },
+        }, {
+          id: CONVERSATION_B,
+          name: "B",
+          preview: "",
+          createdAt: "2026-07-19T08:00:00.000Z",
+          updatedAt: "2026-07-19T09:00:00.000Z",
+          messageCount: 0,
+          activity: { kind: "idle" },
+        }],
+        truncated: false,
+      });
+    });
+    socketMock.autoFocus = false;
+
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+
+    act(() => socketMock.emit?.({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      messages: [],
+      truncated: false,
+    }));
+
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toBeDisabled();
+    expect(screen.getByRole("button", { name: "手动压缩上下文" }))
+      .toBeDisabled();
+    const abortCount = socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "abort",
+    ).length;
+    expect(screen.getByRole("button", { name: "停止" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "停止" }));
+    expect(socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "abort",
+    )).toHaveLength(abortCount);
+  });
+
+  it("keeps a pending compaction scoped to its originating conversation", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.emit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_ID,
+        conversations: [{
+          id: CONVERSATION_ID,
+          name: "A",
+          preview: "",
+          createdAt: "2026-07-19T08:00:00.000Z",
+          updatedAt: "2026-07-19T08:00:00.000Z",
+          messageCount: 0,
+          activity: { kind: "idle" },
+        }, {
+          id: CONVERSATION_B,
+          name: "B",
+          preview: "",
+          createdAt: "2026-07-19T08:00:00.000Z",
+          updatedAt: "2026-07-19T09:00:00.000Z",
+          messageCount: 0,
+          activity: { kind: "idle" },
+        }],
+        truncated: false,
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "手动压缩上下文" }));
+    const compaction = latestCommand("compact_context");
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+
+    expect(screen.getByRole("button", { name: "手动压缩上下文" }))
+      .toHaveTextContent("手动压缩");
+    const deletionCount = socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "delete_conversation",
+    ).length;
+    fireEvent.click(screen.getByRole("button", { name: "删除会话 A" }));
+    fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
+    expect(socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "delete_conversation",
+    )).toHaveLength(deletionCount);
+    fireEvent.click(screen.getByRole("button", { name: "保留" }));
+    act(() => socketMock.rawEmit?.({
+      type: "error",
+      scope: "command",
+      operation: "compact_context",
+      commandId: compaction.commandId,
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      message: "compaction failed",
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 A" }));
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+    expect(screen.getByRole("button", { name: "手动压缩上下文" }))
+      .toHaveTextContent("手动压缩");
   });
 
   it("only a matching prompt error clears the outstanding run", () => {

@@ -182,6 +182,8 @@ interface RunTicket {
   waitingEpoch?: symbol;
   toolMode: ToolMode;
   extensionErrorMessage?: string;
+  sawSdkCompactionAttempt: boolean;
+  compactionErrorReported: boolean;
   abortPromise?: Promise<void>;
   projectRunLease?: ProjectRunLease;
   finishPromise?: Promise<RunSettlement>;
@@ -257,11 +259,13 @@ export class ConversationActor {
   private activeRun?: RunTicket;
   private opening = true;
   private compacting = false;
+  private hostCompactionInProgress = false;
   private truncating = false;
   private switchingRole = false;
   private disposing = false;
   private disposed = false;
   private fatalError?: Error;
+  private manualCompaction?: Promise<void>;
   private disposePromise?: Promise<ConversationDeletionLease | undefined>;
 
   private constructor(options: ConversationActorOpenOptions) {
@@ -384,15 +388,28 @@ export class ConversationActor {
         new Error("Conversation cannot compact during another operation"),
       );
     }
-    return this.operations.run(async () => {
-      this.assertUsable();
-      if (this.activeRun) {
-        throw new Error(
-          "Cannot compact a busy conversation; abort and wait first",
-        );
+    this.updateCompacting(true);
+    const operation = this.operations.run(async () => {
+      try {
+        this.assertUsable();
+        if (this.activeRun) {
+          throw new Error(
+            "Cannot compact a busy conversation; abort and wait first",
+          );
+        }
+        await this.compactSession(true);
+      } finally {
+        this.updateCompacting(false);
       }
-      await this.compactSession();
     });
+    this.manualCompaction = operation;
+    const clearOperation = () => {
+      if (this.manualCompaction === operation) {
+        this.manualCompaction = undefined;
+      }
+    };
+    void operation.then(clearOperation, clearOperation);
+    return operation;
   }
 
   switchRole(
@@ -752,6 +769,8 @@ export class ConversationActor {
       guidanceDeliveries: [],
       phase: "queued",
       toolMode: this.profileSnapshot.role.toolMode,
+      sawSdkCompactionAttempt: false,
+      compactionErrorReported: false,
     };
     this.activeRun = ticket;
     this.emitSessionEvent(ticket, { type: "run_queued" });
@@ -857,6 +876,15 @@ export class ConversationActor {
           failures.push(error);
         }
       }
+      const manualCompaction = this.manualCompaction;
+      if (manualCompaction) {
+        try {
+          this.session.abortCompaction();
+        } catch (error) {
+          failures.push(error);
+        }
+        await manualCompaction.catch(() => undefined);
+      }
 
       try {
         this.unsubscribeSession?.();
@@ -919,7 +947,7 @@ export class ConversationActor {
     execute: (ticket: RunTicket) => Promise<void>,
   ): Promise<void> {
     if (this.activeRun !== ticket) return;
-    if (ticket.phase === "cancelling") {
+    if (isCancelling(ticket)) {
       await this.settleRun(ticket, "aborted");
       return;
     }
@@ -932,6 +960,12 @@ export class ConversationActor {
       return;
     }
     ticket.projectRunLease = projectRunLease;
+    await this.compactAtThreshold(ticket);
+    if (this.activeRun !== ticket) return;
+    if (ticket.phase === "cancelling") {
+      await this.settleRun(ticket, "aborted");
+      return;
+    }
     ticket.phase = "running";
     this.emitSessionEvent(ticket, { type: "run_started" });
     this.emitActivity();
@@ -947,6 +981,7 @@ export class ConversationActor {
         outcome = "aborted";
       } else {
         await this.compactAtThreshold(ticket);
+        if (isCancelling(ticket)) outcome = "aborted";
       }
     } catch (error) {
       if (isCancelling(ticket) || this.activeRun !== ticket) {
@@ -962,6 +997,7 @@ export class ConversationActor {
   }
 
   private async compactAtThreshold(ticket: RunTicket): Promise<void> {
+    if (ticket.sawSdkCompactionAttempt || ticket.compactionErrorReported) return;
     const usage = this.session.getContextUsage?.();
     if (
       usage?.percent === null
@@ -971,22 +1007,32 @@ export class ConversationActor {
     try {
       await this.compactSession();
     } catch (error) {
-      this.emitError(error, ticket.id);
+      if (isCancelling(ticket)) return;
+      if (!ticket.compactionErrorReported) {
+        ticket.compactionErrorReported = true;
+        this.emitError(error, ticket.id);
+      }
     }
   }
 
-  private async compactSession(): Promise<void> {
-    if (this.compacting) {
+  private async compactSession(reserved = false): Promise<void> {
+    if (this.compacting && !reserved) {
       throw new Error("Conversation is already compacting");
     }
-    this.compacting = true;
-    this.emitCompaction();
+    if (!reserved) this.updateCompacting(true);
+    this.hostCompactionInProgress = true;
     try {
       await this.session.compact();
     } finally {
-      this.compacting = false;
-      this.emitCompaction();
+      this.hostCompactionInProgress = false;
+      if (!reserved) this.updateCompacting(false);
     }
+  }
+
+  private updateCompacting(compacting: boolean): void {
+    if (this.compacting === compacting) return;
+    this.compacting = compacting;
+    this.emitCompaction();
   }
 
   private settleRun(
@@ -1077,6 +1123,13 @@ export class ConversationActor {
   private cancelRun(ticket: RunTicket): Promise<void> {
     if (this.activeRun !== ticket) return Promise.resolve();
     this.cancelScope(ticket.id);
+    if (this.compacting) {
+      try {
+        this.session.abortCompaction();
+      } catch (error) {
+        this.emitError(error, ticket.id);
+      }
+    }
     if (ticket.phase === "queued") {
       ticket.phase = "cancelling";
       this.emitActivity();
@@ -1104,6 +1157,23 @@ export class ConversationActor {
 
   private onSessionEvent(event: AgentSessionEvent): void {
     const ticket = this.activeRun;
+    if (event.type === "compaction_start") {
+      if (ticket && !this.hostCompactionInProgress) {
+        ticket.sawSdkCompactionAttempt = true;
+      }
+      this.updateCompacting(true);
+    } else if (event.type === "compaction_end") {
+      this.updateCompacting(false);
+      if (
+        ticket
+        && event.errorMessage
+        && !event.aborted
+        && !event.willRetry
+      ) {
+        ticket.compactionErrorReported = true;
+        this.emitError(event.errorMessage, ticket.id);
+      }
+    }
     if (
       !ticket
       || ticket.phase === "queued"

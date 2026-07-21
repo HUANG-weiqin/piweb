@@ -49,9 +49,9 @@
 - 原子持有 `sessionId + project handle + focused conversationId/focusId + project observer + focused extension UI route`。
 - 普通命令进入 `SerialTaskQueue`。
 - `abort`、`steer`、`auth_response`、`cancel_auth`、`close_session` 走控制通道；steer 必须在当前 run 尚占用 actor operation queue 时即可注入。
-- generation 使创建中的 project observation 变成 stale；detach 只释放观察 handle，不 dispose 后台 actor。
+- generation 使创建中的 project observation 变成 stale；detach 只释放观察 handle，不 dispose 后台 actor。不同 cwd 的 project context 与 conversation actor 各自持有运行状态，单个浏览器连接切换项目只替换观察投影，不能 abort 或 dispose 其它项目仍在执行的 run。
 - 每次 attach 分配新 focusId；PiConnection 只向浏览器转发匹配当前 focus 的 transcript/run event，项目级 activity 仍通过 snapshot 更新。
-- `ExtensionUIBroker` 是连接级临时 rendezvous，每次 focus 使用独立 scope；后台 actor 缺少 UI delegate 时由 conversation router 保留请求并进入 attention，聚焦后再接入 broker，不抢焦点。切换 focus 会取消旧 scope，旧对话框不能在新会话界面继续回答。
+- `ExtensionUIBroker` 是连接级临时 rendezvous，每次 focus 使用独立 scope 和 AbortController；后台 actor 缺少 UI delegate 时由 conversation router 保留请求并进入 attention，聚焦后再接入 broker，不抢焦点。focus/create 的 controller 在命令进入串行队列前登记，后续 focus、initialize、close 或 disconnect 会先同步 abort，再排队 detach，避免 extension activation 等浏览器对话框、而取消操作反过来等待同一队列的死锁。成功 attach 后该 controller 转交给 view 并取消旧 scope；切换失败则保留原 view controller，使原会话 UI 仍可继续使用。create 在 activation 后观察到 abort 时必须在同一 project lifecycle 内删除刚创建的 conversation/actor，不能留下无 attach 回执的幽灵会话。
 
 ## 决策
 
@@ -61,7 +61,9 @@
 - `createAgentSession` 一旦返回，owner bind、host tool gate 安装、startup provider/固定模型与初始思考强度校验和 extension load error 投影都必须位于同一个失败清理边界；其中任何一步抛错都 teardown 已创建的 AgentSession 并释放 actor lease。
 - 持久 conversation、连接 observation sessionId、focusId 和 runId 是不同身份；同一 conversation 重连或重新 focus 都必须分配新传输身份。
 - prompt、运行中 steer、inbox custom messages 和 abort 都由 ConversationActor 的 active run ownership 控制；浏览器 attach/detach 不穿过或中止运行过程。steer 只接受精确 `running | waiting` run，不能再额外依赖 SDK 的 `isStreaming` 投影：actor 会先公布 running，SDK 标志随后才可能追上，而 Pi 原生 steering queue 已能安全接收。引导在当前 assistant turn 工具结束、下一次模型调用前生效，不创建第二个 RunTicket。Actor 为每个浏览器 steer 保留 FIFO delivery waiter，只有对应 user message 的 SDK 事件进入当前 run 后才确认命令；run 先结算或取消会拒绝所有未投递 waiter。
-- 自动压缩阈值属于 conversation actor：缺省 70%，从 `piweb.compaction_threshold.v1` 恢复；每轮正常结束后用 Pi 的 context usage 检查百分比并触发标准 `compact()`，不改动同时影响摘要预算的 `reserveTokens`。更新只追加非上下文 custom entry，运行中的本轮结算会读取最新阈值。空闲会话还可通过精确 focus 关联的 `compact_context` 手动调用同一个标准 `compact()`；两条路径都由 actor 的瞬时 `compacting` 状态包围并阻止新的 run/角色切换/截断，focused connection 将其投影到 `PublicState`。成功 compact 产生的 Pi 原生持久条目仍在 snapshot 中投影为用户可见分界线，不另存第二份持久压缩状态。
+- 精确校验来源 focus 后，手动 `compact_context` 直接交给来源 ConversationActor，不占用 PiConnection 的视图串行队列；压缩继续由 actor 拥有，浏览器可同时切换到另一 conversation。Actor 在返回 Promise 前同步预约 compacting，封住同时启动 run 或删除的间隙；删除端也必须拒绝 compacting actor，不能释放仍被压缩任务使用的 session。完成时仍按原 sessionId + commandId 回执；若当前 focus 已回到同一 conversation，即使 focusId 已更新也要刷新当前 snapshot，确保 A→B→A 不漏掉 compaction marker。
+- 会话角色切换同样是来源 ConversationActor 拥有的长操作，不占用 PiConnection 的视图串行队列；切换项目只撤销浏览器观察，不能取消或等待另一项目正在重建的 runtime。原 observation 仍有效时才刷新 focus 并回执，之后重开来源会话从 actor 权威角色快照恢复。
+- 自动压缩阈值属于 conversation actor：缺省 70%，从 `piweb.compaction_threshold.v1` 恢复；每轮开始前先处理上一次失败/中止遗留的高水位，正常结束后再用 Pi 的 context usage 检查百分比并触发标准 `compact()`，不改动同时影响摘要预算的 `reserveTokens`。Actor 同时观察 SDK 原生 `compaction_start/end` 作为 `compacting` 状态来源；同一 run 已见 SDK 压缩 attempt 时，宿主阈值检查不再立即重试，避免 SDK 失败后双重触发。取消 run 在 compacting 时先调用 `abortCompaction()`；无论取消发生在 pre-run 还是 post-run 压缩，必须等 compact 退出后把 run 结算为 aborted，且取消异常不能伪装成普通压缩错误。更新阈值只追加非上下文 custom entry。空闲会话还可通过精确 focus 关联的 `compact_context` 手动调用同一个标准 `compact()`；这些路径共用 actor 的瞬时 `compacting` 状态并阻止新的 run/角色切换/截断，focused connection 将其投影到 `PublicState`。成功 compact 产生的 Pi 原生持久条目仍在 snapshot 中投影为用户可见分界线，不另存第二份持久压缩状态。
 - 空闲会话可通过精确 focus 关联的 `switch_conversation_role` 应用当前可用角色。Actor 同步封锁新 run，停止旧 AgentSession，追加角色变更记录，再用同一 SessionManager 和新角色 model/prompt/meta tools 重建；替换 runtime 打开失败时追加上一角色作为补偿并恢复旧 runtime，补偿也失败则 actor fatal。conversationId、history、lifecycle 与 createdBy 不变。
 - API Key 在共享配置队列完成后才确认；凭据本身影响所有项目，但发起命令必须仍属于提交时的 observation session/generation，避免迟到页面修改全局认证。会话模型由角色快照固定，中途 `select_model` 明确拒绝；actor 重开时再次校验实际模型，不能 SDK fallback。
 - API Key、角色 CRUD 和删除等需要结算的操作都带原 sessionId + commandId，连接内复用 commandId 会被拒绝。

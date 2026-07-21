@@ -157,6 +157,7 @@ export interface CreateUserConversationInput {
   roleId: string;
   title?: string;
   extensionUI?: PortableExtensionUI;
+  signal?: AbortSignal;
 }
 
 export interface StartPeerSessionInput {
@@ -799,6 +800,7 @@ export class ProjectSessionCoordinator {
   ): Promise<ConversationActor> {
     const context = this.requireContext(handle);
     return this.runLifecycle(context, async () => {
+      this.throwIfAborted(input.signal);
       const conversationId = randomUUID();
       const detachExtensionUI = input.extensionUI
         ? this.extensionUIRouter(context, conversationId)
@@ -809,15 +811,35 @@ export class ProjectSessionCoordinator {
         lifecycle: { kind: "normal" },
         createdBy: { kind: "user" },
       };
+      let actor: ConversationActor | undefined;
       try {
-        const actor = await this.createConversationActor(
+        actor = await this.createConversationActor(
           context,
           conversationId,
           profile,
           input.title,
         );
+        this.throwIfAborted(input.signal);
         await context.project.setLastConversation(actor.conversationId);
+        this.throwIfAborted(input.signal);
         return actor;
+      } catch (error) {
+        if (actor && input.signal?.aborted) {
+          try {
+            await this.deleteConversationInternal(
+              context,
+              conversationId,
+              false,
+              false,
+            );
+          } catch (cleanupError) {
+            throw new AggregateError(
+              [error, cleanupError],
+              "Failed to discard an aborted conversation creation",
+            );
+          }
+        }
+        throw error;
       } finally {
         detachExtensionUI?.();
       }
@@ -1058,6 +1080,9 @@ export class ProjectSessionCoordinator {
     conversationId: string,
   ): Promise<void> {
     const context = this.requireContext(handle);
+    if (context.deleting.has(conversationId)) {
+      throw new Error(`Conversation is being deleted: ${conversationId}`);
+    }
     await this.requireActor(context, conversationId).compactContext();
     this.emit(context, { type: "project_changed" });
   }
@@ -3201,11 +3226,16 @@ export class ProjectSessionCoordinator {
     const actor = context.actors.get(conversationId);
     if (
       actor
-      && actor.getActivity().kind !== "idle"
+      && (
+        actor.getActivity().kind !== "idle"
+        || actor.isCompacting()
+      )
       && !allowTemporaryActor
     ) {
       context.deleting.delete(conversationId);
-      throw new Error("Cannot delete a busy conversation; abort and wait first");
+      throw new Error(
+        "Cannot delete a busy conversation or one that is compacting; wait first",
+      );
     }
     let deletionLease;
     let durableDeletionIntent = false;

@@ -59,6 +59,7 @@ function deferred<T = void>(): Deferred<T> {
 
 interface FakeSession extends AgentSession {
   abortCalls: number;
+  abortCompactionCalls: number;
   compactCalls: number;
   compactImplementation(): Promise<unknown>;
   contextPercent: number | null;
@@ -77,6 +78,7 @@ function fakeSettings(): SettingsManager {
 function fakeSession(): FakeSession {
   const session = {
     abortCalls: 0,
+    abortCompactionCalls: 0,
     compactCalls: 0,
     compactImplementation: async () => ({}),
     contextPercent: 0,
@@ -104,6 +106,9 @@ function fakeSession(): FakeSession {
     abort: async function () {
       this.abortCalls++;
       this.isStreaming = false;
+    },
+    abortCompaction: function () {
+      this.abortCompactionCalls++;
     },
     getContextUsage: function () {
       return {
@@ -373,6 +378,235 @@ describe("ConversationActor", () => {
         conversationId: CONVERSATION_ID,
         compacting: false,
       }]);
+    await fixture.actor.dispose();
+  });
+
+  it("compacts an inherited high-water context before the next run", async () => {
+    const fixture = await openActor();
+    const order: string[] = [];
+    fixture.runtime.session.promptImplementation = async () => {
+      order.push("failed prompt");
+      fixture.runtime.session.contextPercent = 80;
+      throw new Error("model failed");
+    };
+
+    await expect(fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "first attempt",
+      origin: "browser",
+    })).resolves.toMatchObject({ outcome: "failed" });
+    expect(fixture.runtime.session.compactCalls).toBe(0);
+
+    fixture.runtime.session.compactImplementation = async () => {
+      order.push("compact");
+      return {};
+    };
+    fixture.runtime.session.promptImplementation = async () => {
+      order.push("next prompt");
+    };
+    await fixture.actor.startPrompt({
+      runId: RUN_B,
+      text: "retry safely",
+      origin: "browser",
+    });
+
+    expect(order).toEqual(["failed prompt", "compact", "next prompt"]);
+    expect(fixture.runtime.session.compactCalls).toBe(1);
+    await fixture.actor.dispose();
+  });
+
+  it("rechecks the threshold after host pre-compaction when the run refills context", async () => {
+    const fixture = await openActor();
+    fixture.runtime.session.contextPercent = 80;
+    fixture.runtime.session.compactImplementation = async () => {
+      fixture.runtime.session.eventListener?.(nativeEvent({
+        type: "compaction_start",
+        reason: "threshold",
+      }));
+      fixture.runtime.session.eventListener?.(nativeEvent({
+        type: "compaction_end",
+        reason: "threshold",
+      }));
+      return {};
+    };
+    fixture.runtime.session.promptImplementation = async () => {
+      fixture.runtime.session.contextPercent = 80;
+    };
+
+    await fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "grow after pre-compaction",
+      origin: "browser",
+    });
+
+    expect(fixture.runtime.session.compactCalls).toBe(2);
+    await fixture.actor.dispose();
+  });
+
+  it("does not retry a failed host pre-compaction after the run", async () => {
+    const fixture = await openActor();
+    fixture.runtime.session.contextPercent = 80;
+    fixture.runtime.session.compactImplementation = async () => {
+      throw new Error("host compaction failed");
+    };
+
+    await expect(fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "continue after compaction failure",
+      origin: "browser",
+    })).resolves.toMatchObject({ outcome: "completed" });
+
+    expect(fixture.runtime.session.compactCalls).toBe(1);
+    expect(fixture.events.filter(({ type }) => type === "error"))
+      .toEqual([{
+        type: "error",
+        conversationId: CONVERSATION_ID,
+        runId: RUN_A,
+        message: "host compaction failed",
+      }]);
+    await fixture.actor.dispose();
+  });
+
+  it("observes SDK-owned compaction as actor activity", async () => {
+    const fixture = await openActor();
+    const promptFinished = deferred();
+    fixture.runtime.session.promptImplementation = () =>
+      promptFinished.promise;
+    const running = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "let the SDK compact",
+      origin: "browser",
+    });
+    await vi.waitFor(() => {
+      expect(fixture.events).toContainEqual({
+        type: "session_event",
+        conversationId: CONVERSATION_ID,
+        runId: RUN_A,
+        event: { type: "run_started" },
+      });
+    });
+
+    fixture.runtime.session.eventListener?.(nativeEvent({
+      type: "compaction_start",
+    }));
+    expect(fixture.actor.getState().compacting).toBe(true);
+    fixture.runtime.session.eventListener?.(nativeEvent({
+      type: "compaction_end",
+    }));
+    expect(fixture.actor.getState().compacting).toBe(false);
+    expect(fixture.events.filter(({ type }) => type === "compaction"))
+      .toEqual([{
+        type: "compaction",
+        conversationId: CONVERSATION_ID,
+        compacting: true,
+      }, {
+        type: "compaction",
+        conversationId: CONVERSATION_ID,
+        compacting: false,
+      }]);
+
+    promptFinished.resolve();
+    await running;
+    await fixture.actor.dispose();
+  });
+
+  it("does not retry a failed SDK compaction through the host threshold", async () => {
+    const fixture = await openActor();
+    fixture.runtime.session.promptImplementation = async () => {
+      fixture.runtime.session.contextPercent = 90;
+      fixture.runtime.session.eventListener?.(nativeEvent({
+        type: "compaction_start",
+        reason: "threshold",
+      }));
+      fixture.runtime.session.eventListener?.(nativeEvent({
+        type: "compaction_end",
+        reason: "threshold",
+        result: undefined,
+        aborted: false,
+        willRetry: false,
+        errorMessage: "SDK compaction failed",
+      }));
+    };
+
+    await fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "one compaction attempt is enough",
+      origin: "browser",
+    });
+
+    expect(fixture.runtime.session.compactCalls).toBe(0);
+    expect(fixture.events.filter(({ type }) => type === "error"))
+      .toEqual([{
+        type: "error",
+        conversationId: CONVERSATION_ID,
+        runId: RUN_A,
+        message: "SDK compaction failed",
+      }]);
+    await fixture.actor.dispose();
+  });
+
+  it("aborts threshold compaction before settling a queued run", async () => {
+    const fixture = await openActor();
+    const compactionStarted = deferred();
+    const finishCompaction = deferred();
+    let promptCalls = 0;
+    fixture.runtime.session.contextPercent = 80;
+    fixture.runtime.session.compactImplementation = async () => {
+      compactionStarted.resolve();
+      await finishCompaction.promise;
+      return {};
+    };
+    fixture.runtime.session.abortCompaction = () => {
+      fixture.runtime.session.abortCompactionCalls++;
+      finishCompaction.resolve();
+    };
+    fixture.runtime.session.promptImplementation = async () => {
+      promptCalls++;
+    };
+
+    const running = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "cancel before model call",
+      origin: "browser",
+    });
+    await compactionStarted.promise;
+    await fixture.actor.abort(RUN_A);
+    await expect(running).resolves.toMatchObject({ outcome: "aborted" });
+
+    expect(fixture.runtime.session.abortCompactionCalls).toBe(1);
+    expect(promptCalls).toBe(0);
+    expect(fixture.actor.getState().compacting).toBe(false);
+    await fixture.actor.dispose();
+  });
+
+  it("settles an explicit stop during post-run compaction as aborted", async () => {
+    const fixture = await openActor();
+    const compactionStarted = deferred();
+    const abortCompaction = deferred();
+    fixture.runtime.session.promptImplementation = async () => {
+      fixture.runtime.session.contextPercent = 80;
+    };
+    fixture.runtime.session.compactImplementation = async () => {
+      compactionStarted.resolve();
+      await abortCompaction.promise;
+      throw new Error("Compaction cancelled");
+    };
+    fixture.runtime.session.abortCompaction = () => {
+      fixture.runtime.session.abortCompactionCalls++;
+      abortCompaction.resolve();
+    };
+
+    const running = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "stop during post-run compaction",
+      origin: "browser",
+    });
+    await compactionStarted.promise;
+    await fixture.actor.abort(RUN_A);
+
+    await expect(running).resolves.toMatchObject({ outcome: "aborted" });
+    expect(fixture.runtime.session.abortCompactionCalls).toBe(1);
+    expect(fixture.events.filter(({ type }) => type === "error")).toEqual([]);
     await fixture.actor.dispose();
   });
 
@@ -926,6 +1160,11 @@ describe("ConversationActor", () => {
     };
 
     const compaction = fixture.actor.compactContext();
+    expect(() => fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "must not race the compaction reservation",
+      origin: "browser",
+    })).toThrow("Conversation is compacting");
     await compactionStarted.promise;
     expect(fixture.actor.getState().compacting).toBe(true);
     finishCompaction.resolve();

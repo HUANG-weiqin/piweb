@@ -560,7 +560,12 @@ export function Chat({
       <div className="composer">
         <textarea ref={textareaRef} aria-label="给 Pi 发送消息" value={draft} onChange={(e) => onDraftChange(e.target.value)} onKeyDown={keyDown} placeholder={composerPlaceholder} disabled={!online || !conversationReady || !model || submitting || compacting || roleSwitching || Boolean(rewindingMessageId)} rows={1} />
         <div className="composer-actions">
-          {busy && <button className="send stop" onClick={onAbort} aria-label="停止">■</button>}
+          {busy && <button
+            className="send stop"
+            onClick={onAbort}
+            aria-label="停止"
+            disabled={!online || !conversationReady}
+          >■</button>}
           <button className="send" onClick={send} disabled={!online || !conversationReady || !model || submitting || compacting || roleSwitching || Boolean(rewindingMessageId) || !draft.trim()} aria-label="发送">↑</button>
         </div>
       </div>

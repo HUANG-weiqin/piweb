@@ -2335,6 +2335,164 @@ describe("PiConnection coordinated project view", () => {
     }
   });
 
+  it("switches focus without waiting for another conversation to compact", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const compactionStarted = deferred();
+    const finishCompaction = deferred();
+    let compacting: Promise<void> | undefined;
+    let focusing: Promise<void> | undefined;
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      const firstCommandId = randomUUID();
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: firstCommandId,
+        sessionId: SESSION_A,
+        roleId: "default",
+        title: "first",
+      });
+      const first = harness.events.findLast(
+        (event) =>
+          event.type === "focus_attached"
+          && event.commandId === firstCommandId,
+      );
+      if (
+        first?.type !== "focus_attached"
+        || !first.conversationId
+        || !first.focusId
+      ) throw new Error("first conversation was not focused");
+
+      const secondCommandId = randomUUID();
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: secondCommandId,
+        sessionId: SESSION_A,
+        roleId: "default",
+        title: "second",
+      });
+      const second = harness.events.findLast(
+        (event) =>
+          event.type === "focus_attached"
+          && event.commandId === secondCommandId,
+      );
+      if (second?.type !== "focus_attached" || !second.conversationId) {
+        throw new Error("second conversation was not focused");
+      }
+
+      const refocusFirstId = randomUUID();
+      await harness.connection.handle({
+        type: "focus_conversation",
+        commandId: refocusFirstId,
+        sessionId: SESSION_A,
+        conversationId: first.conversationId,
+      });
+      const refocusedFirst = harness.events.findLast(
+        (event) =>
+          event.type === "focus_attached"
+          && event.commandId === refocusFirstId,
+      );
+      if (
+        refocusedFirst?.type !== "focus_attached"
+        || !refocusedFirst.focusId
+      ) throw new Error("first conversation was not refocused");
+
+      const firstSession = harness.runtime.created[0]!;
+      firstSession.compact = async () => {
+        firstSession.compactCalls++;
+        compactionStarted.resolve();
+        await finishCompaction.promise;
+        return {};
+      };
+      const compactCommandId = randomUUID();
+      compacting = harness.connection.handle({
+        type: "compact_context",
+        commandId: compactCommandId,
+        sessionId: SESSION_A,
+        conversationId: first.conversationId,
+        focusId: refocusedFirst.focusId,
+      });
+      await compactionStarted.promise;
+
+      const focusSecondId = randomUUID();
+      focusing = harness.connection.handle({
+        type: "focus_conversation",
+        commandId: focusSecondId,
+        sessionId: SESSION_A,
+        conversationId: second.conversationId,
+      });
+      const focusedPromptly = await Promise.race([
+        focusing.then(() => true),
+        new Promise<false>((resolve) => {
+          setTimeout(() => resolve(false), 500);
+        }),
+      ]);
+      expect(focusedPromptly).toBe(true);
+      expect(harness.events).toContainEqual(expect.objectContaining({
+        type: "focus_attached",
+        commandId: focusSecondId,
+        conversationId: second.conversationId,
+      }));
+
+      await expect(harness.connection.handle({
+        type: "delete_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId: first.conversationId,
+      })).rejects.toThrow("compacting");
+      expect(firstSession.disposed).toBe(false);
+
+      const refocusFirstAgainId = randomUUID();
+      await harness.connection.handle({
+        type: "focus_conversation",
+        commandId: refocusFirstAgainId,
+        sessionId: SESSION_A,
+        conversationId: first.conversationId,
+      });
+      const refocusedFirstAgain = harness.events.findLast(
+        (event) =>
+          event.type === "focus_attached"
+          && event.commandId === refocusFirstAgainId,
+      );
+      if (
+        refocusedFirstAgain?.type !== "focus_attached"
+        || !refocusedFirstAgain.focusId
+      ) throw new Error("first conversation was not focused again");
+      const snapshotsBeforeCompletion = harness.events.filter(
+        (event) => event.type === "conversation_snapshot",
+      ).length;
+
+      finishCompaction.resolve();
+      await compacting;
+      expect(harness.events.filter(
+        (event) => event.type === "conversation_snapshot",
+      ).length).toBeGreaterThan(snapshotsBeforeCompletion);
+      expect(harness.events.findLast(
+        (event) => event.type === "conversation_snapshot",
+      )).toMatchObject({
+        type: "conversation_snapshot",
+        conversationId: first.conversationId,
+        focusId: refocusedFirstAgain.focusId,
+      });
+      expect(harness.events).toContainEqual({
+        type: "command_complete",
+        operation: "compact_context",
+        commandId: compactCommandId,
+        sessionId: SESSION_A,
+      });
+    } finally {
+      finishCompaction.resolve();
+      await compacting?.catch(() => undefined);
+      await focusing?.catch(() => undefined);
+      await harness.cleanup();
+    }
+  });
+
   it("switches the exact focused conversation role before acknowledging it", async () => {
     const harness = await coordinatedConnectionHarness();
     try {
@@ -2390,6 +2548,95 @@ describe("PiConnection coordinated project view", () => {
         sessionId: SESSION_A,
       });
     } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("switches projects without waiting for a conversation role rebuild", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const cwdB = await realpath(
+      await mkdtemp(join(tmpdir(), "piweb-role-switch-second-")),
+    );
+    const activationStarted = deferred();
+    const finishActivation = deferred();
+    let switching: Promise<void> | undefined;
+    try {
+      const role = await harness.roles.createRole({
+        name: "Background reviewer",
+        description: "Rebuild this conversation in the background",
+        systemPrompt: "Review carefully.",
+        model: { provider: "test", id: "model" },
+        defaultThinkingLevel: "off",
+        toolMode: "full_access",
+        canManageSessions: false,
+      });
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        roleId: "default",
+      });
+      const focused = latestState(harness.events);
+      harness.runtime.activate = async () => {
+        activationStarted.resolve();
+        await finishActivation.promise;
+      };
+
+      switching = harness.connection.handle({
+        type: "switch_conversation_role",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+        roleId: role.id,
+      });
+      await activationStarted.promise;
+
+      const projectSwitch = harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_B,
+        cwd: cwdB,
+        conversation: { kind: "recent" },
+      });
+      const switchedPromptly = await Promise.race([
+        projectSwitch.then(() => true),
+        new Promise<false>((resolve) => {
+          setTimeout(() => resolve(false), 500);
+        }),
+      ]);
+      expect(switchedPromptly).toBe(true);
+
+      finishActivation.resolve();
+      await switching;
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_C,
+        cwd: harness.cwd,
+        conversation: {
+          kind: "open",
+          conversationId: focused.conversationId!,
+        },
+      });
+      expect(harness.events.findLast(
+        (event) => event.type === "conversation_snapshot",
+      )).toMatchObject({
+        type: "conversation_snapshot",
+        sessionId: SESSION_C,
+        conversationId: focused.conversationId,
+        role: { id: role.id },
+      });
+    } finally {
+      finishActivation.resolve();
+      await switching?.catch(() => undefined);
       await harness.cleanup();
     }
   });
@@ -3044,6 +3291,329 @@ describe("PiConnection coordinated project view", () => {
         "conversationId",
       );
     } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("keeps the current conversation UI live when a new focus creation fails", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      const firstCommandId = randomUUID();
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: firstCommandId,
+        sessionId: SESSION_A,
+        roleId: "default",
+      });
+      const firstAttach = harness.events.findLast(
+        (event) =>
+          event.type === "focus_attached"
+          && event.commandId === firstCommandId,
+      );
+      const firstUI = harness.runtime.lastCreateOptions?.extensionUI;
+      if (
+        firstAttach?.type !== "focus_attached"
+        || !firstAttach.conversationId
+        || !firstUI
+      ) {
+        throw new Error("first conversation was not attached");
+      }
+
+      harness.runtime.activate = async () => {
+        throw new Error("next conversation startup failed");
+      };
+      await expect(harness.connection.handle({
+        type: "create_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        roleId: "default",
+      })).rejects.toThrow("next conversation startup failed");
+
+      const dialog = firstUI.confirm(
+        "Still focused after failure",
+        "The previous conversation must keep its UI route",
+      );
+      await vi.waitFor(() => {
+        expect(harness.events).toContainEqual(expect.objectContaining({
+          type: "extension_ui_request",
+          sessionId: SESSION_A,
+          request: expect.objectContaining({
+            kind: "confirm",
+            title: "Still focused after failure",
+          }),
+        }));
+      });
+      const request = harness.events.findLast(
+        (event) =>
+          event.type === "extension_ui_request"
+          && event.request.kind === "confirm"
+          && event.request.title === "Still focused after failure",
+      );
+      if (request?.type !== "extension_ui_request") {
+        throw new Error("current conversation UI route was not preserved");
+      }
+      await harness.connection.handle({
+        type: "extension_ui_response",
+        sessionId: SESSION_A,
+        requestId: request.requestId,
+        response: { kind: "confirm", confirmed: true },
+      });
+      await expect(dialog).resolves.toBe(true);
+      expect(latestState(harness.events)).toMatchObject({
+        conversationId: firstAttach.conversationId,
+      });
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("cancels extension UI that blocks a focus transition before close queues", async () => {
+    const harness = await coordinatedConnectionHarness();
+    let create: Promise<void> | undefined;
+    let close: Promise<void> | undefined;
+    let requestId: string | undefined;
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      harness.runtime.activate = async (options) => {
+        if (!options.extensionUI) {
+          throw new Error("extension UI was not bound");
+        }
+        await options.extensionUI.confirm(
+          "Blocking focus startup",
+          "Closing the view must cancel this request before the actor queue",
+        );
+      };
+
+      create = harness.connection.handle({
+        type: "create_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        roleId: "default",
+      });
+      await vi.waitFor(() => {
+        const request = harness.events.findLast(
+          (event) =>
+            event.type === "extension_ui_request"
+            && event.request.kind === "confirm"
+            && event.request.title === "Blocking focus startup",
+        );
+        expect(request?.type).toBe("extension_ui_request");
+        if (request?.type === "extension_ui_request") {
+          requestId = request.requestId;
+        }
+      });
+
+      close = harness.connection.handle({
+        type: "close_session",
+        sessionId: SESSION_A,
+      });
+      const closedPromptly = await Promise.race([
+        close.then(() => true),
+        new Promise<false>((resolve) => {
+          setTimeout(() => resolve(false), 500);
+        }),
+      ]);
+      expect(closedPromptly).toBe(true);
+      await create;
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_B,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      await vi.waitFor(() => {
+        expect(harness.events.findLast(
+          (event) =>
+            event.type === "project_snapshot"
+            && event.sessionId === SESSION_B,
+        )).toMatchObject({
+          type: "project_snapshot",
+          sessionId: SESSION_B,
+          conversations: [],
+        });
+      });
+    } finally {
+      if (requestId) {
+        await harness.connection.handle({
+          type: "extension_ui_response",
+          sessionId: SESSION_A,
+          requestId,
+          response: { kind: "cancel" },
+        });
+      }
+      await create?.catch(() => undefined);
+      await close?.catch(() => undefined);
+      await harness.cleanup();
+    }
+  });
+
+  it("keeps runs self-contained while switching between projects", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const cwdB = await realpath(
+      await mkdtemp(join(tmpdir(), "piweb-coordinated-second-")),
+    );
+    const startedA = deferred();
+    const finishA = deferred();
+    const startedB = deferred();
+    const finishB = deferred();
+    let runA: Promise<void> | undefined;
+    let runB: Promise<void> | undefined;
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      const createA = randomUUID();
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: createA,
+        sessionId: SESSION_A,
+        roleId: "default",
+      });
+      const focusA = harness.events.findLast(
+        (event) => event.type === "focus_attached" && event.commandId === createA,
+      );
+      if (
+        focusA?.type !== "focus_attached"
+        || !focusA.conversationId
+        || !focusA.focusId
+      ) throw new Error("project A conversation was not focused");
+      const sessionA = harness.runtime.created[0]!;
+      sessionA.prompt = async () => {
+        startedA.resolve();
+        await finishA.promise;
+      };
+      runA = harness.connection.handle({
+        type: "prompt",
+        sessionId: SESSION_A,
+        conversationId: focusA.conversationId,
+        focusId: focusA.focusId,
+        runId: RUN_A,
+        text: "work in project A",
+      });
+      await startedA.promise;
+
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_B,
+        cwd: cwdB,
+        conversation: { kind: "recent" },
+      });
+      expect(sessionA.abortCalls).toBe(0);
+      expect(sessionA.disposed).toBe(false);
+
+      const createB = randomUUID();
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: createB,
+        sessionId: SESSION_B,
+        roleId: "default",
+      });
+      const focusB = harness.events.findLast(
+        (event) => event.type === "focus_attached" && event.commandId === createB,
+      );
+      if (
+        focusB?.type !== "focus_attached"
+        || !focusB.conversationId
+        || !focusB.focusId
+      ) throw new Error("project B conversation was not focused");
+      const sessionB = harness.runtime.created[1]!;
+      sessionB.prompt = async () => {
+        startedB.resolve();
+        await finishB.promise;
+      };
+      runB = harness.connection.handle({
+        type: "prompt",
+        sessionId: SESSION_B,
+        conversationId: focusB.conversationId,
+        focusId: focusB.focusId,
+        runId: RUN_B,
+        text: "work in project B",
+      });
+      await startedB.promise;
+
+      const reopenA = randomUUID();
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: reopenA,
+        sessionId: SESSION_C,
+        cwd: harness.cwd,
+        conversation: {
+          kind: "open",
+          conversationId: focusA.conversationId,
+        },
+      });
+      expect(harness.runtime.created).toHaveLength(2);
+      expect(sessionA.abortCalls).toBe(0);
+      expect(sessionB.abortCalls).toBe(0);
+      expect(latestState(harness.events)).toMatchObject({
+        sessionId: SESSION_C,
+        conversationId: focusA.conversationId,
+        busy: true,
+        activeRun: { id: RUN_A },
+      });
+
+      finishA.resolve();
+      await runA;
+      await vi.waitFor(() => {
+        expect(latestState(harness.events)).toMatchObject({
+          sessionId: SESSION_C,
+          conversationId: focusA.conversationId,
+          busy: false,
+        });
+      });
+
+      const sessionD = randomUUID();
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: sessionD,
+        cwd: cwdB,
+        conversation: {
+          kind: "open",
+          conversationId: focusB.conversationId,
+        },
+      });
+      expect(harness.runtime.created).toHaveLength(2);
+      expect(latestState(harness.events)).toMatchObject({
+        sessionId: sessionD,
+        conversationId: focusB.conversationId,
+        busy: true,
+        activeRun: { id: RUN_B },
+      });
+
+      finishB.resolve();
+      await runB;
+      await vi.waitFor(() => {
+        expect(latestState(harness.events)).toMatchObject({
+          sessionId: sessionD,
+          conversationId: focusB.conversationId,
+          busy: false,
+        });
+      });
+    } finally {
+      finishA.resolve();
+      finishB.resolve();
+      await runA?.catch(() => undefined);
+      await runB?.catch(() => undefined);
       await harness.cleanup();
     }
   });

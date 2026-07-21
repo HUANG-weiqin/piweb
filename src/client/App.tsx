@@ -121,7 +121,7 @@ interface PendingCompactionThreshold {
   commandId: string;
 }
 
-interface PendingContextCompaction {
+interface PendingContextCompaction extends ActiveFocus {
   commandId: string;
 }
 
@@ -146,6 +146,46 @@ interface ActiveFocus {
 interface PendingFocus {
   commandId: string;
   operation: "initialize" | "focus_conversation" | "create_conversation";
+  sourceFocus?: ActiveFocus;
+  sourceReady?: boolean;
+}
+
+interface ConversationOperation {
+  commandId: string;
+  conversationId: string;
+}
+
+class ConversationOperationRegistry<T extends ConversationOperation> {
+  private readonly byConversation = new Map<string, T>();
+
+  set(operation: T): void {
+    this.byConversation.set(operation.conversationId, operation);
+  }
+
+  get(conversationId: string): T | undefined {
+    return this.byConversation.get(conversationId);
+  }
+
+  find(commandId: string): T | undefined {
+    return [...this.byConversation.values()].find(
+      (operation) => operation.commandId === commandId,
+    );
+  }
+
+  delete(operation: T): boolean {
+    if (this.get(operation.conversationId)?.commandId !== operation.commandId) {
+      return false;
+    }
+    return this.byConversation.delete(operation.conversationId);
+  }
+
+  clear(): void {
+    this.byConversation.clear();
+  }
+
+  values(): T[] {
+    return [...this.byConversation.values()];
+  }
 }
 
 type RoleCommandInput =
@@ -188,6 +228,8 @@ export function App() {
   const [pendingGuidance, setPendingGuidance] = useState<PendingGuidance>();
   const pendingGuidanceRef =
     useRef<PendingGuidance | undefined>(undefined);
+  const pendingGuidanceRegistryRef =
+    useRef(new ConversationOperationRegistry<PendingGuidance>());
   const [queuedPrompts, setQueuedPromptsState] = useState<QueuedPrompt[]>([]);
   const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
   const queuedPromptsByConversationRef =
@@ -208,6 +250,8 @@ export function App() {
     useState<PendingContextCompaction>();
   const pendingContextCompactionRef =
     useRef<PendingContextCompaction | undefined>(undefined);
+  const pendingContextCompactionRegistryRef =
+    useRef(new ConversationOperationRegistry<PendingContextCompaction>());
   const [pendingConversationRoleSwitch, setPendingConversationRoleSwitchState] =
     useState<PendingConversationRoleSwitch>();
   const pendingConversationRoleSwitchRef =
@@ -300,28 +344,59 @@ export function App() {
       return next;
     });
   };
-  const updatePendingGuidance = (
+  const updatePendingGuidanceProjection = (
     guidance: PendingGuidance | undefined,
   ) => {
     pendingGuidanceRef.current = guidance;
     setPendingGuidance(guidance);
   };
+  const showPendingGuidance = (conversationId: string | undefined) => {
+    updatePendingGuidanceProjection(conversationId
+      ? pendingGuidanceRegistryRef.current.get(conversationId)
+      : undefined);
+  };
+  const addPendingGuidance = (guidance: PendingGuidance) => {
+    pendingGuidanceRegistryRef.current.set(guidance);
+    if (conversationIdRef.current === guidance.conversationId) {
+      updatePendingGuidanceProjection(guidance);
+    }
+  };
+  const removePendingGuidance = (guidance: PendingGuidance) => {
+    if (!pendingGuidanceRegistryRef.current.delete(guidance)) return false;
+    if (conversationIdRef.current === guidance.conversationId) {
+      updatePendingGuidanceProjection(undefined);
+    }
+    return true;
+  };
+  const clearAllPendingGuidance = () => {
+    pendingGuidanceRegistryRef.current.clear();
+    updatePendingGuidanceProjection(undefined);
+  };
+  const findPendingGuidance = (commandId: string) =>
+    pendingGuidanceRegistryRef.current.find(commandId);
+  const updateQueuedPromptsForConversation = (
+    conversationId: string,
+    update: QueuedPrompt[] | ((current: QueuedPrompt[]) => QueuedPrompt[]),
+  ) => {
+    const current = queuedPromptsByConversationRef.current.get(conversationId)
+      ?? [];
+    const next = typeof update === "function" ? update(current) : update;
+    if (next.length === 0) {
+      queuedPromptsByConversationRef.current.delete(conversationId);
+    } else {
+      queuedPromptsByConversationRef.current.set(conversationId, next);
+    }
+    if (conversationIdRef.current === conversationId) {
+      queuedPromptsRef.current = next;
+      setQueuedPromptsState(next);
+    }
+  };
   const updateQueuedPrompts = (
     update: QueuedPrompt[] | ((current: QueuedPrompt[]) => QueuedPrompt[]),
   ) => {
-    const next = typeof update === "function"
-      ? update(queuedPromptsRef.current)
-      : update;
-    queuedPromptsRef.current = next;
     const conversationId = conversationIdRef.current;
-    if (conversationId) {
-      if (next.length === 0) {
-        queuedPromptsByConversationRef.current.delete(conversationId);
-      } else {
-        queuedPromptsByConversationRef.current.set(conversationId, next);
-      }
-    }
-    setQueuedPromptsState(next);
+    if (!conversationId) return;
+    updateQueuedPromptsForConversation(conversationId, update);
   };
   const showQueuedPrompts = (conversationId: string | undefined) => {
     const next = conversationId
@@ -359,6 +434,38 @@ export function App() {
     pendingContextCompactionRef.current = pending;
     setPendingContextCompactionState(pending);
   };
+  const showPendingContextCompaction = (
+    conversationId: string | undefined,
+  ) => {
+    updatePendingContextCompaction(conversationId
+      ? pendingContextCompactionRegistryRef.current.get(conversationId)
+      : undefined);
+  };
+  const addPendingContextCompaction = (
+    pending: PendingContextCompaction,
+  ) => {
+    pendingContextCompactionRegistryRef.current.set(pending);
+    if (conversationIdRef.current === pending.conversationId) {
+      updatePendingContextCompaction(pending);
+    }
+  };
+  const removePendingContextCompaction = (
+    pending: PendingContextCompaction,
+  ) => {
+    if (!pendingContextCompactionRegistryRef.current.delete(pending)) {
+      return false;
+    }
+    if (conversationIdRef.current === pending.conversationId) {
+      updatePendingContextCompaction(undefined);
+    }
+    return true;
+  };
+  const clearAllPendingContextCompactions = () => {
+    pendingContextCompactionRegistryRef.current.clear();
+    updatePendingContextCompaction(undefined);
+  };
+  const findPendingContextCompaction = (commandId: string) =>
+    pendingContextCompactionRegistryRef.current.find(commandId);
   const updatePendingConversationRoleSwitch = (
     pending: PendingConversationRoleSwitch | undefined,
   ) => {
@@ -408,6 +515,8 @@ export function App() {
       focusRef.current = undefined;
       conversationIdRef.current = "";
       showQueuedPrompts(undefined);
+      showPendingGuidance(undefined);
+      showPendingContextCompaction(undefined);
       setConversationRole(undefined);
       setHistoryTruncated(false);
       updateConversationReady(false);
@@ -427,7 +536,8 @@ export function App() {
       setDraft("");
       setPromptNotice("");
       updatePendingPrompt(undefined);
-      updatePendingGuidance(undefined);
+      showPendingGuidance(conversationId);
+      showPendingContextCompaction(conversationId);
       showQueuedPrompts(conversationId);
     }
     updateOutstandingRunId("");
@@ -480,18 +590,27 @@ export function App() {
     );
   };
   const markPendingGuidanceUnconfirmed = () => {
-    const pending = pendingGuidanceRef.current;
-    if (!pending) return;
-    updatePendingGuidance(undefined);
-    const uncertainIds = new Set(pending.queueIds);
-    updateQueuedPrompts((current) => current.map((queued) =>
-      uncertainIds.has(queued.id)
-        ? { ...queued, status: "attention" }
-        : queued
-    ));
-    setPromptNotice(
-      "一批引导消息的接收状态未确认。请先检查恢复后的对话，再选择重试或移除。",
-    );
+    const pendingOperations = pendingGuidanceRegistryRef.current.values();
+    if (pendingOperations.length === 0) return;
+    for (const pending of pendingOperations) {
+      const uncertainIds = new Set(pending.queueIds);
+      updateQueuedPromptsForConversation(
+        pending.conversationId,
+        (current) => current.map((queued) =>
+          uncertainIds.has(queued.id)
+            ? { ...queued, status: "attention" }
+            : queued
+        ),
+      );
+    }
+    clearAllPendingGuidance();
+    if (pendingOperations.some(
+      ({ conversationId }) => conversationId === conversationIdRef.current,
+    )) {
+      setPromptNotice(
+        "一批引导消息的接收状态未确认。请先检查恢复后的对话，再选择重试或移除。",
+      );
+    }
   };
   const updateConversationReady = (ready: boolean) => {
     conversationReadyRef.current = ready;
@@ -508,9 +627,11 @@ export function App() {
     setNotification(undefined);
     setSettingResult(undefined);
     updatePendingCompactionThreshold(undefined);
-    updatePendingContextCompaction(undefined);
+    clearAllPendingContextCompactions();
     updatePendingConversationRoleSwitch(undefined);
     updatePendingConversationTruncation(undefined);
+    updatePendingConversationDeletion(undefined);
+    clearAllPendingGuidance();
     setRoleOperationResult(undefined);
     updatePendingRoleOperation(undefined);
     setSettingsDialogOpen(false);
@@ -719,7 +840,17 @@ export function App() {
         setDraft("");
         setPromptNotice("");
         updatePendingPrompt(undefined);
-        updatePendingGuidance(undefined);
+        const invalidatedGuidance = pendingGuidanceRegistryRef.current.get(
+          event.conversationId,
+        );
+        if (invalidatedGuidance) removePendingGuidance(invalidatedGuidance);
+        const invalidatedCompaction =
+          pendingContextCompactionRegistryRef.current.get(
+            event.conversationId,
+          );
+        if (invalidatedCompaction) {
+          removePendingContextCompaction(invalidatedCompaction);
+        }
         showQueuedPrompts(undefined);
         updateOutstandingRunId("");
         setExtensionUI([]);
@@ -758,7 +889,7 @@ export function App() {
         }
         setConversationRole(event.role);
         setHistoryTruncated(event.truncated);
-        updateConversationReady(true);
+        if (!pendingFocusRef.current) updateConversationReady(true);
       } else if (event.type === "session_event") {
         if (!matchesFocus(
           event.sessionId,
@@ -820,14 +951,17 @@ export function App() {
       } else if (event.type === "command_complete") {
         if (event.sessionId !== sessionIdRef.current) return;
         if (event.operation === "steer") {
-          const pending = pendingGuidanceRef.current;
-          if (!pending || pending.commandId !== event.commandId) return;
+          const pending = findPendingGuidance(event.commandId);
+          if (!pending || pending.sessionId !== event.sessionId) return;
           const acceptedIds = new Set(pending.queueIds);
-          updatePendingGuidance(undefined);
-          updateQueuedPrompts((current) =>
-            current.filter(({ id }) => !acceptedIds.has(id))
+          removePendingGuidance(pending);
+          updateQueuedPromptsForConversation(
+            pending.conversationId,
+            (current) => current.filter(({ id }) => !acceptedIds.has(id)),
           );
-          setPromptNotice("");
+          if (conversationIdRef.current === pending.conversationId) {
+            setPromptNotice("");
+          }
           return;
         }
         if (event.operation === "set_compaction_threshold") {
@@ -837,14 +971,16 @@ export function App() {
           return;
         }
         if (event.operation === "compact_context") {
-          const pending = pendingContextCompactionRef.current;
-          if (!pending || pending.commandId !== event.commandId) return;
-          updatePendingContextCompaction(undefined);
-          setNotification({
-            id: ++notificationIdRef.current,
-            level: "info",
-            message: "上下文已压缩",
-          });
+          const pending = findPendingContextCompaction(event.commandId);
+          if (!pending || pending.sessionId !== event.sessionId) return;
+          removePendingContextCompaction(pending);
+          if (conversationIdRef.current === pending.conversationId) {
+            setNotification({
+              id: ++notificationIdRef.current,
+              level: "info",
+              message: "上下文已压缩",
+            });
+          }
           return;
         }
         if (event.operation === "switch_conversation_role") {
@@ -886,7 +1022,18 @@ export function App() {
             setDraft("");
             setPromptNotice("");
             updatePendingPrompt(undefined);
-            updatePendingGuidance(undefined);
+            const deletedGuidance =
+              pendingGuidanceRegistryRef.current.get(
+                pending.conversationId,
+              );
+            if (deletedGuidance) removePendingGuidance(deletedGuidance);
+            const deletedCompaction =
+              pendingContextCompactionRegistryRef.current.get(
+                pending.conversationId,
+              );
+            if (deletedCompaction) {
+              removePendingContextCompaction(deletedCompaction);
+            }
             showQueuedPrompts(undefined);
             setExtensionUI([]);
           }
@@ -937,6 +1084,29 @@ export function App() {
         });
       } else if (event.type === "error") {
         if (event.sessionId && event.sessionId !== sessionIdRef.current) return;
+        const pendingGuidanceError = event.commandId
+          && event.operation === "steer"
+          ? findPendingGuidance(event.commandId)
+          : undefined;
+        const pendingCompactionError = event.commandId
+          && event.operation === "compact_context"
+          ? findPendingContextCompaction(event.commandId)
+          : undefined;
+        const settlesBackgroundOperation = Boolean(
+          (
+            pendingGuidanceError
+            && pendingGuidanceError.sessionId === event.sessionId
+            && pendingGuidanceError.conversationId === event.conversationId
+            && pendingGuidanceError.focusId === event.focusId
+            && pendingGuidanceError.runId === event.runId
+          )
+          || (
+            pendingCompactionError
+            && pendingCompactionError.sessionId === event.sessionId
+            && pendingCompactionError.conversationId === event.conversationId
+            && pendingCompactionError.focusId === event.focusId
+          ),
+        );
         if (
           (event.conversationId !== undefined || event.focusId !== undefined)
           && (
@@ -947,6 +1117,7 @@ export function App() {
               event.focusId,
             )
           )
+          && !settlesBackgroundOperation
         ) return;
         if (event.authFlowId && event.authFlowId !== authFlowIdRef.current) return;
         if (event.operation === "browse_directory") {
@@ -970,10 +1141,17 @@ export function App() {
           return;
         }
         if (event.operation === "compact_context" && event.commandId) {
-          const pending = pendingContextCompactionRef.current;
-          if (!pending || pending.commandId !== event.commandId) return;
-          updatePendingContextCompaction(undefined);
-          setError(`手动压缩上下文失败：${event.message}`);
+          const pending = findPendingContextCompaction(event.commandId);
+          if (
+            !pending
+            || pending.sessionId !== event.sessionId
+            || pending.conversationId !== event.conversationId
+            || pending.focusId !== event.focusId
+          ) return;
+          removePendingContextCompaction(pending);
+          if (conversationIdRef.current === pending.conversationId) {
+            setError(`手动压缩上下文失败：${event.message}`);
+          }
           return;
         }
         if (
@@ -1019,6 +1197,16 @@ export function App() {
             || pending.operation !== event.operation
           ) return;
           updatePendingFocus(undefined);
+          if (
+            pending.sourceReady
+            && pending.sourceFocus
+            && focusRef.current?.sessionId === pending.sourceFocus.sessionId
+            && focusRef.current.conversationId
+              === pending.sourceFocus.conversationId
+            && focusRef.current.focusId === pending.sourceFocus.focusId
+          ) {
+            updateConversationReady(true);
+          }
           if (event.operation === "initialize" && activeCwdRef.current) {
             markWorkspaceUnavailable(activeCwdRef.current);
           }
@@ -1050,25 +1238,29 @@ export function App() {
           && event.operation === "steer"
           && event.commandId
         ) {
-          const pending = pendingGuidanceRef.current;
+          const pending = findPendingGuidance(event.commandId);
           if (
             !pending
-            || pending.commandId !== event.commandId
             || pending.sessionId !== event.sessionId
             || pending.conversationId !== event.conversationId
             || pending.focusId !== event.focusId
             || pending.runId !== event.runId
           ) return;
           const rejectedIds = new Set(pending.queueIds);
-          updatePendingGuidance(undefined);
-          updateQueuedPrompts((current) => current.map((queued) =>
-            rejectedIds.has(queued.id)
-              ? { ...queued, status: "attention" }
-              : queued
-          ));
-          setPromptNotice(
-            `引导消息未被当前任务接收：${event.message}。请重试或移除。`,
+          removePendingGuidance(pending);
+          updateQueuedPromptsForConversation(
+            pending.conversationId,
+            (current) => current.map((queued) =>
+              rejectedIds.has(queued.id)
+                ? { ...queued, status: "attention" }
+                : queued
+            ),
           );
+          if (conversationIdRef.current === pending.conversationId) {
+            setPromptNotice(
+              `引导消息未被当前任务接收：${event.message}。请重试或移除。`,
+            );
+          }
           return;
         }
         let promptRejectedBeforeAcceptance = false;
@@ -1239,7 +1431,7 @@ export function App() {
     setDraft("");
     setPromptNotice("");
     updatePendingPrompt(undefined);
-    updatePendingGuidance(undefined);
+    clearAllPendingGuidance();
     clearAllQueuedPrompts();
     clearSessionProjection();
     setSetupOpen(false);
@@ -1334,7 +1526,7 @@ export function App() {
       runId,
       queueIds,
     };
-    updatePendingGuidance(pending);
+    addPendingGuidance(pending);
     setPromptNotice("");
     const ok = send({
       type: "steer",
@@ -1347,7 +1539,7 @@ export function App() {
     });
     if (!ok) {
       const rejectedIds = new Set(queueIds);
-      updatePendingGuidance(undefined);
+      removePendingGuidance(pending);
       updateQueuedPrompts((current) => current.map((queued) =>
         rejectedIds.has(queued.id)
           ? { ...queued, status: "attention" }
@@ -1463,6 +1655,7 @@ export function App() {
     transportOnline,
   ]);
   const abortCurrentRun = () => {
+    if (!conversationReadyRef.current || pendingFocusRef.current) return;
     const runId = outstandingRunIdRef.current || state?.activeRun?.id;
     const sessionId = sessionIdRef.current;
     const focus = focusRef.current;
@@ -1483,7 +1676,6 @@ export function App() {
       || pendingFocusRef.current
       || pendingConversationTruncationRef.current
       || pendingPromptRef.current
-      || pendingGuidanceRef.current
       || pendingConversationRoleSwitchRef.current
     ) return;
     if (focusRef.current?.conversationId === conversationId) {
@@ -1491,7 +1683,15 @@ export function App() {
       return;
     }
     const commandId = crypto.randomUUID();
-    updatePendingFocus({ commandId, operation: "focus_conversation" });
+    const sourceFocus = focusRef.current;
+    const sourceReady = conversationReadyRef.current;
+    updateConversationReady(false);
+    updatePendingFocus({
+      commandId,
+      operation: "focus_conversation",
+      ...(sourceFocus ? { sourceFocus } : {}),
+      sourceReady,
+    });
     setError("");
     if (!send({
       type: "focus_conversation",
@@ -1500,6 +1700,9 @@ export function App() {
       conversationId,
     })) {
       updatePendingFocus(undefined);
+      if (sourceReady && focusRef.current === sourceFocus) {
+        updateConversationReady(true);
+      }
     }
   };
   const createConversation = (roleId: string) => {
@@ -1537,9 +1740,13 @@ export function App() {
         deletingFocusedConversation
         && (Boolean(state?.busy) || Boolean(outstandingRunIdRef.current))
       )
+      || Boolean(
+        pendingContextCompactionRegistryRef.current.get(conversationId),
+      )
       || pendingConversationDeletionRef.current
       || pendingConversationTruncationRef.current
       || pendingConversationRoleSwitchRef.current
+      || pendingFocusRef.current
     ) {
       return false;
     }
@@ -1607,12 +1814,18 @@ export function App() {
     return false;
   };
   const setThinkingLevel = (level: ThinkingLevel) => {
+    if (!conversationReadyRef.current || pendingFocusRef.current) return;
     const sessionId = sessionIdRef.current;
     if (sessionId) send({ type: "set_thinking", sessionId, level });
   };
   const setCompactionThreshold = (percent: number): boolean => {
     const focus = focusRef.current;
-    if (!focus || pendingCompactionThresholdRef.current) return false;
+    if (
+      !focus
+      || !conversationReadyRef.current
+      || pendingFocusRef.current
+      || pendingCompactionThresholdRef.current
+    ) return false;
     const commandId = crypto.randomUUID();
     updatePendingCompactionThreshold({
       commandId,
@@ -1630,9 +1843,13 @@ export function App() {
   };
   const compactContext = (): boolean => {
     const focus = focusRef.current;
-    if (!focus || pendingContextCompactionRef.current) return false;
-    const pending = { commandId: crypto.randomUUID() };
-    updatePendingContextCompaction(pending);
+    if (
+      !focus
+      || !conversationReadyRef.current
+      || pendingContextCompactionRef.current
+    ) return false;
+    const pending = { ...focus, commandId: crypto.randomUUID() };
+    addPendingContextCompaction(pending);
     if (send({
       type: "compact_context",
       commandId: pending.commandId,
@@ -1640,7 +1857,7 @@ export function App() {
       conversationId: focus.conversationId,
       focusId: focus.focusId,
     })) return true;
-    updatePendingContextCompaction(undefined);
+    removePendingContextCompaction(pending);
     return false;
   };
   const switchConversationRole = (roleId: string): boolean => {

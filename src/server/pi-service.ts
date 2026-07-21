@@ -115,6 +115,7 @@ interface CoordinatedProjectView {
   sessionId: string;
   generation: number;
   extensionScope: number;
+  extensionAbort: AbortController;
   coordinator: ProjectSessionCoordinator;
   handle: ProjectSessionHandle;
   unsubscribeProject: () => void;
@@ -265,6 +266,7 @@ export class PiConnection {
   private readonly cancelledAuthFlowIds = new Set<string>();
   private generation = 0;
   private initializationAbort?: AbortController;
+  private coordinatedTransitionAbort?: AbortController;
   private disposed = false;
   private disposePromise?: Promise<void>;
 
@@ -700,6 +702,78 @@ export class PiConnection {
         return Promise.reject(error);
       }
     }
+    if (command.type === "compact_context") {
+      try {
+        if (this.usedCommandIds.has(command.commandId)) {
+          return Promise.reject(
+            new Error("Command ID was already used on this connection"),
+          );
+        }
+        this.usedCommandIds.add(command.commandId);
+        const generation = this.generation;
+        const view = this.requireCoordinatedFocus(
+          command.sessionId,
+          command.conversationId,
+          command.focusId,
+        );
+        return this.requireCoordination().then(({ coordinator }) =>
+          coordinator.compactContext(
+            view.handle,
+            command.conversationId,
+          )
+        ).then(() => {
+          if (!this.isCoordinatedSession(command.sessionId, generation)) return;
+          const current = this.coordinatedView;
+          if (
+            current === view
+            && current.conversationId === command.conversationId
+          ) {
+            this.publishCoordinatedState();
+            this.publishFocusedConversationSnapshot();
+          }
+          this.emitCommandComplete(command);
+        });
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    }
+    if (command.type === "switch_conversation_role") {
+      try {
+        if (this.usedCommandIds.has(command.commandId)) {
+          return Promise.reject(
+            new Error("Command ID was already used on this connection"),
+          );
+        }
+        this.usedCommandIds.add(command.commandId);
+        const generation = this.generation;
+        const view = this.requireCoordinatedFocus(
+          command.sessionId,
+          command.conversationId,
+          command.focusId,
+        );
+        return this.requireCoordination().then(({ coordinator }) =>
+          coordinator.switchConversationRole(
+            view.handle,
+            command.conversationId,
+            command.roleId,
+          )
+        ).then(() => {
+          if (!this.isCoordinatedSession(command.sessionId, generation)) return;
+          const current = this.coordinatedView;
+          if (
+            current === view
+            && current.conversationId === command.conversationId
+          ) {
+            this.publishCoordinatedState();
+            this.publishProjectSnapshotCoordinated();
+            this.publishFocusedConversationSnapshot();
+          }
+          this.emitCommandComplete(command);
+        });
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    }
     if (command.type === "initialize") {
       return this.beginCoordinatedInitialization(command);
     }
@@ -727,9 +801,19 @@ export class PiConnection {
     }
 
     const generation = this.generation;
+    let transitionAbort: AbortController | undefined;
+    if (
+      command.type === "focus_conversation"
+      || command.type === "create_conversation"
+    ) {
+      this.cancelCoordinatedTransition();
+      transitionAbort = new AbortController();
+      this.coordinatedTransitionAbort = transitionAbort;
+    }
     return this.operations.run(async () => {
       try {
         this.assertOpen();
+        if (transitionAbort?.signal.aborted) return;
         if (
           "sessionId" in command
           && !this.isCoordinatedSession(command.sessionId, generation)
@@ -742,8 +826,11 @@ export class PiConnection {
         ) {
           return;
         }
-        await this.executeCoordinated(command);
+        await this.executeCoordinated(command, transitionAbort);
       } finally {
+        if (this.coordinatedTransitionAbort === transitionAbort) {
+          this.coordinatedTransitionAbort = undefined;
+        }
         if (command.type === "login_oauth") {
           this.pendingAuthFlowIds.delete(command.authFlowId);
           this.cancelledAuthFlowIds.delete(command.authFlowId);
@@ -769,6 +856,8 @@ export class PiConnection {
       this.usedCommandIds.add(command.commandId);
     }
 
+    this.cancelCoordinatedTransition();
+    this.coordinatedView?.extensionAbort.abort();
     this.initializationAbort?.abort();
     const initializationAbort = new AbortController();
     this.initializationAbort = initializationAbort;
@@ -819,8 +908,13 @@ export class PiConnection {
     const handle = await coordinator.acquireProject(cwd, "read_only");
     let transferred = false;
     let extensionScope: number | undefined;
+    const extensionAbort = new AbortController();
+    const abortExtensions = () => extensionAbort.abort();
+    signal.addEventListener("abort", abortExtensions, { once: true });
+    if (signal.aborted) extensionAbort.abort();
     let unsubscribeProject: (() => void) | undefined;
     let unsubscribeExtensionUI: (() => void) | undefined;
+    let createdConversationId: string | undefined;
     try {
       this.throwIfAborted(signal);
 
@@ -829,7 +923,7 @@ export class PiConnection {
       const extensionUI = this.extensionUI.context({
         sessionId: command.sessionId,
         generation: extensionScope,
-        signal,
+        signal: extensionAbort.signal,
       });
       await coordinator.ensureProjectModelCatalog(handle, extensionUI);
       this.throwIfAborted(signal);
@@ -853,7 +947,9 @@ export class PiConnection {
         actor = await coordinator.createUserConversation(handle, {
           roleId: target.roleId,
           extensionUI,
+          signal: extensionAbort.signal,
         });
+        createdConversationId = actor.conversationId;
         unsubscribeExtensionUI = coordinator.attachExtensionUI(
           handle,
           actor.conversationId,
@@ -888,6 +984,7 @@ export class PiConnection {
         sessionId: command.sessionId,
         generation,
         extensionScope,
+        extensionAbort,
         coordinator,
         handle,
         unsubscribeProject: () => undefined,
@@ -921,13 +1018,27 @@ export class PiConnection {
       this.publishRoleCatalog();
       this.publishFocusedConversationSnapshot();
     } finally {
+      signal.removeEventListener("abort", abortExtensions);
       if (!transferred) {
+        extensionAbort.abort();
         unsubscribeExtensionUI?.();
         unsubscribeProject?.();
         if (extensionScope !== undefined) {
           this.extensionUI.cancelScope(command.sessionId, extensionScope);
         }
+        let cleanupError: unknown;
+        if (createdConversationId) {
+          try {
+            await coordinator.deleteConversation(
+              handle,
+              createdConversationId,
+            );
+          } catch (error) {
+            cleanupError = error;
+          }
+        }
         handle.release();
+        if (cleanupError !== undefined) throw cleanupError;
       }
     }
   }
@@ -939,11 +1050,14 @@ export class PiConnection {
       | { type: "auth_response" }
       | { type: "cancel_auth" }
       | { type: "close_session" }
+      | { type: "compact_context" }
       | { type: "extension_ui_response" }
       | { type: "initialize" }
       | { type: "prompt" }
       | { type: "steer" }
+      | { type: "switch_conversation_role" }
     >,
+    transitionAbort?: AbortController,
   ): Promise<void> {
     if ((command as { type: string }).type === "set_tool_mode") {
       const legacy = command as unknown as LegacySetToolModeCommand;
@@ -961,6 +1075,7 @@ export class PiConnection {
         const view = this.requireCoordinatedView(command.sessionId);
         const { coordinator } = await this.requireCoordination();
         const extensionScope = ++this.extensionScope;
+        const extensionAbort = transitionAbort ?? new AbortController();
         let detachExtensionUI: (() => void) | undefined;
         let transferred = false;
         try {
@@ -970,12 +1085,17 @@ export class PiConnection {
             this.extensionUI.context({
               sessionId: view.sessionId,
               generation: extensionScope,
+              signal: extensionAbort.signal,
             }),
           );
           const actor = await coordinator.openConversation(
             view.handle,
             command.conversationId,
           );
+          if (
+            extensionAbort.signal.aborted
+            || this.coordinatedView !== view
+          ) return;
           this.attachCoordinatedFocus(
             view,
             actor,
@@ -983,8 +1103,16 @@ export class PiConnection {
             command.commandId,
             detachExtensionUI,
             extensionScope,
+            extensionAbort,
           );
           transferred = true;
+        } catch (error) {
+          if (
+            extensionAbort.signal.aborted
+            && error instanceof Error
+            && error.name === "AbortError"
+          ) return;
+          throw error;
         } finally {
           if (!transferred) {
             detachExtensionUI?.();
@@ -997,18 +1125,27 @@ export class PiConnection {
         const view = this.requireCoordinatedView(command.sessionId);
         const { coordinator } = await this.requireCoordination();
         const extensionScope = ++this.extensionScope;
+        const extensionAbort = transitionAbort ?? new AbortController();
         const extensionUI = this.extensionUI.context({
           sessionId: view.sessionId,
           generation: extensionScope,
+          signal: extensionAbort.signal,
         });
         let detachExtensionUI: (() => void) | undefined;
+        let createdConversationId: string | undefined;
         let transferred = false;
         try {
           const actor = await coordinator.createUserConversation(view.handle, {
             roleId: command.roleId,
             ...(command.title === undefined ? {} : { title: command.title }),
             extensionUI,
+            signal: extensionAbort.signal,
           });
+          createdConversationId = actor.conversationId;
+          if (
+            extensionAbort.signal.aborted
+            || this.coordinatedView !== view
+          ) return;
           detachExtensionUI = coordinator.attachExtensionUI(
             view.handle,
             actor.conversationId,
@@ -1021,12 +1158,26 @@ export class PiConnection {
             command.commandId,
             detachExtensionUI,
             extensionScope,
+            extensionAbort,
           );
           transferred = true;
+        } catch (error) {
+          if (
+            extensionAbort.signal.aborted
+            && error instanceof Error
+            && error.name === "AbortError"
+          ) return;
+          throw error;
         } finally {
           if (!transferred) {
             detachExtensionUI?.();
             this.extensionUI.cancelScope(view.sessionId, extensionScope);
+            if (createdConversationId) {
+              await coordinator.deleteConversation(
+                view.handle,
+                createdConversationId,
+              );
+            }
           }
         }
         return;
@@ -1050,40 +1201,6 @@ export class PiConnection {
           command.conversationId,
           command.percent,
         );
-        this.emitCommandComplete(command);
-        return;
-      }
-      case "compact_context": {
-        const view = this.requireCoordinatedFocus(
-          command.sessionId,
-          command.conversationId,
-          command.focusId,
-        );
-        const { coordinator } = await this.requireCoordination();
-        await coordinator.compactContext(
-          view.handle,
-          command.conversationId,
-        );
-        this.publishCoordinatedState();
-        this.publishFocusedConversationSnapshot();
-        this.emitCommandComplete(command);
-        return;
-      }
-      case "switch_conversation_role": {
-        const view = this.requireCoordinatedFocus(
-          command.sessionId,
-          command.conversationId,
-          command.focusId,
-        );
-        const { coordinator } = await this.requireCoordination();
-        view.actor = await coordinator.switchConversationRole(
-          view.handle,
-          command.conversationId,
-          command.roleId,
-        );
-        this.publishCoordinatedState();
-        this.publishProjectSnapshotCoordinated();
-        this.publishFocusedConversationSnapshot();
         this.emitCommandComplete(command);
         return;
       }
@@ -1226,14 +1343,17 @@ export class PiConnection {
     commandId: string,
     unsubscribeExtensionUI: () => void,
     extensionScope: number,
+    extensionAbort: AbortController,
   ): void {
     if (this.coordinatedView !== view) {
       throw new Error("Project observation changed before focus attached");
     }
+    view.extensionAbort.abort();
     this.extensionUI.cancelScope(view.sessionId, view.extensionScope);
     view.unsubscribeExtensionUI();
     view.unsubscribeExtensionUI = unsubscribeExtensionUI;
     view.extensionScope = extensionScope;
+    view.extensionAbort = extensionAbort;
     view.actor = actor;
     view.conversationId = actor.conversationId;
     view.focusId = randomUUID();
@@ -1749,6 +1869,8 @@ export class PiConnection {
     if (this.requestedSessionId !== sessionId) return Promise.resolve();
     this.generation++;
     this.requestedSessionId = undefined;
+    this.cancelCoordinatedTransition();
+    this.coordinatedView?.extensionAbort.abort();
     this.initializationAbort?.abort();
     this.initializationAbort = undefined;
     this.cancelAuth();
@@ -1762,6 +1884,7 @@ export class PiConnection {
     this.projectSnapshotGeneration++;
     this.focusedItemFingerprints.clear();
     const failures: unknown[] = [];
+    view.extensionAbort.abort();
     this.extensionUI.cancelScope(view.sessionId, view.extensionScope);
     try {
       view.unsubscribeExtensionUI();
@@ -2558,6 +2681,8 @@ export class PiConnection {
     this.disposed = true;
     this.generation++;
     this.requestedSessionId = undefined;
+    this.cancelCoordinatedTransition();
+    this.coordinatedView?.extensionAbort.abort();
     this.initializationAbort?.abort();
     this.initializationAbort = undefined;
     this.unsubscribeRuntime();
@@ -2569,5 +2694,10 @@ export class PiConnection {
       this.detachCoordinatedView()
     );
     return this.disposePromise;
+  }
+
+  private cancelCoordinatedTransition(): void {
+    this.coordinatedTransitionAbort?.abort();
+    this.coordinatedTransitionAbort = undefined;
   }
 }
