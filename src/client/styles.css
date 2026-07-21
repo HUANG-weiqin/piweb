@@ -609,6 +609,10 @@ pre {
 }
 
 .streaming-markdown {
+  overflow-wrap: anywhere;
+}
+
+.streaming-tail {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }

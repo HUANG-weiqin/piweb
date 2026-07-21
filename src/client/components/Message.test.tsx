@@ -218,6 +218,98 @@ describe("Message", () => {
     expect(markdown.querySelector("pre code")).toHaveTextContent("const wideValue = true;");
   });
 
+  it("renders completed markdown blocks while keeping the active tail as text", () => {
+    const message: ChatMessage = {
+      id: "streaming-blocks",
+      runId: "run-streaming-blocks",
+      role: "assistant",
+      text: ["# 已完成标题", "", "当前 **未完成"].join("\n"),
+      thinking: "",
+      tools: [],
+    };
+
+    const { container } = render(<Message message={message} streamingText />);
+    const streaming = container.querySelector(".streaming-markdown") as HTMLElement;
+    const tail = container.querySelector(".streaming-tail") as HTMLElement;
+
+    expect(screen.getByRole("heading", { level: 1, name: "已完成标题" }))
+      .toBeInTheDocument();
+    expect(tail).toHaveTextContent("当前 **未完成");
+    expect(tail.querySelector("strong")).not.toBeInTheDocument();
+    expect(streaming).toContainElement(tail);
+  });
+
+  it("promotes a closed streaming code fence to markdown", () => {
+    const message: ChatMessage = {
+      id: "streaming-fence",
+      runId: "run-streaming-fence",
+      role: "assistant",
+      text: [
+        "```ts",
+        "const value = true;",
+        "```",
+        "",
+        "继续生成",
+      ].join("\n"),
+      thinking: "",
+      tools: [],
+    };
+
+    const { container } = render(<Message message={message} streamingText />);
+
+    expect(container.querySelector(".streaming-stable pre code"))
+      .toHaveTextContent("const value = true;");
+    expect(container.querySelector(".streaming-tail"))
+      .toHaveTextContent("继续生成");
+  });
+
+  it("keeps stable streaming blocks mounted while the tail grows", () => {
+    const message: ChatMessage = {
+      id: "streaming-stable-block",
+      runId: "run-streaming-stable-block",
+      role: "assistant",
+      text: "# 稳定标题\n\n正在生成",
+      thinking: "",
+      tools: [],
+    };
+
+    const { container, rerender } = render(<Message message={message} streamingText />);
+    const stableBlock = container.querySelector(".streaming-stable");
+
+    rerender(<Message
+      message={{ ...message, text: "# 稳定标题\n\n正在生成更多内容" }}
+      streamingText
+    />);
+
+    expect(container.querySelector(".streaming-stable")).toBe(stableBlock);
+    expect(container.querySelector(".streaming-tail")).toHaveTextContent("正在生成更多内容");
+  });
+
+  it("does not close a fence when the marker has trailing text", () => {
+    const message: ChatMessage = {
+      id: "streaming-fence-trailing-text",
+      runId: "run-streaming-fence-trailing-text",
+      role: "assistant",
+      text: [
+        "```ts",
+        "const value = true;",
+        "``` still code",
+        "more code",
+        "```",
+        "",
+        "继续生成",
+      ].join("\n"),
+      thinking: "",
+      tools: [],
+    };
+
+    const { container } = render(<Message message={message} streamingText />);
+    const code = container.querySelector(".streaming-stable pre code");
+
+    expect(code).toHaveTextContent("``` still code");
+    expect(code).toHaveTextContent("more code");
+  });
+
   it("copies the assistant's original markdown and reports success", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {

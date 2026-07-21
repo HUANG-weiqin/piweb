@@ -1,6 +1,7 @@
 import {
   memo,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -15,6 +16,128 @@ const TOOL_PREVIEW_LIMIT = 4;
 
 function renderMarkdown(markdown: string): string {
   return DOMPurify.sanitize(marked.parse(markdown, { async: false }) as string);
+}
+
+interface StreamingMarkdownParts {
+  stableBlocks: string[];
+  tail: string;
+}
+
+class StreamingMarkdownSplitter {
+  private sourceText = "";
+  private scanPosition = 0;
+  private blockStart = 0;
+  private fenceCharacter: "`" | "~" | undefined;
+  private fenceLength = 0;
+  private readonly stableBlocks: string[] = [];
+  private parts: StreamingMarkdownParts = {
+    stableBlocks: this.stableBlocks,
+    tail: "",
+  };
+
+  update(markdown: string): StreamingMarkdownParts {
+    if (markdown === this.sourceText) return this.parts;
+    if (!markdown.startsWith(this.sourceText)) this.reset();
+
+    this.sourceText = markdown;
+    this.consumeCompleteLines();
+    this.parts = {
+      stableBlocks: this.stableBlocks,
+      tail: markdown.slice(this.blockStart),
+    };
+    return this.parts;
+  }
+
+  private reset(): void {
+    this.sourceText = "";
+    this.scanPosition = 0;
+    this.blockStart = 0;
+    this.fenceCharacter = undefined;
+    this.fenceLength = 0;
+    this.stableBlocks.length = 0;
+  }
+
+  private consumeCompleteLines(): void {
+    while (true) {
+      const newlineIndex = this.sourceText.indexOf("\n", this.scanPosition);
+      if (newlineIndex < 0) return;
+
+      const lineEnd = newlineIndex + 1;
+      const line = this.sourceText.slice(this.scanPosition, newlineIndex)
+        .replace(/\r$/, "");
+      this.consumeLine(line, lineEnd);
+      this.scanPosition = lineEnd;
+    }
+  }
+
+  private consumeLine(line: string, lineEnd: number): void {
+    const openingFence = line.match(/^\s{0,3}(`{3,}|~{3,})(.*)$/);
+
+    if (this.fenceCharacter) {
+      const closingFence = line.match(/^\s{0,3}(`{3,}|~{3,})\s*$/);
+      if (
+        closingFence
+        && closingFence[1][0] === this.fenceCharacter
+        && closingFence[1].length >= this.fenceLength
+      ) {
+        this.stableBlocks.push(this.sourceText.slice(this.blockStart, lineEnd));
+        this.blockStart = lineEnd;
+        this.fenceCharacter = undefined;
+        this.fenceLength = 0;
+      }
+      return;
+    }
+
+    if (openingFence) {
+      this.fenceCharacter = openingFence[1][0] as "`" | "~";
+      this.fenceLength = openingFence[1].length;
+      return;
+    }
+
+    if (/^\s*$/.test(line)) {
+      const block = this.sourceText.slice(this.blockStart, lineEnd);
+      if (block.trim()) this.stableBlocks.push(block);
+      this.blockStart = lineEnd;
+    }
+  }
+}
+
+function useStreamingMarkdownParts(text: string): StreamingMarkdownParts {
+  const splitterRef = useRef<StreamingMarkdownSplitter | null>(null);
+  if (!splitterRef.current) splitterRef.current = new StreamingMarkdownSplitter();
+  const splitter = splitterRef.current;
+  return useMemo(() => splitter.update(text), [splitter, text]);
+}
+
+const StreamingMarkdownBlock = memo(function StreamingMarkdownBlock({
+  markdown,
+}: {
+  markdown: string;
+}) {
+  const html = useMemo(() => renderMarkdown(markdown), [markdown]);
+  return <div
+    className="markdown streaming-stable"
+    dangerouslySetInnerHTML={{ __html: html }}
+  />;
+});
+
+function StreamingMarkdown({
+  text,
+  placeholder,
+}: {
+  text: string;
+  placeholder?: string;
+}) {
+  const { stableBlocks, tail } = useStreamingMarkdownParts(text);
+  const pendingText = tail || placeholder;
+
+  return <div className="markdown streaming-markdown">
+    {stableBlocks.map((block, index) => <StreamingMarkdownBlock
+      key={`streaming-block:${index}`}
+      markdown={block}
+    />)}
+    {pendingText ? <div className="streaming-tail">{pendingText}</div> : null}
+  </div>;
 }
 
 function ToolsPanel({ tools }: { tools: ChatMessage["tools"] }) {
@@ -163,9 +286,10 @@ function MessageView({
   let responseBody: ReactNode = null;
   if (message.text || !hasActivity) {
     responseBody = showingStreamingText
-      ? <div className="markdown streaming-markdown">
-          {message.text || (hasActivity ? "" : "…")}
-        </div>
+      ? <StreamingMarkdown
+          text={message.text}
+          placeholder={hasActivity ? undefined : "…"}
+        />
       : <div className="markdown" dangerouslySetInnerHTML={{ __html: html }} />;
   }
   return <article className="message assistant">
