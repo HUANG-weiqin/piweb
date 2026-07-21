@@ -13,7 +13,7 @@ export const MAX_PROMPT_CHARACTERS = 200_000;
 export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
-export const PROTOCOL_VERSION = 19;
+export const PROTOCOL_VERSION = 20;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
 const conversationIdSchema = z.string().uuid();
@@ -160,6 +160,13 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
     commandId: commandIdSchema,
     sessionId: sessionIdSchema,
     conversationId: conversationIdSchema,
+  }),
+  z.object({
+    type: z.literal("refresh_view"),
+    sessionId: sessionIdSchema,
+    projectId: z.string().uuid(),
+    conversationId: conversationIdSchema.optional(),
+    focusId: focusIdSchema.optional(),
   }),
   z.object({
     type: z.literal("create_conversation"),
@@ -309,6 +316,17 @@ export const clientCommandSchema = clientCommandUnionSchema.superRefine(
         code: z.ZodIssueCode.custom,
         message: "A role must be selected before creating a conversation",
         path: ["conversation", "roleId"],
+      });
+    }
+    if (
+      command.type === "refresh_view"
+      && ((command.conversationId === undefined)
+        !== (command.focusId === undefined))
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "focusId and conversationId must either both be present or both be absent",
+        path: ["focusId"],
       });
     }
   },
@@ -804,6 +822,7 @@ const commandTypeSchema = z.enum([
   "browse_directory",
   "initialize",
   "focus_conversation",
+  "refresh_view",
   "create_conversation",
   "prompt",
   "steer",

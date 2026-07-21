@@ -3295,6 +3295,227 @@ describe("PiConnection coordinated project view", () => {
     }
   });
 
+  it("collapses project snapshot refresh bursts into one trailing scan", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      await vi.waitFor(() => {
+        expect(harness.events.some(
+          (event) => event.type === "project_snapshot",
+        )).toBe(true);
+      });
+
+      let resolveFirst!: (summaries: ConversationSummary[]) => void;
+      let resolveTrailing!: (summaries: ConversationSummary[]) => void;
+      const first = new Promise<ConversationSummary[]>((resolve) => {
+        resolveFirst = resolve;
+      });
+      const trailing = new Promise<ConversationSummary[]>((resolve) => {
+        resolveTrailing = resolve;
+      });
+      const listSessions = vi.spyOn(harness.coordinator, "listSessions")
+        .mockImplementationOnce(() => first)
+        .mockImplementationOnce(() => trailing);
+      const projectId = latestState(harness.events).projectId;
+      const initialSnapshots = harness.events.filter(
+        (event) => event.type === "project_snapshot",
+      ).length;
+      const refresh = {
+        type: "refresh_view" as const,
+        sessionId: SESSION_A,
+        projectId,
+      };
+
+      await harness.connection.handle(refresh);
+      await vi.waitFor(() => expect(listSessions).toHaveBeenCalledTimes(1));
+      await Promise.all([
+        harness.connection.handle(refresh),
+        harness.connection.handle(refresh),
+        harness.connection.handle(refresh),
+      ]);
+      expect(listSessions).toHaveBeenCalledTimes(1);
+
+      resolveFirst([]);
+      await vi.waitFor(() => expect(listSessions).toHaveBeenCalledTimes(2));
+      resolveTrailing([]);
+      await vi.waitFor(() => {
+        expect(harness.events.filter(
+          (event) => event.type === "project_snapshot",
+        )).toHaveLength(initialSnapshots + 1);
+      });
+      expect(listSessions).toHaveBeenCalledTimes(2);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("refreshes only the exact settled browser view", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const started = deferred();
+    const finish = deferred();
+    const compactionStarted = deferred();
+    const finishCompaction = deferred();
+    let run: Promise<void> | undefined;
+    let compacting: Promise<void> | undefined;
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      const createCommandId = randomUUID();
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: createCommandId,
+        sessionId: SESSION_A,
+        roleId: "default",
+      });
+      const attached = harness.events.findLast(
+        (event) =>
+          event.type === "focus_attached"
+          && event.commandId === createCommandId,
+      );
+      if (
+        attached?.type !== "focus_attached"
+        || !attached.conversationId
+        || !attached.focusId
+      ) throw new Error("conversation focus was not attached");
+
+      const exactRefresh = {
+        type: "refresh_view" as const,
+        sessionId: SESSION_A,
+        projectId: attached.projectId,
+        conversationId: attached.conversationId,
+        focusId: attached.focusId,
+      };
+      await vi.waitFor(() => {
+        expect(harness.events.findLast(
+          (event) => event.type === "project_snapshot",
+        )).toMatchObject({
+          type: "project_snapshot",
+          conversationId: attached.conversationId,
+        });
+      });
+      const staleStart = harness.events.length;
+      await harness.connection.handle({
+        ...exactRefresh,
+        focusId: randomUUID(),
+      });
+      expect(harness.events).toHaveLength(staleStart);
+
+      const idleRefreshStart = harness.events.length;
+      await harness.connection.handle(exactRefresh);
+      await vi.waitFor(() => {
+        expect(harness.events.slice(idleRefreshStart).some(
+          (event) => event.type === "project_snapshot",
+        )).toBe(true);
+      });
+      expect(harness.events.slice(idleRefreshStart)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: "state" }),
+          expect.objectContaining({ type: "role_catalog_snapshot" }),
+          expect.objectContaining({ type: "project_snapshot" }),
+          expect.objectContaining({
+            type: "conversation_snapshot",
+            conversationId: attached.conversationId,
+            focusId: attached.focusId,
+          }),
+        ]),
+      );
+
+      const session = harness.runtime.created[0]!;
+      session.prompt = async () => {
+        started.resolve();
+        await finish.promise;
+      };
+      run = harness.connection.handle({
+        type: "prompt",
+        sessionId: SESSION_A,
+        conversationId: attached.conversationId,
+        focusId: attached.focusId,
+        runId: RUN_A,
+        text: "keep running",
+      });
+      await started.promise;
+      const refreshStart = harness.events.length;
+
+      await harness.connection.handle(exactRefresh);
+      await vi.waitFor(() => {
+        expect(harness.events.slice(refreshStart).some(
+          (event) => event.type === "project_snapshot",
+        )).toBe(true);
+      });
+      expect(harness.events.slice(refreshStart)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "state",
+            state: expect.objectContaining({
+              sessionId: SESSION_A,
+              busy: true,
+            }),
+          }),
+          expect.objectContaining({ type: "role_catalog_snapshot" }),
+          expect.objectContaining({ type: "project_snapshot" }),
+        ]),
+      );
+      expect(harness.events.slice(refreshStart).some(
+        (event) => event.type === "conversation_snapshot",
+      )).toBe(false);
+
+      finish.resolve();
+      await run;
+      run = undefined;
+      session.compact = async () => {
+        session.compactCalls++;
+        compactionStarted.resolve();
+        await finishCompaction.promise;
+        return {};
+      };
+      compacting = harness.connection.handle({
+        type: "compact_context",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId: attached.conversationId,
+        focusId: attached.focusId,
+      });
+      await compactionStarted.promise;
+      const compactionRefreshStart = harness.events.length;
+
+      await harness.connection.handle(exactRefresh);
+      await vi.waitFor(() => {
+        expect(harness.events.slice(compactionRefreshStart).some(
+          (event) => event.type === "project_snapshot",
+        )).toBe(true);
+      });
+      expect(harness.events.slice(compactionRefreshStart)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "state",
+            state: expect.objectContaining({ compacting: true }),
+          }),
+          expect.objectContaining({ type: "project_snapshot" }),
+        ]),
+      );
+      expect(harness.events.slice(compactionRefreshStart).some(
+        (event) => event.type === "conversation_snapshot",
+      )).toBe(false);
+    } finally {
+      finish.resolve();
+      finishCompaction.resolve();
+      await run?.catch(() => undefined);
+      await compacting?.catch(() => undefined);
+      await harness.cleanup();
+    }
+  });
+
   it("keeps the current conversation UI live when a new focus creation fails", async () => {
     const harness = await coordinatedConnectionHarness();
     try {

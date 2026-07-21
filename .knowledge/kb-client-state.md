@@ -34,6 +34,7 @@ ServerEvent
 - 当前 transcript 身份是 `sessionId + conversationId + focusId`。即使 conversationId 再次相同，旧 focus 的 state/snapshot/live item 也必须丢弃。
 - projectId/conversationId 随精确 `focus_attached` 提交；重连用新 sessionId 显式 `open` 当前 durable conversation，若尚未知 ID 才请求 `recent`。
 - WebSocket transport open 与协议握手 ready 是两个状态；版本不兼容会失效 session/run/auth 并禁止发送。
+- 页面从后台、休眠或 bfcache 恢复时，把同一短时 burst 内的 `focus/pageshow/visibilitychange` 合并为一次 `refresh_view`；命令读取发送时最新的 project/focus 身份，pending focus、prompt 尚未确认、hidden、离线或握手未完成时不发送。恢复刷新不创建新 observation epoch，也不改变 transcript ownership。
 - 工作区窄栏是浏览器本地的快速入口，只把最近目录列表与最后使用目录保存在 localStorage，不成为项目身份、信任或会话真相。首次没有记录时仍渲染完整工作台空态；握手后自动 initialize 最后工作区，用户确认切换时先发送 `close_session`，再生成新 observation epoch，旧 state/event 一律忽略。
 - 开启工作区对话框的目录输入由 App 受控；内置目录浏览器只展示服务端确认过的临时浏览位置，不自动 initialize。导航结果按一次性 commandId 匹配；只有用户点击“选择当前文件夹”才替换输入，取消保留原值，错误可回到服务启动目录，断线会关闭临时浏览状态。
 - 最近工作区不能把 initialize 成功当作目录永远存在。相关 initialize 失败时保留该入口并标记不可用，让用户重试、重新选择目录、切换其它工作区或显式从列表移除；不能因为一次失败自动删除本地记录。

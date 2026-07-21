@@ -84,6 +84,7 @@
 - SDK 报告的 extension load errors 也会进入 session 错误，不能只监听运行期 runner errors。
 - initialize 在 project view 建立前就登记目标 observation epoch；focus 只有在精确 `focus_attached` 后才可发送 prompt。
 - attach 后先发布小体积 PublicState，再发布低频 role/project snapshot 与有界 focused history snapshot；恢复历史不能依赖 SDK 重放旧事件。
+- 同一 project view 的索引刷新同时最多执行一轮；进行中收到的任意数量请求折叠为一次尾随扫描，尾随到达时前一轮结果不投影。页面恢复的 `refresh_view` 只接受精确 observation/focus 身份；busy 或 compacting actor 不重发 durable transcript，避免覆盖当前流式尾部。
 - close/focus change 先同步使观察身份和 UI route 失效，再 detach project view；它不会把仍在运行的 conversation actor 当作连接资源销毁。
 - 切到 read_only 是项目级 barrier：先同步取消其它连接的旧 run，等待它们 release，再持久化并发布确认；不能只在异步策略前后“多检查一次”。
 - WebSocket server handle 显式拥有升级监听、活动 socket、共享 RoleCatalog 与 ProjectSessionCoordinator；进程退出会先停止升级、断开客户端，再等待全部 connection 和 conversation actor dispose。

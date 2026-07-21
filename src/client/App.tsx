@@ -45,6 +45,7 @@ const CWD_KEY = "piweb.lastCwd";
 const WORKSPACES_KEY = "piweb.workspaces";
 const MAX_WORKSPACES = 30;
 const MAX_QUEUED_PROMPTS = 20;
+const RESUME_REFRESH_DELAY_MS = 16;
 
 interface InitialWorkspaceState {
   workspaces: string[];
@@ -1373,6 +1374,54 @@ export function App() {
       socket.close();
     };
   }, []);
+
+  useEffect(() => {
+    let refreshTimer: number | undefined;
+    const flush = () => {
+      refreshTimer = undefined;
+      if (
+        !transportOnline
+        || !protocolReady
+        || document.visibilityState === "hidden"
+        || pendingFocusRef.current
+        || pendingPromptRef.current
+        || outstandingRunIdRef.current
+      ) {
+        return;
+      }
+      const sessionId = sessionIdRef.current;
+      const projectId = projectIdRef.current;
+      if (!sessionId || !projectId) return;
+      const focus = focusRef.current;
+      socketRef.current?.send({
+        type: "refresh_view",
+        sessionId,
+        projectId,
+        ...(focus === undefined
+          ? {}
+          : {
+              conversationId: focus.conversationId,
+              focusId: focus.focusId,
+            }),
+      });
+    };
+    const schedule = () => {
+      if (
+        document.visibilityState === "hidden"
+        || refreshTimer !== undefined
+      ) return;
+      refreshTimer = window.setTimeout(flush, RESUME_REFRESH_DELAY_MS);
+    };
+    window.addEventListener("focus", schedule);
+    window.addEventListener("pageshow", schedule);
+    document.addEventListener("visibilitychange", schedule);
+    return () => {
+      if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
+      window.removeEventListener("focus", schedule);
+      window.removeEventListener("pageshow", schedule);
+      document.removeEventListener("visibilitychange", schedule);
+    };
+  }, [protocolReady, transportOnline]);
 
   useEffect(() => {
     if (!notification) return;

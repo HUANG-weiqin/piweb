@@ -128,6 +128,11 @@ interface CoordinatedProjectView {
   projectSnapshotInitialized: boolean;
 }
 
+interface ProjectSnapshotRefresh {
+  readonly view: CoordinatedProjectView;
+  trailing: boolean;
+}
+
 type ConnectionCommand = Exclude<ClientCommand, { type: "browse_directory" }>;
 type LegacySetToolModeCommand = {
   type: "set_tool_mode";
@@ -143,6 +148,7 @@ type QueuedCommand = Exclude<ConnectionCommand, {
     | "extension_ui_response"
     | "initialize"
     | "prompt"
+    | "refresh_view"
     | "steer";
 }>;
 type ConversationTarget = NonNullable<
@@ -251,7 +257,7 @@ export class PiConnection {
   private coordinationReady?: Promise<PiConnectionCoordination>;
   private unsubscribeRoles?: () => void;
   private coordinatedView?: CoordinatedProjectView;
-  private projectSnapshotGeneration = 0;
+  private projectSnapshotRefresh?: ProjectSnapshotRefresh;
   private extensionScope = 0;
   private readonly focusedItemFingerprints = new Map<string, string>();
   private active?: ActiveSession;
@@ -499,6 +505,10 @@ export class PiConnection {
       return Promise.resolve();
     }
     if (command.type === "close_session") return this.closeSession(command.sessionId);
+    if (command.type === "refresh_view") {
+      this.refreshLegacyView(command);
+      return Promise.resolve();
+    }
     if (command.type === "steer") {
       return Promise.reject(
         new Error("steer requires persistent project coordination"),
@@ -627,6 +637,10 @@ export class PiConnection {
     }
     if (command.type === "close_session") {
       return this.closeCoordinatedSession(command.sessionId);
+    }
+    if (command.type === "refresh_view") {
+      this.refreshCoordinatedView(command);
+      return Promise.resolve();
     }
     if (command.type === "abort") {
       try {
@@ -1054,6 +1068,7 @@ export class PiConnection {
       | { type: "extension_ui_response" }
       | { type: "initialize" }
       | { type: "prompt" }
+      | { type: "refresh_view" }
       | { type: "steer" }
       | { type: "switch_conversation_role" }
     >,
@@ -1603,63 +1618,91 @@ export class PiConnection {
     ) {
       return;
     }
-    const requestGeneration = ++this.projectSnapshotGeneration;
-    void this.requireCoordination().then(({ coordinator }) =>
-      coordinator.listSessions(view.handle)
-    ).then((conversations) => {
-      if (
-        this.disposed
-        || this.coordinatedView !== view
-        || requestGeneration !== this.projectSnapshotGeneration
-      ) {
-        return;
-      }
-      const liveConversationIds = new Set(
-        conversations.map(({ id }) => id),
-      );
-      for (const conversation of conversations) {
-        const previousCount = view.seenMessageCounts.get(conversation.id);
-        if (conversation.id === view.conversationId) {
-          view.unreadConversationIds.delete(conversation.id);
-        } else if (
-          (
-            previousCount !== undefined
-              ? conversation.messageCount > previousCount
-              : (
-                  view.projectSnapshotInitialized
-                  && conversation.messageCount > 0
-                )
-          )
-        ) {
-          view.unreadConversationIds.add(conversation.id);
+    const existing = this.projectSnapshotRefresh;
+    if (existing?.view === view) {
+      existing.trailing = true;
+      return;
+    }
+    const refresh: ProjectSnapshotRefresh = { view, trailing: false };
+    this.projectSnapshotRefresh = refresh;
+    void this.runProjectSnapshotRefresh(refresh);
+  }
+
+  private async runProjectSnapshotRefresh(
+    refresh: ProjectSnapshotRefresh,
+  ): Promise<void> {
+    const view = refresh.view;
+    let latestError: unknown;
+    let latestFailed = false;
+    try {
+      do {
+        refresh.trailing = false;
+        latestFailed = false;
+        try {
+          const conversations = await view.coordinator.listSessions(
+            view.handle,
+          );
+          if (!this.isCurrentCoordinatedView(view)) return;
+          if (refresh.trailing) continue;
+          this.emitProjectSnapshot(view, conversations);
+        } catch (error) {
+          latestError = error;
+          latestFailed = true;
         }
-        view.seenMessageCounts.set(
-          conversation.id,
-          conversation.messageCount,
-        );
+      } while (
+        refresh.trailing
+        && this.isCurrentCoordinatedView(view)
+      );
+      if (latestFailed && this.isCurrentCoordinatedView(view)) {
+        this.emitError("session", latestError, view.sessionId);
       }
-      for (const conversationId of view.seenMessageCounts.keys()) {
-        if (liveConversationIds.has(conversationId)) continue;
-        view.seenMessageCounts.delete(conversationId);
-        view.unreadConversationIds.delete(conversationId);
+    } finally {
+      if (this.projectSnapshotRefresh === refresh) {
+        this.projectSnapshotRefresh = undefined;
       }
-      view.projectSnapshotInitialized = true;
-      this.emit(boundedProjectSnapshotEvent({
-        sessionId: view.sessionId,
-        projectId: view.handle.project.id,
-        conversations: conversations.map((conversation) => ({
-          ...conversation,
-          unread: view.unreadConversationIds.has(conversation.id),
-        })),
-        ...(view.conversationId === undefined
-          ? {}
-          : { conversationId: view.conversationId }),
-      }));
-    }).catch((error) => {
-      if (this.coordinatedView === view && !this.disposed) {
-        this.emitError("session", error, view.sessionId);
+    }
+  }
+
+  private emitProjectSnapshot(
+    view: CoordinatedProjectView,
+    conversations: ConversationSummary[],
+  ): void {
+    const liveConversationIds = new Set(
+      conversations.map(({ id }) => id),
+    );
+    for (const conversation of conversations) {
+      const previousCount = view.seenMessageCounts.get(conversation.id);
+      if (conversation.id === view.conversationId) {
+        view.unreadConversationIds.delete(conversation.id);
+      } else if (
+        previousCount !== undefined
+          ? conversation.messageCount > previousCount
+          : view.projectSnapshotInitialized && conversation.messageCount > 0
+      ) {
+        view.unreadConversationIds.add(conversation.id);
       }
-    });
+      view.seenMessageCounts.set(
+        conversation.id,
+        conversation.messageCount,
+      );
+    }
+    for (const conversationId of view.seenMessageCounts.keys()) {
+      if (liveConversationIds.has(conversationId)) continue;
+      view.seenMessageCounts.delete(conversationId);
+      view.unreadConversationIds.delete(conversationId);
+    }
+    view.projectSnapshotInitialized = true;
+    this.emit(boundedProjectSnapshotEvent({
+      sessionId: view.sessionId,
+      projectId: view.handle.project.id,
+      conversations: conversations.map((conversation) => ({
+        ...conversation,
+        unread: view.unreadConversationIds.has(conversation.id),
+      })),
+      ...(view.conversationId === undefined
+        ? {}
+        : { conversationId: view.conversationId }),
+    }));
   }
 
   private publishRoleCatalog(): void {
@@ -1837,6 +1880,67 @@ export class PiConnection {
     return view;
   }
 
+  private isCurrentCoordinatedView(view: CoordinatedProjectView): boolean {
+    return !this.disposed
+      && this.coordinatedView === view
+      && view.sessionId === this.requestedSessionId
+      && view.generation === this.generation;
+  }
+
+  private refreshCoordinatedView(
+    command: Extract<ClientCommand, { type: "refresh_view" }>,
+  ): void {
+    const view = this.coordinatedView;
+    if (
+      !view
+      || !this.isCurrentCoordinatedView(view)
+      || view.sessionId !== command.sessionId
+      || view.handle.project.id !== command.projectId
+      || view.conversationId !== command.conversationId
+      || view.focusId !== command.focusId
+    ) {
+      return;
+    }
+    this.publishCoordinatedState();
+    this.publishRoleCatalog();
+    this.publishProjectSnapshotCoordinated();
+    if (
+      view.actor?.getActivity().kind === "idle"
+      && !view.actor.isCompacting()
+    ) {
+      this.publishFocusedConversationSnapshot();
+    }
+  }
+
+  private refreshLegacyView(
+    command: Extract<ClientCommand, { type: "refresh_view" }>,
+  ): void {
+    const active = this.active;
+    if (
+      !active
+      || active.id !== this.requestedSessionId
+      || active.generation !== this.generation
+      || active.id !== command.sessionId
+      || active.project.id !== command.projectId
+      || active.conversationId !== command.conversationId
+      || active.focusId !== command.focusId
+    ) {
+      return;
+    }
+    this.publishState();
+    this.publishProjectSnapshot();
+    if (this.activeRun) return;
+    const history = projectConversationHistorySnapshot(active.sessionManager);
+    this.emit({
+      type: "conversation_snapshot",
+      sessionId: active.id,
+      conversationId: active.conversationId,
+      focusId: active.focusId,
+      messages: history.messages,
+      truncated: history.truncated,
+    });
+  }
+
   private requireCoordinatedFocus(
     sessionId: string,
     conversationId: string,
@@ -1881,7 +1985,6 @@ export class PiConnection {
     const view = this.coordinatedView;
     if (!view) return;
     this.coordinatedView = undefined;
-    this.projectSnapshotGeneration++;
     this.focusedItemFingerprints.clear();
     const failures: unknown[] = [];
     view.extensionAbort.abort();

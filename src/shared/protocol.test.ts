@@ -25,7 +25,7 @@ const messageId = "assistant:96b960be-b6bb-4a19-9cf2-78e77cb69425";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(19);
+    expect(PROTOCOL_VERSION).toBe(20);
   });
 
   it("accepts supported commands", () => {
@@ -54,6 +54,13 @@ describe("parseClientCommand", () => {
       sessionId,
       conversationId,
     }).type).toBe("focus_conversation");
+    expect(parseClientCommand({
+      type: "refresh_view",
+      sessionId,
+      projectId,
+      conversationId,
+      focusId,
+    }).type).toBe("refresh_view");
     expect(parseClientCommand({
       type: "create_role",
       commandId,
@@ -233,6 +240,12 @@ describe("parseClientCommand", () => {
       conversationId,
       focusId: "not-a-uuid",
     })).toThrow();
+    expect(() => parseClientCommand({
+      type: "refresh_view",
+      sessionId,
+      projectId,
+      conversationId,
+    })).toThrow("focusId and conversationId");
     expect(() => parseClientCommand({
       type: "switch_conversation_role",
       commandId,
@@ -746,6 +759,13 @@ describe("parseClientCommand", () => {
       authFlowId,
       message: "waiting",
     }).type).toBe("auth_progress");
+    expect(parseServerEvent({
+      type: "error",
+      message: "refresh failed",
+      scope: "command",
+      operation: "refresh_view",
+      sessionId,
+    }).type).toBe("error");
 
     expect(() => parseServerEvent({
       type: "session_event",

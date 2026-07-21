@@ -1,7 +1,14 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import { StrictMode } from "react";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   PROTOCOL_VERSION,
@@ -1189,6 +1196,72 @@ describe("App", () => {
     expect(socketMock.send.mock.calls.filter(
       ([command]) => command.type === "prompt",
     )).toHaveLength(1);
+  });
+
+  it("coalesces browser resume signals into one exact view refresh", async () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+    socketMock.send.mockClear();
+
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    await waitFor(() => {
+      expect(socketMock.send).toHaveBeenCalledTimes(1);
+    });
+    expect(latestCommand("refresh_view")).toEqual({
+      type: "refresh_view",
+      sessionId,
+      projectId: PROJECT_ID,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+    });
+  });
+
+  it("does not refresh while a prompt handoff is unacknowledged", async () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+    fireEvent.change(screen.getByRole("textbox", {
+      name: "给 Pi 发送消息",
+    }), { target: { value: "keep this handoff stable" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(latestCommand("prompt").sessionId).toBe(sessionId);
+    socketMock.send.mockClear();
+
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+      await new Promise((resolve) => window.setTimeout(resolve, 30));
+    });
+
+    expect(socketMock.send).not.toHaveBeenCalled();
   });
 
   it("ignores state and events from a closed session epoch", () => {
