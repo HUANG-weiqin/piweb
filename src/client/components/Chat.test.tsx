@@ -215,38 +215,76 @@ describe("Chat", () => {
     });
   });
 
-  it("immediately releases scroll control when the reader wheels upward", () => {
-    const rendered = render(view(emptyChat));
+  it("releases scroll control upward and commits a manual jump before the next delta", () => {
+    const firstChat: ChatState = {
+      messages: [{
+        id: "assistant-1",
+        runId: "run-1",
+        role: "assistant",
+        text: "first streamed chunk",
+        thinking: "",
+        tools: [],
+      }],
+      sessionTokens: 0,
+    };
+    const rendered = render(view(firstChat, "", undefined, {
+      busy: true,
+      activeRun: { id: "run-1", phase: "running" },
+    }));
     const transcript = document.querySelector<HTMLElement>(".transcript");
     if (!transcript) throw new Error("transcript not rendered");
-    const scrollTo = vi.fn();
+    let scrollHeight = 1_000;
+    let scrollTop = 100;
+    const clientHeight = 500;
+    const scrollTo = vi.fn((options: ScrollToOptions) => {
+      if (options.behavior === "smooth") return;
+      scrollTop = Math.min(
+        Number(options.top ?? 0),
+        scrollHeight - clientHeight,
+      );
+    });
     Object.defineProperties(transcript, {
-      scrollHeight: { configurable: true, value: 1_000 },
-      clientHeight: { configurable: true, value: 500 },
-      scrollTop: { configurable: true, writable: true, value: 498 },
+      scrollHeight: { configurable: true, get: () => scrollHeight },
+      clientHeight: { configurable: true, value: clientHeight },
+      scrollTop: {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value: number) => { scrollTop = value; },
+      },
       scrollTo: { configurable: true, value: scrollTo },
     });
     fireEvent.wheel(transcript, { deltaY: -4 });
 
     rendered.rerender(view({
+      ...firstChat,
       messages: [{
-        id: "assistant-1",
-        runId: "run-1",
-        role: "assistant",
-        text: "new output",
-        thinking: "",
-        tools: [],
+        ...firstChat.messages[0],
+        text: "first streamed chunk while detached",
       }],
-      sessionTokens: 0,
+    }, "", undefined, {
+      busy: true,
+      activeRun: { id: "run-1", phase: "running" },
     }));
 
-    expect(transcript).toHaveClass("has-content");
     expect(scrollTo).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "↓ 回到最新消息" }));
-    expect(scrollTo).toHaveBeenCalledWith({
-      behavior: "smooth",
-      top: 1_000,
-    });
+
+    expect(scrollTop).toBe(500);
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 1_000 });
+
+    scrollHeight = 1_030;
+    rendered.rerender(view({
+      ...firstChat,
+      messages: [{
+        ...firstChat.messages[0],
+        text: "first streamed chunk while detached and the next delta",
+      }],
+    }, "", undefined, {
+      busy: true,
+      activeRun: { id: "run-1", phase: "running" },
+    }));
+
+    expect(scrollTo).toHaveBeenCalledOnce();
   });
 
   it("reattaches only after the reader returns all the way to the bottom", () => {

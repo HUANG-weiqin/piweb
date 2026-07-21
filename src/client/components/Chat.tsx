@@ -369,7 +369,7 @@ export function Chat({
   const jumpToLatest = () => {
     followOutputRef.current = true;
     setShowJumpToLatest(false);
-    scrollToLatest("smooth");
+    scrollToLatest();
   };
   const send = () => {
     const value = draft.trim();
