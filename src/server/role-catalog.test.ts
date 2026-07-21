@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   RoleCatalog,
+  type RoleCatalogModel,
   type RoleCatalogModelSource,
 } from "./role-catalog.js";
 import type { RoleModelReference } from "./role-store.js";
@@ -20,8 +21,8 @@ function model(provider: string, id: string): RoleModelReference {
   return { provider, id };
 }
 
-function source(initial: RoleModelReference[]): RoleCatalogModelSource & {
-  available: RoleModelReference[];
+function source(initial: RoleCatalogModel[]): RoleCatalogModelSource & {
+  available: RoleCatalogModel[];
   notify(): void;
 } {
   const listeners = new Set<() => void>();
@@ -66,6 +67,7 @@ describe("RoleCatalog", () => {
       description: "changed",
       systemPrompt: "new prompt",
       model: model("provider", "model-a"),
+      defaultThinkingLevel: "off",
       toolMode: "read_only",
       canManageSessions: false,
     });
@@ -99,6 +101,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "",
       model: model("provider", "missing"),
+      defaultThinkingLevel: "off",
       toolMode: "read_only",
       canManageSessions: true,
     })).rejects.toThrow("unavailable in the current project");
@@ -109,6 +112,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "",
       model: model("provider", "missing"),
+      defaultThinkingLevel: "off",
       toolMode: "read_only",
       canManageSessions: true,
     });
@@ -134,6 +138,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "",
       model: model("extension", "project-model"),
+      defaultThinkingLevel: "off",
       toolMode: "read_only",
       canManageSessions: false,
     })).rejects.toThrow("unavailable in the current project");
@@ -143,6 +148,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "",
       model: model("extension", "project-model"),
+      defaultThinkingLevel: "off",
       toolMode: "read_only",
       canManageSessions: false,
     }, projectModels);
@@ -165,6 +171,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "",
       model: model("extension", "missing"),
+      defaultThinkingLevel: "off",
       toolMode: "read_only",
       canManageSessions: false,
     }, projectModels)).rejects.toThrow("unavailable in the current project");
@@ -174,6 +181,7 @@ describe("RoleCatalog", () => {
       description: "The project provider is temporarily unavailable.",
       systemPrompt: "Keep the frozen model.",
       model: model("extension", "project-model"),
+      defaultThinkingLevel: "off",
       toolMode: "full_access",
       canManageSessions: true,
     }, { getAvailable: () => [] })).resolves.toMatchObject({
@@ -193,6 +201,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "Review.",
       model: model("provider", "model-a"),
+      defaultThinkingLevel: "off",
       toolMode: "read_only",
       canManageSessions: false,
     });
@@ -212,5 +221,44 @@ describe("RoleCatalog", () => {
     models.available = [model("provider", "model-a")];
     models.notify();
     expect(listener).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a default thinking level unsupported by the role model", async () => {
+    const selected = {
+      ...model("provider", "limited"),
+      reasoning: true,
+      thinkingLevelMap: { max: null },
+    };
+    const models = source([selected]);
+    const catalog = await RoleCatalog.open(models, await rolesPath());
+
+    await expect(catalog.createRole({
+      name: "Too much thinking",
+      description: "",
+      systemPrompt: "",
+      model: model("provider", "limited"),
+      defaultThinkingLevel: "max",
+      toolMode: "read_only",
+      canManageSessions: false,
+    })).rejects.toThrow("does not support thinking level max");
+
+    const created = await catalog.createRole({
+      name: "Supported thinking",
+      description: "",
+      systemPrompt: "",
+      model: model("provider", "limited"),
+      defaultThinkingLevel: "high",
+      toolMode: "read_only",
+      canManageSessions: false,
+    });
+    models.available = [{
+      ...selected,
+      thinkingLevelMap: { high: null, max: null },
+    }];
+    expect(catalog.listRoles()).toContainEqual(expect.objectContaining({
+      id: created.id,
+      available: false,
+      unavailableReason: "模型不支持默认思考强度：high",
+    }));
   });
 });

@@ -18,6 +18,7 @@ const baseConversation: ConversationSummary = {
     name: "架构师",
     description: "负责系统设计",
     model: { provider: "openai", id: "gpt-5" },
+    defaultThinkingLevel: "off",
     toolMode: "read_only",
     canManageSessions: true,
   },

@@ -45,8 +45,10 @@ import {
   type ConversationLeaseWaitOptions,
   type ProjectStoreHandle,
 } from "./project-store.js";
-import { RoleCatalog } from "./role-catalog.js";
-import type { RoleModelReference } from "./role-store.js";
+import {
+  RoleCatalog,
+  type RoleCatalogModel,
+} from "./role-catalog.js";
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -115,7 +117,7 @@ class FakeSessionControl {
       model: options.model === undefined
         ? { provider: "test", id: "model-a" }
         : { ...options.model },
-      thinkingLevel: "off",
+      thinkingLevel: options.thinkingLevel ?? "off",
       extensionRunner: {
         getCommand: () => undefined,
       },
@@ -231,9 +233,9 @@ class FakeRuntime implements PiRuntimeLike {
   readonly createOptions = new Map<string, CreatePiSessionOptions>();
   readonly modelListeners = new Set<() => void>();
   readonly createConversationIds: string[] = [];
-  readonly availableModels: RoleModelReference[] = [
-    { provider: "test", id: "model-a" },
-    { provider: "test", id: "model-b" },
+  readonly availableModels: RoleCatalogModel[] = [
+    { provider: "test", id: "model-a", reasoning: true },
+    { provider: "test", id: "model-b", reasoning: true },
   ];
   readonly nextSessionBehaviors: SessionBehavior[][] = [];
   projectCatalogCreations = 0;
@@ -410,6 +412,7 @@ async function createFixture(
     description: defaultRole.description,
     systemPrompt: defaultRole.systemPrompt,
     model: defaultRole.model,
+    defaultThinkingLevel: defaultRole.defaultThinkingLevel,
     toolMode: "full_access",
     canManageSessions: true,
   });
@@ -781,6 +784,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Reviews lifecycle code",
       systemPrompt: "Review the first revision.",
       model: { provider: "test", id: "model-a" },
+      defaultThinkingLevel: "off",
       toolMode: "read_only",
       canManageSessions: false,
     });
@@ -794,6 +798,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Reviews concurrency",
       systemPrompt: "Review the second revision.",
       model: { provider: "test", id: "model-b" },
+      defaultThinkingLevel: "high",
       toolMode: "full_access",
       canManageSessions: true,
     });
@@ -848,6 +853,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Builds the selected change",
       systemPrompt: "Implement the requested change.",
       model: { provider: "test", id: "model-b" },
+      defaultThinkingLevel: "high",
       toolMode: "full_access",
       canManageSessions: true,
     });
@@ -876,6 +882,7 @@ describe("ProjectSessionCoordinator", () => {
     expect(fixture.runtime.createOptions.get(actor.conversationId))
       .toMatchObject({
         model: { provider: "test", id: "model-b" },
+        thinkingLevel: "high",
         roleSystemPrompt: "Implement the requested change.",
       });
     expect(
@@ -896,6 +903,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "",
       systemPrompt: "",
       model: { provider: "test", id: "model-b" },
+      defaultThinkingLevel: "off",
       toolMode: "read_only",
       canManageSessions: false,
     });
@@ -934,6 +942,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "",
       systemPrompt: "This runtime will fail.",
       model: { provider: "test", id: "model-b" },
+      defaultThinkingLevel: "off",
       toolMode: "full_access",
       canManageSessions: false,
     });
@@ -1002,6 +1011,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Uses a project extension provider",
       systemPrompt: "Use the project provider.",
       model: projectModel,
+      defaultThinkingLevel: "off",
       toolMode: "read_only",
       canManageSessions: false,
     }, runtime.sessionModelRegistry);
@@ -1541,6 +1551,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Must not replace the frozen start request",
       systemPrompt: "Use a different role.",
       model: { provider: "test", id: "model-a" },
+      defaultThinkingLevel: "off",
       toolMode: "read_only",
       canManageSessions: false,
     });
@@ -1599,6 +1610,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "The originally selected role",
       systemPrompt: "Use the original role prompt.",
       model: { provider: "test", id: "model-a" },
+      defaultThinkingLevel: "off",
       toolMode: "read_only",
       canManageSessions: false,
     });
@@ -1643,6 +1655,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "A later role definition",
       systemPrompt: "Use the rewritten role prompt.",
       model: { provider: "test", id: "model-b" },
+      defaultThinkingLevel: "off",
       toolMode: "full_access",
       canManageSessions: true,
     });
@@ -1857,6 +1870,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Works only in its own session",
       systemPrompt: "Complete the assigned work.",
       model: { provider: "test", id: "model-a" },
+      defaultThinkingLevel: "off",
       toolMode: "read_only",
       canManageSessions: false,
     });
@@ -3880,6 +3894,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Must survive the processing crash boundary",
       systemPrompt: "Use the frozen processing recovery prompt.",
       model: { provider: "test", id: "model-b" },
+      defaultThinkingLevel: "off",
       toolMode: "read_only",
       canManageSessions: false,
     });

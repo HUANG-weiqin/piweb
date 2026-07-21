@@ -1,6 +1,6 @@
 # 项目与持久会话
 
-`updated: 2026-07-20`
+`updated: 2026-07-21`
 
 ## 这个模块是干什么的
 
@@ -140,7 +140,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 
 ## 旧项目权限字段
 
-严格 v1 manifest 仍保留 `toolMode`，用于兼容旧项目与非协调内部路径；当前 v18 协调运行不再把它当作工具权限真相，也不提供修改它的线协议。工具权限属于用户级角色模板，并进入 conversation 当前角色快照；旧 manifest 的值不能扩大或收紧当前 `ConversationActor`。
+严格 v1 manifest 仍保留 `toolMode`，用于兼容旧项目与非协调内部路径；当前 v19 协调运行不再把它当作工具权限真相，也不提供修改它的线协议。工具权限属于用户级角色模板，并进入 conversation 当前角色快照；旧 manifest 的值不能扩大或收紧当前 `ConversationActor`。
 
 `.piweb` 是宿主持久目录。Agent 在 read_only 中不能写入，但宿主保存 transcript 不受只读模式影响；full_access 不额外保护该目录。
 

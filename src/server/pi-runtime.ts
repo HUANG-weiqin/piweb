@@ -43,6 +43,7 @@ export interface CreatePiSessionOptions {
     provider: string;
     id: string;
   };
+  thinkingLevel?: CreateAgentSessionOptions["thinkingLevel"];
   roleSystemPrompt?: string;
   workbenchCustomTools?: ToolDefinition[];
 }
@@ -380,6 +381,7 @@ export class PiRuntime implements PiRuntimeLike {
           settingsManager: settings,
           sessionManager,
           model: fixedModel,
+          thinkingLevel: options.thinkingLevel,
           customTools: workbenchCustomTools,
         });
       } else {
@@ -413,6 +415,7 @@ export class PiRuntime implements PiRuntimeLike {
           services,
           sessionManager,
           model: fixedModel,
+          thinkingLevel: options.thinkingLevel,
           customTools: workbenchCustomTools,
         });
       }
@@ -436,6 +439,14 @@ export class PiRuntime implements PiRuntimeLike {
       ) {
         throw new Error(
           `Pi session did not retain its fixed model ${fixedModelReference.provider}/${fixedModelReference.id}`,
+        );
+      }
+      if (
+        options.thinkingLevel !== undefined
+        && createdSession.thinkingLevel !== options.thinkingLevel
+      ) {
+        throw new Error(
+          `Pi session did not retain its requested thinking level ${options.thinkingLevel}`,
         );
       }
       const activeToolNames = new Set(createdSession.getActiveToolNames());

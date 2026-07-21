@@ -25,6 +25,7 @@ function role(
     description: `${name} description`,
     systemPrompt: `${name} prompt`,
     model: { provider: "alpha", id: "good" },
+    defaultThinkingLevel: "high",
     toolMode: "full_access",
     canManageSessions: true,
     createdAt: "2026-07-19T12:00:00.000Z",
@@ -46,6 +47,7 @@ const providers: PublicProvider[] = [
         id: "good",
         name: "Good",
         reasoning: true,
+        thinkingLevels: ["off", "minimal", "low", "medium", "high"],
         input: ["text"],
         contextWindow: 100_000,
         available: true,
@@ -55,9 +57,20 @@ const providers: PublicProvider[] = [
         id: "offline",
         name: "Offline",
         reasoning: false,
+        thinkingLevels: ["off"],
         input: ["text"],
         contextWindow: 10_000,
         available: false,
+      },
+      {
+        provider: "alpha",
+        id: "plain",
+        name: "Plain",
+        reasoning: false,
+        thinkingLevels: ["off"],
+        input: ["text"],
+        contextWindow: 10_000,
+        available: true,
       },
     ],
   },
@@ -71,6 +84,7 @@ const providers: PublicProvider[] = [
       id: "hidden",
       name: "Hidden",
       reasoning: false,
+      thinkingLevels: ["off"],
       input: ["text"],
       contextWindow: 10_000,
       available: true,
@@ -135,6 +149,7 @@ describe("RoleManagerDialog", () => {
     expect(options.map((option) => option.textContent)).toEqual([
       "当前不可用 · retired",
       "Good",
+      "Plain",
     ]);
     expect(within(select).getByRole("group", { name: "Alpha" }))
       .toBeInTheDocument();
@@ -156,6 +171,7 @@ describe("RoleManagerDialog", () => {
       description: "Default description",
       systemPrompt: "Default prompt",
       model: { provider: "alpha", id: "good" },
+      defaultThinkingLevel: "high",
       toolMode: "full_access",
       canManageSessions: true,
     });
@@ -200,6 +216,8 @@ describe("RoleManagerDialog", () => {
       .not.toBeChecked();
     expect(screen.getByRole("combobox", { name: "工具权限" }))
       .toHaveValue("read_only");
+    expect(screen.getByRole("combobox", { name: "默认思考强度" }))
+      .toHaveValue("off");
     fireEvent.change(screen.getByRole("textbox", { name: "角色名称" }), {
       target: { value: "Researcher" },
     });
@@ -219,6 +237,7 @@ describe("RoleManagerDialog", () => {
       description: "Finds primary sources",
       systemPrompt: "Use primary sources.",
       model: { provider: "alpha", id: "good" },
+      defaultThinkingLevel: "off",
       toolMode: "read_only",
       canManageSessions: false,
     });
@@ -264,6 +283,42 @@ describe("RoleManagerDialog", () => {
       1,
       expect.objectContaining({ toolMode: "read_only" }),
     );
+  });
+
+  it("limits the default thinking level to the selected model", () => {
+    const update = vi.fn();
+    renderManager({ onUpdate: update });
+
+    const thinking = screen.getByRole("combobox", {
+      name: "默认思考强度",
+    });
+    expect(within(thinking).getAllByRole("option").map((option) => (
+      option.getAttribute("value")
+    ))).toEqual(["off", "minimal", "low", "medium", "high"]);
+
+    fireEvent.change(thinking, { target: { value: "medium" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存角色" }));
+    expect(update).toHaveBeenCalledWith(
+      "default",
+      1,
+      expect.objectContaining({ defaultThinkingLevel: "medium" }),
+    );
+  });
+
+  it("uses model default when the selected model has no adjustable level", () => {
+    renderManager();
+    fireEvent.change(screen.getByRole("combobox", { name: "角色模型" }), {
+      target: { value: JSON.stringify(["alpha", "plain"]) },
+    });
+
+    const thinking = screen.getByRole("combobox", {
+      name: "默认思考强度",
+    });
+    expect(thinking).toBeDisabled();
+    expect(thinking).toHaveValue("off");
+    expect(within(thinking).getByRole("option")).toHaveTextContent("模型默认");
+    expect(screen.getByText("此模型没有可调思考强度，将使用模型默认行为。"))
+      .toBeInTheDocument();
   });
 
   it("only renders a result matching the exact pending command", () => {

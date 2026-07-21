@@ -1,6 +1,6 @@
 # 服务端运行时
 
-`updated: 2026-07-20`
+`updated: 2026-07-21`
 
 ## 这个模块是干什么的
 
@@ -31,7 +31,7 @@
 
 - 严格读写 `<Pi agent dir>/piweb/roles.json`；首次初始化赠送可编辑、可删除的“默认 / 默认角色”普通模板，删除后不自动重建；v2 只迁移未改过的旧默认文案，不覆盖用户已编辑的名称或简介；
 - 用共享模型目录动态计算模板可用性；
-- 创建或切换会话角色时返回完整深快照，不把模板对象引用交给 session。
+- 创建或切换会话角色时返回完整深快照，不把模板对象引用交给 session；角色默认思考强度必须属于固定模型实际支持的档位，无可调档位的模型使用唯一有效值。
 - 未携带角色快照的旧会话迁移为独立“旧会话”快照；可复用其历史模型或任一现存角色模型，但不依赖、也不重建已删除的初始化模板。
 
 `ProjectSessionCoordinator` 是 conversation 生命周期拥有者：
@@ -58,7 +58,7 @@
 - cwd 校验通过后，旧 project view 会 detach，再取得 coordinator project handle；不同项目 actor 仍由 coordinator 独立拥有，直到服务关闭。
 - initialize 在建立空态或打开 actor 前先 singleflight 建立 project model catalog；项目模型查询优先使用当前 actor registry，其次 project catalog，最后才是进程基线。模型列表、角色 CRUD 和 API Key provider 校验必须遵守同一顺序。
 - initialize 的 `recent` 在空项目中提交项目空态，不创建隐含 default conversation。open 复用已有 actor；new 必须先解析可用角色并在 AgentSession 创建前持久写入角色/lifecycle metadata。
-- `createAgentSession` 一旦返回，owner bind、host tool gate 安装、startup provider/固定模型校验和 extension load error 投影都必须位于同一个失败清理边界；其中任何一步抛错都 teardown 已创建的 AgentSession 并释放 actor lease。
+- `createAgentSession` 一旦返回，owner bind、host tool gate 安装、startup provider/固定模型与初始思考强度校验和 extension load error 投影都必须位于同一个失败清理边界；其中任何一步抛错都 teardown 已创建的 AgentSession 并释放 actor lease。
 - 持久 conversation、连接 observation sessionId、focusId 和 runId 是不同身份；同一 conversation 重连或重新 focus 都必须分配新传输身份。
 - prompt、运行中 steer、inbox custom messages 和 abort 都由 ConversationActor 的 active run ownership 控制；浏览器 attach/detach 不穿过或中止运行过程。steer 只接受精确 `running | waiting` run，不能再额外依赖 SDK 的 `isStreaming` 投影：actor 会先公布 running，SDK 标志随后才可能追上，而 Pi 原生 steering queue 已能安全接收。引导在当前 assistant turn 工具结束、下一次模型调用前生效，不创建第二个 RunTicket。Actor 为每个浏览器 steer 保留 FIFO delivery waiter，只有对应 user message 的 SDK 事件进入当前 run 后才确认命令；run 先结算或取消会拒绝所有未投递 waiter。
 - 自动压缩阈值属于 conversation actor：缺省 70%，从 `piweb.compaction_threshold.v1` 恢复；每轮正常结束后用 Pi 的 context usage 检查百分比并触发标准 `compact()`，不改动同时影响摘要预算的 `reserveTokens`。更新只追加非上下文 custom entry，运行中的本轮结算会读取最新阈值。空闲会话还可通过精确 focus 关联的 `compact_context` 手动调用同一个标准 `compact()`；两条路径都由 actor 的瞬时 `compacting` 状态包围并阻止新的 run/角色切换/截断，focused connection 将其投影到 `PublicState`。成功 compact 产生的 Pi 原生持久条目仍在 snapshot 中投影为用户可见分界线，不另存第二份持久压缩状态。

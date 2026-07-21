@@ -3,6 +3,7 @@ dist-client/
 dist-server/
 coverage/
 .piweb/
+.worktrees/
 *.log
 *.pid
 .DS_Store

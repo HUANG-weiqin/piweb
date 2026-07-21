@@ -2,7 +2,7 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { PublicState } from "../../shared/protocol";
+import type { PublicProvider, PublicState } from "../../shared/protocol";
 import { ConnectionDrawer } from "./ConnectionDrawer";
 
 afterEach(cleanup);
@@ -24,8 +24,8 @@ const state: PublicState = {
     configured: true,
     oauth: false,
     models: [
-      { provider: "test", id: "ready", name: "Ready", reasoning: false, input: ["text"], contextWindow: 100, available: true },
-      { provider: "test", id: "locked", name: "Locked", reasoning: false, input: ["text"], contextWindow: 100, available: false },
+      { provider: "test", id: "ready", name: "Ready", reasoning: false, thinkingLevels: ["off"], input: ["text"], contextWindow: 100, available: true },
+      { provider: "test", id: "locked", name: "Locked", reasoning: false, thinkingLevels: ["off"], input: ["text"], contextWindow: 100, available: false },
     ],
   }],
 };
@@ -90,7 +90,7 @@ describe("ConnectionDrawer", () => {
   });
 
   it("shows models only for the provider the user chose", () => {
-    const secondProvider = {
+    const secondProvider: PublicProvider = {
       id: "other",
       name: "Other",
       configured: true,
@@ -100,6 +100,7 @@ describe("ConnectionDrawer", () => {
         id: "other-model",
         name: "Other Model",
         reasoning: true,
+        thinkingLevels: ["off", "low", "medium", "high"],
         input: ["text"],
         contextWindow: 200_000,
         available: true,

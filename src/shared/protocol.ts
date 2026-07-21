@@ -13,7 +13,7 @@ export const MAX_PROMPT_CHARACTERS = 200_000;
 export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
-export const PROTOCOL_VERSION = 18;
+export const PROTOCOL_VERSION = 19;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
 const conversationIdSchema = z.string().uuid();
@@ -73,6 +73,15 @@ const roleModelSchema = z.object({
   provider: required.max(200),
   id: required.max(500),
 });
+const thinkingLevelSchema = z.enum([
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
 const roleInputSchema = z.object({
   name: requiredBoundedCharactersString(
     MAX_ROLE_NAME_CHARACTERS,
@@ -87,6 +96,7 @@ const roleInputSchema = z.object({
     "role.systemPrompt",
   ),
   model: roleModelSchema.nullable(),
+  defaultThinkingLevel: thinkingLevelSchema,
   toolMode: z.enum(["read_only", "full_access"]),
   canManageSessions: z.boolean(),
 });
@@ -329,6 +339,7 @@ export interface PublicModel {
   id: string;
   name: string;
   reasoning: boolean;
+  thinkingLevels: ThinkingLevel[];
   input: string[];
   contextWindow: number;
   available: boolean;
@@ -425,6 +436,7 @@ export interface RoleTemplate {
   description: string;
   systemPrompt: string;
   model: RoleModelSelection | null;
+  defaultThinkingLevel: ThinkingLevel;
   toolMode: ToolMode;
   canManageSessions: boolean;
   createdAt: string;
@@ -440,6 +452,7 @@ export interface ConversationRoleSnapshot {
   description: string;
   systemPrompt: string;
   model: RoleModelSelection;
+  defaultThinkingLevel: ThinkingLevel;
   toolMode: ToolMode;
   canManageSessions: boolean;
 }
@@ -656,7 +669,6 @@ export type ServerEvent =
       commandId?: string;
     };
 
-const thinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const tokenUsageSchema: z.ZodType<TokenUsage> = z.object({
   input: z.number().finite(),
   output: z.number().finite(),
@@ -669,6 +681,7 @@ const publicModelSchema: z.ZodType<PublicModel> = z.object({
   id: z.string(),
   name: z.string(),
   reasoning: z.boolean(),
+  thinkingLevels: z.array(thinkingLevelSchema).min(1),
   input: z.array(z.string()),
   contextWindow: z.number().finite(),
   available: z.boolean(),
@@ -831,6 +844,7 @@ const roleTemplateSchema: z.ZodType<RoleTemplate> = z.object({
     "role.systemPrompt",
   ),
   model: roleModelSchema.nullable(),
+  defaultThinkingLevel: thinkingLevelSchema,
   toolMode: z.enum(["read_only", "full_access"]),
   canManageSessions: z.boolean(),
   createdAt: z.string().datetime(),
@@ -854,6 +868,7 @@ const conversationRoleSnapshotSchema: z.ZodType<ConversationRoleSnapshot> = z.ob
     "role.systemPrompt",
   ),
   model: roleModelSchema,
+  defaultThinkingLevel: thinkingLevelSchema,
   toolMode: z.enum(["read_only", "full_access"]),
   canManageSessions: z.boolean(),
 });
@@ -871,6 +886,7 @@ const conversationRoleSummarySchema: z.ZodType<
     "role.description",
   ),
   model: roleModelSchema,
+  defaultThinkingLevel: thinkingLevelSchema,
   toolMode: z.enum(["read_only", "full_access"]),
   canManageSessions: z.boolean(),
 });

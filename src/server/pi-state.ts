@@ -1,10 +1,13 @@
 import type { PublicProvider } from "../shared/protocol.js";
+import {
+  supportedThinkingLevels,
+  type ThinkingCapableModel,
+} from "./model-thinking.js";
 
-interface ModelLike {
+interface ModelLike extends ThinkingCapableModel {
   provider: string;
   id: string;
   name?: string;
-  reasoning?: boolean;
   input?: string[];
   contextWindow?: number;
 }
@@ -45,6 +48,7 @@ export function buildPublicProviders(input: ProviderProjectionInput): PublicProv
             id: model.id,
             name: model.name ?? model.id,
             reasoning: model.reasoning ?? false,
+            thinkingLevels: supportedThinkingLevels(model),
             input: model.input ?? ["text"],
             contextWindow: model.contextWindow ?? 0,
             available: input.availableKeys.has(`${id}/${model.id}`),

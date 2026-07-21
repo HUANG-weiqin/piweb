@@ -8,7 +8,9 @@ import type {
   PublicProvider,
   RoleModelSelection,
   RoleTemplate,
+  ThinkingLevel,
 } from "../../shared/protocol";
+import { THINKING_LEVEL_LABELS } from "../lib/thinking-level";
 import { useModalFocus } from "../lib/use-modal-focus";
 
 const NEW_ROLE_ID = "__new__";
@@ -23,6 +25,7 @@ export interface RoleDraft {
   description: string;
   systemPrompt: string;
   model: RoleModelSelection | null;
+  defaultThinkingLevel: ThinkingLevel;
   toolMode: "read_only" | "full_access";
   canManageSessions: boolean;
 }
@@ -55,6 +58,7 @@ interface ModelOption {
   provider: string;
   id: string;
   label: string;
+  thinkingLevels: ThinkingLevel[];
 }
 
 const emptyDraft: RoleDraft = {
@@ -62,6 +66,7 @@ const emptyDraft: RoleDraft = {
   description: "",
   systemPrompt: "",
   model: null,
+  defaultThinkingLevel: "off",
   toolMode: "read_only",
   canManageSessions: false,
 };
@@ -72,6 +77,7 @@ function roleDraft(role: RoleTemplate): RoleDraft {
     description: role.description,
     systemPrompt: role.systemPrompt,
     model: role.model === null ? null : { ...role.model },
+    defaultThinkingLevel: role.defaultThinkingLevel,
     toolMode: role.toolMode,
     canManageSessions: role.canManageSessions,
   };
@@ -108,6 +114,7 @@ function availableModelOptions(
         provider: model.provider,
         id: model.id,
         label: model.name,
+        thinkingLevels: [...model.thinkingLevels],
       }));
   });
 }
@@ -217,7 +224,15 @@ export function RoleManagerDialog({
   const selectModel = (value: string) => {
     const model = modelOptions.find((option) => option.value === value);
     if (model) {
-      updateDraft("model", { provider: model.provider, id: model.id });
+      setDraft((current) => ({
+        ...current,
+        model: { provider: model.provider, id: model.id },
+        defaultThinkingLevel: model.thinkingLevels.includes(
+          current.defaultThinkingLevel,
+        )
+          ? current.defaultThinkingLevel
+          : model.thinkingLevels[0] ?? "off",
+      }));
       return;
     }
     if (draft.model && modelValue(draft.model) === value) return;
@@ -225,6 +240,14 @@ export function RoleManagerDialog({
   };
   const currentModelAvailable = draft.model !== null
     && modelOptions.some((option) => sameModel(option, draft.model!));
+  const currentModelOption = draft.model === null
+    ? undefined
+    : modelOptions.find((option) => sameModel(option, draft.model!));
+  const availableThinkingLevels = currentModelOption?.thinkingLevels ?? [];
+  const currentThinkingLevelAvailable = availableThinkingLevels.includes(
+    draft.defaultThinkingLevel,
+  );
+  const thinkingLevelSelectable = availableThinkingLevels.length > 1;
   const modelSelectValue = draft.model === null ? "" : modelValue(draft.model);
 
   return <div
@@ -349,6 +372,38 @@ export function RoleManagerDialog({
               })}
             </select>
             <p className="setting-note">仅列出已配置提供商当前可用的模型。</p>
+          </div>
+          <div className="setting-field">
+            <label htmlFor="role-thinking-level">默认思考强度</label>
+            <select
+              id="role-thinking-level"
+              value={draft.defaultThinkingLevel}
+              disabled={operationBusy || !thinkingLevelSelectable}
+              onChange={(event) => updateDraft(
+                "defaultThinkingLevel",
+                event.target.value as ThinkingLevel,
+              )}
+            >
+              {!currentThinkingLevelAvailable && <option
+                value={draft.defaultThinkingLevel}
+                disabled
+              >
+                当前不支持 · {THINKING_LEVEL_LABELS[draft.defaultThinkingLevel]}
+              </option>}
+              {availableThinkingLevels.map((level) => <option
+                key={level}
+                value={level}
+              >
+                {availableThinkingLevels.length === 1
+                  ? "模型默认"
+                  : THINKING_LEVEL_LABELS[level]}
+              </option>)}
+            </select>
+            <p className="setting-note">
+              {availableThinkingLevels.length === 1
+                ? "此模型没有可调思考强度，将使用模型默认行为。"
+                : "创建会话或切换到此角色时采用；聊天页调整只影响当前运行会话。"}
+            </p>
           </div>
           <div className="setting-field">
             <label htmlFor="role-tool-mode">工具权限</label>

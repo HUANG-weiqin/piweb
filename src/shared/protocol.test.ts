@@ -25,7 +25,7 @@ const messageId = "assistant:96b960be-b6bb-4a19-9cf2-78e77cb69425";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(18);
+    expect(PROTOCOL_VERSION).toBe(19);
   });
 
   it("accepts supported commands", () => {
@@ -63,6 +63,7 @@ describe("parseClientCommand", () => {
         description: "Finds lifecycle bugs",
         systemPrompt: "Review the implementation.",
         model: { provider: "openai", id: "gpt" },
+        defaultThinkingLevel: "high",
         toolMode: "read_only",
         canManageSessions: false,
       },
@@ -78,6 +79,7 @@ describe("parseClientCommand", () => {
         description: "",
         systemPrompt: "",
         model: null,
+        defaultThinkingLevel: "off",
         toolMode: "full_access",
         canManageSessions: true,
       },
@@ -274,6 +276,7 @@ describe("parseClientCommand", () => {
         description: "",
         systemPrompt: "",
         model: null,
+        defaultThinkingLevel: "off",
         toolMode: "read_only",
         canManageSessions: false,
       },
@@ -337,12 +340,16 @@ describe("parseClientCommand", () => {
         description: "",
         systemPrompt: exactPrompt,
         model: null,
+        defaultThinkingLevel: "high",
         toolMode: "read_only",
         canManageSessions: false,
       },
     })).toMatchObject({
       type: "create_role",
-      role: { systemPrompt: exactPrompt },
+      role: {
+        systemPrompt: exactPrompt,
+        defaultThinkingLevel: "high",
+      },
     });
     expect(() => parseClientCommand({
       type: "create_role",
@@ -353,10 +360,24 @@ describe("parseClientCommand", () => {
         description: "",
         systemPrompt: `${exactPrompt}é`,
         model: null,
+        defaultThinkingLevel: "off",
         toolMode: "read_only",
         canManageSessions: false,
       },
     })).toThrow("UTF-8");
+    expect(() => parseClientCommand({
+      type: "create_role",
+      commandId,
+      sessionId,
+      role: {
+        name: "Missing thinking default",
+        description: "",
+        systemPrompt: "",
+        model: null,
+        toolMode: "read_only",
+        canManageSessions: false,
+      },
+    })).toThrow("defaultThinkingLevel");
   });
 
   it("aligns role name and description character limits with durable storage", () => {
@@ -370,6 +391,7 @@ describe("parseClientCommand", () => {
         description: "d".repeat(MAX_ROLE_DESCRIPTION_CHARACTERS),
         systemPrompt: "",
         model: null,
+        defaultThinkingLevel: "off",
         toolMode: "read_only",
         canManageSessions: false,
       },
@@ -386,6 +408,7 @@ describe("parseClientCommand", () => {
         description: "",
         systemPrompt: "",
         model: null,
+        defaultThinkingLevel: "off",
         toolMode: "read_only",
         canManageSessions: false,
       },
@@ -399,6 +422,7 @@ describe("parseClientCommand", () => {
         description: "d".repeat(MAX_ROLE_DESCRIPTION_CHARACTERS + 1),
         systemPrompt: "",
         model: null,
+        defaultThinkingLevel: "off",
         toolMode: "read_only",
         canManageSessions: false,
       },
@@ -522,6 +546,7 @@ describe("parseClientCommand", () => {
         description: "",
         systemPrompt: "",
         model: { provider: "openai", id: "gpt" },
+        defaultThinkingLevel: "high",
         toolMode: "read_only",
         canManageSessions: true,
         createdAt: "2026-07-18T12:00:00.000Z",
@@ -546,6 +571,7 @@ describe("parseClientCommand", () => {
             name: "Default",
             description: "",
             model: { provider: "openai", id: "gpt" },
+            defaultThinkingLevel: "high",
             toolMode: "read_only",
             canManageSessions: true,
           },
@@ -580,6 +606,7 @@ describe("parseClientCommand", () => {
         description: "",
         systemPrompt: "",
         model: { provider: "openai", id: "gpt" },
+        defaultThinkingLevel: "high",
         toolMode: "read_only",
         canManageSessions: true,
       },
@@ -828,6 +855,7 @@ describe("parseClientCommand", () => {
       description: "",
       systemPrompt,
       model: { provider: "openai", id: "gpt" },
+      defaultThinkingLevel: "high" as const,
       toolMode: "read_only",
       canManageSessions: index === 0,
       createdAt: "2026-07-18T12:00:00.000Z",

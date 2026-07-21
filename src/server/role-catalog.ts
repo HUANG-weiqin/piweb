@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type {
   ConversationRoleSnapshot,
   RoleTemplate,
+  ThinkingLevel,
 } from "../shared/protocol.js";
 import {
   RoleStore,
@@ -10,6 +11,10 @@ import {
   type RoleModelReference,
   type RoleTemplateV1,
 } from "./role-store.js";
+import {
+  supportedThinkingLevels,
+  type ThinkingCapableModel,
+} from "./model-thinking.js";
 
 export interface RoleCatalogModelSource {
   readonly modelRegistry: RoleCatalogModelRegistry;
@@ -17,8 +22,11 @@ export interface RoleCatalogModelSource {
 }
 
 export interface RoleCatalogModelRegistry {
-  getAvailable(): readonly RoleModelReference[];
+  getAvailable(): readonly RoleCatalogModel[];
 }
+
+export interface RoleCatalogModel
+  extends RoleModelReference, ThinkingCapableModel {}
 
 export type RoleCatalogListener = (roles: readonly RoleTemplate[]) => void;
 
@@ -37,6 +45,27 @@ function modelsAreEqual(
       && left.id === right.id;
 }
 
+function supportsThinkingLevel(
+  model: RoleCatalogModel,
+  level: ThinkingLevel,
+): boolean {
+  return supportedThinkingLevels(model).includes(level);
+}
+
+function unavailableReason(
+  role: RoleTemplateV1,
+  model: RoleCatalogModel | undefined,
+): string | undefined {
+  if (role.model === null) return "尚未为此角色选择模型";
+  if (model === undefined) {
+    return `模型当前不可用：${role.model.provider}/${role.model.id}`;
+  }
+  if (!supportsThinkingLevel(model, role.defaultThinkingLevel)) {
+    return `模型不支持默认思考强度：${role.defaultThinkingLevel}`;
+  }
+  return undefined;
+}
+
 function cloneConversationRole(
   role: RoleTemplateV1 & { model: RoleModelReference },
 ): ConversationRoleSnapshot {
@@ -47,6 +76,7 @@ function cloneConversationRole(
     description: role.description,
     systemPrompt: role.systemPrompt,
     model: { ...role.model },
+    defaultThinkingLevel: role.defaultThinkingLevel,
     toolMode: role.toolMode,
     canManageSessions: role.canManageSessions,
   };
@@ -84,23 +114,19 @@ export class RoleCatalog {
   listRoles(
     modelRegistry: RoleCatalogModelRegistry = this.source.modelRegistry,
   ): RoleTemplate[] {
-    const available = new Set(
-      modelRegistry.getAvailable().map(modelKey),
+    const available = new Map(
+      modelRegistry.getAvailable().map((model) => [modelKey(model), model]),
     );
     return this.store.listRoles().map((role) => {
-      const modelAvailable = role.model !== null
-        && available.has(modelKey(role.model));
+      const model = role.model === null
+        ? undefined
+        : available.get(modelKey(role.model));
+      const reason = unavailableReason(role, model);
       return {
         ...role,
         model: role.model === null ? null : { ...role.model },
-        available: modelAvailable,
-        ...(modelAvailable
-          ? {}
-          : {
-              unavailableReason: role.model === null
-                ? "尚未为此角色选择模型"
-                : `模型当前不可用：${role.model.provider}/${role.model.id}`,
-            }),
+        available: reason === undefined,
+        ...(reason === undefined ? {} : { unavailableReason: reason }),
       };
     });
   }
@@ -127,7 +153,7 @@ export class RoleCatalog {
     modelRegistry: RoleCatalogModelRegistry = this.source.modelRegistry,
   ): Promise<RoleTemplateV1> {
     this.assertOpen();
-    this.assertSelectedModelAvailable(input.model, modelRegistry);
+    this.assertDraftAvailable(input, modelRegistry);
     return await this.store.createRole(input);
   }
 
@@ -140,8 +166,11 @@ export class RoleCatalog {
     this.assertOpen();
     const current = this.store.getRole(roleId);
     if (!current) throw new Error(`Role not found: ${roleId}`);
-    if (!modelsAreEqual(current.model, input.model)) {
-      this.assertSelectedModelAvailable(input.model, modelRegistry);
+    if (
+      !modelsAreEqual(current.model, input.model)
+      || current.defaultThinkingLevel !== input.defaultThinkingLevel
+    ) {
+      this.assertDraftAvailable(input, modelRegistry);
     }
     return await this.store.updateRole(roleId, expectedRevision, input);
   }
@@ -186,17 +215,24 @@ export class RoleCatalog {
     if (this.disposed) throw new Error("Role catalog is closed");
   }
 
-  private assertSelectedModelAvailable(
-    model: RoleModelReference | null,
+  private assertDraftAvailable(
+    input: RoleDraft,
     modelRegistry: RoleCatalogModelRegistry,
   ): void {
-    if (
-      model !== null
-      && !modelRegistry.getAvailable()
-        .some((candidate) => modelKey(candidate) === modelKey(model))
-    ) {
+    const model = input.model;
+    if (model === null) return;
+    const selected = modelRegistry.getAvailable()
+      .find((candidate) => modelKey(candidate) === modelKey(model));
+    if (selected === undefined) {
       throw new Error(
         `Role model is unavailable in the current project: ${
+          model.provider
+        }/${model.id}`,
+      );
+    }
+    if (!supportsThinkingLevel(selected, input.defaultThinkingLevel)) {
+      throw new Error(
+        `Role model does not support thinking level ${input.defaultThinkingLevel}: ${
           model.provider
         }/${model.id}`,
       );

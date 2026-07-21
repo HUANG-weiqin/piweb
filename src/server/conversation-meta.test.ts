@@ -57,6 +57,7 @@ function metadata() {
         provider: "openai",
         id: "gpt-5.6",
       },
+      defaultThinkingLevel: "high" as const,
       toolMode: "read_only" as const,
       canManageSessions: true,
     },
@@ -205,14 +206,20 @@ describe("conversation reserved entries", () => {
     ])).toThrow(/before conversation metadata/i);
   });
 
-  it("keeps session management disabled for legacy conversation metadata", () => {
+  it("keeps legacy conversation behavior closed", () => {
     const value = metadata();
-    const { canManageSessions: _omitted, ...legacyRole } = value.role;
+    const {
+      canManageSessions: _omittedCapability,
+      defaultThinkingLevel: _omittedThinkingLevel,
+      ...legacyRole
+    } = value.role;
 
-    expect(parseConversationMetaEntry({
+    const parsed = parseConversationMetaEntry({
       customType: CONVERSATION_META_CUSTOM_TYPE,
       data: { ...value, role: legacyRole },
-    }).data.role.canManageSessions).toBe(false);
+    });
+    expect(parsed.data.role.canManageSessions).toBe(false);
+    expect(parsed.data.role.defaultThinkingLevel).toBe("off");
   });
 
   it("rejects unknown, incomplete, and over-limit conversation metadata", () => {

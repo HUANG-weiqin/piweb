@@ -43,6 +43,7 @@ function draft(
     description: "",
     systemPrompt: "",
     model: initialModel,
+    defaultThinkingLevel: "off",
     toolMode: "read_only",
     canManageSessions: false,
     ...overrides,
@@ -59,6 +60,7 @@ function persistedDefault(
     description: "默认角色",
     systemPrompt: "",
     model: initialModel,
+    defaultThinkingLevel: "off",
     toolMode: "read_only",
     canManageSessions: false,
     createdAt: "2026-07-19T10:00:00.000Z",
@@ -160,13 +162,14 @@ describe("RoleStore", () => {
     expect(store.getRole("default")?.model).toBeNull();
   });
 
-  it("defaults legacy role capabilities and tool permission closed", async () => {
+  it("defaults legacy role behavior closed", async () => {
     const rolesPath = await createRolesPath("piweb-role-store-legacy-capability-");
     await mkdir(dirname(rolesPath), { recursive: true });
     const legacyRole = persistedDefault();
     const {
       canManageSessions: _omittedCapability,
       toolMode: _omittedToolMode,
+      defaultThinkingLevel: _omittedThinkingLevel,
       ...legacyFields
     } = legacyRole;
     await writeFile(rolesPath, `${JSON.stringify({
@@ -178,9 +181,13 @@ describe("RoleStore", () => {
 
     expect(store.getRole("default")?.canManageSessions).toBe(false);
     expect(store.getRole("default")?.toolMode).toBe("read_only");
+    expect(store.getRole("default")?.defaultThinkingLevel).toBe("off");
     expect(JSON.parse(await readFile(rolesPath, "utf8"))).toMatchObject({
       version: ROLE_STORE_VERSION,
-      roles: [{ toolMode: "read_only" }],
+      roles: [{
+        defaultThinkingLevel: "off",
+        toolMode: "read_only",
+      }],
     });
   });
 
@@ -197,6 +204,7 @@ describe("RoleStore", () => {
       description: "General purpose",
       systemPrompt: "Be concise.",
       model: { provider: "other-provider", id: "other-model" },
+      defaultThinkingLevel: "high",
       toolMode: "read_only",
       canManageSessions: false,
     });
@@ -208,6 +216,7 @@ describe("RoleStore", () => {
       description: "General purpose",
       systemPrompt: "Be concise.",
       model: { provider: "other-provider", id: "other-model" },
+      defaultThinkingLevel: "high",
       canManageSessions: false,
       updatedAt: "2026-07-19T11:00:00.000Z",
     });
@@ -363,9 +372,14 @@ describe("RoleStore", () => {
   });
 
   it("fails closed on corrupt, unknown, or structurally invalid v1 files", async () => {
+    const {
+      defaultThinkingLevel: _omittedThinkingLevel,
+      ...missingThinkingLevel
+    } = persistedDefault();
     const invalidDocuments: unknown[] = [
       "{",
-      { version: 4, roles: [persistedDefault()] },
+      { version: 5, roles: [persistedDefault()] },
+      { version: ROLE_STORE_VERSION, roles: [missingThinkingLevel] },
       { version: 1, roles: [persistedDefault()], extra: true },
       {
         version: 1,

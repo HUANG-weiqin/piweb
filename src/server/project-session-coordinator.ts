@@ -732,6 +732,8 @@ export class ProjectSessionCoordinator {
                 name: profile.role.name,
                 description: profile.role.description,
                 model: { ...profile.role.model },
+                defaultThinkingLevel:
+                  profile.role.defaultThinkingLevel,
                 toolMode: profile.role.toolMode,
                 canManageSessions: profile.role.canManageSessions,
               },
@@ -1417,6 +1419,7 @@ export class ProjectSessionCoordinator {
   ): CreatePiSessionOptions {
     return {
       model: { ...profile.role.model },
+      thinkingLevel: profile.role.defaultThinkingLevel,
       roleSystemPrompt: profile.role.systemPrompt,
       extensionUI: this.extensionUIRouter(context, conversationId).ui,
       workbenchCustomTools: createMetaTools(
@@ -1459,6 +1462,7 @@ export class ProjectSessionCoordinator {
         description: "从旧版本迁移的会话",
         systemPrompt: "",
         model: { ...model },
+        defaultThinkingLevel: "off",
         toolMode: "read_only",
         canManageSessions: false,
       },

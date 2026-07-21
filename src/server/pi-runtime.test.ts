@@ -206,7 +206,7 @@ describe("PiRuntime session ownership", () => {
           baseUrl: "https://example.invalid/v1",
           apiKey: "role-key",
           api: "openai-completions",
-          models: [providerModel("role-model")],
+          models: [{ ...providerModel("role-model"), reasoning: true }],
         });
         return registry;
       },
@@ -230,15 +230,18 @@ describe("PiRuntime session ownership", () => {
 
     const created = await runtime.createSession(cwd, {
       model: { provider: "role-provider", id: "role-model" },
+      thinkingLevel: "high",
       workbenchCustomTools: tools,
     });
 
     expect(received?.model).toBe(created.modelRegistry.find("role-provider", "role-model"));
+    expect(received?.thinkingLevel).toBe("high");
     expect(received?.customTools).toBe(tools);
     expect(created.session.model).toMatchObject({
       provider: "role-provider",
       id: "role-model",
     });
+    expect(created.session.thinkingLevel).toBe("high");
     expect(created.session.getActiveToolNames()).toContain("workbench_meta");
 
     created.modelRegistry.unregisterProvider("role-provider");
@@ -277,7 +280,10 @@ describe("PiRuntime session ownership", () => {
                 baseUrl: "https://example.invalid/v1",
                 apiKey: "project-role-key",
                 api: "openai-completions",
-                models: [providerModel("project-role-model")],
+                models: [{
+                  ...providerModel("project-role-model"),
+                  reasoning: true,
+                }],
               });
             },
           ],
@@ -291,6 +297,7 @@ describe("PiRuntime session ownership", () => {
 
     const created = await runtime.createSession(cwd, {
       model: { provider: "project-role-provider", id: "project-role-model" },
+      thinkingLevel: "high",
       roleSystemPrompt: "role append prompt",
       workbenchCustomTools: tools,
     });
@@ -298,9 +305,11 @@ describe("PiRuntime session ownership", () => {
     expect(received?.model).toBe(
       created.modelRegistry.find("project-role-provider", "project-role-model"),
     );
+    expect(received?.thinkingLevel).toBe("high");
     expect(received?.customTools).toBe(tools);
     expect(created.session.systemPrompt).toContain("project append prompt");
     expect(created.session.systemPrompt).toContain("role append prompt");
+    expect(created.session.thinkingLevel).toBe("high");
     expect(created.session.systemPrompt.indexOf("project append prompt")).toBeLessThan(
       created.session.systemPrompt.indexOf("role append prompt"),
     );

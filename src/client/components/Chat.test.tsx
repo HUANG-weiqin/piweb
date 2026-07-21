@@ -592,6 +592,7 @@ describe("Chat", () => {
       description: "Reviews changes",
       systemPrompt: "Review exact evidence.",
       model: { provider: "provider", id: "model" },
+      defaultThinkingLevel: "off",
       toolMode: "read_only",
       canManageSessions: true,
     };
@@ -618,6 +619,7 @@ describe("Chat", () => {
       description: "Researches evidence",
       systemPrompt: "Research exact evidence.",
       model: { provider: "provider", id: "model" },
+      defaultThinkingLevel: "off",
       toolMode: "read_only",
       canManageSessions: false,
     };

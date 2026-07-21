@@ -19,6 +19,7 @@ function role(
     description: `${name} description`,
     systemPrompt: `${name} prompt`,
     model: { provider: "openai", id: "gpt-5" },
+    defaultThinkingLevel: "off",
     toolMode: "read_only",
     canManageSessions: true,
     createdAt: "2026-07-19T12:00:00.000Z",

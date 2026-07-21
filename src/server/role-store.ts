@@ -7,8 +7,9 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import type { ThinkingLevel } from "../shared/protocol.js";
 
-export const ROLE_STORE_VERSION = 3;
+export const ROLE_STORE_VERSION = 4;
 export const MAX_ROLE_COUNT = 64;
 export const MAX_ROLE_NAME_CHARACTERS = 80;
 export const MAX_ROLE_DESCRIPTION_CHARACTERS = 1_000;
@@ -28,6 +29,7 @@ export interface RoleDraft {
   description: string;
   systemPrompt: string;
   model: RoleModelReference | null;
+  defaultThinkingLevel: ThinkingLevel;
   toolMode: "read_only" | "full_access";
   canManageSessions: boolean;
 }
@@ -166,6 +168,23 @@ function parseModelReference(
   };
 }
 
+function assertThinkingLevel(
+  value: unknown,
+  field: string,
+): asserts value is ThinkingLevel {
+  if (
+    value !== "off"
+    && value !== "minimal"
+    && value !== "low"
+    && value !== "medium"
+    && value !== "high"
+    && value !== "xhigh"
+    && value !== "max"
+  ) {
+    throw new Error(`${field} must be a supported thinking level`);
+  }
+}
+
 function parseRoleDraft(value: unknown, label: string): RoleDraft {
   assertExactObject(
     value,
@@ -174,6 +193,7 @@ function parseRoleDraft(value: unknown, label: string): RoleDraft {
       "description",
       "systemPrompt",
       "model",
+      "defaultThinkingLevel",
       "toolMode",
       "canManageSessions",
     ],
@@ -203,11 +223,16 @@ function parseRoleDraft(value: unknown, label: string): RoleDraft {
   if (value.toolMode !== "read_only" && value.toolMode !== "full_access") {
     throw new Error(`${label}.toolMode must be read_only or full_access`);
   }
+  assertThinkingLevel(
+    value.defaultThinkingLevel,
+    `${label}.defaultThinkingLevel`,
+  );
   return {
     name: value.name,
     description: value.description,
     systemPrompt: value.systemPrompt,
     model: parseModelReference(value.model, `${label}.model`),
+    defaultThinkingLevel: value.defaultThinkingLevel,
     toolMode: value.toolMode,
     canManageSessions: value.canManageSessions,
   };
@@ -216,7 +241,7 @@ function parseRoleDraft(value: unknown, label: string): RoleDraft {
 function parseRoleTemplate(
   value: unknown,
   index: number,
-  legacyPermissions: boolean,
+  legacyBehavior: boolean,
 ): RoleTemplateV1 {
   const label = `roles[${index}]`;
   assertExactObject(
@@ -228,6 +253,7 @@ function parseRoleTemplate(
       "description",
       "systemPrompt",
       "model",
+      "defaultThinkingLevel",
       "toolMode",
       "canManageSessions",
       "createdAt",
@@ -256,8 +282,12 @@ function parseRoleTemplate(
       description: value.description,
       systemPrompt: value.systemPrompt,
       model: value.model,
+      // Existing roles predate role-scoped thinking defaults. Off is valid for
+      // every model and avoids silently enabling reasoning during migration.
+      defaultThinkingLevel:
+        value.defaultThinkingLevel ?? (legacyBehavior ? "off" : undefined),
       // Role permissions are fail-closed for stores written before v3.
-      toolMode: value.toolMode ?? (legacyPermissions ? "read_only" : undefined),
+      toolMode: value.toolMode ?? (legacyBehavior ? "read_only" : undefined),
       // Session orchestration is opt-in for roles written before this field.
       canManageSessions: value.canManageSessions ?? false,
     }, label),
@@ -302,8 +332,8 @@ function parseRoleStoreDocument(
 
   try {
     assertExactObject(value, ["version", "roles"], "role store");
-    if (![1, 2, ROLE_STORE_VERSION].includes(value.version as number)) {
-      throw new Error(`version must be 1, 2 or ${ROLE_STORE_VERSION}`);
+    if (![1, 2, 3, ROLE_STORE_VERSION].includes(value.version as number)) {
+      throw new Error(`version must be 1, 2, 3 or ${ROLE_STORE_VERSION}`);
     }
     if (!Array.isArray(value.roles)) {
       throw new Error("roles must be an array");
@@ -385,6 +415,7 @@ function draftsAreEqual(
     && role.description === draft.description
     && role.systemPrompt === draft.systemPrompt
     && modelsAreEqual(role.model, draft.model)
+    && role.defaultThinkingLevel === draft.defaultThinkingLevel
     && role.toolMode === draft.toolMode
     && role.canManageSessions === draft.canManageSessions
   );
@@ -466,6 +497,7 @@ export class RoleStore {
           description: "默认角色",
           systemPrompt: "",
           model,
+          defaultThinkingLevel: "off",
           toolMode: "read_only",
           canManageSessions: false,
           createdAt: timestamp,

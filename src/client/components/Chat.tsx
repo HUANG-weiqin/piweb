@@ -24,6 +24,7 @@ import type {
   ChatMessage,
   ChatState,
 } from "../chat/reducer";
+import { THINKING_LEVEL_LABELS } from "../lib/thinking-level";
 import { ConversationRoleDialog } from "./ConversationRoleDialog";
 import { Message } from "./Message";
 import { SessionMessageCard } from "./SessionMessageCard";
@@ -106,16 +107,6 @@ function formatCompactTokens(tokens: number): string {
   if (tokens >= 1_000) return `${format(tokens / 1_000)}k`;
   return Math.round(tokens).toLocaleString("zh-CN");
 }
-
-const thinkingLabels: Record<ThinkingLevel, string> = {
-  off: "关闭",
-  minimal: "极低",
-  low: "低",
-  medium: "中",
-  high: "高",
-  xhigh: "很高",
-  max: "最高",
-};
 
 type TranscriptBlock =
   | {
@@ -574,7 +565,9 @@ export function Chat({
               onThinking(event.target.value as ThinkingLevel)}
           >
             {(availableThinkingLevels ?? [thinkingLevel]).map((level) => (
-              <option key={level} value={level}>{thinkingLabels[level]}</option>
+              <option key={level} value={level}>
+                {THINKING_LEVEL_LABELS[level]}
+              </option>
             ))}
           </select>
         </label>

@@ -1,6 +1,6 @@
 # Agent 协作
 
-`updated: 2026-07-20`
+`updated: 2026-07-21`
 
 ## 这个模块是干什么的
 
@@ -17,11 +17,11 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
 
 ## 角色
 
-- `RoleStore` 是用户级严格 v1 文件，默认路径为 `<Pi agent dir>/piweb/roles.json`；项目文件不能修改角色目录。
-- 角色包含稳定 ID、revision、名称、简介、system prompt、固定 provider/model、`read_only | full_access` 工具权限，以及 `canManageSessions` 能力。写入原子串行，更新使用 expected revision，损坏、未知字段和未知版本 fail closed。新角色、默认模板和旧版角色迁移的工具权限都默认 `read_only`；会话编排同样严格 opt-in，只有用户明确打开才启用。
+- `RoleStore` 是用户级严格 v4 文件，默认路径为 `<Pi agent dir>/piweb/roles.json`；项目文件不能修改角色目录。
+- 角色包含稳定 ID、revision、名称、简介、system prompt、固定 provider/model、模型默认思考强度、`read_only | full_access` 工具权限，以及 `canManageSessions` 能力。写入原子串行，更新使用 expected revision，损坏、未知字段和未知版本 fail closed。旧版角色迁移的默认思考强度为 `off`，保证对所有模型有效且不会静默开启推理；新角色和旧版角色迁移的工具权限都默认 `read_only`，会话编排同样严格 opt-in。
 - 初始化“默认 / 默认角色”只是首次展示模板，可以像其它角色一样编辑、删除，删除后不会重建；新会话仍必须显式选择角色。
 - `RoleCatalog` 用当前项目 actor 的 session-local 模型目录动态计算模板是否可用，因此项目静态 provider 也能参与选择；空项目使用 coordinator 持有的 project model catalog，它经过相同 trust/resource/provider 校验，但不会创建隐藏 AgentSession。角色 CRUD、模型列表和 API Key provider 校验都使用这条项目目录；真正创建还会由 `PiRuntime` 在项目资源加载后再次校验固定模型。
-- 新会话把完整角色修订（包括工具权限与会话管理能力）复制到 `piweb.conversation_meta.v1`。之后修改或删除模板不会自动改变旧会话；用户可在 idle 边界显式应用一个当前可用模板，宿主追加 `piweb.conversation_role_change.v1` 并用同一 SessionManager 重建 AgentSession。角色 prompt 追加到会话 system prompt，实际模型必须与当前快照完全一致，SDK fallback 会被拒绝。旧 conversation metadata 缺少工具权限或能力字段时分别按 `read_only` / 关闭迁移。
+- 新会话把完整角色修订（包括默认思考强度、工具权限与会话管理能力）复制到 `piweb.conversation_meta.v1`。之后修改或删除模板不会自动改变旧会话；用户可在 idle 边界显式应用一个当前可用模板，宿主追加 `piweb.conversation_role_change.v1` 并用同一 SessionManager 重建 AgentSession。角色 prompt 追加到会话 system prompt，实际模型与初始思考强度必须与当前快照完全一致，SDK fallback/clamp 会被拒绝。旧 conversation metadata 缺少默认思考强度、工具权限或能力字段时分别按 `off` / `read_only` / 关闭迁移。
 - 旧会话第一次在独占 writer lease 下打开时迁移为独立“旧会话”快照；其 system prompt 固定为空，并尽量保留旧分支模型，不依赖初始化模板。
 
 ## Actor 所有权
@@ -83,7 +83,7 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
 ## 上下文前缀与缓存
 
 - 已进入模型上下文的 user、assistant、tool 和 incoming custom message 都是 append-only；新的宿主提示只附加到以后收到的新消息，不能回填或重写旧 entry。
-- 当前角色完整修订由 base conversation metadata 加后续角色变更记录得出；重新打开会话使用最后一次成功应用的角色。角色模板后续编辑不会自动改变既有会话，只有用户显式切换才会从下一轮改变 system prompt、模型、权限与 meta 工具 schema。
+- 当前角色完整修订由 base conversation metadata 加后续角色变更记录得出；重新打开会话使用最后一次成功应用的角色。角色模板后续编辑不会自动改变既有会话，只有用户显式切换才会从下一轮改变 system prompt、模型、默认思考强度、权限与 meta 工具 schema。聊天页的思考强度控制仍只修改当前运行会话，不反写角色模板或角色快照。
 - 卡片状态、run settlement、meta operation 和 conversation metadata 使用普通 `custom` entry；SDK 的 `buildSessionContext()` 会忽略它们，因此状态更新既不改旧消息，也不污染模型缓存前缀。
 - 会话自动压缩阈值同样使用普通 `piweb.compaction_threshold.v1` custom entry 保存；缺省为 70%，允许 20%–90%，最后一条有效记录生效，不进入模型上下文。
 - 用户可在会话空闲时发送精确关联的 `compact_context` 命令手动调用 Pi 标准 `compact()`；运行中会话拒绝手动压缩，成功后重新发布 state 与 snapshot。
