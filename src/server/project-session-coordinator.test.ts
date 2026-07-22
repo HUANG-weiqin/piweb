@@ -4717,6 +4717,218 @@ describe("ProjectSessionCoordinator", () => {
         sourceRunId,
       });
     });
+
+    it("resolves implicit lineage from legacy conversations without orchestration", async () => {
+      const fixture = await createFixture();
+      const role = fixture.roles.getConversationRole("default");
+
+      // A: user-created, no orchestration (pre-feature legacy).
+      const aId = randomUUID();
+      await fixture.handle.project.createConversation(aId, {
+        role,
+        lifecycle: { kind: "normal" },
+        createdBy: { kind: "user" },
+      });
+
+      // B: created by A, no orchestration (legacy peer).
+      const bId = randomUUID();
+      await fixture.handle.project.createConversation(bId, {
+        role,
+        lifecycle: { kind: "normal" },
+        createdBy: { kind: "conversation", conversationId: aId },
+      });
+
+      // Open B so its profile is loaded and create a peer C.
+      const bActor = await fixture.coordinator.openConversation(
+        fixture.handle,
+        bId,
+        { updateRecent: false },
+      );
+      const c = await fixture.coordinator.startPeerSession(
+        fixture.handle,
+        bId,
+        startInput({
+          task: "legacy-lineage-child",
+          idempotencyKey: "legacy-lineage-c",
+        }),
+      );
+
+      const cActor = await fixture.coordinator.openConversation(
+        fixture.handle,
+        c.conversationId,
+        { updateRecent: false },
+      );
+      expect(cActor.profile.orchestration).toMatchObject({
+        rootConversationId: aId,
+        depth: 2,
+      });
+    });
+
+    it("rejects start when the createdBy parent is missing and there is no orchestration", async () => {
+      const fixture = await createFixture();
+      const role = fixture.roles.getConversationRole("default");
+
+      // B references a non-existent parent A.
+      const bId = randomUUID();
+      await fixture.handle.project.createConversation(bId, {
+        role,
+        lifecycle: { kind: "normal" },
+        createdBy: { kind: "conversation", conversationId: randomUUID() },
+      });
+
+      const bActor = await fixture.coordinator.openConversation(
+        fixture.handle,
+        bId,
+        { updateRecent: false },
+      );
+      const input = startInput({
+        task: "missing-parent",
+        idempotencyKey: "missing-parent-test",
+      });
+      await expect(fixture.coordinator.startPeerSession(
+        fixture.handle,
+        bId,
+        input,
+      )).rejects.toThrow(/parent.*not found|orchestration/i);
+
+      // Verify no card was written.
+      const bCards = aggregateReservedConversationEntries(
+        bActor.sessionManager.getEntries(),
+      ).cards;
+      expect(
+        bCards.find(({ body }) => body === input.task),
+      ).toBeUndefined();
+    });
+
+    it("rejects a createdBy cycle before writing a sending card", async () => {
+      const fixture = await createFixture();
+      const role = fixture.roles.getConversationRole("default");
+
+      // A createdBy B, B createdBy A (cycle).
+      const aId = randomUUID();
+      const bId = randomUUID();
+      await fixture.handle.project.createConversation(aId, {
+        role,
+        lifecycle: { kind: "normal" },
+        createdBy: { kind: "conversation", conversationId: bId },
+      });
+      await fixture.handle.project.createConversation(bId, {
+        role,
+        lifecycle: { kind: "normal" },
+        createdBy: { kind: "conversation", conversationId: aId },
+      });
+
+      const bActor = await fixture.coordinator.openConversation(
+        fixture.handle,
+        bId,
+        { updateRecent: false },
+      );
+      const input = startInput({
+        task: "cycle-test",
+        idempotencyKey: "cycle-test-input",
+      });
+      await expect(fixture.coordinator.startPeerSession(
+        fixture.handle,
+        bId,
+        input,
+      )).rejects.toThrow(/cycle/i);
+
+      // Verify no card was written.
+      const bCards = aggregateReservedConversationEntries(
+        bActor.sessionManager.getEntries(),
+      ).cards;
+      expect(
+        bCards.find(({ body }) => body === input.task),
+      ).toBeUndefined();
+    });
+
+    it("allows new peers from a child with explicit orchestration after its parent is deleted", async () => {
+      const fixture = await createFixture();
+      const source = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+
+      // B: peer with explicit orchestration.
+      const b = await fixture.coordinator.startPeerSession(
+        fixture.handle,
+        source.conversationId,
+        startInput({
+          task: "surviving-child",
+          idempotencyKey: "surviving-child-b",
+        }),
+      );
+
+      // Delete source (parent).
+      await fixture.coordinator.deleteConversation(
+        fixture.handle,
+        source.conversationId,
+      );
+
+      // B should still be able to create C (orchestration snapshot survives).
+      const c = await fixture.coordinator.startPeerSession(
+        fixture.handle,
+        b.conversationId,
+        startInput({
+          task: "child-of-survivor",
+          idempotencyKey: "child-of-survivor-c",
+        }),
+      );
+
+      const cActor = await fixture.coordinator.openConversation(
+        fixture.handle,
+        c.conversationId,
+        { updateRecent: false },
+      );
+      expect(cActor.profile.orchestration).toMatchObject({
+        rootConversationId: source.conversationId,
+        depth: 2,
+      });
+    });
+
+    it("treats an existing parent without conversationMeta as user root for implicit child", async () => {
+      const fixture = await createFixture();
+      const role = fixture.roles.getConversationRole("default");
+
+      // Parent file exists but has no conversationMeta (pre-feature legacy).
+      const parentId = randomUUID();
+      // Create a minimal session file without any custom entries.
+      await fixture.handle.project.createConversation(parentId);
+
+      // Child references the parent via createdBy, no orchestration.
+      const childId = randomUUID();
+      await fixture.handle.project.createConversation(childId, {
+        role,
+        lifecycle: { kind: "normal" },
+        createdBy: { kind: "conversation", conversationId: parentId },
+      });
+
+      // Open child and create a peer — resolveOrchestration should treat
+      // the no-meta parent as a user root.
+      const childActor = await fixture.coordinator.openConversation(
+        fixture.handle,
+        childId,
+        { updateRecent: false },
+      );
+      const peer = await fixture.coordinator.startPeerSession(
+        fixture.handle,
+        childId,
+        startInput({
+          task: "legacy-no-meta-parent",
+          idempotencyKey: "legacy-no-meta-parent",
+        }),
+      );
+
+      const peerActor = await fixture.coordinator.openConversation(
+        fixture.handle,
+        peer.conversationId,
+        { updateRecent: false },
+      );
+      expect(peerActor.profile.orchestration).toMatchObject({
+        rootConversationId: parentId,
+        depth: 2,
+      });
+    });
   });
 });
 

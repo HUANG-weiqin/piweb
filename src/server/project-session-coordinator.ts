@@ -1013,6 +1013,15 @@ export class ProjectSessionCoordinator {
           "start_session idempotency key conflicts with an earlier request",
         );
       }
+      await this.hydrateConversationProfiles(context);
+      this.throwIfAborted(signal);
+      const sourceOrchestration = this.resolveOrchestration(
+        context,
+        sourceConversationId,
+        source.profile,
+      );
+      const sourceRunOwnership = source.currentRunOwnership();
+
       if (!existingCard) {
         const sentAt = this.now().toISOString();
         existingCard = {
@@ -1045,11 +1054,6 @@ export class ProjectSessionCoordinator {
         if (known) {
           target = await this.getOrOpenActor(context, conversationId);
         } else {
-          const sourceOrchestration = source.profile.orchestration;
-          const parentRoot = sourceOrchestration?.rootConversationId
-            ?? sourceConversationId;
-          const parentDepth = sourceOrchestration?.depth ?? 0;
-          const sourceRunOwnership = source.currentRunOwnership();
           const profile: ConversationMeta = {
             role: requestedRole,
             lifecycle: input.temporary
@@ -1066,8 +1070,8 @@ export class ProjectSessionCoordinator {
               conversationId: sourceConversationId,
             },
             orchestration: {
-              rootConversationId: parentRoot,
-              depth: parentDepth + 1,
+              rootConversationId: sourceOrchestration.rootConversationId,
+              depth: sourceOrchestration.depth + 1,
               ...(sourceRunOwnership
                 ? { sourceRunId: sourceRunOwnership.runId }
                 : {}),
@@ -1866,23 +1870,24 @@ export class ProjectSessionCoordinator {
     };
   }
 
-  private async listSessionsForMeta(
+  /**
+   * Ensure profiles for all project conversations are loaded into
+   * context.profiles. Never opens an AgentSession or changes the
+   * project's recent-conversation pointer.
+   */
+  private async hydrateConversationProfiles(
     context: ProjectContext,
-    sourceConversationId: string,
-    limit: number,
-    cursor?: string,
-    scope: MetaToolSessionScope = "all",
-  ) {
-    const summaries = await this.listSessions(new ProjectSessionHandle(context));
-    const missingProfileIds = summaries
-      .filter((summary) => (
-        !context.actors.has(summary.id)
-        && !context.profiles.has(summary.id)
+  ): Promise<void> {
+    const summaries = context.project.listConversations();
+    const missingIds = summaries
+      .filter(({ id }) => (
+        !context.actors.has(id)
+        && !context.profiles.has(id)
       ))
       .map(({ id }) => id);
-    if (missingProfileIds.length > 0) {
+    if (missingIds.length > 0) {
       const inspections = await context.project.inspectConversations(
-        missingProfileIds,
+        missingIds,
       );
       for (const [conversationId, inspection] of inspections) {
         if (inspection.conversationMeta) {
@@ -1893,6 +1898,137 @@ export class ProjectSessionCoordinator {
         }
       }
     }
+  }
+
+  /**
+   * Synchronously resolve orchestration rootConversationId and depth for a
+   * given conversation. Caller must have run hydrateConversationProfiles()
+   * first so context.profiles is populated for all project conversations.
+   * Never does its own disk I/O.
+   *
+   * Returns { rootConversationId, depth } or throws on cycle/inconsistency/
+   * missing parent (implicit lineage only).
+   */
+  private resolveOrchestration(
+    context: ProjectContext,
+    conversationId: string,
+    profile: ConversationMeta | undefined,
+    visited?: Set<string>,
+  ): { rootConversationId: string; depth: number } {
+    const chain = visited ?? new Set<string>();
+    if (chain.has(conversationId)) {
+      throw new Error(
+        `Orchestration parent cycle detected at ${conversationId}`,
+      );
+    }
+    chain.add(conversationId);
+
+    const knownIds = new Set(
+      context.project.listConversations().map((s) => s.id),
+    );
+
+    // Resolve profile: passed in, from live actor, or from cached profiles.
+    const resolvedProfile = profile
+      ?? context.actors.get(conversationId)?.profile
+      ?? context.profiles.get(conversationId);
+
+    if (!resolvedProfile) {
+      // Conversation exists on disk but has no conversationMeta — pre-feature
+      // legacy file with no createdBy information. Treat as user root.
+      if (!knownIds.has(conversationId)) {
+        throw new Error(`Conversation ${conversationId} not found`);
+      }
+      return { rootConversationId: conversationId, depth: 0 };
+    }
+
+    const { createdBy, orchestration } = resolvedProfile;
+
+    if (orchestration) {
+      // Explicit host-written orchestration snapshot.
+      if (createdBy.kind === "user") {
+        if (
+          orchestration.rootConversationId !== conversationId
+          || orchestration.depth !== 0
+        ) {
+          throw new Error(
+            `User conversation ${conversationId} has inconsistent orchestration: ` +
+            `expected root=self depth=0, got root=${orchestration.rootConversationId} depth=${orchestration.depth}`,
+          );
+        }
+        return { rootConversationId: conversationId, depth: 0 };
+      }
+
+      // createdBy.kind === "conversation"
+      const parentId = createdBy.conversationId;
+      const parentProfile = context.actors.get(parentId)?.profile
+        ?? context.profiles.get(parentId);
+      const parentExists = parentProfile !== undefined
+        || knownIds.has(parentId);
+
+      if (parentExists) {
+        const parent = this.resolveOrchestration(
+          context, parentId, parentProfile, chain,
+        );
+        if (parent.rootConversationId !== orchestration.rootConversationId) {
+          throw new Error(
+            `Orchestration root mismatch: parent root ${parent.rootConversationId} ` +
+            `vs child root ${orchestration.rootConversationId}`,
+          );
+        }
+        if (parent.depth + 1 !== orchestration.depth) {
+          throw new Error(
+            `Orchestration depth mismatch: parent depth ${parent.depth} ` +
+            `implies child depth ${parent.depth + 1} but got ${orchestration.depth}`,
+          );
+        }
+      }
+      // If parent is gone from disk entirely, the explicit snapshot is trusted.
+      return {
+        rootConversationId: orchestration.rootConversationId,
+        depth: orchestration.depth,
+      };
+    }
+
+    // No explicit orchestration — derive from createdBy.
+    if (createdBy.kind === "user") {
+      return { rootConversationId: conversationId, depth: 0 };
+    }
+
+    // createdBy.kind === "conversation", no orchestration.
+    const parentId = createdBy.conversationId;
+    const parentProfile = context.actors.get(parentId)?.profile
+      ?? context.profiles.get(parentId);
+
+    // Parent exists on disk but has no profile — treat as pre-feature user root.
+    if (!parentProfile) {
+      if (!knownIds.has(parentId)) {
+        throw new Error(
+          `Cannot resolve orchestration for ${conversationId}: ` +
+          `parent ${parentId} not found and no explicit orchestration`,
+        );
+      }
+      // Parent file exists with no conversationMeta — treat as user root.
+      return { rootConversationId: parentId, depth: 1 };
+    }
+
+    const parent = this.resolveOrchestration(
+      context, parentId, parentProfile, chain,
+    );
+    return {
+      rootConversationId: parent.rootConversationId,
+      depth: parent.depth + 1,
+    };
+  }
+
+  private async listSessionsForMeta(
+    context: ProjectContext,
+    sourceConversationId: string,
+    limit: number,
+    cursor?: string,
+    scope: MetaToolSessionScope = "all",
+  ) {
+    const summaries = await this.listSessions(new ProjectSessionHandle(context));
+    await this.hydrateConversationProfiles(context);
     const candidates = summaries.map((summary) => {
       const profile =
         context.actors.get(summary.id)?.profile
