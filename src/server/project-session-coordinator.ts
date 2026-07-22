@@ -893,6 +893,10 @@ export class ProjectSessionCoordinator {
         role: this.roles.getConversationRole(input.roleId),
         lifecycle: { kind: "normal" },
         createdBy: { kind: "user" },
+        orchestration: {
+          rootConversationId: conversationId,
+          depth: 0,
+        },
       };
       let actor: ConversationActor | undefined;
       try {
@@ -1041,6 +1045,11 @@ export class ProjectSessionCoordinator {
         if (known) {
           target = await this.getOrOpenActor(context, conversationId);
         } else {
+          const sourceOrchestration = source.profile.orchestration;
+          const parentRoot = sourceOrchestration?.rootConversationId
+            ?? sourceConversationId;
+          const parentDepth = sourceOrchestration?.depth ?? 0;
+          const sourceRunOwnership = source.currentRunOwnership();
           const profile: ConversationMeta = {
             role: requestedRole,
             lifecycle: input.temporary
@@ -1055,6 +1064,13 @@ export class ProjectSessionCoordinator {
             createdBy: {
               kind: "conversation",
               conversationId: sourceConversationId,
+            },
+            orchestration: {
+              rootConversationId: parentRoot,
+              depth: parentDepth + 1,
+              ...(sourceRunOwnership
+                ? { sourceRunId: sourceRunOwnership.runId }
+                : {}),
             },
           };
           target = await this.createConversationActor(

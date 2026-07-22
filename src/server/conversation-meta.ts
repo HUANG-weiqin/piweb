@@ -200,10 +200,22 @@ const createdBySchema = z.discriminatedUnion("kind", [
   }).strict(),
 ]);
 
+/**
+ * Optional orchestration lineage for Agent-created peer sessions.
+ * Written by the host on creation; absent in old JSONL and user-created
+ * metadata written before this field existed.
+ */
+const orchestrationSchema = z.object({
+  rootConversationId: conversationIdSchema("rootConversationId"),
+  depth: z.number().int().safe().nonnegative(),
+  sourceRunId: uuidSchema("sourceRunId").optional(),
+}).strict();
+
 const conversationMetaSchema = z.object({
   role: roleSnapshotSchema,
   lifecycle: lifecycleSchema,
   createdBy: createdBySchema,
+  orchestration: orchestrationSchema.optional(),
 }).strict();
 
 const conversationMetaEntrySchema = z.object({

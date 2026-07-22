@@ -4576,6 +4576,148 @@ describe("ProjectSessionCoordinator", () => {
       ).deliveredMessageIds,
     ).toContain(returnMessageId);
   });
+
+  describe("orchestration lineage", () => {
+    it("writes root+depth 0 for user-created conversations", async () => {
+      const fixture = await createFixture();
+      const actor = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+
+      const profile = actor.profile;
+      expect(profile.orchestration).toBeDefined();
+      expect(profile.orchestration).toMatchObject({
+        rootConversationId: actor.conversationId,
+        depth: 0,
+      });
+      expect(profile.orchestration!.sourceRunId).toBeUndefined();
+    });
+
+    it("inherits root+depth 1 from a user parent without sourceRunId when idle", async () => {
+      const fixture = await createFixture();
+      const source = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      expect(source.profile.orchestration).toMatchObject({
+        rootConversationId: source.conversationId,
+        depth: 0,
+      });
+
+      // Source is idle, so no sourceRunId.
+      const peer = await fixture.coordinator.startPeerSession(
+        fixture.handle,
+        source.conversationId,
+        startInput({
+          task: "orchestration depth check",
+          idempotencyKey: "orchestration-peer-1",
+        }),
+      );
+      const peerActor = await fixture.coordinator.openConversation(
+        fixture.handle,
+        peer.conversationId,
+        { updateRecent: false },
+      );
+      const profile = peerActor.profile;
+      expect(profile.orchestration).toBeDefined();
+      expect(profile.orchestration).toMatchObject({
+        rootConversationId: source.conversationId,
+        depth: 1,
+      });
+      expect(profile.orchestration!.sourceRunId).toBeUndefined();
+    });
+
+    it("propagates same root and depth 2 through two-level peer chain", async () => {
+      const fixture = await createFixture();
+      const source = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+
+      const first = await fixture.coordinator.startPeerSession(
+        fixture.handle,
+        source.conversationId,
+        startInput({
+          task: "first level",
+          idempotencyKey: "chain-peer-1",
+        }),
+      );
+      const second = await fixture.coordinator.startPeerSession(
+        fixture.handle,
+        first.conversationId,
+        startInput({
+          task: "second level",
+          idempotencyKey: "chain-peer-2",
+        }),
+      );
+
+      const firstActor = await fixture.coordinator.openConversation(
+        fixture.handle,
+        first.conversationId,
+        { updateRecent: false },
+      );
+      const secondActor = await fixture.coordinator.openConversation(
+        fixture.handle,
+        second.conversationId,
+        { updateRecent: false },
+      );
+
+      expect(firstActor.profile.orchestration).toMatchObject({
+        rootConversationId: source.conversationId,
+        depth: 1,
+      });
+      expect(secondActor.profile.orchestration).toMatchObject({
+        rootConversationId: source.conversationId,
+        depth: 2,
+      });
+    });
+
+    it("records sourceRunId from a running source", async () => {
+      const fixture = await createFixture();
+      const source = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+
+      const sourceRunId = randomUUID();
+      let peer: { conversationId: string; runId: string; temporary: boolean } | undefined;
+      fixture.runtime.control(source.conversationId).enqueue(
+        async (control) => {
+          peer = await executeTool(
+            control,
+            "start_session",
+            "source-run-peer",
+            {
+              roleId: "default",
+              task: "started from active source run",
+              temporary: false,
+            },
+          ) as typeof peer;
+          control.emitFinal("done");
+        },
+      );
+
+      await fixture.coordinator.prompt(
+        fixture.handle,
+        source.conversationId,
+        sourceRunId,
+        "start a peer while running",
+      );
+
+      expect(peer).toBeDefined();
+      const peerActor = await fixture.coordinator.openConversation(
+        fixture.handle,
+        peer!.conversationId,
+        { updateRecent: false },
+      );
+      expect(peerActor.profile.orchestration).toMatchObject({
+        rootConversationId: source.conversationId,
+        depth: 1,
+        sourceRunId,
+      });
+    });
+  });
 });
 
 class TrackingProjectStoreRegistry extends ProjectStoreRegistry {

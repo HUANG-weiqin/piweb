@@ -259,6 +259,76 @@ describe("conversation reserved entries", () => {
     })).toThrow(/revision/i);
   });
 
+  it("accepts optional orchestration fields and rejects invalid values", () => {
+    const base = metadata();
+
+    // Absent orchestration is valid (legacy metadata).
+    const withoutOrchestration = createConversationMetaEntry(base);
+    expect(parseConversationMetaEntry(withoutOrchestration)).toEqual(
+      withoutOrchestration,
+    );
+
+    // Valid orchestration round-trips.
+    const orchestration = {
+      rootConversationId: randomUUID(),
+      depth: 0,
+    };
+    const withOrchestration = createConversationMetaEntry({
+      ...base,
+      orchestration,
+    });
+    expect(parseConversationMetaEntry(withOrchestration)).toEqual(
+      withOrchestration,
+    );
+
+    // Valid orchestration with optional sourceRunId.
+    const withRunId = createConversationMetaEntry({
+      ...base,
+      orchestration: {
+        ...orchestration,
+        sourceRunId: randomUUID(),
+      },
+    });
+    expect(parseConversationMetaEntry(withRunId)).toEqual(withRunId);
+
+    // Negative depth is rejected.
+    expect(() => createConversationMetaEntry({
+      ...base,
+      orchestration: { rootConversationId: randomUUID(), depth: -1 },
+    })).toThrow(/depth/i);
+
+    // Non-integer depth is rejected.
+    expect(() => createConversationMetaEntry({
+      ...base,
+      orchestration: { rootConversationId: randomUUID(), depth: 0.5 },
+    })).toThrow(/depth/i);
+
+    // Non-UUID sourceRunId is rejected.
+    expect(() => createConversationMetaEntry({
+      ...base,
+      orchestration: {
+        rootConversationId: randomUUID(),
+        depth: 0,
+        sourceRunId: "not-a-uuid",
+      },
+    })).toThrow(/sourceRunId/i);
+
+    // Extra unknown key inside orchestration is rejected (strict).
+    const withExtra = {
+      customType: withoutOrchestration.customType,
+      data: {
+        ...withoutOrchestration.data,
+        orchestration: {
+          rootConversationId: randomUUID(),
+          depth: 0,
+          extra: true,
+        },
+      },
+    };
+    expect(() => parseConversationMetaEntry(withExtra))
+      .toThrow(/unknown|unrecognized/i);
+  });
+
   it("round-trips strict card updates and bounds their semantic body", () => {
     const entry = createConversationCardEntry(card());
 
