@@ -131,6 +131,44 @@ describe("Message", () => {
       .toHaveTextContent("src/client/components/Message.tsx");
   });
 
+  it("summarizes the latest completed step after an earlier tool failure", () => {
+    const message: ChatMessage = {
+      id: "tool-recovered",
+      runId: "run-tool-recovered",
+      role: "assistant",
+      text: "",
+      thinking: "失败后继续恢复。",
+      tools: [
+        {
+          id: "failed-command",
+          name: "bash",
+          args: { cmd: "npm run missing" },
+          result: { error: "script not found" },
+          status: "error",
+        },
+        {
+          id: "successful-read",
+          name: "read",
+          args: { path: "src/client/components/Message.tsx" },
+          result: { ok: true },
+          status: "done",
+        },
+      ],
+      parts: [
+        { kind: "tool", toolId: "failed-command" },
+        { kind: "thinking", text: "失败后继续恢复。" },
+        { kind: "tool", toolId: "successful-read" },
+      ],
+    };
+
+    const { container } = render(<Message message={message} />);
+
+    expect(screen.queryByText("工具执行失败")).not.toBeInTheDocument();
+    expect(screen.getByText("已完成读取文件")).toBeInTheDocument();
+    expect(container.querySelector(".activity-group-detail"))
+      .toHaveTextContent("src/client/components/Message.tsx");
+  });
+
   it("keeps a thinking preview readable without markdown markers", () => {
     const message: ChatMessage = {
       id: "thinking-preview",

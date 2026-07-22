@@ -328,19 +328,17 @@ function activitySummary(
       detail: thinkingPreview(latestRun.text),
     };
   }
-  const failedTool = findLatestTool(runs, (tool) => tool.status === "error");
-  if (failedTool) {
-    const presentation = toolPresentation(failedTool);
-    return {
-      tone: "error",
-      label: "工具执行失败",
-      detail: [presentation.label, presentation.target].filter(Boolean).join(" · "),
-    };
-  }
   if (latestRun?.kind === "tools") {
     const latestTool = latestRun.tools.at(-1);
     if (latestTool) {
       const presentation = toolPresentation(latestTool);
+      if (latestTool.status === "error") {
+        return {
+          tone: "error",
+          label: "工具执行失败",
+          detail: [presentation.label, presentation.target].filter(Boolean).join(" · "),
+        };
+      }
       return {
         tone: "complete",
         label: `已完成${presentation.label}`,
