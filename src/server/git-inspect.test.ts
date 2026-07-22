@@ -107,10 +107,11 @@ afterEach(() => {
 });
 
 describe("createGitInspectTool", () => {
-  it("exposes only the structured status and diff schema", () => {
+  it("exposes only the structured status and diff schema", async () => {
     const cwd = createRepository();
     const schema = createGitInspectTool(cwd).parameters;
 
+    expect(JSON.stringify(schema)).not.toMatch(/anyOf|oneOf/);
     expect(Check(schema, { action: "status" })).toBe(true);
     expect(Check(schema, {
       action: "diff",
@@ -121,6 +122,12 @@ describe("createGitInspectTool", () => {
       .toBe(false);
     expect(Check(schema, { action: "diff", scope: "unknown" })).toBe(false);
     expect(Check(schema, { action: "log" })).toBe(false);
+    await expect(executeTool(createGitInspectTool(cwd), { action: "diff" }))
+      .rejects.toThrow(/requires a scope/i);
+    await expect(executeTool(createGitInspectTool(cwd), {
+      action: "status",
+      scope: "staged",
+    })).rejects.toThrow(/does not accept/i);
   });
 
   it("rejects absolute, NUL, and escaping paths while allowing dot", async () => {

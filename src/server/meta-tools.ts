@@ -84,6 +84,13 @@ function assertConversationBody(value: string, field: string): void {
   }
 }
 
+function normalizeSessionScope(scope: string | undefined): MetaToolSessionScope | undefined {
+  if (scope === undefined || scope === "all" || scope === "created_by_me") {
+    return scope;
+  }
+  throw new Error("Invalid list_sessions scope");
+}
+
 export function createMetaTools(
   sourceConversationId: string,
   service: MetaToolService,
@@ -111,16 +118,14 @@ export function createMetaTools(
       parameters: Type.Object({
         limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
         cursor: Type.Optional(Type.String({ maxLength: 512 })),
-        scope: Type.Optional(Type.Union([
-          Type.Literal("all"),
-          Type.Literal("created_by_me"),
-        ])),
+        scope: Type.Optional(Type.String({ enum: ["all", "created_by_me"] })),
       }, { additionalProperties: false }),
       async execute(_toolCallId, input) {
+        const scope = normalizeSessionScope(input.scope);
         return result(await service.listSessions(sourceConversationId, {
           limit: input.limit ?? 50,
           ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
-          ...(input.scope === undefined ? {} : { scope: input.scope }),
+          ...(scope === undefined ? {} : { scope }),
         }));
       },
     }),

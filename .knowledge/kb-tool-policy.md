@@ -38,13 +38,13 @@ conversation role snapshot
 
 ## Git 浅层投影
 
-`git_inspect` 只有结构化 `status` 和 `diff(worktree | staged | all)`，可选 path 必须是 canonical project cwd 内的相对路径。宿主构造固定 argv，使用项目外解析出的绝对 Git executable、`shell:false`、同一次调用 deadline、AbortSignal，以及 stdout/stderr 共享的 50 KiB / 2000 行预算。
+`git_inspect` 只有结构化 `status` 和 `diff(worktree | staged | all)`，可选 path 必须是 canonical project cwd 内的相对路径。对模型暴露的参数 schema 必须是单个 object + enum，不使用顶层 `anyOf/oneOf` union；`diff` 必须有 scope、`status` 不能带 scope 的语义由执行层再次校验。宿主构造固定 argv，使用项目外解析出的绝对 Git executable、`shell:false`、同一次调用 deadline、AbortSignal，以及 stdout/stderr 共享的 50 KiB / 2000 行预算。
 
 Git 的“只读子命令”仍可能经 pager、external diff、textconv、content filter 或 fsmonitor 执行程序。主命令因此不读取真实 Git 配置：宿主先用固定 `rev-parse` 捕获并校验 repository top、git dir、index、objects、object format 和 HEAD，再为该次调用创建只含宿主 config/HEAD 的临时 synthetic `GIT_DIR`；work tree、index 和 object directory 显式绑定真实只读输入，global/system config 指向临时空文件，继承的 `GIT_*` 全部先删除。临时目录没有 `commondir`、hooks 或 info 链接，并在所有完成/失败路径清理。输出可能因未继承 `core.autocrlf/filemode/ignorecase`、sparse 和 info exclude 而比原生 Git 更嘈杂，这是关闭执行入口的保守代价。
 
 ## Agent 编排工具
 
-每个 ConversationActor 注入 `git_inspect` 和 9 个宿主 meta 工具：
+每个 ConversationActor 注入 `git_inspect` 和 9 个宿主 meta 工具；这些宿主 schema 同样避免 `anyOf/oneOf`，以兼容对工具 schema 子集较严格的 provider：
 
 ```text
 list_roles / list_sessions / current_session / peek_session

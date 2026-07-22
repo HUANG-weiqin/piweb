@@ -45,6 +45,8 @@ describe("createMetaTools", () => {
       "abort_session",
       "delete_session",
     ]);
+    expect(JSON.stringify(tools.map(({ parameters }) => parameters)))
+      .not.toMatch(/anyOf|oneOf/);
   });
 
   it("guides Agents to reuse suitable normal sessions before creating duplicates", () => {

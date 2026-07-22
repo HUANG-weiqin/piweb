@@ -35,34 +35,44 @@ const GIT_INSPECT_MAX_PATH_CHARS = 1_024;
 const REPOSITORY_CAPTURE_MAX_BYTES = 64 * 1024;
 const REPOSITORY_CAPTURE_MAX_LINES = 64;
 
-const statusParameters = Type.Object({
-  action: Type.Literal("status"),
+const gitInspectParameters = Type.Object({
+  action: Type.String({ enum: ["status", "diff"] }),
+  scope: Type.Optional(Type.String({ enum: ["worktree", "staged", "all"] })),
   path: Type.Optional(Type.String({
     minLength: 1,
     maxLength: GIT_INSPECT_MAX_PATH_CHARS,
   })),
 }, { additionalProperties: false });
-
-const diffParameters = Type.Object({
-  action: Type.Literal("diff"),
-  scope: Type.Union([
-    Type.Literal("worktree"),
-    Type.Literal("staged"),
-    Type.Literal("all"),
-  ]),
-  path: Type.Optional(Type.String({
-    minLength: 1,
-    maxLength: GIT_INSPECT_MAX_PATH_CHARS,
-  })),
-}, { additionalProperties: false });
-
-const gitInspectParameters = Type.Union([
-  statusParameters,
-  diffParameters,
-]);
 
 type GitInspectInput = Static<typeof gitInspectParameters>;
 type GitDiffScope = "worktree" | "staged" | "all";
+
+function normalizeGitInspectInput(input: GitInspectInput): GitInspectInput & (
+  | { action: "status"; scope?: undefined }
+  | { action: "diff"; scope: GitDiffScope }
+) {
+  if (input.action !== "status" && input.action !== "diff") {
+    throw new Error("Invalid git_inspect action");
+  }
+  if (
+    input.scope !== undefined
+    && input.scope !== "worktree"
+    && input.scope !== "staged"
+    && input.scope !== "all"
+  ) {
+    throw new Error("Invalid git_inspect diff scope");
+  }
+  if (input.action === "status") {
+    if (input.scope !== undefined) {
+      throw new Error("git_inspect status does not accept a diff scope");
+    }
+    return { ...input, action: "status", scope: undefined };
+  }
+  if (input.scope === undefined) {
+    throw new Error("git_inspect diff requires a scope");
+  }
+  return { ...input, action: "diff", scope: input.scope };
+}
 
 export interface GitInspectDetails {
   action: "status" | "diff";
@@ -582,7 +592,7 @@ export function createGitInspectTool(
       if (!Check(gitInspectParameters, rawInput)) {
         throw new Error("Invalid git_inspect input");
       }
-      const input = rawInput as GitInspectInput;
+      const input = normalizeGitInspectInput(rawInput as GitInspectInput);
       const projectPath = validateProjectPath(input.path, boundCwd);
       const deadline = Date.now() + timeoutMs;
       const sandbox = await createRepositorySandbox(
