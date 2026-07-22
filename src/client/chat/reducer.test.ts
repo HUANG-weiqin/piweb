@@ -174,6 +174,89 @@ describe("chatReducer", () => {
     ]);
   });
 
+  it("hydrates active-run messages with the server runId and applies the next delta in place", () => {
+    let state = chatReducer(initialChatState, {
+      type: "focus_changed",
+      ...FOCUS_A_1,
+    });
+    state = chatReducer(state, {
+      type: "hydrate",
+      ...FOCUS_A_1,
+      projectionSeq: 4,
+      items: [{
+        kind: "message",
+        id: "assistant-live",
+        runId: RUN_1,
+        role: "assistant",
+        text: "hello",
+        thinking: "",
+        tools: [],
+      }],
+    });
+
+    state = chatReducer(state, {
+      type: "session",
+      ...FOCUS_A_1,
+      runId: RUN_1,
+      projectionSeq: 5,
+      event: { type: "text_delta", delta: " world" },
+    });
+
+    expect(state.projectionGap).toBe(false);
+    expect(state.lastProjectionSeq).toBe(5);
+    expect(state.messages).toEqual([
+      expect.objectContaining({
+        id: "assistant-live",
+        runId: RUN_1,
+        text: "hello world",
+      }),
+    ]);
+  });
+
+  it("rejects projection deltas that arrive before a snapshot or with a sequence gap", () => {
+    let state = chatReducer(initialChatState, {
+      type: "focus_changed",
+      ...FOCUS_A_1,
+    });
+    state = chatReducer(state, {
+      type: "session",
+      ...FOCUS_A_1,
+      runId: RUN_1,
+      projectionSeq: 1,
+      event: { type: "text_delta", delta: "early" },
+    });
+    expect(state.projectionGap).toBe(true);
+    expect(state.messages).toEqual([]);
+
+    state = chatReducer(state, {
+      type: "hydrate",
+      ...FOCUS_A_1,
+      projectionSeq: 2,
+      items: [],
+    });
+    state = chatReducer(state, {
+      type: "session",
+      ...FOCUS_A_1,
+      runId: RUN_1,
+      projectionSeq: 4,
+      event: { type: "text_delta", delta: "gap" },
+    });
+    expect(state.projectionGap).toBe(true);
+    expect(state.lastProjectionSeq).toBe(2);
+    expect(state.messages).toEqual([]);
+
+    state = chatReducer(state, {
+      type: "session",
+      ...FOCUS_A_1,
+      runId: RUN_1,
+      projectionSeq: 3,
+      event: { type: "text_delta", delta: "late" },
+    });
+    expect(state.projectionGap).toBe(true);
+    expect(state.lastProjectionSeq).toBe(2);
+    expect(state.messages).toEqual([]);
+  });
+
   it("updates a live card in place by cardId and preserves its position", () => {
     let state = chatReducer(initialChatState, {
       type: "focus_changed",

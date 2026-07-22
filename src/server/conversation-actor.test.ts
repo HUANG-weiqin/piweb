@@ -1,4 +1,5 @@
 import type {
+  AgentMessage,
   AgentSession,
   AgentSessionEvent,
   AuthStorage,
@@ -19,6 +20,7 @@ import {
   type ConversationActorEvent,
   type ConversationActorOpenOptions,
 } from "./conversation-actor.js";
+import { projectConversationItemsSnapshot } from "./conversation-history.js";
 import type {
   CreatedPiSession,
   CreatePiSessionOptions,
@@ -345,6 +347,10 @@ async function openActor(
 
 function nativeEvent(value: unknown): AgentSessionEvent {
   return value as AgentSessionEvent;
+}
+
+function agentMessage(value: unknown): AgentMessage {
+  return value as AgentMessage;
 }
 
 function checkToolTurnBoundary(runtime: FakeRuntime): boolean {
@@ -773,12 +779,12 @@ describe("ConversationActor", () => {
       origin: "browser",
     });
     await vi.waitFor(() => {
-      expect(fixture.events).toContainEqual({
+      expect(fixture.events).toContainEqual(expect.objectContaining({
         type: "session_event",
         conversationId: CONVERSATION_ID,
         runId: RUN_A,
         event: { type: "run_started" },
-      });
+      }));
     });
 
     fixture.runtime.session.eventListener?.(nativeEvent({
@@ -950,6 +956,66 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
+  it("projects live active run instead of duplicating durable message tail", async () => {
+    const fixture = await openActor();
+    const promptStarted = deferred();
+    const promptFinished = deferred();
+    fixture.runtime.session.promptImplementation = async () => {
+      fixture.manager.appendMessage(agentMessage({
+        role: "user",
+        content: "inspect",
+        timestamp: 1,
+      }));
+      fixture.manager.appendMessage(agentMessage({
+        role: "assistant",
+        content: [{ type: "text", text: "durable partial" }],
+        timestamp: 2,
+      }));
+      const emit = fixture.runtime.session.eventListener;
+      emit?.(nativeEvent({ type: "agent_start" }));
+      emit?.(nativeEvent({
+        type: "message_start",
+        message: { role: "assistant", content: [] },
+      }));
+      emit?.(nativeEvent({
+        type: "message_update",
+        assistantMessageEvent: {
+          type: "text_delta",
+          delta: "live partial",
+        },
+      }));
+      promptStarted.resolve();
+      await promptFinished.promise;
+    };
+
+    const running = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "inspect",
+      origin: "browser",
+    });
+    await promptStarted.promise;
+
+    const projected = fixture.actor.projectConversationItems(
+      projectConversationItemsSnapshot(fixture.manager).items,
+    ).items.filter((item) => item.kind === "message");
+    expect(projected).toEqual([
+      expect.objectContaining({
+        role: "user",
+        runId: RUN_A,
+        text: "inspect",
+      }),
+      expect.objectContaining({
+        role: "assistant",
+        runId: RUN_A,
+        text: "live partial",
+      }),
+    ]);
+
+    promptFinished.resolve();
+    await running;
+    await fixture.actor.dispose();
+  });
+
   it("publishes queued synchronously and permits only one active run", async () => {
     const fixture = await openActor();
     const promptStarted = deferred();
@@ -970,6 +1036,7 @@ describe("ConversationActor", () => {
         type: "session_event",
         conversationId: CONVERSATION_ID,
         runId: RUN_A,
+        projectionSeq: 1,
         event: { type: "run_queued" },
       },
       {

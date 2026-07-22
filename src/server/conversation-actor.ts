@@ -9,11 +9,17 @@ import type {
 import {
   DEFAULT_COMPACTION_THRESHOLD_PERCENT,
   type ConversationActivity,
+  type ConversationHistoryItem,
+  type ConversationHistoryMessage,
+  type ConversationHistoryMessagePart,
+  type ConversationHistoryTool,
   type ConversationRoleSnapshot,
   type SessionEvent,
+  type TokenUsage,
   type ToolMode,
 } from "../shared/protocol.js";
 import type { AgentTurnBoundaryCheck } from "./agent-turn-boundary.js";
+import { projectConversationItemsSnapshot } from "./conversation-history.js";
 import {
   aggregateReservedConversationEntries,
   appendReservedCustomEntry,
@@ -70,6 +76,7 @@ export type ConversationActorEvent =
       type: "session_event";
       conversationId: string;
       runId: string;
+      projectionSeq: number;
       event: SessionEvent;
     }
   | {
@@ -238,6 +245,48 @@ function isCancelling(ticket: RunTicket): boolean {
   return ticket.phase === "cancelling";
 }
 
+interface LiveConversationProjection {
+  runId: string;
+  baseHistoryItemCount: number;
+  items: ConversationHistoryItem[];
+}
+
+function runMessageId(runId: string, role: "user" | "assistant"): string {
+  return role === "user" ? `run-${runId}-user` : `assistant:run-${runId}-assistant`;
+}
+
+function appendHistoryPart(
+  parts: ConversationHistoryMessagePart[] | undefined,
+  part: ConversationHistoryMessagePart,
+): ConversationHistoryMessagePart[] {
+  return [...(parts ?? []), part];
+}
+
+function addUsage(
+  current: TokenUsage | undefined,
+  next: TokenUsage,
+): TokenUsage {
+  return {
+    input: (current?.input ?? 0) + next.input,
+    output: (current?.output ?? 0) + next.output,
+    cacheRead: (current?.cacheRead ?? 0) + next.cacheRead,
+    cacheWrite: (current?.cacheWrite ?? 0) + next.cacheWrite,
+    total: (current?.total ?? 0) + next.total,
+  };
+}
+
+function messageIdentity(message: ConversationHistoryMessage): string {
+  return message.runId
+    ? `${message.role}:${message.runId}:${message.id}`
+    : `${message.role}:${message.id}`;
+}
+
+function conversationItemIdentity(item: ConversationHistoryItem): string {
+  if (item.kind === "message") return `message:${messageIdentity(item)}`;
+  if (item.kind === "session_message") return `card:${item.cardId}`;
+  return `${item.kind}:${item.id}`;
+}
+
 /**
  * Owns exactly one persistent Pi conversation independently of any WebSocket.
  *
@@ -266,6 +315,8 @@ export class ConversationActor {
   private readonly usedRunIds = new Set<string>();
   private profileSnapshot: ConversationMeta;
   private compactionThresholdPercent: number;
+  private projectionSeq = 0;
+  private liveProjection?: LiveConversationProjection;
 
   private created?: CreatedPiSession;
   private unsubscribeSession?: () => void;
@@ -611,6 +662,28 @@ export class ConversationActor {
     };
   }
 
+  projectConversationItems(historyItems: ConversationHistoryItem[]): {
+    items: ConversationHistoryItem[];
+    projectionSeq: number;
+  } {
+    const live = this.liveProjection;
+    if (!live) return { items: historyItems, projectionSeq: this.projectionSeq };
+
+    const prefix = historyItems.slice(0, live.baseHistoryItemCount);
+    const durableNonMessageTail = historyItems
+      .slice(live.baseHistoryItemCount)
+      .filter((item) => item.kind !== "message");
+    let items = [...prefix, ...durableNonMessageTail];
+    for (const liveItem of live.items) {
+      const identity = conversationItemIdentity(liveItem);
+      if (items.some((item) => conversationItemIdentity(item) === identity)) {
+        continue;
+      }
+      items = [...items, structuredClone(liveItem)];
+    }
+    return { items, projectionSeq: this.projectionSeq };
+  }
+
   subscribe(listener: ConversationActorListener): () => void {
     this.assertUsable();
     this.listeners.add(listener);
@@ -640,6 +713,7 @@ export class ConversationActor {
         runId: input.runId,
         origin: input.origin,
         recovered: false,
+        promptText: input.origin === "browser" ? input.text : undefined,
       },
       (ticket) => this.session.prompt(input.text, {
         preflightResult: (accepted) => {
@@ -751,6 +825,7 @@ export class ConversationActor {
       runId: string;
       origin: ConversationRunOrigin;
       recovered: boolean;
+      promptText?: string;
     },
     execute: (ticket: RunTicket) => Promise<void>,
   ): Promise<RunSettlement> {
@@ -793,6 +868,7 @@ export class ConversationActor {
       turnBoundaryCompactionRequested: false,
     };
     this.activeRun = ticket;
+    this.beginLiveProjection(ticket, input.promptText);
     this.emitSessionEvent(ticket, { type: "run_queued" });
     this.emitActivity();
 
@@ -1445,13 +1521,203 @@ export class ConversationActor {
     return this.session.extensionRunner.getCommand(commandName) !== undefined;
   }
 
+  private resetLiveProjection(ticket: RunTicket): LiveConversationProjection {
+    const live: LiveConversationProjection = {
+      runId: ticket.id,
+      baseHistoryItemCount: projectConversationItemsSnapshot(
+        this.sessionManager,
+      ).items.length,
+      items: [],
+    };
+    this.liveProjection = live;
+    return live;
+  }
+
+  private requireLiveProjection(ticket: RunTicket): LiveConversationProjection {
+    if (!this.liveProjection || this.liveProjection.runId !== ticket.id) {
+      return this.resetLiveProjection(ticket);
+    }
+    return this.liveProjection;
+  }
+
+  private beginLiveProjection(ticket: RunTicket, promptText: string | undefined): void {
+    const live = this.resetLiveProjection(ticket);
+    const items = live.items;
+    if (promptText !== undefined) {
+      items.push({
+        kind: "message",
+        id: runMessageId(ticket.id, "user"),
+        runId: ticket.id,
+        role: "user",
+        text: promptText,
+        thinking: "",
+        tools: [],
+        parts: promptText
+          ? [{ kind: "text", offset: 0, length: promptText.length }]
+          : [],
+      });
+    }
+  }
+
+  private ensureLiveAssistant(ticket: RunTicket): ConversationHistoryMessage {
+    const live = this.requireLiveProjection(ticket);
+    const existing = live.items.find((item) => (
+      item.kind === "message"
+      && item.role === "assistant"
+      && item.runId === ticket.id
+    ));
+    if (existing?.kind === "message") return existing;
+
+    const assistant: ConversationHistoryMessage & { kind: "message" } = {
+      kind: "message",
+      id: runMessageId(ticket.id, "assistant"),
+      runId: ticket.id,
+      role: "assistant",
+      text: "",
+      thinking: "",
+      tools: [],
+      parts: [],
+    };
+    live.items.push(assistant);
+    return assistant;
+  }
+
+  private appendLiveUser(ticket: RunTicket, projectionId: string, text: string): void {
+    const live = this.requireLiveProjection(ticket);
+    if (live.items.some((item) => item.kind === "message" && item.id === projectionId)) {
+      return;
+    }
+    live.items.push({
+      kind: "message",
+      id: projectionId,
+      runId: ticket.id,
+      role: "user",
+      text,
+      thinking: "",
+      tools: [],
+      parts: text ? [{ kind: "text", offset: 0, length: text.length }] : [],
+    });
+  }
+
+  private applyLiveSessionEvent(ticket: RunTicket, event: SessionEvent): void {
+    if (event.type === "user_message") {
+      this.appendLiveUser(ticket, event.projectionId, event.text);
+      return;
+    }
+    if (event.type === "assistant_message_started") {
+      const live = this.requireLiveProjection(ticket);
+      const existingIndex = live.items.findIndex((item) => (
+        item.kind === "message" && item.id === event.projectionId
+      ));
+      if (existingIndex >= 0) return;
+      const emptyAssistantIndex = live.items.findIndex((item) => (
+        item.kind === "message"
+        && item.role === "assistant"
+        && item.runId === ticket.id
+        && !item.text
+        && !item.thinking
+        && item.tools.length === 0
+      ));
+      if (emptyAssistantIndex >= 0) {
+        live.items.splice(emptyAssistantIndex, 1);
+      }
+      live.items.push({
+        kind: "message",
+        id: event.projectionId,
+        runId: ticket.id,
+        role: "assistant",
+        text: "",
+        thinking: "",
+        tools: [],
+        parts: [],
+      });
+      return;
+    }
+    if (event.type === "text_delta" || event.type === "thinking_delta") {
+      const assistant = this.ensureLiveAssistant(ticket);
+      if (event.type === "text_delta") {
+        const offset = assistant.text.length;
+        assistant.text += event.delta;
+        assistant.parts = appendHistoryPart(assistant.parts, {
+          kind: "text",
+          offset,
+          length: event.delta.length,
+        });
+      } else {
+        const offset = assistant.thinking.length;
+        assistant.thinking += event.delta;
+        assistant.parts = appendHistoryPart(assistant.parts, {
+          kind: "thinking",
+          offset,
+          length: event.delta.length,
+        });
+      }
+      return;
+    }
+    if (event.type === "text_replaced") {
+      const assistant = this.ensureLiveAssistant(ticket);
+      assistant.text = event.text;
+      assistant.parts = [
+        ...(assistant.parts ?? []).filter((part) => part.kind !== "text"),
+        ...(event.text ? [{ kind: "text" as const, offset: 0, length: event.text.length }] : []),
+      ];
+      return;
+    }
+    if (event.type === "tool_started") {
+      const assistant = this.ensureLiveAssistant(ticket);
+      const tool: ConversationHistoryTool = {
+        toolCallId: String(event.toolCallId),
+        toolName: String(event.toolName),
+        args: event.args,
+        status: "pending",
+      };
+      assistant.tools = [...assistant.tools, tool];
+      assistant.parts = appendHistoryPart(assistant.parts, {
+        kind: "tool",
+        toolCallId: tool.toolCallId,
+      });
+      return;
+    }
+    if (event.type === "tool_prepared") {
+      const assistant = this.ensureLiveAssistant(ticket);
+      assistant.tools = assistant.tools.map((tool) => (
+        tool.toolCallId === String(event.toolCallId)
+          ? { ...tool, args: event.args, status: "pending" }
+          : tool
+      ));
+      return;
+    }
+    if (event.type === "tool_updated" || event.type === "tool_finished") {
+      const assistant = this.ensureLiveAssistant(ticket);
+      const status = event.type === "tool_finished"
+        ? (event.isError ? "error" : "done")
+        : "running";
+      assistant.tools = assistant.tools.map((tool) => (
+        tool.toolCallId === String(event.toolCallId)
+          ? { ...tool, result: event.result, status }
+          : tool
+      ));
+      return;
+    }
+    if (event.type === "usage") {
+      const assistant = this.ensureLiveAssistant(ticket);
+      assistant.usage = addUsage(assistant.usage, event.usage);
+    }
+  }
+
   private emitSessionEvent(ticket: RunTicket, event: SessionEvent): void {
+    this.applyLiveSessionEvent(ticket, event);
+    const projectionSeq = ++this.projectionSeq;
     this.emit({
       type: "session_event",
       conversationId: this.conversationId,
       runId: ticket.id,
+      projectionSeq,
       event,
     });
+    if (event.type === "run_finished") {
+      this.liveProjection = undefined;
+    }
   }
 
   private emitActivity(): void {

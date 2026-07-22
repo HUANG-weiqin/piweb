@@ -1509,6 +1509,7 @@ export class PiConnection {
         conversationId: event.conversationId,
         focusId: view.focusId,
         runId: event.runId,
+        projectionSeq: event.projectionSeq,
         event: event.event,
       });
     } else if (event.type === "error" && focused) {
@@ -1782,8 +1783,9 @@ export class PiConnection {
       const history = projectConversationItemsSnapshot(
         actor.sessionManager,
       );
+      const projection = actor.projectConversationItems(history.items);
       const items = projectConversationPeers(
-        history.items,
+        projection.items,
         view.handle.project.listConversations(),
       );
       this.focusedItemFingerprints.clear();
@@ -1796,6 +1798,7 @@ export class PiConnection {
         conversationId: actor.conversationId,
         focusId: view.focusId,
         role: actor.profile.role,
+        projectionSeq: projection.projectionSeq,
         items,
         truncated: history.truncated,
       });
@@ -1817,8 +1820,10 @@ export class PiConnection {
       return;
     }
     try {
+      const history = projectConversationItemsSnapshot(actor.sessionManager);
+      const projection = actor.projectConversationItems(history.items);
       const items = projectConversationPeers(
-        projectConversationItemsSnapshot(actor.sessionManager).items,
+        projection.items,
         view.handle.project.listConversations(),
       );
       for (const item of items) {
@@ -1833,6 +1838,7 @@ export class PiConnection {
           sessionId: view.sessionId,
           conversationId: actor.conversationId,
           focusId: view.focusId,
+          projectionSeq: projection.projectionSeq,
           item,
         });
       }
@@ -1933,10 +1939,7 @@ export class PiConnection {
     this.publishCoordinatedState();
     this.publishRoleCatalog();
     this.publishProjectSnapshotCoordinated();
-    if (
-      view.actor?.getActivity().kind === "idle"
-      && !view.actor.isCompacting()
-    ) {
+    if (view.actor && !view.actor.isCompacting()) {
       this.publishFocusedConversationSnapshot();
     }
   }

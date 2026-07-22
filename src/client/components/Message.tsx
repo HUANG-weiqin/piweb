@@ -364,7 +364,10 @@ function ActivityGroup({
 }) {
   const runs = activityRuns(parts, tools);
   const summary = activitySummary(runs, activeThinking);
-  const toolCount = tools.length;
+  const toolCount = runs.reduce(
+    (count, run) => count + (run.kind === "tools" ? run.tools.length : 0),
+    0,
+  );
   const lastThinkingIndex = findLastIndex(
     runs,
     (run) => run.kind === "thinking",

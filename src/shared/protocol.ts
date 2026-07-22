@@ -14,7 +14,7 @@ export const MAX_PROMPT_CHARACTERS = 200_000;
 export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
-export const PROTOCOL_VERSION = 22;
+export const PROTOCOL_VERSION = 23;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
 const conversationIdSchema = z.string().uuid();
@@ -431,7 +431,7 @@ export interface ConversationHistoryTool {
   toolName: string;
   args?: unknown;
   result?: unknown;
-  status: "pending" | "done" | "error";
+  status: "pending" | "running" | "done" | "error";
 }
 
 export type ConversationHistoryMessagePart =
@@ -440,6 +440,7 @@ export type ConversationHistoryMessagePart =
 
 export interface ConversationHistoryMessage {
   id: string;
+  runId?: string;
   role: "user" | "assistant";
   text: string;
   thinking: string;
@@ -651,6 +652,7 @@ export type ServerEvent =
       conversationId: string;
       focusId: string;
       role?: ConversationRoleSnapshot;
+      projectionSeq?: number;
       messages?: ConversationHistoryMessage[];
       items?: ConversationHistoryItem[];
       truncated: boolean;
@@ -661,6 +663,7 @@ export type ServerEvent =
       runId: string;
       conversationId: string;
       focusId: string;
+      projectionSeq?: number;
       event: SessionEvent;
     }
   | {
@@ -668,6 +671,7 @@ export type ServerEvent =
       sessionId: string;
       conversationId: string;
       focusId: string;
+      projectionSeq?: number;
       item: ConversationHistoryItem;
     }
   | {
@@ -955,6 +959,7 @@ const sessionMessageEndpointSchema: z.ZodType<SessionMessageEndpoint> = z.object
 });
 const conversationHistoryMessageSchema = z.object({
   id: z.string(),
+  runId: runIdSchema.optional(),
   role: z.enum(["user", "assistant"]),
   text: z.string(),
   thinking: z.string(),
@@ -963,7 +968,7 @@ const conversationHistoryMessageSchema = z.object({
     toolName: z.string(),
     args: z.unknown().optional(),
     result: z.unknown().optional(),
-    status: z.enum(["pending", "done", "error"]),
+    status: z.enum(["pending", "running", "done", "error"]),
   })),
   parts: z.array(z.discriminatedUnion("kind", [
     z.object({
@@ -1103,6 +1108,7 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     conversationId: conversationIdSchema,
     focusId: focusIdSchema,
     role: conversationRoleSnapshotSchema.optional(),
+    projectionSeq: z.number().int().nonnegative().optional(),
     messages: z.array(conversationHistoryMessageSchema).optional(),
     items: z.array(conversationHistoryItemSchema).optional(),
     truncated: z.boolean(),
@@ -1113,6 +1119,7 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     runId: runIdSchema,
     conversationId: conversationIdSchema,
     focusId: focusIdSchema,
+    projectionSeq: z.number().int().nonnegative().optional(),
     event: sessionEventSchema,
   }),
   z.object({
@@ -1120,6 +1127,7 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     sessionId: sessionIdSchema,
     conversationId: conversationIdSchema,
     focusId: focusIdSchema,
+    projectionSeq: z.number().int().nonnegative().optional(),
     item: conversationHistoryItemSchema,
   }),
   z.object({

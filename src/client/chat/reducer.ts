@@ -63,6 +63,12 @@ export interface ChatFocus {
 
 export interface ChatState {
   /**
+   * Last server-owned transcript projection sequence observed for this focus.
+   * Undefined means no authoritative snapshot has hydrated the focus yet.
+   */
+  lastProjectionSeq?: number;
+  projectionGap?: boolean;
+  /**
    * The ordered transcript. Cards and ordinary messages share this one
    * projection so a card update cannot jump to the end of the conversation.
    *
@@ -89,12 +95,29 @@ type OptionalFocus = Partial<ChatFocus>;
 
 export type ChatAction =
   | ({ type: "focus_changed" } & ChatFocus)
-  | ({ type: "hydrate"; items: ConversationHistoryItem[] } & ChatFocus)
+  | ({
+      type: "hydrate";
+      items: ConversationHistoryItem[];
+      projectionSeq?: number;
+    } & ChatFocus)
   // Compatibility for the old App while focus-aware wiring lands.
-  | { type: "hydrate"; messages: ConversationHistoryMessage[] }
-  | ({ type: "conversation_item"; item: ConversationHistoryItem } & ChatFocus)
+  | {
+      type: "hydrate";
+      messages: ConversationHistoryMessage[];
+      projectionSeq?: number;
+    }
+  | ({
+      type: "conversation_item";
+      item: ConversationHistoryItem;
+      projectionSeq?: number;
+    } & ChatFocus)
   | ({ type: "prompt_accepted"; runId: string; text: string } & OptionalFocus)
-  | ({ type: "session"; runId: string; event: SessionEvent } & OptionalFocus)
+  | ({
+      type: "session";
+      runId: string;
+      event: SessionEvent;
+      projectionSeq?: number;
+    } & OptionalFocus)
   | ({ type: "error"; runId: string; message: string } & OptionalFocus)
   | { type: "reset" };
 
@@ -166,7 +189,7 @@ function matchesCurrentFocus(state: ChatState, action: OptionalFocus): boolean {
 
 function historyMessageToItem(
   message: ConversationHistoryMessage,
-  runId = `history:${message.id}`,
+  runId = message.runId ?? `history:${message.id}`,
 ): ChatMessageItem {
   const parts = message.parts?.flatMap((part): ChatMessagePart[] => {
     if (part.kind === "tool") {
@@ -223,10 +246,10 @@ function normalizeHistory(items: ConversationHistoryItem[]): ChatItem[] {
   let historyRunId: string | undefined;
   for (const item of items) {
     if (item.kind === "message" && item.role === "user") {
-      historyRunId = `history:${item.id}`;
+      historyRunId = item.runId ?? `history:${item.id}`;
     }
     const next = item.kind === "message"
-      ? historyMessageToItem(item, historyRunId)
+      ? historyMessageToItem(item, item.runId ?? historyRunId)
       : item;
     normalized = upsertItem(normalized, next);
   }
@@ -357,6 +380,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       items: [],
       messages: [],
       sessionTokens: 0,
+      lastProjectionSeq: undefined,
+      projectionGap: false,
     };
   }
 
@@ -371,6 +396,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           conversationId: action.conversationId,
           focusId: action.focusId,
         },
+        lastProjectionSeq: action.projectionSeq,
+        projectionGap: false,
       };
     }
 
@@ -379,13 +406,30 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       kind: "message",
       ...message,
     })));
-    return withItems(state, items, tokenTotal(items));
+    return {
+      ...withItems(state, items, tokenTotal(items)),
+      lastProjectionSeq: action.projectionSeq,
+      projectionGap: false,
+    };
   }
 
   if (action.type === "conversation_item") {
     if (!matchesCurrentFocus(state, action)) return state;
+    if (state.projectionGap) return state;
+    if (
+      action.projectionSeq !== undefined
+      && state.lastProjectionSeq !== undefined
+      && action.projectionSeq !== state.lastProjectionSeq
+      && action.projectionSeq !== state.lastProjectionSeq + 1
+    ) {
+      return { ...state, projectionGap: true };
+    }
     const items = upsertItem(itemsFrom(state), historyItemToChatItem(action.item));
-    return withItems(state, items, tokenTotal(items));
+    return {
+      ...withItems(state, items, tokenTotal(items)),
+      lastProjectionSeq: action.projectionSeq ?? state.lastProjectionSeq,
+      projectionGap: false,
+    };
   }
 
   if (!matchesCurrentFocus(state, action)) return state;
@@ -421,6 +465,20 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   }
 
   const event = action.event;
+  if (state.projectionGap) return state;
+  if (action.projectionSeq !== undefined) {
+    if (
+      state.lastProjectionSeq === undefined
+      || action.projectionSeq !== state.lastProjectionSeq + 1
+    ) {
+      return { ...state, projectionGap: true };
+    }
+    state = {
+      ...state,
+      lastProjectionSeq: action.projectionSeq,
+      projectionGap: false,
+    };
+  }
   if (event.type === "run_started") {
     return withItems(state, ensureAssistant(itemsFrom(state), action.runId).items);
   }

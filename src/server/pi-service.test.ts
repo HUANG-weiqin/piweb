@@ -3827,11 +3827,13 @@ describe("PiConnection coordinated project view", () => {
           }),
           expect.objectContaining({ type: "role_catalog_snapshot" }),
           expect.objectContaining({ type: "project_snapshot" }),
+          expect.objectContaining({
+            type: "conversation_snapshot",
+            conversationId: attached.conversationId,
+            focusId: attached.focusId,
+          }),
         ]),
       );
-      expect(harness.events.slice(refreshStart).some(
-        (event) => event.type === "conversation_snapshot",
-      )).toBe(false);
 
       finish.resolve();
       await run;
@@ -4239,6 +4241,174 @@ describe("PiConnection coordinated project view", () => {
       finishB.resolve();
       await runA?.catch(() => undefined);
       await runB?.catch(() => undefined);
+      await harness.cleanup();
+    }
+  });
+
+  it("restores a running background conversation from the server-owned live projection", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const started = deferred();
+    const emitBackgroundProgress = deferred();
+    const finish = deferred();
+    let run: Promise<void> | undefined;
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      const firstCommandId = randomUUID();
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: firstCommandId,
+        sessionId: SESSION_A,
+        roleId: "default",
+        title: "first",
+      });
+      const first = harness.events.findLast(
+        (event) =>
+          event.type === "focus_attached"
+          && event.commandId === firstCommandId,
+      );
+      if (
+        first?.type !== "focus_attached"
+        || !first.conversationId
+        || !first.focusId
+      ) throw new Error("first conversation was not focused");
+
+      const secondCommandId = randomUUID();
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: secondCommandId,
+        sessionId: SESSION_A,
+        roleId: "default",
+        title: "second",
+      });
+      const second = harness.events.findLast(
+        (event) =>
+          event.type === "focus_attached"
+          && event.commandId === secondCommandId,
+      );
+      if (second?.type !== "focus_attached" || !second.conversationId) {
+        throw new Error("second conversation was not focused");
+      }
+
+      await harness.connection.handle({
+        type: "focus_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId: first.conversationId,
+      });
+      const focusedFirst = latestState(harness.events);
+      if (!focusedFirst.focusId) throw new Error("first focusId missing");
+      const firstSession = harness.runtime.created[0]!;
+      firstSession.prompt = async () => {
+        started.resolve();
+        await emitBackgroundProgress.promise;
+        firstSession.eventListener?.(nativeEvent({ type: "agent_start" }));
+        firstSession.eventListener?.(nativeEvent({
+          type: "message_start",
+          message: { role: "assistant" },
+        }));
+        firstSession.eventListener?.(nativeEvent({
+          type: "message_update",
+          assistantMessageEvent: { type: "thinking_delta", delta: "thinking" },
+        }));
+        firstSession.eventListener?.(nativeEvent({
+          type: "tool_execution_start",
+          toolCallId: "read-1",
+          toolName: "read",
+          args: { path: "a.ts" },
+        }));
+        firstSession.eventListener?.(nativeEvent({
+          type: "tool_execution_end",
+          toolCallId: "read-1",
+          result: { ok: true },
+          isError: false,
+        }));
+        firstSession.eventListener?.(nativeEvent({
+          type: "message_update",
+          assistantMessageEvent: { type: "text_delta", delta: "background text" },
+        }));
+        await finish.promise;
+        firstSession.eventListener?.(nativeEvent({ type: "agent_settled" }));
+      };
+      run = harness.connection.handle({
+        type: "prompt",
+        sessionId: SESSION_A,
+        conversationId: first.conversationId,
+        focusId: focusedFirst.focusId,
+        runId: RUN_A,
+        text: "continue while unfocused",
+      });
+      await started.promise;
+
+      const focusSecondId = randomUUID();
+      await harness.connection.handle({
+        type: "focus_conversation",
+        commandId: focusSecondId,
+        sessionId: SESSION_A,
+        conversationId: second.conversationId,
+      });
+      const eventCountAtSwitch = harness.events.length;
+      emitBackgroundProgress.resolve();
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      await vi.waitFor(() => {
+        expect(harness.events.slice(eventCountAtSwitch).some(
+          (event) =>
+            event.type === "session_event"
+            && event.conversationId === first.conversationId,
+        )).toBe(false);
+      });
+
+      const refocusCommandId = randomUUID();
+      await harness.connection.handle({
+        type: "focus_conversation",
+        commandId: refocusCommandId,
+        sessionId: SESSION_A,
+        conversationId: first.conversationId,
+      });
+      const refocused = harness.events.findLast(
+        (event) =>
+          event.type === "focus_attached"
+          && event.commandId === refocusCommandId,
+      );
+      if (
+        refocused?.type !== "focus_attached"
+        || !refocused.focusId
+      ) throw new Error("first conversation was not refocused");
+      const snapshot = harness.events.findLast((event) => (
+        event.type === "conversation_snapshot"
+        && event.conversationId === first.conversationId
+        && event.focusId === refocused.focusId
+      ));
+      if (snapshot?.type !== "conversation_snapshot") {
+        throw new Error("refocus snapshot was not published");
+      }
+      const assistant = snapshot.items?.find((item) => (
+        item.kind === "message"
+        && item.role === "assistant"
+        && item.runId === RUN_A
+      ));
+      expect(snapshot.projectionSeq).toBeGreaterThan(0);
+      expect(assistant).toMatchObject({
+        kind: "message",
+        runId: RUN_A,
+        thinking: "thinking",
+        text: "background text",
+        tools: [expect.objectContaining({
+          toolCallId: "read-1",
+          toolName: "read",
+          status: "done",
+          result: { ok: true },
+        })],
+      });
+    } finally {
+      emitBackgroundProgress.resolve();
+      finish.resolve();
+      await run?.catch(() => undefined);
       await harness.cleanup();
     }
   });

@@ -2340,10 +2340,26 @@ describe("App", () => {
         }],
         truncated: false,
       });
+      socketMock.emit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        messages: [{
+          id: "assistant-a",
+          role: "assistant",
+          text: "A still working",
+          thinking: "",
+          tools: [],
+        }],
+        truncated: false,
+      });
     });
+    expect(screen.getByText("A still working")).toBeInTheDocument();
     socketMock.autoFocus = false;
 
     fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    expect(screen.queryByText("A still working")).not.toBeInTheDocument();
 
     act(() => socketMock.emit?.({
       type: "conversation_snapshot",

@@ -250,6 +250,7 @@ export function App() {
   const projectIdRef = useRef("");
   const conversationIdRef = useRef("");
   const focusRef = useRef<ActiveFocus | undefined>(undefined);
+  const [pendingFocus, setPendingFocus] = useState<PendingFocus>();
   const pendingFocusRef = useRef<PendingFocus | undefined>(undefined);
   const pendingFocusedStateRef = useRef<PublicState | undefined>(undefined);
   const authFlowIdRef = useRef("");
@@ -583,6 +584,7 @@ export function App() {
   const updatePendingFocus = (pending: PendingFocus | undefined) => {
     if (pending) pendingFocusedStateRef.current = undefined;
     pendingFocusRef.current = pending;
+    setPendingFocus(pending);
     setCreatingConversation(pending?.operation === "create_conversation");
   };
   const updatePendingRoleOperation = (
@@ -1022,9 +1024,14 @@ export function App() {
                 kind: "message" as const,
                 ...message,
               })),
+            projectionSeq: event.projectionSeq,
           });
         } else {
-          dispatch({ type: "hydrate", messages: event.messages ?? [] });
+          dispatch({
+            type: "hydrate",
+            messages: event.messages ?? [],
+            projectionSeq: event.projectionSeq,
+          });
         }
         setConversationRole(event.role);
         setHistoryTruncated(event.truncated);
@@ -1045,6 +1052,7 @@ export function App() {
           type: "session",
           runId: event.runId,
           event: event.event,
+          projectionSeq: event.projectionSeq,
           ...(focusRef.current ?? {}),
         });
       } else if (event.type === "conversation_item") {
@@ -1056,6 +1064,7 @@ export function App() {
           sessionId: focus.sessionId,
           conversationId: focus.conversationId,
           focusId: focus.focusId,
+          projectionSeq: event.projectionSeq,
           item: event.item,
         });
       } else if (event.type === "extension_ui_request") {
@@ -1589,6 +1598,21 @@ export function App() {
     if (!ok) setError("本地服务未连接");
     return ok;
   };
+  useEffect(() => {
+    if (!chat.projectionGap || !transportOnline || !protocolReady) return;
+    const sessionId = sessionIdRef.current;
+    const projectId = projectIdRef.current;
+    const focus = focusRef.current;
+    if (!sessionId || !projectId || !focus) return;
+    updateConversationReady(false);
+    socketRef.current?.send({
+      type: "refresh_view",
+      sessionId,
+      projectId,
+      conversationId: focus.conversationId,
+      focusId: focus.focusId,
+    });
+  }, [chat.projectionGap, protocolReady, transportOnline]);
   const clearSettingResult = useCallback(() => setSettingResult(undefined), []);
   const browseDirectory = (path?: string) => {
     const current = directoryBrowserRef.current;
@@ -2317,6 +2341,12 @@ export function App() {
   const showRoleSelection = selectingRole || !state.conversationId;
   const conversationCompacting =
     state.compacting === true || Boolean(pendingContextCompaction);
+  const switchingFocus = pendingFocus?.operation === "focus_conversation"
+    || pendingFocus?.operation === "create_conversation";
+  const visibleChat = switchingFocus ? initialChatState : chat;
+  const visibleBusy = state.busy || Boolean(outstandingRunId);
+  const visibleActiveRun = state.activeRun;
+  const visibleConversationReady = switchingFocus ? false : conversationReady;
 
   return <>
     <div className="workbench">
@@ -2356,10 +2386,10 @@ export function App() {
               onSettings={() => setDrawer(true)}
             />
           : <Chat
-              chat={chat}
+              chat={visibleChat}
               historyTruncated={historyTruncated}
-              busy={state.busy || Boolean(outstandingRunId)}
-              activeRun={state.activeRun}
+              busy={visibleBusy}
+              activeRun={visibleActiveRun}
               sessionTokenUsage={state.sessionTokenUsage}
               contextTokenCount={state.contextUsage?.tokens}
               contextWindow={state.contextUsage?.contextWindow}
@@ -2389,7 +2419,7 @@ export function App() {
               compacting={conversationCompacting}
               cwd={state.cwd}
               online={online}
-              conversationReady={conversationReady}
+              conversationReady={visibleConversationReady}
               draft={draft}
               submitting={Boolean(pendingPrompt && !pendingPrompt.queueIds)}
               queuedPrompts={queuedPrompts.map((queued) => ({
