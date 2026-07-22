@@ -820,7 +820,178 @@ pre {
 }
 
 .assistant-activity-group {
+  margin: 11px 0;
+  overflow: clip;
+  border: 1px solid color-mix(in srgb, var(--line) 88%, transparent);
+  border-radius: 10px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--soft) 66%, transparent);
+}
+
+.assistant-activity-group > summary {
   display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto 14px;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 7px 10px 7px 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.assistant-activity-group > summary::-webkit-details-marker {
+  display: none;
+}
+
+.assistant-activity-group > summary::marker {
+  content: "";
+}
+
+.assistant-activity-group > summary:hover {
+  color: color-mix(in srgb, var(--muted) 72%, var(--accent));
+}
+
+.assistant-activity-group[open] > summary {
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+}
+
+.activity-group-status {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  color: var(--success);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.assistant-activity-group.is-active .activity-group-status {
+  color: #b98014;
+}
+
+.assistant-activity-group.is-error .activity-group-status {
+  color: var(--danger);
+}
+
+.activity-group-copy {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 7px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.activity-group-copy strong {
+  flex: 0 0 auto;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.activity-group-label {
+  flex: 0 0 auto;
+  color: color-mix(in srgb, currentColor 86%, var(--accent));
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.assistant-activity-group.is-active .activity-group-label {
+  color: color-mix(in srgb, var(--warning) 86%, currentColor);
+}
+
+.assistant-activity-group.is-error .activity-group-label {
+  color: var(--danger);
+}
+
+.activity-group-detail {
+  overflow: hidden;
+  color: var(--muted);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  text-overflow: ellipsis;
+}
+
+.activity-group-count {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.activity-group-chevron {
+  transition: transform 160ms ease;
+}
+
+.assistant-activity-group[open] > summary .activity-group-chevron {
+  transform: rotate(180deg);
+}
+
+.activity-timeline {
+  position: relative;
+  display: grid;
+  padding: 4px 12px 8px 42px;
+}
+
+.activity-timeline::before {
+  position: absolute;
+  top: 15px;
+  bottom: 16px;
+  left: 22px;
+  width: 1px;
+  content: "";
+  background: color-mix(in srgb, var(--line-strong) 58%, transparent);
+}
+
+.activity-timeline > .thinking,
+.activity-timeline > .tools {
+  position: relative;
+  z-index: 0;
+  margin: 0;
+}
+
+.activity-timeline > .thinking > summary,
+.activity-timeline > .tools > summary {
+  position: relative;
+  min-height: 32px;
+  padding: 4px 0;
+  font-size: 12px;
+}
+
+.activity-timeline > .thinking > summary::before,
+.activity-timeline > .thinking > summary::after,
+.activity-timeline > .tools > summary::before,
+.activity-timeline > .tools > summary::after {
+  position: absolute;
+  top: 50%;
+  left: -24px;
+  flex: none;
+  width: 7px;
+  min-width: 7px;
+  height: 7px;
+  content: "";
+  transform: translateY(-50%);
+  border: 2px solid color-mix(in srgb, var(--line-strong) 74%, var(--panel));
+  border-radius: 50%;
+  background: var(--panel);
+}
+
+.activity-timeline > .thinking > summary::after,
+.activity-timeline > .tools > summary::after {
+  display: none;
+}
+
+.activity-timeline > .thinking.is-active > summary::before {
+  border-color: color-mix(in srgb, var(--warning) 74%, var(--panel));
+  background: var(--warning);
+}
+
+.activity-timeline > .thinking > .thinking-body {
+  padding: 3px 0 8px;
+}
+
+.activity-timeline .tool-stack {
+  padding: 2px 0 7px;
 }
 
 .assistant-response {
@@ -3425,6 +3596,20 @@ pre {
 
   .message.user {
     max-width: 90%;
+  }
+
+  .assistant-activity-group > summary {
+    grid-template-columns: 20px minmax(0, 1fr) 14px;
+    row-gap: 1px;
+  }
+
+  .activity-group-detail {
+    display: none;
+  }
+
+  .activity-group-count {
+    grid-row: 2;
+    grid-column: 2;
   }
 
   .composer-wrap {

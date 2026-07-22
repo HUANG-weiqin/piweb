@@ -43,17 +43,26 @@ describe("Message", () => {
     ],
   };
 
-  it("keeps tool details collapsed by default", () => {
+  it("keeps a completed work process collapsed while summarizing its last action", () => {
     const { container } = render(<Message message={toolsMessage} />);
-    const details = container.querySelector("details.tools") as HTMLDetailsElement;
+    const details = container.querySelector("details.assistant-activity-group") as HTMLDetailsElement;
 
     expect(details).toBeTruthy();
     expect(details.open).toBe(false);
+    expect(screen.getByText("工作过程")).toBeInTheDocument();
+    expect(screen.getByText("已完成读取文件")).toBeInTheDocument();
+    expect(container.querySelector(".activity-group-detail"))
+      .toHaveTextContent("src/index.ts");
+    expect(screen.getByText("1 步 · 1 次工具调用")).toBeInTheDocument();
     expect(screen.getByText("工具调用（1）")).toBeInTheDocument();
   });
 
-  it("expands the tool group while keeping each tool independently collapsible", () => {
+  it("expands the work process before its individual tool details", () => {
     const { container } = render(<Message message={toolsMessage} />);
+
+    const activity = container.querySelector("details.assistant-activity-group") as HTMLDetailsElement;
+    fireEvent.click(screen.getByText("工作过程"));
+    expect(activity.open).toBe(true);
 
     const summary = screen.getByText("工具调用（1）") as HTMLElement;
     fireEvent.click(summary);
@@ -78,18 +87,64 @@ describe("Message", () => {
       thinking: "正在检查现有实现。",
       tools: [],
     };
-    const { rerender } = render(
+    const { container, rerender } = render(
       <Message message={message} activeThinking />,
     );
 
     expect(screen.getByRole("status", { name: "Agent 正在思考" })).toBeInTheDocument();
-    expect(screen.getByText("正在思考")).toBeInTheDocument();
+    expect(container.querySelector(".activity-group-label"))
+      .toHaveTextContent("正在思考");
+    expect(container.querySelector(".activity-group-detail"))
+      .toHaveTextContent("正在检查现有实现。");
 
     rerender(<Message message={message} />);
 
     expect(screen.queryByRole("status", { name: "Agent 正在思考" }))
       .not.toBeInTheDocument();
     expect(screen.getByText("思考过程")).toBeInTheDocument();
+  });
+
+  it("shows an active tool in the collapsed work-process summary", () => {
+    const message: ChatMessage = {
+      id: "tool-active",
+      runId: "run-tool-active",
+      role: "assistant",
+      text: "",
+      thinking: "准备读取组件。",
+      tools: [{
+        id: "read-active",
+        name: "read",
+        args: { path: "src/client/components/Message.tsx" },
+        status: "running",
+      }],
+      parts: [
+        { kind: "thinking", text: "准备读取组件。" },
+        { kind: "tool", toolId: "read-active" },
+      ],
+    };
+
+    const { container } = render(<Message message={message} />);
+
+    expect(screen.getByRole("status", { name: "Agent 正在处理" })).toBeInTheDocument();
+    expect(screen.getByText("正在读取文件")).toBeInTheDocument();
+    expect(container.querySelector(".activity-group-detail"))
+      .toHaveTextContent("src/client/components/Message.tsx");
+  });
+
+  it("keeps a thinking preview readable without markdown markers", () => {
+    const message: ChatMessage = {
+      id: "thinking-preview",
+      runId: "run-thinking-preview",
+      role: "assistant",
+      text: "",
+      thinking: "**Planning** `Message.tsx` updates",
+      tools: [],
+    };
+
+    const { container } = render(<Message message={message} />);
+
+    expect(container.querySelector(".activity-group-detail"))
+      .toHaveTextContent("Planning Message.tsx updates");
   });
 
   it("renders thinking content through the sanitized markdown pipeline", () => {
@@ -112,6 +167,7 @@ describe("Message", () => {
     const { container } = render(<Message message={message} />);
     expect(container.querySelector(".thinking-body.markdown")).not.toBeInTheDocument();
 
+    fireEvent.click(screen.getByText("工作过程"));
     fireEvent.click(screen.getByText("思考过程"));
     const thinking = container.querySelector(".thinking-body.markdown") as HTMLElement;
 
@@ -123,6 +179,7 @@ describe("Message", () => {
 
   it("collapses long tool lists and can expand to show all calls", () => {
     render(<Message message={manyToolsMessage} />);
+    fireEvent.click(screen.getByText("工作过程"));
 
     expect(screen.getByText("工具调用（6）")).toBeInTheDocument();
     expect(screen.getByText("已折叠 2 条更早工具调用")).toBeInTheDocument();
@@ -175,13 +232,13 @@ describe("Message", () => {
     expect(Array.from(article.children).map((element) => element.className))
       .toEqual([
         "markdown",
-        "assistant-activity-group",
+        "assistant-activity-group is-complete",
         "markdown",
         "message-actions assistant-message-actions",
       ]);
     const activity = article.querySelector(".assistant-activity-group");
     expect(Array.from(activity?.children ?? []).map((element) => element.className))
-      .toEqual(["thinking", "tools", "thinking", "tools"]);
+      .toEqual(["", "activity-timeline"]);
     expect(screen.getAllByText("工具调用（1）")).toHaveLength(2);
     expect(screen.getByText("先解释。")).toBeInTheDocument();
     expect(screen.getByText("最终回复。")).toBeInTheDocument();

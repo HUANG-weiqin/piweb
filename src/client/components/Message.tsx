@@ -14,7 +14,7 @@ import {
   type ChatMessagePart,
   type ToolItem,
 } from "../chat/reducer";
-import { ToolCard } from "./ToolCard";
+import { ToolCard, toolPresentation } from "./ToolCard";
 
 const TOOL_PREVIEW_LIMIT = 4;
 
@@ -231,6 +231,14 @@ type ActivityRun =
   | { kind: "thinking"; text: string }
   | { kind: "tools"; tools: ToolItem[] };
 
+type ActivityTone = "active" | "complete" | "error";
+
+interface ActivitySummary {
+  tone: ActivityTone;
+  label: string;
+  detail: string;
+}
+
 function findLastIndex<T>(
   items: T[],
   predicate: (item: T) => boolean,
@@ -271,6 +279,82 @@ function activityRuns(
   return runs;
 }
 
+function findLatestTool(
+  runs: ActivityRun[],
+  predicate: (tool: ToolItem) => boolean,
+): ToolItem | undefined {
+  for (let runIndex = runs.length - 1; runIndex >= 0; runIndex -= 1) {
+    const run = runs[runIndex]!;
+    if (run.kind !== "tools") continue;
+    for (let toolIndex = run.tools.length - 1; toolIndex >= 0; toolIndex -= 1) {
+      const tool = run.tools[toolIndex]!;
+      if (predicate(tool)) return tool;
+    }
+  }
+  return undefined;
+}
+
+function thinkingPreview(text: string): string {
+  const preview = text
+    .replace(/(^|\s)#{1,6}\s+/g, "$1")
+    .replace(/(?:\*\*|__|~~|`)/g, "")
+    .replace(/^\s*[-+]\s+/gm, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (preview.length <= 72) return preview;
+  return `${preview.slice(0, 71)}…`;
+}
+
+function activitySummary(
+  runs: ActivityRun[],
+  activeThinking: boolean,
+): ActivitySummary {
+  const latestRun = runs.at(-1);
+  const activeTool = findLatestTool(runs, (tool) => (
+    tool.status === "pending" || tool.status === "running"
+  ));
+  if (activeTool) {
+    const presentation = toolPresentation(activeTool);
+    return {
+      tone: "active",
+      label: `正在${presentation.label}`,
+      detail: presentation.target,
+    };
+  }
+  if (activeThinking && latestRun?.kind === "thinking") {
+    return {
+      tone: "active",
+      label: "正在思考",
+      detail: thinkingPreview(latestRun.text),
+    };
+  }
+  const failedTool = findLatestTool(runs, (tool) => tool.status === "error");
+  if (failedTool) {
+    const presentation = toolPresentation(failedTool);
+    return {
+      tone: "error",
+      label: "工具执行失败",
+      detail: [presentation.label, presentation.target].filter(Boolean).join(" · "),
+    };
+  }
+  if (latestRun?.kind === "tools") {
+    const latestTool = latestRun.tools.at(-1);
+    if (latestTool) {
+      const presentation = toolPresentation(latestTool);
+      return {
+        tone: "complete",
+        label: `已完成${presentation.label}`,
+        detail: presentation.target,
+      };
+    }
+  }
+  return {
+    tone: "complete",
+    label: "已完成思考",
+    detail: latestRun?.kind === "thinking" ? thinkingPreview(latestRun.text) : "",
+  };
+}
+
 function ActivityGroup({
   parts,
   tools,
@@ -281,19 +365,52 @@ function ActivityGroup({
   activeThinking: boolean;
 }) {
   const runs = activityRuns(parts, tools);
+  const summary = activitySummary(runs, activeThinking);
+  const toolCount = tools.length;
   const lastThinkingIndex = findLastIndex(
     runs,
     (run) => run.kind === "thinking",
   );
-  return <section className="assistant-activity-group">
-    {runs.map((run, index) => run.kind === "thinking"
-      ? <ThinkingPanel
-          key={`thinking:${index}`}
-          text={run.text}
-          active={activeThinking && index === lastThinkingIndex}
-        />
-      : <ToolsPanel key={`tools:${index}`} tools={run.tools} />)}
-  </section>;
+  return <details className={`assistant-activity-group is-${summary.tone}`}>
+    <summary>
+      <span
+        className="activity-group-status"
+        role={summary.tone === "active" ? "status" : undefined}
+        aria-label={
+          summary.tone === "active" ? "Agent 正在处理" : undefined
+        }
+      >
+        {summary.tone === "active"
+          ? <span className="thinking-spinner" aria-hidden="true" />
+          : summary.tone === "error"
+            ? <span aria-hidden="true">!</span>
+            : <span aria-hidden="true">✓</span>}
+      </span>
+      <span className="activity-group-copy">
+        <strong>工作过程</strong>
+        <span className="activity-group-label">{summary.label}</span>
+        {summary.detail && <span
+          className="activity-group-detail"
+          title={summary.detail}
+        >
+          {summary.detail}
+        </span>}
+      </span>
+      <span className="activity-group-count">
+        {runs.length} 步 · {toolCount} 次工具调用
+      </span>
+      <span className="activity-group-chevron" aria-hidden="true">⌄</span>
+    </summary>
+    <div className="activity-timeline">
+      {runs.map((run, index) => run.kind === "thinking"
+        ? <ThinkingPanel
+            key={`thinking:${index}`}
+            text={run.text}
+            active={activeThinking && index === lastThinkingIndex}
+          />
+        : <ToolsPanel key={`tools:${index}`} tools={run.tools} />)}
+    </div>
+  </details>;
 }
 
 const MarkdownBlock = memo(function MarkdownBlock({ text }: { text: string }) {

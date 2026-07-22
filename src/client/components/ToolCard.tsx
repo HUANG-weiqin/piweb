@@ -113,61 +113,65 @@ function stringField(record: ToolRecord | undefined, key: string): string {
   return typeof value === "string" ? value : "";
 }
 
-function toolPresentation(name: string, args: ToolRecord | undefined): {
+export function toolPresentation({
+  name,
+  args,
+}: Pick<ToolItem, "name" | "args">): {
   label: string;
   target: string;
 } {
+  const record = asRecord(args);
   switch (name) {
     case "read":
-      return { label: "读取文件", target: stringField(args, "path") };
+      return { label: "读取文件", target: stringField(record, "path") };
     case "bash":
-      return { label: "运行命令", target: stringField(args, "command") };
+      return { label: "运行命令", target: stringField(record, "command") };
     case "edit":
-      return { label: "编辑文件", target: stringField(args, "path") };
+      return { label: "编辑文件", target: stringField(record, "path") };
     case "write":
-      return { label: "写入文件", target: stringField(args, "path") };
+      return { label: "写入文件", target: stringField(record, "path") };
     case "grep": {
-      const pattern = stringField(args, "pattern");
-      const path = stringField(args, "path");
+      const pattern = stringField(record, "pattern");
+      const path = stringField(record, "path");
       return {
         label: "搜索文本",
         target: [pattern && `“${pattern}”`, path].filter(Boolean).join(" · "),
       };
     }
     case "find": {
-      const pattern = stringField(args, "pattern");
-      const path = stringField(args, "path");
+      const pattern = stringField(record, "pattern");
+      const path = stringField(record, "path");
       return {
         label: "查找文件",
         target: [pattern, path].filter(Boolean).join(" · "),
       };
     }
     case "ls":
-      return { label: "浏览目录", target: stringField(args, "path") || "当前目录" };
+      return { label: "浏览目录", target: stringField(record, "path") || "当前目录" };
     case "list_roles":
       return { label: "查看角色", target: "可选 Agent 角色" };
     case "list_sessions":
       return {
         label: "查看会话",
-        target: args?.scope === "created_by_me" ? "我创建的会话" : "项目会话",
+        target: record?.scope === "created_by_me" ? "我创建的会话" : "项目会话",
       };
     case "current_session":
       return { label: "查看当前会话", target: "自身会话信息" };
     case "peek_session":
-      return { label: "查看会话消息", target: stringField(args, "conversationId") };
+      return { label: "查看会话消息", target: stringField(record, "conversationId") };
     case "start_session":
       return {
         label: "启动 Agent 会话",
-        target: stringField(args, "title") || stringField(args, "roleId"),
+        target: stringField(record, "title") || stringField(record, "roleId"),
       };
     case "send_session_message":
-      return { label: "发送会话消息", target: stringField(args, "conversationId") };
+      return { label: "发送会话消息", target: stringField(record, "conversationId") };
     case "wait_for_session":
-      return { label: "等待 Agent 会话", target: stringField(args, "conversationId") };
+      return { label: "等待 Agent 会话", target: stringField(record, "conversationId") };
     case "abort_session":
-      return { label: "终止 Agent 会话", target: stringField(args, "conversationId") };
+      return { label: "终止 Agent 会话", target: stringField(record, "conversationId") };
     case "delete_session":
-      return { label: "删除 Agent 会话", target: stringField(args, "conversationId") };
+      return { label: "删除 Agent 会话", target: stringField(record, "conversationId") };
     default:
       return { label: name.replaceAll("_", " "), target: "" };
   }
@@ -308,8 +312,7 @@ function ToolResult({ name, result }: { name: string; result: unknown }) {
 }
 
 export function ToolCard({ tool }: { tool: ToolItem }) {
-  const args = asRecord(tool.args);
-  const presentation = toolPresentation(tool.name, args);
+  const presentation = toolPresentation(tool);
   const status = statusLabel(tool.status);
   const isActive = tool.status === "pending" || tool.status === "running";
 
