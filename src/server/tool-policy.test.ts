@@ -13,6 +13,14 @@ describe("defaultToolPolicy", () => {
     },
   );
 
+  it("allows only the host-owned Git inspector in read-only mode", () => {
+    expect(defaultToolPolicy({
+      mode: "read_only",
+      toolName: "git_inspect",
+      toolSource: "sdk",
+    })).toEqual({ action: "allow" });
+  });
+
   it.each([
     ["bash", "builtin"],
     ["write", "builtin"],
@@ -22,6 +30,10 @@ describe("defaultToolPolicy", () => {
     ["find", "project"],
     ["ls", "extension"],
     ["custom", "unknown"],
+    ["git_inspect", "builtin"],
+    ["git_inspect", "project"],
+    ["git_inspect", "extension"],
+    ["git_inspect", "unknown"],
   ])(
     "denies %s from %s in read-only mode",
     (toolName, toolSource) => {

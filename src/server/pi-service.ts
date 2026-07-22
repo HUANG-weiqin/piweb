@@ -30,6 +30,7 @@ import {
 import type { ConversationActor } from "./conversation-actor.js";
 import { validateCwd } from "./cwd.js";
 import { ExtensionUIBroker } from "./extension-ui.js";
+import { createGitInspectTool } from "./git-inspect.js";
 import {
   PiRuntime,
   type CreatedPiSession,
@@ -363,6 +364,8 @@ export class PiConnection {
       if (this.disposed || generation !== this.generation || signal.aborted) return;
       created = await this.runtime.createSession(project.cwd, {
         sessionManager: selected.sessionManager,
+        toolMode: initialMode,
+        workbenchCustomTools: [createGitInspectTool(project.cwd)],
         extensionUI: this.extensionUI.context({
           sessionId,
           generation,

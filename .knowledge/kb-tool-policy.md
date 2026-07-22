@@ -1,15 +1,17 @@
 # 工具权限
 
-`updated: 2026-07-21`
+`updated: 2026-07-22`
 
 ## 这个模块是干什么的
 
-工具权限层在 Pi 项目扩展完成参数变换之后、真实工具副作用之前做服务端 allow/deny 决策。它用于减少误操作，不是进程、文件系统或网络 sandbox。
+工具权限层先按 conversation 角色把有效工具集投影给模型，再在 Pi 项目扩展完成参数变换之后、真实工具副作用之前做服务端 allow/deny 决策。它用于减少误操作，不是进程、文件系统或网络 sandbox。
 
 ## 核心循环
 
 ```text
-SDK validated args
+conversation role snapshot
+→ SDK tool-name ceiling + provenance projection
+→ model tools / system prompt
 → project extension tool_call hook
 → stable JSON validation + recursive freeze
 → workbench ToolPolicy
@@ -29,14 +31,20 @@ SDK validated args
 ## 策略
 
 - `full_access` 允许所有工具和命令，不区分来源或目标位置；项目外路径和 `.piweb` 也不额外拦截。
-- `read_only` 只允许 `source=builtin` 的 Pi 原生 `read / grep / find / ls`。
-- `read_only` 直接拒绝 `bash / edit / write / unknown`、扩展工具以及工作台 meta 工具。
-- 扩展可以用 `read` 等名称覆盖内置工具；策略必须同时检查最终 `toolName` 和 SDK `ToolInfo.sourceInfo.source`，不能只按名称放行。
+- `read_only` 对模型只展示 `source=builtin` 的 Pi 原生 `read / grep / find / ls` 和 `source=sdk` 的宿主 `git_inspect`；`bash / edit / write`、meta 和其他扩展工具不进入有效 registry、model tools 或 system prompt。
+- 执行 gate 独立重复同一 identity 约束；`read_only` 直接拒绝命令、写入、unknown、工作台 meta，以及同名 extension/project 工具。工具不可见不是权限边界，硬拒绝仍不可删除。
+- 扩展可以用 `read` 等名称覆盖内置工具；策略必须同时检查最终 `toolName` 和 SDK `ToolInfo.sourceInfo.source`，不能只按名称放行。PiRuntime 对每次 `setActiveToolsByName`（包括 extension refresh 和 `setActiveTools`）重新做 source-aware 投影，同名覆盖发生后宁可移除该工具，也不把扩展 schema/snippet 暴露给只读模型。
 - Agent 的 `read_only` 只限制经过 Pi 工具入口的调用；工作台宿主仍会写 manifest 和 transcript。
+
+## Git 浅层投影
+
+`git_inspect` 只有结构化 `status` 和 `diff(worktree | staged | all)`，可选 path 必须是 canonical project cwd 内的相对路径。宿主构造固定 argv，使用项目外解析出的绝对 Git executable、`shell:false`、同一次调用 deadline、AbortSignal，以及 stdout/stderr 共享的 50 KiB / 2000 行预算。
+
+Git 的“只读子命令”仍可能经 pager、external diff、textconv、content filter 或 fsmonitor 执行程序。主命令因此不读取真实 Git 配置：宿主先用固定 `rev-parse` 捕获并校验 repository top、git dir、index、objects、object format 和 HEAD，再为该次调用创建只含宿主 config/HEAD 的临时 synthetic `GIT_DIR`；work tree、index 和 object directory 显式绑定真实只读输入，global/system config 指向临时空文件，继承的 `GIT_*` 全部先删除。临时目录没有 `commondir`、hooks 或 info 链接，并在所有完成/失败路径清理。输出可能因未继承 `core.autocrlf/filemode/ignorecase`、sparse 和 info exclude 而比原生 Git 更嘈杂，这是关闭执行入口的保守代价。
 
 ## Agent 编排工具
 
-每个 ConversationActor 注入 9 个宿主 meta 工具：
+每个 ConversationActor 注入 `git_inspect` 和 9 个宿主 meta 工具：
 
 ```text
 list_roles / list_sessions / current_session / peek_session
@@ -78,6 +86,7 @@ abort_session / delete_session
 - `src/server/conversation-actor.ts`
 - `src/server/project-session-coordinator.ts`
 - `src/server/meta-tools.ts`
+- `src/server/git-inspect.ts`
 - `src/server/project-run-coordinator.ts`
 - `src/shared/protocol.ts`
 - 对应的 `*.test.ts`

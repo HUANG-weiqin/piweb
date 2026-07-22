@@ -908,11 +908,12 @@ describe("ProjectSessionCoordinator", () => {
     expect(fixture.runtime.createOptions.get(first.conversationId)).toMatchObject({
       roleSystemPrompt: "Review the first revision.",
       model: { provider: "test", id: "model-a" },
+      toolMode: "read_only",
     });
     expect(
       fixture.runtime.createOptions.get(first.conversationId)
-        ?.workbenchCustomTools,
-    ).toEqual([]);
+        ?.workbenchCustomTools?.map(({ name }) => name),
+    ).toEqual(["git_inspect"]);
     expect(second.profile.role).toMatchObject({
       revision: 2,
       name: "Senior reviewer",
@@ -920,10 +921,14 @@ describe("ProjectSessionCoordinator", () => {
       model: { provider: "test", id: "model-b" },
       canManageSessions: true,
     });
+    expect(fixture.runtime.createOptions.get(second.conversationId)).toMatchObject({
+      toolMode: "full_access",
+    });
     expect(
       fixture.runtime.createOptions.get(second.conversationId)
         ?.workbenchCustomTools?.map(({ name }) => name),
     ).toEqual([
+      "git_inspect",
       "list_roles",
       "list_sessions",
       "current_session",

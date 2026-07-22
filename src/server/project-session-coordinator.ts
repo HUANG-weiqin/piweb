@@ -33,6 +33,7 @@ import {
   projectAgentConversationPeek,
   projectConversationItemsSnapshot,
 } from "./conversation-history.js";
+import { createGitInspectTool } from "./git-inspect.js";
 import {
   createMetaTools,
   type MetaToolService,
@@ -1641,12 +1642,16 @@ export class ProjectSessionCoordinator {
       model: { ...profile.role.model },
       thinkingLevel: profile.role.defaultThinkingLevel,
       roleSystemPrompt: profile.role.systemPrompt,
+      toolMode: profile.role.toolMode,
       extensionUI: this.extensionUIRouter(context, conversationId).ui,
-      workbenchCustomTools: createMetaTools(
-        conversationId,
-        this.metaService(context),
-        profile.role.canManageSessions,
-      ),
+      workbenchCustomTools: [
+        createGitInspectTool(context.project.cwd),
+        ...createMetaTools(
+          conversationId,
+          this.metaService(context),
+          profile.role.canManageSessions,
+        ),
+      ],
     };
   }
 

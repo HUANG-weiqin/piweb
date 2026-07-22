@@ -59,6 +59,16 @@ function workbenchTool(cwd: string, name = "workbench_meta") {
   };
 }
 
+function shadowReadTool(cwd: string, name: string, marker: string) {
+  return {
+    ...createReadTool(cwd),
+    name,
+    label: `shadowed ${name}`,
+    promptSnippet: marker,
+    promptGuidelines: [marker],
+  };
+}
+
 function testRuntime(
   extensionsFor: (cwd: string) => InlineExtension[],
   afterCreate?: (
@@ -184,6 +194,102 @@ describe("PiRuntime session ownership", () => {
       "write",
     ]));
     await created.dispose();
+  });
+
+  it("projects only safe native and host tools for read-only sessions", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-read-only-tools-"));
+    const runtime = testRuntime(() => [
+      (pi) => {
+        const originalRead = createReadTool(cwd);
+        pi.registerTool({
+          name: "extension_only",
+          label: "extension only",
+          description: originalRead.description,
+          parameters: originalRead.parameters,
+          execute: (toolCallId, params, signal, onUpdate) => (
+            originalRead.execute(toolCallId, params, signal, onUpdate)
+          ),
+        });
+      },
+    ]);
+
+    const created = await runtime.createSession(cwd, {
+      toolMode: "read_only",
+      workbenchCustomTools: [
+        workbenchTool(cwd, "git_inspect"),
+        workbenchTool(cwd, "list_sessions"),
+      ],
+    });
+
+    const allTools = created.session.getAllTools();
+    const expectedToolNames = new Set([
+      "read",
+      "grep",
+      "find",
+      "ls",
+      "git_inspect",
+    ]);
+    expect(new Set(created.session.getActiveToolNames())).toEqual(expectedToolNames);
+    expect(new Set(allTools.map((tool) => tool.name))).toEqual(expectedToolNames);
+    expect(allTools.find((tool) => tool.name === "read")?.sourceInfo.source)
+      .toBe("builtin");
+    expect(allTools.find((tool) => tool.name === "git_inspect")?.sourceInfo.source)
+      .toBe("sdk");
+    await created.dispose();
+  });
+
+  it("keeps read-only projection across extension tool refreshes", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-dynamic-read-only-tools-"));
+    const staticMarker = "STATIC_SHADOW_TOOL_MARKER";
+    const startMarker = "SESSION_START_SHADOW_TOOL_MARKER";
+    const dynamicMarker = "DYNAMIC_SHADOW_TOOL_MARKER";
+    const shutdownMarker = "SHUTDOWN_SHADOW_TOOL_MARKER";
+    let extensionApi: ExtensionAPI | undefined;
+    let sessionStarted = false;
+    let shutdownActiveTools: string[] | undefined;
+    let shutdownSystemPrompt: string | undefined;
+    const runtime = testRuntime(() => [
+      (pi) => {
+        extensionApi = pi;
+        pi.registerTool(shadowReadTool(cwd, "find", staticMarker));
+        pi.on("session_start", () => {
+          sessionStarted = true;
+          pi.registerTool(shadowReadTool(cwd, "read", startMarker));
+          pi.setActiveTools(["read", "find", "grep", "ls", "git_inspect"]);
+        });
+        pi.on("session_shutdown", (_event, context) => {
+          pi.registerTool(shadowReadTool(cwd, "ls", shutdownMarker));
+          pi.setActiveTools(["read", "find", "grep", "ls", "git_inspect"]);
+          shutdownActiveTools = pi.getActiveTools();
+          shutdownSystemPrompt = context.getSystemPrompt();
+        });
+      },
+    ]);
+
+    const created = await runtime.createSession(cwd, {
+      toolMode: "read_only",
+      workbenchCustomTools: [workbenchTool(cwd, "git_inspect")],
+    });
+    expect(created.session.getActiveToolNames()).not.toContain("find");
+    expect(created.session.systemPrompt).not.toContain(staticMarker);
+
+    await created.activateExtensions();
+    expect(sessionStarted).toBe(true);
+    expect(created.session.getActiveToolNames()).not.toContain("read");
+    expect(created.session.getActiveToolNames()).not.toContain("find");
+    expect(created.session.systemPrompt).not.toContain(staticMarker);
+    expect(created.session.systemPrompt).not.toContain(startMarker);
+
+    extensionApi?.registerTool(shadowReadTool(cwd, "grep", dynamicMarker));
+    extensionApi?.setActiveTools(["read", "find", "grep", "ls", "git_inspect"]);
+    expect(created.session.getActiveToolNames()).toEqual(["ls", "git_inspect"]);
+    expect(created.session.systemPrompt).not.toContain(dynamicMarker);
+
+    const projectedSetter = created.session.setActiveToolsByName;
+    await created.dispose();
+    expect(shutdownActiveTools).toEqual(["git_inspect"]);
+    expect(shutdownSystemPrompt).not.toContain(shutdownMarker);
+    expect(created.session.setActiveToolsByName).not.toBe(projectedSetter);
   });
 
   it("reports an extension that shadows read as a non-builtin tool", async () => {

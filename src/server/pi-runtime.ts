@@ -17,6 +17,7 @@ import {
   type ExtensionUIContext,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import type { ToolMode } from "../shared/protocol.js";
 import type { PortableExtensionUI } from "./extension-ui.js";
 import {
   type AgentTurnBoundaryCheck,
@@ -28,8 +29,46 @@ import {
   installCompactionThinkingOverride,
 } from "./compaction-thinking.js";
 import { SerialTaskQueue } from "./serial-task-queue.js";
+import {
+  isReadOnlyToolIdentity,
+  READ_ONLY_TOOL_NAME_CEILING,
+} from "./tool-policy.js";
 
 type SessionFactory = (options: CreateAgentSessionOptions) => Promise<CreateAgentSessionResult>;
+
+interface ToolProjectionAdapter {
+  dispose(): void;
+}
+
+function installReadOnlyToolProjection(
+  session: AgentSession,
+): ToolProjectionAdapter {
+  const nativeSetActiveTools = session.setActiveToolsByName;
+  const projectedSetActiveTools: AgentSession["setActiveToolsByName"] = (toolNames) => {
+    const allowedNames = new Set(
+      session.getAllTools()
+        .filter((tool) => isReadOnlyToolIdentity(
+          tool.name,
+          tool.sourceInfo.source,
+        ))
+        .map((tool) => tool.name),
+    );
+    nativeSetActiveTools.call(
+      session,
+      toolNames.filter((toolName) => allowedNames.has(toolName)),
+    );
+  };
+  session.setActiveToolsByName = projectedSetActiveTools;
+  projectedSetActiveTools(session.getActiveToolNames());
+
+  return {
+    dispose(): void {
+      if (session.setActiveToolsByName === projectedSetActiveTools) {
+        session.setActiveToolsByName = nativeSetActiveTools;
+      }
+    },
+  };
+}
 
 export interface ToolCallGateInput {
   toolCallId: string;
@@ -55,6 +94,7 @@ export interface CreatePiSessionOptions {
   thinkingLevel?: CreateAgentSessionOptions["thinkingLevel"];
   roleSystemPrompt?: string;
   workbenchCustomTools?: ToolDefinition[];
+  toolMode?: ToolMode;
   turnBoundaryCheck?: (input: AgentTurnBoundaryCheck) => boolean;
 }
 
@@ -368,6 +408,10 @@ export class PiRuntime implements PiRuntimeLike {
       : undefined;
     const roleSystemPrompt = options.roleSystemPrompt;
     const workbenchCustomTools = options.workbenchCustomTools;
+    const readOnlyToolProjection = options.toolMode === "read_only";
+    const allowedToolNames = readOnlyToolProjection
+      ? [...READ_ONLY_TOOL_NAME_CEILING]
+      : undefined;
     const owner = new SessionModelRegistry(
       this.authStorage,
       this.createModelRegistry,
@@ -377,10 +421,11 @@ export class PiRuntime implements PiRuntimeLike {
     let settings: SettingsManager;
     let created: CreateAgentSessionResult;
     let createdSession: AgentSession | undefined;
+    let toolProjectionAdapter: ToolProjectionAdapter | undefined;
     let turnBoundaryController: AgentTurnBoundaryController | undefined;
     let compactionThinkingOverride: CompactionThinkingOverride | undefined;
     let pendingExtensionErrors: ExtensionError[];
-    const disposeSessionAdapters = (): void => {
+    const disposePreTeardownAdapters = (): void => {
       const failures: unknown[] = [];
       try {
         turnBoundaryController?.dispose();
@@ -393,7 +438,7 @@ export class PiRuntime implements PiRuntimeLike {
         failures.push(error);
       }
       if (failures.length > 0) {
-        throw new AggregateError(failures, "Failed to dispose session adapters");
+        throw new AggregateError(failures, "Failed to dispose pre-teardown adapters");
       }
     };
     try {
@@ -412,6 +457,7 @@ export class PiRuntime implements PiRuntimeLike {
           model: fixedModel,
           thinkingLevel: options.thinkingLevel,
           customTools: workbenchCustomTools,
+          tools: allowedToolNames,
         });
       } else {
         const services = await this.servicesFactory({
@@ -446,18 +492,30 @@ export class PiRuntime implements PiRuntimeLike {
           model: fixedModel,
           thinkingLevel: options.thinkingLevel,
           customTools: workbenchCustomTools,
+          tools: allowedToolNames,
         });
       }
       createdSession = created.session;
-      createdSession.setActiveToolsByName([
-        ...new Set([
-          ...createdSession.getActiveToolNames(),
-          "grep",
-          "find",
-          "ls",
-          ...(workbenchCustomTools?.map((tool) => tool.name) ?? []),
-        ]),
-      ]);
+      if (readOnlyToolProjection) {
+        toolProjectionAdapter = installReadOnlyToolProjection(createdSession);
+      }
+      const projectedToolNames = readOnlyToolProjection
+        ? createdSession.getAllTools()
+          .filter((tool) => isReadOnlyToolIdentity(
+            tool.name,
+            tool.sourceInfo.source,
+          ))
+          .map((tool) => tool.name)
+        : [
+            ...new Set([
+              ...createdSession.getActiveToolNames(),
+              "grep",
+              "find",
+              "ls",
+              ...(workbenchCustomTools?.map((tool) => tool.name) ?? []),
+            ]),
+          ];
+      createdSession.setActiveToolsByName(projectedToolNames);
       owner.bindSession(createdSession);
       if (
         fixedModelReference
@@ -479,7 +537,27 @@ export class PiRuntime implements PiRuntimeLike {
         );
       }
       const activeToolNames = new Set(createdSession.getActiveToolNames());
-      const inactiveWorkbenchTool = workbenchCustomTools?.find(
+      if (readOnlyToolProjection) {
+        const toolInfoByName = new Map(
+          createdSession.getAllTools().map((tool) => [tool.name, tool]),
+        );
+        const unsafeActiveTool = [...activeToolNames].find((toolName) => {
+          const tool = toolInfoByName.get(toolName);
+          return !tool || !isReadOnlyToolIdentity(
+            tool.name,
+            tool.sourceInfo.source,
+          );
+        });
+        if (unsafeActiveTool) {
+          throw new Error(
+            `Pi session exposed unsafe read-only tool "${unsafeActiveTool}"`,
+          );
+        }
+      }
+      const expectedWorkbenchTools = readOnlyToolProjection
+        ? workbenchCustomTools?.filter((tool) => tool.name === "git_inspect")
+        : workbenchCustomTools;
+      const inactiveWorkbenchTool = expectedWorkbenchTools?.find(
         (tool) => !activeToolNames.has(tool.name),
       );
       if (inactiveWorkbenchTool) {
@@ -515,15 +593,24 @@ export class PiRuntime implements PiRuntimeLike {
     } catch (error) {
       const failures: unknown[] = [error];
       try {
-        disposeSessionAdapters();
+        disposePreTeardownAdapters();
       } catch (cleanupError) {
         failures.push(cleanupError);
       }
       if (createdSession) {
+        let teardownSucceeded = false;
         try {
           await this.teardownAgentSession(createdSession, false);
+          teardownSucceeded = true;
         } catch (teardownError) {
           failures.push(teardownError);
+        }
+        if (teardownSucceeded) {
+          try {
+            toolProjectionAdapter?.dispose();
+          } catch (cleanupError) {
+            failures.push(cleanupError);
+          }
         }
       }
       this.sessionRegistries.delete(owner);
@@ -540,7 +627,8 @@ export class PiRuntime implements PiRuntimeLike {
       session,
       owner,
       () => activationAttempted,
-      disposeSessionAdapters,
+      disposePreTeardownAdapters,
+      () => toolProjectionAdapter?.dispose(),
     );
     let activationPromise: Promise<void> | undefined;
 
@@ -734,6 +822,7 @@ export class PiRuntime implements PiRuntimeLike {
     owner: SessionModelRegistry,
     shouldEmitShutdown: () => boolean,
     beforeTeardown?: () => void,
+    afterTeardown?: () => void,
   ): () => Promise<void> {
     let disposePromise: Promise<void> | undefined;
     return () => {
@@ -744,10 +833,19 @@ export class PiRuntime implements PiRuntimeLike {
         } catch (error) {
           failures.push(error);
         }
+        let teardownSucceeded = false;
         try {
           await this.teardownAgentSession(session, shouldEmitShutdown());
+          teardownSucceeded = true;
         } catch (error) {
           failures.push(error);
+        }
+        if (teardownSucceeded) {
+          try {
+            afterTeardown?.();
+          } catch (error) {
+            failures.push(error);
+          }
         }
         this.sessionRegistries.delete(owner);
         if (failures.length > 0) {
