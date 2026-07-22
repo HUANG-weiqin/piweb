@@ -63,54 +63,28 @@ export function ConversationRoleDialog({
       className="modal conversation-role-dialog"
       role="dialog"
       aria-modal="true"
-      aria-label="会话角色"
+      aria-label="更换会话角色"
       tabIndex={-1}
     >
       <header className="modal-header">
         <div>
-          <p className="eyebrow">CONVERSATION ROLE</p>
-          <h2>{role.name}</h2>
-          <p>会话空闲时可从角色模板应用新的角色快照。</p>
+          <p className="eyebrow">SWITCH ROLE</p>
+          <h2>更换会话角色</h2>
         </div>
         <button
           type="button"
           className="icon-button"
-          aria-label="关闭会话角色详情"
+          aria-label="关闭"
           onClick={onClose}
         >
           ×
         </button>
       </header>
 
-      <dl className="conversation-role-details">
-        <div>
-          <dt>简介</dt>
-          <dd>{role.description || "暂无角色简介"}</dd>
-        </div>
-        <div>
-          <dt>模型</dt>
-          <dd>{role.model.id}</dd>
-        </div>
-        <div>
-          <dt>模板版本</dt>
-          <dd>修订 {role.revision}</dd>
-        </div>
-        <div>
-          <dt>会话管理</dt>
-          <dd>{role.canManageSessions ? "允许" : "不允许"}</dd>
-        </div>
-        <div>
-          <dt>工具权限</dt>
-          <dd>{role.toolMode === "full_access" ? "全部授权" : "只读"}</dd>
-        </div>
-        <div>
-          <dt>专属提示词</dt>
-          <dd className="role-prompt-preview">{role.systemPrompt || "未设置专属提示词"}</dd>
-        </div>
-      </dl>
-
       <div className="conversation-role-switch">
-        <label htmlFor="conversation-role-select">更换角色</label>
+        <label htmlFor="conversation-role-select">
+          当前角色：{role.name} · {role.model.id}
+        </label>
         <select
           id="conversation-role-select"
           aria-label="选择新的会话角色"
@@ -144,7 +118,7 @@ export function ConversationRoleDialog({
       </div>
 
       <button type="button" className="ghost" onClick={onClose}>
-        关闭
+        取消
       </button>
     </section>
   </div>;

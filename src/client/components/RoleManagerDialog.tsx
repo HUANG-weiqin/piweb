@@ -411,10 +411,13 @@ export function RoleManagerDialog({
               id="role-tool-mode"
               value={draft.toolMode}
               disabled={operationBusy}
-              onChange={(event) => updateDraft(
-                "toolMode",
-                event.target.value as RoleDraft["toolMode"],
-              )}
+              onChange={(event) => {
+                const mode = event.target.value as RoleDraft["toolMode"];
+                updateDraft("toolMode", mode);
+                if (mode === "read_only") {
+                  updateDraft("canManageSessions", false);
+                }
+              }}
             >
               <option value="read_only">只读</option>
               <option value="full_access">全部授权</option>
@@ -428,13 +431,15 @@ export function RoleManagerDialog({
               <strong>允许管理会话</strong>
               <small>
                 开启后可查看和控制项目中的其他会话；关闭后不会向此角色提供任何会话管理工具。
+                {draft.toolMode === "read_only" &&
+                  " 只读模式下不提供角色控制工具，已自动禁用。"}
               </small>
             </span>
             <input
               type="checkbox"
               role="switch"
               checked={draft.canManageSessions}
-              disabled={operationBusy}
+              disabled={operationBusy || draft.toolMode === "read_only"}
               onChange={(event) =>
                 updateDraft("canManageSessions", event.target.checked)}
             />

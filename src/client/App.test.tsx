@@ -870,7 +870,8 @@ describe("App", () => {
     });
 
     expect(screen.getByText("会话角色已更换")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Builder" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查看会话角色 Builder" }))
+      .toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
       .toBeEnabled();
   });

@@ -837,9 +837,10 @@ describe("Chat", () => {
       name: "查看会话角色 Reviewer",
     }));
 
-    expect(screen.getByRole("dialog", { name: "会话角色" }))
-      .toHaveTextContent("Review exact evidence.");
-    expect(screen.getByText("更换角色")).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "更换会话角色" }))
+      .toHaveTextContent("当前角色：Reviewer");
+    expect(screen.getByRole("combobox", { name: "选择新的会话角色" }))
+      .toBeInTheDocument();
   });
 
   it("orders role and thinking before a unified context management group", () => {

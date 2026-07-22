@@ -30,7 +30,7 @@ const roles = [{
 }];
 
 describe("ConversationRoleDialog", () => {
-  it("shows the complete role snapshot and disables reapplying the same revision", () => {
+  it("shows the current role and disables reapplying the same revision", () => {
     render(<ConversationRoleDialog
       open
       role={role}
@@ -41,14 +41,9 @@ describe("ConversationRoleDialog", () => {
       onClose={() => undefined}
     />);
 
-    expect(screen.getByRole("dialog", { name: "会话角色" })).toHaveTextContent("Reviewer");
-    expect(screen.getByText("Reviews risky changes")).toBeInTheDocument();
-    expect(screen.getByText("Inspect the exact diff before drawing conclusions."))
-      .toBeInTheDocument();
-    expect(screen.getByText("gpt-5")).toBeInTheDocument();
-    expect(screen.queryByText(/openai \//)).not.toBeInTheDocument();
-    expect(screen.getByText("修订 7")).toBeInTheDocument();
-    expect(screen.getByText("允许")).toBeInTheDocument();
+    const dialog = screen.getByRole("dialog", { name: "更换会话角色" });
+    expect(dialog).toHaveTextContent("Reviewer");
+    expect(dialog).toHaveTextContent("gpt-5");
     expect(screen.getByRole("button", { name: "应用角色" })).toBeDisabled();
   });
 
@@ -92,7 +87,7 @@ describe("ConversationRoleDialog", () => {
       onClose={close}
     />);
 
-    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
     expect(close).toHaveBeenCalledOnce();
 
     view.rerender(<ConversationRoleDialog
@@ -104,7 +99,7 @@ describe("ConversationRoleDialog", () => {
       onSwitch={() => true}
       onClose={close}
     />);
-    expect(screen.queryByRole("dialog", { name: "会话角色" }))
+    expect(screen.queryByRole("dialog", { name: "更换会话角色" }))
       .not.toBeInTheDocument();
   });
 });
