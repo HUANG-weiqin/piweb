@@ -23,6 +23,10 @@ import {
   type AgentTurnBoundaryController,
   installAgentTurnBoundaryCheck,
 } from "./agent-turn-boundary.js";
+import {
+  type CompactionThinkingOverride,
+  installCompactionThinkingOverride,
+} from "./compaction-thinking.js";
 import { SerialTaskQueue } from "./serial-task-queue.js";
 
 type SessionFactory = (options: CreateAgentSessionOptions) => Promise<CreateAgentSessionResult>;
@@ -374,7 +378,24 @@ export class PiRuntime implements PiRuntimeLike {
     let created: CreateAgentSessionResult;
     let createdSession: AgentSession | undefined;
     let turnBoundaryController: AgentTurnBoundaryController | undefined;
+    let compactionThinkingOverride: CompactionThinkingOverride | undefined;
     let pendingExtensionErrors: ExtensionError[];
+    const disposeSessionAdapters = (): void => {
+      const failures: unknown[] = [];
+      try {
+        turnBoundaryController?.dispose();
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
+        compactionThinkingOverride?.dispose();
+      } catch (error) {
+        failures.push(error);
+      }
+      if (failures.length > 0) {
+        throw new AggregateError(failures, "Failed to dispose session adapters");
+      }
+    };
     try {
       settings = this.createSettings(cwd);
       const sessionManager = options.sessionManager ?? SessionManager.inMemory(cwd);
@@ -475,6 +496,7 @@ export class PiRuntime implements PiRuntimeLike {
           options.turnBoundaryCheck,
         );
       }
+      compactionThinkingOverride = installCompactionThinkingOverride(createdSession);
 
       const startupProviderErrors = owner.takeStartupProviderErrors();
       if (startupProviderErrors.length > 0) {
@@ -493,7 +515,7 @@ export class PiRuntime implements PiRuntimeLike {
     } catch (error) {
       const failures: unknown[] = [error];
       try {
-        turnBoundaryController?.dispose();
+        disposeSessionAdapters();
       } catch (cleanupError) {
         failures.push(cleanupError);
       }
@@ -518,7 +540,7 @@ export class PiRuntime implements PiRuntimeLike {
       session,
       owner,
       () => activationAttempted,
-      () => turnBoundaryController?.dispose(),
+      disposeSessionAdapters,
     );
     let activationPromise: Promise<void> | undefined;
 
