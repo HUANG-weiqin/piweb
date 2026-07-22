@@ -476,6 +476,23 @@ describe("conversation reserved entries", () => {
       kind: "meta_operation",
       entry: operation,
     });
+    const resume = {
+      customType: "piweb.compaction_resume.v1",
+      content:
+        "Continue the unfinished task from the retained context.",
+      display: false,
+      details: { runId: randomUUID() },
+    };
+    expect(parseReservedConversationEntry(resume)).toEqual({
+      kind: "compaction_resume",
+      entry: resume,
+    });
+    expect(aggregateReservedConversationEntries([
+      resume,
+    ])).toMatchObject({
+      deliveredMessageIds: [],
+      runSettlements: [],
+    });
     expect(parseReservedConversationEntry({
       customType: "extension.state",
       data: {},

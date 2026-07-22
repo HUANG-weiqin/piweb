@@ -483,6 +483,7 @@ export function projectConversationItems(
       || reserved.kind === "run_settlement"
       || reserved.kind === "meta_operation"
       || reserved.kind === "compaction_threshold"
+      || reserved.kind === "compaction_resume"
     ) {
       continue;
     }

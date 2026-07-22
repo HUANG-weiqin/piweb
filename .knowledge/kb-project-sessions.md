@@ -1,6 +1,6 @@
 # 项目与持久会话
 
-`updated: 2026-07-21`
+`updated: 2026-07-22`
 
 ## 这个模块是干什么的
 
@@ -103,6 +103,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 - `piweb.run_settlement.v1`：精确 run outcome、final text 与临时回传报告标记；
 - `piweb.meta_operation.v1`：破坏性 meta 工具的 started/completed 幂等状态；
 - `piweb.compaction_threshold.v1`：当前会话 20%–90% 的自动压缩阈值，缺省为 70%，最后一条单调时间记录生效。
+- `piweb.compaction_resume.v1`：压缩后继续同一 workbench run 的隐藏 `custom_message`，必须 `display=false` 且只携带合法 `runId`，只校验不投影为卡片或 settlement。
 
 这些类型由宿主拥有。重复 profile、冲突 settlement、方向变化、未知 `piweb.*` 类型或畸形 payload 都 fail closed。卡片以同 `cardId` 的最后状态投影；其来源/目标/正文/委派身份/request fingerprint/冻结角色不可变化，状态和时间只能单调前进，runId 一旦出现即固定，terminal outcome/result 不可改写。settlement 单调从未报告推进到已报告。
 

@@ -18,6 +18,7 @@ import {
   aggregateReservedConversationEntries,
   appendReservedCustomEntry,
   createCompactionThresholdEntry,
+  createCompactionResumeEntry,
   createConversationMetaEntry,
   createConversationMessageEntry,
   createConversationRoleChangeEntry,
@@ -157,7 +158,6 @@ export interface ConversationWaitingTarget {
 }
 
 const RUN_OWNERSHIP = Symbol("ConversationActor.runOwnership");
-const COMPACTION_RESUME_CUSTOM_TYPE = "piweb.compaction_resume.v1";
 
 /**
  * An opaque capability for the currently executing run. A stale capability can
@@ -998,12 +998,17 @@ export class ConversationActor {
         await this.compactRequestedTurnBoundary(ticket);
         if (this.activeRun !== ticket || isCancelling(ticket)) break;
 
-        await this.session.sendCustomMessage({
-          customType: COMPACTION_RESUME_CUSTOM_TYPE,
+        const resume = createCompactionResumeEntry({
           content:
             "The workbench paused between tool turns for context management. Continue the unfinished task from the retained context without waiting for another user message.",
           display: false,
           details: { runId: ticket.id },
+        });
+        await this.session.sendCustomMessage({
+          customType: resume.customType,
+          content: resume.content,
+          display: resume.display,
+          details: resume.details,
         }, {
           triggerTurn: true,
         });

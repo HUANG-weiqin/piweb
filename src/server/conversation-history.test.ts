@@ -14,6 +14,7 @@ import {
 } from "./conversation-history.js";
 import {
   appendReservedCustomEntry,
+  createCompactionResumeEntry,
   createConversationCardEntry,
   createConversationMessageEntry,
   createConversationMetaEntry,
@@ -551,6 +552,18 @@ describe("projectConversationHistory", () => {
       finalText: "Internal settlement",
       settledAt: "2026-07-19T10:03:00.000Z",
     }));
+    const resume = createCompactionResumeEntry({
+      content:
+        "Continue the unfinished task from the retained context.",
+      display: false,
+      details: { runId: randomUUID() },
+    });
+    manager.appendCustomMessageEntry(
+      resume.customType,
+      resume.content,
+      resume.display,
+      resume.details,
+    );
 
     expect(projectConversationItems(manager)).toEqual([
       expect.objectContaining({

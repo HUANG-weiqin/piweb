@@ -58,6 +58,23 @@ describe("createMetaTools", () => {
     );
   });
 
+  it("guides Agents to peek the smallest useful session tail first", () => {
+    const peekSession = tool(
+      createMetaTools(sourceConversationId, service()),
+      "peek_session",
+    );
+
+    expect(peekSession.description).toContain(
+      "Usually inspect only the last one or two items",
+    );
+    expect(peekSession.promptSnippet).toBe(
+      "Read the last one or two visible items of a project session.",
+    );
+    expect(peekSession.promptGuidelines).toContain(
+      "Use the default small peek first; pass limit=1 or limit=2 for ordinary recency checks, and request more only when you need extra surrounding context.",
+    );
+  });
+
   it("exposes no orchestration tool metadata when the frozen role disallows it", () => {
     const fake = service();
 
@@ -177,7 +194,7 @@ describe("createMetaTools", () => {
     );
     expect(fake.peekSession).toHaveBeenCalledWith(
       sourceConversationId,
-      { conversationId: "target", limit: 6 },
+      { conversationId: "target", limit: 2 },
     );
   });
 

@@ -340,9 +340,17 @@ describe("validatePiSessionFile", () => {
         data: settlement.data,
       },
       {
+        ...base("custom_message", "00000005", "00000004"),
+        customType: "piweb.compaction_resume.v1",
+        content:
+          "Continue the unfinished task from the retained context.",
+        display: false,
+        details: { runId },
+      },
+      {
         ...base(
           "custom",
-          "00000005",
+          "00000006",
           "00000002",
           "2026-01-01T00:05:00.000Z",
         ),

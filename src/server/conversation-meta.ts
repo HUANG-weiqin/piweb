@@ -16,6 +16,8 @@ export const META_OPERATION_CUSTOM_TYPE =
   "piweb.meta_operation.v1";
 export const COMPACTION_THRESHOLD_CUSTOM_TYPE =
   "piweb.compaction_threshold.v1";
+export const COMPACTION_RESUME_CUSTOM_TYPE =
+  "piweb.compaction_resume.v1";
 export const CONVERSATION_ROLE_CHANGE_CUSTOM_TYPE =
   "piweb.conversation_role_change.v1";
 
@@ -320,6 +322,21 @@ const conversationMessageEntrySchema = z.object({
   details: conversationMessageDetailsSchema,
 }).strict();
 
+const compactionResumeEntrySchema = z.object({
+  customType: z.literal(COMPACTION_RESUME_CUSTOM_TYPE),
+  content: limitedString(
+    "content",
+    MAX_CONVERSATION_MESSAGE_CONTENT_BYTES,
+  ).refine(
+    (value) => value.trim().length > 0,
+    "content must not be blank",
+  ),
+  display: z.literal(false),
+  details: z.object({
+    runId: uuidSchema("runId"),
+  }).strict(),
+}).strict();
+
 const runSettlementSchema = z.object({
   runId: uuidSchema("runId"),
   outcome: z.enum(["completed", "aborted", "failed"]),
@@ -452,6 +469,8 @@ export type ConversationMessageDetails =
   z.infer<typeof conversationMessageDetailsSchema>;
 export type ConversationMessageEntry =
   z.infer<typeof conversationMessageEntrySchema>;
+export type CompactionResumeEntry =
+  z.infer<typeof compactionResumeEntrySchema>;
 export type RunSettlement = z.infer<typeof runSettlementSchema>;
 export type RunSettlementEntry =
   z.infer<typeof runSettlementEntrySchema>;
@@ -483,6 +502,10 @@ export type ReservedConversationEntry =
   | {
       kind: "conversation_message";
       entry: ConversationMessageEntry;
+    }
+  | {
+      kind: "compaction_resume";
+      entry: CompactionResumeEntry;
     }
   | {
       kind: "run_settlement";
@@ -563,6 +586,12 @@ export function parseConversationMessageEntry(
   return conversationMessageEntrySchema.parse(value);
 }
 
+export function parseCompactionResumeEntry(
+  value: unknown,
+): CompactionResumeEntry {
+  return compactionResumeEntrySchema.parse(value);
+}
+
 /**
  * Builds the exact payload accepted by AgentSession.sendCustomMessage().
  *
@@ -576,6 +605,15 @@ export function createConversationMessageEntry(
 ): ConversationMessageEntry {
   return parseConversationMessageEntry({
     customType: CONVERSATION_MESSAGE_CUSTOM_TYPE,
+    ...value,
+  });
+}
+
+export function createCompactionResumeEntry(
+  value: Omit<CompactionResumeEntry, "customType">,
+): CompactionResumeEntry {
+  return parseCompactionResumeEntry({
+    customType: COMPACTION_RESUME_CUSTOM_TYPE,
     ...value,
   });
 }
@@ -645,6 +683,7 @@ export function appendReservedCustomEntry(
   if (
     reserved === undefined
     || reserved.kind === "conversation_message"
+    || reserved.kind === "compaction_resume"
   ) {
     throw new Error("Expected a non-context piweb reserved custom entry");
   }
@@ -730,6 +769,12 @@ export function parseReservedConversationEntry(
     return {
       kind: "conversation_message",
       entry: parseConversationMessageEntry(payload),
+    };
+  }
+  if (customType === COMPACTION_RESUME_CUSTOM_TYPE) {
+    return {
+      kind: "compaction_resume",
+      entry: parseCompactionResumeEntry(payload),
     };
   }
   if (customType === RUN_SETTLEMENT_CUSTOM_TYPE) {
@@ -926,6 +971,9 @@ export function aggregateReservedConversationEntries(
         );
       }
       deliveredMessageIds.add(messageId);
+      continue;
+    }
+    if (reserved.kind === "compaction_resume") {
       continue;
     }
     if (reserved.kind === "meta_operation") {

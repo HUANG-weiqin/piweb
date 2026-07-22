@@ -139,8 +139,12 @@ export function createMetaTools(
       name: "peek_session",
       label: "Peek session",
       description:
-        "Read a bounded tail of user-visible messages and workbench session-message cards from another project session without changing its activity or focus.",
-      promptSnippet: "Read the recent visible items of a project session.",
+        "Read a bounded tail of user-visible messages and workbench session-message cards from another project session without changing its activity or focus. Usually inspect only the last one or two items; increase limit only when the recent tail is insufficient.",
+      promptSnippet:
+        "Read the last one or two visible items of a project session.",
+      promptGuidelines: [
+        "Use the default small peek first; pass limit=1 or limit=2 for ordinary recency checks, and request more only when you need extra surrounding context.",
+      ],
       parameters: Type.Object({
         conversationId: Type.String({ minLength: 1, maxLength: 256 }),
         limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })),
@@ -148,7 +152,7 @@ export function createMetaTools(
       async execute(_toolCallId, input) {
         return result(await service.peekSession(sourceConversationId, {
           conversationId: input.conversationId,
-          limit: input.limit ?? 6,
+          limit: input.limit ?? 2,
         }));
       },
     }),
