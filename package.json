@@ -9,7 +9,7 @@
     "build": "vite build && tsc -p tsconfig.server.json",
     "start": "node dist-server/server/index.js",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run --exclude \".worktrees/**\""
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.80.7",
