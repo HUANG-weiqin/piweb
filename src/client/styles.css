@@ -820,22 +820,20 @@ pre {
 }
 
 .assistant-activity-group {
-  margin: 11px 0;
-  overflow: clip;
-  border: 1px solid color-mix(in srgb, var(--line) 88%, transparent);
-  border-radius: 10px;
+  margin: 7px 0 10px;
+  overflow: visible;
   color: var(--muted);
-  background: color-mix(in srgb, var(--soft) 66%, transparent);
 }
 
 .assistant-activity-group > summary {
   display: grid;
-  grid-template-columns: 20px minmax(0, 1fr) auto 14px;
+  grid-template-columns: 16px minmax(0, 1fr) auto 12px;
   align-items: center;
-  gap: 8px;
-  min-height: 44px;
-  padding: 7px 10px 7px 12px;
+  gap: 7px;
+  min-height: 28px;
+  padding: 1px 0;
   cursor: pointer;
+  font-size: 12px;
   list-style: none;
 }
 
@@ -847,23 +845,32 @@ pre {
   content: "";
 }
 
+.assistant-activity-group > summary:focus {
+  outline: none;
+}
+
+.assistant-activity-group > summary:focus-visible {
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--line-strong) 80%, transparent);
+  text-underline-offset: 3px;
+}
+
 .assistant-activity-group > summary:hover {
   color: color-mix(in srgb, var(--muted) 72%, var(--accent));
 }
 
 .assistant-activity-group[open] > summary {
-  border-bottom: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
-  background: color-mix(in srgb, var(--panel) 72%, transparent);
+  color: color-mix(in srgb, var(--muted) 78%, var(--text));
 }
 
 .activity-group-status {
   display: grid;
-  width: 20px;
-  height: 20px;
+  width: 16px;
+  height: 16px;
   place-items: center;
   color: var(--success);
-  font-size: 13px;
-  font-weight: 800;
+  font-size: 11px;
+  font-weight: 750;
 }
 
 .assistant-activity-group.is-active .activity-group-status {
@@ -878,23 +885,23 @@ pre {
   display: flex;
   min-width: 0;
   align-items: baseline;
-  gap: 7px;
+  gap: 6px;
   overflow: hidden;
   white-space: nowrap;
 }
 
 .activity-group-copy strong {
   flex: 0 0 auto;
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 700;
+  color: currentColor;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .activity-group-label {
   flex: 0 0 auto;
   color: color-mix(in srgb, currentColor 86%, var(--accent));
-  font-size: 13px;
-  font-weight: 650;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .assistant-activity-group.is-active .activity-group-label {
@@ -909,17 +916,19 @@ pre {
   overflow: hidden;
   color: var(--muted);
   font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 12px;
+  font-size: 11px;
   text-overflow: ellipsis;
 }
 
 .activity-group-count {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
+  opacity: 0.82;
   white-space: nowrap;
 }
 
 .activity-group-chevron {
+  font-size: 11px;
   transition: transform 160ms ease;
 }
 
@@ -930,17 +939,17 @@ pre {
 .activity-timeline {
   position: relative;
   display: grid;
-  padding: 4px 12px 8px 42px;
+  padding: 1px 0 6px 30px;
 }
 
 .activity-timeline::before {
   position: absolute;
   top: 15px;
   bottom: 16px;
-  left: 22px;
+  left: 9px;
   width: 1px;
   content: "";
-  background: color-mix(in srgb, var(--line-strong) 58%, transparent);
+  background: color-mix(in srgb, var(--line-strong) 48%, transparent);
 }
 
 .activity-timeline > .thinking,
@@ -953,8 +962,8 @@ pre {
 .activity-timeline > .thinking > summary,
 .activity-timeline > .tools > summary {
   position: relative;
-  min-height: 32px;
-  padding: 4px 0;
+  min-height: 28px;
+  padding: 2px 0;
   font-size: 12px;
 }
 
@@ -966,12 +975,12 @@ pre {
   top: 50%;
   left: -24px;
   flex: none;
-  width: 7px;
-  min-width: 7px;
-  height: 7px;
+  width: 6px;
+  min-width: 6px;
+  height: 6px;
   content: "";
   transform: translateY(-50%);
-  border: 2px solid color-mix(in srgb, var(--line-strong) 74%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--line-strong) 74%, var(--panel));
   border-radius: 50%;
   background: var(--panel);
 }
@@ -987,11 +996,11 @@ pre {
 }
 
 .activity-timeline > .thinking > .thinking-body {
-  padding: 3px 0 8px;
+  padding: 2px 0 7px;
 }
 
 .activity-timeline .tool-stack {
-  padding: 2px 0 7px;
+  padding: 1px 0 6px;
 }
 
 .assistant-response {
@@ -3599,7 +3608,7 @@ pre {
   }
 
   .assistant-activity-group > summary {
-    grid-template-columns: 20px minmax(0, 1fr) 14px;
+    grid-template-columns: 16px minmax(0, 1fr) 12px;
     row-gap: 1px;
   }
 
