@@ -308,6 +308,9 @@ export function Chat({
     [chat.items, chat.messages],
   );
   const blocks = useMemo(() => transcriptBlocks(items), [items]);
+  const transcriptFocusKey = chat.focus
+    ? `${chat.focus.sessionId}:${chat.focus.conversationId}:${chat.focus.focusId}`
+    : "unfocused";
   const activeRunId = activeRun?.id;
   const expandedAssistantMessageIds = useMemo(() => {
     const assistantMessages = blocks.flatMap((block) => (
@@ -511,7 +514,7 @@ export function Chat({
       {!blocks.length && <div className="empty"><div>π</div><h1>想做点什么？</h1><p>Pi 可以读取、修改文件并执行命令。</p></div>}
       {blocks.map((block) => {
         if (block.kind === "compaction") return <div
-          key={`compaction:${block.id}`}
+          key={`${transcriptFocusKey}:compaction:${block.id}`}
           className="compaction-marker"
           role="separator"
           aria-label="上下文已压缩"
@@ -519,7 +522,7 @@ export function Chat({
           <span>上下文已压缩</span>
         </div>;
         if (block.kind === "session_message") return <SessionMessageCard
-          key={`card:${block.cardId}`}
+          key={`${transcriptFocusKey}:card:${block.cardId}`}
           card={block}
           onOpenConversation={handleOpenConversation}
         />;
@@ -530,7 +533,7 @@ export function Chat({
         const isStreamingMessage = isActiveMessage
           && activeRun?.phase === "running";
         return <Message
-          key={`message:${block.message.id}`}
+          key={`${transcriptFocusKey}:message:${block.message.id}`}
           message={block.message}
           onRewind={block.message.role === "user" ? handleRewind : undefined}
           rewindDisabled={

@@ -550,6 +550,62 @@ describe("Chat", () => {
     expect(screen.getByText("完成")).toHaveProperty("tagName", "STRONG");
   });
 
+  it("resets work-process disclosure state when switching conversation focus", () => {
+    const focusA = {
+      sessionId: "session-a",
+      conversationId: "conversation-a",
+      focusId: "focus-a",
+    };
+    const focusB = {
+      sessionId: "session-b",
+      conversationId: "conversation-b",
+      focusId: "focus-b",
+    };
+    const toolsFor = (prefix: string) => Array.from({ length: 25 }, (_, index) => ({
+      id: `${prefix}-tool-${index + 1}`,
+      name: "read",
+      args: { path: `${prefix}-${index + 1}.ts` },
+      result: { ok: true },
+      status: "done" as const,
+    }));
+    const assistantFor = (prefix: string) => ({
+      id: "assistant-same-local-id",
+      runId: `run-${prefix}`,
+      role: "assistant" as const,
+      text: "",
+      thinking: "",
+      tools: toolsFor(prefix),
+    });
+    const rendered = render(view({
+      messages: [assistantFor("a")],
+      sessionTokens: 0,
+      focus: focusA,
+    }));
+
+    fireEvent.click(screen.getByText("工作过程"));
+    const firstActivity = rendered.container.querySelector(
+      "details.assistant-activity-group",
+    ) as HTMLDetailsElement;
+    expect(firstActivity.open).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "展开全部 25 条" }));
+    expect(screen.getAllByText(/a-1\.ts/).length).toBeGreaterThan(0);
+
+    rendered.rerender(view({
+      messages: [assistantFor("b")],
+      sessionTokens: 0,
+      focus: focusB,
+    }));
+
+    const nextActivity = rendered.container.querySelector(
+      "details.assistant-activity-group",
+    ) as HTMLDetailsElement;
+    expect(nextActivity.open).toBe(false);
+    expect(screen.getByText("已折叠 21 条更早工具调用")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "展开全部 25 条" })).toBeInTheDocument();
+    expect(screen.queryByText(/b-1\.ts/)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/b-25\.ts/).length).toBeGreaterThan(0);
+  });
+
   it("folds the previous Agent reply only after the latest reply finishes", () => {
     const previousMessage = {
       id: "assistant-previous",

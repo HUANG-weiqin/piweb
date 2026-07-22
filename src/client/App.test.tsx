@@ -1250,6 +1250,148 @@ describe("App", () => {
     )).toHaveLength(1);
   });
 
+  it("restores an unacknowledged prompt after switching projects without leaking it", () => {
+    localStorage.setItem("piweb.workspaces", JSON.stringify([
+      "E:\\first",
+      "E:\\second",
+    ]));
+    localStorage.setItem("piweb.lastCwd", "E:\\first");
+    render(<App />);
+    const firstSessionId = latestCommand("initialize").sessionId;
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId: firstSessionId,
+        cwd: "E:\\first",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+
+    const input = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
+    fireEvent.change(input, { target: { value: "pending across projects" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(screen.getByRole("status")).toHaveTextContent("正在确认服务端已接收");
+    expect(socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "prompt",
+    )).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "打开工作区 second" }));
+    const secondSessionId = latestCommand("initialize").sessionId;
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId: secondSessionId,
+        cwd: "E:\\second",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("");
+    expect(screen.queryByText("pending across projects", { selector: "article" }))
+      .not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "打开工作区 first" }));
+    const returnedSessionId = latestCommand("initialize").sessionId;
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId: returnedSessionId,
+        cwd: "E:\\first",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("pending across projects");
+    expect(screen.getByRole("alert")).toHaveTextContent("发送状态未确认");
+    expect(socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "prompt",
+    )).toHaveLength(1);
+  });
+
+  it("keeps queued prompts scoped while switching projects", () => {
+    localStorage.setItem("piweb.workspaces", JSON.stringify([
+      "E:\\first",
+      "E:\\second",
+    ]));
+    localStorage.setItem("piweb.lastCwd", "E:\\first");
+    render(<App />);
+    const firstSessionId = latestCommand("initialize").sessionId;
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId: firstSessionId,
+        cwd: "E:\\first",
+        busy: true,
+        activeRun: { id: RUN_ID, phase: "queued" },
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+
+    const input = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
+    fireEvent.change(input, { target: { value: "queued for first" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(screen.getByRole("region", { name: "待发送消息" }))
+      .toHaveTextContent("queued for first");
+
+    fireEvent.click(screen.getByRole("button", { name: "打开工作区 second" }));
+    const secondSessionId = latestCommand("initialize").sessionId;
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId: secondSessionId,
+        cwd: "E:\\second",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+    expect(screen.queryByRole("region", { name: "待发送消息" }))
+      .not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "打开工作区 first" }));
+    const returnedSessionId = latestCommand("initialize").sessionId;
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId: returnedSessionId,
+        cwd: "E:\\first",
+        busy: true,
+        activeRun: { id: RUN_ID, phase: "queued" },
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+
+    expect(screen.getByRole("region", { name: "待发送消息" }))
+      .toHaveTextContent("queued for first");
+  });
+
   it("coalesces browser resume signals into one exact view refresh", async () => {
     render(<App />);
     const sessionId = startFromSetup();

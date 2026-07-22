@@ -29,8 +29,8 @@ ServerEvent
 - `PublicState.activeRun`（以及由它派生的 busy）只描述当前 focus；项目其余会话的 activity 来自 `project_snapshot`。聊天 reducer 不维护第二份 busy。
 - `outstandingRunId` 只覆盖“浏览器已交给 WebSocket、服务端运行状态尚未被观察到”的本地传输间隙，并为 Stop 提供 runId；匹配的 PublicState、terminal 或 error 会结算它，它不伪装成 Agent 状态。
 - `PiSocket.send() === true` 只表示浏览器 transport 接受了帧，不表示服务端接受 prompt。只有匹配 focus 三元身份 + runId 的 `run_queued` 才是接收提交点：此时才能清空草稿并把 user message 投影进 transcript。
-- prompt 接收确认前断线属于 unknown outcome。客户端保留内存草稿、重连恢复 durable conversation 后提示用户核对，绝不自动重发；显式切项目、新建或打开另一对话会清掉草稿，避免跨生命周期泄漏。
-- 当前 focus busy 时 composer 仍可发送；消息先进入按 conversationId 隔离的浏览器内存 FIFO。当前 run 进入 `running | waiting` 后，客户端立即把队首连续“等待中”条目用空行聚合成一个 `steer` 批次，而不是等待 idle 或为每条消息新建 run；`queued | cancelling` 暂不注入。批次以自己的 commandId 和精确 active runId 等待 `command_complete(steer)`，确认前条目仍保留并显示提交中，断线或拒绝则整批转为“需要确认”。pending steer 也按 conversationId 保存，当前 UI 只投影当前 conversation 的一项；因此 A 等待 delivery 时可以切到 B，A 的迟到 completion/error 只结算 A 的队列，不能清除 B 的 pending。若 run 已结算，剩余连续条目同样聚合成一个普通 prompt，并仍以 `run_queued` 确认。切换会话只切换当前队列投影，不能把 A 的等待消息发到 B；关闭项目会清空全部内存队列，localStorage 不成为消息真相。
+- prompt 接收确认前断线或显式切换项目属于 unknown outcome。客户端按 `workspaceKey + projectId + conversationId` 保留未确认草稿，切到其它项目/会话时不投影，切回原 focus 后恢复草稿并提示用户核对，绝不自动重发；只有匹配 focus 三元身份 + runId 的 `run_queued` 才能清掉该未确认草稿。
+- 当前 focus busy 时 composer 仍可发送；消息先进入按 `workspaceKey + projectId + conversationId` 隔离的浏览器内存 FIFO。当前 run 进入 `running | waiting` 后，客户端立即把队首连续“等待中”条目用空行聚合成一个 `steer` 批次，而不是等待 idle 或为每条消息新建 run；`queued | cancelling` 暂不注入。批次以自己的 commandId 和精确 active runId 等待 `command_complete(steer)`，确认前条目仍保留并显示提交中，断线或拒绝则整批转为“需要确认”。pending steer 也按相同三元 scope 保存，当前 UI 只投影当前 scope 的一项；因此 A 等待 delivery 时可以切到 B，A 的迟到 completion/error 只结算 A 的队列，不能清除 B 的 pending。若 run 已结算，剩余连续条目同样聚合成一个普通 prompt，并仍以 `run_queued` 确认。切换会话/项目只切换当前队列投影，不能把 A 的等待消息发到 B；localStorage 不成为消息真相。
 - 每次 initialize 或重连生成新的 observation sessionId；每次 initialize/open/create/focus 由服务端返回新的 focusId。
 - 当前 transcript 身份是 `sessionId + conversationId + focusId`。即使 conversationId 再次相同，旧 focus 的 state/snapshot/live item 也必须丢弃。
 - projectId/conversationId 随精确 `focus_attached` 提交；重连用新 sessionId 显式 `open` 当前 durable conversation，若尚未知 ID 才请求 `recent`。
@@ -57,7 +57,7 @@ ServerEvent
 - 初始化“默认”模板在角色管理中与其它角色相同，可编辑、可删除。失效模板保留原 provider/model 展示，不能静默换成其它模型。
 - Chat composer 底部显示会话当前角色 pill；详情展示快照 revision、简介、prompt、模型、工具权限和会话管理能力，并列出当前项目可用模板。只有 history 已恢复、会话 idle、没有待提交消息或其它破坏性命令时才允许发送精确 `switch_conversation_role`；等待态只由匹配 commandId 的完成或错误结算。
 - Chat 在 composer 底部现有控制行显示“自动压缩 N%”按钮，默认不增加 transcript 高度；点击后才展开 20%–90% 的会话级滑条，默认 70%。拖动只预览，松手或键盘调整结束才发送一次精确关联命令，等待相同 commandId 结算期间禁用控件。
-- 同一控制行提供“手动压缩”按钮；只在在线、history 已恢复且会话空闲时启用，提交后等待精确 `compact_context` commandId 结算，不能把普通 state 刷新当成成功。手动 pending 按 conversationId 保存，当前 UI 只投影当前 conversation；A 的后台压缩不能让 B 显示 spinner，迟到 completion/error 仍按 commandId 回收 A，且结算前即使已切到 B 也不能删除 A。该 pending 与服务端 `PublicState.compacting` 共同驱动 transcript 底部的动态“正在压缩上下文”状态，因此点击后立即反馈，自动压缩与重连中的压缩也使用同一投影；压缩期间 composer 和角色切换禁用。
+- 同一控制行提供“手动压缩”按钮；只在在线、history 已恢复且会话空闲时启用，提交后等待精确 `compact_context` commandId 结算，不能把普通 state 刷新当成成功。手动 pending 按 `workspaceKey + projectId + conversationId` 保存，当前 UI 只投影当前 scope；A 的后台压缩不能让 B 显示 spinner，迟到 completion/error 仍按 commandId 回收 A，且结算前即使已切到 B 也不能删除 A。该 pending 与服务端 `PublicState.compacting` 共同驱动 transcript 底部的动态“正在压缩上下文”状态，因此点击后立即反馈，自动压缩与重连中的压缩也使用同一投影；压缩期间 composer 和角色切换禁用。
 - 成功压缩后，completion snapshot 会把 Pi active branch 的持久 `compaction` 项 hydrate 为“上下文已压缩”分界线；它不属于 message、不会计入消息/token 投影，也不会被相邻会话卡片吸收到 assistant 回答中。
 - 跨会话消息使用独立 `SessionMessageCard`。卡片默认收起，只用一行显示方向、对端会话和状态；用户主动展开后才显示来源/目标标题、角色、短句柄、正文、结果与打开入口，状态更新不能擅自展开卡片。reducer 用 cardId 原地 upsert，incoming/outgoing 都作为独立时间点穿插在 transcript 中；历史恢复只在 cardId 首次出现时切断 assistant 聚合，后续状态记录只更新原卡片，不能重复切段或跳到回答末尾。压缩记录同样是时间线边界。新卡片端点标题优先固化显式名称，否则使用有界首条消息 preview；服务端 wire 投影会从完整项目索引补齐旧卡片缺失的端点标题，但不改写 durable JSONL。打开入口只由卡片自身的服务端 `peerExists` 决定，不能用截断侧栏做存在性判断。相关 peer 仍存在时可直接打开，临时会话删除后入口消失。
 - extension UI 可在首个 state 前出现，因此对话框必须位于 Setup/Chat 之外的 session-scoped overlay；协调模式只把当前 focus 路由到浏览器，后台请求通过侧栏 attention 提示，不抢焦点。
@@ -97,7 +97,7 @@ ServerEvent
 
 ## 坑点
 
-- 不带当前 project observation sessionId 的迟到状态不能恢复已关闭的工作区；只匹配 conversationId 也不够。
+- 不带当前 project observation sessionId 的迟到状态不能恢复已关闭的工作区；只匹配 conversationId 也不够。浏览器内存里的 prompt queue、未确认草稿、guidance 和手动压缩 pending 都必须至少按 `workspaceKey + projectId + conversationId` 分区。
 - 设置、认证或 registry 错误不能作为 run finished 处理。
 - `message_end` 可能没有任何流式 delta；最终文本校准必须由服务端 projector 提供。
 - 断线重连会先清空旧投影，再用新 observation/focus identity 打开当前 conversation 并 hydrate；不得把旧浏览器消息和新快照拼接。
