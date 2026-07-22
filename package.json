@@ -5,7 +5,7 @@
   "type": "module",
   "engines": { "node": ">=22.19.0" },
   "scripts": {
-    "dev": "concurrently -k \"vite\" \"tsx watch src/server/index.ts\"",
+    "dev": "concurrently -k \"vite\" \"node --import tsx/esm --watch src/server/index.ts\"",
     "build": "vite build && tsc -p tsconfig.server.json",
     "start": "node dist-server/server/index.js",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",

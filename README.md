@@ -86,6 +86,8 @@
 
 ## 开发运行
 
+Windows 用户也可以双击项目根目录的 `open-piweb-dev.cmd`，它会自动启动开发服务并打开浏览器。
+
 ```bash
 npm install
 npm run dev
@@ -94,6 +96,8 @@ npm run dev
 打开 <http://127.0.0.1:5173>。Vite 会把 `/ws` 代理到本地 Pi 服务。
 
 ## 生产运行
+
+Windows 本地日常使用可以双击项目根目录的 `open-piweb.cmd`。脚本会复用已运行的实例；否则会检查依赖、构建生产版本、等待健康检查通过，然后打开浏览器。
 
 ```bash
 npm install
