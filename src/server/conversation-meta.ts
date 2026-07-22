@@ -279,6 +279,7 @@ const conversationCardSchema = z.object({
     "requestFingerprint must be a lowercase SHA-256 hex digest",
   ).optional(),
   requestedRole: roleSnapshotSchema.optional(),
+  orchestration: orchestrationSchema.optional(),
   result: limitedString(
     "result",
     MAX_RUN_FINAL_TEXT_BYTES,
@@ -468,6 +469,7 @@ export type ConversationRoleSnapshot = z.infer<typeof roleSnapshotSchema>;
 export type ConversationLifecycle = z.infer<typeof lifecycleSchema>;
 export type ConversationCreatedBy = z.infer<typeof createdBySchema>;
 export type ConversationMeta = z.infer<typeof conversationMetaSchema>;
+export type ConversationOrchestration = z.infer<typeof orchestrationSchema>;
 export type ConversationMetaEntry =
   z.infer<typeof conversationMetaEntrySchema>;
 export type ConversationRoleChange =
@@ -886,6 +888,7 @@ function cardIdentity(card: ConversationCard): string {
     delegationId: card.delegationId,
     requestFingerprint: card.requestFingerprint,
     requestedRole: card.requestedRole,
+    orchestration: card.orchestration,
   });
 }
 

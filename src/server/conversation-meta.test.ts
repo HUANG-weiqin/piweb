@@ -737,6 +737,11 @@ describe("conversation reserved entries", () => {
       ...card(),
       requestFingerprint: "a".repeat(64),
       requestedRole: metadata().role,
+      orchestration: {
+        rootConversationId: randomUUID(),
+        depth: 1,
+        sourceRunId: runId,
+      },
     });
     const queued = createConversationCardEntry({
       ...initial.data,
@@ -781,6 +786,12 @@ describe("conversation reserved entries", () => {
         requestedRole: {
           ...initial.data.requestedRole!,
           revision: initial.data.requestedRole!.revision + 1,
+        },
+      },
+      {
+        orchestration: {
+          ...initial.data.orchestration!,
+          depth: initial.data.orchestration!.depth + 1,
         },
       },
     ];

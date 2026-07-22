@@ -19,6 +19,7 @@ import {
   type ConversationCard,
   type ConversationMessageEntry,
   type ConversationMeta,
+  type ConversationOrchestration,
   type ConversationReferenceSnapshot,
   type MetaOperation,
   type RunSettlement,
@@ -1013,15 +1014,28 @@ export class ProjectSessionCoordinator {
           "start_session idempotency key conflicts with an earlier request",
         );
       }
-      await this.hydrateConversationProfiles(context);
-      this.throwIfAborted(signal);
-      const sourceOrchestration = this.resolveOrchestration(
-        context,
-        sourceConversationId,
-        source.profile,
-      );
-      const sourceRunOwnership = source.currentRunOwnership();
+      let childOrchestration: ConversationOrchestration | undefined =
+        existingCard?.orchestration;
+      if (!childOrchestration) {
+        await this.hydrateConversationProfiles(context);
+        this.throwIfAborted(signal);
+        const sourceOrchestration = this.resolveOrchestration(
+          context,
+          sourceConversationId,
+          source.profile,
+        );
+        const sourceRunOwnership = source.currentRunOwnership();
+        childOrchestration = {
+          rootConversationId: sourceOrchestration.rootConversationId,
+          depth: sourceOrchestration.depth + 1,
+          ...(sourceRunOwnership
+            ? { sourceRunId: sourceRunOwnership.runId }
+            : {}),
+        };
+      }
 
+      // Persist the allocation before target creation so crash recovery uses
+      // the same lineage and source run.
       if (!existingCard) {
         const sentAt = this.now().toISOString();
         existingCard = {
@@ -1042,6 +1056,7 @@ export class ProjectSessionCoordinator {
           delegationId,
           requestFingerprint,
           requestedRole,
+          orchestration: { ...childOrchestration },
           updatedAt: sentAt,
         };
         this.appendCard(source, existingCard);
@@ -1069,13 +1084,7 @@ export class ProjectSessionCoordinator {
               kind: "conversation",
               conversationId: sourceConversationId,
             },
-            orchestration: {
-              rootConversationId: sourceOrchestration.rootConversationId,
-              depth: sourceOrchestration.depth + 1,
-              ...(sourceRunOwnership
-                ? { sourceRunId: sourceRunOwnership.runId }
-                : {}),
-            },
+            orchestration: { ...childOrchestration },
           };
           target = await this.createConversationActor(
             context,
@@ -1102,6 +1111,17 @@ export class ProjectSessionCoordinator {
           "start_session idempotency key conflicts with an existing conversation",
         );
       }
+      // If the card carries orchestration, the target profile must match.
+      if (
+        existingCard?.orchestration
+        && JSON.stringify(target.profile.orchestration)
+          !== JSON.stringify(existingCard.orchestration)
+      ) {
+        throw new Error(
+          "start_session idempotency key conflicts with existing orchestration",
+        );
+      }
+
       const queued = await this.enqueueEnvelope(context, source, target, {
         messageId,
         cardId,
@@ -1111,6 +1131,7 @@ export class ProjectSessionCoordinator {
         delegationId,
         requestFingerprint,
         requestedRole,
+        orchestration: existingCard.orchestration,
         processingRunId: runId,
       });
       const activity = target.getActivity();
@@ -2336,6 +2357,7 @@ export class ProjectSessionCoordinator {
       processingRunId?: string;
       requestFingerprint?: string;
       requestedRole?: ConversationMeta["role"];
+      orchestration?: ConversationOrchestration;
     },
   ): Promise<{
     status: "created" | "existing";
@@ -2363,6 +2385,9 @@ export class ProjectSessionCoordinator {
         ...(input.requestedRole === undefined
           ? {}
           : { requestedRole: input.requestedRole }),
+        ...(input.orchestration === undefined
+          ? {}
+          : { orchestration: input.orchestration }),
         updatedAt: input.sentAt,
       };
     this.appendCard(source, baseCard);

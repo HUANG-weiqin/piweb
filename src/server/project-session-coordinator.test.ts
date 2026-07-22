@@ -4716,6 +4716,108 @@ describe("ProjectSessionCoordinator", () => {
         depth: 1,
         sourceRunId,
       });
+      await waitUntil(() => (
+        aggregateReservedConversationEntries(
+          source.sessionManager.getEntries(),
+        ).cards.find(({ body }) => body === "started from active source run")
+          ?.state === "completed"
+      ), "the delegation card to reach its terminal state");
+      expect(
+        aggregateReservedConversationEntries(
+          source.sessionManager.getEntries(),
+        ).cards.find(({ body }) => body === "started from active source run"),
+      ).toMatchObject({
+        orchestration: {
+          rootConversationId: source.conversationId,
+          depth: 1,
+          sourceRunId,
+        },
+      });
+    });
+
+    it("replays a sending card with its original orchestration snapshot", async () => {
+      const fixture = await createFixture();
+      const source = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const input = startInput({
+        task: "replay the recorded lineage",
+        idempotencyKey: "recorded-lineage-replay",
+      });
+      const targetId = deterministicTestUuid(
+        "piweb.start.conversation",
+        input.idempotencyKey,
+      );
+      const messageId = deterministicTestUuid(
+        "piweb.start.message",
+        input.idempotencyKey,
+      );
+      const recordedSourceRunId = randomUUID();
+      appendReservedCustomEntry(
+        source.sessionManager,
+        createConversationCardEntry({
+          cardId: deterministicTestUuid(
+            "piweb.start.card",
+            input.idempotencyKey,
+          ),
+          kind: "delegation_task",
+          body: input.task,
+          fromSnapshot: {
+            conversationId: source.conversationId,
+            role: {
+              id: source.profile.role.id,
+              name: source.profile.role.name,
+            },
+          },
+          toSnapshot: {
+            conversationId: targetId,
+            title: input.task,
+            role: {
+              id: source.profile.role.id,
+              name: source.profile.role.name,
+            },
+          },
+          state: "sending",
+          messageId,
+          delegationId: deterministicTestUuid(
+            "piweb.start.delegation",
+            input.idempotencyKey,
+          ),
+          requestFingerprint: createHash("sha256")
+            .update(JSON.stringify([
+              input.roleId,
+              input.task,
+              null,
+              input.temporary,
+            ]))
+            .digest("hex"),
+          requestedRole: source.profile.role,
+          orchestration: {
+            rootConversationId: source.conversationId,
+            depth: 1,
+            sourceRunId: recordedSourceRunId,
+          },
+          updatedAt: "2026-07-19T10:00:00.000Z",
+        }),
+      );
+
+      const replay = await fixture.coordinator.startPeerSession(
+        fixture.handle,
+        source.conversationId,
+        input,
+      );
+      const target = await fixture.coordinator.openConversation(
+        fixture.handle,
+        replay.conversationId,
+        { updateRecent: false },
+      );
+
+      expect(target.profile.orchestration).toEqual({
+        rootConversationId: source.conversationId,
+        depth: 1,
+        sourceRunId: recordedSourceRunId,
+      });
     });
 
     it("resolves implicit lineage from legacy conversations without orchestration", async () => {
