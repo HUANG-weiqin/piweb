@@ -72,7 +72,7 @@ ServerEvent
 - 认证、设置和扩展交互拥有模态焦点边界。
 - 会话角色快照中的工具权限是执行真相；客户端不保存全局工具模式偏好，也不提供项目级权限切换。
 - PiSocket 的每个回调捕获创建它的 socket；旧 socket 以及 React effect 已销毁的旧 PiSocket 实例都不得操作当前连接。
-- SDK 的 tool_started 投影代表 preflight 已观察到调用，工具卡先显示 pending；后续 `tool_prepared` 用扩展变换后的最终参数校准展示。
+- SDK 的 tool_started 投影代表 preflight 已观察到调用，工具卡先显示 pending；后续 `tool_prepared` 用扩展变换后的最终参数校准展示。恢复 snapshot 中没有对应 tool result 的调用同样保持 pending，只有 tool result 的 `isError=true` 才显示为失败。
 - 服务端累计 token 优先，reducer 累计值只作为旧状态或短暂缺失时的 fallback。
 
 ## 认知模型

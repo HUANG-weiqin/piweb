@@ -25,7 +25,7 @@ conversation role snapshot
 
 - `RoleStore.toolMode` 是角色模板的 `read_only | full_access` 持久权威值；新角色和旧角色迁移都默认 `read_only`。
 - 创建 conversation 或用户在 idle 边界显式切换角色时，工具权限进入 conversation 当前角色快照；run ticket 再捕获该快照。编辑模板不会自动改变已有会话，角色切换也不能改变已经启动的 run。
-- `ProjectStore.toolMode` 只为旧 manifest / 非协调运行路径保留兼容读取，不参与当前 `ConversationActor` 的工具决策；v21 线协议不再接受 `initialize.toolMode` 或 `set_tool_mode`。
+- `ProjectStore.toolMode` 只为旧 manifest / 非协调运行路径保留兼容读取，不参与当前 `ConversationActor` 的工具决策；v22 线协议不再接受 `initialize.toolMode` 或 `set_tool_mode`。
 - 浏览器只在角色设置中编辑模板权限，不参与单次工具决策。
 
 ## 策略

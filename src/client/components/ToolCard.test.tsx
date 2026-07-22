@@ -31,6 +31,21 @@ describe("ToolCard", () => {
     expect(summary).not.toHaveTextContent("---");
   });
 
+  it("shows an unfinished wait as active rather than failed", () => {
+    const waitingTool: ToolItem = {
+      id: "wait-1",
+      name: "wait_for_session",
+      args: { conversationId: "peer", runId: "peer-run" },
+      status: "pending",
+    };
+    const { container } = render(<ToolCard tool={waitingTool} />);
+    const summary = container.querySelector("summary") as HTMLElement;
+
+    expect(screen.getByLabelText("等待执行")).toBeInTheDocument();
+    expect(summary).not.toHaveTextContent("执行失败");
+    expect(summary).toHaveTextContent("等待 Agent 会话");
+  });
+
   it("expands to reveal readable fields instead of raw JSON", () => {
     const { container } = render(<ToolCard tool={tool} />);
     const details = container.querySelector("details") as HTMLDetailsElement;

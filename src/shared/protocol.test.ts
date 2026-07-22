@@ -25,7 +25,7 @@ const messageId = "assistant:96b960be-b6bb-4a19-9cf2-78e77cb69425";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(21);
+    expect(PROTOCOL_VERSION).toBe(22);
   });
 
   it("accepts supported commands", () => {
@@ -943,6 +943,10 @@ describe("parseClientCommand", () => {
           toolCallId: "tool-1",
           toolName: "read",
           status: "done",
+        }, {
+          toolCallId: "tool-error",
+          toolName: "bash",
+          status: "error",
         }],
         parts: [
           { kind: "thinking", offset: 0, length: 4 },
@@ -960,6 +964,29 @@ describe("parseClientCommand", () => {
           { kind: "text" },
         ],
       }],
+    });
+    expect(parseServerEvent({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId,
+      focusId,
+      items: [{
+        kind: "message",
+        id: "assistant-waiting",
+        role: "assistant",
+        text: "",
+        thinking: "",
+        tools: [{
+          toolCallId: "wait-call",
+          toolName: "wait_for_session",
+          status: "pending",
+        }],
+        parts: [{ kind: "tool", toolCallId: "wait-call" }],
+      }],
+      truncated: false,
+    })).toMatchObject({
+      type: "conversation_snapshot",
+      items: [{ tools: [{ status: "pending" }] }],
     });
     expect(() => parseServerEvent({
       type: "conversation_snapshot",

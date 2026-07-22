@@ -135,6 +135,39 @@ describe("projectConversationHistory", () => {
     });
   });
 
+  it("keeps an unfinished wait tool pending instead of reporting a failure", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    manager.appendMessage(message({
+      role: "user",
+      content: "delegate and wait",
+      timestamp: 1,
+    }));
+    manager.appendMessage(message({
+      role: "assistant",
+      content: [{
+        type: "toolCall",
+        id: "wait-call",
+        name: "wait_for_session",
+        arguments: {
+          conversationId: "peer",
+          runId: "peer-run",
+        },
+      }],
+      stopReason: "toolUse",
+      timestamp: 2,
+    }));
+
+    expect(projectConversationHistory(manager).at(-1)?.tools).toEqual([{
+      toolCallId: "wait-call",
+      toolName: "wait_for_session",
+      args: {
+        conversationId: "peer",
+        runId: "peer-run",
+      },
+      status: "pending",
+    }]);
+  });
+
   it("makes an SDK terminal error visible after restore", () => {
     const manager = SessionManager.inMemory("E:\\work");
     manager.appendMessage(message({ role: "user", content: "fail", timestamp: 1 }));

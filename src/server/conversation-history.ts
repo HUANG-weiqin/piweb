@@ -309,7 +309,10 @@ export function projectConversationHistory(
               toolCallId: block.id,
               toolName: block.name,
               args: toWireValue(block.arguments),
-              status: "error",
+              // A tool call without its result is still in flight (for example,
+              // wait_for_session while the peer run is settling). Do not render
+              // an unfinished call as a failure in a restored snapshot.
+              status: "pending",
             });
             target.parts?.push({ kind: "tool", toolCallId: block.id });
           }

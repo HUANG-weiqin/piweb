@@ -14,7 +14,7 @@ export const MAX_PROMPT_CHARACTERS = 200_000;
 export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
-export const PROTOCOL_VERSION = 21;
+export const PROTOCOL_VERSION = 22;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
 const conversationIdSchema = z.string().uuid();
@@ -431,7 +431,7 @@ export interface ConversationHistoryTool {
   toolName: string;
   args?: unknown;
   result?: unknown;
-  status: "done" | "error";
+  status: "pending" | "done" | "error";
 }
 
 export type ConversationHistoryMessagePart =
@@ -963,7 +963,7 @@ const conversationHistoryMessageSchema = z.object({
     toolName: z.string(),
     args: z.unknown().optional(),
     result: z.unknown().optional(),
-    status: z.enum(["done", "error"]),
+    status: z.enum(["pending", "done", "error"]),
   })),
   parts: z.array(z.discriminatedUnion("kind", [
     z.object({

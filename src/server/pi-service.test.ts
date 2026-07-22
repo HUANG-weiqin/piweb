@@ -903,6 +903,282 @@ describe("PiConnection lifecycle", () => {
     });
   });
 
+  it("publishes a waiting tool as pending on coordinated reconnect and done after settlement", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const waitStarted = deferred();
+    const targetStarted = deferred();
+    const reconnectEvents: ServerEvent[] = [];
+    let reconnect: PiConnection | undefined;
+    let worker: PiConnection | undefined;
+    let prompt: Promise<void> | undefined;
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      const orchestrationRole = await harness.roles.createRole({
+        name: "Orchestrator",
+        description: "Runs the wait_for_session integration scenario",
+        systemPrompt: "",
+        model: { provider: "test", id: "model" },
+        defaultThinkingLevel: "off",
+        toolMode: "full_access",
+        canManageSessions: true,
+      });
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        roleId: orchestrationRole.id,
+      });
+      const sourceState = latestState(harness.events);
+      const sourceSession = harness.runtime.created[0];
+      if (!sourceSession) throw new Error("source session was not created");
+      const sourceManager = sourceSession.persistentManager;
+      if (!sourceManager) throw new Error("source SessionManager was not bound");
+      const sourceTools = harness.runtime.lastCreateOptions?.workbenchCustomTools;
+      const waitTool = sourceTools?.find(
+        (tool) => tool.name === "wait_for_session",
+      );
+      if (!waitTool) throw new Error("wait_for_session tool was not registered");
+
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        roleId: "default",
+      });
+      const targetState = latestState(harness.events);
+      const targetSession = harness.runtime.created[1];
+      if (!targetSession) throw new Error("target session was not created");
+      const targetManager = targetSession.persistentManager;
+      if (!targetManager) throw new Error("target SessionManager was not bound");
+
+      await harness.connection.handle({
+        type: "focus_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId: sourceState.conversationId,
+      });
+      const focusedSource = latestState(harness.events);
+      sourceSession.prompt = async () => {
+        sourceManager.appendMessage(agentMessage({
+          role: "user",
+          content: "wait for the peer",
+          timestamp: 1,
+        }));
+        sourceManager.appendMessage(agentMessage({
+          role: "assistant",
+          content: [{
+            type: "toolCall",
+            id: "wait-tool",
+            name: "wait_for_session",
+            arguments: {
+              conversationId: targetState.conversationId,
+              runId: RUN_B,
+            },
+          }],
+          stopReason: "toolUse",
+          timestamp: 2,
+        }));
+        sourceSession.eventListener?.(nativeEvent({ type: "agent_start" }));
+        sourceSession.eventListener?.(nativeEvent({
+          type: "tool_execution_start",
+          toolCallId: "wait-tool",
+          toolName: "wait_for_session",
+          args: {
+            conversationId: targetState.conversationId,
+            runId: RUN_B,
+          },
+        }));
+        const execute = (waitTool as unknown as {
+          execute(...args: unknown[]): Promise<unknown>;
+        }).execute;
+        const waiting = execute.call(
+          waitTool,
+          "wait-tool",
+          { conversationId: targetState.conversationId, runId: RUN_B },
+          undefined,
+          undefined,
+          {},
+        );
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        waitStarted.resolve();
+        await waiting;
+        sourceManager.appendMessage(agentMessage({
+          role: "toolResult",
+          toolCallId: "wait-tool",
+          toolName: "wait_for_session",
+          content: [{ type: "text", text: "peer completed" }],
+          details: { outcome: "completed" },
+          isError: false,
+          timestamp: 3,
+        }));
+        sourceManager.appendMessage(agentMessage({
+          role: "assistant",
+          content: [{ type: "text", text: "The peer completed." }],
+          stopReason: "stop",
+          timestamp: 4,
+        }));
+        sourceSession.eventListener?.(nativeEvent({
+          type: "tool_execution_end",
+          toolCallId: "wait-tool",
+          result: {
+            content: [{ type: "text", text: "peer completed" }],
+            details: { outcome: "completed" },
+          },
+          isError: false,
+        }));
+        sourceSession.eventListener?.(nativeEvent({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "The peer completed." }],
+          },
+        }));
+        sourceSession.eventListener?.(nativeEvent({ type: "agent_settled" }));
+      };
+      targetSession.prompt = async () => {
+        targetStarted.resolve();
+        targetSession.eventListener?.(nativeEvent({ type: "agent_start" }));
+        targetSession.eventListener?.(nativeEvent({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "peer completed" }],
+          },
+        }));
+        targetSession.eventListener?.(nativeEvent({ type: "agent_settled" }));
+      };
+
+      prompt = harness.connection.handle({
+        type: "prompt",
+        sessionId: SESSION_A,
+        conversationId: focusedSource.conversationId,
+        focusId: focusedSource.focusId,
+        runId: RUN_A,
+        text: "wait for the peer",
+      });
+      await waitStarted.promise;
+      expect(latestState(harness.events)).toMatchObject({
+        sessionId: SESSION_A,
+        conversationId: focusedSource.conversationId,
+        focusId: focusedSource.focusId,
+        busy: true,
+        activeRun: { id: RUN_A, phase: "waiting" },
+      });
+
+      // Reconnects replace observers, not the coordinator-owned writer. The
+      // existing actor and conversation lease continue the active wait.
+      await harness.connection.dispose();
+      reconnect = new PiConnection(
+        (event) => reconnectEvents.push(event),
+        harness.runtime,
+        undefined,
+        new ProjectStoreRegistry(),
+        new ProjectRunCoordinator(),
+        async () => ({
+          coordinator: harness.coordinator,
+          roles: harness.roles,
+        }),
+      );
+      await reconnect.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_B,
+        cwd: harness.cwd,
+        conversation: { kind: "open", conversationId: focusedSource.conversationId },
+      });
+
+      const waitingSnapshot = reconnectEvents.findLast(
+        (event) => event.type === "conversation_snapshot",
+      );
+      expect(waitingSnapshot).toMatchObject({
+        type: "conversation_snapshot",
+        sessionId: SESSION_B,
+        conversationId: focusedSource.conversationId,
+        items: expect.arrayContaining([expect.objectContaining({
+          kind: "message",
+          role: "assistant",
+          tools: [expect.objectContaining({
+            toolCallId: "wait-tool",
+            status: "pending",
+          })],
+        })]),
+      });
+
+      const workerEvents: ServerEvent[] = [];
+      worker = new PiConnection(
+        (event) => workerEvents.push(event),
+        harness.runtime,
+        undefined,
+        new ProjectStoreRegistry(),
+        new ProjectRunCoordinator(),
+        async () => ({
+          coordinator: harness.coordinator,
+          roles: harness.roles,
+        }),
+      );
+      await worker.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_C,
+        cwd: harness.cwd,
+        conversation: { kind: "open", conversationId: targetState.conversationId },
+      });
+      const targetFocused = latestState(workerEvents);
+      const targetPrompt = worker.handle({
+        type: "prompt",
+        sessionId: SESSION_C,
+        conversationId: targetFocused.conversationId,
+        focusId: targetFocused.focusId,
+        runId: RUN_B,
+        text: "finish the peer run",
+      });
+      await targetStarted.promise;
+      await targetPrompt;
+      await prompt;
+
+      const finishedSnapshot = reconnectEvents.findLast(
+        (event) => event.type === "conversation_snapshot",
+      );
+      expect(finishedSnapshot).toMatchObject({
+        type: "conversation_snapshot",
+        sessionId: SESSION_B,
+        conversationId: focusedSource.conversationId,
+        items: expect.arrayContaining([expect.objectContaining({
+          kind: "message",
+          role: "assistant",
+          tools: [expect.objectContaining({
+            toolCallId: "wait-tool",
+            status: "done",
+          })],
+        })]),
+      });
+      expect(reconnectEvents).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          type: "session_event",
+          sessionId: SESSION_B,
+          conversationId: focusedSource.conversationId,
+          runId: RUN_A,
+          event: expect.objectContaining({
+            type: "tool_finished",
+            toolCallId: "wait-tool",
+            isError: false,
+          }),
+        }),
+      ]));
+    } finally {
+      await prompt?.catch(() => undefined);
+      await worker?.dispose();
+      await reconnect?.dispose();
+      await harness.cleanup();
+    }
+  });
+
   it("maps a resolved SDK error message to a failed workbench run", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-sdk-error-"));
     const runtime = new FakeRuntime();
