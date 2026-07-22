@@ -257,6 +257,130 @@ describe("chatReducer", () => {
     expect(state.messages).toEqual([]);
   });
 
+  it("does not let conversation items advance projection sequence over a missing delta", () => {
+    let state = chatReducer(initialChatState, {
+      type: "focus_changed",
+      ...FOCUS_A_1,
+    });
+    state = chatReducer(state, {
+      type: "hydrate",
+      ...FOCUS_A_1,
+      projectionSeq: 5,
+      items: [],
+    });
+
+    state = chatReducer(state, {
+      type: "conversation_item",
+      ...FOCUS_A_1,
+      projectionSeq: 6,
+      item: sessionMessageCard("completed"),
+    });
+
+    expect(state.projectionGap).toBe(true);
+    expect(state.lastProjectionSeq).toBe(5);
+    expect(state.items).toEqual([]);
+  });
+
+  it("accepts equal-watermark conversation items without advancing sequence", () => {
+    let state = chatReducer(initialChatState, {
+      type: "focus_changed",
+      ...FOCUS_A_1,
+    });
+    state = chatReducer(state, {
+      type: "hydrate",
+      ...FOCUS_A_1,
+      projectionSeq: 5,
+      items: [historyMessage("before", "user", "before")],
+    });
+
+    state = chatReducer(state, {
+      type: "conversation_item",
+      ...FOCUS_A_1,
+      projectionSeq: 5,
+      item: sessionMessageCard("completed"),
+    });
+
+    expect(state.projectionGap).toBe(false);
+    expect(state.lastProjectionSeq).toBe(5);
+    expect(state.items?.map((item) => item.kind)).toEqual([
+      "message",
+      "session_message",
+    ]);
+  });
+
+  it("clears a projection gap with a matching snapshot and applies the next delta", () => {
+    let state = chatReducer(initialChatState, {
+      type: "focus_changed",
+      ...FOCUS_A_1,
+    });
+    state = chatReducer(state, {
+      type: "hydrate",
+      ...FOCUS_A_1,
+      projectionSeq: 5,
+      items: [],
+    });
+    state = chatReducer(state, {
+      type: "session",
+      ...FOCUS_A_1,
+      runId: RUN_1,
+      projectionSeq: 7,
+      event: { type: "text_delta", delta: "gap" },
+    });
+    expect(state.projectionGap).toBe(true);
+
+    state = chatReducer(state, {
+      type: "hydrate",
+      ...FOCUS_A_1,
+      projectionSeq: 7,
+      items: [{
+        kind: "message",
+        id: "assistant-live",
+        runId: RUN_1,
+        role: "assistant",
+        text: "caught up",
+        thinking: "",
+        tools: [],
+      }],
+    });
+    state = chatReducer(state, {
+      type: "session",
+      ...FOCUS_A_1,
+      runId: RUN_1,
+      projectionSeq: 8,
+      event: { type: "text_delta", delta: " now" },
+    });
+
+    expect(state.projectionGap).toBe(false);
+    expect(state.lastProjectionSeq).toBe(8);
+    expect(state.messages).toEqual([
+      expect.objectContaining({ text: "caught up now" }),
+    ]);
+  });
+
+  it("rejects unsequenced run deltas after a sequenced snapshot", () => {
+    let state = chatReducer(initialChatState, {
+      type: "focus_changed",
+      ...FOCUS_A_1,
+    });
+    state = chatReducer(state, {
+      type: "hydrate",
+      ...FOCUS_A_1,
+      projectionSeq: 5,
+      items: [],
+    });
+
+    state = chatReducer(state, {
+      type: "session",
+      ...FOCUS_A_1,
+      runId: RUN_1,
+      event: { type: "text_delta", delta: "missing sequence" },
+    });
+
+    expect(state.projectionGap).toBe(true);
+    expect(state.lastProjectionSeq).toBe(5);
+    expect(state.messages).toEqual([]);
+  });
+
   it("updates a live card in place by cardId and preserves its position", () => {
     let state = chatReducer(initialChatState, {
       type: "focus_changed",

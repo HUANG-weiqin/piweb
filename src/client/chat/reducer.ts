@@ -416,18 +416,16 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   if (action.type === "conversation_item") {
     if (!matchesCurrentFocus(state, action)) return state;
     if (state.projectionGap) return state;
-    if (
-      action.projectionSeq !== undefined
-      && state.lastProjectionSeq !== undefined
-      && action.projectionSeq !== state.lastProjectionSeq
-      && action.projectionSeq !== state.lastProjectionSeq + 1
-    ) {
+    if (state.lastProjectionSeq !== undefined) {
+      if (action.projectionSeq !== state.lastProjectionSeq) {
+        return { ...state, projectionGap: true };
+      }
+    } else if (action.projectionSeq !== undefined) {
       return { ...state, projectionGap: true };
     }
     const items = upsertItem(itemsFrom(state), historyItemToChatItem(action.item));
     return {
       ...withItems(state, items, tokenTotal(items)),
-      lastProjectionSeq: action.projectionSeq ?? state.lastProjectionSeq,
       projectionGap: false,
     };
   }
@@ -466,6 +464,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
 
   const event = action.event;
   if (state.projectionGap) return state;
+  if (state.lastProjectionSeq !== undefined && action.projectionSeq === undefined) {
+    return { ...state, projectionGap: true };
+  }
   if (action.projectionSeq !== undefined) {
     if (
       state.lastProjectionSeq === undefined

@@ -19,7 +19,10 @@ import {
   type ToolMode,
 } from "../shared/protocol.js";
 import type { AgentTurnBoundaryCheck } from "./agent-turn-boundary.js";
-import { projectConversationItemsSnapshot } from "./conversation-history.js";
+import {
+  projectConversationItemSlots,
+  snapshotConversationItems,
+} from "./conversation-history.js";
 import {
   aggregateReservedConversationEntries,
   appendReservedCustomEntry,
@@ -247,7 +250,9 @@ function isCancelling(ticket: RunTicket): boolean {
 
 interface LiveConversationProjection {
   runId: string;
-  baseHistoryItemCount: number;
+  baseItemIdentities: Set<string>;
+  baseAssistantEntryCounts: Map<string, number>;
+  currentAssistantId?: string;
   items: ConversationHistoryItem[];
 }
 
@@ -259,7 +264,20 @@ function appendHistoryPart(
   parts: ConversationHistoryMessagePart[] | undefined,
   part: ConversationHistoryMessagePart,
 ): ConversationHistoryMessagePart[] {
-  return [...(parts ?? []), part];
+  if (part.kind !== "tool" && part.length <= 0) return parts ?? [];
+  const current = parts ?? [];
+  const last = current[current.length - 1];
+  if (
+    part.kind !== "tool"
+    && last?.kind === part.kind
+    && last.offset + last.length === part.offset
+  ) {
+    return [
+      ...current.slice(0, -1),
+      { kind: part.kind, offset: last.offset, length: last.length + part.length },
+    ];
+  }
+  return [...current, part];
 }
 
 function addUsage(
@@ -665,23 +683,63 @@ export class ConversationActor {
   projectConversationItems(historyItems: ConversationHistoryItem[]): {
     items: ConversationHistoryItem[];
     projectionSeq: number;
+    truncated?: boolean;
   } {
     const live = this.liveProjection;
     if (!live) return { items: historyItems, projectionSeq: this.projectionSeq };
 
-    const prefix = historyItems.slice(0, live.baseHistoryItemCount);
-    const durableNonMessageTail = historyItems
-      .slice(live.baseHistoryItemCount)
-      .filter((item) => item.kind !== "message");
-    let items = [...prefix, ...durableNonMessageTail];
-    for (const liveItem of live.items) {
-      const identity = conversationItemIdentity(liveItem);
-      if (items.some((item) => conversationItemIdentity(item) === identity)) {
+    const liveItems = live.items.map((item) => structuredClone(item));
+    let liveCursor = 0;
+    const merged: ConversationHistoryItem[] = [];
+    const currentSlots = projectConversationItemSlots(this.sessionManager);
+
+    const consumeLiveMessages = (
+      role: "user" | "assistant",
+      count: number,
+      append: boolean,
+    ) => {
+      let consumed = 0;
+      while (consumed < count) {
+        const liveItem = liveItems[liveCursor];
+        if (liveItem?.kind !== "message" || liveItem.role !== role) break;
+        if (append) merged.push(liveItem);
+        liveCursor += 1;
+        consumed += 1;
+      }
+    };
+
+    for (const slot of currentSlots) {
+      const item = slot.item;
+      const identity = conversationItemIdentity(item);
+      const isBaseItem = live.baseItemIdentities.has(identity);
+      if (isBaseItem) {
+        merged.push(item);
+        if (item.kind === "message" && item.role === "assistant") {
+          const baseCount = live.baseAssistantEntryCounts.get(identity) ?? 0;
+          const currentCount = slot.assistantEntryCount ?? baseCount;
+          consumeLiveMessages("assistant", Math.max(0, currentCount - baseCount), false);
+        }
         continue;
       }
-      items = [...items, structuredClone(liveItem)];
+
+      if (item.kind === "message") {
+        const count = item.role === "assistant"
+          ? Math.max(1, slot.assistantEntryCount ?? 1)
+          : 1;
+        consumeLiveMessages(item.role, count, true);
+      } else {
+        merged.push(item);
+      }
     }
-    return { items, projectionSeq: this.projectionSeq };
+
+    merged.push(...liveItems.slice(liveCursor));
+
+    const snapshot = snapshotConversationItems(merged);
+    return {
+      items: snapshot.items,
+      projectionSeq: this.projectionSeq,
+      truncated: snapshot.truncated,
+    };
   }
 
   subscribe(listener: ConversationActorListener): () => void {
@@ -1280,6 +1338,7 @@ export class ConversationActor {
       ticket.projectRunLease = undefined;
     }
     if (this.activeRun === ticket) this.activeRun = undefined;
+    if (this.liveProjection?.runId === ticket.id) this.liveProjection = undefined;
     for (const guidance of ticket.guidanceDeliveries.splice(0)) {
       guidance.reject(error);
     }
@@ -1522,11 +1581,25 @@ export class ConversationActor {
   }
 
   private resetLiveProjection(ticket: RunTicket): LiveConversationProjection {
+    const baseSlots = projectConversationItemSlots(this.sessionManager);
+    const baseItemIdentities = new Set(
+      baseSlots.map((slot) => conversationItemIdentity(slot.item)),
+    );
+    const baseAssistantEntryCounts = new Map(
+      baseSlots.flatMap((slot) => {
+        if (slot.item.kind !== "message" || slot.item.role !== "assistant") {
+          return [];
+        }
+        return [[
+          conversationItemIdentity(slot.item),
+          slot.assistantEntryCount ?? 0,
+        ] as const];
+      }),
+    );
     const live: LiveConversationProjection = {
       runId: ticket.id,
-      baseHistoryItemCount: projectConversationItemsSnapshot(
-        this.sessionManager,
-      ).items.length,
+      baseItemIdentities,
+      baseAssistantEntryCounts,
       items: [],
     };
     this.liveProjection = live;
@@ -1561,12 +1634,12 @@ export class ConversationActor {
 
   private ensureLiveAssistant(ticket: RunTicket): ConversationHistoryMessage {
     const live = this.requireLiveProjection(ticket);
-    const existing = live.items.find((item) => (
-      item.kind === "message"
-      && item.role === "assistant"
-      && item.runId === ticket.id
-    ));
-    if (existing?.kind === "message") return existing;
+    const current = live.currentAssistantId === undefined
+      ? undefined
+      : live.items.find((item) => (
+        item.kind === "message" && item.id === live.currentAssistantId
+      ));
+    if (current?.kind === "message") return current;
 
     const assistant: ConversationHistoryMessage & { kind: "message" } = {
       kind: "message",
@@ -1578,6 +1651,7 @@ export class ConversationActor {
       tools: [],
       parts: [],
     };
+    live.currentAssistantId = assistant.id;
     live.items.push(assistant);
     return assistant;
   }
@@ -1609,7 +1683,10 @@ export class ConversationActor {
       const existingIndex = live.items.findIndex((item) => (
         item.kind === "message" && item.id === event.projectionId
       ));
-      if (existingIndex >= 0) return;
+      if (existingIndex >= 0) {
+        live.currentAssistantId = event.projectionId;
+        return;
+      }
       const emptyAssistantIndex = live.items.findIndex((item) => (
         item.kind === "message"
         && item.role === "assistant"
@@ -1621,6 +1698,7 @@ export class ConversationActor {
       if (emptyAssistantIndex >= 0) {
         live.items.splice(emptyAssistantIndex, 1);
       }
+      live.currentAssistantId = event.projectionId;
       live.items.push({
         kind: "message",
         id: event.projectionId,
@@ -1634,6 +1712,7 @@ export class ConversationActor {
       return;
     }
     if (event.type === "text_delta" || event.type === "thinking_delta") {
+      if (!event.delta) return;
       const assistant = this.ensureLiveAssistant(ticket);
       if (event.type === "text_delta") {
         const offset = assistant.text.length;
@@ -1715,7 +1794,7 @@ export class ConversationActor {
       projectionSeq,
       event,
     });
-    if (event.type === "run_finished") {
+    if (event.type === "run_finished" && this.liveProjection?.runId === ticket.id) {
       this.liveProjection = undefined;
     }
   }

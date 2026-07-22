@@ -12,9 +12,13 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
-import type { ToolMode } from "../shared/protocol.js";
+import { parseServerEvent, type ToolMode } from "../shared/protocol.js";
 import type { ConversationMeta } from "./conversation-meta.js";
-import { aggregateReservedConversationEntries } from "./conversation-meta.js";
+import {
+  aggregateReservedConversationEntries,
+  appendReservedCustomEntry,
+  createConversationCardEntry,
+} from "./conversation-meta.js";
 import {
   ConversationActor,
   type ConversationActorEvent,
@@ -36,6 +40,8 @@ import {
   type ProjectRunLease,
 } from "./project-run-coordinator.js";
 
+const SESSION_ID = "f74fedb8-ea07-49a6-bd47-3036f7b06a27";
+const FOCUS_ID = "cab0af06-a001-45f7-9084-2a4ac5a1ed56";
 const CONVERSATION_ID = "0dd23f7c-80c8-4713-b7a7-33c00177a101";
 const TARGET_CONVERSATION_ID =
   "e15c861c-e18f-4290-bc22-8932f3caaf4e";
@@ -274,6 +280,32 @@ class TrackingRunCoordinator extends ProjectRunCoordinator {
   override isRestrictionPending(): boolean {
     return false;
   }
+}
+
+function peer(conversationId = TARGET_CONVERSATION_ID) {
+  return {
+    conversationId,
+    title: "Peer",
+    role: { id: ROLE_ID, name: "Reviewer" },
+  };
+}
+
+function appendCard(
+  manager: SessionManagerType,
+  cardId = "6cb37047-770e-4b20-96b8-c2258523af05",
+): void {
+  appendReservedCustomEntry(manager, createConversationCardEntry({
+    cardId,
+    kind: "delegation_task",
+    body: "Review this",
+    fromSnapshot: peer(CONVERSATION_ID),
+    toSnapshot: peer(),
+    state: "running",
+    messageId: RUN_B,
+    delegationId: "1c8afc8f-e6fe-4f8c-b1f8-892b888fb384",
+    runId: RUN_A,
+    updatedAt: "2026-07-19T10:00:00.000Z",
+  }));
 }
 
 function profile(): ConversationMeta {
@@ -1010,6 +1042,523 @@ describe("ConversationActor", () => {
         text: "live partial",
       }),
     ]);
+
+    promptFinished.resolve();
+    await running;
+    await fixture.actor.dispose();
+  });
+
+  it("projects live deltas into the current assistant segment after steering", async () => {
+    const fixture = await openActor();
+    const promptStarted = deferred();
+    const promptFinished = deferred();
+    fixture.runtime.session.promptImplementation = async () => {
+      const emit = fixture.runtime.session.eventListener;
+      emit?.(nativeEvent({ type: "agent_start" }));
+      emit?.(nativeEvent({
+        type: "message_start",
+        message: { role: "user", content: "inspect" },
+      }));
+      emit?.(nativeEvent({
+        type: "message_start",
+        message: { role: "assistant", content: [] },
+      }));
+      emit?.(nativeEvent({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "before" },
+      }));
+      emit?.(nativeEvent({
+        type: "message_start",
+        message: { role: "user", content: "steer" },
+      }));
+      emit?.(nativeEvent({
+        type: "message_start",
+        message: { role: "assistant", content: [] },
+      }));
+      emit?.(nativeEvent({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "after" },
+      }));
+      promptStarted.resolve();
+      await promptFinished.promise;
+    };
+
+    const running = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "inspect",
+      origin: "browser",
+    });
+    await promptStarted.promise;
+
+    const messages = fixture.actor.projectConversationItems(
+      projectConversationItemsSnapshot(fixture.manager).items,
+    ).items.filter((item) => item.kind === "message");
+    expect(messages).toEqual([
+      expect.objectContaining({ role: "user", text: "inspect" }),
+      expect.objectContaining({ role: "assistant", text: "before" }),
+      expect.objectContaining({ role: "user", text: "steer" }),
+      expect.objectContaining({ role: "assistant", text: "after" }),
+    ]);
+
+    promptFinished.resolve();
+    await running;
+    await fixture.actor.dispose();
+  });
+
+  it("keeps a card after all live assistant segments represented by one durable aggregate", async () => {
+    const fixture = await openActor();
+    const promptStarted = deferred();
+    const promptFinished = deferred();
+    fixture.runtime.session.promptImplementation = async () => {
+      fixture.manager.appendMessage(agentMessage({
+        role: "user",
+        content: "inspect",
+        timestamp: 1,
+      }));
+      fixture.manager.appendMessage(agentMessage({
+        role: "assistant",
+        content: [{ type: "text", text: "before" }],
+        timestamp: 2,
+      }));
+      fixture.manager.appendMessage(agentMessage({
+        role: "assistant",
+        content: [{ type: "text", text: "after" }],
+        timestamp: 3,
+      }));
+      appendCard(fixture.manager);
+      const emit = fixture.runtime.session.eventListener;
+      emit?.(nativeEvent({ type: "agent_start" }));
+      emit?.(nativeEvent({
+        type: "message_start",
+        message: { role: "user", content: "inspect" },
+      }));
+      emit?.(nativeEvent({
+        type: "message_start",
+        message: { role: "assistant", content: [] },
+      }));
+      emit?.(nativeEvent({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "before" },
+      }));
+      emit?.(nativeEvent({
+        type: "message_start",
+        message: { role: "assistant", content: [] },
+      }));
+      emit?.(nativeEvent({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "after" },
+      }));
+      promptStarted.resolve();
+      await promptFinished.promise;
+    };
+
+    const running = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "inspect",
+      origin: "browser",
+    });
+    await promptStarted.promise;
+
+    const items = fixture.actor.projectConversationItems(
+      projectConversationItemsSnapshot(fixture.manager).items,
+    ).items;
+    expect(items.map((item) => (
+      item.kind === "message" ? `${item.role}:${item.text}` : item.kind
+    ))).toEqual([
+      "user:inspect",
+      "assistant:before",
+      "assistant:after",
+      "session_message",
+    ]);
+
+    promptFinished.resolve();
+    await running;
+    await fixture.actor.dispose();
+  });
+
+  it("keeps a card between two live assistant segments without a steered user", async () => {
+    const fixture = await openActor();
+    const promptStarted = deferred();
+    const promptFinished = deferred();
+    fixture.runtime.session.promptImplementation = async () => {
+      fixture.manager.appendMessage(agentMessage({
+        role: "user",
+        content: "inspect",
+        timestamp: 1,
+      }));
+      fixture.manager.appendMessage(agentMessage({
+        role: "assistant",
+        content: [{ type: "text", text: "before" }],
+        timestamp: 2,
+      }));
+      appendCard(fixture.manager);
+      fixture.manager.appendMessage(agentMessage({
+        role: "assistant",
+        content: [{ type: "text", text: "after" }],
+        timestamp: 3,
+      }));
+      const emit = fixture.runtime.session.eventListener;
+      emit?.(nativeEvent({ type: "agent_start" }));
+      emit?.(nativeEvent({
+        type: "message_start",
+        message: { role: "user", content: "inspect" },
+      }));
+      emit?.(nativeEvent({
+        type: "message_start",
+        message: { role: "assistant", content: [] },
+      }));
+      emit?.(nativeEvent({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "before" },
+      }));
+      emit?.(nativeEvent({
+        type: "message_start",
+        message: { role: "assistant", content: [] },
+      }));
+      emit?.(nativeEvent({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "after" },
+      }));
+      promptStarted.resolve();
+      await promptFinished.promise;
+    };
+
+    const running = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "inspect",
+      origin: "browser",
+    });
+    await promptStarted.promise;
+
+    const items = fixture.actor.projectConversationItems(
+      projectConversationItemsSnapshot(fixture.manager).items,
+    ).items;
+    expect(items.map((item) => (
+      item.kind === "message" ? `${item.role}:${item.text}` : item.kind
+    ))).toEqual([
+      "user:inspect",
+      "assistant:before",
+      "session_message",
+      "assistant:after",
+    ]);
+
+    promptFinished.resolve();
+    await running;
+    await fixture.actor.dispose();
+  });
+
+  it("keeps compaction between two live assistant segments", async () => {
+    const fixture = await openActor();
+    const promptStarted = deferred();
+    const promptFinished = deferred();
+    fixture.runtime.session.promptImplementation = async () => {
+      fixture.manager.appendMessage(agentMessage({
+        role: "user",
+        content: "inspect",
+        timestamp: 1,
+      }));
+      fixture.manager.appendMessage(agentMessage({
+        role: "assistant",
+        content: [{ type: "text", text: "before" }],
+        timestamp: 2,
+      }));
+      fixture.manager.appendCompaction("summary", undefined, 30);
+      fixture.manager.appendMessage(agentMessage({
+        role: "assistant",
+        content: [{ type: "text", text: "after" }],
+        timestamp: 3,
+      }));
+      const emit = fixture.runtime.session.eventListener;
+      emit?.(nativeEvent({ type: "agent_start" }));
+      emit?.(nativeEvent({
+        type: "message_start",
+        message: { role: "user", content: "inspect" },
+      }));
+      emit?.(nativeEvent({
+        type: "message_start",
+        message: { role: "assistant", content: [] },
+      }));
+      emit?.(nativeEvent({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "before" },
+      }));
+      emit?.(nativeEvent({
+        type: "message_start",
+        message: { role: "assistant", content: [] },
+      }));
+      emit?.(nativeEvent({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "after" },
+      }));
+      promptStarted.resolve();
+      await promptFinished.promise;
+    };
+
+    const running = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "inspect",
+      origin: "browser",
+    });
+    await promptStarted.promise;
+
+    const items = fixture.actor.projectConversationItems(
+      projectConversationItemsSnapshot(fixture.manager).items,
+    ).items;
+    expect(items.map((item) => (
+      item.kind === "message" ? `${item.role}:${item.text}` : item.kind
+    ))).toEqual([
+      "user:inspect",
+      "assistant:before",
+      "compaction",
+      "assistant:after",
+    ]);
+
+    promptFinished.resolve();
+    await running;
+    await fixture.actor.dispose();
+  });
+
+  it("does not move a steered user message before an intervening card", async () => {
+    const fixture = await openActor();
+    const promptStarted = deferred();
+    const promptFinished = deferred();
+    fixture.runtime.session.promptImplementation = async () => {
+      fixture.manager.appendMessage(agentMessage({
+        role: "user",
+        content: "inspect",
+        timestamp: 1,
+      }));
+      fixture.manager.appendMessage(agentMessage({
+        role: "assistant",
+        content: [{ type: "text", text: "before" }],
+        timestamp: 2,
+      }));
+      appendCard(fixture.manager);
+      fixture.manager.appendMessage(agentMessage({
+        role: "user",
+        content: "steer",
+        timestamp: 3,
+      }));
+      fixture.manager.appendMessage(agentMessage({
+        role: "assistant",
+        content: [{ type: "text", text: "after" }],
+        timestamp: 4,
+      }));
+      const emit = fixture.runtime.session.eventListener;
+      emit?.(nativeEvent({ type: "agent_start" }));
+      emit?.(nativeEvent({
+        type: "message_start",
+        message: { role: "user", content: "inspect" },
+      }));
+      emit?.(nativeEvent({
+        type: "message_start",
+        message: { role: "assistant", content: [] },
+      }));
+      emit?.(nativeEvent({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "before" },
+      }));
+      emit?.(nativeEvent({
+        type: "message_start",
+        message: { role: "user", content: "steer" },
+      }));
+      emit?.(nativeEvent({
+        type: "message_start",
+        message: { role: "assistant", content: [] },
+      }));
+      emit?.(nativeEvent({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "after" },
+      }));
+      promptStarted.resolve();
+      await promptFinished.promise;
+    };
+
+    const running = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "inspect",
+      origin: "browser",
+    });
+    await promptStarted.promise;
+
+    const items = fixture.actor.projectConversationItems(
+      projectConversationItemsSnapshot(fixture.manager).items,
+    ).items;
+    expect(items.map((item) => (
+      item.kind === "message" ? `${item.role}:${item.text}` : item.kind
+    ))).toEqual([
+      "user:inspect",
+      "assistant:before",
+      "session_message",
+      "user:steer",
+      "assistant:after",
+    ]);
+
+    promptFinished.resolve();
+    await running;
+    await fixture.actor.dispose();
+  });
+
+  it("keeps pre-run compaction before the live prompt", async () => {
+    const fixture = await openActor();
+    const promptStarted = deferred();
+    const promptFinished = deferred();
+    fixture.runtime.session.promptImplementation = async () => {
+      const firstKeptEntryId = fixture.manager.appendCompaction(
+        "summary",
+        undefined,
+        30,
+      );
+      fixture.manager.appendMessage(agentMessage({
+        role: "user",
+        content: "inspect",
+        timestamp: 1,
+      }));
+      fixture.manager.appendMessage(agentMessage({
+        role: "assistant",
+        content: [{ type: "text", text: "after" }],
+        timestamp: 2,
+      }));
+      expect(firstKeptEntryId).toEqual(expect.any(String));
+      const emit = fixture.runtime.session.eventListener;
+      emit?.(nativeEvent({ type: "agent_start" }));
+      emit?.(nativeEvent({
+        type: "message_start",
+        message: { role: "user", content: "inspect" },
+      }));
+      emit?.(nativeEvent({
+        type: "message_start",
+        message: { role: "assistant", content: [] },
+      }));
+      emit?.(nativeEvent({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "after" },
+      }));
+      promptStarted.resolve();
+      await promptFinished.promise;
+    };
+
+    const running = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "inspect",
+      origin: "browser",
+    });
+    await promptStarted.promise;
+
+    const items = fixture.actor.projectConversationItems(
+      projectConversationItemsSnapshot(fixture.manager).items,
+    ).items;
+    expect(items.map((item) => (
+      item.kind === "message" ? `${item.role}:${item.text}` : item.kind
+    ))).toEqual([
+      "compaction",
+      "user:inspect",
+      "assistant:after",
+    ]);
+
+    promptFinished.resolve();
+    await running;
+    await fixture.actor.dispose();
+  });
+
+  it("does not duplicate a resumed reply that extends a baseline assistant aggregate", async () => {
+    const manager = SessionManager.inMemory(process.cwd(), {
+      id: CONVERSATION_ID,
+    });
+    manager.appendMessage(agentMessage({
+      role: "assistant",
+      content: [{ type: "text", text: "old" }],
+      timestamp: 1,
+    }));
+    const fixture = await openActor({ sessionManager: manager });
+    const promptStarted = deferred();
+    const promptFinished = deferred();
+    fixture.runtime.session.resumeImplementation = async () => {
+      fixture.manager.appendMessage(agentMessage({
+        role: "assistant",
+        content: [{ type: "text", text: "after" }],
+        timestamp: 2,
+      }));
+      const emit = fixture.runtime.session.eventListener;
+      emit?.(nativeEvent({ type: "agent_start" }));
+      emit?.(nativeEvent({
+        type: "message_start",
+        message: { role: "assistant", content: [] },
+      }));
+      emit?.(nativeEvent({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "after" },
+      }));
+      promptStarted.resolve();
+      await promptFinished.promise;
+    };
+
+    const running = fixture.actor.resumeMessages({ runId: RUN_A });
+    await promptStarted.promise;
+
+    const items = fixture.actor.projectConversationItems(
+      projectConversationItemsSnapshot(fixture.manager).items,
+    ).items;
+    expect(items.map((item) => (
+      item.kind === "message" ? `${item.role}:${item.text}` : item.kind
+    ))).toEqual(["assistant:old\n\nafter"]);
+
+    promptFinished.resolve();
+    await running;
+    await fixture.actor.dispose();
+  });
+
+  it("bounds live projection parts so refocus snapshots remain parseable", async () => {
+    const fixture = await openActor();
+    const promptStarted = deferred();
+    const promptFinished = deferred();
+    fixture.runtime.session.promptImplementation = async () => {
+      const emit = fixture.runtime.session.eventListener;
+      emit?.(nativeEvent({ type: "agent_start" }));
+      emit?.(nativeEvent({
+        type: "message_start",
+        message: { role: "assistant", content: [] },
+      }));
+      emit?.(nativeEvent({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "" },
+      }));
+      for (let index = 0; index < 201; index += 1) {
+        emit?.(nativeEvent({
+          type: "message_update",
+          assistantMessageEvent: { type: "text_delta", delta: "x" },
+        }));
+      }
+      promptStarted.resolve();
+      await promptFinished.promise;
+    };
+
+    const running = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "inspect",
+      origin: "browser",
+    });
+    await promptStarted.promise;
+
+    const projection = fixture.actor.projectConversationItems(
+      projectConversationItemsSnapshot(fixture.manager).items,
+    );
+    const parsed = parseServerEvent(JSON.stringify({
+      type: "conversation_snapshot",
+      sessionId: SESSION_ID,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_ID,
+      projectionSeq: projection.projectionSeq,
+      items: projection.items,
+      truncated: projection.truncated === true,
+    }));
+    expect(parsed.type).toBe("conversation_snapshot");
+    expect(projection.items).toContainEqual(expect.objectContaining({
+      kind: "message",
+      role: "assistant",
+      text: "x".repeat(201),
+      parts: [{ kind: "text", offset: 0, length: 201 }],
+    }));
 
     promptFinished.resolve();
     await running;

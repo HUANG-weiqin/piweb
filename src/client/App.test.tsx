@@ -1427,6 +1427,74 @@ describe("App", () => {
     });
   });
 
+  it("retries a projection-gap refresh after compaction finishes", async () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: true,
+        compacting: true,
+        activeRun: { id: RUN_ID, phase: "running" },
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+    act(() => socketMock.emit?.({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      projectionSeq: 1,
+      messages: [],
+      truncated: false,
+    }));
+    socketMock.send.mockClear();
+
+    act(() => socketMock.emit?.({
+      type: "session_event",
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      runId: RUN_ID,
+      projectionSeq: 3,
+      event: { type: "text_delta", delta: "missed one" },
+    }));
+
+    await waitFor(() => {
+      expect(socketMock.send.mock.calls.filter(
+        ([command]) => command.type === "refresh_view",
+      )).toHaveLength(1);
+    });
+
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: true,
+        compacting: false,
+        activeRun: { id: RUN_ID, phase: "running" },
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+
+    await waitFor(() => {
+      expect(socketMock.send.mock.calls.filter(
+        ([command]) => command.type === "refresh_view",
+      )).toHaveLength(2);
+    });
+  });
+
   it("does not refresh while a prompt handoff is unacknowledged", async () => {
     render(<App />);
     const sessionId = startFromSetup();
@@ -2374,14 +2442,75 @@ describe("App", () => {
       .toBeDisabled();
     expect(screen.getByRole("button", { name: "手动压缩上下文" }))
       .toBeDisabled();
-    const abortCount = socketMock.send.mock.calls.filter(
-      ([command]) => command.type === "abort",
-    ).length;
-    expect(screen.getByRole("button", { name: "停止" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "停止" }));
+    expect(screen.queryByRole("button", { name: "停止" }))
+      .not.toBeInTheDocument();
     expect(socketMock.send.mock.calls.filter(
       ([command]) => command.type === "abort",
-    )).toHaveLength(abortCount);
+    )).toHaveLength(0);
+  });
+
+  it("keeps focus-owned busy state clear after a focus ack before matching state", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: true,
+          activeRun: { id: RUN_ID, phase: "running" },
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.emit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_ID,
+        conversations: [{
+          id: CONVERSATION_ID,
+          name: "A",
+          preview: "",
+          createdAt: "2026-07-19T08:00:00.000Z",
+          updatedAt: "2026-07-19T08:00:00.000Z",
+          messageCount: 0,
+          activity: { kind: "idle" },
+        }, {
+          id: CONVERSATION_B,
+          name: "B",
+          preview: "",
+          createdAt: "2026-07-19T08:00:00.000Z",
+          updatedAt: "2026-07-19T09:00:00.000Z",
+          messageCount: 0,
+          activity: { kind: "idle" },
+        }],
+        truncated: false,
+      });
+    });
+    expect(screen.getByRole("button", { name: "停止" })).toBeInTheDocument();
+    socketMock.autoFocus = false;
+
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    const command = latestCommand("focus_conversation");
+    act(() => socketMock.rawEmit?.({
+      type: "focus_attached",
+      operation: "focus_conversation",
+      commandId: command.commandId!,
+      sessionId,
+      projectId: PROJECT_ID,
+      conversationId: CONVERSATION_B,
+      focusId: FOCUS_A_SECOND,
+    }));
+
+    expect(screen.queryByRole("button", { name: "停止" }))
+      .not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toBeDisabled();
   });
 
   it("keeps a pending compaction scoped to its originating conversation", () => {

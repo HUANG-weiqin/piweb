@@ -1800,7 +1800,7 @@ export class PiConnection {
         role: actor.profile.role,
         projectionSeq: projection.projectionSeq,
         items,
-        truncated: history.truncated,
+        truncated: projection.truncated ?? history.truncated,
       });
     } catch (error) {
       this.emitError("session", error, view.sessionId);

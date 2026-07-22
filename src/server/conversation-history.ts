@@ -206,26 +206,50 @@ function compactHistoryMessage(
   };
 }
 
+interface ConversationHistoryMessageSlot {
+  message: ConversationHistoryMessage;
+  anchorEntryId: string;
+  assistantEntryCount: number;
+}
+
+export interface ConversationHistoryItemSlot {
+  item: ConversationHistoryItem;
+  assistantEntryCount?: number;
+}
+
+function finalizeHistoryMessage(
+  message: ConversationHistoryMessage,
+): ConversationHistoryMessage {
+  return {
+    ...message,
+    parts: message.parts?.length ? message.parts : undefined,
+  };
+}
+
 /**
  * Projects the selected Pi session branch into replayable timeline segments.
  * Aggregate fields remain available for copy/token views, while `parts` records
  * the original assistant text/thinking/tool order without duplicating strings.
  */
-export function projectConversationHistory(
+function projectConversationHistorySlots(
   sessionManager: Pick<SessionManager, "getBranch">,
-): ConversationHistoryMessage[] {
-  const messages: ConversationHistoryMessage[] = [];
-  let assistant: ConversationHistoryMessage | undefined;
+): ConversationHistoryMessageSlot[] {
+  const messages: ConversationHistoryMessageSlot[] = [];
+  let assistant: ConversationHistoryMessageSlot | undefined;
   const seenCardIds = new Set<string>();
 
-  const requireAssistant = (entryId: string): ConversationHistoryMessage => {
+  const requireAssistant = (entryId: string): ConversationHistoryMessageSlot => {
     assistant ??= {
-      id: `assistant:${entryId}`,
-      role: "assistant",
-      text: "",
-      thinking: "",
-      tools: [],
-      parts: [],
+      anchorEntryId: entryId,
+      assistantEntryCount: 0,
+      message: {
+        id: `assistant:${entryId}`,
+        role: "assistant",
+        text: "",
+        thinking: "",
+        tools: [],
+        parts: [],
+      },
     };
     if (!messages.includes(assistant)) messages.push(assistant);
     return assistant;
@@ -258,17 +282,23 @@ export function projectConversationHistory(
     if (message.role === "user") {
       assistant = undefined;
       messages.push({
-        id: entry.id,
-        role: "user",
-        text: contentText(message.content),
-        thinking: "",
-        tools: [],
+        anchorEntryId: entry.id,
+        assistantEntryCount: 0,
+        message: {
+          id: entry.id,
+          role: "user",
+          text: contentText(message.content),
+          thinking: "",
+          tools: [],
+        },
       });
       continue;
     }
 
     if (message.role === "assistant") {
-      const target = requireAssistant(entry.id);
+      const targetSlot = requireAssistant(entry.id);
+      targetSlot.assistantEntryCount += 1;
+      const target = targetSlot.message;
       if (Array.isArray(message.content)) {
         for (const item of message.content) {
           const block = record(item);
@@ -344,10 +374,10 @@ export function projectConversationHistory(
       && typeof message.toolCallId === "string"
     ) {
       let target = [...messages].reverse().find((item) =>
-        item.role === "assistant"
-        && item.tools.some((tool) => tool.toolCallId === message.toolCallId)
-      );
-      target ??= requireAssistant(entry.id);
+        item.message.role === "assistant"
+        && item.message.tools.some((tool) => tool.toolCallId === message.toolCallId)
+      )?.message;
+      target ??= requireAssistant(entry.id).message;
       let tool = target.tools.find((item) => item.toolCallId === message.toolCallId);
       if (!tool) {
         tool = {
@@ -369,12 +399,22 @@ export function projectConversationHistory(
     }
   }
 
-  return messages.map((message) => ({
-    ...message,
-    tools: message.tools.map((tool): ConversationHistoryTool => ({ ...tool })),
-    parts: message.parts?.map((part) => ({ ...part })),
-    usage: message.usage ? { ...message.usage } : undefined,
+  return messages.map((slot) => ({
+    ...slot,
+    message: finalizeHistoryMessage({
+      ...slot.message,
+      tools: slot.message.tools.map((tool): ConversationHistoryTool => ({ ...tool })),
+      parts: slot.message.parts?.map((part) => ({ ...part })),
+      usage: slot.message.usage ? { ...slot.message.usage } : undefined,
+    }),
   }));
+}
+
+export function projectConversationHistory(
+  sessionManager: Pick<SessionManager, "getBranch">,
+): ConversationHistoryMessage[] {
+  return projectConversationHistorySlots(sessionManager)
+    .map((slot) => slot.message);
 }
 
 function projectOutgoingCard(
@@ -430,37 +470,42 @@ function projectIncomingCard(
  * cards. Reserved records are scanned from every physical entry because card
  * state and delivery identity remain durable even when Pi changes branches.
  */
-export function projectConversationItems(
+export function projectConversationItemSlots(
   sessionManager: Pick<SessionManager, "getBranch" | "getEntries">,
-): ConversationHistoryItem[] {
+): ConversationHistoryItemSlot[] {
   const physicalEntries = sessionManager.getEntries();
   const physicalIndexById = new Map(
     physicalEntries.map((entry, index) => [entry.id, index]),
   );
   const positionedItems: Array<{
-    item: ConversationHistoryItem;
+    slot: ConversationHistoryItemSlot;
     physicalIndex: number;
-  }> = projectConversationHistory(sessionManager).map((message) => {
-    const anchorId = message.role === "assistant"
-      ? message.id.slice("assistant:".length)
-      : message.id;
+  }> = projectConversationHistorySlots(sessionManager).map((messageSlot) => {
+    const message = messageSlot.message;
     return {
-      item: {
-        kind: "message",
-        ...message,
+      slot: {
+        item: {
+          kind: "message",
+          ...message,
+        },
+        ...(message.role === "assistant"
+          ? { assistantEntryCount: messageSlot.assistantEntryCount }
+          : {}),
       },
       physicalIndex:
-        physicalIndexById.get(anchorId) ?? Number.MAX_SAFE_INTEGER,
+        physicalIndexById.get(messageSlot.anchorEntryId) ?? Number.MAX_SAFE_INTEGER,
     };
   });
   for (const entry of sessionManager.getBranch()) {
     if (entry.type !== "compaction") continue;
     positionedItems.push({
-      item: {
-        kind: "compaction",
-        id: entry.id,
-        timestamp: entry.timestamp,
-        tokensBefore: entry.tokensBefore,
+      slot: {
+        item: {
+          kind: "compaction",
+          id: entry.id,
+          timestamp: entry.timestamp,
+          tokensBefore: entry.tokensBefore,
+        },
       },
       physicalIndex:
         physicalIndexById.get(entry.id) ?? Number.MAX_SAFE_INTEGER,
@@ -515,22 +560,28 @@ export function projectConversationItems(
         positionedIndex: positionedItems.length,
         direction,
       });
-      positionedItems.push({ item, physicalIndex });
+      positionedItems.push({ slot: { item }, physicalIndex });
       continue;
     }
 
     const positioned = positionedItems[existing.positionedIndex]!;
-    positioned.item = reserved.kind === "conversation_card"
+    positioned.slot.item = reserved.kind === "conversation_card"
       ? projectOutgoingCard(
           reserved.entry.data,
-          (positioned.item as ConversationMessageCard).sentAt,
+          (positioned.slot.item as ConversationMessageCard).sentAt,
         )
       : projectIncomingCard(reserved.entry);
   }
 
   return positionedItems
     .sort((left, right) => left.physicalIndex - right.physicalIndex)
-    .map(({ item }) => item);
+    .map(({ slot }) => slot);
+}
+
+export function projectConversationItems(
+  sessionManager: Pick<SessionManager, "getBranch" | "getEntries">,
+): ConversationHistoryItem[] {
+  return projectConversationItemSlots(sessionManager).map((slot) => slot.item);
 }
 
 function compactConversationItem(
@@ -651,19 +702,14 @@ export function projectAgentConversationPeek(
   return { items: selected, truncated };
 }
 
-/**
- * Produces a bounded mixed-item snapshot while retaining the legacy messages
- * projection for callers that have not adopted cards yet.
- */
-export function projectConversationItemsSnapshot(
-  sessionManager: Pick<SessionManager, "getBranch" | "getEntries">,
+export function snapshotConversationItems(
+  sourceItems: ConversationHistoryItem[],
 ): {
   messages: ConversationHistoryMessage[];
   items: ConversationHistoryItem[];
   truncated: boolean;
 } {
-  const projected = projectConversationItems(sessionManager)
-    .map(compactConversationItem);
+  const projected = sourceItems.map(compactConversationItem);
   const turns: Array<typeof projected> = [];
   for (const item of projected) {
     if (
@@ -715,6 +761,20 @@ export function projectConversationItemsSnapshot(
     items,
     truncated,
   };
+}
+
+/**
+ * Produces a bounded mixed-item snapshot while retaining the legacy messages
+ * projection for callers that have not adopted cards yet.
+ */
+export function projectConversationItemsSnapshot(
+  sessionManager: Pick<SessionManager, "getBranch" | "getEntries">,
+): {
+  messages: ConversationHistoryMessage[];
+  items: ConversationHistoryItem[];
+  truncated: boolean;
+} {
+  return snapshotConversationItems(projectConversationItems(sessionManager));
 }
 
 /**

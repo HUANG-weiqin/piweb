@@ -917,19 +917,15 @@ export function App() {
             ? {
                 ...current,
                 projectId: event.projectId,
-                ...(event.conversationId && event.focusId
-                  ? {
-                      conversationId: event.conversationId,
-                      focusId: event.focusId,
-                    }
-                  : {
-                      conversationId: undefined,
-                      focusId: undefined,
-                      conversationName: undefined,
-                      selectedModel: undefined,
-                      activeRun: undefined,
-                      busy: false,
-                    }),
+                conversationId: event.conversationId,
+                focusId: event.focusId,
+                conversationName: undefined,
+                selectedModel: undefined,
+                activeRun: undefined,
+                busy: false,
+                compacting: false,
+                sessionTokenUsage: undefined,
+                contextUsage: undefined,
               }
             : current);
         }
@@ -1612,7 +1608,7 @@ export function App() {
       conversationId: focus.conversationId,
       focusId: focus.focusId,
     });
-  }, [chat.projectionGap, protocolReady, transportOnline]);
+  }, [chat.projectionGap, protocolReady, state?.compacting, transportOnline]);
   const clearSettingResult = useCallback(() => setSettingResult(undefined), []);
   const browseDirectory = (path?: string) => {
     const current = directoryBrowserRef.current;
@@ -2344,8 +2340,10 @@ export function App() {
   const switchingFocus = pendingFocus?.operation === "focus_conversation"
     || pendingFocus?.operation === "create_conversation";
   const visibleChat = switchingFocus ? initialChatState : chat;
-  const visibleBusy = state.busy || Boolean(outstandingRunId);
-  const visibleActiveRun = state.activeRun;
+  const visibleBusy = switchingFocus
+    ? false
+    : state.busy || Boolean(outstandingRunId);
+  const visibleActiveRun = switchingFocus ? undefined : state.activeRun;
   const visibleConversationReady = switchingFocus ? false : conversationReady;
 
   return <>
