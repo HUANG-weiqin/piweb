@@ -35,6 +35,7 @@ type QueuedPromptStatus = "queued" | "submitting" | "attention";
 const FOLLOW_COMFORT_LIMIT_PX = 96;
 const FOLLOW_COMFORT_TARGET_PX = 32;
 const FOLLOW_REATTACH_LIMIT_PX = 2;
+const MANUAL_JUMP_SETTLE_FRAMES = 4;
 const COMPACT_NUMBER_FORMAT = new Intl.NumberFormat("en-US", {
   maximumSignificantDigits: 3,
   useGrouping: false,
@@ -364,26 +365,30 @@ export function Chat({
     if (!transcript) return;
     scrollTranscript(transcript.scrollHeight, behavior);
   }, [scrollTranscript]);
+  const hardJumpToLatest = useCallback(() => {
+    const transcript = transcriptRef.current;
+    if (!transcript) return;
+    transcript.scrollTop = transcript.scrollHeight;
+    lastScrollTopRef.current = transcript.scrollTop;
+  }, []);
   const cancelJumpFrame = useCallback(() => {
     if (jumpFrameRef.current === undefined) return;
     window.cancelAnimationFrame(jumpFrameRef.current);
     jumpFrameRef.current = undefined;
   }, []);
-  const commitScrollToLatest = useCallback(() => {
-    scrollToLatest();
-    if (transcriptRef.current) {
-      lastScrollTopRef.current = transcriptRef.current.scrollTop;
-    }
-  }, [scrollToLatest]);
-  const scheduleSettledJump = useCallback(() => {
+  const scheduleSettledHardJumps = useCallback(() => {
     const jumpFocus = currentFocusRef.current;
     cancelJumpFrame();
-    jumpFrameRef.current = window.requestAnimationFrame(() => {
-      jumpFrameRef.current = undefined;
-      if (!sameChatFocus(currentFocusRef.current, jumpFocus)) return;
-      commitScrollToLatest();
-    });
-  }, [cancelJumpFrame, commitScrollToLatest]);
+    const jump = (remainingFrames: number) => {
+      jumpFrameRef.current = window.requestAnimationFrame(() => {
+        jumpFrameRef.current = undefined;
+        if (!sameChatFocus(currentFocusRef.current, jumpFocus)) return;
+        hardJumpToLatest();
+        if (remainingFrames > 1) jump(remainingFrames - 1);
+      });
+    };
+    jump(MANUAL_JUMP_SETTLE_FRAMES);
+  }, [cancelJumpFrame, hardJumpToLatest]);
   const followLatest = useCallback(() => {
     const transcript = transcriptRef.current;
     if (
@@ -456,8 +461,8 @@ export function Chat({
   const jumpToLatest = () => {
     followOutputRef.current = true;
     setShowJumpToLatest(false);
-    commitScrollToLatest();
-    scheduleSettledJump();
+    hardJumpToLatest();
+    scheduleSettledHardJumps();
   };
   const send = () => {
     const value = draft.trim();

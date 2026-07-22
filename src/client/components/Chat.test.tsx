@@ -322,7 +322,9 @@ describe("Chat", () => {
       scrollTop: {
         configurable: true,
         get: () => scrollTop,
-        set: (value: number) => { scrollTop = value; },
+        set: (value: number) => {
+          scrollTop = Math.min(value, scrollHeight - clientHeight);
+        },
       },
       scrollTo: { configurable: true, value: scrollTo },
     });
@@ -343,7 +345,7 @@ describe("Chat", () => {
     fireEvent.click(screen.getByRole("button", { name: "↓ 回到最新消息" }));
 
     expect(scrollTop).toBe(500);
-    expect(scrollTo).toHaveBeenLastCalledWith({ top: 1_000 });
+    expect(scrollTo).not.toHaveBeenCalled();
 
     scrollHeight = 1_030;
     rendered.rerender(view({
@@ -357,10 +359,10 @@ describe("Chat", () => {
       activeRun: { id: "run-1", phase: "running" },
     }));
 
-    expect(scrollTo).toHaveBeenCalledOnce();
+    expect(scrollTo).not.toHaveBeenCalled();
   });
 
-  it("commits an idle manual jump after the current layout frame settles", () => {
+  it("keeps forcing an idle manual jump while layout frames settle", () => {
     const animationCallbacks: FrameRequestCallback[] = [];
     vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
       animationCallbacks.push(callback);
@@ -396,7 +398,9 @@ describe("Chat", () => {
       scrollTop: {
         configurable: true,
         get: () => scrollTop,
-        set: (value: number) => { scrollTop = value; },
+        set: (value: number) => {
+          scrollTop = Math.min(value, scrollHeight - clientHeight);
+        },
       },
       scrollTo: { configurable: true, value: scrollTo },
     });
@@ -404,14 +408,20 @@ describe("Chat", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "↓ 回到最新消息" }));
     expect(scrollTop).toBe(500);
+    expect(scrollTo).not.toHaveBeenCalled();
 
     scrollHeight = 1_160;
     act(() => {
       animationCallbacks[0]?.(0);
     });
-
     expect(scrollTop).toBe(660);
-    expect(scrollTo).toHaveBeenLastCalledWith({ top: 1_160 });
+
+    scrollHeight = 1_300;
+    act(() => {
+      animationCallbacks[1]?.(0);
+    });
+    expect(scrollTop).toBe(800);
+    expect(scrollTo).not.toHaveBeenCalled();
   });
 
   it("reattaches only after the reader returns all the way to the bottom", () => {
