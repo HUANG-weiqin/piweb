@@ -119,6 +119,7 @@ delete_session
 - 工具闭包绑定来源 conversation 和当前 canonical project，不接受 cwd/projectId，不能跨项目。
 - Agent 只能查看和选择角色，不能 CRUD 角色、改认证/trust、换既有会话角色或模型。
 - `start_session` 必须给 role 和 task，创建平级普通/临时会话；工具指导要求 Agent 创建普通会话前先用 `list_sessions(scope=created_by_me)` 查找自己负责的现有会话，职责匹配时通过 `send_session_message` 复用，只有没有合适会话才新建。它在冻结角色、初始 task 和固定 runId 被可靠接受并调度后返回 `conversationId + runId`。目标空闲时立即取得 run ticket；若更早的 run 抢先则持久等待泵送。两种情况都不会隐式等待或挂起调用者。
+- UI 仍投影扁平会话，但宿主在 conversation metadata 与来源 delegation card 中持久保存 `rootConversationId + depth + sourceRunId`。root 深度为 0，最多委派到深度 3；一个来源 run 最多消费 4 个 peer reservation，同一 root 最多保留 16 个 live descendants。per-run 计数来自来源 JSONL 的 append-only card，目标删除、临时会话自删和重启都不能退回额度；live 容量只有 conversation 真正删除后才释放。旧 `createdBy` 链会递归推导并校验，显式谱系快照可在祖先删除后独立存活；仍依赖隐式旧谱系的 child 会阻止父会话先删，恢复中的旧 run 则把无法关联 runId 的 legacy delegation card 保守计入额度。
 - `send_session_message` 在持久接收后返回；busy 目标仍保持当前 run。若目标正在等待发送者的精确 run，则返回 `delivered_to_wait`，消息直接进入目标当前 turn，发送者仍可继续运行。
 - `wait_for_session` 绑定精确 `conversationId + runId`，先读 durable settlement，再 observe-or-subscribe；它等待“精确 run 的下一件相关事件”，可能返回 settlement，也可能先返回 `outcome=message` metadata。消息到达后若仍需最终结果，Agent 可再次等待。活动 session waiter 同时构成 wait-for graph，新增边若会形成任意长度环则在注册前拒绝；取消、异常和消息 rendezvous 都必须注销 waiter 并恢复 phase。
 - `abort_session` 只匹配精确目标 run；stale runId 不会中止后来的 run。其精确目标与已决定结果也写入来源会话的 `piweb.meta_operation.v1`，同一 tool call 在结算或重启后重放仍返回原结果；若进程在 started intent 后崩溃，恢复会先精确中止/结算该 run，再允许 inbox pump 继续。

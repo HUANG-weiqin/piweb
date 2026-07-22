@@ -35,6 +35,9 @@ import type {
 import type { PortableExtensionUI } from "./extension-ui.js";
 import { ProjectInbox } from "./project-inbox.js";
 import {
+  MAX_DELEGATION_DEPTH,
+  MAX_LIVE_DELEGATION_DESCENDANTS,
+  MAX_PEER_SESSIONS_PER_RUN,
   ProjectSessionCoordinator,
   type StartPeerSessionInput,
 } from "./project-session-coordinator.js";
@@ -4944,6 +4947,39 @@ describe("ProjectSessionCoordinator", () => {
       ).toBeUndefined();
     });
 
+    it("requires legacy implicit children to be deleted before their parent", async () => {
+      const fixture = await createFixture();
+      const role = fixture.roles.getConversationRole("default");
+      const parentId = randomUUID();
+      const childId = randomUUID();
+      await fixture.handle.project.createConversation(parentId, {
+        role,
+        lifecycle: { kind: "normal" },
+        createdBy: { kind: "user" },
+      });
+      await fixture.handle.project.createConversation(childId, {
+        role,
+        lifecycle: { kind: "normal" },
+        createdBy: {
+          kind: "conversation",
+          conversationId: parentId,
+        },
+      });
+
+      await expect(fixture.coordinator.deleteConversation(
+        fixture.handle,
+        parentId,
+      )).rejects.toThrow(/legacy child|lineage/i);
+      await expect(fixture.coordinator.deleteConversation(
+        fixture.handle,
+        childId,
+      )).resolves.toBe(true);
+      await expect(fixture.coordinator.deleteConversation(
+        fixture.handle,
+        parentId,
+      )).resolves.toBe(true);
+    });
+
     it("allows new peers from a child with explicit orchestration after its parent is deleted", async () => {
       const fixture = await createFixture();
       const source = await fixture.coordinator.createUserConversation(
@@ -5030,6 +5066,450 @@ describe("ProjectSessionCoordinator", () => {
         rootConversationId: parentId,
         depth: 2,
       });
+    });
+  });
+
+  describe("session budget limits", () => {
+    it("permits depth up to MAX_DELEGATION_DEPTH and rejects deeper", async () => {
+      const fixture = await createFixture();
+      const source = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+
+      let parentId = source.conversationId;
+      let deepest: { conversationId: string; runId: string } | undefined;
+      for (let depth = 0; depth < MAX_DELEGATION_DEPTH; depth++) {
+        const peer = await fixture.coordinator.startPeerSession(
+          fixture.handle,
+          parentId,
+          startInput({
+            task: `depth level ${depth + 1}`,
+            idempotencyKey: `budget-depth-${depth}`,
+          }),
+        );
+        deepest = peer;
+        parentId = peer.conversationId;
+      }
+
+      const exceeded = startInput({
+        task: "one level too deep",
+        idempotencyKey: "budget-depth-exceeded",
+      });
+      await expect(fixture.coordinator.startPeerSession(
+        fixture.handle,
+        parentId,
+        exceeded,
+      )).rejects.toThrow(/depth|maximum/i);
+
+      // No card on deepest parent.
+      const deepestActor = await fixture.coordinator.openConversation(
+        fixture.handle,
+        deepest!.conversationId,
+        { updateRecent: false },
+      );
+      expect(aggregateReservedConversationEntries(
+        deepestActor.sessionManager.getEntries(),
+      ).cards.find(({ body }) => body === exceeded.task)).toBeUndefined();
+
+      // No target conversation created.
+      const expectedId = deterministicTestUuid(
+        "piweb.start.conversation",
+        exceeded.idempotencyKey,
+      );
+      expect((await fixture.coordinator.listSessions(fixture.handle))
+        .find(({ id }) => id === expectedId)).toBeUndefined();
+    });
+
+    it("enforces MAX_PEER_SESSIONS_PER_RUN within one run; delete doesn't free slot", async () => {
+      const fixture = await createFixture();
+      const source = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const peerIds: string[] = [];
+      let fifthError: unknown;
+      let retriedConversationId: string | undefined;
+
+      fixture.runtime.control(source.conversationId).enqueue(
+        async (control) => {
+          for (let index = 0; index < MAX_PEER_SESSIONS_PER_RUN; index++) {
+            const peer = await executeTool(
+              control,
+              "start_session",
+              `budget-run-${index}`,
+              {
+                roleId: "default",
+                task: `peer-${index}`,
+                temporary: false,
+              },
+            ) as { conversationId: string };
+            peerIds.push(peer.conversationId);
+          }
+          await waitUntil(async () => (
+            (await fixture.coordinator.listSessions(fixture.handle))
+              .find(({ id }) => id === peerIds[0])?.activity?.kind === "idle"
+          ), "the first budget peer to become idle");
+          await fixture.coordinator.deleteConversation(
+            fixture.handle,
+            peerIds[0]!,
+          );
+          try {
+            await executeTool(
+              control,
+              "start_session",
+              "budget-run-exceeded",
+              {
+                roleId: "default",
+                task: "deletion must not free the run budget",
+                temporary: false,
+              },
+            );
+          } catch (error) {
+            fifthError = error;
+          }
+          const retry = await executeTool(
+            control,
+            "start_session",
+            "budget-run-0",
+            {
+              roleId: "default",
+              task: "peer-0",
+              temporary: false,
+            },
+          ) as { conversationId: string };
+          retriedConversationId = retry.conversationId;
+          control.emitFinal("same-run budget checked");
+        },
+      );
+
+      const settlement = await fixture.coordinator.prompt(
+        fixture.handle,
+        source.conversationId,
+        randomUUID(),
+        "exercise one run budget",
+      );
+      expect(settlement.outcome).toBe("completed");
+      expect(fifthError).toBeInstanceOf(Error);
+      expect((fifthError as Error).message).toMatch(/limit|maximum/i);
+      expect(retriedConversationId).toBe(peerIds[0]);
+
+      let freshConversationId: string | undefined;
+      fixture.runtime.control(source.conversationId).enqueue(
+        async (control) => {
+          const fresh = await executeTool(
+            control,
+            "start_session",
+            "fresh-run-peer",
+            {
+              roleId: "default",
+              task: "a fresh run has a fresh budget",
+              temporary: false,
+            },
+          ) as { conversationId: string };
+          freshConversationId = fresh.conversationId;
+          control.emitFinal("fresh run accepted");
+        },
+      );
+      const freshSettlement = await fixture.coordinator.prompt(
+        fixture.handle,
+        source.conversationId,
+        randomUUID(),
+        "exercise a fresh run budget",
+      );
+      expect(freshSettlement.outcome).toBe("completed");
+      expect(freshConversationId).toEqual(expect.any(String));
+    });
+
+    it("enforces MAX_LIVE_DELEGATION_DESCENDANTS and allows creation after deletion", async () => {
+      const fixture = await createFixture();
+      const source = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+
+      const peerIds: string[] = [];
+      for (let i = 0; i < MAX_LIVE_DELEGATION_DESCENDANTS; i++) {
+        const peer = await fixture.coordinator.startPeerSession(
+          fixture.handle,
+          source.conversationId,
+          startInput({
+            task: `live-descendant-${i}`,
+            idempotencyKey: `live-descendant-${i}`,
+          }),
+        );
+        peerIds.push(peer.conversationId);
+      }
+
+      const exceeded = startInput({
+        task: "too many descendants",
+        idempotencyKey: "live-descendant-exceeded",
+      });
+      await expect(fixture.coordinator.startPeerSession(
+        fixture.handle,
+        source.conversationId,
+        exceeded,
+      )).rejects.toThrow(/limit|maximum/i);
+
+      // Delete one descendant → now creation succeeds.
+      await fixture.coordinator.deleteConversation(
+        fixture.handle,
+        peerIds[0]!,
+      );
+      const afterDeletion = await fixture.coordinator.startPeerSession(
+        fixture.handle,
+        source.conversationId,
+        startInput({
+          task: "after descendant deletion",
+          idempotencyKey: "live-descendant-after-delete",
+        }),
+      );
+      expect(afterDeletion).toMatchObject({ conversationId: expect.any(String) });
+    });
+
+    it("keeps a reserved but failed deletion in the live descendant count", async () => {
+      const fixture = await createFixture();
+      const source = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const peerIds: string[] = [];
+      for (let index = 0; index < MAX_LIVE_DELEGATION_DESCENDANTS; index++) {
+        const peer = await fixture.coordinator.startPeerSession(
+          fixture.handle,
+          source.conversationId,
+          startInput({
+            task: `reserved-delete-peer-${index}`,
+            idempotencyKey: `reserved-delete-peer-${index}`,
+          }),
+        );
+        peerIds.push(peer.conversationId);
+      }
+      const busyStarted = deferred();
+      const releaseBusy = deferred();
+      fixture.runtime.control(peerIds[0]!).enqueue(
+        blocksUntil(busyStarted, releaseBusy, "busy descendant finished"),
+      );
+      const busyCompletion = fixture.coordinator.prompt(
+        fixture.handle,
+        peerIds[0]!,
+        randomUUID(),
+        "stay busy during deletion",
+      );
+      await busyStarted.promise;
+
+      const exceededInput = startInput({
+        task: "reservation must not free a slot",
+        idempotencyKey: "reserved-delete-exceeded",
+      });
+      const results = await Promise.allSettled([
+        fixture.coordinator.startPeerSession(
+          fixture.handle,
+          source.conversationId,
+          exceededInput,
+        ),
+        fixture.coordinator.deleteConversation(
+          fixture.handle,
+          peerIds[0]!,
+        ),
+      ]);
+      expect(results.map(({ status }) => status)).toEqual([
+        "rejected",
+        "rejected",
+      ]);
+      expect(
+        results[0]?.status === "rejected"
+          ? String(results[0].reason)
+          : "",
+      ).toMatch(/limit|maximum/i);
+      expect(
+        results[1]?.status === "rejected"
+          ? String(results[1].reason)
+          : "",
+      ).toMatch(/busy|compacting/i);
+      const exceededId = deterministicTestUuid(
+        "piweb.start.conversation",
+        exceededInput.idempotencyKey,
+      );
+      expect((await fixture.coordinator.listSessions(fixture.handle))
+        .some(({ id }) => id === exceededId)).toBe(false);
+
+      releaseBusy.resolve();
+      await busyCompletion;
+    });
+
+    it("rejects a failed sending precommit that would exceed the live cap on replay after restart", async () => {
+      const fixture = await createFixture();
+      const source = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+
+      // Precommit: write sending card for K, crash before target creation.
+      let failNextTarget = true;
+      const precommitInput = startInput({
+        task: "precommit-K",
+        idempotencyKey: "precommit-K-replay",
+      });
+      fixture.runtime.beforeCreateSession = async (conversationId) => {
+        if (conversationId !== source.conversationId && failNextTarget) {
+          failNextTarget = false;
+          throw new Error("simulated crash after precommit");
+        }
+      };
+      await expect(fixture.coordinator.startPeerSession(
+        fixture.handle, source.conversationId, precommitInput,
+      )).rejects.toThrow("simulated crash after precommit");
+
+      await fixture.coordinator.close();
+
+      // Re-create coordinator and fill MAX_LIVE_DELEGATION_DESCENDANTS.
+      const restarted = new ProjectSessionCoordinator(
+        fixture.runtime, fixture.roles, fixture.registry,
+      );
+      const handle = await restarted.acquireProject(fixture.cwd, "full_access");
+      await restarted.openConversation(handle, source.conversationId, { updateRecent: false });
+
+      for (let i = 0; i < MAX_LIVE_DELEGATION_DESCENDANTS; i++) {
+        await restarted.startPeerSession(
+          handle, source.conversationId,
+          startInput({ task: `filler-${i}`, idempotencyKey: `filler-${i}` }),
+        );
+      }
+
+      // Replay K — must be rejected (live cap exceeded).
+      await expect(restarted.startPeerSession(
+        handle, source.conversationId, precommitInput,
+      )).rejects.toThrow(/limit|maximum/i);
+
+      // No second card was created.
+      const sourceActor = await restarted.openConversation(
+        handle, source.conversationId, { updateRecent: false },
+      );
+      const sendingCards = aggregateReservedConversationEntries(
+        sourceActor.sessionManager.getEntries(),
+      ).cards.filter(({ body }) => body === precommitInput.task);
+      expect(sendingCards).toHaveLength(1);
+
+      await restarted.close();
+    });
+
+    it("charges terminal legacy cards to a recovered source run after restart", async () => {
+      const fixture = await createFixture();
+      const source = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const runId = randomUUID();
+      appendReservedCustomEntry(
+        source.sessionManager,
+        createConversationCardEntry({
+          cardId: randomUUID(),
+          kind: "delegation_task",
+          body: "run-correlated delegation",
+          fromSnapshot: {
+            conversationId: source.conversationId,
+            role: { id: "default", name: "Default" },
+          },
+          toSnapshot: {
+            conversationId: randomUUID(),
+            role: { id: "default", name: "Default" },
+          },
+          state: "completed",
+          messageId: randomUUID(),
+          delegationId: randomUUID(),
+          orchestration: {
+            rootConversationId: source.conversationId,
+            depth: 1,
+            sourceRunId: runId,
+          },
+          updatedAt: "2026-07-19T10:00:00.000Z",
+        }),
+      );
+      const legacyStates = ["completed", "failed", "aborted"] as const;
+      for (const [index, state] of legacyStates.entries()) {
+        appendReservedCustomEntry(
+          source.sessionManager,
+          createConversationCardEntry({
+            cardId: randomUUID(),
+            kind: "delegation_task",
+            body: `legacy ${state} delegation`,
+            fromSnapshot: {
+              conversationId: source.conversationId,
+              role: { id: "default", name: "Default" },
+            },
+            toSnapshot: {
+              conversationId: randomUUID(),
+              role: { id: "default", name: "Default" },
+            },
+            state,
+            messageId: randomUUID(),
+            delegationId: randomUUID(),
+            updatedAt: `2026-07-19T10:0${index + 1}:00.000Z`,
+          }),
+        );
+      }
+
+      await fixture.coordinator.close();
+      const restarted = new ProjectSessionCoordinator(
+        fixture.runtime,
+        fixture.roles,
+        fixture.registry,
+      );
+      const handle = await restarted.acquireProject(fixture.cwd, "full_access");
+      const sourceActor = await restarted.openConversation(
+        handle,
+        source.conversationId,
+        { updateRecent: false },
+      );
+
+      let journalOutcome: string | undefined;
+      fixture.runtime.control(source.conversationId).enqueue(
+        async (control) => {
+          const exceeded = executeTool(
+            control,
+            "start_session",
+            "journal-exceeded",
+            {
+              roleId: "default",
+              task: "journal limit",
+              temporary: false,
+            },
+          );
+          await expect(exceeded).rejects.toThrow(/limit|maximum/i);
+          journalOutcome = "blocked";
+          control.emitFinal("journal recovery verified");
+        },
+      );
+      expect((await sourceActor.resumeMessages({ runId })).outcome)
+        .toBe("completed");
+      expect(journalOutcome).toBe("blocked");
+
+      let freshConversationId: string | undefined;
+      fixture.runtime.control(source.conversationId).enqueue(
+        async (control) => {
+          const fresh = await executeTool(
+            control,
+            "start_session",
+            "post-recovery-fresh-run",
+            {
+              roleId: "default",
+              task: "legacy cards do not poison future runs",
+              temporary: false,
+            },
+          ) as { conversationId: string };
+          freshConversationId = fresh.conversationId;
+          control.emitFinal("fresh run accepted");
+        },
+      );
+      expect((await restarted.prompt(
+        handle,
+        source.conversationId,
+        randomUUID(),
+        "start a fresh run",
+      )).outcome).toBe("completed");
+      expect(freshConversationId).toEqual(expect.any(String));
+      await restarted.close();
     });
   });
 });

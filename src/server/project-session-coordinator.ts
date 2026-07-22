@@ -68,6 +68,10 @@ import {
 
 const MAX_BATCH_MESSAGES = 8;
 const MAX_COMPLETION_CACHE = 256;
+
+export const MAX_PEER_SESSIONS_PER_RUN = 4;
+export const MAX_DELEGATION_DEPTH = 3;
+export const MAX_LIVE_DELEGATION_DESCENDANTS = 16;
 const INBOX_LIFECYCLE_GUIDANCE = [
   "生命周期提醒：你负责管理自己创建的会话生命周期；普通会话不会被系统自动终止或删除。",
   "收到结果后，请自行决定继续工作、等待运行、终止活动运行或删除空闲会话。临时会话仅在成功回传后自动删除，失败时会保留。",
@@ -979,9 +983,13 @@ export class ProjectSessionCoordinator {
       );
       const requestFingerprint = startRequestFingerprint(input);
 
-      let existingCard = aggregateReservedConversationEntries(
+      // Snapshot source cards once before any writes — used for per-run budget.
+      const sourceAggregate = aggregateReservedConversationEntries(
         source.sessionManager.getEntries(),
-      ).cards.find((card) => card.cardId === cardId);
+      );
+      let existingCard = sourceAggregate.cards.find(
+        (card) => card.cardId === cardId,
+      );
       let recoveredEnvelope = existingCard
         ? await context.inbox.get(messageId)
         : undefined;
@@ -1014,28 +1022,92 @@ export class ProjectSessionCoordinator {
           "start_session idempotency key conflicts with an earlier request",
         );
       }
-      let childOrchestration: ConversationOrchestration | undefined =
-        existingCard?.orchestration;
+
+      // Hydrate once before any orchestration resolution or budget checks.
+      await this.hydrateConversationProfiles(context);
+      this.throwIfAborted(signal);
+
+      // Determine child orchestration — prefer card snapshot on recovery.
+      let childOrchestration = existingCard?.orchestration;
       if (!childOrchestration) {
-        await this.hydrateConversationProfiles(context);
-        this.throwIfAborted(signal);
-        const sourceOrchestration = this.resolveOrchestration(
+        const sourceOrch = this.resolveOrchestration(
           context,
           sourceConversationId,
           source.profile,
         );
         const sourceRunOwnership = source.currentRunOwnership();
         childOrchestration = {
-          rootConversationId: sourceOrchestration.rootConversationId,
-          depth: sourceOrchestration.depth + 1,
+          rootConversationId: sourceOrch.rootConversationId,
+          depth: sourceOrch.depth + 1,
           ...(sourceRunOwnership
             ? { sourceRunId: sourceRunOwnership.runId }
             : {}),
         };
       }
 
-      // Persist the allocation before target creation so crash recovery uses
-      // the same lineage and source run.
+      // Determine whether a new target needs to be created.
+      let target = context.actors.get(conversationId);
+      const targetExistsOnDisk = target !== undefined
+        || context.project.listConversations()
+          .some(({ id }) => id === conversationId);
+      const needsTargetCreation = !target && !targetExistsOnDisk;
+
+      // Budget checks apply when this intent will consume a slot:
+      //   - new start (no existing card)
+      //   - sending recovery where the target was never created
+      // If the target already exists, the slot was already consumed.
+      if (
+        !existingCard
+        || (existingCard.state === "sending" && needsTargetCreation)
+      ) {
+        // Depth check.
+        if (childOrchestration.depth > MAX_DELEGATION_DEPTH) {
+          throw new Error(
+            `Delegation depth ${childOrchestration.depth} exceeds maximum ${MAX_DELEGATION_DEPTH}`,
+          );
+        }
+
+        // Per-run budget from append-only source delegation cards.
+        const sourceRunId = childOrchestration.sourceRunId;
+        if (sourceRunId) {
+          const runCardCount = sourceAggregate.cards.filter(
+            (card) => card.kind === "delegation_task"
+              && card.orchestration?.sourceRunId === sourceRunId,
+          ).length;
+          const activeSourceRun = source.currentRunOwnership(sourceRunId);
+          const legacyRecoveredCount = activeSourceRun?.recovered
+            ? sourceAggregate.cards.filter(
+                (card) => card.kind === "delegation_task"
+                  && card.orchestration === undefined,
+              ).length
+            : 0;
+          const existingCount = runCardCount + legacyRecoveredCount;
+          const totalCount = !existingCard
+            ? existingCount + 1
+            : existingCount;
+          if (totalCount > MAX_PEER_SESSIONS_PER_RUN) {
+            throw new Error(
+              `Peer session limit ${MAX_PEER_SESSIONS_PER_RUN} reached for this run`,
+            );
+          }
+        }
+
+        // Live descendant cap (only when new target is about to be created).
+        if (needsTargetCreation) {
+          const liveDescendants = this.countLiveDelegationDescendants(
+            context,
+            childOrchestration.rootConversationId,
+          );
+          this.throwIfAborted(signal);
+          if (liveDescendants >= MAX_LIVE_DELEGATION_DESCENDANTS) {
+            throw new Error(
+              `Live descendant session limit ${MAX_LIVE_DELEGATION_DESCENDANTS} reached`,
+            );
+          }
+        }
+      }
+
+      // Write sending card for new intents only.
       if (!existingCard) {
         const sentAt = this.now().toISOString();
         existingCard = {
@@ -1062,11 +1134,8 @@ export class ProjectSessionCoordinator {
         this.appendCard(source, existingCard);
       }
 
-      let target = context.actors.get(conversationId);
       if (!target) {
-        const known = context.project.listConversations()
-          .some(({ id }) => id === conversationId);
-        if (known) {
+        if (targetExistsOnDisk) {
           target = await this.getOrOpenActor(context, conversationId);
         } else {
           const profile: ConversationMeta = {
@@ -1111,7 +1180,6 @@ export class ProjectSessionCoordinator {
           "start_session idempotency key conflicts with an existing conversation",
         );
       }
-      // If the card carries orchestration, the target profile must match.
       if (
         existingCard?.orchestration
         && JSON.stringify(target.profile.orchestration)
@@ -1892,6 +1960,38 @@ export class ProjectSessionCoordinator {
   }
 
   /**
+   * Synchronous count of live delegation descendants sharing the given
+   * rootConversationId. Caller must have run hydrateConversationProfiles()
+   * first so profiles are loaded for all project conversations.
+   */
+  private countLiveDelegationDescendants(
+    context: ProjectContext,
+    rootConversationId: string,
+  ): number {
+    const summaries = context.project.listConversations();
+    let count = 0;
+    for (const summary of summaries) {
+      if (summary.id === rootConversationId) continue;
+      const profile = context.actors.get(summary.id)?.profile
+        ?? context.profiles.get(summary.id);
+      if (!profile) continue;
+      try {
+        const resolved = this.resolveOrchestration(
+          context,
+          summary.id,
+          profile,
+        );
+        if (resolved.rootConversationId === rootConversationId) count++;
+      } catch {
+        // Unknown lineage may belong to any root, so conservatively reserve
+        // one slot instead of either blocking unrelated roots or failing open.
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /**
    * Ensure profiles for all project conversations are loaded into
    * context.profiles. Never opens an AgentSession or changes the
    * project's recent-conversation pointer.
@@ -2604,6 +2704,10 @@ export class ProjectSessionCoordinator {
     if (target.getActivity().kind !== "idle") {
       throw new Error(`Conversation is already running: ${target.conversationId}`);
     }
+    const recoveredBatch = envelopes.some((envelope) => (
+      envelope.state === "processing"
+      && envelope.processingRunId === runId
+    ));
     for (const envelope of envelopes) {
       if (
         envelope.state !== "processing"
@@ -2633,6 +2737,7 @@ export class ProjectSessionCoordinator {
         ? target.resumeMessages({ runId })
         : target.startMessages({
             runId,
+            recovered: recoveredBatch,
             messages: undelivered.map((envelope) => {
               const message = this.createDeliveredMessageEntry(
                 target,
@@ -3506,6 +3611,21 @@ export class ProjectSessionCoordinator {
     let deletionLease;
     let durableDeletionIntent = false;
     try {
+      await this.hydrateConversationProfiles(context);
+      const implicitChildren = context.project.listConversations()
+        .filter(({ id }) => id !== conversationId)
+        .filter(({ id }) => {
+          const profile = context.actors.get(id)?.profile
+            ?? context.profiles.get(id);
+          return profile?.createdBy.kind === "conversation"
+            && profile.createdBy.conversationId === conversationId
+            && profile.orchestration === undefined;
+        });
+      if (implicitChildren.length > 0) {
+        throw new Error(
+          "Cannot delete a conversation while legacy child sessions still depend on its unstored orchestration lineage",
+        );
+      }
       await context.inbox.markTargetDeleted(
         conversationId,
         this.now().toISOString(),

@@ -1181,6 +1181,7 @@ describe("ConversationActor", () => {
     });
     await fixture.actor.startMessages({
       runId: RUN_A,
+      recovered: false,
       messages: [
         {
           content: "First durable message",

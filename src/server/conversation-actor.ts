@@ -146,6 +146,7 @@ export interface StartConversationPrompt {
 export interface StartConversationMessages {
   runId: string;
   messages: Array<Omit<ConversationMessageEntry, "customType">>;
+  recovered: boolean;
 }
 
 export interface ResumeConversationMessages {
@@ -167,6 +168,7 @@ export interface ConversationRunOwnership {
   readonly conversationId: string;
   readonly runId: string;
   readonly origin: ConversationRunOrigin;
+  readonly recovered: boolean;
   readonly [RUN_OWNERSHIP]: symbol;
 }
 
@@ -634,6 +636,7 @@ export class ConversationActor {
       {
         runId: input.runId,
         origin: input.origin,
+        recovered: false,
       },
       (ticket) => this.session.prompt(input.text, {
         preflightResult: (accepted) => {
@@ -656,6 +659,7 @@ export class ConversationActor {
       {
         runId: input.runId,
         origin: "inbox",
+        recovered: input.recovered,
       },
       async () => {
         for (let index = 0; index < messages.length; index += 1) {
@@ -725,6 +729,7 @@ export class ConversationActor {
       {
         runId: input.runId,
         origin: "inbox",
+        recovered: true,
       },
       () => this.session.sendCustomMessage({
         customType: "workbench.inbox_resume.v1",
@@ -742,6 +747,7 @@ export class ConversationActor {
     input: {
       runId: string;
       origin: ConversationRunOrigin;
+      recovered: boolean;
     },
     execute: (ticket: RunTicket) => Promise<void>,
   ): Promise<RunSettlement> {
@@ -764,6 +770,7 @@ export class ConversationActor {
       conversationId: this.conversationId,
       runId: input.runId,
       origin: input.origin,
+      recovered: input.recovered,
       [RUN_OWNERSHIP]: Symbol(input.runId),
     });
     const ticket: RunTicket = {
