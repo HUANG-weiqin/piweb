@@ -276,6 +276,8 @@ export function Chat({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const followOutputRef = useRef(true);
   const lastScrollTopRef = useRef(0);
+  const jumpFrameRef = useRef<number | undefined>(undefined);
+  const currentFocusRef = useRef<ChatState["focus"]>(chat.focus);
   const positionedFocusRef = useRef<ChatState["focus"]>(undefined);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [roleDetailsOpen, setRoleDetailsOpen] = useState(false);
@@ -359,6 +361,26 @@ export function Chat({
     if (!transcript) return;
     scrollTranscript(transcript.scrollHeight, behavior);
   }, [scrollTranscript]);
+  const cancelJumpFrame = useCallback(() => {
+    if (jumpFrameRef.current === undefined) return;
+    window.cancelAnimationFrame(jumpFrameRef.current);
+    jumpFrameRef.current = undefined;
+  }, []);
+  const commitScrollToLatest = useCallback(() => {
+    scrollToLatest();
+    if (transcriptRef.current) {
+      lastScrollTopRef.current = transcriptRef.current.scrollTop;
+    }
+  }, [scrollToLatest]);
+  const scheduleSettledJump = useCallback(() => {
+    const jumpFocus = currentFocusRef.current;
+    cancelJumpFrame();
+    jumpFrameRef.current = window.requestAnimationFrame(() => {
+      jumpFrameRef.current = undefined;
+      if (!sameChatFocus(currentFocusRef.current, jumpFocus)) return;
+      commitScrollToLatest();
+    });
+  }, [cancelJumpFrame, commitScrollToLatest]);
   const followLatest = useCallback(() => {
     const transcript = transcriptRef.current;
     if (
@@ -376,6 +398,7 @@ export function Chat({
     );
   }, [scrollTranscript]);
   useLayoutEffect(() => {
+    currentFocusRef.current = chat.focus;
     const focusNeedsInitialPosition = chat.focus
       && !sameChatFocus(positionedFocusRef.current, chat.focus);
     if (focusNeedsInitialPosition) {
@@ -395,6 +418,7 @@ export function Chat({
       lastScrollTopRef.current = transcriptRef.current.scrollTop;
     }
   }, [chat, compacting, conversationReady, followLatest, scrollToLatest]);
+  useEffect(() => cancelJumpFrame, [cancelJumpFrame]);
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
@@ -429,7 +453,8 @@ export function Chat({
   const jumpToLatest = () => {
     followOutputRef.current = true;
     setShowJumpToLatest(false);
-    scrollToLatest();
+    commitScrollToLatest();
+    scheduleSettledJump();
   };
   const send = () => {
     const value = draft.trim();

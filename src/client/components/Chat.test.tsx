@@ -360,6 +360,60 @@ describe("Chat", () => {
     expect(scrollTo).toHaveBeenCalledOnce();
   });
 
+  it("commits an idle manual jump after the current layout frame settles", () => {
+    const animationCallbacks: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
+      animationCallbacks.push(callback);
+      return animationCallbacks.length;
+    }));
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const firstChat: ChatState = {
+      messages: [{
+        id: "assistant-1",
+        runId: "run-1",
+        role: "assistant",
+        text: "final answer",
+        thinking: "",
+        tools: [],
+      }],
+      sessionTokens: 0,
+    };
+    render(view(firstChat));
+    const transcript = document.querySelector<HTMLElement>(".transcript");
+    if (!transcript) throw new Error("transcript not rendered");
+    let scrollHeight = 1_000;
+    let scrollTop = 100;
+    const clientHeight = 500;
+    const scrollTo = vi.fn((options: ScrollToOptions) => {
+      scrollTop = Math.min(
+        Number(options.top ?? 0),
+        scrollHeight - clientHeight,
+      );
+    });
+    Object.defineProperties(transcript, {
+      scrollHeight: { configurable: true, get: () => scrollHeight },
+      clientHeight: { configurable: true, value: clientHeight },
+      scrollTop: {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value: number) => { scrollTop = value; },
+      },
+      scrollTo: { configurable: true, value: scrollTo },
+    });
+    fireEvent.wheel(transcript, { deltaY: -4 });
+
+    fireEvent.click(screen.getByRole("button", { name: "↓ 回到最新消息" }));
+    expect(scrollTop).toBe(500);
+
+    scrollHeight = 1_160;
+    act(() => {
+      animationCallbacks[0]?.(0);
+    });
+
+    expect(scrollTop).toBe(660);
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 1_160 });
+  });
+
   it("reattaches only after the reader returns all the way to the bottom", () => {
     render(view(emptyChat));
     const transcript = document.querySelector<HTMLElement>(".transcript");
