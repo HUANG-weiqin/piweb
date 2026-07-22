@@ -19,7 +19,10 @@ export function supportedThinkingLevels(
   model: ThinkingCapableModel,
 ): ThinkingLevel[] {
   if (!model.reasoning) return ["off"];
-  return THINKING_LEVELS.filter((level) => (
-    model.thinkingLevelMap?.[level] !== null
-  ));
+  return THINKING_LEVELS.filter((level) => {
+    const mapped = model.thinkingLevelMap?.[level];
+    if (mapped === null) return false;
+    if (level === "xhigh" || level === "max") return mapped !== undefined;
+    return true;
+  });
 }

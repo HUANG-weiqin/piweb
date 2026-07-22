@@ -20,8 +20,33 @@ describe("buildPublicProviders", () => {
     });
     expect(providers.find((provider) => provider.id === "openai")?.models[0].available).toBe(true);
     expect(providers.find((provider) => provider.id === "openai")?.models[0].thinkingLevels)
-      .toEqual(["off", "minimal", "low", "medium", "high", "xhigh"]);
+      .toEqual(["off", "minimal", "low", "medium", "high"]);
     expect(providers.find((provider) => provider.id === "openai-codex")?.oauth).toBe(true);
     expect(JSON.stringify(providers)).not.toContain("secret");
+  });
+
+  it("matches Pi thinking-level support for sparse model maps", () => {
+    const providers = buildPublicProviders({
+      models: [{
+        provider: "opencode",
+        id: "deepseek-v4-pro",
+        name: "DeepSeek V4 Pro",
+        reasoning: true,
+        thinkingLevelMap: {
+          minimal: null,
+          low: null,
+          medium: null,
+          high: "high",
+          max: "max",
+        },
+      }],
+      availableKeys: new Set(["opencode/deepseek-v4-pro"]),
+      oauthProviders: new Map(),
+      displayName: () => "OpenCode",
+      authStatus: () => ({ configured: true }),
+    });
+
+    expect(providers[0]?.models[0]?.thinkingLevels)
+      .toEqual(["off", "high", "max"]);
   });
 });

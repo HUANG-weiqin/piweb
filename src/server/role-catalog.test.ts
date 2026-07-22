@@ -241,6 +241,15 @@ describe("RoleCatalog", () => {
       toolMode: "read_only",
       canManageSessions: false,
     })).rejects.toThrow("does not support thinking level max");
+    await expect(catalog.createRole({
+      name: "Unsupported extended thinking",
+      description: "",
+      systemPrompt: "",
+      model: model("provider", "limited"),
+      defaultThinkingLevel: "xhigh",
+      toolMode: "read_only",
+      canManageSessions: false,
+    })).rejects.toThrow("does not support thinking level xhigh");
 
     const created = await catalog.createRole({
       name: "Supported thinking",
