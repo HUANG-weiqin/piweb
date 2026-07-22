@@ -159,6 +159,8 @@ export interface ConversationWaitingTarget {
 }
 
 const RUN_OWNERSHIP = Symbol("ConversationActor.runOwnership");
+// Avoid retrying every tool boundary without disabling protection for a long run.
+const COMPACTION_RETRY_GROWTH_PERCENT = 5;
 
 /**
  * An opaque capability for the currently executing run. A stale capability can
@@ -192,6 +194,7 @@ interface RunTicket {
   extensionErrorMessage?: string;
   sawSdkCompactionAttempt: boolean;
   compactionErrorReported: boolean;
+  compactionRetryAtPercent?: number;
   sdkCompactionSucceeded: boolean;
   turnBoundaryCompactionRequested: boolean;
   abortPromise?: Promise<void>;
@@ -1045,23 +1048,16 @@ export class ConversationActor {
   }
 
   private async compactAtThreshold(ticket: RunTicket): Promise<void> {
-    if (ticket.sawSdkCompactionAttempt || ticket.compactionErrorReported) return;
+    if (ticket.sawSdkCompactionAttempt) return;
     const usage = this.session.getContextUsage?.();
     this.emitContextUsage();
     if (
       usage?.percent === null
       || usage?.percent === undefined
       || usage.percent < this.compactionThresholdPercent
+      || !this.isCompactionAttemptDue(ticket, usage.percent)
     ) return;
-    try {
-      await this.compactSession();
-    } catch (error) {
-      if (isCancelling(ticket)) return;
-      if (!ticket.compactionErrorReported) {
-        ticket.compactionErrorReported = true;
-        this.emitError(error, ticket.id);
-      }
-    }
+    await this.attemptHostCompaction(ticket);
   }
 
   private async compactRequestedTurnBoundary(ticket: RunTicket): Promise<void> {
@@ -1072,14 +1068,47 @@ export class ConversationActor {
       }
       return;
     }
-    if (ticket.compactionErrorReported) return;
+    const percent = this.session.getContextUsage?.()?.percent;
+    if (!this.isCompactionAttemptDue(ticket, percent)) return;
+    await this.attemptHostCompaction(ticket);
+  }
+
+  private async attemptHostCompaction(ticket: RunTicket): Promise<void> {
+    ticket.compactionErrorReported = false;
     try {
       await this.compactSession();
+      this.recordCompactionSuccess(ticket);
     } catch (error) {
       if (isCancelling(ticket)) return;
-      ticket.compactionErrorReported = true;
-      this.emitError(error, ticket.id);
+      this.recordCompactionFailure(ticket);
+      if (!ticket.compactionErrorReported) {
+        ticket.compactionErrorReported = true;
+        this.emitError(error, ticket.id);
+      }
     }
+  }
+
+  private isCompactionAttemptDue(
+    ticket: RunTicket,
+    percent: number | null | undefined,
+  ): boolean {
+    const retryAt = ticket.compactionRetryAtPercent;
+    return retryAt === undefined
+      || (percent !== null && percent !== undefined && percent >= retryAt);
+  }
+
+  private recordCompactionFailure(ticket: RunTicket): void {
+    const percent = this.session.getContextUsage?.()?.percent;
+    const failedAt = percent ?? this.compactionThresholdPercent;
+    ticket.compactionRetryAtPercent = Math.max(
+      ticket.compactionRetryAtPercent ?? 0,
+      failedAt + COMPACTION_RETRY_GROWTH_PERCENT,
+    );
+  }
+
+  private recordCompactionSuccess(ticket: RunTicket): void {
+    ticket.compactionErrorReported = false;
+    ticket.compactionRetryAtPercent = undefined;
   }
 
   private async compactSession(reserved = false): Promise<void> {
@@ -1242,27 +1271,30 @@ export class ConversationActor {
     if (event.type === "compaction_start") {
       if (ticket && !this.hostCompactionInProgress) {
         ticket.sawSdkCompactionAttempt = true;
+        ticket.sdkCompactionSucceeded = false;
+        ticket.compactionErrorReported = false;
       }
       this.updateCompacting(true);
     } else if (event.type === "compaction_end") {
       this.updateCompacting(false);
-      if (
-        ticket
-        && !this.hostCompactionInProgress
-        && event.result !== undefined
-        && !event.aborted
-      ) {
+      const sdkOwned = ticket && !this.hostCompactionInProgress;
+      if (sdkOwned && event.result !== undefined && !event.aborted) {
         ticket.sdkCompactionSucceeded = true;
+        this.recordCompactionSuccess(ticket);
         if (!ticket.turnBoundaryCompactionRequested) {
           ticket.sawSdkCompactionAttempt = false;
           ticket.sdkCompactionSucceeded = false;
         }
+      } else if (sdkOwned && !event.willRetry) {
+        ticket.sawSdkCompactionAttempt = false;
+        if (!isCancelling(ticket)) this.recordCompactionFailure(ticket);
       }
       if (
         ticket
         && event.errorMessage
         && !event.aborted
         && !event.willRetry
+        && !ticket.compactionErrorReported
       ) {
         ticket.compactionErrorReported = true;
         this.emitError(event.errorMessage, ticket.id);
@@ -1373,7 +1405,6 @@ export class ConversationActor {
       || isCancelling(ticket)
       || !input.hasToolResults
       || ticket.sawSdkCompactionAttempt
-      || ticket.compactionErrorReported
     ) {
       return false;
     }
@@ -1382,6 +1413,7 @@ export class ConversationActor {
       percent === null
       || percent === undefined
       || percent < this.compactionThresholdPercent
+      || !this.isCompactionAttemptDue(ticket, percent)
     ) {
       return false;
     }

@@ -347,6 +347,13 @@ function nativeEvent(value: unknown): AgentSessionEvent {
   return value as AgentSessionEvent;
 }
 
+function checkToolTurnBoundary(runtime: FakeRuntime): boolean {
+  return Boolean(runtime.createOptions?.turnBoundaryCheck?.({
+    contextUsage: runtime.session.getContextUsage(),
+    hasToolResults: true,
+  }));
+}
+
 describe("ConversationActor", () => {
   it("persists and triggers a per-conversation compaction threshold", async () => {
     const fixture = await openActor();
@@ -625,6 +632,50 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
+  it("retries a transient compaction failure after context grows", async () => {
+    const fixture = await openActor();
+    const boundaryDecisions: boolean[] = [];
+    let attempt = 0;
+    fixture.runtime.session.promptImplementation = async () => {
+      fixture.runtime.session.contextPercent = 75;
+      boundaryDecisions.push(checkToolTurnBoundary(fixture.runtime));
+    };
+    fixture.runtime.session.compactImplementation = async () => {
+      attempt++;
+      if (attempt === 1) throw new Error("transient summary failure");
+      return {};
+    };
+    fixture.runtime.session.resumeImplementation = async () => {
+      if (fixture.runtime.session.resumeCalls === 1) {
+        fixture.runtime.session.contextPercent = 79;
+        boundaryDecisions.push(checkToolTurnBoundary(fixture.runtime));
+        fixture.runtime.session.contextPercent = 81;
+        boundaryDecisions.push(checkToolTurnBoundary(fixture.runtime));
+      } else {
+        fixture.runtime.session.contextPercent = 20;
+      }
+    };
+
+    const settlement = await fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "keep a long task below the context ceiling",
+      origin: "browser",
+    });
+
+    expect(settlement.outcome).toBe("completed");
+    expect(boundaryDecisions).toEqual([true, false, true]);
+    expect(fixture.runtime.session.compactCalls).toBe(2);
+    expect(fixture.runtime.session.resumeCalls).toBe(2);
+    expect(fixture.events.filter(({ type }) => type === "error"))
+      .toEqual([{
+        type: "error",
+        conversationId: CONVERSATION_ID,
+        runId: RUN_A,
+        message: "transient summary failure",
+      }]);
+    await fixture.actor.dispose();
+  });
+
   it("compacts an inherited high-water context before the next run", async () => {
     const fixture = await openActor();
     const order: string[] = [];
@@ -736,6 +787,9 @@ describe("ConversationActor", () => {
     expect(fixture.actor.getState().compacting).toBe(true);
     fixture.runtime.session.eventListener?.(nativeEvent({
       type: "compaction_end",
+      result: { summary: "summary" },
+      aborted: false,
+      willRetry: false,
     }));
     expect(fixture.actor.getState().compacting).toBe(false);
     expect(fixture.events.filter(({ type }) => type === "compaction"))
@@ -754,7 +808,7 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
-  it("does not retry a failed SDK compaction through the host threshold", async () => {
+  it("backs off instead of immediately retrying a failed SDK compaction", async () => {
     const fixture = await openActor();
     fixture.runtime.session.promptImplementation = async () => {
       fixture.runtime.session.contextPercent = 90;
@@ -779,6 +833,48 @@ describe("ConversationActor", () => {
     });
 
     expect(fixture.runtime.session.compactCalls).toBe(0);
+    expect(fixture.events.filter(({ type }) => type === "error"))
+      .toEqual([{
+        type: "error",
+        conversationId: CONVERSATION_ID,
+        runId: RUN_A,
+        message: "SDK compaction failed",
+      }]);
+    await fixture.actor.dispose();
+  });
+
+  it("retries a failed SDK compaction through the host after context grows", async () => {
+    const fixture = await openActor();
+    const boundaryDecisions: boolean[] = [];
+    fixture.runtime.session.promptImplementation = async () => {
+      fixture.runtime.session.contextPercent = 90;
+      fixture.runtime.session.eventListener?.(nativeEvent({
+        type: "compaction_start",
+        reason: "threshold",
+      }));
+      fixture.runtime.session.eventListener?.(nativeEvent({
+        type: "compaction_end",
+        reason: "threshold",
+        result: undefined,
+        aborted: false,
+        willRetry: false,
+        errorMessage: "SDK compaction failed",
+      }));
+      fixture.runtime.session.contextPercent = 94;
+      boundaryDecisions.push(checkToolTurnBoundary(fixture.runtime));
+      fixture.runtime.session.contextPercent = 96;
+      boundaryDecisions.push(checkToolTurnBoundary(fixture.runtime));
+    };
+
+    await fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "retry native compaction after bounded growth",
+      origin: "browser",
+    });
+
+    expect(boundaryDecisions).toEqual([false, true]);
+    expect(fixture.runtime.session.compactCalls).toBe(1);
+    expect(fixture.runtime.session.resumeCalls).toBe(1);
     expect(fixture.events.filter(({ type }) => type === "error"))
       .toEqual([{
         type: "error",
