@@ -285,6 +285,7 @@ export function toWireValue(value: unknown): unknown {
  */
 export class SessionEventProjector {
   private runCompletedText = "";
+  private runTextBeforeSegment = "";
   private segmentCompletedText = "";
   private currentMessageText = "";
   private finalErrorMessage?: string;
@@ -309,7 +310,9 @@ export class SessionEventProjector {
 
   project(event: AgentSessionEvent): SessionEvent[] {
     if (event.type === "agent_start") {
-      this.runCompletedText = "";
+      if (this.finalErrorMessage || this.finalAborted) {
+        this.runCompletedText = this.runTextBeforeSegment;
+      }
       this.segmentCompletedText = "";
       this.currentMessageText = "";
       this.finalErrorMessage = undefined;
@@ -345,6 +348,7 @@ export class SessionEventProjector {
     }
 
     if (event.type === "message_start" && event.message.role === "assistant") {
+      this.runTextBeforeSegment = this.runCompletedText;
       this.segmentCompletedText = "";
       this.currentMessageText = "";
       return [{

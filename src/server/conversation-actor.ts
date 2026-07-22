@@ -13,6 +13,7 @@ import {
   type SessionEvent,
   type ToolMode,
 } from "../shared/protocol.js";
+import type { AgentTurnBoundaryCheck } from "./agent-turn-boundary.js";
 import {
   aggregateReservedConversationEntries,
   appendReservedCustomEntry,
@@ -79,6 +80,10 @@ export type ConversationActorEvent =
       type: "compaction";
       conversationId: string;
       compacting: boolean;
+    }
+  | {
+      type: "context_usage";
+      conversationId: string;
     }
   | {
       type: "completion";
@@ -152,6 +157,7 @@ export interface ConversationWaitingTarget {
 }
 
 const RUN_OWNERSHIP = Symbol("ConversationActor.runOwnership");
+const COMPACTION_RESUME_CUSTOM_TYPE = "piweb.compaction_resume.v1";
 
 /**
  * An opaque capability for the currently executing run. A stale capability can
@@ -184,6 +190,8 @@ interface RunTicket {
   extensionErrorMessage?: string;
   sawSdkCompactionAttempt: boolean;
   compactionErrorReported: boolean;
+  sdkCompactionSucceeded: boolean;
+  turnBoundaryCompactionRequested: boolean;
   abortPromise?: Promise<void>;
   projectRunLease?: ProjectRunLease;
   finishPromise?: Promise<RunSettlement>;
@@ -771,6 +779,8 @@ export class ConversationActor {
       toolMode: this.profileSnapshot.role.toolMode,
       sawSdkCompactionAttempt: false,
       compactionErrorReported: false,
+      sdkCompactionSucceeded: false,
+      turnBoundaryCompactionRequested: false,
     };
     this.activeRun = ticket;
     this.emitSessionEvent(ticket, { type: "run_queued" });
@@ -974,6 +984,30 @@ export class ConversationActor {
     let failure: unknown;
     try {
       await execute(ticket);
+      this.releaseTurnBoundaryPause();
+      while (
+        ticket.turnBoundaryCompactionRequested
+        && this.activeRun === ticket
+        && !isCancelling(ticket)
+      ) {
+        ticket.turnBoundaryCompactionRequested = false;
+        const projectedFailure =
+          ticket.extensionErrorMessage ?? ticket.projector.errorMessage;
+        if (projectedFailure) throw new Error(projectedFailure);
+
+        await this.compactRequestedTurnBoundary(ticket);
+        if (this.activeRun !== ticket || isCancelling(ticket)) break;
+
+        await this.session.sendCustomMessage({
+          customType: COMPACTION_RESUME_CUSTOM_TYPE,
+          content:
+            "The workbench paused between tool turns for context management. Continue the unfinished task from the retained context without waiting for another user message.",
+          display: false,
+          details: { runId: ticket.id },
+        }, {
+          triggerTurn: true,
+        });
+      }
       const projectedFailure =
         ticket.extensionErrorMessage ?? ticket.projector.errorMessage;
       if (projectedFailure) throw new Error(projectedFailure);
@@ -990,6 +1024,8 @@ export class ConversationActor {
         outcome = "failed";
         failure = error;
       }
+    } finally {
+      this.releaseTurnBoundaryPause();
     }
 
     if (failure !== undefined) this.emitError(failure, ticket.id);
@@ -999,6 +1035,7 @@ export class ConversationActor {
   private async compactAtThreshold(ticket: RunTicket): Promise<void> {
     if (ticket.sawSdkCompactionAttempt || ticket.compactionErrorReported) return;
     const usage = this.session.getContextUsage?.();
+    this.emitContextUsage();
     if (
       usage?.percent === null
       || usage?.percent === undefined
@@ -1012,6 +1049,24 @@ export class ConversationActor {
         ticket.compactionErrorReported = true;
         this.emitError(error, ticket.id);
       }
+    }
+  }
+
+  private async compactRequestedTurnBoundary(ticket: RunTicket): Promise<void> {
+    if (ticket.sawSdkCompactionAttempt) {
+      if (ticket.sdkCompactionSucceeded) {
+        ticket.sawSdkCompactionAttempt = false;
+        ticket.sdkCompactionSucceeded = false;
+      }
+      return;
+    }
+    if (ticket.compactionErrorReported) return;
+    try {
+      await this.compactSession();
+    } catch (error) {
+      if (isCancelling(ticket)) return;
+      ticket.compactionErrorReported = true;
+      this.emitError(error, ticket.id);
     }
   }
 
@@ -1157,6 +1212,21 @@ export class ConversationActor {
 
   private onSessionEvent(event: AgentSessionEvent): void {
     const ticket = this.activeRun;
+    if (
+      ticket
+      && event.type === "agent_start"
+      && ticket.turnBoundaryCompactionRequested
+    ) {
+      // Pi may still continue through an internal recovery path after the
+      // graceful stop. That physical continuation belongs to this workbench
+      // run and replaces the host-injected resume message.
+      this.releaseTurnBoundaryPause();
+      ticket.turnBoundaryCompactionRequested = false;
+      if (ticket.sdkCompactionSucceeded) {
+        ticket.sawSdkCompactionAttempt = false;
+        ticket.sdkCompactionSucceeded = false;
+      }
+    }
     if (event.type === "compaction_start") {
       if (ticket && !this.hostCompactionInProgress) {
         ticket.sawSdkCompactionAttempt = true;
@@ -1164,6 +1234,18 @@ export class ConversationActor {
       this.updateCompacting(true);
     } else if (event.type === "compaction_end") {
       this.updateCompacting(false);
+      if (
+        ticket
+        && !this.hostCompactionInProgress
+        && event.result !== undefined
+        && !event.aborted
+      ) {
+        ticket.sdkCompactionSucceeded = true;
+        if (!ticket.turnBoundaryCompactionRequested) {
+          ticket.sawSdkCompactionAttempt = false;
+          ticket.sdkCompactionSucceeded = false;
+        }
+      }
       if (
         ticket
         && event.errorMessage
@@ -1270,6 +1352,31 @@ export class ConversationActor {
     return undefined;
   }
 
+  private checkTurnBoundary(input: AgentTurnBoundaryCheck): boolean {
+    this.emitContextUsage();
+    const ticket = this.activeRun;
+    if (
+      !ticket
+      || ticket.phase === "queued"
+      || isCancelling(ticket)
+      || !input.hasToolResults
+      || ticket.sawSdkCompactionAttempt
+      || ticket.compactionErrorReported
+    ) {
+      return false;
+    }
+    const percent = input.contextUsage?.percent;
+    if (
+      percent === null
+      || percent === undefined
+      || percent < this.compactionThresholdPercent
+    ) {
+      return false;
+    }
+    ticket.turnBoundaryCompactionRequested = true;
+    return true;
+  }
+
   private requireOwnedRunningTicket(
     ownership: ConversationRunOwnership,
   ): RunTicket {
@@ -1317,6 +1424,17 @@ export class ConversationActor {
       conversationId: this.conversationId,
       compacting: this.compacting,
     });
+  }
+
+  private emitContextUsage(): void {
+    this.emit({
+      type: "context_usage",
+      conversationId: this.conversationId,
+    });
+  }
+
+  private releaseTurnBoundaryPause(): void {
+    this.created?.releaseTurnBoundaryPause?.();
   }
 
   private emitError(
@@ -1387,6 +1505,7 @@ export class ConversationActor {
               this.emitError(error);
             });
           },
+          turnBoundaryCheck: (input) => this.checkTurnBoundary(input),
         },
       );
       this.created = created;

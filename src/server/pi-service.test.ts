@@ -2296,6 +2296,75 @@ describe("PiConnection coordinated project view", () => {
     }
   });
 
+  it("publishes recalculated context usage during an active run", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        roleId: "default",
+      });
+      const focused = latestState(harness.events);
+      const session = harness.runtime.created[0]!;
+      session.getSessionStats = () => ({
+        tokens: {
+          input: 600,
+          output: 40,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: 640,
+        },
+        contextUsage: {
+          tokens: 640,
+          contextWindow: 1_000,
+          percent: 64,
+        },
+      });
+      session.prompt = async () => {
+        expect(harness.runtime.lastCreateOptions?.turnBoundaryCheck?.({
+          contextUsage: {
+            tokens: 640,
+            contextWindow: 1_000,
+            percent: 64,
+          },
+          hasToolResults: false,
+        })).toBe(false);
+      };
+
+      await harness.connection.handle({
+        type: "prompt",
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+        runId: RUN_A,
+        text: "refresh context usage",
+      });
+
+      expect(harness.events).toContainEqual({
+        type: "state",
+        state: expect.objectContaining({
+          busy: true,
+          contextUsage: {
+            tokens: 640,
+            contextWindow: 1_000,
+            percent: 64,
+            source: "measured",
+          },
+        }),
+      });
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
   it("manually compacts the exact focused conversation and acknowledges it", async () => {
     const harness = await coordinatedConnectionHarness();
     try {

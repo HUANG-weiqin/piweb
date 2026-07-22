@@ -18,6 +18,11 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { PortableExtensionUI } from "./extension-ui.js";
+import {
+  type AgentTurnBoundaryCheck,
+  type AgentTurnBoundaryController,
+  installAgentTurnBoundaryCheck,
+} from "./agent-turn-boundary.js";
 import { SerialTaskQueue } from "./serial-task-queue.js";
 
 type SessionFactory = (options: CreateAgentSessionOptions) => Promise<CreateAgentSessionResult>;
@@ -46,12 +51,14 @@ export interface CreatePiSessionOptions {
   thinkingLevel?: CreateAgentSessionOptions["thinkingLevel"];
   roleSystemPrompt?: string;
   workbenchCustomTools?: ToolDefinition[];
+  turnBoundaryCheck?: (input: AgentTurnBoundaryCheck) => boolean;
 }
 
 export interface CreatedPiSession {
   session: AgentSession;
   settings: SettingsManager;
   modelRegistry: ModelRegistry;
+  releaseTurnBoundaryPause?(): void;
   activateExtensions(): Promise<void>;
   activateExtensionErrors(handler: (error: ExtensionError) => void): readonly ExtensionError[];
   dynamicProviderNames(): ReadonlySet<string>;
@@ -366,6 +373,7 @@ export class PiRuntime implements PiRuntimeLike {
     let settings: SettingsManager;
     let created: CreateAgentSessionResult;
     let createdSession: AgentSession | undefined;
+    let turnBoundaryController: AgentTurnBoundaryController | undefined;
     let pendingExtensionErrors: ExtensionError[];
     try {
       settings = this.createSettings(cwd);
@@ -461,6 +469,12 @@ export class PiRuntime implements PiRuntimeLike {
       if (options.toolCallGate) {
         this.installToolCallGate(createdSession, options.toolCallGate);
       }
+      if (options.turnBoundaryCheck) {
+        turnBoundaryController = installAgentTurnBoundaryCheck(
+          createdSession,
+          options.turnBoundaryCheck,
+        );
+      }
 
       const startupProviderErrors = owner.takeStartupProviderErrors();
       if (startupProviderErrors.length > 0) {
@@ -478,6 +492,11 @@ export class PiRuntime implements PiRuntimeLike {
       }));
     } catch (error) {
       const failures: unknown[] = [error];
+      try {
+        turnBoundaryController?.dispose();
+      } catch (cleanupError) {
+        failures.push(cleanupError);
+      }
       if (createdSession) {
         try {
           await this.teardownAgentSession(createdSession, false);
@@ -495,13 +514,21 @@ export class PiRuntime implements PiRuntimeLike {
 
     let extensionErrorHandler: ((error: ExtensionError) => void) | undefined;
     let activationAttempted = false;
-    const dispose = this.createSessionDisposer(session, owner, () => activationAttempted);
+    const dispose = this.createSessionDisposer(
+      session,
+      owner,
+      () => activationAttempted,
+      () => turnBoundaryController?.dispose(),
+    );
     let activationPromise: Promise<void> | undefined;
 
     return {
       session,
       settings,
       modelRegistry: owner.registry,
+      releaseTurnBoundaryPause: () => {
+        turnBoundaryController?.releaseQueuePause();
+      },
       activateExtensions: () => {
         activationAttempted = true;
         const commandContextActions: ExtensionCommandContextActions = {
@@ -684,11 +711,17 @@ export class PiRuntime implements PiRuntimeLike {
     session: AgentSession,
     owner: SessionModelRegistry,
     shouldEmitShutdown: () => boolean,
+    beforeTeardown?: () => void,
   ): () => Promise<void> {
     let disposePromise: Promise<void> | undefined;
     return () => {
       disposePromise ??= (async () => {
         const failures: unknown[] = [];
+        try {
+          beforeTeardown?.();
+        } catch (error) {
+          failures.push(error);
+        }
         try {
           await this.teardownAgentSession(session, shouldEmitShutdown());
         } catch (error) {

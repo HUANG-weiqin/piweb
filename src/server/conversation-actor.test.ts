@@ -69,6 +69,13 @@ interface FakeSession extends AgentSession {
   steerCalls: string[];
   toolCallGate?: ToolCallGate;
   promptImplementation(text: string): Promise<void>;
+  resumeCalls: number;
+  turnBoundaryPaused: boolean;
+  turnBoundaryPauseReleases: number;
+  resumeImplementation(
+    message: Parameters<AgentSession["sendCustomMessage"]>[0],
+    options: Parameters<AgentSession["sendCustomMessage"]>[1],
+  ): Promise<void>;
 }
 
 function fakeSettings(): SettingsManager {
@@ -93,8 +100,16 @@ function fakeSession(): FakeSession {
       getCommand: () => undefined,
     },
     promptImplementation: async () => undefined,
+    resumeCalls: 0,
+    turnBoundaryPaused: false,
+    turnBoundaryPauseReleases: 0,
+    resumeImplementation: async () => undefined,
     prompt: function (text: string) {
       return this.promptImplementation(text);
+    },
+    sendCustomMessage: function (message, options) {
+      this.resumeCalls++;
+      return this.resumeImplementation(message, options);
     },
     steer: async function (text: string) {
       this.steerCalls.push(text);
@@ -163,12 +178,27 @@ class FakeRuntime implements PiRuntimeLike {
     _cwd: string,
     options: CreatePiSessionOptions = {},
   ): Promise<CreatedPiSession> {
-    this.createOptions = options;
+    const turnBoundaryCheck = options.turnBoundaryCheck;
+    this.createOptions = {
+      ...options,
+      turnBoundaryCheck: turnBoundaryCheck
+        ? (input) => {
+            const shouldStop = turnBoundaryCheck(input);
+            if (shouldStop) this.session.turnBoundaryPaused = true;
+            return shouldStop;
+          }
+        : undefined,
+    };
     this.session.toolCallGate = options.toolCallGate;
     return {
       session: this.session,
       settings: this.settings,
       modelRegistry: this.modelRegistry,
+      releaseTurnBoundaryPause: () => {
+        if (!this.session.turnBoundaryPaused) return;
+        this.session.turnBoundaryPaused = false;
+        this.session.turnBoundaryPauseReleases++;
+      },
       activateExtensions: async () => {
         if (this.activationError) throw this.activationError;
       },
@@ -378,6 +408,220 @@ describe("ConversationActor", () => {
         conversationId: CONVERSATION_ID,
         compacting: false,
       }]);
+    await fixture.actor.dispose();
+  });
+
+  it("compacts and resumes the same workbench run at a tool-turn boundary", async () => {
+    const fixture = await openActor();
+    const emit = () => fixture.runtime.session.eventListener;
+
+    fixture.runtime.session.promptImplementation = async () => {
+      emit()?.(nativeEvent({ type: "agent_start" }));
+      emit()?.(nativeEvent({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "before compaction" }],
+          stopReason: "toolUse",
+        },
+      }));
+      fixture.runtime.session.contextPercent = 75;
+      expect(fixture.runtime.createOptions?.turnBoundaryCheck?.({
+        contextUsage: fixture.runtime.session.getContextUsage(),
+        hasToolResults: true,
+      })).toBe(true);
+      emit()?.(nativeEvent({ type: "agent_end" }));
+    };
+    fixture.runtime.session.resumeImplementation = async (message, options) => {
+      expect(message).toMatchObject({
+        customType: "piweb.compaction_resume.v1",
+        display: false,
+      });
+      expect(options).toMatchObject({ triggerTurn: true });
+      fixture.runtime.session.contextPercent = 25;
+      emit()?.(nativeEvent({ type: "agent_start" }));
+      emit()?.(nativeEvent({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "after compaction" }],
+          stopReason: "stop",
+        },
+      }));
+      expect(fixture.runtime.createOptions?.turnBoundaryCheck?.({
+        contextUsage: fixture.runtime.session.getContextUsage(),
+        hasToolResults: false,
+      })).toBe(false);
+      emit()?.(nativeEvent({ type: "agent_end" }));
+    };
+
+    const settlement = await fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "finish a long task",
+      origin: "browser",
+    });
+
+    expect(fixture.runtime.session.compactCalls).toBe(1);
+    expect(fixture.runtime.session.resumeCalls).toBe(1);
+    expect(fixture.runtime.session.turnBoundaryPauseReleases).toBe(1);
+    expect(settlement.finalText).toBe(
+      "before compaction\n\nafter compaction",
+    );
+    expect(fixture.events.filter((event) => event.type === "context_usage"))
+      .toHaveLength(4);
+    expect(fixture.events.filter((event) => (
+      event.type === "session_event"
+      && (event.event.type === "run_started" || event.event.type === "run_finished")
+    ))).toHaveLength(2);
+    await fixture.actor.dispose();
+  });
+
+  it("does not inject a second resume when Pi continued after native compaction", async () => {
+    const fixture = await openActor();
+    const emit = () => fixture.runtime.session.eventListener;
+
+    fixture.runtime.session.promptImplementation = async () => {
+      emit()?.(nativeEvent({ type: "agent_start" }));
+      emit()?.(nativeEvent({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "before native continuation" }],
+          stopReason: "toolUse",
+        },
+      }));
+      fixture.runtime.session.contextPercent = 95;
+      expect(fixture.runtime.createOptions?.turnBoundaryCheck?.({
+        contextUsage: fixture.runtime.session.getContextUsage(),
+        hasToolResults: true,
+      })).toBe(true);
+      emit()?.(nativeEvent({ type: "agent_end" }));
+      emit()?.(nativeEvent({ type: "compaction_start", reason: "threshold" }));
+      emit()?.(nativeEvent({
+        type: "compaction_end",
+        reason: "threshold",
+        result: { summary: "summary" },
+        aborted: false,
+        willRetry: false,
+      }));
+
+      fixture.runtime.session.contextPercent = 20;
+      emit()?.(nativeEvent({ type: "agent_start" }));
+      emit()?.(nativeEvent({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "after native continuation" }],
+          stopReason: "stop",
+        },
+      }));
+      expect(fixture.runtime.createOptions?.turnBoundaryCheck?.({
+        contextUsage: fixture.runtime.session.getContextUsage(),
+        hasToolResults: false,
+      })).toBe(false);
+      emit()?.(nativeEvent({ type: "agent_end" }));
+    };
+
+    const settlement = await fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "continue after native compaction",
+      origin: "browser",
+    });
+
+    expect(fixture.runtime.session.compactCalls).toBe(0);
+    expect(fixture.runtime.session.resumeCalls).toBe(0);
+    expect(settlement.finalText).toBe(
+      "before native continuation\n\nafter native continuation",
+    );
+    await fixture.actor.dispose();
+  });
+
+  it("does not resume a turn-boundary checkpoint after cancellation", async () => {
+    const fixture = await openActor();
+    const compactionStarted = deferred();
+    const finishCompaction = deferred();
+    fixture.runtime.session.promptImplementation = async () => {
+      fixture.runtime.session.contextPercent = 80;
+      expect(fixture.runtime.createOptions?.turnBoundaryCheck?.({
+        contextUsage: fixture.runtime.session.getContextUsage(),
+        hasToolResults: true,
+      })).toBe(true);
+    };
+    fixture.runtime.session.compactImplementation = async () => {
+      compactionStarted.resolve();
+      await finishCompaction.promise;
+      throw new Error("Compaction cancelled");
+    };
+
+    const running = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "cancel at the checkpoint",
+      origin: "browser",
+    });
+    await compactionStarted.promise;
+    await fixture.actor.abort(RUN_A);
+    finishCompaction.resolve();
+
+    await expect(running).resolves.toMatchObject({ outcome: "aborted" });
+    expect(fixture.runtime.session.abortCompactionCalls).toBe(1);
+    expect(fixture.runtime.session.resumeCalls).toBe(0);
+    await fixture.actor.dispose();
+  });
+
+  it("continues the unfinished task after a turn-boundary compaction failure", async () => {
+    const fixture = await openActor();
+    const emit = () => fixture.runtime.session.eventListener;
+    fixture.runtime.session.promptImplementation = async () => {
+      emit()?.(nativeEvent({ type: "agent_start" }));
+      emit()?.(nativeEvent({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "before failed compaction" }],
+          stopReason: "toolUse",
+        },
+      }));
+      fixture.runtime.session.contextPercent = 80;
+      fixture.runtime.createOptions?.turnBoundaryCheck?.({
+        contextUsage: fixture.runtime.session.getContextUsage(),
+        hasToolResults: true,
+      });
+      emit()?.(nativeEvent({ type: "agent_end" }));
+    };
+    fixture.runtime.session.compactImplementation = async () => {
+      throw new Error("summary provider unavailable");
+    };
+    fixture.runtime.session.resumeImplementation = async () => {
+      emit()?.(nativeEvent({ type: "agent_start" }));
+      emit()?.(nativeEvent({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "continued without compaction" }],
+          stopReason: "stop",
+        },
+      }));
+      emit()?.(nativeEvent({ type: "agent_end" }));
+    };
+
+    const settlement = await fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "do not truncate the task",
+      origin: "browser",
+    });
+
+    expect(settlement).toMatchObject({
+      outcome: "completed",
+      finalText:
+        "before failed compaction\n\ncontinued without compaction",
+    });
+    expect(fixture.runtime.session.resumeCalls).toBe(1);
+    expect(fixture.events).toContainEqual({
+      type: "error",
+      conversationId: CONVERSATION_ID,
+      runId: RUN_A,
+      message: "summary provider unavailable",
+    });
     await fixture.actor.dispose();
   });
 

@@ -65,7 +65,7 @@
 - prompt、运行中 steer、inbox custom messages 和 abort 都由 ConversationActor 的 active run ownership 控制；浏览器 attach/detach 不穿过或中止运行过程。steer 只接受精确 `running | waiting` run，不能再额外依赖 SDK 的 `isStreaming` 投影：actor 会先公布 running，SDK 标志随后才可能追上，而 Pi 原生 steering queue 已能安全接收。引导在当前 assistant turn 工具结束、下一次模型调用前生效，不创建第二个 RunTicket。Actor 为每个浏览器 steer 保留 FIFO delivery waiter，只有对应 user message 的 SDK 事件进入当前 run 后才确认命令；run 先结算或取消会拒绝所有未投递 waiter。
 - 精确校验来源 focus 后，手动 `compact_context` 直接交给来源 ConversationActor，不占用 PiConnection 的视图串行队列；压缩继续由 actor 拥有，浏览器可同时切换到另一 conversation。Actor 在返回 Promise 前同步预约 compacting，封住同时启动 run 或删除的间隙；删除端也必须拒绝 compacting actor，不能释放仍被压缩任务使用的 session。完成时仍按原 sessionId + commandId 回执；若当前 focus 已回到同一 conversation，即使 focusId 已更新也要刷新当前 snapshot，确保 A→B→A 不漏掉 compaction marker。
 - 会话角色切换同样是来源 ConversationActor 拥有的长操作，不占用 PiConnection 的视图串行队列；切换项目只撤销浏览器观察，不能取消或等待另一项目正在重建的 runtime。原 observation 仍有效时才刷新 focus 并回执，之后重开来源会话从 actor 权威角色快照恢复。
-- 自动压缩阈值属于 conversation actor：缺省 70%，从 `piweb.compaction_threshold.v1` 恢复；每轮开始前先处理上一次失败/中止遗留的高水位，正常结束后再用 Pi 的 context usage 检查百分比并触发标准 `compact()`，不改动同时影响摘要预算的 `reserveTokens`。Actor 同时观察 SDK 原生 `compaction_start/end` 作为 `compacting` 状态来源；同一 run 已见 SDK 压缩 attempt 时，宿主阈值检查不再立即重试，避免 SDK 失败后双重触发。取消 run 在 compacting 时先调用 `abortCompaction()`；无论取消发生在 pre-run 还是 post-run 压缩，必须等 compact 退出后把 run 结算为 aborted，且取消异常不能伪装成普通压缩错误。更新阈值只追加非上下文 custom entry。空闲会话还可通过精确 focus 关联的 `compact_context` 手动调用同一个标准 `compact()`；这些路径共用 actor 的瞬时 `compacting` 状态并阻止新的 run/角色切换/截断，focused connection 将其投影到 `PublicState`。成功 compact 产生的 Pi 原生持久条目仍在 snapshot 中投影为用户可见分界线，不另存第二份持久压缩状态。
+- 自动压缩阈值属于 conversation actor：缺省 70%，从 `piweb.compaction_threshold.v1` 恢复；每轮开始前先处理上一次失败/中止遗留的高水位，正常结束后再用 Pi 的 context usage 检查百分比并触发标准 `compact()`，不改动同时影响摘要预算的 `reserveTokens`。长工具任务还会在每个成功 assistant/tool 轮次结束后重新调用 `getContextUsage()`：无论是否越过阈值，都发布一次低频 `context_usage` actor 事件，让 focused connection 立即刷新输入框下方的当前上下文计数；只有存在工具结果且达到阈值时，才让 Pi 在该轮完整结束后优雅停下。命中 checkpoint 时 SDK 的 queued continuation 只被临时隐藏、消息本身不被删除，保证下一次模型请求不会越过宿主压缩；工作台取得控制权后释放该暂停，保持原 `runId`、busy 状态和 run lease，执行标准 `compact()`，再用隐藏 custom message 自动续跑并自然消费原队列。因此底层可出现多个 `agent_start`，但浏览器只观察到一个工作台 run；若 SDK 仍因其它内部恢复路径自行续跑，actor 识别后不会再注入第二次 resume。Actor 同时观察 SDK 原生 `compaction_start/end` 作为 `compacting` 状态来源；同一 checkpoint 已见 SDK 压缩 attempt 时，宿主阈值检查不再立即重试，避免 SDK 失败后双重触发，成功后则允许同一长 run 的后续 checkpoint 再次压缩。取消 run 在 compacting 时先调用 `abortCompaction()`；无论取消发生在 pre-run、轮次间还是 post-run 压缩，都必须等 compact 退出后把 run 结算为 aborted，且取消异常不能伪装成普通压缩错误。更新阈值只追加非上下文 custom entry。空闲会话还可通过精确 focus 关联的 `compact_context` 手动调用同一个标准 `compact()`；这些路径共用 actor 的瞬时 `compacting` 状态并阻止新的 run/角色切换/截断，focused connection 将其投影到 `PublicState`。成功 compact 产生的 Pi 原生持久条目仍在 snapshot 中投影为用户可见分界线，不另存第二份持久压缩状态。
 - 空闲会话可通过精确 focus 关联的 `switch_conversation_role` 应用当前可用角色。Actor 同步封锁新 run，停止旧 AgentSession，追加角色变更记录，再用同一 SessionManager 和新角色 model/prompt/meta tools 重建；替换 runtime 打开失败时追加上一角色作为补偿并恢复旧 runtime，补偿也失败则 actor fatal。conversationId、history、lifecycle 与 createdBy 不变。
 - API Key 在共享配置队列完成后才确认；凭据本身影响所有项目，但发起命令必须仍属于提交时的 observation session/generation，避免迟到页面修改全局认证。会话模型由角色快照固定，中途 `select_model` 明确拒绝；actor 重开时再次校验实际模型，不能 SDK fallback。
 - API Key、角色 CRUD 和删除等需要结算的操作都带原 sessionId + commandId，连接内复用 commandId 会被拒绝。
@@ -108,6 +108,7 @@
 ## 入口
 
 - `src/server/pi-runtime.ts`
+- `src/server/agent-turn-boundary.ts`
 - `src/server/pi-service.ts`
 - `src/server/socket-server.ts`
 - `src/server/role-store.ts`
@@ -138,6 +139,7 @@
 - 多连接配置同步依赖所有修改都经过 `PiRuntime.updateConfiguration()`。
 - 不要直接开放 `AgentSession.reload()`；其全局 provider reset 绕过工作台所有权边界。需要 reload 时先设计 runtime 协调入口。
 - extension `confirm` 只是扩展业务交互，不会改变项目工具模式；经过 Pi 工具入口的副作用仍必须经过工作台 tool gate。
+- Pi core 已提供轮次后的 `shouldStopAfterTurn`，但当前 `AgentSession` 没有公开配置入口；`agent-turn-boundary.ts` 是唯一允许依赖 `Agent.createLoopConfig` 与 `hasQueuedMessages` 运行时形状的适配点。命中宿主 checkpoint 后只暂停 SDK 对 queued continuation 的观察，不能清空实际 steer/follow-up/custom 队列；actor 取得控制权后释放暂停、压缩并续跑。Pi 相关依赖必须精确锁定已验证版本；升级若移除这些形状，session 创建必须 fail closed，不能静默退化成在运行中直接 `compact()`、abort 工具或跳过轮次内压缩。
 - trust decision 不能写入项目 `.piweb`；否则恶意仓库可以随自身内容一起声明自己可信。
 - 项目扩展当前在服务进程内运行；无法安全强杀一个不返回的同步/异步 hook。只允许可信扩展，worker/子进程隔离是开放超时与动态 provider 的前置条件。
 - writer lease 目前只覆盖同一服务进程；两个进程同时写同一 JSONL 仍不安全。

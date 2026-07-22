@@ -205,6 +205,79 @@ describe("SessionEventProjector", () => {
       projectionId: expect.any(String),
     }]);
   });
+
+  it("preserves completed text across a host-requested physical continuation", () => {
+    const projector = new SessionEventProjector();
+    projector.project(nativeEvent({ type: "agent_start" }));
+    projector.project(nativeEvent({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "before compaction" }],
+      },
+    }));
+
+    projector.project(nativeEvent({ type: "agent_start" }));
+    projector.project(nativeEvent({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "after compaction" }],
+      },
+    }));
+
+    expect(projector.finalText).toBe(
+      "before compaction\n\nafter compaction",
+    );
+  });
+
+  it("rolls back only the failed physical segment before an SDK retry", () => {
+    const projector = new SessionEventProjector();
+    projector.project(nativeEvent({ type: "agent_start" }));
+    projector.project(nativeEvent({
+      type: "message_start",
+      message: { role: "assistant", content: [] },
+    }));
+    projector.project(nativeEvent({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "completed tool turn" }],
+        stopReason: "toolUse",
+      },
+    }));
+    projector.project(nativeEvent({
+      type: "message_start",
+      message: { role: "assistant", content: [] },
+    }));
+    projector.project(nativeEvent({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "temporary provider error" }],
+        stopReason: "error",
+        errorMessage: "retryable",
+      },
+    }));
+
+    projector.project(nativeEvent({ type: "agent_start" }));
+    projector.project(nativeEvent({
+      type: "message_start",
+      message: { role: "assistant", content: [] },
+    }));
+    projector.project(nativeEvent({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "recovered" }],
+        stopReason: "stop",
+      },
+    }));
+
+    expect(projector.finalText).toBe(
+      "completed tool turn\n\nrecovered",
+    );
+  });
 });
 
 describe("toWireValue", () => {

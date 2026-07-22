@@ -15,7 +15,7 @@ import {
   type ExtensionAPI,
   type InlineExtension,
 } from "@earendil-works/pi-coding-agent";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { PiRuntime } from "./pi-runtime.js";
 
 function deferred(): { promise: Promise<void>; resolve(): void } {
@@ -108,6 +108,66 @@ function testRuntime(
 }
 
 describe("PiRuntime session ownership", () => {
+  it("recalculates context usage at each completed tool-turn boundary", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-turn-boundary-"));
+    const checks: unknown[] = [];
+    let upstreamReceiver: unknown;
+    let originalCreateLoopConfig: unknown;
+    const runtime = testRuntime(
+      () => [],
+      async (result) => {
+        const loopOwner = result.session.agent as unknown as {
+          createLoopConfig(...args: unknown[]): Record<string, unknown>;
+        };
+        const nativeCreateLoopConfig = loopOwner.createLoopConfig;
+        loopOwner.createLoopConfig = function (...args) {
+          return {
+            ...nativeCreateLoopConfig.apply(this, args),
+            marker: "upstream-config",
+            shouldStopAfterTurn: function () {
+              upstreamReceiver = this;
+              return false;
+            },
+          };
+        };
+        originalCreateLoopConfig = loopOwner.createLoopConfig;
+      },
+    );
+    const created = await runtime.createSession(cwd, {
+      turnBoundaryCheck: (input) => {
+        checks.push(input);
+        return true;
+      },
+    });
+    const getContextUsage = vi.spyOn(created.session, "getContextUsage")
+      .mockReturnValue({ tokens: 700, contextWindow: 1_000, percent: 70 });
+    const loopOwner = created.session.agent as unknown as {
+      createLoopConfig(): {
+        shouldStopAfterTurn?: (input: { toolResults: unknown[] }) => Promise<boolean>;
+      };
+    };
+    const shouldStop = loopOwner.createLoopConfig().shouldStopAfterTurn;
+    created.session.agent.steer({
+      role: "user",
+      content: [{ type: "text", text: "queued guidance" }],
+      timestamp: Date.now(),
+    });
+    expect(created.session.agent.hasQueuedMessages()).toBe(true);
+
+    await expect(shouldStop?.({ toolResults: [{}] })).resolves.toBe(true);
+    expect(created.session.agent.hasQueuedMessages()).toBe(false);
+    expect(getContextUsage).toHaveBeenCalledOnce();
+    expect(checks).toEqual([{
+      contextUsage: { tokens: 700, contextWindow: 1_000, percent: 70 },
+      hasToolResults: true,
+    }]);
+    expect(upstreamReceiver).toMatchObject({ marker: "upstream-config" });
+    created.releaseTurnBoundaryPause?.();
+    expect(created.session.agent.hasQueuedMessages()).toBe(true);
+    await created.dispose();
+    expect(loopOwner.createLoopConfig).toBe(originalCreateLoopConfig);
+  });
+
   it("activates Pi's structured read-only tools by default", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-read-tools-"));
     const runtime = testRuntime(() => []);
