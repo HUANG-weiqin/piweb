@@ -20,7 +20,6 @@ function view(
 ) {
   return <Chat
     chat={chat}
-    historyTruncated={false}
     busy={false}
     sessionTokenUsage={{
       input: 0,
@@ -362,13 +361,7 @@ describe("Chat", () => {
     expect(scrollTo).not.toHaveBeenCalled();
   });
 
-  it("keeps forcing an idle manual jump while layout frames settle", () => {
-    const animationCallbacks: FrameRequestCallback[] = [];
-    vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
-      animationCallbacks.push(callback);
-      return animationCallbacks.length;
-    }));
-    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+  it("jumps to the bottom when clicking the jump button", () => {
     const firstChat: ChatState = {
       messages: [{
         id: "assistant-1",
@@ -386,12 +379,6 @@ describe("Chat", () => {
     let scrollHeight = 1_000;
     let scrollTop = 100;
     const clientHeight = 500;
-    const scrollTo = vi.fn((options: ScrollToOptions) => {
-      scrollTop = Math.min(
-        Number(options.top ?? 0),
-        scrollHeight - clientHeight,
-      );
-    });
     Object.defineProperties(transcript, {
       scrollHeight: { configurable: true, get: () => scrollHeight },
       clientHeight: { configurable: true, value: clientHeight },
@@ -402,26 +389,13 @@ describe("Chat", () => {
           scrollTop = Math.min(value, scrollHeight - clientHeight);
         },
       },
-      scrollTo: { configurable: true, value: scrollTo },
     });
     fireEvent.wheel(transcript, { deltaY: -4 });
 
     fireEvent.click(screen.getByRole("button", { name: "↓ 回到最新消息" }));
     expect(scrollTop).toBe(500);
-    expect(scrollTo).not.toHaveBeenCalled();
-
-    scrollHeight = 1_160;
-    act(() => {
-      animationCallbacks[0]?.(0);
-    });
-    expect(scrollTop).toBe(660);
-
-    scrollHeight = 1_300;
-    act(() => {
-      animationCallbacks[1]?.(0);
-    });
-    expect(scrollTop).toBe(800);
-    expect(scrollTo).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "↓ 回到最新消息" }))
+      .not.toBeInTheDocument();
   });
 
   it("reattaches only after the reader returns all the way to the bottom", () => {

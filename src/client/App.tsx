@@ -2385,7 +2385,6 @@ export function App() {
             />
           : <Chat
               chat={visibleChat}
-              historyTruncated={historyTruncated}
               busy={visibleBusy}
               activeRun={visibleActiveRun}
               sessionTokenUsage={state.sessionTokenUsage}

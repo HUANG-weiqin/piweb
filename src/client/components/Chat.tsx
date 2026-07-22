@@ -35,7 +35,7 @@ type QueuedPromptStatus = "queued" | "submitting" | "attention";
 const FOLLOW_COMFORT_LIMIT_PX = 96;
 const FOLLOW_COMFORT_TARGET_PX = 32;
 const FOLLOW_REATTACH_LIMIT_PX = 2;
-const MANUAL_JUMP_SETTLE_FRAMES = 4;
+
 const COMPACT_NUMBER_FORMAT = new Intl.NumberFormat("en-US", {
   maximumSignificantDigits: 3,
   useGrouping: false,
@@ -67,7 +67,6 @@ function queuedPromptStatusLabel(status: QueuedPromptStatus): string {
 
 interface ChatProps {
   chat: ChatState;
-  historyTruncated: boolean;
   busy: boolean;
   activeRun?: PublicState["activeRun"];
   sessionTokenUsage?: TokenUsage;
@@ -227,7 +226,6 @@ function getSessionTokenUsage(chat: ChatState, usage?: TokenUsage): TokenUsage {
 
 export function Chat({
   chat,
-  historyTruncated,
   busy,
   activeRun,
   sessionTokenUsage,
@@ -277,7 +275,7 @@ export function Chat({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const followOutputRef = useRef(true);
   const lastScrollTopRef = useRef(0);
-  const jumpFrameRef = useRef<number | undefined>(undefined);
+
   const currentFocusRef = useRef<ChatState["focus"]>(chat.focus);
   const positionedFocusRef = useRef<ChatState["focus"]>(undefined);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
@@ -365,30 +363,7 @@ export function Chat({
     if (!transcript) return;
     scrollTranscript(transcript.scrollHeight, behavior);
   }, [scrollTranscript]);
-  const hardJumpToLatest = useCallback(() => {
-    const transcript = transcriptRef.current;
-    if (!transcript) return;
-    transcript.scrollTop = transcript.scrollHeight;
-    lastScrollTopRef.current = transcript.scrollTop;
-  }, []);
-  const cancelJumpFrame = useCallback(() => {
-    if (jumpFrameRef.current === undefined) return;
-    window.cancelAnimationFrame(jumpFrameRef.current);
-    jumpFrameRef.current = undefined;
-  }, []);
-  const scheduleSettledHardJumps = useCallback(() => {
-    const jumpFocus = currentFocusRef.current;
-    cancelJumpFrame();
-    const jump = (remainingFrames: number) => {
-      jumpFrameRef.current = window.requestAnimationFrame(() => {
-        jumpFrameRef.current = undefined;
-        if (!sameChatFocus(currentFocusRef.current, jumpFocus)) return;
-        hardJumpToLatest();
-        if (remainingFrames > 1) jump(remainingFrames - 1);
-      });
-    };
-    jump(MANUAL_JUMP_SETTLE_FRAMES);
-  }, [cancelJumpFrame, hardJumpToLatest]);
+
   const followLatest = useCallback(() => {
     const transcript = transcriptRef.current;
     if (
@@ -426,7 +401,7 @@ export function Chat({
       lastScrollTopRef.current = transcriptRef.current.scrollTop;
     }
   }, [chat, compacting, conversationReady, followLatest, scrollToLatest]);
-  useEffect(() => cancelJumpFrame, [cancelJumpFrame]);
+
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
@@ -459,10 +434,11 @@ export function Chat({
     }
   };
   const jumpToLatest = () => {
-    followOutputRef.current = true;
+    const transcript = transcriptRef.current;
+    if (!transcript) return;
+    transcript.scrollTop = transcript.scrollHeight;
+    lastScrollTopRef.current = transcript.scrollTop;
     setShowJumpToLatest(false);
-    hardJumpToLatest();
-    scheduleSettledHardJumps();
   };
   const send = () => {
     const value = draft.trim();
@@ -513,9 +489,6 @@ export function Chat({
       onScroll={handleTranscriptScroll}
       onWheel={handleTranscriptWheel}
     >
-      {historyTruncated && <div className="history-note">
-        较早或过长的显示内容已省略；完整记录仍保存在项目中。
-      </div>}
       {!blocks.length && <div className="empty"><div>π</div><h1>想做点什么？</h1><p>Pi 可以读取、修改文件并执行命令。</p></div>}
       {blocks.map((block) => {
         if (block.kind === "compaction") return <div
