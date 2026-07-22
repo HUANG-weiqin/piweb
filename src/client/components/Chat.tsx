@@ -436,6 +436,7 @@ export function Chat({
   const jumpToLatest = () => {
     const transcript = transcriptRef.current;
     if (!transcript) return;
+    followOutputRef.current = true;
     transcript.scrollTop = transcript.scrollHeight;
     lastScrollTopRef.current = transcript.scrollTop;
     setShowJumpToLatest(false);
