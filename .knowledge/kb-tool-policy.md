@@ -31,14 +31,14 @@ conversation role snapshot
 ## 策略
 
 - `full_access` 允许所有工具和命令，不区分来源或目标位置；项目外路径和 `.piweb` 也不额外拦截。
-- `read_only` 对模型只展示 `source=builtin` 的 Pi 原生 `read / grep / find / ls`，以及 `source=sdk` 的宿主 `git_inspect` 和 conversation-scoped `notebook_write / notebook_list / notebook_grep / notebook_read`；`bash / edit / write`、meta 和其他扩展工具不进入有效 registry、model tools 或 system prompt。
+- `read_only` 对模型只展示 `source=builtin` 的 Pi 原生 `read / grep / find / ls`，以及 `source=sdk` 的宿主 `git_status / git_diff` 和 conversation-scoped `notebook_write / notebook_list / notebook_grep / notebook_read`；`bash / edit / write`、meta 和其他扩展工具不进入有效 registry、model tools 或 system prompt。
 - 执行 gate 独立重复同一 identity 约束；`read_only` 直接拒绝命令、项目写入、unknown、工作台 meta，以及同名 extension/project 工具。工具不可见不是权限边界，硬拒绝仍不可删除。
 - 扩展可以用 `read` 等名称覆盖内置工具；策略必须同时检查最终 `toolName` 和 SDK `ToolInfo.sourceInfo.source`，不能只按名称放行。PiRuntime 对每次 `setActiveToolsByName`（包括 extension refresh 和 `setActiveTools`）重新做 source-aware 投影，同名覆盖发生后宁可移除该工具，也不把扩展 schema/snippet 暴露给只读模型。
 - Agent 的 `read_only` 只限制经过 Pi 工具入口的调用；工作台宿主仍会写 manifest 和 transcript。
 
 ## Git 浅层投影
 
-`git_inspect` 只有结构化 `status` 和 `diff(worktree | staged | all)`，可选 path 必须是 canonical project cwd 内的相对路径。对模型暴露的参数 schema 必须是单个 object + enum，不使用顶层 `anyOf/oneOf` union；`diff` 必须有 scope、`status` 不能带 scope 的语义由执行层再次校验。宿主构造固定 argv，使用项目外解析出的绝对 Git executable、`shell:false`、同一次调用 deadline、AbortSignal，以及 stdout/stderr 共享的 50 KiB / 2000 行预算。
+Git 浅层投影拆成 `git_status(path?)` 和 `git_diff(scope, path?)` 两个宿主工具；`scope` 只存在于 `git_diff`，取值 `worktree | staged | all`。可选 path 必须是 canonical project cwd 内的相对路径。对模型暴露的参数 schema 必须是单个 object + enum，不使用顶层 `anyOf/oneOf` union；通过工具拆分避免模型把 diff 参数传给 status。宿主构造固定 argv，使用项目外解析出的绝对 Git executable、`shell:false`、同一次调用 deadline、AbortSignal，以及 stdout/stderr 共享的 50 KiB / 2000 行预算。
 
 Git 的“只读子命令”仍可能经 pager、external diff、textconv、content filter 或 fsmonitor 执行程序。主命令因此不读取真实 Git 配置：宿主先用固定 `rev-parse` 捕获并校验 repository top、git dir、index、objects、object format 和 HEAD，再为该次调用创建只含宿主 config/HEAD 的临时 synthetic `GIT_DIR`；work tree、index 和 object directory 显式绑定真实只读输入，global/system config 指向临时空文件，继承的 `GIT_*` 全部先删除。临时目录没有 `commondir`、hooks 或 info 链接，并在所有完成/失败路径清理。输出可能因未继承 `core.autocrlf/filemode/ignorecase`、sparse 和 info exclude 而比原生 Git 更嘈杂，这是关闭执行入口的保守代价。
 
@@ -60,7 +60,7 @@ Archive 是可恢复隐藏，不是删除：默认 list 不显示 archived，但
 每个 ConversationActor 注入：
 
 ```text
-git_inspect
+git_status / git_diff
 notebook_write / notebook_list / notebook_grep / notebook_read
 list_roles / list_sessions / current_session / peek_session
 start_session / send_session_message / wait_for_session

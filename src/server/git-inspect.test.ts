@@ -14,7 +14,7 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Check } from "typebox/value";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  createGitInspectTool,
+  createGitTools,
   type GitInspectDetails,
 } from "./git-inspect.js";
 
@@ -67,7 +67,21 @@ function executeTool(
   ) as Promise<ToolResult>;
 }
 
-function nodeBackedTool(
+function createTools(
+  cwd: string,
+  options: {
+    executable?: string;
+    argsPrefix?: readonly string[];
+    timeoutMs?: number;
+    maxOutputBytes?: number;
+    maxOutputLines?: number;
+  } = {},
+): { status: ToolDefinition; diff: ToolDefinition } {
+  const [status, diff] = createGitTools(cwd, options);
+  return { status, diff };
+}
+
+function nodeBackedTools(
   cwd: string,
   script: string,
   options: {
@@ -75,8 +89,8 @@ function nodeBackedTool(
     maxOutputBytes?: number;
     maxOutputLines?: number;
   } = {},
-): ToolDefinition {
-  return createGitInspectTool(cwd, {
+): { status: ToolDefinition; diff: ToolDefinition } {
+  return createTools(cwd, {
     executable: process.execPath,
     argsPrefix: ["-e", script, "--"],
     ...options,
@@ -106,67 +120,64 @@ afterEach(() => {
   }
 });
 
-describe("createGitInspectTool", () => {
-  it("exposes only the structured status and diff schema", async () => {
+describe("createGitTools", () => {
+  it("exposes separate structured status and diff schemas", async () => {
     const cwd = createRepository();
-    const schema = createGitInspectTool(cwd).parameters;
+    const { status, diff } = createTools(cwd);
 
-    expect(JSON.stringify(schema)).not.toMatch(/anyOf|oneOf/);
-    expect(Check(schema, { action: "status" })).toBe(true);
-    expect(Check(schema, {
-      action: "diff",
+    expect(status.name).toBe("git_status");
+    expect(diff.name).toBe("git_diff");
+    expect(JSON.stringify(status.parameters)).not.toMatch(/anyOf|oneOf/);
+    expect(JSON.stringify(diff.parameters)).not.toMatch(/anyOf|oneOf/);
+    expect(Check(status.parameters, {})).toBe(true);
+    expect(Check(status.parameters, { path: "src/server" })).toBe(true);
+    expect(Check(status.parameters, { scope: "staged" })).toBe(false);
+    expect(Check(status.parameters, { action: "status" })).toBe(false);
+    expect(Check(diff.parameters, {
       scope: "staged",
       path: "src/server",
     })).toBe(true);
-    expect(Check(schema, { action: "status", args: ["reset", "--hard"] }))
+    expect(Check(diff.parameters, {})).toBe(false);
+    expect(Check(diff.parameters, { scope: "unknown" })).toBe(false);
+    expect(Check(diff.parameters, { action: "diff", scope: "staged" }))
       .toBe(false);
-    expect(Check(schema, { action: "diff", scope: "unknown" })).toBe(false);
-    expect(Check(schema, { action: "log" })).toBe(false);
-    await expect(executeTool(createGitInspectTool(cwd), { action: "diff" }))
-      .rejects.toThrow(/requires a scope/i);
-    await expect(executeTool(createGitInspectTool(cwd), {
-      action: "status",
-      scope: "staged",
-    })).rejects.toThrow(/does not accept/i);
+    await expect(executeTool(diff, {}))
+      .rejects.toThrow(/Invalid git_diff input/i);
+    await expect(executeTool(status, { scope: "staged" }))
+      .rejects.toThrow(/Invalid git_status input/i);
   });
 
   it("rejects absolute, NUL, and escaping paths while allowing dot", async () => {
     const cwd = createRepository();
-    const tool = createGitInspectTool(cwd);
+    const { status } = createTools(cwd);
 
-    await expect(executeTool(tool, { action: "status", path: "/outside" }))
+    await expect(executeTool(status, { path: "/outside" }))
       .rejects.toThrow(/relative/i);
-    await expect(executeTool(tool, { action: "status", path: "C:\\outside" }))
+    await expect(executeTool(status, { path: "C:\\outside" }))
       .rejects.toThrow(/relative/i);
-    await expect(executeTool(tool, { action: "status", path: "../outside" }))
+    await expect(executeTool(status, { path: "../outside" }))
       .rejects.toThrow(/escapes/i);
-    await expect(executeTool(tool, { action: "status", path: "bad\0path" }))
+    await expect(executeTool(status, { path: "bad\0path" }))
       .rejects.toThrow(/NUL/i);
-    await expect(executeTool(tool, { action: "status", path: "." }))
+    await expect(executeTool(status, { path: "." }))
       .resolves.toMatchObject({ details: { action: "status", path: "." } });
   });
 
   it("reports status and worktree, staged, and combined diffs", async () => {
     const cwd = createRepository();
-    const tool = createGitInspectTool(cwd);
+    const { status, diff } = createTools(cwd);
     writeFileSync(join(cwd, "tracked.txt"), "staged\n");
     git(cwd, "add", "tracked.txt");
     writeFileSync(join(cwd, "tracked.txt"), "worktree\n");
     writeFileSync(join(cwd, "untracked.txt"), "untracked\n");
 
-    const status = await executeTool(tool, { action: "status" });
-    const staged = await executeTool(tool, {
-      action: "diff",
-      scope: "staged",
-    });
-    const worktree = await executeTool(tool, {
-      action: "diff",
-      scope: "worktree",
-    });
-    const all = await executeTool(tool, { action: "diff", scope: "all" });
+    const statusResult = await executeTool(status, {});
+    const staged = await executeTool(diff, { scope: "staged" });
+    const worktree = await executeTool(diff, { scope: "worktree" });
+    const all = await executeTool(diff, { scope: "all" });
 
-    expect(status.details.stdout).toContain("tracked.txt");
-    expect(status.details.stdout).toContain("untracked.txt");
+    expect(statusResult.details.stdout).toContain("tracked.txt");
+    expect(statusResult.details.stdout).toContain("untracked.txt");
     expect(staged.details.stdout).toContain("+staged");
     expect(worktree.details.stdout).toContain("+worktree");
     expect(all.details.stdout).toContain("### Staged changes");
@@ -183,21 +194,18 @@ describe("createGitInspectTool", () => {
     git(repository, "commit", "-m", "nested project");
     writeFileSync(join(cwd, "inside.txt"), "inside worktree\n");
     writeFileSync(join(repository, "secret.txt"), "outside worktree\n");
-    const tool = createGitInspectTool(cwd);
+    const { status, diff } = createTools(cwd);
 
-    const status = await executeTool(tool, { action: "status" });
-    const worktree = await executeTool(tool, {
-      action: "diff",
-      scope: "worktree",
-    });
-    expect(status.details.stdout).toContain("inside.txt");
-    expect(status.details.stdout).not.toContain("secret.txt");
+    const statusResult = await executeTool(status, {});
+    const worktree = await executeTool(diff, { scope: "worktree" });
+    expect(statusResult.details.stdout).toContain("inside.txt");
+    expect(statusResult.details.stdout).not.toContain("secret.txt");
     expect(worktree.details.stdout).toContain("inside worktree");
     expect(worktree.details.stdout).not.toContain("outside worktree");
 
     git(repository, "add", "project/inside.txt", "secret.txt");
-    const staged = await executeTool(tool, { action: "diff", scope: "staged" });
-    const all = await executeTool(tool, { action: "diff", scope: "all" });
+    const staged = await executeTool(diff, { scope: "staged" });
+    const all = await executeTool(diff, { scope: "all" });
     expect(staged.details.stdout).toContain("inside worktree");
     expect(staged.details.stdout).not.toContain("outside worktree");
     expect(all.details.stdout).not.toContain("outside worktree");
@@ -206,9 +214,9 @@ describe("createGitInspectTool", () => {
   it("treats a path beginning with -- as a pathspec, not a Git option", async () => {
     const cwd = createRepository();
     const outputPath = join(cwd, "owned.patch");
+    const { diff } = createTools(cwd);
 
-    await executeTool(createGitInspectTool(cwd), {
-      action: "diff",
+    await executeTool(diff, {
       scope: "worktree",
       path: "--output=owned.patch",
     });
@@ -247,9 +255,9 @@ describe("createGitInspectTool", () => {
     const previousPager = process.env.GIT_PAGER;
     process.env.GIT_PAGER = command;
     try {
-      const tool = createGitInspectTool(cwd);
-      await executeTool(tool, { action: "status" });
-      await executeTool(tool, { action: "diff", scope: "worktree" });
+      const { status, diff } = createTools(cwd);
+      await executeTool(status, {});
+      await executeTool(diff, { scope: "worktree" });
     } finally {
       if (previousPager === undefined) delete process.env.GIT_PAGER;
       else process.env.GIT_PAGER = previousPager;
@@ -275,12 +283,12 @@ describe("createGitInspectTool", () => {
     rmSync(marker, { force: true });
     const trackedBefore = readFileSync(join(cwd, "tracked.txt"));
     const indexBefore = readFileSync(join(cwd, ".git", "index"));
-    const tool = createGitInspectTool(cwd);
+    const { status, diff } = createTools(cwd);
 
-    const status = await executeTool(tool, { action: "status" });
-    const diff = await executeTool(tool, { action: "diff", scope: "all" });
-    expect(status.details.stdout).toContain("tracked.txt");
-    expect(diff.details.stdout).toContain("filtered worktree");
+    const statusResult = await executeTool(status, {});
+    const diffResult = await executeTool(diff, { scope: "all" });
+    expect(statusResult.details.stdout).toContain("tracked.txt");
+    expect(diffResult.details.stdout).toContain("filtered worktree");
     expect(existsSync(marker)).toBe(false);
     expect(readFileSync(join(cwd, "tracked.txt"))).toEqual(trackedBefore);
     expect(readFileSync(join(cwd, ".git", "index"))).toEqual(indexBefore);
@@ -294,9 +302,7 @@ describe("createGitInspectTool", () => {
     const previousPath = process.env.PATH;
     process.env.PATH = `${cwd}${delimiter}${previousPath ?? ""}`;
     try {
-      const result = await executeTool(createGitInspectTool(cwd), {
-        action: "status",
-      });
+      const result = await executeTool(createTools(cwd).status, {});
       expect(result.details.stdout).toContain("## main");
     } finally {
       process.env.PATH = previousPath;
@@ -310,20 +316,20 @@ describe("createGitInspectTool", () => {
       require("node:fs").writeFileSync(${JSON.stringify(marker)}, "started");
       setInterval(() => {}, 1000);
     `;
-    const tool = nodeBackedTool(cwd, script);
+    const { status } = nodeBackedTools(cwd, script);
     const preAborted = new AbortController();
     preAborted.abort();
 
     const preAbortError = await executeTool(
-      tool,
-      { action: "status" },
+      status,
+      {},
       preAborted.signal,
     ).catch((error: unknown) => error as Error);
     expect(preAbortError.name).toBe("AbortError");
     expect(existsSync(marker)).toBe(false);
 
     const runningAbort = new AbortController();
-    const running = executeTool(tool, { action: "status" }, runningAbort.signal);
+    const running = executeTool(status, {}, runningAbort.signal);
     for (let attempt = 0; attempt < 40 && !existsSync(marker); attempt++) {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
     }
@@ -336,9 +342,9 @@ describe("createGitInspectTool", () => {
   it("enforces one timeout across both all-scope Git processes", async () => {
     const cwd = createRepository();
     const script = "setTimeout(() => process.exit(0), 35);";
-    const tool = nodeBackedTool(cwd, script, { timeoutMs: 55 });
+    const { diff } = nodeBackedTools(cwd, script, { timeoutMs: 55 });
 
-    await expect(executeTool(tool, { action: "diff", scope: "all" }))
+    await expect(executeTool(diff, { scope: "all" }))
       .rejects.toThrow(/timed out/i);
   });
 
@@ -351,13 +357,10 @@ describe("createGitInspectTool", () => {
       process.stdout.write("o".repeat(13000));
       process.stderr.write("e".repeat(13000));
     `;
-    const byteTool = nodeBackedTool(cwd, byteScript, {
+    const { diff: byteDiff } = nodeBackedTools(cwd, byteScript, {
       maxOutputBytes: 50 * 1024,
     });
-    const bytes = await executeTool(byteTool, {
-      action: "diff",
-      scope: "all",
-    });
+    const bytes = await executeTool(byteDiff, { scope: "all" });
 
     expect(bytes.details.truncated).toBe(true);
     expect(Buffer.byteLength(
@@ -366,12 +369,12 @@ describe("createGitInspectTool", () => {
     )).toBeLessThanOrEqual(50 * 1024);
     expect(readFileSync(invocations, "utf8")).toBe("xx");
 
-    const lineTool = nodeBackedTool(
+    const { status: lineStatus } = nodeBackedTools(
       cwd,
       "process.stdout.write(Array(30).fill('line').join('\\n'));",
       { maxOutputLines: 10 },
     );
-    const lines = await executeTool(lineTool, { action: "status" });
+    const lines = await executeTool(lineStatus, {});
     expect(lines.details.truncated).toBe(true);
     expect(lines.details.stdout.split("\n").filter(Boolean)).toHaveLength(10);
   });
@@ -380,7 +383,7 @@ describe("createGitInspectTool", () => {
     const cwd = createRepository();
     rmSync(join(cwd, ".git"), { recursive: true, force: true });
 
-    await expect(executeTool(createGitInspectTool(cwd), { action: "status" }))
+    await expect(executeTool(createTools(cwd).status, {}))
       .rejects.toThrow(/not a git repository/i);
   });
 });

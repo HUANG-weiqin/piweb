@@ -57,7 +57,7 @@ Pi Web 是本机优先的极简 Agent 工作台。当前目标不是复制 Pi �
 - 工具策略必须位于项目扩展 `tool_call` hook 之后、真实 `tool.execute` 之前，并只按 run 启动时冻结的 conversation role 权限决策。
 - 会话角色切换命令必须精确匹配 `sessionId + conversationId + focusId + commandId`；busy 会话拒绝，切换不能改变 conversationId、历史、lifecycle 或 createdBy。
 - 工具 gate 启用时固定使用 sequential execution，避免 SDK parallel preflight 在 abort 或模式收紧后执行已积累的 thunk。
-- `read_only` 的有效工具集只投影 `source=builtin` 的 Pi 原生 `read/grep/find/ls`、`source=sdk` 的宿主 `git_inspect`，以及 conversation-scoped notebook 工具；命令、项目写入、未知工具、meta 及扩展同名工具仍由服务端 gate 硬拒绝。`full_access` 直接允许所有工具。
+- `read_only` 的有效工具集只投影 `source=builtin` 的 Pi 原生 `read/grep/find/ls`、`source=sdk` 的宿主 `git_status/git_diff`，以及 conversation-scoped notebook 工具；命令、项目写入、未知工具、meta 及扩展同名工具仍由服务端 gate 硬拒绝。`full_access` 直接允许所有工具。
 - `.piweb` 是宿主持久状态；只读模式不阻止宿主保存，但 `full_access` 也不会替 Agent 额外保护该目录。
 - 项目列表和历史是低频、有界协议快照，不能重新塞回每个高频 `PublicState` 更新。
 

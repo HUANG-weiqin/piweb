@@ -14,7 +14,8 @@ describe("defaultToolPolicy", () => {
   );
 
   it.each([
-    "git_inspect",
+    "git_status",
+    "git_diff",
     "notebook_write",
     "notebook_list",
     "notebook_grep",
@@ -39,10 +40,14 @@ describe("defaultToolPolicy", () => {
     ["find", "project"],
     ["ls", "extension"],
     ["custom", "unknown"],
-    ["git_inspect", "builtin"],
-    ["git_inspect", "project"],
-    ["git_inspect", "extension"],
-    ["git_inspect", "unknown"],
+    ["git_status", "builtin"],
+    ["git_status", "project"],
+    ["git_status", "extension"],
+    ["git_status", "unknown"],
+    ["git_diff", "builtin"],
+    ["git_diff", "project"],
+    ["git_diff", "extension"],
+    ["git_diff", "unknown"],
     ["notebook_list", "builtin"],
     ["notebook_grep", "extension"],
     ["notebook_read", "project"],

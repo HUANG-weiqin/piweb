@@ -216,7 +216,8 @@ describe("PiRuntime session ownership", () => {
     const created = await runtime.createSession(cwd, {
       toolMode: "read_only",
       workbenchCustomTools: [
-        workbenchTool(cwd, "git_inspect"),
+        workbenchTool(cwd, "git_status"),
+        workbenchTool(cwd, "git_diff"),
         workbenchTool(cwd, "notebook_list"),
         workbenchTool(cwd, "notebook_grep"),
         workbenchTool(cwd, "notebook_read"),
@@ -231,7 +232,8 @@ describe("PiRuntime session ownership", () => {
       "grep",
       "find",
       "ls",
-      "git_inspect",
+      "git_status",
+      "git_diff",
       "notebook_write",
       "notebook_list",
       "notebook_grep",
@@ -241,7 +243,9 @@ describe("PiRuntime session ownership", () => {
     expect(new Set(allTools.map((tool) => tool.name))).toEqual(expectedToolNames);
     expect(allTools.find((tool) => tool.name === "read")?.sourceInfo.source)
       .toBe("builtin");
-    expect(allTools.find((tool) => tool.name === "git_inspect")?.sourceInfo.source)
+    expect(allTools.find((tool) => tool.name === "git_status")?.sourceInfo.source)
+      .toBe("sdk");
+    expect(allTools.find((tool) => tool.name === "git_diff")?.sourceInfo.source)
       .toBe("sdk");
     expect(allTools.find((tool) => tool.name === "notebook_write")?.sourceInfo.source)
       .toBe("sdk");
@@ -265,11 +269,11 @@ describe("PiRuntime session ownership", () => {
         pi.on("session_start", () => {
           sessionStarted = true;
           pi.registerTool(shadowReadTool(cwd, "read", startMarker));
-          pi.setActiveTools(["read", "find", "grep", "ls", "git_inspect"]);
+          pi.setActiveTools(["read", "find", "grep", "ls", "git_status", "git_diff"]);
         });
         pi.on("session_shutdown", (_event, context) => {
           pi.registerTool(shadowReadTool(cwd, "ls", shutdownMarker));
-          pi.setActiveTools(["read", "find", "grep", "ls", "git_inspect"]);
+          pi.setActiveTools(["read", "find", "grep", "ls", "git_status", "git_diff"]);
           shutdownActiveTools = pi.getActiveTools();
           shutdownSystemPrompt = context.getSystemPrompt();
         });
@@ -278,7 +282,10 @@ describe("PiRuntime session ownership", () => {
 
     const created = await runtime.createSession(cwd, {
       toolMode: "read_only",
-      workbenchCustomTools: [workbenchTool(cwd, "git_inspect")],
+      workbenchCustomTools: [
+        workbenchTool(cwd, "git_status"),
+        workbenchTool(cwd, "git_diff"),
+      ],
     });
     expect(created.session.getActiveToolNames()).not.toContain("find");
     expect(created.session.systemPrompt).not.toContain(staticMarker);
@@ -291,13 +298,13 @@ describe("PiRuntime session ownership", () => {
     expect(created.session.systemPrompt).not.toContain(startMarker);
 
     extensionApi?.registerTool(shadowReadTool(cwd, "grep", dynamicMarker));
-    extensionApi?.setActiveTools(["read", "find", "grep", "ls", "git_inspect"]);
-    expect(created.session.getActiveToolNames()).toEqual(["ls", "git_inspect"]);
+    extensionApi?.setActiveTools(["read", "find", "grep", "ls", "git_status", "git_diff"]);
+    expect(created.session.getActiveToolNames()).toEqual(["ls", "git_status", "git_diff"]);
     expect(created.session.systemPrompt).not.toContain(dynamicMarker);
 
     const projectedSetter = created.session.setActiveToolsByName;
     await created.dispose();
-    expect(shutdownActiveTools).toEqual(["git_inspect"]);
+    expect(shutdownActiveTools).toEqual(["git_status", "git_diff"]);
     expect(shutdownSystemPrompt).not.toContain(shutdownMarker);
     expect(created.session.setActiveToolsByName).not.toBe(projectedSetter);
   });

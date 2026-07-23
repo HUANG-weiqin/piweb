@@ -16,7 +16,8 @@ export type ToolPolicy = (
 
 const PI_READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const SDK_READ_ONLY_TOOLS = new Set([
-  "git_inspect",
+  "git_status",
+  "git_diff",
   "notebook_write",
   "notebook_list",
   "notebook_grep",
@@ -46,6 +47,6 @@ export const defaultToolPolicy: ToolPolicy = ({
   }
   return {
     action: "deny",
-    reason: "只读模式仅允许 Pi 原生 read、grep、find、ls、宿主 git_inspect 和 conversation notebook 工具；命令、项目写入及扩展工具均被禁止。",
+    reason: "只读模式仅允许 Pi 原生 read、grep、find、ls、宿主 git_status/git_diff 和 conversation notebook 工具；命令、项目写入及扩展工具均被禁止。",
   };
 };

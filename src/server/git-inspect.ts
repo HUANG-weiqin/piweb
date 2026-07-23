@@ -35,43 +35,30 @@ const GIT_INSPECT_MAX_PATH_CHARS = 1_024;
 const REPOSITORY_CAPTURE_MAX_BYTES = 64 * 1024;
 const REPOSITORY_CAPTURE_MAX_LINES = 64;
 
-const gitInspectParameters = Type.Object({
-  action: Type.String({ enum: ["status", "diff"] }),
-  scope: Type.Optional(Type.String({ enum: ["worktree", "staged", "all"] })),
+const gitStatusParameters = Type.Object({
   path: Type.Optional(Type.String({
     minLength: 1,
     maxLength: GIT_INSPECT_MAX_PATH_CHARS,
   })),
 }, { additionalProperties: false });
 
-type GitInspectInput = Static<typeof gitInspectParameters>;
+const gitDiffParameters = Type.Object({
+  scope: Type.String({ enum: ["worktree", "staged", "all"] }),
+  path: Type.Optional(Type.String({
+    minLength: 1,
+    maxLength: GIT_INSPECT_MAX_PATH_CHARS,
+  })),
+}, { additionalProperties: false });
+
+type GitStatusInput = Static<typeof gitStatusParameters>;
+type GitDiffInput = Static<typeof gitDiffParameters>;
 type GitDiffScope = "worktree" | "staged" | "all";
 
-function normalizeGitInspectInput(input: GitInspectInput): GitInspectInput & (
-  | { action: "status"; scope?: undefined }
-  | { action: "diff"; scope: GitDiffScope }
-) {
-  if (input.action !== "status" && input.action !== "diff") {
-    throw new Error("Invalid git_inspect action");
+function normalizeGitDiffScope(scope: GitDiffInput["scope"]): GitDiffScope {
+  if (scope !== "worktree" && scope !== "staged" && scope !== "all") {
+    throw new Error("Invalid git_diff scope");
   }
-  if (
-    input.scope !== undefined
-    && input.scope !== "worktree"
-    && input.scope !== "staged"
-    && input.scope !== "all"
-  ) {
-    throw new Error("Invalid git_inspect diff scope");
-  }
-  if (input.action === "status") {
-    if (input.scope !== undefined) {
-      throw new Error("git_inspect status does not accept a diff scope");
-    }
-    return { ...input, action: "status", scope: undefined };
-  }
-  if (input.scope === undefined) {
-    throw new Error("git_inspect diff requires a scope");
-  }
-  return { ...input, action: "diff", scope: input.scope };
+  return scope;
 }
 
 export interface GitInspectDetails {
@@ -564,10 +551,20 @@ function contentText(details: GitInspectDetails): string {
     : base;
 }
 
-export function createGitInspectTool(
+interface GitToolContext {
+  boundCwd: string;
+  repositoryExecutable: string;
+  executable: string;
+  argsPrefix: string[];
+  timeoutMs: number;
+  maxOutputBytes: number;
+  maxOutputLines: number;
+}
+
+function createGitToolContext(
   canonicalCwd: string,
-  processOptions: GitInspectProcessOptions = {},
-): ToolDefinition {
+  processOptions: GitInspectProcessOptions,
+): GitToolContext {
   const boundCwd = realpathSync(canonicalCwd);
   const repositoryExecutable = resolveHostGit(boundCwd);
   const executable = processOptions.executable === undefined
@@ -576,117 +573,192 @@ export function createGitInspectTool(
   if (!executable) {
     throw new Error("Git executable must be an absolute executable outside the project");
   }
-  const argsPrefix = [...(processOptions.argsPrefix ?? [])];
-  const timeoutMs = processOptions.timeoutMs ?? GIT_INSPECT_TIMEOUT_MS;
-  const maxOutputBytes = processOptions.maxOutputBytes ?? GIT_INSPECT_MAX_BYTES;
-  const maxOutputLines = processOptions.maxOutputLines ?? GIT_INSPECT_MAX_LINES;
+  return {
+    boundCwd,
+    repositoryExecutable,
+    executable,
+    argsPrefix: [...(processOptions.argsPrefix ?? [])],
+    timeoutMs: processOptions.timeoutMs ?? GIT_INSPECT_TIMEOUT_MS,
+    maxOutputBytes: processOptions.maxOutputBytes ?? GIT_INSPECT_MAX_BYTES,
+    maxOutputLines: processOptions.maxOutputLines ?? GIT_INSPECT_MAX_LINES,
+  };
+}
 
-  return defineTool({
-    name: "git_inspect",
-    label: "Git inspect",
-    description:
-      "Inspect the current project's Git status or diff through fixed read-only operations. Use path to narrow large output.",
-    promptSnippet: "Inspect bounded Git status and diffs without changing the project.",
-    parameters: gitInspectParameters,
-    async execute(_toolCallId, rawInput, signal) {
-      if (!Check(gitInspectParameters, rawInput)) {
-        throw new Error("Invalid git_inspect input");
-      }
-      const input = normalizeGitInspectInput(rawInput as GitInspectInput);
-      const projectPath = validateProjectPath(input.path, boundCwd);
-      const deadline = Date.now() + timeoutMs;
-      const sandbox = await createRepositorySandbox(
-        repositoryExecutable,
-        boundCwd,
+async function executeGitInspection(
+  context: GitToolContext,
+  action: "status" | "diff",
+  input: GitStatusInput | (GitDiffInput & { scope: GitDiffScope }),
+  signal: AbortSignal | undefined,
+): Promise<{ content: Array<{ type: "text"; text: string }>; details: GitInspectDetails }> {
+  const projectPath = validateProjectPath(input.path, context.boundCwd);
+  const deadline = Date.now() + context.timeoutMs;
+  const sandbox = await createRepositorySandbox(
+    context.repositoryExecutable,
+    context.boundCwd,
+    signal,
+    deadline,
+  );
+  try {
+    const budget = createBudget(context.maxOutputBytes, context.maxOutputLines);
+    const scope = action === "diff"
+      ? (input as GitDiffInput & { scope: GitDiffScope }).scope
+      : undefined;
+    let stdout = "";
+    let stderr = "";
+    let truncated = false;
+
+    if (action === "status") {
+      const result = await runGit(
+        context.executable,
+        context.argsPrefix,
+        gitArgs("status", undefined, projectPath),
+        context.boundCwd,
         signal,
         deadline,
+        budget,
+        sandbox.environment,
       );
-      try {
-        const budget = createBudget(maxOutputBytes, maxOutputLines);
-        let stdout = "";
-        let stderr = "";
-        let truncated = false;
-
-        if (input.action === "status") {
-          const result = await runGit(
-            executable,
-            argsPrefix,
-            gitArgs("status", undefined, projectPath),
-            boundCwd,
-            signal,
-            deadline,
-            budget,
-            sandbox.environment,
-          );
-          stdout = result.stdout;
-          stderr = result.stderr;
-          truncated = result.truncated;
-        } else if (input.scope === "all") {
-          const staged = await runGit(
-            executable,
-            argsPrefix,
-            gitArgs("diff", "staged", projectPath),
-            boundCwd,
-            signal,
-            deadline,
-            budget,
-            sandbox.environment,
-          );
-          stdout = `### Staged changes\n${staged.stdout || "(no differences)"}\n`;
-          stderr = staged.stderr;
-          truncated = staged.truncated;
-          if (!truncated) {
-            const worktree = await runGit(
-              executable,
-              argsPrefix,
-              gitArgs("diff", "worktree", projectPath),
-              boundCwd,
-              signal,
-              deadline,
-              budget,
-              sandbox.environment,
-            );
-            stdout += `### Worktree changes\n${worktree.stdout || "(no differences)"}`;
-            stderr = [stderr, worktree.stderr].filter(Boolean).join("\n");
-            truncated = worktree.truncated;
-          }
-        } else {
-          const result = await runGit(
-            executable,
-            argsPrefix,
-            gitArgs("diff", input.scope, projectPath),
-            boundCwd,
-            signal,
-            deadline,
-            budget,
-            sandbox.environment,
-          );
-          stdout = result.stdout;
-          stderr = result.stderr;
-          truncated = result.truncated;
-        }
-
-        const bounded = boundCombinedOutput(
-          stdout,
-          stderr,
-          maxOutputBytes,
-          maxOutputLines,
+      stdout = result.stdout;
+      stderr = result.stderr;
+      truncated = result.truncated;
+    } else if (scope === "all") {
+      const staged = await runGit(
+        context.executable,
+        context.argsPrefix,
+        gitArgs("diff", "staged", projectPath),
+        context.boundCwd,
+        signal,
+        deadline,
+        budget,
+        sandbox.environment,
+      );
+      stdout = `### Staged changes\n${staged.stdout || "(no differences)"}\n`;
+      stderr = staged.stderr;
+      truncated = staged.truncated;
+      if (!truncated) {
+        const worktree = await runGit(
+          context.executable,
+          context.argsPrefix,
+          gitArgs("diff", "worktree", projectPath),
+          context.boundCwd,
+          signal,
+          deadline,
+          budget,
+          sandbox.environment,
         );
-        const details: GitInspectDetails = {
-          action: input.action,
-          ...(input.action === "diff" ? { scope: input.scope } : {}),
-          ...(projectPath === undefined ? {} : { path: projectPath }),
-          stdout: bounded.stdout,
-          stderr: bounded.stderr,
-          truncated: truncated || bounded.truncated,
-        };
-        return {
-          content: [{ type: "text", text: contentText(details) }],
-          details,
-        };
-      } finally {
-        sandbox.dispose();
+        stdout += `### Worktree changes\n${worktree.stdout || "(no differences)"}`;
+        stderr = [stderr, worktree.stderr].filter(Boolean).join("\n");
+        truncated = worktree.truncated;
       }
+    } else {
+      const result = await runGit(
+        context.executable,
+        context.argsPrefix,
+        gitArgs("diff", scope, projectPath),
+        context.boundCwd,
+        signal,
+        deadline,
+        budget,
+        sandbox.environment,
+      );
+      stdout = result.stdout;
+      stderr = result.stderr;
+      truncated = result.truncated;
+    }
+
+    const bounded = boundCombinedOutput(
+      stdout,
+      stderr,
+      context.maxOutputBytes,
+      context.maxOutputLines,
+    );
+    const details: GitInspectDetails = {
+      action,
+      ...(scope === undefined ? {} : { scope }),
+      ...(projectPath === undefined ? {} : { path: projectPath }),
+      stdout: bounded.stdout,
+      stderr: bounded.stderr,
+      truncated: truncated || bounded.truncated,
+    };
+    return {
+      content: [{ type: "text", text: contentText(details) }],
+      details,
+    };
+  } finally {
+    sandbox.dispose();
+  }
+}
+
+function createGitStatusToolFromContext(context: GitToolContext): ToolDefinition {
+  return defineTool({
+    name: "git_status",
+    label: "Git status",
+    description:
+      "Inspect the current project's Git status through a fixed read-only operation. Use path to narrow large output.",
+    promptSnippet: "Inspect bounded Git status without changing the project.",
+    parameters: gitStatusParameters,
+    async execute(_toolCallId, rawInput, signal) {
+      if (!Check(gitStatusParameters, rawInput)) {
+        throw new Error("Invalid git_status input");
+      }
+      return executeGitInspection(
+        context,
+        "status",
+        rawInput as GitStatusInput,
+        signal,
+      );
     },
   });
+}
+
+function createGitDiffToolFromContext(context: GitToolContext): ToolDefinition {
+  return defineTool({
+    name: "git_diff",
+    label: "Git diff",
+    description:
+      "Inspect the current project's Git diff through fixed read-only operations. Use path to narrow large output.",
+    promptSnippet: "Inspect bounded Git diffs without changing the project.",
+    parameters: gitDiffParameters,
+    async execute(_toolCallId, rawInput, signal) {
+      if (!Check(gitDiffParameters, rawInput)) {
+        throw new Error("Invalid git_diff input");
+      }
+      const input = rawInput as GitDiffInput;
+      return executeGitInspection(
+        context,
+        "diff",
+        { ...input, scope: normalizeGitDiffScope(input.scope) },
+        signal,
+      );
+    },
+  });
+}
+
+export function createGitStatusTool(
+  canonicalCwd: string,
+  processOptions: GitInspectProcessOptions = {},
+): ToolDefinition {
+  return createGitStatusToolFromContext(
+    createGitToolContext(canonicalCwd, processOptions),
+  );
+}
+
+export function createGitDiffTool(
+  canonicalCwd: string,
+  processOptions: GitInspectProcessOptions = {},
+): ToolDefinition {
+  return createGitDiffToolFromContext(
+    createGitToolContext(canonicalCwd, processOptions),
+  );
+}
+
+export function createGitTools(
+  canonicalCwd: string,
+  processOptions: GitInspectProcessOptions = {},
+): ToolDefinition[] {
+  const context = createGitToolContext(canonicalCwd, processOptions);
+  return [
+    createGitStatusToolFromContext(context),
+    createGitDiffToolFromContext(context),
+  ];
 }
