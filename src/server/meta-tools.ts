@@ -252,8 +252,8 @@ export function createMetaTools(
       name: "delete_session",
       label: "Delete session",
       description:
-        "Delete an idle peer session. This tool can never delete its own session and never implicitly aborts a busy target.",
-      promptSnippet: "Delete an idle peer Agent session other than this one.",
+        "Delete an idle peer session and its idle descendant sessions. This tool can never delete its own session and rejects, without aborting, when any cascade member is busy or compacting.",
+      promptSnippet: "Delete an idle peer Agent session and its idle descendants other than this one; abort/wait busy members first.",
       parameters: Type.Object({
         conversationId: Type.String({ minLength: 1, maxLength: 256 }),
       }, { additionalProperties: false }),

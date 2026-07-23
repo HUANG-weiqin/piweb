@@ -73,10 +73,10 @@ initialize(cwd, target)
 
 删除同样只接受 conversationId，并遵守 actor 边界：
 
-- busy conversation 不可删除，必须先精确 abort 并等待 run 结算；Agent 永远不能删除自己的 conversation。
-- 已打开的 idle actor 把当前 writer lease 在 registry 内原子升级为 deletion lease；未打开目标先 fail-fast 取得独占 lease。升级、精确 unlink 和索引刷新之间不能出现 release/reacquire 窗口。
-- 删除与索引刷新共用同一串行队列。服务端完整校验 sessions 目录、由 ID 解析内部常规 JSONL、复验 header identity，再执行精确单文件 `unlink`；随后删除 `.piweb/notebooks/<conversationId>.json` notebook sidecar；不级联 parent/child 会话。
-- 删除只清理 `toConversationId` 等于目标的 pending inbox；目标此前发往其他会话的 outbound envelope 不随来源删除。
+- 目标及其 descendant set 中任一 busy conversation 都不可删除，必须先精确 abort 并等待 run 结算；Agent 永远不能删除自己，也不能通过删除祖先把自己级联删除。
+- 删除先基于 conversation metadata 冻结目标的 descendant set，再为每个目标设置 deleting fence；持久 tombstone 先写删除目标本身，再写 descendants，确保崩溃恢复至少能从目标重新推导 cascade。已打开的 idle actor 把当前 writer lease 在 registry 内原子升级为 deletion lease；未打开目标先 fail-fast 取得独占 lease。升级、精确 unlink 和索引刷新之间不能出现 release/reacquire 窗口。
+- 删除与索引刷新共用同一串行队列。服务端完整校验 sessions 目录、由 ID 解析内部常规 JSONL、复验 header identity，再按子孙到祖先顺序逐个精确 `unlink`；每个 conversation 的 `.piweb/notebooks/<conversationId>.json` notebook sidecar 同步删除。
+- 每个被删 conversation 只清理 `toConversationId` 等于它的 pending inbox；它此前发往其他会话的 outbound envelope 不随来源删除，除非接收方也在同一个 cascade set 中随后被删除。
 - `lastConversationId` 只在仍等于目标时清除，避免覆盖另一连接刚提交的最近对话。删除成功后更新派生缓存并通过项目订阅发布新 snapshot。
 - 删除不存在的干净目标是幂等成功；目录损坏、链接、身份错配或文件系统拒绝删除仍 fail closed。
 
@@ -121,7 +121,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 - wait 总是先查 JSONL settlement，再订阅内存 completion，避免注册前已经完成而永久错过。
 - 启动恢复会扫描全部 sidecar、profile 和 settlement：修复 inbox 已提交而来源卡片仍是 sending 的窗口，恢复 processing batch，继续临时回传，并只执行尚未 settled 的 run。
 - 临时 conversation 只观察 metadata 中的 `initialRunId`。成功且有 final text 时先 durable enqueue caller、标记 settlement 已报告，再自动删除；失败、中止或无回复同样回传失败，但保留目标并标记 attention。
-- 删除 conversation 先持久化目标 tombstone、终结并删除该目标的 pending envelope，再删除 JSONL；事务中的后到消息明确失败，已发往别处的 outbound envelope 不受影响。删除完成后回收 tombstone，重启时也会安全清理“目标已不存在且无 pending”的残留标记。
+- 删除 conversation 先冻结并 fence 目标及其 metadata descendants，任何成员 busy 都拒绝整次删除；随后先持久化目标 tombstone，再持久化 descendants tombstone，并按子孙到祖先顺序终结/删除每个目标的 pending envelope、删除 JSONL。事务中的后到消息明确失败，已发往 cascade set 之外的 outbound envelope 不受来源删除影响。删除完成后回收 tombstone，重启时也会安全清理“目标已不存在且无 pending”的残留标记。
 - tombstone 从磁盘恢复到内存 deleting set 后才允许 actor open/create 和 inbox pump；因此进程在删除中途退出也不能让目标短暂复活。持久删除失败时 fence 与 tombstone 保留，直到后续恢复真正完成。
 - 恢复会在任何 inbox actor pump 前扫描 `piweb.meta_operation.v1`。若发现 started 但未 completed 的精确 abort intent，会先中止仍匹配的活动 run，或把崩溃中断的 processing run 结算为 aborted，再完成来源卡片/sidecar/ledger 对账。
 - inactive `peek_session` 的短暂 writer lease 也进入项目 lifecycle 串行边界；若同一目标同时删除，先开始者完整释放 lease 后后一个才进入 tombstone/deletion lease 阶段。
@@ -170,7 +170,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 
 ## 当前边界
 
-- 没有 archive、批量删除、fork/import、附件和跨设备同步；Agent 会话列表只有有界 cursor，不构成浏览器历史分页。
+- 没有 archive、用户多选批量删除、fork/import、附件和跨设备同步；Agent 会话列表只有有界 cursor，不构成浏览器历史分页。
 - 每次索引刷新会由宿主完整验证该项目全部 JSONL，并由 Pi `listAll()` 再扫描一次；这是第一版用完整性换简单性的选择。长期项目需要在引入分页时一并设计增量 catalog 和等价的完整性证明。
 - 没有跨进程 writer lock 和断电级 durability。
 - Pi JSONL header eager materialization 依赖锁定 SDK 的 v3 session format；升级 SDK 时必须用测试验证 header/open/list 行为。

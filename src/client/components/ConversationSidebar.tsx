@@ -477,7 +477,8 @@ export function ConversationSidebar({
       >
         <h2>永久删除会话？</h2>
         <p>
-          “{titleOf(deleteCandidate)}”及其历史将被永久删除，此操作无法撤销。
+          “{titleOf(deleteCandidate)}”及其历史，以及由它派生的空闲子孙会话，
+          将被永久删除，此操作无法撤销。
         </p>
         <div className="provider-actions">
           <button

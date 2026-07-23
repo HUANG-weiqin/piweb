@@ -1277,8 +1277,15 @@ export class ProjectSessionCoordinator {
     if (context.deleting.has(conversationId)) {
       throw new Error(`Conversation is being deleted: ${conversationId}`);
     }
-    await this.requireActor(context, conversationId).compactContext();
-    this.emit(context, { type: "project_changed" });
+    const actor = this.requireActor(context, conversationId);
+    try {
+      await actor.compactContext();
+    } finally {
+      this.emit(context, { type: "project_changed" });
+      await this.runLifecycle(context, () =>
+        this.retryBlockedDeletions(context)
+      );
+    }
   }
 
   abort(
@@ -1618,7 +1625,17 @@ export class ProjectSessionCoordinator {
     context.actors.set(conversationId, actor);
     context.profiles.set(conversationId, cloneProfile(profile));
     const unsubscribe = actor.subscribe((event) => {
-      if (event.type === "error") context.attention.add(conversationId);
+      if (event.type === "error") {
+        context.attention.add(conversationId);
+        if (event.fatal && !context.closing) {
+          this.trackBackground(
+            context,
+            this.runLifecycle(context, () =>
+              this.retryBlockedDeletions(context)
+            ),
+          );
+        }
+      }
       this.emit(context, event);
     });
     context.actorUnsubscribes.set(conversationId, unsubscribe);
@@ -1626,10 +1643,9 @@ export class ProjectSessionCoordinator {
     this.trackBackground(context, this.recoverTemporary(context, actor));
     this.trackBackground(
       context,
-      this.runLifecycle(
-        context,
-        () => this.pumpTarget(context, conversationId),
-      ),
+      this.runLifecycle(context, async () => {
+        await this.pumpTarget(context, conversationId);
+      }),
     );
     return actor;
   }
@@ -1919,6 +1935,19 @@ export class ProjectSessionCoordinator {
             return { deleted: existing.deleted };
           }
 
+          const targetExists = context.actors.has(input.conversationId)
+            || context.project.listConversations().some(
+              ({ id }) => id === input.conversationId,
+            );
+          if (targetExists) {
+            await this.hydrateConversationProfiles(context);
+            if (
+              this.collectCascadeDeletionIds(context, input.conversationId)
+                .includes(sourceConversationId)
+            ) {
+              throw new Error("An Agent cannot delete its own session");
+            }
+          }
           if (!existing) {
             appendReservedCustomEntry(
               source.sessionManager,
@@ -1931,10 +1960,6 @@ export class ProjectSessionCoordinator {
               }),
             );
           }
-          const targetExists = context.actors.has(input.conversationId)
-            || context.project.listConversations().some(
-              ({ id }) => id === input.conversationId,
-            );
           const resumedAfterDeletion = existing !== undefined && !targetExists;
           deletionOwnsReservation = !resumedAfterDeletion;
           const deleted = resumedAfterDeletion
@@ -1944,6 +1969,7 @@ export class ProjectSessionCoordinator {
                 input.conversationId,
                 false,
                 true,
+                sourceConversationId,
               );
           appendReservedCustomEntry(
             source.sessionManager,
@@ -2707,7 +2733,7 @@ export class ProjectSessionCoordinator {
     envelopes: InboxEnvelope[],
     runId: string,
     deliveredMessageIds: ReadonlySet<string> = new Set(),
-  ): Promise<void> {
+  ): Promise<"started" | "not_started"> {
     if (target.getActivity().kind !== "idle") {
       throw new Error(`Conversation is already running: ${target.conversationId}`);
     }
@@ -2799,12 +2825,12 @@ export class ProjectSessionCoordinator {
         context.failedDispatchRetries.add(retryKey);
         this.trackBackground(
           context,
-          this.runLifecycle(context, () =>
-            this.pumpTarget(context, target.conversationId)
-          ),
+          this.runLifecycle(context, async () => {
+            await this.pumpTarget(context, target.conversationId);
+          }),
         );
       }
-      return;
+      return "not_started";
     }
     this.trackBackground(context, completion.then(
       () => undefined,
@@ -2815,6 +2841,7 @@ export class ProjectSessionCoordinator {
         error,
       )),
     ));
+    return "started";
   }
 
   private async finishBatch(
@@ -2864,31 +2891,96 @@ export class ProjectSessionCoordinator {
     targetConversationId: string,
     runId: string,
     error: unknown,
+    continuingAfterDeletionReservation = false,
   ): Promise<void> {
     const key = completionKey(targetConversationId, runId);
-    context.processingBatches.delete(key);
-    context.attention.add(targetConversationId);
-    this.emit(context, {
-      type: "error",
-      conversationId: targetConversationId,
-      runId,
-      message: error instanceof Error ? error.message : String(error),
-      fatal: true,
-    });
-    if (context.failedBatchRetries.has(key) || context.closing) return;
-    context.failedBatchRetries.add(key);
+    const deletionCommittedOrGone = async () => {
+      const durableDeletionTargets = new Set(
+        await context.inbox.listDeletedTargets(),
+      );
+      const targetExists = context.actors.has(targetConversationId)
+        || context.project.listConversations().some(
+          ({ id }) => id === targetConversationId,
+        );
+      return durableDeletionTargets.has(targetConversationId) || !targetExists;
+    };
+    const finishAsDeleted = () => {
+      context.processingBatches.delete(key);
+      context.failedBatchRetries.delete(key);
+      context.attention.delete(targetConversationId);
+    };
+    const requeueAfterDeletionReservation = () => {
+      if (context.closing) return;
+      this.trackBackground(
+        context,
+        this.runLifecycle(context, () =>
+          this.recoverFailedBatch(
+            context,
+            targetConversationId,
+            runId,
+            error,
+            true,
+          )
+        ),
+      );
+    };
 
-    const failedActor = context.actors.get(targetConversationId);
-    if (failedActor) {
-      context.actorUnsubscribes.get(targetConversationId)?.();
-      context.actorUnsubscribes.delete(targetConversationId);
-      await failedActor.dispose();
-      if (context.actors.get(targetConversationId) === failedActor) {
-        context.actors.delete(targetConversationId);
-      }
+    if (await deletionCommittedOrGone()) {
+      finishAsDeleted();
+      return;
     }
-    await this.getOrOpenActor(context, targetConversationId);
-    await this.pumpTarget(context, targetConversationId);
+    const retryAlreadyConsumed = context.failedBatchRetries.has(key);
+    if (context.deleting.has(targetConversationId)) {
+      if (continuingAfterDeletionReservation || !retryAlreadyConsumed) {
+        requeueAfterDeletionReservation();
+      } else {
+        context.processingBatches.delete(key);
+      }
+      return;
+    }
+    if (retryAlreadyConsumed && !continuingAfterDeletionReservation) {
+      context.processingBatches.delete(key);
+      return;
+    }
+    if (!retryAlreadyConsumed) {
+      context.attention.add(targetConversationId);
+      this.emit(context, {
+        type: "error",
+        conversationId: targetConversationId,
+        runId,
+        message: error instanceof Error ? error.message : String(error),
+        fatal: true,
+      });
+      context.failedBatchRetries.add(key);
+    }
+    if (context.closing) return;
+
+    try {
+      const failedActor = context.actors.get(targetConversationId);
+      if (failedActor) {
+        context.actorUnsubscribes.get(targetConversationId)?.();
+        context.actorUnsubscribes.delete(targetConversationId);
+        await failedActor.dispose();
+        if (context.actors.get(targetConversationId) === failedActor) {
+          context.actors.delete(targetConversationId);
+        }
+      }
+      await this.getOrOpenActor(context, targetConversationId);
+      const pumpResult = await this.pumpTarget(context, targetConversationId);
+      if (pumpResult === "blocked_by_deletion") {
+        requeueAfterDeletionReservation();
+      }
+    } catch (recoveryError) {
+      if (await deletionCommittedOrGone()) {
+        finishAsDeleted();
+        return;
+      }
+      if (context.deleting.has(targetConversationId)) {
+        requeueAfterDeletionReservation();
+        return;
+      }
+      throw recoveryError;
+    }
   }
 
   private onActorCompletion(
@@ -2917,6 +3009,7 @@ export class ProjectSessionCoordinator {
       if (context.actors.get(actor.conversationId) === actor) {
         await this.pumpTarget(context, actor.conversationId);
       }
+      await this.retryBlockedDeletions(context);
     }).catch((error) => {
       context.attention.add(actor.conversationId);
       this.emit(context, {
@@ -3125,7 +3218,7 @@ export class ProjectSessionCoordinator {
         await this.deleteConversationInternal(
           context,
           actor.conversationId,
-          true,
+          false,
         );
       } else {
         context.attention.add(actor.conversationId);
@@ -3180,11 +3273,73 @@ export class ProjectSessionCoordinator {
       await this.deleteConversationInternal(
         context,
         actor.conversationId,
-        true,
+        false,
       );
     } else {
       context.attention.add(actor.conversationId);
       this.emit(context, { type: "project_changed" });
+    }
+  }
+
+  private async retryBlockedDeletions(
+    context: ProjectContext,
+  ): Promise<void> {
+    await this.retryReturnableTemporaryDeletions(context);
+    await this.retryDurableDeletions(context);
+  }
+
+  private async retryReturnableTemporaryDeletions(
+    context: ProjectContext,
+  ): Promise<void> {
+    for (const actor of [...context.actors.values()]) {
+      if (actor.getState().disposed) continue;
+      const lifecycle = actor.profile.lifecycle;
+      if (lifecycle.kind !== "temporary") continue;
+      const settlement = aggregateReservedConversationEntries(
+        actor.sessionManager.getEntries(),
+      ).runSettlements.find(({ runId }) =>
+        runId === lifecycle.initialRunId
+      );
+      if (
+        !settlement
+        || settlement.reportedAt === undefined
+        || !temporarySettlementIsReturnable(settlement)
+      ) {
+        continue;
+      }
+      try {
+        await this.deleteConversationInternal(
+          context,
+          actor.conversationId,
+          false,
+        );
+      } catch {
+        context.attention.add(actor.conversationId);
+        this.emit(context, { type: "project_changed" });
+      }
+    }
+  }
+
+  private async retryDurableDeletions(
+    context: ProjectContext,
+  ): Promise<void> {
+    for (const conversationId of await context.inbox.listDeletedTargets()) {
+      if (context.closing) return;
+      if (!context.deleting.has(conversationId)) {
+        context.deleting.add(conversationId);
+      }
+      try {
+        await this.deleteConversationInternal(
+          context,
+          conversationId,
+          true,
+          true,
+          undefined,
+          true,
+        );
+      } catch {
+        context.attention.add(conversationId);
+      }
     }
   }
 
@@ -3220,6 +3375,8 @@ export class ProjectSessionCoordinator {
           context,
           conversationId,
           true,
+          true,
+          undefined,
           true,
         );
       } catch {
@@ -3515,15 +3672,17 @@ export class ProjectSessionCoordinator {
   private async pumpTarget(
     context: ProjectContext,
     conversationId: string,
-  ): Promise<void> {
-    if (context.closing || context.deleting.has(conversationId)) return;
+  ): Promise<"blocked_by_deletion" | "no_work" | "settled" | "started"> {
+    if (context.closing) return "no_work";
+    if (context.deleting.has(conversationId)) return "blocked_by_deletion";
     const actor = context.actors.get(conversationId);
-    if (!actor || actor.getActivity().kind !== "idle") return;
+    if (!actor || actor.getActivity().kind !== "idle") return "no_work";
     const pending = await context.inbox.list({
       toConversationId: conversationId,
     });
-    if (context.closing || context.deleting.has(conversationId)) return;
-    if (pending.length === 0) return;
+    if (context.closing) return "no_work";
+    if (context.deleting.has(conversationId)) return "blocked_by_deletion";
+    if (pending.length === 0) return "no_work";
 
     const aggregate = aggregateReservedConversationEntries(
       actor.sessionManager.getEntries(),
@@ -3565,15 +3724,141 @@ export class ProjectSessionCoordinator {
         settled,
       );
       await this.pumpTarget(context, conversationId);
-      return;
+      return "settled";
     }
-    await this.dispatchBatch(
+    const dispatch = await this.dispatchBatch(
       context,
       actor,
       batch,
       runId,
       delivered,
     );
+    return dispatch === "started" ? "started" : "no_work";
+  }
+
+  private collectCascadeDeletionIds(
+    context: ProjectContext,
+    conversationId: string,
+  ): string[] {
+    const knownIds = new Set([
+      ...context.project.listConversations().map(({ id }) => id),
+      ...context.actors.keys(),
+    ]);
+    this.validateConversationLineageGraph(context, knownIds);
+    return [...knownIds]
+      .filter((candidateId) =>
+        candidateId === conversationId
+        || this.isCascadeDescendant(
+          context,
+          candidateId,
+          conversationId,
+          knownIds,
+        )
+      )
+      .sort((left, right) => {
+        const depth = this.cascadeDeletionDepth(
+          context,
+          right,
+          conversationId,
+          knownIds,
+        ) - this.cascadeDeletionDepth(
+          context,
+          left,
+          conversationId,
+          knownIds,
+        );
+        return depth === 0 ? left.localeCompare(right) : depth;
+      });
+  }
+
+  private validateConversationLineageGraph(
+    context: ProjectContext,
+    conversationIds: ReadonlySet<string>,
+  ): void {
+    for (const candidateId of conversationIds) {
+      const profile = context.actors.get(candidateId)?.profile
+        ?? context.profiles.get(candidateId);
+      if (profile) {
+        this.resolveOrchestration(context, candidateId, profile);
+      }
+    }
+  }
+
+  private isCascadeDescendant(
+    context: ProjectContext,
+    conversationId: string,
+    ancestorConversationId: string,
+    knownIds: ReadonlySet<string>,
+    visited: Set<string> = new Set(),
+  ): boolean {
+    if (conversationId === ancestorConversationId) return true;
+    if (visited.has(conversationId)) {
+      throw new Error(
+        `Orchestration parent cycle detected at ${conversationId}`,
+      );
+    }
+    visited.add(conversationId);
+
+    const profile = context.actors.get(conversationId)?.profile
+      ?? context.profiles.get(conversationId);
+    if (!profile || profile.createdBy.kind !== "conversation") {
+      return false;
+    }
+
+    const parentId = profile.createdBy.conversationId;
+    if (parentId === ancestorConversationId) return true;
+    if (knownIds.has(parentId)) {
+      return this.isCascadeDescendant(
+        context,
+        parentId,
+        ancestorConversationId,
+        knownIds,
+        visited,
+      );
+    }
+
+    return profile.orchestration?.rootConversationId === ancestorConversationId;
+  }
+
+  private cascadeDeletionDepth(
+    context: ProjectContext,
+    conversationId: string,
+    rootConversationId: string,
+    knownIds: ReadonlySet<string>,
+    visited: Set<string> = new Set(),
+  ): number {
+    if (conversationId === rootConversationId) return 0;
+    if (visited.has(conversationId)) return 0;
+    visited.add(conversationId);
+
+    const profile = context.actors.get(conversationId)?.profile
+      ?? context.profiles.get(conversationId);
+    if (!profile) return 1;
+    if (profile.createdBy.kind === "conversation") {
+      const parentId = profile.createdBy.conversationId;
+      if (parentId === rootConversationId) return 1;
+      if (
+        knownIds.has(parentId)
+        && this.isCascadeDescendant(
+          context,
+          parentId,
+          rootConversationId,
+          knownIds,
+        )
+      ) {
+        return 1 + this.cascadeDeletionDepth(
+          context,
+          parentId,
+          rootConversationId,
+          knownIds,
+          visited,
+        );
+      }
+    }
+    if (profile.orchestration?.rootConversationId === rootConversationId) {
+      return profile.orchestration.depth;
+    }
+    return 1;
   }
 
   private async deleteConversationInternal(
@@ -3581,16 +3866,112 @@ export class ProjectSessionCoordinator {
     conversationId: string,
     allowTemporaryActor = false,
     deletionReserved = false,
+    protectedConversationId?: string,
+    reservedByDurableTombstone = false,
   ): Promise<boolean> {
+    const ownedReservationIds = new Set<string>();
+    const durableFenceIds = new Set<string>();
     if (deletionReserved) {
       if (!context.deleting.has(conversationId)) {
         throw new Error(
           `Conversation deletion reservation was lost: ${conversationId}`,
         );
       }
+      if (!reservedByDurableTombstone) {
+        ownedReservationIds.add(conversationId);
+      }
     } else if (!this.reserveDeletion(context, conversationId)) {
       return false;
+    } else {
+      ownedReservationIds.add(conversationId);
     }
+
+    const known = context.project.listConversations()
+      .some(({ id }) => id === conversationId);
+    if (!known && !context.actors.has(conversationId)) {
+      try {
+        await context.inbox.clearTargetTombstone(conversationId);
+        return false;
+      } finally {
+        context.deleting.delete(conversationId);
+      }
+    }
+
+    const preexistingDurableFenceIds = reservedByDurableTombstone
+      ? new Set(await context.inbox.listDeletedTargets())
+      : new Set<string>();
+    for (const durableId of preexistingDurableFenceIds) {
+      durableFenceIds.add(durableId);
+    }
+
+    let cascadeIds = [conversationId];
+    const startedDeletionIds = new Set<string>();
+    try {
+      await this.hydrateConversationProfiles(context);
+      cascadeIds = this.collectCascadeDeletionIds(context, conversationId);
+      if (
+        protectedConversationId !== undefined
+        && cascadeIds.includes(protectedConversationId)
+      ) {
+        throw new Error("An Agent cannot delete its own session");
+      }
+      for (const cascadeId of cascadeIds) {
+        if (cascadeId === conversationId) continue;
+        if (!this.reserveDeletion(context, cascadeId)) {
+          if (preexistingDurableFenceIds.has(cascadeId)) continue;
+          throw new Error(`Conversation is being deleted: ${cascadeId}`);
+        }
+        ownedReservationIds.add(cascadeId);
+      }
+      const busyConversationId = cascadeIds.find((cascadeId) => {
+        const actor = context.actors.get(cascadeId);
+        return actor !== undefined
+          && (actor.getActivity().kind !== "idle" || actor.isCompacting())
+          && !(cascadeId === conversationId && allowTemporaryActor);
+      });
+      if (busyConversationId !== undefined) {
+        throw new Error(
+          "Cannot delete a busy conversation or one that is compacting; wait first",
+        );
+      }
+
+      const deletedAt = this.now().toISOString();
+      await context.inbox.markTargetDeleted(conversationId, deletedAt);
+      durableFenceIds.add(conversationId);
+      for (const cascadeId of cascadeIds) {
+        if (cascadeId === conversationId) continue;
+        await context.inbox.markTargetDeleted(cascadeId, deletedAt);
+        durableFenceIds.add(cascadeId);
+      }
+
+      for (const cascadeId of cascadeIds) {
+        startedDeletionIds.add(cascadeId);
+        await this.deleteSingleConversationInternal(
+          context,
+          cascadeId,
+          cascadeId === conversationId && allowTemporaryActor,
+        );
+      }
+      await this.retryBlockedDeletions(context);
+      return true;
+    } catch (error) {
+      for (const reservedId of ownedReservationIds) {
+        if (
+          !startedDeletionIds.has(reservedId)
+          && !durableFenceIds.has(reservedId)
+        ) {
+          context.deleting.delete(reservedId);
+        }
+      }
+      throw error;
+    }
+  }
+
+  private async deleteSingleConversationInternal(
+    context: ProjectContext,
+    conversationId: string,
+    allowTemporaryActor: boolean,
+  ): Promise<boolean> {
     const known = context.project.listConversations()
       .some(({ id }) => id === conversationId);
     if (!known && !context.actors.has(conversationId)) {
@@ -3610,7 +3991,6 @@ export class ProjectSessionCoordinator {
       )
       && !allowTemporaryActor
     ) {
-      context.deleting.delete(conversationId);
       throw new Error(
         "Cannot delete a busy conversation or one that is compacting; wait first",
       );
@@ -3618,21 +3998,6 @@ export class ProjectSessionCoordinator {
     let deletionLease;
     let durableDeletionIntent = false;
     try {
-      await this.hydrateConversationProfiles(context);
-      const implicitChildren = context.project.listConversations()
-        .filter(({ id }) => id !== conversationId)
-        .filter(({ id }) => {
-          const profile = context.actors.get(id)?.profile
-            ?? context.profiles.get(id);
-          return profile?.createdBy.kind === "conversation"
-            && profile.createdBy.conversationId === conversationId
-            && profile.orchestration === undefined;
-        });
-      if (implicitChildren.length > 0) {
-        throw new Error(
-          "Cannot delete a conversation while legacy child sessions still depend on its unstored orchestration lineage",
-        );
-      }
       await context.inbox.markTargetDeleted(
         conversationId,
         this.now().toISOString(),

@@ -1,10 +1,10 @@
 # Agent 协作
 
-`updated: 2026-07-22`
+`updated: 2026-07-23`
 
 ## 这个模块是干什么的
 
-Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。工作台只提供角色、观察、通信、等待和生命周期原语，不建立父子树或固定总指挥。
+Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。工作台只提供角色、观察、通信、等待和生命周期原语；UI 不建立父子树或固定总指挥，但生命周期删除会使用持久来源谱系清理 descendants。
 
 ```text
 用户 prompt / inbox 消息 / meta tool
@@ -78,7 +78,7 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
 - 每个 run 先追加 `piweb.run_settlement.v1`，记录精确 `runId/outcome/finalText`，再通知 waiter 和 inbox 清理。等待返回 durable settlement 或精确目标 run 主动发来的 message metadata；消息正文只通过 incoming custom message 注入一次，不能在 tool result 再复制一份。等待与临时回传不能从“最后一条 assistant”猜结果。
 - 重启会扫描 inbox 与 reserved JSONL：修复 inbox 已提交但来源仍是 sending 的卡片，恢复 processing run、临时结果和目标 pump；已经 durable settled 的 run 不会重复执行。
 - terminal sender card 必须先于 sidecar 删除；两步间崩溃时，残留 sidecar 可在重启后完成对账。
-- 删除 conversation 会先持久化 target tombstone，再把只以它为目标的 pending inbox 对应 sender card 终结并清理；tombstone 在内存中也是 open/create/pump/send 的硬 fence，删除事务中的后到消息被明确拒绝，它此前发出的 outbound envelope 仍会继续送达。JSONL 删除完成后 tombstone 会幂等回收；若进程在这两步之间退出，下次项目打开先恢复 fence，再完成删除或只清理目标已不存在且没有 pending 消息的完成标记，避免重新打开目标或长期编排耗尽固定 tombstone 数量。
+- 删除 conversation 会先冻结 target 的 metadata descendant set 并设置 deleting fence；任一成员 busy 时整次拒绝。随后按子孙到祖先顺序持久化 target tombstone、把只以当前被删会话为目标的 pending inbox 对应 sender card 终结并清理；tombstone 在内存中也是 open/create/pump/send 的硬 fence，删除事务中的后到消息被明确拒绝，它此前发往 cascade set 外的 outbound envelope 仍会继续送达。JSONL 删除完成后 tombstone 会幂等回收；若进程在这两步之间退出，下次项目打开先恢复 fence，再完成删除或只清理目标已不存在且没有 pending 消息的完成标记，避免重新打开目标或长期编排耗尽固定 tombstone 数量。
 
 ## 上下文前缀与缓存
 
@@ -119,11 +119,11 @@ delete_session
 - 工具闭包绑定来源 conversation 和当前 canonical project，不接受 cwd/projectId，不能跨项目。
 - Agent 只能查看和选择角色，不能 CRUD 角色、改认证/trust、换既有会话角色或模型。
 - `start_session` 必须给 role 和 task，创建平级普通/临时会话；工具指导要求 Agent 创建普通会话前先用 `list_sessions(scope=created_by_me)` 查找自己负责的现有会话，职责匹配时通过 `send_session_message` 复用，只有没有合适会话才新建。它在冻结角色、初始 task 和固定 runId 被可靠接受并调度后返回 `conversationId + runId`。目标空闲时立即取得 run ticket；若更早的 run 抢先则持久等待泵送。两种情况都不会隐式等待或挂起调用者。
-- UI 仍投影扁平会话，但宿主在 conversation metadata 与来源 delegation card 中持久保存 `rootConversationId + depth + sourceRunId`。root 深度为 0，最多委派到深度 3；一个来源 run 最多消费 4 个 peer reservation，同一 root 最多保留 16 个 live descendants。per-run 计数来自来源 JSONL 的 append-only card，目标删除、临时会话自删和重启都不能退回额度；live 容量只有 conversation 真正删除后才释放。旧 `createdBy` 链会递归推导并校验，显式谱系快照可在祖先删除后独立存活；仍依赖隐式旧谱系的 child 会阻止父会话先删，恢复中的旧 run 则把无法关联 runId 的 legacy delegation card 保守计入额度。
+- UI 仍投影扁平会话，但宿主在 conversation metadata 与来源 delegation card 中持久保存 `rootConversationId + depth + sourceRunId`。root 深度为 0，最多委派到深度 3；一个来源 run 最多消费 4 个 peer reservation，同一 root 最多保留 16 个 live descendants。per-run 计数来自来源 JSONL 的 append-only card，目标删除、临时会话自删和重启都不能退回额度；live 容量只有 conversation 真正删除后才释放。旧 `createdBy` 链会递归推导并校验；删除一个 conversation 会级联其 metadata descendants，旧隐式 child 不再阻止父删除，而是跟随父删除；恢复中的旧 run 则把无法关联 runId 的 legacy delegation card 保守计入额度。
 - `send_session_message` 在持久接收后返回；busy 目标仍保持当前 run。若目标正在等待发送者的精确 run，则返回 `delivered_to_wait`，消息直接进入目标当前 turn，发送者仍可继续运行。
 - `wait_for_session` 绑定精确 `conversationId + runId`，先读 durable settlement，再 observe-or-subscribe；它等待“精确 run 的下一件相关事件”，可能返回 settlement，也可能先返回 `outcome=message` metadata。消息到达后若仍需最终结果，Agent 可再次等待。活动 session waiter 同时构成 wait-for graph，新增边若会形成任意长度环则在注册前拒绝；取消、异常和消息 rendezvous 都必须注销 waiter 并恢复 phase。
 - `abort_session` 只匹配精确目标 run；stale runId 不会中止后来的 run。其精确目标与已决定结果也写入来源会话的 `piweb.meta_operation.v1`，同一 tool call 在结算或重启后重放仍返回原结果；若进程在 started intent 后崩溃，恢复会先精确中止/结算该 run，再允许 inbox pump 继续。
-- `delete_session` 拒绝 self 和 busy 目标；需要先 abort、等待结算，再删除。删除 intent/result 以 `piweb.meta_operation.v1` 持久化，相同 toolCall 重放不能改删另一个目标。
+- `delete_session` 删除目标及其 metadata descendants；拒绝 self、会把自己级联删除的祖先目标，以及任何 busy 成员；需要先 abort、等待结算，再删除。删除 intent/result 以 `piweb.meta_operation.v1` 持久化，相同 toolCall 重放不能改删另一个目标。
 - `start_session` 的角色、task、title 和 temporary 进入 sender card 指纹，相同 toolCall 改 payload 会冲突而不是谎报成功。
 - `peek_session` 不启动 inactive 目标的模型/扩展，不移动 recent；只返回 user/assistant 可见正文和会话卡片，过滤 thinking/tool/auth/internal，默认只看最近 2 项，工具说明提醒 Agent 通常先看最后 1–2 项即可，最多 20 项且完整 JSON 不超过 256 KiB。inactive inspection 与删除共用 lifecycle 边界，因此短暂 writer lease 会先释放，删除不会留下只能靠重启恢复的 tombstone。
 - 列表和正文同样有界；Agent 看到稳定完整 conversationId，而 UI 可另显示短句柄。`list_sessions` 的每项显式返回 durable `createdBy` 与观察者相对的 `createdByMe`，并支持 `scope=created_by_me`，让 Agent 无需依赖对话记忆即可找回自己负责的会话；尚未迁移、确实没有 conversation profile 的旧条目如实标为 `createdBy.kind=unknown`。

@@ -35,7 +35,7 @@ Pi Web 是本机优先的极简 Agent 工作台。当前目标不是复制 Pi �
 - `projectId`、`conversationId`、`sessionId` 和 `runId` 属于不同生命周期，禁止合并或互相替代。
 - 同一进程内一个 `canonical cwd + conversationId` 只能有一个 writer lease；租约必须在 Pi `open()` 前取得，并在所有失败/关闭路径释放。
 - 已有对话重连可有界等待旧 lease；等待必须 FIFO、可取消，不能通过第二个 writer 解决。
-- 删除只接受 conversationId：active conversation 必须拒绝，非当前目标必须 fail-fast 取得独占 writer lease，并在完整路径/identity 校验后精确 unlink 单个 JSONL；删除与索引刷新共用串行边界。
+- 删除只接受 conversationId：目标及其 metadata descendant set 中任一 busy/compacting conversation 都必须拒绝；删除前先冻结 cascade set，非当前目标必须 fail-fast 取得独占 writer lease，并在完整路径/identity 校验后逐个精确 unlink JSONL；删除与索引刷新共用串行边界。
 - Pi `SessionManager.listAll()` 不是完整性证明：宿主必须验证受控目录内全部常规 JSONL 的尾换行、有限 JSON 数值、header、经迁移后的 entry payload/tree，并要求磁盘全集与 SDK 索引按规范路径和 conversationId 一一对应；任何遗漏、损坏、重复或扫描期变化都 fail closed。
 - 工具权限属于用户级角色模板，并进入 conversation 当前角色快照；新角色和旧角色迁移默认 `read_only`，模板后续编辑不得自动改变已有会话。用户只可在会话空闲时显式应用一个当前可用角色，宿主必须追加角色变更记录并用同一 SessionManager 重建运行时；失败要恢复上一角色或将 actor 置为 fatal。
 - 浏览器不是 transcript owner；恢复必须从服务端 `conversation_snapshot` hydrate，localStorage 只保存目录和安全偏好。

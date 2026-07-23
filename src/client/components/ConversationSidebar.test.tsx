@@ -359,8 +359,9 @@ describe("ConversationSidebar", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "删除会话 接口设计" }));
     expect(onDelete).not.toHaveBeenCalled();
-    expect(screen.getByRole("alertdialog", { name: "确认删除会话" }))
-      .toHaveTextContent("此操作无法撤销");
+    const dialog = screen.getByRole("alertdialog", { name: "确认删除会话" });
+    expect(dialog).toHaveTextContent("派生的空闲子孙会话");
+    expect(dialog).toHaveTextContent("此操作无法撤销");
     fireEvent.click(screen.getByRole("button", { name: "保留" }));
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
 

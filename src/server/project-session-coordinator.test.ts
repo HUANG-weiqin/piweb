@@ -15,6 +15,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ProjectActivitySummary } from "../shared/protocol.js";
+import { ConversationActor } from "./conversation-actor.js";
 import {
   CONVERSATION_CARD_CUSTOM_TYPE,
   aggregateReservedConversationEntries,
@@ -3410,6 +3411,37 @@ describe("ProjectSessionCoordinator", () => {
         .map(({ id }) => id),
     ).toContain(source.conversationId);
 
+    const child = await fixture.coordinator.startPeerSession(
+      fixture.handle,
+      source.conversationId,
+      startInput({
+        task: "child must not delete its ancestor and itself by cascade",
+        idempotencyKey: "delete-ancestor-would-delete-self",
+      }),
+    );
+    const childActor = await fixture.coordinator.openConversation(
+      fixture.handle,
+      child.conversationId,
+      { updateRecent: false },
+    );
+    await expect(executeTool(
+      fixture.runtime.control(child.conversationId),
+      "delete_session",
+      "delete-ancestor-would-delete-self",
+      { conversationId: source.conversationId },
+    )).rejects.toThrow("cannot delete its own session");
+    expect(
+      aggregateReservedConversationEntries(childActor.sessionManager.getEntries())
+        .metaOperations.find(({ kind }) => kind === "delete_session"),
+    ).toBeUndefined();
+    expect(
+      (await fixture.coordinator.listSessions(fixture.handle))
+        .map(({ id }) => id),
+    ).toEqual(expect.arrayContaining([
+      source.conversationId,
+      child.conversationId,
+    ]));
+
     registry.events.length = 0;
     await expect(
       fixture.coordinator.deleteConversation(
@@ -3537,6 +3569,554 @@ describe("ProjectSessionCoordinator", () => {
     );
   });
 
+  it("retries a durable ancestor tombstone after a descendant deletion releases its reservation", async () => {
+    const fixture = await createFixture();
+    const root = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const child = await fixture.coordinator.startPeerSession(
+      fixture.handle,
+      root.conversationId,
+      startInput({
+        task: "child with deletion reservation",
+        idempotencyKey: "durable-root-retry-child",
+      }),
+    );
+    await waitUntil(async () =>
+      (await fixture.coordinator.listSessions(fixture.handle))
+        .find(({ id }) => id === child.conversationId)
+        ?.activity.kind === "idle",
+    "child initial run to settle");
+    const inbox = coordinatorInbox(fixture.handle);
+    await inbox.markTargetDeleted(
+      root.conversationId,
+      "2026-07-19T12:00:03.000Z",
+    );
+
+    const context = (fixture.handle as unknown as {
+      context: {
+        lifecycle: {
+          run<T>(task: () => Promise<T> | T): Promise<T>;
+        };
+      };
+    }).context;
+    const lifecycleBlocked = deferred();
+    const releaseLifecycle = deferred();
+    const lifecycleBlock = context.lifecycle.run(async () => {
+      lifecycleBlocked.resolve();
+      await releaseLifecycle.promise;
+    });
+    await lifecycleBlocked.promise;
+
+    const childDeletion = fixture.coordinator.deleteConversation(
+      fixture.handle,
+      child.conversationId,
+    );
+    await (fixture.coordinator as unknown as {
+      retryDurableDeletions(context: unknown): Promise<void>;
+    }).retryDurableDeletions(context);
+    let ids = (await fixture.coordinator.listSessions(fixture.handle))
+      .map(({ id }) => id);
+    expect(ids).toEqual(expect.arrayContaining([
+      root.conversationId,
+      child.conversationId,
+    ]));
+
+    releaseLifecycle.resolve();
+    await lifecycleBlock;
+    await childDeletion;
+    await waitUntil(async () => {
+      ids = (await fixture.coordinator.listSessions(fixture.handle))
+        .map(({ id }) => id);
+      return !ids.includes(root.conversationId)
+        && !ids.includes(child.conversationId)
+        && (await inbox.listDeletedTargets()).length === 0;
+    }, "durable ancestor retry after child deletion");
+  });
+
+  it("retries a durable ancestor tombstone after a busy descendant turns fatal", async () => {
+    const fixture = await createFixture();
+    const root = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const childStarted = deferred();
+    const releaseChild = deferred();
+    fixture.runtime.nextSessionBehaviors.push([
+      blocksUntil(childStarted, releaseChild, "child done"),
+    ]);
+    const child = await fixture.coordinator.startPeerSession(
+      fixture.handle,
+      root.conversationId,
+      startInput({
+        task: "busy child that will fail settlement persistence",
+        idempotencyKey: "durable-root-retry-fatal-child",
+      }),
+    );
+    await childStarted.promise;
+    const childActor = await fixture.coordinator.openConversation(
+      fixture.handle,
+      child.conversationId,
+      { updateRecent: false },
+    );
+    const appender = childActor.sessionManager as unknown as {
+      appendCustomEntry(customType: string, data: unknown): string;
+    };
+    const originalAppend = appender.appendCustomEntry.bind(appender);
+    appender.appendCustomEntry = (customType, data) => {
+      if (customType === "piweb.run_settlement.v1") {
+        throw new Error("settlement persistence failed");
+      }
+      return originalAppend(customType, data);
+    };
+    const inbox = coordinatorInbox(fixture.handle);
+    await inbox.markTargetDeleted(
+      root.conversationId,
+      "2026-07-19T12:00:04.000Z",
+    );
+    const context = (fixture.handle as unknown as {
+      context: { backgroundTasks: Set<Promise<void>> };
+    }).context;
+    await (fixture.coordinator as unknown as {
+      retryDurableDeletions(context: unknown): Promise<void>;
+    }).retryDurableDeletions(context);
+    expect(
+      (await fixture.coordinator.listSessions(fixture.handle))
+        .map(({ id }) => id),
+    ).toEqual(expect.arrayContaining([
+      root.conversationId,
+      child.conversationId,
+    ]));
+
+    releaseChild.resolve();
+    await waitUntil(async () => {
+      const ids = (await fixture.coordinator.listSessions(fixture.handle))
+        .map(({ id }) => id);
+      return !ids.includes(root.conversationId)
+        && !ids.includes(child.conversationId)
+        && (await inbox.listDeletedTargets()).length === 0;
+    }, "durable ancestor retry after fatal descendant run");
+    await waitUntil(
+      () => context.backgroundTasks.size === 0,
+      "fatal descendant background tasks to settle",
+    );
+    const activity = fixture.coordinator.projectActivitySnapshot().projects
+      .find(({ cwd }) => cwd === fixture.cwd);
+    expect(activity?.attentionConversationCount).toBe(0);
+  });
+
+  it("does not drop failed inbox recovery for a transient delete reservation", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const childStarted = deferred();
+    const releaseChild = deferred();
+    fixture.runtime.nextSessionBehaviors.push([
+      blocksUntil(childStarted, releaseChild, "child done"),
+    ]);
+    const child = await fixture.coordinator.startPeerSession(
+      fixture.handle,
+      target.conversationId,
+      startInput({
+        task: "busy descendant keeps delete transient",
+        idempotencyKey: "failed-batch-transient-delete-child",
+      }),
+    );
+    await childStarted.promise;
+
+    const targetStarted = deferred();
+    const releaseTarget = deferred();
+    fixture.runtime.control(target.conversationId).enqueue(
+      blocksUntil(targetStarted, releaseTarget, "target first run done"),
+    );
+    const sent = await executeTool(
+      fixture.runtime.control(source.conversationId),
+      "send_session_message",
+      "failed-batch-transient-delete",
+      {
+        conversationId: target.conversationId,
+        message: "recover after transient delete reservation",
+      },
+    ) as { messageId: string; runId: string };
+    await targetStarted.promise;
+
+    const appender = target.sessionManager as unknown as {
+      appendCustomEntry(customType: string, data: unknown): string;
+    };
+    const originalAppend = appender.appendCustomEntry.bind(appender);
+    appender.appendCustomEntry = (customType, data) => {
+      if (customType === "piweb.run_settlement.v1") {
+        throw new Error("target settlement persistence failed");
+      }
+      return originalAppend(customType, data);
+    };
+    const context = (fixture.handle as unknown as {
+      context: {
+        backgroundTasks: Set<Promise<void>>;
+        lifecycle: {
+          run<T>(task: () => Promise<T> | T): Promise<T>;
+        };
+      };
+    }).context;
+    const lifecycleBlocked = deferred();
+    const releaseLifecycle = deferred();
+    const lifecycleBlock = context.lifecycle.run(async () => {
+      lifecycleBlocked.resolve();
+      await releaseLifecycle.promise;
+    });
+    await lifecycleBlocked.promise;
+
+    releaseTarget.resolve();
+    await waitUntil(
+      () => target.getState().fatalError !== undefined,
+      "target inbox run to become fatal",
+    );
+    await Promise.resolve();
+    const deletion = fixture.coordinator.deleteConversation(
+      fixture.handle,
+      target.conversationId,
+    );
+
+    releaseLifecycle.resolve();
+    await lifecycleBlock;
+    await expect(deletion).rejects.toThrow("busy conversation");
+    await waitUntil(
+      async () => await coordinatorInbox(fixture.handle).get(sent.messageId)
+        === undefined,
+      "failed inbox batch to recover after transient delete failure",
+    );
+    const recovered = await fixture.coordinator.openConversation(
+      fixture.handle,
+      target.conversationId,
+      { updateRecent: false },
+    );
+    expect(recovered.getState().fatalError).toBeUndefined();
+    expect(
+      (await fixture.coordinator.listSessions(fixture.handle))
+        .map(({ id }) => id),
+    ).toEqual(expect.arrayContaining([
+      target.conversationId,
+      child.conversationId,
+    ]));
+
+    releaseChild.resolve();
+    await waitUntil(
+      () => context.backgroundTasks.size === 0,
+      "transient delete failed-batch background tasks to settle",
+    );
+  });
+
+  it("continues failed inbox recovery when delete reserves during reopen", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const childStarted = deferred();
+    const releaseChild = deferred();
+    fixture.runtime.nextSessionBehaviors.push([
+      blocksUntil(childStarted, releaseChild, "child done"),
+    ]);
+    const child = await fixture.coordinator.startPeerSession(
+      fixture.handle,
+      target.conversationId,
+      startInput({
+        task: "busy descendant blocks racing delete",
+        idempotencyKey: "failed-batch-reopen-delete-child",
+      }),
+    );
+    await childStarted.promise;
+
+    const targetStarted = deferred();
+    const releaseTarget = deferred();
+    fixture.runtime.control(target.conversationId).enqueue(
+      blocksUntil(targetStarted, releaseTarget, "target first run done"),
+    );
+    const sent = await executeTool(
+      fixture.runtime.control(source.conversationId),
+      "send_session_message",
+      "failed-batch-reopen-delete",
+      {
+        conversationId: target.conversationId,
+        message: "recover after delete races reopen",
+      },
+    ) as { messageId: string };
+    await targetStarted.promise;
+
+    const appender = target.sessionManager as unknown as {
+      appendCustomEntry(customType: string, data: unknown): string;
+    };
+    const originalAppend = appender.appendCustomEntry.bind(appender);
+    appender.appendCustomEntry = (customType, data) => {
+      if (customType === "piweb.run_settlement.v1") {
+        throw new Error("target settlement persistence failed");
+      }
+      return originalAppend(customType, data);
+    };
+    const context = (fixture.handle as unknown as {
+      context: { backgroundTasks: Set<Promise<void>> };
+    }).context;
+    const reopenStarted = deferred();
+    const releaseReopen = deferred();
+    let blockTargetReopen = true;
+    fixture.runtime.beforeCreateSession = async (conversationId) => {
+      if (blockTargetReopen && conversationId === target.conversationId) {
+        blockTargetReopen = false;
+        reopenStarted.resolve();
+        await releaseReopen.promise;
+      }
+    };
+
+    releaseTarget.resolve();
+    await reopenStarted.promise;
+    const deletion = fixture.coordinator.deleteConversation(
+      fixture.handle,
+      target.conversationId,
+    );
+    releaseReopen.resolve();
+    await expect(deletion).rejects.toThrow("busy conversation");
+    await waitUntil(
+      async () => await coordinatorInbox(fixture.handle).get(sent.messageId)
+        === undefined,
+      "failed inbox batch to recover after delete raced reopen",
+    );
+    const recovered = await fixture.coordinator.openConversation(
+      fixture.handle,
+      target.conversationId,
+      { updateRecent: false },
+    );
+    expect(recovered.getState().fatalError).toBeUndefined();
+    expect(
+      (await fixture.coordinator.listSessions(fixture.handle))
+        .map(({ id }) => id),
+    ).toEqual(expect.arrayContaining([
+      target.conversationId,
+      child.conversationId,
+    ]));
+
+    releaseChild.resolve();
+    await waitUntil(
+      () => context.backgroundTasks.size === 0,
+      "reopen race failed-batch background tasks to settle",
+    );
+  });
+
+  it("does not retry failed inbox recovery indefinitely", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const targetStarted = deferred();
+    const releaseTarget = deferred();
+    fixture.runtime.control(target.conversationId).enqueue(
+      blocksUntil(targetStarted, releaseTarget, "target first run done"),
+    );
+    const sent = await executeTool(
+      fixture.runtime.control(source.conversationId),
+      "send_session_message",
+      "failed-batch-bounded-retry",
+      {
+        conversationId: target.conversationId,
+        message: "recovery should not loop forever",
+      },
+    ) as { messageId: string; runId: string };
+    await targetStarted.promise;
+
+    let settlementFailures = 0;
+    const wrapFailingSettlement = (manager: unknown) => {
+      const appender = manager as {
+        appendCustomEntry(customType: string, data: unknown): string;
+      };
+      const originalAppend = appender.appendCustomEntry.bind(appender);
+      appender.appendCustomEntry = (customType, data) => {
+        if (customType === "piweb.run_settlement.v1") {
+          settlementFailures++;
+          throw new Error("settlement persistence keeps failing");
+        }
+        return originalAppend(customType, data);
+      };
+    };
+    wrapFailingSettlement(target.sessionManager);
+    fixture.runtime.beforeCreateSession = async (conversationId, options) => {
+      if (conversationId === target.conversationId) {
+        wrapFailingSettlement(options.sessionManager);
+      }
+    };
+    const context = (fixture.handle as unknown as {
+      context: { backgroundTasks: Set<Promise<void>> };
+    }).context;
+
+    releaseTarget.resolve();
+    await waitUntil(
+      () => settlementFailures === 2 && context.backgroundTasks.size === 0,
+      "bounded failed inbox recovery attempts",
+    );
+    expect(
+      fixture.runtime.createConversationIds.filter(
+        (id) => id === target.conversationId,
+      ),
+    ).toHaveLength(2);
+    expect(await coordinatorInbox(fixture.handle).get(sent.messageId))
+      .toMatchObject({
+        state: "processing",
+        processingRunId: sent.runId,
+      });
+  });
+
+  it("does not abort a recovered run when delete reserves after dispatch", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const targetStarted = deferred();
+    const releaseTarget = deferred();
+    fixture.runtime.control(target.conversationId).enqueue(
+      blocksUntil(targetStarted, releaseTarget, "target first run done"),
+    );
+    const sent = await executeTool(
+      fixture.runtime.control(source.conversationId),
+      "send_session_message",
+      "failed-batch-dispatch-delete",
+      {
+        conversationId: target.conversationId,
+        message: "delete races after recovered dispatch",
+      },
+    ) as { messageId: string };
+    await targetStarted.promise;
+
+    const appender = target.sessionManager as unknown as {
+      appendCustomEntry(customType: string, data: unknown): string;
+    };
+    const originalAppend = appender.appendCustomEntry.bind(appender);
+    appender.appendCustomEntry = (customType, data) => {
+      if (customType === "piweb.run_settlement.v1") {
+        throw new Error("target settlement persistence failed");
+      }
+      return originalAppend(customType, data);
+    };
+    const recoveredStarted = deferred();
+    const releaseRecovered = deferred();
+    fixture.runtime.nextSessionBehaviors.push([
+      blocksUntil(recoveredStarted, releaseRecovered, "recovered run done"),
+    ]);
+    const originalResume = ConversationActor.prototype.resumeMessages;
+    let deletion: Promise<boolean> | undefined;
+    let deleteOnRecoveredResume = true;
+    const resumeSpy = vi.spyOn(ConversationActor.prototype, "resumeMessages")
+      .mockImplementation(function (
+        this: ConversationActor,
+        input: Parameters<ConversationActor["resumeMessages"]>[0],
+      ) {
+        const result = originalResume.call(this, input);
+        if (
+          deleteOnRecoveredResume
+          && this.conversationId === target.conversationId
+        ) {
+          deleteOnRecoveredResume = false;
+          deletion = fixture.coordinator.deleteConversation(
+            fixture.handle,
+            target.conversationId,
+          );
+        }
+        return result;
+      });
+
+    releaseTarget.resolve();
+    await recoveredStarted.promise;
+    resumeSpy.mockRestore();
+    const recoveredControl = fixture.runtime.control(target.conversationId);
+    expect(deletion).toBeDefined();
+    await expect(deletion!).rejects.toThrow("busy conversation");
+    expect(recoveredControl.abortCalls).toBe(0);
+
+    releaseRecovered.resolve();
+    await waitUntil(
+      async () => await coordinatorInbox(fixture.handle).get(sent.messageId)
+        === undefined,
+      "recovered run to finish after racing delete",
+    );
+    expect(recoveredControl.abortCalls).toBe(0);
+  });
+
+  it("does not clear a descendant deletion reservation when an ancestor cascade races it", async () => {
+    const fixture = await createFixture();
+    const root = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const childConversationId = randomUUID();
+    await fixture.handle.project.createConversation(
+      childConversationId,
+      defaultProfile(fixture.roles, {
+        createdBy: {
+          kind: "conversation",
+          conversationId: root.conversationId,
+        },
+        orchestration: {
+          rootConversationId: root.conversationId,
+          depth: 1,
+        },
+      }),
+    );
+    await fixture.handle.project.refreshConversations();
+
+    const project = fixture.handle.project;
+    const originalInspectConversations = project.inspectConversations
+      .bind(project);
+    const inspectionStarted = deferred();
+    const releaseInspection = deferred();
+    let blocked = false;
+    project.inspectConversations = async (...args) => {
+      if (!blocked) {
+        blocked = true;
+        inspectionStarted.resolve();
+        await releaseInspection.promise;
+      }
+      return originalInspectConversations(...args);
+    };
+
+    const rootDeletion = fixture.coordinator.deleteConversation(
+      fixture.handle,
+      root.conversationId,
+    );
+    await inspectionStarted.promise;
+    const childDeletion = fixture.coordinator.deleteConversation(
+      fixture.handle,
+      childConversationId,
+    );
+    releaseInspection.resolve();
+
+    await expect(rootDeletion).rejects.toThrow("being deleted");
+    await expect(childDeletion).resolves.toBe(true);
+    project.inspectConversations = originalInspectConversations;
+
+    const remainingIds = (await fixture.coordinator.listSessions(fixture.handle))
+      .map(({ id }) => id);
+    expect(remainingIds).toContain(root.conversationId);
+    expect(remainingIds).not.toContain(childConversationId);
+  });
+
   it("does not let one delete_session tool call idempotency key delete a different replay target", async () => {
     const fixture = await createFixture();
     const source = await fixture.coordinator.createUserConversation(
@@ -3650,6 +4230,302 @@ describe("ProjectSessionCoordinator", () => {
 
     releaseSource.resolve();
     await sourceCompletion;
+  });
+
+  it("does not let delayed initial temporary cleanup cancel a new active run", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const blocker = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const initialRunStarted = deferred();
+    const releaseInitialRun = deferred();
+    fixture.runtime.nextSessionBehaviors.push([
+      blocksUntil(
+        initialRunStarted,
+        releaseInitialRun,
+        "temporary initial result",
+      ),
+    ]);
+    const temporary = await fixture.coordinator.startPeerSession(
+      fixture.handle,
+      source.conversationId,
+      startInput({
+        temporary: true,
+        task: "temporary cleanup waits behind lifecycle queue",
+        idempotencyKey: "temporary-cleanup-races-new-run",
+      }),
+    );
+    await initialRunStarted.promise;
+
+    const inbox = coordinatorInbox(fixture.handle);
+    const originalMarkDeleted = inbox.markTargetDeleted.bind(inbox);
+    const deletionMarked = deferred();
+    const releaseDeletion = deferred();
+    inbox.markTargetDeleted = async (...args) => {
+      await originalMarkDeleted(...args);
+      if (args[0] === blocker.conversationId) {
+        deletionMarked.resolve();
+        await releaseDeletion.promise;
+      }
+    };
+    const blockingDeletion = fixture.coordinator.deleteConversation(
+      fixture.handle,
+      blocker.conversationId,
+    );
+    await deletionMarked.promise;
+
+    releaseInitialRun.resolve();
+    await waitUntil(async () =>
+      (await fixture.coordinator.listSessions(fixture.handle))
+        .find(({ id }) => id === temporary.conversationId)
+        ?.activity.kind === "idle",
+    "temporary initial run settled before queued cleanup");
+
+    const secondRunStarted = deferred();
+    const releaseSecondRun = deferred();
+    fixture.runtime.control(temporary.conversationId).enqueue(
+      blocksUntil(secondRunStarted, releaseSecondRun, "second run done"),
+    );
+    const secondRun = fixture.coordinator.prompt(
+      fixture.handle,
+      temporary.conversationId,
+      randomUUID(),
+      "new run before delayed temporary cleanup",
+    );
+    await secondRunStarted.promise;
+
+    releaseDeletion.resolve();
+    await blockingDeletion;
+    await waitUntil(async () =>
+      (await fixture.coordinator.listSessions(fixture.handle))
+        .find(({ id }) => id === temporary.conversationId)
+        ?.attention === true,
+    "delayed cleanup rejected the busy temporary root");
+    expect(fixture.runtime.control(temporary.conversationId).abortCalls)
+      .toBe(0);
+
+    releaseSecondRun.resolve();
+    await secondRun;
+    await waitUntil(async () =>
+      !(await fixture.coordinator.listSessions(fixture.handle))
+        .some(({ id }) => id === temporary.conversationId),
+    "temporary cleanup after the second run settles");
+    inbox.markTargetDeleted = originalMarkDeleted;
+  });
+
+  it("retries temporary auto-deletion after a busy descendant settles", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const childStarted = deferred();
+    const releaseChild = deferred();
+    let childConversationId: string | undefined;
+    fixture.runtime.nextSessionBehaviors.push([
+      async (control) => {
+        fixture.runtime.nextSessionBehaviors.push([
+          blocksUntil(childStarted, releaseChild, "child done"),
+        ]);
+        const child = await executeTool(
+          control,
+          "start_session",
+          "temporary-parent-starts-child",
+          startInput({
+            task: "busy descendant of temporary parent",
+            idempotencyKey: "temporary-parent-starts-child",
+          }),
+        ) as { conversationId: string };
+        childConversationId = child.conversationId;
+        control.emitFinal("temporary parent result");
+      },
+    ]);
+
+    const temporary = await fixture.coordinator.startPeerSession(
+      fixture.handle,
+      source.conversationId,
+      startInput({
+        temporary: true,
+        task: "temporary parent",
+        idempotencyKey: "temporary-parent-with-busy-child",
+      }),
+    );
+    await childStarted.promise;
+    await waitUntil(async () =>
+      (await fixture.coordinator.listSessions(fixture.handle))
+        .find(({ id }) => id === temporary.conversationId)
+        ?.attention === true,
+    "temporary deletion blocked by a busy descendant");
+    expect(childConversationId).toBeDefined();
+
+    releaseChild.resolve();
+    await waitUntil(async () => {
+      const ids = (await fixture.coordinator.listSessions(fixture.handle))
+        .map(({ id }) => id);
+      return !ids.includes(temporary.conversationId)
+        && !ids.includes(childConversationId!);
+    }, "temporary cascade deletion retry after descendant settlement");
+  });
+
+  it("retries temporary auto-deletion after descendant compaction fails", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const childCreated = deferred();
+    const releaseParent = deferred();
+    let childConversationId: string | undefined;
+    fixture.runtime.nextSessionBehaviors.push([
+      async (control) => {
+        fixture.runtime.nextSessionBehaviors.push([
+          completesWith("child idle"),
+        ]);
+        const child = await executeTool(
+          control,
+          "start_session",
+          "temporary-parent-starts-compacting-child",
+          startInput({
+            task: "compacting descendant of temporary parent",
+            idempotencyKey: "temporary-parent-starts-compacting-child",
+          }),
+        ) as { conversationId: string };
+        childConversationId = child.conversationId;
+        childCreated.resolve();
+        await releaseParent.promise;
+        control.emitFinal("temporary parent result");
+      },
+    ]);
+
+    const temporary = await fixture.coordinator.startPeerSession(
+      fixture.handle,
+      source.conversationId,
+      startInput({
+        temporary: true,
+        task: "temporary parent with compacting child",
+        idempotencyKey: "temporary-parent-with-compacting-child",
+      }),
+    );
+    await childCreated.promise;
+    expect(childConversationId).toBeDefined();
+    await waitUntil(async () =>
+      (await fixture.coordinator.listSessions(fixture.handle))
+        .find(({ id }) => id === childConversationId)
+        ?.activity.kind === "idle",
+    "compacting child initial run to settle");
+    const childActor = await fixture.coordinator.openConversation(
+      fixture.handle,
+      childConversationId!,
+      { updateRecent: false },
+    );
+    let compacting = true;
+    childActor.isCompacting = () => compacting;
+    childActor.compactContext = async () => {
+      compacting = false;
+      throw new Error("compaction failed after clearing state");
+    };
+
+    releaseParent.resolve();
+    await waitUntil(async () =>
+      (await fixture.coordinator.listSessions(fixture.handle))
+        .find(({ id }) => id === temporary.conversationId)
+        ?.attention === true,
+    "temporary deletion blocked by a compacting descendant");
+
+    await expect(fixture.coordinator.compactContext(
+      fixture.handle,
+      childConversationId!,
+    )).rejects.toThrow("compaction failed");
+    await waitUntil(async () => {
+      const ids = (await fixture.coordinator.listSessions(fixture.handle))
+        .map(({ id }) => id);
+      return !ids.includes(temporary.conversationId)
+        && !ids.includes(childConversationId!);
+    }, "temporary cascade deletion retry after failed compaction");
+  });
+
+  it("does not retry temporary cascade deletion through a new active run", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const childStarted = deferred();
+    const releaseChild = deferred();
+    let childConversationId: string | undefined;
+    fixture.runtime.nextSessionBehaviors.push([
+      async (control) => {
+        fixture.runtime.nextSessionBehaviors.push([
+          blocksUntil(childStarted, releaseChild, "child done"),
+        ]);
+        const child = await executeTool(
+          control,
+          "start_session",
+          "temporary-parent-starts-child-before-new-run",
+          startInput({
+            task: "busy descendant before parent gets a new run",
+            idempotencyKey: "temporary-parent-starts-child-before-new-run",
+          }),
+        ) as { conversationId: string };
+        childConversationId = child.conversationId;
+        control.emitFinal("temporary parent result");
+      },
+    ]);
+
+    const temporary = await fixture.coordinator.startPeerSession(
+      fixture.handle,
+      source.conversationId,
+      startInput({
+        temporary: true,
+        task: "temporary parent that will receive another prompt",
+        idempotencyKey: "temporary-parent-new-run-before-retry",
+      }),
+    );
+    await childStarted.promise;
+    await waitUntil(async () =>
+      (await fixture.coordinator.listSessions(fixture.handle))
+        .find(({ id }) => id === temporary.conversationId)
+        ?.attention === true,
+    "temporary deletion initially blocked");
+    expect(childConversationId).toBeDefined();
+
+    const secondRunStarted = deferred();
+    const releaseSecondRun = deferred();
+    fixture.runtime.control(temporary.conversationId).enqueue(
+      blocksUntil(secondRunStarted, releaseSecondRun, "second run done"),
+    );
+    const secondRun = fixture.coordinator.prompt(
+      fixture.handle,
+      temporary.conversationId,
+      randomUUID(),
+      "new work must not be cancelled by a delayed cleanup retry",
+    );
+    await secondRunStarted.promise;
+
+    releaseChild.resolve();
+    await waitUntil(async () =>
+      (await fixture.coordinator.listSessions(fixture.handle))
+        .find(({ id }) => id === childConversationId)
+        ?.activity.kind === "idle",
+    "busy descendant settled while temporary parent stayed running");
+    let ids = (await fixture.coordinator.listSessions(fixture.handle))
+      .map(({ id }) => id);
+    expect(ids).toContain(temporary.conversationId);
+    expect(ids).toContain(childConversationId);
+
+    releaseSecondRun.resolve();
+    await secondRun;
+    await waitUntil(async () => {
+      ids = (await fixture.coordinator.listSessions(fixture.handle))
+        .map(({ id }) => id);
+      return !ids.includes(temporary.conversationId)
+        && !ids.includes(childConversationId!);
+    }, "temporary cascade deletion after the new run settles");
   });
 
   it("returns a temporary failure message and retains the failed session", async () => {
@@ -4302,6 +5178,57 @@ describe("ProjectSessionCoordinator", () => {
       state: "failed",
       result: expect.stringContaining("已删除"),
     }));
+  });
+
+  it("recovers a root deletion tombstone by cascading to descendants", async () => {
+    const cwd = await mkdtemp(join(
+      tmpdir(),
+      "piweb-session-cascade-deletion-recovery-",
+    ));
+    temporaryDirectories.push(cwd);
+    const runtime = new FakeRuntime();
+    const roles = await RoleCatalog.open(
+      runtime,
+      join(cwd, "user", "roles.json"),
+    );
+    const store = await ProjectStore.open(cwd, "full_access");
+    const rootId = "00000000-0000-4000-8000-000000000001";
+    const childId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    await store.createConversation(rootId, defaultProfile(roles, {
+      orchestration: { rootConversationId: rootId, depth: 0 },
+    }));
+    await store.createConversation(childId, defaultProfile(roles, {
+      createdBy: { kind: "conversation", conversationId: rootId },
+      orchestration: { rootConversationId: rootId, depth: 1 },
+    }));
+    const inbox = await ProjectInbox.open(join(store.stateDir, "inbox"));
+    await inbox.markTargetDeleted(
+      rootId,
+      "2026-07-19T12:00:01.000Z",
+    );
+    await inbox.markTargetDeleted(
+      childId,
+      "2026-07-19T12:00:02.000Z",
+    );
+
+    const coordinator = new ProjectSessionCoordinator(runtime, roles);
+    const handle = await coordinator.acquireProject(cwd, "full_access");
+    fixtures.push({
+      cwd,
+      runtime,
+      roles,
+      registry: new ProjectStoreRegistry(),
+      coordinator,
+      handle,
+    });
+
+    await waitUntil(async () => {
+      const ids = (await coordinator.listSessions(handle)).map(({ id }) => id);
+      return !ids.includes(rootId) && !ids.includes(childId);
+    }, "cascade deletion recovery");
+    await waitUntil(async () =>
+      (await coordinatorInbox(handle).listDeletedTargets()).length === 0,
+    "cascade tombstone cleanup");
   });
 
   it("recovers a started abort intent before a processing inbox run can restart", async () => {
@@ -4962,7 +5889,7 @@ describe("ProjectSessionCoordinator", () => {
       ).toBeUndefined();
     });
 
-    it("requires legacy implicit children to be deleted before their parent", async () => {
+    it("cascades deletion through legacy implicit children", async () => {
       const fixture = await createFixture();
       const role = fixture.roles.getConversationRole("default");
       const parentId = randomUUID();
@@ -4984,59 +5911,128 @@ describe("ProjectSessionCoordinator", () => {
       await expect(fixture.coordinator.deleteConversation(
         fixture.handle,
         parentId,
-      )).rejects.toThrow(/legacy child|lineage/i);
-      await expect(fixture.coordinator.deleteConversation(
-        fixture.handle,
-        childId,
       )).resolves.toBe(true);
-      await expect(fixture.coordinator.deleteConversation(
-        fixture.handle,
-        parentId,
-      )).resolves.toBe(true);
+      const remainingIds = (await fixture.coordinator.listSessions(fixture.handle))
+        .map(({ id }) => id);
+      expect(remainingIds).not.toContain(parentId);
+      expect(remainingIds).not.toContain(childId);
     });
 
-    it("allows new peers from a child with explicit orchestration after its parent is deleted", async () => {
+    it("cascades deletion through explicit orchestration descendants", async () => {
       const fixture = await createFixture();
       const source = await fixture.coordinator.createUserConversation(
         fixture.handle,
         { roleId: "default" },
       );
 
-      // B: peer with explicit orchestration.
-      const b = await fixture.coordinator.startPeerSession(
+      const unrelated = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const child = await fixture.coordinator.startPeerSession(
         fixture.handle,
         source.conversationId,
         startInput({
-          task: "surviving-child",
-          idempotencyKey: "surviving-child-b",
+          task: "cascade-child",
+          idempotencyKey: "cascade-child",
+        }),
+      );
+      const grandchild = await fixture.coordinator.startPeerSession(
+        fixture.handle,
+        child.conversationId,
+        startInput({
+          task: "cascade-grandchild",
+          idempotencyKey: "cascade-grandchild",
         }),
       );
 
-      // Delete source (parent).
-      await fixture.coordinator.deleteConversation(
+      await expect(fixture.coordinator.deleteConversation(
         fixture.handle,
         source.conversationId,
-      );
+      )).resolves.toBe(true);
 
-      // B should still be able to create C (orchestration snapshot survives).
-      const c = await fixture.coordinator.startPeerSession(
-        fixture.handle,
-        b.conversationId,
-        startInput({
-          task: "child-of-survivor",
-          idempotencyKey: "child-of-survivor-c",
+      const remainingIds = (await fixture.coordinator.listSessions(fixture.handle))
+        .map(({ id }) => id);
+      expect(remainingIds).toContain(unrelated.conversationId);
+      expect(remainingIds).not.toContain(source.conversationId);
+      expect(remainingIds).not.toContain(child.conversationId);
+      expect(remainingIds).not.toContain(grandchild.conversationId);
+    });
+
+    it("rejects malformed lineage before destructive cascade deletion", async () => {
+      const fixture = await createFixture();
+      const firstId = randomUUID();
+      const secondId = randomUUID();
+      await fixture.handle.project.createConversation(
+        firstId,
+        defaultProfile(fixture.roles, {
+          createdBy: { kind: "conversation", conversationId: secondId },
         }),
       );
-
-      const cActor = await fixture.coordinator.openConversation(
-        fixture.handle,
-        c.conversationId,
-        { updateRecent: false },
+      await fixture.handle.project.createConversation(
+        secondId,
+        defaultProfile(fixture.roles, {
+          createdBy: { kind: "conversation", conversationId: firstId },
+        }),
       );
-      expect(cActor.profile.orchestration).toMatchObject({
-        rootConversationId: source.conversationId,
-        depth: 2,
-      });
+      await fixture.handle.project.refreshConversations();
+
+      await expect(fixture.coordinator.deleteConversation(
+        fixture.handle,
+        firstId,
+      )).rejects.toThrow("cycle detected");
+      const remainingIds = (await fixture.coordinator.listSessions(fixture.handle))
+        .map(({ id }) => id);
+      expect(remainingIds).toContain(firstId);
+      expect(remainingIds).toContain(secondId);
+    });
+
+    it("rejects cascade deletion while any descendant is busy", async () => {
+      const fixture = await createFixture();
+      const source = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const child = await fixture.coordinator.startPeerSession(
+        fixture.handle,
+        source.conversationId,
+        startInput({
+          task: "busy cascade child",
+          idempotencyKey: "busy-cascade-child",
+        }),
+      );
+      await waitUntil(async () =>
+        (await fixture.coordinator.listSessions(fixture.handle))
+          .find(({ id }) => id === child.conversationId)
+          ?.activity.kind === "idle",
+      "cascade child initial run to settle");
+      const started = deferred();
+      const release = deferred();
+      fixture.runtime.control(child.conversationId).enqueue(
+        blocksUntil(started, release, "child done"),
+      );
+      const childRun = fixture.coordinator.prompt(
+        fixture.handle,
+        child.conversationId,
+        randomUUID(),
+        "keep the child busy",
+      );
+      await started.promise;
+
+      await expect(fixture.coordinator.deleteConversation(
+        fixture.handle,
+        source.conversationId,
+      )).rejects.toThrow("busy conversation");
+      expect(
+        (await fixture.coordinator.listSessions(fixture.handle))
+          .map(({ id }) => id),
+      ).toEqual(expect.arrayContaining([
+        source.conversationId,
+        child.conversationId,
+      ]));
+
+      release.resolve();
+      await childRun;
     });
 
     it("treats an existing parent without conversationMeta as user root for implicit child", async () => {
