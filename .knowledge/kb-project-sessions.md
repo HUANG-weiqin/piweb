@@ -1,6 +1,6 @@
 # 项目与持久会话
 
-`updated: 2026-07-22`
+`updated: 2026-07-23`
 
 ## 这个模块是干什么的
 
@@ -32,6 +32,8 @@ runId           ephemeral，一次 prompt
     <timestamp>_<conversationId>.jsonl
   inbox/
     <messageId>.json
+  notebooks/
+    <conversationId>.json
 ```
 
 `project.json` 当前是严格 v1：
@@ -73,7 +75,7 @@ initialize(cwd, target)
 
 - busy conversation 不可删除，必须先精确 abort 并等待 run 结算；Agent 永远不能删除自己的 conversation。
 - 已打开的 idle actor 把当前 writer lease 在 registry 内原子升级为 deletion lease；未打开目标先 fail-fast 取得独占 lease。升级、精确 unlink 和索引刷新之间不能出现 release/reacquire 窗口。
-- 删除与索引刷新共用同一串行队列。服务端完整校验 sessions 目录、由 ID 解析内部常规 JSONL、复验 header identity，再执行精确单文件 `unlink`；不级联 parent/child 会话。
+- 删除与索引刷新共用同一串行队列。服务端完整校验 sessions 目录、由 ID 解析内部常规 JSONL、复验 header identity，再执行精确单文件 `unlink`；随后删除 `.piweb/notebooks/<conversationId>.json` notebook sidecar；不级联 parent/child 会话。
 - 删除只清理 `toConversationId` 等于目标的 pending inbox；目标此前发往其他会话的 outbound envelope 不随来源删除。
 - `lastConversationId` 只在仍等于目标时清除，避免覆盖另一连接刚提交的最近对话。删除成功后更新派生缓存并通过项目订阅发布新 snapshot。
 - 删除不存在的干净目标是幂等成功；目录损坏、链接、身份错配或文件系统拒绝删除仍 fail closed。
@@ -111,7 +113,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 
 ## 持久 inbox 与恢复
 
-`.piweb/inbox/<messageId>.json` 是严格 v1 sidecar，只允许常规项目路径；单条正文、每项目/目标消息数和总字节都有硬上限。
+`.piweb/inbox/<messageId>.json` 是严格 v1 sidecar，只允许常规项目路径；单条正文、每项目/目标消息数和总字节都有硬上限。`.piweb/notebooks/<conversationId>.json` 是 conversation-scoped Agent Notebook sidecar，由 notebook 工具按 title 管理，删除 conversation 时级联清理。
 
 - 发送方先追加 `sending` 卡片，再原子提交 envelope，最后追加同 cardId 的 `queued` 状态；持久接收发生在目标处理之前。
 - busy 目标不会被插入当前 branch。idle 后 inbox pump 把 envelope 标为 `processing`，追加 incoming `custom_message` 并用确定 runId 启动 actor。
@@ -182,6 +184,8 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 - `src/server/conversation-history.ts`
 - `src/server/conversation-meta.ts`
 - `src/server/project-inbox.ts`
+- `src/server/conversation-notebook.ts`
+- `src/server/notebook-tools.ts`
 - `src/server/project-session-coordinator.ts`
 - `src/server/role-store.ts`
 - `src/server/pi-service.ts`

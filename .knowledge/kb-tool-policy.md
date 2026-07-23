@@ -1,6 +1,6 @@
 # 工具权限
 
-`updated: 2026-07-22`
+`updated: 2026-07-23`
 
 ## 这个模块是干什么的
 
@@ -31,8 +31,8 @@ conversation role snapshot
 ## 策略
 
 - `full_access` 允许所有工具和命令，不区分来源或目标位置；项目外路径和 `.piweb` 也不额外拦截。
-- `read_only` 对模型只展示 `source=builtin` 的 Pi 原生 `read / grep / find / ls` 和 `source=sdk` 的宿主 `git_inspect`；`bash / edit / write`、meta 和其他扩展工具不进入有效 registry、model tools 或 system prompt。
-- 执行 gate 独立重复同一 identity 约束；`read_only` 直接拒绝命令、写入、unknown、工作台 meta，以及同名 extension/project 工具。工具不可见不是权限边界，硬拒绝仍不可删除。
+- `read_only` 对模型只展示 `source=builtin` 的 Pi 原生 `read / grep / find / ls`，以及 `source=sdk` 的宿主 `git_inspect` 和 conversation-scoped `notebook_write / notebook_list / notebook_grep / notebook_read`；`bash / edit / write`、meta 和其他扩展工具不进入有效 registry、model tools 或 system prompt。
+- 执行 gate 独立重复同一 identity 约束；`read_only` 直接拒绝命令、项目写入、unknown、工作台 meta，以及同名 extension/project 工具。工具不可见不是权限边界，硬拒绝仍不可删除。
 - 扩展可以用 `read` 等名称覆盖内置工具；策略必须同时检查最终 `toolName` 和 SDK `ToolInfo.sourceInfo.source`，不能只按名称放行。PiRuntime 对每次 `setActiveToolsByName`（包括 extension refresh 和 `setActiveTools`）重新做 source-aware 投影，同名覆盖发生后宁可移除该工具，也不把扩展 schema/snippet 暴露给只读模型。
 - Agent 的 `read_only` 只限制经过 Pi 工具入口的调用；工作台宿主仍会写 manifest 和 transcript。
 
@@ -42,21 +42,39 @@ conversation role snapshot
 
 Git 的“只读子命令”仍可能经 pager、external diff、textconv、content filter 或 fsmonitor 执行程序。主命令因此不读取真实 Git 配置：宿主先用固定 `rev-parse` 捕获并校验 repository top、git dir、index、objects、object format 和 HEAD，再为该次调用创建只含宿主 config/HEAD 的临时 synthetic `GIT_DIR`；work tree、index 和 object directory 显式绑定真实只读输入，global/system config 指向临时空文件，继承的 `GIT_*` 全部先删除。临时目录没有 `commondir`、hooks 或 info 链接，并在所有完成/失败路径清理。输出可能因未继承 `core.autocrlf/filemode/ignorecase`、sparse 和 info exclude 而比原生 Git 更嘈杂，这是关闭执行入口的保守代价。
 
-## Agent 编排工具
+## Agent Notebook 工具
 
-每个 ConversationActor 注入 `git_inspect` 和 9 个宿主 meta 工具；这些宿主 schema 同样避免 `anyOf/oneOf`，以兼容对工具 schema 子集较严格的 provider：
+Agent Notebook 是 conversation-scoped 的外部工作记忆，绑定 `canonical cwd + conversationId`，存放在 `.piweb/notebooks/<conversationId>.json`。它不是项目共享知识库，不自动注入模型上下文；只有 Agent 显式调用 list/grep/read 时才进入当前 turn。Notebook 内容只是工作记忆，最终引用源码仍要重新读取来源范围。
+
+V1 只有四个工具：
+
+- `notebook_write(title, content?, archived?)`：按 title 全量创建/替换内容，或切换 archive 状态；新 title 必须带 content；没有 hard delete。
+- `notebook_list(status?)`：默认列 active note，只返回 title/preview/archive/size/updatedAt，不返回全文。
+- `notebook_grep(pattern, status?)`：对 title + content 做大小写不敏感的 literal 搜索，返回 bounded snippet，不支持 regex/semantic/cursor/limit。
+- `notebook_read(titles)`：按精确 title 读取 active 或 archived note；调用方应先用 list/grep 发现 title。
+
+Archive 是可恢复隐藏，不是删除：默认 list 不显示 archived，但 `status=archived/all` 仍可发现，read 也能按精确标题打开。会话删除通过 project store 级联删除对应 sidecar 文件。
+
+## Agent 宿主工具
+
+每个 ConversationActor 注入：
 
 ```text
+git_inspect
+notebook_write / notebook_list / notebook_grep / notebook_read
 list_roles / list_sessions / current_session / peek_session
 start_session / send_session_message / wait_for_session
 abort_session / delete_session
 ```
 
+这些宿主 schema 同样避免 `anyOf/oneOf`，以兼容对工具 schema 子集较严格的 provider。
+
 它们仍是 Agent 工具调用，不是绕过 gate 的内部 RPC：
 
 - 项目 extension `tool_call` hook 先观察/变换调用，宿主再按最终工具 identity 与 run ownership 决策；
 - 工具闭包固定来源 conversation 和 canonical project，参数不能提交 cwd/projectId；
-- `read_only` 不因 list/peek 看似只读而部分开放整套控制面，第一版统一拒绝 meta 工具；
+- `read_only` 允许 `notebook_write`，因为它只写当前 conversation 的宿主工作记忆 sidecar，生命周期等同 transcript，不是项目源码写入；
+- `read_only` 不因 list/peek 看似只读而部分开放整套会话控制面，第一版统一拒绝 meta 工具；
 - `full_access` 才允许 Agent 创建、通信、等待、中止和删除 peer conversation，但 self delete、self abort/wait、busy delete、stale runId 等生命周期约束仍由 coordinator 独立校验；
 - 用户从 UI 发起的角色管理、焦点切换和宿主持久化不经过 Agent tool gate，仍受协议身份与各自串行边界约束。
 
@@ -87,6 +105,8 @@ abort_session / delete_session
 - `src/server/project-session-coordinator.ts`
 - `src/server/meta-tools.ts`
 - `src/server/git-inspect.ts`
+- `src/server/notebook-tools.ts`
+- `src/server/conversation-notebook.ts`
 - `src/server/project-run-coordinator.ts`
 - `src/shared/protocol.ts`
 - 对应的 `*.test.ts`

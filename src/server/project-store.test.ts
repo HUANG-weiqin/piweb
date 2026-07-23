@@ -21,6 +21,7 @@ import {
   CONVERSATION_META_CUSTOM_TYPE,
   type ConversationMeta,
 } from "./conversation-meta.js";
+import { ConversationNotebook } from "./conversation-notebook.js";
 import { ProjectStore, ProjectStoreRegistry } from "./project-store.js";
 
 const temporaryDirectories: string[] = [];
@@ -319,6 +320,40 @@ describe("ProjectStore", () => {
     await expect(
       store.deleteConversation(deleted.getSessionId()),
     ).resolves.toBeUndefined();
+  });
+
+  it("deletes a conversation-scoped notebook sidecar with its conversation", async () => {
+    const cwd = await createTemporaryDirectory("piweb-delete-notebook-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const retained = await store.createConversation();
+    const deleted = await store.createConversation();
+    await new ConversationNotebook(
+      store.stateDir,
+      retained.getSessionId(),
+    ).write({ title: "Retained", content: "keep me" });
+    await new ConversationNotebook(
+      store.stateDir,
+      deleted.getSessionId(),
+    ).write({ title: "Deleted", content: "remove me" });
+    const staleTemporaryPath = join(
+      store.stateDir,
+      "notebooks",
+      `.${deleted.getSessionId()}.json.123.tmp`,
+    );
+    await writeFile(staleTemporaryPath, "stale temp", "utf8");
+
+    await store.deleteConversation(deleted.getSessionId());
+
+    await expect(readFile(
+      join(store.stateDir, "notebooks", `${deleted.getSessionId()}.json`),
+      "utf8",
+    )).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(staleTemporaryPath, "utf8"))
+      .rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(
+      join(store.stateDir, "notebooks", `${retained.getSessionId()}.json`),
+      "utf8",
+    )).resolves.toContain("keep me");
   });
 
   it("physically truncates the selected message and every later entry", async () => {

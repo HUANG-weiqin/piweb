@@ -31,6 +31,7 @@ import {
   createConversationMetaEntry,
   type ConversationMeta,
 } from "./conversation-meta.js";
+import { deleteConversationNotebook } from "./conversation-notebook.js";
 import {
   inspectPiSessionFile,
   validatePiSessionFile,
@@ -660,6 +661,7 @@ export class ProjectStore {
 
       await this.clearLastConversationIf(conversationId);
       if (safePath !== undefined) await unlink(safePath);
+      await deleteConversationNotebook(this.stateDir, conversationId);
       this.replaceConversations(retained);
     });
   }

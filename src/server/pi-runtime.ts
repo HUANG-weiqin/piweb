@@ -555,7 +555,10 @@ export class PiRuntime implements PiRuntimeLike {
         }
       }
       const expectedWorkbenchTools = readOnlyToolProjection
-        ? workbenchCustomTools?.filter((tool) => tool.name === "git_inspect")
+        ? workbenchCustomTools?.filter((tool) => isReadOnlyToolIdentity(
+          tool.name,
+          "sdk",
+        ))
         : workbenchCustomTools;
       const inactiveWorkbenchTool = expectedWorkbenchTools?.find(
         (tool) => !activeToolNames.has(tool.name),

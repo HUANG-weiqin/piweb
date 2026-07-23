@@ -217,6 +217,10 @@ describe("PiRuntime session ownership", () => {
       toolMode: "read_only",
       workbenchCustomTools: [
         workbenchTool(cwd, "git_inspect"),
+        workbenchTool(cwd, "notebook_list"),
+        workbenchTool(cwd, "notebook_grep"),
+        workbenchTool(cwd, "notebook_read"),
+        workbenchTool(cwd, "notebook_write"),
         workbenchTool(cwd, "list_sessions"),
       ],
     });
@@ -228,12 +232,18 @@ describe("PiRuntime session ownership", () => {
       "find",
       "ls",
       "git_inspect",
+      "notebook_write",
+      "notebook_list",
+      "notebook_grep",
+      "notebook_read",
     ]);
     expect(new Set(created.session.getActiveToolNames())).toEqual(expectedToolNames);
     expect(new Set(allTools.map((tool) => tool.name))).toEqual(expectedToolNames);
     expect(allTools.find((tool) => tool.name === "read")?.sourceInfo.source)
       .toBe("builtin");
     expect(allTools.find((tool) => tool.name === "git_inspect")?.sourceInfo.source)
+      .toBe("sdk");
+    expect(allTools.find((tool) => tool.name === "notebook_write")?.sourceInfo.source)
       .toBe("sdk");
     await created.dispose();
   });

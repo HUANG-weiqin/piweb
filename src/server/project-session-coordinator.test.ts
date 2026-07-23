@@ -913,7 +913,13 @@ describe("ProjectSessionCoordinator", () => {
     expect(
       fixture.runtime.createOptions.get(first.conversationId)
         ?.workbenchCustomTools?.map(({ name }) => name),
-    ).toEqual(["git_inspect"]);
+    ).toEqual([
+      "git_inspect",
+      "notebook_write",
+      "notebook_list",
+      "notebook_grep",
+      "notebook_read",
+    ]);
     expect(second.profile.role).toMatchObject({
       revision: 2,
       name: "Senior reviewer",
@@ -929,6 +935,10 @@ describe("ProjectSessionCoordinator", () => {
         ?.workbenchCustomTools?.map(({ name }) => name),
     ).toEqual([
       "git_inspect",
+      "notebook_write",
+      "notebook_list",
+      "notebook_grep",
+      "notebook_read",
       "list_roles",
       "list_sessions",
       "current_session",

@@ -15,9 +15,16 @@ export type ToolPolicy = (
 ) => ToolPolicyDecision | Promise<ToolPolicyDecision>;
 
 const PI_READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
+const SDK_READ_ONLY_TOOLS = new Set([
+  "git_inspect",
+  "notebook_write",
+  "notebook_list",
+  "notebook_grep",
+  "notebook_read",
+]);
 export const READ_ONLY_TOOL_NAME_CEILING = [
   ...PI_READ_ONLY_TOOLS,
-  "git_inspect",
+  ...SDK_READ_ONLY_TOOLS,
 ] as const;
 
 export function isReadOnlyToolIdentity(
@@ -25,7 +32,7 @@ export function isReadOnlyToolIdentity(
   toolSource: string,
 ): boolean {
   return (toolSource === "builtin" && PI_READ_ONLY_TOOLS.has(toolName))
-    || (toolSource === "sdk" && toolName === "git_inspect");
+    || (toolSource === "sdk" && SDK_READ_ONLY_TOOLS.has(toolName));
 }
 
 export const defaultToolPolicy: ToolPolicy = ({
@@ -39,6 +46,6 @@ export const defaultToolPolicy: ToolPolicy = ({
   }
   return {
     action: "deny",
-    reason: "只读模式仅允许 Pi 原生 read、grep、find、ls 和宿主 git_inspect；命令、写入及扩展工具均被禁止。",
+    reason: "只读模式仅允许 Pi 原生 read、grep、find、ls、宿主 git_inspect 和 conversation notebook 工具；命令、项目写入及扩展工具均被禁止。",
   };
 };

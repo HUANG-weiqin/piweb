@@ -39,6 +39,7 @@ import {
   type MetaToolService,
   type MetaToolSessionScope,
 } from "./meta-tools.js";
+import { createNotebookTools } from "./notebook-tools.js";
 import type {
   CreatedProjectModelCatalog,
   CreatePiSessionOptions,
@@ -1646,6 +1647,7 @@ export class ProjectSessionCoordinator {
       extensionUI: this.extensionUIRouter(context, conversationId).ui,
       workbenchCustomTools: [
         createGitInspectTool(context.project.cwd),
+        ...createNotebookTools(context.project.stateDir, conversationId),
         ...createMetaTools(
           conversationId,
           this.metaService(context),
