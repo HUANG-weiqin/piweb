@@ -91,6 +91,15 @@ function normalizeSessionScope(scope: string | undefined): MetaToolSessionScope 
   throw new Error("Invalid list_sessions scope");
 }
 
+const startSessionParameters = Type.Object({
+  roleId: Type.String({ minLength: 1, maxLength: 128 }),
+  task: Type.String({
+    minLength: 1,
+    maxLength: MAX_CONVERSATION_BODY_BYTES,
+  }),
+  title: Type.Optional(Type.String({ minLength: 1, maxLength: 120 })),
+}, { additionalProperties: false });
+
 export function createMetaTools(
   sourceConversationId: string,
   service: MetaToolService,
@@ -165,28 +174,42 @@ export function createMetaTools(
       name: "start_session",
       label: "Start session",
       description:
-        "Start a flat peer Agent session with a selected role and initial task. Returns as soon as the request is durably accepted and scheduled; another run may already own the target, and this operation never waits for completion. Set temporary only when a successful initial result should be returned and the target then deleted automatically.",
-      promptSnippet: "Start another Agent session without blocking this run.",
+        "Start a persistent peer Agent session for ongoing delegation or follow-up. Returns as soon as the initial task is durably accepted and scheduled; this operation never waits for completion.",
+      promptSnippet: "Start a persistent peer Agent session.",
       promptGuidelines: [
-        "Before starting a normal session, first call list_sessions with scope=created_by_me. Reuse a suitable existing session with send_session_message, and create a new normal session only when none fits the responsibility.",
+        "Before starting a persistent session, first call list_sessions with scope=created_by_me. Reuse a suitable existing session with send_session_message, and create a new persistent session only when none fits the responsibility.",
         "After start_session, choose explicitly whether to keep working, call wait_for_session, or finish and receive a later session message.",
       ],
-      parameters: Type.Object({
-        roleId: Type.String({ minLength: 1, maxLength: 128 }),
-        task: Type.String({
-          minLength: 1,
-          maxLength: MAX_CONVERSATION_BODY_BYTES,
-        }),
-        title: Type.Optional(Type.String({ minLength: 1, maxLength: 120 })),
-        temporary: Type.Optional(Type.Boolean()),
-      }, { additionalProperties: false }),
+      parameters: startSessionParameters,
       async execute(toolCallId, input, signal) {
         assertConversationBody(input.task, "task");
         return result(await service.startSession(sourceConversationId, {
           roleId: input.roleId,
           task: input.task,
           ...(input.title === undefined ? {} : { title: input.title }),
-          temporary: input.temporary ?? false,
+          temporary: false,
+          idempotencyKey: sideEffectKey(sourceConversationId, toolCallId),
+        }, signal));
+      },
+    }),
+    defineTool({
+      name: "start_temporary_session",
+      label: "Start temporary session",
+      description:
+        "Start a one-shot peer Agent session for audits, investigations, or quick reviews. Its successful initial final answer is returned to the caller and the peer session is automatically deleted.",
+      promptSnippet: "Start a one-shot Agent session that auto-deletes after success.",
+      promptGuidelines: [
+        "Use for throwaway work where you only need the initial final answer; use start_session instead when follow-up or later inspection is expected.",
+        "This still runs asynchronously: call wait_for_session when the answer is needed in this turn.",
+      ],
+      parameters: startSessionParameters,
+      async execute(toolCallId, input, signal) {
+        assertConversationBody(input.task, "task");
+        return result(await service.startSession(sourceConversationId, {
+          roleId: input.roleId,
+          task: input.task,
+          ...(input.title === undefined ? {} : { title: input.title }),
+          temporary: true,
           idempotencyKey: sideEffectKey(sourceConversationId, toolCallId),
         }, signal));
       },

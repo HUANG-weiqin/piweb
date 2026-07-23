@@ -63,7 +63,7 @@ Archive 是可恢复隐藏，不是删除：默认 list 不显示 archived，但
 git_status / git_diff
 notebook_write / notebook_list / notebook_grep / notebook_read
 list_roles / list_sessions / current_session / peek_session
-start_session / send_session_message / wait_for_session
+start_session / start_temporary_session / send_session_message / wait_for_session
 abort_session / delete_session
 ```
 

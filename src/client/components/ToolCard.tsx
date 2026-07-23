@@ -9,6 +9,7 @@ const META_TOOL_NAMES = new Set([
   "current_session",
   "peek_session",
   "start_session",
+  "start_temporary_session",
   "send_session_message",
   "wait_for_session",
   "abort_session",
@@ -162,6 +163,11 @@ export function toolPresentation({
     case "start_session":
       return {
         label: "启动 Agent 会话",
+        target: stringField(record, "title") || stringField(record, "roleId"),
+      };
+    case "start_temporary_session":
+      return {
+        label: "启动临时 Agent 会话",
         target: stringField(record, "title") || stringField(record, "roleId"),
       };
     case "send_session_message":

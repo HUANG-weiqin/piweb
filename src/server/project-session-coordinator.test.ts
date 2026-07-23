@@ -947,6 +947,7 @@ describe("ProjectSessionCoordinator", () => {
       "current_session",
       "peek_session",
       "start_session",
+      "start_temporary_session",
       "send_session_message",
       "wait_for_session",
       "abort_session",

@@ -31,7 +31,7 @@ function tool(
 }
 
 describe("createMetaTools", () => {
-  it("exposes the fixed nine-tool orchestration surface", () => {
+  it("exposes the fixed ten-tool orchestration surface", () => {
     const tools = createMetaTools(sourceConversationId, service());
 
     expect(tools.map(({ name }) => name)).toEqual([
@@ -40,6 +40,7 @@ describe("createMetaTools", () => {
       "current_session",
       "peek_session",
       "start_session",
+      "start_temporary_session",
       "send_session_message",
       "wait_for_session",
       "abort_session",
@@ -49,14 +50,17 @@ describe("createMetaTools", () => {
       .not.toMatch(/anyOf|oneOf/);
   });
 
-  it("guides Agents to reuse suitable normal sessions before creating duplicates", () => {
-    const startSession = tool(
-      createMetaTools(sourceConversationId, service()),
-      "start_session",
-    );
+  it("guides Agents to choose persistent versus temporary sessions", () => {
+    const tools = createMetaTools(sourceConversationId, service());
+    const startSession = tool(tools, "start_session");
+    const startTemporarySession = tool(tools, "start_temporary_session");
 
     expect(startSession.promptGuidelines).toContain(
-      "Before starting a normal session, first call list_sessions with scope=created_by_me. Reuse a suitable existing session with send_session_message, and create a new normal session only when none fits the responsibility.",
+      "Before starting a persistent session, first call list_sessions with scope=created_by_me. Reuse a suitable existing session with send_session_message, and create a new persistent session only when none fits the responsibility.",
+    );
+    expect(startTemporarySession.description).toContain("one-shot");
+    expect(startTemporarySession.promptGuidelines).toContain(
+      "Use for throwaway work where you only need the initial final answer; use start_session instead when follow-up or later inspection is expected.",
     );
   });
 
@@ -86,7 +90,7 @@ describe("createMetaTools", () => {
     ))).toBe(true);
   });
 
-  it("binds source identity and returns start_session without adding a wait", async () => {
+  it("binds source identity and starts persistent sessions without adding a wait", async () => {
     const fake = service();
     const tools = createMetaTools(sourceConversationId, fake);
     const signal = new AbortController().signal;
@@ -96,7 +100,6 @@ describe("createMetaTools", () => {
       {
         roleId: "reviewer",
         task: "Review the actor",
-        temporary: true,
       },
       signal,
       undefined,
@@ -108,7 +111,7 @@ describe("createMetaTools", () => {
       {
         roleId: "reviewer",
         task: "Review the actor",
-        temporary: true,
+        temporary: false,
         idempotencyKey: `${sourceConversationId.length}:${sourceConversationId}:tool-call-1`,
       },
       signal,
@@ -118,6 +121,35 @@ describe("createMetaTools", () => {
       type: "text",
       text: JSON.stringify({ conversationId: "target", runId: "run" }),
     }]);
+  });
+
+  it("binds source identity and starts temporary sessions without adding a wait", async () => {
+    const fake = service();
+    const tools = createMetaTools(sourceConversationId, fake);
+    const signal = new AbortController().signal;
+
+    await tool(tools, "start_temporary_session").execute(
+      "tool-call-2",
+      {
+        roleId: "reviewer",
+        task: "Review the actor once",
+      },
+      signal,
+      undefined,
+      {} as never,
+    );
+
+    expect(fake.startSession).toHaveBeenCalledWith(
+      sourceConversationId,
+      {
+        roleId: "reviewer",
+        task: "Review the actor once",
+        temporary: true,
+        idempotencyKey: `${sourceConversationId.length}:${sourceConversationId}:tool-call-2`,
+      },
+      signal,
+    );
+    expect(fake.waitForSession).not.toHaveBeenCalled();
   });
 
   it("aligns task and message limits with the durable UTF-8 byte contract", async () => {
