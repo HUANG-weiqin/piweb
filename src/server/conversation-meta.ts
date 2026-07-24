@@ -20,6 +20,8 @@ export const COMPACTION_RESUME_CUSTOM_TYPE =
   "piweb.compaction_resume.v1";
 export const CONVERSATION_ROLE_CHANGE_CUSTOM_TYPE =
   "piweb.conversation_role_change.v1";
+export const TEMPORARY_RETURN_RECEIPT_CUSTOM_TYPE =
+  "piweb.temporary_return_receipt.v1";
 
 export const MAX_ROLE_NAME_CHARACTERS = 80;
 export const MAX_ROLE_DESCRIPTION_CHARACTERS = 1_000;
@@ -384,6 +386,48 @@ const runSettlementEntrySchema = z.object({
   data: runSettlementSchema,
 }).strict();
 
+const temporaryReturnReceiptIdentitySchema = z.object({
+  temporaryConversationId: conversationIdSchema("temporaryConversationId"),
+  initialRunId: uuidSchema("initialRunId"),
+  messageId: uuidSchema("messageId"),
+  callerRunId: uuidSchema("callerRunId"),
+  claimedAt: canonicalTimestampSchema("claimedAt"),
+}).strict();
+
+const temporaryReturnReceiptSchema = z.discriminatedUnion("state", [
+  temporaryReturnReceiptIdentitySchema.extend({
+    state: z.literal("claimed"),
+  }).strict(),
+  temporaryReturnReceiptIdentitySchema.extend({
+    state: z.literal("settled"),
+    settlement: runSettlementSchema,
+  }).strict(),
+]).superRefine((value, context) => {
+  if (value.state !== "settled") return;
+  if (
+    value.settlement.runId !== value.initialRunId
+    || value.settlement.returnMessageId !== value.messageId
+    || value.settlement.reportedAt === undefined
+    || value.settlement.outcome !== "completed"
+    || value.settlement.finalText === null
+    || value.settlement.finalText.trim().length === 0
+    || Buffer.byteLength(value.settlement.finalText, "utf8")
+      > MAX_CONVERSATION_BODY_BYTES
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message:
+        "settled temporary return receipt must report a returnable initial run through its messageId",
+      path: ["settlement"],
+    });
+  }
+});
+
+const temporaryReturnReceiptEntrySchema = z.object({
+  customType: z.literal(TEMPORARY_RETURN_RECEIPT_CUSTOM_TYPE),
+  data: temporaryReturnReceiptSchema,
+}).strict();
+
 const metaOperationBaseSchema = {
   operationId: uuidSchema("operationId"),
   targetConversationId: conversationIdSchema("targetConversationId"),
@@ -488,6 +532,10 @@ export type CompactionResumeEntry =
 export type RunSettlement = z.infer<typeof runSettlementSchema>;
 export type RunSettlementEntry =
   z.infer<typeof runSettlementEntrySchema>;
+export type TemporaryReturnReceipt =
+  z.infer<typeof temporaryReturnReceiptSchema>;
+export type TemporaryReturnReceiptEntry =
+  z.infer<typeof temporaryReturnReceiptEntrySchema>;
 export type MetaOperation = z.infer<typeof metaOperationSchema>;
 export type MetaOperationEntry =
   z.infer<typeof metaOperationEntrySchema>;
@@ -526,6 +574,10 @@ export type ReservedConversationEntry =
       entry: RunSettlementEntry;
     }
   | {
+      kind: "temporary_return_receipt";
+      entry: TemporaryReturnReceiptEntry;
+    }
+  | {
       kind: "meta_operation";
       entry: MetaOperationEntry;
     }
@@ -539,6 +591,7 @@ export interface ReservedConversationAggregate {
   cards: ConversationCard[];
   deliveredMessageIds: string[];
   runSettlements: RunSettlement[];
+  temporaryReturnReceipts: TemporaryReturnReceipt[];
   metaOperations: MetaOperation[];
   compactionThreshold?: CompactionThreshold;
 }
@@ -647,6 +700,21 @@ export function createRunSettlementEntry(
   });
 }
 
+export function parseTemporaryReturnReceiptEntry(
+  value: unknown,
+): TemporaryReturnReceiptEntry {
+  return temporaryReturnReceiptEntrySchema.parse(value);
+}
+
+export function createTemporaryReturnReceiptEntry(
+  data: TemporaryReturnReceipt,
+): TemporaryReturnReceiptEntry {
+  return parseTemporaryReturnReceiptEntry({
+    customType: TEMPORARY_RETURN_RECEIPT_CUSTOM_TYPE,
+    data,
+  });
+}
+
 export function parseMetaOperationEntry(
   value: unknown,
 ): MetaOperationEntry {
@@ -690,6 +758,7 @@ export function appendReservedCustomEntry(
     | ConversationRoleChangeEntry
     | ConversationCardEntry
     | RunSettlementEntry
+    | TemporaryReturnReceiptEntry
     | MetaOperationEntry
     | CompactionThresholdEntry,
 ): string {
@@ -795,6 +864,12 @@ export function parseReservedConversationEntry(
     return {
       kind: "run_settlement",
       entry: parseRunSettlementEntry(payload),
+    };
+  }
+  if (customType === TEMPORARY_RETURN_RECEIPT_CUSTOM_TYPE) {
+    return {
+      kind: "temporary_return_receipt",
+      entry: parseTemporaryReturnReceiptEntry(payload),
     };
   }
   if (customType === META_OPERATION_CUSTOM_TYPE) {
@@ -936,6 +1011,10 @@ export function aggregateReservedConversationEntries(
   const cards = new Map<string, ConversationCard>();
   const deliveredMessageIds = new Set<string>();
   const runSettlements = new Map<string, RunSettlement>();
+  const temporaryReturnReceipts = new Map<
+    string,
+    TemporaryReturnReceipt
+  >();
   const metaOperations = new Map<string, MetaOperation>();
   let compactionThreshold: CompactionThreshold | undefined;
   let roleChangedAt: string | undefined;
@@ -989,6 +1068,56 @@ export function aggregateReservedConversationEntries(
       continue;
     }
     if (reserved.kind === "compaction_resume") {
+      continue;
+    }
+    if (reserved.kind === "temporary_return_receipt") {
+      const incoming = reserved.entry.data;
+      const key = `${incoming.temporaryConversationId.length}:${incoming.temporaryConversationId}:${incoming.initialRunId}`;
+      const delegation = [...cards.values()].find((card) =>
+        card.kind === "delegation_task"
+        && card.toSnapshot.conversationId === incoming.temporaryConversationId
+        && card.runId === incoming.initialRunId
+      );
+      if (!delegation) {
+        throw new Error(
+          "Piweb temporary return receipt requires an earlier initial delegation card",
+        );
+      }
+      const existing = temporaryReturnReceipts.get(key);
+      if (existing === undefined) {
+        if (incoming.state !== "claimed") {
+          throw new Error(
+            "Piweb temporary return receipt must begin in claimed state",
+          );
+        }
+        temporaryReturnReceipts.set(key, incoming);
+        continue;
+      }
+      if (JSON.stringify(existing) === JSON.stringify(incoming)) continue;
+      const sameIdentity = JSON.stringify({
+        temporaryConversationId: existing.temporaryConversationId,
+        initialRunId: existing.initialRunId,
+        messageId: existing.messageId,
+        callerRunId: existing.callerRunId,
+        claimedAt: existing.claimedAt,
+      }) === JSON.stringify({
+        temporaryConversationId: incoming.temporaryConversationId,
+        initialRunId: incoming.initialRunId,
+        messageId: incoming.messageId,
+        callerRunId: incoming.callerRunId,
+        claimedAt: incoming.claimedAt,
+      });
+      if (!sameIdentity) {
+        throw new Error(
+          `Conflicting piweb temporary return receipt for ${key}`,
+        );
+      }
+      if (existing.state !== "claimed" || incoming.state !== "settled") {
+        throw new Error(
+          `Piweb temporary return receipt state cannot regress for ${key}`,
+        );
+      }
+      temporaryReturnReceipts.set(key, incoming);
       continue;
     }
     if (reserved.kind === "meta_operation") {
@@ -1101,6 +1230,7 @@ export function aggregateReservedConversationEntries(
     cards: [...cards.values()],
     deliveredMessageIds: [...deliveredMessageIds],
     runSettlements: [...runSettlements.values()],
+    temporaryReturnReceipts: [...temporaryReturnReceipts.values()],
     metaOperations: [...metaOperations.values()],
     ...(compactionThreshold === undefined
       ? {}

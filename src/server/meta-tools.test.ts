@@ -59,8 +59,14 @@ describe("createMetaTools", () => {
       "Before starting a persistent session, first call list_sessions with scope=created_by_me. Reuse a suitable existing session with send_session_message, and create a new persistent session only when none fits the responsibility.",
     );
     expect(startTemporarySession.description).toContain("one-shot");
+    expect(startTemporarySession.description).toContain(
+      "replaces that automatic return",
+    );
     expect(startTemporarySession.promptGuidelines).toContain(
       "Use for throwaway work where you only need the initial final answer; use start_session instead when follow-up or later inspection is expected.",
+    );
+    expect(startTemporarySession.promptGuidelines).toContain(
+      "This still runs asynchronously: call wait_for_session when the answer is needed in this turn. If an explicit peer message resolves that wait and you still need the final settlement, call wait_for_session again for the same run.",
     );
   });
 

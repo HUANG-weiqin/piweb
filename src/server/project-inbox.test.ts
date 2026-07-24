@@ -152,6 +152,26 @@ describe("ProjectInbox envelope schema", () => {
       fromRunId: randomUUID(),
     }));
     expect(parseInboxEnvelope(correlated)).toEqual(correlated);
+    const initialRunId = randomUUID();
+    const assigned = createInboxEnvelope(input({
+      fromRunId: initialRunId,
+      temporaryReturnAssignment: {
+        initialRunId,
+        callerRunId: randomUUID(),
+        assignedAt: timestamp,
+      },
+    }));
+    expect(parseInboxEnvelope(assigned)).toEqual(assigned);
+    expect(() => createInboxEnvelope(input({
+      kind: "delegation_result",
+      delegationId: randomUUID(),
+      fromRunId: initialRunId,
+      temporaryReturnAssignment: assigned.temporaryReturnAssignment,
+    }))).toThrow(/temporaryReturnAssignment/i);
+    expect(() => createInboxEnvelope(input({
+      fromRunId: randomUUID(),
+      temporaryReturnAssignment: assigned.temporaryReturnAssignment,
+    }))).toThrow(/temporaryReturnAssignment/i);
     expect(() => createInboxEnvelope(input({
       body: "   ",
     }))).toThrow(/body/i);

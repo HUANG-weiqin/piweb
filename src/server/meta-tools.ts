@@ -196,11 +196,11 @@ export function createMetaTools(
       name: "start_temporary_session",
       label: "Start temporary session",
       description:
-        "Start a one-shot peer Agent session for audits, investigations, or quick reviews. Its successful initial final answer is returned to the caller and the peer session is automatically deleted.",
+        "Start a one-shot peer Agent session for audits, investigations, or quick reviews. Its successful initial final normally returns to the caller and the peer session is automatically deleted; an explicit peer message that resolves the caller's exact initial-run wait replaces that automatic return.",
       promptSnippet: "Start a one-shot Agent session that auto-deletes after success.",
       promptGuidelines: [
         "Use for throwaway work where you only need the initial final answer; use start_session instead when follow-up or later inspection is expected.",
-        "This still runs asynchronously: call wait_for_session when the answer is needed in this turn.",
+        "This still runs asynchronously: call wait_for_session when the answer is needed in this turn. If an explicit peer message resolves that wait and you still need the final settlement, call wait_for_session again for the same run.",
       ],
       parameters: startSessionParameters,
       async execute(toolCallId, input, signal) {

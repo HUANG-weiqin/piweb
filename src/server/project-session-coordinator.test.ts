@@ -5417,6 +5417,744 @@ describe("ProjectSessionCoordinator", () => {
     });
   });
 
+  it("lets a temporary explicit wait reply replace its successful automatic return", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const temporaryStarted = deferred();
+    const releaseTemporary = deferred();
+    fixture.runtime.nextSessionBehaviors.push([
+      blocksUntil(temporaryStarted, releaseTemporary, "final temporary answer"),
+    ]);
+    const callerStarted = deferred();
+    const targetKnown = deferred<{
+      conversationId: string;
+      runId: string;
+    }>();
+    const firstWaitResolved = deferred();
+    const secondWaitResolved = deferred();
+    let firstWait: unknown;
+    let secondWait: unknown;
+    let thirdWait: unknown;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      callerStarted.resolve();
+      const target = await targetKnown.promise;
+      firstWait = await executeTool(
+        control,
+        "wait_for_session",
+        "temporary-explicit-first-wait",
+        target,
+      );
+      control.beginNextModelTurn();
+      firstWaitResolved.resolve();
+      secondWait = await executeTool(
+        control,
+        "wait_for_session",
+        "temporary-explicit-second-wait",
+        target,
+      );
+      control.beginNextModelTurn();
+      secondWaitResolved.resolve();
+      thirdWait = await executeTool(
+        control,
+        "wait_for_session",
+        "temporary-explicit-third-wait",
+        target,
+      );
+      control.emitFinal("caller observed explicit messages then settlement");
+    });
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      randomUUID(),
+      "wait for temporary progress and then its settlement",
+    );
+    await callerStarted.promise;
+
+    const temporary = await fixture.coordinator.startPeerSession(
+      fixture.handle,
+      caller.conversationId,
+      startInput({
+        temporary: true,
+        idempotencyKey: "temporary-explicit-wait-replaces-return",
+      }),
+    );
+    targetKnown.resolve(temporary);
+    await temporaryStarted.promise;
+    const initialTask = fixture.runtime.control(temporary.conversationId)
+      .received[0]?.content;
+    expect(initialTask).toContain(
+      "请直接将最终答复作为 assistant final；宿主会自动回传给调用者。",
+    );
+    expect(initialTask).toContain("仅在需要提前唤醒调用者时，才调用 send_session_message");
+    expect(initialTask).not.toContain("如需回复，请调用 send_session_message");
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the caller's first temporary wait",
+    );
+
+    await expect(executeTool(
+      fixture.runtime.control(temporary.conversationId),
+      "send_session_message",
+      "temporary-explicit-wait-message",
+      {
+        conversationId: caller.conversationId,
+        message: "The explicit temporary conclusion.",
+      },
+    )).resolves.toMatchObject({ status: "delivered_to_wait" });
+    await firstWaitResolved.promise;
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the caller's second temporary wait",
+    );
+    await expect(executeTool(
+      fixture.runtime.control(temporary.conversationId),
+      "send_session_message",
+      "temporary-second-explicit-wait-message",
+      {
+        conversationId: caller.conversationId,
+        message: "A later temporary progress message.",
+      },
+    )).resolves.toMatchObject({ status: "delivered_to_wait" });
+    await secondWaitResolved.promise;
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the caller's third temporary wait",
+    );
+
+    releaseTemporary.resolve();
+    await callerCompletion;
+    await waitUntil(async () =>
+      !(await fixture.coordinator.listSessions(fixture.handle))
+        .some(({ id }) => id === temporary.conversationId),
+    "temporary cleanup after its claimed explicit return");
+
+    expect(firstWait).toMatchObject({
+      outcome: "message",
+      conversationId: temporary.conversationId,
+      runId: temporary.runId,
+      messageId: expect.any(String),
+    });
+    expect(secondWait).toMatchObject({
+      outcome: "message",
+      conversationId: temporary.conversationId,
+      runId: temporary.runId,
+    });
+    expect(thirdWait).toMatchObject({
+      outcome: "completed",
+      runId: temporary.runId,
+      finalText: "final temporary answer",
+    });
+    const received = fixture.runtime.control(caller.conversationId).received;
+    expect(received).toHaveLength(2);
+    expect(received[0]).toMatchObject({
+      content: expect.stringContaining("The explicit temporary conclusion."),
+      details: expect.objectContaining({ kind: "message" }),
+    });
+    expect(received[1]).toMatchObject({
+      content: expect.stringContaining("A later temporary progress message."),
+      details: expect.objectContaining({ kind: "message" }),
+    });
+    expect(received).not.toContainEqual(expect.objectContaining({
+      details: expect.objectContaining({ kind: "delegation_result" }),
+    }));
+  });
+
+  it("returns a settled caller receipt after temporary cleanup and coordinator restart", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const temporaryStarted = deferred();
+    const releaseTemporary = deferred();
+    fixture.runtime.nextSessionBehaviors.push([
+      blocksUntil(temporaryStarted, releaseTemporary, "durable final answer"),
+    ]);
+    const targetKnown = deferred<{ conversationId: string; runId: string }>();
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      await executeTool(
+        control,
+        "wait_for_session",
+        "temporary-receipt-first-wait",
+        await targetKnown.promise,
+      );
+      control.beginNextModelTurn();
+      control.emitFinal("caller consumed the explicit message");
+    });
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      randomUUID(),
+      "wait for the temporary explicit message",
+    );
+    const temporary = await fixture.coordinator.startPeerSession(
+      fixture.handle,
+      caller.conversationId,
+      startInput({
+        temporary: true,
+        idempotencyKey: "temporary-receipt-survives-cleanup",
+      }),
+    );
+    targetKnown.resolve(temporary);
+    await temporaryStarted.promise;
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the caller's initial wait",
+    );
+    await executeTool(
+      fixture.runtime.control(temporary.conversationId),
+      "send_session_message",
+      "temporary-receipt-explicit-message",
+      {
+        conversationId: caller.conversationId,
+        message: "Durably receipt this explicit result.",
+      },
+    );
+    await callerCompletion;
+    releaseTemporary.resolve();
+    await waitUntil(async () =>
+      !(await fixture.coordinator.listSessions(fixture.handle))
+        .some(({ id }) => id === temporary.conversationId),
+    "temporary deletion after the caller receipt settles");
+
+    await fixture.coordinator.close();
+    fixture.coordinator = new ProjectSessionCoordinator(
+      fixture.runtime,
+      fixture.roles,
+      fixture.registry,
+    );
+    fixture.handle = await fixture.coordinator.acquireProject(
+      fixture.cwd,
+      "full_access",
+    );
+    const reopened = await fixture.coordinator.openConversation(
+      fixture.handle,
+      caller.conversationId,
+      { updateRecent: false },
+    );
+    let repeatedWait: unknown;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      repeatedWait = await executeTool(
+        control,
+        "wait_for_session",
+        "temporary-receipt-after-restart",
+        temporary,
+      );
+      control.emitFinal("caller recovered the durable temporary settlement");
+    });
+    await fixture.coordinator.prompt(
+      fixture.handle,
+      reopened.conversationId,
+      randomUUID(),
+      "read the settled caller receipt",
+    );
+
+    expect(repeatedWait).toMatchObject({
+      outcome: "completed",
+      runId: temporary.runId,
+      finalText: "durable final answer",
+    });
+    expect(
+      aggregateReservedConversationEntries(
+        fixture.runtime.control(caller.conversationId).manager.getEntries(),
+      ).temporaryReturnReceipts,
+    ).toContainEqual(expect.objectContaining({
+      temporaryConversationId: temporary.conversationId,
+      initialRunId: temporary.runId,
+      state: "settled",
+    }));
+  });
+
+  it("materializes a caller receipt from an assigned envelope after restart loss", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const temporaryStarted = deferred();
+    const releaseTemporary = deferred();
+    fixture.runtime.nextSessionBehaviors.push([
+      blocksUntil(
+        temporaryStarted,
+        releaseTemporary,
+        "final after receipt projection loss",
+      ),
+    ]);
+    const temporary = await fixture.coordinator.startPeerSession(
+      fixture.handle,
+      caller.conversationId,
+      startInput({
+        temporary: true,
+        idempotencyKey: "temporary-assigned-envelope-repairs-receipt",
+      }),
+    );
+    await temporaryStarted.promise;
+
+    const role = fixture.roles.getConversationRole("default");
+    const messageId = randomUUID();
+    const assignedAt = new Date().toISOString();
+    await coordinatorInbox(fixture.handle).put({
+      messageId,
+      cardId: randomUUID(),
+      fromConversationId: temporary.conversationId,
+      toConversationId: caller.conversationId,
+      sentAt: assignedAt,
+      kind: "message",
+      body: "Explicit result committed before the caller receipt projection.",
+      fromRunId: temporary.runId,
+      temporaryReturnAssignment: {
+        initialRunId: temporary.runId,
+        callerRunId: randomUUID(),
+        assignedAt,
+      },
+      fromSnapshot: {
+        conversationId: temporary.conversationId,
+        role: { id: role.id, name: role.name },
+      },
+      toSnapshot: {
+        conversationId: caller.conversationId,
+        role: { id: role.id, name: role.name },
+      },
+    });
+    expect(
+      aggregateReservedConversationEntries(
+        caller.sessionManager.getEntries(),
+      ).temporaryReturnReceipts,
+    ).toEqual([]);
+
+    releaseTemporary.resolve();
+    await waitUntil(async () =>
+      !(await fixture.coordinator.listSessions(fixture.handle))
+        .some(({ id }) => id === temporary.conversationId),
+    "temporary cleanup after repairing the caller receipt");
+    expect(
+      aggregateReservedConversationEntries(
+        caller.sessionManager.getEntries(),
+      ).temporaryReturnReceipts,
+    ).toContainEqual(expect.objectContaining({
+      temporaryConversationId: temporary.conversationId,
+      initialRunId: temporary.runId,
+      messageId,
+      state: "settled",
+      settlement: expect.objectContaining({
+        finalText: "final after receipt projection loss",
+      }),
+    }));
+    expect(fixture.runtime.control(caller.conversationId).received)
+      .not.toContainEqual(expect.objectContaining({
+        details: expect.objectContaining({ kind: "delegation_result" }),
+      }));
+  });
+
+  it("reuses a settled caller receipt after B reported-settlement append fails", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const temporaryStarted = deferred();
+    const releaseTemporary = deferred();
+    fixture.runtime.nextSessionBehaviors.push([
+      blocksUntil(temporaryStarted, releaseTemporary, "receipt survives B append failure"),
+    ]);
+    const targetKnown = deferred<{ conversationId: string; runId: string }>();
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      await executeTool(
+        control,
+        "wait_for_session",
+        "receipt-before-B-report-failure",
+        await targetKnown.promise,
+      );
+      control.beginNextModelTurn();
+      control.emitFinal("caller received the explicit message");
+    });
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      randomUUID(),
+      "wait for a receipt before B report persistence fails",
+    );
+    const temporary = await fixture.coordinator.startPeerSession(
+      fixture.handle,
+      caller.conversationId,
+      startInput({
+        temporary: true,
+        idempotencyKey: "receipt-before-B-report-append-failure",
+      }),
+    );
+    targetKnown.resolve(temporary);
+    await temporaryStarted.promise;
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the receipt-owning caller wait",
+    );
+    await executeTool(
+      fixture.runtime.control(temporary.conversationId),
+      "send_session_message",
+      "receipt-before-B-report-failure-message",
+      {
+        conversationId: caller.conversationId,
+        message: "Explicit message owns the return receipt.",
+      },
+    );
+    await callerCompletion;
+
+    const temporaryActor = await fixture.coordinator.openConversation(
+      fixture.handle,
+      temporary.conversationId,
+      { updateRecent: false },
+    );
+    const manager = temporaryActor.sessionManager as unknown as {
+      appendCustomEntry(customType: string, data: unknown): string;
+    };
+    const originalAppend = manager.appendCustomEntry.bind(manager);
+    let failReportedAppend = true;
+    manager.appendCustomEntry = (customType, data) => {
+      if (
+        failReportedAppend
+        && customType === RUN_SETTLEMENT_CUSTOM_TYPE
+        && (data as { reportedAt?: string }).reportedAt !== undefined
+      ) {
+        failReportedAppend = false;
+        throw new Error("simulated B reported settlement append failure");
+      }
+      return originalAppend(customType, data);
+    };
+    releaseTemporary.resolve();
+    await waitUntil(() =>
+      aggregateReservedConversationEntries(
+        caller.sessionManager.getEntries(),
+      ).temporaryReturnReceipts.some((receipt) =>
+        receipt.temporaryConversationId === temporary.conversationId
+        && receipt.state === "settled"
+      ),
+    "caller receipt to settle before B report append");
+    manager.appendCustomEntry = originalAppend;
+
+    await fixture.coordinator.close();
+    fixture.coordinator = new ProjectSessionCoordinator(
+      fixture.runtime,
+      fixture.roles,
+      fixture.registry,
+    );
+    fixture.handle = await fixture.coordinator.acquireProject(
+      fixture.cwd,
+      "full_access",
+    );
+    await waitUntil(async () =>
+      !(await fixture.coordinator.listSessions(fixture.handle))
+        .some(({ id }) => id === temporary.conversationId),
+    "recovered temporary deletion after B report append failure");
+    const inspection = await fixture.handle.project.inspectConversation(
+      caller.conversationId,
+    );
+    const receipt = inspection.temporaryReturnReceipts.find((candidate) =>
+      candidate.temporaryConversationId === temporary.conversationId
+    );
+    expect(receipt).toMatchObject({ state: "settled" });
+    expect(receipt?.state === "settled" && receipt.settlement).toMatchObject({
+      runId: temporary.runId,
+      finalText: "receipt survives B append failure",
+    });
+    expect(
+      inspection.cards.filter(({ kind }) => kind === "delegation_result"),
+    ).toHaveLength(0);
+  });
+
+  it("does not claim a temporary message committed before its caller starts waiting", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const callerStarted = deferred();
+    const beginWait = deferred();
+    const targetKnown = deferred<{ conversationId: string; runId: string }>();
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      callerStarted.resolve();
+      await beginWait.promise;
+      await executeTool(
+        control,
+        "wait_for_session",
+        "temporary-wait-after-committed-message",
+        await targetKnown.promise,
+      );
+      control.beginNextModelTurn();
+      control.emitFinal("caller consumed the precommitted message");
+    });
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      randomUUID(),
+      "wait only after the temporary message commits",
+    );
+    await callerStarted.promise;
+    const temporaryStarted = deferred();
+    const releaseTemporary = deferred();
+    fixture.runtime.nextSessionBehaviors.push([
+      blocksUntil(temporaryStarted, releaseTemporary, "automatic final return"),
+    ]);
+    const temporary = await fixture.coordinator.startPeerSession(
+      fixture.handle,
+      caller.conversationId,
+      startInput({
+        temporary: true,
+        idempotencyKey: "temporary-message-before-wait-has-no-receipt",
+      }),
+    );
+    targetKnown.resolve(temporary);
+    await temporaryStarted.promise;
+    await executeTool(
+      fixture.runtime.control(temporary.conversationId),
+      "send_session_message",
+      "temporary-message-before-wait",
+      {
+        conversationId: caller.conversationId,
+        message: "This message predates the exact wait.",
+      },
+    );
+
+    beginWait.resolve();
+    await callerCompletion;
+    expect(
+      aggregateReservedConversationEntries(
+        caller.sessionManager.getEntries(),
+      ).temporaryReturnReceipts,
+    ).toEqual([]);
+    releaseTemporary.resolve();
+    await waitUntil(() =>
+      fixture.runtime.control(caller.conversationId).received.some((message) =>
+        (message.details as { kind?: string } | undefined)?.kind
+          === "delegation_result"
+      ),
+    "automatic delegation result after an unclaimed message");
+  });
+
+  it("keeps a caller receipt when SDK steering rejects and later skips automatic result", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const temporaryStarted = deferred();
+    const releaseTemporary = deferred();
+    fixture.runtime.nextSessionBehaviors.push([
+      blocksUntil(temporaryStarted, releaseTemporary, "final after retry"),
+    ]);
+    const targetKnown = deferred<{ conversationId: string; runId: string }>();
+    let waitError: unknown;
+    let requeuedWait: unknown;
+    let finalWait: unknown;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      try {
+        await executeTool(
+          control,
+          "wait_for_session",
+          "temporary-receipt-before-steer-rejection",
+          await targetKnown.promise,
+        );
+      } catch (error) {
+        waitError = error;
+      }
+      control.beginNextModelTurn();
+      requeuedWait = await executeTool(
+        control,
+        "wait_for_session",
+        "temporary-receipt-requeued-message",
+        await targetKnown.promise,
+      );
+      control.beginNextModelTurn();
+      finalWait = await executeTool(
+        control,
+        "wait_for_session",
+        "temporary-receipt-final-after-message",
+        await targetKnown.promise,
+      );
+      control.emitFinal("caller recovered from rejected steering");
+    });
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      randomUUID(),
+      "wait until steering rejects",
+    );
+    const temporary = await fixture.coordinator.startPeerSession(
+      fixture.handle,
+      caller.conversationId,
+      startInput({
+        temporary: true,
+        idempotencyKey: "temporary-receipt-before-sdk-rejection",
+      }),
+    );
+    targetKnown.resolve(temporary);
+    await temporaryStarted.promise;
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the caller's receipt-claiming wait",
+    );
+
+    const callerSession = caller.session as unknown as {
+      sendCustomMessage: typeof caller.session.sendCustomMessage;
+    };
+    const originalSend = callerSession.sendCustomMessage.bind(caller.session);
+    let rejectSteer = true;
+    callerSession.sendCustomMessage = async (message, options) => {
+      if (rejectSteer && options?.deliverAs === "steer") {
+        rejectSteer = false;
+        throw new Error("simulated SDK steer rejection");
+      }
+      return originalSend(message, options);
+    };
+    await expect(executeTool(
+      fixture.runtime.control(temporary.conversationId),
+      "send_session_message",
+      "temporary-receipt-sdk-rejection-message",
+      {
+        conversationId: caller.conversationId,
+        message: "Deliver after the injected SDK rejection.",
+      },
+    )).rejects.toThrow("simulated SDK steer rejection");
+    callerSession.sendCustomMessage = originalSend;
+
+    expect(waitError).toMatchObject({
+      message: expect.stringContaining("simulated SDK steer rejection"),
+    });
+    expect(
+      aggregateReservedConversationEntries(
+        caller.sessionManager.getEntries(),
+      ).temporaryReturnReceipts,
+    ).toContainEqual(expect.objectContaining({
+      temporaryConversationId: temporary.conversationId,
+      initialRunId: temporary.runId,
+      state: "claimed",
+    }));
+    await expect(coordinatorInbox(fixture.handle).list({
+      toConversationId: caller.conversationId,
+    })).resolves.toContainEqual(expect.objectContaining({ state: "queued" }));
+
+    await waitUntil(() =>
+      fixture.runtime.control(caller.conversationId).received.some(({ content }) =>
+        content.includes("Deliver after the injected SDK rejection.")
+      ),
+    "the requeued explicit message to deliver");
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the caller's completion wait after requeued message",
+    );
+    releaseTemporary.resolve();
+    await callerCompletion;
+    expect(requeuedWait).toMatchObject({
+      outcome: "message",
+      messageId: expect.any(String),
+    });
+    expect(finalWait).toMatchObject({
+      outcome: "completed",
+      runId: temporary.runId,
+      finalText: "final after retry",
+    });
+    await waitUntil(async () =>
+      !(await fixture.coordinator.listSessions(fixture.handle))
+        .some(({ id }) => id === temporary.conversationId),
+    "temporary cleanup after the retried explicit message");
+    expect(fixture.runtime.control(caller.conversationId).received)
+      .not.toContainEqual(expect.objectContaining({
+        details: expect.objectContaining({ kind: "delegation_result" }),
+      }));
+  });
+
+  it("still automatically returns temporary failures after an explicit wait reply", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const temporaryStarted = deferred();
+    const releaseTemporary = deferred();
+    fixture.runtime.nextSessionBehaviors.push([
+      async () => {
+        temporaryStarted.resolve();
+        await releaseTemporary.promise;
+        throw new Error("temporary final failure");
+      },
+    ]);
+    const callerStarted = deferred();
+    const targetKnown = deferred<{
+      conversationId: string;
+      runId: string;
+    }>();
+    let waitResult: unknown;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      callerStarted.resolve();
+      waitResult = await executeTool(
+        control,
+        "wait_for_session",
+        "temporary-failure-after-explicit-wait",
+        await targetKnown.promise,
+      );
+      control.beginNextModelTurn();
+      control.emitFinal("caller handled explicit temporary progress");
+    });
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      randomUUID(),
+      "wait for temporary progress before its failure",
+    );
+    await callerStarted.promise;
+
+    const temporary = await fixture.coordinator.startPeerSession(
+      fixture.handle,
+      caller.conversationId,
+      startInput({
+        temporary: true,
+        idempotencyKey: "temporary-failure-after-explicit-wait",
+      }),
+    );
+    targetKnown.resolve(temporary);
+    await temporaryStarted.promise;
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the caller's temporary failure wait",
+    );
+    await executeTool(
+      fixture.runtime.control(temporary.conversationId),
+      "send_session_message",
+      "temporary-failure-explicit-message",
+      {
+        conversationId: caller.conversationId,
+        message: "Temporary progress before the failure.",
+      },
+    );
+    await callerCompletion;
+
+    releaseTemporary.resolve();
+    await waitUntil(() =>
+      fixture.runtime.control(caller.conversationId).received.some((message) =>
+        (message.details as { kind?: string } | undefined)?.kind
+          === "delegation_failure"
+      ),
+    "automatic temporary failure return");
+
+    expect(waitResult).toMatchObject({ outcome: "message" });
+    expect(
+      aggregateReservedConversationEntries(
+        fixture.runtime.control(caller.conversationId).manager.getEntries(),
+      ).temporaryReturnReceipts,
+    ).toHaveLength(1);
+    expect(
+      fixture.runtime.control(caller.conversationId).received,
+    ).toContainEqual(expect.objectContaining({
+      details: expect.objectContaining({ kind: "delegation_failure" }),
+    }));
+    expect(
+      (await fixture.coordinator.listSessions(fixture.handle))
+        .find(({ id }) => id === temporary.conversationId),
+    ).toMatchObject({ temporary: true, attention: true });
+  });
+
   it("prefers a pending temporary return after its session was deleted", async () => {
     const fixture = await createFixture();
     const caller = await fixture.coordinator.createUserConversation(
@@ -6058,14 +6796,18 @@ describe("ProjectSessionCoordinator", () => {
       const failures = (await inbox.list({
         toConversationId: source.conversationId,
       })).filter(({ kind }) => kind === "delegation_failure");
+      const retained = await fixture.coordinator.listSessions(fixture.handle);
       return failures.some(({ fromConversationId, body }) =>
         fromConversationId === aborted.conversationId
         && body.includes("aborted")
       ) && failures.some(({ fromConversationId, body }) =>
         fromConversationId === noReply.conversationId
         && body.includes("没有 Agent 回复")
+      ) && [aborted.conversationId, noReply.conversationId].every(
+        (conversationId) =>
+          retained.find(({ id }) => id === conversationId)?.attention === true,
       );
-    }, "temporary abort and no-reply failure returns");
+    }, "temporary abort and no-reply failure returns with attention");
     const retained = await fixture.coordinator.listSessions(fixture.handle);
     expect(
       retained.find(({ id }) => id === aborted.conversationId),

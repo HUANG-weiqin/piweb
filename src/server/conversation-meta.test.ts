@@ -13,6 +13,7 @@ import {
   MAX_RUN_FINAL_TEXT_BYTES,
   META_OPERATION_CUSTOM_TYPE,
   RUN_SETTLEMENT_CUSTOM_TYPE,
+  TEMPORARY_RETURN_RECEIPT_CUSTOM_TYPE,
   aggregateReservedConversationEntries,
   appendReservedCustomEntry,
   createCompactionThresholdEntry,
@@ -22,6 +23,7 @@ import {
   createConversationRoleChangeEntry,
   createMetaOperationEntry,
   createRunSettlementEntry,
+  createTemporaryReturnReceiptEntry,
   parseConversationCardEntry,
   parseCompactionThresholdEntry,
   parseConversationMessageEntry,
@@ -30,6 +32,7 @@ import {
   parseMetaOperationEntry,
   parseReservedConversationEntry,
   parseRunSettlementEntry,
+  parseTemporaryReturnReceiptEntry,
 } from "./conversation-meta.js";
 
 const timestamp = "2026-07-19T10:00:00.000Z";
@@ -435,6 +438,106 @@ describe("conversation reserved entries", () => {
       ...settlement(),
       finalText: "x".repeat(MAX_RUN_FINAL_TEXT_BYTES + 1),
     })).toThrow(/finalText/i);
+  });
+
+  it("records caller-owned temporary return receipt transitions strictly", () => {
+    const temporaryConversationId = randomUUID();
+    const initialRunId = randomUUID();
+    const messageId = randomUUID();
+    const delegation = createConversationCardEntry({
+      ...card(),
+      kind: "delegation_task",
+      toSnapshot: peer(temporaryConversationId),
+      runId: initialRunId,
+      state: "running",
+    });
+    const claimed = createTemporaryReturnReceiptEntry({
+      temporaryConversationId,
+      initialRunId,
+      messageId,
+      callerRunId: randomUUID(),
+      claimedAt: timestamp,
+      state: "claimed",
+    });
+    const reported = createRunSettlementEntry({
+      runId: initialRunId,
+      outcome: "completed",
+      finalText: "final answer",
+      settledAt: timestamp,
+      reportedAt: "2026-07-19T10:01:00.000Z",
+      returnMessageId: messageId,
+    }).data;
+    const settled = createTemporaryReturnReceiptEntry({
+      ...claimed.data,
+      state: "settled",
+      settlement: reported,
+    });
+
+    expect(claimed.customType).toBe(TEMPORARY_RETURN_RECEIPT_CUSTOM_TYPE);
+    expect(parseTemporaryReturnReceiptEntry(claimed)).toEqual(claimed);
+    expect(parseReservedConversationEntry(claimed)).toEqual({
+      kind: "temporary_return_receipt",
+      entry: claimed,
+    });
+    expect(aggregateReservedConversationEntries([
+      delegation,
+      claimed,
+      claimed,
+      settled,
+      settled,
+    ]).temporaryReturnReceipts).toEqual([settled.data]);
+    expect(() => createTemporaryReturnReceiptEntry({
+      ...claimed.data,
+      callerRunId: "not-a-uuid",
+    })).toThrow(/callerRunId/i);
+    expect(() => parseTemporaryReturnReceiptEntry({
+      ...claimed,
+      data: { ...claimed.data, extra: true },
+    })).toThrow(/unknown|unrecognized/i);
+    expect(() => createTemporaryReturnReceiptEntry({
+      ...settled.data,
+      settlement: { ...reported, runId: randomUUID() },
+    })).toThrow(/initial run/i);
+    expect(() => createTemporaryReturnReceiptEntry({
+      ...settled.data,
+      settlement: { ...reported, returnMessageId: randomUUID() },
+    })).toThrow(/messageId/i);
+    for (const settlement of [
+      { ...reported, outcome: "failed" as const },
+      { ...reported, outcome: "aborted" as const },
+      { ...reported, finalText: null },
+      { ...reported, finalText: "   " },
+      {
+        ...reported,
+        finalText: "x".repeat(MAX_CONVERSATION_BODY_BYTES + 1),
+      },
+    ]) {
+      expect(() => createTemporaryReturnReceiptEntry({
+        ...settled.data,
+        settlement,
+      })).toThrow(/returnable/i);
+    }
+    expect(() => aggregateReservedConversationEntries([
+      claimed,
+    ])).toThrow(/requires an earlier initial delegation card/i);
+    expect(() => aggregateReservedConversationEntries([
+      delegation,
+      settled,
+    ])).toThrow(/must begin in claimed state/i);
+    expect(() => aggregateReservedConversationEntries([
+      delegation,
+      claimed,
+      createTemporaryReturnReceiptEntry({
+        ...claimed.data,
+        messageId: randomUUID(),
+      }),
+    ])).toThrow(/conflicting.*temporary return receipt/i);
+    expect(() => aggregateReservedConversationEntries([
+      delegation,
+      claimed,
+      settled,
+      claimed,
+    ])).toThrow(/state cannot regress/i);
   });
 
   it("records strict delete-session operation states", () => {

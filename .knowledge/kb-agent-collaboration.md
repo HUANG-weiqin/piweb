@@ -76,7 +76,7 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
 - 普通 inbox claim 每次最多批量投递 8 条。精确 wait 回复若排在该批之后，会先按 FIFO 把目标有界 inbox（单目标最多 64 条）中它之前的消息全部排入同一 steering queue，再排回复并结算 wait；否则未完成的 wait 工具会阻止前批 steering 被消费并形成死锁。允许管理会话的目标 LLM 会收到来源标题、角色、完整 conversationId、正文、回复工具提示，以及“自行管理所创建会话生命周期”的提醒；关闭能力的角色只收到来源元信息和正文，不会看到任何会话工具名称或管理提示。隐藏提示只存在于 Agent 上下文，浏览器卡片仍只从 `details.body` 投影用户可见正文。
 - incoming 消息使用 `piweb.conversation_message.v1` 并进入目标上下文；outgoing/委派状态使用 `piweb.conversation_card.v1`，只用于投影。
 - 同一 `cardId` 的后续 entry 原地覆盖卡片状态；浏览器和重启恢复不会刷出多张重复卡。
-- 每个 run 先追加 `piweb.run_settlement.v1`，记录精确 `runId/outcome/finalText`，再通知 waiter 和 inbox 清理。cycle check、waiter 注册与 committed inbox 补查处于项目 lifecycle 同一线性边界：发送先赢时按 `fromConversationId + fromRunId` 找回未被当前 receiving run receipt 的回复，注册先赢时发送路径直接 rendezvous；扫描/aggregate/投影失败，以及目标 exact run 在 settlement 前进入 fatal infrastructure 状态时，都必须移除 waiter 和 AbortSignal listener，不能留下 ghost wait edge。等待返回 durable settlement 或精确目标 run 主动发来的 message metadata；消息正文只通过 incoming custom message 注入一次，不能在 tool result 再复制一份。临时 initial run 的 caller waiter 会保留到自动回传 envelope 提交，只返回 message metadata，不再同时返回含同一正文的 settlement；return 已 receipt/清理后的再次 wait 则返回 reported settlement。等待与临时回传不能从“最后一条 assistant”猜结果。
+- 每个 run 先追加 `piweb.run_settlement.v1`，记录精确 `runId/outcome/finalText`，再通知 waiter 和 inbox 清理。cycle check、waiter 注册与 committed inbox 补查处于项目 lifecycle 同一线性边界：发送先赢时按 `fromConversationId + fromRunId` 找回未被当前 receiving run receipt 的回复，注册先赢时发送路径直接 rendezvous；扫描/aggregate/投影失败，以及目标 exact run 在 settlement 前进入 fatal infrastructure 状态时，都必须移除 waiter 和 AbortSignal listener，不能留下 ghost wait edge。等待返回 durable settlement 或精确目标 run 主动发来的 message metadata；消息正文只通过 incoming custom message 注入一次，不能在 tool result 再复制一份。临时 initial run 的 caller waiter 会保留到自动回传 envelope 提交，只返回 message metadata，不再同时返回含同一正文的 settlement；但该 initial run 在 caller 正在精确等待时立即 `send_session_message`，会把 exact-wait assignment 与 message 一起原子写进 inbox envelope，这个 inbox commit 是替代成功自动回传的线性化点。宿主随后在 caller JSONL 物化严格的 `piweb.temporary_return_receipt.v1` claimed receipt（temporary conversation、initial run、message、caller run 和时间）；若进程在物化前退出，temporary completion 会从仍在的 assigned envelope 幂等补写。即使后续 inbox steering 或 SDK steer 拒绝，envelope 也会重投而 assignment 仍有效。成功 final 先将 caller receipt 升级为含完整 reported settlement 的 settled 状态，再标记 temporary settlement 并删除 temporary，因此即使 temporary JSONL 已删除，后续 wait 仍能从 caller receipt 返回最终 settlement，不再投递第二条 `delegation_result`；失败、中止、无 final 或超限仍照常投递 `delegation_failure`，以免失败消息与 settlement 竞态。每个 temporary initial run 最多一个 receipt，冲突 fail closed。等待与临时回传不能从“最后一条 assistant”猜结果。
 - 重启会扫描 inbox 与 reserved JSONL：修复 inbox 已提交但来源仍是 sending 的卡片，恢复 processing run、临时结果和目标 pump；已经 durable settled 的 run 不会重复执行。SDK custom-steer acceptance 若异步拒绝，coordinator 会在 lifecycle 边界复查 marker/settlement，幂等 finish 或 dispose/reopen 后恢复精确 processing run，不能让无 settlement 的 claim 永久阻断 FIFO。
 - terminal sender card 必须先于 sidecar 删除；两步间崩溃时，残留 sidecar 可在重启后完成对账。
 - 删除 conversation 会先冻结 target 的 metadata descendant set 并设置 deleting fence；任一成员 busy 时整次拒绝。随后按子孙到祖先顺序持久化 target tombstone、把只以当前被删会话为目标的 pending inbox 对应 sender card 终结并清理；tombstone 在内存中也是 open/create/pump/send 的硬 fence，删除事务中的后到消息被明确拒绝，它此前发往 cascade set 外的 outbound envelope 仍会继续送达。JSONL 删除完成后 tombstone 会幂等回收；若进程在这两步之间退出，下次项目打开先恢复 fence，再完成删除或只清理目标已不存在且没有 pending 消息的完成标记，避免重新打开目标或长期编排耗尽固定 tombstone 数量。
@@ -85,7 +85,7 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
 
 - 已进入模型上下文的 user、assistant、tool 和 incoming custom message 都是 append-only；新的宿主提示只附加到以后收到的新消息，不能回填或重写旧 entry。
 - 当前角色完整修订由 base conversation metadata 加后续角色变更记录得出；重新打开会话使用最后一次成功应用的角色。角色模板后续编辑不会自动改变既有会话，只有用户显式切换才会从下一轮改变 system prompt、模型、默认思考强度、权限与 meta 工具 schema。聊天页的思考强度控制仍只修改当前运行会话，不反写角色模板或角色快照。
-- 卡片状态、run settlement、meta operation 和 conversation metadata 使用普通 `custom` entry；SDK 的 `buildSessionContext()` 会忽略它们，因此状态更新既不改旧消息，也不污染模型缓存前缀。
+- 卡片状态、run settlement、temporary return receipt、meta operation 和 conversation metadata 使用普通 `custom` entry；SDK 的 `buildSessionContext()` 会忽略它们，因此状态更新既不改旧消息，也不污染模型缓存前缀。
 - 会话自动压缩阈值同样使用普通 `piweb.compaction_threshold.v1` custom entry 保存；缺省为 70%，允许 20%–90%，最后一条有效记录生效，不进入模型上下文。
 - 用户可在会话空闲时发送精确关联的 `compact_context` 命令手动调用 Pi 标准 `compact()`；运行中会话拒绝手动压缩，成功后重新发布 state 与 snapshot。
 - 两个明确例外会有意改变模型输入：Pi 在上下文逼近上限时追加 compaction summary 并以摘要替换活动上下文，以及重新启动后项目资源本身发生变化导致基础 system prompt 变化。前者是继续运行所需，后者反映用户真实修改；工作台不为提高命中率伪装旧项目状态。
@@ -95,7 +95,7 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
 临时会话仍是扁平的一等 conversation，只给初始委派增加生命周期：
 
 - metadata 固定 caller conversation、delegation ID、return message ID 和精确 initial run ID；
-- initial run 成功且有最终 Agent 文本时，先把结果作为 durable inbox 消息发给 caller、把 settlement 标记为已报告，再删除临时会话；
+- initial run 成功且有最终 Agent 文本时，默认先把结果作为 durable inbox 消息发给 caller、把 settlement 标记为已报告，再删除临时会话；若该 run 的普通显式消息已在发送时持久占用 caller 的精确 wait，caller 持久 receipt 会使该消息替代这条成功自动回传；receipt 先记录完整 reported settlement，随后 temporary settlement 以该 messageId 标记已报告后删除，避免重复结论；
 - initial run 失败、中止或没有最终回复时，同样持久回传失败消息，但保留会话并标记 attention；
 - 后续重试的成功 run 不会误触发初始委派的自动删除。
 
