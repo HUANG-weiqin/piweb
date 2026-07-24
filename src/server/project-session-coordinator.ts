@@ -30,6 +30,7 @@ import {
 } from "./conversation-meta.js";
 import {
   ConversationActor,
+  isConversationSteerDeliveryError,
   type ConversationActorCompletion,
   type ConversationActorEvent,
   type ConversationRunOwnership,
@@ -57,6 +58,7 @@ import {
   type InboxEnvelopeInput,
 } from "./project-inbox.js";
 import {
+  MAX_PENDING_PROMPT_ATTENTION_REASON_CHARACTERS,
   ProjectPromptQueue,
   type ProjectPromptRecord,
   type PromptQueuePutResult,
@@ -353,6 +355,14 @@ function reportTemporarySettlementThroughReceipt(
     );
   }
   return existing;
+}
+
+function pendingPromptAttentionReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const bounded = message
+    .slice(0, MAX_PENDING_PROMPT_ATTENTION_REASON_CHARACTERS)
+    .trim();
+  return bounded || "Pending prompt delivery outcome is uncertain";
 }
 
 function abortError(message: string): Error {
@@ -1447,16 +1457,28 @@ export class ProjectSessionCoordinator {
         const claimed = (await context.promptQueue.list({ conversationId }))
           .find(({ promptId: candidate }) => candidate === promptId);
         if (
-          claimed?.state === "dispatching"
-          && claimed.runId === runId
+          claimed?.state !== "dispatching"
+          || claimed.runId !== runId
+        ) return;
+        if (
+          isConversationSteerDeliveryError(error)
+          && error.classification === "rejected_before_sdk_acceptance"
         ) {
           await context.promptQueue.requeueAfterDeterministicRejection(
             promptId,
             conversationId,
             runId,
           );
-          await this.emitPendingPromptsChanged(context, conversationId);
+        } else {
+          await context.promptQueue.markAttentionAfterUncertainFailure(
+            promptId,
+            conversationId,
+            runId,
+            pendingPromptAttentionReason(error),
+            this.now().toISOString(),
+          );
         }
+        await this.emitPendingPromptsChanged(context, conversationId);
       });
       throw error;
     }

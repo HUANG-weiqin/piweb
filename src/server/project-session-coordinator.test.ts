@@ -101,7 +101,7 @@ class FakeSessionControl {
   readonly received: ReceivedCustomMessage[] = [];
   readonly promptTexts: string[] = [];
   readonly steerTexts: string[] = [];
-  steerImplementation: (text: string) => Promise<void> = async () => undefined;
+  steerImplementation: (text: string) => Promise<void> | void = () => undefined;
   readonly behaviors: SessionBehavior[] = [];
   readonly continuationBehaviors: SessionBehavior[] = [];
   readonly pendingSteers: ReceivedCustomMessage[] = [];
@@ -140,9 +140,9 @@ class FakeSessionControl {
         control.promptTexts.push(text);
         await control.runNext();
       },
-      steer: async (text: string) => {
+      steer: (text: string) => {
         control.steerTexts.push(text);
-        await control.steerImplementation(text);
+        return control.steerImplementation(text);
       },
       sendCustomMessage: async (
         message: Parameters<AgentSession["sendCustomMessage"]>[0],
@@ -8959,7 +8959,7 @@ describe("ProjectSessionCoordinator", () => {
         actor.conversationId,
         { promptId: rejectedId, text: "requeue after steer rejection" },
       );
-      control.steerImplementation = async () => {
+      control.steerImplementation = () => {
         throw new Error("steer rejected before delivery");
       };
       await expect(fixture.coordinator.steerQueuedPrompt(
@@ -8976,6 +8976,83 @@ describe("ProjectSessionCoordinator", () => {
       ]);
       busyRelease.resolve();
       await busy;
+    });
+
+    it("marks SDK-accepted guidance without a durable user message as attention without retrying it", async () => {
+      const fixture = await createFixture();
+      const actor = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const control = fixture.runtime.control(actor.conversationId);
+      const started = deferred();
+      const release = deferred();
+      control.enqueue(
+        async () => {
+          started.resolve();
+          await release.promise;
+        },
+        async () => {
+          throw new Error("attention prompt must not be auto-pumped");
+        },
+      );
+      const runId = randomUUID();
+      const busy = fixture.coordinator.prompt(
+        fixture.handle,
+        actor.conversationId,
+        runId,
+        "busy before uncertain steer",
+      );
+      await started.promise;
+      const promptId = randomUUID();
+      await fixture.coordinator.enqueuePrompt(
+        fixture.handle,
+        actor.conversationId,
+        { promptId, text: "accepted but not durably proved" },
+      );
+
+      const steering = fixture.coordinator.steerQueuedPrompt(
+        fixture.handle,
+        actor.conversationId,
+        promptId,
+        runId,
+      );
+      await waitUntil(
+        () => control.steerTexts.includes("accepted but not durably proved"),
+        "SDK to accept pending prompt steer",
+      );
+      control.listener?.({
+        type: "message_end",
+        message: agentMessage({
+          role: "user",
+          content: [{ type: "text", text: "not persisted" }],
+          timestamp: Date.now(),
+        }),
+      } as AgentSessionEvent);
+      await expect(steering).rejects.toMatchObject({
+        classification: "uncertain_after_sdk_acceptance",
+        message: expect.stringMatching(/did not durably append/i),
+      });
+      await expect(fixture.coordinator.listPendingPrompts(
+        fixture.handle,
+        actor.conversationId,
+      )).resolves.toEqual([
+        expect.objectContaining({
+          promptId,
+          state: "attention",
+          reason: expect.stringMatching(/did not durably append/i),
+          attentionAt: expect.any(String),
+        }),
+      ]);
+      await expect(fixture.coordinator.withdrawQueuedPrompt(
+        fixture.handle,
+        actor.conversationId,
+        promptId,
+      )).rejects.toThrow("Only queued prompts can be withdrawn");
+      release.resolve();
+      await busy;
+      await Promise.resolve();
+      expect(control.promptTexts).toEqual(["busy before uncertain steer"]);
     });
 
     it("marks no-user delivery attention and recovers dispatching records conservatively", async () => {

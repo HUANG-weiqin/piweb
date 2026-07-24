@@ -1637,7 +1637,21 @@ describe("ConversationActor", () => {
     } as AgentSessionEvent);
 
     await expect(fixture.actor.steer(RUN_B, "wrong run"))
-      .rejects.toThrow("not currently able");
+      .rejects.toMatchObject({
+        classification: "rejected_before_sdk_acceptance",
+        message: expect.stringContaining("not currently able"),
+      });
+    const originalSteer = fixture.runtime.session.steer;
+    const sdkError = new Error("SDK steer rejected");
+    fixture.runtime.session.steer = () => {
+      throw sdkError;
+    };
+    await expect(fixture.actor.steer(RUN_A, "SDK rejection"))
+      .rejects.toMatchObject({
+        classification: "rejected_before_sdk_acceptance",
+        cause: sdkError,
+      });
+    fixture.runtime.session.steer = originalSteer;
     expect(fixture.runtime.session.isStreaming).toBe(false);
     const guidance = fixture.actor.steer(RUN_A, "  change direction  ");
     expect(fixture.runtime.session.steerCalls).toEqual(["change direction"]);
@@ -1674,9 +1688,10 @@ describe("ConversationActor", () => {
       promptFinished.resolve();
     };
     await fixture.actor.abort(RUN_A);
-    await expect(undelivered).rejects.toThrow(
-      "Run ended before queued guidance was delivered",
-    );
+    await expect(undelivered).rejects.toMatchObject({
+      classification: "uncertain_after_sdk_acceptance",
+      message: "Run ended before queued guidance was delivered",
+    });
     await completion;
     expect(fixture.runtime.session.clearQueueCalls).toBe(1);
     await expect(fixture.actor.steer(RUN_A, "too late"))
@@ -1707,7 +1722,10 @@ describe("ConversationActor", () => {
         timestamp: Date.now(),
       }),
     } as AgentSessionEvent);
-    await expect(guidance).rejects.toThrow(/did not durably append/i);
+    await expect(guidance).rejects.toMatchObject({
+      classification: "uncertain_after_sdk_acceptance",
+      message: expect.stringMatching(/did not durably append/i),
+    });
     promptFinished.resolve();
     await completion;
     await fixture.actor.dispose();
