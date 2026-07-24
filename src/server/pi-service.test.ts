@@ -26,6 +26,7 @@ import type {
   ToolCallGate,
 } from "./pi-runtime.js";
 import { ProjectRunCoordinator } from "./project-run-coordinator.js";
+import { ProjectPromptQueue } from "./project-prompt-queue.js";
 import {
   MAX_PROJECT_SNAPSHOT_BYTES,
   PiConnection,
@@ -316,6 +317,23 @@ async function coordinatedConnectionHarness() {
 }
 
 describe("PiConnection lifecycle", () => {
+  it("rejects pending prompt commands without project coordination", async () => {
+    const connection = new PiConnection(() => {}, new FakeRuntime());
+    try {
+      await expect(connection.handle({
+        type: "enqueue_prompt",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId: randomUUID(),
+        focusId: randomUUID(),
+        promptId: randomUUID(),
+        text: "queued work",
+      })).rejects.toThrow("requires persistent project coordination");
+    } finally {
+      await connection.dispose();
+    }
+  });
+
   it("serializes initialization and commits only the latest session bundle", async () => {
     const cwdA = await mkdtemp(join(tmpdir(), "piweb-a-"));
     const cwdB = await mkdtemp(join(tmpdir(), "piweb-b-"));
@@ -2526,6 +2544,336 @@ describe("PiConnection coordinated project view", () => {
       await running;
     } finally {
       promptGate.resolve();
+      await harness.cleanup();
+    }
+  });
+
+  it("projects and durably acknowledges focused pending prompt commands", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const promptStarted = deferred();
+    const promptGate = deferred();
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        roleId: "default",
+      });
+      const focused = latestState(harness.events);
+      const session = harness.runtime.created[0]!;
+      session.prompt = async () => {
+        session.isStreaming = true;
+        session.eventListener?.(nativeEvent({ type: "agent_start" }));
+        promptStarted.resolve();
+        await promptGate.promise;
+        session.isStreaming = false;
+      };
+      const running = harness.connection.handle({
+        type: "prompt",
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+        runId: RUN_A,
+        text: "initial",
+      });
+      await promptStarted.promise;
+
+      const promptId = randomUUID();
+      const enqueueCommandId = randomUUID();
+      await harness.connection.handle({
+        type: "enqueue_prompt",
+        commandId: enqueueCommandId,
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+        promptId,
+        text: "after the current run",
+      });
+
+      expect(harness.events).toContainEqual({
+        type: "command_complete",
+        operation: "enqueue_prompt",
+        commandId: enqueueCommandId,
+        sessionId: SESSION_A,
+      });
+      expect(harness.events).toContainEqual(expect.objectContaining({
+        type: "pending_prompts_snapshot",
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId,
+        focusId: focused.focusId,
+        prompts: [expect.objectContaining({
+          promptId,
+          text: "after the current run",
+          state: "queued",
+        })],
+      }));
+      expect(session.steerCalls).toEqual([]);
+      await expect(harness.connection.handle({
+        type: "enqueue_prompt",
+        commandId: enqueueCommandId,
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+        promptId,
+        text: "after the current run",
+      })).rejects.toThrow("Command ID was already used");
+      await expect(harness.connection.handle({
+        type: "withdraw_pending_prompt",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: randomUUID(),
+        promptId,
+      })).rejects.toThrow("Conversation focus is stale");
+
+      await expect(harness.connection.handle({
+        type: "steer_pending_prompt",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+        promptId,
+        runId: RUN_B,
+      })).rejects.toThrow(`Prompt steer requires exact active run: ${RUN_B}`);
+
+      const steerCommandId = randomUUID();
+      const steering = harness.connection.handle({
+        type: "steer_pending_prompt",
+        commandId: steerCommandId,
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+        promptId,
+        runId: RUN_A,
+      });
+      await vi.waitFor(() => {
+        expect(session.steerCalls).toEqual(["after the current run"]);
+      });
+      expect(harness.events).not.toContainEqual(expect.objectContaining({
+        type: "command_complete",
+        operation: "steer_pending_prompt",
+        commandId: steerCommandId,
+      }));
+
+      const steeredUserMessage = {
+        role: "user",
+        content: [{ type: "text", text: "after the current run" }],
+      } as AgentMessage;
+      session.persistentManager?.appendMessage(steeredUserMessage);
+      session.eventListener?.(nativeEvent({
+        type: "message_end",
+        message: steeredUserMessage,
+      }));
+      await steering;
+      expect(harness.events).toContainEqual({
+        type: "command_complete",
+        operation: "steer_pending_prompt",
+        commandId: steerCommandId,
+        sessionId: SESSION_A,
+      });
+      expect(harness.events).toContainEqual(expect.objectContaining({
+        type: "pending_prompts_snapshot",
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId,
+        focusId: focused.focusId,
+        prompts: [],
+      }));
+
+      promptGate.resolve();
+      await running;
+    } finally {
+      promptGate.resolve();
+      await harness.cleanup();
+    }
+  });
+
+  it("hydrates pending prompts only for the newly attached or refreshed exact focus", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        roleId: "default",
+        title: "A",
+      });
+      const firstFocus = latestState(harness.events);
+      const queue = await ProjectPromptQueue.open(
+        join(harness.cwd, ".piweb", "pending-prompts"),
+      );
+      const firstPromptId = randomUUID();
+      await queue.put({
+        promptId: firstPromptId,
+        conversationId: firstFocus.conversationId!,
+        text: "restore on refresh",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+
+      let marker = harness.events.length;
+      await harness.connection.handle({
+        type: "refresh_view",
+        sessionId: SESSION_A,
+        projectId: firstFocus.projectId,
+        conversationId: firstFocus.conversationId,
+        focusId: firstFocus.focusId,
+      });
+      await vi.waitFor(() => {
+        expect(harness.events.slice(marker)).toContainEqual(expect.objectContaining({
+          type: "pending_prompts_snapshot",
+          sessionId: SESSION_A,
+          conversationId: firstFocus.conversationId,
+          focusId: firstFocus.focusId,
+          prompts: [expect.objectContaining({ promptId: firstPromptId })],
+        }));
+      });
+
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        roleId: "default",
+        title: "B",
+      });
+      const secondFocus = latestState(harness.events);
+      await harness.connection.handle({
+        type: "focus_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId: firstFocus.conversationId!,
+      });
+      const restoredFirstFocus = latestState(harness.events);
+      const secondPromptId = randomUUID();
+      await queue.put({
+        promptId: secondPromptId,
+        conversationId: secondFocus.conversationId!,
+        text: "restore on attach",
+        createdAt: "2026-01-01T00:01:00.000Z",
+      });
+
+      marker = harness.events.length;
+      await harness.connection.handle({
+        type: "refresh_view",
+        sessionId: SESSION_A,
+        projectId: restoredFirstFocus.projectId,
+        conversationId: restoredFirstFocus.conversationId,
+        focusId: restoredFirstFocus.focusId,
+      });
+      await vi.waitFor(() => {
+        expect(harness.events.slice(marker)).toContainEqual(expect.objectContaining({
+          type: "pending_prompts_snapshot",
+          conversationId: restoredFirstFocus.conversationId,
+          focusId: restoredFirstFocus.focusId,
+          prompts: [expect.objectContaining({ promptId: firstPromptId })],
+        }));
+      });
+      expect(harness.events.slice(marker)).not.toContainEqual(expect.objectContaining({
+        type: "pending_prompts_snapshot",
+        conversationId: secondFocus.conversationId,
+        prompts: [expect.objectContaining({ promptId: secondPromptId })],
+      }));
+
+      marker = harness.events.length;
+      await harness.connection.handle({
+        type: "focus_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId: secondFocus.conversationId!,
+      });
+      const restoredSecondFocus = latestState(harness.events);
+      await vi.waitFor(() => {
+        expect(harness.events.slice(marker)).toContainEqual(expect.objectContaining({
+          type: "pending_prompts_snapshot",
+          sessionId: SESSION_A,
+          conversationId: secondFocus.conversationId,
+          focusId: restoredSecondFocus.focusId,
+          prompts: [expect.objectContaining({ promptId: secondPromptId })],
+        }));
+      });
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("dismisses a durable focused attention prompt", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        roleId: "default",
+      });
+      const focused = latestState(harness.events);
+      const promptId = randomUUID();
+      const queue = await ProjectPromptQueue.open(
+        join(harness.cwd, ".piweb", "pending-prompts"),
+      );
+      await queue.put({
+        promptId,
+        conversationId: focused.conversationId!,
+        text: "needs reconciliation",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      await queue.markDispatching(
+        promptId,
+        focused.conversationId!,
+        RUN_A,
+        "2026-01-01T00:01:00.000Z",
+      );
+      await queue.markAttentionAfterUncertainFailure(
+        promptId,
+        focused.conversationId!,
+        RUN_A,
+        "delivery outcome is uncertain",
+        "2026-01-01T00:02:00.000Z",
+      );
+
+      const commandId = randomUUID();
+      await harness.connection.handle({
+        type: "dismiss_pending_prompt",
+        commandId,
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+        promptId,
+      });
+
+      expect(harness.events).toContainEqual({
+        type: "command_complete",
+        operation: "dismiss_pending_prompt",
+        commandId,
+        sessionId: SESSION_A,
+      });
+      expect(await queue.list({ conversationId: focused.conversationId! })).toEqual([]);
+      expect(harness.events).toContainEqual(expect.objectContaining({
+        type: "pending_prompts_snapshot",
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId,
+        focusId: focused.focusId,
+        prompts: [],
+      }));
+    } finally {
       await harness.cleanup();
     }
   });

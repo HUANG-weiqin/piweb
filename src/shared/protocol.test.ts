@@ -25,7 +25,7 @@ const messageId = "assistant:96b960be-b6bb-4a19-9cf2-78e77cb69425";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(23);
+    expect(PROTOCOL_VERSION).toBe(24);
   });
 
   it("accepts supported commands", () => {
@@ -116,6 +116,40 @@ describe("parseClientCommand", () => {
       text: "change direction",
     }).type).toBe("steer");
     expect(parseClientCommand({
+      type: "enqueue_prompt",
+      commandId,
+      sessionId,
+      conversationId,
+      focusId,
+      promptId: targetConversationId,
+      text: "Handle this after the current run",
+    }).type).toBe("enqueue_prompt");
+    expect(parseClientCommand({
+      type: "steer_pending_prompt",
+      commandId,
+      sessionId,
+      conversationId,
+      focusId,
+      promptId: targetConversationId,
+      runId,
+    }).type).toBe("steer_pending_prompt");
+    expect(parseClientCommand({
+      type: "withdraw_pending_prompt",
+      commandId,
+      sessionId,
+      conversationId,
+      focusId,
+      promptId: targetConversationId,
+    }).type).toBe("withdraw_pending_prompt");
+    expect(parseClientCommand({
+      type: "dismiss_pending_prompt",
+      commandId,
+      sessionId,
+      conversationId,
+      focusId,
+      promptId: targetConversationId,
+    }).type).toBe("dismiss_pending_prompt");
+    expect(parseClientCommand({
       type: "abort",
       sessionId,
       conversationId,
@@ -196,6 +230,16 @@ describe("parseClientCommand", () => {
     expect(() => parseClientCommand({ type: "prompt", sessionId, runId, text: "  " })).toThrow();
     expect(() => parseClientCommand({ type: "prompt", text: "hello" })).toThrow();
     expect(() => parseClientCommand({ type: "abort", sessionId, runId: "not-a-uuid" })).toThrow();
+    expect(() => parseClientCommand({
+      type: "enqueue_prompt",
+      commandId,
+      sessionId,
+      conversationId,
+      focusId,
+      promptId: targetConversationId,
+      text: "queued work",
+      unexpected: true,
+    })).toThrow();
     expect(() => parseClientCommand({
       type: "extension_ui_response",
       sessionId,
@@ -734,8 +778,36 @@ describe("parseClientCommand", () => {
       message: "ready",
     }).type).toBe("extension_ui_notification");
     expect(parseServerEvent({
+      type: "pending_prompts_snapshot",
+      sessionId,
+      conversationId,
+      focusId,
+      prompts: [
+        {
+          promptId: targetConversationId,
+          text: "queued work",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          state: "queued",
+        },
+        {
+          promptId: commandId,
+          text: "sent work",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          state: "dispatching",
+          runId,
+          dispatchedAt: "2026-01-01T00:01:00.000Z",
+        },
+      ],
+    }).type).toBe("pending_prompts_snapshot");
+    expect(parseServerEvent({
       type: "command_complete",
       operation: "steer",
+      commandId,
+      sessionId,
+    }).type).toBe("command_complete");
+    expect(parseServerEvent({
+      type: "command_complete",
+      operation: "enqueue_prompt",
       commandId,
       sessionId,
     }).type).toBe("command_complete");

@@ -1223,6 +1223,12 @@ export function App() {
           });
           return;
         }
+        if (
+          event.operation === "enqueue_prompt"
+          || event.operation === "steer_pending_prompt"
+          || event.operation === "withdraw_pending_prompt"
+          || event.operation === "dismiss_pending_prompt"
+        ) return;
         setSettingResult({
           operation: event.operation,
           commandId: event.commandId,
