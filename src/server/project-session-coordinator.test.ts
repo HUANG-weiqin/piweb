@@ -936,8 +936,6 @@ describe("ProjectSessionCoordinator", () => {
       fixture.runtime.createOptions.get(second.conversationId)
         ?.workbenchCustomTools?.map(({ name }) => name),
     ).toEqual([
-      "git_status",
-      "git_diff",
       "notebook_write",
       "notebook_list",
       "notebook_grep",

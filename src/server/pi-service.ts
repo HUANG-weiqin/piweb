@@ -365,7 +365,9 @@ export class PiConnection {
       created = await this.runtime.createSession(project.cwd, {
         sessionManager: selected.sessionManager,
         toolMode: initialMode,
-        workbenchCustomTools: createGitTools(project.cwd),
+        workbenchCustomTools: initialMode === "read_only"
+          ? createGitTools(project.cwd)
+          : [],
         extensionUI: this.extensionUI.context({
           sessionId,
           generation,

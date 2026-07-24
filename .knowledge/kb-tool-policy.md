@@ -38,7 +38,7 @@ conversation role snapshot
 
 ## Git 浅层投影
 
-Git 浅层投影拆成 `git_status(path?)` 和 `git_diff(scope, path?)` 两个宿主工具；`scope` 只存在于 `git_diff`，取值 `worktree | staged | all`。可选 path 必须是 canonical project cwd 内的相对路径。对模型暴露的参数 schema 必须是单个 object + enum，不使用顶层 `anyOf/oneOf` union；通过工具拆分避免模型把 diff 参数传给 status。宿主构造固定 argv，使用项目外解析出的绝对 Git executable、`shell:false`、同一次调用 deadline、AbortSignal，以及 stdout/stderr 共享的 50 KiB / 2000 行预算。
+Git 浅层投影拆成 `git_status(path?)` 和 `git_diff(scope, path?)` 两个宿主工具，只注入 `read_only` 会话；`full_access` Agent 用 `bash git ...`，避免每次只读 Git 包装都创建临时 synthetic `GIT_DIR`。`scope` 只存在于 `git_diff`，取值 `worktree | staged | all`。可选 path 必须是 canonical project cwd 内的相对路径。对模型暴露的参数 schema 必须是单个 object + enum，不使用顶层 `anyOf/oneOf` union；通过工具拆分避免模型把 diff 参数传给 status。宿主构造固定 argv，使用项目外解析出的绝对 Git executable、`shell:false`、同一次调用 deadline、AbortSignal，以及 stdout/stderr 共享的 50 KiB / 2000 行预算。
 
 Git 的“只读子命令”仍可能经 pager、external diff、textconv、content filter 或 fsmonitor 执行程序。主命令因此不读取真实 Git 配置：宿主先用固定 `rev-parse` 捕获并校验 repository top、git dir、index、objects、object format 和 HEAD，再为该次调用创建只含宿主 config/HEAD 的临时 synthetic `GIT_DIR`；work tree、index 和 object directory 显式绑定真实只读输入，global/system config 指向临时空文件，继承的 `GIT_*` 全部先删除。临时目录没有 `commondir`、hooks 或 info 链接，并在所有完成/失败路径清理。输出可能因未继承 `core.autocrlf/filemode/ignorecase`、sparse 和 info exclude 而比原生 Git 更嘈杂，这是关闭执行入口的保守代价。
 
@@ -57,10 +57,10 @@ Archive 是可恢复隐藏，不是删除：默认 list 不显示 archived，但
 
 ## Agent 宿主工具
 
-每个 ConversationActor 注入：
+ConversationActor 按角色模式注入宿主工具：
 
 ```text
-git_status / git_diff
+read_only only: git_status / git_diff
 notebook_write / notebook_list / notebook_grep / notebook_read
 list_roles / list_sessions / current_session / peek_session
 start_session / start_temporary_session / send_session_message / wait_for_session
