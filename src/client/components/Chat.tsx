@@ -14,6 +14,7 @@ import {
   type ConversationCompactionMarker,
   type ConversationMessageCard,
   type ConversationRoleSnapshot,
+  type PendingPrompt,
   type PublicState,
   type RoleTemplate,
   type ThinkingLevel,
@@ -29,8 +30,6 @@ import { THINKING_LEVEL_LABELS } from "../lib/thinking-level";
 import { ConversationRoleDialog } from "./ConversationRoleDialog";
 import { Message } from "./Message";
 import { SessionMessageCard } from "./SessionMessageCard";
-
-type QueuedPromptStatus = "queued" | "submitting" | "attention";
 
 const FOLLOW_COMFORT_LIMIT_PX = 96;
 const FOLLOW_COMFORT_TARGET_PX = 32;
@@ -57,10 +56,10 @@ function sameChatFocus(
     && left?.focusId === right?.focusId;
 }
 
-function queuedPromptStatusLabel(status: QueuedPromptStatus): string {
-  switch (status) {
-    case "submitting": return "正在提交";
-    case "attention": return "需要确认";
+function pendingPromptStatusLabel(prompt: PendingPrompt): string {
+  switch (prompt.state) {
+    case "dispatching": return "正在发送";
+    case "attention": return "需要处理";
     case "queued": return "等待中";
   }
 }
@@ -89,16 +88,14 @@ interface ChatProps {
   conversationReady: boolean;
   draft: string;
   submitting: boolean;
-  queuedPrompts: Array<{
-    id: string;
-    text: string;
-    status: QueuedPromptStatus;
-  }>;
+  pendingPrompts: PendingPrompt[];
+  pendingPromptIds: ReadonlySet<string>;
   promptNotice?: string;
   onDraftChange(text: string): void;
   onSend(text: string): boolean;
-  onRemoveQueuedPrompt(id: string): void;
-  onRetryQueuedPrompt(id: string): void;
+  onSteerPendingPrompt(promptId: string): void;
+  onWithdrawPendingPrompt(promptId: string): void;
+  onDismissPendingPrompt(promptId: string): void;
   onAbort(): void;
   onSettings(): void;
   onThinking(level: ThinkingLevel): void;
@@ -248,12 +245,14 @@ export function Chat({
   conversationReady,
   draft,
   submitting,
-  queuedPrompts,
+  pendingPrompts,
+  pendingPromptIds,
   promptNotice,
   onDraftChange,
   onSend,
-  onRemoveQueuedPrompt,
-  onRetryQueuedPrompt,
+  onSteerPendingPrompt,
+  onWithdrawPendingPrompt,
+  onDismissPendingPrompt,
   onAbort,
   onSettings,
   onThinking,
@@ -270,7 +269,7 @@ export function Chat({
   else if (rewindingMessageId) composerPlaceholder = "正在回到所选消息…";
   else if (compacting) composerPlaceholder = "正在压缩上下文…";
   else if (!model) composerPlaceholder = "请先登录并选择模型";
-  else if (busy) composerPlaceholder = "发送后将引导当前任务…";
+  else if (busy) composerPlaceholder = "发送后将排队等待处理…";
   const transcriptRef = useRef<HTMLElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const followOutputRef = useRef(true);
@@ -551,43 +550,63 @@ export function Chat({
       >
         ↓ 回到最新消息
       </button>}
-      {queuedPrompts.length > 0 && <section
+      {pendingPrompts.length > 0 && <section
         className="prompt-queue"
-        aria-label="待发送消息"
+        aria-label="待处理消息"
       >
         <header>
-          <span>接下来处理 {queuedPrompts.length} 条</span>
-          <small>可接收时合并为一次引导</small>
+          <span>待处理消息 {pendingPrompts.length} 条</span>
+          <small>服务端持久保存</small>
         </header>
         <ol>
-          {queuedPrompts.map((prompt) => <li
-            key={prompt.id}
-            className={`prompt-queue-item ${prompt.status}`}
-          >
-            <span className="prompt-queue-text" title={prompt.text}>
-              {prompt.text}
-            </span>
-            <span className="prompt-queue-status">
-              {queuedPromptStatusLabel(prompt.status)}
-            </span>
-            <span className="prompt-queue-actions">
-              {prompt.status === "attention" && <button
-                type="button"
-                aria-label={`重试排队消息 ${prompt.text}`}
-                onClick={() => onRetryQueuedPrompt(prompt.id)}
+          {pendingPrompts.map((prompt) => {
+            const actionPending = pendingPromptIds.has(prompt.promptId);
+            const canSteer = prompt.state === "queued"
+              && (activeRun?.phase === "running" || activeRun?.phase === "waiting");
+            return <li
+              key={prompt.promptId}
+              className={`prompt-queue-item ${prompt.state}`}
+            >
+              <span className="prompt-queue-text" title={prompt.text}>
+                {prompt.text}
+              </span>
+              <span className="prompt-queue-status">
+                {pendingPromptStatusLabel(prompt)}
+              </span>
+              {prompt.state === "attention" && <small
+                className="prompt-queue-reason"
+                title={prompt.reason}
               >
-                重试
-              </button>}
-              <button
-                type="button"
-                aria-label={`移除排队消息 ${prompt.text}`}
-                disabled={prompt.status === "submitting"}
-                onClick={() => onRemoveQueuedPrompt(prompt.id)}
-              >
-                ×
-              </button>
-            </span>
-          </li>)}
+                {prompt.reason}
+              </small>}
+              <span className="prompt-queue-actions">
+                {prompt.state === "queued" && canSteer && <button
+                  type="button"
+                  aria-label={`引导待处理消息 ${prompt.text}`}
+                  disabled={actionPending}
+                  onClick={() => onSteerPendingPrompt(prompt.promptId)}
+                >
+                  Steer
+                </button>}
+                {prompt.state === "queued" && <button
+                  type="button"
+                  aria-label={`撤回待处理消息 ${prompt.text}`}
+                  disabled={actionPending}
+                  onClick={() => onWithdrawPendingPrompt(prompt.promptId)}
+                >
+                  撤回
+                </button>}
+                {prompt.state === "attention" && <button
+                  type="button"
+                  aria-label={`移除待处理记录 ${prompt.text}`}
+                  disabled={actionPending}
+                  onClick={() => onDismissPendingPrompt(prompt.promptId)}
+                >
+                  移除记录
+                </button>}
+              </span>
+            </li>;
+          })}
         </ol>
       </section>}
       {submitting && !promptNotice && <div

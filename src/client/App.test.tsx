@@ -129,7 +129,7 @@ vi.mock("./lib/socket", () => ({
         if (completed.type === "state") {
           if (!completed.state.conversationId) return;
           const snapshotKey =
-            `${completed.state.sessionId}:${completed.state.conversationId}`;
+            `${completed.state.sessionId}:${completed.state.conversationId}:${completed.state.focusId}`;
           if (snapshottedConversations.has(snapshotKey)) return;
           snapshottedConversations.add(snapshotKey);
           if (!completed.state.focusId) return;
@@ -140,6 +140,13 @@ vi.mock("./lib/socket", () => ({
             focusId: completed.state.focusId,
             messages: [],
             truncated: false,
+          });
+          onEvent({
+            type: "pending_prompts_snapshot",
+            sessionId: completed.state.sessionId,
+            conversationId: completed.state.conversationId,
+            focusId: completed.state.focusId,
+            prompts: [],
           });
         }
       };
@@ -1325,7 +1332,7 @@ describe("App", () => {
     )).toHaveLength(1);
   });
 
-  it("keeps queued prompts scoped while switching projects", () => {
+  it("restores an unacknowledged enqueue across workspaces until its exact durable snapshot proves it", () => {
     localStorage.setItem("piweb.workspaces", JSON.stringify([
       "E:\\first",
       "E:\\second",
@@ -1351,8 +1358,12 @@ describe("App", () => {
     const input = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
     fireEvent.change(input, { target: { value: "queued for first" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
-    expect(screen.getByRole("region", { name: "待发送消息" }))
-      .toHaveTextContent("queued for first");
+    const enqueue = latestCommand("enqueue_prompt");
+    expect(enqueue).toMatchObject({
+      conversationId: CONVERSATION_ID,
+      text: "queued for first",
+    });
+    expect(input).toHaveValue("queued for first");
 
     fireEvent.click(screen.getByRole("button", { name: "打开工作区 second" }));
     const secondSessionId = latestCommand("initialize").sessionId;
@@ -1369,7 +1380,7 @@ describe("App", () => {
         providers: [],
       },
     }));
-    expect(screen.queryByRole("region", { name: "待发送消息" }))
+    expect(screen.queryByRole("region", { name: "待处理消息" }))
       .not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "打开工作区 first" }));
@@ -1389,8 +1400,50 @@ describe("App", () => {
       },
     }));
 
-    expect(screen.getByRole("region", { name: "待发送消息" }))
-      .toHaveTextContent("queued for first");
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("queued for first");
+    expect(screen.getByRole("alert")).toHaveTextContent("发送状态未确认");
+
+    const returnedFocusId = "ae301850-745d-44dd-a30f-000000000003";
+    act(() => socketMock.rawEmit?.({
+      type: "pending_prompts_snapshot",
+      sessionId: returnedSessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: returnedFocusId,
+      prompts: [],
+    }));
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("queued for first");
+    act(() => socketMock.rawEmit?.({
+      type: "pending_prompts_snapshot",
+      sessionId: returnedSessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: returnedFocusId,
+      prompts: [{
+        promptId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        text: "queued for first",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        state: "queued",
+      }],
+    }));
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("queued for first");
+
+    act(() => socketMock.rawEmit?.({
+      type: "pending_prompts_snapshot",
+      sessionId: returnedSessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: returnedFocusId,
+      prompts: [{
+        promptId: enqueue.promptId,
+        text: "queued for first",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        state: "queued",
+      }],
+    }));
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("");
+    expect(screen.getByText("queued for first")).toBeInTheDocument();
   });
 
   it("coalesces browser resume signals into one exact view refresh", async () => {
@@ -2102,12 +2155,13 @@ describe("App", () => {
     fireEvent.change(input, { target: { value: "third task" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
 
-    expect(input).toHaveValue("");
-    expect(screen.getByRole("region", { name: "待发送消息" }))
-      .toHaveTextContent("接下来处理 2 条");
+    expect(input).toHaveValue("third task");
     expect(socketMock.send.mock.calls.filter(
       ([command]) => command.type === "prompt",
     )).toHaveLength(1);
+    expect(socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "enqueue_prompt",
+    )).toHaveLength(2);
     expect(socketMock.send.mock.calls.filter(
       ([command]) => command.type === "steer",
     )).toHaveLength(0);
@@ -2129,31 +2183,9 @@ describe("App", () => {
       });
     });
 
-    const guidanceCommands = socketMock.send.mock.calls
-      .map(([command]) => command)
-      .filter((command): command is Extract<ClientCommand, { type: "steer" }> =>
-        command.type === "steer"
-      );
-    expect(guidanceCommands).toHaveLength(1);
-    const guidance = guidanceCommands[0]!;
-    expect(guidance).toMatchObject({
-      conversationId: CONVERSATION_ID,
-      runId: first.runId,
-      text: "second task\n\nthird task",
-    });
-    expect(screen.getByRole("region", { name: "待发送消息" }))
-      .toHaveTextContent("正在提交");
-
-    act(() => {
-      socketMock.emit?.({
-        type: "command_complete",
-        operation: "steer",
-        commandId: guidance.commandId,
-        sessionId,
-      });
-    });
-    expect(screen.queryByRole("region", { name: "待发送消息" }))
-      .not.toBeInTheDocument();
+    expect(socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "steer",
+    )).toHaveLength(0);
   });
 
   it("keeps busy prompt queues isolated while switching conversations", () => {
@@ -2203,8 +2235,10 @@ describe("App", () => {
     const input = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
     fireEvent.change(input, { target: { value: "only for A" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
-    expect(screen.getByRole("region", { name: "待发送消息" }))
-      .toHaveTextContent("only for A");
+    expect(latestCommand("enqueue_prompt")).toMatchObject({
+      conversationId: CONVERSATION_ID,
+      text: "only for A",
+    });
 
     fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
     act(() => socketMock.emit?.({
@@ -2245,13 +2279,110 @@ describe("App", () => {
       truncated: false,
     }));
 
-    expect(latestCommand("prompt")).toMatchObject({
+    expect(latestCommand("enqueue_prompt")).toMatchObject({
       conversationId: CONVERSATION_ID,
       text: "only for A",
     });
   });
 
-  it("allows switching conversations while guidance delivery is pending", () => {
+  it("does not auto steer durable prompts after state changes", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\work",
+        busy: true,
+        activeRun: { id: RUN_ID, phase: "running" },
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+    const input = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
+    fireEvent.change(input, { target: { value: "queue without steering" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    const enqueue = latestCommand("enqueue_prompt");
+    expect(enqueue).toMatchObject({
+      conversationId: CONVERSATION_ID,
+      text: "queue without steering",
+    });
+    expect(input).toHaveValue("queue without steering");
+    act(() => socketMock.emit?.({
+      type: "command_complete",
+      operation: "enqueue_prompt",
+      commandId: enqueue.commandId,
+      sessionId,
+    }));
+    expect(input).toHaveValue("");
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\work",
+        busy: true,
+        activeRun: { id: RUN_ID, phase: "waiting" },
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+    expect(socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "steer",
+    )).toHaveLength(0);
+  });
+
+  it("renders only an exact restored pending prompt snapshot", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+    act(() => socketMock.emit?.({
+      type: "pending_prompts_snapshot",
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A_SECOND,
+      prompts: [{
+        promptId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        text: "stale queue",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        state: "queued",
+      }],
+    }));
+    expect(screen.queryByText("stale queue")).not.toBeInTheDocument();
+
+    act(() => socketMock.emit?.({
+      type: "pending_prompts_snapshot",
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      prompts: [{
+        promptId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        text: "restored queue",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        state: "queued",
+      }],
+    }));
+    expect(screen.getByText("restored queue")).toBeInTheDocument();
+  });
+
+  it("uses exact durable queue actions without collapsing duplicate text records", () => {
     render(<App />);
     const sessionId = startFromSetup();
     act(() => {
@@ -2270,101 +2401,63 @@ describe("App", () => {
         },
       });
       socketMock.emit?.({
-        type: "project_snapshot",
+        type: "pending_prompts_snapshot",
         sessionId,
-        projectId: PROJECT_ID,
         conversationId: CONVERSATION_ID,
-        conversations: [{
-          id: CONVERSATION_ID,
-          name: "A",
-          preview: "",
-          createdAt: "2026-07-19T08:00:00.000Z",
-          updatedAt: "2026-07-19T08:00:00.000Z",
-          messageCount: 0,
-          activity: { kind: "running", runId: RUN_ID },
+        focusId: FOCUS_A,
+        prompts: [{
+          promptId: "11111111-1111-4111-8111-111111111111",
+          text: "same text",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          state: "queued",
         }, {
-          id: CONVERSATION_B,
-          name: "B",
-          preview: "",
-          createdAt: "2026-07-19T08:00:00.000Z",
-          updatedAt: "2026-07-19T09:00:00.000Z",
-          messageCount: 0,
-          activity: { kind: "idle" },
+          promptId: "22222222-2222-4222-8222-222222222222",
+          text: "same text",
+          createdAt: "2026-01-01T00:01:00.000Z",
+          state: "queued",
+        }, {
+          promptId: "33333333-3333-4333-8333-333333333333",
+          text: "sending",
+          createdAt: "2026-01-01T00:02:00.000Z",
+          state: "dispatching",
+          runId: RUN_ID,
+          dispatchedAt: "2026-01-01T00:02:01.000Z",
+        }, {
+          promptId: "44444444-4444-4444-8444-444444444444",
+          text: "uncertain",
+          createdAt: "2026-01-01T00:03:00.000Z",
+          state: "attention",
+          reason: "delivery outcome is uncertain",
+          attentionAt: "2026-01-01T00:03:01.000Z",
         }],
-        truncated: false,
       });
     });
 
-    const input = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
-    fireEvent.change(input, { target: { value: "guide A" } });
-    fireEvent.click(screen.getByRole("button", { name: "发送" }));
-    const guidance = latestCommand("steer");
-    expect(screen.getByRole("region", { name: "待发送消息" }))
-      .toHaveTextContent("正在提交");
-
-    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
-    expect(latestCommand("focus_conversation").conversationId)
-      .toBe(CONVERSATION_B);
-    act(() => socketMock.emit?.({
-      type: "state",
-      state: {
-        sessionId,
-        cwd: "E:\\work",
-        busy: true,
-        activeRun: { id: RUN_B, phase: "running" },
-        thinkingLevel: "off",
-        toolMode: "full_access",
-        availableThinkingLevels: ["off"],
-        selectedModel: { provider: "provider", id: "model" },
-        providers: [],
-      },
-    }));
-    expect(screen.queryByRole("region", { name: "待发送消息" }))
-      .not.toBeInTheDocument();
-
-    fireEvent.change(screen.getByRole("textbox", { name: "给 Pi 发送消息" }), {
-      target: { value: "guide B" },
+    expect(screen.getAllByText("same text")).toHaveLength(2);
+    expect(screen.queryByRole("button", {
+      name: "撤回待处理消息 sending",
+    })).not.toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", {
+      name: "引导待处理消息 same text",
+    })[0]!);
+    expect(latestCommand("steer_pending_prompt")).toMatchObject({
+      promptId: "11111111-1111-4111-8111-111111111111",
+      runId: RUN_ID,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
     });
-    fireEvent.click(screen.getByRole("button", { name: "发送" }));
-    const guidanceB = latestCommand("steer");
-    expect(guidanceB).toMatchObject({
-      conversationId: CONVERSATION_B,
-      runId: RUN_B,
+    fireEvent.click(screen.getAllByRole("button", {
+      name: "撤回待处理消息 same text",
+    })[1]!);
+    expect(latestCommand("withdraw_pending_prompt")).toMatchObject({
+      promptId: "22222222-2222-4222-8222-222222222222",
     });
-
-    act(() => socketMock.emit?.({
-      type: "command_complete",
-      operation: "steer",
-      commandId: guidance.commandId,
-      sessionId,
+    fireEvent.click(screen.getByRole("button", {
+      name: "移除待处理记录 uncertain",
     }));
-    expect(screen.getByRole("region", { name: "待发送消息" }))
-      .toHaveTextContent("正在提交");
-    act(() => socketMock.emit?.({
-      type: "command_complete",
-      operation: "steer",
-      commandId: guidanceB.commandId,
-      sessionId,
-    }));
-    expect(screen.queryByRole("region", { name: "待发送消息" }))
-      .not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "打开会话 A" }));
-    act(() => socketMock.emit?.({
-      type: "state",
-      state: {
-        sessionId,
-        cwd: "E:\\work",
-        busy: true,
-        activeRun: { id: RUN_ID, phase: "running" },
-        thinkingLevel: "off",
-        toolMode: "full_access",
-        availableThinkingLevels: ["off"],
-        selectedModel: { provider: "provider", id: "model" },
-        providers: [],
-      },
-    }));
-    expect(screen.queryByRole("region", { name: "待发送消息" }))
-      .not.toBeInTheDocument();
+    expect(latestCommand("dismiss_pending_prompt")).toMatchObject({
+      promptId: "44444444-4444-4444-8444-444444444444",
+    });
   });
 
   it("freezes focus-bound controls as soon as a conversation switch starts", () => {

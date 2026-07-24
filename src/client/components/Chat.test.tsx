@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   ConversationMessageCard,
   ConversationRoleSnapshot,
+  PendingPrompt,
 } from "../../shared/protocol";
 import type { ChatState } from "../chat/reducer";
 import { Chat } from "./Chat";
@@ -46,11 +47,13 @@ function view(
     conversationReady
     draft={draft}
     submitting={false}
-    queuedPrompts={[]}
+    pendingPrompts={[]}
+    pendingPromptIds={new Set()}
     onDraftChange={() => undefined}
     onSend={() => true}
-    onRemoveQueuedPrompt={() => undefined}
-    onRetryQueuedPrompt={() => undefined}
+    onSteerPendingPrompt={() => undefined}
+    onWithdrawPendingPrompt={() => undefined}
+    onDismissPendingPrompt={() => undefined}
     onAbort={() => undefined}
     onSettings={() => undefined}
     onThinking={() => undefined}
@@ -111,7 +114,7 @@ describe("Chat", () => {
     expect(input).toBeEnabled();
     expect(input).toHaveAttribute(
       "placeholder",
-      "发送后将引导当前任务…",
+      "发送后将排队等待处理…",
     );
 
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
@@ -121,39 +124,58 @@ describe("Chat", () => {
     expect(onAbort).toHaveBeenCalledOnce();
   });
 
-  it("shows queued prompts compactly and exposes retry or removal", () => {
-    const onRemoveQueuedPrompt = vi.fn();
-    const onRetryQueuedPrompt = vi.fn();
+  it("shows durable prompt actions by state", () => {
+    const onSteerPendingPrompt = vi.fn();
+    const onWithdrawPendingPrompt = vi.fn();
+    const onDismissPendingPrompt = vi.fn();
+    const prompts: PendingPrompt[] = [{
+      promptId: "queued-1",
+      text: "Review the test failure after the current run.",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      state: "queued",
+    }, {
+      promptId: "dispatching-1",
+      text: "This delivery is in progress.",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      state: "dispatching",
+      runId: "run-1",
+      dispatchedAt: "2026-01-01T00:01:00.000Z",
+    }, {
+      promptId: "attention-1",
+      text: "This delivery needs confirmation.",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      state: "attention",
+      reason: "delivery outcome is uncertain",
+      attentionAt: "2026-01-01T00:02:00.000Z",
+    }];
     render(view(emptyChat, "", undefined, {
-      queuedPrompts: [{
-        id: "queued-1",
-        text: "Review the test failure after the current run.",
-        status: "queued",
-      }, {
-        id: "queued-2",
-        text: "This delivery needs confirmation.",
-        status: "attention",
-      }],
-      onRemoveQueuedPrompt,
-      onRetryQueuedPrompt,
+      activeRun: { id: "run-1", phase: "running" },
+      pendingPrompts: prompts,
+      onSteerPendingPrompt,
+      onWithdrawPendingPrompt,
+      onDismissPendingPrompt,
     }));
 
-    const queue = screen.getByRole("region", { name: "待发送消息" });
-    expect(queue).toHaveTextContent("接下来处理 2 条");
-    expect(queue).toHaveTextContent(
-      "Review the test failure after the current run.",
-    );
-    expect(queue).toHaveTextContent("需要确认");
+    const queue = screen.getByRole("region", { name: "待处理消息" });
+    expect(queue).toHaveTextContent("待处理消息 3 条");
+    expect(queue).toHaveTextContent("正在发送");
+    expect(queue).toHaveTextContent("delivery outcome is uncertain");
+    expect(screen.queryByRole("button", {
+      name: "撤回待处理消息 This delivery is in progress.",
+    })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", {
-      name: "重试排队消息 This delivery needs confirmation.",
+      name: "引导待处理消息 Review the test failure after the current run.",
     }));
-    expect(onRetryQueuedPrompt).toHaveBeenCalledWith("queued-2");
-
+    expect(onSteerPendingPrompt).toHaveBeenCalledWith("queued-1");
     fireEvent.click(screen.getByRole("button", {
-      name: "移除排队消息 Review the test failure after the current run.",
+      name: "撤回待处理消息 Review the test failure after the current run.",
     }));
-    expect(onRemoveQueuedPrompt).toHaveBeenCalledWith("queued-1");
+    expect(onWithdrawPendingPrompt).toHaveBeenCalledWith("queued-1");
+    fireEvent.click(screen.getByRole("button", {
+      name: "移除待处理记录 This delivery needs confirmation.",
+    }));
+    expect(onDismissPendingPrompt).toHaveBeenCalledWith("attention-1");
   });
 
   it("lets streamed output grow inside the follow comfort zone", () => {

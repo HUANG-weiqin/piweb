@@ -1446,12 +1446,21 @@ pre {
   white-space: nowrap;
 }
 
-.prompt-queue-item.submitting .prompt-queue-status {
+.prompt-queue-item.dispatching .prompt-queue-status {
   color: var(--focus);
 }
 
 .prompt-queue-item.attention .prompt-queue-status {
   color: var(--warning);
+}
+
+.prompt-queue-reason {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  color: var(--warning);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .prompt-queue-actions {

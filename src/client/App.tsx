@@ -9,6 +9,7 @@ import {
   type ConversationRoleSnapshot,
   type ConversationSummary,
   type DirectoryListing,
+  type PendingPrompt,
   type PublicState,
   type ProjectActivitySummary,
   type RoleTemplate,
@@ -45,7 +46,6 @@ import { useModalFocus } from "./lib/use-modal-focus";
 const CWD_KEY = "piweb.lastCwd";
 const WORKSPACES_KEY = "piweb.workspaces";
 const MAX_WORKSPACES = 30;
-const MAX_QUEUED_PROMPTS = 20;
 const RESUME_REFRESH_DELAY_MS = 16;
 
 interface InitialWorkspaceState {
@@ -84,24 +84,27 @@ function loadInitialWorkspaceState(): InitialWorkspaceState {
   return { workspaces, activeCwd };
 }
 
-interface PendingPrompt extends ActiveFocus {
+interface DirectPendingPrompt extends ActiveFocus {
   workspaceKey: string;
   runId: string;
   text: string;
-  queueIds?: string[];
 }
 
-interface PendingGuidance extends ActiveFocus {
+interface UnconfirmedPrompt {
+  text: string;
+  promptId?: string;
+}
+
+interface PendingQueueCommand extends ActiveFocus {
   workspaceKey: string;
   commandId: string;
-  runId: string;
-  queueIds: string[];
-}
-
-interface QueuedPrompt {
-  id: string;
-  text: string;
-  status: "queued" | "attention";
+  operation:
+    | "enqueue_prompt"
+    | "steer_pending_prompt"
+    | "withdraw_pending_prompt"
+    | "dismiss_pending_prompt";
+  promptId: string;
+  text?: string;
 }
 
 interface PendingConversationDeletion {
@@ -255,18 +258,19 @@ export function App() {
   const pendingFocusedStateRef = useRef<PublicState | undefined>(undefined);
   const authFlowIdRef = useRef("");
   const [draft, setDraft] = useState("");
-  const [pendingPrompt, setPendingPrompt] = useState<PendingPrompt>();
-  const pendingPromptRef = useRef<PendingPrompt | undefined>(undefined);
-  const unconfirmedPromptByConversationRef = useRef(new Map<string, string>());
-  const [pendingGuidance, setPendingGuidance] = useState<PendingGuidance>();
-  const pendingGuidanceRef =
-    useRef<PendingGuidance | undefined>(undefined);
-  const pendingGuidanceRegistryRef =
-    useRef(new ConversationOperationRegistry<PendingGuidance>());
-  const [queuedPrompts, setQueuedPromptsState] = useState<QueuedPrompt[]>([]);
-  const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
-  const queuedPromptsByConversationRef =
-    useRef(new Map<string, QueuedPrompt[]>());
+  const draftRef = useRef("");
+  const updateDraft = (text: string) => {
+    draftRef.current = text;
+    setDraft(text);
+  };
+  const [pendingPrompt, setPendingPrompt] = useState<DirectPendingPrompt>();
+  const pendingPromptRef = useRef<DirectPendingPrompt | undefined>(undefined);
+  const unconfirmedPromptByConversationRef =
+    useRef(new Map<string, UnconfirmedPrompt>());
+  const [pendingPrompts, setPendingPrompts] = useState<PendingPrompt[]>([]);
+  const pendingPromptsRef = useRef<PendingPrompt[]>([]);
+  const pendingQueueCommandsRef = useRef(new Map<string, PendingQueueCommand>());
+  const [, setPendingQueueCommandRevision] = useState(0);
   const [pendingConversationDeletion, setPendingConversationDeletionState] =
     useState<PendingConversationDeletion>();
   const pendingConversationDeletionRef =
@@ -340,7 +344,7 @@ export function App() {
     outstandingRunIdRef.current = runId;
     setOutstandingRunId(runId);
   };
-  const updatePendingPrompt = (prompt: PendingPrompt | undefined) => {
+  const updatePendingPrompt = (prompt: DirectPendingPrompt | undefined) => {
     pendingPromptRef.current = prompt;
     setPendingPrompt(prompt);
   };
@@ -363,18 +367,17 @@ export function App() {
     conversationKey(focus);
   const showUnconfirmedPrompt = (focus: ActiveFocus | undefined) => {
     if (!focus) return;
-    const text = unconfirmedPromptByConversationRef.current.get(
+    const unconfirmed = unconfirmedPromptByConversationRef.current.get(
       unconfirmedPromptKey(focus),
     );
-    if (!text) return;
-    setDraft(text);
+    if (!unconfirmed) return;
+    updateDraft(unconfirmed.text);
     setPromptNotice(UNCONFIRMED_PROMPT_NOTICE);
   };
-  const rememberUnconfirmedPrompt = (pending: PendingPrompt) => {
-    if (pending.queueIds) return;
+  const rememberUnconfirmedPrompt = (pending: DirectPendingPrompt) => {
     unconfirmedPromptByConversationRef.current.set(
       pendingConversationKey(pending),
-      pending.text,
+      { text: pending.text },
     );
   };
   const forgetUnconfirmedPrompt = (
@@ -422,95 +425,48 @@ export function App() {
       return next;
     });
   };
-  const updatePendingGuidanceProjection = (
-    guidance: PendingGuidance | undefined,
+  const replacePendingPrompts = (prompts: PendingPrompt[]) => {
+    pendingPromptsRef.current = prompts;
+    setPendingPrompts(prompts);
+  };
+  const clearPendingPrompts = () => replacePendingPrompts([]);
+  const registerPendingQueueCommand = (command: PendingQueueCommand) => {
+    pendingQueueCommandsRef.current.set(command.commandId, command);
+    setPendingQueueCommandRevision((revision) => revision + 1);
+  };
+  const settlePendingQueueCommand = (commandId: string) => {
+    const command = pendingQueueCommandsRef.current.get(commandId);
+    if (!command) return undefined;
+    pendingQueueCommandsRef.current.delete(commandId);
+    setPendingQueueCommandRevision((revision) => revision + 1);
+    return command;
+  };
+  const rememberUnconfirmedQueueCommands = (
+    commands: PendingQueueCommand[],
   ) => {
-    pendingGuidanceRef.current = guidance;
-    setPendingGuidance(guidance);
-  };
-  const showPendingGuidance = (focus: ActiveFocus | undefined) => {
-    updatePendingGuidanceProjection(focus
-      ? pendingGuidanceRegistryRef.current.get({
-          ...focus,
-          workspaceKey: currentWorkspaceKey(),
-        })
-      : undefined);
-  };
-  const addPendingGuidance = (guidance: PendingGuidance) => {
-    pendingGuidanceRegistryRef.current.set(guidance);
-    const currentFocus = focusRef.current;
-    if (currentFocus && queuedPromptKey(currentFocus) === queuedPromptKey(guidance)) {
-      updatePendingGuidanceProjection(guidance);
+    for (const command of commands) {
+      if (command.operation !== "enqueue_prompt" || command.text === undefined) {
+        continue;
+      }
+      unconfirmedPromptByConversationRef.current.set(
+        pendingConversationKey(command),
+        { text: command.text, promptId: command.promptId },
+      );
     }
   };
-  const removePendingGuidance = (guidance: PendingGuidance) => {
-    if (!pendingGuidanceRegistryRef.current.delete(guidance)) return false;
-    const currentFocus = focusRef.current;
-    if (currentFocus && queuedPromptKey(currentFocus) === queuedPromptKey(guidance)) {
-      updatePendingGuidanceProjection(undefined);
-    }
-    return true;
+  const clearPendingQueueCommands = () => {
+    if (pendingQueueCommandsRef.current.size === 0) return [];
+    const commands = [...pendingQueueCommandsRef.current.values()];
+    pendingQueueCommandsRef.current.clear();
+    setPendingQueueCommandRevision((revision) => revision + 1);
+    return commands;
   };
-  const clearAllPendingGuidance = () => {
-    pendingGuidanceRegistryRef.current.clear();
-    updatePendingGuidanceProjection(undefined);
-  };
-  const findPendingGuidance = (commandId: string) =>
-    pendingGuidanceRegistryRef.current.find(commandId);
-  const queuedPromptKey = (
-    focus: Pick<ActiveFocus, "projectId" | "conversationId"> & { workspaceKey?: string },
-  ) => focus.workspaceKey
-    ? pendingConversationKey({
-        ...focus,
-        workspaceKey: focus.workspaceKey,
-      })
-    : conversationKey(focus);
-  const updateQueuedPromptsForConversation = (
-    focus: Pick<ActiveFocus, "projectId" | "conversationId"> & { workspaceKey?: string },
-    update: QueuedPrompt[] | ((current: QueuedPrompt[]) => QueuedPrompt[]),
-  ) => {
-    const key = queuedPromptKey(focus);
-    const current = queuedPromptsByConversationRef.current.get(key) ?? [];
-    const next = typeof update === "function" ? update(current) : update;
-    if (next.length === 0) {
-      queuedPromptsByConversationRef.current.delete(key);
-    } else {
-      queuedPromptsByConversationRef.current.set(key, next);
-    }
-    const currentFocus = focusRef.current;
-    if (currentFocus && queuedPromptKey(currentFocus) === key) {
-      queuedPromptsRef.current = next;
-      setQueuedPromptsState(next);
-    }
-  };
-  const updateQueuedPrompts = (
-    update: QueuedPrompt[] | ((current: QueuedPrompt[]) => QueuedPrompt[]),
-  ) => {
+  const isCurrentQueueCommand = (command: PendingQueueCommand) => {
     const focus = focusRef.current;
-    if (!focus) return;
-    updateQueuedPromptsForConversation(focus, update);
-  };
-  const showQueuedPrompts = (
-    focus:
-      | (Pick<ActiveFocus, "projectId" | "conversationId"> & { workspaceKey?: string })
-      | undefined,
-  ) => {
-    const next = focus
-      ? queuedPromptsByConversationRef.current.get(queuedPromptKey(focus)) ?? []
-      : [];
-    queuedPromptsRef.current = next;
-    setQueuedPromptsState(next);
-  };
-  const clearQueuedPromptsForConversation = (
-    focus: Pick<ActiveFocus, "projectId" | "conversationId"> & { workspaceKey?: string },
-  ) => {
-    const key = queuedPromptKey(focus);
-    queuedPromptsByConversationRef.current.delete(key);
-    const currentFocus = focusRef.current;
-    if (currentFocus && queuedPromptKey(currentFocus) === key) {
-      queuedPromptsRef.current = [];
-      setQueuedPromptsState([]);
-    }
+    return focus?.sessionId === command.sessionId
+      && focus.projectId === command.projectId
+      && focus.conversationId === command.conversationId
+      && focus.focusId === command.focusId;
   };
   const updatePendingConversationDeletion = (
     pending: PendingConversationDeletion | undefined,
@@ -549,7 +505,12 @@ export function App() {
   ) => {
     pendingContextCompactionRegistryRef.current.set(pending);
     const currentFocus = focusRef.current;
-    if (currentFocus && queuedPromptKey(currentFocus) === queuedPromptKey(pending)) {
+    if (
+      currentFocus
+      && currentFocus.projectId === pending.projectId
+      && currentFocus.conversationId === pending.conversationId
+      && currentWorkspaceKey() === pending.workspaceKey
+    ) {
       updatePendingContextCompaction(pending);
     }
   };
@@ -560,7 +521,12 @@ export function App() {
       return false;
     }
     const currentFocus = focusRef.current;
-    if (currentFocus && queuedPromptKey(currentFocus) === queuedPromptKey(pending)) {
+    if (
+      currentFocus
+      && currentFocus.projectId === pending.projectId
+      && currentFocus.conversationId === pending.conversationId
+      && currentWorkspaceKey() === pending.workspaceKey
+    ) {
       updatePendingContextCompaction(undefined);
     }
     return true;
@@ -621,8 +587,7 @@ export function App() {
     if (!conversationId || !focusId) {
       focusRef.current = undefined;
       conversationIdRef.current = "";
-      showQueuedPrompts(undefined);
-      showPendingGuidance(undefined);
+      clearPendingPrompts();
       showPendingContextCompaction(undefined);
       setConversationRole(undefined);
       setHistoryTruncated(false);
@@ -633,6 +598,7 @@ export function App() {
     }
     const changedConversation = previousProjectId !== projectId
       || conversationIdRef.current !== conversationId;
+    clearPendingPrompts();
     const focus = { sessionId, projectId, conversationId, focusId };
     focusRef.current = focus;
     conversationIdRef.current = conversationId;
@@ -641,12 +607,10 @@ export function App() {
     updateConversationReady(false);
     setSelectingRole(false);
     if (changedConversation) {
-      setDraft("");
+      updateDraft("");
       setPromptNotice("");
       updatePendingPrompt(undefined);
-      showPendingGuidance(focus);
       showPendingContextCompaction(focus);
-      showQueuedPrompts(focus);
       showUnconfirmedPrompt(focus);
     }
     updateOutstandingRunId("");
@@ -668,15 +632,8 @@ export function App() {
       text: pending.text,
       ...(focusRef.current ?? {}),
     });
-    if (pending.queueIds) {
-      const acceptedIds = new Set(pending.queueIds);
-      updateQueuedPrompts((current) =>
-        current.filter(({ id }) => !acceptedIds.has(id))
-      );
-    } else {
-      forgetUnconfirmedPrompt(pending);
-      setDraft("");
-    }
+    forgetUnconfirmedPrompt(pending);
+    updateDraft("");
     setPromptNotice("");
     updatePendingPrompt(undefined);
   };
@@ -688,49 +645,10 @@ export function App() {
     const pendingIsCurrent = currentFocus?.projectId === pending.projectId
       && currentFocus.conversationId === pending.conversationId
       && currentFocus.focusId === pending.focusId;
-    if (pending.queueIds) {
-      const uncertainIds = new Set(pending.queueIds);
-      updateQueuedPromptsForConversation(pending, (current) => current.map((queued) =>
-        uncertainIds.has(queued.id)
-          ? { ...queued, status: "attention" }
-          : queued
-      ));
-      if (pendingIsCurrent) {
-        setPromptNotice(
-          "一批排队消息的发送状态未确认。请先检查恢复后的对话，再选择重试或移除。",
-        );
-      }
-      return;
-    }
     rememberUnconfirmedPrompt(pending);
     if (pendingIsCurrent) {
-      setDraft(pending.text);
+      updateDraft(pending.text);
       setPromptNotice(UNCONFIRMED_PROMPT_NOTICE);
-    }
-  };
-  const markPendingGuidanceUnconfirmed = () => {
-    const pendingOperations = pendingGuidanceRegistryRef.current.values();
-    if (pendingOperations.length === 0) return;
-    for (const pending of pendingOperations) {
-      const uncertainIds = new Set(pending.queueIds);
-      updateQueuedPromptsForConversation(
-        pending,
-        (current) => current.map((queued) =>
-          uncertainIds.has(queued.id)
-            ? { ...queued, status: "attention" }
-            : queued
-        ),
-      );
-    }
-    clearAllPendingGuidance();
-    const currentFocus = focusRef.current;
-    if (pendingOperations.some((pending) => (
-      currentFocus?.projectId === pending.projectId
-      && currentFocus.conversationId === pending.conversationId
-    ))) {
-      setPromptNotice(
-        "一批引导消息的接收状态未确认。请先检查恢复后的对话，再选择重试或移除。",
-      );
     }
   };
   const updateConversationReady = (ready: boolean) => {
@@ -752,13 +670,14 @@ export function App() {
     updatePendingConversationRoleSwitch(undefined);
     updatePendingConversationTruncation(undefined);
     updatePendingConversationDeletion(undefined);
-    clearAllPendingGuidance();
+    clearPendingPrompts();
+    const abandonedQueueCommands = clearPendingQueueCommands();
+    rememberUnconfirmedQueueCommands(abandonedQueueCommands);
     setRoleOperationResult(undefined);
     updatePendingRoleOperation(undefined);
     setSettingsDialogOpen(false);
     setRoleManagerOpen(false);
     setSelectingRole(false);
-    showQueuedPrompts(undefined);
     updatePendingFocus(undefined);
     pendingFocusedStateRef.current = undefined;
     focusRef.current = undefined;
@@ -816,7 +735,7 @@ export function App() {
           authFlowIdRef.current = "";
           updateDirectoryBrowser(undefined);
           markPendingPromptUnconfirmed();
-          markPendingGuidanceUnconfirmed();
+          rememberUnconfirmedQueueCommands(clearPendingQueueCommands());
           updatePendingConversationDeletion(undefined);
           updatePendingConversationTruncation(undefined);
           updateOutstandingRunId("");
@@ -939,7 +858,7 @@ export function App() {
           || event.conversationId !== focus.conversationId
           || event.focusId !== focus.focusId
         ) return;
-        clearQueuedPromptsForConversation(event);
+        clearPendingPrompts();
         unconfirmedPromptByConversationRef.current.delete(
           conversationScopeKey(
             currentWorkspaceKey(),
@@ -964,26 +883,10 @@ export function App() {
               busy: false,
             }
           : current);
-        setDraft("");
+        updateDraft("");
         setPromptNotice("");
         updatePendingPrompt(undefined);
-        const deletedConversation = {
-          workspaceKey: currentWorkspaceKey(),
-          projectId: event.projectId,
-          conversationId: event.conversationId,
-        };
-        const invalidatedGuidance = pendingGuidanceRegistryRef.current.get(
-          deletedConversation,
-        );
-        if (invalidatedGuidance) removePendingGuidance(invalidatedGuidance);
-        const invalidatedCompaction =
-          pendingContextCompactionRegistryRef.current.get(
-            deletedConversation,
-          );
-        if (invalidatedCompaction) {
-          removePendingContextCompaction(invalidatedCompaction);
-        }
-        showQueuedPrompts(undefined);
+        clearPendingPrompts();
         updateOutstandingRunId("");
         setExtensionUI([]);
       } else if (event.type === "role_catalog_snapshot") {
@@ -1006,6 +909,28 @@ export function App() {
         projectIdRef.current = event.projectId;
         setConversations(event.conversations);
         setConversationIndexTruncated(event.truncated);
+      } else if (event.type === "pending_prompts_snapshot") {
+        if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;
+        const focus = focusRef.current;
+        const unconfirmed = focus
+          ? unconfirmedPromptByConversationRef.current.get(
+              unconfirmedPromptKey(focus),
+            )
+          : undefined;
+        if (
+          focus
+          && unconfirmed?.promptId !== undefined
+          && event.prompts.some(({ promptId }) => promptId === unconfirmed.promptId)
+        ) {
+          unconfirmedPromptByConversationRef.current.delete(
+            unconfirmedPromptKey(focus),
+          );
+          if (draftRef.current.trim() === unconfirmed.text.trim()) {
+            updateDraft("");
+          }
+          setPromptNotice("");
+        }
+        replacePendingPrompts(event.prompts);
       } else if (event.type === "conversation_snapshot") {
         if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;
         const focus = focusRef.current;
@@ -1094,19 +1019,26 @@ export function App() {
         setAuth({});
       } else if (event.type === "command_complete") {
         if (event.sessionId !== sessionIdRef.current) return;
-        if (event.operation === "steer") {
-          const pending = findPendingGuidance(event.commandId);
-          if (!pending || pending.sessionId !== event.sessionId) return;
-          const acceptedIds = new Set(pending.queueIds);
-          removePendingGuidance(pending);
-          updateQueuedPromptsForConversation(
-            pending,
-            (current) => current.filter(({ id }) => !acceptedIds.has(id)),
-          );
+        if (
+          event.operation === "enqueue_prompt"
+          || event.operation === "steer_pending_prompt"
+          || event.operation === "withdraw_pending_prompt"
+          || event.operation === "dismiss_pending_prompt"
+        ) {
+          const pending = pendingQueueCommandsRef.current.get(event.commandId);
           if (
-            focusRef.current?.projectId === pending.projectId
-            && focusRef.current.conversationId === pending.conversationId
+            !pending
+            || pending.operation !== event.operation
+            || pending.sessionId !== event.sessionId
+          ) return;
+          settlePendingQueueCommand(event.commandId);
+          if (
+            pending.operation === "enqueue_prompt"
+            && pending.text !== undefined
+            && isCurrentQueueCommand(pending)
+            && draftRef.current.trim() === pending.text.trim()
           ) {
+            updateDraft("");
             setPromptNotice("");
           }
           return;
@@ -1145,7 +1077,7 @@ export function App() {
           const pending = pendingConversationDeletionRef.current;
           if (!pending || pending.commandId !== event.commandId) return;
           updatePendingConversationDeletion(undefined);
-          clearQueuedPromptsForConversation(pending);
+
           unconfirmedPromptByConversationRef.current.delete(
             pendingConversationKey(pending),
           );
@@ -1170,18 +1102,15 @@ export function App() {
                   busy: false,
                 }
               : current);
-            setDraft("");
+            updateDraft("");
             setPromptNotice("");
             updatePendingPrompt(undefined);
-            const deletedGuidance =
-              pendingGuidanceRegistryRef.current.get(pending);
-            if (deletedGuidance) removePendingGuidance(deletedGuidance);
             const deletedCompaction =
               pendingContextCompactionRegistryRef.current.get(pending);
             if (deletedCompaction) {
               removePendingContextCompaction(deletedCompaction);
             }
-            showQueuedPrompts(undefined);
+            clearPendingPrompts();
             setExtensionUI([]);
           }
           setNotification({
@@ -1223,12 +1152,7 @@ export function App() {
           });
           return;
         }
-        if (
-          event.operation === "enqueue_prompt"
-          || event.operation === "steer_pending_prompt"
-          || event.operation === "withdraw_pending_prompt"
-          || event.operation === "dismiss_pending_prompt"
-        ) return;
+        if (event.operation === "steer") return;
         setSettingResult({
           operation: event.operation,
           commandId: event.commandId,
@@ -1237,28 +1161,42 @@ export function App() {
         });
       } else if (event.type === "error") {
         if (event.sessionId && event.sessionId !== sessionIdRef.current) return;
-        const pendingGuidanceError = event.commandId
-          && event.operation === "steer"
-          ? findPendingGuidance(event.commandId)
-          : undefined;
+        if (
+          event.commandId
+          && (
+            event.operation === "enqueue_prompt"
+            || event.operation === "steer_pending_prompt"
+            || event.operation === "withdraw_pending_prompt"
+            || event.operation === "dismiss_pending_prompt"
+          )
+        ) {
+          const pending = pendingQueueCommandsRef.current.get(event.commandId);
+          if (
+            !pending
+            || pending.operation !== event.operation
+            || pending.sessionId !== event.sessionId
+            || pending.conversationId !== event.conversationId
+            || pending.focusId !== event.focusId
+          ) return;
+          settlePendingQueueCommand(event.commandId);
+          if (isCurrentQueueCommand(pending)) {
+            setPromptNotice(
+              pending.operation === "enqueue_prompt"
+                ? `消息未能加入队列：${event.message}。内容已保留，可以重试。`
+                : `队列操作失败：${event.message}`,
+            );
+          }
+          return;
+        }
         const pendingCompactionError = event.commandId
           && event.operation === "compact_context"
           ? findPendingContextCompaction(event.commandId)
           : undefined;
         const settlesBackgroundOperation = Boolean(
-          (
-            pendingGuidanceError
-            && pendingGuidanceError.sessionId === event.sessionId
-            && pendingGuidanceError.conversationId === event.conversationId
-            && pendingGuidanceError.focusId === event.focusId
-            && pendingGuidanceError.runId === event.runId
-          )
-          || (
-            pendingCompactionError
-            && pendingCompactionError.sessionId === event.sessionId
-            && pendingCompactionError.conversationId === event.conversationId
-            && pendingCompactionError.focusId === event.focusId
-          ),
+          pendingCompactionError
+          && pendingCompactionError.sessionId === event.sessionId
+          && pendingCompactionError.conversationId === event.conversationId
+          && pendingCompactionError.focusId === event.focusId,
         );
         if (
           (event.conversationId !== undefined || event.focusId !== undefined)
@@ -1386,39 +1324,6 @@ export function App() {
           });
           return;
         }
-        if (
-          event.scope === "command"
-          && event.operation === "steer"
-          && event.commandId
-        ) {
-          const pending = findPendingGuidance(event.commandId);
-          if (
-            !pending
-            || pending.sessionId !== event.sessionId
-            || pending.conversationId !== event.conversationId
-            || pending.focusId !== event.focusId
-            || pending.runId !== event.runId
-          ) return;
-          const rejectedIds = new Set(pending.queueIds);
-          removePendingGuidance(pending);
-          updateQueuedPromptsForConversation(
-            pending,
-            (current) => current.map((queued) =>
-              rejectedIds.has(queued.id)
-                ? { ...queued, status: "attention" }
-                : queued
-            ),
-          );
-          if (
-            focusRef.current?.projectId === pending.projectId
-            && focusRef.current.conversationId === pending.conversationId
-          ) {
-            setPromptNotice(
-              `引导消息未被当前任务接收：${event.message}。请重试或移除。`,
-            );
-          }
-          return;
-        }
         let promptRejectedBeforeAcceptance = false;
         if (
           event.scope === "command"
@@ -1435,24 +1340,9 @@ export function App() {
           ) {
             promptRejectedBeforeAcceptance = true;
             updatePendingPrompt(undefined);
-            if (pending.queueIds) {
-              const queueIds = new Set(pending.queueIds);
-              updateQueuedPromptsForConversation(
-                pending,
-                (current) => current.map((queued) =>
-                  queueIds.has(queued.id)
-                    ? { ...queued, status: "attention" }
-                    : queued
-                ),
-              );
-              setPromptNotice(
-                `排队消息未被服务端接收：${event.message}。请重试或移除。`,
-              );
-            } else {
-              setPromptNotice(
-                `消息未被服务端接收：${event.message}。内容已保留，可以修改后重试。`,
-              );
-            }
+            setPromptNotice(
+              `消息未被服务端接收：${event.message}。内容已保留，可以修改后重试。`,
+            );
           }
         }
         if (
@@ -1506,7 +1396,13 @@ export function App() {
         setSettingResult(undefined);
         updateDirectoryBrowser(undefined);
         markPendingPromptUnconfirmed();
-        markPendingGuidanceUnconfirmed();
+        const uncertainQueueCommands = clearPendingQueueCommands();
+        rememberUnconfirmedQueueCommands(uncertainQueueCommands);
+        if (uncertainQueueCommands.some((command) => (
+          command.operation === "enqueue_prompt" && isCurrentQueueCommand(command)
+        ))) {
+          setPromptNotice("排队消息提交状态未确认；请等待恢复后的队列快照再确认。");
+        }
         if (pendingConversationDeletionRef.current) {
           updatePendingConversationDeletion(undefined);
           setError("删除状态未确认，请检查项目对话列表后重试。");
@@ -1653,8 +1549,8 @@ export function App() {
     const commandId = crypto.randomUUID();
     setError("");
     markPendingPromptUnconfirmed();
-    markPendingGuidanceUnconfirmed();
-    setDraft("");
+    rememberUnconfirmedQueueCommands(clearPendingQueueCommands());
+    updateDraft("");
     setPromptNotice("");
     clearSessionProjection();
     setSetupOpen(false);
@@ -1682,22 +1578,19 @@ export function App() {
       conversation,
     });
   };
-  const sendPrompt = (text: string, queueIds?: string[]): boolean => {
+  const sendPrompt = (text: string): boolean => {
     const trimmed = text.trim();
-    if (!trimmed) return false;
-    if (!conversationReadyRef.current) return false;
+    if (!trimmed || !conversationReadyRef.current) return false;
     if (pendingConversationTruncationRef.current) return false;
     const sessionId = sessionIdRef.current;
     const focus = focusRef.current;
-    if (!sessionId || !focus) return false;
-    if (focus && focus.sessionId !== sessionId) return false;
+    if (!sessionId || !focus || focus.sessionId !== sessionId) return false;
     const runId = crypto.randomUUID();
-    const pending: PendingPrompt = {
+    const pending: DirectPendingPrompt = {
       ...focus,
       workspaceKey: currentWorkspaceKey(),
       runId,
       text: trimmed,
-      ...(queueIds === undefined ? {} : { queueIds }),
     };
     setPromptNotice("");
     updatePendingPrompt(pending);
@@ -1713,62 +1606,35 @@ export function App() {
     if (!ok) {
       updatePendingPrompt(undefined);
       updateOutstandingRunId("");
-      if (queueIds) {
-        const rejectedIds = new Set(queueIds);
-        updateQueuedPrompts((current) => current.map((queued) =>
-          rejectedIds.has(queued.id)
-            ? { ...queued, status: "attention" }
-            : queued
-        ));
-        setPromptNotice("排队消息未发送，内容已保留，请重试或移除。");
-      } else {
-        setPromptNotice("消息未发送，内容已保留，可以重试。");
-      }
+      setPromptNotice("消息未发送，内容已保留，可以重试。");
     }
     return ok;
   };
-  const sendGuidance = (
-    runId: string,
-    text: string,
-    queueIds: string[],
-  ): boolean => {
+  const enqueuePrompt = (text: string): boolean => {
     const sessionId = sessionIdRef.current;
     const focus = focusRef.current;
-    if (
-      !sessionId
-      || !focus
-      || focus.sessionId !== sessionId
-      || pendingGuidanceRef.current
-    ) return false;
-    const pending: PendingGuidance = {
+    if (!sessionId || !focus || focus.sessionId !== sessionId) return false;
+    const command: PendingQueueCommand = {
       ...focus,
       workspaceKey: currentWorkspaceKey(),
       commandId: crypto.randomUUID(),
-      runId,
-      queueIds,
+      operation: "enqueue_prompt",
+      promptId: crypto.randomUUID(),
+      text,
     };
-    addPendingGuidance(pending);
-    setPromptNotice("");
-    const ok = send({
-      type: "steer",
-      commandId: pending.commandId,
+    registerPendingQueueCommand(command);
+    if (send({
+      type: "enqueue_prompt",
+      commandId: command.commandId,
       sessionId,
       conversationId: focus.conversationId,
       focusId: focus.focusId,
-      runId,
+      promptId: command.promptId,
       text,
-    });
-    if (!ok) {
-      const rejectedIds = new Set(queueIds);
-      removePendingGuidance(pending);
-      updateQueuedPrompts((current) => current.map((queued) =>
-        rejectedIds.has(queued.id)
-          ? { ...queued, status: "attention" }
-          : queued
-      ));
-      setPromptNotice("引导消息未发送，内容已保留，请重试或移除。");
-    }
-    return ok;
+    })) return true;
+    settlePendingQueueCommand(command.commandId);
+    setPromptNotice("消息未能加入队列，内容已保留，可以重试。");
+    return false;
   };
   const submitPrompt = (text: string): boolean => {
     const trimmed = text.trim();
@@ -1785,96 +1651,58 @@ export function App() {
       Boolean(state?.busy)
       || Boolean(outstandingRunIdRef.current)
       || Boolean(pendingPromptRef.current)
-      || Boolean(pendingGuidanceRef.current)
-      || queuedPromptsRef.current.length > 0
+      || pendingPromptsRef.current.length > 0
     );
-    if (!shouldQueue) return sendPrompt(trimmed);
-    if (queuedPromptsRef.current.length >= MAX_QUEUED_PROMPTS) {
-      setPromptNotice(`待发送消息最多保留 ${MAX_QUEUED_PROMPTS} 条。`);
-      return false;
-    }
-    updateQueuedPrompts((current) => [
-      ...current,
-      {
-        id: crypto.randomUUID(),
-        text: trimmed,
-        status: "queued",
-      },
-    ]);
-    setDraft("");
-    setPromptNotice("");
-    return true;
+    return shouldQueue ? enqueuePrompt(trimmed) : sendPrompt(trimmed);
   };
-  const removeQueuedPrompt = (queueId: string) => {
-    if (
-      pendingPromptRef.current?.queueIds?.includes(queueId)
-      || pendingGuidanceRef.current?.queueIds.includes(queueId)
-    ) return;
-    updateQueuedPrompts((current) =>
-      current.filter(({ id }) => id !== queueId)
-    );
+  const sendPendingPromptAction = (
+    operation: Exclude<PendingQueueCommand["operation"], "enqueue_prompt">,
+    promptId: string,
+    runId?: string,
+  ) => {
+    const sessionId = sessionIdRef.current;
+    const focus = focusRef.current;
+    if (!sessionId || !focus || focus.sessionId !== sessionId) return;
+    const command: PendingQueueCommand = {
+      ...focus,
+      workspaceKey: currentWorkspaceKey(),
+      commandId: crypto.randomUUID(),
+      operation,
+      promptId,
+    };
+    registerPendingQueueCommand(command);
+    const common = {
+      commandId: command.commandId,
+      sessionId,
+      conversationId: focus.conversationId,
+      focusId: focus.focusId,
+      promptId,
+    };
+    const sent = operation === "steer_pending_prompt"
+      ? runId !== undefined && send({
+          type: "steer_pending_prompt",
+          ...common,
+          runId,
+        })
+      : operation === "withdraw_pending_prompt"
+        ? send({ type: "withdraw_pending_prompt", ...common })
+        : send({ type: "dismiss_pending_prompt", ...common });
+    if (sent) return;
+    settlePendingQueueCommand(command.commandId);
+    setPromptNotice("队列操作未发送，请检查连接后重试。");
   };
-  const retryQueuedPrompt = (queueId: string) => {
-    updateQueuedPrompts((current) => current.map((queued) =>
-      queued.id === queueId
-        ? { ...queued, status: "queued" }
-        : queued
-    ));
-    setPromptNotice("");
-  };
-  useEffect(() => {
-    const batch: QueuedPrompt[] = [];
-    let batchCharacters = 0;
-    for (const queued of queuedPrompts) {
-      if (queued.status !== "queued") break;
-      const separatorCharacters = batch.length === 0 ? 0 : 2;
-      if (
-        batchCharacters + separatorCharacters + queued.text.length
-        > MAX_PROMPT_CHARACTERS
-      ) break;
-      batch.push(queued);
-      batchCharacters += separatorCharacters + queued.text.length;
-    }
+  const steerPendingPrompt = (promptId: string) => {
     const activeRun = state?.activeRun;
     if (
-      batch.length === 0
-      || !transportOnline
-      || !protocolReady
-      || !conversationReady
-      || Boolean(pendingPrompt)
-      || Boolean(pendingGuidance)
-      || Boolean(pendingConversationTruncation)
-      || Boolean(pendingConversationDeletion)
-      || Boolean(pendingConversationRoleSwitch)
-      || Boolean(pendingFocusRef.current)
-    ) {
-      return;
-    }
-    const text = batch.map(({ text }) => text).join("\n\n");
-    const queueIds = batch.map(({ id }) => id);
-    if (
-      activeRun
-      && (activeRun.phase === "running" || activeRun.phase === "waiting")
-    ) {
-      sendGuidance(activeRun.id, text, queueIds);
-      return;
-    }
-    if (state?.busy || Boolean(outstandingRunId)) return;
-    sendPrompt(text, queueIds);
-  }, [
-    conversationReady,
-    outstandingRunId,
-    pendingConversationDeletion,
-    pendingConversationRoleSwitch,
-    pendingConversationTruncation,
-    pendingGuidance,
-    pendingPrompt,
-    protocolReady,
-    queuedPrompts,
-    state?.activeRun,
-    state?.busy,
-    transportOnline,
-  ]);
+      !activeRun
+      || (activeRun.phase !== "running" && activeRun.phase !== "waiting")
+    ) return;
+    sendPendingPromptAction("steer_pending_prompt", promptId, activeRun.id);
+  };
+  const withdrawPendingPrompt = (promptId: string) =>
+    sendPendingPromptAction("withdraw_pending_prompt", promptId);
+  const dismissPendingPrompt = (promptId: string) =>
+    sendPendingPromptAction("dismiss_pending_prompt", promptId);
   const abortCurrentRun = () => {
     if (!conversationReadyRef.current || pendingFocusRef.current) return;
     const runId = outstandingRunIdRef.current || state?.activeRun?.id;
@@ -1904,6 +1732,7 @@ export function App() {
       return;
     }
     const commandId = crypto.randomUUID();
+    clearPendingPrompts();
     const sourceFocus = focusRef.current;
     const sourceReady = conversationReadyRef.current;
     updateConversationReady(false);
@@ -1933,7 +1762,6 @@ export function App() {
       || pendingFocusRef.current
       || pendingConversationTruncationRef.current
       || pendingPromptRef.current
-      || pendingGuidanceRef.current
       || pendingConversationRoleSwitchRef.current
     ) return;
     const commandId = crypto.randomUUID();
@@ -2016,8 +1844,7 @@ export function App() {
       || Boolean(state?.busy)
       || Boolean(outstandingRunIdRef.current)
       || Boolean(pendingPromptRef.current)
-      || Boolean(pendingGuidanceRef.current)
-      || queuedPromptsRef.current.length > 0
+      || pendingPromptsRef.current.length > 0
       || Boolean(pendingConversationTruncationRef.current)
       || Boolean(pendingConversationDeletionRef.current)
     ) {
@@ -2039,7 +1866,7 @@ export function App() {
       focusId: focus.focusId,
       messageId,
     })) {
-      setDraft(text);
+      updateDraft(text);
       setPromptNotice("");
       return true;
     }
@@ -2105,8 +1932,7 @@ export function App() {
       || Boolean(state?.busy)
       || Boolean(outstandingRunIdRef.current)
       || Boolean(pendingPromptRef.current)
-      || Boolean(pendingGuidanceRef.current)
-      || queuedPromptsRef.current.length > 0
+      || pendingPromptsRef.current.length > 0
       || Boolean(pendingConversationRoleSwitchRef.current)
       || Boolean(pendingConversationTruncationRef.current)
       || Boolean(pendingConversationDeletionRef.current)
@@ -2405,8 +2231,7 @@ export function App() {
                 state.busy
                 || Boolean(outstandingRunId)
                 || Boolean(pendingPrompt)
-                || Boolean(pendingGuidance)
-                || queuedPrompts.length > 0
+                || pendingPrompts.length > 0
                 || Boolean(pendingConversationTruncation)
                 || Boolean(pendingConversationDeletion)
                 || conversationCompacting
@@ -2424,25 +2249,29 @@ export function App() {
               online={online}
               conversationReady={visibleConversationReady}
               draft={draft}
-              submitting={Boolean(pendingPrompt && !pendingPrompt.queueIds)}
-              queuedPrompts={queuedPrompts.map((queued) => ({
-                ...queued,
-                status: (
-                  pendingPrompt?.queueIds?.includes(queued.id)
-                  || pendingGuidance?.queueIds.includes(queued.id)
-                )
-                  ? "submitting"
-                  : queued.status,
-              }))}
+              submitting={Boolean(pendingPrompt)}
+              pendingPrompts={pendingPrompts}
+              pendingPromptIds={new Set(
+                [...pendingQueueCommandsRef.current.values()]
+                  .filter((command) => isCurrentQueueCommand(command))
+                  .map((command) => command.promptId),
+              )}
               promptNotice={promptNotice || undefined}
               onDraftChange={(text) => {
-                setDraft(text);
+                updateDraft(text);
                 const focus = focusRef.current;
                 if (focus) {
                   const key = unconfirmedPromptKey(focus);
                   if (unconfirmedPromptByConversationRef.current.has(key)) {
                     if (text) {
-                      unconfirmedPromptByConversationRef.current.set(key, text);
+                      const unconfirmed =
+                        unconfirmedPromptByConversationRef.current.get(key);
+                      if (unconfirmed) {
+                        unconfirmedPromptByConversationRef.current.set(key, {
+                          ...unconfirmed,
+                          text,
+                        });
+                      }
                     } else {
                       unconfirmedPromptByConversationRef.current.delete(key);
                     }
@@ -2451,8 +2280,9 @@ export function App() {
                 if (promptNotice) setPromptNotice("");
               }}
               onSend={submitPrompt}
-              onRemoveQueuedPrompt={removeQueuedPrompt}
-              onRetryQueuedPrompt={retryQueuedPrompt}
+              onSteerPendingPrompt={steerPendingPrompt}
+              onWithdrawPendingPrompt={withdrawPendingPrompt}
+              onDismissPendingPrompt={dismissPendingPrompt}
               onAbort={abortCurrentRun}
               onSettings={() => setDrawer(true)}
               onThinking={setThinkingLevel}
