@@ -23,6 +23,7 @@ import {
   createConversationCardEntry,
   createConversationMessageEntry,
   createMetaOperationEntry,
+  createPendingPromptDeliveryEntry,
   createRunSettlementEntry,
   MAX_CONVERSATION_BODY_BYTES,
   RUN_SETTLEMENT_CUSTOM_TYPE,
@@ -36,6 +37,7 @@ import type {
 } from "./pi-runtime.js";
 import type { PortableExtensionUI } from "./extension-ui.js";
 import { ProjectInbox } from "./project-inbox.js";
+import { ProjectPromptQueue } from "./project-prompt-queue.js";
 import {
   MAX_DELEGATION_DEPTH,
   MAX_LIVE_DELEGATION_DESCENDANTS,
@@ -98,6 +100,8 @@ function fakeSettings(): SettingsManager {
 class FakeSessionControl {
   readonly received: ReceivedCustomMessage[] = [];
   readonly promptTexts: string[] = [];
+  readonly steerTexts: string[] = [];
+  steerImplementation: (text: string) => Promise<void> = async () => undefined;
   readonly behaviors: SessionBehavior[] = [];
   readonly continuationBehaviors: SessionBehavior[] = [];
   readonly pendingSteers: ReceivedCustomMessage[] = [];
@@ -135,6 +139,10 @@ class FakeSessionControl {
       prompt: async (text: string) => {
         control.promptTexts.push(text);
         await control.runNext();
+      },
+      steer: async (text: string) => {
+        control.steerTexts.push(text);
+        await control.steerImplementation(text);
       },
       sendCustomMessage: async (
         message: Parameters<AgentSession["sendCustomMessage"]>[0],
@@ -182,6 +190,19 @@ class FakeSessionControl {
 
   enqueueContinuation(...behaviors: SessionBehavior[]): void {
     this.continuationBehaviors.push(...behaviors);
+  }
+
+  emitUserMessage(text: string): void {
+    const message = agentMessage({
+      role: "user",
+      content: text,
+      timestamp: Date.now(),
+    });
+    this.manager.appendMessage(message);
+    this.listener?.({
+      type: "message_end",
+      message,
+    } as unknown as AgentSessionEvent);
   }
 
   emitFinal(text: string): void {
@@ -453,6 +474,14 @@ function coordinatorInbox(
   return (handle as unknown as {
     context: { inbox: ProjectInbox };
   }).context.inbox;
+}
+
+function coordinatorPromptQueue(
+  handle: Awaited<ReturnType<ProjectSessionCoordinator["acquireProject"]>>,
+): ProjectPromptQueue {
+  return (handle as unknown as {
+    context: { promptQueue: ProjectPromptQueue };
+  }).context.promptQueue;
 }
 
 const fixtures: Fixture[] = [];
@@ -8681,6 +8710,412 @@ describe("ProjectSessionCoordinator", () => {
       )).outcome).toBe("completed");
       expect(freshConversationId).toEqual(expect.any(String));
       await restarted.close();
+    });
+  });
+
+  describe("pending durable prompts", () => {
+    it("persists while busy and permits queued withdrawal before a claim", async () => {
+      const fixture = await createFixture();
+      const actor = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const started = deferred();
+      const release = deferred();
+      fixture.runtime.control(actor.conversationId).enqueue(async (control) => {
+        started.resolve();
+        await release.promise;
+        control.emitFinal("busy run finished");
+      });
+      const runId = randomUUID();
+      const busy = fixture.coordinator.prompt(
+        fixture.handle,
+        actor.conversationId,
+        runId,
+        "stay busy",
+      );
+      await started.promise;
+      const promptId = randomUUID();
+      await expect(fixture.coordinator.enqueuePrompt(
+        fixture.handle,
+        actor.conversationId,
+        { promptId, text: "wait until this run ends" },
+      )).resolves.toMatchObject({ status: "created" });
+      await expect(fixture.coordinator.enqueuePrompt(
+        fixture.handle,
+        actor.conversationId,
+        { promptId, text: "wait until this run ends" },
+      )).resolves.toMatchObject({ status: "existing" });
+      await expect(fixture.coordinator.withdrawQueuedPrompt(
+        fixture.handle,
+        actor.conversationId,
+        promptId,
+      )).resolves.toBe(true);
+      await expect(fixture.coordinator.listPendingPrompts(
+        fixture.handle,
+        actor.conversationId,
+      )).resolves.toEqual([]);
+      release.resolve();
+      await busy;
+    });
+
+    it("keeps queued inbox delivery ahead of pending prompts after a run completes", async () => {
+      const fixture = await createFixture();
+      const source = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const target = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const started = deferred();
+      const release = deferred();
+      const order: string[] = [];
+      const control = fixture.runtime.control(target.conversationId);
+      control.enqueue(
+        async () => {
+          started.resolve();
+          await release.promise;
+        },
+        async (current) => {
+          order.push("inbox");
+          current.emitFinal("inbox first");
+        },
+        async (current) => {
+          order.push("pending");
+          current.emitUserMessage(current.promptTexts.at(-1)!);
+          current.emitFinal("pending second");
+        },
+      );
+      const runId = randomUUID();
+      const busy = fixture.coordinator.prompt(
+        fixture.handle,
+        target.conversationId,
+        runId,
+        "busy before delivery",
+      );
+      await started.promise;
+      await fixture.coordinator.enqueuePrompt(
+        fixture.handle,
+        target.conversationId,
+        { promptId: randomUUID(), text: "pending after inbox" },
+      );
+      await coordinatorInbox(fixture.handle).put({
+        messageId: randomUUID(),
+        cardId: randomUUID(),
+        fromConversationId: source.conversationId,
+        toConversationId: target.conversationId,
+        sentAt: "2026-07-24T10:00:00.000Z",
+        kind: "message",
+        body: "durable inbox before pending",
+        fromSnapshot: {
+          conversationId: source.conversationId,
+          role: {
+            id: source.profile.role.id,
+            name: source.profile.role.name,
+          },
+        },
+        toSnapshot: {
+          conversationId: target.conversationId,
+          role: {
+            id: target.profile.role.id,
+            name: target.profile.role.name,
+          },
+        },
+      });
+      release.resolve();
+      await busy;
+      await waitUntil(
+        () => order.length === 2,
+        "inbox to settle before the pending prompt starts",
+      );
+      expect(order).toEqual(["inbox", "pending"]);
+    });
+
+    it("claims an exact queued prompt before steering and removes it only after user message_end", async () => {
+      const fixture = await createFixture();
+      const actor = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const started = deferred();
+      const release = deferred();
+      const control = fixture.runtime.control(actor.conversationId);
+      control.enqueue(async () => {
+        started.resolve();
+        await release.promise;
+      });
+      const runId = randomUUID();
+      const busy = fixture.coordinator.prompt(
+        fixture.handle,
+        actor.conversationId,
+        runId,
+        "stay busy",
+      );
+      await started.promise;
+      const promptId = randomUUID();
+      await fixture.coordinator.enqueuePrompt(
+        fixture.handle,
+        actor.conversationId,
+        { promptId, text: "deliver this guidance" },
+      );
+
+      const steered = fixture.coordinator.steerQueuedPrompt(
+        fixture.handle,
+        actor.conversationId,
+        promptId,
+        runId,
+      );
+      await waitUntil(
+        () => control.steerTexts.includes("deliver this guidance"),
+        "pending prompt steer to reach the SDK",
+      );
+      await expect(fixture.coordinator.listPendingPrompts(
+        fixture.handle,
+        actor.conversationId,
+      )).resolves.toEqual([
+        expect.objectContaining({ state: "dispatching", runId }),
+      ]);
+      control.emitUserMessage("deliver this guidance");
+      await steered;
+      expect(aggregateReservedConversationEntries(
+        actor.sessionManager.getEntries(),
+      ).pendingPromptDeliveries).toEqual([
+        expect.objectContaining({ promptId, runId }),
+      ]);
+      await expect(fixture.coordinator.listPendingPrompts(
+        fixture.handle,
+        actor.conversationId,
+      )).resolves.toEqual([]);
+      release.resolve();
+      await busy;
+    });
+
+    it("returns a rejected steer to queued and pumps exactly one FIFO prompt after completion", async () => {
+      const fixture = await createFixture();
+      const actor = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const control = fixture.runtime.control(actor.conversationId);
+      const started = deferred();
+      const release = deferred();
+      control.enqueue(
+        async (current) => {
+          current.emitUserMessage(current.promptTexts.at(-1)!);
+          started.resolve();
+          await release.promise;
+          current.emitFinal("first done");
+        },
+        async (current) => {
+          current.emitUserMessage(current.promptTexts.at(-1)!);
+          current.emitFinal("second done");
+        },
+      );
+      const firstId = randomUUID();
+      const secondId = randomUUID();
+      await fixture.coordinator.enqueuePrompt(
+        fixture.handle,
+        actor.conversationId,
+        { promptId: firstId, text: "first queued prompt" },
+      );
+      await started.promise;
+      await fixture.coordinator.enqueuePrompt(
+        fixture.handle,
+        actor.conversationId,
+        { promptId: secondId, text: "second queued prompt" },
+      );
+      release.resolve();
+      await waitUntil(
+        async () => (await fixture.coordinator.listPendingPrompts(
+          fixture.handle,
+          actor.conversationId,
+        )).length === 0,
+        "the next FIFO pending prompt to finish",
+      );
+      expect(control.promptTexts).toEqual([
+        "first queued prompt",
+        "second queued prompt",
+      ]);
+
+      const busyStarted = deferred();
+      const busyRelease = deferred();
+      control.enqueue(async () => {
+        busyStarted.resolve();
+        await busyRelease.promise;
+      });
+      const runId = randomUUID();
+      const busy = fixture.coordinator.prompt(
+        fixture.handle,
+        actor.conversationId,
+        runId,
+        "busy for rejection",
+      );
+      await busyStarted.promise;
+      const rejectedId = randomUUID();
+      await fixture.coordinator.enqueuePrompt(
+        fixture.handle,
+        actor.conversationId,
+        { promptId: rejectedId, text: "requeue after steer rejection" },
+      );
+      control.steerImplementation = async () => {
+        throw new Error("steer rejected before delivery");
+      };
+      await expect(fixture.coordinator.steerQueuedPrompt(
+        fixture.handle,
+        actor.conversationId,
+        rejectedId,
+        runId,
+      )).rejects.toThrow(/steer rejected/i);
+      await expect(fixture.coordinator.listPendingPrompts(
+        fixture.handle,
+        actor.conversationId,
+      )).resolves.toEqual([
+        expect.objectContaining({ promptId: rejectedId, state: "queued" }),
+      ]);
+      busyRelease.resolve();
+      await busy;
+    });
+
+    it("marks no-user delivery attention and recovers dispatching records conservatively", async () => {
+      const fixture = await createFixture();
+      const actor = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const queue = coordinatorPromptQueue(fixture.handle);
+      const settledId = randomUUID();
+      const unsettledId = randomUUID();
+      const queuedId = randomUUID();
+      const settledRunId = randomUUID();
+      const unsettledRunId = randomUUID();
+      await queue.put({
+        promptId: settledId,
+        conversationId: actor.conversationId,
+        text: "settled recovery cleanup",
+        createdAt: "2026-07-24T10:00:00.000Z",
+      });
+      await queue.markDispatching(
+        settledId,
+        actor.conversationId,
+        settledRunId,
+        "2026-07-24T10:00:01.000Z",
+      );
+      appendReservedCustomEntry(
+        actor.sessionManager,
+        createRunSettlementEntry({
+          runId: settledRunId,
+          outcome: "completed",
+          finalText: null,
+          settledAt: "2026-07-24T10:00:02.000Z",
+        }),
+      );
+      appendReservedCustomEntry(
+        actor.sessionManager,
+        createPendingPromptDeliveryEntry({
+          promptId: settledId,
+          runId: settledRunId,
+          deliveredAt: "2026-07-24T10:00:02.500Z",
+        }),
+      );
+      await queue.put({
+        promptId: unsettledId,
+        conversationId: actor.conversationId,
+        text: "uncertain recovery",
+        createdAt: "2026-07-24T10:00:03.000Z",
+      });
+      await queue.markDispatching(
+        unsettledId,
+        actor.conversationId,
+        unsettledRunId,
+        "2026-07-24T10:00:04.000Z",
+      );
+      appendReservedCustomEntry(
+        actor.sessionManager,
+        createRunSettlementEntry({
+          runId: unsettledRunId,
+          outcome: "completed",
+          finalText: null,
+          settledAt: "2026-07-24T10:00:04.500Z",
+        }),
+      );
+      await queue.put({
+        promptId: queuedId,
+        conversationId: actor.conversationId,
+        text: "queued recovery prompt",
+        createdAt: "2026-07-24T10:00:05.000Z",
+      });
+      fixture.runtime.nextSessionBehaviors.push([
+        async (control) => {
+          control.emitUserMessage(control.promptTexts.at(-1)!);
+          control.emitFinal("recovered queued prompt");
+        },
+      ]);
+      await fixture.coordinator.close();
+      const restarted = new ProjectSessionCoordinator(
+        fixture.runtime,
+        fixture.roles,
+        fixture.registry,
+      );
+      const handle = await restarted.acquireProject(fixture.cwd, "full_access");
+      await waitUntil(
+        async () => (await coordinatorPromptQueue(handle).list({
+          conversationId: actor.conversationId,
+        })).every(({ promptId, state }) => (
+          promptId !== queuedId && (promptId !== unsettledId || state === "attention")
+        )),
+        "pending prompt recovery reconciliation",
+      );
+      expect(await coordinatorPromptQueue(handle).list({
+        conversationId: actor.conversationId,
+      })).toEqual([
+        expect.objectContaining({ promptId: unsettledId, state: "attention" }),
+      ]);
+      await restarted.close();
+    });
+
+    it("cleans all prompt states during conversation deletion", async () => {
+      const fixture = await createFixture();
+      const actor = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const queue = coordinatorPromptQueue(fixture.handle);
+      const queuedId = randomUUID();
+      const attentionId = randomUUID();
+      await queue.put({
+        promptId: queuedId,
+        conversationId: actor.conversationId,
+        text: "queued deletion cleanup",
+        createdAt: "2026-07-24T10:00:00.000Z",
+      });
+      await queue.put({
+        promptId: attentionId,
+        conversationId: actor.conversationId,
+        text: "attention deletion cleanup",
+        createdAt: "2026-07-24T10:00:01.000Z",
+      });
+      const dispatchRunId = randomUUID();
+      await queue.markDispatching(
+        attentionId,
+        actor.conversationId,
+        dispatchRunId,
+        "2026-07-24T10:00:02.000Z",
+      );
+      await queue.markAttentionAfterUncertainFailure(
+        attentionId,
+        actor.conversationId,
+        dispatchRunId,
+        "manual reconciliation required",
+        "2026-07-24T10:00:03.000Z",
+      );
+      await expect(fixture.coordinator.deleteConversation(
+        fixture.handle,
+        actor.conversationId,
+      )).resolves.toBe(true);
+      await expect(queue.list({ conversationId: actor.conversationId }))
+        .resolves.toEqual([]);
     });
   });
 });

@@ -2505,12 +2505,14 @@ describe("PiConnection coordinated project view", () => {
           commandId,
         }),
       );
+      const steeredUserMessage = {
+        role: "user",
+        content: [{ type: "text", text: "change direction" }],
+      } as AgentMessage;
+      session.persistentManager?.appendMessage(steeredUserMessage);
       session.eventListener?.(nativeEvent({
-        type: "message_start",
-        message: {
-          role: "user",
-          content: [{ type: "text", text: "change direction" }],
-        },
+        type: "message_end",
+        message: steeredUserMessage,
       }));
       await guiding;
       expect(harness.events).toContainEqual({

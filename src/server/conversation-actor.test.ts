@@ -1649,6 +1649,22 @@ describe("ConversationActor", () => {
         timestamp: Date.now(),
       },
     } as AgentSessionEvent);
+    let guidanceDelivered = false;
+    void guidance.then(() => {
+      guidanceDelivered = true;
+    });
+    await Promise.resolve();
+    expect(guidanceDelivered).toBe(false);
+    const transformedGuidance = agentMessage({
+      role: "user",
+      content: [{ type: "text", text: "template-expanded guidance" }],
+      timestamp: Date.now(),
+    });
+    fixture.manager.appendMessage(transformedGuidance);
+    fixture.runtime.session.eventListener?.({
+      type: "message_end",
+      message: transformedGuidance,
+    } as AgentSessionEvent);
     await expect(guidance).resolves.toBeUndefined();
 
     const undelivered = fixture.actor.steer(RUN_A, "one more change");
@@ -1665,6 +1681,35 @@ describe("ConversationActor", () => {
     expect(fixture.runtime.session.clearQueueCalls).toBe(1);
     await expect(fixture.actor.steer(RUN_A, "too late"))
       .rejects.toThrow("not currently able");
+    await fixture.actor.dispose();
+  });
+
+  it("rejects guidance when the raw user message was not durably appended", async () => {
+    const fixture = await openActor();
+    const promptStarted = deferred();
+    const promptFinished = deferred();
+    fixture.runtime.session.promptImplementation = async () => {
+      promptStarted.resolve();
+      await promptFinished.promise;
+    };
+    const completion = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "inspect",
+      origin: "browser",
+    });
+    await promptStarted.promise;
+    const guidance = fixture.actor.steer(RUN_A, "guidance without append");
+    fixture.runtime.session.eventListener?.({
+      type: "message_end",
+      message: agentMessage({
+        role: "user",
+        content: [{ type: "text", text: "transformed but not persisted" }],
+        timestamp: Date.now(),
+      }),
+    } as AgentSessionEvent);
+    await expect(guidance).rejects.toThrow(/did not durably append/i);
+    promptFinished.resolve();
+    await completion;
     await fixture.actor.dispose();
   });
 

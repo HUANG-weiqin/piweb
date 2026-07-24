@@ -5,9 +5,11 @@ import {
   CONVERSATION_MESSAGE_CUSTOM_TYPE,
   CONVERSATION_META_CUSTOM_TYPE,
   RUN_SETTLEMENT_CUSTOM_TYPE,
+  PENDING_PROMPT_DELIVERY_CUSTOM_TYPE,
   createConversationCardEntry,
   createConversationMessageEntry,
   createConversationMetaEntry,
+  createPendingPromptDeliveryEntry,
   createRunSettlementEntry,
 } from "./conversation-meta.js";
 import {
@@ -297,6 +299,11 @@ describe("validatePiSessionFile", () => {
       finalText: "Done",
       settledAt: "2026-01-01T00:03:00.000Z",
     });
+    const delivery = createPendingPromptDeliveryEntry({
+      promptId: randomUUID(),
+      runId,
+      deliveredAt: "2026-01-01T00:03:30.000Z",
+    });
     const meta = createConversationMetaEntry(metadata());
     const base = (
       type: string,
@@ -357,6 +364,11 @@ describe("validatePiSessionFile", () => {
         customType: CONVERSATION_CARD_CUSTOM_TYPE,
         data: finalCard.data,
       },
+      {
+        ...base("custom", "00000007", "00000006"),
+        customType: PENDING_PROMPT_DELIVERY_CUSTOM_TYPE,
+        data: delivery.data,
+      },
     ]);
 
     expect(inspectPiSessionFile(
@@ -369,6 +381,7 @@ describe("validatePiSessionFile", () => {
       cards: [finalCard.data],
       deliveredMessageIds: [messageId],
       runSettlements: [settlement.data],
+      pendingPromptDeliveries: [delivery.data],
       temporaryReturnReceipts: [],
       metaOperations: [],
       lastActivityAt: "2026-01-01T00:05:00.000Z",

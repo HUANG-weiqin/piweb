@@ -8,6 +8,7 @@ import {
   type ConversationCard,
   type ConversationMeta,
   type MetaOperation,
+  type PendingPromptDelivery,
   type RunSettlement,
 } from "./conversation-meta.js";
 
@@ -42,6 +43,7 @@ export interface PiSessionFileInspection {
   cards: ConversationCard[];
   deliveredMessageIds: string[];
   runSettlements: RunSettlement[];
+  pendingPromptDeliveries: PendingPromptDelivery[];
   metaOperations: MetaOperation[];
   lastActivityAt: string;
 }

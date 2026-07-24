@@ -529,6 +529,7 @@ export function projectConversationItemSlots(
       reserved.kind === "conversation_meta"
       || reserved.kind === "conversation_role_change"
       || reserved.kind === "run_settlement"
+      || reserved.kind === "pending_prompt_delivery"
       || reserved.kind === "temporary_return_receipt"
       || reserved.kind === "meta_operation"
       || reserved.kind === "compaction_threshold"

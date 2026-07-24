@@ -63,7 +63,8 @@ import {
 export type ConversationRunOrigin =
   | "browser"
   | "inbox"
-  | "conversation";
+  | "conversation"
+  | "pending_prompt";
 
 export interface ConversationActorState {
   conversationId: string;
@@ -101,6 +102,7 @@ export type ConversationActorEvent =
       conversationId: string;
       origin: ConversationRunOrigin;
       settlement: RunSettlement;
+      pendingPromptUserDelivered: boolean;
     }
   | {
       type: "error";
@@ -117,6 +119,8 @@ export type ConversationActorListener = (
 export interface ConversationActorCompletion {
   settlement: RunSettlement;
   origin: ConversationRunOrigin;
+  /** True only after Pi emitted the durable user message for a pending prompt. */
+  pendingPromptUserDelivered: boolean;
 }
 
 export interface ConversationActorOpenOptions {
@@ -195,14 +199,19 @@ interface PendingCustomSteer {
   readonly delivery: Deferred<void>;
 }
 
+interface PendingGuidance {
+  readonly delivery: Deferred<void>;
+}
+
 interface RunTicket {
   readonly id: string;
   readonly origin: ConversationRunOrigin;
   readonly ownership: ConversationRunOwnership;
   readonly projector: SessionEventProjector;
   readonly completion: Deferred<RunSettlement>;
-  readonly guidanceDeliveries: Deferred<void>[];
+  readonly guidanceDeliveries: PendingGuidance[];
   readonly customSteerDeliveries: PendingCustomSteer[];
+  pendingPromptUserDelivered: boolean;
   customSteerFlush?: Promise<void>;
   phase: "queued" | "running" | "waiting" | "cancelling";
   waitingFor?: ConversationWaitingTarget;
@@ -249,6 +258,20 @@ function cloneActivity(activity: ConversationActivity): ConversationActivity {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function rawUserMessageIsPersisted(
+  entries: readonly unknown[],
+  message: unknown,
+): boolean {
+  return entries.some((entry) => (
+    typeof entry === "object"
+    && entry !== null
+    && "type" in entry
+    && entry.type === "message"
+    && "message" in entry
+    && entry.message === message
+  ));
 }
 
 function isCancelling(ticket: RunTicket): boolean {
@@ -842,7 +865,8 @@ export class ConversationActor {
     }
 
     const delivery = deferred<void>();
-    ticket.guidanceDeliveries.push(delivery);
+    const pendingGuidance: PendingGuidance = { delivery };
+    ticket.guidanceDeliveries.push(pendingGuidance);
 
     // AgentSession.steer queues synchronously before its promise resolves. Do
     // not route this through the actor operation queue: that queue is occupied
@@ -852,7 +876,7 @@ export class ConversationActor {
     return Promise.all([queued, delivery.promise]).then(
       () => undefined,
       (error) => {
-        const index = ticket.guidanceDeliveries.indexOf(delivery);
+        const index = ticket.guidanceDeliveries.indexOf(pendingGuidance);
         if (index >= 0) ticket.guidanceDeliveries.splice(index, 1);
         delivery.reject(error);
         throw error;
@@ -1007,6 +1031,7 @@ export class ConversationActor {
       completion: deferred<RunSettlement>(),
       guidanceDeliveries: [],
       customSteerDeliveries: [],
+      pendingPromptUserDelivered: false,
       phase: "queued",
       toolMode: this.profileSnapshot.role.toolMode,
       sawSdkCompactionAttempt: false,
@@ -1380,7 +1405,7 @@ export class ConversationActor {
     // browser terminal projection, and coordinator lifecycle reactions.
     await this.persistSettlementCallback(settlement, this.sessionManager);
     for (const guidance of ticket.guidanceDeliveries.splice(0)) {
-      guidance.reject(
+      guidance.delivery.reject(
         new Error("Run ended before queued guidance was delivered"),
       );
     }
@@ -1400,6 +1425,7 @@ export class ConversationActor {
     const completion = {
       settlement,
       origin: ticket.origin,
+      pendingPromptUserDelivered: ticket.pendingPromptUserDelivered,
     } satisfies ConversationActorCompletion;
     this.emit({
       type: "completion",
@@ -1433,7 +1459,7 @@ export class ConversationActor {
     if (this.activeRun === ticket) this.activeRun = undefined;
     if (this.liveProjection?.runId === ticket.id) this.liveProjection = undefined;
     for (const guidance of ticket.guidanceDeliveries.splice(0)) {
-      guidance.reject(error);
+      guidance.delivery.reject(error);
     }
     this.rejectCustomSteers(ticket, error);
     this.fatalError = error instanceof Error
@@ -1547,10 +1573,38 @@ export class ConversationActor {
       return;
     }
 
+    if (
+      event.type === "message_end"
+      && event.message.role === "user"
+      && (
+        ticket.origin === "pending_prompt"
+        || ticket.guidanceDeliveries.length > 0
+      )
+    ) {
+      const rawMessage = event.message;
+      queueMicrotask(() => {
+        if (!rawUserMessageIsPersisted(
+          this.sessionManager.getEntries(),
+          rawMessage,
+        )) {
+          const error = new Error(
+            "Pi did not durably append the raw user message before delivery acknowledgement",
+          );
+          ticket.guidanceDeliveries.shift()?.delivery.reject(error);
+          this.emitError(error, ticket.id);
+          return;
+        }
+        if (ticket.origin === "pending_prompt") {
+          ticket.pendingPromptUserDelivered = true;
+        }
+        // The raw user-message ends are FIFO with AgentSession.steer() calls.
+        // Promise continuations run after this microtask, after Pi's synchronous
+        // SessionManager append has been proved by object identity.
+        ticket.guidanceDeliveries.shift()?.delivery.resolve();
+      });
+    }
+
     for (const projected of ticket.projector.project(event)) {
-      if (projected.type === "user_message") {
-        ticket.guidanceDeliveries.shift()?.resolve();
-      }
       this.emitSessionEvent(ticket, projected);
     }
   }

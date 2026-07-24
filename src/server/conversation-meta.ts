@@ -12,6 +12,8 @@ export const CONVERSATION_MESSAGE_CUSTOM_TYPE =
   "piweb.conversation_message.v1";
 export const RUN_SETTLEMENT_CUSTOM_TYPE =
   "piweb.run_settlement.v1";
+export const PENDING_PROMPT_DELIVERY_CUSTOM_TYPE =
+  "piweb.pending_prompt_delivery.v1";
 export const META_OPERATION_CUSTOM_TYPE =
   "piweb.meta_operation.v1";
 export const COMPACTION_THRESHOLD_CUSTOM_TYPE =
@@ -386,6 +388,17 @@ const runSettlementEntrySchema = z.object({
   data: runSettlementSchema,
 }).strict();
 
+const pendingPromptDeliverySchema = z.object({
+  promptId: uuidSchema("promptId"),
+  runId: uuidSchema("runId"),
+  deliveredAt: canonicalTimestampSchema("deliveredAt"),
+}).strict();
+
+const pendingPromptDeliveryEntrySchema = z.object({
+  customType: z.literal(PENDING_PROMPT_DELIVERY_CUSTOM_TYPE),
+  data: pendingPromptDeliverySchema,
+}).strict();
+
 const temporaryReturnReceiptIdentitySchema = z.object({
   temporaryConversationId: conversationIdSchema("temporaryConversationId"),
   initialRunId: uuidSchema("initialRunId"),
@@ -532,6 +545,10 @@ export type CompactionResumeEntry =
 export type RunSettlement = z.infer<typeof runSettlementSchema>;
 export type RunSettlementEntry =
   z.infer<typeof runSettlementEntrySchema>;
+export type PendingPromptDelivery =
+  z.infer<typeof pendingPromptDeliverySchema>;
+export type PendingPromptDeliveryEntry =
+  z.infer<typeof pendingPromptDeliveryEntrySchema>;
 export type TemporaryReturnReceipt =
   z.infer<typeof temporaryReturnReceiptSchema>;
 export type TemporaryReturnReceiptEntry =
@@ -574,6 +591,10 @@ export type ReservedConversationEntry =
       entry: RunSettlementEntry;
     }
   | {
+      kind: "pending_prompt_delivery";
+      entry: PendingPromptDeliveryEntry;
+    }
+  | {
       kind: "temporary_return_receipt";
       entry: TemporaryReturnReceiptEntry;
     }
@@ -591,6 +612,7 @@ export interface ReservedConversationAggregate {
   cards: ConversationCard[];
   deliveredMessageIds: string[];
   runSettlements: RunSettlement[];
+  pendingPromptDeliveries: PendingPromptDelivery[];
   temporaryReturnReceipts: TemporaryReturnReceipt[];
   metaOperations: MetaOperation[];
   compactionThreshold?: CompactionThreshold;
@@ -700,6 +722,21 @@ export function createRunSettlementEntry(
   });
 }
 
+export function parsePendingPromptDeliveryEntry(
+  value: unknown,
+): PendingPromptDeliveryEntry {
+  return pendingPromptDeliveryEntrySchema.parse(value);
+}
+
+export function createPendingPromptDeliveryEntry(
+  data: PendingPromptDelivery,
+): PendingPromptDeliveryEntry {
+  return parsePendingPromptDeliveryEntry({
+    customType: PENDING_PROMPT_DELIVERY_CUSTOM_TYPE,
+    data,
+  });
+}
+
 export function parseTemporaryReturnReceiptEntry(
   value: unknown,
 ): TemporaryReturnReceiptEntry {
@@ -758,6 +795,7 @@ export function appendReservedCustomEntry(
     | ConversationRoleChangeEntry
     | ConversationCardEntry
     | RunSettlementEntry
+    | PendingPromptDeliveryEntry
     | TemporaryReturnReceiptEntry
     | MetaOperationEntry
     | CompactionThresholdEntry,
@@ -864,6 +902,12 @@ export function parseReservedConversationEntry(
     return {
       kind: "run_settlement",
       entry: parseRunSettlementEntry(payload),
+    };
+  }
+  if (customType === PENDING_PROMPT_DELIVERY_CUSTOM_TYPE) {
+    return {
+      kind: "pending_prompt_delivery",
+      entry: parsePendingPromptDeliveryEntry(payload),
     };
   }
   if (customType === TEMPORARY_RETURN_RECEIPT_CUSTOM_TYPE) {
@@ -1011,6 +1055,8 @@ export function aggregateReservedConversationEntries(
   const cards = new Map<string, ConversationCard>();
   const deliveredMessageIds = new Set<string>();
   const runSettlements = new Map<string, RunSettlement>();
+  const pendingPromptDeliveries = new Map<string, PendingPromptDelivery>();
+  const pendingPromptRuns = new Map<string, PendingPromptDelivery>();
   const temporaryReturnReceipts = new Map<
     string,
     TemporaryReturnReceipt
@@ -1068,6 +1114,24 @@ export function aggregateReservedConversationEntries(
       continue;
     }
     if (reserved.kind === "compaction_resume") {
+      continue;
+    }
+    if (reserved.kind === "pending_prompt_delivery") {
+      const incoming = reserved.entry.data;
+      const existingPrompt = pendingPromptDeliveries.get(incoming.promptId);
+      const existingRun = pendingPromptRuns.get(incoming.runId);
+      if (
+        (existingPrompt !== undefined
+          && JSON.stringify(existingPrompt) !== JSON.stringify(incoming))
+        || (existingRun !== undefined
+          && JSON.stringify(existingRun) !== JSON.stringify(incoming))
+      ) {
+        throw new Error(
+          `Conflicting piweb pending prompt delivery for promptId ${incoming.promptId} or runId ${incoming.runId}`,
+        );
+      }
+      pendingPromptDeliveries.set(incoming.promptId, incoming);
+      pendingPromptRuns.set(incoming.runId, incoming);
       continue;
     }
     if (reserved.kind === "temporary_return_receipt") {
@@ -1230,6 +1294,7 @@ export function aggregateReservedConversationEntries(
     cards: [...cards.values()],
     deliveredMessageIds: [...deliveredMessageIds],
     runSettlements: [...runSettlements.values()],
+    pendingPromptDeliveries: [...pendingPromptDeliveries.values()],
     temporaryReturnReceipts: [...temporaryReturnReceipts.values()],
     metaOperations: [...metaOperations.values()],
     ...(compactionThreshold === undefined

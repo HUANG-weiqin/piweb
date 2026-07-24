@@ -13,6 +13,7 @@ import {
   createConversationCardEntry,
   createConversationMetaEntry,
   createConversationMessageEntry,
+  createPendingPromptDeliveryEntry,
   createMetaOperationEntry,
   createRunSettlementEntry,
   createTemporaryReturnReceiptEntry,
@@ -23,6 +24,7 @@ import {
   type ConversationOrchestration,
   type ConversationReferenceSnapshot,
   type MetaOperation,
+  type PendingPromptDelivery,
   type RunSettlement,
   type TemporaryReturnReceipt,
 } from "./conversation-meta.js";
@@ -55,6 +57,11 @@ import {
   type InboxEnvelopeInput,
 } from "./project-inbox.js";
 import {
+  ProjectPromptQueue,
+  type ProjectPromptRecord,
+  type PromptQueuePutResult,
+} from "./project-prompt-queue.js";
+import {
   ProjectStoreRegistry,
   type ProjectStore,
   type ProjectStoreHandle,
@@ -84,7 +91,12 @@ const INBOX_LIFECYCLE_GUIDANCE = [
 
 export type ProjectSessionCoordinatorEvent =
   | ConversationActorEvent
-  | { type: "project_changed" };
+  | { type: "project_changed" }
+  | {
+      type: "pending_prompts_changed";
+      conversationId: string;
+      prompts: ProjectPromptRecord[];
+    };
 
 export type ProjectSessionCoordinatorListener = (
   event: ProjectSessionCoordinatorEvent,
@@ -138,6 +150,7 @@ interface ProjectContext {
   readonly project: ProjectStore;
   readonly projectHandle: ProjectStoreHandle;
   readonly inbox: ProjectInbox;
+  readonly promptQueue: ProjectPromptQueue;
   readonly actors: Map<string, ConversationActor>;
   readonly actorOpenings: Map<string, Promise<ConversationActor>>;
   readonly actorUnsubscribes: Map<string, () => void>;
@@ -185,6 +198,11 @@ export interface CreateUserConversationInput {
   title?: string;
   extensionUI?: PortableExtensionUI;
   signal?: AbortSignal;
+}
+
+export interface EnqueueProjectPromptInput {
+  promptId: string;
+  text: string;
 }
 
 export interface StartPeerSessionInput {
@@ -679,11 +697,15 @@ export class ProjectSessionCoordinator {
     let unsubscribeProject: (() => void) | undefined;
     try {
       const inbox = await ProjectInbox.open(join(project.stateDir, "inbox"));
+      const promptQueue = await ProjectPromptQueue.open(
+        join(project.stateDir, "pending-prompts"),
+      );
       const contextDraft = {
         key,
         project,
         projectHandle,
         inbox,
+        promptQueue,
         actors: new Map(),
         actorOpenings: new Map(),
         actorUnsubscribes: new Map(),
@@ -891,27 +913,34 @@ export class ProjectSessionCoordinator {
     roleId: string,
   ): Promise<ConversationActor> {
     const context = this.requireContext(handle);
-    const actor = this.requireActor(context, conversationId);
-    const template = this.roles.listRoles(actor.modelRegistry)
-      .find(({ id }) => id === roleId);
-    if (!template) throw new Error(`Role not found: ${roleId}`);
-    if (!template.available) {
-      throw new Error(
-        template.unavailableReason ?? `Role is unavailable: ${roleId}`,
+    return this.runLifecycle(context, async () => {
+      const actor = this.requireActor(context, conversationId);
+      if ((await context.promptQueue.list({ conversationId })).length > 0) {
+        throw new Error(
+          "Cannot switch role while this conversation has pending prompts",
+        );
+      }
+      const template = this.roles.listRoles(actor.modelRegistry)
+        .find(({ id }) => id === roleId);
+      if (!template) throw new Error(`Role not found: ${roleId}`);
+      if (!template.available) {
+        throw new Error(
+          template.unavailableReason ?? `Role is unavailable: ${roleId}`,
+        );
+      }
+      const role = this.roles.getConversationRole(roleId);
+      const profile = {
+        ...actor.profile,
+        role,
+      };
+      await actor.switchRole(
+        role,
+        this.createActorSessionOptions(context, conversationId, profile),
       );
-    }
-    const role = this.roles.getConversationRole(roleId);
-    const profile = {
-      ...actor.profile,
-      role,
-    };
-    await actor.switchRole(
-      role,
-      this.createActorSessionOptions(context, conversationId, profile),
-    );
-    context.profiles.set(conversationId, cloneProfile(actor.profile));
-    this.emit(context, { type: "project_changed" });
-    return actor;
+      context.profiles.set(conversationId, cloneProfile(actor.profile));
+      this.emit(context, { type: "project_changed" });
+      return actor;
+    });
   }
 
   async createUserConversation(
@@ -1288,6 +1317,167 @@ export class ProjectSessionCoordinator {
     return this.requireActor(context, conversationId).steer(runId, text);
   }
 
+  async listPendingPrompts(
+    handle: ProjectSessionHandle,
+    conversationId: string,
+  ): Promise<ProjectPromptRecord[]> {
+    const context = this.requireContext(handle);
+    this.assertPromptConversation(context, conversationId);
+    return context.promptQueue.list({ conversationId });
+  }
+
+  async enqueuePrompt(
+    handle: ProjectSessionHandle,
+    conversationId: string,
+    input: EnqueueProjectPromptInput,
+  ): Promise<PromptQueuePutResult> {
+    const context = this.requireContext(handle);
+    return this.runLifecycle(context, async () => {
+      this.assertPromptConversation(context, conversationId);
+      const existing = (await context.promptQueue.list())
+        .find(({ promptId }) => promptId === input.promptId);
+      let result: PromptQueuePutResult;
+      if (existing !== undefined) {
+        if (
+          existing.conversationId !== conversationId
+          || existing.text !== input.text
+        ) {
+          throw new Error(`Prompt queue conflict for promptId ${input.promptId}`);
+        }
+        result = { status: "existing", prompt: existing };
+      } else {
+        result = await context.promptQueue.put({
+          promptId: input.promptId,
+          conversationId,
+          text: input.text,
+          createdAt: this.now().toISOString(),
+        });
+        await this.emitPendingPromptsChanged(context, conversationId);
+      }
+      await this.pumpTarget(context, conversationId);
+      return result;
+    });
+  }
+
+  async withdrawQueuedPrompt(
+    handle: ProjectSessionHandle,
+    conversationId: string,
+    promptId: string,
+  ): Promise<boolean> {
+    const context = this.requireContext(handle);
+    return this.runLifecycle(context, async () => {
+      this.assertPromptConversation(context, conversationId);
+      this.assertExactPrompt(
+        await context.promptQueue.list(),
+        conversationId,
+        promptId,
+      );
+      const withdrawn = await context.promptQueue.withdrawQueued(
+        promptId,
+        conversationId,
+      );
+      if (withdrawn) await this.emitPendingPromptsChanged(context, conversationId);
+      return withdrawn;
+    });
+  }
+
+  async dismissAttentionPrompt(
+    handle: ProjectSessionHandle,
+    conversationId: string,
+    promptId: string,
+  ): Promise<boolean> {
+    const context = this.requireContext(handle);
+    return this.runLifecycle(context, async () => {
+      this.assertPromptConversation(context, conversationId);
+      const prompt = this.assertExactPrompt(
+        await context.promptQueue.list(),
+        conversationId,
+        promptId,
+      );
+      if (prompt.state !== "attention") {
+        throw new Error(`Only attention prompts can be dismissed: ${promptId}`);
+      }
+      const removed = await context.promptQueue.removeForHostCleanup(
+        promptId,
+        conversationId,
+      );
+      if (removed) await this.emitPendingPromptsChanged(context, conversationId);
+      return removed;
+    });
+  }
+
+  async steerQueuedPrompt(
+    handle: ProjectSessionHandle,
+    conversationId: string,
+    promptId: string,
+    runId: string,
+  ): Promise<void> {
+    const context = this.requireContext(handle);
+    const { delivery } = await this.runLifecycle(context, async () => {
+      this.assertPromptConversation(context, conversationId);
+      const actor = this.requireActor(context, conversationId);
+      const activity = actor.getActivity();
+      if (
+        (activity.kind !== "running" && activity.kind !== "waiting")
+        || activity.runId !== runId
+      ) {
+        throw new Error(`Prompt steer requires exact active run: ${runId}`);
+      }
+      const prompt = this.assertExactPrompt(
+        await context.promptQueue.list(),
+        conversationId,
+        promptId,
+      );
+      if (prompt.state !== "queued") {
+        throw new Error(`Only queued prompts can be steered: ${promptId}`);
+      }
+      const claimed = await context.promptQueue.markDispatching(
+        promptId,
+        conversationId,
+        runId,
+        this.now().toISOString(),
+      );
+      await this.emitPendingPromptsChanged(context, conversationId);
+      return { delivery: actor.steer(runId, claimed.text) };
+    });
+    try {
+      await delivery;
+    } catch (error) {
+      await this.runLifecycle(context, async () => {
+        const claimed = (await context.promptQueue.list({ conversationId }))
+          .find(({ promptId: candidate }) => candidate === promptId);
+        if (
+          claimed?.state === "dispatching"
+          && claimed.runId === runId
+        ) {
+          await context.promptQueue.requeueAfterDeterministicRejection(
+            promptId,
+            conversationId,
+            runId,
+          );
+          await this.emitPendingPromptsChanged(context, conversationId);
+        }
+      });
+      throw error;
+    }
+    await this.runLifecycle(context, async () => {
+      const claimed = (await context.promptQueue.list({ conversationId }))
+        .find(({ promptId: candidate }) => candidate === promptId);
+      if (
+        claimed?.state === "dispatching"
+        && claimed.runId === runId
+      ) {
+        this.appendPendingPromptDelivery(
+          this.requireActor(context, conversationId),
+          promptId,
+          runId,
+        );
+        await context.promptQueue.removeForHostCleanup(promptId, conversationId);
+        await this.emitPendingPromptsChanged(context, conversationId);
+      }
+    });
+  }
+
   setCompactionThreshold(
     handle: ProjectSessionHandle,
     conversationId: string,
@@ -1360,6 +1550,9 @@ export class ProjectSessionCoordinator {
         throw new Error(
           "Cannot rewind while this conversation has pending cross-session messages",
         );
+      }
+      if ((await context.promptQueue.list({ conversationId })).length > 0) {
+        throw new Error("Cannot rewind while this conversation has pending prompts");
       }
       await actor.truncateFromMessage(entryId);
       this.emit(context, { type: "project_changed" });
@@ -3376,6 +3569,14 @@ export class ProjectSessionCoordinator {
         actor,
         completion.settlement,
       );
+      if (completion.origin === "pending_prompt") {
+        await this.finishPendingPrompt(
+          context,
+          actor,
+          completion.settlement.runId,
+          completion.pendingPromptUserDelivered,
+        );
+      }
       if (context.actors.get(actor.conversationId) === actor) {
         await this.pumpTarget(context, actor.conversationId);
       }
@@ -3396,6 +3597,67 @@ export class ProjectSessionCoordinator {
         fatal: false,
       });
     }));
+  }
+
+  private async finishPendingPrompt(
+    context: ProjectContext,
+    actor: ConversationActor,
+    runId: string,
+    userDelivered: boolean,
+  ): Promise<void> {
+    const conversationId = actor.conversationId;
+    const prompt = (await context.promptQueue.list({ conversationId }))
+      .find((candidate) => (
+        candidate.state === "dispatching" && candidate.runId === runId
+      ));
+    if (!prompt) return;
+    if (userDelivered) {
+      this.appendPendingPromptDelivery(
+        actor,
+        prompt.promptId,
+        runId,
+      );
+      await context.promptQueue.removeForHostCleanup(
+        prompt.promptId,
+        conversationId,
+      );
+    } else {
+      await context.promptQueue.markAttentionAfterUncertainFailure(
+        prompt.promptId,
+        conversationId,
+        runId,
+        "The run settled before the pending prompt user message was observed.",
+        this.now().toISOString(),
+      );
+    }
+    await this.emitPendingPromptsChanged(context, conversationId);
+  }
+
+  private appendPendingPromptDelivery(
+    actor: ConversationActor,
+    promptId: string,
+    runId: string,
+  ): void {
+    const aggregate = aggregateReservedConversationEntries(
+      actor.sessionManager.getEntries(),
+    );
+    const existing = aggregate.pendingPromptDeliveries.find((delivery) => (
+      delivery.promptId === promptId || delivery.runId === runId
+    ));
+    if (existing !== undefined) {
+      if (existing.promptId === promptId && existing.runId === runId) return;
+      throw new Error(
+        `Conflicting pending prompt delivery for promptId ${promptId} or runId ${runId}`,
+      );
+    }
+    appendReservedCustomEntry(
+      actor.sessionManager,
+      createPendingPromptDeliveryEntry({
+        promptId,
+        runId,
+        deliveredAt: this.now().toISOString(),
+      }),
+    );
   }
 
   private rejectRunWaiters(
@@ -4268,6 +4530,10 @@ export class ProjectSessionCoordinator {
         { kind: "abort_session"; state: "started" }
       >;
     }> = [];
+    const pendingPromptDeliveriesByConversation = new Map<
+      string,
+      PendingPromptDelivery[]
+    >();
     const actorIds = new Set(
       pending
         .filter(({ toConversationId }) =>
@@ -4297,6 +4563,10 @@ export class ProjectSessionCoordinator {
             });
           }
         }
+        pendingPromptDeliveriesByConversation.set(
+          summary.id,
+          inspection.pendingPromptDeliveries,
+        );
         const profile = inspection.conversationMeta;
         if (!profile) continue;
         context.profiles.set(summary.id, cloneProfile(profile));
@@ -4312,6 +4582,38 @@ export class ProjectSessionCoordinator {
       } catch {
         context.attention.add(summary.id);
       }
+    }
+
+    for (const prompt of await context.promptQueue.list()) {
+      if (context.closing) return;
+      if (prompt.state === "queued") {
+        if (!blockedTargets.has(prompt.conversationId)) {
+          actorIds.add(prompt.conversationId);
+        }
+        continue;
+      }
+      if (prompt.state !== "dispatching") continue;
+      const delivered = pendingPromptDeliveriesByConversation
+        .get(prompt.conversationId)
+        ?.some((delivery) => (
+          delivery.promptId === prompt.promptId
+          && delivery.runId === prompt.runId
+        ));
+      if (delivered) {
+        await context.promptQueue.removeForHostCleanup(
+          prompt.promptId,
+          prompt.conversationId,
+        );
+      } else {
+        await context.promptQueue.markAttentionAfterUncertainFailure(
+          prompt.promptId,
+          prompt.conversationId,
+          prompt.runId,
+          "Recovery could not prove pending prompt user delivery.",
+          this.now().toISOString(),
+        );
+      }
+      await this.emitPendingPromptsChanged(context, prompt.conversationId);
     }
 
     for (const recovery of startedAbortOperations) {
@@ -4542,6 +4844,67 @@ export class ProjectSessionCoordinator {
     return await work(actor.sessionManager);
   }
 
+  private async pumpPendingPrompt(
+    context: ProjectContext,
+    conversationId: string,
+  ): Promise<boolean> {
+    if (context.closing || context.deleting.has(conversationId)) return false;
+    const actor = context.actors.get(conversationId);
+    if (!actor || actor.getActivity().kind !== "idle") return false;
+    const queued = (await context.promptQueue.list({ conversationId }))
+      .find((prompt) => prompt.state === "queued");
+    if (!queued) return false;
+
+    const runId = randomUUID();
+    const dispatching = await context.promptQueue.markDispatching(
+      queued.promptId,
+      conversationId,
+      runId,
+      this.now().toISOString(),
+    );
+    await this.emitPendingPromptsChanged(context, conversationId);
+    let completion: Promise<RunSettlement>;
+    try {
+      completion = actor.startPrompt({
+        runId,
+        text: dispatching.text,
+        origin: "pending_prompt",
+      });
+    } catch {
+      // startPrompt rejected before an AgentSession turn existed, so no user
+      // message could have been delivered. Preserve FIFO for later lifecycle
+      // activity instead of turning a deterministic race into attention.
+      await context.promptQueue.requeueAfterDeterministicRejection(
+        dispatching.promptId,
+        conversationId,
+        runId,
+      );
+      await this.emitPendingPromptsChanged(context, conversationId);
+      return false;
+    }
+    this.trackBackground(context, completion.then(
+      () => undefined,
+      (error) => this.runLifecycle(context, async () => {
+        const current = (await context.promptQueue.list({ conversationId }))
+          .find(({ promptId }) => promptId === dispatching.promptId);
+        if (
+          current?.state === "dispatching"
+          && current.runId === runId
+        ) {
+          await context.promptQueue.markAttentionAfterUncertainFailure(
+            current.promptId,
+            conversationId,
+            runId,
+            error instanceof Error ? error.message : String(error),
+            this.now().toISOString(),
+          );
+          await this.emitPendingPromptsChanged(context, conversationId);
+        }
+      }),
+    ));
+    return true;
+  }
+
   private async pumpTarget(
     context: ProjectContext,
     conversationId: string,
@@ -4555,7 +4918,11 @@ export class ProjectSessionCoordinator {
     });
     if (context.closing) return "no_work";
     if (context.deleting.has(conversationId)) return "blocked_by_deletion";
-    if (pending.length === 0) return "no_work";
+    if (pending.length === 0) {
+      return await this.pumpPendingPrompt(context, conversationId)
+        ? "started"
+        : "no_work";
+    }
 
     const aggregate = aggregateReservedConversationEntries(
       actor.sessionManager.getEntries(),
@@ -4889,6 +5256,23 @@ export class ProjectSessionCoordinator {
         );
         await context.inbox.delete(envelope.messageId);
       }
+      const prompts = await context.promptQueue.list({ conversationId });
+      for (const prompt of prompts) {
+        if (prompt.state === "queued") {
+          await context.promptQueue.withdrawQueued(
+            prompt.promptId,
+            conversationId,
+          );
+        } else {
+          await context.promptQueue.removeForHostCleanup(
+            prompt.promptId,
+            conversationId,
+          );
+        }
+      }
+      if (prompts.length > 0) {
+        await this.emitPendingPromptsChanged(context, conversationId);
+      }
       if (actor) {
         context.actorUnsubscribes.get(conversationId)?.();
         context.actorUnsubscribes.delete(conversationId);
@@ -4986,6 +5370,47 @@ export class ProjectSessionCoordinator {
     const actor = context.actors.get(conversationId);
     if (!actor) throw new Error(`Conversation is not active: ${conversationId}`);
     return actor;
+  }
+
+  private assertPromptConversation(
+    context: ProjectContext,
+    conversationId: string,
+  ): void {
+    if (context.deleting.has(conversationId)) {
+      throw new Error(`Conversation is being deleted: ${conversationId}`);
+    }
+    if (
+      !context.actors.has(conversationId)
+      && !context.project.listConversations().some(({ id }) => id === conversationId)
+    ) {
+      throw new Error(`Conversation not found: ${conversationId}`);
+    }
+  }
+
+  private assertExactPrompt(
+    prompts: readonly ProjectPromptRecord[],
+    conversationId: string,
+    promptId: string,
+  ): ProjectPromptRecord {
+    const prompt = prompts.find(({ promptId: candidate }) => candidate === promptId);
+    if (prompt === undefined) {
+      throw new Error(`Prompt not found: ${promptId}`);
+    }
+    if (prompt.conversationId !== conversationId) {
+      throw new Error(`Prompt conversation identity does not match: ${promptId}`);
+    }
+    return prompt;
+  }
+
+  private async emitPendingPromptsChanged(
+    context: ProjectContext,
+    conversationId: string,
+  ): Promise<void> {
+    this.emit(context, {
+      type: "pending_prompts_changed",
+      conversationId,
+      prompts: await context.promptQueue.list({ conversationId }),
+    });
   }
 
   private requireContext(handle: ProjectSessionHandle): ProjectContext {

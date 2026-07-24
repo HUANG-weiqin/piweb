@@ -12,6 +12,7 @@ import {
   MAX_ROLE_SYSTEM_PROMPT_BYTES,
   MAX_RUN_FINAL_TEXT_BYTES,
   META_OPERATION_CUSTOM_TYPE,
+  PENDING_PROMPT_DELIVERY_CUSTOM_TYPE,
   RUN_SETTLEMENT_CUSTOM_TYPE,
   TEMPORARY_RETURN_RECEIPT_CUSTOM_TYPE,
   aggregateReservedConversationEntries,
@@ -22,6 +23,7 @@ import {
   createConversationMetaEntry,
   createConversationRoleChangeEntry,
   createMetaOperationEntry,
+  createPendingPromptDeliveryEntry,
   createRunSettlementEntry,
   createTemporaryReturnReceiptEntry,
   parseConversationCardEntry,
@@ -30,6 +32,7 @@ import {
   parseConversationMetaEntry,
   parseConversationRoleChangeEntry,
   parseMetaOperationEntry,
+  parsePendingPromptDeliveryEntry,
   parseReservedConversationEntry,
   parseRunSettlementEntry,
   parseTemporaryReturnReceiptEntry,
@@ -438,6 +441,33 @@ describe("conversation reserved entries", () => {
       ...settlement(),
       finalText: "x".repeat(MAX_RUN_FINAL_TEXT_BYTES + 1),
     })).toThrow(/finalText/i);
+  });
+
+  it("records strict pending prompt delivery receipts without conflicting prompt/run duplicates", () => {
+    const delivery = createPendingPromptDeliveryEntry({
+      promptId: randomUUID(),
+      runId: randomUUID(),
+      deliveredAt: timestamp,
+    });
+    expect(delivery.customType).toBe(PENDING_PROMPT_DELIVERY_CUSTOM_TYPE);
+    expect(parsePendingPromptDeliveryEntry(delivery)).toEqual(delivery);
+    expect(parseReservedConversationEntry(delivery)).toEqual({
+      kind: "pending_prompt_delivery",
+      entry: delivery,
+    });
+    expect(aggregateReservedConversationEntries([delivery, delivery])
+      .pendingPromptDeliveries).toEqual([delivery.data]);
+    expect(() => aggregateReservedConversationEntries([
+      delivery,
+      createPendingPromptDeliveryEntry({
+        ...delivery.data,
+        deliveredAt: "2026-07-19T10:01:00.000Z",
+      }),
+    ])).toThrow(/conflicting.*pending prompt delivery/i);
+    expect(() => createPendingPromptDeliveryEntry({
+      ...delivery.data,
+      promptId: "not-a-uuid",
+    })).toThrow(/promptId/i);
   });
 
   it("records caller-owned temporary return receipt transitions strictly", () => {
