@@ -40,7 +40,9 @@ Pi Web 是本机优先的极简 Agent 工作台。当前目标不是复制 Pi �
 - 工具权限属于用户级角色模板，并进入 conversation 当前角色快照；新角色和旧角色迁移默认 `read_only`，模板后续编辑不得自动改变已有会话。用户只可在会话空闲时显式应用一个当前可用角色，宿主必须追加角色变更记录并用同一 SessionManager 重建运行时；失败要恢复上一角色或将 actor 置为 fatal。
 - 浏览器不是 transcript owner；恢复必须从服务端 `conversation_snapshot` hydrate，localStorage 只保存目录和安全偏好。
 - 客户端收到匹配的 history snapshot 前不得发送 prompt；state 提交和历史恢复是两个观察边界。
-- `WebSocket.send()` 不是 prompt 提交点。只有匹配 sessionId + runId 的 `run_queued` 才能清空草稿并投影 user message；确认前断线必须保留草稿、恢复历史后提示核对，禁止自动重发。
+- `WebSocket.send()` 不是 prompt 提交点。只有匹配 sessionId + runId 的 `run_queued` 才能清空直接 prompt 草稿并投影 user message；durable enqueue 则只由匹配 commandId 的完成回执或包含同一 promptId 的精确队列快照证明提交。确认前断线必须保留草稿、恢复历史/队列后提示核对，禁止自动重发或按正文去重。
+- busy 时的普通用户消息必须先进入服务端 `.piweb/pending-prompts` durable queue，浏览器不能拥有或自动泵送 FIFO。queued 可精确撤回；Steer 必须由用户显式点击并绑定当前 exact runId；dispatching 不可假装撤回，SDK 已接受后无法证明持久交付的记录只能转 attention，不能自动重试。
+- pending prompt 自动 pump 只在 actor idle 时按 `createdAt + promptId` FIFO 启动新 run，并让跨会话 inbox 优先。dispatching sidecar 只能凭 JSONL 中 exact `promptId + runId` delivery receipt 清理；run settlement 本身不是交付证明。
 - 普通会话操作串行执行；`abort`、认证响应、认证取消和生命周期失效走控制通道，session dispose 排回 actor 队列。
 - 所有 session command/state/event 都带 `sessionId`；run command/event 还带 `runId`。客户端必须丢弃不匹配的身份。
 - 会让界面等待配置结果的命令必须有精确关联身份；当前 API Key 与模型选择使用 sessionId + 连接内一次性 commandId，不能把任意 PublicState 刷新当作成功回执。

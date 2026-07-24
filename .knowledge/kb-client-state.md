@@ -1,6 +1,6 @@
 # 客户端状态
 
-`updated: 2026-07-22`
+`updated: 2026-07-24`
 
 ## 这个模块是干什么的
 
@@ -18,6 +18,7 @@ ServerEvent
 → role_catalog_snapshot / project_snapshot 更新当前项目控制面
 → focus_attached 提交 conversationId + focusId
 → conversation_snapshot 原子 hydrate focused items
+→ pending_prompts_snapshot 替换当前 focus 的服务端持久队列投影
 → SessionEvent 按 focusId + runId 更新 transcript
 → conversation_item 按 focusId + cardId upsert
 → extension_ui_request/closed 按 sessionId + requestId 维护临时模态队列
@@ -30,7 +31,8 @@ ServerEvent
 - `outstandingRunId` 只覆盖“浏览器已交给 WebSocket、服务端运行状态尚未被观察到”的本地传输间隙，并为 Stop 提供 runId；匹配的 PublicState、terminal 或 error 会结算它，它不伪装成 Agent 状态。
 - `PiSocket.send() === true` 只表示浏览器 transport 接受了帧，不表示服务端接受 prompt。只有匹配 focus 三元身份 + runId 的 `run_queued` 才是接收提交点：此时才能清空草稿并把 user message 投影进 transcript。
 - prompt 接收确认前断线或显式切换项目属于 unknown outcome。客户端按 `workspaceKey + projectId + conversationId` 保留未确认草稿，切到其它项目/会话时不投影，切回原 focus 后恢复草稿并提示用户核对，绝不自动重发；只有匹配 focus 三元身份 + runId 的 `run_queued` 才能清掉该未确认草稿。
-- 当前 focus busy 时 composer 仍可发送；消息先进入按 `workspaceKey + projectId + conversationId` 隔离的浏览器内存 FIFO。当前 run 进入 `running | waiting` 后，客户端立即把队首连续“等待中”条目用空行聚合成一个 `steer` 批次，而不是等待 idle 或为每条消息新建 run；`queued | cancelling` 暂不注入。批次以自己的 commandId 和精确 active runId 等待 `command_complete(steer)`，确认前条目仍保留并显示提交中，断线或拒绝则整批转为“需要确认”。pending steer 也按相同三元 scope 保存，当前 UI 只投影当前 scope 的一项；因此 A 等待 delivery 时可以切到 B，A 的迟到 completion/error 只结算 A 的队列，不能清除 B 的 pending。若 run 已结算，剩余连续条目同样聚合成一个普通 prompt，并仍以 `run_queued` 确认。切换会话/项目只切换当前队列投影，不能把 A 的等待消息发到 B；localStorage 不成为消息真相。
+- 当前 focus busy、已有未确认 run 或已有 durable pending prompt 时，composer 仍可发送，但使用带新 `promptId + commandId` 的 `enqueue_prompt` 把原始用户意图持久提交给服务端；浏览器不再维护或自动泵送消息 FIFO，也不会自动 steer。`WebSocket.send()` 后草稿保持不变，只有匹配的 `command_complete(enqueue_prompt)` 或包含同一 promptId 的精确 `pending_prompts_snapshot` 才证明 durable commit 并清掉对应未确认草稿。断线或工作区切换前尚未确认的 enqueue 只在浏览器按 `workspaceKey + projectId + conversationId` 保留 `{text,promptId}` 供用户核对，绝不自动重放，也绝不能按正文与快照去重。
+- `pending_prompts_snapshot` 是当前 focus 队列的唯一 UI 真相；切换 focus 立即清空旧投影，返回后等待服务端新快照，迟到快照必须同时匹配 sessionId、conversationId 和 focusId。`queued` 可显式撤回；仅当当前 active run 精确处于 `running | waiting` 时才显示 `Steer`，点击后发送带该 runId 的 `steer_pending_prompt`。`dispatching` 已越过可撤回边界；`attention` 表示服务端不能证明投递结果，只能显示原因并让用户移除记录，不能伪装成安全重试。相同正文的不同 promptId 必须分别显示和结算。
 - 每次 initialize 或重连生成新的 observation sessionId；每次 initialize/open/create/focus 由服务端返回新的 focusId。
 - 当前 transcript 身份是 `sessionId + conversationId + focusId`。即使 conversationId 再次相同，旧 focus 的 state/snapshot/live item 也必须丢弃。
 - projectId/conversationId 随精确 `focus_attached` 提交；重连用新 sessionId 显式 `open` 当前 durable conversation，若尚未知 ID 才请求 `recent`。
@@ -97,7 +99,7 @@ ServerEvent
 
 ## 坑点
 
-- 不带当前 project observation sessionId 的迟到状态不能恢复已关闭的工作区；只匹配 conversationId 也不够。浏览器内存里的 prompt queue、未确认草稿、guidance 和手动压缩 pending 都必须至少按 `workspaceKey + projectId + conversationId` 分区。
+- 不带当前 project observation sessionId 的迟到状态不能恢复已关闭的工作区；只匹配 conversationId 也不够。durable prompt queue 属于服务端，浏览器只按完整 focus 身份投影快照；本地未确认草稿、队列命令 waiter 和手动压缩 pending 仍必须至少按 `workspaceKey + projectId + conversationId` 分区。
 - 设置、认证或 registry 错误不能作为 run finished 处理。
 - `message_end` 可能没有任何流式 delta；最终文本校准必须由服务端 projector 提供。
 - 断线重连会先清空旧投影，再用新 observation/focus identity 打开当前 conversation 并 hydrate；不得把旧浏览器消息和新快照拼接。

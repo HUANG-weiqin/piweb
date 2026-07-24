@@ -1,6 +1,6 @@
 # 线协议
 
-`updated: 2026-07-22`
+`updated: 2026-07-24`
 
 ## 这个模块是干什么的
 
@@ -19,7 +19,7 @@ ClientCommand
 → App / reducer
 ```
 
-协议由 `PROTOCOL_VERSION` 标识，当前为 v23。工具参数和结果允许 `unknown`，但服务端在投影时会做有界遍历、转成 JSON-safe 数据并限制单值大小。
+协议由 `PROTOCOL_VERSION` 标识，当前为 v24。工具参数和结果允许 `unknown`，但服务端在投影时会做有界遍历、转成 JSON-safe 数据并限制单值大小。
 
 ## 决策
 
@@ -28,7 +28,9 @@ ClientCommand
 - `project_snapshot` 与 `role_catalog_snapshot` 用 `sessionId + projectId` 过滤；它们描述整个项目，不能因更新来自后台 conversation 就丢弃。
 - `project_activity_snapshot` 是连接级、跨当前 observation 的进程目录，只汇总 coordinator 已加载项目的 cwd/projectId、busy conversation 数和 coordinator-owned attention 数；它不携带 transcript、当前 focus 或浏览器私有 unread。最多 100 项，超出时置 `truncated=true`。
 - 当前 transcript 的 state、snapshot、live run 和卡片必须匹配 `sessionId + conversationId + focusId`。每次 initialize/open/create/focus 都分配新 focusId，因此快速 `A → B → A` 时第一次 A 的迟到帧不能污染第二次 A。
-- prompt/abort 显式携带上述 focus 三元身份和 runId；运行中引导另用 `steer + commandId + 精确 active runId`，由 `command_complete(steer)` 确认 SDK 已把该 user message 实际送入当前 run，而不只是放进易失内存队列。steer 是控制通道，不能排在被当前 run 占用的 actor 串行队列之后；错 focus 或错 runId 必须失败，不能作用于当前观察。
+- prompt/abort 显式携带上述 focus 三元身份和 runId；底层即时引导仍可使用 `steer + commandId + 精确 active runId`，由 `command_complete(steer)` 确认 SDK 已把该 user message 持久送入当前 run，而不只是放进易失内存队列。steer 是控制通道，不能排在被当前 run 占用的 actor 串行队列之后；错 focus 或错 runId 必须失败，不能作用于当前观察。
+- busy composer 的普通发送不直接调用 steer，而使用 `enqueue_prompt + commandId + promptId + 精确 focus`。`command_complete(enqueue_prompt)` 只在 sidecar durable commit 后返回。`withdraw_pending_prompt` 只删除尚为 queued 的精确 promptId；`steer_pending_prompt` 还携带精确 active runId，并在 durable user delivery receipt 写入后才完成；`dismiss_pending_prompt` 只删除 attention 记录。四种命令都使用一次性 commandId 精确结算。
+- `pending_prompts_snapshot` 是独立于 transcript 的完整低频快照，携带 `sessionId + conversationId + focusId` 和最多 64 条严格 tagged records。queued 没有 dispatch 字段；dispatching 必须带 runId/dispatchedAt；attention 必须带有界 reason/attentionAt。初始化、focus attach、`refresh_view` 和当前 focus 队列变化都会发布；异步读取后必须复验原 view/focus，不能把 A 的队列投影到 B。
 - `browse_directory` 是 initialize 前的连接级只读控制命令，使用连接内一次性 commandId 关联 `directory_listing` 或 command error；`path` 是临时浏览位置，不是已提交项目 cwd。列表同时受项数和序列化字节数限制，迟到或不匹配的结果必须忽略。
 - OAuth login/request/progress/response/cancel/complete 显式携带 authFlowId；浏览器不得接收非当前 flow 的帧。
 - 扩展对话响应携带 sessionId / requestId；requestId 一次性使用，错类型、错选项、重复和 stale response 都是 no-op。
@@ -39,12 +41,12 @@ ClientCommand
 - `refresh_view` 是页面恢复后的无等待只读重同步，必须精确携带当前 `sessionId + projectId` 以及成对出现的 `conversationId + focusId`；身份已经变化时服务端静默丢弃。它刷新 state、角色目录和项目索引；只要 focused actor 未压缩，就可重发 conversation snapshot。active run 的 snapshot 必须由 actor 的 live projection 覆盖 durable 活跃尾部，不能用持久快照覆盖正在流式生成的尾部。
 - 当前 focus 被其它 Agent 删除时，服务端发送带完整 `sessionId + projectId + conversationId + focusId` 的 `focus_invalidated(reason=deleted)`；客户端只结算精确匹配的观察身份，然后回到角色选择页。不能从缺少当前项的截断列表猜测删除。
 - 创建新 conversation 必须显式 roleId。`default` 只是角色 ID，不是省略选择时的隐含值。
-- 工具模式只有 `read_only | full_access`，由角色模板持有并复制到 conversation 当前角色快照；角色 CRUD payload 必须同时携带模型默认思考强度和工具模式。v23 不接受 `initialize.toolMode` 与 `set_tool_mode`，协议仍没有逐工具询问命令或待回答状态。
+- 工具模式只有 `read_only | full_access`，由角色模板持有并复制到 conversation 当前角色快照；角色 CRUD payload 必须同时携带模型默认思考强度和工具模式。v24 不接受 `initialize.toolMode` 与 `set_tool_mode`，协议仍没有逐工具询问命令或待回答状态。
 - `rename_conversation` 同时匹配当前 sessionId 和目标 conversationId。
 - `delete_conversation` 携带 sessionId、一次性 commandId 和目标 conversationId；浏览器不能提交文件路径。成功和失败都用同一 sessionId + commandId 精确结算。
 - `truncate_conversation` 携带一次性 commandId、精确 `sessionId + conversationId + focusId` 和 snapshot 中的 durable messageId。assistant 聚合 ID 使用 `assistant:<entryId>`，仅由服务端剥离前缀并解析物理锚点；成功前服务端先发布截断后的完整 focused snapshot，再发送同 commandId 的完成事件，客户端不得本地猜测删除结果。
 - 角色 CRUD 使用 `create_role/update_role/delete_role + sessionId + commandId`；create/update 的 role payload 包含 `canManageSessions`，update/delete 还携带 expectedRevision，不能用迟到 snapshot 冒充提交成功。初始化模板没有删除特权。
-- 会话模型、初始思考强度、工具权限和会话管理能力都来自当前角色快照。v23 的 `switch_conversation_role` 携带精确 `sessionId + conversationId + focusId + commandId + roleId`，只允许 idle focus，并在服务端发布新 state、project snapshot 与 conversation snapshot 后完成；直接 `select_model` 仍明确拒绝。API Key 命令继续按 sessionId + commandId 精确结算。
+- 会话模型、初始思考强度、工具权限和会话管理能力都来自当前角色快照。v24 的 `switch_conversation_role` 携带精确 `sessionId + conversationId + focusId + commandId + roleId`，只允许 idle focus，并在服务端发布新 state、project snapshot 与 conversation snapshot 后完成；直接 `select_model` 仍明确拒绝。API Key 命令继续按 sessionId + commandId 精确结算。
 - `compact_context` 携带一次性 commandId 和精确 `sessionId + conversationId + focusId`；只允许空闲 conversation，成功后服务端先刷新 state / snapshot，再发送同 commandId 的完成事件。
 - `PublicState.compacting` 是当前 focused conversation 正在执行 Pi 标准压缩的可恢复瞬时状态；手动与自动压缩共用该字段。它独立于 `busy/activeRun`，因为自动压缩可能发生在 run 结算尾部，而手动压缩没有 runId。
 - `set_compaction_threshold` 携带一次性 commandId 和精确 `sessionId + conversationId + focusId`，只接受 20–90 的整数百分比；`PublicState.compactionThresholdPercent` 是当前会话权威值，成功或失败必须按 commandId 精确结算。
@@ -59,7 +61,7 @@ ClientCommand
 - `run_queued → run_started → run_finished(outcome)` 由工作台适配层合成，不把 SDK 的 agent lifecycle 当成线协议真相。
 - `run_queued` 还有明确的接收回执语义：服务端已校验身份、占用不可复用 runId、安装 active RunTicket，并接受该 prompt 进入 actor 队列。浏览器只有收到精确匹配 focus 三元身份 + runId 的这一帧，才能清草稿并投影本地 user message。
 - runId 描述执行生命周期，不描述气泡生命周期。projector 为每条物理 assistant message 发送 `assistant_message_started`，steer 被 SDK 真正取用时另用 `user_message` 标出同一 run 内的新用户段；后续文本、思考、工具和 usage 仍归该 run，但 reducer 只写入最新 assistant 段。UI 可以合并没有 card/compaction/user 边界的同 run 相邻段，最终 focused snapshot 仍以 Pi durable entry 的 ordered parts 为准。
-- `WebSocket.send()` 不是协议提交点。确认前断线是 unknown outcome；当前协议没有 prompt 查询或幂等重放，因此客户端必须保留草稿、恢复历史后让用户核对，不能自动重试。
+- `WebSocket.send()` 不是协议提交点。直接 prompt 仍以精确 `run_queued` 为提交回执；durable enqueue 以 `command_complete(enqueue_prompt)` 或包含同一 promptId 的精确队列快照为提交证明。确认前断线是 unknown outcome；客户端必须保留草稿并在恢复 history/queue 后让用户核对，不能自动重试，也不能按正文去重。
 - 错误包含 `scope`，命令错误可包含 `operation`；需要精确结算的设置错误还必须携带 sessionId + commandId。通用设置错误不能结束一次运行。
 - context usage 保留 `measured | estimated | unknown` 来源，不把未知伪装成精确数字。
 
@@ -78,6 +80,7 @@ ClientCommand
 - `src/shared/protocol.ts`
 - `src/shared/protocol.test.ts`
 - `src/server/session-events.ts`
+- `src/server/project-prompt-queue.ts`
 - `src/server/session-events.test.ts`
 - `src/client/lib/socket.ts`
 
@@ -91,7 +94,7 @@ ClientCommand
 - 扩展 UI 文本与选项有独立上限；超限是扩展错误，不能静默截断后改变选择语义。
 - 大型或循环工具结果必须经过 `toWireValue()`；不要直接放入 `ServerEvent`。
 - 不要把完整 conversation list 放回 PublicState，也不要发送无总量上限的历史快照。
-- 不要用普通 prompt/run_queued 冒充运行中引导。新 run 只由 `run_queued` 提交，当前 run 的 steer 只由精确 commandId 的 `command_complete(steer)` 提交；身份不匹配的回执必须忽略。
+- 不要把 busy composer 消息直接变成易失 steer。它先由 `enqueue_prompt` 持久化；只有用户对某条 queued 记录显式点击 Steer 才发送 `steer_pending_prompt + 精确 active runId`。直接 prompt、底层 raw steer 与 durable pending prompt 是三个不同提交边界，身份不匹配的回执必须忽略。
 - 不要只按 conversationId 过滤 transcript。conversationId 会在 `A → B → A` 中重复，focusId 才能阻断 ABA。
 
 ## 关联模块
