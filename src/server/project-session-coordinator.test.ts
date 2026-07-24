@@ -25,6 +25,7 @@ import {
   createMetaOperationEntry,
   createRunSettlementEntry,
   MAX_CONVERSATION_BODY_BYTES,
+  RUN_SETTLEMENT_CUSTOM_TYPE,
   type ConversationMeta,
   type RunSettlement,
 } from "./conversation-meta.js";
@@ -83,6 +84,7 @@ interface ReceivedCustomMessage {
   display: boolean;
   details: unknown;
   triggerTurn: boolean;
+  deliverAs?: "steer" | "followUp" | "nextTurn";
 }
 
 function fakeSettings(): SettingsManager {
@@ -97,6 +99,10 @@ class FakeSessionControl {
   readonly received: ReceivedCustomMessage[] = [];
   readonly promptTexts: string[] = [];
   readonly behaviors: SessionBehavior[] = [];
+  readonly continuationBehaviors: SessionBehavior[] = [];
+  readonly pendingSteers: ReceivedCustomMessage[] = [];
+  readonly modelRequestCustomMessages: ReceivedCustomMessage[][] = [];
+  steerContinuationCalls = 0;
   abortCalls = 0;
   disposeCalls = 0;
   skipNextCustomMessagePersistence = false;
@@ -134,31 +140,29 @@ class FakeSessionControl {
         message: Parameters<AgentSession["sendCustomMessage"]>[0],
         sendOptions: Parameters<AgentSession["sendCustomMessage"]>[1],
       ) => {
-        if (control.skipNextCustomMessagePersistence) {
-          control.skipNextCustomMessagePersistence = false;
-          return;
-        }
         const received = {
           customType: message.customType,
           content: String(message.content),
           display: message.display,
           details: message.details,
           triggerTurn: sendOptions?.triggerTurn === true,
+          deliverAs: sendOptions?.deliverAs,
         };
         control.received.push(received);
-        control.manager.appendCustomMessageEntry(
-          received.customType,
-          received.content,
-          received.display,
-          received.details,
-        );
+        if (received.deliverAs === "steer") {
+          control.pendingSteers.push(received);
+          return;
+        }
+        control.persistCustomMessage(received);
         if (received.triggerTurn) await control.runNext();
       },
       abort: async () => {
         control.abortCalls++;
         control.abortCurrent?.();
       },
-      clearQueue: () => undefined,
+      clearQueue: () => {
+        control.pendingSteers.splice(0);
+      },
       dispose: () => {
         control.disposeCalls++;
       },
@@ -174,6 +178,10 @@ class FakeSessionControl {
 
   enqueue(...behaviors: SessionBehavior[]): void {
     this.behaviors.push(...behaviors);
+  }
+
+  enqueueContinuation(...behaviors: SessionBehavior[]): void {
+    this.continuationBehaviors.push(...behaviors);
   }
 
   emitFinal(text: string): void {
@@ -194,6 +202,10 @@ class FakeSessionControl {
     } as unknown as AgentSessionEvent);
   }
 
+  beginNextModelTurn(): void {
+    this.consumePendingSteers();
+  }
+
   emitTextDelta(delta: string): void {
     this.listener?.({
       type: "message_update",
@@ -204,9 +216,44 @@ class FakeSessionControl {
     } as unknown as AgentSessionEvent);
   }
 
+  private persistCustomMessage(message: ReceivedCustomMessage): void {
+    if (this.skipNextCustomMessagePersistence) {
+      this.skipNextCustomMessagePersistence = false;
+      return;
+    }
+    this.manager.appendCustomMessageEntry(
+      message.customType,
+      message.content,
+      message.display,
+      message.details,
+    );
+  }
+
+  private consumePendingSteers(): boolean {
+    const pending = this.pendingSteers.splice(0);
+    if (pending.length === 0) return false;
+    this.steerContinuationCalls++;
+    this.modelRequestCustomMessages.push(pending);
+    for (const message of pending) this.persistCustomMessage(message);
+    return true;
+  }
+
   private async runNext(): Promise<void> {
     const behavior = this.behaviors.shift() ?? completesWith("ok");
-    await behavior(this);
+    const session = this.session as unknown as { isStreaming: boolean };
+    const wasStreaming = session.isStreaming;
+    session.isStreaming = true;
+    this.listener?.({ type: "agent_start" } as AgentSessionEvent);
+    try {
+      await behavior(this);
+      while (this.consumePendingSteers()) {
+        const continuation = this.continuationBehaviors.shift();
+        if (continuation) await continuation(this);
+      }
+    } finally {
+      session.isStreaming = wasStreaming;
+      this.listener?.({ type: "agent_end", messages: [] } as AgentSessionEvent);
+    }
   }
 }
 
@@ -1912,7 +1959,7 @@ describe("ProjectSessionCoordinator", () => {
     });
   });
 
-  it("durably queues a message for a busy target without interrupting its current run", async () => {
+  it("steers a durable message into a busy target's current run", async () => {
     const fixture = await createFixture();
     const source = await fixture.coordinator.createUserConversation(
       fixture.handle,
@@ -1924,8 +1971,16 @@ describe("ProjectSessionCoordinator", () => {
     );
     const busyStarted = deferred();
     const releaseBusy = deferred();
-    fixture.runtime.control(target.conversationId).enqueue(
-      blocksUntil(busyStarted, releaseBusy, "busy run done"),
+    fixture.runtime.control(target.conversationId).enqueue(async (control) => {
+      busyStarted.resolve();
+      control.abortCurrent = () => releaseBusy.resolve();
+      try {
+        await releaseBusy.promise;
+      } finally {
+        control.abortCurrent = undefined;
+      }
+    });
+    fixture.runtime.control(target.conversationId).enqueueContinuation(
       completesWith("message handled"),
     );
     const busyRunId = randomUUID();
@@ -1947,14 +2002,26 @@ describe("ProjectSessionCoordinator", () => {
       },
     ) as {
       status: string;
-      activeRunId: string;
+      runId: string;
     };
 
     expect(sendResult).toMatchObject({
-      status: "queued",
-      activeRunId: busyRunId,
+      status: "processing",
+      runId: busyRunId,
     });
-    expect(fixture.runtime.control(target.conversationId).received).toEqual([]);
+    expect(fixture.runtime.control(target.conversationId).received).toEqual([
+      expect.objectContaining({
+        content: expect.stringContaining("Handle this after the current task"),
+        triggerTurn: false,
+        deliverAs: "steer",
+      }),
+    ]);
+    expect(
+      aggregateReservedConversationEntries(target.sessionManager.getEntries())
+        .deliveredMessageIds,
+    ).toHaveLength(0);
+    expect(fixture.runtime.control(target.conversationId).pendingSteers)
+      .toHaveLength(1);
     expect(fixture.runtime.control(target.conversationId).abortCalls).toBe(0);
     expect(
       (await fixture.coordinator.listSessions(fixture.handle))
@@ -1966,15 +2033,33 @@ describe("ProjectSessionCoordinator", () => {
     ).toBe(false);
 
     releaseBusy.resolve();
-    await busyCompletion;
+    const busySettlement = await busyCompletion;
     await waitUntil(
-      () => fixture.runtime.control(target.conversationId).received.length === 1,
-      "the queued message to be delivered after the busy run",
+      async () => (
+        await coordinatorInbox(fixture.handle).list({
+          toConversationId: target.conversationId,
+        })
+      ).length === 0,
+      "the steered message to settle with its current run",
     );
-    expect(fixture.runtime.control(target.conversationId).received[0]).toMatchObject({
+    expect(fixture.runtime.control(target.conversationId).promptTexts).toEqual([
+      "stay busy",
+    ]);
+    expect(fixture.runtime.control(target.conversationId).steerContinuationCalls)
+      .toBe(1);
+    expect(
+      fixture.runtime.control(target.conversationId).modelRequestCustomMessages,
+    ).toEqual([[expect.objectContaining({
       content: expect.stringContaining("Handle this after the current task"),
-      triggerTurn: true,
+      deliverAs: "steer",
+    })]]);
+    expect(busySettlement).toMatchObject({
+      finalText: "message handled",
     });
+    expect(
+      aggregateReservedConversationEntries(target.sessionManager.getEntries())
+        .deliveredMessageIds,
+    ).toHaveLength(1);
     expect(
       fixture.runtime.control(target.conversationId).received[0]?.content,
     ).toContain("你负责管理自己创建的会话生命周期");
@@ -1983,6 +2068,243 @@ describe("ProjectSessionCoordinator", () => {
       (await fixture.coordinator.listSessions(fixture.handle))
         .find(({ id }) => id === target.conversationId)?.attention,
     ).toBe(false);
+  });
+
+  it("does not hold project lifecycle shutdown on pre-stream steering", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const preflightStarted = deferred();
+    const releasePreflight = deferred();
+    const control = fixture.runtime.control(target.conversationId);
+    const originalPrompt = control.session.prompt.bind(control.session);
+    control.session.prompt = async (...args) => {
+      preflightStarted.resolve();
+      control.abortCurrent = () => releasePreflight.resolve();
+      await releasePreflight.promise;
+      control.abortCurrent = undefined;
+      return originalPrompt(...args);
+    };
+
+    const targetCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      target.conversationId,
+      randomUUID(),
+      "pause before Pi streaming starts",
+    );
+    await preflightStarted.promise;
+    const sending = executeTool(
+      fixture.runtime.control(source.conversationId),
+      "send_session_message",
+      "pre-stream-steer",
+      {
+        conversationId: target.conversationId,
+        message: "Persist this without blocking coordinator close.",
+      },
+    );
+    await waitUntil(
+      async () => (await coordinatorInbox(fixture.handle).list({
+        toConversationId: target.conversationId,
+      }))[0]?.state === "processing",
+      "the pre-stream envelope claim",
+    );
+
+    let closeSettled = false;
+    const closing = fixture.coordinator.close().then(() => {
+      closeSettled = true;
+    });
+    let closeError: unknown;
+    try {
+      await waitUntil(
+        () => closeSettled,
+        "coordinator close to cancel a pre-stream run",
+        500,
+      );
+    } catch (error) {
+      closeError = error;
+    } finally {
+      releasePreflight.resolve();
+    }
+    await Promise.allSettled([sending, targetCompletion, closing]);
+    expect(closeError).toBeUndefined();
+  });
+
+  it("recovers a rejected pre-stream steer after actor infrastructure failure", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const preflightStarted = deferred();
+    const releasePreflight = deferred();
+    const control = fixture.runtime.control(target.conversationId);
+    const originalPrompt = control.session.prompt.bind(control.session);
+    control.session.prompt = async (...args) => {
+      preflightStarted.resolve();
+      control.abortCurrent = () => releasePreflight.resolve();
+      await releasePreflight.promise;
+      control.abortCurrent = undefined;
+      return originalPrompt(...args);
+    };
+    fixture.runtime.nextSessionBehaviors.push([
+      completesWith("recovered durable steer"),
+    ]);
+    const manager = target.sessionManager as unknown as {
+      appendCustomEntry(customType: string, data: unknown): string;
+    };
+    const originalAppend = manager.appendCustomEntry.bind(manager);
+    let rejectSettlement = true;
+    manager.appendCustomEntry = (customType, data) => {
+      if (rejectSettlement && customType === RUN_SETTLEMENT_CUSTOM_TYPE) {
+        rejectSettlement = false;
+        throw new Error("simulated settlement infrastructure failure");
+      }
+      return originalAppend(customType, data);
+    };
+
+    const failedRunId = randomUUID();
+    const failedCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      target.conversationId,
+      failedRunId,
+      "fail before Pi can accept steering",
+    );
+    await preflightStarted.promise;
+    const sent = await executeTool(
+      fixture.runtime.control(source.conversationId),
+      "send_session_message",
+      "recover-rejected-pre-stream-steer",
+      {
+        conversationId: target.conversationId,
+        message: "recover this rejected in-memory delivery",
+      },
+    ) as { messageId: string; status: string };
+    expect(sent.status).toBe("processing");
+
+    await fixture.coordinator.abort(
+      fixture.handle,
+      target.conversationId,
+      failedRunId,
+    );
+    await expect(failedCompletion).rejects.toThrow(
+      "simulated settlement infrastructure failure",
+    );
+    await waitUntil(
+      async () => (await coordinatorInbox(fixture.handle).get(sent.messageId))
+        === undefined,
+      "the rejected steer to recover without a process restart",
+    );
+    const recoveredActor = (fixture.handle as unknown as {
+      context: { actors: Map<string, ConversationActor> };
+    }).context.actors.get(target.conversationId);
+    expect(
+      aggregateReservedConversationEntries(
+        recoveredActor!.sessionManager.getEntries(),
+      ).deliveredMessageIds,
+    ).toHaveLength(1);
+
+    await executeTool(
+      fixture.runtime.control(source.conversationId),
+      "send_session_message",
+      "send-after-rejected-steer-recovery",
+      {
+        conversationId: target.conversationId,
+        message: "a later message must not be FIFO-blocked",
+      },
+    );
+    await waitUntil(
+      () => fixture.runtime.control(target.conversationId).received.some(
+        ({ content }) => content.includes("a later message must not be FIFO-blocked"),
+      ),
+      "a later message after rejected steer recovery",
+    );
+  });
+
+  it("requeues a steered envelope when Pi settles before recording its marker", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const started = deferred();
+    const release = deferred();
+    fixture.runtime.control(target.conversationId).enqueue(
+      blocksUntil(started, release, "first run settled"),
+      completesWith("replayed durable message"),
+    );
+    const busyRunId = randomUUID();
+    const busyCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      target.conversationId,
+      busyRunId,
+      "work while receiving supervision",
+    );
+    await started.promise;
+    fixture.runtime.control(target.conversationId)
+      .skipNextCustomMessagePersistence = true;
+
+    const result = await executeTool(
+      fixture.runtime.control(source.conversationId),
+      "send_session_message",
+      "steer-marker-retry",
+      {
+        conversationId: target.conversationId,
+        message: "Do not lose this durable supervision message.",
+      },
+    ) as { status: string; runId: string };
+    expect(result).toMatchObject({
+      status: "processing",
+      runId: busyRunId,
+    });
+    expect((await coordinatorInbox(fixture.handle).list({
+      toConversationId: target.conversationId,
+    }))[0]).toMatchObject({
+      state: "processing",
+      processingRunId: busyRunId,
+      processingDelivery: "steer",
+    });
+
+    release.resolve();
+    await busyCompletion;
+    await waitUntil(
+      () => fixture.runtime.control(target.conversationId).received.some(
+        ({ triggerTurn }) => triggerTurn,
+      ),
+      "the unmarked steering message to replay from its durable inbox",
+    );
+    expect(fixture.runtime.control(target.conversationId).received)
+      .toContainEqual(expect.objectContaining({
+        content: expect.stringContaining(
+          "Do not lose this durable supervision message.",
+        ),
+        triggerTurn: true,
+      }));
+    await waitUntil(
+      async () => (
+        await coordinatorInbox(fixture.handle).list({
+          toConversationId: target.conversationId,
+        })
+      ).length === 0,
+      "the replayed message to receive a durable marker and settle",
+    );
+    expect(
+      aggregateReservedConversationEntries(target.sessionManager.getEntries())
+        .deliveredMessageIds,
+    ).toHaveLength(1);
   });
 
   it("continues pumping after the sender is aborted immediately after the durable inbox commit", async () => {
@@ -2116,6 +2438,71 @@ describe("ProjectSessionCoordinator", () => {
     expect(
       fixture.runtime.control(target.conversationId).received[0]?.content,
     ).toContain("Retry this durable message");
+  });
+
+  it("preserves a recovered steering claim across synchronous dispatch rollback", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const started = deferred();
+    const release = deferred();
+    fixture.runtime.control(target.conversationId).enqueue(
+      blocksUntil(started, release, "original run settled"),
+    );
+    const busyRunId = randomUUID();
+    const completion = fixture.coordinator.prompt(
+      fixture.handle,
+      target.conversationId,
+      busyRunId,
+      "accept a steering claim before restart",
+    );
+    await started.promise;
+    const control = fixture.runtime.control(target.conversationId);
+    control.skipNextCustomMessagePersistence = true;
+    const sent = await executeTool(
+      fixture.runtime.control(source.conversationId),
+      "send_session_message",
+      "recovered-steer-dispatch-rollback",
+      {
+        conversationId: target.conversationId,
+        message: "retain the durable steering discriminator",
+      },
+    ) as { messageId: string };
+
+    const recoveryRunId = randomUUID();
+    const inbox = coordinatorInbox(fixture.handle);
+    await inbox.updateState(sent.messageId, {
+      state: "processing",
+      processingRunId: recoveryRunId,
+      processingDelivery: "steer",
+    });
+    const internal = fixture.handle as unknown as {
+      context: { processingBatches: Map<string, unknown> };
+    };
+    internal.context.processingBatches.clear();
+    let dispatchAttempts = 0;
+    target.startMessages = () => {
+      dispatchAttempts++;
+      throw new Error("recovered dispatch fails synchronously");
+    };
+
+    release.resolve();
+    await completion;
+    await waitUntil(
+      () => dispatchAttempts >= 2,
+      "the bounded recovered dispatch retry",
+    );
+    await expect(inbox.get(sent.messageId)).resolves.toMatchObject({
+      state: "processing",
+      processingRunId: recoveryRunId,
+      processingDelivery: "steer",
+    });
   });
 
   it("retries one send_session_message tool call while running and after settlement without duplicate delivery", async () => {
@@ -2626,6 +3013,189 @@ describe("ProjectSessionCoordinator", () => {
     },
   );
 
+  it("observes a correlated durable message committed before wait registration", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const peer = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const callerStarted = deferred();
+    const beginWait = deferred();
+    let peerRunId = "";
+    let waitResult: RunSettlement | undefined;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      callerStarted.resolve();
+      await beginWait.promise;
+      waitResult = await executeTool(
+        control,
+        "wait_for_session",
+        "wait-after-correlated-message",
+        {
+          conversationId: peer.conversationId,
+          runId: peerRunId,
+        },
+      ) as RunSettlement;
+      control.emitFinal("caller observed the committed reply");
+    });
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      randomUUID(),
+      "begin waiting after the peer message commits",
+    );
+    await callerStarted.promise;
+
+    const peerStarted = deferred();
+    const releasePeer = deferred();
+    fixture.runtime.control(peer.conversationId).enqueue(
+      blocksUntil(peerStarted, releasePeer, "peer completed later"),
+    );
+    peerRunId = randomUUID();
+    const peerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      peer.conversationId,
+      peerRunId,
+      "send before the caller registers its wait",
+    );
+    await peerStarted.promise;
+    await executeTool(
+      fixture.runtime.control(peer.conversationId),
+      "send_session_message",
+      "message-before-wait-registration",
+      {
+        conversationId: caller.conversationId,
+        message: "durable reply committed before subscription",
+      },
+    );
+    expect((await coordinatorInbox(fixture.handle).list({
+      toConversationId: caller.conversationId,
+    }))[0]).toMatchObject({
+      fromConversationId: peer.conversationId,
+      fromRunId: peerRunId,
+      state: "processing",
+    });
+
+    beginWait.resolve();
+    await callerCompletion;
+    expect(waitResult).toMatchObject({
+      outcome: "message",
+      conversationId: peer.conversationId,
+      runId: peerRunId,
+    });
+    releasePeer.resolve();
+    await peerCompletion;
+  });
+
+  it("preserves inbox FIFO when an exact wait reply follows a full steer batch", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const child = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const backlogSender = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const childStarted = deferred();
+    const releaseChild = deferred();
+    fixture.runtime.control(child.conversationId).enqueue(
+      blocksUntil(childStarted, releaseChild, "child completed"),
+    );
+    const childRunId = randomUUID();
+    const childCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      child.conversationId,
+      childRunId,
+      "prepare the ordered reply",
+    );
+    await childStarted.promise;
+
+    const waitResolved = deferred();
+    const releaseCaller = deferred();
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      await executeTool(
+        control,
+        "wait_for_session",
+        "wait-behind-backlog",
+        {
+          conversationId: child.conversationId,
+          runId: childRunId,
+        },
+      );
+      waitResolved.resolve();
+      await releaseCaller.promise;
+      control.emitFinal("caller processed ordered messages");
+    });
+    const callerRunId = randomUUID();
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "wait while other peer messages arrive",
+    );
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the caller wait before the ordered backlog",
+    );
+
+    const batchSize = 8;
+    for (let index = 1; index <= batchSize + 1; index++) {
+      await executeTool(
+        fixture.runtime.control(backlogSender.conversationId),
+        "send_session_message",
+        `ordered-backlog-${index}`,
+        {
+          conversationId: caller.conversationId,
+          message: `ordered backlog ${index}`,
+        },
+      );
+    }
+    await expect(executeTool(
+      fixture.runtime.control(child.conversationId),
+      "send_session_message",
+      "ordered-exact-reply",
+      {
+        conversationId: caller.conversationId,
+        message: "ordered exact wait reply",
+      },
+    )).resolves.toMatchObject({ status: "delivered_to_wait" });
+    await waitResolved.promise;
+
+    const steers = fixture.runtime.control(caller.conversationId).pendingSteers;
+    expect(steers).toHaveLength(batchSize + 2);
+    expect(steers[batchSize]?.content)
+      .toContain(`ordered backlog ${batchSize + 1}`);
+    expect(steers[batchSize + 1]?.content)
+      .toContain("ordered exact wait reply");
+    expect(await coordinatorInbox(fixture.handle).list({
+      toConversationId: caller.conversationId,
+    })).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        body: `ordered backlog ${batchSize + 1}`,
+        state: "processing",
+        processingRunId: callerRunId,
+      }),
+      expect.objectContaining({
+        body: "ordered exact wait reply",
+        state: "processing",
+        processingRunId: callerRunId,
+      }),
+    ]));
+
+    releaseCaller.resolve();
+    await callerCompletion;
+    releaseChild.resolve();
+    await childCompletion;
+  });
+
   it("delivers a child message directly into an exact caller wait", async () => {
     const fixture = await createFixture();
     const caller = await fixture.coordinator.createUserConversation(
@@ -2651,6 +3221,8 @@ describe("ProjectSessionCoordinator", () => {
     await childStarted.promise;
 
     let waited: RunSettlement | undefined;
+    const callerMessageDelivered = deferred();
+    const releaseCaller = deferred();
     fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
       waited = await executeTool(
         control,
@@ -2661,12 +3233,16 @@ describe("ProjectSessionCoordinator", () => {
           runId: childRunId,
         },
       ) as RunSettlement;
+      control.beginNextModelTurn();
+      callerMessageDelivered.resolve();
+      await releaseCaller.promise;
       control.emitFinal("caller resumed");
     });
+    const callerRunId = randomUUID();
     const callerCompletion = fixture.coordinator.prompt(
       fixture.handle,
       caller.conversationId,
-      randomUUID(),
+      callerRunId,
       "wait for the child",
     );
     await waitUntil(
@@ -2686,6 +3262,17 @@ describe("ProjectSessionCoordinator", () => {
       status: "delivered_to_wait",
       conversationId: caller.conversationId,
     });
+    await callerMessageDelivered.promise;
+    await expect(coordinatorInbox(fixture.handle).list({
+      toConversationId: caller.conversationId,
+    })).resolves.toEqual([
+      expect.objectContaining({
+        state: "processing",
+        processingRunId: callerRunId,
+        processingDelivery: "steer",
+      }),
+    ]);
+    releaseCaller.resolve();
 
     await expect(callerCompletion).resolves.toMatchObject({
       outcome: "completed",
@@ -2695,6 +3282,13 @@ describe("ProjectSessionCoordinator", () => {
       conversationId: child.conversationId,
       runId: childRunId,
     });
+    expect(
+      fixture.runtime.control(caller.conversationId)
+        .modelRequestCustomMessages,
+    ).toEqual([[expect.objectContaining({
+      content: expect.stringContaining("Reply while the child keeps working."),
+      deliverAs: "steer",
+    })]]);
     expect(child.getActivity()).toMatchObject({
       kind: "running",
       runId: childRunId,
@@ -2716,6 +3310,222 @@ describe("ProjectSessionCoordinator", () => {
       runId: childRunId,
       outcome: "completed",
     });
+  });
+
+  it("does not return one correlated message from two waits in the same run", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const peer = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const peerStarted = deferred();
+    const releasePeer = deferred();
+    fixture.runtime.control(peer.conversationId).enqueue(
+      blocksUntil(peerStarted, releasePeer, "peer final settlement"),
+    );
+    const peerRunId = randomUUID();
+    const peerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      peer.conversationId,
+      peerRunId,
+      "send once and remain active",
+    );
+    await peerStarted.promise;
+
+    const firstWaitResolved = deferred();
+    const secondWaitStarted = deferred();
+    let firstResult: RunSettlement | undefined;
+    let secondResult: RunSettlement | undefined;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      firstResult = await executeTool(
+        control,
+        "wait_for_session",
+        "first-wait-for-one-message",
+        {
+          conversationId: peer.conversationId,
+          runId: peerRunId,
+        },
+      ) as RunSettlement;
+      control.beginNextModelTurn();
+      firstWaitResolved.resolve();
+      secondWaitStarted.resolve();
+      secondResult = await executeTool(
+        control,
+        "wait_for_session",
+        "second-wait-after-one-message",
+        {
+          conversationId: peer.conversationId,
+          runId: peerRunId,
+        },
+      ) as RunSettlement;
+      control.emitFinal("caller observed message then settlement");
+    });
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      randomUUID(),
+      "wait twice without replaying one message",
+    );
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the first exact wait",
+    );
+
+    await executeTool(
+      fixture.runtime.control(peer.conversationId),
+      "send_session_message",
+      "one-message-for-two-waits",
+      {
+        conversationId: caller.conversationId,
+        message: "observe this correlated message only once",
+      },
+    );
+    await firstWaitResolved.promise;
+    await secondWaitStarted.promise;
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the second wait to remain pending",
+    );
+    expect(firstResult).toMatchObject({
+      outcome: "message",
+      messageId: expect.any(String),
+    });
+    expect(secondResult).toBeUndefined();
+    expect((await coordinatorInbox(fixture.handle).list({
+      toConversationId: caller.conversationId,
+    }))[0]).toMatchObject({
+      waitedByRunId: expect.any(String),
+    });
+
+    releasePeer.resolve();
+    await peerCompletion;
+    await callerCompletion;
+    expect(secondResult).toMatchObject({
+      outcome: "completed",
+      runId: peerRunId,
+    });
+  });
+
+  it("rejects an exact wait if its sender-card projection cannot be appended", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const peer = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const peerStarted = deferred();
+    const releasePeer = deferred();
+    fixture.runtime.control(peer.conversationId).enqueue(
+      blocksUntil(peerStarted, releasePeer, "peer finished"),
+    );
+    const peerRunId = randomUUID();
+    const peerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      peer.conversationId,
+      peerRunId,
+      "send a reply whose card projection fails",
+    );
+    await peerStarted.promise;
+
+    const waitRejected = deferred();
+    const releaseCaller = deferred();
+    let waitError: unknown;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      try {
+        await executeTool(
+          control,
+          "wait_for_session",
+          "wait-for-card-append-failure",
+          {
+            conversationId: peer.conversationId,
+            runId: peerRunId,
+          },
+        );
+      } catch (error) {
+        waitError = error;
+        waitRejected.resolve();
+      }
+      await releaseCaller.promise;
+      control.emitFinal("caller recovered from projection failure");
+    });
+    const callerRunId = randomUUID();
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "wait for a projection failure",
+    );
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the wait before sender-card append failure",
+    );
+
+    const manager = peer.sessionManager as unknown as {
+      appendCustomEntry(customType: string, data: unknown): string;
+    };
+    const originalAppend = manager.appendCustomEntry.bind(manager);
+    let rejectDeliveredCard = true;
+    manager.appendCustomEntry = (customType, data) => {
+      if (
+        rejectDeliveredCard
+        && customType === CONVERSATION_CARD_CUSTOM_TYPE
+        && (data as { state?: string }).state === "delivered"
+      ) {
+        rejectDeliveredCard = false;
+        throw new Error("simulated delivered-card append failure");
+      }
+      return originalAppend(customType, data);
+    };
+
+    await expect(executeTool(
+      fixture.runtime.control(peer.conversationId),
+      "send_session_message",
+      "reply-with-card-append-failure",
+      {
+        conversationId: caller.conversationId,
+        message: "the wait must settle even if projection fails",
+      },
+    )).rejects.toThrow("simulated delivered-card append failure");
+    await waitRejected.promise;
+    expect(waitError).toMatchObject({
+      message: expect.stringContaining("delivered-card append failure"),
+    });
+    expect(caller.getActivity().kind).toBe("running");
+    expect(await coordinatorInbox(fixture.handle).list({
+      toConversationId: caller.conversationId,
+    })).toContainEqual(expect.objectContaining({
+      waitedByRunId: callerRunId,
+    }));
+
+    const retryAbort = new AbortController();
+    const retryWait = executeTool(
+      fixture.runtime.control(caller.conversationId),
+      "wait_for_session",
+      "retry-after-card-append-failure",
+      {
+        conversationId: peer.conversationId,
+        runId: peerRunId,
+      },
+      retryAbort.signal,
+    );
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "a retry to skip the already consumed message",
+    );
+    retryAbort.abort();
+    await expect(retryWait).rejects.toMatchObject({ name: "AbortError" });
+
+    releaseCaller.resolve();
+    await callerCompletion;
+    releasePeer.resolve();
+    await peerCompletion;
   });
 
   it("requeues a rendezvous message until the target records its delivery marker", async () => {
@@ -2876,7 +3686,7 @@ describe("ProjectSessionCoordinator", () => {
     );
 
     await expect(sending).resolves.toMatchObject({
-      status: "queued",
+      status: "processing",
       conversationId: caller.conversationId,
     });
     expect(waitError).toMatchObject({ name: "AbortError" });
@@ -2893,6 +3703,289 @@ describe("ProjectSessionCoordinator", () => {
     await expect(childCompletion).resolves.toMatchObject({
       outcome: "completed",
     });
+  });
+
+  it("removes a registered wait edge when durable reconciliation fails", async () => {
+    const fixture = await createFixture();
+    const first = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const second = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const firstStarted = deferred();
+    const releaseFirst = deferred();
+    const secondStarted = deferred();
+    const releaseSecond = deferred();
+    fixture.runtime.control(first.conversationId).enqueue(
+      blocksUntil(firstStarted, releaseFirst, "first done"),
+    );
+    fixture.runtime.control(second.conversationId).enqueue(
+      blocksUntil(secondStarted, releaseSecond, "second done"),
+    );
+    const firstRunId = randomUUID();
+    const secondRunId = randomUUID();
+    const firstCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      first.conversationId,
+      firstRunId,
+      "first remains active after wait failure",
+    );
+    const secondCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      second.conversationId,
+      secondRunId,
+      "second tests the reverse wait edge",
+    );
+    await Promise.all([firstStarted.promise, secondStarted.promise]);
+
+    const inbox = coordinatorInbox(fixture.handle);
+    const originalList = inbox.list.bind(inbox);
+    let listCalls = 0;
+    inbox.list = async (...args) => {
+      listCalls++;
+      if (listCalls === 2) {
+        throw new Error("simulated wait reconciliation scan failure");
+      }
+      return originalList(...args);
+    };
+    await expect(executeTool(
+      fixture.runtime.control(first.conversationId),
+      "wait_for_session",
+      "wait-with-reconciliation-failure",
+      {
+        conversationId: second.conversationId,
+        runId: secondRunId,
+      },
+    )).rejects.toThrow("wait reconciliation scan failure");
+    inbox.list = originalList;
+    expect(first.getActivity().kind).toBe("running");
+
+    const reverseAbort = new AbortController();
+    const reverseWait = executeTool(
+      fixture.runtime.control(second.conversationId),
+      "wait_for_session",
+      "reverse-wait-after-reconciliation-failure",
+      {
+        conversationId: first.conversationId,
+        runId: firstRunId,
+      },
+      reverseAbort.signal,
+    );
+    await waitUntil(
+      () => second.getActivity().kind === "waiting",
+      "the reverse wait without a ghost cycle edge",
+    );
+    reverseAbort.abort();
+    await expect(reverseWait).rejects.toMatchObject({ name: "AbortError" });
+
+    releaseFirst.resolve();
+    releaseSecond.resolve();
+    await Promise.all([firstCompletion, secondCompletion]);
+  });
+
+  it("rejects and removes an exact waiter when its durable receipt write fails", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const peer = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const peerRunId = randomUUID();
+    const callerWaitRejected = deferred();
+    const releaseCaller = deferred();
+    let callerWaitError: unknown;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      try {
+        await executeTool(
+          control,
+          "wait_for_session",
+          "wait-before-receipt-write-failure",
+          {
+            conversationId: peer.conversationId,
+            runId: peerRunId,
+          },
+        );
+      } catch (error) {
+        callerWaitError = error;
+        callerWaitRejected.resolve();
+      }
+      await releaseCaller.promise;
+      control.emitFinal("caller recovered after receipt failure");
+    });
+    const peerStarted = deferred();
+    const releasePeer = deferred();
+    fixture.runtime.control(peer.conversationId).enqueue(
+      blocksUntil(peerStarted, releasePeer, "peer completed"),
+    );
+    const callerRunId = randomUUID();
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "wait while the exact receipt write fails",
+    );
+    const peerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      peer.conversationId,
+      peerRunId,
+      "send the exact reply",
+    );
+    await peerStarted.promise;
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the exact waiter before receipt failure",
+    );
+
+    const inbox = coordinatorInbox(fixture.handle);
+    const originalUpdateState = inbox.updateState.bind(inbox);
+    let failReceiptWrite = true;
+    inbox.updateState = async (messageId, update) => {
+      if (
+        failReceiptWrite
+        && update.state === "processing"
+        && update.waitedByRunId !== undefined
+      ) {
+        failReceiptWrite = false;
+        throw new Error("simulated exact receipt write failure");
+      }
+      return originalUpdateState(messageId, update);
+    };
+    await expect(executeTool(
+      fixture.runtime.control(peer.conversationId),
+      "send_session_message",
+      "send-with-receipt-write-failure",
+      {
+        conversationId: caller.conversationId,
+        message: "this receipt write fails once",
+      },
+    )).rejects.toThrow("exact receipt write failure");
+    await callerWaitRejected.promise;
+    inbox.updateState = originalUpdateState;
+    expect(callerWaitError).toMatchObject({
+      message: expect.stringContaining("exact receipt write failure"),
+    });
+    expect(caller.getActivity().kind).toBe("running");
+    const pendingAfterFailure = await inbox.list({
+      toConversationId: caller.conversationId,
+    });
+    expect(pendingAfterFailure).toContainEqual(expect.objectContaining({
+      state: "queued",
+    }));
+    expect(pendingAfterFailure[0]).not.toHaveProperty("waitedByRunId");
+
+    const reverseAbort = new AbortController();
+    const reverseWait = executeTool(
+      fixture.runtime.control(peer.conversationId),
+      "wait_for_session",
+      "reverse-wait-after-receipt-write-failure",
+      {
+        conversationId: caller.conversationId,
+        runId: callerRunId,
+      },
+      reverseAbort.signal,
+    );
+    await waitUntil(
+      () => peer.getActivity().kind === "waiting",
+      "the reverse wait without a ghost exact edge",
+    );
+    reverseAbort.abort();
+    await expect(reverseWait).rejects.toMatchObject({ name: "AbortError" });
+
+    releaseCaller.resolve();
+    releasePeer.resolve();
+    await Promise.all([callerCompletion, peerCompletion]);
+  });
+
+  it("rejects exact waiters when target settlement persistence becomes fatal", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const targetStarted = deferred();
+    const releaseTarget = deferred();
+    fixture.runtime.control(target.conversationId).enqueue(
+      blocksUntil(targetStarted, releaseTarget, "target settlement will fail"),
+    );
+    const targetRunId = randomUUID();
+    const targetCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      target.conversationId,
+      targetRunId,
+      "fail settlement persistence after a caller waits",
+    );
+    await targetStarted.promise;
+
+    const callerWaitRejected = deferred();
+    const releaseCaller = deferred();
+    let callerWaitError: unknown;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      try {
+        await executeTool(
+          control,
+          "wait_for_session",
+          "wait-for-fatal-settlement-persistence",
+          {
+            conversationId: target.conversationId,
+            runId: targetRunId,
+          },
+        );
+      } catch (error) {
+        callerWaitError = error;
+        callerWaitRejected.resolve();
+      }
+      await releaseCaller.promise;
+      control.emitFinal("caller recovered from target fatal state");
+    });
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      randomUUID(),
+      "wait for a target that becomes fatal",
+    );
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the exact waiter before target infrastructure failure",
+    );
+
+    const manager = target.sessionManager as unknown as {
+      appendCustomEntry(customType: string, data: unknown): string;
+    };
+    const originalAppend = manager.appendCustomEntry.bind(manager);
+    let failSettlement = true;
+    manager.appendCustomEntry = (customType, data) => {
+      if (failSettlement && customType === RUN_SETTLEMENT_CUSTOM_TYPE) {
+        failSettlement = false;
+        throw new Error("simulated fatal settlement persistence failure");
+      }
+      return originalAppend(customType, data);
+    };
+    releaseTarget.resolve();
+    await expect(targetCompletion).rejects.toThrow(
+      "fatal settlement persistence failure",
+    );
+    await callerWaitRejected.promise;
+    expect(callerWaitError).toMatchObject({
+      message: expect.stringContaining("fatal settlement persistence failure"),
+    });
+    expect(caller.getActivity().kind).toBe("running");
+    const internal = fixture.handle as unknown as {
+      context: { waiters: Map<string, Set<unknown>> };
+    };
+    expect(internal.context.waiters.size).toBe(0);
+
+    releaseCaller.resolve();
+    await callerCompletion;
   });
 
   it("rejects a wait edge that would close a conversation cycle", async () => {
@@ -2968,6 +4061,96 @@ describe("ProjectSessionCoordinator", () => {
       runId: firstRunId,
       outcome: "completed",
     });
+  });
+
+  it("atomically rejects one of two concurrently registered reverse waits", async () => {
+    const fixture = await createFixture();
+    const first = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const second = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const firstStarted = deferred();
+    const secondStarted = deferred();
+    const releaseFirst = deferred();
+    const releaseSecond = deferred();
+    fixture.runtime.control(first.conversationId).enqueue(
+      blocksUntil(firstStarted, releaseFirst, "first settled"),
+    );
+    fixture.runtime.control(second.conversationId).enqueue(
+      blocksUntil(secondStarted, releaseSecond, "second settled"),
+    );
+    const firstRunId = randomUUID();
+    const secondRunId = randomUUID();
+    const firstCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      first.conversationId,
+      firstRunId,
+      "first concurrent wait",
+    );
+    const secondCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      second.conversationId,
+      secondRunId,
+      "second concurrent wait",
+    );
+    await Promise.all([firstStarted.promise, secondStarted.promise]);
+
+    const internal = fixture.handle as unknown as {
+      context: { lifecycle: { run<T>(task: () => Promise<T>): Promise<T> } };
+    };
+    const lifecycleHeld = deferred();
+    const releaseLifecycle = deferred();
+    const blocker = internal.context.lifecycle.run(async () => {
+      lifecycleHeld.resolve();
+      await releaseLifecycle.promise;
+    });
+    await lifecycleHeld.promise;
+    const firstWaitAbort = new AbortController();
+    const secondWaitAbort = new AbortController();
+    let firstError: unknown;
+    let secondError: unknown;
+    const firstWait = executeTool(
+      fixture.runtime.control(first.conversationId),
+      "wait_for_session",
+      "concurrent-first-waits-second",
+      { conversationId: second.conversationId, runId: secondRunId },
+      firstWaitAbort.signal,
+    );
+    const secondWait = executeTool(
+      fixture.runtime.control(second.conversationId),
+      "wait_for_session",
+      "concurrent-second-waits-first",
+      { conversationId: first.conversationId, runId: firstRunId },
+      secondWaitAbort.signal,
+    );
+    void firstWait.catch((error) => {
+      firstError = error;
+    });
+    void secondWait.catch((error) => {
+      secondError = error;
+    });
+    await Promise.resolve();
+    releaseLifecycle.resolve();
+    await blocker;
+    await waitUntil(
+      () => firstError !== undefined || secondError !== undefined,
+      "one concurrent reverse wait to reject its cycle",
+    );
+    expect([firstError, secondError].filter(Boolean)).toHaveLength(1);
+    expect(firstError ?? secondError).toMatchObject({
+      message: expect.stringContaining("wait cycle"),
+    });
+
+    firstWaitAbort.abort();
+    secondWaitAbort.abort();
+    await Promise.allSettled([firstWait, secondWait]);
+    releaseFirst.resolve();
+    releaseSecond.resolve();
+    await Promise.all([firstCompletion, secondCompletion]);
   });
 
   it("aborts wait_for_session while the target actor is still opening without leaking waiting state", async () => {
@@ -3550,10 +4733,10 @@ describe("ProjectSessionCoordinator", () => {
       "send-before-delete-linearization",
       {
         conversationId: busyTarget.conversationId,
-        message: "queue behind the run before deletion can win",
+        message: "steer into the run before deletion can win",
       },
     ) as { status: string };
-    expect(sentWhileBusy.status).toBe("queued");
+    expect(sentWhileBusy.status).toBe("processing");
     await expect(
       fixture.coordinator.deleteConversation(
         fixture.handle,
@@ -3566,7 +4749,7 @@ describe("ProjectSessionCoordinator", () => {
       () =>
         fixture.runtime.control(busyTarget.conversationId)
           .received.length === 1,
-      "the queued send after the prompt finishes",
+      "the steered send to settle with the prompt",
     );
   });
 
@@ -4161,6 +5344,145 @@ describe("ProjectSessionCoordinator", () => {
     });
   });
 
+  it("returns a waited temporary result only through its incoming message", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const temporaryStarted = deferred();
+    const releaseTemporary = deferred();
+    fixture.runtime.nextSessionBehaviors.push([
+      blocksUntil(
+        temporaryStarted,
+        releaseTemporary,
+        "one temporary answer",
+      ),
+    ]);
+    const callerStarted = deferred();
+    const targetKnown = deferred<{
+      conversationId: string;
+      runId: string;
+    }>();
+    let waitResult: RunSettlement | undefined;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      callerStarted.resolve();
+      const target = await targetKnown.promise;
+      waitResult = await executeTool(
+        control,
+        "wait_for_session",
+        "wait-for-one-temporary-return",
+        target,
+      ) as RunSettlement;
+      control.emitFinal("caller handled one message-owned answer");
+    });
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      randomUUID(),
+      "start and wait for one temporary result",
+    );
+    await callerStarted.promise;
+
+    const temporary = await fixture.coordinator.startPeerSession(
+      fixture.handle,
+      caller.conversationId,
+      startInput({
+        temporary: true,
+        idempotencyKey: "waited-temporary-single-input",
+      }),
+    );
+    targetKnown.resolve(temporary);
+    await temporaryStarted.promise;
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the caller to wait for its temporary initial run",
+    );
+
+    releaseTemporary.resolve();
+    await callerCompletion;
+    expect(waitResult).toMatchObject({
+      outcome: "message",
+      conversationId: temporary.conversationId,
+      runId: temporary.runId,
+      messageId: expect.any(String),
+    });
+    expect(waitResult).not.toHaveProperty("finalText");
+    const returnedMessages = fixture.runtime.control(caller.conversationId)
+      .received.filter(({ content }) => content.includes("one temporary answer"));
+    expect(returnedMessages).toHaveLength(1);
+    expect(returnedMessages[0]).toMatchObject({
+      deliverAs: "steer",
+      triggerTurn: false,
+    });
+  });
+
+  it("prefers a pending temporary return after its session was deleted", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    fixture.runtime.nextSessionBehaviors.push([
+      completesWith("temporary answer committed before wait"),
+    ]);
+    const callerStarted = deferred();
+    const beginWait = deferred();
+    const targetKnown = deferred<{
+      conversationId: string;
+      runId: string;
+    }>();
+    let waitResult: RunSettlement | undefined;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      callerStarted.resolve();
+      const target = await targetKnown.promise;
+      await beginWait.promise;
+      waitResult = await executeTool(
+        control,
+        "wait_for_session",
+        "wait-after-temporary-deletion",
+        target,
+      ) as RunSettlement;
+      control.emitFinal("caller consumed the pending return once");
+    });
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      randomUUID(),
+      "delay wait until temporary cleanup",
+    );
+    await callerStarted.promise;
+    const temporary = await fixture.coordinator.startPeerSession(
+      fixture.handle,
+      caller.conversationId,
+      startInput({
+        temporary: true,
+        idempotencyKey: "temporary-delete-before-wait",
+      }),
+    );
+    targetKnown.resolve(temporary);
+    await waitUntil(async () => {
+      const ids = (await fixture.coordinator.listSessions(fixture.handle))
+        .map(({ id }) => id);
+      const pending = await coordinatorInbox(fixture.handle).list({
+        toConversationId: caller.conversationId,
+      });
+      return !ids.includes(temporary.conversationId)
+        && pending.some(({ fromRunId, waitedByRunId }) =>
+          fromRunId === temporary.runId && waitedByRunId === undefined
+        );
+    }, "temporary deletion with its return still pending");
+
+    beginWait.resolve();
+    await callerCompletion;
+    expect(waitResult).toMatchObject({
+      outcome: "message",
+      conversationId: temporary.conversationId,
+      runId: temporary.runId,
+    });
+    expect(waitResult).not.toHaveProperty("finalText");
+  });
+
   it("durably returns a temporary success before deleting its session", async () => {
     const fixture = await createFixture();
     const source = await fixture.coordinator.createUserConversation(
@@ -4172,10 +5494,11 @@ describe("ProjectSessionCoordinator", () => {
     fixture.runtime.control(source.conversationId).enqueue(
       blocksUntil(sourceStarted, releaseSource, "source done"),
     );
+    const sourceRunId = randomUUID();
     const sourceCompletion = fixture.coordinator.prompt(
       fixture.handle,
       source.conversationId,
-      randomUUID(),
+      sourceRunId,
       "remain busy while the result is committed",
     );
     await sourceStarted.promise;
@@ -4210,10 +5533,12 @@ describe("ProjectSessionCoordinator", () => {
         toConversationId: source.conversationId,
       });
       return !ids.includes(started.conversationId)
-        && pending.some(({ kind, body }) =>
-          kind === "delegation_result" && body === "temporary success"
+        && pending.some(({ kind, body, state }) =>
+          kind === "delegation_result"
+          && body === "temporary success"
+          && state === "processing"
         );
-    }, "temporary result commit followed by session deletion");
+    }, "temporary result steering followed by session deletion");
 
     const pending = await inbox.list({
       toConversationId: source.conversationId,
@@ -4223,14 +5548,36 @@ describe("ProjectSessionCoordinator", () => {
       toConversationId: source.conversationId,
       kind: "delegation_result",
       body: "temporary success",
-      state: "queued",
+      state: "processing",
+      processingRunId: sourceRunId,
+      processingDelivery: "steer",
     }));
+    expect(fixture.runtime.control(source.conversationId).received)
+      .toContainEqual(expect.objectContaining({
+        content: expect.stringContaining("temporary success"),
+        deliverAs: "steer",
+        triggerTurn: false,
+      }));
+    expect(
+      aggregateReservedConversationEntries(source.sessionManager.getEntries())
+        .deliveredMessageIds,
+    ).toHaveLength(0);
     expect(
       await readdir(fixture.handle.project.sessionDir),
     ).toHaveLength(1);
 
     releaseSource.resolve();
     await sourceCompletion;
+    await waitUntil(
+      async () => (await inbox.list({
+        toConversationId: source.conversationId,
+      })).length === 0,
+      "the steered temporary result to settle durably",
+    );
+    expect(
+      aggregateReservedConversationEntries(source.sessionManager.getEntries())
+        .deliveredMessageIds,
+    ).toHaveLength(1);
   });
 
   it("does not let delayed initial temporary cleanup cancel a new active run", async () => {
@@ -4529,7 +5876,7 @@ describe("ProjectSessionCoordinator", () => {
     }, "temporary cascade deletion after the new run settles");
   });
 
-  it("returns a temporary failure message and retains the failed session", async () => {
+  it("returns a retained temporary failure settlement after restart and return cleanup", async () => {
     const fixture = await createFixture();
     const source = await fixture.coordinator.createUserConversation(
       fixture.handle,
@@ -4540,10 +5887,11 @@ describe("ProjectSessionCoordinator", () => {
     fixture.runtime.control(source.conversationId).enqueue(
       blocksUntil(sourceStarted, releaseSource, "source done"),
     );
+    const sourceRunId = randomUUID();
     const sourceCompletion = fixture.coordinator.prompt(
       fixture.handle,
       source.conversationId,
-      randomUUID(),
+      sourceRunId,
       "remain busy while failure is committed",
     );
     await sourceStarted.promise;
@@ -4579,7 +5927,9 @@ describe("ProjectSessionCoordinator", () => {
       fromConversationId: started.conversationId,
       kind: "delegation_failure",
       body: expect.stringContaining("failed"),
-      state: "queued",
+      state: "processing",
+      processingRunId: sourceRunId,
+      processingDelivery: "steer",
     }));
 
     fixture.runtime.control(started.conversationId).enqueue(
@@ -4602,6 +5952,52 @@ describe("ProjectSessionCoordinator", () => {
 
     releaseSource.resolve();
     await sourceCompletion;
+    await waitUntil(
+      async () => (await inbox.list({
+        toConversationId: source.conversationId,
+      })).length === 0,
+      "the retained temporary failure return to finish delivery",
+    );
+
+    await fixture.coordinator.close();
+    fixture.coordinator = new ProjectSessionCoordinator(
+      fixture.runtime,
+      fixture.roles,
+      fixture.registry,
+    );
+    fixture.handle = await fixture.coordinator.acquireProject(
+      fixture.cwd,
+      "full_access",
+    );
+    const reopenedSource = await fixture.coordinator.openConversation(
+      fixture.handle,
+      source.conversationId,
+      { updateRecent: false },
+    );
+
+    let repeatedWait: RunSettlement | undefined;
+    fixture.runtime.control(source.conversationId).enqueue(async (control) => {
+      repeatedWait = await executeTool(
+        control,
+        "wait_for_session",
+        "wait-after-retained-return-cleanup-restart",
+        {
+          conversationId: started.conversationId,
+          runId: started.runId,
+        },
+      ) as RunSettlement;
+      control.emitFinal("caller observed the retained settlement");
+    });
+    await fixture.coordinator.prompt(
+      fixture.handle,
+      reopenedSource.conversationId,
+      randomUUID(),
+      "wait after restart and return sidecar cleanup",
+    );
+    expect(repeatedWait).toMatchObject({
+      runId: started.runId,
+      outcome: "failed",
+    });
   });
 
   it("returns bounded failures and retains temporary sessions for abort and missing replies", async () => {
@@ -4682,7 +6078,7 @@ describe("ProjectSessionCoordinator", () => {
     await sourceCompletion;
   });
 
-  it("fails messages queued behind a temporary run before deleting the target", async () => {
+  it("settles messages steered into a temporary run before deleting its target", async () => {
     const fixture = await createFixture();
     const caller = await fixture.coordinator.createUserConversation(
       fixture.handle,
@@ -4721,7 +6117,7 @@ describe("ProjectSessionCoordinator", () => {
     await waitUntil(async () =>
       !(await fixture.coordinator.listSessions(fixture.handle))
         .some(({ id }) => id === started.conversationId),
-    "temporary deletion after terminalizing its pending inbox");
+    "temporary deletion after settling its steered inbox message");
 
     const senderCard = aggregateReservedConversationEntries(
       sender.sessionManager.getEntries(),
@@ -4729,8 +6125,8 @@ describe("ProjectSessionCoordinator", () => {
       body === "arrived while temporary target was busy"
     );
     expect(senderCard).toMatchObject({
-      state: "failed",
-      result: "目标会话已删除，消息未被处理。",
+      state: "completed",
+      result: "temporary result",
     });
   });
 
@@ -5459,6 +6855,7 @@ describe("ProjectSessionCoordinator", () => {
     const targetId = randomUUID();
     const initialRunId = randomUUID();
     const returnMessageId = randomUUID();
+    const delegationId = randomUUID();
     await store.createConversation(sourceId, defaultProfile(roles));
     const targetManager = await store.createConversation(
       targetId,
@@ -5466,7 +6863,7 @@ describe("ProjectSessionCoordinator", () => {
         lifecycle: {
           kind: "temporary",
           callerConversationId: sourceId,
-          delegationId: randomUUID(),
+          delegationId,
           returnMessageId,
           initialRunId,
         },
@@ -5485,6 +6882,26 @@ describe("ProjectSessionCoordinator", () => {
         settledAt: "2026-07-19T12:01:00.000Z",
       }),
     );
+    const legacyInbox = await ProjectInbox.open(join(store.stateDir, "inbox"));
+    const role = roles.getConversationRole("default");
+    await legacyInbox.put({
+      messageId: returnMessageId,
+      cardId: deterministicTestUuid("piweb.return.card", returnMessageId),
+      fromConversationId: targetId,
+      toConversationId: sourceId,
+      sentAt: "2026-07-19T12:01:01.000Z",
+      kind: "delegation_result",
+      body: "result recovered after restart",
+      delegationId,
+      fromSnapshot: {
+        conversationId: targetId,
+        role: { id: role.id, name: role.name },
+      },
+      toSnapshot: {
+        conversationId: sourceId,
+        role: { id: role.id, name: role.name },
+      },
+    });
 
     const coordinator = new ProjectSessionCoordinator(runtime, roles);
     const handle = await coordinator.acquireProject(cwd, "full_access");

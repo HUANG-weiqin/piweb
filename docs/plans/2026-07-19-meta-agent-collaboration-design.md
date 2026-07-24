@@ -48,7 +48,7 @@
 - transcript 使用独立、简洁的“会话消息卡片”，明确显示来源/目标会话、角色、状态和正文。
 - 同一次委派使用稳定卡片 ID 原地更新，不连续刷出创建、等待和完成三条状态。
 - 点击卡片可以打开仍存在的目标会话。
-- 消息不会打断目标当前 run。目标 idle 时立即开始新 run；busy 时持久排队，结算后再启动。
+- 消息是 durable steering 输入：目标 busy 时先持久 claim 到其精确 run，再在当前工具调用结束、下一次模型请求前注入；不会创建第二个 run。目标 idle 时才由 inbox 启动新 run。消息仅在 Pi 写入 incoming marker 且精确 run 已结算后完成清理；abort、断线或重启前未写 marker 的 claim 会恢复为 queued 重投。
 - 发送成功只表示工作台已经持久接收，不表示目标已经处理或回复。
 
 ### 创建、等待与临时模式
@@ -238,21 +238,25 @@ data: {
   body,
   replyToMessageId?,
   delegationId?,
+  fromRunId?,
   fromSnapshot,
   toSnapshot,
   state: "queued" | "processing",
-  processingRunId?
+  processingRunId?,
+  processingDelivery?: "steer",
+  waitedByRunId?
 }
 ```
 
 顺序：
 
 1. 原子写入 inbox 后，发送者才能收到“已接收”。
-2. busy 目标只保留 queued，不修改其当前 JSONL branch。
-3. 目标 idle 后由 actor 将一批 envelope 写为 reserved `custom_message`。
+2. busy 目标将最早 queued envelope（包括临时结果/失败）持久改为 `processing(runId, "steer")`，再以 reserved `custom_message` 作为 SDK steering 注入当前 run；当前工具调用不被中断，普通发送在 durable claim 后返回而不等待 pre-stream SDK 队列。
+3. 目标 idle 后由 actor 将一批 envelope 写为 reserved `custom_message` 并启动 run。
 4. `content` 包含来源标题、角色、句柄和正文，保证目标 LLM 可回复；`details` 保存卡片元数据且不进入模型。
-5. 对应 run durable settled 后，先持久化发送方 terminal 卡片，再删除 inbox sidecar。
-6. 重启时用 `messageId` 对账 JSONL 和 sidecar，避免重复投递。
+5. 对应 run durable settled 后，先持久化发送方 terminal 卡片，再删除 inbox sidecar；steering claim 若尚无目标 JSONL marker，则恢复 queued 而非确认交付。
+6. 主动消息冻结可选 `fromRunId`；cycle check、waiter 注册与 inbox 补查在同一项目 lifecycle 边界，发送先赢时仍能按来源 conversation + run 找回精确回复。processing envelope 用 `waitedByRunId` receipt 防止同一接收 run 的连续 wait 重放相同 messageId；异常必须 remove+detach waiter。
+7. 重启时用 `messageId` 对账 JSONL 和 sidecar，避免重复投递；异步 steering acceptance 拒绝会触发 tracked actor reopen/recovery，不能留下无 settlement 的永久 processing claim。旧 v1 envelope 缺少 `fromRunId` 时 crash replay 保留字段缺席。
 
 发送方卡片和目标 inbox 也需要可恢复的事务边界：
 
@@ -268,7 +272,7 @@ data: {
 - 同一 `cardId` 的后续 reserved entry 覆盖先前卡片投影。
 - 每个 workbench run 结算前追加 reserved settlement，保存 `runId`、outcome、精确最终 Agent 文本和已报告状态。
 - wait、临时回传和崩溃恢复只读取 settlement，不能从“会话最后一条 assistant”猜测。
-- 临时自动回传只绑定 `initialRunId`。该 run 失败后会话进入 durable `retained_failed` 状态；后续重试不能误触发旧委派的自动删除。
+- 临时自动回传只绑定 `initialRunId`。caller 正在等待该 run 时，settlement 不直接把 `finalText` 复制进 wait tool result；wait 保留到回传 envelope 提交，以 message metadata 结算，正文只由 incoming custom message 输入一次。该 run 失败后会话进入 durable `retained_failed` 状态；后续重试不能误触发旧委派的自动删除。
 - 临时生命周期通过 reserved entries 单调推进：
 
 ```text
@@ -341,8 +345,8 @@ delete_session
 - `peek_session`：默认 6、最多 20，只返回用户可见 user/assistant/会话卡片，不返回 thinking、认证或 SDK 内部事件；inactive 目标检查不能修改 recent pointer。
 - inactive `peek_session` 与删除共用项目 lifecycle 边界；读取持有的短暂 writer lease 必须先释放，删除才能写 tombstone 并 fail-fast 取得 deletion lease。
 - `start_session`：`roleId + task` 必填，`title + temporary` 可选；必须先把完整角色快照、初始 task、确定的 `runId` 和临时生命周期元数据持久化并可靠调度后才返回。目标空闲时安装同一个 run ticket；若更早的 browser run 抢先，则保留这个 task/runId 等待泵送。崩溃恢复继续这一个 task/runId，不能确认成功后丢任务或另造 run。
-- `send_session_message`：持久接收后返回 queued/delivered 状态；目标 busy 时不打断。
-- `wait_for_session`：必须绑定 target `conversationId + runId`；先查 durable settlement，已经完成则立即返回；等待自身当前 run 被拒绝；AbortSignal 取消 waiter；来源会话只在这次显式等待期间显示沙漏。
+- `send_session_message`：持久接收后返回 queued/processing/delivered 状态；目标 busy 时不打断当前工具调用，但作为 durable steering 注入其当前 run。
+- `wait_for_session`：必须绑定 target `conversationId + runId`；先查 durable settlement，已经完成则立即返回；等待自身当前 run 被拒绝；AbortSignal 取消 waiter；来源会话只在这次显式等待期间显示沙漏。精确回复不得越过更早 inbox 消息；为避免未完成 wait 工具阻止既有 steering 被消费，宿主先把有界 predecessor chain 按 FIFO 排入同一 run，再排回复并结算 wait。
 - `abort_session`：精确匹配 runId，错误 runId 不得中止后来 run。
 - `delete_session`：拒绝 self 和 busy；并发删除最多一个实际执行，目标已不存在可返回幂等结果。
 
@@ -409,7 +413,7 @@ type ConversationHistoryItem =
 1. meta 工具在来源 prompt 内创建目标不会重入来源 actor queue 或死锁。
 2. 浏览器打开 Agent 创建的活跃会话复用同一 actor 和 writer lease。
 3. wait 注册前目标已完成时立即且只返回一次。
-4. busy 目标收信不改变当前 run context；结算后才用新 runId 启动。
+4. busy 目标收信进入当前 run 的下一次模型请求，不创建新 run；abort、断线或重启前未写 incoming marker 时 inbox 会按 FIFO 重投。
 5. send/finish、send/delete、prompt/delete 都只有一个线性结果。
 6. 错误 runId abort 不影响后来 run。
 7. 自身 delete 永远拒绝。

@@ -136,6 +136,22 @@ describe("ProjectInbox envelope schema", () => {
       ...envelope,
       state: "processing",
     })).toThrow(/processingRunId/i);
+    expect(() => parseInboxEnvelope({
+      ...envelope,
+      processingDelivery: "steer",
+    })).toThrow(/processingDelivery/i);
+    expect(() => parseInboxEnvelope({
+      ...envelope,
+      waitedByRunId: randomUUID(),
+    })).toThrow(/waitedByRunId/i);
+    expect(() => parseInboxEnvelope({
+      ...envelope,
+      fromRunId: "not-a-run-id",
+    })).toThrow(/fromRunId/i);
+    const correlated = createInboxEnvelope(input({
+      fromRunId: randomUUID(),
+    }));
+    expect(parseInboxEnvelope(correlated)).toEqual(correlated);
     expect(() => createInboxEnvelope(input({
       body: "   ",
     }))).toThrow(/body/i);
@@ -190,22 +206,29 @@ describe("ProjectInbox", () => {
     const { inbox } = await temporaryInbox("piweb-inbox-state-");
     const value = input();
     const runId = randomUUID();
+    const waitedByRunId = runId;
     await inbox.put(value);
 
     await expect(
       inbox.updateState(value.messageId, {
         state: "processing",
         processingRunId: runId,
+        processingDelivery: "steer",
+        waitedByRunId,
       }),
     ).resolves.toMatchObject({
       state: "processing",
       processingRunId: runId,
+      processingDelivery: "steer",
+      waitedByRunId,
     });
     await expect(inbox.put(value)).resolves.toMatchObject({
       status: "existing",
       envelope: {
         state: "processing",
         processingRunId: runId,
+        processingDelivery: "steer",
+        waitedByRunId,
       },
     });
     await expect(
@@ -214,7 +237,11 @@ describe("ProjectInbox", () => {
       state: "queued",
     });
     await expect(inbox.get(value.messageId)).resolves.toEqual(
-      expect.not.objectContaining({ processingRunId: expect.anything() }),
+      expect.not.objectContaining({
+        processingRunId: expect.anything(),
+        processingDelivery: expect.anything(),
+        waitedByRunId: expect.anything(),
+      }),
     );
   });
 

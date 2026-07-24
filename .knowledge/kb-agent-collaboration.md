@@ -55,7 +55,7 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
     target-<conversationId hash>.tombstone.json
 ```
 
-每个 inbox envelope 是严格 v1 的单文件原子记录，保存稳定 `messageId/cardId`、来源/目标 conversation 快照、正文、消息种类以及 `queued | processing`。目录、文件、身份、容量或内容异常都 fail closed。
+每个 inbox envelope 是严格 v1 的单文件原子记录，保存稳定 `messageId/cardId`、来源/目标 conversation 快照、正文、消息种类、可选的冻结来源 `fromRunId`，以及 `queued | processing`。processing 状态还可保存接收方 `waitedByRunId` receipt；`fromRunId` 让 wait 在“消息先提交、wait 后注册”时能补查精确回复，receipt 防止同一接收 run 的后续 wait 重复观察同一 messageId。两者都是 durable sidecar 状态；目录、文件、身份、容量或内容异常都 fail closed。
 
 发送线性化顺序：
 
@@ -63,20 +63,21 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
 来源 JSONL 追加 sending 卡片
 → 原子写目标 inbox
 → 来源同 cardId 追加 queued 卡片
-→ 目标 idle 后转 processing，写入 custom_message 并启动 run
+→ busy target：先转 processing 并按精确 runId 作为 SDK custom steering 注入；idle target：写入 custom_message 并启动 run
+→ Pi 持久写入 custom_message marker
 → 精确 run settlement 持久化
 → 来源同 cardId 更新 terminal 状态
 → 删除 sidecar
 ```
 
-- busy 目标通常不会被打断；消息保持 queued，等当前 run 结算后泵送。唯一的同 run rendezvous 是：目标正通过 `wait_for_session` 等待发送者的这个精确 run 时，durable envelope 会先标为 processing，再作为 SDK steering message 注入目标当前 turn，并直接结算该 wait；目标无需先结束 run 才能读到回复。
+- busy target 默认接收 steering：所有 peer message 种类（包括临时结果/失败）都先持久转为 `processing(runId)`，再以 `piweb.conversation_message.v1` custom message 放入当前 Pi turn 的 steering queue；它在当前工具调用结束、下次模型请求前生效，不创建第二个 run。普通发送以 durable claim 为确认点，不等待 pre-stream SDK 内存队列，因此不会与项目关闭或 preflight 互锁。只有 Pi 已把 custom message marker 写入 JSONL 且该精确 run 已结算，sidecar 才能删除；abort、启动失败或在 marker 前结算会将 envelope 恢复为 `queued` 并按 FIFO 重投。因此切换浏览器项目/focus、断线或进程重启都不能依赖内存 steering queue。目标 idle 时仍由 inbox pump 启动新 run。目标通过 `wait_for_session` 等待发送者的精确 run 时，同一投递还会立即结算 wait。
 - inbox commit 是取消边界：commit 前取消可拒绝，commit 后即使来源 run 随即取消，目标 pump 仍继续；同步启动失败会有界重试一次并保留 durable sidecar。
-- 同一目标严格按 `sentAt + messageId` 泵送，新的 idle-target send 也必须先经过项目 inbox pump，不能越过更早的 queued 消息。
-- inbox 每次最多批量投递 8 条。允许管理会话的目标 LLM 会收到来源标题、角色、完整 conversationId、正文、回复工具提示，以及“自行管理所创建会话生命周期”的提醒；关闭能力的角色只收到来源元信息和正文，不会看到任何会话工具名称或管理提示。隐藏提示只存在于 Agent 上下文，浏览器卡片仍只从 `details.body` 投影用户可见正文。
+- 同一目标严格按 `sentAt + messageId` 投递；busy steering 也只能认领最早的未送 envelope，不能越过更早的 queued 或其它 run 的 processing envelope。
+- 普通 inbox claim 每次最多批量投递 8 条。精确 wait 回复若排在该批之后，会先按 FIFO 把目标有界 inbox（单目标最多 64 条）中它之前的消息全部排入同一 steering queue，再排回复并结算 wait；否则未完成的 wait 工具会阻止前批 steering 被消费并形成死锁。允许管理会话的目标 LLM 会收到来源标题、角色、完整 conversationId、正文、回复工具提示，以及“自行管理所创建会话生命周期”的提醒；关闭能力的角色只收到来源元信息和正文，不会看到任何会话工具名称或管理提示。隐藏提示只存在于 Agent 上下文，浏览器卡片仍只从 `details.body` 投影用户可见正文。
 - incoming 消息使用 `piweb.conversation_message.v1` 并进入目标上下文；outgoing/委派状态使用 `piweb.conversation_card.v1`，只用于投影。
 - 同一 `cardId` 的后续 entry 原地覆盖卡片状态；浏览器和重启恢复不会刷出多张重复卡。
-- 每个 run 先追加 `piweb.run_settlement.v1`，记录精确 `runId/outcome/finalText`，再通知 waiter 和 inbox 清理。等待返回 durable settlement 或精确目标 run 主动发来的 message metadata；消息正文只通过 incoming custom message 注入一次，不能在 tool result 再复制一份。等待与临时回传不能从“最后一条 assistant”猜结果。
-- 重启会扫描 inbox 与 reserved JSONL：修复 inbox 已提交但来源仍是 sending 的卡片，恢复 processing run、临时结果和目标 pump；已经 durable settled 的 run 不会重复执行。
+- 每个 run 先追加 `piweb.run_settlement.v1`，记录精确 `runId/outcome/finalText`，再通知 waiter 和 inbox 清理。cycle check、waiter 注册与 committed inbox 补查处于项目 lifecycle 同一线性边界：发送先赢时按 `fromConversationId + fromRunId` 找回未被当前 receiving run receipt 的回复，注册先赢时发送路径直接 rendezvous；扫描/aggregate/投影失败，以及目标 exact run 在 settlement 前进入 fatal infrastructure 状态时，都必须移除 waiter 和 AbortSignal listener，不能留下 ghost wait edge。等待返回 durable settlement 或精确目标 run 主动发来的 message metadata；消息正文只通过 incoming custom message 注入一次，不能在 tool result 再复制一份。临时 initial run 的 caller waiter 会保留到自动回传 envelope 提交，只返回 message metadata，不再同时返回含同一正文的 settlement；return 已 receipt/清理后的再次 wait 则返回 reported settlement。等待与临时回传不能从“最后一条 assistant”猜结果。
+- 重启会扫描 inbox 与 reserved JSONL：修复 inbox 已提交但来源仍是 sending 的卡片，恢复 processing run、临时结果和目标 pump；已经 durable settled 的 run 不会重复执行。SDK custom-steer acceptance 若异步拒绝，coordinator 会在 lifecycle 边界复查 marker/settlement，幂等 finish 或 dispose/reopen 后恢复精确 processing run，不能让无 settlement 的 claim 永久阻断 FIFO。
 - terminal sender card 必须先于 sidecar 删除；两步间崩溃时，残留 sidecar 可在重启后完成对账。
 - 删除 conversation 会先冻结 target 的 metadata descendant set 并设置 deleting fence；任一成员 busy 时整次拒绝。随后按子孙到祖先顺序持久化 target tombstone、把只以当前被删会话为目标的 pending inbox 对应 sender card 终结并清理；tombstone 在内存中也是 open/create/pump/send 的硬 fence，删除事务中的后到消息被明确拒绝，它此前发往 cascade set 外的 outbound envelope 仍会继续送达。JSONL 删除完成后 tombstone 会幂等回收；若进程在这两步之间退出，下次项目打开先恢复 fence，再完成删除或只清理目标已不存在且没有 pending 消息的完成标记，避免重新打开目标或长期编排耗尽固定 tombstone 数量。
 

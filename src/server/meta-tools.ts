@@ -218,7 +218,7 @@ export function createMetaTools(
       name: "send_session_message",
       label: "Send session message",
       description:
-        "Durably send a first-class session message to a peer. A busy target normally processes it after its current run settles. If that peer is waiting for this exact run, the message resolves that wait immediately while this run may continue.",
+        "Durably send a first-class session message to a peer. A busy target receives it as steering after its current tool turn and before its next model request; it remains durable until Pi records the target message and the exact run settles. If that peer is waiting for this exact run, the message also resolves that wait immediately.",
       promptSnippet: "Send a durable message to another Agent session.",
       parameters: Type.Object({
         conversationId: Type.String({ minLength: 1, maxLength: 256 }),

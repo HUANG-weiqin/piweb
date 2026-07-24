@@ -190,6 +190,11 @@ interface Deferred<T> {
   reject(error: unknown): void;
 }
 
+interface PendingCustomSteer {
+  readonly message: ConversationMessageEntry;
+  readonly delivery: Deferred<void>;
+}
+
 interface RunTicket {
   readonly id: string;
   readonly origin: ConversationRunOrigin;
@@ -197,6 +202,8 @@ interface RunTicket {
   readonly projector: SessionEventProjector;
   readonly completion: Deferred<RunSettlement>;
   readonly guidanceDeliveries: Deferred<void>[];
+  readonly customSteerDeliveries: PendingCustomSteer[];
+  customSteerFlush?: Promise<void>;
   phase: "queued" | "running" | "waiting" | "cancelling";
   waitingFor?: ConversationWaitingTarget;
   waitingEpoch?: symbol;
@@ -854,6 +861,33 @@ export class ConversationActor {
   }
 
   /**
+   * Queues a durable peer message into the exact active run as a custom
+   * steering message. Unlike text guidance, this retains the message card's
+   * source identity and is persisted by Pi when the steering queue is consumed.
+   */
+  steerCustomMessage(
+    runId: string,
+    message: ConversationMessageEntry,
+  ): Promise<void> {
+    this.assertUsable();
+    const ticket = this.activeRun;
+    if (
+      !ticket
+      || ticket.id !== runId
+      || ticket.phase === "cancelling"
+    ) {
+      return Promise.reject(
+        new Error("The target run is not currently able to accept a session message"),
+      );
+    }
+
+    const delivery = deferred<void>();
+    ticket.customSteerDeliveries.push({ message, delivery });
+    this.flushCustomSteers(ticket);
+    return delivery.promise;
+  }
+
+  /**
    * Restarts the exact inbox run after its durable custom messages were
    * appended but the process stopped before a settlement was recorded.
    * The hidden trigger adds no second delivery marker; the original messages
@@ -876,6 +910,60 @@ export class ConversationActor {
         triggerTurn: true,
       }),
     );
+  }
+
+  private flushCustomSteers(ticket: RunTicket): void {
+    if (ticket.customSteerFlush) return;
+    const flush = (async () => {
+      try {
+        // AgentSession only queues custom steering while its Pi run is live.
+        // A ticket may be installed before SDK preflight reaches agent_start;
+        // leave the durable envelope claimed and flush it from that event.
+        if (!this.session.isStreaming) return;
+        while (
+          this.activeRun === ticket
+          && ticket.phase !== "cancelling"
+          && ticket.customSteerDeliveries.length > 0
+        ) {
+          const next = ticket.customSteerDeliveries[0]!;
+          await this.session.sendCustomMessage({
+            customType: next.message.customType,
+            content: next.message.content,
+            display: next.message.display,
+            details: next.message.details,
+          }, {
+            triggerTurn: false,
+            deliverAs: "steer",
+          });
+          if (ticket.customSteerDeliveries[0] === next) {
+            ticket.customSteerDeliveries.shift();
+            next.delivery.resolve();
+          }
+        }
+      } catch (error) {
+        this.rejectCustomSteers(ticket, error);
+      }
+    })();
+    ticket.customSteerFlush = flush;
+    void flush.then(() => {
+      if (ticket.customSteerFlush !== flush) return;
+      ticket.customSteerFlush = undefined;
+      if (
+        this.activeRun === ticket
+        && ticket.phase !== "cancelling"
+        && this.session.isStreaming
+        && ticket.customSteerDeliveries.length > 0
+      ) {
+        this.flushCustomSteers(ticket);
+      }
+    });
+  }
+
+  private rejectCustomSteers(ticket: RunTicket, error: unknown): void {
+    ticket.customSteerFlush = undefined;
+    for (const pending of ticket.customSteerDeliveries.splice(0)) {
+      pending.delivery.reject(error);
+    }
   }
 
   private startRun(
@@ -918,6 +1006,7 @@ export class ConversationActor {
       }),
       completion: deferred<RunSettlement>(),
       guidanceDeliveries: [],
+      customSteerDeliveries: [],
       phase: "queued",
       toolMode: this.profileSnapshot.role.toolMode,
       sawSdkCompactionAttempt: false,
@@ -1295,6 +1384,10 @@ export class ConversationActor {
         new Error("Run ended before queued guidance was delivered"),
       );
     }
+    this.rejectCustomSteers(
+      ticket,
+      new Error("Run ended before queued session messages were delivered"),
+    );
     ticket.projectRunLease?.release();
     ticket.projectRunLease = undefined;
     this.cancelScope(ticket.id);
@@ -1342,6 +1435,7 @@ export class ConversationActor {
     for (const guidance of ticket.guidanceDeliveries.splice(0)) {
       guidance.reject(error);
     }
+    this.rejectCustomSteers(ticket, error);
     this.fatalError = error instanceof Error
       ? error
       : new Error(String(error));
@@ -1388,6 +1482,9 @@ export class ConversationActor {
 
   private onSessionEvent(event: AgentSessionEvent): void {
     const ticket = this.activeRun;
+    if (ticket && event.type === "agent_start") {
+      this.flushCustomSteers(ticket);
+    }
     if (
       ticket
       && event.type === "agent_start"

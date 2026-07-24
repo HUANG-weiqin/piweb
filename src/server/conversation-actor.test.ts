@@ -13,7 +13,10 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import { parseServerEvent, type ToolMode } from "../shared/protocol.js";
-import type { ConversationMeta } from "./conversation-meta.js";
+import type {
+  ConversationMessageEntry,
+  ConversationMeta,
+} from "./conversation-meta.js";
 import {
   aggregateReservedConversationEntries,
   appendReservedCustomEntry,
@@ -1662,6 +1665,64 @@ describe("ConversationActor", () => {
     expect(fixture.runtime.session.clearQueueCalls).toBe(1);
     await expect(fixture.actor.steer(RUN_A, "too late"))
       .rejects.toThrow("not currently able");
+    await fixture.actor.dispose();
+  });
+
+  it("holds a custom peer message until the exact run reaches Pi steering", async () => {
+    const fixture = await openActor();
+    const promptStarted = deferred();
+    const promptFinished = deferred();
+    fixture.runtime.session.promptImplementation = async () => {
+      promptStarted.resolve();
+      await promptFinished.promise;
+    };
+
+    const completion = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "inspect",
+      origin: "browser",
+    });
+    await promptStarted.promise;
+
+    let queued: {
+      content: unknown;
+      deliverAs: unknown;
+      triggerTurn: unknown;
+    } | undefined;
+    fixture.runtime.session.resumeImplementation = async (message, options) => {
+      queued = {
+        content: message.content,
+        deliverAs: options?.deliverAs,
+        triggerTurn: options?.triggerTurn,
+      };
+    };
+
+    const delivery = fixture.actor.steerCustomMessage(
+      RUN_A,
+      {
+        customType: "piweb.conversation_message.v1",
+        content: "Peer supervision instruction",
+        display: true,
+        details: {},
+      } as ConversationMessageEntry,
+    );
+    expect(fixture.runtime.session.resumeCalls).toBe(0);
+
+    (fixture.runtime.session as unknown as { isStreaming: boolean })
+      .isStreaming = true;
+    fixture.runtime.session.eventListener?.({
+      type: "agent_start",
+    } as AgentSessionEvent);
+
+    await expect(delivery).resolves.toBeUndefined();
+    expect(fixture.runtime.session.resumeCalls).toBe(1);
+    expect(queued).toEqual({
+      content: "Peer supervision instruction",
+      deliverAs: "steer",
+      triggerTurn: false,
+    });
+    promptFinished.resolve();
+    await completion;
     await fixture.actor.dispose();
   });
 

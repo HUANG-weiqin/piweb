@@ -126,7 +126,7 @@ git diff --check
 9. 删除 conversation 时只清理以其为目标的 pending inbox/metadata，保留已经发往其他会话的 outbound/temporary return envelope。
 10. 运行相关 server tests 与 typecheck。
 
-**成功标准：** busy 目标不需要中途写 branch；重启后 pending envelope 可恢复且不重复。
+**成功标准：** busy 目标的 durable custom steering 不创建第二个 run；重启后 pending envelope 可恢复且不重复。
 
 ---
 
@@ -233,7 +233,7 @@ git diff --check
    - server close 清理 detached actor。
 2. coordinator 按 canonical cwd + conversationId 管理 actor。
 3. 实现 cancellable waiters 和 bounded completion cache；每次 wait 都先查目标 JSONL 的 durable settlement，缓存不能成为真相。
-4. inbox pump 只在 target idle 时批量投递，并用新 runId 启动。
+4. inbox pump 在 target idle 时批量投递并用新 runId 启动；busy target 则先持久 claim 到精确 runId，再以 custom steering 注入当前 run。
 5. 实现 9 个 custom tools，闭包绑定 source actor token。
 6. 每个 meta side effect 用 source conversation + toolCallId 幂等。
 7. start_session 先持久保存冻结角色 + 初始 task + 确定 runId 并可靠调度；目标空闲时安装同一 ticket，若被更早 run 占用则保留待泵送；返回绝不隐式 wait。
@@ -259,7 +259,11 @@ git diff --check
 **步骤：**
 
 1. 写失败测试：
-   - busy 目标当前 context 不含新消息；
+   - busy 目标在当前工具调用后、下一次模型请求前收到 durable custom steering，且不创建第二个 run；
+   - steering claim 在 abort、断线或重启前未写 incoming marker 时按 FIFO 重投；
+   - pre-stream steering 不阻塞项目 lifecycle close；异步 acceptance rejection 触发 tracked reopen/recovery；同步 dispatch rollback 保留 delivery discriminator；
+   - 精确 wait 回复不越过满批次后的 predecessor；消息先于 wait 注册时由 durable `fromRunId` 补查，`waitedByRunId` receipt 防止重复观察；cycle check+add 原子化，任一注册后异常都 remove+detach；sender-card append 失败也必须结算 waiter；
+   - 临时结果/失败对 busy caller 同样 steering，等待 initial run 时正文只通过尚未 receipt 的 incoming message 输入一次；reported return 已消费/清理后的再次 wait 返回 settlement；旧 v1 缺失 `fromRunId` 的 temporary crash replay 不冲突；
    - idle 后一批 inbox 只启动一次新 run；
    - append/sidecar crash window 不重复；
    - inbox 已提交但 sender queued card 缺失时恢复会补写同 cardId；
@@ -463,7 +467,7 @@ git diff --check
    - 主 Agent `list_roles/list_sessions/current_session`；
    - 主 Agent 创建两个后台普通会话并继续并行工作；
    - 一个显式 wait，一个通过主动消息回传；
-   - busy target 收消息不被打断；
+   - busy target 收消息在当前工具调用后作为 durable steering 进入同一 run；
    - 临时成功回传并自动删除；
    - 临时 abort 回传失败并保留；
    - Agent abort 后 delete 另一个会话；

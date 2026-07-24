@@ -28,6 +28,7 @@ import {
   ConversationActor,
   type ConversationActorCompletion,
   type ConversationActorEvent,
+  type ConversationRunOwnership,
 } from "./conversation-actor.js";
 import {
   projectAgentConversationPeek,
@@ -1628,11 +1629,20 @@ export class ProjectSessionCoordinator {
       if (event.type === "error") {
         context.attention.add(conversationId);
         if (event.fatal && !context.closing) {
+          const failure = new Error(event.message);
           this.trackBackground(
             context,
-            this.runLifecycle(context, () =>
-              this.retryBlockedDeletions(context)
-            ),
+            this.runLifecycle(context, async () => {
+              if (event.runId !== undefined) {
+                this.rejectRunWaiters(
+                  context,
+                  conversationId,
+                  event.runId,
+                  failure,
+                );
+              }
+              await this.retryBlockedDeletions(context);
+            }),
           );
         }
       }
@@ -2342,6 +2352,9 @@ export class ProjectSessionCoordinator {
         sentAt: recoveredEnvelope?.sentAt ?? this.now().toISOString(),
         kind: "message",
         body: message,
+        fromRunId: recoveredEnvelope
+          ? recoveredEnvelope.fromRunId
+          : sourceRun?.runId,
       });
       const envelope = queued.envelope;
       if (
@@ -2372,6 +2385,7 @@ export class ProjectSessionCoordinator {
           ...(activity.kind === "idle" ? {} : { runId: activity.runId }),
         };
       }
+      await this.steerActiveTarget(context, target);
       if (target.getActivity().kind === "idle") {
         await this.pumpTarget(context, targetConversationId);
       }
@@ -2435,33 +2449,47 @@ export class ProjectSessionCoordinator {
     ) {
       return false;
     }
+    let steered: boolean;
+    try {
+      steered = await this.steerActiveTarget(context, target, {
+        throughMessageId: envelope.messageId,
+        beforeThroughDelivery: async (claimed) => {
+          if (
+            claimed.state !== "processing"
+            || claimed.processingRunId !== initialActivity.runId
+          ) {
+            throw new Error(
+              "The exact wait reply lost its durable processing claim",
+            );
+          }
+          await context.inbox.updateState(claimed.messageId, {
+            state: "processing",
+            processingRunId: initialActivity.runId,
+            ...(claimed.processingDelivery === undefined
+              ? {}
+              : { processingDelivery: claimed.processingDelivery }),
+            waitedByRunId: initialActivity.runId,
+          });
+        },
+      });
+    } catch (error) {
+      if (waiters.has(waiter)) {
+        waiters.delete(waiter);
+        if (waiters.size === 0) context.waiters.delete(key);
+        this.detachWaiter(waiter);
+        waiter.reject(
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      }
+      throw error;
+    }
+    if (!steered || !waiters.has(waiter)) return false;
+
     waiters.delete(waiter);
     if (waiters.size === 0) context.waiters.delete(key);
     this.detachWaiter(waiter);
-    const processingKey = completionKey(
-      target.conversationId,
-      initialActivity.runId,
-    );
     try {
-      const message = this.createDeliveredMessageEntry(target, envelope);
-      await target.session.sendCustomMessage(message, {
-        triggerTurn: false,
-        deliverAs: "steer",
-      });
-      const processing = context.processingBatches.get(processingKey) ?? [];
-      if (!processing.some(
-        ({ messageId }) => messageId === envelope.messageId,
-      )) {
-        context.processingBatches.set(
-          processingKey,
-          [...processing, envelope],
-        );
-      }
-      this.appendSourceCardState(
-        context,
-        envelope,
-        "delivered",
-      );
+      this.appendSourceCardState(context, envelope, "delivered");
       const result: SessionMessageWaitResult = {
         outcome: "message",
         conversationId: envelope.fromConversationId,
@@ -2473,12 +2501,189 @@ export class ProjectSessionCoordinator {
       this.emit(context, { type: "project_changed" });
       return true;
     } catch (error) {
-      const failure = error instanceof Error
-        ? error
-        : new Error(String(error));
-      waiter.reject(failure);
-      throw failure;
+      waiter.reject(
+        error instanceof Error ? error : new Error(String(error)),
+      );
+      throw error;
     }
+  }
+
+  /**
+   * Claims target messages in durable FIFO order and queues custom steering for
+   * the exact active run. Ordinary sends claim one bounded batch without
+   * waiting for Pi streaming. An exact wait reply drains its bounded predecessor
+   * chain first, then waits only for SDK queue acceptance so the blocked tool can
+   * return without allowing that reply to overtake earlier messages.
+   */
+  private async steerActiveTarget(
+    context: ProjectContext,
+    target: ConversationActor,
+    options: {
+      throughMessageId?: string;
+      beforeThroughDelivery?: (envelope: InboxEnvelope) => Promise<void>;
+    } = {},
+  ): Promise<boolean> {
+    const activity = target.getActivity();
+    if (activity.kind === "idle" || activity.kind === "cancelling") {
+      return false;
+    }
+
+    const runId = activity.runId;
+    const key = completionKey(target.conversationId, runId);
+    const pending = await context.inbox.list({
+      toConversationId: target.conversationId,
+    });
+    const delivered = new Set(
+      aggregateReservedConversationEntries(
+        target.sessionManager.getEntries(),
+      ).deliveredMessageIds,
+    );
+    let claimed = pending.filter((envelope) => (
+      envelope.state === "processing"
+      && envelope.processingRunId === runId
+      && !delivered.has(envelope.messageId)
+    )).length;
+
+    for (const envelope of pending) {
+      if (delivered.has(envelope.messageId)) {
+        if (envelope.messageId === options.throughMessageId) {
+          await options.beforeThroughDelivery?.(envelope);
+          return true;
+        }
+        continue;
+      }
+      if (envelope.state === "processing") {
+        // A preceding batch belongs to another run and must settle or recover
+        // before a later message can overtake it.
+        if (envelope.processingRunId !== runId) return false;
+        if (envelope.messageId === options.throughMessageId) {
+          await options.beforeThroughDelivery?.(envelope);
+          return true;
+        }
+        continue;
+      }
+      if (
+        options.throughMessageId === undefined
+        && claimed >= MAX_BATCH_MESSAGES
+      ) {
+        return false;
+      }
+
+      const processingEnvelope = await context.inbox.updateState(
+        envelope.messageId,
+        {
+          state: "processing",
+          processingRunId: runId,
+          processingDelivery: "steer",
+        },
+      );
+      const batch = context.processingBatches.get(key) ?? [];
+      if (!batch.some(({ messageId }) => messageId === envelope.messageId)) {
+        context.processingBatches.set(key, [...batch, processingEnvelope]);
+      }
+      try {
+        if (envelope.messageId === options.throughMessageId) {
+          await options.beforeThroughDelivery?.(processingEnvelope);
+        }
+        const delivery = target.steerCustomMessage(
+          runId,
+          this.createDeliveredMessageEntry(target, processingEnvelope),
+        );
+        if (options.throughMessageId === undefined) {
+          // The durable claim is the send acknowledgement. Waiting for Pi's
+          // transient queue here would deadlock lifecycle shutdown during
+          // pre-stream work such as compaction or provider setup.
+          this.recoverRejectedSteer(
+            context,
+            target.conversationId,
+            runId,
+            processingEnvelope,
+            delivery,
+          );
+        } else {
+          await delivery;
+        }
+        claimed++;
+        if (envelope.messageId === options.throughMessageId) return true;
+      } catch (error) {
+        // A run can end between claiming the sidecar and the SDK accepting its
+        // steering queue. Do not treat in-memory delivery as durable; leave it
+        // available for the next run unless Pi already wrote its marker.
+        const markers = new Set(
+          aggregateReservedConversationEntries(
+            target.sessionManager.getEntries(),
+          ).deliveredMessageIds,
+        );
+        if (markers.has(envelope.messageId)) {
+          claimed++;
+          if (envelope.messageId === options.throughMessageId) return true;
+          continue;
+        }
+        const batchAfterFailure = (context.processingBatches.get(key) ?? [])
+          .filter(({ messageId }) => messageId !== envelope.messageId);
+        if (batchAfterFailure.length === 0) {
+          context.processingBatches.delete(key);
+        } else {
+          context.processingBatches.set(key, batchAfterFailure);
+        }
+        await context.inbox.updateState(envelope.messageId, { state: "queued" });
+        if (envelope.messageId === options.throughMessageId) throw error;
+        return false;
+      }
+    }
+    return false;
+  }
+
+  private recoverRejectedSteer(
+    context: ProjectContext,
+    targetConversationId: string,
+    runId: string,
+    envelope: InboxEnvelope,
+    delivery: Promise<void>,
+  ): void {
+    void delivery.catch((error) => {
+      if (context.closing) return;
+      const recovery = this.runLifecycle(context, async () => {
+        const stored = await context.inbox.get(envelope.messageId);
+        if (
+          stored?.state !== "processing"
+          || stored.processingRunId !== runId
+          || stored.processingDelivery !== "steer"
+        ) {
+          return;
+        }
+        const key = completionKey(targetConversationId, runId);
+        const batch = context.processingBatches.get(key) ?? [];
+        if (!batch.some(({ messageId }) => messageId === stored.messageId)) {
+          context.processingBatches.set(key, [...batch, stored]);
+        }
+        const actor = context.actors.get(targetConversationId);
+        const settlement = actor
+          ? this.findSettlement(context, actor, runId)
+          : undefined;
+        if (settlement) {
+          await this.finishBatch(
+            context,
+            targetConversationId,
+            runId,
+            settlement,
+          );
+          if (!actor?.getState().fatalError) {
+            if (actor?.getActivity().kind === "idle") {
+              await this.pumpTarget(context, targetConversationId);
+            }
+            return;
+          }
+        }
+        await this.recoverFailedBatch(
+          context,
+          targetConversationId,
+          runId,
+          error,
+        );
+      });
+      this.trackBackground(context, recovery);
+    });
   }
 
   private async enqueueEnvelope(
@@ -2487,7 +2692,13 @@ export class ProjectSessionCoordinator {
     target: ConversationActor,
     input: Pick<
       InboxEnvelopeInput,
-      "messageId" | "cardId" | "sentAt" | "kind" | "body" | "delegationId"
+      | "messageId"
+      | "cardId"
+      | "sentAt"
+      | "kind"
+      | "body"
+      | "delegationId"
+      | "fromRunId"
     > & {
       processingRunId?: string;
       requestFingerprint?: string;
@@ -2540,6 +2751,9 @@ export class ProjectSessionCoordinator {
       ...(input.requestFingerprint === undefined
         ? {}
         : { requestFingerprint: input.requestFingerprint }),
+      ...(input.fromRunId === undefined
+        ? {}
+        : { fromRunId: input.fromRunId }),
       fromSnapshot,
       toSnapshot,
     });
@@ -2804,6 +3018,12 @@ export class ProjectSessionCoordinator {
             ? {
                 state: "processing",
                 processingRunId: envelope.processingRunId!,
+                ...(envelope.processingDelivery === undefined
+                  ? {}
+                  : { processingDelivery: envelope.processingDelivery }),
+                ...(envelope.waitedByRunId === undefined
+                  ? {}
+                  : { waitedByRunId: envelope.waitedByRunId }),
               }
             : { state: "queued" },
         );
@@ -2871,6 +3091,15 @@ export class ProjectSessionCoordinator {
     );
     for (const envelope of envelopes) {
       if (!deliveredMessageIds.has(envelope.messageId)) {
+        if (envelope.processingDelivery === "steer") {
+          // The SDK queue is transient. If abort/settlement won before Pi
+          // persisted the custom message marker, return this claimed steering
+          // envelope to FIFO delivery instead of claiming receipt.
+          await context.inbox.updateState(envelope.messageId, {
+            state: "queued",
+          });
+          continue;
+        }
         if (envelope.state === "queued") continue;
       }
       const state = settlement.outcome === "completed"
@@ -3013,6 +3242,12 @@ export class ProjectSessionCoordinator {
       }
       await this.retryBlockedDeletions(context);
     }).catch((error) => {
+      this.rejectRunWaiters(
+        context,
+        actor.conversationId,
+        completion.settlement.runId,
+        error instanceof Error ? error : new Error(String(error)),
+      );
       context.attention.add(actor.conversationId);
       this.emit(context, {
         type: "error",
@@ -3022,6 +3257,22 @@ export class ProjectSessionCoordinator {
         fatal: false,
       });
     }));
+  }
+
+  private rejectRunWaiters(
+    context: ProjectContext,
+    conversationId: string,
+    runId: string,
+    error: Error,
+  ): void {
+    const key = completionKey(conversationId, runId);
+    const waiters = context.waiters.get(key);
+    if (!waiters) return;
+    context.waiters.delete(key);
+    for (const waiter of waiters) {
+      this.detachWaiter(waiter);
+      waiter.reject(error);
+    }
   }
 
   private recordCompletion(
@@ -3042,10 +3293,30 @@ export class ProjectSessionCoordinator {
     }
     const waiters = context.waiters.get(key);
     if (!waiters) return;
-    context.waiters.delete(key);
+    const lifecycle = context.actors.get(conversationId)?.profile.lifecycle
+      ?? context.profiles.get(conversationId)?.lifecycle;
+    const deferredReturnWaiters = new Set<ProjectWaiter>();
     for (const waiter of waiters) {
+      if (
+        waiter.kind === "session"
+        && lifecycle?.kind === "temporary"
+        && lifecycle.initialRunId === settlement.runId
+        && lifecycle.callerConversationId === waiter.waitingConversationId
+      ) {
+        // The temporary result body has one model-input owner: its durable
+        // incoming message. Keep the caller wait until that envelope is
+        // committed and resolve it with metadata instead of duplicating the
+        // final text in the tool result.
+        deferredReturnWaiters.add(waiter);
+        continue;
+      }
       this.detachWaiter(waiter);
       waiter.resolve(cloneSettlement(settlement));
+    }
+    if (deferredReturnWaiters.size === 0) {
+      context.waiters.delete(key);
+    } else {
+      context.waiters.set(key, deferredReturnWaiters);
     }
   }
 
@@ -3065,10 +3336,41 @@ export class ProjectSessionCoordinator {
     if (!ownership) {
       throw new Error("No running source turn owns this wait");
     }
-    const cached = context.completions.get(
-      completionKey(targetConversationId, runId),
-    );
-    if (cached) return cloneSettlement(cached);
+    const preliminary = await this.runLifecycle(context, async () => {
+      const committedReply = await this.findCommittedWaitReply(
+        context,
+        sourceConversationId,
+        targetConversationId,
+        runId,
+        ownership.runId,
+      );
+      const cached = context.completions.get(
+        completionKey(targetConversationId, runId),
+      );
+      return {
+        committedReply,
+        cached: cached ? cloneSettlement(cached) : undefined,
+        waitsForTemporaryReturn: this.waitsForTemporaryReturn(
+          context,
+          sourceConversationId,
+          targetConversationId,
+          runId,
+          cached,
+        ),
+      };
+    });
+    this.throwIfAborted(signal);
+    if (preliminary.committedReply || preliminary.waitsForTemporaryReturn) {
+      return this.waitForSessionEvent(
+        context,
+        source,
+        ownership,
+        targetConversationId,
+        runId,
+        signal,
+      );
+    }
+    if (preliminary.cached) return preliminary.cached;
     const activeTarget = context.actors.get(targetConversationId);
     if (activeTarget) {
       const activeSettlement = this.findSettlement(
@@ -3076,7 +3378,18 @@ export class ProjectSessionCoordinator {
         activeTarget,
         runId,
       );
-      if (activeSettlement) return activeSettlement;
+      if (
+        activeSettlement
+        && !this.waitsForTemporaryReturn(
+          context,
+          sourceConversationId,
+          targetConversationId,
+          runId,
+          activeSettlement,
+        )
+      ) {
+        return activeSettlement;
+      }
     } else {
       const inspection = await context.project.inspectConversation(
         targetConversationId,
@@ -3085,7 +3398,15 @@ export class ProjectSessionCoordinator {
       const durable = inspection.runSettlements.find(
         (settlement) => settlement.runId === runId,
       );
-      if (durable) return cloneSettlement(durable);
+      const inspectedLifecycle = inspection.conversationMeta?.lifecycle;
+      const waitsForInspectedTemporaryReturn =
+        inspectedLifecycle?.kind === "temporary"
+        && inspectedLifecycle.initialRunId === runId
+        && inspectedLifecycle.callerConversationId === sourceConversationId
+        && durable?.reportedAt === undefined;
+      if (durable && !waitsForInspectedTemporaryReturn) {
+        return cloneSettlement(durable);
+      }
     }
     const target = await raceWithAbort(
       this.getOrOpenActor(context, targetConversationId),
@@ -3093,68 +3414,189 @@ export class ProjectSessionCoordinator {
     );
     this.throwIfAborted(signal);
     const existing = this.findSettlement(context, target, runId);
-    if (existing) return existing;
-    if (this.hasWaitPath(
-      context,
-      targetConversationId,
-      sourceConversationId,
-    )) {
-      throw new Error(
-        `Waiting for ${targetConversationId} would create a conversation wait cycle`,
-      );
+    if (
+      existing
+      && !this.waitsForTemporaryReturn(
+        context,
+        sourceConversationId,
+        targetConversationId,
+        runId,
+        existing,
+      )
+    ) {
+      return existing;
     }
+    return this.waitForSessionEvent(
+      context,
+      source,
+      ownership,
+      targetConversationId,
+      runId,
+      signal,
+      target,
+    );
+  }
 
+  private waitForSessionEvent(
+    context: ProjectContext,
+    source: ConversationActor,
+    ownership: ConversationRunOwnership,
+    targetConversationId: string,
+    runId: string,
+    signal?: AbortSignal,
+    target?: ConversationActor,
+  ): Promise<RunSettlement | SessionMessageWaitResult> {
+    const sourceConversationId = source.conversationId;
     return source.withWaiting(
       ownership,
       { conversationId: targetConversationId, runId },
       async () => {
+        let resolveCompletion!: (
+          result: RunSettlement | SessionMessageWaitResult,
+        ) => void;
+        let rejectCompletion!: (error: Error) => void;
         const completion = new Promise<
           RunSettlement | SessionMessageWaitResult
         >((resolve, reject) => {
-          const key = completionKey(targetConversationId, runId);
-          const waiter: SessionWaiter = {
-            kind: "session",
-            resolve,
-            reject,
-            waitingConversationId: sourceConversationId,
-            targetConversationId,
-            targetRunId: runId,
-            ...(signal === undefined ? {} : { signal }),
-          };
-          if (signal) {
-            waiter.abortListener = () => {
-              const waiting = context.waiters.get(key);
-              waiting?.delete(waiter);
-              if (waiting?.size === 0) context.waiters.delete(key);
-              this.detachWaiter(waiter);
-              reject(abortError("Session wait was aborted"));
+          resolveCompletion = resolve;
+          rejectCompletion = reject;
+        });
+        const key = completionKey(targetConversationId, runId);
+        let registeredWaiter: SessionWaiter | undefined;
+        try {
+          await this.runLifecycle(context, async () => {
+            const waiter: SessionWaiter = {
+              kind: "session",
+              resolve: resolveCompletion,
+              reject: rejectCompletion,
+              waitingConversationId: sourceConversationId,
+              targetConversationId,
+              targetRunId: runId,
+              ...(signal === undefined ? {} : { signal }),
             };
-            signal.addEventListener("abort", waiter.abortListener, {
-              once: true,
-            });
-            if (signal.aborted) {
-              waiter.abortListener();
+            registeredWaiter = waiter;
+            const fatalTarget = context.actors.get(targetConversationId)
+              ?.getState().fatalError;
+            if (fatalTarget !== undefined) {
+              throw new Error(
+                `Target conversation is fatal: ${fatalTarget}`,
+              );
+            }
+            if (signal) {
+              waiter.abortListener = () => {
+                const waiting = context.waiters.get(key);
+                waiting?.delete(waiter);
+                if (waiting?.size === 0) context.waiters.delete(key);
+                this.detachWaiter(waiter);
+                rejectCompletion(abortError("Session wait was aborted"));
+              };
+              signal.addEventListener("abort", waiter.abortListener, {
+                once: true,
+              });
+              if (signal.aborted) {
+                waiter.abortListener();
+                return;
+              }
+            }
+            if (this.hasWaitPath(
+              context,
+              targetConversationId,
+              sourceConversationId,
+            )) {
+              throw new Error(
+                `Waiting for ${targetConversationId} would create a conversation wait cycle`,
+              );
+            }
+            let waiters = context.waiters.get(key);
+            if (!waiters) {
+              waiters = new Set();
+              context.waiters.set(key, waiters);
+            }
+            waiters.add(waiter);
+
+            const committedReply = await this.findCommittedWaitReply(
+              context,
+              sourceConversationId,
+              targetConversationId,
+              runId,
+              ownership.runId,
+            );
+            if (committedReply) {
+              await this.deliverEnvelopeToWaitingRun(
+                context,
+                source,
+                committedReply,
+                runId,
+              );
               return;
             }
-          }
-          let waiters = context.waiters.get(key);
-          if (!waiters) {
-            waiters = new Set();
-            context.waiters.set(key, waiters);
-          }
-          waiters.add(waiter);
 
-          const raced = this.findSettlement(context, target, runId);
-          if (raced) {
-            waiters.delete(waiter);
-            if (waiters.size === 0) context.waiters.delete(key);
-            this.detachWaiter(waiter);
-            resolve(raced);
+            const raced = target
+              ? this.findSettlement(context, target, runId)
+              : context.completions.get(key);
+            if (
+              raced
+              && !this.waitsForTemporaryReturn(
+                context,
+                sourceConversationId,
+                targetConversationId,
+                runId,
+                raced,
+              )
+            ) {
+              waiters.delete(waiter);
+              if (waiters.size === 0) context.waiters.delete(key);
+              this.detachWaiter(waiter);
+              resolveCompletion(cloneSettlement(raced));
+            }
+          });
+        } catch (error) {
+          if (registeredWaiter) {
+            const waiters = context.waiters.get(key);
+            waiters?.delete(registeredWaiter);
+            if (waiters?.size === 0) context.waiters.delete(key);
+            this.detachWaiter(registeredWaiter);
           }
-        });
+          rejectCompletion(
+            error instanceof Error ? error : new Error(String(error)),
+          );
+        }
         return completion;
       },
     );
+  }
+
+  private async findCommittedWaitReply(
+    context: ProjectContext,
+    sourceConversationId: string,
+    targetConversationId: string,
+    targetRunId: string,
+    sourceRunId: string,
+  ): Promise<InboxEnvelope | undefined> {
+    const pending = await context.inbox.list({
+      toConversationId: sourceConversationId,
+    });
+    return pending.find((envelope) =>
+      envelope.fromConversationId === targetConversationId
+      && envelope.fromRunId === targetRunId
+      && envelope.waitedByRunId !== sourceRunId
+    );
+  }
+
+  private waitsForTemporaryReturn(
+    context: ProjectContext,
+    sourceConversationId: string,
+    targetConversationId: string,
+    runId: string,
+    settlement?: RunSettlement,
+  ): boolean {
+    const lifecycle = context.actors.get(targetConversationId)?.profile.lifecycle
+      ?? context.profiles.get(targetConversationId)?.lifecycle;
+    return lifecycle?.kind === "temporary"
+      && lifecycle.initialRunId === runId
+      && lifecycle.callerConversationId === sourceConversationId
+      && settlement !== undefined
+      && settlement.reportedAt === undefined;
   }
 
   private findSettlement(
@@ -3195,11 +3637,17 @@ export class ProjectSessionCoordinator {
         context.waiters.set(key, waiters);
       }
       waiters.add(waiter);
-      const raced = this.findSettlement(context, target, runId);
-      if (!raced) return;
-      waiters.delete(waiter);
-      if (waiters.size === 0) context.waiters.delete(key);
-      resolve(raced);
+      try {
+        const raced = this.findSettlement(context, target, runId);
+        if (!raced) return;
+        waiters.delete(waiter);
+        if (waiters.size === 0) context.waiters.delete(key);
+        resolve(raced);
+      } catch (error) {
+        waiters.delete(waiter);
+        if (waiters.size === 0) context.waiters.delete(key);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
     });
   }
 
@@ -3238,13 +3686,16 @@ export class ProjectSessionCoordinator {
       context,
       lifecycle.callerConversationId,
     );
-    await this.enqueueEnvelope(context, actor, caller, {
+    const recoveredReturn = await context.inbox.get(
+      lifecycle.returnMessageId,
+    );
+    const returned = await this.enqueueEnvelope(context, actor, caller, {
       messageId: lifecycle.returnMessageId,
       cardId: deterministicUuid(
         "piweb.return.card",
         lifecycle.returnMessageId,
       ),
-      sentAt: this.now().toISOString(),
+      sentAt: recoveredReturn?.sentAt ?? this.now().toISOString(),
       kind: successful
         ? "delegation_result"
         : "delegation_failure",
@@ -3258,6 +3709,9 @@ export class ProjectSessionCoordinator {
               settlement.finalText === null ? "，且没有 Agent 回复" : ""
             }`,
       delegationId: lifecycle.delegationId,
+      fromRunId: recoveredReturn
+        ? recoveredReturn.fromRunId
+        : settlement.runId,
     });
     const reported = createRunSettlementEntry({
       ...settlement,
@@ -3268,6 +3722,17 @@ export class ProjectSessionCoordinator {
       actor.sessionManager,
       createRunSettlementEntry(reported),
     );
+    context.completions.set(
+      completionKey(actor.conversationId, reported.runId),
+      cloneSettlement(reported),
+    );
+    const deliveredToWait = await this.deliverEnvelopeToWaitingRun(
+      context,
+      caller,
+      returned.envelope,
+      settlement.runId,
+    );
+    if (!deliveredToWait) await this.steerActiveTarget(context, caller);
     if (caller.getActivity().kind === "idle") {
       await this.pumpTarget(context, caller.conversationId);
     }

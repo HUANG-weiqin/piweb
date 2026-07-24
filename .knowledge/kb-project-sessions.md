@@ -113,12 +113,12 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 
 ## 持久 inbox 与恢复
 
-`.piweb/inbox/<messageId>.json` 是严格 v1 sidecar，只允许常规项目路径；单条正文、每项目/目标消息数和总字节都有硬上限。`.piweb/notebooks/<conversationId>.json` 是 conversation-scoped Agent Notebook sidecar，由 notebook 工具按 title 管理，删除 conversation 时级联清理。
+`.piweb/inbox/<messageId>.json` 是严格 v1 sidecar，只允许常规项目路径；可选 `fromRunId` 冻结来源 run correlation，processing 状态的可选 `waitedByRunId` 记录接收 run 已观察该 messageId，供 wait 在订阅前消息已提交时补查且不重复消费。`fromRunId` 属于 immutable sender payload，`waitedByRunId` 属于 processing delivery state；兼容旧 v1 envelope 时必须保留 `fromRunId` 缺席，crash replay 不能自行补值制造 payload conflict。单条正文、每项目/目标消息数和总字节都有硬上限。`.piweb/notebooks/<conversationId>.json` 是 conversation-scoped Agent Notebook sidecar，由 notebook 工具按 title 管理，删除 conversation 时级联清理。
 
 - 发送方先追加 `sending` 卡片，再原子提交 envelope，最后追加同 cardId 的 `queued` 状态；持久接收发生在目标处理之前。
-- busy 目标不会被插入当前 branch。idle 后 inbox pump 把 envelope 标为 `processing`，追加 incoming `custom_message` 并用确定 runId 启动 actor。
-- run settlement durable 后，pump 先把发送方卡片推进到 completed/failed/aborted，再删除 sidecar；崩溃时残留 sidecar 用于恢复对账。
-- wait 总是先查 JSONL settlement，再订阅内存 completion，避免注册前已经完成而永久错过。
+- busy 目标把最早 queued envelope 持久 claim 为 `processing(runId, processingDelivery="steer")`，再由 actor 以 incoming `custom_message` 排入精确 run 的 SDK steering queue；当前工具调用不被中断。idle 后 inbox pump 才用确定 runId 启动新 run。普通发送在 durable claim 后即可返回，不等待 pre-stream SDK 内存队列，避免项目关闭与 provider/compaction preflight 互锁。
+- run settlement durable 后，pump 先对账目标 JSONL incoming marker：带 steer 标记但尚无 marker 的 claim 恢复 queued；已有 marker 才把发送方卡片推进到 completed/failed/aborted 并删除 sidecar。同步 dispatch rollback 必须保留 `processingDelivery`，崩溃时残留 sidecar 用于恢复对账。
+- wait 在项目 lifecycle 内把 cycle check、waiter 注册与 durable inbox 补查原子化：发送先赢时按目标 conversation + `fromRunId` 找回未被当前 receiving run receipt 的消息，注册先赢时发送直接结算 waiter，避免消息或 settlement 在订阅前到达而永久错过或同一 messageId 被连续 wait 重放。异常路径必须 remove+detach waiter；目标 exact run 在 durable settlement 前 fatal 时也必须按 runId reject 全部 waiter。临时 initial run 对 caller 只通过尚未 receipt 的回传 incoming message 交付正文，wait tool result 只返回 metadata；return 已 receipt/清理后再次 wait 返回 reported settlement。
 - 启动恢复会扫描全部 sidecar、profile 和 settlement：修复 inbox 已提交而来源卡片仍是 sending 的窗口，恢复 processing batch，继续临时回传，并只执行尚未 settled 的 run。
 - 临时 conversation 只观察 metadata 中的 `initialRunId`。成功且有 final text 时先 durable enqueue caller、标记 settlement 已报告，再自动删除；失败、中止或无回复同样回传失败，但保留目标并标记 attention。
 - 删除 conversation 先冻结并 fence 目标及其 metadata descendants，任何成员 busy 都拒绝整次删除；随后先持久化目标 tombstone，再持久化 descendants tombstone，并按子孙到祖先顺序终结/删除每个目标的 pending envelope、删除 JSONL。事务中的后到消息明确失败，已发往 cascade set 之外的 outbound envelope 不受来源删除影响。删除完成后回收 tombstone，重启时也会安全清理“目标已不存在且无 pending”的残留标记。

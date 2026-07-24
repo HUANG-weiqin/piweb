@@ -1063,7 +1063,7 @@ describe("PiConnection lifecycle", () => {
         text: "wait for the peer",
       });
       await waitStarted.promise;
-      expect(latestState(harness.events)).toMatchObject({
+      await expect.poll(() => latestState(harness.events)).toMatchObject({
         sessionId: SESSION_A,
         conversationId: focusedSource.conversationId,
         focusId: focusedSource.focusId,

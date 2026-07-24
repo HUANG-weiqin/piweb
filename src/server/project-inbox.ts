@@ -86,10 +86,13 @@ const envelopeSchema = z.object({
     SHA256_HEX_PATTERN,
     "requestFingerprint must be a lowercase SHA-256 hex digest",
   ).optional(),
+  fromRunId: uuidSchema("fromRunId").optional(),
   fromSnapshot: z.unknown(),
   toSnapshot: z.unknown(),
   state: z.enum(["queued", "processing"]),
   processingRunId: uuidSchema("processingRunId").optional(),
+  processingDelivery: z.literal("steer").optional(),
+  waitedByRunId: uuidSchema("waitedByRunId").optional(),
 }).strict();
 
 const stateUpdateSchema = z.discriminatedUnion("state", [
@@ -99,6 +102,8 @@ const stateUpdateSchema = z.discriminatedUnion("state", [
   z.object({
     state: z.literal("processing"),
     processingRunId: uuidSchema("processingRunId"),
+    processingDelivery: z.literal("steer").optional(),
+    waitedByRunId: uuidSchema("waitedByRunId").optional(),
   }).strict(),
 ]);
 
@@ -124,20 +129,35 @@ export interface InboxEnvelope {
   replyToMessageId?: string;
   delegationId?: string;
   requestFingerprint?: string;
+  /** Frozen source run correlation used by durable wait rendezvous. */
+  fromRunId?: string;
   fromSnapshot: ConversationReferenceSnapshot;
   toSnapshot: ConversationReferenceSnapshot;
   state: "queued" | "processing";
   processingRunId?: string;
+  /** A claimed custom steer must be retried if its exact run settles unmarked. */
+  processingDelivery?: "steer";
+  /** Exact receiving run whose wait already observed this message. */
+  waitedByRunId?: string;
 }
 
 export type InboxEnvelopeInput = Omit<
   InboxEnvelope,
-  "version" | "state" | "processingRunId"
+  | "version"
+  | "state"
+  | "processingRunId"
+  | "processingDelivery"
+  | "waitedByRunId"
 >;
 
 export type InboxStateUpdate =
   | { state: "queued" }
-  | { state: "processing"; processingRunId: string };
+  | {
+      state: "processing";
+      processingRunId: string;
+      processingDelivery?: "steer";
+      waitedByRunId?: string;
+    };
 
 export interface InboxPutResult {
   status: "created" | "existing";
@@ -239,6 +259,8 @@ function immutablePayload(envelope: InboxEnvelope): InboxEnvelopeInput {
     version: _version,
     state: _state,
     processingRunId: _processingRunId,
+    processingDelivery: _processingDelivery,
+    waitedByRunId: _waitedByRunId,
     ...payload
   } = envelope;
   return payload;
@@ -319,6 +341,25 @@ export function parseInboxEnvelope(value: unknown): InboxEnvelope {
     );
   }
   if (
+    raw.state !== "processing"
+    && (
+      raw.processingDelivery !== undefined
+      || raw.waitedByRunId !== undefined
+    )
+  ) {
+    throw new Error(
+      "processingDelivery and waitedByRunId are only valid while processing",
+    );
+  }
+  if (
+    raw.waitedByRunId !== undefined
+    && raw.waitedByRunId !== raw.processingRunId
+  ) {
+    throw new Error(
+      "waitedByRunId must match the exact processingRunId",
+    );
+  }
+  if (
     raw.kind !== "message"
     && raw.delegationId === undefined
   ) {
@@ -358,12 +399,21 @@ export function parseInboxEnvelope(value: unknown): InboxEnvelope {
     ...(raw.requestFingerprint === undefined
       ? {}
       : { requestFingerprint: raw.requestFingerprint }),
+    ...(raw.fromRunId === undefined
+      ? {}
+      : { fromRunId: raw.fromRunId }),
     fromSnapshot,
     toSnapshot,
     state: raw.state,
     ...(raw.processingRunId === undefined
       ? {}
       : { processingRunId: raw.processingRunId }),
+    ...(raw.processingDelivery === undefined
+      ? {}
+      : { processingDelivery: raw.processingDelivery }),
+    ...(raw.waitedByRunId === undefined
+      ? {}
+      : { waitedByRunId: raw.waitedByRunId }),
   };
 }
 
@@ -534,8 +584,20 @@ export class ProjectInbox {
         ...match.envelope,
         state: state.state,
         ...(state.state === "processing"
-          ? { processingRunId: state.processingRunId }
-          : { processingRunId: undefined }),
+          ? {
+              processingRunId: state.processingRunId,
+              ...(state.processingDelivery === undefined
+                ? { processingDelivery: undefined }
+                : { processingDelivery: state.processingDelivery }),
+              ...(state.waitedByRunId === undefined
+                ? { waitedByRunId: undefined }
+                : { waitedByRunId: state.waitedByRunId }),
+            }
+          : {
+              processingRunId: undefined,
+              processingDelivery: undefined,
+              waitedByRunId: undefined,
+            }),
       });
       if (JSON.stringify(next) === JSON.stringify(match.envelope)) {
         return cloneEnvelope(match.envelope);
