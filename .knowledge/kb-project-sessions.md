@@ -138,7 +138,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 - `dispatching(runId, dispatchedAt)`：已为自动新 run 或用户显式 Steer 持久 claim，不可假装撤回；
 - `attention(reason, attentionAt)`：投递结果无法证明，需要用户核对并显式移除记录，不能自动重发。
 
-目录、文件名、regular-file identity、尾换行、JSON schema、单项目 256 条、单 conversation 64 条和总 32 MiB 都 fail closed。容量按每条 immutable payload 的最坏合法状态序列化大小预留，因此任何已接受 queued 记录都必能转成 dispatching 或最大 attention，而不会在状态增长时卡死。创建使用同项目父目录临时文件加 hard-link commit，状态替换使用原子 rename；列表按 `createdAt + promptId` FIFO。
+目录、文件名、regular-file identity、尾换行、JSON schema、单项目 256 条、单 conversation 64 条和实际总 32 MiB 都 fail closed。新建容量按每条 immutable payload 的最坏合法 JSON 序列化状态预留（包括控制字符被 `JSON.stringify` 转义后的最大 attention reason），因此本版本接受的 queued 记录必能转成 dispatching 或最大 attention；状态替换仍复核实际 next bytes。scan 允许旧版 actual-fit 但新 reservation 超限的队列打开、撤回和清理，只禁止继续创建，避免升级后把可恢复项目直接拒之门外。创建使用同项目父目录临时文件加 hard-link commit，状态替换使用原子 rename；列表按 `createdAt + promptId` FIFO。
 
 - busy 时 `enqueue_prompt` 只 durable put，提交回执不等待后续 claim/pump 成功；post-commit pump 失败保留 exact queued sidecar 并投影 error/attention，不能把已经提交的意图回答成失败。idle pump 在跨会话 inbox 之后 claim 最早 queued prompt，并生成新 run。直接 browser prompt 的 admission 也经过同一 project lifecycle：发现更早 queued/processing inbox 或 queued/dispatching prompt 时先泵送 durable work 并拒绝本次 direct draft，不能从 idle-publication 或重连窗口插队。
 - startPrompt 的首条 raw user `message_end` 与后续 guidance 是两个 receipt 槽位。只有从同一 SessionManager entries 找到 `entry.message === rawMessage` 的对象引用才能确认 Pi 已持久追加；首条只确认 initial prompt，不能顺手结算已经排队的 Steer。后续持久 raw user message 再按 SDK FIFO 逐条结算 guidance。

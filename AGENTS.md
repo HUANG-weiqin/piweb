@@ -43,7 +43,7 @@ Pi Web 是本机优先的极简 Agent 工作台。当前目标不是复制 Pi �
 - `WebSocket.send()` 不是 prompt 提交点。只有匹配 sessionId + runId 的 `run_queued` 才能清空直接 prompt 草稿并投影 user message；durable enqueue 则只由匹配 commandId 的完成回执或包含同一 promptId 的精确队列快照证明提交。确认前断线必须保留草稿、恢复历史/队列后提示核对，禁止自动重发或按正文去重。
 - busy 时的普通用户消息必须先进入服务端 `.piweb/pending-prompts` durable queue，浏览器不能拥有或自动泵送 FIFO。queued 可精确撤回；Steer 必须由用户显式点击并绑定当前 exact runId；dispatching 不可假装撤回，SDK 已接受后无法证明持久交付的记录只能转 attention，不能自动重试。
 - pending prompt 自动 pump 只在 actor idle 时按 `createdAt + promptId` FIFO 启动新 run，并让跨会话 inbox 优先；direct browser prompt admission 也必须经过同一 project lifecycle，不能越过已有 durable work。dispatching sidecar 只能凭 JSONL 中 exact `promptId + runId` delivery receipt 清理；run settlement 本身不是交付证明。receipt 按 promptId 唯一，同一 run 可合法接收多个 prompt。
-- pending prompt 与 inbox 的总字节上限必须为每条 immutable payload 预留最坏合法状态大小，保证已接受的 queued sidecar 必能增长到 processing/dispatching/attention。需要初始 processing claim 的 inbox envelope 必须首次原子创建成目标状态，不能先 commit queued 再改写。
+- pending prompt 与 inbox envelope 的准入容量必须为每条 immutable payload 预留最坏合法 JSON 状态大小，状态替换仍复核实际 next bytes；旧版 actual-fit/reservation 超限目录允许打开清理但不能继续创建。inbox 删除 tombstone 使用独立有界预算，不能因 envelope 满载而无法建立删除 fence。需要初始 processing claim 的 inbox envelope 必须首次原子创建成目标状态，不能先 commit queued 再改写。
 - 用户消息投递只能在 raw user `message_end` 后，从同一 SessionManager entries 找到 `entry.message === rawMessage` 的对象引用来证明。startPrompt 的首条 raw user 只结算 initial prompt 槽位；后续消息再 FIFO 结算 guidance，不能让晚到的 initial event 误认成 Steer delivery。
 - 普通会话操作串行执行；`abort`、认证响应、认证取消和生命周期失效走控制通道，session dispose 排回 actor 队列。
 - 所有 session command/state/event 都带 `sessionId`；run command/event 还带 `runId`。客户端必须丢弃不匹配的身份。
