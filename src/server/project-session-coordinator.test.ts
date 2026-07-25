@@ -8833,7 +8833,7 @@ describe("ProjectSessionCoordinator", () => {
       expect(order).toEqual(["inbox", "pending"]);
     });
 
-    it("claims an exact queued prompt before steering and removes it only after user message_end", async () => {
+    it("records separate durable receipts when one run explicitly steers multiple pending prompts", async () => {
       const fixture = await createFixture();
       const actor = await fixture.coordinator.createUserConversation(
         fixture.handle,
@@ -8854,11 +8854,19 @@ describe("ProjectSessionCoordinator", () => {
         "stay busy",
       );
       await started.promise;
+      control.emitUserMessage("stay busy");
+      await Promise.resolve();
       const promptId = randomUUID();
+      const secondPromptId = randomUUID();
       await fixture.coordinator.enqueuePrompt(
         fixture.handle,
         actor.conversationId,
         { promptId, text: "deliver this guidance" },
+      );
+      await fixture.coordinator.enqueuePrompt(
+        fixture.handle,
+        actor.conversationId,
+        { promptId: secondPromptId, text: "deliver another guidance" },
       );
 
       const steered = fixture.coordinator.steerQueuedPrompt(
@@ -8875,14 +8883,28 @@ describe("ProjectSessionCoordinator", () => {
         fixture.handle,
         actor.conversationId,
       )).resolves.toEqual([
-        expect.objectContaining({ state: "dispatching", runId }),
+        expect.objectContaining({ promptId, state: "dispatching", runId }),
+        expect.objectContaining({ promptId: secondPromptId, state: "queued" }),
       ]);
       control.emitUserMessage("deliver this guidance");
       await steered;
+      const secondSteered = fixture.coordinator.steerQueuedPrompt(
+        fixture.handle,
+        actor.conversationId,
+        secondPromptId,
+        runId,
+      );
+      await waitUntil(
+        () => control.steerTexts.includes("deliver another guidance"),
+        "second pending prompt steer to reach the SDK",
+      );
+      control.emitUserMessage("deliver another guidance");
+      await secondSteered;
       expect(aggregateReservedConversationEntries(
         actor.sessionManager.getEntries(),
       ).pendingPromptDeliveries).toEqual([
         expect.objectContaining({ promptId, runId }),
+        expect.objectContaining({ promptId: secondPromptId, runId }),
       ]);
       await expect(fixture.coordinator.listPendingPrompts(
         fixture.handle,
@@ -9004,6 +9026,8 @@ describe("ProjectSessionCoordinator", () => {
         "busy before uncertain steer",
       );
       await started.promise;
+      control.emitUserMessage("busy before uncertain steer");
+      await Promise.resolve();
       const promptId = randomUUID();
       await fixture.coordinator.enqueuePrompt(
         fixture.handle,
@@ -9053,6 +9077,72 @@ describe("ProjectSessionCoordinator", () => {
       await busy;
       await Promise.resolve();
       expect(control.promptTexts).toEqual(["busy before uncertain steer"]);
+    });
+
+    it("keeps a queued steer pending when a late persisted initial prompt arrives first", async () => {
+      const fixture = await createFixture();
+      const actor = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const control = fixture.runtime.control(actor.conversationId);
+      const started = deferred();
+      const release = deferred();
+      control.enqueue(blocksUntil(started, release));
+      const runId = randomUUID();
+      const busy = fixture.coordinator.prompt(
+        fixture.handle,
+        actor.conversationId,
+        runId,
+        "initial prompt arrives late",
+      );
+      await started.promise;
+      const promptId = randomUUID();
+      await fixture.coordinator.enqueuePrompt(
+        fixture.handle,
+        actor.conversationId,
+        { promptId, text: "guidance must remain pending" },
+      );
+      const steering = fixture.coordinator.steerQueuedPrompt(
+        fixture.handle,
+        actor.conversationId,
+        promptId,
+        runId,
+      );
+      await waitUntil(
+        () => control.steerTexts.includes("guidance must remain pending"),
+        "queued guidance to reach the SDK",
+      );
+      let delivered = false;
+      void steering.then(
+        () => {
+          delivered = true;
+        },
+        () => undefined,
+      );
+      control.emitUserMessage("initial prompt arrives late");
+      await Promise.resolve();
+      expect(delivered).toBe(false);
+
+      await fixture.coordinator.abort(
+        fixture.handle,
+        actor.conversationId,
+        runId,
+      );
+      await expect(steering).rejects.toMatchObject({
+        classification: "uncertain_after_sdk_acceptance",
+        message: "Run ended before queued guidance was delivered",
+      });
+      await busy;
+      expect(aggregateReservedConversationEntries(
+        actor.sessionManager.getEntries(),
+      ).pendingPromptDeliveries).toEqual([]);
+      await expect(fixture.coordinator.listPendingPrompts(
+        fixture.handle,
+        actor.conversationId,
+      )).resolves.toEqual([
+        expect.objectContaining({ promptId, state: "attention" }),
+      ]);
     });
 
     it("marks no-user delivery attention and recovers dispatching records conservatively", async () => {

@@ -3664,12 +3664,12 @@ export class ProjectSessionCoordinator {
       actor.sessionManager.getEntries(),
     );
     const existing = aggregate.pendingPromptDeliveries.find((delivery) => (
-      delivery.promptId === promptId || delivery.runId === runId
+      delivery.promptId === promptId
     ));
     if (existing !== undefined) {
-      if (existing.promptId === promptId && existing.runId === runId) return;
+      if (existing.runId === runId) return;
       throw new Error(
-        `Conflicting pending prompt delivery for promptId ${promptId} or runId ${runId}`,
+        `Conflicting pending prompt delivery for promptId ${promptId}`,
       );
     }
     appendReservedCustomEntry(

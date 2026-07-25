@@ -2501,6 +2501,16 @@ describe("PiConnection coordinated project view", () => {
         text: "initial",
       });
       await promptStarted.promise;
+      const initialUserMessage = {
+        role: "user",
+        content: [{ type: "text", text: "initial" }],
+      } as AgentMessage;
+      session.persistentManager?.appendMessage(initialUserMessage);
+      session.eventListener?.(nativeEvent({
+        type: "message_end",
+        message: initialUserMessage,
+      }));
+      await Promise.resolve();
       const commandId = randomUUID();
 
       const guiding = harness.connection.handle({
@@ -2584,6 +2594,16 @@ describe("PiConnection coordinated project view", () => {
         text: "initial",
       });
       await promptStarted.promise;
+      const initialUserMessage = {
+        role: "user",
+        content: [{ type: "text", text: "initial" }],
+      } as AgentMessage;
+      session.persistentManager?.appendMessage(initialUserMessage);
+      session.eventListener?.(nativeEvent({
+        type: "message_end",
+        message: initialUserMessage,
+      }));
+      await Promise.resolve();
 
       const promptId = randomUUID();
       const enqueueCommandId = randomUUID();

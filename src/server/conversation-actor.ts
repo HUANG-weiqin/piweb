@@ -211,6 +211,8 @@ interface RunTicket {
   readonly completion: Deferred<RunSettlement>;
   readonly guidanceDeliveries: PendingGuidance[];
   readonly customSteerDeliveries: PendingCustomSteer[];
+  /** The first raw user message belongs to startPrompt(), never guidance. */
+  expectsInitialPromptRawUserMessage: boolean;
   pendingPromptUserDelivered: boolean;
   customSteerFlush?: Promise<void>;
   phase: "queued" | "running" | "waiting" | "cancelling";
@@ -827,6 +829,7 @@ export class ConversationActor {
         origin: input.origin,
         recovered: false,
         promptText: input.origin === "browser" ? input.text : undefined,
+        expectsInitialPromptRawUserMessage: true,
       },
       (ticket) => this.session.prompt(input.text, {
         preflightResult: (accepted) => {
@@ -850,6 +853,7 @@ export class ConversationActor {
         runId: input.runId,
         origin: "inbox",
         recovered: input.recovered,
+        expectsInitialPromptRawUserMessage: false,
       },
       async () => {
         for (let index = 0; index < messages.length; index += 1) {
@@ -993,6 +997,7 @@ export class ConversationActor {
         runId: input.runId,
         origin: "inbox",
         recovered: true,
+        expectsInitialPromptRawUserMessage: false,
       },
       () => this.session.sendCustomMessage({
         customType: "workbench.inbox_resume.v1",
@@ -1066,6 +1071,7 @@ export class ConversationActor {
       origin: ConversationRunOrigin;
       recovered: boolean;
       promptText?: string;
+      expectsInitialPromptRawUserMessage: boolean;
     },
     execute: (ticket: RunTicket) => Promise<void>,
   ): Promise<RunSettlement> {
@@ -1101,6 +1107,8 @@ export class ConversationActor {
       completion: deferred<RunSettlement>(),
       guidanceDeliveries: [],
       customSteerDeliveries: [],
+      expectsInitialPromptRawUserMessage:
+        input.expectsInitialPromptRawUserMessage,
       pendingPromptUserDelivered: false,
       phase: "queued",
       toolMode: this.profileSnapshot.role.toolMode,
@@ -1647,11 +1655,16 @@ export class ConversationActor {
       event.type === "message_end"
       && event.message.role === "user"
       && (
-        ticket.origin === "pending_prompt"
+        ticket.expectsInitialPromptRawUserMessage
         || ticket.guidanceDeliveries.length > 0
       )
     ) {
       const rawMessage = event.message;
+      // Raw user ends are ordered by Pi. Claim the first one before the
+      // asynchronous persistence proof so a late initial prompt can never be
+      // mistaken for the first queued guidance delivery.
+      const isInitialPrompt = ticket.expectsInitialPromptRawUserMessage;
+      if (isInitialPrompt) ticket.expectsInitialPromptRawUserMessage = false;
       queueMicrotask(() => {
         if (!rawUserMessageIsPersisted(
           this.sessionManager.getEntries(),
@@ -1660,16 +1673,21 @@ export class ConversationActor {
           const error = new Error(
             "Pi did not durably append the raw user message before delivery acknowledgement",
           );
-          ticket.guidanceDeliveries.shift()?.delivery.reject(error);
+          if (!isInitialPrompt) {
+            ticket.guidanceDeliveries.shift()?.delivery.reject(error);
+          }
           this.emitError(error, ticket.id);
           return;
         }
-        if (ticket.origin === "pending_prompt") {
-          ticket.pendingPromptUserDelivered = true;
+        if (isInitialPrompt) {
+          if (ticket.origin === "pending_prompt") {
+            ticket.pendingPromptUserDelivered = true;
+          }
+          return;
         }
-        // The raw user-message ends are FIFO with AgentSession.steer() calls.
-        // Promise continuations run after this microtask, after Pi's synchronous
-        // SessionManager append has been proved by object identity.
+        // Subsequent raw user-message ends are FIFO with AgentSession.steer()
+        // calls. Promise continuations run after this microtask, after Pi's
+        // synchronous SessionManager append has been proved by object identity.
         ticket.guidanceDeliveries.shift()?.delivery.resolve();
       });
     }

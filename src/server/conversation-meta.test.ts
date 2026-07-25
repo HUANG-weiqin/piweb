@@ -443,11 +443,16 @@ describe("conversation reserved entries", () => {
     })).toThrow(/finalText/i);
   });
 
-  it("records strict pending prompt delivery receipts without conflicting prompt/run duplicates", () => {
+  it("records pending prompt delivery receipts by prompt identity, allowing one run to deliver several prompts", () => {
     const delivery = createPendingPromptDeliveryEntry({
       promptId: randomUUID(),
       runId: randomUUID(),
       deliveredAt: timestamp,
+    });
+    const sameRunDifferentPrompt = createPendingPromptDeliveryEntry({
+      promptId: randomUUID(),
+      runId: delivery.data.runId,
+      deliveredAt: "2026-07-19T10:01:00.000Z",
     });
     expect(delivery.customType).toBe(PENDING_PROMPT_DELIVERY_CUSTOM_TYPE);
     expect(parsePendingPromptDeliveryEntry(delivery)).toEqual(delivery);
@@ -457,11 +462,25 @@ describe("conversation reserved entries", () => {
     });
     expect(aggregateReservedConversationEntries([delivery, delivery])
       .pendingPromptDeliveries).toEqual([delivery.data]);
+    expect(aggregateReservedConversationEntries([
+      delivery,
+      sameRunDifferentPrompt,
+    ]).pendingPromptDeliveries).toEqual([
+      delivery.data,
+      sameRunDifferentPrompt.data,
+    ]);
     expect(() => aggregateReservedConversationEntries([
       delivery,
       createPendingPromptDeliveryEntry({
         ...delivery.data,
         deliveredAt: "2026-07-19T10:01:00.000Z",
+      }),
+    ])).toThrow(/conflicting.*pending prompt delivery/i);
+    expect(() => aggregateReservedConversationEntries([
+      delivery,
+      createPendingPromptDeliveryEntry({
+        ...delivery.data,
+        runId: randomUUID(),
       }),
     ])).toThrow(/conflicting.*pending prompt delivery/i);
     expect(() => createPendingPromptDeliveryEntry({

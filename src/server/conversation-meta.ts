@@ -1056,7 +1056,6 @@ export function aggregateReservedConversationEntries(
   const deliveredMessageIds = new Set<string>();
   const runSettlements = new Map<string, RunSettlement>();
   const pendingPromptDeliveries = new Map<string, PendingPromptDelivery>();
-  const pendingPromptRuns = new Map<string, PendingPromptDelivery>();
   const temporaryReturnReceipts = new Map<
     string,
     TemporaryReturnReceipt
@@ -1119,19 +1118,15 @@ export function aggregateReservedConversationEntries(
     if (reserved.kind === "pending_prompt_delivery") {
       const incoming = reserved.entry.data;
       const existingPrompt = pendingPromptDeliveries.get(incoming.promptId);
-      const existingRun = pendingPromptRuns.get(incoming.runId);
       if (
-        (existingPrompt !== undefined
-          && JSON.stringify(existingPrompt) !== JSON.stringify(incoming))
-        || (existingRun !== undefined
-          && JSON.stringify(existingRun) !== JSON.stringify(incoming))
+        existingPrompt !== undefined
+        && JSON.stringify(existingPrompt) !== JSON.stringify(incoming)
       ) {
         throw new Error(
-          `Conflicting piweb pending prompt delivery for promptId ${incoming.promptId} or runId ${incoming.runId}`,
+          `Conflicting piweb pending prompt delivery for promptId ${incoming.promptId}`,
         );
       }
       pendingPromptDeliveries.set(incoming.promptId, incoming);
-      pendingPromptRuns.set(incoming.runId, incoming);
       continue;
     }
     if (reserved.kind === "temporary_return_receipt") {

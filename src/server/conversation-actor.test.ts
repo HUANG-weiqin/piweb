@@ -1669,6 +1669,18 @@ describe("ConversationActor", () => {
     });
     await Promise.resolve();
     expect(guidanceDelivered).toBe(false);
+    const lateInitialPrompt = agentMessage({
+      role: "user",
+      content: [{ type: "text", text: "late initial prompt" }],
+      timestamp: Date.now(),
+    });
+    fixture.manager.appendMessage(lateInitialPrompt);
+    fixture.runtime.session.eventListener?.({
+      type: "message_end",
+      message: lateInitialPrompt,
+    } as AgentSessionEvent);
+    await Promise.resolve();
+    expect(guidanceDelivered).toBe(false);
     const transformedGuidance = agentMessage({
       role: "user",
       content: [{ type: "text", text: "template-expanded guidance" }],
@@ -1713,6 +1725,17 @@ describe("ConversationActor", () => {
       origin: "browser",
     });
     await promptStarted.promise;
+    const initialPrompt = agentMessage({
+      role: "user",
+      content: [{ type: "text", text: "initial persisted" }],
+      timestamp: Date.now(),
+    });
+    fixture.manager.appendMessage(initialPrompt);
+    fixture.runtime.session.eventListener?.({
+      type: "message_end",
+      message: initialPrompt,
+    } as AgentSessionEvent);
+    await Promise.resolve();
     const guidance = fixture.actor.steer(RUN_A, "guidance without append");
     fixture.runtime.session.eventListener?.({
       type: "message_end",
