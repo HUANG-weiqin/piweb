@@ -486,6 +486,13 @@ export function App() {
       && focus.conversationId === command.conversationId
       && focus.focusId === command.focusId;
   };
+  const isCurrentQueueConversation = (command: PendingQueueCommand) => {
+    const focus = focusRef.current;
+    return command.workspaceKey === currentWorkspaceKey()
+      && focus?.sessionId === command.sessionId
+      && focus.projectId === command.projectId
+      && focus.conversationId === command.conversationId;
+  };
   const hasPendingEnqueueForFocus = (focus: ActiveFocus | undefined) => {
     if (!focus) return false;
     return [...pendingQueueCommandsRef.current.values()].some((command) => (
@@ -1239,7 +1246,7 @@ export function App() {
           settlePendingQueueCommand(event.commandId);
           if (pending.operation === "enqueue_prompt") {
             const retained = rememberFailedEnqueue(pending, event.message);
-            if (isCurrentQueueCommand(pending)) {
+            if (isCurrentQueueConversation(pending)) {
               if (!retained.edited) updateDraft(retained.retainedDraft);
               setPromptNotice(retained.notice!);
             }

@@ -2274,17 +2274,7 @@ describe("App", () => {
       ]);
 
     const enqueueA = enqueues[0]!;
-    act(() => socketMock.rawEmit?.({
-      type: "error",
-      scope: "command",
-      operation: "enqueue_prompt",
-      commandId: enqueueA.commandId,
-      sessionId,
-      conversationId: CONVERSATION_ID,
-      focusId: FOCUS_A,
-      message: "A queue rejected",
-    }));
-
+    const enqueueB = enqueues[1]!;
     fireEvent.click(screen.getByRole("button", { name: "打开会话 A" }));
     act(() => socketMock.emit?.({
       type: "state",
@@ -2300,10 +2290,53 @@ describe("App", () => {
       },
     }));
 
+    // The exact response belongs to A's old focus, but A is already current
+    // again under a new focusId. The conversation-scoped draft must still be
+    // restored instead of remaining hidden in the retained-intent map.
+    act(() => socketMock.rawEmit?.({
+      type: "error",
+      scope: "command",
+      operation: "enqueue_prompt",
+      commandId: enqueueA.commandId,
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: enqueueA.focusId,
+      message: "A queue rejected after refocus",
+    }));
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
       .toHaveValue("only for A");
     expect(screen.getByRole("alert"))
-      .toHaveTextContent("消息未能加入队列：A queue rejected");
+      .toHaveTextContent("消息未能加入队列：A queue rejected after refocus");
+
+    // B's failure remains background-scoped and is restored when B is opened.
+    act(() => socketMock.rawEmit?.({
+      type: "error",
+      scope: "command",
+      operation: "enqueue_prompt",
+      commandId: enqueueB.commandId,
+      sessionId,
+      conversationId: CONVERSATION_B,
+      focusId: enqueueB.focusId,
+      message: "B queue rejected in background",
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("only for B");
+    expect(screen.getByRole("alert"))
+      .toHaveTextContent("消息未能加入队列：B queue rejected in background");
   });
 
   it("does not auto steer durable prompts after state changes", () => {
