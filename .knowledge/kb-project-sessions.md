@@ -179,7 +179,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 - `conversation_snapshot` 是当前 focus 的一次性 active-branch 投影，包含固化角色和 message/session-message/compaction discriminated items，并限制总字节以及单消息/tool/card payload。
 - `pending_prompts_snapshot` 是同一 focus 的独立完整队列投影；它不进入高频 PublicState 或 transcript，也不使用 truncated，因为 durable store 已硬限制为每 conversation 64 条。`compaction` 直接来自 Pi 的持久条目，位于压缩发生处；它作为独立小型 turn 保留，避免较早的大消息被截断时连分界线一起丢失。
 - `truncated=true` 只表示 UI 投影省略；不会删除 JSONL。
-- live run 仍按 runId 发送增量，卡片按 cardId upsert；恢复时 reducer 用 snapshot 原子 hydrate。两者都必须匹配 `sessionId + conversationId + focusId`，匹配快照到达前 composer 保持禁用。
+- live run 仍按 runId 发送增量，卡片按 cardId upsert；恢复时 reducer 用 snapshot 原子 hydrate。两者都必须匹配 `sessionId + conversationId + focusId`，匹配快照到达前 composer 保持禁用。同一 run 内一旦出现 durable compaction，重新聚焦时其前缀必须使用持久聚合投影，不能继续把每个 live assistant segment 展开后再套总字节上限；否则细粒度 live 表示会把本可恢复的压缩前历史整段挤出 snapshot。最后一次 compaction 之后的活动后缀才继续使用 live 投影。
 - Agent 的 `peek_session` 有意省略 compaction 分界项；它是用户界面元信息，不应增加 peer Agent 上下文。
 
 ## 故障语义
