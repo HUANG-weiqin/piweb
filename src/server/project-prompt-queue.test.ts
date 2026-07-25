@@ -296,6 +296,71 @@ describe("ProjectPromptQueue", () => {
     await expect(bytes.queue.list()).rejects.toThrow(/total byte limit/i);
   }, 15_000);
 
+  it("reserves queued capacity for worst-valid dispatch and attention transitions", async () => {
+    const { directory, queue } = await temporaryQueue("piweb-prompt-reserve-");
+    const text = "x".repeat(MAX_PROMPT_CHARACTERS);
+    const sample = input({ text });
+    const maxUuid = "ffffffff-ffff-8fff-bfff-ffffffffffff";
+    const maxTimestamp = "+275760-09-13T00:00:00.000Z";
+    const maxReason = "\u0800".repeat(
+      MAX_PENDING_PROMPT_ATTENTION_REASON_CHARACTERS,
+    );
+    const serializedBytes = (value: unknown) => Buffer.byteLength(
+      `${JSON.stringify(value, null, 2)}\n`,
+      "utf8",
+    );
+    const queuedBytes = serializedBytes(createQueuedProjectPrompt(sample));
+    const reservedBytes = Math.max(
+      queuedBytes,
+      serializedBytes({
+        version: 1,
+        ...sample,
+        state: "dispatching",
+        runId: maxUuid,
+        dispatchedAt: maxTimestamp,
+      }),
+      serializedBytes({
+        version: 1,
+        ...sample,
+        state: "attention",
+        reason: maxReason,
+        attentionAt: maxTimestamp,
+      }),
+    );
+    const recordCount = Math.floor(
+      MAX_PENDING_PROMPT_TOTAL_BYTES / reservedBytes,
+    );
+    const conversations = Array.from({ length: 4 }, () => randomUUID());
+    const accepted = Array.from({ length: recordCount }, (_, index) => input({
+      text,
+      conversationId: conversations[index % conversations.length],
+    }));
+    await Promise.all(accepted.map((value) =>
+      writeQueuedPrompt(directory, value)
+    ));
+
+    const candidate = input({ text, conversationId: conversations[0] });
+    expect((recordCount + 1) * queuedBytes)
+      .toBeLessThanOrEqual(MAX_PENDING_PROMPT_TOTAL_BYTES);
+    await expect(queue.put(candidate)).rejects.toThrow(/reserved byte limit/i);
+
+    const transitioned = accepted[0]!;
+    const runId = randomUUID();
+    await expect(queue.markDispatching(
+      transitioned.promptId,
+      transitioned.conversationId,
+      runId,
+      timestamp,
+    )).resolves.toMatchObject({ state: "dispatching" });
+    await expect(queue.markAttentionAfterUncertainFailure(
+      transitioned.promptId,
+      transitioned.conversationId,
+      runId,
+      maxReason,
+      timestamp,
+    )).resolves.toMatchObject({ state: "attention" });
+  }, 30_000);
+
   it("reopens persisted state without losing attention records", async () => {
     const { directory, queue } = await temporaryQueue("piweb-prompt-reopen-");
     const value = input();

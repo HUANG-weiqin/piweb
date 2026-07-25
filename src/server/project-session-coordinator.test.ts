@@ -8714,6 +8714,55 @@ describe("ProjectSessionCoordinator", () => {
   });
 
   describe("pending durable prompts", () => {
+    it("acknowledges a committed enqueue when its later FIFO claim fails", async () => {
+      const fixture = await createFixture();
+      const actor = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const events: unknown[] = [];
+      fixture.coordinator.subscribe(fixture.handle, (event) => events.push(event));
+      const queue = coordinatorPromptQueue(fixture.handle);
+      vi.spyOn(queue, "markDispatching").mockRejectedValue(
+        new Error("injected pending prompt claim failure"),
+      );
+      const promptId = randomUUID();
+
+      await expect(fixture.coordinator.enqueuePrompt(
+        fixture.handle,
+        actor.conversationId,
+        { promptId, text: "commit before pumping" },
+      )).resolves.toMatchObject({ status: "created" });
+      await waitUntil(
+        () => events.some((event) => (
+          typeof event === "object"
+          && event !== null
+          && "type" in event
+          && event.type === "error"
+          && "message" in event
+          && event.message === "injected pending prompt claim failure"
+        )),
+        "post-commit pump failure projection",
+      );
+      await expect(fixture.coordinator.listPendingPrompts(
+        fixture.handle,
+        actor.conversationId,
+      )).resolves.toEqual([
+        expect.objectContaining({ promptId, state: "queued" }),
+      ]);
+      await expect(fixture.coordinator.enqueuePrompt(
+        fixture.handle,
+        actor.conversationId,
+        { promptId, text: "commit before pumping" },
+      )).resolves.toMatchObject({ status: "existing" });
+      await expect(fixture.coordinator.listPendingPrompts(
+        fixture.handle,
+        actor.conversationId,
+      )).resolves.toEqual([
+        expect.objectContaining({ promptId, state: "queued" }),
+      ]);
+    });
+
     it("persists while busy and permits queued withdrawal before a claim", async () => {
       const fixture = await createFixture();
       const actor = await fixture.coordinator.createUserConversation(

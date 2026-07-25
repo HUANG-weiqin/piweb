@@ -26,6 +26,11 @@ const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const PROMPT_FILE_PATTERN =
   /^([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.json$/;
+const MAX_CANONICAL_UUID = "ffffffff-ffff-8fff-bfff-ffffffffffff";
+const MAX_CANONICAL_TIMESTAMP = "+275760-09-13T00:00:00.000Z";
+const MAX_VALID_UTF8_ATTENTION_REASON = "\u0800".repeat(
+  MAX_PENDING_PROMPT_ATTENTION_REASON_CHARACTERS,
+);
 
 const uuidSchema = (field: string) =>
   z.string().regex(UUID_PATTERN, `${field} must be a canonical UUID`);
@@ -117,6 +122,7 @@ interface StoredPrompt {
 interface PromptScan {
   prompts: StoredPrompt[];
   totalBytes: number;
+  reservedBytes: number;
 }
 
 function isNodeError(error: unknown, code: string): boolean {
@@ -154,6 +160,34 @@ function clonePrompt(prompt: ProjectPromptRecord): ProjectPromptRecord {
 
 function serializePrompt(prompt: ProjectPromptRecord): string {
   return `${JSON.stringify(prompt, null, 2)}\n`;
+}
+
+/**
+ * Every accepted immutable payload reserves its largest legal representation,
+ * so transitions never exhaust capacity after the queued sidecar commits.
+ */
+function reservedBytesForPrompt(prompt: ProjectPromptRecord): number {
+  const payload = immutablePayload(prompt);
+  const states: ProjectPromptRecord[] = [
+    createQueuedProjectPrompt(payload),
+    {
+      version: PROJECT_PROMPT_QUEUE_VERSION,
+      ...payload,
+      state: "dispatching",
+      runId: MAX_CANONICAL_UUID,
+      dispatchedAt: MAX_CANONICAL_TIMESTAMP,
+    },
+    {
+      version: PROJECT_PROMPT_QUEUE_VERSION,
+      ...payload,
+      state: "attention",
+      reason: MAX_VALID_UTF8_ATTENTION_REASON,
+      attentionAt: MAX_CANONICAL_TIMESTAMP,
+    },
+  ];
+  return Math.max(...states.map((state) =>
+    Buffer.byteLength(serializePrompt(state), "utf8")
+  ));
 }
 
 function immutablePayload(prompt: ProjectPromptRecord): ProjectPromptInput {
@@ -535,6 +569,7 @@ export class ProjectPromptQueue {
     const promptIds = new Set<string>();
     const conversationCounts = new Map<string, number>();
     let totalBytes = 0;
+    let reservedBytes = 0;
     for (const name of namesBefore) {
       const matched = PROMPT_FILE_PATTERN.exec(name);
       if (matched === null) {
@@ -591,6 +626,12 @@ export class ProjectPromptQueue {
         );
       }
       conversationCounts.set(prompt.conversationId, conversationCount);
+      reservedBytes += reservedBytesForPrompt(prompt);
+      if (reservedBytes > MAX_PENDING_PROMPT_TOTAL_BYTES) {
+        throw new Error(
+          `Prompt queue reserved byte limit exceeded: ${MAX_PENDING_PROMPT_TOTAL_BYTES}`,
+        );
+      }
       prompts.push({ prompt, path, bytes: information.size, information });
     }
 
@@ -602,7 +643,7 @@ export class ProjectPromptQueue {
       throw new Error("Prompt queue directory changed while scanning");
     }
     await assertOwnedDirectory(this.directory);
-    return { prompts, totalBytes };
+    return { prompts, totalBytes, reservedBytes };
   }
 
   private assertCapacityForCreate(
@@ -623,11 +664,11 @@ export class ProjectPromptQueue {
       );
     }
     if (
-      scan.totalBytes + Buffer.byteLength(serializePrompt(prompt), "utf8")
+      scan.reservedBytes + reservedBytesForPrompt(prompt)
       > MAX_PENDING_PROMPT_TOTAL_BYTES
     ) {
       throw new Error(
-        `Prompt queue total byte limit exceeded: ${MAX_PENDING_PROMPT_TOTAL_BYTES}`,
+        `Prompt queue reserved byte limit exceeded: ${MAX_PENDING_PROMPT_TOTAL_BYTES}`,
       );
     }
   }
@@ -636,13 +677,10 @@ export class ProjectPromptQueue {
     stored: StoredPrompt,
     next: ProjectPromptRecord,
   ): Promise<void> {
-    const nextBytes = Buffer.byteLength(serializePrompt(next), "utf8");
-    const scan = await this.scan();
-    if (scan.totalBytes - stored.bytes + nextBytes > MAX_PENDING_PROMPT_TOTAL_BYTES) {
-      throw new Error(
-        `Prompt queue total byte limit exceeded: ${MAX_PENDING_PROMPT_TOTAL_BYTES}`,
-      );
-    }
+    // scan() proves the aggregate immutable-payload reservation. Every legal
+    // replacement state is bounded by that reservation, so no transition can
+    // fail solely because queued records had already consumed actual bytes.
+    await this.scan();
     await this.assertStoredFileUnchanged(stored);
     await this.replaceAtomically(stored.path, serializePrompt(next));
   }

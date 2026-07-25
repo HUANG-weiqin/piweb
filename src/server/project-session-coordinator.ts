@@ -1342,11 +1342,10 @@ export class ProjectSessionCoordinator {
     input: EnqueueProjectPromptInput,
   ): Promise<PromptQueuePutResult> {
     const context = this.requireContext(handle);
-    return this.runLifecycle(context, async () => {
+    const result = await this.runLifecycle<PromptQueuePutResult>(context, async () => {
       this.assertPromptConversation(context, conversationId);
       const existing = (await context.promptQueue.list())
         .find(({ promptId }) => promptId === input.promptId);
-      let result: PromptQueuePutResult;
       if (existing !== undefined) {
         if (
           existing.conversationId !== conversationId
@@ -1354,19 +1353,30 @@ export class ProjectSessionCoordinator {
         ) {
           throw new Error(`Prompt queue conflict for promptId ${input.promptId}`);
         }
-        result = { status: "existing", prompt: existing };
-      } else {
-        result = await context.promptQueue.put({
-          promptId: input.promptId,
-          conversationId,
-          text: input.text,
-          createdAt: this.now().toISOString(),
-        });
-        await this.emitPendingPromptsChanged(context, conversationId);
+        return { status: "existing", prompt: existing };
       }
-      await this.pumpTarget(context, conversationId);
-      return result;
+      const created = await context.promptQueue.put({
+        promptId: input.promptId,
+        conversationId,
+        text: input.text,
+        createdAt: this.now().toISOString(),
+      });
+      await this.emitPendingPromptsChanged(context, conversationId);
+      return created;
     });
+    this.trackBackground(context, this.runLifecycle(context, async () => {
+      await this.pumpTarget(context, conversationId);
+    }).catch((error) => {
+      if (context.closing || this.disposed) return;
+      context.attention.add(conversationId);
+      this.emit(context, {
+        type: "error",
+        conversationId,
+        message: error instanceof Error ? error.message : String(error),
+        fatal: false,
+      });
+    }));
+    return result;
   }
 
   async withdrawQueuedPrompt(
