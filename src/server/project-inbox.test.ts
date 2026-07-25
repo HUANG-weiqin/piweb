@@ -82,6 +82,21 @@ async function writeEnvelope(
   );
 }
 
+function maximumEnvelopeBytes(value: ReturnType<typeof input>): number {
+  const envelope = createInboxEnvelope(value);
+  return Buffer.byteLength(`${JSON.stringify({
+    ...envelope,
+    state: "processing",
+    processingRunId: "ffffffff-ffff-8fff-bfff-ffffffffffff",
+    processingDelivery: "steer",
+    waitedByRunId: "ffffffff-ffff-8fff-bfff-ffffffffffff",
+  }, null, 2)}\n`, "utf8");
+}
+
+function queuedEnvelopeBytes(value: ReturnType<typeof input>): number {
+  return Buffer.byteLength(`${JSON.stringify(createInboxEnvelope(value), null, 2)}\n`, "utf8");
+}
+
 function tombstonePath(
   directory: string,
   conversationId: string,
@@ -229,18 +244,21 @@ describe("ProjectInbox", () => {
     const waitedByRunId = runId;
     await inbox.put(value);
 
-    await expect(
-      inbox.updateState(value.messageId, {
+    await expect(inbox.put(value, {
+      initialState: {
         state: "processing",
         processingRunId: runId,
         processingDelivery: "steer",
         waitedByRunId,
-      }),
-    ).resolves.toMatchObject({
-      state: "processing",
-      processingRunId: runId,
-      processingDelivery: "steer",
-      waitedByRunId,
+      },
+    })).resolves.toMatchObject({
+      status: "existing",
+      envelope: {
+        state: "processing",
+        processingRunId: runId,
+        processingDelivery: "steer",
+        waitedByRunId,
+      },
     });
     await expect(inbox.put(value)).resolves.toMatchObject({
       status: "existing",
@@ -509,6 +527,61 @@ describe("ProjectInbox", () => {
       /regular project-owned file/i,
     );
   });
+
+  it("reserves queued capacity for worst-valid processing transitions", async () => {
+    const { directory } = await temporaryInbox(
+      "piweb-inbox-reserved-capacity-",
+    );
+    const seeded = Array.from({ length: 127 }, () => input({
+      body: "x".repeat(256 * 1024),
+    }));
+    await Promise.all(seeded.map((value) => writeEnvelope(directory, value)));
+    const reservedSeedBytes = seeded.reduce(
+      (total, value) => total + maximumEnvelopeBytes(value),
+      0,
+    );
+    expect(reservedSeedBytes).toBeLessThan(MAX_INBOX_TOTAL_BYTES);
+    const inbox = await ProjectInbox.open(directory);
+    const remaining = MAX_INBOX_TOTAL_BYTES - reservedSeedBytes;
+    const candidate = input({ body: "x" });
+    let bodyLength = remaining - queuedEnvelopeBytes(candidate) + 1;
+    expect(bodyLength).toBeGreaterThan(1);
+    expect(bodyLength).toBeLessThanOrEqual(256 * 1024);
+    const overflowing = {
+      ...candidate,
+      body: "x".repeat(bodyLength),
+    };
+    expect(queuedEnvelopeBytes(overflowing)).toBeLessThanOrEqual(remaining);
+    expect(maximumEnvelopeBytes(overflowing)).toBeGreaterThan(remaining);
+    await expect(inbox.put(overflowing)).rejects.toThrow(/total byte limit/i);
+
+    do {
+      bodyLength--;
+    } while (maximumEnvelopeBytes({
+      ...candidate,
+      body: "x".repeat(bodyLength),
+    }) > remaining);
+    const accepted = {
+      ...input(),
+      body: "x".repeat(bodyLength),
+    };
+    await expect(inbox.put(accepted)).resolves.toMatchObject({
+      status: "created",
+      envelope: { state: "queued" },
+    });
+    const processingRunId = randomUUID();
+    await expect(inbox.updateState(accepted.messageId, {
+      state: "processing",
+      processingRunId,
+      processingDelivery: "steer",
+      waitedByRunId: processingRunId,
+    })).resolves.toMatchObject({
+      state: "processing",
+      processingRunId,
+      processingDelivery: "steer",
+      waitedByRunId: processingRunId,
+    });
+  }, 20_000);
 
   it("includes tombstone sidecars in the inbox byte limit", async () => {
     const { directory, inbox } = await temporaryInbox(

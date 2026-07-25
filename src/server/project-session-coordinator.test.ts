@@ -1726,6 +1726,41 @@ describe("ProjectSessionCoordinator", () => {
     });
   });
 
+  it("creates an initial start_session inbox envelope already processing", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const inbox = coordinatorInbox(fixture.handle);
+    const replace = vi.spyOn(
+      inbox as unknown as {
+        replaceAtomically(path: string, content: string): Promise<void>;
+      },
+      "replaceAtomically",
+    ).mockRejectedValue(new Error("processing state rewrite must not occur"));
+
+    const started = await fixture.coordinator.startPeerSession(
+      fixture.handle,
+      source.conversationId,
+      startInput({
+        task: "atomically create processing inbox envelope",
+        idempotencyKey: "initial-processing-create",
+      }),
+    );
+
+    expect(replace).not.toHaveBeenCalled();
+    await expect(coordinatorInbox(fixture.handle).list({
+      toConversationId: started.conversationId,
+    })).resolves.toEqual([
+      expect.objectContaining({
+        state: "processing",
+        processingRunId: started.runId,
+        body: "atomically create processing inbox envelope",
+      }),
+    ]);
+  });
+
   it("allows a browser run after a committed start_session inbox entry settles", async () => {
     const fixture = await createFixture();
     const source = await fixture.coordinator.createUserConversation(

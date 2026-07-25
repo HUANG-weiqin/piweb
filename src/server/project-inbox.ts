@@ -170,6 +170,10 @@ export type InboxStateUpdate =
       waitedByRunId?: string;
     };
 
+export interface InboxPutOptions {
+  initialState?: InboxStateUpdate;
+}
+
 export interface InboxPutResult {
   status: "created" | "existing";
   envelope: InboxEnvelope;
@@ -202,6 +206,7 @@ interface InboxScan {
   envelopes: StoredEnvelope[];
   tombstones: StoredTargetTombstone[];
   totalBytes: number;
+  reservedBytes: number;
 }
 
 function isNodeError(error: unknown, code: string): boolean {
@@ -455,12 +460,25 @@ export function parseInboxEnvelope(value: unknown): InboxEnvelope {
 
 export function createInboxEnvelope(
   input: InboxEnvelopeInput,
+  initialState: InboxStateUpdate = { state: "queued" },
 ): InboxEnvelope {
+  const state = stateUpdateSchema.parse(initialState);
   return parseInboxEnvelope({
     version: INBOX_ENVELOPE_VERSION,
     ...input,
-    state: "queued",
+    ...state,
   });
+}
+
+function reservedEnvelopeBytes(envelope: InboxEnvelope): number {
+  return Buffer.byteLength(serializeEnvelope(parseInboxEnvelope({
+    ...immutablePayload(envelope),
+    version: INBOX_ENVELOPE_VERSION,
+    state: "processing",
+    processingRunId: "ffffffff-ffff-8fff-bfff-ffffffffffff",
+    processingDelivery: "steer",
+    waitedByRunId: "ffffffff-ffff-8fff-bfff-ffffffffffff",
+  })), "utf8");
 }
 
 export class ProjectInbox {
@@ -485,77 +503,87 @@ export class ProjectInbox {
     return inbox;
   }
 
-  put(input: InboxEnvelopeInput): Promise<InboxPutResult> {
+  put(
+    input: InboxEnvelopeInput,
+    options: InboxPutOptions = {},
+  ): Promise<InboxPutResult> {
     return this.operations.run(async () => {
-      const queued = createInboxEnvelope(input);
+      const requestedState = options.initialState === undefined
+        ? undefined
+        : stateUpdateSchema.parse(options.initialState);
+      const envelope = createInboxEnvelope(input, requestedState);
       const scan = await this.scan();
       if (scan.tombstones.some(
         ({ tombstone }) =>
-          tombstone.conversationId === queued.toConversationId,
+          tombstone.conversationId === envelope.toConversationId,
       )) {
         throw new Error(
-          `Inbox target has been deleted: ${queued.toConversationId}`,
+          `Inbox target has been deleted: ${envelope.toConversationId}`,
         );
       }
       const existing = scan.envelopes.find(
-        ({ envelope }) => envelope.messageId === queued.messageId,
+        ({ envelope: candidate }) => candidate.messageId === envelope.messageId,
       );
       if (existing !== undefined) {
-        if (!payloadsEqual(existing.envelope, queued)) {
+        if (!payloadsEqual(existing.envelope, envelope)) {
           throw new Error(
-            `Inbox message conflict for messageId ${queued.messageId}`,
+            `Inbox message conflict for messageId ${envelope.messageId}`,
           );
         }
         return {
           status: "existing",
-          envelope: cloneEnvelope(existing.envelope),
+          envelope: requestedState === undefined
+            ? cloneEnvelope(existing.envelope)
+            : await this.updateStoredState(existing, requestedState),
         };
       }
 
-      this.assertCapacityForCreate(scan, queued);
-      const path = this.pathForMessage(queued.messageId);
-      const serialized = serializeEnvelope(queued);
+      this.assertCapacityForCreate(scan, envelope);
+      const path = this.pathForMessage(envelope.messageId);
+      const serialized = serializeEnvelope(envelope);
       try {
         await this.writeNewAtomically(path, serialized);
       } catch (error) {
         if (!isNodeError(error, "EEXIST")) throw error;
         const raced = await this.scan();
         const match = raced.envelopes.find(
-          ({ envelope }) => envelope.messageId === queued.messageId,
+          ({ envelope: candidate }) => candidate.messageId === envelope.messageId,
         );
         if (
           match === undefined
-          || !payloadsEqual(match.envelope, queued)
+          || !payloadsEqual(match.envelope, envelope)
         ) {
           throw new Error(
-            `Inbox message conflict for messageId ${queued.messageId}`,
+            `Inbox message conflict for messageId ${envelope.messageId}`,
             { cause: error },
           );
         }
         return {
           status: "existing",
-          envelope: cloneEnvelope(match.envelope),
+          envelope: requestedState === undefined
+            ? cloneEnvelope(match.envelope)
+            : await this.updateStoredState(match, requestedState),
         };
       }
       const committed = await this.scan();
       if (committed.tombstones.some(
         ({ tombstone }) =>
-          tombstone.conversationId === queued.toConversationId,
+          tombstone.conversationId === envelope.toConversationId,
       )) {
         const pending = committed.envelopes.find(
-          ({ envelope }) => envelope.messageId === queued.messageId,
+          ({ envelope: candidate }) => candidate.messageId === envelope.messageId,
         );
         if (pending !== undefined) {
           await this.assertStoredFileUnchanged(pending);
           await unlink(pending.path);
         }
         throw new Error(
-          `Inbox target has been deleted: ${queued.toConversationId}`,
+          `Inbox target has been deleted: ${envelope.toConversationId}`,
         );
       }
       return {
         status: "created",
-        envelope: cloneEnvelope(queued),
+        envelope: cloneEnvelope(envelope),
       };
     });
   }
@@ -616,40 +644,7 @@ export class ProjectInbox {
       if (match === undefined) {
         throw new Error(`Inbox message not found: ${messageId}`);
       }
-      const next = parseInboxEnvelope({
-        ...match.envelope,
-        state: state.state,
-        ...(state.state === "processing"
-          ? {
-              processingRunId: state.processingRunId,
-              ...(state.processingDelivery === undefined
-                ? { processingDelivery: undefined }
-                : { processingDelivery: state.processingDelivery }),
-              ...(state.waitedByRunId === undefined
-                ? { waitedByRunId: undefined }
-                : { waitedByRunId: state.waitedByRunId }),
-            }
-          : {
-              processingRunId: undefined,
-              processingDelivery: undefined,
-              waitedByRunId: undefined,
-            }),
-      });
-      if (JSON.stringify(next) === JSON.stringify(match.envelope)) {
-        return cloneEnvelope(match.envelope);
-      }
-
-      const serialized = serializeEnvelope(next);
-      const nextBytes = Buffer.byteLength(serialized, "utf8");
-      const totalBytes = scan.totalBytes - match.bytes + nextBytes;
-      if (totalBytes > MAX_INBOX_TOTAL_BYTES) {
-        throw new Error(
-          `Inbox total byte limit exceeded: ${MAX_INBOX_TOTAL_BYTES}`,
-        );
-      }
-      await this.assertStoredFileUnchanged(match);
-      await this.replaceAtomically(match.path, serialized);
-      return cloneEnvelope(next);
+      return this.updateStoredState(match, state);
     });
   }
 
@@ -791,7 +786,7 @@ export class ProjectInbox {
     };
     const serialized = serializeTargetTombstone(tombstone);
     if (
-      scan.totalBytes
+      scan.reservedBytes
         + Buffer.byteLength(serialized, "utf8")
       > MAX_INBOX_TOTAL_BYTES
     ) {
@@ -844,6 +839,7 @@ export class ProjectInbox {
     const stored: StoredEnvelope[] = [];
     const tombstones: StoredTargetTombstone[] = [];
     let totalBytes = 0;
+    let reservedBytes = 0;
     const messageIds = new Set<string>();
     const tombstonedTargets = new Set<string>();
     const targetCounts = new Map<string, number>();
@@ -911,6 +907,12 @@ export class ProjectInbox {
           path,
           bytes: information.size,
         });
+        reservedBytes += information.size;
+        if (reservedBytes > MAX_INBOX_TOTAL_BYTES) {
+          throw new Error(
+            `Inbox total byte limit exceeded: ${MAX_INBOX_TOTAL_BYTES}`,
+          );
+        }
         continue;
       }
 
@@ -945,6 +947,12 @@ export class ProjectInbox {
         );
       }
       targetCounts.set(envelope.toConversationId, targetCount);
+      reservedBytes += reservedEnvelopeBytes(envelope);
+      if (reservedBytes > MAX_INBOX_TOTAL_BYTES) {
+        throw new Error(
+          `Inbox total byte limit exceeded: ${MAX_INBOX_TOTAL_BYTES}`,
+        );
+      }
       stored.push({
         envelope,
         path,
@@ -976,7 +984,39 @@ export class ProjectInbox {
       envelopes: stored,
       tombstones,
       totalBytes,
+      reservedBytes,
     };
+  }
+
+  private async updateStoredState(
+    match: StoredEnvelope,
+    state: InboxStateUpdate,
+  ): Promise<InboxEnvelope> {
+    const next = parseInboxEnvelope({
+      ...match.envelope,
+      state: state.state,
+      ...(state.state === "processing"
+        ? {
+            processingRunId: state.processingRunId,
+            ...(state.processingDelivery === undefined
+              ? { processingDelivery: undefined }
+              : { processingDelivery: state.processingDelivery }),
+            ...(state.waitedByRunId === undefined
+              ? { waitedByRunId: undefined }
+              : { waitedByRunId: state.waitedByRunId }),
+          }
+        : {
+            processingRunId: undefined,
+            processingDelivery: undefined,
+            waitedByRunId: undefined,
+          }),
+    });
+    if (JSON.stringify(next) === JSON.stringify(match.envelope)) {
+      return cloneEnvelope(match.envelope);
+    }
+    await this.assertStoredFileUnchanged(match);
+    await this.replaceAtomically(match.path, serializeEnvelope(next));
+    return cloneEnvelope(next);
   }
 
   private assertCapacityForCreate(
@@ -998,10 +1038,8 @@ export class ProjectInbox {
         `Inbox target message limit exceeded for ${envelope.toConversationId}: ${MAX_INBOX_MESSAGES_PER_TARGET}`,
       );
     }
-    const totalBytes =
-      scan.totalBytes
-      + Buffer.byteLength(serializeEnvelope(envelope), "utf8");
-    if (totalBytes > MAX_INBOX_TOTAL_BYTES) {
+    const reservedBytes = scan.reservedBytes + reservedEnvelopeBytes(envelope);
+    if (reservedBytes > MAX_INBOX_TOTAL_BYTES) {
       throw new Error(
         `Inbox total byte limit exceeded: ${MAX_INBOX_TOTAL_BYTES}`,
       );

@@ -3142,13 +3142,15 @@ export class ProjectSessionCoordinator {
           }),
       fromSnapshot,
       toSnapshot,
-    });
-    const envelope = input.processingRunId === undefined
-      ? result.envelope
-      : await context.inbox.updateState(result.envelope.messageId, {
-          state: "processing",
-          processingRunId: input.processingRunId,
+    }, input.processingRunId === undefined
+      ? undefined
+      : {
+          initialState: {
+            state: "processing",
+            processingRunId: input.processingRunId,
+          },
         });
+    const envelope = result.envelope;
     this.appendCard(source, {
       ...baseCard,
       state: "queued",
