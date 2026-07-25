@@ -28,7 +28,9 @@ const PROMPT_FILE_PATTERN =
   /^([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.json$/;
 const MAX_CANONICAL_UUID = "ffffffff-ffff-8fff-bfff-ffffffffffff";
 const MAX_CANONICAL_TIMESTAMP = "+275760-09-13T00:00:00.000Z";
-const MAX_VALID_UTF8_ATTENTION_REASON = "\u0800".repeat(
+// JSON.stringify escapes each NUL as six ASCII bytes, which is larger than
+// the UTF-8 representation of other legal reason code units.
+const MAX_VALID_SERIALIZED_ATTENTION_REASON = "\0".repeat(
   MAX_PENDING_PROMPT_ATTENTION_REASON_CHARACTERS,
 );
 
@@ -181,7 +183,7 @@ function reservedBytesForPrompt(prompt: ProjectPromptRecord): number {
       version: PROJECT_PROMPT_QUEUE_VERSION,
       ...payload,
       state: "attention",
-      reason: MAX_VALID_UTF8_ATTENTION_REASON,
+      reason: MAX_VALID_SERIALIZED_ATTENTION_REASON,
       attentionAt: MAX_CANONICAL_TIMESTAMP,
     },
   ];
@@ -627,11 +629,6 @@ export class ProjectPromptQueue {
       }
       conversationCounts.set(prompt.conversationId, conversationCount);
       reservedBytes += reservedBytesForPrompt(prompt);
-      if (reservedBytes > MAX_PENDING_PROMPT_TOTAL_BYTES) {
-        throw new Error(
-          `Prompt queue reserved byte limit exceeded: ${MAX_PENDING_PROMPT_TOTAL_BYTES}`,
-        );
-      }
       prompts.push({ prompt, path, bytes: information.size, information });
     }
 
@@ -677,12 +674,27 @@ export class ProjectPromptQueue {
     stored: StoredPrompt,
     next: ProjectPromptRecord,
   ): Promise<void> {
-    // scan() proves the aggregate immutable-payload reservation. Every legal
-    // replacement state is bounded by that reservation, so no transition can
-    // fail solely because queued records had already consumed actual bytes.
-    await this.scan();
-    await this.assertStoredFileUnchanged(stored);
-    await this.replaceAtomically(stored.path, serializePrompt(next));
+    const scan = await this.scan();
+    const current = scan.prompts.find(
+      ({ prompt }) => prompt.promptId === stored.prompt.promptId,
+    );
+    if (
+      current === undefined
+      || JSON.stringify(current.prompt) !== JSON.stringify(stored.prompt)
+    ) {
+      throw new Error(`Prompt changed before mutation: ${stored.prompt.promptId}`);
+    }
+    const nextSerialized = serializePrompt(next);
+    if (
+      scan.totalBytes - current.bytes + Buffer.byteLength(nextSerialized, "utf8")
+      > MAX_PENDING_PROMPT_TOTAL_BYTES
+    ) {
+      throw new Error(
+        `Prompt queue total byte limit exceeded: ${MAX_PENDING_PROMPT_TOTAL_BYTES}`,
+      );
+    }
+    await this.assertStoredFileUnchanged(current);
+    await this.replaceAtomically(current.path, nextSerialized);
   }
 
   private async writeNewAtomically(

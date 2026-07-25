@@ -32,6 +32,9 @@ export const MAX_INBOX_MESSAGES_PER_PROJECT = 256;
 export const MAX_INBOX_MESSAGES_PER_TARGET = 64;
 export const MAX_INBOX_TOMBSTONES_PER_PROJECT = 1_024;
 export const MAX_INBOX_TOTAL_BYTES = 32 * 1024 * 1024;
+// Canonical tombstones are bounded independently so a full envelope
+// reservation can always create a deletion fence.
+export const MAX_INBOX_TOMBSTONE_TOTAL_BYTES = 1 * 1024 * 1024;
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -206,6 +209,7 @@ interface InboxScan {
   envelopes: StoredEnvelope[];
   tombstones: StoredTargetTombstone[];
   totalBytes: number;
+  tombstoneBytes: number;
   reservedBytes: number;
 }
 
@@ -534,7 +538,7 @@ export class ProjectInbox {
           status: "existing",
           envelope: requestedState === undefined
             ? cloneEnvelope(existing.envelope)
-            : await this.updateStoredState(existing, requestedState),
+            : await this.updateStoredState(scan, existing, requestedState),
         };
       }
 
@@ -562,7 +566,7 @@ export class ProjectInbox {
           status: "existing",
           envelope: requestedState === undefined
             ? cloneEnvelope(match.envelope)
-            : await this.updateStoredState(match, requestedState),
+            : await this.updateStoredState(raced, match, requestedState),
         };
       }
       const committed = await this.scan();
@@ -644,7 +648,7 @@ export class ProjectInbox {
       if (match === undefined) {
         throw new Error(`Inbox message not found: ${messageId}`);
       }
-      return this.updateStoredState(match, state);
+      return this.updateStoredState(scan, match, state);
     });
   }
 
@@ -786,12 +790,12 @@ export class ProjectInbox {
     };
     const serialized = serializeTargetTombstone(tombstone);
     if (
-      scan.reservedBytes
+      scan.tombstoneBytes
         + Buffer.byteLength(serialized, "utf8")
-      > MAX_INBOX_TOTAL_BYTES
+      > MAX_INBOX_TOMBSTONE_TOTAL_BYTES
     ) {
       throw new Error(
-        `Inbox total byte limit exceeded: ${MAX_INBOX_TOTAL_BYTES}`,
+        `Inbox tombstone byte limit exceeded: ${MAX_INBOX_TOMBSTONE_TOTAL_BYTES}`,
       );
     }
     const path = this.pathForTargetTombstone(conversationId);
@@ -839,6 +843,7 @@ export class ProjectInbox {
     const stored: StoredEnvelope[] = [];
     const tombstones: StoredTargetTombstone[] = [];
     let totalBytes = 0;
+    let tombstoneBytes = 0;
     let reservedBytes = 0;
     const messageIds = new Set<string>();
     const tombstonedTargets = new Set<string>();
@@ -851,10 +856,20 @@ export class ProjectInbox {
       }
       const path = join(this.directory, name);
       const information = await assertOwnedFile(this.directory, path);
-      totalBytes += information.size;
-      if (totalBytes > MAX_INBOX_TOTAL_BYTES) {
+      if (
+        envelopeName !== null
+        && information.size > MAX_INBOX_TOTAL_BYTES
+      ) {
         throw new Error(
           `Inbox total byte limit exceeded: ${MAX_INBOX_TOTAL_BYTES}`,
+        );
+      }
+      if (
+        tombstoneName !== null
+        && information.size > MAX_INBOX_TOMBSTONE_TOTAL_BYTES
+      ) {
+        throw new Error(
+          `Inbox tombstone byte limit exceeded: ${MAX_INBOX_TOMBSTONE_TOTAL_BYTES}`,
         );
       }
       const raw = await readFile(path, "utf8");
@@ -907,10 +922,10 @@ export class ProjectInbox {
           path,
           bytes: information.size,
         });
-        reservedBytes += information.size;
-        if (reservedBytes > MAX_INBOX_TOTAL_BYTES) {
+        tombstoneBytes += information.size;
+        if (tombstoneBytes > MAX_INBOX_TOMBSTONE_TOTAL_BYTES) {
           throw new Error(
-            `Inbox total byte limit exceeded: ${MAX_INBOX_TOTAL_BYTES}`,
+            `Inbox tombstone byte limit exceeded: ${MAX_INBOX_TOMBSTONE_TOTAL_BYTES}`,
           );
         }
         continue;
@@ -947,12 +962,13 @@ export class ProjectInbox {
         );
       }
       targetCounts.set(envelope.toConversationId, targetCount);
-      reservedBytes += reservedEnvelopeBytes(envelope);
-      if (reservedBytes > MAX_INBOX_TOTAL_BYTES) {
+      totalBytes += information.size;
+      if (totalBytes > MAX_INBOX_TOTAL_BYTES) {
         throw new Error(
           `Inbox total byte limit exceeded: ${MAX_INBOX_TOTAL_BYTES}`,
         );
       }
+      reservedBytes += reservedEnvelopeBytes(envelope);
       stored.push({
         envelope,
         path,
@@ -984,11 +1000,13 @@ export class ProjectInbox {
       envelopes: stored,
       tombstones,
       totalBytes,
+      tombstoneBytes,
       reservedBytes,
     };
   }
 
   private async updateStoredState(
+    scan: InboxScan,
     match: StoredEnvelope,
     state: InboxStateUpdate,
   ): Promise<InboxEnvelope> {
@@ -1014,8 +1032,17 @@ export class ProjectInbox {
     if (JSON.stringify(next) === JSON.stringify(match.envelope)) {
       return cloneEnvelope(match.envelope);
     }
+    const serialized = serializeEnvelope(next);
+    if (
+      scan.totalBytes - match.bytes + Buffer.byteLength(serialized, "utf8")
+      > MAX_INBOX_TOTAL_BYTES
+    ) {
+      throw new Error(
+        `Inbox total byte limit exceeded: ${MAX_INBOX_TOTAL_BYTES}`,
+      );
+    }
     await this.assertStoredFileUnchanged(match);
-    await this.replaceAtomically(match.path, serializeEnvelope(next));
+    await this.replaceAtomically(match.path, serialized);
     return cloneEnvelope(next);
   }
 

@@ -302,7 +302,7 @@ describe("ProjectPromptQueue", () => {
     const sample = input({ text });
     const maxUuid = "ffffffff-ffff-8fff-bfff-ffffffffffff";
     const maxTimestamp = "+275760-09-13T00:00:00.000Z";
-    const maxReason = "\u0800".repeat(
+    const maxReason = "\0".repeat(
       MAX_PENDING_PROMPT_ATTENTION_REASON_CHARACTERS,
     );
     const serializedBytes = (value: unknown) => Buffer.byteLength(
@@ -343,22 +343,37 @@ describe("ProjectPromptQueue", () => {
     expect((recordCount + 1) * queuedBytes)
       .toBeLessThanOrEqual(MAX_PENDING_PROMPT_TOTAL_BYTES);
     await expect(queue.put(candidate)).rejects.toThrow(/reserved byte limit/i);
+    await writeQueuedPrompt(directory, candidate);
+    const legacy = await ProjectPromptQueue.open(directory);
+    await expect(legacy.list()).resolves.toHaveLength(recordCount + 1);
+    await expect(legacy.put(input({
+      text,
+      conversationId: conversations[0],
+    }))).rejects.toThrow(/reserved byte limit/i);
 
     const transitioned = accepted[0]!;
     const runId = randomUUID();
-    await expect(queue.markDispatching(
+    await expect(legacy.markDispatching(
       transitioned.promptId,
       transitioned.conversationId,
       runId,
       timestamp,
     )).resolves.toMatchObject({ state: "dispatching" });
-    await expect(queue.markAttentionAfterUncertainFailure(
+    await expect(legacy.markAttentionAfterUncertainFailure(
       transitioned.promptId,
       transitioned.conversationId,
       runId,
       maxReason,
       timestamp,
-    )).resolves.toMatchObject({ state: "attention" });
+    )).resolves.toMatchObject({ state: "attention", reason: maxReason });
+    const reopened = await ProjectPromptQueue.open(directory);
+    await expect(reopened.list()).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        promptId: transitioned.promptId,
+        state: "attention",
+        reason: maxReason,
+      }),
+    ]));
   }, 30_000);
 
   it("reopens persisted state without losing attention records", async () => {

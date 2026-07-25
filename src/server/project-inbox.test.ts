@@ -554,6 +554,11 @@ describe("ProjectInbox", () => {
     expect(queuedEnvelopeBytes(overflowing)).toBeLessThanOrEqual(remaining);
     expect(maximumEnvelopeBytes(overflowing)).toBeGreaterThan(remaining);
     await expect(inbox.put(overflowing)).rejects.toThrow(/total byte limit/i);
+    await writeEnvelope(directory, overflowing);
+    const legacy = await ProjectInbox.open(directory);
+    await expect(legacy.list()).resolves.toHaveLength(seeded.length + 1);
+    await expect(legacy.put(input())).rejects.toThrow(/total byte limit/i);
+    await expect(legacy.delete(overflowing.messageId)).resolves.toBe(true);
 
     do {
       bodyLength--;
@@ -565,12 +570,12 @@ describe("ProjectInbox", () => {
       ...input(),
       body: "x".repeat(bodyLength),
     };
-    await expect(inbox.put(accepted)).resolves.toMatchObject({
+    await expect(legacy.put(accepted)).resolves.toMatchObject({
       status: "created",
       envelope: { state: "queued" },
     });
     const processingRunId = randomUUID();
-    await expect(inbox.updateState(accepted.messageId, {
+    await expect(legacy.updateState(accepted.messageId, {
       state: "processing",
       processingRunId,
       processingDelivery: "steer",
@@ -581,6 +586,19 @@ describe("ProjectInbox", () => {
       processingDelivery: "steer",
       waitedByRunId: processingRunId,
     });
+    await expect(legacy.markTargetDeleted(
+      accepted.toConversationId,
+      timestamp,
+    )).resolves.toBeUndefined();
+    const reopened = await ProjectInbox.open(directory);
+    await expect(reopened.listDeletedTargets()).resolves.toContain(
+      accepted.toConversationId,
+    );
+    await expect(reopened.list({
+      toConversationId: accepted.toConversationId,
+    })).resolves.toEqual([
+      expect.objectContaining({ messageId: accepted.messageId }),
+    ]);
   }, 20_000);
 
   it("includes tombstone sidecars in the inbox byte limit", async () => {
@@ -593,7 +611,7 @@ describe("ProjectInbox", () => {
       "x".repeat(MAX_INBOX_TOTAL_BYTES + 1),
     );
 
-    await expect(inbox.list()).rejects.toThrow(/total byte limit/i);
+    await expect(inbox.list()).rejects.toThrow(/tombstone byte limit/i);
   });
 
   it("rejects a linked inbox directory", async () => {
