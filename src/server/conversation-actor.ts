@@ -749,6 +749,12 @@ export class ConversationActor {
     let liveCursor = 0;
     const merged: ConversationHistoryItem[] = [];
     const currentSlots = projectConversationItemSlots(this.sessionManager);
+    let lastCompactionSlotIndex = -1;
+    for (let index = 0; index < currentSlots.length; index += 1) {
+      if (currentSlots[index]?.item.kind === "compaction") {
+        lastCompactionSlotIndex = index;
+      }
+    }
 
     const consumeLiveMessages = (
       role: "user" | "assistant",
@@ -765,7 +771,7 @@ export class ConversationActor {
       }
     };
 
-    for (const slot of currentSlots) {
+    for (const [slotIndex, slot] of currentSlots.entries()) {
       const item = slot.item;
       const identity = conversationItemIdentity(item);
       const isBaseItem = live.baseItemIdentities.has(identity);
@@ -783,7 +789,9 @@ export class ConversationActor {
         const count = item.role === "assistant"
           ? Math.max(1, slot.assistantEntryCount ?? 1)
           : 1;
-        consumeLiveMessages(item.role, count, true);
+        const preserveDurableItem = slotIndex < lastCompactionSlotIndex;
+        consumeLiveMessages(item.role, count, !preserveDurableItem);
+        if (preserveDurableItem) merged.push(item);
       } else {
         merged.push(item);
       }

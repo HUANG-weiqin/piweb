@@ -27,7 +27,10 @@ import {
   type ConversationActorEvent,
   type ConversationActorOpenOptions,
 } from "./conversation-actor.js";
-import { projectConversationItemsSnapshot } from "./conversation-history.js";
+import {
+  MAX_HISTORY_SNAPSHOT_BYTES,
+  projectConversationItemsSnapshot,
+} from "./conversation-history.js";
 import type {
   CreatedPiSession,
   CreatePiSessionOptions,
@@ -1314,6 +1317,88 @@ describe("ConversationActor", () => {
       "assistant:before",
       "compaction",
       "assistant:after",
+    ]);
+
+    promptFinished.resolve();
+    await running;
+    await fixture.actor.dispose();
+  });
+
+  it("keeps the durable pre-compaction aggregate when live segments exceed the snapshot cap", async () => {
+    const fixture = await openActor();
+    const promptStarted = deferred();
+    const promptFinished = deferred();
+    const segmentCount = Math.floor(MAX_HISTORY_SNAPSHOT_BYTES / 80_000) + 1;
+    const liveSegments = Array.from(
+      { length: segmentCount },
+      (_, index) => `pre-compaction-${index}-${"x".repeat(80_000)}`,
+    );
+    fixture.runtime.session.promptImplementation = async () => {
+      fixture.manager.appendMessage(agentMessage({
+        role: "user",
+        content: "inspect",
+        timestamp: 1,
+      }));
+      for (const [index, text] of liveSegments.entries()) {
+        fixture.manager.appendMessage(agentMessage({
+          role: "assistant",
+          content: [{ type: "text", text }],
+          timestamp: index + 2,
+        }));
+      }
+      fixture.manager.appendCompaction("summary", undefined, 30);
+      fixture.manager.appendMessage(agentMessage({
+        role: "assistant",
+        content: [{ type: "text", text: "live suffix" }],
+        timestamp: segmentCount + 2,
+      }));
+
+      const emit = fixture.runtime.session.eventListener;
+      emit?.(nativeEvent({ type: "agent_start" }));
+      emit?.(nativeEvent({
+        type: "message_start",
+        message: { role: "user", content: "inspect" },
+      }));
+      for (const text of liveSegments) {
+        emit?.(nativeEvent({
+          type: "message_start",
+          message: { role: "assistant", content: [] },
+        }));
+        emit?.(nativeEvent({
+          type: "message_update",
+          assistantMessageEvent: { type: "text_delta", delta: text },
+        }));
+      }
+      emit?.(nativeEvent({
+        type: "message_start",
+        message: { role: "assistant", content: [] },
+      }));
+      emit?.(nativeEvent({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "live suffix" },
+      }));
+      promptStarted.resolve();
+      await promptFinished.promise;
+    };
+
+    const running = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "inspect",
+      origin: "browser",
+    });
+    await promptStarted.promise;
+
+    const projection = fixture.actor.projectConversationItems(
+      projectConversationItemsSnapshot(fixture.manager).items,
+    );
+    expect(projection.truncated).toBe(true);
+    expect(projection.items.map((item) => (
+      item.kind === "message" ? `${item.role}:${item.text}` : item.kind
+    ))).toEqual([
+      "user:inspect",
+      expect.stringContaining("assistant:pre-compaction-0-"),
+      "compaction",
+      "assistant:live suffix",
     ]);
 
     promptFinished.resolve();
