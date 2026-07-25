@@ -451,6 +451,9 @@ export function App() {
     setPendingQueueCommandRevision((revision) => revision + 1);
     return command;
   };
+  // SAFETY: this map is conversation-scoped because enqueue admission permits
+  // at most one unresolved enqueue per conversation; removing that guard would
+  // require storing retained drafts by promptId instead.
   const rememberUnconfirmedQueueCommands = (
     commands: PendingQueueCommand[],
   ) => {

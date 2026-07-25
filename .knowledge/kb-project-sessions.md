@@ -138,12 +138,14 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 - `dispatching(runId, dispatchedAt)`：已为自动新 run 或用户显式 Steer 持久 claim，不可假装撤回；
 - `attention(reason, attentionAt)`：投递结果无法证明，需要用户核对并显式移除记录，不能自动重发。
 
-目录、文件名、regular-file identity、尾换行、JSON schema、单项目 256 条、单 conversation 64 条和总 32 MiB 都 fail closed。创建使用同项目父目录临时文件加 hard-link commit，状态替换使用原子 rename；列表按 `createdAt + promptId` FIFO。
+目录、文件名、regular-file identity、尾换行、JSON schema、单项目 256 条、单 conversation 64 条和总 32 MiB 都 fail closed。容量按每条 immutable payload 的最坏合法状态序列化大小预留，因此任何已接受 queued 记录都必能转成 dispatching 或最大 attention，而不会在状态增长时卡死。创建使用同项目父目录临时文件加 hard-link commit，状态替换使用原子 rename；列表按 `createdAt + promptId` FIFO。
 
-- busy 时 `enqueue_prompt` 只 durable put，不自动 steer；idle pump 在跨会话 inbox 之后 claim 最早 queued prompt，并生成新 run。run 的 durable user message 已观察后，宿主先追加 `piweb.pending_prompt_delivery.v1` receipt，再删除 sidecar。
+- busy 时 `enqueue_prompt` 只 durable put，提交回执不等待后续 claim/pump 成功；post-commit pump 失败保留 exact queued sidecar 并投影 error/attention，不能把已经提交的意图回答成失败。idle pump 在跨会话 inbox 之后 claim 最早 queued prompt，并生成新 run。直接 browser prompt 的 admission 也经过同一 project lifecycle：发现更早 queued/processing inbox 或 queued/dispatching prompt 时先泵送 durable work 并拒绝本次 direct draft，不能从 idle-publication 或重连窗口插队。
+- startPrompt 的首条 raw user `message_end` 与后续 guidance 是两个 receipt 槽位。只有从同一 SessionManager entries 找到 `entry.message === rawMessage` 的对象引用才能确认 Pi 已持久追加；首条只确认 initial prompt，不能顺手结算已经排队的 Steer。后续持久 raw user message 再按 SDK FIFO 逐条结算 guidance。
+- run 的 durable user message 已观察后，宿主先追加 `piweb.pending_prompt_delivery.v1` receipt，再删除 sidecar。receipt 以 promptId 唯一绑定一个 run；同一 active run 可以合法接收多个不同 promptId，并为每条各写一个 receipt。
 - 用户显式 Steer 必须携带当前 exact active runId。SDK promise 尚未接受前的确定性拒绝可精确 requeue；SDK 已接受后若 user message 持久证明丢失、run 提前结算或确认路径失败，只能转 attention，不能重试制造重复。
 - 崩溃恢复只在 JSONL 中存在同一 `promptId + runId` delivery receipt 时清理 dispatching sidecar；单有 run settlement 不构成交付证明，因为 preflight failure 也会 settle。没有 receipt 的 dispatching 一律转 attention，queued 继续由 FIFO pump 处理。
-- browser、项目切换和服务重启都不拥有该队列；当前 focus 只通过 `pending_prompts_snapshot` 观察完整列表。删除 conversation 会清理其所有状态；角色切换和物理截断在任意 pending record 存在时拒绝。
+- browser、项目切换和服务重启都不拥有该队列；当前 focus 只通过 `pending_prompts_snapshot` 观察完整列表。attention sidecar 另有服务端拥有的 durable attention 集合，会进入后台 conversation sidebar 与 workspace activity；聚焦不能清掉，只有最后一条 attention 被精确 dismiss 或 conversation 删除才消失。删除 conversation 会清理其所有状态；角色切换和物理截断在任意 pending record 存在时拒绝。
 
 详细编排语义见 [kb-agent-collaboration.md](kb-agent-collaboration.md)。
 

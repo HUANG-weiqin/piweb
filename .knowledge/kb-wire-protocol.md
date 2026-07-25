@@ -94,7 +94,7 @@ ClientCommand
 - 扩展 UI 文本与选项有独立上限；超限是扩展错误，不能静默截断后改变选择语义。
 - 大型或循环工具结果必须经过 `toWireValue()`；不要直接放入 `ServerEvent`。
 - 不要把完整 conversation list 放回 PublicState，也不要发送无总量上限的历史快照。
-- 不要把 busy composer 消息直接变成易失 steer。它先由 `enqueue_prompt` 持久化；只有用户对某条 queued 记录显式点击 Steer 才发送 `steer_pending_prompt + 精确 active runId`。直接 prompt、底层 raw steer 与 durable pending prompt 是三个不同提交边界，身份不匹配的回执必须忽略。
+- 不要把 busy composer 消息直接变成易失 steer。它先由 `enqueue_prompt` 持久化；只有用户对某条 queued 记录显式点击 Steer 才发送 `steer_pending_prompt + 精确 active runId`。直接 prompt、底层 raw steer 与 durable pending prompt 是三个不同提交边界，身份不匹配的回执必须忽略。四种 pending command 的 error 都必须携带完整 `sessionId + commandId + conversationId + focusId`，Steer error 还必须带 runId；客户端每个 conversation 同时只允许一个尚未 ack 的 enqueue，避免 unknown-outcome 草稿被覆盖。
 - 不要只按 conversationId 过滤 transcript。conversationId 会在 `A → B → A` 中重复，focusId 才能阻断 ABA。
 
 ## 关联模块

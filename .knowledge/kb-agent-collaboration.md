@@ -55,7 +55,7 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
     target-<conversationId hash>.tombstone.json
 ```
 
-每个 inbox envelope 是严格 v1 的单文件原子记录，保存稳定 `messageId/cardId`、来源/目标 conversation 快照、正文、消息种类、可选的冻结来源 `fromRunId`，以及 `queued | processing`。processing 状态还可保存接收方 `waitedByRunId` receipt；`fromRunId` 让 wait 在“消息先提交、wait 后注册”时能补查精确回复，receipt 防止同一接收 run 的后续 wait 重复观察同一 messageId。两者都是 durable sidecar 状态；目录、文件、身份、容量或内容异常都 fail closed。
+每个 inbox envelope 是严格 v1 的单文件原子记录，保存稳定 `messageId/cardId`、来源/目标 conversation 快照、正文、消息种类、可选的冻结来源 `fromRunId`，以及 `queued | processing`。processing 状态还可保存接收方 `waitedByRunId` receipt；`fromRunId` 让 wait 在“消息先提交、wait 后注册”时能补查精确回复，receipt 防止同一接收 run 的后续 wait 重复观察同一 messageId。两者都是 durable sidecar 状态；目录、文件、身份、容量或内容异常都 fail closed。32 MiB 项目容量按每条 envelope 的最坏 processing 形态预留，并计入 tombstone 实际字节，所以已接受 queued 记录不会因状态字段增长而无法 claim。需要固定 initial runId 的 start_session envelope 在首次原子创建时就写成 processing，不存在先 commit queued、再二次改写的窗口。
 
 发送线性化顺序：
 

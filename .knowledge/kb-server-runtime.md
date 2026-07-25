@@ -40,7 +40,7 @@
 - 按 `canonical cwd + conversationId` singleflight 打开唯一 `ConversationActor`；
 - actor 持有 `SessionManager + writer lease + settings/model registry + AgentSession + activeRun`，与 WebSocket 是否连接无关；
 - inbox、完成 ledger、waiter、临时回传和删除都经过项目/actor 串行边界；
-- 维护进程级项目活动目录，每个 context 的摘要独立缓存，只在 busy/compacting/attention 汇总真正变化时通知全局 observer；高频 `session_event` 不触发目录扫描，可发布目录始终限制为 100 项，遗漏项目一旦变化就进入目录并优先替换最旧的低活动项；
+- 维护进程级项目活动目录，每个 context 的摘要独立缓存，只在 busy/compacting/attention 汇总真正变化时通知全局 observer；普通运行错误 attention 与 durable pending-prompt attention 分开拥有、按 conversation 去重合并，聚焦只确认前者，后者从 sidecar 恢复并持续显示到精确 dismiss/delete；高频 `session_event` 不触发目录扫描，可发布目录始终限制为 100 项，遗漏项目一旦变化就进入目录并优先替换最旧的低活动项；
 - server close 会同步封闭新 acquisition 与项目 lifecycle queue；已排队但未开始的 task 在持久写前失败，队列完全 drain 后才 dispose 尚在打开的 actor/catalog、全部后台 actor、项目 model catalog 并释放共享项目 handle。
 
 只读目录浏览属于 socket server 的 pre-session 控制边界：每次请求只枚举指定位置的一层子目录，结果按 commandId 返回；它不进入 `PiConnection` actor，也不参与项目或会话持久化。
@@ -71,7 +71,7 @@
 - API Key、角色 CRUD 和删除等需要结算的操作都带原 sessionId + commandId，连接内复用 commandId 会被拒绝。
 - 会话“回到此处”由 project lifecycle、ConversationActor operation queue 和 ProjectStore 原子截断共同完成；busy 或存在待处理 inbox 时拒绝。只有 durable JSONL 与同一 AgentSession 内存 context 都同步后，PiConnection 才依次发布 focused snapshot 和 command completion。
 - `setThinkingLevel()` 和 `setSessionName()` 会先改内存再持久化；工作台以 actor 实际后置条件为准，发布新 state 并单独报告持久化风险。相对地，`AuthStorage.set/remove` 与 `ProjectStore.setToolMode` 都是持久写成功后才替换内存状态，不需要这种部分提交适配。
-- browser prompt、pending prompt 或 inbox run 在入队前先同步注册 actor run ticket，因此 abort 可以取消 queued run；精确 abort 复用同一个 SDK abort promise，错误 runId 不能影响后来的 run。pending prompt pump 总是让已排队的跨会话 inbox 优先；只有 actor idle 时才 claim 一条 FIFO prompt 并启动新 run。
+- browser prompt、pending prompt 或 inbox run 在入队前先同步注册 actor run ticket，因此 abort 可以取消 queued run；精确 abort 复用同一个 SDK abort promise，错误 runId 不能影响后来的 run。direct browser admission 与 durable pump 共用 project lifecycle；actor idle 时仍要先处理已有 inbox 与 pending claim，不能在 completion/reconnect 观察窗口插队。pending prompt pump 总是让已排队的跨会话 inbox 优先；只有 actor idle 时才 claim 一条 FIFO prompt 并启动新 run。
 - 取消 run 必须先清空 SDK 尚未消费的 steering/follow-up queue 再 abort；否则旧引导可能跨越结算边界污染下一次 prompt。持久跨会话消息仍由 inbox delivery marker 决定是否重投，不能把 SDK 内存队列当成 durable truth。
 - 注册不可复用 runId、安装 active RunTicket 后立即发送 `run_queued`；它既是生命周期事件，也是浏览器提交 user draft 的唯一服务端接收回执。
 - SDK 异步 preflight 结束时会再次检查 run ticket；若期间已取消，会在真正启动 agent 前阻断。
