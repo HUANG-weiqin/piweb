@@ -846,6 +846,16 @@ describe("parseClientCommand", () => {
       commandId,
     }).type).toBe("error");
     expect(parseServerEvent({
+      type: "error",
+      message: "queue failed",
+      scope: "command",
+      operation: "enqueue_prompt",
+      sessionId,
+      conversationId,
+      focusId,
+      commandId,
+    }).type).toBe("error");
+    expect(parseServerEvent({
       type: "auth_progress",
       authFlowId,
       message: "waiting",
@@ -868,6 +878,23 @@ describe("parseClientCommand", () => {
       sessionId,
       runId,
       event: { type: "run_finished" },
+    })).toThrow();
+    expect(() => parseServerEvent({
+      type: "error",
+      message: "queue failed without exact focus",
+      scope: "command",
+      operation: "enqueue_prompt",
+      sessionId,
+      commandId,
+    })).toThrow();
+    expect(() => parseServerEvent({
+      type: "error",
+      message: "queue failed without command identity",
+      scope: "command",
+      operation: "withdraw_pending_prompt",
+      sessionId,
+      conversationId,
+      focusId,
     })).toThrow();
     expect(() => parseServerEvent({
       type: "command_complete",

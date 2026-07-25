@@ -876,6 +876,64 @@ describe("ProjectSessionCoordinator", () => {
     );
   });
 
+  it("blocks role switching and rewind for an attention pending prompt", async () => {
+    const fixture = await createFixture();
+    const role = await fixture.roles.createRole({
+      name: "Pending guard target",
+      description: "Must not replace a conversation with unresolved intent.",
+      systemPrompt: "Keep the conversation stable.",
+      model: { provider: "test", id: "model-b" },
+      defaultThinkingLevel: "off",
+      toolMode: "full_access",
+      canManageSessions: false,
+    });
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const selectedId = actor.sessionManager.appendMessage({
+      role: "user",
+      content: "retain until the pending prompt is reconciled",
+      timestamp: 1,
+    });
+    const promptId = randomUUID();
+    const pendingRunId = randomUUID();
+    const queue = coordinatorPromptQueue(fixture.handle);
+    await queue.put({
+      promptId,
+      conversationId: actor.conversationId,
+      text: "uncertain pending intent",
+      createdAt: "2026-07-24T10:00:00.000Z",
+    });
+    await queue.markDispatching(
+      promptId,
+      actor.conversationId,
+      pendingRunId,
+      "2026-07-24T10:00:01.000Z",
+    );
+    await queue.markAttentionAfterUncertainFailure(
+      promptId,
+      actor.conversationId,
+      pendingRunId,
+      "delivery outcome is uncertain",
+      "2026-07-24T10:00:02.000Z",
+    );
+
+    await expect(fixture.coordinator.switchConversationRole(
+      fixture.handle,
+      actor.conversationId,
+      role.id,
+    )).rejects.toThrow(/pending prompts/i);
+    await expect(fixture.coordinator.truncateConversation(
+      fixture.handle,
+      actor.conversationId,
+      selectedId,
+    )).rejects.toThrow(/pending prompts/i);
+    expect(actor.profile.role.id).toBe("default");
+    expect(actor.sessionManager.getEntries().some(({ id }) => id === selectedId))
+      .toBe(true);
+  });
+
   it("rejects rewind while the selected conversation is running", async () => {
     const fixture = await createFixture();
     const actor = await fixture.coordinator.createUserConversation(
