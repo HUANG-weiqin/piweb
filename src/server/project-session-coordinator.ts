@@ -158,6 +158,7 @@ interface ProjectContext {
   readonly actorUnsubscribes: Map<string, () => void>;
   readonly profiles: Map<string, ConversationMeta>;
   readonly attention: Set<string>;
+  readonly promptAttention: Set<string>;
   readonly deleting: Set<string>;
   readonly listeners: Set<ProjectSessionCoordinatorListener>;
   readonly waiters: Map<string, Set<ProjectWaiter>>;
@@ -721,6 +722,7 @@ export class ProjectSessionCoordinator {
         actorUnsubscribes: new Map(),
         profiles: new Map(),
         attention: new Set(),
+        promptAttention: new Set(),
         deleting: new Set(),
         listeners: new Set(),
         waiters: new Map(),
@@ -748,6 +750,11 @@ export class ProjectSessionCoordinator {
       );
       for (const conversationId of await inbox.listDeletedTargets()) {
         context.deleting.add(conversationId);
+      }
+      for (const prompt of await promptQueue.list()) {
+        if (prompt.state === "attention") {
+          context.promptAttention.add(prompt.conversationId);
+        }
       }
       this.assertOpen();
       this.contexts.set(key, context);
@@ -894,7 +901,8 @@ export class ProjectSessionCoordinator {
               createdBy: structuredClone(profile.createdBy),
             }),
         activity,
-        attention: context.attention.has(summary.id),
+        attention: context.attention.has(summary.id)
+          || context.promptAttention.has(summary.id),
       };
     });
   }
@@ -4580,6 +4588,12 @@ export class ProjectSessionCoordinator {
       await context.inbox.listDeletedTargets(),
     );
     const pending = await context.inbox.list();
+    const pendingPrompts = await context.promptQueue.list();
+    for (const prompt of pendingPrompts) {
+      if (prompt.state === "attention") {
+        context.promptAttention.add(prompt.conversationId);
+      }
+    }
     summaries = await context.project.refreshConversations();
     const startedAbortOperations: Array<{
       sourceConversationId: string;
@@ -4642,7 +4656,7 @@ export class ProjectSessionCoordinator {
       }
     }
 
-    for (const prompt of await context.promptQueue.list()) {
+    for (const prompt of pendingPrompts) {
       if (context.closing) return;
       if (prompt.state === "queued") {
         if (!blockedTargets.has(prompt.conversationId)) {
@@ -5356,6 +5370,7 @@ export class ProjectSessionCoordinator {
       context.extensionUIRouters.delete(conversationId);
       context.profiles.delete(conversationId);
       context.attention.delete(conversationId);
+      context.promptAttention.delete(conversationId);
       this.emit(context, { type: "project_changed" });
       return true;
     } finally {
@@ -5464,10 +5479,20 @@ export class ProjectSessionCoordinator {
     context: ProjectContext,
     conversationId: string,
   ): Promise<void> {
+    const prompts = await context.promptQueue.list({ conversationId });
+    const hasAttention = prompts.some(({ state }) => state === "attention");
+    if (hasAttention !== context.promptAttention.has(conversationId)) {
+      if (hasAttention) {
+        context.promptAttention.add(conversationId);
+      } else {
+        context.promptAttention.delete(conversationId);
+      }
+      this.emit(context, { type: "project_changed" });
+    }
     this.emit(context, {
       type: "pending_prompts_changed",
       conversationId,
-      prompts: await context.promptQueue.list({ conversationId }),
+      prompts,
     });
   }
 
@@ -5551,7 +5576,10 @@ export class ProjectSessionCoordinator {
       projectId: context.project.id,
       cwd: context.project.cwd,
       busyConversationCount,
-      attentionConversationCount: context.attention.size,
+      attentionConversationCount: new Set([
+        ...context.attention,
+        ...context.promptAttention,
+      ]).size,
     };
   }
 

@@ -9449,6 +9449,171 @@ describe("ProjectSessionCoordinator", () => {
       await restarted.close();
     });
 
+    it("projects recovered prompt attention independently from general attention", async () => {
+      const fixture = await createFixture();
+      const actor = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const queue = coordinatorPromptQueue(fixture.handle);
+      const firstPromptId = randomUUID();
+      const secondPromptId = randomUUID();
+      for (const [promptId, createdAt] of [
+        [firstPromptId, "2026-07-24T10:00:00.000Z"],
+        [secondPromptId, "2026-07-24T10:00:01.000Z"],
+      ] as const) {
+        await queue.put({
+          promptId,
+          conversationId: actor.conversationId,
+          text: `attention ${promptId}`,
+          createdAt,
+        });
+        await queue.markDispatching(
+          promptId,
+          actor.conversationId,
+          RUN_A,
+          "2026-07-24T10:00:02.000Z",
+        );
+        await queue.markAttentionAfterUncertainFailure(
+          promptId,
+          actor.conversationId,
+          RUN_A,
+          "manual reconciliation required",
+          "2026-07-24T10:00:03.000Z",
+        );
+      }
+      await fixture.coordinator.close();
+      const restarted = new ProjectSessionCoordinator(
+        fixture.runtime,
+        fixture.roles,
+        fixture.registry,
+      );
+      const handle = await restarted.acquireProject(fixture.cwd, "full_access");
+      expect(
+        (await restarted.listSessions(handle))
+          .find(({ id }) => id === actor.conversationId),
+      ).toMatchObject({ attention: true });
+      expect(restarted.projectActivitySnapshot().projects).toContainEqual(
+        expect.objectContaining({
+          cwd: fixture.cwd,
+          attentionConversationCount: 1,
+        }),
+      );
+
+      await restarted.openConversation(handle, actor.conversationId);
+      expect(
+        (await restarted.listSessions(handle))
+          .find(({ id }) => id === actor.conversationId),
+      ).toMatchObject({ attention: true });
+
+      const events: unknown[] = [];
+      restarted.subscribe(handle, (event) => events.push(event));
+      await restarted.dismissAttentionPrompt(
+        handle,
+        actor.conversationId,
+        firstPromptId,
+      );
+      expect(
+        (await restarted.listSessions(handle))
+          .find(({ id }) => id === actor.conversationId),
+      ).toMatchObject({ attention: true });
+
+      const context = (handle as unknown as {
+        context: { attention: Set<string> };
+      }).context;
+      const internals = restarted as unknown as {
+        emit(context: unknown, event: unknown): void;
+      };
+      context.attention.add(actor.conversationId);
+      internals.emit(context, { type: "project_changed" });
+      await restarted.dismissAttentionPrompt(
+        handle,
+        actor.conversationId,
+        secondPromptId,
+      );
+      expect(events).toContainEqual({ type: "project_changed" });
+      expect(
+        (await restarted.listSessions(handle))
+          .find(({ id }) => id === actor.conversationId),
+      ).toMatchObject({ attention: true });
+      expect(restarted.projectActivitySnapshot().projects).toContainEqual(
+        expect.objectContaining({
+          cwd: fixture.cwd,
+          attentionConversationCount: 1,
+        }),
+      );
+
+      context.attention.delete(actor.conversationId);
+      internals.emit(context, { type: "project_changed" });
+      expect(
+        (await restarted.listSessions(handle))
+          .find(({ id }) => id === actor.conversationId),
+      ).toMatchObject({ attention: false });
+      expect(restarted.projectActivitySnapshot().projects).toContainEqual(
+        expect.objectContaining({
+          cwd: fixture.cwd,
+          attentionConversationCount: 0,
+        }),
+      );
+      await restarted.close();
+    });
+
+    it("clears recovered prompt attention when deleting its conversation", async () => {
+      const fixture = await createFixture();
+      const actor = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const promptId = randomUUID();
+      const queue = coordinatorPromptQueue(fixture.handle);
+      await queue.put({
+        promptId,
+        conversationId: actor.conversationId,
+        text: "attention deletion cleanup",
+        createdAt: "2026-07-24T10:00:00.000Z",
+      });
+      await queue.markDispatching(
+        promptId,
+        actor.conversationId,
+        RUN_A,
+        "2026-07-24T10:00:01.000Z",
+      );
+      await queue.markAttentionAfterUncertainFailure(
+        promptId,
+        actor.conversationId,
+        RUN_A,
+        "manual reconciliation required",
+        "2026-07-24T10:00:02.000Z",
+      );
+      await fixture.coordinator.close();
+      const restarted = new ProjectSessionCoordinator(
+        fixture.runtime,
+        fixture.roles,
+        fixture.registry,
+      );
+      const handle = await restarted.acquireProject(fixture.cwd, "full_access");
+      expect(restarted.projectActivitySnapshot().projects).toContainEqual(
+        expect.objectContaining({
+          cwd: fixture.cwd,
+          attentionConversationCount: 1,
+        }),
+      );
+      await expect(restarted.deleteConversation(
+        handle,
+        actor.conversationId,
+      )).resolves.toBe(true);
+      expect(
+        (await restarted.listSessions(handle)).map(({ id }) => id),
+      ).not.toContain(actor.conversationId);
+      expect(restarted.projectActivitySnapshot().projects).toContainEqual(
+        expect.objectContaining({
+          cwd: fixture.cwd,
+          attentionConversationCount: 0,
+        }),
+      );
+      await restarted.close();
+    });
+
     it("cleans all prompt states during conversation deletion", async () => {
       const fixture = await createFixture();
       const actor = await fixture.coordinator.createUserConversation(

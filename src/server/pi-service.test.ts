@@ -2898,6 +2898,141 @@ describe("PiConnection coordinated project view", () => {
     }
   });
 
+  it("publishes background prompt attention to project and activity snapshots", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        roleId: "default",
+        title: "A",
+      });
+      const firstFocus = latestState(harness.events);
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        roleId: "default",
+        title: "B",
+      });
+      const queue = await ProjectPromptQueue.open(
+        join(harness.cwd, ".piweb", "pending-prompts"),
+      );
+      const promptId = randomUUID();
+      await queue.put({
+        promptId,
+        conversationId: firstFocus.conversationId!,
+        text: "background attention",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      await queue.markDispatching(
+        promptId,
+        firstFocus.conversationId!,
+        RUN_A,
+        "2026-01-01T00:01:00.000Z",
+      );
+      await queue.markAttentionAfterUncertainFailure(
+        promptId,
+        firstFocus.conversationId!,
+        RUN_A,
+        "delivery outcome is uncertain",
+        "2026-01-01T00:02:00.000Z",
+      );
+      const view = (harness.connection as unknown as {
+        coordinatedView: { handle: { context: unknown } };
+      }).coordinatedView;
+      await (harness.coordinator as unknown as {
+        emitPendingPromptsChanged(
+          context: unknown,
+          conversationId: string,
+        ): Promise<void>;
+      }).emitPendingPromptsChanged(view.handle.context, firstFocus.conversationId!);
+
+      await vi.waitFor(() => {
+        expect(harness.events.findLast(
+          (event) => event.type === "project_snapshot",
+        )).toMatchObject({
+          type: "project_snapshot",
+          conversations: expect.arrayContaining([
+            expect.objectContaining({
+              id: firstFocus.conversationId,
+              attention: true,
+            }),
+          ]),
+        });
+      });
+      expect(harness.events.findLast(
+        (event) => event.type === "project_activity_snapshot",
+      )).toMatchObject({
+        type: "project_activity_snapshot",
+        projects: [expect.objectContaining({
+          cwd: harness.cwd,
+          attentionConversationCount: 1,
+        })],
+      });
+
+      await harness.connection.handle({
+        type: "focus_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId: firstFocus.conversationId!,
+      });
+      const focused = latestState(harness.events);
+      expect(harness.events.findLast(
+        (event) => event.type === "project_snapshot",
+      )).toMatchObject({
+        type: "project_snapshot",
+        conversations: expect.arrayContaining([
+          expect.objectContaining({
+            id: firstFocus.conversationId,
+            attention: true,
+          }),
+        ]),
+      });
+
+      await harness.connection.handle({
+        type: "dismiss_pending_prompt",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId: firstFocus.conversationId!,
+        focusId: focused.focusId!,
+        promptId,
+      });
+      await vi.waitFor(() => {
+        expect(harness.events.findLast(
+          (event) => event.type === "project_snapshot",
+        )).toMatchObject({
+          type: "project_snapshot",
+          conversations: expect.arrayContaining([
+            expect.objectContaining({
+              id: firstFocus.conversationId,
+              attention: false,
+            }),
+          ]),
+        });
+      });
+      expect(harness.events.findLast(
+        (event) => event.type === "project_activity_snapshot",
+      )).toMatchObject({
+        type: "project_activity_snapshot",
+        projects: [expect.objectContaining({
+          cwd: harness.cwd,
+          attentionConversationCount: 0,
+        })],
+      });
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
   it("persists and acknowledges the focused conversation compaction threshold", async () => {
     const harness = await coordinatedConnectionHarness();
     try {
