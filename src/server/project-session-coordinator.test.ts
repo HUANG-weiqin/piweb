@@ -15,7 +15,10 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ProjectActivitySummary } from "../shared/protocol.js";
-import { ConversationActor } from "./conversation-actor.js";
+import {
+  ConversationActor,
+  type ConversationActorEvent,
+} from "./conversation-actor.js";
 import {
   CONVERSATION_CARD_CUSTOM_TYPE,
   aggregateReservedConversationEntries,
@@ -57,6 +60,9 @@ import {
   RoleCatalog,
   type RoleCatalogModel,
 } from "./role-catalog.js";
+
+const RUN_A = "ba39f161-b67f-47c9-9285-e391427ed7d0";
+const RUN_B = "65feacc3-00b4-45bd-80ee-5e18bc32f7dc";
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -1662,17 +1668,14 @@ describe("ProjectSessionCoordinator", () => {
     });
   });
 
-  it("returns a committed start_session even when a browser run wins the target immediately after inbox commit", async () => {
+  it("allows a browser run after a committed start_session inbox entry settles", async () => {
     const fixture = await createFixture();
     const source = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
     );
-    const browserStarted = deferred();
-    const releaseBrowser = deferred();
     fixture.runtime.nextSessionBehaviors.push([
-      blocksUntil(browserStarted, releaseBrowser, "browser run complete"),
-      completesWith("delegation handled after browser"),
+      completesWith("delegation handled before browser admission"),
     ]);
     const inbox = coordinatorInbox(fixture.handle);
     const originalPut = inbox.put.bind(inbox);
@@ -1684,9 +1687,8 @@ describe("ProjectSessionCoordinator", () => {
         fixture.handle,
         input.toConversationId,
         browserRunId,
-        "browser work won the target first",
+        "browser work cannot overtake durable inbox",
       );
-      await browserStarted.promise;
       return committed;
     };
 
@@ -1696,8 +1698,8 @@ describe("ProjectSessionCoordinator", () => {
         fixture.handle,
         source.conversationId,
         startInput({
-          task: "run after the browser without a false tool failure",
-          idempotencyKey: "browser-wins-after-inbox-commit",
+          task: "run before the browser admission",
+          idempotencyKey: "browser-after-inbox-commit",
         }),
       );
     } finally {
@@ -1707,21 +1709,18 @@ describe("ProjectSessionCoordinator", () => {
       conversationId: expect.any(String),
       runId: expect.any(String),
     });
-    expect(
-      (await fixture.coordinator.listSessions(fixture.handle))
-        .find(({ id }) => id === started.conversationId)?.activity,
-    ).toEqual({ kind: "running", runId: browserRunId });
-
-    releaseBrowser.resolve();
-    await browserCompletion;
+    await expect(browserCompletion).resolves.toMatchObject({
+      runId: browserRunId,
+      outcome: "completed",
+    });
     await waitUntil(
       () =>
         fixture.runtime.control(started.conversationId).received.length === 1,
-      "the committed delegation after the browser run",
+      "the committed delegation before browser admission",
     );
     expect(
       fixture.runtime.control(started.conversationId).received[0]?.content,
-    ).toContain("run after the browser without a false tool failure");
+    ).toContain("run before the browser admission");
   });
 
   it("rejects start_session replays that change role, temporary mode, or title under the same idempotency key", async () => {
@@ -4708,12 +4707,12 @@ describe("ProjectSessionCoordinator", () => {
       deletingTarget.conversationId,
     );
     await deletionMarked.promise;
-    await expect(fixture.coordinator.prompt(
+    const rejectedDeletionPrompt = fixture.coordinator.prompt(
       fixture.handle,
       deletingTarget.conversationId,
       randomUUID(),
       "a prompt cannot cross a committed deletion fence",
-    )).rejects.toThrow("being deleted");
+    );
     const lateSend = executeTool(
       fixture.runtime.control(source.conversationId),
       "send_session_message",
@@ -4724,6 +4723,9 @@ describe("ProjectSessionCoordinator", () => {
       },
     );
     releaseDeletion.resolve();
+    await expect(rejectedDeletionPrompt).rejects.toThrow(
+      /(being deleted|not active)/i,
+    );
     await expect(deleting).resolves.toBe(true);
     await expect(lateSend).rejects.toThrow(/not found/i);
     inbox.markTargetDeleted = originalMarkDeleted;
@@ -6347,7 +6349,7 @@ describe("ProjectSessionCoordinator", () => {
     ).toHaveLength(1);
   });
 
-  it("does not let delayed initial temporary cleanup cancel a new active run", async () => {
+  it("runs delayed temporary cleanup before a browser prompt admitted behind it", async () => {
     const fixture = await createFixture();
     const source = await fixture.coordinator.createUserConversation(
       fixture.handle,
@@ -6401,35 +6403,19 @@ describe("ProjectSessionCoordinator", () => {
         ?.activity.kind === "idle",
     "temporary initial run settled before queued cleanup");
 
-    const secondRunStarted = deferred();
-    const releaseSecondRun = deferred();
-    fixture.runtime.control(temporary.conversationId).enqueue(
-      blocksUntil(secondRunStarted, releaseSecondRun, "second run done"),
-    );
     const secondRun = fixture.coordinator.prompt(
       fixture.handle,
       temporary.conversationId,
       randomUUID(),
-      "new run before delayed temporary cleanup",
+      "browser prompt behind delayed temporary cleanup",
     );
-    await secondRunStarted.promise;
-
     releaseDeletion.resolve();
     await blockingDeletion;
-    await waitUntil(async () =>
-      (await fixture.coordinator.listSessions(fixture.handle))
-        .find(({ id }) => id === temporary.conversationId)
-        ?.attention === true,
-    "delayed cleanup rejected the busy temporary root");
-    expect(fixture.runtime.control(temporary.conversationId).abortCalls)
-      .toBe(0);
-
-    releaseSecondRun.resolve();
-    await secondRun;
+    await expect(secondRun).rejects.toThrow(/not active/i);
     await waitUntil(async () =>
       !(await fixture.coordinator.listSessions(fixture.handle))
         .some(({ id }) => id === temporary.conversationId),
-    "temporary cleanup after the second run settles");
+    "temporary cleanup before browser admission");
     inbox.markTargetDeleted = originalMarkDeleted;
   });
 
@@ -8761,6 +8747,178 @@ describe("ProjectSessionCoordinator", () => {
       )).resolves.toEqual([
         expect.objectContaining({ promptId, state: "queued" }),
       ]);
+    });
+
+    it("admits queued durable work before a reconnect-like idle browser prompt", async () => {
+      const fixture = await createFixture();
+      const actor = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const events: ConversationActorEvent[] = [];
+      actor.subscribe((event) => events.push(event));
+      const started = deferred();
+      const release = deferred();
+      fixture.runtime.control(actor.conversationId).enqueue(async (control) => {
+        control.emitUserMessage(control.promptTexts.at(-1)!);
+        started.resolve();
+        await release.promise;
+      });
+      const promptId = randomUUID();
+      await coordinatorPromptQueue(fixture.handle).put({
+        promptId,
+        conversationId: actor.conversationId,
+        text: "older durable pending prompt",
+        createdAt: "2026-07-24T10:00:00.000Z",
+      });
+
+      await expect(fixture.coordinator.prompt(
+        fixture.handle,
+        actor.conversationId,
+        RUN_A,
+        "new browser prompt",
+      )).rejects.toThrow();
+      await started.promise;
+      expect(fixture.runtime.control(actor.conversationId).promptTexts)
+        .toEqual(["older durable pending prompt"]);
+      expect(events).not.toContainEqual(expect.objectContaining({
+        type: "session_event",
+        runId: RUN_A,
+        event: { type: "run_queued" },
+      }));
+      release.resolve();
+    });
+
+    it("blocks browser admission behind an idle dispatching pending sidecar", async () => {
+      const fixture = await createFixture();
+      const actor = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const events: ConversationActorEvent[] = [];
+      actor.subscribe((event) => events.push(event));
+      const promptId = randomUUID();
+      const queue = coordinatorPromptQueue(fixture.handle);
+      await queue.put({
+        promptId,
+        conversationId: actor.conversationId,
+        text: "dispatching receipt still needs reconciliation",
+        createdAt: "2026-07-24T10:00:00.000Z",
+      });
+      await queue.markDispatching(
+        promptId,
+        actor.conversationId,
+        RUN_B,
+        "2026-07-24T10:00:01.000Z",
+      );
+
+      await expect(fixture.coordinator.prompt(
+        fixture.handle,
+        actor.conversationId,
+        RUN_A,
+        "new browser prompt",
+      )).rejects.toThrow(/durable conversation work/i);
+      await expect(fixture.coordinator.listPendingPrompts(
+        fixture.handle,
+        actor.conversationId,
+      )).resolves.toEqual([
+        expect.objectContaining({ promptId, state: "dispatching", runId: RUN_B }),
+      ]);
+      expect(events).not.toContainEqual(expect.objectContaining({
+        type: "session_event",
+        runId: RUN_A,
+        event: { type: "run_queued" },
+      }));
+    });
+
+    it("admits queued inbox work before a reconnect-like idle browser prompt", async () => {
+      const fixture = await createFixture();
+      const source = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const target = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const events: ConversationActorEvent[] = [];
+      target.subscribe((event) => events.push(event));
+      const started = deferred();
+      const release = deferred();
+      fixture.runtime.control(target.conversationId).enqueue(async (control) => {
+        started.resolve();
+        await release.promise;
+        control.emitFinal("inbox finished");
+      });
+      await coordinatorInbox(fixture.handle).put({
+        messageId: randomUUID(),
+        cardId: randomUUID(),
+        fromConversationId: source.conversationId,
+        toConversationId: target.conversationId,
+        sentAt: "2026-07-24T10:00:00.000Z",
+        kind: "message",
+        body: "older durable inbox message",
+        fromSnapshot: {
+          conversationId: source.conversationId,
+          role: { id: source.profile.role.id, name: source.profile.role.name },
+        },
+        toSnapshot: {
+          conversationId: target.conversationId,
+          role: { id: target.profile.role.id, name: target.profile.role.name },
+        },
+      });
+
+      await expect(fixture.coordinator.prompt(
+        fixture.handle,
+        target.conversationId,
+        RUN_A,
+        "new browser prompt",
+      )).rejects.toThrow(/durable conversation work/i);
+      await started.promise;
+      expect(events).not.toContainEqual(expect.objectContaining({
+        type: "session_event",
+        runId: RUN_A,
+        event: { type: "run_queued" },
+      }));
+      release.resolve();
+    });
+
+    it("publishes an empty-idle browser run before releasing lifecycle admission", async () => {
+      const fixture = await createFixture();
+      const actor = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const events: ConversationActorEvent[] = [];
+      actor.subscribe((event) => events.push(event));
+      const started = deferred();
+      const release = deferred();
+      fixture.runtime.control(actor.conversationId).enqueue(async () => {
+        started.resolve();
+        await release.promise;
+      });
+
+      const browser = fixture.coordinator.prompt(
+        fixture.handle,
+        actor.conversationId,
+        RUN_A,
+        "empty idle browser prompt",
+      );
+      await waitUntil(
+        () => events.some((event) => (
+          event.type === "session_event"
+          && event.runId === RUN_A
+          && event.event.type === "run_queued"
+        )),
+        "browser run queued before another lifecycle admission",
+      );
+      await expect(fixture.coordinator.enqueuePrompt(
+        fixture.handle,
+        actor.conversationId,
+        { promptId: randomUUID(), text: "lifecycle remains available" },
+      )).resolves.toMatchObject({ status: "created" });
+      release.resolve();
+      await browser;
     });
 
     it("persists while busy and permits queued withdrawal before a claim", async () => {

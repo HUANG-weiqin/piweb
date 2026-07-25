@@ -1293,23 +1293,49 @@ export class ProjectSessionCoordinator {
     });
   }
 
-  prompt(
+  async prompt(
     handle: ProjectSessionHandle,
     conversationId: string,
     runId: string,
     text: string,
   ): Promise<RunSettlement> {
     const context = this.requireContext(handle);
-    if (context.deleting.has(conversationId)) {
-      return Promise.reject(
-        new Error(`Conversation is being deleted: ${conversationId}`),
-      );
-    }
-    return this.requireActor(context, conversationId).startPrompt({
-      runId,
-      text,
-      origin: "browser",
+    const admitted = await this.runLifecycle(context, async () => {
+      if (context.deleting.has(conversationId)) {
+        throw new Error(`Conversation is being deleted: ${conversationId}`);
+      }
+      const actor = this.requireActor(context, conversationId);
+      if (actor.getActivity().kind === "idle") {
+        const pump = await this.pumpTarget(context, conversationId);
+        if (pump === "blocked_by_deletion" || context.deleting.has(conversationId)) {
+          throw new Error(`Conversation is being deleted: ${conversationId}`);
+        }
+        const pendingInbox = await context.inbox.list({
+          toConversationId: conversationId,
+        });
+        const pendingPrompts = await context.promptQueue.list({ conversationId });
+        if (
+          pump === "started"
+          || pendingInbox.length > 0
+          || pendingPrompts.some((prompt) => (
+            prompt.state === "queued"
+            || prompt.state === "dispatching"
+          ))
+        ) {
+          throw new Error(
+            "Durable conversation work was admitted before this browser prompt",
+          );
+        }
+      }
+      return {
+        completion: actor.startPrompt({
+          runId,
+          text,
+          origin: "browser",
+        }),
+      };
     });
+    return admitted.completion;
   }
 
   steer(
