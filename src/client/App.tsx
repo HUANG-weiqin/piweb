@@ -91,8 +91,11 @@ interface DirectPendingPrompt extends ActiveFocus {
 }
 
 interface UnconfirmedPrompt {
-  text: string;
+  submittedText: string;
+  retainedDraft: string;
+  edited: boolean;
   promptId?: string;
+  notice?: string;
 }
 
 interface PendingQueueCommand extends ActiveFocus {
@@ -105,6 +108,7 @@ interface PendingQueueCommand extends ActiveFocus {
     | "dismiss_pending_prompt";
   promptId: string;
   text?: string;
+  draftRevision?: number;
 }
 
 interface PendingConversationDeletion {
@@ -259,7 +263,9 @@ export function App() {
   const authFlowIdRef = useRef("");
   const [draft, setDraft] = useState("");
   const draftRef = useRef("");
+  const draftRevisionRef = useRef(0);
   const updateDraft = (text: string) => {
+    draftRevisionRef.current += 1;
     draftRef.current = text;
     setDraft(text);
   };
@@ -371,13 +377,17 @@ export function App() {
       unconfirmedPromptKey(focus),
     );
     if (!unconfirmed) return;
-    updateDraft(unconfirmed.text);
-    setPromptNotice(UNCONFIRMED_PROMPT_NOTICE);
+    updateDraft(unconfirmed.retainedDraft);
+    setPromptNotice(unconfirmed.notice ?? UNCONFIRMED_PROMPT_NOTICE);
   };
   const rememberUnconfirmedPrompt = (pending: DirectPendingPrompt) => {
     unconfirmedPromptByConversationRef.current.set(
       pendingConversationKey(pending),
-      { text: pending.text },
+      {
+        submittedText: pending.text,
+        retainedDraft: pending.text,
+        edited: false,
+      },
     );
   };
   const forgetUnconfirmedPrompt = (
@@ -450,7 +460,12 @@ export function App() {
       }
       unconfirmedPromptByConversationRef.current.set(
         pendingConversationKey(command),
-        { text: command.text, promptId: command.promptId },
+        {
+          submittedText: command.text,
+          retainedDraft: command.text,
+          edited: false,
+          promptId: command.promptId,
+        },
       );
     }
   };
@@ -467,6 +482,46 @@ export function App() {
       && focus.projectId === command.projectId
       && focus.conversationId === command.conversationId
       && focus.focusId === command.focusId;
+  };
+  const hasPendingEnqueueForFocus = (focus: ActiveFocus | undefined) => {
+    if (!focus) return false;
+    return [...pendingQueueCommandsRef.current.values()].some((command) => (
+      command.operation === "enqueue_prompt"
+      && command.workspaceKey === currentWorkspaceKey()
+      && command.sessionId === focus.sessionId
+      && command.projectId === focus.projectId
+      && command.conversationId === focus.conversationId
+    ));
+  };
+  const enqueueFailureNotice = (message: string) =>
+    `消息未能加入队列：${message}。内容已保留，可以重试。`;
+  const rememberFailedEnqueue = (
+    command: PendingQueueCommand,
+    message: string,
+  ) => {
+    const edited = isCurrentQueueCommand(command)
+      && command.draftRevision !== undefined
+      && draftRevisionRef.current !== command.draftRevision;
+    const retainedDraft = edited ? draftRef.current : command.text!;
+    const unconfirmed: UnconfirmedPrompt = {
+      submittedText: command.text!,
+      retainedDraft,
+      edited,
+      promptId: command.promptId,
+      notice: enqueueFailureNotice(message),
+    };
+    unconfirmedPromptByConversationRef.current.set(
+      pendingConversationKey(command),
+      unconfirmed,
+    );
+    return unconfirmed;
+  };
+  const clearRetainedEnqueue = (command: PendingQueueCommand) => {
+    const key = pendingConversationKey(command);
+    const retained = unconfirmedPromptByConversationRef.current.get(key);
+    if (retained?.promptId === command.promptId) {
+      unconfirmedPromptByConversationRef.current.delete(key);
+    }
   };
   const updatePendingConversationDeletion = (
     pending: PendingConversationDeletion | undefined,
@@ -925,9 +980,7 @@ export function App() {
           unconfirmedPromptByConversationRef.current.delete(
             unconfirmedPromptKey(focus),
           );
-          if (draftRef.current.trim() === unconfirmed.text.trim()) {
-            updateDraft("");
-          }
+          if (!unconfirmed.edited) updateDraft("");
           setPromptNotice("");
         }
         replacePendingPrompts(event.prompts);
@@ -1032,14 +1085,16 @@ export function App() {
             || pending.sessionId !== event.sessionId
           ) return;
           settlePendingQueueCommand(event.commandId);
-          if (
-            pending.operation === "enqueue_prompt"
-            && pending.text !== undefined
-            && isCurrentQueueCommand(pending)
-            && draftRef.current.trim() === pending.text.trim()
-          ) {
-            updateDraft("");
-            setPromptNotice("");
+          if (pending.operation === "enqueue_prompt") {
+            clearRetainedEnqueue(pending);
+            if (
+              isCurrentQueueCommand(pending)
+              && pending.draftRevision !== undefined
+              && draftRevisionRef.current === pending.draftRevision
+            ) {
+              updateDraft("");
+              setPromptNotice("");
+            }
           }
           return;
         }
@@ -1179,12 +1234,14 @@ export function App() {
             || pending.focusId !== event.focusId
           ) return;
           settlePendingQueueCommand(event.commandId);
-          if (isCurrentQueueCommand(pending)) {
-            setPromptNotice(
-              pending.operation === "enqueue_prompt"
-                ? `消息未能加入队列：${event.message}。内容已保留，可以重试。`
-                : `队列操作失败：${event.message}`,
-            );
+          if (pending.operation === "enqueue_prompt") {
+            const retained = rememberFailedEnqueue(pending, event.message);
+            if (isCurrentQueueCommand(pending)) {
+              if (!retained.edited) updateDraft(retained.retainedDraft);
+              setPromptNotice(retained.notice!);
+            }
+          } else if (isCurrentQueueCommand(pending)) {
+            setPromptNotice(`队列操作失败：${event.message}`);
           }
           return;
         }
@@ -1613,7 +1670,15 @@ export function App() {
   const enqueuePrompt = (text: string): boolean => {
     const sessionId = sessionIdRef.current;
     const focus = focusRef.current;
-    if (!sessionId || !focus || focus.sessionId !== sessionId) return false;
+    if (
+      !sessionId
+      || !focus
+      || focus.sessionId !== sessionId
+      || hasPendingEnqueueForFocus(focus)
+    ) return false;
+    unconfirmedPromptByConversationRef.current.delete(
+      pendingConversationKey({ ...focus, workspaceKey: currentWorkspaceKey() }),
+    );
     const command: PendingQueueCommand = {
       ...focus,
       workspaceKey: currentWorkspaceKey(),
@@ -1621,6 +1686,7 @@ export function App() {
       operation: "enqueue_prompt",
       promptId: crypto.randomUUID(),
       text,
+      draftRevision: draftRevisionRef.current,
     };
     registerPendingQueueCommand(command);
     if (send({
@@ -1633,7 +1699,8 @@ export function App() {
       text,
     })) return true;
     settlePendingQueueCommand(command.commandId);
-    setPromptNotice("消息未能加入队列，内容已保留，可以重试。");
+    const retained = rememberFailedEnqueue(command, "请求未发送");
+    setPromptNotice(retained.notice!);
     return false;
   };
   const submitPrompt = (text: string): boolean => {
@@ -1642,6 +1709,7 @@ export function App() {
       !trimmed
       || !conversationReadyRef.current
       || pendingConversationRoleSwitchRef.current
+      || hasPendingEnqueueForFocus(focusRef.current)
     ) return false;
     if (trimmed.length > MAX_PROMPT_CHARACTERS) {
       setPromptNotice(`单条消息最多 ${MAX_PROMPT_CHARACTERS.toLocaleString()} 个字符。`);
@@ -2249,7 +2317,9 @@ export function App() {
               online={online}
               conversationReady={visibleConversationReady}
               draft={draft}
-              submitting={Boolean(pendingPrompt)}
+              submitting={
+                Boolean(pendingPrompt) || hasPendingEnqueueForFocus(focusRef.current)
+              }
               pendingPrompts={pendingPrompts}
               pendingPromptIds={new Set(
                 [...pendingQueueCommandsRef.current.values()]
@@ -2262,16 +2332,15 @@ export function App() {
                 const focus = focusRef.current;
                 if (focus) {
                   const key = unconfirmedPromptKey(focus);
-                  if (unconfirmedPromptByConversationRef.current.has(key)) {
+                  const unconfirmed =
+                    unconfirmedPromptByConversationRef.current.get(key);
+                  if (unconfirmed) {
                     if (text) {
-                      const unconfirmed =
-                        unconfirmedPromptByConversationRef.current.get(key);
-                      if (unconfirmed) {
-                        unconfirmedPromptByConversationRef.current.set(key, {
-                          ...unconfirmed,
-                          text,
-                        });
-                      }
+                      unconfirmedPromptByConversationRef.current.set(key, {
+                        ...unconfirmed,
+                        retainedDraft: text,
+                        edited: true,
+                      });
                     } else {
                       unconfirmedPromptByConversationRef.current.delete(key);
                     }
