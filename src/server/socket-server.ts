@@ -4,6 +4,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import {
   MAX_MESSAGE_BYTES,
   MAX_SERVER_EVENT_BYTES,
+  OBSERVATION_FATAL_CLOSE_CODE,
   parseClientCommand,
   PROTOCOL_VERSION,
   serverEventSchema,
@@ -73,20 +74,37 @@ export function safeSend(
 ): void {
   if (socket.readyState !== WebSocket.OPEN) return;
   let payload: string;
+  let invalidObservation = false;
   try {
-    payload = serverEventSchema.safeParse(event).success
-      ? JSON.stringify(event)
-      : SERVER_EVENT_SCHEMA_ERROR;
+    if (serverEventSchema.safeParse(event).success) {
+      payload = JSON.stringify(event);
+    } else {
+      payload = SERVER_EVENT_SCHEMA_ERROR;
+      invalidObservation = true;
+    }
   } catch {
     payload = SERVER_EVENT_SERIALIZATION_ERROR;
+    invalidObservation = true;
   }
   if (Buffer.byteLength(payload, "utf8") > maximumBytes) {
     payload = SERVER_EVENT_SIZE_ERROR;
+    invalidObservation = true;
   }
   try {
     socket.send(payload);
   } catch {
     // A disconnected browser will trigger normal socket cleanup.
+    return;
+  }
+  if (invalidObservation) {
+    try {
+      socket.close(
+        OBSERVATION_FATAL_CLOSE_CODE,
+        "Invalid server observation",
+      );
+    } catch {
+      // A concurrently disconnected browser already owns cleanup.
+    }
   }
 }
 

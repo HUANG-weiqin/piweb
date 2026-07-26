@@ -7,8 +7,13 @@ import type {
   ModelRegistry,
 } from "@earendil-works/pi-coding-agent";
 import { WebSocket } from "ws";
-import { describe, expect, it } from "vitest";
-import { parseServerEvent, PROTOCOL_VERSION, type ServerEvent } from "../shared/protocol.js";
+import { describe, expect, it, vi } from "vitest";
+import {
+  OBSERVATION_FATAL_CLOSE_CODE,
+  parseServerEvent,
+  PROTOCOL_VERSION,
+  type ServerEvent,
+} from "../shared/protocol.js";
 import type { DirectoryBrowser } from "./directory-browser.js";
 import type { CreatedPiSession, PiRuntimeLike } from "./pi-runtime.js";
 import {
@@ -327,13 +332,15 @@ describe("isAllowedOrigin", () => {
 });
 
 describe("safeSend", () => {
-  it("replaces a schema-invalid server event with one parseable protocol error", () => {
+  it("replaces a schema-invalid server event and terminates the observation", () => {
     const sent: string[] = [];
+    const close = vi.fn();
     const socket = {
       readyState: WebSocket.OPEN,
       send(payload: string) {
         sent.push(payload);
       },
+      close,
     } as unknown as WebSocket;
 
     safeSend(socket, {
@@ -349,15 +356,21 @@ describe("safeSend", () => {
       scope: "protocol",
       message: "A server event violated the protocol schema",
     });
+    expect(close).toHaveBeenCalledWith(
+      OBSERVATION_FATAL_CLOSE_CODE,
+      "Invalid server observation",
+    );
   });
 
-  it("replaces an oversized server frame with one fixed protocol error", () => {
+  it("replaces an oversized server frame and terminates the observation", () => {
     const sent: string[] = [];
+    const close = vi.fn();
     const socket = {
       readyState: WebSocket.OPEN,
       send(payload: string) {
         sent.push(payload);
       },
+      close,
     } as unknown as WebSocket;
 
     safeSend(socket, {
@@ -374,5 +387,9 @@ describe("safeSend", () => {
       scope: "protocol",
       message: "A server event exceeded the protocol frame limit",
     });
+    expect(close).toHaveBeenCalledWith(
+      OBSERVATION_FATAL_CLOSE_CODE,
+      "Invalid server observation",
+    );
   });
 });

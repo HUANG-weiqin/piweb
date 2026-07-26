@@ -1,6 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PROTOCOL_VERSION } from "../../shared/protocol";
+import {
+  OBSERVATION_FATAL_CLOSE_CODE,
+  PROTOCOL_VERSION,
+} from "../../shared/protocol";
 import { PiSocket } from "./socket";
 
 class FakeWebSocket {
@@ -10,7 +13,7 @@ class FakeWebSocket {
   readyState = FakeWebSocket.OPEN;
   onopen?: () => void;
   onmessage?: (event: MessageEvent) => void;
-  onclose?: () => void;
+  onclose?: (event?: CloseEvent) => void;
   onerror?: () => void;
   readonly send = vi.fn();
   readonly close = vi.fn();
@@ -49,6 +52,24 @@ describe("PiSocket", () => {
       scope: "protocol",
     });
     expect(transport.close).toHaveBeenCalledOnce();
+  });
+
+  it("does not reconnect an observation rejected by the server", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const statuses = vi.fn();
+    const socket = new PiSocket(vi.fn(), statuses);
+    socket.connect();
+    const transport = FakeWebSocket.instances[0]!;
+
+    transport.onopen?.();
+    transport.onclose?.(new CloseEvent("close", {
+      code: OBSERVATION_FATAL_CLOSE_CODE,
+    }));
+    vi.advanceTimersByTime(1200);
+
+    expect(statuses.mock.calls).toEqual([[true], [false]]);
+    expect(FakeWebSocket.instances).toHaveLength(1);
   });
 
   it("ignores open and message callbacks from a replaced socket", () => {

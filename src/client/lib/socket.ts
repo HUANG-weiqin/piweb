@@ -1,4 +1,9 @@
-import { parseServerEvent, type ClientCommand, type ServerEvent } from "../../shared/protocol";
+import {
+  OBSERVATION_FATAL_CLOSE_CODE,
+  parseServerEvent,
+  type ClientCommand,
+  type ServerEvent,
+} from "../../shared/protocol";
 
 export class PiSocket {
   private socket?: WebSocket;
@@ -40,11 +45,11 @@ export class PiSocket {
       }
       this.onEvent(event);
     };
-    socket.onclose = () => {
+    socket.onclose = (event) => {
       if (this.socket !== socket) return;
       this.socket = undefined;
       this.onStatus(false);
-      if (!this.stopped) {
+      if (!this.stopped && event?.code !== OBSERVATION_FATAL_CLOSE_CODE) {
         this.reconnectTimer = window.setTimeout(() => {
           this.reconnectTimer = undefined;
           if (!this.stopped) this.connect();
