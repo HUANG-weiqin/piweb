@@ -1084,6 +1084,41 @@ describe("PiRuntime session ownership", () => {
     await second.dispose();
   });
 
+  it("refreshes every model registry and notifies after one registry fails", async () => {
+    const cwdA = await mkdtemp(join(tmpdir(), "piweb-runtime-refresh-a-"));
+    const cwdB = await mkdtemp(join(tmpdir(), "piweb-runtime-refresh-b-"));
+    const runtime = testRuntime(() => []);
+    const first = await runtime.createSession(cwdA);
+    const second = await runtime.createSession(cwdB);
+    const owners = [...(runtime as unknown as {
+      sessionRegistries: Set<{ refresh(): void }>;
+    }).sessionRegistries];
+    const firstRefresh = vi.spyOn(owners[0]!, "refresh")
+      .mockImplementationOnce(() => {
+        throw new Error("first registry refresh failed");
+      });
+    const secondRefresh = vi.spyOn(owners[1]!, "refresh");
+    const baselineRefresh = vi.spyOn(runtime.modelRegistry, "refresh");
+    const notified = vi.fn();
+    const unsubscribe = runtime.subscribe(notified);
+
+    try {
+      await expect(runtime.refreshConfiguration())
+        .rejects.toThrow("first registry refresh failed");
+      expect(firstRefresh).toHaveBeenCalledOnce();
+      expect(secondRefresh).toHaveBeenCalledOnce();
+      expect(baselineRefresh).toHaveBeenCalledOnce();
+      expect(notified).toHaveBeenCalledOnce();
+    } finally {
+      unsubscribe();
+      firstRefresh.mockRestore();
+      secondRefresh.mockRestore();
+      baselineRefresh.mockRestore();
+      await first.dispose();
+      await second.dispose();
+    }
+  });
+
   it("snapshots extension provider config before the extension can mutate it", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-snapshot-"));
     let retained: Parameters<ExtensionAPI["registerProvider"]>[1] | undefined;

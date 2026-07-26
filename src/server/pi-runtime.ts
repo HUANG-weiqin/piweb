@@ -696,10 +696,27 @@ export class PiRuntime implements PiRuntimeLike {
       try {
         return await change();
       } finally {
-        this.authStorage.reload();
-        for (const owner of this.sessionRegistries) owner.refresh();
-        this.modelRegistry.refresh();
+        const refreshErrors: unknown[] = [];
+        const attempt = (refresh: () => void): void => {
+          try {
+            refresh();
+          } catch (error) {
+            refreshErrors.push(error);
+          }
+        };
+        attempt(() => this.authStorage.reload());
+        for (const owner of this.sessionRegistries) {
+          attempt(() => owner.refresh());
+        }
+        attempt(() => this.modelRegistry.refresh());
         this.notify();
+        if (refreshErrors.length === 1) throw refreshErrors[0];
+        if (refreshErrors.length > 1) {
+          throw new AggregateError(
+            refreshErrors,
+            "Failed to refresh one or more model registries",
+          );
+        }
       }
     });
   }

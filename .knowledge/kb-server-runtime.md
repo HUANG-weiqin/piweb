@@ -95,7 +95,7 @@
 - ConversationActor dispose 会先等待取消，再发送 `session_shutdown(reason=quit)`，最后释放 AgentSession、session 模型目录和 writer lease。
 - Pi SDK 的 `streamSimple` 与扩展 OAuth 注册表是进程全局状态；第一版显式拒绝这两种项目扩展 provider，不能用裸 per-session registry 伪装隔离。
 - 允许的静态 provider config 会先做 host-owned 深快照，防止扩展在注册后修改原对象绕过策略。
-- registry refresh 后必须把 AgentSession 当前 model 重新绑定到新对象；若原模型被删除，则选择 registry fallback，不能继续使用旧 endpoint。
+- registry refresh 后必须把 AgentSession 当前 model 重新绑定到新对象；若原模型被删除，则选择 registry fallback，不能继续使用旧 endpoint。配置已持久提交后，每个 session registry 与 baseline registry 的 refresh 都必须独立尝试，并在最后照常通知订阅者；单个 owner 抛错不能跳过其余 session，多个错误聚合后再返回调用方。
 - SDK 内容事件只在当前 actor run ticket 匹配时投影；PiConnection 再按当前 focusId 决定是否发给浏览器。run lifecycle 由工作台适配层合成。
 - SDK 可能用 assistant `stopReason=error` 表达失败并让 `prompt()` 正常 resolve；projector 以最终一次 assistant 结果校准 workbench outcome。
 - SDK 原生事件只交给 `SessionEventProjector`，不直接发送。
