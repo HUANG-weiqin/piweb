@@ -188,6 +188,41 @@ describe("validatePiSessionFile", () => {
     )).toBe(conversationId);
   });
 
+  it("rejects negative compaction token counts before history projection", () => {
+    const conversationId = randomUUID();
+    const session = serialize([
+      {
+        type: "session",
+        version: 3,
+        id: conversationId,
+        timestamp,
+        cwd: "E:\\work",
+      },
+      {
+        type: "message",
+        id: "00000001",
+        parentId: null,
+        timestamp,
+        message: { role: "user", content: "hello", timestamp: 1 },
+      },
+      {
+        type: "compaction",
+        id: "00000002",
+        parentId: "00000001",
+        timestamp,
+        summary: "summary",
+        firstKeptEntryId: "00000001",
+        tokensBefore: -1,
+      },
+    ]);
+
+    expect(() => validatePiSessionFile(
+      session,
+      "negative-compaction.jsonl",
+      conversationId,
+    )).toThrow(/tokensBefore must be non-negative/i);
+  });
+
   it("accepts Pi's root branch-summary sentinel", () => {
     const conversationId = randomUUID();
     const session = serialize([

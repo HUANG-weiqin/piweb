@@ -301,7 +301,9 @@ function assertKnownEntry(
         "firstKeptEntryId is not an ancestor of the compacted branch",
       );
     }
-    requireFiniteNumber(entry, "tokensBefore");
+    if (requireFiniteNumber(entry, "tokensBefore") < 0) {
+      throw new Error("tokensBefore must be non-negative");
+    }
     assertOptionalBoolean(entry, "fromHook");
   } else if (type === "branch_summary") {
     const fromId = requireString(entry, "fromId");
