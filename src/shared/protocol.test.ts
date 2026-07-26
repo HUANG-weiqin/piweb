@@ -1144,6 +1144,46 @@ describe("parseClientCommand", () => {
 });
 
 describe("parseServerEvent", () => {
+  it("aligns role model references with durable UTF-8 limits", () => {
+    const role = {
+      id: "default",
+      revision: 1,
+      name: "Default",
+      description: "",
+      systemPrompt: "",
+      model: {
+        provider: "p".repeat(1_024),
+        id: "m".repeat(1_024),
+      },
+      defaultThinkingLevel: "off" as const,
+      toolMode: "read_only" as const,
+      canManageSessions: false,
+      createdAt: "2026-07-18T12:00:00.000Z",
+      updatedAt: "2026-07-18T12:00:00.000Z",
+      available: false,
+      unavailableReason: "u".repeat(2_100),
+    };
+
+    expect(parseServerEvent({
+      type: "role_catalog_snapshot",
+      sessionId,
+      projectId,
+      roles: [role],
+    })).toMatchObject({
+      type: "role_catalog_snapshot",
+      roles: [role],
+    });
+    expect(() => parseServerEvent({
+      type: "role_catalog_snapshot",
+      sessionId,
+      projectId,
+      roles: [{
+        ...role,
+        model: { ...role.model, provider: "p".repeat(1_025) },
+      }],
+    })).toThrow();
+  });
+
   it("accepts durable legacy Pi conversation identities", () => {
     const legacyConversationId = "legacy.session_1";
 

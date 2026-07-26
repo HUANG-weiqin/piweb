@@ -6,6 +6,8 @@ export const MAX_ROLE_COUNT = 64;
 export const MAX_ROLE_NAME_CHARACTERS = 80;
 export const MAX_ROLE_DESCRIPTION_CHARACTERS = 1_000;
 export const MAX_ROLE_SYSTEM_PROMPT_BYTES = 128 * 1024;
+export const MAX_MODEL_REFERENCE_BYTES = 1024;
+export const MAX_ROLE_UNAVAILABLE_REASON_CHARACTERS = 4096;
 export const MAX_PROJECT_CONVERSATIONS = 100;
 export const MAX_PROJECT_ACTIVITY_SUMMARIES = 100;
 export const MAX_PROJECT_CONVERSATION_NAME_CHARACTERS = 120;
@@ -87,8 +89,20 @@ const roleIdSchema = required.max(128).refine(
   'roleId must be "default" or a UUID',
 );
 const roleModelSchema = z.object({
-  provider: required.max(200),
-  id: required.max(500),
+  provider: boundedUtf8String(
+    MAX_MODEL_REFERENCE_BYTES,
+    "role.model.provider",
+  ).refine(
+    (value) => value.trim().length > 0,
+    "role.model.provider must not be blank",
+  ),
+  id: boundedUtf8String(
+    MAX_MODEL_REFERENCE_BYTES,
+    "role.model.id",
+  ).refine(
+    (value) => value.trim().length > 0,
+    "role.model.id must not be blank",
+  ),
 });
 const thinkingLevelSchema = z.enum([
   "off",
@@ -1004,7 +1018,9 @@ const roleTemplateSchema: z.ZodType<RoleTemplate> = z.object({
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
   available: z.boolean(),
-  unavailableReason: z.string().max(2_000).optional(),
+  unavailableReason: z.string()
+    .max(MAX_ROLE_UNAVAILABLE_REASON_CHARACTERS)
+    .optional(),
 });
 const conversationRoleSnapshotSchema: z.ZodType<ConversationRoleSnapshot> = z.object({
   id: roleIdSchema,

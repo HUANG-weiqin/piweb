@@ -7,7 +7,10 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import type { ThinkingLevel } from "../shared/protocol.js";
+import {
+  MAX_MODEL_REFERENCE_BYTES,
+  type ThinkingLevel,
+} from "../shared/protocol.js";
 
 export const ROLE_STORE_VERSION = 4;
 export const MAX_ROLE_COUNT = 64;
@@ -15,7 +18,6 @@ export const MAX_ROLE_NAME_CHARACTERS = 80;
 export const MAX_ROLE_DESCRIPTION_CHARACTERS = 1_000;
 export const MAX_ROLE_SYSTEM_PROMPT_BYTES = 128 * 1024;
 
-const MAX_MODEL_REFERENCE_BYTES = 1_024;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
