@@ -6,6 +6,7 @@ import {
   MAX_SERVER_EVENT_BYTES,
   parseClientCommand,
   PROTOCOL_VERSION,
+  serverEventSchema,
   type ClientCommand,
   type ServerEvent,
 } from "../shared/protocol.js";
@@ -49,6 +50,11 @@ export function isAllowedOrigin(
   }
 }
 
+const SERVER_EVENT_SCHEMA_ERROR = JSON.stringify({
+  type: "error",
+  scope: "protocol",
+  message: "A server event violated the protocol schema",
+} satisfies ServerEvent);
 const SERVER_EVENT_SERIALIZATION_ERROR = JSON.stringify({
   type: "error",
   scope: "protocol",
@@ -68,7 +74,9 @@ export function safeSend(
   if (socket.readyState !== WebSocket.OPEN) return;
   let payload: string;
   try {
-    payload = JSON.stringify(event);
+    payload = serverEventSchema.safeParse(event).success
+      ? JSON.stringify(event)
+      : SERVER_EVENT_SCHEMA_ERROR;
   } catch {
     payload = SERVER_EVENT_SERIALIZATION_ERROR;
   }

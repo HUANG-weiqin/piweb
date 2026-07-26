@@ -327,6 +327,30 @@ describe("isAllowedOrigin", () => {
 });
 
 describe("safeSend", () => {
+  it("replaces a schema-invalid server event with one parseable protocol error", () => {
+    const sent: string[] = [];
+    const socket = {
+      readyState: WebSocket.OPEN,
+      send(payload: string) {
+        sent.push(payload);
+      },
+    } as unknown as WebSocket;
+
+    safeSend(socket, {
+      type: "extension_ui_notification",
+      sessionId: randomUUID(),
+      level: "fatal",
+      message: "invalid runtime projection",
+    } as unknown as ServerEvent);
+
+    expect(sent).toHaveLength(1);
+    expect(parseServerEvent(sent[0])).toEqual({
+      type: "error",
+      scope: "protocol",
+      message: "A server event violated the protocol schema",
+    });
+  });
+
   it("replaces an oversized server frame with one fixed protocol error", () => {
     const sent: string[] = [];
     const socket = {
