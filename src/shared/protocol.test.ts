@@ -1144,6 +1144,22 @@ describe("parseClientCommand", () => {
 });
 
 describe("parseServerEvent", () => {
+  it("accepts durable legacy Pi conversation identities", () => {
+    const legacyConversationId = "legacy.session_1";
+
+    expect(parseServerEvent({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId: legacyConversationId,
+      focusId,
+      items: [],
+      truncated: false,
+    })).toMatchObject({
+      type: "conversation_snapshot",
+      conversationId: legacyConversationId,
+    });
+  });
+
   it.each([
     "compact_context",
     "switch_conversation_role",

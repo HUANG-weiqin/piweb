@@ -24,7 +24,7 @@ ClientCommand
 ## 决策
 
 - 协议只暴露 UI 实际消费的稳定事件。
-- projectId/conversationId 是持久身份，sessionId 是浏览器项目观察 epoch，focusId 是一次 conversation attach，runId 是单次执行；协议必须显式携带消费方需要的身份，不能混用。
+- projectId/conversationId 是持久身份，sessionId 是浏览器项目观察 epoch，focusId 是一次 conversation attach，runId 是单次执行；协议必须显式携带消费方需要的身份，不能混用。projectId 与所有 ephemeral correlation ID 是 UUID；conversationId 必须保留 Pi session ID 合同（1–256 个 ASCII 字母数字及 `._-`，首尾为字母数字），因为旧 durable Pi 会话不保证 UUID。
 - `project_snapshot` 与 `role_catalog_snapshot` 用 `sessionId + projectId` 过滤；它们描述整个项目，不能因更新来自后台 conversation 就丢弃。
 - `project_activity_snapshot` 是连接级、跨当前 observation 的进程目录，只汇总 coordinator 已加载项目的 cwd/projectId、busy conversation 数和 coordinator-owned attention 数；它不携带 transcript、当前 focus 或浏览器私有 unread。最多 100 项，超出时置 `truncated=true`。
 - 当前 transcript 的 state、snapshot、live run 和卡片必须匹配 `sessionId + conversationId + focusId`。每次 initialize/open/create/focus 都分配新 focusId，因此快速 `A → B → A` 时第一次 A 的迟到帧不能污染第二次 A。

@@ -27,7 +27,13 @@ const canonicalTimestampSchema = z.string().refine(
   "must be a canonical ISO timestamp",
 );
 const sessionIdSchema = z.string().uuid();
-const conversationIdSchema = z.string().uuid();
+const conversationIdSchema = z.string()
+  .min(1)
+  .max(256)
+  .regex(
+    /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/,
+    "conversationId must be a valid Pi session id",
+  );
 const runIdSchema = z.string().uuid();
 const focusIdSchema = z.string().uuid();
 const authFlowIdSchema = z.string().uuid();
