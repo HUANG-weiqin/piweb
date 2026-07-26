@@ -6,6 +6,8 @@ import {
 import { MAX_CONVERSATION_BODY_BYTES } from "./conversation-meta.js";
 
 const sourceConversationId = "source-session";
+const targetConversationId = "11111111-1111-4111-8111-111111111111";
+const targetRunId = "22222222-2222-4222-8222-222222222222";
 
 function service(): MetaToolService {
   return {
@@ -260,7 +262,10 @@ describe("createMetaTools", () => {
     const fake = service();
     const tools = createMetaTools(sourceConversationId, fake);
     const signal = new AbortController().signal;
-    const target = { conversationId: "target", runId: "run-7" };
+    const target = {
+      conversationId: targetConversationId,
+      runId: targetRunId,
+    };
 
     await tool(tools, "wait_for_session").execute(
       "wait-1",
@@ -290,5 +295,32 @@ describe("createMetaTools", () => {
           `${sourceConversationId.length}:${sourceConversationId}:abort-1`,
       },
     );
+  });
+
+  it("rejects malformed run identities before entering lifecycle services", async () => {
+    const fake = service();
+    const tools = createMetaTools(sourceConversationId, fake);
+    const malformedTarget = {
+      conversationId: targetConversationId,
+      runId: `${targetRunId}f6f`,
+    };
+
+    await expect(tool(tools, "wait_for_session").execute(
+      "invalid-wait",
+      malformedTarget,
+      undefined,
+      undefined,
+      {} as never,
+    )).rejects.toThrow(/runId must be a canonical UUID/);
+    await expect(tool(tools, "abort_session").execute(
+      "invalid-abort",
+      malformedTarget,
+      undefined,
+      undefined,
+      {} as never,
+    )).rejects.toThrow(/runId must be a canonical UUID/);
+
+    expect(fake.waitForSession).not.toHaveBeenCalled();
+    expect(fake.abortSession).not.toHaveBeenCalled();
   });
 });

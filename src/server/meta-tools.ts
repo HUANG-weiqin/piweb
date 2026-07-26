@@ -84,6 +84,15 @@ function assertConversationBody(value: string, field: string): void {
   }
 }
 
+const CANONICAL_UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+function assertCanonicalRunId(runId: string): void {
+  if (!CANONICAL_UUID_PATTERN.test(runId)) {
+    throw new Error("runId must be a canonical UUID");
+  }
+}
+
 function normalizeSessionScope(scope: string | undefined): MetaToolSessionScope | undefined {
   if (scope === undefined || scope === "all" || scope === "created_by_me") {
     return scope;
@@ -247,6 +256,7 @@ export function createMetaTools(
         runId: Type.String({ minLength: 1, maxLength: 200 }),
       }, { additionalProperties: false }),
       async execute(_toolCallId, input, signal) {
+        assertCanonicalRunId(input.runId);
         return result(await service.waitForSession(
           sourceConversationId,
           input,
@@ -265,6 +275,7 @@ export function createMetaTools(
         runId: Type.String({ minLength: 1, maxLength: 200 }),
       }, { additionalProperties: false }),
       async execute(toolCallId, input) {
+        assertCanonicalRunId(input.runId);
         return result(await service.abortSession(sourceConversationId, {
           ...input,
           idempotencyKey: sideEffectKey(sourceConversationId, toolCallId),
