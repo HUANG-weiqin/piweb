@@ -3532,14 +3532,7 @@ export class ProjectSessionCoordinator {
     settlement: RunSettlement,
   ): Promise<void> {
     const key = completionKey(targetConversationId, runId);
-    const envelopes = context.processingBatches.get(key) ?? [];
-    context.processingBatches.delete(key);
-    context.failedBatchRetries.delete(key);
-    if (envelopes.length > 0) {
-      context.failedDispatchRetries.delete(
-        dispatchRetryKey(targetConversationId, envelopes),
-      );
-    }
+    const initialEnvelopes = context.processingBatches.get(key) ?? [];
     const target = context.actors.get(targetConversationId);
     const deliveredMessageIds = new Set(
       target
@@ -3548,32 +3541,59 @@ export class ProjectSessionCoordinator {
           ).deliveredMessageIds
         : [],
     );
-    for (const envelope of envelopes) {
-      if (!deliveredMessageIds.has(envelope.messageId)) {
-        if (envelope.processingDelivery === "steer") {
-          // The SDK queue is transient. If abort/settlement won before Pi
-          // persisted the custom message marker, return this claimed steering
-          // envelope to FIFO delivery instead of claiming receipt.
-          await context.inbox.updateState(envelope.messageId, {
-            state: "queued",
-          });
-          continue;
+    const finishRemaining = async (retrying: boolean): Promise<void> => {
+      const remaining = [...(context.processingBatches.get(key) ?? [])];
+      while (remaining.length > 0) {
+        const envelope = remaining[0]!;
+        try {
+          const delivered = deliveredMessageIds.has(envelope.messageId);
+          if (!delivered && envelope.processingDelivery === "steer") {
+            // The SDK queue is transient. If abort/settlement won before Pi
+            // persisted the custom message marker, return this claimed steering
+            // envelope to FIFO delivery instead of claiming receipt.
+            await context.inbox.updateState(envelope.messageId, {
+              state: "queued",
+            });
+          } else if (delivered || envelope.state !== "queued") {
+            const state = settlement.outcome === "completed"
+              ? "completed"
+              : settlement.outcome;
+            await this.appendTerminalSourceCardState(
+              context,
+              envelope,
+              state,
+              runId,
+              settlement.finalText ?? undefined,
+            );
+            await context.inbox.delete(envelope.messageId);
+          }
+        } catch (error) {
+          // Keep the failed envelope and every later envelope recoverable in
+          // this process. A terminal card append may already have committed;
+          // its aggregation makes the one bounded retry safe before deletion.
+          context.processingBatches.set(key, remaining);
+          if (!retrying) {
+            await finishRemaining(true);
+            return;
+          }
+          throw error;
         }
-        if (envelope.state === "queued") continue;
+        remaining.shift();
+        if (remaining.length === 0) {
+          context.processingBatches.delete(key);
+        } else {
+          context.processingBatches.set(key, remaining);
+        }
       }
-      const state = settlement.outcome === "completed"
-        ? "completed"
-        : settlement.outcome;
-      await this.appendTerminalSourceCardState(
-        context,
-        envelope,
-        state,
-        runId,
-        settlement.finalText ?? undefined,
-      );
-      await context.inbox.delete(envelope.messageId);
-    }
-    this.emit(context, { type: "project_changed" });
+      context.failedBatchRetries.delete(key);
+      if (initialEnvelopes.length > 0) {
+        context.failedDispatchRetries.delete(
+          dispatchRetryKey(targetConversationId, initialEnvelopes),
+        );
+      }
+      this.emit(context, { type: "project_changed" });
+    };
+    await finishRemaining(false);
   }
 
   private async recoverFailedBatch(

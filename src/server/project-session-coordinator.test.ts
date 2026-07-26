@@ -2863,6 +2863,137 @@ describe("ProjectSessionCoordinator", () => {
     ).toEqual([first.messageId]);
   });
 
+  it("keeps the remaining processing batch and retries a failed terminal sidecar delete once", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const started = deferred();
+    const release = deferred();
+    fixture.runtime.control(target.conversationId).enqueue(
+      blocksUntil(started, release, "the original run settled"),
+      completesWith("the later inbox pump settled"),
+    );
+    const runId = randomUUID();
+    const completion = fixture.coordinator.prompt(
+      fixture.handle,
+      target.conversationId,
+      runId,
+      "keep this run active while three peer messages arrive",
+    );
+    await started.promise;
+
+    const messages = await Promise.all(["first", "second", "third"].map(
+      async (ordinal) => await executeTool(
+        fixture.runtime.control(source.conversationId),
+        "send_session_message",
+        `finish-batch-${ordinal}`,
+        {
+          conversationId: target.conversationId,
+          message: `${ordinal} processing envelope`,
+        },
+      ) as { messageId: string },
+    ));
+    const [first, second, third] = messages;
+    const inbox = coordinatorInbox(fixture.handle);
+    const originalDelete = inbox.delete.bind(inbox);
+    const retrySecondDeleteStarted = deferred();
+    const releaseRetrySecondDelete = deferred();
+    let secondDeleteAttempts = 0;
+    inbox.delete = async (messageId) => {
+      if (messageId === second!.messageId) {
+        secondDeleteAttempts++;
+        if (secondDeleteAttempts === 1) {
+          throw new Error("second terminal sidecar delete fails once");
+        }
+        retrySecondDeleteStarted.resolve();
+        await releaseRetrySecondDelete.promise;
+      }
+      await originalDelete(messageId);
+    };
+
+    release.resolve();
+    await completion;
+    await retrySecondDeleteStarted.promise;
+
+    expect(await inbox.get(first!.messageId)).toBeUndefined();
+    await expect(inbox.get(second!.messageId)).resolves.toMatchObject({
+      state: "processing",
+      processingRunId: runId,
+    });
+    await expect(inbox.get(third!.messageId)).resolves.toMatchObject({
+      state: "processing",
+      processingRunId: runId,
+    });
+    const context = (fixture.handle as unknown as {
+      context: {
+        processingBatches: Map<string, Array<{ messageId: string }>>;
+      };
+    }).context;
+    expect([...context.processingBatches.values()].flat().map(
+      ({ messageId }) => messageId,
+    )).toEqual([second!.messageId, third!.messageId]);
+    expect(
+      aggregateReservedConversationEntries(source.sessionManager.getEntries())
+        .cards.filter(({ messageId }) => messageId === first!.messageId),
+    ).toEqual([expect.objectContaining({
+      state: "completed",
+      runId,
+      result: "the original run settled",
+    })]);
+
+    releaseRetrySecondDelete.resolve();
+    await waitUntil(
+      async () => (await inbox.list({
+        toConversationId: target.conversationId,
+      })).length === 0,
+      "the retried terminal sidecar cleanup",
+    );
+    inbox.delete = originalDelete;
+
+    expect(secondDeleteAttempts).toBe(2);
+    expect(
+      aggregateReservedConversationEntries(source.sessionManager.getEntries())
+        .cards.filter(({ messageId }) => (
+          messageId === second!.messageId || messageId === third!.messageId
+        )),
+    ).toEqual([
+      expect.objectContaining({
+        messageId: second!.messageId,
+        state: "completed",
+        runId,
+        result: "the original run settled",
+      }),
+      expect.objectContaining({
+        messageId: third!.messageId,
+        state: "completed",
+        runId,
+        result: "the original run settled",
+      }),
+    ]);
+
+    await executeTool(
+      fixture.runtime.control(source.conversationId),
+      "send_session_message",
+      "finish-batch-later-pump",
+      {
+        conversationId: target.conversationId,
+        message: "later work must not remain FIFO-blocked",
+      },
+    );
+    await waitUntil(
+      () => fixture.runtime.control(target.conversationId).received.some(
+        ({ content }) => content.includes("later work must not remain FIFO-blocked"),
+      ),
+      "a later inbox pump after the retry",
+    );
+  });
+
   it("persists the terminal sender card before deleting its sidecar so restart can repair an append failure", async () => {
     const fixture = await createFixture();
     const source = await fixture.coordinator.createUserConversation(
@@ -2879,17 +3010,17 @@ describe("ProjectSessionCoordinator", () => {
 
     const manager = source.sessionManager;
     const originalAppend = manager.appendCustomEntry.bind(manager);
-    let terminalAppendAttempted = false;
+    let terminalAppendFailures = 0;
     manager.appendCustomEntry = (customType, data) => {
       if (
-        !terminalAppendAttempted
+        terminalAppendFailures < 2
         && customType === CONVERSATION_CARD_CUSTOM_TYPE
         && typeof data === "object"
         && data !== null
         && "state" in data
         && data.state === "completed"
       ) {
-        terminalAppendAttempted = true;
+        terminalAppendFailures++;
         throw new Error("simulated terminal card append failure");
       }
       return originalAppend(customType, data);
@@ -2912,8 +3043,8 @@ describe("ProjectSessionCoordinator", () => {
         },
       ) as typeof sent;
       await waitUntil(
-        () => terminalAppendAttempted,
-        "the simulated terminal sender-card append",
+        () => terminalAppendFailures === 2,
+        "the exhausted terminal sender-card append retry",
       );
     } finally {
       manager.appendCustomEntry = originalAppend;
