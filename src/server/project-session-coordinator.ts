@@ -3416,28 +3416,28 @@ export class ProjectSessionCoordinator {
       envelope.state === "processing"
       && envelope.processingRunId === runId
     ));
-    for (const envelope of envelopes) {
-      if (
-        envelope.state !== "processing"
-        || envelope.processingRunId !== runId
-      ) {
-        await context.inbox.updateState(envelope.messageId, {
-          state: "processing",
-          processingRunId: runId,
-        });
-      }
-    }
-    const processing = envelopes.map((envelope) => ({
-      ...envelope,
-      state: "processing" as const,
-      processingRunId: runId,
-    }));
-    context.processingBatches.set(
-      completionKey(target.conversationId, runId),
-      processing,
-    );
     let completion: Promise<RunSettlement>;
     try {
+      for (const envelope of envelopes) {
+        if (
+          envelope.state !== "processing"
+          || envelope.processingRunId !== runId
+        ) {
+          await context.inbox.updateState(envelope.messageId, {
+            state: "processing",
+            processingRunId: runId,
+          });
+        }
+      }
+      const processing = envelopes.map((envelope) => ({
+        ...envelope,
+        state: "processing" as const,
+        processingRunId: runId,
+      }));
+      context.processingBatches.set(
+        completionKey(target.conversationId, runId),
+        processing,
+      );
       const undelivered = processing.filter(
         ({ messageId }) => !deliveredMessageIds.has(messageId),
       );

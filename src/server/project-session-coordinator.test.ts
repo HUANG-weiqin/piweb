@@ -2607,6 +2607,111 @@ describe("ProjectSessionCoordinator", () => {
     ).toContain("Retry this durable message");
   });
 
+  it("rolls back an idle inbox batch when its second claim fails and retries the full FIFO batch", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const inbox = coordinatorInbox(fixture.handle);
+    const firstMessageId = randomUUID();
+    const secondMessageId = randomUUID();
+    const commonEnvelope = {
+      cardId: randomUUID(),
+      fromConversationId: source.conversationId,
+      toConversationId: target.conversationId,
+      kind: "message" as const,
+      fromSnapshot: {
+        conversationId: source.conversationId,
+        role: { id: "default", name: "Default" },
+      },
+      toSnapshot: {
+        conversationId: target.conversationId,
+        role: { id: "default", name: "Default" },
+      },
+    };
+    await inbox.put({
+      ...commonEnvelope,
+      messageId: firstMessageId,
+      sentAt: "2026-07-24T12:00:00.000Z",
+      body: "first idle batch message",
+    });
+    await inbox.put({
+      ...commonEnvelope,
+      cardId: randomUUID(),
+      messageId: secondMessageId,
+      sentAt: "2026-07-24T12:00:01.000Z",
+      body: "second idle batch message",
+    });
+
+    const originalStartMessages = target.startMessages.bind(target);
+    let starts = 0;
+    target.startMessages = (input) => {
+      starts++;
+      return originalStartMessages(input);
+    };
+    const originalUpdateState = inbox.updateState.bind(inbox);
+    const retryClaimStarted = deferred();
+    const releaseRetryClaim = deferred();
+    let processingClaims = 0;
+    inbox.updateState = async (messageId, update) => {
+      if (update.state === "processing") {
+        processingClaims++;
+        if (processingClaims === 2) {
+          throw new Error("second idle batch claim fails once");
+        }
+        if (processingClaims === 3) {
+          retryClaimStarted.resolve();
+          await releaseRetryClaim.promise;
+        }
+      }
+      return originalUpdateState(messageId, update);
+    };
+
+    await expect(fixture.coordinator.prompt(
+      fixture.handle,
+      target.conversationId,
+      randomUUID(),
+      "must wait behind the durable inbox batch",
+    )).rejects.toThrow("Durable conversation work was admitted");
+    await retryClaimStarted.promise;
+
+    expect(starts).toBe(0);
+    await expect(inbox.get(firstMessageId)).resolves.toMatchObject({
+      state: "queued",
+    });
+    await expect(inbox.get(secondMessageId)).resolves.toMatchObject({
+      state: "queued",
+    });
+
+    releaseRetryClaim.resolve();
+    await waitUntil(
+      () => fixture.runtime.control(target.conversationId).received.length === 2,
+      "the retried full idle inbox batch",
+    );
+    await waitUntil(
+      async () => (await inbox.list({
+        toConversationId: target.conversationId,
+      })).length === 0,
+      "the retried batch sidecar cleanup",
+    );
+    inbox.updateState = originalUpdateState;
+
+    expect(starts).toBe(1);
+    expect(processingClaims).toBe(4);
+    expect(fixture.runtime.control(target.conversationId).received.map(
+      ({ content }) => content.includes("first idle batch message")
+        ? "first"
+        : content.includes("second idle batch message")
+          ? "second"
+          : "unexpected",
+    )).toEqual(["first", "second"]);
+  });
+
   it("preserves a recovered steering claim across synchronous dispatch rollback", async () => {
     const fixture = await createFixture();
     const source = await fixture.coordinator.createUserConversation(
