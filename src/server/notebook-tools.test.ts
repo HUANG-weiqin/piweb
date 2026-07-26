@@ -4,7 +4,10 @@ import { join } from "node:path";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Check } from "typebox/value";
 import { afterEach, describe, expect, it } from "vitest";
-import { MAX_NOTE_CONTENT_BYTES } from "./conversation-notebook.js";
+import {
+  MAX_NOTE_CONTENT_BYTES,
+  MAX_NOTE_COUNT,
+} from "./conversation-notebook.js";
 import { createNotebookTools } from "./notebook-tools.js";
 
 interface ToolResult<Details> {
@@ -229,6 +232,39 @@ describe("createNotebookTools", () => {
     expect(opened.details.notes.every((note) => !note.truncated)).toBe(true);
     expect(opened.content[0]?.text).toContain("output truncated");
     expect(opened.content[0]?.text).not.toContain("# Third");
+  });
+
+  it("never commits a notebook file beyond its own reread budget", async () => {
+    const stateDir = await createStateDir();
+    const tools = createNotebookTools(stateDir, "conversation-a");
+    const write = toolByName(tools, "notebook_write");
+    const list = toolByName(tools, "notebook_list");
+    const escapedContent = "\0".repeat(MAX_NOTE_CONTENT_BYTES);
+    let accepted = 0;
+    let rejection: unknown;
+
+    for (let index = 0; index < MAX_NOTE_COUNT; index++) {
+      try {
+        await executeTool(write, {
+          title: `Escaped ${index.toString().padStart(3, "0")}`,
+          content: escapedContent,
+        });
+        accepted++;
+      } catch (error) {
+        rejection = error;
+        break;
+      }
+    }
+
+    expect(rejection).toBeInstanceOf(Error);
+    expect(String(rejection)).toMatch(/file exceeds its safety limit/i);
+    expect(accepted).toBeGreaterThan(0);
+    expect(accepted).toBeLessThan(MAX_NOTE_COUNT);
+    const listed = await executeTool<{ notes: unknown[] }>(
+      list,
+      { status: "all" },
+    );
+    expect(listed.details.notes).toHaveLength(accepted);
   });
 
   it("requires content for new notes and replaces existing content by title", async () => {

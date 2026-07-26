@@ -53,7 +53,7 @@ V1 只有四个工具：
 - `notebook_grep(pattern, status?)`：对 title + content 做大小写不敏感的 literal 搜索，返回 bounded snippet，不支持 regex/semantic/cursor/limit。
 - `notebook_read(titles)`：按精确 title 读取 active 或 archived note；调用方应先用 list/grep 发现 title。
 
-Archive 是可恢复隐藏，不是删除：默认 list 不显示 archived，但 `status=archived/all` 仍可发现，read 也能按精确标题打开。会话删除通过 project store 级联删除对应 sidecar 文件。
+Archive 是可恢复隐藏，不是删除：默认 list 不显示 archived，但 `status=archived/all` 仍可发现，read 也能按精确标题打开。会话删除通过 project store 级联删除对应 sidecar 文件。单 note 内容和 note 数量之外，宿主还在写临时文件前按最终 JSON 的 UTF-8 字节数复核总文件预算；NUL 等 JSON escape 膨胀也计入，不能提交一个下一次读取会因超限而拒绝的 sidecar。
 
 ## Agent 宿主工具
 

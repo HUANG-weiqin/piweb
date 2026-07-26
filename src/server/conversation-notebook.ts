@@ -420,6 +420,17 @@ async function writeNotes(
   paths: NotebookPaths,
   notes: readonly NotebookNote[],
 ): Promise<void> {
+  const file: NotebookFileV1 = {
+    version: NOTEBOOK_VERSION,
+    notes: [...notes].sort((first, second) =>
+      first.title.localeCompare(second.title)
+    ),
+  };
+  const serialized = `${JSON.stringify(file, null, 2)}\n`;
+  if (Buffer.byteLength(serialized, "utf8") > MAX_NOTEBOOK_FILE_BYTES) {
+    throw new Error(`Notebook file exceeds its safety limit: ${paths.file}`);
+  }
+
   await ensureNotebookDirectory(paths);
   const temporaryPath = join(
     paths.notebookDir,
@@ -430,16 +441,10 @@ async function writeNotes(
       `Notebook temporary path escapes notebook directory: ${temporaryPath}`,
     );
   }
-  const file: NotebookFileV1 = {
-    version: NOTEBOOK_VERSION,
-    notes: [...notes].sort((first, second) =>
-      first.title.localeCompare(second.title)
-    ),
-  };
   try {
     await writeFile(
       temporaryPath,
-      `${JSON.stringify(file, null, 2)}\n`,
+      serialized,
       { encoding: "utf8", flag: "wx" },
     );
     await rename(temporaryPath, paths.file);
