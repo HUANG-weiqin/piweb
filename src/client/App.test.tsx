@@ -556,13 +556,15 @@ describe("App", () => {
     expect(input).toHaveValue("E:\\typed");
   });
 
-  it("does not enable commands before a compatible protocol handshake", () => {
-    socketMock.helloVersion = PROTOCOL_VERSION + 1;
+  it("rejects a v24 server before enabling commands", () => {
+    socketMock.helloVersion = 24;
 
     render(<App />);
 
     fireEvent.click(screen.getByRole("button", { name: "开启工作区" }));
-    expect(screen.getByText(/协议版本不兼容/)).toBeInTheDocument();
+    expect(screen.getByText(
+      `协议版本不兼容：服务端 24，客户端 ${PROTOCOL_VERSION}`,
+    )).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "协议不兼容" })).toBeDisabled();
     expect(socketMock.send).not.toHaveBeenCalled();
     expect(socketMock.close).toHaveBeenCalledOnce();
