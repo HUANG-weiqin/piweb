@@ -1871,16 +1871,9 @@ export class PiConnection {
 
   private publishRoleCatalog(): void {
     const view = this.coordinatedView;
-    if (
-      this.disposed
-      || !view
-      || view.sessionId !== this.requestedSessionId
-      || view.generation !== this.generation
-    ) {
-      return;
-    }
+    if (!view || !this.isCurrentCoordinatedView(view)) return;
     void this.requireCoordination().then(({ coordinator }) => {
-      if (this.coordinatedView !== view || this.disposed) return;
+      if (!this.isCurrentCoordinatedView(view)) return;
       this.emit({
         type: "role_catalog_snapshot",
         sessionId: view.sessionId,
@@ -1891,7 +1884,7 @@ export class PiConnection {
         ),
       });
     }).catch((error) => {
-      if (this.coordinatedView === view && !this.disposed) {
+      if (this.isCurrentCoordinatedView(view)) {
         this.emitError("settings", error, view.sessionId);
       }
     });

@@ -84,7 +84,7 @@
 - extension command 的 new/fork/tree/switch 返回 cancelled，reload 明确报 unsupported；当前入口拒绝 extension slash command，避免 handler 的 detached turn 越过 activeRun ownership。
 - actor 无 activeRun（或 run 尚 queued）却出现 `agent_start` 时立即 abort；这是一条防止扩展旁路启动 Agent turn 的兜底不变量。
 - SDK 报告的 extension load errors 也会进入 session 错误，不能只监听运行期 runner errors。
-- initialize 在 project view 建立前就登记目标 observation epoch；focus 只有在精确 `focus_attached` 后才可发送 prompt。
+- initialize 在 project view 建立前就登记目标 observation epoch；focus 只有在精确 `focus_attached` 后才可发送 prompt。异步取得共享 coordination 后发布 role catalog 时也必须重新核对同一个 view 对象及其 session/generation，不能仅凭旧对象仍被引用就向新 observation 发迟到快照或错误。
 - attach 后先发布小体积 PublicState，再发布低频 role/project snapshot、有界 focused history snapshot 和独立 `pending_prompts_snapshot`；恢复历史与队列都不能依赖 SDK 或浏览器重放旧事件。异步读取队列后必须复验原 view 的 generation/conversationId/focusId。
 - 同一 project view 的索引刷新同时最多执行一轮；进行中收到的任意数量请求折叠为一次尾随扫描，尾随到达时前一轮结果不投影。页面恢复的 `refresh_view` 只接受精确 observation/focus 身份；busy 或 compacting actor 不重发 durable transcript，避免覆盖当前流式尾部。
 - close/focus change 先同步使观察身份和 UI route 失效，再 detach project view；它不会把仍在运行的 conversation actor 当作连接资源销毁。
