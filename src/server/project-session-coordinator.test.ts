@@ -1761,6 +1761,52 @@ describe("ProjectSessionCoordinator", () => {
     ]);
   });
 
+  it("rolls back a new start_session target when inbox admission fails", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const inbox = coordinatorInbox(fixture.handle);
+    inbox.put = async () => {
+      throw new Error("inbox admission rejected");
+    };
+
+    await expect(fixture.coordinator.startPeerSession(
+      fixture.handle,
+      source.conversationId,
+      startInput({
+        task: "must not leave an orphan target",
+        idempotencyKey: "failed-inbox-admission",
+      }),
+    )).rejects.toThrow("inbox admission rejected");
+
+    expect(
+      (await fixture.coordinator.listSessions(fixture.handle))
+        .map(({ id }) => id),
+    ).toEqual([source.conversationId]);
+    expect(
+      aggregateReservedConversationEntries(
+        source.sessionManager.getEntries(),
+      ).cards.find(({ body }) => body === "must not leave an orphan target"),
+    ).toMatchObject({
+      state: "failed",
+      result: expect.stringContaining("inbox admission rejected"),
+    });
+    await expect(fixture.coordinator.startPeerSession(
+      fixture.handle,
+      source.conversationId,
+      startInput({
+        task: "must not leave an orphan target",
+        idempotencyKey: "failed-inbox-admission",
+      }),
+    )).rejects.toThrow(/start_session inbox admission failed/i);
+    expect(
+      (await fixture.coordinator.listSessions(fixture.handle))
+        .map(({ id }) => id),
+    ).toEqual([source.conversationId]);
+  });
+
   it("allows a browser run after a committed start_session inbox entry settles", async () => {
     const fixture = await createFixture();
     const source = await fixture.coordinator.createUserConversation(

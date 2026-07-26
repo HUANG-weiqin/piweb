@@ -86,6 +86,8 @@ const MAX_COMPLETION_CACHE = 256;
 export const MAX_PEER_SESSIONS_PER_RUN = 4;
 export const MAX_DELEGATION_DEPTH = 3;
 export const MAX_LIVE_DELEGATION_DESCENDANTS = 16;
+const START_SESSION_ADMISSION_FAILURE_PREFIX =
+  "start_session inbox admission failed: ";
 const INBOX_LIFECYCLE_GUIDANCE = [
   "生命周期提醒：你负责管理自己创建的会话生命周期；普通会话不会被系统自动终止或删除。",
   "收到结果后，请自行决定继续工作、等待运行、终止活动运行或删除空闲会话。临时会话仅在成功回传后自动删除，失败时会保留。",
@@ -1084,6 +1086,14 @@ export class ProjectSessionCoordinator {
             "start_session idempotency key conflicts with an earlier request",
           );
         }
+        if (
+          existingCard.state === "failed"
+          && existingCard.result?.startsWith(
+            START_SESSION_ADMISSION_FAILURE_PREFIX,
+          )
+        ) {
+          throw new Error(existingCard.result);
+        }
         if (existingCard.state !== "sending") {
           return {
             conversationId,
@@ -1213,6 +1223,7 @@ export class ProjectSessionCoordinator {
         this.appendCard(source, existingCard);
       }
 
+      let createdTarget = false;
       if (!target) {
         if (targetExistsOnDisk) {
           target = await this.getOrOpenActor(context, conversationId);
@@ -1240,6 +1251,7 @@ export class ProjectSessionCoordinator {
             profile,
             targetTitle,
           );
+          createdTarget = true;
         }
       }
       const lifecycle = target.profile.lifecycle;
@@ -1269,18 +1281,65 @@ export class ProjectSessionCoordinator {
         );
       }
 
-      const queued = await this.enqueueEnvelope(context, source, target, {
-        messageId,
-        cardId,
-        sentAt: recoveredEnvelope?.sentAt ?? existingCard.updatedAt,
-        kind: "delegation_task",
-        body: input.task,
-        delegationId,
-        requestFingerprint,
-        requestedRole,
-        orchestration: existingCard.orchestration,
-        processingRunId: runId,
-      });
+      let queued: { envelope: InboxEnvelope };
+      try {
+        queued = await this.enqueueEnvelope(context, source, target, {
+          messageId,
+          cardId,
+          sentAt: recoveredEnvelope?.sentAt ?? existingCard.updatedAt,
+          kind: "delegation_task",
+          body: input.task,
+          delegationId,
+          requestFingerprint,
+          requestedRole,
+          orchestration: existingCard.orchestration,
+          processingRunId: runId,
+        });
+      } catch (error) {
+        let committedEnvelope: InboxEnvelope | undefined;
+        try {
+          committedEnvelope = await context.inbox.get(messageId);
+        } catch (inspectionError) {
+          throw new AggregateError(
+            [error, inspectionError],
+            "Failed to determine whether start_session inbox admission committed",
+          );
+        }
+        if (committedEnvelope !== undefined) throw error;
+
+        const cleanupErrors: unknown[] = [];
+        const detail = (error instanceof Error ? error.message : String(error))
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 1_000);
+        try {
+          this.appendCard(source, {
+            ...existingCard,
+            state: "failed",
+            result: `${START_SESSION_ADMISSION_FAILURE_PREFIX}${detail}`,
+            updatedAt: this.now().toISOString(),
+          });
+        } catch (cardError) {
+          cleanupErrors.push(cardError);
+        }
+        if (createdTarget) {
+          try {
+            await this.deleteConversationInternal(
+              context,
+              target.conversationId,
+            );
+          } catch (cleanupError) {
+            cleanupErrors.push(cleanupError);
+          }
+        }
+        if (cleanupErrors.length > 0) {
+          throw new AggregateError(
+            [error, ...cleanupErrors],
+            "Failed to roll back rejected start_session inbox admission",
+          );
+        }
+        throw error;
+      }
       const activity = target.getActivity();
       if (activity.kind === "idle") {
         const settled = this.findSettlement(context, target, runId);
