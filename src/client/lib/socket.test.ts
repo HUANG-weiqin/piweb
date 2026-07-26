@@ -48,6 +48,7 @@ describe("PiSocket", () => {
       type: "error",
       scope: "protocol",
     });
+    expect(transport.close).toHaveBeenCalledOnce();
   });
 
   it("ignores open and message callbacks from a replaced socket", () => {

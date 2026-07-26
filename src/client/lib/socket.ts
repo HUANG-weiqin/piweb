@@ -25,15 +25,20 @@ export class PiSocket {
     };
     socket.onmessage = (message) => {
       if (this.socket !== socket) return;
+      let event: ServerEvent;
       try {
-        this.onEvent(parseServerEvent(String(message.data)));
+        event = parseServerEvent(String(message.data));
       } catch {
+        socket.onmessage = null;
         this.onEvent({
           type: "error",
           scope: "protocol",
           message: "服务端发送了无法解析的协议消息",
         });
+        socket.close();
+        return;
       }
+      this.onEvent(event);
     };
     socket.onclose = () => {
       if (this.socket !== socket) return;
