@@ -659,9 +659,9 @@ export class ProjectStore {
         );
       }
 
+      await deleteConversationNotebook(this.stateDir, conversationId);
       await this.clearLastConversationIf(conversationId);
       if (safePath !== undefined) await unlink(safePath);
-      await deleteConversationNotebook(this.stateDir, conversationId);
       this.replaceConversations(retained);
     });
   }

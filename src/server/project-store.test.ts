@@ -356,6 +356,43 @@ describe("ProjectStore", () => {
     )).resolves.toContain("keep me");
   });
 
+  it("fails before deleting the transcript when its notebook path is not a file", async () => {
+    const cwd = await createTemporaryDirectory("piweb-invalid-notebook-delete-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversation = await store.createConversation();
+    const conversationId = conversation.getSessionId();
+    const sessionFile = conversation.getSessionFile();
+    if (!sessionFile) throw new Error("conversation did not expose its session file");
+    await new ConversationNotebook(store.stateDir, conversationId).write({
+      title: "Existing note",
+      content: "must not authorize a recursive delete",
+    });
+    const notebookPath = join(
+      store.stateDir,
+      "notebooks",
+      `${conversationId}.json`,
+    );
+    await rm(notebookPath);
+    await mkdir(notebookPath);
+    await writeFile(join(notebookPath, "unexpected.txt"), "keep", "utf8");
+    await store.setLastConversation(conversationId);
+
+    await expect(store.deleteConversation(conversationId))
+      .rejects.toThrow(/notebook file.*regular file/i);
+
+    await expect(readFile(sessionFile, "utf8")).resolves.toContain(
+      `\"id\":\"${conversationId}\"`,
+    );
+    expect(store.lastConversationId).toBe(conversationId);
+    expect(store.listConversations().map(({ id }) => id)).toContain(
+      conversationId,
+    );
+    await expect(readFile(
+      join(notebookPath, "unexpected.txt"),
+      "utf8",
+    )).resolves.toBe("keep");
+  });
+
   it("physically truncates the selected message and every later entry", async () => {
     const cwd = await createTemporaryDirectory("piweb-truncate-conversation-");
     const store = await ProjectStore.open(cwd, "full_access");

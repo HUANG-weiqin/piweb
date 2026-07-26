@@ -6,7 +6,6 @@ import {
   readFile,
   realpath,
   rename,
-  rm,
   unlink,
   writeFile,
 } from "node:fs/promises";
@@ -714,15 +713,32 @@ export async function deleteConversationNotebook(
   const hasDirectory = await assertNotebookDirectoryIfPresent(paths);
   if (!hasDirectory) return;
 
-  await rm(paths.file, { recursive: true, force: true });
+  const hasFile = await assertNotebookFileIfPresent(paths);
   const temporaryPrefix = `.${basename(paths.file)}.`;
   const entries = await readdir(paths.notebookDir, { withFileTypes: true });
-  const staleTemporaryEntries = entries.filter((entry) =>
-    entry.name.startsWith(temporaryPrefix) && entry.name.endsWith(".tmp")
-  );
-  await Promise.all(staleTemporaryEntries.map((entry) =>
-    rm(join(paths.notebookDir, entry.name), { recursive: true, force: true })
-  ));
+  const staleTemporaryPaths: string[] = [];
+  for (const entry of entries) {
+    if (
+      !entry.name.startsWith(temporaryPrefix)
+      || !entry.name.endsWith(".tmp")
+    ) continue;
+    const temporaryPath = join(paths.notebookDir, entry.name);
+    if (entry.isSymbolicLink() || !entry.isFile()) {
+      throw new Error(
+        `Notebook temporary entry must be a regular file: ${temporaryPath}`,
+      );
+    }
+    const canonicalPath = await realpath(temporaryPath);
+    if (!isPathInside(paths.notebookDir, canonicalPath)) {
+      throw new Error(
+        `Notebook temporary entry escapes notebook directory: ${temporaryPath}`,
+      );
+    }
+    staleTemporaryPaths.push(temporaryPath);
+  }
+
+  if (hasFile) await unlink(paths.file);
+  await Promise.all(staleTemporaryPaths.map((path) => unlink(path)));
 }
 
 export const notebookResultText = {
