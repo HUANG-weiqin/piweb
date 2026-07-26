@@ -231,6 +231,23 @@ describe("ProjectStore", () => {
     expect(reopened.getCwd()).toBe(store.cwd);
   });
 
+  it("does not strand a conversation file when the initial SDK open fails", async () => {
+    const cwd = await createTemporaryDirectory("piweb-create-open-failure-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversationId = randomUUID();
+    const before = await readdir(store.sessionDir);
+    const open = vi.spyOn(SessionManager, "open").mockImplementationOnce(() => {
+      throw new Error("SDK refused the initial session");
+    });
+
+    await expect(store.createConversation(conversationId))
+      .rejects.toThrow("SDK refused the initial session");
+
+    open.mockRestore();
+    expect(await readdir(store.sessionDir)).toEqual(before);
+    expect(store.listConversations()).toEqual([]);
+  });
+
   it("creates the header and immutable role metadata in one initial file", async () => {
     const cwd = await createTemporaryDirectory("piweb-meta-conversation-");
     const store = await ProjectStore.open(cwd, "full_access");

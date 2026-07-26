@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  link,
   lstat,
   mkdir,
   readdir,
@@ -233,6 +234,27 @@ async function writeManifestAtomically(
   } catch (error) {
     await unlink(temporaryPath).catch(() => undefined);
     throw error;
+  }
+}
+
+async function createFileAtomically(
+  filePath: string,
+  content: string,
+): Promise<void> {
+  const temporaryPath = join(
+    dirname(filePath),
+    `.${basename(filePath)}.${process.pid}.${randomUUID()}.create.tmp`,
+  );
+  try {
+    await writeFile(temporaryPath, content, {
+      encoding: "utf8",
+      flag: "wx",
+    });
+    // A hard link publishes the fully written inode without overwriting an
+    // existing conversation with the same durable identity.
+    await link(temporaryPath, filePath);
+  } finally {
+    await unlink(temporaryPath).catch(() => undefined);
   }
 }
 
@@ -547,19 +569,32 @@ export class ProjectStore {
       header,
       ...pending.getEntries(),
     ];
-    await writeFile(
+    const initialContent =
+      `${initialEntries.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
+    validatePiSessionFile(
+      initialContent,
       sessionFile,
-      `${initialEntries.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
-      {
-      encoding: "utf8",
-      flag: "wx",
-      },
+      pending.getSessionId(),
     );
-    const conversation = SessionManager.open(
-      sessionFile,
-      this.sessionDir,
-      this.cwd,
-    );
+    await createFileAtomically(sessionFile, initialContent);
+    let conversation: SessionManager;
+    try {
+      conversation = SessionManager.open(
+        sessionFile,
+        this.sessionDir,
+        this.cwd,
+      );
+    } catch (error) {
+      try {
+        await unlink(sessionFile);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Failed to discard a conversation after its initial SDK open failed",
+        );
+      }
+      throw error;
+    }
     if (options.updateRecent !== false) {
       await this.setLastConversation(conversation.getSessionId());
     }

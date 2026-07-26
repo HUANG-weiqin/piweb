@@ -70,7 +70,7 @@ initialize(cwd, target)
 → state + role/project snapshot + focused conversation snapshot
 ```
 
-`recent` 优先使用 manifest 中仍存在的 `lastConversationId`，否则使用索引中最近修改的对话；项目没有对话时保持空态并显示角色选择页，不创建隐含 default 会话。
+`recent` 优先使用 manifest 中仍存在的 `lastConversationId`，否则使用索引中最近修改的对话；项目没有对话时保持空态并显示角色选择页，不创建隐含 default 会话。新 conversation 的 header 与初始 role/profile 先完整序列化并通过宿主校验，再写同目录临时文件，以 exclusive hard link 原子发布最终 JSONL；崩溃不能暴露 partial final，重复 identity 也不能覆盖旧文件。初次 SDK `open()` 若失败，宿主必须精确 unlink 刚发布的文件，不能留下调用方未拿到 handle 的 orphan conversation。
 
 显式 `open` 只接受浏览器从服务端索引获得的 conversationId。服务端重新列举受控目录并解析文件路径，不能接受客户端文件路径。Pi 的 `open(nonexistent)` 会创建 manager 而不是可靠报错，所以必须先证明目标存在。
 
