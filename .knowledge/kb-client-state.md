@@ -48,7 +48,7 @@ ServerEvent
 - `project_snapshot` 同时投影持久创建来源；侧栏只为 `createdBy.kind=conversation` 的会话在标题旁显示紧凑 `Agent` 徽标，用户创建与来源未知的旧会话不显示，列表仍保持扁平。
 - 扁平可折叠 `ConversationSidebar` 是项目会话的唯一列表/新建/打开/改名/删除控制面；模型连接抽屉不维护第二套会话入口。桌面展开态可通过右边缘在 240–640px 内横向调整，折叠态与 600px 以下窄屏不提供 resize handle。running/queued/cancelling/waiting 的活跃项优先，再按 attention 和最后活跃时间排序；running/queued 使用与思考状态同尺寸、同转速的环形 spinner，沙漏、attention、unread 与 temporary 都来自服务端投影。
 - 后台 actor 的创建、运行或完成只能更新侧栏/通知，不能改变 current focus、draft 或 transcript。用户在当前会话 running 时仍可切换观察。
-- 删除以 sessionId + commandId 保持单一 pending 状态，匹配的 `command_complete` / error 才能结算；普通 snapshot 只更新列表，不能冒充删除回执。断线属于未知结果，应清除等待态并提示用户重新核对；initialize/工作区切换必须同步清掉旧 observation 的删除 pending，迟到的旧 session 回执不能锁住新项目按钮。
+- 删除 pending 固化 `sessionId + commandId + workspace/project/conversation`，删除当前 focus 时还固化 `focusId`；匹配的 `command_complete` / error 才能结算，且只有 exact 原 focus 仍在观察时才能清空当前 transcript。普通 snapshot 只更新列表，不能冒充删除回执。pending 期间禁止切换/新建 conversation，阻断 `A → B → A` 后旧删除回执清空新 focus 的 ABA；断线属于未知结果，应清除等待态并提示用户重新核对；initialize/工作区切换必须同步清掉旧 observation 的删除 pending，迟到的旧 session 回执不能锁住新项目按钮。
 - state 只说明 focused runtime 已提交，不说明历史已经 hydrate；`conversationReady` 必须等匹配 focus 三元身份的 snapshot，期间 composer 和 `sendPrompt` 双重禁用，避免 hydrate 覆盖刚发送的本地消息。pending focus 期间 Chat 使用空 transcript 投影，不能继续展示旧 focus 的“工作过程”。
 - tool、usage、prompt error 与停止仍按 runId 路由；但一个 run 可因 steering 包含多个 `assistant → user → assistant` 消息段。live projector 显式发送 user message 与 assistant segment start，reducer 只在该 run 的最新 assistant 段内追加 delta/tool，不能把“run 生命周期”误作“单个气泡生命周期”。切走再切回 running 会话时，恢复依赖服务端 conversation snapshot 的 live projection（含真实 runId、thinking/text/tool/status/usage），不依赖浏览器曾经收到后台 delta。
 - OAuth UI 只接收当前 authFlowId；取消或新 flow 之后的旧 request/progress/complete 一律忽略。

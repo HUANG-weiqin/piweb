@@ -187,6 +187,7 @@ function ConversationRow({
         className="conversation-sidebar-conversation"
         aria-current={selected ? "page" : undefined}
         aria-label={selected ? `当前会话 ${title}` : `打开会话 ${title}`}
+        disabled={!online || deletionBlocked}
         onClick={() => onSelect(conversation.id)}
       >
         <span className="conversation-sidebar-primary">
@@ -438,7 +439,7 @@ export function ConversationSidebar({
           type="button"
           className="conversation-sidebar-create"
           aria-label="新建会话"
-          disabled={!online}
+          disabled={!online || Boolean(pendingDeletionId)}
           onClick={onCreate}
         >
           <span aria-hidden="true">＋</span>

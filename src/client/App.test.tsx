@@ -1852,6 +1852,10 @@ describe("App", () => {
     expect(screen.getByRole("button", {
       name: "删除会话 Older work",
     })).toBeDisabled();
+    expect(screen.getByRole("button", {
+      name: "打开会话 Older work",
+    })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "新建会话" })).toBeDisabled();
 
     act(() => socketMock.emit?.({
       type: "command_complete",

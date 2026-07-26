@@ -113,9 +113,11 @@ interface PendingQueueCommand extends ActiveFocus {
 
 interface PendingConversationDeletion {
   commandId: string;
+  sessionId: string;
   workspaceKey: string;
   projectId: string;
   conversationId: string;
+  focusId?: string;
 }
 
 interface PendingConversationTruncation {
@@ -1140,15 +1142,22 @@ export function App() {
         }
         if (event.operation === "delete_conversation") {
           const pending = pendingConversationDeletionRef.current;
-          if (!pending || pending.commandId !== event.commandId) return;
+          if (
+            !pending
+            || pending.commandId !== event.commandId
+            || pending.sessionId !== event.sessionId
+          ) return;
           updatePendingConversationDeletion(undefined);
 
           unconfirmedPromptByConversationRef.current.delete(
             pendingConversationKey(pending),
           );
           if (
-            focusRef.current?.projectId === pending.projectId
+            pending.focusId !== undefined
+            && focusRef.current?.sessionId === pending.sessionId
+            && focusRef.current.projectId === pending.projectId
             && focusRef.current.conversationId === pending.conversationId
+            && focusRef.current.focusId === pending.focusId
           ) {
             attachFocus(
               event.sessionId,
@@ -1801,6 +1810,7 @@ export function App() {
     if (
       !sessionId
       || pendingFocusRef.current
+      || pendingConversationDeletionRef.current
       || pendingConversationTruncationRef.current
       || pendingPromptRef.current
       || pendingConversationRoleSwitchRef.current
@@ -1838,6 +1848,7 @@ export function App() {
     if (
       !sessionId
       || pendingFocusRef.current
+      || pendingConversationDeletionRef.current
       || pendingConversationTruncationRef.current
       || pendingPromptRef.current
       || pendingConversationRoleSwitchRef.current
@@ -1887,9 +1898,13 @@ export function App() {
     const commandId = crypto.randomUUID();
     const pending = {
       commandId,
+      sessionId,
       workspaceKey: currentWorkspaceKey(),
       projectId,
       conversationId,
+      ...(deletingFocusedConversation && focusRef.current
+        ? { focusId: focusRef.current.focusId }
+        : {}),
     };
     updatePendingConversationDeletion(pending);
     setError("");
