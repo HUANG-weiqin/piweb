@@ -80,7 +80,7 @@
 - `read_only` 只允许最终来源为 builtin 的 Pi 原生 `read/grep/find/ls`；`full_access` 允许所有工具和命令。扩展同名工具不能冒充 builtin。
 - 生产 `SettingsManager` 先以 `projectTrusted=false` 创建。无受保护资源时直接继续；有资源时先读用户级 trust store/global default，必要时通过浏览器选择，再由 SDK 二阶段 resource reload 加载或跳过项目设置、skills 与 extensions。
 - 创建后显式 `bindExtensions(mode=rpc)`；只把 `select/confirm/input/editor/notify` 接到 Web UI，TUI 定制仍继承 SDK no-op。session_start/resources_discover 会运行，扩展错误会绑定到当前 run 或 session。
-- extension UI response 绕过 actor queue；request 绑定当前 focus 的 sessionId/generation，timeout、扩展 AbortSignal、run stop、focus change、close 和 disconnect 都按 Pi 默认值结算。
+- extension UI response 绕过 actor queue；request 绑定当前 focus 的 sessionId/generation，timeout、扩展 AbortSignal、run stop、focus change、close 和 disconnect 都按 Pi 默认值结算。requestId 在连接生命周期内不复用，并以 4096 次总请求上限约束去重集合；达到上限后必须重连，不能让扩展用顺序对话无界增长宿主内存。
 - extension command 的 new/fork/tree/switch 返回 cancelled，reload 明确报 unsupported；当前入口拒绝 extension slash command，避免 handler 的 detached turn 越过 activeRun ownership。
 - actor 无 activeRun（或 run 尚 queued）却出现 `agent_start` 时立即 abort；这是一条防止扩展旁路启动 Agent turn 的兜底不变量。
 - SDK 报告的 extension load errors 也会进入 session 错误，不能只监听运行期 runner errors。

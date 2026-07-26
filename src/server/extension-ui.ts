@@ -38,6 +38,7 @@ interface PendingDialog {
 }
 
 const MAX_TIMER_MS = 2_147_483_647;
+const MAX_REQUESTS_PER_CONNECTION = 4_096;
 const NOTIFICATION_MAX_CHARS = 20_000;
 
 /**
@@ -256,6 +257,9 @@ export class ExtensionUIBroker {
   }
 
   private nextRequestId(): string {
+    if (this.usedRequestIds.size >= MAX_REQUESTS_PER_CONNECTION) {
+      throw new Error("Extension UI request limit exceeded for this connection");
+    }
     for (let attempt = 0; attempt < 100; attempt++) {
       const requestId = this.createRequestId();
       if (this.usedRequestIds.has(requestId)) continue;

@@ -134,6 +134,32 @@ describe("ExtensionUIBroker", () => {
     });
   });
 
+  it("bounds one-time request identities for the lifetime of a connection", async () => {
+    let sequence = 0;
+    const broker = new ExtensionUIBroker(
+      () => undefined,
+      () => `00000000-0000-4000-8000-${(++sequence).toString(16).padStart(12, "0")}`,
+    );
+    const ui = broker.context({
+      sessionId: SESSION_A,
+      generation: 1,
+    });
+
+    for (let index = 0; index < 4_096; index++) {
+      const result = ui.input("bounded");
+      expect(broker.respond({
+        sessionId: SESSION_A,
+        requestId: `00000000-0000-4000-8000-${(index + 1).toString(16).padStart(12, "0")}`,
+        response: { kind: "cancel" },
+      })).toBe(true);
+      await expect(result).resolves.toBeUndefined();
+    }
+
+    expect(() => ui.input("one too many")).toThrow(
+      "Extension UI request limit exceeded",
+    );
+  });
+
   it("rejects oversized dialog content instead of silently truncating it", async () => {
     const events: ServerEvent[] = [];
     const broker = new ExtensionUIBroker((event) => events.push(event));
