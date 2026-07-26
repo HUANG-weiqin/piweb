@@ -131,6 +131,9 @@ function fakeSession(settings = fakeSettings()): FakeSession {
 class FakeRuntime implements PiRuntimeLike {
   readonly authStorage = {
     getOAuthProviders: () => [],
+    get: () => undefined,
+    set: () => undefined,
+    remove: () => undefined,
     drainErrors: () => [],
   } as unknown as AuthStorage;
 
@@ -1675,6 +1678,50 @@ describe("PiConnection lifecycle", () => {
     await Promise.all([login, close, initialize]);
 
     expect(connection.sessionId).toBe(SESSION_B);
+    expect(events.some((event) => event.type === "auth_complete")).toBe(false);
+  });
+
+  it("restores prior credentials when an OAuth provider resolves after cancellation", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-oauth-late-commit-"));
+    const loginStarted = deferred();
+    const loginGate = deferred();
+    const runtime = new FakeRuntime();
+    let credential: unknown = { type: "api_key", key: "previous" };
+    Object.assign(runtime.authStorage, {
+      getOAuthProviders: () => [{ id: "oauth", name: "OAuth" }],
+      get: () => credential,
+      set: (_provider: string, next: unknown) => {
+        credential = next;
+      },
+      remove: () => {
+        credential = undefined;
+      },
+      login: async () => {
+        loginStarted.resolve();
+        await loginGate.promise;
+        credential = {
+          type: "oauth",
+          access: "late credentials",
+          refresh: "late refresh",
+          expires: Date.now() + 60_000,
+        };
+      },
+    });
+    const events: ServerEvent[] = [];
+    const connection = new PiConnection((event) => events.push(event), runtime);
+    await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
+
+    const login = connection.handle({
+      type: "login_oauth",
+      authFlowId: AUTH_A,
+      provider: "oauth",
+    });
+    await loginStarted.promise;
+    await connection.handle({ type: "cancel_auth", authFlowId: AUTH_A });
+    loginGate.resolve();
+    await login;
+
+    expect(credential).toEqual({ type: "api_key", key: "previous" });
     expect(events.some((event) => event.type === "auth_complete")).toBe(false);
   });
 

@@ -2465,12 +2465,30 @@ export class PiConnection {
     const flow = new AuthFlowBroker(authFlowId, this.emit);
     this.authFlow = flow;
     const signal = flow.callbacks.signal;
+    let rollbackFailed = false;
     try {
-      await this.updateConfiguration(() => this.runtime.authStorage.login(provider, flow.callbacks));
+      await this.updateConfiguration(async () => {
+        const currentCredential = this.runtime.authStorage.get(provider);
+        const previousCredential = currentCredential === undefined
+          ? undefined
+          : structuredClone(currentCredential);
+        await this.runtime.authStorage.login(provider, flow.callbacks);
+        if (!signal?.aborted) return;
+        try {
+          if (previousCredential === undefined) {
+            this.runtime.authStorage.remove(provider);
+          } else {
+            this.runtime.authStorage.set(provider, previousCredential);
+          }
+        } catch (error) {
+          rollbackFailed = true;
+          throw error;
+        }
+      });
       if (signal?.aborted) return;
       this.emit({ type: "auth_complete", authFlowId, provider });
     } catch (error) {
-      if (!signal?.aborted) throw error;
+      if (!signal?.aborted || rollbackFailed) throw error;
     } finally {
       if (this.authFlow === flow) this.authFlow = undefined;
     }
