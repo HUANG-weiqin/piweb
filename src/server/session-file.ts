@@ -5,6 +5,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   aggregateReservedConversationEntries,
+  parseReservedConversationEntry,
   type ConversationCard,
   type ConversationMeta,
   type MetaOperation,
@@ -468,6 +469,25 @@ export function inspectPiSessionFile(
 
   let reserved;
   try {
+    for (const value of values.slice(1)) {
+      const entry = parseReservedConversationEntry(value);
+      if (
+        entry?.kind === "conversation_card"
+        && entry.entry.data.fromSnapshot.conversationId !== header.id
+      ) {
+        throw new Error(
+          "Piweb conversation card source must be the current conversation",
+        );
+      }
+      if (
+        entry?.kind === "conversation_message"
+        && entry.entry.details.toSnapshot.conversationId !== header.id
+      ) {
+        throw new Error(
+          "Piweb conversation message target must be the current conversation",
+        );
+      }
+    }
     reserved = aggregateReservedConversationEntries(values.slice(1));
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);

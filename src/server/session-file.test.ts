@@ -542,6 +542,53 @@ describe("validatePiSessionFile", () => {
         },
       },
     ]), "nested-carrier.jsonl")).toThrow(/nested message\.role=custom/i);
+
+    const foreignCard = createConversationCardEntry({
+      cardId: randomUUID(),
+      kind: "message",
+      body: "not owned by this conversation",
+      fromSnapshot: peer(),
+      toSnapshot: peer(),
+      state: "queued",
+      messageId: randomUUID(),
+      updatedAt: timestamp,
+    });
+    expect(() => inspectPiSessionFile(serialize([
+      header,
+      {
+        ...base,
+        type: "custom",
+        customType: CONVERSATION_CARD_CUSTOM_TYPE,
+        data: foreignCard.data,
+      },
+    ]), "foreign-card.jsonl")).toThrow(/card source.*current conversation/i);
+
+    const foreignMessage = createConversationMessageEntry({
+      content: "not delivered to this conversation",
+      display: true,
+      details: {
+        messageId: randomUUID(),
+        cardId: randomUUID(),
+        sentAt: timestamp,
+        kind: "message",
+        body: "not delivered to this conversation",
+        fromSnapshot: peer(),
+        toSnapshot: peer(),
+      },
+    });
+    expect(() => inspectPiSessionFile(serialize([
+      header,
+      {
+        ...base,
+        type: "custom_message",
+        customType: CONVERSATION_MESSAGE_CUSTOM_TYPE,
+        content: foreignMessage.content,
+        display: foreignMessage.display,
+        details: foreignMessage.details,
+      },
+    ]), "foreign-message.jsonl")).toThrow(
+      /message target.*current conversation/i,
+    );
   });
 
   it("detects duplicate delivery identities even when one is off the active branch", () => {
