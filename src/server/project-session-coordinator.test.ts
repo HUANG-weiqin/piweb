@@ -3686,8 +3686,11 @@ describe("ProjectSessionCoordinator", () => {
       () => caller.getActivity().kind === "waiting",
       "a retry to skip the already consumed message",
     );
+    const retryRejected = expect(retryWait).rejects.toMatchObject({
+      name: "AbortError",
+    });
     retryAbort.abort();
-    await expect(retryWait).rejects.toMatchObject({ name: "AbortError" });
+    await retryRejected;
 
     releaseCaller.resolve();
     await callerCompletion;
@@ -3945,8 +3948,11 @@ describe("ProjectSessionCoordinator", () => {
       () => second.getActivity().kind === "waiting",
       "the reverse wait without a ghost cycle edge",
     );
+    const reverseRejected = expect(reverseWait).rejects.toMatchObject({
+      name: "AbortError",
+    });
     reverseAbort.abort();
-    await expect(reverseWait).rejects.toMatchObject({ name: "AbortError" });
+    await reverseRejected;
 
     releaseFirst.resolve();
     releaseSecond.resolve();
@@ -4061,8 +4067,11 @@ describe("ProjectSessionCoordinator", () => {
       () => peer.getActivity().kind === "waiting",
       "the reverse wait without a ghost exact edge",
     );
+    const reverseRejected = expect(reverseWait).rejects.toMatchObject({
+      name: "AbortError",
+    });
     reverseAbort.abort();
-    await expect(reverseWait).rejects.toMatchObject({ name: "AbortError" });
+    await reverseRejected;
 
     releaseCaller.resolve();
     releasePeer.resolve();
