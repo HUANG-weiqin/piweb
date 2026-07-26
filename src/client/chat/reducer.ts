@@ -388,6 +388,18 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   if (action.type === "hydrate") {
     if ("items" in action) {
       if (state.focus && !sameFocus(state.focus, action)) return state;
+      if (
+        state.focus
+        && state.lastProjectionSeq !== undefined
+        && (
+          action.projectionSeq === undefined
+          || action.projectionSeq < state.lastProjectionSeq
+          || (
+            state.projectionGap
+            && action.projectionSeq === state.lastProjectionSeq
+          )
+        )
+      ) return state;
       const items = normalizeHistory(action.items);
       return {
         ...withItems(state, items, tokenTotal(items)),

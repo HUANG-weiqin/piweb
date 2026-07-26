@@ -213,6 +213,40 @@ describe("chatReducer", () => {
     ]);
   });
 
+  it("does not let an older snapshot roll back a current focus watermark", () => {
+    let state = chatReducer(initialChatState, {
+      type: "focus_changed",
+      ...FOCUS_A_1,
+    });
+    state = chatReducer(state, {
+      type: "hydrate",
+      ...FOCUS_A_1,
+      projectionSeq: 5,
+      items: [historyMessage("current", "assistant", "current")],
+    });
+    state = chatReducer(state, {
+      type: "session",
+      ...FOCUS_A_1,
+      runId: RUN_1,
+      projectionSeq: 6,
+      event: { type: "text_delta", delta: " state" },
+    });
+
+    const stale = chatReducer(state, {
+      type: "hydrate",
+      ...FOCUS_A_1,
+      projectionSeq: 5,
+      items: [historyMessage("stale", "assistant", "stale")],
+    });
+
+    expect(stale).toBe(state);
+    expect(stale.lastProjectionSeq).toBe(6);
+    expect(stale.messages.map(({ text }) => text)).toEqual([
+      "current",
+      " state",
+    ]);
+  });
+
   it("rejects projection deltas that arrive before a snapshot or with a sequence gap", () => {
     let state = chatReducer(initialChatState, {
       type: "focus_changed",

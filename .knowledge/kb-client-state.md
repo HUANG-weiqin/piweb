@@ -109,7 +109,7 @@ ServerEvent
 - 不要在 `WebSocket.send()` 成功后清空 composer 或插入 user message；这会在帧未到达服务端时制造不可恢复的数据丢失窗口。
 - 目录列表中的 `path` 只是浏览投影，不是项目 cwd；不要在用户确认和 initialize 校验前创建项目状态、加载资源或持久化会话。
 - 后台 project snapshot 不能通过 conversationId 过滤；focused transcript event 也不能只按 conversationId 接收。两者处在不同观察边界。
-- `projectionSeq` 缺口表示当前工作过程投影不可证明完整；reducer 必须停止套用后续 delta 并触发 `refresh_view`，只能由匹配 snapshot 清除缺口。`conversation_item` 只能匹配当前 watermark，不能替代丢失的 run delta 推进序号。
+- `projectionSeq` 缺口表示当前工作过程投影不可证明完整；reducer 必须停止套用后续 delta 并触发 `refresh_view`，只能由匹配且不早于当前 watermark 的 snapshot 清除缺口。同 focus 的旧 snapshot 或在已进入 sequenced 模式后缺少序号的 snapshot 必须丢弃，不能回退 transcript/watermark；`conversation_item` 只能匹配当前 watermark，不能替代丢失的 run delta 推进序号。
 - `message.text/thinking/tools` 是复制、token 与旧快照兼容投影，不再携带顺序语义。只有确实没有 `parts` 的旧快照可以退回历史固定布局；任何新实时或恢复路径都必须生成 ordered parts，不能再次从三个聚合字段猜时间顺序。
 
 ## 关联模块
