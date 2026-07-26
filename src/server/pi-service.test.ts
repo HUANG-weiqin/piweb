@@ -16,6 +16,7 @@ import type {
 import { describe, expect, it, vi } from "vitest";
 import {
   MAX_PROJECT_CONVERSATIONS,
+  parseServerEvent,
   type ConversationSummary,
   type ServerEvent,
 } from "../shared/protocol.js";
@@ -3925,7 +3926,7 @@ describe("PiConnection coordinated project view", () => {
     }
   });
 
-  it("projects peer existence and repairs missing card titles from the durable project index", async () => {
+  it("bounds durable card titles and repairs missing peer titles for the wire", async () => {
     const harness = await coordinatedConnectionHarness();
     let externalHandle:
       Awaited<ReturnType<ProjectSessionCoordinator["acquireProject"]>>
@@ -3996,6 +3997,7 @@ describe("PiConnection coordinated project view", () => {
           body: "review this",
           fromSnapshot: {
             conversationId: source.conversationId,
+            title: "😀".repeat(121),
             role: {
               id: source.profile.role.id,
               name: source.profile.role.name,
@@ -4031,15 +4033,23 @@ describe("PiConnection coordinated project view", () => {
       ) {
         throw new Error("source snapshot was not published");
       }
-      expect(snapshot.items).toEqual(expect.arrayContaining([
-        expect.objectContaining({
-          kind: "session_message",
-          cardId,
-          peerExists: true,
-          from: expect.objectContaining({ title: "source" }),
-          to: expect.objectContaining({ title: "target" }),
-        }),
-      ]));
+      const card = snapshot.items.find((item) =>
+        item.kind === "session_message" && item.cardId === cardId
+      );
+      expect(card).toMatchObject({
+        kind: "session_message",
+        peerExists: true,
+      });
+      if (card?.kind !== "session_message") {
+        throw new Error("source card was not projected");
+      }
+      expect([...card.from.title!]).toHaveLength(120);
+      expect(card.from.title?.endsWith("…")).toBe(true);
+      expect(card.to.title).toBe("target");
+      expect(parseServerEvent(JSON.stringify(snapshot))).toMatchObject({
+        type: "conversation_snapshot",
+        conversationId: source.conversationId,
+      });
 
       const itemCount = harness.events.filter(
         (event) => event.type === "conversation_item",

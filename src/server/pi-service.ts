@@ -289,7 +289,14 @@ function projectConversationPeers(
   const enrichTitle = (
     endpoint: SessionMessageEndpoint,
   ): SessionMessageEndpoint => {
-    if (endpoint.title?.trim()) return endpoint;
+    const explicitTitle = endpoint.title === undefined
+      ? undefined
+      : conversationDisplayTitle({ name: endpoint.title, preview: "" });
+    if (explicitTitle !== undefined) {
+      return explicitTitle === endpoint.title
+        ? endpoint
+        : { ...endpoint, title: explicitTitle };
+    }
     const summary = summaries.get(endpoint.conversationId);
     if (!summary) return endpoint;
     const title = conversationDisplayTitle(summary);

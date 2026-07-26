@@ -1055,7 +1055,10 @@ const conversationActivitySchema: z.ZodType<ConversationActivity> = z.discrimina
 );
 const sessionMessageEndpointSchema: z.ZodType<SessionMessageEndpoint> = z.object({
   conversationId: conversationIdSchema,
-  title: z.string().max(120).optional(),
+  title: boundedCharactersString(
+    MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
+    "sessionMessageEndpoint.title",
+  ).optional(),
   role: z.object({
     id: roleIdSchema,
     name: requiredBoundedCharactersString(
