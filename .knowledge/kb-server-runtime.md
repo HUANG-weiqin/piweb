@@ -127,7 +127,7 @@
 - OAuth login 会等待浏览器回答；认证回答和取消不能排在 login 后面的同一队列，否则会死锁。
 - OAuth/extension UI 这类同步 emitter 的请求必须先登记 pending waiter 再发事件；emit 抛错时要删除 waiter 并拒绝请求，避免同步回答丢失或残留悬挂状态。
 - 项目信任和当前 focus 的 extension hook 也可能在首个 PublicState 前等待浏览器；扩展 UI 回答同样不能排 actor queue，也不能要求 PublicState 已存在。
-- OAuth flow 由 authFlowId 关联；pending/cancelled tombstone 保证在 flow 创建前收到的 cancel 也能阻止它启动。SDK `AuthStorage.login()` 会在 provider 返回后自行提交 credential，因此宿主在串行配置事务内先深快照旧 credential；若 provider 忽略 abort 并在取消后仍 resolve，宿主必须在 registry refresh 前恢复旧值，不能只抑制 `auth_complete`。
+- OAuth flow 由 authFlowId 关联；pending/cancelled tombstone 保证在 flow 创建前收到的 cancel 也能阻止它启动。宿主不能直接调用会在 provider 返回后自行提交 credential 的 `AuthStorage.login()`；必须先调用 baseline provider 获取 credential，复验 flow 未取消后才由宿主提交。这样忽略 abort 的 provider 只能返回一个未提交值，不需要用旧快照回滚，也不会覆盖同时发生的 token refresh。
 - `tool_execution_start` 发生在 SDK 参数校验与 host 策略之前，不能解释成副作用已经开始。
 - sessionId/focusId/runId 不得复用，否则迟到命令会形成 ABA；连接 view 与 conversation actor 会显式拒绝复用。
 - `close` 与 `error` 都可能触发 dispose，清理必须幂等。

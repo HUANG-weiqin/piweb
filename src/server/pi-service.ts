@@ -2460,35 +2460,26 @@ export class PiConnection {
   }
 
   private async loginOAuth(provider: string, authFlowId: string): Promise<void> {
-    if (!this.isVisibleOAuthProvider(provider)) throw new Error(`OAuth provider not found: ${provider}`);
+    const oauthProvider = this.runtime.authStorage.getOAuthProviders()
+      .find((item) => item.id === provider);
+    if (!oauthProvider) throw new Error(`OAuth provider not found: ${provider}`);
     this.authFlow?.cancel();
     const flow = new AuthFlowBroker(authFlowId, this.emit);
     this.authFlow = flow;
     const signal = flow.callbacks.signal;
-    let rollbackFailed = false;
     try {
       await this.updateConfiguration(async () => {
-        const currentCredential = this.runtime.authStorage.get(provider);
-        const previousCredential = currentCredential === undefined
-          ? undefined
-          : structuredClone(currentCredential);
-        await this.runtime.authStorage.login(provider, flow.callbacks);
-        if (!signal?.aborted) return;
-        try {
-          if (previousCredential === undefined) {
-            this.runtime.authStorage.remove(provider);
-          } else {
-            this.runtime.authStorage.set(provider, previousCredential);
-          }
-        } catch (error) {
-          rollbackFailed = true;
-          throw error;
-        }
+        const credentials = await oauthProvider.login(flow.callbacks);
+        if (signal?.aborted) return;
+        this.runtime.authStorage.set(provider, {
+          type: "oauth",
+          ...credentials,
+        });
       });
       if (signal?.aborted) return;
       this.emit({ type: "auth_complete", authFlowId, provider });
     } catch (error) {
-      if (!signal?.aborted || rollbackFailed) throw error;
+      if (!signal?.aborted) throw error;
     } finally {
       if (this.authFlow === flow) this.authFlow = undefined;
     }

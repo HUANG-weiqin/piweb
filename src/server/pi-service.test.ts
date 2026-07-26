@@ -257,8 +257,18 @@ function configureOAuth(
   login: (provider: string, callbacks: { signal: AbortSignal }) => Promise<void>,
 ): void {
   Object.assign(runtime.authStorage, {
-    getOAuthProviders: () => [{ id: "oauth", name: "OAuth" }],
-    login,
+    getOAuthProviders: () => [{
+      id: "oauth",
+      name: "OAuth",
+      login: async (callbacks: { signal: AbortSignal }) => {
+        await login("oauth", callbacks);
+        return {
+          access: "test access",
+          refresh: "test refresh",
+          expires: Date.now() + 60_000,
+        };
+      },
+    }],
   });
 }
 
@@ -1681,20 +1691,29 @@ describe("PiConnection lifecycle", () => {
     expect(events.some((event) => event.type === "auth_complete")).toBe(false);
   });
 
-  it("restores prior credentials when an OAuth provider resolves after cancellation", async () => {
+  it("preserves a concurrent credential refresh when cancelled OAuth resolves", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-oauth-late-commit-"));
     const loginStarted = deferred();
     const loginGate = deferred();
     const runtime = new FakeRuntime();
     let credential: unknown = { type: "api_key", key: "previous" };
     Object.assign(runtime.authStorage, {
-      getOAuthProviders: () => [{ id: "oauth", name: "OAuth" }],
+      getOAuthProviders: () => [{
+        id: "oauth",
+        name: "OAuth",
+        login: async () => {
+          loginStarted.resolve();
+          await loginGate.promise;
+          return {
+            access: "late credentials",
+            refresh: "late refresh",
+            expires: Date.now() + 60_000,
+          };
+        },
+      }],
       get: () => credential,
       set: (_provider: string, next: unknown) => {
         credential = next;
-      },
-      remove: () => {
-        credential = undefined;
       },
       login: async () => {
         loginStarted.resolve();
@@ -1718,10 +1737,14 @@ describe("PiConnection lifecycle", () => {
     });
     await loginStarted.promise;
     await connection.handle({ type: "cancel_auth", authFlowId: AUTH_A });
+    credential = { type: "oauth", access: "concurrently refreshed" };
     loginGate.resolve();
     await login;
 
-    expect(credential).toEqual({ type: "api_key", key: "previous" });
+    expect(credential).toEqual({
+      type: "oauth",
+      access: "concurrently refreshed",
+    });
     expect(events.some((event) => event.type === "auth_complete")).toBe(false);
   });
 
