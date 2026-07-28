@@ -18,8 +18,10 @@ import {
   type TokenUsage,
   type ToolMode,
 } from "../shared/protocol.js";
+import type { AgentProviderPayloadCheck } from "./agent-provider-payload.js";
 import type { AgentTurnBoundaryCheck } from "./agent-turn-boundary.js";
 import {
+  codexPayloadPressureError,
   COMPACTION_RETRY_GROWTH_BYTES,
   hasCodexContextBytePressure,
   measureSerializedContextBytes,
@@ -1865,6 +1867,16 @@ export class ConversationActor {
     return undefined;
   }
 
+  private checkProviderPayload(
+    input: AgentProviderPayloadCheck,
+  ): { block: true; reason: string } | undefined {
+    const reason = codexPayloadPressureError(
+      input.model,
+      input.serializedPayloadBytes,
+    );
+    return reason ? { block: true, reason } : undefined;
+  }
+
   private checkTurnBoundary(input: AgentTurnBoundaryCheck): boolean {
     this.emitContextUsage();
     const ticket = this.activeRun;
@@ -2237,6 +2249,7 @@ export class ConversationActor {
             });
           },
           turnBoundaryCheck: (input) => this.checkTurnBoundary(input),
+          providerPayloadGate: (input) => this.checkProviderPayload(input),
         },
       );
       this.created = created;

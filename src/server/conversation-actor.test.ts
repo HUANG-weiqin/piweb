@@ -603,6 +603,41 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
+  it("blocks only unsafe final Codex provider payloads", async () => {
+    const fixture = await openActor();
+    const gate = fixture.runtime.createOptions?.providerPayloadGate;
+
+    expect(await gate?.({
+      model: {
+        provider: "openai-codex",
+        api: "openai-codex-responses",
+        id: "gpt-5.6-sol",
+      },
+      serializedPayloadBytes: 1_000_000,
+    })).toMatchObject({
+      block: true,
+      reason: expect.stringContaining("context_length_exceeded"),
+    });
+    expect(await gate?.({
+      model: {
+        provider: "openai-codex",
+        api: "openai-codex-responses",
+        id: "gpt-5.6-sol",
+      },
+      serializedPayloadBytes: undefined,
+    })).toMatchObject({ block: true });
+    expect(await gate?.({
+      model: {
+        provider: "anthropic",
+        api: "anthropic-messages",
+        id: "claude",
+      },
+      serializedPayloadBytes: 2_000_000,
+    })).toBeUndefined();
+
+    await fixture.actor.dispose();
+  });
+
   it("compacts inherited Codex byte pressure before the live prompt", async () => {
     const fixture = await openActor();
     const order: string[] = [];

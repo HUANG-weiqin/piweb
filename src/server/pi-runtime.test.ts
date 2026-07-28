@@ -2,6 +2,10 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  createFauxCore,
+  fauxAssistantMessage,
+} from "@earendil-works/pi-ai";
+import {
   AuthStorage,
   createAgentSession,
   createAgentSessionFromServices,
@@ -11,12 +15,14 @@ import {
   ModelRegistry,
   SessionManager,
   SettingsManager,
+  type AgentSession,
   type CreateAgentSessionOptions,
   type ExtensionAPI,
   type InlineExtension,
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import { PiRuntime } from "./pi-runtime.js";
+import { codexPayloadPressureError } from "./provider-context-pressure.js";
 
 function deferred(): { promise: Promise<void>; resolve(): void } {
   let resolve!: () => void;
@@ -67,6 +73,40 @@ function shadowReadTool(cwd: string, name: string, marker: string) {
     promptSnippet: marker,
     promptGuidelines: [marker],
   };
+}
+
+function seedCompactableCodexHistory(session: AgentSession): void {
+  session.sessionManager.appendMessage({
+    role: "user",
+    content: [{ type: "text", text: "earlier context" }],
+    timestamp: Date.now(),
+  });
+  session.sessionManager.appendMessage({
+    ...fauxAssistantMessage("earlier response"),
+    api: "openai-codex-responses",
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+  });
+  session.sessionManager.appendMessage({
+    role: "user",
+    content: [{ type: "text", text: "old context ".repeat(10_000) }],
+    timestamp: Date.now(),
+  });
+  session.sessionManager.appendMessage({
+    ...fauxAssistantMessage("old response"),
+    api: "openai-codex-responses",
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    usage: {
+      input: 30_000,
+      output: 10,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 30_010,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+  });
+  session.agent.state.messages = session.sessionManager.buildSessionContext().messages;
 }
 
 function testRuntime(
@@ -176,6 +216,247 @@ describe("PiRuntime session ownership", () => {
     expect(created.session.agent.hasQueuedMessages()).toBe(true);
     await created.dispose();
     expect(loopOwner.createLoopConfig).toBe(originalCreateLoopConfig);
+  });
+
+  it("gates the final provider payload after extension transforms", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-payload-gate-"));
+    const transformedPayload = { input: "扩展 payload" };
+    let extensionHook: AgentSession["agent"]["onPayload"];
+    let extensionCalls = 0;
+    let observedBytes: number | undefined;
+    let block = false;
+    const runtime = testRuntime(
+      () => [(pi) => {
+        pi.on("before_provider_request", () => {
+          extensionCalls++;
+          return transformedPayload;
+        });
+      }],
+      async (result) => {
+        extensionHook = result.session.agent.onPayload;
+      },
+    );
+    const created = await runtime.createSession(cwd, {
+      providerPayloadGate: (input) => {
+        observedBytes = input.serializedPayloadBytes;
+        return block
+          ? { block: true, reason: "context_length_exceeded: test guard" }
+          : undefined;
+      },
+    });
+    await created.activateExtensions();
+    const installedHook = created.session.agent.onPayload;
+    const model = {
+      provider: "openai-codex",
+      api: "openai-codex-responses",
+      id: "gpt-5.6-sol",
+    } as never;
+
+    await expect(installedHook?.({ input: "before" }, model))
+      .resolves.toEqual(transformedPayload);
+    expect(observedBytes).toBe(Buffer.byteLength(
+      JSON.stringify(transformedPayload),
+      "utf8",
+    ));
+
+    block = true;
+    await expect(installedHook?.({ input: "before" }, model))
+      .rejects.toThrow("context_length_exceeded: test guard");
+
+    expect(extensionCalls).toBe(2);
+    await created.dispose();
+    expect(created.session.agent.onPayload).toBe(extensionHook);
+  });
+
+  it("lets AgentSession compact and retry after a guarded payload overflow", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-payload-retry-"));
+    const faux = createFauxCore({
+      provider: "openai-codex",
+      api: "openai-codex-responses",
+      models: [{
+        id: "gpt-5.6-sol",
+        contextWindow: 128_000,
+        maxTokens: 16_384,
+      }],
+    });
+    let normalPayloads = 0;
+    const runtime = testRuntime(
+      () => [],
+      async (result) => {
+        result.session.agent.onPayload = (payload) => {
+          normalPayloads++;
+          return normalPayloads === 1
+            ? { payload, padding: "x".repeat(920 * 1024) }
+            : payload;
+        };
+      },
+    );
+    faux.setResponses([
+      async (_context, options, _state, model) => {
+        await options?.onPayload?.({ input: "first" }, model);
+        return fauxAssistantMessage("unreachable");
+      },
+      fauxAssistantMessage("compacted history"),
+      async (_context, options, _state, model) => {
+        await options?.onPayload?.({ input: "retry" }, model);
+        return fauxAssistantMessage("completed after retry");
+      },
+    ]);
+    const created = await runtime.createSession(cwd, {
+      providerPayloadGate: (input) => {
+        const reason = codexPayloadPressureError(
+          input.model,
+          input.serializedPayloadBytes,
+        );
+        return reason ? { block: true, reason } : undefined;
+      },
+    });
+    created.modelRegistry.authStorage.setRuntimeApiKey("openai-codex", "test-key");
+    created.session.agent.state.model = faux.getModel();
+    created.session.agent.streamFn = faux.streamSimple as never;
+    seedCompactableCodexHistory(created.session);
+    const compactionEvents: string[] = [];
+    let endedMessage: unknown;
+    const unsubscribe = created.session.subscribe((event) => {
+      if (event.type === "message_end") endedMessage = event.message;
+      if (event.type === "compaction_start" || event.type === "compaction_end") {
+        compactionEvents.push(event.type);
+      }
+    });
+
+    await within(created.session.prompt("continue"), 5_000);
+
+    expect(faux.state.callCount).toBe(3);
+    expect(normalPayloads).toBe(2);
+    expect(compactionEvents).toEqual(["compaction_start", "compaction_end"]);
+    expect(endedMessage).toMatchObject({
+      role: "assistant",
+      stopReason: "stop",
+    });
+    expect(created.session.agent.state.messages.at(-1)).toMatchObject({
+      role: "assistant",
+      content: [{ type: "text", text: "completed after retry" }],
+      stopReason: "stop",
+    });
+
+    unsubscribe();
+    await created.dispose();
+  });
+
+  it("blocks an oversized SDK compaction payload before transport", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-compaction-payload-"));
+    const faux = createFauxCore({
+      provider: "openai-codex",
+      api: "openai-codex-responses",
+      models: [{
+        id: "gpt-5.6-sol",
+        contextWindow: 128_000,
+        maxTokens: 16_384,
+      }],
+    });
+    const runtime = testRuntime(
+      () => [],
+      async (result) => {
+        result.session.agent.onPayload = (payload) => ({
+          payload,
+          padding: "x".repeat(920 * 1024),
+        });
+      },
+    );
+    let summaryTransported = false;
+    faux.setResponses([
+      async (_context, options, _state, model) => {
+        await options?.onPayload?.({ input: "first" }, model);
+        return fauxAssistantMessage("unreachable");
+      },
+      async (_context, options, _state, model) => {
+        await options?.onPayload?.({
+          summaryInput: "x".repeat(920 * 1024),
+        }, model);
+        summaryTransported = true;
+        return fauxAssistantMessage("unreachable summary");
+      },
+    ]);
+    const created = await runtime.createSession(cwd, {
+      providerPayloadGate: (input) => {
+        const reason = codexPayloadPressureError(
+          input.model,
+          input.serializedPayloadBytes,
+        );
+        return reason ? { block: true, reason } : undefined;
+      },
+    });
+    created.modelRegistry.authStorage.setRuntimeApiKey("openai-codex", "test-key");
+    created.session.agent.state.model = faux.getModel();
+    created.session.agent.streamFn = faux.streamSimple as never;
+    seedCompactableCodexHistory(created.session);
+    let compactionError: string | undefined;
+    const unsubscribe = created.session.subscribe((event) => {
+      if (event.type === "compaction_end") {
+        compactionError = event.errorMessage;
+      }
+    });
+
+    await within(created.session.prompt("continue"), 5_000);
+
+    expect(faux.state.callCount).toBe(2);
+    expect(summaryTransported).toBe(false);
+    expect(compactionError).toContain("context_length_exceeded");
+    expect(created.session.agent.state.errorMessage)
+      .toContain("context_length_exceeded");
+
+    unsubscribe();
+    await created.dispose();
+  });
+
+  it("fails safely without transport retry when SDK compaction is disabled", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-payload-no-retry-"));
+    const faux = createFauxCore({
+      provider: "openai-codex",
+      api: "openai-codex-responses",
+      models: [{ id: "gpt-5.6-sol" }],
+    });
+    const runtime = testRuntime(
+      () => [],
+      async (result) => {
+        result.session.agent.onPayload = () => ({
+          padding: "x".repeat(920 * 1024),
+        });
+      },
+    );
+    faux.setResponses([
+      async (_context, options, _state, model) => {
+        await options?.onPayload?.({ input: "blocked" }, model);
+        return fauxAssistantMessage("unreachable");
+      },
+    ]);
+    const created = await runtime.createSession(cwd, {
+      providerPayloadGate: (input) => {
+        const reason = codexPayloadPressureError(
+          input.model,
+          input.serializedPayloadBytes,
+        );
+        return reason ? { block: true, reason } : undefined;
+      },
+    });
+    created.modelRegistry.authStorage.setRuntimeApiKey("openai-codex", "test-key");
+    created.session.agent.state.model = faux.getModel();
+    created.session.agent.streamFn = faux.streamSimple as never;
+    created.settings.setCompactionEnabled(false);
+    const compactionStart = vi.fn();
+    const unsubscribe = created.session.subscribe((event) => {
+      if (event.type === "compaction_start") compactionStart();
+    });
+
+    await within(created.session.prompt("continue"), 5_000);
+
+    expect(faux.state.callCount).toBe(1);
+    expect(compactionStart).not.toHaveBeenCalled();
+    expect(created.session.agent.state.errorMessage)
+      .toContain("context_length_exceeded");
+
+    unsubscribe();
+    await created.dispose();
   });
 
   it("activates Pi's structured read-only tools by default", async () => {
