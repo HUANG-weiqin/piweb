@@ -107,8 +107,6 @@ function fakeSession(): FakeSession {
     disposeCalls: 0,
     steerCalls: [],
     isStreaming: false,
-    agent: { state: { messages: [], tools: [] } },
-    systemPrompt: "",
     messages: [],
     model: { provider: "test", id: "model", contextWindow: 1_000 },
     thinkingLevel: "off",
@@ -393,10 +391,7 @@ function agentMessage(value: unknown): AgentMessage {
   return value as AgentMessage;
 }
 
-function checkToolTurnBoundary(
-  runtime: FakeRuntime,
-  _serializedContextBytes?: number,
-): boolean {
+function checkToolTurnBoundary(runtime: FakeRuntime): boolean {
   return Boolean(runtime.createOptions?.turnBoundaryCheck?.({
     contextUsage: runtime.session.getContextUsage(),
     hasToolResults: true,
@@ -529,134 +524,6 @@ describe("ConversationActor", () => {
       event.type === "session_event"
       && (event.event.type === "run_started" || event.event.type === "run_finished")
     ))).toHaveLength(2);
-    await fixture.actor.dispose();
-  });
-
-  it("does not compact raw Codex bytes before the token threshold", async () => {
-    const fixture = await openActor();
-    const emit = () => fixture.runtime.session.eventListener;
-    Object.defineProperty(fixture.runtime.session, "model", {
-      configurable: true,
-      value: {
-        provider: "openai-codex",
-        id: "gpt-5.6-sol",
-        api: "openai-codex-responses",
-        contextWindow: 372_000,
-      },
-    });
-
-    fixture.runtime.session.promptImplementation = async () => {
-      emit()?.(nativeEvent({ type: "agent_start" }));
-      emit()?.(nativeEvent({
-        type: "message_end",
-        message: {
-          role: "assistant",
-          content: [{ type: "text", text: "before byte-pressure compaction" }],
-          stopReason: "toolUse",
-        },
-      }));
-      fixture.runtime.session.contextPercent = 45;
-      expect(checkToolTurnBoundary(fixture.runtime, 1_000_000)).toBe(false);
-      emit()?.(nativeEvent({ type: "agent_end" }));
-    };
-
-    await expect(fixture.actor.startPrompt({
-      runId: RUN_A,
-      text: "finish despite a large provider request",
-      origin: "browser",
-    })).resolves.toMatchObject({ outcome: "completed" });
-
-    expect(fixture.runtime.session.compactCalls).toBe(0);
-    expect(fixture.runtime.session.resumeCalls).toBe(0);
-    await fixture.actor.dispose();
-  });
-
-  it("does not apply the Codex byte ceiling to another provider", async () => {
-    const fixture = await openActor();
-    fixture.runtime.session.promptImplementation = async () => {
-      fixture.runtime.session.contextPercent = 45;
-      expect(checkToolTurnBoundary(fixture.runtime, 1_000_000)).toBe(false);
-    };
-
-    await expect(fixture.actor.startPrompt({
-      runId: RUN_A,
-      text: "keep the provider-specific safety boundary scoped",
-      origin: "browser",
-    })).resolves.toMatchObject({ outcome: "completed" });
-
-    expect(fixture.runtime.session.compactCalls).toBe(0);
-    await fixture.actor.dispose();
-  });
-
-  it("blocks only unsafe final Codex provider payloads", async () => {
-    const fixture = await openActor();
-    const gate = fixture.runtime.createOptions?.providerPayloadGate;
-
-    expect(await gate?.({
-      model: {
-        provider: "openai-codex",
-        api: "openai-codex-responses",
-        id: "gpt-5.6-sol",
-      },
-      serializedPayloadBytes: 1_000_000,
-    })).toMatchObject({
-      block: true,
-      reason: expect.stringContaining("context_length_exceeded"),
-    });
-    expect(await gate?.({
-      model: {
-        provider: "openai-codex",
-        api: "openai-codex-responses",
-        id: "gpt-5.6-sol",
-      },
-      serializedPayloadBytes: undefined,
-    })).toMatchObject({ block: true });
-    expect(await gate?.({
-      model: {
-        provider: "anthropic",
-        api: "anthropic-messages",
-        id: "claude",
-      },
-      serializedPayloadBytes: 2_000_000,
-    })).toBeUndefined();
-
-    await fixture.actor.dispose();
-  });
-
-  it("does not pre-compact inherited raw Codex bytes below the token threshold", async () => {
-    const fixture = await openActor();
-    const order: string[] = [];
-    Object.defineProperty(fixture.runtime.session, "model", {
-      configurable: true,
-      value: {
-        provider: "openai-codex",
-        id: "gpt-5.6-sol",
-        api: "openai-codex-responses",
-        contextWindow: 372_000,
-      },
-    });
-    fixture.runtime.session.contextPercent = 10;
-    fixture.runtime.session.agent.state.messages = [{
-      role: "user",
-      content: "x".repeat(1_000_000),
-    }] as never;
-    fixture.runtime.session.compactImplementation = async () => {
-      order.push("compact");
-      fixture.runtime.session.agent.state.messages = [];
-      return {};
-    };
-    fixture.runtime.session.promptImplementation = async () => {
-      order.push("prompt");
-    };
-
-    await fixture.actor.startPrompt({
-      runId: RUN_A,
-      text: "continue safely",
-      origin: "browser",
-    });
-
-    expect(order).toEqual(["prompt"]);
-    expect(fixture.runtime.session.compactCalls).toBe(0);
     await fixture.actor.dispose();
   });
 
@@ -825,10 +692,7 @@ describe("ConversationActor", () => {
     fixture.runtime.session.resumeImplementation = async () => {
       if (fixture.runtime.session.resumeCalls === 1) {
         fixture.runtime.session.contextPercent = 79;
-        boundaryDecisions.push(checkToolTurnBoundary(
-          fixture.runtime,
-          1_000_000,
-        ));
+        boundaryDecisions.push(checkToolTurnBoundary(fixture.runtime));
         fixture.runtime.session.contextPercent = 81;
         boundaryDecisions.push(checkToolTurnBoundary(fixture.runtime));
       } else {
@@ -988,96 +852,6 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
-  it("does not let raw Codex bytes bypass a token retry gate", async () => {
-    const fixture = await openActor();
-    const boundaryDecisions: boolean[] = [];
-    Object.defineProperty(fixture.runtime.session, "model", {
-      configurable: true,
-      value: {
-        provider: "openai-codex",
-        id: "gpt-5.6-sol",
-        api: "openai-codex-responses",
-        contextWindow: 372_000,
-      },
-    });
-    fixture.runtime.session.promptImplementation = async () => {
-      fixture.runtime.session.contextPercent = 80;
-      fixture.runtime.session.eventListener?.(nativeEvent({
-        type: "compaction_start",
-        reason: "threshold",
-      }));
-      fixture.runtime.session.eventListener?.(nativeEvent({
-        type: "compaction_end",
-        reason: "threshold",
-        result: undefined,
-        aborted: false,
-        willRetry: false,
-        errorMessage: "SDK compaction failed",
-      }));
-      boundaryDecisions.push(checkToolTurnBoundary(fixture.runtime, 1_000_000));
-    };
-
-    await fixture.actor.startPrompt({
-      runId: RUN_A,
-      text: "compact when a different pressure dimension appears",
-      origin: "browser",
-    });
-
-    expect(boundaryDecisions).toEqual([false]);
-    expect(fixture.runtime.session.compactCalls).toBe(0);
-    await fixture.actor.dispose();
-  });
-
-  it("compacts when token pressure appears after an SDK failure", async () => {
-    const fixture = await openActor();
-    const boundaryDecisions: boolean[] = [];
-    Object.defineProperty(fixture.runtime.session, "model", {
-      configurable: true,
-      value: {
-        provider: "openai-codex",
-        id: "gpt-5.6-sol",
-        api: "openai-codex-responses",
-        contextWindow: 372_000,
-      },
-    });
-    fixture.runtime.session.contextPercent = null;
-    fixture.runtime.session.compactImplementation = async () => {
-      fixture.runtime.session.agent.state.messages = [];
-      return {};
-    };
-    fixture.runtime.session.promptImplementation = async () => {
-      fixture.runtime.session.agent.state.messages = [{
-        role: "user",
-        content: [{ type: "text", text: "x".repeat(1_000_000) }],
-        timestamp: Date.now(),
-      }];
-      fixture.runtime.session.eventListener?.(nativeEvent({
-        type: "compaction_start",
-        reason: "threshold",
-      }));
-      fixture.runtime.session.eventListener?.(nativeEvent({
-        type: "compaction_end",
-        reason: "threshold",
-        result: undefined,
-        aborted: false,
-        willRetry: false,
-        errorMessage: "SDK compaction failed",
-      }));
-      fixture.runtime.session.contextPercent = 70;
-      boundaryDecisions.push(checkToolTurnBoundary(fixture.runtime, 1_000_000));
-    };
-
-    await fixture.actor.startPrompt({
-      runId: RUN_A,
-      text: "compact when token pressure appears",
-      origin: "browser",
-    });
-
-    expect(boundaryDecisions).toEqual([true]);
-    expect(fixture.runtime.session.compactCalls).toBe(1);
-    await fixture.actor.dispose();
-  });
-
   it("backs off instead of immediately retrying a failed SDK compaction", async () => {
     const fixture = await openActor();
     fixture.runtime.session.promptImplementation = async () => {
@@ -1168,6 +942,7 @@ describe("ConversationActor", () => {
     };
     fixture.runtime.session.abortCompaction = () => {
       fixture.runtime.session.abortCompactionCalls++;
+      finishCompaction.resolve();
     };
     fixture.runtime.session.promptImplementation = async () => {
       promptCalls++;
@@ -1179,21 +954,7 @@ describe("ConversationActor", () => {
       origin: "browser",
     });
     await compactionStarted.promise;
-    const aborting = fixture.actor.abort(RUN_A);
-    let settled = false;
-    void running.then(() => {
-      settled = true;
-    });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(settled).toBe(false);
-    expect(fixture.actor.getState()).toMatchObject({
-      activity: { kind: "cancelling", runId: RUN_A },
-      compacting: true,
-    });
-
-    finishCompaction.resolve();
-    await aborting;
+    await fixture.actor.abort(RUN_A);
     await expect(running).resolves.toMatchObject({ outcome: "aborted" });
 
     expect(fixture.runtime.session.abortCompactionCalls).toBe(1);

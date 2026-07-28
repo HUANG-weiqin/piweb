@@ -20,11 +20,6 @@ import {
 import type { ToolMode } from "../shared/protocol.js";
 import type { PortableExtensionUI } from "./extension-ui.js";
 import {
-  type AgentProviderPayloadController,
-  type AgentProviderPayloadHandler,
-  installAgentProviderPayloadHandler,
-} from "./agent-provider-payload.js";
-import {
   type AgentTurnBoundaryCheck,
   type AgentTurnBoundaryController,
   installAgentTurnBoundaryCheck,
@@ -101,7 +96,6 @@ export interface CreatePiSessionOptions {
   workbenchCustomTools?: ToolDefinition[];
   toolMode?: ToolMode;
   turnBoundaryCheck?: (input: AgentTurnBoundaryCheck) => boolean;
-  providerPayloadGate?: AgentProviderPayloadHandler;
 }
 
 export interface CreatedPiSession {
@@ -429,16 +423,10 @@ export class PiRuntime implements PiRuntimeLike {
     let createdSession: AgentSession | undefined;
     let toolProjectionAdapter: ToolProjectionAdapter | undefined;
     let turnBoundaryController: AgentTurnBoundaryController | undefined;
-    let providerPayloadController: AgentProviderPayloadController | undefined;
     let compactionThinkingOverride: CompactionThinkingOverride | undefined;
     let pendingExtensionErrors: ExtensionError[];
     const disposePreTeardownAdapters = (): void => {
       const failures: unknown[] = [];
-      try {
-        providerPayloadController?.dispose();
-      } catch (error) {
-        failures.push(error);
-      }
       try {
         turnBoundaryController?.dispose();
       } catch (error) {
@@ -589,16 +577,7 @@ export class PiRuntime implements PiRuntimeLike {
           options.turnBoundaryCheck,
         );
       }
-      if (options.providerPayloadGate) {
-        providerPayloadController = installAgentProviderPayloadHandler(
-          createdSession,
-          options.providerPayloadGate,
-        );
-      }
-      compactionThinkingOverride = installCompactionThinkingOverride(
-        createdSession,
-        options.providerPayloadGate,
-      );
+      compactionThinkingOverride = installCompactionThinkingOverride(createdSession);
 
       const startupProviderErrors = owner.takeStartupProviderErrors();
       if (startupProviderErrors.length > 0) {

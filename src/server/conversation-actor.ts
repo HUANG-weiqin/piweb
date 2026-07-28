@@ -18,9 +18,7 @@ import {
   type TokenUsage,
   type ToolMode,
 } from "../shared/protocol.js";
-import type { AgentProviderPayloadCheck } from "./agent-provider-payload.js";
 import type { AgentTurnBoundaryCheck } from "./agent-turn-boundary.js";
-import { codexPayloadPressureError } from "./provider-context-pressure.js";
 import {
   projectConversationItemSlots,
   snapshotConversationItems,
@@ -205,10 +203,6 @@ interface PendingGuidance {
   readonly delivery: Deferred<void>;
 }
 
-interface CompactionPressure {
-  percent: number | null | undefined;
-}
-
 interface RunTicket {
   readonly id: string;
   readonly origin: ConversationRunOrigin;
@@ -230,7 +224,7 @@ interface RunTicket {
   compactionErrorReported: boolean;
   compactionRetryAtPercent?: number;
   sdkCompactionSucceeded: boolean;
-  turnBoundaryCompactionRequest?: CompactionPressure;
+  turnBoundaryCompactionRequested: boolean;
   abortPromise?: Promise<void>;
   projectRunLease?: ProjectRunLease;
   finishPromise?: Promise<RunSettlement>;
@@ -1129,6 +1123,7 @@ export class ConversationActor {
       sawSdkCompactionAttempt: false,
       compactionErrorReported: false,
       sdkCompactionSucceeded: false,
+      turnBoundaryCompactionRequested: false,
     };
     this.activeRun = ticket;
     this.beginLiveProjection(ticket, input.promptText);
@@ -1335,17 +1330,16 @@ export class ConversationActor {
       await execute(ticket);
       this.releaseTurnBoundaryPause();
       while (
-        ticket.turnBoundaryCompactionRequest
+        ticket.turnBoundaryCompactionRequested
         && this.activeRun === ticket
         && !isCancelling(ticket)
       ) {
-        const compactionPressure = ticket.turnBoundaryCompactionRequest;
-        ticket.turnBoundaryCompactionRequest = undefined;
+        ticket.turnBoundaryCompactionRequested = false;
         const projectedFailure =
           ticket.extensionErrorMessage ?? ticket.projector.errorMessage;
         if (projectedFailure) throw new Error(projectedFailure);
 
-        await this.compactRequestedTurnBoundary(ticket, compactionPressure);
+        await this.compactRequestedTurnBoundary(ticket);
         if (this.activeRun !== ticket || isCancelling(ticket)) break;
 
         const resume = createCompactionResumeEntry({
@@ -1392,16 +1386,15 @@ export class ConversationActor {
     const usage = this.session.getContextUsage?.();
     this.emitContextUsage();
     if (
-      !this.isCompactionThresholdReached(usage?.percent)
-      || !this.isCompactionAttemptDue(ticket, usage?.percent)
+      usage?.percent === null
+      || usage?.percent === undefined
+      || usage.percent < this.compactionThresholdPercent
+      || !this.isCompactionAttemptDue(ticket, usage.percent)
     ) return;
-    await this.attemptHostCompaction(ticket, { percent: usage?.percent });
+    await this.attemptHostCompaction(ticket);
   }
 
-  private async compactRequestedTurnBoundary(
-    ticket: RunTicket,
-    pressure: CompactionPressure,
-  ): Promise<void> {
+  private async compactRequestedTurnBoundary(ticket: RunTicket): Promise<void> {
     if (ticket.sawSdkCompactionAttempt) {
       if (ticket.sdkCompactionSucceeded) {
         ticket.sawSdkCompactionAttempt = false;
@@ -1409,20 +1402,19 @@ export class ConversationActor {
       }
       return;
     }
-    await this.attemptHostCompaction(ticket, pressure);
+    const percent = this.session.getContextUsage?.()?.percent;
+    if (!this.isCompactionAttemptDue(ticket, percent)) return;
+    await this.attemptHostCompaction(ticket);
   }
 
-  private async attemptHostCompaction(
-    ticket: RunTicket,
-    pressure: CompactionPressure,
-  ): Promise<void> {
+  private async attemptHostCompaction(ticket: RunTicket): Promise<void> {
     ticket.compactionErrorReported = false;
     try {
       await this.compactSession();
       this.recordCompactionSuccess(ticket);
     } catch (error) {
       if (isCancelling(ticket)) return;
-      this.recordCompactionFailure(ticket, pressure);
+      this.recordCompactionFailure(ticket);
       if (!ticket.compactionErrorReported) {
         ticket.compactionErrorReported = true;
         this.emitError(error, ticket.id);
@@ -1430,44 +1422,22 @@ export class ConversationActor {
     }
   }
 
-  private isCompactionThresholdReached(
-    percent: number | null | undefined,
-  ): boolean {
-    return percent !== null
-      && percent !== undefined
-      && percent >= this.compactionThresholdPercent;
-  }
-
   private isCompactionAttemptDue(
     ticket: RunTicket,
     percent: number | null | undefined,
   ): boolean {
-    if (
-      percent === null
-      || percent === undefined
-      || percent < this.compactionThresholdPercent
-    ) return false;
-    return ticket.compactionRetryAtPercent === undefined
-      || percent >= ticket.compactionRetryAtPercent;
+    const retryAt = ticket.compactionRetryAtPercent;
+    return retryAt === undefined
+      || (percent !== null && percent !== undefined && percent >= retryAt);
   }
 
-  private recordCompactionFailure(
-    ticket: RunTicket,
-    pressure: CompactionPressure = {
-      percent: this.session.getContextUsage?.()?.percent,
-    },
-  ): void {
-    const { percent } = pressure;
-    if (
-      percent !== null
-      && percent !== undefined
-      && percent >= this.compactionThresholdPercent
-    ) {
-      ticket.compactionRetryAtPercent = Math.max(
-        ticket.compactionRetryAtPercent ?? 0,
-        percent + COMPACTION_RETRY_GROWTH_PERCENT,
-      );
-    }
+  private recordCompactionFailure(ticket: RunTicket): void {
+    const percent = this.session.getContextUsage?.()?.percent;
+    const failedAt = percent ?? this.compactionThresholdPercent;
+    ticket.compactionRetryAtPercent = Math.max(
+      ticket.compactionRetryAtPercent ?? 0,
+      failedAt + COMPACTION_RETRY_GROWTH_PERCENT,
+    );
   }
 
   private recordCompactionSuccess(ticket: RunTicket): void {
@@ -1600,10 +1570,6 @@ export class ConversationActor {
     if (ticket.phase === "queued") {
       ticket.phase = "cancelling";
       this.emitActivity();
-      if (this.compacting) {
-        ticket.abortPromise ??= ticket.completion.promise.then(() => undefined);
-        return ticket.abortPromise;
-      }
       return this.settleRun(ticket, "aborted").then(() => undefined);
     }
     if (ticket.phase === "cancelling") {
@@ -1634,13 +1600,13 @@ export class ConversationActor {
     if (
       ticket
       && event.type === "agent_start"
-      && ticket.turnBoundaryCompactionRequest
+      && ticket.turnBoundaryCompactionRequested
     ) {
       // Pi may still continue through an internal recovery path after the
       // graceful stop. That physical continuation belongs to this workbench
       // run and replaces the host-injected resume message.
       this.releaseTurnBoundaryPause();
-      ticket.turnBoundaryCompactionRequest = undefined;
+      ticket.turnBoundaryCompactionRequested = false;
       if (ticket.sdkCompactionSucceeded) {
         ticket.sawSdkCompactionAttempt = false;
         ticket.sdkCompactionSucceeded = false;
@@ -1659,7 +1625,7 @@ export class ConversationActor {
       if (sdkOwned && event.result !== undefined && !event.aborted) {
         ticket.sdkCompactionSucceeded = true;
         this.recordCompactionSuccess(ticket);
-        if (!ticket.turnBoundaryCompactionRequest) {
+        if (!ticket.turnBoundaryCompactionRequested) {
           ticket.sawSdkCompactionAttempt = false;
           ticket.sdkCompactionSucceeded = false;
         }
@@ -1812,16 +1778,6 @@ export class ConversationActor {
     return undefined;
   }
 
-  private checkProviderPayload(
-    input: AgentProviderPayloadCheck,
-  ): { block: true; reason: string } | undefined {
-    const reason = codexPayloadPressureError(
-      input.model,
-      input.serializedPayloadBytes,
-    );
-    return reason ? { block: true, reason } : undefined;
-  }
-
   private checkTurnBoundary(input: AgentTurnBoundaryCheck): boolean {
     this.emitContextUsage();
     const ticket = this.activeRun;
@@ -1836,12 +1792,14 @@ export class ConversationActor {
     }
     const percent = input.contextUsage?.percent;
     if (
-      !this.isCompactionThresholdReached(percent)
+      percent === null
+      || percent === undefined
+      || percent < this.compactionThresholdPercent
       || !this.isCompactionAttemptDue(ticket, percent)
     ) {
       return false;
     }
-    ticket.turnBoundaryCompactionRequest = { percent };
+    ticket.turnBoundaryCompactionRequested = true;
     return true;
   }
 
@@ -2184,7 +2142,6 @@ export class ConversationActor {
             });
           },
           turnBoundaryCheck: (input) => this.checkTurnBoundary(input),
-          providerPayloadGate: (input) => this.checkProviderPayload(input),
         },
       );
       this.created = created;

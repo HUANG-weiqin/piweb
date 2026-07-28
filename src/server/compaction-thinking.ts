@@ -1,10 +1,5 @@
 import { clampThinkingLevel } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import {
-  type AgentProviderPayloadHandler,
-  type AgentProviderPayloadHook,
-  wrapAgentProviderPayloadHandler,
-} from "./agent-provider-payload.js";
 
 const COMPACTION_THINKING_TARGET = "minimal";
 
@@ -18,7 +13,6 @@ export interface CompactionThinkingOverride {
  */
 export function installCompactionThinkingOverride(
   session: AgentSession,
-  providerPayloadHandler?: AgentProviderPayloadHandler,
 ): CompactionThinkingOverride {
   let originalStream: typeof session.agent.streamFn | undefined;
   let overrideStream: typeof session.agent.streamFn | undefined;
@@ -42,16 +36,9 @@ export function installCompactionThinkingOverride(
         model,
         COMPACTION_THINKING_TARGET,
       );
-      const guardedOnPayload = providerPayloadHandler
-        ? wrapAgentProviderPayloadHandler(
-            options?.onPayload as AgentProviderPayloadHook | undefined,
-            providerPayloadHandler,
-          )
-        : options?.onPayload;
       return capturedStream(model, context, {
         ...options,
         reasoning: reasoning === "off" ? undefined : reasoning,
-        ...(guardedOnPayload ? { onPayload: guardedOnPayload } : {}),
       });
     };
     session.agent.streamFn = overrideStream;

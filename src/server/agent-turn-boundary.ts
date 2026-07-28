@@ -13,7 +13,6 @@ export type AgentTurnBoundaryHandler = (
 ) => boolean;
 
 interface TurnBoundaryContext {
-  context: unknown;
   toolResults: unknown[];
 }
 

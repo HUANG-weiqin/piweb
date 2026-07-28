@@ -53,41 +53,6 @@ describe("installCompactionThinkingOverride", () => {
     override.dispose();
   });
 
-  it("guards the final Codex payload used by compaction streams", async () => {
-    const fixture = fakeSession();
-    let observedBytes: number | undefined;
-    const override = installCompactionThinkingOverride(
-      fixture.session,
-      (input) => {
-        observedBytes = input.serializedPayloadBytes;
-        return { block: true, reason: "context_length_exceeded: compaction guard" };
-      },
-    );
-    const model = {
-      provider: "openai-codex",
-      api: "openai-codex-responses",
-      id: "gpt-5.6-sol",
-      reasoning: true,
-    } as never;
-
-    fixture.emit({ type: "compaction_start", reason: "overflow" });
-    fixture.session.agent.streamFn(model, {} as never, {});
-    const forwardedOptions = (
-      fixture.originalStream as unknown as ReturnType<typeof vi.fn>
-    ).mock.calls[0]?.[2];
-
-    await expect(forwardedOptions?.onPayload?.(
-      { summaryInput: "压缩上下文" },
-      model,
-    )).rejects.toThrow("context_length_exceeded: compaction guard");
-    expect(observedBytes).toBe(Buffer.byteLength(
-      JSON.stringify({ summaryInput: "压缩上下文" }),
-      "utf8",
-    ));
-
-    override.dispose();
-  });
-
   it("preserves manual auth identity before overriding a non-reasoning model", async () => {
     const fixture = fakeSession();
     const override = installCompactionThinkingOverride(fixture.session);
