@@ -208,6 +208,11 @@ interface PendingGuidance {
   readonly delivery: Deferred<void>;
 }
 
+interface CompactionPressure {
+  percent: number | null | undefined;
+  serializedContextBytes: number | undefined;
+}
+
 interface RunTicket {
   readonly id: string;
   readonly origin: ConversationRunOrigin;
@@ -230,7 +235,7 @@ interface RunTicket {
   compactionRetryAtPercent?: number;
   compactionRetryAtBytes?: number;
   sdkCompactionSucceeded: boolean;
-  turnBoundaryCompactionRequested: boolean;
+  turnBoundaryCompactionRequest?: CompactionPressure;
   abortPromise?: Promise<void>;
   projectRunLease?: ProjectRunLease;
   finishPromise?: Promise<RunSettlement>;
@@ -1129,7 +1134,6 @@ export class ConversationActor {
       sawSdkCompactionAttempt: false,
       compactionErrorReported: false,
       sdkCompactionSucceeded: false,
-      turnBoundaryCompactionRequested: false,
     };
     this.activeRun = ticket;
     this.beginLiveProjection(ticket, input.promptText);
@@ -1336,16 +1340,17 @@ export class ConversationActor {
       await execute(ticket);
       this.releaseTurnBoundaryPause();
       while (
-        ticket.turnBoundaryCompactionRequested
+        ticket.turnBoundaryCompactionRequest
         && this.activeRun === ticket
         && !isCancelling(ticket)
       ) {
-        ticket.turnBoundaryCompactionRequested = false;
+        const compactionPressure = ticket.turnBoundaryCompactionRequest;
+        ticket.turnBoundaryCompactionRequest = undefined;
         const projectedFailure =
           ticket.extensionErrorMessage ?? ticket.projector.errorMessage;
         if (projectedFailure) throw new Error(projectedFailure);
 
-        await this.compactRequestedTurnBoundary(ticket);
+        await this.compactRequestedTurnBoundary(ticket, compactionPressure);
         if (this.activeRun !== ticket || isCancelling(ticket)) break;
 
         const resume = createCompactionResumeEntry({
@@ -1403,10 +1408,16 @@ export class ConversationActor {
         serializedContextBytes,
       )
     ) return;
-    await this.attemptHostCompaction(ticket);
+    await this.attemptHostCompaction(ticket, {
+      percent: usage?.percent,
+      serializedContextBytes,
+    });
   }
 
-  private async compactRequestedTurnBoundary(ticket: RunTicket): Promise<void> {
+  private async compactRequestedTurnBoundary(
+    ticket: RunTicket,
+    pressure: CompactionPressure,
+  ): Promise<void> {
     if (ticket.sawSdkCompactionAttempt) {
       if (ticket.sdkCompactionSucceeded) {
         ticket.sawSdkCompactionAttempt = false;
@@ -1414,22 +1425,20 @@ export class ConversationActor {
       }
       return;
     }
-    const percent = this.session.getContextUsage?.()?.percent;
-    const serializedContextBytes = this.serializedContextBytes();
-    if (!this.isCompactionAttemptDue(ticket, percent, serializedContextBytes)) {
-      return;
-    }
-    await this.attemptHostCompaction(ticket);
+    await this.attemptHostCompaction(ticket, pressure);
   }
 
-  private async attemptHostCompaction(ticket: RunTicket): Promise<void> {
+  private async attemptHostCompaction(
+    ticket: RunTicket,
+    pressure: CompactionPressure,
+  ): Promise<void> {
     ticket.compactionErrorReported = false;
     try {
       await this.compactSession();
       this.recordCompactionSuccess(ticket);
     } catch (error) {
       if (isCancelling(ticket)) return;
-      this.recordCompactionFailure(ticket);
+      this.recordCompactionFailure(ticket, pressure);
       if (!ticket.compactionErrorReported) {
         ticket.compactionErrorReported = true;
         this.emitError(error, ticket.id);
@@ -1462,36 +1471,49 @@ export class ConversationActor {
     percent: number | null | undefined,
     serializedContextBytes: number | undefined,
   ): boolean {
-    const retryAtPercent = ticket.compactionRetryAtPercent;
-    const retryAtBytes = ticket.compactionRetryAtBytes;
-    if (retryAtPercent === undefined && retryAtBytes === undefined) {
-      return true;
-    }
-    return (
-      (retryAtPercent !== undefined
-        && percent !== null
-        && percent !== undefined
-        && percent >= retryAtPercent)
-      || (retryAtBytes !== undefined
-        && serializedContextBytes !== undefined
-        && serializedContextBytes >= retryAtBytes)
-    );
-  }
-
-  private recordCompactionFailure(ticket: RunTicket): void {
-    const percent = this.session.getContextUsage?.()?.percent;
-    const failedAt = percent ?? this.compactionThresholdPercent;
-    ticket.compactionRetryAtPercent = Math.max(
-      ticket.compactionRetryAtPercent ?? 0,
-      failedAt + COMPACTION_RETRY_GROWTH_PERCENT,
-    );
-    const serializedContextBytes = this.serializedContextBytes();
-    if (
-      serializedContextBytes !== undefined
+    const tokenPressure = percent !== null
+      && percent !== undefined
+      && percent >= this.compactionThresholdPercent;
+    const bytePressure = serializedContextBytes !== undefined
       && hasCodexContextBytePressure(
         this.session.model,
         serializedContextBytes,
-      )
+      );
+    return (
+      (tokenPressure
+        && (
+          ticket.compactionRetryAtPercent === undefined
+          || percent >= ticket.compactionRetryAtPercent
+        ))
+      || (bytePressure
+        && (
+          ticket.compactionRetryAtBytes === undefined
+          || serializedContextBytes >= ticket.compactionRetryAtBytes
+        ))
+    );
+  }
+
+  private recordCompactionFailure(
+    ticket: RunTicket,
+    pressure: CompactionPressure = {
+      percent: this.session.getContextUsage?.()?.percent,
+      serializedContextBytes: this.serializedContextBytes(),
+    },
+  ): void {
+    const { percent, serializedContextBytes } = pressure;
+    if (
+      percent !== null
+      && percent !== undefined
+      && percent >= this.compactionThresholdPercent
+    ) {
+      ticket.compactionRetryAtPercent = Math.max(
+        ticket.compactionRetryAtPercent ?? 0,
+        percent + COMPACTION_RETRY_GROWTH_PERCENT,
+      );
+    }
+    if (
+      serializedContextBytes !== undefined
+      && hasCodexContextBytePressure(this.session.model, serializedContextBytes)
     ) {
       ticket.compactionRetryAtBytes = Math.max(
         ticket.compactionRetryAtBytes ?? 0,
@@ -1665,13 +1687,13 @@ export class ConversationActor {
     if (
       ticket
       && event.type === "agent_start"
-      && ticket.turnBoundaryCompactionRequested
+      && ticket.turnBoundaryCompactionRequest
     ) {
       // Pi may still continue through an internal recovery path after the
       // graceful stop. That physical continuation belongs to this workbench
       // run and replaces the host-injected resume message.
       this.releaseTurnBoundaryPause();
-      ticket.turnBoundaryCompactionRequested = false;
+      ticket.turnBoundaryCompactionRequest = undefined;
       if (ticket.sdkCompactionSucceeded) {
         ticket.sawSdkCompactionAttempt = false;
         ticket.sdkCompactionSucceeded = false;
@@ -1690,7 +1712,7 @@ export class ConversationActor {
       if (sdkOwned && event.result !== undefined && !event.aborted) {
         ticket.sdkCompactionSucceeded = true;
         this.recordCompactionSuccess(ticket);
-        if (!ticket.turnBoundaryCompactionRequested) {
+        if (!ticket.turnBoundaryCompactionRequest) {
           ticket.sawSdkCompactionAttempt = false;
           ticket.sdkCompactionSucceeded = false;
         }
@@ -1869,7 +1891,10 @@ export class ConversationActor {
     ) {
       return false;
     }
-    ticket.turnBoundaryCompactionRequested = true;
+    ticket.turnBoundaryCompactionRequest = {
+      percent,
+      serializedContextBytes: input.serializedContextBytes,
+    };
     return true;
   }
 

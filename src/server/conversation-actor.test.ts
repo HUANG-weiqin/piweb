@@ -41,6 +41,7 @@ import type {
   ConversationDeletionLease,
   ConversationLease,
 } from "./project-store.js";
+import { COMPACTION_RETRY_GROWTH_BYTES } from "./provider-context-pressure.js";
 import {
   ProjectRunCoordinator,
   type ProjectRunLease,
@@ -835,6 +836,64 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
+  it("retries failed Codex byte compaction only after bounded byte growth", async () => {
+    const fixture = await openActor();
+    const boundaryDecisions: boolean[] = [];
+    let attempt = 0;
+    const failedAtBytes = 1_000_000;
+    Object.defineProperty(fixture.runtime.session, "model", {
+      configurable: true,
+      value: {
+        provider: "openai-codex",
+        id: "gpt-5.6-sol",
+        api: "openai-codex-responses",
+        contextWindow: 372_000,
+      },
+    });
+    fixture.runtime.session.promptImplementation = async () => {
+      fixture.runtime.session.contextPercent = 45;
+      boundaryDecisions.push(checkToolTurnBoundary(
+        fixture.runtime,
+        failedAtBytes,
+      ));
+    };
+    fixture.runtime.session.compactImplementation = async () => {
+      attempt++;
+      if (attempt === 1) throw new Error("transient byte compaction failure");
+      return {};
+    };
+    fixture.runtime.session.resumeImplementation = async () => {
+      if (fixture.runtime.session.resumeCalls === 1) {
+        fixture.runtime.session.contextPercent = 45;
+        boundaryDecisions.push(checkToolTurnBoundary(
+          fixture.runtime,
+          failedAtBytes,
+        ));
+        boundaryDecisions.push(checkToolTurnBoundary(
+          fixture.runtime,
+          failedAtBytes + COMPACTION_RETRY_GROWTH_BYTES - 1,
+        ));
+        boundaryDecisions.push(checkToolTurnBoundary(
+          fixture.runtime,
+          failedAtBytes + COMPACTION_RETRY_GROWTH_BYTES,
+        ));
+      } else {
+        fixture.runtime.session.contextPercent = 20;
+      }
+    };
+
+    await fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "retry only after bounded byte growth",
+      origin: "browser",
+    });
+
+    expect(boundaryDecisions).toEqual([true, false, false, true]);
+    expect(fixture.runtime.session.compactCalls).toBe(2);
+    expect(fixture.runtime.session.resumeCalls).toBe(2);
+    await fixture.actor.dispose();
+  });
+
   it("compacts an inherited high-water context before the next run", async () => {
     const fixture = await openActor();
     const order: string[] = [];
@@ -964,6 +1023,96 @@ describe("ConversationActor", () => {
 
     promptFinished.resolve();
     await running;
+    await fixture.actor.dispose();
+  });
+
+  it("lets new Codex byte pressure bypass a token-only retry gate", async () => {
+    const fixture = await openActor();
+    const boundaryDecisions: boolean[] = [];
+    Object.defineProperty(fixture.runtime.session, "model", {
+      configurable: true,
+      value: {
+        provider: "openai-codex",
+        id: "gpt-5.6-sol",
+        api: "openai-codex-responses",
+        contextWindow: 372_000,
+      },
+    });
+    fixture.runtime.session.promptImplementation = async () => {
+      fixture.runtime.session.contextPercent = 80;
+      fixture.runtime.session.eventListener?.(nativeEvent({
+        type: "compaction_start",
+        reason: "threshold",
+      }));
+      fixture.runtime.session.eventListener?.(nativeEvent({
+        type: "compaction_end",
+        reason: "threshold",
+        result: undefined,
+        aborted: false,
+        willRetry: false,
+        errorMessage: "SDK compaction failed",
+      }));
+      boundaryDecisions.push(checkToolTurnBoundary(fixture.runtime, 1_000_000));
+    };
+
+    await fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "compact when a different pressure dimension appears",
+      origin: "browser",
+    });
+
+    expect(boundaryDecisions).toEqual([true]);
+    expect(fixture.runtime.session.compactCalls).toBe(1);
+    await fixture.actor.dispose();
+  });
+
+  it("lets new token pressure bypass a byte-only retry gate", async () => {
+    const fixture = await openActor();
+    const boundaryDecisions: boolean[] = [];
+    Object.defineProperty(fixture.runtime.session, "model", {
+      configurable: true,
+      value: {
+        provider: "openai-codex",
+        id: "gpt-5.6-sol",
+        api: "openai-codex-responses",
+        contextWindow: 372_000,
+      },
+    });
+    fixture.runtime.session.contextPercent = null;
+    fixture.runtime.session.compactImplementation = async () => {
+      fixture.runtime.session.agent.state.messages = [];
+      return {};
+    };
+    fixture.runtime.session.promptImplementation = async () => {
+      fixture.runtime.session.agent.state.messages = [{
+        role: "user",
+        content: [{ type: "text", text: "x".repeat(1_000_000) }],
+        timestamp: Date.now(),
+      }];
+      fixture.runtime.session.eventListener?.(nativeEvent({
+        type: "compaction_start",
+        reason: "threshold",
+      }));
+      fixture.runtime.session.eventListener?.(nativeEvent({
+        type: "compaction_end",
+        reason: "threshold",
+        result: undefined,
+        aborted: false,
+        willRetry: false,
+        errorMessage: "SDK compaction failed",
+      }));
+      fixture.runtime.session.contextPercent = 70;
+      boundaryDecisions.push(checkToolTurnBoundary(fixture.runtime, 1_000_000));
+    };
+
+    await fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "compact when token pressure appears",
+      origin: "browser",
+    });
+
+    expect(boundaryDecisions).toEqual([true]);
+    expect(fixture.runtime.session.compactCalls).toBe(1);
     await fixture.actor.dispose();
   });
 
