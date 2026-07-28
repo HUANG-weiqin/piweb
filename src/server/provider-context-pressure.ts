@@ -1,9 +1,8 @@
-// Codex upstream retries stop buffering requests around 1 MiB. The exact
-// provider payload is capped here with 128 KiB of headroom. Raw AgentContext
-// uses the same threshold only as an early heuristic because provider
-// conversion and extension transforms can expand or shrink the final body.
+// Codex upstream retries stop buffering requests around 1 MiB. Only the exact
+// provider payload is capped here with 128 KiB of headroom. Raw AgentContext is
+// deliberately not a trigger: its encoding can substantially overestimate the
+// provider body and cause repeated low-token compactions.
 export const CODEX_REQUEST_SAFETY_BYTES = 896 * 1024;
-export const COMPACTION_RETRY_GROWTH_BYTES = 64 * 1024;
 
 interface ProviderModel {
   provider?: unknown;
@@ -28,15 +27,6 @@ export function measureSerializedContextBytes(
   } catch {
     return undefined;
   }
-}
-
-export function hasCodexContextBytePressure(
-  model: ProviderModel | undefined,
-  serializedContextBytes: number | undefined,
-): boolean {
-  return isCodexResponsesModel(model)
-    && serializedContextBytes !== undefined
-    && serializedContextBytes >= CODEX_REQUEST_SAFETY_BYTES;
 }
 
 export function codexPayloadPressureError(

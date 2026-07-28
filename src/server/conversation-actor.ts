@@ -20,12 +20,7 @@ import {
 } from "../shared/protocol.js";
 import type { AgentProviderPayloadCheck } from "./agent-provider-payload.js";
 import type { AgentTurnBoundaryCheck } from "./agent-turn-boundary.js";
-import {
-  codexPayloadPressureError,
-  COMPACTION_RETRY_GROWTH_BYTES,
-  hasCodexContextBytePressure,
-  measureSerializedContextBytes,
-} from "./provider-context-pressure.js";
+import { codexPayloadPressureError } from "./provider-context-pressure.js";
 import {
   projectConversationItemSlots,
   snapshotConversationItems,
@@ -212,7 +207,6 @@ interface PendingGuidance {
 
 interface CompactionPressure {
   percent: number | null | undefined;
-  serializedContextBytes: number | undefined;
 }
 
 interface RunTicket {
@@ -235,7 +229,6 @@ interface RunTicket {
   sawSdkCompactionAttempt: boolean;
   compactionErrorReported: boolean;
   compactionRetryAtPercent?: number;
-  compactionRetryAtBytes?: number;
   sdkCompactionSucceeded: boolean;
   turnBoundaryCompactionRequest?: CompactionPressure;
   abortPromise?: Promise<void>;
@@ -1397,23 +1390,12 @@ export class ConversationActor {
   private async compactAtThreshold(ticket: RunTicket): Promise<void> {
     if (ticket.sawSdkCompactionAttempt) return;
     const usage = this.session.getContextUsage?.();
-    const serializedContextBytes = this.serializedContextBytes();
     this.emitContextUsage();
     if (
-      !this.isCompactionThresholdReached(
-        usage?.percent,
-        serializedContextBytes,
-      )
-      || !this.isCompactionAttemptDue(
-        ticket,
-        usage?.percent,
-        serializedContextBytes,
-      )
+      !this.isCompactionThresholdReached(usage?.percent)
+      || !this.isCompactionAttemptDue(ticket, usage?.percent)
     ) return;
-    await this.attemptHostCompaction(ticket, {
-      percent: usage?.percent,
-      serializedContextBytes,
-    });
+    await this.attemptHostCompaction(ticket, { percent: usage?.percent });
   }
 
   private async compactRequestedTurnBoundary(
@@ -1450,59 +1432,32 @@ export class ConversationActor {
 
   private isCompactionThresholdReached(
     percent: number | null | undefined,
-    serializedContextBytes: number | undefined,
   ): boolean {
-    return (
-      (percent !== null
-        && percent !== undefined
-        && percent >= this.compactionThresholdPercent)
-      || hasCodexContextBytePressure(this.session.model, serializedContextBytes)
-    );
-  }
-
-  private serializedContextBytes(): number | undefined {
-    return measureSerializedContextBytes({
-      systemPrompt: this.session.systemPrompt,
-      messages: this.session.agent.state.messages,
-      tools: this.session.agent.state.tools,
-    });
+    return percent !== null
+      && percent !== undefined
+      && percent >= this.compactionThresholdPercent;
   }
 
   private isCompactionAttemptDue(
     ticket: RunTicket,
     percent: number | null | undefined,
-    serializedContextBytes: number | undefined,
   ): boolean {
-    const tokenPressure = percent !== null
-      && percent !== undefined
-      && percent >= this.compactionThresholdPercent;
-    const bytePressure = serializedContextBytes !== undefined
-      && hasCodexContextBytePressure(
-        this.session.model,
-        serializedContextBytes,
-      );
-    return (
-      (tokenPressure
-        && (
-          ticket.compactionRetryAtPercent === undefined
-          || percent >= ticket.compactionRetryAtPercent
-        ))
-      || (bytePressure
-        && (
-          ticket.compactionRetryAtBytes === undefined
-          || serializedContextBytes >= ticket.compactionRetryAtBytes
-        ))
-    );
+    if (
+      percent === null
+      || percent === undefined
+      || percent < this.compactionThresholdPercent
+    ) return false;
+    return ticket.compactionRetryAtPercent === undefined
+      || percent >= ticket.compactionRetryAtPercent;
   }
 
   private recordCompactionFailure(
     ticket: RunTicket,
     pressure: CompactionPressure = {
       percent: this.session.getContextUsage?.()?.percent,
-      serializedContextBytes: this.serializedContextBytes(),
     },
   ): void {
-    const { percent, serializedContextBytes } = pressure;
+    const { percent } = pressure;
     if (
       percent !== null
       && percent !== undefined
@@ -1513,21 +1468,11 @@ export class ConversationActor {
         percent + COMPACTION_RETRY_GROWTH_PERCENT,
       );
     }
-    if (
-      serializedContextBytes !== undefined
-      && hasCodexContextBytePressure(this.session.model, serializedContextBytes)
-    ) {
-      ticket.compactionRetryAtBytes = Math.max(
-        ticket.compactionRetryAtBytes ?? 0,
-        serializedContextBytes + COMPACTION_RETRY_GROWTH_BYTES,
-      );
-    }
   }
 
   private recordCompactionSuccess(ticket: RunTicket): void {
     ticket.compactionErrorReported = false;
     ticket.compactionRetryAtPercent = undefined;
-    ticket.compactionRetryAtBytes = undefined;
   }
 
   private async compactSession(reserved = false): Promise<void> {
@@ -1891,22 +1836,12 @@ export class ConversationActor {
     }
     const percent = input.contextUsage?.percent;
     if (
-      !this.isCompactionThresholdReached(
-        percent,
-        input.serializedContextBytes,
-      )
-      || !this.isCompactionAttemptDue(
-        ticket,
-        percent,
-        input.serializedContextBytes,
-      )
+      !this.isCompactionThresholdReached(percent)
+      || !this.isCompactionAttemptDue(ticket, percent)
     ) {
       return false;
     }
-    ticket.turnBoundaryCompactionRequest = {
-      percent,
-      serializedContextBytes: input.serializedContextBytes,
-    };
+    ticket.turnBoundaryCompactionRequest = { percent };
     return true;
   }
 

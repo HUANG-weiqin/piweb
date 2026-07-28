@@ -1,20 +1,12 @@
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   type AgentTurnBoundaryCheck,
   installAgentTurnBoundaryCheck,
 } from "./agent-turn-boundary.js";
-import { measureSerializedContextBytes } from "./provider-context-pressure.js";
 
 describe("installAgentTurnBoundaryCheck", () => {
-  it("returns undefined rather than throwing for an unserializable context", () => {
-    const context: { self?: unknown } = {};
-    context.self = context;
-
-    expect(measureSerializedContextBytes(context)).toBeUndefined();
-  });
-
-  it("reports the UTF-8 size of the exact post-tool agent context", async () => {
+  it("reports token usage without serializing the raw Agent context", async () => {
     let observed: AgentTurnBoundaryCheck | undefined;
     const agent = {
       createLoopConfig: () => ({}),
@@ -28,11 +20,9 @@ describe("installAgentTurnBoundaryCheck", () => {
         percent: 45,
       }),
     } as unknown as AgentSession;
-    const context = {
-      systemPrompt: "系统",
-      messages: [{ role: "toolResult", content: "x".repeat(32) }],
-      tools: [{ name: "read", description: "读取" }],
-    };
+    const toJSON = vi.fn(() => {
+      throw new Error("raw context must not drive compaction");
+    });
     const controller = installAgentTurnBoundaryCheck(session, (input) => {
       observed = input;
       return false;
@@ -41,11 +31,20 @@ describe("installAgentTurnBoundaryCheck", () => {
     const config = agent.createLoopConfig() as {
       shouldStopAfterTurn(input: unknown): Promise<boolean>;
     };
-    await config.shouldStopAfterTurn({ context, toolResults: [{}] });
+    await config.shouldStopAfterTurn({
+      context: { toJSON },
+      toolResults: [{}],
+    });
 
-    expect(observed?.serializedContextBytes).toBe(
-      Buffer.byteLength(JSON.stringify(context), "utf8"),
-    );
+    expect(observed).toEqual({
+      contextUsage: {
+        tokens: 45,
+        contextWindow: 100,
+        percent: 45,
+      },
+      hasToolResults: true,
+    });
+    expect(toJSON).not.toHaveBeenCalled();
     controller.dispose();
   });
 });

@@ -41,7 +41,6 @@ import type {
   ConversationDeletionLease,
   ConversationLease,
 } from "./project-store.js";
-import { COMPACTION_RETRY_GROWTH_BYTES } from "./provider-context-pressure.js";
 import {
   ProjectRunCoordinator,
   type ProjectRunLease,
@@ -396,13 +395,12 @@ function agentMessage(value: unknown): AgentMessage {
 
 function checkToolTurnBoundary(
   runtime: FakeRuntime,
-  serializedContextBytes?: number,
+  _serializedContextBytes?: number,
 ): boolean {
   return Boolean(runtime.createOptions?.turnBoundaryCheck?.({
     contextUsage: runtime.session.getContextUsage(),
     hasToolResults: true,
-    serializedContextBytes,
-  } as Parameters<NonNullable<CreatePiSessionOptions["turnBoundaryCheck"]>>[0]));
+  }));
 }
 
 describe("ConversationActor", () => {
@@ -534,7 +532,7 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
-  it("compacts Codex byte-heavy context before the token threshold", async () => {
+  it("does not compact raw Codex bytes before the token threshold", async () => {
     const fixture = await openActor();
     const emit = () => fixture.runtime.session.eventListener;
     Object.defineProperty(fixture.runtime.session, "model", {
@@ -558,20 +556,7 @@ describe("ConversationActor", () => {
         },
       }));
       fixture.runtime.session.contextPercent = 45;
-      expect(checkToolTurnBoundary(fixture.runtime, 1_000_000)).toBe(true);
-      emit()?.(nativeEvent({ type: "agent_end" }));
-    };
-    fixture.runtime.session.resumeImplementation = async () => {
-      fixture.runtime.session.contextPercent = 20;
-      emit()?.(nativeEvent({ type: "agent_start" }));
-      emit()?.(nativeEvent({
-        type: "message_end",
-        message: {
-          role: "assistant",
-          content: [{ type: "text", text: "after byte-pressure compaction" }],
-          stopReason: "stop",
-        },
-      }));
+      expect(checkToolTurnBoundary(fixture.runtime, 1_000_000)).toBe(false);
       emit()?.(nativeEvent({ type: "agent_end" }));
     };
 
@@ -581,8 +566,8 @@ describe("ConversationActor", () => {
       origin: "browser",
     })).resolves.toMatchObject({ outcome: "completed" });
 
-    expect(fixture.runtime.session.compactCalls).toBe(1);
-    expect(fixture.runtime.session.resumeCalls).toBe(1);
+    expect(fixture.runtime.session.compactCalls).toBe(0);
+    expect(fixture.runtime.session.resumeCalls).toBe(0);
     await fixture.actor.dispose();
   });
 
@@ -638,7 +623,7 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
-  it("compacts inherited Codex byte pressure before the live prompt", async () => {
+  it("does not pre-compact inherited raw Codex bytes below the token threshold", async () => {
     const fixture = await openActor();
     const order: string[] = [];
     Object.defineProperty(fixture.runtime.session, "model", {
@@ -670,8 +655,8 @@ describe("ConversationActor", () => {
       origin: "browser",
     });
 
-    expect(order).toEqual(["compact", "prompt"]);
-    expect(fixture.runtime.session.compactCalls).toBe(1);
+    expect(order).toEqual(["prompt"]);
+    expect(fixture.runtime.session.compactCalls).toBe(0);
     await fixture.actor.dispose();
   });
 
@@ -871,64 +856,6 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
-  it("retries failed Codex byte compaction only after bounded byte growth", async () => {
-    const fixture = await openActor();
-    const boundaryDecisions: boolean[] = [];
-    let attempt = 0;
-    const failedAtBytes = 1_000_000;
-    Object.defineProperty(fixture.runtime.session, "model", {
-      configurable: true,
-      value: {
-        provider: "openai-codex",
-        id: "gpt-5.6-sol",
-        api: "openai-codex-responses",
-        contextWindow: 372_000,
-      },
-    });
-    fixture.runtime.session.promptImplementation = async () => {
-      fixture.runtime.session.contextPercent = 45;
-      boundaryDecisions.push(checkToolTurnBoundary(
-        fixture.runtime,
-        failedAtBytes,
-      ));
-    };
-    fixture.runtime.session.compactImplementation = async () => {
-      attempt++;
-      if (attempt === 1) throw new Error("transient byte compaction failure");
-      return {};
-    };
-    fixture.runtime.session.resumeImplementation = async () => {
-      if (fixture.runtime.session.resumeCalls === 1) {
-        fixture.runtime.session.contextPercent = 45;
-        boundaryDecisions.push(checkToolTurnBoundary(
-          fixture.runtime,
-          failedAtBytes,
-        ));
-        boundaryDecisions.push(checkToolTurnBoundary(
-          fixture.runtime,
-          failedAtBytes + COMPACTION_RETRY_GROWTH_BYTES - 1,
-        ));
-        boundaryDecisions.push(checkToolTurnBoundary(
-          fixture.runtime,
-          failedAtBytes + COMPACTION_RETRY_GROWTH_BYTES,
-        ));
-      } else {
-        fixture.runtime.session.contextPercent = 20;
-      }
-    };
-
-    await fixture.actor.startPrompt({
-      runId: RUN_A,
-      text: "retry only after bounded byte growth",
-      origin: "browser",
-    });
-
-    expect(boundaryDecisions).toEqual([true, false, false, true]);
-    expect(fixture.runtime.session.compactCalls).toBe(2);
-    expect(fixture.runtime.session.resumeCalls).toBe(2);
-    await fixture.actor.dispose();
-  });
-
   it("compacts an inherited high-water context before the next run", async () => {
     const fixture = await openActor();
     const order: string[] = [];
@@ -1061,7 +988,7 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
-  it("lets new Codex byte pressure bypass a token-only retry gate", async () => {
+  it("does not let raw Codex bytes bypass a token retry gate", async () => {
     const fixture = await openActor();
     const boundaryDecisions: boolean[] = [];
     Object.defineProperty(fixture.runtime.session, "model", {
@@ -1096,12 +1023,12 @@ describe("ConversationActor", () => {
       origin: "browser",
     });
 
-    expect(boundaryDecisions).toEqual([true]);
-    expect(fixture.runtime.session.compactCalls).toBe(1);
+    expect(boundaryDecisions).toEqual([false]);
+    expect(fixture.runtime.session.compactCalls).toBe(0);
     await fixture.actor.dispose();
   });
 
-  it("lets new token pressure bypass a byte-only retry gate", async () => {
+  it("compacts when token pressure appears after an SDK failure", async () => {
     const fixture = await openActor();
     const boundaryDecisions: boolean[] = [];
     Object.defineProperty(fixture.runtime.session, "model", {

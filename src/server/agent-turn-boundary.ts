@@ -2,12 +2,10 @@ import type {
   AgentSession,
   ContextUsage,
 } from "@earendil-works/pi-coding-agent";
-import { measureSerializedContextBytes } from "./provider-context-pressure.js";
 
 export interface AgentTurnBoundaryCheck {
   contextUsage: ContextUsage | undefined;
   hasToolResults: boolean;
-  serializedContextBytes?: number;
 }
 
 export type AgentTurnBoundaryHandler = (
@@ -70,9 +68,6 @@ export function installAgentTurnBoundaryCheck(
           hostShouldStop = handler({
             contextUsage: session.getContextUsage(),
             hasToolResults: context.toolResults.length > 0,
-            serializedContextBytes: measureSerializedContextBytes(
-              context.context,
-            ),
           });
         } catch {
           // Pi requires this callback to be non-throwing. A later boundary can
