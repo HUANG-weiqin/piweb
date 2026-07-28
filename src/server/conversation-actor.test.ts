@@ -107,6 +107,8 @@ function fakeSession(): FakeSession {
     disposeCalls: 0,
     steerCalls: [],
     isStreaming: false,
+    agent: { state: { messages: [], tools: [] } },
+    systemPrompt: "",
     messages: [],
     model: { provider: "test", id: "model", contextWindow: 1_000 },
     thinkingLevel: "off",
@@ -391,11 +393,15 @@ function agentMessage(value: unknown): AgentMessage {
   return value as AgentMessage;
 }
 
-function checkToolTurnBoundary(runtime: FakeRuntime): boolean {
+function checkToolTurnBoundary(
+  runtime: FakeRuntime,
+  serializedContextBytes?: number,
+): boolean {
   return Boolean(runtime.createOptions?.turnBoundaryCheck?.({
     contextUsage: runtime.session.getContextUsage(),
     hasToolResults: true,
-  }));
+    serializedContextBytes,
+  } as Parameters<NonNullable<CreatePiSessionOptions["turnBoundaryCheck"]>>[0]));
 }
 
 describe("ConversationActor", () => {
@@ -524,6 +530,112 @@ describe("ConversationActor", () => {
       event.type === "session_event"
       && (event.event.type === "run_started" || event.event.type === "run_finished")
     ))).toHaveLength(2);
+    await fixture.actor.dispose();
+  });
+
+  it("compacts Codex byte-heavy context before the token threshold", async () => {
+    const fixture = await openActor();
+    const emit = () => fixture.runtime.session.eventListener;
+    Object.defineProperty(fixture.runtime.session, "model", {
+      configurable: true,
+      value: {
+        provider: "openai-codex",
+        id: "gpt-5.6-sol",
+        api: "openai-codex-responses",
+        contextWindow: 372_000,
+      },
+    });
+
+    fixture.runtime.session.promptImplementation = async () => {
+      emit()?.(nativeEvent({ type: "agent_start" }));
+      emit()?.(nativeEvent({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "before byte-pressure compaction" }],
+          stopReason: "toolUse",
+        },
+      }));
+      fixture.runtime.session.contextPercent = 45;
+      expect(checkToolTurnBoundary(fixture.runtime, 1_000_000)).toBe(true);
+      emit()?.(nativeEvent({ type: "agent_end" }));
+    };
+    fixture.runtime.session.resumeImplementation = async () => {
+      fixture.runtime.session.contextPercent = 20;
+      emit()?.(nativeEvent({ type: "agent_start" }));
+      emit()?.(nativeEvent({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "after byte-pressure compaction" }],
+          stopReason: "stop",
+        },
+      }));
+      emit()?.(nativeEvent({ type: "agent_end" }));
+    };
+
+    await expect(fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "finish despite a large provider request",
+      origin: "browser",
+    })).resolves.toMatchObject({ outcome: "completed" });
+
+    expect(fixture.runtime.session.compactCalls).toBe(1);
+    expect(fixture.runtime.session.resumeCalls).toBe(1);
+    await fixture.actor.dispose();
+  });
+
+  it("does not apply the Codex byte ceiling to another provider", async () => {
+    const fixture = await openActor();
+    fixture.runtime.session.promptImplementation = async () => {
+      fixture.runtime.session.contextPercent = 45;
+      expect(checkToolTurnBoundary(fixture.runtime, 1_000_000)).toBe(false);
+    };
+
+    await expect(fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "keep the provider-specific safety boundary scoped",
+      origin: "browser",
+    })).resolves.toMatchObject({ outcome: "completed" });
+
+    expect(fixture.runtime.session.compactCalls).toBe(0);
+    await fixture.actor.dispose();
+  });
+
+  it("compacts inherited Codex byte pressure before the live prompt", async () => {
+    const fixture = await openActor();
+    const order: string[] = [];
+    Object.defineProperty(fixture.runtime.session, "model", {
+      configurable: true,
+      value: {
+        provider: "openai-codex",
+        id: "gpt-5.6-sol",
+        api: "openai-codex-responses",
+        contextWindow: 372_000,
+      },
+    });
+    fixture.runtime.session.contextPercent = 10;
+    fixture.runtime.session.agent.state.messages = [{
+      role: "user",
+      content: "x".repeat(1_000_000),
+    }] as never;
+    fixture.runtime.session.compactImplementation = async () => {
+      order.push("compact");
+      fixture.runtime.session.agent.state.messages = [];
+      return {};
+    };
+    fixture.runtime.session.promptImplementation = async () => {
+      order.push("prompt");
+    };
+
+    await fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "continue safely",
+      origin: "browser",
+    });
+
+    expect(order).toEqual(["compact", "prompt"]);
+    expect(fixture.runtime.session.compactCalls).toBe(1);
     await fixture.actor.dispose();
   });
 
@@ -692,7 +804,10 @@ describe("ConversationActor", () => {
     fixture.runtime.session.resumeImplementation = async () => {
       if (fixture.runtime.session.resumeCalls === 1) {
         fixture.runtime.session.contextPercent = 79;
-        boundaryDecisions.push(checkToolTurnBoundary(fixture.runtime));
+        boundaryDecisions.push(checkToolTurnBoundary(
+          fixture.runtime,
+          1_000_000,
+        ));
         fixture.runtime.session.contextPercent = 81;
         boundaryDecisions.push(checkToolTurnBoundary(fixture.runtime));
       } else {

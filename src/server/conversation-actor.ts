@@ -20,6 +20,11 @@ import {
 } from "../shared/protocol.js";
 import type { AgentTurnBoundaryCheck } from "./agent-turn-boundary.js";
 import {
+  COMPACTION_RETRY_GROWTH_BYTES,
+  hasCodexContextBytePressure,
+  measureSerializedContextBytes,
+} from "./provider-context-pressure.js";
+import {
   projectConversationItemSlots,
   snapshotConversationItems,
 } from "./conversation-history.js";
@@ -223,6 +228,7 @@ interface RunTicket {
   sawSdkCompactionAttempt: boolean;
   compactionErrorReported: boolean;
   compactionRetryAtPercent?: number;
+  compactionRetryAtBytes?: number;
   sdkCompactionSucceeded: boolean;
   turnBoundaryCompactionRequested: boolean;
   abortPromise?: Promise<void>;
@@ -1384,12 +1390,18 @@ export class ConversationActor {
   private async compactAtThreshold(ticket: RunTicket): Promise<void> {
     if (ticket.sawSdkCompactionAttempt) return;
     const usage = this.session.getContextUsage?.();
+    const serializedContextBytes = this.serializedContextBytes();
     this.emitContextUsage();
     if (
-      usage?.percent === null
-      || usage?.percent === undefined
-      || usage.percent < this.compactionThresholdPercent
-      || !this.isCompactionAttemptDue(ticket, usage.percent)
+      !this.isCompactionThresholdReached(
+        usage?.percent,
+        serializedContextBytes,
+      )
+      || !this.isCompactionAttemptDue(
+        ticket,
+        usage?.percent,
+        serializedContextBytes,
+      )
     ) return;
     await this.attemptHostCompaction(ticket);
   }
@@ -1403,7 +1415,10 @@ export class ConversationActor {
       return;
     }
     const percent = this.session.getContextUsage?.()?.percent;
-    if (!this.isCompactionAttemptDue(ticket, percent)) return;
+    const serializedContextBytes = this.serializedContextBytes();
+    if (!this.isCompactionAttemptDue(ticket, percent, serializedContextBytes)) {
+      return;
+    }
     await this.attemptHostCompaction(ticket);
   }
 
@@ -1422,13 +1437,45 @@ export class ConversationActor {
     }
   }
 
+  private isCompactionThresholdReached(
+    percent: number | null | undefined,
+    serializedContextBytes: number | undefined,
+  ): boolean {
+    return (
+      (percent !== null
+        && percent !== undefined
+        && percent >= this.compactionThresholdPercent)
+      || hasCodexContextBytePressure(this.session.model, serializedContextBytes)
+    );
+  }
+
+  private serializedContextBytes(): number | undefined {
+    return measureSerializedContextBytes({
+      systemPrompt: this.session.systemPrompt,
+      messages: this.session.agent.state.messages,
+      tools: this.session.agent.state.tools,
+    });
+  }
+
   private isCompactionAttemptDue(
     ticket: RunTicket,
     percent: number | null | undefined,
+    serializedContextBytes: number | undefined,
   ): boolean {
-    const retryAt = ticket.compactionRetryAtPercent;
-    return retryAt === undefined
-      || (percent !== null && percent !== undefined && percent >= retryAt);
+    const retryAtPercent = ticket.compactionRetryAtPercent;
+    const retryAtBytes = ticket.compactionRetryAtBytes;
+    if (retryAtPercent === undefined && retryAtBytes === undefined) {
+      return true;
+    }
+    return (
+      (retryAtPercent !== undefined
+        && percent !== null
+        && percent !== undefined
+        && percent >= retryAtPercent)
+      || (retryAtBytes !== undefined
+        && serializedContextBytes !== undefined
+        && serializedContextBytes >= retryAtBytes)
+    );
   }
 
   private recordCompactionFailure(ticket: RunTicket): void {
@@ -1438,11 +1485,25 @@ export class ConversationActor {
       ticket.compactionRetryAtPercent ?? 0,
       failedAt + COMPACTION_RETRY_GROWTH_PERCENT,
     );
+    const serializedContextBytes = this.serializedContextBytes();
+    if (
+      serializedContextBytes !== undefined
+      && hasCodexContextBytePressure(
+        this.session.model,
+        serializedContextBytes,
+      )
+    ) {
+      ticket.compactionRetryAtBytes = Math.max(
+        ticket.compactionRetryAtBytes ?? 0,
+        serializedContextBytes + COMPACTION_RETRY_GROWTH_BYTES,
+      );
+    }
   }
 
   private recordCompactionSuccess(ticket: RunTicket): void {
     ticket.compactionErrorReported = false;
     ticket.compactionRetryAtPercent = undefined;
+    ticket.compactionRetryAtBytes = undefined;
   }
 
   private async compactSession(reserved = false): Promise<void> {
@@ -1792,10 +1853,15 @@ export class ConversationActor {
     }
     const percent = input.contextUsage?.percent;
     if (
-      percent === null
-      || percent === undefined
-      || percent < this.compactionThresholdPercent
-      || !this.isCompactionAttemptDue(ticket, percent)
+      !this.isCompactionThresholdReached(
+        percent,
+        input.serializedContextBytes,
+      )
+      || !this.isCompactionAttemptDue(
+        ticket,
+        percent,
+        input.serializedContextBytes,
+      )
     ) {
       return false;
     }
