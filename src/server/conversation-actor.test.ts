@@ -1057,7 +1057,6 @@ describe("ConversationActor", () => {
     };
     fixture.runtime.session.abortCompaction = () => {
       fixture.runtime.session.abortCompactionCalls++;
-      finishCompaction.resolve();
     };
     fixture.runtime.session.promptImplementation = async () => {
       promptCalls++;
@@ -1069,7 +1068,21 @@ describe("ConversationActor", () => {
       origin: "browser",
     });
     await compactionStarted.promise;
-    await fixture.actor.abort(RUN_A);
+    const aborting = fixture.actor.abort(RUN_A);
+    let settled = false;
+    void running.then(() => {
+      settled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(settled).toBe(false);
+    expect(fixture.actor.getState()).toMatchObject({
+      activity: { kind: "cancelling", runId: RUN_A },
+      compacting: true,
+    });
+
+    finishCompaction.resolve();
+    await aborting;
     await expect(running).resolves.toMatchObject({ outcome: "aborted" });
 
     expect(fixture.runtime.session.abortCompactionCalls).toBe(1);

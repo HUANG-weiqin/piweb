@@ -1631,6 +1631,10 @@ export class ConversationActor {
     if (ticket.phase === "queued") {
       ticket.phase = "cancelling";
       this.emitActivity();
+      if (this.compacting) {
+        ticket.abortPromise ??= ticket.completion.promise.then(() => undefined);
+        return ticket.abortPromise;
+      }
       return this.settleRun(ticket, "aborted").then(() => undefined);
     }
     if (ticket.phase === "cancelling") {
