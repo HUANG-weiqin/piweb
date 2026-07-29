@@ -8,6 +8,8 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import {
   DEFAULT_COMPACTION_THRESHOLD_PERCENT,
+  MAX_PENDING_PROMPTS_PER_CONVERSATION,
+  MAX_PROMPT_CHARACTERS,
   type ConversationActivity,
   type ConversationHistoryItem,
   type ConversationHistoryMessage,
@@ -285,6 +287,46 @@ export function isConversationSteerDeliveryError(
   error: unknown,
 ): error is ConversationSteerDeliveryError {
   return error instanceof ConversationSteerDeliveryError;
+}
+
+/**
+ * Encodes several pending prompts as one user-guidance unit for one SDK steer.
+ * The JSON array preserves the durable FIFO order and every original boundary.
+ */
+export function createPendingPromptBatchGuidance(
+  batchId: string,
+  texts: readonly string[],
+): string {
+  if (
+    !Array.isArray(texts)
+    || texts.length === 0
+    || texts.length > MAX_PENDING_PROMPTS_PER_CONVERSATION
+  ) {
+    throw new Error(
+      `Pending prompt batch must contain 1 to ${MAX_PENDING_PROMPTS_PER_CONVERSATION} texts`,
+    );
+  }
+  for (const text of texts) {
+    if (typeof text !== "string" || text.trim().length === 0) {
+      throw new Error("Pending prompt batch texts must not be empty");
+    }
+    if (text.trimStart().startsWith("/")) {
+      throw new Error(
+        "Pending prompt batch cannot include slash-command text",
+      );
+    }
+  }
+  const guidance = JSON.stringify({
+    hostInstruction: "以下消息属于同一批，请作为整体处理。",
+    batchId,
+    items: texts.map((text, index) => ({ ordinal: index + 1, text })),
+  });
+  if (guidance.length > MAX_PROMPT_CHARACTERS) {
+    throw new Error(
+      `Pending prompt batch guidance exceeds ${MAX_PROMPT_CHARACTERS} characters`,
+    );
+  }
+  return guidance;
 }
 
 function rawUserMessageIsPersisted(
@@ -964,6 +1006,24 @@ export class ConversationActor {
         error,
       );
     });
+  }
+
+  /** Queues an entire pending prompt batch through one SDK guidance call. */
+  steerPendingPromptBatch(
+    runId: string,
+    batchId: string,
+    texts: readonly string[],
+  ): Promise<void> {
+    let guidance: string;
+    try {
+      guidance = createPendingPromptBatchGuidance(batchId, texts);
+    } catch (error) {
+      return Promise.reject(new ConversationSteerDeliveryError(
+        "rejected_before_sdk_acceptance",
+        error,
+      ));
+    }
+    return this.steer(runId, guidance);
   }
 
   /**
