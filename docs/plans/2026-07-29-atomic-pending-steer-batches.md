@@ -46,7 +46,7 @@ commandId + batchId + sessionId + conversationId + focusId + exact runId
 
 这会让 durable Pi transcript 中出现一个批次 user message，而不是 N 个物理 user entries。批次正文明确保留每条原始消息的编号和边界；待处理 sidecar、receipt 和 batch manifest 仍逐条保存 prompt identity。
 
-批次成员若以 `/` 开头则整体拒绝并保持 queued，避免把原本可能触发 skill/template 展开的命令静默改成普通批次正文。
+编码后的完整 batch guidance 必须仍满足单条 `MAX_PROMPT_CHARACTERS` 上限；超限时在 manifest/claim 前整体拒绝并保持 queued，不能静默截取前缀。批次成员若以 `/` 开头也整体拒绝并保持 queued，避免把原本可能触发 skill/template 展开的命令静默改成普通批次正文。
 
 ### 3. Durable batch manifest
 
