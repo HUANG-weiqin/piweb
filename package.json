@@ -3,18 +3,25 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "workspaces": ["packages/*"],
   "engines": { "node": ">=22.19.0" },
   "scripts": {
+    "predev": "npm run context-compressor:build",
     "dev": "concurrently -k \"vite\" \"node --import tsx/esm --watch src/server/index.ts\"",
+    "prebuild": "npm run context-compressor:build",
     "build": "vite build && tsc -p tsconfig.server.json",
     "start": "node dist-server/server/index.js",
+    "pretypecheck": "npm run context-compressor:build",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit && npm run context-compressor:typecheck",
+    "pretest": "npm run context-compressor:build",
     "test": "vitest run --exclude \".worktrees/**\"",
+    "context-compressor:build": "npm run build --workspace=@piweb/context-compressor",
     "context-compressor:test": "vitest run packages/context-compressor/test/index.test.ts",
-    "context-compressor:typecheck": "tsc -p packages/context-compressor/tsconfig.json --noEmit",
-    "context-compressor:benchmark": "tsx scripts/benchmark-context-compressor.ts"
+    "context-compressor:typecheck": "tsc -p packages/context-compressor/tsconfig.test.json",
+    "context-compressor:benchmark": "npm run context-compressor:build && tsx scripts/benchmark-context-compressor.ts"
   },
   "dependencies": {
+    "@piweb/context-compressor": "workspace:*",
     "@earendil-works/pi-ai": "0.80.7",
     "@earendil-works/pi-coding-agent": "0.80.7",
     "dompurify": "^3.2.6",

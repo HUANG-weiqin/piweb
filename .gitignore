@@ -1,6 +1,7 @@
 node_modules/
 dist-client/
 dist-server/
+packages/context-compressor/dist/
 coverage/
 .piweb/
 .worktrees/

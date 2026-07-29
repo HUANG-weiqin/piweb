@@ -20,6 +20,7 @@ import {
 import type { ToolMode } from "../shared/protocol.js";
 import type { PortableExtensionUI } from "./extension-ui.js";
 import { applyCodexAutoTransportPolicy } from "./codex-transport-policy.js";
+import { installContextCompression } from "./context-compression.js";
 import {
   type AgentTurnBoundaryCheck,
   type AgentTurnBoundaryController,
@@ -502,6 +503,7 @@ export class PiRuntime implements PiRuntimeLike {
         });
       }
       createdSession = created.session;
+      installContextCompression(createdSession);
       if (readOnlyToolProjection) {
         toolProjectionAdapter = installReadOnlyToolProjection(createdSession);
       }

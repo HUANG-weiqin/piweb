@@ -1,7 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-import { compressLineStream } from "../packages/context-compressor/src/index.js";
+import { compressLineStream } from "@piweb/context-compressor";
 
 type JsonRecord = Record<string, unknown>;
 
