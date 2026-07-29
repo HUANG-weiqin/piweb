@@ -8,8 +8,6 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import {
   DEFAULT_COMPACTION_THRESHOLD_PERCENT,
-  MAX_PENDING_PROMPTS_PER_CONVERSATION,
-  MAX_PROMPT_CHARACTERS,
   type ConversationActivity,
   type ConversationHistoryItem,
   type ConversationHistoryMessage,
@@ -39,6 +37,10 @@ import {
   type ConversationMessageEntry,
   type RunSettlement,
 } from "./conversation-meta.js";
+import {
+  createPendingPromptBatchGuidance,
+  pendingPromptBatchDisplayText,
+} from "./pending-prompt-batch-guidance.js";
 import {
   type CreatedPiSession,
   type CreatePiSessionOptions,
@@ -203,6 +205,7 @@ interface PendingCustomSteer {
 
 interface PendingGuidance {
   readonly delivery: Deferred<void>;
+  readonly projectedText?: string;
 }
 
 interface RunTicket {
@@ -289,45 +292,7 @@ export function isConversationSteerDeliveryError(
   return error instanceof ConversationSteerDeliveryError;
 }
 
-/**
- * Encodes several pending prompts as one user-guidance unit for one SDK steer.
- * The JSON array preserves the durable FIFO order and every original boundary.
- */
-export function createPendingPromptBatchGuidance(
-  batchId: string,
-  texts: readonly string[],
-): string {
-  if (
-    !Array.isArray(texts)
-    || texts.length === 0
-    || texts.length > MAX_PENDING_PROMPTS_PER_CONVERSATION
-  ) {
-    throw new Error(
-      `Pending prompt batch must contain 1 to ${MAX_PENDING_PROMPTS_PER_CONVERSATION} texts`,
-    );
-  }
-  for (const text of texts) {
-    if (typeof text !== "string" || text.trim().length === 0) {
-      throw new Error("Pending prompt batch texts must not be empty");
-    }
-    if (text.trimStart().startsWith("/")) {
-      throw new Error(
-        "Pending prompt batch cannot include slash-command text",
-      );
-    }
-  }
-  const guidance = JSON.stringify({
-    hostInstruction: "以下消息属于同一批，请作为整体处理。",
-    batchId,
-    items: texts.map((text, index) => ({ ordinal: index + 1, text })),
-  });
-  if (guidance.length > MAX_PROMPT_CHARACTERS) {
-    throw new Error(
-      `Pending prompt batch guidance exceeds ${MAX_PROMPT_CHARACTERS} characters`,
-    );
-  }
-  return guidance;
-}
+export { createPendingPromptBatchGuidance };
 
 function rawUserMessageIsPersisted(
   entries: readonly unknown[],
@@ -922,6 +887,14 @@ export class ConversationActor {
   }
 
   steer(runId: string, text: string): Promise<void> {
+    return this.steerWithProjectedText(runId, text);
+  }
+
+  private steerWithProjectedText(
+    runId: string,
+    text: string,
+    projectedText?: string,
+  ): Promise<void> {
     try {
       this.assertUsable();
     } catch (error) {
@@ -960,7 +933,10 @@ export class ConversationActor {
     // its rejection immediately; the returned command promise still receives
     // the same error after the exact waiter is removed.
     void delivery.promise.catch(() => undefined);
-    const pendingGuidance: PendingGuidance = { delivery };
+    const pendingGuidance: PendingGuidance = {
+      delivery,
+      ...(projectedText === undefined ? {} : { projectedText }),
+    };
     ticket.guidanceDeliveries.push(pendingGuidance);
     const removePendingGuidance = () => {
       const index = ticket.guidanceDeliveries.indexOf(pendingGuidance);
@@ -1023,7 +999,11 @@ export class ConversationActor {
         error,
       ));
     }
-    return this.steer(runId, guidance);
+    return this.steerWithProjectedText(
+      runId,
+      guidance,
+      pendingPromptBatchDisplayText(texts),
+    );
   }
 
   /**
@@ -1760,8 +1740,19 @@ export class ConversationActor {
       });
     }
 
+    const guidanceProjectedText =
+      event.type === "message_start"
+      && event.message.role === "user"
+      && !ticket.expectsInitialPromptRawUserMessage
+        ? ticket.guidanceDeliveries[0]?.projectedText
+        : undefined;
     for (const projected of ticket.projector.project(event)) {
-      this.emitSessionEvent(ticket, projected);
+      this.emitSessionEvent(
+        ticket,
+        projected.type === "user_message" && guidanceProjectedText !== undefined
+          ? { ...projected, text: guidanceProjectedText }
+          : projected,
+      );
     }
   }
 

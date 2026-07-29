@@ -12,6 +12,10 @@ import {
   type ConversationCard,
   type ConversationMessageEntry,
 } from "./conversation-meta.js";
+import {
+  parsePendingPromptBatchGuidance,
+  pendingPromptBatchDisplayText,
+} from "./pending-prompt-batch-guidance.js";
 import { toWireValue } from "./session-events.js";
 
 export const MAX_HISTORY_SNAPSHOT_BYTES = 750_000;
@@ -234,6 +238,8 @@ function finalizeHistoryMessage(
 function projectConversationHistorySlots(
   sessionManager: Pick<SessionManager, "getBranch">,
 ): ConversationHistoryMessageSlot[] {
+  const branch = sessionManager.getBranch();
+  const startedPendingPromptBatches = new Map<string, number>();
   const messages: ConversationHistoryMessageSlot[] = [];
   let assistant: ConversationHistoryMessageSlot | undefined;
   const seenCardIds = new Set<string>();
@@ -255,7 +261,7 @@ function projectConversationHistorySlots(
     return assistant;
   };
 
-  for (const entry of sessionManager.getBranch()) {
+  for (const entry of branch) {
     if (entry.type === "compaction") {
       assistant = undefined;
       continue;
@@ -273,6 +279,12 @@ function projectConversationHistorySlots(
       continue;
     }
     if (reserved?.kind === "pending_prompt_batch") {
+      const batch = reserved.entry.data;
+      if (batch.state === "started") {
+        startedPendingPromptBatches.set(batch.batchId, batch.items.length);
+      } else if (batch.state !== "prepared") {
+        startedPendingPromptBatches.delete(batch.batchId);
+      }
       continue;
     }
     if (entry.type === "custom" || entry.type === "custom_message") {
@@ -284,13 +296,25 @@ function projectConversationHistorySlots(
 
     if (message.role === "user") {
       assistant = undefined;
+      const rawText = contentText(message.content);
+      const guidance = parsePendingPromptBatchGuidance(rawText);
+      const expectedItemCount = guidance === undefined
+        ? undefined
+        : startedPendingPromptBatches.get(guidance.batchId);
+      const text = guidance !== undefined
+        && expectedItemCount === guidance.texts.length
+        ? pendingPromptBatchDisplayText(guidance.texts)
+        : rawText;
+      if (guidance !== undefined && expectedItemCount === guidance.texts.length) {
+        startedPendingPromptBatches.delete(guidance.batchId);
+      }
       messages.push({
         anchorEntryId: entry.id,
         assistantEntryCount: 0,
         message: {
           id: entry.id,
           role: "user",
-          text: contentText(message.content),
+          text,
           thinking: "",
           tools: [],
         },

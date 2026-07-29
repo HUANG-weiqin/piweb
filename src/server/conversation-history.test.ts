@@ -125,6 +125,126 @@ describe("projectConversationHistory", () => {
     ]);
   });
 
+  it("shows durable pending prompt batches as user-authored text instead of the host envelope", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    const batchId = randomUUID();
+    const conversationId = randomUUID();
+    const runId = randomUUID();
+    const batch = {
+      batchId,
+      conversationId,
+      runId,
+      items: [
+        {
+          promptId: randomUUID(),
+          createdAt: "2026-07-29T10:00:00.000Z",
+          payloadSha256: "a".repeat(64),
+        },
+        {
+          promptId: randomUUID(),
+          createdAt: "2026-07-29T10:00:01.000Z",
+          payloadSha256: "b".repeat(64),
+        },
+      ],
+    };
+    appendReservedCustomEntry(manager, createPendingPromptBatchEntry({
+      ...batch,
+      state: "prepared",
+      updatedAt: "2026-07-29T10:00:02.000Z",
+    }));
+    appendReservedCustomEntry(manager, createPendingPromptBatchEntry({
+      ...batch,
+      state: "started",
+      updatedAt: "2026-07-29T10:00:03.000Z",
+    }));
+    const guidance = JSON.stringify({
+      hostInstruction: "以下消息属于同一批，请作为整体处理。",
+      batchId,
+      items: [
+        { ordinal: 1, text: "first pending" },
+        { ordinal: 2, text: "second pending" },
+      ],
+    });
+    manager.appendMessage(message({
+      role: "user",
+      content: [{ type: "text", text: guidance }],
+      timestamp: 1,
+    }));
+    appendReservedCustomEntry(manager, createPendingPromptBatchEntry({
+      ...batch,
+      state: "delivered",
+      updatedAt: "2026-07-29T10:00:04.000Z",
+    }));
+    appendReservedCustomEntry(manager, createPendingPromptBatchEntry({
+      ...batch,
+      state: "completed",
+      updatedAt: "2026-07-29T10:00:05.000Z",
+    }));
+    const userAuthoredText = "first pending\n\nsecond pending";
+
+    expect(projectConversationHistory(manager)).toContainEqual(
+      expect.objectContaining({ role: "user", text: userAuthoredText }),
+    );
+    expect(projectConversationItems(manager)).toContainEqual(
+      expect.objectContaining({
+        kind: "message",
+        role: "user",
+        text: userAuthoredText,
+      }),
+    );
+
+    manager.appendMessage(message({
+      role: "user",
+      content: guidance,
+      timestamp: 2,
+    }));
+    expect(projectConversationHistory(manager).at(-1)?.text).toBe(guidance);
+  });
+
+  it("does not decode user JSON outside an exact started batch envelope", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    const batch = {
+      batchId: randomUUID(),
+      conversationId: randomUUID(),
+      runId: randomUUID(),
+      items: [{
+        promptId: randomUUID(),
+        createdAt: "2026-07-29T11:00:00.000Z",
+        payloadSha256: "c".repeat(64),
+      }],
+    };
+    const guidance = JSON.stringify({
+      hostInstruction: "以下消息属于同一批，请作为整体处理。",
+      batchId: batch.batchId,
+      items: [{ ordinal: 1, text: "user-authored JSON" }],
+    });
+    appendReservedCustomEntry(manager, createPendingPromptBatchEntry({
+      ...batch,
+      state: "prepared",
+      updatedAt: "2026-07-29T11:00:01.000Z",
+    }));
+    manager.appendMessage(message({ role: "user", content: guidance, timestamp: 1 }));
+    appendReservedCustomEntry(manager, createPendingPromptBatchEntry({
+      ...batch,
+      state: "started",
+      updatedAt: "2026-07-29T11:00:02.000Z",
+    }));
+    manager.appendMessage(message({ role: "user", content: ` ${guidance}`, timestamp: 2 }));
+    appendReservedCustomEntry(manager, createPendingPromptBatchEntry({
+      ...batch,
+      state: "failed",
+      updatedAt: "2026-07-29T11:00:03.000Z",
+      reason: "SDK rejected the batch",
+    }));
+    manager.appendMessage(message({ role: "user", content: guidance, timestamp: 3 }));
+
+    expect(projectConversationHistory(manager).map(({ text }) => text)).toEqual([
+      guidance,
+      ` ${guidance}`,
+      guidance,
+    ]);
+  });
+
   it("projects only the selected branch and preserves failed tool results", () => {
     const manager = SessionManager.inMemory("E:\\work");
     const root = manager.appendMessage(message({

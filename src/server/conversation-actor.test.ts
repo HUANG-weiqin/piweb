@@ -1747,6 +1747,10 @@ describe("ConversationActor", () => {
     });
     fixture.manager.appendMessage(initialPrompt);
     fixture.runtime.session.eventListener?.(nativeEvent({
+      type: "message_start",
+      message: initialPrompt,
+    }));
+    fixture.runtime.session.eventListener?.(nativeEvent({
       type: "message_end",
       message: initialPrompt,
     }));
@@ -1776,6 +1780,19 @@ describe("ConversationActor", () => {
       timestamp: Date.now(),
     });
     fixture.manager.appendMessage(durableBatchMessage);
+    fixture.runtime.session.eventListener?.(nativeEvent({
+      type: "message_start",
+      message: durableBatchMessage,
+    }));
+    expect(fixture.events).toContainEqual(expect.objectContaining({
+      type: "session_event",
+      conversationId: CONVERSATION_ID,
+      runId: RUN_A,
+      event: expect.objectContaining({
+        type: "user_message",
+        text: "first prompt\n\nsecond prompt\n\nthird prompt",
+      }),
+    }));
     fixture.runtime.session.eventListener?.(nativeEvent({
       type: "message_end",
       message: durableBatchMessage,
