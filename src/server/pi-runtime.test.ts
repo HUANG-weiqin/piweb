@@ -1,5 +1,5 @@
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
-import type { Api, ToolResultMessage, Transport } from "@earendil-works/pi-ai";
+import type { Api, Transport } from "@earendil-works/pi-ai";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -418,34 +418,30 @@ describe("PiRuntime session ownership", () => {
     await created.dispose();
   });
 
-  it("installs context compression without changing the original tool result", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-context-compression-"));
+  it("installs tool result compression without changing the executed result", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-tool-result-compression-"));
     const runtime = testRuntime(() => []);
     const originalText = Array.from(
       { length: 160 },
       (_, index) => `grep ${String(index).padStart(3, "0")} ${"x".repeat(100)}`,
     ).join("\n");
-    const original: ToolResultMessage = {
-      role: "toolResult",
-      toolCallId: "tool-context-compression",
-      toolName: "grep",
-      content: [{ type: "text", text: originalText }],
-      isError: false,
-      timestamp: Date.now(),
+    const original = {
+      content: [{ type: "text" as const, text: originalText }],
+      details: { executed: true },
     };
     const created = await runtime.createSession(cwd);
-    const transformContext = created.session.agent.transformContext;
-    if (!transformContext) throw new Error("context transform was not installed");
+    const afterToolCall = created.session.agent.afterToolCall;
+    if (!afterToolCall) throw new Error("tool result hook was not installed");
 
-    const modelContext = [original];
-    const projected = await transformContext(modelContext);
+    const patch = await afterToolCall({
+      toolCall: { name: "grep" },
+      result: original,
+    } as Parameters<typeof afterToolCall>[0]);
 
-    expect(projected).not.toBe(modelContext);
-    expect(projected[0]).not.toBe(original);
-    expect((projected[0] as ToolResultMessage).content[0]).toEqual({
+    expect(patch?.content).toEqual([{
       type: "text",
       text: expect.stringContaining("[... omitted"),
-    });
+    }]);
     expect(original.content).toEqual([{ type: "text", text: originalText }]);
     await created.dispose();
   });
@@ -961,16 +957,16 @@ describe("PiRuntime session ownership", () => {
       toolCallGate: undefined,
     },
     {
-      stage: "context compression installation",
-      expectedError: "context compression installation failed",
+      stage: "tool result compression installation",
+      expectedError: "tool result compression installation failed",
       installFailure(created: Awaited<ReturnType<typeof createAgentSession>>) {
         const nativeAgent = created.session.agent;
         Object.defineProperty(created.session, "agent", {
           configurable: true,
           value: new Proxy(nativeAgent, {
             set(target, property, value, receiver) {
-              if (property === "transformContext") {
-                throw new Error("context compression installation failed");
+              if (property === "afterToolCall") {
+                throw new Error("tool result compression installation failed");
               }
               return Reflect.set(target, property, value, receiver);
             },
