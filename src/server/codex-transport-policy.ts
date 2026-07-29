@@ -10,6 +10,11 @@ export function isCodexResponsesModel(model: TransportPolicyModel): boolean {
   );
 }
 
+/**
+ * Prefer Codex's zstd-compressed SSE path for workbench-managed auto transport.
+ * This is a session-only settings override: transport failures must not be
+ * converted into token overflow or durable compaction pressure.
+ */
 export function applyCodexAutoTransportPolicy(
   settings: SettingsManager,
   model: TransportPolicyModel,
