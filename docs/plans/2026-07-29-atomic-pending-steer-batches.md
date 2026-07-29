@@ -38,7 +38,7 @@ commandId + batchId + sessionId + conversationId + focusId + exact runId
 
 命令不携带客户端看到的 promptIds。服务端在 project lifecycle 串行边界读取权威队列并冻结全部 queued 成员，避免 stale snapshot、非连续选择和跨命令竞态。
 
-现有单条 `steer_pending_prompt` 保留；客户端在任一队列操作未结算时禁用其它 Steer 操作，避免把多次独立点击误当成批次。
+现有单条 `steer_pending_prompt` 保留；Web UI 不再提供单条入口，批次待结算或任一 queued 成员操作未结算时禁用新的批次 Steer，避免把多次独立点击误当成同一批。
 
 ### 2. 一个 SDK user message 是原子模型输入单元
 
@@ -141,7 +141,7 @@ Coordinator 随后先追加 batch `delivered` fence，再为每个 prompt 追加
 - `src/client/components/Chat.tsx`
 - `src/client/components/Chat.test.tsx`
 
-验收：多条 queued 且 active run 为 running/waiting 时显示“全部 Steer”；发送单一 batch command；等待期间冻结全部队列动作；精确 completion/error 结算；snapshot 仍是队列真相。
+验收：多条 queued 且 active run 为 running/waiting 时显示“同时 Steer N 条”；发送单一 batch command；等待期间冻结批次成员与再次 batch，晚到的非成员 queued 仍可撤回；精确 completion/error 结算；snapshot 仍是队列真相。
 
 ### 阶段 5：真实 SDK 合同与知识页
 
