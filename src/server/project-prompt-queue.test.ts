@@ -18,6 +18,7 @@ import {
   ProjectPromptQueue,
   createQueuedProjectPrompt,
   parseProjectPromptRecord,
+  projectPromptPayloadSha256,
 } from "./project-prompt-queue.js";
 
 const timestamp = "2026-07-24T10:00:00.000Z";
@@ -355,6 +356,38 @@ describe("ProjectPromptQueue", () => {
         runId,
       }))),
     );
+  });
+
+  it("removes a delivered batch sidecar only for its exact manifest identity", async () => {
+    const { queue } = await temporaryQueue("piweb-prompt-batch-cleanup-");
+    const queued = input();
+    await queue.put(queued);
+    const runId = randomUUID();
+    const dispatching = await queue.markDispatching(
+      queued.promptId,
+      queued.conversationId,
+      runId,
+      timestamp,
+    );
+
+    await expect(queue.removeDeliveredBatchPrompt(
+      queued.promptId,
+      queued.conversationId,
+      runId,
+      queued.createdAt,
+      "0".repeat(64),
+    )).rejects.toThrow(/identity/i);
+    await expect(queue.list({ conversationId: queued.conversationId }))
+      .resolves.toHaveLength(1);
+    await expect(queue.removeDeliveredBatchPrompt(
+      queued.promptId,
+      queued.conversationId,
+      runId,
+      queued.createdAt,
+      projectPromptPayloadSha256(dispatching),
+    )).resolves.toBeUndefined();
+    await expect(queue.list({ conversationId: queued.conversationId }))
+      .resolves.toEqual([]);
   });
 
   it("withdraws only exact queued prompts; host cleanup is a separate boundary", async () => {

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
 import {
   link,
@@ -192,13 +192,24 @@ function reservedBytesForPrompt(prompt: ProjectPromptRecord): number {
   ));
 }
 
-function immutablePayload(prompt: ProjectPromptRecord): ProjectPromptInput {
+function immutablePayload(
+  prompt: ProjectPromptRecord | ProjectPromptInput,
+): ProjectPromptInput {
   return {
     promptId: prompt.promptId,
     conversationId: prompt.conversationId,
     text: prompt.text,
     createdAt: prompt.createdAt,
   };
+}
+
+export function projectPromptPayloadSha256(
+  prompt: ProjectPromptRecord | ProjectPromptInput,
+): string {
+  return createHash("sha256").update(
+    JSON.stringify(immutablePayload(prompt)),
+    "utf8",
+  ).digest("hex");
 }
 
 function payloadsEqual(
@@ -692,6 +703,36 @@ export class ProjectPromptQueue {
       await this.assertStoredFileUnchanged(stored);
       await unlink(stored.path);
       return true;
+    });
+  }
+
+  /** Removes one delivered batch sidecar only while its manifest identity matches. */
+  removeDeliveredBatchPrompt(
+    promptId: string,
+    conversationId: string,
+    runId: string,
+    createdAt: string,
+    payloadSha256: string,
+  ): Promise<void> {
+    return this.operations.run(async () => {
+      uuidSchema("promptId").parse(promptId);
+      uuidSchema("conversationId").parse(conversationId);
+      uuidSchema("runId").parse(runId);
+      canonicalTimestampSchema("createdAt").parse(createdAt);
+      z.string().regex(/^[0-9a-f]{64}$/).parse(payloadSha256);
+      const stored = await this.requireExactPrompt(promptId, conversationId);
+      if (
+        stored.prompt.state !== "dispatching"
+        || stored.prompt.runId !== runId
+        || stored.prompt.createdAt !== createdAt
+        || projectPromptPayloadSha256(stored.prompt) !== payloadSha256
+      ) {
+        throw new Error(
+          `Delivered batch prompt identity does not match: ${promptId}`,
+        );
+      }
+      await this.assertStoredFileUnchanged(stored);
+      await unlink(stored.path);
     });
   }
 
