@@ -1625,6 +1625,26 @@ export class ProjectSessionCoordinator {
     const prepared = await this.runLifecycle(context, async () => {
       this.assertPromptConversation(context, conversationId);
       const actor = this.requireActor(context, conversationId);
+      const aggregate = aggregateReservedConversationEntries(
+        actor.sessionManager.getEntries(),
+      );
+      const existingBatch = aggregate.pendingPromptBatches.find(
+        (batch) => batch.batchId === batchId,
+      );
+      if (existingBatch !== undefined) {
+        if (
+          existingBatch.conversationId !== conversationId
+          || existingBatch.runId !== exactRunId
+        ) {
+          throw new Error(`Pending prompt batchId identity conflicts: ${batchId}`);
+        }
+        if (existingBatch.state === "completed") {
+          return { kind: "completed" } as const;
+        }
+        throw new Error(
+          `Pending prompt batchId already ended or is still active: ${batchId}`,
+        );
+      }
       const activity = actor.getActivity();
       if (
         (activity.kind !== "running" && activity.kind !== "waiting")
@@ -1643,12 +1663,6 @@ export class ProjectSessionCoordinator {
       const texts = queued.map(({ text }) => text);
       // Validate the composite before recording any batch state or claim.
       createPendingPromptBatchGuidance(batchId, texts);
-      const aggregate = aggregateReservedConversationEntries(
-        actor.sessionManager.getEntries(),
-      );
-      if (aggregate.pendingPromptBatches.some((batch) => batch.batchId === batchId)) {
-        throw new Error(`Pending prompt batchId already exists: ${batchId}`);
-      }
       if (aggregate.pendingPromptBatches.some((batch) => (
         batch.state === "prepared"
         || batch.state === "started"
@@ -1742,12 +1756,14 @@ export class ProjectSessionCoordinator {
       void delivery.catch(() => undefined);
       await this.emitPendingPromptsChanged(context, conversationId);
       return {
+        kind: "started" as const,
         actor,
         batch,
         promptIds: claimed.map(({ promptId }) => promptId),
         delivery,
       };
     });
+    if (prepared.kind === "completed") return;
 
     try {
       await prepared.delivery;

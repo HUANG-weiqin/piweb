@@ -9196,6 +9196,19 @@ describe("ProjectSessionCoordinator", () => {
         expect.objectContaining({ promptId: laterId, state: "queued" }),
       ]);
       expect(control.steerTexts).toHaveLength(1);
+      await expect(fixture.coordinator.steerAllQueuedPrompts(
+        fixture.handle,
+        actor.conversationId,
+        batchId,
+        runId,
+      )).resolves.toBeUndefined();
+      expect(control.steerTexts).toHaveLength(1);
+      await expect(fixture.coordinator.listPendingPrompts(
+        fixture.handle,
+        actor.conversationId,
+      )).resolves.toEqual([
+        expect.objectContaining({ promptId: laterId, state: "queued" }),
+      ]);
 
       release.resolve();
       await busy;
