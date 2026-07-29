@@ -307,6 +307,14 @@ export function Chat({
     })),
     [chat.items, chat.messages],
   );
+  const queuedPendingPrompts = pendingPrompts.filter(
+    ({ state }) => state === "queued",
+  );
+  const canSteerPendingBatch = queuedPendingPrompts.length > 0
+    && (activeRun?.phase === "running" || activeRun?.phase === "waiting");
+  const queuedActionPending = queuedPendingPrompts.some(({ promptId }) => (
+    pendingPromptIds.has(promptId)
+  ));
   const blocks = useMemo(() => transcriptBlocks(items), [items]);
   const transcriptFocusKey = chat.focus
     ? `${chat.focus.sessionId}:${chat.focus.conversationId}:${chat.focus.focusId}`
@@ -559,19 +567,14 @@ export function Chat({
         <header>
           <span>待处理消息 {pendingPrompts.length} 条</span>
           <small>服务端持久保存</small>
-          {(() => {
-            const queued = pendingPrompts.filter(({ state }) => state === "queued");
-            const active = activeRun?.phase === "running" || activeRun?.phase === "waiting";
-            const queuedActionPending = queued.some(({ promptId }) => pendingPromptIds.has(promptId));
-            return queued.length > 0 && active && <button
-              type="button"
-              aria-label={`同时 Steer ${queued.length} 条`}
-              disabled={batchSteerPending || queuedActionPending}
-              onClick={onSteerAllPendingPrompts}
-            >
-              同时 Steer {queued.length} 条
-            </button>;
-          })()}
+          {canSteerPendingBatch && <button
+            type="button"
+            aria-label={`同时 Steer ${queuedPendingPrompts.length} 条`}
+            disabled={batchSteerPending || queuedActionPending}
+            onClick={onSteerAllPendingPrompts}
+          >
+            同时 Steer {queuedPendingPrompts.length} 条
+          </button>}
         </header>
         <ol>
           {pendingPrompts.map((prompt) => {

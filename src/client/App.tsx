@@ -504,7 +504,10 @@ export function App() {
     return [...pendingQueueCommandsRef.current.values()].some((command) => (
       command.operation === "steer_all_pending_prompts"
       && command.workspaceKey === currentWorkspaceKey()
-      && isCurrentQueueCommand(command)
+      && command.sessionId === focus.sessionId
+      && command.projectId === focus.projectId
+      && command.conversationId === focus.conversationId
+      && command.focusId === focus.focusId
     ));
   };
   const hasPendingEnqueueForFocus = (focus: ActiveFocus | undefined) => {
