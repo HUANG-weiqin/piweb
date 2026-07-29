@@ -1,5 +1,6 @@
-import { clampThinkingLevel } from "@earendil-works/pi-ai";
+import { clampThinkingLevel, type Transport } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import { isCodexResponsesModel } from "./codex-transport-policy.js";
 
 const COMPACTION_THINKING_TARGET = "minimal";
 
@@ -13,6 +14,7 @@ export interface CompactionThinkingOverride {
  */
 export function installCompactionThinkingOverride(
   session: AgentSession,
+  transport: Transport,
 ): CompactionThinkingOverride {
   let originalStream: typeof session.agent.streamFn | undefined;
   let overrideStream: typeof session.agent.streamFn | undefined;
@@ -39,6 +41,7 @@ export function installCompactionThinkingOverride(
       return capturedStream(model, context, {
         ...options,
         reasoning: reasoning === "off" ? undefined : reasoning,
+        ...(isCodexResponsesModel(model) ? { transport } : {}),
       });
     };
     session.agent.streamFn = overrideStream;

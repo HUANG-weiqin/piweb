@@ -19,6 +19,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { ToolMode } from "../shared/protocol.js";
 import type { PortableExtensionUI } from "./extension-ui.js";
+import { applyCodexAutoTransportPolicy } from "./codex-transport-policy.js";
 import {
   type AgentTurnBoundaryCheck,
   type AgentTurnBoundaryController,
@@ -419,6 +420,7 @@ export class PiRuntime implements PiRuntimeLike {
     );
     this.sessionRegistries.add(owner);
     let settings: SettingsManager;
+    let resolvedTransport: ReturnType<SettingsManager["getTransport"]>;
     let created: CreateAgentSessionResult;
     let createdSession: AgentSession | undefined;
     let toolProjectionAdapter: ToolProjectionAdapter | undefined;
@@ -448,6 +450,8 @@ export class PiRuntime implements PiRuntimeLike {
         const fixedModel = fixedModelReference
           ? this.resolveFixedModel(owner.registry, fixedModelReference)
           : undefined;
+        if (fixedModel) applyCodexAutoTransportPolicy(settings, fixedModel);
+        resolvedTransport = settings.getTransport();
         created = await this.sessionFactory({
           cwd,
           authStorage: this.authStorage,
@@ -486,6 +490,8 @@ export class PiRuntime implements PiRuntimeLike {
         const fixedModel = fixedModelReference
           ? this.resolveFixedModel(services.modelRegistry, fixedModelReference)
           : undefined;
+        if (fixedModel) applyCodexAutoTransportPolicy(settings, fixedModel);
+        resolvedTransport = settings.getTransport();
         created = await this.sessionFromServicesFactory({
           services,
           sessionManager,
@@ -577,7 +583,10 @@ export class PiRuntime implements PiRuntimeLike {
           options.turnBoundaryCheck,
         );
       }
-      compactionThinkingOverride = installCompactionThinkingOverride(createdSession);
+      compactionThinkingOverride = installCompactionThinkingOverride(
+        createdSession,
+        resolvedTransport,
+      );
 
       const startupProviderErrors = owner.takeStartupProviderErrors();
       if (startupProviderErrors.length > 0) {

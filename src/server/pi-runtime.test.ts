@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import type { Api, Transport } from "@earendil-works/pi-ai";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -48,6 +49,71 @@ function providerModel(id: string) {
     contextWindow: 1024,
     maxTokens: 128,
   };
+}
+
+function fixedModelTransportRuntime(
+  factory: "direct" | "services",
+  transport: Transport,
+  provider: string,
+  api: Api,
+): { runtime: PiRuntime; constructedTransport(): Transport | undefined } {
+  const authStorage = AuthStorage.inMemory();
+  let constructed: Transport | undefined;
+  const createModelRegistry = (storage: AuthStorage) => {
+    const registry = ModelRegistry.inMemory(storage);
+    registry.registerProvider(provider, {
+      baseUrl: "https://example.invalid/v1",
+      apiKey: "test-key",
+      api,
+      models: [providerModel("fixed-model")],
+    });
+    return registry;
+  };
+  const options = {
+    authStorage,
+    modelRegistry: ModelRegistry.inMemory(authStorage),
+    createModelRegistry,
+    createSettings: () => SettingsManager.inMemory({ transport }),
+  };
+  const runtime = factory === "direct"
+    ? new PiRuntime({
+        ...options,
+        createSession: async (sessionOptions) => {
+          constructed = sessionOptions.settingsManager?.getTransport();
+          const resourceLoader = new DefaultResourceLoader({
+            cwd: sessionOptions.cwd ?? process.cwd(),
+            agentDir: sessionOptions.cwd ?? process.cwd(),
+            settingsManager: sessionOptions.settingsManager,
+            noExtensions: true,
+            noSkills: true,
+            noPromptTemplates: true,
+            noThemes: true,
+            noContextFiles: true,
+          });
+          return createAgentSession({ ...sessionOptions, resourceLoader });
+        },
+      })
+    : new PiRuntime({
+        ...options,
+        createServices: (serviceOptions) => createAgentSessionServices({
+          ...serviceOptions,
+          agentDir: serviceOptions.cwd,
+          resourceLoaderOptions: {
+            ...serviceOptions.resourceLoaderOptions,
+            noExtensions: true,
+            noSkills: true,
+            noPromptTemplates: true,
+            noThemes: true,
+            noContextFiles: true,
+          },
+        }),
+        createSessionFromServices: async (sessionOptions) => {
+          constructed = sessionOptions.services.settingsManager.getTransport();
+          return createAgentSessionFromServices(sessionOptions);
+        },
+      });
+
+  return { runtime, constructedTransport: () => constructed };
 }
 
 function workbenchTool(cwd: string, name = "workbench_meta") {
@@ -374,6 +440,30 @@ describe("PiRuntime session ownership", () => {
     expect(explicitSession.session.sessionManager).toBe(manager);
     await explicitSession.dispose();
   });
+
+  it.each([
+    ["direct", "openai-codex", "openai-codex-responses", "auto", "sse"],
+    ["services", "openai-codex", "openai-codex-responses", "auto", "sse"],
+    ["direct", "openai-codex", "openai-codex-responses", "websocket", "websocket"],
+    ["services", "openai-codex", "openai-codex-responses", "websocket-cached", "websocket-cached"],
+    ["direct", "openai-codex", "openai-codex-responses", "sse", "sse"],
+    ["services", "openai", "openai-responses", "auto", "auto"],
+  ] as const)(
+    "constructs a %s fixed session with %s transport resolved from %s/%s",
+    async (factory, provider, api, transport, expectedTransport) => {
+      const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-transport-"));
+      const fixture = fixedModelTransportRuntime(factory, transport, provider, api);
+
+      const created = await fixture.runtime.createSession(cwd, {
+        model: { provider, id: "fixed-model" },
+      });
+
+      expect(fixture.constructedTransport()).toBe(expectedTransport);
+      expect(created.settings.getTransport()).toBe(expectedTransport);
+      expect(created.session.agent.transport).toBe(expectedTransport);
+      await created.dispose();
+    },
+  );
 
   it("passes a fixed authenticated model and workbench tools through the direct factory", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-direct-role-"));

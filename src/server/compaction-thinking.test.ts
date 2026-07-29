@@ -29,7 +29,7 @@ function fakeSession() {
 describe("installCompactionThinkingOverride", () => {
   it("uses the nearest supported minimal level only during compaction", () => {
     const fixture = fakeSession();
-    const override = installCompactionThinkingOverride(fixture.session);
+    const override = installCompactionThinkingOverride(fixture.session, "auto");
 
     fixture.emit({ type: "compaction_start", reason: "threshold" });
     fixture.session.agent.streamFn(
@@ -53,9 +53,58 @@ describe("installCompactionThinkingOverride", () => {
     override.dispose();
   });
 
+  it.each([
+    ["sse", "websocket"],
+    ["websocket", "sse"],
+    ["websocket-cached", "sse"],
+  ] as const)(
+    "forces configured %s transport for Codex compaction",
+    (transport, inputTransport) => {
+      const fixture = fakeSession();
+      const override = installCompactionThinkingOverride(fixture.session, transport);
+
+      fixture.emit({ type: "compaction_start", reason: "threshold" });
+      fixture.session.agent.streamFn(
+        {
+          provider: "openai-codex",
+          api: "openai-codex-responses",
+          reasoning: true,
+        } as never,
+        {} as never,
+        { reasoning: "max", transport: inputTransport },
+      );
+
+      expect(fixture.originalStream).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        { reasoning: "minimal", transport },
+      );
+      override.dispose();
+    },
+  );
+
+  it("preserves a non-Codex compaction transport", () => {
+    const fixture = fakeSession();
+    const override = installCompactionThinkingOverride(fixture.session, "sse");
+
+    fixture.emit({ type: "compaction_start", reason: "threshold" });
+    fixture.session.agent.streamFn(
+      { provider: "openai", api: "openai-responses", reasoning: true } as never,
+      {} as never,
+      { reasoning: "max", transport: "websocket" },
+    );
+
+    expect(fixture.originalStream).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      { reasoning: "minimal", transport: "websocket" },
+    );
+    override.dispose();
+  });
+
   it("preserves manual auth identity before overriding a non-reasoning model", async () => {
     const fixture = fakeSession();
-    const override = installCompactionThinkingOverride(fixture.session);
+    const override = installCompactionThinkingOverride(fixture.session, "auto");
 
     fixture.emit({ type: "compaction_start", reason: "manual" });
     expect(fixture.session.agent.streamFn).toBe(fixture.originalStream);
@@ -79,7 +128,7 @@ describe("installCompactionThinkingOverride", () => {
 
   it("does not install a deferred manual override after disposal", async () => {
     const fixture = fakeSession();
-    const override = installCompactionThinkingOverride(fixture.session);
+    const override = installCompactionThinkingOverride(fixture.session, "auto");
 
     fixture.emit({ type: "compaction_start", reason: "manual" });
     override.dispose();
