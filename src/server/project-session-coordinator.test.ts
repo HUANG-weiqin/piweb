@@ -10293,6 +10293,91 @@ describe("ProjectSessionCoordinator", () => {
       await restarted.close();
     });
 
+    it("does not let a terminal batch receipt delete a replaced sidecar", async () => {
+      const fixture = await createFixture();
+      const actor = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      await waitUntil(
+        () => (fixture.handle as unknown as {
+          context: { backgroundTasks: Set<Promise<void>> };
+        }).context.backgroundTasks.size === 0,
+        "initial actor pump to settle",
+      );
+      const queue = coordinatorPromptQueue(fixture.handle);
+      const promptId = randomUUID();
+      const runId = randomUUID();
+      await queue.put({
+        promptId,
+        conversationId: actor.conversationId,
+        text: "replacement must not inherit an old receipt",
+        createdAt: "2026-07-30T11:30:00.000Z",
+      });
+      await queue.markDispatching(
+        promptId,
+        actor.conversationId,
+        runId,
+        "2026-07-30T11:30:01.000Z",
+      );
+      const batch = {
+        batchId: randomUUID(),
+        conversationId: actor.conversationId,
+        runId,
+        items: [{
+          promptId,
+          createdAt: "2026-07-30T11:30:00.000Z",
+          payloadSha256: "0".repeat(64),
+        }],
+      };
+      for (const [index, state] of ([
+        "prepared",
+        "started",
+        "delivered",
+        "completed",
+      ] as const).entries()) {
+        appendReservedCustomEntry(
+          actor.sessionManager,
+          createPendingPromptBatchEntry({
+            ...batch,
+            state,
+            updatedAt: `2026-07-30T11:30:0${index + 2}.000Z`,
+          }),
+        );
+      }
+      appendReservedCustomEntry(
+        actor.sessionManager,
+        createPendingPromptDeliveryEntry({
+          promptId,
+          runId,
+          batchId: batch.batchId,
+          deliveredAt: "2026-07-30T11:30:06.000Z",
+        }),
+      );
+
+      await fixture.coordinator.close();
+      const restarted = new ProjectSessionCoordinator(
+        fixture.runtime,
+        fixture.roles,
+        fixture.registry,
+      );
+      const handle = await restarted.acquireProject(fixture.cwd, "full_access");
+      const context = (handle as unknown as {
+        context: { promptAttention: Set<string> };
+      }).context;
+      await waitUntil(
+        () => context.promptAttention.has(actor.conversationId),
+        "terminal batch replacement fence",
+      );
+      await expect(coordinatorPromptQueue(handle).list({
+        conversationId: actor.conversationId,
+      })).resolves.toEqual([
+        expect.objectContaining({ promptId, state: "dispatching", runId }),
+      ]);
+      expect(fixture.runtime.control(actor.conversationId).promptTexts).toEqual([]);
+      await restarted.close();
+    });
+
     it("marks started batches attention without redelivering their composite steer", async () => {
       const fixture = await createFixture();
       const actor = await fixture.coordinator.createUserConversation(fixture.handle, { roleId: "default" });

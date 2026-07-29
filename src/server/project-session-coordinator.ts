@@ -5225,13 +5225,36 @@ export class ProjectSessionCoordinator {
         continue;
       }
       if (prompt.state !== "dispatching") continue;
-      const delivered = pendingPromptDeliveriesByConversation
+      const delivery = pendingPromptDeliveriesByConversation
         .get(prompt.conversationId)
-        ?.some((delivery) => (
-          delivery.promptId === prompt.promptId
-          && delivery.runId === prompt.runId
+        ?.find((candidate) => (
+          candidate.promptId === prompt.promptId
+          && candidate.runId === prompt.runId
         ));
-      if (delivered) {
+      if (delivery?.batchId !== undefined) {
+        const batch = pendingPromptBatchesByConversation
+          .get(prompt.conversationId)
+          ?.find(({ batchId }) => batchId === delivery.batchId);
+        const item = batch?.items.find(({ promptId }) => (
+          promptId === prompt.promptId
+        ));
+        if (
+          batch?.runId !== prompt.runId
+          || item === undefined
+          || item.createdAt !== prompt.createdAt
+          || item.payloadSha256 !== projectPromptPayloadSha256(prompt)
+        ) {
+          context.promptAttention.add(prompt.conversationId);
+          continue;
+        }
+        await context.promptQueue.removeDeliveredBatchPrompt(
+          prompt.promptId,
+          prompt.conversationId,
+          prompt.runId,
+          item.createdAt,
+          item.payloadSha256,
+        );
+      } else if (delivery !== undefined) {
         await context.promptQueue.removeForHostCleanup(
           prompt.promptId,
           prompt.conversationId,
