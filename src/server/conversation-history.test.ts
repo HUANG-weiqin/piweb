@@ -18,6 +18,7 @@ import {
   createConversationCardEntry,
   createConversationMessageEntry,
   createConversationMetaEntry,
+  createPendingPromptBatchEntry,
   createRunSettlementEntry,
 } from "./conversation-meta.js";
 
@@ -92,6 +93,35 @@ describe("projectConversationHistory", () => {
           status: "done",
         }],
       }),
+    ]);
+  });
+
+  it("ignores non-context pending prompt batch manifests", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    const conversationId = randomUUID();
+    manager.appendMessage(message({
+      role: "user",
+      content: "keep this visible",
+      timestamp: 1,
+    }));
+    appendReservedCustomEntry(manager, createPendingPromptBatchEntry({
+      batchId: randomUUID(),
+      conversationId,
+      runId: randomUUID(),
+      items: [{
+        promptId: randomUUID(),
+        createdAt: "2026-07-29T10:00:00.000Z",
+        payloadSha256: "a".repeat(64),
+      }],
+      state: "prepared",
+      updatedAt: "2026-07-29T10:00:00.000Z",
+    }));
+
+    expect(projectConversationHistory(manager)).toEqual([
+      expect.objectContaining({ role: "user", text: "keep this visible" }),
+    ]);
+    expect(projectConversationItems(manager)).toEqual([
+      expect.objectContaining({ kind: "message", text: "keep this visible" }),
     ]);
   });
 

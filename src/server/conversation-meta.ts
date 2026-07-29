@@ -2,6 +2,8 @@ import { z } from "zod";
 import {
   MAX_COMPACTION_THRESHOLD_PERCENT,
   MAX_MODEL_REFERENCE_BYTES,
+  MAX_PENDING_PROMPT_ATTENTION_REASON_CHARACTERS,
+  MAX_PENDING_PROMPTS_PER_CONVERSATION,
   MIN_COMPACTION_THRESHOLD_PERCENT,
 } from "../shared/protocol.js";
 
@@ -15,6 +17,8 @@ export const RUN_SETTLEMENT_CUSTOM_TYPE =
   "piweb.run_settlement.v1";
 export const PENDING_PROMPT_DELIVERY_CUSTOM_TYPE =
   "piweb.pending_prompt_delivery.v1";
+export const PENDING_PROMPT_BATCH_CUSTOM_TYPE =
+  "piweb.pending_prompt_batch.v1";
 export const META_OPERATION_CUSTOM_TYPE =
   "piweb.meta_operation.v1";
 export const COMPACTION_THRESHOLD_CUSTOM_TYPE =
@@ -391,12 +395,107 @@ const runSettlementEntrySchema = z.object({
 const pendingPromptDeliverySchema = z.object({
   promptId: uuidSchema("promptId"),
   runId: uuidSchema("runId"),
+  batchId: uuidSchema("batchId").optional(),
   deliveredAt: canonicalTimestampSchema("deliveredAt"),
 }).strict();
 
 const pendingPromptDeliveryEntrySchema = z.object({
   customType: z.literal(PENDING_PROMPT_DELIVERY_CUSTOM_TYPE),
   data: pendingPromptDeliverySchema,
+}).strict();
+
+const pendingPromptBatchItemSchema = z.object({
+  promptId: uuidSchema("promptId"),
+  createdAt: canonicalTimestampSchema("createdAt"),
+  payloadSha256: z.string().regex(
+    SHA256_HEX_PATTERN,
+    "payloadSha256 must be a lowercase SHA-256 hex digest",
+  ),
+}).strict();
+
+const pendingPromptBatchIdentityFields = {
+  batchId: uuidSchema("batchId"),
+  conversationId: conversationIdSchema("conversationId"),
+  runId: uuidSchema("runId"),
+  items: z.array(pendingPromptBatchItemSchema)
+    .min(1)
+    .max(MAX_PENDING_PROMPTS_PER_CONVERSATION),
+};
+
+const pendingPromptBatchReasonSchema = z.string()
+  .min(1)
+  .max(MAX_PENDING_PROMPT_ATTENTION_REASON_CHARACTERS)
+  .refine((value) => value.trim().length > 0, "pending prompt batch reason must not be blank");
+
+const pendingPromptBatchSchema = z.discriminatedUnion("state", [
+  z.object({
+    ...pendingPromptBatchIdentityFields,
+    state: z.literal("prepared"),
+    updatedAt: canonicalTimestampSchema("updatedAt"),
+  }).strict(),
+  z.object({
+    ...pendingPromptBatchIdentityFields,
+    state: z.literal("started"),
+    updatedAt: canonicalTimestampSchema("updatedAt"),
+  }).strict(),
+  z.object({
+    ...pendingPromptBatchIdentityFields,
+    state: z.literal("delivered"),
+    updatedAt: canonicalTimestampSchema("updatedAt"),
+  }).strict(),
+  z.object({
+    ...pendingPromptBatchIdentityFields,
+    state: z.literal("completed"),
+    updatedAt: canonicalTimestampSchema("updatedAt"),
+  }).strict(),
+  z.object({
+    ...pendingPromptBatchIdentityFields,
+    state: z.literal("failed"),
+    updatedAt: canonicalTimestampSchema("updatedAt"),
+    reason: pendingPromptBatchReasonSchema,
+  }).strict(),
+  z.object({
+    ...pendingPromptBatchIdentityFields,
+    state: z.literal("attention"),
+    updatedAt: canonicalTimestampSchema("updatedAt"),
+    reason: pendingPromptBatchReasonSchema,
+  }).strict(),
+]).superRefine((value, context) => {
+  const promptIds = new Set<string>();
+  let previous: { createdAt: string; promptId: string } | undefined;
+  for (let index = 0; index < value.items.length; index += 1) {
+    const item = value.items[index]!;
+    if (promptIds.has(item.promptId)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "pending prompt batch items must have unique promptId values",
+        path: ["items", index, "promptId"],
+      });
+    }
+    promptIds.add(item.promptId);
+    if (
+      previous !== undefined
+      && (
+        Date.parse(item.createdAt) < Date.parse(previous.createdAt)
+        || (
+          item.createdAt === previous.createdAt
+          && item.promptId.localeCompare(previous.promptId) <= 0
+        )
+      )
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "pending prompt batch items must be ordered by createdAt and promptId",
+        path: ["items", index],
+      });
+    }
+    previous = item;
+  }
+});
+
+const pendingPromptBatchEntrySchema = z.object({
+  customType: z.literal(PENDING_PROMPT_BATCH_CUSTOM_TYPE),
+  data: pendingPromptBatchSchema,
 }).strict();
 
 const temporaryReturnReceiptIdentitySchema = z.object({
@@ -549,6 +648,9 @@ export type PendingPromptDelivery =
   z.infer<typeof pendingPromptDeliverySchema>;
 export type PendingPromptDeliveryEntry =
   z.infer<typeof pendingPromptDeliveryEntrySchema>;
+export type PendingPromptBatch = z.infer<typeof pendingPromptBatchSchema>;
+export type PendingPromptBatchEntry =
+  z.infer<typeof pendingPromptBatchEntrySchema>;
 export type TemporaryReturnReceipt =
   z.infer<typeof temporaryReturnReceiptSchema>;
 export type TemporaryReturnReceiptEntry =
@@ -595,6 +697,10 @@ export type ReservedConversationEntry =
       entry: PendingPromptDeliveryEntry;
     }
   | {
+      kind: "pending_prompt_batch";
+      entry: PendingPromptBatchEntry;
+    }
+  | {
       kind: "temporary_return_receipt";
       entry: TemporaryReturnReceiptEntry;
     }
@@ -613,6 +719,7 @@ export interface ReservedConversationAggregate {
   deliveredMessageIds: string[];
   runSettlements: RunSettlement[];
   pendingPromptDeliveries: PendingPromptDelivery[];
+  pendingPromptBatches: PendingPromptBatch[];
   temporaryReturnReceipts: TemporaryReturnReceipt[];
   metaOperations: MetaOperation[];
   compactionThreshold?: CompactionThreshold;
@@ -737,6 +844,21 @@ export function createPendingPromptDeliveryEntry(
   });
 }
 
+export function parsePendingPromptBatchEntry(
+  value: unknown,
+): PendingPromptBatchEntry {
+  return pendingPromptBatchEntrySchema.parse(value);
+}
+
+export function createPendingPromptBatchEntry(
+  data: PendingPromptBatch,
+): PendingPromptBatchEntry {
+  return parsePendingPromptBatchEntry({
+    customType: PENDING_PROMPT_BATCH_CUSTOM_TYPE,
+    data,
+  });
+}
+
 export function parseTemporaryReturnReceiptEntry(
   value: unknown,
 ): TemporaryReturnReceiptEntry {
@@ -796,6 +918,7 @@ export function appendReservedCustomEntry(
     | ConversationCardEntry
     | RunSettlementEntry
     | PendingPromptDeliveryEntry
+    | PendingPromptBatchEntry
     | TemporaryReturnReceiptEntry
     | MetaOperationEntry
     | CompactionThresholdEntry,
@@ -910,6 +1033,12 @@ export function parseReservedConversationEntry(
       entry: parsePendingPromptDeliveryEntry(payload),
     };
   }
+  if (customType === PENDING_PROMPT_BATCH_CUSTOM_TYPE) {
+    return {
+      kind: "pending_prompt_batch",
+      entry: parsePendingPromptBatchEntry(payload),
+    };
+  }
   if (customType === TEMPORARY_RETURN_RECEIPT_CUSTOM_TYPE) {
     return {
       kind: "temporary_return_receipt",
@@ -930,6 +1059,30 @@ export function parseReservedConversationEntry(
   }
   throw new Error(`Unknown piweb reserved custom type: ${customType}`);
 }
+
+function pendingPromptBatchIdentity(batch: PendingPromptBatch): string {
+  return JSON.stringify({
+    batchId: batch.batchId,
+    conversationId: batch.conversationId,
+    runId: batch.runId,
+    items: batch.items,
+  });
+}
+
+const TERMINAL_PENDING_PROMPT_BATCH_STATES = new Set<
+  PendingPromptBatch["state"]
+>(["completed", "failed", "attention"]);
+
+const ALLOWED_PENDING_PROMPT_BATCH_TRANSITIONS: Readonly<
+  Record<PendingPromptBatch["state"], ReadonlySet<PendingPromptBatch["state"]>>
+> = {
+  prepared: new Set(["started", "failed"]),
+  started: new Set(["delivered", "failed", "attention"]),
+  delivered: new Set(["completed"]),
+  completed: new Set(),
+  failed: new Set(),
+  attention: new Set(),
+};
 
 function settlementCore(settlement: RunSettlement): string {
   return JSON.stringify({
@@ -1056,6 +1209,7 @@ export function aggregateReservedConversationEntries(
   const deliveredMessageIds = new Set<string>();
   const runSettlements = new Map<string, RunSettlement>();
   const pendingPromptDeliveries = new Map<string, PendingPromptDelivery>();
+  const pendingPromptBatches = new Map<string, PendingPromptBatch>();
   const temporaryReturnReceipts = new Map<
     string,
     TemporaryReturnReceipt
@@ -1127,6 +1281,42 @@ export function aggregateReservedConversationEntries(
         );
       }
       pendingPromptDeliveries.set(incoming.promptId, incoming);
+      continue;
+    }
+    if (reserved.kind === "pending_prompt_batch") {
+      const incoming = reserved.entry.data;
+      const existing = pendingPromptBatches.get(incoming.batchId);
+      if (existing === undefined) {
+        if (incoming.state !== "prepared") {
+          throw new Error(
+            `Piweb pending prompt batch ${incoming.batchId} must begin in prepared state`,
+          );
+        }
+        pendingPromptBatches.set(incoming.batchId, incoming);
+        continue;
+      }
+      if (JSON.stringify(existing) === JSON.stringify(incoming)) continue;
+      if (pendingPromptBatchIdentity(existing) !== pendingPromptBatchIdentity(incoming)) {
+        throw new Error(
+          `Conflicting piweb pending prompt batch identity for batchId ${incoming.batchId}`,
+        );
+      }
+      if (Date.parse(incoming.updatedAt) < Date.parse(existing.updatedAt)) {
+        throw new Error(
+          `Piweb pending prompt batch updatedAt cannot regress for batchId ${incoming.batchId}`,
+        );
+      }
+      if (TERMINAL_PENDING_PROMPT_BATCH_STATES.has(existing.state)) {
+        throw new Error(
+          `Piweb pending prompt batch terminal state cannot change for batchId ${incoming.batchId}`,
+        );
+      }
+      if (!ALLOWED_PENDING_PROMPT_BATCH_TRANSITIONS[existing.state].has(incoming.state)) {
+        throw new Error(
+          `Piweb pending prompt batch state cannot transition from ${existing.state} to ${incoming.state} for batchId ${incoming.batchId}`,
+        );
+      }
+      pendingPromptBatches.set(incoming.batchId, incoming);
       continue;
     }
     if (reserved.kind === "temporary_return_receipt") {
@@ -1290,6 +1480,7 @@ export function aggregateReservedConversationEntries(
     deliveredMessageIds: [...deliveredMessageIds],
     runSettlements: [...runSettlements.values()],
     pendingPromptDeliveries: [...pendingPromptDeliveries.values()],
+    pendingPromptBatches: [...pendingPromptBatches.values()],
     temporaryReturnReceipts: [...temporaryReturnReceipts.values()],
     metaOperations: [...metaOperations.values()],
     ...(compactionThreshold === undefined

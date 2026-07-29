@@ -12,6 +12,7 @@ import {
   MAX_ROLE_SYSTEM_PROMPT_BYTES,
   MAX_RUN_FINAL_TEXT_BYTES,
   META_OPERATION_CUSTOM_TYPE,
+  PENDING_PROMPT_BATCH_CUSTOM_TYPE,
   PENDING_PROMPT_DELIVERY_CUSTOM_TYPE,
   RUN_SETTLEMENT_CUSTOM_TYPE,
   TEMPORARY_RETURN_RECEIPT_CUSTOM_TYPE,
@@ -23,6 +24,7 @@ import {
   createConversationMetaEntry,
   createConversationRoleChangeEntry,
   createMetaOperationEntry,
+  createPendingPromptBatchEntry,
   createPendingPromptDeliveryEntry,
   createRunSettlementEntry,
   createTemporaryReturnReceiptEntry,
@@ -32,6 +34,7 @@ import {
   parseConversationMetaEntry,
   parseConversationRoleChangeEntry,
   parseMetaOperationEntry,
+  parsePendingPromptBatchEntry,
   parsePendingPromptDeliveryEntry,
   parseReservedConversationEntry,
   parseRunSettlementEntry,
@@ -449,6 +452,12 @@ describe("conversation reserved entries", () => {
       runId: randomUUID(),
       deliveredAt: timestamp,
     });
+    const batchDelivery = createPendingPromptDeliveryEntry({
+      promptId: randomUUID(),
+      runId: delivery.data.runId,
+      batchId: randomUUID(),
+      deliveredAt: "2026-07-19T10:00:30.000Z",
+    });
     const sameRunDifferentPrompt = createPendingPromptDeliveryEntry({
       promptId: randomUUID(),
       runId: delivery.data.runId,
@@ -456,6 +465,8 @@ describe("conversation reserved entries", () => {
     });
     expect(delivery.customType).toBe(PENDING_PROMPT_DELIVERY_CUSTOM_TYPE);
     expect(parsePendingPromptDeliveryEntry(delivery)).toEqual(delivery);
+    expect(delivery.data.batchId).toBeUndefined();
+    expect(parsePendingPromptDeliveryEntry(batchDelivery)).toEqual(batchDelivery);
     expect(parseReservedConversationEntry(delivery)).toEqual({
       kind: "pending_prompt_delivery",
       entry: delivery,
@@ -464,9 +475,11 @@ describe("conversation reserved entries", () => {
       .pendingPromptDeliveries).toEqual([delivery.data]);
     expect(aggregateReservedConversationEntries([
       delivery,
+      batchDelivery,
       sameRunDifferentPrompt,
     ]).pendingPromptDeliveries).toEqual([
       delivery.data,
+      batchDelivery.data,
       sameRunDifferentPrompt.data,
     ]);
     expect(() => aggregateReservedConversationEntries([
@@ -487,6 +500,113 @@ describe("conversation reserved entries", () => {
       ...delivery.data,
       promptId: "not-a-uuid",
     })).toThrow(/promptId/i);
+  });
+
+  it("folds immutable pending prompt batch manifests through strict state transitions", () => {
+    const prepared = createPendingPromptBatchEntry({
+      batchId: randomUUID(),
+      conversationId: randomUUID(),
+      runId: randomUUID(),
+      items: [
+        {
+          promptId: randomUUID(),
+          createdAt: timestamp,
+          payloadSha256: "a".repeat(64),
+        },
+        {
+          promptId: randomUUID(),
+          createdAt: "2026-07-19T10:00:01.000Z",
+          payloadSha256: "b".repeat(64),
+        },
+      ],
+      state: "prepared",
+      updatedAt: timestamp,
+    });
+    const started = createPendingPromptBatchEntry({
+      ...prepared.data,
+      state: "started",
+      updatedAt: "2026-07-19T10:01:00.000Z",
+    });
+    const delivered = createPendingPromptBatchEntry({
+      ...started.data,
+      state: "delivered",
+      updatedAt: "2026-07-19T10:02:00.000Z",
+    });
+    const completed = createPendingPromptBatchEntry({
+      ...delivered.data,
+      state: "completed",
+      updatedAt: "2026-07-19T10:03:00.000Z",
+    });
+
+    expect(prepared.customType).toBe(PENDING_PROMPT_BATCH_CUSTOM_TYPE);
+    expect(parsePendingPromptBatchEntry(prepared)).toEqual(prepared);
+    expect(parseReservedConversationEntry(prepared)).toEqual({
+      kind: "pending_prompt_batch",
+      entry: prepared,
+    });
+    expect(aggregateReservedConversationEntries([
+      prepared,
+      prepared,
+      started,
+      delivered,
+      completed,
+      completed,
+    ]).pendingPromptBatches).toEqual([completed.data]);
+    expect(() => aggregateReservedConversationEntries([started]))
+      .toThrow(/begin in prepared/i);
+    expect(() => aggregateReservedConversationEntries([
+      prepared,
+      delivered,
+    ])).toThrow(/cannot transition/i);
+    expect(() => aggregateReservedConversationEntries([
+      prepared,
+      createPendingPromptBatchEntry({
+        ...started.data,
+        runId: randomUUID(),
+      }),
+    ])).toThrow(/conflicting.*identity/i);
+    expect(() => aggregateReservedConversationEntries([
+      prepared,
+      started,
+      createPendingPromptBatchEntry({
+        ...started.data,
+        state: "failed",
+        updatedAt: "2026-07-19T10:02:00.000Z",
+        reason: "deterministic rejection",
+      }),
+      createPendingPromptBatchEntry({
+        ...started.data,
+        updatedAt: "2026-07-19T10:03:00.000Z",
+      }),
+    ])).toThrow(/terminal state/i);
+    expect(() => parsePendingPromptBatchEntry({
+      customType: PENDING_PROMPT_BATCH_CUSTOM_TYPE,
+      data: {
+        ...prepared.data,
+        items: [{
+          ...prepared.data.items[0],
+          payloadSha256: "A".repeat(64),
+        }],
+        reason: "forbidden",
+      },
+    })).toThrow(/unrecognized|unknown/i);
+    expect(() => parsePendingPromptBatchEntry({
+      customType: PENDING_PROMPT_BATCH_CUSTOM_TYPE,
+      data: {
+        ...prepared.data,
+        items: [{
+          ...prepared.data.items[0],
+          payloadSha256: "A".repeat(64),
+        }],
+      },
+    })).toThrow(/payloadSha256/i);
+    expect(() => parsePendingPromptBatchEntry({
+      customType: PENDING_PROMPT_BATCH_CUSTOM_TYPE,
+      data: {
+        ...prepared.data,
+        state: "failed",
+      },
+    })).toThrow(/reason/i);
   });
 
   it("records caller-owned temporary return receipt transitions strictly", () => {

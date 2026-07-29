@@ -5,10 +5,12 @@ import {
   CONVERSATION_MESSAGE_CUSTOM_TYPE,
   CONVERSATION_META_CUSTOM_TYPE,
   RUN_SETTLEMENT_CUSTOM_TYPE,
+  PENDING_PROMPT_BATCH_CUSTOM_TYPE,
   PENDING_PROMPT_DELIVERY_CUSTOM_TYPE,
   createConversationCardEntry,
   createConversationMessageEntry,
   createConversationMetaEntry,
+  createPendingPromptBatchEntry,
   createPendingPromptDeliveryEntry,
   createRunSettlementEntry,
 } from "./conversation-meta.js";
@@ -339,6 +341,18 @@ describe("validatePiSessionFile", () => {
       runId,
       deliveredAt: "2026-01-01T00:03:30.000Z",
     });
+    const batch = createPendingPromptBatchEntry({
+      batchId: randomUUID(),
+      conversationId,
+      runId,
+      items: [{
+        promptId: randomUUID(),
+        createdAt: "2026-01-01T00:03:15.000Z",
+        payloadSha256: "a".repeat(64),
+      }],
+      state: "prepared",
+      updatedAt: "2026-01-01T00:03:20.000Z",
+    });
     const meta = createConversationMetaEntry(metadata());
     const base = (
       type: string,
@@ -404,6 +418,11 @@ describe("validatePiSessionFile", () => {
         customType: PENDING_PROMPT_DELIVERY_CUSTOM_TYPE,
         data: delivery.data,
       },
+      {
+        ...base("custom", "00000008", "00000007"),
+        customType: PENDING_PROMPT_BATCH_CUSTOM_TYPE,
+        data: batch.data,
+      },
     ]);
 
     expect(inspectPiSessionFile(
@@ -417,6 +436,7 @@ describe("validatePiSessionFile", () => {
       deliveredMessageIds: [messageId],
       runSettlements: [settlement.data],
       pendingPromptDeliveries: [delivery.data],
+      pendingPromptBatches: [batch.data],
       temporaryReturnReceipts: [],
       metaOperations: [],
       lastActivityAt: "2026-01-01T00:05:00.000Z",

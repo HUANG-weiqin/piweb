@@ -8,7 +8,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { MAX_PROMPT_CHARACTERS } from "../shared/protocol.js";
 import {
   MAX_PENDING_PROMPTS_PER_CONVERSATION,
@@ -199,6 +199,162 @@ describe("ProjectPromptQueue", () => {
       value.promptId,
       value.conversationId,
     )).resolves.toBe(true);
+  });
+
+  it("bulk claims all queued prompts for a conversation in FIFO order and exactly requeues them", async () => {
+    const { queue } = await temporaryQueue("piweb-prompt-bulk-");
+    const conversationId = randomUUID();
+    const later = input({
+      conversationId,
+      createdAt: "2026-07-24T10:00:02.000Z",
+    });
+    const earlier = input({
+      conversationId,
+      createdAt: "2026-07-24T10:00:01.000Z",
+    });
+    await queue.put(later);
+    await queue.put(earlier);
+    await queue.put(input());
+    const runId = randomUUID();
+
+    await expect(queue.claimAllQueuedForConversation(
+      conversationId,
+      runId,
+      timestamp,
+    )).resolves.toEqual([
+      expect.objectContaining({ promptId: earlier.promptId, state: "dispatching", runId }),
+      expect.objectContaining({ promptId: later.promptId, state: "dispatching", runId }),
+    ]);
+    await expect(queue.requeueDispatchingBatch(
+      [earlier.promptId, later.promptId],
+      conversationId,
+      runId,
+    )).resolves.toEqual([
+      expect.objectContaining({ promptId: earlier.promptId, state: "queued" }),
+      expect.objectContaining({ promptId: later.promptId, state: "queued" }),
+    ]);
+  });
+
+  it("rejects bulk claims with existing dispatching prompts or without queued prompts", async () => {
+    const { queue } = await temporaryQueue("piweb-prompt-bulk-reject-");
+    const conversationId = randomUUID();
+    const dispatching = input({ conversationId });
+    const stillQueued = input({ conversationId });
+    await queue.put(dispatching);
+    await queue.put(stillQueued);
+    await queue.markDispatching(
+      dispatching.promptId,
+      conversationId,
+      randomUUID(),
+      timestamp,
+    );
+
+    await expect(queue.claimAllQueuedForConversation(
+      conversationId,
+      randomUUID(),
+      timestamp,
+    )).rejects.toThrow(/already has dispatching/i);
+    await expect(queue.claimAllQueuedForConversation(
+      randomUUID(),
+      randomUUID(),
+      timestamp,
+    )).rejects.toThrow(/no queued/i);
+  });
+
+  it("validates every bulk requeue claim before changing any prompt", async () => {
+    const { queue } = await temporaryQueue("piweb-prompt-bulk-requeue-");
+    const conversationId = randomUUID();
+    const first = input({ conversationId });
+    const second = input({ conversationId });
+    await queue.put(first);
+    await queue.put(second);
+    const runId = randomUUID();
+    await queue.claimAllQueuedForConversation(conversationId, runId, timestamp);
+
+    await expect(queue.requeueDispatchingBatch(
+      [first.promptId, randomUUID()],
+      conversationId,
+      runId,
+    )).rejects.toThrow(/not found/i);
+    await expect(queue.list({ conversationId })).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ promptId: first.promptId, state: "dispatching", runId }),
+      expect.objectContaining({ promptId: second.promptId, state: "dispatching", runId }),
+    ]));
+    await expect(queue.requeueDispatchingBatch(
+      [first.promptId, second.promptId],
+      conversationId,
+      randomUUID(),
+    )).rejects.toThrow(/runId/i);
+  });
+
+  it("rolls back only this bulk claim when a later write fails", async () => {
+    const { queue } = await temporaryQueue("piweb-prompt-bulk-rollback-");
+    const conversationId = randomUUID();
+    const prompts = [input({ conversationId }), input({ conversationId }), input({ conversationId })];
+    for (const prompt of prompts) await queue.put(prompt);
+    const internals = queue as unknown as {
+      replaceStoredPrompt: (...args: never[]) => Promise<void>;
+    };
+    const original = internals.replaceStoredPrompt;
+    let writes = 0;
+    const replacement = vi.spyOn(internals, "replaceStoredPrompt")
+      .mockImplementation(async (...args) => {
+        writes += 1;
+        if (writes === 3) throw new Error("injected write failure");
+        return original.apply(queue, args);
+      });
+
+    await expect(queue.claimAllQueuedForConversation(
+      conversationId,
+      randomUUID(),
+      timestamp,
+    )).rejects.toThrow(/injected write failure/i);
+    replacement.mockRestore();
+    await expect(queue.list({ conversationId })).resolves.toEqual(expect.arrayContaining(
+      prompts.map(({ promptId }) => expect.objectContaining({ promptId, state: "queued" })),
+    ));
+  });
+
+  it("restores the exact dispatching batch when a later bulk requeue write fails", async () => {
+    const { queue } = await temporaryQueue("piweb-prompt-bulk-requeue-rollback-");
+    const conversationId = randomUUID();
+    const prompts = [
+      input({ conversationId }),
+      input({ conversationId }),
+      input({ conversationId }),
+    ];
+    for (const prompt of prompts) await queue.put(prompt);
+    const runId = randomUUID();
+    const claimed = await queue.claimAllQueuedForConversation(
+      conversationId,
+      runId,
+      timestamp,
+    );
+    const internals = queue as unknown as {
+      replaceStoredPrompt: (...args: never[]) => Promise<void>;
+    };
+    const original = internals.replaceStoredPrompt;
+    let writes = 0;
+    const replacement = vi.spyOn(internals, "replaceStoredPrompt")
+      .mockImplementation(async (...args) => {
+        writes += 1;
+        if (writes === 3) throw new Error("injected requeue failure");
+        return original.apply(queue, args);
+      });
+
+    await expect(queue.requeueDispatchingBatch(
+      claimed.map(({ promptId }) => promptId),
+      conversationId,
+      runId,
+    )).rejects.toThrow(/injected requeue failure/i);
+    replacement.mockRestore();
+    await expect(queue.list({ conversationId })).resolves.toEqual(
+      expect.arrayContaining(prompts.map(({ promptId }) => expect.objectContaining({
+        promptId,
+        state: "dispatching",
+        runId,
+      }))),
+    );
   });
 
   it("withdraws only exact queued prompts; host cleanup is a separate boundary", async () => {

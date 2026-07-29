@@ -9,6 +9,7 @@ import {
   type ConversationCard,
   type ConversationMeta,
   type MetaOperation,
+  type PendingPromptBatch,
   type PendingPromptDelivery,
   type RunSettlement,
 } from "./conversation-meta.js";
@@ -45,6 +46,7 @@ export interface PiSessionFileInspection {
   deliveredMessageIds: string[];
   runSettlements: RunSettlement[];
   pendingPromptDeliveries: PendingPromptDelivery[];
+  pendingPromptBatches: PendingPromptBatch[];
   metaOperations: MetaOperation[];
   lastActivityAt: string;
 }
@@ -485,6 +487,14 @@ export function inspectPiSessionFile(
       ) {
         throw new Error(
           "Piweb conversation message target must be the current conversation",
+        );
+      }
+      if (
+        entry?.kind === "pending_prompt_batch"
+        && entry.entry.data.conversationId !== header.id
+      ) {
+        throw new Error(
+          "Piweb pending prompt batch conversation must be the current conversation",
         );
       }
     }

@@ -406,6 +406,186 @@ export class ProjectPromptQueue {
     });
   }
 
+  /**
+   * Freezes every queued prompt for one conversation into the exact dispatch
+   * run. The scan and all state changes share one queue operation.
+   */
+  claimAllQueuedForConversation(
+    conversationId: string,
+    runId: string,
+    dispatchedAt: string,
+  ): Promise<DispatchingProjectPrompt[]> {
+    return this.operations.run(async () => {
+      uuidSchema("conversationId").parse(conversationId);
+      uuidSchema("runId").parse(runId);
+      canonicalTimestampSchema("dispatchedAt").parse(dispatchedAt);
+      const scan = await this.scan();
+      if (scan.prompts.some(({ prompt }) => (
+        prompt.conversationId === conversationId
+        && prompt.state === "dispatching"
+      ))) {
+        throw new Error(
+          `Conversation already has dispatching prompts: ${conversationId}`,
+        );
+      }
+      const queued = scan.prompts
+        .filter(({ prompt }) => (
+          prompt.conversationId === conversationId
+          && prompt.state === "queued"
+        ))
+        .sort((first, second) => {
+          const byCreatedAt = Date.parse(first.prompt.createdAt)
+            - Date.parse(second.prompt.createdAt);
+          if (byCreatedAt !== 0) return byCreatedAt;
+          return first.prompt.promptId.localeCompare(second.prompt.promptId);
+        });
+      if (queued.length === 0) {
+        throw new Error(`Conversation has no queued prompts: ${conversationId}`);
+      }
+
+      const claimed: DispatchingProjectPrompt[] = [];
+      try {
+        for (const stored of queued) {
+          const next = parseProjectPromptRecord({
+            ...immutablePayload(stored.prompt),
+            version: PROJECT_PROMPT_QUEUE_VERSION,
+            state: "dispatching",
+            runId,
+            dispatchedAt,
+          }) as DispatchingProjectPrompt;
+          await this.replaceStoredPrompt(stored, next);
+          claimed.push(next);
+        }
+      } catch (error) {
+        const rollbackErrors: unknown[] = [];
+        for (const claim of [...claimed].reverse()) {
+          try {
+            const current = await this.requireExactPrompt(
+              claim.promptId,
+              conversationId,
+            );
+            if (
+              current.prompt.state !== "dispatching"
+              || current.prompt.runId !== runId
+            ) {
+              throw new Error(
+                `Prompt is not this batch's dispatching claim: ${claim.promptId}`,
+              );
+            }
+            await this.replaceStoredPrompt(
+              current,
+              createQueuedProjectPrompt(immutablePayload(current.prompt)),
+            );
+          } catch (rollbackError) {
+            rollbackErrors.push(rollbackError);
+          }
+        }
+        if (rollbackErrors.length > 0) {
+          throw new AggregateError(
+            [error, ...rollbackErrors],
+            "Failed to claim queued prompts and roll back the batch",
+          );
+        }
+        throw error;
+      }
+      return claimed.map((prompt) =>
+        clonePrompt(prompt) as DispatchingProjectPrompt
+      );
+    });
+  }
+
+  /**
+   * Restores an exact group of deterministic batch claims only after the full
+   * group still proves to belong to the specified dispatch run.
+   */
+  requeueDispatchingBatch(
+    promptIds: readonly string[],
+    conversationId: string,
+    runId: string,
+  ): Promise<QueuedProjectPrompt[]> {
+    return this.operations.run(async () => {
+      if (
+        !Array.isArray(promptIds)
+        || promptIds.length === 0
+        || promptIds.length > MAX_PENDING_PROMPTS_PER_CONVERSATION
+      ) {
+        throw new Error("promptIds must contain one bounded exact batch");
+      }
+      const uniquePromptIds = new Set<string>();
+      for (const promptId of promptIds) {
+        uuidSchema("promptId").parse(promptId);
+        if (uniquePromptIds.has(promptId)) {
+          throw new Error(`promptIds contains a duplicate promptId: ${promptId}`);
+        }
+        uniquePromptIds.add(promptId);
+      }
+      uuidSchema("conversationId").parse(conversationId);
+      uuidSchema("runId").parse(runId);
+      const scan = await this.scan();
+      const claims = promptIds.map((promptId) => {
+        const stored = scan.prompts.find(({ prompt }) => prompt.promptId === promptId);
+        if (stored === undefined) {
+          throw new Error(`Prompt not found: ${promptId}`);
+        }
+        if (stored.prompt.conversationId !== conversationId) {
+          throw new Error(`Prompt conversation identity does not match: ${promptId}`);
+        }
+        if (
+          stored.prompt.state !== "dispatching"
+          || stored.prompt.runId !== runId
+        ) {
+          throw new Error(`Prompt is not dispatching for runId ${runId}: ${promptId}`);
+        }
+        return {
+          stored,
+          prompt: stored.prompt,
+        };
+      });
+
+      const requeued: Array<{
+        prompt: DispatchingProjectPrompt;
+        queued: QueuedProjectPrompt;
+      }> = [];
+      try {
+        for (const claim of claims) {
+          const queued = createQueuedProjectPrompt(
+            immutablePayload(claim.prompt),
+          );
+          await this.replaceStoredPrompt(claim.stored, queued);
+          requeued.push({ prompt: claim.prompt, queued });
+        }
+      } catch (error) {
+        const rollbackErrors: unknown[] = [];
+        for (const changed of [...requeued].reverse()) {
+          try {
+            const current = await this.requireExactPrompt(
+              changed.prompt.promptId,
+              conversationId,
+            );
+            if (current.prompt.state !== "queued") {
+              throw new Error(
+                `Prompt is not queued for batch rollback: ${changed.prompt.promptId}`,
+              );
+            }
+            await this.replaceStoredPrompt(current, changed.prompt);
+          } catch (rollbackError) {
+            rollbackErrors.push(rollbackError);
+          }
+        }
+        if (rollbackErrors.length > 0) {
+          throw new AggregateError(
+            [error, ...rollbackErrors],
+            "Failed to requeue dispatching prompts and restore the batch",
+          );
+        }
+        throw error;
+      }
+      return requeued.map(({ queued }) =>
+        clonePrompt(queued) as QueuedProjectPrompt
+      );
+    });
+  }
+
   /** Claims one exact queued prompt for a specific dispatch run. */
   markDispatching(
     promptId: string,
