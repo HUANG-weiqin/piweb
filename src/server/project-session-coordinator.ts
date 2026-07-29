@@ -377,6 +377,7 @@ interface PendingPromptBatchIdentity {
   conversationId: string;
   runId: string;
   items: PendingPromptBatch["items"];
+  updatedAt?: string;
 }
 
 function abortError(message: string): Error {
@@ -1604,7 +1605,7 @@ export class ProjectSessionCoordinator {
         && claimed.runId === runId
       ) {
         this.appendPendingPromptDelivery(
-          this.requireActor(context, conversationId),
+          this.requireActor(context, conversationId).sessionManager,
           promptId,
           runId,
         );
@@ -1665,7 +1666,7 @@ export class ProjectSessionCoordinator {
           payloadSha256: projectPromptPayloadSha256(prompt),
         })),
       };
-      this.appendPendingPromptBatchState(actor, batch, "prepared");
+      this.appendPendingPromptBatchState(actor.sessionManager, batch, "prepared");
       let claimed: ProjectPromptRecord[];
       try {
         claimed = await context.promptQueue.claimAllQueuedForConversation(
@@ -1679,7 +1680,7 @@ export class ProjectSessionCoordinator {
           prompt.promptId === promptId && prompt.state === "queued"
         )))) {
           this.appendPendingPromptBatchState(
-            actor,
+            actor.sessionManager,
             batch,
             "failed",
             pendingPromptAttentionReason(error),
@@ -1706,7 +1707,7 @@ export class ProjectSessionCoordinator {
           exactRunId,
         );
         this.appendPendingPromptBatchState(
-          actor,
+          actor.sessionManager,
           batch,
           "failed",
           pendingPromptAttentionReason(mismatch),
@@ -1728,7 +1729,7 @@ export class ProjectSessionCoordinator {
           exactRunId,
         );
         this.appendPendingPromptBatchState(
-          actor,
+          actor.sessionManager,
           batch,
           "failed",
           pendingPromptAttentionReason(stale),
@@ -1736,7 +1737,7 @@ export class ProjectSessionCoordinator {
         await this.emitPendingPromptsChanged(context, conversationId);
         throw stale;
       }
-      this.appendPendingPromptBatchState(actor, batch, "started");
+      this.appendPendingPromptBatchState(actor.sessionManager, batch, "started");
       const delivery = actor.steerPendingPromptBatch(exactRunId, batchId, texts);
       void delivery.catch(() => undefined);
       await this.emitPendingPromptsChanged(context, conversationId);
@@ -1769,7 +1770,7 @@ export class ProjectSessionCoordinator {
             exactRunId,
           );
           this.appendPendingPromptBatchState(
-            prepared.actor,
+            prepared.actor.sessionManager,
             prepared.batch,
             "failed",
             pendingPromptAttentionReason(error),
@@ -1785,7 +1786,7 @@ export class ProjectSessionCoordinator {
             );
           }
           this.appendPendingPromptBatchState(
-            prepared.actor,
+            prepared.actor.sessionManager,
             prepared.batch,
             "attention",
             pendingPromptAttentionReason(error),
@@ -1800,11 +1801,11 @@ export class ProjectSessionCoordinator {
       let delivered = false;
       let firstError: unknown;
       try {
-        this.appendPendingPromptBatchState(prepared.actor, prepared.batch, "delivered");
+        this.appendPendingPromptBatchState(prepared.actor.sessionManager, prepared.batch, "delivered");
         delivered = true;
         await this.completePendingPromptBatchCleanup(
           context,
-          prepared.actor,
+          prepared.actor.sessionManager,
           prepared.batch,
           prepared.promptIds,
         );
@@ -1813,14 +1814,14 @@ export class ProjectSessionCoordinator {
         try {
           if (!delivered) {
             this.appendPendingPromptBatchState(
-              prepared.actor,
+              prepared.actor.sessionManager,
               prepared.batch,
               "delivered",
             );
           }
           await this.completePendingPromptBatchCleanup(
             context,
-            prepared.actor,
+            prepared.actor.sessionManager,
             prepared.batch,
             prepared.promptIds,
           );
@@ -3992,7 +3993,7 @@ export class ProjectSessionCoordinator {
     if (!prompt) return;
     if (userDelivered) {
       this.appendPendingPromptDelivery(
-        actor,
+        actor.sessionManager,
         prompt.promptId,
         runId,
       );
@@ -4013,15 +4014,21 @@ export class ProjectSessionCoordinator {
   }
 
   private appendPendingPromptBatchState(
-    actor: ConversationActor,
+    manager: ConversationActor["sessionManager"],
     batch: PendingPromptBatchIdentity,
     state: PendingPromptBatch["state"],
     reason?: string,
   ): void {
-    const updatedAt = this.now().toISOString();
+    const current = aggregateReservedConversationEntries(
+      manager.getEntries(),
+    ).pendingPromptBatches.find(({ batchId }) => batchId === batch.batchId);
+    const updatedAt = new Date(Math.max(
+      this.now().getTime(),
+      Date.parse(current?.updatedAt ?? batch.updatedAt ?? "1970-01-01T00:00:00.000Z"),
+    )).toISOString();
     if (state === "failed" || state === "attention") {
       appendReservedCustomEntry(
-        actor.sessionManager,
+        manager,
         createPendingPromptBatchEntry({
           ...batch,
           state,
@@ -4032,14 +4039,14 @@ export class ProjectSessionCoordinator {
       return;
     }
     appendReservedCustomEntry(
-      actor.sessionManager,
+      manager,
       createPendingPromptBatchEntry({ ...batch, state, updatedAt }),
     );
   }
 
   private async completePendingPromptBatchCleanup(
     context: ProjectContext,
-    actor: ConversationActor,
+    manager: ConversationActor["sessionManager"],
     batch: PendingPromptBatchIdentity,
     promptIds: readonly string[],
   ): Promise<void> {
@@ -4047,7 +4054,7 @@ export class ProjectSessionCoordinator {
       conversationId: batch.conversationId,
     });
     const receipts = aggregateReservedConversationEntries(
-      actor.sessionManager.getEntries(),
+      manager.getEntries(),
     ).pendingPromptDeliveries;
     for (const promptId of promptIds) {
       const item = batch.items.find((candidate) => candidate.promptId === promptId);
@@ -4077,7 +4084,7 @@ export class ProjectSessionCoordinator {
     }
     for (const promptId of promptIds) {
       this.appendPendingPromptDelivery(
-        actor,
+        manager,
         promptId,
         batch.runId,
         batch.batchId,
@@ -4095,17 +4102,17 @@ export class ProjectSessionCoordinator {
         item.payloadSha256,
       );
     }
-    this.appendPendingPromptBatchState(actor, batch, "completed");
+    this.appendPendingPromptBatchState(manager, batch, "completed");
   }
 
   private appendPendingPromptDelivery(
-    actor: ConversationActor,
+    manager: ConversationActor["sessionManager"],
     promptId: string,
     runId: string,
     batchId?: string,
   ): void {
     const aggregate = aggregateReservedConversationEntries(
-      actor.sessionManager.getEntries(),
+      manager.getEntries(),
     );
     const existing = aggregate.pendingPromptDeliveries.find((delivery) => (
       delivery.promptId === promptId
@@ -4117,7 +4124,7 @@ export class ProjectSessionCoordinator {
       );
     }
     appendReservedCustomEntry(
-      actor.sessionManager,
+      manager,
       createPendingPromptDeliveryEntry({
         promptId,
         runId,
@@ -4961,6 +4968,107 @@ export class ProjectSessionCoordinator {
     );
   }
 
+  private async recoverPendingPromptBatch(
+    context: ProjectContext,
+    manager: ConversationActor["sessionManager"],
+    batch: PendingPromptBatch,
+  ): Promise<void> {
+    const identity: PendingPromptBatchIdentity = {
+      batchId: batch.batchId,
+      conversationId: batch.conversationId,
+      runId: batch.runId,
+      items: batch.items,
+      updatedAt: batch.updatedAt,
+    };
+    const prompts = await context.promptQueue.list({
+      conversationId: batch.conversationId,
+    });
+    const exactPrompt = (item: PendingPromptBatch["items"][number]) => {
+      const prompt = prompts.find(({ promptId }) => promptId === item.promptId);
+      if (
+        prompt === undefined
+        || prompt.createdAt !== item.createdAt
+        || projectPromptPayloadSha256(prompt) !== item.payloadSha256
+      ) {
+        throw new Error(
+          `Pending prompt batch recovery identity does not match: ${item.promptId}`,
+        );
+      }
+      return prompt;
+    };
+
+    if (batch.state === "prepared") {
+      const dispatchingIds: string[] = [];
+      for (const item of batch.items) {
+        const prompt = exactPrompt(item);
+        if (prompt.state === "queued") continue;
+        if (prompt.state === "dispatching" && prompt.runId === batch.runId) {
+          dispatchingIds.push(prompt.promptId);
+          continue;
+        }
+        throw new Error(
+          `Prepared pending prompt batch has an invalid member state: ${item.promptId}`,
+        );
+      }
+      if (dispatchingIds.length > 0) {
+        await context.promptQueue.requeueDispatchingBatch(
+          dispatchingIds,
+          batch.conversationId,
+          batch.runId,
+        );
+      }
+      this.appendPendingPromptBatchState(manager, identity, "failed", "Recovered prepared pending prompt batch");
+      return;
+    }
+
+    if (batch.state === "started") {
+      const aggregate = aggregateReservedConversationEntries(manager.getEntries());
+      if (aggregate.pendingPromptDeliveries.some(({ batchId }) => batchId === batch.batchId)) {
+        throw new Error(
+          `Started pending prompt batch has a delivery receipt: ${batch.batchId}`,
+        );
+      }
+      const members = batch.items.map((item) => {
+        const prompt = exactPrompt(item);
+        if (
+          prompt.state !== "attention"
+          && (prompt.state !== "dispatching" || prompt.runId !== batch.runId)
+        ) {
+          throw new Error(
+            `Started pending prompt batch has an invalid member state: ${item.promptId}`,
+          );
+        }
+        return prompt;
+      });
+      for (const prompt of members) {
+        if (prompt.state === "attention") continue;
+        await context.promptQueue.markAttentionAfterUncertainFailure(
+          prompt.promptId,
+          batch.conversationId,
+          batch.runId,
+          "Recovery cannot prove pending prompt batch delivery.",
+          this.now().toISOString(),
+        );
+      }
+      this.appendPendingPromptBatchState(
+        manager,
+        identity,
+        "attention",
+        "Recovery cannot prove pending prompt batch delivery.",
+      );
+      return;
+    }
+
+    if (batch.state === "delivered") {
+      await this.completePendingPromptBatchCleanup(
+        context,
+        manager,
+        identity,
+        batch.items.map(({ promptId }) => promptId),
+      );
+    }
+  }
+
   private async recoverProject(context: ProjectContext): Promise<void> {
     if (context.closing) return;
     let summaries = await context.project.refreshConversations();
@@ -4989,12 +5097,7 @@ export class ProjectSessionCoordinator {
       await context.inbox.listDeletedTargets(),
     );
     const pending = await context.inbox.list();
-    const pendingPrompts = await context.promptQueue.list();
-    for (const prompt of pendingPrompts) {
-      if (prompt.state === "attention") {
-        context.promptAttention.add(prompt.conversationId);
-      }
-    }
+    let pendingPrompts = await context.promptQueue.list();
     summaries = await context.project.refreshConversations();
     const startedAbortOperations: Array<{
       sourceConversationId: string;
@@ -5007,6 +5110,11 @@ export class ProjectSessionCoordinator {
       string,
       PendingPromptDelivery[]
     >();
+    const pendingPromptBatchesByConversation = new Map<
+      string,
+      PendingPromptBatch[]
+    >();
+    const batchRecoveryBlocked = new Set<string>();
     const actorIds = new Set(
       pending
         .filter(({ toConversationId }) =>
@@ -5040,6 +5148,10 @@ export class ProjectSessionCoordinator {
           summary.id,
           inspection.pendingPromptDeliveries,
         );
+        pendingPromptBatchesByConversation.set(
+          summary.id,
+          inspection.pendingPromptBatches,
+        );
         const profile = inspection.conversationMeta;
         if (!profile) continue;
         context.profiles.set(summary.id, cloneProfile(profile));
@@ -5054,11 +5166,42 @@ export class ProjectSessionCoordinator {
         }
       } catch {
         context.attention.add(summary.id);
+        batchRecoveryBlocked.add(summary.id);
+      }
+    }
+
+    for (const [conversationId, batches] of pendingPromptBatchesByConversation) {
+      const nonterminal = batches.filter(({ state }) => (
+        state === "prepared" || state === "started" || state === "delivered"
+      ));
+      if (nonterminal.length === 0) continue;
+      if (nonterminal.length !== 1) {
+        batchRecoveryBlocked.add(conversationId);
+        context.promptAttention.add(conversationId);
+        continue;
+      }
+      try {
+        await this.withConversationManager(context, conversationId, (manager) =>
+          this.recoverPendingPromptBatch(context, manager, nonterminal[0]!)
+        );
+      } catch {
+        batchRecoveryBlocked.add(conversationId);
+        context.promptAttention.add(conversationId);
+      }
+    }
+
+    // Batch reconciliation can change durable sidecars. Generic recovery must
+    // observe that result and must never cross a batch fence it could not prove.
+    pendingPrompts = await context.promptQueue.list();
+    for (const prompt of pendingPrompts) {
+      if (prompt.state === "attention") {
+        context.promptAttention.add(prompt.conversationId);
       }
     }
 
     for (const prompt of pendingPrompts) {
       if (context.closing) return;
+      if (batchRecoveryBlocked.has(prompt.conversationId)) continue;
       if (prompt.state === "queued") {
         if (!blockedTargets.has(prompt.conversationId)) {
           actorIds.add(prompt.conversationId);
@@ -5324,6 +5467,12 @@ export class ProjectSessionCoordinator {
     if (context.closing || context.deleting.has(conversationId)) return false;
     const actor = context.actors.get(conversationId);
     if (!actor || actor.getActivity().kind !== "idle") return false;
+    const hasActiveBatchFence = aggregateReservedConversationEntries(
+      actor.sessionManager.getEntries(),
+    ).pendingPromptBatches.some(({ state }) => (
+      state === "prepared" || state === "started" || state === "delivered"
+    ));
+    if (hasActiveBatchFence) return false;
     const queued = (await context.promptQueue.list({ conversationId }))
       .find((prompt) => prompt.state === "queued");
     if (!queued) return false;
