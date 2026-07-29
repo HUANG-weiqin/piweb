@@ -90,10 +90,11 @@ interface ChatProps {
   submitting: boolean;
   pendingPrompts: PendingPrompt[];
   pendingPromptIds: ReadonlySet<string>;
+  batchSteerPending: boolean;
   promptNotice?: string;
   onDraftChange(text: string): void;
   onSend(text: string): boolean;
-  onSteerPendingPrompt(promptId: string): void;
+  onSteerAllPendingPrompts(): void;
   onWithdrawPendingPrompt(promptId: string): void;
   onDismissPendingPrompt(promptId: string): void;
   onAbort(): void;
@@ -247,10 +248,11 @@ export function Chat({
   submitting,
   pendingPrompts,
   pendingPromptIds,
+  batchSteerPending,
   promptNotice,
   onDraftChange,
   onSend,
-  onSteerPendingPrompt,
+  onSteerAllPendingPrompts,
   onWithdrawPendingPrompt,
   onDismissPendingPrompt,
   onAbort,
@@ -557,12 +559,23 @@ export function Chat({
         <header>
           <span>待处理消息 {pendingPrompts.length} 条</span>
           <small>服务端持久保存</small>
+          {(() => {
+            const queued = pendingPrompts.filter(({ state }) => state === "queued");
+            const active = activeRun?.phase === "running" || activeRun?.phase === "waiting";
+            const queuedActionPending = queued.some(({ promptId }) => pendingPromptIds.has(promptId));
+            return queued.length > 0 && active && <button
+              type="button"
+              aria-label={`同时 Steer ${queued.length} 条`}
+              disabled={batchSteerPending || queuedActionPending}
+              onClick={onSteerAllPendingPrompts}
+            >
+              同时 Steer {queued.length} 条
+            </button>;
+          })()}
         </header>
         <ol>
           {pendingPrompts.map((prompt) => {
             const actionPending = pendingPromptIds.has(prompt.promptId);
-            const canSteer = prompt.state === "queued"
-              && (activeRun?.phase === "running" || activeRun?.phase === "waiting");
             return <li
               key={prompt.promptId}
               className={`prompt-queue-item ${prompt.state}`}
@@ -580,14 +593,6 @@ export function Chat({
                 {prompt.reason}
               </small>}
               <span className="prompt-queue-actions">
-                {prompt.state === "queued" && canSteer && <button
-                  type="button"
-                  aria-label={`引导待处理消息 ${prompt.text}`}
-                  disabled={actionPending}
-                  onClick={() => onSteerPendingPrompt(prompt.promptId)}
-                >
-                  Steer
-                </button>}
                 {prompt.state === "queued" && <button
                   type="button"
                   aria-label={`撤回待处理消息 ${prompt.text}`}

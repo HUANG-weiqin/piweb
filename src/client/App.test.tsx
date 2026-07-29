@@ -2442,7 +2442,7 @@ describe("App", () => {
     expect(screen.getByText("restored queue")).toBeInTheDocument();
   });
 
-  it("uses exact durable queue actions without collapsing duplicate text records", () => {
+  it("uses one batch steer command for every queued prompt", () => {
     render(<App />);
     const sessionId = startFromSetup();
     act(() => {
@@ -2497,27 +2497,76 @@ describe("App", () => {
     expect(screen.queryByRole("button", {
       name: "撤回待处理消息 sending",
     })).not.toBeInTheDocument();
-    fireEvent.click(screen.getAllByRole("button", {
-      name: "引导待处理消息 same text",
-    })[0]!);
-    expect(latestCommand("steer_pending_prompt")).toMatchObject({
-      promptId: "11111111-1111-4111-8111-111111111111",
+    fireEvent.click(screen.getByRole("button", {
+      name: "同时 Steer 2 条",
+    }));
+    expect(latestCommand("steer_all_pending_prompts")).toMatchObject({
       runId: RUN_ID,
       conversationId: CONVERSATION_ID,
       focusId: FOCUS_A,
+      batchId: expect.any(String),
     });
-    fireEvent.click(screen.getAllByRole("button", {
-      name: "撤回待处理消息 same text",
-    })[1]!);
-    expect(latestCommand("withdraw_pending_prompt")).toMatchObject({
-      promptId: "22222222-2222-4222-8222-222222222222",
-    });
-    fireEvent.click(screen.getByRole("button", {
-      name: "移除待处理记录 uncertain",
+    const firstBatch = latestCommand("steer_all_pending_prompts");
+    expect(firstBatch).not.toHaveProperty("promptIds");
+    expect(screen.queryByRole("button", {
+      name: "引导待处理消息 same text",
+    })).not.toBeInTheDocument();
+    act(() => socketMock.emit?.({
+      type: "pending_prompts_snapshot",
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      prompts: [{
+        promptId: "55555555-5555-4555-8555-555555555555",
+        text: "late queued",
+        createdAt: "2026-01-01T00:04:00.000Z",
+        state: "queued",
+      }],
     }));
-    expect(latestCommand("dismiss_pending_prompt")).toMatchObject({
-      promptId: "44444444-4444-4444-8444-444444444444",
-    });
+    const batchButton = screen.getByRole("button", { name: "同时 Steer 1 条" });
+    expect(batchButton).toBeDisabled();
+    fireEvent.click(batchButton);
+    expect(socketMock.send.mock.calls.filter(([command]) => (
+      command.type === "steer_all_pending_prompts"
+    ))).toHaveLength(1);
+    act(() => socketMock.emit?.({
+      type: "error",
+      scope: "command",
+      operation: "steer_all_pending_prompts",
+      commandId: firstBatch.commandId,
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      runId: RUN_B,
+      message: "wrong run must not settle",
+    }));
+    expect(batchButton).toBeDisabled();
+    act(() => socketMock.emit?.({
+      type: "command_complete",
+      operation: "steer_all_pending_prompts",
+      commandId: firstBatch.commandId,
+      sessionId,
+    }));
+    expect(batchButton).toBeEnabled();
+    fireEvent.click(batchButton);
+    const secondBatch = latestCommand("steer_all_pending_prompts");
+    act(() => socketMock.emit?.({
+      type: "error",
+      scope: "command",
+      operation: "steer_all_pending_prompts",
+      commandId: secondBatch.commandId,
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      runId: RUN_ID,
+      message: "batch steer failed",
+    }));
+    expect(batchButton).toBeEnabled();
+    expect(screen.getByText("队列操作失败：batch steer failed")).toBeInTheDocument();
+    socketMock.send.mockReturnValueOnce(false);
+    fireEvent.click(batchButton);
+    expect(batchButton).toBeEnabled();
+    expect(screen.getByText("队列操作未发送，请检查连接后重试。")).toBeInTheDocument();
   });
 
   it("freezes focus-bound controls as soon as a conversation switch starts", () => {

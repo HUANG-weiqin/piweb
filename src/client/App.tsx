@@ -104,9 +104,13 @@ interface PendingQueueCommand extends ActiveFocus {
   operation:
     | "enqueue_prompt"
     | "steer_pending_prompt"
+    | "steer_all_pending_prompts"
     | "withdraw_pending_prompt"
     | "dismiss_pending_prompt";
   promptId: string;
+  runId?: string;
+  batchId?: string;
+  affectedPromptIds?: readonly string[];
   text?: string;
   draftRevision?: number;
 }
@@ -494,6 +498,14 @@ export function App() {
       && focus?.sessionId === command.sessionId
       && focus.projectId === command.projectId
       && focus.conversationId === command.conversationId;
+  };
+  const hasPendingBatchSteerForFocus = (focus: ActiveFocus | undefined) => {
+    if (!focus) return false;
+    return [...pendingQueueCommandsRef.current.values()].some((command) => (
+      command.operation === "steer_all_pending_prompts"
+      && command.workspaceKey === currentWorkspaceKey()
+      && isCurrentQueueCommand(command)
+    ));
   };
   const hasPendingEnqueueForFocus = (focus: ActiveFocus | undefined) => {
     if (!focus) return false;
@@ -1087,6 +1099,7 @@ export function App() {
         if (
           event.operation === "enqueue_prompt"
           || event.operation === "steer_pending_prompt"
+          || event.operation === "steer_all_pending_prompts"
           || event.operation === "withdraw_pending_prompt"
           || event.operation === "dismiss_pending_prompt"
         ) {
@@ -1226,10 +1239,7 @@ export function App() {
           });
           return;
         }
-        if (
-          event.operation === "steer"
-          || event.operation === "steer_all_pending_prompts"
-        ) return;
+        if (event.operation === "steer") return;
         setSettingResult({
           operation: event.operation,
           commandId: event.commandId,
@@ -1243,6 +1253,7 @@ export function App() {
           && (
             event.operation === "enqueue_prompt"
             || event.operation === "steer_pending_prompt"
+            || event.operation === "steer_all_pending_prompts"
             || event.operation === "withdraw_pending_prompt"
             || event.operation === "dismiss_pending_prompt"
           )
@@ -1254,6 +1265,9 @@ export function App() {
             || pending.sessionId !== event.sessionId
             || pending.conversationId !== event.conversationId
             || pending.focusId !== event.focusId
+            || ((pending.operation === "steer_pending_prompt"
+              || pending.operation === "steer_all_pending_prompts")
+              && pending.runId !== event.runId)
           ) return;
           settlePendingQueueCommand(event.commandId);
           if (pending.operation === "enqueue_prompt") {
@@ -1746,7 +1760,10 @@ export function App() {
     return shouldQueue ? enqueuePrompt(trimmed) : sendPrompt(trimmed);
   };
   const sendPendingPromptAction = (
-    operation: Exclude<PendingQueueCommand["operation"], "enqueue_prompt">,
+    operation:
+      | "steer_pending_prompt"
+      | "withdraw_pending_prompt"
+      | "dismiss_pending_prompt",
     promptId: string,
     runId?: string,
   ) => {
@@ -1759,6 +1776,7 @@ export function App() {
       commandId: crypto.randomUUID(),
       operation,
       promptId,
+      ...(runId === undefined ? {} : { runId }),
     };
     registerPendingQueueCommand(command);
     const common = {
@@ -1781,13 +1799,45 @@ export function App() {
     settlePendingQueueCommand(command.commandId);
     setPromptNotice("队列操作未发送，请检查连接后重试。");
   };
-  const steerPendingPrompt = (promptId: string) => {
+  const steerAllPendingPrompts = () => {
+    const sessionId = sessionIdRef.current;
+    const focus = focusRef.current;
     const activeRun = state?.activeRun;
+    const queued = pendingPromptsRef.current.filter((prompt) => (
+      prompt.state === "queued"
+    ));
     if (
-      !activeRun
+      !conversationReadyRef.current
+      || !sessionId
+      || !focus
+      || focus.sessionId !== sessionId
+      || !activeRun
       || (activeRun.phase !== "running" && activeRun.phase !== "waiting")
+      || queued.length === 0
+      || hasPendingBatchSteerForFocus(focus)
     ) return;
-    sendPendingPromptAction("steer_pending_prompt", promptId, activeRun.id);
+    const command: PendingQueueCommand = {
+      ...focus,
+      workspaceKey: currentWorkspaceKey(),
+      commandId: crypto.randomUUID(),
+      operation: "steer_all_pending_prompts",
+      promptId: queued[0]!.promptId,
+      batchId: crypto.randomUUID(),
+      runId: activeRun.id,
+      affectedPromptIds: queued.map(({ promptId }) => promptId),
+    };
+    registerPendingQueueCommand(command);
+    if (send({
+      type: "steer_all_pending_prompts",
+      commandId: command.commandId,
+      sessionId,
+      conversationId: focus.conversationId,
+      focusId: focus.focusId,
+      batchId: command.batchId!,
+      runId: command.runId!,
+    })) return;
+    settlePendingQueueCommand(command.commandId);
+    setPromptNotice("队列操作未发送，请检查连接后重试。");
   };
   const withdrawPendingPrompt = (promptId: string) =>
     sendPendingPromptAction("withdraw_pending_prompt", promptId);
@@ -2352,8 +2402,9 @@ export function App() {
               pendingPromptIds={new Set(
                 [...pendingQueueCommandsRef.current.values()]
                   .filter((command) => isCurrentQueueCommand(command))
-                  .map((command) => command.promptId),
+                  .flatMap((command) => command.affectedPromptIds ?? [command.promptId]),
               )}
+              batchSteerPending={hasPendingBatchSteerForFocus(focusRef.current)}
               promptNotice={promptNotice || undefined}
               onDraftChange={(text) => {
                 updateDraft(text);
@@ -2377,7 +2428,7 @@ export function App() {
                 if (promptNotice) setPromptNotice("");
               }}
               onSend={submitPrompt}
-              onSteerPendingPrompt={steerPendingPrompt}
+              onSteerAllPendingPrompts={steerAllPendingPrompts}
               onWithdrawPendingPrompt={withdrawPendingPrompt}
               onDismissPendingPrompt={dismissPendingPrompt}
               onAbort={abortCurrentRun}

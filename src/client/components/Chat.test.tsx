@@ -49,9 +49,10 @@ function view(
     submitting={false}
     pendingPrompts={[]}
     pendingPromptIds={new Set()}
+    batchSteerPending={false}
     onDraftChange={() => undefined}
     onSend={() => true}
-    onSteerPendingPrompt={() => undefined}
+    onSteerAllPendingPrompts={() => undefined}
     onWithdrawPendingPrompt={() => undefined}
     onDismissPendingPrompt={() => undefined}
     onAbort={() => undefined}
@@ -124,8 +125,8 @@ describe("Chat", () => {
     expect(onAbort).toHaveBeenCalledOnce();
   });
 
-  it("shows durable prompt actions by state", () => {
-    const onSteerPendingPrompt = vi.fn();
+  it("shows one batch Steer action and retains per-prompt recovery actions", () => {
+    const onSteerAllPendingPrompts = vi.fn();
     const onWithdrawPendingPrompt = vi.fn();
     const onDismissPendingPrompt = vi.fn();
     const prompts: PendingPrompt[] = [{
@@ -151,7 +152,7 @@ describe("Chat", () => {
     render(view(emptyChat, "", undefined, {
       activeRun: { id: "run-1", phase: "running" },
       pendingPrompts: prompts,
-      onSteerPendingPrompt,
+      onSteerAllPendingPrompts,
       onWithdrawPendingPrompt,
       onDismissPendingPrompt,
     }));
@@ -164,10 +165,13 @@ describe("Chat", () => {
       name: "撤回待处理消息 This delivery is in progress.",
     })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", {
+    expect(screen.queryByRole("button", {
       name: "引导待处理消息 Review the test failure after the current run.",
+    })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", {
+      name: "同时 Steer 1 条",
     }));
-    expect(onSteerPendingPrompt).toHaveBeenCalledWith("queued-1");
+    expect(onSteerAllPendingPrompts).toHaveBeenCalledOnce();
     fireEvent.click(screen.getByRole("button", {
       name: "撤回待处理消息 Review the test failure after the current run.",
     }));
