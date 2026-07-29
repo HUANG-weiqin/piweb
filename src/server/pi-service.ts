@@ -159,6 +159,7 @@ type QueuedCommand = Exclude<ConnectionCommand, {
     | "steer"
     | "enqueue_prompt"
     | "steer_pending_prompt"
+    | "steer_all_pending_prompts"
     | "withdraw_pending_prompt"
     | "dismiss_pending_prompt";
 }>;
@@ -588,6 +589,7 @@ export class PiConnection {
     if (
       command.type === "enqueue_prompt"
       || command.type === "steer_pending_prompt"
+      || command.type === "steer_all_pending_prompts"
       || command.type === "withdraw_pending_prompt"
       || command.type === "dismiss_pending_prompt"
     ) {
@@ -800,6 +802,7 @@ export class PiConnection {
     if (
       command.type === "enqueue_prompt"
       || command.type === "steer_pending_prompt"
+      || command.type === "steer_all_pending_prompts"
       || command.type === "withdraw_pending_prompt"
       || command.type === "dismiss_pending_prompt"
     ) {
@@ -829,6 +832,14 @@ export class PiConnection {
                 view.handle,
                 command.conversationId,
                 command.promptId,
+                command.runId,
+              );
+              break;
+            case "steer_all_pending_prompts":
+              await coordinator.steerAllQueuedPrompts(
+                view.handle,
+                command.conversationId,
+                command.batchId,
                 command.runId,
               );
               break;
@@ -1352,6 +1363,10 @@ export class PiConnection {
       case "set_thinking":
         await this.setCoordinatedThinking(command.level);
         return;
+      case "steer_all_pending_prompts":
+        throw new Error(
+          "steer_all_pending_prompts is handled by coordinated prompt control",
+        );
       case "set_compaction_threshold": {
         const view = this.requireCoordinatedFocus(
           command.sessionId,

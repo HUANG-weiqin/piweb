@@ -343,6 +343,15 @@ describe("PiConnection lifecycle", () => {
         promptId: randomUUID(),
         text: "queued work",
       })).rejects.toThrow("requires persistent project coordination");
+      await expect(connection.handle({
+        type: "steer_all_pending_prompts",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId: randomUUID(),
+        focusId: randomUUID(),
+        batchId: randomUUID(),
+        runId: RUN_A,
+      })).rejects.toThrow("requires persistent project coordination");
     } finally {
       await connection.dispose();
     }
@@ -2529,6 +2538,111 @@ describe("PiConnection lifecycle", () => {
 });
 
 describe("PiConnection coordinated project view", () => {
+  it("forwards one batch steer and acknowledges only after the coordinator resolves", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        roleId: "default",
+      });
+      const focused = latestState(harness.events);
+      const batchId = randomUUID();
+      const commandId = randomUUID();
+      const completion = deferred();
+      const steerAll = vi.spyOn(harness.coordinator, "steerAllQueuedPrompts")
+        .mockImplementation(async () => await completion.promise);
+      const steering = harness.connection.handle({
+        type: "steer_all_pending_prompts",
+        commandId,
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+        batchId,
+        runId: RUN_A,
+      });
+      await vi.waitFor(() => {
+        expect(steerAll).toHaveBeenCalledExactlyOnceWith(
+          expect.anything(),
+          focused.conversationId,
+          batchId,
+          RUN_A,
+        );
+      });
+      expect(harness.events).not.toContainEqual(expect.objectContaining({
+        type: "command_complete",
+        operation: "steer_all_pending_prompts",
+        commandId,
+      }));
+      completion.resolve();
+      await steering;
+      expect(harness.events).toContainEqual({
+        type: "command_complete",
+        operation: "steer_all_pending_prompts",
+        commandId,
+        sessionId: SESSION_A,
+      });
+      await expect(harness.connection.handle({
+        type: "steer_all_pending_prompts",
+        commandId,
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+        batchId,
+        runId: RUN_A,
+      })).rejects.toThrow("Command ID was already used");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("does not complete a rejected batch steer", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        roleId: "default",
+      });
+      const focused = latestState(harness.events);
+      const commandId = randomUUID();
+      vi.spyOn(harness.coordinator, "steerAllQueuedPrompts")
+        .mockRejectedValueOnce(new Error(`Prompt batch steer requires exact active run: ${RUN_B}`));
+      await expect(harness.connection.handle({
+        type: "steer_all_pending_prompts",
+        commandId,
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+        batchId: randomUUID(),
+        runId: RUN_B,
+      })).rejects.toThrow(`Prompt batch steer requires exact active run: ${RUN_B}`);
+      expect(harness.events).not.toContainEqual(expect.objectContaining({
+        type: "command_complete",
+        operation: "steer_all_pending_prompts",
+        commandId,
+      }));
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
   it("acknowledges guidance only after the exact active run accepts it", async () => {
     const harness = await coordinatedConnectionHarness();
     const promptStarted = deferred();

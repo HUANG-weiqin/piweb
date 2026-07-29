@@ -25,7 +25,7 @@ const messageId = "assistant:96b960be-b6bb-4a19-9cf2-78e77cb69425";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(25);
+    expect(PROTOCOL_VERSION).toBe(26);
   });
 
   it("accepts supported commands", () => {
@@ -134,6 +134,15 @@ describe("parseClientCommand", () => {
       runId,
     }).type).toBe("steer_pending_prompt");
     expect(parseClientCommand({
+      type: "steer_all_pending_prompts",
+      commandId,
+      sessionId,
+      conversationId,
+      focusId,
+      batchId: targetConversationId,
+      runId,
+    }).type).toBe("steer_all_pending_prompts");
+    expect(parseClientCommand({
       type: "withdraw_pending_prompt",
       commandId,
       sessionId,
@@ -239,6 +248,23 @@ describe("parseClientCommand", () => {
       promptId: targetConversationId,
       text: "queued work",
       unexpected: true,
+    })).toThrow();
+    expect(() => parseClientCommand({
+      type: "steer_all_pending_prompts",
+      commandId,
+      sessionId,
+      conversationId,
+      focusId,
+      runId,
+    })).toThrow();
+    expect(() => parseClientCommand({
+      type: "steer_all_pending_prompts",
+      commandId,
+      sessionId,
+      conversationId,
+      focusId,
+      batchId: "not-a-uuid",
+      runId,
     })).toThrow();
     expect(() => parseClientCommand({
       type: "extension_ui_response",
@@ -847,6 +873,17 @@ describe("parseClientCommand", () => {
     }).type).toBe("error");
     expect(parseServerEvent({
       type: "error",
+      message: "batch steer failed",
+      scope: "command",
+      operation: "steer_all_pending_prompts",
+      sessionId,
+      runId,
+      conversationId,
+      focusId,
+      commandId,
+    }).type).toBe("error");
+    expect(parseServerEvent({
+      type: "error",
       message: "queue failed",
       scope: "command",
       operation: "enqueue_prompt",
@@ -925,6 +962,26 @@ describe("parseClientCommand", () => {
       runId,
       conversationId,
       focusId,
+    })).toThrow();
+    expect(() => parseServerEvent({
+      type: "error",
+      message: "failed batch steer",
+      scope: "command",
+      operation: "steer_all_pending_prompts",
+      sessionId,
+      commandId,
+      conversationId,
+      focusId,
+    })).toThrow();
+    expect(() => parseServerEvent({
+      type: "error",
+      message: "failed batch steer without focus",
+      scope: "command",
+      operation: "steer_all_pending_prompts",
+      sessionId,
+      commandId,
+      conversationId,
+      runId,
     })).toThrow();
     expect(() => parseServerEvent({
       type: "session_event",

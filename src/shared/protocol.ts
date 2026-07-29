@@ -18,7 +18,7 @@ export const MAX_PENDING_PROMPT_ATTENTION_REASON_CHARACTERS = 1_000;
 export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
-export const PROTOCOL_VERSION = 25;
+export const PROTOCOL_VERSION = 26;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 const required = z.string().trim().min(1);
 const canonicalTimestampSchema = z.string().refine(
@@ -243,6 +243,15 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
     runId: runIdSchema,
   }).strict(),
   z.object({
+    type: z.literal("steer_all_pending_prompts"),
+    commandId: commandIdSchema,
+    sessionId: sessionIdSchema,
+    conversationId: conversationIdSchema,
+    focusId: focusIdSchema,
+    batchId: z.string().uuid(),
+    runId: runIdSchema,
+  }).strict(),
+  z.object({
     type: z.literal("withdraw_pending_prompt"),
     commandId: commandIdSchema,
     sessionId: sessionIdSchema,
@@ -406,6 +415,7 @@ const ACKNOWLEDGED_COMMAND_OPERATIONS = [
   "steer",
   "enqueue_prompt",
   "steer_pending_prompt",
+  "steer_all_pending_prompts",
   "withdraw_pending_prompt",
   "dismiss_pending_prompt",
   "set_compaction_threshold",
@@ -974,6 +984,7 @@ const commandTypeSchema = z.enum([
   "steer",
   "enqueue_prompt",
   "steer_pending_prompt",
+  "steer_all_pending_prompts",
   "withdraw_pending_prompt",
   "dismiss_pending_prompt",
   "abort",
@@ -1422,6 +1433,7 @@ export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.
       && (
         event.operation === "enqueue_prompt"
         || event.operation === "steer_pending_prompt"
+        || event.operation === "steer_all_pending_prompts"
         || event.operation === "withdraw_pending_prompt"
         || event.operation === "dismiss_pending_prompt"
       )
@@ -1430,7 +1442,9 @@ export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.
         || event.commandId === undefined
         || event.conversationId === undefined
         || event.focusId === undefined
-        || (event.operation === "steer_pending_prompt" && event.runId === undefined)
+        || ((event.operation === "steer_pending_prompt"
+          || event.operation === "steer_all_pending_prompts")
+          && event.runId === undefined)
       )
     ) {
       context.addIssue({

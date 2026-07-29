@@ -1226,7 +1226,10 @@ export function App() {
           });
           return;
         }
-        if (event.operation === "steer") return;
+        if (
+          event.operation === "steer"
+          || event.operation === "steer_all_pending_prompts"
+        ) return;
         setSettingResult({
           operation: event.operation,
           commandId: event.commandId,
