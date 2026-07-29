@@ -95,6 +95,34 @@ describe("compressLineStream", () => {
     expect(output).not.toContain(lines[25]);
   });
 
+  it("keeps expanded diagnostic neighborhoods in a large stream", () => {
+    const diagnostics = [
+      "warning",
+      "timeout",
+      "timed out",
+      "segmentation fault",
+      "segfault",
+      "access violation",
+      "out of memory",
+      "OOM",
+      "deadlock",
+    ];
+    const diagnosticIndices = diagnostics.map((_, index) => 120 + index * 20);
+    const lines = Array.from({ length: 400 }, (_, index) => {
+      const diagnostic = diagnostics[diagnosticIndices.indexOf(index)];
+      return numberedLine(index, 100, diagnostic ? `${diagnostic} target ` : "");
+    });
+    const output = compressLineStream(lines.join("\n"));
+
+    for (const diagnosticIndex of diagnosticIndices) {
+      for (let index = diagnosticIndex - 2; index <= diagnosticIndex + 2; index += 1) {
+        expect(output).toContain(lines[index]);
+      }
+    }
+    expect(output).toContain("[... omitted");
+    expect(output).not.toContain(lines[50]);
+  });
+
   it("handles a huge multi-line stream without retrying increasingly smaller samples", () => {
     const lines = Array.from({ length: 100_000 }, (_, index) => String(index).padStart(6, "0"));
     const output = compressLineStream(lines.join("\n"));

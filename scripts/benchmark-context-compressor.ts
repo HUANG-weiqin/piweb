@@ -1,7 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-import { compressLineStream } from "@piweb/context-compressor";
+import { compressToolResultText } from "../src/server/tool-result-compression.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -71,7 +71,7 @@ async function benchmark(sessionsDirectory: string): Promise<void> {
       summary.toolResults += 1;
       let changed = false;
       for (const text of textParts(message.content)) {
-        const output = compressLineStream(text);
+        const output = compressToolResultText(message.toolName, text);
         summary.inputBytes += byteLength(text);
         summary.outputBytes += byteLength(output);
         changed ||= output !== text;

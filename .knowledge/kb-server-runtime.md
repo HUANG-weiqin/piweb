@@ -78,7 +78,7 @@
 - 注册不可复用 runId、安装 active RunTicket 后立即发送 `run_queued`；它既是生命周期事件，也是浏览器提交 user draft 的唯一服务端接收回执。
 - SDK 异步 preflight 结束时会再次检查 run ticket；若期间已取消，会在真正启动 agent 前阻断。
 - AgentSession 构造完成后，工作台在 SDK extension hook 外再包一层 host tool gate；扩展先修改/阻止，工作台再用最终 validated args 决策。
-- 每个 `bash` 或 `grep` 工具结果在 Pi extension 的 `tool_result` hook 完成后，由宿主在 `afterToolCall` 直接压缩最终有效 content 的文本 part（image 和其它 part 保持原样）；该 hook 发生在 SDK `tool_execution_end` 和 tool-result `message_end` 前，默认压缩内容进入 Agent 内存、SessionManager/JSONL、UI、后续上下文和 compaction。后续可信 extension 的 `message_end` 仍可显式替换消息；压缩是默认优化而非安全边界。未被再次替换时，被省略的原始行不持久化，也不提供 recovery。
+- 每个 `bash` 或 `grep` 工具结果在 Pi extension 的 `tool_result` hook 完成后，由宿主在 `afterToolCall` 直接压缩最终有效 content 的文本 part（image 和其它 part 保持原样）；`grep` 在通用采样后折叠连续同路径行，两个工具都会把同一结果中的非连续长重复行引用到首次输出行，并以原始输入重新执行 10% UTF-8 收益门槛。该 hook 发生在 SDK `tool_execution_end` 和 tool-result `message_end` 前，默认压缩内容进入 Agent 内存、SessionManager/JSONL、UI、后续上下文和 compaction。后续可信 extension 的 `message_end` 仍可显式替换消息；压缩是默认优化而非安全边界。未被再次替换时，被省略的原始行不持久化，也不提供 recovery。
 - gate 启用时固定 sequential tool execution，避免 parallel preflight 在 abort 或权限收紧后执行已积累的调用。
 - `read_only` 只允许最终来源为 builtin 的 Pi 原生 `read/grep/find/ls`；`full_access` 允许所有工具和命令。扩展同名工具不能冒充 builtin。
 - 生产 `SettingsManager` 先以 `projectTrusted=false` 创建。无受保护资源时直接继续；有资源时先读用户级 trust store/global default，必要时通过浏览器选择，再由 SDK 二阶段 resource reload 加载或跳过项目设置、skills 与 extensions。

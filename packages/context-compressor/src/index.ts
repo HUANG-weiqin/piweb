@@ -1,7 +1,7 @@
 const MAX_OUTPUT_BYTES = 8192;
 const ANSI_CSI = /\u001B\[[0-?]*[ -/]*[@-~]/g;
 const ANSI_OSC = /\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)/g;
-const PROTECTED_LINE = /error|exception|failed|failure|fatal|panic|assert/i;
+const PROTECTED_LINE = /error|exception|failed|failure|fatal|panic|assert|warning|timeout|timed out|segmentation fault|\bsegfault\b|access violation|out of memory|\boom\b|deadlock/i;
 const encoder = new TextEncoder();
 
 function utf8Bytes(value: string): number {
