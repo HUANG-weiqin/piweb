@@ -45,6 +45,7 @@ function view(
     cwd="E:\\work"
     online
     conversationReady
+    historyTruncated={false}
     draft={draft}
     submitting={false}
     pendingPrompts={[]}
@@ -82,6 +83,13 @@ describe("Chat", () => {
     fireEvent.click(screen.getByRole("button", { name: "手动压缩上下文" }));
 
     expect(onCompact).toHaveBeenCalledOnce();
+  });
+
+  it("shows when the restored transcript omits older history", () => {
+    render(view(emptyChat, "", undefined, { historyTruncated: true }));
+
+    expect(screen.getByRole("note", { name: "历史记录不完整" }))
+      .toHaveTextContent("较早的对话记录未加载，当前仅显示最近内容。");
   });
 
   it("shows animated compaction progress inside the transcript", () => {

@@ -2397,6 +2397,7 @@ export function App() {
               cwd={state.cwd}
               online={online}
               conversationReady={visibleConversationReady}
+              historyTruncated={historyTruncated}
               draft={draft}
               submitting={
                 Boolean(pendingPrompt) || hasPendingEnqueueForFocus(focusRef.current)

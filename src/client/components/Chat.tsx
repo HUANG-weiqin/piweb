@@ -86,6 +86,7 @@ interface ChatProps {
   cwd: string;
   online: boolean;
   conversationReady: boolean;
+  historyTruncated: boolean;
   draft: string;
   submitting: boolean;
   pendingPrompts: PendingPrompt[];
@@ -244,6 +245,7 @@ export function Chat({
   cwd,
   online,
   conversationReady,
+  historyTruncated,
   draft,
   submitting,
   pendingPrompts,
@@ -492,6 +494,13 @@ export function Chat({
       </div>
     </header>
     {!online && <div className="banner">本地服务已断开，正在重连…</div>}
+    {historyTruncated && <div
+      className="banner"
+      role="note"
+      aria-label="历史记录不完整"
+    >
+      较早的对话记录未加载，当前仅显示最近内容。
+    </div>}
     <section
       ref={transcriptRef}
       className={`transcript${blocks.length ? " has-content" : ""}`}
