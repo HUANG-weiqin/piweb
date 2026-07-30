@@ -242,7 +242,8 @@ function upsertItem(items: ChatItem[], next: ChatItem): ChatItem[] {
 }
 
 function normalizeHistory(items: ConversationHistoryItem[]): ChatItem[] {
-  let normalized: ChatItem[] = [];
+  const normalized: ChatItem[] = [];
+  const indexByIdentity = new Map<string, number>();
   let historyRunId: string | undefined;
   for (const item of items) {
     if (item.kind === "message" && item.role === "user") {
@@ -251,7 +252,14 @@ function normalizeHistory(items: ConversationHistoryItem[]): ChatItem[] {
     const next = item.kind === "message"
       ? historyMessageToItem(item, item.runId ?? historyRunId)
       : item;
-    normalized = upsertItem(normalized, next);
+    const identity = itemIdentity(next);
+    const existingIndex = indexByIdentity.get(identity);
+    if (existingIndex === undefined) {
+      indexByIdentity.set(identity, normalized.length);
+      normalized.push(next);
+    } else {
+      normalized[existingIndex] = next;
+    }
   }
   return normalized;
 }

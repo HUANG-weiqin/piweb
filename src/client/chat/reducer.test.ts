@@ -102,6 +102,40 @@ describe("chatReducer", () => {
     expect(state.sessionTokens).toBe(9);
   });
 
+  it("normalizes a large unique snapshot with linear identity reads", () => {
+    let idReads = 0;
+    const items = Array.from({ length: 1_000 }, (_, index) => {
+      const item: ConversationHistoryItem = {
+        kind: "compaction",
+        id: `compaction-${index}`,
+        timestamp: "2026-07-19T10:00:00.000Z",
+        tokensBefore: index,
+      };
+      Object.defineProperty(item, "id", {
+        configurable: true,
+        enumerable: true,
+        get: () => {
+          idReads += 1;
+          return `compaction-${index}`;
+        },
+      });
+      return item;
+    });
+
+    let state = chatReducer(initialChatState, {
+      type: "focus_changed",
+      ...FOCUS_A_1,
+    });
+    state = chatReducer(state, {
+      type: "hydrate",
+      ...FOCUS_A_1,
+      items,
+    });
+
+    expect(state.items).toHaveLength(items.length);
+    expect(idReads).toBeLessThanOrEqual(items.length * 2);
+  });
+
   it("hydrates a durable compaction boundary without treating it as a message", () => {
     let state = chatReducer(initialChatState, {
       type: "focus_changed",
