@@ -4541,6 +4541,10 @@ export class ProjectSessionCoordinator {
           resolveCompletion = resolve;
           rejectCompletion = reject;
         });
+        // The abort listener can reject while durable waiter registration is
+        // still awaiting project lifecycle work. Observe that interval now;
+        // callers still receive the same rejection from `completion` below.
+        void completion.catch(() => undefined);
         const key = completionKey(targetConversationId, runId);
         let registeredWaiter: SessionWaiter | undefined;
         try {
