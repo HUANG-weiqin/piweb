@@ -15,7 +15,11 @@ import {
   type ServerEvent,
 } from "../shared/protocol.js";
 import type { DirectoryBrowser } from "./directory-browser.js";
-import type { CreatedPiSession, PiRuntimeLike } from "./pi-runtime.js";
+import type {
+  CreatedPiSession,
+  CredentialChangeIntent,
+  PiRuntimeLike,
+} from "./pi-runtime.js";
 import {
   attachSocketServer,
   isAllowedOrigin,
@@ -37,6 +41,18 @@ class SocketTestRuntime implements PiRuntimeLike {
 
   createSession(): Promise<CreatedPiSession> {
     throw new Error("not used");
+  }
+
+  beginCredentialChange(provider: string): CredentialChangeIntent {
+    return { provider, revision: 1 };
+  }
+
+  async commitCredentialChange(
+    _intent: CredentialChangeIntent,
+    change: () => void,
+  ): Promise<boolean> {
+    change();
+    return true;
   }
 
   async updateConfiguration<T>(change: () => Promise<T> | T): Promise<T> {

@@ -39,6 +39,7 @@ import {
 import type {
   CreatedPiSession,
   CreatePiSessionOptions,
+  CredentialChangeIntent,
   PiRuntimeLike,
   ToolCallGate,
 } from "./pi-runtime.js";
@@ -231,6 +232,18 @@ class FakeRuntime implements PiRuntimeLike {
         this.session.dispose();
       },
     };
+  }
+
+  beginCredentialChange(provider: string): CredentialChangeIntent {
+    return { provider, revision: 1 };
+  }
+
+  async commitCredentialChange(
+    _intent: CredentialChangeIntent,
+    change: () => void,
+  ): Promise<boolean> {
+    change();
+    return true;
   }
 
   updateConfiguration<T>(change: () => Promise<T> | T): Promise<T> {

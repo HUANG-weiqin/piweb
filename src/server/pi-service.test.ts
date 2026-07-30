@@ -23,6 +23,7 @@ import {
 import type {
   CreatedPiSession,
   CreatePiSessionOptions,
+  CredentialChangeIntent,
   PiRuntimeLike,
   ToolCallGate,
 } from "./pi-runtime.js";
@@ -163,6 +164,7 @@ class FakeRuntime implements PiRuntimeLike {
   readonly startupExtensionErrors: ExtensionError[] = [];
 
   private readonly listeners = new Set<() => void>();
+  private readonly credentialRevisions = new Map<string, number>();
 
   async createProjectModelCatalog() {
     return {
@@ -204,6 +206,26 @@ class FakeRuntime implements PiRuntimeLike {
         return disposePromise;
       },
     };
+  }
+
+  beginCredentialChange(provider: string): CredentialChangeIntent {
+    const revision = (this.credentialRevisions.get(provider) ?? 0) + 1;
+    this.credentialRevisions.set(provider, revision);
+    return { provider, revision };
+  }
+
+  commitCredentialChange(
+    intent: CredentialChangeIntent,
+    change: () => void,
+  ): Promise<boolean> {
+    return this.updateConfiguration(() => {
+      if (this.credentialRevisions.get(intent.provider) !== intent.revision) {
+        return false;
+      }
+      this.credentialRevisions.set(intent.provider, intent.revision + 1);
+      change();
+      return true;
+    });
   }
 
   async updateConfiguration<T>(change: () => Promise<T> | T): Promise<T> {
@@ -1670,6 +1692,85 @@ describe("PiConnection lifecycle", () => {
     }));
   });
 
+  it("waits for OAuth credentials before entering configuration serialization", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-oauth-lock-scope-"));
+    const loginStarted = deferred();
+    const loginGate = deferred();
+    const runtime = new FakeRuntime();
+    configureOAuth(runtime, async () => {
+      loginStarted.resolve();
+      await loginGate.promise;
+    });
+    let configurationChanges = 0;
+    const order: string[] = [];
+    runtime.updateConfiguration = async <T>(change: () => Promise<T> | T) => {
+      configurationChanges++;
+      const value = await change();
+      order.push("configuration-refreshed");
+      return value;
+    };
+    const connection = new PiConnection((event) => {
+      if (event.type === "auth_complete") order.push("auth-complete");
+    }, runtime);
+    await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
+
+    const login = connection.handle({
+      type: "login_oauth",
+      authFlowId: AUTH_A,
+      provider: "oauth",
+    });
+    await loginStarted.promise;
+    try {
+      expect(configurationChanges).toBe(0);
+    } finally {
+      loginGate.resolve();
+      await login;
+    }
+    expect(configurationChanges).toBe(1);
+    expect(order).toEqual(["configuration-refreshed", "auth-complete"]);
+  });
+
+  it("does not let an older OAuth result overwrite a newer logout", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-oauth-stale-result-"));
+    const loginStarted = deferred();
+    const loginGate = deferred();
+    const runtime = new FakeRuntime();
+    let credential: unknown;
+    configureOAuth(runtime, async () => {
+      loginStarted.resolve();
+      await loginGate.promise;
+    });
+    Object.assign(runtime.authStorage, {
+      set: (_provider: string, next: unknown) => {
+        credential = next;
+      },
+      logout: () => {
+        credential = undefined;
+      },
+    });
+    const events: ServerEvent[] = [];
+    const oauthConnection = new PiConnection((event) => events.push(event), runtime);
+    const logoutConnection = new PiConnection(() => undefined, runtime);
+    await oauthConnection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
+
+    const login = oauthConnection.handle({
+      type: "login_oauth",
+      authFlowId: AUTH_A,
+      provider: "oauth",
+    });
+    await loginStarted.promise;
+    await logoutConnection.handle({ type: "logout", provider: "oauth" });
+    try {
+      expect(credential).toBeUndefined();
+    } finally {
+      loginGate.resolve();
+      await login;
+    }
+
+    expect(credential).toBeUndefined();
+    expect(events.some((event) => event.type === "auth_complete")).toBe(false);
+  });
+
   it("cancels an active OAuth flow so a new session is not blocked", async () => {
     const cwdA = await mkdtemp(join(tmpdir(), "piweb-oauth-a-"));
     const cwdB = await mkdtemp(join(tmpdir(), "piweb-oauth-b-"));
@@ -1697,6 +1798,42 @@ describe("PiConnection lifecycle", () => {
     await Promise.all([login, close, initialize]);
 
     expect(connection.sessionId).toBe(SESSION_B);
+    expect(events.some((event) => event.type === "auth_complete")).toBe(false);
+  });
+
+  it("does not commit OAuth credentials when cancelled while waiting to serialize", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-oauth-cancel-commit-"));
+    const commitStarted = deferred();
+    const commitGate = deferred();
+    const runtime = new FakeRuntime();
+    let credential: unknown = { type: "api_key", key: "previous" };
+    configureOAuth(runtime, async () => undefined);
+    Object.assign(runtime.authStorage, {
+      set: (_provider: string, next: unknown) => {
+        credential = next;
+      },
+    });
+    const commitCredentialChange = runtime.commitCredentialChange.bind(runtime);
+    runtime.commitCredentialChange = async (intent, change) => {
+      commitStarted.resolve();
+      await commitGate.promise;
+      return commitCredentialChange(intent, change);
+    };
+    const events: ServerEvent[] = [];
+    const connection = new PiConnection((event) => events.push(event), runtime);
+    await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
+
+    const login = connection.handle({
+      type: "login_oauth",
+      authFlowId: AUTH_A,
+      provider: "oauth",
+    });
+    await commitStarted.promise;
+    await connection.handle({ type: "cancel_auth", authFlowId: AUTH_A });
+    commitGate.resolve();
+    await login;
+
+    expect(credential).toEqual({ type: "api_key", key: "previous" });
     expect(events.some((event) => event.type === "auth_complete")).toBe(false);
   });
 

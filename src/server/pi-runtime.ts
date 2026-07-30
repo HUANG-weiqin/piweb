@@ -121,6 +121,11 @@ export interface CreatedProjectModelCatalog {
   dispose(): Promise<void>;
 }
 
+export interface CredentialChangeIntent {
+  readonly provider: string;
+  readonly revision: number;
+}
+
 export interface PiRuntimeLike {
   readonly authStorage: AuthStorage;
   readonly modelRegistry: ModelRegistry;
@@ -129,6 +134,11 @@ export interface PiRuntimeLike {
     cwd: string,
     options?: CreateProjectModelCatalogOptions,
   ): Promise<CreatedProjectModelCatalog>;
+  beginCredentialChange(provider: string): CredentialChangeIntent;
+  commitCredentialChange(
+    intent: CredentialChangeIntent,
+    change: () => void,
+  ): Promise<boolean>;
   updateConfiguration<T>(change: () => Promise<T> | T): Promise<T>;
   refreshConfiguration(): Promise<void>;
   subscribe(listener: () => void): () => void;
@@ -331,6 +341,7 @@ export class PiRuntime implements PiRuntimeLike {
   readonly modelRegistry: ModelRegistry;
 
   private readonly configurationQueue = new SerialTaskQueue();
+  private readonly credentialRevisions = new Map<string, number>();
   private readonly listeners = new Set<() => void>();
   private readonly sessionRegistries = new Set<SessionModelRegistry>();
   private readonly createModelRegistry: (authStorage: AuthStorage) => ModelRegistry;
@@ -700,6 +711,28 @@ export class PiRuntime implements PiRuntimeLike {
       dynamicProviderNames: () => owner.names(),
       dispose,
     };
+  }
+
+  beginCredentialChange(provider: string): CredentialChangeIntent {
+    const revision = (this.credentialRevisions.get(provider) ?? 0) + 1;
+    this.credentialRevisions.set(provider, revision);
+    return { provider, revision };
+  }
+
+  commitCredentialChange(
+    intent: CredentialChangeIntent,
+    change: () => void,
+  ): Promise<boolean> {
+    return this.updateConfiguration(() => {
+      if (this.credentialRevisions.get(intent.provider) !== intent.revision) {
+        return false;
+      }
+      // Consume the intent before the external storage mutation so it cannot
+      // be accidentally committed twice, including after a thrown write.
+      this.credentialRevisions.set(intent.provider, intent.revision + 1);
+      change();
+      return true;
+    });
   }
 
   updateConfiguration<T>(change: () => Promise<T> | T): Promise<T> {

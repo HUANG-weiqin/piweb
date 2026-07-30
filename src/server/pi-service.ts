@@ -35,6 +35,7 @@ import { createGitTools } from "./git-inspect.js";
 import {
   PiRuntime,
   type CreatedPiSession,
+  type CredentialChangeIntent,
   type PiRuntimeLike,
   type ToolCallGateInput,
 } from "./pi-runtime.js";
@@ -2462,9 +2463,11 @@ export class PiConnection {
 
   private async setApiKey(provider: string, key: string): Promise<void> {
     this.assertKnownProvider(provider);
-    await this.updateConfiguration(() => {
+    const intent = this.runtime.beginCredentialChange(provider);
+    const applied = await this.commitCredentialChange(intent, () => {
       this.runtime.authStorage.set(provider, { type: "api_key", key });
     });
+    if (!applied) throw new Error("API key change was superseded by a newer credential change");
   }
 
   private async loginOAuth(provider: string, authFlowId: string): Promise<void> {
@@ -2475,16 +2478,18 @@ export class PiConnection {
     const flow = new AuthFlowBroker(authFlowId, this.emit);
     this.authFlow = flow;
     const signal = flow.callbacks.signal;
+    const intent = this.runtime.beginCredentialChange(provider);
     try {
-      await this.updateConfiguration(async () => {
-        const credentials = await oauthProvider.login(flow.callbacks);
+      const credentials = await oauthProvider.login(flow.callbacks);
+      if (signal?.aborted) return;
+      const applied = await this.commitCredentialChange(intent, () => {
         if (signal?.aborted) return;
         this.runtime.authStorage.set(provider, {
           type: "oauth",
           ...credentials,
         });
       });
-      if (signal?.aborted) return;
+      if (signal?.aborted || !applied) return;
       this.emit({ type: "auth_complete", authFlowId, provider });
     } catch (error) {
       if (!signal?.aborted) throw error;
@@ -2495,14 +2500,27 @@ export class PiConnection {
 
   private async logout(provider: string): Promise<void> {
     this.assertKnownProvider(provider, true);
-    await this.updateConfiguration(() => {
+    const intent = this.runtime.beginCredentialChange(provider);
+    const applied = await this.commitCredentialChange(intent, () => {
       this.runtime.authStorage.logout(provider);
     });
+    if (!applied) throw new Error("Logout was superseded by a newer credential change");
   }
 
   private async refreshModels(): Promise<void> {
     try {
       await this.runtime.refreshConfiguration();
+    } finally {
+      this.reportNativeErrors();
+    }
+  }
+
+  private async commitCredentialChange(
+    intent: CredentialChangeIntent,
+    change: () => void,
+  ): Promise<boolean> {
+    try {
+      return await this.runtime.commitCredentialChange(intent, change);
     } finally {
       this.reportNativeErrors();
     }

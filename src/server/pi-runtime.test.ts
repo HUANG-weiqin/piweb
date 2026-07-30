@@ -1190,6 +1190,41 @@ describe("PiRuntime session ownership", () => {
     await clean.dispose();
   });
 
+  it("commits only the latest one-shot credential intent per provider", async () => {
+    const runtime = testRuntime(() => []);
+    const applied: string[] = [];
+    const older = runtime.beginCredentialChange("provider-a");
+    const independent = runtime.beginCredentialChange("provider-b");
+    const newer = runtime.beginCredentialChange("provider-a");
+
+    await expect(runtime.commitCredentialChange(older, () => {
+      applied.push("older");
+    })).resolves.toBe(false);
+    await expect(runtime.commitCredentialChange(independent, () => {
+      applied.push("independent");
+    })).resolves.toBe(true);
+    await expect(runtime.commitCredentialChange(newer, () => {
+      applied.push("newer");
+    })).resolves.toBe(true);
+    await expect(runtime.commitCredentialChange(newer, () => {
+      applied.push("reused");
+    })).resolves.toBe(false);
+
+    const failing = runtime.beginCredentialChange("provider-a");
+    await expect(runtime.commitCredentialChange(failing, () => {
+      throw new Error("credential write failed");
+    })).rejects.toThrow("credential write failed");
+    await expect(runtime.commitCredentialChange(failing, () => {
+      applied.push("retried-failure");
+    })).resolves.toBe(false);
+    const recovery = runtime.beginCredentialChange("provider-a");
+    await expect(runtime.commitCredentialChange(recovery, () => {
+      applied.push("recovery");
+    })).resolves.toBe(true);
+
+    expect(applied).toEqual(["independent", "newer", "recovery"]);
+  });
+
   it("does not let a long configuration flow block session creation or disposal", async () => {
     const cwdA = await mkdtemp(join(tmpdir(), "piweb-runtime-lock-a-"));
     const cwdB = await mkdtemp(join(tmpdir(), "piweb-runtime-lock-b-"));
