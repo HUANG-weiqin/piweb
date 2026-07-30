@@ -2,7 +2,6 @@ import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import {
   MAX_PROJECT_ACTIVITY_SUMMARIES,
-  type ConversationActivity,
   type ConversationSummary,
   type ProjectActivitySummary,
   type ToolMode,

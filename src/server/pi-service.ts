@@ -2526,14 +2526,6 @@ export class PiConnection {
     }
   }
 
-  private async updateConfiguration<T>(change: () => Promise<T> | T): Promise<T> {
-    try {
-      return await this.runtime.updateConfiguration(change);
-    } finally {
-      this.reportNativeErrors();
-    }
-  }
-
   private assertKnownProvider(provider: string, includeOAuth = false): void {
     const active = this.active;
     const view = this.coordinatedView;
