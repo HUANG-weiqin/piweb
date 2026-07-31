@@ -1222,6 +1222,84 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
+  it("keeps the initial durable prompt owned while a later steered user message is still open", async () => {
+    const fixture = await openActor();
+    const steerStarted = deferred();
+    const promptFinished = deferred();
+    fixture.runtime.session.promptImplementation = async () => {
+      const emit = fixture.runtime.session.eventListener;
+      const initial = agentMessage({
+        role: "user",
+        content: "inspect",
+        timestamp: 1,
+      });
+      const assistantStarted = agentMessage({
+        role: "assistant",
+        content: [],
+        timestamp: 2,
+      });
+      const assistantFinal = agentMessage({
+        role: "assistant",
+        content: [{ type: "text", text: "before steer" }],
+        timestamp: 2,
+      });
+      const steer = agentMessage({
+        role: "user",
+        content: "steer while running",
+        timestamp: 3,
+      });
+
+      emit?.(nativeEvent({ type: "agent_start" }));
+      emit?.(nativeEvent({ type: "message_start", message: initial }));
+      emit?.(nativeEvent({ type: "message_end", message: initial }));
+      fixture.manager.appendMessage(initial);
+      // pi-agent-core intentionally emits a shallow partial clone at start,
+      // then a different finalized object at end; only the latter is persisted.
+      emit?.(nativeEvent({ type: "message_start", message: assistantStarted }));
+      emit?.(nativeEvent({ type: "message_end", message: assistantFinal }));
+      fixture.manager.appendMessage(assistantFinal);
+
+      // Pi emits message_start before message_end persistence. A focused
+      // snapshot can therefore observe this later user message still open.
+      emit?.(nativeEvent({ type: "message_start", message: steer }));
+      steerStarted.resolve();
+      await promptFinished.promise;
+    };
+
+    const running = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "inspect",
+      origin: "browser",
+    });
+    await steerStarted.promise;
+
+    expect(() => fixture.actor.projectConversationItems()).not.toThrow();
+    expect(fixture.actor.projectConversationItems().items).toEqual([
+      expect.objectContaining({
+        kind: "message",
+        role: "user",
+        text: "inspect",
+        runId: RUN_A,
+      }),
+      expect.objectContaining({
+        kind: "message",
+        role: "assistant",
+        text: "before steer",
+        runId: RUN_A,
+      }),
+      expect.objectContaining({
+        kind: "message",
+        role: "user",
+        text: "steer while running",
+        runId: RUN_A,
+      }),
+    ]);
+
+    promptFinished.resolve();
+    await running;
+    await fixture.actor.dispose();
+  });
+
   it("projects live deltas into the current assistant segment after steering", async () => {
     const fixture = await openActor();
     const promptStarted = deferred();
