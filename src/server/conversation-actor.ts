@@ -314,9 +314,10 @@ function isCancelling(ticket: RunTicket): boolean {
 
 interface LiveConversationProjection {
   runId: string;
-  baseItemIdentities: Set<string>;
-  baseAssistantEntryCounts: Map<string, number>;
   currentAssistantId?: string;
+  initialUserItemId?: string;
+  /** Raw SDK message identity, never text/role-derived matching. */
+  rawMessagesByItemId: Map<string, unknown>;
   items: ConversationHistoryItem[];
 }
 
@@ -355,18 +356,6 @@ function addUsage(
     cacheWrite: (current?.cacheWrite ?? 0) + next.cacheWrite,
     total: (current?.total ?? 0) + next.total,
   };
-}
-
-function messageIdentity(message: ConversationHistoryMessage): string {
-  return message.runId
-    ? `${message.role}:${message.runId}:${message.id}`
-    : `${message.role}:${message.id}`;
-}
-
-function conversationItemIdentity(item: ConversationHistoryItem): string {
-  if (item.kind === "message") return `message:${messageIdentity(item)}`;
-  if (item.kind === "session_message") return `card:${item.cardId}`;
-  return `${item.kind}:${item.id}`;
 }
 
 /**
@@ -744,72 +733,71 @@ export class ConversationActor {
     };
   }
 
-  projectConversationItems(historyItems: ConversationHistoryItem[]): {
+  projectConversationItems(
+    enrich?: (items: ConversationHistoryItem[]) => ConversationHistoryItem[],
+  ): {
     items: ConversationHistoryItem[];
     projectionSeq: number;
-    truncated?: boolean;
+    truncated: boolean;
   } {
-    const live = this.liveProjection;
-    if (!live) return { items: historyItems, projectionSeq: this.projectionSeq };
-
-    const liveItems = live.items.map((item) => structuredClone(item));
-    let liveCursor = 0;
-    const merged: ConversationHistoryItem[] = [];
-    const currentSlots = projectConversationItemSlots(this.sessionManager);
-    let lastCompactionSlotIndex = -1;
-    for (let index = 0; index < currentSlots.length; index += 1) {
-      if (currentSlots[index]?.item.kind === "compaction") {
-        lastCompactionSlotIndex = index;
+    const slots = projectConversationItemSlots(this.sessionManager);
+    const durableItems = slots.map(({ item }) => structuredClone(item));
+    const durableIndexByRawMessage = new Map<unknown, number>();
+    for (const [index, slot] of slots.entries()) {
+      for (const source of slot.sourceMessages ?? []) {
+        durableIndexByRawMessage.set(source.message, index);
       }
     }
 
-    const consumeLiveMessages = (
-      role: "user" | "assistant",
-      count: number,
-      append: boolean,
-    ) => {
-      let consumed = 0;
-      while (consumed < count) {
-        const liveItem = liveItems[liveCursor];
-        if (liveItem?.kind !== "message" || liveItem.role !== role) break;
-        if (append) merged.push(liveItem);
-        liveCursor += 1;
-        consumed += 1;
-      }
-    };
-
-    for (const [slotIndex, slot] of currentSlots.entries()) {
-      const item = slot.item;
-      const identity = conversationItemIdentity(item);
-      const isBaseItem = live.baseItemIdentities.has(identity);
-      if (isBaseItem) {
-        merged.push(item);
-        if (item.kind === "message" && item.role === "assistant") {
-          const baseCount = live.baseAssistantEntryCounts.get(identity) ?? 0;
-          const currentCount = slot.assistantEntryCount ?? baseCount;
-          consumeLiveMessages("assistant", Math.max(0, currentCount - baseCount), false);
+    const live = this.activeRun === undefined ? undefined : this.liveProjection;
+    if (live) {
+      let sawUnmatchedLiveItem = false;
+      for (const liveItem of live.items) {
+        if (liveItem.kind !== "message") continue;
+        const rawMessage = live.rawMessagesByItemId.get(liveItem.id);
+        const durableIndex = rawMessage === undefined
+          ? undefined
+          : durableIndexByRawMessage.get(rawMessage);
+        if (durableIndex === undefined) {
+          sawUnmatchedLiveItem = true;
+          durableItems.push(structuredClone(liveItem));
+          continue;
         }
-        continue;
-      }
-
-      if (item.kind === "message") {
-        const count = item.role === "assistant"
-          ? Math.max(1, slot.assistantEntryCount ?? 1)
-          : 1;
-        const preserveDurableItem = slotIndex < lastCompactionSlotIndex;
-        consumeLiveMessages(item.role, count, !preserveDurableItem);
-        if (preserveDurableItem) merged.push(item);
-      } else {
-        merged.push(item);
+        if (sawUnmatchedLiveItem) {
+          throw new Error("A durable live message appeared after the live suffix");
+        }
+        const durableItem = durableItems[durableIndex];
+        if (durableItem?.kind !== "message") continue;
+        const ownedDurable = { ...durableItem, runId: live.runId };
+        if (ownedDurable.role !== "assistant" || liveItem.role !== "assistant") {
+          durableItems[durableIndex] = ownedDurable;
+          continue;
+        }
+        const liveTools = new Map(
+          liveItem.tools.map((tool) => [tool.toolCallId, tool]),
+        );
+        durableItems[durableIndex] = {
+          ...ownedDurable,
+          tools: ownedDurable.tools.map((tool) => {
+            const patch = liveTools.get(tool.toolCallId);
+            if (patch === undefined || tool.status !== "pending") return tool;
+            return {
+              ...tool,
+              status: patch.status,
+              ...(patch.result === undefined ? {} : { result: patch.result }),
+            };
+          }),
+        };
       }
     }
 
-    merged.push(...liveItems.slice(liveCursor));
-
-    const snapshot = snapshotConversationItems(merged);
+    const snapshot = snapshotConversationItems(
+      enrich ? enrich(durableItems) : durableItems,
+    );
+    const projectionSeq = this.projectionSeq;
     return {
       items: snapshot.items,
-      projectionSeq: this.projectionSeq,
+      projectionSeq,
       truncated: snapshot.truncated,
     };
   }
@@ -1740,6 +1728,22 @@ export class ConversationActor {
       });
     }
 
+    const rawStartedMessage = event.type === "message_start"
+      && (event.message.role === "user" || event.message.role === "assistant")
+        ? event.message
+        : undefined;
+    if (
+      event.type === "message_start"
+      && event.message.role === "user"
+      && ticket.origin === "browser"
+      && this.liveProjection?.runId === ticket.id
+      && this.liveProjection.initialUserItemId !== undefined
+    ) {
+      this.liveProjection.rawMessagesByItemId.set(
+        this.liveProjection.initialUserItemId,
+        event.message,
+      );
+    }
     const guidanceProjectedText =
       event.type === "message_start"
       && event.message.role === "user"
@@ -1752,6 +1756,7 @@ export class ConversationActor {
         projected.type === "user_message" && guidanceProjectedText !== undefined
           ? { ...projected, text: guidanceProjectedText }
           : projected,
+        rawStartedMessage,
       );
     }
   }
@@ -1879,25 +1884,9 @@ export class ConversationActor {
   }
 
   private resetLiveProjection(ticket: RunTicket): LiveConversationProjection {
-    const baseSlots = projectConversationItemSlots(this.sessionManager);
-    const baseItemIdentities = new Set(
-      baseSlots.map((slot) => conversationItemIdentity(slot.item)),
-    );
-    const baseAssistantEntryCounts = new Map(
-      baseSlots.flatMap((slot) => {
-        if (slot.item.kind !== "message" || slot.item.role !== "assistant") {
-          return [];
-        }
-        return [[
-          conversationItemIdentity(slot.item),
-          slot.assistantEntryCount ?? 0,
-        ] as const];
-      }),
-    );
     const live: LiveConversationProjection = {
       runId: ticket.id,
-      baseItemIdentities,
-      baseAssistantEntryCounts,
+      rawMessagesByItemId: new Map(),
       items: [],
     };
     this.liveProjection = live;
@@ -1915,9 +1904,11 @@ export class ConversationActor {
     const live = this.resetLiveProjection(ticket);
     const items = live.items;
     if (promptText !== undefined) {
+      const id = runMessageId(ticket.id, "user");
+      live.initialUserItemId = id;
       items.push({
         kind: "message",
-        id: runMessageId(ticket.id, "user"),
+        id,
         runId: ticket.id,
         role: "user",
         text: promptText,
@@ -1954,9 +1945,15 @@ export class ConversationActor {
     return assistant;
   }
 
-  private appendLiveUser(ticket: RunTicket, projectionId: string, text: string): void {
+  private appendLiveUser(
+    ticket: RunTicket,
+    projectionId: string,
+    text: string,
+    rawMessage?: unknown,
+  ): void {
     const live = this.requireLiveProjection(ticket);
     if (live.items.some((item) => item.kind === "message" && item.id === projectionId)) {
+      if (rawMessage !== undefined) live.rawMessagesByItemId.set(projectionId, rawMessage);
       return;
     }
     live.items.push({
@@ -1969,11 +1966,16 @@ export class ConversationActor {
       tools: [],
       parts: text ? [{ kind: "text", offset: 0, length: text.length }] : [],
     });
+    if (rawMessage !== undefined) live.rawMessagesByItemId.set(projectionId, rawMessage);
   }
 
-  private applyLiveSessionEvent(ticket: RunTicket, event: SessionEvent): void {
+  private applyLiveSessionEvent(
+    ticket: RunTicket,
+    event: SessionEvent,
+    rawMessage?: unknown,
+  ): void {
     if (event.type === "user_message") {
-      this.appendLiveUser(ticket, event.projectionId, event.text);
+      this.appendLiveUser(ticket, event.projectionId, event.text, rawMessage);
       return;
     }
     if (event.type === "assistant_message_started") {
@@ -1983,6 +1985,9 @@ export class ConversationActor {
       ));
       if (existingIndex >= 0) {
         live.currentAssistantId = event.projectionId;
+        if (rawMessage !== undefined) {
+          live.rawMessagesByItemId.set(event.projectionId, rawMessage);
+        }
         return;
       }
       const emptyAssistantIndex = live.items.findIndex((item) => (
@@ -1994,7 +1999,10 @@ export class ConversationActor {
         && item.tools.length === 0
       ));
       if (emptyAssistantIndex >= 0) {
-        live.items.splice(emptyAssistantIndex, 1);
+        const [removed] = live.items.splice(emptyAssistantIndex, 1);
+        if (removed?.kind === "message") {
+          live.rawMessagesByItemId.delete(removed.id);
+        }
       }
       live.currentAssistantId = event.projectionId;
       live.items.push({
@@ -2007,6 +2015,9 @@ export class ConversationActor {
         tools: [],
         parts: [],
       });
+      if (rawMessage !== undefined) {
+        live.rawMessagesByItemId.set(event.projectionId, rawMessage);
+      }
       return;
     }
     if (event.type === "text_delta" || event.type === "thinking_delta") {
@@ -2082,8 +2093,12 @@ export class ConversationActor {
     }
   }
 
-  private emitSessionEvent(ticket: RunTicket, event: SessionEvent): void {
-    this.applyLiveSessionEvent(ticket, event);
+  private emitSessionEvent(
+    ticket: RunTicket,
+    event: SessionEvent,
+    rawMessage?: unknown,
+  ): void {
+    this.applyLiveSessionEvent(ticket, event, rawMessage);
     const projectionSeq = ++this.projectionSeq;
     this.emit({
       type: "session_event",

@@ -24,10 +24,7 @@ import type {
 } from "../shared/protocol.js";
 import { mostRestrictiveToolMode } from "../shared/tool-mode.js";
 import { AuthFlowBroker } from "./auth-flow.js";
-import {
-  projectConversationHistorySnapshot,
-  projectConversationItemsSnapshot,
-} from "./conversation-history.js";
+import { projectConversationHistorySnapshot } from "./conversation-history.js";
 import type { ConversationActor } from "./conversation-actor.js";
 import { validateCwd } from "./cwd.js";
 import { ExtensionUIBroker } from "./extension-ui.js";
@@ -1919,14 +1916,13 @@ export class PiConnection {
       return;
     }
     try {
-      const history = projectConversationItemsSnapshot(
-        actor.sessionManager,
-      );
-      const projection = actor.projectConversationItems(history.items);
-      const items = projectConversationPeers(
-        projection.items,
-        view.handle.project.listConversations(),
-      );
+      const projection = actor.projectConversationItems((items) => (
+        projectConversationPeers(
+          items,
+          view.handle.project.listConversations(),
+        )
+      ));
+      const items = projection.items;
       this.focusedItemFingerprints.clear();
       for (const item of items) {
         this.focusedItemFingerprints.set(item.id, JSON.stringify(item));
@@ -1939,7 +1935,7 @@ export class PiConnection {
         role: actor.profile.role,
         projectionSeq: projection.projectionSeq,
         items,
-        truncated: projection.truncated ?? history.truncated,
+        truncated: projection.truncated,
       });
     } catch (error) {
       this.emitError("session", error, view.sessionId);
@@ -2016,12 +2012,22 @@ export class PiConnection {
       return;
     }
     try {
-      const history = projectConversationItemsSnapshot(actor.sessionManager);
-      const projection = actor.projectConversationItems(history.items);
-      const items = projectConversationPeers(
-        projection.items,
-        view.handle.project.listConversations(),
-      );
+      const projection = actor.projectConversationItems((items) => (
+        projectConversationPeers(
+          items,
+          view.handle.project.listConversations(),
+        )
+      ));
+      const items = projection.items;
+      const currentIds = new Set(items.map((item) => item.id));
+      const omittedPreviousItem = [...this.focusedItemFingerprints.keys()]
+        .some((id) => !currentIds.has(id));
+      if (omittedPreviousItem) {
+        // An item upsert cannot remove a newly-evicted window member. Rehydrate
+        // the exact bounded window instead of leaving stale client history.
+        this.publishFocusedConversationSnapshot();
+        return;
+      }
       for (const item of items) {
         if (item.kind !== "session_message") continue;
         const fingerprint = JSON.stringify(item);

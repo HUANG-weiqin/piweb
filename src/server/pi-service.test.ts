@@ -4310,6 +4310,7 @@ describe("PiConnection coordinated project view", () => {
         { updateRecent: false },
       );
       const cardId = randomUUID();
+      const cardMessageId = randomUUID();
       appendReservedCustomEntry(
         source.sessionManager,
         createConversationCardEntry({
@@ -4332,8 +4333,27 @@ describe("PiConnection coordinated project view", () => {
             },
           },
           state: "queued",
-          messageId: randomUUID(),
+          messageId: cardMessageId,
           updatedAt: "2026-07-19T12:00:00.000Z",
+        }),
+      );
+      appendReservedCustomEntry(
+        source.sessionManager,
+        createConversationCardEntry({
+          cardId: randomUUID(),
+          kind: "message",
+          body: "\u0000".repeat(80_000),
+          fromSnapshot: {
+            conversationId: source.conversationId,
+            role: { id: source.profile.role.id, name: source.profile.role.name },
+          },
+          toSnapshot: {
+            conversationId: target.conversationId,
+            role: { id: target.profile.role.id, name: target.profile.role.name },
+          },
+          state: "queued",
+          messageId: randomUUID(),
+          updatedAt: "2026-07-19T12:00:01.000Z",
         }),
       );
       const focusCommandId = randomUUID();
@@ -4393,6 +4413,55 @@ describe("PiConnection coordinated project view", () => {
           peerExists: false,
         }),
       }));
+
+      appendReservedCustomEntry(
+        source.sessionManager,
+        createConversationCardEntry({
+          cardId,
+          kind: "message",
+          body: "review this",
+          fromSnapshot: {
+            conversationId: source.conversationId,
+            title: "😀".repeat(121),
+            role: { id: source.profile.role.id, name: source.profile.role.name },
+          },
+          toSnapshot: {
+            conversationId: target.conversationId,
+            role: { id: target.profile.role.id, name: target.profile.role.name },
+          },
+          state: "completed",
+          messageId: cardMessageId,
+          result: "\u0000".repeat(80_000),
+          updatedAt: "2026-07-19T12:00:02.000Z",
+        }),
+      );
+      const snapshotCount = harness.events.filter(
+        (event) => event.type === "conversation_snapshot",
+      ).length;
+      await harness.connection.handle({
+        type: "rename_conversation",
+        sessionId: SESSION_A,
+        conversationId: source.conversationId,
+        name: "source renamed",
+      });
+      await vi.waitFor(() => {
+        expect(harness.events.filter(
+          (event) => event.type === "conversation_snapshot",
+        ).length).toBeGreaterThan(snapshotCount);
+      });
+      const membershipSnapshot = harness.events.findLast(
+        (event) => event.type === "conversation_snapshot",
+      );
+      expect(membershipSnapshot).toMatchObject({
+        type: "conversation_snapshot",
+        conversationId: source.conversationId,
+        truncated: true,
+      });
+      if (membershipSnapshot?.type !== "conversation_snapshot") {
+        throw new Error("card growth snapshot was not published");
+      }
+      expect(membershipSnapshot.items?.some((item) => item.id === `session-message:${cardId}`))
+        .toBe(false);
     } finally {
       externalHandle?.release();
       await harness.cleanup();

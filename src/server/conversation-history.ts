@@ -213,12 +213,13 @@ function compactHistoryMessage(
 interface ConversationHistoryMessageSlot {
   message: ConversationHistoryMessage;
   anchorEntryId: string;
-  assistantEntryCount: number;
+  sourceMessages: Array<{ entryId: string; message: unknown }>;
 }
 
 export interface ConversationHistoryItemSlot {
   item: ConversationHistoryItem;
-  assistantEntryCount?: number;
+  /** Exact physical Pi messages represented by this durable semantic slot. */
+  sourceMessages?: ReadonlyArray<{ entryId: string; message: unknown }>;
 }
 
 function finalizeHistoryMessage(
@@ -247,7 +248,7 @@ function projectConversationHistorySlots(
   const requireAssistant = (entryId: string): ConversationHistoryMessageSlot => {
     assistant ??= {
       anchorEntryId: entryId,
-      assistantEntryCount: 0,
+      sourceMessages: [],
       message: {
         id: `assistant:${entryId}`,
         role: "assistant",
@@ -310,7 +311,7 @@ function projectConversationHistorySlots(
       }
       messages.push({
         anchorEntryId: entry.id,
-        assistantEntryCount: 0,
+        sourceMessages: [{ entryId: entry.id, message: entry.message }],
         message: {
           id: entry.id,
           role: "user",
@@ -324,7 +325,7 @@ function projectConversationHistorySlots(
 
     if (message.role === "assistant") {
       const targetSlot = requireAssistant(entry.id);
-      targetSlot.assistantEntryCount += 1;
+      targetSlot.sourceMessages.push({ entryId: entry.id, message: entry.message });
       const target = targetSlot.message;
       if (Array.isArray(message.content)) {
         for (const item of message.content) {
@@ -434,6 +435,7 @@ function projectConversationHistorySlots(
       parts: slot.message.parts?.map((part) => ({ ...part })),
       usage: slot.message.usage ? { ...slot.message.usage } : undefined,
     }),
+    sourceMessages: [...slot.sourceMessages],
   }));
 }
 
@@ -515,9 +517,7 @@ export function projectConversationItemSlots(
           kind: "message",
           ...message,
         },
-        ...(message.role === "assistant"
-          ? { assistantEntryCount: messageSlot.assistantEntryCount }
-          : {}),
+        sourceMessages: messageSlot.sourceMessages,
       },
       physicalIndex:
         physicalIndexById.get(messageSlot.anchorEntryId) ?? Number.MAX_SAFE_INTEGER,
@@ -732,6 +732,109 @@ export function projectAgentConversationPeek(
   return { items: selected, truncated };
 }
 
+function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+function shortenPrefix(value: string): string {
+  if (value.length <= 1) return "";
+  return `${value.slice(0, Math.floor(value.length / 2))}…`;
+}
+
+function minimalConversationItem(
+  item: ConversationHistoryItem,
+): ConversationHistoryItem {
+  if (item.kind === "message") {
+    return {
+      ...item,
+      text: "",
+      thinking: "",
+      tools: [],
+      parts: undefined,
+    };
+  }
+  if (item.kind === "compaction") return { ...item };
+  return {
+    ...item,
+    body: "",
+    ...(item.result === undefined ? {} : { result: "" }),
+  };
+}
+
+/**
+ * The per-field limits are byte limits on the raw strings, while JSON can make
+ * legal control characters six times larger. Make the final item itself fit
+ * its page slot using the exact serialized representation.
+ */
+function fitConversationItem(
+  source: ConversationHistoryItem,
+  maxBytes: number,
+): { item: ConversationHistoryItem; truncated: boolean } {
+  const compacted = compactConversationItem(source);
+  let item = compacted.item;
+  if (jsonBytes(item) <= maxBytes) return compacted;
+
+  let truncated = true;
+  if (item.kind === "message") {
+    item = {
+      ...item,
+      tools: item.tools.map((tool) => ({
+        ...tool,
+        ...(tool.args === undefined ? {} : { args: OMITTED_TOOL_VALUE }),
+        ...(tool.result === undefined ? {} : { result: OMITTED_TOOL_VALUE }),
+      })),
+    };
+  }
+
+  while (jsonBytes(item) > maxBytes) {
+    if (item.kind === "message") {
+      const field = jsonBytes(item.text) >= jsonBytes(item.thinking)
+        ? "text"
+        : "thinking";
+      const value = item[field];
+      if (!value) break;
+      const shortened = shortenPrefix(value);
+      item = {
+        ...item,
+        [field]: shortened,
+        parts: fallbackHistoryParts(
+          field === "text" ? shortened : item.text,
+          field === "thinking" ? shortened : item.thinking,
+          item.tools,
+        ),
+      };
+      continue;
+    }
+    if (item.kind === "session_message") {
+      const field = jsonBytes(item.body) >= jsonBytes(item.result ?? "")
+        ? "body"
+        : "result";
+      const value = field === "body" ? item.body : item.result ?? "";
+      if (!value) break;
+      item = field === "body"
+        ? { ...item, body: shortenPrefix(value) }
+        : { ...item, result: shortenPrefix(value) };
+      continue;
+    }
+    break;
+  }
+
+  if (jsonBytes(item) <= maxBytes) return { item, truncated };
+  const minimal = minimalConversationItem(item);
+  if (jsonBytes(minimal) > maxBytes) {
+    throw new Error("Conversation history item cannot fit the snapshot budget");
+  }
+  return { item: minimal, truncated: true };
+}
+
+function startsNewTurn(item: ConversationHistoryItem, hasTurns: boolean): boolean {
+  return (
+    !hasTurns
+    || item.kind === "compaction"
+    || (item.kind === "message" && item.role === "user")
+  );
+}
+
 export function snapshotConversationItems(
   sourceItems: ConversationHistoryItem[],
 ): {
@@ -739,47 +842,54 @@ export function snapshotConversationItems(
   items: ConversationHistoryItem[];
   truncated: boolean;
 } {
-  const projected = sourceItems.map(compactConversationItem);
-  const turns: Array<typeof projected> = [];
+  const projected = sourceItems.map((item) => {
+    const fitted = fitConversationItem(item, MAX_HISTORY_SNAPSHOT_BYTES - 2);
+    return { ...fitted, bytes: jsonBytes(fitted.item) };
+  });
+  const turns: Array<{ items: typeof projected; bytes: number }> = [];
   for (const item of projected) {
-    if (
-      (
-        item.item.kind === "message"
-        && item.item.role === "user"
-      )
-      || item.item.kind === "compaction"
-      || turns.length === 0
-    ) {
-      turns.push([item]);
+    if (startsNewTurn(item.item, turns.length > 0)) {
+      turns.push({ items: [item], bytes: item.bytes });
     } else {
-      turns.at(-1)!.push(item);
+      const turn = turns.at(-1)!;
+      turn.items.push(item);
+      turn.bytes += item.bytes + 1;
     }
   }
 
-  const selectedTurns: ConversationHistoryItem[][] = [];
-  let bytes = 2;
+  const selectedTurns: Array<typeof projected> = [];
+  let selectedItemCount = 0;
+  let selectedBytes = 2;
   let truncated = projected.some((item) => item.truncated);
   for (let index = turns.length - 1; index >= 0; index -= 1) {
-    const turn = turns[index]!.map(({ item }) => item);
-    const turnBytes = turn.reduce(
-      (total, item, itemIndex) => (
-        total
-        + Buffer.byteLength(JSON.stringify(item), "utf8")
-        + (itemIndex > 0 ? 1 : 0)
-      ),
-      0,
-    );
-    const nextBytes =
-      bytes + turnBytes + (selectedTurns.length > 0 ? 1 : 0);
-    if (nextBytes > MAX_HISTORY_SNAPSHOT_BYTES) {
-      truncated = true;
-      break;
+    const turn = turns[index]!;
+    const turnBytesWithSeparator = turn.bytes + (selectedItemCount > 0 ? 1 : 0);
+    if (selectedBytes + turnBytesWithSeparator <= MAX_HISTORY_SNAPSHOT_BYTES) {
+      selectedTurns.push(turn.items);
+      selectedItemCount += turn.items.length;
+      selectedBytes += turnBytesWithSeparator;
+      continue;
     }
-    selectedTurns.push(turn);
-    bytes = nextBytes;
+    truncated = true;
+    if (selectedItemCount === 0) {
+      // The newest turn cannot be kept whole. Retain its contiguous ordered
+      // suffix; never skip a large item to include an older one.
+      const reverseSuffix: typeof projected = [];
+      for (let itemIndex = turn.items.length - 1; itemIndex >= 0; itemIndex -= 1) {
+        const candidate = turn.items[itemIndex]!;
+        const candidateBytes = candidate.bytes + (reverseSuffix.length > 0 ? 1 : 0);
+        if (selectedBytes + candidateBytes > MAX_HISTORY_SNAPSHOT_BYTES) break;
+        reverseSuffix.push(candidate);
+        selectedBytes += candidateBytes;
+      }
+      selectedTurns.push(reverseSuffix.reverse());
+      selectedItemCount = reverseSuffix.length;
+    }
+    break;
   }
 
-  const items = selectedTurns.reverse().flat();
+  const selected = selectedTurns.reverse().flat();
+  const items = selected.map(({ item }) => item);
   if (items.length !== projected.length) truncated = true;
   return {
     messages: items
@@ -814,40 +924,11 @@ export function projectConversationItemsSnapshot(
 export function projectConversationHistorySnapshot(
   sessionManager: Pick<SessionManager, "getBranch">,
 ): { messages: ConversationHistoryMessage[]; truncated: boolean } {
-  const projected = projectConversationHistory(sessionManager)
-    .map(compactHistoryMessage);
-  const turns: Array<typeof projected> = [];
-  for (const item of projected) {
-    if (item.message.role === "user" || turns.length === 0) {
-      turns.push([item]);
-    } else {
-      turns.at(-1)!.push(item);
-    }
-  }
-
-  const selectedTurns: ConversationHistoryMessage[][] = [];
-  let bytes = 2;
-  let truncated = projected.some((item) => item.truncated);
-
-  for (let index = turns.length - 1; index >= 0; index--) {
-    const turn = turns[index]!.map(({ message }) => message);
-    const turnBytes = turn.reduce(
-      (total, message, messageIndex) => (
-        total
-        + Buffer.byteLength(JSON.stringify(message), "utf8")
-        + (messageIndex > 0 ? 1 : 0)
-      ),
-      0,
-    );
-    const nextBytes = bytes + turnBytes + (selectedTurns.length > 0 ? 1 : 0);
-    if (nextBytes > MAX_HISTORY_SNAPSHOT_BYTES) {
-      truncated = true;
-      break;
-    }
-    selectedTurns.push(turn);
-    bytes = nextBytes;
-  }
-  const selected = selectedTurns.reverse().flat();
-  if (selected.length !== projected.length) truncated = true;
-  return { messages: selected, truncated };
+  const snapshot = snapshotConversationItems(
+    projectConversationHistory(sessionManager).map((message) => ({
+      kind: "message" as const,
+      ...message,
+    })),
+  );
+  return { messages: snapshot.messages, truncated: snapshot.truncated };
 }
