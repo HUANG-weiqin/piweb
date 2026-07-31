@@ -1,6 +1,6 @@
 # 线协议
 
-`updated: 2026-07-29`
+`updated: 2026-07-31`
 
 ## 这个模块是干什么的
 
@@ -19,7 +19,7 @@ ClientCommand
 → App / reducer
 ```
 
-协议由 `PROTOCOL_VERSION` 标识，当前为 v26。工具参数和结果允许 `unknown`，但服务端在投影时会做有界遍历、转成 JSON-safe 数据并限制单值大小。
+协议由 `PROTOCOL_VERSION` 标识，当前为 v27。工具参数和结果允许 `unknown`，但服务端在投影时会做有界遍历、转成 JSON-safe 数据并限制单值大小。
 
 ## 决策
 
@@ -39,25 +39,25 @@ ClientCommand
 - 扩展 `notify` 是有界、session-scoped 的 fire-and-forget 事件，不赋予任何工具许可。
 - initialize 的 conversation target 是 `recent | new(roleId) | open(conversationId)`；客户端不能提交 session 文件路径。空项目的 `recent` 返回“项目已打开、没有 active conversation”，不会偷偷创建 default 会话。
 - `focus_conversation` 和 `create_conversation` 使用一次性 commandId；服务端用同 commandId 的 `focus_attached` 确认新 focus。客户端在精确确认前不能把 pending target 当成当前 transcript。
-- `refresh_view` 是页面恢复后的无等待只读重同步，必须精确携带当前 `sessionId + projectId` 以及成对出现的 `conversationId + focusId`；身份已经变化时服务端静默丢弃。它刷新 state、角色目录和项目索引；只要 focused actor 未压缩，就可重发 conversation snapshot。active run 的 snapshot 必须由 actor 的 live projection 覆盖 durable 活跃尾部，不能用持久快照覆盖正在流式生成的尾部。
+- `refresh_view` 是页面恢复后的无等待只读重同步，必须精确携带当前 `sessionId + projectId` 以及成对出现的 `conversationId + focusId`；身份已经变化时服务端静默丢弃。它刷新 state、角色目录和项目索引；只要 focused actor 未压缩，就可重发 conversation snapshot。active run 的 snapshot 由 actor 把 durable active branch 与尚未持久化的 live suffix 精确交接后生成，不能用纯持久快照覆盖正在流式生成的尾部，也不能把同一物理消息重复投影两次。
 - 当前 focus 被其它 Agent 删除时，服务端发送带完整 `sessionId + projectId + conversationId + focusId` 的 `focus_invalidated(reason=deleted)`；客户端只结算精确匹配的观察身份，然后回到角色选择页。不能从缺少当前项的截断列表猜测删除。
 - 创建新 conversation 必须显式 roleId。`default` 只是角色 ID，不是省略选择时的隐含值。
-- 工具模式只有 `read_only | full_access`，由角色模板持有并复制到 conversation 当前角色快照；角色 CRUD payload 必须同时携带模型默认思考强度和工具模式。v26 不接受 `initialize.toolMode` 与 `set_tool_mode`，协议仍没有逐工具询问命令或待回答状态。
+- 工具模式只有 `read_only | full_access`，由角色模板持有并复制到 conversation 当前角色快照；角色 CRUD payload 必须同时携带模型默认思考强度和工具模式。v27 不接受 `initialize.toolMode` 与 `set_tool_mode`，协议仍没有逐工具询问命令或待回答状态。
 - `rename_conversation` 同时匹配当前 sessionId 和目标 conversationId。
 - `delete_conversation` 携带 sessionId、一次性 commandId 和目标 conversationId；浏览器不能提交文件路径。成功和失败都用同一 sessionId + commandId 精确结算。
 - `truncate_conversation` 携带一次性 commandId、精确 `sessionId + conversationId + focusId` 和 snapshot 中的 durable messageId。assistant 聚合 ID 使用 `assistant:<entryId>`，仅由服务端剥离前缀并解析物理锚点；成功前服务端先发布截断后的完整 focused snapshot，再发送同 commandId 的完成事件，客户端不得本地猜测删除结果。
 - 角色 CRUD 使用 `create_role/update_role/delete_role + sessionId + commandId`；create/update 的 role payload 包含 `canManageSessions`，update/delete 还携带 expectedRevision，不能用迟到 snapshot 冒充提交成功。初始化模板没有删除特权。
-- 会话模型、初始思考强度、工具权限和会话管理能力都来自当前角色快照。v26 的 `switch_conversation_role` 携带精确 `sessionId + conversationId + focusId + commandId + roleId`，只允许 idle focus，并在服务端发布新 state、project snapshot 与 conversation snapshot 后完成；直接 `select_model` 仍明确拒绝。API Key 命令继续按 sessionId + commandId 精确结算。
+- 会话模型、初始思考强度、工具权限和会话管理能力都来自当前角色快照。v27 的 `switch_conversation_role` 携带精确 `sessionId + conversationId + focusId + commandId + roleId`，只允许 idle focus，并在服务端发布新 state、project snapshot 与 conversation snapshot 后完成；直接 `select_model` 仍明确拒绝。API Key 命令继续按 sessionId + commandId 精确结算。
 - `compact_context` 携带一次性 commandId 和精确 `sessionId + conversationId + focusId`；只允许空闲 conversation，成功后服务端先刷新 state / snapshot，再发送同 commandId 的完成事件。
 - `PublicState.compacting` 是当前 focused conversation 正在执行 Pi 标准压缩的可恢复瞬时状态；手动与自动压缩共用该字段。它独立于 `busy/activeRun`，因为自动压缩可能发生在 run 结算尾部，而手动压缩没有 runId。
 - `set_compaction_threshold` 携带一次性 commandId 和精确 `sessionId + conversationId + focusId`，只接受 20–90 的整数百分比；`PublicState.compactionThresholdPercent` 是当前会话权威值，成功或失败必须按 commandId 精确结算。
 - 高频 `PublicState` 不携带完整项目索引；项目空态允许 conversation/focus/model/runtime 字段缺席。`project_snapshot` 低频发布扁平会话列表及 role/activity/attention/unread/temporary，最多 100 项且整帧不超过 750,000 UTF-8 bytes；保留顺序优先 current、active、attention、unread，再按最后活跃时间。字段裁剪、条数省略或帧预算省略都会置 `truncated=true`。
 - `role_catalog_snapshot` 独立发布用户级角色目录；最多 64 个角色，名称/简介与 durable store 一致按 80/1000 个 Unicode 字符校验，system prompt 按 128 KiB UTF-8、model provider/id 各按 1024 UTF-8 bytes 校验，不可用原因最多 4096 个字符。客户端命令帧仍限制为 1 MB；服务端事件使用独立的 64 MiB 上限，以容纳最坏情况下 JSON 转义后的完整有界角色目录。socket 发送边界必须先用同一 `serverEventSchema` 复验运行时事件，再执行序列化与发送上限；schema、序列化或大小失败会发送各自固定且可解析的 protocol error，然后以专用 close code 终止已经丢帧的 observation，不能在缺失关键帧后继续运行，也不能把浏览器必然拒绝的原帧发出去。
-- `conversation_snapshot` 携带固化角色，并且必须在有界 `ConversationHistoryItem[]` 与兼容 `messages[]` 中二选一，禁止重复发送两份 transcript。普通 user/assistant 是 `message`，跨会话 incoming/outgoing 是 `session_message`，Pi active branch 上的持久压缩记录是 `compaction` 分界项。session-message 的固化 endpoint title 可以比浏览器显示边界更长，投影时必须按 120 个 Unicode 字符裁剪，wire 校验也使用相同字符语义而不是 UTF-16 code unit。assistant message 额外用有界 `parts` 保存 text/thinking span 与 toolCallId 的原始顺序；span 只引用已有聚合字符串，不能在线路上复制整段正文或思考。工具调用状态区分 `pending | running | done | error`：没有对应 tool result 的调用仍在执行中，不能投影成失败。active snapshot 中属于当前 run 的 message 必须带真实 runId。
+- `conversation_snapshot` 携带固化角色，并且必须在有界 `ConversationHistoryItem[]` 与兼容 `messages[]` 中二选一，禁止重复发送两份 transcript。普通 user/assistant 是 `message`，跨会话 incoming/outgoing 是 `session_message`，Pi active branch 上的持久压缩记录是 `compaction` 分界项。session-message 的固化 endpoint title 可以比浏览器显示边界更长，投影时必须按 120 个 Unicode 字符裁剪，wire 校验也使用相同字符语义而不是 UTF-16 code unit。assistant message 额外用有界 `parts` 保存 text/thinking span 与 toolCallId 的原始顺序；span 只引用已有聚合字符串，不能在线路上复制整段正文或思考。工具调用状态区分 `pending | running | done | error`：没有对应 tool result 的调用仍在执行中，不能投影成失败。active snapshot 中属于当前 run 的 message 必须带真实 runId。`window` 必须显式携带 `omittedBefore / startsMidTurn / contentTruncated`；`startsMidTurn=true` 必然要求 `omittedBefore=true`。三者分别表示较早 item 被省略、窗口从一个语义 turn 内部开始、已选 item 的载荷被缩略，不能再压成一个含糊的 `truncated`。
 - `conversation_snapshot` 和 `session_event` 携带单调 `projectionSeq`。`conversation_item` 只带当前 transcript watermark 用于证明卡片更新没有跨过丢失的 run delta；它不得推进 watermark。浏览器只接受连续 run 增量；发现缺口时请求 `refresh_view` 并等待新的 snapshot，而不是猜测丢失的工作过程。
 - live 卡片使用 `conversation_item`，同 cardId 幂等更新；它不能伪装成某个 run 的文本 delta。
 - wire 上的 `session_message.peerExists` 由服务端基于完整 durable 项目 ID 集合计算，不依赖可能截断的 `project_snapshot`；它只控制 peer 跳转入口，不写回 durable 卡片。
-- snapshot 的 `truncated` 都只表示浏览器投影省略，不能解释成 durable 数据被删除。
+- `project_snapshot` 等控制面快照的 `truncated` 与 conversation 的结构化 `window` 都只描述浏览器投影覆盖范围，不能解释成 durable 数据被删除。当前 conversation 没有公开分页 cursor；在 load-older 命令及 stale-cursor 语义落地前不能先暴露伪 cursor。
 - sessionId、focusId 和 acknowledged commandId 在一个连接内不可复用，runId 在一个 session 内不可复用；它们是关联身份，不承诺任意网络命令的 exactly-once。
 - `run_queued → run_started → run_finished(outcome)` 由工作台适配层合成，不把 SDK 的 agent lifecycle 当成线协议真相。
 - `run_queued` 还有明确的接收回执语义：服务端已校验身份、占用不可复用 runId、安装 active RunTicket，并接受该 prompt 进入 actor 队列。浏览器只有收到精确匹配 focus 三元身份 + runId 的这一帧，才能清草稿并投影本地 user message。
@@ -94,7 +94,7 @@ ClientCommand
 - 扩展 select 的响应值必须属于服务端保存的原始 options；不能相信浏览器回传值。
 - 扩展 UI 文本与选项有独立上限；超限是扩展错误，不能静默截断后改变选择语义。
 - 大型或循环工具结果必须经过 `toWireValue()`；不要直接放入 `ServerEvent`。
-- 不要把完整 conversation list 放回 PublicState，也不要发送无总量上限的历史快照。
+- 不要把完整 conversation list 放回 PublicState，也不要发送无总量上限的历史快照。conversation window 必须按最终 `JSON.stringify` UTF-8 bytes 计量；非空来源至少保留最新 item，不能因为最新 turn/item 单独超限而返回空快照。
 - 不要把 busy composer 消息直接变成易失 steer。它先由 `enqueue_prompt` 持久化；Web UI 的唯一队列 Steer 是 `steer_all_pending_prompts + batchId + 精确 active runId`，服务端权威冻结全部 queued 成员。不要用多次 `steer_pending_prompt`、`Promise.all(session.steer())` 或 `steeringMode=all` 冒充同一模型 turn。直接 prompt、底层 raw steer 与 durable pending batch 是不同提交边界，身份不匹配的回执必须忽略。pending command error 都必须携带完整 `sessionId + commandId + conversationId + focusId`，Steer error 还必须带 runId；客户端每个 conversation 同时只允许一个尚未 ack 的 enqueue 和一个 batch Steer，避免 unknown-outcome 被自动重放。
 - 不要只按 conversationId 过滤 transcript。conversationId 会在 `A → B → A` 中重复，focusId 才能阻断 ABA。
 

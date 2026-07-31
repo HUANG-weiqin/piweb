@@ -1,6 +1,6 @@
 # 项目与持久会话
 
-`updated: 2026-07-24`
+`updated: 2026-07-31`
 
 ## 这个模块是干什么的
 
@@ -176,11 +176,12 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 - `role_catalog_snapshot` 是低频用户角色目录及当前可用性。
 - `project_snapshot` 是低频扁平会话索引，包含固化 role 摘要、activity、attention 和 temporary；后台 actor 变化不会切换 current focus。
 - `project_activity_snapshot` 是进程级已加载项目的有界汇总，只投影 busy/attention 计数；它不复制会话索引、浏览器 unread 或 transcript。
-- `conversation_snapshot` 是当前 focus 的一次性 active-branch 投影，包含固化角色和 message/session-message/compaction discriminated items，并限制总字节以及单消息/tool/card payload。
-- `pending_prompts_snapshot` 是同一 focus 的独立完整队列投影；它不进入高频 PublicState 或 transcript，也不使用 truncated，因为 durable store 已硬限制为每 conversation 64 条。`compaction` 直接来自 Pi 的持久条目，位于压缩发生处；它作为独立小型 turn 保留，避免较早的大消息被截断时连分界线一起丢失。
-- `truncated=true` 只表示 UI 投影省略；不会删除 JSONL。
-- live run 仍按 runId 发送增量，卡片按 cardId upsert；恢复时 reducer 用 snapshot 原子 hydrate。两者都必须匹配 `sessionId + conversationId + focusId`，匹配快照到达前 composer 保持禁用。同一 run 内一旦出现 durable compaction，重新聚焦时其前缀必须使用持久聚合投影，不能继续把每个 live assistant segment 展开后再套总字节上限；否则细粒度 live 表示会把本可恢复的压缩前历史整段挤出 snapshot。最后一次 compaction 之后的活动后缀才继续使用 live 投影。
-- Agent 的 `peek_session` 有意省略 compaction 分界项；它是用户界面元信息，不应增加 peer Agent 上下文。
+- `conversation_snapshot` 是当前 focus 的一次性 active-branch 投影，包含固化角色和 message/session-message/compaction discriminated items，并限制总字节以及单消息/tool/card payload。投影只有一条 canonical pipeline：捕获 durable physical slots → 用 raw SDK message 对象身份把已持久化 live message 精确交给 durable slot → semantic fold → peer enrichment → 一次最终 exact-JSON-byte window。不能按角色、文本或数量猜测交接，也不能分别裁 durable/live 后再拼接。
+- 每条物理 user/assistant message 在任一时刻只能由 durable slot 或未持久化 live suffix 一方拥有。exact handoff 后 durable item 保留当前 runId；live tool 状态只可覆盖尚无 durable tool result 的 pending 工具，一旦 JSONL 已有 result 就由 durable 状态获胜。compaction、user/steer 与卡片首次出现是时间线语义边界；不再保留“最后一次 compaction 后才使用 live”的特判。
+- 最终窗口优先保留完整的最近语义 turn；最新 turn 自身超限时保留连续有序后缀，不能跳过一个超大 item 后再捡更早的小 item。非空来源必须至少投影最新 item；单项也按最终 `JSON.stringify` 的 UTF-8 bytes 自适应缩略，避免 JSON 转义把合法原文放大后得到空快照。`window.omittedBefore / startsMidTurn / contentTruncated` 精确描述覆盖范围，任何省略都不会删除 JSONL。
+- `pending_prompts_snapshot` 是同一 focus 的独立完整队列投影；它不进入高频 PublicState 或 transcript，也不使用 window，因为 durable store 已硬限制为每 conversation 64 条。`compaction` 直接来自 Pi 的持久条目，位于压缩发生处；它作为独立小型 turn 保留。
+- live run 仍按 runId 发送增量，卡片按 cardId upsert；恢复时 reducer 用 snapshot 原子 hydrate。两者都必须匹配 `sessionId + conversationId + focusId`，匹配快照到达前 composer 保持禁用。卡片更新若改变最终窗口成员，单条 upsert 无法表达淘汰，服务端必须改发完整 snapshot。
+- Agent 的 `peek_session` 有意省略 compaction 分界项；它是用户界面元信息，不应增加 peer Agent 上下文。peek tail 同样按最终序列化字节裁剪，并保证 limit 非零且来源有可见 item 时不会因最新单项超限返回空列表。
 
 ## 故障语义
 

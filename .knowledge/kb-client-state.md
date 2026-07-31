@@ -1,6 +1,6 @@
 # 客户端状态
 
-`updated: 2026-07-29`
+`updated: 2026-07-31`
 
 ## 这个模块是干什么的
 
@@ -45,13 +45,13 @@ ServerEvent
 - 新建/切换对话复用同一 project observation sessionId，只更新 focusId。切换命令成功交给 transport 后立即令旧 focus `conversationReady=false`，冻结 prompt、Stop、思考强度、压缩阈值和删除等 focus-bound 操作；pending focus 期间迟到的来源 snapshot 只能更新旧投影，不能把 ready 重新置真。只有匹配 commandId 的 `focus_attached` 才提交本地 focus，匹配 snapshot 后才重新启用 composer。切换失败仅在来源 focus 仍未变化时恢复原 ready 状态；pending state 暂存到 ack 后再应用。
 - 当前会话被其它 Agent 删除时，客户端只接受精确匹配当前 `sessionId + projectId + conversationId + focusId` 的 `focus_invalidated`，原子清空 transcript、角色、草稿、pending prompt 和 extension UI，并回到角色选择页；迟到或其它 focus 的失效事件必须忽略。
 - 项目空态和用户点击“新建会话”都进入完整 `RoleSelectionPage`。每张角色卡右下角直接提供管理与启动入口，不维护“先选卡牌、再点页面级开始”的中间状态；点击可用角色的启动图标后，在收到 create attach 前不渲染 Chat/composer。
-- 对话列表来自 `project_snapshot`，角色来自 `role_catalog_snapshot`，恢复消息/卡片来自 `conversation_snapshot`；它们的 truncated 提示必须可见，localStorage 不是数据 fallback。
+- 对话列表来自 `project_snapshot`，角色来自 `role_catalog_snapshot`，恢复消息/卡片来自 `conversation_snapshot`；localStorage 不是数据 fallback。项目索引继续显示 `truncated` 提示；conversation 则保存精确 `window`，分别提示“省略较早历史”“从 turn 中间开始”和“已选内容被缩略”，不能把三种覆盖差异重新合并为一个布尔值。focus change、disconnect 和新 observation 都先重置 window，只有匹配 focus 的 snapshot 能恢复它。
 - `project_snapshot` 同时投影持久创建来源；侧栏只为 `createdBy.kind=conversation` 的会话在标题旁显示紧凑 `Agent` 徽标，用户创建与来源未知的旧会话不显示，列表仍保持扁平。
 - 扁平可折叠 `ConversationSidebar` 是项目会话的唯一列表/新建/打开/改名/删除控制面；模型连接抽屉不维护第二套会话入口。桌面展开态可通过右边缘在 240–640px 内横向调整，折叠态与 600px 以下窄屏不提供 resize handle。running/queued/cancelling/waiting 的活跃项优先，再按 attention 和最后活跃时间排序；running/queued 使用与思考状态同尺寸、同转速的环形 spinner，沙漏、attention、unread 与 temporary 都来自服务端投影。
 - 后台 actor 的创建、运行或完成只能更新侧栏/通知，不能改变 current focus、draft 或 transcript。用户在当前会话 running 时仍可切换观察。
 - 删除 pending 固化 `sessionId + commandId + workspace/project/conversation`，删除当前 focus 时还固化 `focusId`；匹配的 `command_complete` / error 才能结算，且只有 exact 原 focus 仍在观察时才能清空当前 transcript。普通 snapshot 只更新列表，不能冒充删除回执。pending 期间禁止切换/新建 conversation，阻断 `A → B → A` 后旧删除回执清空新 focus 的 ABA；断线属于未知结果，应清除等待态并提示用户重新核对；initialize/工作区切换必须同步清掉旧 observation 的删除 pending，迟到的旧 session 回执不能锁住新项目按钮。
 - state 只说明 focused runtime 已提交，不说明历史已经 hydrate；`conversationReady` 必须等匹配 focus 三元身份的 snapshot，期间 composer 和 `sendPrompt` 双重禁用，避免 hydrate 覆盖刚发送的本地消息。pending focus 期间 Chat 使用空 transcript 投影，不能继续展示旧 focus 的“工作过程”。
-- tool、usage、prompt error 与停止仍按 runId 路由；但一个 run 可因 steering 包含多个 `assistant → user → assistant` 消息段。live projector 显式发送 user message 与 assistant segment start，reducer 只在该 run 的最新 assistant 段内追加 delta/tool，不能把“run 生命周期”误作“单个气泡生命周期”。切走再切回 running 会话时，恢复依赖服务端 conversation snapshot 的 live projection（含真实 runId、thinking/text/tool/status/usage），不依赖浏览器曾经收到后台 delta。
+- tool、usage、prompt error 与停止仍按 runId 路由；但一个 run 可因 steering 包含多个 `assistant → user → assistant` 消息段。live projector 显式发送 user message 与 assistant segment start，reducer 只在该 run 的最新 assistant 段内追加 delta/tool，不能把“run 生命周期”误作“单个气泡生命周期”。切走再切回 running 会话时，恢复依赖服务端把 durable timeline 与未持久化 live suffix 交接后的 conversation snapshot（当前 run message 含真实 runId/thinking/text/tool/status/usage），不依赖浏览器曾经收到后台 delta。
 - OAuth UI 只接收当前 authFlowId；取消或新 flow 之后的旧 request/progress/complete 一律忽略。
 - 右侧抽屉只负责“提供商 → 凭据 → 可用模型”的连接状态，不承载权限、会话生命周期或 Agent 行为控制。composer 底部控制按“当前角色 → 思考级别 → 上下文管理”排列；上下文用量、自动压缩和手动压缩属于同一个无外框视觉组，自动压缩阈值也在该组内展开。角色管理从新会话页的角色卡齿轮或添加卡进入，齿轮必须定位到对应角色；角色默认思考强度只列出所选模型真实支持的档位，模型没有可调档位时显示并锁定“模型默认”。会话改名位于左侧会话栏。
 - 会话不直接选择模型或权限；它只在空闲时整体应用一个当前可用角色。角色管理只列已配置提供商当前可用模型，并把 provider/model 与工具权限固定到模板；新角色工具权限默认只读。角色表单还显式控制“允许管理会话”：新建角色默认关闭，编辑时按模板原值显示；关闭意味着 Agent 完全看不到工作台会话工具。

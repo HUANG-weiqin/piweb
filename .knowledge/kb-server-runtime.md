@@ -1,6 +1,6 @@
 # 服务端运行时
 
-`updated: 2026-07-30`
+`updated: 2026-07-31`
 
 ## 这个模块是干什么的
 
@@ -91,6 +91,7 @@
 - SDK 报告的 extension load errors 也会进入 session 错误，不能只监听运行期 runner errors。
 - initialize 在 project view 建立前就登记目标 observation epoch；focus 只有在精确 `focus_attached` 后才可发送 prompt。异步取得共享 coordination 后发布 role catalog 时也必须重新核对同一个 view 对象及其 session/generation，不能仅凭旧对象仍被引用就向新 observation 发迟到快照或错误。
 - attach 后先发布小体积 PublicState，再发布低频 role/project snapshot、有界 focused history snapshot 和独立 `pending_prompts_snapshot`；恢复历史与队列都不能依赖 SDK 或浏览器重放旧事件。异步读取队列后必须复验原 view 的 generation/conversationId/focusId。
+- focused history 由 ConversationActor 一次性捕获并完成 durable/live ownership 交接、语义折叠、peer enrichment 和最终窗口化；PiConnection 不得再次独立读取/裁剪 SessionManager。交接只认 `entry.message === rawMessage` 的对象身份，未匹配 live item 必须形成连续 suffix。投影窗口按最终 JSON UTF-8 bytes 计算；窗口成员被卡片更新淘汰时必须发布完整 snapshot，而不是只发送无法删除旧 item 的 `conversation_item`。
 - 同一 project view 的索引刷新同时最多执行一轮；进行中收到的任意数量请求折叠为一次尾随扫描，尾随到达时前一轮结果不投影。页面恢复的 `refresh_view` 只接受精确 observation/focus 身份；busy 或 compacting actor 不重发 durable transcript，避免覆盖当前流式尾部。
 - close/focus change 先同步使观察身份和 UI route 失效，再 detach project view；它不会把仍在运行的 conversation actor 当作连接资源销毁。
 - 切到 read_only 是项目级 barrier：先同步取消其它连接的旧 run，等待它们 release，再持久化并发布确认；不能只在异步策略前后“多检查一次”。
