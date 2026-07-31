@@ -1424,6 +1424,110 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
+  it("keeps the active browser prompt and latest live content when one live turn exceeds the page budget", async () => {
+    const fixture = await openActor();
+    const promptStarted = deferred();
+    const promptFinished = deferred();
+    const segmentCount = 10;
+    fixture.runtime.session.promptImplementation = async () => {
+      const emit = fixture.runtime.session.eventListener;
+      const initialPrompt = agentMessage({
+        role: "user",
+        content: "inspect the active oversized run",
+        timestamp: 1,
+      });
+      fixture.manager.appendMessage(initialPrompt);
+      emit?.(nativeEvent({ type: "agent_start" }));
+      emit?.(nativeEvent({ type: "message_start", message: initialPrompt }));
+      emit?.(nativeEvent({ type: "message_end", message: initialPrompt }));
+
+      for (let index = 0; index < segmentCount; index += 1) {
+        const toolCallId = `tool-${index}`;
+        const text = `live-segment-${index}-${"x".repeat(80_000)}`;
+        const assistant = agentMessage({
+          role: "assistant",
+          content: [
+            { type: "text", text },
+            {
+              type: "toolCall",
+              id: toolCallId,
+              name: "read",
+              arguments: { path: `file-${index}.txt` },
+            },
+          ],
+          stopReason: "toolUse",
+          timestamp: index * 3 + 2,
+        });
+        fixture.manager.appendMessage(assistant);
+        emit?.(nativeEvent({
+          type: "message_start",
+          message: { role: "assistant", content: [] },
+        }));
+        emit?.(nativeEvent({
+          type: "message_update",
+          assistantMessageEvent: { type: "text_delta", delta: text },
+        }));
+        emit?.(nativeEvent({
+          type: "tool_execution_start",
+          toolCallId,
+          toolName: "read",
+          args: { path: `file-${index}.txt` },
+        }));
+        fixture.manager.appendMessage(agentMessage({
+          role: "toolResult",
+          toolCallId,
+          toolName: "read",
+          content: [{ type: "text", text: `tool result ${index}` }],
+          isError: false,
+          timestamp: index * 3 + 3,
+        }));
+        emit?.(nativeEvent({
+          type: "tool_execution_end",
+          toolCallId,
+          toolName: "read",
+          result: { content: `tool result ${index}` },
+          isError: false,
+        }));
+        emit?.(nativeEvent({ type: "message_end", message: assistant }));
+      }
+      promptStarted.resolve();
+      await promptFinished.promise;
+    };
+
+    const running = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "inspect the active oversized run",
+      origin: "browser",
+    });
+    await promptStarted.promise;
+
+    expect(fixture.actor.getActivity().kind).toBe("running");
+    expect(fixture.runtime.session.compactCalls).toBe(0);
+    const projection = fixture.actor.projectConversationItems(
+      projectConversationItemsSnapshot(fixture.manager).items,
+    );
+    expect(projection.items).not.toHaveLength(0);
+    expect(Buffer.byteLength(JSON.stringify(projection.items), "utf8"))
+      .toBeLessThanOrEqual(MAX_HISTORY_SNAPSHOT_BYTES);
+    expect(projection.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: "message",
+        role: "user",
+        text: "inspect the active oversized run",
+      }),
+      expect.objectContaining({
+        kind: "message",
+        role: "assistant",
+        text: expect.stringContaining("live-segment-9-"),
+      }),
+    ]));
+    expect(projection.truncated).toBe(true);
+
+    promptFinished.resolve();
+    await running;
+    await fixture.actor.dispose();
+  });
+
   it("does not move a steered user message before an intervening card", async () => {
     const fixture = await openActor();
     const promptStarted = deferred();

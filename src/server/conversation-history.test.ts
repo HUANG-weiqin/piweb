@@ -392,6 +392,70 @@ describe("projectConversationHistory", () => {
     expect(projectConversationHistory(manager)).toHaveLength(24);
   });
 
+  it("keeps the newest visible item when one direct snapshot turn exceeds its page budget", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    manager.appendMessage(message({
+      role: "user",
+      content: "start the oversized turn",
+      timestamp: 1,
+    }));
+    for (let index = 0; index < 10; index += 1) {
+      appendReservedCustomEntry(manager, createConversationCardEntry({
+        cardId: randomUUID(),
+        kind: "message",
+        body: `card-${index}-${"x".repeat(80_000)}`,
+        fromSnapshot: peer(),
+        toSnapshot: peer(),
+        state: "queued",
+        messageId: randomUUID(),
+        updatedAt: "2026-07-31T10:00:00.000Z",
+      }));
+    }
+
+    const snapshot = projectConversationItemsSnapshot(manager);
+    expect(snapshot.items).not.toHaveLength(0);
+    expect(Buffer.byteLength(JSON.stringify(snapshot.items), "utf8"))
+      .toBeLessThanOrEqual(MAX_HISTORY_SNAPSHOT_BYTES);
+    expect(snapshot.items.at(-1)).toMatchObject({
+      kind: "session_message",
+      body: expect.stringContaining("card-9-"),
+    });
+    expect(snapshot.truncated).toBe(true);
+  });
+
+  it("uses exact JSON bytes when an escaped newest item exceeds the page budget", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    const bodyPrefix = "latest escaped body ";
+    const resultPrefix = "latest escaped result ";
+    const body = bodyPrefix + "\u0000".repeat(80_000 - bodyPrefix.length);
+    const result = resultPrefix + "\u0000".repeat(80_000 - resultPrefix.length);
+    appendReservedCustomEntry(manager, createConversationCardEntry({
+      cardId: randomUUID(),
+      kind: "message",
+      body,
+      fromSnapshot: peer(),
+      toSnapshot: peer(),
+      state: "completed",
+      messageId: randomUUID(),
+      result,
+      updatedAt: "2026-07-31T10:00:00.000Z",
+    }));
+
+    const source = projectConversationItems(manager);
+    expect(Buffer.byteLength(JSON.stringify(source), "utf8"))
+      .toBeGreaterThan(MAX_HISTORY_SNAPSHOT_BYTES);
+    const snapshot = projectConversationItemsSnapshot(manager);
+    expect(snapshot.items).not.toHaveLength(0);
+    expect(Buffer.byteLength(JSON.stringify(snapshot.items), "utf8"))
+      .toBeLessThanOrEqual(MAX_HISTORY_SNAPSHOT_BYTES);
+    expect(snapshot.items.at(-1)).toMatchObject({
+      kind: "session_message",
+      body: expect.stringContaining(bodyPrefix),
+      result: expect.stringContaining(resultPrefix),
+    });
+    expect(snapshot.truncated).toBe(true);
+  });
+
   it("never starts a truncated snapshot with an orphaned assistant bubble", () => {
     const manager = SessionManager.inMemory("E:\\work");
     for (let index = 0; index < 8; index++) {
