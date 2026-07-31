@@ -1096,6 +1096,54 @@ describe("projectConversationHistory", () => {
     });
   });
 
+  it("keeps an escaped newest Agent peek item instead of returning an empty tail", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    manager.appendMessage(message({
+      role: "user",
+      content: `latest question ${"\u0000".repeat(80_000)}`,
+      timestamp: 1,
+    }));
+
+    const peek = projectAgentConversationPeek(manager);
+
+    expect(peek.items).toEqual([expect.objectContaining({
+      kind: "message",
+      role: "user",
+      text: expect.stringContaining("latest question"),
+    })]);
+    expect(peek.truncated).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(peek), "utf8"))
+      .toBeLessThanOrEqual(MAX_AGENT_PEEK_BYTES);
+  });
+
+  it("keeps an escaped newest Agent card while preserving its identity", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    const cardId = randomUUID();
+    appendReservedCustomEntry(manager, createConversationCardEntry({
+      cardId,
+      kind: "message",
+      body: `latest card ${"\u0000".repeat(80_000)}`,
+      fromSnapshot: peer(),
+      toSnapshot: peer(),
+      state: "completed",
+      messageId: randomUUID(),
+      result: `latest result ${"\u0000".repeat(80_000)}`,
+      updatedAt: "2026-07-31T10:00:00.000Z",
+    }));
+
+    const peek = projectAgentConversationPeek(manager);
+
+    expect(peek.items).toEqual([expect.objectContaining({
+      kind: "session_message",
+      cardId,
+      body: expect.stringContaining("latest card"),
+      result: expect.stringContaining("latest result"),
+    })]);
+    expect(peek.truncated).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(peek), "utf8"))
+      .toBeLessThanOrEqual(MAX_AGENT_PEEK_BYTES);
+  });
+
   it("bounds the complete serialized Agent peek snapshot to 256 KiB", () => {
     const manager = SessionManager.inMemory("E:\\work");
     for (let index = 0; index < 20; index += 1) {

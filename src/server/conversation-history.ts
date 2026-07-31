@@ -681,6 +681,35 @@ function agentPeekItem(
   return { ...item };
 }
 
+function fitAgentPeekItem(
+  source: AgentConversationPeekItem,
+): { item: AgentConversationPeekItem; truncated: boolean; bytes: number } {
+  let item = source;
+  let bytes = jsonBytes({ items: [item], truncated: false });
+  let truncated = false;
+  while (bytes > MAX_AGENT_PEEK_BYTES) {
+    truncated = true;
+    if (item.kind === "message") {
+      if (!item.text) break;
+      item = { ...item, text: shortenPrefix(item.text) };
+    } else {
+      const field = jsonBytes(item.body) >= jsonBytes(item.result ?? "")
+        ? "body"
+        : "result";
+      const value = field === "body" ? item.body : item.result ?? "";
+      if (!value) break;
+      item = field === "body"
+        ? { ...item, body: shortenPrefix(value) }
+        : { ...item, result: shortenPrefix(value) };
+    }
+    bytes = jsonBytes({ items: [item], truncated: false });
+  }
+  if (bytes > MAX_AGENT_PEEK_BYTES) {
+    throw new Error("Agent conversation peek item cannot fit the snapshot budget");
+  }
+  return { item, truncated, bytes: jsonBytes(item) };
+}
+
 /**
  * Produces the bounded, user-visible tail exposed to peer Agents. It deliberately
  * omits thinking, tool/auth payloads, usage, and host-only reserved records.
@@ -703,37 +732,32 @@ export function projectAgentConversationPeek(
     .map(compactConversationItem)
     .flatMap(({ item, truncated }) => {
       const visibleItem = agentPeekItem(item);
-      return visibleItem === undefined
-        ? []
-        : [{ item: visibleItem, truncated }];
+      if (visibleItem === undefined) return [];
+      const fitted = fitAgentPeekItem(visibleItem);
+      return [{
+        ...fitted,
+        truncated: truncated || fitted.truncated,
+      }];
     });
   const candidates = limit === 0 ? [] : projected.slice(-limit);
-  const selected: AgentConversationPeekItem[] = [];
+  const reverseSelected: AgentConversationPeekItem[] = [];
+  let selectedBytes = jsonBytes({ items: [], truncated: false });
   let compacted = false;
 
   for (let index = candidates.length - 1; index >= 0; index -= 1) {
     const candidate = candidates[index]!;
-    const nextItems = [candidate.item, ...selected];
-    const nextSnapshot = {
-      items: nextItems,
-      // "false" is one serialized byte longer than "true", so it is the
-      // conservative bound regardless of the final truncation state.
-      truncated: false,
-    };
-    if (
-      Buffer.byteLength(JSON.stringify(nextSnapshot), "utf8")
-      > MAX_AGENT_PEEK_BYTES
-    ) {
+    const separatorBytes = reverseSelected.length > 0 ? 1 : 0;
+    if (selectedBytes + separatorBytes + candidate.bytes > MAX_AGENT_PEEK_BYTES) {
       compacted = true;
       break;
     }
-    selected.unshift(candidate.item);
+    reverseSelected.push(candidate.item);
+    selectedBytes += separatorBytes + candidate.bytes;
     compacted ||= candidate.truncated;
   }
 
-  const truncated =
-    compacted
-    || selected.length !== projected.length;
+  const selected = reverseSelected.reverse();
+  const truncated = compacted || selected.length !== projected.length;
   return { items: selected, truncated };
 }
 
