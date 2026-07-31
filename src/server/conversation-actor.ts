@@ -1729,6 +1729,19 @@ export class ConversationActor {
       });
     }
 
+    if (
+      event.type === "message_end"
+      && event.message.role === "assistant"
+      && this.liveProjection?.runId === ticket.id
+    ) {
+      // pi-agent-core emits a shallow partial clone at message_start, but
+      // AgentSession persists the finalized message_end object after listeners
+      // return. Rebind the live slot to that eventual durable identity before
+      // projecting final text/usage.
+      const assistant = this.ensureLiveAssistant(ticket);
+      this.liveProjection.rawMessagesByItemId.set(assistant.id, event.message);
+    }
+
     const rawStartedMessage = event.type === "message_start"
       && (event.message.role === "user" || event.message.role === "assistant")
         ? event.message
@@ -1737,6 +1750,7 @@ export class ConversationActor {
       event.type === "message_start"
       && event.message.role === "user"
       && ticket.origin === "browser"
+      && ticket.expectsInitialPromptRawUserMessage
       && this.liveProjection?.runId === ticket.id
       && this.liveProjection.initialUserItemId !== undefined
     ) {
