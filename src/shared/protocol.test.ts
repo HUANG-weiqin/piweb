@@ -25,7 +25,7 @@ const messageId = "assistant:96b960be-b6bb-4a19-9cf2-78e77cb69425";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(26);
+    expect(PROTOCOL_VERSION).toBe(27);
   });
 
   it("accepts supported commands", () => {
@@ -740,7 +740,7 @@ describe("parseClientCommand", () => {
           tokensBefore: 63_771,
         },
       ],
-      truncated: false,
+      window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
     }).type).toBe("conversation_snapshot");
     expect(parseServerEvent({
       type: "session_event",
@@ -1110,7 +1110,7 @@ describe("parseClientCommand", () => {
           { kind: "text", offset: 0, length: 6 },
         ],
       }],
-      truncated: false,
+      window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
     })).toMatchObject({
       type: "conversation_snapshot",
       items: [{
@@ -1139,7 +1139,7 @@ describe("parseClientCommand", () => {
         }],
         parts: [{ kind: "tool", toolCallId: "wait-call" }],
       }],
-      truncated: false,
+      window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
     })).toMatchObject({
       type: "conversation_snapshot",
       items: [{ tools: [{ status: "pending" }] }],
@@ -1151,14 +1151,14 @@ describe("parseClientCommand", () => {
       focusId,
       messages: [message],
       items: [{ kind: "message", ...message }],
-      truncated: false,
+      window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
     })).toThrow("exactly one");
     expect(() => parseServerEvent({
       type: "conversation_snapshot",
       sessionId,
       conversationId,
       focusId,
-      truncated: false,
+      window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
     })).toThrow("exactly one");
     expect(() => parseServerEvent({
       type: "project_snapshot",
@@ -1201,6 +1201,53 @@ describe("parseClientCommand", () => {
 });
 
 describe("parseServerEvent", () => {
+  it.each([
+    { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
+    { omittedBefore: true, startsMidTurn: false, contentTruncated: false },
+    { omittedBefore: true, startsMidTurn: true, contentTruncated: false },
+    { omittedBefore: false, startsMidTurn: false, contentTruncated: true },
+  ])("accepts independent conversation window coverage %o", (window) => {
+    expect(parseServerEvent({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId,
+      focusId,
+      items: [],
+      window,
+    })).toMatchObject({ type: "conversation_snapshot", window });
+  });
+
+  it("rejects a mid-turn conversation window without omitted history", () => {
+    expect(() => parseServerEvent({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId,
+      focusId,
+      items: [],
+      window: {
+        omittedBefore: false,
+        startsMidTurn: true,
+        contentTruncated: false,
+      },
+    })).toThrow("startsMidTurn requires omittedBefore");
+  });
+
+  it("rejects the removed ambiguous conversation truncation field", () => {
+    expect(() => parseServerEvent({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId,
+      focusId,
+      items: [],
+      window: {
+        omittedBefore: false,
+        startsMidTurn: false,
+        contentTruncated: false,
+      },
+      truncated: false,
+    })).toThrow("Unrecognized key");
+  });
+
   it("aligns role model references with durable UTF-8 limits", () => {
     const role = {
       id: "default",
@@ -1250,7 +1297,7 @@ describe("parseServerEvent", () => {
       conversationId: legacyConversationId,
       focusId,
       items: [],
-      truncated: false,
+      window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
     })).toMatchObject({
       type: "conversation_snapshot",
       conversationId: legacyConversationId,

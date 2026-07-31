@@ -139,7 +139,7 @@ vi.mock("./lib/socket", () => ({
             conversationId: completed.state.conversationId,
             focusId: completed.state.focusId,
             messages: [],
-            truncated: false,
+            window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
           });
           onEvent({
             type: "pending_prompts_snapshot",
@@ -817,7 +817,7 @@ describe("App", () => {
           canManageSessions: true,
         },
         messages: [],
-        truncated: false,
+        window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
       });
     });
 
@@ -868,7 +868,7 @@ describe("App", () => {
           canManageSessions: nextRole.canManageSessions,
         },
         messages: [],
-        truncated: false,
+        window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
       });
       socketMock.emit?.({
         type: "command_complete",
@@ -929,7 +929,7 @@ describe("App", () => {
           thinking: "",
           tools: [],
         }],
-        truncated: false,
+        window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
       });
     });
 
@@ -962,7 +962,7 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_ID,
         items: [],
-        truncated: false,
+        window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
       });
       socketMock.emit?.({
         type: "command_complete",
@@ -1514,7 +1514,7 @@ describe("App", () => {
       focusId: FOCUS_A,
       projectionSeq: 1,
       messages: [],
-      truncated: false,
+      window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
     }));
     socketMock.send.mockClear();
 
@@ -1675,7 +1675,7 @@ describe("App", () => {
           thinking: "",
           tools: [],
         }],
-        truncated: false,
+        window: { omittedBefore: true, startsMidTurn: true, contentTruncated: true },
       });
       socketMock.emit?.({
         type: "conversation_snapshot",
@@ -1688,13 +1688,16 @@ describe("App", () => {
           thinking: "",
           tools: [],
         }],
-        truncated: false,
+        window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
       });
     });
 
     expect(screen.getByText("persisted question", { selector: "article" })).toBeInTheDocument();
     expect(screen.getByText("persisted answer").closest("article")).toBeInTheDocument();
     expect(screen.queryByText("wrong conversation")).not.toBeInTheDocument();
+    const historyWindow = screen.getByRole("note", { name: "历史记录不完整" });
+    expect(historyWindow).toHaveTextContent("当前可见记录从一轮对话的中间开始。");
+    expect(historyWindow).toHaveTextContent("较长消息或工具详情已缩短显示。");
   });
 
   it("waits for the matching conversation snapshot before enabling prompts", () => {
@@ -1728,7 +1731,7 @@ describe("App", () => {
       conversationId: CONVERSATION_B,
       focusId: FOCUS_A,
       messages: [],
-      truncated: false,
+      window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
     }));
     expect(input).toBeDisabled();
 
@@ -1738,7 +1741,7 @@ describe("App", () => {
       conversationId: CONVERSATION_ID,
       focusId: FOCUS_A,
       messages: [],
-      truncated: false,
+      window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
     }));
     expect(input).toBeEnabled();
 
@@ -2623,7 +2626,7 @@ describe("App", () => {
           thinking: "",
           tools: [],
         }],
-        truncated: false,
+        window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
       });
     });
     expect(screen.getByText("A still working")).toBeInTheDocument();
@@ -2638,7 +2641,7 @@ describe("App", () => {
       conversationId: CONVERSATION_ID,
       focusId: FOCUS_A,
       messages: [],
-      truncated: false,
+      window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
     }));
 
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
@@ -3450,7 +3453,7 @@ describe("App", () => {
           thinking: "",
           tools: [],
         }],
-        truncated: false,
+        window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
       });
       socketMock.rawEmit?.({
         type: "conversation_snapshot",
@@ -3464,7 +3467,7 @@ describe("App", () => {
           thinking: "",
           tools: [],
         }],
-        truncated: false,
+        window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
       });
       socketMock.rawEmit?.({
         type: "conversation_item",
@@ -3529,7 +3532,7 @@ describe("App", () => {
       sessionId,
       conversationId: CONVERSATION_ID,
       items: [card],
-      truncated: false,
+      window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
     }));
     expect(screen.getByRole("status", { name: "消息状态：已排队" }))
       .toBeInTheDocument();

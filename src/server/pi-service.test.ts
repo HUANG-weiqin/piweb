@@ -4455,7 +4455,7 @@ describe("PiConnection coordinated project view", () => {
       expect(membershipSnapshot).toMatchObject({
         type: "conversation_snapshot",
         conversationId: source.conversationId,
-        truncated: true,
+        window: { omittedBefore: true },
       });
       if (membershipSnapshot?.type !== "conversation_snapshot") {
         throw new Error("card growth snapshot was not published");

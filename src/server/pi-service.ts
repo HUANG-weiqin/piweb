@@ -477,7 +477,7 @@ export class PiConnection {
         conversationId: selected.conversationId,
         focusId: this.active.focusId,
         messages: history.messages,
-        truncated: history.truncated,
+        window: history.window,
       });
       for (const error of pendingExtensionErrors) {
         this.emitExtensionError(sessionId, error);
@@ -1935,7 +1935,7 @@ export class PiConnection {
         role: actor.profile.role,
         projectionSeq: projection.projectionSeq,
         items,
-        truncated: projection.truncated,
+        window: projection.window,
       });
     } catch (error) {
       this.emitError("session", error, view.sessionId);
@@ -2172,7 +2172,7 @@ export class PiConnection {
       conversationId: active.conversationId,
       focusId: active.focusId,
       messages: history.messages,
-      truncated: history.truncated,
+      window: history.window,
     });
   }
 

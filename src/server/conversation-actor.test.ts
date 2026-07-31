@@ -1495,7 +1495,7 @@ describe("ConversationActor", () => {
     await promptStarted.promise;
 
     const projection = fixture.actor.projectConversationItems();
-    expect(projection.truncated).toBe(true);
+    expect(projection.window.contentTruncated).toBe(true);
     expect(projection.items.map((item) => (
       item.kind === "message" ? `${item.role}:${item.text}` : item.kind
     ))).toEqual([
@@ -1611,7 +1611,7 @@ describe("ConversationActor", () => {
         text: "latest live content",
       }),
     ]));
-    expect(projection.truncated).toBe(true);
+    expect(projection.window.contentTruncated).toBe(true);
 
     promptFinished.resolve();
     await running;
@@ -1810,7 +1810,7 @@ describe("ConversationActor", () => {
       focusId: FOCUS_ID,
       projectionSeq: projection.projectionSeq,
       items: projection.items,
-      truncated: projection.truncated === true,
+      window: projection.window,
     }));
     expect(parsed.type).toBe("conversation_snapshot");
     expect(projection.items).toContainEqual(expect.objectContaining({

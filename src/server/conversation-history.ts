@@ -5,6 +5,7 @@ import type {
   ConversationHistoryMessagePart,
   ConversationHistoryTool,
   ConversationMessageCard,
+  ConversationWindowCoverage,
   TokenUsage,
 } from "../shared/protocol.js";
 import {
@@ -629,7 +630,11 @@ function compactConversationItem(
     };
   }
   if (item.kind === "compaction") {
-    return { item: { ...item }, truncated: false };
+    const id = clipUtf8(item.id, MAX_HISTORY_ID_BYTES);
+    return {
+      item: { ...item, id: id.value },
+      truncated: id.truncated,
+    };
   }
 
   const body = clipUtf8(item.body, MAX_HISTORY_TEXT_BYTES);
@@ -840,11 +845,11 @@ export function snapshotConversationItems(
 ): {
   messages: ConversationHistoryMessage[];
   items: ConversationHistoryItem[];
-  truncated: boolean;
+  window: ConversationWindowCoverage;
 } {
-  const projected = sourceItems.map((item) => {
+  const projected = sourceItems.map((item, sourceIndex) => {
     const fitted = fitConversationItem(item, MAX_HISTORY_SNAPSHOT_BYTES - 2);
-    return { ...fitted, bytes: jsonBytes(fitted.item) };
+    return { ...fitted, sourceIndex, bytes: jsonBytes(fitted.item) };
   });
   const turns: Array<{ items: typeof projected; bytes: number }> = [];
   for (const item of projected) {
@@ -860,7 +865,7 @@ export function snapshotConversationItems(
   const selectedTurns: Array<typeof projected> = [];
   let selectedItemCount = 0;
   let selectedBytes = 2;
-  let truncated = projected.some((item) => item.truncated);
+  let startsMidTurn = false;
   for (let index = turns.length - 1; index >= 0; index -= 1) {
     const turn = turns[index]!;
     const turnBytesWithSeparator = turn.bytes + (selectedItemCount > 0 ? 1 : 0);
@@ -870,7 +875,6 @@ export function snapshotConversationItems(
       selectedBytes += turnBytesWithSeparator;
       continue;
     }
-    truncated = true;
     if (selectedItemCount === 0) {
       // The newest turn cannot be kept whole. Retain its contiguous ordered
       // suffix; never skip a large item to include an older one.
@@ -882,6 +886,7 @@ export function snapshotConversationItems(
         reverseSuffix.push(candidate);
         selectedBytes += candidateBytes;
       }
+      startsMidTurn = reverseSuffix.length < turn.items.length;
       selectedTurns.push(reverseSuffix.reverse());
       selectedItemCount = reverseSuffix.length;
     }
@@ -890,7 +895,11 @@ export function snapshotConversationItems(
 
   const selected = selectedTurns.reverse().flat();
   const items = selected.map(({ item }) => item);
-  if (items.length !== projected.length) truncated = true;
+  const window: ConversationWindowCoverage = {
+    omittedBefore: selected[0]?.sourceIndex !== undefined && selected[0].sourceIndex > 0,
+    startsMidTurn,
+    contentTruncated: selected.some((item) => item.truncated),
+  };
   return {
     messages: items
       .map(historyMessageFromItem)
@@ -899,7 +908,7 @@ export function snapshotConversationItems(
           message !== undefined,
       ),
     items,
-    truncated,
+    window,
   };
 }
 
@@ -912,7 +921,7 @@ export function projectConversationItemsSnapshot(
 ): {
   messages: ConversationHistoryMessage[];
   items: ConversationHistoryItem[];
-  truncated: boolean;
+  window: ConversationWindowCoverage;
 } {
   return snapshotConversationItems(projectConversationItems(sessionManager));
 }
@@ -923,12 +932,12 @@ export function projectConversationItemsSnapshot(
  */
 export function projectConversationHistorySnapshot(
   sessionManager: Pick<SessionManager, "getBranch">,
-): { messages: ConversationHistoryMessage[]; truncated: boolean } {
+): { messages: ConversationHistoryMessage[]; window: ConversationWindowCoverage } {
   const snapshot = snapshotConversationItems(
     projectConversationHistory(sessionManager).map((message) => ({
       kind: "message" as const,
       ...message,
     })),
   );
-  return { messages: snapshot.messages, truncated: snapshot.truncated };
+  return { messages: snapshot.messages, window: snapshot.window };
 }

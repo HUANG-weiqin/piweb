@@ -11,6 +11,7 @@ import {
   projectConversationItemsSnapshot,
   projectConversationHistory,
   projectConversationHistorySnapshot,
+  snapshotConversationItems,
 } from "./conversation-history.js";
 import {
   appendReservedCustomEntry,
@@ -385,7 +386,11 @@ describe("projectConversationHistory", () => {
     }
 
     const snapshot = projectConversationHistorySnapshot(manager);
-    expect(snapshot.truncated).toBe(true);
+    expect(snapshot.window).toEqual({
+      omittedBefore: true,
+      startsMidTurn: false,
+      contentTruncated: true,
+    });
     expect(Buffer.byteLength(JSON.stringify(snapshot.messages), "utf8"))
       .toBeLessThanOrEqual(MAX_HISTORY_SNAPSHOT_BYTES);
     expect(snapshot.messages.at(-1)?.text).toContain("answer-11");
@@ -399,11 +404,11 @@ describe("projectConversationHistory", () => {
       content: "start the oversized turn",
       timestamp: 1,
     }));
-    for (let index = 0; index < 10; index += 1) {
+    for (let index = 0; index < 11; index += 1) {
       appendReservedCustomEntry(manager, createConversationCardEntry({
         cardId: randomUUID(),
         kind: "message",
-        body: `card-${index}-${"x".repeat(80_000)}`,
+        body: `card-${index}-${"x".repeat(70_000)}`,
         fromSnapshot: peer(),
         toSnapshot: peer(),
         state: "queued",
@@ -418,9 +423,13 @@ describe("projectConversationHistory", () => {
       .toBeLessThanOrEqual(MAX_HISTORY_SNAPSHOT_BYTES);
     expect(snapshot.items.at(-1)).toMatchObject({
       kind: "session_message",
-      body: expect.stringContaining("card-9-"),
+      body: expect.stringContaining("card-10-"),
     });
-    expect(snapshot.truncated).toBe(true);
+    expect(snapshot.window).toEqual({
+      omittedBefore: true,
+      startsMidTurn: true,
+      contentTruncated: false,
+    });
   });
 
   it("uses exact JSON bytes when an escaped newest item exceeds the page budget", () => {
@@ -453,7 +462,33 @@ describe("projectConversationHistory", () => {
       body: expect.stringContaining(bodyPrefix),
       result: expect.stringContaining(resultPrefix),
     });
-    expect(snapshot.truncated).toBe(true);
+    expect(snapshot.window).toEqual({
+      omittedBefore: false,
+      startsMidTurn: false,
+      contentTruncated: true,
+    });
+  });
+
+  it("keeps a snapshot renderable when a compaction identity exceeds the page budget", () => {
+    const snapshot = snapshotConversationItems([{
+      kind: "compaction",
+      id: "c".repeat(MAX_HISTORY_SNAPSHOT_BYTES),
+      timestamp: "2026-07-31T10:00:00.000Z",
+      tokensBefore: 42,
+    }]);
+
+    expect(snapshot.items).toHaveLength(1);
+    expect(snapshot.items[0]).toMatchObject({
+      kind: "compaction",
+      id: expect.stringMatching(/…$/),
+    });
+    expect(Buffer.byteLength(JSON.stringify(snapshot.items), "utf8"))
+      .toBeLessThanOrEqual(MAX_HISTORY_SNAPSHOT_BYTES);
+    expect(snapshot.window).toEqual({
+      omittedBefore: false,
+      startsMidTurn: false,
+      contentTruncated: true,
+    });
   });
 
   it("never starts a truncated snapshot with an orphaned assistant bubble", () => {
@@ -461,12 +496,12 @@ describe("projectConversationHistory", () => {
     for (let index = 0; index < 8; index++) {
       manager.appendMessage(message({
         role: "user",
-        content: `question-${index}-${"q".repeat(100_000)}`,
+        content: `question-${index}-${"q".repeat(60_000)}`,
         timestamp: index * 2,
       }));
       manager.appendMessage(message({
         role: "assistant",
-        content: [{ type: "text", text: `answer-${index}-${"a".repeat(100_000)}` }],
+        content: [{ type: "text", text: `answer-${index}-${"a".repeat(60_000)}` }],
         usage: { totalTokens: 1 },
         stopReason: "stop",
         timestamp: index * 2 + 1,
@@ -474,7 +509,11 @@ describe("projectConversationHistory", () => {
     }
 
     const snapshot = projectConversationHistorySnapshot(manager);
-    expect(snapshot.truncated).toBe(true);
+    expect(snapshot.window).toEqual({
+      omittedBefore: true,
+      startsMidTurn: false,
+      contentTruncated: false,
+    });
     expect(snapshot.messages[0]?.role).toBe("user");
     expect(snapshot.messages.at(-1)?.text).toContain("answer-7");
   });
@@ -553,7 +592,11 @@ describe("projectConversationHistory", () => {
     const snapshot = projectConversationItemsSnapshot(manager);
     expect(snapshot.items).toEqual(items);
     expect(snapshot.messages).toEqual(projectConversationHistory(manager));
-    expect(snapshot.truncated).toBe(false);
+    expect(snapshot.window).toEqual({
+      omittedBefore: false,
+      startsMidTurn: false,
+      contentTruncated: false,
+    });
   });
 
   it("splits restored assistant bubbles across incoming messages and compaction", () => {
@@ -916,7 +959,7 @@ describe("projectConversationHistory", () => {
     }));
 
     const snapshot = projectConversationItemsSnapshot(manager);
-    expect(snapshot.truncated).toBe(true);
+    expect(snapshot.window.omittedBefore).toBe(true);
     expect(snapshot.items).toEqual(expect.arrayContaining([
       expect.objectContaining({
         kind: "compaction",

@@ -14,6 +14,7 @@ import {
   type ConversationHistoryMessagePart,
   type ConversationHistoryTool,
   type ConversationRoleSnapshot,
+  type ConversationWindowCoverage,
   type SessionEvent,
   type TokenUsage,
   type ToolMode,
@@ -738,7 +739,7 @@ export class ConversationActor {
   ): {
     items: ConversationHistoryItem[];
     projectionSeq: number;
-    truncated: boolean;
+    window: ConversationWindowCoverage;
   } {
     const slots = projectConversationItemSlots(this.sessionManager);
     const durableItems = slots.map(({ item }) => structuredClone(item));
@@ -798,7 +799,7 @@ export class ConversationActor {
     return {
       items: snapshot.items,
       projectionSeq,
-      truncated: snapshot.truncated,
+      window: snapshot.window,
     };
   }
 

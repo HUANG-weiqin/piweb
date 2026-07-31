@@ -8,6 +8,7 @@ import {
   type ClientCommand,
   type ConversationRoleSnapshot,
   type ConversationSummary,
+  type ConversationWindowCoverage,
   type DirectoryListing,
   type PendingPrompt,
   type PublicState,
@@ -47,6 +48,11 @@ const CWD_KEY = "piweb.lastCwd";
 const WORKSPACES_KEY = "piweb.workspaces";
 const MAX_WORKSPACES = 30;
 const RESUME_REFRESH_DELAY_MS = 16;
+const EMPTY_CONVERSATION_WINDOW: ConversationWindowCoverage = {
+  omittedBefore: false,
+  startsMidTurn: false,
+  contentTruncated: false,
+};
 
 interface InitialWorkspaceState {
   workspaces: string[];
@@ -316,7 +322,9 @@ export function App() {
   const [conversationRole, setConversationRole] =
     useState<ConversationRoleSnapshot>();
   const [conversationIndexTruncated, setConversationIndexTruncated] = useState(false);
-  const [historyTruncated, setHistoryTruncated] = useState(false);
+  const [historyWindow, setHistoryWindow] = useState<ConversationWindowCoverage>(
+    EMPTY_CONVERSATION_WINDOW,
+  );
   const [conversationReady, setConversationReady] = useState(false);
   const conversationReadyRef = useRef(false);
   const [drawer, setDrawer] = useState(false);
@@ -672,7 +680,7 @@ export function App() {
       clearPendingPrompts();
       showPendingContextCompaction(undefined);
       setConversationRole(undefined);
-      setHistoryTruncated(false);
+      setHistoryWindow(EMPTY_CONVERSATION_WINDOW);
       updateConversationReady(false);
       setSelectingRole(true);
       dispatch({ type: "reset" });
@@ -685,7 +693,7 @@ export function App() {
     focusRef.current = focus;
     conversationIdRef.current = conversationId;
     setConversationRole(undefined);
-    setHistoryTruncated(false);
+    setHistoryWindow(EMPTY_CONVERSATION_WINDOW);
     updateConversationReady(false);
     setSelectingRole(false);
     if (changedConversation) {
@@ -743,7 +751,7 @@ export function App() {
     setRoles([]);
     setConversationRole(undefined);
     setConversationIndexTruncated(false);
-    setHistoryTruncated(false);
+    setHistoryWindow(EMPTY_CONVERSATION_WINDOW);
     setExtensionUI([]);
     setNotification(undefined);
     setSettingResult(undefined);
@@ -1035,7 +1043,7 @@ export function App() {
           });
         }
         setConversationRole(event.role);
-        setHistoryTruncated(event.truncated);
+        setHistoryWindow(event.window);
         if (!pendingFocusRef.current) updateConversationReady(true);
       } else if (event.type === "session_event") {
         if (!matchesFocus(
@@ -2397,7 +2405,7 @@ export function App() {
               cwd={state.cwd}
               online={online}
               conversationReady={visibleConversationReady}
-              historyTruncated={historyTruncated}
+              historyWindow={historyWindow}
               draft={draft}
               submitting={
                 Boolean(pendingPrompt) || hasPendingEnqueueForFocus(focusRef.current)

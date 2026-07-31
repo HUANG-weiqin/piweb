@@ -18,7 +18,7 @@ export const MAX_PENDING_PROMPT_ATTENTION_REASON_CHARACTERS = 1_000;
 export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
-export const PROTOCOL_VERSION = 26;
+export const PROTOCOL_VERSION = 27;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 const required = z.string().trim().min(1);
 const canonicalTimestampSchema = z.string().refine(
@@ -645,6 +645,12 @@ export type ConversationHistoryItem =
   | ConversationCompactionMarker
   | ConversationMessageCard;
 
+export interface ConversationWindowCoverage {
+  omittedBefore: boolean;
+  startsMidTurn: boolean;
+  contentTruncated: boolean;
+}
+
 export type ConversationCreatedBy =
   | { kind: "user" }
   | { kind: "conversation"; conversationId: string };
@@ -765,7 +771,7 @@ export type ServerEvent =
       projectionSeq?: number;
       messages?: ConversationHistoryMessage[];
       items?: ConversationHistoryItem[];
-      truncated: boolean;
+      window: ConversationWindowCoverage;
     }
   | {
       type: "session_event";
@@ -1163,6 +1169,12 @@ const conversationHistoryItemSchema: z.ZodType<ConversationHistoryItem> =
       peerExists: z.boolean(),
     }),
   ]);
+const conversationWindowCoverageSchema: z.ZodType<ConversationWindowCoverage> = z.object({
+  omittedBefore: z.boolean(),
+  startsMidTurn: z.boolean(),
+  contentTruncated: z.boolean(),
+});
+
 const serverEventUnionSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("hello"),
@@ -1262,8 +1274,8 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     projectionSeq: z.number().int().nonnegative().optional(),
     messages: z.array(conversationHistoryMessageSchema).optional(),
     items: z.array(conversationHistoryItemSchema).optional(),
-    truncated: z.boolean(),
-  }),
+    window: conversationWindowCoverageSchema,
+  }).strict(),
   z.object({
     type: z.literal("session_event"),
     sessionId: sessionIdSchema,
@@ -1340,6 +1352,17 @@ export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.
         message:
           "conversation_snapshot requires exactly one of messages or items",
         path: ["items"],
+      });
+    }
+    if (
+      event.type === "conversation_snapshot"
+      && event.window.startsMidTurn
+      && !event.window.omittedBefore
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "conversation_snapshot window startsMidTurn requires omittedBefore",
+        path: ["window", "startsMidTurn"],
       });
     }
     if (
