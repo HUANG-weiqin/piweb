@@ -73,8 +73,8 @@ describe("createCompletionSound", () => {
     await sound.unlock();
     sound.play();
 
+    await vi.waitFor(() => expect(context.oscillators).toHaveLength(2));
     expect(context.resume).toHaveBeenCalledTimes(1);
-    expect(context.oscillators).toHaveLength(2);
     expect(context.oscillators[0]!.frequency.setValueAtTime)
       .toHaveBeenCalledWith(880, 10);
     expect(context.oscillators[1]!.frequency.setValueAtTime)
