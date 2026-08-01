@@ -5363,6 +5363,19 @@ describe("PiConnection coordinated project view", () => {
           && event.focusId === firstAttach.focusId,
       );
       expect(initialSnapshot).not.toHaveProperty("messages");
+      expect(harness.events.filter(
+        (event) => event.type === "conversation_run_settled",
+      )).toHaveLength(0);
+      await harness.connection.handle({
+        type: "refresh_view",
+        sessionId: SESSION_A,
+        projectId: firstAttach.projectId,
+        conversationId: firstAttach.conversationId,
+        focusId: firstAttach.focusId,
+      });
+      expect(harness.events.filter(
+        (event) => event.type === "conversation_run_settled",
+      )).toHaveLength(0);
       const firstAttachIndex = harness.events.indexOf(firstAttach);
       const firstSnapshotIndex = harness.events.findIndex(
         (event) =>
@@ -5459,6 +5472,15 @@ describe("PiConnection coordinated project view", () => {
       finish.resolve();
       await firstRun;
       expect(firstSession.abortCalls).toBe(0);
+      expect(harness.events).toContainEqual({
+        type: "conversation_run_settled",
+        sessionId: SESSION_A,
+        projectId: firstAttach.projectId,
+        conversationId: firstAttach.conversationId,
+        runId: firstRunId,
+        outcome: "completed",
+        createdBy: { kind: "user" },
+      });
       await vi.waitFor(() => {
         const snapshot = harness.events.findLast(
           (event) => event.type === "project_snapshot",
@@ -5481,6 +5503,47 @@ describe("PiConnection coordinated project view", () => {
         ),
       ).toBe(false);
 
+      const coordinatedView = (harness.connection as unknown as {
+        coordinatedView: {
+          handle: Parameters<
+            ProjectSessionCoordinator["startPeerSession"]
+          >[0];
+        };
+      }).coordinatedView;
+      const peer = await harness.coordinator.startPeerSession(
+        coordinatedView.handle,
+        firstAttach.conversationId,
+        {
+          roleId: "default",
+          task: "agent-created background work",
+          temporary: false,
+          idempotencyKey: randomUUID(),
+        },
+      );
+      await vi.waitFor(() => {
+        const settlement = harness.events.find((event) => (
+          event.type === "conversation_run_settled"
+          && event.conversationId === peer.conversationId
+          && event.runId === peer.runId
+        ));
+        expect(settlement).toMatchObject({
+          type: "conversation_run_settled",
+          sessionId: SESSION_A,
+          projectId: firstAttach.projectId,
+          conversationId: peer.conversationId,
+          runId: peer.runId,
+          createdBy: {
+            kind: "conversation",
+            conversationId: firstAttach.conversationId,
+          },
+        });
+        if (settlement?.type === "conversation_run_settled") {
+          expect(["completed", "aborted", "failed"]).toContain(
+            settlement.outcome,
+          );
+        }
+      });
+
       const refocusCommandId = randomUUID();
       await harness.connection.handle({
         type: "focus_conversation",
@@ -5501,7 +5564,7 @@ describe("PiConnection coordinated project view", () => {
         throw new Error("first conversation was not refocused");
       }
       expect(refocused.focusId).not.toBe(firstAttach.focusId);
-      expect(harness.runtime.created).toHaveLength(2);
+      expect(harness.runtime.created).toHaveLength(3);
       await vi.waitFor(() => {
         const snapshot = harness.events.findLast(
           (event) => event.type === "project_snapshot",

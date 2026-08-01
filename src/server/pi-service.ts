@@ -1633,6 +1633,18 @@ export class PiConnection {
       return;
     }
 
+    if (event.type === "completion") {
+      this.emit({
+        type: "conversation_run_settled",
+        sessionId: view.sessionId,
+        projectId: view.handle.project.id,
+        conversationId: event.conversationId,
+        runId: event.settlement.runId,
+        outcome: event.settlement.outcome,
+        createdBy: structuredClone(event.createdBy),
+      });
+    }
+
     const focused = event.conversationId === view.conversationId
       && view.focusId !== undefined;
     if (

@@ -107,6 +107,7 @@ export type ConversationActorEvent =
       conversationId: string;
       origin: ConversationRunOrigin;
       settlement: RunSettlement;
+      createdBy: ConversationMeta["createdBy"];
       pendingPromptUserDelivered: boolean;
     }
   | {
@@ -124,6 +125,7 @@ export type ConversationActorListener = (
 export interface ConversationActorCompletion {
   settlement: RunSettlement;
   origin: ConversationRunOrigin;
+  createdBy: ConversationMeta["createdBy"];
   /** True only after Pi emitted the durable user message for a pending prompt. */
   pendingPromptUserDelivered: boolean;
 }
@@ -1540,6 +1542,7 @@ export class ConversationActor {
     const completion = {
       settlement,
       origin: ticket.origin,
+      createdBy: structuredClone(this.profileSnapshot.createdBy),
       pendingPromptUserDelivered: ticket.pendingPromptUserDelivered,
     } satisfies ConversationActorCompletion;
     this.emit({

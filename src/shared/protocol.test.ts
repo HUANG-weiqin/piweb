@@ -25,7 +25,7 @@ const messageId = "assistant:96b960be-b6bb-4a19-9cf2-78e77cb69425";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(27);
+    expect(PROTOCOL_VERSION).toBe(28);
   });
 
   it("accepts supported commands", () => {
@@ -1302,6 +1302,63 @@ describe("parseServerEvent", () => {
       type: "conversation_snapshot",
       conversationId: legacyConversationId,
     });
+  });
+
+  it.each([
+    { createdBy: { kind: "user" } },
+    { createdBy: { kind: "conversation", conversationId: targetConversationId } },
+  ])("accepts a live conversation run settlement %o", ({ createdBy }) => {
+    expect(parseServerEvent({
+      type: "conversation_run_settled",
+      sessionId,
+      projectId,
+      conversationId,
+      runId,
+      outcome: "completed",
+      createdBy,
+    })).toEqual({
+      type: "conversation_run_settled",
+      sessionId,
+      projectId,
+      conversationId,
+      runId,
+      outcome: "completed",
+      createdBy,
+    });
+  });
+
+  it.each([
+    { sessionId: "not-a-uuid" },
+    { projectId: "not-a-uuid" },
+    { conversationId: "bad id" },
+    { runId: "not-a-uuid" },
+    { outcome: "unknown" },
+    { createdBy: { kind: "agent" } },
+    { createdBy: { kind: "conversation", conversationId: "bad id" } },
+  ])("rejects an invalid conversation run settlement field %o", (invalid) => {
+    expect(() => parseServerEvent({
+      type: "conversation_run_settled",
+      sessionId,
+      projectId,
+      conversationId,
+      runId,
+      outcome: "completed",
+      createdBy: { kind: "user" },
+      ...invalid,
+    })).toThrow();
+  });
+
+  it("rejects extra fields on a conversation run settlement", () => {
+    expect(() => parseServerEvent({
+      type: "conversation_run_settled",
+      sessionId,
+      projectId,
+      conversationId,
+      runId,
+      outcome: "completed",
+      createdBy: { kind: "user" },
+      focusId,
+    })).toThrow();
   });
 
   it.each([

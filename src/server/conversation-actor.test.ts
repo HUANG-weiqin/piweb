@@ -2482,6 +2482,34 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
+  it("publishes the frozen creator with completion events", async () => {
+    const inputProfile = profile();
+    inputProfile.createdBy = {
+      kind: "conversation",
+      conversationId: TARGET_CONVERSATION_ID,
+    };
+    const fixture = await openActor({ profile: inputProfile });
+    inputProfile.createdBy = { kind: "user" };
+
+    await fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "finish",
+      origin: "browser",
+    });
+
+    expect(fixture.events.findLast(({ type }) => type === "completion"))
+      .toMatchObject({
+        type: "completion",
+        conversationId: CONVERSATION_ID,
+        settlement: { runId: RUN_A, outcome: "completed" },
+        createdBy: {
+          kind: "conversation",
+          conversationId: TARGET_CONVERSATION_ID,
+        },
+      });
+    await fixture.actor.dispose();
+  });
+
   it("uses a reserved custom entry as the default durable settlement", async () => {
     const fixture = await openActor();
     await fixture.actor.startPrompt({
