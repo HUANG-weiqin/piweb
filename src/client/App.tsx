@@ -40,6 +40,7 @@ import {
   workspaceKey,
 } from "./components/WorkspaceRail";
 import { WorkspacePlaceholder } from "./components/WorkspacePlaceholder";
+import { createCompletionSound, type CompletionSound } from "./lib/completion-sound";
 import { PiSocket } from "./lib/socket";
 import { readStoredString, writeStoredString } from "./lib/storage";
 import { useModalFocus } from "./lib/use-modal-focus";
@@ -357,6 +358,7 @@ export function App() {
   const notificationIdRef = useRef(0);
   const [chat, dispatch] = useReducer(chatReducer, initialChatState);
   const socketRef = useRef<PiSocket | undefined>(undefined);
+  const completionSoundRef = useRef<CompletionSound | undefined>(undefined);
   const socketEpochRef = useRef(0);
   const autoOpened = useRef(false);
 
@@ -806,6 +808,24 @@ export function App() {
   };
 
   useEffect(() => {
+    const sound = createCompletionSound();
+    completionSoundRef.current = sound;
+    const unlock = () => {
+      void sound.unlock();
+    };
+    window.addEventListener("pointerdown", unlock);
+    window.addEventListener("keydown", unlock);
+    return () => {
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+      sound.dispose();
+      if (completionSoundRef.current === sound) {
+        completionSoundRef.current = undefined;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     const epoch = ++socketEpochRef.current;
     const isCurrentSocket = () => socketEpochRef.current === epoch;
     const socket = new PiSocket((event: ServerEvent) => {
@@ -999,6 +1019,14 @@ export function App() {
         projectIdRef.current = event.projectId;
         setConversations(event.conversations);
         setConversationIndexTruncated(event.truncated);
+      } else if (event.type === "conversation_run_settled") {
+        if (
+          event.sessionId !== sessionIdRef.current
+          || event.projectId !== projectIdRef.current
+          || event.outcome !== "completed"
+          || event.createdBy.kind !== "user"
+        ) return;
+        completionSoundRef.current?.play();
       } else if (event.type === "pending_prompts_snapshot") {
         if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;
         const focus = focusRef.current;

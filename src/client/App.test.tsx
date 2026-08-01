@@ -66,6 +66,26 @@ function completeEvent(event: TestServerEvent): TestServerEvent {
   };
 }
 
+const completionSoundMock = vi.hoisted(() => ({
+  instances: [] as Array<{
+    unlock: ReturnType<typeof vi.fn>;
+    play: ReturnType<typeof vi.fn>;
+    dispose: ReturnType<typeof vi.fn>;
+  }>,
+}));
+
+vi.mock("./lib/completion-sound", () => ({
+  createCompletionSound: () => {
+    const sound = {
+      unlock: vi.fn(async () => undefined),
+      play: vi.fn(),
+      dispose: vi.fn(),
+    };
+    completionSoundMock.instances.push(sound);
+    return sound;
+  },
+}));
+
 const socketMock = vi.hoisted(() => ({
   instances: [] as Array<{
     emit(event: TestServerEvent): void;
@@ -213,6 +233,7 @@ afterEach(() => {
   socketMock.rawEmit = undefined;
   socketMock.status = undefined;
   socketMock.instances.splice(0);
+  completionSoundMock.instances.splice(0);
   socketMock.send.mockReset();
   socketMock.send.mockReturnValue(true);
   socketMock.close.mockReset();
@@ -280,6 +301,118 @@ describe("App", () => {
     expect(socketMock.send).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: "initialize" }),
     );
+  });
+
+  it("plays one project-scoped chime for a completed user run", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    const sound = completionSoundMock.instances.at(-1)!;
+
+    act(() => socketMock.rawEmit?.({
+      type: "conversation_run_settled",
+      sessionId,
+      projectId: PROJECT_ID,
+      conversationId: CONVERSATION_B,
+      runId: RUN_ID,
+      outcome: "completed",
+      createdBy: { kind: "user" },
+    }));
+
+    expect(sound.play).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not chime for replayable projections, non-user outcomes, or stale observations", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    const sound = completionSoundMock.instances.at(-1)!;
+    const snapshotWindow = {
+      omittedBefore: false,
+      startsMidTurn: false,
+      contentTruncated: false,
+    };
+
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversations: [],
+        truncated: false,
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        items: [],
+        window: snapshotWindow,
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_run_settled",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_B,
+        runId: RUN_ID,
+        outcome: "completed",
+        createdBy: { kind: "conversation", conversationId: CONVERSATION_ID },
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_run_settled",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_B,
+        runId: RUN_B,
+        outcome: "aborted",
+        createdBy: { kind: "user" },
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_run_settled",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_B,
+        runId: "4f9c2a19-4b9b-4f1b-9b3d-0f5e7c8a6d21",
+        outcome: "failed",
+        createdBy: { kind: "user" },
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_run_settled",
+        sessionId: "00000000-0000-4000-8000-000000000001",
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_B,
+        runId: "5f9c2a19-4b9b-4f1b-9b3d-0f5e7c8a6d21",
+        outcome: "completed",
+        createdBy: { kind: "user" },
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_run_settled",
+        sessionId,
+        projectId: "00000000-0000-4000-8000-000000000002",
+        conversationId: CONVERSATION_B,
+        runId: "6f9c2a19-4b9b-4f1b-9b3d-0f5e7c8a6d21",
+        outcome: "completed",
+        createdBy: { kind: "user" },
+      });
+    });
+
+    expect(sound.play).not.toHaveBeenCalled();
+  });
+
+  it("cleans completion sound listeners and instances under StrictMode", () => {
+    const view = render(<StrictMode><App /></StrictMode>);
+    expect(completionSoundMock.instances).toHaveLength(2);
+    const first = completionSoundMock.instances[0]!;
+    const current = completionSoundMock.instances[1]!;
+    expect(first.dispose).toHaveBeenCalledTimes(1);
+
+    fireEvent.pointerDown(window);
+    fireEvent.keyDown(window);
+    expect(first.unlock).not.toHaveBeenCalled();
+    expect(current.unlock).toHaveBeenCalledTimes(2);
+
+    view.unmount();
+    expect(current.dispose).toHaveBeenCalledTimes(1);
+    fireEvent.pointerDown(window);
+    expect(current.unlock).toHaveBeenCalledTimes(2);
   });
 
   it("remembers an opened workspace and restores the last one on startup", () => {
