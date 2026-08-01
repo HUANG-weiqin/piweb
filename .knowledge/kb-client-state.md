@@ -1,6 +1,6 @@
 # 客户端状态
 
-`updated: 2026-07-31`
+`updated: 2026-08-01`
 
 ## 这个模块是干什么的
 
@@ -15,6 +15,7 @@ ServerEvent
 → 校验 protocolVersion / project observation
 → PublicState 更新权威 activeRun / busy
 → project_activity_snapshot 更新跨项目工作区状态
+→ conversation_run_settled 触发当前项目的实时完成提示
 → role_catalog_snapshot / project_snapshot 更新当前项目控制面
 → focus_attached 提交 conversationId + focusId
 → conversation_snapshot 原子 hydrate focused items
@@ -47,6 +48,7 @@ ServerEvent
 - 项目空态和用户点击“新建会话”都进入完整 `RoleSelectionPage`。每张角色卡右下角直接提供管理与启动入口，不维护“先选卡牌、再点页面级开始”的中间状态；点击可用角色的启动图标后，在收到 create attach 前不渲染 Chat/composer。
 - 对话列表来自 `project_snapshot`，角色来自 `role_catalog_snapshot`，恢复消息/卡片来自 `conversation_snapshot`；localStorage 不是数据 fallback。项目索引继续显示 `truncated` 提示；conversation 则保存精确 `window`，分别提示“省略较早历史”“从 turn 中间开始”和“已选内容被缩略”，不能把三种覆盖差异重新合并为一个布尔值。focus change、disconnect 和新 observation 都先重置 window，只有匹配 focus 的 snapshot 能恢复它。
 - `project_snapshot` 同时投影持久创建来源；侧栏只为 `createdBy.kind=conversation` 的会话在标题旁显示紧凑 `Agent` 徽标，用户创建与来源未知的旧会话不显示，列表仍保持扁平。
+- 完成音效只消费精确匹配当前 `sessionId + projectId` 的实时 `conversation_run_settled`：仅 `outcome=completed` 且 `createdBy.kind=user` 时播放，因此后台用户会话也可提示，而 Agent 创建会话、中止、失败、初次 hydrate 和重连恢复都不响。音效由浏览器 Web Audio API 本地合成双音，不依赖外部素材；页面用首次 pointer/keyboard 交互解锁自动播放策略，失败时静默降级，不能影响会话生命周期。客户端不得从 `project_snapshot` 的 busy→idle 猜测完成。
 - 扁平可折叠 `ConversationSidebar` 是项目会话的唯一列表/新建/打开/改名/删除控制面；模型连接抽屉不维护第二套会话入口。桌面展开态可通过右边缘在 240–640px 内横向调整，折叠态与 600px 以下窄屏不提供 resize handle。running/queued/cancelling/waiting 的活跃项优先，再按 attention 和最后活跃时间排序；running/queued 使用与思考状态同尺寸、同转速的环形 spinner，沙漏、attention、unread 与 temporary 都来自服务端投影。
 - 后台 actor 的创建、运行或完成只能更新侧栏/通知，不能改变 current focus、draft 或 transcript。用户在当前会话 running 时仍可切换观察。
 - 删除 pending 固化 `sessionId + commandId + workspace/project/conversation`，删除当前 focus 时还固化 `focusId`；匹配的 `command_complete` / error 才能结算，且只有 exact 原 focus 仍在观察时才能清空当前 transcript。普通 snapshot 只更新列表，不能冒充删除回执。pending 期间禁止切换/新建 conversation，阻断 `A → B → A` 后旧删除回执清空新 focus 的 ABA；断线属于未知结果，应清除等待态并提示用户重新核对；initialize/工作区切换必须同步清掉旧 observation 的删除 pending，迟到的旧 session 回执不能锁住新项目按钮。

@@ -1,6 +1,6 @@
 # 线协议
 
-`updated: 2026-07-31`
+`updated: 2026-08-01`
 
 ## 这个模块是干什么的
 
@@ -19,7 +19,7 @@ ClientCommand
 → App / reducer
 ```
 
-协议由 `PROTOCOL_VERSION` 标识，当前为 v27。工具参数和结果允许 `unknown`，但服务端在投影时会做有界遍历、转成 JSON-safe 数据并限制单值大小。
+协议由 `PROTOCOL_VERSION` 标识，当前为 v28。工具参数和结果允许 `unknown`，但服务端在投影时会做有界遍历、转成 JSON-safe 数据并限制单值大小。
 
 ## 决策
 
@@ -27,6 +27,7 @@ ClientCommand
 - projectId/conversationId 是持久身份，sessionId 是浏览器项目观察 epoch，focusId 是一次 conversation attach，runId 是单次执行；协议必须显式携带消费方需要的身份，不能混用。projectId 与所有 ephemeral correlation ID 是 UUID；conversationId 使用 Pi Web 的兼容策略（1–256 个 ASCII 字母数字及 `._-`，首尾为字母数字），以接纳常见的旧 durable Pi 非 UUID 会话，同时给 metadata、notebook 与 wire 一个共同的宿主上限；这不是 Pi SDK 自身的长度合同。
 - `project_snapshot` 与 `role_catalog_snapshot` 用 `sessionId + projectId` 过滤；它们描述整个项目，不能因更新来自后台 conversation 就丢弃。
 - `project_activity_snapshot` 是连接级、跨当前 observation 的进程目录，只汇总 coordinator 已加载项目的 cwd/projectId、busy conversation 数和 coordinator-owned attention 数；它不携带 transcript、当前 focus 或浏览器私有 unread。最多 100 项，超出时置 `truncated=true`。
+- `conversation_run_settled` 是当前项目 observation 的实时结算边界：只在 actor 已持久写入精确 run settlement 并回到 idle 后发送，携带 `sessionId + projectId + conversationId + runId + outcome + createdBy`。它覆盖 focused 和后台 conversation，但不会由 initialize、refresh 或 snapshot 重放；浏览器不能从可能合并的 activity 快照反推这类瞬时完成事件。
 - 当前 transcript 的 state、snapshot、live run 和卡片必须匹配 `sessionId + conversationId + focusId`。每次 initialize/open/create/focus 都分配新 focusId，因此快速 `A → B → A` 时第一次 A 的迟到帧不能污染第二次 A。
 - prompt/abort 显式携带上述 focus 三元身份和 runId；底层即时引导仍可使用 `steer + commandId + 精确 active runId`，由 `command_complete(steer)` 确认 SDK 已把该 user message 持久送入当前 run，而不只是放进易失内存队列。steer 是控制通道，不能排在被当前 run 占用的 actor 串行队列之后；错 focus 或错 runId 必须失败，不能作用于当前观察。
 - busy composer 的普通发送不直接调用 steer，而使用 `enqueue_prompt + commandId + promptId + 精确 focus`。`command_complete(enqueue_prompt)` 只在 sidecar durable commit 后返回。`withdraw_pending_prompt` 只删除尚为 queued 的精确 promptId；`dismiss_pending_prompt` 只删除 attention 记录。`steer_all_pending_prompts` 携带客户端生成的 batchId 与精确 active runId，但不携带 promptId 列表：服务端在项目 lifecycle 内冻结当时全部 queued 记录，持久写入 batch manifest，并把它们编码成一次 SDK user guidance。只有 batch delivery fence、逐 prompt receipt、sidecar cleanup 和 completed manifest 都持久完成后才发送 command completion。旧的 `steer_pending_prompt` 仍是单记录控制命令，Web UI 不再用它处理队列。所有 pending 命令都使用一次性 commandId 精确结算。
