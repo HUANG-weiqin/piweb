@@ -112,7 +112,7 @@ describe("createCompletionSound", () => {
 
   it("does not schedule sound when autoplay unlock fails", async () => {
     const context = new FakeAudioContext();
-    context.resume.mockRejectedValueOnce(new Error("autoplay blocked"));
+    context.resume.mockRejectedValue(new Error("autoplay blocked"));
     vi.stubGlobal("AudioContext", class {
       constructor() {
         return context;
@@ -123,7 +123,35 @@ describe("createCompletionSound", () => {
     await sound.unlock();
     sound.play();
 
+    await vi.waitFor(() => expect(context.resume).toHaveBeenCalledTimes(2));
+    await Promise.resolve();
     expect(context.oscillators).toHaveLength(0);
     sound.dispose();
+  });
+
+  it("does not schedule sound when disposed while resume is pending", async () => {
+    const context = new FakeAudioContext();
+    let finishResume = () => undefined;
+    context.resume.mockImplementation(() => new Promise<void>((resolve) => {
+      finishResume = () => {
+        context.state = "running";
+        resolve();
+      };
+    }));
+    vi.stubGlobal("AudioContext", class {
+      constructor() {
+        return context;
+      }
+    });
+    const sound = createCompletionSound();
+
+    sound.play();
+    expect(context.resume).toHaveBeenCalledTimes(1);
+    sound.dispose();
+    finishResume();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(context.oscillators).toHaveLength(0);
   });
 });
