@@ -8,7 +8,11 @@ import type {
   ConversationRoleSnapshot,
   PendingPrompt,
 } from "../../shared/protocol";
-import type { ChatState } from "../chat/reducer";
+import {
+  chatReducer,
+  initialChatState,
+  type ChatState,
+} from "../chat/reducer";
 import { Chat } from "./Chat";
 
 const emptyChat: ChatState = { messages: [], sessionTokens: 0 };
@@ -608,6 +612,111 @@ describe("Chat", () => {
     expect(rendered.container.querySelector(".streaming-markdown"))
       .not.toBeInTheDocument();
     expect(screen.getByText("完成")).toHaveProperty("tagName", "STRONG");
+  });
+
+  it("keeps active work-process disclosures open across an exact live snapshot", () => {
+    const focus = {
+      sessionId: "session-live",
+      conversationId: "conversation-live",
+      focusId: "focus-live",
+    };
+    const runId = "run-live";
+    const thinking = "正在分析恢复投影";
+    let chat = chatReducer(initialChatState, {
+      type: "focus_changed",
+      ...focus,
+    });
+    chat = chatReducer(chat, {
+      type: "hydrate",
+      items: [],
+      projectionSeq: 0,
+      ...focus,
+    });
+    chat = chatReducer(chat, {
+      type: "prompt_accepted",
+      runId,
+      text: "检查项目",
+      ...focus,
+    });
+    for (const [projectionSeq, event] of [
+      [1, { type: "run_queued" as const }],
+      [2, { type: "run_started" as const }],
+      [3, {
+        type: "assistant_message_started" as const,
+        projectionId: "assistant-live",
+      }],
+      [4, { type: "thinking_delta" as const, delta: thinking }],
+      [5, {
+        type: "tool_started" as const,
+        toolCallId: "tool-live",
+        toolName: "read",
+        args: { path: "src/client/App.tsx" },
+      }],
+    ] as const) {
+      chat = chatReducer(chat, {
+        type: "session",
+        runId,
+        event,
+        projectionSeq,
+        ...focus,
+      });
+    }
+
+    const rendered = render(view(chat, "", undefined, {
+      busy: true,
+      activeRun: { id: runId, phase: "running" },
+    }));
+    fireEvent.click(screen.getByText("工作过程"));
+    expect(rendered.container.querySelector<HTMLDetailsElement>(
+      "details.assistant-activity-group",
+    )?.open).toBe(true);
+
+    chat = chatReducer(chat, {
+      type: "hydrate",
+      projectionSeq: 5,
+      items: [{
+        kind: "message",
+        id: `run-${runId}-user`,
+        runId,
+        role: "user",
+        text: "检查项目",
+        thinking: "",
+        tools: [],
+      }, {
+        kind: "message",
+        id: "assistant-live",
+        runId,
+        role: "assistant",
+        text: "",
+        thinking,
+        tools: [{
+          toolCallId: "tool-live",
+          toolName: "read",
+          args: { path: "src/client/App.tsx" },
+          status: "pending",
+        }],
+        parts: [{
+          kind: "thinking",
+          offset: 0,
+          length: thinking.length,
+        }, {
+          kind: "tool",
+          toolCallId: "tool-live",
+        }],
+      }],
+      ...focus,
+    });
+    rendered.rerender(view(chat, "", undefined, {
+      busy: true,
+      activeRun: { id: runId, phase: "running" },
+    }));
+
+    const restoredActivity = rendered.container.querySelector(
+      "details.assistant-activity-group",
+    ) as HTMLDetailsElement;
+    expect(restoredActivity.open).toBe(true);
+    expect(screen.getByText("思考过程")).toBeInTheDocument();
+    expect(screen.getByText("工具调用（1）")).toBeInTheDocument();
   });
 
   it("resets work-process disclosure state when switching conversation focus", () => {

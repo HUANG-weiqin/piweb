@@ -620,6 +620,56 @@ describe("chatReducer", () => {
     expect(state.messages.at(-1)?.text).toBe("hi");
   });
 
+  it("hands a trailing run placeholder the authoritative assistant projection ID", () => {
+    let state = chatReducer(initialChatState, {
+      type: "prompt_accepted",
+      runId: RUN_1,
+      text: "hello",
+    });
+    state = chatReducer(state, {
+      type: "session",
+      runId: RUN_1,
+      event: { type: "run_started" },
+    });
+    const placeholderId = state.messages.at(-1)?.id;
+
+    state = chatReducer(state, {
+      type: "session",
+      runId: RUN_1,
+      event: {
+        type: "assistant_message_started",
+        projectionId: "assistant-projection-1",
+      },
+    });
+
+    expect(state.messages).toHaveLength(2);
+    expect(state.messages.at(-1)).toMatchObject({
+      id: "assistant-projection-1",
+      role: "assistant",
+      runId: RUN_1,
+    });
+    expect(state.messages.at(-1)?.id).not.toBe(placeholderId);
+  });
+
+  it("projects an assistant start when no run placeholder exists", () => {
+    const state = chatReducer(initialChatState, {
+      type: "session",
+      runId: RUN_1,
+      event: {
+        type: "assistant_message_started",
+        projectionId: "assistant-projection-1",
+      },
+    });
+
+    expect(state.messages).toEqual([
+      expect.objectContaining({
+        id: "assistant-projection-1",
+        role: "assistant",
+        runId: RUN_1,
+      }),
+    ]);
+  });
+
   it("keeps guidance and the following assistant segment in transcript order", () => {
     let state = chatReducer(initialChatState, {
       type: "prompt_accepted",

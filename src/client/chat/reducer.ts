@@ -523,7 +523,15 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     const placeholderIndex = items.findIndex((item) => (
       isEmptyAssistantPlaceholder(item, action.runId)
     ));
-    if (placeholderIndex === items.length - 1) return state;
+    if (placeholderIndex >= 0 && placeholderIndex === items.length - 1) {
+      const placeholder = items[placeholderIndex];
+      if (placeholder && isMessage(placeholder)) {
+        return withItems(state, [
+          ...items.slice(0, placeholderIndex),
+          { ...placeholder, id: event.projectionId },
+        ]);
+      }
+    }
     const currentItems = placeholderIndex < 0
       ? items
       : [
