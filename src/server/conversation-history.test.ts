@@ -469,6 +469,41 @@ describe("projectConversationHistory", () => {
     });
   });
 
+  it("keeps more than twenty small tool calls in one timeline snapshot", () => {
+    const tools = Array.from({ length: 25 }, (_, index) => ({
+      toolCallId: `tool-${index}`,
+      toolName: "read",
+      args: { path: `src/file-${index}.ts` },
+      result: { ok: true },
+      status: "done" as const,
+    }));
+    const snapshot = snapshotConversationItems([{
+      kind: "message",
+      id: "assistant-many-tools",
+      role: "assistant",
+      text: "",
+      thinking: "",
+      tools,
+      parts: tools.map((tool) => ({
+        kind: "tool" as const,
+        toolCallId: tool.toolCallId,
+      })),
+    }]);
+    const assistant = snapshot.items[0];
+
+    expect(assistant).toMatchObject({
+      kind: "message",
+      tools: tools.map((tool) => expect.objectContaining({
+        toolCallId: tool.toolCallId,
+      })),
+      parts: tools.map((tool) => ({
+        kind: "tool",
+        toolCallId: tool.toolCallId,
+      })),
+    });
+    expect(snapshot.window.contentTruncated).toBe(false);
+  });
+
   it("keeps a snapshot renderable when a compaction identity exceeds the page budget", () => {
     const snapshot = snapshotConversationItems([{
       kind: "compaction",

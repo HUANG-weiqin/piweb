@@ -24,7 +24,7 @@ export const MAX_AGENT_PEEK_BYTES = 256 * 1024;
 export const MAX_AGENT_PEEK_ITEMS = 20;
 const MAX_HISTORY_TEXT_BYTES = 80_000;
 const MAX_HISTORY_TOOL_VALUE_BYTES = 8_000;
-const MAX_HISTORY_TOOLS_PER_MESSAGE = 20;
+const MAX_HISTORY_TOOLS_PER_MESSAGE = 200;
 const MAX_HISTORY_PARTS_PER_MESSAGE = 200;
 const MAX_HISTORY_ID_BYTES = 500;
 const OMITTED_TOOL_VALUE = "[历史工具数据过大，已省略]";
@@ -130,7 +130,7 @@ function compactHistoryMessage(
   const id = clipUtf8(message.id, MAX_HISTORY_ID_BYTES);
   const text = clipUtf8(message.text, MAX_HISTORY_TEXT_BYTES);
   const thinking = clipUtf8(message.thinking, MAX_HISTORY_TEXT_BYTES);
-  const selectedTools = message.tools.slice(0, MAX_HISTORY_TOOLS_PER_MESSAGE);
+  const selectedTools = message.tools.slice(-MAX_HISTORY_TOOLS_PER_MESSAGE);
   let truncated = id.truncated
     || text.truncated
     || thinking.truncated
