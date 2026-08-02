@@ -1,6 +1,6 @@
 # 客户端状态
 
-`updated: 2026-08-01`
+`updated: 2026-08-02`
 
 ## 这个模块是干什么的
 
@@ -105,6 +105,7 @@ ServerEvent
 - 不带当前 project observation sessionId 的迟到状态不能恢复已关闭的工作区；只匹配 conversationId 也不够。durable prompt queue 属于服务端，浏览器只按完整 focus 身份投影快照；本地未确认草稿、队列命令 waiter 和手动压缩 pending 仍必须至少按 `workspaceKey + projectId + conversationId` 分区。
 - 设置、认证或 registry 错误不能作为 run finished 处理。
 - `message_end` 可能没有任何流式 delta；最终文本校准必须由服务端 projector 提供。
+- `run_started` 创建的客户端空 assistant 占位符必须在首个 `assistant_message_started` 到达时接管服务端 `projectionId`，并且只有确实找到占位符时才能走接管分支。否则同 focus 的 live snapshot hydrate 会改变 React message key，重挂载并关闭用户已经展开的工作过程；空 transcript 下也不能把 `findIndex() === -1` 误判为“占位符位于末尾”而吞掉 assistant start。
 - 断线重连会先清空旧投影，再用新 observation/focus identity 打开当前 conversation 并 hydrate；不得把旧浏览器消息和新快照拼接。
 - 不能因为先收到 state 就开放输入；服务端按 state → project snapshot → conversation snapshot 发布，大历史会放大这个窗口。
 - extension dialog 的提交不能靠本地关闭冒充成功；服务端会发送 `extension_ui_closed`，超时或 abort 时也由它清掉浏览器残影。
