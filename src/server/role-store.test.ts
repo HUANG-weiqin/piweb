@@ -4,6 +4,7 @@ import {
   readFile,
   readdir,
   rm,
+  symlink,
   unlink,
   writeFile,
 } from "node:fs/promises";
@@ -69,6 +70,30 @@ function persistedDefault(
   };
 }
 
+function persistedRole(role: RoleTemplateV1) {
+  return {
+    id: role.id,
+    revision: role.revision,
+    name: role.name,
+    description: role.description,
+    systemPromptFile: `role-prompts/${role.id}.${role.revision}.md`,
+    model: role.model,
+    defaultThinkingLevel: role.defaultThinkingLevel,
+    toolMode: role.toolMode,
+    canManageSessions: role.canManageSessions,
+    createdAt: role.createdAt,
+    updatedAt: role.updatedAt,
+  };
+}
+
+function promptPath(rolesPath: string, role: RoleTemplateV1): string {
+  return join(
+    dirname(rolesPath),
+    "role-prompts",
+    `${role.id}.${role.revision}.md`,
+  );
+}
+
 afterEach(async () => {
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -99,8 +124,11 @@ describe("RoleStore", () => {
     const persisted = JSON.parse(await readFile(rolesPath, "utf8")) as unknown;
     expect(persisted).toEqual({
       version: ROLE_STORE_VERSION,
-      roles: [persistedDefault()],
+      roles: [persistedRole(persistedDefault())],
     });
+    await expect(
+      readFile(promptPath(rolesPath, persistedDefault()), "utf8"),
+    ).resolves.toBe("");
 
     const reopened = await RoleStore.open(rolesPath, {
       provider: "ignored",
@@ -129,13 +157,17 @@ describe("RoleStore", () => {
       revision: 4,
       updatedAt: "2026-07-19T11:00:00.000Z",
     }));
+    const migratedDefault = persistedDefault({
+      revision: 4,
+      updatedAt: "2026-07-19T11:00:00.000Z",
+    });
     expect(JSON.parse(await readFile(rolesPath, "utf8"))).toEqual({
       version: ROLE_STORE_VERSION,
-      roles: [persistedDefault({
-        revision: 4,
-        updatedAt: "2026-07-19T11:00:00.000Z",
-      })],
+      roles: [persistedRole(migratedDefault)],
     });
+    await expect(
+      readFile(promptPath(rolesPath, migratedDefault), "utf8"),
+    ).resolves.toBe("");
 
     const editedRolesPath = await createRolesPath(
       "piweb-role-store-v1-edited-default-",
@@ -152,6 +184,48 @@ describe("RoleStore", () => {
 
     const editedStore = await RoleStore.open(editedRolesPath, initialModel);
     expect(editedStore.getRole("default")).toEqual(editedDefault);
+  });
+
+  it("migrates v4 prompts byte-for-byte and reopens the v5 store", async () => {
+    const rolesPath = await createRolesPath("piweb-role-store-v4-prompt-");
+    const systemPrompt = "\uFEFF  first line\r\nsecond line with é\n\u0000trailing  ";
+    const legacyRole = persistedDefault({
+      revision: 7,
+      systemPrompt,
+      updatedAt: "2026-07-19T10:01:00.000Z",
+    });
+    await mkdir(dirname(rolesPath), { recursive: true });
+    await writeFile(rolesPath, `${JSON.stringify({
+      version: 4,
+      roles: [legacyRole],
+    }, null, 2)}\n`, "utf8");
+
+    const store = await RoleStore.open(rolesPath, initialModel);
+
+    expect(store.listRoles()).toEqual([legacyRole]);
+    expect(JSON.parse(await readFile(rolesPath, "utf8"))).toEqual({
+      version: ROLE_STORE_VERSION,
+      roles: [persistedRole(legacyRole)],
+    });
+    await expect(
+      readFile(promptPath(rolesPath, legacyRole), "utf8"),
+    ).resolves.toBe(systemPrompt);
+
+    const reopened = await RoleStore.open(rolesPath, initialModel);
+    expect(reopened.getRole("default")).toEqual(legacyRole);
+  });
+
+  it("reads an externally edited prompt on every public read", async () => {
+    const rolesPath = await createRolesPath("piweb-role-store-external-prompt-");
+    const store = await RoleStore.open(rolesPath, initialModel);
+    const role = persistedDefault();
+    const promptFile = promptPath(rolesPath, role);
+
+    await writeFile(promptFile, "edited outside the store", "utf8");
+
+    expect(store.listRoles()[0]?.systemPrompt).toBe("edited outside the store");
+    expect(store.getRole("default")?.systemPrompt).toBe("edited outside the store");
+    expect(store.getSnapshot().roles[0]?.systemPrompt).toBe("edited outside the store");
   });
 
   it("keeps a model-less default when no initial model is available", async () => {
@@ -197,6 +271,9 @@ describe("RoleStore", () => {
     const rolesPath = await createRolesPath("piweb-role-store-edit-default-");
     const store = await RoleStore.open(rolesPath, initialModel);
     const before = store.getRole("default")!;
+    expect(await readdir(join(dirname(rolesPath), "role-prompts"))).toEqual([
+      "default.1.md",
+    ]);
 
     vi.setSystemTime(new Date("2026-07-19T11:00:00.000Z"));
     const updated = await store.updateRole("default", 1, {
@@ -221,9 +298,18 @@ describe("RoleStore", () => {
       updatedAt: "2026-07-19T11:00:00.000Z",
     });
     expect(store.listRoles()).toHaveLength(1);
+    await expect(
+      readFile(promptPath(rolesPath, persistedDefault({ revision: 2 })), "utf8"),
+    ).resolves.toBe("Be concise.");
+    await expect(
+      readdir(join(dirname(rolesPath), "role-prompts")),
+    ).resolves.toEqual(["default.2.md"]);
 
     await store.deleteRole("default", updated.revision);
     expect(store.listRoles()).toEqual([]);
+    await expect(
+      readdir(join(dirname(rolesPath), "role-prompts")),
+    ).resolves.toEqual([]);
 
     const reopened = await RoleStore.open(rolesPath, null);
     expect(reopened.listRoles()).toEqual([]);
@@ -281,13 +367,19 @@ describe("RoleStore", () => {
     expect(listener).toHaveBeenCalledTimes(2);
 
     const persisted = JSON.parse(await readFile(rolesPath, "utf8")) as {
-      roles: RoleTemplateV1[];
+      roles: Array<Record<string, unknown>>;
     };
     expect(persisted.roles[0]).toMatchObject({
       name: "Third",
       revision: 4,
     });
-    expect((await readdir(dirname(rolesPath))).sort()).toEqual(["roles.json"]);
+    expect((await readdir(dirname(rolesPath))).sort()).toEqual([
+      "role-prompts",
+      "roles.json",
+    ]);
+    expect(await readdir(join(dirname(rolesPath), "role-prompts"))).toEqual([
+      "default.4.md",
+    ]);
   });
 
   it("does not publish or mutate memory when the atomic replacement fails", async () => {
@@ -305,7 +397,41 @@ describe("RoleStore", () => {
     ).rejects.toThrow();
     expect(store.getSnapshot()).toEqual(before);
     expect(listener).not.toHaveBeenCalled();
-    expect((await readdir(dirname(rolesPath))).sort()).toEqual(["roles.json"]);
+    expect((await readdir(dirname(rolesPath))).sort()).toEqual([
+      "role-prompts",
+      "roles.json",
+    ]);
+    expect(await readdir(join(dirname(rolesPath), "role-prompts"))).toEqual([
+      "default.1.md",
+      "default.2.md",
+    ]);
+  });
+
+  it("does not publish or mutate memory when prompt replacement fails", async () => {
+    const rolesPath = await createRolesPath("piweb-role-store-prompt-fail-");
+    const store = await RoleStore.open(rolesPath, initialModel);
+    const before = store.getSnapshot();
+    const blockedPromptPath = promptPath(
+      rolesPath,
+      persistedDefault({ revision: 2 }),
+    );
+    await mkdir(blockedPromptPath);
+
+    await expect(
+      store.updateRole("default", 1, draft("Prompt write failure")),
+    ).rejects.toThrow();
+    expect(store.getSnapshot()).toEqual(before);
+    expect(await readFile(rolesPath, "utf8")).toContain("default.1.md");
+  });
+
+  it("commits deletion when best-effort prompt cleanup cannot remove the file", async () => {
+    const rolesPath = await createRolesPath("piweb-role-store-delete-cleanup-");
+    const store = await RoleStore.open(rolesPath, initialModel);
+    await unlink(promptPath(rolesPath, persistedDefault()));
+
+    await expect(store.deleteRole("default", 1)).resolves.toBeUndefined();
+    expect(store.listRoles()).toEqual([]);
+    await expect(RoleStore.open(rolesPath, null)).resolves.toBeDefined();
   });
 
   it("enforces role capacity and text limits without silently truncating", async () => {
@@ -369,6 +495,63 @@ describe("RoleStore", () => {
       name: "默认",
       model: initialModel,
     });
+  });
+
+  it("fails closed on invalid v5 prompt references and files", async () => {
+    for (const kind of [
+      "missing",
+      "invalid-utf8",
+      "oversize",
+      "symlink",
+      "directory",
+      "path-traversal",
+    ] as const) {
+      const rolesPath = await createRolesPath(
+        `piweb-role-store-v5-prompt-${kind}-`,
+      );
+      const role = persistedDefault();
+      const manifest = persistedRole(role) as Record<string, unknown>;
+      await mkdir(dirname(rolesPath), { recursive: true });
+      const promptDirectory = join(dirname(rolesPath), "role-prompts");
+      await mkdir(promptDirectory, { recursive: true });
+      if (kind === "path-traversal") {
+        manifest.systemPromptFile = "role-prompts/../outside.md";
+      }
+      const raw = `${JSON.stringify({
+        version: ROLE_STORE_VERSION,
+        roles: [manifest],
+      }, null, 2)}\n`;
+      await writeFile(rolesPath, raw, "utf8");
+
+      const file = promptPath(rolesPath, role);
+      if (kind === "invalid-utf8") {
+        await writeFile(file, Buffer.from([0xff, 0xfe]));
+      } else if (kind === "oversize") {
+        await writeFile(file, Buffer.alloc(MAX_ROLE_SYSTEM_PROMPT_BYTES + 1, 0x61));
+      } else if (kind === "symlink") {
+        const outside = join(dirname(rolesPath), "outside.md");
+        await writeFile(outside, "outside", "utf8");
+        try {
+          await symlink(outside, file);
+        } catch (error) {
+          if (
+            process.platform === "win32"
+            && error instanceof Error
+            && "code" in error
+            && ((error as NodeJS.ErrnoException).code === "EPERM"
+              || (error as NodeJS.ErrnoException).code === "EACCES")
+          ) {
+            continue;
+          }
+          throw error;
+        }
+      } else if (kind === "directory") {
+        await mkdir(file);
+      }
+
+      await expect(RoleStore.open(rolesPath, initialModel)).rejects.toThrow();
+      await expect(readFile(rolesPath, "utf8")).resolves.toBe(raw);
+    }
   });
 
   it("fails closed on corrupt, unknown, or structurally invalid v1 files", async () => {
