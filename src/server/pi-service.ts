@@ -1455,6 +1455,7 @@ export class PiConnection {
         await roles.updateRole(
           command.roleId,
           command.expectedRevision,
+          command.expectedSystemPrompt,
           command.role,
           view.actor?.modelRegistry
             ?? coordinator.modelRegistryForProject(view.handle),

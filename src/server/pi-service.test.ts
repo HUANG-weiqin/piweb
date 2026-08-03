@@ -5975,6 +5975,7 @@ describe("PiConnection coordinated project view", () => {
         sessionId: SESSION_A,
         roleId: projectRole.id,
         expectedRevision: projectRole.revision,
+        expectedSystemPrompt: "Use the project model.",
         role: {
           name: "Renamed project specialist",
           description: "The provider may be temporarily unavailable.",
@@ -6013,6 +6014,7 @@ describe("PiConnection coordinated project view", () => {
         sessionId: SESSION_A,
         roleId: projectRole.id,
         expectedRevision: renamedRole!.revision,
+        expectedSystemPrompt: "Keep the frozen project model.",
         role: {
           name: "Invalid model change",
           description: "",

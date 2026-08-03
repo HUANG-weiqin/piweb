@@ -1,6 +1,6 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   RoleCatalog,
@@ -62,7 +62,7 @@ describe("RoleCatalog", () => {
     }]);
 
     const snapshot = catalog.getConversationRole("default");
-    await catalog.updateRole("default", 1, {
+    await catalog.updateRole("default", 1, "", {
       name: "Updated",
       description: "changed",
       systemPrompt: "new prompt",
@@ -86,6 +86,40 @@ describe("RoleCatalog", () => {
     });
   });
 
+  it("rejects a stale prompt base before allowing a save with the current prompt", async () => {
+    const models = source([model("provider", "model-a")]);
+    const path = await rolesPath();
+    const catalog = await RoleCatalog.open(models, path);
+    await writeFile(
+      join(dirname(path), "role-prompts", "default.1.md"),
+      "B",
+      "utf8",
+    );
+
+    await expect(catalog.updateRole("default", 1, "", {
+      name: "Saved",
+      description: "",
+      systemPrompt: "C",
+      model: model("provider", "model-a"),
+      defaultThinkingLevel: "off",
+      toolMode: "read_only",
+      canManageSessions: false,
+    })).rejects.toThrow("Role system prompt changed");
+
+    await expect(catalog.updateRole("default", 1, "B", {
+      name: "Saved",
+      description: "",
+      systemPrompt: "C",
+      model: model("provider", "model-a"),
+      defaultThinkingLevel: "off",
+      toolMode: "read_only",
+      canManageSessions: false,
+    })).resolves.toMatchObject({
+      revision: 2,
+      systemPrompt: "C",
+    });
+  });
+
   it("reports model-less and disconnected roles without blocking their frozen snapshot", async () => {
     const models = source([]);
     const catalog = await RoleCatalog.open(models, await rolesPath());
@@ -96,7 +130,7 @@ describe("RoleCatalog", () => {
     });
     expect(() => catalog.getConversationRole("default")).toThrow("no model");
 
-    await expect(catalog.updateRole("default", 1, {
+    await expect(catalog.updateRole("default", 1, "", {
       name: "Default",
       description: "",
       systemPrompt: "",
@@ -107,7 +141,7 @@ describe("RoleCatalog", () => {
     })).rejects.toThrow("unavailable in the current project");
 
     models.available = [model("provider", "missing")];
-    await catalog.updateRole("default", 1, {
+    await catalog.updateRole("default", 1, "", {
       name: "Default",
       description: "",
       systemPrompt: "",
@@ -166,7 +200,7 @@ describe("RoleCatalog", () => {
       }),
     );
 
-    await expect(catalog.updateRole(created.id, created.revision, {
+    await expect(catalog.updateRole(created.id, created.revision, "", {
       name: "Changed model",
       description: "",
       systemPrompt: "",
@@ -176,7 +210,7 @@ describe("RoleCatalog", () => {
       canManageSessions: false,
     }, projectModels)).rejects.toThrow("unavailable in the current project");
 
-    await expect(catalog.updateRole(created.id, created.revision, {
+    await expect(catalog.updateRole(created.id, created.revision, "", {
       name: "Renamed project role",
       description: "The project provider is temporarily unavailable.",
       systemPrompt: "Keep the frozen model.",

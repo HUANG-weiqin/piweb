@@ -166,7 +166,7 @@ describe("RoleManagerDialog", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "保存角色" }));
 
-    expect(update).toHaveBeenCalledWith("default", 1, {
+    expect(update).toHaveBeenCalledWith("default", 1, "Default prompt", {
       name: "Edited default",
       description: "Default description",
       systemPrompt: "Default prompt",
@@ -204,6 +204,42 @@ describe("RoleManagerDialog", () => {
       .toHaveValue("Unsaved name");
     expect(screen.getByRole("combobox", { name: "角色模型" }))
       .toHaveValue(JSON.stringify(["alpha", "good"]));
+  });
+
+  it("keeps the base prompt separate from a same-revision catalog refresh", () => {
+    const update = vi.fn();
+    const view = renderManager({ onUpdate: update });
+    fireEvent.change(screen.getByRole("textbox", { name: "角色名称" }), {
+      target: { value: "Unsaved name" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "专属提示词" }), {
+      target: { value: "Draft prompt" },
+    });
+
+    view.rerender(<RoleManagerDialog
+      open
+      roles={[role("default", "Default", { systemPrompt: "External prompt" })]}
+      providers={providers}
+      onClose={() => undefined}
+      onCreate={() => undefined}
+      onUpdate={update}
+      onDelete={() => undefined}
+    />);
+
+    expect(screen.getByRole("textbox", { name: "角色名称" }))
+      .toHaveValue("Unsaved name");
+    expect(screen.getByRole("textbox", { name: "专属提示词" }))
+      .toHaveValue("Draft prompt");
+    fireEvent.click(screen.getByRole("button", { name: "保存角色" }));
+    expect(update).toHaveBeenCalledWith(
+      "default",
+      1,
+      "Default prompt",
+      expect.objectContaining({
+        name: "Unsaved name",
+        systemPrompt: "Draft prompt",
+      }),
+    );
   });
 
   it("creates and deletes roles through callbacks without optimistic list changes", () => {
@@ -265,6 +301,7 @@ describe("RoleManagerDialog", () => {
     expect(update).toHaveBeenCalledWith(
       "default",
       1,
+      "Default prompt",
       expect.objectContaining({ canManageSessions: false }),
     );
   });
@@ -281,6 +318,7 @@ describe("RoleManagerDialog", () => {
     expect(update).toHaveBeenCalledWith(
       "default",
       1,
+      "Default prompt",
       expect.objectContaining({ toolMode: "read_only" }),
     );
   });
@@ -301,6 +339,7 @@ describe("RoleManagerDialog", () => {
     expect(update).toHaveBeenCalledWith(
       "default",
       1,
+      "Default prompt",
       expect.objectContaining({ defaultThinkingLevel: "medium" }),
     );
   });

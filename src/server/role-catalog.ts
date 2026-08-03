@@ -160,6 +160,7 @@ export class RoleCatalog {
   async updateRole(
     roleId: string,
     expectedRevision: number,
+    expectedSystemPrompt: string,
     input: RoleDraft,
     modelRegistry: RoleCatalogModelRegistry = this.source.modelRegistry,
   ): Promise<RoleTemplateV1> {
@@ -172,7 +173,12 @@ export class RoleCatalog {
     ) {
       this.assertDraftAvailable(input, modelRegistry);
     }
-    return await this.store.updateRole(roleId, expectedRevision, input);
+    return await this.store.updateRole(
+      roleId,
+      expectedRevision,
+      expectedSystemPrompt,
+      input,
+    );
   }
 
   deleteRole(roleId: string, expectedRevision: number): Promise<void> {

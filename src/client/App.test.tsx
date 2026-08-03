@@ -3746,6 +3746,7 @@ describe("App", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "保存角色" }));
     const update = latestCommand("update_role");
+    expect(update).toMatchObject({ expectedSystemPrompt: "Be useful." });
 
     act(() => socketMock.emit?.({
       type: "command_complete",

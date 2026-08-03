@@ -25,7 +25,7 @@ const messageId = "assistant:96b960be-b6bb-4a19-9cf2-78e77cb69425";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(28);
+    expect(PROTOCOL_VERSION).toBe(29);
   });
 
   it("accepts supported commands", () => {
@@ -81,6 +81,7 @@ describe("parseClientCommand", () => {
       sessionId,
       roleId,
       expectedRevision: 1,
+      expectedSystemPrompt: "",
       role: {
         name: "Reviewer",
         description: "",
@@ -354,6 +355,7 @@ describe("parseClientCommand", () => {
       sessionId,
       roleId,
       expectedRevision: 0,
+      expectedSystemPrompt: "",
       role: {
         name: "Reviewer",
         description: "",

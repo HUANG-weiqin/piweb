@@ -77,7 +77,7 @@
     *.json
 ```
 
-角色目录位于 `<Pi agent dir>/piweb/`，不随项目复制：`roles.json` 保存模型、权限等元数据，`role-prompts/<roleId>.<revision>.md` 保存可直接编辑的提示词；浏览器角色管理界面仍会读取和保存完整提示词。已有 conversation 始终使用创建或切换角色时写入 JSONL 的完整快照，不会随模板文件静默变化。`.piweb` 不保存 API Key；认证仍使用 Pi 的全局目录。只读模式下 Agent 不能写入它，但工作台宿主仍会保存清单、对话和 inbox；全部授权模式不会额外保护 `.piweb`。
+角色目录位于 `<Pi agent dir>/piweb/`，不随项目复制：`roles.json` 保存模型、权限等元数据，`role-prompts/<roleId>.<revision>.md` 保存可直接编辑的提示词；浏览器角色管理界面仍会读取和保存完整提示词。角色 ID 大小写不敏感且更新带当前 UI base prompt，外部编辑不会被旧 draft 静默覆盖。已有 conversation 始终使用创建或切换角色时写入 JSONL 的完整快照，不会随模板文件静默变化。`.piweb` 不保存 API Key；认证仍使用 Pi 的全局目录。只读模式下 Agent 不能写入它，但工作台宿主仍会保存清单、对话和 inbox；全部授权模式不会额外保护 `.piweb`。
 
 ## 要求
 

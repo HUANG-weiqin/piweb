@@ -524,15 +524,20 @@ async function createFixture(
     join(cwd, "user", "roles.json"),
   );
   const defaultRole = roles.getRoleTemplate("default");
-  await roles.updateRole("default", defaultRole.revision, {
-    name: defaultRole.name,
-    description: defaultRole.description,
-    systemPrompt: defaultRole.systemPrompt,
-    model: defaultRole.model,
-    defaultThinkingLevel: defaultRole.defaultThinkingLevel,
-    toolMode: "full_access",
-    canManageSessions: true,
-  });
+  await roles.updateRole(
+    "default",
+    defaultRole.revision,
+    defaultRole.systemPrompt,
+    {
+      name: defaultRole.name,
+      description: defaultRole.description,
+      systemPrompt: defaultRole.systemPrompt,
+      model: defaultRole.model,
+      defaultThinkingLevel: defaultRole.defaultThinkingLevel,
+      toolMode: "full_access",
+      canManageSessions: true,
+    },
+  );
   const coordinator = new ProjectSessionCoordinator(
     runtime,
     roles,
@@ -1045,15 +1050,20 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: role.id, title: "First review" },
     );
-    await fixture.roles.updateRole(role.id, role.revision, {
-      name: "Senior reviewer",
-      description: "Reviews concurrency",
-      systemPrompt: "Review the second revision.",
-      model: { provider: "test", id: "model-b" },
-      defaultThinkingLevel: "high",
-      toolMode: "full_access",
-      canManageSessions: true,
-    });
+    await fixture.roles.updateRole(
+      role.id,
+      role.revision,
+      role.systemPrompt,
+      {
+        name: "Senior reviewer",
+        description: "Reviews concurrency",
+        systemPrompt: "Review the second revision.",
+        model: { provider: "test", id: "model-b" },
+        defaultThinkingLevel: "high",
+        toolMode: "full_access",
+        canManageSessions: true,
+      },
+    );
     const second = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: role.id, title: "Second review" },
@@ -1992,15 +2002,20 @@ describe("ProjectSessionCoordinator", () => {
     });
 
     await fixture.coordinator.close();
-    await fixture.roles.updateRole(role.id, role.revision, {
-      name: "Rewritten worker",
-      description: "A later role definition",
-      systemPrompt: "Use the rewritten role prompt.",
-      model: { provider: "test", id: "model-b" },
-      defaultThinkingLevel: "off",
-      toolMode: "full_access",
-      canManageSessions: true,
-    });
+    await fixture.roles.updateRole(
+      role.id,
+      role.revision,
+      role.systemPrompt,
+      {
+        name: "Rewritten worker",
+        description: "A later role definition",
+        systemPrompt: "Use the rewritten role prompt.",
+        model: { provider: "test", id: "model-b" },
+        defaultThinkingLevel: "off",
+        toolMode: "full_access",
+        canManageSessions: true,
+      },
+    );
     fixture.runtime.beforeCreateSession = undefined;
     const restarted = new ProjectSessionCoordinator(
       fixture.runtime,

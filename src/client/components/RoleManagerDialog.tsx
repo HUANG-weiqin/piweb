@@ -49,7 +49,12 @@ export interface RoleManagerDialogProps {
   result?: RoleOperationResult;
   onClose(): void;
   onCreate(role: RoleDraft): void;
-  onUpdate(roleId: string, expectedRevision: number, role: RoleDraft): void;
+  onUpdate(
+    roleId: string,
+    expectedRevision: number,
+    expectedSystemPrompt: string,
+    role: RoleDraft,
+  ): void;
   onDelete(roleId: string, expectedRevision: number): void;
 }
 
@@ -150,6 +155,9 @@ export function RoleManagerDialog({
   const [draft, setDraft] = useState<RoleDraft>(
     initialRole ? roleDraft(initialRole) : emptyDraft,
   );
+  const [baseSystemPrompt, setBaseSystemPrompt] = useState(
+    initialRole?.systemPrompt ?? "",
+  );
   const selectedRole = roles.find(({ id }) => id === selectedRoleId);
   const creating = selectedRoleId === NEW_ROLE_ID;
   const draftSourceKey = creating
@@ -166,15 +174,18 @@ export function RoleManagerDialog({
 
   useEffect(() => {
     if (creating) {
+      setBaseSystemPrompt("");
       setDraft(emptyDraft);
       return;
     }
     if (selectedRole) {
+      setBaseSystemPrompt(selectedRole.systemPrompt);
       setDraft(roleDraft(selectedRole));
       return;
     }
     const next = roles[0];
     setSelectedRoleId(next?.id ?? NEW_ROLE_ID);
+    setBaseSystemPrompt(next?.systemPrompt ?? "");
     setDraft(next ? roleDraft(next) : emptyDraft);
   }, [draftSourceKey]);
 
@@ -182,6 +193,7 @@ export function RoleManagerDialog({
     if (!open) return;
     const nextRole = requestedRole(roles, initialRoleId);
     setSelectedRoleId(nextRole?.id ?? NEW_ROLE_ID);
+    setBaseSystemPrompt(nextRole?.systemPrompt ?? "");
     setDraft(nextRole ? roleDraft(nextRole) : emptyDraft);
   }, [open, initialRoleId]);
 
@@ -196,11 +208,13 @@ export function RoleManagerDialog({
   const selectRole = (role: RoleTemplate) => {
     if (operationBusy) return;
     setSelectedRoleId(role.id);
+    setBaseSystemPrompt(role.systemPrompt);
     setDraft(roleDraft(role));
   };
   const selectNewRole = () => {
     if (operationBusy) return;
     setSelectedRoleId(NEW_ROLE_ID);
+    setBaseSystemPrompt("");
     setDraft(emptyDraft);
   };
   const updateDraft = <K extends keyof RoleDraft>(
@@ -218,7 +232,12 @@ export function RoleManagerDialog({
     if (creating) {
       onCreate(nextDraft);
     } else if (selectedRole) {
-      onUpdate(selectedRole.id, selectedRole.revision, nextDraft);
+      onUpdate(
+        selectedRole.id,
+        selectedRole.revision,
+        baseSystemPrompt,
+        nextDraft,
+      );
     }
   };
   const selectModel = (value: string) => {

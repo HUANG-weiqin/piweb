@@ -241,6 +241,7 @@ type RoleCommandInput =
       type: "update_role";
       roleId: string;
       expectedRevision: number;
+      expectedSystemPrompt: string;
       role: RoleDraft;
     }
   | {
@@ -2529,11 +2530,12 @@ export function App() {
         "create_role",
         { type: "create_role", role },
       )}
-      onUpdate={(roleId, expectedRevision, role: RoleDraft) =>
+      onUpdate={(roleId, expectedRevision, expectedSystemPrompt, role: RoleDraft) =>
         beginRoleOperation("update_role", {
           type: "update_role",
           roleId,
           expectedRevision,
+          expectedSystemPrompt,
           role,
         })}
       onDelete={(roleId, expectedRevision) =>

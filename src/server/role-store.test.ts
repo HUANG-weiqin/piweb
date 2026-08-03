@@ -228,6 +228,64 @@ describe("RoleStore", () => {
     expect(store.getSnapshot().roles[0]?.systemPrompt).toBe("edited outside the store");
   });
 
+  it("rejects role IDs that differ only by case in every supported store version", async () => {
+    const id = "f23db1e6-c657-4dac-8b7e-a14fdecc5f21";
+    const lower = persistedDefault({ id, name: "Lower" });
+    const upper = persistedDefault({ id: id.toUpperCase(), name: "Upper" });
+
+    for (const version of [1, 2, 3, 4, ROLE_STORE_VERSION]) {
+      const rolesPath = await createRolesPath(
+        `piweb-role-store-case-id-${version}-`,
+      );
+      await mkdir(dirname(rolesPath), { recursive: true });
+      if (version === ROLE_STORE_VERSION) {
+        await mkdir(join(dirname(rolesPath), "role-prompts"), {
+          recursive: true,
+        });
+        await writeFile(promptPath(rolesPath, lower), lower.systemPrompt);
+        await writeFile(promptPath(rolesPath, upper), upper.systemPrompt);
+      }
+      const raw = `${JSON.stringify({
+        version,
+        roles: version === ROLE_STORE_VERSION
+          ? [persistedRole(lower), persistedRole(upper)]
+          : [lower, upper],
+      }, null, 2)}\n`;
+      await writeFile(rolesPath, raw, "utf8");
+
+      await expect(RoleStore.open(rolesPath, initialModel)).rejects.toThrow(
+        "duplicate role id",
+      );
+      await expect(readFile(rolesPath, "utf8")).resolves.toBe(raw);
+    }
+  });
+
+  it("rejects a stale prompt base and saves after reloading the current prompt", async () => {
+    const rolesPath = await createRolesPath("piweb-role-store-prompt-conflict-");
+    const store = await RoleStore.open(rolesPath, initialModel);
+    await writeFile(promptPath(rolesPath, persistedDefault()), "B", "utf8");
+
+    await expect(
+      store.updateRole("default", 1, "", draft("Saved", {
+        systemPrompt: "C",
+      })),
+    ).rejects.toThrow("Role system prompt changed");
+    expect(store.getRole("default")).toMatchObject({
+      revision: 1,
+      systemPrompt: "B",
+    });
+
+    await expect(
+      store.updateRole("default", 1, "B", draft("Saved", {
+        systemPrompt: "C",
+      })),
+    ).resolves.toMatchObject({
+      revision: 2,
+      name: "Saved",
+      systemPrompt: "C",
+    });
+  });
+
   it("keeps a model-less default when no initial model is available", async () => {
     const rolesPath = await createRolesPath("piweb-role-store-no-model-");
 
@@ -276,7 +334,7 @@ describe("RoleStore", () => {
     ]);
 
     vi.setSystemTime(new Date("2026-07-19T11:00:00.000Z"));
-    const updated = await store.updateRole("default", 1, {
+    const updated = await store.updateRole("default", 1, "", {
       name: "General",
       description: "General purpose",
       systemPrompt: "Be concise.",
@@ -329,7 +387,7 @@ describe("RoleStore", () => {
       "Role name already exists",
     );
     await expect(
-      store.updateRole("default", 1, draft("REVIEWER")),
+      store.updateRole("default", 1, "", draft("REVIEWER")),
     ).rejects.toThrow("Role name already exists");
 
     await store.deleteRole(created.id, created.revision);
@@ -345,9 +403,9 @@ describe("RoleStore", () => {
     const listener = vi.fn();
     const unsubscribe = store.subscribe(listener);
 
-    const first = store.updateRole("default", 1, draft("First"));
+    const first = store.updateRole("default", 1, "", draft("First"));
     const firstResult = await first;
-    const secondResult = await store.updateRole("default", 2, draft("Second"));
+    const secondResult = await store.updateRole("default", 2, "", draft("Second"));
 
     expect(firstResult.revision).toBe(2);
     expect(secondResult.revision).toBe(3);
@@ -359,11 +417,11 @@ describe("RoleStore", () => {
       snapshot.roles[0]?.revision
     ))).toEqual([2, 3]);
 
-    await store.updateRole("default", 3, draft("Second"));
+    await store.updateRole("default", 3, "", draft("Second"));
     expect(listener).toHaveBeenCalledTimes(2);
 
     unsubscribe();
-    await store.updateRole("default", 3, draft("Third"));
+    await store.updateRole("default", 3, "", draft("Third"));
     expect(listener).toHaveBeenCalledTimes(2);
 
     const persisted = JSON.parse(await readFile(rolesPath, "utf8")) as {
@@ -393,7 +451,7 @@ describe("RoleStore", () => {
     await mkdir(rolesPath);
 
     await expect(
-      store.updateRole("default", 1, draft("Must not commit")),
+      store.updateRole("default", 1, "", draft("Must not commit")),
     ).rejects.toThrow();
     expect(store.getSnapshot()).toEqual(before);
     expect(listener).not.toHaveBeenCalled();
@@ -404,6 +462,58 @@ describe("RoleStore", () => {
     expect(await readdir(join(dirname(rolesPath), "role-prompts"))).toEqual([
       "default.1.md",
       "default.2.md",
+    ]);
+  });
+
+  it("recovers a prompt orphan left by a failed manifest commit on reopen", async () => {
+    const rolesPath = await createRolesPath("piweb-role-store-orphan-recovery-");
+    const store = await RoleStore.open(rolesPath, initialModel);
+    const originalManifest = await readFile(rolesPath, "utf8");
+    await writeFile(
+      join(dirname(rolesPath), "role-prompts", "default.42.md"),
+      "orphan",
+      "utf8",
+    );
+    await writeFile(
+      join(dirname(rolesPath), "role-prompts", "default.01.md"),
+      "keep",
+      "utf8",
+    );
+    await mkdir(join(dirname(rolesPath), "role-prompts", "default.43.md"));
+    await writeFile(
+      join(dirname(rolesPath), "role-prompts", "notes.md"),
+      "keep",
+      "utf8",
+    );
+    if (process.platform === "linux") {
+      await writeFile(
+        join(dirname(rolesPath), "role-prompts", "DEFAULT.1.md"),
+        "case-variant orphan",
+        "utf8",
+      );
+    }
+
+    await unlink(rolesPath);
+    await mkdir(rolesPath);
+    await expect(
+      store.updateRole("default", 1, "", draft("Orphaned")),
+    ).rejects.toThrow();
+    expect(await readdir(join(dirname(rolesPath), "role-prompts"))).toContain(
+      "default.2.md",
+    );
+
+    await rm(rolesPath, { force: true, recursive: true });
+    await writeFile(rolesPath, originalManifest, "utf8");
+    await expect(RoleStore.open(rolesPath, initialModel)).resolves.toBeDefined();
+
+    const remaining = (await readdir(
+      join(dirname(rolesPath), "role-prompts"),
+    )).sort();
+    expect(remaining).toEqual([
+      "default.01.md",
+      "default.1.md",
+      "default.43.md",
+      "notes.md",
     ]);
   });
 
@@ -418,7 +528,7 @@ describe("RoleStore", () => {
     await mkdir(blockedPromptPath);
 
     await expect(
-      store.updateRole("default", 1, draft("Prompt write failure")),
+      store.updateRole("default", 1, "", draft("Prompt write failure")),
     ).rejects.toThrow();
     expect(store.getSnapshot()).toEqual(before);
     expect(await readFile(rolesPath, "utf8")).toContain("default.1.md");
@@ -459,12 +569,12 @@ describe("RoleStore", () => {
 
     const exactPrompt = "é".repeat(MAX_ROLE_SYSTEM_PROMPT_BYTES / 2);
     await expect(
-      store.updateRole("default", 1, draft("Default", {
+      store.updateRole("default", 1, "", draft("Default", {
         systemPrompt: exactPrompt,
       })),
     ).resolves.toMatchObject({ systemPrompt: exactPrompt });
     await expect(
-      store.updateRole("default", 2, draft("Default", {
+      store.updateRole("default", 2, exactPrompt, draft("Default", {
         systemPrompt: `${exactPrompt}é`,
       })),
     ).rejects.toThrow("systemPrompt");

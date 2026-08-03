@@ -3,11 +3,19 @@ import {
   lstat,
   mkdir,
   readFile,
+  readdir,
   rename,
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { lstatSync, readFileSync } from "node:fs";
+import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readSync,
+} from "node:fs";
 import { TextDecoder } from "node:util";
 import { basename, dirname, join } from "node:path";
 import {
@@ -28,6 +36,8 @@ const ROLE_PROMPT_DECODER = new TextDecoder("utf-8", {
 });
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const CONTROLLED_PROMPT_FILENAME_PATTERN =
+  /^(?:default|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.([1-9][0-9]*)\.md$/i;
 
 export interface RoleModelReference {
   provider: string;
@@ -404,16 +414,21 @@ function normalizedRoleName(name: string): string {
   return name.trim().normalize("NFKC").toLowerCase();
 }
 
+function normalizedRoleId(id: string): string {
+  return id.toLowerCase();
+}
+
 function assertUniqueRoles(
   roles: readonly Pick<RoleTemplateV1, "id" | "name">[],
 ): void {
   const ids = new Set<string>();
   const names = new Set<string>();
   for (const role of roles) {
-    if (ids.has(role.id)) {
+    const normalizedId = normalizedRoleId(role.id);
+    if (ids.has(normalizedId)) {
       throw new Error(`duplicate role id ${JSON.stringify(role.id)}`);
     }
-    ids.add(role.id);
+    ids.add(normalizedId);
 
     const name = normalizedRoleName(role.name);
     if (names.has(name)) {
@@ -573,6 +588,38 @@ function promptPathFor(rolesPath: string, role: PersistedRole): string {
   return join(dirname(rolesPath), ROLE_PROMPTS_DIRECTORY, `${role.id}.${role.revision}.md`);
 }
 
+type FileIdentity = readonly [number, number];
+
+function fileIdentity(
+  stats: { dev: number; ino: number },
+): FileIdentity | undefined {
+  if (
+    !Number.isFinite(stats.dev)
+    || !Number.isFinite(stats.ino)
+    || (stats.dev === 0 && stats.ino === 0)
+  ) {
+    return undefined;
+  }
+  return [stats.dev, stats.ino];
+}
+
+function readAtMostPromptLimit(fileDescriptor: number): Buffer {
+  const bytes = Buffer.allocUnsafe(MAX_ROLE_SYSTEM_PROMPT_BYTES + 1);
+  let length = 0;
+  while (length < bytes.length) {
+    const count = readSync(
+      fileDescriptor,
+      bytes,
+      length,
+      bytes.length - length,
+      null,
+    );
+    if (count === 0) break;
+    length += count;
+  }
+  return bytes.subarray(0, length);
+}
+
 function readRolePrompt(
   rolesPath: string,
   role: PersistedRole,
@@ -609,25 +656,63 @@ function readRolePrompt(
     );
   }
 
-  let bytes: Buffer;
+  const noFollow = (fsConstants as { O_NOFOLLOW?: number }).O_NOFOLLOW;
+  let fileDescriptor: number | undefined;
   try {
-    bytes = readFileSync(promptPath);
-  } catch (error) {
-    throw new Error(`Unable to read role system prompt at ${promptPath}`, {
-      cause: error,
-    });
-  }
-  if (bytes.byteLength > MAX_ROLE_SYSTEM_PROMPT_BYTES) {
-    throw new Error(
-      `Role system prompt must be at most ${MAX_ROLE_SYSTEM_PROMPT_BYTES} UTF-8 bytes: ${promptPath}`,
-    );
-  }
-  try {
-    return ROLE_PROMPT_DECODER.decode(bytes);
-  } catch (error) {
-    throw new Error(`Role system prompt is not valid UTF-8: ${promptPath}`, {
-      cause: error,
-    });
+    try {
+      fileDescriptor = openSync(
+        promptPath,
+        fsConstants.O_RDONLY | (noFollow ?? 0),
+      );
+    } catch (error) {
+      throw new Error(`Unable to read role system prompt at ${promptPath}`, {
+        cause: error,
+      });
+    }
+
+    const openedStats = fstatSync(fileDescriptor);
+    if (!openedStats.isFile()) {
+      throw new Error(`Role system prompt is not a regular file: ${promptPath}`);
+    }
+    const expectedIdentity = fileIdentity(promptStats);
+    const openedIdentity = fileIdentity(openedStats);
+    if (
+      expectedIdentity !== undefined
+      && openedIdentity !== undefined
+      && (
+        expectedIdentity[0] !== openedIdentity[0]
+        || expectedIdentity[1] !== openedIdentity[1]
+      )
+    ) {
+      throw new Error(`Role system prompt changed while opening: ${promptPath}`);
+    }
+    if (openedStats.size > MAX_ROLE_SYSTEM_PROMPT_BYTES) {
+      throw new Error(
+        `Role system prompt must be at most ${MAX_ROLE_SYSTEM_PROMPT_BYTES} UTF-8 bytes: ${promptPath}`,
+      );
+    }
+
+    const bytes = readAtMostPromptLimit(fileDescriptor);
+    if (bytes.byteLength > MAX_ROLE_SYSTEM_PROMPT_BYTES) {
+      throw new Error(
+        `Role system prompt grew beyond ${MAX_ROLE_SYSTEM_PROMPT_BYTES} UTF-8 bytes: ${promptPath}`,
+      );
+    }
+    try {
+      return ROLE_PROMPT_DECODER.decode(bytes);
+    } catch (error) {
+      throw new Error(`Role system prompt is not valid UTF-8: ${promptPath}`, {
+        cause: error,
+      });
+    }
+  } finally {
+    if (fileDescriptor !== undefined) {
+      try {
+        closeSync(fileDescriptor);
+      } catch {
+        // The read result is already determined; do not hide it behind close errors.
+      }
+    }
   }
 }
 
@@ -701,6 +786,70 @@ async function writeRoleStoreAtomically(
   } catch (error) {
     await unlink(temporaryPath).catch(() => undefined);
     throw error;
+  }
+}
+
+function isControlledPromptFilename(name: string): boolean {
+  const match = CONTROLLED_PROMPT_FILENAME_PATTERN.exec(name);
+  if (!match) return false;
+  const revision = Number(match[1]);
+  return Number.isSafeInteger(revision)
+    && revision > 0
+    && String(revision) === match[1];
+}
+
+async function recoverOrphanPromptFiles(
+  rolesPath: string,
+  document: RoleStoreDocument,
+): Promise<void> {
+  const promptDirectory = promptDirectoryPath(rolesPath);
+  let entries;
+  try {
+    entries = await readdir(promptDirectory, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  const promptPrefix = `${ROLE_PROMPTS_DIRECTORY}/`;
+  const referencedNames = document.roles.map((role) =>
+    role.systemPromptFile.slice(promptPrefix.length));
+  const exactReferenced = new Set(referencedNames);
+  const foldedReferenced = new Map(
+    referencedNames.map((name) => [name.toLowerCase(), name]),
+  );
+  for (const entry of entries) {
+    if (
+      !isControlledPromptFilename(entry.name)
+      || exactReferenced.has(entry.name)
+      || (!entry.isFile() && !entry.isSymbolicLink())
+    ) {
+      continue;
+    }
+
+    const caseVariant = foldedReferenced.get(entry.name.toLowerCase());
+    if (caseVariant !== undefined) {
+      try {
+        const entryIdentity = fileIdentity(
+          await lstat(join(promptDirectory, entry.name)),
+        );
+        const referencedIdentity = fileIdentity(
+          await lstat(join(promptDirectory, caseVariant)),
+        );
+        if (
+          entryIdentity === undefined
+          || referencedIdentity === undefined
+          || (
+            entryIdentity[0] === referencedIdentity[0]
+            && entryIdentity[1] === referencedIdentity[1]
+          )
+        ) {
+          continue;
+        }
+      } catch {
+        continue;
+      }
+    }
+    await unlink(join(promptDirectory, entry.name)).catch(() => undefined);
   }
 }
 
@@ -780,6 +929,7 @@ export class RoleStore {
       await writeRoleStoreAtomically(rolesPath, document);
     }
 
+    await recoverOrphanPromptFiles(rolesPath, document);
     return new RoleStore(rolesPath, cloneDocument(document));
   }
 
@@ -820,7 +970,9 @@ export class RoleStore {
       this.assertNameAvailable(draft.name);
 
       let id = randomUUID();
-      while (this.document.roles.some((role) => role.id === id)) {
+      while (this.document.roles.some((role) => (
+        normalizedRoleId(role.id) === normalizedRoleId(id)
+      ))) {
         id = randomUUID();
       }
       const timestamp = new Date().toISOString();
@@ -847,10 +999,16 @@ export class RoleStore {
   async updateRole(
     roleId: string,
     expectedRevision: number,
+    expectedSystemPrompt: string,
     input: RoleDraft,
   ): Promise<RoleTemplateV1> {
     assertRoleId(roleId, "roleId");
     assertRevision(expectedRevision, "expectedRevision");
+    assertBoundedUtf8(
+      expectedSystemPrompt,
+      "expectedSystemPrompt",
+      MAX_ROLE_SYSTEM_PROMPT_BYTES,
+    );
     const draft = parseRoleDraft(input, "role");
     return this.enqueueWrite(async () => {
       const index = this.document.roles.findIndex(({ id }) => id === roleId);
@@ -864,6 +1022,11 @@ export class RoleStore {
         );
       }
       const currentHydrated = readHydratedRole(this.rolesPath, current);
+      if (currentHydrated.systemPrompt !== expectedSystemPrompt) {
+        throw new Error(
+          `Role system prompt changed: expected current prompt to match the supplied base`,
+        );
+      }
       if (draftsAreEqual(currentHydrated, draft)) return cloneRole(currentHydrated);
       this.assertNameAvailable(draft.name, roleId);
       if (current.revision === Number.MAX_SAFE_INTEGER) {
