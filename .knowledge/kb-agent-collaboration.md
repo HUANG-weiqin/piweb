@@ -1,6 +1,6 @@
 # Agent 协作
 
-`updated: 2026-07-29`
+`updated: 2026-08-03`
 
 ## 这个模块是干什么的
 
@@ -17,8 +17,8 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
 
 ## 角色
 
-- `RoleStore` 是用户级严格 v4 文件，默认路径为 `<Pi agent dir>/piweb/roles.json`；项目文件不能修改角色目录。
-- 角色包含稳定 ID、revision、名称、简介、system prompt、固定 provider/model、模型默认思考强度、`read_only | full_access` 工具权限，以及 `canManageSessions` 能力。写入原子串行，更新使用 expected revision，损坏、未知字段和未知版本 fail closed。旧版角色迁移的默认思考强度为 `off`，保证对所有模型有效且不会静默开启推理；新角色和旧版角色迁移的工具权限都默认 `read_only`，会话编排同样严格 opt-in。
+- `RoleStore` 是用户级严格 v5 目录，`<Pi agent dir>/piweb/roles.json` 保存角色元数据与受控 Markdown 引用，提示词正文位于同级 `role-prompts/<roleId>.<revision>.md`；项目文件不能修改角色目录。RoleStore 对上层仍投影完整 `systemPrompt`，浏览器协议和管理界面不观察文件边界。
+- 角色包含稳定 ID、revision、名称、简介、system prompt、固定 provider/model、模型默认思考强度、`read_only | full_access` 工具权限，以及 `canManageSessions` 能力。提示词文件必须与角色 ID/revision 精确匹配、是有限合法 UTF-8 的常规文件；每次读取重新 hydrate，因此外部编辑会影响后续模板读取，但没有 watcher 主动广播。创建/更新先原子写新 revision Markdown，再原子替换 manifest，旧版 inline prompt 会保真迁移；损坏、缺失、未知字段和未知版本 fail closed。更新仍使用 expected revision，旧版角色的默认思考强度为 `off`、工具权限为 `read_only`、会话编排严格 opt-in。
 - 初始化“默认 / 默认角色”只是首次展示模板，可以像其它角色一样编辑、删除，删除后不会重建；新会话仍必须显式选择角色。
 - `RoleCatalog` 用当前项目 actor 的 session-local 模型目录动态计算模板是否可用，因此项目静态 provider 也能参与选择；空项目使用 coordinator 持有的 project model catalog，它经过相同 trust/resource/provider 校验，但不会创建隐藏 AgentSession。角色 CRUD、模型列表和 API Key provider 校验都使用这条项目目录；真正创建还会由 `PiRuntime` 在项目资源加载后再次校验固定模型。
 - 新会话把完整角色修订（包括默认思考强度、工具权限与会话管理能力）复制到 `piweb.conversation_meta.v1`。之后修改或删除模板不会自动改变旧会话；用户可在 idle 边界显式应用一个当前可用模板，宿主追加 `piweb.conversation_role_change.v1` 并用同一 SessionManager 重建 AgentSession。角色 prompt 追加到会话 system prompt，实际模型与初始思考强度必须与当前快照完全一致，SDK fallback/clamp 会被拒绝。旧 conversation metadata 缺少默认思考强度、工具权限或能力字段时分别按 `off` / `read_only` / 关闭迁移。
