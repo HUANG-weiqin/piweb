@@ -9032,7 +9032,9 @@ describe("ProjectSessionCoordinator", () => {
         }),
       );
       const legacyStates = ["completed", "failed", "aborted"] as const;
-      for (const [index, state] of legacyStates.entries()) {
+      const legacyCount = MAX_PEER_SESSIONS_PER_RUN - 1;
+      for (let index = 0; index < legacyCount; index++) {
+        const state = legacyStates[index % legacyStates.length]!;
         appendReservedCustomEntry(
           source.sessionManager,
           createConversationCardEntry({
@@ -9050,7 +9052,7 @@ describe("ProjectSessionCoordinator", () => {
             state,
             messageId: randomUUID(),
             delegationId: randomUUID(),
-            updatedAt: `2026-07-19T10:0${index + 1}:00.000Z`,
+            updatedAt: `2026-07-19T10:${String(index).padStart(2, "0")}:00.000Z`,
           }),
         );
       }
