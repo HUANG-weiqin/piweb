@@ -182,6 +182,7 @@ interface ProjectContext {
   readonly extensionUIRouters: Map<string, ConversationExtensionUIRouter>;
   readonly lifecycle: SerialTaskQueue;
   readonly backgroundTasks: Set<Promise<void>>;
+  readonly recentUpdates: Set<Promise<void>>;
   readonly unsubscribeProject: () => void;
   modelCatalog?: CreatedProjectModelCatalog;
   modelCatalogOpening?: Promise<CreatedProjectModelCatalog>;
@@ -730,6 +731,7 @@ export class ProjectSessionCoordinator {
         extensionUIRouters: new Map(),
         lifecycle: new SerialTaskQueue(),
         backgroundTasks: new Set(),
+        recentUpdates: new Set(),
         unsubscribeProject: () => undefined,
         references: 1,
         closing: false,
@@ -931,11 +933,35 @@ export class ProjectSessionCoordinator {
       throw new Error(`Conversation is being deleted: ${conversationId}`);
     }
     if (options.updateRecent !== false) {
-      await context.project.setLastConversation(conversationId);
-      context.attention.delete(conversationId);
-      this.emit(context, { type: "project_changed" });
+      await this.markConversationRecent(context, conversationId);
     }
     return actor;
+  }
+
+  markConversationRecentInBackground(
+    handle: ProjectSessionHandle,
+    actor: ConversationActor,
+  ): Promise<void> {
+    let context: ProjectContext;
+    try {
+      context = this.requireContext(handle);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    if (context.actors.get(actor.conversationId) !== actor) {
+      return Promise.reject(
+        new Error(`Conversation is not active: ${actor.conversationId}`),
+      );
+    }
+    if (context.deleting.has(actor.conversationId) || actor.getState().disposed) {
+      return Promise.reject(
+        new Error(`Conversation is being deleted: ${actor.conversationId}`),
+      );
+    }
+    return this.trackBackground(
+      context,
+      this.markConversationRecent(context, actor.conversationId),
+    );
   }
 
   async switchConversationRole(
@@ -1563,6 +1589,7 @@ export class ProjectSessionCoordinator {
           lifecycleClosures.get(context)
           ?? context.lifecycle.close()
         );
+        await this.drainRecentUpdates(context);
         if (context.modelCatalogOpening) {
           await Promise.allSettled([context.modelCatalogOpening]);
         }
@@ -5280,10 +5307,34 @@ export class ProjectSessionCoordinator {
     });
   }
 
+  private markConversationRecent(
+    context: ProjectContext,
+    conversationId: string,
+  ): Promise<void> {
+    if (context.closing || this.disposed) {
+      return Promise.reject(new Error("Project context is closing"));
+    }
+    let write: Promise<void>;
+    try {
+      write = context.project.setLastConversation(conversationId);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    const recentUpdate = write.then(() => {
+      context.attention.delete(conversationId);
+      this.emit(context, { type: "project_changed" });
+    });
+    context.recentUpdates.add(recentUpdate);
+    void recentUpdate.finally(() => {
+      context.recentUpdates.delete(recentUpdate);
+    }).catch(() => undefined);
+    return recentUpdate;
+  }
+
   private trackBackground(
     context: ProjectContext,
     task: Promise<void>,
-  ): void {
+  ): Promise<void> {
     const tracked = task.catch((error) => {
       if (!context.closing) {
         this.emit(context, { type: "project_changed" });
@@ -5294,6 +5345,13 @@ export class ProjectSessionCoordinator {
     void tracked.finally(() => {
       context.backgroundTasks.delete(tracked);
     }).catch(() => undefined);
+    return tracked;
+  }
+
+  private async drainRecentUpdates(context: ProjectContext): Promise<void> {
+    while (context.recentUpdates.size > 0) {
+      await Promise.allSettled([...context.recentUpdates]);
+    }
   }
 
   private async drainBackground(context: ProjectContext): Promise<void> {

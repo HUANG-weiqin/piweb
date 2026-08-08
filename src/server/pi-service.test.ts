@@ -2650,6 +2650,227 @@ describe("PiConnection lifecycle", () => {
 });
 
 describe("PiConnection coordinated project view", () => {
+  it("attaches focus before the first project refresh and does not await recent manifest writes", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const recentWriteGate = deferred();
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      const firstCommandId = randomUUID();
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: firstCommandId,
+        sessionId: SESSION_A,
+        roleId: "default",
+      });
+      const first = harness.events.findLast(
+        (event) => event.type === "focus_attached" && event.commandId === firstCommandId,
+      );
+      if (first?.type !== "focus_attached" || !first.conversationId) {
+        throw new Error("first conversation was not focused");
+      }
+      const secondCommandId = randomUUID();
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: secondCommandId,
+        sessionId: SESSION_A,
+        roleId: "default",
+      });
+      const second = harness.events.findLast(
+        (event) => event.type === "focus_attached" && event.commandId === secondCommandId,
+      );
+      if (second?.type !== "focus_attached" || !second.conversationId) {
+        throw new Error("second conversation was not focused");
+      }
+      const projectHandle = await harness.coordinator.acquireProject(
+        harness.cwd,
+        "read_only",
+      );
+      const project = projectHandle.project;
+      projectHandle.release();
+      const persistRecent = project.setLastConversation.bind(project);
+      vi.spyOn(project, "setLastConversation").mockImplementation(async (conversationId) => {
+        if (conversationId === first.conversationId) {
+          await recentWriteGate.promise;
+        }
+        await persistRecent(conversationId);
+      });
+      const start = harness.events.length;
+      let firstListSessionsSawConversationSnapshot: boolean | undefined;
+      let listSessionsCalls = 0;
+      const listSessions = harness.coordinator.listSessions.bind(
+        harness.coordinator,
+      );
+      vi.spyOn(harness.coordinator, "listSessions").mockImplementation(async (handle) => {
+        if (listSessionsCalls++ === 0) {
+          firstListSessionsSawConversationSnapshot = harness.events.some(
+            (event) => event.type === "conversation_snapshot"
+              && event.conversationId === first.conversationId,
+          );
+        }
+        return listSessions(handle);
+      });
+      const focus = harness.connection.handle({
+        type: "focus_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId: first.conversationId,
+      });
+      await focus;
+      const attachedIndex = harness.events.findIndex(
+        (event, index) => index >= start && event.type === "focus_attached",
+      );
+      const stateIndex = harness.events.findIndex(
+        (event, index) => index >= start && event.type === "state",
+      );
+      const conversationIndex = harness.events.findIndex(
+        (event, index) => index >= start
+          && event.type === "conversation_snapshot"
+          && event.conversationId === first.conversationId,
+      );
+      expect(attachedIndex).toBeGreaterThanOrEqual(start);
+      expect(stateIndex).toBeGreaterThan(attachedIndex);
+      expect(conversationIndex).toBeGreaterThan(stateIndex);
+      await vi.waitFor(() => {
+        expect(firstListSessionsSawConversationSnapshot).toBe(true);
+      });
+      await vi.waitFor(() => {
+        expect(harness.events.some(
+          (event, index) => index >= start && event.type === "project_snapshot",
+        )).toBe(true);
+      });
+      const projectIndex = harness.events.findIndex(
+        (event, index) => index >= start && event.type === "project_snapshot",
+      );
+      expect(projectIndex).toBeGreaterThan(conversationIndex);
+      recentWriteGate.resolve();
+    } finally {
+      recentWriteGate.resolve();
+      await harness.cleanup();
+    }
+  });
+
+  it("warns only the current focus when a background recent manifest write fails", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const recentWriteGate = deferred();
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      const firstCommandId = randomUUID();
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: firstCommandId,
+        sessionId: SESSION_A,
+        roleId: "default",
+      });
+      const first = harness.events.findLast(
+        (event) => event.type === "focus_attached" && event.commandId === firstCommandId,
+      );
+      if (first?.type !== "focus_attached" || !first.conversationId) {
+        throw new Error("first conversation was not focused");
+      }
+      const secondCommandId = randomUUID();
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: secondCommandId,
+        sessionId: SESSION_A,
+        roleId: "default",
+      });
+      const second = harness.events.findLast(
+        (event) => event.type === "focus_attached" && event.commandId === secondCommandId,
+      );
+      if (second?.type !== "focus_attached" || !second.conversationId) {
+        throw new Error("second conversation was not focused");
+      }
+      const projectHandle = await harness.coordinator.acquireProject(
+        harness.cwd,
+        "read_only",
+      );
+      const project = projectHandle.project;
+      projectHandle.release();
+      const persistRecent = project.setLastConversation.bind(project);
+      let firstWrite = true;
+      const setLastConversation = vi.spyOn(project, "setLastConversation")
+        .mockImplementation(async (conversationId) => {
+          const write = persistRecent(conversationId);
+          if (conversationId === first.conversationId && firstWrite) {
+            firstWrite = false;
+            await recentWriteGate.promise;
+            throw new Error("recent manifest write failed");
+          }
+          await write;
+        });
+      await harness.connection.handle({
+        type: "focus_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId: first.conversationId,
+      });
+      const oldFocusId = latestState(harness.events).focusId;
+      await harness.connection.handle({
+        type: "focus_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId: second.conversationId,
+      });
+      await harness.connection.handle({
+        type: "focus_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId: first.conversationId,
+      });
+      const newFocusId = latestState(harness.events).focusId;
+      expect(newFocusId).not.toBe(oldFocusId);
+      recentWriteGate.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(harness.events.filter(
+        (event) => event.type === "error"
+          && event.scope === "session"
+          && event.message.includes("recent manifest write failed"),
+      )).toHaveLength(0);
+
+      setLastConversation.mockImplementation(async (conversationId) => {
+        if (conversationId === first.conversationId) {
+          throw new Error("current recent manifest write failed");
+        }
+        await persistRecent(conversationId);
+      });
+      await harness.connection.handle({
+        type: "focus_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId: second.conversationId,
+      });
+      await harness.connection.handle({
+        type: "focus_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId: first.conversationId,
+      });
+      await vi.waitFor(() => {
+        expect(harness.events).toContainEqual({
+          type: "error",
+          scope: "session",
+          sessionId: SESSION_A,
+          message: "会话已切换，但最近会话位置未保存：current recent manifest write failed",
+        });
+      });
+    } finally {
+      recentWriteGate.resolve();
+      await harness.cleanup();
+    }
+  });
+
   it("uses the validated recent seed for one initial project snapshot", async () => {
     const harness = await coordinatedConnectionHarness();
     const warmHandle = await harness.coordinator.acquireProject(
@@ -5237,14 +5458,16 @@ describe("PiConnection coordinated project view", () => {
         sessionId: SESSION_A,
         conversationId: firstAttach.conversationId,
       });
-      expect(harness.events.findLast(
-        (event) => event.type === "project_activity_snapshot",
-      )).toMatchObject({
-        type: "project_activity_snapshot",
-        projects: [expect.objectContaining({
-          cwd: harness.cwd,
-          attentionConversationCount: 0,
-        })],
+      await vi.waitFor(() => {
+        expect(harness.events.findLast(
+          (event) => event.type === "project_activity_snapshot",
+        )).toMatchObject({
+          type: "project_activity_snapshot",
+          projects: [expect.objectContaining({
+            cwd: harness.cwd,
+            attentionConversationCount: 0,
+          })],
+        });
       });
       await vi.waitFor(() => {
         expect(harness.events).toContainEqual(expect.objectContaining({

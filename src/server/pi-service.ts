@@ -1149,6 +1149,7 @@ export class PiConnection {
           const actor = await coordinator.openConversation(
             view.handle,
             command.conversationId,
+            { updateRecent: false },
           );
           if (
             extensionAbort.signal.aborted
@@ -1429,9 +1430,29 @@ export class PiConnection {
     this.focusedItemFingerprints.clear();
     this.emitFocusAttached(view, operation, commandId);
     this.publishCoordinatedState();
+    this.publishFocusedConversationSnapshot();
+    if (operation === "focus_conversation") {
+      const attachedFocusId = view.focusId;
+      if (attachedFocusId === undefined) {
+        throw new Error("Focus identity was not assigned before recent update");
+      }
+      void view.coordinator.markConversationRecentInBackground(view.handle, actor)
+        .catch((error) => {
+          if (
+            !this.isCurrentCoordinatedView(view)
+            || view.actor !== actor
+            || view.conversationId !== actor.conversationId
+            || view.focusId !== attachedFocusId
+          ) return;
+          this.emitError(
+            "session",
+            `会话已切换，但最近会话位置未保存：${this.errorMessage(error)}`,
+            view.sessionId,
+          );
+        });
+    }
     this.publishProjectSnapshotCoordinated();
     this.publishRoleCatalog();
-    this.publishFocusedConversationSnapshot();
   }
 
   private emitFocusAttached(

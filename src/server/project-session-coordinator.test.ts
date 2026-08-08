@@ -612,6 +612,161 @@ function deterministicTestUuid(namespace: string, value: string): string {
 }
 
 describe("ProjectSessionCoordinator", () => {
+  it("starts focus recent writes immediately and orders a later awaited open behind them", async () => {
+    const fixture = await createFixture();
+    const first = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default", title: "first" },
+    );
+    const second = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default", title: "second" },
+    );
+    const firstActor = await fixture.coordinator.openConversation(
+      fixture.handle,
+      first.conversationId,
+      { updateRecent: false },
+    );
+    await fixture.coordinator.openConversation(
+      fixture.handle,
+      second.conversationId,
+      { updateRecent: false },
+    );
+    const gate = deferred();
+    let firstWriteStarted = false;
+    const store = fixture.handle.project as unknown as {
+      enqueueWrite(task: () => Promise<void>): Promise<void>;
+    };
+    const persistWrite = store.enqueueWrite.bind(store);
+    let firstWrite = true;
+    const enqueueWrite = vi.spyOn(store, "enqueueWrite")
+      .mockImplementation((task) => {
+        if (firstWrite) {
+          firstWrite = false;
+          return persistWrite(async () => {
+            firstWriteStarted = true;
+            await gate.promise;
+            await task();
+          });
+        }
+        return persistWrite(task);
+      });
+
+    const firstRecent = fixture.coordinator.markConversationRecentInBackground(
+      fixture.handle,
+      firstActor,
+    );
+    await waitUntil(() => firstWriteStarted, "the immediate focus recent write");
+    let secondOpenSettled = false;
+    const secondOpen = fixture.coordinator.openConversation(
+      fixture.handle,
+      second.conversationId,
+    ).then(() => {
+      secondOpenSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(secondOpenSettled).toBe(false);
+
+    gate.resolve();
+    await expect(firstRecent).resolves.toBeUndefined();
+    await expect(secondOpen).resolves.toBeUndefined();
+    expect(fixture.handle.project.lastConversationId).toBe(
+      second.conversationId,
+    );
+    enqueueWrite.mockRestore();
+  });
+
+  it("serializes background recent focus updates in focus order", async () => {
+    const fixture = await createFixture();
+    const first = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default", title: "first" },
+    );
+    const second = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default", title: "second" },
+    );
+    const firstActor = await fixture.coordinator.openConversation(
+      fixture.handle,
+      first.conversationId,
+      { updateRecent: false },
+    );
+    const secondActor = await fixture.coordinator.openConversation(
+      fixture.handle,
+      second.conversationId,
+      { updateRecent: false },
+    );
+    const writes: string[] = [];
+    const persistRecent = fixture.handle.project.setLastConversation.bind(
+      fixture.handle.project,
+    );
+    const setLastConversation = vi.spyOn(
+      fixture.handle.project,
+      "setLastConversation",
+    ).mockImplementation(async (conversationId) => {
+      writes.push(conversationId);
+      await persistRecent(conversationId);
+    });
+
+    const firstWrite = fixture.coordinator.markConversationRecentInBackground(
+      fixture.handle,
+      firstActor,
+    );
+    const secondWrite = fixture.coordinator.markConversationRecentInBackground(
+      fixture.handle,
+      secondActor,
+    );
+    const firstWriteAgain = fixture.coordinator.markConversationRecentInBackground(
+      fixture.handle,
+      firstActor,
+    );
+    await Promise.all([firstWrite, secondWrite, firstWriteAgain]);
+
+    expect(writes).toEqual([
+      first.conversationId,
+      second.conversationId,
+      first.conversationId,
+    ]);
+    expect(fixture.handle.project.lastConversationId).toBe(
+      first.conversationId,
+    );
+    setLastConversation.mockRestore();
+  });
+
+  it("drains a pending background recent focus update during close", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const gate = deferred();
+    let started = false;
+    const setLastConversation = vi.spyOn(
+      fixture.handle.project,
+      "setLastConversation",
+    ).mockImplementation(async () => {
+      started = true;
+      await gate.promise;
+    });
+
+    const recent = fixture.coordinator.markConversationRecentInBackground(
+      fixture.handle,
+      actor,
+    );
+    await waitUntil(() => started, "background recent write");
+    let closed = false;
+    const closing = fixture.coordinator.close().then(() => {
+      closed = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(closed).toBe(false);
+    gate.resolve();
+    await expect(recent).resolves.toBeUndefined();
+    await expect(closing).resolves.toBeUndefined();
+    expect(closed).toBe(true);
+    setLastConversation.mockRestore();
+  });
+
   it("migrates legacy queued pending prompts on reopen and drops attention records", async () => {
     const fixture = await createFixture();
     const actor = await fixture.coordinator.createUserConversation(
