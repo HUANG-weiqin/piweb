@@ -40,11 +40,10 @@ Pi Web 是本机优先的极简 Agent 工作台。当前目标不是复制 Pi �
 - 工具权限属于用户级角色模板，并进入 conversation 当前角色快照；新角色和旧角色迁移默认 `read_only`，模板后续编辑不得自动改变已有会话。用户只可在会话空闲时显式应用一个当前可用角色，宿主必须追加角色变更记录并用同一 SessionManager 重建运行时；失败要恢复上一角色或将 actor 置为 fatal。
 - 浏览器不是 transcript owner；恢复必须从服务端 `conversation_snapshot` hydrate，localStorage 只保存目录和安全偏好。
 - 客户端收到匹配的 history snapshot 前不得发送 prompt；state 提交和历史恢复是两个观察边界。
-- `WebSocket.send()` 不是 prompt 提交点。只有匹配 sessionId + runId 的 `run_queued` 才能清空直接 prompt 草稿并投影 user message；durable enqueue 则只由匹配 commandId 的完成回执或包含同一 promptId 的精确队列快照证明提交。确认前断线必须保留草稿、恢复历史/队列后提示核对，禁止自动重发或按正文去重。
-- busy 时的普通用户消息必须先进入服务端 `.piweb/pending-prompts` durable queue，浏览器不能拥有或自动泵送 FIFO。queued 可精确撤回；Steer 必须由用户显式点击并绑定当前 exact runId；dispatching 不可假装撤回，SDK 已接受后无法证明持久交付的记录只能转 attention，不能自动重试。
-- pending prompt 自动 pump 只在 actor idle 时按 `createdAt + promptId` FIFO 启动新 run，并让跨会话 inbox 优先；direct browser prompt admission 也必须经过同一 project lifecycle，不能越过已有 durable work。dispatching sidecar 只能凭 JSONL 中 exact `promptId + runId` delivery receipt 清理；run settlement 本身不是交付证明。receipt 按 promptId 唯一，同一 run 可合法接收多个 prompt。
-- pending prompt 与 inbox envelope 的准入容量必须为每条 immutable payload 预留最坏合法 JSON 状态大小，状态替换仍复核实际 next bytes；旧版 actual-fit/reservation 超限目录允许打开清理但不能继续创建。inbox 删除 tombstone 使用独立有界预算，不能因 envelope 满载而无法建立删除 fence。需要初始 processing claim 的 inbox envelope 必须首次原子创建成目标状态，不能先 commit queued 再改写。
-- 用户消息投递只能在 raw user `message_end` 后，从同一 SessionManager entries 找到 `entry.message === rawMessage` 的对象引用来证明。startPrompt 的首条 raw user 只结算 initial prompt 槽位；后续消息再 FIFO 结算 guidance，不能让晚到的 initial event 误认成 Steer delivery。
+- `WebSocket.send()` 不是 prompt 提交点。只有匹配 sessionId + promptId 的 `prompt_admitted` 才能清空直接 prompt 草稿并投影"等待中"消息；`prompt_delivered`（raw user 持久化证明）才把它结算为已投递。确认前断线必须保留草稿；断线后从 `conversation_snapshot.pendingPrompts` 恢复等待中列表，禁止自动重发或按正文去重。
+- 消息与 Agent 忙闲无关，随时可发：busy 时浏览器 prompt 直接进 SDK followUp 队列（`streamingBehavior:"followUp"` + `preflightResult(true)`），SDK run 循环自动读取，宿主零 pump/零重建/零持久队列。进程重启或 abort 时未投递消息丢失（UI 必须诚实显示"等待中"而非"已发送"）；abort 清空 followUp 队列与 admissions 并通知 UI。
+- 跨会话 inbox 仍是 durable 工作：idle 时 browser prompt 必须经过同一 project lifecycle 且不越过已有 inbox 工作；inbox envelope 准入容量必须为每条 immutable payload 预留最坏合法 JSON 状态大小，状态替换仍复核实际 next bytes；inbox 删除 tombstone 使用独立有界预算，不能因 envelope 满载而无法建立删除 fence。需要初始 processing claim 的 inbox envelope 必须首次原子创建成目标状态，不能先 commit queued 再改写。
+- 用户消息投递只能在 raw user `message_end` 后，从同一 SessionManager entries 找到 `entry.message === rawMessage` 的对象引用来证明；admissions 按 `createdAt + promptId` FIFO 文本匹配结算，run settlement 本身不是交付证明。admit 有界（单会话同时最多 64 条 pending）；存量 `.piweb/pending-prompts` 只做一次性迁移，迁移后目录必须删除，不允许重新创建队列状态。
 - 普通会话操作串行执行；`abort`、认证响应、认证取消和生命周期失效走控制通道，session dispose 排回 actor 队列。
 - 所有 session command/state/event 都带 `sessionId`；run command/event 还带 `runId`。客户端必须丢弃不匹配的身份。
 - 会让界面等待配置结果的命令必须有精确关联身份；当前 API Key 与模型选择使用 sessionId + 连接内一次性 commandId，不能把任意 PublicState 刷新当作成功回执。

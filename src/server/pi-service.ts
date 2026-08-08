@@ -1237,10 +1237,6 @@ export class PiConnection {
       case "set_thinking":
         await this.setCoordinatedThinking(command.level);
         return;
-      case "steer_all_pending_prompts":
-        throw new Error(
-          "steer_all_pending_prompts is handled by coordinated prompt control",
-        );
       case "set_compaction_threshold": {
         const view = this.requireCoordinatedFocus(
           command.sessionId,

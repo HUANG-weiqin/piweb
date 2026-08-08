@@ -19,7 +19,7 @@ ServerEvent
 → role_catalog_snapshot / project_snapshot 更新当前项目控制面
 → focus_attached 提交 conversationId + focusId
 → conversation_snapshot 原子 hydrate focused items
-→ pending_prompts_snapshot 替换当前 focus 的服务端持久队列投影
+→ conversation_snapshot.pendingPrompts 恢复当前 focus 的"等待中"列表
 → SessionEvent 按 focusId + runId 更新 transcript
 → conversation_item 按 focusId + cardId upsert
 → extension_ui_request/closed 按 sessionId + requestId 维护临时模态队列
@@ -32,8 +32,8 @@ ServerEvent
 - `outstandingRunId` 只覆盖“浏览器已交给 WebSocket、服务端运行状态尚未被观察到”的本地传输间隙，并为 Stop 提供 runId；匹配的 PublicState、terminal 或 error 会结算它，它不伪装成 Agent 状态。
 - `PiSocket.send() === true` 只表示浏览器 transport 接受了帧，不表示服务端接受 prompt。只有匹配 focus 三元身份 + runId 的 `run_queued` 才是接收提交点：此时才能清空草稿并把 user message 投影进 transcript。
 - prompt 接收确认前断线或显式切换项目属于 unknown outcome。客户端按 `workspaceKey + projectId + conversationId` 保留未确认草稿，切到其它项目/会话时不投影，切回原 focus 后恢复草稿并提示用户核对，绝不自动重发；只有匹配 focus 三元身份 + runId 的 `run_queued` 才能清掉该未确认草稿。
-- 当前 focus busy、已有未确认 run 或已有 durable pending prompt 时，composer 仍可发送，但使用带新 `promptId + commandId` 的 `enqueue_prompt` 把原始用户意图持久提交给服务端；浏览器不再维护或自动泵送消息 FIFO，也不会自动 steer。每个 conversation 同时最多保留一个未结算 enqueue command，精确 ack/error 后才重新开放 composer，不限制已经 durable 的多条 prompt。`WebSocket.send()` 后草稿保持不变，只有匹配的 `command_complete(enqueue_prompt)` 或包含同一 promptId 的精确 `pending_prompts_snapshot` 才证明 durable commit。断线或工作区切换前尚未确认的 enqueue 按 `workspaceKey + projectId + conversationId` 保留 immutable submitted text/promptId 与独立的 retained draft/edit revision；确认只能清掉未被用户编辑的原 revision，即使用户把 A 改成 B 再改回 A 也不能按正文误判。后台 focus 的确定性 enqueue error 也必须恢复其正文和错误提示；即使命令属于旧 focus1、响应到达时 conversation 已经 A→B→A 进入 focus3，也按 workspace/project/conversation 恢复 UI，而命令结算本身仍校验旧 exact focus 身份。所有 retained intent 都绝不自动重放。
-- `pending_prompts_snapshot` 是当前 focus 队列的唯一 UI 真相；切换 focus 立即清空旧投影，返回后等待服务端新快照，迟到快照必须同时匹配 sessionId、conversationId 和 focusId。`queued` 可逐条撤回；仅当当前 active run 精确处于 `running | waiting` 时，队列 header 才显示唯一的“同时 Steer N 条”。一次点击生成一个 batchId，只发送一条 `steer_all_pending_prompts`，不发送客户端 promptId 列表，也不循环单条 steer；服务端权威冻结当时全部 queued 记录并作为一个 SDK user message 处理。命令 pending 时，即使新快照出现晚到 queued 记录也不能再次发送；completion 按 commandId 结算，error 还必须匹配原 focus 与 exact runId。断线只清理本地等待态并依赖快照恢复，绝不自动重发 batch。`dispatching` 已越过可撤回边界；`attention` 表示服务端不能证明投递结果，只能显示原因并让用户移除记录，不能伪装成安全重试。相同正文的不同 promptId 必须分别显示和结算。
+- 消息与忙闲无关，随时可发：composer 始终发送带新 `promptId + runId` 的 `prompt`。`WebSocket.send()` 后草稿保持不变，只有匹配 sessionId + promptId 的 `prompt_admitted` 才清空草稿并投影"等待中" user message（诚实显示未投递，不是"已发送"）；匹配的 `prompt_delivered` 才把它结算为已投递。断线或工作区切换前尚未确认的 prompt 按 `workspaceKey + projectId + conversationId` 保留 immutable submitted text/promptId 与独立的 retained draft/edit revision；确认只能清掉未被用户编辑的原 revision，即使用户把 A 改成 B 再改回 A 也不能按正文误判。所有 retained intent 都绝不自动重放；进程重启后等待中消息消失（服务端无持久队列），UI 据 snapshot 反映真实状态。
+- `conversation_snapshot.pendingPrompts` 是当前 focus 等待中列表的唯一 UI 真相；切换 focus 立即清空旧投影，返回后等待服务端快照，迟到快照必须同时匹配 sessionId、conversationId 和 focusId。`prompt_delivered` 移除对应等待中项（按 promptId 精确匹配）；`run_finished(aborted)` 清空全部等待中项（SDK followUp 队列已被 abort 清空）。相同正文的不同 promptId 必须分别显示和结算。
 - batch 在 SDK/JSONL 中仍是一个带 host metadata 的物理 user message，但 transcript 的 live 与 snapshot 投影只显示按 FIFO 拼接的用户原文，不能把 `hostInstruction/batchId/items` envelope 暴露进对话气泡；浏览器不自行解析或猜测这种宿主编码。
 - 每次 initialize 或重连生成新的 observation sessionId；每次 initialize/open/create/focus 由服务端返回新的 focusId。
 - 当前 transcript 身份是 `sessionId + conversationId + focusId`。即使 conversationId 再次相同，旧 focus 的 state/snapshot/live item 也必须丢弃。

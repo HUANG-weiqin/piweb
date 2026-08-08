@@ -4,7 +4,7 @@
 
 ## 这个模块是干什么的
 
-项目存储层让工作台状态跟工作目录移动，而不是跟浏览器、WebSocket 或服务进程走。它持有项目清单、Pi 对话、跨会话 inbox 和用户 pending prompt queue；角色与 API Key 仍分别由用户级 `RoleStore` 和 Pi 全局 `AuthStorage` 管理。
+项目存储层让工作台状态跟工作目录移动，而不是跟浏览器、WebSocket 或服务进程走。它持有项目清单、Pi 对话和跨会话 inbox；角色与 API Key 仍分别由用户级 `RoleStore` 和 Pi 全局 `AuthStorage` 管理。浏览器消息投递不建持久队列（见下）。
 
 ## 身份与生命周期
 
@@ -32,8 +32,6 @@ runId           ephemeral，一次 prompt
     <timestamp>_<conversationId>.jsonl
   inbox/
     <messageId>.json
-  pending-prompts/
-    <promptId>.json
   notebooks/
     <conversationId>.json
 ```
@@ -60,7 +58,7 @@ initialize(cwd, target)
 → ProjectSessionCoordinator.acquireProject()
 → 校验 .piweb 与 sessions 不是 symlink/junction
 → refreshConversations()，枚举并验证全部 JSONL，再与 SessionManager.listAll(custom sessionDir) 一一核对
-→ 严格扫描 inbox / pending-prompts，并用 JSONL receipt 保守对账 crash 窗口
+→ 严格扫描 inbox，并用 JSONL receipt 保守对账 crash 窗口
 → recent 可返回项目空态；open 选择 exact conversation；new 必须显式 roleId
 → coordinator singleflight 取得/等待 writer lease
 → SessionManager.create/open(..., current cwd override)
@@ -79,14 +77,14 @@ initialize(cwd, target)
 - 目标及其 descendant set 中任一 busy conversation 都不可删除，必须先精确 abort 并等待 run 结算；Agent 永远不能删除自己，也不能通过删除祖先把自己级联删除。
 - 删除先基于 conversation metadata 冻结目标的 descendant set，再为每个目标设置 deleting fence；持久 tombstone 先写删除目标本身，再写 descendants，确保崩溃恢复至少能从目标重新推导 cascade。已打开的 idle actor 把当前 writer lease 在 registry 内原子升级为 deletion lease；未打开目标先 fail-fast 取得独占 lease。升级、精确 unlink 和索引刷新之间不能出现 release/reacquire 窗口。
 - 删除与索引刷新共用同一串行队列。服务端完整校验 sessions 目录、由 ID 解析内部常规 JSONL、复验 header identity，再按子孙到祖先顺序逐个精确 `unlink`；每个 conversation 的 `.piweb/notebooks/<conversationId>.json` notebook sidecar 同步删除。notebook 目标与其 stale temp 必须先证明是项目目录内常规文件，并在 transcript/最近指针发生不可逆修改前以 `unlink` 清理；禁止对预期文件路径使用 recursive `rm`，异常目录或链接必须 fail closed 且保留 transcript。
-- 每个被删 conversation 只清理 `toConversationId` 等于它的 pending inbox，并按状态精确清理属于它的 queued/dispatching/attention prompt sidecar；它此前发往其他会话的 outbound envelope 不随来源删除，除非接收方也在同一个 cascade set 中随后被删除。
+- 每个被删 conversation 只清理 `toConversationId` 等于它的 pending inbox；它此前发往其他会话的 outbound envelope 不随来源删除，除非接收方也在同一个 cascade set 中随后被删除。
 - `lastConversationId` 只在仍等于目标时清除，避免覆盖另一连接刚提交的最近对话。删除成功后更新派生缓存并通过项目订阅发布新 snapshot。
 - 删除不存在的干净目标是幂等成功；目录损坏、链接、身份错配或文件系统拒绝删除仍 fail closed。
 
 “回到此处”是当前 conversation 内的物理后缀截断，不是 branch 或浏览器隐藏：
 
 - snapshot 的 user ID 直接对应 Pi message entry，assistant 聚合 ID 的 `assistant:` 后缀对应该聚合首个物理 message entry；所选 entry 本身和它之后的所有 JSONL entry 都被删除，更早行保持字节不变。
-- 只允许 idle actor 执行；目标还有 queued/processing inbox 或任意 pending prompt 状态时拒绝，避免截断恢复账本后重复投递。已经送达其它 conversation 的外部效果不回滚。
+- 只允许 idle actor 执行；目标还有 queued/processing inbox 时拒绝，避免截断恢复账本后重复投递。已经送达其它 conversation 的外部效果不回滚。
 - store 在项目会话串行边界内完整验证原文件与候选前缀，复验路径及扫描期间文件身份，写临时文件后原子替换；候选不是 message、文件变化、链接、损坏或身份错配都不覆盖原文件。
 - durable 替换后，同一 actor 必须 reload SessionManager，并从其 active context 重建 Agent 内存 messages、runId 集合和压缩阈值。若磁盘已提交但内存同步失败，actor 进入 fatal 状态，禁止用旧 parent 继续追加。
 
@@ -130,22 +128,15 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 - 恢复会在任何 inbox actor pump 前扫描 `piweb.meta_operation.v1`。若发现 started 但未 completed 的精确 abort intent，会先中止仍匹配的活动 run，或把崩溃中断的 processing run 结算为 aborted，再完成来源卡片/sidecar/ledger 对账。
 - inactive `peek_session` 的短暂 writer lease 也进入项目 lifecycle 串行边界；若同一目标同时删除，先开始者完整释放 lease 后后一个才进入 tombstone/deletion lease 阶段。
 
-## 持久 pending prompt queue
+## 浏览器消息投递（消息直通，无持久队列）
 
-`.piweb/pending-prompts/<promptId>.json` 是严格 v1、项目级有界 sidecar。immutable payload 是 `promptId + conversationId + text + createdAt`，同 ID 重放只在 payload 完全相同时幂等；不同 promptId 即使正文相同也属于两条独立用户意图。状态只有：
+消息与忙闲无关，随时可发；工作台不再拥有持久 pending prompt 队列、pump 或 batch guidance。
 
-- `queued`：尚未跨过运行时提交边界，可由用户精确撤回；
-- `dispatching(runId, dispatchedAt)`：已为自动新 run 或用户显式 Steer 持久 claim，不可假装撤回；
-- `attention(reason, attentionAt)`：投递结果无法证明，需要用户核对并显式移除记录，不能自动重发。
-
-目录、文件名、regular-file identity、尾换行、JSON schema、单项目 256 条、单 conversation 64 条和实际总 32 MiB 都 fail closed。新建容量按每条 immutable payload 的最坏合法 JSON 序列化状态预留（包括控制字符被 `JSON.stringify` 转义后的最大 attention reason），因此本版本接受的 queued 记录必能转成 dispatching 或最大 attention；状态替换仍复核实际 next bytes。scan 允许旧版 actual-fit 但新 reservation 超限的队列打开、撤回和清理，只禁止继续创建，避免升级后把可恢复项目直接拒之门外。创建使用同项目父目录临时文件加 hard-link commit，状态替换使用原子 rename；列表按 `createdAt + promptId` FIFO。
-
-- busy 时 `enqueue_prompt` 只 durable put，提交回执不等待后续 claim/pump 成功；post-commit pump 失败保留 exact queued sidecar 并投影 error/attention，不能把已经提交的意图回答成失败。idle pump 在跨会话 inbox 之后 claim 最早 queued prompt，并生成新 run。直接 browser prompt 的 admission 也经过同一 project lifecycle：发现更早 queued/processing inbox 或 queued/dispatching prompt 时先泵送 durable work 并拒绝本次 direct draft，不能从 idle-publication 或重连窗口插队。
-- startPrompt 的首条 raw user `message_end` 与后续 guidance 是两个 receipt 槽位。只有从同一 SessionManager entries 找到 `entry.message === rawMessage` 的对象引用才能确认 Pi 已持久追加；首条只确认 initial prompt，不能顺手结算已经排队的 Steer。后续持久 raw user message 再按 SDK FIFO 逐条结算 guidance。
-- run 的 durable user message 已观察后，宿主先追加 `piweb.pending_prompt_delivery.v1` receipt，再删除 sidecar。receipt 以 promptId 唯一绑定一个 run；同一 active run 可以合法接收多个不同 promptId，并为每条各写一个 receipt。
-- 用户显式 Steer 必须携带当前 exact active runId；同一 active run 可以有多个 batch，但每个 non-terminal batch 的 manifest 会持续拥有其 promptId，旧 batch 不能被新 run 抢占。SDK promise 尚未接受前的确定性拒绝可精确 requeue；SDK 已接受后若 user message 持久证明丢失、run 提前结算或确认路径失败，只能转 attention，不能重试制造重复；settlement 后会释放 batch fence 并继续 FIFO pump 后续 queued work。
-- 崩溃恢复只在 JSONL 中存在同一 `promptId + runId` delivery receipt 时清理 dispatching sidecar；单有 run settlement 不构成交付证明，因为 preflight failure 也会 settle。没有 receipt 的 dispatching 一律转 attention，queued 继续由 FIFO pump 处理。prepared/started/delivered batch 遇到缺失 sidecar、替换 payload 或未知状态时会以 attention 终止 batch，并将可见 sidecar 置 attention，避免恢复后永久 fence；无法证明的 manifest 仍 fail closed。历史 delivery receipt 和 batch manifest 也保留 promptId 归属，禁止 sidecar 删除后复用旧 promptId。
-- browser、项目切换和服务重启都不拥有该队列；当前 focus 只通过 `pending_prompts_snapshot` 观察完整列表。attention sidecar 另有服务端拥有的 durable attention 集合，会进入后台 conversation sidebar 与 workspace activity；聚焦不能清掉，只有最后一条 attention 被精确 dismiss 或 conversation 删除才消失。删除 conversation 会清理其所有状态；角色切换和物理截断在任意 pending record 存在时拒绝。
+- busy 时浏览器 `prompt`（带 promptId）由 actor 直接 `session.prompt(text, { streamingBehavior: "followUp", preflightResult })` 进 SDK followUp 队列；SDK run 循环自动 drain，宿主零 pump/零重建。idle 时经 project lifecycle 起新 run，且不越过已有 inbox 工作。
+- 会话创建时 `settingsManager.applyOverrides({ followUpMode: "all" })` 让排队消息在一次 run 内连续注入。admitted 是 actor 内存 FIFO（`promptId + text + createdAt`），有界（单会话最多 64 条），abort 清空 followUp 队列与 admissions。进程重启时未投递消息丢失——UI 必须诚实显示"等待中"而非"已发送"。
+- 投递证明：只在 raw user `message_end` 后，从同一 SessionManager entries 找到 `entry.message === rawMessage` 的对象引用，再按 admissions 的 `createdAt + promptId` FIFO 文本匹配结算 `prompt_delivered`；run settlement 本身不是交付证明。admissions 不能跨 restart 恢复。
+- 存量 `.piweb/pending-prompts` 目录在项目打开时一次性迁移：queued 按 FIFO 经 admitBrowserPrompt 重投递（idle 起 run / busy 进 followUp），dispatching/attention/损坏/超限记录直接丢弃，全部尝试后删除目录；中途关闭保留目录待下次重试（按 promptId 幂等）。不允许重新创建队列状态。
+- `piweb.pending_prompt_delivery.v1` / `piweb.pending_prompt_batch.v1` 的 schema、解析与聚合校验仍保留为 JSONL 历史格式的只读兼容层（fail closed 校验旧文件），但不再写入新记录。
 
 详细编排语义见 [kb-agent-collaboration.md](kb-agent-collaboration.md)。
 
@@ -179,7 +170,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 - `conversation_snapshot` 是当前 focus 的一次性 active-branch 投影，包含固化角色和 message/session-message/compaction discriminated items，并限制总字节以及单消息/tool/card payload。投影只有一条 canonical pipeline：捕获 durable physical slots → 用 raw SDK message 对象身份把已持久化 live message 精确交给 durable slot → semantic fold → peer enrichment → 一次最终 exact-JSON-byte window。不能按角色、文本或数量猜测交接，也不能分别裁 durable/live 后再拼接。
 - 每条物理 user/assistant message 在任一时刻只能由 durable slot 或未持久化 live suffix 一方拥有。Pi 对 user 的 start/end/persistence 复用同一对象，但 pi-agent-core 的 assistant `message_start` 是 partial 浅拷贝，真正被 AgentSession 持久化的是 `message_end` 的 final 对象；因此 assistant live slot 必须在 end 时改绑 final identity，不能把 start payload 当成 durable identity。browser 初始 prompt slot 也只能绑定首条 user，后续 steer 不得覆盖它。exact handoff 后 durable item 保留当前 runId；live tool 状态只可覆盖尚无 durable tool result 的 pending 工具，一旦 JSONL 已有 result 就由 durable 状态获胜。compaction、user/steer 与卡片首次出现是时间线语义边界；不再保留“最后一次 compaction 后才使用 live”的特判。
 - 最终窗口优先保留完整的最近语义 turn；最新 turn 自身超限时保留连续有序后缀，不能跳过一个超大 item 后再捡更早的小 item。非空来源必须至少投影最新 item；单项也按最终 `JSON.stringify` 的 UTF-8 bytes 自适应缩略，避免 JSON 转义把合法原文放大后得到空快照。`window.omittedBefore / startsMidTurn / contentTruncated` 精确描述覆盖范围，任何省略都不会删除 JSONL。
-- `pending_prompts_snapshot` 是同一 focus 的独立完整队列投影；它不进入高频 PublicState 或 transcript，也不使用 window，因为 durable store 已硬限制为每 conversation 64 条。`compaction` 直接来自 Pi 的持久条目，位于压缩发生处；它作为独立小型 turn 保留。
+- `conversation_snapshot` 携带当前 focus 的 admitted 项（`pendingPrompts`，`promptId + text + createdAt`，最多 64 条）；它不进入高频 PublicState，也不使用 window，用于断线/多窗口恢复"等待中"列表。`compaction` 直接来自 Pi 的持久条目，位于压缩发生处；它作为独立小型 turn 保留。
 - live run 仍按 runId 发送增量，卡片按 cardId upsert；恢复时 reducer 用 snapshot 原子 hydrate。两者都必须匹配 `sessionId + conversationId + focusId`，匹配快照到达前 composer 保持禁用。卡片更新若改变最终窗口成员，单条 upsert 无法表达淘汰，服务端必须改发完整 snapshot。
 - Agent 的 `peek_session` 有意省略 compaction 分界项；它是用户界面元信息，不应增加 peer Agent 上下文。peek tail 同样按最终序列化字节裁剪，并保证 limit 非零且来源有可见 item 时不会因最新单项超限返回空列表。
 

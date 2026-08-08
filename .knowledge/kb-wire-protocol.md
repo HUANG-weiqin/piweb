@@ -30,9 +30,8 @@ ClientCommand
 - `conversation_run_settled` 是当前项目 observation 的实时结算边界：只在 actor 已持久写入精确 run settlement 并回到 idle 后发送，携带 `sessionId + projectId + conversationId + runId + outcome + createdBy`。它覆盖 focused 和后台 conversation，但不会由 initialize、refresh 或 snapshot 重放；浏览器不能从可能合并的 activity 快照反推这类瞬时完成事件。
 - 当前 transcript 的 state、snapshot、live run 和卡片必须匹配 `sessionId + conversationId + focusId`。每次 initialize/open/create/focus 都分配新 focusId，因此快速 `A → B → A` 时第一次 A 的迟到帧不能污染第二次 A。
 - prompt/abort 显式携带上述 focus 三元身份和 runId；底层即时引导仍可使用 `steer + commandId + 精确 active runId`，由 `command_complete(steer)` 确认 SDK 已把该 user message 持久送入当前 run，而不只是放进易失内存队列。steer 是控制通道，不能排在被当前 run 占用的 actor 串行队列之后；错 focus 或错 runId 必须失败，不能作用于当前观察。
-- busy composer 的普通发送不直接调用 steer，而使用 `enqueue_prompt + commandId + promptId + 精确 focus`。`command_complete(enqueue_prompt)` 只在 sidecar durable commit 后返回。`withdraw_pending_prompt` 只删除尚为 queued 的精确 promptId；`dismiss_pending_prompt` 只删除 attention 记录。`steer_all_pending_prompts` 携带客户端生成的 batchId 与精确 active runId，但不携带 promptId 列表：服务端在项目 lifecycle 内冻结当时全部 queued 记录，持久写入 batch manifest，并把它们编码成一次 SDK user guidance。只有 batch delivery fence、逐 prompt receipt、sidecar cleanup 和 completed manifest 都持久完成后才发送 command completion。旧的 `steer_pending_prompt` 仍是单记录控制命令，Web UI 不再用它处理队列。所有 pending 命令都使用一次性 commandId 精确结算。
-- batch guidance 的模型侧原子消息与 wire transcript 的用户可见正文是两个投影边界：服务端仍向 SDK 持久写入 canonical envelope，但 `user_message` 和 `conversation_snapshot` 只发送其中按 FIFO 拼接的原始成员文本。wire 不携带 hostInstruction 或 batchId，也不让客户端解析 SDK envelope。
-- `pending_prompts_snapshot` 是独立于 transcript 的完整低频快照，携带 `sessionId + conversationId + focusId` 和最多 64 条严格 tagged records。queued 没有 dispatch 字段；dispatching 必须带 runId/dispatchedAt；attention 必须带有界 reason/attentionAt。初始化、focus attach、`refresh_view` 和当前 focus 队列变化都会发布；异步读取后必须复验原 view/focus，不能把 A 的队列投影到 B。
+- 消息与忙闲无关，随时可发。busy 时浏览器 `prompt` 直接进 SDK followUp 队列：服务端回 `prompt_admitted`（匹配 sessionId + promptId）即证明 SDK 已接受入队，`prompt_delivered`（raw user 持久化证明）才结算为已投递；admitted 是"等待中"，delivered 才是"已发送"。进程重启或 abort 时未投递消息丢失，UI 必须诚实显示等待中。abort 清空 followUp 队列与 admissions。
+- `conversation_snapshot` 携带有界 `pendingPrompts`（当前 focus 的 admitted 项，`promptId + text + createdAt` FIFO），断线/多窗口据此恢复等待中列表；它不是 transcript，不进入高频 PublicState。客户端不得自建重发、撤回或去重。
 - `browse_directory` 是 initialize 前的连接级只读控制命令，使用连接内一次性 commandId 关联 `directory_listing` 或 command error；`path` 是临时浏览位置，不是已提交项目 cwd。列表同时受项数和序列化字节数限制，迟到或不匹配的结果必须忽略。
 - OAuth login/request/progress/response/cancel/complete 显式携带 authFlowId；浏览器不得接收非当前 flow 的帧。
 - 扩展对话响应携带 sessionId / requestId；requestId 一次性使用，错类型、错选项、重复和 stale response 都是 no-op。
@@ -61,9 +60,9 @@ ClientCommand
 - `project_snapshot` 等控制面快照的 `truncated` 与 conversation 的结构化 `window` 都只描述浏览器投影覆盖范围，不能解释成 durable 数据被删除。当前 conversation 没有公开分页 cursor；在 load-older 命令及 stale-cursor 语义落地前不能先暴露伪 cursor。
 - sessionId、focusId 和 acknowledged commandId 在一个连接内不可复用，runId 在一个 session 内不可复用；它们是关联身份，不承诺任意网络命令的 exactly-once。
 - `run_queued → run_started → run_finished(outcome)` 由工作台适配层合成，不把 SDK 的 agent lifecycle 当成线协议真相。
-- `run_queued` 还有明确的接收回执语义：服务端已校验身份、占用不可复用 runId、安装 active RunTicket，并接受该 prompt 进入 actor 队列。浏览器只有收到精确匹配 focus 三元身份 + runId 的这一帧，才能清草稿并投影本地 user message。
+- `prompt_admitted` 是接收回执：服务端已校验身份并让该 prompt 进入 SDK followUp 队列（或已转成新 run）。浏览器只有收到精确匹配 focus 三元身份 + promptId 的这一帧，才能清草稿并投影"等待中" user message；`prompt_delivered` 才把它标为已投递。
 - runId 描述执行生命周期，不描述气泡生命周期。projector 为每条物理 assistant message 发送 `assistant_message_started`，steer 被 SDK 真正取用时另用 `user_message` 标出同一 run 内的新用户段；后续文本、思考、工具和 usage 仍归该 run，但 reducer 只写入最新 assistant 段。UI 可以合并没有 card/compaction/user 边界的同 run 相邻段，最终 focused snapshot 仍以 Pi durable entry 的 ordered parts 为准。
-- `WebSocket.send()` 不是协议提交点。直接 prompt 仍以精确 `run_queued` 为提交回执；durable enqueue 以 `command_complete(enqueue_prompt)` 或包含同一 promptId 的精确队列快照为提交证明。确认前断线是 unknown outcome；客户端必须保留草稿并在恢复 history/queue 后让用户核对，不能自动重试，也不能按正文去重。
+- `WebSocket.send()` 不是协议提交点。只有匹配 sessionId + promptId 的 `prompt_admitted` 才能清草稿；确认前断线是 unknown outcome，客户端必须保留草稿并在恢复后让用户核对，不能自动重试，也不能按正文去重。
 - 错误包含 `scope`，命令错误可包含 `operation`；需要精确结算的设置错误还必须携带 sessionId + commandId。通用设置错误不能结束一次运行。
 - context usage 保留 `measured | estimated | unknown` 来源，不把未知伪装成精确数字。
 
@@ -96,7 +95,7 @@ ClientCommand
 - 扩展 UI 文本与选项有独立上限；超限是扩展错误，不能静默截断后改变选择语义。
 - 大型或循环工具结果必须经过 `toWireValue()`；不要直接放入 `ServerEvent`。
 - 不要把完整 conversation list 放回 PublicState，也不要发送无总量上限的历史快照。conversation window 必须按最终 `JSON.stringify` UTF-8 bytes 计量；非空来源至少保留最新 item，不能因为最新 turn/item 单独超限而返回空快照。
-- 不要把 busy composer 消息直接变成易失 steer。它先由 `enqueue_prompt` 持久化；Web UI 的唯一队列 Steer 是 `steer_all_pending_prompts + batchId + 精确 active runId`，服务端权威冻结全部 queued 成员。不要用多次 `steer_pending_prompt`、`Promise.all(session.steer())` 或 `steeringMode=all` 冒充同一模型 turn。直接 prompt、底层 raw steer 与 durable pending batch 是不同提交边界，身份不匹配的回执必须忽略。pending command error 都必须携带完整 `sessionId + commandId + conversationId + focusId`，Steer error 还必须带 runId；客户端每个 conversation 同时只允许一个尚未 ack 的 enqueue 和一个 batch Steer，避免 unknown-outcome 被自动重放。
+- 不要把 busy composer 消息直接变成易失 steer。浏览器唯一路径是带 promptId 的 `prompt`：服务端按忙闲分流（busy 进 SDK followUp 队列，idle 起新 run），投递证明只能凭 exact promptId + runId 的 raw user 持久化 receipt，run settlement 本身不是交付证明。底层 raw steer 只保留给 extension UI 与 inbox 等宿主内部路径。
 - 不要只按 conversationId 过滤 transcript。conversationId 会在 `A → B → A` 中重复，focusId 才能阻断 ABA。
 
 ## 关联模块

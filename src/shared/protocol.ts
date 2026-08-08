@@ -18,7 +18,9 @@ export const MAX_PENDING_PROMPT_ATTENTION_REASON_CHARACTERS = 1_000;
 export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
-export const PROTOCOL_VERSION = 29;
+// v30: 删除 pending prompt 队列五命令与 pending_prompts_snapshot，busy 消息改走
+// SDK followUp（prompt 带 promptId，prompt_admitted/prompt_delivered 事件）。
+export const PROTOCOL_VERSION = 30;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();

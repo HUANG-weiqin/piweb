@@ -28,7 +28,6 @@ import {
 } from "./conversation-meta.js";
 import {
   ConversationActor,
-  isConversationSteerDeliveryError,
   type ConversationActorCompletion,
   type ConversationActorEvent,
   type ConversationRunOwnership,
@@ -82,11 +81,6 @@ import {
   type InboxEnvelope,
   type InboxEnvelopeInput,
 } from "./project-inbox.js";
-import {
-  projectPromptPayloadSha256,
-  type ProjectPromptRecord,
-  type PromptQueuePutResult,
-} from "./project-prompt-queue.js";
 import {
   ProjectStoreRegistry,
   type ProjectStore,
@@ -2683,23 +2677,6 @@ export class ProjectSessionCoordinator {
     );
   }
 
-
-  private async recoverTemporary(
-    context: ProjectContext,
-    actor: ConversationActor,
-  ): Promise<void> {
-    if (context.closing) return;
-    const lifecycle = actor.profile.lifecycle;
-    if (lifecycle.kind !== "temporary") return;
-    const settlement = aggregateReservedConversationEntries(
-      actor.sessionManager.getEntries(),
-    ).runSettlements.find(({ runId }) => runId === lifecycle.initialRunId);
-    if (!settlement) return;
-    await this.runLifecycle(context, () =>
-      this.handleTemporaryCompletion(context, actor, settlement)
-    );
-  }
-
   private loadOrMigrateProfile(
     manager: Awaited<ReturnType<ProjectStore["openConversation"]>>,
   ): ConversationMeta {
@@ -5259,36 +5236,6 @@ export class ProjectSessionCoordinator {
     const actor = context.actors.get(conversationId);
     if (!actor) throw new Error(`Conversation is not active: ${conversationId}`);
     return actor;
-  }
-
-  private assertPromptConversation(
-    context: ProjectContext,
-    conversationId: string,
-  ): void {
-    if (context.deleting.has(conversationId)) {
-      throw new Error(`Conversation is being deleted: ${conversationId}`);
-    }
-    if (
-      !context.actors.has(conversationId)
-      && !context.project.listConversations().some(({ id }) => id === conversationId)
-    ) {
-      throw new Error(`Conversation not found: ${conversationId}`);
-    }
-  }
-
-  private assertExactPrompt(
-    prompts: readonly ProjectPromptRecord[],
-    conversationId: string,
-    promptId: string,
-  ): ProjectPromptRecord {
-    const prompt = prompts.find(({ promptId: candidate }) => candidate === promptId);
-    if (prompt === undefined) {
-      throw new Error(`Prompt not found: ${promptId}`);
-    }
-    if (prompt.conversationId !== conversationId) {
-      throw new Error(`Prompt conversation identity does not match: ${promptId}`);
-    }
-    return prompt;
   }
 
   private requireContext(handle: ProjectSessionHandle): ProjectContext {
