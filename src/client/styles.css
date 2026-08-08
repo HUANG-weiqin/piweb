@@ -1316,6 +1316,69 @@ pre {
   }
 }
 
+.pending-admissions {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+
+.pending-admission-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  max-width: min(80%, 640px);
+  margin-left: auto;
+  padding: 9px 12px 9px 14px;
+  border: 1px dashed color-mix(in srgb, var(--warning) 45%, var(--line));
+  border-radius: 14px 14px 5px 14px;
+  background: color-mix(in srgb, var(--warning) 7%, var(--panel));
+  box-shadow: 0 4px 14px rgb(35 31 23 / 5%);
+  line-height: 1.6;
+}
+
+.pending-admission-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  color: color-mix(in srgb, currentColor 90%, var(--muted));
+}
+
+.pending-admission-status {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  color: var(--warning);
+  background: var(--warning-soft);
+  font-size: 11px;
+  font-weight: 620;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.pending-admission-status::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: pending-admission-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes pending-admission-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
 .composer-wrap {
   position: absolute;
   right: 0;
