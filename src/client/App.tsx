@@ -772,6 +772,7 @@ export function App() {
     setConversationReady(ready);
   };
   const clearSessionProjection = () => {
+    cachedPresentationKeyRef.current = "";
     setState(undefined);
     setConversations([]);
     setRoles([]);
@@ -879,6 +880,8 @@ export function App() {
           conversationIdRef.current = "";
           focusRef.current = undefined;
           authFlowIdRef.current = "";
+          cachedPresentationKeyRef.current = "";
+          updateWorkspaceSyncing(false);
           updateDirectoryBrowser(undefined);
           markPendingPromptUnconfirmed();
           updatePendingConversationDeletion(undefined);
@@ -895,23 +898,54 @@ export function App() {
         setProtocolReady(true);
         setSetupCwd((current) => current || event.startupCwd);
         if (activeCwdRef.current) {
+          const previousConversationId = conversationIdRef.current;
+          const cached = getWorkspaceProjection(
+            workspaceProjectionCacheRef.current,
+            currentWorkspaceKey(),
+          );
+          let conversation: Extract<
+            ClientCommand,
+            { type: "initialize" }
+          >["conversation"];
+          if (cached) {
+            conversation = {
+              kind: "open",
+              conversationId: cached.conversationId,
+            };
+          } else if (previousConversationId) {
+            conversation = {
+              kind: "open",
+              conversationId: previousConversationId,
+            };
+          } else {
+            conversation = { kind: "recent" };
+          }
           const sessionId = crypto.randomUUID();
           const commandId = crypto.randomUUID();
           sessionIdRef.current = sessionId;
           authFlowIdRef.current = "";
+          projectIdRef.current = "";
+          focusRef.current = undefined;
+          conversationIdRef.current = conversation.kind === "open"
+            ? conversation.conversationId
+            : "";
           updateOutstandingRunId("");
           setAuth({});
           dispatch({ type: "reset" });
           clearSessionProjection();
-          updatePendingFocus({ commandId, operation: "initialize" });
+          updateWorkspaceSyncing(Boolean(cached));
+          if (cached) showCachedPresentation(cached, sessionId);
+          updatePendingFocus({
+            commandId,
+            operation: "initialize",
+            ...(cached ? { cachedProjectId: cached.projectId } : {}),
+          });
           socket.send({
             type: "initialize",
             commandId,
             sessionId,
             cwd: activeCwdRef.current,
-            conversation: conversationIdRef.current
-              ? { kind: "open", conversationId: conversationIdRef.current }
-              : { kind: "recent" },
+            conversation,
           });
         }
       } else if (event.type === "directory_listing") {
@@ -1435,8 +1469,9 @@ export function App() {
           ) {
             updateConversationReady(true);
           }
-          if (event.operation === "initialize" && pending.cachedProjectId) {
-            discardCachedPresentation();
+          if (event.operation === "initialize") {
+            if (pending.cachedProjectId) discardCachedPresentation();
+            conversationIdRef.current = "";
             updateWorkspaceSyncing(false);
           }
           if (event.operation === "initialize" && activeCwdRef.current) {
@@ -1729,6 +1764,19 @@ export function App() {
       updateWorkspaceSyncing(false);
       markWorkspaceUnavailable(normalizedCwd);
     }
+  };
+  const initializeWorkspace = (cwd: string) => {
+    const cached = getWorkspaceProjection(
+      workspaceProjectionCacheRef.current,
+      workspaceKey(cwd),
+    );
+    initialize(
+      cwd,
+      cached
+        ? { kind: "open", conversationId: cached.conversationId }
+        : { kind: "recent" },
+      cached,
+    );
   };
   const sendPrompt = (text: string): boolean => {
     const trimmed = text.trim();
@@ -2077,18 +2125,7 @@ export function App() {
       return;
     }
     cacheCurrentWorkspaceProjection();
-    const key = workspaceKey(cwd);
-    const cached = getWorkspaceProjection(
-      workspaceProjectionCacheRef.current,
-      key,
-    );
-    initialize(
-      cwd,
-      cached
-        ? { kind: "open", conversationId: cached.conversationId }
-        : { kind: "recent" },
-      cached,
-    );
+    initializeWorkspace(cwd);
   };
   const removeWorkspace = (cwd: string) => {
     const key = workspaceKey(cwd);
@@ -2113,8 +2150,7 @@ export function App() {
 
     const fallback = next.at(-1);
     if (fallback) {
-      switchWorkspace(fallback);
-      forgetWorkspaceProjection(workspaceProjectionCacheRef.current, key);
+      initializeWorkspace(fallback);
       return;
     }
 
@@ -2128,6 +2164,7 @@ export function App() {
     setActiveCwd("");
     setSetupCwd("");
     setError("");
+    updateWorkspaceSyncing(false);
     clearSessionProjection();
     dispatch({ type: "reset" });
   };
