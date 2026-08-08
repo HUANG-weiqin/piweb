@@ -48,7 +48,11 @@ function makeFakeStreamFn(calls: LlmCall[], onCall?: (n: number) => void) {
 
 interface EventRecord { type: string; role?: string; text?: string }
 
-function makeAgent(calls: LlmCall[], events: EventRecord[]) {
+function makeAgent(
+  calls: LlmCall[],
+  events: EventRecord[],
+  steeringMode: "all" | "one-at-a-time" = "one-at-a-time",
+) {
   const agent = new Agent({
     initialState: {
       systemPrompt: "",
@@ -61,7 +65,7 @@ function makeAgent(calls: LlmCall[], events: EventRecord[]) {
       if (n > 0) setTimeout(() => calls[n]!.release(), 10);
     }),
     convertToLlm: (messages: unknown[]) => messages as never,
-    steeringMode: "one-at-a-time",
+    steeringMode,
     followUpMode: "one-at-a-time",
   });
   agent.subscribe(async (event: { type: string; message?: { role: string; content?: Array<{ text?: string }> } }) => {
@@ -178,6 +182,28 @@ async function main() {
     console.log(`  [t3] run 结束后 followUp 才被读取: ${calls[2]!.userTexts.includes("followUp 消息")}`);
     calls[2]!.release();
     await run;
+  }
+
+  console.log("\n=== 场景 6：steeringMode=all 时多条用户消息一次全部注入 ===");
+  {
+    const calls: LlmCall[] = [];
+    const events: EventRecord[] = [];
+    const agent = makeAgent(calls, events, "all");
+    const run = agent.prompt([{ role: "user", content: [{ type: "text", text: "busy" }], timestamp: Date.now() }] as never);
+    await waitFor(() => calls.length === 1, "llm#0");
+    // busy 期间用户连发 3 条
+    agent.steer({ role: "user", content: [{ type: "text", text: "M1" }], timestamp: Date.now() });
+    agent.steer({ role: "user", content: [{ type: "text", text: "M2" }], timestamp: Date.now() });
+    agent.steer({ role: "user", content: [{ type: "text", text: "M3" }], timestamp: Date.now() });
+    console.log("  [t1] busy 中连发 M1/M2/M3（均入 steering 队列）");
+    calls[0]!.release();
+    await waitFor(() => calls.length >= 2, "llm#1");
+    const injected = calls[1]!.userTexts.filter((t) => t.startsWith("M"));
+    console.log(`  [t2] llm#1 一次看到全部: ${JSON.stringify(injected)}（all=${injected.length === 3}）`);
+    calls[1]!.release();
+    await run;
+    const userEnds = events.filter((e) => e.type === "message_end" && e.role === "user" && e.text?.startsWith("M"));
+    console.log(`  [t3] 注入事件连续发生: ${userEnds.map((e) => e.text).join(",")}`);
   }
 
   console.log("\n全部场景验证完成 ✓");

@@ -446,6 +446,36 @@ describe("PiRuntime session ownership", () => {
     await created.dispose();
   });
 
+  it("sets steeringMode=all so queued prompts drain in one model turn", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-steering-mode-"));
+    const authStorage = AuthStorage.inMemory();
+    const runtime = new PiRuntime({
+      authStorage,
+      modelRegistry: ModelRegistry.inMemory(authStorage),
+      createModelRegistry: (storage) => ModelRegistry.inMemory(storage),
+      createSettings: () => SettingsManager.inMemory(),
+      createSession: async (options) => {
+        const resourceLoader = new DefaultResourceLoader({
+          cwd,
+          agentDir: cwd,
+          settingsManager: options.settingsManager,
+          noExtensions: true,
+          noSkills: true,
+          noPromptTemplates: true,
+          noThemes: true,
+          noContextFiles: true,
+        });
+        await resourceLoader.reload();
+        return createAgentSession({ ...options, resourceLoader });
+      },
+    });
+
+    const created = await runtime.createSession(cwd);
+    expect(created.session.agent.steeringMode).toBe("all");
+    expect(created.settings.getSteeringMode()).toBe("one-at-a-time");
+    await created.dispose();
+  });
+
   it("defaults to an in-memory manager and passes an explicit manager through", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-manager-"));
     const managers: SessionManager[] = [];

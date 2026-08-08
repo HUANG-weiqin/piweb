@@ -514,6 +514,12 @@ export class PiRuntime implements PiRuntimeLike {
         });
       }
       createdSession = created.session;
+      // 消息直通：busy 时浏览器 prompt 进 SDK steering 队列，排队消息必须一次
+      // 全部注入（one-at-a-time 会让每条消息各占一个完整模型轮次，用户连发多条
+      // 时 agent 逐条执行、无法整体理解意图）。inbox 消息同队列也批量注入。
+      // 不用 setSteeringMode()：它会 markModified 并把 all 写进用户 settings.json。
+      // Agent.steeringMode 公开 setter 直接改 PendingMessageQueue.mode（drain 时实时读取）。
+      createdSession.agent.steeringMode = "all";
       installToolResultCompression(createdSession);
       if (readOnlyToolProjection) {
         toolProjectionAdapter = installReadOnlyToolProjection(createdSession);
