@@ -161,13 +161,6 @@ vi.mock("./lib/socket", () => ({
             messages: [],
             window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
           });
-          onEvent({
-            type: "pending_prompts_snapshot",
-            sessionId: completed.state.sessionId,
-            conversationId: completed.state.conversationId,
-            focusId: completed.state.focusId,
-            prompts: [],
-          });
         }
       };
       socketMock.instances.push({ emit, rawEmit, status: onStatus });

@@ -14,7 +14,6 @@ import type {
   ConversationHistoryItem,
   ConversationSummary,
   FocusAttachedOperation,
-  PendingPrompt,
   PublicState,
   ServerEvent,
   SessionEvent,
@@ -52,7 +51,6 @@ import {
   type ProjectSessionCoordinatorEvent,
   type ProjectSessionHandle,
 } from "./project-session-coordinator.js";
-import type { ProjectPromptRecord } from "./project-prompt-queue.js";
 import {
   conversationDisplayTitle,
   projectConversationIndex,
@@ -154,12 +152,7 @@ type QueuedCommand = Exclude<ConnectionCommand, {
     | "initialize"
     | "prompt"
     | "refresh_view"
-    | "steer"
-    | "enqueue_prompt"
-    | "steer_pending_prompt"
-    | "steer_all_pending_prompts"
-    | "withdraw_pending_prompt"
-    | "dismiss_pending_prompt";
+    | "steer";
 }>;
 type ConversationTarget = NonNullable<
   Extract<ClientCommand, { type: "initialize" }>["conversation"]
@@ -170,37 +163,6 @@ function assertNever(value: never): never {
   throw new Error(`Unhandled command type: ${String(type)}`);
 }
 
-function projectPendingPrompt(prompt: ProjectPromptRecord): PendingPrompt {
-  switch (prompt.state) {
-    case "queued":
-      return {
-        promptId: prompt.promptId,
-        text: prompt.text,
-        createdAt: prompt.createdAt,
-        state: "queued",
-      };
-    case "dispatching":
-      return {
-        promptId: prompt.promptId,
-        text: prompt.text,
-        createdAt: prompt.createdAt,
-        state: "dispatching",
-        runId: prompt.runId,
-        dispatchedAt: prompt.dispatchedAt,
-      };
-    case "attention":
-      return {
-        promptId: prompt.promptId,
-        text: prompt.text,
-        createdAt: prompt.createdAt,
-        state: "attention",
-        reason: prompt.reason,
-        attentionAt: prompt.attentionAt,
-      };
-    default:
-      return assertNever(prompt);
-  }
-}
 
 function queuedCommandScope(command: QueuedCommand): "session" | "epoch" | "global" {
   if ((command as { type: string }).type === "set_tool_mode") return "session";
@@ -584,17 +546,6 @@ export class PiConnection {
         new Error("steer requires persistent project coordination"),
       );
     }
-    if (
-      command.type === "enqueue_prompt"
-      || command.type === "steer_pending_prompt"
-      || command.type === "steer_all_pending_prompts"
-      || command.type === "withdraw_pending_prompt"
-      || command.type === "dismiss_pending_prompt"
-    ) {
-      return Promise.reject(
-        new Error(`${command.type} requires persistent project coordination`),
-      );
-    }
     if (command.type === "initialize") {
       if (this.usedSessionIds.has(command.sessionId)) {
         return Promise.reject(new Error("Session ID was already used on this connection"));
@@ -792,77 +743,6 @@ export class PiConnection {
             command.text,
           )
         ).then(() => {
-          this.emitCommandComplete(command);
-        });
-      } catch (error) {
-        return Promise.reject(error);
-      }
-    }
-    if (
-      command.type === "enqueue_prompt"
-      || command.type === "steer_pending_prompt"
-      || command.type === "steer_all_pending_prompts"
-      || command.type === "withdraw_pending_prompt"
-      || command.type === "dismiss_pending_prompt"
-    ) {
-      try {
-        if (this.usedCommandIds.has(command.commandId)) {
-          return Promise.reject(
-            new Error("Command ID was already used on this connection"),
-          );
-        }
-        this.usedCommandIds.add(command.commandId);
-        const view = this.requireCoordinatedFocus(
-          command.sessionId,
-          command.conversationId,
-          command.focusId,
-        );
-        return this.requireCoordination().then(async ({ coordinator }) => {
-          switch (command.type) {
-            case "enqueue_prompt":
-              await coordinator.enqueuePrompt(
-                view.handle,
-                command.conversationId,
-                { promptId: command.promptId, text: command.text },
-              );
-              break;
-            case "steer_pending_prompt":
-              await coordinator.steerQueuedPrompt(
-                view.handle,
-                command.conversationId,
-                command.promptId,
-                command.runId,
-              );
-              break;
-            case "steer_all_pending_prompts":
-              await coordinator.steerAllQueuedPrompts(
-                view.handle,
-                command.conversationId,
-                command.batchId,
-                command.runId,
-              );
-              break;
-            case "withdraw_pending_prompt":
-              if (!await coordinator.withdrawQueuedPrompt(
-                view.handle,
-                command.conversationId,
-                command.promptId,
-              )) {
-                throw new Error(`Only queued prompts can be withdrawn: ${command.promptId}`);
-              }
-              break;
-            case "dismiss_pending_prompt":
-              if (!await coordinator.dismissAttentionPrompt(
-                view.handle,
-                command.conversationId,
-                command.promptId,
-              )) {
-                throw new Error(`Attention prompt was not dismissed: ${command.promptId}`);
-              }
-              break;
-            default:
-              return assertNever(command);
-          }
           this.emitCommandComplete(command);
         });
       } catch (error) {
@@ -1184,7 +1064,6 @@ export class PiConnection {
       this.publishProjectSnapshotCoordinated();
       this.publishRoleCatalog();
       this.publishFocusedConversationSnapshot();
-      this.publishFocusedPendingPromptSnapshot();
     } finally {
       signal.removeEventListener("abort", abortExtensions);
       if (!transferred) {
@@ -1224,10 +1103,6 @@ export class PiConnection {
       | { type: "prompt" }
       | { type: "refresh_view" }
       | { type: "steer" }
-      | { type: "enqueue_prompt" }
-      | { type: "steer_pending_prompt" }
-      | { type: "withdraw_pending_prompt" }
-      | { type: "dismiss_pending_prompt" }
       | { type: "switch_conversation_role" }
     >,
     transitionAbort?: AbortController,
@@ -1551,7 +1426,6 @@ export class PiConnection {
     this.publishProjectSnapshotCoordinated();
     this.publishRoleCatalog();
     this.publishFocusedConversationSnapshot();
-    this.publishFocusedPendingPromptSnapshot();
   }
 
   private emitFocusAttached(
@@ -1627,11 +1501,6 @@ export class PiConnection {
         this.publishFocusedConversationItems();
       }
       this.publishProjectSnapshotCoordinated();
-      return;
-    }
-
-    if (event.type === "pending_prompts_changed") {
-      this.emitFocusedPendingPromptSnapshot(view, event.conversationId, event.prompts);
       return;
     }
 
@@ -1985,63 +1854,6 @@ export class PiConnection {
     }
   }
 
-  private publishFocusedPendingPromptSnapshot(): void {
-    const view = this.coordinatedView;
-    const conversationId = view?.conversationId;
-    const focusId = view?.focusId;
-    if (
-      !view
-      || conversationId === undefined
-      || focusId === undefined
-      || !this.isCurrentCoordinatedView(view)
-    ) {
-      return;
-    }
-    void view.coordinator.listPendingPrompts(view.handle, conversationId).then(
-      (prompts) => {
-        this.emitFocusedPendingPromptSnapshot(
-          view,
-          conversationId,
-          prompts,
-          focusId,
-        );
-      },
-      (error: unknown) => {
-        if (
-          this.isCurrentCoordinatedView(view)
-          && view.conversationId === conversationId
-          && view.focusId === focusId
-        ) {
-          this.emitError("session", error, view.sessionId);
-        }
-      },
-    );
-  }
-
-  private emitFocusedPendingPromptSnapshot(
-    view: CoordinatedProjectView,
-    conversationId: string,
-    prompts: readonly ProjectPromptRecord[],
-    expectedFocusId?: string,
-  ): void {
-    const focusId = expectedFocusId ?? view.focusId;
-    if (
-      focusId === undefined
-      || !this.isCurrentCoordinatedView(view)
-      || view.conversationId !== conversationId
-      || view.focusId !== focusId
-    ) {
-      return;
-    }
-    this.emit({
-      type: "pending_prompts_snapshot",
-      sessionId: view.sessionId,
-      conversationId,
-      focusId,
-      prompts: prompts.map(projectPendingPrompt),
-    });
-  }
-
   private publishFocusedConversationItems(): void {
     const view = this.coordinatedView;
     const actor = view?.actor;
@@ -2187,7 +1999,6 @@ export class PiConnection {
     if (view.actor && !view.actor.isCompacting()) {
       this.publishFocusedConversationSnapshot();
     }
-    this.publishFocusedPendingPromptSnapshot();
   }
 
   private refreshLegacyView(

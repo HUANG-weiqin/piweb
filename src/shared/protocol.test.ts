@@ -117,49 +117,6 @@ describe("parseClientCommand", () => {
       text: "change direction",
     }).type).toBe("steer");
     expect(parseClientCommand({
-      type: "enqueue_prompt",
-      commandId,
-      sessionId,
-      conversationId,
-      focusId,
-      promptId: targetConversationId,
-      text: "Handle this after the current run",
-    }).type).toBe("enqueue_prompt");
-    expect(parseClientCommand({
-      type: "steer_pending_prompt",
-      commandId,
-      sessionId,
-      conversationId,
-      focusId,
-      promptId: targetConversationId,
-      runId,
-    }).type).toBe("steer_pending_prompt");
-    expect(parseClientCommand({
-      type: "steer_all_pending_prompts",
-      commandId,
-      sessionId,
-      conversationId,
-      focusId,
-      batchId: targetConversationId,
-      runId,
-    }).type).toBe("steer_all_pending_prompts");
-    expect(parseClientCommand({
-      type: "withdraw_pending_prompt",
-      commandId,
-      sessionId,
-      conversationId,
-      focusId,
-      promptId: targetConversationId,
-    }).type).toBe("withdraw_pending_prompt");
-    expect(parseClientCommand({
-      type: "dismiss_pending_prompt",
-      commandId,
-      sessionId,
-      conversationId,
-      focusId,
-      promptId: targetConversationId,
-    }).type).toBe("dismiss_pending_prompt");
-    expect(parseClientCommand({
       type: "abort",
       sessionId,
       conversationId,
@@ -240,33 +197,6 @@ describe("parseClientCommand", () => {
     expect(() => parseClientCommand({ type: "prompt", sessionId, runId, text: "  " })).toThrow();
     expect(() => parseClientCommand({ type: "prompt", text: "hello" })).toThrow();
     expect(() => parseClientCommand({ type: "abort", sessionId, runId: "not-a-uuid" })).toThrow();
-    expect(() => parseClientCommand({
-      type: "enqueue_prompt",
-      commandId,
-      sessionId,
-      conversationId,
-      focusId,
-      promptId: targetConversationId,
-      text: "queued work",
-      unexpected: true,
-    })).toThrow();
-    expect(() => parseClientCommand({
-      type: "steer_all_pending_prompts",
-      commandId,
-      sessionId,
-      conversationId,
-      focusId,
-      runId,
-    })).toThrow();
-    expect(() => parseClientCommand({
-      type: "steer_all_pending_prompts",
-      commandId,
-      sessionId,
-      conversationId,
-      focusId,
-      batchId: "not-a-uuid",
-      runId,
-    })).toThrow();
     expect(() => parseClientCommand({
       type: "extension_ui_response",
       sessionId,
@@ -806,36 +736,8 @@ describe("parseClientCommand", () => {
       message: "ready",
     }).type).toBe("extension_ui_notification");
     expect(parseServerEvent({
-      type: "pending_prompts_snapshot",
-      sessionId,
-      conversationId,
-      focusId,
-      prompts: [
-        {
-          promptId: targetConversationId,
-          text: "queued work",
-          createdAt: "2026-01-01T00:00:00.000Z",
-          state: "queued",
-        },
-        {
-          promptId: commandId,
-          text: "sent work",
-          createdAt: "2026-01-01T00:00:00.000Z",
-          state: "dispatching",
-          runId,
-          dispatchedAt: "2026-01-01T00:01:00.000Z",
-        },
-      ],
-    }).type).toBe("pending_prompts_snapshot");
-    expect(parseServerEvent({
       type: "command_complete",
       operation: "steer",
-      commandId,
-      sessionId,
-    }).type).toBe("command_complete");
-    expect(parseServerEvent({
-      type: "command_complete",
-      operation: "enqueue_prompt",
       commandId,
       sessionId,
     }).type).toBe("command_complete");
@@ -874,27 +776,6 @@ describe("parseClientCommand", () => {
       commandId,
     }).type).toBe("error");
     expect(parseServerEvent({
-      type: "error",
-      message: "batch steer failed",
-      scope: "command",
-      operation: "steer_all_pending_prompts",
-      sessionId,
-      runId,
-      conversationId,
-      focusId,
-      commandId,
-    }).type).toBe("error");
-    expect(parseServerEvent({
-      type: "error",
-      message: "queue failed",
-      scope: "command",
-      operation: "enqueue_prompt",
-      sessionId,
-      conversationId,
-      focusId,
-      commandId,
-    }).type).toBe("error");
-    expect(parseServerEvent({
       type: "auth_progress",
       authFlowId,
       message: "waiting",
@@ -917,23 +798,6 @@ describe("parseClientCommand", () => {
       sessionId,
       runId,
       event: { type: "run_finished" },
-    })).toThrow();
-    expect(() => parseServerEvent({
-      type: "error",
-      message: "queue failed without exact focus",
-      scope: "command",
-      operation: "enqueue_prompt",
-      sessionId,
-      commandId,
-    })).toThrow();
-    expect(() => parseServerEvent({
-      type: "error",
-      message: "queue failed without command identity",
-      scope: "command",
-      operation: "withdraw_pending_prompt",
-      sessionId,
-      conversationId,
-      focusId,
     })).toThrow();
     expect(() => parseServerEvent({
       type: "command_complete",

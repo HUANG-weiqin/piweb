@@ -21,14 +21,6 @@ export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 export const PROTOCOL_VERSION = 29;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 const required = z.string().trim().min(1);
-const canonicalTimestampSchema = z.string().refine(
-  (value) => {
-    const timestamp = Date.parse(value);
-    return Number.isFinite(timestamp)
-      && new Date(timestamp).toISOString() === value;
-  },
-  "must be a canonical ISO timestamp",
-);
 const sessionIdSchema = z.string().uuid();
 const conversationIdSchema = z.string()
   .min(1)
@@ -227,49 +219,6 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
     text: required.max(MAX_PROMPT_CHARACTERS),
   }),
   z.object({
-    type: z.literal("enqueue_prompt"),
-    commandId: commandIdSchema,
-    sessionId: sessionIdSchema,
-    conversationId: conversationIdSchema,
-    focusId: focusIdSchema,
-    promptId: z.string().uuid(),
-    text: required.max(MAX_PROMPT_CHARACTERS),
-  }).strict(),
-  z.object({
-    type: z.literal("steer_pending_prompt"),
-    commandId: commandIdSchema,
-    sessionId: sessionIdSchema,
-    conversationId: conversationIdSchema,
-    focusId: focusIdSchema,
-    promptId: z.string().uuid(),
-    runId: runIdSchema,
-  }).strict(),
-  z.object({
-    type: z.literal("steer_all_pending_prompts"),
-    commandId: commandIdSchema,
-    sessionId: sessionIdSchema,
-    conversationId: conversationIdSchema,
-    focusId: focusIdSchema,
-    batchId: z.string().uuid(),
-    runId: runIdSchema,
-  }).strict(),
-  z.object({
-    type: z.literal("withdraw_pending_prompt"),
-    commandId: commandIdSchema,
-    sessionId: sessionIdSchema,
-    conversationId: conversationIdSchema,
-    focusId: focusIdSchema,
-    promptId: z.string().uuid(),
-  }).strict(),
-  z.object({
-    type: z.literal("dismiss_pending_prompt"),
-    commandId: commandIdSchema,
-    sessionId: sessionIdSchema,
-    conversationId: conversationIdSchema,
-    focusId: focusIdSchema,
-    promptId: z.string().uuid(),
-  }).strict(),
-  z.object({
     type: z.literal("abort"),
     sessionId: sessionIdSchema,
     conversationId: conversationIdSchema,
@@ -419,11 +368,6 @@ const ACKNOWLEDGED_COMMAND_OPERATIONS = [
   "select_model",
   "set_api_key",
   "steer",
-  "enqueue_prompt",
-  "steer_pending_prompt",
-  "steer_all_pending_prompts",
-  "withdraw_pending_prompt",
-  "dismiss_pending_prompt",
   "set_compaction_threshold",
   "compact_context",
   "switch_conversation_role",
@@ -437,30 +381,6 @@ export type AcknowledgedCommandOperation =
   typeof ACKNOWLEDGED_COMMAND_OPERATIONS[number];
 export type ThinkingLevel = Extract<ClientCommand, { type: "set_thinking" }>["level"];
 export type ToolMode = "read_only" | "full_access";
-
-export type PendingPrompt =
-  | {
-      promptId: string;
-      text: string;
-      createdAt: string;
-      state: "queued";
-    }
-  | {
-      promptId: string;
-      text: string;
-      createdAt: string;
-      state: "dispatching";
-      runId: string;
-      dispatchedAt: string;
-    }
-  | {
-      promptId: string;
-      text: string;
-      createdAt: string;
-      state: "attention";
-      reason: string;
-      attentionAt: string;
-    };
 
 export interface PublicModel {
   provider: string;
@@ -768,13 +688,6 @@ export type ServerEvent =
       truncated: boolean;
     }
   | {
-      type: "pending_prompts_snapshot";
-      sessionId: string;
-      conversationId: string;
-      focusId: string;
-      prompts: PendingPrompt[];
-    }
-  | {
       /** 浏览器 prompt 已被服务端接受（busy 时进入 followUp 队列，尚未投递）。 */
       type: "prompt_admitted";
       sessionId: string;
@@ -954,30 +867,6 @@ const authRequestSchema: z.ZodType<AuthRequest> = z.discriminatedUnion("kind", [
     options: z.array(z.object({ id: z.string(), label: z.string() })),
   }),
 ]);
-const pendingPromptSchema: z.ZodType<PendingPrompt> = z.discriminatedUnion("state", [
-  z.object({
-    promptId: z.string().uuid(),
-    text: required.max(MAX_PROMPT_CHARACTERS),
-    createdAt: canonicalTimestampSchema,
-    state: z.literal("queued"),
-  }).strict(),
-  z.object({
-    promptId: z.string().uuid(),
-    text: required.max(MAX_PROMPT_CHARACTERS),
-    createdAt: canonicalTimestampSchema,
-    state: z.literal("dispatching"),
-    runId: runIdSchema,
-    dispatchedAt: canonicalTimestampSchema,
-  }).strict(),
-  z.object({
-    promptId: z.string().uuid(),
-    text: required.max(MAX_PROMPT_CHARACTERS),
-    createdAt: canonicalTimestampSchema,
-    state: z.literal("attention"),
-    reason: required.max(MAX_PENDING_PROMPT_ATTENTION_REASON_CHARACTERS),
-    attentionAt: canonicalTimestampSchema,
-  }).strict(),
-]);
 const sessionEventSchema: z.ZodType<SessionEvent> = z.discriminatedUnion("type", [
   z.object({ type: z.literal("run_queued") }),
   z.object({ type: z.literal("run_started") }),
@@ -1029,11 +918,6 @@ const commandTypeSchema = z.enum([
   "create_conversation",
   "prompt",
   "steer",
-  "enqueue_prompt",
-  "steer_pending_prompt",
-  "steer_all_pending_prompts",
-  "withdraw_pending_prompt",
-  "dismiss_pending_prompt",
   "abort",
   "extension_ui_response",
   "select_model",
@@ -1300,13 +1184,6 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     truncated: z.boolean(),
   }),
   z.object({
-    type: z.literal("pending_prompts_snapshot"),
-    sessionId: sessionIdSchema,
-    conversationId: conversationIdSchema,
-    focusId: focusIdSchema,
-    prompts: z.array(pendingPromptSchema).max(MAX_PENDING_PROMPTS_PER_CONVERSATION),
-  }).strict(),
-  z.object({
     type: z.literal("prompt_admitted"),
     sessionId: sessionIdSchema,
     conversationId: conversationIdSchema,
@@ -1525,32 +1402,6 @@ export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.
       context.addIssue({
         code: z.ZodIssueCode.custom,
         message: "steer command errors require the complete command and run focus identity",
-        path: ["focusId"],
-      });
-    }
-    if (
-      event.type === "error"
-      && event.scope === "command"
-      && (
-        event.operation === "enqueue_prompt"
-        || event.operation === "steer_pending_prompt"
-        || event.operation === "steer_all_pending_prompts"
-        || event.operation === "withdraw_pending_prompt"
-        || event.operation === "dismiss_pending_prompt"
-      )
-      && (
-        event.sessionId === undefined
-        || event.commandId === undefined
-        || event.conversationId === undefined
-        || event.focusId === undefined
-        || ((event.operation === "steer_pending_prompt"
-          || event.operation === "steer_all_pending_prompts")
-          && event.runId === undefined)
-      )
-    ) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "pending prompt command errors require the complete command focus identity",
         path: ["focusId"],
       });
     }

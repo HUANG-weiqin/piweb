@@ -919,25 +919,6 @@ export function App() {
           || event.createdBy.kind !== "user"
         ) return;
         completionSoundRef.current?.play();
-      } else if (event.type === "pending_prompts_snapshot") {
-        if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;
-        const focus = focusRef.current;
-        const unconfirmed = focus
-          ? unconfirmedPromptByConversationRef.current.get(
-              unconfirmedPromptKey(focus),
-            )
-          : undefined;
-        if (
-          focus
-          && unconfirmed?.promptId !== undefined
-          && event.prompts.some(({ promptId }) => promptId === unconfirmed.promptId)
-        ) {
-          unconfirmedPromptByConversationRef.current.delete(
-            unconfirmedPromptKey(focus),
-          );
-          if (!unconfirmed.edited) updateDraft("");
-          setPromptNotice("");
-        }
       } else if (event.type === "prompt_admitted") {
         if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;
         // busy 路径回执：消息已进 followUp 队列，清草稿并显示为等待中。

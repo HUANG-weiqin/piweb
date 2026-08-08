@@ -39,10 +39,6 @@ import {
   type RunSettlement,
 } from "./conversation-meta.js";
 import {
-  createPendingPromptBatchGuidance,
-  pendingPromptBatchDisplayText,
-} from "./pending-prompt-batch-guidance.js";
-import {
   type CreatedPiSession,
   type CreatePiSessionOptions,
   type PiRuntimeLike,
@@ -316,8 +312,6 @@ export function isConversationSteerDeliveryError(
 ): error is ConversationSteerDeliveryError {
   return error instanceof ConversationSteerDeliveryError;
 }
-
-export { createPendingPromptBatchGuidance };
 
 function rawUserMessageIsPersisted(
   entries: readonly unknown[],
@@ -1112,28 +1106,6 @@ export class ConversationActor {
         error,
       );
     });
-  }
-
-  /** Queues an entire pending prompt batch through one SDK guidance call. */
-  steerPendingPromptBatch(
-    runId: string,
-    batchId: string,
-    texts: readonly string[],
-  ): Promise<void> {
-    let guidance: string;
-    try {
-      guidance = createPendingPromptBatchGuidance(batchId, texts);
-    } catch (error) {
-      return Promise.reject(new ConversationSteerDeliveryError(
-        "rejected_before_sdk_acceptance",
-        error,
-      ));
-    }
-    return this.steerWithProjectedText(
-      runId,
-      guidance,
-      pendingPromptBatchDisplayText(texts),
-    );
   }
 
   /**

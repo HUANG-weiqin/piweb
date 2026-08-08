@@ -12,8 +12,6 @@ import {
   createConversationCardEntry,
   createConversationMetaEntry,
   createConversationMessageEntry,
-  createPendingPromptBatchEntry,
-  createPendingPromptDeliveryEntry,
   createMetaOperationEntry,
   createRunSettlementEntry,
   createTemporaryReturnReceiptEntry,
@@ -24,14 +22,11 @@ import {
   type ConversationOrchestration,
   type ConversationReferenceSnapshot,
   type MetaOperation,
-  type PendingPromptBatch,
-  type PendingPromptDelivery,
   type RunSettlement,
   type TemporaryReturnReceipt,
 } from "./conversation-meta.js";
 import {
   ConversationActor,
-  createPendingPromptBatchGuidance,
   isConversationSteerDeliveryError,
   type ConversationActorCompletion,
   type ConversationActorEvent,
@@ -61,7 +56,6 @@ import {
 } from "./project-inbox.js";
 import {
   MAX_PENDING_PROMPT_ATTENTION_REASON_CHARACTERS,
-  ProjectPromptQueue,
   projectPromptPayloadSha256,
   type ProjectPromptRecord,
   type PromptQueuePutResult,
@@ -98,12 +92,7 @@ const INBOX_LIFECYCLE_GUIDANCE = [
 
 export type ProjectSessionCoordinatorEvent =
   | ConversationActorEvent
-  | { type: "project_changed" }
-  | {
-      type: "pending_prompts_changed";
-      conversationId: string;
-      prompts: ProjectPromptRecord[];
-    };
+  | { type: "project_changed" };
 
 export type ProjectSessionCoordinatorListener = (
   event: ProjectSessionCoordinatorEvent,
@@ -157,13 +146,11 @@ interface ProjectContext {
   readonly project: ProjectStore;
   readonly projectHandle: ProjectStoreHandle;
   readonly inbox: ProjectInbox;
-  readonly promptQueue: ProjectPromptQueue;
   readonly actors: Map<string, ConversationActor>;
   readonly actorOpenings: Map<string, Promise<ConversationActor>>;
   readonly actorUnsubscribes: Map<string, () => void>;
   readonly profiles: Map<string, ConversationMeta>;
   readonly attention: Set<string>;
-  readonly promptAttention: Set<string>;
   readonly deleting: Set<string>;
   readonly listeners: Set<ProjectSessionCoordinatorListener>;
   readonly waiters: Map<string, Set<ProjectWaiter>>;
@@ -363,21 +350,7 @@ function reportTemporarySettlementThroughReceipt(
   return existing;
 }
 
-function pendingPromptAttentionReason(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  const bounded = message
-    .slice(0, MAX_PENDING_PROMPT_ATTENTION_REASON_CHARACTERS)
-    .trim();
-  return bounded || "Pending prompt delivery outcome is uncertain";
-}
 
-interface PendingPromptBatchIdentity {
-  batchId: string;
-  conversationId: string;
-  runId: string;
-  items: PendingPromptBatch["items"];
-  updatedAt?: string;
-}
 
 function abortError(message: string): Error {
   const error = new Error(message);
@@ -721,21 +694,16 @@ export class ProjectSessionCoordinator {
     let unsubscribeProject: (() => void) | undefined;
     try {
       const inbox = await ProjectInbox.open(join(project.stateDir, "inbox"));
-      const promptQueue = await ProjectPromptQueue.open(
-        join(project.stateDir, "pending-prompts"),
-      );
       const contextDraft = {
         key,
         project,
         projectHandle,
         inbox,
-        promptQueue,
         actors: new Map(),
         actorOpenings: new Map(),
         actorUnsubscribes: new Map(),
         profiles: new Map(),
         attention: new Set(),
-        promptAttention: new Set(),
         deleting: new Set(),
         listeners: new Set(),
         waiters: new Map(),
@@ -763,11 +731,6 @@ export class ProjectSessionCoordinator {
       );
       for (const conversationId of await inbox.listDeletedTargets()) {
         context.deleting.add(conversationId);
-      }
-      for (const prompt of await promptQueue.list()) {
-        if (prompt.state === "attention") {
-          context.promptAttention.add(prompt.conversationId);
-        }
       }
       this.assertOpen();
       this.contexts.set(key, context);
@@ -914,8 +877,7 @@ export class ProjectSessionCoordinator {
               createdBy: structuredClone(profile.createdBy),
             }),
         activity,
-        attention: context.attention.has(summary.id)
-          || context.promptAttention.has(summary.id),
+        attention: context.attention.has(summary.id),
       };
     });
   }
@@ -946,11 +908,6 @@ export class ProjectSessionCoordinator {
     const context = this.requireContext(handle);
     return this.runLifecycle(context, async () => {
       const actor = this.requireActor(context, conversationId);
-      if ((await context.promptQueue.list({ conversationId })).length > 0) {
-        throw new Error(
-          "Cannot switch role while this conversation has pending prompts",
-        );
-      }
       const template = this.roles.listRoles(actor.modelRegistry)
         .find(({ id }) => id === roleId);
       if (!template) throw new Error(`Role not found: ${roleId}`);
@@ -1400,14 +1357,9 @@ export class ProjectSessionCoordinator {
       const pendingInbox = await context.inbox.list({
         toConversationId: conversationId,
       });
-      const pendingPrompts = await context.promptQueue.list({ conversationId });
       if (
         pump === "started"
         || pendingInbox.length > 0
-        || pendingPrompts.some((prompt) => (
-          prompt.state === "queued"
-          || prompt.state === "dispatching"
-        ))
       ) {
         throw new Error(
           "Durable conversation work was admitted before this browser prompt",
@@ -1438,618 +1390,6 @@ export class ProjectSessionCoordinator {
       );
     }
     return this.requireActor(context, conversationId).steer(runId, text);
-  }
-
-  async listPendingPrompts(
-    handle: ProjectSessionHandle,
-    conversationId: string,
-  ): Promise<ProjectPromptRecord[]> {
-    const context = this.requireContext(handle);
-    this.assertPromptConversation(context, conversationId);
-    return context.promptQueue.list({ conversationId });
-  }
-
-  async enqueuePrompt(
-    handle: ProjectSessionHandle,
-    conversationId: string,
-    input: EnqueueProjectPromptInput,
-  ): Promise<PromptQueuePutResult> {
-    const context = this.requireContext(handle);
-    const result = await this.runLifecycle<PromptQueuePutResult>(context, async () => {
-      this.assertPromptConversation(context, conversationId);
-      const actor = context.actors.get(conversationId);
-      const inspection = actor === undefined
-        ? await context.project.inspectConversation(conversationId)
-        : undefined;
-      const aggregate = actor === undefined
-        ? inspection!
-        : aggregateReservedConversationEntries(actor.sessionManager.getEntries());
-      const hasDeliveryReceipt = aggregate.pendingPromptDeliveries.some(({ promptId }) => (
-        promptId === input.promptId
-      ));
-      if (hasDeliveryReceipt) {
-        throw new Error(
-          `Prompt ID was already used by a durable delivery receipt: ${input.promptId}`,
-        );
-      }
-      const existing = (await context.promptQueue.list())
-        .find(({ promptId }) => promptId === input.promptId);
-      if (existing !== undefined) {
-        if (
-          existing.conversationId !== conversationId
-          || existing.text !== input.text
-        ) {
-          throw new Error(`Prompt queue conflict for promptId ${input.promptId}`);
-        }
-        return { status: "existing", prompt: existing };
-      }
-      const promptWasUsed = aggregate.pendingPromptBatches.some(({ items }) => (
-        items.some(({ promptId }) => promptId === input.promptId)
-      ));
-      if (promptWasUsed) {
-        throw new Error(
-          `Prompt ID was already used by a durable pending batch: ${input.promptId}`,
-        );
-      }
-      const created = await context.promptQueue.put({
-        promptId: input.promptId,
-        conversationId,
-        text: input.text,
-        createdAt: this.now().toISOString(),
-      });
-      await this.emitPendingPromptsChanged(context, conversationId);
-      return created;
-    });
-    this.trackBackground(context, this.runLifecycle(context, async () => {
-      await this.pumpTarget(context, conversationId);
-    }).catch((error) => {
-      if (context.closing || this.disposed) return;
-      context.attention.add(conversationId);
-      this.emit(context, {
-        type: "error",
-        conversationId,
-        message: error instanceof Error ? error.message : String(error),
-        fatal: false,
-      });
-    }));
-    return result;
-  }
-
-  async withdrawQueuedPrompt(
-    handle: ProjectSessionHandle,
-    conversationId: string,
-    promptId: string,
-  ): Promise<boolean> {
-    const context = this.requireContext(handle);
-    return this.runLifecycle(context, async () => {
-      this.assertPromptConversation(context, conversationId);
-      this.assertExactPrompt(
-        await context.promptQueue.list(),
-        conversationId,
-        promptId,
-      );
-      const withdrawn = await context.promptQueue.withdrawQueued(
-        promptId,
-        conversationId,
-      );
-      if (withdrawn) await this.emitPendingPromptsChanged(context, conversationId);
-      return withdrawn;
-    });
-  }
-
-  async dismissAttentionPrompt(
-    handle: ProjectSessionHandle,
-    conversationId: string,
-    promptId: string,
-  ): Promise<boolean> {
-    const context = this.requireContext(handle);
-    return this.runLifecycle(context, async () => {
-      this.assertPromptConversation(context, conversationId);
-      const prompt = this.assertExactPrompt(
-        await context.promptQueue.list(),
-        conversationId,
-        promptId,
-      );
-      if (prompt.state !== "attention") {
-        throw new Error(`Only attention prompts can be dismissed: ${promptId}`);
-      }
-      const removed = await context.promptQueue.removeForHostCleanup(
-        promptId,
-        conversationId,
-      );
-      if (removed) await this.emitPendingPromptsChanged(context, conversationId);
-      return removed;
-    });
-  }
-
-  async steerQueuedPrompt(
-    handle: ProjectSessionHandle,
-    conversationId: string,
-    promptId: string,
-    runId: string,
-  ): Promise<void> {
-    const context = this.requireContext(handle);
-    const { delivery } = await this.runLifecycle(context, async () => {
-      this.assertPromptConversation(context, conversationId);
-      const actor = this.requireActor(context, conversationId);
-      const activity = actor.getActivity();
-      if (
-        (activity.kind !== "running" && activity.kind !== "waiting")
-        || activity.runId !== runId
-      ) {
-        throw new Error(`Prompt steer requires exact active run: ${runId}`);
-      }
-      const prompt = this.assertExactPrompt(
-        await context.promptQueue.list(),
-        conversationId,
-        promptId,
-      );
-      if (prompt.state !== "queued") {
-        throw new Error(`Only queued prompts can be steered: ${promptId}`);
-      }
-      const aggregate = aggregateReservedConversationEntries(
-        actor.sessionManager.getEntries(),
-      );
-      const ownedByBatch = aggregate.pendingPromptBatches.some((batch) => (
-        (batch.state === "prepared"
-          || batch.state === "started"
-          || batch.state === "delivered")
-        && batch.items.some(({ promptId: ownedPromptId }) => ownedPromptId === promptId)
-      ));
-      if (ownedByBatch) {
-        throw new Error(
-          `Pending prompt already belongs to a non-terminal batch: ${promptId}`,
-        );
-      }
-      const claimed = await context.promptQueue.markDispatching(
-        promptId,
-        conversationId,
-        runId,
-        this.now().toISOString(),
-      );
-      await this.emitPendingPromptsChanged(context, conversationId);
-      return { delivery: actor.steer(runId, claimed.text) };
-    });
-    try {
-      await delivery;
-    } catch (error) {
-      await this.runLifecycle(context, async () => {
-        const claimed = (await context.promptQueue.list({ conversationId }))
-          .find(({ promptId: candidate }) => candidate === promptId);
-        if (
-          claimed?.state !== "dispatching"
-          || claimed.runId !== runId
-        ) return;
-        if (
-          isConversationSteerDeliveryError(error)
-          && error.classification === "rejected_before_sdk_acceptance"
-        ) {
-          await context.promptQueue.requeueAfterDeterministicRejection(
-            promptId,
-            conversationId,
-            runId,
-          );
-        } else {
-          await context.promptQueue.markAttentionAfterUncertainFailure(
-            promptId,
-            conversationId,
-            runId,
-            pendingPromptAttentionReason(error),
-            this.now().toISOString(),
-          );
-        }
-        await this.emitPendingPromptsChanged(context, conversationId);
-      });
-      throw error;
-    }
-    await this.runLifecycle(context, async () => {
-      const claimed = (await context.promptQueue.list({ conversationId }))
-        .find(({ promptId: candidate }) => candidate === promptId);
-      if (
-        claimed?.state === "dispatching"
-        && claimed.runId === runId
-      ) {
-        this.appendPendingPromptDelivery(
-          this.requireActor(context, conversationId).sessionManager,
-          promptId,
-          runId,
-        );
-        await context.promptQueue.removeForHostCleanup(promptId, conversationId);
-        await this.emitPendingPromptsChanged(context, conversationId);
-      }
-    });
-  }
-
-  async steerAllQueuedPrompts(
-    handle: ProjectSessionHandle,
-    conversationId: string,
-    batchId: string,
-    exactRunId: string,
-  ): Promise<void> {
-    const context = this.requireContext(handle);
-    const prepared = await this.runLifecycle(context, async () => {
-      this.assertPromptConversation(context, conversationId);
-      const actor = this.requireActor(context, conversationId);
-      const aggregate = aggregateReservedConversationEntries(
-        actor.sessionManager.getEntries(),
-      );
-      const existingBatch = aggregate.pendingPromptBatches.find(
-        (batch) => batch.batchId === batchId,
-      );
-      if (existingBatch !== undefined) {
-        if (
-          existingBatch.conversationId !== conversationId
-          || existingBatch.runId !== exactRunId
-        ) {
-          throw new Error(`Pending prompt batchId identity conflicts: ${batchId}`);
-        }
-        if (existingBatch.state === "completed") {
-          return { kind: "completed" } as const;
-        }
-        throw new Error(
-          `Pending prompt batchId already ended or is still active: ${batchId}`,
-        );
-      }
-      const activity = actor.getActivity();
-      if (
-        (activity.kind !== "running" && activity.kind !== "waiting")
-        || activity.runId !== exactRunId
-      ) {
-        throw new Error(`Prompt batch steer requires exact active run: ${exactRunId}`);
-      }
-      const prompts = await context.promptQueue.list({ conversationId });
-      const nonterminalBatches = aggregate.pendingPromptBatches.filter(({ state }) => (
-        state === "prepared" || state === "started" || state === "delivered"
-      ));
-      const ownedPromptIds = new Set(
-        nonterminalBatches.flatMap(({ items }) =>
-          items.map(({ promptId }) => promptId)
-        ),
-      );
-      const activeBatchPromptIds = new Set(
-        nonterminalBatches
-          .filter(({ runId }) => runId === exactRunId)
-          .flatMap(({ items }) => items.map(({ promptId }) => promptId)),
-      );
-      const unresolvedBatch = nonterminalBatches.find(({ items }) => (
-        items.some((item) => {
-          const prompt = prompts.find(({ promptId }) => promptId === item.promptId);
-          return prompt === undefined
-            || prompt.createdAt !== item.createdAt
-            || projectPromptPayloadSha256(prompt) !== item.payloadSha256;
-        })
-      ));
-      if (unresolvedBatch !== undefined) {
-        throw new Error(
-          `Cannot steer while a non-terminal batch has unresolved prompt ownership: ${unresolvedBatch.batchId}`,
-        );
-      }
-      const ownedQueuedPrompt = prompts.find(({ promptId, state }) => (
-        state === "queued" && ownedPromptIds.has(promptId)
-      ));
-      if (ownedQueuedPrompt !== undefined) {
-        throw new Error(
-          `Pending prompt already belongs to a non-terminal batch: ${ownedQueuedPrompt.promptId}`,
-        );
-      }
-      if (prompts.some(({ promptId, state }) => (
-        state === "dispatching" && !activeBatchPromptIds.has(promptId)
-      ))) {
-        throw new Error("Cannot steer a batch while a prompt is dispatching");
-      }
-      const queued = prompts.filter(({ state }) => state === "queued");
-      if (queued.length === 0) {
-        throw new Error("Cannot steer a batch without queued prompts");
-      }
-      const texts = queued.map(({ text }) => text);
-      // Validate the composite before recording any batch state or claim.
-      createPendingPromptBatchGuidance(batchId, texts);
-      const batch: PendingPromptBatchIdentity = {
-        batchId,
-        conversationId,
-        runId: exactRunId,
-        items: queued.map((prompt) => ({
-          promptId: prompt.promptId,
-          createdAt: prompt.createdAt,
-          payloadSha256: projectPromptPayloadSha256(prompt),
-        })),
-      };
-      this.appendPendingPromptBatchState(actor.sessionManager, batch, "prepared");
-      let claimed: ProjectPromptRecord[];
-      try {
-        claimed = await context.promptQueue.claimAllQueuedForConversation(
-          conversationId,
-          exactRunId,
-          this.now().toISOString(),
-          [...activeBatchPromptIds],
-        );
-      } catch (error) {
-        const current = await context.promptQueue.list({ conversationId });
-        const reason = pendingPromptAttentionReason(error);
-        const cleanupErrors: unknown[] = [];
-        const allMembersQueued = batch.items.every((item) => {
-          const prompt = current.find(({ promptId }) => promptId === item.promptId);
-          return prompt !== undefined
-            && prompt.state === "queued"
-            && prompt.conversationId === conversationId
-            && prompt.createdAt === item.createdAt
-            && projectPromptPayloadSha256(prompt) === item.payloadSha256;
-        });
-        for (const item of batch.items) {
-          const prompt = current.find(({ promptId }) => promptId === item.promptId);
-          if (
-            prompt?.state !== "dispatching"
-            || prompt.runId !== exactRunId
-            || prompt.createdAt !== item.createdAt
-            || projectPromptPayloadSha256(prompt) !== item.payloadSha256
-          ) {
-            continue;
-          }
-          try {
-            await context.promptQueue.markAttentionAfterUncertainFailure(
-              item.promptId,
-              conversationId,
-              exactRunId,
-              reason,
-              this.now().toISOString(),
-            );
-          } catch (firstCleanupError) {
-            try {
-              await context.promptQueue.markAttentionAfterUncertainFailure(
-                item.promptId,
-                conversationId,
-                exactRunId,
-                reason,
-                this.now().toISOString(),
-              );
-            } catch (retryCleanupError) {
-              cleanupErrors.push(new AggregateError(
-                [firstCleanupError, retryCleanupError],
-                `Failed to fence pending prompt ${item.promptId}`,
-              ));
-            }
-          }
-        }
-        try {
-          this.appendPendingPromptBatchState(
-            actor.sessionManager,
-            batch,
-            allMembersQueued ? "failed" : "attention",
-            reason,
-          );
-        } catch (firstCleanupError) {
-          try {
-            this.appendPendingPromptBatchState(
-              actor.sessionManager,
-              batch,
-              allMembersQueued ? "failed" : "attention",
-              reason,
-            );
-          } catch (retryCleanupError) {
-            cleanupErrors.push(new AggregateError(
-              [firstCleanupError, retryCleanupError],
-              `Failed to persist pending prompt batch ${batch.batchId} recovery`,
-            ));
-          }
-        }
-        try {
-          await this.emitPendingPromptsChanged(context, conversationId);
-        } catch (cleanupError) {
-          cleanupErrors.push(cleanupError);
-        }
-        if (cleanupErrors.length > 0) {
-          throw new AggregateError(
-            [error, ...cleanupErrors],
-            "Pending prompt batch claim recovery failed",
-          );
-        }
-        throw error;
-      }
-      const claimsMatchManifest = claimed.length === batch.items.length
-        && claimed.every((prompt, index) => {
-          const item = batch.items[index];
-          return item !== undefined
-            && prompt.promptId === item.promptId
-            && prompt.createdAt === item.createdAt
-            && projectPromptPayloadSha256(prompt) === item.payloadSha256;
-        });
-      if (!claimsMatchManifest) {
-        const mismatch = new Error(
-          "Pending prompt batch claim did not match its prepared manifest",
-        );
-        try {
-          await context.promptQueue.requeueDispatchingBatch(
-            claimed.map(({ promptId }) => promptId),
-            conversationId,
-            exactRunId,
-          );
-          this.appendPendingPromptBatchState(
-            actor.sessionManager,
-            batch,
-            "failed",
-            pendingPromptAttentionReason(mismatch),
-          );
-          await this.emitPendingPromptsChanged(context, conversationId);
-        } catch (cleanupError) {
-          let repairError: unknown;
-          try {
-            await this.markPendingPromptBatchAttention(
-              context,
-              actor.sessionManager,
-              batch,
-              claimed.map(({ promptId }) => promptId),
-              pendingPromptAttentionReason(cleanupError),
-            );
-          } catch (error) {
-            repairError = error;
-          }
-          throw new AggregateError(
-            [mismatch, cleanupError, ...(repairError === undefined ? [] : [repairError])],
-            "Pending prompt batch claim mismatch recovery failed",
-          );
-        }
-        throw mismatch;
-      }
-      const currentActivity = actor.getActivity();
-      if (
-        (currentActivity.kind !== "running" && currentActivity.kind !== "waiting")
-        || currentActivity.runId !== exactRunId
-      ) {
-        const stale = new Error(
-          `Prompt batch steer requires exact active run: ${exactRunId}`,
-        );
-        try {
-          await context.promptQueue.requeueDispatchingBatch(
-            claimed.map(({ promptId }) => promptId),
-            conversationId,
-            exactRunId,
-          );
-          this.appendPendingPromptBatchState(
-            actor.sessionManager,
-            batch,
-            "failed",
-            pendingPromptAttentionReason(stale),
-          );
-          await this.emitPendingPromptsChanged(context, conversationId);
-        } catch (cleanupError) {
-          let repairError: unknown;
-          try {
-            await this.markPendingPromptBatchAttention(
-              context,
-              actor.sessionManager,
-              batch,
-              claimed.map(({ promptId }) => promptId),
-              pendingPromptAttentionReason(cleanupError),
-            );
-          } catch (error) {
-            repairError = error;
-          }
-          throw new AggregateError(
-            [stale, cleanupError, ...(repairError === undefined ? [] : [repairError])],
-            "Pending prompt batch stale-run recovery failed",
-          );
-        }
-        throw stale;
-      }
-      this.appendPendingPromptBatchState(actor.sessionManager, batch, "started");
-      const delivery = actor.steerPendingPromptBatch(exactRunId, batchId, texts);
-      void delivery.catch(() => undefined);
-      await this.emitPendingPromptsChanged(context, conversationId);
-      return {
-        kind: "started" as const,
-        actor,
-        batch,
-        promptIds: claimed.map(({ promptId }) => promptId),
-        delivery,
-      };
-    });
-    if (prepared.kind === "completed") return;
-
-    try {
-      await prepared.delivery;
-    } catch (error) {
-      await this.runLifecycle(context, async () => {
-        const prompts = await context.promptQueue.list({ conversationId });
-        const exactClaims = prepared.promptIds.every((promptId) => prompts.some((prompt) => (
-          prompt.promptId === promptId
-          && prompt.state === "dispatching"
-          && prompt.runId === exactRunId
-        )));
-        if (exactClaims) {
-          if (
-            isConversationSteerDeliveryError(error)
-            && error.classification === "rejected_before_sdk_acceptance"
-          ) {
-            await context.promptQueue.requeueDispatchingBatch(
-              prepared.promptIds,
-              conversationId,
-              exactRunId,
-            );
-            this.appendPendingPromptBatchState(
-              prepared.actor.sessionManager,
-              prepared.batch,
-              "failed",
-              pendingPromptAttentionReason(error),
-            );
-          } else {
-            for (const promptId of prepared.promptIds) {
-              await context.promptQueue.markAttentionAfterUncertainFailure(
-                promptId,
-                conversationId,
-                exactRunId,
-                pendingPromptAttentionReason(error),
-                this.now().toISOString(),
-              );
-            }
-            this.appendPendingPromptBatchState(
-              prepared.actor.sessionManager,
-              prepared.batch,
-              "attention",
-              pendingPromptAttentionReason(error),
-            );
-          }
-          await this.emitPendingPromptsChanged(context, conversationId);
-        }
-        if (prepared.actor.getActivity().kind === "idle") {
-          await this.pumpTarget(context, conversationId);
-        }
-      });
-      throw error;
-    }
-
-    await this.runLifecycle(context, async () => {
-      let delivered = false;
-      let firstError: unknown;
-      try {
-        this.appendPendingPromptBatchState(prepared.actor.sessionManager, prepared.batch, "delivered");
-        delivered = true;
-        await this.completePendingPromptBatchCleanup(
-          context,
-          prepared.actor.sessionManager,
-          prepared.batch,
-          prepared.promptIds,
-        );
-      } catch (error) {
-        firstError = error;
-        try {
-          if (!delivered) {
-            this.appendPendingPromptBatchState(
-              prepared.actor.sessionManager,
-              prepared.batch,
-              "delivered",
-            );
-          }
-          await this.completePendingPromptBatchCleanup(
-            context,
-            prepared.actor.sessionManager,
-            prepared.batch,
-            prepared.promptIds,
-          );
-        } catch (retryError) {
-          const attentionReason = pendingPromptAttentionReason(retryError);
-          const fenceErrors: unknown[] = [];
-          try {
-            await this.markPendingPromptBatchAttention(
-              context,
-              prepared.actor.sessionManager,
-              prepared.batch,
-              prepared.promptIds,
-              attentionReason,
-            );
-            if (prepared.actor.getActivity().kind === "idle") {
-              await this.pumpTarget(context, conversationId);
-            }
-          } catch (fenceError) {
-            fenceErrors.push(fenceError);
-          }
-          throw new AggregateError(
-            [firstError, retryError, ...fenceErrors],
-            "Pending prompt batch cleanup failed after one retry",
-          );
-        }
-      }
-      await this.emitPendingPromptsChanged(context, conversationId);
-    });
   }
 
   setCompactionThreshold(
@@ -2124,9 +1464,6 @@ export class ProjectSessionCoordinator {
         throw new Error(
           "Cannot rewind while this conversation has pending cross-session messages",
         );
-      }
-      if ((await context.promptQueue.list({ conversationId })).length > 0) {
-        throw new Error("Cannot rewind while this conversation has pending prompts");
       }
       await actor.truncateFromMessage(entryId);
       this.emit(context, { type: "project_changed" });
@@ -2479,6 +1816,861 @@ export class ProjectSessionCoordinator {
         ),
       ],
     };
+  }
+
+  private rejectRunWaiters(
+    context: ProjectContext,
+    conversationId: string,
+    runId: string,
+    error: Error,
+  ): void {
+    const key = completionKey(conversationId, runId);
+    const waiters = context.waiters.get(key);
+    if (!waiters) return;
+    context.waiters.delete(key);
+    for (const waiter of waiters) {
+      this.detachWaiter(waiter);
+      waiter.reject(error);
+    }
+  }
+
+  private recordCompletion(
+    context: ProjectContext,
+    conversationId: string,
+    settlement: RunSettlement,
+  ): void {
+    const key = completionKey(conversationId, settlement.runId);
+    if (!context.completions.has(key)) {
+      context.completions.set(key, cloneSettlement(settlement));
+      while (context.completions.size > MAX_COMPLETION_CACHE) {
+        const oldest = context.completions.keys().next().value as
+          | string
+          | undefined;
+        if (oldest === undefined) break;
+        context.completions.delete(oldest);
+      }
+    }
+    const waiters = context.waiters.get(key);
+    if (!waiters) return;
+    const actor = context.actors.get(conversationId);
+    const lifecycle = actor?.profile.lifecycle
+      ?? context.profiles.get(conversationId)?.lifecycle;
+    for (const waiter of [...waiters]) {
+      if (
+        waiter.kind === "session"
+        && lifecycle?.kind === "temporary"
+        && lifecycle.initialRunId === settlement.runId
+        && lifecycle.callerConversationId === waiter.waitingConversationId
+      ) {
+        // The temporary result body has one model-input owner: its durable
+        // incoming message. Keep the caller wait until that envelope is
+        // committed and resolve it with metadata instead of duplicating the
+        // final text in the tool result.
+        continue;
+      }
+      waiters.delete(waiter);
+      this.detachWaiter(waiter);
+      waiter.resolve(cloneSettlement(settlement));
+    }
+    if (waiters.size === 0) context.waiters.delete(key);
+  }
+
+  private temporaryReturnReceipt(
+    context: ProjectContext,
+    callerConversationId: string,
+    temporaryConversationId: string,
+    initialRunId: string,
+  ): TemporaryReturnReceipt | undefined {
+    const caller = context.actors.get(callerConversationId);
+    if (!caller) return undefined;
+    return aggregateReservedConversationEntries(
+      caller.sessionManager.getEntries(),
+    ).temporaryReturnReceipts.find((receipt) =>
+      receipt.temporaryConversationId === temporaryConversationId
+      && receipt.initialRunId === initialRunId
+    );
+  }
+
+  private async withTemporaryReturnReceiptManager<T>(
+    context: ProjectContext,
+    callerConversationId: string,
+    work: (manager: ConversationActor["sessionManager"]) => Promise<T> | T,
+  ): Promise<T> {
+    const active = context.actors.get(callerConversationId);
+    if (active) return work(active.sessionManager);
+    const opening = context.actorOpenings.get(callerConversationId);
+    if (opening) return work((await opening).sessionManager);
+    const lease = await this.projects.acquireConversationWhenAvailable(
+      context.project.cwd,
+      callerConversationId,
+    );
+    try {
+      const manager = await context.project.openConversation(
+        callerConversationId,
+        { updateRecent: false },
+      );
+      return await work(manager);
+    } finally {
+      lease.release();
+    }
+  }
+
+  private async durableTemporaryReturnReceipt(
+    context: ProjectContext,
+    callerConversationId: string,
+    temporaryConversationId: string,
+    initialRunId: string,
+  ): Promise<TemporaryReturnReceipt | undefined> {
+    let receipt: TemporaryReturnReceipt | undefined;
+    await this.withTemporaryReturnReceiptManager(
+      context,
+      callerConversationId,
+      (manager) => {
+        receipt = aggregateReservedConversationEntries(
+          manager.getEntries(),
+        ).temporaryReturnReceipts.find((candidate) =>
+          candidate.temporaryConversationId === temporaryConversationId
+          && candidate.initialRunId === initialRunId
+        );
+      },
+    );
+    if (receipt) return receipt;
+
+    const assignedEnvelope = (await context.inbox.list({
+      toConversationId: callerConversationId,
+    })).find((envelope) =>
+      envelope.kind === "message"
+      && envelope.fromConversationId === temporaryConversationId
+      && envelope.fromRunId === initialRunId
+      && envelope.temporaryReturnAssignment?.initialRunId === initialRunId
+    );
+    if (!assignedEnvelope?.temporaryReturnAssignment) return undefined;
+    const source = context.actors.get(temporaryConversationId);
+    const lifecycle = source?.profile.lifecycle;
+    if (
+      !source
+      || lifecycle?.kind !== "temporary"
+      || lifecycle.initialRunId !== initialRunId
+      || lifecycle.callerConversationId !== callerConversationId
+    ) {
+      throw new Error("Temporary return assignment conflicts with lifecycle");
+    }
+    const assignment = assignedEnvelope.temporaryReturnAssignment;
+    await this.withTemporaryReturnReceiptManager(
+      context,
+      callerConversationId,
+      (manager) => {
+        const aggregate = aggregateReservedConversationEntries(
+          manager.getEntries(),
+        );
+        receipt = aggregate.temporaryReturnReceipts.find((candidate) =>
+          candidate.temporaryConversationId === temporaryConversationId
+          && candidate.initialRunId === initialRunId
+        );
+        if (receipt) return;
+        const claimed = createTemporaryReturnReceiptEntry({
+          temporaryConversationId,
+          initialRunId,
+          messageId: assignedEnvelope.messageId,
+          callerRunId: assignment.callerRunId,
+          claimedAt: assignment.assignedAt,
+          state: "claimed",
+        });
+        appendReservedCustomEntry(manager, claimed);
+        receipt = claimed.data;
+      },
+    );
+    return receipt;
+  }
+
+  private async settleTemporaryReturnReceipt(
+    context: ProjectContext,
+    callerConversationId: string,
+    temporaryConversationId: string,
+    initialRunId: string,
+    settlement: RunSettlement,
+  ): Promise<void> {
+    await this.withTemporaryReturnReceiptManager(
+      context,
+      callerConversationId,
+      (manager) => {
+        const receipt = aggregateReservedConversationEntries(
+          manager.getEntries(),
+        ).temporaryReturnReceipts.find((candidate) =>
+          candidate.temporaryConversationId === temporaryConversationId
+          && candidate.initialRunId === initialRunId
+        );
+        if (!receipt) {
+          throw new Error("Missing temporary return receipt for settlement");
+        }
+        if (receipt.messageId !== settlement.returnMessageId) {
+          throw new Error("Temporary return receipt conflicts with settlement");
+        }
+        if (receipt.state === "settled") {
+          if (JSON.stringify(receipt.settlement) !== JSON.stringify(settlement)) {
+            throw new Error("Conflicting settled temporary return receipt");
+          }
+          return;
+        }
+        appendReservedCustomEntry(
+          manager,
+          createTemporaryReturnReceiptEntry({
+            ...receipt,
+            state: "settled",
+            settlement,
+          }),
+        );
+      },
+    );
+  }
+
+  private resolveDeferredTemporaryReturnWaiters(
+    context: ProjectContext,
+    callerConversationId: string,
+    temporaryConversationId: string,
+    initialRunId: string,
+    settlement: RunSettlement,
+  ): void {
+    const key = completionKey(temporaryConversationId, initialRunId);
+    const waiters = context.waiters.get(key);
+    if (!waiters) return;
+    for (const waiter of [...waiters]) {
+      if (
+        waiter.kind !== "session"
+        || waiter.waitingConversationId !== callerConversationId
+        || waiter.targetConversationId !== temporaryConversationId
+        || waiter.targetRunId !== initialRunId
+      ) {
+        continue;
+      }
+      waiters.delete(waiter);
+      this.detachWaiter(waiter);
+      waiter.resolve(cloneSettlement(settlement));
+    }
+    if (waiters.size === 0) context.waiters.delete(key);
+  }
+
+  private async waitForSession(
+    context: ProjectContext,
+    sourceConversationId: string,
+    targetConversationId: string,
+    runId: string,
+    signal?: AbortSignal,
+  ): Promise<RunSettlement | SessionMessageWaitResult> {
+    if (sourceConversationId === targetConversationId) {
+      throw new Error("An Agent cannot wait for its own current run");
+    }
+    this.throwIfAborted(signal);
+    const source = this.requireActor(context, sourceConversationId);
+    const ownership = source.currentRunOwnership();
+    if (!ownership) {
+      throw new Error("No running source turn owns this wait");
+    }
+    const preliminary = await this.runLifecycle(context, async () => {
+      const committedReplyCandidate = await this.findCommittedWaitReply(
+        context,
+        sourceConversationId,
+        targetConversationId,
+        runId,
+        ownership.runId,
+      );
+      const temporaryReceipt = this.temporaryReturnReceipt(
+        context,
+        sourceConversationId,
+        targetConversationId,
+        runId,
+      );
+      const committedReply = committedReplyCandidate
+        && !(
+          temporaryReceipt !== undefined
+          && committedReplyCandidate.messageId === temporaryReceipt.messageId
+          && committedReplyCandidate.waitedByRunId !== undefined
+        )
+        ? committedReplyCandidate
+        : undefined;
+      const cached = context.completions.get(
+        completionKey(targetConversationId, runId),
+      );
+      return {
+        committedReply,
+        settledReceipt: temporaryReceipt?.state === "settled"
+          ? cloneSettlement(temporaryReceipt.settlement)
+          : undefined,
+        cached: cached ? cloneSettlement(cached) : undefined,
+        waitsForTemporaryReturn: this.waitsForTemporaryReturn(
+          context,
+          sourceConversationId,
+          targetConversationId,
+          runId,
+          cached,
+        ),
+      };
+    });
+    this.throwIfAborted(signal);
+    if (preliminary.committedReply || preliminary.waitsForTemporaryReturn) {
+      return this.waitForSessionEvent(
+        context,
+        source,
+        ownership,
+        targetConversationId,
+        runId,
+        signal,
+      );
+    }
+    if (preliminary.settledReceipt) return preliminary.settledReceipt;
+    if (preliminary.cached) return preliminary.cached;
+    const activeTarget = context.actors.get(targetConversationId);
+    if (activeTarget) {
+      const activeSettlement = this.findSettlement(
+        context,
+        activeTarget,
+        runId,
+      );
+      if (
+        activeSettlement
+        && !this.waitsForTemporaryReturn(
+          context,
+          sourceConversationId,
+          targetConversationId,
+          runId,
+          activeSettlement,
+        )
+      ) {
+        return activeSettlement;
+      }
+    } else {
+      const inspection = await context.project.inspectConversation(
+        targetConversationId,
+      );
+      this.throwIfAborted(signal);
+      const durable = inspection.runSettlements.find(
+        (settlement) => settlement.runId === runId,
+      );
+      const inspectedLifecycle = inspection.conversationMeta?.lifecycle;
+      const waitsForInspectedTemporaryReturn =
+        inspectedLifecycle?.kind === "temporary"
+        && inspectedLifecycle.initialRunId === runId
+        && inspectedLifecycle.callerConversationId === sourceConversationId
+        && durable?.reportedAt === undefined;
+      if (durable && !waitsForInspectedTemporaryReturn) {
+        return cloneSettlement(durable);
+      }
+    }
+    const target = await raceWithAbort(
+      this.getOrOpenActor(context, targetConversationId),
+      signal,
+    );
+    this.throwIfAborted(signal);
+    const existing = this.findSettlement(context, target, runId);
+    if (
+      existing
+      && !this.waitsForTemporaryReturn(
+        context,
+        sourceConversationId,
+        targetConversationId,
+        runId,
+        existing,
+      )
+    ) {
+      return existing;
+    }
+    return this.waitForSessionEvent(
+      context,
+      source,
+      ownership,
+      targetConversationId,
+      runId,
+      signal,
+      target,
+    );
+  }
+
+  private waitForSessionEvent(
+    context: ProjectContext,
+    source: ConversationActor,
+    ownership: ConversationRunOwnership,
+    targetConversationId: string,
+    runId: string,
+    signal?: AbortSignal,
+    target?: ConversationActor,
+  ): Promise<RunSettlement | SessionMessageWaitResult> {
+    const sourceConversationId = source.conversationId;
+    return source.withWaiting(
+      ownership,
+      { conversationId: targetConversationId, runId },
+      async () => {
+        let resolveCompletion!: (
+          result: RunSettlement | SessionMessageWaitResult,
+        ) => void;
+        let rejectCompletion!: (error: Error) => void;
+        const completion = new Promise<
+          RunSettlement | SessionMessageWaitResult
+        >((resolve, reject) => {
+          resolveCompletion = resolve;
+          rejectCompletion = reject;
+        });
+        // The abort listener can reject while durable waiter registration is
+        // still awaiting project lifecycle work. Observe that interval now;
+        // callers still receive the same rejection from `completion` below.
+        void completion.catch(() => undefined);
+        const key = completionKey(targetConversationId, runId);
+        let registeredWaiter: SessionWaiter | undefined;
+        try {
+          await this.runLifecycle(context, async () => {
+            const waiter: SessionWaiter = {
+              kind: "session",
+              resolve: resolveCompletion,
+              reject: rejectCompletion,
+              waitingConversationId: sourceConversationId,
+              targetConversationId,
+              targetRunId: runId,
+              ...(signal === undefined ? {} : { signal }),
+            };
+            registeredWaiter = waiter;
+            const fatalTarget = context.actors.get(targetConversationId)
+              ?.getState().fatalError;
+            if (fatalTarget !== undefined) {
+              throw new Error(
+                `Target conversation is fatal: ${fatalTarget}`,
+              );
+            }
+            if (signal) {
+              waiter.abortListener = () => {
+                const waiting = context.waiters.get(key);
+                waiting?.delete(waiter);
+                if (waiting?.size === 0) context.waiters.delete(key);
+                this.detachWaiter(waiter);
+                rejectCompletion(abortError("Session wait was aborted"));
+              };
+              signal.addEventListener("abort", waiter.abortListener, {
+                once: true,
+              });
+              if (signal.aborted) {
+                waiter.abortListener();
+                return;
+              }
+            }
+            if (this.hasWaitPath(
+              context,
+              targetConversationId,
+              sourceConversationId,
+            )) {
+              throw new Error(
+                `Waiting for ${targetConversationId} would create a conversation wait cycle`,
+              );
+            }
+            let waiters = context.waiters.get(key);
+            if (!waiters) {
+              waiters = new Set();
+              context.waiters.set(key, waiters);
+            }
+            waiters.add(waiter);
+
+            const committedReply = await this.findCommittedWaitReply(
+              context,
+              sourceConversationId,
+              targetConversationId,
+              runId,
+              ownership.runId,
+            );
+            if (committedReply) {
+              await this.deliverEnvelopeToWaitingRun(
+                context,
+                source,
+                committedReply,
+                runId,
+              );
+              return;
+            }
+
+            const raced = target
+              ? this.findSettlement(context, target, runId)
+              : context.completions.get(key);
+            if (
+              raced
+              && !this.waitsForTemporaryReturn(
+                context,
+                sourceConversationId,
+                targetConversationId,
+                runId,
+                raced,
+              )
+            ) {
+              waiters.delete(waiter);
+              if (waiters.size === 0) context.waiters.delete(key);
+              this.detachWaiter(waiter);
+              resolveCompletion(cloneSettlement(raced));
+            }
+          });
+        } catch (error) {
+          if (registeredWaiter) {
+            const waiters = context.waiters.get(key);
+            waiters?.delete(registeredWaiter);
+            if (waiters?.size === 0) context.waiters.delete(key);
+            this.detachWaiter(registeredWaiter);
+          }
+          rejectCompletion(
+            error instanceof Error ? error : new Error(String(error)),
+          );
+        }
+        return completion;
+      },
+    );
+  }
+
+  private async findCommittedWaitReply(
+    context: ProjectContext,
+    sourceConversationId: string,
+    targetConversationId: string,
+    targetRunId: string,
+    sourceRunId: string,
+  ): Promise<InboxEnvelope | undefined> {
+    const pending = await context.inbox.list({
+      toConversationId: sourceConversationId,
+    });
+    return pending.find((envelope) =>
+      envelope.fromConversationId === targetConversationId
+      && envelope.fromRunId === targetRunId
+      && envelope.waitedByRunId !== sourceRunId
+    );
+  }
+
+  private waitsForTemporaryReturn(
+    context: ProjectContext,
+    sourceConversationId: string,
+    targetConversationId: string,
+    runId: string,
+    settlement?: RunSettlement,
+  ): boolean {
+    const actor = context.actors.get(targetConversationId);
+    const lifecycle = actor?.profile.lifecycle
+      ?? context.profiles.get(targetConversationId)?.lifecycle;
+    return lifecycle?.kind === "temporary"
+      && lifecycle.initialRunId === runId
+      && lifecycle.callerConversationId === sourceConversationId
+      && settlement !== undefined
+      && settlement.reportedAt === undefined
+      && !(
+        temporarySettlementIsReturnable(settlement)
+        && this.temporaryReturnReceipt(
+          context,
+          sourceConversationId,
+          targetConversationId,
+          runId,
+        )?.state === "settled"
+      );
+  }
+
+  private findSettlement(
+    context: ProjectContext,
+    target: ConversationActor,
+    runId: string,
+  ): RunSettlement | undefined {
+    const cached = context.completions.get(
+      completionKey(target.conversationId, runId),
+    );
+    if (cached) return cloneSettlement(cached);
+    const aggregate = aggregateReservedConversationEntries(
+      target.sessionManager.getEntries(),
+    );
+    const durable = aggregate.runSettlements.find(
+      (settlement) => settlement.runId === runId,
+    );
+    return durable ? cloneSettlement(durable) : undefined;
+  }
+
+  private observeSettlement(
+    context: ProjectContext,
+    target: ConversationActor,
+    runId: string,
+  ): Promise<RunSettlement> {
+    const existing = this.findSettlement(context, target, runId);
+    if (existing) return Promise.resolve(existing);
+    return new Promise<RunSettlement>((resolve, reject) => {
+      const key = completionKey(target.conversationId, runId);
+      const waiter: CompletionWaiter = {
+        kind: "completion",
+        resolve,
+        reject,
+      };
+      let waiters = context.waiters.get(key);
+      if (!waiters) {
+        waiters = new Set();
+        context.waiters.set(key, waiters);
+      }
+      waiters.add(waiter);
+      try {
+        const raced = this.findSettlement(context, target, runId);
+        if (!raced) return;
+        waiters.delete(waiter);
+        if (waiters.size === 0) context.waiters.delete(key);
+        resolve(raced);
+      } catch (error) {
+        waiters.delete(waiter);
+        if (waiters.size === 0) context.waiters.delete(key);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
+
+  private async handleTemporaryCompletion(
+    context: ProjectContext,
+    actor: ConversationActor,
+    settlement: RunSettlement,
+  ): Promise<void> {
+    const lifecycle = actor.profile.lifecycle;
+    if (
+      lifecycle.kind !== "temporary"
+      || settlement.runId !== lifecycle.initialRunId
+    ) {
+      return;
+    }
+    if (settlement.reportedAt !== undefined) {
+      if (temporarySettlementIsReturnable(settlement)) {
+        const receipt = await this.durableTemporaryReturnReceipt(
+          context,
+          lifecycle.callerConversationId,
+          actor.conversationId,
+          settlement.runId,
+        );
+        if (receipt) {
+          if (settlement.returnMessageId !== receipt.messageId) {
+            throw new Error("Reported temporary settlement conflicts with receipt");
+          }
+          await this.settleTemporaryReturnReceipt(
+            context,
+            lifecycle.callerConversationId,
+            actor.conversationId,
+            settlement.runId,
+            settlement,
+          );
+          this.resolveDeferredTemporaryReturnWaiters(
+            context,
+            lifecycle.callerConversationId,
+            actor.conversationId,
+            settlement.runId,
+            settlement,
+          );
+        }
+        await this.deleteConversationInternal(
+          context,
+          actor.conversationId,
+          false,
+        );
+      } else {
+        context.attention.add(actor.conversationId);
+        this.emit(context, { type: "project_changed" });
+      }
+      return;
+    }
+
+    const successful = temporarySettlementIsReturnable(settlement);
+    const receipt = successful
+      ? await this.durableTemporaryReturnReceipt(
+          context,
+          lifecycle.callerConversationId,
+          actor.conversationId,
+          settlement.runId,
+        )
+      : undefined;
+    if (receipt) {
+      const reported = reportTemporarySettlementThroughReceipt(
+        settlement,
+        receipt,
+        () => this.now().toISOString(),
+      );
+      await this.settleTemporaryReturnReceipt(
+        context,
+        lifecycle.callerConversationId,
+        actor.conversationId,
+        settlement.runId,
+        reported,
+      );
+      this.resolveDeferredTemporaryReturnWaiters(
+        context,
+        lifecycle.callerConversationId,
+        actor.conversationId,
+        settlement.runId,
+        reported,
+      );
+      appendReservedCustomEntry(
+        actor.sessionManager,
+        createRunSettlementEntry(reported),
+      );
+      context.completions.set(
+        completionKey(actor.conversationId, reported.runId),
+        cloneSettlement(reported),
+      );
+      await this.deleteConversationInternal(
+        context,
+        actor.conversationId,
+        false,
+      );
+      return;
+    }
+    const oversized = settlement.outcome === "completed"
+      && settlement.finalText !== null
+      && settlement.finalText.trim().length > 0
+      && !successful;
+    const caller = await this.getOrOpenActor(
+      context,
+      lifecycle.callerConversationId,
+    );
+    const recoveredReturn = await context.inbox.get(
+      lifecycle.returnMessageId,
+    );
+    const returned = await this.enqueueEnvelope(context, actor, caller, {
+      messageId: lifecycle.returnMessageId,
+      cardId: deterministicUuid(
+        "piweb.return.card",
+        lifecycle.returnMessageId,
+      ),
+      sentAt: recoveredReturn?.sentAt ?? this.now().toISOString(),
+      kind: successful
+        ? "delegation_result"
+        : "delegation_failure",
+      body: successful
+        ? settlement.finalText!
+        : oversized
+          ? `临时会话已经完成，但最终回复超过 ${
+              MAX_CONVERSATION_BODY_BYTES
+            } 字节的自动回传上限；会话已保留，请打开查看。`
+          : `临时会话未成功完成：${settlement.outcome}${
+              settlement.finalText === null ? "，且没有 Agent 回复" : ""
+            }`,
+      delegationId: lifecycle.delegationId,
+      fromRunId: recoveredReturn
+        ? recoveredReturn.fromRunId
+        : settlement.runId,
+    });
+    const reported = createRunSettlementEntry({
+      ...settlement,
+      reportedAt: this.now().toISOString(),
+      returnMessageId: lifecycle.returnMessageId,
+    }).data;
+    appendReservedCustomEntry(
+      actor.sessionManager,
+      createRunSettlementEntry(reported),
+    );
+    context.completions.set(
+      completionKey(actor.conversationId, reported.runId),
+      cloneSettlement(reported),
+    );
+    const deliveredToWait = await this.deliverEnvelopeToWaitingRun(
+      context,
+      caller,
+      returned.envelope,
+      settlement.runId,
+    );
+    if (!deliveredToWait) await this.steerActiveTarget(context, caller);
+    if (caller.getActivity().kind === "idle") {
+      await this.pumpTarget(context, caller.conversationId);
+    }
+    if (successful) {
+      await this.deleteConversationInternal(
+        context,
+        actor.conversationId,
+        false,
+      );
+    } else {
+      context.attention.add(actor.conversationId);
+      this.emit(context, { type: "project_changed" });
+    }
+  }
+
+  private async retryBlockedDeletions(
+    context: ProjectContext,
+  ): Promise<void> {
+    await this.retryReturnableTemporaryDeletions(context);
+    await this.retryDurableDeletions(context);
+  }
+
+  private async retryReturnableTemporaryDeletions(
+    context: ProjectContext,
+  ): Promise<void> {
+    for (const actor of [...context.actors.values()]) {
+      if (actor.getState().disposed) continue;
+      const lifecycle = actor.profile.lifecycle;
+      if (lifecycle.kind !== "temporary") continue;
+      const settlement = aggregateReservedConversationEntries(
+        actor.sessionManager.getEntries(),
+      ).runSettlements.find(({ runId }) =>
+        runId === lifecycle.initialRunId
+      );
+      if (
+        !settlement
+        || settlement.reportedAt === undefined
+        || !temporarySettlementIsReturnable(settlement)
+      ) {
+        continue;
+      }
+      try {
+        await this.deleteConversationInternal(
+          context,
+          actor.conversationId,
+          false,
+        );
+      } catch {
+        context.attention.add(actor.conversationId);
+        this.emit(context, { type: "project_changed" });
+      }
+    }
+  }
+
+  private async retryDurableDeletions(
+    context: ProjectContext,
+  ): Promise<void> {
+    for (const conversationId of await context.inbox.listDeletedTargets()) {
+      if (context.closing) return;
+      if (!context.deleting.has(conversationId)) {
+        context.deleting.add(conversationId);
+      }
+      try {
+        await this.deleteConversationInternal(
+          context,
+          conversationId,
+          true,
+          true,
+          undefined,
+          true,
+        );
+      } catch {
+        context.attention.add(conversationId);
+      }
+    }
+  }
+
+  private async recoverTemporary(
+    context: ProjectContext,
+    actor: ConversationActor,
+  ): Promise<void> {
+    if (context.closing) return;
+    const lifecycle = actor.profile.lifecycle;
+    if (lifecycle.kind !== "temporary") return;
+    const settlement = aggregateReservedConversationEntries(
+      actor.sessionManager.getEntries(),
+    ).runSettlements.find(({ runId }) => runId === lifecycle.initialRunId);
+    if (!settlement) return;
+    await this.runLifecycle(context, () =>
+      this.handleTemporaryCompletion(context, actor, settlement)
+    );
+  }
+
+
+  private async recoverTemporary(
+    context: ProjectContext,
+    actor: ConversationActor,
+  ): Promise<void> {
+    if (context.closing) return;
+    const lifecycle = actor.profile.lifecycle;
+    if (lifecycle.kind !== "temporary") return;
+    const settlement = aggregateReservedConversationEntries(
+      actor.sessionManager.getEntries(),
+    ).runSettlements.find(({ runId }) => runId === lifecycle.initialRunId);
+    if (!settlement) return;
+    await this.runLifecycle(context, () =>
+      this.handleTemporaryCompletion(context, actor, settlement)
+    );
   }
 
   private loadOrMigrateProfile(
@@ -4165,14 +4357,6 @@ export class ProjectSessionCoordinator {
         actor,
         completion.settlement,
       );
-      if (completion.origin === "pending_prompt") {
-        await this.finishPendingPrompt(
-          context,
-          actor,
-          completion.settlement.runId,
-          completion.pendingPromptUserDelivered,
-        );
-      }
       if (context.actors.get(actor.conversationId) === actor) {
         await this.pumpTarget(context, actor.conversationId);
       }
@@ -4195,1266 +4379,6 @@ export class ProjectSessionCoordinator {
     }));
   }
 
-  private async finishPendingPrompt(
-    context: ProjectContext,
-    actor: ConversationActor,
-    runId: string,
-    userDelivered: boolean,
-  ): Promise<void> {
-    const conversationId = actor.conversationId;
-    const prompt = (await context.promptQueue.list({ conversationId }))
-      .find((candidate) => (
-        candidate.state === "dispatching" && candidate.runId === runId
-      ));
-    if (!prompt) return;
-    if (userDelivered) {
-      this.appendPendingPromptDelivery(
-        actor.sessionManager,
-        prompt.promptId,
-        runId,
-      );
-      await context.promptQueue.removeForHostCleanup(
-        prompt.promptId,
-        conversationId,
-      );
-    } else {
-      await context.promptQueue.markAttentionAfterUncertainFailure(
-        prompt.promptId,
-        conversationId,
-        runId,
-        "The run settled before the pending prompt user message was observed.",
-        this.now().toISOString(),
-      );
-    }
-    await this.emitPendingPromptsChanged(context, conversationId);
-  }
-
-  private appendPendingPromptBatchState(
-    manager: ConversationActor["sessionManager"],
-    batch: PendingPromptBatchIdentity,
-    state: PendingPromptBatch["state"],
-    reason?: string,
-  ): void {
-    const current = aggregateReservedConversationEntries(
-      manager.getEntries(),
-    ).pendingPromptBatches.find(({ batchId }) => batchId === batch.batchId);
-    if (current?.state === state) return;
-    const updatedAt = new Date(Math.max(
-      this.now().getTime(),
-      Date.parse(current?.updatedAt ?? batch.updatedAt ?? "1970-01-01T00:00:00.000Z"),
-    )).toISOString();
-    if (state === "failed" || state === "attention") {
-      appendReservedCustomEntry(
-        manager,
-        createPendingPromptBatchEntry({
-          ...batch,
-          state,
-          updatedAt,
-          reason: reason ?? "Pending prompt batch failed",
-        }),
-      );
-      return;
-    }
-    appendReservedCustomEntry(
-      manager,
-      createPendingPromptBatchEntry({ ...batch, state, updatedAt }),
-    );
-  }
-
-  private async markPendingPromptBatchAttention(
-    context: ProjectContext,
-    manager: ConversationActor["sessionManager"],
-    batch: PendingPromptBatchIdentity,
-    promptIds: readonly string[],
-    reason: string,
-  ): Promise<void> {
-    const prompts = await context.promptQueue.list({
-      conversationId: batch.conversationId,
-    });
-    const errors: unknown[] = [];
-    for (const promptId of promptIds) {
-      const item = batch.items.find(({ promptId: candidate }) => candidate === promptId);
-      const prompt = prompts.find(({ promptId: candidate }) => candidate === promptId);
-      if (item === undefined || prompt === undefined) continue;
-      if (
-        prompt.createdAt !== item.createdAt
-        || projectPromptPayloadSha256(prompt) !== item.payloadSha256
-      ) continue;
-      if (prompt.state === "attention") continue;
-      try {
-        const attentionRunId = prompt.state === "dispatching"
-          ? prompt.runId
-          : batch.runId;
-        if (prompt.state === "queued") {
-          await context.promptQueue.markDispatching(
-            promptId,
-            batch.conversationId,
-            batch.runId,
-            this.now().toISOString(),
-          );
-        }
-        await context.promptQueue.markAttentionAfterUncertainFailure(
-          promptId,
-          batch.conversationId,
-          attentionRunId,
-          reason,
-          this.now().toISOString(),
-        );
-      } catch (error) {
-        errors.push(error);
-      }
-    }
-    try {
-      this.appendPendingPromptBatchState(manager, batch, "attention", reason);
-    } catch (error) {
-      errors.push(error);
-    }
-    await this.emitPendingPromptsChanged(context, batch.conversationId);
-    if (errors.length > 0) {
-      throw new AggregateError(
-        errors,
-        `Failed to mark pending prompt batch ${batch.batchId} attention`,
-      );
-    }
-  }
-
-  private async completePendingPromptBatchCleanup(
-    context: ProjectContext,
-    manager: ConversationActor["sessionManager"],
-    batch: PendingPromptBatchIdentity,
-    promptIds: readonly string[],
-  ): Promise<void> {
-    const prompts = await context.promptQueue.list({
-      conversationId: batch.conversationId,
-    });
-    const receipts = aggregateReservedConversationEntries(
-      manager.getEntries(),
-    ).pendingPromptDeliveries;
-    for (const promptId of promptIds) {
-      const item = batch.items.find((candidate) => candidate.promptId === promptId);
-      if (item === undefined) {
-        throw new Error(`Pending prompt batch manifest lost item: ${promptId}`);
-      }
-      const prompt = prompts.find((candidate) => candidate.promptId === promptId);
-      const receipt = receipts.find((candidate) => candidate.promptId === promptId);
-      if (prompt === undefined) {
-        if (receipt?.runId === batch.runId && receipt.batchId === batch.batchId) {
-          continue;
-        }
-        throw new Error(
-          `Pending prompt batch cleanup lost unreceipted sidecar: ${promptId}`,
-        );
-      }
-      if (
-        prompt.state !== "dispatching"
-        || prompt.runId !== batch.runId
-        || prompt.createdAt !== item.createdAt
-        || projectPromptPayloadSha256(prompt) !== item.payloadSha256
-      ) {
-        throw new Error(
-          `Pending prompt batch cleanup lost exact dispatching claim: ${promptId}`,
-        );
-      }
-    }
-    for (const promptId of promptIds) {
-      this.appendPendingPromptDelivery(
-        manager,
-        promptId,
-        batch.runId,
-        batch.batchId,
-      );
-    }
-    for (const promptId of promptIds) {
-      const prompt = prompts.find((candidate) => candidate.promptId === promptId);
-      if (prompt === undefined) continue;
-      const item = batch.items.find((candidate) => candidate.promptId === promptId)!;
-      await context.promptQueue.removeDeliveredBatchPrompt(
-        promptId,
-        batch.conversationId,
-        batch.runId,
-        item.createdAt,
-        item.payloadSha256,
-      );
-    }
-    this.appendPendingPromptBatchState(manager, batch, "completed");
-  }
-
-  private appendPendingPromptDelivery(
-    manager: ConversationActor["sessionManager"],
-    promptId: string,
-    runId: string,
-    batchId?: string,
-  ): void {
-    const aggregate = aggregateReservedConversationEntries(
-      manager.getEntries(),
-    );
-    const existing = aggregate.pendingPromptDeliveries.find((delivery) => (
-      delivery.promptId === promptId
-    ));
-    if (existing !== undefined) {
-      if (existing.runId === runId && existing.batchId === batchId) return;
-      throw new Error(
-        `Conflicting pending prompt delivery for promptId ${promptId}`,
-      );
-    }
-    appendReservedCustomEntry(
-      manager,
-      createPendingPromptDeliveryEntry({
-        promptId,
-        runId,
-        ...(batchId === undefined ? {} : { batchId }),
-        deliveredAt: this.now().toISOString(),
-      }),
-    );
-  }
-
-  private rejectRunWaiters(
-    context: ProjectContext,
-    conversationId: string,
-    runId: string,
-    error: Error,
-  ): void {
-    const key = completionKey(conversationId, runId);
-    const waiters = context.waiters.get(key);
-    if (!waiters) return;
-    context.waiters.delete(key);
-    for (const waiter of waiters) {
-      this.detachWaiter(waiter);
-      waiter.reject(error);
-    }
-  }
-
-  private recordCompletion(
-    context: ProjectContext,
-    conversationId: string,
-    settlement: RunSettlement,
-  ): void {
-    const key = completionKey(conversationId, settlement.runId);
-    if (!context.completions.has(key)) {
-      context.completions.set(key, cloneSettlement(settlement));
-      while (context.completions.size > MAX_COMPLETION_CACHE) {
-        const oldest = context.completions.keys().next().value as
-          | string
-          | undefined;
-        if (oldest === undefined) break;
-        context.completions.delete(oldest);
-      }
-    }
-    const waiters = context.waiters.get(key);
-    if (!waiters) return;
-    const actor = context.actors.get(conversationId);
-    const lifecycle = actor?.profile.lifecycle
-      ?? context.profiles.get(conversationId)?.lifecycle;
-    for (const waiter of [...waiters]) {
-      if (
-        waiter.kind === "session"
-        && lifecycle?.kind === "temporary"
-        && lifecycle.initialRunId === settlement.runId
-        && lifecycle.callerConversationId === waiter.waitingConversationId
-      ) {
-        // The temporary result body has one model-input owner: its durable
-        // incoming message. Keep the caller wait until that envelope is
-        // committed and resolve it with metadata instead of duplicating the
-        // final text in the tool result.
-        continue;
-      }
-      waiters.delete(waiter);
-      this.detachWaiter(waiter);
-      waiter.resolve(cloneSettlement(settlement));
-    }
-    if (waiters.size === 0) context.waiters.delete(key);
-  }
-
-  private temporaryReturnReceipt(
-    context: ProjectContext,
-    callerConversationId: string,
-    temporaryConversationId: string,
-    initialRunId: string,
-  ): TemporaryReturnReceipt | undefined {
-    const caller = context.actors.get(callerConversationId);
-    if (!caller) return undefined;
-    return aggregateReservedConversationEntries(
-      caller.sessionManager.getEntries(),
-    ).temporaryReturnReceipts.find((receipt) =>
-      receipt.temporaryConversationId === temporaryConversationId
-      && receipt.initialRunId === initialRunId
-    );
-  }
-
-  private async withTemporaryReturnReceiptManager<T>(
-    context: ProjectContext,
-    callerConversationId: string,
-    work: (manager: ConversationActor["sessionManager"]) => Promise<T> | T,
-  ): Promise<T> {
-    const active = context.actors.get(callerConversationId);
-    if (active) return work(active.sessionManager);
-    const opening = context.actorOpenings.get(callerConversationId);
-    if (opening) return work((await opening).sessionManager);
-    const lease = await this.projects.acquireConversationWhenAvailable(
-      context.project.cwd,
-      callerConversationId,
-    );
-    try {
-      const manager = await context.project.openConversation(
-        callerConversationId,
-        { updateRecent: false },
-      );
-      return await work(manager);
-    } finally {
-      lease.release();
-    }
-  }
-
-  private async durableTemporaryReturnReceipt(
-    context: ProjectContext,
-    callerConversationId: string,
-    temporaryConversationId: string,
-    initialRunId: string,
-  ): Promise<TemporaryReturnReceipt | undefined> {
-    let receipt: TemporaryReturnReceipt | undefined;
-    await this.withTemporaryReturnReceiptManager(
-      context,
-      callerConversationId,
-      (manager) => {
-        receipt = aggregateReservedConversationEntries(
-          manager.getEntries(),
-        ).temporaryReturnReceipts.find((candidate) =>
-          candidate.temporaryConversationId === temporaryConversationId
-          && candidate.initialRunId === initialRunId
-        );
-      },
-    );
-    if (receipt) return receipt;
-
-    const assignedEnvelope = (await context.inbox.list({
-      toConversationId: callerConversationId,
-    })).find((envelope) =>
-      envelope.kind === "message"
-      && envelope.fromConversationId === temporaryConversationId
-      && envelope.fromRunId === initialRunId
-      && envelope.temporaryReturnAssignment?.initialRunId === initialRunId
-    );
-    if (!assignedEnvelope?.temporaryReturnAssignment) return undefined;
-    const source = context.actors.get(temporaryConversationId);
-    const lifecycle = source?.profile.lifecycle;
-    if (
-      !source
-      || lifecycle?.kind !== "temporary"
-      || lifecycle.initialRunId !== initialRunId
-      || lifecycle.callerConversationId !== callerConversationId
-    ) {
-      throw new Error("Temporary return assignment conflicts with lifecycle");
-    }
-    const assignment = assignedEnvelope.temporaryReturnAssignment;
-    await this.withTemporaryReturnReceiptManager(
-      context,
-      callerConversationId,
-      (manager) => {
-        const aggregate = aggregateReservedConversationEntries(
-          manager.getEntries(),
-        );
-        receipt = aggregate.temporaryReturnReceipts.find((candidate) =>
-          candidate.temporaryConversationId === temporaryConversationId
-          && candidate.initialRunId === initialRunId
-        );
-        if (receipt) return;
-        const claimed = createTemporaryReturnReceiptEntry({
-          temporaryConversationId,
-          initialRunId,
-          messageId: assignedEnvelope.messageId,
-          callerRunId: assignment.callerRunId,
-          claimedAt: assignment.assignedAt,
-          state: "claimed",
-        });
-        appendReservedCustomEntry(manager, claimed);
-        receipt = claimed.data;
-      },
-    );
-    return receipt;
-  }
-
-  private async settleTemporaryReturnReceipt(
-    context: ProjectContext,
-    callerConversationId: string,
-    temporaryConversationId: string,
-    initialRunId: string,
-    settlement: RunSettlement,
-  ): Promise<void> {
-    await this.withTemporaryReturnReceiptManager(
-      context,
-      callerConversationId,
-      (manager) => {
-        const receipt = aggregateReservedConversationEntries(
-          manager.getEntries(),
-        ).temporaryReturnReceipts.find((candidate) =>
-          candidate.temporaryConversationId === temporaryConversationId
-          && candidate.initialRunId === initialRunId
-        );
-        if (!receipt) {
-          throw new Error("Missing temporary return receipt for settlement");
-        }
-        if (receipt.messageId !== settlement.returnMessageId) {
-          throw new Error("Temporary return receipt conflicts with settlement");
-        }
-        if (receipt.state === "settled") {
-          if (JSON.stringify(receipt.settlement) !== JSON.stringify(settlement)) {
-            throw new Error("Conflicting settled temporary return receipt");
-          }
-          return;
-        }
-        appendReservedCustomEntry(
-          manager,
-          createTemporaryReturnReceiptEntry({
-            ...receipt,
-            state: "settled",
-            settlement,
-          }),
-        );
-      },
-    );
-  }
-
-  private resolveDeferredTemporaryReturnWaiters(
-    context: ProjectContext,
-    callerConversationId: string,
-    temporaryConversationId: string,
-    initialRunId: string,
-    settlement: RunSettlement,
-  ): void {
-    const key = completionKey(temporaryConversationId, initialRunId);
-    const waiters = context.waiters.get(key);
-    if (!waiters) return;
-    for (const waiter of [...waiters]) {
-      if (
-        waiter.kind !== "session"
-        || waiter.waitingConversationId !== callerConversationId
-        || waiter.targetConversationId !== temporaryConversationId
-        || waiter.targetRunId !== initialRunId
-      ) {
-        continue;
-      }
-      waiters.delete(waiter);
-      this.detachWaiter(waiter);
-      waiter.resolve(cloneSettlement(settlement));
-    }
-    if (waiters.size === 0) context.waiters.delete(key);
-  }
-
-  private async waitForSession(
-    context: ProjectContext,
-    sourceConversationId: string,
-    targetConversationId: string,
-    runId: string,
-    signal?: AbortSignal,
-  ): Promise<RunSettlement | SessionMessageWaitResult> {
-    if (sourceConversationId === targetConversationId) {
-      throw new Error("An Agent cannot wait for its own current run");
-    }
-    this.throwIfAborted(signal);
-    const source = this.requireActor(context, sourceConversationId);
-    const ownership = source.currentRunOwnership();
-    if (!ownership) {
-      throw new Error("No running source turn owns this wait");
-    }
-    const preliminary = await this.runLifecycle(context, async () => {
-      const committedReplyCandidate = await this.findCommittedWaitReply(
-        context,
-        sourceConversationId,
-        targetConversationId,
-        runId,
-        ownership.runId,
-      );
-      const temporaryReceipt = this.temporaryReturnReceipt(
-        context,
-        sourceConversationId,
-        targetConversationId,
-        runId,
-      );
-      const committedReply = committedReplyCandidate
-        && !(
-          temporaryReceipt !== undefined
-          && committedReplyCandidate.messageId === temporaryReceipt.messageId
-          && committedReplyCandidate.waitedByRunId !== undefined
-        )
-        ? committedReplyCandidate
-        : undefined;
-      const cached = context.completions.get(
-        completionKey(targetConversationId, runId),
-      );
-      return {
-        committedReply,
-        settledReceipt: temporaryReceipt?.state === "settled"
-          ? cloneSettlement(temporaryReceipt.settlement)
-          : undefined,
-        cached: cached ? cloneSettlement(cached) : undefined,
-        waitsForTemporaryReturn: this.waitsForTemporaryReturn(
-          context,
-          sourceConversationId,
-          targetConversationId,
-          runId,
-          cached,
-        ),
-      };
-    });
-    this.throwIfAborted(signal);
-    if (preliminary.committedReply || preliminary.waitsForTemporaryReturn) {
-      return this.waitForSessionEvent(
-        context,
-        source,
-        ownership,
-        targetConversationId,
-        runId,
-        signal,
-      );
-    }
-    if (preliminary.settledReceipt) return preliminary.settledReceipt;
-    if (preliminary.cached) return preliminary.cached;
-    const activeTarget = context.actors.get(targetConversationId);
-    if (activeTarget) {
-      const activeSettlement = this.findSettlement(
-        context,
-        activeTarget,
-        runId,
-      );
-      if (
-        activeSettlement
-        && !this.waitsForTemporaryReturn(
-          context,
-          sourceConversationId,
-          targetConversationId,
-          runId,
-          activeSettlement,
-        )
-      ) {
-        return activeSettlement;
-      }
-    } else {
-      const inspection = await context.project.inspectConversation(
-        targetConversationId,
-      );
-      this.throwIfAborted(signal);
-      const durable = inspection.runSettlements.find(
-        (settlement) => settlement.runId === runId,
-      );
-      const inspectedLifecycle = inspection.conversationMeta?.lifecycle;
-      const waitsForInspectedTemporaryReturn =
-        inspectedLifecycle?.kind === "temporary"
-        && inspectedLifecycle.initialRunId === runId
-        && inspectedLifecycle.callerConversationId === sourceConversationId
-        && durable?.reportedAt === undefined;
-      if (durable && !waitsForInspectedTemporaryReturn) {
-        return cloneSettlement(durable);
-      }
-    }
-    const target = await raceWithAbort(
-      this.getOrOpenActor(context, targetConversationId),
-      signal,
-    );
-    this.throwIfAborted(signal);
-    const existing = this.findSettlement(context, target, runId);
-    if (
-      existing
-      && !this.waitsForTemporaryReturn(
-        context,
-        sourceConversationId,
-        targetConversationId,
-        runId,
-        existing,
-      )
-    ) {
-      return existing;
-    }
-    return this.waitForSessionEvent(
-      context,
-      source,
-      ownership,
-      targetConversationId,
-      runId,
-      signal,
-      target,
-    );
-  }
-
-  private waitForSessionEvent(
-    context: ProjectContext,
-    source: ConversationActor,
-    ownership: ConversationRunOwnership,
-    targetConversationId: string,
-    runId: string,
-    signal?: AbortSignal,
-    target?: ConversationActor,
-  ): Promise<RunSettlement | SessionMessageWaitResult> {
-    const sourceConversationId = source.conversationId;
-    return source.withWaiting(
-      ownership,
-      { conversationId: targetConversationId, runId },
-      async () => {
-        let resolveCompletion!: (
-          result: RunSettlement | SessionMessageWaitResult,
-        ) => void;
-        let rejectCompletion!: (error: Error) => void;
-        const completion = new Promise<
-          RunSettlement | SessionMessageWaitResult
-        >((resolve, reject) => {
-          resolveCompletion = resolve;
-          rejectCompletion = reject;
-        });
-        // The abort listener can reject while durable waiter registration is
-        // still awaiting project lifecycle work. Observe that interval now;
-        // callers still receive the same rejection from `completion` below.
-        void completion.catch(() => undefined);
-        const key = completionKey(targetConversationId, runId);
-        let registeredWaiter: SessionWaiter | undefined;
-        try {
-          await this.runLifecycle(context, async () => {
-            const waiter: SessionWaiter = {
-              kind: "session",
-              resolve: resolveCompletion,
-              reject: rejectCompletion,
-              waitingConversationId: sourceConversationId,
-              targetConversationId,
-              targetRunId: runId,
-              ...(signal === undefined ? {} : { signal }),
-            };
-            registeredWaiter = waiter;
-            const fatalTarget = context.actors.get(targetConversationId)
-              ?.getState().fatalError;
-            if (fatalTarget !== undefined) {
-              throw new Error(
-                `Target conversation is fatal: ${fatalTarget}`,
-              );
-            }
-            if (signal) {
-              waiter.abortListener = () => {
-                const waiting = context.waiters.get(key);
-                waiting?.delete(waiter);
-                if (waiting?.size === 0) context.waiters.delete(key);
-                this.detachWaiter(waiter);
-                rejectCompletion(abortError("Session wait was aborted"));
-              };
-              signal.addEventListener("abort", waiter.abortListener, {
-                once: true,
-              });
-              if (signal.aborted) {
-                waiter.abortListener();
-                return;
-              }
-            }
-            if (this.hasWaitPath(
-              context,
-              targetConversationId,
-              sourceConversationId,
-            )) {
-              throw new Error(
-                `Waiting for ${targetConversationId} would create a conversation wait cycle`,
-              );
-            }
-            let waiters = context.waiters.get(key);
-            if (!waiters) {
-              waiters = new Set();
-              context.waiters.set(key, waiters);
-            }
-            waiters.add(waiter);
-
-            const committedReply = await this.findCommittedWaitReply(
-              context,
-              sourceConversationId,
-              targetConversationId,
-              runId,
-              ownership.runId,
-            );
-            if (committedReply) {
-              await this.deliverEnvelopeToWaitingRun(
-                context,
-                source,
-                committedReply,
-                runId,
-              );
-              return;
-            }
-
-            const raced = target
-              ? this.findSettlement(context, target, runId)
-              : context.completions.get(key);
-            if (
-              raced
-              && !this.waitsForTemporaryReturn(
-                context,
-                sourceConversationId,
-                targetConversationId,
-                runId,
-                raced,
-              )
-            ) {
-              waiters.delete(waiter);
-              if (waiters.size === 0) context.waiters.delete(key);
-              this.detachWaiter(waiter);
-              resolveCompletion(cloneSettlement(raced));
-            }
-          });
-        } catch (error) {
-          if (registeredWaiter) {
-            const waiters = context.waiters.get(key);
-            waiters?.delete(registeredWaiter);
-            if (waiters?.size === 0) context.waiters.delete(key);
-            this.detachWaiter(registeredWaiter);
-          }
-          rejectCompletion(
-            error instanceof Error ? error : new Error(String(error)),
-          );
-        }
-        return completion;
-      },
-    );
-  }
-
-  private async findCommittedWaitReply(
-    context: ProjectContext,
-    sourceConversationId: string,
-    targetConversationId: string,
-    targetRunId: string,
-    sourceRunId: string,
-  ): Promise<InboxEnvelope | undefined> {
-    const pending = await context.inbox.list({
-      toConversationId: sourceConversationId,
-    });
-    return pending.find((envelope) =>
-      envelope.fromConversationId === targetConversationId
-      && envelope.fromRunId === targetRunId
-      && envelope.waitedByRunId !== sourceRunId
-    );
-  }
-
-  private waitsForTemporaryReturn(
-    context: ProjectContext,
-    sourceConversationId: string,
-    targetConversationId: string,
-    runId: string,
-    settlement?: RunSettlement,
-  ): boolean {
-    const actor = context.actors.get(targetConversationId);
-    const lifecycle = actor?.profile.lifecycle
-      ?? context.profiles.get(targetConversationId)?.lifecycle;
-    return lifecycle?.kind === "temporary"
-      && lifecycle.initialRunId === runId
-      && lifecycle.callerConversationId === sourceConversationId
-      && settlement !== undefined
-      && settlement.reportedAt === undefined
-      && !(
-        temporarySettlementIsReturnable(settlement)
-        && this.temporaryReturnReceipt(
-          context,
-          sourceConversationId,
-          targetConversationId,
-          runId,
-        )?.state === "settled"
-      );
-  }
-
-  private findSettlement(
-    context: ProjectContext,
-    target: ConversationActor,
-    runId: string,
-  ): RunSettlement | undefined {
-    const cached = context.completions.get(
-      completionKey(target.conversationId, runId),
-    );
-    if (cached) return cloneSettlement(cached);
-    const aggregate = aggregateReservedConversationEntries(
-      target.sessionManager.getEntries(),
-    );
-    const durable = aggregate.runSettlements.find(
-      (settlement) => settlement.runId === runId,
-    );
-    return durable ? cloneSettlement(durable) : undefined;
-  }
-
-  private observeSettlement(
-    context: ProjectContext,
-    target: ConversationActor,
-    runId: string,
-  ): Promise<RunSettlement> {
-    const existing = this.findSettlement(context, target, runId);
-    if (existing) return Promise.resolve(existing);
-    return new Promise<RunSettlement>((resolve, reject) => {
-      const key = completionKey(target.conversationId, runId);
-      const waiter: CompletionWaiter = {
-        kind: "completion",
-        resolve,
-        reject,
-      };
-      let waiters = context.waiters.get(key);
-      if (!waiters) {
-        waiters = new Set();
-        context.waiters.set(key, waiters);
-      }
-      waiters.add(waiter);
-      try {
-        const raced = this.findSettlement(context, target, runId);
-        if (!raced) return;
-        waiters.delete(waiter);
-        if (waiters.size === 0) context.waiters.delete(key);
-        resolve(raced);
-      } catch (error) {
-        waiters.delete(waiter);
-        if (waiters.size === 0) context.waiters.delete(key);
-        reject(error instanceof Error ? error : new Error(String(error)));
-      }
-    });
-  }
-
-  private async handleTemporaryCompletion(
-    context: ProjectContext,
-    actor: ConversationActor,
-    settlement: RunSettlement,
-  ): Promise<void> {
-    const lifecycle = actor.profile.lifecycle;
-    if (
-      lifecycle.kind !== "temporary"
-      || settlement.runId !== lifecycle.initialRunId
-    ) {
-      return;
-    }
-    if (settlement.reportedAt !== undefined) {
-      if (temporarySettlementIsReturnable(settlement)) {
-        const receipt = await this.durableTemporaryReturnReceipt(
-          context,
-          lifecycle.callerConversationId,
-          actor.conversationId,
-          settlement.runId,
-        );
-        if (receipt) {
-          if (settlement.returnMessageId !== receipt.messageId) {
-            throw new Error("Reported temporary settlement conflicts with receipt");
-          }
-          await this.settleTemporaryReturnReceipt(
-            context,
-            lifecycle.callerConversationId,
-            actor.conversationId,
-            settlement.runId,
-            settlement,
-          );
-          this.resolveDeferredTemporaryReturnWaiters(
-            context,
-            lifecycle.callerConversationId,
-            actor.conversationId,
-            settlement.runId,
-            settlement,
-          );
-        }
-        await this.deleteConversationInternal(
-          context,
-          actor.conversationId,
-          false,
-        );
-      } else {
-        context.attention.add(actor.conversationId);
-        this.emit(context, { type: "project_changed" });
-      }
-      return;
-    }
-
-    const successful = temporarySettlementIsReturnable(settlement);
-    const receipt = successful
-      ? await this.durableTemporaryReturnReceipt(
-          context,
-          lifecycle.callerConversationId,
-          actor.conversationId,
-          settlement.runId,
-        )
-      : undefined;
-    if (receipt) {
-      const reported = reportTemporarySettlementThroughReceipt(
-        settlement,
-        receipt,
-        () => this.now().toISOString(),
-      );
-      await this.settleTemporaryReturnReceipt(
-        context,
-        lifecycle.callerConversationId,
-        actor.conversationId,
-        settlement.runId,
-        reported,
-      );
-      this.resolveDeferredTemporaryReturnWaiters(
-        context,
-        lifecycle.callerConversationId,
-        actor.conversationId,
-        settlement.runId,
-        reported,
-      );
-      appendReservedCustomEntry(
-        actor.sessionManager,
-        createRunSettlementEntry(reported),
-      );
-      context.completions.set(
-        completionKey(actor.conversationId, reported.runId),
-        cloneSettlement(reported),
-      );
-      await this.deleteConversationInternal(
-        context,
-        actor.conversationId,
-        false,
-      );
-      return;
-    }
-    const oversized = settlement.outcome === "completed"
-      && settlement.finalText !== null
-      && settlement.finalText.trim().length > 0
-      && !successful;
-    const caller = await this.getOrOpenActor(
-      context,
-      lifecycle.callerConversationId,
-    );
-    const recoveredReturn = await context.inbox.get(
-      lifecycle.returnMessageId,
-    );
-    const returned = await this.enqueueEnvelope(context, actor, caller, {
-      messageId: lifecycle.returnMessageId,
-      cardId: deterministicUuid(
-        "piweb.return.card",
-        lifecycle.returnMessageId,
-      ),
-      sentAt: recoveredReturn?.sentAt ?? this.now().toISOString(),
-      kind: successful
-        ? "delegation_result"
-        : "delegation_failure",
-      body: successful
-        ? settlement.finalText!
-        : oversized
-          ? `临时会话已经完成，但最终回复超过 ${
-              MAX_CONVERSATION_BODY_BYTES
-            } 字节的自动回传上限；会话已保留，请打开查看。`
-          : `临时会话未成功完成：${settlement.outcome}${
-              settlement.finalText === null ? "，且没有 Agent 回复" : ""
-            }`,
-      delegationId: lifecycle.delegationId,
-      fromRunId: recoveredReturn
-        ? recoveredReturn.fromRunId
-        : settlement.runId,
-    });
-    const reported = createRunSettlementEntry({
-      ...settlement,
-      reportedAt: this.now().toISOString(),
-      returnMessageId: lifecycle.returnMessageId,
-    }).data;
-    appendReservedCustomEntry(
-      actor.sessionManager,
-      createRunSettlementEntry(reported),
-    );
-    context.completions.set(
-      completionKey(actor.conversationId, reported.runId),
-      cloneSettlement(reported),
-    );
-    const deliveredToWait = await this.deliverEnvelopeToWaitingRun(
-      context,
-      caller,
-      returned.envelope,
-      settlement.runId,
-    );
-    if (!deliveredToWait) await this.steerActiveTarget(context, caller);
-    if (caller.getActivity().kind === "idle") {
-      await this.pumpTarget(context, caller.conversationId);
-    }
-    if (successful) {
-      await this.deleteConversationInternal(
-        context,
-        actor.conversationId,
-        false,
-      );
-    } else {
-      context.attention.add(actor.conversationId);
-      this.emit(context, { type: "project_changed" });
-    }
-  }
-
-  private async retryBlockedDeletions(
-    context: ProjectContext,
-  ): Promise<void> {
-    await this.retryReturnableTemporaryDeletions(context);
-    await this.retryDurableDeletions(context);
-  }
-
-  private async retryReturnableTemporaryDeletions(
-    context: ProjectContext,
-  ): Promise<void> {
-    for (const actor of [...context.actors.values()]) {
-      if (actor.getState().disposed) continue;
-      const lifecycle = actor.profile.lifecycle;
-      if (lifecycle.kind !== "temporary") continue;
-      const settlement = aggregateReservedConversationEntries(
-        actor.sessionManager.getEntries(),
-      ).runSettlements.find(({ runId }) =>
-        runId === lifecycle.initialRunId
-      );
-      if (
-        !settlement
-        || settlement.reportedAt === undefined
-        || !temporarySettlementIsReturnable(settlement)
-      ) {
-        continue;
-      }
-      try {
-        await this.deleteConversationInternal(
-          context,
-          actor.conversationId,
-          false,
-        );
-      } catch {
-        context.attention.add(actor.conversationId);
-        this.emit(context, { type: "project_changed" });
-      }
-    }
-  }
-
-  private async retryDurableDeletions(
-    context: ProjectContext,
-  ): Promise<void> {
-    for (const conversationId of await context.inbox.listDeletedTargets()) {
-      if (context.closing) return;
-      if (!context.deleting.has(conversationId)) {
-        context.deleting.add(conversationId);
-      }
-      try {
-        await this.deleteConversationInternal(
-          context,
-          conversationId,
-          true,
-          true,
-          undefined,
-          true,
-        );
-      } catch {
-        context.attention.add(conversationId);
-      }
-    }
-  }
-
-  private async recoverTemporary(
-    context: ProjectContext,
-    actor: ConversationActor,
-  ): Promise<void> {
-    if (context.closing) return;
-    const lifecycle = actor.profile.lifecycle;
-    if (lifecycle.kind !== "temporary") return;
-    const settlement = aggregateReservedConversationEntries(
-      actor.sessionManager.getEntries(),
-    ).runSettlements.find(({ runId }) => runId === lifecycle.initialRunId);
-    if (!settlement) return;
-    await this.runLifecycle(context, () =>
-      this.handleTemporaryCompletion(context, actor, settlement)
-    );
-  }
-
-  private async recoverPendingPromptBatch(
-    context: ProjectContext,
-    manager: ConversationActor["sessionManager"],
-    batch: PendingPromptBatch,
-  ): Promise<void> {
-    const identity: PendingPromptBatchIdentity = {
-      batchId: batch.batchId,
-      conversationId: batch.conversationId,
-      runId: batch.runId,
-      items: batch.items,
-      updatedAt: batch.updatedAt,
-    };
-    const prompts = await context.promptQueue.list({
-      conversationId: batch.conversationId,
-    });
-    const promptForItem = (item: PendingPromptBatch["items"][number]) =>
-      prompts.find(({ promptId }) => promptId === item.promptId);
-    const matchesManifest = (
-      prompt: ProjectPromptRecord | undefined,
-      item: PendingPromptBatch["items"][number],
-    ): boolean => (
-      prompt !== undefined
-      && prompt.conversationId === batch.conversationId
-      && prompt.createdAt === item.createdAt
-      && projectPromptPayloadSha256(prompt) === item.payloadSha256
-    );
-    const exactPrompt = (item: PendingPromptBatch["items"][number]) => {
-      const prompt = promptForItem(item);
-      if (!matchesManifest(prompt, item)) {
-        throw new Error(
-          `Pending prompt batch recovery identity does not match: ${item.promptId}`,
-        );
-      }
-      return prompt!;
-    };
-
-    // A missing or replaced sidecar is not proof that the batch was delivered.
-    // Repair the batch to terminal attention instead of leaving a prepared,
-    // started, or delivered fence that blocks every later prompt after restart.
-    const deliveryReceipts = aggregateReservedConversationEntries(
-      manager.getEntries(),
-    ).pendingPromptDeliveries;
-    if (
-      batch.state === "prepared"
-      || batch.state === "started"
-      || batch.state === "delivered"
-    ) {
-      const invalidItems = batch.items.filter((item) => {
-        const prompt = promptForItem(item);
-        if (batch.state === "delivered") {
-          const receipt = deliveryReceipts.find(({ promptId }) => (
-            promptId === item.promptId
-          ));
-          if (
-            receipt?.runId === batch.runId
-            && receipt.batchId === batch.batchId
-          ) return false;
-          return !matchesManifest(prompt, item)
-            || prompt!.state !== "dispatching"
-            || prompt!.runId !== batch.runId;
-        }
-        if (!matchesManifest(prompt, item)) return true;
-        if (batch.state === "prepared") {
-          return prompt!.state !== "queued"
-            && !(prompt!.state === "dispatching" && prompt!.runId === batch.runId);
-        }
-        return prompt!.state !== "attention"
-          && !(prompt!.state === "dispatching" && prompt!.runId === batch.runId);
-      });
-      if (invalidItems.length > 0) {
-        const reason =
-          "Recovery cannot prove pending prompt batch sidecar identity or delivery.";
-        const repairErrors: unknown[] = [];
-        for (const item of batch.items) {
-          const prompt = promptForItem(item);
-          if (prompt === undefined) continue;
-          try {
-            if (
-              matchesManifest(prompt, item)
-              && batch.state === "prepared"
-              && prompt.state === "dispatching"
-              && prompt.runId === batch.runId
-            ) {
-              await context.promptQueue.requeueDispatchingBatch(
-                [prompt.promptId],
-                batch.conversationId,
-                batch.runId,
-              );
-            } else if (
-              matchesManifest(prompt, item)
-              && batch.state === "prepared"
-              && prompt.state === "queued"
-            ) {
-              // A prepared batch never crossed SDK acceptance, so an exact
-              // queued member is still safe to let the generic FIFO pump own.
-              continue;
-            } else if (prompt.state === "attention") {
-              continue;
-            } else {
-              const attentionRunId = prompt.state === "dispatching"
-                ? prompt.runId
-                : batch.runId;
-              if (prompt.state === "queued") {
-                await context.promptQueue.markDispatching(
-                  prompt.promptId,
-                  batch.conversationId,
-                  batch.runId,
-                  this.now().toISOString(),
-                );
-              }
-              await context.promptQueue.markAttentionAfterUncertainFailure(
-                prompt.promptId,
-                batch.conversationId,
-                attentionRunId,
-                reason,
-                this.now().toISOString(),
-              );
-            }
-          } catch (error) {
-            repairErrors.push(error);
-          }
-        }
-        try {
-          this.appendPendingPromptBatchState(manager, identity, "attention", reason);
-        } catch (error) {
-          repairErrors.push(error);
-        }
-        context.promptAttention.add(batch.conversationId);
-        if (repairErrors.length > 0) {
-          throw new AggregateError(
-            repairErrors,
-            "Pending prompt batch recovery repair failed",
-          );
-        }
-        return;
-      }
-    }
-
-    if (batch.state === "prepared") {
-      const dispatchingIds: string[] = [];
-      for (const item of batch.items) {
-        const prompt = exactPrompt(item);
-        if (prompt.state === "queued") continue;
-        if (prompt.state === "dispatching" && prompt.runId === batch.runId) {
-          dispatchingIds.push(prompt.promptId);
-          continue;
-        }
-        throw new Error(
-          `Prepared pending prompt batch has an invalid member state: ${item.promptId}`,
-        );
-      }
-      if (dispatchingIds.length > 0) {
-        await context.promptQueue.requeueDispatchingBatch(
-          dispatchingIds,
-          batch.conversationId,
-          batch.runId,
-        );
-      }
-      this.appendPendingPromptBatchState(manager, identity, "failed", "Recovered prepared pending prompt batch");
-      return;
-    }
-
-    if (batch.state === "started") {
-      const aggregate = aggregateReservedConversationEntries(manager.getEntries());
-      if (aggregate.pendingPromptDeliveries.some(({ batchId }) => batchId === batch.batchId)) {
-        throw new Error(
-          `Started pending prompt batch has a delivery receipt: ${batch.batchId}`,
-        );
-      }
-      const members = batch.items.map((item) => {
-        const prompt = exactPrompt(item);
-        if (
-          prompt.state !== "attention"
-          && (prompt.state !== "dispatching" || prompt.runId !== batch.runId)
-        ) {
-          throw new Error(
-            `Started pending prompt batch has an invalid member state: ${item.promptId}`,
-          );
-        }
-        return prompt;
-      });
-      for (const prompt of members) {
-        if (prompt.state === "attention") continue;
-        await context.promptQueue.markAttentionAfterUncertainFailure(
-          prompt.promptId,
-          batch.conversationId,
-          batch.runId,
-          "Recovery cannot prove pending prompt batch delivery.",
-          this.now().toISOString(),
-        );
-      }
-      this.appendPendingPromptBatchState(
-        manager,
-        identity,
-        "attention",
-        "Recovery cannot prove pending prompt batch delivery.",
-      );
-      return;
-    }
-
-    if (batch.state === "delivered") {
-      await this.completePendingPromptBatchCleanup(
-        context,
-        manager,
-        identity,
-        batch.items.map(({ promptId }) => promptId),
-      );
-    }
-  }
 
   private async recoverProject(context: ProjectContext): Promise<void> {
     if (context.closing) return;
@@ -5484,7 +4408,6 @@ export class ProjectSessionCoordinator {
       await context.inbox.listDeletedTargets(),
     );
     const pending = await context.inbox.list();
-    let pendingPrompts = await context.promptQueue.list();
     summaries = await context.project.refreshConversations();
     const startedAbortOperations: Array<{
       sourceConversationId: string;
@@ -5493,15 +4416,6 @@ export class ProjectSessionCoordinator {
         { kind: "abort_session"; state: "started" }
       >;
     }> = [];
-    const pendingPromptDeliveriesByConversation = new Map<
-      string,
-      PendingPromptDelivery[]
-    >();
-    const pendingPromptBatchesByConversation = new Map<
-      string,
-      PendingPromptBatch[]
-    >();
-    const batchRecoveryBlocked = new Set<string>();
     const actorIds = new Set(
       pending
         .filter(({ toConversationId }) =>
@@ -5531,14 +4445,6 @@ export class ProjectSessionCoordinator {
             });
           }
         }
-        pendingPromptDeliveriesByConversation.set(
-          summary.id,
-          inspection.pendingPromptDeliveries,
-        );
-        pendingPromptBatchesByConversation.set(
-          summary.id,
-          inspection.pendingPromptBatches,
-        );
         const profile = inspection.conversationMeta;
         if (!profile) continue;
         context.profiles.set(summary.id, cloneProfile(profile));
@@ -5553,100 +4459,7 @@ export class ProjectSessionCoordinator {
         }
       } catch {
         context.attention.add(summary.id);
-        batchRecoveryBlocked.add(summary.id);
       }
-    }
-
-    for (const [conversationId, batches] of pendingPromptBatchesByConversation) {
-      const nonterminal = batches.filter(({ state }) => (
-        state === "prepared" || state === "started" || state === "delivered"
-      ));
-      if (nonterminal.length === 0) continue;
-      const promptOwners = new Set<string>();
-      if (nonterminal.some((batch) => batch.items.some(({ promptId }) => {
-        if (promptOwners.has(promptId)) return true;
-        promptOwners.add(promptId);
-        return false;
-      }))) {
-        batchRecoveryBlocked.add(conversationId);
-        context.promptAttention.add(conversationId);
-        continue;
-      }
-      for (const batch of nonterminal) {
-        try {
-          await this.withConversationManager(context, conversationId, (manager) =>
-            this.recoverPendingPromptBatch(context, manager, batch)
-          );
-        } catch {
-          batchRecoveryBlocked.add(conversationId);
-          context.promptAttention.add(conversationId);
-        }
-      }
-    }
-
-    // Batch reconciliation can change durable sidecars. Generic recovery must
-    // observe that result and must never cross a batch fence it could not prove.
-    pendingPrompts = await context.promptQueue.list();
-    for (const prompt of pendingPrompts) {
-      if (prompt.state === "attention") {
-        context.promptAttention.add(prompt.conversationId);
-      }
-    }
-
-    for (const prompt of pendingPrompts) {
-      if (context.closing) return;
-      if (batchRecoveryBlocked.has(prompt.conversationId)) continue;
-      if (prompt.state === "queued") {
-        if (!blockedTargets.has(prompt.conversationId)) {
-          actorIds.add(prompt.conversationId);
-        }
-        continue;
-      }
-      if (prompt.state !== "dispatching") continue;
-      const delivery = pendingPromptDeliveriesByConversation
-        .get(prompt.conversationId)
-        ?.find((candidate) => (
-          candidate.promptId === prompt.promptId
-          && candidate.runId === prompt.runId
-        ));
-      if (delivery?.batchId !== undefined) {
-        const batch = pendingPromptBatchesByConversation
-          .get(prompt.conversationId)
-          ?.find(({ batchId }) => batchId === delivery.batchId);
-        const item = batch?.items.find(({ promptId }) => (
-          promptId === prompt.promptId
-        ));
-        if (
-          batch?.runId !== prompt.runId
-          || item === undefined
-          || item.createdAt !== prompt.createdAt
-          || item.payloadSha256 !== projectPromptPayloadSha256(prompt)
-        ) {
-          context.promptAttention.add(prompt.conversationId);
-          continue;
-        }
-        await context.promptQueue.removeDeliveredBatchPrompt(
-          prompt.promptId,
-          prompt.conversationId,
-          prompt.runId,
-          item.createdAt,
-          item.payloadSha256,
-        );
-      } else if (delivery !== undefined) {
-        await context.promptQueue.removeForHostCleanup(
-          prompt.promptId,
-          prompt.conversationId,
-        );
-      } else {
-        await context.promptQueue.markAttentionAfterUncertainFailure(
-          prompt.promptId,
-          prompt.conversationId,
-          prompt.runId,
-          "Recovery could not prove pending prompt user delivery.",
-          this.now().toISOString(),
-        );
-      }
-      await this.emitPendingPromptsChanged(context, prompt.conversationId);
     }
 
     for (const recovery of startedAbortOperations) {
@@ -5877,73 +4690,6 @@ export class ProjectSessionCoordinator {
     return await work(actor.sessionManager);
   }
 
-  private async pumpPendingPrompt(
-    context: ProjectContext,
-    conversationId: string,
-  ): Promise<boolean> {
-    if (context.closing || context.deleting.has(conversationId)) return false;
-    const actor = context.actors.get(conversationId);
-    if (!actor || actor.getActivity().kind !== "idle") return false;
-    const hasActiveBatchFence = aggregateReservedConversationEntries(
-      actor.sessionManager.getEntries(),
-    ).pendingPromptBatches.some(({ state }) => (
-      state === "prepared" || state === "started" || state === "delivered"
-    ));
-    if (hasActiveBatchFence) return false;
-    const queued = (await context.promptQueue.list({ conversationId }))
-      .find((prompt) => prompt.state === "queued");
-    if (!queued) return false;
-
-    const runId = randomUUID();
-    const dispatching = await context.promptQueue.markDispatching(
-      queued.promptId,
-      conversationId,
-      runId,
-      this.now().toISOString(),
-    );
-    await this.emitPendingPromptsChanged(context, conversationId);
-    let completion: Promise<RunSettlement>;
-    try {
-      completion = actor.startPrompt({
-        runId,
-        text: dispatching.text,
-        origin: "pending_prompt",
-      });
-    } catch {
-      // startPrompt rejected before an AgentSession turn existed, so no user
-      // message could have been delivered. Preserve FIFO for later lifecycle
-      // activity instead of turning a deterministic race into attention.
-      await context.promptQueue.requeueAfterDeterministicRejection(
-        dispatching.promptId,
-        conversationId,
-        runId,
-      );
-      await this.emitPendingPromptsChanged(context, conversationId);
-      return false;
-    }
-    this.trackBackground(context, completion.then(
-      () => undefined,
-      (error) => this.runLifecycle(context, async () => {
-        const current = (await context.promptQueue.list({ conversationId }))
-          .find(({ promptId }) => promptId === dispatching.promptId);
-        if (
-          current?.state === "dispatching"
-          && current.runId === runId
-        ) {
-          await context.promptQueue.markAttentionAfterUncertainFailure(
-            current.promptId,
-            conversationId,
-            runId,
-            error instanceof Error ? error.message : String(error),
-            this.now().toISOString(),
-          );
-          await this.emitPendingPromptsChanged(context, conversationId);
-        }
-      }),
-    ));
-    return true;
-  }
-
   private async pumpTarget(
     context: ProjectContext,
     conversationId: string,
@@ -5958,9 +4704,7 @@ export class ProjectSessionCoordinator {
     if (context.closing) return "no_work";
     if (context.deleting.has(conversationId)) return "blocked_by_deletion";
     if (pending.length === 0) {
-      return await this.pumpPendingPrompt(context, conversationId)
-        ? "started"
-        : "no_work";
+      return "no_work";
     }
 
     const aggregate = aggregateReservedConversationEntries(
@@ -6295,23 +5039,6 @@ export class ProjectSessionCoordinator {
         );
         await context.inbox.delete(envelope.messageId);
       }
-      const prompts = await context.promptQueue.list({ conversationId });
-      for (const prompt of prompts) {
-        if (prompt.state === "queued") {
-          await context.promptQueue.withdrawQueued(
-            prompt.promptId,
-            conversationId,
-          );
-        } else {
-          await context.promptQueue.removeForHostCleanup(
-            prompt.promptId,
-            conversationId,
-          );
-        }
-      }
-      if (prompts.length > 0) {
-        await this.emitPendingPromptsChanged(context, conversationId);
-      }
       if (actor) {
         context.actorUnsubscribes.get(conversationId)?.();
         context.actorUnsubscribes.delete(conversationId);
@@ -6337,7 +5064,7 @@ export class ProjectSessionCoordinator {
       context.extensionUIRouters.delete(conversationId);
       context.profiles.delete(conversationId);
       context.attention.delete(conversationId);
-      context.promptAttention.delete(conversationId);
+
       this.emit(context, { type: "project_changed" });
       return true;
     } finally {
@@ -6442,27 +5169,6 @@ export class ProjectSessionCoordinator {
     return prompt;
   }
 
-  private async emitPendingPromptsChanged(
-    context: ProjectContext,
-    conversationId: string,
-  ): Promise<void> {
-    const prompts = await context.promptQueue.list({ conversationId });
-    const hasAttention = prompts.some(({ state }) => state === "attention");
-    if (hasAttention !== context.promptAttention.has(conversationId)) {
-      if (hasAttention) {
-        context.promptAttention.add(conversationId);
-      } else {
-        context.promptAttention.delete(conversationId);
-      }
-      this.emit(context, { type: "project_changed" });
-    }
-    this.emit(context, {
-      type: "pending_prompts_changed",
-      conversationId,
-      prompts,
-    });
-  }
-
   private requireContext(handle: ProjectSessionHandle): ProjectContext {
     this.assertOpen();
     const context = handle.context;
@@ -6543,10 +5249,7 @@ export class ProjectSessionCoordinator {
       projectId: context.project.id,
       cwd: context.project.cwd,
       busyConversationCount,
-      attentionConversationCount: new Set([
-        ...context.attention,
-        ...context.promptAttention,
-      ]).size,
+      attentionConversationCount: context.attention.size,
     };
   }
 
