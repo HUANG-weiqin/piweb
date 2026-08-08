@@ -85,7 +85,8 @@ interface FakeSession extends AgentSession {
   eventListener?: (event: AgentSessionEvent) => void;
   steerCalls: string[];
   toolCallGate?: ToolCallGate;
-  promptImplementation(text: string): Promise<void>;
+  promptCalls: Array<{ text: string; streamingBehavior?: "steer" | "followUp" }>;
+  promptImplementation(text: string, options?: Parameters<AgentSession["prompt"]>[1]): Promise<void>;
   resumeCalls: number;
   turnBoundaryPaused: boolean;
   turnBoundaryPauseReleases: number;
@@ -121,8 +122,10 @@ function fakeSession(): FakeSession {
     turnBoundaryPaused: false,
     turnBoundaryPauseReleases: 0,
     resumeImplementation: async () => undefined,
-    prompt: function (text: string) {
-      return this.promptImplementation(text);
+    promptCalls: [],
+    prompt: function (text: string, options?: Parameters<AgentSession["prompt"]>[1]) {
+      this.promptCalls.push({ text, streamingBehavior: options?.streamingBehavior });
+      return this.promptImplementation(text, options);
     },
     sendCustomMessage: function (message, options) {
       this.resumeCalls++;
@@ -414,6 +417,213 @@ function checkToolTurnBoundary(runtime: FakeRuntime): boolean {
 }
 
 describe("ConversationActor", () => {
+  describe("browser prompt admission while busy (A')", () => {
+    const PROMPT_ID = "3c5b3e7a-1f2a-4b6e-8d0c-9a1b2c3d4e5f";
+
+    function busyRun(
+      fixture: ActorFixture,
+    ): { runStarted: Deferred<void>; finishRun: Deferred<void>; running: Promise<unknown> } {
+      const emit = () => fixture.runtime.session.eventListener;
+      const runStarted = deferred();
+      const finishRun = deferred();
+      fixture.runtime.session.promptImplementation = async (text, options) => {
+        if (text === "follow up") {
+          // admit 的调用：SDK 接受即入队返回
+          options?.preflightResult?.(true);
+          return;
+        }
+        emit()?.(nativeEvent({ type: "agent_start" }));
+        runStarted.resolve();
+        await finishRun.promise;
+        emit()?.(nativeEvent({ type: "agent_end" }));
+      };
+      const running = fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "long task",
+        origin: "browser",
+      });
+      return { runStarted, finishRun, running };
+    }
+
+    it("admits via SDK followUp while a run is active and emits prompt_admitted", async () => {
+      const fixture = await openActor();
+      const { runStarted, finishRun, running } = busyRun(fixture);
+      await runStarted.promise;
+
+      const admit = fixture.actor.admitBrowserPrompt({
+        promptId: PROMPT_ID,
+        runId: RUN_B,
+        text: "follow up",
+      });
+
+      await vi.waitFor(() => {
+        expect(fixture.runtime.session.promptCalls).toContainEqual({
+          text: "follow up",
+          streamingBehavior: "followUp",
+        });
+      });
+      await vi.waitFor(() => {
+        expect(fixture.events).toContainEqual({
+          type: "prompt_admitted",
+          conversationId: CONVERSATION_ID,
+          promptId: PROMPT_ID,
+          text: "follow up",
+        });
+      });
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([{
+        promptId: PROMPT_ID,
+        text: "follow up",
+        createdAt: expect.any(String),
+      }]);
+
+      finishRun.resolve();
+      await running;
+      await expect(admit).resolves.toEqual({ outcome: "admitted" });
+      await fixture.actor.dispose();
+    });
+
+    it("emits prompt_delivered when the SDK appends the admitted user message", async () => {
+      const fixture = await openActor();
+      const emit = () => fixture.runtime.session.eventListener;
+      const { runStarted, finishRun, running } = busyRun(fixture);
+      await runStarted.promise;
+      await fixture.actor.admitBrowserPrompt({
+        promptId: PROMPT_ID,
+        runId: RUN_B,
+        text: "follow up",
+      });
+      await vi.waitFor(() => expect(fixture.actor.pendingPromptAdmissions()).toHaveLength(1));
+
+      // SDK 投递：消息持久化 + message_end user
+      const rawMessage = {
+        role: "user",
+        content: [{ type: "text", text: "follow up" }],
+      };
+      fixture.manager.appendMessage(rawMessage as never);
+      emit()?.(nativeEvent({ type: "message_end", message: rawMessage }));
+
+      await vi.waitFor(() => {
+        expect(fixture.events).toContainEqual({
+          type: "prompt_delivered",
+          conversationId: CONVERSATION_ID,
+          promptId: PROMPT_ID,
+          runId: RUN_A,
+        });
+      });
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
+
+      finishRun.resolve();
+      await running;
+      await fixture.actor.dispose();
+    });
+
+    it("clears admitted prompts when the run is aborted", async () => {
+      const fixture = await openActor();
+      const { runStarted, finishRun, running } = busyRun(fixture);
+      await runStarted.promise;
+      await fixture.actor.admitBrowserPrompt({
+        promptId: PROMPT_ID,
+        runId: RUN_B,
+        text: "follow up",
+      });
+      await vi.waitFor(() => expect(fixture.actor.pendingPromptAdmissions()).toHaveLength(1));
+
+      await fixture.actor.abort(RUN_A);
+      expect(fixture.runtime.session.clearQueueCalls).toBe(1);
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
+
+      finishRun.resolve();
+      await expect(running).resolves.toMatchObject({ outcome: "aborted" });
+      await fixture.actor.dispose();
+    });
+
+    it("falls back to startPrompt when the actor became idle", async () => {
+      const fixture = await openActor();
+      const emit = () => fixture.runtime.session.eventListener;
+      fixture.runtime.session.promptImplementation = async () => {
+        emit()?.(nativeEvent({ type: "agent_start" }));
+        emit()?.(nativeEvent({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "ok" }],
+            stopReason: "stop",
+          },
+        }));
+        emit()?.(nativeEvent({ type: "agent_end" }));
+      };
+
+      const result = await fixture.actor.admitBrowserPrompt({
+        promptId: PROMPT_ID,
+        runId: RUN_A,
+        text: "hello",
+      });
+
+      // idle 时转 startPrompt：返回 RunSettlement 而非 admitted
+      expect(result).toMatchObject({ runId: RUN_A });
+      expect("outcome" in (result as object) && (result as { outcome?: string }).outcome)
+        .not.toBe("admitted");
+      expect(fixture.runtime.session.promptCalls).toEqual([{
+        text: "hello",
+        streamingBehavior: undefined,
+      }]);
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
+      await fixture.actor.dispose();
+    });
+
+    it("rejects duplicate promptIds and enforces the admission cap", async () => {
+      const fixture = await openActor();
+      const emit = () => fixture.runtime.session.eventListener;
+      const runStarted = deferred();
+      const finishRun = deferred();
+      fixture.runtime.session.promptImplementation = async (text, options) => {
+        if (text === "long task") {
+          emit()?.(nativeEvent({ type: "agent_start" }));
+          runStarted.resolve();
+          await finishRun.promise;
+          emit()?.(nativeEvent({ type: "agent_end" }));
+          return;
+        }
+        // admit 的调用：SDK 接受即入队返回
+        options?.preflightResult?.(true);
+      };
+      const running = fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "long task",
+        origin: "browser",
+      });
+      await runStarted.promise;
+
+      await expect(fixture.actor.admitBrowserPrompt({
+        promptId: PROMPT_ID,
+        runId: RUN_A,
+        text: "one",
+      })).resolves.toEqual({ outcome: "admitted" });
+      await expect(fixture.actor.admitBrowserPrompt({
+        promptId: PROMPT_ID,
+        runId: RUN_B,
+        text: "duplicate",
+      })).rejects.toThrow("already admitted");
+
+      // 填满上限（已有一条 admission，再塞 63 条到 64）
+      for (let index = 0; index < 63; index += 1) {
+        await fixture.actor.admitBrowserPrompt({
+          promptId: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+          runId: `11111111-2222-4333-8444-${String(index).padStart(12, "0")}`,
+          text: `message ${index}`,
+        });
+      }
+      await expect(fixture.actor.admitBrowserPrompt({
+        promptId: "22222222-3333-4444-8555-666677778888",
+        runId: "99999999-8888-4777-8666-555544443333",
+        text: "over the cap",
+      })).rejects.toThrow("Too many pending messages");
+      finishRun.resolve();
+      await running;
+      await fixture.actor.dispose();
+    });
+  });
+
   it("persists and triggers a per-conversation compaction threshold", async () => {
     const fixture = await openActor();
 

@@ -213,6 +213,8 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
     conversationId: conversationIdSchema,
     focusId: commandIdSchema,
     runId: runIdSchema,
+    /** 客户端生成的消息身份；busy 时用于 prompt_admitted/prompt_delivered 关联。 */
+    promptId: z.string().uuid().optional(),
     text: required.max(MAX_PROMPT_CHARACTERS),
   }),
   z.object({
@@ -767,6 +769,24 @@ export type ServerEvent =
       prompts: PendingPrompt[];
     }
   | {
+      /** 浏览器 prompt 已被服务端接受（busy 时进入 followUp 队列，尚未投递）。 */
+      type: "prompt_admitted";
+      sessionId: string;
+      conversationId: string;
+      focusId: string;
+      promptId: string;
+      text: string;
+    }
+  | {
+      /** 已接受的 prompt 已被 SDK 投递为真实 user message（JSONL entry）。 */
+      type: "prompt_delivered";
+      sessionId: string;
+      conversationId: string;
+      focusId: string;
+      promptId: string;
+      runId: string;
+    }
+  | {
       type: "conversation_snapshot";
       sessionId: string;
       conversationId: string;
@@ -1277,6 +1297,22 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     conversationId: conversationIdSchema,
     focusId: focusIdSchema,
     prompts: z.array(pendingPromptSchema).max(MAX_PENDING_PROMPTS_PER_CONVERSATION),
+  }).strict(),
+  z.object({
+    type: z.literal("prompt_admitted"),
+    sessionId: sessionIdSchema,
+    conversationId: conversationIdSchema,
+    focusId: focusIdSchema,
+    promptId: z.string().uuid(),
+    text: required.max(MAX_PROMPT_CHARACTERS),
+  }).strict(),
+  z.object({
+    type: z.literal("prompt_delivered"),
+    sessionId: sessionIdSchema,
+    conversationId: conversationIdSchema,
+    focusId: focusIdSchema,
+    promptId: z.string().uuid(),
+    runId: runIdSchema,
   }).strict(),
   z.object({
     type: z.literal("conversation_snapshot"),

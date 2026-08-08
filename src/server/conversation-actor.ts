@@ -111,6 +111,18 @@ export type ConversationActorEvent =
       pendingPromptUserDelivered: boolean;
     }
   | {
+      type: "prompt_admitted";
+      conversationId: string;
+      promptId: string;
+      text: string;
+    }
+  | {
+      type: "prompt_delivered";
+      conversationId: string;
+      promptId: string;
+      runId: string;
+    }
+  | {
       type: "error";
       conversationId: string;
       runId?: string;
@@ -129,6 +141,16 @@ export interface ConversationActorCompletion {
   /** True only after Pi emitted the durable user message for a pending prompt. */
   pendingPromptUserDelivered: boolean;
 }
+
+/** 一次 busy 期间被 SDK followUp 队列接受的浏览器 prompt（内存态，重启丢失为接受项）。 */
+export interface PendingPromptAdmission {
+  promptId: string;
+  text: string;
+  createdAt: string;
+}
+
+/** 每个对话同时等待投递的上限（防连点打爆内存）。 */
+export const MAX_PENDING_ADMISSIONS = 64;
 
 export interface ConversationActorOpenOptions {
   conversationId: string;
@@ -311,6 +333,20 @@ function rawUserMessageIsPersisted(
   ));
 }
 
+/** 提取 raw user message 的纯文本（与 AgentSession._getUserMessageText 一致）。 */
+function admittedUserMessageText(message: {
+  role: string;
+  content: string | Array<{ type: string; text?: string }>;
+}): string | undefined {
+  if (message.role !== "user") return undefined;
+  const content = message.content;
+  if (typeof content === "string") return content;
+  return content
+    .filter((c) => c.type === "text")
+    .map((c) => c.text ?? "")
+    .join("");
+}
+
 function isCancelling(ticket: RunTicket): boolean {
   return ticket.phase === "cancelling";
 }
@@ -387,6 +423,7 @@ export class ConversationActor {
   private readonly operations = new SerialTaskQueue();
   private readonly listeners = new Set<ConversationActorListener>();
   private readonly usedRunIds = new Set<string>();
+  private readonly pendingAdmissions: PendingPromptAdmission[] = [];
   private profileSnapshot: ConversationMeta;
   private compactionThresholdPercent: number;
   private projectionSeq = 0;
@@ -845,6 +882,108 @@ export class ConversationActor {
         },
       }),
     );
+  }
+
+  /**
+   * busy 时浏览器 prompt：消息进 SDK followUp 队列（不建 run ticket）。
+   * preflightResult(true)（已入队）即 resolve；轮到时若已 idle 则转 startPrompt。
+   * 投递确认由 onSessionEvent 的 prompt_delivered 事件表达。
+   */
+  async admitBrowserPrompt(input: {
+    promptId: string;
+    runId: string;
+    text: string;
+  }): Promise<RunSettlement | { outcome: "admitted" }> {
+    this.assertUsable();
+    if (this.truncating) {
+      throw new Error("Conversation is being rewound");
+    }
+    if (this.switchingRole) {
+      throw new Error("Conversation role is being switched");
+    }
+    if (this.compacting) {
+      throw new Error("Conversation is compacting");
+    }
+    if (this.pendingAdmissions.some((a) => a.promptId === input.promptId)) {
+      throw new Error(`Prompt was already admitted: ${input.promptId}`);
+    }
+    if (this.pendingAdmissions.length >= MAX_PENDING_ADMISSIONS) {
+      throw new Error(
+        `Too many pending messages (${MAX_PENDING_ADMISSIONS}); wait for the agent to catch up`,
+      );
+    }
+    if (this.isExtensionCommand(input.text)) {
+      throw new Error(
+        "Extension slash commands are not supported until their detached Agent turns can be owned safely",
+      );
+    }
+    // 注意：不进入 operations 串行队列——run 进行中队列被 executeRun 占用，
+    // admit 必须在 run 进行中直接调用 SDK followUp。
+    // 若检查时已 idle（当前 run 刚结束），转 startPrompt（其内部在串行队列执行）。
+    if (!this.activeRun) {
+      return this.startPrompt({
+        runId: input.runId,
+        text: input.text,
+        origin: "browser",
+      });
+    }
+    return this.admitFollowUp(input);
+  }
+
+  private async admitFollowUp(input: {
+    promptId: string;
+    runId: string;
+    text: string;
+  }): Promise<{ outcome: "admitted" }> {
+    const admission: PendingPromptAdmission = {
+      promptId: input.promptId,
+      text: input.text,
+      createdAt: this.now().toISOString(),
+    };
+    this.pendingAdmissions.push(admission);
+    let accepted = false;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        void this.session.prompt(input.text, {
+          streamingBehavior: "followUp",
+          preflightResult: (ok) => {
+            if (ok) {
+              accepted = true;
+              resolve();
+            } else {
+              reject(new Error("Prompt preflight rejected"));
+            }
+          },
+        }).catch((error: unknown) => {
+          // 主 promise 覆盖整个队列 drain；若投递确认已发生，忽略迟到错误。
+          if (!accepted) reject(error);
+        });
+      });
+    } catch (error) {
+      this.removePendingAdmission(input.promptId);
+      throw error;
+    }
+    this.emit({
+      type: "prompt_admitted",
+      conversationId: this.conversationId,
+      promptId: input.promptId,
+      text: input.text,
+    });
+    return { outcome: "admitted" };
+  }
+
+  /** 当前等待投递的浏览器 prompt（快照/恢复用）。 */
+  pendingPromptAdmissions(): readonly PendingPromptAdmission[] {
+    return this.pendingAdmissions.slice();
+  }
+
+  private removePendingAdmission(promptId: string): void {
+    const index = this.pendingAdmissions.findIndex((a) => a.promptId === promptId);
+    if (index >= 0) this.pendingAdmissions.splice(index, 1);
+  }
+
+  private clearPendingAdmissions(): void {
+    this.pendingAdmissions.splice(0);
   }
 
   startMessages(input: StartConversationMessages): Promise<RunSettlement> {
@@ -1614,6 +1753,7 @@ export class ConversationActor {
     this.emitActivity();
     ticket.abortPromise = Promise.resolve().then(() => {
       this.session.clearQueue();
+      this.clearPendingAdmissions();
       return this.session.abort();
     });
     return ticket.abortPromise;
@@ -1691,45 +1831,71 @@ export class ConversationActor {
       return;
     }
 
-    if (
-      event.type === "message_end"
-      && event.message.role === "user"
-      && (
+    if (event.type === "message_end" && event.message.role === "user") {
+      const rawMessage = event.message;
+      // busy 期间 accepted 的 followUp prompt：按 FIFO 文本匹配确认投递。
+      // 必须在 guidance 逻辑之前，避免被误当作 extension steer 投递。
+      const admittedText = admittedUserMessageText(rawMessage);
+      const admissionIndex = admittedText === undefined
+        ? -1
+        : this.pendingAdmissions.findIndex((a) => a.text === admittedText);
+      if (admissionIndex >= 0) {
+        const [admission] = this.pendingAdmissions.splice(admissionIndex, 1);
+        queueMicrotask(() => {
+          if (!rawUserMessageIsPersisted(
+            this.sessionManager.getEntries(),
+            rawMessage,
+          )) {
+            this.emitError(
+              new Error(
+                "Pi did not durably append the admitted user message before delivery acknowledgement",
+              ),
+              ticket.id,
+            );
+            return;
+          }
+          this.emit({
+            type: "prompt_delivered",
+            conversationId: this.conversationId,
+            promptId: admission.promptId,
+            runId: ticket.id,
+          });
+        });
+      } else if (
         ticket.expectsInitialPromptRawUserMessage
         || ticket.guidanceDeliveries.length > 0
-      )
-    ) {
-      const rawMessage = event.message;
-      // Raw user ends are ordered by Pi. Claim the first one before the
-      // asynchronous persistence proof so a late initial prompt can never be
-      // mistaken for the first queued guidance delivery.
-      const isInitialPrompt = ticket.expectsInitialPromptRawUserMessage;
-      if (isInitialPrompt) ticket.expectsInitialPromptRawUserMessage = false;
-      queueMicrotask(() => {
-        if (!rawUserMessageIsPersisted(
-          this.sessionManager.getEntries(),
-          rawMessage,
-        )) {
-          const error = new Error(
-            "Pi did not durably append the raw user message before delivery acknowledgement",
-          );
-          if (!isInitialPrompt) {
-            ticket.guidanceDeliveries.shift()?.delivery.reject(error);
+      ) {
+        // Raw user ends are ordered by Pi. Claim the first one before the
+        // asynchronous persistence proof so a late initial prompt can never be
+        // mistaken for the first queued guidance delivery.
+        const isInitialPrompt = ticket.expectsInitialPromptRawUserMessage;
+        if (isInitialPrompt) ticket.expectsInitialPromptRawUserMessage = false;
+        queueMicrotask(() => {
+          if (!rawUserMessageIsPersisted(
+            this.sessionManager.getEntries(),
+            rawMessage,
+          )) {
+            const error = new Error(
+              "Pi did not durably append the raw user message before delivery acknowledgement",
+            );
+            if (!isInitialPrompt) {
+              ticket.guidanceDeliveries.shift()?.delivery.reject(error);
+            }
+            this.emitError(error, ticket.id);
+            return;
           }
-          this.emitError(error, ticket.id);
-          return;
-        }
-        if (isInitialPrompt) {
-          if (ticket.origin === "pending_prompt") {
-            ticket.pendingPromptUserDelivered = true;
+          if (isInitialPrompt) {
+            if (ticket.origin === "pending_prompt") {
+              ticket.pendingPromptUserDelivered = true;
+            }
+            return;
           }
-          return;
-        }
-        // Subsequent raw user-message ends are FIFO with AgentSession.steer()
-        // calls. Promise continuations run after this microtask, after Pi's
-        // synchronous SessionManager append has been proved by object identity.
-        ticket.guidanceDeliveries.shift()?.delivery.resolve();
-      });
+          // Subsequent raw user-message ends are FIFO with AgentSession.steer()
+          // calls. Promise continuations run after this microtask, after Pi's
+          // synchronous SessionManager append has been proved by object identity.
+          ticket.guidanceDeliveries.shift()?.delivery.resolve();
+        });
+      }
     }
 
     if (

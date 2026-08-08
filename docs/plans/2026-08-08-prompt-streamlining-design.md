@@ -130,6 +130,16 @@ abort 时清空 followUp 队列（与现状 clearQueue 一致，conversation-act
 - SDK 文本匹配投递歧义：相同文本按 FIFO 匹配，基本可靠。
 - followUpMode="all" 需实施时验证与项目 SettingsManager 的兼容（applyOverrides 已确认内存态）。
 
+---
+
+# followUp 行为实验结论（2026-08-08，scripts/verify-followup.ts，真实 Agent + 假 LLM）
+
+1. **runLoop 自动 drain**：外层循环在 Agent 要停止时 poll followUp 队列并继续内层循环——宿主零 pump，`agent.prompt()` 的 promise 覆盖到全部队列 drain 结束。
+2. **mode=all**：排队消息连续注入（message_end 连续），**一次 LLM 调用、一个 assistant 回复**（实测 `A1:[U0|U1|U2]`）。one-at-a-time 则每条一个回复。→ 必须设置 followUpMode="all"。
+3. **回执时机**：busy 时 `prompt(text, {streamingBehavior:"followUp"})` 的 preflightResult(true) 在入队后立即调用；promise 要等整个 drain 结束。→ 宿主对浏览器的"已接受"回执必须用 preflightResult，不能等 promise。
+4. **abort 不清队列**：agent.abort() 只中断当前 LLM 流，followUp 队列保留且 runLoop 照常 drain。→ actor 的 abort 路径必须显式 clearQueue()（现状已有，conversation-actor.ts:1611-1618）并清 admitted 列表、通知 UI。
+5. **投递事件序列**：前序 assistant message_end 之后，排队消息的 message_start/end 连续出现——宿主可借此确认投递（配合 SDK 自身的文本匹配移除）。
+
 ## 产品语义最终定义
 
 - 用户消息与 Agent 是否忙无关，随时可发；发出 = 服务端 durable admission（消息立即作为 server-owned 对话项出现在对话流，带 deliveryState）。

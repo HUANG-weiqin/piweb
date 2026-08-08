@@ -764,6 +764,7 @@ export class PiConnection {
             command.conversationId,
             command.runId,
             command.text,
+            command.promptId,
           )
         ).then(() => undefined);
       } catch (error) {
@@ -1631,6 +1632,22 @@ export class PiConnection {
 
     if (event.type === "pending_prompts_changed") {
       this.emitFocusedPendingPromptSnapshot(view, event.conversationId, event.prompts);
+      return;
+    }
+
+    if (event.type === "prompt_admitted" || event.type === "prompt_delivered") {
+      if (event.conversationId === view.conversationId && view.focusId !== undefined) {
+        this.emit({
+          type: event.type,
+          sessionId: view.sessionId,
+          conversationId: event.conversationId,
+          focusId: view.focusId,
+          promptId: event.promptId,
+          ...(event.type === "prompt_admitted"
+            ? { text: event.text }
+            : { runId: event.runId }),
+        });
+      }
       return;
     }
 

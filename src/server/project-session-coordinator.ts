@@ -1376,34 +1376,42 @@ export class ProjectSessionCoordinator {
     conversationId: string,
     runId: string,
     text: string,
-  ): Promise<RunSettlement> {
+    promptId?: string,
+  ): Promise<RunSettlement | { outcome: "admitted" }> {
     const context = this.requireContext(handle);
     const admitted = await this.runLifecycle(context, async () => {
       if (context.deleting.has(conversationId)) {
         throw new Error(`Conversation is being deleted: ${conversationId}`);
       }
       const actor = this.requireActor(context, conversationId);
-      if (actor.getActivity().kind === "idle") {
-        const pump = await this.pumpTarget(context, conversationId);
-        if (pump === "blocked_by_deletion" || context.deleting.has(conversationId)) {
-          throw new Error(`Conversation is being deleted: ${conversationId}`);
-        }
-        const pendingInbox = await context.inbox.list({
-          toConversationId: conversationId,
-        });
-        const pendingPrompts = await context.promptQueue.list({ conversationId });
-        if (
-          pump === "started"
-          || pendingInbox.length > 0
-          || pendingPrompts.some((prompt) => (
-            prompt.state === "queued"
-            || prompt.state === "dispatching"
-          ))
-        ) {
+      // busy：消息与 run 状态无关，进 SDK followUp 队列，忙完自动读。
+      if (actor.getActivity().kind !== "idle") {
+        if (promptId === undefined) {
           throw new Error(
-            "Durable conversation work was admitted before this browser prompt",
+            "promptId is required while the agent is busy",
           );
         }
+        return actor.admitBrowserPrompt({ promptId, runId, text });
+      }
+      const pump = await this.pumpTarget(context, conversationId);
+      if (pump === "blocked_by_deletion" || context.deleting.has(conversationId)) {
+        throw new Error(`Conversation is being deleted: ${conversationId}`);
+      }
+      const pendingInbox = await context.inbox.list({
+        toConversationId: conversationId,
+      });
+      const pendingPrompts = await context.promptQueue.list({ conversationId });
+      if (
+        pump === "started"
+        || pendingInbox.length > 0
+        || pendingPrompts.some((prompt) => (
+          prompt.state === "queued"
+          || prompt.state === "dispatching"
+        ))
+      ) {
+        throw new Error(
+          "Durable conversation work was admitted before this browser prompt",
+        );
       }
       return {
         completion: actor.startPrompt({
@@ -1413,7 +1421,7 @@ export class ProjectSessionCoordinator {
         }),
       };
     });
-    return admitted.completion;
+    return admitted.completion ?? admitted;
   }
 
   steer(
