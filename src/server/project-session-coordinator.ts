@@ -216,11 +216,6 @@ export interface CreateUserConversationInput {
   signal?: AbortSignal;
 }
 
-export interface EnqueueProjectPromptInput {
-  promptId: string;
-  text: string;
-}
-
 export interface StartPeerSessionInput {
   roleId: string;
   task: string;

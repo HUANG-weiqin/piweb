@@ -734,24 +734,6 @@ function createGitDiffToolFromContext(context: GitToolContext): ToolDefinition {
   });
 }
 
-export function createGitStatusTool(
-  canonicalCwd: string,
-  processOptions: GitInspectProcessOptions = {},
-): ToolDefinition {
-  return createGitStatusToolFromContext(
-    createGitToolContext(canonicalCwd, processOptions),
-  );
-}
-
-export function createGitDiffTool(
-  canonicalCwd: string,
-  processOptions: GitInspectProcessOptions = {},
-): ToolDefinition {
-  return createGitDiffToolFromContext(
-    createGitToolContext(canonicalCwd, processOptions),
-  );
-}
-
 export function createGitTools(
   canonicalCwd: string,
   processOptions: GitInspectProcessOptions = {},

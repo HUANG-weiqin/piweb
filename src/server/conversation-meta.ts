@@ -622,7 +622,6 @@ export type ConversationKind = z.infer<typeof conversationKindSchema>;
 export type ConversationReferenceSnapshot =
   z.infer<typeof conversationReferenceSnapshotSchema>;
 export type ConversationRoleSnapshot = z.infer<typeof roleSnapshotSchema>;
-export type ConversationLifecycle = z.infer<typeof lifecycleSchema>;
 export type ConversationCreatedBy = z.infer<typeof createdBySchema>;
 export type ConversationMeta = z.infer<typeof conversationMetaSchema>;
 export type ConversationOrchestration = z.infer<typeof orchestrationSchema>;
@@ -635,8 +634,6 @@ export type ConversationRoleChangeEntry =
 export type ConversationCard = z.infer<typeof conversationCardSchema>;
 export type ConversationCardEntry =
   z.infer<typeof conversationCardEntrySchema>;
-export type ConversationMessageDetails =
-  z.infer<typeof conversationMessageDetailsSchema>;
 export type ConversationMessageEntry =
   z.infer<typeof conversationMessageEntrySchema>;
 export type CompactionResumeEntry =
