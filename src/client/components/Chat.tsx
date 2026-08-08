@@ -78,6 +78,8 @@ interface ChatProps {
   compacting?: boolean;
   cwd: string;
   online: boolean;
+  /** Transport is online, but focus-bound server controls may be frozen. */
+  interactive?: boolean;
   conversationReady: boolean;
   historyWindow: ConversationWindowCoverage;
   draft: string;
@@ -233,6 +235,7 @@ export function Chat({
   compacting = false,
   cwd,
   online,
+  interactive = true,
   conversationReady,
   historyWindow,
   draft,
@@ -252,6 +255,7 @@ export function Chat({
   onRewind,
   rewindingMessageId,
 }: ChatProps) {
+  const controlsEnabled = online && interactive;
   let composerPlaceholder = "给 Pi 发送消息…";
   if (!conversationReady) composerPlaceholder = "正在恢复项目对话…";
   else if (rewindingMessageId) composerPlaceholder = "正在回到所选消息…";
@@ -436,7 +440,7 @@ export function Chat({
       || compacting
       || rewindingMessageId
       || !model
-      || !online
+      || !controlsEnabled
       || !conversationReady
     ) return;
     onSend(value);
@@ -474,6 +478,7 @@ export function Chat({
         <button
           className="model-button"
           title="模型连接"
+          disabled={!controlsEnabled}
           onClick={onSettings}
         >
           {model?.id ?? "模型连接"}<span>⌄</span>
@@ -523,7 +528,7 @@ export function Chat({
           rewindDisabled={
             busy
             || submitting
-            || !online
+            || !controlsEnabled
             || !conversationReady
             || Boolean(rewindingMessageId)
           }
@@ -585,15 +590,15 @@ export function Chat({
       </div>}
       {promptNotice && <div className="composer-notice" role="alert">{promptNotice}</div>}
       <div className="composer">
-        <textarea ref={textareaRef} aria-label="给 Pi 发送消息" value={draft} onChange={(e) => onDraftChange(e.target.value)} onKeyDown={keyDown} placeholder={composerPlaceholder} disabled={!online || !conversationReady || !model || submitting || compacting || roleSwitching || Boolean(rewindingMessageId)} rows={1} />
+        <textarea ref={textareaRef} aria-label="给 Pi 发送消息" value={draft} onChange={(e) => onDraftChange(e.target.value)} onKeyDown={keyDown} placeholder={composerPlaceholder} disabled={!controlsEnabled || !conversationReady || !model || submitting || compacting || roleSwitching || Boolean(rewindingMessageId)} rows={1} />
         <div className="composer-actions">
           {busy && <button
             className="send stop"
             onClick={onAbort}
             aria-label="停止"
-            disabled={!online || !conversationReady}
+            disabled={!controlsEnabled || !conversationReady}
           >■</button>}
-          <button className="send" onClick={send} disabled={!online || !conversationReady || !model || submitting || compacting || roleSwitching || Boolean(rewindingMessageId) || !draft.trim()} aria-label="发送">↑</button>
+          <button className="send" onClick={send} disabled={!controlsEnabled || !conversationReady || !model || submitting || compacting || roleSwitching || Boolean(rewindingMessageId) || !draft.trim()} aria-label="发送">↑</button>
         </div>
       </div>
       <div className="composer-meta">
@@ -611,7 +616,7 @@ export function Chat({
           <select
             aria-label="思考级别"
             value={thinkingLevel}
-            disabled={!online}
+            disabled={!controlsEnabled || !conversationReady}
             onChange={(event) =>
               onThinking(event.target.value as ThinkingLevel)}
           >
@@ -651,6 +656,7 @@ export function Chat({
               aria-expanded={compactionThresholdOpen}
               aria-controls="compaction-threshold-panel"
               title={`上下文达到 ${compactionThresholdDraft}% 时自动压缩`}
+              disabled={!controlsEnabled || !conversationReady}
               onClick={() => setCompactionThresholdOpen((open) => !open)}
             >
               <span>自动压缩 {compactionThresholdDraft}%</span>
@@ -660,7 +666,7 @@ export function Chat({
               type="button"
               className="compaction-threshold-toggle"
               aria-label="手动压缩上下文"
-              disabled={!online || !conversationReady || busy || compacting}
+              disabled={!controlsEnabled || !conversationReady || busy || compacting}
               onClick={onCompact}
             >
               {compacting ? "正在压缩…" : "手动压缩"}
@@ -679,7 +685,7 @@ export function Chat({
               max={MAX_COMPACTION_THRESHOLD_PERCENT}
               step={1}
               value={compactionThresholdDraft}
-              disabled={!online || !conversationReady || compactionThresholdBusy}
+              disabled={!controlsEnabled || !conversationReady || compactionThresholdBusy}
               onChange={(event) =>
                 setCompactionThresholdDraft(Number(event.target.value))}
               onPointerUp={commitCompactionThreshold}
