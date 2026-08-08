@@ -1,6 +1,6 @@
 # 项目与持久会话
 
-`updated: 2026-07-31`
+`updated: 2026-08-08`
 
 ## 这个模块是干什么的
 
@@ -59,7 +59,7 @@ initialize(cwd, target)
 → 校验 .piweb 与 sessions 不是 symlink/junction
 → refreshConversations()，枚举并验证全部 JSONL，再与 SessionManager.listAll(custom sessionDir) 一一核对
 → 严格扫描 inbox，并用 JSONL receipt 保守对账 crash 窗口
-→ recent 可返回项目空态；open 选择 exact conversation；new 必须显式 roleId
+→ recent 用一次完整索引刷新选择目标；open 选择 exact conversation；new 必须显式 roleId
 → coordinator singleflight 取得/等待 writer lease
 → SessionManager.create/open(..., current cwd override)
 → 创建或读取 conversation profile 与其追加式角色变更
@@ -68,7 +68,7 @@ initialize(cwd, target)
 → state + role/project snapshot + focused conversation snapshot
 ```
 
-`recent` 优先使用 manifest 中仍存在的 `lastConversationId`，否则使用索引中最近修改的对话；项目没有对话时保持空态并显示角色选择页，不创建隐含 default 会话。新 conversation 的 header 与初始 role/profile 先完整序列化并通过宿主校验，再写同目录临时文件，以 exclusive hard link 原子发布最终 JSONL；崩溃不能暴露 partial final，重复 identity 也不能覆盖旧文件。初次 SDK `open()` 若失败，宿主必须精确 unlink 刚发布的文件，不能留下调用方未拿到 handle 的 orphan conversation。
+`recent` 优先使用 manifest 中仍存在的 `lastConversationId`，否则使用索引中最近修改的对话；项目没有对话时保持空态并显示角色选择页，不创建隐含 default 会话。recent 选择前的完整刷新结果也是该次 initialize 的已验证索引 seed；目标 actor 打开后，首次 `project_snapshot` 只从同一 ProjectStore 当前索引补充 actor role/activity/attention，不再立即做第二次全目录扫描。这个无扫描投影不是新的完整性证明，只能用于刚完成验证后的展示，不能用于 open/delete 决策；后续项目变化和 `refresh_view` 仍走完整刷新。新 conversation 的 header 与初始 role/profile 先完整序列化并通过宿主校验，再写同目录临时文件，以 exclusive hard link 原子发布最终 JSONL；崩溃不能暴露 partial final，重复 identity 也不能覆盖旧文件。初次 SDK `open()` 若失败，宿主必须精确 unlink 刚发布的文件，不能留下调用方未拿到 handle 的 orphan conversation。
 
 显式 `open` 只接受浏览器从服务端索引获得的 conversationId。服务端重新列举受控目录并解析文件路径，不能接受客户端文件路径。Pi 的 `open(nonexistent)` 会创建 manager 而不是可靠报错，所以必须先证明目标存在。
 
@@ -167,6 +167,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 - `role_catalog_snapshot` 是低频用户角色目录及当前可用性。
 - `project_snapshot` 是低频扁平会话索引，包含固化 role 摘要、activity、attention 和 temporary；后台 actor 变化不会切换 current focus。
 - `project_activity_snapshot` 是进程级已加载项目的有界汇总，只投影 busy/attention 计数；它不复制会话索引、浏览器 unread 或 transcript。
+- 浏览器可以为少量已访问工作区保留只读内存展示缓存，让切换时立即画出上一帧；缓存不持久化、不接管 transcript，也不能解锁命令。新 observation 仍必须 exact open durable conversation，并以匹配新完整 focus 身份的服务端 snapshot 覆盖缓存。
 - `conversation_snapshot` 是当前 focus 的一次性 active-branch 投影，包含固化角色和 message/session-message/compaction discriminated items，并限制总字节以及单消息/tool/card payload。投影只有一条 canonical pipeline：捕获 durable physical slots → 用 raw SDK message 对象身份把已持久化 live message 精确交给 durable slot → semantic fold → peer enrichment → 一次最终 exact-JSON-byte window。不能按角色、文本或数量猜测交接，也不能分别裁 durable/live 后再拼接。
 - 每条物理 user/assistant message 在任一时刻只能由 durable slot 或未持久化 live suffix 一方拥有。Pi 对 user 的 start/end/persistence 复用同一对象，但 pi-agent-core 的 assistant `message_start` 是 partial 浅拷贝，真正被 AgentSession 持久化的是 `message_end` 的 final 对象；因此 assistant live slot 必须在 end 时改绑 final identity，不能把 start payload 当成 durable identity。browser 初始 prompt slot 也只能绑定首条 user，后续 steer 不得覆盖它。exact handoff 后 durable item 保留当前 runId；live tool 状态只可覆盖尚无 durable tool result 的 pending 工具，一旦 JSONL 已有 result 就由 durable 状态获胜。compaction、user/steer 与卡片首次出现是时间线语义边界；不再保留“最后一次 compaction 后才使用 live”的特判。
 - 最终窗口优先保留完整的最近语义 turn；最新 turn 自身超限时保留连续有序后缀，不能跳过一个超大 item 后再捡更早的小 item。非空来源必须至少投影最新 item；单项也按最终 `JSON.stringify` 的 UTF-8 bytes 自适应缩略，避免 JSON 转义把合法原文放大后得到空快照。`window.omittedBefore / startsMidTurn / contentTruncated` 精确描述覆盖范围，任何省略都不会删除 JSONL。
