@@ -41,7 +41,7 @@ Pi Web 是本机优先的极简 Agent 工作台。当前目标不是复制 Pi �
 - 浏览器不是 transcript owner；恢复必须从服务端 `conversation_snapshot` hydrate，localStorage 只保存目录和安全偏好。
 - 客户端收到匹配的 history snapshot 前不得发送 prompt；state 提交和历史恢复是两个观察边界。
 - `WebSocket.send()` 不是 prompt 提交点。只有匹配 sessionId + promptId 的 `prompt_admitted` 才能清空直接 prompt 草稿并投影"等待中"消息；`prompt_delivered`（raw user 持久化证明）才把它结算为已投递。确认前断线必须保留草稿；断线后从 `conversation_snapshot.pendingPrompts` 恢复等待中列表，禁止自动重发或按正文去重。
-- 消息与 Agent 忙闲无关，随时可发：busy 时浏览器 prompt 直接进 SDK followUp 队列（`streamingBehavior:"followUp"` + `preflightResult(true)`），SDK run 循环自动读取，宿主零 pump/零重建/零持久队列。进程重启或 abort 时未投递消息丢失（UI 必须诚实显示"等待中"而非"已发送"）；abort 清空 followUp 队列与 admissions 并通知 UI。
+- 消息与 Agent 忙闲无关，随时可发：busy 时浏览器 prompt 直接进 SDK steering 队列（`streamingBehavior:"steer"` + `preflightResult(true)`），当前 assistant turn 的工具调用全部结束后、下一次模型调用前注入（用户可及时纠正 agent 方向；followUp 要等整个 run 结束才读取，不用于用户消息）。宿主零 pump/零重建/零持久队列。进程重启或 abort 时未投递消息丢失（UI 必须诚实显示"等待中"而非"已发送"）；abort 清空 steering/followUp 队列与 admissions 并通知 UI。
 - 跨会话 inbox 仍是 durable 工作：idle 时 browser prompt 必须经过同一 project lifecycle 且不越过已有 inbox 工作；inbox envelope 准入容量必须为每条 immutable payload 预留最坏合法 JSON 状态大小，状态替换仍复核实际 next bytes；inbox 删除 tombstone 使用独立有界预算，不能因 envelope 满载而无法建立删除 fence。需要初始 processing claim 的 inbox envelope 必须首次原子创建成目标状态，不能先 commit queued 再改写。
 - 用户消息投递只能在 raw user `message_end` 后，从同一 SessionManager entries 找到 `entry.message === rawMessage` 的对象引用来证明；admissions 按 `createdAt + promptId` FIFO 文本匹配结算，run settlement 本身不是交付证明。admit 有界（单会话同时最多 64 条 pending）；存量 `.piweb/pending-prompts` 只做一次性迁移，迁移后目录必须删除，不允许重新创建队列状态。
 - 普通会话操作串行执行；`abort`、认证响应、认证取消和生命周期失效走控制通道，session dispose 排回 actor 队列。

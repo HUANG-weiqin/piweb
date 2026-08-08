@@ -1362,7 +1362,7 @@ export class ProjectSessionCoordinator {
         throw new Error(`Conversation is being deleted: ${conversationId}`);
       }
       const actor = this.requireActor(context, conversationId);
-      // busy：消息与 run 状态无关，进 SDK followUp 队列，忙完自动读。
+      // busy：消息与 run 状态无关，进 SDK steering 队列，当前工具序列结束即注入。
       if (actor.getActivity().kind !== "idle") {
         if (promptId === undefined) {
           throw new Error(
@@ -4586,7 +4586,7 @@ export class ProjectSessionCoordinator {
   }
 
   /**
-   * 尽力而为投递迁移队列：actor 已打开的会话直接 admit（busy 进 followUp
+   * 尽力而为投递迁移队列：actor 已打开的会话直接 admit（busy 进 steer
    * 队列、idle 起新 run）；投递失败或会话不可用则丢弃该条。全部尝试后
    * 删除旧队列目录；中途关闭则保留目录待下次重试（admit 按 promptId 幂等）。
    */

@@ -138,7 +138,7 @@ export interface ConversationActorCompletion {
   pendingPromptUserDelivered: boolean;
 }
 
-/** 一次 busy 期间被 SDK followUp 队列接受的浏览器 prompt（内存态，重启丢失为接受项）。 */
+/** 一次 busy 期间被 SDK steering 队列接受的浏览器 prompt（内存态，重启丢失为接受项）。 */
 export interface PendingPromptAdmission {
   promptId: string;
   text: string;
@@ -879,7 +879,9 @@ export class ConversationActor {
   }
 
   /**
-   * busy 时浏览器 prompt：消息进 SDK followUp 队列（不建 run ticket）。
+   * busy 时浏览器 prompt：消息进 SDK steering 队列（不建 run ticket）。
+   * steering 在当前 assistant turn 的工具调用全部结束后、下一次模型调用前注入，
+   * 用户消息因此能及时纠正 agent 方向（followUp 要等整个 run 结束才读取）。
    * preflightResult(true)（已入队）即 resolve；轮到时若已 idle 则转 startPrompt。
    * 投递确认由 onSessionEvent 的 prompt_delivered 事件表达。
    */
@@ -912,7 +914,7 @@ export class ConversationActor {
       );
     }
     // 注意：不进入 operations 串行队列——run 进行中队列被 executeRun 占用，
-    // admit 必须在 run 进行中直接调用 SDK followUp。
+    // admit 必须在 run 进行中直接调用 SDK steer。
     // 若检查时已 idle（当前 run 刚结束），转 startPrompt（其内部在串行队列执行）。
     if (!this.activeRun) {
       return this.startPrompt({
@@ -921,10 +923,10 @@ export class ConversationActor {
         origin: "browser",
       });
     }
-    return this.admitFollowUp(input);
+    return this.admitSteerPrompt(input);
   }
 
-  private async admitFollowUp(input: {
+  private async admitSteerPrompt(input: {
     promptId: string;
     runId: string;
     text: string;
@@ -939,7 +941,7 @@ export class ConversationActor {
     try {
       await new Promise<void>((resolve, reject) => {
         void this.session.prompt(input.text, {
-          streamingBehavior: "followUp",
+          streamingBehavior: "steer",
           preflightResult: (ok) => {
             if (ok) {
               accepted = true;
@@ -1805,7 +1807,7 @@ export class ConversationActor {
 
     if (event.type === "message_end" && event.message.role === "user") {
       const rawMessage = event.message;
-      // busy 期间 accepted 的 followUp prompt：按 FIFO 文本匹配确认投递。
+      // busy 期间 accepted 的 steer prompt：按 FIFO 文本匹配确认投递。
       // 必须在 guidance 逻辑之前，避免被误当作 extension steer 投递。
       const admittedText = admittedUserMessageText(rawMessage);
       const admissionIndex = admittedText === undefined

@@ -132,10 +132,10 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 
 消息与忙闲无关，随时可发；工作台不再拥有持久 pending prompt 队列、pump 或 batch guidance。
 
-- busy 时浏览器 `prompt`（带 promptId）由 actor 直接 `session.prompt(text, { streamingBehavior: "followUp", preflightResult })` 进 SDK followUp 队列；SDK run 循环自动 drain，宿主零 pump/零重建。idle 时经 project lifecycle 起新 run，且不越过已有 inbox 工作。
-- 会话创建时 `settingsManager.applyOverrides({ followUpMode: "all" })` 让排队消息在一次 run 内连续注入。admitted 是 actor 内存 FIFO（`promptId + text + createdAt`），有界（单会话最多 64 条），abort 清空 followUp 队列与 admissions。进程重启时未投递消息丢失——UI 必须诚实显示"等待中"而非"已发送"。
+- busy 时浏览器 `prompt`（带 promptId）由 actor 直接 `session.prompt(text, { streamingBehavior: "steer", preflightResult })` 进 SDK steering 队列；当前 assistant turn 工具调用全部结束后、下一次模型调用前注入——用户消息因此能及时纠正 agent 方向（followUp 要等整个 run 结束才读，不用于用户消息）。宿主零 pump/零重建。idle 时经 project lifecycle 起新 run，且不越过已有 inbox 工作。
+- admitted 是 actor 内存 FIFO（`promptId + text + createdAt`），有界（单会话最多 64 条），abort 清空 steering/followUp 队列与 admissions。进程重启时未投递消息丢失——UI 必须诚实显示"等待中"而非"已发送"。steer 消息在 run 结束后才入队时，留待下一次 run 开始时注入（runLoop 首轮读取）。
 - 投递证明：只在 raw user `message_end` 后，从同一 SessionManager entries 找到 `entry.message === rawMessage` 的对象引用，再按 admissions 的 `createdAt + promptId` FIFO 文本匹配结算 `prompt_delivered`；run settlement 本身不是交付证明。admissions 不能跨 restart 恢复。
-- 存量 `.piweb/pending-prompts` 目录在项目打开时一次性迁移：queued 按 FIFO 经 admitBrowserPrompt 重投递（idle 起 run / busy 进 followUp），dispatching/attention/损坏/超限记录直接丢弃，全部尝试后删除目录；中途关闭保留目录待下次重试（按 promptId 幂等）。不允许重新创建队列状态。
+- 存量 `.piweb/pending-prompts` 目录在项目打开时一次性迁移：queued 按 FIFO 经 admitBrowserPrompt 重投递（idle 起 run / busy 进 steer），dispatching/attention/损坏/超限记录直接丢弃，全部尝试后删除目录；中途关闭保留目录待下次重试（按 promptId 幂等）。不允许重新创建队列状态。
 - `piweb.pending_prompt_delivery.v1` / `piweb.pending_prompt_batch.v1` 的 schema、解析与聚合校验仍保留为 JSONL 历史格式的只读兼容层（fail closed 校验旧文件），但不再写入新记录。
 
 详细编排语义见 [kb-agent-collaboration.md](kb-agent-collaboration.md)。

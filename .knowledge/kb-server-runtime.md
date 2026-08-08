@@ -73,7 +73,7 @@
 - API Key、角色 CRUD 和删除等需要结算的操作都带原 sessionId + commandId，连接内复用 commandId 会被拒绝。
 - 会话“回到此处”由 project lifecycle、ConversationActor operation queue 和 ProjectStore 原子截断共同完成；busy 或存在待处理 inbox 时拒绝。只有 durable JSONL 与同一 AgentSession 内存 context 都同步后，PiConnection 才依次发布 focused snapshot 和 command completion。
 - `setThinkingLevel()` 和 `setSessionName()` 会先改内存再持久化；工作台以 actor 实际后置条件为准，发布新 state 并单独报告持久化风险。相对地，`AuthStorage.set/remove` 与 `ProjectStore.setToolMode` 都是持久写成功后才替换内存状态，不需要这种部分提交适配。
-- browser prompt 与忙闲无关：busy 时直接 `session.prompt(text, { streamingBehavior: "followUp", preflightResult })` 进 SDK followUp 队列（不建 run ticket、不写持久队列），idle 时经 project lifecycle 起新 run 且不越过已有 inbox 工作。abort 先清空 SDK followUp/steering 队列与 admissions 再 abort，旧消息不能跨越结算边界污染下一次 run。admit 有界（单会话最多 64 条 pending），slash 开头拒绝。
+- browser prompt 与忙闲无关：busy 时直接 `session.prompt(text, { streamingBehavior: "steer", preflightResult })` 进 SDK steering 队列（不建 run ticket、不写持久队列），当前工具序列结束后下一次模型调用前注入，用户消息可及时纠正 agent 方向；idle 时经 project lifecycle 起新 run 且不越过已有 inbox 工作。abort 先清空 SDK steering/followUp 队列与 admissions 再 abort，旧消息不能跨越结算边界污染下一次 run。admit 有界（单会话最多 64 条 pending），slash 开头拒绝。
 - 取消 run 必须先清空 SDK 尚未消费的 steering/follow-up queue 再 abort；否则旧引导可能跨越结算边界污染下一次 prompt。持久跨会话消息仍由 inbox delivery marker 决定是否重投，不能把 SDK 内存队列当成 durable truth。
 - 注册不可复用 runId、安装 active RunTicket 后立即发送 `run_queued`；它既是生命周期事件，也是浏览器提交 user draft 的唯一服务端接收回执。
 - SDK 异步 preflight 结束时会再次检查 run ticket；若期间已取消，会在真正启动 agent 前阻断。

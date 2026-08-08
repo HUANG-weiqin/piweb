@@ -457,9 +457,6 @@ export class PiRuntime implements PiRuntimeLike {
     };
     try {
       settings = this.createSettings(cwd);
-      // 消息直通：busy 时的浏览器 prompt 进 SDK followUp 队列，run 结束后必须一次性
-      // 全部读取（one-at-a-time 会让每条排队消息各占一个完整模型轮次）。
-      // applyOverrides 是内存 deepMerge，不写 settings.json，不污染用户设置。
       const sessionManager = options.sessionManager ?? SessionManager.inMemory(cwd);
       if (this.sessionFactory) {
         const fixedModel = fixedModelReference
@@ -517,12 +514,6 @@ export class PiRuntime implements PiRuntimeLike {
         });
       }
       createdSession = created.session;
-      // 消息直通：busy 时的浏览器 prompt 进 SDK followUp 队列，run 结束后必须一次性
-      // 全部读取（one-at-a-time 会让每条排队消息各占一个完整模型轮次）。
-      // 不用 applyOverrides：resourceLoader.reload() 会重置其内存合并视图；
-      // 不用 setFollowUpMode()：它会 markModified 并把 all 写进用户 settings.json。
-      // Agent.followUpMode 公开 setter 直接改 PendingMessageQueue.mode（drain 时实时读取）。
-      createdSession.agent.followUpMode = "all";
       installToolResultCompression(createdSession);
       if (readOnlyToolProjection) {
         toolProjectionAdapter = installReadOnlyToolProjection(createdSession);

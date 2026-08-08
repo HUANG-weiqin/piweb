@@ -445,7 +445,7 @@ describe("ConversationActor", () => {
       return { runStarted, finishRun, running };
     }
 
-    it("admits via SDK followUp while a run is active and emits prompt_admitted", async () => {
+    it("admits via SDK steer while a run is active and emits prompt_admitted", async () => {
       const fixture = await openActor();
       const { runStarted, finishRun, running } = busyRun(fixture);
       await runStarted.promise;
@@ -459,7 +459,7 @@ describe("ConversationActor", () => {
       await vi.waitFor(() => {
         expect(fixture.runtime.session.promptCalls).toContainEqual({
           text: "follow up",
-          streamingBehavior: "followUp",
+          streamingBehavior: "steer",
         });
       });
       await vi.waitFor(() => {
