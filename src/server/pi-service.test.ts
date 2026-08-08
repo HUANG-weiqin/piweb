@@ -2650,6 +2650,58 @@ describe("PiConnection lifecycle", () => {
 });
 
 describe("PiConnection coordinated project view", () => {
+  it("uses the validated recent seed for one initial project snapshot", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const warmHandle = await harness.coordinator.acquireProject(
+      harness.cwd,
+      "read_only",
+    );
+    await Promise.allSettled([...warmHandle.context.backgroundTasks]);
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "new", roleId: "default" },
+      });
+      await vi.waitFor(() => {
+        expect(harness.events.some((event) => event.type === "project_snapshot"))
+          .toBe(true);
+      });
+
+      const listSessions = vi.spyOn(harness.coordinator, "listSessions");
+      harness.events.splice(0);
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_B,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+
+      expect(listSessions).toHaveBeenCalledTimes(1);
+      const snapshots = harness.events.filter(
+        (event): event is Extract<ServerEvent, { type: "project_snapshot" }> =>
+          event.type === "project_snapshot",
+      );
+      expect(snapshots).toHaveLength(1);
+      const conversation = snapshots[0]!.conversations.find(
+        ({ id }) => id === snapshots[0]!.conversationId,
+      );
+      expect(conversation).toMatchObject({
+        role: expect.objectContaining({ id: "default" }),
+        activity: { kind: "idle" },
+        createdBy: { kind: "user" },
+        temporary: false,
+        attention: false,
+      });
+    } finally {
+      warmHandle.release();
+      await harness.cleanup();
+    }
+  });
+
 
 
 
@@ -3972,6 +4024,11 @@ describe("PiConnection coordinated project view", () => {
 
   it("collapses project snapshot refresh bursts into one trailing scan", async () => {
     const harness = await coordinatedConnectionHarness();
+    const warmHandle = await harness.coordinator.acquireProject(
+      harness.cwd,
+      "read_only",
+    );
+    await Promise.allSettled([...warmHandle.context.backgroundTasks]);
     try {
       await harness.connection.handle({
         type: "initialize",
@@ -4026,6 +4083,7 @@ describe("PiConnection coordinated project view", () => {
       });
       expect(listSessions).toHaveBeenCalledTimes(2);
     } finally {
+      warmHandle.release();
       await harness.cleanup();
     }
   });

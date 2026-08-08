@@ -962,6 +962,7 @@ export class PiConnection {
     let unsubscribeProject: (() => void) | undefined;
     let unsubscribeExtensionUI: (() => void) | undefined;
     let createdConversationId: string | undefined;
+    let initialRecentConversations: ConversationSummary[] | undefined;
     try {
       this.throwIfAborted(signal);
 
@@ -1003,12 +1004,15 @@ export class PiConnection {
           extensionUI,
         );
       } else {
-        const sessions = await coordinator.listSessions(handle);
-        const knownIds = new Set(sessions.map(({ id }) => id));
+        // This is the one fresh integrity scan for recent selection. Keep its
+        // validated seed; the initial project snapshot will project the same
+        // successful index after the actor profile is loaded.
+        const recentSeed = await coordinator.listSessions(handle);
+        const knownIds = new Set(recentSeed.map(({ id }) => id));
         const conversationId = handle.project.lastConversationId
           && knownIds.has(handle.project.lastConversationId)
           ? handle.project.lastConversationId
-          : sessions[0]?.id;
+          : recentSeed[0]?.id;
         if (conversationId !== undefined) {
           unsubscribeExtensionUI = coordinator.attachExtensionUI(
             handle,
@@ -1017,6 +1021,8 @@ export class PiConnection {
           );
           actor = await coordinator.openConversation(handle, conversationId);
         }
+        initialRecentConversations =
+          coordinator.projectSessionsFromCurrentIndex(handle);
       }
       this.throwIfAborted(signal);
       if (
@@ -1061,7 +1067,11 @@ export class PiConnection {
         );
       }
       this.publishCoordinatedState();
-      this.publishProjectSnapshotCoordinated();
+      if (initialRecentConversations !== undefined) {
+        this.emitProjectSnapshot(view, initialRecentConversations);
+      } else {
+        this.publishProjectSnapshotCoordinated();
+      }
       this.publishRoleCatalog();
       this.publishFocusedConversationSnapshot();
     } finally {

@@ -869,6 +869,28 @@ export class ProjectSessionCoordinator {
   ): Promise<ConversationSummary[]> {
     const context = this.requireContext(handle);
     const summaries = await context.project.refreshConversations();
+    return this.projectConversationSummaries(context, summaries);
+  }
+
+  /**
+   * Projects the last successful project index without scanning the session
+   * directory. This is not a fresh integrity proof and must not be used for
+   * open/delete decisions.
+   */
+  projectSessionsFromCurrentIndex(
+    handle: ProjectSessionHandle,
+  ): ConversationSummary[] {
+    const context = this.requireContext(handle);
+    return this.projectConversationSummaries(
+      context,
+      context.project.listConversations(),
+    );
+  }
+
+  private projectConversationSummaries(
+    context: ProjectContext,
+    summaries: readonly ConversationSummary[],
+  ): ConversationSummary[] {
     return summaries.map((summary) => {
       const actor = context.actors.get(summary.id);
       const profile = actor?.profile ?? context.profiles.get(summary.id);
