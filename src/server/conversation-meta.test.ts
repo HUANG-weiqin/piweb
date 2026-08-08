@@ -24,8 +24,6 @@ import {
   createConversationMetaEntry,
   createConversationRoleChangeEntry,
   createMetaOperationEntry,
-  createPendingPromptBatchEntry,
-  createPendingPromptDeliveryEntry,
   createRunSettlementEntry,
   createTemporaryReturnReceiptEntry,
   parseConversationCardEntry,
@@ -40,8 +38,29 @@ import {
   parseRunSettlementEntry,
   parseTemporaryReturnReceiptEntry,
 } from "./conversation-meta.js";
+import type {
+  PendingPromptBatch,
+  PendingPromptBatchEntry,
+  PendingPromptDelivery,
+  PendingPromptDeliveryEntry,
+} from "./conversation-meta.js";
 
 const timestamp = "2026-07-19T10:00:00.000Z";
+
+function deliveryEntry(data: PendingPromptDelivery): PendingPromptDeliveryEntry {
+  return parsePendingPromptDeliveryEntry({
+    customType: PENDING_PROMPT_DELIVERY_CUSTOM_TYPE,
+    data,
+  });
+}
+
+function batchEntry(data: PendingPromptBatch): PendingPromptBatchEntry {
+  return parsePendingPromptBatchEntry({
+    customType: PENDING_PROMPT_BATCH_CUSTOM_TYPE,
+    data,
+  });
+}
+
 
 function peer(conversationId = randomUUID()) {
   return {
@@ -447,18 +466,18 @@ describe("conversation reserved entries", () => {
   });
 
   it("records pending prompt delivery receipts by prompt identity, allowing one run to deliver several prompts", () => {
-    const delivery = createPendingPromptDeliveryEntry({
+    const delivery = deliveryEntry({
       promptId: randomUUID(),
       runId: randomUUID(),
       deliveredAt: timestamp,
     });
-    const batchDelivery = createPendingPromptDeliveryEntry({
+    const batchDelivery = deliveryEntry({
       promptId: randomUUID(),
       runId: delivery.data.runId,
       batchId: randomUUID(),
       deliveredAt: "2026-07-19T10:00:30.000Z",
     });
-    const sameRunDifferentPrompt = createPendingPromptDeliveryEntry({
+    const sameRunDifferentPrompt = deliveryEntry({
       promptId: randomUUID(),
       runId: delivery.data.runId,
       deliveredAt: "2026-07-19T10:01:00.000Z",
@@ -484,26 +503,26 @@ describe("conversation reserved entries", () => {
     ]);
     expect(() => aggregateReservedConversationEntries([
       delivery,
-      createPendingPromptDeliveryEntry({
+      deliveryEntry({
         ...delivery.data,
         deliveredAt: "2026-07-19T10:01:00.000Z",
       }),
     ])).toThrow(/conflicting.*pending prompt delivery/i);
     expect(() => aggregateReservedConversationEntries([
       delivery,
-      createPendingPromptDeliveryEntry({
+      deliveryEntry({
         ...delivery.data,
         runId: randomUUID(),
       }),
     ])).toThrow(/conflicting.*pending prompt delivery/i);
-    expect(() => createPendingPromptDeliveryEntry({
+    expect(() => deliveryEntry({
       ...delivery.data,
       promptId: "not-a-uuid",
     })).toThrow(/promptId/i);
   });
 
   it("folds immutable pending prompt batch manifests through strict state transitions", () => {
-    const prepared = createPendingPromptBatchEntry({
+    const prepared = batchEntry({
       batchId: randomUUID(),
       conversationId: randomUUID(),
       runId: randomUUID(),
@@ -522,28 +541,28 @@ describe("conversation reserved entries", () => {
       state: "prepared",
       updatedAt: timestamp,
     });
-    const started = createPendingPromptBatchEntry({
+    const started = batchEntry({
       ...prepared.data,
       state: "started",
       updatedAt: "2026-07-19T10:01:00.000Z",
     });
-    const delivered = createPendingPromptBatchEntry({
+    const delivered = batchEntry({
       ...started.data,
       state: "delivered",
       updatedAt: "2026-07-19T10:02:00.000Z",
     });
-    const completed = createPendingPromptBatchEntry({
+    const completed = batchEntry({
       ...delivered.data,
       state: "completed",
       updatedAt: "2026-07-19T10:03:00.000Z",
     });
-    const preparedAttention = createPendingPromptBatchEntry({
+    const preparedAttention = batchEntry({
       ...prepared.data,
       state: "attention",
       reason: "sidecar disappeared during recovery",
       updatedAt: "2026-07-19T10:04:00.000Z",
     });
-    const deliveredAttention = createPendingPromptBatchEntry({
+    const deliveredAttention = batchEntry({
       ...delivered.data,
       state: "attention",
       reason: "delivery proof was lost",
@@ -582,7 +601,7 @@ describe("conversation reserved entries", () => {
     ])).toThrow(/cannot transition/i);
     expect(() => aggregateReservedConversationEntries([
       prepared,
-      createPendingPromptBatchEntry({
+      batchEntry({
         ...started.data,
         runId: randomUUID(),
       }),
@@ -590,13 +609,13 @@ describe("conversation reserved entries", () => {
     expect(() => aggregateReservedConversationEntries([
       prepared,
       started,
-      createPendingPromptBatchEntry({
+      batchEntry({
         ...started.data,
         state: "failed",
         updatedAt: "2026-07-19T10:02:00.000Z",
         reason: "deterministic rejection",
       }),
-      createPendingPromptBatchEntry({
+      batchEntry({
         ...started.data,
         updatedAt: "2026-07-19T10:03:00.000Z",
       }),

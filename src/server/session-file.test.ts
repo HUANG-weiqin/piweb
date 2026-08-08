@@ -10,14 +10,34 @@ import {
   createConversationCardEntry,
   createConversationMessageEntry,
   createConversationMetaEntry,
-  createPendingPromptBatchEntry,
-  createPendingPromptDeliveryEntry,
   createRunSettlementEntry,
+  parsePendingPromptBatchEntry,
+  parsePendingPromptDeliveryEntry,
+} from "./conversation-meta.js";
+import type {
+  PendingPromptBatch,
+  PendingPromptBatchEntry,
+  PendingPromptDelivery,
+  PendingPromptDeliveryEntry,
 } from "./conversation-meta.js";
 import {
   inspectPiSessionFile,
   validatePiSessionFile,
 } from "./session-file.js";
+
+function batchEntry(data: PendingPromptBatch): PendingPromptBatchEntry {
+  return parsePendingPromptBatchEntry({
+    customType: PENDING_PROMPT_BATCH_CUSTOM_TYPE,
+    data,
+  });
+}
+
+function deliveryEntry(data: PendingPromptDelivery): PendingPromptDeliveryEntry {
+  return parsePendingPromptDeliveryEntry({
+    customType: PENDING_PROMPT_DELIVERY_CUSTOM_TYPE,
+    data,
+  });
+}
 
 const timestamp = "2026-01-01T00:00:00.000Z";
 
@@ -336,12 +356,12 @@ describe("validatePiSessionFile", () => {
       finalText: "Done",
       settledAt: "2026-01-01T00:03:00.000Z",
     });
-    const delivery = createPendingPromptDeliveryEntry({
+    const delivery = deliveryEntry({
       promptId: randomUUID(),
       runId,
       deliveredAt: "2026-01-01T00:03:30.000Z",
     });
-    const batch = createPendingPromptBatchEntry({
+    const batch = batchEntry({
       batchId: randomUUID(),
       conversationId,
       runId,

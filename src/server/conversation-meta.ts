@@ -832,28 +832,10 @@ export function parsePendingPromptDeliveryEntry(
   return pendingPromptDeliveryEntrySchema.parse(value);
 }
 
-export function createPendingPromptDeliveryEntry(
-  data: PendingPromptDelivery,
-): PendingPromptDeliveryEntry {
-  return parsePendingPromptDeliveryEntry({
-    customType: PENDING_PROMPT_DELIVERY_CUSTOM_TYPE,
-    data,
-  });
-}
-
 export function parsePendingPromptBatchEntry(
   value: unknown,
 ): PendingPromptBatchEntry {
   return pendingPromptBatchEntrySchema.parse(value);
-}
-
-export function createPendingPromptBatchEntry(
-  data: PendingPromptBatch,
-): PendingPromptBatchEntry {
-  return parsePendingPromptBatchEntry({
-    customType: PENDING_PROMPT_BATCH_CUSTOM_TYPE,
-    data,
-  });
 }
 
 export function parseTemporaryReturnReceiptEntry(

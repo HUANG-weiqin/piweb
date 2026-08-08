@@ -19,13 +19,26 @@ import {
   createConversationCardEntry,
   createConversationMessageEntry,
   createConversationMetaEntry,
-  createPendingPromptBatchEntry,
   createRunSettlementEntry,
+  parsePendingPromptBatchEntry,
+  PENDING_PROMPT_BATCH_CUSTOM_TYPE,
+} from "./conversation-meta.js";
+import type {
+  PendingPromptBatch,
+  PendingPromptBatchEntry,
 } from "./conversation-meta.js";
 
 function message(value: unknown): AgentMessage {
   return value as AgentMessage;
 }
+
+function batchEntry(data: PendingPromptBatch): PendingPromptBatchEntry {
+  return parsePendingPromptBatchEntry({
+    customType: PENDING_PROMPT_BATCH_CUSTOM_TYPE,
+    data,
+  });
+}
+
 
 function peer(conversationId = randomUUID()) {
   return {
@@ -105,7 +118,7 @@ describe("projectConversationHistory", () => {
       content: "keep this visible",
       timestamp: 1,
     }));
-    appendReservedCustomEntry(manager, createPendingPromptBatchEntry({
+    appendReservedCustomEntry(manager, batchEntry({
       batchId: randomUUID(),
       conversationId,
       runId: randomUUID(),
@@ -145,19 +158,19 @@ describe("projectConversationHistory", () => {
       batchId: batch.batchId,
       items: [{ ordinal: 1, text: "user-authored JSON" }],
     });
-    appendReservedCustomEntry(manager, createPendingPromptBatchEntry({
+    appendReservedCustomEntry(manager, batchEntry({
       ...batch,
       state: "prepared",
       updatedAt: "2026-07-29T11:00:01.000Z",
     }));
     manager.appendMessage(message({ role: "user", content: guidance, timestamp: 1 }));
-    appendReservedCustomEntry(manager, createPendingPromptBatchEntry({
+    appendReservedCustomEntry(manager, batchEntry({
       ...batch,
       state: "started",
       updatedAt: "2026-07-29T11:00:02.000Z",
     }));
     manager.appendMessage(message({ role: "user", content: ` ${guidance}`, timestamp: 2 }));
-    appendReservedCustomEntry(manager, createPendingPromptBatchEntry({
+    appendReservedCustomEntry(manager, batchEntry({
       ...batch,
       state: "failed",
       updatedAt: "2026-07-29T11:00:03.000Z",
