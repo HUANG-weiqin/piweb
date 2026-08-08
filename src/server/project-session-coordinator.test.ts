@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -612,6 +612,79 @@ function deterministicTestUuid(namespace: string, value: string): string {
 }
 
 describe("ProjectSessionCoordinator", () => {
+  it("migrates legacy queued pending prompts on reopen and drops attention records", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const conversationId = actor.conversationId;
+    await fixture.coordinator.close();
+
+    const queueDir = join(fixture.cwd, ".piweb", "pending-prompts");
+    await mkdir(queueDir, { recursive: true });
+    const queuedId = randomUUID();
+    await writeFile(
+      join(queueDir, `${queuedId}.json`),
+      JSON.stringify({
+        version: 1,
+        promptId: queuedId,
+        conversationId,
+        text: "legacy queued message",
+        createdAt: "2026-07-01T10:00:00.000Z",
+        state: "queued",
+      }),
+    );
+    const attentionId = randomUUID();
+    await writeFile(
+      join(queueDir, `${attentionId}.json`),
+      JSON.stringify({
+        version: 1,
+        promptId: attentionId,
+        conversationId,
+        text: "legacy attention message",
+        createdAt: "2026-07-01T10:01:00.000Z",
+        state: "attention",
+        reason: "uncertain delivery",
+      }),
+    );
+    await writeFile(
+      join(queueDir, "corrupt.json"),
+      "{not-json",
+    );
+
+    const restarted = new ProjectSessionCoordinator(
+      fixture.runtime,
+      fixture.roles,
+      fixture.registry,
+    );
+    const restartedHandle = await restarted.acquireProject(
+      fixture.cwd,
+      "full_access",
+    );
+    fixture.coordinator = restarted;
+    fixture.handle = restartedHandle;
+
+    await waitUntil(
+      () => fixture.runtime.control(conversationId)
+        .promptTexts.includes("legacy queued message"),
+      "legacy queued message redelivery",
+    );
+    expect(fixture.runtime.control(conversationId).promptTexts)
+      .not.toContain("legacy attention message");
+    await waitUntil(
+      async () => {
+        try {
+          await readdir(queueDir);
+          return false;
+        } catch {
+          return true;
+        }
+      },
+      "legacy queue directory removal",
+    );
+  });
+
   it("does not rescan project activity for streaming session deltas", async () => {
     const fixture = await createFixture();
     const actor = await fixture.coordinator.createUserConversation(

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { readFile, readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
   MAX_PROJECT_ACTIVITY_SUMMARIES,
@@ -37,6 +38,33 @@ import {
   projectConversationItemsSnapshot,
 } from "./conversation-history.js";
 import { createGitTools } from "./git-inspect.js";
+
+function isNodeError(error: unknown, code: string): boolean {
+  return (
+    error instanceof Error
+    && "code" in error
+    && (error as NodeJS.ErrnoException).code === code
+  );
+}
+
+function isLegacyQueuedPrompt(value: unknown): value is {
+  promptId: string;
+  conversationId: string;
+  text: string;
+  createdAt: string;
+} {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    record.version === 1
+    && record.state === "queued"
+    && typeof record.promptId === "string"
+    && typeof record.conversationId === "string"
+    && typeof record.text === "string"
+    && typeof record.createdAt === "string"
+  );
+}
+
 import {
   createMetaTools,
   type MetaToolService,
@@ -55,7 +83,6 @@ import {
   type InboxEnvelopeInput,
 } from "./project-inbox.js";
 import {
-  MAX_PENDING_PROMPT_ATTENTION_REASON_CHARACTERS,
   projectPromptPayloadSha256,
   type ProjectPromptRecord,
   type PromptQueuePutResult,
@@ -4382,6 +4409,7 @@ export class ProjectSessionCoordinator {
 
   private async recoverProject(context: ProjectContext): Promise<void> {
     if (context.closing) return;
+    const legacyPromptQueue = await this.readLegacyPendingPromptQueue(context);
     let summaries = await context.project.refreshConversations();
     const existingIds = new Set(summaries.map(({ id }) => id));
     for (const conversationId of await context.inbox.listDeletedTargets()) {
@@ -4423,6 +4451,10 @@ export class ProjectSessionCoordinator {
         )
         .map(({ toConversationId }) => toConversationId),
     );
+    for (const item of legacyPromptQueue) {
+      if (context.closing) return;
+      actorIds.add(item.conversationId);
+    }
     for (const summary of summaries) {
       if (context.closing) return;
       if (blockedTargets.has(summary.id)) {
@@ -4521,7 +4553,97 @@ export class ProjectSessionCoordinator {
         context.attention.add(actorId);
       }
     }
+    if (legacyPromptQueue.length > 0) {
+      await this.redeliverLegacyPromptQueue(context, legacyPromptQueue);
+    }
     this.emit(context, { type: "project_changed" });
+  }
+
+
+  /**
+   * 一次性迁移：读取旧版 .piweb/pending-prompts 队列文件中仍处于 queued 的
+   * 消息，按 createdAt FIFO 排序后返回；会话 id 收集到 actorIds 以便打开 actor。
+   * dispatching/attention/损坏/超限记录直接丢弃（A' 不保留重启恢复语义）。
+   */
+  private async readLegacyPendingPromptQueue(
+    context: ProjectContext,
+  ): Promise<Array<{
+    promptId: string;
+    conversationId: string;
+    text: string;
+  }>> {
+    const directory = join(context.project.stateDir, "pending-prompts");
+    let names: string[];
+    try {
+      names = await readdir(directory);
+    } catch (error) {
+      if (isNodeError(error, "ENOENT")) return [];
+      throw error;
+    }
+    const queued: Array<{
+      promptId: string;
+      conversationId: string;
+      text: string;
+      createdAt: string;
+    }> = [];
+    for (const name of names) {
+      if (!name.endsWith(".json")) continue;
+      try {
+        const path = join(directory, name);
+        const fileStats = await stat(path);
+        if (!fileStats.isFile() || fileStats.size > 1024 * 1024) continue;
+        const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
+        if (!isLegacyQueuedPrompt(parsed)) continue;
+        queued.push(parsed);
+      } catch {
+        // 损坏或无法解析的旧记录直接丢弃。
+      }
+    }
+    queued.sort((first, second) => {
+      const byCreatedAt =
+        Date.parse(first.createdAt) - Date.parse(second.createdAt);
+      if (byCreatedAt !== 0) return byCreatedAt;
+      return first.promptId.localeCompare(second.promptId);
+    });
+    return queued;
+  }
+
+  /**
+   * 尽力而为投递迁移队列：actor 已打开的会话直接 admit（busy 进 followUp
+   * 队列、idle 起新 run）；投递失败或会话不可用则丢弃该条。全部尝试后
+   * 删除旧队列目录；中途关闭则保留目录待下次重试（admit 按 promptId 幂等）。
+   */
+  private async redeliverLegacyPromptQueue(
+    context: ProjectContext,
+    queue: Array<{
+      promptId: string;
+      conversationId: string;
+      text: string;
+    }>,
+  ): Promise<void> {
+    for (const item of queue) {
+      if (context.closing) return;
+      const actor = context.actors.get(item.conversationId);
+      if (!actor) continue;
+      try {
+        await actor.admitBrowserPrompt({
+          promptId: item.promptId,
+          runId: randomUUID(),
+          text: item.text,
+        });
+      } catch (error) {
+        // 一次性迁移：无法投递的旧记录丢弃，不进入 A' 的新投递路径。
+        console.warn(
+          `[prompt-streamlining] dropped legacy pending prompt ${item.promptId}:`,
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
+    if (context.closing) return;
+    await rm(join(context.project.stateDir, "pending-prompts"), {
+      recursive: true,
+      force: true,
+    });
   }
 
   private async recoverStartedAbortOperation(
