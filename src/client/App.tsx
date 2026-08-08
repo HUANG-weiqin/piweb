@@ -10,7 +10,7 @@ import {
   type ConversationSummary,
   type ConversationWindowCoverage,
   type DirectoryListing,
-  type PendingPrompt,
+
   type PublicState,
   type ProjectActivitySummary,
   type RoleTemplate,
@@ -94,6 +94,13 @@ function loadInitialWorkspaceState(): InitialWorkspaceState {
 interface DirectPendingPrompt extends ActiveFocus {
   workspaceKey: string;
   runId: string;
+  promptId?: string;
+  text: string;
+}
+
+/** busy 时已接受、尚未投递的浏览器 prompt（服务端内存态）。 */
+interface PendingAdmission {
+  promptId: string;
   text: string;
 }
 
@@ -103,23 +110,6 @@ interface UnconfirmedPrompt {
   edited: boolean;
   promptId?: string;
   notice?: string;
-}
-
-interface PendingQueueCommand extends ActiveFocus {
-  workspaceKey: string;
-  commandId: string;
-  operation:
-    | "enqueue_prompt"
-    | "steer_pending_prompt"
-    | "steer_all_pending_prompts"
-    | "withdraw_pending_prompt"
-    | "dismiss_pending_prompt";
-  promptId: string;
-  runId?: string;
-  batchId?: string;
-  affectedPromptIds?: readonly string[];
-  text?: string;
-  draftRevision?: number;
 }
 
 interface PendingConversationDeletion {
@@ -287,10 +277,23 @@ export function App() {
   const pendingPromptRef = useRef<DirectPendingPrompt | undefined>(undefined);
   const unconfirmedPromptByConversationRef =
     useRef(new Map<string, UnconfirmedPrompt>());
-  const [pendingPrompts, setPendingPrompts] = useState<PendingPrompt[]>([]);
-  const pendingPromptsRef = useRef<PendingPrompt[]>([]);
-  const pendingQueueCommandsRef = useRef(new Map<string, PendingQueueCommand>());
-  const [, setPendingQueueCommandRevision] = useState(0);
+  const [pendingAdmissions, setPendingAdmissions] = useState<PendingAdmission[]>([]);
+  const pendingAdmissionsRef = useRef<PendingAdmission[]>([]);
+  const replacePendingAdmissions = (admissions: PendingAdmission[]) => {
+    pendingAdmissionsRef.current = admissions;
+    setPendingAdmissions(admissions);
+  };
+  const addPendingAdmission = (admission: PendingAdmission) => {
+    if (pendingAdmissionsRef.current.some((a) => a.promptId === admission.promptId)) return;
+    replacePendingAdmissions([...pendingAdmissionsRef.current, admission]);
+  };
+  const removePendingAdmission = (promptId: string) => {
+    if (!pendingAdmissionsRef.current.some((a) => a.promptId === promptId)) return;
+    replacePendingAdmissions(
+      pendingAdmissionsRef.current.filter((a) => a.promptId !== promptId),
+    );
+  };
+  const clearPendingAdmissions = () => replacePendingAdmissions([]);
   const [pendingConversationDeletion, setPendingConversationDeletionState] =
     useState<PendingConversationDeletion>();
   const pendingConversationDeletionRef =
@@ -452,115 +455,6 @@ export function App() {
       return next;
     });
   };
-  const replacePendingPrompts = (prompts: PendingPrompt[]) => {
-    pendingPromptsRef.current = prompts;
-    setPendingPrompts(prompts);
-  };
-  const clearPendingPrompts = () => replacePendingPrompts([]);
-  const registerPendingQueueCommand = (command: PendingQueueCommand) => {
-    pendingQueueCommandsRef.current.set(command.commandId, command);
-    setPendingQueueCommandRevision((revision) => revision + 1);
-  };
-  const settlePendingQueueCommand = (commandId: string) => {
-    const command = pendingQueueCommandsRef.current.get(commandId);
-    if (!command) return undefined;
-    pendingQueueCommandsRef.current.delete(commandId);
-    setPendingQueueCommandRevision((revision) => revision + 1);
-    return command;
-  };
-  // SAFETY: this map is conversation-scoped because enqueue admission permits
-  // at most one unresolved enqueue per conversation; removing that guard would
-  // require storing retained drafts by promptId instead.
-  const rememberUnconfirmedQueueCommands = (
-    commands: PendingQueueCommand[],
-  ) => {
-    for (const command of commands) {
-      if (command.operation !== "enqueue_prompt" || command.text === undefined) {
-        continue;
-      }
-      unconfirmedPromptByConversationRef.current.set(
-        pendingConversationKey(command),
-        {
-          submittedText: command.text,
-          retainedDraft: command.text,
-          edited: false,
-          promptId: command.promptId,
-        },
-      );
-    }
-  };
-  const clearPendingQueueCommands = () => {
-    if (pendingQueueCommandsRef.current.size === 0) return [];
-    const commands = [...pendingQueueCommandsRef.current.values()];
-    pendingQueueCommandsRef.current.clear();
-    setPendingQueueCommandRevision((revision) => revision + 1);
-    return commands;
-  };
-  const isCurrentQueueCommand = (command: PendingQueueCommand) => {
-    const focus = focusRef.current;
-    return focus?.sessionId === command.sessionId
-      && focus.projectId === command.projectId
-      && focus.conversationId === command.conversationId
-      && focus.focusId === command.focusId;
-  };
-  const isCurrentQueueConversation = (command: PendingQueueCommand) => {
-    const focus = focusRef.current;
-    return command.workspaceKey === currentWorkspaceKey()
-      && focus?.sessionId === command.sessionId
-      && focus.projectId === command.projectId
-      && focus.conversationId === command.conversationId;
-  };
-  const hasPendingBatchSteerForFocus = (focus: ActiveFocus | undefined) => {
-    if (!focus) return false;
-    return [...pendingQueueCommandsRef.current.values()].some((command) => (
-      command.operation === "steer_all_pending_prompts"
-      && command.workspaceKey === currentWorkspaceKey()
-      && command.sessionId === focus.sessionId
-      && command.projectId === focus.projectId
-      && command.conversationId === focus.conversationId
-      && command.focusId === focus.focusId
-    ));
-  };
-  const hasPendingEnqueueForFocus = (focus: ActiveFocus | undefined) => {
-    if (!focus) return false;
-    return [...pendingQueueCommandsRef.current.values()].some((command) => (
-      command.operation === "enqueue_prompt"
-      && command.workspaceKey === currentWorkspaceKey()
-      && command.sessionId === focus.sessionId
-      && command.projectId === focus.projectId
-      && command.conversationId === focus.conversationId
-    ));
-  };
-  const enqueueFailureNotice = (message: string) =>
-    `消息未能加入队列：${message}。内容已保留，可以重试。`;
-  const rememberFailedEnqueue = (
-    command: PendingQueueCommand,
-    message: string,
-  ) => {
-    const edited = isCurrentQueueCommand(command)
-      && command.draftRevision !== undefined
-      && draftRevisionRef.current !== command.draftRevision;
-    const retainedDraft = edited ? draftRef.current : command.text!;
-    const unconfirmed: UnconfirmedPrompt = {
-      submittedText: command.text!,
-      retainedDraft,
-      edited,
-      promptId: command.promptId,
-      notice: enqueueFailureNotice(message),
-    };
-    unconfirmedPromptByConversationRef.current.set(
-      pendingConversationKey(command),
-      unconfirmed,
-    );
-    return unconfirmed;
-  };
-  const clearRetainedEnqueue = (command: PendingQueueCommand) => {
-    const key = pendingConversationKey(command);
-    const retained = unconfirmedPromptByConversationRef.current.get(key);
-    if (retained?.promptId === command.promptId) {
-      unconfirmedPromptByConversationRef.current.delete(key);
-    }
-  };
   const updatePendingConversationDeletion = (
     pending: PendingConversationDeletion | undefined,
   ) => {
@@ -680,7 +574,7 @@ export function App() {
     if (!conversationId || !focusId) {
       focusRef.current = undefined;
       conversationIdRef.current = "";
-      clearPendingPrompts();
+      clearPendingAdmissions();
       showPendingContextCompaction(undefined);
       setConversationRole(undefined);
       setHistoryWindow(EMPTY_CONVERSATION_WINDOW);
@@ -691,7 +585,7 @@ export function App() {
     }
     const changedConversation = previousProjectId !== projectId
       || conversationIdRef.current !== conversationId;
-    clearPendingPrompts();
+    clearPendingAdmissions();
     const focus = { sessionId, projectId, conversationId, focusId };
     focusRef.current = focus;
     conversationIdRef.current = conversationId;
@@ -763,9 +657,7 @@ export function App() {
     updatePendingConversationRoleSwitch(undefined);
     updatePendingConversationTruncation(undefined);
     updatePendingConversationDeletion(undefined);
-    clearPendingPrompts();
-    const abandonedQueueCommands = clearPendingQueueCommands();
-    rememberUnconfirmedQueueCommands(abandonedQueueCommands);
+    clearPendingAdmissions();
     setRoleOperationResult(undefined);
     updatePendingRoleOperation(undefined);
     setSettingsDialogOpen(false);
@@ -846,7 +738,6 @@ export function App() {
           authFlowIdRef.current = "";
           updateDirectoryBrowser(undefined);
           markPendingPromptUnconfirmed();
-          rememberUnconfirmedQueueCommands(clearPendingQueueCommands());
           updatePendingConversationDeletion(undefined);
           updatePendingConversationTruncation(undefined);
           updateOutstandingRunId("");
@@ -969,7 +860,7 @@ export function App() {
           || event.conversationId !== focus.conversationId
           || event.focusId !== focus.focusId
         ) return;
-        clearPendingPrompts();
+        clearPendingAdmissions();
         unconfirmedPromptByConversationRef.current.delete(
           conversationScopeKey(
             currentWorkspaceKey(),
@@ -997,7 +888,7 @@ export function App() {
         updateDraft("");
         setPromptNotice("");
         updatePendingPrompt(undefined);
-        clearPendingPrompts();
+        clearPendingAdmissions();
         updateOutstandingRunId("");
         setExtensionUI([]);
       } else if (event.type === "role_catalog_snapshot") {
@@ -1047,7 +938,26 @@ export function App() {
           if (!unconfirmed.edited) updateDraft("");
           setPromptNotice("");
         }
-        replacePendingPrompts(event.prompts);
+      } else if (event.type === "prompt_admitted") {
+        if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;
+        // busy 路径回执：消息已进 followUp 队列，清草稿并显示为等待中。
+        const pending = pendingPromptRef.current;
+        if (
+          pending
+          && pending.promptId === event.promptId
+          && pending.sessionId === event.sessionId
+          && pending.conversationId === event.conversationId
+          && pending.focusId === event.focusId
+        ) {
+          forgetUnconfirmedPrompt(pending);
+          updateDraft("");
+          setPromptNotice("");
+          updatePendingPrompt(undefined);
+        }
+        addPendingAdmission({ promptId: event.promptId, text: event.text });
+      } else if (event.type === "prompt_delivered") {
+        if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;
+        removePendingAdmission(event.promptId);
       } else if (event.type === "conversation_snapshot") {
         if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;
         const focus = focusRef.current;
@@ -1073,6 +983,11 @@ export function App() {
         }
         setConversationRole(event.role);
         setHistoryWindow(event.window);
+        if (event.pendingPrompts !== undefined) {
+          replacePendingAdmissions(
+            event.pendingPrompts.map(({ promptId, text }) => ({ promptId, text })),
+          );
+        }
         if (!pendingFocusRef.current) updateConversationReady(true);
       } else if (event.type === "session_event") {
         if (!matchesFocus(
@@ -1085,6 +1000,13 @@ export function App() {
         }
         if (event.event.type === "run_finished" && event.runId === outstandingRunIdRef.current) {
           updateOutstandingRunId("");
+        }
+        if (
+          event.event.type === "run_finished"
+          && event.event.outcome === "aborted"
+        ) {
+          // 停止 = 取消未投递的等待中消息（与服务端 clearQueue 一致）
+          clearPendingAdmissions();
         }
         dispatch({
           type: "session",
@@ -1136,33 +1058,6 @@ export function App() {
         setAuth({});
       } else if (event.type === "command_complete") {
         if (event.sessionId !== sessionIdRef.current) return;
-        if (
-          event.operation === "enqueue_prompt"
-          || event.operation === "steer_pending_prompt"
-          || event.operation === "steer_all_pending_prompts"
-          || event.operation === "withdraw_pending_prompt"
-          || event.operation === "dismiss_pending_prompt"
-        ) {
-          const pending = pendingQueueCommandsRef.current.get(event.commandId);
-          if (
-            !pending
-            || pending.operation !== event.operation
-            || pending.sessionId !== event.sessionId
-          ) return;
-          settlePendingQueueCommand(event.commandId);
-          if (pending.operation === "enqueue_prompt") {
-            clearRetainedEnqueue(pending);
-            if (
-              isCurrentQueueCommand(pending)
-              && pending.draftRevision !== undefined
-              && draftRevisionRef.current === pending.draftRevision
-            ) {
-              updateDraft("");
-              setPromptNotice("");
-            }
-          }
-          return;
-        }
         if (event.operation === "set_compaction_threshold") {
           const pending = pendingCompactionThresholdRef.current;
           if (!pending || pending.commandId !== event.commandId) return;
@@ -1237,7 +1132,7 @@ export function App() {
             if (deletedCompaction) {
               removePendingContextCompaction(deletedCompaction);
             }
-            clearPendingPrompts();
+            clearPendingAdmissions();
             setExtensionUI([]);
           }
           setNotification({
@@ -1281,46 +1176,13 @@ export function App() {
         }
         if (event.operation === "steer") return;
         setSettingResult({
-          operation: event.operation,
+          operation: event.operation as AcknowledgedSettingOperation,
           commandId: event.commandId,
           ok: true,
           message: "",
         });
       } else if (event.type === "error") {
         if (event.sessionId && event.sessionId !== sessionIdRef.current) return;
-        if (
-          event.commandId
-          && (
-            event.operation === "enqueue_prompt"
-            || event.operation === "steer_pending_prompt"
-            || event.operation === "steer_all_pending_prompts"
-            || event.operation === "withdraw_pending_prompt"
-            || event.operation === "dismiss_pending_prompt"
-          )
-        ) {
-          const pending = pendingQueueCommandsRef.current.get(event.commandId);
-          if (
-            !pending
-            || pending.operation !== event.operation
-            || pending.sessionId !== event.sessionId
-            || pending.conversationId !== event.conversationId
-            || pending.focusId !== event.focusId
-            || ((pending.operation === "steer_pending_prompt"
-              || pending.operation === "steer_all_pending_prompts")
-              && pending.runId !== event.runId)
-          ) return;
-          settlePendingQueueCommand(event.commandId);
-          if (pending.operation === "enqueue_prompt") {
-            const retained = rememberFailedEnqueue(pending, event.message);
-            if (isCurrentQueueConversation(pending)) {
-              if (!retained.edited) updateDraft(retained.retainedDraft);
-              setPromptNotice(retained.notice!);
-            }
-          } else if (isCurrentQueueCommand(pending)) {
-            setPromptNotice(`队列操作失败：${event.message}`);
-          }
-          return;
-        }
         const pendingCompactionError = event.commandId
           && event.operation === "compact_context"
           ? findPendingContextCompaction(event.commandId)
@@ -1529,13 +1391,6 @@ export function App() {
         setSettingResult(undefined);
         updateDirectoryBrowser(undefined);
         markPendingPromptUnconfirmed();
-        const uncertainQueueCommands = clearPendingQueueCommands();
-        rememberUnconfirmedQueueCommands(uncertainQueueCommands);
-        if (uncertainQueueCommands.some((command) => (
-          command.operation === "enqueue_prompt" && isCurrentQueueCommand(command)
-        ))) {
-          setPromptNotice("排队消息提交状态未确认；请等待恢复后的队列快照再确认。");
-        }
         if (pendingConversationDeletionRef.current) {
           updatePendingConversationDeletion(undefined);
           setError("删除状态未确认，请检查项目对话列表后重试。");
@@ -1682,7 +1537,6 @@ export function App() {
     const commandId = crypto.randomUUID();
     setError("");
     markPendingPromptUnconfirmed();
-    rememberUnconfirmedQueueCommands(clearPendingQueueCommands());
     updateDraft("");
     setPromptNotice("");
     clearSessionProjection();
@@ -1719,10 +1573,12 @@ export function App() {
     const focus = focusRef.current;
     if (!sessionId || !focus || focus.sessionId !== sessionId) return false;
     const runId = crypto.randomUUID();
+    const promptId = crypto.randomUUID();
     const pending: DirectPendingPrompt = {
       ...focus,
       workspaceKey: currentWorkspaceKey(),
       runId,
+      promptId,
       text: trimmed,
     };
     setPromptNotice("");
@@ -1734,6 +1590,7 @@ export function App() {
       conversationId: focus.conversationId,
       focusId: focus.focusId,
       runId,
+      promptId,
       text: trimmed,
     });
     if (!ok) {
@@ -1743,146 +1600,19 @@ export function App() {
     }
     return ok;
   };
-  const enqueuePrompt = (text: string): boolean => {
-    const sessionId = sessionIdRef.current;
-    const focus = focusRef.current;
-    if (
-      !sessionId
-      || !focus
-      || focus.sessionId !== sessionId
-      || hasPendingEnqueueForFocus(focus)
-    ) return false;
-    unconfirmedPromptByConversationRef.current.delete(
-      pendingConversationKey({ ...focus, workspaceKey: currentWorkspaceKey() }),
-    );
-    const command: PendingQueueCommand = {
-      ...focus,
-      workspaceKey: currentWorkspaceKey(),
-      commandId: crypto.randomUUID(),
-      operation: "enqueue_prompt",
-      promptId: crypto.randomUUID(),
-      text,
-      draftRevision: draftRevisionRef.current,
-    };
-    registerPendingQueueCommand(command);
-    if (send({
-      type: "enqueue_prompt",
-      commandId: command.commandId,
-      sessionId,
-      conversationId: focus.conversationId,
-      focusId: focus.focusId,
-      promptId: command.promptId,
-      text,
-    })) return true;
-    settlePendingQueueCommand(command.commandId);
-    const retained = rememberFailedEnqueue(command, "请求未发送");
-    setPromptNotice(retained.notice!);
-    return false;
-  };
   const submitPrompt = (text: string): boolean => {
     const trimmed = text.trim();
     if (
       !trimmed
       || !conversationReadyRef.current
       || pendingConversationRoleSwitchRef.current
-      || hasPendingEnqueueForFocus(focusRef.current)
     ) return false;
     if (trimmed.length > MAX_PROMPT_CHARACTERS) {
       setPromptNotice(`单条消息最多 ${MAX_PROMPT_CHARACTERS.toLocaleString()} 个字符。`);
       return false;
     }
-    const shouldQueue = (
-      Boolean(state?.busy)
-      || Boolean(outstandingRunIdRef.current)
-      || Boolean(pendingPromptRef.current)
-      || pendingPromptsRef.current.length > 0
-    );
-    return shouldQueue ? enqueuePrompt(trimmed) : sendPrompt(trimmed);
+    return sendPrompt(trimmed);
   };
-  const sendPendingPromptAction = (
-    operation:
-      | "steer_pending_prompt"
-      | "withdraw_pending_prompt"
-      | "dismiss_pending_prompt",
-    promptId: string,
-    runId?: string,
-  ) => {
-    const sessionId = sessionIdRef.current;
-    const focus = focusRef.current;
-    if (!sessionId || !focus || focus.sessionId !== sessionId) return;
-    const command: PendingQueueCommand = {
-      ...focus,
-      workspaceKey: currentWorkspaceKey(),
-      commandId: crypto.randomUUID(),
-      operation,
-      promptId,
-      ...(runId === undefined ? {} : { runId }),
-    };
-    registerPendingQueueCommand(command);
-    const common = {
-      commandId: command.commandId,
-      sessionId,
-      conversationId: focus.conversationId,
-      focusId: focus.focusId,
-      promptId,
-    };
-    const sent = operation === "steer_pending_prompt"
-      ? runId !== undefined && send({
-          type: "steer_pending_prompt",
-          ...common,
-          runId,
-        })
-      : operation === "withdraw_pending_prompt"
-        ? send({ type: "withdraw_pending_prompt", ...common })
-        : send({ type: "dismiss_pending_prompt", ...common });
-    if (sent) return;
-    settlePendingQueueCommand(command.commandId);
-    setPromptNotice("队列操作未发送，请检查连接后重试。");
-  };
-  const steerAllPendingPrompts = () => {
-    const sessionId = sessionIdRef.current;
-    const focus = focusRef.current;
-    const activeRun = state?.activeRun;
-    const queued = pendingPromptsRef.current.filter((prompt) => (
-      prompt.state === "queued"
-    ));
-    if (
-      !conversationReadyRef.current
-      || !sessionId
-      || !focus
-      || focus.sessionId !== sessionId
-      || !activeRun
-      || (activeRun.phase !== "running" && activeRun.phase !== "waiting")
-      || queued.length === 0
-      || hasPendingBatchSteerForFocus(focus)
-    ) return;
-    const command: PendingQueueCommand = {
-      ...focus,
-      workspaceKey: currentWorkspaceKey(),
-      commandId: crypto.randomUUID(),
-      operation: "steer_all_pending_prompts",
-      promptId: queued[0]!.promptId,
-      batchId: crypto.randomUUID(),
-      runId: activeRun.id,
-      affectedPromptIds: queued.map(({ promptId }) => promptId),
-    };
-    registerPendingQueueCommand(command);
-    if (send({
-      type: "steer_all_pending_prompts",
-      commandId: command.commandId,
-      sessionId,
-      conversationId: focus.conversationId,
-      focusId: focus.focusId,
-      batchId: command.batchId!,
-      runId: command.runId!,
-    })) return;
-    settlePendingQueueCommand(command.commandId);
-    setPromptNotice("队列操作未发送，请检查连接后重试。");
-  };
-  const withdrawPendingPrompt = (promptId: string) =>
-    sendPendingPromptAction("withdraw_pending_prompt", promptId);
-  const dismissPendingPrompt = (promptId: string) =>
-    sendPendingPromptAction("dismiss_pending_prompt", promptId);
   const abortCurrentRun = () => {
     if (!conversationReadyRef.current || pendingFocusRef.current) return;
     const runId = outstandingRunIdRef.current || state?.activeRun?.id;
@@ -1913,7 +1643,7 @@ export function App() {
       return;
     }
     const commandId = crypto.randomUUID();
-    clearPendingPrompts();
+    clearPendingAdmissions();
     const sourceFocus = focusRef.current;
     const sourceReady = conversationReadyRef.current;
     updateConversationReady(false);
@@ -2030,7 +1760,7 @@ export function App() {
       || Boolean(state?.busy)
       || Boolean(outstandingRunIdRef.current)
       || Boolean(pendingPromptRef.current)
-      || pendingPromptsRef.current.length > 0
+      || pendingAdmissionsRef.current.length > 0
       || Boolean(pendingConversationTruncationRef.current)
       || Boolean(pendingConversationDeletionRef.current)
     ) {
@@ -2118,7 +1848,7 @@ export function App() {
       || Boolean(state?.busy)
       || Boolean(outstandingRunIdRef.current)
       || Boolean(pendingPromptRef.current)
-      || pendingPromptsRef.current.length > 0
+      || pendingAdmissionsRef.current.length > 0
       || Boolean(pendingConversationRoleSwitchRef.current)
       || Boolean(pendingConversationTruncationRef.current)
       || Boolean(pendingConversationDeletionRef.current)
@@ -2417,7 +2147,7 @@ export function App() {
                 state.busy
                 || Boolean(outstandingRunId)
                 || Boolean(pendingPrompt)
-                || pendingPrompts.length > 0
+                || pendingAdmissions.length > 0
                 || Boolean(pendingConversationTruncation)
                 || Boolean(pendingConversationDeletion)
                 || conversationCompacting
@@ -2436,16 +2166,8 @@ export function App() {
               conversationReady={visibleConversationReady}
               historyWindow={historyWindow}
               draft={draft}
-              submitting={
-                Boolean(pendingPrompt) || hasPendingEnqueueForFocus(focusRef.current)
-              }
-              pendingPrompts={pendingPrompts}
-              pendingPromptIds={new Set(
-                [...pendingQueueCommandsRef.current.values()]
-                  .filter((command) => isCurrentQueueCommand(command))
-                  .flatMap((command) => command.affectedPromptIds ?? [command.promptId]),
-              )}
-              batchSteerPending={hasPendingBatchSteerForFocus(focusRef.current)}
+              submitting={Boolean(pendingPrompt)}
+              pendingAdmissions={pendingAdmissions}
               promptNotice={promptNotice || undefined}
               onDraftChange={(text) => {
                 updateDraft(text);
@@ -2469,9 +2191,6 @@ export function App() {
                 if (promptNotice) setPromptNotice("");
               }}
               onSend={submitPrompt}
-              onSteerAllPendingPrompts={steerAllPendingPrompts}
-              onWithdrawPendingPrompt={withdrawPendingPrompt}
-              onDismissPendingPrompt={dismissPendingPrompt}
               onAbort={abortCurrentRun}
               onSettings={() => setDrawer(true)}
               onThinking={setThinkingLevel}

@@ -558,6 +558,12 @@ export interface ConversationHistoryMessage {
   usage?: TokenUsage;
 }
 
+/** busy 时已接受、尚未投递的浏览器 prompt（服务端内存态）。 */
+export interface PendingPromptAdmissionSnapshot {
+  promptId: string;
+  text: string;
+}
+
 export interface RoleModelSelection {
   provider: string;
   id: string;
@@ -795,6 +801,8 @@ export type ServerEvent =
       projectionSeq?: number;
       messages?: ConversationHistoryMessage[];
       items?: ConversationHistoryItem[];
+      /** busy 时已接受、尚未投递的浏览器 prompt（服务端内存态，重启丢失为接受项）。 */
+      pendingPrompts?: PendingPromptAdmissionSnapshot[];
       window: ConversationWindowCoverage;
     }
   | {
@@ -1323,6 +1331,10 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     projectionSeq: z.number().int().nonnegative().optional(),
     messages: z.array(conversationHistoryMessageSchema).optional(),
     items: z.array(conversationHistoryItemSchema).optional(),
+    pendingPrompts: z.array(z.object({
+      promptId: z.string().uuid(),
+      text: required.max(MAX_PROMPT_CHARACTERS),
+    }).strict()).max(MAX_PENDING_PROMPTS_PER_CONVERSATION).optional(),
     window: conversationWindowCoverageSchema,
   }).strict(),
   z.object({

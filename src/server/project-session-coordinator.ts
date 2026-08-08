@@ -1421,7 +1421,8 @@ export class ProjectSessionCoordinator {
         }),
       };
     });
-    return admitted.completion ?? admitted;
+    if ("completion" in admitted) return admitted.completion;
+    return admitted;
   }
 
   steer(

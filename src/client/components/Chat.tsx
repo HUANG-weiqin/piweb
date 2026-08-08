@@ -15,7 +15,7 @@ import {
   type ConversationMessageCard,
   type ConversationRoleSnapshot,
   type ConversationWindowCoverage,
-  type PendingPrompt,
+  type PendingPromptAdmissionSnapshot as PendingAdmission,
   type PublicState,
   type RoleTemplate,
   type ThinkingLevel,
@@ -57,14 +57,6 @@ function sameChatFocus(
     && left?.focusId === right?.focusId;
 }
 
-function pendingPromptStatusLabel(prompt: PendingPrompt): string {
-  switch (prompt.state) {
-    case "dispatching": return "正在发送";
-    case "attention": return "需要处理";
-    case "queued": return "等待中";
-  }
-}
-
 interface ChatProps {
   chat: ChatState;
   busy: boolean;
@@ -90,15 +82,11 @@ interface ChatProps {
   historyWindow: ConversationWindowCoverage;
   draft: string;
   submitting: boolean;
-  pendingPrompts: PendingPrompt[];
-  pendingPromptIds: ReadonlySet<string>;
-  batchSteerPending: boolean;
+  /** busy 时已接受、尚未投递的浏览器 prompt（显示为对话流中的等待中消息）。 */
+  pendingAdmissions: PendingAdmission[];
   promptNotice?: string;
   onDraftChange(text: string): void;
   onSend(text: string): boolean;
-  onSteerAllPendingPrompts(): void;
-  onWithdrawPendingPrompt(promptId: string): void;
-  onDismissPendingPrompt(promptId: string): void;
   onAbort(): void;
   onSettings(): void;
   onThinking(level: ThinkingLevel): void;
@@ -249,15 +237,10 @@ export function Chat({
   historyWindow,
   draft,
   submitting,
-  pendingPrompts,
-  pendingPromptIds,
-  batchSteerPending,
+  pendingAdmissions,
   promptNotice,
   onDraftChange,
   onSend,
-  onSteerAllPendingPrompts,
-  onWithdrawPendingPrompt,
-  onDismissPendingPrompt,
   onAbort,
   onSettings,
   onThinking,
@@ -310,14 +293,6 @@ export function Chat({
     })),
     [chat.items, chat.messages],
   );
-  const queuedPendingPrompts = pendingPrompts.filter(
-    ({ state }) => state === "queued",
-  );
-  const canSteerPendingBatch = queuedPendingPrompts.length > 0
-    && (activeRun?.phase === "running" || activeRun?.phase === "waiting");
-  const queuedActionPending = queuedPendingPrompts.some(({ promptId }) => (
-    pendingPromptIds.has(promptId)
-  ));
   const blocks = useMemo(() => transcriptBlocks(items), [items]);
   const transcriptFocusKey = chat.focus
     ? `${chat.focus.sessionId}:${chat.focus.conversationId}:${chat.focus.focusId}`
@@ -581,62 +556,20 @@ export function Chat({
       >
         ↓ 回到最新消息
       </button>}
-      {pendingPrompts.length > 0 && <section
-        className="prompt-queue"
-        aria-label="待处理消息"
+      {pendingAdmissions.length > 0 && <section
+        className="pending-admissions"
+        aria-label="等待处理的消息"
       >
-        <header>
-          <span>待处理消息 {pendingPrompts.length} 条</span>
-          <small>服务端持久保存</small>
-          {canSteerPendingBatch && <button
-            type="button"
-            aria-label={`同时 Steer ${queuedPendingPrompts.length} 条`}
-            disabled={batchSteerPending || queuedActionPending}
-            onClick={onSteerAllPendingPrompts}
+        {pendingAdmissions.map((admission) => (
+          <div
+            key={admission.promptId}
+            className="pending-admission-item"
+            role="status"
           >
-            同时 Steer {queuedPendingPrompts.length} 条
-          </button>}
-        </header>
-        <ol>
-          {pendingPrompts.map((prompt) => {
-            const actionPending = pendingPromptIds.has(prompt.promptId);
-            return <li
-              key={prompt.promptId}
-              className={`prompt-queue-item ${prompt.state}`}
-            >
-              <span className="prompt-queue-text" title={prompt.text}>
-                {prompt.text}
-              </span>
-              <span className="prompt-queue-status">
-                {pendingPromptStatusLabel(prompt)}
-              </span>
-              {prompt.state === "attention" && <small
-                className="prompt-queue-reason"
-                title={prompt.reason}
-              >
-                {prompt.reason}
-              </small>}
-              <span className="prompt-queue-actions">
-                {prompt.state === "queued" && <button
-                  type="button"
-                  aria-label={`撤回待处理消息 ${prompt.text}`}
-                  disabled={actionPending}
-                  onClick={() => onWithdrawPendingPrompt(prompt.promptId)}
-                >
-                  撤回
-                </button>}
-                {prompt.state === "attention" && <button
-                  type="button"
-                  aria-label={`移除待处理记录 ${prompt.text}`}
-                  disabled={actionPending}
-                  onClick={() => onDismissPendingPrompt(prompt.promptId)}
-                >
-                  移除记录
-                </button>}
-              </span>
-            </li>;
-          })}
-        </ol>
+            <span className="pending-admission-text">{admission.text}</span>
+            <span className="pending-admission-status">等待中</span>
+          </div>
+        ))}
       </section>}
       {submitting && !promptNotice && <div
         className="composer-notice pending"

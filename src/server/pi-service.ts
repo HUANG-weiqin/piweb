@@ -1637,16 +1637,25 @@ export class PiConnection {
 
     if (event.type === "prompt_admitted" || event.type === "prompt_delivered") {
       if (event.conversationId === view.conversationId && view.focusId !== undefined) {
-        this.emit({
-          type: event.type,
-          sessionId: view.sessionId,
-          conversationId: event.conversationId,
-          focusId: view.focusId,
-          promptId: event.promptId,
-          ...(event.type === "prompt_admitted"
-            ? { text: event.text }
-            : { runId: event.runId }),
-        });
+        if (event.type === "prompt_admitted") {
+          this.emit({
+            type: "prompt_admitted",
+            sessionId: view.sessionId,
+            conversationId: event.conversationId,
+            focusId: view.focusId,
+            promptId: event.promptId,
+            text: event.text,
+          });
+        } else {
+          this.emit({
+            type: "prompt_delivered",
+            sessionId: view.sessionId,
+            conversationId: event.conversationId,
+            focusId: view.focusId,
+            promptId: event.promptId,
+            runId: event.runId,
+          });
+        }
       }
       return;
     }
@@ -1965,6 +1974,10 @@ export class PiConnection {
         role: actor.profile.role,
         projectionSeq: projection.projectionSeq,
         items,
+        pendingPrompts: actor.pendingPromptAdmissions().map((admission) => ({
+          promptId: admission.promptId,
+          text: admission.text,
+        })),
         window: projection.window,
       });
     } catch (error) {

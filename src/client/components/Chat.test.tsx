@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   ConversationMessageCard,
   ConversationRoleSnapshot,
-  PendingPrompt,
+  PendingPromptAdmissionSnapshot as PendingAdmission,
 } from "../../shared/protocol";
 import {
   chatReducer,
@@ -57,14 +57,10 @@ function view(
     historyWindow={fullHistoryWindow}
     draft={draft}
     submitting={false}
-    pendingPrompts={[]}
-    pendingPromptIds={new Set()}
-    batchSteerPending={false}
+    pendingAdmissions={[]}
     onDraftChange={() => undefined}
     onSend={() => true}
-    onSteerAllPendingPrompts={() => undefined}
-    onWithdrawPendingPrompt={() => undefined}
-    onDismissPendingPrompt={() => undefined}
+
     onAbort={() => undefined}
     onSettings={() => undefined}
     onThinking={() => undefined}
@@ -179,61 +175,25 @@ describe("Chat", () => {
     expect(onAbort).toHaveBeenCalledOnce();
   });
 
-  it("shows one batch Steer action and retains per-prompt recovery actions", () => {
-    const onSteerAllPendingPrompts = vi.fn();
-    const onWithdrawPendingPrompt = vi.fn();
-    const onDismissPendingPrompt = vi.fn();
-    const prompts: PendingPrompt[] = [{
+  it("shows admitted prompts as waiting messages while the agent is busy", () => {
+    const admissions: PendingAdmission[] = [{
       promptId: "queued-1",
       text: "Review the test failure after the current run.",
-      createdAt: "2026-01-01T00:00:00.000Z",
-      state: "queued",
     }, {
-      promptId: "dispatching-1",
+      promptId: "queued-2",
       text: "This delivery is in progress.",
-      createdAt: "2026-01-01T00:00:00.000Z",
-      state: "dispatching",
-      runId: "run-1",
-      dispatchedAt: "2026-01-01T00:01:00.000Z",
-    }, {
-      promptId: "attention-1",
-      text: "This delivery needs confirmation.",
-      createdAt: "2026-01-01T00:00:00.000Z",
-      state: "attention",
-      reason: "delivery outcome is uncertain",
-      attentionAt: "2026-01-01T00:02:00.000Z",
     }];
     render(view(emptyChat, "", undefined, {
       activeRun: { id: "run-1", phase: "running" },
-      pendingPrompts: prompts,
-      onSteerAllPendingPrompts,
-      onWithdrawPendingPrompt,
-      onDismissPendingPrompt,
+      pendingAdmissions: admissions,
     }));
 
-    const queue = screen.getByRole("region", { name: "待处理消息" });
-    expect(queue).toHaveTextContent("待处理消息 3 条");
-    expect(queue).toHaveTextContent("正在发送");
-    expect(queue).toHaveTextContent("delivery outcome is uncertain");
-    expect(screen.queryByRole("button", {
-      name: "撤回待处理消息 This delivery is in progress.",
-    })).not.toBeInTheDocument();
-
-    expect(screen.queryByRole("button", {
-      name: "引导待处理消息 Review the test failure after the current run.",
-    })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", {
-      name: "同时 Steer 1 条",
-    }));
-    expect(onSteerAllPendingPrompts).toHaveBeenCalledOnce();
-    fireEvent.click(screen.getByRole("button", {
-      name: "撤回待处理消息 Review the test failure after the current run.",
-    }));
-    expect(onWithdrawPendingPrompt).toHaveBeenCalledWith("queued-1");
-    fireEvent.click(screen.getByRole("button", {
-      name: "移除待处理记录 This delivery needs confirmation.",
-    }));
-    expect(onDismissPendingPrompt).toHaveBeenCalledWith("attention-1");
+    const queue = screen.getByRole("region", { name: "等待处理的消息" });
+    expect(queue).toHaveTextContent("Review the test failure after the current run.");
+    expect(queue).toHaveTextContent("This delivery is in progress.");
+    expect(queue).toHaveTextContent("等待中");
+    expect(queue.textContent).not.toContain("撤回");
+    expect(queue.textContent).not.toContain("Steer");
   });
 
   it("lets streamed output grow inside the follow comfort zone", () => {
