@@ -469,7 +469,7 @@ describe("projectConversationHistory", () => {
     });
   });
 
-  it("keeps more than twenty small tool calls in one timeline snapshot", () => {
+  it("keeps only the newest sixteen small tool calls in one timeline snapshot", () => {
     const tools = Array.from({ length: 25 }, (_, index) => ({
       toolCallId: `tool-${index}`,
       toolName: "read",
@@ -493,18 +493,18 @@ describe("projectConversationHistory", () => {
 
     expect(assistant).toMatchObject({
       kind: "message",
-      tools: tools.map((tool) => expect.objectContaining({
+      tools: tools.slice(-16).map((tool) => expect.objectContaining({
         toolCallId: tool.toolCallId,
       })),
-      parts: tools.map((tool) => ({
+      parts: tools.slice(-16).map((tool) => ({
         kind: "tool",
         toolCallId: tool.toolCallId,
       })),
     });
-    expect(snapshot.window.contentTruncated).toBe(false);
+    expect(snapshot.window.contentTruncated).toBe(true);
   });
 
-  it("never emits more parts than the wire schema allows when a fallback rebuilds an oversized timeline", () => {
+  it("never emits more than sixteen parts when an oversized timeline is compacted", () => {
     const tools = Array.from({ length: 250 }, (_, index) => ({
       toolCallId: `tool-${index}`,
       toolName: "read",
@@ -527,7 +527,7 @@ describe("projectConversationHistory", () => {
     const assistant = snapshot.items[0];
     expect(assistant).toMatchObject({ kind: "message" });
     if (assistant.kind !== "message") throw new Error("expected message item");
-    expect(assistant.parts?.length ?? 0).toBeLessThanOrEqual(200);
+    expect(assistant.parts?.length ?? 0).toBeLessThanOrEqual(16);
     expect(snapshot.window.contentTruncated).toBe(true);
   });
 

@@ -278,6 +278,9 @@ describe("Message", () => {
     expect(Array.from(activity?.children ?? []).map((element) => element.className))
       .toEqual(["", "activity-timeline"]);
     expect(screen.getAllByText("工具调用（1）")).toHaveLength(2);
+    expect(Array.from(activity?.querySelector(".activity-timeline")?.children ?? [])
+      .map((element) => element.className))
+      .toEqual(["tools", "thinking", "tools", "thinking"]);
     expect(screen.getByText("先解释。")).toBeInTheDocument();
     expect(screen.getByText("最终回复。")).toBeInTheDocument();
   });

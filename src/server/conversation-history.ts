@@ -24,8 +24,11 @@ export const MAX_AGENT_PEEK_BYTES = 256 * 1024;
 export const MAX_AGENT_PEEK_ITEMS = 20;
 const MAX_HISTORY_TEXT_BYTES = 80_000;
 const MAX_HISTORY_TOOL_VALUE_BYTES = 8_000;
-const MAX_HISTORY_TOOLS_PER_MESSAGE = 200;
-const MAX_HISTORY_PARTS_PER_MESSAGE = 200;
+// The work-process timeline is intentionally bounded to the newest entries.
+// The UI renders this suffix newest-first, so older activity never displaces
+// the currently useful work from the history snapshot.
+const MAX_HISTORY_TOOLS_PER_MESSAGE = 16;
+const MAX_HISTORY_PARTS_PER_MESSAGE = 16;
 const MAX_HISTORY_ID_BYTES = 500;
 const OMITTED_TOOL_VALUE = "[历史工具数据过大，已省略]";
 
@@ -121,7 +124,7 @@ function fallbackHistoryParts(
     0,
     MAX_HISTORY_PARTS_PER_MESSAGE - parts.length - (text ? 1 : 0),
   );
-  for (const tool of tools.slice(0, toolBudget)) {
+  for (const tool of tools.slice(-toolBudget)) {
     parts.push({ kind: "tool", toolCallId: tool.toolCallId });
   }
   if (text) parts.push({ kind: "text", offset: 0, length: text.length });
@@ -134,11 +137,22 @@ function compactHistoryMessage(
   const id = clipUtf8(message.id, MAX_HISTORY_ID_BYTES);
   const text = clipUtf8(message.text, MAX_HISTORY_TEXT_BYTES);
   const thinking = clipUtf8(message.thinking, MAX_HISTORY_TEXT_BYTES);
-  const selectedTools = message.tools.slice(-MAX_HISTORY_TOOLS_PER_MESSAGE);
+  const selectedParts = message.parts?.slice(-MAX_HISTORY_PARTS_PER_MESSAGE);
+  const selectedPartToolIds = selectedParts === undefined
+    ? undefined
+    : new Set(
+        selectedParts
+          .filter((part) => part.kind === "tool")
+          .map((part) => part.toolCallId),
+      );
+  const selectedTools = selectedPartToolIds === undefined
+    ? message.tools.slice(-MAX_HISTORY_TOOLS_PER_MESSAGE)
+    : message.tools.filter((tool) => selectedPartToolIds.has(tool.toolCallId));
   let truncated = id.truncated
     || text.truncated
     || thinking.truncated
-    || selectedTools.length !== message.tools.length;
+    || selectedTools.length !== message.tools.length
+    || (selectedParts?.length ?? 0) !== (message.parts?.length ?? 0);
   const compactedToolIds = new Map<string, string>();
   const tools = selectedTools.map((tool) => {
     const toolCallId = clipUtf8(tool.toolCallId, MAX_HISTORY_ID_BYTES);
@@ -159,12 +173,7 @@ function compactHistoryMessage(
       status: tool.status,
     };
   });
-  const selectedParts = message.parts?.slice(0, MAX_HISTORY_PARTS_PER_MESSAGE);
-  let partsLostOrder = selectedParts !== undefined
-    && selectedParts.length !== message.parts?.length;
-  if (partsLostOrder) {
-    truncated = true;
-  }
+  let partsLostOrder = false;
   const compactedParts = selectedParts?.flatMap((part): ConversationHistoryMessagePart[] => {
     if (part.kind === "tool") {
       const toolCallId = compactedToolIds.get(part.toolCallId);

@@ -752,12 +752,14 @@ describe("Chat", () => {
     }));
 
     fireEvent.click(screen.getByText("工作过程"));
+    expect(screen.getByText("工具调用（16）")).toBeInTheDocument();
     const firstActivity = rendered.container.querySelector(
       "details.assistant-activity-group",
     ) as HTMLDetailsElement;
     expect(firstActivity.open).toBe(true);
-    fireEvent.click(screen.getByRole("button", { name: "展开全部 25 条" }));
-    expect(screen.getAllByText(/a-1\.ts/).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: "展开最近 16 条" }));
+    expect(screen.queryByText(/a-1\.ts/)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/a-25\.ts/).length).toBeGreaterThan(0);
 
     rendered.rerender(view({
       messages: [assistantFor("b")],
@@ -770,7 +772,7 @@ describe("Chat", () => {
     ) as HTMLDetailsElement;
     expect(nextActivity.open).toBe(false);
     expect(screen.getByText("已折叠 21 条更早工具调用")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "展开全部 25 条" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "展开最近 16 条" })).toBeInTheDocument();
     expect(screen.queryByText(/b-1\.ts/)).not.toBeInTheDocument();
     expect(screen.getAllByText(/b-25\.ts/).length).toBeGreaterThan(0);
   });

@@ -17,6 +17,7 @@ import {
 import { ToolCard, toolPresentation } from "./ToolCard";
 
 const TOOL_PREVIEW_LIMIT = 4;
+const ACTIVITY_TIMELINE_LIMIT = 16;
 
 function renderMarkdown(markdown: string): string {
   return DOMPurify.sanitize(marked.parse(markdown, { async: false }) as string);
@@ -147,18 +148,24 @@ function StreamingMarkdown({
 function ToolsPanel({ tools }: { tools: ChatMessage["tools"] }) {
   const [showAllTools, setShowAllTools] = useState(false);
   const hasOverflow = tools.length > TOOL_PREVIEW_LIMIT;
-  const visibleTools = showAllTools ? tools : tools.slice(Math.max(0, tools.length - TOOL_PREVIEW_LIMIT));
-  const hiddenToolsCount = hasOverflow && !showAllTools ? tools.length - visibleTools.length : 0;
+  const recentTools = tools.slice(-ACTIVITY_TIMELINE_LIMIT);
+  const visibleTools = showAllTools
+    ? recentTools
+    : recentTools.slice(-TOOL_PREVIEW_LIMIT);
+  const hiddenToolsCount = tools.length - visibleTools.length;
+  const expandLabel = tools.length > ACTIVITY_TIMELINE_LIMIT
+    ? `展开最近 ${ACTIVITY_TIMELINE_LIMIT} 条`
+    : `展开全部 ${tools.length} 条`;
 
   return <details className="tools">
     <summary>
-      <span className="tools-title">工具调用（{tools.length}）</span>
+      <span className="tools-title">工具调用（{Math.min(tools.length, ACTIVITY_TIMELINE_LIMIT)}）</span>
       <span className="tools-chevron" aria-hidden="true">⌄</span>
     </summary>
     <div className="tool-stack">
       {!!hiddenToolsCount && <p className="tool-stack-note">已折叠 {hiddenToolsCount} 条更早工具调用</p>}
-      {visibleTools.map((tool) => <ToolCard key={tool.id} tool={tool} />)}
-      {hasOverflow ? <button className="ghost tool-toggle" type="button" onClick={() => setShowAllTools((current) => !current)}>{showAllTools ? `收起到最近 ${TOOL_PREVIEW_LIMIT} 条` : `展开全部 ${tools.length} 条`}</button> : null}
+      {visibleTools.slice().reverse().map((tool) => <ToolCard key={tool.id} tool={tool} />)}
+      {hasOverflow ? <button className="ghost tool-toggle" type="button" onClick={() => setShowAllTools((current) => !current)}>{showAllTools ? `收起到最近 ${TOOL_PREVIEW_LIMIT} 条` : expandLabel}</button> : null}
     </div>
   </details>;
 }
@@ -364,13 +371,23 @@ function ActivityGroup({
 }) {
   const runs = activityRuns(parts, tools);
   const summary = activitySummary(runs, activeThinking);
-  const toolCount = runs.reduce(
-    (count, run) => count + (run.kind === "tools" ? run.tools.length : 0),
-    0,
-  );
   const lastThinkingIndex = findLastIndex(
     runs,
     (run) => run.kind === "thinking",
+  );
+  const latestThinking = lastThinkingIndex >= 0
+    ? runs[lastThinkingIndex]
+    : undefined;
+  const visibleRuns = runs
+    .slice(-ACTIVITY_TIMELINE_LIMIT)
+    .reverse();
+  const visibleToolCount = visibleRuns.reduce(
+    (count, run) => count + (
+      run.kind === "tools"
+        ? Math.min(run.tools.length, ACTIVITY_TIMELINE_LIMIT)
+        : 0
+    ),
+    0,
   );
   return <details className={`assistant-activity-group is-${summary.tone}`}>
     <summary>
@@ -398,16 +415,16 @@ function ActivityGroup({
         </span>}
       </span>
       <span className="activity-group-count">
-        {runs.length} 步 · {toolCount} 次工具调用
+        {visibleRuns.length} 步 · {visibleToolCount} 次工具调用
       </span>
       <span className="activity-group-chevron" aria-hidden="true">⌄</span>
     </summary>
     <div className="activity-timeline">
-      {runs.map((run, index) => run.kind === "thinking"
+      {visibleRuns.map((run, index) => run.kind === "thinking"
         ? <ThinkingPanel
             key={`thinking:${index}`}
             text={run.text}
-            active={activeThinking && index === lastThinkingIndex}
+            active={activeThinking && run === latestThinking}
           />
         : <ToolsPanel key={`tools:${index}`} tools={run.tools} />)}
     </div>
