@@ -493,6 +493,37 @@ describe("PiRuntime session ownership", () => {
     },
   );
 
+  it("sets followUpMode=all so busy followUp prompts drain in one model turn", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-followup-mode-"));
+    const authStorage = AuthStorage.inMemory();
+    const runtime = new PiRuntime({
+      authStorage,
+      modelRegistry: ModelRegistry.inMemory(authStorage),
+      createModelRegistry: (storage) => ModelRegistry.inMemory(storage),
+      createSettings: () => SettingsManager.inMemory(),
+      createSession: async (options) => {
+        const resourceLoader = new DefaultResourceLoader({
+          cwd,
+          agentDir: cwd,
+          settingsManager: options.settingsManager,
+          noExtensions: true,
+          noSkills: true,
+          noPromptTemplates: true,
+          noThemes: true,
+          noContextFiles: true,
+        });
+        // reload 会重置 applyOverrides 的内存合并视图，模拟真实创建链。
+        await resourceLoader.reload();
+        return createAgentSession({ ...options, resourceLoader });
+      },
+    });
+
+    const created = await runtime.createSession(cwd);
+    expect(created.session.followUpMode).toBe("all");
+    expect(created.settings.getFollowUpMode()).toBe("one-at-a-time");
+    await created.dispose();
+  });
+
   it("passes a fixed authenticated model and workbench tools through the direct factory", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-direct-role-"));
     const authStorage = AuthStorage.inMemory();
