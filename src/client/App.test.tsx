@@ -20,8 +20,13 @@ import {
 import {
   App,
   MAX_CACHED_WORKSPACES,
-  forgetWorkspaceProjection,
+  MAX_CACHED_CONVERSATION_PRESENTATIONS,
+  forgetConversationPresentation,
+  getConversationPresentation,
+  getWorkspaceProjection,
+  rememberConversationPresentation,
   rememberWorkspaceProjection,
+  forgetWorkspaceProjection,
 } from "./App";
 
 const RUN_ID = "13f17393-974b-49a0-9c6a-3176f775912a";
@@ -595,6 +600,310 @@ describe("App", () => {
       .toBeEnabled();
   });
 
+  it("keeps a cache miss empty and restores the source focus on a matching focus error", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    const window = {
+      omittedBefore: false,
+      startsMidTurn: false,
+      contentTruncated: false,
+    };
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversations: [{
+          id: CONVERSATION_ID,
+          name: "A",
+          preview: "A",
+          createdAt: "2026-07-19T08:00:00.000Z",
+          updatedAt: "2026-07-19T08:00:00.000Z",
+          messageCount: 1,
+        }, {
+          id: CONVERSATION_B,
+          name: "B",
+          preview: "B",
+          createdAt: "2026-07-19T08:00:00.000Z",
+          updatedAt: "2026-07-19T09:00:00.000Z",
+          messageCount: 0,
+        }],
+        truncated: false,
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        messages: [{
+          id: "source-history",
+          runId: RUN_ID,
+          role: "user",
+          text: "source A",
+          thinking: "",
+          tools: [],
+        }],
+        window,
+      });
+    });
+    socketMock.autoFocus = false;
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    expect(screen.queryByText("source A")).not.toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "正在同步会话…" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeDisabled();
+
+    const command = latestCommand("focus_conversation");
+    act(() => socketMock.rawEmit?.({
+      type: "error",
+      scope: "command",
+      operation: "focus_conversation",
+      commandId: "00000000-0000-4000-8000-000000000099",
+      sessionId,
+      conversationId: CONVERSATION_B,
+      message: "stale focus error",
+    }));
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        messages: [{
+          id: "late-source",
+          runId: RUN_ID,
+          role: "user",
+          text: "late source snapshot",
+          thinking: "",
+          tools: [],
+        }],
+        window,
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_item",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        item: {
+          kind: "message",
+          id: "late-source-live",
+          runId: RUN_B,
+          role: "assistant",
+          text: "late source live",
+          thinking: "",
+          tools: [],
+        },
+      });
+    });
+    expect(screen.getByRole("status", { name: "正在同步会话…" })).toBeInTheDocument();
+    expect(screen.queryByText("late source snapshot")).not.toBeInTheDocument();
+    expect(screen.queryByText("late source live")).not.toBeInTheDocument();
+
+    act(() => socketMock.rawEmit?.({
+      type: "error",
+      scope: "command",
+      operation: "focus_conversation",
+      commandId: command.commandId!,
+      sessionId,
+      message: "focus failed",
+    }));
+    expect(screen.queryByRole("status", { name: "正在同步会话…" })).not.toBeInTheDocument();
+    expect(screen.getByText("source A")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeEnabled();
+
+    socketMock.send.mockReturnValueOnce(false);
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    expect(screen.queryByRole("status", { name: "正在同步会话…" })).not.toBeInTheDocument();
+    expect(screen.getByText("source A")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeEnabled();
+    socketMock.send.mockReturnValue(true);
+  });
+
+  it("hot-switches A to B to A with a read-only cached conversation presentation", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    const window = {
+      omittedBefore: false,
+      startsMidTurn: false,
+      contentTruncated: false,
+    };
+    const projectSnapshot = {
+      type: "project_snapshot" as const,
+      sessionId,
+      projectId: PROJECT_ID,
+      conversations: [{
+        id: CONVERSATION_ID,
+        name: "A",
+        preview: "A",
+        createdAt: "2026-07-19T08:00:00.000Z",
+        updatedAt: "2026-07-19T08:00:00.000Z",
+        messageCount: 1,
+      }, {
+        id: CONVERSATION_B,
+        name: "B",
+        preview: "B",
+        createdAt: "2026-07-19T08:00:00.000Z",
+        updatedAt: "2026-07-19T09:00:00.000Z",
+        messageCount: 1,
+      }],
+      truncated: false,
+    };
+    const stateFor = (conversationId: string, focusId: string): TestServerEvent => ({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+        projectId: PROJECT_ID,
+        conversationId,
+        focusId,
+      },
+    });
+    const snapshotFor = (
+      conversationId: string,
+      focusId: string,
+      text: string,
+    ): TestServerEvent => ({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId,
+      focusId,
+      messages: [{
+        id: `${conversationId}-history`,
+        runId: RUN_ID,
+        role: "user",
+        text,
+        thinking: "",
+        tools: [],
+      }],
+      window,
+    });
+
+    act(() => {
+      socketMock.emit?.(stateFor(CONVERSATION_ID, FOCUS_A));
+      socketMock.rawEmit?.(projectSnapshot);
+      socketMock.rawEmit?.(snapshotFor(CONVERSATION_ID, FOCUS_A, "A cached history"));
+      socketMock.rawEmit?.({
+        type: "conversation_item",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        item: {
+          kind: "message",
+          id: "a-live-item",
+          runId: RUN_B,
+          role: "assistant",
+          text: "A live card",
+          thinking: "",
+          tools: [],
+        },
+      });
+    });
+    act(() => socketMock.rawEmit?.({
+      ...projectSnapshot,
+      conversations: [projectSnapshot.conversations[1]!],
+      truncated: true,
+    }));
+    socketMock.autoFocus = false;
+    const focusB = "ae301850-745d-44dd-a30f-000000000101";
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    const focusBCommand = latestCommand("focus_conversation");
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "focus_attached",
+        operation: "focus_conversation",
+        commandId: focusBCommand.commandId!,
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_B,
+        focusId: focusB,
+      });
+      socketMock.rawEmit?.(stateFor(CONVERSATION_B, focusB));
+      socketMock.rawEmit?.(snapshotFor(CONVERSATION_B, focusB, "B history"));
+      socketMock.rawEmit?.(projectSnapshot);
+    });
+
+    const focusA = "ae301850-745d-44dd-a30f-000000000102";
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 A" }));
+    expect(screen.getByText("A cached history")).toBeInTheDocument();
+    expect(screen.getByText("A live card")).toBeInTheDocument();
+    expect(screen.queryByText("B history")).not.toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "正在同步会话…" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "当前会话 A" })).toBeDisabled();
+
+    const focusACommand = latestCommand("focus_conversation");
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "focus_attached",
+        operation: "focus_conversation",
+        commandId: focusACommand.commandId!,
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_ID,
+        focusId: focusA,
+      });
+      socketMock.rawEmit?.(stateFor(CONVERSATION_ID, focusA));
+    });
+    expect(screen.getByText("A cached history")).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "正在同步会话…" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeDisabled();
+
+    act(() => socketMock.rawEmit?.(snapshotFor(
+      CONVERSATION_ID,
+      focusA,
+      "fresh A history",
+    )));
+    expect(screen.queryByRole("status", { name: "正在同步会话…" })).not.toBeInTheDocument();
+    expect(screen.getByText("fresh A history")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeEnabled();
+
+    act(() => {
+      socketMock.rawEmit?.({
+        ...projectSnapshot,
+        conversations: [projectSnapshot.conversations[1]!],
+        truncated: false,
+      });
+    });
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    const secondBCommand = latestCommand("focus_conversation");
+    const secondBFocus = "ae301850-745d-44dd-a30f-000000000103";
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "focus_attached",
+        operation: "focus_conversation",
+        commandId: secondBCommand.commandId!,
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_B,
+        focusId: secondBFocus,
+      });
+      socketMock.rawEmit?.(stateFor(CONVERSATION_B, secondBFocus));
+      socketMock.rawEmit?.(snapshotFor(CONVERSATION_B, secondBFocus, "B again"));
+      socketMock.rawEmit?.(projectSnapshot);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 A" }));
+    expect(screen.queryByText("fresh A history")).not.toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "正在同步会话…" })).toBeInTheDocument();
+  });
+
   it("reconnects from the active workspace cache and waits for a fresh snapshot", () => {
     localStorage.setItem("piweb.workspaces", JSON.stringify([
       "E:\\first",
@@ -1021,21 +1330,30 @@ describe("App", () => {
       .not.toBeInTheDocument();
   });
 
-  it("keeps the workspace presentation cache bounded by LRU order", () => {
-    const cache = new Map<string, number>();
-    for (let index = 0; index < MAX_CACHED_WORKSPACES + 1; index += 1) {
-      rememberWorkspaceProjection(cache, `workspace-${index}`, index);
+  it("keeps workspace and conversation presentation LRU caches independent", () => {
+    const workspaceCache = new Map<string, number>();
+    for (let index = 0; index < MAX_CACHED_WORKSPACES; index += 1) {
+      rememberWorkspaceProjection(workspaceCache, `workspace-${index}`, index);
     }
-    rememberWorkspaceProjection(cache, "workspace-1", 11);
-    rememberWorkspaceProjection(cache, "workspace-new", 12);
+    expect(getWorkspaceProjection(workspaceCache, "workspace-0")).toBe(0);
+    rememberWorkspaceProjection(workspaceCache, "workspace-new", 4);
+    expect(workspaceCache.size).toBe(MAX_CACHED_WORKSPACES);
+    expect(workspaceCache.has("workspace-0")).toBe(true);
+    expect(workspaceCache.has("workspace-1")).toBe(false);
+    forgetWorkspaceProjection(workspaceCache, "workspace-0");
+    expect(workspaceCache.has("workspace-0")).toBe(false);
 
-    expect(cache.size).toBe(MAX_CACHED_WORKSPACES);
-    expect(cache.has("workspace-0")).toBe(false);
-    expect(cache.has("workspace-1")).toBe(true);
-    expect(cache.has("workspace-2")).toBe(false);
-
-    forgetWorkspaceProjection(cache, "workspace-1");
-    expect(cache.has("workspace-1")).toBe(false);
+    const conversationCache = new Map<string, number>();
+    for (let index = 0; index < MAX_CACHED_CONVERSATION_PRESENTATIONS; index += 1) {
+      rememberConversationPresentation(conversationCache, `scope-${index}`, index);
+    }
+    expect(getConversationPresentation(conversationCache, "scope-0")).toBe(0);
+    rememberConversationPresentation(conversationCache, "scope-new", 8);
+    expect(conversationCache.size).toBe(MAX_CACHED_CONVERSATION_PRESENTATIONS);
+    expect(conversationCache.has("scope-0")).toBe(true);
+    expect(conversationCache.has("scope-1")).toBe(false);
+    forgetConversationPresentation(conversationCache, "scope-0");
+    expect(conversationCache.has("scope-0")).toBe(false);
   });
 
   it("keeps global project activity visible across workspace switches", () => {

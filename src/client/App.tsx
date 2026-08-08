@@ -49,6 +49,7 @@ const CWD_KEY = "piweb.lastCwd";
 const WORKSPACES_KEY = "piweb.workspaces";
 const MAX_WORKSPACES = 30;
 export const MAX_CACHED_WORKSPACES = 4;
+export const MAX_CACHED_CONVERSATION_PRESENTATIONS = 8;
 const RESUME_REFRESH_DELAY_MS = 16;
 const EMPTY_CONVERSATION_WINDOW: ConversationWindowCoverage = {
   omittedBefore: false,
@@ -83,7 +84,7 @@ export function forgetWorkspaceProjection<T>(
   cache.delete(key);
 }
 
-function getWorkspaceProjection<T>(
+export function getWorkspaceProjection<T>(
   cache: Map<string, T>,
   key: string,
 ): T | undefined {
@@ -93,6 +94,40 @@ function getWorkspaceProjection<T>(
   cache.set(key, projection);
   return projection;
 }
+
+export function rememberConversationPresentation<T>(
+  cache: Map<string, T>,
+  key: string,
+  presentation: T,
+  limit = MAX_CACHED_CONVERSATION_PRESENTATIONS,
+): void {
+  cache.delete(key);
+  cache.set(key, presentation);
+  while (cache.size > limit) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+}
+
+export function forgetConversationPresentation<T>(
+  cache: Map<string, T>,
+  key: string,
+): void {
+  cache.delete(key);
+}
+
+export function getConversationPresentation<T>(
+  cache: Map<string, T>,
+  key: string,
+): T | undefined {
+  const presentation = cache.get(key);
+  if (presentation === undefined) return undefined;
+  cache.delete(key);
+  cache.set(key, presentation);
+  return presentation;
+}
+
 
 function loadInitialWorkspaceState(): InitialWorkspaceState {
   const legacyCwd = readStoredString(CWD_KEY).trim();
@@ -200,6 +235,16 @@ interface CachedWorkspaceProjection {
   chat: typeof initialChatState;
 }
 
+interface CachedConversationPresentation {
+  workspaceKey: string;
+  projectId: string;
+  conversationId: string;
+  state: PublicState;
+  conversationRole?: ConversationRoleSnapshot;
+  historyWindow: ConversationWindowCoverage;
+  chat: typeof initialChatState;
+}
+
 function conversationScopeKey(
   workspace: string,
   projectId: string,
@@ -217,6 +262,7 @@ interface PendingFocus {
   sourceFocus?: ActiveFocus;
   sourceReady?: boolean;
   cachedProjectId?: string;
+  targetConversationId?: string;
 }
 
 interface ConversationOperation {
@@ -374,6 +420,7 @@ export function App() {
   const [conversationRole, setConversationRole] =
     useState<ConversationRoleSnapshot>();
   const [conversationIndexTruncated, setConversationIndexTruncated] = useState(false);
+  const projectSnapshotReceivedRef = useRef(false);
   const [historyWindow, setHistoryWindow] = useState<ConversationWindowCoverage>(
     EMPTY_CONVERSATION_WINDOW,
   );
@@ -382,14 +429,26 @@ export function App() {
   const workspaceProjectionCacheRef = useRef(
     new Map<string, CachedWorkspaceProjection>(),
   );
-  const cachedPresentationKeyRef = useRef("");
-  const [cachedPresentation, setCachedPresentation] =
+  const cachedWorkspacePresentationKeyRef = useRef("");
+  const [cachedWorkspacePresentation, setCachedWorkspacePresentation] =
     useState<CachedWorkspaceProjection>();
+  const conversationPresentationCacheRef = useRef(
+    new Map<string, CachedConversationPresentation>(),
+  );
+  const cachedConversationPresentationKeyRef = useRef("");
+  const [cachedConversationPresentation, setCachedConversationPresentation] =
+    useState<CachedConversationPresentation>();
   const [workspaceSyncing, setWorkspaceSyncing] = useState(false);
   const workspaceSyncingRef = useRef(false);
+  const [conversationSyncing, setConversationSyncing] = useState(false);
+  const conversationSyncingRef = useRef(false);
   const updateWorkspaceSyncing = (syncing: boolean) => {
     workspaceSyncingRef.current = syncing;
     setWorkspaceSyncing(syncing);
+  };
+  const updateConversationSyncing = (syncing: boolean) => {
+    conversationSyncingRef.current = syncing;
+    setConversationSyncing(syncing);
   };
   const [drawer, setDrawer] = useState(false);
   const [roleManagerOpen, setRoleManagerOpen] = useState(false);
@@ -450,6 +509,10 @@ export function App() {
   );
   const unconfirmedPromptKey = (focus: Pick<ActiveFocus, "projectId" | "conversationId">) =>
     conversationKey(focus);
+  const conversationIsConfirmedMissing = (conversationId: string): boolean =>
+    projectSnapshotReceivedRef.current
+    && !conversationIndexTruncated
+    && !conversations.some(({ id }) => id === conversationId);
   const cacheCurrentWorkspaceProjection = () => {
     const focus = focusRef.current;
     if (
@@ -458,6 +521,7 @@ export function App() {
       || !state
       || state.projectId !== focus.projectId
       || state.conversationId !== focus.conversationId
+      || conversationIsConfirmedMissing(focus.conversationId)
     ) return;
     rememberWorkspaceProjection(
       workspaceProjectionCacheRef.current,
@@ -475,12 +539,56 @@ export function App() {
       },
     );
   };
-  const discardCachedPresentation = () => {
-    const key = cachedPresentationKeyRef.current;
+  const cacheCurrentConversationPresentation = () => {
+    const focus = focusRef.current;
+    if (
+      !conversationReadyRef.current
+      || !focus
+      || !state
+      || state.sessionId !== focus.sessionId
+      || state.projectId !== focus.projectId
+      || state.conversationId !== focus.conversationId
+      || state.focusId !== focus.focusId
+      || !chat.focus
+      || chat.focus.sessionId !== focus.sessionId
+      || chat.focus.conversationId !== focus.conversationId
+      || chat.focus.focusId !== focus.focusId
+      || conversationIsConfirmedMissing(focus.conversationId)
+    ) return;
+    const key = conversationScopeKey(
+      currentWorkspaceKey(),
+      focus.projectId,
+      focus.conversationId,
+    );
+    rememberConversationPresentation(
+      conversationPresentationCacheRef.current,
+      key,
+      {
+        workspaceKey: currentWorkspaceKey(),
+        projectId: focus.projectId,
+        conversationId: focus.conversationId,
+        state: { ...state },
+        conversationRole,
+        historyWindow,
+        // Keep the reducer-produced object by reference; this cache is display-only.
+        chat,
+      },
+    );
+  };
+  const clearTemporaryWorkspacePresentation = () => {
+    cachedWorkspacePresentationKeyRef.current = "";
+    setCachedWorkspacePresentation(undefined);
+  };
+  const clearTemporaryConversationPresentation = () => {
+    cachedConversationPresentationKeyRef.current = "";
+    setCachedConversationPresentation(undefined);
+  };
+  const discardCachedWorkspacePresentation = () => {
+    const key = cachedWorkspacePresentationKeyRef.current;
     if (key) forgetWorkspaceProjection(workspaceProjectionCacheRef.current, key);
-    cachedPresentationKeyRef.current = "";
-    setCachedPresentation(undefined);
+    clearTemporaryWorkspacePresentation();
     setState(undefined);
+    projectSnapshotReceivedRef.current = false;
     setConversations([]);
     setRoles([]);
     setConversationRole(undefined);
@@ -488,12 +596,12 @@ export function App() {
     setHistoryWindow(EMPTY_CONVERSATION_WINDOW);
     dispatch({ type: "reset" });
   };
-  const showCachedPresentation = (
+  const showCachedWorkspacePresentation = (
     cached: CachedWorkspaceProjection,
     sessionId: string,
   ) => {
-    cachedPresentationKeyRef.current = currentWorkspaceKey();
-    setCachedPresentation(cached);
+    cachedWorkspacePresentationKeyRef.current = currentWorkspaceKey();
+    setCachedWorkspacePresentation(cached);
     setState({
       ...cached.state,
       sessionId,
@@ -508,13 +616,20 @@ export function App() {
     setConversationIndexTruncated(cached.conversationIndexTruncated);
     setHistoryWindow(cached.historyWindow);
   };
-  const discardCachedPresentationIfProjectMismatch = (projectId: string) => {
+  const showCachedConversationPresentation = (
+    cached: CachedConversationPresentation,
+    cacheKey: string,
+  ) => {
+    cachedConversationPresentationKeyRef.current = cacheKey;
+    setCachedConversationPresentation(cached);
+  };
+  const discardCachedWorkspacePresentationIfProjectMismatch = (projectId: string) => {
     const pending = pendingFocusRef.current;
     if (
       !pending?.cachedProjectId
       || pending.cachedProjectId === projectId
     ) return;
-    discardCachedPresentation();
+    discardCachedWorkspacePresentation();
     updateWorkspaceSyncing(false);
   };
   const showUnconfirmedPrompt = (focus: ActiveFocus | undefined) => {
@@ -772,14 +887,16 @@ export function App() {
     setConversationReady(ready);
   };
   const clearSessionProjection = () => {
-    cachedPresentationKeyRef.current = "";
+    clearTemporaryWorkspacePresentation();
+    clearTemporaryConversationPresentation();
+    updateConversationSyncing(false);
     setState(undefined);
+    projectSnapshotReceivedRef.current = false;
     setConversations([]);
     setRoles([]);
     setConversationRole(undefined);
     setConversationIndexTruncated(false);
     setHistoryWindow(EMPTY_CONVERSATION_WINDOW);
-    setCachedPresentation(undefined);
     setExtensionUI([]);
     setNotification(undefined);
     setSettingResult(undefined);
@@ -833,6 +950,7 @@ export function App() {
 
   useEffect(() => {
     cacheCurrentWorkspaceProjection();
+    cacheCurrentConversationPresentation();
   }, [
     chat,
     conversationIndexTruncated,
@@ -880,8 +998,12 @@ export function App() {
           conversationIdRef.current = "";
           focusRef.current = undefined;
           authFlowIdRef.current = "";
-          cachedPresentationKeyRef.current = "";
+          cachedWorkspacePresentationKeyRef.current = "";
+          cachedConversationPresentationKeyRef.current = "";
           updateWorkspaceSyncing(false);
+          updateConversationSyncing(false);
+          clearTemporaryWorkspacePresentation();
+          clearTemporaryConversationPresentation();
           updateDirectoryBrowser(undefined);
           markPendingPromptUnconfirmed();
           updatePendingConversationDeletion(undefined);
@@ -934,7 +1056,7 @@ export function App() {
           dispatch({ type: "reset" });
           clearSessionProjection();
           updateWorkspaceSyncing(Boolean(cached));
-          if (cached) showCachedPresentation(cached, sessionId);
+          if (cached) showCachedWorkspacePresentation(cached, sessionId);
           updatePendingFocus({
             commandId,
             operation: "initialize",
@@ -963,8 +1085,16 @@ export function App() {
         });
       } else if (event.type === "state") {
         if (!sessionIdRef.current || event.state.sessionId !== sessionIdRef.current) return;
-        discardCachedPresentationIfProjectMismatch(event.state.projectId);
+        discardCachedWorkspacePresentationIfProjectMismatch(event.state.projectId);
         const currentFocus = focusRef.current;
+        const pendingFocusState = pendingFocusRef.current;
+        if (
+          pendingFocusState?.operation === "focus_conversation"
+          && currentFocus
+          && event.state.sessionId === currentFocus.sessionId
+          && event.state.conversationId === currentFocus.conversationId
+          && event.state.focusId === currentFocus.focusId
+        ) return;
         if (
           currentFocus
           && (
@@ -994,16 +1124,19 @@ export function App() {
           !pending
           || pending.commandId !== event.commandId
           || pending.operation !== event.operation
+          || (pending.targetConversationId !== undefined
+            && pending.targetConversationId !== event.conversationId)
         ) return;
         const cachedProjectMismatch = Boolean(
           pending.cachedProjectId
           && pending.cachedProjectId !== event.projectId,
         );
         if (cachedProjectMismatch) {
-          discardCachedPresentation();
+          discardCachedWorkspacePresentation();
           updateWorkspaceSyncing(false);
         }
         updatePendingFocus(undefined);
+        updateConversationSyncing(event.operation === "focus_conversation");
         attachFocus(
           event.sessionId,
           event.projectId,
@@ -1049,6 +1182,17 @@ export function App() {
           || event.focusId !== focus.focusId
         ) return;
         clearPendingAdmissions();
+        const invalidatedConversationKey = conversationScopeKey(
+          currentWorkspaceKey(),
+          event.projectId,
+          event.conversationId,
+        );
+        forgetConversationPresentation(
+          conversationPresentationCacheRef.current,
+          invalidatedConversationKey,
+        );
+        clearTemporaryConversationPresentation();
+        updateConversationSyncing(false);
         unconfirmedPromptByConversationRef.current.delete(
           conversationScopeKey(
             currentWorkspaceKey(),
@@ -1084,7 +1228,7 @@ export function App() {
           event.sessionId !== sessionIdRef.current
           || (projectIdRef.current && event.projectId !== projectIdRef.current)
         ) return;
-        discardCachedPresentationIfProjectMismatch(event.projectId);
+        discardCachedWorkspacePresentationIfProjectMismatch(event.projectId);
         projectIdRef.current = event.projectId;
         setRoles(event.roles);
       } else if (event.type === "project_activity_snapshot") {
@@ -1097,8 +1241,37 @@ export function App() {
           event.sessionId !== sessionIdRef.current
           || (projectIdRef.current && event.projectId !== projectIdRef.current)
         ) return;
-        discardCachedPresentationIfProjectMismatch(event.projectId);
+        discardCachedWorkspacePresentationIfProjectMismatch(event.projectId);
         projectIdRef.current = event.projectId;
+        projectSnapshotReceivedRef.current = true;
+        const existingConversationIds = new Set(event.conversations.map(({ id }) => id));
+        if (!event.truncated) {
+          const workspaceKeyValue = currentWorkspaceKey();
+          const workspaceProjection = workspaceProjectionCacheRef.current.get(workspaceKeyValue);
+          if (
+            workspaceProjection
+            && workspaceProjection.projectId === event.projectId
+            && !existingConversationIds.has(workspaceProjection.conversationId)
+          ) {
+            forgetWorkspaceProjection(workspaceProjectionCacheRef.current, workspaceKeyValue);
+            if (cachedWorkspacePresentationKeyRef.current === workspaceKeyValue) {
+              clearTemporaryWorkspacePresentation();
+            }
+          }
+        }
+        for (const [cacheKey, presentation] of conversationPresentationCacheRef.current) {
+          if (
+            !event.truncated
+            && presentation.workspaceKey === currentWorkspaceKey()
+            && presentation.projectId === event.projectId
+            && !existingConversationIds.has(presentation.conversationId)
+          ) {
+            forgetConversationPresentation(conversationPresentationCacheRef.current, cacheKey);
+            if (cachedConversationPresentationKeyRef.current === cacheKey) {
+              clearTemporaryConversationPresentation();
+            }
+          }
+        }
         setConversations(event.conversations);
         setConversationIndexTruncated(event.truncated);
       } else if (event.type === "conversation_run_settled") {
@@ -1130,7 +1303,10 @@ export function App() {
         if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;
         removePendingAdmission(event.promptId);
       } else if (event.type === "conversation_snapshot") {
-        if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;
+        if (
+          pendingFocusRef.current?.operation === "focus_conversation"
+          || !matchesFocus(event.sessionId, event.conversationId, event.focusId)
+        ) return;
         const focus = focusRef.current;
         if (focus) {
           dispatch({
@@ -1160,10 +1336,11 @@ export function App() {
           );
         }
         if (!pendingFocusRef.current) updateConversationReady(true);
-        if (workspaceSyncingRef.current) {
-          cachedPresentationKeyRef.current = "";
-          setCachedPresentation(undefined);
+        if (workspaceSyncingRef.current || conversationSyncingRef.current) {
+          if (workspaceSyncingRef.current) clearTemporaryWorkspacePresentation();
+          if (conversationSyncingRef.current) clearTemporaryConversationPresentation();
           updateWorkspaceSyncing(false);
+          updateConversationSyncing(false);
         }
       } else if (event.type === "session_event") {
         if (!matchesFocus(
@@ -1272,6 +1449,13 @@ export function App() {
             || pending.sessionId !== event.sessionId
           ) return;
           updatePendingConversationDeletion(undefined);
+          forgetConversationPresentation(
+            conversationPresentationCacheRef.current,
+            pendingConversationKey(pending),
+          );
+          if (cachedConversationPresentationKeyRef.current === pendingConversationKey(pending)) {
+            clearTemporaryConversationPresentation();
+          }
 
           unconfirmedPromptByConversationRef.current.delete(
             pendingConversationKey(pending),
@@ -1363,6 +1547,16 @@ export function App() {
           && event.operation === "compact_context"
           ? findPendingContextCompaction(event.commandId)
           : undefined;
+        const pendingFocusError = pendingFocusRef.current;
+        const settlesPendingFocus = Boolean(
+          pendingFocusError
+          && event.sessionId === sessionIdRef.current
+          && event.commandId === pendingFocusError.commandId
+          && event.operation === pendingFocusError.operation
+          && event.focusId === undefined
+          && (event.conversationId === undefined
+            || pendingFocusError.targetConversationId === event.conversationId),
+        );
         const settlesBackgroundOperation = Boolean(
           pendingCompactionError
           && pendingCompactionError.sessionId === event.sessionId
@@ -1380,6 +1574,7 @@ export function App() {
             )
           )
           && !settlesBackgroundOperation
+          && !settlesPendingFocus
         ) return;
         if (event.authFlowId && event.authFlowId !== authFlowIdRef.current) return;
         if (event.operation === "browse_directory") {
@@ -1459,6 +1654,10 @@ export function App() {
             || pending.operation !== event.operation
           ) return;
           updatePendingFocus(undefined);
+          if (event.operation === "focus_conversation") {
+            clearTemporaryConversationPresentation();
+            updateConversationSyncing(false);
+          }
           if (
             pending.sourceReady
             && pending.sourceFocus
@@ -1470,9 +1669,10 @@ export function App() {
             updateConversationReady(true);
           }
           if (event.operation === "initialize") {
-            if (pending.cachedProjectId) discardCachedPresentation();
+            if (pending.cachedProjectId) discardCachedWorkspacePresentation();
             conversationIdRef.current = "";
             updateWorkspaceSyncing(false);
+            updateConversationSyncing(false);
           }
           if (event.operation === "initialize" && activeCwdRef.current) {
             markWorkspaceUnavailable(activeCwdRef.current);
@@ -1590,6 +1790,10 @@ export function App() {
         setExtensionUI([]);
         setNotification(undefined);
         updateConversationReady(false);
+        updateWorkspaceSyncing(false);
+        updateConversationSyncing(false);
+        clearTemporaryWorkspacePresentation();
+        clearTemporaryConversationPresentation();
       }
     });
     socketRef.current = socket;
@@ -1610,6 +1814,7 @@ export function App() {
         || document.visibilityState === "hidden"
         || pendingFocusRef.current
         || workspaceSyncingRef.current
+        || conversationSyncingRef.current
         || pendingPromptRef.current
         || outstandingRunIdRef.current
       ) {
@@ -1670,6 +1875,7 @@ export function App() {
     if (
       !chat.projectionGap
       || workspaceSyncingRef.current
+      || conversationSyncingRef.current
       || !transportOnline
       || !protocolReady
     ) return;
@@ -1744,7 +1950,7 @@ export function App() {
     setAuth({});
     autoOpened.current = false;
     updateWorkspaceSyncing(Boolean(cached));
-    if (cached) showCachedPresentation(cached, sessionId);
+    if (cached) showCachedWorkspacePresentation(cached, sessionId);
     dispatch({ type: "reset" });
     updatePendingFocus({
       commandId,
@@ -1760,7 +1966,7 @@ export function App() {
     });
     if (!sent && cached) {
       updatePendingFocus(undefined);
-      discardCachedPresentation();
+      discardCachedWorkspacePresentation();
       updateWorkspaceSyncing(false);
       markWorkspaceUnavailable(normalizedCwd);
     }
@@ -1846,6 +2052,7 @@ export function App() {
     if (
       !sessionId
       || workspaceSyncingRef.current
+      || conversationSyncingRef.current
       || pendingFocusRef.current
       || pendingConversationDeletionRef.current
       || pendingConversationTruncationRef.current
@@ -1858,12 +2065,30 @@ export function App() {
     }
     const commandId = crypto.randomUUID();
     clearPendingAdmissions();
+    cacheCurrentConversationPresentation();
     const sourceFocus = focusRef.current;
     const sourceReady = conversationReadyRef.current;
+    const targetProjectId = projectIdRef.current;
+    const targetCacheKey = targetProjectId
+      ? conversationScopeKey(currentWorkspaceKey(), targetProjectId, conversationId)
+      : "";
+    const targetPresentation = targetCacheKey
+      ? getConversationPresentation(
+          conversationPresentationCacheRef.current,
+          targetCacheKey,
+        )
+      : undefined;
+    if (targetPresentation) {
+      showCachedConversationPresentation(targetPresentation, targetCacheKey);
+    } else {
+      clearTemporaryConversationPresentation();
+    }
+    updateConversationSyncing(true);
     updateConversationReady(false);
     updatePendingFocus({
       commandId,
       operation: "focus_conversation",
+      targetConversationId: conversationId,
       ...(sourceFocus ? { sourceFocus } : {}),
       sourceReady,
     });
@@ -1875,6 +2100,8 @@ export function App() {
       conversationId,
     })) {
       updatePendingFocus(undefined);
+      clearTemporaryConversationPresentation();
+      updateConversationSyncing(false);
       if (sourceReady && focusRef.current === sourceFocus) {
         updateConversationReady(true);
       }
@@ -1885,6 +2112,7 @@ export function App() {
     if (
       !sessionId
       || workspaceSyncingRef.current
+      || conversationSyncingRef.current
       || pendingFocusRef.current
       || pendingConversationDeletionRef.current
       || pendingConversationTruncationRef.current
@@ -1913,6 +2141,7 @@ export function App() {
     if (
       !sessionId
       || workspaceSyncingRef.current
+      || conversationSyncingRef.current
       || !projectId
       || !conversation
       || (conversation.activity?.kind ?? "idle") !== "idle"
@@ -1960,7 +2189,7 @@ export function App() {
   };
   const renameConversation = (conversationId: string, name: string) => {
     const sessionId = sessionIdRef.current;
-    if (!sessionId || workspaceSyncingRef.current) return;
+    if (!sessionId || workspaceSyncingRef.current || conversationSyncingRef.current) return;
     send({
       type: "rename_conversation",
       sessionId,
@@ -1973,6 +2202,7 @@ export function App() {
     if (
       !focus
       || workspaceSyncingRef.current
+      || conversationSyncingRef.current
       || !conversationReadyRef.current
       || Boolean(state?.busy)
       || Boolean(outstandingRunIdRef.current)
@@ -2010,6 +2240,7 @@ export function App() {
     if (
       !conversationReadyRef.current
       || workspaceSyncingRef.current
+      || conversationSyncingRef.current
       || pendingFocusRef.current
     ) return;
     const sessionId = sessionIdRef.current;
@@ -2020,6 +2251,7 @@ export function App() {
     if (
       !focus
       || workspaceSyncingRef.current
+      || conversationSyncingRef.current
       || !conversationReadyRef.current
       || pendingFocusRef.current
       || pendingCompactionThresholdRef.current
@@ -2044,6 +2276,7 @@ export function App() {
     if (
       !focus
       || workspaceSyncingRef.current
+      || conversationSyncingRef.current
       || !conversationReadyRef.current
       || pendingContextCompactionRef.current
     ) return false;
@@ -2068,6 +2301,7 @@ export function App() {
     if (
       !focus
       || workspaceSyncingRef.current
+      || conversationSyncingRef.current
       || !conversationReadyRef.current
       || Boolean(state?.busy)
       || Boolean(outstandingRunIdRef.current)
@@ -2104,6 +2338,7 @@ export function App() {
     if (
       !sessionId
       || workspaceSyncingRef.current
+      || conversationSyncingRef.current
       || pendingRoleOperationRef.current
     ) return;
     const commandId = crypto.randomUUID();
@@ -2125,14 +2360,22 @@ export function App() {
       return;
     }
     cacheCurrentWorkspaceProjection();
+    cacheCurrentConversationPresentation();
     initializeWorkspace(cwd);
   };
   const removeWorkspace = (cwd: string) => {
     const key = workspaceKey(cwd);
     forgetWorkspaceProjection(workspaceProjectionCacheRef.current, key);
-    if (cachedPresentationKeyRef.current === key) {
-      cachedPresentationKeyRef.current = "";
-      setCachedPresentation(undefined);
+    if (cachedWorkspacePresentationKeyRef.current === key) {
+      clearTemporaryWorkspacePresentation();
+    }
+    for (const [cacheKey, presentation] of conversationPresentationCacheRef.current) {
+      if (presentation.workspaceKey === key) {
+        forgetConversationPresentation(conversationPresentationCacheRef.current, cacheKey);
+      }
+    }
+    if (cachedConversationPresentation?.workspaceKey === key) {
+      clearTemporaryConversationPresentation();
     }
     const next = workspacesRef.current.filter(
       (candidate) => workspaceKey(candidate) !== key,
@@ -2287,7 +2530,23 @@ export function App() {
     onClose={() => updateDirectoryBrowser(undefined)}
   />;
 
-  if (!activeCwd || !state) return <>
+  const transitioning = workspaceSyncing || conversationSyncing;
+  const transitionPresentation = workspaceSyncing
+    ? cachedWorkspacePresentation
+    : conversationSyncing
+      ? cachedConversationPresentation
+      : undefined;
+  const visibleState = transitionPresentation
+    ? {
+        ...transitionPresentation.state,
+        sessionId: sessionIdRef.current,
+        focusId: undefined,
+        busy: false,
+        compacting: false,
+        activeRun: undefined,
+      }
+    : state;
+  if (!activeCwd || !visibleState) return <>
     <div className="workbench">
       {workspaceRail}
       <ConversationSidebar
@@ -2315,25 +2574,40 @@ export function App() {
     {feedback}
   </>;
 
-  const showRoleSelection = selectingRole || !state.conversationId;
+  const showRoleSelection = selectingRole || !visibleState.conversationId;
   const conversationCompacting =
-    state.compacting === true || Boolean(pendingContextCompaction);
+    visibleState.compacting === true || Boolean(pendingContextCompaction);
   const switchingFocus = pendingFocus?.operation === "focus_conversation"
     || pendingFocus?.operation === "create_conversation";
   const visibleChat = workspaceSyncing
-    ? cachedPresentation?.chat ?? initialChatState
-    : switchingFocus
-      ? initialChatState
-      : chat;
-  const visibleBusy = switchingFocus || workspaceSyncing
+    ? cachedWorkspacePresentation?.chat ?? initialChatState
+    : conversationSyncing
+      ? cachedConversationPresentation?.chat ?? initialChatState
+      : switchingFocus
+        ? initialChatState
+        : chat;
+  const visibleBusy = transitioning || switchingFocus
     ? false
-    : state.busy || Boolean(outstandingRunId);
-  const visibleActiveRun = switchingFocus || workspaceSyncing
+    : visibleState.busy || Boolean(outstandingRunId);
+  const visibleActiveRun = transitioning || switchingFocus
     ? undefined
-    : state.activeRun;
+    : visibleState.activeRun;
   const visibleConversationReady =
-    !switchingFocus && !workspaceSyncing && conversationReady;
-  const visibleCompacting = workspaceSyncing ? false : conversationCompacting;
+    !switchingFocus && !transitioning && conversationReady;
+  const visibleCompacting = transitioning ? false : conversationCompacting;
+  const visibleConversationRole = workspaceSyncing
+    ? cachedWorkspacePresentation?.conversationRole
+    : conversationSyncing
+      ? cachedConversationPresentation?.conversationRole
+      : conversationRole;
+  const visibleHistoryWindow = workspaceSyncing
+    ? cachedWorkspacePresentation?.historyWindow ?? EMPTY_CONVERSATION_WINDOW
+    : conversationSyncing
+      ? cachedConversationPresentation?.historyWindow ?? EMPTY_CONVERSATION_WINDOW
+      : historyWindow;
+  const pendingTargetConversationId = pendingFocus?.operation === "focus_conversation"
+    ? pendingFocus.targetConversationId
+    : undefined;
 
   return <>
     <div className="workbench">
@@ -2341,18 +2615,21 @@ export function App() {
       <ConversationSidebar
         conversations={conversations}
         truncated={conversationIndexTruncated}
-        currentConversationId={showRoleSelection
-          ? undefined
-          : state.conversationId}
+        currentConversationId={pendingTargetConversationId
+          ?? (showRoleSelection ? undefined : visibleState.conversationId)}
         busyConversationId={
-          state.busy || outstandingRunId ? state.conversationId : undefined
+          visibleState.busy || outstandingRunId ? visibleState.conversationId : undefined
         }
         collapsed={sidebarCollapsed}
-        online={online && !workspaceSyncing}
+        online={online && !transitioning}
         pendingDeletionId={pendingConversationDeletion?.conversationId}
         onToggleCollapsed={setSidebarCollapsed}
         onSelect={focusConversation}
-        onCreate={() => setSelectingRole(true)}
+        onCreate={() => {
+          if (!workspaceSyncingRef.current && !conversationSyncingRef.current) {
+            setSelectingRole(true);
+          }
+        }}
         onRename={renameConversation}
         onDelete={deleteConversation}
       />
@@ -2364,10 +2641,17 @@ export function App() {
         >
           正在同步工作区…
         </div>}
+        {conversationSyncing && <div
+          className="banner"
+          role="status"
+          aria-label="正在同步会话…"
+        >
+          正在同步会话…
+        </div>}
         {showRoleSelection
           ? <RoleSelectionPage
               roles={roles}
-              pending={creatingConversation || workspaceSyncing}
+              pending={creatingConversation || transitioning}
               onStart={createConversation}
               onManageRole={(roleId) => {
                 setRoleManagerInitialRoleId(roleId);
@@ -2383,17 +2667,17 @@ export function App() {
               chat={visibleChat}
               busy={visibleBusy}
               activeRun={visibleActiveRun}
-              sessionTokenUsage={state.sessionTokenUsage}
-              contextTokenCount={state.contextUsage?.tokens}
-              contextWindow={state.contextUsage?.contextWindow}
-              contextPercent={state.contextUsage?.percent}
-              contextSource={state.contextUsage?.source}
-              model={state.selectedModel}
-              role={conversationRole}
+              sessionTokenUsage={visibleState.sessionTokenUsage}
+              contextTokenCount={visibleState.contextUsage?.tokens}
+              contextWindow={visibleState.contextUsage?.contextWindow}
+              contextPercent={visibleState.contextUsage?.percent}
+              contextSource={visibleState.contextUsage?.source}
+              model={visibleState.selectedModel}
+              role={visibleConversationRole}
               roles={roles}
               roleSwitchDisabled={
-                workspaceSyncing
-                || state.busy
+                transitioning
+                || visibleState.busy
                 || Boolean(outstandingRunId)
                 || Boolean(pendingPrompt)
                 || pendingAdmissions.length > 0
@@ -2402,19 +2686,19 @@ export function App() {
                 || conversationCompacting
               }
               roleSwitching={Boolean(pendingConversationRoleSwitch)}
-              thinkingLevel={state.thinkingLevel}
-              availableThinkingLevels={state.availableThinkingLevels}
+              thinkingLevel={visibleState.thinkingLevel}
+              availableThinkingLevels={visibleState.availableThinkingLevels}
               compactionThresholdPercent={
-                state.compactionThresholdPercent
+                visibleState.compactionThresholdPercent
                 ?? DEFAULT_COMPACTION_THRESHOLD_PERCENT
               }
               compactionThresholdBusy={Boolean(pendingCompactionThreshold)}
               compacting={visibleCompacting}
-              cwd={state.cwd}
+              cwd={visibleState.cwd}
               online={online}
-              interactive={!workspaceSyncing}
+              interactive={!transitioning}
               conversationReady={visibleConversationReady}
-              historyWindow={historyWindow}
+              historyWindow={visibleHistoryWindow}
               draft={draft}
               submitting={Boolean(pendingPrompt)}
               pendingAdmissions={pendingAdmissions}
@@ -2443,7 +2727,7 @@ export function App() {
               onSend={submitPrompt}
               onAbort={abortCurrentRun}
               onSettings={() => {
-                if (!workspaceSyncingRef.current) setDrawer(true);
+                if (!workspaceSyncingRef.current && !conversationSyncingRef.current) setDrawer(true);
               }}
               onThinking={setThinkingLevel}
               onCompactionThreshold={setCompactionThreshold}
@@ -2457,9 +2741,9 @@ export function App() {
       </div>
     </div>
     <ConnectionDrawer
-      state={state}
-      open={drawer && !blockingModalVisible && !workspaceSyncing}
-      online={online && !workspaceSyncing}
+      state={visibleState}
+      open={drawer && !blockingModalVisible && !transitioning}
+      online={online && !transitioning}
       settingResult={settingResult}
       onClose={() => setDrawer(false)}
       onKey={(provider, key) => {
@@ -2486,9 +2770,9 @@ export function App() {
       onKeyDialogChange={setSettingsDialogOpen}
     />
     <RoleManagerDialog
-      open={roleManagerOpen && !blockingModalVisible}
+      open={roleManagerOpen && !blockingModalVisible && !transitioning}
       roles={roles}
-      providers={state.providers}
+      providers={visibleState.providers}
       initialRoleId={roleManagerInitialRoleId}
       pending={pendingRoleOperation}
       result={roleOperationResult}
