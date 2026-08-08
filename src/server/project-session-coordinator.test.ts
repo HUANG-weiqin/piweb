@@ -9244,6 +9244,211 @@ describe("ProjectSessionCoordinator", () => {
       await busy;
     });
 
+    it("allows multiple pending prompt batches on one active run", async () => {
+      const fixture = await createFixture();
+      const actor = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const control = fixture.runtime.control(actor.conversationId);
+      const started = deferred();
+      const release = deferred();
+      control.enqueue(async (current) => {
+        current.emitUserMessage(current.promptTexts.at(-1)!);
+        started.resolve();
+        await release.promise;
+      });
+      const runId = randomUUID();
+      const busy = fixture.coordinator.prompt(
+        fixture.handle,
+        actor.conversationId,
+        runId,
+        "busy before multiple batches",
+      );
+      await started.promise;
+
+      const firstPromptId = randomUUID();
+      const firstBatchId = randomUUID();
+      await fixture.coordinator.enqueuePrompt(
+        fixture.handle,
+        actor.conversationId,
+        { promptId: firstPromptId, text: "first batch prompt" },
+      );
+      const firstSteering = fixture.coordinator.steerAllQueuedPrompts(
+        fixture.handle,
+        actor.conversationId,
+        firstBatchId,
+        runId,
+      );
+      await waitUntil(
+        () => control.steerTexts.length === 1,
+        "first pending prompt batch steer",
+      );
+
+      const secondPromptId = randomUUID();
+      const secondBatchId = randomUUID();
+      await fixture.coordinator.enqueuePrompt(
+        fixture.handle,
+        actor.conversationId,
+        { promptId: secondPromptId, text: "second batch prompt" },
+      );
+      const secondSteering = fixture.coordinator.steerAllQueuedPrompts(
+        fixture.handle,
+        actor.conversationId,
+        secondBatchId,
+        runId,
+      );
+      await waitUntil(
+        () => control.steerTexts.length === 2,
+        "second pending prompt batch steer",
+      );
+      await expect(fixture.coordinator.listPendingPrompts(
+        fixture.handle,
+        actor.conversationId,
+      )).resolves.toEqual([
+        expect.objectContaining({ promptId: firstPromptId, state: "dispatching", runId }),
+        expect.objectContaining({ promptId: secondPromptId, state: "dispatching", runId }),
+      ]);
+
+      control.emitUserMessage(control.steerTexts[0]!);
+      await firstSteering;
+      control.emitUserMessage(control.steerTexts[1]!);
+      await secondSteering;
+
+      const aggregate = aggregateReservedConversationEntries(
+        actor.sessionManager.getEntries(),
+      );
+      expect(aggregate.pendingPromptBatches).toEqual(expect.arrayContaining([
+        expect.objectContaining({ batchId: firstBatchId, state: "completed" }),
+        expect.objectContaining({ batchId: secondBatchId, state: "completed" }),
+      ]));
+      expect(aggregate.pendingPromptDeliveries).toEqual(expect.arrayContaining([
+        expect.objectContaining({ promptId: firstPromptId, batchId: firstBatchId, runId }),
+        expect.objectContaining({ promptId: secondPromptId, batchId: secondBatchId, runId }),
+      ]));
+      await expect(fixture.coordinator.listPendingPrompts(
+        fixture.handle,
+        actor.conversationId,
+      )).resolves.toEqual([]);
+
+      release.resolve();
+      await busy;
+    });
+
+    it("rejects reuse of a promptId after its durable delivery receipt is recorded", async () => {
+      const fixture = await createFixture();
+      const actor = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      await waitUntil(
+        () => (fixture.handle as unknown as {
+          context: { backgroundTasks: Set<Promise<void>> };
+        }).context.backgroundTasks.size === 0,
+        "initial actor pump before promptId reuse test",
+      );
+      const queue = coordinatorPromptQueue(fixture.handle);
+      const promptId = randomUUID();
+      const runId = randomUUID();
+      const original = {
+        promptId,
+        conversationId: actor.conversationId,
+        text: "original durable prompt",
+        createdAt: "2026-08-08T13:10:00.000Z",
+      };
+      await queue.put(original);
+      await queue.markDispatching(
+        promptId,
+        actor.conversationId,
+        runId,
+        "2026-08-08T13:10:01.000Z",
+      );
+      appendReservedCustomEntry(
+        actor.sessionManager,
+        createPendingPromptDeliveryEntry({
+          promptId,
+          runId,
+          deliveredAt: "2026-08-08T13:10:02.000Z",
+        }),
+      );
+      await queue.removeForHostCleanup(promptId, actor.conversationId);
+
+      await expect(fixture.coordinator.enqueuePrompt(
+        fixture.handle,
+        actor.conversationId,
+        { promptId, text: "reused with a different payload" },
+      )).rejects.toThrow(/already used.*durable delivery/i);
+      await expect(queue.list({ conversationId: actor.conversationId })).resolves.toEqual([]);
+    });
+
+    it("does not let a new run claim a prompt owned by an older prepared batch", async () => {
+      const fixture = await createFixture();
+      const actor = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const control = fixture.runtime.control(actor.conversationId);
+      const started = deferred();
+      const release = deferred();
+      control.enqueue(async (current) => {
+        current.emitUserMessage(current.promptTexts.at(-1)!);
+        started.resolve();
+        await release.promise;
+      });
+      const runId = randomUUID();
+      const busy = fixture.coordinator.prompt(
+        fixture.handle,
+        actor.conversationId,
+        runId,
+        "busy before ownership fence",
+      );
+      await started.promise;
+
+      const promptId = randomUUID();
+      await fixture.coordinator.enqueuePrompt(
+        fixture.handle,
+        actor.conversationId,
+        { promptId, text: "owned by an older prepared batch" },
+      );
+      const queue = coordinatorPromptQueue(fixture.handle);
+      const prompt = (await queue.list({ conversationId: actor.conversationId }))[0]!;
+      const oldBatchId = randomUUID();
+      appendReservedCustomEntry(
+        actor.sessionManager,
+        createPendingPromptBatchEntry({
+          batchId: oldBatchId,
+          conversationId: actor.conversationId,
+          runId: randomUUID(),
+          items: [{
+            promptId,
+            createdAt: prompt.createdAt,
+            payloadSha256: projectPromptPayloadSha256(prompt),
+          }],
+          state: "prepared",
+          updatedAt: "2026-08-08T13:00:00.000Z",
+        }),
+      );
+
+      await expect(fixture.coordinator.steerAllQueuedPrompts(
+        fixture.handle,
+        actor.conversationId,
+        randomUUID(),
+        runId,
+      )).rejects.toThrow(/already belongs to a non-terminal batch/i);
+      await expect(queue.list({ conversationId: actor.conversationId })).resolves.toEqual([
+        expect.objectContaining({ promptId, state: "queued" }),
+      ]);
+      expect(aggregateReservedConversationEntries(
+        actor.sessionManager.getEntries(),
+      ).pendingPromptBatches).toContainEqual(expect.objectContaining({
+        batchId: oldBatchId,
+        state: "prepared",
+      }));
+
+      release.resolve();
+      await busy;
+    });
+
     it("rejects wrong-run, slash, and oversize batches before writing manifests or claims", async () => {
       const fixture = await createFixture();
       const actor = await fixture.coordinator.createUserConversation(
@@ -9388,6 +9593,113 @@ describe("ProjectSessionCoordinator", () => {
       await busy;
     });
 
+    it("fences a partially rolled-back batch instead of leaving a prepared ownership leak", async () => {
+      const fixture = await createFixture();
+      const actor = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const control = fixture.runtime.control(actor.conversationId);
+      const started = deferred();
+      const release = deferred();
+      control.enqueue(async (current) => {
+        current.emitUserMessage(current.promptTexts.at(-1)!);
+        started.resolve();
+        await release.promise;
+      });
+      const runId = randomUUID();
+      const busy = fixture.coordinator.prompt(
+        fixture.handle,
+        actor.conversationId,
+        runId,
+        "busy before partial batch claim failure",
+      );
+      await started.promise;
+
+      const promptIds = [randomUUID(), randomUUID()];
+      for (const [index, promptId] of promptIds.entries()) {
+        await fixture.coordinator.enqueuePrompt(
+          fixture.handle,
+          actor.conversationId,
+          { promptId, text: `partial claim ${index}` },
+        );
+      }
+      const queue = coordinatorPromptQueue(fixture.handle);
+      const internals = queue as unknown as {
+        replaceStoredPrompt: (...args: never[]) => Promise<void>;
+      };
+      const originalReplace = internals.replaceStoredPrompt;
+      let writes = 0;
+      const replacement = vi.spyOn(internals, "replaceStoredPrompt")
+        .mockImplementation(async (...args) => {
+          writes += 1;
+          if (writes === 2 || writes === 3) {
+            throw new Error("injected claim and rollback failure");
+          }
+          return originalReplace.apply(queue, args);
+        });
+      const batchId = randomUUID();
+      let claimError: unknown;
+      try {
+        await fixture.coordinator.steerAllQueuedPrompts(
+          fixture.handle,
+          actor.conversationId,
+          batchId,
+          runId,
+        );
+      } catch (error) {
+        claimError = error;
+      } finally {
+        replacement.mockRestore();
+      }
+      expect(claimError).toEqual(expect.objectContaining({
+        message: expect.stringMatching(/claim.*roll back|roll back.*claim/i),
+      }));
+
+      await expect(fixture.coordinator.listPendingPrompts(
+        fixture.handle,
+        actor.conversationId,
+      )).resolves.toEqual([
+        expect.objectContaining({
+          promptId: promptIds[0],
+          state: "attention",
+        }),
+        expect.objectContaining({
+          promptId: promptIds[1],
+          state: "queued",
+        }),
+      ]);
+      expect(aggregateReservedConversationEntries(
+        actor.sessionManager.getEntries(),
+      ).pendingPromptBatches).toEqual([
+        expect.objectContaining({ batchId, state: "attention" }),
+      ]);
+
+      const retryBatch = fixture.coordinator.steerAllQueuedPrompts(
+        fixture.handle,
+        actor.conversationId,
+        randomUUID(),
+        runId,
+      );
+      await waitUntil(
+        () => control.steerTexts.length === 1,
+        "retry batch after partial claim failure",
+      );
+      control.emitUserMessage(control.steerTexts[0]!);
+      await retryBatch;
+      await expect(fixture.coordinator.listPendingPrompts(
+        fixture.handle,
+        actor.conversationId,
+      )).resolves.toEqual([
+        expect.objectContaining({
+          promptId: promptIds[0],
+          state: "attention",
+        }),
+      ]);
+      release.resolve();
+      await busy;
+    });
+
     it("marks an SDK-accepted batch attention when its run settles before delivery", async () => {
       const fixture = await createFixture();
       const actor = await fixture.coordinator.createUserConversation(
@@ -9455,6 +9767,87 @@ describe("ProjectSessionCoordinator", () => {
         expect.objectContaining({ batchId, state: "attention" }),
       ]);
       expect(control.promptTexts).toEqual(["busy before uncertain batch"]);
+    });
+
+    it("releases the batch fence when its run settles and pumps later queued work", async () => {
+      const fixture = await createFixture();
+      const actor = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const control = fixture.runtime.control(actor.conversationId);
+      const started = deferred();
+      const release = deferred();
+      control.enqueue(
+        async (current) => {
+          current.emitUserMessage(current.promptTexts.at(-1)!);
+          started.resolve();
+          await release.promise;
+          current.emitFinal("settled before batch delivery");
+        },
+        async (current) => {
+          current.emitUserMessage(current.promptTexts.at(-1)!);
+          current.emitFinal("later pending work");
+        },
+      );
+      const runId = randomUUID();
+      const busy = fixture.coordinator.prompt(
+        fixture.handle,
+        actor.conversationId,
+        runId,
+        "settlement fence source run",
+      );
+      await started.promise;
+      const batchPromptId = randomUUID();
+      await fixture.coordinator.enqueuePrompt(
+        fixture.handle,
+        actor.conversationId,
+        { promptId: batchPromptId, text: "batch guidance" },
+      );
+      const steering = fixture.coordinator.steerAllQueuedPrompts(
+        fixture.handle,
+        actor.conversationId,
+        randomUUID(),
+        runId,
+      );
+      await waitUntil(
+        () => control.steerTexts.length === 1,
+        "settlement fence batch SDK acceptance",
+      );
+      const laterPromptId = randomUUID();
+      await fixture.coordinator.enqueuePrompt(
+        fixture.handle,
+        actor.conversationId,
+        { promptId: laterPromptId, text: "later queued work" },
+      );
+      release.resolve();
+      await expect(steering).rejects.toMatchObject({
+        classification: "uncertain_after_sdk_acceptance",
+      });
+      await busy;
+      await waitUntil(
+        () => control.promptTexts.length === 2,
+        "pending work after settled batch fence",
+      );
+      await waitUntil(async () => !(await fixture.coordinator.listPendingPrompts(
+        fixture.handle,
+        actor.conversationId,
+      )).some(({ promptId }) => promptId === laterPromptId),
+      "later pending work settlement",
+      );
+      expect(control.promptTexts).toEqual([
+        "settlement fence source run",
+        "later queued work",
+      ]);
+      await expect(fixture.coordinator.listPendingPrompts(
+        fixture.handle,
+        actor.conversationId,
+      )).resolves.toEqual([
+        expect.objectContaining({
+          promptId: batchPromptId,
+          state: "attention",
+        }),
+      ]);
     });
 
     it("acknowledges a committed enqueue when its later FIFO claim fails", async () => {
@@ -10268,7 +10661,7 @@ describe("ProjectSessionCoordinator", () => {
       await restarted.close();
     });
 
-    it("fences a hash-mismatched prepared batch without generic recovery", async () => {
+    it("fences a hash-mismatched prompt as attention and releases later work", async () => {
       const fixture = await createFixture();
       const actor = await fixture.coordinator.createUserConversation(fixture.handle, { roleId: "default" });
       await waitUntil(
@@ -10281,12 +10674,19 @@ describe("ProjectSessionCoordinator", () => {
       const promptId = randomUUID();
       const runId = randomUUID();
       await queue.put({ promptId, conversationId: actor.conversationId, text: "tampered", createdAt: "2026-07-30T11:00:00.000Z" });
+      const batchId = randomUUID();
       appendReservedCustomEntry(actor.sessionManager, createPendingPromptBatchEntry({
-        batchId: randomUUID(), conversationId: actor.conversationId, runId,
+        batchId, conversationId: actor.conversationId, runId,
         items: [{ promptId, createdAt: "2026-07-30T11:00:00.000Z", payloadSha256: "0".repeat(64) }],
         state: "prepared", updatedAt: "2026-07-30T11:00:02.000Z",
       }));
       await fixture.coordinator.close();
+      fixture.runtime.nextSessionBehaviors.push([
+        async (control) => {
+          control.emitUserMessage(control.promptTexts.at(-1)!);
+          control.emitFinal("later prompt repaired");
+        },
+      ]);
       const restarted = new ProjectSessionCoordinator(fixture.runtime, fixture.roles, fixture.registry);
       const handle = await restarted.acquireProject(fixture.cwd, "full_access");
       const restartedContext = (handle as unknown as {
@@ -10297,29 +10697,122 @@ describe("ProjectSessionCoordinator", () => {
         "hash-mismatched batch recovery fence",
       );
       expect(await coordinatorPromptQueue(handle).list({ conversationId: actor.conversationId })).toEqual([
-        expect.objectContaining({ promptId, state: "queued" }),
+        expect.objectContaining({ promptId, state: "attention" }),
       ]);
       expect((await handle.project.inspectConversation(actor.conversationId))
-        .pendingPromptBatches).toContainEqual(expect.objectContaining({ state: "prepared" }));
+        .pendingPromptBatches).toContainEqual(expect.objectContaining({
+          batchId,
+          state: "attention",
+        }));
 
       const laterPromptId = randomUUID();
       await restarted.enqueuePrompt(handle, actor.conversationId, {
         promptId: laterPromptId,
-        text: "must remain behind the unresolved batch fence",
+        text: "later work after attention repair",
       });
       await waitUntil(
-        () => (handle as unknown as {
+        () => fixture.runtime.control(actor.conversationId).promptTexts.length === 1,
+        "later prompt after attention repair",
+      );
+      await waitUntil(async () => !(await coordinatorPromptQueue(handle).list({
+        conversationId: actor.conversationId,
+      })).some(({ promptId: candidate }) => candidate === laterPromptId),
+      "later prompt settlement after attention repair",
+      );
+      expect(fixture.runtime.control(actor.conversationId).promptTexts).toEqual([
+        "later work after attention repair",
+      ]);
+      await restarted.close();
+    });
+
+    it("moves missing-sidecar batches to attention instead of leaving recovery fences", async () => {
+      const fixture = await createFixture();
+      const actor = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      await waitUntil(
+        () => (fixture.handle as unknown as {
           context: { backgroundTasks: Set<Promise<void>> };
         }).context.backgroundTasks.size === 0,
-        "blocked batch pump attempt",
+        "initial actor pump before missing-sidecar recovery",
       );
-      expect(fixture.runtime.control(actor.conversationId).promptTexts).toEqual([]);
-      expect(await coordinatorPromptQueue(handle).list({
-        conversationId: actor.conversationId,
-      })).toEqual(expect.arrayContaining([
-        expect.objectContaining({ promptId, state: "queued" }),
-        expect.objectContaining({ promptId: laterPromptId, state: "queued" }),
-      ]));
+      const missingBatches = (["prepared", "started", "delivered"] as const).map((state) => ({
+        batchId: randomUUID(),
+        promptId: randomUUID(),
+        runId: randomUUID(),
+        state,
+      }));
+      for (const [index, batch] of missingBatches.entries()) {
+        appendReservedCustomEntry(
+          actor.sessionManager,
+          createPendingPromptBatchEntry({
+            batchId: batch.batchId,
+            conversationId: actor.conversationId,
+            runId: batch.runId,
+            items: [{
+              promptId: batch.promptId,
+              createdAt: `2026-07-30T11:20:0${index}.000Z`,
+              payloadSha256: "0".repeat(64),
+            }],
+            state: "prepared",
+            updatedAt: `2026-07-30T11:20:1${index}.000Z`,
+          }),
+        );
+        if (batch.state !== "prepared") {
+          appendReservedCustomEntry(
+            actor.sessionManager,
+            createPendingPromptBatchEntry({
+              batchId: batch.batchId,
+              conversationId: actor.conversationId,
+              runId: batch.runId,
+              items: [{
+                promptId: batch.promptId,
+                createdAt: `2026-07-30T11:20:0${index}.000Z`,
+                payloadSha256: "0".repeat(64),
+              }],
+              state: "started",
+              updatedAt: `2026-07-30T11:20:2${index}.000Z`,
+            }),
+          );
+        }
+        if (batch.state === "delivered") {
+          appendReservedCustomEntry(
+            actor.sessionManager,
+            createPendingPromptBatchEntry({
+              batchId: batch.batchId,
+              conversationId: actor.conversationId,
+              runId: batch.runId,
+              items: [{
+                promptId: batch.promptId,
+                createdAt: `2026-07-30T11:20:0${index}.000Z`,
+                payloadSha256: "0".repeat(64),
+              }],
+              state: "delivered",
+              updatedAt: `2026-07-30T11:20:3${index}.000Z`,
+            }),
+          );
+        }
+      }
+
+      await fixture.coordinator.close();
+      const restarted = new ProjectSessionCoordinator(
+        fixture.runtime,
+        fixture.roles,
+        fixture.registry,
+      );
+      const handle = await restarted.acquireProject(fixture.cwd, "full_access");
+      await waitUntil(async () => {
+        const recovered = await handle.project.inspectConversation(actor.conversationId);
+        return missingBatches.every(({ batchId }) => recovered.pendingPromptBatches.some((batch) => (
+          batch.batchId === batchId && batch.state === "attention"
+        )));
+      }, "missing-sidecar batch attention recovery");
+      expect((await handle.project.inspectConversation(actor.conversationId))
+        .pendingPromptBatches.filter(({ state }) => state === "attention")).toHaveLength(3);
+      expect((handle as unknown as {
+        context: { promptAttention: Set<string> };
+      }).context.promptAttention.has(actor.conversationId)).toBe(true);
       await restarted.close();
     });
 
@@ -10427,6 +10920,80 @@ describe("ProjectSessionCoordinator", () => {
       const recovered = await restarted.openConversation(handle, actor.conversationId);
       expect(aggregateReservedConversationEntries(recovered.sessionManager.getEntries()).pendingPromptBatches)
         .toContainEqual(expect.objectContaining({ batchId: batch.batchId, state: "attention" }));
+      await restarted.close();
+    });
+
+    it("recovers multiple non-terminal batches independently", async () => {
+      const fixture = await createFixture();
+      const actor = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const queue = coordinatorPromptQueue(fixture.handle);
+      const runId = randomUUID();
+      const batches = [0, 1].map((index) => ({
+        batchId: randomUUID(),
+        promptId: randomUUID(),
+        createdAt: `2026-07-30T13:30:0${index}.000Z`,
+      }));
+      for (const batch of batches) {
+        await queue.put({
+          promptId: batch.promptId,
+          conversationId: actor.conversationId,
+          text: `recovery batch ${batch.promptId}`,
+          createdAt: batch.createdAt,
+        });
+        const dispatching = await queue.markDispatching(
+          batch.promptId,
+          actor.conversationId,
+          runId,
+          "2026-07-30T13:30:02.000Z",
+        );
+        const identity = {
+          batchId: batch.batchId,
+          conversationId: actor.conversationId,
+          runId,
+          items: [{
+            promptId: batch.promptId,
+            createdAt: batch.createdAt,
+            payloadSha256: projectPromptPayloadSha256(dispatching),
+          }],
+        };
+        appendReservedCustomEntry(
+          actor.sessionManager,
+          createPendingPromptBatchEntry({
+            ...identity,
+            state: "prepared",
+            updatedAt: "2026-07-30T13:30:03.000Z",
+          }),
+        );
+        appendReservedCustomEntry(
+          actor.sessionManager,
+          createPendingPromptBatchEntry({
+            ...identity,
+            state: "started",
+            updatedAt: "2026-07-30T13:30:04.000Z",
+          }),
+        );
+      }
+
+      await fixture.coordinator.close();
+      const restarted = new ProjectSessionCoordinator(
+        fixture.runtime,
+        fixture.roles,
+        fixture.registry,
+      );
+      const handle = await restarted.acquireProject(fixture.cwd, "full_access");
+      await waitUntil(async () => {
+        const recovered = await handle.project.inspectConversation(actor.conversationId);
+        return recovered.pendingPromptBatches.filter(({ state }) => state === "attention").length === 2;
+      }, "multiple pending prompt batch recovery");
+      expect(await coordinatorPromptQueue(handle).list({
+        conversationId: actor.conversationId,
+      })).toEqual(batches.map(({ promptId }) => expect.objectContaining({
+        promptId,
+        state: "attention",
+      })));
       await restarted.close();
     });
 

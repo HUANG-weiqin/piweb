@@ -1076,9 +1076,9 @@ const TERMINAL_PENDING_PROMPT_BATCH_STATES = new Set<
 const ALLOWED_PENDING_PROMPT_BATCH_TRANSITIONS: Readonly<
   Record<PendingPromptBatch["state"], ReadonlySet<PendingPromptBatch["state"]>>
 > = {
-  prepared: new Set(["started", "failed"]),
+  prepared: new Set(["started", "failed", "attention"]),
   started: new Set(["delivered", "failed", "attention"]),
-  delivered: new Set(["completed"]),
+  delivered: new Set(["completed", "attention"]),
   completed: new Set(),
   failed: new Set(),
   attention: new Set(),
@@ -1132,8 +1132,11 @@ const ALLOWED_CARD_TRANSITIONS: Readonly<
     "failed",
     "aborted",
   ]),
+  // A target can enter its run before an exact wait rendezvous proves the
+  // same envelope was consumed, so delivery may be observed after running.
   running: new Set([
     "running",
+    "delivered",
     "waiting",
     "completed",
     "failed",

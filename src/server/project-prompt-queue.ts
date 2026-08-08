@@ -419,21 +419,26 @@ export class ProjectPromptQueue {
 
   /**
    * Freezes every queued prompt for one conversation into the exact dispatch
-   * run. The scan and all state changes share one queue operation.
+   * run. Existing dispatching IDs may be supplied when they are already owned
+   * by another batch on that same run. The scan and all state changes share
+   * one queue operation.
    */
   claimAllQueuedForConversation(
     conversationId: string,
     runId: string,
     dispatchedAt: string,
+    allowedDispatchingPromptIds: readonly string[] = [],
   ): Promise<DispatchingProjectPrompt[]> {
     return this.operations.run(async () => {
       uuidSchema("conversationId").parse(conversationId);
       uuidSchema("runId").parse(runId);
       canonicalTimestampSchema("dispatchedAt").parse(dispatchedAt);
       const scan = await this.scan();
+      const allowedDispatchingIds = new Set(allowedDispatchingPromptIds);
       if (scan.prompts.some(({ prompt }) => (
         prompt.conversationId === conversationId
         && prompt.state === "dispatching"
+        && !allowedDispatchingIds.has(prompt.promptId)
       ))) {
         throw new Error(
           `Conversation already has dispatching prompts: ${conversationId}`,

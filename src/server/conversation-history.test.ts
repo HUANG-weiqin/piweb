@@ -504,6 +504,33 @@ describe("projectConversationHistory", () => {
     expect(snapshot.window.contentTruncated).toBe(false);
   });
 
+  it("never emits more parts than the wire schema allows when a fallback rebuilds an oversized timeline", () => {
+    const tools = Array.from({ length: 250 }, (_, index) => ({
+      toolCallId: `tool-${index}`,
+      toolName: "read",
+      args: { path: `src/file-${index}.ts` },
+      result: { ok: true },
+      status: "done" as const,
+    }));
+    const snapshot = snapshotConversationItems([{
+      kind: "message",
+      id: "assistant-overflow-tools",
+      role: "assistant",
+      text: "done",
+      thinking: "thinking",
+      tools,
+      parts: tools.map((tool) => ({
+        kind: "tool" as const,
+        toolCallId: tool.toolCallId,
+      })),
+    }]);
+    const assistant = snapshot.items[0];
+    expect(assistant).toMatchObject({ kind: "message" });
+    if (assistant.kind !== "message") throw new Error("expected message item");
+    expect(assistant.parts?.length ?? 0).toBeLessThanOrEqual(200);
+    expect(snapshot.window.contentTruncated).toBe(true);
+  });
+
   it("keeps a snapshot renderable when a compaction identity exceeds the page budget", () => {
     const snapshot = snapshotConversationItems([{
       kind: "compaction",

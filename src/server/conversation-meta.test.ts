@@ -537,6 +537,18 @@ describe("conversation reserved entries", () => {
       state: "completed",
       updatedAt: "2026-07-19T10:03:00.000Z",
     });
+    const preparedAttention = createPendingPromptBatchEntry({
+      ...prepared.data,
+      state: "attention",
+      reason: "sidecar disappeared during recovery",
+      updatedAt: "2026-07-19T10:04:00.000Z",
+    });
+    const deliveredAttention = createPendingPromptBatchEntry({
+      ...delivered.data,
+      state: "attention",
+      reason: "delivery proof was lost",
+      updatedAt: "2026-07-19T10:04:00.000Z",
+    });
 
     expect(prepared.customType).toBe(PENDING_PROMPT_BATCH_CUSTOM_TYPE);
     expect(parsePendingPromptBatchEntry(prepared)).toEqual(prepared);
@@ -552,6 +564,16 @@ describe("conversation reserved entries", () => {
       completed,
       completed,
     ]).pendingPromptBatches).toEqual([completed.data]);
+    expect(aggregateReservedConversationEntries([
+      prepared,
+      preparedAttention,
+    ]).pendingPromptBatches).toEqual([preparedAttention.data]);
+    expect(aggregateReservedConversationEntries([
+      prepared,
+      started,
+      delivered,
+      deliveredAttention,
+    ]).pendingPromptBatches).toEqual([deliveredAttention.data]);
     expect(() => aggregateReservedConversationEntries([started]))
       .toThrow(/begin in prepared/i);
     expect(() => aggregateReservedConversationEntries([
@@ -1026,8 +1048,13 @@ describe("conversation reserved entries", () => {
       runId,
       updatedAt: "2026-07-19T10:02:00.000Z",
     });
-    const completed = createConversationCardEntry({
+    const deliveredAfterRunning = createConversationCardEntry({
       ...running.data,
+      state: "delivered",
+      updatedAt: "2026-07-19T10:02:30.000Z",
+    });
+    const completed = createConversationCardEntry({
+      ...deliveredAfterRunning.data,
       state: "completed",
       result: "Done",
       updatedAt: "2026-07-19T10:03:00.000Z",
@@ -1042,6 +1069,7 @@ describe("conversation reserved entries", () => {
       initial,
       queued,
       running,
+      deliveredAfterRunning,
       completed,
       replayed,
     ]).cards).toEqual([replayed.data]);

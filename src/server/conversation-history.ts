@@ -117,7 +117,11 @@ function fallbackHistoryParts(
   if (thinking) {
     parts.push({ kind: "thinking", offset: 0, length: thinking.length });
   }
-  for (const tool of tools) {
+  const toolBudget = Math.max(
+    0,
+    MAX_HISTORY_PARTS_PER_MESSAGE - parts.length - (text ? 1 : 0),
+  );
+  for (const tool of tools.slice(0, toolBudget)) {
     parts.push({ kind: "tool", toolCallId: tool.toolCallId });
   }
   if (text) parts.push({ kind: "text", offset: 0, length: text.length });
