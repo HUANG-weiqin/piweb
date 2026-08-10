@@ -13,13 +13,14 @@
 - 用户可定义 Agent 角色：名称、简介、专属提示词和已配置提供商的固定模型
 - 首次提供可编辑、可删除的 default 角色；新会话仍必须显式选角色，不会自动套用 default
 - 模板后续编辑不会自动追溯到已有会话；会话空闲时可显式应用任一当前可用角色，并从下一轮整体切换模型、提示词与权限
+- 每个 Agent 都可列出并读取任意角色的完整定义；用户明确要求后，Agent 可起草完整替换提示词，只有用户在编辑器中完成审核才会原子写入下一 revision，名称、模型和权限保持不变
 - 思考级别仍写入 Pi 原生 `settings.json`
 - 工作目录可在启动页用工作台内置的只读文件夹浏览器选择，也保留绝对路径手输
 - 每个项目在 `.piweb/` 中持久保存项目清单、Pi JSONL 对话和跨会话 inbox
 - 可收缩的扁平左侧会话栏是唯一会话控制面，展示角色、稳定句柄、最后活跃时间、运行 spinner、等待沙漏、attention、未读和临时标记
 - 支持恢复最近对话、新建、切换观察、重命名和永久删除 idle 对话；切换焦点或断线不会中止后台 Agent
 - 损坏、crash 截断或结构上不是 Pi entry tree 的 JSONL，以及畸形 inbox/角色元数据，在索引与打开前 fail closed
-- Agent 拥有 9 个项目内 meta 工具，可列出角色/会话、查看自身与近期消息、创建 peer、互发消息、精确等待/中止 run 和删除 idle peer
+- 每个 Agent 都有 `list_roles / read_role / propose_role_revision` 三个角色工具；允许管理会话的角色另有 9 个项目内编排工具，可列出会话、查看自身与近期消息、创建 peer、互发消息、精确等待/中止 run 和删除 idle peer
 - Agent 创建会话默认不挂起调用者；它可以继续并行、显式等待，或让另一会话稍后主动回信
 - 临时会话成功后先持久回传精确初始 run 结果再自动删除；失败、中止或无回复会回传失败并保留目标
 - 跨会话消息是目标 Agent 的一等输入，并在双方 transcript 中显示可打开相关会话的独立消息卡片；busy 目标在当前工具调用结束后于同一 run 接收 durable steering，不会被强制中断
@@ -36,7 +37,7 @@
 - 流式输出只在用户位于底部时自动跟随；向上阅读时可一键回到最新消息，输入框会随内容有界增长
 - 工具权限只保留“全部授权”和“只读”两个项目级模式
 - 全部授权模式下所有工具和命令直接执行，也可以修改项目外文件
-- 只读模式只允许 Pi 原生 `read/grep/find/ls`；命令、写入、扩展和未知工具由服务端直接阻止
+- 只读模式只允许 Pi 原生 `read/grep/find/ls`、宿主 Git/Notebook 工具，以及由用户编辑器确认的角色提示词查看/提案工具；命令、项目写入、会话编排、扩展和未知工具由服务端直接阻止
 - 多窗口共享项目切到只读时会先封锁新运行、取消并结算旧运行，再确认持久模式
 - OAuth request/progress/response/cancel 使用 authFlowId 关联，取消后的迟到帧不会复活旧流程
 - 展示累计计费 token，并区分上下文 token 的 measured / estimated / unknown 来源
@@ -77,7 +78,7 @@
     *.json
 ```
 
-角色目录位于 `<Pi agent dir>/piweb/`，不随项目复制：`roles.json` 保存模型、权限等元数据，`role-prompts/<roleId>.<revision>.md` 保存可直接编辑的提示词；浏览器角色管理界面仍会读取和保存完整提示词。角色 ID 大小写不敏感且更新带当前 UI base prompt，外部编辑不会被旧 draft 静默覆盖。已有 conversation 始终使用创建或切换角色时写入 JSONL 的完整快照，不会随模板文件静默变化。`.piweb` 不保存 API Key；认证仍使用 Pi 的全局目录。只读模式下 Agent 不能写入它，但工作台宿主仍会保存清单、对话和 inbox；全部授权模式不会额外保护 `.piweb`。
+角色目录位于 `<Pi agent dir>/piweb/`，不随项目复制：`roles.json` 保存模型、权限等元数据，`role-prompts/<roleId>.<revision>.md` 保存可直接编辑的提示词；浏览器角色管理界面仍会读取和保存完整提示词。角色 ID 大小写不敏感且更新带当前 UI base prompt，外部编辑不会被旧 draft 静默覆盖。已有 conversation 始终使用创建或切换角色时写入 JSONL 的完整快照，不会随模板文件静默变化。每个工作台 Agent 都能通过 `read_role` 把任意角色提示词读入模型上下文和自身 transcript，因此角色提示词不是秘密存储，不应包含密钥或其它敏感值；`propose_role_revision` 只有在用户编辑器提交后才按 revision + base prompt CAS 更新模板。`.piweb` 不保存 API Key；认证仍使用 Pi 的全局目录。只读模式下 Agent 不能写项目源码，但工作台宿主仍会保存清单、对话、Notebook 和用户确认的角色 revision；全部授权模式允许通用文件工具访问项目外路径，并不把角色目录变成 OS 级受保护区域。
 
 ## 要求
 
@@ -116,9 +117,10 @@ npm start
 3. 如果还没有可用模型，先在“连接与权限”中选择提供商并用 API Key 或订阅登录；Key 通过 Pi 的 `AuthStorage` 保存，网页不会回显或写入浏览器存储。
 4. 打开“管理角色”，为 default 或新角色填写简介、专属提示词和模型。角色保存只在该命令收到明确回执后完成。
 5. 在角色选择页显式点选一个可用角色，再创建会话；选择前没有 composer。创建后可从 composer 底部的角色详情在会话空闲时应用另一角色。
-6. 在“工具权限”中选择“全部授权”或“只读”。Agent 的多会话 meta 工具只在全部授权下可用。
-7. 用左侧会话栏查看、新建和切换平级会话；后台会话继续运行，不会抢走当前焦点。
-8. 若消息发送确认前断线，先查看恢复后的对话是否已有该消息，再手动决定是否重试。
+6. 在“工具权限”中选择“全部授权”或“只读”。角色查看/提示词提案工具在两种模式下都可用；多会话编排工具仍要求角色启用会话管理且处于全部授权模式。
+7. 需要改进角色时，明确让 Agent 先读取目标角色并提议完整新版提示词；浏览器会打开编辑器，取消不写，完成后服务器写入下一 revision。
+8. 用左侧会话栏查看、新建和切换平级会话；后台会话继续运行，不会抢走当前焦点。
+9. 若消息发送确认前断线，先查看恢复后的对话是否已有该消息，再手动决定是否重试。
 
 ## 配置复用
 
@@ -161,7 +163,7 @@ Pi 会话格式与 SDK 用法可参考官方 [SDK 文档](https://pi.dev/docs/la
 
 ## 项目导航
 
-未来修改先读 [AGENTS.md](AGENTS.md) 和 [`.knowledge/INDEX.md`](.knowledge/INDEX.md)。多 Agent 的角色、actor、inbox、临时会话和 9 个工具集中记录在 [Agent 协作知识页](.knowledge/kb-agent-collaboration.md)。
+未来修改先读 [AGENTS.md](AGENTS.md) 和 [`.knowledge/INDEX.md`](.knowledge/INDEX.md)。多 Agent 的角色、actor、inbox、临时会话、3 个角色工具和 9 个会话编排工具集中记录在 [Agent 协作知识页](.knowledge/kb-agent-collaboration.md)。
 
 ## 验证
 

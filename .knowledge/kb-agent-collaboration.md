@@ -1,6 +1,6 @@
 # Agent 协作
 
-`updated: 2026-08-03`
+`updated: 2026-08-10`
 
 ## 这个模块是干什么的
 
@@ -17,8 +17,9 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
 
 ## 角色
 
-- `RoleStore` 是用户级严格 v5 目录，`<Pi agent dir>/piweb/roles.json` 保存角色元数据与受控 Markdown 引用，提示词正文位于同级 `role-prompts/<roleId>.<revision>.md`；项目文件不能修改角色目录。角色 ID 按大小写不敏感唯一校验；RoleStore 对上层仍投影完整 `systemPrompt`，浏览器协议和管理界面不观察文件边界。
-- 角色包含稳定 ID、revision、名称、简介、system prompt、固定 provider/model、模型默认思考强度、`read_only | full_access` 工具权限，以及 `canManageSessions` 能力。提示词文件必须与角色 ID/revision 精确匹配、是有限合法 UTF-8 的常规文件；每次读取重新 hydrate，因此外部编辑会影响后续模板读取，但没有 watcher 主动广播。读取使用同一打开句柄的有界内容，lstat/fstat 身份可用时复核，平台没有 O_NOFOLLOW 时不伪造保证。创建/更新先原子写新 revision Markdown，再原子替换 manifest，旧版 inline prompt 会保真迁移；成功重开时只清理严格受控且未引用的 prompt orphan。损坏、缺失、未知字段和未知版本 fail closed。更新使用 expected revision 加 UI base 的 expectedSystemPrompt，旧版角色的默认思考强度为 `off`、工具权限为 `read_only`、会话编排严格 opt-in。
+- `RoleStore` 是用户级严格 v5 目录，`<Pi agent dir>/piweb/roles.json` 保存角色元数据与受控 Markdown 引用，提示词正文位于同级 `role-prompts/<roleId>.<revision>.md`；角色目录不由项目文件定义或重定向。角色 ID 按大小写不敏感唯一校验；RoleStore 对上层仍投影完整 `systemPrompt`，浏览器协议和管理界面不观察文件边界。
+- 角色包含稳定 ID、revision、名称、简介、system prompt、固定 provider/model、模型默认思考强度、`read_only | full_access` 工具权限，以及 `canManageSessions` 能力。提示词文件必须与角色 ID/revision 精确匹配、是有限合法 UTF-8 的常规文件；每次读取重新 hydrate，因此外部编辑会影响后续模板读取，但没有 watcher 主动广播。读取使用同一打开句柄的有界内容，lstat/fstat 身份可用时复核，平台没有 O_NOFOLLOW 时不伪造保证。创建/更新先原子写新 revision Markdown，再原子替换 manifest，旧版 inline prompt 会保真迁移；成功重开时只清理严格受控且未引用的 prompt orphan。损坏、缺失、未知字段和未知版本 fail closed。更新使用 expected revision 加 UI base 的 expectedSystemPrompt，旧版角色的默认思考强度为 `off`、工具权限为 `read_only`、会话编排严格 opt-in。write tail 与 revision CAS 是单个 `RoleStore` 实例内的串行边界，不提供跨进程文件锁；同一 agent dir 不应由多个 Pi Web 服务并发写角色目录。
+- 每个工作台 Agent 都能读取任意角色的完整定义，因此角色 system prompt 会进入调用模型和来源 conversation transcript，不是秘密存储，不得放 API Key 或其它敏感值。Agent 只能通过 `propose_role_revision` 提议完整替换 system prompt；用户在 conversation-scoped editor 中取消时不写，完成后宿主才按 expected revision + captured base prompt CAS 写下一 revision。名称、简介、模型、思考强度、工具权限和会话管理能力均由旧模板复制，工具参数不能提交这些字段。
 - 初始化“默认 / 默认角色”只是首次展示模板，可以像其它角色一样编辑、删除，删除后不会重建；新会话仍必须显式选择角色。
 - `RoleCatalog` 用当前项目 actor 的 session-local 模型目录动态计算模板是否可用，因此项目静态 provider 也能参与选择；空项目使用 coordinator 持有的 project model catalog，它经过相同 trust/resource/provider 校验，但不会创建隐藏 AgentSession。角色 CRUD、模型列表和 API Key provider 校验都使用这条项目目录；真正创建还会由 `PiRuntime` 在项目资源加载后再次校验固定模型。
 - 新会话把完整角色修订（包括默认思考强度、工具权限与会话管理能力）复制到 `piweb.conversation_meta.v1`。之后修改或删除模板不会自动改变旧会话；用户可在 idle 边界显式应用一个当前可用模板，宿主追加 `piweb.conversation_role_change.v1` 并用同一 SessionManager 重建 AgentSession。角色 prompt 追加到会话 system prompt，实际模型与初始思考强度必须与当前快照完全一致，SDK fallback/clamp 会被拒绝。旧 conversation metadata 缺少默认思考强度、工具权限或能力字段时分别按 `off` / `read_only` / 关闭迁移。
@@ -39,7 +40,7 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
 
 ### Extension UI
 
-扩展 UI 只在线路上路由到当前被该浏览器 focus 的 conversation。后台 actor 暂无 UI delegate 时，请求留在 conversation router 中并把目标标为 attention，不会抢走用户焦点；用户切换到该会话后才发出对话框并可正常回答。等待 focus 期间仍遵守 extension 的 AbortSignal/timeout；切走 focus 会取消已经发给浏览器的旧对话框，项目关闭会用取消值结算全部待处理请求。
+扩展 UI 只在线路上路由到当前被该浏览器 focus 的 conversation。后台 actor 暂无 UI delegate 时，请求留在 conversation router 中并把目标标为 attention，不会抢走用户焦点；用户切换到该会话后才发出对话框并可正常回答。等待 focus 期间仍遵守 extension 的 AbortSignal/timeout；切走 focus 会取消已经发给浏览器的旧对话框，项目关闭会用取消值结算全部待处理请求。角色提示词 editor 额外绑定当前工具调用的 AbortSignal：无 delegate 或已发到浏览器时取消 run 都会结算 router/broker pending、关闭对话框并禁止迟到回答落版。
 
 ## 持久通信
 
@@ -101,10 +102,19 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
 
 ## Agent meta 工具
 
-只有 frozen role 的 `canManageSessions=true` 时，actor 才注入完整十个工具：
+每个 actor 无论工具模式和 `canManageSessions` 值都注入三个角色工具：
 
 ```text
 list_roles
+read_role
+propose_role_revision
+```
+
+`list_roles` 返回有界角色元数据与 revision；`read_role` 一次读取一个角色的完整当前定义；`propose_role_revision` 要求调用方提交刚读取的 expected revision 和完整替换 prompt，只在用户 editor 提交后落版。提案可指向任意角色（包括调用者自身和 default），但不能创建/删除角色，也不能改认证、trust、既有会话角色或模型。prompt 已是目标值时返回 `already_current`；基线变化返回 `stale`；取消/中止返回 `cancelled`；用户改回基线返回 `unchanged`；成功返回新 revision。editor 返回后会重新读取基线，真正写入仍由 `RoleStore.updateRole` CAS 防止竞态。
+
+只有 frozen role 的 `canManageSessions=true` 时，actor 才额外注入九个会话编排工具：
+
+```text
 list_sessions
 current_session
 peek_session
@@ -116,10 +126,9 @@ abort_session
 delete_session
 ```
 
-`canManageSessions=false` 时工具列表是空数组，不注册占位工具，也不向模型提供名称、参数、说明、回复工具提示或生命周期管理提示。该决定只读取 conversation role snapshot；后续编辑角色模板不会改变已存在会话的工具 schema，因此不会破坏既有会话的缓存前缀。
+`canManageSessions=false` 时不注册会话编排工具，也不向模型提供它们的名称、参数、说明、回复提示或生命周期管理提示。该决定只读取 conversation role snapshot；后续编辑角色模板不会改变已存在会话的编排 schema，因此不会破坏既有会话的缓存前缀。
 
-- 工具闭包绑定来源 conversation 和当前 canonical project，不接受 cwd/projectId，不能跨项目。
-- Agent 只能查看和选择角色，不能 CRUD 角色、改认证/trust、换既有会话角色或模型。
+- 工具闭包绑定来源 conversation 和当前 canonical project，不接受 cwd/projectId，不能跨项目；角色目录本身是用户级共享状态，但模型可用性仍按来源 actor 的 session-local model registry 投影。
 - `start_session` 必须给 role 和 task，创建平级持久会话；工具指导要求 Agent 创建持久会话前先用 `list_sessions(scope=created_by_me)` 查找自己负责的现有会话，职责匹配时通过 `send_session_message` 复用，只有没有合适会话才新建。`start_temporary_session` 创建一次性会话，用于只需要初始最终答复的调查、审计或快速 review；成功结果返回给调用者后自动删除。两者都在冻结角色、初始 task 和固定 runId 被可靠接受并调度后返回 `conversationId + runId`。目标空闲时立即取得 run ticket；若更早的 run 抢先则持久等待泵送。两种情况都不会隐式等待或挂起调用者。
 - UI 仍投影扁平会话，但宿主在 conversation metadata 与来源 delegation card 中持久保存 `rootConversationId + depth + sourceRunId`。root 深度为 0，最多委派到深度 3；一个来源 run 最多消费 16 个 peer reservation，同一 root 最多保留 16 个 live descendants。per-run 计数来自来源 JSONL 的 append-only card，目标删除、临时会话自删和重启都不能退回额度；live 容量只有 conversation 真正删除后才释放。旧 `createdBy` 链会递归推导并校验；删除一个 conversation 会级联其 metadata descendants，旧隐式 child 不再阻止父删除，而是跟随父删除；恢复中的旧 run 则把无法关联 runId 的 legacy delegation card 保守计入额度。
 - `send_session_message` 在持久接收后返回；busy 目标仍保持当前 run。若目标正在等待发送者的精确 run，则返回 `delivered_to_wait`，消息直接进入目标当前 turn，发送者仍可继续运行。
@@ -131,7 +140,7 @@ delete_session
 - `peek_session` 不启动 inactive 目标的模型/扩展，不移动 recent；只返回 user/assistant 可见正文和会话卡片，过滤 thinking/tool/auth/internal，默认只看最近 2 项，工具说明提醒 Agent 通常先看最后 1–2 项即可，最多 20 项且完整 JSON 不超过 256 KiB。inactive inspection 与删除共用 lifecycle 边界，因此短暂 writer lease 会先释放，删除不会留下只能靠重启恢复的 tombstone。
 - 列表和正文同样有界；Agent 看到稳定完整 conversationId，而 UI 可另显示短句柄。`list_sessions` 的每项显式返回 durable `createdBy` 与观察者相对的 `createdByMe`，并支持 `scope=created_by_me`，让 Agent 无需依赖对话记忆即可找回自己负责的会话；尚未迁移、确实没有 conversation profile 的旧条目如实标为 `createdBy.kind=unknown`。
 
-meta 工具仍经过项目扩展 hook、run ownership 和宿主 tool gate。它们不是 builtin 只读工具，因此完整 Agent 编排只在 `full_access` 可用，`read_only` 语义不变。
+所有宿主工具仍经过项目扩展 hook、run ownership 和 source-aware tool gate。`list_roles/read_role/propose_role_revision` 是 `source=sdk` 的显式只读模式例外：前两个只读宿主状态，最后一个只有用户 editor 提交才写角色 prompt。九个会话编排工具仍只在 `canManageSessions=true + full_access` 时可用；扩展或项目工具即使同名也不能冒充 SDK 角色工具。`full_access` 仍允许通用文件工具访问项目外路径，不是角色目录的 OS sandbox，因此这里的人工确认保证只覆盖 `propose_role_revision` 工作流。
 
 ## 入口
 

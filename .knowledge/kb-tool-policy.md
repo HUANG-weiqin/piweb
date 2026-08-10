@@ -1,6 +1,6 @@
 # 工具权限
 
-`updated: 2026-07-23`
+`updated: 2026-08-10`
 
 ## 这个模块是干什么的
 
@@ -19,7 +19,7 @@ conversation role snapshot
 → SDK block result 或 tool.execute
 ```
 
-没有逐工具询问、一次性许可或命令白名单。
+权限层本身没有通用的逐工具询问、一次性许可或命令白名单；`propose_role_revision` 是工具语义内的窄例外，必须等待 conversation-scoped editor 返回用户提交文本后才写角色 prompt。
 
 ## 状态所有权
 
@@ -31,8 +31,8 @@ conversation role snapshot
 ## 策略
 
 - `full_access` 允许所有工具和命令，不区分来源或目标位置；项目外路径和 `.piweb` 也不额外拦截。
-- `read_only` 对模型只展示 `source=builtin` 的 Pi 原生 `read / grep / find / ls`，以及 `source=sdk` 的宿主 `git_status / git_diff` 和 conversation-scoped `notebook_write / notebook_list / notebook_grep / notebook_read`；`bash / edit / write`、meta 和其他扩展工具不进入有效 registry、model tools 或 system prompt。
-- 执行 gate 独立重复同一 identity 约束；`read_only` 直接拒绝命令、项目写入、unknown、工作台 meta，以及同名 extension/project 工具。工具不可见不是权限边界，硬拒绝仍不可删除。
+- `read_only` 对模型只展示 `source=builtin` 的 Pi 原生 `read / grep / find / ls`，以及 `source=sdk` 的宿主 `git_status / git_diff`、conversation-scoped `notebook_write / notebook_list / notebook_grep / notebook_read` 和 `list_roles / read_role / propose_role_revision`；`bash / edit / write`、会话编排 meta 和其他扩展工具不进入有效 registry、model tools 或 system prompt。
+- 执行 gate 独立重复同一 identity 约束；`read_only` 直接拒绝命令、项目写入、unknown、会话编排 meta，以及同名 extension/project 工具。三个角色工具只有 `source=sdk` 时放行；工具不可见不是权限边界，硬拒绝仍不可删除。
 - 扩展可以用 `read` 等名称覆盖内置工具；策略必须同时检查最终 `toolName` 和 SDK `ToolInfo.sourceInfo.source`，不能只按名称放行。PiRuntime 对每次 `setActiveToolsByName`（包括 extension refresh 和 `setActiveTools`）重新做 source-aware 投影，同名覆盖发生后宁可移除该工具，也不把扩展 schema/snippet 暴露给只读模型。
 - Agent 的 `read_only` 只限制经过 Pi 工具入口的调用；工作台宿主仍会写 manifest 和 transcript。
 
@@ -57,14 +57,15 @@ Archive 是可恢复隐藏，不是删除：默认 list 不显示 archived，但
 
 ## Agent 宿主工具
 
-ConversationActor 按角色模式注入宿主工具：
+ConversationActor 按角色模式和会话管理能力注入宿主工具：
 
 ```text
 read_only only: git_status / git_diff
-notebook_write / notebook_list / notebook_grep / notebook_read
-list_roles / list_sessions / current_session / peek_session
-start_session / start_temporary_session / send_session_message / wait_for_session
-abort_session / delete_session
+all roles: notebook_write / notebook_list / notebook_grep / notebook_read
+all roles: list_roles / read_role / propose_role_revision
+canManageSessions only: list_sessions / current_session / peek_session
+canManageSessions only: start_session / start_temporary_session / send_session_message
+canManageSessions only: wait_for_session / abort_session / delete_session
 ```
 
 这些宿主 schema 同样避免 `anyOf/oneOf`，以兼容对工具 schema 子集较严格的 provider。
@@ -74,11 +75,12 @@ abort_session / delete_session
 - 项目 extension `tool_call` hook 先观察/变换调用，宿主再按最终工具 identity 与 run ownership 决策；
 - 工具闭包固定来源 conversation 和 canonical project，参数不能提交 cwd/projectId；
 - `read_only` 允许 `notebook_write`，因为它只写当前 conversation 的宿主工作记忆 sidecar，生命周期等同 transcript，不是项目源码写入；
-- `read_only` 不因 list/peek 看似只读而部分开放整套会话控制面，第一版统一拒绝 meta 工具；
+- `read_only` 允许读取所有用户级角色 prompt，它们会进入调用模型与当前 transcript，因此角色 prompt 不能保存秘密；`propose_role_revision` 的 Agent 参数只包含目标、expected revision、完整替换 prompt 和理由，名称、模型及权限字段不存在于 schema，用户取消或中止 run 都不会落版；
+- `read_only` 不因 list/peek 看似只读而部分开放会话控制面；九个会话编排工具仍全部拒绝；
 - `full_access` 才允许 Agent 创建、通信、等待、中止和删除 peer conversation；删除会级联 metadata descendants，但 self delete、级联删除自身、self abort/wait、busy delete、stale runId 等生命周期约束仍由 coordinator 独立校验；
 - 用户从 UI 发起的角色管理、焦点切换和宿主持久化不经过 Agent tool gate，仍受协议身份与各自串行边界约束。
 
-`full_access` 是执行许可，不是无限生命周期权限。meta 能力只限当前项目，不能修改角色目录、认证、trust 或既有会话的角色/模型。
+`full_access` 是执行许可，不是无限生命周期权限或文件系统 sandbox。会话编排能力只限当前项目，不能通过 meta 工具改认证、trust 或既有会话的角色/模型；但通用 `bash/edit/write` 仍可访问进程有权访问的项目外路径，包括用户级角色文件，所以人工确认只保证 `propose_role_revision` 这条宿主工作流，不能替代 OS 隔离。
 
 ## 生命周期
 
