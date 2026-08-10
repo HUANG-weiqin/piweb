@@ -10,10 +10,16 @@ import {
   type ServerEvent,
 } from "../shared/protocol.js";
 
-export type PortableExtensionUI = Pick<
-  ExtensionUIContext,
-  "select" | "confirm" | "input" | "notify" | "editor"
->;
+export type PortableExtensionUI = Omit<
+  Pick<ExtensionUIContext, "select" | "confirm" | "input" | "notify" | "editor">,
+  "editor"
+> & {
+  editor(
+    title: string,
+    prefill?: string,
+    options?: ExtensionUIDialogOptions,
+  ): Promise<string | undefined>;
+};
 
 export interface ExtensionUIScope {
   sessionId: string;
@@ -100,10 +106,10 @@ export class ExtensionUIBroker {
             : { accepted: false };
         },
       ),
-      editor: (title, prefill) => this.request(
+      editor: (title, prefill, dialogOptions) => this.request(
         scope,
         { kind: "editor", title, prefill },
-        undefined,
+        dialogOptions,
         undefined,
         (response) => {
           if (response.kind === "cancel") return { accepted: true, value: undefined };

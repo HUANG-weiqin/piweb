@@ -97,6 +97,39 @@ describe("ExtensionUIBroker", () => {
     expect(events.filter(({ type }) => type === "extension_ui_closed")).toHaveLength(2);
   });
 
+  it("settles an editor on dialog-signal abort and rejects a late response", async () => {
+    const events: ServerEvent[] = [];
+    const broker = new ExtensionUIBroker(
+      (event) => events.push(event),
+      () => REQUEST_A,
+    );
+    const controller = new AbortController();
+    const editor = broker.context({
+      sessionId: SESSION_A,
+      generation: 3,
+    }).editor("Edit", "draft", { signal: controller.signal });
+
+    expect(events[0]).toMatchObject({
+      type: "extension_ui_request",
+      sessionId: SESSION_A,
+      requestId: REQUEST_A,
+      request: { kind: "editor", title: "Edit", prefill: "draft" },
+    });
+    controller.abort();
+
+    await expect(editor).resolves.toBeUndefined();
+    expect(events[1]).toEqual({
+      type: "extension_ui_closed",
+      sessionId: SESSION_A,
+      requestId: REQUEST_A,
+    });
+    expect(broker.respond({
+      sessionId: SESSION_A,
+      requestId: REQUEST_A,
+      response: { kind: "editor", value: "late" },
+    })).toBe(false);
+  });
+
   it("cancels one generation without settling another and forwards notifications", async () => {
     const events: ServerEvent[] = [];
     const ids = [REQUEST_A, REQUEST_B];

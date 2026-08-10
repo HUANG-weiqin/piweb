@@ -92,6 +92,7 @@ import {
   RoleCatalog,
   type RoleCatalogModelRegistry,
 } from "./role-catalog.js";
+import { MAX_ROLE_SYSTEM_PROMPT_BYTES } from "./role-store.js";
 import { SerialTaskQueue } from "./serial-task-queue.js";
 import {
   defaultToolPolicy,
@@ -299,6 +300,26 @@ function normalizedTitle(title: string | undefined, fallback: string): string {
   return [...value].slice(0, 80).join("");
 }
 
+function assertRoleSystemPromptBytes(value: string, field: string): void {
+  if (Buffer.byteLength(value, "utf8") > MAX_ROLE_SYSTEM_PROMPT_BYTES) {
+    throw new Error(
+      `${field} exceeds ${MAX_ROLE_SYSTEM_PROMPT_BYTES} UTF-8 bytes`,
+    );
+  }
+}
+
+function roleRevisionEditorTitle(
+  roleName: string,
+  revision: number,
+  reason: string,
+): string {
+  const normalizedReason = reason.replace(/[\r\n]+/g, " ").trim();
+  const truncatedReason = [...normalizedReason].slice(0, 160).join("");
+  return `审核角色提示词：${roleName}（修订 ${revision}）${
+    truncatedReason ? `：${truncatedReason}` : ""
+  }`;
+}
+
 function cloneSettlement(settlement: RunSettlement): RunSettlement {
   return { ...settlement };
 }
@@ -455,10 +476,11 @@ class ConversationExtensionUIRouter {
       (delegate, routedOptions) =>
         delegate.input(title, placeholder, routedOptions),
     ),
-    editor: (title, prefill) => this.route(
+    editor: (title, prefill, dialogOptions) => this.route(
       undefined,
-      undefined,
-      (delegate) => delegate.editor(title, prefill),
+      dialogOptions,
+      (delegate, routedOptions) =>
+        delegate.editor(title, prefill, routedOptions),
     ),
     notify: (message, level) => {
       if (this.closed) return;
@@ -2768,12 +2790,21 @@ export class ProjectSessionCoordinator {
   }
 
   private metaService(context: ProjectContext): MetaToolService {
+    const roleForSource = (sourceConversationId: string, roleId: string) => {
+      const source = this.requireActor(context, sourceConversationId);
+      const role = this.roles.listRoles(source.modelRegistry)
+        .find(({ id }) => id === roleId);
+      if (!role) throw new Error(`Role not found: ${roleId}`);
+      return { source, role };
+    };
+
     return {
       listRoles: async (sourceConversationId) =>
         this.roles.listRoles(
           this.requireActor(context, sourceConversationId).modelRegistry,
         ).map((role) => ({
           id: role.id,
+          revision: role.revision,
           name: role.name,
           description: role.description,
           model: role.model,
@@ -2782,6 +2813,109 @@ export class ProjectSessionCoordinator {
             ? { unavailableReason: role.unavailableReason }
             : {}),
         })),
+      readRole: async (sourceConversationId, input) => {
+        const { role } = roleForSource(sourceConversationId, input.roleId);
+        return {
+          id: role.id,
+          revision: role.revision,
+          name: role.name,
+          description: role.description,
+          systemPrompt: role.systemPrompt,
+          model: role.model,
+          defaultThinkingLevel: role.defaultThinkingLevel,
+          toolMode: role.toolMode,
+          canManageSessions: role.canManageSessions,
+          available: role.available,
+          ...(role.unavailableReason
+            ? { unavailableReason: role.unavailableReason }
+            : {}),
+        };
+      },
+      proposeRoleRevision: async (
+        sourceConversationId,
+        input,
+        signal,
+      ) => {
+        const { source, role } = roleForSource(
+          sourceConversationId,
+          input.roleId,
+        );
+        assertRoleSystemPromptBytes(input.newSystemPrompt, "newSystemPrompt");
+        if (role.systemPrompt === input.newSystemPrompt) {
+          return {
+            outcome: "already_current" as const,
+            roleId: role.id,
+            revision: role.revision,
+          };
+        }
+        if (role.revision !== input.expectedRevision) {
+          return {
+            outcome: "stale" as const,
+            roleId: role.id,
+            expectedRevision: input.expectedRevision,
+            revision: role.revision,
+          };
+        }
+        if (signal?.aborted) return { outcome: "cancelled" as const };
+
+        const finalPrompt = await this.extensionUIRouter(
+          context,
+          sourceConversationId,
+        ).ui.editor(
+          roleRevisionEditorTitle(role.name, role.revision, input.reason),
+          input.newSystemPrompt,
+          { signal },
+        );
+        if (signal?.aborted || typeof finalPrompt !== "string") {
+          return { outcome: "cancelled" as const };
+        }
+        assertRoleSystemPromptBytes(finalPrompt, "finalSystemPrompt");
+        const current = roleForSource(sourceConversationId, input.roleId).role;
+        if (
+          current.revision !== role.revision
+          || current.systemPrompt !== role.systemPrompt
+        ) {
+          return {
+            outcome: "stale" as const,
+            roleId: current.id,
+            expectedRevision: input.expectedRevision,
+            revision: current.revision,
+          };
+        }
+        if (signal?.aborted) return { outcome: "cancelled" as const };
+        if (finalPrompt === role.systemPrompt) {
+          return {
+            outcome: "unchanged" as const,
+            roleId: role.id,
+            previousRevision: role.revision,
+            revision: role.revision,
+            userEdited: finalPrompt !== input.newSystemPrompt,
+          };
+        }
+
+        const updated = await this.roles.updateRole(
+          role.id,
+          input.expectedRevision,
+          role.systemPrompt,
+          {
+            name: role.name,
+            description: role.description,
+            systemPrompt: finalPrompt,
+            model: role.model === null ? null : { ...role.model },
+            defaultThinkingLevel: role.defaultThinkingLevel,
+            toolMode: role.toolMode,
+            canManageSessions: role.canManageSessions,
+          },
+          source.modelRegistry,
+        );
+        return {
+          outcome: "applied" as const,
+          roleId: updated.id,
+          previousRevision: role.revision,
+          revision: updated.revision,
+          userEdited: finalPrompt !== input.newSystemPrompt,
+        };
+      },
       listSessions: async (sourceConversationId, input) => {
         const sessions = await this.listSessionsForMeta(
           context,

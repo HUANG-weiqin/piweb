@@ -4,6 +4,7 @@ import {
   type MetaToolService,
 } from "./meta-tools.js";
 import { MAX_CONVERSATION_BODY_BYTES } from "./conversation-meta.js";
+import { MAX_ROLE_SYSTEM_PROMPT_BYTES } from "./role-store.js";
 
 const sourceConversationId = "source-session";
 const targetConversationId = "11111111-1111-4111-8111-111111111111";
@@ -12,6 +13,8 @@ const targetRunId = "22222222-2222-4222-8222-222222222222";
 function service(): MetaToolService {
   return {
     listRoles: vi.fn(async () => ({ roles: [] })),
+    readRole: vi.fn(async () => ({ roleId: "default" })),
+    proposeRoleRevision: vi.fn(async () => ({ outcome: "cancelled" })),
     listSessions: vi.fn(async () => ({ sessions: [] })),
     currentSession: vi.fn(async () => ({ conversationId: sourceConversationId })),
     peekSession: vi.fn(async () => ({ items: [] })),
@@ -33,11 +36,13 @@ function tool(
 }
 
 describe("createMetaTools", () => {
-  it("exposes the fixed ten-tool orchestration surface", () => {
+  it("exposes the fixed role and orchestration tool surface", () => {
     const tools = createMetaTools(sourceConversationId, service());
 
     expect(tools.map(({ name }) => name)).toEqual([
       "list_roles",
+      "read_role",
+      "propose_role_revision",
       "list_sessions",
       "current_session",
       "peek_session",
@@ -89,13 +94,55 @@ describe("createMetaTools", () => {
     );
   });
 
-  it("exposes no orchestration tool metadata when the frozen role disallows it", () => {
+  it("keeps safe role tools when the frozen role disallows orchestration", () => {
     const fake = service();
 
-    expect(createMetaTools(sourceConversationId, fake, false)).toEqual([]);
+    expect(createMetaTools(sourceConversationId, fake, false)
+      .map(({ name }) => name)).toEqual([
+        "list_roles",
+        "read_role",
+        "propose_role_revision",
+      ]);
     expect(Object.values(fake).every((method) => (
       vi.mocked(method).mock.calls.length === 0
     ))).toBe(true);
+  });
+
+  it("binds role reads and proposals to the source conversation", async () => {
+    const fake = service();
+    const tools = createMetaTools(sourceConversationId, fake, false);
+    const signal = new AbortController().signal;
+    const proposal = {
+      roleId: "default",
+      expectedRevision: 3,
+      newSystemPrompt: "A complete replacement.",
+      reason: "The user explicitly requested this change.",
+    };
+
+    await tool(tools, "read_role").execute(
+      "read-role",
+      { roleId: "default" },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    await tool(tools, "propose_role_revision").execute(
+      "propose-role",
+      proposal,
+      signal,
+      undefined,
+      {} as never,
+    );
+
+    expect(fake.readRole).toHaveBeenCalledWith(
+      sourceConversationId,
+      { roleId: "default" },
+    );
+    expect(fake.proposeRoleRevision).toHaveBeenCalledWith(
+      sourceConversationId,
+      proposal,
+      signal,
+    );
   });
 
   it("binds source identity and starts persistent sessions without adding a wait", async () => {
@@ -209,6 +256,28 @@ describe("createMetaTools", () => {
       undefined,
       {} as never,
     )).rejects.toThrow(/UTF-8 bytes/);
+  });
+
+  it("enforces the role system prompt UTF-8 byte contract", async () => {
+    const fake = service();
+    const tools = createMetaTools(sourceConversationId, fake, false);
+    const oversizedUtf8 = "界".repeat(
+      Math.floor(MAX_ROLE_SYSTEM_PROMPT_BYTES / 3) + 1,
+    );
+
+    await expect(tool(tools, "propose_role_revision").execute(
+      "oversized-role-prompt",
+      {
+        roleId: "default",
+        expectedRevision: 1,
+        newSystemPrompt: oversizedUtf8,
+        reason: "The user explicitly requested this change.",
+      },
+      undefined,
+      undefined,
+      {} as never,
+    )).rejects.toThrow(/UTF-8 bytes/);
+    expect(fake.proposeRoleRevision).not.toHaveBeenCalled();
   });
 
   it("uses bounded defaults for list and peek operations", async () => {

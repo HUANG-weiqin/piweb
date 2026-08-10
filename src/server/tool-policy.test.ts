@@ -20,6 +20,9 @@ describe("defaultToolPolicy", () => {
     "notebook_list",
     "notebook_grep",
     "notebook_read",
+    "list_roles",
+    "read_role",
+    "propose_role_revision",
   ])(
     "allows the host-owned %s tool in read-only mode",
     (toolName) => {
@@ -51,6 +54,9 @@ describe("defaultToolPolicy", () => {
     ["notebook_list", "builtin"],
     ["notebook_grep", "extension"],
     ["notebook_read", "project"],
+    ["list_sessions", "sdk"],
+    ["current_session", "sdk"],
+    ["start_session", "sdk"],
   ])(
     "denies %s from %s in read-only mode",
     (toolName, toolSource) => {

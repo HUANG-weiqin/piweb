@@ -1263,6 +1263,9 @@ describe("ProjectSessionCoordinator", () => {
       "notebook_list",
       "notebook_grep",
       "notebook_read",
+      "list_roles",
+      "read_role",
+      "propose_role_revision",
     ]);
     expect(second.profile.role).toMatchObject({
       revision: 2,
@@ -1283,6 +1286,8 @@ describe("ProjectSessionCoordinator", () => {
       "notebook_grep",
       "notebook_read",
       "list_roles",
+      "read_role",
+      "propose_role_revision",
       "list_sessions",
       "current_session",
       "peek_session",
@@ -1488,6 +1493,336 @@ describe("ProjectSessionCoordinator", () => {
         model: projectModel,
       }),
     ]));
+  });
+
+  it("lets a read-only Agent propose a gated prompt-only role revision", async () => {
+    const fixture = await createFixture();
+    const targetRole = await fixture.roles.createRole({
+      name: "Prompt reviewer",
+      description: "Reviews prompts",
+      systemPrompt: "The original prompt.",
+      model: { provider: "test", id: "model-b" },
+      defaultThinkingLevel: "high",
+      toolMode: "read_only",
+      canManageSessions: false,
+    });
+    const sourceRole = await fixture.roles.createRole({
+      name: "Restricted prompt editor",
+      description: "May only inspect project files and propose role prompts",
+      systemPrompt: "Improve roles only when the user asks.",
+      model: { provider: "test", id: "model-a" },
+      defaultThinkingLevel: "off",
+      toolMode: "read_only",
+      canManageSessions: false,
+    });
+    const existingTarget = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: targetRole.id, title: "Existing target" },
+    );
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: sourceRole.id },
+    );
+    const sourceTools = fixture.runtime.createOptions
+      .get(source.conversationId)?.workbenchCustomTools
+      ?.map(({ name }) => name);
+    expect(sourceTools).toEqual(expect.arrayContaining([
+      "list_roles",
+      "read_role",
+      "propose_role_revision",
+    ]));
+    expect(sourceTools).not.toContain("list_sessions");
+
+    const before = fixture.roles.getRoleTemplate(targetRole.id);
+    const listed = await executeTool(
+      fixture.runtime.control(source.conversationId),
+      "list_roles",
+      "list-role-revision",
+      {},
+    );
+    expect(listed).toContainEqual(expect.objectContaining({
+      id: targetRole.id,
+      revision: before.revision,
+    }));
+    await expect(executeTool(
+      fixture.runtime.control(source.conversationId),
+      "read_role",
+      "read-role-complete",
+      { roleId: targetRole.id },
+    )).resolves.toEqual({
+      id: before.id,
+      revision: before.revision,
+      name: before.name,
+      description: before.description,
+      systemPrompt: before.systemPrompt,
+      model: before.model,
+      defaultThinkingLevel: before.defaultThinkingLevel,
+      toolMode: before.toolMode,
+      canManageSessions: before.canManageSessions,
+      available: before.available,
+    });
+
+    const replacement = "The reviewed replacement prompt.";
+    let editorResult: string | undefined = replacement;
+    const editorCalls: Array<{ title: string; prefill: string }> = [];
+    const detach = fixture.coordinator.attachExtensionUI(
+      fixture.handle,
+      source.conversationId,
+      {
+        select: async () => undefined,
+        confirm: async () => false,
+        input: async () => undefined,
+        editor: async (title, prefill) => {
+          editorCalls.push({ title, prefill });
+          return editorResult;
+        },
+        notify: () => undefined,
+      } satisfies PortableExtensionUI,
+    );
+    try {
+      await expect(executeTool(
+        fixture.runtime.control(source.conversationId),
+        "propose_role_revision",
+        "propose-role-applied",
+        {
+          roleId: targetRole.id,
+          expectedRevision: before.revision,
+          newSystemPrompt: replacement,
+          reason: "The user explicitly requested a reviewed prompt.",
+        },
+      )).resolves.toEqual({
+        outcome: "applied",
+        roleId: targetRole.id,
+        previousRevision: before.revision,
+        revision: before.revision + 1,
+        userEdited: false,
+      });
+      expect(editorCalls).toHaveLength(1);
+      expect(editorCalls[0]).toMatchObject({
+        title: expect.stringContaining(before.name),
+        prefill: replacement,
+      });
+      expect(editorCalls[0]?.title).toContain(`修订 ${before.revision}`);
+
+      const after = fixture.roles.getRoleTemplate(targetRole.id);
+      expect(after).toMatchObject({
+        id: before.id,
+        revision: before.revision + 1,
+        name: before.name,
+        description: before.description,
+        systemPrompt: replacement,
+        model: before.model,
+        defaultThinkingLevel: before.defaultThinkingLevel,
+        toolMode: before.toolMode,
+        canManageSessions: before.canManageSessions,
+        createdAt: before.createdAt,
+      });
+      expect(existingTarget.profile.role).toMatchObject({
+        revision: before.revision,
+        systemPrompt: before.systemPrompt,
+      });
+
+      const appliedEditorCallCount = editorCalls.length;
+      await expect(executeTool(
+        fixture.runtime.control(source.conversationId),
+        "propose_role_revision",
+        "propose-role-replay",
+        {
+          roleId: targetRole.id,
+          expectedRevision: before.revision,
+          newSystemPrompt: replacement,
+          reason: "Replay the already applied proposal.",
+        },
+      )).resolves.toEqual({
+        outcome: "already_current",
+        roleId: targetRole.id,
+        revision: before.revision + 1,
+      });
+      expect(editorCalls).toHaveLength(appliedEditorCallCount);
+
+      editorResult = replacement;
+      await expect(executeTool(
+        fixture.runtime.control(source.conversationId),
+        "propose_role_revision",
+        "propose-role-unchanged",
+        {
+          roleId: targetRole.id,
+          expectedRevision: before.revision + 1,
+          newSystemPrompt: "A replacement edited back to the base.",
+          reason: "The editor can return the original prompt.",
+        },
+      )).resolves.toEqual({
+        outcome: "unchanged",
+        roleId: targetRole.id,
+        previousRevision: before.revision + 1,
+        revision: before.revision + 1,
+        userEdited: true,
+      });
+      expect(editorCalls).toHaveLength(appliedEditorCallCount + 1);
+
+      editorResult = undefined;
+      await expect(executeTool(
+        fixture.runtime.control(source.conversationId),
+        "propose_role_revision",
+        "propose-role-cancelled",
+        {
+          roleId: targetRole.id,
+          expectedRevision: after.revision,
+          newSystemPrompt: "A cancelled replacement.",
+          reason: "The user can still cancel this editor.",
+        },
+      )).resolves.toEqual({ outcome: "cancelled" });
+      expect(fixture.roles.getRoleTemplate(targetRole.id).systemPrompt)
+        .toBe(replacement);
+
+      const editorCallCount = editorCalls.length;
+      await expect(executeTool(
+        fixture.runtime.control(source.conversationId),
+        "propose_role_revision",
+        "propose-role-stale",
+        {
+          roleId: targetRole.id,
+          expectedRevision: before.revision,
+          newSystemPrompt: "A stale replacement.",
+          reason: "This must not open the editor.",
+        },
+      )).resolves.toEqual({
+        outcome: "stale",
+        roleId: targetRole.id,
+        expectedRevision: before.revision,
+        revision: after.revision,
+      });
+      expect(editorCalls).toHaveLength(editorCallCount);
+
+      const newTarget = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: targetRole.id, title: "New target" },
+      );
+      expect(newTarget.profile.role).toMatchObject({
+        revision: after.revision,
+        systemPrompt: replacement,
+      });
+      expect(fixture.runtime.createOptions.get(newTarget.conversationId))
+        .toMatchObject({ roleSystemPrompt: replacement });
+    } finally {
+      detach();
+    }
+  });
+
+  it("cancels a role proposal through the router when no UI delegate is attached", async () => {
+    const fixture = await createFixture();
+    const targetRole = await fixture.roles.createRole({
+      name: "No delegate target",
+      description: "",
+      systemPrompt: "Keep this prompt.",
+      model: { provider: "test", id: "model-a" },
+      defaultThinkingLevel: "off",
+      toolMode: "read_only",
+      canManageSessions: false,
+    });
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const controller = new AbortController();
+    const proposal = executeTool(
+      fixture.runtime.control(source.conversationId),
+      "propose_role_revision",
+      "propose-role-no-delegate-abort",
+      {
+        roleId: targetRole.id,
+        expectedRevision: targetRole.revision,
+        newSystemPrompt: "This must not be written.",
+        reason: "Abort while waiting for the missing UI delegate.",
+      },
+      controller.signal,
+    );
+    await Promise.resolve();
+    controller.abort();
+
+    await expect(proposal).resolves.toEqual({ outcome: "cancelled" });
+    expect(fixture.roles.getRoleTemplate(targetRole.id)).toMatchObject({
+      revision: targetRole.revision,
+      systemPrompt: targetRole.systemPrompt,
+    });
+  });
+
+  it("returns stale when a role changes while the editor is open", async () => {
+    const fixture = await createFixture();
+    const targetRole = await fixture.roles.createRole({
+      name: "Concurrent target",
+      description: "Before concurrent edit",
+      systemPrompt: "The captured base prompt.",
+      model: { provider: "test", id: "model-a" },
+      defaultThinkingLevel: "off",
+      toolMode: "read_only",
+      canManageSessions: false,
+    });
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const editorStarted = deferred();
+    const releaseEditor = deferred<string>();
+    const detach = fixture.coordinator.attachExtensionUI(
+      fixture.handle,
+      source.conversationId,
+      {
+        select: async () => undefined,
+        confirm: async () => false,
+        input: async () => undefined,
+        editor: async () => {
+          editorStarted.resolve();
+          return releaseEditor.promise;
+        },
+        notify: () => undefined,
+      } satisfies PortableExtensionUI,
+    );
+    try {
+      const proposal = executeTool(
+        fixture.runtime.control(source.conversationId),
+        "propose_role_revision",
+        "propose-role-concurrent-edit",
+        {
+          roleId: targetRole.id,
+          expectedRevision: targetRole.revision,
+          newSystemPrompt: "A proposed prompt.",
+          reason: "The user requested a prompt revision.",
+        },
+      );
+      await editorStarted.promise;
+
+      const current = fixture.roles.getRoleTemplate(targetRole.id);
+      const concurrentlyUpdated = await fixture.roles.updateRole(
+        targetRole.id,
+        current.revision,
+        current.systemPrompt,
+        {
+          name: current.name,
+          description: "Changed while the editor was open",
+          systemPrompt: current.systemPrompt,
+          model: current.model,
+          defaultThinkingLevel: current.defaultThinkingLevel,
+          toolMode: current.toolMode,
+          canManageSessions: current.canManageSessions,
+        },
+      );
+      releaseEditor.resolve(current.systemPrompt);
+
+      await expect(proposal).resolves.toEqual({
+        outcome: "stale",
+        roleId: targetRole.id,
+        expectedRevision: targetRole.revision,
+        revision: concurrentlyUpdated.revision,
+      });
+      expect(fixture.roles.getRoleTemplate(targetRole.id)).toMatchObject({
+        revision: concurrentlyUpdated.revision,
+        description: "Changed while the editor was open",
+        systemPrompt: current.systemPrompt,
+      });
+    } finally {
+      detach();
+    }
   });
 
   it("shares an actor opening when openConversation races an unfinished create", async () => {

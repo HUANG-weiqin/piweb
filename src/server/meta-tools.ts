@@ -4,6 +4,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { MAX_CONVERSATION_BODY_BYTES } from "./conversation-meta.js";
+import { MAX_ROLE_SYSTEM_PROMPT_BYTES } from "./role-store.js";
 
 export interface MetaToolSessionRef {
   conversationId: string;
@@ -14,6 +15,20 @@ export type MetaToolSessionScope = "all" | "created_by_me";
 
 export interface MetaToolService {
   listRoles(sourceConversationId: string): Promise<unknown>;
+  readRole(
+    sourceConversationId: string,
+    input: { roleId: string },
+  ): Promise<unknown>;
+  proposeRoleRevision(
+    sourceConversationId: string,
+    input: {
+      roleId: string;
+      expectedRevision: number;
+      newSystemPrompt: string;
+      reason: string;
+    },
+    signal?: AbortSignal,
+  ): Promise<unknown>;
   listSessions(
     sourceConversationId: string,
     input: {
@@ -84,6 +99,14 @@ function assertConversationBody(value: string, field: string): void {
   }
 }
 
+function assertRoleSystemPrompt(value: string, field: string): void {
+  if (Buffer.byteLength(value, "utf8") > MAX_ROLE_SYSTEM_PROMPT_BYTES) {
+    throw new Error(
+      `${field} exceeds ${MAX_ROLE_SYSTEM_PROMPT_BYTES} UTF-8 bytes`,
+    );
+  }
+}
+
 const CANONICAL_UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -109,24 +132,73 @@ const startSessionParameters = Type.Object({
   title: Type.Optional(Type.String({ minLength: 1, maxLength: 120 })),
 }, { additionalProperties: false });
 
+const roleIdParameters = Type.Object({
+  roleId: Type.String({ minLength: 1, maxLength: 128 }),
+}, { additionalProperties: false });
+
+const proposeRoleRevisionParameters = Type.Object({
+  roleId: Type.String({ minLength: 1, maxLength: 128 }),
+  expectedRevision: Type.Integer({ minimum: 1 }),
+  newSystemPrompt: Type.String({
+    maxLength: MAX_ROLE_SYSTEM_PROMPT_BYTES,
+  }),
+  reason: Type.String({ minLength: 1, maxLength: 2_000 }),
+}, { additionalProperties: false });
+
 export function createMetaTools(
   sourceConversationId: string,
   service: MetaToolService,
   canManageSessions = true,
 ): ToolDefinition[] {
-  if (!canManageSessions) return [];
-  return [
+  const roleTools = [
     defineTool({
       name: "list_roles",
       label: "List roles",
       description:
-        "List the project workbench roles that may be selected when starting another session, including their fixed model and availability.",
-      promptSnippet: "List reusable workbench Agent roles.",
+        "List all project workbench roles, including each role's revision, fixed model, and availability. Read the target role before proposing a revision.",
+      promptSnippet: "List reusable workbench Agent roles and their revisions.",
       parameters: Type.Object({}, { additionalProperties: false }),
       async execute() {
         return result(await service.listRoles(sourceConversationId));
       },
     }),
+    defineTool({
+      name: "read_role",
+      label: "Read role",
+      description:
+        "Read any existing role's complete current definition, including its full system prompt and revision. Use this before proposing a replacement.",
+      promptSnippet: "Read one complete workbench Agent role.",
+      parameters: roleIdParameters,
+      async execute(_toolCallId, input) {
+        return result(await service.readRole(sourceConversationId, input));
+      },
+    }),
+    defineTool({
+      name: "propose_role_revision",
+      label: "Propose role revision",
+      description:
+        "After the user explicitly asks to change a role, open the human editor with a complete replacement system prompt. The user may cancel; existing conversations keep their role snapshot, and no field other than systemPrompt may change.",
+      promptSnippet: "Ask the user to review a complete replacement for a role system prompt.",
+      promptGuidelines: [
+        "Only call this after the user explicitly requests the role change; the user can cancel the editor.",
+        "First call read_role, then pass the complete replacement system prompt rather than a patch or diff.",
+        "The proposal can target your own role or another role, including default. Existing conversations are not retroactively changed; only new conversations use the new revision.",
+        "Do not attempt to change the role name, description, model, thinking level, tool mode, or session-management permission.",
+      ],
+      parameters: proposeRoleRevisionParameters,
+      async execute(_toolCallId, input, signal) {
+        assertRoleSystemPrompt(input.newSystemPrompt, "newSystemPrompt");
+        return result(await service.proposeRoleRevision(
+          sourceConversationId,
+          input,
+          signal,
+        ));
+      },
+    }),
+  ];
+  if (!canManageSessions) return roleTools;
+  return [
+    ...roleTools,
     defineTool({
       name: "list_sessions",
       label: "List sessions",

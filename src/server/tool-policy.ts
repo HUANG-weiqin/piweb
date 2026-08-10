@@ -22,6 +22,9 @@ const SDK_READ_ONLY_TOOLS = new Set([
   "notebook_list",
   "notebook_grep",
   "notebook_read",
+  "list_roles",
+  "read_role",
+  "propose_role_revision",
 ]);
 export const READ_ONLY_TOOL_NAME_CEILING = [
   ...PI_READ_ONLY_TOOLS,
@@ -47,6 +50,6 @@ export const defaultToolPolicy: ToolPolicy = ({
   }
   return {
     action: "deny",
-    reason: "只读模式仅允许 Pi 原生 read、grep、find、ls、宿主 git_status/git_diff 和 conversation notebook 工具；命令、项目写入及扩展工具均被禁止。",
+    reason: "只读模式仅允许 Pi 原生 read、grep、find、ls、宿主 git_status/git_diff、conversation notebook 工具和安全角色查看/提议工具 list_roles/read_role/propose_role_revision；其它会话编排、命令、项目写入及扩展工具均被禁止。",
   };
 };
