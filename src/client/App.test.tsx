@@ -2943,6 +2943,18 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "使用 Default 开始会话" }))
       .toBeInTheDocument();
     expect(screen.getByText("对话已删除")).toBeInTheDocument();
+
+    socketMock.autoFocus = false;
+    act(() => {
+      socketMock.status?.(false);
+      socketMock.status?.(true);
+      socketMock.emit?.({
+        type: "hello",
+        protocolVersion: PROTOCOL_VERSION,
+        startupCwd: "E:\\default",
+      });
+    });
+    expect(latestCommand("initialize").conversation).toEqual({ kind: "recent" });
   });
 
   it("does not unlock a running prompt for an unrelated settings error", () => {
@@ -3847,6 +3859,18 @@ describe("App", () => {
     })).toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "给 Pi 发送消息" }))
       .not.toBeInTheDocument();
+
+    socketMock.autoFocus = false;
+    act(() => {
+      socketMock.status?.(false);
+      socketMock.status?.(true);
+      socketMock.emit?.({
+        type: "hello",
+        protocolVersion: PROTOCOL_VERSION,
+        startupCwd: "E:\\default",
+      });
+    });
+    expect(latestCommand("initialize").conversation).toEqual({ kind: "recent" });
   });
 
   it("uses the focusId to reject late A frames across an A-B-A navigation", () => {

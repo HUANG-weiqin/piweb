@@ -579,6 +579,24 @@ export function App() {
     cachedWorkspacePresentationKeyRef.current = "";
     setCachedWorkspacePresentation(undefined);
   };
+  const forgetWorkspaceConversationProjection = (
+    workspaceKeyValue: string,
+    projectId: string,
+    conversationId: string,
+  ) => {
+    const cached = workspaceProjectionCacheRef.current.get(workspaceKeyValue);
+    if (
+      cached?.projectId !== projectId
+      || cached.conversationId !== conversationId
+    ) return;
+    forgetWorkspaceProjection(
+      workspaceProjectionCacheRef.current,
+      workspaceKeyValue,
+    );
+    if (cachedWorkspacePresentationKeyRef.current === workspaceKeyValue) {
+      clearTemporaryWorkspacePresentation();
+    }
+  };
   const clearTemporaryConversationPresentation = () => {
     cachedConversationPresentationKeyRef.current = "";
     setCachedConversationPresentation(undefined);
@@ -1182,8 +1200,14 @@ export function App() {
           || event.focusId !== focus.focusId
         ) return;
         clearPendingAdmissions();
+        const invalidatedWorkspaceKey = currentWorkspaceKey();
         const invalidatedConversationKey = conversationScopeKey(
-          currentWorkspaceKey(),
+          invalidatedWorkspaceKey,
+          event.projectId,
+          event.conversationId,
+        );
+        forgetWorkspaceConversationProjection(
+          invalidatedWorkspaceKey,
           event.projectId,
           event.conversationId,
         );
@@ -1449,6 +1473,11 @@ export function App() {
             || pending.sessionId !== event.sessionId
           ) return;
           updatePendingConversationDeletion(undefined);
+          forgetWorkspaceConversationProjection(
+            pending.workspaceKey,
+            pending.projectId,
+            pending.conversationId,
+          );
           forgetConversationPresentation(
             conversationPresentationCacheRef.current,
             pendingConversationKey(pending),
