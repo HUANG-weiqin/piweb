@@ -1006,13 +1006,13 @@ export class PiConnection {
           extensionUI,
         );
       } else {
-        // This is the one fresh integrity scan for recent selection. Keep its
-        // validated seed unless an actor mutates between the scan and the main
-        // view subscription.
-        const recentSeed = await coordinator.listSessions(handle);
+        // Subscribe before the one fresh integrity scan: promise settlement is
+        // itself a handoff boundary where an actor mutation could otherwise be
+        // missed. A mutation during the scan may cause one harmless refresh.
         unsubscribeRecentSeed = coordinator.subscribe(handle, (event) => {
           if (event.type !== "project_changed") recentSeedInvalidated = true;
         });
+        const recentSeed = await coordinator.listSessions(handle);
         const knownIds = new Set(recentSeed.map(({ id }) => id));
         const conversationId = handle.project.lastConversationId
           && knownIds.has(handle.project.lastConversationId)

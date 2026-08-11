@@ -2923,14 +2923,13 @@ describe("PiConnection coordinated project view", () => {
     }
   });
 
-  it("refreshes a recent seed after an actor mutation before view subscription", async () => {
+  it("refreshes a recent seed after an actor mutation at the scan handoff", async () => {
     const harness = await coordinatedConnectionHarness();
     const warmHandle = await harness.coordinator.acquireProject(
       harness.cwd,
       "read_only",
     );
-    const openStarted = deferred();
-    const openGate = deferred();
+    const seedMutated = deferred();
     const refreshGate = deferred();
     try {
       await harness.connection.handle({
@@ -2955,14 +2954,8 @@ describe("PiConnection coordinated project view", () => {
       const listSessions = vi.spyOn(harness.coordinator, "listSessions");
       listSessions.mockImplementation(async (handle) => {
         if (listSessions.mock.calls.length === 2) await refreshGate.promise;
-        return listSessionsImplementation(handle);
-      });
-      const openConversation = harness.coordinator.openConversation.bind(
-        harness.coordinator,
-      );
-      vi.spyOn(harness.coordinator, "openConversation")
-        .mockImplementation(async (handle, targetId, options) => {
-          const opening = openConversation(handle, targetId, options);
+        const sessions = await listSessionsImplementation(handle);
+        if (listSessions.mock.calls.length === 1) {
           manager.appendMessage(agentMessage({
             role: "user",
             content: "fresh preview",
@@ -2972,12 +2965,12 @@ describe("PiConnection coordinated project view", () => {
             emit(context: unknown, event: unknown): void;
           }).emit(handle.context, {
             type: "context_usage",
-            conversationId: targetId,
+            conversationId,
           });
-          openStarted.resolve();
-          await openGate.promise;
-          return opening;
-        });
+          seedMutated.resolve();
+        }
+        return sessions;
+      });
 
       harness.events.splice(0);
       const initialization = harness.connection.handle({
@@ -2987,9 +2980,8 @@ describe("PiConnection coordinated project view", () => {
         cwd: harness.cwd,
         conversation: { kind: "recent" },
       });
-      await openStarted.promise;
+      await seedMutated.promise;
       expect(listSessions).toHaveBeenCalledTimes(1);
-      openGate.resolve();
       await initialization;
       expect(listSessions).toHaveBeenCalledTimes(2);
       refreshGate.resolve();
@@ -3009,7 +3001,6 @@ describe("PiConnection coordinated project view", () => {
         ]));
       });
     } finally {
-      openGate.resolve();
       refreshGate.resolve();
       warmHandle.release();
       await harness.cleanup();
