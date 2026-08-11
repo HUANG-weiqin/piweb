@@ -767,6 +767,42 @@ describe("ProjectSessionCoordinator", () => {
     setLastConversation.mockRestore();
   });
 
+  it("does not let a delayed recent write clear newer attention", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const gate = deferred();
+    let started = false;
+    const setLastConversation = vi.spyOn(
+      fixture.handle.project,
+      "setLastConversation",
+    ).mockImplementation(async () => {
+      started = true;
+      await gate.promise;
+    });
+
+    fixture.handle.context.attention.add(actor.conversationId);
+    const recent = fixture.coordinator.markConversationRecentInBackground(
+      fixture.handle,
+      actor,
+    );
+    try {
+      await waitUntil(() => started, "background recent write");
+      expect(fixture.handle.context.attention.has(actor.conversationId)).toBe(false);
+
+      fixture.handle.context.attention.add(actor.conversationId);
+      gate.resolve();
+      await expect(recent).resolves.toBeUndefined();
+      expect(fixture.handle.context.attention.has(actor.conversationId)).toBe(true);
+    } finally {
+      gate.resolve();
+      await recent.catch(() => undefined);
+      setLastConversation.mockRestore();
+    }
+  });
+
   it("migrates legacy queued pending prompts on reopen and drops attention records", async () => {
     const fixture = await createFixture();
     const actor = await fixture.coordinator.createUserConversation(

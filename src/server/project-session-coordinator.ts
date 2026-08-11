@@ -955,6 +955,7 @@ export class ProjectSessionCoordinator {
       throw new Error(`Conversation is being deleted: ${conversationId}`);
     }
     if (options.updateRecent !== false) {
+      this.acknowledgeConversationFocus(context, conversationId);
       await this.markConversationRecent(context, conversationId);
     }
     return actor;
@@ -980,6 +981,7 @@ export class ProjectSessionCoordinator {
         new Error(`Conversation is being deleted: ${actor.conversationId}`),
       );
     }
+    this.acknowledgeConversationFocus(context, actor.conversationId);
     return this.trackBackground(
       context,
       this.markConversationRecent(context, actor.conversationId),
@@ -5441,6 +5443,15 @@ export class ProjectSessionCoordinator {
     });
   }
 
+  private acknowledgeConversationFocus(
+    context: ProjectContext,
+    conversationId: string,
+  ): void {
+    if (context.attention.delete(conversationId)) {
+      this.emit(context, { type: "project_changed" });
+    }
+  }
+
   private markConversationRecent(
     context: ProjectContext,
     conversationId: string,
@@ -5448,16 +5459,12 @@ export class ProjectSessionCoordinator {
     if (context.closing || this.disposed) {
       return Promise.reject(new Error("Project context is closing"));
     }
-    let write: Promise<void>;
+    let recentUpdate: Promise<void>;
     try {
-      write = context.project.setLastConversation(conversationId);
+      recentUpdate = context.project.setLastConversation(conversationId);
     } catch (error) {
       return Promise.reject(error);
     }
-    const recentUpdate = write.then(() => {
-      context.attention.delete(conversationId);
-      this.emit(context, { type: "project_changed" });
-    });
     context.recentUpdates.add(recentUpdate);
     void recentUpdate.finally(() => {
       context.recentUpdates.delete(recentUpdate);

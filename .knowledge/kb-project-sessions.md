@@ -71,7 +71,7 @@ initialize(cwd, target)
 
 `recent` 优先使用 manifest 中仍存在的 `lastConversationId`，否则使用索引中最近修改的对话；项目没有对话时保持空态并显示角色选择页，不创建隐含 default 会话。recent 选择前的完整刷新结果也是该次 initialize 的已验证索引 seed；目标 actor 打开后，首次 `project_snapshot` 只从同一 ProjectStore 当前索引补充 actor role/activity/attention，不再立即做第二次全目录扫描。这个无扫描投影不是新的完整性证明，只能用于刚完成验证后的展示，不能用于 open/delete 决策；后续项目变化和 `refresh_view` 仍走完整刷新。新 conversation 的 header 与初始 role/profile 先完整序列化并通过宿主校验，再写同目录临时文件，以 exclusive hard link 原子发布最终 JSONL；崩溃不能暴露 partial final，重复 identity 也不能覆盖旧文件。初次 SDK `open()` 若失败，宿主必须精确 unlink 刚发布的文件，不能留下调用方未拿到 handle 的 orphan conversation。
 
-focus 切换先 exact open：warm actor 直接复用，cold actor 仍完成目标存在性与 JSONL 完整性证明；focused snapshot 发布不等待 `lastConversationId` 保存或全项目索引刷新。recent intent 在 snapshot 后立即进入 ProjectStore 的原子写队列；focus 后台写和 initialize/open 的 awaited 写共用该调用顺序，A→B→A 的最终指针不能被旧任务覆盖。已准入 recent 写由 coordinator 在 close 前 drain；写失败只向仍精确观察该 focusId 的连接报告 session error，不撤销已经提交的 focus。
+focus 切换先 exact open：warm actor 直接复用，cold actor 仍完成目标存在性与 JSONL 完整性证明；focused snapshot 发布不等待 `lastConversationId` 保存或全项目索引刷新。focus attach 会立即确认并清除当时已有的 attention；这个观察确认与 recent 持久写是两个边界，之后新产生的错误或 UI 等待不能被迟到的旧写清除。recent intent 随后立即进入 ProjectStore 的原子写队列；focus 后台写和 initialize/open 的 awaited 写共用该调用顺序，A→B→A 的最终指针不能被旧任务覆盖。已准入 recent 写由 coordinator 在 close 前 drain；写失败只向仍精确观察该 focusId 的连接报告 session error，不撤销已经提交的 focus。
 
 显式 `open` 只接受浏览器从服务端索引获得的 conversationId。服务端重新列举受控目录并解析文件路径，不能接受客户端文件路径。Pi 的 `open(nonexistent)` 会创建 manager 而不是可靠报错，所以必须先证明目标存在。
 
