@@ -163,6 +163,7 @@ export class RoleCatalog {
     expectedSystemPrompt: string,
     input: RoleDraft,
     modelRegistry: RoleCatalogModelRegistry = this.source.modelRegistry,
+    signal?: AbortSignal,
   ): Promise<RoleTemplateV1> {
     this.assertOpen();
     const current = this.store.getRole(roleId);
@@ -178,6 +179,7 @@ export class RoleCatalog {
       expectedRevision,
       expectedSystemPrompt,
       input,
+      signal,
     );
   }
 

@@ -92,7 +92,10 @@ import {
   RoleCatalog,
   type RoleCatalogModelRegistry,
 } from "./role-catalog.js";
-import { MAX_ROLE_SYSTEM_PROMPT_BYTES } from "./role-store.js";
+import {
+  MAX_ROLE_SYSTEM_PROMPT_BYTES,
+  RoleUpdateConflictError,
+} from "./role-store.js";
 import { SerialTaskQueue } from "./serial-task-queue.js";
 import {
   defaultToolPolicy,
@@ -2895,28 +2898,58 @@ export class ProjectSessionCoordinator {
           };
         }
 
-        const updated = await this.roles.updateRole(
-          role.id,
-          input.expectedRevision,
-          role.systemPrompt,
-          {
-            name: role.name,
-            description: role.description,
-            systemPrompt: finalPrompt,
-            model: role.model === null ? null : { ...role.model },
-            defaultThinkingLevel: role.defaultThinkingLevel,
-            toolMode: role.toolMode,
-            canManageSessions: role.canManageSessions,
-          },
-          source.modelRegistry,
-        );
-        return {
-          outcome: "applied" as const,
-          roleId: updated.id,
-          previousRevision: role.revision,
-          revision: updated.revision,
-          userEdited: finalPrompt !== input.newSystemPrompt,
-        };
+        try {
+          const updated = await this.roles.updateRole(
+            role.id,
+            input.expectedRevision,
+            role.systemPrompt,
+            {
+              name: role.name,
+              description: role.description,
+              systemPrompt: finalPrompt,
+              model: role.model === null ? null : { ...role.model },
+              defaultThinkingLevel: role.defaultThinkingLevel,
+              toolMode: role.toolMode,
+              canManageSessions: role.canManageSessions,
+            },
+            source.modelRegistry,
+            signal,
+          );
+          return {
+            outcome: "applied" as const,
+            roleId: updated.id,
+            previousRevision: role.revision,
+            revision: updated.revision,
+            userEdited: finalPrompt !== input.newSystemPrompt,
+          };
+        } catch (error) {
+          if (
+            signal?.aborted
+            && error instanceof Error
+            && error.name === "AbortError"
+          ) {
+            return { outcome: "cancelled" as const };
+          }
+          if (!(error instanceof RoleUpdateConflictError)) throw error;
+          let current: ReturnType<typeof roleForSource>["role"];
+          try {
+            current = roleForSource(sourceConversationId, input.roleId).role;
+          } catch {
+            throw error;
+          }
+          if (
+            current.revision !== role.revision
+            || current.systemPrompt !== role.systemPrompt
+          ) {
+            return {
+              outcome: "stale" as const,
+              roleId: current.id,
+              expectedRevision: input.expectedRevision,
+              revision: current.revision,
+            };
+          }
+          throw error;
+        }
       },
       listSessions: async (sourceConversationId, input) => {
         const sessions = await this.listSessionsForMeta(

@@ -286,6 +286,26 @@ describe("RoleStore", () => {
     });
   });
 
+  it("rejects an aborted role update before committing", async () => {
+    const rolesPath = await createRolesPath("piweb-role-store-aborted-update-");
+    const store = await RoleStore.open(rolesPath, initialModel);
+    const before = store.getSnapshot();
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      store.updateRole(
+        "default",
+        1,
+        "",
+        draft("Must not commit", { systemPrompt: "Must not commit" }),
+        controller.signal,
+      ),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(store.getSnapshot()).toEqual(before);
+    expect(await readFile(rolesPath, "utf8")).toContain("default.1.md");
+  });
+
   it("keeps a model-less default when no initial model is available", async () => {
     const rolesPath = await createRolesPath("piweb-role-store-no-model-");
 

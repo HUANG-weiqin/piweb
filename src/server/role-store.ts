@@ -29,6 +29,13 @@ export const MAX_ROLE_NAME_CHARACTERS = 80;
 export const MAX_ROLE_DESCRIPTION_CHARACTERS = 1_000;
 export const MAX_ROLE_SYSTEM_PROMPT_BYTES = 128 * 1024;
 
+export class RoleUpdateConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RoleUpdateConflictError";
+  }
+}
+
 const ROLE_PROMPTS_DIRECTORY = "role-prompts";
 const ROLE_PROMPT_DECODER = new TextDecoder("utf-8", {
   fatal: true,
@@ -176,6 +183,16 @@ function assertBoundedUtf8(
   if (Buffer.byteLength(value, "utf8") > maxBytes) {
     throw new Error(`${field} must be at most ${maxBytes} UTF-8 bytes`);
   }
+}
+
+function abortError(): Error {
+  const error = new Error("Role update was aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function assertNotAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw abortError();
 }
 
 function parseModelReference(
@@ -1001,6 +1018,7 @@ export class RoleStore {
     expectedRevision: number,
     expectedSystemPrompt: string,
     input: RoleDraft,
+    signal?: AbortSignal,
   ): Promise<RoleTemplateV1> {
     assertRoleId(roleId, "roleId");
     assertRevision(expectedRevision, "expectedRevision");
@@ -1010,20 +1028,22 @@ export class RoleStore {
       MAX_ROLE_SYSTEM_PROMPT_BYTES,
     );
     const draft = parseRoleDraft(input, "role");
+    assertNotAborted(signal);
     return this.enqueueWrite(async () => {
+      assertNotAborted(signal);
       const index = this.document.roles.findIndex(({ id }) => id === roleId);
       if (index < 0) {
         throw new Error(`Role not found: ${roleId}`);
       }
       const current = this.document.roles[index]!;
       if (current.revision !== expectedRevision) {
-        throw new Error(
+        throw new RoleUpdateConflictError(
           `Role revision changed: expected ${expectedRevision}, found ${current.revision}`,
         );
       }
       const currentHydrated = readHydratedRole(this.rolesPath, current);
       if (currentHydrated.systemPrompt !== expectedSystemPrompt) {
-        throw new Error(
+        throw new RoleUpdateConflictError(
           `Role system prompt changed: expected current prompt to match the supplied base`,
         );
       }
@@ -1044,6 +1064,7 @@ export class RoleStore {
       const roles = [...this.document.roles];
       roles[index] = updated;
       const oldPromptPath = promptPathFor(this.rolesPath, current);
+      assertNotAborted(signal);
       await this.commit({
         version: ROLE_STORE_VERSION,
         roles,

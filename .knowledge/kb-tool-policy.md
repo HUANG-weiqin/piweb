@@ -75,7 +75,7 @@ canManageSessions only: wait_for_session / abort_session / delete_session
 - 项目 extension `tool_call` hook 先观察/变换调用，宿主再按最终工具 identity 与 run ownership 决策；
 - 工具闭包固定来源 conversation 和 canonical project，参数不能提交 cwd/projectId；
 - `read_only` 允许 `notebook_write`，因为它只写当前 conversation 的宿主工作记忆 sidecar，生命周期等同 transcript，不是项目源码写入；
-- `read_only` 允许读取所有用户级角色 prompt，它们会进入调用模型与当前 transcript，因此角色 prompt 不能保存秘密；`propose_role_revision` 的 Agent 参数只包含目标、expected revision、完整替换 prompt 和理由，名称、模型及权限字段不存在于 schema，用户取消或中止 run 都不会落版；
+- `read_only` 允许读取所有用户级角色 prompt，它们会进入调用模型与当前 transcript，因此角色 prompt 不能保存秘密；`propose_role_revision` 的 Agent 参数只包含目标、expected revision、完整替换 prompt 和理由，名称、模型及权限字段不存在于 schema。取消有效到 `RoleStore` commit 开始；CAS queue race 返回 `stale`，commit 开始后按已授权提交处理；用户取消或中止 run 在此之前都不会落版；
 - `read_only` 不因 list/peek 看似只读而部分开放会话控制面；九个会话编排工具仍全部拒绝；
 - `full_access` 才允许 Agent 创建、通信、等待、中止和删除 peer conversation；删除会级联 metadata descendants，但 self delete、级联删除自身、self abort/wait、busy delete、stale runId 等生命周期约束仍由 coordinator 独立校验；
 - 用户从 UI 发起的角色管理、焦点切换和宿主持久化不经过 Agent tool gate，仍受协议身份与各自串行边界约束。

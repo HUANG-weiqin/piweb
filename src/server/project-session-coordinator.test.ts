@@ -1783,6 +1783,211 @@ describe("ProjectSessionCoordinator", () => {
     });
   });
 
+  it("cancels a proposal after the editor before RoleStore precommit", async () => {
+    const fixture = await createFixture();
+    const targetRole = await fixture.roles.createRole({
+      name: "Abort target",
+      description: "",
+      systemPrompt: "Keep this prompt.",
+      model: { provider: "test", id: "model-a" },
+      defaultThinkingLevel: "off",
+      toolMode: "read_only",
+      canManageSessions: false,
+    });
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const updateStarted = deferred();
+    const updateGate = deferred();
+    const controller = new AbortController();
+    const originalUpdateRole = fixture.roles.updateRole.bind(fixture.roles);
+    const updateRole = vi.spyOn(fixture.roles, "updateRole")
+      .mockImplementation(async (...args) => {
+        updateStarted.resolve();
+        await updateGate.promise;
+        return originalUpdateRole(...args);
+      });
+    const detach = fixture.coordinator.attachExtensionUI(
+      fixture.handle,
+      source.conversationId,
+      {
+        select: async () => undefined,
+        confirm: async () => false,
+        input: async () => undefined,
+        editor: async () => "A cancelled prompt.",
+        notify: () => undefined,
+      } satisfies PortableExtensionUI,
+    );
+    try {
+      const proposal = executeTool(
+        fixture.runtime.control(source.conversationId),
+        "propose_role_revision",
+        "propose-role-abort-before-commit",
+        {
+          roleId: targetRole.id,
+          expectedRevision: targetRole.revision,
+          newSystemPrompt: "A cancelled prompt.",
+          reason: "Cancel after the editor has returned.",
+        },
+        controller.signal,
+      );
+      await updateStarted.promise;
+      controller.abort();
+      updateGate.resolve();
+
+      await expect(proposal).resolves.toEqual({ outcome: "cancelled" });
+      expect(updateRole).toHaveBeenCalledTimes(1);
+      expect(fixture.roles.getRoleTemplate(targetRole.id)).toMatchObject({
+        revision: targetRole.revision,
+        systemPrompt: targetRole.systemPrompt,
+      });
+    } finally {
+      updateGate.resolve();
+      detach();
+    }
+  });
+
+  it("returns stale when a CAS race changes a role after the editor", async () => {
+    const fixture = await createFixture();
+    const targetRole = await fixture.roles.createRole({
+      name: "CAS target",
+      description: "Before concurrent edit",
+      systemPrompt: "The captured base prompt.",
+      model: { provider: "test", id: "model-a" },
+      defaultThinkingLevel: "off",
+      toolMode: "read_only",
+      canManageSessions: false,
+    });
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const originalUpdateRole = fixture.roles.updateRole.bind(fixture.roles);
+    let proposalUpdate = false;
+    const updateRole = vi.spyOn(fixture.roles, "updateRole")
+      .mockImplementation(async (...args) => {
+        if (!proposalUpdate) {
+          proposalUpdate = true;
+          const current = fixture.roles.getRoleTemplate(targetRole.id);
+          await originalUpdateRole(
+            current.id,
+            current.revision,
+            current.systemPrompt,
+            {
+              name: current.name,
+              description: current.description,
+              systemPrompt: "Concurrent revision",
+              model: current.model,
+              defaultThinkingLevel: current.defaultThinkingLevel,
+              toolMode: current.toolMode,
+              canManageSessions: current.canManageSessions,
+            },
+          );
+        }
+        return originalUpdateRole(...args);
+      });
+    const detach = fixture.coordinator.attachExtensionUI(
+      fixture.handle,
+      source.conversationId,
+      {
+        select: async () => undefined,
+        confirm: async () => false,
+        input: async () => undefined,
+        editor: async () => "The proposed revision.",
+        notify: () => undefined,
+      } satisfies PortableExtensionUI,
+    );
+    try {
+      await expect(executeTool(
+        fixture.runtime.control(source.conversationId),
+        "propose_role_revision",
+        "propose-role-cas-race",
+        {
+          roleId: targetRole.id,
+          expectedRevision: targetRole.revision,
+          newSystemPrompt: "The proposed revision.",
+          reason: "Race the role CAS after editor acceptance.",
+        },
+      )).resolves.toEqual({
+        outcome: "stale",
+        roleId: targetRole.id,
+        expectedRevision: targetRole.revision,
+        revision: targetRole.revision + 1,
+      });
+      expect(updateRole).toHaveBeenCalledTimes(1);
+      expect(fixture.roles.getRoleTemplate(targetRole.id)).toMatchObject({
+        revision: targetRole.revision + 1,
+        systemPrompt: "Concurrent revision",
+      });
+    } finally {
+      detach();
+    }
+  });
+
+  it("rethrows a post-commit proposal error instead of reporting stale", async () => {
+    const fixture = await createFixture();
+    const targetRole = await fixture.roles.createRole({
+      name: "Post-commit target",
+      description: "",
+      systemPrompt: "The captured base prompt.",
+      model: { provider: "test", id: "model-a" },
+      defaultThinkingLevel: "off",
+      toolMode: "read_only",
+      canManageSessions: false,
+    });
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const originalUpdateRole = fixture.roles.updateRole.bind(fixture.roles);
+    const postCommitError = new Error("post-commit readback failed");
+    vi.spyOn(fixture.roles, "updateRole")
+      .mockImplementation(async (...args) => {
+        await originalUpdateRole(...args);
+        throw postCommitError;
+      });
+    const detach = fixture.coordinator.attachExtensionUI(
+      fixture.handle,
+      source.conversationId,
+      {
+        select: async () => undefined,
+        confirm: async () => false,
+        input: async () => undefined,
+        editor: async () => "The applied prompt.",
+        notify: () => undefined,
+      } satisfies PortableExtensionUI,
+    );
+    try {
+      await expect(executeTool(
+        fixture.runtime.control(source.conversationId),
+        "propose_role_revision",
+        "propose-role-post-commit-error",
+        {
+          roleId: targetRole.id,
+          expectedRevision: targetRole.revision,
+          newSystemPrompt: "The applied prompt.",
+          reason: "Expose a post-commit readback failure.",
+        },
+      )).rejects.toBe(postCommitError);
+
+      expect(fixture.roles.getRoleTemplate(targetRole.id)).toMatchObject({
+        revision: targetRole.revision + 1,
+        systemPrompt: "The applied prompt.",
+      });
+      const persisted = JSON.parse(await readFile(
+        join(fixture.cwd, "user", "roles.json"),
+        "utf8",
+      )) as { roles: Array<{ id: string; revision: number }> };
+      expect(persisted.roles).toContainEqual(expect.objectContaining({
+        id: targetRole.id,
+        revision: targetRole.revision + 1,
+      }));
+    } finally {
+      detach();
+    }
+  });
+
   it("returns stale when a role changes while the editor is open", async () => {
     const fixture = await createFixture();
     const targetRole = await fixture.roles.createRole({
