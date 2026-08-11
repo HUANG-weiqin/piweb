@@ -2923,9 +2923,98 @@ describe("PiConnection coordinated project view", () => {
     }
   });
 
+  it("refreshes a recent seed after an actor mutation before view subscription", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const warmHandle = await harness.coordinator.acquireProject(
+      harness.cwd,
+      "read_only",
+    );
+    const openStarted = deferred();
+    const openGate = deferred();
+    const refreshGate = deferred();
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "new", roleId: "default" },
+      });
+      await vi.waitFor(() => {
+        expect(harness.events.some((event) => event.type === "project_snapshot"))
+          .toBe(true);
+      });
+      const conversationId = latestState(harness.events).conversationId;
+      if (!conversationId) throw new Error("conversation was not created");
+      const manager = harness.runtime.created[0]?.persistentManager;
+      if (!manager) throw new Error("persistent SessionManager was not provided");
 
+      const listSessionsImplementation = harness.coordinator.listSessions.bind(
+        harness.coordinator,
+      );
+      const listSessions = vi.spyOn(harness.coordinator, "listSessions");
+      listSessions.mockImplementation(async (handle) => {
+        if (listSessions.mock.calls.length === 2) await refreshGate.promise;
+        return listSessionsImplementation(handle);
+      });
+      const openConversation = harness.coordinator.openConversation.bind(
+        harness.coordinator,
+      );
+      vi.spyOn(harness.coordinator, "openConversation")
+        .mockImplementation(async (handle, targetId, options) => {
+          const opening = openConversation(handle, targetId, options);
+          manager.appendMessage(agentMessage({
+            role: "user",
+            content: "fresh preview",
+            timestamp: 1,
+          }));
+          (harness.coordinator as unknown as {
+            emit(context: unknown, event: unknown): void;
+          }).emit(handle.context, {
+            type: "context_usage",
+            conversationId: targetId,
+          });
+          openStarted.resolve();
+          await openGate.promise;
+          return opening;
+        });
 
+      harness.events.splice(0);
+      const initialization = harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_B,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      await openStarted.promise;
+      expect(listSessions).toHaveBeenCalledTimes(1);
+      openGate.resolve();
+      await initialization;
+      expect(listSessions).toHaveBeenCalledTimes(2);
+      refreshGate.resolve();
 
+      await vi.waitFor(() => {
+        const snapshots = harness.events.filter(
+          (event): event is Extract<ServerEvent, { type: "project_snapshot" }> =>
+            event.type === "project_snapshot",
+        );
+        expect(snapshots).toHaveLength(1);
+        expect(snapshots[0]!.conversations).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            id: conversationId,
+            preview: "fresh preview",
+            messageCount: 1,
+          }),
+        ]));
+      });
+    } finally {
+      openGate.resolve();
+      refreshGate.resolve();
+      warmHandle.release();
+      await harness.cleanup();
+    }
+  });
 
   it("acknowledges guidance only after the exact active run accepts it", async () => {
     const harness = await coordinatedConnectionHarness();

@@ -960,9 +960,11 @@ export class PiConnection {
     signal.addEventListener("abort", abortExtensions, { once: true });
     if (signal.aborted) extensionAbort.abort();
     let unsubscribeProject: (() => void) | undefined;
+    let unsubscribeRecentSeed: (() => void) | undefined;
     let unsubscribeExtensionUI: (() => void) | undefined;
     let createdConversationId: string | undefined;
     let initialRecentConversations: ConversationSummary[] | undefined;
+    let recentSeedInvalidated = false;
     try {
       this.throwIfAborted(signal);
 
@@ -1005,9 +1007,12 @@ export class PiConnection {
         );
       } else {
         // This is the one fresh integrity scan for recent selection. Keep its
-        // validated seed; the initial project snapshot will project the same
-        // successful index after the actor profile is loaded.
+        // validated seed unless an actor mutates between the scan and the main
+        // view subscription.
         const recentSeed = await coordinator.listSessions(handle);
+        unsubscribeRecentSeed = coordinator.subscribe(handle, (event) => {
+          if (event.type !== "project_changed") recentSeedInvalidated = true;
+        });
         const knownIds = new Set(recentSeed.map(({ id }) => id));
         const conversationId = handle.project.lastConversationId
           && knownIds.has(handle.project.lastConversationId)
@@ -1059,6 +1064,8 @@ export class PiConnection {
       view.unsubscribeProject = unsubscribeProject;
       this.coordinatedView = view;
       transferred = true;
+      unsubscribeRecentSeed?.();
+      unsubscribeRecentSeed = undefined;
       if (command.commandId !== undefined) {
         this.emitFocusAttached(
           view,
@@ -1067,7 +1074,7 @@ export class PiConnection {
         );
       }
       this.publishCoordinatedState();
-      if (initialRecentConversations !== undefined) {
+      if (initialRecentConversations !== undefined && !recentSeedInvalidated) {
         this.emitProjectSnapshot(view, initialRecentConversations);
       } else {
         this.publishProjectSnapshotCoordinated();
@@ -1076,6 +1083,7 @@ export class PiConnection {
       this.publishFocusedConversationSnapshot();
     } finally {
       signal.removeEventListener("abort", abortExtensions);
+      unsubscribeRecentSeed?.();
       if (!transferred) {
         extensionAbort.abort();
         unsubscribeExtensionUI?.();
