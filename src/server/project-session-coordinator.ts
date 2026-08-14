@@ -146,10 +146,25 @@ interface WaiterBase {
 interface SessionMessageWaitResult {
   outcome: "message";
   conversationId: string;
-  runId: string;
+  /** Present when the message carries a source run (the sender's active run). */
+  runId?: string;
   messageId: string;
   sentAt: string;
 }
+
+/**
+ * User guidance was accepted into the waiting run's SDK steering queue and
+ * ended the wait. Its body remains owned by the queued raw user message, so
+ * the tool result only reports the wake-up kind.
+ */
+interface SessionGuidanceWaitResult {
+  outcome: "guidance";
+}
+
+type SessionWaitResult =
+  | RunSettlement
+  | SessionMessageWaitResult
+  | SessionGuidanceWaitResult;
 
 interface CompletionWaiter extends WaiterBase {
   kind: "completion";
@@ -161,7 +176,7 @@ interface SessionWaiter extends WaiterBase {
   waitingConversationId: string;
   targetConversationId: string;
   targetRunId: string;
-  resolve(result: RunSettlement | SessionMessageWaitResult): void;
+  resolve(result: SessionWaitResult): void;
 }
 
 type ProjectWaiter = CompletionWaiter | SessionWaiter;
@@ -2148,7 +2163,7 @@ export class ProjectSessionCoordinator {
     targetConversationId: string,
     runId: string,
     signal?: AbortSignal,
-  ): Promise<RunSettlement | SessionMessageWaitResult> {
+  ): Promise<SessionWaitResult> {
     if (sourceConversationId === targetConversationId) {
       throw new Error("An Agent cannot wait for its own current run");
     }
@@ -2277,6 +2292,35 @@ export class ProjectSessionCoordinator {
     );
   }
 
+  private async findClaimedPendingWaitReply(
+    context: ProjectContext,
+    source: ConversationActor,
+    runId: string,
+  ): Promise<InboxEnvelope | undefined> {
+    const pending = await context.inbox.list({
+      toConversationId: source.conversationId,
+    });
+    const delivered = new Set(
+      aggregateReservedConversationEntries(
+        source.sessionManager.getEntries(),
+      ).deliveredMessageIds,
+    );
+    for (const envelope of pending) {
+      if (delivered.has(envelope.messageId)) continue;
+      if (envelope.waitedByRunId === runId) continue;
+      if (envelope.state === "processing" && envelope.processingRunId === runId) {
+        // The message was durably claimed into this run's steering queue
+        // before the wait registered and the run has not observed it yet. The
+        // wait must not block consumption: return its real source metadata.
+        return envelope;
+      }
+      // Any earlier envelope not claimed into this run's queue is a FIFO
+      // predecessor; a later message must not overtake it, so stay pending.
+      return undefined;
+    }
+    return undefined;
+  }
+
   private waitForSessionEvent(
     context: ProjectContext,
     source: ConversationActor,
@@ -2285,19 +2329,15 @@ export class ProjectSessionCoordinator {
     runId: string,
     signal?: AbortSignal,
     target?: ConversationActor,
-  ): Promise<RunSettlement | SessionMessageWaitResult> {
+  ): Promise<SessionWaitResult> {
     const sourceConversationId = source.conversationId;
     return source.withWaiting(
       ownership,
       { conversationId: targetConversationId, runId },
       async () => {
-        let resolveCompletion!: (
-          result: RunSettlement | SessionMessageWaitResult,
-        ) => void;
+        let resolveCompletion!: (result: SessionWaitResult) => void;
         let rejectCompletion!: (error: Error) => void;
-        const completion = new Promise<
-          RunSettlement | SessionMessageWaitResult
-        >((resolve, reject) => {
+        const completion = new Promise<SessionWaitResult>((resolve, reject) => {
           resolveCompletion = resolve;
           rejectCompletion = reject;
         });
@@ -2307,6 +2347,7 @@ export class ProjectSessionCoordinator {
         void completion.catch(() => undefined);
         const key = completionKey(targetConversationId, runId);
         let registeredWaiter: SessionWaiter | undefined;
+        let unregisterGuidanceInterrupt: (() => void) | undefined;
         try {
           await this.runLifecycle(context, async () => {
             const waiter: SessionWaiter = {
@@ -2358,6 +2399,35 @@ export class ProjectSessionCoordinator {
             }
             waiters.add(waiter);
 
+            // User guidance accepted into this waiting run's steering queue
+            // (an explicit steer or a busy browser prompt) must end the wait,
+            // or the queued guidance can never be consumed (the blocked tool
+            // would deadlock the next model request). The callback is
+            // waiter-identity guarded and fires at most once.
+            unregisterGuidanceInterrupt = source.onWaitingSteerAdmitted(
+              ownership,
+              () => {
+                const waiters = context.waiters.get(key);
+                if (!waiters?.has(waiter)) return false;
+                waiters.delete(waiter);
+                if (waiters.size === 0) context.waiters.delete(key);
+                this.detachWaiter(waiter);
+                try {
+                  const result: SessionGuidanceWaitResult = {
+                    outcome: "guidance",
+                  };
+                  waiter.resolve(result);
+                  this.emit(context, { type: "project_changed" });
+                  return true;
+                } catch (error) {
+                  waiter.reject(
+                    error instanceof Error ? error : new Error(String(error)),
+                  );
+                  return false;
+                }
+              },
+            );
+
             const committedReply = await this.findCommittedWaitReply(
               context,
               sourceConversationId,
@@ -2393,6 +2463,48 @@ export class ProjectSessionCoordinator {
               this.detachWaiter(waiter);
               resolveCompletion(cloneSettlement(raced));
             }
+
+            if (waiters.has(waiter)) {
+              // A peer/inbox message may have been durably claimed into this
+              // run's steering queue before the wait registered (the run has
+              // not observed it yet — Pi has not started the next model call).
+              // End the wait with that message's real source metadata so the
+              // run can consume the queue; mark it waitedByRunId so neither a
+              // later wait of this run nor a replay can re-wake on it.
+              const claimedPending = await this.findClaimedPendingWaitReply(
+                context,
+                source,
+                ownership.runId,
+              );
+              if (claimedPending) {
+                await context.inbox.updateState(claimedPending.messageId, {
+                  state: "processing",
+                  processingRunId: ownership.runId,
+                  ...(claimedPending.processingDelivery === undefined
+                    ? {}
+                    : { processingDelivery: claimedPending.processingDelivery }),
+                  waitedByRunId: ownership.runId,
+                });
+                waiters.delete(waiter);
+                if (waiters.size === 0) context.waiters.delete(key);
+                this.detachWaiter(waiter);
+                this.appendSourceCardState(
+                  context,
+                  claimedPending,
+                  "delivered",
+                );
+                const result: SessionMessageWaitResult = {
+                  outcome: "message",
+                  conversationId: claimedPending.fromConversationId,
+                  ...(claimedPending.fromRunId === undefined
+                    ? {}
+                    : { runId: claimedPending.fromRunId }),
+                  messageId: claimedPending.messageId,
+                  sentAt: claimedPending.sentAt,
+                };
+                resolveCompletion(result);
+              }
+            }
           });
         } catch (error) {
           if (registeredWaiter) {
@@ -2401,6 +2513,7 @@ export class ProjectSessionCoordinator {
             if (waiters?.size === 0) context.waiters.delete(key);
             this.detachWaiter(registeredWaiter);
           }
+          unregisterGuidanceInterrupt?.();
           rejectCompletion(
             error instanceof Error ? error : new Error(String(error)),
           );
@@ -3650,22 +3763,55 @@ export class ProjectSessionCoordinator {
     envelope: InboxEnvelope,
     sourceRunId: string,
   ): Promise<boolean> {
-    const key = completionKey(envelope.fromConversationId, sourceRunId);
-    const waiters = context.waiters.get(key);
-    const waiter = [...(waiters ?? [])].find(
+    const exactKey = completionKey(envelope.fromConversationId, sourceRunId);
+    const exactWaiters = context.waiters.get(exactKey);
+    const exactWaiter = [...(exactWaiters ?? [])].find(
       (candidate): candidate is SessionWaiter =>
         candidate.kind === "session"
         && candidate.waitingConversationId === target.conversationId
         && candidate.targetConversationId === envelope.fromConversationId
         && candidate.targetRunId === sourceRunId,
     );
+    const initialActivity = target.getActivity();
+    let waiter: SessionWaiter | undefined = exactWaiter;
+    let waiters: Set<ProjectWaiter> | undefined = exactWaiter
+      ? exactWaiters
+      : undefined;
+    if (!waiter && initialActivity.kind === "waiting") {
+      // Any NEW peer/inbox message actually delivered to the current run after
+      // the wait registered must end that wait, even when the message source
+      // differs from the waited target. Never wake on a message this run has
+      // already observed: a persisted delivered marker, an envelope already
+      // given to this run's wait (waitedByRunId), or one already claimed into
+      // its steering queue counts as observed.
+      const deliveredMessageIds = new Set(
+        aggregateReservedConversationEntries(
+          target.sessionManager.getEntries(),
+        ).deliveredMessageIds,
+      );
+      if (
+        !deliveredMessageIds.has(envelope.messageId)
+        && envelope.waitedByRunId !== initialActivity.runId
+      ) {
+        const currentKey = completionKey(
+          initialActivity.targetConversationId,
+          initialActivity.targetRunId,
+        );
+        const currentWaiters = context.waiters.get(currentKey);
+        waiter = [...(currentWaiters ?? [])].find(
+          (candidate): candidate is SessionWaiter =>
+            candidate.kind === "session"
+            && candidate.waitingConversationId === target.conversationId,
+        );
+        waiters = waiter ? currentWaiters : undefined;
+      }
+    }
     if (!waiter || !waiters) return false;
 
-    const initialActivity = target.getActivity();
     if (
       initialActivity.kind !== "waiting"
-      || initialActivity.targetConversationId !== envelope.fromConversationId
-      || initialActivity.targetRunId !== sourceRunId
+      || initialActivity.targetConversationId !== waiter.targetConversationId
+      || initialActivity.targetRunId !== waiter.targetRunId
     ) {
       return false;
     }
@@ -3695,7 +3841,11 @@ export class ProjectSessionCoordinator {
     } catch (error) {
       if (waiters.has(waiter)) {
         waiters.delete(waiter);
-        if (waiters.size === 0) context.waiters.delete(key);
+        if (waiters.size === 0) {
+          context.waiters.delete(
+            completionKey(waiter.targetConversationId, waiter.targetRunId),
+          );
+        }
         this.detachWaiter(waiter);
         waiter.reject(
           error instanceof Error ? error : new Error(String(error)),
@@ -3706,14 +3856,18 @@ export class ProjectSessionCoordinator {
     if (!steered || !waiters.has(waiter)) return false;
 
     waiters.delete(waiter);
-    if (waiters.size === 0) context.waiters.delete(key);
+    if (waiters.size === 0) {
+      context.waiters.delete(
+        completionKey(waiter.targetConversationId, waiter.targetRunId),
+      );
+    }
     this.detachWaiter(waiter);
     try {
       this.appendSourceCardState(context, envelope, "delivered");
       const result: SessionMessageWaitResult = {
         outcome: "message",
         conversationId: envelope.fromConversationId,
-        runId: sourceRunId,
+        runId: envelope.fromRunId ?? sourceRunId,
         messageId: envelope.messageId,
         sentAt: envelope.sentAt,
       };
@@ -3922,7 +4076,13 @@ export class ProjectSessionCoordinator {
           context.processingBatches.set(key, batchAfterFailure);
         }
         await context.inbox.updateState(envelope.messageId, { state: "queued" });
-        if (envelope.messageId === options.throughMessageId) throw error;
+        // In through mode any failed delivery — the through envelope itself or
+        // any FIFO predecessor — must fail closed: rethrow so the caller
+        // (deliverEnvelopeToWaitingRun) rejects the waiter and the send, and
+        // the through envelope stays queued instead of being claimed into the
+        // waiting run by an ordinary fallback while no waiter resolution
+        // exists.
+        if (options.throughMessageId !== undefined) throw error;
         return false;
       }
     }

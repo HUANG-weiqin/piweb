@@ -229,6 +229,27 @@ interface PendingGuidance {
   readonly projectedText?: string;
 }
 
+/**
+ * 本 run 已由 SDK 接受、尚未被 raw user message_end 观察的 guidance。
+ * 显式 steer 与 busy 浏览器 prompt 共用同一 FIFO tracking，作为 wait
+ * 唤醒的权威状态；`waited` 与 raw observation 独立，防止同一 guidance
+ * 反复唤醒本 run 的后续 wait。记录在 raw user message_end 认领时移除。
+ */
+interface PendingGuidanceObservation {
+  /** 显式 steer 记录（其 command 在 raw user message_end 结算）。 */
+  readonly steer?: PendingGuidance;
+  /** busy 浏览器 prompt admission（其 prompt_delivered 在 raw user message_end 结算）。 */
+  readonly admission?: PendingPromptAdmission;
+  /**
+   * SDK 实际入队的 delivery text（浏览器 prompt 为验证后的 queued text；
+   * 显式 steer 为调用后同步捕获的 queued text）。raw user message_end
+   * 只认领 FIFO 头 deliveryText 匹配的记录。
+   */
+  readonly deliveryText: string;
+  /** 本 run 的 wait 已在此 guidance 上唤醒过一次。 */
+  waited: boolean;
+}
+
 interface RunTicket {
   readonly id: string;
   readonly origin: ConversationRunOrigin;
@@ -244,6 +265,23 @@ interface RunTicket {
   phase: "queued" | "running" | "waiting" | "cancelling";
   waitingFor?: ConversationWaitingTarget;
   waitingEpoch?: symbol;
+  /**
+   * One-shot host callback fired when guidance is accepted into the SDK
+   * steering queue of this exact waiting run. Used by the host to end a
+   * blocked wait_for_session tool call so the queued guidance can be consumed
+   * at the next model request. Returns true only when the host's exact
+   * waiter still exists and successfully claimed the guidance; false leaves
+   * the record available for the next wait. Cleared on fire, on wait
+   * restore, or by the caller's unsubscribe.
+   */
+  waitSteerInterrupt?: () => boolean;
+  /**
+   * Accepted-but-not-observed guidance in SDK acceptance order (unified FIFO
+   * across explicit steers and busy browser prompts). Persists across waits
+   * of this run; each record wakes at most one wait (waited flag) and is
+   * removed when its raw user message_end is observed.
+   */
+  readonly pendingGuidanceObservations: PendingGuidanceObservation[];
   toolMode: ToolMode;
   extensionErrorMessage?: string;
   sawSdkCompactionAttempt: boolean;
@@ -882,8 +920,8 @@ export class ConversationActor {
    * busy 时浏览器 prompt：消息进 SDK steering 队列（不建 run ticket）。
    * steering 在当前 assistant turn 的工具调用全部结束后、下一次模型调用前注入，
    * 用户消息因此能及时纠正 agent 方向（followUp 要等整个 run 结束才读取）。
-   * preflightResult(true)（已入队）即 resolve；轮到时若已 idle 则转 startPrompt。
-   * 投递确认由 onSessionEvent 的 prompt_delivered 事件表达。
+   * preflightResult(true) 后还要验证 SDK steering queue 确实新增 entry 才 resolve；
+   * 轮到时若已 idle 则转 startPrompt。投递确认由 prompt_delivered 表达。
    */
   async admitBrowserPrompt(input: {
     promptId: string;
@@ -916,21 +954,52 @@ export class ConversationActor {
     // 注意：不进入 operations 串行队列——run 进行中队列被 executeRun 占用，
     // admit 必须在 run 进行中直接调用 SDK steer。
     // 若检查时已 idle（当前 run 刚结束），转 startPrompt（其内部在串行队列执行）。
-    if (!this.activeRun) {
+    const ticket = this.activeRun;
+    if (!ticket) {
       return this.startPrompt({
         runId: input.runId,
         text: input.text,
         origin: "browser",
       });
     }
-    return this.admitSteerPrompt(input);
+    if (
+      ticket.phase !== "running"
+      && ticket.phase !== "waiting"
+    ) {
+      // The SDK run is not live (queued) or is cancelling: a steering
+      // admission could escape into a second SDK run or survive queue cleanup.
+      // Fail closed; the browser keeps its draft because no prompt_admitted is
+      // emitted.
+      throw new Error("The agent run is not ready to accept a message");
+    }
+    return this.admitSteerPrompt(ticket, input);
   }
 
-  private async admitSteerPrompt(input: {
-    promptId: string;
-    runId: string;
-    text: string;
-  }): Promise<{ outcome: "admitted" }> {
+  private async admitSteerPrompt(
+    ticket: RunTicket,
+    input: {
+      promptId: string;
+      runId: string;
+      text: string;
+    },
+  ): Promise<{ outcome: "admitted" }> {
+    // Fail closed BEFORE the SDK call:
+    // - pre-stream: the SDK run is not streaming yet — a steer-mode prompt
+    //   would start an unowned SDK run (and the later queue proof could not
+    //   undo it). The browser keeps its draft: no prompt_admitted.
+    // - input extensions: the SDK can consume the prompt without queueing
+    //   (preflight(true) without a queue entry). Extension commands are
+    //   already host-rejected before this point.
+    if (!this.session.isStreaming) {
+      throw new Error(
+        "The agent run is not streaming yet; cannot queue a message",
+      );
+    }
+    if (this.session.hasExtensionHandlers("input")) {
+      throw new Error(
+        "Busy browser messages are not supported while input extensions are registered",
+      );
+    }
     const admission: PendingPromptAdmission = {
       promptId: input.promptId,
       text: input.text,
@@ -943,12 +1012,58 @@ export class ConversationActor {
         void this.session.prompt(input.text, {
           streamingBehavior: "steer",
           preflightResult: (ok) => {
-            if (ok) {
-              accepted = true;
-              resolve();
-            } else {
+            if (!ok) {
               reject(new Error("Prompt preflight rejected"));
+              return;
             }
+            accepted = true;
+            // The SDK pushes this entry synchronously before its preflight
+            // continuation. Supported host admissions cannot append in that
+            // interval, while queue drains only remove from the front, so the
+            // tail is this prompt. A length proof would falsely reject when a
+            // predecessor drains while leaving this text queued.
+            const after = this.session.getSteeringMessages();
+            const deliveryText = after.at(-1);
+            if (deliveryText === undefined) {
+              // No own entry appeared (e.g. the SDK consumed the input
+              // without queueing): fail closed — no prompt_admitted, no
+              // wait wake, admission removed by the catch below.
+              reject(new Error(
+                "Prompt was handled without being queued for steering",
+              ));
+              return;
+            }
+            if (
+              this.activeRun !== ticket
+              || (
+                ticket.phase !== "running"
+                && ticket.phase !== "waiting"
+              )
+            ) {
+              reject(new Error(
+                "The agent run stopped accepting messages before admission completed",
+              ));
+              return;
+            }
+            resolve();
+            // The SDK has queued the browser prompt into the steering
+            // queue. Defer the observation record to a microtask so explicit
+            // steer acceptances (already queued) keep the unified FIFO in
+            // SDK queue order; then wake a waiting run's host interrupt if
+            // one is registered.
+            queueMicrotask(() => {
+              if (
+                this.activeRun === ticket
+                && ticket.phase !== "cancelling"
+              ) {
+                ticket.pendingGuidanceObservations.push({
+                  admission,
+                  deliveryText,
+                  waited: false,
+                });
+                this.fireWaitingSteerInterrupt(ticket);
+              }
+            });
           },
         }).catch((error: unknown) => {
           // 主 promise 覆盖整个队列 drain；若投递确认已发生，忽略迟到错误。
@@ -970,7 +1085,11 @@ export class ConversationActor {
 
   /** 当前等待投递的浏览器 prompt（快照/恢复用）。 */
   pendingPromptAdmissions(): readonly PendingPromptAdmission[] {
-    return this.pendingAdmissions.slice();
+    return this.pendingAdmissions.map(({ promptId, text, createdAt }) => ({
+      promptId,
+      text,
+      createdAt,
+    }));
   }
 
   private removePendingAdmission(promptId: string): void {
@@ -1074,6 +1193,7 @@ export class ConversationActor {
     // not route this through the actor operation queue: that queue is occupied
     // by the active run until settlement. The command itself settles only when
     // the SDK later emits the queued user message into this exact run.
+    const beforeSteerQueueLength = this.session.getSteeringMessages().length;
     let queued: Promise<void>;
     try {
       queued = this.session.steer(trimmed);
@@ -1085,9 +1205,41 @@ export class ConversationActor {
         error,
       ));
     }
+    // The real SDK pushes its steering entry synchronously inside the steer
+    // call (before the first await of its async body). Capture the exact
+    // queued delivery text now; the later raw user message_end carries it.
+    const afterSteer = this.session.getSteeringMessages();
+    const steerDeliveryText = afterSteer.length > beforeSteerQueueLength
+      ? afterSteer[beforeSteerQueueLength]
+      : undefined;
     return Promise.resolve(queued).then(
       () => {
         sdkAccepted = true;
+        // Fail closed: without the queued delivery text the raw end could
+        // never settle this delivery, and waking a wait on an un-queued
+        // guidance would be a fake acceptance. Do not accept before the
+        // steer promise settles.
+        if (steerDeliveryText === undefined) {
+          removePendingGuidance();
+          const error = new Error(
+            "Steer was accepted without a queued steering entry",
+          );
+          delivery.reject(error);
+          throw new ConversationSteerDeliveryError(
+            "uncertain_after_sdk_acceptance",
+            error,
+          );
+        }
+        // The SDK has queued the guidance: record it as accepted-but-
+        // unobserved and, if this exact run is currently waiting with a host
+        // interrupt, wake it now. The command promise still settles only on
+        // the raw user message_end proof below, where the record is retired.
+        ticket.pendingGuidanceObservations.push({
+          steer: pendingGuidance,
+          deliveryText: steerDeliveryText,
+          waited: false,
+        });
+        this.fireWaitingSteerInterrupt(ticket);
         return delivery.promise;
       },
       (error) => {
@@ -1258,6 +1410,7 @@ export class ConversationActor {
       }),
       completion: deferred<RunSettlement>(),
       guidanceDeliveries: [],
+      pendingGuidanceObservations: [],
       customSteerDeliveries: [],
       expectsInitialPromptRawUserMessage:
         input.expectsInitialPromptRawUserMessage,
@@ -1324,6 +1477,7 @@ export class ConversationActor {
       ticket.phase = "running";
       ticket.waitingFor = undefined;
       ticket.waitingEpoch = undefined;
+      ticket.waitSteerInterrupt = undefined;
       this.emitActivity();
     };
   }
@@ -1338,6 +1492,139 @@ export class ConversationActor {
       return await work();
     } finally {
       restore();
+    }
+  }
+
+  /**
+   * Registers a one-shot, ownership-scoped callback that fires when guidance
+   * (an explicit steer or a busy browser prompt) is accepted into the SDK
+   * steering queue of this exact waiting run, or when such guidance was
+   * already accepted but not yet observed by a raw user message_end. Fires at
+   * most once; unregistering before then is safe and the actor also clears it
+   * when the wait ends. Rejects when the run is not currently waiting under
+   * this ownership. The host uses this to end a blocked wait_for_session tool
+   * call without inventing a peer identity.
+   */
+  onWaitingSteerAdmitted(
+    ownership: ConversationRunOwnership,
+    callback: () => boolean,
+  ): () => void {
+    const ticket = this.activeRun;
+    if (
+      !ticket
+      || ticket.ownership !== ownership
+      || ownership[RUN_OWNERSHIP] !== ticket.ownership[RUN_OWNERSHIP]
+      || ticket.phase !== "waiting"
+    ) {
+      throw new Error("The run is not currently waiting under this ownership");
+    }
+    if (ticket.waitSteerInterrupt !== undefined) {
+      throw new Error("A waiting steer interrupt is already registered");
+    }
+    ticket.waitSteerInterrupt = callback;
+    // Consume guidance already accepted into the SDK queue (including before
+    // this wait registered or while the registration was still queued behind
+    // the serial lifecycle task).
+    this.fireWaitingSteerInterrupt(ticket);
+    let active = true;
+    return () => {
+      if (!active) return;
+      active = false;
+      if (ticket.waitSteerInterrupt === callback) {
+        ticket.waitSteerInterrupt = undefined;
+      }
+    };
+  }
+
+  /**
+   * Fires the registered waiting interrupt once for the first accepted-but-
+   * unobserved guidance record. Marks that record waited so a later wait of
+   * this run is never re-woken by the same guidance, independently of when
+   * its raw user message_end is observed.
+   */
+  private fireWaitingSteerInterrupt(ticket: RunTicket): void {
+    if (this.activeRun !== ticket || ticket.phase !== "waiting") return;
+    if (ticket.waitSteerInterrupt === undefined) return;
+    const record = ticket.pendingGuidanceObservations.find(
+      (candidate) => !candidate.waited,
+    );
+    if (!record) return;
+    const interrupt = ticket.waitSteerInterrupt;
+    ticket.waitSteerInterrupt = undefined;
+    let claimed = false;
+    try {
+      claimed = interrupt() === true;
+    } catch (error) {
+      this.emitError(error, ticket.id);
+      return;
+    }
+    // Only the host's exact waiter claiming the guidance burns the record.
+    // A stale callback (waiter already removed by abort/settlement/message
+    // before withWaiting's restore ran) must leave the record for the next
+    // wait; otherwise a subsequent blocking tool or wait registered before
+    // the raw guidance injection would deadlock.
+    if (claimed) {
+      record.waited = true;
+    }
+  }
+
+  /**
+   * Claims the FIFO-head accepted-guidance record for a raw user message_end:
+   * retires the unified record, removes its source (explicit steer or browser
+   * admission) by object identity, and settles it after the durable
+   * persistence proof. Same-text sources are never matched by a text search;
+   * the record IS the queue order.
+   */
+  private claimPendingGuidanceObservation(
+    ticket: RunTicket,
+    rawMessage: unknown,
+    record: PendingGuidanceObservation,
+  ): void {
+    ticket.pendingGuidanceObservations.shift();
+    const steer = record.steer;
+    const admission = record.admission;
+    if (steer !== undefined) {
+      const index = ticket.guidanceDeliveries.indexOf(steer);
+      if (index >= 0) ticket.guidanceDeliveries.splice(index, 1);
+      queueMicrotask(() => {
+        if (!rawUserMessageIsPersisted(
+          this.sessionManager.getEntries(),
+          rawMessage,
+        )) {
+          const error = new Error(
+            "Pi did not durably append the raw user message before delivery acknowledgement",
+          );
+          steer.delivery.reject(error);
+          this.emitError(error, ticket.id);
+          return;
+        }
+        steer.delivery.resolve();
+      });
+      return;
+    }
+    if (admission !== undefined) {
+      const index = this.pendingAdmissions.indexOf(admission);
+      if (index >= 0) this.pendingAdmissions.splice(index, 1);
+      queueMicrotask(() => {
+        if (!rawUserMessageIsPersisted(
+          this.sessionManager.getEntries(),
+          rawMessage,
+        )) {
+          this.emitError(
+            new Error(
+              "Pi did not durably append the admitted user message before delivery acknowledgement",
+            ),
+            ticket.id,
+          );
+          return;
+        }
+        this.emit({
+          type: "prompt_delivered",
+          conversationId: this.conversationId,
+          promptId: admission.promptId,
+          runId: ticket.id,
+        });
+      });
     }
   }
 
@@ -1639,6 +1926,9 @@ export class ConversationActor {
         new Error("Run ended before queued guidance was delivered"),
       );
     }
+    ticket.pendingGuidanceObservations.splice(0);
+    // Un-delivered browser admissions must not leak into a later run.
+    this.clearPendingAdmissions();
     this.rejectCustomSteers(
       ticket,
       new Error("Run ended before queued session messages were delivered"),
@@ -1692,6 +1982,8 @@ export class ConversationActor {
     for (const guidance of ticket.guidanceDeliveries.splice(0)) {
       guidance.delivery.reject(error);
     }
+    ticket.pendingGuidanceObservations.splice(0);
+    this.clearPendingAdmissions();
     this.rejectCustomSteers(ticket, error);
     this.fatalError = error instanceof Error
       ? error
@@ -1728,6 +2020,7 @@ export class ConversationActor {
     ticket.abortPromise = Promise.resolve().then(() => {
       this.session.clearQueue();
       this.clearPendingAdmissions();
+      ticket.pendingGuidanceObservations.splice(0);
       return this.session.abort();
     });
     return ticket.abortPromise;
@@ -1807,14 +2100,11 @@ export class ConversationActor {
 
     if (event.type === "message_end" && event.message.role === "user") {
       const rawMessage = event.message;
-      // busy 期间 accepted 的 steer prompt：按 FIFO 文本匹配确认投递。
-      // 必须在 guidance 逻辑之前，避免被误当作 extension steer 投递。
-      const admittedText = admittedUserMessageText(rawMessage);
-      const admissionIndex = admittedText === undefined
-        ? -1
-        : this.pendingAdmissions.findIndex((a) => a.text === admittedText);
-      if (admissionIndex >= 0) {
-        const [admission] = this.pendingAdmissions.splice(admissionIndex, 1);
+      // The first raw user end of a run unconditionally belongs to the
+      // initial prompt: clear the flag first and run the persistence proof.
+      // A busy browser admission with the same text must never steal it.
+      if (ticket.expectsInitialPromptRawUserMessage) {
+        ticket.expectsInitialPromptRawUserMessage = false;
         queueMicrotask(() => {
           if (!rawUserMessageIsPersisted(
             this.sessionManager.getEntries(),
@@ -1822,54 +2112,35 @@ export class ConversationActor {
           )) {
             this.emitError(
               new Error(
-                "Pi did not durably append the admitted user message before delivery acknowledgement",
+                "Pi did not durably append the raw user message before delivery acknowledgement",
               ),
               ticket.id,
             );
             return;
           }
-          this.emit({
-            type: "prompt_delivered",
-            conversationId: this.conversationId,
-            promptId: admission.promptId,
-            runId: ticket.id,
-          });
-        });
-      } else if (
-        ticket.expectsInitialPromptRawUserMessage
-        || ticket.guidanceDeliveries.length > 0
-      ) {
-        // Raw user ends are ordered by Pi. Claim the first one before the
-        // asynchronous persistence proof so a late initial prompt can never be
-        // mistaken for the first queued guidance delivery.
-        const isInitialPrompt = ticket.expectsInitialPromptRawUserMessage;
-        if (isInitialPrompt) ticket.expectsInitialPromptRawUserMessage = false;
-        queueMicrotask(() => {
-          if (!rawUserMessageIsPersisted(
-            this.sessionManager.getEntries(),
-            rawMessage,
-          )) {
-            const error = new Error(
-              "Pi did not durably append the raw user message before delivery acknowledgement",
-            );
-            if (!isInitialPrompt) {
-              ticket.guidanceDeliveries.shift()?.delivery.reject(error);
-            }
-            this.emitError(error, ticket.id);
-            return;
+          if (ticket.origin === "pending_prompt") {
+            ticket.pendingPromptUserDelivered = true;
           }
-          if (isInitialPrompt) {
-            if (ticket.origin === "pending_prompt") {
-              ticket.pendingPromptUserDelivered = true;
-            }
-            return;
-          }
-          // Subsequent raw user-message ends are FIFO with AgentSession.steer()
-          // calls. Promise continuations run after this microtask, after Pi's
-          // synchronous SessionManager append has been proved by object identity.
-          ticket.guidanceDeliveries.shift()?.delivery.resolve();
         });
+        return;
       }
+
+      // Subsequent raw ends claim the unified accepted-guidance FIFO head by
+      // its queued delivery text (browser + explicit in SDK acceptance
+      // order). Same-text messages stay ordered by kind and identity — never
+      // by a text search over arbitrary admissions.
+      const admittedText = admittedUserMessageText(rawMessage);
+      const head = ticket.pendingGuidanceObservations[0];
+      if (
+        head !== undefined
+        && admittedText !== undefined
+        && head.deliveryText === admittedText
+      ) {
+        this.claimPendingGuidanceObservation(ticket, rawMessage, head);
+        return;
+      }
+      // A mismatched raw user end (e.g. an extension user message) must not
+      // consume or overtake host guidance records.
     }
 
     if (

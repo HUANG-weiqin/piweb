@@ -64,6 +64,7 @@ import {
   type ConversationLeaseWaitOptions,
   type ProjectStoreHandle,
 } from "./project-store.js";
+import type { SerialTaskQueue } from "./serial-task-queue.js";
 import {
   RoleCatalog,
   type RoleCatalogModel,
@@ -124,6 +125,22 @@ class FakeSessionControl {
   abortCalls = 0;
   disposeCalls = 0;
   skipNextCustomMessagePersistence = false;
+  /**
+   * Real text steering queue mirroring the SDK; admissions must verify a
+   * queue entry actually appeared. Raw deliveries never drain it in the fake
+   * (the actor only reads length/indices), matching the SDK's append order.
+   */
+  readonly steeringMessages: string[] = [];
+  /** Simulated SDK preflight result for busy browser steer prompts. */
+  steerPromptPreflightResult?: boolean;
+  /** Simulated SDK queued text (may differ from the submitted prompt text). */
+  steerPromptExpandedText?: string;
+  /** Simulated SDK queued text for steers (may differ from the submitted text). */
+  steerExpandedText?: string;
+  /** Simulated extension-handled input: preflight true but NO queue entry. */
+  steerPromptHandled?: boolean;
+  /** Simulated input-extension handlers (admission precheck). */
+  hasInputExtensionHandlers?: boolean;
   listener?: (event: AgentSessionEvent) => void;
   abortCurrent?: () => void;
   readonly session: AgentSession;
@@ -150,13 +167,41 @@ class FakeSessionControl {
       extensionRunner: {
         getCommand: () => undefined,
       },
-      prompt: async (text: string) => {
+      prompt: async (
+        text: string,
+        options?: {
+          streamingBehavior?: "steer" | "followUp";
+          preflightResult?: (ok: boolean) => void;
+        },
+      ) => {
         control.promptTexts.push(text);
+        if (options?.streamingBehavior === "steer") {
+          // Busy browser prompts queue into the SDK steering queue; they do
+          // not start a turn. The raw user message_end arrives later via
+          // emitUserMessage. Mirror the SDK: queue first, then preflight.
+          const ok = control.steerPromptPreflightResult ?? true;
+          if (ok && !control.steerPromptHandled) {
+            control.steeringMessages.push(
+              control.steerPromptExpandedText ?? text,
+            );
+          }
+          options.preflightResult?.(ok);
+          return;
+        }
         await control.runNext();
       },
+      getSteeringMessages: () => control.steeringMessages.slice(),
+      hasExtensionHandlers: (eventType: string) =>
+        eventType === "input" && control.hasInputExtensionHandlers === true,
       steer: (text: string) => {
         control.steerTexts.push(text);
-        return control.steerImplementation(text);
+        const result = control.steerImplementation(text);
+        control.steeringMessages.push(control.steerExpandedText ?? text);
+        return result;
+      },
+      clearQueue: () => {
+        control.pendingSteers.splice(0);
+        control.steeringMessages.splice(0);
       },
       sendCustomMessage: async (
         message: Parameters<AgentSession["sendCustomMessage"]>[0],
@@ -181,9 +226,6 @@ class FakeSessionControl {
       abort: async () => {
         control.abortCalls++;
         control.abortCurrent?.();
-      },
-      clearQueue: () => {
-        control.pendingSteers.splice(0);
       },
       dispose: () => {
         control.disposeCalls++;
@@ -4495,6 +4537,1503 @@ describe("ProjectSessionCoordinator", () => {
     await expect(childCompletion).resolves.toMatchObject({
       runId: childRunId,
       outcome: "completed",
+    });
+  });
+
+  it("ends a wait for a canonical but wrong runId when the peer's real active run sends", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const peer = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const peerStarted = deferred();
+    const releasePeer = deferred();
+    fixture.runtime.control(peer.conversationId).enqueue(
+      blocksUntil(peerStarted, releasePeer, "peer real run completed"),
+    );
+    const peerRunId = randomUUID();
+    const peerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      peer.conversationId,
+      peerRunId,
+      "send from the real active run",
+    );
+    await peerStarted.promise;
+
+    const waitResolved = deferred();
+    const releaseCaller = deferred();
+    let waitResult: unknown;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      waitResult = await executeTool(
+        control,
+        "wait_for_session",
+        "wait-for-wrong-run",
+        {
+          conversationId: peer.conversationId,
+          runId: RUN_A,
+        },
+      );
+      control.beginNextModelTurn();
+      waitResolved.resolve();
+      await releaseCaller.promise;
+      control.emitFinal("caller resumed after the real peer message");
+    });
+    const callerRunId = randomUUID();
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "wait for a run that never settles",
+    );
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the caller wait on the canonical-but-wrong runId",
+    );
+
+    await expect(executeTool(
+      fixture.runtime.control(peer.conversationId),
+      "send_session_message",
+      "real-run-wake-up",
+      {
+        conversationId: caller.conversationId,
+        message: "Wake the caller from its unmatched wait.",
+      },
+    )).resolves.toMatchObject({
+      status: "delivered_to_wait",
+      conversationId: caller.conversationId,
+    });
+    await waitResolved.promise;
+    expect(waitResult).toMatchObject({
+      outcome: "message",
+      conversationId: peer.conversationId,
+      runId: peerRunId,
+      messageId: expect.any(String),
+      sentAt: expect.any(String),
+    });
+    expect(peer.getActivity()).toMatchObject({
+      kind: "running",
+      runId: peerRunId,
+    });
+    expect(
+      fixture.runtime.control(caller.conversationId)
+        .modelRequestCustomMessages,
+    ).toEqual([[expect.objectContaining({
+      content: expect.stringContaining("Wake the caller from its unmatched wait."),
+      deliverAs: "steer",
+    })]]);
+    expect(
+      aggregateReservedConversationEntries(
+        caller.sessionManager.getEntries(),
+      ).deliveredMessageIds,
+    ).toHaveLength(1);
+    expect((await coordinatorInbox(fixture.handle).list({
+      toConversationId: caller.conversationId,
+    }))).toContainEqual(expect.objectContaining({
+      fromConversationId: peer.conversationId,
+      fromRunId: peerRunId,
+      state: "processing",
+      processingRunId: callerRunId,
+    }));
+
+    releaseCaller.resolve();
+    await expect(callerCompletion).resolves.toMatchObject({
+      outcome: "completed",
+      runId: callerRunId,
+    });
+    releasePeer.resolve();
+    await expect(peerCompletion).resolves.toMatchObject({
+      outcome: "completed",
+      runId: peerRunId,
+    });
+  });
+
+  it("keeps inbox FIFO when a wait resolves at registration from the claimed backlog", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const waitedPeer = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const backlogStarted = deferred();
+    const releaseBacklog = deferred();
+    const backlogSender = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    fixture.runtime.control(backlogSender.conversationId).enqueue(
+      blocksUntil(backlogStarted, releaseBacklog, "backlog sender completed"),
+    );
+    const backlogRunId = randomUUID();
+    const backlogCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      backlogSender.conversationId,
+      backlogRunId,
+      "send the ordered backlog",
+    );
+    await backlogStarted.promise;
+    const messengerStarted = deferred();
+    const releaseMessenger = deferred();
+    const messenger = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    fixture.runtime.control(messenger.conversationId).enqueue(
+      blocksUntil(messengerStarted, releaseMessenger, "messenger completed"),
+    );
+    const messengerRunId = randomUUID();
+    const messengerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      messenger.conversationId,
+      messengerRunId,
+      "send after the wait registered",
+    );
+    await messengerStarted.promise;
+
+    const callerAtGate = deferred();
+    const beginWait = deferred();
+    const waitResolved = deferred();
+    const releaseCaller = deferred();
+    let waitResult: unknown;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      callerAtGate.resolve();
+      await beginWait.promise;
+      waitResult = await executeTool(
+        control,
+        "wait_for_session",
+        "wait-behind-pre-registration-backlog",
+        {
+          conversationId: waitedPeer.conversationId,
+          runId: RUN_A,
+        },
+      );
+      control.beginNextModelTurn();
+      waitResolved.resolve();
+      await releaseCaller.promise;
+      control.emitFinal("caller processed the ordered messages");
+    });
+    const callerRunId = randomUUID();
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "wait behind a pre-registration backlog",
+    );
+    await callerAtGate.promise;
+
+    const batchSize = 8;
+    for (let index = 1; index <= batchSize + 1; index++) {
+      await executeTool(
+        fixture.runtime.control(backlogSender.conversationId),
+        "send_session_message",
+        `pre-registration-backlog-${index}`,
+        {
+          conversationId: caller.conversationId,
+          message: `pre-registration backlog ${index}`,
+        },
+      );
+    }
+    beginWait.resolve();
+
+    // The wait registers and immediately resolves with the FIRST message
+    // already durably claimed into the current run's steering queue: real
+    // source metadata, no separate re-injection, no settlement required.
+    await waitResolved.promise;
+    expect(waitResult).toMatchObject({
+      outcome: "message",
+      conversationId: backlogSender.conversationId,
+      runId: backlogRunId,
+      messageId: expect.any(String),
+    });
+    const firstBatch = fixture.runtime.control(caller.conversationId)
+      .modelRequestCustomMessages[0];
+    expect(firstBatch).toHaveLength(batchSize);
+    expect(firstBatch?.[0]?.content)
+      .toContain("pre-registration backlog 1");
+    expect(firstBatch?.[batchSize - 1]?.content)
+      .toContain(`pre-registration backlog ${batchSize}`);
+    const claimedInbox = await coordinatorInbox(fixture.handle).list({
+      toConversationId: caller.conversationId,
+    });
+    expect(claimedInbox[0]).toMatchObject({
+      body: "pre-registration backlog 1",
+      state: "processing",
+      processingRunId: callerRunId,
+      waitedByRunId: callerRunId,
+    });
+    expect(claimedInbox[1]).toMatchObject({
+      body: "pre-registration backlog 2",
+      state: "processing",
+      processingRunId: callerRunId,
+    });
+
+    // A later message must still not overtake the queued 9th predecessor.
+    await expect(executeTool(
+      fixture.runtime.control(messenger.conversationId),
+      "send_session_message",
+      "unmatched-wake-behind-backlog",
+      {
+        conversationId: caller.conversationId,
+        message: "unmatched wake-up behind the backlog",
+      },
+    )).resolves.toMatchObject({ status: "processing" });
+    const steers = fixture.runtime.control(caller.conversationId).pendingSteers;
+    expect(steers).toHaveLength(2);
+    expect(steers[0]?.content)
+      .toContain(`pre-registration backlog ${batchSize + 1}`);
+    expect(steers[1]?.content)
+      .toContain("unmatched wake-up behind the backlog");
+
+    releaseCaller.resolve();
+    await callerCompletion;
+    releaseBacklog.resolve();
+    await backlogCompletion;
+    releaseMessenger.resolve();
+    await messengerCompletion;
+  });
+
+  it("resolves a wait at registration from a message already claimed into the current run's queue", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const waitedPeer = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const messengerStarted = deferred();
+    const releaseMessenger = deferred();
+    const messenger = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    fixture.runtime.control(messenger.conversationId).enqueue(
+      blocksUntil(messengerStarted, releaseMessenger, "messenger completed"),
+    );
+    const messengerRunId = randomUUID();
+    const messengerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      messenger.conversationId,
+      messengerRunId,
+      "send before the caller waits",
+    );
+    await messengerStarted.promise;
+
+    const callerAtGate = deferred();
+    const beginWait = deferred();
+    const waitResolved = deferred();
+    const releaseCaller = deferred();
+    let waitResult: unknown;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      callerAtGate.resolve();
+      await beginWait.promise;
+      waitResult = await executeTool(
+        control,
+        "wait_for_session",
+        "wait-after-pre-claimed-message",
+        {
+          conversationId: waitedPeer.conversationId,
+          runId: RUN_A,
+        },
+      );
+      control.beginNextModelTurn();
+      waitResolved.resolve();
+      await releaseCaller.promise;
+      control.emitFinal("caller consumed the pre-claimed message");
+    });
+    const callerRunId = randomUUID();
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "wait after an unrelated message was already claimed",
+    );
+    await callerAtGate.promise;
+
+    // B's message is durably claimed into the caller's CURRENT run queue
+    // while the run is still active but before any wait is registered.
+    await expect(executeTool(
+      fixture.runtime.control(messenger.conversationId),
+      "send_session_message",
+      "pre-registration-claim",
+      {
+        conversationId: caller.conversationId,
+        message: "claimed into the queue before the wait registered",
+      },
+    )).resolves.toMatchObject({ status: "processing" });
+    expect((await coordinatorInbox(fixture.handle).list({
+      toConversationId: caller.conversationId,
+    }))[0]).toMatchObject({
+      state: "processing",
+      processingRunId: callerRunId,
+    });
+
+    // No further message arrives; the wait must still end immediately with
+    // B's real source metadata and inject the message exactly once.
+    beginWait.resolve();
+    await waitResolved.promise;
+    expect(waitResult).toMatchObject({
+      outcome: "message",
+      conversationId: messenger.conversationId,
+      runId: messengerRunId,
+      messageId: expect.any(String),
+      sentAt: expect.any(String),
+    });
+    expect(
+      fixture.runtime.control(caller.conversationId)
+        .modelRequestCustomMessages,
+    ).toEqual([[expect.objectContaining({
+      content: expect.stringContaining(
+        "claimed into the queue before the wait registered",
+      ),
+      deliverAs: "steer",
+    })]]);
+    expect(
+      aggregateReservedConversationEntries(
+        caller.sessionManager.getEntries(),
+      ).deliveredMessageIds,
+    ).toHaveLength(1);
+    expect((await coordinatorInbox(fixture.handle).list({
+      toConversationId: caller.conversationId,
+    }))[0]).toMatchObject({
+      waitedByRunId: callerRunId,
+    });
+
+    releaseCaller.resolve();
+    await expect(callerCompletion).resolves.toMatchObject({
+      outcome: "completed",
+      runId: callerRunId,
+    });
+    releaseMessenger.resolve();
+    await expect(messengerCompletion).resolves.toMatchObject({
+      outcome: "completed",
+      runId: messengerRunId,
+    });
+  });
+
+  it("latches user guidance admitted before the wait registration", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const waitedPeer = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const waitStarted = deferred();
+    const guidanceResolved = deferred();
+    let waitResult: unknown;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      waitStarted.resolve();
+      waitResult = await executeTool(
+        control,
+        "wait_for_session",
+        "wait-while-registration-is-gated",
+        {
+          conversationId: waitedPeer.conversationId,
+          runId: RUN_A,
+        },
+      );
+      guidanceResolved.resolve();
+      control.emitUserMessage("initial prompt settlement");
+      control.emitUserMessage("user guidance");
+      control.beginNextModelTurn();
+      control.emitFinal("caller resumed after latched guidance");
+    });
+    const callerRunId = randomUUID();
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "wait while its registration is gated",
+    );
+    await waitStarted.promise;
+
+    // Hold the project lifecycle so the waiter registration task cannot run.
+    // The wait tool's preliminary lifecycle work is already queued ahead of
+    // this gate; by the time the gate is released the wait has passed
+    // enterWaiting (phase=waiting) and the registration task is queued behind
+    // the gate, where the steer admission must be latched.
+    const context = (fixture.handle as unknown as {
+      context: { lifecycle: SerialTaskQueue };
+    }).context;
+    const gate = deferred();
+    const gateTask = context.lifecycle.run(() => gate.promise);
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the wait phase before its registration task runs",
+    );
+
+    const guidance = fixture.coordinator.steer(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "user guidance",
+    );
+    gate.resolve();
+    await gateTask;
+    await expect(Promise.race([
+      guidanceResolved.promise.then(() => "resolved"),
+      new Promise<"timeout">((resolve) =>
+        setTimeout(() => resolve("timeout"), 1500)
+      ),
+    ])).resolves.toBe("resolved");
+    expect(waitResult).toEqual({ outcome: "guidance" });
+    await expect(guidance).resolves.toBeUndefined();
+    expect(fixture.runtime.control(caller.conversationId).steerTexts)
+      .toEqual(["user guidance"]);
+    await expect(callerCompletion).resolves.toMatchObject({
+      outcome: "completed",
+      runId: callerRunId,
+    });
+    expect(waitedPeer.getActivity()).toMatchObject({ kind: "idle" });
+  });
+
+  it("does not establish a temporary return receipt when an unrelated message ends a temporary wait", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const temporaryStarted = deferred();
+    const releaseTemporary = deferred();
+    fixture.runtime.nextSessionBehaviors.push([
+      blocksUntil(temporaryStarted, releaseTemporary, "temporary final answer"),
+    ]);
+    const temporary = await fixture.coordinator.startPeerSession(
+      fixture.handle,
+      caller.conversationId,
+      startInput({
+        temporary: true,
+        idempotencyKey: "unrelated-wake-up-has-no-receipt",
+      }),
+    );
+    await temporaryStarted.promise;
+    const messengerStarted = deferred();
+    const releaseMessenger = deferred();
+    const messenger = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    fixture.runtime.control(messenger.conversationId).enqueue(
+      blocksUntil(messengerStarted, releaseMessenger, "messenger completed"),
+    );
+    const messengerRunId = randomUUID();
+    const messengerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      messenger.conversationId,
+      messengerRunId,
+      "send unrelated progress",
+    );
+    await messengerStarted.promise;
+
+    const waitResolved = deferred();
+    let waitResult: unknown;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      waitResult = await executeTool(
+        control,
+        "wait_for_session",
+        "temporary-unrelated-wake-up",
+        {
+          conversationId: temporary.conversationId,
+          runId: temporary.runId,
+        },
+      );
+      control.beginNextModelTurn();
+      waitResolved.resolve();
+      control.emitFinal("caller consumed the unrelated wake-up");
+    });
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      randomUUID(),
+      "wait for the temporary run while an unrelated peer sends",
+    );
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the caller's exact temporary wait",
+    );
+
+    await expect(executeTool(
+      fixture.runtime.control(messenger.conversationId),
+      "send_session_message",
+      "unrelated-temporary-wake-up-message",
+      {
+        conversationId: caller.conversationId,
+        message: "Unrelated progress while the temporary run is pending.",
+      },
+    )).resolves.toMatchObject({ status: "delivered_to_wait" });
+    await waitResolved.promise;
+    expect(waitResult).toMatchObject({
+      outcome: "message",
+      conversationId: messenger.conversationId,
+      runId: messengerRunId,
+    });
+    expect(
+      aggregateReservedConversationEntries(
+        caller.sessionManager.getEntries(),
+      ).temporaryReturnReceipts,
+    ).toEqual([]);
+    await callerCompletion;
+
+    releaseTemporary.resolve();
+    await waitUntil(() =>
+      fixture.runtime.control(caller.conversationId).received.some((message) =>
+        (message.details as { kind?: string } | undefined)?.kind
+          === "delegation_result"
+      ),
+    "automatic delegation result after the unrelated wake-up");
+    expect(
+      aggregateReservedConversationEntries(
+        caller.sessionManager.getEntries(),
+      ).temporaryReturnReceipts,
+    ).toEqual([]);
+    releaseMessenger.resolve();
+    await messengerCompletion;
+  });
+
+  it("ends a waiting run when user guidance is accepted into its steering queue", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const waitedPeer = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const waitResolved = deferred();
+    let waitResult: unknown;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      waitResult = await executeTool(
+        control,
+        "wait_for_session",
+        "wait-for-guidance",
+        {
+          conversationId: waitedPeer.conversationId,
+          runId: RUN_A,
+        },
+      );
+      waitResolved.resolve();
+      control.emitUserMessage("initial prompt settlement");
+      control.emitUserMessage("user guidance");
+      control.beginNextModelTurn();
+      control.emitFinal("caller resumed after user guidance");
+    });
+    const callerRunId = randomUUID();
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "wait while the user steers",
+    );
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the caller wait that user guidance must end",
+    );
+
+    const guidance = fixture.coordinator.steer(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "user guidance",
+    );
+    await waitResolved.promise;
+    expect(waitResult).toEqual({ outcome: "guidance" });
+    await expect(guidance).resolves.toBeUndefined();
+    expect(fixture.runtime.control(caller.conversationId).steerTexts)
+      .toEqual(["user guidance"]);
+    await expect(callerCompletion).resolves.toMatchObject({
+      outcome: "completed",
+      runId: callerRunId,
+    });
+    expect(waitedPeer.getActivity()).toMatchObject({ kind: "idle" });
+  });
+
+  it("wakes a waiting run when a browser busy prompt is accepted and settles its raw delivery once", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const waitedPeer = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const waitResolved = deferred();
+    let waitResult: unknown;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      waitResult = await executeTool(
+        control,
+        "wait_for_session",
+        "wait-for-browser-prompt",
+        {
+          conversationId: waitedPeer.conversationId,
+          runId: RUN_A,
+        },
+      );
+      waitResolved.resolve();
+      // Real SDK order: the initial prompt's raw end comes first, then the
+      // busy admission's delivery.
+      control.emitUserMessage("initial prompt settlement");
+      control.emitUserMessage("browser guidance");
+      control.beginNextModelTurn();
+      control.emitFinal("caller resumed after browser guidance");
+    });
+    const callerRunId = randomUUID();
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "wait while the user sends a browser message",
+    );
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the caller wait that the browser prompt must end",
+    );
+
+    await expect(fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "browser guidance",
+      "browser-guidance-prompt-1",
+    )).resolves.toEqual({ outcome: "admitted" });
+    await expect(Promise.race([
+      waitResolved.promise.then(() => "resolved"),
+      new Promise<"timeout">((resolve) =>
+        setTimeout(() => resolve("timeout"), 1500)
+      ),
+    ])).resolves.toBe("resolved");
+    expect(waitResult).toEqual({ outcome: "guidance" });
+    expect(caller.pendingPromptAdmissions()).toEqual([]);
+    // The guidance body is injected exactly once via its raw user message.
+    const userTexts = caller.sessionManager.getEntries()
+      .map((entry) => (entry as { message?: unknown }).message)
+      .filter((message): message is { role: string; content: string } =>
+        message !== undefined
+        && typeof message === "object"
+        && (message as { role?: unknown }).role === "user"
+        && typeof (message as { content?: unknown }).content === "string"
+      )
+      .map((message) => message.content);
+    expect(userTexts.filter((text) => text === "browser guidance"))
+      .toHaveLength(1);
+    await expect(callerCompletion).resolves.toMatchObject({
+      outcome: "completed",
+      runId: callerRunId,
+    });
+    expect(waitedPeer.getActivity()).toMatchObject({ kind: "idle" });
+  });
+
+  it("rejects a busy prompt whose preflight passed but added no steering entry", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const waitedPeer = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const waitResolved = deferred();
+    const abort = new AbortController();
+    let waitError: unknown;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      try {
+        await executeTool(
+          control,
+          "wait_for_session",
+          "wait-behind-ghost-admission",
+          {
+            conversationId: waitedPeer.conversationId,
+            runId: RUN_A,
+          },
+          abort.signal,
+        );
+      } catch (error) {
+        waitError = error;
+      }
+      waitResolved.resolve();
+      control.emitFinal("caller resumed after the ghost rejection");
+    });
+    const callerRunId = randomUUID();
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "wait while an extension consumes a prompt",
+    );
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the caller wait",
+    );
+
+    // Extension-handled input: the SDK preflights true but never queues a
+    // steering entry. Fail closed: reject, no admission, no wait wake.
+    const control = fixture.runtime.control(caller.conversationId);
+    control.steerPromptHandled = true;
+    await expect(fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "handled prompt",
+      "handled-prompt-1",
+    )).rejects.toThrow("handled without being queued for steering");
+    control.steerPromptHandled = undefined;
+    expect(caller.pendingPromptAdmissions()).toEqual([]);
+    await expect(Promise.race([
+      waitResolved.promise.then(() => "resolved"),
+      new Promise<"timeout">((resolve) =>
+        setTimeout(() => resolve("timeout"), 300)
+      ),
+    ])).resolves.toBe("timeout");
+
+    abort.abort();
+    await waitResolved.promise;
+    expect(waitError).toMatchObject({ name: "AbortError" });
+    await expect(callerCompletion).resolves.toMatchObject({
+      outcome: "completed",
+      runId: callerRunId,
+    });
+  });
+
+  it("settles an expanded browser delivery by the SDK queued text and retires the record", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const waitedPeer = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const delivered: Array<{ promptId: string }> = [];
+    const unsubscribe = fixture.coordinator.subscribe(fixture.handle, (event) => {
+      if (event.type === "prompt_delivered") delivered.push(event);
+    });
+    const firstResolved = deferred();
+    const secondAttempted = deferred();
+    const secondResolved = deferred();
+    let firstResult: unknown;
+    let secondResult: unknown;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      firstResult = await executeTool(
+        control,
+        "wait_for_session",
+        "wait-for-expanded-delivery",
+        {
+          conversationId: waitedPeer.conversationId,
+          runId: RUN_A,
+        },
+      );
+      firstResolved.resolve();
+      // Real SDK order: the initial prompt's raw end comes first, then the
+      // expanded browser delivery.
+      control.emitUserMessage("initial prompt settlement");
+      control.emitUserMessage("EXPANDED guidance");
+      secondAttempted.resolve();
+      secondResult = await executeTool(
+        control,
+        "wait_for_session",
+        "wait-after-expanded-delivery",
+        {
+          conversationId: waitedPeer.conversationId,
+          runId: RUN_A,
+        },
+      );
+      secondResolved.resolve();
+      control.emitUserMessage("initial prompt settlement");
+      control.emitUserMessage("user guidance two");
+      control.beginNextModelTurn();
+      control.emitFinal("caller consumed the expanded guidance");
+    });
+    const callerRunId = randomUUID();
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "wait while the SDK expands a browser prompt",
+    );
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the first wait",
+    );
+
+    // The SDK queues the EXPANDED text; the admission must record it and the
+    // raw transformed delivery must settle the ORIGINAL promptId.
+    const control = fixture.runtime.control(caller.conversationId);
+    control.steerPromptExpandedText = "EXPANDED guidance";
+    await expect(fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "browser guidance",
+      "expanded-prompt-1",
+    )).resolves.toEqual({ outcome: "admitted" });
+    control.steerPromptExpandedText = undefined;
+    await firstResolved.promise;
+    expect(firstResult).toEqual({ outcome: "guidance" });
+    await secondAttempted.promise;
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the second wait after the expanded raw delivery",
+    );
+    expect(delivered).toEqual([{
+      type: "prompt_delivered",
+      conversationId: caller.conversationId,
+      promptId: "expanded-prompt-1",
+      runId: callerRunId,
+    }]);
+    expect(caller.pendingPromptAdmissions()).toEqual([]);
+    // The retired record must not wake the later wait.
+    await expect(Promise.race([
+      secondResolved.promise.then(() => "resolved"),
+      new Promise<"timeout">((resolve) =>
+        setTimeout(() => resolve("timeout"), 300)
+      ),
+    ])).resolves.toBe("timeout");
+    unsubscribe();
+
+    const secondSteer = fixture.coordinator.steer(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "user guidance two",
+    );
+    await secondResolved.promise;
+    expect(secondResult).toEqual({ outcome: "guidance" });
+    await expect(secondSteer).resolves.toBeUndefined();
+    await expect(callerCompletion).resolves.toMatchObject({
+      outcome: "completed",
+      runId: callerRunId,
+    });
+  });
+
+  it("wakes at wait registration from guidance accepted before waitForSession started", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const waitedPeer = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const callerAtGate = deferred();
+    const beginWait = deferred();
+    const waitResolved = deferred();
+    let waitResult: unknown;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      callerAtGate.resolve();
+      await beginWait.promise;
+      waitResult = await executeTool(
+        control,
+        "wait_for_session",
+        "wait-after-accepted-guidance",
+        {
+          conversationId: waitedPeer.conversationId,
+          runId: RUN_A,
+        },
+      );
+      waitResolved.resolve();
+      control.emitUserMessage("initial prompt settlement");
+      control.emitUserMessage("user guidance");
+      control.beginNextModelTurn();
+      control.emitFinal("caller resumed after pre-wait guidance");
+    });
+    const callerRunId = randomUUID();
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "wait after guidance was accepted",
+    );
+    await callerAtGate.promise;
+
+    // Guidance is SDK-accepted while the run is still active but before the
+    // wait tool is even called; no raw user message_end has been observed.
+    // The later wait registration must consume it immediately.
+    const guidance = fixture.coordinator.steer(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "user guidance",
+    );
+    beginWait.resolve();
+    await expect(Promise.race([
+      waitResolved.promise.then(() => "resolved"),
+      new Promise<"timeout">((resolve) =>
+        setTimeout(() => resolve("timeout"), 1500)
+      ),
+    ])).resolves.toBe("resolved");
+    expect(waitResult).toEqual({ outcome: "guidance" });
+    await expect(guidance).resolves.toBeUndefined();
+    expect(fixture.runtime.control(caller.conversationId).steerTexts)
+      .toEqual(["user guidance"]);
+    await expect(callerCompletion).resolves.toMatchObject({
+      outcome: "completed",
+      runId: callerRunId,
+    });
+    expect(waitedPeer.getActivity()).toMatchObject({ kind: "idle" });
+  });
+
+  it("never wakes a later wait from rejected guidance", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const waitedPeer = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const waitResolved = deferred();
+    const abort = new AbortController();
+    let waitResult: unknown;
+    let waitError: unknown;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      try {
+        waitResult = await executeTool(
+          control,
+          "wait_for_session",
+          "wait-after-rejected-guidance",
+          {
+            conversationId: waitedPeer.conversationId,
+            runId: RUN_A,
+          },
+          abort.signal,
+        );
+      } catch (error) {
+        waitError = error;
+      }
+      waitResolved.resolve();
+      control.emitFinal("caller resumed after abort");
+    });
+    const callerRunId = randomUUID();
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "wait after rejected guidance",
+    );
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the caller wait after the rejected steer",
+    );
+
+    const control = fixture.runtime.control(caller.conversationId);
+    control.steerImplementation = () => {
+      throw new Error("SDK steer rejected");
+    };
+    await expect(fixture.coordinator.steer(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "rejected steer",
+    )).rejects.toMatchObject({
+      message: expect.stringContaining("SDK steer rejected"),
+    });
+    control.steerImplementation = () => undefined;
+    control.steerPromptPreflightResult = false;
+    await expect(fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "rejected prompt",
+      "rejected-prompt-1",
+    )).rejects.toThrow("Prompt preflight rejected");
+    control.steerPromptPreflightResult = undefined;
+    expect(caller.pendingPromptAdmissions()).toEqual([]);
+
+    // Neither rejection may leave accepted guidance behind or wake the wait.
+    await expect(Promise.race([
+      waitResolved.promise.then(() => "resolved"),
+      new Promise<"timeout">((resolve) =>
+        setTimeout(() => resolve("timeout"), 300)
+      ),
+    ])).resolves.toBe("timeout");
+
+    abort.abort();
+    await waitResolved.promise;
+    expect(waitResult).toBeUndefined();
+    expect(waitError).toMatchObject({ name: "AbortError" });
+    await expect(callerCompletion).resolves.toMatchObject({
+      outcome: "completed",
+      runId: callerRunId,
+    });
+  });
+
+  it("wakes two sequential waits on two distinct accepted guidance records", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const waitedPeer = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const firstResolved = deferred();
+    const secondAttempted = deferred();
+    const secondResolved = deferred();
+    let firstResult: unknown;
+    let secondResult: unknown;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      firstResult = await executeTool(
+        control,
+        "wait_for_session",
+        "fifo-first-wait",
+        {
+          conversationId: waitedPeer.conversationId,
+          runId: RUN_A,
+        },
+      );
+      firstResolved.resolve();
+      secondAttempted.resolve();
+      secondResult = await executeTool(
+        control,
+        "wait_for_session",
+        "fifo-second-wait",
+        {
+          conversationId: waitedPeer.conversationId,
+          runId: RUN_A,
+        },
+      );
+      secondResolved.resolve();
+      control.emitUserMessage("initial prompt settlement");
+      control.emitUserMessage("user guidance one");
+      control.emitUserMessage("user guidance two");
+      control.beginNextModelTurn();
+      control.emitFinal("caller observed both guidance messages");
+    });
+    const callerRunId = randomUUID();
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "wait twice while two guidance messages are accepted",
+    );
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the first wait",
+    );
+
+    // Two guidance records are accepted while the first wait is pending. The
+    // first wait is woken exactly once; the second wait must be woken by the
+    // second record, never re-woken by the one the first wait claimed.
+    const firstSteer = fixture.coordinator.steer(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "user guidance one",
+    );
+    const secondSteer = fixture.coordinator.steer(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "user guidance two",
+    );
+    await firstResolved.promise;
+    expect(firstResult).toEqual({ outcome: "guidance" });
+    await secondAttempted.promise;
+    await secondResolved.promise;
+    expect(secondResult).toEqual({ outcome: "guidance" });
+    await expect(firstSteer).resolves.toBeUndefined();
+    await expect(secondSteer).resolves.toBeUndefined();
+    expect(fixture.runtime.control(caller.conversationId).steerTexts)
+      .toEqual(["user guidance one", "user guidance two"]);
+    const userTexts = caller.sessionManager.getEntries()
+      .map((entry) => (entry as { message?: unknown }).message)
+      .filter((message): message is { role: string; content: string } =>
+        message !== undefined
+        && typeof message === "object"
+        && (message as { role?: unknown }).role === "user"
+        && typeof (message as { content?: unknown }).content === "string"
+      )
+      .map((message) => message.content);
+    expect(userTexts.filter((text) => text === "user guidance one"))
+      .toHaveLength(1);
+    expect(userTexts.filter((text) => text === "user guidance two"))
+      .toHaveLength(1);
+    await expect(callerCompletion).resolves.toMatchObject({
+      outcome: "completed",
+      runId: callerRunId,
+    });
+  });
+
+  it("does not re-wake a later wait on guidance already claimed by an earlier wait", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const waitedPeer = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const firstResolved = deferred();
+    const secondAttempted = deferred();
+    const secondResolved = deferred();
+    let firstResult: unknown;
+    let secondResult: unknown;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      firstResult = await executeTool(
+        control,
+        "wait_for_session",
+        "claimed-first-wait",
+        {
+          conversationId: waitedPeer.conversationId,
+          runId: RUN_A,
+        },
+      );
+      firstResolved.resolve();
+      secondAttempted.resolve();
+      secondResult = await executeTool(
+        control,
+        "wait_for_session",
+        "claimed-second-wait",
+        {
+          conversationId: waitedPeer.conversationId,
+          runId: RUN_A,
+        },
+      );
+      secondResolved.resolve();
+      control.emitUserMessage("initial prompt settlement");
+      control.emitUserMessage("user guidance one");
+      control.emitUserMessage("user guidance two");
+      control.beginNextModelTurn();
+      control.emitFinal("caller observed both guidance messages");
+    });
+    const callerRunId = randomUUID();
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "wait twice while one guidance is still unobserved",
+    );
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the first wait",
+    );
+
+    const firstSteer = fixture.coordinator.steer(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "user guidance one",
+    );
+    await firstResolved.promise;
+    expect(firstResult).toEqual({ outcome: "guidance" });
+    await secondAttempted.promise;
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the second wait to register before the raw observation",
+    );
+
+    // The first guidance is still unobserved (no raw user message_end yet) but
+    // already claimed by the first wait: it must not wake the second wait.
+    await expect(Promise.race([
+      secondResolved.promise.then(() => "resolved"),
+      new Promise<"timeout">((resolve) =>
+        setTimeout(() => resolve("timeout"), 300)
+      ),
+    ])).resolves.toBe("timeout");
+    const secondSteer = fixture.coordinator.steer(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "user guidance two",
+    );
+    await secondResolved.promise;
+    expect(secondResult).toEqual({ outcome: "guidance" });
+    await expect(firstSteer).resolves.toBeUndefined();
+    await expect(secondSteer).resolves.toBeUndefined();
+    await expect(callerCompletion).resolves.toMatchObject({
+      outcome: "completed",
+      runId: callerRunId,
+    });
+  });
+
+  it("does not wake a later wait from browser guidance whose raw delivery was already observed", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const waitedPeer = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const firstResolved = deferred();
+    const secondAttempted = deferred();
+    const secondResolved = deferred();
+    let firstResult: unknown;
+    let secondResult: unknown;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      firstResult = await executeTool(
+        control,
+        "wait_for_session",
+        "browser-observed-first-wait",
+        {
+          conversationId: waitedPeer.conversationId,
+          runId: RUN_A,
+        },
+      );
+      firstResolved.resolve();
+      control.emitUserMessage("initial prompt settlement");
+      control.emitUserMessage("browser guidance");
+      secondAttempted.resolve();
+      secondResult = await executeTool(
+        control,
+        "wait_for_session",
+        "browser-observed-second-wait",
+        {
+          conversationId: waitedPeer.conversationId,
+          runId: RUN_A,
+        },
+      );
+      secondResolved.resolve();
+      control.emitUserMessage("user guidance two");
+      control.beginNextModelTurn();
+      control.emitFinal("caller observed the browser guidance once");
+    });
+    const callerRunId = randomUUID();
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "wait twice around an observed browser prompt",
+    );
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the first wait",
+    );
+
+    await expect(fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "browser guidance",
+      "browser-guidance-prompt-2",
+    )).resolves.toEqual({ outcome: "admitted" });
+    await firstResolved.promise;
+    expect(firstResult).toEqual({ outcome: "guidance" });
+    await secondAttempted.promise;
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the second wait after the browser raw delivery",
+    );
+
+    // The browser guidance was raw-delivered before the second wait started:
+    // its accepted record must have been retired, so the second wait stays
+    // pending until a NEW guidance arrives.
+    await expect(Promise.race([
+      secondResolved.promise.then(() => "resolved"),
+      new Promise<"timeout">((resolve) =>
+        setTimeout(() => resolve("timeout"), 300)
+      ),
+    ])).resolves.toBe("timeout");
+    const secondSteer = fixture.coordinator.steer(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "user guidance two",
+    );
+    await secondResolved.promise;
+    expect(secondResult).toEqual({ outcome: "guidance" });
+    await expect(secondSteer).resolves.toBeUndefined();
+    await expect(callerCompletion).resolves.toMatchObject({
+      outcome: "completed",
+      runId: callerRunId,
+    });
+  });
+
+  it("fails closed when a through-drain predecessor steer is SDK-rejected", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const waitedPeer = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const backlogSender = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const messengerStarted = deferred();
+    const releaseMessenger = deferred();
+    const messenger = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    fixture.runtime.control(messenger.conversationId).enqueue(
+      blocksUntil(messengerStarted, releaseMessenger, "messenger completed"),
+    );
+    const messengerRunId = randomUUID();
+    const messengerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      messenger.conversationId,
+      messengerRunId,
+      "wake the waiting caller",
+    );
+    await messengerStarted.promise;
+
+    const callerAtGate = deferred();
+    const beginWait = deferred();
+    const waitResolved = deferred();
+    const releaseCaller = deferred();
+    let waitResult: unknown;
+    let waitError: unknown;
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      callerAtGate.resolve();
+      await beginWait.promise;
+      // Consume the backlog steers so their durable markers persist; the 9th
+      // message stays queued behind the batch cap.
+      control.beginNextModelTurn();
+      try {
+        waitResult = await executeTool(
+          control,
+          "wait_for_session",
+          "wait-behind-failed-predecessor",
+          {
+            conversationId: waitedPeer.conversationId,
+            runId: RUN_A,
+          },
+        );
+      } catch (error) {
+        waitError = error;
+      }
+      waitResolved.resolve();
+      control.beginNextModelTurn();
+      await releaseCaller.promise;
+      control.emitFinal("caller released after the failed through drain");
+    });
+    const callerRunId = randomUUID();
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "wait behind a failed predecessor",
+    );
+    await callerAtGate.promise;
+
+    // Step 1: a full backlog batch is claimed into the caller's current run
+    // while it is active but not waiting; the 9th message stays durably
+    // queued as the through drain's FIFO predecessor.
+    const batchSize = 8;
+    for (let index = 1; index <= batchSize + 1; index++) {
+      await executeTool(
+        fixture.runtime.control(backlogSender.conversationId),
+        "send_session_message",
+        `through-predecessor-${index}`,
+        {
+          conversationId: caller.conversationId,
+          message: `through predecessor ${index}`,
+        },
+      );
+    }
+    expect((await coordinatorInbox(fixture.handle).list({
+      toConversationId: caller.conversationId,
+    }))[batchSize]).toMatchObject({
+      body: `through predecessor ${batchSize + 1}`,
+      state: "queued",
+    });
+    beginWait.resolve();
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the caller wait behind the queued predecessor",
+    );
+
+    // Step 2: the wake message's through drain claims the queued predecessor
+    // and the SDK rejects that steer. Fail closed: the send and the wait must
+    // both reject, leaving both envelopes queued.
+    let rejectSteer = true;
+    const callerSession = caller.session as unknown as {
+      sendCustomMessage: typeof caller.session.sendCustomMessage;
+    };
+    const originalSend = callerSession.sendCustomMessage.bind(caller.session);
+    callerSession.sendCustomMessage = async (message, options) => {
+      if (rejectSteer && options?.deliverAs === "steer") {
+        rejectSteer = false;
+        throw new Error("simulated SDK steer rejection");
+      }
+      return originalSend(message, options);
+    };
+    const wakeSend = executeTool(
+      fixture.runtime.control(messenger.conversationId),
+      "send_session_message",
+      "wake-behind-failed-predecessor",
+      {
+        conversationId: caller.conversationId,
+        message: "wake message",
+      },
+    );
+    await expect(wakeSend).rejects.toThrow("simulated SDK steer rejection");
+    await waitResolved.promise;
+    expect(waitResult).toBeUndefined();
+    expect(waitError).toMatchObject({
+      message: expect.stringContaining("simulated SDK steer rejection"),
+    });
+    expect(caller.getActivity()).toMatchObject({
+      kind: "running",
+      runId: callerRunId,
+    });
+    // Nothing was claimed into the waiting run: the failed predecessor and
+    // the wake envelope stay queued and no waiter remains registered.
+    expect(
+      fixture.runtime.control(caller.conversationId).pendingSteers,
+    ).toHaveLength(0);
+    const inboxAfter = await coordinatorInbox(fixture.handle).list({
+      toConversationId: caller.conversationId,
+    });
+    expect(inboxAfter[batchSize]).toMatchObject({
+      body: `through predecessor ${batchSize + 1}`,
+      state: "queued",
+    });
+    expect(inboxAfter[batchSize + 1]).toMatchObject({
+      body: "wake message",
+      state: "queued",
+    });
+    expect(
+      (fixture.handle as unknown as {
+        context: { waiters: Map<string, unknown> };
+      }).context.waiters.size,
+    ).toBe(0);
+
+    // Step 3: releasing the run lets the durable pump deliver the remaining
+    // messages in FIFO order without loss.
+    releaseCaller.resolve();
+    await callerCompletion;
+    await waitUntil(async () =>
+      (await coordinatorInbox(fixture.handle).list({
+        toConversationId: caller.conversationId,
+      })).length === 0,
+    "the durable pump to drain the remaining messages");
+    const received = fixture.runtime.control(caller.conversationId).received;
+    expect(
+      received.findIndex(({ content }) =>
+        content.includes(`through predecessor ${batchSize + 1}`)
+      ),
+    ).toBeLessThan(
+      received.findIndex(({ content }) => content.includes("wake message")),
+    );
+    callerSession.sendCustomMessage = originalSend;
+
+    releaseMessenger.resolve();
+    await expect(messengerCompletion).resolves.toMatchObject({
+      outcome: "completed",
+      runId: messengerRunId,
     });
   });
 

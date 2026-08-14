@@ -97,8 +97,14 @@ function fakeSession(settings = fakeSettings()): FakeSession {
       };
     },
     prompt: async () => undefined,
+    steeringMessages: [],
+    getSteeringMessages: function () {
+      return this.steeringMessages;
+    },
+    hasExtensionHandlers: () => false,
     steer: async function (text: string) {
       this.steerCalls.push(text);
+      this.steeringMessages.push(text);
     },
     clearQueue: () => ({ steering: [], followUp: [] }),
     abort: async function () {

@@ -281,7 +281,7 @@ export function createMetaTools(
       promptSnippet: "Start a one-shot Agent session that auto-deletes after success.",
       promptGuidelines: [
         "Use for throwaway work where you only need the initial final answer; use start_session instead when follow-up or later inspection is expected.",
-        "This still runs asynchronously: call wait_for_session when the answer is needed in this turn. If an explicit peer message resolves that wait and you still need the final settlement, call wait_for_session again for the same run.",
+        "This still runs asynchronously: call wait_for_session when the answer is needed in this turn. If any delivered peer message resolves that wait and you still need the final settlement, call wait_for_session again for the same run.",
       ],
       parameters: startSessionParameters,
       async execute(toolCallId, input, signal) {
@@ -299,7 +299,7 @@ export function createMetaTools(
       name: "send_session_message",
       label: "Send session message",
       description:
-        "Durably send a first-class session message to a peer. A busy target receives it as steering after its current tool turn and before its next model request; it remains durable until Pi records the target message and the exact run settles. If that peer is waiting for this exact run, the message also resolves that wait immediately.",
+        "Durably send a first-class session message to a peer. A busy target receives it as steering after its current tool turn and before its next model request; it remains durable until Pi records the target message and the exact run settles. If that peer is currently waiting (wait_for_session), the delivered message also resolves that wait immediately, even when the wait targets a different conversation or run.",
       promptSnippet: "Send a durable message to another Agent session.",
       parameters: Type.Object({
         conversationId: Type.String({ minLength: 1, maxLength: 256 }),
@@ -321,7 +321,7 @@ export function createMetaTools(
       name: "wait_for_session",
       label: "Wait for session",
       description:
-        "Explicitly wait for the next relevant event from one exact target conversationId and runId. Returns either that run's durable settlement or message metadata while the message itself is injected into the current turn; call again if a message arrives but final settlement is still required. Cyclic conversation waits are rejected.",
+        "Explicitly wait for the next relevant event while keeping the current turn responsive. Returns the exact target conversationId+runId's durable settlement when it settles, or message metadata when a peer/inbox message is claimed into the current run's steering queue (delivered after the wait starts, or already claimed before it registered but not yet observed — from any conversation or run), or guidance metadata when user guidance is accepted into the current run's steering queue (an explicit steer or a busy browser message, accepted before or after the wait registered). The message is injected before the next model request; call again if a message arrived but the final settlement is still required. Cyclic conversation waits are rejected.",
       promptSnippet: "Wait for one exact peer run when its result is required now.",
       parameters: Type.Object({
         conversationId: Type.String({ minLength: 1, maxLength: 256 }),

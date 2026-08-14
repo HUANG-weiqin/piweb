@@ -73,7 +73,7 @@ describe("createMetaTools", () => {
       "Use for throwaway work where you only need the initial final answer; use start_session instead when follow-up or later inspection is expected.",
     );
     expect(startTemporarySession.promptGuidelines).toContain(
-      "This still runs asynchronously: call wait_for_session when the answer is needed in this turn. If an explicit peer message resolves that wait and you still need the final settlement, call wait_for_session again for the same run.",
+      "This still runs asynchronously: call wait_for_session when the answer is needed in this turn. If any delivered peer message resolves that wait and you still need the final settlement, call wait_for_session again for the same run.",
     );
   });
 

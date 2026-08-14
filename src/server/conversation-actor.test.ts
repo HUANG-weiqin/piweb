@@ -84,6 +84,12 @@ interface FakeSession extends AgentSession {
   disposeCalls: number;
   eventListener?: (event: AgentSessionEvent) => void;
   steerCalls: string[];
+  /** Real text steering queue mirroring the SDK (admission verification reads it). */
+  steeringMessages: string[];
+  /** Simulated SDK queued text for steers (may differ from the submitted text). */
+  steerExpandedText?: string;
+  /** Simulated input-extension handlers (admission precheck). */
+  hasInputExtensionHandlers?: boolean;
   toolCallGate?: ToolCallGate;
   promptCalls: Array<{ text: string; streamingBehavior?: "steer" | "followUp" }>;
   promptImplementation(text: string, options?: Parameters<AgentSession["prompt"]>[1]): Promise<void>;
@@ -122,10 +128,17 @@ function fakeSession(): FakeSession {
     turnBoundaryPaused: false,
     turnBoundaryPauseReleases: 0,
     resumeImplementation: async () => undefined,
+    steeringMessages: [],
     promptCalls: [],
     prompt: function (text: string, options?: Parameters<AgentSession["prompt"]>[1]) {
       this.promptCalls.push({ text, streamingBehavior: options?.streamingBehavior });
       return this.promptImplementation(text, options);
+    },
+    getSteeringMessages: function () {
+      return this.steeringMessages;
+    },
+    hasExtensionHandlers: function (eventType: string) {
+      return eventType === "input" && this.hasInputExtensionHandlers === true;
     },
     sendCustomMessage: function (message, options) {
       this.resumeCalls++;
@@ -133,9 +146,11 @@ function fakeSession(): FakeSession {
     },
     steer: async function (text: string) {
       this.steerCalls.push(text);
+      this.steeringMessages.push(this.steerExpandedText ?? text);
     },
     clearQueue: function () {
       this.clearQueueCalls++;
+      this.steeringMessages.splice(0);
       return { steering: [], followUp: [] };
     },
     abort: async function () {
@@ -429,11 +444,14 @@ describe("ConversationActor", () => {
       fixture.runtime.session.promptImplementation = async (text, options) => {
         if (text === "follow up") {
           // admit 的调用：SDK 接受即入队返回
+          fixture.runtime.session.steeringMessages.push(text);
           options?.preflightResult?.(true);
           return;
         }
         emit()?.(nativeEvent({ type: "agent_start" }));
         runStarted.resolve();
+        // The SDK run is streaming once agent_start fires.
+        fixture.runtime.session.isStreaming = true;
         await finishRun.promise;
         emit()?.(nativeEvent({ type: "agent_end" }));
       };
@@ -482,6 +500,602 @@ describe("ConversationActor", () => {
       await fixture.actor.dispose();
     });
 
+    it("rejects a busy admission while the run ticket is still queued", async () => {
+      const fixture = await openActor();
+      const promptStarted = deferred();
+      const promptFinished = deferred();
+      fixture.runtime.session.promptImplementation = async (text, options) => {
+        if (options?.streamingBehavior === "steer") {
+          fixture.runtime.session.steeringMessages.push(text);
+          options?.preflightResult?.(true);
+          return;
+        }
+        promptStarted.resolve();
+        await promptFinished.promise;
+      };
+
+      const completion = fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "first prompt",
+        origin: "browser",
+      });
+      // The run ticket is still phase=queued (its operations task has not
+      // started): a steering admission must not escape into a second SDK run.
+      await expect(fixture.actor.admitBrowserPrompt({
+        promptId: PROMPT_ID,
+        runId: RUN_A,
+        text: "second prompt",
+      })).rejects.toThrow("not ready to accept a message");
+      expect(fixture.runtime.session.promptCalls).toHaveLength(1);
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
+
+      await promptStarted.promise;
+      promptFinished.resolve();
+      await expect(completion).resolves.toMatchObject({
+        runId: RUN_A,
+        outcome: "completed",
+      });
+      await fixture.actor.dispose();
+    });
+
+    it("clears un-delivered browser admissions when the run ends", async () => {
+      const fixture = await openActor();
+      const { runStarted, finishRun, running } = busyRun(fixture);
+      await runStarted.promise;
+      await fixture.actor.admitBrowserPrompt({
+        promptId: PROMPT_ID,
+        runId: RUN_B,
+        text: "follow up",
+      });
+      await vi.waitFor(() =>
+        expect(fixture.actor.pendingPromptAdmissions()).toHaveLength(1)
+      );
+
+      // The run ends without the raw user delivery: the admission must not
+      // leak into a later run.
+      finishRun.resolve();
+      await running;
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
+      await fixture.actor.dispose();
+    });
+
+    it("never lets a busy admission steal the initial raw delivery with the same text", async () => {
+      const fixture = await openActor();
+      const emit = () => fixture.runtime.session.eventListener;
+      const runStarted = deferred();
+      const finishRun = deferred();
+      fixture.runtime.session.promptImplementation = async (text, options) => {
+        if (options?.streamingBehavior === "steer") {
+          fixture.runtime.session.steeringMessages.push(text);
+          options?.preflightResult?.(true);
+          return;
+        }
+        emit()?.(nativeEvent({ type: "agent_start" }));
+        runStarted.resolve();
+        fixture.runtime.session.isStreaming = true;
+        await finishRun.promise;
+        emit()?.(nativeEvent({ type: "agent_end" }));
+      };
+      const running = fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "shared text",
+        origin: "browser",
+      });
+      await runStarted.promise;
+
+      await fixture.actor.admitBrowserPrompt({
+        promptId: PROMPT_ID,
+        runId: RUN_A,
+        text: "shared text",
+      });
+      await vi.waitFor(() =>
+        expect(fixture.actor.pendingPromptAdmissions()).toHaveLength(1)
+      );
+
+      // The first raw end carries the same text as the busy admission: it
+      // must settle the INITIAL prompt, never the admission.
+      const firstRaw = {
+        role: "user",
+        content: [{ type: "text", text: "shared text" }],
+      };
+      fixture.manager.appendMessage(firstRaw as never);
+      emit()?.(nativeEvent({ type: "message_end", message: firstRaw }));
+      await Promise.resolve();
+      expect(fixture.events).not.toContainEqual(expect.objectContaining({
+        type: "prompt_delivered",
+      }));
+      expect(fixture.actor.pendingPromptAdmissions()).toHaveLength(1);
+
+      // The second raw end is the admission's: precise promptId delivery.
+      const secondRaw = {
+        role: "user",
+        content: [{ type: "text", text: "shared text" }],
+      };
+      fixture.manager.appendMessage(secondRaw as never);
+      emit()?.(nativeEvent({ type: "message_end", message: secondRaw }));
+      await Promise.resolve();
+      expect(fixture.events).toContainEqual(expect.objectContaining({
+        type: "prompt_delivered",
+        promptId: PROMPT_ID,
+      }));
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
+
+      finishRun.resolve();
+      await running;
+      await fixture.actor.dispose();
+    });
+
+    it("settles a same-text explicit steer and browser admission in queue order", async () => {
+      const fixture = await openActor();
+      const emit = () => fixture.runtime.session.eventListener;
+      const runStarted = deferred();
+      const finishRun = deferred();
+      fixture.runtime.session.promptImplementation = async (text, options) => {
+        if (options?.streamingBehavior === "steer") {
+          fixture.runtime.session.steeringMessages.push(text);
+          options?.preflightResult?.(true);
+          return;
+        }
+        emit()?.(nativeEvent({ type: "agent_start" }));
+        runStarted.resolve();
+        fixture.runtime.session.isStreaming = true;
+        await finishRun.promise;
+        emit()?.(nativeEvent({ type: "agent_end" }));
+      };
+      const running = fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "long task",
+        origin: "browser",
+      });
+      await runStarted.promise;
+
+      // Settle the initial prompt first (real SDK order), then queue an
+      // explicit steer and a busy browser admission with the SAME text.
+      const initialRaw = {
+        role: "user",
+        content: [{ type: "text", text: "long task" }],
+      };
+      fixture.manager.appendMessage(initialRaw as never);
+      emit()?.(nativeEvent({ type: "message_end", message: initialRaw }));
+      await Promise.resolve();
+
+      const steerPromise = fixture.actor.steer(RUN_A, "shared text");
+      await fixture.actor.admitBrowserPrompt({
+        promptId: PROMPT_ID,
+        runId: RUN_A,
+        text: "shared text",
+      });
+
+      // The first raw end resolves ONLY the explicit steer; no browser
+      // prompt_delivered fires for it.
+      const firstRaw = {
+        role: "user",
+        content: [{ type: "text", text: "shared text" }],
+      };
+      fixture.manager.appendMessage(firstRaw as never);
+      emit()?.(nativeEvent({ type: "message_end", message: firstRaw }));
+      await expect(steerPromise).resolves.toBeUndefined();
+      expect(fixture.events).not.toContainEqual(expect.objectContaining({
+        type: "prompt_delivered",
+      }));
+      expect(fixture.actor.pendingPromptAdmissions()).toHaveLength(1);
+
+      // The second raw end delivers the browser promptId precisely.
+      const secondRaw = {
+        role: "user",
+        content: [{ type: "text", text: "shared text" }],
+      };
+      fixture.manager.appendMessage(secondRaw as never);
+      emit()?.(nativeEvent({ type: "message_end", message: secondRaw }));
+      await Promise.resolve();
+      expect(fixture.events).toContainEqual(expect.objectContaining({
+        type: "prompt_delivered",
+        promptId: PROMPT_ID,
+      }));
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
+
+      finishRun.resolve();
+      await running;
+      await fixture.actor.dispose();
+    });
+
+    it("settles a same-text browser admission and explicit steer in queue order", async () => {
+      const fixture = await openActor();
+      const emit = () => fixture.runtime.session.eventListener;
+      const runStarted = deferred();
+      const finishRun = deferred();
+      fixture.runtime.session.promptImplementation = async (text, options) => {
+        if (options?.streamingBehavior === "steer") {
+          fixture.runtime.session.steeringMessages.push(text);
+          options?.preflightResult?.(true);
+          return;
+        }
+        emit()?.(nativeEvent({ type: "agent_start" }));
+        runStarted.resolve();
+        fixture.runtime.session.isStreaming = true;
+        await finishRun.promise;
+        emit()?.(nativeEvent({ type: "agent_end" }));
+      };
+      const running = fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "long task",
+        origin: "browser",
+      });
+      await runStarted.promise;
+      const initialRaw = {
+        role: "user",
+        content: [{ type: "text", text: "long task" }],
+      };
+      fixture.manager.appendMessage(initialRaw as never);
+      emit()?.(nativeEvent({ type: "message_end", message: initialRaw }));
+      await Promise.resolve();
+
+      // Reverse order: the browser admission queues before the explicit
+      // steer with the same text.
+      await fixture.actor.admitBrowserPrompt({
+        promptId: PROMPT_ID,
+        runId: RUN_A,
+        text: "shared text",
+      });
+      const steerPromise = fixture.actor.steer(RUN_A, "shared text");
+
+      const firstRaw = {
+        role: "user",
+        content: [{ type: "text", text: "shared text" }],
+      };
+      fixture.manager.appendMessage(firstRaw as never);
+      emit()?.(nativeEvent({ type: "message_end", message: firstRaw }));
+      await Promise.resolve();
+      expect(fixture.events).toContainEqual(expect.objectContaining({
+        type: "prompt_delivered",
+        promptId: PROMPT_ID,
+      }));
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
+      const steerSettledRace = Promise.race([
+        steerPromise.then(
+          () => true,
+          () => true,
+        ),
+        new Promise<false>((resolve) =>
+          setTimeout(() => resolve(false), 150)
+        ),
+      ]);
+      expect(await steerSettledRace).toBe(false);
+
+      const secondRaw = {
+        role: "user",
+        content: [{ type: "text", text: "shared text" }],
+      };
+      fixture.manager.appendMessage(secondRaw as never);
+      emit()?.(nativeEvent({ type: "message_end", message: secondRaw }));
+      await expect(steerPromise).resolves.toBeUndefined();
+
+      finishRun.resolve();
+      await running;
+      await fixture.actor.dispose();
+    });
+
+    it("does not consume a guidance record for a mismatched raw user message", async () => {
+      const fixture = await openActor();
+      const emit = () => fixture.runtime.session.eventListener;
+      const runStarted = deferred();
+      const finishRun = deferred();
+      fixture.runtime.session.promptImplementation = async (text, options) => {
+        if (options?.streamingBehavior === "steer") {
+          fixture.runtime.session.steeringMessages.push(text);
+          options?.preflightResult?.(true);
+          return;
+        }
+        emit()?.(nativeEvent({ type: "agent_start" }));
+        runStarted.resolve();
+        fixture.runtime.session.isStreaming = true;
+        await finishRun.promise;
+        emit()?.(nativeEvent({ type: "agent_end" }));
+      };
+      const running = fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "long task",
+        origin: "browser",
+      });
+      await runStarted.promise;
+      const initialRaw = {
+        role: "user",
+        content: [{ type: "text", text: "long task" }],
+      };
+      fixture.manager.appendMessage(initialRaw as never);
+      emit()?.(nativeEvent({ type: "message_end", message: initialRaw }));
+      await Promise.resolve();
+
+      const steerPromise = fixture.actor.steer(RUN_A, "real guidance");
+      // An unrelated raw user end (e.g. an extension user message) must not
+      // consume the host guidance record.
+      const mismatched = {
+        role: "user",
+        content: [{ type: "text", text: "unrelated extension text" }],
+      };
+      fixture.manager.appendMessage(mismatched as never);
+      emit()?.(nativeEvent({ type: "message_end", message: mismatched }));
+      await Promise.resolve();
+      const steerSettledRace = Promise.race([
+        steerPromise.then(
+          () => true,
+          () => true,
+        ),
+        new Promise<false>((resolve) =>
+          setTimeout(() => resolve(false), 150)
+        ),
+      ]);
+      expect(await steerSettledRace).toBe(false);
+
+      // The matching raw end settles it.
+      const real = {
+        role: "user",
+        content: [{ type: "text", text: "real guidance" }],
+      };
+      fixture.manager.appendMessage(real as never);
+      emit()?.(nativeEvent({ type: "message_end", message: real }));
+      await expect(steerPromise).resolves.toBeUndefined();
+
+      finishRun.resolve();
+      await running;
+      await fixture.actor.dispose();
+    });
+
+    it("rejects a busy admission while the SDK run is not streaming yet", async () => {
+      const fixture = await openActor();
+      const emit = () => fixture.runtime.session.eventListener;
+      const runStarted = deferred();
+      const finishRun = deferred();
+      const steerCalls: string[] = [];
+      fixture.runtime.session.promptImplementation = async (text, options) => {
+        if (options?.streamingBehavior === "steer") {
+          steerCalls.push(text);
+          fixture.runtime.session.steeringMessages.push(text);
+          options?.preflightResult?.(true);
+          return;
+        }
+        emit()?.(nativeEvent({ type: "agent_start" }));
+        runStarted.resolve();
+        await finishRun.promise;
+        emit()?.(nativeEvent({ type: "agent_end" }));
+      };
+      const running = fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "start task",
+        origin: "browser",
+      });
+      await runStarted.promise;
+      // The run ticket is running but the SDK has not started streaming: a
+      // steer-mode prompt would start an unowned SDK run.
+      expect(fixture.runtime.session.isStreaming).toBe(false);
+      await expect(fixture.actor.admitBrowserPrompt({
+        promptId: PROMPT_ID,
+        runId: RUN_A,
+        text: "pre-stream message",
+      })).rejects.toThrow("not streaming");
+      expect(steerCalls).toEqual([]);
+      expect(fixture.runtime.session.promptCalls).toHaveLength(1);
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
+
+      finishRun.resolve();
+      await running;
+      await fixture.actor.dispose();
+    });
+
+    it("admits a browser prompt when a predecessor queue entry drains before preflight", async () => {
+      const fixture = await openActor();
+      const emit = () => fixture.runtime.session.eventListener;
+      const runStarted = deferred();
+      const finishRun = deferred();
+      (fixture.runtime.session as { isStreaming: boolean }).isStreaming = true;
+      let beforePreflight: (() => void) | undefined;
+      fixture.runtime.session.promptImplementation = async (text, options) => {
+        if (options?.streamingBehavior === "steer") {
+          fixture.runtime.session.steeringMessages.push(text);
+          beforePreflight?.();
+          options?.preflightResult?.(true);
+          return;
+        }
+        emit()?.(nativeEvent({ type: "agent_start" }));
+        runStarted.resolve();
+        await finishRun.promise;
+        emit()?.(nativeEvent({ type: "agent_end" }));
+      };
+      const running = fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "start task",
+        origin: "browser",
+      });
+      await runStarted.promise;
+      const initialRaw = {
+        role: "user",
+        content: [{ type: "text", text: "start task" }],
+      };
+      fixture.manager.appendMessage(initialRaw as never);
+      emit()?.(nativeEvent({ type: "message_end", message: initialRaw }));
+      await Promise.resolve();
+
+      // A predecessor queues first; its raw delivery drains the queue front
+      // between the admission's own push and its preflight. The length-based
+      // proof would falsely reject; own entry is the queue tail.
+      const predecessor = fixture.actor.steer(RUN_A, "predecessor text");
+      let drained = false;
+      beforePreflight = () => {
+        drained = true;
+        fixture.runtime.session.steeringMessages.shift();
+      };
+      await expect(fixture.actor.admitBrowserPrompt({
+        promptId: PROMPT_ID,
+        runId: RUN_A,
+        text: "own text",
+      })).resolves.toEqual({ outcome: "admitted" });
+      expect(drained).toBe(true);
+      expect(fixture.runtime.session.steeringMessages).toEqual(["own text"]);
+      expect(fixture.actor.pendingPromptAdmissions()).toHaveLength(1);
+
+      // Raw ends arrive in SDK queue order: predecessor first, own second.
+      const predRaw = {
+        role: "user",
+        content: [{ type: "text", text: "predecessor text" }],
+      };
+      fixture.manager.appendMessage(predRaw as never);
+      emit()?.(nativeEvent({ type: "message_end", message: predRaw }));
+      await expect(predecessor).resolves.toBeUndefined();
+      const ownRaw = {
+        role: "user",
+        content: [{ type: "text", text: "own text" }],
+      };
+      fixture.manager.appendMessage(ownRaw as never);
+      emit()?.(nativeEvent({ type: "message_end", message: ownRaw }));
+      await Promise.resolve();
+      expect(fixture.events).toContainEqual(expect.objectContaining({
+        type: "prompt_delivered",
+        promptId: PROMPT_ID,
+      }));
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
+
+      finishRun.resolve();
+      await running;
+      await fixture.actor.dispose();
+    });
+
+    it("rejects a busy admission before the SDK call when input extensions are registered", async () => {
+      const fixture = await openActor();
+      const emit = () => fixture.runtime.session.eventListener;
+      const runStarted = deferred();
+      const finishRun = deferred();
+      fixture.runtime.session.promptImplementation = async (text, options) => {
+        if (options?.streamingBehavior === "steer") {
+          fixture.runtime.session.steeringMessages.push(text);
+          options?.preflightResult?.(true);
+          return;
+        }
+        emit()?.(nativeEvent({ type: "agent_start" }));
+        runStarted.resolve();
+        await finishRun.promise;
+        emit()?.(nativeEvent({ type: "agent_end" }));
+      };
+      (fixture.runtime.session as { isStreaming: boolean }).isStreaming = true;
+      const running = fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "start task",
+        origin: "browser",
+      });
+      await runStarted.promise;
+
+      (fixture.runtime.session as { hasInputExtensionHandlers?: boolean })
+        .hasInputExtensionHandlers = true;
+      await expect(fixture.actor.admitBrowserPrompt({
+        promptId: PROMPT_ID,
+        runId: RUN_A,
+        text: "extension input",
+      })).rejects.toThrow("input extensions");
+      expect(fixture.runtime.session.promptCalls).toHaveLength(1);
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
+
+      finishRun.resolve();
+      await running;
+      await fixture.actor.dispose();
+    });
+
+    it("does not burn a guidance record when the host wait callback is stale", async () => {
+      const fixture = await openActor();
+      const emit = () => fixture.runtime.session.eventListener;
+      const runStarted = deferred();
+      const finishRun = deferred();
+      fixture.runtime.session.promptImplementation = async (text, options) => {
+        if (options?.streamingBehavior === "steer") {
+          fixture.runtime.session.steeringMessages.push(text);
+          options?.preflightResult?.(true);
+          return;
+        }
+        emit()?.(nativeEvent({ type: "agent_start" }));
+        runStarted.resolve();
+        fixture.runtime.session.isStreaming = true;
+        await finishRun.promise;
+        emit()?.(nativeEvent({ type: "agent_end" }));
+      };
+      const running = fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "start task",
+        origin: "browser",
+      });
+      await runStarted.promise;
+      const initialRaw = {
+        role: "user",
+        content: [{ type: "text", text: "start task" }],
+      };
+      fixture.manager.appendMessage(initialRaw as never);
+      emit()?.(nativeEvent({ type: "message_end", message: initialRaw }));
+      await Promise.resolve();
+
+      // An explicit steer is accepted and remains unobserved.
+      const guidance = fixture.actor.steer(RUN_A, "guidance text");
+      await Promise.resolve();
+
+      const ownership = fixture.actor.currentRunOwnership(RUN_A);
+      expect(ownership).toBeDefined();
+      const ownershipValue = ownership!;
+      const waitTarget = {
+        conversationId: CONVERSATION_ID,
+        runId: "dummy-target-run",
+      };
+      const restore = fixture.actor.enterWaiting(ownershipValue, waitTarget);
+
+      // First wait: the host callback is stale (its waiter was already
+      // removed by abort/settlement/message before withWaiting's restore
+      // ran). It must NOT burn the record.
+      const staleCalls: boolean[] = [];
+      fixture.actor.onWaitingSteerAdmitted(
+        ownershipValue,
+        () => {
+          staleCalls.push(true);
+          return false;
+        },
+      );
+      restore();
+
+      // Second wait: registers before the raw guidance delivery; the SAME
+      // record must wake it immediately.
+      const restoreSecond = fixture.actor.enterWaiting(ownershipValue, waitTarget);
+      let secondCalls = 0;
+      fixture.actor.onWaitingSteerAdmitted(
+        ownershipValue,
+        () => {
+          secondCalls++;
+          return true;
+        },
+      );
+      restoreSecond();
+      expect(staleCalls).toEqual([true]);
+      expect(secondCalls).toBe(1);
+
+      // The raw delivery settles the steer precisely; no further wait wakes
+      // on the already-claimed record.
+      const rawGuidance = {
+        role: "user",
+        content: [{ type: "text", text: "guidance text" }],
+      };
+      fixture.manager.appendMessage(rawGuidance as never);
+      emit()?.(nativeEvent({ type: "message_end", message: rawGuidance }));
+      await expect(guidance).resolves.toBeUndefined();
+      const restoreThird = fixture.actor.enterWaiting(ownershipValue, waitTarget);
+      let thirdCalls = 0;
+      fixture.actor.onWaitingSteerAdmitted(
+        ownershipValue,
+        () => {
+          thirdCalls++;
+          return true;
+        },
+      );
+      restoreThird();
+      expect(thirdCalls).toBe(0);
+
+      finishRun.resolve();
+      await running;
+      await fixture.actor.dispose();
+    });
+
     it("emits prompt_delivered when the SDK appends the admitted user message", async () => {
       const fixture = await openActor();
       const emit = () => fixture.runtime.session.eventListener;
@@ -494,7 +1108,13 @@ describe("ConversationActor", () => {
       });
       await vi.waitFor(() => expect(fixture.actor.pendingPromptAdmissions()).toHaveLength(1));
 
-      // SDK 投递：消息持久化 + message_end user
+      // SDK 投递：先结算 initial raw（真实 SDK 顺序），再投递 admission。
+      const initialRaw = {
+        role: "user",
+        content: [{ type: "text", text: "long task" }],
+      };
+      fixture.manager.appendMessage(initialRaw as never);
+      emit()?.(nativeEvent({ type: "message_end", message: initialRaw }));
       const rawMessage = {
         role: "user",
         content: [{ type: "text", text: "follow up" }],
@@ -580,11 +1200,13 @@ describe("ConversationActor", () => {
         if (text === "long task") {
           emit()?.(nativeEvent({ type: "agent_start" }));
           runStarted.resolve();
+          fixture.runtime.session.isStreaming = true;
           await finishRun.promise;
           emit()?.(nativeEvent({ type: "agent_end" }));
           return;
         }
         // admit 的调用：SDK 接受即入队返回
+        fixture.runtime.session.steeringMessages.push(text);
         options?.preflightResult?.(true);
       };
       const running = fixture.actor.startPrompt({
@@ -2204,6 +2826,8 @@ describe("ConversationActor", () => {
       });
     fixture.runtime.session.steer = originalSteer;
     expect(fixture.runtime.session.isStreaming).toBe(false);
+    // The SDK queues the EXPANDED steer text; the raw delivery carries it.
+    fixture.runtime.session.steerExpandedText = "template-expanded guidance";
     const guidance = fixture.actor.steer(RUN_A, "  change direction  ");
     expect(fixture.runtime.session.steerCalls).toEqual(["change direction"]);
     fixture.runtime.session.eventListener?.({
@@ -2287,7 +2911,13 @@ describe("ConversationActor", () => {
       message: initialPrompt,
     } as AgentSessionEvent);
     await Promise.resolve();
+    // The SDK queues the EXPANDED text (which is what the raw end carries),
+    // so the record matches and the delivery fails on the persistence proof.
+    fixture.runtime.session.steerExpandedText = "transformed but not persisted";
     const guidance = fixture.actor.steer(RUN_A, "guidance without append");
+    // Let the SDK acceptance microtask register the observation record
+    // before the raw delivery arrives (real SDK order: drain after accept).
+    await Promise.resolve();
     fixture.runtime.session.eventListener?.({
       type: "message_end",
       message: agentMessage({
