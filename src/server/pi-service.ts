@@ -55,7 +55,7 @@ import {
   projectConversationIndex,
 } from "./project-snapshot.js";
 import type { RoleCatalog } from "./role-catalog.js";
-import { MODEL_REFRESH_TIMEOUT_MS } from "./model-refresh-scheduler.js";
+import { MODEL_REFRESH_TIMEOUT_MS } from "./model-refresh.js";
 import { SerialTaskQueue } from "./serial-task-queue.js";
 import { SessionEventProjector, snapshotWireValue } from "./session-events.js";
 import { resolveContextUsage } from "./session-usage.js";
