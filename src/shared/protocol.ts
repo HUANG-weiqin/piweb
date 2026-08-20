@@ -18,9 +18,9 @@ export const MAX_PENDING_PROMPT_ATTENTION_REASON_CHARACTERS = 1_000;
 export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
-// v30: 删除 pending prompt 队列五命令与 pending_prompts_snapshot，busy 消息改走
-// SDK followUp（prompt 带 promptId，prompt_admitted/prompt_delivered 事件）。
-export const PROTOCOL_VERSION = 30;
+// v31: refresh_models 改为 sessionId + commandId 精确关联的联网刷新命令；
+// auth prompt 保留 secret 元数据，避免认证输入与刷新回执混用观察边界。
+export const PROTOCOL_VERSION = 31;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
@@ -326,7 +326,11 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("logout"), provider: required }),
   z.object({ type: z.literal("auth_response"), authFlowId: authFlowIdSchema, requestId: required, value: z.string().optional(), selectedId: z.string().optional(), cancelled: z.boolean().optional() }),
   z.object({ type: z.literal("cancel_auth"), authFlowId: authFlowIdSchema }),
-  z.object({ type: z.literal("refresh_models") }),
+  z.object({
+    type: z.literal("refresh_models"),
+    commandId: commandIdSchema,
+    sessionId: sessionIdSchema,
+  }),
   z.object({ type: z.literal("close_session"), sessionId: sessionIdSchema }),
 ]);
 
@@ -365,10 +369,11 @@ export const clientCommandSchema = clientCommandUnionSchema.superRefine(
 );
 
 export type ClientCommand = z.infer<typeof clientCommandSchema>;
-export type AcknowledgedSettingOperation = "select_model" | "set_api_key";
+export type AcknowledgedSettingOperation = "select_model" | "set_api_key" | "refresh_models";
 const ACKNOWLEDGED_COMMAND_OPERATIONS = [
   "select_model",
   "set_api_key",
+  "refresh_models",
   "steer",
   "set_compaction_threshold",
   "compact_context",
@@ -1416,6 +1421,7 @@ export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.
         event.operation === "select_model"
         || event.operation === "steer"
         || event.operation === "set_api_key"
+        || event.operation === "refresh_models"
         || event.operation === "delete_conversation"
         || event.operation === "truncate_conversation"
       )

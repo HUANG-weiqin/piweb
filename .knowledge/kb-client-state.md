@@ -57,10 +57,10 @@ ServerEvent
 - state 只说明 focused runtime 已提交，不说明历史已经 hydrate；`conversationReady` 必须等匹配 focus 三元身份的 snapshot，期间 composer 和 `sendPrompt` 双重禁用，避免 hydrate 覆盖刚发送的本地消息。pending focus 期间 Chat 只能使用目标 conversation 的只读 presentation cache；未命中时使用空 transcript，绝不能继续展示来源 focus 的“工作过程”或把缓存当成可操作状态。
 - tool、usage、prompt error 与停止仍按 runId 路由；但一个 run 可因 steering 包含多个 `assistant → user → assistant` 消息段。live projector 显式发送 user message 与 assistant segment start，reducer 只在该 run 的最新 assistant 段内追加 delta/tool，不能把“run 生命周期”误作“单个气泡生命周期”。切走再切回 running 会话时，恢复依赖服务端把 durable timeline 与未持久化 live suffix 交接后的 conversation snapshot（当前 run message 含真实 runId/thinking/text/tool/status/usage），不依赖浏览器曾经收到后台 delta。
 - OAuth UI 只接收当前 authFlowId；取消或新 flow 之后的旧 request/progress/complete 一律忽略。
-- 右侧抽屉只负责“提供商 → 凭据 → 可用模型”的连接状态，不承载权限、会话生命周期或 Agent 行为控制。composer 底部控制按“当前角色 → 思考级别 → 上下文管理”排列；上下文用量、自动压缩和手动压缩属于同一个无外框视觉组，自动压缩阈值也在该组内展开。角色管理从新会话页的角色卡齿轮或添加卡进入，齿轮必须定位到对应角色；角色默认思考强度只列出所选模型真实支持的档位，模型没有可调档位时显示并锁定“模型默认”。会话改名位于左侧会话栏。
+- 右侧抽屉只负责“提供商 → 凭据 → 可用模型”的连接状态，不承载权限、会话生命周期或 Agent 行为控制。模型刷新按钮始终显示，即使没有 provider、provider 未配置、目录为空或已有模型；只按 online、busy 和当前 refresh command pending 禁用。点击后固化 `sessionId + commandId`，只显示精确匹配的 pending/result，成功保留 `ok=true`，失败显示 error/alert；断线或 session replacement 清除 pending 并显示 unknown/重试提示。远程供应商目录刷新失败只属于设置回执，不落为全局错误。composer 底部控制按“当前角色 → 思考级别 → 上下文管理”排列；上下文用量、自动压缩和手动压缩属于同一个无外框视觉组，自动压缩阈值也在该组内展开。角色管理从新会话页的角色卡齿轮或添加卡进入，齿轮必须定位到对应角色；角色默认思考强度只列出所选模型真实支持的档位，模型没有可调档位时显示并锁定“模型默认”。会话改名位于左侧会话栏。
 - 会话不直接选择模型或权限；它只在空闲时整体应用一个当前可用角色。角色管理只列已配置提供商当前可用模型，并把 provider/model 与工具权限固定到模板；新角色工具权限默认只读。角色表单还显式控制“允许管理会话”：新建角色默认关闭，编辑时按模板原值显示；关闭意味着 Agent 完全看不到工作台会话工具。
 - Pi 凭据属于当前用户并由所有项目共享；移除凭据必须明确提示全局影响并二次确认。空模型列表的恢复动作必须真的发送 `refresh_models`，不能用“重新打开设置”冒充刷新。
-- API Key 保存和角色 CRUD 只由匹配 sessionId + operation + commandId 的 `command_complete` / error 结算；任何中途 state/catalog 刷新都不能关闭等待态。角色 update/delete 同时带 expectedRevision，update 还携带对话框独立保存的 `expectedSystemPrompt`，同 revision 的目录刷新不能静默替换编辑中的 base/draft。
+- API Key 保存和角色 CRUD 只由匹配 sessionId + operation + commandId 的 `command_complete` / error 结算；模型刷新同样只接受精确 `refresh_models + sessionId + commandId` 的成功/失败回执，stale 回执必须忽略；任何中途 state/catalog 刷新都不能关闭等待态。角色 update/delete 同时带 expectedRevision，update 还携带对话框独立保存的 `expectedSystemPrompt`，同 revision 的目录刷新不能静默替换编辑中的 base/draft。
 - 初始化“默认”模板在角色管理中与其它角色相同，可编辑、可删除。失效模板保留原 provider/model 展示，不能静默换成其它模型。
 - Chat composer 底部显示会话当前角色 pill；详情展示快照 revision、简介、prompt、模型、工具权限和会话管理能力，并列出当前项目可用模板。只有 history 已恢复、会话 idle、没有待提交消息或其它破坏性命令时才允许发送精确 `switch_conversation_role`；等待态只由匹配 commandId 的完成或错误结算。
 - Chat 在 composer 底部现有控制行显示“自动压缩 N%”按钮，默认不增加 transcript 高度；点击后才展开 20%–90% 的会话级滑条，默认 70%。拖动只预览，松手或键盘调整结束才发送一次精确关联命令，等待相同 commandId 结算期间禁用控件。
@@ -111,7 +111,7 @@ ServerEvent
 - 断线重连会先清空旧投影，再用新 observation/focus identity 打开当前 conversation 并 hydrate；不得把旧浏览器消息和新快照拼接。
 - 不能因为先收到 state 就开放输入；服务端按 state → project snapshot → conversation snapshot 发布，大历史会放大这个窗口。
 - extension dialog 的提交不能靠本地关闭冒充成功；服务端会发送 `extension_ui_closed`，超时或 abort 时也由它清掉浏览器残影。
-- 不要用 `provider.configured` 或任意新 state 推断刚提交的 Key 已保存；配置刷新可能先于原命令的失败错误到达。
+- 不要用 `provider.configured` 或任意新 state 推断刚提交的 Key 已保存；配置刷新可能先于原命令的失败错误到达。模型目录刷新也不能用新 state 推断成功；必须等精确 refresh command result，断线则保持 unknown，不自动重发。
 - 不要在 `WebSocket.send()` 成功后清空 composer 或插入 user message；这会在帧未到达服务端时制造不可恢复的数据丢失窗口。
 - 目录列表中的 `path` 只是浏览投影，不是项目 cwd；不要在用户确认和 initialize 校验前创建项目状态、加载资源或持久化会话。
 - 后台 project snapshot 不能通过 conversationId 过滤；focused transcript event 也不能只按 conversationId 接收。两者处在不同观察边界。

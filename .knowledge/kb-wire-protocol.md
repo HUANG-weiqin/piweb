@@ -19,7 +19,7 @@ ClientCommand
 → App / reducer
 ```
 
-协议由 `PROTOCOL_VERSION` 标识，当前为 v29。工具参数和结果允许 `unknown`，但服务端在投影时会做有界遍历、转成 JSON-safe 数据并限制单值大小。
+协议由 `PROTOCOL_VERSION` 标识，当前为 v31。工具参数和结果允许 `unknown`，但服务端在投影时会做有界遍历、转成 JSON-safe 数据并限制单值大小。
 
 ## 决策
 
@@ -40,6 +40,7 @@ ClientCommand
 - initialize 的 conversation target 是 `recent | new(roleId) | open(conversationId)`；客户端不能提交 session 文件路径。空项目的 `recent` 返回“项目已打开、没有 active conversation”，不会偷偷创建 default 会话。
 - `focus_conversation` 和 `create_conversation` 使用一次性 commandId；服务端用同 commandId 的 `focus_attached` 确认新 focus。客户端在精确确认前不能把 pending target 当成当前 transcript。
 - `refresh_view` 是页面恢复后的无等待只读重同步，必须精确携带当前 `sessionId + projectId` 以及成对出现的 `conversationId + focusId`；身份已经变化时服务端静默丢弃。它刷新 state、角色目录和项目索引；只要 focused actor 未压缩，就可重发 conversation snapshot。active run 的 snapshot 由 actor 把 durable active branch 与尚未持久化的 live suffix 精确交接后生成，不能用纯持久快照覆盖正在流式生成的尾部，也不能把同一物理消息重复投影两次。
+- `refresh_models` 是 session-scoped 的联网配置命令，必须携带当前 `sessionId + commandId`。它使用 `refreshConfiguration({ allowNetwork: true, force: true, signal })`；成功只能由同一 correlation 的 `command_complete` 证明，失败由同一 correlation 的 command error 结算，不能用普通 state/catalog 更新冒充成功。连接内 commandId 不可复用；15 秒超时是明确失败，断线属于 unknown，生命周期替换会取消旧命令，三者都不得自动重发。后台刷新不走浏览器命令，不发送 wire 回执。
 - 当前 focus 被其它 Agent 删除时，服务端发送带完整 `sessionId + projectId + conversationId + focusId` 的 `focus_invalidated(reason=deleted)`；客户端只结算精确匹配的观察身份，然后回到角色选择页。不能从缺少当前项的截断列表猜测删除。
 - 创建新 conversation 必须显式 roleId。`default` 只是角色 ID，不是省略选择时的隐含值。
 - 工具模式只有 `read_only | full_access`，由角色模板持有并复制到 conversation 当前角色快照；角色 CRUD payload 必须同时携带模型默认思考强度和工具模式。v27 不接受 `initialize.toolMode` 与 `set_tool_mode`，协议仍没有逐工具询问命令或待回答状态。
@@ -63,7 +64,7 @@ ClientCommand
 - `prompt_admitted` 是接收回执：服务端已校验身份并让该 prompt 进入 SDK steering 队列（或已转成新 run）。浏览器只有收到精确匹配 focus 三元身份 + promptId 的这一帧，才能清草稿并投影"等待中" user message；`prompt_delivered` 才把它标为已投递。
 - runId 描述执行生命周期，不描述气泡生命周期。projector 为每条物理 assistant message 发送 `assistant_message_started`，steer 被 SDK 真正取用时另用 `user_message` 标出同一 run 内的新用户段；后续文本、思考、工具和 usage 仍归该 run，但 reducer 只写入最新 assistant 段。UI 可以合并没有 card/compaction/user 边界的同 run 相邻段，最终 focused snapshot 仍以 Pi durable entry 的 ordered parts 为准。
 - `WebSocket.send()` 不是协议提交点。只有匹配 sessionId + promptId 的 `prompt_admitted` 才能清草稿；确认前断线是 unknown outcome，客户端必须保留草稿并在恢复后让用户核对，不能自动重试，也不能按正文去重。
-- 错误包含 `scope`，命令错误可包含 `operation`；需要精确结算的设置错误还必须携带 sessionId + commandId。通用设置错误不能结束一次运行。
+- 错误包含 `scope`，命令错误可包含 `operation`；需要精确结算的设置错误还必须携带 sessionId + commandId。通用设置错误不能结束一次运行。`refresh_models` 的失败只进入设置回执，不得落为全局运行错误。
 - context usage 保留 `measured | estimated | unknown` 来源，不把未知伪装成精确数字。
 
 ## 认知模型

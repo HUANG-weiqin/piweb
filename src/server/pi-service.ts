@@ -55,6 +55,7 @@ import {
   projectConversationIndex,
 } from "./project-snapshot.js";
 import type { RoleCatalog } from "./role-catalog.js";
+import { MODEL_REFRESH_TIMEOUT_MS } from "./model-refresh-scheduler.js";
 import { SerialTaskQueue } from "./serial-task-queue.js";
 import { SessionEventProjector, snapshotWireValue } from "./session-events.js";
 import { resolveContextUsage } from "./session-usage.js";
@@ -83,6 +84,16 @@ interface ActiveSession {
   unsubscribe: () => void;
   unsubscribeProject: () => void;
   disposePromise?: Promise<void>;
+}
+
+interface ManualModelRefresh {
+  controller: AbortController;
+  completion: Promise<never>;
+  cancel(reason: string): void;
+  cancelled?: string;
+  underlying?: Promise<void>;
+  timedOut: boolean;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 interface RunTicket {
@@ -183,8 +194,9 @@ function queuedCommandScope(command: QueuedCommand): "session" | "epoch" | "glob
       return "session";
     case "login_oauth":
       return "epoch";
-    case "logout":
     case "refresh_models":
+      return "session";
+    case "logout":
       return "global";
     default:
       return assertNever(command);
@@ -301,6 +313,7 @@ export class PiConnection {
   private generation = 0;
   private initializationAbort?: AbortController;
   private coordinatedTransitionAbort?: AbortController;
+  private manualRefresh?: ManualModelRefresh;
   private disposed = false;
   private disposePromise?: Promise<void>;
 
@@ -550,6 +563,7 @@ export class PiConnection {
       if (this.usedSessionIds.has(command.sessionId)) {
         return Promise.reject(new Error("Session ID was already used on this connection"));
       }
+      this.cancelManualRefresh("Model refresh cancelled by connection lifecycle");
       this.initializationAbort?.abort();
       const initializationAbort = new AbortController();
       this.initializationAbort = initializationAbort;
@@ -598,9 +612,13 @@ export class PiConnection {
         }
       });
     }
+    if (command.type === "refresh_models" && this.manualRefresh) {
+      return Promise.reject(new Error("A model refresh is already pending"));
+    }
     if (
       command.type === "select_model"
       || command.type === "set_api_key"
+      || command.type === "refresh_models"
       || command.type === "delete_conversation"
     ) {
       if (this.usedCommandIds.has(command.commandId)) {
@@ -620,8 +638,11 @@ export class PiConnection {
 
     const generation = this.generation;
     this.admitCredentialIntent(command, generation, false);
+    const manualRefresh = command.type === "refresh_models"
+      ? this.startManualRefresh()
+      : undefined;
     const scope = queuedCommandScope(command);
-    return this.operations.run(async () => {
+    const operation = this.operations.run(async () => {
       try {
         this.assertOpen();
         if (scope !== "global" && generation !== this.generation) return;
@@ -631,10 +652,12 @@ export class PiConnection {
         if (command.type === "login_oauth" && this.cancelledAuthFlowIds.has(command.authFlowId)) {
           return;
         }
-        await this.execute(command);
+        if (manualRefresh?.cancelled || manualRefresh?.timedOut) return;
+        await this.execute(command, manualRefresh);
         if (
           command.type === "select_model"
           || command.type === "set_api_key"
+          || command.type === "refresh_models"
           || command.type === "delete_conversation"
         ) {
           this.emit({
@@ -652,6 +675,9 @@ export class PiConnection {
         this.credentialIntents.delete(command);
       }
     });
+    return manualRefresh
+      ? this.observeManualRefresh(operation, manualRefresh)
+      : operation;
   }
 
   private handleCoordinated(command: ConnectionCommand): Promise<void> {
@@ -827,6 +853,9 @@ export class PiConnection {
       return this.beginCoordinatedInitialization(command);
     }
 
+    if (command.type === "refresh_models" && this.manualRefresh) {
+      return Promise.reject(new Error("A model refresh is already pending"));
+    }
     const commandId = "commandId" in command
       ? command.commandId
       : undefined;
@@ -838,6 +867,9 @@ export class PiConnection {
       }
       this.usedCommandIds.add(commandId);
     }
+    const manualRefresh = command.type === "refresh_models"
+      ? this.startManualRefresh()
+      : undefined;
     if (command.type === "login_oauth") {
       if (this.usedAuthFlowIds.has(command.authFlowId)) {
         return Promise.reject(
@@ -860,7 +892,7 @@ export class PiConnection {
       transitionAbort = new AbortController();
       this.coordinatedTransitionAbort = transitionAbort;
     }
-    return this.operations.run(async () => {
+    const operation = this.operations.run(async () => {
       try {
         this.assertOpen();
         if (transitionAbort?.signal.aborted) return;
@@ -876,7 +908,8 @@ export class PiConnection {
         ) {
           return;
         }
-        await this.executeCoordinated(command, transitionAbort);
+        if (manualRefresh?.cancelled || manualRefresh?.timedOut) return;
+        await this.executeCoordinated(command, transitionAbort, manualRefresh);
       } finally {
         if (this.coordinatedTransitionAbort === transitionAbort) {
           this.coordinatedTransitionAbort = undefined;
@@ -888,6 +921,9 @@ export class PiConnection {
         this.credentialIntents.delete(command);
       }
     });
+    return manualRefresh
+      ? this.observeManualRefresh(operation, manualRefresh)
+      : operation;
   }
 
   private beginCoordinatedInitialization(
@@ -907,6 +943,7 @@ export class PiConnection {
       this.usedCommandIds.add(command.commandId);
     }
 
+    this.cancelManualRefresh("Model refresh cancelled by connection lifecycle");
     this.cancelCoordinatedTransition();
     this.coordinatedView?.extensionAbort.abort();
     this.initializationAbort?.abort();
@@ -1128,6 +1165,7 @@ export class PiConnection {
       | { type: "switch_conversation_role" }
     >,
     transitionAbort?: AbortController,
+    manualRefresh?: ManualModelRefresh,
   ): Promise<void> {
     if ((command as { type: string }).type === "set_tool_mode") {
       const legacy = command as unknown as LegacySetToolModeCommand;
@@ -1388,7 +1426,8 @@ export class PiConnection {
         await this.logout(command.provider, this.takeCredentialIntent(command));
         return;
       case "refresh_models":
-        await this.refreshModels();
+        await this.refreshModels(manualRefresh);
+        this.emitCommandComplete(command);
         return;
       default:
         return assertNever(command);
@@ -1668,7 +1707,13 @@ export class PiConnection {
             focusId: view.focusId,
             conversationName:
               actor.sessionManager.getSessionName() ?? undefined,
-            selectedModel: { ...actor.profile.role.model },
+            selectedModel: actor.session.model
+              && registry.hasConfiguredAuth(actor.session.model)
+              ? {
+                  provider: actor.session.model.provider,
+                  id: actor.session.model.id,
+                }
+              : undefined,
             compacting: actor.isCompacting(),
           }),
       ...(activity.kind === "idle"
@@ -1685,6 +1730,7 @@ export class PiConnection {
       ) as ThinkingLevel[],
       providers: buildPublicProviders({
         models: registry.getAll(),
+        registeredProviderIds: registry.getRegisteredProviderIds(),
         availableKeys: new Set(
           available.map((model) => `${model.provider}/${model.id}`),
         ),
@@ -2100,6 +2146,7 @@ export class PiConnection {
 
   private closeCoordinatedSession(sessionId: string): Promise<void> {
     if (this.requestedSessionId !== sessionId) return Promise.resolve();
+    this.cancelManualRefresh("Model refresh cancelled by connection lifecycle");
     this.generation++;
     this.requestedSessionId = undefined;
     this.cancelCoordinatedTransition();
@@ -2141,7 +2188,10 @@ export class PiConnection {
     }
   }
 
-  private async execute(command: QueuedCommand): Promise<void> {
+  private async execute(
+    command: QueuedCommand,
+    manualRefresh?: ManualModelRefresh,
+  ): Promise<void> {
     if ((command as { type: string }).type === "set_tool_mode") {
       const legacy = command as unknown as LegacySetToolModeCommand;
       await this.projectRuns.transitionToolMode(
@@ -2194,7 +2244,7 @@ export class PiConnection {
         command.provider,
         this.takeCredentialIntent(command),
       );
-      case "refresh_models": return this.refreshModels();
+      case "refresh_models": return this.refreshModels(manualRefresh);
       default: return assertNever(command);
     }
   }
@@ -2445,8 +2495,79 @@ export class PiConnection {
     if (!applied) throw new Error("Logout was superseded by a newer credential change");
   }
 
-  private async refreshModels(): Promise<void> {
-    await this.runtime.refreshConfiguration();
+  private startManualRefresh(): ManualModelRefresh {
+    const controller = new AbortController();
+    let rejectCompletion!: (error: Error) => void;
+    const completion = new Promise<never>((_, reject) => {
+      rejectCompletion = reject;
+    });
+    let refresh!: ManualModelRefresh;
+    const timer = setTimeout(() => {
+      refresh.timedOut = true;
+      controller.abort();
+      rejectCompletion(new Error("Model refresh timed out; please retry"));
+    }, MODEL_REFRESH_TIMEOUT_MS);
+    timer.unref?.();
+    refresh = {
+      controller,
+      completion,
+      timer,
+      timedOut: false,
+      cancel: (reason: string) => {
+        if (refresh.cancelled || refresh.timedOut) return;
+        refresh.cancelled = reason;
+        controller.abort();
+        rejectCompletion(new Error(reason));
+      },
+    };
+    this.manualRefresh = refresh;
+    return refresh;
+  }
+
+  private observeManualRefresh(
+    operation: Promise<void>,
+    refresh: ManualModelRefresh,
+  ): Promise<void> {
+    const releaseWhenDrained = () => {
+      void (refresh.underlying ?? Promise.resolve())
+        .catch(() => undefined)
+        .then(() => {
+          if (this.manualRefresh === refresh) this.manualRefresh = undefined;
+        });
+    };
+    void operation.then(releaseWhenDrained, releaseWhenDrained);
+    return Promise.race([operation, refresh.completion]).finally(() => {
+      clearTimeout(refresh.timer);
+    });
+  }
+
+  private async refreshModels(refresh?: ManualModelRefresh): Promise<void> {
+    if (process.env.PI_OFFLINE !== undefined) {
+      throw new Error("Model refresh is unavailable while offline");
+    }
+    if (!refresh) throw new Error("Model refresh was not admitted");
+    if (refresh.timedOut) throw new Error("Model refresh timed out; please retry");
+    if (refresh.cancelled) throw new Error(refresh.cancelled);
+    try {
+      const underlying = this.runtime.refreshConfiguration({
+        allowNetwork: true,
+        force: true,
+        signal: refresh.controller.signal,
+      });
+      refresh.underlying = underlying;
+      // The caller may settle on timeout/cancellation while SDK refresh keeps
+      // running. Always observe its eventual rejection.
+      void underlying.catch(() => undefined);
+      await Promise.race([underlying, refresh.completion]);
+    } catch (error) {
+      if (refresh.timedOut) throw new Error("Model refresh timed out; please retry");
+      if (refresh.cancelled) throw new Error(refresh.cancelled);
+      throw error;
+    }
+  }
+
+  private cancelManualRefresh(reason: string): void {
+    this.manualRefresh?.cancel(reason);
   }
 
   private async commitCredentialChange(
@@ -2557,6 +2678,7 @@ export class PiConnection {
       availableThinkingLevels: session.getAvailableThinkingLevels() as ThinkingLevel[],
       providers: buildPublicProviders({
         models: registry.getAll(),
+        registeredProviderIds: registry.getRegisteredProviderIds(),
         availableKeys: new Set(available.map((model) => `${model.provider}/${model.id}`)),
         oauthProviders,
         displayName: (provider) => registry.getProviderDisplayName(provider),
@@ -2904,6 +3026,7 @@ export class PiConnection {
   private closeSession(sessionId: string): Promise<void> {
     if (this.requestedSessionId !== sessionId) return Promise.resolve();
 
+    this.cancelManualRefresh("Model refresh cancelled by connection lifecycle");
     this.generation++;
     this.requestedSessionId = undefined;
     this.initializationAbort?.abort();
@@ -2964,6 +3087,7 @@ export class PiConnection {
   }
 
   dispose(): Promise<void> {
+    this.cancelManualRefresh("Model refresh cancelled by connection lifecycle");
     if (this.coordinationProvider) {
       return this.disposeCoordinated();
     }

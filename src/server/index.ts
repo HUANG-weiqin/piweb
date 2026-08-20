@@ -1,6 +1,7 @@
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
+import { ModelRefreshScheduler } from "./model-refresh-scheduler.js";
 import { PiRuntime } from "./pi-runtime.js";
 import { attachSocketServer } from "./socket-server.js";
 
@@ -23,6 +24,16 @@ const server = app.listen(port, host, () => {
 });
 
 const socketServer = attachSocketServer(server, process.cwd(), runtime);
+const modelRefreshScheduler = new ModelRefreshScheduler(
+  runtime,
+  (error) => {
+    console.warn(
+      "Automatic model refresh failed",
+      error instanceof Error ? error.message : "unknown error",
+    );
+  },
+);
+modelRefreshScheduler.start();
 
 let shutdownPromise: Promise<void> | undefined;
 
@@ -33,10 +44,13 @@ function closeHttpServer(): Promise<void> {
 }
 
 function shutdown(): void {
-  shutdownPromise ??= Promise.all([
-    closeHttpServer(),
-    socketServer.close(),
-  ]).then(
+  shutdownPromise ??= (async () => {
+    await modelRefreshScheduler.dispose();
+    await Promise.all([
+      closeHttpServer(),
+      socketServer.close(),
+    ]);
+  })().then(
     () => {
       process.exitCode = 0;
     },

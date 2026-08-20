@@ -47,7 +47,7 @@ Pi Web 是本机优先的极简 Agent 工作台。当前目标不是复制 Pi �
 - 用户消息投递只能在 raw user `message_end` 后，从同一 SessionManager entries 找到 `entry.message === rawMessage` 的对象引用来证明。初始 raw user 无条件先归当前 run 的 initial prompt；后续 browser admission 与显式 steer 按 SDK 接受顺序共用 FIFO，并只由 FIFO 头的实际 queued text 匹配认领，禁止跨队列按正文搜索。run settlement 本身不是交付证明。admit 有界（单会话同时最多 64 条 pending）；存量 `.piweb/pending-prompts` 只做一次性迁移，迁移后目录必须删除，不允许重新创建队列状态。
 - 普通会话操作串行执行；`abort`、认证响应、认证取消和生命周期失效走控制通道，session dispose 排回 actor 队列。
 - 所有 session command/state/event 都带 `sessionId`；run command/event 还带 `runId`。客户端必须丢弃不匹配的身份。
-- 会让界面等待配置结果的命令必须有精确关联身份；当前 API Key 与模型选择使用 sessionId + 连接内一次性 commandId，不能把任意 PublicState 刷新当作成功回执。
+- 会让界面等待配置结果的命令必须有精确关联身份；当前 API Key、模型选择与远程供应商模型刷新使用 sessionId + 连接内一次性 commandId，不能把任意 PublicState 刷新当作成功回执；后台模型目录刷新允许联网但必须有界、可取消、无重叠且离线 no-op。
 - Pi 的模型切换不是持久化事务：command success 以目标 model 已进入当前 AgentSession 为准，后续 session/settings 写入失败要单独报告，不能谎称运行态未切换。
 - Pi 的 thinking/name setter 也有相同的“内存先变更”顺序；新增 SDK 状态 setter 接入前必须核对源码顺序并用后置条件测试覆盖部分提交。
 - OAuth 命令与事件都带 `authFlowId`；取消必须覆盖 active 和尚在 actor 队列中的 flow。

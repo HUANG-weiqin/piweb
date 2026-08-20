@@ -1464,7 +1464,27 @@ describe("PiRuntime session ownership", () => {
     });
     expect(created.session.model).toBe(original);
 
-    await runtime.refreshConfiguration();
+    const projectCatalog = await runtime.createProjectModelCatalog(cwd);
+    const owners = [...(runtime as unknown as {
+      sessionRegistries: Set<{ refresh(options?: unknown): Promise<void> }>;
+    }).sessionRegistries];
+    const ownerRefreshes = owners.map((owner) => vi.spyOn(owner, "refresh"));
+    const baselineRefresh = vi.spyOn(runtime.modelRuntime, "refresh");
+    const signal = new AbortController().signal;
+    await runtime.refreshConfiguration({ allowNetwork: true, force: true, signal });
+    expect(baselineRefresh).toHaveBeenCalledWith({
+      allowNetwork: true,
+      force: true,
+      signal,
+    });
+    expect(ownerRefreshes).toHaveLength(2);
+    for (const ownerRefresh of ownerRefreshes) {
+      expect(ownerRefresh).toHaveBeenCalledWith({
+        allowNetwork: false,
+        force: true,
+        signal,
+      });
+    }
     expect(created.session.model).not.toBe(original);
     expect(created.session.model?.baseUrl).toBe("https://after.invalid/v1");
 
@@ -1473,6 +1493,9 @@ describe("PiRuntime session ownership", () => {
     await runtime.refreshConfiguration();
     expect(created.modelRegistry.find("refreshable", "refreshable-model")).toBeUndefined();
     expect(created.session.model).not.toBe(refreshed);
+    for (const ownerRefresh of ownerRefreshes) ownerRefresh.mockRestore();
+    baselineRefresh.mockRestore();
+    await projectCatalog.dispose();
     await created.dispose();
   });
 

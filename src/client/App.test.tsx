@@ -2086,6 +2086,89 @@ describe("App", () => {
     expect(screen.getByRole("status")).toHaveTextContent("项目资源已跳过");
   });
 
+  it("correlates model refresh commands and preserves unknown outcomes", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [{
+          id: "provider",
+          name: "Provider",
+          configured: true,
+          oauth: false,
+          models: [{
+            provider: "provider",
+            id: "model",
+            name: "Model",
+            reasoning: false,
+            thinkingLevels: ["off"],
+            input: ["text"],
+            contextWindow: 1_000,
+            available: true,
+          }],
+        }],
+      },
+    }));
+    fireEvent.click(screen.getByRole("button", { name: /^model\s*⌄$/ }));
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新模型" }));
+    const command = latestCommand("refresh_models");
+    expect(command.sessionId).toBe(sessionId);
+    expect(command.commandId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(screen.getByRole("button", { name: "正在刷新模型…" })).toBeDisabled();
+
+    act(() => socketMock.rawEmit?.({
+      type: "command_complete",
+      operation: "refresh_models",
+      commandId: "8ee64aa3-c8a8-4e21-b521-66029ce3673b",
+      sessionId,
+    }));
+    act(() => socketMock.rawEmit?.({
+      type: "error",
+      scope: "command",
+      operation: "refresh_models",
+      commandId: "8ee64aa3-c8a8-4e21-b521-66029ce3673b",
+      sessionId,
+      message: "stale refresh failure",
+    }));
+    expect(screen.getByRole("button", { name: "正在刷新模型…" })).toBeDisabled();
+
+    act(() => socketMock.rawEmit?.({
+      type: "command_complete",
+      operation: "refresh_models",
+      commandId: command.commandId,
+      sessionId,
+    }));
+    expect(screen.getByRole("status")).toHaveTextContent("远程供应商模型目录已刷新");
+    expect(screen.queryByText("stale refresh failure")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新模型" }));
+    const failedCommand = latestCommand("refresh_models");
+    act(() => socketMock.rawEmit?.({
+      type: "error",
+      scope: "command",
+      operation: "refresh_models",
+      commandId: failedCommand.commandId,
+      sessionId,
+      message: "远程刷新失败",
+    }));
+    expect(screen.getByRole("alert")).toHaveTextContent("远程刷新失败");
+    expect(screen.queryByText("stale refresh failure")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新模型" }));
+    act(() => socketMock.status?.(false));
+    expect(screen.getByRole("alert")).toHaveTextContent("状态未确认");
+    expect(screen.getByRole("button", { name: "刷新模型" })).toBeDisabled();
+  });
+
   it("temporarily hides the model drawer while an extension interaction owns focus", () => {
     render(<App />);
     const sessionId = startFromSetup();

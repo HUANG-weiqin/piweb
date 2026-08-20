@@ -1752,7 +1752,9 @@ export function App() {
         }
         if (
           event.commandId
-          && (event.operation === "set_api_key" || event.operation === "select_model")
+          && (event.operation === "set_api_key"
+            || event.operation === "select_model"
+            || event.operation === "refresh_models")
         ) {
           if (!event.sessionId) {
             setError("设置命令响应缺少会话标识");
@@ -2794,7 +2796,15 @@ export function App() {
         }
       }}
       onLogout={(provider) => send({ type: "logout", provider })}
-      onRefresh={() => send({ type: "refresh_models" })}
+      onRefresh={() => {
+         const commandId = crypto.randomUUID();
+         const sessionId = sessionIdRef.current;
+         if (!sessionId) return undefined;
+         setSettingResult(undefined);
+         return send({ type: "refresh_models", commandId, sessionId })
+           ? commandId
+           : undefined;
+       }}
       onClearSettingResult={clearSettingResult}
       onKeyDialogChange={setSettingsDialogOpen}
     />

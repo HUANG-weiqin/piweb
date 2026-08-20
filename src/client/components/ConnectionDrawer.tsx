@@ -19,7 +19,7 @@ interface ConnectionDrawerProps {
   onKey(provider: string, key: string): string | undefined;
   onOAuth(provider: string): void;
   onLogout(provider: string): void;
-  onRefresh(): void;
+  onRefresh(): string | undefined;
   onClearSettingResult(): void;
   onKeyDialogChange(open: boolean): void;
 }
@@ -72,6 +72,11 @@ export function ConnectionDrawer({
   const [savedKeyProviderId, setSavedKeyProviderId] = useState("");
   const [confirmLogoutProviderId, setConfirmLogoutProviderId] = useState("");
   const [search, setSearch] = useState("");
+  const [refreshingModels, setRefreshingModels] = useState<{
+    sessionId: string;
+    commandId: string;
+  }>();
+  const [refreshStatus, setRefreshStatus] = useState<{ ok: boolean; message: string }>();
 
   useEffect(() => {
     if (providerId && state.providers.some((provider) => provider.id === providerId)) return;
@@ -105,6 +110,33 @@ export function ConnectionDrawer({
   ]);
 
   useEffect(() => {
+    if (
+      !refreshingModels
+      || refreshingModels.sessionId !== state.sessionId
+      || settingResult?.operation !== "refresh_models"
+      || settingResult.commandId !== refreshingModels.commandId
+    ) return;
+    setRefreshingModels(undefined);
+    setRefreshStatus({
+      ok: settingResult.ok,
+      message: settingResult.ok
+        ? "远程供应商模型目录已刷新。"
+        : settingResult.message || "远程供应商模型目录刷新失败。",
+    });
+    onClearSettingResult();
+  }, [onClearSettingResult, refreshingModels, settingResult, state.sessionId]);
+
+  useEffect(() => {
+    if (!refreshingModels || refreshingModels.sessionId === state.sessionId) return;
+    setRefreshingModels(undefined);
+    setRefreshStatus({
+      ok: false,
+      message: "观察会话已更换，刷新状态未确认；请重试。",
+    });
+    onClearSettingResult();
+  }, [onClearSettingResult, refreshingModels, state.sessionId]);
+
+  useEffect(() => {
     if (online) return;
     if (savingKey) {
       setSavingKey(undefined);
@@ -112,8 +144,15 @@ export function ConnectionDrawer({
       setShowKey(false);
       setKeyError("连接已断开，无法确认 Key 是否保存；请重连后重试。");
     }
+    if (refreshingModels) {
+      setRefreshingModels(undefined);
+      setRefreshStatus({
+        ok: false,
+        message: "连接已断开，刷新状态未确认；请重连后重试。",
+      });
+    }
     onClearSettingResult();
-  }, [online, onClearSettingResult, savingKey]);
+  }, [online, onClearSettingResult, refreshingModels, savingKey]);
 
   const selectedProvider = state.providers.find((provider) => provider.id === providerId);
   const keyProvider = state.providers.find((provider) => provider.id === keyProviderId);
@@ -198,6 +237,7 @@ export function ConnectionDrawer({
     setSearch("");
     setSavedKeyProviderId("");
     setConfirmLogoutProviderId("");
+    setRefreshStatus(undefined);
     onClearSettingResult();
   };
   const openKeyDialog = (nextProviderId: string) => {
@@ -350,6 +390,27 @@ export function ConnectionDrawer({
             onChange={(event) => setSearch(event.target.value)}
             placeholder={`搜索 ${selectedProvider.name} 模型`}
           />}
+          <div className="provider-actions model-refresh-actions">
+            <button
+              type="button"
+              className="ghost"
+              disabled={!online || state.busy || Boolean(refreshingModels)}
+              onClick={() => {
+                const commandId = onRefresh();
+                if (!commandId) return;
+                setRefreshingModels({ sessionId: state.sessionId, commandId });
+                setRefreshStatus(undefined);
+              }}
+            >
+              {refreshingModels ? "正在刷新模型…" : "刷新模型"}
+            </button>
+            {refreshStatus && <p
+              className={`inline-status ${refreshStatus.ok ? "success" : "error"}`}
+              role={refreshStatus.ok ? "status" : "alert"}
+            >
+              {refreshStatus.message}
+            </p>}
+          </div>
           <div className="model-list">
             {!selectedProvider && <div className="setting-empty">
               <strong>先选择提供商</strong>
@@ -361,15 +422,7 @@ export function ConnectionDrawer({
             </div>}
             {selectedProvider?.configured && availableModels.length === 0 && <div className="setting-empty">
               <strong>暂无可用模型</strong>
-              <p>检查凭据，或重新读取本机 Pi 模型目录。</p>
-              <button
-                type="button"
-                className="ghost"
-                disabled={!online || state.busy}
-                onClick={onRefresh}
-              >
-                刷新模型
-              </button>
+              <p>检查凭据，或刷新远程供应商模型目录。</p>
             </div>}
             {selectedProvider?.configured && availableModels.length > 0 && models.length === 0 && <div className="setting-empty">
               <strong>没有匹配结果</strong>

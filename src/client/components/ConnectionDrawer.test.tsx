@@ -238,6 +238,92 @@ describe("ConnectionDrawer", () => {
     expect(logout).toHaveBeenCalledWith("test");
   });
 
+  it("always offers refresh and settles only its exact command result", () => {
+    const secondCommandId = "8ee64aa3-c8a8-4e21-b521-66029ce3673b";
+    const refresh = vi.fn()
+      .mockReturnValueOnce(commandId)
+      .mockReturnValueOnce(secondCommandId);
+    const view = renderDrawer({ onRefresh: refresh });
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新模型" }));
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(screen.getByRole("button", { name: "正在刷新模型…" })).toBeDisabled();
+
+    view.rerender(<ConnectionDrawer {...drawerProps({
+      onRefresh: refresh,
+      settingResult: {
+        operation: "refresh_models",
+        commandId: "8ee64aa3-c8a8-4e21-b521-66029ce3673b",
+        ok: false,
+        message: "stale",
+      },
+    })} />);
+    expect(screen.getByRole("button", { name: "正在刷新模型…" })).toBeDisabled();
+
+    view.rerender(<ConnectionDrawer {...drawerProps({
+      onRefresh: refresh,
+      settingResult: {
+        operation: "refresh_models",
+        commandId,
+        ok: true,
+        message: "",
+      },
+    })} />);
+    expect(screen.getByRole("status")).toHaveTextContent("远程供应商模型目录已刷新");
+    expect(screen.getByRole("status")).toHaveClass("success");
+    expect(screen.getByRole("button", { name: "刷新模型" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新模型" }));
+    view.rerender(<ConnectionDrawer {...drawerProps({
+      onRefresh: refresh,
+      settingResult: {
+        operation: "refresh_models",
+        commandId: secondCommandId,
+        ok: false,
+        message: "刷新失败",
+      },
+    })} />);
+    expect(screen.getByRole("alert")).toHaveTextContent("刷新失败");
+    expect(screen.getByRole("alert")).toHaveClass("error");
+    expect(screen.getByRole("button", { name: "刷新模型" })).toBeEnabled();
+  });
+
+  it("invalidates a pending refresh when the observed session changes", () => {
+    const view = renderDrawer({ onRefresh: () => commandId });
+    fireEvent.click(screen.getByRole("button", { name: "刷新模型" }));
+
+    view.rerender(<ConnectionDrawer {...drawerProps({
+      state: { ...state, sessionId: "session-2" },
+      onRefresh: () => commandId,
+    })} />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("状态未确认");
+    expect(screen.getByRole("button", { name: "刷新模型" })).toBeEnabled();
+  });
+
+  it("keeps refresh available with no provider and disables it offline or while busy", () => {
+    const refresh = vi.fn(() => commandId);
+    const view = renderDrawer({
+      state: { ...state, providers: [] },
+      onRefresh: refresh,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "刷新模型" }));
+    expect(refresh).toHaveBeenCalledOnce();
+
+    view.rerender(<ConnectionDrawer {...drawerProps({
+      state: { ...state, providers: [] },
+      online: false,
+      onRefresh: refresh,
+    })} />);
+    expect(screen.getByRole("button", { name: "刷新模型" })).toBeDisabled();
+
+    view.rerender(<ConnectionDrawer {...drawerProps({
+      state: { ...state, busy: true },
+      onRefresh: refresh,
+    })} />);
+    expect(screen.getByRole("button", { name: "刷新模型" })).toBeDisabled();
+  });
+
   it("offers a real model refresh when a configured provider has no models", () => {
     const refresh = vi.fn();
     renderDrawer({

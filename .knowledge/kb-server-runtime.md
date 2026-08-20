@@ -14,9 +14,9 @@
 - 持有 Pi 用户级 `ProjectTrustStore`；受保护的项目资源在 trust resolution 前不能进入最终 resource loader。
 - 为每个 session 或 project model catalog 创建独立 `ModelRuntime` / `ModelRegistry`，隔离 cwd 扩展的静态模型、base URL 和 headers；owner 必须在 AgentSession 创建后确认其 `modelRuntime` 身份。
 - API key 与 logout 只通过 `CredentialStore.modify/delete` 持久化；OAuth 在配置队列外使用 baseline provider 的 `auth.oauth.login(AuthInteraction)`，成功后再经 credential intent CAS 写入。扩展 OAuth 与进程全局 provider 注册仍 fail closed。
-- 扩展 provider 只能通过 session-local runtime 注册可快照的静态配置；`streamSimple`、OAuth、`refreshModels` 和 native provider 注册会 fail closed，不允许绕过宿主的进程级边界。
+- 扩展 provider 只能通过 session-local runtime 注册可快照的静态配置；`streamSimple`、OAuth、`refreshModels` 和 native provider 注册会 fail closed，不允许绕过宿主的进程级边界。合法注册的静态 provider 即使暂时没有模型也必须保留在连接投影中，才能配置凭据并通过后续目录刷新恢复。
 - Pi 内置 provider 的远程目录缓存有意由各 runtime 共享同一用户级 `models-store.json`；项目扩展不能注册会写目录缓存的动态/native provider，因此共享缓存只承载 Pi 官方目录，项目差异仍只存在于 session-local 静态 overlay。
-- 配置变更通过 runtime 的串行 refresh 入口清理 credential command cache；基线可按显式 `allowNetwork` 刷新，session/project owner 则固定禁止网络刷新并保留每个 runtime 的错误聚合。
+- 配置变更通过 runtime 的串行 refresh 入口清理 credential command cache；基线可按显式 `allowNetwork` 刷新，session/project owner 则固定禁止网络刷新并保留每个 runtime 的错误聚合。后台 `ModelRefreshScheduler` 在服务启动后立即执行一次联网刷新，成功或失败后再安排 4 小时周期；单轮 15 秒超时、无重叠，离线时不启动网络任务，dispose 会 abort 并等待当前刷新。
 - 可为项目创建独立的 model catalog：走与 session 相同的 trust、resource loader、静态 provider 深快照和不安全 provider 拒绝路径，但不创建或启动 `AgentSession`。它让空项目也能列出项目扩展模型并配置第一条会话。
 - 串行执行认证/模型配置提交；OAuth provider 的交互式等待必须在队列外完成。
 - 每个 provider 的 credential intent 在用户操作开始时取得一次性 revision，提交时只允许当前最新 revision 写入，避免旧 OAuth 结果覆盖后来发生的 API Key 或 logout。
@@ -75,7 +75,7 @@
 - OpenAI Codex Responses 的 `auto` transport 在 AgentSession 创建前通过 session-local settings override 解析为 `sse`，让普通 turn、SDK retry 与 compaction summary 共用 zstd SSE；用户显式选择的 `sse | websocket | websocket-cached` 原样保留，override 不写回用户或项目 settings。完整 provider JSON、cached WebSocket delta、实际 WebSocket frame 与压缩 SSE body 是不同观察边界；工作台不得再用 raw context/provider body 字节阈值伪造 `context_length_exceeded` 或触发 durable compaction，generic WebSocket/request-buffer error 也必须保持 transport error。
 - 空闲会话可通过精确 focus 关联的 `switch_conversation_role` 应用当前可用角色。Actor 同步封锁新 run，停止旧 AgentSession，追加角色变更记录，再用同一 SessionManager 和新角色 model/prompt/meta tools 重建；替换 runtime 打开失败时追加上一角色作为补偿并恢复旧 runtime，补偿也失败则 actor fatal。conversationId、history、lifecycle 与 createdBy 不变。
 - API Key 在共享配置队列完成后才确认；API Key、OAuth 与 logout 共用按 provider 排序的一次性 credential intent，旧操作若已被更新 intent 取代就不得写入或发送成功回执。凭据本身影响所有项目，但发起命令必须仍属于提交时的 observation session/generation，避免迟到页面修改全局认证。会话模型由角色快照固定，中途 `select_model` 明确拒绝；actor 重开时再次校验实际模型，不能 SDK fallback。
-- API Key、角色 CRUD 和删除等需要结算的操作都带原 sessionId + commandId，连接内复用 commandId 会被拒绝。
+- API Key、角色 CRUD 和删除等需要结算的操作都带原 sessionId + commandId，连接内复用 commandId 会被拒绝。手动 `refresh_models` 同样是 session-scoped 的精确 command：必须携带 `sessionId + commandId`，使用 `allowNetwork:true, force:true` 和 15 秒全操作 deadline；成功回 `command_complete`，失败回同一 correlation 的 error，不能只刷新公共状态。超时或生命周期取消会立即结算调用方，但底层 refresh 真正退出前仍占用单连接 refresh slot，不能积累第二个底层刷新。
 - 会话“回到此处”由 project lifecycle、ConversationActor operation queue 和 ProjectStore 原子截断共同完成；busy 或存在待处理 inbox 时拒绝。只有 durable JSONL 与同一 AgentSession 内存 context 都同步后，PiConnection 才依次发布 focused snapshot 和 command completion。
 - `setThinkingLevel()` 和 `setSessionName()` 会先改内存再持久化；工作台以 actor 实际后置条件为准，发布新 state 并单独报告持久化风险。相对地，`CredentialStore.modify/delete` 与 `ProjectStore.setToolMode` 都是持久写成功后才替换内存状态，不需要这种部分提交适配。
 - browser prompt 可随时尝试，但 busy admission 只在 actor 与 SDK 双重 live 边界允许；失败时不发 `prompt_admitted`，浏览器保留草稿。接受后不建新 run ticket、不写持久队列，当前工具序列结束后下一次模型调用前注入；steeringMode="all" 让排队消息（含 inbox）一次模型轮次全部注入。idle 时经 project lifecycle 起新 run且不越过已有 inbox 工作。abort 先清空 SDK steering/followUp 队列、admissions 与 guidance observations 再 abort，旧消息不能跨越结算边界污染下一次 run。admit 有界（单会话最多 64 条 pending），slash 开头拒绝。
@@ -105,7 +105,7 @@
 - ConversationActor dispose 会先等待取消，再发送 `session_shutdown(reason=quit)`，最后释放 AgentSession、session 模型目录和 writer lease。
 - Pi SDK 的 `streamSimple`、OAuth 和 native provider 注册可能触及进程全局状态；第一版显式拒绝这些项目扩展 provider，不能用裸 per-session registry 伪装隔离。
 - 允许的静态 provider config 会先做 host-owned 深快照，防止扩展在注册后修改原对象绕过策略。
-- registry refresh 后必须把 AgentSession 当前 model 重新绑定到新对象；若原模型被删除，则选择 registry fallback，不能继续使用旧 endpoint。配置已持久提交后，每个 session registry 与 baseline registry 的 refresh 都必须独立尝试，并在最后照常通知订阅者；单个 owner 抛错不能跳过其余 session，多个错误聚合后再返回调用方。
+- registry refresh 后必须把 AgentSession 当前 model 重新绑定到新对象；非 fixed 模型被删除时可以选择 registry fallback，但角色快照固定的模型被删除时必须 unset 并投影为 unavailable，绝不能继续使用旧 endpoint。配置已持久提交后，每个 session registry 与 baseline registry 的 refresh 都必须独立尝试，并在最后照常通知订阅者；单个 owner 抛错不能跳过其余 session，多个错误聚合后再返回调用方。
 - SDK 内容事件只在当前 actor run ticket 匹配时投影；PiConnection 再按当前 focusId 决定是否发给浏览器。run lifecycle 由工作台适配层合成。
 - SDK 可能用 assistant `stopReason=error` 表达失败并让 `prompt()` 正常 resolve；projector 以最终一次 assistant 结果校准 workbench outcome。
 - SDK 原生事件只交给 `SessionEventProjector`，不直接发送。
@@ -118,6 +118,7 @@
 ## 入口
 
 - `src/server/pi-runtime.ts`
+- `src/server/model-refresh-scheduler.ts`
 - `src/server/agent-turn-boundary.ts`
 - `src/server/pi-service.ts`
 - `src/server/socket-server.ts`

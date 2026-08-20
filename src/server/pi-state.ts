@@ -14,6 +14,7 @@ interface ModelLike extends ThinkingCapableModel {
 
 interface ProviderProjectionInput {
   models: ModelLike[];
+  registeredProviderIds: readonly string[];
   availableKeys: Set<string>;
   oauthProviders: Map<string, string>;
   displayName(provider: string): string;
@@ -22,6 +23,9 @@ interface ProviderProjectionInput {
 
 export function buildPublicProviders(input: ProviderProjectionInput): PublicProvider[] {
   const grouped = new Map<string, ModelLike[]>();
+  for (const providerId of input.registeredProviderIds) {
+    if (!grouped.has(providerId)) grouped.set(providerId, []);
+  }
   for (const model of input.models) {
     const list = grouped.get(model.provider) ?? [];
     list.push(model);

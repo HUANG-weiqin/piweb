@@ -144,6 +144,7 @@ class FakeRuntime implements PiRuntimeLike {
 
   readonly modelRegistry = {
     getAll: () => [],
+    getRegisteredProviderIds: () => [],
     getAvailable: () => [],
     getError: () => undefined,
     getProviderDisplayName: (provider: string) => provider,
@@ -330,6 +331,7 @@ async function coordinatedConnectionHarness() {
   };
   Object.assign(runtime.modelRegistry, {
     getAll: () => [model],
+    getRegisteredProviderIds: () => [],
     getAvailable: () => [model],
     getError: () => undefined,
     getProviderDisplayName: (provider: string) => provider,
@@ -857,7 +859,11 @@ describe("PiConnection lifecycle", () => {
     const connection = new PiConnection((event) => events.push(event), runtime);
     await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
 
-    const refresh = connection.handle({ type: "refresh_models" });
+    const refresh = connection.handle({
+      type: "refresh_models",
+      commandId: COMMAND_A,
+      sessionId: SESSION_A,
+    });
     await refreshStarted.promise;
     const first = connection.handle({
       type: "prompt",
@@ -1599,6 +1605,153 @@ describe("PiConnection lifecycle", () => {
     });
   });
 
+  it("refreshes models with a session-scoped command acknowledgment", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-manual-model-refresh-"));
+    const runtime = new FakeRuntime();
+    const refresh = vi.spyOn(runtime, "refreshConfiguration");
+    const events: ServerEvent[] = [];
+    const connection = new PiConnection((event) => events.push(event), runtime);
+    await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
+
+    await connection.handle({
+      type: "refresh_models",
+      commandId: COMMAND_A,
+      sessionId: SESSION_A,
+    });
+
+    expect(refresh).toHaveBeenCalledWith(expect.objectContaining({
+      allowNetwork: true,
+      force: true,
+      signal: expect.any(AbortSignal),
+    }));
+    expect(events).toContainEqual({
+      type: "command_complete",
+      operation: "refresh_models",
+      commandId: COMMAND_A,
+      sessionId: SESSION_A,
+    });
+  });
+
+  it("rejects a manual model refresh while offline", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-offline-model-refresh-"));
+    const runtime = new FakeRuntime();
+    const events: ServerEvent[] = [];
+    const connection = new PiConnection((event) => events.push(event), runtime);
+    await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
+    vi.stubEnv("PI_OFFLINE", "1");
+
+    await expect(connection.handle({
+      type: "refresh_models",
+      commandId: COMMAND_A,
+      sessionId: SESSION_A,
+    })).rejects.toThrow("Model refresh is unavailable while offline");
+    vi.unstubAllEnvs();
+  });
+
+  it("maps a manual model refresh timeout to a safe error", async () => {
+    vi.useFakeTimers();
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-model-refresh-timeout-"));
+    const runtime = new FakeRuntime();
+    let releaseRefresh!: () => void;
+    const refresh = vi.spyOn(runtime, "refreshConfiguration")
+      .mockImplementation(() => new Promise<void>((resolve) => {
+        releaseRefresh = resolve;
+      }));
+    const connection = new PiConnection(() => undefined, runtime);
+    await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
+
+    const pending = connection.handle({
+      type: "refresh_models",
+      commandId: COMMAND_A,
+      sessionId: SESSION_A,
+    });
+    const timedOut = expect(pending).rejects.toThrow("Model refresh timed out; please retry");
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(refresh.mock.calls[0]?.[0]?.signal.aborted).toBe(true);
+    await timedOut;
+    await expect(connection.handle({
+      type: "refresh_models",
+      commandId: COMMAND_B,
+      sessionId: SESSION_A,
+    })).rejects.toThrow("already pending");
+    releaseRefresh();
+    await Promise.resolve();
+    vi.useRealTimers();
+  });
+
+  it("cancels active model refreshes before close, reinitialize, and dispose", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-model-refresh-lifecycle-"));
+    const runtime = new FakeRuntime();
+    const signals: AbortSignal[] = [];
+    const releaseRefreshes: Array<() => void> = [];
+    vi.spyOn(runtime, "refreshConfiguration").mockImplementation((options) => {
+      if (options?.signal) signals.push(options.signal);
+      return new Promise<void>((resolve) => {
+        releaseRefreshes.push(resolve);
+      });
+    });
+    const connection = new PiConnection(() => undefined, runtime);
+    await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
+
+    const first = connection.handle({
+      type: "refresh_models",
+      commandId: COMMAND_A,
+      sessionId: SESSION_A,
+    });
+    await Promise.resolve();
+    await connection.handle({ type: "close_session", sessionId: SESSION_B });
+    await expect(connection.handle({
+      type: "initialize",
+      sessionId: SESSION_A,
+      cwd,
+    })).rejects.toThrow("already used");
+    await expect(connection.handle({
+      type: "refresh_models",
+      commandId: randomUUID(),
+      sessionId: SESSION_A,
+    })).rejects.toThrow("already pending");
+    expect(signals[0]?.aborted).toBe(false);
+
+    const close = connection.handle({ type: "close_session", sessionId: SESSION_A });
+    await expect(first).rejects.toThrow("connection lifecycle");
+    await close;
+    expect(signals[0]?.aborted).toBe(true);
+    releaseRefreshes[0]!();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    await connection.handle({ type: "initialize", sessionId: SESSION_B, cwd });
+    const second = connection.handle({
+      type: "refresh_models",
+      commandId: COMMAND_B,
+      sessionId: SESSION_B,
+    });
+    await Promise.resolve();
+    const reinitialize = connection.handle({
+      type: "initialize",
+      commandId: randomUUID(),
+      sessionId: SESSION_C,
+      cwd,
+    });
+    await expect(second).rejects.toThrow("connection lifecycle");
+    await reinitialize;
+    expect(signals[1]?.aborted).toBe(true);
+    releaseRefreshes[1]!();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const third = connection.handle({
+      type: "refresh_models",
+      commandId: randomUUID(),
+      sessionId: SESSION_C,
+    });
+    await Promise.resolve();
+    const disposing = connection.dispose();
+    await expect(third).rejects.toThrow("connection lifecycle");
+    await disposing;
+    expect(signals[2]?.aborted).toBe(true);
+  });
+
   it("keeps an applied thinking level when its default setting cannot be flushed", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-settings-error-"));
     const runtime = new FakeRuntime();
@@ -1633,7 +1786,11 @@ describe("PiConnection lifecycle", () => {
       message: "settings write failed",
     });
 
-    await connection.handle({ type: "refresh_models" });
+    await connection.handle({
+      type: "refresh_models",
+      commandId: COMMAND_A,
+      sessionId: SESSION_A,
+    });
 
     expect(latestState(events).thinkingLevel).toBe("high");
     expect(events.filter((event) => event.type === "error" && event.scope === "settings")).toEqual([
@@ -1953,7 +2110,11 @@ describe("PiConnection lifecycle", () => {
     const connection = new PiConnection(() => undefined, runtime);
     await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
 
-    const refresh = connection.handle({ type: "refresh_models" });
+    const refresh = connection.handle({
+      type: "refresh_models",
+      commandId: COMMAND_A,
+      sessionId: SESSION_A,
+    });
     await refreshStarted.promise;
     const login = connection.handle({
       type: "login_oauth",
@@ -1984,7 +2145,11 @@ describe("PiConnection lifecycle", () => {
     const connection = new PiConnection((event) => events.push(event), runtime);
     await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
 
-    const refresh = connection.handle({ type: "refresh_models" });
+    const refresh = connection.handle({
+      type: "refresh_models",
+      commandId: COMMAND_A,
+      sessionId: SESSION_A,
+    });
     await refreshStarted.promise;
     const first = connection.handle({
       type: "login_oauth",
@@ -2718,6 +2883,66 @@ describe("PiConnection lifecycle", () => {
 });
 
 describe("PiConnection coordinated project view", () => {
+  it("acknowledges and deduplicates a coordinated model refresh", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      await harness.connection.handle({
+        type: "refresh_models",
+        commandId: COMMAND_A,
+        sessionId: SESSION_A,
+      });
+
+      expect(harness.events).toContainEqual({
+        type: "command_complete",
+        operation: "refresh_models",
+        commandId: COMMAND_A,
+        sessionId: SESSION_A,
+      });
+      await expect(harness.connection.handle({
+        type: "refresh_models",
+        commandId: COMMAND_A,
+        sessionId: SESSION_A,
+      })).rejects.toThrow("already used");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("stops projecting a fixed role model after the session runtime unsets it", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "new", roleId: "default" },
+      });
+      expect(latestState(harness.events).selectedModel).toEqual({
+        provider: "test",
+        id: "model",
+      });
+
+      const actor = (harness.connection as unknown as {
+        coordinatedView?: { actor?: { session: AgentSession } };
+      }).coordinatedView?.actor;
+      if (!actor) throw new Error("coordinated actor was not attached");
+      Object.assign(actor.session, { model: undefined });
+      await harness.runtime.refreshConfiguration();
+
+      expect(latestState(harness.events).selectedModel).toBeUndefined();
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
   it("attaches focus before the first project refresh and does not await recent manifest writes", async () => {
     const harness = await coordinatedConnectionHarness();
     const recentWriteGate = deferred();
@@ -3801,6 +4026,7 @@ describe("PiConnection coordinated project view", () => {
     const projectModels = [baselineModel, projectModel];
     harness.runtime.projectModelRegistry = {
       getAll: () => projectModels,
+      getRegisteredProviderIds: () => [],
       getAvailable: () => projectModels,
       getError: () => undefined,
       getProviderDisplayName: (provider: string) => provider,
@@ -5723,6 +5949,7 @@ describe("PiConnection coordinated project view", () => {
     let projectAvailable = [baselineModel, projectModel];
     harness.runtime.sessionModelRegistry = {
       getAll: () => [baselineModel, projectModel],
+      getRegisteredProviderIds: () => [],
       getAvailable: () => projectAvailable,
       getError: () => undefined,
       getProviderDisplayName: (provider: string) => provider,

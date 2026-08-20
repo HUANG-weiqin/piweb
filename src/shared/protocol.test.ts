@@ -25,7 +25,7 @@ const messageId = "assistant:96b960be-b6bb-4a19-9cf2-78e77cb69425";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(30);
+    expect(PROTOCOL_VERSION).toBe(31);
   });
 
   it("accepts supported commands", () => {
@@ -61,6 +61,12 @@ describe("parseClientCommand", () => {
       conversationId,
       focusId,
     }).type).toBe("refresh_view");
+    expect(parseClientCommand({
+      type: "refresh_models",
+      commandId,
+      sessionId,
+    })).toMatchObject({ type: "refresh_models", commandId, sessionId });
+    expect(() => parseClientCommand({ type: "refresh_models" })).toThrow();
     expect(parseClientCommand({
       type: "create_role",
       commandId,
@@ -826,6 +832,21 @@ describe("parseClientCommand", () => {
       commandId,
       message: "failed",
     })).toThrow();
+    expect(() => parseServerEvent({
+      type: "error",
+      scope: "command",
+      operation: "refresh_models",
+      commandId,
+      message: "failed",
+    })).toThrow();
+    expect(parseServerEvent({
+      type: "error",
+      scope: "command",
+      operation: "refresh_models",
+      commandId,
+      sessionId,
+      message: "failed",
+    }).type).toBe("error");
     expect(() => parseServerEvent({
       type: "error",
       message: "failed",
