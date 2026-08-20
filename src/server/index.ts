@@ -1,6 +1,7 @@
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
+import { PiRuntime } from "./pi-runtime.js";
 import { attachSocketServer } from "./socket-server.js";
 
 const host = "127.0.0.1";
@@ -16,11 +17,12 @@ app.get("/{*path}", (_request, response) => response.sendFile(
   { dotfiles: "allow" },
 ));
 
+const runtime = await PiRuntime.create({ allowModelNetwork: false });
 const server = app.listen(port, host, () => {
   console.log(`Pi Web: http://${host}:${port}`);
 });
 
-const socketServer = attachSocketServer(server, process.cwd());
+const socketServer = attachSocketServer(server, process.cwd(), runtime);
 
 let shutdownPromise: Promise<void> | undefined;
 

@@ -1,22 +1,30 @@
 import { types as nodeTypes } from "node:util";
 import {
-  AuthStorage,
   createAgentSessionFromServices,
   createAgentSessionServices,
   getAgentDir,
   hasTrustRequiringProjectResources,
   ModelRegistry,
+  ModelRuntime,
   ProjectTrustStore,
   SessionManager,
   SettingsManager,
   type AgentSession,
   type CreateAgentSessionOptions,
+  type CreateModelRuntimeOptions,
   type CreateAgentSessionResult,
   type ExtensionCommandContextActions,
   type ExtensionError,
   type ExtensionUIContext,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import {
+  InMemoryModelsStore,
+  type CredentialStore,
+  type ModelsRefreshOptions,
+  type ModelsRefreshResult,
+  type ModelsStore,
+} from "@earendil-works/pi-ai";
 import type { ToolMode } from "../shared/protocol.js";
 import type { PortableExtensionUI } from "./extension-ui.js";
 import { applyCodexAutoTransportPolicy } from "./codex-transport-policy.js";
@@ -31,6 +39,7 @@ import {
   installCompactionThinkingOverride,
 } from "./compaction-thinking.js";
 import { SerialTaskQueue } from "./serial-task-queue.js";
+import { clearCredentialCommandCache, FileCredentialStore } from "./credential-store.js";
 import {
   isReadOnlyToolIdentity,
   READ_ONLY_TOOL_NAME_CEILING,
@@ -103,6 +112,7 @@ export interface CreatePiSessionOptions {
 export interface CreatedPiSession {
   session: AgentSession;
   settings: SettingsManager;
+  modelRuntime: ModelRuntime;
   modelRegistry: ModelRegistry;
   releaseTurnBoundaryPause?(): void;
   activateExtensions(): Promise<void>;
@@ -116,6 +126,7 @@ export interface CreateProjectModelCatalogOptions {
 }
 
 export interface CreatedProjectModelCatalog {
+  modelRuntime: ModelRuntime;
   modelRegistry: ModelRegistry;
   dynamicProviderNames(): ReadonlySet<string>;
   dispose(): Promise<void>;
@@ -127,7 +138,8 @@ export interface CredentialChangeIntent {
 }
 
 export interface PiRuntimeLike {
-  readonly authStorage: AuthStorage;
+  readonly credentialStore: CredentialStore;
+  readonly modelRuntime: ModelRuntime;
   readonly modelRegistry: ModelRegistry;
   createSession(cwd: string, options?: CreatePiSessionOptions): Promise<CreatedPiSession>;
   createProjectModelCatalog(
@@ -137,17 +149,20 @@ export interface PiRuntimeLike {
   beginCredentialChange(provider: string): CredentialChangeIntent;
   commitCredentialChange(
     intent: CredentialChangeIntent,
-    change: () => void,
+    change: () => Promise<void> | void,
   ): Promise<boolean>;
   updateConfiguration<T>(change: () => Promise<T> | T): Promise<T>;
-  refreshConfiguration(): Promise<void>;
+  refreshConfiguration(options?: Pick<ModelsRefreshOptions, "allowNetwork" | "force" | "signal">): Promise<void>;
   subscribe(listener: () => void): () => void;
 }
 
 export interface PiRuntimeOptions {
-  authStorage?: AuthStorage;
-  modelRegistry?: ModelRegistry;
-  createModelRegistry?: (authStorage: AuthStorage) => ModelRegistry;
+  credentialStore?: CredentialStore;
+  modelsStore?: ModelsStore;
+  createModelsStore?: () => ModelsStore;
+  modelsPath?: string | null;
+  allowModelNetwork?: boolean;
+  createModelRuntime?: (options: CreateModelRuntimeOptions) => Promise<ModelRuntime>;
   createSettings?: (cwd: string) => SettingsManager;
   createSession?: SessionFactory;
   createServices?: typeof createAgentSessionServices;
@@ -159,6 +174,28 @@ const TRUST_PROJECT_AND_REMEMBER = "信任此项目并记住";
 const TRUST_PROJECT_ONCE = "仅本次信任";
 const DECLINE_PROJECT_AND_REMEMBER = "不信任此项目并记住";
 const DECLINE_PROJECT_ONCE = "仅本次不信任";
+
+function refreshResultErrors(result: ModelsRefreshResult): Error[] {
+  const errors = [...result.errors].map(([provider, error]) => new Error(
+    `Provider "${provider}" model refresh failed: ${error.message}`,
+    { cause: error },
+  ));
+  if (result.aborted) {
+    const error = new Error("Model refresh was aborted");
+    error.name = "AbortError";
+    errors.push(error);
+  }
+  return errors;
+}
+
+function throwRefreshResultErrors(result: ModelsRefreshResult): void {
+  const errors = refreshResultErrors(result);
+  if (errors.length === 0) return;
+  throw new AggregateError(
+    errors,
+    errors.map((error) => error.message).join("; "),
+  );
+}
 
 function freezeStableJsonValue(value: unknown): void {
   const visiting = new WeakSet<object>();
@@ -230,28 +267,30 @@ function freezeStableJsonValue(value: unknown): void {
   structuredClone(value);
 }
 
-class SessionModelRegistry {
+class SessionModelRuntime {
   readonly registry: ModelRegistry;
+  readonly runtime: ModelRuntime;
   private readonly providers = new Set<string>();
   private readonly startupProviderErrors: Error[] = [];
-  private readonly nativeRegister: ModelRegistry["registerProvider"];
-  private readonly nativeUnregister: ModelRegistry["unregisterProvider"];
+  private readonly nativeRegisterProvider: ModelRuntime["registerProvider"];
+  private readonly nativeUnregisterProvider: ModelRuntime["unregisterProvider"];
   private captureStartupErrors = true;
+  private active = true;
   private session?: AgentSession;
 
   constructor(
-    authStorage: AuthStorage,
-    createRegistry: (authStorage: AuthStorage) => ModelRegistry,
+    runtime: ModelRuntime,
     private readonly fixedModel?: Readonly<{ provider: string; id: string }>,
   ) {
-    this.registry = createRegistry(authStorage);
-    this.nativeRegister = this.registry.registerProvider.bind(this.registry);
-    this.nativeUnregister = this.registry.unregisterProvider.bind(this.registry);
-    this.registry.registerProvider = (provider, config) => {
+    this.runtime = runtime;
+    this.registry = new ModelRegistry(runtime);
+    this.nativeRegisterProvider = runtime.registerProvider.bind(runtime);
+    this.nativeUnregisterProvider = runtime.unregisterProvider.bind(runtime);
+    runtime.registerProvider = (provider, config) => {
       try {
-        if (config.streamSimple || config.oauth) {
+        if (config.streamSimple || config.oauth || config.refreshModels) {
           throw new Error(
-            `Extension provider "${provider}" uses process-global streamSimple or OAuth registration, which this workbench does not support safely`,
+            `Extension provider "${provider}" uses process-global streamSimple, OAuth, or refreshModels registration, which this workbench does not support safely`,
           );
         }
         let snapshot: typeof config;
@@ -263,12 +302,7 @@ class SessionModelRegistry {
             { cause: error },
           );
         }
-        if (snapshot.streamSimple || snapshot.oauth) {
-          throw new Error(
-            `Extension provider "${provider}" uses process-global streamSimple or OAuth registration, which this workbench does not support safely`,
-          );
-        }
-        this.nativeRegister(provider, snapshot);
+        this.nativeRegisterProvider(provider, snapshot);
         this.providers.add(provider);
       } catch (error) {
         if (this.captureStartupErrors) {
@@ -277,9 +311,16 @@ class SessionModelRegistry {
         throw error;
       }
     };
-    this.registry.unregisterProvider = (provider) => {
+    runtime.registerNativeProvider = (provider) => {
+      const error = new Error(
+        `Extension native provider "${provider.id}" is not supported by this workbench`,
+      );
+      if (this.captureStartupErrors) this.startupProviderErrors.push(error);
+      throw error;
+    };
+    runtime.unregisterProvider = (provider) => {
       this.providers.delete(provider);
-      this.nativeUnregister(provider);
+      this.nativeUnregisterProvider(provider);
     };
   }
 
@@ -293,41 +334,55 @@ class SessionModelRegistry {
   }
 
   bindSession(session: AgentSession): void {
+    if (!this.active) throw new Error("Model runtime owner is no longer active");
+    if (session.modelRuntime !== this.runtime) {
+      throw new Error("Pi session was created with a different ModelRuntime");
+    }
+    if (
+      this.fixedModel
+      && (
+        session.model?.provider !== this.fixedModel.provider
+        || session.model.id !== this.fixedModel.id
+      )
+    ) {
+      throw new Error(
+        `Pi session did not retain its fixed model ${this.fixedModel.provider}/${this.fixedModel.id}`,
+      );
+    }
     this.session = session;
     this.reconcileSelectedModel();
   }
 
-  refresh(): void {
-    this.registry.refresh();
+  async refresh(options?: ModelsRefreshOptions): Promise<void> {
+    if (!this.active) return;
+    const result = await this.runtime.refresh(options);
+    if (!this.active) return;
     this.reconcileSelectedModel();
+    throwRefreshResultErrors(result);
+  }
+
+  deactivate(): void {
+    this.active = false;
+    this.session = undefined;
   }
 
   private reconcileSelectedModel(): void {
     const session = this.session;
-    const current = session?.model;
-    if (!current) return;
+    if (!this.active || !session) return;
     if (this.fixedModel) {
-      if (
-        current.provider !== this.fixedModel.provider
-        || current.id !== this.fixedModel.id
-      ) {
-        return;
-      }
-      const replacement = this.registry.find(
-        this.fixedModel.provider,
-        this.fixedModel.id,
-      );
-      if (replacement && replacement !== current) {
-        session.agent.state.model = replacement;
-      }
+      const replacement = this.runtime.getModel(this.fixedModel.provider, this.fixedModel.id);
+      (session.agent.state as { model: typeof replacement }).model = replacement;
       return;
     }
-    const replacement = this.registry.find(current.provider, current.id)
-      ?? this.registry.getAvailable()[0]
-      ?? this.registry.getAll()[0];
-    if (replacement && replacement !== current) {
-      session.agent.state.model = replacement;
-    }
+    const current = session.model;
+    const replacement = current
+      ? this.runtime.getModel(current.provider, current.id)
+        ?? this.runtime.getAvailableSnapshot().find((model) => model.provider === current.provider)
+      : undefined;
+    const fallback = replacement
+      ?? this.runtime.getAvailableSnapshot()[0]
+      ?? this.runtime.getModels()[0];
+    (session.agent.state as { model: typeof fallback }).model = fallback;
   }
 }
 
@@ -337,24 +392,37 @@ class SessionModelRegistry {
  * mutate another cwd's visible providers.
  */
 export class PiRuntime implements PiRuntimeLike {
-  readonly authStorage: AuthStorage;
+  readonly credentialStore: CredentialStore;
+  readonly modelRuntime: ModelRuntime;
   readonly modelRegistry: ModelRegistry;
 
   private readonly configurationQueue = new SerialTaskQueue();
   private readonly credentialRevisions = new Map<string, number>();
   private readonly listeners = new Set<() => void>();
-  private readonly sessionRegistries = new Set<SessionModelRegistry>();
-  private readonly createModelRegistry: (authStorage: AuthStorage) => ModelRegistry;
+  private readonly sessionRegistries = new Set<SessionModelRuntime>();
+  private readonly createModelRuntime: (options: CreateModelRuntimeOptions) => Promise<ModelRuntime>;
+  private readonly createModelsStore?: () => ModelsStore;
+  private readonly modelsPath: string | null | undefined;
   private readonly createSettings: (cwd: string) => SettingsManager;
   private readonly sessionFactory?: SessionFactory;
   private readonly servicesFactory: typeof createAgentSessionServices;
   private readonly sessionFromServicesFactory: typeof createAgentSessionFromServices;
   private readonly projectTrustStore: Pick<ProjectTrustStore, "get" | "set">;
 
-  constructor(options: PiRuntimeOptions = {}) {
-    this.authStorage = options.authStorage ?? AuthStorage.create();
-    this.modelRegistry = options.modelRegistry ?? ModelRegistry.create(this.authStorage);
-    this.createModelRegistry = options.createModelRegistry ?? ((authStorage) => ModelRegistry.create(authStorage));
+  private constructor(
+    options: PiRuntimeOptions,
+    credentialStore: CredentialStore,
+    modelRuntime: ModelRuntime,
+  ) {
+    this.credentialStore = credentialStore;
+    this.modelRuntime = modelRuntime;
+    this.modelRegistry = new ModelRegistry(modelRuntime);
+    this.createModelRuntime = options.createModelRuntime ?? ((runtimeOptions) => (
+      ModelRuntime.create(runtimeOptions)
+    ));
+    this.createModelsStore = options.createModelsStore
+      ?? (options.modelsStore ? () => new InMemoryModelsStore() : undefined);
+    this.modelsPath = options.modelsPath;
     this.createSettings = options.createSettings
       ?? ((cwd) => SettingsManager.create(cwd, getAgentDir(), { projectTrusted: false }));
     this.sessionFactory = options.createSession;
@@ -363,22 +431,44 @@ export class PiRuntime implements PiRuntimeLike {
     this.projectTrustStore = options.projectTrustStore ?? new ProjectTrustStore(getAgentDir());
   }
 
+  static async create(options: PiRuntimeOptions = {}): Promise<PiRuntime> {
+    const credentialStore = options.credentialStore ?? new FileCredentialStore();
+    const createModelRuntime = options.createModelRuntime ?? ((runtimeOptions) => (
+      ModelRuntime.create(runtimeOptions)
+    ));
+    const modelRuntime = await createModelRuntime({
+      credentials: credentialStore,
+      modelsPath: options.modelsPath,
+      modelsStore: options.modelsStore,
+      allowModelNetwork: options.allowModelNetwork === true,
+    });
+    return new PiRuntime(options, credentialStore, modelRuntime);
+  }
+
+  private async createSessionModelRuntime(
+    fixedModel?: Readonly<{ provider: string; id: string }>,
+  ): Promise<SessionModelRuntime> {
+    const runtime = await this.createModelRuntime({
+      credentials: this.credentialStore,
+      modelsPath: this.modelsPath,
+      modelsStore: this.createModelsStore?.(),
+      allowModelNetwork: false,
+    });
+    return new SessionModelRuntime(runtime, fixedModel);
+  }
+
   async createProjectModelCatalog(
     cwd: string,
     options: CreateProjectModelCatalogOptions = {},
   ): Promise<CreatedProjectModelCatalog> {
-    const owner = new SessionModelRegistry(
-      this.authStorage,
-      this.createModelRegistry,
-    );
+    const owner = await this.createSessionModelRuntime();
     this.sessionRegistries.add(owner);
     try {
       const settings = this.createSettings(cwd);
-      await this.servicesFactory({
+      const services = await this.servicesFactory({
         cwd,
         agentDir: getAgentDir(),
-        authStorage: this.authStorage,
-        modelRegistry: owner.registry,
+        modelRuntime: owner.runtime,
         settingsManager: settings,
         resourceLoaderReloadOptions: {
           resolveProjectTrust: () => this.resolveProjectTrust(
@@ -388,6 +478,10 @@ export class PiRuntime implements PiRuntimeLike {
           ),
         },
       });
+      if (services.modelRuntime !== owner.runtime) {
+        throw new Error("Pi project services were created with a different ModelRuntime");
+      }
+      this.throwServiceDiagnostics(services.diagnostics);
       const startupProviderErrors = owner.takeStartupProviderErrors();
       if (startupProviderErrors.length > 0) {
         throw new AggregateError(
@@ -398,16 +492,19 @@ export class PiRuntime implements PiRuntimeLike {
         );
       }
     } catch (error) {
+      owner.deactivate();
       this.sessionRegistries.delete(owner);
       throw error;
     }
 
     let disposePromise: Promise<void> | undefined;
     return {
+      modelRuntime: owner.runtime,
       modelRegistry: owner.registry,
       dynamicProviderNames: () => owner.names(),
       dispose: () => {
         disposePromise ??= Promise.resolve().then(() => {
+          owner.deactivate();
           this.sessionRegistries.delete(owner);
         });
         return disposePromise;
@@ -425,11 +522,7 @@ export class PiRuntime implements PiRuntimeLike {
     const allowedToolNames = readOnlyToolProjection
       ? [...READ_ONLY_TOOL_NAME_CEILING]
       : undefined;
-    const owner = new SessionModelRegistry(
-      this.authStorage,
-      this.createModelRegistry,
-      fixedModelReference,
-    );
+    const owner = await this.createSessionModelRuntime(fixedModelReference);
     this.sessionRegistries.add(owner);
     let settings: SettingsManager;
     let resolvedTransport: ReturnType<SettingsManager["getTransport"]>;
@@ -466,8 +559,7 @@ export class PiRuntime implements PiRuntimeLike {
         resolvedTransport = settings.getTransport();
         created = await this.sessionFactory({
           cwd,
-          authStorage: this.authStorage,
-          modelRegistry: owner.registry,
+          modelRuntime: owner.runtime,
           settingsManager: settings,
           sessionManager,
           model: fixedModel,
@@ -479,8 +571,7 @@ export class PiRuntime implements PiRuntimeLike {
         const services = await this.servicesFactory({
           cwd,
           agentDir: getAgentDir(),
-          authStorage: this.authStorage,
-          modelRegistry: owner.registry,
+          modelRuntime: owner.runtime,
           settingsManager: settings,
           resourceLoaderOptions: roleSystemPrompt
             ? {
@@ -498,9 +589,10 @@ export class PiRuntime implements PiRuntimeLike {
             ),
           },
         });
+        this.throwServiceDiagnostics(services.diagnostics);
         settings = services.settingsManager;
         const fixedModel = fixedModelReference
-          ? this.resolveFixedModel(services.modelRegistry, fixedModelReference)
+          ? this.resolveFixedModel(owner.registry, fixedModelReference)
           : undefined;
         if (fixedModel) applyCodexAutoTransportPolicy(settings, fixedModel);
         resolvedTransport = settings.getTransport();
@@ -622,6 +714,7 @@ export class PiRuntime implements PiRuntimeLike {
         error: error.error,
       }));
     } catch (error) {
+      owner.deactivate();
       const failures: unknown[] = [error];
       try {
         disposePreTeardownAdapters();
@@ -666,6 +759,7 @@ export class PiRuntime implements PiRuntimeLike {
     return {
       session,
       settings,
+      modelRuntime: owner.runtime,
       modelRegistry: owner.registry,
       releaseTurnBoundaryPause: () => {
         turnBoundaryController?.releaseQueuePause();
@@ -727,57 +821,106 @@ export class PiRuntime implements PiRuntimeLike {
 
   commitCredentialChange(
     intent: CredentialChangeIntent,
-    change: () => void,
+    change: () => Promise<void> | void,
   ): Promise<boolean> {
-    return this.updateConfiguration(() => {
+    return this.updateConfiguration(async () => {
       if (this.credentialRevisions.get(intent.provider) !== intent.revision) {
         return false;
       }
       // Consume the intent before the external storage mutation so it cannot
       // be accidentally committed twice, including after a thrown write.
       this.credentialRevisions.set(intent.provider, intent.revision + 1);
-      change();
+      await change();
       return true;
     });
   }
 
   updateConfiguration<T>(change: () => Promise<T> | T): Promise<T> {
     return this.configurationQueue.run(async () => {
+      let result!: T;
+      let changeFailed = false;
+      let changeError: unknown;
       try {
-        return await change();
-      } finally {
-        const refreshErrors: unknown[] = [];
-        const attempt = (refresh: () => void): void => {
-          try {
-            refresh();
-          } catch (error) {
-            refreshErrors.push(error);
-          }
-        };
-        attempt(() => this.authStorage.reload());
-        for (const owner of this.sessionRegistries) {
-          attempt(() => owner.refresh());
-        }
-        attempt(() => this.modelRegistry.refresh());
-        this.notify();
-        if (refreshErrors.length === 1) throw refreshErrors[0];
-        if (refreshErrors.length > 1) {
-          throw new AggregateError(
-            refreshErrors,
-            "Failed to refresh one or more model registries",
-          );
-        }
+        result = await change();
+      } catch (error) {
+        changeFailed = true;
+        changeError = error;
       }
+      clearCredentialCommandCache();
+      const refreshErrors = await this.refreshAll({ allowNetwork: false });
+      this.notify();
+      this.throwConfigurationErrors(changeFailed, changeError, refreshErrors);
+      return result;
     });
   }
 
-  async refreshConfiguration(): Promise<void> {
-    await this.updateConfiguration(() => undefined);
+  refreshConfiguration(
+    options: Pick<ModelsRefreshOptions, "allowNetwork" | "force" | "signal"> = {},
+  ): Promise<void> {
+    return this.configurationQueue.run(async () => {
+      clearCredentialCommandCache();
+      const refreshErrors = await this.refreshAll({
+        ...options,
+        allowNetwork: options.allowNetwork === true,
+      });
+      this.notify();
+      this.throwConfigurationErrors(false, undefined, refreshErrors);
+    });
+  }
+
+  private async refreshAll(options: ModelsRefreshOptions): Promise<unknown[]> {
+    const errors: unknown[] = [];
+    const attempt = async (refresh: () => Promise<void>): Promise<void> => {
+      try {
+        await refresh();
+      } catch (error) {
+        errors.push(error);
+      }
+    };
+    await attempt(async () => this.refreshModelRuntime(this.modelRuntime, options));
+    for (const owner of this.sessionRegistries) {
+      await attempt(async () => owner.refresh({ ...options, allowNetwork: false }));
+    }
+    return errors;
+  }
+
+  private async refreshModelRuntime(
+    runtime: ModelRuntime,
+    options: ModelsRefreshOptions,
+  ): Promise<void> {
+    const result = await runtime.refresh(options);
+    throwRefreshResultErrors(result);
+  }
+
+  private throwConfigurationErrors(
+    changeFailed: boolean,
+    changeError: unknown,
+    refreshErrors: readonly unknown[],
+  ): void {
+    if (changeFailed && refreshErrors.length > 0) {
+      throw new AggregateError([changeError, ...refreshErrors], "Configuration update failed");
+    }
+    if (changeFailed) throw changeError;
+    if (refreshErrors.length === 1) throw refreshErrors[0];
+    if (refreshErrors.length > 1) {
+      throw new AggregateError(refreshErrors, "Failed to refresh one or more model runtimes");
+    }
   }
 
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  private throwServiceDiagnostics(
+    diagnostics: readonly { type: "info" | "warning" | "error"; message: string }[],
+  ): void {
+    const errors = diagnostics
+      .filter((diagnostic) => diagnostic.type === "error")
+      .map((diagnostic) => new Error(diagnostic.message));
+    if (errors.length > 0) {
+      throw new AggregateError(errors, "Pi session services reported errors");
+    }
   }
 
   private resolveFixedModel(
@@ -889,7 +1032,7 @@ export class PiRuntime implements PiRuntimeLike {
 
   private createSessionDisposer(
     session: AgentSession,
-    owner: SessionModelRegistry,
+    owner: SessionModelRuntime,
     shouldEmitShutdown: () => boolean,
     beforeTeardown?: () => void,
     afterTeardown?: () => void,
@@ -897,6 +1040,8 @@ export class PiRuntime implements PiRuntimeLike {
     let disposePromise: Promise<void> | undefined;
     return () => {
       disposePromise ??= (async () => {
+        owner.deactivate();
+        this.sessionRegistries.delete(owner);
         const failures: unknown[] = [];
         try {
           beforeTeardown?.();
@@ -917,7 +1062,6 @@ export class PiRuntime implements PiRuntimeLike {
             failures.push(error);
           }
         }
-        this.sessionRegistries.delete(owner);
         if (failures.length > 0) {
           throw new AggregateError(failures, "Failed to dispose Pi session");
         }

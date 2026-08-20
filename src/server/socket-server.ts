@@ -15,7 +15,7 @@ import {
   listDirectory,
   type DirectoryBrowser,
 } from "./directory-browser.js";
-import { PiRuntime, type PiRuntimeLike } from "./pi-runtime.js";
+import type { PiRuntimeLike } from "./pi-runtime.js";
 import { ProjectRunCoordinator } from "./project-run-coordinator.js";
 import { ProjectSessionCoordinator } from "./project-session-coordinator.js";
 import {
@@ -111,7 +111,7 @@ export function safeSend(
 export function attachSocketServer(
   server: Server,
   startupCwd: string,
-  runtime: PiRuntimeLike = new PiRuntime(),
+  runtime: PiRuntimeLike,
   directoryBrowser: DirectoryBrowser = listDirectory,
 ): SocketServerHandle {
   const sockets = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES });

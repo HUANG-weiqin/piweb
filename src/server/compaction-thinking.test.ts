@@ -7,10 +7,10 @@ import { installCompactionThinkingOverride } from "./compaction-thinking.js";
 
 function fakeSession() {
   let listener: ((event: AgentSessionEvent) => void) | undefined;
-  const originalStream = vi.fn(() => undefined) as unknown as AgentSession["agent"]["streamFn"];
+  const originalStream = vi.fn(() => undefined) as unknown as AgentSession["agent"]["streamFunction"];
   const unsubscribe = vi.fn();
   const session = {
-    agent: { streamFn: originalStream },
+    agent: { streamFunction: originalStream },
     subscribe(next: (event: AgentSessionEvent) => void) {
       listener = next;
       return unsubscribe;
@@ -32,7 +32,7 @@ describe("installCompactionThinkingOverride", () => {
     const override = installCompactionThinkingOverride(fixture.session, "auto");
 
     fixture.emit({ type: "compaction_start", reason: "threshold" });
-    fixture.session.agent.streamFn(
+    fixture.session.agent.streamFunction(
       {
         reasoning: true,
         thinkingLevelMap: { minimal: null },
@@ -46,10 +46,10 @@ describe("installCompactionThinkingOverride", () => {
       expect.anything(),
       { reasoning: "low" },
     );
-    expect(fixture.session.agent.streamFn).not.toBe(fixture.originalStream);
+    expect(fixture.session.agent.streamFunction).not.toBe(fixture.originalStream);
 
     fixture.emit({ type: "compaction_end", reason: "threshold" });
-    expect(fixture.session.agent.streamFn).toBe(fixture.originalStream);
+    expect(fixture.session.agent.streamFunction).toBe(fixture.originalStream);
     override.dispose();
   });
 
@@ -64,7 +64,7 @@ describe("installCompactionThinkingOverride", () => {
       const override = installCompactionThinkingOverride(fixture.session, transport);
 
       fixture.emit({ type: "compaction_start", reason: "threshold" });
-      fixture.session.agent.streamFn(
+      fixture.session.agent.streamFunction(
         {
           provider: "openai-codex",
           api: "openai-codex-responses",
@@ -88,7 +88,7 @@ describe("installCompactionThinkingOverride", () => {
     const override = installCompactionThinkingOverride(fixture.session, "sse");
 
     fixture.emit({ type: "compaction_start", reason: "threshold" });
-    fixture.session.agent.streamFn(
+    fixture.session.agent.streamFunction(
       { provider: "openai", api: "openai-responses", reasoning: true } as never,
       {} as never,
       { reasoning: "max", transport: "websocket" },
@@ -107,10 +107,10 @@ describe("installCompactionThinkingOverride", () => {
     const override = installCompactionThinkingOverride(fixture.session, "auto");
 
     fixture.emit({ type: "compaction_start", reason: "manual" });
-    expect(fixture.session.agent.streamFn).toBe(fixture.originalStream);
+    expect(fixture.session.agent.streamFunction).toBe(fixture.originalStream);
 
     await Promise.resolve();
-    fixture.session.agent.streamFn(
+    fixture.session.agent.streamFunction(
       { reasoning: false } as never,
       {} as never,
       { reasoning: "max" },
@@ -123,7 +123,7 @@ describe("installCompactionThinkingOverride", () => {
 
     override.dispose();
     expect(fixture.unsubscribe).toHaveBeenCalledOnce();
-    expect(fixture.session.agent.streamFn).toBe(fixture.originalStream);
+    expect(fixture.session.agent.streamFunction).toBe(fixture.originalStream);
   });
 
   it("does not install a deferred manual override after disposal", async () => {
@@ -134,6 +134,6 @@ describe("installCompactionThinkingOverride", () => {
     override.dispose();
     await Promise.resolve();
 
-    expect(fixture.session.agent.streamFn).toBe(fixture.originalStream);
+    expect(fixture.session.agent.streamFunction).toBe(fixture.originalStream);
   });
 });

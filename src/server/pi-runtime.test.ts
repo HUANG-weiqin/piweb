@@ -1,23 +1,31 @@
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
-import type { Api, Transport } from "@earendil-works/pi-ai";
+import {
+  InMemoryCredentialStore,
+  InMemoryModelsStore,
+  type Api,
+  type Transport,
+} from "@earendil-works/pi-ai";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  AuthStorage,
   createAgentSession,
   createAgentSessionFromServices,
   createAgentSessionServices,
   createReadTool,
   DefaultResourceLoader,
-  ModelRegistry,
+  initTheme,
+  ModelRuntime,
   SessionManager,
   SettingsManager,
   type CreateAgentSessionOptions,
+  type CreateModelRuntimeOptions,
   type ExtensionAPI,
   type InlineExtension,
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import { PiRuntime } from "./pi-runtime.js";
+
+initTheme();
 
 function deferred(): { promise: Promise<void>; resolve(): void } {
   let resolve!: () => void;
@@ -51,32 +59,37 @@ function providerModel(id: string) {
   };
 }
 
-function fixedModelTransportRuntime(
+async function fixedModelTransportRuntime(
   factory: "direct" | "services",
   transport: Transport,
   provider: string,
   api: Api,
-): { runtime: PiRuntime; constructedTransport(): Transport | undefined } {
-  const authStorage = AuthStorage.inMemory();
+): Promise<{ runtime: PiRuntime; constructedTransport(): Transport | undefined }> {
   let constructed: Transport | undefined;
-  const createModelRegistry = (storage: AuthStorage) => {
-    const registry = ModelRegistry.inMemory(storage);
-    registry.registerProvider(provider, {
+  const credentialStore = new InMemoryCredentialStore();
+  const createModelRuntime = async (options: CreateModelRuntimeOptions) => {
+    const runtime = await ModelRuntime.create({
+      ...options,
+      modelsPath: null,
+    });
+    runtime.registerProvider(provider, {
       baseUrl: "https://example.invalid/v1",
       apiKey: "test-key",
       api,
       models: [providerModel("fixed-model")],
     });
-    return registry;
+    await runtime.refresh({ allowNetwork: false });
+    return runtime;
   };
   const options = {
-    authStorage,
-    modelRegistry: ModelRegistry.inMemory(authStorage),
-    createModelRegistry,
+    credentialStore,
+    modelsStore: new InMemoryModelsStore(),
+    createModelsStore: () => new InMemoryModelsStore(),
+    createModelRuntime,
     createSettings: () => SettingsManager.inMemory({ transport }),
   };
   const runtime = factory === "direct"
-    ? new PiRuntime({
+    ? await PiRuntime.create({
         ...options,
         createSession: async (sessionOptions) => {
           constructed = sessionOptions.settingsManager?.getTransport();
@@ -93,7 +106,7 @@ function fixedModelTransportRuntime(
           return createAgentSession({ ...sessionOptions, resourceLoader });
         },
       })
-    : new PiRuntime({
+    : await PiRuntime.create({
         ...options,
         createServices: (serviceOptions) => createAgentSessionServices({
           ...serviceOptions,
@@ -135,18 +148,24 @@ function shadowReadTool(cwd: string, name: string, marker: string) {
   };
 }
 
-function testRuntime(
+async function testRuntime(
   extensionsFor: (cwd: string) => InlineExtension[],
   afterCreate?: (
     created: Awaited<ReturnType<typeof createAgentSession>>,
     options: CreateAgentSessionOptions,
   ) => Promise<void>,
-): PiRuntime {
-  const authStorage = AuthStorage.inMemory();
-  return new PiRuntime({
-    authStorage,
-    modelRegistry: ModelRegistry.inMemory(authStorage),
-    createModelRegistry: (storage) => ModelRegistry.inMemory(storage),
+  setupModelRuntime?: (runtime: ModelRuntime) => Promise<void> | void,
+): Promise<PiRuntime> {
+  const credentialStore = new InMemoryCredentialStore();
+  return PiRuntime.create({
+    credentialStore,
+    modelsStore: new InMemoryModelsStore(),
+    createModelsStore: () => new InMemoryModelsStore(),
+    createModelRuntime: async (options) => {
+      const runtime = await ModelRuntime.create({ ...options, modelsPath: null });
+      await setupModelRuntime?.(runtime);
+      return runtime;
+    },
     createSettings: () => SettingsManager.inMemory(),
     createServices: (options) => createAgentSessionServices({
       ...options,
@@ -189,7 +208,7 @@ describe("PiRuntime session ownership", () => {
     const checks: unknown[] = [];
     let upstreamReceiver: unknown;
     let originalCreateLoopConfig: unknown;
-    const runtime = testRuntime(
+    const runtime = await testRuntime(
       () => [],
       async (result) => {
         const loopOwner = result.session.agent as unknown as {
@@ -246,7 +265,7 @@ describe("PiRuntime session ownership", () => {
 
   it("activates Pi's structured read-only tools by default", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-read-tools-"));
-    const runtime = testRuntime(() => []);
+    const runtime = await testRuntime(() => []);
 
     const created = await runtime.createSession(cwd);
 
@@ -264,7 +283,7 @@ describe("PiRuntime session ownership", () => {
 
   it("projects only safe native and host tools for read-only sessions", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-read-only-tools-"));
-    const runtime = testRuntime(() => [
+    const runtime = await testRuntime(() => [
       (pi) => {
         const originalRead = createReadTool(cwd);
         pi.registerTool({
@@ -328,7 +347,7 @@ describe("PiRuntime session ownership", () => {
     let sessionStarted = false;
     let shutdownActiveTools: string[] | undefined;
     let shutdownSystemPrompt: string | undefined;
-    const runtime = testRuntime(() => [
+    const runtime = await testRuntime(() => [
       (pi) => {
         extensionApi = pi;
         pi.registerTool(shadowReadTool(cwd, "find", staticMarker));
@@ -377,7 +396,7 @@ describe("PiRuntime session ownership", () => {
 
   it("reports an extension that shadows read as a non-builtin tool", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-shadowed-read-"));
-    const runtime = testRuntime(() => [
+    const runtime = await testRuntime(() => [
       (pi) => {
         const originalRead = createReadTool(cwd);
         pi.registerTool({
@@ -420,7 +439,7 @@ describe("PiRuntime session ownership", () => {
 
   it("installs tool result compression without changing the executed result", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-tool-result-compression-"));
-    const runtime = testRuntime(() => []);
+    const runtime = await testRuntime(() => []);
     const originalText = Array.from(
       { length: 160 },
       (_, index) => `grep ${String(index).padStart(3, "0")} ${"x".repeat(100)}`,
@@ -448,27 +467,7 @@ describe("PiRuntime session ownership", () => {
 
   it("sets steeringMode=all so queued prompts drain in one model turn", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-steering-mode-"));
-    const authStorage = AuthStorage.inMemory();
-    const runtime = new PiRuntime({
-      authStorage,
-      modelRegistry: ModelRegistry.inMemory(authStorage),
-      createModelRegistry: (storage) => ModelRegistry.inMemory(storage),
-      createSettings: () => SettingsManager.inMemory(),
-      createSession: async (options) => {
-        const resourceLoader = new DefaultResourceLoader({
-          cwd,
-          agentDir: cwd,
-          settingsManager: options.settingsManager,
-          noExtensions: true,
-          noSkills: true,
-          noPromptTemplates: true,
-          noThemes: true,
-          noContextFiles: true,
-        });
-        await resourceLoader.reload();
-        return createAgentSession({ ...options, resourceLoader });
-      },
-    });
+    const runtime = await testRuntime(() => []);
 
     const created = await runtime.createSession(cwd);
     expect(created.session.agent.steeringMode).toBe("all");
@@ -479,7 +478,7 @@ describe("PiRuntime session ownership", () => {
   it("defaults to an in-memory manager and passes an explicit manager through", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-manager-"));
     const managers: SessionManager[] = [];
-    const runtime = testRuntime(
+    const runtime = await testRuntime(
       () => [],
       async (_created, options) => {
         if (!options.sessionManager) throw new Error("session manager was not provided");
@@ -510,7 +509,7 @@ describe("PiRuntime session ownership", () => {
     "constructs a %s fixed session with %s transport resolved from %s/%s",
     async (factory, provider, api, transport, expectedTransport) => {
       const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-transport-"));
-      const fixture = fixedModelTransportRuntime(factory, transport, provider, api);
+      const fixture = await fixedModelTransportRuntime(factory, transport, provider, api);
 
       const created = await fixture.runtime.createSession(cwd, {
         model: { provider, id: "fixed-model" },
@@ -527,22 +526,25 @@ describe("PiRuntime session ownership", () => {
 
   it("passes a fixed authenticated model and workbench tools through the direct factory", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-direct-role-"));
-    const authStorage = AuthStorage.inMemory();
+    const credentialStore = new InMemoryCredentialStore();
     const tools = [workbenchTool(cwd)];
     let received: CreateAgentSessionOptions | undefined;
-    const runtime = new PiRuntime({
-      authStorage,
-      modelRegistry: ModelRegistry.inMemory(authStorage),
-      createModelRegistry: (storage) => {
-        const registry = ModelRegistry.inMemory(storage);
-        registry.registerProvider("role-provider", {
-          baseUrl: "https://example.invalid/v1",
-          apiKey: "role-key",
-          api: "openai-completions",
-          models: [{ ...providerModel("role-model"), reasoning: true }],
-        });
-        return registry;
-      },
+    const createModelRuntime = async (options: CreateModelRuntimeOptions) => {
+      const runtime = await ModelRuntime.create({ ...options, modelsPath: null });
+      runtime.registerProvider("role-provider", {
+        baseUrl: "https://example.invalid/v1",
+        apiKey: "role-key",
+        api: "openai-completions",
+        models: [{ ...providerModel("role-model"), reasoning: true }],
+      });
+      await runtime.refresh({ allowNetwork: false });
+      return runtime;
+    };
+    const runtime = await PiRuntime.create({
+      credentialStore,
+      modelsStore: new InMemoryModelsStore(),
+      createModelsStore: () => new InMemoryModelsStore(),
+      createModelRuntime,
       createSettings: () => SettingsManager.inMemory(),
       createSession: async (options) => {
         received = options;
@@ -567,7 +569,10 @@ describe("PiRuntime session ownership", () => {
       workbenchCustomTools: tools,
     });
 
-    expect(received?.model).toBe(created.modelRegistry.find("role-provider", "role-model"));
+    expect(received?.model).toMatchObject({
+      provider: "role-provider",
+      id: "role-model",
+    });
     expect(received?.thinkingLevel).toBe("high");
     expect(received?.customTools).toBe(tools);
     expect(created.session.model).toMatchObject({
@@ -579,22 +584,19 @@ describe("PiRuntime session ownership", () => {
 
     created.modelRegistry.unregisterProvider("role-provider");
     await runtime.refreshConfiguration();
-    expect(created.session.model).toMatchObject({
-      provider: "role-provider",
-      id: "role-model",
-    });
+    expect(created.session.model).toBeUndefined();
     await created.dispose();
   });
 
   it("loads project providers before resolving a fixed role model and appends the role prompt", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-services-role-"));
-    const authStorage = AuthStorage.inMemory();
+    const credentialStore = new InMemoryCredentialStore();
     const tools = [workbenchTool(cwd)];
     let received: Parameters<typeof createAgentSessionFromServices>[0] | undefined;
-    const runtime = new PiRuntime({
-      authStorage,
-      modelRegistry: ModelRegistry.inMemory(authStorage),
-      createModelRegistry: (storage) => ModelRegistry.inMemory(storage),
+    const runtime = await PiRuntime.create({
+      credentialStore,
+      modelsStore: new InMemoryModelsStore(),
+      createModelsStore: () => new InMemoryModelsStore(),
       createSettings: () => SettingsManager.inMemory(),
       createServices: (options) => createAgentSessionServices({
         ...options,
@@ -635,9 +637,10 @@ describe("PiRuntime session ownership", () => {
       workbenchCustomTools: tools,
     });
 
-    expect(received?.model).toBe(
-      created.modelRegistry.find("project-role-provider", "project-role-model"),
-    );
+    expect(received?.model).toMatchObject({
+      provider: "project-role-provider",
+      id: "project-role-model",
+    });
     expect(received?.thinkingLevel).toBe("high");
     expect(received?.customTools).toBe(tools);
     expect(created.session.systemPrompt).toContain("project append prompt");
@@ -652,22 +655,24 @@ describe("PiRuntime session ownership", () => {
 
   it("loads a project model catalog without creating or activating an AgentSession", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-project-catalog-"));
-    const authStorage = AuthStorage.inMemory();
+    const credentialStore = new InMemoryCredentialStore();
     let catalogRefreshes = 0;
     let sessionCreations = 0;
     let sessionStarts = 0;
-    const runtime = new PiRuntime({
-      authStorage,
-      modelRegistry: ModelRegistry.inMemory(authStorage),
-      createModelRegistry: (storage) => {
-        const registry = ModelRegistry.inMemory(storage);
-        const nativeRefresh = registry.refresh.bind(registry);
-        registry.refresh = () => {
-          catalogRefreshes++;
-          nativeRefresh();
-        };
-        return registry;
-      },
+    const createModelRuntime = async (options: CreateModelRuntimeOptions) => {
+      const runtime = await ModelRuntime.create({ ...options, modelsPath: null });
+      const nativeRefresh = runtime.refresh.bind(runtime);
+      runtime.refresh = async (refreshOptions) => {
+        catalogRefreshes++;
+        return nativeRefresh(refreshOptions);
+      };
+      return runtime;
+    };
+    const runtime = await PiRuntime.create({
+      credentialStore,
+      modelsStore: new InMemoryModelsStore(),
+      createModelsStore: () => new InMemoryModelsStore(),
+      createModelRuntime,
       createSettings: () => SettingsManager.inMemory(),
       createServices: (options) => createAgentSessionServices({
         ...options,
@@ -717,8 +722,9 @@ describe("PiRuntime session ownership", () => {
       sessionStarts: 0,
     });
 
+    catalogRefreshes = 0;
     await runtime.refreshConfiguration();
-    expect(catalogRefreshes).toBe(1);
+    expect(catalogRefreshes).toBe(2);
     expect(catalog.modelRegistry.find(
       "catalog-provider",
       "catalog-model",
@@ -727,26 +733,29 @@ describe("PiRuntime session ownership", () => {
     await catalog.dispose();
     await catalog.dispose();
     await runtime.refreshConfiguration();
-    expect(catalogRefreshes).toBe(1);
+    expect(catalogRefreshes).toBe(3);
   });
 
   it("fails closed before direct session creation when the fixed model is missing or unauthenticated", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-role-model-guard-"));
     let factoryCalls = 0;
-    const authStorage = AuthStorage.inMemory();
-    const runtime = new PiRuntime({
-      authStorage,
-      modelRegistry: ModelRegistry.inMemory(authStorage),
-      createModelRegistry: (storage) => {
-        const registry = ModelRegistry.inMemory(storage);
-        registry.registerProvider("unconfigured-role-provider", {
-          baseUrl: "https://example.invalid/v1",
-          apiKey: "$PIWEB_RUNTIME_TEST_KEY_THAT_IS_NOT_CONFIGURED",
-          api: "openai-completions",
-          models: [providerModel("unconfigured-role-model")],
-        });
-        return registry;
-      },
+    const credentialStore = new InMemoryCredentialStore();
+    const createModelRuntime = async (options: CreateModelRuntimeOptions) => {
+      const runtime = await ModelRuntime.create({ ...options, modelsPath: null });
+      runtime.registerProvider("unconfigured-role-provider", {
+        baseUrl: "https://example.invalid/v1",
+        apiKey: "$PIWEB_RUNTIME_TEST_KEY_THAT_IS_NOT_CONFIGURED",
+        api: "openai-completions",
+        models: [providerModel("unconfigured-role-model")],
+      });
+      await runtime.refresh({ allowNetwork: false });
+      return runtime;
+    };
+    const runtime = await PiRuntime.create({
+      credentialStore,
+      modelsStore: new InMemoryModelsStore(),
+      createModelsStore: () => new InMemoryModelsStore(),
+      createModelRuntime,
       createSettings: () => SettingsManager.inMemory(),
       createSession: async (options) => {
         factoryCalls++;
@@ -768,28 +777,11 @@ describe("PiRuntime session ownership", () => {
 
   it("tears down when a session factory falls back from the fixed role model", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-role-fallback-"));
-    const authStorage = AuthStorage.inMemory();
     let disposals = 0;
-    const runtime = new PiRuntime({
-      authStorage,
-      modelRegistry: ModelRegistry.inMemory(authStorage),
-      createModelRegistry: (storage) => {
-        const registry = ModelRegistry.inMemory(storage);
-        registry.registerProvider("fixed-role-provider", {
-          baseUrl: "https://example.invalid/v1",
-          apiKey: "fixed-key",
-          api: "openai-completions",
-          models: [
-            providerModel("fixed-role-model"),
-            providerModel("fallback-model"),
-          ],
-        });
-        return registry;
-      },
-      createSettings: () => SettingsManager.inMemory(),
-      createSession: async (options) => {
-        const created = await createAgentSession(options);
-        const fallback = created.session.modelRegistry.find(
+    const runtime = await testRuntime(
+      () => [],
+      async (created) => {
+        const fallback = created.session.modelRuntime.getModel(
           "fixed-role-provider",
           "fallback-model",
         );
@@ -800,9 +792,20 @@ describe("PiRuntime session ownership", () => {
           disposals++;
           nativeDispose();
         };
-        return created;
       },
-    });
+      async (modelRuntime) => {
+        modelRuntime.registerProvider("fixed-role-provider", {
+          baseUrl: "https://example.invalid/v1",
+          apiKey: "fixed-key",
+          api: "openai-completions",
+          models: [
+            providerModel("fixed-role-model"),
+            providerModel("fallback-model"),
+          ],
+        });
+        await modelRuntime.refresh({ allowNetwork: false });
+      },
+    );
 
     await expect(runtime.createSession(cwd, {
       model: { provider: "fixed-role-provider", id: "fixed-role-model" },
@@ -817,11 +820,11 @@ describe("PiRuntime session ownership", () => {
     await writeFile(join(cwd, ".pi", "settings.json"), "{}\n", "utf8");
     const remembered = new Map<string, boolean>();
     let offeredOptions: string[] = [];
-    const authStorage = AuthStorage.inMemory();
-    const runtime = new PiRuntime({
-      authStorage,
-      modelRegistry: ModelRegistry.inMemory(authStorage),
-      createModelRegistry: (storage) => ModelRegistry.inMemory(storage),
+    const credentialStore = new InMemoryCredentialStore();
+    const runtime = await PiRuntime.create({
+      credentialStore,
+      modelsStore: new InMemoryModelsStore(),
+      createModelsStore: () => new InMemoryModelsStore(),
       createSettings: (projectCwd) => SettingsManager.create(
         projectCwd,
         agentDir,
@@ -868,11 +871,11 @@ describe("PiRuntime session ownership", () => {
     const agentDir = await mkdtemp(join(tmpdir(), "piweb-runtime-untrusted-agent-"));
     await mkdir(join(cwd, ".pi"), { recursive: true });
     await writeFile(join(cwd, ".pi", "settings.json"), "{}\n", "utf8");
-    const authStorage = AuthStorage.inMemory();
-    const runtime = new PiRuntime({
-      authStorage,
-      modelRegistry: ModelRegistry.inMemory(authStorage),
-      createModelRegistry: (storage) => ModelRegistry.inMemory(storage),
+    const credentialStore = new InMemoryCredentialStore();
+    const runtime = await PiRuntime.create({
+      credentialStore,
+      modelsStore: new InMemoryModelsStore(),
+      createModelsStore: () => new InMemoryModelsStore(),
       createSettings: (projectCwd) => SettingsManager.create(
         projectCwd,
         agentDir,
@@ -896,14 +899,14 @@ describe("PiRuntime session ownership", () => {
 
   it("registers project providers before restoring a persisted model", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-restore-provider-"));
-    const authStorage = AuthStorage.inMemory();
+    const credentialStore = new InMemoryCredentialStore();
     const manager = SessionManager.inMemory(cwd);
     manager.appendModelChange("restored-provider", "restored-model");
     manager.appendCustomMessageEntry("restore-test", "saved context", false);
-    const runtime = new PiRuntime({
-      authStorage,
-      modelRegistry: ModelRegistry.inMemory(authStorage),
-      createModelRegistry: (storage) => ModelRegistry.inMemory(storage),
+    const runtime = await PiRuntime.create({
+      credentialStore,
+      modelsStore: new InMemoryModelsStore(),
+      createModelsStore: () => new InMemoryModelsStore(),
       createSettings: () => SettingsManager.inMemory(),
       createServices: (options) => createAgentSessionServices({
         ...options,
@@ -941,20 +944,22 @@ describe("PiRuntime session ownership", () => {
 
   it("releases the isolated registry when two-stage session creation fails", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-create-failure-"));
-    const authStorage = AuthStorage.inMemory();
+    const credentialStore = new InMemoryCredentialStore();
     let ownerRefreshes = 0;
-    const runtime = new PiRuntime({
-      authStorage,
-      modelRegistry: ModelRegistry.inMemory(authStorage),
-      createModelRegistry: (storage) => {
-        const registry = ModelRegistry.inMemory(storage);
-        const refresh = registry.refresh.bind(registry);
-        registry.refresh = () => {
-          ownerRefreshes++;
-          refresh();
-        };
-        return registry;
-      },
+    const createModelRuntime = async (options: CreateModelRuntimeOptions) => {
+      const runtime = await ModelRuntime.create({ ...options, modelsPath: null });
+      const refresh = runtime.refresh.bind(runtime);
+      runtime.refresh = async (refreshOptions) => {
+        ownerRefreshes++;
+        return refresh(refreshOptions);
+      };
+      return runtime;
+    };
+    const runtime = await PiRuntime.create({
+      credentialStore,
+      modelsStore: new InMemoryModelsStore(),
+      createModelsStore: () => new InMemoryModelsStore(),
+      createModelRuntime,
       createSettings: () => SettingsManager.inMemory(),
       createServices: (options) => createAgentSessionServices({
         ...options,
@@ -973,8 +978,9 @@ describe("PiRuntime session ownership", () => {
     });
 
     await expect(runtime.createSession(cwd)).rejects.toThrow("second-stage creation failed");
+    ownerRefreshes = 0;
     await runtime.refreshConfiguration();
-    expect(ownerRefreshes).toBe(0);
+    expect(ownerRefreshes).toBe(1);
   });
 
   it.each([
@@ -982,7 +988,7 @@ describe("PiRuntime session ownership", () => {
       stage: "model binding",
       expectedError: "model binding failed",
       installFailure(created: Awaited<ReturnType<typeof createAgentSession>>) {
-        created.session.modelRegistry.find = () => {
+        created.session.modelRuntime.getModel = () => {
           throw new Error("model binding failed");
         };
       },
@@ -1047,7 +1053,7 @@ describe("PiRuntime session ownership", () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-assembly-failure-"));
     let disposals = 0;
     let ownerRefreshes = 0;
-    const runtime = testRuntime(
+    const runtime = await testRuntime(
       () => [],
       async (created) => {
         const nativeDispose = created.session.dispose.bind(created.session);
@@ -1055,11 +1061,11 @@ describe("PiRuntime session ownership", () => {
           disposals++;
           nativeDispose();
         };
-        const registry = created.session.modelRegistry;
-        const nativeRefresh = registry.refresh.bind(registry);
-        registry.refresh = () => {
+        const modelRuntime = created.session.modelRuntime;
+        const nativeRefresh = modelRuntime.refresh.bind(modelRuntime);
+        modelRuntime.refresh = async (refreshOptions) => {
           ownerRefreshes++;
-          nativeRefresh();
+          return nativeRefresh(refreshOptions);
         };
         installFailure(created);
       },
@@ -1083,7 +1089,7 @@ describe("PiRuntime session ownership", () => {
     const cwdB = await mkdtemp(join(tmpdir(), "piweb-runtime-b-"));
     let starts = 0;
     let shutdowns = 0;
-    const runtime = testRuntime((cwd) => cwd === cwdA
+    const runtime = await testRuntime((cwd) => cwd === cwdA
       ? [
           (pi) => {
             pi.registerProvider("project-a", {
@@ -1132,7 +1138,7 @@ describe("PiRuntime session ownership", () => {
   it("binds portable extension UI in rpc mode and fails closed for host-owned session actions", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-extension-ui-"));
     const observations: unknown[] = [];
-    const runtime = testRuntime(() => [
+    const runtime = await testRuntime(() => [
       (pi: ExtensionAPI) => {
         pi.on("session_start", async (_event, ctx) => {
           observations.push(ctx.mode, ctx.hasUI);
@@ -1192,7 +1198,7 @@ describe("PiRuntime session ownership", () => {
   it("fails initialization when an extension requests a process-global provider", async () => {
     const cwdA = await mkdtemp(join(tmpdir(), "piweb-runtime-global-"));
     const cwdB = await mkdtemp(join(tmpdir(), "piweb-runtime-clean-"));
-    const runtime = testRuntime((cwd) => cwd === cwdA
+    const runtime = await testRuntime((cwd) => cwd === cwdA
       ? [
           (pi) => {
             pi.registerProvider("unsafe-stream", {
@@ -1209,7 +1215,7 @@ describe("PiRuntime session ownership", () => {
       : []);
 
     await expect(runtime.createProjectModelCatalog(cwdA)).rejects.toThrow(
-      "Extension provider registration failed",
+      "Pi session services reported errors",
     );
     await expect(runtime.createSession(cwdA)).rejects.toThrow(
       "Extension provider registration failed",
@@ -1222,8 +1228,42 @@ describe("PiRuntime session ownership", () => {
     await clean.dispose();
   });
 
+  it("rejects native provider registrations before session creation", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-unsafe-native-"));
+    const runtime = await PiRuntime.create({
+      credentialStore: new InMemoryCredentialStore(),
+      modelsStore: new InMemoryModelsStore(),
+      createModelsStore: () => new InMemoryModelsStore(),
+      createSettings: () => SettingsManager.inMemory(),
+      createServices: async (options) => {
+        options.modelRuntime.registerNativeProvider({ id: "unsafe-native" } as never);
+        return createAgentSessionServices(options);
+      },
+    });
+
+    await expect(runtime.createProjectModelCatalog(cwd)).rejects.toThrow(
+      "Extension native provider",
+    );
+  });
+
+  it("rejects refreshModels provider registrations before session creation", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-unsafe-refresh-"));
+    const runtime = await testRuntime(() => [
+      (pi) => {
+        pi.registerProvider("unsafe-refresh", {
+          models: [providerModel("unsafe-refresh-model")],
+          refreshModels: async () => [],
+        });
+      },
+    ]);
+
+    await expect(runtime.createProjectModelCatalog(cwd)).rejects.toThrow(
+      "Pi session services reported errors",
+    );
+  });
+
   it("commits only the latest one-shot credential intent per provider", async () => {
-    const runtime = testRuntime(() => []);
+    const runtime = await testRuntime(() => []);
     const applied: string[] = [];
     const older = runtime.beginCredentialChange("provider-a");
     const independent = runtime.beginCredentialChange("provider-b");
@@ -1260,7 +1300,7 @@ describe("PiRuntime session ownership", () => {
   it("does not let a long configuration flow block session creation or disposal", async () => {
     const cwdA = await mkdtemp(join(tmpdir(), "piweb-runtime-lock-a-"));
     const cwdB = await mkdtemp(join(tmpdir(), "piweb-runtime-lock-b-"));
-    const runtime = testRuntime(() => []);
+    const runtime = await testRuntime(() => []);
     const first = await runtime.createSession(cwdA);
     await first.activateExtensions();
     first.activateExtensionErrors(() => undefined);
@@ -1288,10 +1328,44 @@ describe("PiRuntime session ownership", () => {
     await second.dispose();
   });
 
+  it("does not rebind a disposed session when an in-flight refresh settles", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-dispose-refresh-"));
+    const runtime = await testRuntime(() => [
+      (pi) => {
+        pi.registerProvider("dispose-refresh", {
+          baseUrl: "https://before.invalid/v1",
+          apiKey: "dummy",
+          api: "openai-completions",
+          models: [providerModel("dispose-refresh-model")],
+        });
+      },
+    ]);
+    const created = await runtime.createSession(cwd);
+    const original = created.session.model;
+    const refreshStarted = deferred();
+    const refreshGate = deferred();
+    const refresh = vi.spyOn(created.modelRuntime, "refresh")
+      .mockImplementationOnce(async () => {
+        refreshStarted.resolve();
+        await refreshGate.promise;
+        created.modelRuntime.unregisterProvider("dispose-refresh");
+        return { aborted: false, errors: new Map() };
+      });
+
+    const pendingRefresh = runtime.refreshConfiguration();
+    await refreshStarted.promise;
+    await within(created.dispose(), 500);
+    refreshGate.resolve();
+    await pendingRefresh;
+
+    expect(created.session.model).toBe(original);
+    refresh.mockRestore();
+  });
+
   it("refreshes every model registry and notifies after one registry fails", async () => {
     const cwdA = await mkdtemp(join(tmpdir(), "piweb-runtime-refresh-a-"));
     const cwdB = await mkdtemp(join(tmpdir(), "piweb-runtime-refresh-b-"));
-    const runtime = testRuntime(() => []);
+    const runtime = await testRuntime(() => []);
     const first = await runtime.createSession(cwdA);
     const second = await runtime.createSession(cwdB);
     const owners = [...(runtime as unknown as {
@@ -1302,7 +1376,7 @@ describe("PiRuntime session ownership", () => {
         throw new Error("first registry refresh failed");
       });
     const secondRefresh = vi.spyOn(owners[1]!, "refresh");
-    const baselineRefresh = vi.spyOn(runtime.modelRegistry, "refresh");
+    const baselineRefresh = vi.spyOn(runtime.modelRuntime, "refresh");
     const notified = vi.fn();
     const unsubscribe = runtime.subscribe(notified);
 
@@ -1326,7 +1400,7 @@ describe("PiRuntime session ownership", () => {
   it("snapshots extension provider config before the extension can mutate it", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-snapshot-"));
     let retained: Parameters<ExtensionAPI["registerProvider"]>[1] | undefined;
-    const runtime = testRuntime(() => [
+    const runtime = await testRuntime(() => [
       (pi) => {
         retained = {
           baseUrl: "https://example.invalid/v1",
@@ -1359,15 +1433,13 @@ describe("PiRuntime session ownership", () => {
 
     expect(created.modelRegistry.find("retained-provider", "stable-model")).toBeDefined();
     expect(created.modelRegistry.find("retained-provider", "mutated-model")).toBeUndefined();
-    expect(runtime.authStorage.getOAuthProviders().some((provider) => (
-      provider.id === "retained-provider"
-    ))).toBe(false);
+    expect(runtime.modelRuntime.isUsingOAuth("retained-provider")).toBe(false);
     await created.dispose();
   });
 
   it("rebinds the selected model object after registry refresh", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-model-refresh-"));
-    const runtime = testRuntime(() => [
+    const runtime = await testRuntime(() => [
       (pi) => {
         pi.registerProvider("refreshable", {
           baseUrl: "https://before.invalid/v1",
@@ -1410,7 +1482,7 @@ describe("PiRuntime session ownership", () => {
     const factoryGate = deferred();
     let nativeSession: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
     let originalModel: NonNullable<typeof nativeSession>["model"];
-    const runtime = testRuntime(
+    const runtime = await testRuntime(
       () => [
         (pi) => {
           pi.registerProvider("bind-race", {
@@ -1423,7 +1495,7 @@ describe("PiRuntime session ownership", () => {
       ],
       async (created) => {
         nativeSession = created.session;
-        const model = created.session.modelRegistry.find("bind-race", "bind-race-model");
+        const model = created.session.modelRuntime.getModel("bind-race", "bind-race-model");
         if (!model) throw new Error("test model was not registered");
         await created.session.setModel(model);
         originalModel = created.session.model;
@@ -1434,7 +1506,7 @@ describe("PiRuntime session ownership", () => {
 
     const pending = runtime.createSession(cwd);
     await factoryReached.promise;
-    nativeSession!.modelRegistry.registerProvider("bind-race", {
+    nativeSession!.modelRuntime.registerProvider("bind-race", {
       baseUrl: "https://after.invalid/v1",
       apiKey: "dummy",
       api: "openai-completions",
@@ -1456,7 +1528,7 @@ describe("PiRuntime session ownership", () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-unactivated-"));
     let starts = 0;
     let shutdowns = 0;
-    const runtime = testRuntime(() => [
+    const runtime = await testRuntime(() => [
       (pi) => {
         pi.on("session_start", () => {
           starts++;
@@ -1475,7 +1547,7 @@ describe("PiRuntime session ownership", () => {
 
   it("surfaces extension load errors after the session becomes active", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-load-error-"));
-    const runtime = testRuntime(() => [
+    const runtime = await testRuntime(() => [
       () => {
         throw new Error("extension failed to load");
       },
@@ -1496,7 +1568,7 @@ describe("PiRuntime session ownership", () => {
   it("rejects disposal when a shutdown handler fails but still releases the session", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-shutdown-error-"));
     let shutdowns = 0;
-    const runtime = testRuntime(() => [
+    const runtime = await testRuntime(() => [
       (pi) => {
         pi.on("session_shutdown", () => {
           shutdowns++;
@@ -1519,7 +1591,7 @@ describe("PiRuntime session ownership", () => {
     let waits = 0;
     let disposals = 0;
     let ownerRefreshes = 0;
-    const runtime = testRuntime(
+    const runtime = await testRuntime(
       () => [],
       async (created) => {
         const nativeAbort = created.session.abort.bind(created.session);
@@ -1544,11 +1616,11 @@ describe("PiRuntime session ownership", () => {
         created.session.extensionRunner.onError = () => {
           throw new Error("extension error listener registration failed");
         };
-        const registry = created.session.modelRegistry;
-        const nativeRefresh = registry.refresh.bind(registry);
-        registry.refresh = () => {
+        const modelRuntime = created.session.modelRuntime;
+        const nativeRefresh = modelRuntime.refresh.bind(modelRuntime);
+        modelRuntime.refresh = async (refreshOptions) => {
           ownerRefreshes++;
-          nativeRefresh();
+          return nativeRefresh(refreshOptions);
         };
       },
     );
@@ -1571,7 +1643,7 @@ describe("PiRuntime session ownership", () => {
 
   it("runs extension tool hooks before the host gate and forces sequential execution", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-tool-gate-"));
-    const runtime = testRuntime(() => [
+    const runtime = await testRuntime(() => [
       (pi) => {
         pi.on("tool_call", (event) => {
           if (event.toolName === "write") event.input.path = "changed-by-extension.ts";
@@ -1645,7 +1717,7 @@ describe("PiRuntime session ownership", () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-tool-abort-"));
     let extensionCalls = 0;
     let gateCalls = 0;
-    const runtime = testRuntime(() => [
+    const runtime = await testRuntime(() => [
       (pi) => {
         pi.on("tool_call", async () => {
           extensionCalls++;
@@ -1697,7 +1769,7 @@ describe("PiRuntime session ownership", () => {
       metadata: { owner: string };
       tags: string[];
     } | undefined;
-    const runtime = testRuntime(() => [
+    const runtime = await testRuntime(() => [
       (pi) => {
         pi.on("tool_call", (event) => {
           retained = event.input as typeof retained;
@@ -1769,7 +1841,7 @@ describe("PiRuntime session ownership", () => {
   it("blocks non-JSON or unstable tool arguments before the host gate", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-tool-json-"));
     let gateCalls = 0;
-    const runtime = testRuntime(() => []);
+    const runtime = await testRuntime(() => []);
     const created = await runtime.createSession(cwd, {
       toolCallGate: async () => {
         gateCalls++;

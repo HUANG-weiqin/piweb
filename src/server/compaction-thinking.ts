@@ -16,14 +16,14 @@ export function installCompactionThinkingOverride(
   session: AgentSession,
   transport: Transport,
 ): CompactionThinkingOverride {
-  let originalStream: typeof session.agent.streamFn | undefined;
-  let overrideStream: typeof session.agent.streamFn | undefined;
+  let originalStream: typeof session.agent.streamFunction | undefined;
+  let overrideStream: typeof session.agent.streamFunction | undefined;
   let generation = 0;
   let disposed = false;
 
   const restore = (): void => {
-    if (originalStream && session.agent.streamFn === overrideStream) {
-      session.agent.streamFn = originalStream;
+    if (originalStream && session.agent.streamFunction === overrideStream) {
+      session.agent.streamFunction = originalStream;
     }
     originalStream = undefined;
     overrideStream = undefined;
@@ -31,7 +31,7 @@ export function installCompactionThinkingOverride(
 
   const install = (): void => {
     if (originalStream || disposed) return;
-    originalStream = session.agent.streamFn;
+    originalStream = session.agent.streamFunction;
     const capturedStream = originalStream;
     overrideStream = (model, context, options) => {
       const reasoning = clampThinkingLevel(
@@ -44,7 +44,7 @@ export function installCompactionThinkingOverride(
         ...(isCodexResponsesModel(model) ? { transport } : {}),
       });
     };
-    session.agent.streamFn = overrideStream;
+    session.agent.streamFunction = overrideStream;
   };
 
   const unsubscribe = session.subscribe((event) => {
@@ -53,13 +53,13 @@ export function installCompactionThinkingOverride(
       if (event.reason === "manual") {
         // Manual compact emits start before choosing its auth path. Deferring
         // preserves the SDK's streamSimple identity check; its auth await still
-        // yields before the summarizer reads agent.streamFn.
+        // yields before the summarizer reads agent.streamFunction.
         queueMicrotask(() => {
           if (generation === startedGeneration) install();
         });
       } else {
         // SDK auto-compaction resolves auth before emitting start and can read
-        // streamFn synchronously afterwards.
+        // streamFunction synchronously afterwards.
         install();
       }
     } else if (event.type === "compaction_end") {

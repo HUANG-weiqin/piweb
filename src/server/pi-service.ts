@@ -29,7 +29,6 @@ import { validateCwd } from "./cwd.js";
 import { ExtensionUIBroker } from "./extension-ui.js";
 import { createGitTools } from "./git-inspect.js";
 import {
-  PiRuntime,
   type CreatedPiSession,
   type CredentialChangeIntent,
   type PiRuntimeLike,
@@ -306,7 +305,7 @@ export class PiConnection {
 
   constructor(
     private readonly emit: (event: ServerEvent) => void,
-    private readonly runtime: PiRuntimeLike = new PiRuntime(),
+    private readonly runtime: PiRuntimeLike,
     private readonly toolPolicy: ToolPolicy = defaultToolPolicy,
     private readonly projects: ProjectStoreRegistry = new ProjectStoreRegistry(),
     private readonly projectRuns: ProjectRunCoordinator = new ProjectRunCoordinator(),
