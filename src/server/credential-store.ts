@@ -1,5 +1,5 @@
 import { execSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -231,8 +231,59 @@ function abortIfNeeded(options?: AuthOperationOptions): void {
   options?.signal?.throwIfAborted();
 }
 
+function abortReason(signal: AbortSignal): unknown {
+  return (signal as AbortSignal & { reason?: unknown }).reason
+    ?? new DOMException("Aborted", "AbortError");
+}
+
+function raceWithAbortSignal<T>(
+  operation: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T> {
+  if (!signal) return operation;
+  if (signal.aborted) {
+    void operation.catch(() => {});
+    return Promise.reject(abortReason(signal));
+  }
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const cleanup = (): void => signal.removeEventListener("abort", onAbort);
+    const onAbort = (): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(abortReason(signal));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    void operation.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      },
+    );
+    if (signal.aborted) onAbort();
+  });
+}
+
+type ReloadState = {
+  promise: Promise<{ data: AuthData; revision: string | undefined }>;
+  abortController: AbortController;
+  readers: number;
+};
+
 export class FileCredentialStore implements CredentialStore {
   private readonly authPath: string;
+  private cachedData: AuthData | undefined;
+  private cachedRevision: string | undefined;
+  private reloadState: ReloadState | undefined;
 
   constructor(authPath: string = defaultAuthPath()) {
     const expanded = authPath === "~"
@@ -246,6 +297,18 @@ export class FileCredentialStore implements CredentialStore {
   private ensureParentDirectory(): void {
     const parent = dirname(this.authPath);
     if (!existsSync(parent)) mkdirSync(parent, { recursive: true, mode: AUTH_DIRECTORY_MODE });
+  }
+
+  private getFileRevision(): string | undefined {
+    try {
+      const stats = statSync(this.authPath, { bigint: true });
+      // Match cache identity to the file and its high-resolution write metadata.
+      // A mismatch reloads under the writer lock, so in-place writes cannot be
+      // parsed until the writer has released a complete JSON document.
+      return `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeNs}:${stats.ctimeNs}`;
+    } catch {
+      return undefined;
+    }
   }
 
   private async acquireLock(
@@ -326,10 +389,66 @@ export class FileCredentialStore implements CredentialStore {
     }
   }
 
-  async read(providerId: string, options?: AuthOperationOptions): Promise<Credential | undefined> {
-    const credential = await this.withLock(options, async (data) => ({
-      result: cloneCredential(getCredential(data, providerId)),
+  private reloadUnderLock(
+    signal: AbortSignal,
+  ): Promise<{ data: AuthData; revision: string | undefined }> {
+    return this.withLock({ signal }, async (data) => ({
+      result: {
+        data,
+        revision: this.getFileRevision(),
+      },
     }));
+  }
+
+  private async readLatestData(options?: AuthOperationOptions): Promise<AuthData> {
+    abortIfNeeded(options);
+    const currentRevision = this.getFileRevision();
+    if (
+      this.cachedData !== undefined &&
+      this.cachedRevision !== undefined &&
+      currentRevision !== undefined &&
+      this.cachedRevision === currentRevision
+    ) {
+      abortIfNeeded(options);
+      return this.cachedData;
+    }
+    return this.joinReload(options);
+  }
+
+  private async joinReload(options?: AuthOperationOptions): Promise<AuthData> {
+    abortIfNeeded(options);
+    let state = this.reloadState;
+    if (!state) {
+      const abortController = new AbortController();
+      const raw = this.reloadUnderLock(abortController.signal);
+      const promise = raw.then((result) => {
+        if (this.reloadState === state) {
+          this.cachedData = result.data;
+          this.cachedRevision = result.revision;
+        }
+        return result;
+      });
+      promise.catch(() => {});
+      state = { promise, abortController, readers: 0 };
+      this.reloadState = state;
+    }
+    state.readers++;
+    try {
+      const result = await raceWithAbortSignal(state.promise, options?.signal);
+      return result.data;
+    } finally {
+      state.readers--;
+      if (state.readers === 0 && this.reloadState === state) {
+        this.reloadState = undefined;
+        state.abortController.abort();
+      }
+    }
+  }
+
+  async read(providerId: string, options?: AuthOperationOptions): Promise<Credential | undefined> {
+    const data = await this.readLatestData(options);
+    abortIfNeeded(options);
+    const credential = cloneCredential(getCredential(data, providerId));
     abortIfNeeded(options);
     if (credential?.type === "api_key" && credential.key !== undefined) {
       credential.key = resolveConfigValue(credential.key, credential.env);
@@ -339,11 +458,11 @@ export class FileCredentialStore implements CredentialStore {
   }
 
   async list(options?: AuthOperationOptions): Promise<readonly CredentialInfo[]> {
-    return this.withLock(options, async (data) => ({
-      result: Object.entries(data).map(([providerId, credential]) => ({
-        providerId,
-        type: credential.type,
-      })),
+    const data = await this.readLatestData(options);
+    abortIfNeeded(options);
+    return Object.entries(data).map(([providerId, credential]) => ({
+      providerId,
+      type: credential.type,
     }));
   }
 
@@ -352,25 +471,42 @@ export class FileCredentialStore implements CredentialStore {
     fn: (current: Credential | undefined) => Promise<Credential | undefined>,
     options?: AuthOperationOptions,
   ): Promise<Credential | undefined> {
-    return this.withLock(options, async (data) => {
+    let snapshot!: AuthData;
+    let snapshotRevision: string | undefined;
+    let wrote = false;
+    const result = await this.withLock(options, async (data) => {
       const current = cloneCredential(getCredential(data, providerId));
       const next = await fn(current);
       abortIfNeeded(options);
-      if (next === undefined) return { result: cloneCredential(getCredential(data, providerId)) };
+      if (next === undefined) {
+        snapshot = data;
+        snapshotRevision = this.getFileRevision();
+        return { result: cloneCredential(getCredential(data, providerId)) };
+      }
       if (!isCredential(next)) {
         throw new Error(`Invalid credential for provider "${providerId}"`);
       }
       const stored = cloneCredential(next) as Credential;
-      const updated = { ...data, [providerId]: stored };
-      return { result: cloneCredential(stored), next: updated };
+      snapshot = { ...data, [providerId]: stored };
+      wrote = true;
+      return { result: cloneCredential(stored), next: snapshot };
     });
+    this.cachedData = snapshot;
+    // A write's revision cannot be sampled after unlock without pairing this
+    // snapshot with a later process's write. Revalidate once on the next read.
+    this.cachedRevision = wrote ? undefined : snapshotRevision;
+    return result;
   }
 
   async delete(providerId: string, options?: AuthOperationOptions): Promise<void> {
+    let snapshot!: AuthData;
     await this.withLock(options, async (data) => {
-      const next = { ...data };
-      delete next[providerId];
-      return { result: undefined, next };
+      snapshot = { ...data };
+      delete snapshot[providerId];
+      return { result: undefined, next: snapshot };
     });
+    this.cachedData = snapshot;
+    // See modify(): force one locked revalidation after publishing a write.
+    this.cachedRevision = undefined;
   }
 }

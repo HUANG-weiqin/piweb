@@ -10,7 +10,7 @@
 
 `PiRuntime` 是进程级对象：
 
-- 唯一持有共享 `CredentialStore` 与基线 `ModelRuntime` / `ModelRegistry`；认证和模型缓存由 Pi 0.84.2 runtime 统一读取。
+- 唯一持有共享 `CredentialStore` 与基线 `ModelRuntime` / `ModelRegistry`；认证和模型缓存由 Pi 0.84.2 runtime 统一读取。文件凭据按文件 identity/size/高精度时间戳复用已验证快照，同一 revision 的 provider 扇出读取不得重复取得跨进程排他锁；revision 变化时只允许一轮可取消的共享 reload 在锁内重新解析，写入仍锁定并让下一次读取重新验证磁盘。
 - 持有 Pi 用户级 `ProjectTrustStore`；受保护的项目资源在 trust resolution 前不能进入最终 resource loader。
 - 为每个 session 或 project model catalog 创建独立 `ModelRuntime` / `ModelRegistry`，隔离 cwd 扩展的静态模型、base URL 和 headers；owner 必须在 AgentSession 创建后确认其 `modelRuntime` 身份。
 - API key 与 logout 只通过 `CredentialStore.modify/delete` 持久化；OAuth 在配置队列外使用 baseline provider 的 `auth.oauth.login(AuthInteraction)`，成功后再经 credential intent CAS 写入。扩展 OAuth 与进程全局 provider 注册仍 fail closed。

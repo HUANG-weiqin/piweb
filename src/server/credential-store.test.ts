@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import lockfile from "proper-lockfile";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Credential } from "@earendil-works/pi-ai";
 import { FileCredentialStore } from "./credential-store.js";
 
@@ -21,6 +21,7 @@ async function writeAuth(authPath: string, data: unknown): Promise<void> {
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(
     tempDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })),
   );
@@ -256,5 +257,120 @@ describe("FileCredentialStore", () => {
     }
     await expect(store.read("oauth")).resolves.toEqual(oauth);
     await expect(store.list()).resolves.toEqual([{ providerId: "oauth", type: "oauth" }]);
+  });
+});
+
+describe("FileCredentialStore read cache regression", () => {
+  it("cold concurrent burst should perform one lock-backed reload", async () => {
+    const authPath = await makeAuthPath();
+    await writeAuth(authPath, { alpha: { type: "api_key", key: "secret" } });
+    const store = new FileCredentialStore(authPath);
+    const spy = vi.spyOn(lockfile, "lock");
+    const results = await Promise.all(
+      Array.from({ length: 10 }, () => store.read("alpha")),
+    );
+    for (const result of results) {
+      expect(result).toEqual({ type: "api_key", key: "secret" });
+    }
+    expect(spy.mock.calls.length).toBe(1);
+  });
+
+  it("repeated unchanged reads/list should add zero locks", async () => {
+    const authPath = await makeAuthPath();
+    await writeAuth(authPath, { alpha: { type: "api_key", key: "cached" } });
+    const store = new FileCredentialStore(authPath);
+    await store.read("alpha");
+    const spy = vi.spyOn(lockfile, "lock");
+    await expect(store.read("alpha")).resolves.toEqual({ type: "api_key", key: "cached" });
+    await expect(store.list()).resolves.toEqual([{ providerId: "alpha", type: "api_key" }]);
+    await expect(store.read("alpha")).resolves.toEqual({ type: "api_key", key: "cached" });
+    await expect(store.list()).resolves.toEqual([{ providerId: "alpha", type: "api_key" }]);
+    expect(spy.mock.calls.length).toBe(0);
+  });
+
+  it("external file change must be observed and require one reload", async () => {
+    const authPath = await makeAuthPath();
+    await writeAuth(authPath, { alpha: { type: "api_key", key: "old" } });
+    const store = new FileCredentialStore(authPath);
+    await expect(store.read("alpha")).resolves.toEqual({ type: "api_key", key: "old" });
+    await writeAuth(authPath, { alpha: { type: "api_key", key: "new" } });
+    const spy = vi.spyOn(lockfile, "lock");
+    await expect(store.read("alpha")).resolves.toEqual({ type: "api_key", key: "new" });
+    expect(spy.mock.calls.length).toBe(1);
+    spy.mockClear();
+    await expect(store.read("alpha")).resolves.toEqual({ type: "api_key", key: "new" });
+    await expect(store.list()).resolves.toEqual([{ providerId: "alpha", type: "api_key" }]);
+    expect(spy.mock.calls.length).toBe(0);
+  });
+
+  it("corrupt external change must reject rather than return stale cache", async () => {
+    const authPath = await makeAuthPath();
+    await writeAuth(authPath, { alpha: { type: "api_key", key: "good" } });
+    const store = new FileCredentialStore(authPath);
+    await expect(store.read("alpha")).resolves.toEqual({ type: "api_key", key: "good" });
+    await mkdir(dirname(authPath), { recursive: true });
+    await writeFile(authPath, "{not-json", { mode: 0o600 });
+    await expect(store.read("alpha")).rejects.toThrow("Failed to read auth.json");
+    await expect(store.list()).rejects.toThrow("Failed to read auth.json");
+    await expect(readFile(authPath, "utf8")).resolves.toBe("{not-json");
+    await writeAuth(authPath, { alpha: { type: "api_key", key: "recovered" } });
+    await expect(store.read("alpha")).resolves.toEqual({ type: "api_key", key: "recovered" });
+  });
+
+  it("distinct callers sharing a blocked reload must have independent abort behavior", async () => {
+    const authPath = await makeAuthPath();
+    await writeAuth(authPath, { alpha: { type: "api_key", key: "secret" } });
+    const heldRelease = await lockfile.lock(authPath, { realpath: false });
+    const store = new FileCredentialStore(authPath);
+    const controller = new AbortController();
+    const first = store.read("alpha", { signal: controller.signal });
+    const second = store.read("alpha");
+    controller.abort();
+    await expect(first).rejects.toThrow();
+    await heldRelease();
+    await expect(second).resolves.toEqual({ type: "api_key", key: "secret" });
+  });
+
+  it("when the last waiter leaves before settlement, abort the underlying lock wait", async () => {
+    const authPath = await makeAuthPath();
+    await writeAuth(authPath, {});
+    const heldRelease = await lockfile.lock(authPath, { realpath: false });
+    const store = new FileCredentialStore(authPath);
+    const c1 = new AbortController();
+    const c2 = new AbortController();
+    const p1 = store.read("alpha", { signal: c1.signal });
+    const p2 = store.read("alpha", { signal: c2.signal });
+    c1.abort();
+    c2.abort();
+    await expect(p1).rejects.toThrow();
+    await expect(p2).rejects.toThrow();
+    const spy = vi.spyOn(lockfile, "lock");
+    const newRead = store.read("alpha");
+    await heldRelease();
+    await expect(newRead).resolves.toBeUndefined();
+    expect(spy.mock.calls.length).toBe(1);
+  });
+
+  it("ModelRuntime create/refresh with modelsPath:null and cached store does bounded locks", async () => {
+    const authPath = await makeAuthPath();
+    await writeAuth(authPath, {});
+    const store = new FileCredentialStore(authPath);
+    const spy = vi.spyOn(lockfile, "lock");
+    const { ModelRuntime } = await import("@earendil-works/pi-coding-agent");
+    const beforeCreate = spy.mock.calls.length;
+    const runtime = await ModelRuntime.create({
+      credentials: store,
+      modelsPath: null,
+      allowModelNetwork: false,
+    });
+    const afterCreate = spy.mock.calls.length;
+    const createLocks = afterCreate - beforeCreate;
+    expect(createLocks).toBeGreaterThanOrEqual(1);
+    expect(createLocks).toBeLessThan(5);
+    const beforeRefresh = spy.mock.calls.length;
+    await runtime.refresh({ allowNetwork: false });
+    const afterRefresh = spy.mock.calls.length;
+    const refreshLocks = afterRefresh - beforeRefresh;
+    expect(refreshLocks).toBeLessThan(5);
   });
 });
