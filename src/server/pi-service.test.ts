@@ -6,14 +6,15 @@ import type {
   AgentSession,
   AgentSessionEvent,
   AgentMessage,
-  AuthStorage,
   ExtensionError,
+  ModelRuntime,
   ModelRegistry,
   PromptOptions,
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
+import { InMemoryCredentialStore, type CredentialStore } from "@earendil-works/pi-ai";
 import {
   MAX_PROJECT_CONVERSATIONS,
   parseServerEvent,
@@ -135,13 +136,11 @@ function fakeSession(settings = fakeSettings()): FakeSession {
 }
 
 class FakeRuntime implements PiRuntimeLike {
-  readonly authStorage = {
-    getOAuthProviders: () => [],
-    get: () => undefined,
-    set: () => undefined,
-    remove: () => undefined,
-    drainErrors: () => [],
-  } as unknown as AuthStorage;
+  credentialStore: CredentialStore = new InMemoryCredentialStore();
+  readonly modelRuntime = {
+    getProviders: () => [],
+    getProvider: () => undefined,
+  } as unknown as ModelRuntime;
 
   readonly modelRegistry = {
     getAll: () => [],
@@ -173,6 +172,7 @@ class FakeRuntime implements PiRuntimeLike {
 
   async createProjectModelCatalog() {
     return {
+      modelRuntime: this.modelRuntime,
       modelRegistry: this.projectModelRegistry ?? this.modelRegistry,
       dynamicProviderNames: () => new Set<string>(),
       dispose: async () => undefined,
@@ -192,6 +192,7 @@ class FakeRuntime implements PiRuntimeLike {
     let activatedHandler: ((error: ExtensionError) => void) | undefined;
     return {
       ...created,
+      modelRuntime: this.modelRuntime,
       modelRegistry: this.sessionModelRegistry ?? this.modelRegistry,
       activateExtensions: () => this.activate(options),
       activateExtensionErrors: (handler) => {
@@ -221,14 +222,14 @@ class FakeRuntime implements PiRuntimeLike {
 
   commitCredentialChange(
     intent: CredentialChangeIntent,
-    change: () => void,
+    change: () => Promise<void> | void,
   ): Promise<boolean> {
-    return this.updateConfiguration(() => {
+    return this.updateConfiguration(async () => {
       if (this.credentialRevisions.get(intent.provider) !== intent.revision) {
         return false;
       }
       this.credentialRevisions.set(intent.provider, intent.revision + 1);
-      change();
+      await change();
       return true;
     });
   }
@@ -281,21 +282,36 @@ function latestState(events: ServerEvent[]) {
 
 function configureOAuth(
   runtime: FakeRuntime,
-  login: (provider: string, callbacks: { signal: AbortSignal }) => Promise<void>,
+  login: (provider: string, interaction: { signal: AbortSignal }) => Promise<void>,
 ): void {
-  Object.assign(runtime.authStorage, {
-    getOAuthProviders: () => [{
-      id: "oauth",
-      name: "OAuth",
-      login: async (callbacks: { signal: AbortSignal }) => {
-        await login("oauth", callbacks);
-        return {
-          access: "test access",
-          refresh: "test refresh",
+  const provider = {
+    id: "oauth",
+    name: "OAuth",
+    auth: {
+      oauth: {
+        name: "OAuth",
+        login: async (interaction: { signal: AbortSignal }) => {
+          await login("oauth", interaction);
+          return {
+            type: "oauth" as const,
+            access: "test access",
+            refresh: "test refresh",
+            expires: Date.now() + 60_000,
+          };
+        },
+        refresh: async () => ({
+          type: "oauth" as const,
+          access: "refreshed",
+          refresh: "refresh",
           expires: Date.now() + 60_000,
-        };
+        }),
+        toAuth: async () => ({ apiKey: "test" }),
       },
-    }],
+    },
+  } as never;
+  Object.assign(runtime.modelRuntime, {
+    getProviders: () => [provider],
+    getProvider: (id: string) => id === "oauth" ? provider : undefined,
   });
 }
 
@@ -1368,20 +1384,16 @@ describe("PiConnection lifecycle", () => {
     });
   });
 
-  it("drains a native auth error on the operation that produced it", async () => {
+  it("rejects an API key write failure without acknowledging the command", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-api-key-error-"));
     const runtime = new FakeRuntime();
-    const nativeErrors: Error[] = [];
     Object.assign(runtime.modelRegistry, {
       getAll: () => [{ provider: "provider" }],
     });
-    Object.assign(runtime.authStorage, {
-      set: () => {
-        const error = new Error("credential write failed");
-        nativeErrors.push(error);
-        throw error;
+    Object.assign(runtime.credentialStore, {
+      modify: async () => {
+        throw new Error("credential write failed");
       },
-      drainErrors: () => nativeErrors.splice(0),
     });
     const events: ServerEvent[] = [];
     const connection = new PiConnection((event) => events.push(event), runtime);
@@ -1394,11 +1406,7 @@ describe("PiConnection lifecycle", () => {
       provider: "provider",
       key: "secret",
     })).rejects.toThrow("credential write failed");
-    await connection.handle({ type: "refresh_models" });
 
-    expect(events.filter((event) => event.type === "error" && event.scope === "auth")).toEqual([
-      expect.objectContaining({ message: "credential write failed" }),
-    ]);
     expect(events.some((event) => event.type === "command_complete")).toBe(false);
   });
 
@@ -1407,9 +1415,6 @@ describe("PiConnection lifecycle", () => {
     const runtime = new FakeRuntime();
     Object.assign(runtime.modelRegistry, {
       getAll: () => [{ provider: "provider" }],
-    });
-    Object.assign(runtime.authStorage, {
-      set: () => undefined,
     });
     const events: ServerEvent[] = [];
     const connection = new PiConnection((event) => events.push(event), runtime);
@@ -1429,18 +1434,18 @@ describe("PiConnection lifecycle", () => {
       commandId: COMMAND_A,
       sessionId: SESSION_A,
     });
+    await expect(runtime.credentialStore.read("provider")).resolves.toEqual({
+      type: "api_key",
+      key: "secret",
+    });
   });
 
   it("does not apply API Key commands from stale or unknown sessions", async () => {
     const cwdA = await mkdtemp(join(tmpdir(), "piweb-api-key-session-a-"));
     const cwdB = await mkdtemp(join(tmpdir(), "piweb-api-key-session-b-"));
     const runtime = new FakeRuntime();
-    const credentials: unknown[] = [];
     Object.assign(runtime.modelRegistry, {
       getAll: () => [{ provider: "provider" }],
-    });
-    Object.assign(runtime.authStorage, {
-      set: (_provider: string, credential: unknown) => credentials.push(credential),
     });
     const events: ServerEvent[] = [];
     const connection = new PiConnection((event) => events.push(event), runtime);
@@ -1462,7 +1467,7 @@ describe("PiConnection lifecycle", () => {
       key: "from-unknown-session",
     });
 
-    expect(credentials).toEqual([]);
+    await expect(runtime.credentialStore.read("provider")).resolves.toBeUndefined();
     expect(events.some((event) => event.type === "command_complete")).toBe(false);
     await connection.dispose();
   });
@@ -1567,12 +1572,8 @@ describe("PiConnection lifecycle", () => {
   it("rejects a reused setting command ID without applying it twice", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-api-key-command-id-"));
     const runtime = new FakeRuntime();
-    const credentials: unknown[] = [];
     Object.assign(runtime.modelRegistry, {
       getAll: () => [{ provider: "provider" }],
-    });
-    Object.assign(runtime.authStorage, {
-      set: (_provider: string, credential: unknown) => credentials.push(credential),
     });
     const connection = new PiConnection(() => undefined, runtime);
     await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
@@ -1592,7 +1593,10 @@ describe("PiConnection lifecycle", () => {
       key: "second",
     })).rejects.toThrow("already used");
 
-    expect(credentials).toEqual([{ type: "api_key", key: "first" }]);
+    await expect(runtime.credentialStore.read("provider")).resolves.toEqual({
+      type: "api_key",
+      key: "first",
+    });
   });
 
   it("keeps an applied thinking level when its default setting cannot be flushed", async () => {
@@ -1709,6 +1713,83 @@ describe("PiConnection lifecycle", () => {
     }
     expect(configurationChanges).toBe(1);
     expect(order).toEqual(["configuration-refreshed", "auth-complete"]);
+    await expect(runtime.credentialStore.read("oauth")).resolves.toEqual(expect.objectContaining({
+      type: "oauth",
+      access: "test access",
+      refresh: "test refresh",
+    }));
+  });
+
+  it("sanitizes provider errors and never puts OAuth secrets on the wire", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-oauth-provider-error-"));
+    const runtime = new FakeRuntime();
+    configureOAuth(runtime, async () => {
+      throw new Error("provider body access_token=access-secret refresh_token=refresh-secret");
+    });
+    const events: ServerEvent[] = [];
+    const connection = new PiConnection((event) => events.push(event), runtime);
+    await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
+
+    let failure: unknown;
+    try {
+      await connection.handle({
+        type: "login_oauth",
+        authFlowId: AUTH_A,
+        provider: "oauth",
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe("OAuth login failed");
+    const messages = events
+      .filter((event) => event.type === "error")
+      .map((event) => event.message)
+      .join(" ");
+    expect(messages).not.toContain("access-secret");
+    expect(messages).not.toContain("refresh-secret");
+  });
+
+  it("admits a same-connection API key while OAuth is waiting and supersedes it", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-oauth-same-connection-key-"));
+    const loginStarted = deferred();
+    const loginGate = deferred();
+    const runtime = new FakeRuntime();
+    configureOAuth(runtime, async () => {
+      loginStarted.resolve();
+      await loginGate.promise;
+    });
+    Object.assign(runtime.modelRegistry, {
+      getAll: () => [{ provider: "oauth" }],
+    });
+    const events: ServerEvent[] = [];
+    const connection = new PiConnection((event) => events.push(event), runtime);
+    await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
+
+    const login = connection.handle({
+      type: "login_oauth",
+      authFlowId: AUTH_A,
+      provider: "oauth",
+    });
+    await loginStarted.promise;
+    const setKey = connection.handle({
+      type: "set_api_key",
+      commandId: COMMAND_A,
+      sessionId: SESSION_A,
+      provider: "oauth",
+      key: "new-api-key",
+    });
+    loginGate.resolve();
+
+    await expect(login).rejects.toThrow(
+      "OAuth credential change was superseded by a newer credential change",
+    );
+    await setKey;
+    expect(events.some((event) => event.type === "auth_complete")).toBe(false);
+    await expect(runtime.credentialStore.read("oauth")).resolves.toEqual({
+      type: "api_key",
+      key: "new-api-key",
+    });
   });
 
   it("does not let an older OAuth result overwrite a newer logout", async () => {
@@ -1716,19 +1797,14 @@ describe("PiConnection lifecycle", () => {
     const loginStarted = deferred();
     const loginGate = deferred();
     const runtime = new FakeRuntime();
-    let credential: unknown;
     configureOAuth(runtime, async () => {
       loginStarted.resolve();
       await loginGate.promise;
     });
-    Object.assign(runtime.authStorage, {
-      set: (_provider: string, next: unknown) => {
-        credential = next;
-      },
-      logout: () => {
-        credential = undefined;
-      },
-    });
+    await runtime.credentialStore.modify("oauth", async () => ({
+      type: "api_key",
+      key: "previous",
+    }));
     const events: ServerEvent[] = [];
     const oauthConnection = new PiConnection((event) => events.push(event), runtime);
     const logoutConnection = new PiConnection(() => undefined, runtime);
@@ -1742,13 +1818,15 @@ describe("PiConnection lifecycle", () => {
     await loginStarted.promise;
     await logoutConnection.handle({ type: "logout", provider: "oauth" });
     try {
-      expect(credential).toBeUndefined();
+      await expect(runtime.credentialStore.read("oauth")).resolves.toBeUndefined();
     } finally {
       loginGate.resolve();
-      await login;
+      await expect(login).rejects.toThrow(
+        "OAuth credential change was superseded by a newer credential change",
+      );
     }
 
-    expect(credential).toBeUndefined();
+    await expect(runtime.credentialStore.read("oauth")).resolves.toBeUndefined();
     expect(events.some((event) => event.type === "auth_complete")).toBe(false);
   });
 
@@ -1787,13 +1865,11 @@ describe("PiConnection lifecycle", () => {
     const commitStarted = deferred();
     const commitGate = deferred();
     const runtime = new FakeRuntime();
-    let credential: unknown = { type: "api_key", key: "previous" };
     configureOAuth(runtime, async () => undefined);
-    Object.assign(runtime.authStorage, {
-      set: (_provider: string, next: unknown) => {
-        credential = next;
-      },
-    });
+    await runtime.credentialStore.modify("oauth", async () => ({
+      type: "api_key",
+      key: "previous",
+    }));
     const commitCredentialChange = runtime.commitCredentialChange.bind(runtime);
     runtime.commitCredentialChange = async (intent, change) => {
       commitStarted.resolve();
@@ -1814,7 +1890,10 @@ describe("PiConnection lifecycle", () => {
     commitGate.resolve();
     await login;
 
-    expect(credential).toEqual({ type: "api_key", key: "previous" });
+    await expect(runtime.credentialStore.read("oauth")).resolves.toEqual({
+      type: "api_key",
+      key: "previous",
+    });
     expect(events.some((event) => event.type === "auth_complete")).toBe(false);
   });
 
@@ -1823,36 +1902,14 @@ describe("PiConnection lifecycle", () => {
     const loginStarted = deferred();
     const loginGate = deferred();
     const runtime = new FakeRuntime();
-    let credential: unknown = { type: "api_key", key: "previous" };
-    Object.assign(runtime.authStorage, {
-      getOAuthProviders: () => [{
-        id: "oauth",
-        name: "OAuth",
-        login: async () => {
-          loginStarted.resolve();
-          await loginGate.promise;
-          return {
-            access: "late credentials",
-            refresh: "late refresh",
-            expires: Date.now() + 60_000,
-          };
-        },
-      }],
-      get: () => credential,
-      set: (_provider: string, next: unknown) => {
-        credential = next;
-      },
-      login: async () => {
-        loginStarted.resolve();
-        await loginGate.promise;
-        credential = {
-          type: "oauth",
-          access: "late credentials",
-          refresh: "late refresh",
-          expires: Date.now() + 60_000,
-        };
-      },
+    configureOAuth(runtime, async () => {
+      loginStarted.resolve();
+      await loginGate.promise;
     });
+    await runtime.credentialStore.modify("oauth", async () => ({
+      type: "api_key",
+      key: "previous",
+    }));
     const events: ServerEvent[] = [];
     const connection = new PiConnection((event) => events.push(event), runtime);
     await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
@@ -1864,14 +1921,19 @@ describe("PiConnection lifecycle", () => {
     });
     await loginStarted.promise;
     await connection.handle({ type: "cancel_auth", authFlowId: AUTH_A });
-    credential = { type: "oauth", access: "concurrently refreshed" };
+    await runtime.credentialStore.modify("oauth", async () => ({
+      type: "oauth",
+      access: "concurrently refreshed",
+      refresh: "concurrently refreshed",
+      expires: Date.now() + 60_000,
+    }));
     loginGate.resolve();
     await login;
 
-    expect(credential).toEqual({
+    await expect(runtime.credentialStore.read("oauth")).resolves.toEqual(expect.objectContaining({
       type: "oauth",
       access: "concurrently refreshed",
-    });
+    }));
     expect(events.some((event) => event.type === "auth_complete")).toBe(false);
   });
 
@@ -3746,12 +3808,7 @@ describe("PiConnection coordinated project view", () => {
       hasConfiguredAuth: () => true,
     } as unknown as ModelRegistry;
     harness.runtime.sessionModelRegistry = harness.runtime.projectModelRegistry;
-    const credentials: unknown[] = [];
-    Object.assign(harness.runtime.authStorage, {
-      set: (provider: string, credential: unknown) => {
-        credentials.push({ provider, credential });
-      },
-    });
+
     try {
       await harness.connection.handle({
         type: "initialize",
@@ -3820,10 +3877,10 @@ describe("PiConnection coordinated project view", () => {
         provider: projectModel.provider,
         key: "project-secret",
       });
-      expect(credentials).toEqual([{
-        provider: projectModel.provider,
-        credential: { type: "api_key", key: "project-secret" },
-      }]);
+      await expect(harness.runtime.credentialStore.read(projectModel.provider)).resolves.toEqual({
+        type: "api_key",
+        key: "project-secret",
+      });
       expect(harness.events).toContainEqual({
         type: "command_complete",
         operation: "set_api_key",

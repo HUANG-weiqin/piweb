@@ -13,6 +13,7 @@
 - 唯一持有共享 `CredentialStore` 与基线 `ModelRuntime` / `ModelRegistry`；认证和模型缓存由 Pi 0.84.2 runtime 统一读取。
 - 持有 Pi 用户级 `ProjectTrustStore`；受保护的项目资源在 trust resolution 前不能进入最终 resource loader。
 - 为每个 session 或 project model catalog 创建独立 `ModelRuntime` / `ModelRegistry`，隔离 cwd 扩展的静态模型、base URL 和 headers；owner 必须在 AgentSession 创建后确认其 `modelRuntime` 身份。
+- API key 与 logout 只通过 `CredentialStore.modify/delete` 持久化；OAuth 在配置队列外使用 baseline provider 的 `auth.oauth.login(AuthInteraction)`，成功后再经 credential intent CAS 写入。扩展 OAuth 与进程全局 provider 注册仍 fail closed。
 - 扩展 provider 只能通过 session-local runtime 注册可快照的静态配置；`streamSimple`、OAuth、`refreshModels` 和 native provider 注册会 fail closed，不允许绕过宿主的进程级边界。
 - Pi 内置 provider 的远程目录缓存有意由各 runtime 共享同一用户级 `models-store.json`；项目扩展不能注册会写目录缓存的动态/native provider，因此共享缓存只承载 Pi 官方目录，项目差异仍只存在于 session-local 静态 overlay。
 - 配置变更通过 runtime 的串行 refresh 入口清理 credential command cache；基线可按显式 `allowNetwork` 刷新，session/project owner 则固定禁止网络刷新并保留每个 runtime 的错误聚合。
@@ -76,7 +77,7 @@
 - API Key 在共享配置队列完成后才确认；API Key、OAuth 与 logout 共用按 provider 排序的一次性 credential intent，旧操作若已被更新 intent 取代就不得写入或发送成功回执。凭据本身影响所有项目，但发起命令必须仍属于提交时的 observation session/generation，避免迟到页面修改全局认证。会话模型由角色快照固定，中途 `select_model` 明确拒绝；actor 重开时再次校验实际模型，不能 SDK fallback。
 - API Key、角色 CRUD 和删除等需要结算的操作都带原 sessionId + commandId，连接内复用 commandId 会被拒绝。
 - 会话“回到此处”由 project lifecycle、ConversationActor operation queue 和 ProjectStore 原子截断共同完成；busy 或存在待处理 inbox 时拒绝。只有 durable JSONL 与同一 AgentSession 内存 context 都同步后，PiConnection 才依次发布 focused snapshot 和 command completion。
-- `setThinkingLevel()` 和 `setSessionName()` 会先改内存再持久化；工作台以 actor 实际后置条件为准，发布新 state 并单独报告持久化风险。相对地，`AuthStorage.set/remove` 与 `ProjectStore.setToolMode` 都是持久写成功后才替换内存状态，不需要这种部分提交适配。
+- `setThinkingLevel()` 和 `setSessionName()` 会先改内存再持久化；工作台以 actor 实际后置条件为准，发布新 state 并单独报告持久化风险。相对地，`CredentialStore.modify/delete` 与 `ProjectStore.setToolMode` 都是持久写成功后才替换内存状态，不需要这种部分提交适配。
 - browser prompt 可随时尝试，但 busy admission 只在 actor 与 SDK 双重 live 边界允许；失败时不发 `prompt_admitted`，浏览器保留草稿。接受后不建新 run ticket、不写持久队列，当前工具序列结束后下一次模型调用前注入；steeringMode="all" 让排队消息（含 inbox）一次模型轮次全部注入。idle 时经 project lifecycle 起新 run且不越过已有 inbox 工作。abort 先清空 SDK steering/followUp 队列、admissions 与 guidance observations 再 abort，旧消息不能跨越结算边界污染下一次 run。admit 有界（单会话最多 64 条 pending），slash 开头拒绝。
 - `wait_for_session` 让当前工具调用阻塞，但不锁死 run：目标 `conversationId + runId` 只决定哪次 durable settlement 成功；任何实际投递到当前 run 的新 peer/inbox 消息，或 SDK 已接受且尚未 raw-observed 的 browser/explicit guidance，都可先结束 wait。消息只返回真实来源 metadata，guidance 只返回 outcome，正文仍由 custom/raw user message 注入一次。actor 的 one-shot guidance callback 必须由 host 返回是否真的认领到仍存在的 waiter；stale callback 不得提前烧掉 record。claimed inbox 用 `waitedByRunId`、guidance 用 per-record claimed 标记避免后续 wait 重复唤醒；temporary receipt 仍只由精确 temporary wait 建立。
 - 取消 run 必须先清空 SDK 尚未消费的 steering/follow-up queue 再 abort；否则旧引导可能跨越结算边界污染下一次 prompt。持久跨会话消息仍由 inbox delivery marker 决定是否重投，不能把 SDK 内存队列当成 durable truth。
@@ -102,7 +103,7 @@
 - 目录浏览不启动系统窗口或子进程；服务端重新校验浏览位置，只返回目录名与绝对路径，并同时限制数量和序列化字节数。用户确认后仍必须由 initialize 独立校验并提交项目 cwd。
 - WebSocket upgrade 要求 loopback Origin 与请求 Host 精确一致；不能因为 hostname 是 localhost 就允许其它本机端口枚举目录或发送 Agent 命令。
 - ConversationActor dispose 会先等待取消，再发送 `session_shutdown(reason=quit)`，最后释放 AgentSession、session 模型目录和 writer lease。
-- Pi SDK 的 `streamSimple` 与扩展 OAuth 注册表是进程全局状态；第一版显式拒绝这两种项目扩展 provider，不能用裸 per-session registry 伪装隔离。
+- Pi SDK 的 `streamSimple`、OAuth 和 native provider 注册可能触及进程全局状态；第一版显式拒绝这些项目扩展 provider，不能用裸 per-session registry 伪装隔离。
 - 允许的静态 provider config 会先做 host-owned 深快照，防止扩展在注册后修改原对象绕过策略。
 - registry refresh 后必须把 AgentSession 当前 model 重新绑定到新对象；若原模型被删除，则选择 registry fallback，不能继续使用旧 endpoint。配置已持久提交后，每个 session registry 与 baseline registry 的 refresh 都必须独立尝试，并在最后照常通知订阅者；单个 owner 抛错不能跳过其余 session，多个错误聚合后再返回调用方。
 - SDK 内容事件只在当前 actor run ticket 匹配时投影；PiConnection 再按当前 focusId 决定是否发给浏览器。run lifecycle 由工作台适配层合成。
@@ -136,7 +137,7 @@
 - OAuth login 会等待浏览器回答；认证回答和取消不能排在 login 后面的同一队列，否则会死锁。
 - OAuth/extension UI 这类同步 emitter 的请求必须先登记 pending waiter 再发事件；emit 抛错时要删除 waiter 并拒绝请求，避免同步回答丢失或残留悬挂状态。
 - 项目信任和当前 focus 的 extension hook 也可能在首个 PublicState 前等待浏览器；扩展 UI 回答同样不能排 actor queue，也不能要求 PublicState 已存在。
-- OAuth flow 由 authFlowId 关联；pending/cancelled tombstone 保证在 flow 创建前收到的 cancel 也能阻止它启动。宿主不能直接调用会在 provider 返回后自行提交 credential 的 `AuthStorage.login()`；必须先在配置队列外调用 baseline provider 获取 credential，再复验 flow 未取消，并用 flow 开始时取得的一次性 provider revision 进入共享队列提交。这样忽略 abort 的 provider 只能返回一个未提交值，且旧 flow 不能覆盖后来开始的 API Key、logout 或 OAuth intent。
+- OAuth flow 由 authFlowId 关联；pending/cancelled tombstone 保证在 flow 创建前收到的 cancel 也能阻止它启动。宿主不能调用会在 provider 返回后自行同步 credential 的 `ModelRuntime.login()`；必须从 baseline provider 的 `auth.oauth` 取 login，在配置队列外传入 `AuthInteraction` 获取 credential，再复验 flow 未取消，并用 flow 开始时取得的一次性 provider revision 进入共享队列通过 `CredentialStore.modify` 提交。这样忽略 abort 的 provider 只能返回一个未提交值，且旧 flow 不能覆盖后来开始的 API Key、logout 或 OAuth intent。
 - `tool_execution_start` 发生在 SDK 参数校验与 host 策略之前，不能解释成副作用已经开始。
 - sessionId/focusId/runId 不得复用，否则迟到命令会形成 ABA；连接 view 与 conversation actor 会显式拒绝复用。
 - `close` 与 `error` 都可能触发 dispose，清理必须幂等。

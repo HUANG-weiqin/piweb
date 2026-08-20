@@ -158,9 +158,13 @@ describe("ConnectionDrawer", () => {
     expect(keyInput).toHaveAttribute("type", "password");
     expect(keyInput).toHaveFocus();
     fireEvent.change(keyInput, { target: { value: "  secret-key  " } });
+    fireEvent.click(screen.getByRole("button", { name: "显示" }));
+    expect(keyInput).toHaveAttribute("type", "text");
     fireEvent.click(screen.getByRole("button", { name: "保存 API Key" }));
 
     expect(saveKey).toHaveBeenCalledWith("test", "secret-key");
+    expect(keyInput).toHaveValue("");
+    expect(keyInput).toHaveAttribute("type", "password");
     expect(screen.getByRole("button", { name: "正在保存…" })).toBeDisabled();
     expect(dialog).toBeInTheDocument();
 
@@ -198,6 +202,10 @@ describe("ConnectionDrawer", () => {
     })} />);
     expect(screen.getByRole("dialog", { name: "Test API Key" })).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("Key 保存失败");
+    expect(screen.getByLabelText("API Key")).toHaveValue("");
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "retry-key" },
+    });
     expect(screen.getByRole("button", { name: "保存 API Key" })).toBeEnabled();
   });
 

@@ -22,7 +22,11 @@ export function AuthDialog({ requestId, request, progress, visible = true, onRes
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    if (requestId) onRespond(requestId, { value });
+    if (requestId) {
+      const responseValue = value;
+      if (request?.kind === "prompt" && request.secret) setValue("");
+      onRespond(requestId, { value: responseValue });
+    }
   };
 
   return <div className="modal-backdrop" role="presentation">
@@ -45,6 +49,7 @@ export function AuthDialog({ requestId, request, progress, visible = true, onRes
       {(request?.kind === "prompt" || request?.kind === "manual") && <form className="modal-form" onSubmit={submit}>
         <label>{request.message}</label>
         <input
+          type={request.kind === "prompt" && request.secret ? "password" : "text"}
           value={value}
           placeholder={request.placeholder}
           onChange={(event) => setValue(event.target.value)}

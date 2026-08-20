@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthDialog } from "./AuthDialog";
 
 afterEach(cleanup);
@@ -26,5 +26,23 @@ describe("AuthDialog", () => {
 
     view.rerender(<AuthDialog {...props} />);
     expect(screen.getByRole("textbox")).toHaveValue("123456");
+  });
+
+  it("renders secret prompts as password inputs", () => {
+    const onRespond = vi.fn();
+    render(<AuthDialog
+      requestId="secret-request"
+      request={{ kind: "prompt", message: "API key", secret: true }}
+      onRespond={onRespond}
+      onCancel={() => undefined}
+    />);
+
+    const input = document.querySelector("input");
+    expect(input).toHaveAttribute("type", "password");
+    fireEvent.change(input!, { target: { value: "super-secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    expect(onRespond).toHaveBeenCalledWith("secret-request", { value: "super-secret" });
+    expect(input).toHaveValue("");
+    expect(input).toHaveAttribute("type", "password");
   });
 });

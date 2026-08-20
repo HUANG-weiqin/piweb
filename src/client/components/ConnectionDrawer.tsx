@@ -187,7 +187,11 @@ export function ConnectionDrawer({
     if (!online || !keyProvider || !value || savingKey) return;
     setKeyError("");
     const commandId = onKey(keyProvider.id, value);
-    if (commandId) setSavingKey({ providerId: keyProvider.id, commandId });
+    if (commandId) {
+      setSavingKey({ providerId: keyProvider.id, commandId });
+      setKey("");
+      setShowKey(false);
+    }
   };
   const chooseProvider = (nextProviderId: string) => {
     setProviderId(nextProviderId);

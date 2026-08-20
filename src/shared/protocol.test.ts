@@ -477,6 +477,21 @@ describe("parseClientCommand", () => {
     })).toThrow();
   });
 
+  it("preserves secret auth prompt metadata without exposing a value", () => {
+    expect(parseServerEvent({
+      type: "auth_request",
+      authFlowId,
+      requestId: "auth-request-1",
+      request: { kind: "prompt", message: "API key", secret: true },
+    })).toMatchObject({ request: { kind: "prompt", secret: true } });
+    expect(() => parseServerEvent({
+      type: "auth_request",
+      authFlowId,
+      requestId: "auth-request-2",
+      request: { kind: "manual", message: "Code", secret: true },
+    })).toThrow();
+  });
+
   it("validates run correlation on state, events, outcomes, and errors", () => {
     expect(parseServerEvent({
       type: "state",

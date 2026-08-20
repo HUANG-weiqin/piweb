@@ -3,9 +3,10 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
-  AuthStorage,
   ModelRegistry,
+  ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
+import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { WebSocket } from "ws";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -27,12 +28,14 @@ import {
 } from "./socket-server.js";
 
 class SocketTestRuntime implements PiRuntimeLike {
-  readonly authStorage = {} as AuthStorage;
+  readonly credentialStore = new InMemoryCredentialStore();
+  readonly modelRuntime = {} as ModelRuntime;
   readonly modelRegistry = {} as ModelRegistry;
   subscribers = 0;
 
   async createProjectModelCatalog() {
     return {
+      modelRuntime: this.modelRuntime,
       modelRegistry: this.modelRegistry,
       dynamicProviderNames: () => new Set<string>(),
       dispose: async () => undefined,
@@ -49,9 +52,9 @@ class SocketTestRuntime implements PiRuntimeLike {
 
   async commitCredentialChange(
     _intent: CredentialChangeIntent,
-    change: () => void,
+    change: () => Promise<void> | void,
   ): Promise<boolean> {
-    change();
+    await change();
     return true;
   }
 

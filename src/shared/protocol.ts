@@ -454,7 +454,8 @@ export interface PublicState {
 export type AuthRequest =
   | { kind: "auth"; url: string; instructions?: string }
   | { kind: "device"; userCode: string; verificationUri: string; expiresInSeconds?: number }
-  | { kind: "prompt" | "manual"; message: string; placeholder?: string; allowEmpty?: boolean }
+  | { kind: "prompt"; message: string; placeholder?: string; allowEmpty?: boolean; secret?: boolean }
+  | { kind: "manual"; message: string; placeholder?: string; allowEmpty?: boolean }
   | { kind: "select"; message: string; options: Array<{ id: string; label: string }> };
 
 export interface ConversationHistoryTool {
@@ -856,13 +857,14 @@ const authRequestSchema: z.ZodType<AuthRequest> = z.discriminatedUnion("kind", [
     message: z.string(),
     placeholder: z.string().optional(),
     allowEmpty: z.boolean().optional(),
+    secret: z.boolean().optional(),
   }),
   z.object({
     kind: z.literal("manual"),
     message: z.string(),
     placeholder: z.string().optional(),
     allowEmpty: z.boolean().optional(),
-  }),
+  }).strict(),
   z.object({
     kind: z.literal("select"),
     message: z.string(),

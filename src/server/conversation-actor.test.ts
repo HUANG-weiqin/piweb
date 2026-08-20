@@ -2,8 +2,8 @@ import type {
   AgentMessage,
   AgentSession,
   AgentSessionEvent,
-  AuthStorage,
   ExtensionError,
+  ModelRuntime,
   ModelRegistry,
   SessionManager as SessionManagerType,
 } from "@earendil-works/pi-coding-agent";
@@ -12,6 +12,7 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
+import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import {
   MAX_PROMPT_CHARACTERS,
   parseServerEvent,
@@ -191,7 +192,8 @@ function fakeSession(): FakeSession {
 }
 
 class FakeRuntime implements PiRuntimeLike {
-  readonly authStorage = {} as AuthStorage;
+  readonly credentialStore = new InMemoryCredentialStore();
+  readonly modelRuntime = {} as ModelRuntime;
   readonly modelRegistry = {} as ModelRegistry;
   readonly session = fakeSession();
   readonly settings = fakeSettings();
@@ -203,6 +205,7 @@ class FakeRuntime implements PiRuntimeLike {
 
   async createProjectModelCatalog() {
     return {
+      modelRuntime: this.modelRuntime,
       modelRegistry: this.modelRegistry,
       dynamicProviderNames: () => new Set<string>(),
       dispose: async () => undefined,
@@ -228,6 +231,7 @@ class FakeRuntime implements PiRuntimeLike {
     return {
       session: this.session,
       settings: this.settings,
+      modelRuntime: this.modelRuntime,
       modelRegistry: this.modelRegistry,
       releaseTurnBoundaryPause: () => {
         if (!this.session.turnBoundaryPaused) return;
@@ -255,10 +259,9 @@ class FakeRuntime implements PiRuntimeLike {
 
   async commitCredentialChange(
     _intent: CredentialChangeIntent,
-    change: () => void,
+    change: () => Promise<void> | void,
   ): Promise<boolean> {
-    change();
-    return true;
+    return Promise.resolve(change()).then(() => true);
   }
 
   updateConfiguration<T>(change: () => Promise<T> | T): Promise<T> {

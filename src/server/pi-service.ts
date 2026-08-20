@@ -297,6 +297,7 @@ export class PiConnection {
   private readonly usedAuthFlowIds = new Set<string>();
   private readonly pendingAuthFlowIds = new Set<string>();
   private readonly cancelledAuthFlowIds = new Set<string>();
+  private readonly credentialIntents = new WeakMap<object, CredentialChangeIntent>();
   private generation = 0;
   private initializationAbort?: AbortController;
   private coordinatedTransitionAbort?: AbortController;
@@ -618,6 +619,7 @@ export class PiConnection {
     }
 
     const generation = this.generation;
+    this.admitCredentialIntent(command, generation, false);
     const scope = queuedCommandScope(command);
     return this.operations.run(async () => {
       try {
@@ -647,6 +649,7 @@ export class PiConnection {
           this.pendingAuthFlowIds.delete(command.authFlowId);
           this.cancelledAuthFlowIds.delete(command.authFlowId);
         }
+        this.credentialIntents.delete(command);
       }
     });
   }
@@ -847,6 +850,7 @@ export class PiConnection {
     }
 
     const generation = this.generation;
+    this.admitCredentialIntent(command, generation, true);
     let transitionAbort: AbortController | undefined;
     if (
       command.type === "focus_conversation"
@@ -881,6 +885,7 @@ export class PiConnection {
           this.pendingAuthFlowIds.delete(command.authFlowId);
           this.cancelledAuthFlowIds.delete(command.authFlowId);
         }
+        this.credentialIntents.delete(command);
       }
     });
   }
@@ -1365,14 +1370,22 @@ export class PiConnection {
         return;
       }
       case "set_api_key":
-        await this.setApiKey(command.provider, command.key);
+        await this.setApiKey(
+          command.provider,
+          command.key,
+          this.takeCredentialIntent(command),
+        );
         this.emitCommandComplete(command);
         return;
       case "login_oauth":
-        await this.loginOAuth(command.provider, command.authFlowId);
+        await this.loginOAuth(
+          command.provider,
+          command.authFlowId,
+          this.takeCredentialIntent(command),
+        );
         return;
       case "logout":
-        await this.logout(command.provider);
+        await this.logout(command.provider, this.takeCredentialIntent(command));
         return;
       case "refresh_models":
         await this.refreshModels();
@@ -1642,10 +1655,7 @@ export class PiConnection {
     const registry = actor?.modelRegistry
       ?? view.coordinator.modelRegistryForProject(view.handle);
     const available = registry.getAvailable();
-    const oauthProviders = new Map(
-      this.runtime.authStorage.getOAuthProviders()
-        .map((provider) => [provider.id, provider.name]),
-    );
+    const oauthProviders = this.visibleOAuthProviders();
     const base: PublicState = {
       sessionId: view.sessionId,
       projectId: view.handle.project.id,
@@ -1979,10 +1989,6 @@ export class PiConnection {
     }
     const failures: unknown[] = [];
     const reported = new Set<unknown>();
-    for (const error of this.runtime.authStorage.drainErrors()) {
-      reported.add(error);
-      this.emitError("auth", error);
-    }
     for (const item of actor.settings.drainErrors()) {
       reported.add(item.error);
       failures.push(item.error);
@@ -2174,9 +2180,20 @@ export class PiConnection {
       case "update_role":
       case "delete_role":
         throw new Error(`${command.type} is unavailable until project coordination is initialized`);
-      case "set_api_key": return this.setApiKey(command.provider, command.key);
-      case "login_oauth": return this.loginOAuth(command.provider, command.authFlowId);
-      case "logout": return this.logout(command.provider);
+      case "set_api_key": return this.setApiKey(
+        command.provider,
+        command.key,
+        this.takeCredentialIntent(command),
+      );
+      case "login_oauth": return this.loginOAuth(
+        command.provider,
+        command.authFlowId,
+        this.takeCredentialIntent(command),
+      );
+      case "logout": return this.logout(
+        command.provider,
+        this.takeCredentialIntent(command),
+      );
       case "refresh_models": return this.refreshModels();
       default: return assertNever(command);
     }
@@ -2355,72 +2372,131 @@ export class PiConnection {
     }
   }
 
-  private async setApiKey(provider: string, key: string): Promise<void> {
+  private async setApiKey(
+    provider: string,
+    key: string,
+    intent: CredentialChangeIntent | undefined,
+  ): Promise<void> {
     this.assertKnownProvider(provider);
-    const intent = this.runtime.beginCredentialChange(provider);
-    const applied = await this.commitCredentialChange(intent, () => {
-      this.runtime.authStorage.set(provider, { type: "api_key", key });
+    if (!intent) throw new Error("Credential change was not admitted");
+    const applied = await this.commitCredentialChange(intent, async () => {
+      await this.runtime.credentialStore.modify(provider, async () => ({
+        type: "api_key",
+        key,
+      }));
     });
     if (!applied) throw new Error("API key change was superseded by a newer credential change");
   }
 
-  private async loginOAuth(provider: string, authFlowId: string): Promise<void> {
-    const oauthProvider = this.runtime.authStorage.getOAuthProviders()
-      .find((item) => item.id === provider);
-    if (!oauthProvider) throw new Error(`OAuth provider not found: ${provider}`);
+  private async loginOAuth(
+    provider: string,
+    authFlowId: string,
+    intent: CredentialChangeIntent | undefined,
+  ): Promise<void> {
+    const oauth = this.runtime.modelRuntime.getProvider(provider)?.auth.oauth;
+    if (!oauth) throw new Error(`OAuth provider not found: ${provider}`);
+    if (!intent) throw new Error("Credential change was not admitted");
     this.authFlow?.cancel();
     const flow = new AuthFlowBroker(authFlowId, this.emit);
     this.authFlow = flow;
-    const signal = flow.callbacks.signal;
-    const intent = this.runtime.beginCredentialChange(provider);
+    const signal = flow.signal;
     try {
-      const credentials = await oauthProvider.login(flow.callbacks);
-      if (signal?.aborted) return;
-      const applied = await this.commitCredentialChange(intent, () => {
-        if (signal?.aborted) return;
-        this.runtime.authStorage.set(provider, {
-          type: "oauth",
-          ...credentials,
+      let credential;
+      try {
+        credential = await oauth.login(flow.interaction);
+      } catch (error) {
+        if (signal.aborted) return;
+        throw new Error("OAuth login failed", { cause: error });
+      }
+      if (signal.aborted) return;
+      let applied: boolean;
+      try {
+        applied = await this.commitCredentialChange(intent, async () => {
+          if (signal.aborted) throw new Error("Authentication cancelled");
+          await this.runtime.credentialStore.modify(
+            provider,
+            async () => credential,
+            { signal },
+          );
         });
-      });
-      if (signal?.aborted || !applied) return;
+      } catch (error) {
+        if (signal.aborted) return;
+        throw error;
+      }
+      if (signal.aborted) return;
+      if (!applied) {
+        throw new Error("OAuth credential change was superseded by a newer credential change");
+      }
       this.emit({ type: "auth_complete", authFlowId, provider });
-    } catch (error) {
-      if (!signal?.aborted) throw error;
     } finally {
       if (this.authFlow === flow) this.authFlow = undefined;
     }
   }
 
-  private async logout(provider: string): Promise<void> {
+  private async logout(
+    provider: string,
+    intent: CredentialChangeIntent | undefined,
+  ): Promise<void> {
     this.assertKnownProvider(provider, true);
-    const intent = this.runtime.beginCredentialChange(provider);
-    const applied = await this.commitCredentialChange(intent, () => {
-      this.runtime.authStorage.logout(provider);
+    if (!intent) throw new Error("Credential change was not admitted");
+    const applied = await this.commitCredentialChange(intent, async () => {
+      await this.runtime.credentialStore.delete(provider);
     });
     if (!applied) throw new Error("Logout was superseded by a newer credential change");
   }
 
   private async refreshModels(): Promise<void> {
-    try {
-      await this.runtime.refreshConfiguration();
-    } finally {
-      this.reportNativeErrors();
-    }
+    await this.runtime.refreshConfiguration();
   }
 
   private async commitCredentialChange(
     intent: CredentialChangeIntent,
-    change: () => void,
+    change: () => Promise<void> | void,
   ): Promise<boolean> {
-    try {
-      return await this.runtime.commitCredentialChange(intent, change);
-    } finally {
-      this.reportNativeErrors();
-    }
+    return this.runtime.commitCredentialChange(intent, change);
   }
 
-  private assertKnownProvider(provider: string, includeOAuth = false): void {
+  private admitCredentialIntent(
+    command: ConnectionCommand,
+    generation: number,
+    coordinated: boolean,
+  ): void {
+    if (this.disposed) return;
+    let provider: string | undefined;
+    let includeOAuth = false;
+    switch (command.type) {
+      case "set_api_key":
+        if (
+          !(
+            coordinated
+              ? this.isCoordinatedSession(command.sessionId, generation)
+              : this.isActiveSession(command.sessionId, generation)
+          )
+        ) return;
+        provider = command.provider;
+        break;
+      case "login_oauth":
+        provider = command.provider;
+        includeOAuth = true;
+        break;
+      case "logout":
+        provider = command.provider;
+        includeOAuth = true;
+        break;
+      default:
+        return;
+    }
+    if (!this.isKnownProvider(provider, includeOAuth)) return;
+    this.credentialIntents.set(command, this.runtime.beginCredentialChange(provider));
+  }
+
+  private takeCredentialIntent(command: object): CredentialChangeIntent | undefined {
+    const intent = this.credentialIntents.get(command);
+    this.credentialIntents.delete(command);
+    return intent;
+  }
+
+  private isKnownProvider(provider: string, includeOAuth = false): boolean {
     const active = this.active;
     const view = this.coordinatedView;
     const actor = view?.actor;
@@ -2436,7 +2512,13 @@ export class PiConnection {
       || actor?.dynamicProviderNames().has(provider) === true
       || active?.dynamicProviderNames().has(provider) === true;
     const oauthProvider = includeOAuth && this.isVisibleOAuthProvider(provider);
-    if (!modelProvider && !oauthProvider) throw new Error(`Provider not found: ${provider}`);
+    return modelProvider || oauthProvider;
+  }
+
+  private assertKnownProvider(provider: string, includeOAuth = false): void {
+    if (!this.isKnownProvider(provider, includeOAuth)) {
+      throw new Error(`Provider not found: ${provider}`);
+    }
   }
 
   private state(): PublicState {
@@ -2448,8 +2530,7 @@ export class PiConnection {
       : undefined;
     const registry = active.modelRegistry;
     const available = registry.getAvailable();
-    const oauthProviders = new Map(this.runtime.authStorage.getOAuthProviders()
-      .map((provider) => [provider.id, provider.name]));
+    const oauthProviders = this.visibleOAuthProviders();
     const stats = session.getSessionStats();
     const contextUsage = resolveContextUsage({
       contextWindow: session.model?.contextWindow ?? null,
@@ -2545,35 +2626,12 @@ export class PiConnection {
     }
     const failures: unknown[] = [];
     const reported = new Set<unknown>();
-    for (const error of this.runtime.authStorage.drainErrors()) {
-      reported.add(error);
-      this.emitError("auth", error);
-    }
     for (const item of this.active?.settings.drainErrors() ?? []) {
       reported.add(item.error);
       failures.push(item.error);
     }
     if (failure && !reported.has(failure)) failures.push(failure);
     return failures;
-  }
-
-  private reportNativeErrors(): Set<unknown> {
-    const reported = new Set<unknown>();
-    for (const error of this.runtime.authStorage.drainErrors()) {
-      reported.add(error);
-      this.emitError("auth", error);
-    }
-    const settings =
-      this.coordinatedView?.actor?.settings ?? this.active?.settings;
-    for (const item of settings?.drainErrors() ?? []) {
-      reported.add(item.error);
-      this.emitError(
-        "settings",
-        item.error,
-        this.coordinatedView?.sessionId ?? this.active?.id,
-      );
-    }
-    return reported;
   }
 
   private isActiveSession(sessionId: string, generation: number): boolean {
@@ -2653,8 +2711,17 @@ export class PiConnection {
     return `Extension error in ${error.event} (${error.extensionPath}): ${error.error}`;
   }
 
+  private visibleOAuthProviders(): Map<string, string> {
+    return new Map(
+      this.runtime.modelRuntime.getProviders()
+        .flatMap((provider) => provider.auth.oauth
+          ? [[provider.id, provider.auth.oauth.name] as const]
+          : []),
+    );
+  }
+
   private isVisibleOAuthProvider(provider: string): boolean {
-    return this.runtime.authStorage.getOAuthProviders().some((item) => item.id === provider);
+    return this.visibleOAuthProviders().has(provider);
   }
 
   private async authorizeToolCall(
