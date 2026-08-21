@@ -392,4 +392,12 @@ describe("createMetaTools", () => {
     expect(fake.waitForSession).not.toHaveBeenCalled();
     expect(fake.abortSession).not.toHaveBeenCalled();
   });
+
+  it("documents checkpoint as not proof and requires same IDs to wait again", () => {
+    const tools = createMetaTools(sourceConversationId, service());
+    const wait = tools.find((t) => t.name === "wait_for_session")!;
+    expect(wait.description).toMatch(/checkpoint/i);
+    expect(wait.description).toMatch(/outcome.*checkpoint/i);
+    expect(wait.description).toMatch(/call again with the same conversationId\+runId/i);
+  });
 });

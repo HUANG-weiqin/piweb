@@ -201,6 +201,16 @@ const RUN_OWNERSHIP = Symbol("ConversationActor.runOwnership");
 // Avoid retrying every tool boundary without disabling protection for a long run.
 const COMPACTION_RETRY_GROWTH_PERCENT = 5;
 
+type AssistantAgentMessage = Extract<
+  Extract<AgentSessionEvent, { type: "message_end" }>["message"],
+  { role: "assistant" }
+>;
+
+export const WAIT_CACHE_CHECKPOINT_DELAY_MS = 180_000;
+const WAIT_CACHE_CHECKPOINT_MIN_CONTEXT_TOKENS = 32_000;
+const MAX_WAIT_CACHE_CHECKPOINTS_PER_RUN = 2;
+const WAIT_CACHE_CHECKPOINT_MIN_HIT_RATIO = 0.5;
+
 /**
  * An opaque capability for the currently executing run. A stale capability can
  * observe completion, but it cannot mutate a later run or revive a settled one.
@@ -289,6 +299,9 @@ interface RunTicket {
   compactionRetryAtPercent?: number;
   sdkCompactionSucceeded: boolean;
   turnBoundaryCompactionRequested: boolean;
+  waitCacheCheckpointCount: number;
+  waitCacheCheckpointDisabled: boolean;
+  awaitingWaitCacheCheckpointUsage: boolean;
   abortPromise?: Promise<void>;
   projectRunLease?: ProjectRunLease;
   finishPromise?: Promise<RunSettlement>;
@@ -1421,6 +1434,9 @@ export class ConversationActor {
       compactionErrorReported: false,
       sdkCompactionSucceeded: false,
       turnBoundaryCompactionRequested: false,
+      waitCacheCheckpointCount: 0,
+      waitCacheCheckpointDisabled: false,
+      awaitingWaitCacheCheckpointUsage: false,
     };
     this.activeRun = ticket;
     this.beginLiveProjection(ticket, input.promptText);
@@ -1492,6 +1508,102 @@ export class ConversationActor {
       return await work();
     } finally {
       restore();
+    }
+  }
+
+  canScheduleWaitCacheCheckpoint(
+    ownership: ConversationRunOwnership,
+  ): boolean {
+    const ticket = this.activeRun;
+    if (
+      !ticket
+      || ticket.ownership !== ownership
+      || ownership[RUN_OWNERSHIP] !== ticket.ownership[RUN_OWNERSHIP]
+      || ticket.phase !== "waiting"
+    ) {
+      return false;
+    }
+    if (ticket.waitCacheCheckpointDisabled) return false;
+    if (
+      ticket.waitCacheCheckpointCount
+      >= MAX_WAIT_CACHE_CHECKPOINTS_PER_RUN
+    ) {
+      return false;
+    }
+    if (ticket.awaitingWaitCacheCheckpointUsage) return false;
+    const tokens = this.session.getContextUsage?.()?.tokens;
+    if (
+      typeof tokens !== "number"
+      || !Number.isFinite(tokens)
+      || tokens < WAIT_CACHE_CHECKPOINT_MIN_CONTEXT_TOKENS
+    ) {
+      return false;
+    }
+    const cost = this.session.model?.cost;
+    if (!cost) return false;
+    const inputCost = cost.input;
+    const cacheReadCost = cost.cacheRead;
+    if (
+      typeof inputCost !== "number"
+      || typeof cacheReadCost !== "number"
+      || !Number.isFinite(inputCost)
+      || !Number.isFinite(cacheReadCost)
+      || inputCost <= 0
+      || cacheReadCost <= 0
+    ) {
+      return false;
+    }
+    // Budget two refreshes plus the eventual target-result turn against one
+    // uncached read; equality has no guaranteed savings, so fail closed.
+    if (
+      (MAX_WAIT_CACHE_CHECKPOINTS_PER_RUN + 1) * cacheReadCost
+      >= inputCost
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  claimWaitCacheCheckpoint(
+    ownership: ConversationRunOwnership,
+  ): boolean {
+    if (!this.canScheduleWaitCacheCheckpoint(ownership)) return false;
+    const ticket = this.activeRun!;
+    ticket.waitCacheCheckpointCount += 1;
+    ticket.awaitingWaitCacheCheckpointUsage = true;
+    return true;
+  }
+
+  private handleWaitCacheCheckpointAssistantUsage(
+    ticket: RunTicket,
+    message: AssistantAgentMessage,
+  ): void {
+    if (!ticket.awaitingWaitCacheCheckpointUsage) return;
+    const usage = message.usage;
+    ticket.awaitingWaitCacheCheckpointUsage = false;
+    if (
+      !usage
+      || typeof usage.input !== "number"
+      || typeof usage.cacheRead !== "number"
+      || typeof usage.cacheWrite !== "number"
+      || !Number.isFinite(usage.input)
+      || !Number.isFinite(usage.cacheRead)
+      || !Number.isFinite(usage.cacheWrite)
+    ) {
+      ticket.waitCacheCheckpointDisabled = true;
+      return;
+    }
+    const denom = usage.input + usage.cacheRead + usage.cacheWrite;
+    if (!Number.isFinite(denom) || denom <= 0) {
+      ticket.waitCacheCheckpointDisabled = true;
+      return;
+    }
+    const ratio = usage.cacheRead / denom;
+    if (
+      !Number.isFinite(ratio)
+      || ratio < WAIT_CACHE_CHECKPOINT_MIN_HIT_RATIO
+    ) {
+      ticket.waitCacheCheckpointDisabled = true;
     }
   }
 
@@ -2154,6 +2266,16 @@ export class ConversationActor {
       // projecting final text/usage.
       const assistant = this.ensureLiveAssistant(ticket);
       this.liveProjection.rawMessagesByItemId.set(assistant.id, event.message);
+    }
+
+    if (
+      event.type === "message_end"
+      && event.message.role === "assistant"
+    ) {
+      this.handleWaitCacheCheckpointAssistantUsage(
+        ticket,
+        event.message,
+      );
     }
 
     const rawStartedMessage = event.type === "message_start"

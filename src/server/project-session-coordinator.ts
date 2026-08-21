@@ -31,6 +31,7 @@ import {
   type ConversationActorCompletion,
   type ConversationActorEvent,
   type ConversationRunOwnership,
+  WAIT_CACHE_CHECKPOINT_DELAY_MS,
 } from "./conversation-actor.js";
 import {
   projectAgentConversationPeek,
@@ -161,10 +162,15 @@ interface SessionGuidanceWaitResult {
   outcome: "guidance";
 }
 
+interface SessionCheckpointWaitResult {
+  outcome: "checkpoint";
+}
+
 type SessionWaitResult =
   | RunSettlement
   | SessionMessageWaitResult
-  | SessionGuidanceWaitResult;
+  | SessionGuidanceWaitResult
+  | SessionCheckpointWaitResult;
 
 interface CompletionWaiter extends WaiterBase {
   kind: "completion";
@@ -177,6 +183,7 @@ interface SessionWaiter extends WaiterBase {
   targetConversationId: string;
   targetRunId: string;
   resolve(result: SessionWaitResult): void;
+  checkpointTimer?: ReturnType<typeof setTimeout>;
 }
 
 type ProjectWaiter = CompletionWaiter | SessionWaiter;
@@ -2504,6 +2511,49 @@ export class ProjectSessionCoordinator {
                 };
                 resolveCompletion(result);
               }
+            }
+
+            if (
+              waiters.has(waiter)
+              && source.canScheduleWaitCacheCheckpoint(ownership)
+            ) {
+              const timer = setTimeout(() => {
+                if (waiter.checkpointTimer !== timer) return;
+                waiter.checkpointTimer = undefined;
+                void this.runLifecycle(context, async () => {
+                  const set = context.waiters.get(key);
+                  if (!set?.has(waiter)) return;
+                  const claimed =
+                    source.claimWaitCacheCheckpoint(ownership);
+                  if (!claimed) return;
+                  set.delete(waiter);
+                  if (set.size === 0) context.waiters.delete(key);
+                  this.detachWaiter(waiter);
+                  const result: SessionCheckpointWaitResult = {
+                    outcome: "checkpoint",
+                  };
+                  waiter.resolve(result);
+                  this.emit(context, { type: "project_changed" });
+                }).catch((error) => {
+                  const set = context.waiters.get(key);
+                  if (!set?.has(waiter)) return;
+                  set.delete(waiter);
+                  if (set.size === 0) context.waiters.delete(key);
+                  this.detachWaiter(waiter);
+                  waiter.reject(
+                    error instanceof Error
+                      ? error
+                      : new Error(String(error)),
+                  );
+                });
+              }, WAIT_CACHE_CHECKPOINT_DELAY_MS);
+              const maybeUnref = timer as unknown as {
+                unref?: () => void;
+              };
+              if (typeof maybeUnref.unref === "function") {
+                maybeUnref.unref();
+              }
+              waiter.checkpointTimer = timer;
             }
           });
         } catch (error) {
@@ -5585,6 +5635,10 @@ export class ProjectSessionCoordinator {
   private detachWaiter(waiter: ProjectWaiter): void {
     if (waiter.signal && waiter.abortListener) {
       waiter.signal.removeEventListener("abort", waiter.abortListener);
+    }
+    if (waiter.kind === "session" && waiter.checkpointTimer !== undefined) {
+      clearTimeout(waiter.checkpointTimer);
+      waiter.checkpointTimer = undefined;
     }
   }
 

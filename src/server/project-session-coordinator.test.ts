@@ -21,6 +21,7 @@ import {
 } from "../shared/protocol.js";
 import {
   ConversationActor,
+  WAIT_CACHE_CHECKPOINT_DELAY_MS,
   type ConversationActorEvent,
 } from "./conversation-actor.js";
 import {
@@ -142,6 +143,11 @@ class FakeSessionControl {
   steerPromptHandled?: boolean;
   /** Simulated input-extension handlers (admission precheck). */
   hasInputExtensionHandlers?: boolean;
+  contextUsage?: {
+    tokens: number | null;
+    contextWindow: number;
+    percent: number | null;
+  };
   listener?: (event: AgentSessionEvent) => void;
   abortCurrent?: () => void;
   readonly session: AgentSession;
@@ -238,6 +244,7 @@ class FakeSessionControl {
         };
       },
       setSessionName: (_name: string) => undefined,
+      getContextUsage: () => control.contextUsage,
     } as unknown as AgentSession;
   }
 
@@ -276,6 +283,29 @@ class FakeSessionControl {
         role: "assistant",
         content: [{ type: "text", text }],
         stopReason: "stop",
+      },
+    } as unknown as AgentSessionEvent);
+  }
+
+  emitAssistantUsage(
+    input: number,
+    cacheRead: number,
+    cacheWrite: number,
+  ): void {
+    this.listener?.({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [],
+        stopReason: "toolUse",
+        usage: {
+          input,
+          output: 1,
+          cacheRead,
+          cacheWrite,
+          totalTokens: input + cacheRead + cacheWrite + 1,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
       },
     } as unknown as AgentSessionEvent);
   }
@@ -11411,7 +11441,340 @@ describe("ProjectSessionCoordinator", () => {
     });
   });
 
+  describe("wait cache checkpoints", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
 
+    function makeWaitCacheEligible(control: FakeSessionControl): void {
+      control.contextUsage = {
+        tokens: 50_000,
+        contextWindow: 200_000,
+        percent: 25,
+      };
+      const model = control.session.model;
+      if (!model) throw new Error("Expected a test model");
+      model.cost = { input: 10, output: 1, cacheRead: 1, cacheWrite: 1 };
+    }
+
+    function observeWaitCacheTimers() {
+      const spy = vi.spyOn(global, "setTimeout");
+      return () => spy.mock.calls.flatMap((call, index) => {
+        const [callback, delay] = call;
+        if (
+          delay !== WAIT_CACHE_CHECKPOINT_DELAY_MS
+          || typeof callback !== "function"
+        ) {
+          return [];
+        }
+        const result = spy.mock.results[index];
+        if (!result || result.type !== "return") {
+          throw new Error("Expected wait-cache timer handle");
+        }
+        return [{
+          fire: () => callback(),
+          handle: result.value as ReturnType<typeof setTimeout>,
+        }];
+      });
+    }
+
+    it("returns a checkpoint without fabricating target completion", async () => {
+      const fixture = await createFixture();
+      const source = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const target = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      makeWaitCacheEligible(
+        fixture.runtime.control(source.conversationId),
+      );
+
+      const targetStarted = deferred();
+      const releaseTarget = deferred();
+      fixture.runtime.control(target.conversationId).enqueue(
+        blocksUntil(targetStarted, releaseTarget),
+      );
+      const targetRunId = randomUUID();
+      const targetCompletion = fixture.coordinator.prompt(
+        fixture.handle,
+        target.conversationId,
+        targetRunId,
+        "hold target",
+      );
+      await targetStarted.promise;
+
+      const timers = observeWaitCacheTimers();
+      const waitReturned = deferred();
+      const releaseSource = deferred();
+      let waitResult: unknown;
+      fixture.runtime.control(source.conversationId).enqueue(async (control) => {
+        waitResult = await executeTool(
+          control,
+          "wait_for_session",
+          "checkpoint-wait",
+          { conversationId: target.conversationId, runId: targetRunId },
+        );
+        waitReturned.resolve();
+        await releaseSource.promise;
+        control.emitFinal("source finished");
+      });
+      const sourceCompletion = fixture.coordinator.prompt(
+        fixture.handle,
+        source.conversationId,
+        randomUUID(),
+        "wait for target",
+      );
+      await waitUntil(
+        () => source.getActivity().kind === "waiting",
+        "wait-cache timer registration",
+      );
+
+      const timer = timers()[0];
+      if (!timer) throw new Error("Expected wait-cache timer");
+      clearTimeout(timer.handle);
+      timer.fire();
+      await waitReturned.promise;
+
+      expect(waitResult).toEqual({ outcome: "checkpoint" });
+      expect(source.getActivity().kind).toBe("running");
+      expect(target.getActivity().kind).toBe("running");
+
+      releaseSource.resolve();
+      releaseTarget.resolve();
+      await expect(sourceCompletion).resolves.toMatchObject({
+        outcome: "completed",
+      });
+      await expect(targetCompletion).resolves.toMatchObject({
+        outcome: "completed",
+        runId: targetRunId,
+      });
+    });
+
+    it("lets a durable settlement win and clears its checkpoint timer", async () => {
+      const fixture = await createFixture();
+      const source = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const target = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      makeWaitCacheEligible(
+        fixture.runtime.control(source.conversationId),
+      );
+
+      const targetStarted = deferred();
+      const releaseTarget = deferred();
+      fixture.runtime.control(target.conversationId).enqueue(
+        blocksUntil(targetStarted, releaseTarget),
+      );
+      const targetRunId = randomUUID();
+      const targetCompletion = fixture.coordinator.prompt(
+        fixture.handle,
+        target.conversationId,
+        targetRunId,
+        "settle before timer",
+      );
+      await targetStarted.promise;
+
+      const timers = observeWaitCacheTimers();
+      const clearTimer = vi.spyOn(global, "clearTimeout");
+      const waitReturned = deferred();
+      let waitResult: unknown;
+      fixture.runtime.control(source.conversationId).enqueue(async (control) => {
+        waitResult = await executeTool(
+          control,
+          "wait_for_session",
+          "settlement-wait",
+          { conversationId: target.conversationId, runId: targetRunId },
+        );
+        waitReturned.resolve();
+        control.emitFinal("settlement observed");
+      });
+      const sourceCompletion = fixture.coordinator.prompt(
+        fixture.handle,
+        source.conversationId,
+        randomUUID(),
+        "wait for settlement",
+      );
+      await waitUntil(
+        () => source.getActivity().kind === "waiting",
+        "settlement waiter registration",
+      );
+      const timer = timers()[0];
+      if (!timer) throw new Error("Expected wait-cache timer");
+      const claim = vi.spyOn(source, "claimWaitCacheCheckpoint");
+
+      releaseTarget.resolve();
+      await targetCompletion;
+      await waitReturned.promise;
+
+      expect(waitResult).toMatchObject({
+        outcome: "completed",
+        runId: targetRunId,
+      });
+      expect(clearTimer).toHaveBeenCalledWith(timer.handle);
+      timer.fire();
+      expect(claim).not.toHaveBeenCalled();
+      await sourceCompletion;
+    });
+
+    it("uses positive cache feedback but never installs a third timer", async () => {
+      const fixture = await createFixture();
+      const source = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const target = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      makeWaitCacheEligible(
+        fixture.runtime.control(source.conversationId),
+      );
+
+      const targetStarted = deferred();
+      const releaseTarget = deferred();
+      fixture.runtime.control(target.conversationId).enqueue(
+        blocksUntil(targetStarted, releaseTarget),
+      );
+      const targetRunId = randomUUID();
+      const targetCompletion = fixture.coordinator.prompt(
+        fixture.handle,
+        target.conversationId,
+        targetRunId,
+        "hold target through two checkpoints",
+      );
+      await targetStarted.promise;
+
+      const timers = observeWaitCacheTimers();
+      const abortThirdWait = new AbortController();
+      const thirdWaitStarted = deferred();
+      const waitResults: unknown[] = [];
+      let thirdWaitError: unknown;
+      fixture.runtime.control(source.conversationId).enqueue(async (control) => {
+        for (const toolCallId of ["checkpoint-one", "checkpoint-two"]) {
+          waitResults.push(await executeTool(
+            control,
+            "wait_for_session",
+            toolCallId,
+            { conversationId: target.conversationId, runId: targetRunId },
+          ));
+          control.emitAssistantUsage(20, 80, 10);
+        }
+        thirdWaitStarted.resolve();
+        try {
+          await executeTool(
+            control,
+            "wait_for_session",
+            "checkpoint-three",
+            { conversationId: target.conversationId, runId: targetRunId },
+            abortThirdWait.signal,
+          );
+        } catch (error) {
+          thirdWaitError = error;
+        }
+        control.emitFinal("checkpoint cap observed");
+      });
+      const sourceCompletion = fixture.coordinator.prompt(
+        fixture.handle,
+        source.conversationId,
+        randomUUID(),
+        "wait repeatedly",
+      );
+
+      await waitUntil(() => timers().length === 1, "first checkpoint timer");
+      const firstTimer = timers()[0];
+      if (!firstTimer) throw new Error("Expected first checkpoint timer");
+      clearTimeout(firstTimer.handle);
+      firstTimer.fire();
+
+      await waitUntil(() => timers().length === 2, "second checkpoint timer");
+      const secondTimer = timers()[1];
+      if (!secondTimer) throw new Error("Expected second checkpoint timer");
+      clearTimeout(secondTimer.handle);
+      secondTimer.fire();
+
+      await thirdWaitStarted.promise;
+      await waitUntil(
+        () => source.getActivity().kind === "waiting",
+        "third wait without a checkpoint timer",
+      );
+      expect(timers()).toHaveLength(2);
+      expect(waitResults).toEqual([
+        { outcome: "checkpoint" },
+        { outcome: "checkpoint" },
+      ]);
+
+      abortThirdWait.abort();
+      await sourceCompletion;
+      expect(thirdWaitError).toMatchObject({ name: "AbortError" });
+      releaseTarget.resolve();
+      await targetCompletion;
+    });
+
+    it("clears an aborted wait timer and ignores its stale callback", async () => {
+      const fixture = await createFixture();
+      const source = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const target = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      makeWaitCacheEligible(
+        fixture.runtime.control(source.conversationId),
+      );
+
+      const timers = observeWaitCacheTimers();
+      const clearTimer = vi.spyOn(global, "clearTimeout");
+      const abort = new AbortController();
+      const waitReturned = deferred();
+      let waitError: unknown;
+      fixture.runtime.control(source.conversationId).enqueue(async (control) => {
+        try {
+          await executeTool(
+            control,
+            "wait_for_session",
+            "aborted-checkpoint-wait",
+            { conversationId: target.conversationId, runId: RUN_A },
+            abort.signal,
+          );
+        } catch (error) {
+          waitError = error;
+        }
+        waitReturned.resolve();
+        control.emitFinal("aborted wait handled");
+      });
+      const sourceCompletion = fixture.coordinator.prompt(
+        fixture.handle,
+        source.conversationId,
+        randomUUID(),
+        "abort this wait",
+      );
+      await waitUntil(
+        () => source.getActivity().kind === "waiting",
+        "aborted waiter registration",
+      );
+      const timer = timers()[0];
+      if (!timer) throw new Error("Expected wait-cache timer");
+      const claim = vi.spyOn(source, "claimWaitCacheCheckpoint");
+
+      abort.abort();
+      await waitReturned.promise;
+
+      expect(waitError).toMatchObject({ name: "AbortError" });
+      expect(clearTimer).toHaveBeenCalledWith(timer.handle);
+      timer.fire();
+      expect(claim).not.toHaveBeenCalled();
+      await sourceCompletion;
+    });
+  });
 });
 
 class TrackingProjectStoreRegistry extends ProjectStoreRegistry {

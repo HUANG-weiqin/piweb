@@ -81,6 +81,7 @@ interface FakeSession extends AgentSession {
   compactCalls: number;
   compactImplementation(): Promise<unknown>;
   contextPercent: number | null;
+  contextTokens?: number | null;
   clearQueueCalls: number;
   disposeCalls: number;
   eventListener?: (event: AgentSessionEvent) => void;
@@ -119,7 +120,12 @@ function fakeSession(): FakeSession {
     steerCalls: [],
     isStreaming: false,
     messages: [],
-    model: { provider: "test", id: "model", contextWindow: 1_000 },
+    model: {
+      provider: "test",
+      id: "model",
+      contextWindow: 1_000,
+      cost: { input: 10, output: 1, cacheRead: 1, cacheWrite: 1 },
+    },
     thinkingLevel: "off",
     extensionRunner: {
       getCommand: () => undefined,
@@ -162,6 +168,15 @@ function fakeSession(): FakeSession {
       this.abortCompactionCalls++;
     },
     getContextUsage: function () {
+      if (this.contextTokens !== undefined) {
+        return {
+          tokens: this.contextTokens,
+          contextWindow: 200_000,
+          percent: this.contextTokens === null
+            ? null
+            : this.contextTokens / 2_000,
+        };
+      }
       return {
         tokens: this.contextPercent === null
           ? null
@@ -3506,5 +3521,168 @@ describe("ConversationActor", () => {
     );
     finishPrompt();
     await running;
+  });
+});
+
+async function startHeldActorRun(fixture: ActorFixture, runId: string) {
+  const started = deferred();
+  const release = deferred();
+  fixture.runtime.session.promptImplementation = async () => {
+    fixture.runtime.session.eventListener?.(nativeEvent({
+      type: "agent_start",
+    }));
+    started.resolve();
+    await release.promise;
+    fixture.runtime.session.eventListener?.(nativeEvent({
+      type: "agent_end",
+    }));
+  };
+  const completion = fixture.actor.startPrompt({
+    runId,
+    text: "hold run for wait-cache policy",
+    origin: "browser",
+  });
+  await started.promise;
+  const ownership = fixture.actor.currentRunOwnership(runId);
+  if (!ownership) throw new Error("Expected active run ownership");
+  return {
+    ownership,
+    finish: async () => {
+      release.resolve();
+      await completion;
+    },
+  };
+}
+
+function setWaitCacheInputs(
+  session: FakeSession,
+  tokens: number | null,
+  input: number,
+  cacheRead: number,
+): void {
+  session.contextTokens = tokens;
+  const model = session.model;
+  if (!model) throw new Error("Expected a test model");
+  model.cost = { input, output: 1, cacheRead, cacheWrite: 1 };
+}
+
+function waitCacheUsage(
+  input: number,
+  cacheRead: number,
+  cacheWrite: number,
+) {
+  return {
+    input,
+    output: 1,
+    cacheRead,
+    cacheWrite,
+    totalTokens: input + cacheRead + cacheWrite + 1,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+}
+
+function emitWaitCacheFeedback(
+  session: FakeSession,
+  usage?: ReturnType<typeof waitCacheUsage>,
+): void {
+  session.eventListener?.(nativeEvent({
+    type: "message_end",
+    message: {
+      role: "assistant",
+      content: [],
+      stopReason: "stop",
+      ...(usage === undefined ? {} : { usage }),
+    },
+  }));
+}
+
+describe("wait cache checkpoint policy", () => {
+  const target = {
+    conversationId: TARGET_CONVERSATION_ID,
+    runId: RUN_B,
+  };
+
+  it("fails closed unless context and model economics qualify", async () => {
+    const fixture = await openActor();
+    const run = await startHeldActorRun(fixture, RUN_A);
+    const restore = fixture.actor.enterWaiting(run.ownership, target);
+
+    const cases = [
+      { tokens: 31_999, input: 10, cacheRead: 1, expected: false },
+      { tokens: null, input: 10, cacheRead: 1, expected: false },
+      { tokens: 50_000, input: 10, cacheRead: 0, expected: false },
+      { tokens: 50_000, input: 3, cacheRead: 1, expected: false },
+      { tokens: 50_000, input: 10, cacheRead: 1, expected: true },
+    ] as const;
+    for (const testCase of cases) {
+      setWaitCacheInputs(
+        fixture.runtime.session,
+        testCase.tokens,
+        testCase.input,
+        testCase.cacheRead,
+      );
+      expect(fixture.actor.canScheduleWaitCacheCheckpoint(run.ownership))
+        .toBe(testCase.expected);
+    }
+
+    restore();
+    await run.finish();
+    await fixture.actor.dispose();
+  });
+
+  it("requires positive cache feedback and caps checkpoints per run", async () => {
+    const fixture = await openActor();
+    const run = await startHeldActorRun(fixture, RUN_A);
+    setWaitCacheInputs(fixture.runtime.session, 50_000, 10, 1);
+
+    let restore = fixture.actor.enterWaiting(run.ownership, target);
+    expect(fixture.actor.claimWaitCacheCheckpoint(run.ownership)).toBe(true);
+    expect(fixture.actor.canScheduleWaitCacheCheckpoint(run.ownership))
+      .toBe(false);
+    restore();
+    emitWaitCacheFeedback(
+      fixture.runtime.session,
+      waitCacheUsage(20, 80, 10),
+    );
+
+    restore = fixture.actor.enterWaiting(run.ownership, target);
+    expect(fixture.actor.claimWaitCacheCheckpoint(run.ownership)).toBe(true);
+    restore();
+    emitWaitCacheFeedback(
+      fixture.runtime.session,
+      waitCacheUsage(20, 80, 10),
+    );
+
+    restore = fixture.actor.enterWaiting(run.ownership, target);
+    expect(fixture.actor.canScheduleWaitCacheCheckpoint(run.ownership))
+      .toBe(false);
+    expect(fixture.actor.claimWaitCacheCheckpoint(run.ownership)).toBe(false);
+    restore();
+
+    await run.finish();
+    await fixture.actor.dispose();
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["invalid", waitCacheUsage(Number.NaN, 80, 10)],
+    ["low-hit", waitCacheUsage(80, 10, 10)],
+  ])("disables later checkpoints after %s usage", async (_name, usage) => {
+    const fixture = await openActor();
+    const run = await startHeldActorRun(fixture, RUN_A);
+    setWaitCacheInputs(fixture.runtime.session, 50_000, 10, 1);
+
+    let restore = fixture.actor.enterWaiting(run.ownership, target);
+    expect(fixture.actor.claimWaitCacheCheckpoint(run.ownership)).toBe(true);
+    restore();
+    emitWaitCacheFeedback(fixture.runtime.session, usage);
+
+    restore = fixture.actor.enterWaiting(run.ownership, target);
+    expect(fixture.actor.canScheduleWaitCacheCheckpoint(run.ownership))
+      .toBe(false);
+    restore();
+
+    await run.finish();
+    await fixture.actor.dispose();
   });
 });
