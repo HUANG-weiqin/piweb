@@ -6,6 +6,7 @@ import type {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import {
   DEFAULT_COMPACTION_THRESHOLD_PERCENT,
   type ConversationActivity,
@@ -200,11 +201,6 @@ export interface ConversationWaitingTarget {
 const RUN_OWNERSHIP = Symbol("ConversationActor.runOwnership");
 // Avoid retrying every tool boundary without disabling protection for a long run.
 const COMPACTION_RETRY_GROWTH_PERCENT = 5;
-
-type AssistantAgentMessage = Extract<
-  Extract<AgentSessionEvent, { type: "message_end" }>["message"],
-  { role: "assistant" }
->;
 
 export const WAIT_CACHE_CHECKPOINT_DELAY_MS = 180_000;
 const WAIT_CACHE_CHECKPOINT_MIN_CONTEXT_TOKENS = 32_000;
@@ -1576,7 +1572,7 @@ export class ConversationActor {
 
   private handleWaitCacheCheckpointAssistantUsage(
     ticket: RunTicket,
-    message: AssistantAgentMessage,
+    message: AssistantMessage,
   ): void {
     if (!ticket.awaitingWaitCacheCheckpointUsage) return;
     const usage = message.usage;

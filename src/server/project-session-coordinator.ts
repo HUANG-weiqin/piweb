@@ -2547,12 +2547,7 @@ export class ProjectSessionCoordinator {
                   );
                 });
               }, WAIT_CACHE_CHECKPOINT_DELAY_MS);
-              const maybeUnref = timer as unknown as {
-                unref?: () => void;
-              };
-              if (typeof maybeUnref.unref === "function") {
-                maybeUnref.unref();
-              }
+              timer.unref?.();
               waiter.checkpointTimer = timer;
             }
           });
