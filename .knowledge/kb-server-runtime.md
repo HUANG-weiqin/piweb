@@ -1,6 +1,6 @@
 # 服务端运行时
 
-`updated: 2026-08-14`
+`updated: 2026-08-21`
 
 ## 这个模块是干什么的
 
@@ -80,6 +80,7 @@
 - `setThinkingLevel()` 和 `setSessionName()` 会先改内存再持久化；工作台以 actor 实际后置条件为准，发布新 state 并单独报告持久化风险。相对地，`CredentialStore.modify/delete` 与 `ProjectStore.setToolMode` 都是持久写成功后才替换内存状态，不需要这种部分提交适配。
 - browser prompt 可随时尝试，但 busy admission 只在 actor 与 SDK 双重 live 边界允许；失败时不发 `prompt_admitted`，浏览器保留草稿。接受后不建新 run ticket、不写持久队列，当前工具序列结束后下一次模型调用前注入；steeringMode="all" 让排队消息（含 inbox）一次模型轮次全部注入。idle 时经 project lifecycle 起新 run且不越过已有 inbox 工作。abort 先清空 SDK steering/followUp 队列、admissions 与 guidance observations 再 abort，旧消息不能跨越结算边界污染下一次 run。admit 有界（单会话最多 64 条 pending），slash 开头拒绝。
 - `wait_for_session` 让当前工具调用阻塞，但不锁死 run：目标 `conversationId + runId` 只决定哪次 durable settlement 成功；任何实际投递到当前 run 的新 peer/inbox 消息，或 SDK 已接受且尚未 raw-observed 的 browser/explicit guidance，都可先结束 wait。消息只返回真实来源 metadata，guidance 只返回 outcome，正文仍由 custom/raw user message 注入一次。actor 的 one-shot guidance callback 必须由 host 返回是否真的认领到仍存在的 waiter；stale callback 不得提前烧掉 record。claimed inbox 用 `waitedByRunId`、guidance 用 per-record claimed 标记避免后续 wait 重复唤醒；temporary receipt 仍只由精确 temporary wait 建立。
+- 大上下文且当前模型 cache-read 经济时，静默 wait 的 exact waiter 可持有一个三分钟、已 `unref` 的易失 timer；timer 到期必须进入 project lifecycle，复核 waiter identity 与 source run ownership 后才消费该 run 最多两次的 cache checkpoint 额度并返回 `{ outcome: "checkpoint" }`。该结果只促使同一 AgentSession 进行正常下一轮，不是 target result；后续 assistant usage 缺失、非法或 cache hit 低于 50% 时禁用本 run 剩余额度。所有其它 waiter 结算路径共用 detach 清 timer，进程退出不为保留远端缓存而延长生命周期。
 - 取消 run 必须先清空 SDK 尚未消费的 steering/follow-up queue 再 abort；否则旧引导可能跨越结算边界污染下一次 prompt。持久跨会话消息仍由 inbox delivery marker 决定是否重投，不能把 SDK 内存队列当成 durable truth。
 - 注册不可复用 runId、安装 active RunTicket 后立即发送 `run_queued`；它既是生命周期事件，也是浏览器提交 user draft 的唯一服务端接收回执。
 - SDK 异步 preflight 结束时会再次检查 run ticket；若期间已取消，会在真正启动 agent 前阻断。
