@@ -263,6 +263,21 @@ describe("PiRuntime session ownership", () => {
     expect(loopOwner.createLoopConfig).toBe(originalCreateLoopConfig);
   });
 
+  it("owns the supplied manager compaction boundary for the session lifetime", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-compaction-boundary-"));
+    const manager = SessionManager.inMemory(cwd);
+    const nativeAppendCompaction = manager.appendCompaction;
+    const runtime = await testRuntime(() => []);
+
+    const created = await runtime.createSession(cwd, { sessionManager: manager });
+    expect(Object.hasOwn(manager, "appendCompaction")).toBe(true);
+    expect(manager.appendCompaction).not.toBe(nativeAppendCompaction);
+
+    await created.dispose();
+    expect(Object.hasOwn(manager, "appendCompaction")).toBe(false);
+    expect(manager.appendCompaction).toBe(nativeAppendCompaction);
+  });
+
   it("activates Pi's structured read-only tools by default", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-read-tools-"));
     const runtime = await testRuntime(() => []);
@@ -944,6 +959,8 @@ describe("PiRuntime session ownership", () => {
 
   it("releases the isolated registry when two-stage session creation fails", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-create-failure-"));
+    const manager = SessionManager.inMemory(cwd);
+    const nativeAppendCompaction = manager.appendCompaction;
     const credentialStore = new InMemoryCredentialStore();
     let ownerRefreshes = 0;
     const createModelRuntime = async (options: CreateModelRuntimeOptions) => {
@@ -977,7 +994,11 @@ describe("PiRuntime session ownership", () => {
       },
     });
 
-    await expect(runtime.createSession(cwd)).rejects.toThrow("second-stage creation failed");
+    await expect(runtime.createSession(cwd, { sessionManager: manager })).rejects.toThrow(
+      "second-stage creation failed",
+    );
+    expect(Object.hasOwn(manager, "appendCompaction")).toBe(false);
+    expect(manager.appendCompaction).toBe(nativeAppendCompaction);
     ownerRefreshes = 0;
     await runtime.refreshConfiguration();
     expect(ownerRefreshes).toBe(1);

@@ -35,6 +35,10 @@ import {
   installAgentTurnBoundaryCheck,
 } from "./agent-turn-boundary.js";
 import {
+  type CompactionBoundaryAdapter,
+  installCompactionBoundary,
+} from "./compaction-boundary.js";
+import {
   type CompactionThinkingOverride,
   installCompactionThinkingOverride,
 } from "./compaction-thinking.js";
@@ -531,6 +535,7 @@ export class PiRuntime implements PiRuntimeLike {
     let toolProjectionAdapter: ToolProjectionAdapter | undefined;
     let turnBoundaryController: AgentTurnBoundaryController | undefined;
     let compactionThinkingOverride: CompactionThinkingOverride | undefined;
+    let compactionBoundaryAdapter: CompactionBoundaryAdapter | undefined;
     let pendingExtensionErrors: ExtensionError[];
     const disposePreTeardownAdapters = (): void => {
       const failures: unknown[] = [];
@@ -544,6 +549,11 @@ export class PiRuntime implements PiRuntimeLike {
       } catch (error) {
         failures.push(error);
       }
+      try {
+        compactionBoundaryAdapter?.dispose();
+      } catch (error) {
+        failures.push(error);
+      }
       if (failures.length > 0) {
         throw new AggregateError(failures, "Failed to dispose pre-teardown adapters");
       }
@@ -551,6 +561,7 @@ export class PiRuntime implements PiRuntimeLike {
     try {
       settings = this.createSettings(cwd);
       const sessionManager = options.sessionManager ?? SessionManager.inMemory(cwd);
+      compactionBoundaryAdapter = installCompactionBoundary(sessionManager);
       if (this.sessionFactory) {
         const fixedModel = fixedModelReference
           ? this.resolveFixedModel(owner.registry, fixedModelReference)
