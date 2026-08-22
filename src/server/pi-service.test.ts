@@ -4286,7 +4286,7 @@ describe("PiConnection coordinated project view", () => {
       ]));
       expect(snapshot.conversations.every(
         ({ name, preview }) =>
-          (name?.length ?? 0) <= 120 && preview.length <= 500,
+          [...(name ?? "")].length <= 24 && preview.length <= 500,
       )).toBe(true);
       expect(snapshot.truncated).toBe(true);
       expect(Buffer.byteLength(JSON.stringify(snapshot), "utf8"))
@@ -4433,7 +4433,7 @@ describe("PiConnection coordinated project view", () => {
       if (card?.kind !== "session_message") {
         throw new Error("source card was not projected");
       }
-      expect([...card.from.title!]).toHaveLength(120);
+      expect([...card.from.title!]).toHaveLength(24);
       expect(card.from.title?.endsWith("…")).toBe(true);
       expect(card.to.title).toBe("target");
       expect(parseServerEvent(JSON.stringify(snapshot))).toMatchObject({

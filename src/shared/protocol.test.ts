@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   MAX_MESSAGE_BYTES,
+  MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
   MAX_ROLE_COUNT,
   MAX_ROLE_DESCRIPTION_CHARACTERS,
   MAX_ROLE_NAME_CHARACTERS,
@@ -25,7 +26,7 @@ const messageId = "assistant:96b960be-b6bb-4a19-9cf2-78e77cb69425";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(31);
+    expect(PROTOCOL_VERSION).toBe(32);
   });
 
   it("accepts supported commands", () => {
@@ -197,6 +198,29 @@ describe("parseClientCommand", () => {
     expect(parseClientCommand({ type: "auth_response", authFlowId, requestId: "1", value: "code" }).type).toBe("auth_response");
     expect(parseClientCommand({ type: "cancel_auth", authFlowId }).type).toBe("cancel_auth");
     expect(parseClientCommand({ type: "close_session", sessionId }).type).toBe("close_session");
+  });
+
+  it("counts conversation title limits by Unicode character", () => {
+    const title = "😀".repeat(MAX_PROJECT_CONVERSATION_NAME_CHARACTERS);
+    expect(parseClientCommand({
+      type: "create_conversation",
+      commandId,
+      sessionId,
+      roleId,
+      title,
+    })).toMatchObject({ title });
+    expect(parseClientCommand({
+      type: "rename_conversation",
+      sessionId,
+      conversationId,
+      name: title,
+    })).toMatchObject({ name: title });
+    expect(() => parseClientCommand({
+      type: "rename_conversation",
+      sessionId,
+      conversationId,
+      name: `${title}😀`,
+    })).toThrow("at most 24 characters");
   });
 
   it("requires valid session and run ids on session-scoped commands", () => {
@@ -1091,7 +1115,7 @@ describe("parseClientCommand", () => {
       projectId,
       conversations: [{
         id: conversationId,
-        name: "n".repeat(121),
+        name: "n".repeat(25),
         preview: "",
         createdAt: "2026-07-18T12:00:00.000Z",
         updatedAt: "2026-07-18T12:00:00.000Z",

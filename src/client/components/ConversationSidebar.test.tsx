@@ -65,6 +65,29 @@ describe("ConversationSidebar", () => {
     expect(screen.getAllByText("最后活跃", { exact: false })).toHaveLength(2);
   });
 
+  it("clips an automatic title to 24 characters", () => {
+    render(
+      <ConversationSidebar
+        conversations={[{
+          ...baseConversation,
+          name: undefined,
+          preview: "会".repeat(30),
+        }]}
+        currentConversationId={baseConversation.id}
+        collapsed={false}
+        truncated={false}
+        online
+        onToggleCollapsed={vi.fn()}
+        onSelect={vi.fn()}
+        onCreate={vi.fn()}
+        onRename={vi.fn()}
+        onDelete={vi.fn(() => true)}
+      />,
+    );
+
+    expect(screen.getByText(`${"会".repeat(23)}…`)).toBeInTheDocument();
+  });
+
   it("marks only conversations created by an Agent", () => {
     render(
       <ConversationSidebar
@@ -391,6 +414,8 @@ describe("ConversationSidebar", () => {
     const nameInput = screen.getByRole("textbox", { name: "会话名称" });
     expect(nameInput).toHaveValue("接口设计");
 
+    fireEvent.change(nameInput, { target: { value: "😀".repeat(25) } });
+    expect(nameInput).toHaveValue("😀".repeat(24));
     fireEvent.change(nameInput, { target: { value: "新名称" } });
     fireEvent.click(screen.getByRole("button", { name: "保存名称" }));
     expect(onRename).toHaveBeenCalledWith(baseConversation.id, "新名称");

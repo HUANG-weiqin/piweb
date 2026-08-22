@@ -29,7 +29,7 @@ describe("projectConversationIndex", () => {
     const clipped = conversationDisplayTitle({
       preview: "会".repeat(140),
     });
-    expect([...(clipped ?? "")]).toHaveLength(120);
+    expect([...(clipped ?? "")]).toHaveLength(24);
     expect(clipped?.endsWith("…")).toBe(true);
   });
 

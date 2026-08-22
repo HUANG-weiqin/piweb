@@ -3,6 +3,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { MAX_PROJECT_CONVERSATION_NAME_CHARACTERS } from "../shared/protocol.js";
 import { MAX_CONVERSATION_BODY_BYTES } from "./conversation-meta.js";
 import { MAX_ROLE_SYSTEM_PROMPT_BYTES } from "./role-store.js";
 
@@ -129,7 +130,10 @@ const startSessionParameters = Type.Object({
     minLength: 1,
     maxLength: MAX_CONVERSATION_BODY_BYTES,
   }),
-  title: Type.Optional(Type.String({ minLength: 1, maxLength: 120 })),
+  title: Type.Optional(Type.String({
+    minLength: 1,
+    maxLength: MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
+  })),
 }, { additionalProperties: false });
 
 const roleIdParameters = Type.Object({

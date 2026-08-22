@@ -6,9 +6,10 @@ import {
   type KeyboardEvent,
   type PointerEvent,
 } from "react";
-import type {
-  ConversationActivity,
-  ConversationSummary,
+import {
+  MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
+  type ConversationActivity,
+  type ConversationSummary,
 } from "../../shared/protocol";
 import { useModalFocus } from "../lib/use-modal-focus";
 
@@ -44,9 +45,22 @@ function shortHandle(conversationId: string): string {
 }
 
 function titleOf(conversation: ConversationSummary): string {
-  return conversation.name?.trim()
+  const title = conversation.name?.trim()
     || conversation.preview.trim()
     || "新会话";
+  const characters = [...title];
+  if (characters.length <= MAX_PROJECT_CONVERSATION_NAME_CHARACTERS) {
+    return title;
+  }
+  return `${characters
+    .slice(0, MAX_PROJECT_CONVERSATION_NAME_CHARACTERS - 1)
+    .join("")}…`;
+}
+
+function clipTitleInput(value: string): string {
+  return [...value]
+    .slice(0, MAX_PROJECT_CONVERSATION_NAME_CHARACTERS)
+    .join("");
 }
 
 function formatLastActive(value: string): string {
@@ -545,10 +559,11 @@ export function ConversationSidebar({
         <input
           id="conversation-rename"
           value={renameDraft}
-          maxLength={120}
           disabled={renameBlocked}
           data-modal-autofocus
-          onChange={(event) => setRenameDraft(event.target.value)}
+          onChange={(event) => setRenameDraft(
+            clipTitleInput(event.target.value),
+          )}
         />
         <div className="provider-actions">
           <button

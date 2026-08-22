@@ -10,7 +10,7 @@ export const MAX_MODEL_REFERENCE_BYTES = 1024;
 export const MAX_ROLE_UNAVAILABLE_REASON_CHARACTERS = 4096;
 export const MAX_PROJECT_CONVERSATIONS = 100;
 export const MAX_PROJECT_ACTIVITY_SUMMARIES = 100;
-export const MAX_PROJECT_CONVERSATION_NAME_CHARACTERS = 120;
+export const MAX_PROJECT_CONVERSATION_NAME_CHARACTERS = 24;
 export const MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS = 500;
 export const MAX_PROMPT_CHARACTERS = 200_000;
 export const MAX_PENDING_PROMPTS_PER_CONVERSATION = 64;
@@ -18,9 +18,11 @@ export const MAX_PENDING_PROMPT_ATTENTION_REASON_CHARACTERS = 1_000;
 export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
+// v32: project conversation titles share one 24-Unicode-character boundary
+// across browser commands, Agent tools, snapshots, and session-message cards.
 // v31: refresh_models 改为 sessionId + commandId 精确关联的联网刷新命令；
 // auth prompt 保留 secret 元数据，避免认证输入与刷新回执混用观察边界。
-export const PROTOCOL_VERSION = 31;
+export const PROTOCOL_VERSION = 32;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
@@ -199,7 +201,10 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
     commandId: commandIdSchema,
     sessionId: sessionIdSchema,
     roleId: roleIdSchema,
-    title: required.max(120).optional(),
+    title: requiredBoundedCharactersString(
+      MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
+      "createConversation.title",
+    ).optional(),
   }),
   z.object({
     type: z.literal("prompt"),
@@ -274,7 +279,10 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
     type: z.literal("rename_conversation"),
     sessionId: sessionIdSchema,
     conversationId: conversationIdSchema,
-    name: required.max(120),
+    name: requiredBoundedCharactersString(
+      MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
+      "renameConversation.name",
+    ),
   }),
   z.object({
     type: z.literal("delete_conversation"),
@@ -1157,9 +1165,10 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     conversationId: conversationIdSchema.optional(),
     conversations: z.array(z.object({
       id: conversationIdSchema,
-      name: z.string()
-        .max(MAX_PROJECT_CONVERSATION_NAME_CHARACTERS)
-        .optional(),
+      name: boundedCharactersString(
+        MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
+        "conversation.name",
+      ).optional(),
       preview: z.string()
         .max(MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS),
       createdAt: z.string().datetime(),

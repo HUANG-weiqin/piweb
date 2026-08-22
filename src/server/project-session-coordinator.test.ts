@@ -2925,7 +2925,7 @@ describe("ProjectSessionCoordinator", () => {
     expect(reopened.lastConversationId).toBe(source.conversationId);
   });
 
-  it("captures the preview title when an unnamed conversation sends a message", async () => {
+  it("captures a bounded preview title when an unnamed conversation sends a message", async () => {
     const fixture = await createFixture();
     const source = await fixture.coordinator.createUserConversation(
       fixture.handle,
@@ -2945,6 +2945,7 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle.project.listConversations()
         .find(({ id }) => id === source.conversationId)?.preview,
     ).toBe("Investigate the rendering pipeline");
+    const displayTitle = "Investigate the renderi…";
     fixture.runtime.control(target.conversationId).enqueue(
       completesWith("message handled"),
     );
@@ -2968,7 +2969,7 @@ describe("ProjectSessionCoordinator", () => {
     ).toMatchObject({
       fromSnapshot: {
         conversationId: source.conversationId,
-        title: "Investigate the rendering pipeline",
+        title: displayTitle,
       },
       toSnapshot: {
         conversationId: target.conversationId,
@@ -2980,7 +2981,7 @@ describe("ProjectSessionCoordinator", () => {
     ).toMatchObject({
       fromSnapshot: {
         conversationId: source.conversationId,
-        title: "Investigate the rendering pipeline",
+        title: displayTitle,
       },
     });
   });

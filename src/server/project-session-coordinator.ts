@@ -3,6 +3,7 @@ import { readFile, readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
   MAX_PROJECT_ACTIVITY_SUMMARIES,
+  MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
   type ConversationSummary,
   type ProjectActivitySummary,
   type ToolMode,
@@ -322,7 +323,9 @@ function normalizedTitle(title: string | undefined, fallback: string): string {
     .replace(/[\r\n]+/g, " ")
     .trim();
   if (!value) return "新会话";
-  return [...value].slice(0, 80).join("");
+  return [...value]
+    .slice(0, MAX_PROJECT_CONVERSATION_NAME_CHARACTERS)
+    .join("");
 }
 
 function assertRoleSystemPromptBytes(value: string, field: string): void {
