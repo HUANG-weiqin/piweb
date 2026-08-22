@@ -28,6 +28,10 @@ import {
 import type { ToolMode } from "../shared/protocol.js";
 import type { PortableExtensionUI } from "./extension-ui.js";
 import { applyCodexAutoTransportPolicy } from "./codex-transport-policy.js";
+import {
+  type AgentContextBudgetController,
+  installAgentContextBudget,
+} from "./agent-context-budget.js";
 import { installToolResultCompression } from "./tool-result-compression.js";
 import {
   type AgentTurnBoundaryCheck,
@@ -111,6 +115,7 @@ export interface CreatePiSessionOptions {
   workbenchCustomTools?: ToolDefinition[];
   toolMode?: ToolMode;
   turnBoundaryCheck?: (input: AgentTurnBoundaryCheck) => boolean;
+  getCompactionThresholdPercent?: () => number;
 }
 
 export interface CreatedPiSession {
@@ -533,12 +538,18 @@ export class PiRuntime implements PiRuntimeLike {
     let created: CreateAgentSessionResult;
     let createdSession: AgentSession | undefined;
     let toolProjectionAdapter: ToolProjectionAdapter | undefined;
+    let contextBudgetController: AgentContextBudgetController | undefined;
     let turnBoundaryController: AgentTurnBoundaryController | undefined;
     let compactionThinkingOverride: CompactionThinkingOverride | undefined;
     let compactionBoundaryAdapter: CompactionBoundaryAdapter | undefined;
     let pendingExtensionErrors: ExtensionError[];
     const disposePreTeardownAdapters = (): void => {
       const failures: unknown[] = [];
+      try {
+        contextBudgetController?.dispose();
+      } catch (error) {
+        failures.push(error);
+      }
       try {
         turnBoundaryController?.dispose();
       } catch (error) {
@@ -624,6 +635,14 @@ export class PiRuntime implements PiRuntimeLike {
       // Agent.steeringMode 公开 setter 直接改 PendingMessageQueue.mode（drain 时实时读取）。
       createdSession.agent.steeringMode = "all";
       installToolResultCompression(createdSession);
+      if (options.getCompactionThresholdPercent) {
+        // This host wrapper sits outside the SDK extension transform so its
+        // ephemeral telemetry remains the final context projection.
+        contextBudgetController = installAgentContextBudget(
+          createdSession,
+          options.getCompactionThresholdPercent,
+        );
+      }
       if (readOnlyToolProjection) {
         toolProjectionAdapter = installReadOnlyToolProjection(createdSession);
       }

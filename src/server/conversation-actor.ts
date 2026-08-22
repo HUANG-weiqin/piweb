@@ -2755,6 +2755,7 @@ export class ConversationActor {
             });
           },
           turnBoundaryCheck: (input) => this.checkTurnBoundary(input),
+          getCompactionThresholdPercent: () => this.compactionThresholdPercent,
         },
       );
       this.created = created;

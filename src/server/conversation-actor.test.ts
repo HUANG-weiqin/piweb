@@ -1268,8 +1268,14 @@ describe("ConversationActor", () => {
     const fixture = await openActor();
 
     expect(fixture.actor.getCompactionThresholdPercent()).toBe(70);
+    expect(
+      fixture.runtime.createOptions?.getCompactionThresholdPercent?.(),
+    ).toBe(70);
 
     fixture.actor.setCompactionThresholdPercent(55);
+    expect(
+      fixture.runtime.createOptions?.getCompactionThresholdPercent?.(),
+    ).toBe(55);
     fixture.runtime.session.contextPercent = 60;
     await fixture.actor.startPrompt({
       runId: RUN_A,

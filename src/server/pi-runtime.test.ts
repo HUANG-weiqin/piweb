@@ -23,6 +23,7 @@ import {
   type InlineExtension,
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
+import { AGENT_CONTEXT_BUDGET_CUSTOM_TYPE } from "./agent-context-budget.js";
 import { PiRuntime } from "./pi-runtime.js";
 
 initTheme();
@@ -276,6 +277,79 @@ describe("PiRuntime session ownership", () => {
     await created.dispose();
     expect(Object.hasOwn(manager, "appendCompaction")).toBe(false);
     expect(manager.appendCompaction).toBe(nativeAppendCompaction);
+  });
+
+  it("projects live context-budget telemetry after the SDK context transform", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-context-budget-"));
+    const manager = SessionManager.inMemory(cwd);
+    const projectMessage = {
+      role: "custom" as const,
+      customType: "test.project_context.v1",
+      content: "project context",
+      display: false,
+      timestamp: 1,
+    };
+    let originalTransform: unknown;
+    const runtime = await testRuntime(
+      () => [
+        (pi) => {
+          pi.on("context", (event) => ({
+            messages: [
+              ...event.messages,
+              projectMessage as (typeof event.messages)[number],
+            ],
+          }));
+        },
+      ],
+      async (result) => {
+        originalTransform = result.session.agent.transformContext;
+      },
+    );
+    let thresholdPercent = 70;
+    const created = await runtime.createSession(cwd, {
+      sessionManager: manager,
+      getCompactionThresholdPercent: () => thresholdPercent,
+    });
+    await created.activateExtensions();
+    vi.spyOn(created.session, "getContextUsage").mockReturnValue({
+      tokens: 10_000,
+      contextWindow: 100_000,
+      percent: 10,
+    });
+    const input = [{
+      role: "user",
+      content: [{ type: "text", text: "input" }],
+      timestamp: 1,
+    }] as Parameters<NonNullable<
+      typeof created.session.agent.transformContext
+    >>[0];
+    const sessionMessagesBefore = [...created.session.messages];
+    const entriesBefore = manager.getEntries();
+
+    const first = await created.session.agent.transformContext!(input);
+    thresholdPercent = 80;
+    const second = await created.session.agent.transformContext!(input);
+
+    expect(first.slice(0, -1)).toEqual([input[0], projectMessage]);
+    expect(first.at(-1)).toMatchObject({
+      role: "custom",
+      customType: AGENT_CONTEXT_BUDGET_CUSTOM_TYPE,
+      content: "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
+      display: false,
+    });
+    expect(second.slice(0, -1)).toEqual([input[0], projectMessage]);
+    expect(second.at(-1)).toMatchObject({
+      role: "custom",
+      customType: AGENT_CONTEXT_BUDGET_CUSTOM_TYPE,
+      content: "<piweb_ctx used=\"10k/100k\" auto_compact=\"80%\" remaining=\"70k\" />",
+      display: false,
+    });
+    expect(created.session.messages).toEqual(sessionMessagesBefore);
+    expect(manager.getEntries()).toEqual(entriesBefore);
+    expect(created.session.agent.transformContext).not.toBe(originalTransform);
+
+    await created.dispose();
+    expect(created.session.agent.transformContext).toBe(originalTransform);
   });
 
   it("activates Pi's structured read-only tools by default", async () => {
@@ -1014,6 +1088,7 @@ describe("PiRuntime session ownership", () => {
         };
       },
       toolCallGate: undefined,
+      contextBudget: false,
     },
     {
       stage: "tool result compression installation",
@@ -1033,6 +1108,27 @@ describe("PiRuntime session ownership", () => {
         });
       },
       toolCallGate: undefined,
+      contextBudget: false,
+    },
+    {
+      stage: "context budget installation",
+      expectedError: "context budget installation failed",
+      installFailure(created: Awaited<ReturnType<typeof createAgentSession>>) {
+        const nativeAgent = created.session.agent;
+        Object.defineProperty(created.session, "agent", {
+          configurable: true,
+          value: new Proxy(nativeAgent, {
+            set(target, property, value, receiver) {
+              if (property === "transformContext") {
+                throw new Error("context budget installation failed");
+              }
+              return Reflect.set(target, property, value, receiver);
+            },
+          }),
+        });
+      },
+      toolCallGate: undefined,
+      contextBudget: true,
     },
     {
       stage: "tool gate installation",
@@ -1052,6 +1148,7 @@ describe("PiRuntime session ownership", () => {
         });
       },
       toolCallGate: async () => undefined,
+      contextBudget: false,
     },
     {
       stage: "extension load error projection",
@@ -1065,20 +1162,25 @@ describe("PiRuntime session ownership", () => {
         });
       },
       toolCallGate: undefined,
+      contextBudget: true,
     },
   ])("cleans up a created session when $stage fails", async ({
     expectedError,
     installFailure,
     toolCallGate,
+    contextBudget,
   }) => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-assembly-failure-"));
     let disposals = 0;
     let ownerRefreshes = 0;
+    let originalTransform: unknown;
     const runtime = await testRuntime(
       () => [],
       async (created) => {
+        originalTransform = created.session.agent.transformContext;
         const nativeDispose = created.session.dispose.bind(created.session);
         created.session.dispose = () => {
+          expect(created.session.agent.transformContext).toBe(originalTransform);
           disposals++;
           nativeDispose();
         };
@@ -1092,7 +1194,10 @@ describe("PiRuntime session ownership", () => {
       },
     );
 
-    await expect(runtime.createSession(cwd, { toolCallGate })).rejects.toThrow(expectedError);
+    await expect(runtime.createSession(cwd, {
+      toolCallGate,
+      getCompactionThresholdPercent: contextBudget ? () => 70 : undefined,
+    })).rejects.toThrow(expectedError);
     const refreshError = await runtime.refreshConfiguration().then(
       () => undefined,
       (error: unknown) => error,
