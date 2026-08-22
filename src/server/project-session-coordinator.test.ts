@@ -11146,7 +11146,7 @@ describe("ProjectSessionCoordinator", () => {
       );
       expect(freshSettlement.outcome).toBe("completed");
       expect(freshConversationId).toEqual(expect.any(String));
-    });
+    }, 15_000);
 
     it("enforces MAX_LIVE_DELEGATION_DESCENDANTS and allows creation after deletion", async () => {
       const fixture = await createFixture();
@@ -11192,7 +11192,7 @@ describe("ProjectSessionCoordinator", () => {
         }),
       );
       expect(afterDeletion).toMatchObject({ conversationId: expect.any(String) });
-    });
+    }, 15_000);
 
     it("keeps a reserved but failed deletion in the live descendant count", async () => {
       const fixture = await createFixture();
@@ -11263,7 +11263,7 @@ describe("ProjectSessionCoordinator", () => {
 
       releaseBusy.resolve();
       await busyCompletion;
-    });
+    }, 15_000);
 
     it("rejects a failed sending precommit that would exceed the live cap on replay after restart", async () => {
       const fixture = await createFixture();
@@ -11319,7 +11319,7 @@ describe("ProjectSessionCoordinator", () => {
       expect(sendingCards).toHaveLength(1);
 
       await restarted.close();
-    });
+    }, 15_000);
 
     it("charges terminal legacy cards to a recovered source run after restart", async () => {
       const fixture = await createFixture();

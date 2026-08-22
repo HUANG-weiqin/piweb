@@ -107,9 +107,9 @@ import {
 const MAX_BATCH_MESSAGES = 8;
 const MAX_COMPLETION_CACHE = 256;
 
-export const MAX_PEER_SESSIONS_PER_RUN = 16;
+export const MAX_PEER_SESSIONS_PER_RUN = 32;
 export const MAX_DELEGATION_DEPTH = 3;
-export const MAX_LIVE_DELEGATION_DESCENDANTS = 16;
+export const MAX_LIVE_DELEGATION_DESCENDANTS = 32;
 const START_SESSION_ADMISSION_FAILURE_PREFIX =
   "start_session inbox admission failed: ";
 const INBOX_LIFECYCLE_GUIDANCE = [
