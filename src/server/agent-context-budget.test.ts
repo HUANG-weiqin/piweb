@@ -162,6 +162,32 @@ describe("installAgentContextBudget", () => {
     );
   });
 
+  it("drops the warning after compaction lowers context usage", async () => {
+    const getContextUsage = vi.fn<() => ContextUsage | undefined>()
+      .mockReturnValueOnce({
+        tokens: 66_000,
+        contextWindow: 100_000,
+        percent: 66,
+      })
+      .mockReturnValueOnce({
+        tokens: 10_000,
+        contextWindow: 100_000,
+        percent: 10,
+      });
+    const { session } = fakeSession({ getContextUsage });
+    installAgentContextBudget(session, () => 70);
+
+    const beforeCompaction = await session.agent.transformContext!([]);
+    const afterCompaction = await session.agent.transformContext!([]);
+
+    expect(telemetry(beforeCompaction).content).toContain(
+      "warning=\"Compaction soon; consider updating Agent Notebook.\"",
+    );
+    expect(telemetry(afterCompaction).content).toBe(
+      "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
+    );
+  });
+
   it("recalculates usage and a changing threshold on every transform", async () => {
     const getContextUsage = vi.fn(() => ({
       tokens: 60_000,
@@ -321,6 +347,15 @@ describe("installAgentContextBudget", () => {
     inheritedController.dispose();
     expect(Object.hasOwn(inherited.session.agent, "transformContext")).toBe(false);
     expect(inherited.session.agent.transformContext).toBe(inheritedOriginal);
+  });
+
+  it("fails closed when the Agent does not expose transformContext", () => {
+    const agent = Object.create(null) as AgentSession["agent"];
+    const { session } = fakeSession({ agent });
+
+    expect(() => installAgentContextBudget(session, () => 70)).toThrow(
+      "Pi Agent does not expose transformContext",
+    );
   });
 
   it("does not restore over a transform installed after its wrapper", () => {
