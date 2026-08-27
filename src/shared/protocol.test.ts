@@ -26,7 +26,7 @@ const messageId = "assistant:96b960be-b6bb-4a19-9cf2-78e77cb69425";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(34);
+    expect(PROTOCOL_VERSION).toBe(35);
   });
 
   it("accepts supported commands", () => {
@@ -654,6 +654,44 @@ describe("parseClientCommand", () => {
       kind: "conversation",
       conversationId: targetConversationId,
     });
+    expect(parseServerEvent({
+      type: "project_snapshot",
+      sessionId,
+      projectId,
+      conversations: [{
+        id: conversationId,
+        preview: "waiting on either peer",
+        createdAt: "2026-07-18T12:00:00.000Z",
+        updatedAt: "2026-07-18T12:01:00.000Z",
+        messageCount: 1,
+        activity: { kind: "waiting", runId, targetCount: 2 },
+      }],
+      truncated: false,
+    })).toMatchObject({
+      conversations: [{
+        activity: { kind: "waiting", runId, targetCount: 2 },
+      }],
+    });
+    expect(() => parseServerEvent({
+      type: "project_snapshot",
+      sessionId,
+      projectId,
+      conversations: [{
+        id: conversationId,
+        preview: "ambiguous wait projection",
+        createdAt: "2026-07-18T12:00:00.000Z",
+        updatedAt: "2026-07-18T12:01:00.000Z",
+        messageCount: 1,
+        activity: {
+          kind: "waiting",
+          runId,
+          targetCount: 2,
+          targetConversationId,
+          targetRunId: runId,
+        },
+      }],
+      truncated: false,
+    })).toThrow();
     expect(parseServerEvent({
       type: "project_activity_snapshot",
       projects: [{

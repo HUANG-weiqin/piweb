@@ -1,6 +1,6 @@
 # 线协议
 
-`updated: 2026-08-21`
+`updated: 2026-08-27`
 
 ## 这个模块是干什么的
 
@@ -19,7 +19,7 @@ ClientCommand
 → App / reducer
 ```
 
-协议由 `PROTOCOL_VERSION` 标识，当前为 v33。工具参数和结果允许 `unknown`，但服务端在投影时会做有界遍历、转成 JSON-safe 数据并限制单值大小。
+协议由 `PROTOCOL_VERSION` 标识，当前为 v35。工具参数和结果允许 `unknown`，但服务端在投影时会做有界遍历、转成 JSON-safe 数据并限制单值大小。
 
 ## 决策
 
@@ -28,6 +28,7 @@ ClientCommand
 - `project_snapshot` 与 `role_catalog_snapshot` 用 `sessionId + projectId` 过滤；它们描述整个项目，不能因更新来自后台 conversation 就丢弃。
 - `project_activity_snapshot` 是连接级、跨当前 observation 的进程目录，只汇总 coordinator 已加载项目的 cwd/projectId、busy conversation 数和 coordinator-owned attention 数；它不携带 transcript、当前 focus 或浏览器私有 unread。最多 100 项，超出时置 `truncated=true`。
 - `conversation_run_settled` 是当前项目 observation 的实时结算边界：只在 actor 已持久写入精确 run settlement 并回到 idle 后发送，携带 `sessionId + projectId + conversationId + runId + outcome + createdBy`。它覆盖 focused 和后台 conversation，但不会由 initialize、refresh 或 snapshot 重放；浏览器不能从可能合并的 activity 快照反推这类瞬时完成事件。
+- v35 的 `ConversationActivity.waiting` 保留精确 wait 的 `targetConversationId + targetRunId` 兼容形态；aggregate wait 只投影 `targetCount`（1–32），不能把首个 target 伪装成唯一等待目标。当前高频 PublicState 对 aggregate 只投影 waiting phase，不暴露虚假的 `waitingFor`。
 - 当前 transcript 的 state、snapshot、live run 和卡片必须匹配 `sessionId + conversationId + focusId`。每次 initialize/open/create/focus 都分配新 focusId，因此快速 `A → B → A` 时第一次 A 的迟到帧不能污染第二次 A。
 - prompt/abort 显式携带上述 focus 三元身份和 runId；底层即时引导仍可使用 `steer + commandId + 精确 active runId`，由 `command_complete(steer)` 确认 SDK 已把该 user message 持久送入当前 run，而不只是放进易失内存队列。steer 是控制通道，不能排在被当前 run 占用的 actor 串行队列之后；错 focus 或错 runId 必须失败，不能作用于当前观察。
 - 消息与忙闲无关，随时可发。busy 时浏览器 `prompt` 直接进 SDK steering 队列（当前工具序列结束后、下一次模型调用前注入，用户可及时纠正方向；排队消息一次全部注入）：服务端回 `prompt_admitted`（匹配 sessionId + promptId）即证明 SDK 已接受入队，`prompt_delivered`（raw user 持久化证明）才结算为已投递；admitted 是"等待中"，delivered 才是"已发送"。进程重启或 abort 时未投递消息丢失，UI 必须诚实显示等待中。abort 清空 steering/followUp 队列与 admissions。

@@ -4453,6 +4453,180 @@ describe("ProjectSessionCoordinator", () => {
     expect(sourceActivities).not.toContain("waiting");
   });
 
+  it("resumes an aggregate wait when the second target settles and unregisters the first", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const first = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const second = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const firstStarted = deferred();
+    const releaseFirst = deferred();
+    const secondStarted = deferred();
+    const releaseSecond = deferred();
+    fixture.runtime.control(first.conversationId).enqueue(
+      blocksUntil(firstStarted, releaseFirst, "first result"),
+    );
+    fixture.runtime.control(second.conversationId).enqueue(
+      blocksUntil(secondStarted, releaseSecond, "second result"),
+    );
+    const firstRunId = randomUUID();
+    const secondRunId = randomUUID();
+    const firstCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      first.conversationId,
+      firstRunId,
+      "keep the first target running",
+    );
+    const secondCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      second.conversationId,
+      secondRunId,
+      "release this target first",
+    );
+    await Promise.all([firstStarted.promise, secondStarted.promise]);
+
+    let waitResult: (RunSettlement & { conversationId: string }) | undefined;
+    fixture.runtime.control(source.conversationId).enqueue(async (control) => {
+      waitResult = await executeTool(
+        control,
+        "wait_for_session",
+        "wait-for-any-second-target",
+        {
+          targets: [{
+            conversationId: first.conversationId,
+            runId: firstRunId,
+          }, {
+            conversationId: second.conversationId,
+            runId: secondRunId,
+          }],
+        },
+      ) as RunSettlement & { conversationId: string };
+      control.emitFinal("source resumed from wait-any");
+    });
+    const sourceCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      source.conversationId,
+      randomUUID(),
+      "wait for either target",
+    );
+    await waitUntil(
+      () => source.getActivity().kind === "waiting",
+      "the aggregate wait registration",
+    );
+    expect(source.getActivity()).toEqual({
+      kind: "waiting",
+      runId: expect.any(String),
+      targetCount: 2,
+    });
+
+    releaseSecond.resolve();
+    await expect(secondCompletion).resolves.toMatchObject({
+      runId: secondRunId,
+      outcome: "completed",
+    });
+    await expect(sourceCompletion).resolves.toMatchObject({
+      outcome: "completed",
+    });
+
+    expect(waitResult).toMatchObject({
+      conversationId: second.conversationId,
+      runId: secondRunId,
+      outcome: "completed",
+      finalText: "second result",
+    });
+    expect(first.getActivity()).toEqual({
+      kind: "running",
+      runId: firstRunId,
+    });
+    const internal = fixture.handle as unknown as {
+      context: { waiters: Map<string, Set<unknown>> };
+    };
+    expect(internal.context.waiters.size).toBe(0);
+
+    releaseFirst.resolve();
+    await expect(firstCompletion).resolves.toMatchObject({
+      runId: firstRunId,
+      outcome: "completed",
+    });
+  });
+
+  it("returns a settled aggregate winner without opening a later inactive target", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const settledConversationId = randomUUID();
+    const settledRunId = randomUUID();
+    const settledManager = await fixture.handle.project.createConversation(
+      settledConversationId,
+      defaultProfile(fixture.roles),
+      { updateRecent: false },
+    );
+    appendReservedCustomEntry(
+      settledManager,
+      createRunSettlementEntry({
+        runId: settledRunId,
+        outcome: "completed",
+        finalText: "durable winner",
+        settledAt: "2026-08-27T12:00:00.000Z",
+      }),
+    );
+    const inactiveConversationId = randomUUID();
+    await fixture.handle.project.createConversation(
+      inactiveConversationId,
+      defaultProfile(fixture.roles),
+      { updateRecent: false },
+    );
+    let inactiveOpenAttempts = 0;
+    fixture.runtime.beforeCreateSession = async (conversationId) => {
+      if (conversationId !== inactiveConversationId) return;
+      inactiveOpenAttempts++;
+      throw new Error("inactive target model is unavailable");
+    };
+
+    let waitResult: unknown;
+    fixture.runtime.control(source.conversationId).enqueue(async (control) => {
+      waitResult = await executeTool(
+        control,
+        "wait_for_session",
+        "wait-any-durable-before-unavailable",
+        {
+          targets: [{
+            conversationId: settledConversationId,
+            runId: settledRunId,
+          }, {
+            conversationId: inactiveConversationId,
+            runId: randomUUID(),
+          }],
+        },
+      );
+      control.emitFinal("used the durable winner");
+    });
+
+    await expect(fixture.coordinator.prompt(
+      fixture.handle,
+      source.conversationId,
+      randomUUID(),
+      "return the already-settled target",
+    )).resolves.toMatchObject({ outcome: "completed" });
+    expect(waitResult).toMatchObject({
+      conversationId: settledConversationId,
+      runId: settledRunId,
+      outcome: "completed",
+      finalText: "durable winner",
+    });
+    expect(inactiveOpenAttempts).toBe(0);
+  });
+
   it.each([
     ["completed", "target completed while observed"],
     ["failed", null],
@@ -7033,13 +7207,17 @@ describe("ProjectSessionCoordinator", () => {
     await callerCompletion;
   });
 
-  it("rejects a wait edge that would close a conversation cycle", async () => {
+  it("rejects a wait edge when any aggregate target would close a conversation cycle", async () => {
     const fixture = await createFixture();
     const first = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
     );
     const second = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const unrelated = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
     );
@@ -7087,8 +7265,13 @@ describe("ProjectSessionCoordinator", () => {
       "wait_for_session",
       "second-waits-first",
       {
-        conversationId: first.conversationId,
-        runId: firstRunId,
+        targets: [{
+          conversationId: unrelated.conversationId,
+          runId: randomUUID(),
+        }, {
+          conversationId: first.conversationId,
+          runId: firstRunId,
+        }],
       },
     )).rejects.toThrow("would create a conversation wait cycle");
 
@@ -8392,78 +8575,83 @@ describe("ProjectSessionCoordinator", () => {
     });
   });
 
-  it("returns a waited temporary result only through its incoming message", async () => {
-    const fixture = await createFixture();
-    const caller = await fixture.coordinator.createUserConversation(
-      fixture.handle,
-      { roleId: "default" },
-    );
-    const temporaryStarted = deferred();
-    const releaseTemporary = deferred();
-    fixture.runtime.nextSessionBehaviors.push([
-      blocksUntil(
-        temporaryStarted,
-        releaseTemporary,
-        "one temporary answer",
-      ),
-    ]);
-    const callerStarted = deferred();
-    const targetKnown = deferred<{
-      conversationId: string;
-      runId: string;
-    }>();
-    let waitResult: RunSettlement | undefined;
-    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
-      callerStarted.resolve();
-      const target = await targetKnown.promise;
-      waitResult = await executeTool(
-        control,
-        "wait_for_session",
-        "wait-for-one-temporary-return",
-        target,
-      ) as RunSettlement;
-      control.emitFinal("caller handled one message-owned answer");
-    });
-    const callerCompletion = fixture.coordinator.prompt(
-      fixture.handle,
-      caller.conversationId,
-      randomUUID(),
-      "start and wait for one temporary result",
-    );
-    await callerStarted.promise;
+  it.each(["exact", "aggregate"] as const)(
+    "returns a waited temporary result only through its incoming message (%s)",
+    async (waitMode) => {
+      const fixture = await createFixture();
+      const caller = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const temporaryStarted = deferred();
+      const releaseTemporary = deferred();
+      fixture.runtime.nextSessionBehaviors.push([
+        blocksUntil(
+          temporaryStarted,
+          releaseTemporary,
+          "one temporary answer",
+        ),
+      ]);
+      const callerStarted = deferred();
+      const targetKnown = deferred<{
+        conversationId: string;
+        runId: string;
+      }>();
+      let waitResult: RunSettlement | undefined;
+      fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+        callerStarted.resolve();
+        const target = await targetKnown.promise;
+        waitResult = await executeTool(
+          control,
+          "wait_for_session",
+          "wait-for-one-temporary-return",
+          waitMode === "exact" ? target : { targets: [target] },
+        ) as RunSettlement;
+        control.emitFinal("caller handled one message-owned answer");
+      });
+      const callerCompletion = fixture.coordinator.prompt(
+        fixture.handle,
+        caller.conversationId,
+        randomUUID(),
+        "start and wait for one temporary result",
+      );
+      await callerStarted.promise;
 
-    const temporary = await fixture.coordinator.startPeerSession(
-      fixture.handle,
-      caller.conversationId,
-      startInput({
-        temporary: true,
-        idempotencyKey: "waited-temporary-single-input",
-      }),
-    );
-    targetKnown.resolve(temporary);
-    await temporaryStarted.promise;
-    await waitUntil(
-      () => caller.getActivity().kind === "waiting",
-      "the caller to wait for its temporary initial run",
-    );
+      const temporary = await fixture.coordinator.startPeerSession(
+        fixture.handle,
+        caller.conversationId,
+        startInput({
+          temporary: true,
+          idempotencyKey: "waited-temporary-single-input",
+        }),
+      );
+      targetKnown.resolve(temporary);
+      await temporaryStarted.promise;
+      await waitUntil(
+        () => caller.getActivity().kind === "waiting",
+        "the caller to wait for its temporary initial run",
+      );
 
-    releaseTemporary.resolve();
-    await callerCompletion;
-    expect(waitResult).toMatchObject({
-      outcome: "message",
-      conversationId: temporary.conversationId,
-      runId: temporary.runId,
-      messageId: expect.any(String),
-    });
-    expect(waitResult).not.toHaveProperty("finalText");
-    const returnedMessages = fixture.runtime.control(caller.conversationId)
-      .received.filter(({ content }) => content.includes("one temporary answer"));
-    expect(returnedMessages).toHaveLength(1);
-    expect(returnedMessages[0]).toMatchObject({
-      deliverAs: "steer",
-      triggerTurn: false,
-    });
-  });
+      releaseTemporary.resolve();
+      await callerCompletion;
+      expect(waitResult).toMatchObject({
+        outcome: "message",
+        conversationId: temporary.conversationId,
+        runId: temporary.runId,
+        messageId: expect.any(String),
+      });
+      expect(waitResult).not.toHaveProperty("finalText");
+      const returnedMessages = fixture.runtime.control(caller.conversationId)
+        .received.filter(({ content }) =>
+          content.includes("one temporary answer")
+        );
+      expect(returnedMessages).toHaveLength(1);
+      expect(returnedMessages[0]).toMatchObject({
+        deliverAs: "steer",
+        triggerTurn: false,
+      });
+    },
+  );
 
   it("lets a temporary explicit wait reply replace its successful automatic return", async () => {
     const fixture = await createFixture();

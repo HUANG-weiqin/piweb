@@ -9,6 +9,8 @@ import { MAX_ROLE_SYSTEM_PROMPT_BYTES } from "./role-store.js";
 const sourceConversationId = "source-session";
 const targetConversationId = "11111111-1111-4111-8111-111111111111";
 const targetRunId = "22222222-2222-4222-8222-222222222222";
+const secondTargetConversationId = "33333333-3333-4333-8333-333333333333";
+const secondTargetRunId = "44444444-4444-4444-8444-444444444444";
 
 function service(): MetaToolService {
   return {
@@ -364,6 +366,93 @@ describe("createMetaTools", () => {
           `${sourceConversationId.length}:${sourceConversationId}:abort-1`,
       },
     );
+  });
+
+  it("forwards a bounded, de-duplicated aggregate wait set", async () => {
+    const fake = service();
+    const wait = tool(
+      createMetaTools(sourceConversationId, fake),
+      "wait_for_session",
+    );
+    const signal = new AbortController().signal;
+    const first = {
+      conversationId: targetConversationId,
+      runId: targetRunId,
+    };
+    const second = {
+      conversationId: secondTargetConversationId,
+      runId: secondTargetRunId,
+    };
+    const parameters = wait.parameters as unknown as {
+      properties: {
+        targets: { minItems: number; maxItems: number };
+      };
+    };
+
+    expect(parameters.properties.targets).toMatchObject({
+      minItems: 1,
+      maxItems: 32,
+    });
+    await wait.execute(
+      "wait-any",
+      { targets: [first, first, second] } as never,
+      signal,
+      undefined,
+      {} as never,
+    );
+
+    expect(fake.waitForSession).toHaveBeenCalledWith(
+      sourceConversationId,
+      { targets: [first, second] },
+      signal,
+    );
+    const forwarded = vi.mocked(fake.waitForSession).mock.calls[0]?.[1] as {
+      targets: Array<{ conversationId: string; runId: string }>;
+    };
+    expect(Object.isFrozen(forwarded.targets)).toBe(true);
+    expect(forwarded.targets.every(Object.isFrozen)).toBe(true);
+  });
+
+  it("rejects malformed or mixed aggregate waits before lifecycle services", async () => {
+    const fake = service();
+    const wait = tool(
+      createMetaTools(sourceConversationId, fake),
+      "wait_for_session",
+    );
+
+    await expect(wait.execute(
+      "mixed-wait",
+      {
+        conversationId: targetConversationId,
+        runId: targetRunId,
+        targets: [{
+          conversationId: secondTargetConversationId,
+          runId: secondTargetRunId,
+        }],
+      } as never,
+      undefined,
+      undefined,
+      {} as never,
+    )).rejects.toThrow(/cannot mix/i);
+    await expect(wait.execute(
+      "empty-wait",
+      { targets: [] } as never,
+      undefined,
+      undefined,
+      {} as never,
+    )).rejects.toThrow(/1 to 32/);
+    await expect(wait.execute(
+      "invalid-target-wait",
+      { targets: [{
+        conversationId: targetConversationId,
+        runId: `${targetRunId}f6f`,
+      }] } as never,
+      undefined,
+      undefined,
+      {} as never,
+    )).rejects.toThrow(/runId must be a canonical UUID/);
+
+    expect(fake.waitForSession).not.toHaveBeenCalled();
   });
 
   it("rejects malformed run identities before entering lifecycle services", async () => {

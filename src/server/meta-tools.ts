@@ -9,8 +9,12 @@ import { MAX_ROLE_SYSTEM_PROMPT_BYTES } from "./role-store.js";
 
 export interface MetaToolSessionRef {
   conversationId: string;
-  runId?: string;
+  runId: string;
 }
+
+export type MetaToolWaitInput =
+  | MetaToolSessionRef
+  | { targets: readonly MetaToolSessionRef[] };
 
 export type MetaToolSessionScope = "all" | "created_by_me";
 
@@ -65,12 +69,12 @@ export interface MetaToolService {
   ): Promise<unknown>;
   waitForSession(
     sourceConversationId: string,
-    input: MetaToolSessionRef,
+    input: MetaToolWaitInput,
     signal: AbortSignal | undefined,
   ): Promise<unknown>;
   abortSession(
     sourceConversationId: string,
-    input: Required<MetaToolSessionRef> & { idempotencyKey: string },
+    input: MetaToolSessionRef & { idempotencyKey: string },
   ): Promise<unknown>;
   deleteSession(
     sourceConversationId: string,
@@ -117,12 +121,57 @@ function assertCanonicalRunId(runId: string): void {
   }
 }
 
+function normalizeWaitInput(input: {
+  conversationId?: string;
+  runId?: string;
+  targets?: Array<{ conversationId: string; runId: string }>;
+}): MetaToolWaitInput {
+  if (input.targets !== undefined) {
+    if (input.conversationId !== undefined || input.runId !== undefined) {
+      throw new Error(
+        "wait_for_session cannot mix targets with conversationId or runId",
+      );
+    }
+    if (input.targets.length < 1 || input.targets.length > 32) {
+      throw new Error("wait_for_session targets must contain 1 to 32 items");
+    }
+    const seen = new Set<string>();
+    const targets: MetaToolSessionRef[] = [];
+    for (const target of input.targets) {
+      assertCanonicalRunId(target.runId);
+      const key = `${target.conversationId.length}:${target.conversationId}:${target.runId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      targets.push(Object.freeze({
+        conversationId: target.conversationId,
+        runId: target.runId,
+      }));
+    }
+    return { targets: Object.freeze(targets) };
+  }
+  if (input.conversationId === undefined || input.runId === undefined) {
+    throw new Error(
+      "wait_for_session requires conversationId+runId or targets",
+    );
+  }
+  assertCanonicalRunId(input.runId);
+  return {
+    conversationId: input.conversationId,
+    runId: input.runId,
+  };
+}
+
 function normalizeSessionScope(scope: string | undefined): MetaToolSessionScope | undefined {
   if (scope === undefined || scope === "all" || scope === "created_by_me") {
     return scope;
   }
   throw new Error("Invalid list_sessions scope");
 }
+
+const sessionTargetParameters = Type.Object({
+  conversationId: Type.String({ minLength: 1, maxLength: 256 }),
+  runId: Type.String({ minLength: 1, maxLength: 200 }),
+}, { additionalProperties: false });
 
 const startSessionParameters = Type.Object({
   roleId: Type.String({ minLength: 1, maxLength: 128 }),
@@ -325,17 +374,22 @@ export function createMetaTools(
       name: "wait_for_session",
       label: "Wait for session",
       description:
-        "Explicitly wait for the next relevant event while keeping the current turn responsive. Returns the exact target conversationId+runId's durable settlement when it settles, or message metadata when a peer/inbox message is claimed into the current run's steering queue (delivered after the wait starts, or already claimed before it registered but not yet observed — from any conversation or run), or guidance metadata when user guidance is accepted into the current run's steering queue (an explicit steer or a busy browser message, accepted before or after the wait registered). The message is injected before the next model request; call again if a message arrived but the final settlement is still required. Cyclic conversation waits are rejected. A long silent wait may return {\"outcome\":\"checkpoint\"}; it is not target completion proof — if the result is still required, call again with the same conversationId+runId.",
-      promptSnippet: "Wait for one exact peer run when its result is required now.",
+        "Explicitly wait for the next relevant event while keeping the current turn responsive. Pass one exact conversationId+runId pair, or targets with 1-32 peer run identities to wait for the first listed durable settlement; an aggregate settlement also identifies its conversationId. The wait may instead return message metadata when a peer/inbox message is claimed into the current run's steering queue (delivered after the wait starts, or already claimed before it registered but not yet observed — from any conversation or run), or guidance metadata when user guidance is accepted into the current run's steering queue (an explicit steer or a busy browser message, accepted before or after the wait registered). The message is injected before the next model request; call again if a message arrived but a final settlement is still required. Cyclic conversation waits are rejected. A long silent wait may return {\"outcome\":\"checkpoint\"}; it is not target completion proof — if the result is still required, call again with the same conversationId+runId or the same target set.",
+      promptSnippet: "Wait for one exact peer run or the first of a bounded target set.",
       parameters: Type.Object({
-        conversationId: Type.String({ minLength: 1, maxLength: 256 }),
-        runId: Type.String({ minLength: 1, maxLength: 200 }),
+        conversationId: Type.Optional(
+          Type.String({ minLength: 1, maxLength: 256 }),
+        ),
+        runId: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
+        targets: Type.Optional(Type.Array(sessionTargetParameters, {
+          minItems: 1,
+          maxItems: 32,
+        })),
       }, { additionalProperties: false }),
       async execute(_toolCallId, input, signal) {
-        assertCanonicalRunId(input.runId);
         return result(await service.waitForSession(
           sourceConversationId,
-          input,
+          normalizeWaitInput(input),
           signal,
         ));
       },
@@ -346,10 +400,7 @@ export function createMetaTools(
       description:
         "Abort one exact peer run. A stale or incorrect runId never aborts a later run.",
       promptSnippet: "Abort one exact peer Agent run.",
-      parameters: Type.Object({
-        conversationId: Type.String({ minLength: 1, maxLength: 256 }),
-        runId: Type.String({ minLength: 1, maxLength: 200 }),
-      }, { additionalProperties: false }),
+      parameters: sessionTargetParameters,
       async execute(toolCallId, input) {
         assertCanonicalRunId(input.runId);
         return result(await service.abortSession(sourceConversationId, {

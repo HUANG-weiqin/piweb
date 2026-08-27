@@ -208,6 +208,10 @@ export interface ConversationWaitingTarget {
   runId: string;
 }
 
+export type ConversationWaitingFor =
+  | ConversationWaitingTarget
+  | { targets: readonly ConversationWaitingTarget[] };
+
 const RUN_OWNERSHIP = Symbol("ConversationActor.runOwnership");
 // Avoid retrying every tool boundary without disabling protection for a long run.
 const COMPACTION_RETRY_GROWTH_PERCENT = 5;
@@ -279,7 +283,7 @@ interface RunTicket {
   pendingPromptUserDelivered: boolean;
   customSteerFlush?: Promise<void>;
   phase: "queued" | "running" | "waiting" | "cancelling";
-  waitingFor?: ConversationWaitingTarget;
+  waitingFor?: ConversationWaitingFor;
   waitingEpoch?: symbol;
   /**
    * One-shot host callback fired when guidance is accepted into the SDK
@@ -332,12 +336,18 @@ function cloneActivity(activity: ConversationActivity): ConversationActivity {
     case "cancelling":
       return { kind: activity.kind, runId: activity.runId };
     case "waiting":
-      return {
-        kind: "waiting",
-        runId: activity.runId,
-        targetConversationId: activity.targetConversationId,
-        targetRunId: activity.targetRunId,
-      };
+      return "targetCount" in activity
+        ? {
+            kind: "waiting",
+            runId: activity.runId,
+            targetCount: activity.targetCount,
+          }
+        : {
+            kind: "waiting",
+            runId: activity.runId,
+            targetConversationId: activity.targetConversationId,
+            targetRunId: activity.targetRunId,
+          };
   }
 }
 
@@ -860,12 +870,18 @@ export class ConversationActor {
         if (!ticket.waitingFor) {
           throw new Error("Waiting run is missing its target");
         }
-        return {
-          kind: "waiting",
-          runId: ticket.id,
-          targetConversationId: ticket.waitingFor.conversationId,
-          targetRunId: ticket.waitingFor.runId,
-        };
+        return "targets" in ticket.waitingFor
+          ? {
+              kind: "waiting",
+              runId: ticket.id,
+              targetCount: ticket.waitingFor.targets.length,
+            }
+          : {
+              kind: "waiting",
+              runId: ticket.id,
+              targetConversationId: ticket.waitingFor.conversationId,
+              targetRunId: ticket.waitingFor.runId,
+            };
     }
   }
 
@@ -1531,15 +1547,17 @@ export class ConversationActor {
 
   enterWaiting(
     ownership: ConversationRunOwnership,
-    target: ConversationWaitingTarget,
+    waitingFor: ConversationWaitingFor,
   ): () => void {
-    // SAFETY: one run has one visible waiting target because gated tool
+    // SAFETY: one run has one visible waiting operation because gated tool
     // execution is sequential. Parallel blocking tools would require a
     // multi-wait activity model instead of overwriting this single phase.
     const ticket = this.requireOwnedRunningTicket(ownership);
-    const waitingEpoch = Symbol(`${target.conversationId}:${target.runId}`);
+    const waitingEpoch = Symbol("wait_for_session");
     ticket.phase = "waiting";
-    ticket.waitingFor = { ...target };
+    ticket.waitingFor = "targets" in waitingFor
+      ? { targets: waitingFor.targets.map((target) => ({ ...target })) }
+      : { ...waitingFor };
     ticket.waitingEpoch = waitingEpoch;
     this.emitActivity();
 
@@ -1565,10 +1583,10 @@ export class ConversationActor {
 
   async withWaiting<T>(
     ownership: ConversationRunOwnership,
-    target: ConversationWaitingTarget,
+    waitingFor: ConversationWaitingFor,
     work: () => Promise<T> | T,
   ): Promise<T> {
-    const restore = this.enterWaiting(ownership, target);
+    const restore = this.enterWaiting(ownership, waitingFor);
     try {
       return await work();
     } finally {

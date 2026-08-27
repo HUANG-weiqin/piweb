@@ -21,13 +21,13 @@ export const MAX_LOOP_LIST_ITEM_TEXT_CHARACTERS = 512;
 export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
+// v35: aggregate wait-for-session activity projects a bounded target count
+// instead of pretending that the source waits on one exact target.
 // v34: focused snapshots and identity-bound live events project the bounded
 // conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
-// v32: project conversation titles share one 24-Unicode-character boundary
-// across browser commands, Agent tools, snapshots, and session-message cards.
-export const PROTOCOL_VERSION = 34;
+export const PROTOCOL_VERSION = 35;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
@@ -557,6 +557,11 @@ export type ConversationActivity =
       runId: string;
       targetConversationId: string;
       targetRunId: string;
+    }
+  | {
+      kind: "waiting";
+      runId: string;
+      targetCount: number;
     };
 
 export interface SessionMessageEndpoint {
@@ -1057,21 +1062,23 @@ const conversationRoleSummarySchema: z.ZodType<
   toolMode: z.enum(["read_only", "full_access"]),
   canManageSessions: z.boolean(),
 });
-const conversationActivitySchema: z.ZodType<ConversationActivity> = z.discriminatedUnion(
-  "kind",
-  [
-    z.object({ kind: z.literal("idle") }),
-    z.object({ kind: z.literal("queued"), runId: runIdSchema }),
-    z.object({ kind: z.literal("running"), runId: runIdSchema }),
-    z.object({ kind: z.literal("cancelling"), runId: runIdSchema }),
-    z.object({
-      kind: z.literal("waiting"),
-      runId: runIdSchema,
-      targetConversationId: conversationIdSchema,
-      targetRunId: runIdSchema,
-    }),
-  ],
-);
+const conversationActivitySchema: z.ZodType<ConversationActivity> = z.union([
+  z.object({ kind: z.literal("idle") }),
+  z.object({ kind: z.literal("queued"), runId: runIdSchema }),
+  z.object({ kind: z.literal("running"), runId: runIdSchema }),
+  z.object({ kind: z.literal("cancelling"), runId: runIdSchema }),
+  z.object({
+    kind: z.literal("waiting"),
+    runId: runIdSchema,
+    targetConversationId: conversationIdSchema,
+    targetRunId: runIdSchema,
+  }).strict(),
+  z.object({
+    kind: z.literal("waiting"),
+    runId: runIdSchema,
+    targetCount: z.number().int().min(1).max(32),
+  }).strict(),
+]);
 const sessionMessageEndpointSchema: z.ZodType<SessionMessageEndpoint> = z.object({
   conversationId: conversationIdSchema,
   title: boundedCharactersString(

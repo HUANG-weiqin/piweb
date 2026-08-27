@@ -1835,6 +1835,12 @@ export class PiConnection {
         phase: activity.kind,
       };
     }
+    if ("targetCount" in activity) {
+      return {
+        id: activity.runId,
+        phase: "waiting",
+      };
+    }
     return {
       id: activity.runId,
       phase: "waiting",
