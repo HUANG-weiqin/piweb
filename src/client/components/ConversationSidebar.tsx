@@ -1,5 +1,8 @@
 import {
+  memo,
+  useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -17,6 +20,13 @@ const DEFAULT_SIDEBAR_WIDTH = 286;
 const MIN_SIDEBAR_WIDTH = 240;
 const MAX_SIDEBAR_WIDTH = 640;
 const SIDEBAR_KEYBOARD_STEP = 16;
+const LAST_ACTIVE_FORMATTER = new Intl.DateTimeFormat("zh-CN", {
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
 
 function clampSidebarWidth(width: number): number {
   return Math.min(
@@ -67,13 +77,7 @@ function clipTitleInput(value: string): string {
 function formatLastActive(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.valueOf())) return value;
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(date);
+  return LAST_ACTIVE_FORMATTER.format(date);
 }
 
 function activityRank(activity: ConversationActivity | undefined): number {
@@ -163,7 +167,7 @@ function ActivityIndicator({
   }
 }
 
-function ConversationRow({
+const ConversationRow = memo(function ConversationRow({
   conversation,
   selected,
   navigationEnabled,
@@ -183,7 +187,7 @@ function ConversationRow({
   deletionBlocked: boolean;
   busy: boolean;
   onSelect(conversationId: string): void;
-  onRequestRename(conversationId: string): void;
+  onRequestRename(conversation: ConversationSummary): void;
   onRequestDelete(conversationId: string): void;
 }) {
   const title = titleOf(conversation);
@@ -267,7 +271,7 @@ function ConversationRow({
           aria-label={`重命名会话 ${title}`}
           disabled={!actionsEnabled || deletionBlocked || active}
           title={active ? "活跃会话结算后可以重命名" : "重命名会话"}
-          onClick={() => onRequestRename(conversation.id)}
+          onClick={() => onRequestRename(conversation)}
         >
           改名
         </button>
@@ -284,9 +288,9 @@ function ConversationRow({
       </div>
     </li>
   );
-}
+});
 
-export function ConversationSidebar({
+function ConversationSidebarView({
   conversations,
   truncated,
   currentConversationId,
@@ -310,6 +314,10 @@ export function ConversationSidebar({
   const [confirmDeleteConversationId, setConfirmDeleteConversationId] = useState("");
   const [renameConversationId, setRenameConversationId] = useState("");
   const [renameDraft, setRenameDraft] = useState("");
+  const sortedConversations = useMemo(
+    () => orderedConversations(conversations),
+    [conversations],
+  );
   const deleteCandidate = conversations.find(
     ({ id }) => id === confirmDeleteConversationId,
   );
@@ -403,12 +411,13 @@ export function ConversationSidebar({
     setRenameConversationId("");
   }, [renameConversationId, renameCandidate]);
 
-  const requestRename = (conversationId: string) => {
-    const conversation = conversations.find(({ id }) => id === conversationId);
-    if (!conversation) return;
+  const requestRename = useCallback((conversation: ConversationSummary) => {
     setRenameDraft(titleOf(conversation));
-    setRenameConversationId(conversationId);
-  };
+    setRenameConversationId(conversation.id);
+  }, []);
+  const requestDelete = useCallback((conversationId: string) => {
+    setConfirmDeleteConversationId(conversationId);
+  }, []);
 
   return <>
     <aside
@@ -433,7 +442,7 @@ export function ConversationSidebar({
       {!collapsed && (
         <nav className="conversation-sidebar-navigation" aria-label="项目会话">
           <ul className="conversation-sidebar-list">
-            {orderedConversations(conversations).map((conversation) => (
+            {sortedConversations.map((conversation) => (
               <ConversationRow
                 key={conversation.id}
                 conversation={conversation}
@@ -445,7 +454,7 @@ export function ConversationSidebar({
                 busy={conversation.id === busyConversationId}
                 onSelect={onSelect}
                 onRequestRename={requestRename}
-                onRequestDelete={setConfirmDeleteConversationId}
+                onRequestDelete={requestDelete}
               />
             ))}
           </ul>
@@ -592,3 +601,5 @@ export function ConversationSidebar({
     </div>}
   </>;
 }
+
+export const ConversationSidebar = memo(ConversationSidebarView);

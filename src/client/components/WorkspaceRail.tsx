@@ -1,3 +1,4 @@
+import { memo } from "react";
 import type { ProjectActivitySummary } from "../../shared/protocol";
 
 interface WorkspaceRailProps {
@@ -47,7 +48,7 @@ function workspaceActivityLabel(
   return labels.join("，");
 }
 
-export function WorkspaceRail({
+function WorkspaceRailView({
   workspaces,
   activeCwd,
   unavailable,
@@ -120,4 +121,5 @@ export function WorkspaceRail({
   </nav>;
 }
 
+export const WorkspaceRail = memo(WorkspaceRailView);
 export { workspaceKey, workspaceName };

@@ -1,9 +1,15 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { useCallback, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ConversationSummary } from "../../shared/protocol";
 import { ConversationSidebar } from "./ConversationSidebar";
+
+const dateTimeFormatDescriptor = Object.getOwnPropertyDescriptor(
+  Intl.DateTimeFormat.prototype,
+  "format",
+)!;
 
 const baseConversation: ConversationSummary = {
   id: "01234567-89ab-cdef-0123-456789abcdef",
@@ -25,9 +31,121 @@ const baseConversation: ConversationSummary = {
   activity: { kind: "idle" },
 };
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  Object.defineProperty(
+    Intl.DateTimeFormat.prototype,
+    "format",
+    dateTimeFormatDescriptor,
+  );
+});
 
 describe("ConversationSidebar", () => {
+  it("bails out of unrelated parent renders and still updates changed facts", () => {
+    const getFormat = dateTimeFormatDescriptor.get as (
+      this: Intl.DateTimeFormat
+    ) => Intl.DateTimeFormat["format"];
+    const formatDates = vi.fn(function formatDates(this: Intl.DateTimeFormat) {
+      return getFormat.call(this);
+    });
+    Object.defineProperty(Intl.DateTimeFormat.prototype, "format", {
+      ...dateTimeFormatDescriptor,
+      get: formatDates,
+    });
+    const trackedConversation = { ...baseConversation };
+    const readName = vi.fn(() => baseConversation.name);
+    const readUpdatedAt = vi.fn(() => baseConversation.updatedAt);
+    Object.defineProperties(trackedConversation, {
+      name: { enumerable: true, get: readName },
+      updatedAt: { enumerable: true, get: readUpdatedAt },
+    });
+    const trackedConversations = [trackedConversation];
+    const findConversations = vi.spyOn(trackedConversations, "find");
+    const orderConversations = vi.spyOn(trackedConversations, "map");
+
+    function Harness() {
+      const [, setUnrelated] = useState(0);
+      const [conversations, setConversations] = useState<ConversationSummary[]>(
+        trackedConversations,
+      );
+      const [selectedId, setSelectedId] = useState<string>();
+      const [online, setOnline] = useState(true);
+      const onSelect = useCallback((conversationId: string) => {
+        setSelectedId(conversationId);
+      }, []);
+      const onToggleCollapsed = useCallback(() => undefined, []);
+      const onCreate = useCallback(() => undefined, []);
+      const onRename = useCallback(() => undefined, []);
+      const onDelete = useCallback(() => true, []);
+      return <>
+        <button type="button" onClick={() => setUnrelated((value) => value + 1)}>
+          unrelated
+        </button>
+        <button type="button" onClick={() => setOnline((value) => !value)}>
+          online
+        </button>
+        <button type="button" onClick={() => setConversations([
+          {
+            ...baseConversation,
+            id: "older-12345678",
+            name: "较早会话",
+            updatedAt: "2026-07-19T07:00:00.000Z",
+          },
+          {
+            ...baseConversation,
+            id: "running-12345678",
+            name: "事实已更新",
+            activity: { kind: "running", runId: "run-1" },
+          },
+        ])}>
+          update facts
+        </button>
+        <ConversationSidebar
+          conversations={conversations}
+          truncated={false}
+          currentConversationId={selectedId}
+          collapsed={false}
+          navigationEnabled={online}
+          actionsEnabled={online}
+          onToggleCollapsed={onToggleCollapsed}
+          onSelect={onSelect}
+          onCreate={onCreate}
+          onRename={onRename}
+          onDelete={onDelete}
+        />
+      </>;
+    }
+
+    render(<Harness />);
+    const initialFinds = findConversations.mock.calls.length;
+    const initialOrderings = orderConversations.mock.calls.length;
+    const initialNameReads = readName.mock.calls.length;
+    const initialTimeReads = readUpdatedAt.mock.calls.length;
+    const initialFormats = formatDates.mock.calls.length;
+
+    fireEvent.click(screen.getByRole("button", { name: "unrelated" }));
+    expect(findConversations).toHaveBeenCalledTimes(initialFinds);
+    expect(orderConversations).toHaveBeenCalledTimes(initialOrderings);
+    expect(readName).toHaveBeenCalledTimes(initialNameReads);
+    expect(readUpdatedAt).toHaveBeenCalledTimes(initialTimeReads);
+    expect(formatDates).toHaveBeenCalledTimes(initialFormats);
+
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 接口设计" }));
+    expect(screen.getByRole("button", { name: "当前会话 接口设计" }))
+      .toHaveAttribute("aria-current", "page");
+
+    fireEvent.click(screen.getByRole("button", { name: "online" }));
+    expect(screen.getByRole("button", { name: "当前会话 接口设计" }))
+      .toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "update facts" }));
+    const rows = screen.getAllByRole("listitem");
+    expect(within(rows[0]!).getByText("事实已更新")).toBeInTheDocument();
+    expect(within(rows[0]!).getByRole("status", { name: "运行中" }))
+      .toBeInTheDocument();
+  });
+
   it("renders one flat list with title, role, short handle and last active time", () => {
     render(
       <ConversationSidebar

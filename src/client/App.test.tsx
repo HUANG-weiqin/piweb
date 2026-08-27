@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { StrictMode } from "react";
+import { StrictMode, type ComponentProps } from "react";
 import {
   act,
   cleanup,
@@ -99,6 +99,31 @@ vi.mock("./lib/completion-sound", () => ({
     return sound;
   },
 }));
+
+const renderIsolationMock = vi.hoisted(() => ({
+  chat: vi.fn(),
+  message: vi.fn(),
+}));
+
+vi.mock("./components/Message", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./components/Message")>();
+  const { createElement, memo } = await import("react");
+  function MessageRenderProbe(props: ComponentProps<typeof actual.Message>) {
+    renderIsolationMock.message(props.message.id);
+    return createElement(actual.Message, props);
+  }
+  return { ...actual, Message: memo(MessageRenderProbe) };
+});
+
+vi.mock("./components/Chat", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./components/Chat")>();
+  const { createElement, memo } = await import("react");
+  function ChatRenderProbe(props: ComponentProps<typeof actual.Chat>) {
+    renderIsolationMock.chat();
+    return createElement(actual.Chat, props);
+  }
+  return { ...actual, Chat: memo(ChatRenderProbe) };
+});
 
 const socketMock = vi.hoisted(() => ({
   instances: [] as Array<{
@@ -241,6 +266,8 @@ afterEach(() => {
   socketMock.status = undefined;
   socketMock.instances.splice(0);
   completionSoundMock.instances.splice(0);
+  renderIsolationMock.chat.mockClear();
+  renderIsolationMock.message.mockClear();
   socketMock.send.mockReset();
   socketMock.send.mockReturnValue(true);
   socketMock.close.mockReset();
@@ -5637,6 +5664,167 @@ describe("App", () => {
     expect(
       screen.queryByText("late A failure", { selector: "article" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("isolates rail activity and streaming transcript renders in both directions", () => {
+    const trackedConversation = conversationSummary(CONVERSATION_ID, "Tracked A");
+    const readConversationName = vi.fn(() => "Tracked A");
+    const readConversationTime = vi.fn(() => "2026-07-19T08:00:00.000Z");
+    Object.defineProperties(trackedConversation, {
+      name: { enumerable: true, get: readConversationName },
+      updatedAt: { enumerable: true, get: readConversationTime },
+    });
+    const trackedConversations = [trackedConversation];
+    const findConversations = vi.spyOn(trackedConversations, "find");
+    const orderConversations = vi.spyOn(trackedConversations, "map");
+    const activity = {
+      projectId: PROJECT_ID,
+      cwd: "E:\\default",
+      busyConversationCount: 1,
+      attentionConversationCount: 0,
+    };
+    const readWorkspaceBusyCount = vi.fn(() => 1);
+    Object.defineProperty(activity, "busyConversationCount", {
+      enumerable: true,
+      get: readWorkspaceBusyCount,
+    });
+
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\default",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_ID,
+        conversations: trackedConversations,
+        truncated: false,
+      });
+      socketMock.rawEmit?.({
+        type: "project_activity_snapshot",
+        projects: [activity],
+        truncated: false,
+      });
+    });
+    const initialFinds = findConversations.mock.calls.length;
+    const initialOrderings = orderConversations.mock.calls.length;
+    const initialNameReads = readConversationName.mock.calls.length;
+    const initialTimeReads = readConversationTime.mock.calls.length;
+    const initialActivityReads = readWorkspaceBusyCount.mock.calls.length;
+
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "session_event",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        runId: RUN_ID,
+        event: {
+          type: "assistant_message_started",
+          projectionId: "streaming-render-isolation",
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "session_event",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        runId: RUN_ID,
+        event: { type: "text_delta", delta: "streaming transcript update" },
+      });
+    });
+
+    expect(screen.getByText("streaming transcript update")).toBeInTheDocument();
+    expect(findConversations).toHaveBeenCalledTimes(initialFinds);
+    expect(orderConversations).toHaveBeenCalledTimes(initialOrderings);
+    expect(readConversationName).toHaveBeenCalledTimes(initialNameReads);
+    expect(readConversationTime).toHaveBeenCalledTimes(initialTimeReads);
+    expect(readWorkspaceBusyCount).toHaveBeenCalledTimes(initialActivityReads);
+
+    renderIsolationMock.chat.mockClear();
+    renderIsolationMock.message.mockClear();
+    act(() => socketMock.rawEmit?.({
+      type: "project_activity_snapshot",
+      projects: [{
+        projectId: PROJECT_ID,
+        cwd: "E:\\default",
+        busyConversationCount: 0,
+        attentionConversationCount: 2,
+      }],
+      truncated: false,
+    }));
+    expect(screen.getByRole("button", {
+      name: "打开工作区 default（2 个会话需要注意）",
+    })).toBeInTheDocument();
+    expect(renderIsolationMock.chat).not.toHaveBeenCalled();
+    expect(renderIsolationMock.message).not.toHaveBeenCalled();
+
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\default",
+        busy: false,
+        thinkingLevel: "high",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off", "high"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+    expect(screen.getByRole("combobox", { name: "思考级别" })).toHaveValue("high");
+    expect(renderIsolationMock.chat).toHaveBeenCalled();
+    expect(renderIsolationMock.message).not.toHaveBeenCalled();
+
+    renderIsolationMock.chat.mockClear();
+    renderIsolationMock.message.mockClear();
+    act(() => socketMock.rawEmit?.({
+      type: "session_event",
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      runId: RUN_ID,
+      event: { type: "text_delta", delta: " and focused update" },
+    }));
+    expect(screen.getByText("streaming transcript update and focused update"))
+      .toBeInTheDocument();
+    expect(renderIsolationMock.chat).toHaveBeenCalled();
+    expect(renderIsolationMock.message).toHaveBeenCalledWith(
+      "streaming-render-isolation",
+    );
+
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_ID,
+        conversations: [{
+          ...conversationSummary(CONVERSATION_ID, "Updated A"),
+          activity: { kind: "running", runId: RUN_ID },
+        }],
+        truncated: false,
+      });
+    });
+    expect(screen.getByText("Updated A")).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "运行中" })).toBeInTheDocument();
+
+    act(() => socketMock.status?.(false));
+    expect(screen.getByRole("button", { name: "当前会话 Updated A" }))
+      .toBeDisabled();
   });
 
   it("keeps the current draft while background activity updates the project list", () => {

@@ -1,4 +1,5 @@
 import {
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -214,7 +215,7 @@ function getSessionTokenUsage(chat: ChatState, usage?: TokenUsage): TokenUsage {
   };
 }
 
-export function Chat({
+function ChatView({
   chat,
   busy,
   activeRun,
@@ -711,3 +712,5 @@ export function Chat({
     />}
   </main>;
 }
+
+export const Chat = memo(ChatView);

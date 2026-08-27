@@ -44,6 +44,7 @@ import { createCompletionSound, type CompletionSound } from "./lib/completion-so
 import { PiSocket } from "./lib/socket";
 import { readStoredString, writeStoredString } from "./lib/storage";
 import { createTransitionTimingOwner } from "./lib/transition-timing";
+import { useLatestCallback } from "./lib/use-latest-callback";
 import { useModalFocus } from "./lib/use-modal-focus";
 
 const CWD_KEY = "piweb.lastCwd";
@@ -2933,6 +2934,57 @@ export function App() {
     setSetupOpen(false);
     updateDirectoryBrowser(undefined);
   };
+  const handleWorkspaceSelect = useLatestCallback(switchWorkspace);
+  const handleWorkspaceAdd = useLatestCallback(openWorkspaceDialog);
+  const handleSidebarCollapsedChange = useLatestCallback(
+    (collapsed: boolean) => setSidebarCollapsed(collapsed),
+  );
+  const handleConversationSelect = useLatestCallback(focusConversation);
+  const handleConversationCreate = useLatestCallback(() => {
+    if (
+      !workspaceSyncingRef.current
+      && !conversationSyncingRef.current
+      && !focusedConversationNeedsSnapshot()
+    ) {
+      setSelectingRole(true);
+    }
+  });
+  const handleConversationRename = useLatestCallback(renameConversation);
+  const handleConversationDelete = useLatestCallback(deleteConversation);
+  const handleChatDraftChange = useLatestCallback((text: string) => {
+    updateDraft(text);
+    const focus = focusRef.current;
+    if (focus) {
+      const key = unconfirmedPromptKey(focus);
+      const unconfirmed = unconfirmedPromptByConversationRef.current.get(key);
+      if (unconfirmed) {
+        if (text) {
+          unconfirmedPromptByConversationRef.current.set(key, {
+            ...unconfirmed,
+            retainedDraft: text,
+            edited: true,
+          });
+        } else {
+          unconfirmedPromptByConversationRef.current.delete(key);
+        }
+      }
+    }
+    if (promptNotice) setPromptNotice("");
+  });
+  const handleChatSend = useLatestCallback(submitPrompt);
+  const handleChatAbort = useLatestCallback(abortCurrentRun);
+  const handleChatSettings = useLatestCallback(() => {
+    if (
+      !workspaceSyncingRef.current
+      && !conversationSyncingRef.current
+      && !focusedConversationNeedsSnapshot()
+    ) setDrawer(true);
+  });
+  const handleChatThinking = useLatestCallback(setThinkingLevel);
+  const handleChatCompactionThreshold = useLatestCallback(setCompactionThreshold);
+  const handleChatCompact = useLatestCallback(compactContext);
+  const handleChatSwitchRole = useLatestCallback(switchConversationRole);
+  const handleChatRewind = useLatestCallback(truncateConversation);
   const workspaceSetupFocusRef = useModalFocus<HTMLElement>(
     setupOpen && !directoryBrowser,
     setupOpen ? "workspace-setup" : "",
@@ -2992,8 +3044,8 @@ export function App() {
     unavailable={unavailableWorkspaceKeys}
     activityByWorkspace={projectActivityByWorkspace}
     activityCatalogTruncated={projectActivityTruncated}
-    onSelect={switchWorkspace}
-    onAdd={openWorkspaceDialog}
+    onSelect={handleWorkspaceSelect}
+    onAdd={handleWorkspaceAdd}
   />;
   const workspaceSetupDialog = setupOpen && <div
     className="modal-backdrop workspace-setup-backdrop"
@@ -3074,11 +3126,11 @@ export function App() {
         collapsed={sidebarCollapsed}
         navigationEnabled={false}
         actionsEnabled={false}
-        onToggleCollapsed={setSidebarCollapsed}
-        onSelect={() => undefined}
-        onCreate={() => undefined}
-        onRename={() => undefined}
-        onDelete={() => false}
+        onToggleCollapsed={handleSidebarCollapsedChange}
+        onSelect={handleConversationSelect}
+        onCreate={handleConversationCreate}
+        onRename={handleConversationRename}
+        onDelete={handleConversationDelete}
       />
       <WorkspacePlaceholder
         cwd={activeCwd}
@@ -3160,19 +3212,11 @@ export function App() {
           && !focusAwaitingSnapshot
         }
         pendingDeletionId={pendingConversationDeletion?.conversationId}
-        onToggleCollapsed={setSidebarCollapsed}
-        onSelect={focusConversation}
-        onCreate={() => {
-          if (
-            !workspaceSyncingRef.current
-            && !conversationSyncingRef.current
-            && !focusedConversationNeedsSnapshot()
-          ) {
-            setSelectingRole(true);
-          }
-        }}
-        onRename={renameConversation}
-        onDelete={deleteConversation}
+        onToggleCollapsed={handleSidebarCollapsedChange}
+        onSelect={handleConversationSelect}
+        onCreate={handleConversationCreate}
+        onRename={handleConversationRename}
+        onDelete={handleConversationDelete}
       />
       <div className="workbench-main">
         {workspaceSyncing && <div
@@ -3246,43 +3290,17 @@ export function App() {
               submitting={Boolean(pendingPrompt)}
               pendingAdmissions={pendingAdmissions}
               promptNotice={promptNotice || undefined}
-              onDraftChange={(text) => {
-                updateDraft(text);
-                const focus = focusRef.current;
-                if (focus) {
-                  const key = unconfirmedPromptKey(focus);
-                  const unconfirmed =
-                    unconfirmedPromptByConversationRef.current.get(key);
-                  if (unconfirmed) {
-                    if (text) {
-                      unconfirmedPromptByConversationRef.current.set(key, {
-                        ...unconfirmed,
-                        retainedDraft: text,
-                        edited: true,
-                      });
-                    } else {
-                      unconfirmedPromptByConversationRef.current.delete(key);
-                    }
-                  }
-                }
-                if (promptNotice) setPromptNotice("");
-              }}
-              onSend={submitPrompt}
-              onAbort={abortCurrentRun}
-              onSettings={() => {
-                if (
-                  !workspaceSyncingRef.current
-                  && !conversationSyncingRef.current
-                  && !focusedConversationNeedsSnapshot()
-                ) setDrawer(true);
-              }}
-              onThinking={setThinkingLevel}
-              onCompactionThreshold={setCompactionThreshold}
-              onCompact={compactContext}
-              onSwitchRole={switchConversationRole}
-              onChangeCwd={openWorkspaceDialog}
-              onOpenConversation={focusConversation}
-              onRewind={truncateConversation}
+              onDraftChange={handleChatDraftChange}
+              onSend={handleChatSend}
+              onAbort={handleChatAbort}
+              onSettings={handleChatSettings}
+              onThinking={handleChatThinking}
+              onCompactionThreshold={handleChatCompactionThreshold}
+              onCompact={handleChatCompact}
+              onSwitchRole={handleChatSwitchRole}
+              onChangeCwd={handleWorkspaceAdd}
+              onOpenConversation={handleConversationSelect}
+              onRewind={handleChatRewind}
               rewindingMessageId={pendingConversationTruncation?.messageId}
             />}
       </div>
