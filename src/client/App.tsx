@@ -1162,6 +1162,15 @@ export function App() {
           event.focusId,
           Boolean(pending.cachedProjectId && !cachedProjectMismatch),
         );
+        if (
+          event.operation === "initialize"
+          && event.conversationId === undefined
+          && event.focusId === undefined
+          && workspaceSyncingRef.current
+        ) {
+          clearTemporaryWorkspacePresentation();
+          updateWorkspaceSyncing(false);
+        }
         const pendingState = pendingFocusedStateRef.current;
         pendingFocusedStateRef.current = undefined;
         if (

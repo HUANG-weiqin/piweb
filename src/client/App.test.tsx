@@ -600,6 +600,139 @@ describe("App", () => {
       .toBeEnabled();
   });
 
+  it("settles a cached workspace without a conversation only for the exact initialize acknowledgement", () => {
+    render(<App />);
+    const originalSessionId = startFromSetup();
+    const window = {
+      omittedBefore: false,
+      startsMidTurn: false,
+      contentTruncated: false,
+    };
+
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId: originalSessionId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId: originalSessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        messages: [{
+          id: "cached-before-empty",
+          runId: RUN_ID,
+          role: "user",
+          text: "cached conversation before empty project",
+          thinking: "",
+          tools: [],
+        }],
+        window,
+      });
+    });
+
+    socketMock.autoFocus = false;
+    act(() => {
+      socketMock.status?.(false);
+      socketMock.status?.(true);
+      socketMock.emit?.({
+        type: "hello",
+        protocolVersion: PROTOCOL_VERSION,
+        startupCwd: "E:\\default",
+      });
+    });
+    const reconnect = latestCommand("initialize");
+    expect(reconnect).toMatchObject({
+      cwd: "E:\\work",
+      conversation: { kind: "open", conversationId: CONVERSATION_ID },
+    });
+    expect(screen.getByRole("status", { name: "正在同步工作区…" }))
+      .toBeInTheDocument();
+    expect(screen.getByText("cached conversation before empty project"))
+      .toBeInTheDocument();
+
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "focus_attached",
+        operation: "initialize",
+        commandId: reconnect.commandId!,
+        sessionId: originalSessionId,
+        projectId: PROJECT_ID,
+      });
+      socketMock.rawEmit?.({
+        type: "focus_attached",
+        operation: "initialize",
+        commandId: "00000000-0000-4000-8000-000000000099",
+        sessionId: reconnect.sessionId,
+        projectId: PROJECT_ID,
+      });
+    });
+    expect(screen.getByRole("status", { name: "正在同步工作区…" }))
+      .toBeInTheDocument();
+    expect(screen.getByText("cached conversation before empty project"))
+      .toBeInTheDocument();
+
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "focus_attached",
+        operation: "initialize",
+        commandId: reconnect.commandId!,
+        sessionId: reconnect.sessionId,
+        projectId: PROJECT_ID,
+      });
+      socketMock.rawEmit?.({
+        type: "state",
+        state: {
+          sessionId: reconnect.sessionId,
+          projectId: PROJECT_ID,
+          conversationId: undefined,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "project_snapshot",
+        sessionId: reconnect.sessionId,
+        projectId: PROJECT_ID,
+        conversations: [],
+        truncated: false,
+      });
+      socketMock.rawEmit?.({
+        type: "role_catalog_snapshot",
+        sessionId: reconnect.sessionId,
+        projectId: PROJECT_ID,
+        roles: [defaultRole()],
+      });
+    });
+
+    expect(screen.queryByRole("status", { name: "正在同步工作区…" }))
+      .not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "选择这个会话的角色" }))
+      .toBeInTheDocument();
+    const start = screen.getByRole("button", {
+      name: "使用 Default 开始会话",
+    });
+    expect(start).toBeEnabled();
+    fireEvent.click(start);
+    expect(latestCommand("create_conversation")).toMatchObject({
+      sessionId: reconnect.sessionId,
+      roleId: "default",
+    });
+  });
+
   it("keeps a cache miss empty and restores the source focus on a matching focus error", () => {
     render(<App />);
     const sessionId = startFromSetup();
