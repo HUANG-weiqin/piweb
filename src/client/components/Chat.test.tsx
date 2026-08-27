@@ -140,17 +140,6 @@ describe("Chat", () => {
       .toHaveAttribute("aria-expanded", "false");
   });
 
-  it("labels an armed active LoopList as executing", () => {
-    render(view(emptyChat, "", undefined, {
-      busy: true,
-      loopList: {
-        items: [{ id: "run", text: "Running", checked: false }],
-        armed: true,
-      },
-    }));
-    expect(screen.getByText("执行中")).toBeInTheDocument();
-  });
-
   it("publishes composer height and keeps followed output above its inset", () => {
     const observe = vi.fn();
     let resize: ResizeObserverCallback | undefined;

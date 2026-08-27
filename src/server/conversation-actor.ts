@@ -308,7 +308,6 @@ interface RunTicket {
   waitCacheCheckpointCount: number;
   waitCacheCheckpointDisabled: boolean;
   awaitingWaitCacheCheckpointUsage: boolean;
-  loopListContinuationCount: number;
   abortPromise?: Promise<void>;
   projectRunLease?: ProjectRunLease;
   finishPromise?: Promise<RunSettlement>;
@@ -513,18 +512,10 @@ export class ConversationActor {
     const reserved = aggregateReservedConversationEntries(
       this.sessionManager.getEntries(),
     );
-    const branchLoopList = aggregateReservedConversationEntries(
-      this.sessionManager.getBranch(),
-    ).loopList;
     this.compactionThresholdPercent =
       reserved.compactionThreshold?.percent
       ?? DEFAULT_COMPACTION_THRESHOLD_PERCENT;
-    this.loopListSnapshot = branchLoopList
-      ? {
-          items: structuredClone(branchLoopList.items),
-          armed: branchLoopList.armed,
-        }
-      : { items: [], armed: false };
+    this.loopListSnapshot = this.restoreLoopListFromActiveBranch();
     for (const settlement of reserved.runSettlements) {
       this.usedRunIds.add(settlement.runId);
     }
@@ -597,35 +588,46 @@ export class ConversationActor {
     return structuredClone(this.loopListSnapshot);
   }
 
-  private writeLoopList(items: LoopList["items"]): LoopList {
+  private restoreLoopListFromActiveBranch(): LoopList {
+    const branchLoopList = aggregateReservedConversationEntries(
+      this.sessionManager.getBranch(),
+    ).loopList;
+    return branchLoopList
+      ? structuredClone({
+          items: branchLoopList.items,
+          armed: branchLoopList.armed,
+        })
+      : { items: [], armed: false };
+  }
+
+  private persistLoopList(
+    items: LoopList["items"],
+    armed: boolean,
+  ): LoopList {
     const entry = createLoopListEntry({
       items,
-      armed: items.some((item) => !item.checked),
+      armed,
       updatedAt: this.now().toISOString(),
     });
     appendReservedCustomEntry(this.sessionManager, entry);
-    this.loopListSnapshot = {
-      items: structuredClone(entry.data.items),
+    this.loopListSnapshot = structuredClone({
+      items: entry.data.items,
       armed: entry.data.armed,
-    };
+    });
     this.emitLoopList();
     return this.getLoopList();
   }
 
+  private writeLoopList(items: LoopList["items"]): LoopList {
+    return this.persistLoopList(
+      items,
+      items.some((item) => !item.checked),
+    );
+  }
+
   private pauseLoopList(): LoopList {
     if (!this.loopListSnapshot.armed) return this.getLoopList();
-    const entry = createLoopListEntry({
-      items: this.loopListSnapshot.items,
-      armed: false,
-      updatedAt: this.now().toISOString(),
-    });
-    appendReservedCustomEntry(this.sessionManager, entry);
-    this.loopListSnapshot = {
-      items: structuredClone(entry.data.items),
-      armed: false,
-    };
-    this.emitLoopList();
-    return this.getLoopList();
+    return this.persistLoopList(this.loopListSnapshot.items, false);
   }
 
   private rearmLoopList(): void {
@@ -818,18 +820,10 @@ export class ConversationActor {
         const reserved = aggregateReservedConversationEntries(
           this.sessionManager.getEntries(),
         );
-        const branchLoopList = aggregateReservedConversationEntries(
-          this.sessionManager.getBranch(),
-        ).loopList;
         this.compactionThresholdPercent =
           reserved.compactionThreshold?.percent
           ?? DEFAULT_COMPACTION_THRESHOLD_PERCENT;
-        this.loopListSnapshot = branchLoopList
-          ? {
-              items: structuredClone(branchLoopList.items),
-              armed: branchLoopList.armed,
-            }
-          : { items: [], armed: false };
+        this.loopListSnapshot = this.restoreLoopListFromActiveBranch();
         this.emitLoopList();
         this.usedRunIds.clear();
         for (const settlement of reserved.runSettlements) {
@@ -988,7 +982,6 @@ export class ConversationActor {
         recovered: false,
         promptText: input.origin === "browser" ? input.text : undefined,
         expectsInitialPromptRawUserMessage: true,
-        rearmLoopList: input.origin === "browser",
       },
       (ticket) => this.session.prompt(input.text, {
         preflightResult: (accepted) => {
@@ -1460,7 +1453,6 @@ export class ConversationActor {
       recovered: boolean;
       promptText?: string;
       expectsInitialPromptRawUserMessage: boolean;
-      rearmLoopList?: boolean;
     },
     execute: (ticket: RunTicket) => Promise<void>,
   ): Promise<RunSettlement> {
@@ -1478,7 +1470,7 @@ export class ConversationActor {
     if (this.usedRunIds.has(input.runId)) {
       throw new Error("Run ID was already used in this conversation actor");
     }
-    if (input.rearmLoopList) this.rearmLoopList();
+    if (input.origin === "browser") this.rearmLoopList();
     this.usedRunIds.add(input.runId);
     const ownership: ConversationRunOwnership = Object.freeze({
       conversationId: this.conversationId,
@@ -1510,7 +1502,6 @@ export class ConversationActor {
       waitCacheCheckpointCount: 0,
       waitCacheCheckpointDisabled: false,
       awaitingWaitCacheCheckpointUsage: false,
-      loopListContinuationCount: 0,
     };
     this.activeRun = ticket;
     this.beginLiveProjection(ticket, input.promptText);
@@ -1941,6 +1932,7 @@ export class ConversationActor {
     this.emitSessionEvent(ticket, { type: "run_started" });
     this.emitActivity();
 
+    let loopListContinuationCount = 0;
     let outcome: RunSettlement["outcome"] = "completed";
     let failure: unknown;
     try {
@@ -1981,16 +1973,16 @@ export class ConversationActor {
           || !this.loopListSnapshot.items.some((item) => !item.checked)
         ) break;
         if (
-          ticket.loopListContinuationCount
+          loopListContinuationCount
           >= MAX_LOOP_LIST_CONTINUATIONS_PER_RUN
         ) {
           this.pauseLoopList();
           break;
         }
-        ticket.loopListContinuationCount += 1;
+        loopListContinuationCount += 1;
         const continuation = createLoopListContinueEntry({
           runId: ticket.id,
-          continuation: ticket.loopListContinuationCount,
+          continuation: loopListContinuationCount,
           items: this.loopListSnapshot.items,
         });
         await this.session.sendCustomMessage(continuation, {

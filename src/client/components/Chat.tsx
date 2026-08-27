@@ -308,9 +308,9 @@ function ChatView({
     ? `${chat.focus.sessionId}:${chat.focus.conversationId}:${chat.focus.focusId}`
     : "unfocused";
   const loopListEmpty = loopList.items.length === 0;
-  const loopListCompleted = !loopListEmpty
-    && loopList.items.every((item) => item.checked);
   const checkedLoopListItems = loopList.items.filter((item) => item.checked).length;
+  const loopListCompleted = !loopListEmpty
+    && checkedLoopListItems === loopList.items.length;
   const remainingLoopListItems = loopList.items.length - checkedLoopListItems;
   let loopListStatusKey = "paused";
   let loopListStatusLabel = "已暂停";
@@ -323,10 +323,7 @@ function ChatView({
   }
   useEffect(() => {
     setLoopListExpanded(false);
-  }, [transcriptFocusKey]);
-  useEffect(() => {
-    if (loopListEmpty || loopListCompleted) setLoopListExpanded(false);
-  }, [loopListCompleted, loopListEmpty]);
+  }, [transcriptFocusKey, loopListCompleted, loopListEmpty]);
   const activeRunId = activeRun?.id;
   const expandedAssistantMessageIds = useMemo(() => {
     const assistantMessages = blocks.flatMap((block) => (
@@ -606,7 +603,7 @@ function ChatView({
     </section>
     <div className="composer-wrap" ref={composerWrapRef}>
       {loopList.items.length > 0 && <section
-        className={`loop-list ${loopListExpanded ? "expanded" : "collapsed"}`}
+        className="loop-list"
         aria-label="LoopList"
       >
         <button

@@ -16,7 +16,7 @@ const itemsSchema = Type.Array(Type.Object({
 const writeSchema = Type.Object({ items: itemsSchema }, { additionalProperties: false });
 const emptySchema = Type.Object({}, { additionalProperties: false });
 
-export interface LoopListToolService {
+interface LoopListToolService {
   read(): LoopList;
   write(items: LoopList["items"]): LoopList;
   pause(): LoopList;

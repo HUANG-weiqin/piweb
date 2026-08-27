@@ -1148,7 +1148,7 @@ const conversationHistoryItemSchema: z.ZodType<ConversationHistoryItem> =
       peerExists: z.boolean(),
     }),
   ]);
-export const loopListItemSchema = z.object({
+const loopListItemSchema = z.object({
   id: boundedCharactersString(
     MAX_LOOP_LIST_ITEM_ID_CHARACTERS,
     "loopList.items.id",
