@@ -31,7 +31,7 @@ conversation role snapshot
 ## 策略
 
 - `full_access` 允许所有工具和命令，不区分来源或目标位置；项目外路径和 `.piweb` 也不额外拦截。
-- `read_only` 对模型只展示 `source=builtin` 的 Pi 原生 `read / grep / find / ls`，以及 `source=sdk` 的宿主 `git_status / git_diff`、conversation-scoped `notebook_write / notebook_list / notebook_grep / notebook_read` 和 `list_roles / read_role / propose_role_revision`；`bash / edit / write`、会话编排 meta 和其他扩展工具不进入有效 registry、model tools 或 system prompt。
+- `read_only` 对模型只展示 `source=builtin` 的 Pi 原生 `read / grep / find / ls`，以及 `source=sdk` 的宿主 `git_status / git_diff`、conversation-scoped `notebook_write / notebook_list / notebook_grep / notebook_read`、LoopList `todo_read / todo_write / todo_pause` 和 `list_roles / read_role / propose_role_revision`；`bash / edit / write`、会话编排 meta 和其他扩展工具不进入有效 registry、model tools 或 system prompt。
 - 执行 gate 独立重复同一 identity 约束；`read_only` 直接拒绝命令、项目写入、unknown、会话编排 meta，以及同名 extension/project 工具。三个角色工具只有 `source=sdk` 时放行；工具不可见不是权限边界，硬拒绝仍不可删除。
 - 扩展可以用 `read` 等名称覆盖内置工具；策略必须同时检查最终 `toolName` 和 SDK `ToolInfo.sourceInfo.source`，不能只按名称放行。PiRuntime 对每次 `setActiveToolsByName`（包括 extension refresh 和 `setActiveTools`）重新做 source-aware 投影，同名覆盖发生后宁可移除该工具，也不把扩展 schema/snippet 暴露给只读模型。
 - Agent 的 `read_only` 只限制经过 Pi 工具入口的调用；工作台宿主仍会写 manifest 和 transcript。
@@ -62,6 +62,7 @@ ConversationActor 按角色模式和会话管理能力注入宿主工具：
 ```text
 read_only only: git_status / git_diff
 all roles: notebook_write / notebook_list / notebook_grep / notebook_read
+all roles: todo_read / todo_write / todo_pause
 all roles: list_roles / read_role / propose_role_revision
 canManageSessions only: list_sessions / current_session / peek_session
 canManageSessions only: start_session / start_temporary_session / send_session_message

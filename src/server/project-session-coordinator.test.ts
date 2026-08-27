@@ -1622,6 +1622,9 @@ describe("ProjectSessionCoordinator", () => {
       "list_roles",
       "read_role",
       "propose_role_revision",
+      "todo_read",
+      "todo_write",
+      "todo_pause",
     ]);
     expect(second.profile.role).toMatchObject({
       revision: 2,
@@ -1653,6 +1656,9 @@ describe("ProjectSessionCoordinator", () => {
       "wait_for_session",
       "abort_session",
       "delete_session",
+      "todo_read",
+      "todo_write",
+      "todo_pause",
     ]);
     expect(first.profile.role).not.toEqual(second.profile.role);
   });

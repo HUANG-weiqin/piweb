@@ -1686,6 +1686,18 @@ export class PiConnection {
       view.unreadConversationIds.add(event.conversationId);
     }
     if (
+      event.type === "loop_list"
+      && focused
+      && view.focusId !== undefined
+    ) {
+      this.emit({
+        type: "loop_list_update",
+        sessionId: view.sessionId,
+        conversationId: event.conversationId,
+        focusId: view.focusId,
+        loopList: event.loopList,
+      });
+    } else if (
       event.type === "session_event"
       && focused
       && view.focusId !== undefined
@@ -1987,6 +1999,7 @@ export class PiConnection {
           promptId: admission.promptId,
           text: admission.text,
         })),
+        loopList: actor.getLoopList(),
         window: projection.window,
       });
     } catch (error) {

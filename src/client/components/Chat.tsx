@@ -17,6 +17,7 @@ import {
   type ConversationRoleSnapshot,
   type ConversationWindowCoverage,
   type PendingPromptAdmissionSnapshot as PendingAdmission,
+  type LoopList,
   type PublicState,
   type RoleTemplate,
   type ThinkingLevel,
@@ -62,6 +63,7 @@ interface ChatProps {
   chat: ChatState;
   busy: boolean;
   activeRun?: PublicState["activeRun"];
+  loopList?: LoopList;
   sessionTokenUsage?: TokenUsage;
   contextTokenCount: number | null | undefined;
   contextWindow: number | null | undefined;
@@ -219,6 +221,7 @@ function ChatView({
   chat,
   busy,
   activeRun,
+  loopList = { items: [], armed: false },
   sessionTokenUsage,
   contextTokenCount,
   contextWindow,
@@ -264,6 +267,7 @@ function ChatView({
   else if (!model) composerPlaceholder = "请先登录并选择模型";
   else if (busy) composerPlaceholder = "发送后将排队等待处理…";
   const transcriptRef = useRef<HTMLElement>(null);
+  const composerWrapRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const followOutputRef = useRef(true);
   const lastScrollTopRef = useRef(0);
@@ -271,6 +275,7 @@ function ChatView({
   const currentFocusRef = useRef<ChatState["focus"]>(chat.focus);
   const positionedFocusRef = useRef<ChatState["focus"]>(undefined);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const [loopListExpanded, setLoopListExpanded] = useState(false);
   const [roleDetailsOpen, setRoleDetailsOpen] = useState(false);
   const [compactionThresholdOpen, setCompactionThresholdOpen] = useState(false);
   const [compactionThresholdDraft, setCompactionThresholdDraft] =
@@ -302,6 +307,26 @@ function ChatView({
   const transcriptFocusKey = chat.focus
     ? `${chat.focus.sessionId}:${chat.focus.conversationId}:${chat.focus.focusId}`
     : "unfocused";
+  const loopListEmpty = loopList.items.length === 0;
+  const loopListCompleted = !loopListEmpty
+    && loopList.items.every((item) => item.checked);
+  const checkedLoopListItems = loopList.items.filter((item) => item.checked).length;
+  const remainingLoopListItems = loopList.items.length - checkedLoopListItems;
+  let loopListStatusKey = "paused";
+  let loopListStatusLabel = "已暂停";
+  if (loopListCompleted) {
+    loopListStatusKey = "completed";
+    loopListStatusLabel = "已完成";
+  } else if (loopList.armed && busy) {
+    loopListStatusKey = "executing";
+    loopListStatusLabel = "执行中";
+  }
+  useEffect(() => {
+    setLoopListExpanded(false);
+  }, [transcriptFocusKey]);
+  useEffect(() => {
+    if (loopListEmpty || loopListCompleted) setLoopListExpanded(false);
+  }, [loopListCompleted, loopListEmpty]);
   const activeRunId = activeRun?.id;
   const expandedAssistantMessageIds = useMemo(() => {
     const assistantMessages = blocks.flatMap((block) => (
@@ -392,7 +417,21 @@ function ChatView({
     if (transcriptRef.current) {
       lastScrollTopRef.current = transcriptRef.current.scrollTop;
     }
-  }, [chat, compacting, conversationReady, followLatest, scrollToLatest]);
+  }, [chat, compacting, conversationReady, followLatest, loopListExpanded, scrollToLatest]);
+
+  useLayoutEffect(() => {
+    const composerWrap = composerWrapRef.current;
+    const shell = composerWrap?.parentElement;
+    if (!composerWrap || !shell) return;
+    const updateInset = () => {
+      shell.style.setProperty("--composer-inset", `${composerWrap.getBoundingClientRect().height}px`);
+    };
+    updateInset();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(updateInset);
+    observer.observe(composerWrap);
+    return () => observer.disconnect();
+  }, []);
 
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
@@ -554,7 +593,42 @@ function ChatView({
         </span>
       </div>}
     </section>
-    <div className="composer-wrap">
+    <div className="composer-wrap" ref={composerWrapRef}>
+      {loopList.items.length > 0 && <section
+        className={`loop-list ${loopListExpanded ? "expanded" : "collapsed"}`}
+        aria-label="LoopList"
+      >
+        <button
+          type="button"
+          className="loop-list-toggle"
+          aria-expanded={loopListExpanded}
+          onClick={() => setLoopListExpanded((expanded) => !expanded)}
+        >
+          <span className="loop-list-title">LoopList</span>
+          <span className={`loop-list-status ${loopListStatusKey}`}>
+            {loopListStatusLabel}
+          </span>
+          <span className="loop-list-count">
+            {checkedLoopListItems}/{loopList.items.length}
+            {remainingLoopListItems > 0 && ` · ${remainingLoopListItems} 项未完成`}
+          </span>
+          <span aria-hidden="true">{loopListExpanded ? "⌃" : "⌄"}</span>
+        </button>
+        {loopListExpanded && <ul className="loop-list-items">
+          {loopList.items.map((item) => <li
+            key={item.id}
+            className={item.checked ? "checked" : ""}
+          >
+            <input
+              type="checkbox"
+              checked={item.checked}
+              disabled
+              aria-label={item.text}
+            />
+            <span>{item.text}</span>
+          </li>)}
+        </ul>}
+      </section>}
       {showJumpToLatest && <button
         type="button"
         className="jump-latest"

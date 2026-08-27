@@ -10,7 +10,7 @@ import {
   type ConversationSummary,
   type ConversationWindowCoverage,
   type DirectoryListing,
-
+  type LoopList,
   type PublicState,
   type ProjectActivitySummary,
   type RoleTemplate,
@@ -481,6 +481,7 @@ export function App() {
   const [roles, setRoles] = useState<RoleTemplate[]>([]);
   const [conversationRole, setConversationRole] =
     useState<ConversationRoleSnapshot>();
+  const [loopList, setLoopList] = useState<LoopList>({ items: [], armed: false });
   const [conversationIndexTruncated, setConversationIndexTruncated] = useState(false);
   const authoritativeProjectMembershipRef = useRef(
     new Map<string, ReadonlySet<string>>(),
@@ -680,6 +681,7 @@ export function App() {
     setConversations([]);
     setRoles([]);
     setConversationRole(undefined);
+    setLoopList({ items: [], armed: false });
     setConversationIndexTruncated(false);
     setHistoryWindow(EMPTY_CONVERSATION_WINDOW);
     dispatch({ type: "reset" });
@@ -864,7 +866,10 @@ export function App() {
     setDirectoryBrowserState(next);
   };
   const updatePendingFocus = (pending: PendingFocus | undefined) => {
-    if (pending) pendingFocusedStateRef.current = undefined;
+    if (pending) {
+      pendingFocusedStateRef.current = undefined;
+      setLoopList({ items: [], armed: false });
+    }
     pendingFocusRef.current = pending;
     setPendingFocus(pending);
     setCreatingConversation(pending?.operation === "create_conversation");
@@ -934,6 +939,7 @@ export function App() {
       clearPendingAdmissions();
       showPendingContextCompaction(undefined);
       setConversationRole(undefined);
+      setLoopList({ items: [], armed: false });
       setHistoryWindow(EMPTY_CONVERSATION_WINDOW);
       updateConversationReady(false);
       setSelectingRole(true);
@@ -948,6 +954,7 @@ export function App() {
     conversationIdRef.current = conversationId;
     if (!preservePresentation) {
       setConversationRole(undefined);
+      setLoopList({ items: [], armed: false });
       setHistoryWindow(EMPTY_CONVERSATION_WINDOW);
       dispatch({ type: "focus_changed", ...focus });
     }
@@ -1011,6 +1018,7 @@ export function App() {
     setConversations([]);
     setRoles([]);
     setConversationRole(undefined);
+    setLoopList({ items: [], armed: false });
     setConversationIndexTruncated(false);
     setHistoryWindow(EMPTY_CONVERSATION_WINDOW);
     setExtensionUI([]);
@@ -1120,6 +1128,7 @@ export function App() {
       });
     }
     setConversationRole(event.role);
+    setLoopList(event.loopList ?? { items: [], armed: false });
     setHistoryWindow(event.window);
     if (event.pendingPrompts !== undefined) {
       replacePendingAdmissions(
@@ -1701,6 +1710,10 @@ export function App() {
       } else if (event.type === "prompt_delivered") {
         if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;
         removePendingAdmission(event.promptId);
+      } else if (event.type === "loop_list_update") {
+        if (pendingFocusRef.current) return;
+        if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;
+        setLoopList(event.loopList);
       } else if (event.type === "conversation_snapshot") {
         if (pendingFocusRef.current?.operation === "focus_conversation") {
           const deferred = deferredFocusAuthorityRef.current;
@@ -3254,6 +3267,7 @@ export function App() {
               chat={visibleChat}
               busy={visibleBusy}
               activeRun={visibleActiveRun}
+              loopList={loopList}
               sessionTokenUsage={visibleState.sessionTokenUsage}
               contextTokenCount={visibleState.contextUsage?.tokens}
               contextWindow={visibleState.contextUsage?.contextWindow}

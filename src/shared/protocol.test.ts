@@ -26,7 +26,7 @@ const messageId = "assistant:96b960be-b6bb-4a19-9cf2-78e77cb69425";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(33);
+    expect(PROTOCOL_VERSION).toBe(34);
   });
 
   it("accepts supported commands", () => {
@@ -1127,6 +1127,45 @@ describe("parseClientCommand", () => {
 });
 
 describe("parseServerEvent", () => {
+  it("parses bounded LoopList snapshots and focus-correlated live updates", () => {
+    const loopList = {
+      items: [{ id: "verify", text: "Verify behavior", checked: false }],
+      armed: true,
+    };
+    expect(parseServerEvent({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId,
+      focusId,
+      items: [],
+      loopList,
+      window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
+    })).toMatchObject({ type: "conversation_snapshot", loopList });
+    expect(parseServerEvent({
+      type: "loop_list_update",
+      sessionId,
+      conversationId,
+      focusId,
+      loopList,
+    })).toEqual({
+      type: "loop_list_update",
+      sessionId,
+      conversationId,
+      focusId,
+      loopList,
+    });
+    expect(() => parseServerEvent({
+      type: "loop_list_update",
+      sessionId,
+      conversationId,
+      focusId,
+      loopList: {
+        ...loopList,
+        items: [...loopList.items, loopList.items[0]],
+      },
+    })).toThrow(/unique/i);
+  });
+
   it("strictly parses a correlated read-only conversation preview", () => {
     const preview = {
       type: "conversation_preview" as const,

@@ -4,6 +4,7 @@ import {
   type FileEntry,
   type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
+import type { LoopList } from "../shared/protocol.js";
 import {
   aggregateReservedConversationEntries,
   parseReservedConversationEntry,
@@ -49,6 +50,7 @@ export interface PiSessionFileInspection {
   pendingPromptDeliveries: PendingPromptDelivery[];
   pendingPromptBatches: PendingPromptBatch[];
   metaOperations: MetaOperation[];
+  loopList?: LoopList & { updatedAt: string };
   lastActivityAt: string;
 }
 

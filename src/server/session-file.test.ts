@@ -5,6 +5,7 @@ import {
   CONVERSATION_MESSAGE_CUSTOM_TYPE,
   CONVERSATION_META_CUSTOM_TYPE,
   RUN_SETTLEMENT_CUSTOM_TYPE,
+  LOOP_LIST_CUSTOM_TYPE,
   PENDING_PROMPT_BATCH_CUSTOM_TYPE,
   PENDING_PROMPT_DELIVERY_CUSTOM_TYPE,
   createConversationCardEntry,
@@ -675,6 +676,23 @@ describe("validatePiSessionFile", () => {
         data: {},
       },
     ]), "wrong-carrier.jsonl")).toThrow();
+
+    expect(() => inspectPiSessionFile(serialize([
+      header,
+      {
+        ...base,
+        type: "custom",
+        customType: LOOP_LIST_CUSTOM_TYPE,
+        data: {
+          items: [
+            { id: "duplicate", text: "first", checked: false },
+            { id: "duplicate", text: "second", checked: false },
+          ],
+          armed: true,
+          updatedAt: timestamp,
+        },
+      },
+    ]), "malformed-loop-list.jsonl")).toThrow(/unique/i);
 
     expect(() => inspectPiSessionFile(serialize([
       header,

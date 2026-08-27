@@ -472,6 +472,81 @@ describe("App", () => {
     );
   });
 
+  it("hydrates LoopList from focused snapshots and ignores stale live identities", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off", "high"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        items: [],
+        loopList: {
+          items: [{ id: "focused", text: "Focused item", checked: false }],
+          armed: false,
+        },
+        window: completeConversationWindow,
+      });
+    });
+    expect(screen.getByRole("region", { name: "LoopList" })).toBeInTheDocument();
+    expect(screen.getByText("已暂停")).toBeInTheDocument();
+
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "loop_list_update",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A_SECOND,
+        loopList: {
+          items: [{ id: "focused", text: "Focused item", checked: true }],
+          armed: false,
+        },
+      });
+    });
+    expect(screen.getByText("已暂停")).toBeInTheDocument();
+
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "loop_list_update",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        loopList: {
+          items: [{ id: "focused", text: "Focused item", checked: true }],
+          armed: false,
+        },
+      });
+    });
+    expect(screen.getByText("已完成")).toBeInTheDocument();
+
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        items: [],
+        loopList: { items: [], armed: false },
+        window: completeConversationWindow,
+      });
+    });
+    expect(screen.queryByRole("region", { name: "LoopList" })).not.toBeInTheDocument();
+  });
+
   it("plays one project-scoped chime for a completed user run", () => {
     render(<App />);
     const sessionId = startFromSetup();

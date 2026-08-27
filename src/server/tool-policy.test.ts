@@ -23,6 +23,9 @@ describe("defaultToolPolicy", () => {
     "list_roles",
     "read_role",
     "propose_role_revision",
+    "todo_read",
+    "todo_write",
+    "todo_pause",
   ])(
     "allows the host-owned %s tool in read-only mode",
     (toolName) => {
@@ -54,6 +57,9 @@ describe("defaultToolPolicy", () => {
     ["notebook_list", "builtin"],
     ["notebook_grep", "extension"],
     ["notebook_read", "project"],
+    ["todo_read", "builtin"],
+    ["todo_write", "project"],
+    ["todo_pause", "extension"],
     ["list_sessions", "sdk"],
     ["current_session", "sdk"],
     ["start_session", "sdk"],

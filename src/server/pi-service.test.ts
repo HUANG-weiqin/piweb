@@ -3001,6 +3001,73 @@ describe("PiConnection lifecycle", () => {
 });
 
 describe("PiConnection coordinated project view", () => {
+  it("projects LoopList snapshots and focus-correlated low-frequency updates", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "new", roleId: "default" },
+      });
+      const focused = latestState(harness.events);
+      expect(harness.events.findLast(
+        (event) => event.type === "conversation_snapshot",
+      )).toMatchObject({
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId,
+        focusId: focused.focusId,
+        loopList: { items: [], armed: false },
+      });
+
+      const todoWrite = harness.runtime.lastCreateOptions?.workbenchCustomTools?.find(
+        ({ name }) => name === "todo_write",
+      );
+      const todoPause = harness.runtime.lastCreateOptions?.workbenchCustomTools?.find(
+        ({ name }) => name === "todo_pause",
+      );
+      expect(todoWrite).toBeDefined();
+      expect(todoPause).toBeDefined();
+      harness.runtime.created.at(-1)!.prompt = async () => {
+        await todoWrite?.execute("write", {
+          items: [{ id: "event", text: "Project this", checked: false }],
+        });
+        await todoPause?.execute("pause", {});
+      };
+
+      await harness.connection.handle({
+        type: "prompt",
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+        runId: RUN_A,
+        text: "write a list",
+      });
+
+      const updates = harness.events.filter(
+        (event): event is Extract<ServerEvent, { type: "loop_list_update" }> =>
+          event.type === "loop_list_update",
+      );
+      expect(updates).toHaveLength(2);
+      for (const event of updates) {
+        expect(event).toMatchObject({
+          sessionId: SESSION_A,
+          conversationId: focused.conversationId,
+          focusId: focused.focusId,
+        });
+      }
+      expect(updates.at(-1)).toMatchObject({
+        loopList: {
+          items: [{ id: "event", text: "Project this", checked: false }],
+          armed: false,
+        },
+      });
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
   it.each(["open", "recent"] as const)(
     "emits a cold %s preview before model catalog and AgentSession readiness",
     async (kind) => {

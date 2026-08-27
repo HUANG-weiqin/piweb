@@ -26,6 +26,8 @@ import {
   aggregateReservedConversationEntries,
   appendReservedCustomEntry,
   createConversationCardEntry,
+  createLoopListEntry,
+  LOOP_LIST_CUSTOM_TYPE,
 } from "./conversation-meta.js";
 import {
   ConversationActor,
@@ -1262,6 +1264,286 @@ describe("ConversationActor", () => {
       await running;
       await fixture.actor.dispose();
     });
+  });
+
+  it("continues an unfinished LoopList inside the same run and settles once checked", async () => {
+    const fixture = await openActor();
+    const emit = () => fixture.runtime.session.eventListener;
+    const todoWrite = fixture.runtime.createOptions?.workbenchCustomTools?.find(
+      ({ name }) => name === "todo_write",
+    );
+    expect(todoWrite).toBeDefined();
+
+    fixture.runtime.session.promptImplementation = async () => {
+      emit()?.(nativeEvent({ type: "agent_start" }));
+      await todoWrite?.execute("todo-call-1", {
+        items: [{ id: "verify", text: "Verify the implementation", checked: false }],
+      });
+      emit()?.(nativeEvent({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "implementation drafted" }],
+          stopReason: "stop",
+        },
+      }));
+      emit()?.(nativeEvent({ type: "agent_end" }));
+    };
+    fixture.runtime.session.resumeImplementation = async (message, options) => {
+      expect(message).toMatchObject({
+        customType: "piweb.loop_list_continue.v1",
+        display: false,
+        details: {
+          runId: RUN_A,
+          continuation: 1,
+          items: [{
+            id: "verify",
+            text: "Verify the implementation",
+            checked: false,
+          }],
+        },
+      });
+      expect(options).toMatchObject({ triggerTurn: true });
+      emit()?.(nativeEvent({ type: "agent_start" }));
+      await todoWrite?.execute("todo-call-2", {
+        items: [{ id: "verify", text: "Verify the implementation", checked: true }],
+      });
+      emit()?.(nativeEvent({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "verification complete" }],
+          stopReason: "stop",
+        },
+      }));
+      emit()?.(nativeEvent({ type: "agent_end" }));
+    };
+
+    const settlement = await fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "implement and verify",
+      origin: "browser",
+    });
+
+    expect(settlement).toMatchObject({
+      runId: RUN_A,
+      outcome: "completed",
+      finalText: "implementation drafted\n\nverification complete",
+    });
+    expect(fixture.runtime.session.resumeCalls).toBe(1);
+    expect(fixture.events.filter((event) => (
+      event.type === "session_event"
+      && (event.event.type === "run_started" || event.event.type === "run_finished")
+    ))).toHaveLength(2);
+    await fixture.actor.dispose();
+  });
+
+  it("settles without hidden continuation when the LoopList is checked", async () => {
+    const fixture = await openActor();
+    const todoWrite = fixture.runtime.createOptions?.workbenchCustomTools?.find(
+      ({ name }) => name === "todo_write",
+    );
+    expect(todoWrite).toBeDefined();
+    fixture.runtime.session.promptImplementation = async () => {
+      await todoWrite?.execute("todo-call", {
+        items: [{ id: "done", text: "Already done", checked: true }],
+      });
+    };
+
+    await expect(fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "record completion",
+      origin: "browser",
+    })).resolves.toMatchObject({ outcome: "completed" });
+
+    expect(fixture.runtime.session.resumeCalls).toBe(0);
+    await fixture.actor.dispose();
+  });
+
+  it("pauses an unfinished LoopList after eight same-run continuations", async () => {
+    const fixture = await openActor();
+    const todoWrite = fixture.runtime.createOptions?.workbenchCustomTools?.find(
+      ({ name }) => name === "todo_write",
+    );
+    fixture.runtime.session.promptImplementation = async () => {
+      await todoWrite?.execute("todo-call", {
+        items: [{ id: "blocked", text: "Still blocked", checked: false }],
+      });
+    };
+    fixture.runtime.session.resumeImplementation = async () => undefined;
+
+    await expect(fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "keep trying",
+      origin: "browser",
+    })).resolves.toMatchObject({ outcome: "completed" });
+
+    expect(fixture.runtime.session.resumeCalls).toBe(8);
+    expect(fixture.actor.getLoopList()).toEqual({
+      items: [{ id: "blocked", text: "Still blocked", checked: false }],
+      armed: false,
+    });
+    await fixture.actor.dispose();
+  });
+
+  it("restores the latest LoopList without auto-starting after process restart", async () => {
+    const manager = SessionManager.inMemory(process.cwd(), { id: CONVERSATION_ID });
+    appendReservedCustomEntry(manager, createLoopListEntry({
+      items: [{ id: "restore", text: "Resume explicitly", checked: false }],
+      armed: true,
+      updatedAt: "2026-07-19T10:00:00.000Z",
+    }));
+
+    const fixture = await openActor({ sessionManager: manager });
+
+    expect(fixture.actor.getLoopList()).toEqual({
+      items: [{ id: "restore", text: "Resume explicitly", checked: false }],
+      armed: true,
+    });
+    expect(fixture.runtime.session.promptCalls).toHaveLength(0);
+    expect(fixture.actor.getActivity()).toEqual({ kind: "idle" });
+    await fixture.actor.dispose();
+  });
+
+  it("re-arms a paused unfinished LoopList on a later browser prompt", async () => {
+    const fixture = await openActor();
+    const todoWrite = fixture.runtime.createOptions?.workbenchCustomTools?.find(
+      ({ name }) => name === "todo_write",
+    );
+    const todoPause = fixture.runtime.createOptions?.workbenchCustomTools?.find(
+      ({ name }) => name === "todo_pause",
+    );
+    let promptNumber = 0;
+    fixture.runtime.session.promptImplementation = async () => {
+      promptNumber += 1;
+      if (promptNumber === 1) {
+        await todoWrite?.execute("todo-write", {
+          items: [{ id: "later", text: "Continue later", checked: false }],
+        });
+        await todoPause?.execute("todo-pause", {});
+        return;
+      }
+      expect(fixture.actor.getLoopList().armed).toBe(true);
+      await todoWrite?.execute("todo-complete", {
+        items: [{ id: "later", text: "Continue later", checked: true }],
+      });
+    };
+
+    await fixture.actor.startPrompt({ runId: RUN_A, text: "pause", origin: "browser" });
+    expect(fixture.actor.getLoopList().armed).toBe(false);
+    await fixture.actor.startPrompt({ runId: RUN_B, text: "resume", origin: "browser" });
+    expect(fixture.actor.getLoopList()).toEqual({
+      items: [{ id: "later", text: "Continue later", checked: true }],
+      armed: false,
+    });
+    await fixture.actor.dispose();
+  });
+
+  it("durably pauses the LoopList before aborting the SDK run", async () => {
+    const fixture = await openActor();
+    const started = deferred();
+    const finished = deferred();
+    const todoWrite = fixture.runtime.createOptions?.workbenchCustomTools?.find(
+      ({ name }) => name === "todo_write",
+    );
+    fixture.runtime.session.promptImplementation = async () => {
+      await todoWrite?.execute("todo-call", {
+        items: [{ id: "abort", text: "Preserve this", checked: false }],
+      });
+      started.resolve();
+      await finished.promise;
+    };
+    fixture.runtime.session.abort = async () => {
+      expect(fixture.actor.getLoopList().armed).toBe(false);
+      fixture.runtime.session.abortCalls += 1;
+      finished.resolve();
+    };
+
+    const completion = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "start",
+      origin: "browser",
+    });
+    await started.promise;
+    await fixture.actor.abort(RUN_A);
+
+    await expect(completion).resolves.toMatchObject({ outcome: "aborted" });
+    expect(aggregateReservedConversationEntries(fixture.manager.getBranch()).loopList)
+      .toMatchObject({ armed: false });
+    await fixture.actor.dispose();
+  });
+
+  it("still aborts and settles when persisting the LoopList pause fails", async () => {
+    const fixture = await openActor();
+    const started = deferred();
+    const finished = deferred();
+    const todoWrite = fixture.runtime.createOptions?.workbenchCustomTools?.find(
+      ({ name }) => name === "todo_write",
+    );
+    fixture.runtime.session.promptImplementation = async () => {
+      await todoWrite?.execute("todo-call", {
+        items: [{ id: "abort", text: "Preserve this", checked: false }],
+      });
+      started.resolve();
+      await finished.promise;
+    };
+    fixture.runtime.session.abort = async () => {
+      fixture.runtime.session.abortCalls += 1;
+      finished.resolve();
+    };
+
+    const completion = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "start",
+      origin: "browser",
+    });
+    await started.promise;
+    const appendCustomEntry = fixture.manager.appendCustomEntry.bind(
+      fixture.manager,
+    );
+    vi.spyOn(fixture.manager, "appendCustomEntry").mockImplementation(
+      (customType, data) => {
+        if (customType === LOOP_LIST_CUSTOM_TYPE) {
+          throw new Error("LoopList pause persistence failed");
+        }
+        return appendCustomEntry(customType, data);
+      },
+    );
+
+    await fixture.actor.abort(RUN_A);
+
+    await expect(completion).resolves.toMatchObject({ outcome: "aborted" });
+    expect(fixture.runtime.session.abortCalls).toBe(1);
+    expect(fixture.events).toContainEqual(expect.objectContaining({
+      type: "error",
+      runId: RUN_A,
+      message: "LoopList pause persistence failed",
+    }));
+    await fixture.actor.dispose();
+  });
+
+  it("pauses unfinished LoopList state when the model turn fails", async () => {
+    const fixture = await openActor();
+    const todoWrite = fixture.runtime.createOptions?.workbenchCustomTools?.find(
+      ({ name }) => name === "todo_write",
+    );
+    fixture.runtime.session.promptImplementation = async () => {
+      await todoWrite?.execute("todo-call", {
+        items: [{ id: "recover", text: "Recover later", checked: false }],
+      });
+      throw new Error("model interrupted");
+    };
+
+    await expect(fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "start",
+      origin: "browser",
+    })).resolves.toMatchObject({ outcome: "failed" });
+    expect(fixture.actor.getLoopList()).toEqual({
+      items: [{ id: "recover", text: "Recover later", checked: false }],
+      armed: false,
+    });
+    await fixture.actor.dispose();
   });
 
   it("persists and triggers a per-conversation compaction threshold", async () => {

@@ -81,6 +81,99 @@ afterEach(() => {
 });
 
 describe("Chat", () => {
+  it("mounts no LoopList container or height when the list is absent or empty", () => {
+    const { rerender } = render(view(emptyChat));
+    expect(screen.queryByRole("region", { name: "LoopList" })).not.toBeInTheDocument();
+
+    rerender(view(emptyChat, "", undefined, {
+      loopList: { items: [], armed: true },
+    }));
+    expect(screen.queryByRole("region", { name: "LoopList" })).not.toBeInTheDocument();
+  });
+
+  it("shows a collapsed read-only LoopList and keeps completed nonempty lists", () => {
+    const loopList = {
+      items: [
+        { id: "done", text: "Finished item", checked: true },
+        { id: "next", text: "Pending item", checked: false },
+      ],
+      armed: false,
+    };
+    const { rerender } = render(view(emptyChat, "", undefined, { loopList }));
+    const toggle = screen.getByRole("button", { name: /LoopList/ });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText("已暂停")).toBeInTheDocument();
+    expect(screen.getByText("1/2 · 1 项未完成")).toBeInTheDocument();
+    expect(screen.queryByText("Pending item")).not.toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("checkbox", { name: "Finished item" })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "Finished item" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Pending item" })).not.toBeChecked();
+
+    rerender(view(emptyChat, "", undefined, {
+      loopList: {
+        items: [
+          { id: "done", text: "Finished item updated", checked: true },
+          { id: "replacement", text: "Replacement item", checked: false },
+        ],
+        armed: true,
+      },
+      busy: true,
+    }));
+    expect(screen.getByRole("button", { name: /LoopList/ }))
+      .toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("Replacement item")).toBeInTheDocument();
+    expect(screen.getByText("执行中")).toBeInTheDocument();
+
+    rerender(view(emptyChat, "", undefined, {
+      loopList: {
+        items: loopList.items.map((item) => ({ ...item, checked: true })),
+        armed: false,
+      },
+    }));
+    expect(screen.getByRole("region", { name: "LoopList" })).toBeInTheDocument();
+    expect(screen.getByText("已完成")).toBeInTheDocument();
+    expect(screen.getByText("2/2")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /LoopList/ }))
+      .toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("labels an armed active LoopList as executing", () => {
+    render(view(emptyChat, "", undefined, {
+      busy: true,
+      loopList: {
+        items: [{ id: "run", text: "Running", checked: false }],
+        armed: true,
+      },
+    }));
+    expect(screen.getByText("执行中")).toBeInTheDocument();
+  });
+
+  it("publishes the measured composer height as transcript inset", () => {
+    const observe = vi.fn();
+    vi.stubGlobal("ResizeObserver", class {
+      observe = observe;
+      disconnect() {}
+    });
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 0, top: 0, right: 600, bottom: 220,
+      left: 0, width: 600, height: 220, toJSON: () => ({}),
+    });
+
+    const { container } = render(view(emptyChat, "", undefined, {
+      loopList: {
+        items: [{ id: "measure", text: "Measure", checked: false }],
+        armed: false,
+      },
+    }));
+
+    expect(observe).toHaveBeenCalledOnce();
+    expect(container.querySelector(".app-shell"))
+      .toHaveStyle("--composer-inset: 220px");
+  });
+
   it("offers manual context compaction below the composer", () => {
     const onCompact = vi.fn(() => true);
     render(view(emptyChat, "", undefined, { onCompact }));

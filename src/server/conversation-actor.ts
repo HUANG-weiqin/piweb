@@ -18,6 +18,7 @@ import {
   type ConversationWindowCoverage,
   type SessionEvent,
   type TokenUsage,
+  type LoopList,
   type ToolMode,
 } from "../shared/protocol.js";
 import type { AgentTurnBoundaryCheck } from "./agent-turn-boundary.js";
@@ -30,6 +31,8 @@ import {
   appendReservedCustomEntry,
   createCompactionThresholdEntry,
   createCompactionResumeEntry,
+  createLoopListContinueEntry,
+  createLoopListEntry,
   createConversationMetaEntry,
   createConversationMessageEntry,
   createConversationRoleChangeEntry,
@@ -38,7 +41,9 @@ import {
   type ConversationMeta,
   type ConversationMessageEntry,
   type RunSettlement,
+  MAX_LOOP_LIST_CONTINUATIONS_PER_RUN,
 } from "./conversation-meta.js";
+import { createLoopListTools } from "./loop-list-tools.js";
 import {
   type CreatedPiSession,
   type CreatePiSessionOptions,
@@ -98,6 +103,11 @@ export type ConversationActorEvent =
   | {
       type: "context_usage";
       conversationId: string;
+    }
+  | {
+      type: "loop_list";
+      conversationId: string;
+      loopList: LoopList;
     }
   | {
       type: "completion";
@@ -298,6 +308,7 @@ interface RunTicket {
   waitCacheCheckpointCount: number;
   waitCacheCheckpointDisabled: boolean;
   awaitingWaitCacheCheckpointUsage: boolean;
+  loopListContinuationCount: number;
   abortPromise?: Promise<void>;
   projectRunLease?: ProjectRunLease;
   finishPromise?: Promise<RunSettlement>;
@@ -467,6 +478,7 @@ export class ConversationActor {
   private readonly pendingAdmissions: PendingPromptAdmission[] = [];
   private profileSnapshot: ConversationMeta;
   private compactionThresholdPercent: number;
+  private loopListSnapshot: LoopList;
   private projectionSeq = 0;
   private liveProjection?: LiveConversationProjection;
 
@@ -504,6 +516,12 @@ export class ConversationActor {
     this.compactionThresholdPercent =
       reserved.compactionThreshold?.percent
       ?? DEFAULT_COMPACTION_THRESHOLD_PERCENT;
+    this.loopListSnapshot = reserved.loopList
+      ? {
+          items: structuredClone(reserved.loopList.items),
+          armed: reserved.loopList.armed,
+        }
+      : { items: [], armed: false };
     for (const settlement of reserved.runSettlements) {
       this.usedRunIds.add(settlement.runId);
     }
@@ -570,6 +588,49 @@ export class ConversationActor {
 
   get modelRegistry(): ModelRegistry {
     return this.requireCreated().modelRegistry;
+  }
+
+  getLoopList(): LoopList {
+    return structuredClone(this.loopListSnapshot);
+  }
+
+  private writeLoopList(items: LoopList["items"]): LoopList {
+    const entry = createLoopListEntry({
+      items,
+      armed: items.some((item) => !item.checked),
+      updatedAt: this.now().toISOString(),
+    });
+    appendReservedCustomEntry(this.sessionManager, entry);
+    this.loopListSnapshot = {
+      items: structuredClone(entry.data.items),
+      armed: entry.data.armed,
+    };
+    this.emitLoopList();
+    return this.getLoopList();
+  }
+
+  private pauseLoopList(): LoopList {
+    if (!this.loopListSnapshot.armed) return this.getLoopList();
+    const entry = createLoopListEntry({
+      items: this.loopListSnapshot.items,
+      armed: false,
+      updatedAt: this.now().toISOString(),
+    });
+    appendReservedCustomEntry(this.sessionManager, entry);
+    this.loopListSnapshot = {
+      items: structuredClone(entry.data.items),
+      armed: false,
+    };
+    this.emitLoopList();
+    return this.getLoopList();
+  }
+
+  private rearmLoopList(): void {
+    if (
+      this.loopListSnapshot.armed
+      || !this.loopListSnapshot.items.some((item) => !item.checked)
+    ) return;
+    this.writeLoopList(this.loopListSnapshot.items);
   }
 
   getCompactionThresholdPercent(): number {
@@ -757,6 +818,13 @@ export class ConversationActor {
         this.compactionThresholdPercent =
           reserved.compactionThreshold?.percent
           ?? DEFAULT_COMPACTION_THRESHOLD_PERCENT;
+        this.loopListSnapshot = reserved.loopList
+          ? {
+              items: structuredClone(reserved.loopList.items),
+              armed: reserved.loopList.armed,
+            }
+          : { items: [], armed: false };
+        this.emitLoopList();
         this.usedRunIds.clear();
         for (const settlement of reserved.runSettlements) {
           this.usedRunIds.add(settlement.runId);
@@ -914,6 +982,7 @@ export class ConversationActor {
         recovered: false,
         promptText: input.origin === "browser" ? input.text : undefined,
         expectsInitialPromptRawUserMessage: true,
+        rearmLoopList: input.origin === "browser",
       },
       (ticket) => this.session.prompt(input.text, {
         preflightResult: (accepted) => {
@@ -1385,6 +1454,7 @@ export class ConversationActor {
       recovered: boolean;
       promptText?: string;
       expectsInitialPromptRawUserMessage: boolean;
+      rearmLoopList?: boolean;
     },
     execute: (ticket: RunTicket) => Promise<void>,
   ): Promise<RunSettlement> {
@@ -1402,6 +1472,7 @@ export class ConversationActor {
     if (this.usedRunIds.has(input.runId)) {
       throw new Error("Run ID was already used in this conversation actor");
     }
+    if (input.rearmLoopList) this.rearmLoopList();
     this.usedRunIds.add(input.runId);
     const ownership: ConversationRunOwnership = Object.freeze({
       conversationId: this.conversationId,
@@ -1433,6 +1504,7 @@ export class ConversationActor {
       waitCacheCheckpointCount: 0,
       waitCacheCheckpointDisabled: false,
       awaitingWaitCacheCheckpointUsage: false,
+      loopListContinuationCount: 0,
     };
     this.activeRun = ticket;
     this.beginLiveProjection(ticket, input.promptText);
@@ -1867,32 +1939,55 @@ export class ConversationActor {
     let failure: unknown;
     try {
       await execute(ticket);
-      this.releaseTurnBoundaryPause();
-      while (
-        ticket.turnBoundaryCompactionRequested
-        && this.activeRun === ticket
-        && !isCancelling(ticket)
-      ) {
-        ticket.turnBoundaryCompactionRequested = false;
+      while (this.activeRun === ticket && !isCancelling(ticket)) {
+        this.releaseTurnBoundaryPause();
+        while (
+          ticket.turnBoundaryCompactionRequested
+          && this.activeRun === ticket
+          && !isCancelling(ticket)
+        ) {
+          ticket.turnBoundaryCompactionRequested = false;
+          const projectedFailure =
+            ticket.extensionErrorMessage ?? ticket.projector.errorMessage;
+          if (projectedFailure) throw new Error(projectedFailure);
+
+          await this.compactRequestedTurnBoundary(ticket);
+          if (this.activeRun !== ticket || isCancelling(ticket)) break;
+
+          const resume = createCompactionResumeEntry({
+            content:
+              "The workbench paused between tool turns for context management. Continue the unfinished task from the retained context without waiting for another user message.",
+            display: false,
+            details: { runId: ticket.id },
+          });
+          await this.session.sendCustomMessage({
+            customType: resume.customType,
+            content: resume.content,
+            display: resume.display,
+            details: resume.details,
+          }, { triggerTurn: true });
+        }
         const projectedFailure =
           ticket.extensionErrorMessage ?? ticket.projector.errorMessage;
         if (projectedFailure) throw new Error(projectedFailure);
-
-        await this.compactRequestedTurnBoundary(ticket);
-        if (this.activeRun !== ticket || isCancelling(ticket)) break;
-
-        const resume = createCompactionResumeEntry({
-          content:
-            "The workbench paused between tool turns for context management. Continue the unfinished task from the retained context without waiting for another user message.",
-          display: false,
-          details: { runId: ticket.id },
+        if (
+          !this.loopListSnapshot.armed
+          || !this.loopListSnapshot.items.some((item) => !item.checked)
+        ) break;
+        if (
+          ticket.loopListContinuationCount
+          >= MAX_LOOP_LIST_CONTINUATIONS_PER_RUN
+        ) {
+          this.pauseLoopList();
+          break;
+        }
+        ticket.loopListContinuationCount += 1;
+        const continuation = createLoopListContinueEntry({
+          runId: ticket.id,
+          continuation: ticket.loopListContinuationCount,
+          items: this.loopListSnapshot.items,
         });
-        await this.session.sendCustomMessage({
-          customType: resume.customType,
-          content: resume.content,
-          display: resume.display,
-          details: resume.details,
-        }, {
+        await this.session.sendCustomMessage(continuation, {
           triggerTurn: true,
         });
       }
@@ -2008,6 +2103,9 @@ export class ConversationActor {
     ticket: RunTicket,
     outcome: RunSettlement["outcome"],
   ): Promise<RunSettlement> {
+    if (outcome !== "completed" && ticket.phase !== "cancelling") {
+      this.tryPauseLoopList(ticket);
+    }
     ticket.finishPromise ??= this.finishRun(ticket, outcome);
     return ticket.finishPromise;
   }
@@ -2102,8 +2200,17 @@ export class ConversationActor {
     ticket.completion.reject(this.fatalError);
   }
 
+  private tryPauseLoopList(ticket: RunTicket): void {
+    try {
+      this.pauseLoopList();
+    } catch (error) {
+      this.emitError(error, ticket.id);
+    }
+  }
+
   private cancelRun(ticket: RunTicket): Promise<void> {
     if (this.activeRun !== ticket) return Promise.resolve();
+    this.tryPauseLoopList(ticket);
     this.cancelScope(ticket.id);
     if (this.compacting) {
       try {
@@ -2675,6 +2782,14 @@ export class ConversationActor {
     });
   }
 
+  private emitLoopList(): void {
+    this.emit({
+      type: "loop_list",
+      conversationId: this.conversationId,
+      loopList: this.getLoopList(),
+    });
+  }
+
   private emitContextUsage(): void {
     this.emit({
       type: "context_usage",
@@ -2747,6 +2862,14 @@ export class ConversationActor {
         this.project.cwd,
         {
           ...createSessionOptions,
+          workbenchCustomTools: [
+            ...(createSessionOptions?.workbenchCustomTools ?? []),
+            ...createLoopListTools({
+              read: () => this.getLoopList(),
+              write: (items) => this.writeLoopList(items),
+              pause: () => this.pauseLoopList(),
+            }),
+          ],
           sessionManager: this.sessionManager,
           toolCallGate: (input) => this.authorizeToolCall(input),
           extensionAbort: () => {

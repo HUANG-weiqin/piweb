@@ -5,6 +5,8 @@ import {
   MAX_PENDING_PROMPT_ATTENTION_REASON_CHARACTERS,
   MAX_PENDING_PROMPTS_PER_CONVERSATION,
   MIN_COMPACTION_THRESHOLD_PERCENT,
+  loopListSchema,
+  type LoopList,
 } from "../shared/protocol.js";
 
 export const CONVERSATION_META_CUSTOM_TYPE =
@@ -25,6 +27,9 @@ export const COMPACTION_THRESHOLD_CUSTOM_TYPE =
   "piweb.compaction_threshold.v1";
 export const COMPACTION_RESUME_CUSTOM_TYPE =
   "piweb.compaction_resume.v1";
+export const LOOP_LIST_CUSTOM_TYPE = "piweb.loop_list.v1";
+export const LOOP_LIST_CONTINUE_CUSTOM_TYPE = "piweb.loop_list_continue.v1";
+export const MAX_LOOP_LIST_CONTINUATIONS_PER_RUN = 8;
 export const CONVERSATION_ROLE_CHANGE_CUSTOM_TYPE =
   "piweb.conversation_role_change.v1";
 export const TEMPORARY_RETURN_RECEIPT_CUSTOM_TYPE =
@@ -343,6 +348,40 @@ const conversationMessageEntrySchema = z.object({
   details: conversationMessageDetailsSchema,
 }).strict();
 
+const loopListEntrySchema = z.object({
+  customType: z.literal(LOOP_LIST_CUSTOM_TYPE),
+  data: loopListSchema.extend({
+    updatedAt: canonicalTimestampSchema("updatedAt"),
+  }).strict(),
+}).strict();
+
+function formatLoopListItems(items: LoopList["items"]): string {
+  return [
+    "Current LoopList snapshot:",
+    ...items.map((item) => `${item.checked ? "[x]" : "[ ]"} ${item.text} (${item.id})`),
+    "Continue working through the unchecked items. Update the list with todo_write as progress changes.",
+  ].join("\n");
+}
+
+const loopListContinueEntrySchema = z.object({
+  customType: z.literal(LOOP_LIST_CONTINUE_CUSTOM_TYPE),
+  content: limitedString("content", MAX_CONVERSATION_MESSAGE_CONTENT_BYTES),
+  display: z.literal(false),
+  details: z.object({
+    runId: uuidSchema("runId"),
+    continuation: z.number().int().min(1).max(MAX_LOOP_LIST_CONTINUATIONS_PER_RUN),
+    items: loopListSchema.shape.items,
+  }).strict(),
+}).strict().superRefine((value, context) => {
+  if (value.content !== formatLoopListItems(value.details.items)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "LoopList continuation content must match its item snapshot",
+      path: ["content"],
+    });
+  }
+});
+
 const compactionResumeEntrySchema = z.object({
   customType: z.literal(COMPACTION_RESUME_CUSTOM_TYPE),
   content: limitedString(
@@ -638,6 +677,8 @@ export type ConversationMessageEntry =
   z.infer<typeof conversationMessageEntrySchema>;
 export type CompactionResumeEntry =
   z.infer<typeof compactionResumeEntrySchema>;
+export type LoopListEntry = z.infer<typeof loopListEntrySchema>;
+export type LoopListContinueEntry = z.infer<typeof loopListContinueEntrySchema>;
 export type RunSettlement = z.infer<typeof runSettlementSchema>;
 export type RunSettlementEntry =
   z.infer<typeof runSettlementEntrySchema>;
@@ -686,6 +727,14 @@ export type ReservedConversationEntry =
       entry: CompactionResumeEntry;
     }
   | {
+      kind: "loop_list";
+      entry: LoopListEntry;
+    }
+  | {
+      kind: "loop_list_continue";
+      entry: LoopListContinueEntry;
+    }
+  | {
       kind: "run_settlement";
       entry: RunSettlementEntry;
     }
@@ -720,6 +769,7 @@ export interface ReservedConversationAggregate {
   temporaryReturnReceipts: TemporaryReturnReceipt[];
   metaOperations: MetaOperation[];
   compactionThreshold?: CompactionThreshold;
+  loopList?: LoopListEntry["data"];
 }
 
 export function parseConversationReferenceSnapshot(
@@ -777,6 +827,31 @@ export function parseConversationMessageEntry(
   value: unknown,
 ): ConversationMessageEntry {
   return conversationMessageEntrySchema.parse(value);
+}
+
+export function parseLoopListEntry(value: unknown): LoopListEntry {
+  return loopListEntrySchema.parse(value);
+}
+
+export function createLoopListEntry(data: LoopListEntry["data"]): LoopListEntry {
+  return parseLoopListEntry({ customType: LOOP_LIST_CUSTOM_TYPE, data });
+}
+
+export function parseLoopListContinueEntry(value: unknown): LoopListContinueEntry {
+  return loopListContinueEntrySchema.parse(value);
+}
+
+export function createLoopListContinueEntry(input: {
+  runId: string;
+  continuation: number;
+  items: LoopList["items"];
+}): LoopListContinueEntry {
+  return parseLoopListContinueEntry({
+    customType: LOOP_LIST_CONTINUE_CUSTOM_TYPE,
+    content: formatLoopListItems(input.items),
+    display: false,
+    details: input,
+  });
 }
 
 export function parseCompactionResumeEntry(
@@ -900,13 +975,15 @@ export function appendReservedCustomEntry(
     | PendingPromptBatchEntry
     | TemporaryReturnReceiptEntry
     | MetaOperationEntry
-    | CompactionThresholdEntry,
+    | CompactionThresholdEntry
+    | LoopListEntry,
 ): string {
   const reserved = parseReservedConversationEntry(value);
   if (
     reserved === undefined
     || reserved.kind === "conversation_message"
     || reserved.kind === "compaction_resume"
+    || reserved.kind === "loop_list_continue"
   ) {
     throw new Error("Expected a non-context piweb reserved custom entry");
   }
@@ -993,6 +1070,12 @@ export function parseReservedConversationEntry(
       kind: "conversation_message",
       entry: parseConversationMessageEntry(payload),
     };
+  }
+  if (customType === LOOP_LIST_CUSTOM_TYPE) {
+    return { kind: "loop_list", entry: parseLoopListEntry(payload) };
+  }
+  if (customType === LOOP_LIST_CONTINUE_CUSTOM_TYPE) {
+    return { kind: "loop_list_continue", entry: parseLoopListContinueEntry(payload) };
   }
   if (customType === COMPACTION_RESUME_CUSTOM_TYPE) {
     return {
@@ -1198,6 +1281,7 @@ export function aggregateReservedConversationEntries(
   >();
   const metaOperations = new Map<string, MetaOperation>();
   let compactionThreshold: CompactionThreshold | undefined;
+  let loopList: LoopListEntry["data"] | undefined;
   let roleChangedAt: string | undefined;
 
   for (const value of values) {
@@ -1248,7 +1332,21 @@ export function aggregateReservedConversationEntries(
       deliveredMessageIds.add(messageId);
       continue;
     }
-    if (reserved.kind === "compaction_resume") {
+    if (
+      reserved.kind === "compaction_resume"
+      || reserved.kind === "loop_list_continue"
+    ) {
+      continue;
+    }
+    if (reserved.kind === "loop_list") {
+      if (
+        loopList
+        && Date.parse(reserved.entry.data.updatedAt)
+          < Date.parse(loopList.updatedAt)
+      ) {
+        throw new Error("Piweb LoopList updatedAt cannot regress");
+      }
+      loopList = reserved.entry.data;
       continue;
     }
     if (reserved.kind === "pending_prompt_delivery") {
@@ -1468,5 +1566,6 @@ export function aggregateReservedConversationEntries(
     ...(compactionThreshold === undefined
       ? {}
       : { compactionThreshold }),
+    ...(loopList === undefined ? {} : { loopList }),
   };
 }

@@ -15,14 +15,19 @@ export const MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS = 500;
 export const MAX_PROMPT_CHARACTERS = 200_000;
 export const MAX_PENDING_PROMPTS_PER_CONVERSATION = 64;
 export const MAX_PENDING_PROMPT_ATTENTION_REASON_CHARACTERS = 1_000;
+export const MAX_LOOP_LIST_ITEMS = 100;
+export const MAX_LOOP_LIST_ITEM_ID_CHARACTERS = 128;
+export const MAX_LOOP_LIST_ITEM_TEXT_CHARACTERS = 512;
 export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
+// v34: focused snapshots and identity-bound live events project the bounded
+// conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
 // v32: project conversation titles share one 24-Unicode-character boundary
 // across browser commands, Agent tools, snapshots, and session-message cards.
-export const PROTOCOL_VERSION = 33;
+export const PROTOCOL_VERSION = 34;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
@@ -500,6 +505,17 @@ export interface PendingPromptAdmissionSnapshot {
   text: string;
 }
 
+export interface LoopListItem {
+  id: string;
+  text: string;
+  checked: boolean;
+}
+
+export interface LoopList {
+  items: LoopListItem[];
+  armed: boolean;
+}
+
 export interface RoleModelSelection {
   provider: string;
   id: string;
@@ -745,7 +761,15 @@ export type ServerEvent =
       items?: ConversationHistoryItem[];
       /** busy 时已接受、尚未投递的浏览器 prompt（服务端内存态，重启丢失为接受项）。 */
       pendingPrompts?: PendingPromptAdmissionSnapshot[];
+      loopList?: LoopList;
       window: ConversationWindowCoverage;
+    }
+  | {
+      type: "loop_list_update";
+      sessionId: string;
+      conversationId: string;
+      focusId: string;
+      loopList: LoopList;
     }
   | {
       type: "session_event";
@@ -1124,6 +1148,38 @@ const conversationHistoryItemSchema: z.ZodType<ConversationHistoryItem> =
       peerExists: z.boolean(),
     }),
   ]);
+export const loopListItemSchema = z.object({
+  id: boundedCharactersString(
+    MAX_LOOP_LIST_ITEM_ID_CHARACTERS,
+    "loopList.items.id",
+  ).refine((value) => value.trim().length > 0, "item id must not be blank"),
+  text: boundedCharactersString(
+    MAX_LOOP_LIST_ITEM_TEXT_CHARACTERS,
+    "loopList.items.text",
+  ).refine((value) => value.trim().length > 0, "item text must not be blank"),
+  checked: z.boolean(),
+}).strict();
+
+export const loopListSchema = z.object({
+  items: z.array(loopListItemSchema)
+    .max(MAX_LOOP_LIST_ITEMS)
+    .superRefine((items, context) => {
+      const ids = new Set<string>();
+      for (let index = 0; index < items.length; index += 1) {
+        const id = items[index]!.id;
+        if (ids.has(id)) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "LoopList item IDs must be unique",
+            path: [index, "id"],
+          });
+        }
+        ids.add(id);
+      }
+    }),
+  armed: z.boolean(),
+}).strict() satisfies z.ZodType<LoopList>;
+
 const conversationWindowCoverageSchema: z.ZodType<ConversationWindowCoverage> = z.object({
   omittedBefore: z.boolean(),
   startsMidTurn: z.boolean(),
@@ -1255,7 +1311,15 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
       promptId: z.string().uuid(),
       text: required.max(MAX_PROMPT_CHARACTERS),
     }).strict()).max(MAX_PENDING_PROMPTS_PER_CONVERSATION).optional(),
+    loopList: loopListSchema.optional(),
     window: conversationWindowCoverageSchema,
+  }).strict(),
+  z.object({
+    type: z.literal("loop_list_update"),
+    sessionId: sessionIdSchema,
+    conversationId: conversationIdSchema,
+    focusId: focusIdSchema,
+    loopList: loopListSchema,
   }).strict(),
   z.object({
     type: z.literal("session_event"),

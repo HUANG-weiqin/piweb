@@ -11,6 +11,8 @@ import {
   MAX_CONVERSATION_MESSAGE_CONTENT_BYTES,
   MAX_ROLE_SYSTEM_PROMPT_BYTES,
   MAX_RUN_FINAL_TEXT_BYTES,
+  LOOP_LIST_CUSTOM_TYPE,
+  LOOP_LIST_CONTINUE_CUSTOM_TYPE,
   META_OPERATION_CUSTOM_TYPE,
   PENDING_PROMPT_BATCH_CUSTOM_TYPE,
   PENDING_PROMPT_DELIVERY_CUSTOM_TYPE,
@@ -25,6 +27,8 @@ import {
   createConversationRoleChangeEntry,
   createMetaOperationEntry,
   createRunSettlementEntry,
+  createLoopListEntry,
+  createLoopListContinueEntry,
   createTemporaryReturnReceiptEntry,
   parseConversationCardEntry,
   parseCompactionThresholdEntry,
@@ -33,6 +37,8 @@ import {
   parseConversationRoleChangeEntry,
   parseMetaOperationEntry,
   parsePendingPromptBatchEntry,
+  parseLoopListEntry,
+  parseLoopListContinueEntry,
   parsePendingPromptDeliveryEntry,
   parseReservedConversationEntry,
   parseRunSettlementEntry,
@@ -208,6 +214,53 @@ describe("conversation reserved entries", () => {
       changed,
       initial,
     ])).toThrow(/updatedAt cannot regress/i);
+  });
+
+  it("round-trips and aggregates strict bounded LoopList state and continuation snapshots", () => {
+    const initial = createLoopListEntry({
+      items: [{ id: "implement", text: "Implement LoopList", checked: false }],
+      armed: true,
+      updatedAt: timestamp,
+    });
+    const completed = createLoopListEntry({
+      items: [{ id: "implement", text: "Implement LoopList", checked: true }],
+      armed: false,
+      updatedAt: "2026-07-19T10:01:00.000Z",
+    });
+    const continuation = createLoopListContinueEntry({
+      runId: randomUUID(),
+      continuation: 1,
+      items: initial.data.items,
+    });
+
+    expect(initial.customType).toBe(LOOP_LIST_CUSTOM_TYPE);
+    expect(continuation).toMatchObject({
+      customType: LOOP_LIST_CONTINUE_CUSTOM_TYPE,
+      display: false,
+    });
+    expect(parseLoopListEntry(initial)).toEqual(initial);
+    expect(parseLoopListContinueEntry(continuation)).toEqual(continuation);
+    expect(aggregateReservedConversationEntries([
+      initial,
+      continuation,
+      completed,
+    ]).loopList).toEqual(completed.data);
+
+    expect(() => parseLoopListEntry({
+      ...initial,
+      data: {
+        ...initial.data,
+        items: [...initial.data.items, initial.data.items[0]],
+      },
+    })).toThrow(/unique/i);
+    expect(() => parseLoopListContinueEntry({
+      ...continuation,
+      content: "tampered",
+    })).toThrow(/must match/i);
+    expect(() => aggregateReservedConversationEntries([
+      completed,
+      initial,
+    ])).toThrow(/LoopList updatedAt cannot regress/i);
   });
 
   it("applies durable role changes after the base conversation metadata", () => {
