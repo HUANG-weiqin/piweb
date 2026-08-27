@@ -609,9 +609,31 @@ function ChatView({
       </div>}
     </section>
     <div className="composer-wrap" ref={composerWrapRef}>
+      {showJumpToLatest && <button
+        type="button"
+        className="jump-latest"
+        onClick={jumpToLatest}
+      >
+        ↓ 回到最新消息
+      </button>}
+      {pendingAdmissions.length > 0 && <section
+        className="pending-admissions"
+        aria-label="等待处理的消息"
+      >
+        {pendingAdmissions.map((admission) => (
+          <div
+            key={admission.promptId}
+            className="pending-admission-item"
+            role="status"
+          >
+            <span className="pending-admission-text">{admission.text}</span>
+            <span className="pending-admission-status">等待中</span>
+          </div>
+        ))}
+      </section>}
       {loopList.items.length > 0 && <section
         className="loop-list"
-        aria-label="LoopList"
+        aria-label="Tasks"
       >
         <button
           type="button"
@@ -619,7 +641,7 @@ function ChatView({
           aria-expanded={loopListExpanded}
           onClick={() => setLoopListExpanded((expanded) => !expanded)}
         >
-          <span className="loop-list-title">LoopList</span>
+          <span className="loop-list-title">Tasks</span>
           <span className={`loop-list-status ${loopListStatusKey}`}>
             {loopListStatusLabel}
           </span>
@@ -643,28 +665,6 @@ function ChatView({
             <span>{item.text}</span>
           </li>)}
         </ul>}
-      </section>}
-      {showJumpToLatest && <button
-        type="button"
-        className="jump-latest"
-        onClick={jumpToLatest}
-      >
-        ↓ 回到最新消息
-      </button>}
-      {pendingAdmissions.length > 0 && <section
-        className="pending-admissions"
-        aria-label="等待处理的消息"
-      >
-        {pendingAdmissions.map((admission) => (
-          <div
-            key={admission.promptId}
-            className="pending-admission-item"
-            role="status"
-          >
-            <span className="pending-admission-text">{admission.text}</span>
-            <span className="pending-admission-status">等待中</span>
-          </div>
-        ))}
       </section>}
       {submitting && !promptNotice && <div
         className="composer-notice pending"

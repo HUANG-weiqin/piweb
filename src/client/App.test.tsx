@@ -502,7 +502,7 @@ describe("App", () => {
         window: completeConversationWindow,
       });
     });
-    expect(screen.getByRole("region", { name: "LoopList" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Tasks" })).toBeInTheDocument();
     expect(screen.getByText("已暂停")).toBeInTheDocument();
 
     act(() => {
@@ -544,7 +544,7 @@ describe("App", () => {
         window: completeConversationWindow,
       });
     });
-    expect(screen.queryByRole("region", { name: "LoopList" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Tasks" })).not.toBeInTheDocument();
   });
 
   it("plays one project-scoped chime for a completed user run", () => {

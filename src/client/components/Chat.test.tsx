@@ -154,17 +154,17 @@ describe("Chat", () => {
       .toBeInTheDocument();
   });
 
-  it("mounts no LoopList container or height when the list is absent or empty", () => {
+  it("mounts no Tasks panel or height when the list is absent or empty", () => {
     const { rerender } = render(view(emptyChat));
-    expect(screen.queryByRole("region", { name: "LoopList" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Tasks" })).not.toBeInTheDocument();
 
     rerender(view(emptyChat, "", undefined, {
       loopList: { items: [], armed: true },
     }));
-    expect(screen.queryByRole("region", { name: "LoopList" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Tasks" })).not.toBeInTheDocument();
   });
 
-  it("shows a collapsed read-only LoopList and keeps completed nonempty lists", () => {
+  it("shows a collapsed read-only Tasks panel and keeps completed nonempty lists", () => {
     const loopList = {
       items: [
         { id: "done", text: "Finished item", checked: true },
@@ -173,7 +173,7 @@ describe("Chat", () => {
       armed: false,
     };
     const { rerender } = render(view(emptyChat, "", undefined, { loopList }));
-    const toggle = screen.getByRole("button", { name: /LoopList/ });
+    const toggle = screen.getByRole("button", { name: /Tasks/ });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByText("已暂停")).toBeInTheDocument();
     expect(screen.getByText("1/2 · 1 项未完成")).toBeInTheDocument();
@@ -195,7 +195,7 @@ describe("Chat", () => {
       },
       busy: true,
     }));
-    expect(screen.getByRole("button", { name: /LoopList/ }))
+    expect(screen.getByRole("button", { name: /Tasks/ }))
       .toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("Replacement item")).toBeInTheDocument();
     expect(screen.getByText("执行中")).toBeInTheDocument();
@@ -206,10 +206,10 @@ describe("Chat", () => {
         armed: false,
       },
     }));
-    expect(screen.getByRole("region", { name: "LoopList" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Tasks" })).toBeInTheDocument();
     expect(screen.getByText("已完成")).toBeInTheDocument();
     expect(screen.getByText("2/2")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /LoopList/ }))
+    expect(screen.getByRole("button", { name: /Tasks/ }))
       .toHaveAttribute("aria-expanded", "false");
   });
 
@@ -344,7 +344,7 @@ describe("Chat", () => {
     expect(onAbort).toHaveBeenCalledOnce();
   });
 
-  it("shows admitted prompts as waiting messages while the agent is busy", () => {
+  it("shows admitted prompts above Tasks while the agent is busy", () => {
     const admissions: PendingAdmission[] = [{
       promptId: "queued-1",
       text: "Review the test failure after the current run.",
@@ -353,16 +353,23 @@ describe("Chat", () => {
       text: "This delivery is in progress.",
     }];
     render(view(emptyChat, "", undefined, {
+      busy: true,
       activeRun: { id: "run-1", phase: "running" },
       pendingAdmissions: admissions,
+      loopList: {
+        items: [{ id: "active", text: "Finish current work", checked: false }],
+        armed: true,
+      },
     }));
 
     const queue = screen.getByRole("region", { name: "等待处理的消息" });
+    const loopList = screen.getByRole("region", { name: "Tasks" });
     expect(queue).toHaveTextContent("Review the test failure after the current run.");
     expect(queue).toHaveTextContent("This delivery is in progress.");
     expect(queue).toHaveTextContent("等待中");
     expect(queue.textContent).not.toContain("撤回");
     expect(queue.textContent).not.toContain("Steer");
+    expect(queue.nextElementSibling).toBe(loopList);
   });
 
   it("lets streamed output grow inside the follow comfort zone", () => {
