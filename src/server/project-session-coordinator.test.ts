@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdirSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type {
   AgentMessage,
   AgentSession,
@@ -10190,7 +10191,123 @@ describe("ProjectSessionCoordinator", () => {
     expect(runtime.control(targetId).received).toHaveLength(1);
   });
 
-  it("treats a durable deletion tombstone as an immediate open and pump fence during restart", async () => {
+  it("keeps an unlink-race replacement tombstoned until restart deletes it", async () => {
+    const fixture = await createFixture();
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const conversationId = target.conversationId;
+    const sessionFile = target.sessionManager.getSessionFile()!;
+    const replacementPath = join(
+      fixture.handle.project.sessionDir,
+      ".replacement-at-unlink.tmp",
+    );
+    const replacementRaw = await readFile(sessionFile, "utf8");
+    await writeFile(replacementPath, replacementRaw);
+    const internals = fixture.handle.project as unknown as {
+      unlinkSessionFile(path: string): Promise<void>;
+    };
+    const originalUnlinkSessionFile =
+      internals.unlinkSessionFile.bind(fixture.handle.project);
+    vi.spyOn(internals, "unlinkSessionFile").mockImplementationOnce(
+      async (path) => {
+        await rename(replacementPath, sessionFile);
+        await originalUnlinkSessionFile(path);
+      },
+    );
+
+    await expect(fixture.coordinator.deleteConversation(
+      fixture.handle,
+      conversationId,
+    )).rejects.toThrow("Conversation reappeared during deletion");
+
+    await expect(readFile(sessionFile, "utf8")).resolves.toBe(replacementRaw);
+    expect(await coordinatorInbox(fixture.handle).listDeletedTargets())
+      .toContain(conversationId);
+
+    await fixture.coordinator.close();
+    fixture.registry = new ProjectStoreRegistry();
+    fixture.coordinator = new ProjectSessionCoordinator(
+      fixture.runtime,
+      fixture.roles,
+      fixture.registry,
+    );
+    fixture.handle = await fixture.coordinator.acquireProject(
+      fixture.cwd,
+      "full_access",
+    );
+
+    await waitUntil(async () => {
+      const ids = (await fixture.coordinator.listSessions(fixture.handle))
+        .map(({ id }) => id);
+      return !ids.includes(conversationId)
+        && (await coordinatorInbox(fixture.handle).listDeletedTargets())
+          .length === 0;
+    }, "replacement deletion and tombstone cleanup after restart");
+    await expect(readFile(sessionFile, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("recovers a leftover quarantine before a same-process durable deletion retry", async () => {
+    const fixture = await createFixture();
+    const retained = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const conversationId = target.conversationId;
+    const sessionFile = target.sessionManager.getSessionFile()!;
+    let obstacleCreated = false;
+    const unsubscribe = fixture.handle.project.subscribe((snapshot) => {
+      if (snapshot.lastConversationId !== undefined || obstacleCreated) return;
+      mkdirSync(sessionFile);
+      obstacleCreated = true;
+    });
+
+    try {
+      await expect(fixture.coordinator.deleteConversation(
+        fixture.handle,
+        conversationId,
+      )).rejects.toThrow(
+        "Conversation deletion failed and recovery could not be completed",
+      );
+    } finally {
+      unsubscribe();
+    }
+
+    expect(obstacleCreated).toBe(true);
+    await expect(readdir(sessionFile)).resolves.toEqual([]);
+    expect((await readdir(fixture.handle.project.sessionDir)).filter((name) =>
+      name.endsWith(".delete-quarantine")
+    )).toHaveLength(1);
+    expect(await coordinatorInbox(fixture.handle).listDeletedTargets())
+      .toContain(conversationId);
+
+    await rm(sessionFile, { recursive: true });
+    vi.spyOn(retained, "compactContext").mockResolvedValueOnce();
+    await fixture.coordinator.compactContext(
+      fixture.handle,
+      retained.conversationId,
+    );
+
+    await expect(readFile(sessionFile, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect((await readdir(fixture.handle.project.sessionDir)).filter((name) =>
+      name.endsWith(".delete-quarantine")
+    )).toEqual([]);
+    expect(await coordinatorInbox(fixture.handle).listDeletedTargets())
+      .not.toContain(conversationId);
+    expect((await fixture.coordinator.listSessions(fixture.handle))
+      .map(({ id }) => id)).not.toContain(conversationId);
+  });
+
+  it("restores an abandoned quarantine before a durable tombstone resumes deletion", async () => {
     const cwd = await mkdtemp(join(
       tmpdir(),
       "piweb-session-deletion-fence-recovery-",
@@ -10205,7 +10322,15 @@ describe("ProjectSessionCoordinator", () => {
     const sourceId = randomUUID();
     const targetId = randomUUID();
     await store.createConversation(sourceId, defaultProfile(roles));
-    await store.createConversation(targetId, defaultProfile(roles));
+    const target = await store.createConversation(
+      targetId,
+      defaultProfile(roles),
+    );
+    const targetPath = target.getSessionFile()!;
+    const quarantinePath = join(
+      store.sessionDir,
+      `.${basename(targetPath)}.${randomUUID()}.delete-quarantine`,
+    );
     const inbox = await ProjectInbox.open(join(store.stateDir, "inbox"));
     const messageId = randomUUID();
     const cardId = randomUUID();
@@ -10230,6 +10355,7 @@ describe("ProjectSessionCoordinator", () => {
       targetId,
       "2026-07-19T12:00:01.000Z",
     );
+    await rename(targetPath, quarantinePath);
 
     const coordinator = new ProjectSessionCoordinator(runtime, roles);
     const handle = await coordinator.acquireProject(cwd, "full_access");
@@ -10257,6 +10383,12 @@ describe("ProjectSessionCoordinator", () => {
     "deletion sidecar and tombstone cleanup");
 
     expect(runtime.createConversationIds).not.toContain(targetId);
+    await expect(readFile(targetPath, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(readFile(quarantinePath, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
     const source = await coordinator.openConversation(
       handle,
       sourceId,

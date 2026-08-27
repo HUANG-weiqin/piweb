@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { renameSync, rmSync, writeFileSync } from "node:fs";
 import {
+  link,
   mkdir,
   mkdtemp,
   readdir,
@@ -12,7 +13,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import {
   SessionManager,
   type SessionInfo,
@@ -28,7 +29,7 @@ import { ProjectStore, ProjectStoreRegistry } from "./project-store.js";
 const temporaryDirectories: string[] = [];
 
 interface ProjectStoreIntegrityInternals {
-  listSafeSessionFiles(): Promise<unknown>;
+  listSafeSessionFiles(allowedQuarantinePath?: string): Promise<unknown>;
   clearLastConversationIf(conversationId: string): Promise<void>;
   renameSessionFile(source: string, destination: string): Promise<void>;
   unlinkSessionFile(path: string): Promise<void>;
@@ -386,6 +387,185 @@ describe("ProjectStore", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("recovers an abandoned deletion quarantine before the first refresh", async () => {
+    const cwd = await createTemporaryDirectory("piweb-delete-crash-recovery-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversation = await store.createConversation();
+    const conversationId = conversation.getSessionId();
+    const sessionFile = conversation.getSessionFile()!;
+    const originalRaw = await readFile(sessionFile, "utf8");
+    const quarantinePath = join(
+      store.sessionDir,
+      `.${basename(sessionFile)}.${randomUUID()}.delete-quarantine`,
+    );
+    await rename(sessionFile, quarantinePath);
+
+    const reopened = await ProjectStore.open(cwd, "full_access");
+
+    await expect(readFile(sessionFile, "utf8")).resolves.toBe(originalRaw);
+    await expect(readFile(quarantinePath, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(reopened.refreshConversations()).resolves.toEqual([
+      expect.objectContaining({ id: conversationId }),
+    ]);
+  });
+
+  it("blocks catalogs on an inactive quarantine until a delete retry recovers it", async () => {
+    const cwd = await createTemporaryDirectory(
+      "piweb-delete-same-process-recovery-",
+    );
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversation = await store.createConversation();
+    const conversationId = conversation.getSessionId();
+    const sessionFile = conversation.getSessionFile()!;
+    const quarantinePath = join(
+      store.sessionDir,
+      `.${basename(sessionFile)}.${randomUUID()}.delete-quarantine`,
+    );
+    await rename(sessionFile, quarantinePath);
+
+    await expect(store.refreshConversations()).rejects.toThrow(
+      "Abandoned conversation deletion quarantine requires recovery",
+    );
+    await expect(readFile(quarantinePath, "utf8")).resolves.toContain(
+      conversationId,
+    );
+
+    await store.deleteConversation(conversationId);
+
+    await expect(readFile(sessionFile, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(readFile(quarantinePath, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect(store.listConversations().map(({ id }) => id)).not.toContain(
+      conversationId,
+    );
+  });
+
+  it("finishes recovery when a prior hard link committed before quarantine unlink", async () => {
+    const cwd = await createTemporaryDirectory(
+      "piweb-delete-crash-after-recovery-link-",
+    );
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversation = await store.createConversation();
+    const conversationId = conversation.getSessionId();
+    const sessionFile = conversation.getSessionFile()!;
+    const originalRaw = await readFile(sessionFile, "utf8");
+    const quarantinePath = join(
+      store.sessionDir,
+      `.${basename(sessionFile)}.${randomUUID()}.delete-quarantine`,
+    );
+    await rename(sessionFile, quarantinePath);
+    await link(quarantinePath, sessionFile);
+
+    const reopened = await ProjectStore.open(cwd, "full_access");
+
+    await expect(readFile(sessionFile, "utf8")).resolves.toBe(originalRaw);
+    await expect(readFile(quarantinePath, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect((await readdir(store.sessionDir)).filter((name) =>
+      name.endsWith(".delete-recovery.jsonl")
+    )).toEqual([]);
+    await expect(reopened.refreshConversations()).resolves.toEqual([
+      expect.objectContaining({ id: conversationId }),
+    ]);
+  });
+
+  it("fails closed without moving a corrupt validly named quarantine", async () => {
+    const cwd = await createTemporaryDirectory(
+      "piweb-corrupt-delete-quarantine-",
+    );
+    const store = await ProjectStore.open(cwd, "full_access");
+    const originalPath = join(store.sessionDir, "corrupt-conversation.jsonl");
+    const quarantinePath = join(
+      store.sessionDir,
+      `.corrupt-conversation.jsonl.${randomUUID()}.delete-quarantine`,
+    );
+    const corruptRaw = '{"type":"session"\n';
+    await writeFile(quarantinePath, corruptRaw);
+
+    await expect(ProjectStore.open(cwd, "full_access")).rejects.toThrow(
+      "invalid JSON",
+    );
+
+    await expect(readFile(quarantinePath, "utf8")).resolves.toBe(corruptRaw);
+    await expect(readFile(originalPath, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("preserves a colliding abandoned quarantine before catalog fails closed", async () => {
+    const cwd = await createTemporaryDirectory("piweb-delete-crash-collision-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversation = await store.createConversation();
+    const conversationId = conversation.getSessionId();
+    const sessionFile = conversation.getSessionFile()!;
+    const originalRaw = await readFile(sessionFile, "utf8");
+    const quarantinePath = join(
+      store.sessionDir,
+      `.${basename(sessionFile)}.${randomUUID()}.delete-quarantine`,
+    );
+    await rename(sessionFile, quarantinePath);
+    await writeFile(sessionFile, originalRaw);
+
+    const reopened = await ProjectStore.open(cwd, "full_access");
+
+    await expect(readFile(sessionFile, "utf8")).resolves.toBe(originalRaw);
+    await expect(readFile(quarantinePath, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    const recoveryFiles = (await readdir(store.sessionDir)).filter((name) =>
+      name.endsWith(".delete-recovery.jsonl")
+    );
+    expect(recoveryFiles).toHaveLength(1);
+    await expect(
+      readFile(join(store.sessionDir, recoveryFiles[0]!), "utf8"),
+    ).resolves.toBe(originalRaw);
+    await expect(reopened.refreshConversations()).rejects.toThrow(
+      `Duplicate conversation identity ${conversationId}`,
+    );
+  });
+
+  it("fails closed on malformed and non-file deletion quarantines", async () => {
+    const cwd = await createTemporaryDirectory("piweb-invalid-delete-quarantine-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const malformedPath = join(
+      store.sessionDir,
+      ".conversation.jsonl.not-a-uuid.delete-quarantine",
+    );
+    await writeSessionHeader(malformedPath, randomUUID(), store.cwd);
+
+    await expect(ProjectStore.open(cwd, "full_access")).rejects.toThrow(
+      "Invalid conversation deletion quarantine filename",
+    );
+    await expect(readFile(malformedPath, "utf8")).resolves.toContain(
+      '"type":"session"',
+    );
+
+    await rm(malformedPath);
+    const directoryPath = join(
+      store.sessionDir,
+      `.conversation.jsonl.${randomUUID()}.delete-quarantine`,
+    );
+    await mkdir(directoryPath);
+    await expect(ProjectStore.open(cwd, "full_access")).rejects.toThrow(
+      "must be a regular project-owned file",
+    );
+
+    await rm(directoryPath, { recursive: true });
+    const outside = await createTemporaryDirectory(
+      "piweb-delete-quarantine-link-target-",
+    );
+    await createDirectoryLink(outside, directoryPath);
+    await expect(ProjectStore.open(cwd, "full_access")).rejects.toThrow(
+      "must be a regular project-owned file",
+    );
+  });
+
   it("deletes a conversation-scoped notebook sidecar with its conversation", async () => {
     const cwd = await createTemporaryDirectory("piweb-delete-notebook-");
     const store = await ProjectStore.open(cwd, "full_access");
@@ -517,27 +697,30 @@ describe("ProjectStore", () => {
     ).resolves.toContain(conversationId);
   });
 
-  it("unlinks only quarantine when an original-path replacement appears at unlink", async () => {
-    const cwd = await createTemporaryDirectory("piweb-delete-unlink-swap-");
+  it("projects an unrelated conversation added at quarantine unlink", async () => {
+    const cwd = await createTemporaryDirectory("piweb-delete-unlink-add-");
     const store = await ProjectStore.open(cwd, "full_access");
-    const conversation = await store.createConversation();
-    const conversationId = conversation.getSessionId();
-    const sessionFile = conversation.getSessionFile()!;
-    const replacementPath = join(store.sessionDir, ".replacement.tmp");
-    await writeSessionHeader(replacementPath, conversationId, store.cwd);
-    const replacementRaw = await readFile(replacementPath, "utf8");
+    const deleted = await store.createConversation();
+    const retained = await store.createConversation();
+    const addedId = randomUUID();
+    const addedPath = join(store.sessionDir, "added-at-unlink.jsonl");
     const internals = store as unknown as ProjectStoreIntegrityInternals;
     const originalUnlinkSessionFile = internals.unlinkSessionFile.bind(store);
     vi.spyOn(internals, "unlinkSessionFile").mockImplementationOnce(
       async (path) => {
-        await rename(replacementPath, sessionFile);
+        await writeSessionHeader(addedPath, addedId, store.cwd);
         await originalUnlinkSessionFile(path);
       },
     );
 
-    await store.deleteConversation(conversationId);
+    await store.deleteConversation(deleted.getSessionId());
 
-    await expect(readFile(sessionFile, "utf8")).resolves.toBe(replacementRaw);
+    expect(store.listConversations().map(({ id }) => id)).toEqual(
+      expect.arrayContaining([retained.getSessionId(), addedId]),
+    );
+    expect(store.listConversations().map(({ id }) => id)).not.toContain(
+      deleted.getSessionId(),
+    );
   });
 
   it("projects retained conversations from the catalog generation that deletion proved", async () => {
@@ -552,13 +735,15 @@ describe("ProjectStore", () => {
     const originalListSafeSessionFiles =
       internals.listSafeSessionFiles.bind(store);
     let fingerprintEnumerations = 0;
-    vi.spyOn(internals, "listSafeSessionFiles").mockImplementation(async () => {
-      fingerprintEnumerations += 1;
-      if (fingerprintEnumerations === 2) {
-        await writeSessionHeader(addedPath, addedId, store.cwd);
-      }
-      return originalListSafeSessionFiles();
-    });
+    vi.spyOn(internals, "listSafeSessionFiles").mockImplementation(
+      async (allowedQuarantinePath) => {
+        fingerprintEnumerations += 1;
+        if (fingerprintEnumerations === 2) {
+          await writeSessionHeader(addedPath, addedId, store.cwd);
+        }
+        return originalListSafeSessionFiles(allowedQuarantinePath);
+      },
+    );
 
     await store.deleteConversation(deleted.getSessionId());
 
@@ -958,13 +1143,15 @@ describe("ProjectStore", () => {
     const originalListSafeSessionFiles =
       internals.listSafeSessionFiles.bind(store);
     let fingerprintEnumerations = 0;
-    vi.spyOn(internals, "listSafeSessionFiles").mockImplementation(async () => {
-      fingerprintEnumerations += 1;
-      if (fingerprintEnumerations === 2) {
-        unrelated.appendSessionInfo("changed during target read");
-      }
-      return originalListSafeSessionFiles();
-    });
+    vi.spyOn(internals, "listSafeSessionFiles").mockImplementation(
+      async (allowedQuarantinePath) => {
+        fingerprintEnumerations += 1;
+        if (fingerprintEnumerations === 2) {
+          unrelated.appendSessionInfo("changed during target read");
+        }
+        return originalListSafeSessionFiles(allowedQuarantinePath);
+      },
+    );
 
     await expect(
       store.inspectConversation(target.getSessionId()),

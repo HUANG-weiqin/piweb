@@ -53,6 +53,7 @@ const SESSION_ID_PATTERN =
   /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 const DEFAULT_CONVERSATION_LEASE_TIMEOUT_MS = 5_000;
 const MAX_INTEGRITY_PROOF_ATTEMPTS = 8;
+const DELETE_QUARANTINE_SUFFIX = ".delete-quarantine";
 
 interface ProjectManifestV1 {
   version: typeof MANIFEST_VERSION;
@@ -133,6 +134,7 @@ interface QuarantinedSessionFile {
   originalPath: string;
   quarantinePath: string;
   quarantineFingerprint: Readonly<SessionFileFingerprint>;
+  conversationId: string;
 }
 
 interface ConversationLeaseWaiter {
@@ -199,6 +201,28 @@ function assertSessionId(value: unknown, field: string): asserts value is string
   if (typeof value !== "string" || !SESSION_ID_PATTERN.test(value)) {
     throw new Error(`${field} must be a valid Pi session id`);
   }
+}
+
+function parseDeletionQuarantineBasename(name: string): string {
+  const stem = name.slice(0, -DELETE_QUARANTINE_SUFFIX.length);
+  const uuidSeparator = stem.lastIndexOf(".");
+  const originalBasename = stem.slice(1, uuidSeparator);
+  const quarantineId = stem.slice(uuidSeparator + 1);
+  if (
+    !name.endsWith(DELETE_QUARANTINE_SUFFIX)
+    || !stem.startsWith(".")
+    || uuidSeparator <= 1
+    || originalBasename.length <= ".jsonl".length
+    || !originalBasename.endsWith(".jsonl")
+    || originalBasename.includes("/")
+    || originalBasename.includes("\\")
+    || !UUID_PATTERN.test(quarantineId)
+  ) {
+    throw new Error(
+      `Invalid conversation deletion quarantine filename: ${name}`,
+    );
+  }
+  return originalBasename;
 }
 
 interface ParsedManifest {
@@ -564,13 +588,15 @@ export class ProjectStore {
       sessionDir,
       "Project session directory",
     );
-    return new ProjectStore(
+    const store = new ProjectStore(
       canonicalCwd,
       stateDir,
       sessionDir,
       manifestPath,
       manifest,
     );
+    await store.recoverAbandonedSessionQuarantines();
+    return store;
   }
 
   get toolMode(): ToolMode {
@@ -876,6 +902,7 @@ export class ProjectStore {
   deleteConversation(conversationId: string): Promise<void> {
     assertSessionId(conversationId, "conversationId");
     return this.enqueueConversationOperation(async () => {
+      await this.recoverAbandonedSessionQuarantines();
       const batch = await this.readVerifiedSessionFileBatch(
         [conversationId],
         { allowMissing: true },
@@ -893,28 +920,37 @@ export class ProjectStore {
 
         // Quarantine changes the controlled JSONL set, so prove the remaining
         // project before any unrelated durable side effect.
-        await this.getVerifiedSessionCatalog();
+        await this.getVerifiedSessionCatalog(quarantined?.quarantinePath);
         await deleteConversationNotebook(this.stateDir, conversationId);
         await this.clearLastConversationIf(conversationId);
 
         // Side effects may have yielded to writers. Revalidate all remaining
-        // JSONL files and derive the projection only from this latest proof.
-        const latestCatalog = await this.getVerifiedSessionCatalog();
+        // JSONL files before the irreversible quarantine unlink.
+        await this.getVerifiedSessionCatalog(quarantined?.quarantinePath);
         if (quarantined !== undefined) {
           await this.readStableExpectedSessionFile(
             quarantined.quarantineFingerprint,
             conversationId,
           );
         }
-        const retained = toConversationSummaries(
-          latestCatalog.information.map(cloneSessionInformation),
-        );
-
         if (quarantined !== undefined) {
           await this.unlinkSessionFile(quarantined.quarantinePath);
           quarantined = undefined;
         }
-        this.replaceConversations(retained);
+
+        // A successful delete is projected only from a complete proof taken
+        // after the captured quarantine has been unlinked.
+        const committedCatalog = await this.getVerifiedSessionCatalog();
+        if (
+          committedCatalog.information.some(({ id }) => id === conversationId)
+        ) {
+          throw new Error(
+            `Conversation reappeared during deletion: ${conversationId}`,
+          );
+        }
+        this.replaceConversations(toConversationSummaries(
+          committedCatalog.information.map(cloneSessionInformation),
+        ));
       } catch (error) {
         if (quarantined !== undefined) {
           try {
@@ -1066,7 +1102,9 @@ export class ProjectStore {
     return catalog.information.map(cloneSessionInformation);
   }
 
-  private async getVerifiedSessionCatalog(): Promise<VerifiedSessionCatalog> {
+  private async getVerifiedSessionCatalog(
+    allowedQuarantinePath?: string,
+  ): Promise<VerifiedSessionCatalog> {
     for (
       let attempt = 0;
       attempt < MAX_INTEGRITY_PROOF_ATTEMPTS;
@@ -1074,7 +1112,9 @@ export class ProjectStore {
     ) {
       let currentFiles: SessionFileFingerprint[];
       try {
-        currentFiles = await this.listSafeSessionFiles();
+        currentFiles = await this.listSafeSessionFiles(
+          allowedQuarantinePath,
+        );
       } catch (error) {
         this.verifiedCatalog = undefined;
         throw error;
@@ -1087,7 +1127,10 @@ export class ProjectStore {
 
       this.verifiedCatalog = undefined;
       try {
-        return await this.scanSafeSessionInformation(currentFiles);
+        return await this.scanSafeSessionInformation(
+          currentFiles,
+          allowedQuarantinePath,
+        );
       } catch (error) {
         if (
           !(error instanceof SessionDirectoryChangedError)
@@ -1102,6 +1145,7 @@ export class ProjectStore {
 
   private async scanSafeSessionInformation(
     filesBeforeScan: readonly SessionFileFingerprint[],
+    allowedQuarantinePath?: string,
   ): Promise<VerifiedSessionCatalog> {
     const information = await SessionManager.listAll(this.sessionDir);
     const validatedByPath = new Map<string, string>();
@@ -1163,7 +1207,9 @@ export class ProjectStore {
       );
     }
 
-    const filesAfterScan = await this.listSafeSessionFiles();
+    const filesAfterScan = await this.listSafeSessionFiles(
+      allowedQuarantinePath,
+    );
     if (!fingerprintSetsEqual(filesBeforeScan, filesAfterScan)) {
       throw new SessionDirectoryChangedError();
     }
@@ -1187,13 +1233,33 @@ export class ProjectStore {
     return catalog;
   }
 
-  private async listSafeSessionFiles(): Promise<SessionFileFingerprint[]> {
+  private async listSafeSessionFiles(
+    allowedQuarantinePath?: string,
+  ): Promise<SessionFileFingerprint[]> {
     await this.assertSessionDirectorySafe();
     const entries = await readdir(this.sessionDir, { withFileTypes: true });
+    const allowedQuarantinePathKey = allowedQuarantinePath === undefined
+      ? undefined
+      : pathIdentity(allowedQuarantinePath);
     const files: SessionFileFingerprint[] = [];
     for (const entry of entries) {
-      if (!entry.name.endsWith(".jsonl")) continue;
       const entryPath = join(this.sessionDir, entry.name);
+      if (entry.name.endsWith(DELETE_QUARANTINE_SUFFIX)) {
+        parseDeletionQuarantineBasename(entry.name);
+        if (entry.isSymbolicLink() || !entry.isFile()) {
+          throw new Error(
+            `Conversation deletion quarantine must be a regular project-owned file: ${entryPath}`,
+          );
+        }
+        const quarantine = await this.fingerprintSafeSessionPath(entryPath);
+        if (quarantine.pathKey !== allowedQuarantinePathKey) {
+          throw new Error(
+            `Abandoned conversation deletion quarantine requires recovery: ${entryPath}`,
+          );
+        }
+        continue;
+      }
+      if (!entry.name.endsWith(".jsonl")) continue;
       if (entry.isSymbolicLink() || !entry.isFile()) {
         throw new Error(
           `Session entry must be a regular project-owned file: ${entryPath}`,
@@ -1327,6 +1393,45 @@ export class ProjectStore {
     }
   }
 
+  private async recoverAbandonedSessionQuarantines(): Promise<void> {
+    await this.assertSessionDirectorySafe();
+    const entries = await readdir(this.sessionDir, { withFileTypes: true });
+    const quarantineEntries = entries
+      .filter(({ name }) => name.endsWith(DELETE_QUARANTINE_SUFFIX))
+      .sort((first, second) => first.name.localeCompare(second.name));
+
+    for (const entry of quarantineEntries) {
+      const originalBasename = parseDeletionQuarantineBasename(entry.name);
+      const quarantinePath = join(this.sessionDir, entry.name);
+      if (entry.isSymbolicLink() || !entry.isFile()) {
+        throw new Error(
+          `Conversation deletion quarantine must be a regular project-owned file: ${quarantinePath}`,
+        );
+      }
+
+      const beforeRead = await this.fingerprintSafeSessionPath(quarantinePath);
+      const raw = await readFile(beforeRead.path, "utf8");
+      const afterRead = await this.fingerprintSafeSessionPath(beforeRead.path);
+      if (!fingerprintsEqual(beforeRead, afterRead)) {
+        throw new SessionDirectoryChangedError(
+          `Conversation deletion quarantine changed while it was being recovered: ${quarantinePath}`,
+        );
+      }
+      const conversationId = validatePiSessionFile(raw, afterRead.path);
+
+      await this.recoverQuarantinedSessionFile({
+        originalPath: join(this.sessionDir, originalBasename),
+        quarantinePath: afterRead.path,
+        quarantineFingerprint: afterRead,
+        conversationId,
+      });
+    }
+    await this.assertSessionDirectorySafe();
+    if (quarantineEntries.length > 0) {
+      this.verifiedCatalog = undefined;
+    }
+  }
+
   private async quarantineSessionFile(
     target: VerifiedSessionFileRead,
     conversationId: string,
@@ -1357,14 +1462,19 @@ export class ProjectStore {
         originalPath: target.path,
         quarantinePath,
         quarantineFingerprint: verified.fingerprint,
+        conversationId,
       };
     } catch (error) {
       this.verifiedCatalog = undefined;
       if (moved) {
         try {
+          const quarantineFingerprint =
+            await this.fingerprintSafeSessionPath(quarantinePath);
           await this.recoverQuarantinedSessionFile({
             originalPath: target.path,
             quarantinePath,
+            quarantineFingerprint,
+            conversationId,
           });
         } catch (recoveryError) {
           throw new AggregateError(
@@ -1378,11 +1488,13 @@ export class ProjectStore {
   }
 
   private async recoverQuarantinedSessionFile(
-    quarantined: Pick<
-      QuarantinedSessionFile,
-      "originalPath" | "quarantinePath"
-    >,
+    quarantined: QuarantinedSessionFile,
   ): Promise<void> {
+    await this.readStableExpectedSessionFile(
+      quarantined.quarantineFingerprint,
+      quarantined.conversationId,
+    );
+
     let restoreError: unknown;
     try {
       await link(quarantined.quarantinePath, quarantined.originalPath);
@@ -1390,6 +1502,22 @@ export class ProjectStore {
       restoreError = error;
     }
     if (restoreError === undefined) {
+      await this.unlinkSessionFile(quarantined.quarantinePath);
+      return;
+    }
+    if (!isNodeError(restoreError, "EEXIST")) {
+      throw restoreError;
+    }
+
+    const [quarantineAfterCollision, originalAfterCollision] =
+      await Promise.all([
+        this.fingerprintSafeSessionPath(quarantined.quarantinePath),
+        this.fingerprintSafeSessionPath(quarantined.originalPath),
+      ]);
+    if (
+      quarantineAfterCollision.dev === originalAfterCollision.dev
+      && quarantineAfterCollision.ino === originalAfterCollision.ino
+    ) {
       await this.unlinkSessionFile(quarantined.quarantinePath);
       return;
     }

@@ -1,6 +1,6 @@
 # 项目与持久会话
 
-`updated: 2026-08-14`
+`updated: 2026-08-27`
 
 ## 这个模块是干什么的
 
@@ -81,6 +81,8 @@ focus 切换先 exact open：warm actor 直接复用，cold actor 仍完成目�
 - 目标及其 descendant set 中任一 busy conversation 都不可删除，必须先精确 abort 并等待 run 结算；Agent 永远不能删除自己，也不能通过删除祖先把自己级联删除。
 - 删除先基于 conversation metadata 冻结目标的 descendant set，再为每个目标设置 deleting fence；持久 tombstone 先写删除目标本身，再写 descendants，确保崩溃恢复至少能从目标重新推导 cascade。已打开的 idle actor 把当前 writer lease 在 registry 内原子升级为 deletion lease；未打开目标先 fail-fast 取得独占 lease。升级、精确 unlink 和索引刷新之间不能出现 release/reacquire 窗口。
 - 删除与索引刷新共用同一串行队列。服务端完整校验 sessions 目录、由 ID 解析内部常规 JSONL、复验 header identity，再按子孙到祖先顺序逐个精确 `unlink`；每个 conversation 的 `.piweb/notebooks/<conversationId>.json` notebook sidecar 同步删除。notebook 目标与其 stale temp 必须先证明是项目目录内常规文件，并在 transcript/最近指针发生不可逆修改前以 `unlink` 清理；禁止对预期文件路径使用 recursive `rm`，异常目录或链接必须 fail closed 且保留 transcript。
+- transcript 删除先原子 rename 到宿主保留的 `.<original-basename>.<uuid>.delete-quarantine`。项目每次打开及每次串行删除开始时，都在任何 catalog/refresh 前严格扫描并恢复这类文件：名称、UUID、目录内常规 canonical 路径、稳定内容和 header identity 任一非法都 fail closed。普通 catalog 遇到任何 leftover quarantine 都拒绝；只有正常删除在 unlink 前的两次 proof 可显式传入并忽略该次删除的精确 quarantine 路径，unlink 后的最终 proof 不再例外。合法 orphan 通过 exclusive hard link 恢复到原名；若上次恢复在 link 后、quarantine unlink 前崩溃，原名与 quarantine 的一次 fingerprint 会证明二者仍是同一 inode，此时只清理 quarantine；不同 inode 的真实碰撞才改存 `.delete-recovery.jsonl`，再由随后完整 catalog 对重复 identity 或损坏内容 fail closed。这样 rename 后崩溃不会让 tombstone 因索引暂时缺席而被误清理。
+- unlink quarantine 不是删除成功边界。宿主必须在 unlink 后重新取得完整 verified catalog，并只从该 proof 发布索引；同 conversationId 的路径替换会明确失败且保留 replacement，协调层也保留 tombstone 供安全重试。无关的合法新增会由这次 proof 纳入投影。
 - 每个被删 conversation 只清理 `toConversationId` 等于它的 pending inbox；它此前发往其他会话的 outbound envelope 不随来源删除，除非接收方也在同一个 cascade set 中随后被删除。
 - `lastConversationId` 只在仍等于目标时清除，避免覆盖另一连接刚提交的最近对话。删除成功后更新派生缓存并通过项目订阅发布新 snapshot。
 - 删除不存在的干净目标是幂等成功；目录损坏、链接、身份错配或文件系统拒绝删除仍 fail closed。
