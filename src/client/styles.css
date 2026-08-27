@@ -1514,10 +1514,13 @@ pre {
 .jump-latest {
   position: absolute;
   top: -34px;
-  left: 50%;
+  right: 0;
+  left: 0;
+  width: max-content;
   min-height: 32px;
+  margin-inline: auto;
   padding: 6px 12px;
-  transform: translateX(-50%);
+  /* Global button:active owns transform; centering must not depend on it. */
   border-color: var(--line);
   border-radius: 999px;
   color: var(--muted);
