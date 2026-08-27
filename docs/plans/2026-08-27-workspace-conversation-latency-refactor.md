@@ -149,6 +149,15 @@ Acceptance:
 - Workspace activity updates do not rebuild transcript items.
 - Existing UI behavior tests remain green.
 
+## Implementation closure
+
+P0–P2 landed on 2026-08-27. Two implementation refinements kept the same observable acceptance criteria with less state duplication:
+
+- P2.3 retains `App` as the state owner and splits React render subscriptions with memoized `WorkspaceRail`, `ConversationSidebar`, and `Chat` boundaries plus commit-safe stable callbacks. Streaming transcript changes therefore do not rebuild navigation, and workspace activity changes do not rebuild transcript items. A second external store was unnecessary for this boundary.
+- The workspace rail remains replaceable during workspace initialization. Conversation navigation remains replaceable during conversation focus synchronization, but not before a new workspace has an attached project identity and authoritative conversation index; sending a conversation command across that observation boundary would violate session correlation.
+
+Final audit also closed crash recovery for deletion quarantine, post-unlink replacement proof, superseded cold-opening waits, unstable-open reconnect backoff, and a pre-existing credential reload retirement race exposed by the full gate. None of the deferred P3 work was introduced.
+
 ## Documentation and verification
 
 Update the relevant knowledge pages only after behavior lands:
