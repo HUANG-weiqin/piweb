@@ -1384,7 +1384,7 @@ describe("ProjectSessionCoordinator", () => {
     expect(card).toBeUndefined();
   });
 
-  it("singleflights and owns one project model catalog per context", async () => {
+  it("keeps a project model catalog singleflight after one caller cancels", async () => {
     const fixture = await createFixture();
     const catalogRegistry = {
       getAvailable: () => [{ provider: "project", id: "catalog" }],
@@ -1396,17 +1396,21 @@ describe("ProjectSessionCoordinator", () => {
       started.resolve();
       await release.promise;
     };
+    const controller = new AbortController();
 
-    const first = fixture.coordinator.ensureProjectModelCatalog(fixture.handle);
+    const cancelled = fixture.coordinator.ensureProjectModelCatalog(
+      fixture.handle,
+      undefined,
+      controller.signal,
+    );
     await started.promise;
-    const second = fixture.coordinator.ensureProjectModelCatalog(fixture.handle);
-    release.resolve();
+    controller.abort();
+    await expect(cancelled).rejects.toMatchObject({ name: "AbortError" });
 
-    await expect(Promise.all([first, second])).resolves.toEqual([
-      catalogRegistry,
-      catalogRegistry,
-    ]);
+    const shared = fixture.coordinator.ensureProjectModelCatalog(fixture.handle);
     expect(fixture.runtime.projectCatalogCreations).toBe(1);
+    release.resolve();
+    await expect(shared).resolves.toBe(catalogRegistry);
     expect(
       fixture.coordinator.modelRegistryForProject(fixture.handle),
     ).toBe(catalogRegistry);

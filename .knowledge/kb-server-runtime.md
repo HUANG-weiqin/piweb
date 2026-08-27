@@ -1,6 +1,6 @@
 # 服务端运行时
 
-`updated: 2026-08-22`
+`updated: 2026-08-27`
 
 ## 这个模块是干什么的
 
@@ -63,7 +63,7 @@
 ## 决策
 
 - cwd 校验通过后，旧 project view 会 detach，再取得 coordinator project handle；不同项目 actor 仍由 coordinator 独立拥有，直到服务关闭。
-- initialize 在建立空态或打开 actor 前 singleflight 建立 project model catalog；但 cold exact/recent 的只读 conversation preview 位于这一步之前。常规 ProjectStore inspection 只取 metadata；preview 使用单目标 opt-in presentation inspection，从本次 parse/migration 新拥有的 readonly entries 构造 active branch 与有界历史/角色，不做递归 clone，也不创建 model catalog、AgentSession、extension route 或 writer lease。项目模型查询仍优先使用当前 actor registry，其次 project catalog，最后才是进程基线；模型列表、角色 CRUD 和 API Key provider 校验必须遵守同一顺序。
+- initialize 在建立空态或打开 actor 前 singleflight 建立 project model catalog；但 cold exact/recent 的只读 conversation preview 位于这一步之前。常规 ProjectStore inspection 只取 metadata；preview 使用单目标 opt-in presentation inspection，从本次 parse/migration 新拥有的 readonly entries 构造 active branch 与有界历史/角色，不做递归 clone，也不创建 model catalog、AgentSession、extension route 或 writer lease。项目模型查询仍优先使用当前 actor registry，其次 project catalog，最后才是进程基线；模型列表、角色 CRUD 和 API Key provider 校验必须遵守同一顺序。后继 initialize 会同步取消前一 initialize 对 recent 完整扫描、project catalog opening、actor singleflight 以及 actor resolve 后 recent manifest write 的调用方等待，使连接命令队列立即让位；caller signal 不作为这些 owner-owned promise 的操作取消信号，底层仍自行结算，已完成的 catalog/actor 可复用，旧 handle、临时订阅和 extension UI route 则在调用方退出时清理。带 caller signal 的 open 只有在 recent write 等待成功且仍未取消后才确认 focus/清除 attention；无 signal 的 coordinator 调用仍保持 write 等待前立即确认的原语义。
 - initialize 的 `recent` 在空项目中提交项目空态，不创建隐含 default conversation。它只用一次 `listSessions()` 完整扫描选择 recent，并从 seed 扫描开始前到主 view subscription 安装之间临时观察 coordinator actor event：除 `project_changed` 外的 mutation 会使 seed 失效；扫描期间的 mutation 最多触发一次保守的额外刷新。无 mutation 时，actor 打开后仅从当前索引重新补充 actor profile/activity/attention，不再为同一初始化立刻扫描第二次；seed 失效时跳过缓存的 project snapshot，先发布 focused snapshot，再异步执行完整索引刷新。无扫描的 current-index 投影不是 fresh integrity proof，禁止用于 open/delete；后续 project refresh 仍完整校验。open 复用已有 actor；new 必须先解析可用角色并在 AgentSession 创建前持久写入角色/lifecycle metadata。
 - `focus_conversation` 的 warm exact open 复用已有 actor；cold exact open 仍先完成目标存在性与 JSONL 完整性证明，但两者都不在 focused snapshot 关键路径等待 `lastConversationId` manifest。attach 发布 snapshot 后立即把 recent intent 送入 ProjectStore 自身的串行写队列，再启动完整 project refresh；所有 focus 与 awaited initialize/open recent 写按调用顺序共用该队列，保证 A→B→A 最终指针正确。Coordinator 单独跟踪这些已准入任务并在 close 前 drain；失败不反转已经提交的 focus，只向仍匹配本次 focusId 的当前 view 报 session error。
 - `createAgentSession` 一旦返回，owner bind、host tool gate 安装、startup provider/固定模型与初始思考强度校验和 extension load error 投影都必须位于同一个失败清理边界；其中任何一步抛错都 teardown 已创建的 AgentSession 并释放 actor lease。

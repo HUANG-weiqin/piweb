@@ -982,7 +982,7 @@ export class PiConnection {
         unsubscribeRecentSeed = coordinator.subscribe(handle, (event) => {
           if (event.type !== "project_changed") recentSeedInvalidated = true;
         });
-        const recentSeed = await coordinator.listSessions(handle);
+        const recentSeed = await coordinator.listSessions(handle, signal);
         const knownIds = new Set(recentSeed.map(({ id }) => id));
         targetConversationId = handle.project.lastConversationId
           && knownIds.has(handle.project.lastConversationId)
@@ -1026,7 +1026,11 @@ export class PiConnection {
         generation: extensionScope,
         signal: extensionAbort.signal,
       });
-      await coordinator.ensureProjectModelCatalog(handle, extensionUI);
+      await coordinator.ensureProjectModelCatalog(
+        handle,
+        extensionUI,
+        signal,
+      );
       this.throwIfAborted(signal);
       let actor: ConversationActor | undefined;
       if (target.kind === "new") {
@@ -1055,6 +1059,7 @@ export class PiConnection {
         actor = await coordinator.openConversation(
           handle,
           targetConversationId,
+          { signal },
         );
       }
       if (target.kind === "recent") {

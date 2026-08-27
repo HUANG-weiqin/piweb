@@ -880,49 +880,48 @@ export class ProjectSessionCoordinator {
   async ensureProjectModelCatalog(
     handle: ProjectSessionHandle,
     extensionUI?: PortableExtensionUI,
+    signal?: AbortSignal,
   ) {
     const context = this.requireContext(handle);
+    this.throwIfAborted(signal);
     if (context.modelCatalog) return context.modelCatalog.modelRegistry;
 
-    const pending = context.modelCatalogOpening;
-    if (pending) {
-      const catalog = await pending;
-      if (context.closing || this.disposed) {
-        throw new Error("Project context is closing");
-      }
-      return catalog.modelRegistry;
+    let opening = context.modelCatalogOpening;
+    if (!opening) {
+      const createCatalog = this.runtime.createProjectModelCatalog;
+      const ownedOpening = (async () => {
+        const catalog = await createCatalog.call(
+          this.runtime,
+          context.project.cwd,
+          {
+            ...(extensionUI === undefined ? {} : { extensionUI }),
+          },
+        );
+        if (context.closing || this.disposed) {
+          await catalog.dispose();
+          throw new Error(
+            "Project context closed while its model catalog was opening",
+          );
+        }
+        context.modelCatalog = catalog;
+        return catalog;
+      })();
+      opening = ownedOpening;
+      context.modelCatalogOpening = ownedOpening;
+      const clearOpening = () => {
+        if (context.modelCatalogOpening === ownedOpening) {
+          context.modelCatalogOpening = undefined;
+        }
+      };
+      void ownedOpening.then(clearOpening, clearOpening);
     }
 
-    const createCatalog = this.runtime.createProjectModelCatalog;
-    const opening = (async () => {
-      const catalog = await createCatalog.call(
-        this.runtime,
-        context.project.cwd,
-        {
-          ...(extensionUI === undefined ? {} : { extensionUI }),
-        },
-      );
-      if (context.closing || this.disposed) {
-        await catalog.dispose();
-        throw new Error(
-          "Project context closed while its model catalog was opening",
-        );
-      }
-      context.modelCatalog = catalog;
-      return catalog;
-    })();
-    context.modelCatalogOpening = opening;
-    try {
-      const catalog = await opening;
-      if (context.closing || this.disposed) {
-        throw new Error("Project context is closing");
-      }
-      return catalog.modelRegistry;
-    } finally {
-      if (context.modelCatalogOpening === opening) {
-        context.modelCatalogOpening = undefined;
-      }
+    const catalog = await raceWithAbort(opening, signal);
+    this.throwIfAborted(signal);
+    if (context.closing || this.disposed) {
+      throw new Error("Project context is closing");
     }
+    return catalog.modelRegistry;
   }
 
   modelRegistryForProject(handle: ProjectSessionHandle) {
@@ -935,9 +934,15 @@ export class ProjectSessionCoordinator {
 
   async listSessions(
     handle: ProjectSessionHandle,
+    signal?: AbortSignal,
   ): Promise<ConversationSummary[]> {
     const context = this.requireContext(handle);
-    const summaries = await context.project.refreshConversations();
+    this.throwIfAborted(signal);
+    const summaries = await raceWithAbort(
+      context.project.refreshConversations(),
+      signal,
+    );
+    this.throwIfAborted(signal);
     return this.projectConversationSummaries(context, summaries);
   }
 
@@ -1079,8 +1084,15 @@ export class ProjectSessionCoordinator {
       throw new Error(`Conversation is being deleted: ${conversationId}`);
     }
     if (options.updateRecent !== false) {
-      this.acknowledgeConversationFocus(context, conversationId);
-      await this.markConversationRecent(context, conversationId);
+      const recentUpdate = this.markConversationRecent(context, conversationId);
+      if (options.signal === undefined) {
+        this.acknowledgeConversationFocus(context, conversationId);
+        await recentUpdate;
+      } else {
+        await raceWithAbort(recentUpdate, options.signal);
+        this.throwIfAborted(options.signal);
+        this.acknowledgeConversationFocus(context, conversationId);
+      }
     }
     return actor;
   }

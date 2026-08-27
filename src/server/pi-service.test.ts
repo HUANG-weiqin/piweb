@@ -386,11 +386,9 @@ type CoordinatedHarness = Awaited<
 async function createColdConversation(
   harness: CoordinatedHarness,
   text: string,
+  cwd = harness.cwd,
 ): Promise<string> {
-  const handle = await harness.coordinator.acquireProject(
-    harness.cwd,
-    "read_only",
-  );
+  const handle = await harness.coordinator.acquireProject(cwd, "read_only");
   try {
     const conversationId = randomUUID();
     const manager = await handle.project.createConversation(
@@ -411,6 +409,88 @@ async function createColdConversation(
   } finally {
     handle.release();
   }
+}
+
+async function createWarmConversation(
+  harness: CoordinatedHarness,
+  cwd: string,
+  text: string,
+): Promise<string> {
+  const conversationId = await createColdConversation(harness, text, cwd);
+  const handle = await harness.coordinator.acquireProject(cwd, "read_only");
+  try {
+    await harness.coordinator.ensureProjectModelCatalog(handle);
+    await harness.coordinator.openConversation(handle, conversationId, {
+      updateRecent: false,
+    });
+    return conversationId;
+  } finally {
+    handle.release();
+  }
+}
+
+function projectReferenceState(handle: unknown): {
+  attention: Set<string>;
+  listeners: Set<unknown>;
+  references: number;
+} {
+  return (handle as {
+    context: {
+      attention: Set<string>;
+      listeners: Set<unknown>;
+      references: number;
+    };
+  }).context;
+}
+
+async function replaceCoordinatedInitialization(
+  harness: CoordinatedHarness,
+  staleStarted: Promise<void>,
+  staleConversation: { kind: "recent" } | {
+    kind: "open";
+    conversationId: string;
+  },
+  currentCwd: string,
+  currentConversationId: string,
+  operations: Promise<void>[],
+): Promise<void> {
+  const staleCommandId = randomUUID();
+  operations.push(harness.connection.handle({
+    type: "initialize",
+    commandId: staleCommandId,
+    sessionId: SESSION_B,
+    cwd: harness.cwd,
+    conversation: staleConversation,
+  }));
+  await staleStarted;
+
+  const currentCommandId = randomUUID();
+  operations.push(harness.connection.handle({
+    type: "initialize",
+    commandId: currentCommandId,
+    sessionId: SESSION_C,
+    cwd: currentCwd,
+    conversation: {
+      kind: "open",
+      conversationId: currentConversationId,
+    },
+  }));
+  await vi.waitFor(() => {
+    expect(harness.events).toContainEqual(expect.objectContaining({
+      type: "focus_attached",
+      commandId: currentCommandId,
+      conversationId: currentConversationId,
+    }));
+  });
+  await Promise.all(operations);
+
+  expect(harness.events).not.toContainEqual(expect.objectContaining({
+    type: "focus_attached",
+    commandId: staleCommandId,
+  }));
+  expect(latestState(harness.events).conversationId).toBe(
+    currentConversationId,
+  );
 }
 
 describe("PiConnection lifecycle", () => {
@@ -3398,6 +3478,270 @@ describe("PiConnection coordinated project view", () => {
       await Promise.allSettled([stale, current].filter(
         (operation): operation is Promise<void> => operation !== undefined,
       ));
+      await harness.cleanup();
+    }
+  });
+
+  it("lets a newer initialize attach while a stale recent scan continues", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const currentCwd = await realpath(
+      await mkdtemp(join(tmpdir(), "piweb-current-initialize-scan-")),
+    );
+    const scanStarted = deferred();
+    const releaseScan = deferred();
+    const scanCompleted = deferred();
+    const operations: Promise<void>[] = [];
+    try {
+      const currentConversationId = await createWarmConversation(
+        harness,
+        currentCwd,
+        "current initialize after stale scan",
+      );
+      const staleHandle = await harness.coordinator.acquireProject(
+        harness.cwd,
+        "read_only",
+      );
+      const staleContext = projectReferenceState(staleHandle);
+      const refreshConversations = staleHandle.project.refreshConversations
+        .bind(staleHandle.project);
+      vi.spyOn(staleHandle.project, "refreshConversations")
+        .mockImplementationOnce(async () => {
+          scanStarted.resolve();
+          await releaseScan.promise;
+          const result = await refreshConversations();
+          scanCompleted.resolve();
+          return result;
+        });
+      staleHandle.release();
+
+      await replaceCoordinatedInitialization(
+        harness,
+        scanStarted.promise,
+        { kind: "recent" },
+        currentCwd,
+        currentConversationId,
+        operations,
+      );
+      expect(staleContext).toMatchObject({ references: 0 });
+      expect(staleContext.listeners.size).toBe(0);
+
+      releaseScan.resolve();
+      await scanCompleted.promise;
+    } finally {
+      releaseScan.resolve();
+      await Promise.allSettled(operations);
+      await harness.cleanup();
+    }
+  });
+
+  it("lets a newer initialize attach while a stale model catalog opens", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const currentCwd = await realpath(
+      await mkdtemp(join(tmpdir(), "piweb-current-initialize-catalog-")),
+    );
+    const catalogStarted = deferred();
+    const releaseCatalog = deferred();
+    const catalogCompleted = deferred();
+    const operations: Promise<void>[] = [];
+    try {
+      const currentConversationId = await createWarmConversation(
+        harness,
+        currentCwd,
+        "current initialize after stale catalog",
+      );
+      const staleHandle = await harness.coordinator.acquireProject(
+        harness.cwd,
+        "read_only",
+      );
+      const staleContext = projectReferenceState(staleHandle);
+      staleHandle.release();
+      harness.runtime.beforeCreateProjectModelCatalog = async () => {
+        catalogStarted.resolve();
+        await releaseCatalog.promise;
+        catalogCompleted.resolve();
+      };
+
+      await replaceCoordinatedInitialization(
+        harness,
+        catalogStarted.promise,
+        { kind: "recent" },
+        currentCwd,
+        currentConversationId,
+        operations,
+      );
+      expect(staleContext).toMatchObject({ references: 0 });
+      expect(staleContext.listeners.size).toBe(0);
+
+      releaseCatalog.resolve();
+      await catalogCompleted.promise;
+      const reopened = await harness.coordinator.acquireProject(
+        harness.cwd,
+        "read_only",
+      );
+      await expect(
+        harness.coordinator.ensureProjectModelCatalog(reopened),
+      ).resolves.toBe(harness.runtime.modelRegistry);
+      reopened.release();
+      expect(harness.runtime.projectCatalogCreations).toBe(2);
+    } finally {
+      releaseCatalog.resolve();
+      await Promise.allSettled(operations);
+      await harness.cleanup();
+    }
+  });
+
+  it("lets a newer initialize attach while a stale actor activation continues", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const currentCwd = await realpath(
+      await mkdtemp(join(tmpdir(), "piweb-current-initialize-actor-")),
+    );
+    const activationStarted = deferred();
+    const releaseActivation = deferred();
+    const activationCompleted = deferred();
+    const operations: Promise<void>[] = [];
+    let staleExtensionUI: NonNullable<
+      CreatePiSessionOptions["extensionUI"]
+    > | undefined;
+    try {
+      const currentConversationId = await createWarmConversation(
+        harness,
+        currentCwd,
+        "current initialize after stale actor",
+      );
+      const staleConversationId = await createColdConversation(
+        harness,
+        "stale initialize actor",
+      );
+      const staleHandle = await harness.coordinator.acquireProject(
+        harness.cwd,
+        "read_only",
+      );
+      await harness.coordinator.ensureProjectModelCatalog(staleHandle);
+      const staleContext = projectReferenceState(staleHandle);
+      staleHandle.release();
+
+      const activate = harness.runtime.activate;
+      harness.runtime.activate = async (options) => {
+        if (options.sessionManager?.getSessionId() !== staleConversationId) {
+          return activate(options);
+        }
+        if (!options.extensionUI) {
+          throw new Error("stale initialize extension UI was not bound");
+        }
+        staleExtensionUI = options.extensionUI;
+        activationStarted.resolve();
+        await releaseActivation.promise;
+        activationCompleted.resolve();
+      };
+
+      await replaceCoordinatedInitialization(
+        harness,
+        activationStarted.promise,
+        { kind: "open", conversationId: staleConversationId },
+        currentCwd,
+        currentConversationId,
+        operations,
+      );
+      expect(staleContext).toMatchObject({ references: 0 });
+      expect(staleContext.listeners.size).toBe(0);
+
+      const extensionUI = staleExtensionUI;
+      if (!extensionUI) {
+        throw new Error("stale initialize did not start actor activation");
+      }
+      const requestCount = harness.events.filter(
+        (event) => event.type === "extension_ui_request",
+      ).length;
+      const dialogAbort = new AbortController();
+      const detachedDialog = extensionUI.confirm(
+        "Detached stale initialize",
+        "This request must not reach the current browser route",
+        { signal: dialogAbort.signal },
+      );
+      expect(harness.events.filter(
+        (event) => event.type === "extension_ui_request",
+      )).toHaveLength(requestCount);
+      dialogAbort.abort();
+      await expect(detachedDialog).resolves.toBe(false);
+
+      releaseActivation.resolve();
+      await activationCompleted.promise;
+      const reopenedHandle = await harness.coordinator.acquireProject(
+        harness.cwd,
+        "read_only",
+      );
+      const reopened = await harness.coordinator.openConversation(
+        reopenedHandle,
+        staleConversationId,
+        { updateRecent: false },
+      );
+      reopenedHandle.release();
+      expect(reopened.conversationId).toBe(staleConversationId);
+      expect(harness.runtime.createCalls).toHaveLength(2);
+    } finally {
+      releaseActivation.resolve();
+      await Promise.allSettled(operations);
+      await harness.cleanup();
+    }
+  });
+
+  it("lets a newer initialize attach while a stale recent write continues", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const currentCwd = await realpath(
+      await mkdtemp(join(tmpdir(), "piweb-current-initialize-recent-write-")),
+    );
+    const writeStarted = deferred();
+    const releaseWrite = deferred();
+    const writeCompleted = deferred();
+    const operations: Promise<void>[] = [];
+    try {
+      const currentConversationId = await createWarmConversation(
+        harness,
+        currentCwd,
+        "current initialize after stale recent write",
+      );
+      const staleConversationId = await createWarmConversation(
+        harness,
+        harness.cwd,
+        "stale initialize resolved actor",
+      );
+      const staleHandle = await harness.coordinator.acquireProject(
+        harness.cwd,
+        "read_only",
+      );
+      const staleProject = staleHandle.project;
+      const staleContext = projectReferenceState(staleHandle);
+      staleContext.attention.add(staleConversationId);
+      const setLastConversation = staleProject.setLastConversation
+        .bind(staleProject);
+      vi.spyOn(staleProject, "setLastConversation")
+        .mockImplementationOnce(async (conversationId) => {
+          writeStarted.resolve();
+          await releaseWrite.promise;
+          await setLastConversation(conversationId);
+          writeCompleted.resolve();
+        });
+      staleHandle.release();
+
+      await replaceCoordinatedInitialization(
+        harness,
+        writeStarted.promise,
+        { kind: "open", conversationId: staleConversationId },
+        currentCwd,
+        currentConversationId,
+        operations,
+      );
+      expect(staleContext).toMatchObject({ references: 0 });
+      expect(staleContext.listeners.size).toBe(0);
+      expect(staleContext.attention.has(staleConversationId)).toBe(true);
+
+      releaseWrite.resolve();
+      await writeCompleted.promise;
+      expect(staleProject.lastConversationId).toBe(staleConversationId);
+      expect(staleContext.attention.has(staleConversationId)).toBe(true);
+    } finally {
+      releaseWrite.resolve();
+      await Promise.allSettled(operations);
       await harness.cleanup();
     }
   });
