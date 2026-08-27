@@ -788,12 +788,15 @@ describe("ProjectSessionCoordinator", () => {
     );
     const inspectionStarted = deferred();
     const releaseInspection = deferred();
+    const inspectionCompleted = deferred();
     const inspectConversationPresentation = fixture.handle.project
       .inspectConversationPresentation.bind(fixture.handle.project);
     inspect.mockImplementationOnce(async (conversationId) => {
       inspectionStarted.resolve();
       await releaseInspection.promise;
-      return inspectConversationPresentation(conversationId);
+      const result = await inspectConversationPresentation(conversationId);
+      inspectionCompleted.resolve();
+      return result;
     });
     const controller = new AbortController();
     const preparing = fixture.coordinator.prepareConversationPresentation(
@@ -803,13 +806,51 @@ describe("ProjectSessionCoordinator", () => {
     );
     await inspectionStarted.promise;
     controller.abort();
-    releaseInspection.resolve();
 
     await expect(preparing).rejects.toMatchObject({ name: "AbortError" });
+    releaseInspection.resolve();
+    await inspectionCompleted.promise;
     expect(fixture.runtime.createConversationIds).toEqual([
       warm.conversationId,
       openingId,
     ]);
+  });
+
+  it("cancels only the caller wait while a shared actor opening completes", async () => {
+    const fixture = await createFixture();
+    const conversationId = randomUUID();
+    await fixture.handle.project.createConversation(
+      conversationId,
+      defaultProfile(fixture.roles),
+      { updateRecent: false },
+    );
+    const openingStarted = deferred();
+    const releaseOpening = deferred();
+    fixture.runtime.beforeCreateSession = async (id) => {
+      if (id !== conversationId) return;
+      openingStarted.resolve();
+      await releaseOpening.promise;
+    };
+    const controller = new AbortController();
+    const cancelled = fixture.coordinator.openConversation(
+      fixture.handle,
+      conversationId,
+      { updateRecent: false, signal: controller.signal },
+    );
+    await openingStarted.promise;
+    controller.abort();
+
+    await expect(cancelled).rejects.toMatchObject({ name: "AbortError" });
+    const shared = fixture.coordinator.openConversation(
+      fixture.handle,
+      conversationId,
+      { updateRecent: false },
+    );
+    releaseOpening.resolve();
+    const actor = await shared;
+
+    expect(actor.conversationId).toBe(conversationId);
+    expect(fixture.runtime.createConversationIds).toEqual([conversationId]);
   });
 
   it("skips projection failures but propagates presentation integrity failures", async () => {

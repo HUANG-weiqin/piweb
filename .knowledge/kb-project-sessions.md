@@ -155,7 +155,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 - 新 Pi manager 默认要到首条 assistant 消息才创建文件。工作台一次写入合法 header 和 conversation metadata 后丢弃 pending manager，再用公开 `open()` 重开。
 - `SessionManager` 没有 flush/close/fsync，也没有内建锁；正常 append 是同步 JSONL 写入。
 - SDK 打开旧格式时可能原地迁移，因此 writer lease 必须先于 `open()`。
-- coordinator 打开已有对话时最多等待旧 writer lease 5 秒；等待队列 FIFO 且可取消。actor singleflight 确保浏览器和 Agent 不会因并发 open 获得第二个 writer。
+- coordinator 打开已有对话时最多等待旧 writer lease 5 秒；等待队列 FIFO 且可取消。actor singleflight 确保浏览器和 Agent 不会因并发 open 获得第二个 writer。cold focus 被后继导航取消时，只结束该 PiConnection 对 shared opening 的等待；coordinator 自有的 singleflight、lease、文件打开和 actor activation 继续结算并供后续调用复用。
 - `open()` 前宿主再次验证文件非空、以换行结束、每条非空 JSONL 可解析、所有数值有限、compaction `tokensBefore` 非负、首 header 身份匹配，并且 entry ID 唯一、parent/label 引用有效、compaction 保留点属于当前分支祖先链。宿主 reserved entry 还必须绑定该 header identity：outbound card 的 source 与 inbound message 的 target 都必须是当前 conversation，不能把另一会话的合法记录搬入本文件。branch summary 可引用已有节点，或使用 Pi 合法的 `parentId=null + fromId=root` 哨兵。crash partial tail 或“合法 JSON、非法 Pi entry”都会 fail closed，不能被 SDK 静默跳过或恢复成空历史。
 - 第一版只有进程内租约；跨进程文件锁尚未实现。
 

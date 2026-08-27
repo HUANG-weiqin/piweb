@@ -3196,10 +3196,13 @@ describe("PiConnection coordinated project view", () => {
     }
   });
 
-  it("does not emit a preview from an aborted stale focus command", async () => {
+  it("lets a newer focus attach while a stale cold inspection continues", async () => {
     const harness = await coordinatedConnectionHarness();
     const inspectionStarted = deferred();
     const releaseInspection = deferred();
+    const inspectionCompleted = deferred();
+    let stale: Promise<void> | undefined;
+    let current: Promise<void> | undefined;
     try {
       await harness.connection.handle({
         type: "initialize",
@@ -3210,16 +3213,27 @@ describe("PiConnection coordinated project view", () => {
       });
       const firstId = await createColdConversation(harness, "first cold");
       const secondId = await createColdConversation(harness, "second cold");
-      const prepare = harness.coordinator.prepareConversationPresentation
-        .bind(harness.coordinator);
-      vi.spyOn(harness.coordinator, "prepareConversationPresentation")
-        .mockImplementationOnce(async (...args) => {
+      const handle = await harness.coordinator.acquireProject(
+        harness.cwd,
+        "read_only",
+      );
+      const inspectConversationPresentation = handle.project
+        .inspectConversationPresentation.bind(handle.project);
+      vi.spyOn(handle.project, "inspectConversationPresentation")
+        .mockImplementation(async (conversationId) => {
+          if (conversationId !== firstId) {
+            return inspectConversationPresentation(conversationId);
+          }
           inspectionStarted.resolve();
           await releaseInspection.promise;
-          return prepare(...args);
+          const result = await inspectConversationPresentation(conversationId);
+          inspectionCompleted.resolve();
+          return result;
         });
+      handle.release();
+
       const staleCommandId = randomUUID();
-      const stale = harness.connection.handle({
+      stale = harness.connection.handle({
         type: "focus_conversation",
         commandId: staleCommandId,
         sessionId: SESSION_A,
@@ -3227,14 +3241,23 @@ describe("PiConnection coordinated project view", () => {
       });
       await inspectionStarted.promise;
       const currentCommandId = randomUUID();
-      const current = harness.connection.handle({
+      current = harness.connection.handle({
         type: "focus_conversation",
         commandId: currentCommandId,
         sessionId: SESSION_A,
         conversationId: secondId,
       });
-      releaseInspection.resolve();
+
+      await vi.waitFor(() => {
+        expect(harness.events).toContainEqual(expect.objectContaining({
+          type: "focus_attached",
+          commandId: currentCommandId,
+          conversationId: secondId,
+        }));
+      });
       await Promise.all([stale, current]);
+      releaseInspection.resolve();
+      await inspectionCompleted.promise;
 
       expect(harness.events).not.toContainEqual(expect.objectContaining({
         type: "conversation_preview",
@@ -3244,13 +3267,137 @@ describe("PiConnection coordinated project view", () => {
         type: "focus_attached",
         commandId: staleCommandId,
       }));
-      expect(harness.events).toContainEqual(expect.objectContaining({
-        type: "focus_attached",
-        commandId: currentCommandId,
-        conversationId: secondId,
-      }));
+      expect(latestState(harness.events).conversationId).toBe(secondId);
     } finally {
       releaseInspection.resolve();
+      await Promise.allSettled([stale, current].filter(
+        (operation): operation is Promise<void> => operation !== undefined,
+      ));
+      await harness.cleanup();
+    }
+  });
+
+  it("lets a warm focus attach while a stale actor activation continues", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const activationStarted = deferred();
+    const releaseActivation = deferred();
+    const activationCompleted = deferred();
+    let staleExtensionUI: NonNullable<
+      CreatePiSessionOptions["extensionUI"]
+    > | undefined;
+    let stale: Promise<void> | undefined;
+    let current: Promise<void> | undefined;
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      const staleConversationId = await createColdConversation(
+        harness,
+        "stale activation",
+      );
+      const currentConversationId = await createColdConversation(
+        harness,
+        "warm target",
+      );
+      const handle = await harness.coordinator.acquireProject(
+        harness.cwd,
+        "read_only",
+      );
+      await harness.coordinator.openConversation(
+        handle,
+        currentConversationId,
+        { updateRecent: false },
+      );
+      handle.release();
+
+      const activate = harness.runtime.activate;
+      harness.runtime.activate = async (options) => {
+        if (
+          options.sessionManager?.getSessionId() !== staleConversationId
+        ) {
+          return activate(options);
+        }
+        if (!options.extensionUI) {
+          throw new Error("stale actor extension UI was not bound");
+        }
+        staleExtensionUI = options.extensionUI;
+        activationStarted.resolve();
+        await releaseActivation.promise;
+        activationCompleted.resolve();
+      };
+
+      const staleCommandId = randomUUID();
+      stale = harness.connection.handle({
+        type: "focus_conversation",
+        commandId: staleCommandId,
+        sessionId: SESSION_A,
+        conversationId: staleConversationId,
+      });
+      await activationStarted.promise;
+      const currentCommandId = randomUUID();
+      current = harness.connection.handle({
+        type: "focus_conversation",
+        commandId: currentCommandId,
+        sessionId: SESSION_A,
+        conversationId: currentConversationId,
+      });
+
+      await vi.waitFor(() => {
+        expect(harness.events).toContainEqual(expect.objectContaining({
+          type: "focus_attached",
+          commandId: currentCommandId,
+          conversationId: currentConversationId,
+        }));
+      });
+      await Promise.all([stale, current]);
+      const extensionUI = staleExtensionUI;
+      if (!extensionUI) throw new Error("stale actor did not start activation");
+      const requestCount = harness.events.filter(
+        (event) => event.type === "extension_ui_request",
+      ).length;
+      const dialogAbort = new AbortController();
+      const detachedDialog = extensionUI.confirm(
+        "Detached stale focus",
+        "This request must not reach the current browser route",
+        { signal: dialogAbort.signal },
+      );
+      expect(harness.events.filter(
+        (event) => event.type === "extension_ui_request",
+      )).toHaveLength(requestCount);
+      dialogAbort.abort();
+      await expect(detachedDialog).resolves.toBe(false);
+
+      releaseActivation.resolve();
+      await activationCompleted.promise;
+      const reopenedHandle = await harness.coordinator.acquireProject(
+        harness.cwd,
+        "read_only",
+      );
+      const reopened = await harness.coordinator.openConversation(
+        reopenedHandle,
+        staleConversationId,
+        { updateRecent: false },
+      );
+      reopenedHandle.release();
+
+      expect(reopened.conversationId).toBe(staleConversationId);
+      expect(harness.runtime.createCalls).toHaveLength(2);
+      expect(latestState(harness.events).conversationId).toBe(
+        currentConversationId,
+      );
+      expect(harness.events).not.toContainEqual(expect.objectContaining({
+        type: "focus_attached",
+        commandId: staleCommandId,
+      }));
+    } finally {
+      releaseActivation.resolve();
+      await Promise.allSettled([stale, current].filter(
+        (operation): operation is Promise<void> => operation !== undefined,
+      ));
       await harness.cleanup();
     }
   });

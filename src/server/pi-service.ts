@@ -1216,7 +1216,10 @@ export class PiConnection {
           const actor = await coordinator.openConversation(
             view.handle,
             command.conversationId,
-            { updateRecent: false },
+            {
+              updateRecent: false,
+              signal: extensionAbort.signal,
+            },
           );
           if (
             extensionAbort.signal.aborted

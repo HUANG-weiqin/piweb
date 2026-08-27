@@ -1006,8 +1006,9 @@ export class ProjectSessionCoordinator {
       return undefined;
     }
 
-    const inspection = await context.project.inspectConversationPresentation(
-      conversationId,
+    const inspection = await raceWithAbort(
+      context.project.inspectConversationPresentation(conversationId),
+      signal,
     );
     this.throwIfAborted(signal);
     this.requireContext(handle);
@@ -1065,10 +1066,15 @@ export class ProjectSessionCoordinator {
   async openConversation(
     handle: ProjectSessionHandle,
     conversationId: string,
-    options: { updateRecent?: boolean } = {},
+    options: { updateRecent?: boolean; signal?: AbortSignal } = {},
   ): Promise<ConversationActor> {
     const context = this.requireContext(handle);
-    const actor = await this.getOrOpenActor(context, conversationId);
+    this.throwIfAborted(options.signal);
+    const actor = await raceWithAbort(
+      this.getOrOpenActor(context, conversationId),
+      options.signal,
+    );
+    this.throwIfAborted(options.signal);
     if (context.deleting.has(conversationId) || actor.getState().disposed) {
       throw new Error(`Conversation is being deleted: ${conversationId}`);
     }
