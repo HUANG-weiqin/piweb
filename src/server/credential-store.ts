@@ -417,30 +417,54 @@ export class FileCredentialStore implements CredentialStore {
 
   private async joinReload(options?: AuthOperationOptions): Promise<AuthData> {
     abortIfNeeded(options);
-    let state = this.reloadState;
-    if (!state) {
-      const abortController = new AbortController();
-      const raw = this.reloadUnderLock(abortController.signal);
-      const promise = raw.then((result) => {
-        if (this.reloadState === state) {
-          this.cachedData = result.data;
-          this.cachedRevision = result.revision;
+    while (true) {
+      let state = this.reloadState;
+      if (state?.abortController.signal.aborted) {
+        // The last reader abandoned this generation. Keep successors behind its
+        // settlement so lock cleanup cannot race a replacement reload.
+        const settlement = state.promise.then(
+          () => undefined,
+          () => undefined,
+        );
+        await raceWithAbortSignal(settlement, options?.signal);
+        abortIfNeeded(options);
+        continue;
+      }
+      if (!state) {
+        const abortController = new AbortController();
+        let createdState!: ReloadState;
+        const promise = this.reloadUnderLock(abortController.signal).then((result) => {
+          if (this.reloadState === createdState) {
+            this.cachedData = result.data;
+            this.cachedRevision = result.revision;
+          }
+          return result;
+        });
+        createdState = { promise, abortController, readers: 0 };
+        this.reloadState = createdState;
+        const clearIfCurrent = (): void => {
+          // A retiring generation remains visible until its lock attempt and
+          // release path have completely settled.
+          if (this.reloadState === createdState) this.reloadState = undefined;
+        };
+        void promise.then(clearIfCurrent, clearIfCurrent);
+        state = createdState;
+      }
+      state.readers++;
+      try {
+        const result = await raceWithAbortSignal(state.promise, options?.signal);
+        return result.data;
+      } finally {
+        state.readers--;
+        if (
+          state.readers === 0 &&
+          this.reloadState === state &&
+          !state.abortController.signal.aborted
+        ) {
+          // Do not clear here: a replacement must observe this retiring state
+          // until state.promise runs the settlement cleanup above.
+          state.abortController.abort();
         }
-        return result;
-      });
-      promise.catch(() => {});
-      state = { promise, abortController, readers: 0 };
-      this.reloadState = state;
-    }
-    state.readers++;
-    try {
-      const result = await raceWithAbortSignal(state.promise, options?.signal);
-      return result.data;
-    } finally {
-      state.readers--;
-      if (state.readers === 0 && this.reloadState === state) {
-        this.reloadState = undefined;
-        state.abortController.abort();
       }
     }
   }

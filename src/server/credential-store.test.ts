@@ -317,21 +317,21 @@ describe("FileCredentialStore read cache regression", () => {
     await expect(store.read("alpha")).resolves.toEqual({ type: "api_key", key: "recovered" });
   });
 
-  it("distinct callers sharing a blocked reload must have independent abort behavior", async () => {
+  it("a reader joining before the last reader leaves keeps the shared reload alive", async () => {
     const authPath = await makeAuthPath();
     await writeAuth(authPath, { alpha: { type: "api_key", key: "secret" } });
     const heldRelease = await lockfile.lock(authPath, { realpath: false });
     const store = new FileCredentialStore(authPath);
     const controller = new AbortController();
     const first = store.read("alpha", { signal: controller.signal });
-    const second = store.read("alpha");
     controller.abort();
+    const second = store.read("alpha");
     await expect(first).rejects.toThrow();
     await heldRelease();
     await expect(second).resolves.toEqual({ type: "api_key", key: "secret" });
   });
 
-  it("when the last waiter leaves before settlement, abort the underlying lock wait", async () => {
+  it("retires an abandoned reload before starting its replacement", async () => {
     const authPath = await makeAuthPath();
     await writeAuth(authPath, {});
     const heldRelease = await lockfile.lock(authPath, { realpath: false });
@@ -344,11 +344,20 @@ describe("FileCredentialStore read cache regression", () => {
     c2.abort();
     await expect(p1).rejects.toThrow();
     await expect(p2).rejects.toThrow();
+
     const spy = vi.spyOn(lockfile, "lock");
+    const replacementAbort = new AbortController();
+    const cancelledReplacement = store.read("alpha", {
+      signal: replacementAbort.signal,
+    });
+    replacementAbort.abort();
+    await expect(cancelledReplacement).rejects.toThrow();
     const newRead = store.read("alpha");
+    expect(spy).not.toHaveBeenCalled();
+
     await heldRelease();
     await expect(newRead).resolves.toBeUndefined();
-    expect(spy.mock.calls.length).toBe(1);
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 
   it("ModelRuntime create/refresh with modelsPath:null and cached store does bounded locks", async () => {
