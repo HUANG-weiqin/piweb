@@ -11,13 +11,11 @@ import type {
   AcknowledgedCommandOperation,
   ClientCommand,
   ConversationActivity,
-  ConversationHistoryItem,
   ConversationSummary,
   FocusAttachedOperation,
   PublicState,
   ServerEvent,
   SessionEvent,
-  SessionMessageEndpoint,
   ThinkingLevel,
   ToolMode,
 } from "../shared/protocol.js";
@@ -47,12 +45,13 @@ import {
 } from "./project-run-coordinator.js";
 import {
   ProjectSessionCoordinator,
+  type ConversationPresentation,
   type ProjectSessionCoordinatorEvent,
   type ProjectSessionHandle,
 } from "./project-session-coordinator.js";
 import {
-  conversationDisplayTitle,
   projectConversationIndex,
+  projectConversationPeers,
 } from "./project-snapshot.js";
 import type { RoleCatalog } from "./role-catalog.js";
 import { MODEL_REFRESH_TIMEOUT_MS } from "./model-refresh.js";
@@ -249,43 +248,6 @@ function boundedProjectSnapshotEvent(input: {
     throw new Error("Project snapshot envelope exceeds its wire budget");
   }
   return event;
-}
-
-function projectConversationPeers(
-  items: readonly ConversationHistoryItem[],
-  conversations: readonly ConversationSummary[],
-): ConversationHistoryItem[] {
-  const summaries = new Map(
-    conversations.map((conversation) => [conversation.id, conversation]),
-  );
-  const enrichTitle = (
-    endpoint: SessionMessageEndpoint,
-  ): SessionMessageEndpoint => {
-    const explicitTitle = endpoint.title === undefined
-      ? undefined
-      : conversationDisplayTitle({ name: endpoint.title, preview: "" });
-    if (explicitTitle !== undefined) {
-      return explicitTitle === endpoint.title
-        ? endpoint
-        : { ...endpoint, title: explicitTitle };
-    }
-    const summary = summaries.get(endpoint.conversationId);
-    if (!summary) return endpoint;
-    const title = conversationDisplayTitle(summary);
-    return title === undefined ? endpoint : { ...endpoint, title };
-  };
-  return items.map((item) => {
-    if (item.kind !== "session_message") return item;
-    const from = enrichTitle(item.from);
-    const to = enrichTitle(item.to);
-    const peer = item.direction === "incoming" ? from : to;
-    return {
-      ...item,
-      from,
-      to,
-      peerExists: summaries.has(peer.conversationId),
-    };
-  });
 }
 
 export class PiConnection {
@@ -1010,6 +972,54 @@ export class PiConnection {
       this.throwIfAborted(signal);
 
       const target = command.conversation ?? { kind: "recent" as const };
+      let targetConversationId = target.kind === "open"
+        ? target.conversationId
+        : undefined;
+      if (target.kind === "recent") {
+        // Subscribe before the one fresh integrity scan: promise settlement is
+        // itself a handoff boundary where an actor mutation could otherwise be
+        // missed. A mutation during the scan may cause one harmless refresh.
+        unsubscribeRecentSeed = coordinator.subscribe(handle, (event) => {
+          if (event.type !== "project_changed") recentSeedInvalidated = true;
+        });
+        const recentSeed = await coordinator.listSessions(handle);
+        const knownIds = new Set(recentSeed.map(({ id }) => id));
+        targetConversationId = handle.project.lastConversationId
+          && knownIds.has(handle.project.lastConversationId)
+          ? handle.project.lastConversationId
+          : recentSeed[0]?.id;
+      }
+
+      if (
+        command.commandId !== undefined
+        && targetConversationId !== undefined
+      ) {
+        const presentation = await coordinator.prepareConversationPresentation(
+          handle,
+          targetConversationId,
+          signal,
+        );
+        this.throwIfAborted(signal);
+        if (
+          presentation !== undefined
+          && !this.disposed
+          && generation === this.generation
+          && this.requestedSessionId === command.sessionId
+          && coordinator.canPublishConversationPresentation(
+            handle,
+            targetConversationId,
+          )
+        ) {
+          this.emitConversationPreview(
+            command.sessionId,
+            command.commandId,
+            handle,
+            targetConversationId,
+            presentation,
+          );
+        }
+      }
+
       extensionScope = ++this.extensionScope;
       const extensionUI = this.extensionUI.context({
         sessionId: command.sessionId,
@@ -1019,17 +1029,7 @@ export class PiConnection {
       await coordinator.ensureProjectModelCatalog(handle, extensionUI);
       this.throwIfAborted(signal);
       let actor: ConversationActor | undefined;
-      if (target.kind === "open") {
-        unsubscribeExtensionUI = coordinator.attachExtensionUI(
-          handle,
-          target.conversationId,
-          extensionUI,
-        );
-        actor = await coordinator.openConversation(
-          handle,
-          target.conversationId,
-        );
-      } else if (target.kind === "new") {
+      if (target.kind === "new") {
         if (!target.roleId) {
           throw new Error(
             "A role must be selected before creating a conversation",
@@ -1046,27 +1046,18 @@ export class PiConnection {
           actor.conversationId,
           extensionUI,
         );
-      } else {
-        // Subscribe before the one fresh integrity scan: promise settlement is
-        // itself a handoff boundary where an actor mutation could otherwise be
-        // missed. A mutation during the scan may cause one harmless refresh.
-        unsubscribeRecentSeed = coordinator.subscribe(handle, (event) => {
-          if (event.type !== "project_changed") recentSeedInvalidated = true;
-        });
-        const recentSeed = await coordinator.listSessions(handle);
-        const knownIds = new Set(recentSeed.map(({ id }) => id));
-        const conversationId = handle.project.lastConversationId
-          && knownIds.has(handle.project.lastConversationId)
-          ? handle.project.lastConversationId
-          : recentSeed[0]?.id;
-        if (conversationId !== undefined) {
-          unsubscribeExtensionUI = coordinator.attachExtensionUI(
-            handle,
-            conversationId,
-            extensionUI,
-          );
-          actor = await coordinator.openConversation(handle, conversationId);
-        }
+      } else if (targetConversationId !== undefined) {
+        unsubscribeExtensionUI = coordinator.attachExtensionUI(
+          handle,
+          targetConversationId,
+          extensionUI,
+        );
+        actor = await coordinator.openConversation(
+          handle,
+          targetConversationId,
+        );
+      }
+      if (target.kind === "recent") {
         initialRecentConversations =
           coordinator.projectSessionsFromCurrentIndex(handle);
       }
@@ -1182,11 +1173,37 @@ export class PiConnection {
       case "focus_conversation": {
         const view = this.requireCoordinatedView(command.sessionId);
         const { coordinator } = await this.requireCoordination();
-        const extensionScope = ++this.extensionScope;
         const extensionAbort = transitionAbort ?? new AbortController();
+        let extensionScope: number | undefined;
         let detachExtensionUI: (() => void) | undefined;
         let transferred = false;
         try {
+          const presentation = await coordinator.prepareConversationPresentation(
+            view.handle,
+            command.conversationId,
+            extensionAbort.signal,
+          );
+          if (
+            extensionAbort.signal.aborted
+            || this.coordinatedView !== view
+          ) return;
+          if (
+            presentation !== undefined
+            && coordinator.canPublishConversationPresentation(
+              view.handle,
+              command.conversationId,
+            )
+          ) {
+            this.emitConversationPreview(
+              view.sessionId,
+              command.commandId,
+              view.handle,
+              command.conversationId,
+              presentation,
+            );
+          }
+
+          extensionScope = ++this.extensionScope;
           detachExtensionUI = coordinator.attachExtensionUI(
             view.handle,
             command.conversationId,
@@ -1225,7 +1242,9 @@ export class PiConnection {
         } finally {
           if (!transferred) {
             detachExtensionUI?.();
-            this.extensionUI.cancelScope(view.sessionId, extensionScope);
+            if (extensionScope !== undefined) {
+              this.extensionUI.cancelScope(view.sessionId, extensionScope);
+            }
           }
         }
         return;
@@ -1512,6 +1531,29 @@ export class PiConnection {
     }
     this.publishProjectSnapshotCoordinated();
     this.publishRoleCatalog();
+  }
+
+  private emitConversationPreview(
+    sessionId: string,
+    commandId: string,
+    handle: ProjectSessionHandle,
+    conversationId: string,
+    presentation: ConversationPresentation,
+  ): void {
+    this.emit({
+      type: "conversation_preview",
+      sessionId,
+      commandId,
+      projectId: handle.project.id,
+      conversationId,
+      cwd: presentation.cwd,
+      toolMode: presentation.toolMode,
+      ...(presentation.role === undefined
+        ? {}
+        : { role: presentation.role }),
+      items: presentation.items,
+      window: presentation.window,
+    });
   }
 
   private emitFocusAttached(

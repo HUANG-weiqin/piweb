@@ -2,6 +2,7 @@ import {
   CURRENT_SESSION_VERSION,
   migrateSessionEntries,
   type FileEntry,
+  type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import {
   aggregateReservedConversationEntries,
@@ -49,6 +50,19 @@ export interface PiSessionFileInspection {
   pendingPromptBatches: PendingPromptBatch[];
   metaOperations: MetaOperation[];
   lastActivityAt: string;
+}
+
+export type ReadonlySessionEntry = Readonly<SessionEntry>;
+
+export interface PiSessionFilePresentationInspection
+  extends PiSessionFileInspection {
+  /** Newly parsed, migrated, and validated physical entries. */
+  entries: readonly ReadonlySessionEntry[];
+}
+
+export interface ReadonlySessionEntriesAdapter {
+  getEntries(): readonly ReadonlySessionEntry[];
+  getBranch(): readonly ReadonlySessionEntry[];
 }
 
 function isRecord(value: unknown): value is UnknownRecord {
@@ -359,11 +373,24 @@ function assertFiniteJsonNumbers(
   }
 }
 
-export function inspectPiSessionFile(
+function inspectPiSessionFileInternal(
   raw: string,
   sessionPath: string,
-  expectedConversationId?: string,
-): PiSessionFileInspection {
+  expectedConversationId: string | undefined,
+  includeEntries: false,
+): PiSessionFileInspection;
+function inspectPiSessionFileInternal(
+  raw: string,
+  sessionPath: string,
+  expectedConversationId: string | undefined,
+  includeEntries: true,
+): PiSessionFilePresentationInspection;
+function inspectPiSessionFileInternal(
+  raw: string,
+  sessionPath: string,
+  expectedConversationId: string | undefined,
+  includeEntries: boolean,
+): PiSessionFileInspection | PiSessionFilePresentationInspection {
   if (raw.trim().length === 0) {
     throw new Error(`Session file is empty: ${sessionPath}`);
   }
@@ -471,8 +498,8 @@ export function inspectPiSessionFile(
 
   let reserved;
   try {
-    for (const value of values.slice(1)) {
-      const entry = parseReservedConversationEntry(value);
+    for (let index = 1; index < values.length; index += 1) {
+      const entry = parseReservedConversationEntry(values[index]);
       if (
         entry?.kind === "conversation_card"
         && entry.entry.data.fromSnapshot.conversationId !== header.id
@@ -498,7 +525,9 @@ export function inspectPiSessionFile(
         );
       }
     }
-    reserved = aggregateReservedConversationEntries(values.slice(1));
+    // The session header is not a reserved custom entry, so passing the owned
+    // parsed array avoids allocating an entries copy on metadata-only reads.
+    reserved = aggregateReservedConversationEntries(values);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(
@@ -516,10 +545,66 @@ export function inspectPiSessionFile(
     }
   }
 
-  return {
+  const inspection: PiSessionFileInspection = {
     conversationId: header.id,
     ...reserved,
     lastActivityAt,
+  };
+  if (!includeEntries) return inspection;
+  return {
+    ...inspection,
+    entries: values.slice(1) as ReadonlySessionEntry[],
+  };
+}
+
+export function inspectPiSessionFile(
+  raw: string,
+  sessionPath: string,
+  expectedConversationId?: string,
+): PiSessionFileInspection {
+  return inspectPiSessionFileInternal(
+    raw,
+    sessionPath,
+    expectedConversationId,
+    false,
+  );
+}
+
+export function inspectPiSessionFilePresentation(
+  raw: string,
+  sessionPath: string,
+  expectedConversationId?: string,
+): PiSessionFilePresentationInspection {
+  return inspectPiSessionFileInternal(
+    raw,
+    sessionPath,
+    expectedConversationId,
+    true,
+  );
+}
+
+/**
+ * Adapts validated physical entries to the read methods used by the canonical
+ * history projector. The active branch follows the final physical leaf through
+ * parentId links; no writable SessionManager is created.
+ */
+export function createReadonlySessionEntriesAdapter(
+  sourceEntries: readonly ReadonlySessionEntry[],
+): ReadonlySessionEntriesAdapter {
+  const entries = [...sourceEntries];
+  const entriesById = new Map(entries.map((entry) => [entry.id, entry]));
+  const reverseBranch: ReadonlySessionEntry[] = [];
+  let entry = entries.at(-1);
+  while (entry !== undefined) {
+    reverseBranch.push(entry);
+    entry = entry.parentId === null
+      ? undefined
+      : entriesById.get(entry.parentId);
+  }
+  const branch = reverseBranch.reverse();
+  return {
+    getEntries: () => [...entries],
+    getBranch: () => [...branch],
   };
 }
 
@@ -528,9 +613,10 @@ export function validatePiSessionFile(
   sessionPath: string,
   expectedConversationId?: string,
 ): string {
-  return inspectPiSessionFile(
+  return inspectPiSessionFileInternal(
     raw,
     sessionPath,
     expectedConversationId,
+    false,
   ).conversationId;
 }

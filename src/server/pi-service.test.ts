@@ -154,6 +154,8 @@ class FakeRuntime implements PiRuntimeLike {
 
   readonly createCalls: string[] = [];
   readonly created: FakeSession[] = [];
+  projectCatalogCreations = 0;
+  beforeCreateProjectModelCatalog?: () => Promise<void>;
   sessionModelRegistry?: ModelRegistry;
   projectModelRegistry?: ModelRegistry;
   lastCreateOptions?: CreatePiSessionOptions;
@@ -172,6 +174,8 @@ class FakeRuntime implements PiRuntimeLike {
   private readonly credentialRevisions = new Map<string, number>();
 
   async createProjectModelCatalog() {
+    this.projectCatalogCreations++;
+    await this.beforeCreateProjectModelCatalog?.();
     return {
       modelRuntime: this.modelRuntime,
       modelRegistry: this.projectModelRegistry ?? this.modelRegistry,
@@ -373,6 +377,40 @@ async function coordinatedConnectionHarness() {
     connection,
     cleanup,
   };
+}
+
+type CoordinatedHarness = Awaited<
+  ReturnType<typeof coordinatedConnectionHarness>
+>;
+
+async function createColdConversation(
+  harness: CoordinatedHarness,
+  text: string,
+): Promise<string> {
+  const handle = await harness.coordinator.acquireProject(
+    harness.cwd,
+    "read_only",
+  );
+  try {
+    const conversationId = randomUUID();
+    const manager = await handle.project.createConversation(
+      conversationId,
+      {
+        role: harness.roles.getConversationRole("default"),
+        lifecycle: { kind: "normal" },
+        createdBy: { kind: "user" },
+      },
+      { updateRecent: false },
+    );
+    manager.appendMessage(agentMessage({
+      role: "user",
+      content: text,
+      timestamp: 1,
+    }));
+    return conversationId;
+  } finally {
+    handle.release();
+  }
 }
 
 describe("PiConnection lifecycle", () => {
@@ -2883,6 +2921,340 @@ describe("PiConnection lifecycle", () => {
 });
 
 describe("PiConnection coordinated project view", () => {
+  it.each(["open", "recent"] as const)(
+    "emits a cold %s preview before model catalog and AgentSession readiness",
+    async (kind) => {
+      const harness = await coordinatedConnectionHarness();
+      const catalogStarted = deferred();
+      const releaseCatalog = deferred();
+      try {
+        const conversationId = await createColdConversation(
+          harness,
+          `cold ${kind} history`,
+        );
+        const canPublish = vi.spyOn(
+          harness.coordinator,
+          "canPublishConversationPresentation",
+        );
+        let previewExistedAtCatalogStart = false;
+        harness.runtime.beforeCreateProjectModelCatalog = async () => {
+          previewExistedAtCatalogStart = harness.events.some(
+            (event) => event.type === "conversation_preview",
+          );
+          catalogStarted.resolve();
+          await releaseCatalog.promise;
+        };
+        const commandId = randomUUID();
+        const initializing = harness.connection.handle({
+          type: "initialize",
+          commandId,
+          sessionId: SESSION_A,
+          cwd: harness.cwd,
+          conversation: kind === "open"
+            ? { kind: "open", conversationId }
+            : { kind: "recent" },
+        });
+
+        await catalogStarted.promise;
+        expect(previewExistedAtCatalogStart).toBe(true);
+        expect(canPublish).toHaveBeenCalledWith(
+          expect.anything(),
+          conversationId,
+        );
+        expect(harness.runtime.createCalls).toEqual([]);
+        expect(harness.events).toContainEqual(expect.objectContaining({
+          type: "conversation_preview",
+          sessionId: SESSION_A,
+          commandId,
+          conversationId,
+          cwd: harness.cwd,
+          toolMode: "read_only",
+          role: expect.objectContaining({ id: "default" }),
+          items: [expect.objectContaining({
+            kind: "message",
+            role: "user",
+            text: `cold ${kind} history`,
+          })],
+        }));
+
+        releaseCatalog.resolve();
+        await initializing;
+        const previewIndex = harness.events.findIndex(
+          (event) => event.type === "conversation_preview"
+            && event.commandId === commandId,
+        );
+        const attachedIndex = harness.events.findIndex(
+          (event) => event.type === "focus_attached"
+            && event.commandId === commandId,
+        );
+        const snapshotIndex = harness.events.findIndex(
+          (event) => event.type === "conversation_snapshot"
+            && event.conversationId === conversationId,
+        );
+        expect(previewIndex).toBeGreaterThanOrEqual(0);
+        expect(attachedIndex).toBeGreaterThan(previewIndex);
+        expect(snapshotIndex).toBeGreaterThan(attachedIndex);
+      } finally {
+        releaseCatalog.resolve();
+        await harness.cleanup();
+      }
+    },
+  );
+
+  it("continues cold initialization when optional preview projection fails", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      const conversationId = await createColdConversation(
+        harness,
+        "history remains authoritative",
+      );
+      const handle = await harness.coordinator.acquireProject(
+        harness.cwd,
+        "read_only",
+      );
+      const inspected = await handle.project.inspectConversationPresentation(
+        conversationId,
+      );
+      const brokenEntry = new Proxy(inspected.entries[0]!, {
+        get(target, property, receiver) {
+          if (property === "type") throw new Error("preview projection failed");
+          return Reflect.get(target, property, receiver);
+        },
+      });
+      vi.spyOn(handle.project, "inspectConversationPresentation")
+        .mockResolvedValueOnce({ ...inspected, entries: [brokenEntry] });
+      handle.release();
+      const commandId = randomUUID();
+
+      await harness.connection.handle({
+        type: "initialize",
+        commandId,
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "open", conversationId },
+      });
+
+      expect(harness.events).not.toContainEqual(expect.objectContaining({
+        type: "conversation_preview",
+        commandId,
+      }));
+      expect(harness.runtime.projectCatalogCreations).toBe(1);
+      expect(harness.runtime.createCalls).toEqual([harness.cwd]);
+      expect(harness.events).toContainEqual(expect.objectContaining({
+        type: "focus_attached",
+        commandId,
+        conversationId,
+      }));
+      expect(harness.events).toContainEqual(expect.objectContaining({
+        type: "conversation_snapshot",
+        conversationId,
+      }));
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("suppresses a focus preview when an actor opening starts after preparation", async () => {
+    const harness = await coordinatedConnectionHarness();
+    let racingOpen: Promise<unknown> | undefined;
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      const conversationId = await createColdConversation(
+        harness,
+        "racing actor history",
+      );
+      const prepare = harness.coordinator.prepareConversationPresentation
+        .bind(harness.coordinator);
+      vi.spyOn(harness.coordinator, "prepareConversationPresentation")
+        .mockImplementationOnce(async (handle, id, signal) => {
+          const presentation = await prepare(handle, id, signal);
+          racingOpen = harness.coordinator.openConversation(handle, id, {
+            updateRecent: false,
+          });
+          return presentation;
+        });
+      const commandId = randomUUID();
+
+      await harness.connection.handle({
+        type: "focus_conversation",
+        commandId,
+        sessionId: SESSION_A,
+        conversationId,
+      });
+      await racingOpen;
+
+      expect(harness.events).not.toContainEqual(expect.objectContaining({
+        type: "conversation_preview",
+        commandId,
+      }));
+      expect(harness.events).toContainEqual(expect.objectContaining({
+        type: "focus_attached",
+        commandId,
+        conversationId,
+      }));
+      expect(harness.events).toContainEqual(expect.objectContaining({
+        type: "conversation_snapshot",
+        conversationId,
+      }));
+    } finally {
+      await racingOpen?.catch(() => undefined);
+      await harness.cleanup();
+    }
+  });
+
+  it("previews cold focus before extension attach and actor open, but skips warm disk preview", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const actorCreateStarted = deferred();
+    const releaseActorCreate = deferred();
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      const conversationId = await createColdConversation(
+        harness,
+        "cold focused history",
+      );
+      const attachExtensionUI = vi.spyOn(
+        harness.coordinator,
+        "attachExtensionUI",
+      );
+      const originalCreate = harness.runtime.create;
+      harness.runtime.create = async (cwd) => {
+        actorCreateStarted.resolve();
+        await releaseActorCreate.promise;
+        return originalCreate(cwd);
+      };
+      const commandId = randomUUID();
+      const focusing = harness.connection.handle({
+        type: "focus_conversation",
+        commandId,
+        sessionId: SESSION_A,
+        conversationId,
+      });
+
+      await actorCreateStarted.promise;
+      expect(harness.events).toContainEqual(expect.objectContaining({
+        type: "conversation_preview",
+        commandId,
+        conversationId,
+      }));
+      expect(attachExtensionUI).toHaveBeenCalledTimes(1);
+      releaseActorCreate.resolve();
+      await focusing;
+
+      const previewIndex = harness.events.findIndex(
+        (event) => event.type === "conversation_preview"
+          && event.commandId === commandId,
+      );
+      const attachedIndex = harness.events.findIndex(
+        (event) => event.type === "focus_attached"
+          && event.commandId === commandId,
+      );
+      const snapshotIndex = harness.events.findIndex(
+        (event, index) => index > attachedIndex
+          && event.type === "conversation_snapshot"
+          && event.conversationId === conversationId,
+      );
+      expect(attachedIndex).toBeGreaterThan(previewIndex);
+      expect(snapshotIndex).toBeGreaterThan(attachedIndex);
+
+      const handle = await harness.coordinator.acquireProject(
+        harness.cwd,
+        "read_only",
+      );
+      const inspect = vi.spyOn(
+        handle.project,
+        "inspectConversationPresentation",
+      );
+      handle.release();
+      harness.events.splice(0);
+      const warmCommandId = randomUUID();
+      await harness.connection.handle({
+        type: "focus_conversation",
+        commandId: warmCommandId,
+        sessionId: SESSION_A,
+        conversationId,
+      });
+      expect(inspect).not.toHaveBeenCalled();
+      expect(harness.events).not.toContainEqual(expect.objectContaining({
+        type: "conversation_preview",
+        commandId: warmCommandId,
+      }));
+    } finally {
+      releaseActorCreate.resolve();
+      await harness.cleanup();
+    }
+  });
+
+  it("does not emit a preview from an aborted stale focus command", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const inspectionStarted = deferred();
+    const releaseInspection = deferred();
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      const firstId = await createColdConversation(harness, "first cold");
+      const secondId = await createColdConversation(harness, "second cold");
+      const prepare = harness.coordinator.prepareConversationPresentation
+        .bind(harness.coordinator);
+      vi.spyOn(harness.coordinator, "prepareConversationPresentation")
+        .mockImplementationOnce(async (...args) => {
+          inspectionStarted.resolve();
+          await releaseInspection.promise;
+          return prepare(...args);
+        });
+      const staleCommandId = randomUUID();
+      const stale = harness.connection.handle({
+        type: "focus_conversation",
+        commandId: staleCommandId,
+        sessionId: SESSION_A,
+        conversationId: firstId,
+      });
+      await inspectionStarted.promise;
+      const currentCommandId = randomUUID();
+      const current = harness.connection.handle({
+        type: "focus_conversation",
+        commandId: currentCommandId,
+        sessionId: SESSION_A,
+        conversationId: secondId,
+      });
+      releaseInspection.resolve();
+      await Promise.all([stale, current]);
+
+      expect(harness.events).not.toContainEqual(expect.objectContaining({
+        type: "conversation_preview",
+        commandId: staleCommandId,
+      }));
+      expect(harness.events).not.toContainEqual(expect.objectContaining({
+        type: "focus_attached",
+        commandId: staleCommandId,
+      }));
+      expect(harness.events).toContainEqual(expect.objectContaining({
+        type: "focus_attached",
+        commandId: currentCommandId,
+        conversationId: secondId,
+      }));
+    } finally {
+      releaseInspection.resolve();
+      await harness.cleanup();
+    }
+  });
+
   it("acknowledges and deduplicates a coordinated model refresh", async () => {
     const harness = await coordinatedConnectionHarness();
     try {

@@ -37,8 +37,10 @@ import {
 import { deleteConversationNotebook } from "./conversation-notebook.js";
 import {
   inspectPiSessionFile,
+  inspectPiSessionFilePresentation,
   validatePiSessionFile,
   type PiSessionFileInspection,
+  type PiSessionFilePresentationInspection,
 } from "./session-file.js";
 
 const MANIFEST_VERSION = 1;
@@ -827,6 +829,23 @@ export class ProjectStore {
   ): Promise<PiSessionFileInspection> {
     const inspections = await this.inspectConversations([conversationId]);
     return inspections.get(conversationId)!;
+  }
+
+  /**
+   * Opt-in transcript read for one cold presentation target. Metadata callers
+   * use inspectConversation(s) and never retain physical session entries.
+   */
+  async inspectConversationPresentation(
+    conversationId: string,
+  ): Promise<PiSessionFilePresentationInspection> {
+    assertSessionId(conversationId, "conversationId");
+    const batch = await this.readVerifiedSessionFileBatch([conversationId]);
+    const target = batch.targets.get(conversationId)!;
+    return inspectPiSessionFilePresentation(
+      target.raw,
+      target.path,
+      conversationId,
+    );
   }
 
   async inspectConversations(

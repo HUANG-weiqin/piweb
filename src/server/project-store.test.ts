@@ -254,6 +254,30 @@ describe("ProjectStore", () => {
     expect(reopened.getCwd()).toBe(store.cwd);
   });
 
+  it("validates metadata and normally opens deeply nested custom entry data", async () => {
+    const cwd = await createTemporaryDirectory("piweb-deep-session-entry-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversation = await store.createConversation();
+    const sessionFile = conversation.getSessionFile()!;
+    const depth = 2_500;
+    const nested = `${'{"next":'.repeat(depth)}null${"}".repeat(depth)}`;
+    await writeFile(sessionFile, [
+      JSON.stringify(conversation.getHeader()),
+      `{"type":"custom","id":"00000001","parentId":null,"timestamp":"2026-01-01T00:00:00.000Z","customType":"extension-state","data":${nested}}`,
+      "",
+    ].join("\n"));
+
+    const metadata = await store.inspectConversation(
+      conversation.getSessionId(),
+    );
+    expect(metadata).not.toHaveProperty("entries");
+    const reopened = await store.openConversation(
+      conversation.getSessionId(),
+      { updateRecent: false },
+    );
+    expect(reopened.getEntries()).toHaveLength(1);
+  });
+
   it("does not strand a conversation file when the initial SDK open fails", async () => {
     const cwd = await createTemporaryDirectory("piweb-create-open-failure-");
     const store = await ProjectStore.open(cwd, "full_access");
@@ -801,6 +825,9 @@ describe("ProjectStore", () => {
     );
 
     expect(inspections.size).toBe(3);
+    for (const inspection of inspections.values()) {
+      expect(inspection).not.toHaveProperty("entries");
+    }
     expect(listAll).toHaveBeenCalledTimes(1);
     expect(listSafeSessionFiles).toHaveBeenCalledTimes(3);
   });

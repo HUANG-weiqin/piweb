@@ -21,7 +21,9 @@ import type {
   PendingPromptDeliveryEntry,
 } from "./conversation-meta.js";
 import {
+  createReadonlySessionEntriesAdapter,
   inspectPiSessionFile,
+  inspectPiSessionFilePresentation,
   validatePiSessionFile,
 } from "./session-file.js";
 
@@ -203,11 +205,116 @@ describe("validatePiSessionFile", () => {
       },
     ]);
 
+    const inspection = inspectPiSessionFile(
+      legacy,
+      "legacy.jsonl",
+      conversationId,
+    );
+    expect(inspection).not.toHaveProperty("entries");
+    const presentation = inspectPiSessionFilePresentation(
+      legacy,
+      "legacy.jsonl",
+      conversationId,
+    );
+    expect(presentation.entries).toHaveLength(2);
+    expect(presentation.entries.every(({ id }) => id.length > 0)).toBe(true);
+    expect(presentation.entries[0]).toMatchObject({
+      type: "message",
+      parentId: null,
+    });
+    expect(presentation.entries[1]).toMatchObject({
+      type: "session_info",
+      parentId: presentation.entries[0]!.id,
+    });
     expect(validatePiSessionFile(
       legacy,
       "legacy.jsonl",
       conversationId,
     )).toBe(conversationId);
+  });
+
+  it("returns shallow readonly arrays and follows the final leaf active branch", () => {
+    const conversationId = randomUUID();
+    const session = serialize([
+      {
+        type: "session",
+        version: 3,
+        id: conversationId,
+        timestamp,
+        cwd: "E:\\work",
+      },
+      {
+        type: "message",
+        id: "00000001",
+        parentId: null,
+        timestamp,
+        message: { role: "user", content: "root", timestamp: 1 },
+      },
+      {
+        type: "message",
+        id: "00000002",
+        parentId: "00000001",
+        timestamp,
+        message: { role: "user", content: "inactive", timestamp: 2 },
+      },
+      {
+        type: "message",
+        id: "00000003",
+        parentId: "00000001",
+        timestamp,
+        message: { role: "user", content: "active", timestamp: 3 },
+      },
+      {
+        type: "session_info",
+        id: "00000004",
+        parentId: "00000003",
+        timestamp,
+        name: "Current leaf",
+      },
+    ]);
+    const inspection = inspectPiSessionFilePresentation(
+      session,
+      "branch.jsonl",
+    );
+    const adapter = createReadonlySessionEntriesAdapter(inspection.entries);
+
+    expect(adapter.getBranch().map(({ id }) => id)).toEqual([
+      "00000001",
+      "00000003",
+      "00000004",
+    ]);
+    const returned = adapter.getEntries();
+    expect(returned).not.toBe(adapter.getEntries());
+    expect(returned[0]).toBe(inspection.entries[0]);
+    expect(adapter.getBranch()[0]).toBe(inspection.entries[0]);
+  });
+
+  it("does not recursively copy deeply nested entries during validation or opt-in presentation", () => {
+    const conversationId = randomUUID();
+    const depth = 2_500;
+    const nested = `${'{"next":'.repeat(depth)}null${"}".repeat(depth)}`;
+    const raw = [
+      JSON.stringify({
+        type: "session",
+        version: 3,
+        id: conversationId,
+        timestamp,
+        cwd: "E:\\work",
+      }),
+      `{"type":"custom","id":"00000001","parentId":null,"timestamp":"${timestamp}","customType":"extension-state","data":${nested}}`,
+      "",
+    ].join("\n");
+
+    expect(validatePiSessionFile(raw, "deep.jsonl", conversationId)).toBe(
+      conversationId,
+    );
+    expect(inspectPiSessionFile(raw, "deep.jsonl", conversationId))
+      .not.toHaveProperty("entries");
+    expect(inspectPiSessionFilePresentation(
+      raw,
+      "deep.jsonl",
+      conversationId,
+    ).entries).toHaveLength(1);
   });
 
   it("rejects negative compaction token counts before history projection", () => {

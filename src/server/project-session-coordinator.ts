@@ -4,7 +4,10 @@ import { join } from "node:path";
 import {
   MAX_PROJECT_ACTIVITY_SUMMARIES,
   MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
+  type ConversationHistoryItem,
+  type ConversationRoleSnapshot,
   type ConversationSummary,
+  type ConversationWindowCoverage,
   type ProjectActivitySummary,
   type ToolMode,
 } from "../shared/protocol.js";
@@ -36,7 +39,9 @@ import {
 } from "./conversation-actor.js";
 import {
   projectAgentConversationPeek,
+  projectConversationItemSlots,
   projectConversationItemsSnapshot,
+  snapshotConversationItems,
 } from "./conversation-history.js";
 import { createGitTools } from "./git-inspect.js";
 
@@ -88,7 +93,10 @@ import {
   type ProjectStore,
   type ProjectStoreHandle,
 } from "./project-store.js";
-import { conversationDisplayTitle } from "./project-snapshot.js";
+import {
+  conversationDisplayTitle,
+  projectConversationPeers,
+} from "./project-snapshot.js";
 import { ProjectRunCoordinator } from "./project-run-coordinator.js";
 import {
   RoleCatalog,
@@ -99,6 +107,7 @@ import {
   RoleUpdateConflictError,
 } from "./role-store.js";
 import { SerialTaskQueue } from "./serial-task-queue.js";
+import { createReadonlySessionEntriesAdapter } from "./session-file.js";
 import {
   defaultToolPolicy,
   type ToolPolicy,
@@ -235,6 +244,14 @@ export class ProjectSessionHandle {
     this.released = true;
     this.context.references = Math.max(0, this.context.references - 1);
   }
+}
+
+export interface ConversationPresentation {
+  cwd: string;
+  toolMode: ToolMode;
+  role?: ConversationRoleSnapshot;
+  items: ConversationHistoryItem[];
+  window: ConversationWindowCoverage;
 }
 
 export interface CreateUserConversationInput {
@@ -970,6 +987,79 @@ export class ProjectSessionCoordinator {
         attention: context.attention.has(summary.id),
       };
     });
+  }
+
+  async prepareConversationPresentation(
+    handle: ProjectSessionHandle,
+    conversationId: string,
+    signal?: AbortSignal,
+  ): Promise<ConversationPresentation | undefined> {
+    const context = this.requireContext(handle);
+    this.throwIfAborted(signal);
+    if (context.deleting.has(conversationId)) {
+      throw new Error(`Conversation is being deleted: ${conversationId}`);
+    }
+    if (
+      context.actors.has(conversationId)
+      || context.actorOpenings.has(conversationId)
+    ) {
+      return undefined;
+    }
+
+    const inspection = await context.project.inspectConversationPresentation(
+      conversationId,
+    );
+    this.throwIfAborted(signal);
+    this.requireContext(handle);
+    if (context.deleting.has(conversationId)) {
+      throw new Error(`Conversation is being deleted: ${conversationId}`);
+    }
+    if (
+      context.actors.has(conversationId)
+      || context.actorOpenings.has(conversationId)
+    ) {
+      return undefined;
+    }
+
+    try {
+      const adapter = createReadonlySessionEntriesAdapter(inspection.entries);
+      const durableItems = projectConversationItemSlots(adapter)
+        .map(({ item }) => item);
+      const snapshot = snapshotConversationItems(projectConversationPeers(
+        durableItems,
+        context.project.listConversations(),
+      ));
+      return {
+        cwd: context.project.cwd,
+        toolMode: inspection.conversationMeta?.role.toolMode ?? "read_only",
+        ...(inspection.conversationMeta === undefined
+          ? {}
+          : { role: inspection.conversationMeta.role }),
+        items: snapshot.items,
+        window: snapshot.window,
+      };
+    } catch {
+      // Preview is a best-effort display optimization after the exact file has
+      // passed its integrity proof. Actor activation remains authoritative.
+      return undefined;
+    }
+  }
+
+  canPublishConversationPresentation(
+    handle: ProjectSessionHandle,
+    conversationId: string,
+  ): boolean {
+    let context: ProjectContext;
+    try {
+      context = this.requireContext(handle);
+    } catch {
+      return false;
+    }
+    return (
+      !context.deleting.has(conversationId)
+      && !context.actors.has(conversationId)
+      && !context.actorOpenings.has(conversationId)
+    );
   }
 
   async openConversation(

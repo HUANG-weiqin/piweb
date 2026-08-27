@@ -26,7 +26,7 @@ const messageId = "assistant:96b960be-b6bb-4a19-9cf2-78e77cb69425";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(32);
+    expect(PROTOCOL_VERSION).toBe(33);
   });
 
   it("accepts supported commands", () => {
@@ -1127,6 +1127,50 @@ describe("parseClientCommand", () => {
 });
 
 describe("parseServerEvent", () => {
+  it("strictly parses a correlated read-only conversation preview", () => {
+    const preview = {
+      type: "conversation_preview" as const,
+      sessionId,
+      commandId,
+      projectId,
+      conversationId,
+      cwd: "E:\\work",
+      toolMode: "read_only" as const,
+      role: {
+        id: roleId,
+        revision: 1,
+        name: "Reviewer",
+        description: "Reviews code",
+        systemPrompt: "Review carefully.",
+        model: { provider: "test", id: "model" },
+        defaultThinkingLevel: "off" as const,
+        toolMode: "read_only" as const,
+        canManageSessions: false,
+      },
+      items: [],
+      window: {
+        omittedBefore: false,
+        startsMidTurn: false,
+        contentTruncated: false,
+      },
+    };
+
+    expect(parseServerEvent(preview)).toEqual(preview);
+    expect(() => parseServerEvent({ ...preview, commandId: undefined }))
+      .toThrow();
+    expect(() => parseServerEvent({ ...preview, focusId })).toThrow(
+      "Unrecognized key",
+    );
+    expect(() => parseServerEvent({
+      ...preview,
+      window: {
+        omittedBefore: false,
+        startsMidTurn: true,
+        contentTruncated: false,
+      },
+    })).toThrow("startsMidTurn requires omittedBefore");
+  });
+
   it.each([
     { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
     { omittedBefore: true, startsMidTurn: false, contentTruncated: false },

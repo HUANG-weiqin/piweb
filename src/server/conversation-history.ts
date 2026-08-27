@@ -1,4 +1,4 @@
-import type { SessionManager } from "@earendil-works/pi-coding-agent";
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type {
   ConversationHistoryItem,
   ConversationHistoryMessage,
@@ -27,6 +27,15 @@ const MAX_HISTORY_TOOLS_PER_MESSAGE = 16;
 const MAX_HISTORY_PARTS_PER_MESSAGE = 16;
 const MAX_HISTORY_ID_BYTES = 500;
 const OMITTED_TOOL_VALUE = "[历史工具数据过大，已省略]";
+
+export interface ReadonlySessionBranchSource {
+  getBranch(): readonly Readonly<SessionEntry>[];
+}
+
+export interface ReadonlySessionEntriesSource
+  extends ReadonlySessionBranchSource {
+  getEntries(): readonly Readonly<SessionEntry>[];
+}
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object"
@@ -247,7 +256,7 @@ function finalizeHistoryMessage(
  * the original assistant text/thinking/tool order without duplicating strings.
  */
 function projectConversationHistorySlots(
-  sessionManager: Pick<SessionManager, "getBranch">,
+  sessionManager: ReadonlySessionBranchSource,
 ): ConversationHistoryMessageSlot[] {
   const branch = sessionManager.getBranch();
   const messages: ConversationHistoryMessageSlot[] = [];
@@ -429,7 +438,7 @@ function projectConversationHistorySlots(
 }
 
 export function projectConversationHistory(
-  sessionManager: Pick<SessionManager, "getBranch">,
+  sessionManager: ReadonlySessionBranchSource,
 ): ConversationHistoryMessage[] {
   return projectConversationHistorySlots(sessionManager)
     .map((slot) => slot.message);
@@ -489,7 +498,7 @@ function projectIncomingCard(
  * state and delivery identity remain durable even when Pi changes branches.
  */
 export function projectConversationItemSlots(
-  sessionManager: Pick<SessionManager, "getBranch" | "getEntries">,
+  sessionManager: ReadonlySessionEntriesSource,
 ): ConversationHistoryItemSlot[] {
   const physicalEntries = sessionManager.getEntries();
   const physicalIndexById = new Map(
@@ -598,7 +607,7 @@ export function projectConversationItemSlots(
 }
 
 export function projectConversationItems(
-  sessionManager: Pick<SessionManager, "getBranch" | "getEntries">,
+  sessionManager: ReadonlySessionEntriesSource,
 ): ConversationHistoryItem[] {
   return projectConversationItemSlots(sessionManager).map((slot) => slot.item);
 }
@@ -703,7 +712,7 @@ function fitAgentPeekItem(
  * omits thinking, tool/auth payloads, usage, and host-only reserved records.
  */
 export function projectAgentConversationPeek(
-  sessionManager: Pick<SessionManager, "getBranch" | "getEntries">,
+  sessionManager: ReadonlySessionEntriesSource,
   requestedLimit = MAX_AGENT_PEEK_ITEMS,
 ): {
   items: AgentConversationPeekItem[];
@@ -929,7 +938,7 @@ export function snapshotConversationItems(
  * projection for callers that have not adopted cards yet.
  */
 export function projectConversationItemsSnapshot(
-  sessionManager: Pick<SessionManager, "getBranch" | "getEntries">,
+  sessionManager: ReadonlySessionEntriesSource,
 ): {
   messages: ConversationHistoryMessage[];
   items: ConversationHistoryItem[];
@@ -943,7 +952,7 @@ export function projectConversationItemsSnapshot(
  * file; the browser projection is deliberately capped until pagination lands.
  */
 export function projectConversationHistorySnapshot(
-  sessionManager: Pick<SessionManager, "getBranch">,
+  sessionManager: ReadonlySessionBranchSource,
 ): { messages: ConversationHistoryMessage[]; window: ConversationWindowCoverage } {
   const snapshot = snapshotConversationItems(
     projectConversationHistory(sessionManager).map((message) => ({

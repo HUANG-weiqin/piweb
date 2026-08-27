@@ -688,6 +688,204 @@ function deterministicTestUuid(namespace: string, value: string): string {
 }
 
 describe("ProjectSessionCoordinator", () => {
+  it("prepares bounded cold history and role without executable resources", async () => {
+    const fixture = await createFixture();
+    const conversationId = randomUUID();
+    const manager = await fixture.handle.project.createConversation(
+      conversationId,
+      defaultProfile(fixture.roles),
+      { updateRecent: false },
+    );
+    for (let index = 0; index < 12; index += 1) {
+      manager.appendMessage(agentMessage({
+        role: "user",
+        content: `${index}:${"x".repeat(80_000)}`,
+        timestamp: index,
+      }));
+    }
+    const acquireWriter = vi.spyOn(
+      fixture.registry,
+      "acquireConversationWhenAvailable",
+    );
+
+    const presentation = await fixture.coordinator
+      .prepareConversationPresentation(fixture.handle, conversationId);
+
+    expect(presentation).toMatchObject({
+      cwd: fixture.cwd,
+      toolMode: "full_access",
+      role: expect.objectContaining({
+        id: "default",
+        toolMode: "full_access",
+      }),
+      window: {
+        omittedBefore: true,
+        startsMidTurn: false,
+        contentTruncated: true,
+      },
+    });
+    expect(presentation?.items.at(-1)).toMatchObject({
+      kind: "message",
+      role: "user",
+      text: expect.stringMatching(/^11:/),
+    });
+    expect(acquireWriter).not.toHaveBeenCalled();
+    expect(fixture.runtime.createConversationIds).toEqual([]);
+    expect(fixture.runtime.projectCatalogCreations).toBe(0);
+  });
+
+  it("skips disk presentation for warm/opening actors and aborts stale reads", async () => {
+    const fixture = await createFixture();
+    const warm = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const inspect = vi.spyOn(
+      fixture.handle.project,
+      "inspectConversationPresentation",
+    );
+
+    await expect(fixture.coordinator.prepareConversationPresentation(
+      fixture.handle,
+      warm.conversationId,
+    )).resolves.toBeUndefined();
+    expect(inspect).not.toHaveBeenCalled();
+
+    const openingId = randomUUID();
+    await fixture.handle.project.createConversation(
+      openingId,
+      defaultProfile(fixture.roles),
+      { updateRecent: false },
+    );
+    const actorOpeningStarted = deferred();
+    const releaseActorOpening = deferred();
+    fixture.runtime.beforeCreateSession = async (conversationId) => {
+      if (conversationId !== openingId) return;
+      actorOpeningStarted.resolve();
+      await releaseActorOpening.promise;
+    };
+    const actorOpening = fixture.coordinator.openConversation(
+      fixture.handle,
+      openingId,
+      { updateRecent: false },
+    );
+    await actorOpeningStarted.promise;
+    await expect(fixture.coordinator.prepareConversationPresentation(
+      fixture.handle,
+      openingId,
+    )).resolves.toBeUndefined();
+    expect(inspect).not.toHaveBeenCalled();
+    releaseActorOpening.resolve();
+    await actorOpening;
+    fixture.runtime.beforeCreateSession = undefined;
+
+    const coldId = randomUUID();
+    await fixture.handle.project.createConversation(
+      coldId,
+      defaultProfile(fixture.roles),
+      { updateRecent: false },
+    );
+    const inspectionStarted = deferred();
+    const releaseInspection = deferred();
+    const inspectConversationPresentation = fixture.handle.project
+      .inspectConversationPresentation.bind(fixture.handle.project);
+    inspect.mockImplementationOnce(async (conversationId) => {
+      inspectionStarted.resolve();
+      await releaseInspection.promise;
+      return inspectConversationPresentation(conversationId);
+    });
+    const controller = new AbortController();
+    const preparing = fixture.coordinator.prepareConversationPresentation(
+      fixture.handle,
+      coldId,
+      controller.signal,
+    );
+    await inspectionStarted.promise;
+    controller.abort();
+    releaseInspection.resolve();
+
+    await expect(preparing).rejects.toMatchObject({ name: "AbortError" });
+    expect(fixture.runtime.createConversationIds).toEqual([
+      warm.conversationId,
+      openingId,
+    ]);
+  });
+
+  it("skips projection failures but propagates presentation integrity failures", async () => {
+    const fixture = await createFixture();
+    const conversationId = randomUUID();
+    await fixture.handle.project.createConversation(
+      conversationId,
+      defaultProfile(fixture.roles),
+      { updateRecent: false },
+    );
+    const inspected = await fixture.handle.project
+      .inspectConversationPresentation(conversationId);
+    const brokenEntry = new Proxy(inspected.entries[0]!, {
+      get(target, property, receiver) {
+        if (property === "type") throw new Error("projection failed");
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const inspect = vi.spyOn(
+      fixture.handle.project,
+      "inspectConversationPresentation",
+    );
+    inspect.mockResolvedValueOnce({
+      ...inspected,
+      entries: [brokenEntry],
+    });
+
+    await expect(fixture.coordinator.prepareConversationPresentation(
+      fixture.handle,
+      conversationId,
+    )).resolves.toBeUndefined();
+
+    inspect.mockRejectedValueOnce(new Error("integrity proof failed"));
+    await expect(fixture.coordinator.prepareConversationPresentation(
+      fixture.handle,
+      conversationId,
+    )).rejects.toThrow("integrity proof failed");
+  });
+
+  it("rechecks actor openings synchronously before publishing a prepared presentation", async () => {
+    const fixture = await createFixture();
+    const conversationId = randomUUID();
+    await fixture.handle.project.createConversation(
+      conversationId,
+      defaultProfile(fixture.roles),
+      { updateRecent: false },
+    );
+    await expect(fixture.coordinator.prepareConversationPresentation(
+      fixture.handle,
+      conversationId,
+    )).resolves.toBeDefined();
+    expect(fixture.coordinator.canPublishConversationPresentation(
+      fixture.handle,
+      conversationId,
+    )).toBe(true);
+
+    const openingStarted = deferred();
+    const releaseOpening = deferred();
+    fixture.runtime.beforeCreateSession = async (id) => {
+      if (id !== conversationId) return;
+      openingStarted.resolve();
+      await releaseOpening.promise;
+    };
+    const opening = fixture.coordinator.openConversation(
+      fixture.handle,
+      conversationId,
+      { updateRecent: false },
+    );
+    expect(fixture.coordinator.canPublishConversationPresentation(
+      fixture.handle,
+      conversationId,
+    )).toBe(false);
+    await openingStarted.promise;
+    releaseOpening.resolve();
+    await opening;
+  });
+
   it("starts focus recent writes immediately and orders a later awaited open behind them", async () => {
     const fixture = await createFixture();
     const first = await fixture.coordinator.createUserConversation(

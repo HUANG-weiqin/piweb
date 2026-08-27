@@ -18,11 +18,11 @@ export const MAX_PENDING_PROMPT_ATTENTION_REASON_CHARACTERS = 1_000;
 export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
+// v33: cold conversation navigation may emit a correlated read-only preview
+// before executable focus ownership is attached.
 // v32: project conversation titles share one 24-Unicode-character boundary
 // across browser commands, Agent tools, snapshots, and session-message cards.
-// v31: refresh_models 改为 sessionId + commandId 精确关联的联网刷新命令；
-// auth prompt 保留 secret 元数据，避免认证输入与刷新回执混用观察边界。
-export const PROTOCOL_VERSION = 32;
+export const PROTOCOL_VERSION = 33;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
@@ -704,6 +704,19 @@ export type ServerEvent =
       truncated: boolean;
     }
   | {
+      /** Correlated read-only display data; never executable focus authority. */
+      type: "conversation_preview";
+      sessionId: string;
+      commandId: string;
+      projectId: string;
+      conversationId: string;
+      cwd: string;
+      toolMode: ToolMode;
+      role?: ConversationRoleSnapshot;
+      items: ConversationHistoryItem[];
+      window: ConversationWindowCoverage;
+    }
+  | {
       /** 浏览器 prompt 已被服务端接受（busy 时进入 followUp 队列，尚未投递）。 */
       type: "prompt_admitted";
       sessionId: string;
@@ -1202,6 +1215,18 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     truncated: z.boolean(),
   }),
   z.object({
+    type: z.literal("conversation_preview"),
+    sessionId: sessionIdSchema,
+    commandId: commandIdSchema,
+    projectId: z.string().uuid(),
+    conversationId: conversationIdSchema,
+    cwd: required.max(4096),
+    toolMode: z.enum(["read_only", "full_access"]),
+    role: conversationRoleSnapshotSchema.optional(),
+    items: z.array(conversationHistoryItemSchema),
+    window: conversationWindowCoverageSchema,
+  }).strict(),
+  z.object({
     type: z.literal("prompt_admitted"),
     sessionId: sessionIdSchema,
     conversationId: conversationIdSchema,
@@ -1328,13 +1353,14 @@ export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.
       });
     }
     if (
-      event.type === "conversation_snapshot"
+      (event.type === "conversation_snapshot"
+        || event.type === "conversation_preview")
       && event.window.startsMidTurn
       && !event.window.omittedBefore
     ) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "conversation_snapshot window startsMidTurn requires omittedBefore",
+        message: `${event.type} window startsMidTurn requires omittedBefore`,
         path: ["window", "startsMidTurn"],
       });
     }
