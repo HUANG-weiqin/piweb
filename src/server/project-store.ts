@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import {
   link,
   lstat,
@@ -21,6 +22,7 @@ import {
   sep,
 } from "node:path";
 import {
+  CURRENT_SESSION_VERSION,
   SessionManager,
   type SessionInfo,
 } from "@earendil-works/pi-coding-agent";
@@ -48,6 +50,7 @@ const UUID_PATTERN =
 const SESSION_ID_PATTERN =
   /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 const DEFAULT_CONVERSATION_LEASE_TIMEOUT_MS = 5_000;
+const MAX_INTEGRITY_PROOF_ATTEMPTS = 8;
 
 interface ProjectManifestV1 {
   version: typeof MANIFEST_VERSION;
@@ -93,6 +96,43 @@ interface ProjectStoreRegistryEntry {
   references: number;
 }
 
+interface SessionFileFingerprint {
+  path: string;
+  pathKey: string;
+  dev: bigint;
+  ino: bigint;
+  size: bigint;
+  mtimeNs: bigint;
+  ctimeNs: bigint;
+}
+
+interface VerifiedSessionCatalog {
+  information: readonly Readonly<SessionInfo>[];
+  validatedIdsByPath: ReadonlyMap<string, string>;
+  files: readonly Readonly<SessionFileFingerprint>[];
+  fingerprintsByPath: ReadonlyMap<
+    string,
+    Readonly<SessionFileFingerprint>
+  >;
+}
+
+interface VerifiedSessionFileRead {
+  path: string;
+  raw: string;
+  fingerprint: SessionFileFingerprint;
+}
+
+interface VerifiedSessionReadBatch {
+  catalog: VerifiedSessionCatalog;
+  targets: ReadonlyMap<string, VerifiedSessionFileRead>;
+}
+
+interface QuarantinedSessionFile {
+  originalPath: string;
+  quarantinePath: string;
+  quarantineFingerprint: Readonly<SessionFileFingerprint>;
+}
+
 interface ConversationLeaseWaiter {
   token: symbol;
   resolve(lease: ConversationLease): void;
@@ -106,6 +146,20 @@ interface ConversationLeaseWaiter {
 interface ConversationLeaseState {
   owner: symbol;
   waiters: ConversationLeaseWaiter[];
+}
+
+class SessionDirectoryChangedError extends Error {
+  constructor(
+    message = "Project session directory changed while it was being scanned",
+  ) {
+    super(message);
+  }
+}
+
+class SessionFileChangedError extends Error {
+  constructor(conversationId: string) {
+    super(`Conversation changed while it was being read: ${conversationId}`);
+  }
 }
 
 function isNodeError(error: unknown, code: string): boolean {
@@ -286,6 +340,78 @@ function pathsAreIdentical(first: string, second: string): boolean {
   return pathIdentity(first) === pathIdentity(second);
 }
 
+function cloneSessionInformation(information: SessionInfo): SessionInfo {
+  return {
+    path: information.path,
+    id: information.id,
+    cwd: information.cwd,
+    ...(information.name === undefined ? {} : { name: information.name }),
+    ...(information.parentSessionPath === undefined
+      ? {}
+      : { parentSessionPath: information.parentSessionPath }),
+    created: new Date(information.created.getTime()),
+    modified: new Date(information.modified.getTime()),
+    messageCount: information.messageCount,
+    firstMessage: information.firstMessage,
+    allMessagesText: information.allMessagesText,
+  };
+}
+
+function fingerprintsEqual(
+  first: SessionFileFingerprint,
+  second: SessionFileFingerprint,
+): boolean {
+  return first.pathKey === second.pathKey
+    && first.dev === second.dev
+    && first.ino === second.ino
+    && first.size === second.size
+    && first.mtimeNs === second.mtimeNs
+    && first.ctimeNs === second.ctimeNs;
+}
+
+function fingerprintSetsEqual(
+  first: readonly Readonly<SessionFileFingerprint>[],
+  second: readonly Readonly<SessionFileFingerprint>[],
+): boolean {
+  if (first.length !== second.length) return false;
+  const secondByPath = new Map(second.map((item) => [item.pathKey, item]));
+  return first.every((item) => {
+    const other = secondByPath.get(item.pathKey);
+    return other !== undefined && fingerprintsEqual(item, other);
+  });
+}
+
+function indexFingerprintsByPath(
+  files: readonly Readonly<SessionFileFingerprint>[],
+): ReadonlyMap<string, Readonly<SessionFileFingerprint>> {
+  const indexed = new Map<
+    string,
+    Readonly<SessionFileFingerprint>
+  >();
+  for (const file of files) {
+    if (indexed.has(file.pathKey)) {
+      throw new Error(`Duplicate canonical session path: ${file.path}`);
+    }
+    indexed.set(file.pathKey, file);
+  }
+  if (indexed.size !== files.length) {
+    throw new Error("Session fingerprint index is incomplete");
+  }
+  return indexed;
+}
+
+function parseValidatedSessionValues(raw: string): unknown[] {
+  return raw
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as unknown);
+}
+
+function validatedSessionVersion(values: readonly unknown[]): number {
+  const header = values[0] as { version?: number };
+  return header.version ?? 1;
+}
+
 async function assertCanonicalOwnedDirectory(
   expectedPath: string,
   label: string,
@@ -378,6 +504,7 @@ export class ProjectStore {
   private readonly listeners = new Set<ProjectStoreListener>();
   private manifest: ProjectManifestV1;
   private conversations: ConversationSummary[] = [];
+  private verifiedCatalog?: VerifiedSessionCatalog;
   private writeTail: Promise<void> = Promise.resolve();
   private refreshTail: Promise<void> = Promise.resolve();
 
@@ -577,6 +704,7 @@ export class ProjectStore {
       pending.getSessionId(),
     );
     await createFileAtomically(sessionFile, initialContent);
+    this.verifiedCatalog = undefined;
     let conversation: SessionManager;
     try {
       conversation = SessionManager.open(
@@ -606,28 +734,84 @@ export class ProjectStore {
     conversationId: string,
     options: { updateRecent?: boolean } = {},
   ): Promise<SessionManager> {
-    const information = await this.listSafeSessionInformation();
-    const match = information.find(({ id }) => id === conversationId);
-    if (match === undefined) {
-      throw new Error(`Conversation not found: ${conversationId}`);
-    }
+    const batch = await this.readVerifiedSessionFileBatch([conversationId]);
+    const target = batch.targets.get(conversationId)!;
+    const preOpenValues = parseValidatedSessionValues(target.raw);
+    const preOpenVersion = validatedSessionVersion(preOpenValues);
 
-    const safePath = await this.resolveSafeSessionPath(match.path);
-    validatePiSessionFile(
-      await readFile(safePath, "utf8"),
-      safePath,
-      conversationId,
-    );
-    const conversation = SessionManager.open(
-      safePath,
-      this.sessionDir,
-      this.cwd,
-    );
+    let conversation: SessionManager;
+    try {
+      conversation = SessionManager.open(
+        target.path,
+        this.sessionDir,
+        this.cwd,
+      );
+    } catch (error) {
+      this.verifiedCatalog = undefined;
+      throw error;
+    }
     if (conversation.getSessionId() !== conversationId) {
+      this.verifiedCatalog = undefined;
       throw new Error(
         `Conversation identity changed while opening: ${conversationId}`,
       );
     }
+
+    let afterOpen: SessionFileFingerprint;
+    try {
+      afterOpen = await this.fingerprintSafeSessionPath(target.path);
+    } catch (error) {
+      this.verifiedCatalog = undefined;
+      throw error;
+    }
+    let expectedFilesAfterOpen: readonly Readonly<SessionFileFingerprint>[] =
+      batch.catalog.files;
+    if (!fingerprintsEqual(target.fingerprint, afterOpen)) {
+      this.verifiedCatalog = undefined;
+      if (
+        preOpenVersion >= CURRENT_SESSION_VERSION
+        || target.fingerprint.dev !== afterOpen.dev
+        || target.fingerprint.ino !== afterOpen.ino
+      ) {
+        throw new SessionFileChangedError(conversationId);
+      }
+
+      const postOpen = await this.readStableExpectedSessionFile(
+        afterOpen,
+        conversationId,
+      );
+      const postOpenValues = parseValidatedSessionValues(postOpen.raw);
+      const postOpenHeader = postOpenValues[0] as { version?: number };
+      if (postOpenHeader.version !== CURRENT_SESSION_VERSION) {
+        throw new Error(
+          `Conversation migration did not produce the current session version: ${conversationId}`,
+        );
+      }
+      if (
+        !isDeepStrictEqual(conversation.getHeader(), postOpenValues[0])
+        || !isDeepStrictEqual(conversation.getEntries(), postOpenValues.slice(1))
+      ) {
+        throw new Error(
+          `Conversation migration does not match the opened session: ${conversationId}`,
+        );
+      }
+      expectedFilesAfterOpen = batch.catalog.files.map((file) =>
+        file.pathKey === target.fingerprint.pathKey ? postOpen.fingerprint : file
+      );
+    }
+
+    try {
+      const filesAfterOpen = await this.listSafeSessionFiles();
+      if (!fingerprintSetsEqual(expectedFilesAfterOpen, filesAfterOpen)) {
+        throw new SessionDirectoryChangedError(
+          `Project session directory changed while conversation ${conversationId} was being opened`,
+        );
+      }
+    } catch (error) {
+      this.verifiedCatalog = undefined;
+      throw error;
+    }
+
     if (options.updateRecent !== false) {
       await this.setLastConversation(conversationId);
     }
@@ -652,22 +836,17 @@ export class ProjectStore {
     for (const conversationId of uniqueConversationIds) {
       assertSessionId(conversationId, "conversationId");
     }
-    const information = await this.listSafeSessionInformation();
-    const informationById = new Map(
-      information.map((item) => [item.id, item]),
+    const batch = await this.readVerifiedSessionFileBatch(
+      uniqueConversationIds,
     );
     const inspections = new Map<string, PiSessionFileInspection>();
     for (const conversationId of uniqueConversationIds) {
-      const match = informationById.get(conversationId);
-      if (match === undefined) {
-        throw new Error(`Conversation not found: ${conversationId}`);
-      }
-      const safePath = await this.resolveSafeSessionPath(match.path);
+      const target = batch.targets.get(conversationId)!;
       inspections.set(
         conversationId,
         inspectPiSessionFile(
-          await readFile(safePath, "utf8"),
-          safePath,
+          target.raw,
+          target.path,
           conversationId,
         ),
       );
@@ -678,26 +857,58 @@ export class ProjectStore {
   deleteConversation(conversationId: string): Promise<void> {
     assertSessionId(conversationId, "conversationId");
     return this.enqueueConversationOperation(async () => {
-      const information = await this.listSafeSessionInformation();
-      const match = information.find(({ id }) => id === conversationId);
-      const retained = toConversationSummaries(
-        information.filter(({ id }) => id !== conversationId),
+      const batch = await this.readVerifiedSessionFileBatch(
+        [conversationId],
+        { allowMissing: true },
       );
+      const target = batch.targets.get(conversationId);
+      let quarantined: QuarantinedSessionFile | undefined;
 
-      let safePath: string | undefined;
-      if (match !== undefined) {
-        safePath = await this.resolveSafeSessionPath(match.path);
-        validatePiSessionFile(
-          await readFile(safePath, "utf8"),
-          safePath,
-          conversationId,
+      try {
+        if (target !== undefined) {
+          quarantined = await this.quarantineSessionFile(
+            target,
+            conversationId,
+          );
+        }
+
+        // Quarantine changes the controlled JSONL set, so prove the remaining
+        // project before any unrelated durable side effect.
+        await this.getVerifiedSessionCatalog();
+        await deleteConversationNotebook(this.stateDir, conversationId);
+        await this.clearLastConversationIf(conversationId);
+
+        // Side effects may have yielded to writers. Revalidate all remaining
+        // JSONL files and derive the projection only from this latest proof.
+        const latestCatalog = await this.getVerifiedSessionCatalog();
+        if (quarantined !== undefined) {
+          await this.readStableExpectedSessionFile(
+            quarantined.quarantineFingerprint,
+            conversationId,
+          );
+        }
+        const retained = toConversationSummaries(
+          latestCatalog.information.map(cloneSessionInformation),
         );
-      }
 
-      await deleteConversationNotebook(this.stateDir, conversationId);
-      await this.clearLastConversationIf(conversationId);
-      if (safePath !== undefined) await unlink(safePath);
-      this.replaceConversations(retained);
+        if (quarantined !== undefined) {
+          await this.unlinkSessionFile(quarantined.quarantinePath);
+          quarantined = undefined;
+        }
+        this.replaceConversations(retained);
+      } catch (error) {
+        if (quarantined !== undefined) {
+          try {
+            await this.recoverQuarantinedSessionFile(quarantined);
+          } catch (recoveryError) {
+            throw new AggregateError(
+              [error, recoveryError],
+              `Conversation deletion failed and recovery could not be completed: ${conversationId}`,
+            );
+          }
+        }
+        throw error;
+      }
     });
   }
 
@@ -763,6 +974,7 @@ export class ProjectStore {
           );
         }
         await rename(temporaryPath, safePath);
+        this.verifiedCatalog = undefined;
       } finally {
         await unlink(temporaryPath).catch(() => undefined);
       }
@@ -831,39 +1043,77 @@ export class ProjectStore {
   }
 
   private async listSafeSessionInformation(): Promise<SessionInfo[]> {
-    const pathsBeforeScan = await this.listSafeSessionPaths();
-    const information = await SessionManager.listAll(this.sessionDir);
-    const pathsAfterScan = await this.listSafeSessionPaths();
-    const beforeIdentities = new Set(pathsBeforeScan.map(pathIdentity));
-    const afterIdentities = new Set(pathsAfterScan.map(pathIdentity));
-    if (
-      beforeIdentities.size !== afterIdentities.size
-      || [...beforeIdentities].some((path) => !afterIdentities.has(path))
-    ) {
-      throw new Error("Project session directory changed while it was being scanned");
-    }
+    const catalog = await this.getVerifiedSessionCatalog();
+    return catalog.information.map(cloneSessionInformation);
+  }
 
+  private async getVerifiedSessionCatalog(): Promise<VerifiedSessionCatalog> {
+    for (
+      let attempt = 0;
+      attempt < MAX_INTEGRITY_PROOF_ATTEMPTS;
+      attempt += 1
+    ) {
+      let currentFiles: SessionFileFingerprint[];
+      try {
+        currentFiles = await this.listSafeSessionFiles();
+      } catch (error) {
+        this.verifiedCatalog = undefined;
+        throw error;
+      }
+
+      const catalog = this.verifiedCatalog;
+      if (catalog && fingerprintSetsEqual(catalog.files, currentFiles)) {
+        return catalog;
+      }
+
+      this.verifiedCatalog = undefined;
+      try {
+        return await this.scanSafeSessionInformation(currentFiles);
+      } catch (error) {
+        if (
+          !(error instanceof SessionDirectoryChangedError)
+          || attempt === MAX_INTEGRITY_PROOF_ATTEMPTS - 1
+        ) {
+          throw error;
+        }
+      }
+    }
+    throw new SessionDirectoryChangedError();
+  }
+
+  private async scanSafeSessionInformation(
+    filesBeforeScan: readonly SessionFileFingerprint[],
+  ): Promise<VerifiedSessionCatalog> {
+    const information = await SessionManager.listAll(this.sessionDir);
     const validatedByPath = new Map<string, string>();
     const pathsByConversation = new Map<string, string>();
-    for (const sessionPath of pathsAfterScan) {
-      const conversationId = validatePiSessionFile(
-        await readFile(sessionPath, "utf8"),
-        sessionPath,
-      );
+
+    for (const file of filesBeforeScan) {
+      const beforeRead = await this.fingerprintSafeSessionPath(file.path);
+      if (!fingerprintsEqual(file, beforeRead)) {
+        throw new SessionDirectoryChangedError();
+      }
+      const raw = await readFile(file.path, "utf8");
+      const afterRead = await this.fingerprintSafeSessionPath(file.path);
+      if (!fingerprintsEqual(beforeRead, afterRead)) {
+        throw new SessionDirectoryChangedError();
+      }
+      const conversationId = validatePiSessionFile(raw, file.path);
       const previousPath = pathsByConversation.get(conversationId);
       if (
         previousPath !== undefined
-        && !pathsAreIdentical(previousPath, sessionPath)
+        && !pathsAreIdentical(previousPath, file.path)
       ) {
         throw new Error(
-          `Duplicate conversation identity ${conversationId}: ${previousPath} and ${sessionPath}`,
+          `Duplicate conversation identity ${conversationId}: ${previousPath} and ${file.path}`,
         );
       }
-      pathsByConversation.set(conversationId, sessionPath);
-      validatedByPath.set(pathIdentity(sessionPath), conversationId);
+      pathsByConversation.set(conversationId, file.path);
+      validatedByPath.set(file.pathKey, conversationId);
     }
 
     const indexedPaths = new Set<string>();
+    const normalizedInformation: SessionInfo[] = [];
     for (const session of information) {
       const safePath = await this.resolveSafeSessionPath(session.path);
       const pathKey = pathIdentity(safePath);
@@ -880,6 +1130,10 @@ export class ProjectStore {
         throw new Error(`Pi indexed a project session file more than once: ${safePath}`);
       }
       indexedPaths.add(pathKey);
+      normalizedInformation.push(cloneSessionInformation({
+        ...session,
+        path: safePath,
+      }));
     }
     if (indexedPaths.size !== validatedByPath.size) {
       const omittedPath = [...validatedByPath.keys()].find(
@@ -889,13 +1143,35 @@ export class ProjectStore {
         `Pi omitted a valid project session file from its index: ${String(omittedPath)}`,
       );
     }
-    return information;
+
+    const filesAfterScan = await this.listSafeSessionFiles();
+    if (!fingerprintSetsEqual(filesBeforeScan, filesAfterScan)) {
+      throw new SessionDirectoryChangedError();
+    }
+    // Validate all SDK-derived summary fields before publishing the proof.
+    toConversationSummaries(normalizedInformation);
+
+    const catalogInformation = normalizedInformation.map((item) =>
+      Object.freeze(cloneSessionInformation(item))
+    );
+    const catalogFiles = filesAfterScan.map((file) =>
+      Object.freeze({ ...file })
+    );
+    const frozenCatalogFiles = Object.freeze(catalogFiles);
+    const catalog = Object.freeze({
+      information: Object.freeze(catalogInformation),
+      validatedIdsByPath: new Map(validatedByPath),
+      files: frozenCatalogFiles,
+      fingerprintsByPath: indexFingerprintsByPath(frozenCatalogFiles),
+    });
+    this.verifiedCatalog = catalog;
+    return catalog;
   }
 
-  private async listSafeSessionPaths(): Promise<string[]> {
+  private async listSafeSessionFiles(): Promise<SessionFileFingerprint[]> {
     await this.assertSessionDirectorySafe();
     const entries = await readdir(this.sessionDir, { withFileTypes: true });
-    const paths: string[] = [];
+    const files: SessionFileFingerprint[] = [];
     for (const entry of entries) {
       if (!entry.name.endsWith(".jsonl")) continue;
       const entryPath = join(this.sessionDir, entry.name);
@@ -904,16 +1180,223 @@ export class ProjectStore {
           `Session entry must be a regular project-owned file: ${entryPath}`,
         );
       }
-      const canonicalPath = await realpath(entryPath);
-      if (!pathsAreIdentical(entryPath, canonicalPath)) {
-        throw new Error(
-          `Session entry resolves outside its project-owned path: ${entryPath} -> ${canonicalPath}`,
-        );
-      }
-      paths.push(canonicalPath);
+      files.push(await this.fingerprintSafeSessionPath(entryPath));
     }
     await this.assertSessionDirectorySafe();
-    return paths;
+    return files.sort((first, second) =>
+      first.pathKey.localeCompare(second.pathKey)
+    );
+  }
+
+  private async fingerprintSafeSessionPath(
+    path: string,
+  ): Promise<SessionFileFingerprint> {
+    this.assertLexicallyInsideSessionDirectory(path);
+    const lexicalPath = resolve(path);
+    const entryInformation = await lstat(lexicalPath, { bigint: true });
+    if (entryInformation.isSymbolicLink() || !entryInformation.isFile()) {
+      throw new Error(
+        `Session entry must be a regular project-owned file: ${lexicalPath}`,
+      );
+    }
+    const canonicalPath = await realpath(lexicalPath);
+    if (!pathsAreIdentical(lexicalPath, canonicalPath)) {
+      throw new Error(
+        `Session entry resolves outside its project-owned path: ${lexicalPath} -> ${canonicalPath}`,
+      );
+    }
+    const information = await stat(canonicalPath, { bigint: true });
+    if (!information.isFile()) {
+      throw new Error(
+        `Session entry must be a regular project-owned file: ${canonicalPath}`,
+      );
+    }
+    return {
+      path: canonicalPath,
+      pathKey: pathIdentity(canonicalPath),
+      dev: information.dev,
+      ino: information.ino,
+      size: information.size,
+      mtimeNs: information.mtimeNs,
+      ctimeNs: information.ctimeNs,
+    };
+  }
+
+  private async readVerifiedSessionFileBatch(
+    conversationIds: readonly string[],
+    options: { allowMissing?: boolean } = {},
+  ): Promise<VerifiedSessionReadBatch> {
+    for (
+      let attempt = 0;
+      attempt < MAX_INTEGRITY_PROOF_ATTEMPTS;
+      attempt += 1
+    ) {
+      const catalog = await this.getVerifiedSessionCatalog();
+      const informationById = new Map(
+        catalog.information.map((item) => [item.id, item]),
+      );
+      const targets = new Map<string, VerifiedSessionFileRead>();
+
+      try {
+        for (const conversationId of conversationIds) {
+          const information = informationById.get(conversationId);
+          if (information === undefined) {
+            if (options.allowMissing === true) continue;
+            throw new Error(`Conversation not found: ${conversationId}`);
+          }
+          const pathKey = pathIdentity(information.path);
+          const expectedFile = catalog.fingerprintsByPath.get(pathKey);
+          if (
+            catalog.validatedIdsByPath.get(pathKey) !== conversationId
+            || expectedFile === undefined
+          ) {
+            throw new SessionFileChangedError(conversationId);
+          }
+          targets.set(
+            conversationId,
+            await this.readStableExpectedSessionFile(
+              expectedFile,
+              conversationId,
+            ),
+          );
+        }
+
+        const filesAfterRead = await this.listSafeSessionFiles();
+        if (!fingerprintSetsEqual(catalog.files, filesAfterRead)) {
+          throw new SessionDirectoryChangedError(
+            "Project session directory changed while conversations were being read",
+          );
+        }
+        return { catalog, targets };
+      } catch (error) {
+        this.verifiedCatalog = undefined;
+        if (
+          (
+            !(error instanceof SessionDirectoryChangedError)
+            && !(error instanceof SessionFileChangedError)
+          )
+          || attempt === MAX_INTEGRITY_PROOF_ATTEMPTS - 1
+        ) {
+          throw error;
+        }
+      }
+    }
+    throw new SessionDirectoryChangedError();
+  }
+
+  private async readStableExpectedSessionFile(
+    expectedFile: Readonly<SessionFileFingerprint>,
+    conversationId: string,
+  ): Promise<VerifiedSessionFileRead> {
+    try {
+      const beforeRead = await this.fingerprintSafeSessionPath(
+        expectedFile.path,
+      );
+      if (!fingerprintsEqual(expectedFile, beforeRead)) {
+        throw new SessionFileChangedError(conversationId);
+      }
+      const raw = await readFile(beforeRead.path, "utf8");
+      const afterRead = await this.fingerprintSafeSessionPath(beforeRead.path);
+      if (!fingerprintsEqual(beforeRead, afterRead)) {
+        throw new SessionFileChangedError(conversationId);
+      }
+      validatePiSessionFile(raw, afterRead.path, conversationId);
+      return { path: afterRead.path, raw, fingerprint: afterRead };
+    } catch (error) {
+      this.verifiedCatalog = undefined;
+      throw error;
+    }
+  }
+
+  private async quarantineSessionFile(
+    target: VerifiedSessionFileRead,
+    conversationId: string,
+  ): Promise<QuarantinedSessionFile> {
+    const quarantinePath = join(
+      this.sessionDir,
+      `.${basename(target.path)}.${randomUUID()}.delete-quarantine`,
+    );
+    this.assertLexicallyInsideSessionDirectory(quarantinePath);
+    let moved = false;
+    try {
+      await this.renameSessionFile(target.path, quarantinePath);
+      moved = true;
+      this.verifiedCatalog = undefined;
+      const quarantineFingerprint =
+        await this.fingerprintSafeSessionPath(quarantinePath);
+      if (
+        quarantineFingerprint.dev !== target.fingerprint.dev
+        || quarantineFingerprint.ino !== target.fingerprint.ino
+      ) {
+        throw new SessionFileChangedError(conversationId);
+      }
+      const verified = await this.readStableExpectedSessionFile(
+        quarantineFingerprint,
+        conversationId,
+      );
+      return {
+        originalPath: target.path,
+        quarantinePath,
+        quarantineFingerprint: verified.fingerprint,
+      };
+    } catch (error) {
+      this.verifiedCatalog = undefined;
+      if (moved) {
+        try {
+          await this.recoverQuarantinedSessionFile({
+            originalPath: target.path,
+            quarantinePath,
+          });
+        } catch (recoveryError) {
+          throw new AggregateError(
+            [error, recoveryError],
+            `Conversation quarantine failed and recovery could not be completed: ${conversationId}`,
+          );
+        }
+      }
+      throw error;
+    }
+  }
+
+  private async recoverQuarantinedSessionFile(
+    quarantined: Pick<
+      QuarantinedSessionFile,
+      "originalPath" | "quarantinePath"
+    >,
+  ): Promise<void> {
+    let restoreError: unknown;
+    try {
+      await link(quarantined.quarantinePath, quarantined.originalPath);
+    } catch (error) {
+      restoreError = error;
+    }
+    if (restoreError === undefined) {
+      await this.unlinkSessionFile(quarantined.quarantinePath);
+      return;
+    }
+
+    const recoveryPath = join(
+      this.sessionDir,
+      `.${basename(quarantined.originalPath, ".jsonl")}.${randomUUID()}.delete-recovery.jsonl`,
+    );
+    this.assertLexicallyInsideSessionDirectory(recoveryPath);
+    try {
+      await link(quarantined.quarantinePath, recoveryPath);
+      await this.unlinkSessionFile(quarantined.quarantinePath);
+    } catch (recoveryError) {
+      throw new AggregateError(
+        [restoreError, recoveryError],
+        `Quarantined conversation remains at ${quarantined.quarantinePath}`,
+      );
+    }
+  }
+
+  private renameSessionFile(source: string, destination: string): Promise<void> {
+    return rename(source, destination);
+  }
+
+  private unlinkSessionFile(path: string): Promise<void> {
+    return unlink(path);
   }
 
   private assertLexicallyInsideSessionDirectory(path: string): void {

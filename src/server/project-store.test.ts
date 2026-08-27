@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { renameSync, rmSync, writeFileSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
@@ -25,6 +26,13 @@ import { ConversationNotebook } from "./conversation-notebook.js";
 import { ProjectStore, ProjectStoreRegistry } from "./project-store.js";
 
 const temporaryDirectories: string[] = [];
+
+interface ProjectStoreIntegrityInternals {
+  listSafeSessionFiles(): Promise<unknown>;
+  clearLastConversationIf(conversationId: string): Promise<void>;
+  renameSessionFile(source: string, destination: string): Promise<void>;
+  unlinkSessionFile(path: string): Promise<void>;
+}
 
 async function createTemporaryDirectory(prefix: string): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), prefix));
@@ -66,6 +74,21 @@ function sessionInformation(
     allMessagesText: "",
     ...overrides,
   };
+}
+
+async function writeSessionHeader(
+  path: string,
+  id: string,
+  cwd: string,
+  version = 3,
+): Promise<void> {
+  await writeFile(path, `${JSON.stringify({
+    type: "session",
+    version,
+    id,
+    timestamp: "2026-01-01T00:00:00.000Z",
+    cwd,
+  })}\n`);
 }
 
 afterEach(async () => {
@@ -410,6 +433,176 @@ describe("ProjectStore", () => {
     )).resolves.toBe("keep");
   });
 
+  it("restores a path replacement swapped in at the quarantine rename boundary", async () => {
+    const cwd = await createTemporaryDirectory("piweb-delete-replacement-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversation = await store.createConversation();
+    const conversationId = conversation.getSessionId();
+    const sessionFile = conversation.getSessionFile()!;
+    const displacedPath = join(store.sessionDir, ".displaced-original.tmp");
+    const replacementPath = join(store.sessionDir, ".replacement.tmp");
+    await writeSessionHeader(replacementPath, conversationId, store.cwd);
+    const replacementRaw = await readFile(replacementPath, "utf8");
+    const internals = store as unknown as ProjectStoreIntegrityInternals;
+    const originalRenameSessionFile = internals.renameSessionFile.bind(store);
+    vi.spyOn(internals, "renameSessionFile").mockImplementationOnce(
+      async (source, destination) => {
+        await rename(source, displacedPath);
+        await rename(replacementPath, source);
+        await originalRenameSessionFile(source, destination);
+      },
+    );
+
+    await expect(store.deleteConversation(conversationId)).rejects.toThrow(
+      "changed while it was being read",
+    );
+
+    await expect(readFile(sessionFile, "utf8")).resolves.toBe(replacementRaw);
+    await expect(readFile(displacedPath, "utf8")).resolves.toContain(
+      conversationId,
+    );
+  });
+
+  it("preserves quarantine as recovery JSONL when the original path is occupied", async () => {
+    const cwd = await createTemporaryDirectory("piweb-delete-recovery-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversation = await store.createConversation();
+    const conversationId = conversation.getSessionId();
+    const sessionFile = conversation.getSessionFile()!;
+    const corruptRaw = '{"type":"session"\n';
+    const internals = store as unknown as ProjectStoreIntegrityInternals;
+    const originalRenameSessionFile = internals.renameSessionFile.bind(store);
+    vi.spyOn(internals, "renameSessionFile").mockImplementationOnce(
+      async (source, destination) => {
+        await originalRenameSessionFile(source, destination);
+        await writeFile(source, corruptRaw);
+      },
+    );
+
+    await expect(store.deleteConversation(conversationId)).rejects.toThrow(
+      "invalid JSON",
+    );
+
+    await expect(readFile(sessionFile, "utf8")).resolves.toBe(corruptRaw);
+    const recoveryFiles = (await readdir(store.sessionDir)).filter((name) =>
+      name.endsWith(".delete-recovery.jsonl")
+    );
+    expect(recoveryFiles).toHaveLength(1);
+    await expect(
+      readFile(join(store.sessionDir, recoveryFiles[0]!), "utf8"),
+    ).resolves.toContain(conversationId);
+  });
+
+  it("unlinks only quarantine when an original-path replacement appears at unlink", async () => {
+    const cwd = await createTemporaryDirectory("piweb-delete-unlink-swap-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversation = await store.createConversation();
+    const conversationId = conversation.getSessionId();
+    const sessionFile = conversation.getSessionFile()!;
+    const replacementPath = join(store.sessionDir, ".replacement.tmp");
+    await writeSessionHeader(replacementPath, conversationId, store.cwd);
+    const replacementRaw = await readFile(replacementPath, "utf8");
+    const internals = store as unknown as ProjectStoreIntegrityInternals;
+    const originalUnlinkSessionFile = internals.unlinkSessionFile.bind(store);
+    vi.spyOn(internals, "unlinkSessionFile").mockImplementationOnce(
+      async (path) => {
+        await rename(replacementPath, sessionFile);
+        await originalUnlinkSessionFile(path);
+      },
+    );
+
+    await store.deleteConversation(conversationId);
+
+    await expect(readFile(sessionFile, "utf8")).resolves.toBe(replacementRaw);
+  });
+
+  it("projects retained conversations from the catalog generation that deletion proved", async () => {
+    const cwd = await createTemporaryDirectory("piweb-delete-generation-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const deleted = await store.createConversation();
+    const retained = await store.createConversation();
+    const addedId = randomUUID();
+    const addedPath = join(store.sessionDir, "added-during-proof.jsonl");
+    const listAll = vi.spyOn(SessionManager, "listAll");
+    const internals = store as unknown as ProjectStoreIntegrityInternals;
+    const originalListSafeSessionFiles =
+      internals.listSafeSessionFiles.bind(store);
+    let fingerprintEnumerations = 0;
+    vi.spyOn(internals, "listSafeSessionFiles").mockImplementation(async () => {
+      fingerprintEnumerations += 1;
+      if (fingerprintEnumerations === 2) {
+        await writeSessionHeader(addedPath, addedId, store.cwd);
+      }
+      return originalListSafeSessionFiles();
+    });
+
+    await store.deleteConversation(deleted.getSessionId());
+
+    expect(listAll).toHaveBeenCalledTimes(2);
+    expect(store.listConversations().map(({ id }) => id)).toEqual(
+      expect.arrayContaining([retained.getSessionId(), addedId]),
+    );
+    expect(store.listConversations().map(({ id }) => id)).not.toContain(
+      deleted.getSessionId(),
+    );
+  });
+
+  it("publishes a conversation added after the first post-quarantine proof", async () => {
+    const cwd = await createTemporaryDirectory("piweb-delete-post-proof-add-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const deleted = await store.createConversation();
+    const retained = await store.createConversation();
+    const addedId = randomUUID();
+    const addedPath = join(store.sessionDir, "added-after-proof.jsonl");
+    const internals = store as unknown as ProjectStoreIntegrityInternals;
+    const originalClearLastConversation =
+      internals.clearLastConversationIf.bind(store);
+    vi.spyOn(internals, "clearLastConversationIf").mockImplementationOnce(
+      async (id) => {
+        await originalClearLastConversation(id);
+        await writeSessionHeader(addedPath, addedId, store.cwd);
+      },
+    );
+
+    await store.deleteConversation(deleted.getSessionId());
+
+    expect(store.listConversations().map(({ id }) => id)).toEqual(
+      expect.arrayContaining([retained.getSessionId(), addedId]),
+    );
+  });
+
+  it("restores quarantine when an unrelated file becomes corrupt after proof", async () => {
+    const cwd = await createTemporaryDirectory("piweb-delete-post-proof-corrupt-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const deleted = await store.createConversation();
+    const retained = await store.createConversation();
+    const deletedPath = deleted.getSessionFile()!;
+    const corruptPath = join(store.sessionDir, "corrupt-after-proof.jsonl");
+    const internals = store as unknown as ProjectStoreIntegrityInternals;
+    const originalClearLastConversation =
+      internals.clearLastConversationIf.bind(store);
+    vi.spyOn(internals, "clearLastConversationIf").mockImplementationOnce(
+      async (id) => {
+        await originalClearLastConversation(id);
+        await writeFile(corruptPath, '{"type":"session"\n');
+      },
+    );
+
+    await expect(
+      store.deleteConversation(deleted.getSessionId()),
+    ).rejects.toThrow("invalid JSON");
+
+    await expect(readFile(deletedPath, "utf8")).resolves.toContain(
+      deleted.getSessionId(),
+    );
+    await expect(readFile(corruptPath, "utf8")).resolves.toBe(
+      '{"type":"session"\n',
+    );
+    expect(store.listConversations().map(({ id }) => id)).toEqual(
+      expect.arrayContaining([deleted.getSessionId(), retained.getSessionId()]),
+    );
+  });
+
   it("physically truncates the selected message and every later entry", async () => {
     const cwd = await createTemporaryDirectory("piweb-truncate-conversation-");
     const store = await ProjectStore.open(cwd, "full_access");
@@ -476,6 +669,7 @@ describe("ProjectStore", () => {
     const retained = await store.createConversation();
     const deleted = await store.createConversation();
     await store.setLastConversation(deleted.getSessionId());
+    retained.appendSessionInfo("force a fresh integrity scan");
     const information = await SessionManager.listAll(store.sessionDir);
     const delayedScan = createDeferred<SessionInfo[]>();
     const listAll = vi
@@ -547,17 +741,16 @@ describe("ProjectStore", () => {
     );
   });
 
-  it("strictly serializes refreshes so an older scan cannot overwrite a newer cache", async () => {
+  it("serializes queued refreshes and reuses one unchanged verified scan", async () => {
     const cwd = await createTemporaryDirectory("piweb-refresh-queue-");
     const store = await ProjectStore.open(cwd, "full_access");
     const conversation = await store.createConversation();
-    const sessionFile = conversation.getSessionFile()!;
-    const firstScan = createDeferred<SessionInfo[]>();
-    const secondScan = createDeferred<SessionInfo[]>();
+    conversation.appendSessionInfo("fresh scan");
+    const information = await SessionManager.listAll(store.sessionDir);
+    const delayedScan = createDeferred<SessionInfo[]>();
     const listAll = vi
       .spyOn(SessionManager, "listAll")
-      .mockImplementationOnce(() => firstScan.promise)
-      .mockImplementationOnce(() => secondScan.promise);
+      .mockImplementationOnce(() => delayedScan.promise);
 
     const firstRefresh = store.refreshConversations();
     await vi.waitFor(() => expect(listAll).toHaveBeenCalledTimes(1));
@@ -565,28 +758,296 @@ describe("ProjectStore", () => {
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
     expect(listAll).toHaveBeenCalledTimes(1);
 
-    firstScan.resolve([
-      sessionInformation(sessionFile, conversation.getSessionId(), {
-        name: "older scan",
-      }),
-    ]);
-    await expect(firstRefresh).resolves.toEqual([
-      expect.objectContaining({ name: "older scan" }),
-    ]);
-    await vi.waitFor(() => expect(listAll).toHaveBeenCalledTimes(2));
+    delayedScan.resolve(information);
+    const [first, second] = await Promise.all([firstRefresh, secondRefresh]);
 
-    secondScan.resolve([
-      sessionInformation(sessionFile, conversation.getSessionId(), {
-        name: "newer scan",
-        modified: new Date("2026-01-02T00:00:00.000Z"),
+    expect(listAll).toHaveBeenCalledTimes(1);
+    expect(first).toEqual(second);
+    expect(first).toEqual([
+      expect.objectContaining({ name: "fresh scan" }),
+    ]);
+  });
+
+  it("reuses one verified catalog across unchanged refresh, open, and inspect", async () => {
+    const cwd = await createTemporaryDirectory("piweb-verified-catalog-reuse-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const listAll = vi.spyOn(SessionManager, "listAll");
+    const conversation = await store.createConversation();
+
+    await store.refreshConversations();
+    await store.openConversation(conversation.getSessionId(), {
+      updateRecent: false,
+    });
+    await store.inspectConversation(conversation.getSessionId());
+
+    expect(listAll).toHaveBeenCalledTimes(1);
+  });
+
+  it("bulk-inspects targets with one catalog scan and one final directory proof", async () => {
+    const cwd = await createTemporaryDirectory("piweb-catalog-bulk-inspect-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversations = [
+      await store.createConversation(),
+      await store.createConversation(),
+      await store.createConversation(),
+    ];
+    conversations[0]!.appendSessionInfo("force a fresh integrity scan");
+    const listAll = vi.spyOn(SessionManager, "listAll");
+    const internals = store as unknown as ProjectStoreIntegrityInternals;
+    const listSafeSessionFiles = vi.spyOn(internals, "listSafeSessionFiles");
+
+    const inspections = await store.inspectConversations(
+      conversations.map((conversation) => conversation.getSessionId()),
+    );
+
+    expect(inspections.size).toBe(3);
+    expect(listAll).toHaveBeenCalledTimes(1);
+    expect(listSafeSessionFiles).toHaveBeenCalledTimes(3);
+  });
+
+  it("deep-copies SDK catalog values before unchanged reuse", async () => {
+    const cwd = await createTemporaryDirectory("piweb-catalog-copy-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversationId = randomUUID();
+    const sessionFile = join(store.sessionDir, "copied.jsonl");
+    await writeSessionHeader(sessionFile, conversationId, store.cwd);
+    const sdkInformation = sessionInformation(sessionFile, conversationId, {
+      name: "original",
+    });
+    const listAll = vi.spyOn(SessionManager, "listAll")
+      .mockResolvedValueOnce([sdkInformation]);
+
+    await expect(store.refreshConversations()).resolves.toEqual([
+      expect.objectContaining({ name: "original" }),
+    ]);
+    sdkInformation.name = "mutated outside";
+    sdkInformation.created.setTime(0);
+    sdkInformation.modified.setTime(0);
+    await expect(store.refreshConversations()).resolves.toEqual([
+      expect.objectContaining({
+        name: "original",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
       }),
     ]);
-    await expect(secondRefresh).resolves.toEqual([
-      expect.objectContaining({ name: "newer scan" }),
+
+    expect(listAll).toHaveBeenCalledTimes(1);
+  });
+
+  it("rescans after add and remove change the session fingerprint set", async () => {
+    const cwd = await createTemporaryDirectory("piweb-catalog-add-remove-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    await store.createConversation();
+    const listAll = vi.spyOn(SessionManager, "listAll");
+    const addedId = randomUUID();
+    const addedPath = join(store.sessionDir, "added.jsonl");
+
+    await writeSessionHeader(addedPath, addedId, store.cwd);
+    await expect(store.refreshConversations()).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: addedId })]),
+    );
+    await rm(addedPath);
+    await expect(store.refreshConversations()).resolves.not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: addedId })]),
+    );
+
+    expect(listAll).toHaveBeenCalledTimes(2);
+  });
+
+  it("rescans after same-path replacement and in-place changes", async () => {
+    const cwd = await createTemporaryDirectory("piweb-catalog-file-change-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversation = await store.createConversation();
+    const sessionFile = conversation.getSessionFile()!;
+    const original = await readFile(sessionFile, "utf8");
+    const replacement = join(store.sessionDir, ".replacement.tmp");
+    const listAll = vi.spyOn(SessionManager, "listAll");
+
+    await writeFile(replacement, original);
+    await rm(sessionFile);
+    await rename(replacement, sessionFile);
+    await store.refreshConversations();
+
+    const reopened = await store.openConversation(conversation.getSessionId(), {
+      updateRecent: false,
+    });
+    reopened.appendSessionInfo("changed in place");
+    await expect(store.refreshConversations()).resolves.toEqual([
+      expect.objectContaining({ name: "changed in place" }),
     ]);
-    expect(store.listConversations()).toEqual([
-      expect.objectContaining({ name: "newer scan" }),
-    ]);
+
+    expect(listAll).toHaveBeenCalledTimes(2);
+  });
+
+  it("exhausts the proof budget when every SDK scan changes the fingerprint set", async () => {
+    const cwd = await createTemporaryDirectory("piweb-catalog-scan-race-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversation = await store.createConversation();
+    conversation.appendSessionInfo("force a fresh integrity scan");
+    const originalListAll = SessionManager.listAll.bind(SessionManager);
+    let lateFile = 0;
+    const listAll = vi.spyOn(SessionManager, "listAll")
+      .mockImplementation(async (sessionDir) => {
+        const information = await originalListAll(sessionDir);
+        const latePath = join(store.sessionDir, `late-${lateFile++}.jsonl`);
+        await writeSessionHeader(latePath, randomUUID(), store.cwd);
+        return information;
+      });
+
+    await expect(store.refreshConversations()).rejects.toThrow(
+      "changed while it was being scanned",
+    );
+    expect(listAll).toHaveBeenCalledTimes(8);
+  });
+
+  it("reproves the complete catalog after one transient SDK scan mutation", async () => {
+    const cwd = await createTemporaryDirectory("piweb-catalog-scan-retry-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversation = await store.createConversation();
+    conversation.appendSessionInfo("force a fresh integrity scan");
+    const originalListAll = SessionManager.listAll.bind(SessionManager);
+    const lateId = randomUUID();
+    const latePath = join(store.sessionDir, "late.jsonl");
+    const listAll = vi.spyOn(SessionManager, "listAll")
+      .mockImplementationOnce(async (sessionDir) => {
+        const information = await originalListAll(sessionDir);
+        await writeSessionHeader(latePath, lateId, store.cwd);
+        return information;
+      });
+
+    await expect(store.refreshConversations()).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: lateId })]),
+    );
+    expect(listAll).toHaveBeenCalledTimes(2);
+  });
+
+  it("reproves after an unrelated file changes in the target-read window", async () => {
+    const cwd = await createTemporaryDirectory("piweb-catalog-read-race-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const target = await store.createConversation();
+    const unrelated = await store.createConversation();
+    const listAll = vi.spyOn(SessionManager, "listAll");
+    const internals = store as unknown as ProjectStoreIntegrityInternals;
+    const originalListSafeSessionFiles =
+      internals.listSafeSessionFiles.bind(store);
+    let fingerprintEnumerations = 0;
+    vi.spyOn(internals, "listSafeSessionFiles").mockImplementation(async () => {
+      fingerprintEnumerations += 1;
+      if (fingerprintEnumerations === 2) {
+        unrelated.appendSessionInfo("changed during target read");
+      }
+      return originalListSafeSessionFiles();
+    });
+
+    await expect(
+      store.inspectConversation(target.getSessionId()),
+    ).resolves.toEqual(expect.objectContaining({
+      conversationId: target.getSessionId(),
+    }));
+    expect(fingerprintEnumerations).toBeGreaterThan(2);
+    expect(listAll).toHaveBeenCalledTimes(1);
+  });
+
+  it("invalidates the catalog when SDK open migrates the target file", async () => {
+    const cwd = await createTemporaryDirectory("piweb-catalog-sdk-migration-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversationId = randomUUID();
+    const sessionFile = join(store.sessionDir, "legacy.jsonl");
+    await writeFile(sessionFile, [
+      JSON.stringify({
+        type: "session",
+        version: 1,
+        id: conversationId,
+        timestamp: "2026-01-01T00:00:00.000Z",
+        cwd: store.cwd,
+      }),
+      JSON.stringify({
+        type: "message",
+        timestamp: "2026-01-01T00:00:01.000Z",
+        message: { role: "user", content: "legacy", timestamp: 1 },
+      }),
+      "",
+    ].join("\n"));
+    const listAll = vi.spyOn(SessionManager, "listAll");
+
+    await store.refreshConversations();
+    await store.openConversation(conversationId, { updateRecent: false });
+    await store.refreshConversations();
+
+    expect(listAll).toHaveBeenCalledTimes(2);
+    await expect(readFile(sessionFile, "utf8")).resolves.toContain(
+      '"version":3',
+    );
+  });
+
+  it("rejects a current-version file changed by SDK open", async () => {
+    const cwd = await createTemporaryDirectory("piweb-catalog-sdk-current-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversation = await store.createConversation();
+    const originalOpen = SessionManager.open.bind(SessionManager);
+    vi.spyOn(SessionManager, "open").mockImplementationOnce(
+      (path, sessionDir, cwdOverride) => {
+        const opened = originalOpen(path, sessionDir, cwdOverride);
+        opened.appendSessionInfo("changed during open");
+        return opened;
+      },
+    );
+
+    await expect(
+      store.openConversation(conversation.getSessionId(), {
+        updateRecent: false,
+      }),
+    ).rejects.toThrow("changed while it was being read");
+  });
+
+  it("rejects an unrelated malformed file added during SDK open", async () => {
+    const cwd = await createTemporaryDirectory("piweb-catalog-sdk-unrelated-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversation = await store.createConversation();
+    const malformedPath = join(store.sessionDir, "malformed-during-open.jsonl");
+    const originalOpen = SessionManager.open.bind(SessionManager);
+    vi.spyOn(SessionManager, "open").mockImplementationOnce(
+      (path, sessionDir, cwdOverride) => {
+        const opened = originalOpen(path, sessionDir, cwdOverride);
+        writeFileSync(malformedPath, '{"type":"session"\n');
+        return opened;
+      },
+    );
+
+    await expect(
+      store.openConversation(conversation.getSessionId(), {
+        updateRecent: false,
+      }),
+    ).rejects.toThrow("changed while conversation");
+    await expect(readFile(malformedPath, "utf8")).resolves.toBe(
+      '{"type":"session"\n',
+    );
+  });
+
+  it("rejects an invalid replacement inserted during legacy SDK migration", async () => {
+    const cwd = await createTemporaryDirectory("piweb-catalog-sdk-replace-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversationId = randomUUID();
+    const sessionFile = join(store.sessionDir, "legacy.jsonl");
+    const invalidReplacement = join(store.sessionDir, ".invalid.tmp");
+    const invalidRaw = '{"type":"session"\n';
+    await writeSessionHeader(sessionFile, conversationId, store.cwd, 1);
+    await writeFile(invalidReplacement, invalidRaw);
+    await store.refreshConversations();
+    const originalOpen = SessionManager.open.bind(SessionManager);
+    vi.spyOn(SessionManager, "open").mockImplementationOnce(
+      (path, sessionDir, cwdOverride) => {
+        const conversation = originalOpen(path, sessionDir, cwdOverride);
+        rmSync(path);
+        renameSync(invalidReplacement, path);
+        return conversation;
+      },
+    );
+
+    await expect(
+      store.openConversation(conversationId, { updateRecent: false }),
+    ).rejects.toThrow("changed while it was being read");
+    await expect(readFile(sessionFile, "utf8")).resolves.toBe(invalidRaw);
   });
 
   it("rejects a partial JSONL tail before Pi can rewrite the session", async () => {
@@ -676,6 +1137,7 @@ describe("ProjectStore", () => {
     const store = await ProjectStore.open(cwd, "full_access");
     const conversation = await store.createConversation();
     const sessionFile = conversation.getSessionFile()!;
+    conversation.appendSessionInfo("force a fresh integrity scan");
     vi.spyOn(SessionManager, "listAll").mockResolvedValueOnce([
       sessionInformation(sessionFile, conversation.getSessionId(), {
         modified: new Date(Number.NaN),
