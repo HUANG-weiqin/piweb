@@ -237,6 +237,7 @@ interface CachedWorkspaceProjection {
 }
 
 interface CachedConversationPresentation {
+  authority: "preview" | "snapshot";
   workspaceKey: string;
   projectId: string;
   conversationId: string;
@@ -260,10 +261,13 @@ const UNCONFIRMED_PROMPT_NOTICE =
 interface PendingFocus {
   commandId: string;
   operation: "initialize" | "focus_conversation" | "create_conversation";
+  workspaceKey: string;
   sourceFocus?: ActiveFocus;
   sourceReady?: boolean;
   cachedProjectId?: string;
+  targetProjectId?: string;
   targetConversationId?: string;
+  initializeConversationKind?: "recent" | "new" | "open";
 }
 
 interface ConversationOperation {
@@ -422,7 +426,9 @@ export function App() {
   const [conversationRole, setConversationRole] =
     useState<ConversationRoleSnapshot>();
   const [conversationIndexTruncated, setConversationIndexTruncated] = useState(false);
-  const projectSnapshotReceivedRef = useRef(false);
+  const authoritativeProjectMembershipRef = useRef(
+    new Map<string, ReadonlySet<string>>(),
+  );
   const [historyWindow, setHistoryWindow] = useState<ConversationWindowCoverage>(
     EMPTY_CONVERSATION_WINDOW,
   );
@@ -511,10 +517,13 @@ export function App() {
   );
   const unconfirmedPromptKey = (focus: Pick<ActiveFocus, "projectId" | "conversationId">) =>
     conversationKey(focus);
-  const conversationIsConfirmedMissing = (conversationId: string): boolean =>
-    projectSnapshotReceivedRef.current
-    && !conversationIndexTruncated
-    && !conversations.some(({ id }) => id === conversationId);
+  const conversationIsConfirmedMissing = (
+    projectId: string,
+    conversationId: string,
+  ): boolean => {
+    const membership = authoritativeProjectMembershipRef.current.get(projectId);
+    return membership !== undefined && !membership.has(conversationId);
+  };
   const cacheCurrentWorkspaceProjection = () => {
     const focus = focusRef.current;
     if (
@@ -523,7 +532,7 @@ export function App() {
       || !state
       || state.projectId !== focus.projectId
       || state.conversationId !== focus.conversationId
-      || conversationIsConfirmedMissing(focus.conversationId)
+      || conversationIsConfirmedMissing(focus.projectId, focus.conversationId)
     ) return;
     rememberWorkspaceProjection(
       workspaceProjectionCacheRef.current,
@@ -555,7 +564,7 @@ export function App() {
       || chat.focus.sessionId !== focus.sessionId
       || chat.focus.conversationId !== focus.conversationId
       || chat.focus.focusId !== focus.focusId
-      || conversationIsConfirmedMissing(focus.conversationId)
+      || conversationIsConfirmedMissing(focus.projectId, focus.conversationId)
     ) return;
     const key = conversationScopeKey(
       currentWorkspaceKey(),
@@ -566,6 +575,7 @@ export function App() {
       conversationPresentationCacheRef.current,
       key,
       {
+        authority: "snapshot",
         workspaceKey: currentWorkspaceKey(),
         projectId: focus.projectId,
         conversationId: focus.conversationId,
@@ -608,7 +618,7 @@ export function App() {
     if (key) forgetWorkspaceProjection(workspaceProjectionCacheRef.current, key);
     clearTemporaryWorkspacePresentation();
     setState(undefined);
-    projectSnapshotReceivedRef.current = false;
+    authoritativeProjectMembershipRef.current.clear();
     setConversations([]);
     setRoles([]);
     setConversationRole(undefined);
@@ -911,7 +921,7 @@ export function App() {
     clearTemporaryConversationPresentation();
     updateConversationSyncing(false);
     setState(undefined);
-    projectSnapshotReceivedRef.current = false;
+    authoritativeProjectMembershipRef.current.clear();
     setConversations([]);
     setRoles([]);
     setConversationRole(undefined);
@@ -1087,6 +1097,11 @@ export function App() {
           updatePendingFocus({
             commandId,
             operation: "initialize",
+            workspaceKey: currentWorkspaceKey(),
+            initializeConversationKind: conversation.kind,
+            ...(conversation.kind === "open"
+              ? { targetConversationId: conversation.conversationId }
+              : {}),
             ...(cached ? { cachedProjectId: cached.projectId } : {}),
           });
           const sent = socket.send({
@@ -1145,6 +1160,73 @@ export function App() {
           return;
         }
         applyPublicState(event.state);
+      } else if (event.type === "conversation_preview") {
+        const pending = pendingFocusRef.current;
+        if (
+          event.sessionId !== sessionIdRef.current
+          || !pending
+          || pending.commandId !== event.commandId
+          || (pending.operation !== "initialize"
+            && pending.operation !== "focus_conversation")
+          || pending.workspaceKey !== currentWorkspaceKey()
+          || workspaceKey(event.cwd) !== pending.workspaceKey
+        ) return;
+        const expectedProjectId = pending.targetProjectId
+          ?? pending.cachedProjectId
+          ?? projectIdRef.current;
+        if (expectedProjectId && event.projectId !== expectedProjectId) return;
+        if (pending.operation === "focus_conversation") {
+          if (pending.targetConversationId !== event.conversationId) return;
+        } else if (
+          pending.initializeConversationKind !== "recent"
+          && (
+            pending.initializeConversationKind !== "open"
+            || pending.targetConversationId !== event.conversationId
+          )
+        ) return;
+        if (conversationIsConfirmedMissing(event.projectId, event.conversationId)) return;
+
+        const previewThinkingLevel = event.role?.defaultThinkingLevel ?? "off";
+        const previewChat = chatReducer(initialChatState, {
+          type: "hydrate",
+          sessionId: event.sessionId,
+          conversationId: event.conversationId,
+          focusId: `preview:${event.commandId}`,
+          items: event.items,
+        });
+        const preview: CachedConversationPresentation = {
+          authority: "preview",
+          workspaceKey: pending.workspaceKey,
+          projectId: event.projectId,
+          conversationId: event.conversationId,
+          state: {
+            sessionId: event.sessionId,
+            projectId: event.projectId,
+            conversationId: event.conversationId,
+            cwd: event.cwd,
+            busy: false,
+            compacting: false,
+            thinkingLevel: previewThinkingLevel,
+            toolMode: event.toolMode,
+            availableThinkingLevels: [previewThinkingLevel],
+            providers: [],
+          },
+          conversationRole: event.role,
+          historyWindow: event.window,
+          chat: previewChat,
+        };
+        const cacheKey = conversationScopeKey(
+          pending.workspaceKey,
+          event.projectId,
+          event.conversationId,
+        );
+        rememberConversationPresentation(
+          conversationPresentationCacheRef.current,
+          cacheKey,
+          preview,
+        );
+        showCachedConversationPresentation(preview, cacheKey);
+        if (pending.operation === "initialize") updateWorkspaceSyncing(true);
       } else if (event.type === "focus_attached") {
         if (event.sessionId !== sessionIdRef.current) return;
         const pending = pendingFocusRef.current;
@@ -1152,8 +1234,17 @@ export function App() {
           !pending
           || pending.commandId !== event.commandId
           || pending.operation !== event.operation
-          || (pending.targetConversationId !== undefined
+          || pending.workspaceKey !== currentWorkspaceKey()
+          || (pending.targetProjectId !== undefined
+            && pending.targetProjectId !== event.projectId)
+          || (pending.operation === "focus_conversation"
             && pending.targetConversationId !== event.conversationId)
+          || (pending.operation === "initialize"
+            && pending.initializeConversationKind === "open"
+            && (
+              pending.targetConversationId !== event.conversationId
+              || event.focusId === undefined
+            ))
         ) return;
         const cachedProjectMismatch = Boolean(
           pending.cachedProjectId
@@ -1162,6 +1253,19 @@ export function App() {
         if (cachedProjectMismatch) {
           discardCachedWorkspacePresentation();
           updateWorkspaceSyncing(false);
+        }
+        const attachedPresentationKey = event.conversationId
+          ? conversationScopeKey(
+              pending.workspaceKey,
+              event.projectId,
+              event.conversationId,
+            )
+          : "";
+        if (
+          cachedConversationPresentationKeyRef.current
+          && cachedConversationPresentationKeyRef.current !== attachedPresentationKey
+        ) {
+          clearTemporaryConversationPresentation();
         }
         transitionTiming.attach({
           kind: event.operation === "initialize" ? "workspace" : "conversation",
@@ -1185,6 +1289,7 @@ export function App() {
           && event.focusId === undefined
         ) {
           transitionTiming.ready({ sessionId: event.sessionId });
+          clearTemporaryConversationPresentation();
           if (workspaceSyncingRef.current) {
             clearTemporaryWorkspacePresentation();
             updateWorkspaceSyncing(false);
@@ -1295,9 +1400,12 @@ export function App() {
         ) return;
         discardCachedWorkspacePresentationIfProjectMismatch(event.projectId);
         projectIdRef.current = event.projectId;
-        projectSnapshotReceivedRef.current = true;
         const existingConversationIds = new Set(event.conversations.map(({ id }) => id));
         if (!event.truncated) {
+          authoritativeProjectMembershipRef.current.set(
+            event.projectId,
+            existingConversationIds,
+          );
           const workspaceKeyValue = currentWorkspaceKey();
           const workspaceProjection = workspaceProjectionCacheRef.current.get(workspaceKeyValue);
           if (
@@ -1393,9 +1501,19 @@ export function App() {
           );
         }
         if (!pendingFocusRef.current) updateConversationReady(true);
+        const snapshotPresentationKey = conversationScopeKey(
+          currentWorkspaceKey(),
+          projectIdRef.current,
+          event.conversationId,
+        );
+        if (
+          cachedConversationPresentationKeyRef.current
+          === snapshotPresentationKey
+        ) {
+          clearTemporaryConversationPresentation();
+        }
         if (workspaceSyncingRef.current || conversationSyncingRef.current) {
           if (workspaceSyncingRef.current) clearTemporaryWorkspacePresentation();
-          if (conversationSyncingRef.current) clearTemporaryConversationPresentation();
           updateWorkspaceSyncing(false);
           updateConversationSyncing(false);
         }
@@ -1617,6 +1735,10 @@ export function App() {
           && event.operation === pendingFocusError.operation
           && event.focusId === undefined
           && (event.conversationId === undefined
+            || (
+              pendingFocusError.operation === "initialize"
+              && pendingFocusError.initializeConversationKind === "recent"
+            )
             || pendingFocusError.targetConversationId === event.conversationId),
         );
         const settlesBackgroundOperation = Boolean(
@@ -1714,6 +1836,7 @@ export function App() {
             !pending
             || pending.commandId !== event.commandId
             || pending.operation !== event.operation
+            || !settlesPendingFocus
           ) return;
           transitionTiming.cancel({
             kind: pending.operation === "initialize" ? "workspace" : "conversation",
@@ -1736,6 +1859,7 @@ export function App() {
             updateConversationReady(true);
           }
           if (event.operation === "initialize") {
+            clearTemporaryConversationPresentation();
             if (pending.cachedProjectId) discardCachedWorkspacePresentation();
             conversationIdRef.current = "";
             updateWorkspaceSyncing(false);
@@ -2032,6 +2156,11 @@ export function App() {
     updatePendingFocus({
       commandId,
       operation: "initialize",
+      workspaceKey: currentWorkspaceKey(),
+      initializeConversationKind: conversation?.kind ?? "recent",
+      ...(conversation?.kind === "open"
+        ? { targetConversationId: conversation.conversationId }
+        : {}),
       ...(cached ? { cachedProjectId: cached.projectId } : {}),
     });
     const sent = send({
@@ -2172,6 +2301,8 @@ export function App() {
     updatePendingFocus({
       commandId,
       operation: "focus_conversation",
+      workspaceKey: currentWorkspaceKey(),
+      ...(targetProjectId ? { targetProjectId } : {}),
       targetConversationId: conversationId,
       ...(sourceFocus ? { sourceFocus } : {}),
       sourceReady,
@@ -2211,7 +2342,11 @@ export function App() {
       commandId,
     };
     transitionTiming.begin(timingIntent);
-    updatePendingFocus({ commandId, operation: "create_conversation" });
+    updatePendingFocus({
+      commandId,
+      operation: "create_conversation",
+      workspaceKey: currentWorkspaceKey(),
+    });
     setError("");
     if (!send({
       type: "create_conversation",
@@ -2624,11 +2759,19 @@ export function App() {
   />;
 
   const transitioning = workspaceSyncing || conversationSyncing;
-  const transitionPresentation = workspaceSyncing
-    ? cachedWorkspacePresentation
-    : conversationSyncing
+  const activeConversationPresentation =
+    cachedConversationPresentationKeyRef.current
       ? cachedConversationPresentation
       : undefined;
+  let transitionPresentation:
+    | CachedWorkspaceProjection
+    | CachedConversationPresentation
+    | undefined;
+  if (transitioning && activeConversationPresentation) {
+    transitionPresentation = activeConversationPresentation;
+  } else if (workspaceSyncing) {
+    transitionPresentation = cachedWorkspacePresentation;
+  }
   const visibleState = transitionPresentation
     ? {
         ...transitionPresentation.state,
@@ -2672,13 +2815,12 @@ export function App() {
     visibleState.compacting === true || Boolean(pendingContextCompaction);
   const switchingFocus = pendingFocus?.operation === "focus_conversation"
     || pendingFocus?.operation === "create_conversation";
-  const visibleChat = workspaceSyncing
-    ? cachedWorkspacePresentation?.chat ?? initialChatState
-    : conversationSyncing
-      ? cachedConversationPresentation?.chat ?? initialChatState
-      : switchingFocus
-        ? initialChatState
-        : chat;
+  let visibleChat = chat;
+  if (transitioning) {
+    visibleChat = transitionPresentation?.chat ?? initialChatState;
+  } else if (switchingFocus) {
+    visibleChat = initialChatState;
+  }
   const visibleBusy = transitioning || switchingFocus
     ? false
     : visibleState.busy || Boolean(outstandingRunId);
@@ -2688,16 +2830,12 @@ export function App() {
   const visibleConversationReady =
     !switchingFocus && !transitioning && conversationReady;
   const visibleCompacting = transitioning ? false : conversationCompacting;
-  const visibleConversationRole = workspaceSyncing
-    ? cachedWorkspacePresentation?.conversationRole
-    : conversationSyncing
-      ? cachedConversationPresentation?.conversationRole
-      : conversationRole;
-  const visibleHistoryWindow = workspaceSyncing
-    ? cachedWorkspacePresentation?.historyWindow ?? EMPTY_CONVERSATION_WINDOW
-    : conversationSyncing
-      ? cachedConversationPresentation?.historyWindow ?? EMPTY_CONVERSATION_WINDOW
-      : historyWindow;
+  const visibleConversationRole = transitioning
+    ? transitionPresentation?.conversationRole
+    : conversationRole;
+  const visibleHistoryWindow = transitioning
+    ? transitionPresentation?.historyWindow ?? EMPTY_CONVERSATION_WINDOW
+    : historyWindow;
   const pendingTargetConversationId = pendingFocus?.operation === "focus_conversation"
     ? pendingFocus.targetConversationId
     : undefined;

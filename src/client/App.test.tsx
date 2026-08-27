@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   PROTOCOL_VERSION,
   type ClientCommand,
+  type ConversationRoleSnapshot,
   type PublicState,
   type RoleTemplate,
   type ServerEvent,
@@ -285,6 +286,62 @@ function defaultRole(overrides: Partial<RoleTemplate> = {}): RoleTemplate {
     createdAt: "2026-07-19T12:00:00.000Z",
     updatedAt: "2026-07-19T12:00:00.000Z",
     available: true,
+    ...overrides,
+  };
+}
+
+function defaultConversationRole(
+  overrides: Partial<ConversationRoleSnapshot> = {},
+): ConversationRoleSnapshot {
+  return {
+    id: "default",
+    revision: 1,
+    name: "Default",
+    description: "General purpose",
+    systemPrompt: "Be useful.",
+    model: { provider: "provider", id: "model" },
+    defaultThinkingLevel: "off",
+    toolMode: "read_only",
+    canManageSessions: true,
+    ...overrides,
+  };
+}
+
+type ConversationPreviewEvent = Extract<
+  ServerEvent,
+  { type: "conversation_preview" }
+>;
+
+function conversationPreview(
+  identity: Pick<ConversationPreviewEvent, "sessionId" | "commandId">,
+  conversationId: string,
+  text: string,
+  overrides: Partial<Pick<
+    ConversationPreviewEvent,
+    "projectId" | "cwd" | "toolMode" | "role" | "window"
+  >> = {},
+): ConversationPreviewEvent {
+  return {
+    type: "conversation_preview",
+    projectId: PROJECT_ID,
+    conversationId,
+    cwd: "E:\\work",
+    toolMode: "read_only",
+    role: defaultConversationRole(),
+    items: [{
+      kind: "message",
+      id: `preview-${text}`,
+      role: "user",
+      text,
+      thinking: "",
+      tools: [],
+    }],
+    window: {
+      omittedBefore: false,
+      startsMidTurn: false,
+      contentTruncated: false,
+    },
+    ...identity,
     ...overrides,
   };
 }
@@ -600,7 +657,7 @@ describe("App", () => {
       .toBeEnabled();
   });
 
-  it("settles a cached workspace without a conversation only for the exact initialize acknowledgement", () => {
+  it("ignores an empty attachment for an exact initialize until its target focus is ready", () => {
     render(<App />);
     const originalSessionId = startFromSetup();
     const window = {
@@ -660,6 +717,14 @@ describe("App", () => {
     expect(screen.getByText("cached conversation before empty project"))
       .toBeInTheDocument();
 
+    act(() => socketMock.rawEmit?.(conversationPreview(
+      { sessionId: reconnect.sessionId, commandId: reconnect.commandId! },
+      CONVERSATION_ID,
+      "exact reconnect preview",
+    )));
+    expect(screen.getByText("exact reconnect preview", { selector: "article" }))
+      .toBeInTheDocument();
+
     act(() => {
       socketMock.rawEmit?.({
         type: "focus_attached",
@@ -678,59 +743,699 @@ describe("App", () => {
     });
     expect(screen.getByRole("status", { name: "正在同步工作区…" }))
       .toBeInTheDocument();
-    expect(screen.getByText("cached conversation before empty project"))
+    expect(screen.getByText("exact reconnect preview", { selector: "article" }))
       .toBeInTheDocument();
 
+    act(() => socketMock.rawEmit?.({
+      type: "focus_attached",
+      operation: "initialize",
+      commandId: reconnect.commandId!,
+      sessionId: reconnect.sessionId,
+      projectId: PROJECT_ID,
+    }));
+
+    expect(screen.getByRole("status", { name: "正在同步工作区…" }))
+      .toBeInTheDocument();
+    expect(screen.getByText("exact reconnect preview", { selector: "article" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toBeDisabled();
+    expect(screen.queryByRole("heading", { name: "选择这个会话的角色" }))
+      .not.toBeInTheDocument();
+
+    act(() => socketMock.rawEmit?.({
+      type: "focus_attached",
+      operation: "initialize",
+      commandId: reconnect.commandId!,
+      sessionId: reconnect.sessionId,
+      projectId: PROJECT_ID,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A_SECOND,
+    }));
+    expect(screen.getByText("exact reconnect preview", { selector: "article" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toBeDisabled();
+
     act(() => {
-      socketMock.rawEmit?.({
-        type: "focus_attached",
-        operation: "initialize",
-        commandId: reconnect.commandId!,
-        sessionId: reconnect.sessionId,
-        projectId: PROJECT_ID,
-      });
       socketMock.rawEmit?.({
         type: "state",
         state: {
           sessionId: reconnect.sessionId,
           projectId: PROJECT_ID,
-          conversationId: undefined,
+          conversationId: CONVERSATION_ID,
+          focusId: FOCUS_A_SECOND,
           cwd: "E:\\work",
           busy: false,
           thinkingLevel: "off",
-          toolMode: "full_access",
+          toolMode: "read_only",
           availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
           providers: [],
         },
       });
       socketMock.rawEmit?.({
-        type: "project_snapshot",
+        type: "conversation_snapshot",
         sessionId: reconnect.sessionId,
-        projectId: PROJECT_ID,
-        conversations: [],
-        truncated: false,
-      });
-      socketMock.rawEmit?.({
-        type: "role_catalog_snapshot",
-        sessionId: reconnect.sessionId,
-        projectId: PROJECT_ID,
-        roles: [defaultRole()],
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A_SECOND,
+        role: defaultConversationRole(),
+        messages: [{
+          id: "reconnect-authoritative",
+          role: "user",
+          text: "exact reconnect authoritative",
+          thinking: "",
+          tools: [],
+        }],
+        window,
       });
     });
 
     expect(screen.queryByRole("status", { name: "正在同步工作区…" }))
       .not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "选择这个会话的角色" }))
+    expect(screen.queryByText("exact reconnect preview", { selector: "article" }))
+      .not.toBeInTheDocument();
+    expect(screen.getByText("exact reconnect authoritative", { selector: "article" }))
       .toBeInTheDocument();
-    const start = screen.getByRole("button", {
-      name: "使用 Default 开始会话",
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toBeEnabled();
+  });
+
+  it("renders a correlated recent-initialize preview read-only until the exact snapshot", () => {
+    localStorage.setItem("piweb.workspaces", JSON.stringify(["E:\\work"]));
+    localStorage.setItem("piweb.lastCwd", "E:\\work");
+    socketMock.autoFocus = false;
+    render(<App />);
+
+    const initialize = latestCommand("initialize");
+    expect(initialize.conversation).toEqual({ kind: "recent" });
+    act(() => socketMock.rawEmit?.(conversationPreview(
+      { sessionId: initialize.sessionId, commandId: initialize.commandId! },
+      CONVERSATION_B,
+      "cold recent preview",
+      {
+        role: defaultConversationRole({ name: "Preview Reader" }),
+        window: {
+          omittedBefore: true,
+          startsMidTurn: false,
+          contentTruncated: true,
+        },
+      },
+    )));
+
+    expect(screen.getByText("cold recent preview", { selector: "article" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "正在同步工作区…" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("note", { name: "历史记录不完整" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查看会话角色 Preview Reader" }))
+      .toBeInTheDocument();
+    expect(screen.getByTitle("模型连接")).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toBeDisabled();
+    expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "思考级别" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "手动压缩上下文" }))
+      .toBeDisabled();
+    expect(screen.getByRole("button", {
+      name: "回到此处，删除这条及之后的消息",
+    })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "停止" })).not.toBeInTheDocument();
+    const commandCount = socketMock.send.mock.calls.length;
+    fireEvent.click(screen.getByTitle("模型连接"));
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    fireEvent.click(screen.getByRole("button", { name: "手动压缩上下文" }));
+    expect(socketMock.send).toHaveBeenCalledTimes(commandCount);
+
+    act(() => socketMock.rawEmit?.({
+      type: "focus_attached",
+      operation: "initialize",
+      commandId: initialize.commandId!,
+      sessionId: initialize.sessionId,
+      projectId: PROJECT_ID,
+      conversationId: CONVERSATION_B,
+      focusId: FOCUS_A_SECOND,
+    }));
+    expect(screen.getByText("cold recent preview", { selector: "article" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "正在同步工作区…" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toBeDisabled();
+
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "state",
+        state: {
+          sessionId: initialize.sessionId,
+          projectId: PROJECT_ID,
+          conversationId: CONVERSATION_B,
+          focusId: FOCUS_A_SECOND,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId: initialize.sessionId,
+        conversationId: CONVERSATION_B,
+        focusId: FOCUS_A_SECOND,
+        role: defaultConversationRole(),
+        messages: [{
+          id: "fresh-authoritative-b",
+          role: "user",
+          text: "fresh authoritative conversation",
+          thinking: "",
+          tools: [],
+        }],
+        window: {
+          omittedBefore: false,
+          startsMidTurn: false,
+          contentTruncated: false,
+        },
+      });
     });
-    expect(start).toBeEnabled();
-    fireEvent.click(start);
-    expect(latestCommand("create_conversation")).toMatchObject({
-      sessionId: reconnect.sessionId,
-      roleId: "default",
+
+    expect(screen.queryByRole("status", { name: "正在同步工作区…" }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByText("cold recent preview", { selector: "article" }))
+      .not.toBeInTheDocument();
+    expect(screen.getByText("fresh authoritative conversation", {
+      selector: "article",
+    })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toBeEnabled();
+  });
+
+  it("keeps a focus preview through attach, replaces it on snapshot, and clears it on error", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    const window = {
+      omittedBefore: false,
+      startsMidTurn: false,
+      contentTruncated: false,
+    };
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversations: [{
+          id: CONVERSATION_ID,
+          name: "A",
+          preview: "A",
+          createdAt: "2026-07-19T08:00:00.000Z",
+          updatedAt: "2026-07-19T08:00:00.000Z",
+          messageCount: 1,
+        }, {
+          id: CONVERSATION_B,
+          name: "B",
+          preview: "B",
+          createdAt: "2026-07-19T08:00:00.000Z",
+          updatedAt: "2026-07-19T09:00:00.000Z",
+          messageCount: 1,
+        }],
+        truncated: false,
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        role: defaultConversationRole(),
+        messages: [{
+          id: "source-a",
+          role: "user",
+          text: "source A authoritative",
+          thinking: "",
+          tools: [],
+        }],
+        window,
+      });
     });
+
+    socketMock.autoFocus = false;
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    const focusB = latestCommand("focus_conversation");
+    act(() => socketMock.rawEmit?.(conversationPreview(
+      { sessionId, commandId: focusB.commandId },
+      CONVERSATION_B,
+      "B prepared preview",
+    )));
+    expect(screen.getByText("B prepared preview", { selector: "article" }))
+      .toBeInTheDocument();
+    expect(screen.queryByText("source A authoritative", { selector: "article" }))
+      .not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toBeDisabled();
+    expect(screen.getByRole("button", { name: "删除会话 B" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "打开会话 A" })).toBeDisabled();
+
+    const focusBId = "ae301850-745d-44dd-a30f-000000000201";
+    act(() => socketMock.rawEmit?.({
+      type: "focus_attached",
+      operation: "focus_conversation",
+      commandId: focusB.commandId,
+      sessionId,
+      projectId: PROJECT_ID,
+      conversationId: CONVERSATION_B,
+      focusId: focusBId,
+    }));
+    expect(screen.getByText("B prepared preview", { selector: "article" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "正在同步会话…" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toBeDisabled();
+
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "state",
+        state: {
+          sessionId,
+          projectId: PROJECT_ID,
+          conversationId: CONVERSATION_B,
+          focusId: focusBId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_B,
+        focusId: focusBId,
+        role: defaultConversationRole(),
+        messages: [{
+          id: "fresh-b",
+          role: "user",
+          text: "B authoritative snapshot",
+          thinking: "",
+          tools: [],
+        }],
+        window,
+      });
+    });
+    expect(screen.queryByText("B prepared preview", { selector: "article" }))
+      .not.toBeInTheDocument();
+    expect(screen.getByText("B authoritative snapshot", { selector: "article" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 A" }));
+    const focusA = latestCommand("focus_conversation");
+    act(() => socketMock.rawEmit?.(conversationPreview(
+      { sessionId, commandId: focusA.commandId },
+      CONVERSATION_ID,
+      "A preview that will fail",
+    )));
+    expect(screen.getByText("A preview that will fail", { selector: "article" }))
+      .toBeInTheDocument();
+
+    act(() => socketMock.rawEmit?.({
+      type: "error",
+      scope: "command",
+      operation: "focus_conversation",
+      commandId: focusA.commandId,
+      sessionId,
+      message: "focus failed after preview",
+    }));
+    expect(screen.queryByText("A preview that will fail", { selector: "article" }))
+      .not.toBeInTheDocument();
+    expect(screen.getByText("B authoritative snapshot", { selector: "article" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toBeEnabled();
+  });
+
+  it("does not cache a late preview after complete membership confirms deletion", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    const window = {
+      omittedBefore: false,
+      startsMidTurn: false,
+      contentTruncated: false,
+    };
+    const conversationA = {
+      id: CONVERSATION_ID,
+      name: "A",
+      preview: "A",
+      createdAt: "2026-07-19T08:00:00.000Z",
+      updatedAt: "2026-07-19T08:00:00.000Z",
+      messageCount: 1,
+    };
+    const conversationB = {
+      id: CONVERSATION_B,
+      name: "B",
+      preview: "B",
+      createdAt: "2026-07-19T08:00:00.000Z",
+      updatedAt: "2026-07-19T09:00:00.000Z",
+      messageCount: 1,
+    };
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversations: [conversationA, conversationB],
+        truncated: false,
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        messages: [{
+          id: "source-before-deletion",
+          role: "user",
+          text: "source before deletion",
+          thinking: "",
+          tools: [],
+        }],
+        window,
+      });
+    });
+
+    socketMock.autoFocus = false;
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    const deletedFocus = latestCommand("focus_conversation");
+    act(() => socketMock.rawEmit?.({
+      type: "project_snapshot",
+      sessionId,
+      projectId: PROJECT_ID,
+      conversations: [conversationA],
+      truncated: false,
+    }));
+    expect(screen.queryByRole("button", { name: "打开会话 B" }))
+      .not.toBeInTheDocument();
+
+    act(() => socketMock.rawEmit?.(conversationPreview(
+      { sessionId, commandId: deletedFocus.commandId },
+      CONVERSATION_B,
+      "late deleted B preview",
+    )));
+    expect(screen.queryByText("late deleted B preview"))
+      .not.toBeInTheDocument();
+
+    act(() => socketMock.rawEmit?.({
+      type: "error",
+      scope: "command",
+      operation: "focus_conversation",
+      commandId: deletedFocus.commandId,
+      sessionId,
+      conversationId: CONVERSATION_B,
+      message: "deleted while opening",
+    }));
+    expect(screen.getByText("source before deletion", { selector: "article" }))
+      .toBeInTheDocument();
+
+    act(() => socketMock.rawEmit?.({
+      type: "project_snapshot",
+      sessionId,
+      projectId: PROJECT_ID,
+      conversations: [conversationA, conversationB],
+      truncated: false,
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+
+    expect(screen.getByRole("status", { name: "正在同步会话…" }))
+      .toBeInTheDocument();
+    expect(screen.queryByText("late deleted B preview"))
+      .not.toBeInTheDocument();
+    expect(screen.queryByText("source before deletion", { selector: "article" }))
+      .not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toBeDisabled();
+  });
+
+  it("does not treat absence from a truncated project snapshot as deletion proof", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    const conversationA = {
+      id: CONVERSATION_ID,
+      name: "A",
+      preview: "A",
+      createdAt: "2026-07-19T08:00:00.000Z",
+      updatedAt: "2026-07-19T08:00:00.000Z",
+      messageCount: 1,
+    };
+    const conversationB = {
+      id: CONVERSATION_B,
+      name: "B",
+      preview: "B",
+      createdAt: "2026-07-19T08:00:00.000Z",
+      updatedAt: "2026-07-19T09:00:00.000Z",
+      messageCount: 1,
+    };
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversations: [conversationA, conversationB],
+        truncated: false,
+      });
+    });
+
+    socketMock.autoFocus = false;
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    const focus = latestCommand("focus_conversation");
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversations: [conversationA],
+        truncated: true,
+      });
+      socketMock.rawEmit?.(conversationPreview(
+        { sessionId, commandId: focus.commandId },
+        CONVERSATION_B,
+        "preview absent only from truncated index",
+      ));
+    });
+
+    expect(screen.getByText("preview absent only from truncated index", {
+      selector: "article",
+    })).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "正在同步会话…" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toBeDisabled();
+  });
+
+  it("rejects mismatched previews and clears temporary previews on replacement and disconnect", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    const window = {
+      omittedBefore: false,
+      startsMidTurn: false,
+      contentTruncated: false,
+    };
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversations: [{
+          id: CONVERSATION_ID,
+          name: "A",
+          preview: "A",
+          createdAt: "2026-07-19T08:00:00.000Z",
+          updatedAt: "2026-07-19T08:00:00.000Z",
+          messageCount: 1,
+        }, {
+          id: CONVERSATION_B,
+          name: "B",
+          preview: "B",
+          createdAt: "2026-07-19T08:00:00.000Z",
+          updatedAt: "2026-07-19T09:00:00.000Z",
+          messageCount: 1,
+        }],
+        truncated: false,
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        messages: [{
+          id: "source-before-stale-preview",
+          role: "user",
+          text: "source before stale preview",
+          thinking: "",
+          tools: [],
+        }],
+        window,
+      });
+    });
+
+    socketMock.autoFocus = false;
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    const focus = latestCommand("focus_conversation");
+    const mismatches = [
+      conversationPreview({
+        sessionId: "00000000-0000-4000-8000-000000000001",
+        commandId: focus.commandId,
+      }, CONVERSATION_B, "wrong session preview"),
+      conversationPreview({
+        sessionId,
+        commandId: "00000000-0000-4000-8000-000000000099",
+      }, CONVERSATION_B, "wrong command preview"),
+      conversationPreview(
+        { sessionId, commandId: focus.commandId },
+        CONVERSATION_B,
+        "wrong project preview",
+        { projectId: "00000000-0000-4000-8000-000000000002" },
+      ),
+      conversationPreview(
+        { sessionId, commandId: focus.commandId },
+        CONVERSATION_B,
+        "wrong workspace preview",
+        { cwd: "E:\\other" },
+      ),
+      conversationPreview(
+        { sessionId, commandId: focus.commandId },
+        CONVERSATION_ID,
+        "wrong target preview",
+      ),
+    ];
+    act(() => {
+      for (const preview of mismatches) socketMock.rawEmit?.(preview);
+    });
+    for (const text of [
+      "wrong session preview",
+      "wrong command preview",
+      "wrong project preview",
+      "wrong workspace preview",
+      "wrong target preview",
+    ]) {
+      expect(screen.queryByText(text)).not.toBeInTheDocument();
+    }
+
+    act(() => socketMock.rawEmit?.(conversationPreview(
+      { sessionId, commandId: focus.commandId },
+      CONVERSATION_B,
+      "exact preview before replacement",
+    )));
+    expect(screen.getByText("exact preview before replacement", {
+      selector: "article",
+    })).toBeInTheDocument();
+    act(() => socketMock.rawEmit?.({
+      type: "error",
+      scope: "command",
+      operation: "focus_conversation",
+      commandId: focus.commandId,
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      message: "wrong focus target error",
+    }));
+    expect(screen.getByText("exact preview before replacement", {
+      selector: "article",
+    })).toBeInTheDocument();
+    expect(screen.queryByText("wrong focus target error")).not.toBeInTheDocument();
+
+    act(() => socketMock.rawEmit?.({
+      type: "hello",
+      protocolVersion: PROTOCOL_VERSION,
+      startupCwd: "E:\\default",
+    }));
+    const replacement = latestCommand("initialize");
+    expect(replacement.sessionId).not.toBe(sessionId);
+    expect(screen.queryByText("exact preview before replacement"))
+      .not.toBeInTheDocument();
+    act(() => socketMock.rawEmit?.(conversationPreview(
+      { sessionId, commandId: focus.commandId },
+      CONVERSATION_B,
+      "stale preview after replacement",
+    )));
+    expect(screen.queryByText("stale preview after replacement"))
+      .not.toBeInTheDocument();
+    act(() => socketMock.rawEmit?.(conversationPreview(
+      { sessionId: replacement.sessionId, commandId: replacement.commandId! },
+      CONVERSATION_B,
+      "wrong exact-open target preview",
+    )));
+    expect(screen.queryByText("wrong exact-open target preview"))
+      .not.toBeInTheDocument();
+
+    act(() => socketMock.rawEmit?.(conversationPreview(
+      { sessionId: replacement.sessionId, commandId: replacement.commandId! },
+      CONVERSATION_ID,
+      "replacement preview before disconnect",
+    )));
+    expect(screen.getByText("replacement preview before disconnect", {
+      selector: "article",
+    })).toBeInTheDocument();
+    act(() => socketMock.status?.(false));
+    expect(screen.queryByText("replacement preview before disconnect"))
+      .not.toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "正在同步工作区…" }))
+      .not.toBeInTheDocument();
   });
 
   it("keeps a cache miss empty and restores the source focus on a matching focus error", () => {
