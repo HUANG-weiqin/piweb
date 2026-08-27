@@ -1469,9 +1469,41 @@ pre {
   overflow-wrap: anywhere;
 }
 
-.loop-list-items input {
-  margin-top: 2px;
-  accent-color: var(--accent);
+.loop-list-items input[type="checkbox"] {
+  appearance: none;
+  display: grid;
+  place-content: center;
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+  margin: 2px 0 0;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  background: var(--panel-strong);
+  box-shadow: none;
+  opacity: 1;
+  cursor: default;
+}
+
+.loop-list-items input[type="checkbox"]::before {
+  width: 4px;
+  height: 8px;
+  border: solid var(--on-accent);
+  border-width: 0 2px 2px 0;
+  content: "";
+  opacity: 0;
+  transform: rotate(45deg) translate(-1px, -1px);
+}
+
+.loop-list-items input[type="checkbox"]:checked {
+  border-color: var(--success);
+  background: var(--success);
+}
+
+.loop-list-items input[type="checkbox"]:checked::before {
+  opacity: 1;
 }
 
 .loop-list-items .checked span {
