@@ -50,17 +50,9 @@ function distanceFromBottom(transcript: HTMLElement): number {
   );
 }
 
-function sameChatFocus(
-  left: ChatState["focus"],
-  right: ChatState["focus"],
-): boolean {
-  return left?.sessionId === right?.sessionId
-    && left?.conversationId === right?.conversationId
-    && left?.focusId === right?.focusId;
-}
-
 interface ChatProps {
   chat: ChatState;
+  observationSessionId: string;
   busy: boolean;
   activeRun?: PublicState["activeRun"];
   loopList?: LoopList;
@@ -219,6 +211,7 @@ function getSessionTokenUsage(chat: ChatState, usage?: TokenUsage): TokenUsage {
 
 function ChatView({
   chat,
+  observationSessionId,
   busy,
   activeRun,
   loopList = { items: [], armed: false },
@@ -272,8 +265,8 @@ function ChatView({
   const followOutputRef = useRef(true);
   const lastScrollTopRef = useRef(0);
 
-  const currentFocusRef = useRef<ChatState["focus"]>(chat.focus);
-  const positionedFocusRef = useRef<ChatState["focus"]>(undefined);
+  const observedTranscriptKeyRef = useRef<string | undefined>(undefined);
+  const positionedTranscriptKeyRef = useRef<string | undefined>(undefined);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [loopListExpanded, setLoopListExpanded] = useState(false);
   const [roleDetailsOpen, setRoleDetailsOpen] = useState(false);
@@ -308,7 +301,7 @@ function ChatView({
     ? `${chat.focus.sessionId}:${chat.focus.conversationId}:${chat.focus.focusId}`
     : "unfocused";
   const transcriptRenderScopeKey = chat.focus
-    ? `${chat.focus.sessionId}:${chat.focus.conversationId}`
+    ? `${observationSessionId}:${chat.focus.conversationId}`
     : "unfocused";
   const loopListEmpty = loopList.items.length === 0;
   const checkedLoopListItems = loopList.items.filter((item) => item.checked).length;
@@ -398,15 +391,18 @@ function ChatView({
     );
   }, [scrollTranscript]);
   useLayoutEffect(() => {
-    currentFocusRef.current = chat.focus;
-    const focusNeedsInitialPosition = chat.focus
-      && !sameChatFocus(positionedFocusRef.current, chat.focus);
-    if (focusNeedsInitialPosition) {
+    if (observedTranscriptKeyRef.current !== transcriptRenderScopeKey) {
+      observedTranscriptKeyRef.current = transcriptRenderScopeKey;
+      positionedTranscriptKeyRef.current = undefined;
+    }
+    const transcriptNeedsInitialPosition = chat.focus
+      && positionedTranscriptKeyRef.current !== transcriptRenderScopeKey;
+    if (transcriptNeedsInitialPosition) {
       followOutputRef.current = true;
       setShowJumpToLatest(false);
-      if (conversationReady) {
+      if (conversationReady || blocks.length > 0) {
         scrollToLatest();
-        positionedFocusRef.current = chat.focus;
+        positionedTranscriptKeyRef.current = transcriptRenderScopeKey;
       }
     } else if (followOutputRef.current) {
       followLatest();
@@ -417,7 +413,15 @@ function ChatView({
     if (transcriptRef.current) {
       lastScrollTopRef.current = transcriptRef.current.scrollTop;
     }
-  }, [chat, compacting, conversationReady, followLatest, loopListExpanded, scrollToLatest]);
+  }, [
+    chat,
+    compacting,
+    conversationReady,
+    followLatest,
+    loopListExpanded,
+    scrollToLatest,
+    transcriptRenderScopeKey,
+  ]);
 
   useLayoutEffect(() => {
     const composerWrap = composerWrapRef.current;

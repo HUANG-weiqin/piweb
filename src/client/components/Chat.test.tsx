@@ -30,6 +30,7 @@ function view(
 ) {
   return <Chat
     chat={chat}
+    observationSessionId={chat.focus?.sessionId ?? "unfocused-session"}
     busy={false}
     sessionTokenUsage={{
       input: 0,
@@ -422,7 +423,7 @@ describe("Chat", () => {
     });
   });
 
-  it("jumps directly to the latest message when a focus first hydrates", () => {
+  it("jumps directly to the latest message before a focus or presentation first paints", () => {
     const focusA = {
       sessionId: "session-1",
       conversationId: "conversation-a",
@@ -432,6 +433,10 @@ describe("Chat", () => {
       ...focusA,
       conversationId: "conversation-b",
       focusId: "focus-b",
+    };
+    const previewFocusB = {
+      ...focusB,
+      focusId: "preview:conversation-b",
     };
     const rendered = render(view({ ...emptyChat, focus: focusA }, "", undefined, {
       conversationReady: false,
@@ -477,22 +482,70 @@ describe("Chat", () => {
     expect(scrollTo).toHaveBeenLastCalledWith({ top: 1_000 });
     expect(scrollTop).toBe(500);
 
-    rendered.rerender(view({ ...emptyChat, focus: focusB }, "", undefined, {
-      conversationReady: false,
-    }));
     scrollHeight = 2_000;
     scrollTop = 0;
     scrollTo.mockClear();
 
     rendered.rerender(view({
-      messages: [{ ...hydratedMessage, id: "assistant-2" }],
+      messages: [{ ...hydratedMessage, id: "assistant-2", text: "preview latest" }],
       sessionTokens: 0,
-      focus: focusB,
-    }));
+      focus: previewFocusB,
+    }, "", undefined, { conversationReady: false }));
 
     expect(scrollTo).toHaveBeenCalledOnce();
     expect(scrollTo).toHaveBeenLastCalledWith({ top: 2_000 });
     expect(scrollTop).toBe(1_500);
+
+    scrollTop = 800;
+    fireEvent.wheel(transcript, { deltaY: -4 });
+    scrollTo.mockClear();
+    rendered.rerender(view({
+      messages: [{ ...hydratedMessage, id: "assistant-2", text: "authoritative latest" }],
+      sessionTokens: 0,
+      focus: focusB,
+    }));
+
+    expect(scrollTo).not.toHaveBeenCalled();
+    expect(scrollTop).toBe(800);
+
+    rendered.rerender(view({ ...emptyChat, focus: focusA }, "", undefined, {
+      conversationReady: false,
+    }));
+    const cachedB: ChatState = {
+      messages: [{ ...hydratedMessage, id: "assistant-2", text: "cached again" }],
+      sessionTokens: 0,
+      focus: previewFocusB,
+    };
+    scrollHeight = 2_500;
+    scrollTop = 0;
+    scrollTo.mockClear();
+    rendered.rerender(view(cachedB, "", undefined, {
+      conversationReady: false,
+    }));
+
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 2_500 });
+    expect(scrollTop).toBe(2_000);
+
+    scrollHeight = 3_000;
+    scrollTop = 0;
+    scrollTo.mockClear();
+    rendered.rerender(view(cachedB, "", undefined, {
+      conversationReady: false,
+      observationSessionId: "session-2",
+    }));
+
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 3_000 });
+    expect(scrollTop).toBe(2_500);
+
+    scrollTo.mockClear();
+    rendered.rerender(view({
+      messages: [{ ...hydratedMessage, id: "assistant-2", text: "new-session snapshot" }],
+      sessionTokens: 0,
+      focus: { ...focusB, sessionId: "session-2" },
+    }));
+
+    expect(scrollTo).not.toHaveBeenCalled();
+    expect(scrollTop).toBe(2_500);
   });
 
   it("releases scroll control upward and commits a manual jump before the next delta", () => {

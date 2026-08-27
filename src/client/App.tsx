@@ -3265,6 +3265,7 @@ export function App() {
             />
           : <Chat
               chat={visibleChat}
+              observationSessionId={visibleState.sessionId}
               busy={visibleBusy}
               activeRun={visibleActiveRun}
               loopList={loopList}
