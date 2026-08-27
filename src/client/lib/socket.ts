@@ -7,10 +7,12 @@ import {
 
 const RECONNECT_BASE_DELAY_MS = 250;
 const RECONNECT_MAX_DELAY_MS = 5_000;
+const RECONNECT_STABLE_WINDOW_MS = 10_000;
 
 export class PiSocket {
   private socket?: WebSocket;
   private reconnectTimer?: number;
+  private reconnectResetTimer?: number;
   private nextReconnectDelayMs = 0;
   private stopped = false;
 
@@ -25,13 +27,24 @@ export class PiSocket {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = undefined;
     }
+    if (this.reconnectResetTimer !== undefined) {
+      clearTimeout(this.reconnectResetTimer);
+      this.reconnectResetTimer = undefined;
+    }
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(`${protocol}//${location.host}/ws`);
     this.socket = socket;
     socket.onopen = () => {
       if (this.socket !== socket) return;
-      this.nextReconnectDelayMs = 0;
       this.onStatus(true);
+      if (this.nextReconnectDelayMs > 0) {
+        this.reconnectResetTimer = window.setTimeout(() => {
+          this.reconnectResetTimer = undefined;
+          if (this.socket === socket && socket.readyState === WebSocket.OPEN) {
+            this.nextReconnectDelayMs = 0;
+          }
+        }, RECONNECT_STABLE_WINDOW_MS);
+      }
     };
     socket.onmessage = (message) => {
       if (this.socket !== socket) return;
@@ -53,6 +66,10 @@ export class PiSocket {
     socket.onclose = (event) => {
       if (this.socket !== socket) return;
       this.socket = undefined;
+      if (this.reconnectResetTimer !== undefined) {
+        clearTimeout(this.reconnectResetTimer);
+        this.reconnectResetTimer = undefined;
+      }
       this.onStatus(false);
       if (!this.stopped && event?.code !== OBSERVATION_FATAL_CLOSE_CODE) {
         const delay = this.nextReconnectDelayMs;
@@ -79,6 +96,10 @@ export class PiSocket {
     if (this.reconnectTimer !== undefined) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = undefined;
+    }
+    if (this.reconnectResetTimer !== undefined) {
+      clearTimeout(this.reconnectResetTimer);
+      this.reconnectResetTimer = undefined;
     }
     this.socket?.close();
   }

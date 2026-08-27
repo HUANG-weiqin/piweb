@@ -89,7 +89,7 @@ describe("PiSocket", () => {
     }
   });
 
-  it("resets reconnect backoff after a successful open", () => {
+  it("resets reconnect backoff only after a stable open window", () => {
     vi.useFakeTimers();
     vi.stubGlobal("WebSocket", FakeWebSocket);
     const socket = new PiSocket(vi.fn(), vi.fn());
@@ -104,10 +104,35 @@ describe("PiSocket", () => {
 
     const recovered = FakeWebSocket.instances[2]!;
     recovered.onopen?.();
+    vi.advanceTimersByTime(10_000);
     recovered.onclose?.();
     vi.advanceTimersByTime(0);
 
     expect(FakeWebSocket.instances).toHaveLength(4);
+  });
+
+  it("keeps backing off when each transport opens and then sends a malformed frame", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const socket = new PiSocket(vi.fn(), vi.fn());
+    socket.connect();
+
+    for (const delay of [0, 250, 500]) {
+      const failed = FakeWebSocket.instances.at(-1)!;
+      const instanceCount = FakeWebSocket.instances.length;
+      failed.onopen?.();
+      failed.onmessage?.({ data: "{" } as MessageEvent);
+      failed.onclose?.();
+
+      if (delay > 0) {
+        vi.advanceTimersByTime(delay - 1);
+        expect(FakeWebSocket.instances).toHaveLength(instanceCount);
+        vi.advanceTimersByTime(1);
+      } else {
+        vi.advanceTimersByTime(0);
+      }
+      expect(FakeWebSocket.instances).toHaveLength(instanceCount + 1);
+    }
   });
 
   it("does not let a stale open reset the current reconnect backoff", () => {
