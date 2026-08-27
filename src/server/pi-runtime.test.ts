@@ -23,7 +23,6 @@ import {
   type InlineExtension,
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
-import { AGENT_CONTEXT_BUDGET_CUSTOM_TYPE } from "./agent-context-budget.js";
 import { PiRuntime } from "./pi-runtime.js";
 
 initTheme();
@@ -279,7 +278,7 @@ describe("PiRuntime session ownership", () => {
     expect(manager.appendCompaction).toBe(nativeAppendCompaction);
   });
 
-  it("projects live context-budget telemetry after the SDK context transform", async () => {
+  it("projects live context-budget telemetry without creating a trailing user turn", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-context-budget-"));
     const manager = SessionManager.inMemory(cwd);
     const projectMessage = {
@@ -290,6 +289,7 @@ describe("PiRuntime session ownership", () => {
       timestamp: 1,
     };
     let originalTransform: unknown;
+    let originalConverter: unknown;
     const runtime = await testRuntime(
       () => [
         (pi) => {
@@ -303,6 +303,7 @@ describe("PiRuntime session ownership", () => {
       ],
       async (result) => {
         originalTransform = result.session.agent.transformContext;
+        originalConverter = result.session.agent.convertToLlm;
       },
     );
     let thresholdPercent = 70;
@@ -326,30 +327,47 @@ describe("PiRuntime session ownership", () => {
     const sessionMessagesBefore = [...created.session.messages];
     const entriesBefore = manager.getEntries();
 
-    const first = await created.session.agent.transformContext!(input);
+    const firstTransformed = await created.session.agent.transformContext!(input);
+    const first = await created.session.agent.convertToLlm(firstTransformed);
     thresholdPercent = 80;
-    const second = await created.session.agent.transformContext!(input);
+    const secondTransformed = await created.session.agent.transformContext!(input);
+    const second = await created.session.agent.convertToLlm(secondTransformed);
 
-    expect(first.slice(0, -1)).toEqual([input[0], projectMessage]);
-    expect(first.at(-1)).toMatchObject({
-      role: "custom",
-      customType: AGENT_CONTEXT_BUDGET_CUSTOM_TYPE,
-      content: "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
-      display: false,
-    });
-    expect(second.slice(0, -1)).toEqual([input[0], projectMessage]);
+    expect(firstTransformed).toEqual([input[0], projectMessage]);
+    expect(secondTransformed).toEqual([input[0], projectMessage]);
+    expect(first).toEqual([
+      input[0],
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
+          },
+          { type: "text", text: "project context" },
+        ],
+        timestamp: 1,
+      },
+    ]);
     expect(second.at(-1)).toMatchObject({
-      role: "custom",
-      customType: AGENT_CONTEXT_BUDGET_CUSTOM_TYPE,
-      content: "<piweb_ctx used=\"10k/100k\" auto_compact=\"80%\" remaining=\"70k\" />",
-      display: false,
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: "<piweb_ctx used=\"10k/100k\" auto_compact=\"80%\" remaining=\"70k\" />",
+        },
+        { type: "text", text: "project context" },
+      ],
     });
+    expect(second).toHaveLength(secondTransformed.length);
     expect(created.session.messages).toEqual(sessionMessagesBefore);
     expect(manager.getEntries()).toEqual(entriesBefore);
-    expect(created.session.agent.transformContext).not.toBe(originalTransform);
+    expect(created.session.agent.transformContext).toBe(originalTransform);
+    expect(created.session.agent.convertToLlm).not.toBe(originalConverter);
 
     await created.dispose();
     expect(created.session.agent.transformContext).toBe(originalTransform);
+    expect(created.session.agent.convertToLlm).toBe(originalConverter);
   });
 
   it("activates Pi's structured read-only tools by default", async () => {
@@ -1119,7 +1137,7 @@ describe("PiRuntime session ownership", () => {
           configurable: true,
           value: new Proxy(nativeAgent, {
             set(target, property, value, receiver) {
-              if (property === "transformContext") {
+              if (property === "convertToLlm") {
                 throw new Error("context budget installation failed");
               }
               return Reflect.set(target, property, value, receiver);
@@ -1173,14 +1191,14 @@ describe("PiRuntime session ownership", () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-assembly-failure-"));
     let disposals = 0;
     let ownerRefreshes = 0;
-    let originalTransform: unknown;
+    let originalConverter: unknown;
     const runtime = await testRuntime(
       () => [],
       async (created) => {
-        originalTransform = created.session.agent.transformContext;
+        originalConverter = created.session.agent.convertToLlm;
         const nativeDispose = created.session.dispose.bind(created.session);
         created.session.dispose = () => {
-          expect(created.session.agent.transformContext).toBe(originalTransform);
+          expect(created.session.agent.convertToLlm).toBe(originalConverter);
           disposals++;
           nativeDispose();
         };

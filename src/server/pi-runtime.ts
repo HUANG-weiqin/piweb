@@ -636,8 +636,8 @@ export class PiRuntime implements PiRuntimeLike {
       createdSession.agent.steeringMode = "all";
       installToolResultCompression(createdSession);
       if (options.getCompactionThresholdPercent) {
-        // This host wrapper sits outside the SDK extension transform so its
-        // ephemeral telemetry remains the final context projection.
+        // This host converter runs after the SDK extension transform and keeps
+        // telemetry inside the existing final input instead of creating a new turn.
         contextBudgetController = installAgentContextBudget(
           createdSession,
           options.getCompactionThresholdPercent,

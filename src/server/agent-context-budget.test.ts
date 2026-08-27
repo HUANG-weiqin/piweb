@@ -3,13 +3,11 @@ import type {
   ContextUsage,
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
-import {
-  AGENT_CONTEXT_BUDGET_CUSTOM_TYPE,
-  installAgentContextBudget,
-} from "./agent-context-budget.js";
+import { installAgentContextBudget } from "./agent-context-budget.js";
 
-type TransformContext = NonNullable<AgentSession["agent"]["transformContext"]>;
-type AgentMessage = Parameters<TransformContext>[0][number];
+type ConvertToLlm = AgentSession["agent"]["convertToLlm"];
+type AgentMessage = Parameters<ConvertToLlm>[0][number];
+type LlmMessages = Awaited<ReturnType<ConvertToLlm>>;
 
 function message(value: unknown): AgentMessage {
   return value as AgentMessage;
@@ -23,18 +21,16 @@ function userMessage(text: string): AgentMessage {
   });
 }
 
-function contextBudgetMessage(content: string): AgentMessage {
-  return message({
-    role: "custom",
-    customType: AGENT_CONTEXT_BUDGET_CUSTOM_TYPE,
-    content,
-    display: false,
+function llmUser(text: string): LlmMessages[number] {
+  return {
+    role: "user",
+    content: [{ type: "text", text }],
     timestamp: 1,
-  });
+  };
 }
 
 function fakeSession({
-  original = async (messages) => messages,
+  original = async () => [llmUser("converted")],
   getContextUsage = () => ({
     tokens: 10_000,
     contextWindow: 100_000,
@@ -42,7 +38,7 @@ function fakeSession({
   }),
   agent,
 }: {
-  original?: TransformContext;
+  original?: ConvertToLlm;
   getContextUsage?: () => ContextUsage | undefined;
   agent?: AgentSession["agent"];
 } = {}) {
@@ -50,7 +46,7 @@ function fakeSession({
   const managerMessages = [userMessage("persisted manager message")];
   const session = {
     agent: agent ?? {
-      transformContext: original,
+      convertToLlm: original,
       state: { messages: sessionMessages },
     },
     getContextUsage,
@@ -60,28 +56,47 @@ function fakeSession({
   return { session, sessionMessages, managerMessages };
 }
 
-function telemetry(messages: AgentMessage[]) {
-  const result = messages.at(-1);
-  if (!result || result.role !== "custom") {
-    throw new Error("Expected final custom telemetry message");
+function firstText(messages: LlmMessages): string {
+  const last = messages.at(-1);
+  if (!last || (last.role !== "user" && last.role !== "toolResult")) {
+    throw new Error("Expected a final user or tool-result message");
   }
-  return result;
+  const content = typeof last.content === "string"
+    ? [{ type: "text" as const, text: last.content }]
+    : last.content;
+  const first = content[0];
+  if (first?.type !== "text") throw new Error("Expected telemetry text");
+  return first.text;
 }
 
 describe("installAgentContextBudget", () => {
-  it("calls the original first with its receiver and AbortSignal, then preserves its result order", async () => {
+  it("calls the original converter first with its receiver and preserves message order", async () => {
     const events: string[] = [];
-    const first = userMessage("first");
-    const second = userMessage("second");
-    const originalResult = [first, second];
+    const first = {
+      role: "assistant" as const,
+      content: [],
+      api: "openai-responses" as const,
+      provider: "test",
+      model: "test",
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "stop" as const,
+      timestamp: 1,
+    };
+    const second = llmUser("latest task");
+    const originalResult: LlmMessages = [first, second];
     let receiver: unknown;
     let receivedMessages: AgentMessage[] | undefined;
-    let receivedSignal: AbortSignal | undefined;
-    const original: TransformContext = async function (messages, signal) {
+    const original: ConvertToLlm = async function (messages) {
       events.push("original");
       receiver = this;
       receivedMessages = messages;
-      receivedSignal = signal;
       return originalResult;
     };
     const getContextUsage = vi.fn(() => {
@@ -95,24 +110,23 @@ describe("installAgentContextBudget", () => {
     const { session } = fakeSession({ original, getContextUsage });
     installAgentContextBudget(session, getThreshold);
     const input = [userMessage("input")];
-    const controller = new AbortController();
 
-    const result = await session.agent.transformContext!(
-      input,
-      controller.signal,
-    );
+    const result = await session.agent.convertToLlm(input);
 
     expect(events).toEqual(["original", "usage", "threshold"]);
     expect(receiver).toBe(session.agent);
     expect(receivedMessages).toBe(input);
-    expect(receivedSignal).toBe(controller.signal);
-    expect(result.slice(0, -1)).toEqual(originalResult);
+    expect(result).toHaveLength(originalResult.length);
     expect(result[0]).toBe(first);
-    expect(result[1]).toBe(second);
+    expect(result[1]).not.toBe(second);
+    expect(result[1]).toMatchObject({ role: "user" });
   });
 
-  it("appends the exact normal payload as one hidden final custom message", async () => {
+  it("prepends the exact telemetry inside the final user message without creating a new turn", async () => {
+    const originalMessage = llmUser("continue the long task");
+    const originalResult = [originalMessage];
     const { session } = fakeSession({
+      original: async () => originalResult,
       getContextUsage: () => ({
         tokens: 51_900,
         contextWindow: 272_000,
@@ -121,19 +135,48 @@ describe("installAgentContextBudget", () => {
     });
     installAgentContextBudget(session, () => 70);
 
-    const result = await session.agent.transformContext!([userMessage("input")]);
+    const result = await session.agent.convertToLlm([userMessage("input")]);
 
-    expect(telemetry(result)).toEqual({
-      role: "custom",
-      customType: AGENT_CONTEXT_BUDGET_CUSTOM_TYPE,
-      content: "<piweb_ctx used=\"51.9k/272k\" auto_compact=\"70%\" remaining=\"138.5k\" />",
-      display: false,
-      timestamp: expect.any(Number),
-    });
-    expect(result.filter((item) => (
-      item.role === "custom"
-      && item.customType === AGENT_CONTEXT_BUDGET_CUSTOM_TYPE
-    ))).toHaveLength(1);
+    expect(result).toEqual([{
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: "<piweb_ctx used=\"51.9k/272k\" auto_compact=\"70%\" remaining=\"138.5k\" />",
+        },
+        { type: "text", text: "continue the long task" },
+      ],
+      timestamp: 1,
+    }]);
+    expect(result).toHaveLength(originalResult.length);
+    expect(originalResult).toEqual([originalMessage]);
+  });
+
+  it("preserves a final tool-result role and protocol position", async () => {
+    const toolResult: LlmMessages[number] = {
+      role: "toolResult",
+      toolCallId: "call-1",
+      toolName: "read",
+      content: [{ type: "text", text: "tool output" }],
+      isError: false,
+      timestamp: 1,
+    };
+    const { session } = fakeSession({ original: async () => [toolResult] });
+    installAgentContextBudget(session, () => 70);
+
+    const result = await session.agent.convertToLlm([]);
+
+    expect(result).toEqual([{
+      ...toolResult,
+      content: [
+        {
+          type: "text",
+          text: "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
+        },
+        { type: "text", text: "tool output" },
+      ],
+    }]);
+    expect(result).toHaveLength(1);
   });
 
   it("uses the unrounded usage percentage at the exact warning boundary", async () => {
@@ -151,13 +194,13 @@ describe("installAgentContextBudget", () => {
     const { session } = fakeSession({ getContextUsage });
     installAgentContextBudget(session, () => 70);
 
-    const below = await session.agent.transformContext!([]);
-    const at = await session.agent.transformContext!([]);
+    const below = await session.agent.convertToLlm([]);
+    const at = await session.agent.convertToLlm([]);
 
-    expect(telemetry(below).content).toBe(
+    expect(firstText(below)).toBe(
       "<piweb_ctx used=\"65k/100k\" auto_compact=\"70%\" remaining=\"5k\" />",
     );
-    expect(telemetry(at).content).toBe(
+    expect(firstText(at)).toBe(
       "<piweb_ctx used=\"65k/100k\" auto_compact=\"70%\" remaining=\"5k\" warning=\"Compaction soon; consider updating Agent Notebook.\" />",
     );
   });
@@ -177,18 +220,18 @@ describe("installAgentContextBudget", () => {
     const { session } = fakeSession({ getContextUsage });
     installAgentContextBudget(session, () => 70);
 
-    const beforeCompaction = await session.agent.transformContext!([]);
-    const afterCompaction = await session.agent.transformContext!([]);
+    const beforeCompaction = await session.agent.convertToLlm([]);
+    const afterCompaction = await session.agent.convertToLlm([]);
 
-    expect(telemetry(beforeCompaction).content).toContain(
+    expect(firstText(beforeCompaction)).toContain(
       "warning=\"Compaction soon; consider updating Agent Notebook.\"",
     );
-    expect(telemetry(afterCompaction).content).toBe(
+    expect(firstText(afterCompaction)).toBe(
       "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
     );
   });
 
-  it("recalculates usage and a changing threshold on every transform", async () => {
+  it("recalculates usage and a changing threshold on every conversion", async () => {
     const getContextUsage = vi.fn(() => ({
       tokens: 60_000,
       contextWindow: 100_000,
@@ -200,13 +243,13 @@ describe("installAgentContextBudget", () => {
     const { session } = fakeSession({ getContextUsage });
     installAgentContextBudget(session, getThreshold);
 
-    const first = await session.agent.transformContext!([]);
-    const second = await session.agent.transformContext!([]);
+    const first = await session.agent.convertToLlm([]);
+    const second = await session.agent.convertToLlm([]);
 
-    expect(telemetry(first).content).toBe(
+    expect(firstText(first)).toBe(
       "<piweb_ctx used=\"60k/100k\" auto_compact=\"70%\" remaining=\"10k\" />",
     );
-    expect(telemetry(second).content).toBe(
+    expect(firstText(second)).toBe(
       "<piweb_ctx used=\"60k/100k\" auto_compact=\"80%\" remaining=\"20k\" />",
     );
     expect(getContextUsage).toHaveBeenCalledTimes(2);
@@ -223,16 +266,16 @@ describe("installAgentContextBudget", () => {
     });
     installAgentContextBudget(session, () => 70);
 
-    const result = await session.agent.transformContext!([]);
+    const result = await session.agent.convertToLlm([]);
 
-    expect(telemetry(result).content).toBe(
+    expect(firstText(result)).toBe(
       "<piweb_ctx used=\"unknown/272k\" auto_compact=\"70%\" />",
     );
   });
 
-  it("fails open for unavailable usage, invalid windows or thresholds, and telemetry getter failures", async () => {
-    const originalResult = [userMessage("transformed")];
-    const original = vi.fn<TransformContext>(async () => originalResult);
+  it("fails open for unavailable usage, invalid values, and telemetry getter failures", async () => {
+    const originalResult = [llmUser("converted")];
+    const original = vi.fn<ConvertToLlm>(async () => originalResult);
     const getContextUsage = vi.fn<() => ContextUsage | undefined>()
       .mockReturnValueOnce(undefined)
       .mockReturnValueOnce({ tokens: 10, contextWindow: 0, percent: 10 })
@@ -247,17 +290,17 @@ describe("installAgentContextBudget", () => {
     const { session } = fakeSession({ original, getContextUsage });
     installAgentContextBudget(session, getThreshold);
 
-    await expect(session.agent.transformContext!([])).resolves.toBe(originalResult);
-    await expect(session.agent.transformContext!([])).resolves.toBe(originalResult);
-    await expect(session.agent.transformContext!([])).resolves.toBe(originalResult);
-    await expect(session.agent.transformContext!([])).resolves.toBe(originalResult);
+    await expect(session.agent.convertToLlm([])).resolves.toBe(originalResult);
+    await expect(session.agent.convertToLlm([])).resolves.toBe(originalResult);
+    await expect(session.agent.convertToLlm([])).resolves.toBe(originalResult);
+    await expect(session.agent.convertToLlm([])).resolves.toBe(originalResult);
     expect(getContextUsage).toHaveBeenCalledTimes(4);
     expect(getThreshold).toHaveBeenCalledTimes(4);
   });
 
-  it("propagates an original-transform rejection without reading telemetry", async () => {
+  it("propagates an original-converter rejection without reading telemetry", async () => {
     const failure = new Error("original failed");
-    const original = vi.fn<TransformContext>(async () => {
+    const original = vi.fn<ConvertToLlm>(async () => {
       throw failure;
     });
     const getContextUsage = vi.fn<() => ContextUsage | undefined>();
@@ -265,109 +308,104 @@ describe("installAgentContextBudget", () => {
     const { session } = fakeSession({ original, getContextUsage });
     installAgentContextBudget(session, getThreshold);
 
-    await expect(session.agent.transformContext!([])).rejects.toBe(failure);
+    await expect(session.agent.convertToLlm([])).rejects.toBe(failure);
     expect(getContextUsage).not.toHaveBeenCalled();
     expect(getThreshold).not.toHaveBeenCalled();
   });
 
-  it("replaces every prior reserved marker and leaves exactly one at the end", async () => {
-    const first = userMessage("first");
-    const otherCustom = message({
-      role: "custom",
-      customType: "example.other.v1",
-      content: "other",
-      display: false,
-      timestamp: 1,
-    });
-    const staleOne = contextBudgetMessage("stale one");
-    const staleTwo = contextBudgetMessage("stale two");
-    const originalResult = [
-      staleOne,
-      first,
-      staleTwo,
-      otherCustom,
-    ];
-    const original = vi.fn<TransformContext>(async () => originalResult);
-    const { session } = fakeSession({ original });
-    installAgentContextBudget(session, () => 70);
-
-    const result = await session.agent.transformContext!([]);
-
-    expect(result.slice(0, -1)).toEqual([first, otherCustom]);
-    expect(result[0]).toBe(first);
-    expect(result[1]).toBe(otherCustom);
-    expect(result.filter((item) => (
-      item.role === "custom"
-      && item.customType === AGENT_CONTEXT_BUDGET_CUSTOM_TYPE
-    ))).toHaveLength(1);
-    expect(originalResult).toEqual([staleOne, first, staleTwo, otherCustom]);
-  });
-
-  it("does not mutate transform input or session-owned message arrays", async () => {
+  it("does not mutate input, converted output, or session-owned messages", async () => {
     const inputMessage = userMessage("input");
     const input = Object.freeze([inputMessage]) as unknown as AgentMessage[];
-    const original: TransformContext = async (messages) => messages;
+    const convertedMessage = llmUser("converted");
+    const converted = Object.freeze([convertedMessage]) as unknown as LlmMessages;
+    const original: ConvertToLlm = async () => converted;
     const { session, sessionMessages, managerMessages } = fakeSession({ original });
     const sessionBefore = [...sessionMessages];
     const managerBefore = [...managerMessages];
     installAgentContextBudget(session, () => 70);
 
-    const result = await session.agent.transformContext!(input);
+    const result = await session.agent.convertToLlm(input);
 
     expect(input).toEqual([inputMessage]);
-    expect(result).not.toBe(input);
+    expect(converted).toEqual([convertedMessage]);
+    expect(result).not.toBe(converted);
     expect(sessionMessages).toEqual(sessionBefore);
     expect(managerMessages).toEqual(managerBefore);
   });
 
+  it("fails open when the converted context has no safe final input role", async () => {
+    const assistant = {
+      role: "assistant" as const,
+      content: [],
+      api: "openai-responses" as const,
+      provider: "test",
+      model: "test",
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "stop" as const,
+      timestamp: 1,
+    };
+    const originalResult: LlmMessages = [assistant];
+    const { session } = fakeSession({ original: async () => originalResult });
+    installAgentContextBudget(session, () => 70);
+
+    await expect(session.agent.convertToLlm([])).resolves.toBe(originalResult);
+  });
+
   it("disposes idempotently and restores own and inherited property shapes", () => {
-    const ownOriginal: TransformContext = async (messages) => messages;
+    const ownOriginal: ConvertToLlm = async () => [];
     const own = fakeSession({ original: ownOriginal });
     const ownController = installAgentContextBudget(own.session, () => 70);
-    expect(Object.hasOwn(own.session.agent, "transformContext")).toBe(true);
-    expect(own.session.agent.transformContext).not.toBe(ownOriginal);
+    expect(Object.hasOwn(own.session.agent, "convertToLlm")).toBe(true);
+    expect(own.session.agent.convertToLlm).not.toBe(ownOriginal);
 
     ownController.dispose();
     ownController.dispose();
-    expect(Object.hasOwn(own.session.agent, "transformContext")).toBe(true);
-    expect(own.session.agent.transformContext).toBe(ownOriginal);
+    expect(Object.hasOwn(own.session.agent, "convertToLlm")).toBe(true);
+    expect(own.session.agent.convertToLlm).toBe(ownOriginal);
 
-    const inheritedOriginal: TransformContext = async (messages) => messages;
-    const prototype = { transformContext: inheritedOriginal };
+    const inheritedOriginal: ConvertToLlm = async () => [];
+    const prototype = { convertToLlm: inheritedOriginal };
     const inheritedAgent = Object.create(prototype) as AgentSession["agent"];
     const inherited = fakeSession({ agent: inheritedAgent });
-    expect(Object.hasOwn(inherited.session.agent, "transformContext")).toBe(false);
+    expect(Object.hasOwn(inherited.session.agent, "convertToLlm")).toBe(false);
 
     const inheritedController = installAgentContextBudget(
       inherited.session,
       () => 70,
     );
-    expect(Object.hasOwn(inherited.session.agent, "transformContext")).toBe(true);
+    expect(Object.hasOwn(inherited.session.agent, "convertToLlm")).toBe(true);
     inheritedController.dispose();
     inheritedController.dispose();
-    expect(Object.hasOwn(inherited.session.agent, "transformContext")).toBe(false);
-    expect(inherited.session.agent.transformContext).toBe(inheritedOriginal);
+    expect(Object.hasOwn(inherited.session.agent, "convertToLlm")).toBe(false);
+    expect(inherited.session.agent.convertToLlm).toBe(inheritedOriginal);
   });
 
-  it("fails closed when the Agent does not expose transformContext", () => {
+  it("fails closed when the Agent does not expose convertToLlm", () => {
     const agent = Object.create(null) as AgentSession["agent"];
     const { session } = fakeSession({ agent });
 
     expect(() => installAgentContextBudget(session, () => 70)).toThrow(
-      "Pi Agent does not expose transformContext",
+      "Pi Agent does not expose convertToLlm",
     );
   });
 
-  it("does not restore over a transform installed after its wrapper", () => {
-    const original: TransformContext = async (messages) => messages;
-    const foreign: TransformContext = async (messages) => [...messages];
+  it("does not restore over a converter installed after its wrapper", () => {
+    const original: ConvertToLlm = async () => [];
+    const foreign: ConvertToLlm = async () => [];
     const { session } = fakeSession({ original });
     const controller = installAgentContextBudget(session, () => 70);
-    session.agent.transformContext = foreign;
+    session.agent.convertToLlm = foreign;
 
     controller.dispose();
     controller.dispose();
 
-    expect(session.agent.transformContext).toBe(foreign);
+    expect(session.agent.convertToLlm).toBe(foreign);
   });
 });

@@ -1,9 +1,8 @@
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 
-type TransformContext = NonNullable<AgentSession["agent"]["transformContext"]>;
-type AgentMessage = Parameters<TransformContext>[0][number];
-
-export const AGENT_CONTEXT_BUDGET_CUSTOM_TYPE = "piweb.context_budget.v1";
+type ConvertToLlm = AgentSession["agent"]["convertToLlm"];
+type AgentMessage = Parameters<ConvertToLlm>[0][number];
+type LlmMessages = Awaited<ReturnType<ConvertToLlm>>;
 
 export interface AgentContextBudgetController {
   dispose(): void;
@@ -27,7 +26,7 @@ function formatTokens(tokens: number): string {
 function createTelemetry(
   usage: ReturnType<AgentSession["getContextUsage"]>,
   thresholdPercent: number,
-): AgentMessage | undefined {
+): string | undefined {
   if (
     !usage
     || !Number.isFinite(usage.contextWindow)
@@ -40,30 +39,45 @@ function createTelemetry(
   }
 
   const window = usage.contextWindow;
-  let content: string;
   if (usage.tokens === null) {
-    content = `<piweb_ctx used="unknown/${formatTokens(window)}" auto_compact="${thresholdPercent}%" />`;
-  } else {
-    if (!Number.isFinite(usage.tokens) || usage.tokens < 0) return undefined;
-    const remaining = Math.max(
-      0,
-      (window * thresholdPercent) / 100 - usage.tokens,
-    );
-    const warning = typeof usage.percent === "number"
-      && Number.isFinite(usage.percent)
-      && usage.percent >= thresholdPercent - 5
-      ? " warning=\"Compaction soon; consider updating Agent Notebook.\""
-      : "";
-    content = `<piweb_ctx used="${formatTokens(usage.tokens)}/${formatTokens(window)}" auto_compact="${thresholdPercent}%" remaining="${formatTokens(remaining)}"${warning} />`;
+    return `<piweb_ctx used="unknown/${formatTokens(window)}" auto_compact="${thresholdPercent}%" />`;
+  }
+  if (!Number.isFinite(usage.tokens) || usage.tokens < 0) return undefined;
+
+  const remaining = Math.max(
+    0,
+    (window * thresholdPercent) / 100 - usage.tokens,
+  );
+  const warning = typeof usage.percent === "number"
+    && Number.isFinite(usage.percent)
+    && usage.percent >= thresholdPercent - 5
+    ? " warning=\"Compaction soon; consider updating Agent Notebook.\""
+    : "";
+  return `<piweb_ctx used="${formatTokens(usage.tokens)}/${formatTokens(window)}" auto_compact="${thresholdPercent}%" remaining="${formatTokens(remaining)}"${warning} />`;
+}
+
+function prependTelemetry(
+  messages: LlmMessages,
+  telemetry: string,
+): LlmMessages {
+  const lastMessage = messages.at(-1);
+  if (
+    !lastMessage
+    || (lastMessage.role !== "user" && lastMessage.role !== "toolResult")
+  ) {
+    return messages;
   }
 
-  return {
-    role: "custom",
-    customType: AGENT_CONTEXT_BUDGET_CUSTOM_TYPE,
-    content,
-    display: false,
-    timestamp: Date.now(),
-  };
+  const content = typeof lastMessage.content === "string"
+    ? [{ type: "text" as const, text: telemetry }, {
+        type: "text" as const,
+        text: lastMessage.content,
+      }]
+    : [{ type: "text" as const, text: telemetry }, ...lastMessage.content];
+  return [
+    ...messages.slice(0, -1),
+    { ...lastMessage, content },
+  ];
 }
 
 export function installAgentContextBudget(
@@ -71,45 +85,36 @@ export function installAgentContextBudget(
   getCompactionThresholdPercent: () => number,
 ): AgentContextBudgetController {
   const agent = session.agent;
-  const candidate = agent.transformContext;
-  if (typeof candidate !== "function") {
-    throw new Error("Pi Agent does not expose transformContext");
+  const original = agent.convertToLlm;
+  if (typeof original !== "function") {
+    throw new Error("Pi Agent does not expose convertToLlm");
   }
-  const original: TransformContext = candidate;
 
-  const hadOwnTransform = Object.hasOwn(agent, "transformContext");
-  async function transformContext(
+  const hadOwnConverter = Object.hasOwn(agent, "convertToLlm");
+  async function convertToLlm(
     this: AgentSession["agent"],
     messages: AgentMessage[],
-    signal?: AbortSignal,
-  ): Promise<AgentMessage[]> {
-    const transformed = await original.call(this, messages, signal);
+  ): Promise<LlmMessages> {
+    const converted = await original.call(this, messages);
     try {
       const usage = session.getContextUsage();
       const thresholdPercent = getCompactionThresholdPercent();
       const telemetry = createTelemetry(usage, thresholdPercent);
-      if (!telemetry) return transformed;
-      return [
-        ...transformed.filter((message) => (
-          message.role !== "custom"
-          || message.customType !== AGENT_CONTEXT_BUDGET_CUSTOM_TYPE
-        )),
-        telemetry,
-      ];
+      return telemetry ? prependTelemetry(converted, telemetry) : converted;
     } catch {
-      return transformed;
+      return converted;
     }
   }
 
-  agent.transformContext = transformContext;
+  agent.convertToLlm = convertToLlm;
   let installed = true;
   return {
     dispose(): void {
       if (!installed) return;
       installed = false;
-      if (agent.transformContext !== transformContext) return;
-      if (hadOwnTransform) agent.transformContext = original;
-      else delete agent.transformContext;
+      if (agent.convertToLlm !== convertToLlm) return;
+      if (hadOwnConverter) agent.convertToLlm = original;
+      else delete (agent as Partial<AgentSession["agent"]>).convertToLlm;
     },
   };
 }
