@@ -44,7 +44,8 @@ describe("ConversationSidebar", () => {
         currentConversationId={baseConversation.id}
         collapsed={false}
         truncated={false}
-        online
+        navigationEnabled
+        actionsEnabled
         onToggleCollapsed={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn()}
@@ -76,7 +77,8 @@ describe("ConversationSidebar", () => {
         currentConversationId={baseConversation.id}
         collapsed={false}
         truncated={false}
-        online
+        navigationEnabled
+        actionsEnabled
         onToggleCollapsed={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn()}
@@ -108,7 +110,8 @@ describe("ConversationSidebar", () => {
         ]}
         collapsed={false}
         truncated={false}
-        online
+        navigationEnabled
+        actionsEnabled
         onToggleCollapsed={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn()}
@@ -145,7 +148,8 @@ describe("ConversationSidebar", () => {
         conversations={[baseConversation, running, attention]}
         collapsed={false}
         truncated={false}
-        online
+        navigationEnabled
+        actionsEnabled
         onToggleCollapsed={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn()}
@@ -176,7 +180,8 @@ describe("ConversationSidebar", () => {
           }]}
           collapsed={false}
           truncated={false}
-          online
+          navigationEnabled
+        actionsEnabled
           onToggleCollapsed={vi.fn()}
           onSelect={vi.fn()}
           onCreate={vi.fn()}
@@ -209,7 +214,8 @@ describe("ConversationSidebar", () => {
         }]}
         collapsed={false}
         truncated={false}
-        online
+        navigationEnabled
+        actionsEnabled
         onToggleCollapsed={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn()}
@@ -234,7 +240,8 @@ describe("ConversationSidebar", () => {
         }]}
         collapsed={false}
         truncated={false}
-        online
+        navigationEnabled
+        actionsEnabled
         onToggleCollapsed={vi.fn()}
         onSelect={onSelect}
         onCreate={vi.fn()}
@@ -256,7 +263,8 @@ describe("ConversationSidebar", () => {
         }]}
         collapsed={false}
         truncated={false}
-        online
+        navigationEnabled
+        actionsEnabled
         onToggleCollapsed={vi.fn()}
         onSelect={onSelect}
         onCreate={vi.fn()}
@@ -275,7 +283,8 @@ describe("ConversationSidebar", () => {
         conversations={[baseConversation]}
         collapsed={false}
         truncated={false}
-        online
+        navigationEnabled
+        actionsEnabled
         onToggleCollapsed={onToggleCollapsed}
         onSelect={vi.fn()}
         onCreate={onCreate}
@@ -294,7 +303,8 @@ describe("ConversationSidebar", () => {
         conversations={[baseConversation]}
         collapsed
         truncated={false}
-        online
+        navigationEnabled
+        actionsEnabled
         onToggleCollapsed={onToggleCollapsed}
         onSelect={vi.fn()}
         onCreate={onCreate}
@@ -311,13 +321,72 @@ describe("ConversationSidebar", () => {
       .not.toBeInTheDocument();
   });
 
+  it("keeps navigation available while lifecycle actions are locked and disables all controls offline", () => {
+    const onSelect = vi.fn();
+    const onToggleCollapsed = vi.fn();
+    const { rerender } = render(
+      <ConversationSidebar
+        conversations={[baseConversation]}
+        collapsed={false}
+        truncated={false}
+        navigationEnabled
+        actionsEnabled={false}
+        onToggleCollapsed={onToggleCollapsed}
+        onSelect={onSelect}
+        onCreate={vi.fn()}
+        onRename={vi.fn()}
+        onDelete={vi.fn(() => true)}
+      />,
+    );
+
+    const conversationButton = screen.getByRole("button", {
+      name: "打开会话 接口设计",
+    });
+    const collapseButton = screen.getByRole("button", { name: "收起会话栏" });
+    expect(conversationButton).toBeEnabled();
+    expect(collapseButton).toBeEnabled();
+    expect(screen.getByRole("button", { name: "新建会话" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "重命名会话 接口设计" }))
+      .toBeDisabled();
+    expect(screen.getByRole("button", { name: "删除会话 接口设计" }))
+      .toBeDisabled();
+    fireEvent.click(conversationButton);
+    fireEvent.click(collapseButton);
+    expect(onSelect).toHaveBeenCalledWith(baseConversation.id);
+    expect(onToggleCollapsed).toHaveBeenCalledWith(true);
+
+    rerender(
+      <ConversationSidebar
+        conversations={[baseConversation]}
+        collapsed={false}
+        truncated={false}
+        navigationEnabled={false}
+        actionsEnabled={false}
+        onToggleCollapsed={onToggleCollapsed}
+        onSelect={onSelect}
+        onCreate={vi.fn()}
+        onRename={vi.fn()}
+        onDelete={vi.fn(() => true)}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "打开会话 接口设计" }))
+      .toBeDisabled();
+    expect(screen.getByRole("button", { name: "收起会话栏" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "新建会话" })).toBeDisabled();
+    expect(screen.getByRole("separator", { name: "调整会话栏宽度" }))
+      .toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByRole("separator", { name: "调整会话栏宽度" }))
+      .toHaveAttribute("tabindex", "-1");
+  });
+
   it("resizes the expanded sidebar within fixed pointer and keyboard bounds", () => {
     render(
       <ConversationSidebar
         conversations={[baseConversation]}
         collapsed={false}
         truncated={false}
-        online
+        navigationEnabled
+        actionsEnabled
         onToggleCollapsed={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn()}
@@ -368,7 +437,8 @@ describe("ConversationSidebar", () => {
         currentConversationId={baseConversation.id}
         collapsed={false}
         truncated={false}
-        online
+        navigationEnabled
+        actionsEnabled
         onToggleCollapsed={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn()}
@@ -400,7 +470,8 @@ describe("ConversationSidebar", () => {
         conversations={[baseConversation]}
         collapsed={false}
         truncated={false}
-        online
+        navigationEnabled
+        actionsEnabled
         onToggleCollapsed={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn()}
@@ -429,7 +500,8 @@ describe("ConversationSidebar", () => {
         busyConversationId={baseConversation.id}
         collapsed={false}
         truncated={false}
-        online
+        navigationEnabled
+        actionsEnabled
         onToggleCollapsed={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn()}
@@ -450,7 +522,8 @@ describe("ConversationSidebar", () => {
         conversations={[{ ...baseConversation, unread: true }]}
         collapsed={false}
         truncated
-        online
+        navigationEnabled
+        actionsEnabled
         onToggleCollapsed={vi.fn()}
         onSelect={vi.fn()}
         onCreate={vi.fn()}

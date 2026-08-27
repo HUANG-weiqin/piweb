@@ -31,7 +31,8 @@ export interface ConversationSidebarProps {
   currentConversationId?: string;
   busyConversationId?: string;
   collapsed: boolean;
-  online: boolean;
+  navigationEnabled: boolean;
+  actionsEnabled: boolean;
   pendingDeletionId?: string;
   onToggleCollapsed(collapsed: boolean): void;
   onSelect(conversationId: string): void;
@@ -165,7 +166,8 @@ function ActivityIndicator({
 function ConversationRow({
   conversation,
   selected,
-  online,
+  navigationEnabled,
+  actionsEnabled,
   deletionPending,
   deletionBlocked,
   busy,
@@ -175,7 +177,8 @@ function ConversationRow({
 }: {
   conversation: ConversationSummary;
   selected: boolean;
-  online: boolean;
+  navigationEnabled: boolean;
+  actionsEnabled: boolean;
   deletionPending: boolean;
   deletionBlocked: boolean;
   busy: boolean;
@@ -201,7 +204,7 @@ function ConversationRow({
         className="conversation-sidebar-conversation"
         aria-current={selected ? "page" : undefined}
         aria-label={selected ? `当前会话 ${title}` : `打开会话 ${title}`}
-        disabled={!online || deletionBlocked}
+        disabled={!navigationEnabled || deletionBlocked}
         onClick={() => onSelect(conversation.id)}
       >
         <span className="conversation-sidebar-primary">
@@ -262,7 +265,7 @@ function ConversationRow({
           type="button"
           className="conversation-sidebar-rename ghost"
           aria-label={`重命名会话 ${title}`}
-          disabled={!online || deletionBlocked || active}
+          disabled={!actionsEnabled || deletionBlocked || active}
           title={active ? "活跃会话结算后可以重命名" : "重命名会话"}
           onClick={() => onRequestRename(conversation.id)}
         >
@@ -272,7 +275,7 @@ function ConversationRow({
           type="button"
           className="conversation-sidebar-delete ghost danger"
           aria-label={`删除会话 ${title}`}
-          disabled={!online || deletionBlocked || active}
+          disabled={!actionsEnabled || deletionBlocked || active}
           title={active ? "活跃会话需先终止并等待结算" : "删除会话"}
           onClick={() => onRequestDelete(conversation.id)}
         >
@@ -289,7 +292,8 @@ export function ConversationSidebar({
   currentConversationId,
   busyConversationId,
   collapsed,
-  online,
+  navigationEnabled,
+  actionsEnabled,
   pendingDeletionId,
   onToggleCollapsed,
   onSelect,
@@ -319,14 +323,14 @@ export function ConversationSidebar({
     renameCandidate?.id === busyConversationId
     || (renameCandidate?.activity?.kind ?? "idle") !== "idle";
   const renameName = renameDraft.trim();
-  const renameBlocked = !online || renameCandidateActive;
+  const renameBlocked = !actionsEnabled || renameCandidateActive;
   const renameUnchanged =
     renameCandidate ? renameName === titleOf(renameCandidate) : false;
   const sidebarStyle = {
     "--conversation-sidebar-width": `${sidebarWidth}px`,
   } as CSSProperties;
   const startResize = (event: PointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0) return;
+    if (!navigationEnabled || event.button !== 0) return;
     resizeState.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
@@ -335,6 +339,7 @@ export function ConversationSidebar({
     event.preventDefault();
   };
   const resizeWithKeyboard = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (!navigationEnabled) return;
     let nextWidth: number | undefined;
     if (event.key === "ArrowLeft") {
       nextWidth = sidebarWidth - SIDEBAR_KEYBOARD_STEP;
@@ -391,8 +396,8 @@ export function ConversationSidebar({
     };
   }, []);
   useEffect(() => {
-    if (collapsed) resizeState.current = undefined;
-  }, [collapsed]);
+    if (collapsed || !navigationEnabled) resizeState.current = undefined;
+  }, [collapsed, navigationEnabled]);
   useEffect(() => {
     if (!renameConversationId || renameCandidate) return;
     setRenameConversationId("");
@@ -418,6 +423,7 @@ export function ConversationSidebar({
           className="conversation-sidebar-toggle"
           aria-label={collapsed ? "展开会话栏" : "收起会话栏"}
           aria-expanded={!collapsed}
+          disabled={!navigationEnabled}
           onClick={() => onToggleCollapsed(!collapsed)}
         >
           {collapsed ? "›" : "‹"}
@@ -432,7 +438,8 @@ export function ConversationSidebar({
                 key={conversation.id}
                 conversation={conversation}
                 selected={conversation.id === currentConversationId}
-                online={online}
+                navigationEnabled={navigationEnabled}
+                actionsEnabled={actionsEnabled}
                 deletionPending={pendingDeletionId === conversation.id}
                 deletionBlocked={Boolean(pendingDeletionId)}
                 busy={conversation.id === busyConversationId}
@@ -453,7 +460,7 @@ export function ConversationSidebar({
           type="button"
           className="conversation-sidebar-create"
           aria-label="新建会话"
-          disabled={!online || Boolean(pendingDeletionId)}
+          disabled={!actionsEnabled || Boolean(pendingDeletionId)}
           onClick={onCreate}
         >
           <span aria-hidden="true">＋</span>
@@ -469,7 +476,8 @@ export function ConversationSidebar({
         aria-valuemax={MAX_SIDEBAR_WIDTH}
         aria-valuenow={sidebarWidth}
         aria-valuetext={`${sidebarWidth} 像素`}
-        tabIndex={0}
+        aria-disabled={!navigationEnabled}
+        tabIndex={navigationEnabled ? 0 : -1}
         title="拖动调整会话栏宽度"
         onKeyDown={resizeWithKeyboard}
         onPointerDown={startResize}
@@ -508,7 +516,7 @@ export function ConversationSidebar({
           <button
             type="button"
             className="danger-button"
-            disabled={!online || Boolean(pendingDeletionId) || deleteCandidateActive}
+            disabled={!actionsEnabled || Boolean(pendingDeletionId) || deleteCandidateActive}
             onClick={() => {
               if (onDelete(deleteCandidate.id)) {
                 setConfirmDeleteConversationId("");
