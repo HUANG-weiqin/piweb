@@ -43,6 +43,7 @@ import { WorkspacePlaceholder } from "./components/WorkspacePlaceholder";
 import { createCompletionSound, type CompletionSound } from "./lib/completion-sound";
 import { PiSocket } from "./lib/socket";
 import { readStoredString, writeStoredString } from "./lib/storage";
+import { createTransitionTimingOwner } from "./lib/transition-timing";
 import { useModalFocus } from "./lib/use-modal-focus";
 
 const CWD_KEY = "piweb.lastCwd";
@@ -335,6 +336,7 @@ type RoleCommandInput =
 
 export function App() {
   const [initialWorkspaces] = useState(loadInitialWorkspaceState);
+  const [transitionTiming] = useState(createTransitionTimingOwner);
   const [transportOnline, setTransportOnline] = useState(false);
   const [protocolReady, setProtocolReady] = useState(false);
   const [protocolError, setProtocolError] = useState("");
@@ -1006,6 +1008,7 @@ export function App() {
       if (event.type === "hello") {
         if (event.protocolVersion !== PROTOCOL_VERSION) {
           const message = `协议版本不兼容：服务端 ${event.protocolVersion}，客户端 ${PROTOCOL_VERSION}`;
+          transitionTiming.cancel();
           setProtocolReady(false);
           setTransportOnline(false);
           setProjectActivityByWorkspace(new Map());
@@ -1062,6 +1065,12 @@ export function App() {
           }
           const sessionId = crypto.randomUUID();
           const commandId = crypto.randomUUID();
+          const timingIntent = {
+            kind: "workspace" as const,
+            sessionId,
+            commandId,
+          };
+          transitionTiming.begin(timingIntent);
           sessionIdRef.current = sessionId;
           authFlowIdRef.current = "";
           projectIdRef.current = "";
@@ -1080,13 +1089,14 @@ export function App() {
             operation: "initialize",
             ...(cached ? { cachedProjectId: cached.projectId } : {}),
           });
-          socket.send({
+          const sent = socket.send({
             type: "initialize",
             commandId,
             sessionId,
             cwd: activeCwdRef.current,
             conversation,
           });
+          if (!sent) transitionTiming.cancel(timingIntent);
         }
       } else if (event.type === "directory_listing") {
         const current = directoryBrowserRef.current;
@@ -1153,6 +1163,13 @@ export function App() {
           discardCachedWorkspacePresentation();
           updateWorkspaceSyncing(false);
         }
+        transitionTiming.attach({
+          kind: event.operation === "initialize" ? "workspace" : "conversation",
+          sessionId: event.sessionId,
+          commandId: event.commandId,
+          conversationId: event.conversationId,
+          focusId: event.focusId,
+        });
         updatePendingFocus(undefined);
         updateConversationSyncing(event.operation === "focus_conversation");
         attachFocus(
@@ -1166,10 +1183,12 @@ export function App() {
           event.operation === "initialize"
           && event.conversationId === undefined
           && event.focusId === undefined
-          && workspaceSyncingRef.current
         ) {
-          clearTemporaryWorkspacePresentation();
-          updateWorkspaceSyncing(false);
+          transitionTiming.ready({ sessionId: event.sessionId });
+          if (workspaceSyncingRef.current) {
+            clearTemporaryWorkspacePresentation();
+            updateWorkspaceSyncing(false);
+          }
         }
         const pendingState = pendingFocusedStateRef.current;
         pendingFocusedStateRef.current = undefined;
@@ -1340,6 +1359,11 @@ export function App() {
           pendingFocusRef.current?.operation === "focus_conversation"
           || !matchesFocus(event.sessionId, event.conversationId, event.focusId)
         ) return;
+        transitionTiming.ready({
+          sessionId: event.sessionId,
+          conversationId: event.conversationId,
+          focusId: event.focusId,
+        });
         const focus = focusRef.current;
         if (focus) {
           dispatch({
@@ -1691,6 +1715,11 @@ export function App() {
             || pending.commandId !== event.commandId
             || pending.operation !== event.operation
           ) return;
+          transitionTiming.cancel({
+            kind: pending.operation === "initialize" ? "workspace" : "conversation",
+            sessionId: sessionIdRef.current,
+            commandId: pending.commandId,
+          });
           updatePendingFocus(undefined);
           if (event.operation === "focus_conversation") {
             clearTemporaryConversationPresentation();
@@ -1806,6 +1835,7 @@ export function App() {
       if (!isCurrentSocket()) return;
       setTransportOnline(connected);
       if (!connected) {
+        transitionTiming.cancel();
         setProtocolReady(false);
         setProjectActivityByWorkspace(new Map());
         setProjectActivityTruncated(false);
@@ -1839,6 +1869,7 @@ export function App() {
     socketRef.current = socket;
     socket.connect();
     return () => {
+      transitionTiming.cancel();
       if (socketEpochRef.current === epoch) socketEpochRef.current++;
       socket.close();
     };
@@ -1969,6 +2000,12 @@ export function App() {
     const normalizedCwd = cwd.trim();
     const sessionId = crypto.randomUUID();
     const commandId = crypto.randomUUID();
+    const timingIntent = {
+      kind: "workspace" as const,
+      sessionId,
+      commandId,
+    };
+    transitionTiming.begin(timingIntent);
     setError("");
     markPendingPromptUnconfirmed();
     updateDraft("");
@@ -2004,6 +2041,7 @@ export function App() {
       cwd: normalizedCwd,
       conversation,
     });
+    if (!sent) transitionTiming.cancel(timingIntent);
     if (!sent && cached) {
       updatePendingFocus(undefined);
       discardCachedWorkspacePresentation();
@@ -2104,6 +2142,12 @@ export function App() {
       return;
     }
     const commandId = crypto.randomUUID();
+    const timingIntent = {
+      kind: "conversation" as const,
+      sessionId,
+      commandId,
+    };
+    transitionTiming.begin(timingIntent);
     clearPendingAdmissions();
     cacheCurrentConversationPresentation();
     const sourceFocus = focusRef.current;
@@ -2139,6 +2183,7 @@ export function App() {
       sessionId,
       conversationId,
     })) {
+      transitionTiming.cancel(timingIntent);
       updatePendingFocus(undefined);
       clearTemporaryConversationPresentation();
       updateConversationSyncing(false);
@@ -2160,6 +2205,12 @@ export function App() {
       || pendingConversationRoleSwitchRef.current
     ) return;
     const commandId = crypto.randomUUID();
+    const timingIntent = {
+      kind: "conversation" as const,
+      sessionId,
+      commandId,
+    };
+    transitionTiming.begin(timingIntent);
     updatePendingFocus({ commandId, operation: "create_conversation" });
     setError("");
     if (!send({
@@ -2168,6 +2219,7 @@ export function App() {
       sessionId,
       roleId,
     })) {
+      transitionTiming.cancel(timingIntent);
       updatePendingFocus(undefined);
     }
   };
@@ -2439,6 +2491,7 @@ export function App() {
 
     const sessionId = sessionIdRef.current;
     if (sessionId) send({ type: "close_session", sessionId });
+    transitionTiming.cancel();
     activeCwdRef.current = "";
     sessionIdRef.current = "";
     conversationIdRef.current = "";
