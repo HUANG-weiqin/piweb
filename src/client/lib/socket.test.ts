@@ -54,6 +54,82 @@ describe("PiSocket", () => {
     expect(transport.close).toHaveBeenCalledOnce();
   });
 
+  it("reconnects immediately after the first unexpected close", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const socket = new PiSocket(vi.fn(), vi.fn());
+    socket.connect();
+
+    FakeWebSocket.instances[0]!.onclose?.();
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    vi.advanceTimersByTime(0);
+
+    expect(FakeWebSocket.instances).toHaveLength(2);
+  });
+
+  it("uses bounded backoff for consecutive connection failures", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const socket = new PiSocket(vi.fn(), vi.fn());
+    socket.connect();
+    const delays = [0, 250, 500, 1_000, 2_000, 4_000, 5_000, 5_000];
+
+    for (const delay of delays) {
+      const failed = FakeWebSocket.instances.at(-1)!;
+      const instanceCount = FakeWebSocket.instances.length;
+      failed.onclose?.();
+      if (delay > 0) {
+        vi.advanceTimersByTime(delay - 1);
+        expect(FakeWebSocket.instances).toHaveLength(instanceCount);
+        vi.advanceTimersByTime(1);
+      } else {
+        vi.advanceTimersByTime(0);
+      }
+      expect(FakeWebSocket.instances).toHaveLength(instanceCount + 1);
+    }
+  });
+
+  it("resets reconnect backoff after a successful open", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const socket = new PiSocket(vi.fn(), vi.fn());
+    socket.connect();
+
+    FakeWebSocket.instances[0]!.onclose?.();
+    vi.advanceTimersByTime(0);
+    FakeWebSocket.instances[1]!.onclose?.();
+    vi.advanceTimersByTime(249);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    vi.advanceTimersByTime(1);
+
+    const recovered = FakeWebSocket.instances[2]!;
+    recovered.onopen?.();
+    recovered.onclose?.();
+    vi.advanceTimersByTime(0);
+
+    expect(FakeWebSocket.instances).toHaveLength(4);
+  });
+
+  it("does not let a stale open reset the current reconnect backoff", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const socket = new PiSocket(vi.fn(), vi.fn());
+    socket.connect();
+    const stale = FakeWebSocket.instances[0]!;
+
+    stale.onclose?.();
+    vi.advanceTimersByTime(0);
+    FakeWebSocket.instances[1]!.onclose?.();
+    stale.onopen?.();
+    vi.advanceTimersByTime(250);
+
+    FakeWebSocket.instances[2]!.onclose?.();
+    vi.advanceTimersByTime(499);
+    expect(FakeWebSocket.instances).toHaveLength(3);
+    vi.advanceTimersByTime(1);
+    expect(FakeWebSocket.instances).toHaveLength(4);
+  });
+
   it("does not reconnect an observation rejected by the server", () => {
     vi.useFakeTimers();
     vi.stubGlobal("WebSocket", FakeWebSocket);
@@ -66,7 +142,7 @@ describe("PiSocket", () => {
     transport.onclose?.(new CloseEvent("close", {
       code: OBSERVATION_FATAL_CLOSE_CODE,
     }));
-    vi.advanceTimersByTime(1200);
+    vi.advanceTimersByTime(10_000);
 
     expect(statuses.mock.calls).toEqual([[true], [false]]);
     expect(FakeWebSocket.instances).toHaveLength(1);
@@ -82,7 +158,7 @@ describe("PiSocket", () => {
     const staleTransport = FakeWebSocket.instances[0]!;
 
     staleTransport.onclose?.();
-    vi.advanceTimersByTime(1200);
+    vi.advanceTimersByTime(0);
     expect(FakeWebSocket.instances).toHaveLength(2);
     events.mockClear();
     statuses.mockClear();
@@ -108,7 +184,7 @@ describe("PiSocket", () => {
     const staleTransport = FakeWebSocket.instances[0]!;
 
     staleTransport.onclose?.();
-    vi.advanceTimersByTime(1200);
+    vi.advanceTimersByTime(0);
     const currentTransport = FakeWebSocket.instances[1]!;
 
     staleTransport.onerror?.();
@@ -126,13 +202,13 @@ describe("PiSocket", () => {
     const staleTransport = FakeWebSocket.instances[0]!;
 
     staleTransport.onclose?.();
-    vi.advanceTimersByTime(1200);
+    vi.advanceTimersByTime(0);
     expect(FakeWebSocket.instances).toHaveLength(2);
     statuses.mockClear();
 
     staleTransport.onclose?.();
     staleTransport.onclose?.();
-    vi.advanceTimersByTime(1200);
+    vi.advanceTimersByTime(10_000);
 
     expect(statuses).not.toHaveBeenCalled();
     expect(FakeWebSocket.instances).toHaveLength(2);

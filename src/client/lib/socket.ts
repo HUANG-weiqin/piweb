@@ -5,9 +5,13 @@ import {
   type ServerEvent,
 } from "../../shared/protocol";
 
+const RECONNECT_BASE_DELAY_MS = 250;
+const RECONNECT_MAX_DELAY_MS = 5_000;
+
 export class PiSocket {
   private socket?: WebSocket;
   private reconnectTimer?: number;
+  private nextReconnectDelayMs = 0;
   private stopped = false;
 
   constructor(
@@ -26,6 +30,7 @@ export class PiSocket {
     this.socket = socket;
     socket.onopen = () => {
       if (this.socket !== socket) return;
+      this.nextReconnectDelayMs = 0;
       this.onStatus(true);
     };
     socket.onmessage = (message) => {
@@ -50,10 +55,14 @@ export class PiSocket {
       this.socket = undefined;
       this.onStatus(false);
       if (!this.stopped && event?.code !== OBSERVATION_FATAL_CLOSE_CODE) {
+        const delay = this.nextReconnectDelayMs;
+        this.nextReconnectDelayMs = delay === 0
+          ? RECONNECT_BASE_DELAY_MS
+          : Math.min(delay * 2, RECONNECT_MAX_DELAY_MS);
         this.reconnectTimer = window.setTimeout(() => {
           this.reconnectTimer = undefined;
           if (!this.stopped) this.connect();
-        }, 1200);
+        }, delay);
       }
     };
     socket.onerror = () => socket.close();
