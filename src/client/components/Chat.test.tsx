@@ -81,6 +81,78 @@ afterEach(() => {
 });
 
 describe("Chat", () => {
+  it("scopes transcript item identity to the session and conversation, not the focus", () => {
+    const message = (text: string) => ({
+      id: "stable-message-id",
+      runId: "run-1",
+      role: "user" as const,
+      text,
+      thinking: "",
+      tools: [],
+    });
+    const focus = {
+      sessionId: "session-1",
+      conversationId: "conversation-a",
+      focusId: "focus-preview",
+    };
+    const rendered = render(view({
+      messages: [message("preview")],
+      sessionTokens: 0,
+      focus,
+    }, "", undefined, { conversationReady: false }));
+    const previewArticle = screen.getByText("preview", { selector: "article" });
+
+    rendered.rerender(view({
+      messages: [message("authoritative")],
+      sessionTokens: 0,
+      focus: { ...focus, focusId: "focus-authoritative" },
+    }));
+    const authoritativeArticle = screen.getByText("authoritative", {
+      selector: "article",
+    });
+    expect(authoritativeArticle).toBe(previewArticle);
+
+    rendered.rerender(view({
+      messages: [message("other conversation")],
+      sessionTokens: 0,
+      focus: {
+        ...focus,
+        conversationId: "conversation-b",
+        focusId: "focus-b",
+      },
+    }));
+    const otherConversationArticle = screen.getByText("other conversation", {
+      selector: "article",
+    });
+    expect(otherConversationArticle).not.toBe(authoritativeArticle);
+
+    rendered.rerender(view({
+      messages: [message("other session")],
+      sessionTokens: 0,
+      focus: {
+        sessionId: "session-2",
+        conversationId: "conversation-b",
+        focusId: "focus-c",
+      },
+    }));
+    expect(screen.getByText("other session", { selector: "article" }))
+      .not.toBe(otherConversationArticle);
+  });
+
+  it("shows onboarding only after an empty conversation is ready", () => {
+    const rendered = render(view(emptyChat, "", undefined, {
+      conversationReady: false,
+    }));
+
+    expect(screen.queryByRole("heading", { name: "想做点什么？" }))
+      .not.toBeInTheDocument();
+
+    rendered.rerender(view(emptyChat));
+
+    expect(screen.getByRole("heading", { name: "想做点什么？" }))
+      .toBeInTheDocument();
+  });
+
   it("mounts no LoopList container or height when the list is absent or empty", () => {
     const { rerender } = render(view(emptyChat));
     expect(screen.queryByRole("region", { name: "LoopList" })).not.toBeInTheDocument();

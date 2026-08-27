@@ -37,6 +37,7 @@ ServerEvent
 - batch 在 SDK/JSONL 中仍是一个带 host metadata 的物理 user message，但 transcript 的 live 与 snapshot 投影只显示按 FIFO 拼接的用户原文，不能把 `hostInstruction/batchId/items` envelope 暴露进对话气泡；浏览器不自行解析或猜测这种宿主编码。
 - 每次 initialize 或重连生成新的 observation sessionId；每次 initialize/open/create/focus 由服务端返回新的 focusId。
 - 当前 transcript 身份是 `sessionId + conversationId + focusId`。即使 conversationId 再次相同，旧 focus 的 state/snapshot/live item 也必须丢弃。
+- transcript 的滚动定位与 LoopList 展开重置仍按完整 focus 身份；transcript item 的 React key 使用 `sessionId + conversationId + item id`，仅同会话换 focus 时复用。未 ready 的空投影不显示空会话 onboarding，同步提示不参与主布局。
 - projectId/conversationId 随精确 `focus_attached` 提交；重连用新 sessionId 显式 `open` 当前 durable conversation，若尚未知 ID 才请求 `recent`。
 - WebSocket transport open 与协议握手 ready 是两个状态；版本不兼容会失效 session/run/auth 并禁止发送。浏览器收到无法通过 `ServerEvent` runtime schema 的帧时，先显示有界 protocol error，再隔离并关闭该 socket，通过正常重连和 snapshot hydrate 恢复。首次异常关闭立即重试，后续失败有界退避；裸 transport open 不能重置退避，只有同一 socket 持续稳定打开 10 秒才算恢复，避免服务端反复 `open → malformed frame → close` 形成零延迟自旋。服务端若在最终发送边界发现自己的投影不合法，则发送固定 error 并用专用 close code 终止 observation；客户端清空在线状态且不自动重连，避免确定性坏投影形成重连循环。两种路径都不能在可能缺失关键帧的连接上继续工作。
 - 页面从后台、休眠或 bfcache 恢复时，把同一短时 burst 内的 `focus/pageshow/visibilitychange` 合并为一次 `refresh_view`；命令读取发送时最新的 project/focus 身份，pending focus、prompt 尚未确认、hidden、离线或握手未完成时不发送。恢复刷新不创建新 observation epoch，也不改变 transcript ownership。

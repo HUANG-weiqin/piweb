@@ -307,6 +307,9 @@ function ChatView({
   const transcriptFocusKey = chat.focus
     ? `${chat.focus.sessionId}:${chat.focus.conversationId}:${chat.focus.focusId}`
     : "unfocused";
+  const transcriptRenderScopeKey = chat.focus
+    ? `${chat.focus.sessionId}:${chat.focus.conversationId}`
+    : "unfocused";
   const loopListEmpty = loopList.items.length === 0;
   const checkedLoopListItems = loopList.items.filter((item) => item.checked).length;
   const loopListCompleted = !loopListEmpty
@@ -548,10 +551,10 @@ function ChatView({
       onScroll={handleTranscriptScroll}
       onWheel={handleTranscriptWheel}
     >
-      {!blocks.length && <div className="empty"><div>π</div><h1>想做点什么？</h1><p>Pi 可以读取、修改文件并执行命令。</p></div>}
+      {conversationReady && !blocks.length && <div className="empty"><div>π</div><h1>想做点什么？</h1><p>Pi 可以读取、修改文件并执行命令。</p></div>}
       {blocks.map((block) => {
         if (block.kind === "compaction") return <div
-          key={`${transcriptFocusKey}:compaction:${block.id}`}
+          key={`${transcriptRenderScopeKey}:compaction:${block.id}`}
           className="compaction-marker"
           role="separator"
           aria-label="上下文已压缩"
@@ -559,7 +562,7 @@ function ChatView({
           <span>上下文已压缩</span>
         </div>;
         if (block.kind === "session_message") return <SessionMessageCard
-          key={`${transcriptFocusKey}:card:${block.cardId}`}
+          key={`${transcriptRenderScopeKey}:card:${block.cardId}`}
           card={block}
           onOpenConversation={handleOpenConversation}
         />;
@@ -570,7 +573,7 @@ function ChatView({
         const isStreamingMessage = isActiveMessage
           && activeRun?.phase === "running";
         return <Message
-          key={`${transcriptFocusKey}:message:${block.message.id}`}
+          key={`${transcriptRenderScopeKey}:message:${block.message.id}`}
           message={block.message}
           onRewind={block.message.role === "user" ? handleRewind : undefined}
           rewindDisabled={

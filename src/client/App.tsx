@@ -3233,14 +3233,14 @@ export function App() {
       />
       <div className="workbench-main">
         {workspaceSyncing && <div
-          className="banner"
+          className="banner transition-status-overlay"
           role="status"
           aria-label="正在同步工作区…"
         >
           正在同步工作区…
         </div>}
         {conversationSyncing && <div
-          className="banner"
+          className="banner transition-status-overlay"
           role="status"
           aria-label="正在同步会话…"
         >

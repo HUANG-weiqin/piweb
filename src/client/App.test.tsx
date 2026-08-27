@@ -760,7 +760,7 @@ describe("App", () => {
     expect(screen.getByText("缓存中的 A 对话", { selector: "article" }))
       .toBeInTheDocument();
     expect(screen.getByRole("status", { name: "正在同步工作区…" }))
-      .toBeInTheDocument();
+      .toHaveClass("transition-status-overlay");
     expect(screen.queryByText("本地服务已断开，正在重连…"))
       .not.toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
@@ -1970,7 +1970,7 @@ describe("App", () => {
     socketMock.autoFocus = false;
     fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
     expect(screen.getByRole("status", { name: "正在同步会话…" }))
-      .toBeInTheDocument();
+      .toHaveClass("transition-status-overlay");
     const secondWorkspace = screen.getByRole("button", { name: "打开工作区 second" });
     expect(secondWorkspace).toBeEnabled();
     fireEvent.click(secondWorkspace);
