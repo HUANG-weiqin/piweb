@@ -500,8 +500,25 @@ function inspectPiSessionFileInternal(
 
   let reserved;
   try {
+    const loopListByEntryId = new Map<
+      string,
+      (LoopList & { updatedAt: string }) | undefined
+    >();
+    const continuationsByEntryId = new Map<
+      string,
+      ReadonlyMap<string, number>
+    >();
+    const noContinuations: ReadonlyMap<string, number> = new Map();
     for (let index = 1; index < values.length; index += 1) {
-      const entry = parseReservedConversationEntry(values[index]);
+      const rawEntry = values[index] as UnknownRecord;
+      const parentId = rawEntry.parentId as string | null;
+      let loopList = parentId === null
+        ? undefined
+        : loopListByEntryId.get(parentId);
+      let continuations = parentId === null
+        ? noContinuations
+        : continuationsByEntryId.get(parentId)!;
+      const entry = parseReservedConversationEntry(rawEntry);
       if (
         entry?.kind === "conversation_card"
         && entry.entry.data.fromSnapshot.conversationId !== header.id
@@ -526,6 +543,40 @@ function inspectPiSessionFileInternal(
           "Piweb pending prompt batch conversation must be the current conversation",
         );
       }
+      if (entry?.kind === "loop_list") {
+        loopList = entry.entry.data;
+      }
+      if (entry?.kind === "loop_list_continue") {
+        const { items, runId, continuation } = entry.entry.details;
+        if (loopList === undefined) {
+          throw new Error(
+            "Piweb LoopList continuation requires an ancestor LoopList",
+          );
+        }
+        if (JSON.stringify(items) !== JSON.stringify(loopList.items)) {
+          throw new Error(
+            "Piweb LoopList continuation item snapshot must match the latest ancestor LoopList",
+          );
+        }
+        if (
+          !loopList.armed
+          || !loopList.items.some((item) => !item.checked)
+        ) {
+          throw new Error(
+            "Piweb LoopList continuation requires an armed ancestor LoopList with unchecked work",
+          );
+        }
+        const expectedContinuation = (continuations.get(runId) ?? 0) + 1;
+        if (continuation !== expectedContinuation) {
+          throw new Error(
+            `Piweb LoopList continuation must be ${expectedContinuation} for runId ${runId} on its branch`,
+          );
+        }
+        continuations = new Map(continuations).set(runId, continuation);
+      }
+      const entryId = rawEntry.id as string;
+      loopListByEntryId.set(entryId, loopList);
+      continuationsByEntryId.set(entryId, continuations);
     }
     // The session header is not a reserved custom entry, so passing the owned
     // parsed array avoids allocating an entries copy on metadata-only reads.

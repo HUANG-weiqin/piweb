@@ -423,15 +423,26 @@ function ChatView({
     const composerWrap = composerWrapRef.current;
     const shell = composerWrap?.parentElement;
     if (!composerWrap || !shell) return;
+    let followFrame: number | undefined;
     const updateInset = () => {
       shell.style.setProperty("--composer-inset", `${composerWrap.getBoundingClientRect().height}px`);
+      if (!followOutputRef.current) return;
+      if (followFrame !== undefined) cancelAnimationFrame(followFrame);
+      followFrame = requestAnimationFrame(() => {
+        followFrame = undefined;
+        if (followOutputRef.current) scrollToLatest();
+      });
     };
     updateInset();
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(updateInset);
-    observer.observe(composerWrap);
-    return () => observer.disconnect();
-  }, []);
+    const observer = typeof ResizeObserver === "undefined"
+      ? undefined
+      : new ResizeObserver(updateInset);
+    observer?.observe(composerWrap);
+    return () => {
+      observer?.disconnect();
+      if (followFrame !== undefined) cancelAnimationFrame(followFrame);
+    };
+  }, [scrollToLatest]);
 
   useLayoutEffect(() => {
     const textarea = textareaRef.current;

@@ -31,6 +31,7 @@ import {
   appendReservedCustomEntry,
   createConversationCardEntry,
   createConversationMessageEntry,
+  createLoopListEntry,
   createMetaOperationEntry,
   createPendingPromptBatchEntry,
   createPendingPromptDeliveryEntry,
@@ -1454,6 +1455,25 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: "default" },
     );
+    const branchRootId = actor.sessionManager.getLeafId()!;
+    const activeLoopListId = appendReservedCustomEntry(
+      actor.sessionManager,
+      createLoopListEntry({
+        items: [{ id: "active", text: "Retained work", checked: false }],
+        armed: true,
+        updatedAt: "2026-07-19T10:00:00.000Z",
+      }),
+    );
+    actor.sessionManager.branch(branchRootId);
+    const inactiveLoopListId = appendReservedCustomEntry(
+      actor.sessionManager,
+      createLoopListEntry({
+        items: [{ id: "inactive", text: "Discarded branch", checked: false }],
+        armed: true,
+        updatedAt: "2026-07-19T10:01:00.000Z",
+      }),
+    );
+    actor.sessionManager.branch(activeLoopListId);
     const retainedId = actor.sessionManager.appendMessage({
       role: "user",
       content: "retained",
@@ -1478,11 +1498,17 @@ describe("ProjectSessionCoordinator", () => {
 
     expect(actor.sessionManager.getEntries().map(({ id }) => id)).toEqual([
       expect.any(String),
+      activeLoopListId,
+      inactiveLoopListId,
       retainedId,
     ]);
     expect(actor.session.agent.state.messages).toEqual(
       actor.sessionManager.buildSessionContext().messages,
     );
+    expect(actor.getLoopList()).toEqual({
+      items: [{ id: "active", text: "Retained work", checked: false }],
+      armed: true,
+    });
   });
 
 

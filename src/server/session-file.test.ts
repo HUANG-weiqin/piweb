@@ -11,6 +11,8 @@ import {
   createConversationCardEntry,
   createConversationMessageEntry,
   createConversationMetaEntry,
+  createLoopListContinueEntry,
+  createLoopListEntry,
   createRunSettlementEntry,
   parsePendingPromptBatchEntry,
   parsePendingPromptDeliveryEntry,
@@ -46,6 +48,39 @@ const timestamp = "2026-01-01T00:00:00.000Z";
 
 function serialize(entries: unknown[]): string {
   return `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
+}
+
+type LoopListItems = Parameters<typeof createLoopListEntry>[0]["items"];
+
+function loopListStateEntry(
+  id: string,
+  parentId: string | null,
+  items: LoopListItems,
+  updatedAt = timestamp,
+) {
+  return {
+    type: "custom",
+    id,
+    parentId,
+    timestamp,
+    ...createLoopListEntry({ items, armed: true, updatedAt }),
+  };
+}
+
+function loopListContinuationEntry(
+  id: string,
+  parentId: string,
+  runId: string,
+  continuation: number,
+  items: LoopListItems,
+) {
+  return {
+    type: "custom_message",
+    id,
+    parentId,
+    timestamp,
+    ...createLoopListContinueEntry({ runId, continuation, items }),
+  };
 }
 
 function peer(conversationId = randomUUID()) {
@@ -574,6 +609,132 @@ describe("validatePiSessionFile", () => {
       "reserved.jsonl",
       conversationId,
     )).toBe(conversationId);
+  });
+
+  it("accepts exact LoopList continuation snapshots and numbering on a branch", () => {
+    const conversationId = randomUUID();
+    const runId = randomUUID();
+    const initialItems = [
+      { id: "implement", text: "Implement the change", checked: false },
+    ];
+    const updatedItems = [
+      { id: "implement", text: "Verify the change", checked: false },
+    ];
+    const session = serialize([
+      {
+        type: "session",
+        version: 3,
+        id: conversationId,
+        timestamp,
+        cwd: "E:\\work",
+      },
+      loopListStateEntry("00000001", null, initialItems),
+      loopListContinuationEntry(
+        "00000002",
+        "00000001",
+        runId,
+        1,
+        initialItems,
+      ),
+      loopListStateEntry(
+        "00000003",
+        "00000002",
+        updatedItems,
+        "2026-01-01T00:01:00.000Z",
+      ),
+      loopListContinuationEntry(
+        "00000004",
+        "00000003",
+        runId,
+        2,
+        updatedItems,
+      ),
+      loopListContinuationEntry(
+        "00000005",
+        "00000001",
+        runId,
+        1,
+        initialItems,
+      ),
+    ]);
+
+    expect(validatePiSessionFile(
+      session,
+      "valid-loop-list-continuations.jsonl",
+      conversationId,
+    )).toBe(conversationId);
+  });
+
+  it.each([
+    {
+      name: "whose item snapshot differs from the latest LoopList",
+      continuations: (runId: string, items: LoopListItems) => [
+        loopListContinuationEntry(
+          "00000002",
+          "00000001",
+          runId,
+          1,
+          [{ ...items[0]!, text: "Tampered work" }],
+        ),
+      ],
+      error: /snapshot must match/i,
+    },
+    {
+      name: "whose numbering does not start at one",
+      continuations: (runId: string, items: LoopListItems) => [
+        loopListContinuationEntry(
+          "00000002",
+          "00000001",
+          runId,
+          2,
+          items,
+        ),
+      ],
+      error: /must be 1/i,
+    },
+    {
+      name: "whose numbering skips along the branch",
+      continuations: (runId: string, items: LoopListItems) => [
+        loopListContinuationEntry(
+          "00000002",
+          "00000001",
+          runId,
+          1,
+          items,
+        ),
+        loopListContinuationEntry(
+          "00000003",
+          "00000002",
+          runId,
+          3,
+          items,
+        ),
+      ],
+      error: /must be 2/i,
+    },
+  ])("rejects a LoopList continuation $name", ({ continuations, error }) => {
+    const conversationId = randomUUID();
+    const runId = randomUUID();
+    const items = [
+      { id: "implement", text: "Implement the change", checked: false },
+    ];
+    const session = serialize([
+      {
+        type: "session",
+        version: 3,
+        id: conversationId,
+        timestamp,
+        cwd: "E:\\work",
+      },
+      loopListStateEntry("00000001", null, items),
+      ...continuations(runId, items),
+    ]);
+
+    expect(() => validatePiSessionFile(
+      session,
+      "malformed-loop-list-continuation.jsonl",
+      conversationId,
+    )).toThrow(error);
   });
 
   it("fails closed when physical card updates rewrite identity or regress state", () => {

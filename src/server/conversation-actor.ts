@@ -513,13 +513,16 @@ export class ConversationActor {
     const reserved = aggregateReservedConversationEntries(
       this.sessionManager.getEntries(),
     );
+    const branchLoopList = aggregateReservedConversationEntries(
+      this.sessionManager.getBranch(),
+    ).loopList;
     this.compactionThresholdPercent =
       reserved.compactionThreshold?.percent
       ?? DEFAULT_COMPACTION_THRESHOLD_PERCENT;
-    this.loopListSnapshot = reserved.loopList
+    this.loopListSnapshot = branchLoopList
       ? {
-          items: structuredClone(reserved.loopList.items),
-          armed: reserved.loopList.armed,
+          items: structuredClone(branchLoopList.items),
+          armed: branchLoopList.armed,
         }
       : { items: [], armed: false };
     for (const settlement of reserved.runSettlements) {
@@ -815,13 +818,16 @@ export class ConversationActor {
         const reserved = aggregateReservedConversationEntries(
           this.sessionManager.getEntries(),
         );
+        const branchLoopList = aggregateReservedConversationEntries(
+          this.sessionManager.getBranch(),
+        ).loopList;
         this.compactionThresholdPercent =
           reserved.compactionThreshold?.percent
           ?? DEFAULT_COMPACTION_THRESHOLD_PERCENT;
-        this.loopListSnapshot = reserved.loopList
+        this.loopListSnapshot = branchLoopList
           ? {
-              items: structuredClone(reserved.loopList.items),
-              armed: reserved.loopList.armed,
+              items: structuredClone(branchLoopList.items),
+              armed: branchLoopList.armed,
             }
           : { items: [], armed: false };
         this.emitLoopList();

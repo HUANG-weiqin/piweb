@@ -1405,6 +1405,45 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
+  it("restores LoopList state from the active branch instead of a later inactive branch", async () => {
+    const manager = SessionManager.inMemory(process.cwd(), { id: CONVERSATION_ID });
+    const rootId = manager.appendMessage({
+      role: "user",
+      content: "root",
+      timestamp: 1,
+    });
+    const activeLoopListId = appendReservedCustomEntry(
+      manager,
+      createLoopListEntry({
+        items: [{ id: "active", text: "Active branch work", checked: false }],
+        armed: true,
+        updatedAt: "2026-07-19T10:00:00.000Z",
+      }),
+    );
+    manager.branch(rootId);
+    appendReservedCustomEntry(manager, createLoopListEntry({
+      items: [{ id: "inactive", text: "Inactive branch work", checked: false }],
+      armed: true,
+      updatedAt: "2026-07-19T10:01:00.000Z",
+    }));
+    manager.branch(activeLoopListId);
+    manager.appendMessage({
+      role: "user",
+      content: "active leaf",
+      timestamp: 2,
+    });
+
+    expect(aggregateReservedConversationEntries(manager.getEntries()).loopList)
+      .toMatchObject({ items: [{ id: "inactive" }] });
+    const fixture = await openActor({ sessionManager: manager });
+
+    expect(fixture.actor.getLoopList()).toEqual({
+      items: [{ id: "active", text: "Active branch work", checked: false }],
+      armed: true,
+    });
+    await fixture.actor.dispose();
+  });
+
   it("re-arms a paused unfinished LoopList on a later browser prompt", async () => {
     const fixture = await openActor();
     const todoWrite = fixture.runtime.createOptions?.workbenchCustomTools?.find(

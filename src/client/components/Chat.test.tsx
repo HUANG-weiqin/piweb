@@ -151,12 +151,22 @@ describe("Chat", () => {
     expect(screen.getByText("执行中")).toBeInTheDocument();
   });
 
-  it("publishes the measured composer height as transcript inset", () => {
+  it("publishes composer height and keeps followed output above its inset", () => {
     const observe = vi.fn();
+    let resize: ResizeObserverCallback | undefined;
     vi.stubGlobal("ResizeObserver", class {
+      constructor(callback: ResizeObserverCallback) {
+        resize = callback;
+      }
       observe = observe;
       disconnect() {}
     });
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const scrollTo = vi.fn();
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
       x: 0, y: 0, top: 0, right: 600, bottom: 220,
       left: 0, width: 600, height: 220, toJSON: () => ({}),
@@ -172,6 +182,10 @@ describe("Chat", () => {
     expect(observe).toHaveBeenCalledOnce();
     expect(container.querySelector(".app-shell"))
       .toHaveStyle("--composer-inset: 220px");
+    const transcript = container.querySelector(".transcript") as HTMLElement;
+    transcript.scrollTo = scrollTo;
+    resize?.([], {} as ResizeObserver);
+    expect(scrollTo).toHaveBeenCalledOnce();
   });
 
   it("offers manual context compaction below the composer", () => {
