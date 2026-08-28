@@ -1,10 +1,9 @@
 import { estimateTokens } from "@earendil-works/pi-coding-agent";
 import type { PublicContextUsage } from "../shared/protocol.js";
 
-export interface NativeContextUsage {
+interface NativeContextUsage {
   tokens: number | null;
   contextWindow: number | null;
-  percent: number | null;
 }
 
 function usagePercent(tokens: number, contextWindow: number | null): number | null {
@@ -24,7 +23,7 @@ export function resolveContextUsage({
 }): PublicContextUsage {
   const window = contextWindow ?? nativeUsage?.contextWindow ?? null;
 
-  if (nativeUsage?.tokens !== undefined) {
+  if (nativeUsage) {
     if (nativeUsage.tokens === null) {
       return {
         tokens: null,

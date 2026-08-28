@@ -57,9 +57,7 @@ export class AuthFlowBroker {
           : undefined,
       };
       const abort = () => {
-        if (this.pending.get(requestId) !== pending) return;
-        this.pending.delete(requestId);
-        pending.onAbort = undefined;
+        this.removePending(requestId, pending);
         reject(cancelledError());
       };
       pending.onAbort = abort;
@@ -187,6 +185,5 @@ export class AuthFlowBroker {
       this.removePending(requestId, pending);
       pending.reject(error);
     }
-    this.pending.clear();
   }
 }

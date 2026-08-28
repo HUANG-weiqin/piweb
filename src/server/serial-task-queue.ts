@@ -14,16 +14,8 @@ export class SerialTaskQueue {
     return result;
   }
 
-  async drain(): Promise<void> {
-    while (true) {
-      const observed = this.tail;
-      await observed;
-      if (this.tail === observed) return;
-    }
-  }
-
   async close(): Promise<void> {
     this.accepting = false;
-    await this.drain();
+    await this.tail;
   }
 }

@@ -7,7 +7,7 @@ export const MAX_ROLE_NAME_CHARACTERS = 80;
 export const MAX_ROLE_DESCRIPTION_CHARACTERS = 1_000;
 export const MAX_ROLE_SYSTEM_PROMPT_BYTES = 128 * 1024;
 export const MAX_MODEL_REFERENCE_BYTES = 1024;
-export const MAX_ROLE_UNAVAILABLE_REASON_CHARACTERS = 4096;
+const MAX_ROLE_UNAVAILABLE_REASON_CHARACTERS = 4096;
 export const MAX_PROJECT_CONVERSATIONS = 100;
 export const MAX_PROJECT_ACTIVITY_SUMMARIES = 100;
 export const MAX_PROJECT_CONVERSATION_NAME_CHARACTERS = 24;
@@ -115,6 +115,9 @@ const thinkingLevelSchema = z.enum([
   "xhigh",
   "max",
 ]);
+export type ThinkingLevel = z.infer<typeof thinkingLevelSchema>;
+const toolModeSchema = z.enum(["read_only", "full_access"]);
+export type ToolMode = z.infer<typeof toolModeSchema>;
 const roleInputSchema = z.object({
   name: requiredBoundedCharactersString(
     MAX_ROLE_NAME_CHARACTERS,
@@ -130,7 +133,7 @@ const roleInputSchema = z.object({
   ),
   model: roleModelSchema.nullable(),
   defaultThinkingLevel: thinkingLevelSchema,
-  toolMode: z.enum(["read_only", "full_access"]),
+  toolMode: toolModeSchema,
   canManageSessions: z.boolean(),
 });
 
@@ -157,7 +160,7 @@ export const extensionUIRequestSchema = z.discriminatedUnion("kind", [
   }),
 ]);
 
-export const extensionUIResponseSchema = z.discriminatedUnion("kind", [
+const extensionUIResponseSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("cancel") }),
   z.object({ kind: z.literal("select"), value: z.string().max(500) }),
   z.object({ kind: z.literal("confirm"), confirmed: z.boolean() }),
@@ -253,7 +256,7 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("set_thinking"),
     sessionId: sessionIdSchema,
-    level: z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]),
+    level: thinkingLevelSchema,
   }),
   z.object({
     type: z.literal("set_compaction_threshold"),
@@ -347,7 +350,7 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("close_session"), sessionId: sessionIdSchema }),
 ]);
 
-export const clientCommandSchema = clientCommandUnionSchema.superRefine(
+const clientCommandSchema = clientCommandUnionSchema.superRefine(
   (command, context) => {
     if (command.type === "initialize" && command.commandId === undefined) {
       context.addIssue({
@@ -399,10 +402,7 @@ const ACKNOWLEDGED_COMMAND_OPERATIONS = [
 ] as const;
 export type AcknowledgedCommandOperation =
   typeof ACKNOWLEDGED_COMMAND_OPERATIONS[number];
-export type ThinkingLevel = Extract<ClientCommand, { type: "set_thinking" }>["level"];
-export type ToolMode = "read_only" | "full_access";
-
-export interface PublicModel {
+interface PublicModel {
   provider: string;
   id: string;
   name: string;
@@ -505,7 +505,7 @@ export interface PendingPromptAdmissionSnapshot {
   text: string;
 }
 
-export interface LoopListItem {
+interface LoopListItem {
   id: string;
   text: string;
   checked: boolean;
@@ -620,7 +620,7 @@ export interface ConversationWindowCoverage {
   contentTruncated: boolean;
 }
 
-export type ConversationCreatedBy =
+type ConversationCreatedBy =
   | { kind: "user" }
   | { kind: "conversation"; conversationId: string };
 
@@ -675,7 +675,7 @@ export type SessionEvent =
   | { type: "tool_finished"; toolCallId: string; result?: unknown; isError: boolean }
   | { type: "usage"; usage: TokenUsage };
 
-export type ErrorScope = "auth" | "command" | "protocol" | "session" | "settings";
+type ErrorScope = "auth" | "command" | "protocol" | "session" | "settings";
 const FOCUS_ATTACHED_OPERATIONS = [
   "initialize",
   "focus_conversation",
@@ -888,7 +888,7 @@ const publicStateSchema: z.ZodType<PublicState> = z.object({
   }).optional(),
   selectedModel: z.object({ provider: z.string(), id: z.string() }).optional(),
   thinkingLevel: thinkingLevelSchema,
-  toolMode: z.enum(["read_only", "full_access"]),
+  toolMode: toolModeSchema,
   availableThinkingLevels: z.array(thinkingLevelSchema),
   providers: z.array(publicProviderSchema),
   registryError: z.string().optional(),
@@ -1015,7 +1015,7 @@ const roleTemplateSchema: z.ZodType<RoleTemplate> = z.object({
   ),
   model: roleModelSchema.nullable(),
   defaultThinkingLevel: thinkingLevelSchema,
-  toolMode: z.enum(["read_only", "full_access"]),
+  toolMode: toolModeSchema,
   canManageSessions: z.boolean(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
@@ -1041,7 +1041,7 @@ const conversationRoleSnapshotSchema: z.ZodType<ConversationRoleSnapshot> = z.ob
   ),
   model: roleModelSchema,
   defaultThinkingLevel: thinkingLevelSchema,
-  toolMode: z.enum(["read_only", "full_access"]),
+  toolMode: toolModeSchema,
   canManageSessions: z.boolean(),
 });
 const conversationRoleSummarySchema: z.ZodType<
@@ -1059,7 +1059,7 @@ const conversationRoleSummarySchema: z.ZodType<
   ),
   model: roleModelSchema,
   defaultThinkingLevel: thinkingLevelSchema,
-  toolMode: z.enum(["read_only", "full_access"]),
+  toolMode: toolModeSchema,
   canManageSessions: z.boolean(),
 });
 const conversationActivitySchema: z.ZodType<ConversationActivity> = z.union([
@@ -1284,7 +1284,7 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     projectId: z.string().uuid(),
     conversationId: conversationIdSchema,
     cwd: required.max(4096),
-    toolMode: z.enum(["read_only", "full_access"]),
+    toolMode: toolModeSchema,
     role: conversationRoleSnapshotSchema.optional(),
     items: z.array(conversationHistoryItemSchema),
     window: conversationWindowCoverageSchema,

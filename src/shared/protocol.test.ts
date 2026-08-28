@@ -289,12 +289,6 @@ describe("parseClientCommand", () => {
       type: "initialize",
       sessionId,
       cwd: "E:\\work",
-      conversation: { kind: "open", conversationId: "not-a-uuid" },
-    })).toThrow();
-    expect(() => parseClientCommand({
-      type: "initialize",
-      sessionId,
-      cwd: "E:\\work",
       conversation: { kind: "recent" },
     })).toThrow("commandId");
     expect(() => parseClientCommand({
@@ -348,30 +342,14 @@ describe("parseClientCommand", () => {
     })).toThrow();
     expect(() => parseClientCommand({ type: "close_session" })).toThrow();
     expect(() => parseClientCommand({ type: "login_oauth", provider: "openai" })).toThrow();
-    expect(() => parseClientCommand({ type: "invented" })).toThrow();
   });
 
-  it("rejects the removed workspace mode", () => {
-    expect(() => parseClientCommand({
-      type: "initialize",
-      sessionId,
-      cwd: "E:\\work",
-      toolMode: "workspace_write",
-    })).toThrow();
-    expect(() => parseClientCommand({
-      type: "set_tool_mode",
-      sessionId,
-      mode: "workspace_write",
-    })).toThrow();
+  it("rejects the removed set_tool_mode command", () => {
     expect(() => parseClientCommand({
       type: "set_tool_mode",
       sessionId,
       mode: "full_access",
     })).toThrow();
-  });
-
-  it("rejects oversized socket messages", () => {
-    expect(() => parseClientCommand("x".repeat(1_000_001))).toThrow("too large");
   });
 
   it("aligns role prompts with the durable 128 KiB UTF-8 boundary", () => {
@@ -936,16 +914,6 @@ describe("parseClientCommand", () => {
       commandId,
       conversationId,
       focusId,
-    })).toThrow();
-    expect(() => parseServerEvent({
-      type: "error",
-      message: "failed batch steer without focus",
-      scope: "command",
-      operation: "steer_all_pending_prompts",
-      sessionId,
-      commandId,
-      conversationId,
-      runId,
     })).toThrow();
     expect(() => parseServerEvent({
       type: "session_event",

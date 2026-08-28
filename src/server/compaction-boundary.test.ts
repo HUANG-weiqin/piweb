@@ -201,33 +201,17 @@ describe("installCompactionBoundary", () => {
     adapter.dispose();
   });
 
-  it("restores inherited and own methods exactly and disposes idempotently", () => {
-    const inheritedManager = SessionManager.inMemory("E:\\inherited");
-    const inheritedMethod = inheritedManager.appendCompaction;
-    expect(Object.hasOwn(inheritedManager, "appendCompaction")).toBe(false);
-    const inheritedAdapter = installCompactionBoundary(inheritedManager);
-    expect(Object.hasOwn(inheritedManager, "appendCompaction")).toBe(true);
+  it("restores the inherited method and disposes idempotently", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    const inheritedMethod = manager.appendCompaction;
+    expect(Object.hasOwn(manager, "appendCompaction")).toBe(false);
+    const adapter = installCompactionBoundary(manager);
+    expect(Object.hasOwn(manager, "appendCompaction")).toBe(true);
 
-    inheritedAdapter.dispose();
-    inheritedAdapter.dispose();
-    expect(Object.hasOwn(inheritedManager, "appendCompaction")).toBe(false);
-    expect(inheritedManager.appendCompaction).toBe(inheritedMethod);
-
-    const ownManager = SessionManager.inMemory("E:\\own");
-    const ownMethod = ownManager.appendCompaction.bind(ownManager) as SessionManager["appendCompaction"];
-    Object.defineProperty(ownManager, "appendCompaction", {
-      configurable: true,
-      enumerable: false,
-      writable: true,
-      value: ownMethod,
-    });
-    const originalDescriptor = Object.getOwnPropertyDescriptor(ownManager, "appendCompaction");
-    const ownAdapter = installCompactionBoundary(ownManager);
-
-    ownAdapter.dispose();
-    expect(Object.getOwnPropertyDescriptor(ownManager, "appendCompaction")).toEqual(
-      originalDescriptor,
-    );
+    adapter.dispose();
+    adapter.dispose();
+    expect(Object.hasOwn(manager, "appendCompaction")).toBe(false);
+    expect(manager.appendCompaction).toBe(inheritedMethod);
   });
 
   it("does not overwrite a method installed by a later owner", () => {

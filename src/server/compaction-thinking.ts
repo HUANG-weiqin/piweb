@@ -19,7 +19,6 @@ export function installCompactionThinkingOverride(
   let originalStream: typeof session.agent.streamFunction | undefined;
   let overrideStream: typeof session.agent.streamFunction | undefined;
   let generation = 0;
-  let disposed = false;
 
   const restore = (): void => {
     if (originalStream && session.agent.streamFunction === overrideStream) {
@@ -30,7 +29,7 @@ export function installCompactionThinkingOverride(
   };
 
   const install = (): void => {
-    if (originalStream || disposed) return;
+    if (originalStream) return;
     originalStream = session.agent.streamFunction;
     const capturedStream = originalStream;
     overrideStream = (model, context, options) => {
@@ -70,7 +69,6 @@ export function installCompactionThinkingOverride(
 
   return {
     dispose(): void {
-      disposed = true;
       generation++;
       unsubscribe();
       restore();

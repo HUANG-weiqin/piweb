@@ -37,20 +37,6 @@ describe("SerialTaskQueue", () => {
     await expect(next).resolves.toBe("ok");
   });
 
-  it("drains tasks appended by an accepted task before becoming idle", async () => {
-    const queue = new SerialTaskQueue();
-    const order: string[] = [];
-    queue.run(() => {
-      order.push("first");
-      void queue.run(() => {
-        order.push("second");
-      });
-    });
-
-    await queue.drain();
-    expect(order).toEqual(["first", "second"]);
-  });
-
   it("closes admission after all previously accepted tasks settle", async () => {
     const queue = new SerialTaskQueue();
     const gate = deferred();

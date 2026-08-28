@@ -264,19 +264,4 @@ describe("tool result compression", () => {
     expect(extensionAfterToolCall).toHaveBeenCalledWith(context, controller.signal);
   });
 
-  it("falls back to the extension patch when host compression fails", async () => {
-    const extensionPatch: AfterToolCallPatch = { details: { extension: true } };
-    const context = toolResultContext("bash", []);
-    Object.defineProperty(context.result, "content", {
-      configurable: true,
-      get: () => {
-        throw new Error("unreadable content");
-      },
-    });
-    const session = sessionWithAfterToolCall(async () => extensionPatch);
-
-    installToolResultCompression(session);
-
-    await expect(session.agent.afterToolCall!(context)).resolves.toBe(extensionPatch);
-  });
 });

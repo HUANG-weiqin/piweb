@@ -5,7 +5,7 @@ describe("resolveContextUsage", () => {
   it("uses measured SDK usage when available", () => {
     expect(resolveContextUsage({
       contextWindow: 1000,
-      nativeUsage: { tokens: 123, contextWindow: 1000, percent: 12.3 },
+      nativeUsage: { tokens: 123, contextWindow: 1000 },
     })).toEqual({
       tokens: 123,
       contextWindow: 1000,
@@ -33,7 +33,7 @@ describe("resolveContextUsage", () => {
         content: [{ type: "text", text: "pre-compaction response" }],
         usage: { totalTokens: 900 },
       }],
-      nativeUsage: { tokens: null, contextWindow: 1000, percent: null },
+      nativeUsage: { tokens: null, contextWindow: 1000 },
     })).toEqual({
       tokens: null,
       contextWindow: 1000,

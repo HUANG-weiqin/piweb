@@ -107,17 +107,13 @@ export function installToolResultCompression(session: AgentSession): void {
   const extensionAfterToolCall = session.agent.afterToolCall;
   session.agent.afterToolCall = async (context, signal) => {
     const extensionPatch = await extensionAfterToolCall?.(context, signal);
-    try {
-      if (context.toolCall.name !== "bash" && context.toolCall.name !== "grep") {
-        return extensionPatch;
-      }
-
-      const content = extensionPatch?.content ?? context.result.content;
-      const projectedContent = compressToolResultContent(context.toolCall.name, content);
-      if (projectedContent === content) return extensionPatch;
-      return { ...extensionPatch, content: projectedContent };
-    } catch {
+    if (context.toolCall.name !== "bash" && context.toolCall.name !== "grep") {
       return extensionPatch;
     }
+
+    const content = extensionPatch?.content ?? context.result.content;
+    const projectedContent = compressToolResultContent(context.toolCall.name, content);
+    if (projectedContent === content) return extensionPatch;
+    return { ...extensionPatch, content: projectedContent };
   };
 }
