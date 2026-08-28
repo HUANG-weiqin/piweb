@@ -2933,7 +2933,7 @@ export class PiConnection {
     const active = this.requireActive();
     let preparedArgs: unknown;
     try {
-      preparedArgs = snapshotWireValue(input.args).value;
+      preparedArgs = snapshotWireValue(input.args);
     } catch {
       preparedArgs = undefined;
     }

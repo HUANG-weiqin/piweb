@@ -45,10 +45,7 @@ export class ProjectRunCoordinator {
   ): ProjectRunLease | undefined {
     const key = projectKey(cwd);
     const state = this.stateFor(key);
-    if (state.pendingRestrictions > 0) {
-      this.cleanUp(key, state);
-      return;
-    }
+    if (state.pendingRestrictions > 0) return;
 
     let released = false;
     let resolveDone!: () => void;

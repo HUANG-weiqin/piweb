@@ -225,7 +225,6 @@ interface ProjectContext {
   readonly unsubscribeProject: () => void;
   modelCatalog?: CreatedProjectModelCatalog;
   modelCatalogOpening?: Promise<CreatedProjectModelCatalog>;
-  references: number;
   closing: boolean;
 }
 
@@ -243,9 +242,7 @@ export class ProjectSessionHandle {
   }
 
   release(): void {
-    if (this.released) return;
     this.released = true;
-    this.context.references = Math.max(0, this.context.references - 1);
   }
 }
 
@@ -743,7 +740,6 @@ export class ProjectSessionCoordinator {
       if (existing.closing) {
         throw new Error("Project context is closing");
       }
-      existing.references++;
       this.publishProjectActivityIfChanged(existing, true);
       return new ProjectSessionHandle(existing);
     }
@@ -754,7 +750,6 @@ export class ProjectSessionCoordinator {
       const context = await pending;
       this.assertOpen();
       if (context.closing) throw new Error("Project context is closing");
-      context.references++;
       this.publishProjectActivityIfChanged(context, true);
       return new ProjectSessionHandle(context);
     }
@@ -803,7 +798,6 @@ export class ProjectSessionCoordinator {
         backgroundTasks: new Set(),
         recentUpdates: new Set(),
         unsubscribeProject: () => undefined,
-        references: 1,
         closing: false,
       } satisfies ProjectContext;
       unsubscribeProject = project.subscribe(() => {

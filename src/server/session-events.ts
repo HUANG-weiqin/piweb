@@ -180,10 +180,7 @@ function freezeWireValue(value: unknown): void {
  * Captures the exact JSON value shown for authorization. Unlike toWireValue,
  * this never substitutes, truncates, or previews data.
  */
-export function snapshotWireValue(value: unknown): {
-  value: unknown;
-  serialized: string;
-} {
+export function snapshotWireValue(value: unknown): unknown {
   const budget = { bytes: 0, nodes: MAX_WIRE_NODES };
   measureExactWireValue(value, new WeakSet<object>(), budget, 0);
   const serialized = JSON.stringify(value);
@@ -194,7 +191,7 @@ export function snapshotWireValue(value: unknown): {
 
   const snapshot = JSON.parse(serialized) as unknown;
   freezeWireValue(snapshot);
-  return { value: snapshot, serialized };
+  return snapshot;
 }
 
 function sanitizeWireValue(

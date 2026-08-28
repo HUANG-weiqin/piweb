@@ -327,11 +327,10 @@ describe("snapshotWireValue", () => {
     const snapshot = snapshotWireValue(args);
     args.command = "changed after capture";
 
-    expect(snapshot.value).toEqual({
+    expect(snapshot).toEqual({
       command: "npm test",
       options: ["--run", 1, true, null],
     });
-    expect(snapshot.serialized).toBe(JSON.stringify(snapshot.value));
   });
 
   it("rejects values that cannot be represented losslessly as JSON", () => {

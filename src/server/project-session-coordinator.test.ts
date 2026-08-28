@@ -51,10 +51,6 @@ import type {
 import type { PortableExtensionUI } from "./extension-ui.js";
 import { ProjectInbox } from "./project-inbox.js";
 import {
-  projectPromptPayloadSha256,
-  ProjectPromptQueue,
-} from "./project-prompt-queue.js";
-import {
   MAX_DELEGATION_DEPTH,
   MAX_LIVE_DELEGATION_DESCENDANTS,
   MAX_PEER_SESSIONS_PER_RUN,
@@ -585,14 +581,6 @@ function coordinatorInbox(
   return (handle as unknown as {
     context: { inbox: ProjectInbox };
   }).context.inbox;
-}
-
-function coordinatorPromptQueue(
-  handle: Awaited<ReturnType<ProjectSessionCoordinator["acquireProject"]>>,
-): ProjectPromptQueue {
-  return (handle as unknown as {
-    context: { promptQueue: ProjectPromptQueue };
-  }).context.promptQueue;
 }
 
 const fixtures: Fixture[] = [];

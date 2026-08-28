@@ -3389,7 +3389,7 @@ describe("ConversationActor", () => {
     const completion = fixture.actor.startPrompt({
       runId: RUN_A,
       text: "coordinate",
-      origin: "conversation",
+      origin: "browser",
     });
     await promptStarted.promise;
     const ownership = fixture.actor.currentRunOwnership(RUN_A);

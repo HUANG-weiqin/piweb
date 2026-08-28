@@ -67,11 +67,7 @@ import {
   type ToolPolicyDecision,
 } from "./tool-policy.js";
 
-export type ConversationRunOrigin =
-  | "browser"
-  | "inbox"
-  | "conversation"
-  | "pending_prompt";
+export type ConversationRunOrigin = "browser" | "inbox";
 
 export interface ConversationActorState {
   conversationId: string;
@@ -115,7 +111,6 @@ export type ConversationActorEvent =
       origin: ConversationRunOrigin;
       settlement: RunSettlement;
       createdBy: ConversationMeta["createdBy"];
-      pendingPromptUserDelivered: boolean;
     }
   | {
       type: "prompt_admitted";
@@ -145,8 +140,6 @@ export interface ConversationActorCompletion {
   settlement: RunSettlement;
   origin: ConversationRunOrigin;
   createdBy: ConversationMeta["createdBy"];
-  /** True only after Pi emitted the durable user message for a pending prompt. */
-  pendingPromptUserDelivered: boolean;
 }
 
 /** 一次 busy 期间被 SDK steering 队列接受的浏览器 prompt（内存态，重启丢失为接受项）。 */
@@ -280,7 +273,6 @@ interface RunTicket {
   readonly customSteerDeliveries: PendingCustomSteer[];
   /** The first raw user message belongs to startPrompt(), never guidance. */
   expectsInitialPromptRawUserMessage: boolean;
-  pendingPromptUserDelivered: boolean;
   customSteerFlush?: Promise<void>;
   phase: "queued" | "running" | "waiting" | "cancelling";
   waitingFor?: ConversationWaitingFor;
@@ -1508,7 +1500,6 @@ export class ConversationActor {
       customSteerDeliveries: [],
       expectsInitialPromptRawUserMessage:
         input.expectsInitialPromptRawUserMessage,
-      pendingPromptUserDelivered: false,
       phase: "queued",
       toolMode: this.profileSnapshot.role.toolMode,
       sawSdkCompactionAttempt: false,
@@ -2168,7 +2159,6 @@ export class ConversationActor {
       settlement,
       origin: ticket.origin,
       createdBy: structuredClone(this.profileSnapshot.createdBy),
-      pendingPromptUserDelivered: ticket.pendingPromptUserDelivered,
     } satisfies ConversationActorCompletion;
     this.emit({
       type: "completion",
@@ -2349,9 +2339,6 @@ export class ConversationActor {
             );
             return;
           }
-          if (ticket.origin === "pending_prompt") {
-            ticket.pendingPromptUserDelivered = true;
-          }
         });
         return;
       }
@@ -2460,7 +2447,7 @@ export class ConversationActor {
 
     let preparedArgs: unknown;
     try {
-      preparedArgs = snapshotWireValue(input.args).value;
+      preparedArgs = snapshotWireValue(input.args);
     } catch {
       preparedArgs = undefined;
     }
