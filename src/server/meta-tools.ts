@@ -201,7 +201,7 @@ const proposeRoleRevisionParameters = Type.Object({
 export function createMetaTools(
   sourceConversationId: string,
   service: MetaToolService,
-  canManageSessions = true,
+  canManageSessions: boolean,
 ): ToolDefinition[] {
   const roleTools = [
     defineTool({

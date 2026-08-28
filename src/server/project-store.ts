@@ -420,9 +420,6 @@ function indexFingerprintsByPath(
     }
     indexed.set(file.pathKey, file);
   }
-  if (indexed.size !== files.length) {
-    throw new Error("Session fingerprint index is incomplete");
-  }
   return indexed;
 }
 
@@ -949,7 +946,7 @@ export class ProjectStore {
           );
         }
         this.replaceConversations(toConversationSummaries(
-          committedCatalog.information.map(cloneSessionInformation),
+          committedCatalog.information,
         ));
       } catch (error) {
         if (quarantined !== undefined) {

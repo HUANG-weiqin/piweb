@@ -19,6 +19,7 @@ import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import {
   MAX_PROMPT_CHARACTERS,
   type ProjectActivitySummary,
+  type RoleTemplate,
 } from "../shared/protocol.js";
 import {
   ConversationActor,
@@ -76,6 +77,12 @@ import {
 
 const RUN_A = "ba39f161-b67f-47c9-9285-e391427ed7d0";
 const RUN_B = "65feacc3-00b4-45bd-80ee-5e18bc32f7dc";
+
+function getRoleTemplate(catalog: RoleCatalog, roleId: string): RoleTemplate {
+  const role = catalog.listRoles().find(({ id }) => id === roleId);
+  if (role === undefined) throw new Error(`Role not found: ${roleId}`);
+  return role;
+}
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -601,7 +608,7 @@ async function createFixture(
     runtime,
     join(cwd, "user", "roles.json"),
   );
-  const defaultRole = roles.getRoleTemplate("default");
+  const defaultRole = getRoleTemplate(roles, "default");
   await roles.updateRole(
     "default",
     defaultRole.revision,
@@ -1921,7 +1928,7 @@ describe("ProjectSessionCoordinator", () => {
     ]));
     expect(sourceTools).not.toContain("list_sessions");
 
-    const before = fixture.roles.getRoleTemplate(targetRole.id);
+    const before = getRoleTemplate(fixture.roles, targetRole.id);
     const listed = await executeTool(
       fixture.runtime.control(source.conversationId),
       "list_roles",
@@ -1992,7 +1999,7 @@ describe("ProjectSessionCoordinator", () => {
       });
       expect(editorCalls[0]?.title).toContain(`修订 ${before.revision}`);
 
-      const after = fixture.roles.getRoleTemplate(targetRole.id);
+      const after = getRoleTemplate(fixture.roles, targetRole.id);
       expect(after).toMatchObject({
         id: before.id,
         revision: before.revision + 1,
@@ -2060,7 +2067,7 @@ describe("ProjectSessionCoordinator", () => {
           reason: "The user can still cancel this editor.",
         },
       )).resolves.toEqual({ outcome: "cancelled" });
-      expect(fixture.roles.getRoleTemplate(targetRole.id).systemPrompt)
+      expect(getRoleTemplate(fixture.roles, targetRole.id).systemPrompt)
         .toBe(replacement);
 
       const editorCallCount = editorCalls.length;
@@ -2129,7 +2136,7 @@ describe("ProjectSessionCoordinator", () => {
     controller.abort();
 
     await expect(proposal).resolves.toEqual({ outcome: "cancelled" });
-    expect(fixture.roles.getRoleTemplate(targetRole.id)).toMatchObject({
+    expect(getRoleTemplate(fixture.roles, targetRole.id)).toMatchObject({
       revision: targetRole.revision,
       systemPrompt: targetRole.systemPrompt,
     });
@@ -2190,7 +2197,7 @@ describe("ProjectSessionCoordinator", () => {
 
       await expect(proposal).resolves.toEqual({ outcome: "cancelled" });
       expect(updateRole).toHaveBeenCalledTimes(1);
-      expect(fixture.roles.getRoleTemplate(targetRole.id)).toMatchObject({
+      expect(getRoleTemplate(fixture.roles, targetRole.id)).toMatchObject({
         revision: targetRole.revision,
         systemPrompt: targetRole.systemPrompt,
       });
@@ -2221,7 +2228,7 @@ describe("ProjectSessionCoordinator", () => {
       .mockImplementation(async (...args) => {
         if (!proposalUpdate) {
           proposalUpdate = true;
-          const current = fixture.roles.getRoleTemplate(targetRole.id);
+          const current = getRoleTemplate(fixture.roles, targetRole.id);
           await originalUpdateRole(
             current.id,
             current.revision,
@@ -2268,7 +2275,7 @@ describe("ProjectSessionCoordinator", () => {
         revision: targetRole.revision + 1,
       });
       expect(updateRole).toHaveBeenCalledTimes(1);
-      expect(fixture.roles.getRoleTemplate(targetRole.id)).toMatchObject({
+      expect(getRoleTemplate(fixture.roles, targetRole.id)).toMatchObject({
         revision: targetRole.revision + 1,
         systemPrompt: "Concurrent revision",
       });
@@ -2323,7 +2330,7 @@ describe("ProjectSessionCoordinator", () => {
         },
       )).rejects.toBe(postCommitError);
 
-      expect(fixture.roles.getRoleTemplate(targetRole.id)).toMatchObject({
+      expect(getRoleTemplate(fixture.roles, targetRole.id)).toMatchObject({
         revision: targetRole.revision + 1,
         systemPrompt: "The applied prompt.",
       });
@@ -2385,7 +2392,7 @@ describe("ProjectSessionCoordinator", () => {
       );
       await editorStarted.promise;
 
-      const current = fixture.roles.getRoleTemplate(targetRole.id);
+      const current = getRoleTemplate(fixture.roles, targetRole.id);
       const concurrentlyUpdated = await fixture.roles.updateRole(
         targetRole.id,
         current.revision,
@@ -2408,7 +2415,7 @@ describe("ProjectSessionCoordinator", () => {
         expectedRevision: targetRole.revision,
         revision: concurrentlyUpdated.revision,
       });
-      expect(fixture.roles.getRoleTemplate(targetRole.id)).toMatchObject({
+      expect(getRoleTemplate(fixture.roles, targetRole.id)).toMatchObject({
         revision: concurrentlyUpdated.revision,
         description: "Changed while the editor was open",
         systemPrompt: current.systemPrompt,
@@ -10240,7 +10247,7 @@ describe("ProjectSessionCoordinator", () => {
       runtime,
       join(cwd, "user", "roles.json"),
     );
-    const seeded = roles.getRoleTemplate("default");
+    const seeded = getRoleTemplate(roles, "default");
     await roles.deleteRole(seeded.id, seeded.revision);
     expect(roles.listRoles()).toEqual([]);
 

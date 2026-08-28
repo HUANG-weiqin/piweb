@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { ConversationSummary } from "../shared/protocol.js";
+import {
+  MAX_PROJECT_CONVERSATIONS,
+  type ConversationSummary,
+} from "../shared/protocol.js";
 import {
   conversationDisplayTitle,
-  MAX_PROJECT_CONVERSATIONS,
   projectConversationIndex,
 } from "./project-snapshot.js";
 

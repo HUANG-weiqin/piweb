@@ -283,47 +283,6 @@ describe("ProjectInbox", () => {
     );
   });
 
-  it("lists and deletes by exact target without cascading from the source", async () => {
-    const { inbox } = await temporaryInbox("piweb-inbox-target-");
-    const temporarySource = randomUUID();
-    const caller = randomUUID();
-    const otherTarget = randomUUID();
-    const returned = input({
-      fromConversationId: temporarySource,
-      toConversationId: caller,
-      kind: "delegation_result",
-    });
-    const inbound = input({
-      fromConversationId: caller,
-      toConversationId: temporarySource,
-      kind: "delegation_task",
-    });
-    const unrelated = input({
-      fromConversationId: temporarySource,
-      toConversationId: otherTarget,
-    });
-    await inbox.put(returned);
-    await inbox.put(inbound);
-    await inbox.put(unrelated);
-
-    await expect(inbox.list({
-      toConversationId: temporarySource,
-    })).resolves.toEqual([
-      expect.objectContaining({ messageId: inbound.messageId }),
-    ]);
-    await expect(
-      inbox.deleteForTarget(temporarySource),
-    ).resolves.toBe(1);
-    await expect(inbox.get(inbound.messageId)).resolves.toBeUndefined();
-    await expect(inbox.get(returned.messageId)).resolves.toEqual(
-      expect.objectContaining({
-        fromConversationId: temporarySource,
-        toConversationId: caller,
-      }),
-    );
-    await expect(inbox.get(unrelated.messageId)).resolves.toBeDefined();
-  });
-
   it("persists a target tombstone before exact pending cleanup and rejects future puts after reopen", async () => {
     const { directory, inbox } = await temporaryInbox(
       "piweb-inbox-tombstone-",

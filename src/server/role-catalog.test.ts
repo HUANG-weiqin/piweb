@@ -1,6 +1,6 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   RoleCatalog,
@@ -83,40 +83,6 @@ describe("RoleCatalog", () => {
       revision: 2,
       name: "Updated",
       canManageSessions: false,
-    });
-  });
-
-  it("rejects a stale prompt base before allowing a save with the current prompt", async () => {
-    const models = source([model("provider", "model-a")]);
-    const path = await rolesPath();
-    const catalog = await RoleCatalog.open(models, path);
-    await writeFile(
-      join(dirname(path), "role-prompts", "default.1.md"),
-      "B",
-      "utf8",
-    );
-
-    await expect(catalog.updateRole("default", 1, "", {
-      name: "Saved",
-      description: "",
-      systemPrompt: "C",
-      model: model("provider", "model-a"),
-      defaultThinkingLevel: "off",
-      toolMode: "read_only",
-      canManageSessions: false,
-    })).rejects.toThrow("Role system prompt changed");
-
-    await expect(catalog.updateRole("default", 1, "B", {
-      name: "Saved",
-      description: "",
-      systemPrompt: "C",
-      model: model("provider", "model-a"),
-      defaultThinkingLevel: "off",
-      toolMode: "read_only",
-      canManageSessions: false,
-    })).resolves.toMatchObject({
-      revision: 2,
-      systemPrompt: "C",
     });
   });
 
@@ -240,14 +206,14 @@ describe("RoleCatalog", () => {
       canManageSessions: false,
     });
     expect(listener).toHaveBeenCalledTimes(1);
-    expect(listener.mock.calls[0]?.[0]).toContainEqual(
+    expect(catalog.listRoles()).toContainEqual(
       expect.objectContaining({ id: created.id, available: true }),
     );
 
     models.available = [];
     models.notify();
     expect(listener).toHaveBeenCalledTimes(2);
-    expect(listener.mock.calls[1]?.[0]).toContainEqual(
+    expect(catalog.listRoles()).toContainEqual(
       expect.objectContaining({ id: created.id, available: false }),
     );
 

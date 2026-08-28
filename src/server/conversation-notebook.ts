@@ -202,14 +202,6 @@ function assertContentBudget(content: string): void {
   }
 }
 
-function normalizeStatus(status: NotebookStatus | undefined): NotebookStatus {
-  if (status === undefined) return "active";
-  if (status === "active" || status === "archived" || status === "all") {
-    return status;
-  }
-  throw new Error("Invalid notebook status");
-}
-
 function isCanonicalIsoDate(value: string): boolean {
   const time = Date.parse(value);
   return Number.isFinite(time) && new Date(time).toISOString() === value;
@@ -586,7 +578,7 @@ export class ConversationNotebook {
 
   list(statusInput?: NotebookStatus): Promise<NotebookListResult> {
     return this.queue.run(async () => {
-      const status = normalizeStatus(statusInput);
+      const status = statusInput ?? "active";
       const notes = sortByUpdatedThenTitle(
         (await readNotes(this.paths))
           .filter((note) => statusIncludes(status, note))
@@ -609,7 +601,7 @@ export class ConversationNotebook {
       if (pattern.length === 0) {
         throw new Error("Notebook grep pattern is required");
       }
-      const status = normalizeStatus(statusInput);
+      const status = statusInput ?? "active";
       const needle = pattern.toLowerCase();
       const matches: NotebookGrepMatch[] = [];
       let truncated = false;

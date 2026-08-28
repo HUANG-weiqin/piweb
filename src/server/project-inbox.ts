@@ -202,7 +202,6 @@ interface InboxTargetTombstone {
 interface StoredTargetTombstone {
   tombstone: InboxTargetTombstone;
   path: string;
-  bytes: number;
 }
 
 interface InboxScan {
@@ -486,7 +485,7 @@ function reservedEnvelopeBytes(envelope: InboxEnvelope): number {
 }
 
 export class ProjectInbox {
-  readonly directory: string;
+  private readonly directory: string;
 
   private readonly operations = new SerialTaskQueue();
 
@@ -666,22 +665,6 @@ export class ProjectInbox {
     });
   }
 
-  deleteForTarget(toConversationId: string): Promise<number> {
-    return this.operations.run(async () => {
-      conversationIdSchema("toConversationId").parse(toConversationId);
-      const scan = await this.scan();
-      const matches = scan.envelopes.filter(
-        ({ envelope }) =>
-          envelope.toConversationId === toConversationId,
-      );
-      for (const match of matches) {
-        await this.assertStoredFileUnchanged(match);
-        await unlink(match.path);
-      }
-      return matches.length;
-    });
-  }
-
   tombstoneTarget(
     conversationId: string,
     deletedAt = new Date().toISOString(),
@@ -845,8 +828,6 @@ export class ProjectInbox {
     let totalBytes = 0;
     let tombstoneBytes = 0;
     let reservedBytes = 0;
-    const messageIds = new Set<string>();
-    const tombstonedTargets = new Set<string>();
     const targetCounts = new Map<string, number>();
     for (const name of namesBefore) {
       const envelopeName = INBOX_FILE_PATTERN.exec(name);
@@ -911,17 +892,7 @@ export class ProjectInbox {
             `Inbox tombstone filename identity does not match target ${tombstone.conversationId}: ${path}`,
           );
         }
-        if (tombstonedTargets.has(tombstone.conversationId)) {
-          throw new Error(
-            `Duplicate inbox target tombstone: ${tombstone.conversationId}`,
-          );
-        }
-        tombstonedTargets.add(tombstone.conversationId);
-        tombstones.push({
-          tombstone,
-          path,
-          bytes: information.size,
-        });
+        tombstones.push({ tombstone, path });
         tombstoneBytes += information.size;
         if (tombstoneBytes > MAX_INBOX_TOMBSTONE_TOTAL_BYTES) {
           throw new Error(
@@ -948,12 +919,6 @@ export class ProjectInbox {
           `Inbox filename identity does not match messageId ${envelope.messageId}: ${path}`,
         );
       }
-      if (messageIds.has(envelope.messageId)) {
-        throw new Error(
-          `Duplicate inbox message identity: ${envelope.messageId}`,
-        );
-      }
-      messageIds.add(envelope.messageId);
       const targetCount =
         (targetCounts.get(envelope.toConversationId) ?? 0) + 1;
       if (targetCount > MAX_INBOX_MESSAGES_PER_TARGET) {
@@ -1010,25 +975,10 @@ export class ProjectInbox {
     match: StoredEnvelope,
     state: InboxStateUpdate,
   ): Promise<InboxEnvelope> {
-    const next = parseInboxEnvelope({
-      ...match.envelope,
-      state: state.state,
-      ...(state.state === "processing"
-        ? {
-            processingRunId: state.processingRunId,
-            ...(state.processingDelivery === undefined
-              ? { processingDelivery: undefined }
-              : { processingDelivery: state.processingDelivery }),
-            ...(state.waitedByRunId === undefined
-              ? { waitedByRunId: undefined }
-              : { waitedByRunId: state.waitedByRunId }),
-          }
-        : {
-            processingRunId: undefined,
-            processingDelivery: undefined,
-            waitedByRunId: undefined,
-          }),
-    });
+    const next = createInboxEnvelope(
+      immutablePayload(match.envelope),
+      state,
+    );
     if (JSON.stringify(next) === JSON.stringify(match.envelope)) {
       return cloneEnvelope(match.envelope);
     }

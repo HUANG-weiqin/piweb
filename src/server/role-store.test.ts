@@ -225,7 +225,6 @@ describe("RoleStore", () => {
 
     expect(store.listRoles()[0]?.systemPrompt).toBe("edited outside the store");
     expect(store.getRole("default")?.systemPrompt).toBe("edited outside the store");
-    expect(store.getSnapshot().roles[0]?.systemPrompt).toBe("edited outside the store");
   });
 
   it("rejects role IDs that differ only by case in every supported store version", async () => {
@@ -289,7 +288,7 @@ describe("RoleStore", () => {
   it("rejects an aborted role update before committing", async () => {
     const rolesPath = await createRolesPath("piweb-role-store-aborted-update-");
     const store = await RoleStore.open(rolesPath, initialModel);
-    const before = store.getSnapshot();
+    const before = store.listRoles();
     const controller = new AbortController();
     controller.abort();
 
@@ -302,7 +301,7 @@ describe("RoleStore", () => {
         controller.signal,
       ),
     ).rejects.toMatchObject({ name: "AbortError" });
-    expect(store.getSnapshot()).toEqual(before);
+    expect(store.listRoles()).toEqual(before);
     expect(await readFile(rolesPath, "utf8")).toContain("default.1.md");
   });
 
@@ -420,7 +419,10 @@ describe("RoleStore", () => {
   it("serializes concurrent writes and publishes only committed snapshots", async () => {
     const rolesPath = await createRolesPath("piweb-role-store-serial-");
     const store = await RoleStore.open(rolesPath, initialModel);
-    const listener = vi.fn();
+    const publishedRevisions: number[] = [];
+    const listener = vi.fn(() => {
+      publishedRevisions.push(store.getRole("default")!.revision);
+    });
     const unsubscribe = store.subscribe(listener);
 
     const first = store.updateRole("default", 1, "", draft("First"));
@@ -433,9 +435,7 @@ describe("RoleStore", () => {
       name: "Second",
       revision: 3,
     });
-    expect(listener.mock.calls.map(([snapshot]) => (
-      snapshot.roles[0]?.revision
-    ))).toEqual([2, 3]);
+    expect(publishedRevisions).toEqual([2, 3]);
 
     await store.updateRole("default", 3, "", draft("Second"));
     expect(listener).toHaveBeenCalledTimes(2);
@@ -465,7 +465,7 @@ describe("RoleStore", () => {
     const store = await RoleStore.open(rolesPath, initialModel);
     const listener = vi.fn();
     store.subscribe(listener);
-    const before = store.getSnapshot();
+    const before = store.listRoles();
 
     await unlink(rolesPath);
     await mkdir(rolesPath);
@@ -473,7 +473,7 @@ describe("RoleStore", () => {
     await expect(
       store.updateRole("default", 1, "", draft("Must not commit")),
     ).rejects.toThrow();
-    expect(store.getSnapshot()).toEqual(before);
+    expect(store.listRoles()).toEqual(before);
     expect(listener).not.toHaveBeenCalled();
     expect((await readdir(dirname(rolesPath))).sort()).toEqual([
       "role-prompts",
@@ -540,7 +540,7 @@ describe("RoleStore", () => {
   it("does not publish or mutate memory when prompt replacement fails", async () => {
     const rolesPath = await createRolesPath("piweb-role-store-prompt-fail-");
     const store = await RoleStore.open(rolesPath, initialModel);
-    const before = store.getSnapshot();
+    const before = store.listRoles();
     const blockedPromptPath = promptPath(
       rolesPath,
       persistedDefault({ revision: 2 }),
@@ -550,7 +550,7 @@ describe("RoleStore", () => {
     await expect(
       store.updateRole("default", 1, "", draft("Prompt write failure")),
     ).rejects.toThrow();
-    expect(store.getSnapshot()).toEqual(before);
+    expect(store.listRoles()).toEqual(before);
     expect(await readFile(rolesPath, "utf8")).toContain("default.1.md");
   });
 

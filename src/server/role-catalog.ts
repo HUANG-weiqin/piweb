@@ -28,7 +28,7 @@ export interface RoleCatalogModelRegistry {
 export interface RoleCatalogModel
   extends RoleModelReference, ThinkingCapableModel {}
 
-export type RoleCatalogListener = (roles: readonly RoleTemplate[]) => void;
+type RoleCatalogListener = () => void;
 
 function modelKey(model: RoleModelReference): string {
   return `${model.provider.length}:${model.provider}:${model.id}`;
@@ -131,12 +131,6 @@ export class RoleCatalog {
     });
   }
 
-  getRoleTemplate(roleId: string): RoleTemplate {
-    const role = this.listRoles().find(({ id }) => id === roleId);
-    if (!role) throw new Error(`Role not found: ${roleId}`);
-    return structuredClone(role);
-  }
-
   getConversationRole(roleId: string): ConversationRoleSnapshot {
     const role = this.store.getRole(roleId);
     if (role === undefined) throw new Error(`Role not found: ${roleId}`);
@@ -209,10 +203,9 @@ export class RoleCatalog {
 
   private emit(): void {
     if (this.disposed) return;
-    const snapshot = this.listRoles();
     for (const listener of [...this.listeners]) {
       try {
-        listener(snapshot);
+        listener();
       } catch {
         // One observer cannot roll back a durable role or model change.
       }

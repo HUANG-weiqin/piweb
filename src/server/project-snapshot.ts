@@ -7,7 +7,6 @@ import {
   type SessionMessageEndpoint,
 } from "../shared/protocol.js";
 
-export { MAX_PROJECT_CONVERSATIONS };
 
 export function projectConversationPeers(
   items: readonly ConversationHistoryItem[],

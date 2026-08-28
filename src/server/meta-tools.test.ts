@@ -39,7 +39,7 @@ function tool(
 
 describe("createMetaTools", () => {
   it("exposes the fixed role and orchestration tool surface", () => {
-    const tools = createMetaTools(sourceConversationId, service());
+    const tools = createMetaTools(sourceConversationId, service(), true);
 
     expect(tools.map(({ name }) => name)).toEqual([
       "list_roles",
@@ -60,7 +60,7 @@ describe("createMetaTools", () => {
   });
 
   it("guides Agents to choose persistent versus temporary sessions", () => {
-    const tools = createMetaTools(sourceConversationId, service());
+    const tools = createMetaTools(sourceConversationId, service(), true);
     const startSession = tool(tools, "start_session");
     const startTemporarySession = tool(tools, "start_temporary_session");
 
@@ -81,7 +81,7 @@ describe("createMetaTools", () => {
 
   it("guides Agents to peek the smallest useful session tail first", () => {
     const peekSession = tool(
-      createMetaTools(sourceConversationId, service()),
+      createMetaTools(sourceConversationId, service(), true),
       "peek_session",
     );
 
@@ -149,7 +149,7 @@ describe("createMetaTools", () => {
 
   it("binds source identity and starts persistent sessions without adding a wait", async () => {
     const fake = service();
-    const tools = createMetaTools(sourceConversationId, fake);
+    const tools = createMetaTools(sourceConversationId, fake, true);
     const signal = new AbortController().signal;
 
     const value = await tool(tools, "start_session").execute(
@@ -182,7 +182,7 @@ describe("createMetaTools", () => {
 
   it("binds source identity and starts temporary sessions without adding a wait", async () => {
     const fake = service();
-    const tools = createMetaTools(sourceConversationId, fake);
+    const tools = createMetaTools(sourceConversationId, fake, true);
     const signal = new AbortController().signal;
 
     await tool(tools, "start_temporary_session").execute(
@@ -211,7 +211,7 @@ describe("createMetaTools", () => {
 
   it("aligns task and message limits with the durable UTF-8 byte contract", async () => {
     const fake = service();
-    const tools = createMetaTools(sourceConversationId, fake);
+    const tools = createMetaTools(sourceConversationId, fake, true);
     const largeLegalAscii = "a".repeat(220_000);
 
     await expect(tool(tools, "start_session").execute(
@@ -284,7 +284,7 @@ describe("createMetaTools", () => {
 
   it("uses bounded defaults for list and peek operations", async () => {
     const fake = service();
-    const tools = createMetaTools(sourceConversationId, fake);
+    const tools = createMetaTools(sourceConversationId, fake, true);
 
     await tool(tools, "list_sessions").execute(
       "list-1",
@@ -313,7 +313,7 @@ describe("createMetaTools", () => {
 
   it("forwards the created-by-me session scope", async () => {
     const fake = service();
-    const tools = createMetaTools(sourceConversationId, fake);
+    const tools = createMetaTools(sourceConversationId, fake, true);
 
     await tool(tools, "list_sessions").execute(
       "list-created",
@@ -331,7 +331,7 @@ describe("createMetaTools", () => {
 
   it("passes exact wait and abort identities without inventing lifecycle behavior", async () => {
     const fake = service();
-    const tools = createMetaTools(sourceConversationId, fake);
+    const tools = createMetaTools(sourceConversationId, fake, true);
     const signal = new AbortController().signal;
     const target = {
       conversationId: targetConversationId,
@@ -371,7 +371,7 @@ describe("createMetaTools", () => {
   it("forwards a bounded, de-duplicated aggregate wait set", async () => {
     const fake = service();
     const wait = tool(
-      createMetaTools(sourceConversationId, fake),
+      createMetaTools(sourceConversationId, fake, true),
       "wait_for_session",
     );
     const signal = new AbortController().signal;
@@ -416,7 +416,7 @@ describe("createMetaTools", () => {
   it("rejects malformed or mixed aggregate waits before lifecycle services", async () => {
     const fake = service();
     const wait = tool(
-      createMetaTools(sourceConversationId, fake),
+      createMetaTools(sourceConversationId, fake, true),
       "wait_for_session",
     );
 
@@ -457,7 +457,7 @@ describe("createMetaTools", () => {
 
   it("rejects malformed run identities before entering lifecycle services", async () => {
     const fake = service();
-    const tools = createMetaTools(sourceConversationId, fake);
+    const tools = createMetaTools(sourceConversationId, fake, true);
     const malformedTarget = {
       conversationId: targetConversationId,
       runId: `${targetRunId}f6f`,
@@ -484,7 +484,7 @@ describe("createMetaTools", () => {
 
   it("documents checkpoint as not proof and requires the same IDs", () => {
     const wait = tool(
-      createMetaTools(sourceConversationId, service()),
+      createMetaTools(sourceConversationId, service(), true),
       "wait_for_session",
     );
     expect(wait.description).toContain("{\"outcome\":\"checkpoint\"}");

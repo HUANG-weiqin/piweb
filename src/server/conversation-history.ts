@@ -264,19 +264,21 @@ function projectConversationHistorySlots(
   const seenCardIds = new Set<string>();
 
   const requireAssistant = (entryId: string): ConversationHistoryMessageSlot => {
-    assistant ??= {
-      anchorEntryId: entryId,
-      sourceMessages: [],
-      message: {
-        id: `assistant:${entryId}`,
-        role: "assistant",
-        text: "",
-        thinking: "",
-        tools: [],
-        parts: [],
-      },
-    };
-    if (!messages.includes(assistant)) messages.push(assistant);
+    if (assistant === undefined) {
+      assistant = {
+        anchorEntryId: entryId,
+        sourceMessages: [],
+        message: {
+          id: `assistant:${entryId}`,
+          role: "assistant",
+          text: "",
+          thinking: "",
+          tools: [],
+          parts: [],
+        },
+      };
+      messages.push(assistant);
+    }
     return assistant;
   };
 

@@ -92,12 +92,7 @@ type ParsedRoleStoreDocument =
   | ParsedCurrentRoleStoreDocument
   | ParsedLegacyRoleStoreDocument;
 
-export interface RoleStoreSnapshot {
-  version: typeof ROLE_STORE_VERSION;
-  roles: RoleTemplateV1[];
-}
-
-export type RoleStoreListener = (snapshot: RoleStoreSnapshot) => void;
+type RoleStoreListener = () => void;
 
 function isNodeError(error: unknown, code: string): boolean {
   return (
@@ -255,13 +250,6 @@ function parseRoleMetadata(
     `${label}.description`,
     MAX_ROLE_DESCRIPTION_CHARACTERS,
   );
-  if (legacyBehavior) {
-    assertBoundedUtf8(
-      value.systemPrompt,
-      `${label}.systemPrompt`,
-      MAX_ROLE_SYSTEM_PROMPT_BYTES,
-    );
-  }
   if (value.canManageSessions !== undefined && value.canManageSessions !== null
     && typeof value.canManageSessions !== "boolean") {
     throw new Error(`${label}.canManageSessions must be a boolean`);
@@ -876,7 +864,7 @@ interface PromptWrite {
 }
 
 export class RoleStore {
-  readonly rolesPath: string;
+  private readonly rolesPath: string;
 
   private readonly listeners = new Set<RoleStoreListener>();
   private document: RoleStoreDocument;
@@ -948,13 +936,6 @@ export class RoleStore {
 
     await recoverOrphanPromptFiles(rolesPath, document);
     return new RoleStore(rolesPath, cloneDocument(document));
-  }
-
-  getSnapshot(): RoleStoreSnapshot {
-    return {
-      version: ROLE_STORE_VERSION,
-      roles: this.listRoles(),
-    };
   }
 
   listRoles(): RoleTemplateV1[] {
@@ -1139,7 +1120,7 @@ export class RoleStore {
   private emit(): void {
     for (const listener of [...this.listeners]) {
       try {
-        listener(this.getSnapshot());
+        listener();
       } catch {
         // A subscriber cannot roll back a durable state change.
       }
