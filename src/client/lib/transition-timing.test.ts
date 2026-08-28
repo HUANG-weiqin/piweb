@@ -1,16 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  TRANSITION_MEASURE_NAMES,
-  createTransitionTimingOwner,
-  type TransitionPerformanceSurface,
-} from "./transition-timing";
+import { createTransitionTimingOwner } from "./transition-timing";
 
-function createPerformanceRecorder(): {
-  surface: TransitionPerformanceSurface;
-  mark: ReturnType<typeof vi.fn>;
-  measure: ReturnType<typeof vi.fn>;
-  clearMarks: ReturnType<typeof vi.fn>;
-} {
+const MEASURES = {
+  workspace: {
+    attach: "piweb.workspace.intent-to-attach",
+    ready: "piweb.workspace.intent-to-ready",
+  },
+  conversation: {
+    attach: "piweb.conversation.intent-to-attach",
+    ready: "piweb.conversation.intent-to-ready",
+  },
+} as const;
+
+function createPerformanceRecorder() {
   const mark = vi.fn();
   const measure = vi.fn();
   const clearMarks = vi.fn();
@@ -38,18 +40,18 @@ describe("transition timing owner", () => {
     };
 
     timing.begin(intent);
-    expect(timing.attach(attached)).toBe(true);
-    expect(timing.attach(attached)).toBe(false);
-    expect(timing.ready({
+    timing.attach(attached);
+    timing.attach(attached);
+    timing.ready({
       sessionId: intent.sessionId,
       conversationId: attached.conversationId,
       focusId: attached.focusId,
-    })).toBe(true);
-    expect(timing.ready({
+    });
+    timing.ready({
       sessionId: intent.sessionId,
       conversationId: attached.conversationId,
       focusId: attached.focusId,
-    })).toBe(false);
+    });
 
     const intentMark = performance.mark.mock.calls[0]?.[0];
     const attachMark = performance.mark.mock.calls[1]?.[0];
@@ -57,13 +59,13 @@ describe("transition timing owner", () => {
     expect(performance.measure).toHaveBeenCalledTimes(2);
     expect(performance.measure).toHaveBeenNthCalledWith(
       1,
-      TRANSITION_MEASURE_NAMES.workspace.attach,
+      MEASURES.workspace.attach,
       intentMark,
       attachMark,
     );
     expect(performance.measure).toHaveBeenNthCalledWith(
       2,
-      TRANSITION_MEASURE_NAMES.workspace.ready,
+      MEASURES.workspace.ready,
       intentMark,
       readyMark,
     );
@@ -92,37 +94,37 @@ describe("transition timing owner", () => {
     const currentIntentMark = performance.mark.mock.calls.at(-1)?.[0];
 
     expect(performance.clearMarks).toHaveBeenCalledWith(replacedIntentMark);
-    expect(timing.attach({
+    timing.attach({
       ...replaced,
       conversationId: "conversation-old",
       focusId: "focus-old",
-    })).toBe(false);
-    expect(timing.cancel(replaced)).toBe(false);
+    });
+    timing.cancel(replaced);
     expect(performance.measure).not.toHaveBeenCalled();
 
-    expect(timing.attach({
+    timing.attach({
       ...current,
       conversationId: "conversation-current",
       focusId: "focus-current",
-    })).toBe(true);
-    expect(timing.ready({
+    });
+    timing.ready({
       sessionId: replaced.sessionId,
       conversationId: "conversation-old",
       focusId: "focus-old",
-    })).toBe(false);
-    expect(timing.cancel({ ...current, commandId: "stale-command" })).toBe(false);
-    expect(timing.ready({
+    });
+    timing.cancel({ ...current, commandId: "stale-command" });
+    timing.ready({
       sessionId: current.sessionId,
       conversationId: "conversation-current",
       focusId: "focus-current",
-    })).toBe(true);
+    });
     expect(performance.measure).toHaveBeenCalledWith(
-      TRANSITION_MEASURE_NAMES.conversation.attach,
+      MEASURES.conversation.attach,
       currentIntentMark,
       expect.any(String),
     );
     expect(performance.measure).toHaveBeenCalledWith(
-      TRANSITION_MEASURE_NAMES.conversation.ready,
+      MEASURES.conversation.ready,
       currentIntentMark,
       expect.any(String),
     );
@@ -134,7 +136,7 @@ describe("transition timing owner", () => {
     };
     timing.begin(failed);
     const failedIntentMark = performance.mark.mock.calls.at(-1)?.[0];
-    expect(timing.cancel(failed)).toBe(true);
+    timing.cancel(failed);
     expect(performance.clearMarks).toHaveBeenCalledWith(failedIntentMark);
     expect(performance.measure).toHaveBeenCalledTimes(2);
   });

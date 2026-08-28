@@ -1,29 +1,29 @@
-export type ClientTransitionKind = "workspace" | "conversation";
+type ClientTransitionKind = "workspace" | "conversation";
 
-export interface ClientTransitionIntent {
+interface ClientTransitionIntent {
   kind: ClientTransitionKind;
   sessionId: string;
   commandId: string;
 }
 
-export interface ClientTransitionAttachment extends ClientTransitionIntent {
+interface ClientTransitionAttachment extends ClientTransitionIntent {
   conversationId?: string;
   focusId?: string;
 }
 
-export interface ClientTransitionObservation {
+interface ClientTransitionObservation {
   sessionId: string;
   conversationId?: string;
   focusId?: string;
 }
 
-export interface TransitionPerformanceSurface {
+interface TransitionPerformanceSurface {
   mark(name: string): unknown;
   measure(name: string, startMark: string, endMark: string): unknown;
   clearMarks(name?: string): void;
 }
 
-export const TRANSITION_MEASURE_NAMES = {
+const TRANSITION_MEASURE_NAMES = {
   workspace: {
     attach: "piweb.workspace.intent-to-attach",
     ready: "piweb.workspace.intent-to-ready",
@@ -34,11 +34,11 @@ export const TRANSITION_MEASURE_NAMES = {
   },
 } as const;
 
-export interface TransitionTimingOwner {
+interface TransitionTimingOwner {
   begin(intent: ClientTransitionIntent): void;
-  attach(attachment: ClientTransitionAttachment): boolean;
-  ready(observation: ClientTransitionObservation): boolean;
-  cancel(intent?: ClientTransitionIntent): boolean;
+  attach(attachment: ClientTransitionAttachment): void;
+  ready(observation: ClientTransitionObservation): void;
+  cancel(intent?: ClientTransitionIntent): void;
 }
 
 interface ActiveTransition extends ClientTransitionIntent {
@@ -91,15 +91,13 @@ class PerformanceTransitionTimingOwner implements TransitionTimingOwner {
     this.mark(active.marks.intent);
   }
 
-  attach(attachment: ClientTransitionAttachment): boolean {
+  attach(attachment: ClientTransitionAttachment): void {
     const active = this.active;
     if (
       !active
       || active.attachment !== undefined
       || !this.matchesIntent(active, attachment)
-    ) {
-      return false;
-    }
+    ) return;
     active.attachment = {
       conversationId: attachment.conversationId,
       focusId: attachment.focusId,
@@ -109,19 +107,16 @@ class PerformanceTransitionTimingOwner implements TransitionTimingOwner {
       active.marks.intent,
       active.marks.attach,
     );
-    return true;
   }
 
-  ready(observation: ClientTransitionObservation): boolean {
+  ready(observation: ClientTransitionObservation): void {
     const active = this.active;
     if (
       !active?.attachment
       || active.sessionId !== observation.sessionId
       || active.attachment.conversationId !== observation.conversationId
       || active.attachment.focusId !== observation.focusId
-    ) {
-      return false;
-    }
+    ) return;
     this.measure(
       TRANSITION_MEASURE_NAMES[active.kind].ready,
       active.marks.intent,
@@ -129,19 +124,15 @@ class PerformanceTransitionTimingOwner implements TransitionTimingOwner {
     );
     this.clearMark(active.marks.intent);
     this.active = undefined;
-    return true;
   }
 
-  cancel(intent?: ClientTransitionIntent): boolean {
+  cancel(intent?: ClientTransitionIntent): void {
     const active = this.active;
-    if (!active || (intent && !this.matchesIntent(active, intent))) {
-      return false;
-    }
+    if (!active || (intent && !this.matchesIntent(active, intent))) return;
     this.clearMark(active.marks.intent);
     this.clearMark(active.marks.attach);
     this.clearMark(active.marks.ready);
     this.active = undefined;
-    return true;
   }
 
   private matchesIntent(
