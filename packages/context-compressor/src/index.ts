@@ -98,7 +98,7 @@ function sampleLargeStream(lines: string[]): string {
   const availableBytes = MAX_OUTPUT_BYTES - requiredBytes;
   const count = Math.min(
     candidates.length,
-    Math.max(1, Math.floor((availableBytes * candidates.length) / Math.max(1, candidateBytes))),
+    Math.max(1, Math.floor((availableBytes * candidates.length) / candidateBytes)),
   );
   const selected = new Set(required);
   for (const index of evenlySelectedIndices(candidates, count)) {

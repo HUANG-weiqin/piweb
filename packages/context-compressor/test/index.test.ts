@@ -166,7 +166,6 @@ describe("compressLineStream", () => {
     }).join("\n");
     const output = compressLineStream(input);
 
-    expect(bytes(output)).toBeLessThanOrEqual(bytes(input));
     if (output !== input) {
       expect(bytes(output) * 10).toBeLessThanOrEqual(bytes(input) * 9);
     }
