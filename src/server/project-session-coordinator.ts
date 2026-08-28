@@ -98,7 +98,6 @@ import {
   conversationDisplayTitle,
   projectConversationPeers,
 } from "./project-snapshot.js";
-import { ProjectRunCoordinator } from "./project-run-coordinator.js";
 import {
   RoleCatalog,
   type RoleCatalogModelRegistry,
@@ -704,7 +703,6 @@ export class ProjectSessionCoordinator {
     private readonly runtime: PiRuntimeLike,
     private readonly roles: RoleCatalog,
     private readonly projects: ProjectStoreRegistry = new ProjectStoreRegistry(),
-    private readonly projectRuns: ProjectRunCoordinator = new ProjectRunCoordinator(),
     private readonly toolPolicy: ToolPolicy = defaultToolPolicy,
     private readonly now: () => Date = () => new Date(),
   ) {}
@@ -1950,7 +1948,6 @@ export class ProjectSessionCoordinator {
       sessionManager: manager,
       conversationLease: lease,
       runtime: this.runtime,
-      projectRuns: this.projectRuns,
       toolPolicy: this.toolPolicy,
       createSessionOptions: this.createActorSessionOptions(
         context,

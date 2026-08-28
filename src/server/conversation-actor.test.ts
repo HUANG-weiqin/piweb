@@ -47,10 +47,6 @@ import type {
   ConversationDeletionLease,
   ConversationLease,
 } from "./project-store.js";
-import {
-  ProjectRunCoordinator,
-  type ProjectRunLease,
-} from "./project-run-coordinator.js";
 
 const SESSION_ID = "f74fedb8-ea07-49a6-bd47-3036f7b06a27";
 const FOCUS_ID = "cab0af06-a001-45f7-9084-2a4ac5a1ed56";
@@ -313,31 +309,6 @@ class FakeConversationLease implements ConversationLease {
         this.deletionReleases++;
       },
     };
-  }
-}
-
-class TrackingRunCoordinator extends ProjectRunCoordinator {
-  constructor(private readonly order: string[] = []) {
-    super();
-  }
-
-  override registerRun(
-    _cwd: string,
-    _cancel: () => Promise<void> | void,
-  ): ProjectRunLease {
-    this.order.push("run-registered");
-    let released = false;
-    return {
-      release: () => {
-        if (released) return;
-        released = true;
-        this.order.push("run-lease-released");
-      },
-    };
-  }
-
-  override isRestrictionPending(): boolean {
-    return false;
   }
 }
 
@@ -3435,11 +3406,9 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
-  it("persists exact final text before releasing and publishing terminal", async () => {
+  it("persists exact final text before publishing terminal", async () => {
     const order: string[] = [];
-    const projectRuns = new TrackingRunCoordinator(order);
     const fixture = await openActor({
-      projectRuns,
       persistSettlement: async (settlement) => {
         order.push(`persist:${settlement.finalText}`);
       },
@@ -3497,9 +3466,7 @@ describe("ConversationActor", () => {
       settledAt: "2026-07-19T12:00:00.000Z",
     });
     expect(order).toEqual([
-      "run-registered",
       "persist:exact final",
-      "run-lease-released",
       "terminal",
       "completion-callback",
     ]);

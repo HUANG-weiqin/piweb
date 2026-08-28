@@ -28,7 +28,6 @@ import type {
   PiRuntimeLike,
   ToolCallGate,
 } from "./pi-runtime.js";
-import { ProjectRunCoordinator } from "./project-run-coordinator.js";
 import {
   MAX_PROJECT_SNAPSHOT_BYTES,
   PiConnection,
@@ -347,12 +346,10 @@ async function coordinatedConnectionHarness() {
     join(cwd, "roles.json"),
   );
   const projects = new ProjectStoreRegistry();
-  const projectRuns = new ProjectRunCoordinator();
   const coordinator = new ProjectSessionCoordinator(
     runtime,
     roles,
     projects,
-    projectRuns,
   );
   const events: ServerEvent[] = [];
   const connection = new PiConnection(
@@ -360,7 +357,6 @@ async function coordinatedConnectionHarness() {
     runtime,
     undefined,
     projects,
-    projectRuns,
     async () => ({ coordinator, roles }),
   );
   const cleanup = async () => {
@@ -1263,7 +1259,6 @@ describe("PiConnection lifecycle", () => {
         harness.runtime,
         undefined,
         new ProjectStoreRegistry(),
-        new ProjectRunCoordinator(),
         async () => ({
           coordinator: harness.coordinator,
           roles: harness.roles,
@@ -1300,7 +1295,6 @@ describe("PiConnection lifecycle", () => {
         harness.runtime,
         undefined,
         new ProjectStoreRegistry(),
-        new ProjectRunCoordinator(),
         async () => ({
           coordinator: harness.coordinator,
           roles: harness.roles,

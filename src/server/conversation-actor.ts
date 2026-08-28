@@ -55,10 +55,6 @@ import {
   type ConversationLease,
   type ProjectStore,
 } from "./project-store.js";
-import {
-  ProjectRunCoordinator,
-  type ProjectRunLease,
-} from "./project-run-coordinator.js";
 import { SerialTaskQueue } from "./serial-task-queue.js";
 import { SessionEventProjector, snapshotWireValue } from "./session-events.js";
 import {
@@ -162,7 +158,6 @@ export interface ConversationActorOpenOptions {
   sessionManager: SessionManager;
   conversationLease: ConversationLease;
   runtime: PiRuntimeLike;
-  projectRuns?: ProjectRunCoordinator;
   toolPolicy?: ToolPolicy;
   createSessionOptions?: Omit<
     CreatePiSessionOptions,
@@ -305,7 +300,6 @@ interface RunTicket {
   waitCacheCheckpointDisabled: boolean;
   awaitingWaitCacheCheckpointUsage: boolean;
   abortPromise?: Promise<void>;
-  projectRunLease?: ProjectRunLease;
   finishPromise?: Promise<RunSettlement>;
 }
 
@@ -438,7 +432,6 @@ export class ConversationActor {
   private readonly project: ConversationActorOpenOptions["project"];
   private readonly conversationLease: ConversationLease;
   private readonly runtime: PiRuntimeLike;
-  private readonly projectRuns: ProjectRunCoordinator;
   private readonly toolPolicy: ToolPolicy;
   private createSessionOptions:
     ConversationActorOpenOptions["createSessionOptions"];
@@ -478,7 +471,6 @@ export class ConversationActor {
     this.project = options.project;
     this.conversationLease = options.conversationLease;
     this.runtime = options.runtime;
-    this.projectRuns = options.projectRuns ?? new ProjectRunCoordinator();
     this.toolPolicy = options.toolPolicy ?? defaultToolPolicy;
     this.createSessionOptions = options.createSessionOptions;
     this.onCompletion = options.onCompletion;
@@ -1816,15 +1808,6 @@ export class ConversationActor {
       }
       this.created = undefined;
 
-      const leftover = this.activeRun;
-      if (leftover?.projectRunLease) {
-        try {
-          leftover.projectRunLease.release();
-        } catch (error) {
-          failures.push(error);
-        }
-        leftover.projectRunLease = undefined;
-      }
       this.activeRun = undefined;
 
       let deletionLease: ConversationDeletionLease | undefined;
@@ -1867,15 +1850,6 @@ export class ConversationActor {
       await this.settleRun(ticket, "aborted");
       return;
     }
-    const projectRunLease = this.projectRuns.registerRun(
-      this.project.cwd,
-      () => this.cancelRun(ticket),
-    );
-    if (!projectRunLease) {
-      await this.settleRun(ticket, "aborted");
-      return;
-    }
-    ticket.projectRunLease = projectRunLease;
     await this.compactAtThreshold(ticket);
     if (this.activeRun !== ticket) return;
     if (ticket.phase === "cancelling") {
@@ -2076,8 +2050,8 @@ export class ConversationActor {
       settledAt: this.now().toISOString(),
     }).data;
 
-    // Ordering is intentional: durable truth precedes the permission lease,
-    // browser terminal projection, and coordinator lifecycle reactions.
+    // Ordering is intentional: durable truth precedes browser terminal
+    // projection and coordinator lifecycle reactions.
     await this.persistSettlementCallback(settlement, this.sessionManager);
     for (const guidance of ticket.guidanceDeliveries.splice(0)) {
       guidance.delivery.reject(
@@ -2091,8 +2065,6 @@ export class ConversationActor {
       ticket,
       new Error("Run ended before queued session messages were delivered"),
     );
-    ticket.projectRunLease?.release();
-    ticket.projectRunLease = undefined;
     this.cancelScope(ticket.id);
     this.activeRun = undefined;
     this.emitSessionEvent(ticket, {
@@ -2126,14 +2098,6 @@ export class ConversationActor {
   }
 
   private failRunInfrastructure(ticket: RunTicket, error: unknown): void {
-    if (ticket.projectRunLease) {
-      try {
-        ticket.projectRunLease.release();
-      } catch {
-        // The original persistence/lifecycle failure remains authoritative.
-      }
-      ticket.projectRunLease = undefined;
-    }
     if (this.activeRun === ticket) this.activeRun = undefined;
     if (this.liveProjection?.runId === ticket.id) this.liveProjection = undefined;
     for (const guidance of ticket.guidanceDeliveries.splice(0)) {

@@ -16,7 +16,6 @@ import {
   type DirectoryBrowser,
 } from "./directory-browser.js";
 import type { PiRuntimeLike } from "./pi-runtime.js";
-import { ProjectRunCoordinator } from "./project-run-coordinator.js";
 import { ProjectSessionCoordinator } from "./project-session-coordinator.js";
 import {
   PiConnection,
@@ -118,7 +117,6 @@ export function attachSocketServer(
   const connections = new Map<WebSocket, PiConnection>();
   const connectionDisposals = new Map<PiConnection, Promise<void>>();
   const projects = new ProjectStoreRegistry();
-  const projectRuns = new ProjectRunCoordinator();
   let coordinationPromise: Promise<PiConnectionCoordination> | undefined;
   let closePromise: Promise<void> | undefined;
 
@@ -129,7 +127,6 @@ export function attachSocketServer(
         runtime,
         roles,
         projects,
-        projectRuns,
       ),
     }));
     return coordinationPromise;
@@ -165,7 +162,6 @@ export function attachSocketServer(
       runtime,
       undefined,
       projects,
-      projectRuns,
       coordination,
     );
     connections.set(socket, connection);

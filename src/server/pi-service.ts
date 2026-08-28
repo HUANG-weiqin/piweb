@@ -40,10 +40,6 @@ import {
   type ProjectStoreHandle,
 } from "./project-store.js";
 import {
-  ProjectRunCoordinator,
-  type ProjectRunLease,
-} from "./project-run-coordinator.js";
-import {
   ProjectSessionCoordinator,
   type ConversationPresentation,
   type ProjectSessionCoordinatorEvent,
@@ -106,7 +102,6 @@ interface RunTicket {
   projector: SessionEventProjector;
   extensionErrorMessage?: string;
   abortPromise?: Promise<void>;
-  projectRunLease?: ProjectRunLease;
 }
 
 interface SelectedConversation {
@@ -278,7 +273,6 @@ export class PiConnection {
     private readonly runtime: PiRuntimeLike,
     private readonly toolPolicy: ToolPolicy = defaultToolPolicy,
     private readonly projects: ProjectStoreRegistry = new ProjectStoreRegistry(),
-    private readonly projectRuns: ProjectRunCoordinator = new ProjectRunCoordinator(),
     private readonly coordinationProvider?: PiConnectionCoordinationProvider,
   ) {
     this.extensionUI = new ExtensionUIBroker(emit);
@@ -2331,15 +2325,6 @@ export class PiConnection {
         );
       }
       ticket.toolMode ??= active.project.toolMode;
-      const projectRunLease = this.projectRuns.registerRun(
-        active.cwd,
-        () => this.cancelRun(ticket),
-      );
-      if (!projectRunLease) {
-        this.finishRun(ticket, "aborted");
-        return;
-      }
-      ticket.projectRunLease = projectRunLease;
       ticket.phase = "running";
       this.emitRun(ticket, { type: "run_started" });
       this.publishState();
@@ -2910,12 +2895,10 @@ export class PiConnection {
     let policy: ToolPolicyDecision;
     try {
       policy = await this.toolPolicy({
-        mode: this.projectRuns.isRestrictionPending(active.cwd)
-          ? "read_only"
-          : mostRestrictiveToolMode(
-              ticket.toolMode ?? "read_only",
-              active.project.toolMode,
-            ),
+        mode: mostRestrictiveToolMode(
+          ticket.toolMode ?? "read_only",
+          active.project.toolMode,
+        ),
         toolName: input.toolName,
         toolSource: input.toolSource,
       });
@@ -2977,8 +2960,6 @@ export class PiConnection {
     if (this.activeRun !== ticket) return;
     this.extensionUI.cancelScope(ticket.sessionId, ticket.generation);
     this.activeRun = undefined;
-    ticket.projectRunLease?.release();
-    ticket.projectRunLease = undefined;
     this.emitRun(ticket, { type: "run_finished", outcome });
     this.publishState();
     const active = this.active;
