@@ -14,6 +14,7 @@ import {
   type ChatMessagePart,
   type ToolItem,
 } from "../chat/reducer";
+import { ActivitySpinner } from "./ActivitySpinner";
 import { ToolCard, toolPresentation } from "./ToolCard";
 
 const TOOL_PREVIEW_LIMIT = 4;
@@ -194,7 +195,7 @@ function ThinkingPanel({
             role="status"
             aria-label="Agent 正在思考"
           >
-            <span className="thinking-spinner" aria-hidden="true" />
+            <ActivitySpinner className="thinking-spinner" />
           </span>
         : <span className="thinking-complete" aria-hidden="true">✓</span>}
       <span>{active ? "正在思考" : "思考过程"}</span>
@@ -399,7 +400,7 @@ function ActivityGroup({
         }
       >
         {summary.tone === "active"
-          ? <span className="thinking-spinner" aria-hidden="true" />
+          ? <ActivitySpinner className="thinking-spinner" />
           : summary.tone === "error"
             ? <span aria-hidden="true">!</span>
             : <span aria-hidden="true">✓</span>}

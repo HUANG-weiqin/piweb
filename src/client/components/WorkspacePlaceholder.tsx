@@ -1,3 +1,4 @@
+import { ActivitySpinner } from "./ActivitySpinner";
 import { workspaceName } from "./WorkspaceRail";
 
 interface WorkspacePlaceholderProps {
@@ -52,7 +53,7 @@ export function WorkspacePlaceholder({
 
   return <main className="workspace-placeholder">
     <div className="workspace-placeholder-content">
-      <span className="workspace-opening-spinner" aria-hidden="true" />
+      <ActivitySpinner className="workspace-opening-spinner" strokeWidth={1.2} />
       <p className="eyebrow">OPENING WORKSPACE</p>
       <h1>正在打开工作区</h1>
       <p>{workspaceName(cwd)}</p>

@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { ToolItem } from "../chat/reducer";
+import { ActivitySpinner } from "./ActivitySpinner";
 
 type ToolRecord = Record<string, unknown>;
 
@@ -325,12 +326,11 @@ export function ToolCard({ tool }: { tool: ToolItem }) {
   return <details className={`tool tool-${tool.status}`}>
     <summary>
       <span className="tool-status" aria-label={status}>
-        <span
-          className={isActive ? "tool-spinner" : "tool-status-symbol"}
-          aria-hidden="true"
-        >
-          {isActive ? "" : tool.status === "done" ? "✓" : "!"}
-        </span>
+        {isActive
+          ? <ActivitySpinner className="tool-spinner" />
+          : <span className="tool-status-symbol" aria-hidden="true">
+              {tool.status === "done" ? "✓" : "!"}
+            </span>}
       </span>
       <span className="tool-summary">
         <strong>{presentation.label}</strong>

@@ -1073,17 +1073,30 @@ pre {
   font-size: 12px;
 }
 
-.conversation-activity-spinner,
-.compaction-spinner,
-.thinking-spinner,
-.tool-spinner {
+.activity-spinner {
   display: block;
   width: 14px;
   height: 14px;
-  border: 2px solid color-mix(in srgb, currentColor 22%, transparent);
-  border-top-color: currentColor;
-  border-radius: 50%;
+  overflow: visible;
+  transform-box: fill-box;
+  transform-origin: center;
   animation: agent-activity-spin 850ms linear infinite;
+}
+
+.activity-spinner-track,
+.activity-spinner-arc {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+}
+
+.activity-spinner-track {
+  stroke-opacity: 0.22;
+}
+
+.activity-spinner-arc {
+  stroke-dasharray: 9 26;
+  stroke-linecap: round;
 }
 
 .thinking.is-active > summary {
@@ -1942,10 +1955,15 @@ pre {
   width: 36px;
   height: 36px;
   margin-bottom: 8px;
-  border: 3px solid color-mix(in srgb, var(--muted) 20%, transparent);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: agent-activity-spin 850ms linear infinite;
+}
+
+.workspace-opening-spinner .activity-spinner-track,
+.workspace-opening-spinner .activity-spinner-arc {
+  stroke-width: 1.2;
+}
+
+.workspace-opening-spinner {
+  color: var(--accent);
 }
 
 .workspace-setup-dialog {

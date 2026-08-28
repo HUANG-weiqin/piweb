@@ -30,6 +30,7 @@ import {
   type ChatState,
 } from "../chat/reducer";
 import { THINKING_LEVEL_LABELS } from "../lib/thinking-level";
+import { ActivitySpinner } from "./ActivitySpinner";
 import { ConversationRoleDialog } from "./ConversationRoleDialog";
 import { Message } from "./Message";
 import { SessionMessageCard } from "./SessionMessageCard";
@@ -594,7 +595,7 @@ function ChatView({
         role="status"
         aria-label="正在压缩上下文"
       >
-        <span className="compaction-spinner" aria-hidden="true" />
+        <ActivitySpinner className="compaction-spinner" />
         <span className="compaction-progress-copy">
           <strong>正在压缩上下文</strong>
           <small>整理较早消息并保留关键信息…</small>

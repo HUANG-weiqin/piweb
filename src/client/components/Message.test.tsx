@@ -92,6 +92,11 @@ describe("Message", () => {
     );
 
     expect(screen.getByRole("status", { name: "Agent 正在思考" })).toBeInTheDocument();
+    const spinner = container.querySelector(".thinking-spinner");
+    expect(spinner?.tagName).toBe("svg");
+    expect(spinner?.querySelectorAll("circle")).toHaveLength(2);
+    expect(spinner?.querySelector(".activity-spinner-arc"))
+      .toHaveAttribute("stroke-linecap", "round");
     expect(container.querySelector(".activity-group-label"))
       .toHaveTextContent("正在思考");
     expect(container.querySelector(".activity-group-detail"))

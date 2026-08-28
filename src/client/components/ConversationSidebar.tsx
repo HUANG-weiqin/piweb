@@ -15,6 +15,7 @@ import {
   type ConversationSummary,
 } from "../../shared/protocol";
 import { useModalFocus } from "../lib/use-modal-focus";
+import { ActivitySpinner } from "./ActivitySpinner";
 
 const DEFAULT_SIDEBAR_WIDTH = 286;
 const MIN_SIDEBAR_WIDTH = 240;
@@ -134,7 +135,7 @@ function ActivityIndicator({
         aria-label={label}
         title={label}
       >
-        <span className="conversation-activity-spinner" aria-hidden="true" />
+        <ActivitySpinner className="conversation-activity-spinner" />
       </span>
     );
   }
