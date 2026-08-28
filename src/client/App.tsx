@@ -166,7 +166,7 @@ function loadInitialWorkspaceState(): InitialWorkspaceState {
 interface DirectPendingPrompt extends ActiveFocus {
   workspaceKey: string;
   runId: string;
-  promptId?: string;
+  promptId: string;
   text: string;
 }
 
@@ -174,14 +174,6 @@ interface DirectPendingPrompt extends ActiveFocus {
 interface PendingAdmission {
   promptId: string;
   text: string;
-}
-
-interface UnconfirmedPrompt {
-  submittedText: string;
-  retainedDraft: string;
-  edited: boolean;
-  promptId?: string;
-  notice?: string;
 }
 
 interface PendingConversationDeletion {
@@ -195,7 +187,6 @@ interface PendingConversationDeletion {
 
 interface PendingConversationTruncation {
   commandId: string;
-  conversationId: string;
   messageId: string;
 }
 
@@ -210,7 +201,6 @@ interface PendingContextCompaction extends ActiveFocus {
 
 interface PendingConversationRoleSwitch {
   commandId: string;
-  roleId: string;
 }
 
 interface DirectoryBrowserState {
@@ -367,10 +357,6 @@ class ConversationOperationRegistry<T extends ConversationOperation> {
   clear(): void {
     this.byConversation.clear();
   }
-
-  values(): T[] {
-    return [...this.byConversation.values()];
-  }
 }
 
 type RoleCommandInput =
@@ -421,17 +407,10 @@ export function App() {
   );
   const authFlowIdRef = useRef("");
   const [draft, setDraft] = useState("");
-  const draftRef = useRef("");
-  const draftRevisionRef = useRef(0);
-  const updateDraft = (text: string) => {
-    draftRevisionRef.current += 1;
-    draftRef.current = text;
-    setDraft(text);
-  };
+  const updateDraft = (text: string) => setDraft(text);
   const [pendingPrompt, setPendingPrompt] = useState<DirectPendingPrompt>();
   const pendingPromptRef = useRef<DirectPendingPrompt | undefined>(undefined);
-  const unconfirmedPromptByConversationRef =
-    useRef(new Map<string, UnconfirmedPrompt>());
+  const unconfirmedPromptByConversationRef = useRef(new Map<string, string>());
   const [pendingAdmissions, setPendingAdmissions] = useState<PendingAdmission[]>([]);
   const pendingAdmissionsRef = useRef<PendingAdmission[]>([]);
   const replacePendingAdmissions = (admissions: PendingAdmission[]) => {
@@ -520,7 +499,6 @@ export function App() {
   const [roleManagerInitialRoleId, setRoleManagerInitialRoleId] =
     useState<string | null>();
   const [selectingRole, setSelectingRole] = useState(false);
-  const [creatingConversation, setCreatingConversation] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [pendingRoleOperation, setPendingRoleOperation] =
     useState<PendingRoleOperation>();
@@ -727,30 +705,21 @@ export function App() {
     const unconfirmed = unconfirmedPromptByConversationRef.current.get(
       unconfirmedPromptKey(focus),
     );
-    if (!unconfirmed) return;
-    updateDraft(unconfirmed.retainedDraft);
-    setPromptNotice(unconfirmed.notice ?? UNCONFIRMED_PROMPT_NOTICE);
+    if (unconfirmed === undefined) return;
+    updateDraft(unconfirmed);
+    setPromptNotice(UNCONFIRMED_PROMPT_NOTICE);
   };
   const rememberUnconfirmedPrompt = (pending: DirectPendingPrompt) => {
     unconfirmedPromptByConversationRef.current.set(
       pendingConversationKey(pending),
-      {
-        submittedText: pending.text,
-        retainedDraft: pending.text,
-        edited: false,
-      },
+      pending.text,
     );
   };
   const forgetUnconfirmedPrompt = (
-    focus: Pick<ActiveFocus, "projectId" | "conversationId"> & { workspaceKey?: string },
+    focus: Pick<DirectPendingPrompt, "workspaceKey" | "projectId" | "conversationId">,
   ) => {
     unconfirmedPromptByConversationRef.current.delete(
-      focus.workspaceKey
-        ? pendingConversationKey({
-            ...focus,
-            workspaceKey: focus.workspaceKey,
-          })
-        : unconfirmedPromptKey(focus),
+      pendingConversationKey(focus),
     );
   };
   const rememberWorkspace = (cwd: string) => {
@@ -872,7 +841,6 @@ export function App() {
     }
     pendingFocusRef.current = pending;
     setPendingFocus(pending);
-    setCreatingConversation(pending?.operation === "create_conversation");
   };
   const clearFocusReplacementAuthority = () => {
     supersededFocusCommandsRef.current.clear();
@@ -1099,6 +1067,8 @@ export function App() {
     event: ConversationSnapshotEvent,
     settleReadiness = true,
   ) => {
+    const focus = focusRef.current;
+    if (!focus) return;
     if (settleReadiness) {
       transitionTiming.ready({
         sessionId: event.sessionId,
@@ -1106,27 +1076,18 @@ export function App() {
         focusId: event.focusId,
       });
     }
-    const focus = focusRef.current;
-    if (focus) {
-      dispatch({
-        type: "hydrate",
-        sessionId: focus.sessionId,
-        conversationId: focus.conversationId,
-        focusId: focus.focusId,
-        items: event.items
-          ?? (event.messages ?? []).map((message) => ({
-            kind: "message" as const,
-            ...message,
-          })),
-        projectionSeq: event.projectionSeq,
-      });
-    } else {
-      dispatch({
-        type: "hydrate",
-        messages: event.messages ?? [],
-        projectionSeq: event.projectionSeq,
-      });
-    }
+    dispatch({
+      type: "hydrate",
+      sessionId: focus.sessionId,
+      conversationId: focus.conversationId,
+      focusId: focus.focusId,
+      items: event.items
+        ?? (event.messages ?? []).map((message) => ({
+          kind: "message" as const,
+          ...message,
+        })),
+      projectionSeq: event.projectionSeq,
+    });
     setConversationRole(event.role);
     setLoopList(event.loopList ?? { items: [], armed: false });
     setHistoryWindow(event.window);
@@ -1578,7 +1539,6 @@ export function App() {
           || event.conversationId !== focus.conversationId
           || event.focusId !== focus.focusId
         ) return;
-        clearPendingAdmissions();
         clearFocusReplacementAuthority();
         pendingFocusedStateRef.current = undefined;
         const invalidatedWorkspaceKey = currentWorkspaceKey();
@@ -1625,7 +1585,6 @@ export function App() {
         updateDraft("");
         setPromptNotice("");
         updatePendingPrompt(undefined);
-        clearPendingAdmissions();
         updateOutstandingRunId("");
         setExtensionUI([]);
       } else if (event.type === "role_catalog_snapshot") {
@@ -2740,7 +2699,6 @@ export function App() {
     const commandId = crypto.randomUUID();
     const pending = {
       commandId,
-      conversationId: focus.conversationId,
       messageId,
     };
     updatePendingConversationTruncation(pending);
@@ -2839,7 +2797,6 @@ export function App() {
     }
     const pending = {
       commandId: crypto.randomUUID(),
-      roleId,
     };
     updatePendingConversationRoleSwitch(pending);
     setError("");
@@ -2972,11 +2929,7 @@ export function App() {
       const unconfirmed = unconfirmedPromptByConversationRef.current.get(key);
       if (unconfirmed) {
         if (text) {
-          unconfirmedPromptByConversationRef.current.set(key, {
-            ...unconfirmed,
-            retainedDraft: text,
-            edited: true,
-          });
+          unconfirmedPromptByConversationRef.current.set(key, text);
         } else {
           unconfirmedPromptByConversationRef.current.delete(key);
         }
@@ -3249,7 +3202,10 @@ export function App() {
         {showRoleSelection
           ? <RoleSelectionPage
               roles={roles}
-              pending={creatingConversation || transitioning}
+              pending={
+                pendingFocus?.operation === "create_conversation"
+                || transitioning
+              }
               onStart={createConversation}
               onManageRole={(roleId) => {
                 setRoleManagerInitialRoleId(roleId);

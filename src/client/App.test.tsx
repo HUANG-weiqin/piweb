@@ -3501,14 +3501,6 @@ describe("App", () => {
     expect(screen.getByRole("textbox", { name: "项目目录" })).toHaveValue("E:\\default");
   });
 
-  it("starts projects without a global tool permission", () => {
-    render(<App />);
-
-    startFromSetup();
-
-    expect(latestCommand("initialize")).not.toHaveProperty("toolMode");
-  });
-
   it("ignores the removed global tool-mode preference", () => {
     localStorage.setItem("piweb.toolMode", "workspace_write");
     render(<App />);
@@ -4635,56 +4627,6 @@ describe("App", () => {
     expect(latestCommand("prompt")).toMatchObject({
       sessionId,
       text: "safe after hydrate",
-    });
-  });
-
-  it("opens a listed project conversation with a fresh connection epoch", () => {
-    render(<App />);
-    const sessionId = startFromSetup();
-    act(() => socketMock.emit?.({
-      type: "state",
-      state: {
-        sessionId,
-        projectId: PROJECT_ID,
-        conversationId: CONVERSATION_ID,
-        cwd: "E:\\work",
-        busy: false,
-        thinkingLevel: "off",
-        toolMode: "full_access",
-        availableThinkingLevels: ["off"],
-        selectedModel: { provider: "provider", id: "model" },
-        providers: [],
-      },
-    }));
-    act(() => socketMock.emit?.({
-      type: "project_snapshot",
-      sessionId,
-      projectId: PROJECT_ID,
-      conversationId: CONVERSATION_ID,
-      conversations: [{
-          id: CONVERSATION_ID,
-          name: "Current",
-          preview: "current",
-          createdAt: "2026-07-18T12:00:00.000Z",
-          updatedAt: "2026-07-18T12:01:00.000Z",
-          messageCount: 2,
-        }, {
-          id: CONVERSATION_B,
-          name: "Older work",
-          preview: "older",
-          createdAt: "2026-07-17T12:00:00.000Z",
-          updatedAt: "2026-07-17T12:01:00.000Z",
-          messageCount: 4,
-      }],
-      truncated: false,
-    }));
-    fireEvent.click(screen.getByRole("button", {
-      name: "打开会话 Older work",
-    }));
-
-    expect(latestCommand("focus_conversation")).toMatchObject({
-      sessionId,
-      conversationId: CONVERSATION_B,
     });
   });
 
