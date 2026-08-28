@@ -8,16 +8,13 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  createAgentSession,
   createAgentSessionFromServices,
   createAgentSessionServices,
   createReadTool,
-  DefaultResourceLoader,
   initTheme,
   ModelRuntime,
   SessionManager,
   SettingsManager,
-  type CreateAgentSessionOptions,
   type CreateModelRuntimeOptions,
   type ExtensionAPI,
   type InlineExtension,
@@ -60,7 +57,6 @@ function providerModel(id: string) {
 }
 
 async function fixedModelTransportRuntime(
-  factory: "direct" | "services",
   transport: Transport,
   provider: string,
   api: Api,
@@ -88,43 +84,25 @@ async function fixedModelTransportRuntime(
     createModelRuntime,
     createSettings: () => SettingsManager.inMemory({ transport }),
   };
-  const runtime = factory === "direct"
-    ? await PiRuntime.create({
-        ...options,
-        createSession: async (sessionOptions) => {
-          constructed = sessionOptions.settingsManager?.getTransport();
-          const resourceLoader = new DefaultResourceLoader({
-            cwd: sessionOptions.cwd ?? process.cwd(),
-            agentDir: sessionOptions.cwd ?? process.cwd(),
-            settingsManager: sessionOptions.settingsManager,
-            noExtensions: true,
-            noSkills: true,
-            noPromptTemplates: true,
-            noThemes: true,
-            noContextFiles: true,
-          });
-          return createAgentSession({ ...sessionOptions, resourceLoader });
-        },
-      })
-    : await PiRuntime.create({
-        ...options,
-        createServices: (serviceOptions) => createAgentSessionServices({
-          ...serviceOptions,
-          agentDir: serviceOptions.cwd,
-          resourceLoaderOptions: {
-            ...serviceOptions.resourceLoaderOptions,
-            noExtensions: true,
-            noSkills: true,
-            noPromptTemplates: true,
-            noThemes: true,
-            noContextFiles: true,
-          },
-        }),
-        createSessionFromServices: async (sessionOptions) => {
-          constructed = sessionOptions.services.settingsManager.getTransport();
-          return createAgentSessionFromServices(sessionOptions);
-        },
-      });
+  const runtime = await PiRuntime.create({
+    ...options,
+    createServices: (serviceOptions) => createAgentSessionServices({
+      ...serviceOptions,
+      agentDir: serviceOptions.cwd,
+      resourceLoaderOptions: {
+        ...serviceOptions.resourceLoaderOptions,
+        noExtensions: true,
+        noSkills: true,
+        noPromptTemplates: true,
+        noThemes: true,
+        noContextFiles: true,
+      },
+    }),
+    createSessionFromServices: async (sessionOptions) => {
+      constructed = sessionOptions.services.settingsManager.getTransport();
+      return createAgentSessionFromServices(sessionOptions);
+    },
+  });
 
   return { runtime, constructedTransport: () => constructed };
 }
@@ -151,8 +129,8 @@ function shadowReadTool(cwd: string, name: string, marker: string) {
 async function testRuntime(
   extensionsFor: (cwd: string) => InlineExtension[],
   afterCreate?: (
-    created: Awaited<ReturnType<typeof createAgentSession>>,
-    options: CreateAgentSessionOptions,
+    created: Awaited<ReturnType<typeof createAgentSessionFromServices>>,
+    options: Parameters<typeof createAgentSessionFromServices>[0],
   ) => Promise<void>,
   setupModelRuntime?: (runtime: ModelRuntime) => Promise<void> | void,
 ): Promise<PiRuntime> {
@@ -180,22 +158,8 @@ async function testRuntime(
         extensionFactories: extensionsFor(options.cwd),
       },
     }),
-    createSession: async (options) => {
-      const cwd = options.cwd ?? process.cwd();
-      const settingsManager = options.settingsManager ?? SettingsManager.inMemory();
-      const resourceLoader = new DefaultResourceLoader({
-        cwd,
-        agentDir: cwd,
-        settingsManager,
-        noExtensions: true,
-        noSkills: true,
-        noPromptTemplates: true,
-        noThemes: true,
-        noContextFiles: true,
-        extensionFactories: extensionsFor(cwd),
-      });
-      await resourceLoader.reload();
-      const created = await createAgentSession({ ...options, resourceLoader });
+    createSessionFromServices: async (options) => {
+      const created = await createAgentSessionFromServices(options);
       await afterCreate?.(created, options);
       return created;
     },
@@ -606,17 +570,16 @@ describe("PiRuntime session ownership", () => {
   });
 
   it.each([
-    ["direct", "openai-codex", "openai-codex-responses", "auto", "sse"],
-    ["services", "openai-codex", "openai-codex-responses", "auto", "sse"],
-    ["direct", "openai-codex", "openai-codex-responses", "websocket", "websocket"],
-    ["services", "openai-codex", "openai-codex-responses", "websocket-cached", "websocket-cached"],
-    ["direct", "openai-codex", "openai-codex-responses", "sse", "sse"],
-    ["services", "openai", "openai-responses", "auto", "auto"],
+    ["openai-codex", "openai-codex-responses", "auto", "sse"],
+    ["openai-codex", "openai-codex-responses", "websocket", "websocket"],
+    ["openai-codex", "openai-codex-responses", "websocket-cached", "websocket-cached"],
+    ["openai-codex", "openai-codex-responses", "sse", "sse"],
+    ["openai", "openai-responses", "auto", "auto"],
   ] as const)(
-    "constructs a %s fixed session with %s transport resolved from %s/%s",
-    async (factory, provider, api, transport, expectedTransport) => {
+    "constructs a fixed %s session with transport resolved from %s/%s",
+    async (provider, api, transport, expectedTransport) => {
       const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-transport-"));
-      const fixture = await fixedModelTransportRuntime(factory, transport, provider, api);
+      const fixture = await fixedModelTransportRuntime(transport, provider, api);
 
       const created = await fixture.runtime.createSession(cwd, {
         model: { provider, id: "fixed-model" },
@@ -631,44 +594,25 @@ describe("PiRuntime session ownership", () => {
 
 
 
-  it("passes a fixed authenticated model and workbench tools through the direct factory", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-direct-role-"));
-    const credentialStore = new InMemoryCredentialStore();
+  it("passes a fixed authenticated model and workbench tools through session creation", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-role-"));
     const tools = [workbenchTool(cwd)];
-    let received: CreateAgentSessionOptions | undefined;
-    const createModelRuntime = async (options: CreateModelRuntimeOptions) => {
-      const runtime = await ModelRuntime.create({ ...options, modelsPath: null });
-      runtime.registerProvider("role-provider", {
-        baseUrl: "https://example.invalid/v1",
-        apiKey: "role-key",
-        api: "openai-completions",
-        models: [{ ...providerModel("role-model"), reasoning: true }],
-      });
-      await runtime.refresh({ allowNetwork: false });
-      return runtime;
-    };
-    const runtime = await PiRuntime.create({
-      credentialStore,
-      modelsStore: new InMemoryModelsStore(),
-      createModelsStore: () => new InMemoryModelsStore(),
-      createModelRuntime,
-      createSettings: () => SettingsManager.inMemory(),
-      createSession: async (options) => {
+    let received: Parameters<typeof createAgentSessionFromServices>[0] | undefined;
+    const runtime = await testRuntime(
+      () => [],
+      async (_created, options) => {
         received = options;
-        const resourceLoader = new DefaultResourceLoader({
-          cwd,
-          agentDir: cwd,
-          settingsManager: options.settingsManager,
-          noExtensions: true,
-          noSkills: true,
-          noPromptTemplates: true,
-          noThemes: true,
-          noContextFiles: true,
-        });
-        await resourceLoader.reload();
-        return createAgentSession({ ...options, resourceLoader });
       },
-    });
+      async (modelRuntime) => {
+        modelRuntime.registerProvider("role-provider", {
+          baseUrl: "https://example.invalid/v1",
+          apiKey: "role-key",
+          api: "openai-completions",
+          models: [{ ...providerModel("role-model"), reasoning: true }],
+        });
+        await modelRuntime.refresh({ allowNetwork: false });
+      },
+    );
 
     const created = await runtime.createSession(cwd, {
       model: { provider: "role-provider", id: "role-model" },
@@ -843,32 +787,24 @@ describe("PiRuntime session ownership", () => {
     expect(catalogRefreshes).toBe(3);
   });
 
-  it("fails closed before direct session creation when the fixed model is missing or unauthenticated", async () => {
+  it("fails closed before session creation when the fixed model is missing or unauthenticated", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-role-model-guard-"));
     let factoryCalls = 0;
-    const credentialStore = new InMemoryCredentialStore();
-    const createModelRuntime = async (options: CreateModelRuntimeOptions) => {
-      const runtime = await ModelRuntime.create({ ...options, modelsPath: null });
-      runtime.registerProvider("unconfigured-role-provider", {
-        baseUrl: "https://example.invalid/v1",
-        apiKey: "$PIWEB_RUNTIME_TEST_KEY_THAT_IS_NOT_CONFIGURED",
-        api: "openai-completions",
-        models: [providerModel("unconfigured-role-model")],
-      });
-      await runtime.refresh({ allowNetwork: false });
-      return runtime;
-    };
-    const runtime = await PiRuntime.create({
-      credentialStore,
-      modelsStore: new InMemoryModelsStore(),
-      createModelsStore: () => new InMemoryModelsStore(),
-      createModelRuntime,
-      createSettings: () => SettingsManager.inMemory(),
-      createSession: async (options) => {
+    const runtime = await testRuntime(
+      () => [],
+      async () => {
         factoryCalls++;
-        return createAgentSession(options);
       },
-    });
+      async (modelRuntime) => {
+        modelRuntime.registerProvider("unconfigured-role-provider", {
+          baseUrl: "https://example.invalid/v1",
+          apiKey: "$PIWEB_RUNTIME_TEST_KEY_THAT_IS_NOT_CONFIGURED",
+          api: "openai-completions",
+          models: [providerModel("unconfigured-role-model")],
+        });
+        await modelRuntime.refresh({ allowNetwork: false });
+      },
+    );
 
     await expect(runtime.createSession(cwd, {
       model: { provider: "missing-provider", id: "missing-model" },
@@ -882,7 +818,7 @@ describe("PiRuntime session ownership", () => {
     expect(factoryCalls).toBe(0);
   });
 
-  it("tears down when a session factory falls back from the fixed role model", async () => {
+  it("tears down when session creation falls back from the fixed role model", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-role-fallback-"));
     let disposals = 0;
     const runtime = await testRuntime(
@@ -1362,7 +1298,7 @@ describe("PiRuntime session ownership", () => {
       "Pi session services reported errors",
     );
     await expect(runtime.createSession(cwdA)).rejects.toThrow(
-      "Extension provider registration failed",
+      "Pi session services reported errors",
     );
 
     const clean = await runtime.createSession(cwdB);

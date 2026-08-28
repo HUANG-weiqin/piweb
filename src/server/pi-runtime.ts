@@ -53,8 +53,6 @@ import {
   READ_ONLY_TOOL_NAME_CEILING,
 } from "./tool-policy.js";
 
-type SessionFactory = (options: CreateAgentSessionOptions) => Promise<CreateAgentSessionResult>;
-
 interface ToolProjectionAdapter {
   dispose(): void;
 }
@@ -173,7 +171,6 @@ export interface PiRuntimeOptions {
   allowModelNetwork?: boolean;
   createModelRuntime?: (options: CreateModelRuntimeOptions) => Promise<ModelRuntime>;
   createSettings?: (cwd: string) => SettingsManager;
-  createSession?: SessionFactory;
   createServices?: typeof createAgentSessionServices;
   createSessionFromServices?: typeof createAgentSessionFromServices;
   projectTrustStore?: Pick<ProjectTrustStore, "get" | "set">;
@@ -413,7 +410,6 @@ export class PiRuntime implements PiRuntimeLike {
   private readonly createModelsStore?: () => ModelsStore;
   private readonly modelsPath: string | null | undefined;
   private readonly createSettings: (cwd: string) => SettingsManager;
-  private readonly sessionFactory?: SessionFactory;
   private readonly servicesFactory: typeof createAgentSessionServices;
   private readonly sessionFromServicesFactory: typeof createAgentSessionFromServices;
   private readonly projectTrustStore: Pick<ProjectTrustStore, "get" | "set">;
@@ -434,7 +430,6 @@ export class PiRuntime implements PiRuntimeLike {
     this.modelsPath = options.modelsPath;
     this.createSettings = options.createSettings
       ?? ((cwd) => SettingsManager.create(cwd, getAgentDir(), { projectTrusted: false }));
-    this.sessionFactory = options.createSession;
     this.servicesFactory = options.createServices ?? createAgentSessionServices;
     this.sessionFromServicesFactory = options.createSessionFromServices ?? createAgentSessionFromServices;
     this.projectTrustStore = options.projectTrustStore ?? new ProjectTrustStore(getAgentDir());
@@ -573,60 +568,42 @@ export class PiRuntime implements PiRuntimeLike {
       settings = this.createSettings(cwd);
       const sessionManager = options.sessionManager ?? SessionManager.inMemory(cwd);
       compactionBoundaryAdapter = installCompactionBoundary(sessionManager);
-      if (this.sessionFactory) {
-        const fixedModel = fixedModelReference
-          ? this.resolveFixedModel(owner.registry, fixedModelReference)
-          : undefined;
-        if (fixedModel) applyCodexAutoTransportPolicy(settings, fixedModel);
-        resolvedTransport = settings.getTransport();
-        created = await this.sessionFactory({
-          cwd,
-          modelRuntime: owner.runtime,
-          settingsManager: settings,
-          sessionManager,
-          model: fixedModel,
-          thinkingLevel: options.thinkingLevel,
-          customTools: workbenchCustomTools,
-          tools: allowedToolNames,
-        });
-      } else {
-        const services = await this.servicesFactory({
-          cwd,
-          agentDir: getAgentDir(),
-          modelRuntime: owner.runtime,
-          settingsManager: settings,
-          resourceLoaderOptions: roleSystemPrompt
-            ? {
-                appendSystemPromptOverride: (base) => [
-                  ...base,
-                  roleSystemPrompt,
-                ],
-              }
-            : undefined,
-          resourceLoaderReloadOptions: {
-            resolveProjectTrust: () => this.resolveProjectTrust(
-              cwd,
-              settings,
-              options.extensionUI,
-            ),
-          },
-        });
-        this.throwServiceDiagnostics(services.diagnostics);
-        settings = services.settingsManager;
-        const fixedModel = fixedModelReference
-          ? this.resolveFixedModel(owner.registry, fixedModelReference)
-          : undefined;
-        if (fixedModel) applyCodexAutoTransportPolicy(settings, fixedModel);
-        resolvedTransport = settings.getTransport();
-        created = await this.sessionFromServicesFactory({
-          services,
-          sessionManager,
-          model: fixedModel,
-          thinkingLevel: options.thinkingLevel,
-          customTools: workbenchCustomTools,
-          tools: allowedToolNames,
-        });
-      }
+      const services = await this.servicesFactory({
+        cwd,
+        agentDir: getAgentDir(),
+        modelRuntime: owner.runtime,
+        settingsManager: settings,
+        resourceLoaderOptions: roleSystemPrompt
+          ? {
+              appendSystemPromptOverride: (base) => [
+                ...base,
+                roleSystemPrompt,
+              ],
+            }
+          : undefined,
+        resourceLoaderReloadOptions: {
+          resolveProjectTrust: () => this.resolveProjectTrust(
+            cwd,
+            settings,
+            options.extensionUI,
+          ),
+        },
+      });
+      this.throwServiceDiagnostics(services.diagnostics);
+      settings = services.settingsManager;
+      const fixedModel = fixedModelReference
+        ? this.resolveFixedModel(owner.registry, fixedModelReference)
+        : undefined;
+      if (fixedModel) applyCodexAutoTransportPolicy(settings, fixedModel);
+      resolvedTransport = settings.getTransport();
+      created = await this.sessionFromServicesFactory({
+        services,
+        sessionManager,
+        model: fixedModel,
+        thinkingLevel: options.thinkingLevel,
+        customTools: workbenchCustomTools,
+        tools: allowedToolNames,
+      });
       createdSession = created.session;
       // 消息直通：busy 时浏览器 prompt 进 SDK steering 队列，排队消息必须一次
       // 全部注入（one-at-a-time 会让每条消息各占一个完整模型轮次，用户连发多条

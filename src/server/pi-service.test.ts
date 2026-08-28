@@ -2329,54 +2329,6 @@ describe("PiConnection lifecycle", () => {
     expect(loginCalls).toBe(0);
   });
 
-  it("runs commands directly in full access and blocks them in read-only mode", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-tool-mode-command-"));
-    const runtime = new FakeRuntime();
-    const settings = fakeSettings();
-    const session = fakeSession(settings);
-    const decisions: Array<{ block?: boolean; reason?: string } | undefined> = [];
-    session.prompt = async () => {
-      decisions.push(await session.toolCallGate?.({
-        toolCallId: `tool-bash-${decisions.length}`,
-        toolName: "bash",
-        toolSource: "builtin",
-        args: { command: "npm test" },
-        signal: new AbortController().signal,
-      }));
-    };
-    runtime.create = async () => {
-      runtime.created.push(session);
-      return { session, settings };
-    };
-    const events: ServerEvent[] = [];
-    const connection = new PiConnection((event) => events.push(event), runtime);
-    await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
-
-    await connection.handle({
-      type: "prompt",
-      sessionId: SESSION_A,
-      runId: RUN_A,
-      text: "run a command",
-    });
-    await connection.handle({
-      type: "set_tool_mode",
-      sessionId: SESSION_A,
-      mode: "read_only",
-    });
-    await connection.handle({
-      type: "prompt",
-      sessionId: SESSION_A,
-      runId: RUN_B,
-      text: "try the command again",
-    });
-
-    expect(decisions[0]).toBeUndefined();
-    expect(decisions[1]).toMatchObject({
-      block: true,
-      reason: expect.stringContaining("Pi 原生"),
-    });
-  });
-
   it("emits exact detached arguments when a tool call is prepared", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-tool-prepared-"));
     const runtime = new FakeRuntime();
@@ -2486,216 +2438,11 @@ describe("PiConnection lifecycle", () => {
     expect(executions).toBe(1);
   });
 
-  it("allows writes in full access and blocks them after switching to read-only", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-tool-mode-"));
-    const runtime = new FakeRuntime();
-    const settings = fakeSettings();
-    const session = fakeSession(settings);
-    const decisions: Array<{ block?: boolean; reason?: string } | undefined> = [];
-    session.prompt = async () => {
-      decisions.push(await session.toolCallGate?.({
-        toolCallId: `tool-${decisions.length}`,
-        toolName: "write",
-        toolSource: "builtin",
-        args: { path: "src/generated.ts", content: "content" },
-        signal: new AbortController().signal,
-      }));
-    };
-    runtime.create = async () => {
-      runtime.created.push(session);
-      return { session, settings };
-    };
-    const events: ServerEvent[] = [];
-    const connection = new PiConnection((event) => events.push(event), runtime);
-    await connection.handle({ type: "initialize", sessionId: SESSION_A, cwd });
-    expect(latestState(events).toolMode).toBe("full_access");
-
-    await connection.handle({
-      type: "prompt",
-      sessionId: SESSION_A,
-      runId: RUN_A,
-      text: "write inside",
-    });
-    await connection.handle({
-      type: "set_tool_mode",
-      sessionId: SESSION_A,
-      mode: "read_only",
-    });
-    await connection.handle({
-      type: "prompt",
-      sessionId: SESSION_A,
-      runId: RUN_B,
-      text: "try writing again",
-    });
-
-    expect(decisions[0]).toBeUndefined();
-    expect(decisions[1]).toMatchObject({
-      block: true,
-      reason: expect.stringContaining("只读模式"),
-    });
-    expect(latestState(events).toolMode).toBe("read_only");
-  });
-
-  it("cancels project runs before acknowledging read-only on another connection", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-tool-mode-shared-"));
-    const projects = new ProjectStoreRegistry();
-    const projectRuns = new ProjectRunCoordinator();
-    const firstRuntime = new FakeRuntime();
-    const firstSession = fakeSession();
-    const promptStarted = deferred();
-    const abortCalled = deferred();
-    const finishPrompt = deferred();
-    firstSession.prompt = async () => {
-      firstSession.isStreaming = true;
-      promptStarted.resolve();
-      await finishPrompt.promise;
-      firstSession.isStreaming = false;
-    };
-    firstSession.abort = async () => {
-      firstSession.abortCalls++;
-      firstSession.isStreaming = false;
-      abortCalled.resolve();
-    };
-    firstRuntime.create = async () => {
-      firstRuntime.created.push(firstSession);
-      return { session: firstSession, settings: firstSession.settingsManager };
-    };
-    const firstEvents: ServerEvent[] = [];
-    const first = new PiConnection(
-      (event) => firstEvents.push(event),
-      firstRuntime,
-      undefined,
-      projects,
-      projectRuns,
-    );
-    const secondEvents: ServerEvent[] = [];
-    const second = new PiConnection(
-      (event) => secondEvents.push(event),
-      new FakeRuntime(),
-      undefined,
-      projects,
-      projectRuns,
-    );
-    await first.handle({
-      type: "initialize",
-      sessionId: SESSION_A,
-      cwd,
-      conversation: { kind: "new" },
-    });
-    await second.handle({
-      type: "initialize",
-      sessionId: SESSION_B,
-      cwd,
-      conversation: { kind: "new" },
-    });
-
-    const prompt = first.handle({
-      type: "prompt",
-      sessionId: SESSION_A,
-      runId: RUN_A,
-      text: "run a command",
-    });
-    await promptStarted.promise;
-
-    let modeSettled = false;
-    const modeChange = second.handle({
-      type: "set_tool_mode",
-      sessionId: SESSION_B,
-      mode: "read_only",
-    }).then(() => {
-      modeSettled = true;
-    });
-    await abortCalled.promise;
-
-    expect(firstSession.abortCalls).toBe(1);
-    expect(modeSettled).toBe(false);
-    expect(latestState(firstEvents).toolMode).toBe("full_access");
-
-    finishPrompt.resolve();
-    await Promise.all([prompt, modeChange]);
-
-    expect(latestState(firstEvents).toolMode).toBe("read_only");
-    expect(latestState(secondEvents).toolMode).toBe("read_only");
-    await Promise.all([first.dispose(), second.dispose()]);
-  });
-
-  it("does not expand the permission snapshot of an already running turn", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-tool-mode-snapshot-"));
-    const projects = new ProjectStoreRegistry();
-    const projectRuns = new ProjectRunCoordinator();
-    const firstRuntime = new FakeRuntime();
-    const firstSession = fakeSession();
-    const promptStarted = deferred();
-    const runTool = deferred();
-    let gateDecision: Awaited<ReturnType<ToolCallGate>>;
-    firstSession.prompt = async () => {
-      promptStarted.resolve();
-      await runTool.promise;
-      gateDecision = await firstSession.toolCallGate?.({
-        toolCallId: "tool-snapshot-bash",
-        toolName: "bash",
-        toolSource: "builtin",
-        args: { command: "npm test" },
-        signal: new AbortController().signal,
-      });
-    };
-    firstRuntime.create = async () => {
-      firstRuntime.created.push(firstSession);
-      return { session: firstSession, settings: firstSession.settingsManager };
-    };
-    const first = new PiConnection(
-      () => undefined,
-      firstRuntime,
-      undefined,
-      projects,
-      projectRuns,
-    );
-    const second = new PiConnection(
-      () => undefined,
-      new FakeRuntime(),
-      undefined,
-      projects,
-      projectRuns,
-    );
-    await first.handle({
-      type: "initialize",
-      sessionId: SESSION_A,
-      cwd,
-      toolMode: "read_only",
-      conversation: { kind: "new" },
-    });
-    await second.handle({
-      type: "initialize",
-      sessionId: SESSION_B,
-      cwd,
-      conversation: { kind: "new" },
-    });
-
-    const prompt = first.handle({
-      type: "prompt",
-      sessionId: SESSION_A,
-      runId: RUN_A,
-      text: "run later",
-    });
-    await promptStarted.promise;
-    await second.handle({
-      type: "set_tool_mode",
-      sessionId: SESSION_B,
-      mode: "full_access",
-    });
-    runTool.resolve();
-    await prompt;
-
-    expect(gateDecision).toMatchObject({
-      block: true,
-      reason: expect.stringContaining("Pi 原生"),
-    });
-    await Promise.all([first.dispose(), second.dispose()]);
-  });
-
   it("restores project-local history, name, and tool mode on a fresh connection", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-persistent-session-"));
     const projects = new ProjectStoreRegistry();
+    const seeded = await projects.acquireProject(cwd, "read_only");
+    seeded.release();
     const firstRuntime = new FakeRuntime();
     const firstEvents: ServerEvent[] = [];
     const first = new PiConnection(
@@ -2748,11 +2495,6 @@ describe("PiConnection lifecycle", () => {
       conversationId: firstState.conversationId,
       name: "Persistent work",
     });
-    await first.handle({
-      type: "set_tool_mode",
-      sessionId: SESSION_A,
-      mode: "read_only",
-    });
     await first.handle({ type: "close_session", sessionId: SESSION_A });
 
     const secondRuntime = new FakeRuntime();
@@ -2767,7 +2509,6 @@ describe("PiConnection lifecycle", () => {
       type: "initialize",
       sessionId: SESSION_B,
       cwd,
-      toolMode: "full_access",
       conversation: { kind: "recent" },
     });
 
@@ -3589,7 +3330,6 @@ describe("PiConnection coordinated project view", () => {
         currentConversationId,
         operations,
       );
-      expect(staleContext).toMatchObject({ references: 0 });
       expect(staleContext.listeners.size).toBe(0);
 
       releaseScan.resolve();
@@ -3636,7 +3376,6 @@ describe("PiConnection coordinated project view", () => {
         currentConversationId,
         operations,
       );
-      expect(staleContext).toMatchObject({ references: 0 });
       expect(staleContext.listeners.size).toBe(0);
 
       releaseCatalog.resolve();
@@ -3709,7 +3448,6 @@ describe("PiConnection coordinated project view", () => {
         currentConversationId,
         operations,
       );
-      expect(staleContext).toMatchObject({ references: 0 });
       expect(staleContext.listeners.size).toBe(0);
 
       const extensionUI = staleExtensionUI;
@@ -3798,7 +3536,6 @@ describe("PiConnection coordinated project view", () => {
         currentConversationId,
         operations,
       );
-      expect(staleContext).toMatchObject({ references: 0 });
       expect(staleContext.listeners.size).toBe(0);
       expect(staleContext.attention.has(staleConversationId)).toBe(true);
 
@@ -5191,9 +4928,9 @@ describe("PiConnection coordinated project view", () => {
       const eventCount = harness.events.length;
 
       await harness.connection.handle({
-        type: "set_tool_mode",
+        type: "refresh_view",
         sessionId: SESSION_A,
-        mode: "full_access",
+        projectId: latestState(harness.events).projectId,
       });
       await vi.waitFor(() => {
         expect(harness.events.slice(eventCount).some(

@@ -347,31 +347,6 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export type SteerDeliveryClassification =
-  | "rejected_before_sdk_acceptance"
-  | "uncertain_after_sdk_acceptance";
-
-/**
- * A steering command is only known durable after Pi appends the corresponding
- * raw user message. Callers with a durable dispatch sidecar must not retry an
- * SDK-accepted steer whose later delivery proof failed.
- */
-export class ConversationSteerDeliveryError extends Error {
-  constructor(
-    readonly classification: SteerDeliveryClassification,
-    cause: unknown,
-  ) {
-    super(errorMessage(cause), { cause });
-    this.name = "ConversationSteerDeliveryError";
-  }
-}
-
-export function isConversationSteerDeliveryError(
-  error: unknown,
-): error is ConversationSteerDeliveryError {
-  return error instanceof ConversationSteerDeliveryError;
-}
-
 function rawUserMessageIsPersisted(
   entries: readonly unknown[],
   message: unknown,
@@ -1228,23 +1203,16 @@ export class ConversationActor {
     try {
       this.assertUsable();
     } catch (error) {
-      return Promise.reject(new ConversationSteerDeliveryError(
-        "rejected_before_sdk_acceptance",
-        error,
-      ));
+      return Promise.reject(error);
     }
     const trimmed = text.trim();
     if (!trimmed) {
-      return Promise.reject(new ConversationSteerDeliveryError(
-        "rejected_before_sdk_acceptance",
-        new Error("Steering text must not be empty"),
-      ));
+      return Promise.reject(new Error("Steering text must not be empty"));
     }
     if (this.isExtensionCommand(trimmed)) {
-      return Promise.reject(new ConversationSteerDeliveryError(
-        "rejected_before_sdk_acceptance",
+      return Promise.reject(
         new Error("Extension slash commands cannot steer an active Agent run"),
-      ));
+      );
     }
     const ticket = this.activeRun;
     if (
@@ -1252,10 +1220,9 @@ export class ConversationActor {
       || ticket.id !== runId
       || (ticket.phase !== "running" && ticket.phase !== "waiting")
     ) {
-      return Promise.reject(new ConversationSteerDeliveryError(
-        "rejected_before_sdk_acceptance",
+      return Promise.reject(
         new Error("The target run is not currently able to accept guidance"),
-      ));
+      );
     }
 
     const delivery = deferred<void>();
@@ -1272,8 +1239,6 @@ export class ConversationActor {
       const index = ticket.guidanceDeliveries.indexOf(pendingGuidance);
       if (index >= 0) ticket.guidanceDeliveries.splice(index, 1);
     };
-    let sdkAccepted = false;
-
     // AgentSession.steer queues synchronously before its promise resolves. Do
     // not route this through the actor operation queue: that queue is occupied
     // by the active run until settlement. The command itself settles only when
@@ -1285,10 +1250,7 @@ export class ConversationActor {
     } catch (error) {
       removePendingGuidance();
       delivery.reject(error);
-      return Promise.reject(new ConversationSteerDeliveryError(
-        "rejected_before_sdk_acceptance",
-        error,
-      ));
+      return Promise.reject(error);
     }
     // The real SDK pushes its steering entry synchronously inside the steer
     // call (before the first await of its async body). Capture the exact
@@ -1299,7 +1261,6 @@ export class ConversationActor {
       : undefined;
     return Promise.resolve(queued).then(
       () => {
-        sdkAccepted = true;
         // Fail closed: without the queued delivery text the raw end could
         // never settle this delivery, and waking a wait on an un-queued
         // guidance would be a fake acceptance. Do not accept before the
@@ -1310,10 +1271,7 @@ export class ConversationActor {
             "Steer was accepted without a queued steering entry",
           );
           delivery.reject(error);
-          throw new ConversationSteerDeliveryError(
-            "uncertain_after_sdk_acceptance",
-            error,
-          );
+          throw error;
         }
         // The SDK has queued the guidance: record it as accepted-but-
         // unobserved and, if this exact run is currently waiting with a host
@@ -1327,23 +1285,10 @@ export class ConversationActor {
         this.fireWaitingSteerInterrupt(ticket);
         return delivery.promise;
       },
-      (error) => {
-        removePendingGuidance();
-        delivery.reject(error);
-        throw new ConversationSteerDeliveryError(
-          "rejected_before_sdk_acceptance",
-          error,
-        );
-      },
     ).catch((error: unknown) => {
       removePendingGuidance();
-      if (isConversationSteerDeliveryError(error)) throw error;
-      throw new ConversationSteerDeliveryError(
-        sdkAccepted
-          ? "uncertain_after_sdk_acceptance"
-          : "rejected_before_sdk_acceptance",
-        error,
-      );
+      delivery.reject(error);
+      throw error;
     });
   }
 

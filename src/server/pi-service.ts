@@ -146,11 +146,6 @@ interface ProjectSnapshotRefresh {
 }
 
 type ConnectionCommand = Exclude<ClientCommand, { type: "browse_directory" }>;
-type LegacySetToolModeCommand = {
-  type: "set_tool_mode";
-  sessionId: string;
-  mode: ToolMode;
-};
 type QueuedCommand = Exclude<ConnectionCommand, {
   type:
     | "abort"
@@ -174,7 +169,6 @@ function assertNever(value: never): never {
 
 
 function queuedCommandScope(command: QueuedCommand): "session" | "epoch" | "global" {
-  if ((command as { type: string }).type === "set_tool_mode") return "session";
   switch (command.type) {
     case "select_model":
     case "set_thinking":
@@ -306,7 +300,6 @@ export class PiConnection {
     inputCwd: string,
     sessionId: string,
     generation: number,
-    seedToolMode: ToolMode,
     target: ConversationTarget,
     signal: AbortSignal,
   ): Promise<void> {
@@ -322,7 +315,7 @@ export class PiConnection {
 
     const projectHandle = await this.projects.acquireProject(
       validatedCwd,
-      seedToolMode,
+      "full_access",
     );
     const project = projectHandle.store;
     const lifecycleAbort = new AbortController();
@@ -333,14 +326,7 @@ export class PiConnection {
     let created: CreatedPiSession | undefined;
     let ownershipTransferred = false;
     try {
-      // Initialize carries a safety ceiling, not permission to expand a
-      // durable project setting. A lost acknowledgement therefore cannot
-      // silently restore write permission on reconnect.
-      const initialMode = mostRestrictiveToolMode(project.toolMode, seedToolMode);
-      if (initialMode !== project.toolMode) {
-        await this.projectRuns.transitionToolMode(project, initialMode);
-      }
-      if (this.disposed || generation !== this.generation || signal.aborted) return;
+      const initialMode = project.toolMode;
       selected = await this.selectConversation(project, target, signal);
       if (this.disposed || generation !== this.generation || signal.aborted) return;
       created = await this.runtime.createSession(project.cwd, {
@@ -549,8 +535,6 @@ export class PiConnection {
             command.cwd,
             command.sessionId,
             generation,
-            (command as typeof command & { toolMode?: ToolMode }).toolMode
-              ?? "full_access",
             command.conversation ?? { kind: "recent" },
             initializationAbort.signal,
           );
@@ -1163,17 +1147,6 @@ export class PiConnection {
     transitionAbort?: AbortController,
     manualRefresh?: ManualModelRefresh,
   ): Promise<void> {
-    if ((command as { type: string }).type === "set_tool_mode") {
-      const legacy = command as unknown as LegacySetToolModeCommand;
-      const view = this.requireCoordinatedView(legacy.sessionId);
-      await this.projectRuns.transitionToolMode(
-        view.handle.project,
-        legacy.mode,
-      );
-      this.publishCoordinatedState();
-      this.publishProjectSnapshotCoordinated();
-      return;
-    }
     switch (command.type) {
       case "focus_conversation": {
         const view = this.requireCoordinatedView(command.sessionId);
@@ -2261,15 +2234,6 @@ export class PiConnection {
     command: QueuedCommand,
     manualRefresh?: ManualModelRefresh,
   ): Promise<void> {
-    if ((command as { type: string }).type === "set_tool_mode") {
-      const legacy = command as unknown as LegacySetToolModeCommand;
-      await this.projectRuns.transitionToolMode(
-        this.requireActive().project,
-        legacy.mode,
-      );
-      this.publishState();
-      return;
-    }
     switch (command.type) {
       case "select_model": return this.selectModel(command.provider, command.modelId);
       case "set_thinking": return this.setThinking(command.level);
