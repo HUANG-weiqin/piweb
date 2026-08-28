@@ -1087,7 +1087,6 @@ pre {
 .activity-spinner-arc {
   fill: none;
   stroke: currentColor;
-  stroke-width: 2;
 }
 
 .activity-spinner-track {
