@@ -1956,11 +1956,6 @@ pre {
   color: var(--accent);
 }
 
-.workspace-opening-spinner .activity-spinner-track,
-.workspace-opening-spinner .activity-spinner-arc {
-  stroke-width: 1.2;
-}
-
 .workspace-opening-spinner .activity-spinner-track {
   stroke: var(--muted);
   stroke-opacity: 0.2;
