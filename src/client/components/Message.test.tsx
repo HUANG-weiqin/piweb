@@ -95,8 +95,10 @@ describe("Message", () => {
     const spinner = container.querySelector(".thinking-spinner");
     expect(spinner?.tagName).toBe("svg");
     expect(spinner?.querySelectorAll("circle")).toHaveLength(2);
-    expect(spinner?.querySelector(".activity-spinner-arc"))
-      .toHaveAttribute("stroke-linecap", "round");
+    const arc = spinner?.querySelector(".activity-spinner-arc");
+    expect(arc).toHaveAttribute("stroke-linecap", "round");
+    expect(arc).toHaveAttribute("pathLength", "100");
+    expect(arc).toHaveAttribute("stroke-dasharray", "25 75");
     expect(container.querySelector(".activity-group-label"))
       .toHaveTextContent("正在思考");
     expect(container.querySelector(".activity-group-detail"))

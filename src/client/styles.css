@@ -1095,7 +1095,6 @@ pre {
 }
 
 .activity-spinner-arc {
-  stroke-dasharray: 9 26;
   stroke-linecap: round;
 }
 
@@ -1955,6 +1954,7 @@ pre {
   width: 36px;
   height: 36px;
   margin-bottom: 8px;
+  color: var(--accent);
 }
 
 .workspace-opening-spinner .activity-spinner-track,
@@ -1962,8 +1962,9 @@ pre {
   stroke-width: 1.2;
 }
 
-.workspace-opening-spinner {
-  color: var(--accent);
+.workspace-opening-spinner .activity-spinner-track {
+  stroke: var(--muted);
+  stroke-opacity: 0.2;
 }
 
 .workspace-setup-dialog {

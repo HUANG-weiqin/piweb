@@ -8,6 +8,8 @@ export function ActivitySpinner({
   className,
   strokeWidth = 2,
 }: ActivitySpinnerProps) {
+  const radius = 7 - strokeWidth / 2;
+
   return <svg
     className={`activity-spinner ${className}`}
     viewBox="0 0 14 14"
@@ -18,16 +20,17 @@ export function ActivitySpinner({
       className="activity-spinner-track"
       cx="7"
       cy="7"
-      r="5.5"
+      r={radius}
       strokeWidth={strokeWidth}
     />
     <circle
       className="activity-spinner-arc"
       cx="7"
       cy="7"
-      r="5.5"
+      r={radius}
       strokeWidth={strokeWidth}
-      strokeDasharray="9 26"
+      pathLength={100}
+      strokeDasharray="25 75"
       strokeLinecap="round"
     />
   </svg>;
