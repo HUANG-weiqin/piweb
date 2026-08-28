@@ -10523,8 +10523,11 @@ describe("ProjectSessionCoordinator", () => {
     const conversationId = target.conversationId;
     const sessionFile = target.sessionManager.getSessionFile()!;
     let obstacleCreated = false;
-    const unsubscribe = fixture.handle.project.subscribe((snapshot) => {
-      if (snapshot.lastConversationId !== undefined || obstacleCreated) return;
+    const unsubscribe = fixture.handle.project.subscribe(() => {
+      if (
+        fixture.handle.project.lastConversationId !== undefined
+        || obstacleCreated
+      ) return;
       mkdirSync(sessionFile);
       obstacleCreated = true;
     });

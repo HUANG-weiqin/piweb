@@ -63,16 +63,6 @@ interface ProjectManifestV1 {
   lastConversationId?: string;
 }
 
-export interface ProjectStoreSnapshot {
-  id: string;
-  cwd: string;
-  stateDir: string;
-  sessionDir: string;
-  toolMode: ToolMode;
-  lastConversationId?: string;
-  conversations: ConversationSummary[];
-}
-
 export interface ConversationLease {
   release(): void;
   upgradeToDeletion(): ConversationDeletionLease;
@@ -92,7 +82,7 @@ export interface ConversationLeaseWaitOptions {
   timeoutMs?: number;
 }
 
-export type ProjectStoreListener = (snapshot: ProjectStoreSnapshot) => void;
+export type ProjectStoreListener = () => void;
 
 interface ProjectStoreRegistryEntry {
   opening: Promise<ProjectStore>;
@@ -604,20 +594,6 @@ export class ProjectStore {
     return this.manifest.lastConversationId;
   }
 
-  getSnapshot(): ProjectStoreSnapshot {
-    return {
-      id: this.id,
-      cwd: this.cwd,
-      stateDir: this.stateDir,
-      sessionDir: this.sessionDir,
-      toolMode: this.toolMode,
-      ...(this.lastConversationId === undefined
-        ? {}
-        : { lastConversationId: this.lastConversationId }),
-      conversations: this.listConversations(),
-    };
-  }
-
   subscribe(listener: ProjectStoreListener): () => void {
     this.listeners.add(listener);
     let subscribed = true;
@@ -626,18 +602,6 @@ export class ProjectStore {
       subscribed = false;
       this.listeners.delete(listener);
     };
-  }
-
-  setToolMode(toolMode: ToolMode): Promise<void> {
-    assertToolMode(toolMode);
-    return this.enqueueWrite(async () => {
-      if (toolMode === this.manifest.toolMode) return;
-      await this.assertStateDirectorySafe();
-      const next = { ...this.manifest, toolMode };
-      await writeManifestAtomically(this.manifestPath, next);
-      this.manifest = next;
-      this.emit();
-    });
   }
 
   setLastConversation(conversationId?: string): Promise<void> {
@@ -1072,7 +1036,7 @@ export class ProjectStore {
   private emit(): void {
     for (const listener of [...this.listeners]) {
       try {
-        listener(this.getSnapshot());
+        listener();
       } catch {
         // A subscriber cannot roll back a durable state change.
       }

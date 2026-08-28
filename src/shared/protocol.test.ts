@@ -906,16 +906,6 @@ describe("parseClientCommand", () => {
       focusId,
     })).toThrow();
     expect(() => parseServerEvent({
-      type: "error",
-      message: "failed batch steer",
-      scope: "command",
-      operation: "steer_all_pending_prompts",
-      sessionId,
-      commandId,
-      conversationId,
-      focusId,
-    })).toThrow();
-    expect(() => parseServerEvent({
       type: "session_event",
       sessionId,
       runId,

@@ -105,13 +105,10 @@ afterEach(async () => {
 describe("ProjectStore", () => {
   it("creates a stable project manifest and reopens it", async () => {
     const cwd = await createTemporaryDirectory("piweb-project-");
-    const first = await ProjectStore.open(cwd, "full_access");
+    const first = await ProjectStore.open(cwd, "read_only");
     const conversationId = randomUUID();
 
-    await Promise.all([
-      first.setToolMode("read_only"),
-      first.setLastConversation(conversationId),
-    ]);
+    await first.setLastConversation(conversationId);
 
     const reopened = await ProjectStore.open(cwd, "full_access");
     expect(reopened.id).toBe(first.id);
@@ -197,31 +194,30 @@ describe("ProjectStore", () => {
     ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("durably serializes tool mode changes and notifies subscribers", async () => {
-    const cwd = await createTemporaryDirectory("piweb-project-mode-");
+  it("durably serializes recent conversation changes and notifies subscribers", async () => {
+    const cwd = await createTemporaryDirectory("piweb-project-recent-");
     const store = await ProjectStore.open(cwd, "full_access");
+    const conversationId = randomUUID();
     const listener = vi.fn();
     const unsubscribe = store.subscribe(listener);
 
-    await store.setToolMode("read_only");
-    await store.setToolMode("read_only");
+    await store.setLastConversation(conversationId);
+    await store.setLastConversation(conversationId);
     unsubscribe();
-    await store.setToolMode("full_access");
+    await store.setLastConversation(undefined);
 
     expect(listener).toHaveBeenCalledTimes(1);
-    expect(listener.mock.calls[0]?.[0].toolMode).toBe("read_only");
+    expect(listener).toHaveBeenCalledWith();
     await expect(ProjectStore.open(cwd, "read_only")).resolves.toMatchObject({
       toolMode: "full_access",
+      lastConversationId: undefined,
     });
   });
 
-  it("persists full-access mode in the project manifest", async () => {
+  it("seeds a new project with full-access mode", async () => {
     const cwd = await createTemporaryDirectory("piweb-project-full-access-");
-    const store = await ProjectStore.open(cwd, "full_access");
 
-    await store.setToolMode("full_access");
-
-    await expect(ProjectStore.open(cwd, "read_only")).resolves.toMatchObject({
+    await expect(ProjectStore.open(cwd, "full_access")).resolves.toMatchObject({
       toolMode: "full_access",
     });
   });
