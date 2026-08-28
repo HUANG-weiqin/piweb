@@ -446,16 +446,6 @@ interface MessageProps {
   collapsed?: boolean;
 }
 
-function sameMessageProps(previous: MessageProps, next: MessageProps): boolean {
-  return previous.message === next.message
-    && previous.onRewind === next.onRewind
-    && previous.rewindDisabled === next.rewindDisabled
-    && previous.rewinding === next.rewinding
-    && previous.activeThinking === next.activeThinking
-    && previous.streamingText === next.streamingText
-    && previous.collapsed === next.collapsed;
-}
-
 function MessageView({
   message,
   onRewind,
@@ -573,4 +563,4 @@ function MessageView({
   </article>;
 }
 
-export const Message = memo(MessageView, sameMessageProps);
+export const Message = memo(MessageView);

@@ -5,13 +5,13 @@ import type {
 } from "../../shared/protocol";
 import { useModalFocus } from "../lib/use-modal-focus";
 
-export interface ConversationRoleDialogProps {
+interface ConversationRoleDialogProps {
   open: boolean;
   role: ConversationRoleSnapshot;
   roles: RoleTemplate[];
   switchDisabled: boolean;
   switching: boolean;
-  onSwitch(roleId: string): boolean;
+  onSwitch(roleId: string): void;
   onClose(): void;
 }
 

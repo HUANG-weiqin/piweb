@@ -35,7 +35,7 @@ function clampSidebarWidth(width: number): number {
   );
 }
 
-export interface ConversationSidebarProps {
+interface ConversationSidebarProps {
   conversations: ConversationSummary[];
   truncated: boolean;
   currentConversationId?: string;

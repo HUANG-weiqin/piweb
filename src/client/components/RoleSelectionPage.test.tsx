@@ -7,6 +7,13 @@ import { RoleSelectionPage } from "./RoleSelectionPage";
 
 afterEach(cleanup);
 
+const defaultCallbacks = {
+  onStart: () => undefined,
+  onManageRole: () => undefined,
+  onAddRole: () => undefined,
+  onSettings: () => undefined,
+};
+
 function role(
   id: string,
   name: string,
@@ -37,16 +44,13 @@ describe("RoleSelectionPage", () => {
         role("reviewer", "Reviewer"),
         role("default", "Default"),
       ]}
+      {...defaultCallbacks}
       onStart={start}
     />);
 
     const cards = screen.getAllByRole("article");
     expect(cards[0]).toHaveAccessibleName("角色 Reviewer");
     expect(cards[1]).toHaveAccessibleName("角色 Default");
-    expect(screen.queryByRole("button", { name: "开始新会话" }))
-      .not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "管理角色" }))
-      .not.toBeInTheDocument();
     expect(screen.getByText(
       "角色和模型会作为会话的初始配置；会话空闲时可在角色详情中更换。",
     )).toBeInTheDocument();
@@ -65,7 +69,7 @@ describe("RoleSelectionPage", () => {
         role("default", "Default"),
         role("reviewer", "Reviewer"),
       ]}
-      onStart={() => undefined}
+      {...defaultCallbacks}
       onManageRole={manageRole}
       onAddRole={addRole}
     />);
@@ -89,7 +93,7 @@ describe("RoleSelectionPage", () => {
           model: { provider: "acme", id: "retired-model" },
         }),
       ]}
-      onStart={() => undefined}
+      {...defaultCallbacks}
       onManageRole={manageRole}
     />);
 
@@ -111,17 +115,13 @@ describe("RoleSelectionPage", () => {
   it("locks card actions while creation is pending", () => {
     const view = render(<RoleSelectionPage
       roles={[role("default", "Default")]}
-      onStart={() => undefined}
-      onManageRole={() => undefined}
-      onAddRole={() => undefined}
+      {...defaultCallbacks}
     />);
 
     view.rerender(<RoleSelectionPage
       roles={[role("default", "Default")]}
       pending
-      onStart={() => undefined}
-      onManageRole={() => undefined}
-      onAddRole={() => undefined}
+      {...defaultCallbacks}
     />);
 
     expect(screen.getByRole("button", {
@@ -136,9 +136,8 @@ describe("RoleSelectionPage", () => {
     const settings = vi.fn();
     render(<RoleSelectionPage
       roles={[]}
-      onStart={() => undefined}
+      {...defaultCallbacks}
       onSettings={settings}
-      onAddRole={() => undefined}
     />);
 
     fireEvent.click(screen.getByRole("button", { name: "模型连接" }));

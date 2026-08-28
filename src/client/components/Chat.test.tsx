@@ -1356,10 +1356,10 @@ describe("Chat", () => {
       }],
     }));
 
-    const renderedCard = container.querySelector(
-      `[data-card-id="${card.cardId}"]`,
-    );
-    expect(renderedCard?.closest(".message.assistant")).toBeNull();
+    const renderedCard = screen.getByRole("article", {
+      name: "发出的会话消息",
+    });
+    expect(renderedCard.closest(".message.assistant")).toBeNull();
     const transcript = container.querySelector(".transcript");
     expect(
       Array.from(transcript?.children ?? []).map(
@@ -1415,10 +1415,10 @@ describe("Chat", () => {
 
     const transcript = container.querySelector(".transcript");
     const assistants = container.querySelectorAll(".message.assistant");
-    const renderedCard = container.querySelector(
-      `[data-card-id="${card.cardId}"]`,
-    );
-    expect(renderedCard?.closest(".message.assistant")).toBeNull();
+    const renderedCard = screen.getByRole("article", {
+      name: "收到的会话消息",
+    });
+    expect(renderedCard.closest(".message.assistant")).toBeNull();
     expect(Array.from(transcript?.children ?? [])).toEqual([
       assistants[0],
       renderedCard,

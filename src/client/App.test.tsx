@@ -6139,9 +6139,8 @@ describe("App", () => {
     expect(screen.getByRole("status", { name: "消息状态：已完成" }))
       .toBeInTheDocument();
     expect(screen.getByText("looks good")).toBeInTheDocument();
-    expect(document.querySelectorAll(
-      "[data-card-id='11c51221-a321-44d4-8f29-502f77f0a799']",
-    )).toHaveLength(1);
+    expect(screen.getAllByRole("article", { name: "发出的会话消息" }))
+      .toHaveLength(1);
     expect(screen.queryByRole("button", { name: "打开会话" }))
       .not.toBeInTheDocument();
   });

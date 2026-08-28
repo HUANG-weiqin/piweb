@@ -15,7 +15,7 @@ import { useModalFocus } from "../lib/use-modal-focus";
 
 const NEW_ROLE_ID = "__new__";
 
-export type RoleOperation =
+type RoleOperation =
   | "create_role"
   | "update_role"
   | "delete_role";
@@ -40,7 +40,7 @@ export interface RoleOperationResult extends PendingRoleOperation {
   message: string;
 }
 
-export interface RoleManagerDialogProps {
+interface RoleManagerDialogProps {
   open: boolean;
   roles: RoleTemplate[];
   providers: PublicProvider[];
@@ -242,26 +242,21 @@ export function RoleManagerDialog({
   };
   const selectModel = (value: string) => {
     const model = modelOptions.find((option) => option.value === value);
-    if (model) {
-      setDraft((current) => ({
-        ...current,
-        model: { provider: model.provider, id: model.id },
-        defaultThinkingLevel: model.thinkingLevels.includes(
-          current.defaultThinkingLevel,
-        )
-          ? current.defaultThinkingLevel
-          : model.thinkingLevels[0] ?? "off",
-      }));
-      return;
-    }
-    if (draft.model && modelValue(draft.model) === value) return;
-    updateDraft("model", null);
+    if (!model) return;
+    setDraft((current) => ({
+      ...current,
+      model: { provider: model.provider, id: model.id },
+      defaultThinkingLevel: model.thinkingLevels.includes(
+        current.defaultThinkingLevel,
+      )
+        ? current.defaultThinkingLevel
+        : model.thinkingLevels[0] ?? "off",
+    }));
   };
-  const currentModelAvailable = draft.model !== null
-    && modelOptions.some((option) => sameModel(option, draft.model!));
   const currentModelOption = draft.model === null
     ? undefined
     : modelOptions.find((option) => sameModel(option, draft.model!));
+  const currentModelAvailable = currentModelOption !== undefined;
   const availableThinkingLevels = currentModelOption?.thinkingLevels ?? [];
   const currentThinkingLevelAvailable = availableThinkingLevels.includes(
     draft.defaultThinkingLevel,

@@ -1,12 +1,12 @@
 import type { RoleTemplate } from "../../shared/protocol";
 
-export interface RoleSelectionPageProps {
+interface RoleSelectionPageProps {
   roles: RoleTemplate[];
   pending?: boolean;
   onStart(roleId: string): void;
-  onManageRole?(roleId: string): void;
-  onAddRole?(): void;
-  onSettings?(): void;
+  onManageRole(roleId: string): void;
+  onAddRole(): void;
+  onSettings(): void;
 }
 
 function roleModelLabel(role: RoleTemplate): string {
@@ -29,7 +29,7 @@ export function RoleSelectionPage({
         <h1>选择这个会话的角色</h1>
         <p>角色和模型会作为会话的初始配置；会话空闲时可在角色详情中更换。</p>
       </div>
-      {onSettings && <div className="role-selection-header-actions">
+      <div className="role-selection-header-actions">
         <button
           type="button"
           className="ghost"
@@ -38,7 +38,7 @@ export function RoleSelectionPage({
         >
           模型连接
         </button>
-      </div>}
+      </div>
     </header>
 
     <section className="role-card-grid" aria-label="可选角色">
@@ -68,7 +68,7 @@ export function RoleSelectionPage({
             {role.unavailableReason ?? "此角色当前不可用"}
           </span>}
           <span className="role-card-actions">
-            {onManageRole && <button
+            <button
               type="button"
               className="role-card-action"
               aria-label={`管理角色 ${role.name}`}
@@ -84,7 +84,7 @@ export function RoleSelectionPage({
                 <path d="M12 8.25a3.75 3.75 0 1 0 0 7.5 3.75 3.75 0 0 0 0-7.5Z" />
                 <path d="M19.2 13.7a7.6 7.6 0 0 0 .05-1.7 7.6 7.6 0 0 0-.05-1.7l2-1.55-2-3.5-2.45 1a7.8 7.8 0 0 0-2.95-1.7L13.45 2h-4l-.35 2.55a7.8 7.8 0 0 0-2.95 1.7l-2.45-1-2 3.5 2 1.55a7.6 7.6 0 0 0-.05 1.7 7.6 7.6 0 0 0 .05 1.7l-2 1.55 2 3.5 2.45-1a7.8 7.8 0 0 0 2.95 1.7L9.45 22h4l.35-2.55a7.8 7.8 0 0 0 2.95-1.7l2.45 1 2-3.5-2-1.55Z" />
               </svg>
-            </button>}
+            </button>
             <button
               type="button"
               className="role-card-action role-card-start"
@@ -106,7 +106,7 @@ export function RoleSelectionPage({
           </span>
         </article>;
       })}
-      {onAddRole && <button
+      <button
         type="button"
         className="role-card role-card-add"
         aria-label="添加角色"
@@ -115,11 +115,7 @@ export function RoleSelectionPage({
       >
         <span className="role-card-add-icon" aria-hidden="true">＋</span>
         <strong>添加角色</strong>
-      </button>}
-      {roles.length === 0 && !onAddRole && <div className="setting-empty">
-        <strong>还没有可选择的角色</strong>
-        <p>先在角色管理中配置一个可用角色和模型。</p>
-      </div>}
+      </button>
     </section>
   </main>;
 }

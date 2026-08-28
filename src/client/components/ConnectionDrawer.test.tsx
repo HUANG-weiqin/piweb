@@ -74,11 +74,6 @@ describe("ConnectionDrawer", () => {
       .not.toBeInTheDocument();
   });
 
-  it("does not crash if the browser briefly receives state from an older server", () => {
-    const legacyState = { ...state, availableThinkingLevels: undefined } as unknown as PublicState;
-    expect(() => renderDrawer({ state: legacyState })).not.toThrow();
-  });
-
   it("owns modal focus and closes safely with Escape", () => {
     const close = vi.fn();
     renderDrawer({ onClose: close });

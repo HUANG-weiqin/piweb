@@ -68,8 +68,6 @@ export function SessionMessageCard({
         expanded ? "is-expanded" : "is-collapsed",
       ].join(" ")}
       aria-label={`${directionLabel}的会话消息`}
-      data-card-id={card.cardId}
-      data-message-id={card.messageId}
     >
       <header className="session-message-header">
         <button

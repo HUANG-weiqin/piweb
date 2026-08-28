@@ -83,16 +83,16 @@ interface ChatProps {
   pendingAdmissions: PendingAdmission[];
   promptNotice?: string;
   onDraftChange(text: string): void;
-  onSend(text: string): boolean;
+  onSend(text: string): void;
   onAbort(): void;
   onSettings(): void;
   onThinking(level: ThinkingLevel): void;
   onCompactionThreshold(percent: number): boolean;
-  onCompact(): boolean;
-  onSwitchRole(roleId: string): boolean;
+  onCompact(): void;
+  onSwitchRole(roleId: string): void;
   onChangeCwd(): void;
   onOpenConversation?(conversationId: string): void;
-  onRewind(messageId: string, text: string): boolean;
+  onRewind(messageId: string, text: string): void;
   rewindingMessageId?: string;
 }
 

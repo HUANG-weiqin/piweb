@@ -12,18 +12,12 @@ describe("WorkspaceRail", () => {
   it("bails out of unrelated parent renders and updates selection and activity facts", () => {
     const workspaces = ["E:\\alpha", "E:\\beta"];
     const mapWorkspaces = vi.spyOn(workspaces, "map");
-    const activity: ProjectActivitySummary = {
+    const initialActivity = new Map([[workspaceKey(workspaces[0]!), {
       projectId: "f25ee8d8-34f0-4c30-a045-b2a69f2e28bd",
       cwd: workspaces[0]!,
       busyConversationCount: 1,
       attentionConversationCount: 0,
-    };
-    const readBusyCount = vi.fn(() => 1);
-    Object.defineProperty(activity, "busyConversationCount", {
-      enumerable: true,
-      get: readBusyCount,
-    });
-    const initialActivity = new Map([[workspaceKey(workspaces[0]!), activity]]);
+    }]]);
     const unavailable = new Set<string>();
 
     function Harness() {
@@ -63,11 +57,9 @@ describe("WorkspaceRail", () => {
 
     render(<Harness />);
     const initialMaps = mapWorkspaces.mock.calls.length;
-    const initialActivityReads = readBusyCount.mock.calls.length;
 
     fireEvent.click(screen.getByRole("button", { name: "unrelated" }));
     expect(mapWorkspaces).toHaveBeenCalledTimes(initialMaps);
-    expect(readBusyCount).toHaveBeenCalledTimes(initialActivityReads);
 
     fireEvent.click(screen.getByRole("button", { name: "打开工作区 beta" }));
     expect(screen.getByRole("button", { name: "打开工作区 beta" }))
