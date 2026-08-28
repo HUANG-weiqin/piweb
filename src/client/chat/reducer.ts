@@ -71,27 +71,14 @@ export interface ChatState {
   /**
    * The ordered transcript. Cards and ordinary messages share this one
    * projection so a card update cannot jump to the end of the conversation.
-   *
-   * Optional only until the existing Chat component finishes migrating from
-   * its message-only test fixtures. Reducer-produced states always set it.
    */
-  items?: ChatItem[];
-  /**
-   * Temporary compatibility projection for existing message-only consumers.
-   * It is always derived from `items`.
-   */
-  messages: ChatMessage[];
-  sessionTokens: number;
+  items: ChatItem[];
   focus?: ChatFocus;
 }
 
 export const initialChatState: ChatState = {
   items: [],
-  messages: [],
-  sessionTokens: 0,
 };
-
-type OptionalFocus = Partial<ChatFocus>;
 
 export type ChatAction =
   | ({ type: "focus_changed" } & ChatFocus)
@@ -100,28 +87,20 @@ export type ChatAction =
       items: ConversationHistoryItem[];
       projectionSeq?: number;
     } & ChatFocus)
-  // Compatibility for the old App while focus-aware wiring lands.
-  | {
-      type: "hydrate";
-      messages: ConversationHistoryMessage[];
-      projectionSeq?: number;
-    }
   | ({
       type: "conversation_item";
       item: ConversationHistoryItem;
       projectionSeq?: number;
     } & ChatFocus)
-  | ({ type: "prompt_accepted"; runId: string; text: string } & OptionalFocus)
+  | ({ type: "prompt_accepted"; runId: string; text: string } & ChatFocus)
   | ({
       type: "session";
       runId: string;
       event: SessionEvent;
       projectionSeq?: number;
-    } & OptionalFocus)
-  | ({ type: "error"; runId: string; message: string } & OptionalFocus)
+    } & ChatFocus)
+  | ({ type: "error"; runId: string; message: string } & ChatFocus)
   | { type: "reset" };
-
-const id = () => crypto.randomUUID();
 
 function isMessage(item: ChatItem): item is ChatMessageItem {
   return item.kind === "message";
@@ -141,25 +120,10 @@ function isEmptyAssistantPlaceholder(
     && item.usage === undefined;
 }
 
-function messagesFrom(items: ChatItem[]): ChatMessage[] {
-  return items.filter(isMessage);
-}
-
-function itemsFrom(state: ChatState): ChatItem[] {
-  if (state.items) return state.items;
-  return state.messages.map((message) => ({ kind: "message", ...message }));
-}
-
-function withItems(
-  state: ChatState,
-  items: ChatItem[],
-  sessionTokens = state.sessionTokens,
-): ChatState {
+function withItems(state: ChatState, items: ChatItem[]): ChatState {
   return {
     ...state,
     items,
-    messages: messagesFrom(items),
-    sessionTokens,
   };
 }
 
@@ -167,24 +131,6 @@ function sameFocus(left: ChatFocus | undefined, right: ChatFocus): boolean {
   return left?.sessionId === right.sessionId
     && left.conversationId === right.conversationId
     && left.focusId === right.focusId;
-}
-
-function hasCompleteFocus(action: OptionalFocus): action is ChatFocus {
-  return typeof action.sessionId === "string"
-    && typeof action.conversationId === "string"
-    && typeof action.focusId === "string";
-}
-
-/**
- * Legacy unscoped events are accepted only before a focus-aware App attaches.
- * Once a focus exists, every live mutation must carry the complete identity.
- */
-function matchesCurrentFocus(state: ChatState, action: OptionalFocus): boolean {
-  const hasAnyFocusPart = action.sessionId !== undefined
-    || action.conversationId !== undefined
-    || action.focusId !== undefined;
-  if (!hasAnyFocusPart) return state.focus === undefined;
-  return hasCompleteFocus(action) && sameFocus(state.focus, action);
 }
 
 function historyMessageToItem(
@@ -264,13 +210,6 @@ function normalizeHistory(items: ConversationHistoryItem[]): ChatItem[] {
   return normalized;
 }
 
-function tokenTotal(items: ChatItem[]): number {
-  return items.reduce(
-    (total, item) => total + (isMessage(item) ? (item.usage?.total ?? 0) : 0),
-    0,
-  );
-}
-
 function ensureAssistant(
   items: ChatItem[],
   runId: string,
@@ -292,7 +231,7 @@ function ensureAssistant(
 
   const assistant: ChatMessageItem = {
     kind: "message",
-    id: id(),
+    id: crypto.randomUUID(),
     runId,
     role: "assistant",
     text: "",
@@ -386,55 +325,40 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         focusId: action.focusId,
       },
       items: [],
-      messages: [],
-      sessionTokens: 0,
       lastProjectionSeq: undefined,
       projectionGap: false,
     };
   }
 
   if (action.type === "hydrate") {
-    if ("items" in action) {
-      if (state.focus && !sameFocus(state.focus, action)) return state;
-      if (
-        state.focus
-        && state.lastProjectionSeq !== undefined
-        && (
-          action.projectionSeq === undefined
-          || action.projectionSeq < state.lastProjectionSeq
-          || (
-            state.projectionGap
-            && action.projectionSeq === state.lastProjectionSeq
-          )
+    if (state.focus && !sameFocus(state.focus, action)) return state;
+    if (
+      state.focus
+      && state.lastProjectionSeq !== undefined
+      && (
+        action.projectionSeq === undefined
+        || action.projectionSeq < state.lastProjectionSeq
+        || (
+          state.projectionGap
+          && action.projectionSeq === state.lastProjectionSeq
         )
-      ) return state;
-      const items = normalizeHistory(action.items);
-      return {
-        ...withItems(state, items, tokenTotal(items)),
-        focus: {
-          sessionId: action.sessionId,
-          conversationId: action.conversationId,
-          focusId: action.focusId,
-        },
-        lastProjectionSeq: action.projectionSeq,
-        projectionGap: false,
-      };
-    }
-
-    if (state.focus) return state;
-    const items = normalizeHistory(action.messages.map((message) => ({
-      kind: "message",
-      ...message,
-    })));
+      )
+    ) return state;
+    const items = normalizeHistory(action.items);
     return {
-      ...withItems(state, items, tokenTotal(items)),
+      ...withItems(state, items),
+      focus: {
+        sessionId: action.sessionId,
+        conversationId: action.conversationId,
+        focusId: action.focusId,
+      },
       lastProjectionSeq: action.projectionSeq,
       projectionGap: false,
     };
   }
 
   if (action.type === "conversation_item") {
-    if (!matchesCurrentFocus(state, action)) return state;
+    if (!sameFocus(state.focus, action)) return state;
     if (state.projectionGap) return state;
     if (state.lastProjectionSeq !== undefined) {
       if (action.projectionSeq !== state.lastProjectionSeq) {
@@ -443,23 +367,23 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     } else if (action.projectionSeq !== undefined) {
       return { ...state, projectionGap: true };
     }
-    const items = upsertItem(itemsFrom(state), historyItemToChatItem(action.item));
+    const items = upsertItem(state.items, historyItemToChatItem(action.item));
     return {
-      ...withItems(state, items, tokenTotal(items)),
+      ...withItems(state, items),
       projectionGap: false,
     };
   }
 
-  if (!matchesCurrentFocus(state, action)) return state;
+  if (!sameFocus(state.focus, action)) return state;
 
   if (action.type === "prompt_accepted") {
-    const items = itemsFrom(state);
+    const items = state.items;
     if (items.some((item) => (
       isMessage(item) && item.role === "user" && item.runId === action.runId
     ))) return state;
     return withItems(state, [...items, {
       kind: "message",
-      id: id(),
+      id: crypto.randomUUID(),
       runId: action.runId,
       role: "user",
       text: action.text,
@@ -470,9 +394,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   }
 
   if (action.type === "error") {
-    return withItems(state, [...itemsFrom(state), {
+    return withItems(state, [...state.items, {
       kind: "message",
-      id: id(),
+      id: crypto.randomUUID(),
       runId: action.runId,
       role: "error",
       text: action.message,
@@ -501,10 +425,10 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     };
   }
   if (event.type === "run_started") {
-    return withItems(state, ensureAssistant(itemsFrom(state), action.runId).items);
+    return withItems(state, ensureAssistant(state.items, action.runId).items);
   }
   if (event.type === "user_message") {
-    const items = itemsFrom(state);
+    const items = state.items;
     if (items.some((item) => item.id === event.projectionId)) return state;
     return withItems(state, [...items, {
       kind: "message",
@@ -518,7 +442,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     }]);
   }
   if (event.type === "assistant_message_started") {
-    const items = itemsFrom(state);
+    const items = state.items;
     if (items.some((item) => item.id === event.projectionId)) return state;
     const placeholderIndex = items.findIndex((item) => (
       isEmptyAssistantPlaceholder(item, action.runId)
@@ -556,7 +480,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     || event.type === "text_replaced"
     || event.type === "thinking_delta"
   ) {
-    const items = updateAssistant(itemsFrom(state), action.runId, (assistant) => {
+    const items = updateAssistant(state.items, action.runId, (assistant) => {
       if (event.type === "text_delta") {
         return {
           ...assistant,
@@ -596,7 +520,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     };
     return withItems(
       state,
-      updateAssistant(itemsFrom(state), action.runId, (assistant) => ({
+      updateAssistant(state.items, action.runId, (assistant) => ({
         ...assistant,
         tools: [...assistant.tools, tool],
         parts: appendPart(assistant.parts, {
@@ -610,7 +534,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   if (event.type === "tool_prepared") {
     return withItems(
       state,
-      updateAssistant(itemsFrom(state), action.runId, (assistant) => ({
+      updateAssistant(state.items, action.runId, (assistant) => ({
         ...assistant,
         tools: assistant.tools.map((tool) => (
           tool.id === String(event.toolCallId)
@@ -626,7 +550,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     if (event.type === "tool_finished") status = event.isError ? "error" : "done";
     return withItems(
       state,
-      updateAssistant(itemsFrom(state), action.runId, (assistant) => ({
+      updateAssistant(state.items, action.runId, (assistant) => ({
         ...assistant,
         tools: assistant.tools.map((tool) => {
           if (tool.id !== String(event.toolCallId)) return tool;
@@ -637,11 +561,11 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   }
 
   if (event.type === "usage") {
-    const items = updateAssistant(itemsFrom(state), action.runId, (assistant) => ({
+    const items = updateAssistant(state.items, action.runId, (assistant) => ({
       ...assistant,
       usage: addUsage(assistant.usage, event.usage),
     }));
-    return withItems(state, items, state.sessionTokens + event.usage.total);
+    return withItems(state, items);
   }
 
   return state;

@@ -190,23 +190,22 @@ function formatContextUsage({
 
 function getSessionTokenUsage(chat: ChatState, usage?: TokenUsage): TokenUsage {
   if (usage) return usage;
-  const aggregate = chat.messages.reduce<TokenUsage>((total, message) => ({
-    input: total.input + (message.usage?.input ?? 0),
-    output: total.output + (message.usage?.output ?? 0),
-    cacheRead: total.cacheRead + (message.usage?.cacheRead ?? 0),
-    cacheWrite: total.cacheWrite + (message.usage?.cacheWrite ?? 0),
-    total: total.total + (message.usage?.total ?? 0),
-  }), {
+  return chat.items.reduce<TokenUsage>((total, item) => {
+    if (item.kind !== "message") return total;
+    return {
+      input: total.input + (item.usage?.input ?? 0),
+      output: total.output + (item.usage?.output ?? 0),
+      cacheRead: total.cacheRead + (item.usage?.cacheRead ?? 0),
+      cacheWrite: total.cacheWrite + (item.usage?.cacheWrite ?? 0),
+      total: total.total + (item.usage?.total ?? 0),
+    };
+  }, {
     input: 0,
     output: 0,
     cacheRead: 0,
     cacheWrite: 0,
     total: 0,
   });
-  return {
-    ...aggregate,
-    total: aggregate.total || chat.sessionTokens,
-  };
 }
 
 function ChatView({
@@ -289,13 +288,7 @@ function ChatView({
     () => getSessionTokenUsage(chat, sessionTokenUsage),
     [chat, sessionTokenUsage],
   );
-  const items = useMemo(
-    () => chat.items ?? chat.messages.map((message) => ({
-      kind: "message" as const,
-      ...message,
-    })),
-    [chat.items, chat.messages],
-  );
+  const items = chat.items;
   const blocks = useMemo(() => transcriptBlocks(items), [items]);
   const transcriptFocusKey = chat.focus
     ? `${chat.focus.sessionId}:${chat.focus.conversationId}:${chat.focus.focusId}`

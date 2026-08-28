@@ -11,11 +11,23 @@ import type {
 import {
   chatReducer,
   initialChatState,
+  type ChatMessage,
+  type ChatMessageItem,
   type ChatState,
 } from "../chat/reducer";
 import { Chat } from "./Chat";
 
-const emptyChat: ChatState = { messages: [], sessionTokens: 0 };
+function messageItems(...messages: ChatMessage[]): ChatMessageItem[] {
+  return messages.map((message) => ({ kind: "message", ...message }));
+}
+
+function firstMessage(chat: ChatState): ChatMessage {
+  const item = chat.items[0];
+  if (!item || item.kind !== "message") throw new Error("message not found");
+  return item;
+}
+
+const emptyChat: ChatState = { items: [] };
 const fullHistoryWindow = {
   omittedBefore: false,
   startsMidTurn: false,
@@ -97,15 +109,13 @@ describe("Chat", () => {
       focusId: "focus-preview",
     };
     const rendered = render(view({
-      messages: [message("preview")],
-      sessionTokens: 0,
+      items: messageItems(message("preview")),
       focus,
     }, "", undefined, { conversationReady: false }));
     const previewArticle = screen.getByText("preview", { selector: "article" });
 
     rendered.rerender(view({
-      messages: [message("authoritative")],
-      sessionTokens: 0,
+      items: messageItems(message("authoritative")),
       focus: { ...focus, focusId: "focus-authoritative" },
     }));
     const authoritativeArticle = screen.getByText("authoritative", {
@@ -114,8 +124,7 @@ describe("Chat", () => {
     expect(authoritativeArticle).toBe(previewArticle);
 
     rendered.rerender(view({
-      messages: [message("other conversation")],
-      sessionTokens: 0,
+      items: messageItems(message("other conversation")),
       focus: {
         ...focus,
         conversationId: "conversation-b",
@@ -128,8 +137,7 @@ describe("Chat", () => {
     expect(otherConversationArticle).not.toBe(authoritativeArticle);
 
     rendered.rerender(view({
-      messages: [message("other session")],
-      sessionTokens: 0,
+      items: messageItems(message("other session")),
       focus: {
         sessionId: "session-2",
         conversationId: "conversation-b",
@@ -385,15 +393,14 @@ describe("Chat", () => {
     });
 
     rendered.rerender(view({
-      messages: [{
+      items: messageItems({
         id: "assistant-1",
         runId: "run-1",
         role: "assistant",
         text: "new output",
         thinking: "",
         tools: [],
-      }],
-      sessionTokens: 0,
+      }),
     }));
 
     expect(scrollTo).not.toHaveBeenCalled();
@@ -413,15 +420,14 @@ describe("Chat", () => {
     });
 
     rendered.rerender(view({
-      messages: [{
+      items: messageItems({
         id: "assistant-1",
         runId: "run-1",
         role: "assistant",
         text: "new output",
         thinking: "",
         tools: [],
-      }],
-      sessionTokens: 0,
+      }),
     }));
 
     expect(scrollTo).toHaveBeenCalledWith({
@@ -480,8 +486,7 @@ describe("Chat", () => {
     };
 
     rendered.rerender(view({
-      messages: [hydratedMessage],
-      sessionTokens: 0,
+      items: messageItems(hydratedMessage),
       focus: focusA,
     }));
 
@@ -494,8 +499,7 @@ describe("Chat", () => {
     scrollTo.mockClear();
 
     rendered.rerender(view({
-      messages: [{ ...hydratedMessage, id: "assistant-2", text: "preview latest" }],
-      sessionTokens: 0,
+      items: messageItems({ ...hydratedMessage, id: "assistant-2", text: "preview latest" }),
       focus: previewFocusB,
     }, "", undefined, { conversationReady: false }));
 
@@ -507,8 +511,7 @@ describe("Chat", () => {
     fireEvent.wheel(transcript, { deltaY: -4 });
     scrollTo.mockClear();
     rendered.rerender(view({
-      messages: [{ ...hydratedMessage, id: "assistant-2", text: "authoritative latest" }],
-      sessionTokens: 0,
+      items: messageItems({ ...hydratedMessage, id: "assistant-2", text: "authoritative latest" }),
       focus: focusB,
     }));
 
@@ -519,8 +522,7 @@ describe("Chat", () => {
       conversationReady: false,
     }));
     const cachedB: ChatState = {
-      messages: [{ ...hydratedMessage, id: "assistant-2", text: "cached again" }],
-      sessionTokens: 0,
+      items: messageItems({ ...hydratedMessage, id: "assistant-2", text: "cached again" }),
       focus: previewFocusB,
     };
     scrollHeight = 2_500;
@@ -546,8 +548,7 @@ describe("Chat", () => {
 
     scrollTo.mockClear();
     rendered.rerender(view({
-      messages: [{ ...hydratedMessage, id: "assistant-2", text: "new-session snapshot" }],
-      sessionTokens: 0,
+      items: messageItems({ ...hydratedMessage, id: "assistant-2", text: "new-session snapshot" }),
       focus: { ...focusB, sessionId: "session-2" },
     }));
 
@@ -557,15 +558,14 @@ describe("Chat", () => {
 
   it("releases scroll control upward and commits a manual jump before the next delta", () => {
     const firstChat: ChatState = {
-      messages: [{
+      items: messageItems({
         id: "assistant-1",
         runId: "run-1",
         role: "assistant",
         text: "first streamed chunk",
         thinking: "",
         tools: [],
-      }],
-      sessionTokens: 0,
+      }),
     };
     const rendered = render(view(firstChat, "", undefined, {
       busy: true,
@@ -599,8 +599,9 @@ describe("Chat", () => {
 
     rendered.rerender(view({
       ...firstChat,
-      messages: [{
-        ...firstChat.messages[0],
+      items: [{
+        kind: "message",
+        ...firstMessage(firstChat),
         text: "first streamed chunk while detached",
       }],
     }, "", undefined, {
@@ -617,8 +618,9 @@ describe("Chat", () => {
     scrollHeight = 1_030;
     rendered.rerender(view({
       ...firstChat,
-      messages: [{
-        ...firstChat.messages[0],
+      items: [{
+        kind: "message",
+        ...firstMessage(firstChat),
         text: "first streamed chunk while detached and the next delta",
       }],
     }, "", undefined, {
@@ -631,15 +633,14 @@ describe("Chat", () => {
 
   it("jumps to the bottom when clicking the jump button", () => {
     const firstChat: ChatState = {
-      messages: [{
+      items: messageItems({
         id: "assistant-1",
         runId: "run-1",
         role: "assistant",
         text: "final answer",
         thinking: "",
         tools: [],
-      }],
-      sessionTokens: 0,
+      }),
     };
     render(view(firstChat));
     const transcript = document.querySelector<HTMLElement>(".transcript");
@@ -688,15 +689,14 @@ describe("Chat", () => {
 
   it("renders the latest received text immediately", () => {
     const firstChat: ChatState = {
-      messages: [{
+      items: messageItems({
         id: "assistant-1",
         runId: "run-1",
         role: "assistant",
         text: "第一段",
         thinking: "",
         tools: [],
-      }],
-      sessionTokens: 0,
+      }),
     };
     const rendered = render(view(firstChat, "", undefined, {
       busy: true,
@@ -721,7 +721,7 @@ describe("Chat", () => {
 
     rendered.rerender(view({
       ...firstChat,
-      messages: [{ ...firstChat.messages[0], text: completeText }],
+      items: [{ kind: "message", ...firstMessage(firstChat), text: completeText }],
     }, "", undefined, {
       busy: true,
       activeRun: { id: "run-1", phase: "running" },
@@ -744,8 +744,7 @@ describe("Chat", () => {
       tools: [],
     };
     const firstChat: ChatState = {
-      messages: [firstMessage],
-      sessionTokens: 0,
+      items: messageItems(firstMessage),
     };
     const rendered = render(view(firstChat, "", undefined, {
       busy: true,
@@ -755,7 +754,7 @@ describe("Chat", () => {
 
     rendered.rerender(view({
       ...firstChat,
-      messages: [{ ...firstMessage, text: completeText }],
+      items: messageItems({ ...firstMessage, text: completeText }),
     }));
 
     expect(screen.getByText(completeText)).toBeInTheDocument();
@@ -771,8 +770,7 @@ describe("Chat", () => {
       tools: [],
     };
     const firstChat: ChatState = {
-      messages: [firstMessage],
-      sessionTokens: 0,
+      items: messageItems(firstMessage),
     };
     const rendered = render(view(firstChat, "", undefined, {
       busy: true,
@@ -782,7 +780,7 @@ describe("Chat", () => {
 
     rendered.rerender(view({
       ...firstChat,
-      messages: [{ ...firstMessage, text: completeText }],
+      items: messageItems({ ...firstMessage, text: completeText }),
     }, "", undefined, {
       busy: true,
       activeRun: { id: "run-markdown", phase: "running" },
@@ -795,7 +793,7 @@ describe("Chat", () => {
 
     rendered.rerender(view({
       ...firstChat,
-      messages: [{ ...firstMessage, text: completeText }],
+      items: messageItems({ ...firstMessage, text: completeText }),
     }));
     expect(rendered.container.querySelector(".streaming-markdown"))
       .not.toBeInTheDocument();
@@ -934,8 +932,7 @@ describe("Chat", () => {
       tools: toolsFor(prefix),
     });
     const rendered = render(view({
-      messages: [assistantFor("a")],
-      sessionTokens: 0,
+      items: messageItems(assistantFor("a")),
       focus: focusA,
     }));
 
@@ -950,8 +947,7 @@ describe("Chat", () => {
     expect(screen.getAllByText(/a-25\.ts/).length).toBeGreaterThan(0);
 
     rendered.rerender(view({
-      messages: [assistantFor("b")],
-      sessionTokens: 0,
+      items: messageItems(assistantFor("b")),
       focus: focusB,
     }));
 
@@ -987,8 +983,7 @@ describe("Chat", () => {
       tools: [],
     };
     const rendered = render(view({
-      messages: [previousMessage, latestMessage],
-      sessionTokens: 0,
+      items: messageItems(previousMessage, latestMessage),
     }, "", undefined, {
       busy: true,
       activeRun: { id: "run-latest", phase: "running" },
@@ -1003,11 +998,10 @@ describe("Chat", () => {
       .not.toBeInTheDocument();
 
     rendered.rerender(view({
-      messages: [previousMessage, {
+      items: messageItems(previousMessage, {
         ...latestMessage,
         text: "最新回复已经完成",
-      }],
-      sessionTokens: 0,
+      }),
     }));
 
     const foldedReply = assistantMessages()[0]?.querySelector<HTMLDetailsElement>(
@@ -1034,7 +1028,7 @@ describe("Chat", () => {
 
   it("only exposes disabled rewind on user messages while the Agent runs", () => {
     render(view({
-      messages: [{
+      items: messageItems({
         id: "user-rewind",
         runId: "run-rewind",
         role: "user",
@@ -1048,8 +1042,7 @@ describe("Chat", () => {
         text: "正在处理",
         thinking: "",
         tools: [],
-      }],
-      sessionTokens: 0,
+      }),
     }, "", undefined, {
       busy: true,
       activeRun: { id: "run-rewind", phase: "running" },
@@ -1073,8 +1066,7 @@ describe("Chat", () => {
       tools: [],
     };
     const firstChat: ChatState = {
-      messages: [firstMessage],
-      sessionTokens: 0,
+      items: messageItems(firstMessage),
     };
     const rendered = render(view(firstChat, "", undefined, {
       busy: true,
@@ -1084,14 +1076,14 @@ describe("Chat", () => {
 
     rendered.rerender(view({
       ...firstChat,
-      messages: [{ ...firstMessage, text: completeText }],
+      items: messageItems({ ...firstMessage, text: completeText }),
     }, "", undefined, {
       busy: true,
       activeRun: { id: "run-1", phase: "running" },
     }));
     rendered.rerender(view({
       ...firstChat,
-      messages: [{
+      items: messageItems({
         ...firstMessage,
         text: completeText,
         tools: [{
@@ -1099,7 +1091,7 @@ describe("Chat", () => {
           name: "read",
           status: "running",
         }],
-      }],
+      }),
     }, "", undefined, {
       busy: true,
       activeRun: { id: "run-1", phase: "running" },
@@ -1279,7 +1271,6 @@ describe("Chat", () => {
 
   it("renders a compaction divider between the surrounding messages", () => {
     const { container } = render(view({
-      messages: [],
       items: [{
         kind: "message",
         id: "assistant-before",
@@ -1302,7 +1293,6 @@ describe("Chat", () => {
         thinking: "",
         tools: [],
       }],
-      sessionTokens: 0,
     }));
 
     const transcript = container.querySelector(".transcript");
@@ -1335,7 +1325,6 @@ describe("Chat", () => {
       result: "Review complete",
     };
     const { container } = render(view({
-      messages: [],
       items: [{
         kind: "message",
         id: "user-1",
@@ -1365,7 +1354,6 @@ describe("Chat", () => {
         thinking: "",
         tools: [],
       }],
-      sessionTokens: 0,
     }));
 
     const renderedCard = container.querySelector(
@@ -1406,7 +1394,6 @@ describe("Chat", () => {
       updatedAt: "2026-07-19T10:01:00.000Z",
     };
     const { container } = render(view({
-      messages: [],
       items: [{
         kind: "message",
         id: "assistant-before",
@@ -1424,7 +1411,6 @@ describe("Chat", () => {
         thinking: "",
         tools: [],
       }],
-      sessionTokens: 0,
     }));
 
     const transcript = container.querySelector(".transcript");

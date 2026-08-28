@@ -947,11 +947,13 @@ export function App() {
       || pending.conversationId !== focusRef.current?.conversationId
       || pending.focusId !== focusRef.current?.focusId
     ) return;
+    const focus = focusRef.current;
+    if (!focus) return;
     dispatch({
       type: "prompt_accepted",
       runId,
       text: pending.text,
-      ...(focusRef.current ?? {}),
+      ...focus,
     });
     forgetUnconfirmedPrompt(pending);
     updateDraft("");
@@ -1702,12 +1704,14 @@ export function App() {
           // 停止 = 取消未投递的等待中消息（与服务端 clearQueue 一致）
           clearPendingAdmissions();
         }
+        const focus = focusRef.current;
+        if (!focus) return;
         dispatch({
           type: "session",
           runId: event.runId,
           event: event.event,
           projectionSeq: event.projectionSeq,
-          ...(focusRef.current ?? {}),
+          ...focus,
         });
       } else if (event.type === "conversation_item") {
         if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;

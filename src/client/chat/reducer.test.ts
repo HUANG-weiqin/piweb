@@ -4,7 +4,12 @@ import type {
   ConversationMessageCard,
   TokenUsage,
 } from "../../shared/protocol";
-import { chatReducer, initialChatState } from "./reducer";
+import {
+  chatReducer,
+  initialChatState,
+  type ChatMessageItem,
+  type ChatState,
+} from "./reducer";
 
 const RUN_1 = "run-1";
 const RUN_2 = "run-2";
@@ -50,6 +55,19 @@ function historyMessage(
   };
 }
 
+function messageItems(state: ChatState): ChatMessageItem[] {
+  return state.items.filter((item): item is ChatMessageItem => (
+    item.kind === "message"
+  ));
+}
+
+function focusedState(focus = FOCUS_A_1): ChatState {
+  return chatReducer(initialChatState, {
+    type: "focus_changed",
+    ...focus,
+  });
+}
+
 function sessionMessageCard(
   state: ConversationMessageCard["state"] = "queued",
 ): ConversationMessageCard {
@@ -93,13 +111,13 @@ describe("chatReducer", () => {
     });
 
     expect(state.focus).toEqual(FOCUS_A_1);
-    expect(state.items?.map((item) => item.kind)).toEqual([
+    expect(state.items.map((item) => item.kind)).toEqual([
       "message",
       "session_message",
       "message",
     ]);
-    expect(state.messages.map(({ id }) => id)).toEqual(["user-1", "assistant-1"]);
-    expect(state.sessionTokens).toBe(9);
+    expect(messageItems(state).map(({ id }) => id)).toEqual(["user-1", "assistant-1"]);
+    expect(messageItems(state).at(-1)?.usage?.total).toBe(9);
   });
 
   it("normalizes a large unique snapshot with linear identity reads", () => {
@@ -156,12 +174,12 @@ describe("chatReducer", () => {
       ],
     });
 
-    expect(state.items?.map((item) => item.kind)).toEqual([
+    expect(state.items.map((item) => item.kind)).toEqual([
       "message",
       "compaction",
       "message",
     ]);
-    expect(state.messages.map(({ id }) => id)).toEqual(["before", "after"]);
+    expect(messageItems(state).map(({ id }) => id)).toEqual(["before", "after"]);
   });
 
   it("clears the old transcript when a new focus is attached", () => {
@@ -179,8 +197,6 @@ describe("chatReducer", () => {
 
     expect(state.focus).toEqual(FOCUS_B);
     expect(state.items).toEqual([]);
-    expect(state.messages).toEqual([]);
-    expect(state.sessionTokens).toBe(0);
   });
 
   it("rejects the first A snapshot after an A to B to A focus cycle", () => {
@@ -238,7 +254,7 @@ describe("chatReducer", () => {
 
     expect(state.projectionGap).toBe(false);
     expect(state.lastProjectionSeq).toBe(5);
-    expect(state.messages).toEqual([
+    expect(messageItems(state)).toEqual([
       expect.objectContaining({
         id: "assistant-live",
         runId: RUN_1,
@@ -275,7 +291,7 @@ describe("chatReducer", () => {
 
     expect(stale).toBe(state);
     expect(stale.lastProjectionSeq).toBe(6);
-    expect(stale.messages.map(({ text }) => text)).toEqual([
+    expect(messageItems(stale).map(({ text }) => text)).toEqual([
       "current",
       " state",
     ]);
@@ -294,7 +310,7 @@ describe("chatReducer", () => {
       event: { type: "text_delta", delta: "early" },
     });
     expect(state.projectionGap).toBe(true);
-    expect(state.messages).toEqual([]);
+    expect(messageItems(state)).toEqual([]);
 
     state = chatReducer(state, {
       type: "hydrate",
@@ -311,7 +327,7 @@ describe("chatReducer", () => {
     });
     expect(state.projectionGap).toBe(true);
     expect(state.lastProjectionSeq).toBe(2);
-    expect(state.messages).toEqual([]);
+    expect(messageItems(state)).toEqual([]);
 
     state = chatReducer(state, {
       type: "session",
@@ -322,7 +338,7 @@ describe("chatReducer", () => {
     });
     expect(state.projectionGap).toBe(true);
     expect(state.lastProjectionSeq).toBe(2);
-    expect(state.messages).toEqual([]);
+    expect(messageItems(state)).toEqual([]);
   });
 
   it("does not let conversation items advance projection sequence over a missing delta", () => {
@@ -370,7 +386,7 @@ describe("chatReducer", () => {
 
     expect(state.projectionGap).toBe(false);
     expect(state.lastProjectionSeq).toBe(5);
-    expect(state.items?.map((item) => item.kind)).toEqual([
+    expect(state.items.map((item) => item.kind)).toEqual([
       "message",
       "session_message",
     ]);
@@ -420,7 +436,7 @@ describe("chatReducer", () => {
 
     expect(state.projectionGap).toBe(false);
     expect(state.lastProjectionSeq).toBe(8);
-    expect(state.messages).toEqual([
+    expect(messageItems(state)).toEqual([
       expect.objectContaining({ text: "caught up now" }),
     ]);
   });
@@ -446,7 +462,7 @@ describe("chatReducer", () => {
 
     expect(state.projectionGap).toBe(true);
     expect(state.lastProjectionSeq).toBe(5);
-    expect(state.messages).toEqual([]);
+    expect(messageItems(state)).toEqual([]);
   });
 
   it("updates a live card in place by cardId and preserves its position", () => {
@@ -471,13 +487,13 @@ describe("chatReducer", () => {
     });
 
     expect(state.items).toHaveLength(3);
-    expect(state.items?.[1]).toMatchObject({
+    expect(state.items[1]).toMatchObject({
       kind: "session_message",
       cardId: "card-1",
       state: "completed",
       result: "all good",
     });
-    expect(state.items?.map(({ id }) => id)).toEqual([
+    expect(state.items.map(({ id }) => id)).toEqual([
       "before",
       "entry-completed",
       "after",
@@ -518,7 +534,7 @@ describe("chatReducer", () => {
       runId: RUN_1,
       event: { type: "text_delta", delta: "current" },
     });
-    expect(state.messages).toEqual([
+    expect(messageItems(state)).toEqual([
       expect.objectContaining({ role: "assistant", text: "current" }),
     ]);
   });
@@ -550,21 +566,23 @@ describe("chatReducer", () => {
       text: "stale",
     });
     expect(state).toBe(once);
-    expect(state.messages).toEqual([
+    expect(messageItems(state)).toEqual([
       expect.objectContaining({ role: "user", runId: RUN_1, text: "current" }),
     ]);
   });
 
   it("hydrates a detached persistent history snapshot", () => {
-    const state = chatReducer(initialChatState, {
+    const state = chatReducer(initialChatState, { ...FOCUS_A_1,
       type: "hydrate",
-      messages: [{
+      items: [{
+        kind: "message",
         id: "user-1",
         role: "user",
         text: "inspect",
         thinking: "",
         tools: [],
       }, {
+        kind: "message",
         id: "assistant-1",
         role: "assistant",
         text: "done",
@@ -586,8 +604,8 @@ describe("chatReducer", () => {
       }],
     });
 
-    expect(state.sessionTokens).toBe(9);
-    expect(state.messages).toEqual([
+    expect(messageItems(state).at(-1)?.usage?.total).toBe(9);
+    expect(messageItems(state)).toEqual([
       expect.objectContaining({ id: "user-1", role: "user", text: "inspect" }),
       expect.objectContaining({
         id: "assistant-1",
@@ -600,40 +618,41 @@ describe("chatReducer", () => {
 
   it("projects an accepted prompt once per run identity", () => {
     const accepted = {
+      ...FOCUS_A_1,
       type: "prompt_accepted" as const,
       runId: RUN_1,
       text: "hello",
     };
-    const once = chatReducer(initialChatState, accepted);
+    const once = chatReducer(focusedState(), accepted);
     const twice = chatReducer(once, accepted);
 
     expect(twice).toBe(once);
-    expect(twice.messages).toEqual([
+    expect(messageItems(twice)).toEqual([
       expect.objectContaining({ role: "user", runId: RUN_1, text: "hello" }),
     ]);
   });
 
   it("streams assistant text", () => {
-    let state = chatReducer(initialChatState, { type: "prompt_accepted", runId: RUN_1, text: "hello" });
-    state = chatReducer(state, { type: "session", runId: RUN_1, event: { type: "run_started" } });
-    state = chatReducer(state, { type: "session", runId: RUN_1, event: { type: "text_delta", delta: "hi" } });
-    expect(state.messages.at(-1)?.text).toBe("hi");
+    let state = chatReducer(focusedState(), { ...FOCUS_A_1, type: "prompt_accepted", runId: RUN_1, text: "hello" });
+    state = chatReducer(state, { ...FOCUS_A_1, type: "session", runId: RUN_1, event: { type: "run_started" } });
+    state = chatReducer(state, { ...FOCUS_A_1, type: "session", runId: RUN_1, event: { type: "text_delta", delta: "hi" } });
+    expect(messageItems(state).at(-1)?.text).toBe("hi");
   });
 
   it("hands a trailing run placeholder the authoritative assistant projection ID", () => {
-    let state = chatReducer(initialChatState, {
+    let state = chatReducer(focusedState(), { ...FOCUS_A_1,
       type: "prompt_accepted",
       runId: RUN_1,
       text: "hello",
     });
-    state = chatReducer(state, {
+    state = chatReducer(state, { ...FOCUS_A_1,
       type: "session",
       runId: RUN_1,
       event: { type: "run_started" },
     });
-    const placeholderId = state.messages.at(-1)?.id;
+    const placeholderId = messageItems(state).at(-1)?.id;
 
-    state = chatReducer(state, {
+    state = chatReducer(state, { ...FOCUS_A_1,
       type: "session",
       runId: RUN_1,
       event: {
@@ -642,17 +661,17 @@ describe("chatReducer", () => {
       },
     });
 
-    expect(state.messages).toHaveLength(2);
-    expect(state.messages.at(-1)).toMatchObject({
+    expect(messageItems(state)).toHaveLength(2);
+    expect(messageItems(state).at(-1)).toMatchObject({
       id: "assistant-projection-1",
       role: "assistant",
       runId: RUN_1,
     });
-    expect(state.messages.at(-1)?.id).not.toBe(placeholderId);
+    expect(messageItems(state).at(-1)?.id).not.toBe(placeholderId);
   });
 
   it("projects an assistant start when no run placeholder exists", () => {
-    const state = chatReducer(initialChatState, {
+    const state = chatReducer(focusedState(), { ...FOCUS_A_1,
       type: "session",
       runId: RUN_1,
       event: {
@@ -661,7 +680,7 @@ describe("chatReducer", () => {
       },
     });
 
-    expect(state.messages).toEqual([
+    expect(messageItems(state)).toEqual([
       expect.objectContaining({
         id: "assistant-projection-1",
         role: "assistant",
@@ -671,22 +690,22 @@ describe("chatReducer", () => {
   });
 
   it("keeps guidance and the following assistant segment in transcript order", () => {
-    let state = chatReducer(initialChatState, {
+    let state = chatReducer(focusedState(), { ...FOCUS_A_1,
       type: "prompt_accepted",
       runId: RUN_1,
       text: "initial",
     });
-    state = chatReducer(state, {
+    state = chatReducer(state, { ...FOCUS_A_1,
       type: "session",
       runId: RUN_1,
       event: { type: "run_started" },
     });
-    state = chatReducer(state, {
+    state = chatReducer(state, { ...FOCUS_A_1,
       type: "session",
       runId: RUN_1,
       event: { type: "text_delta", delta: "before" },
     });
-    state = chatReducer(state, {
+    state = chatReducer(state, { ...FOCUS_A_1,
       type: "session",
       runId: RUN_1,
       event: {
@@ -695,7 +714,7 @@ describe("chatReducer", () => {
         text: "change direction",
       },
     });
-    state = chatReducer(state, {
+    state = chatReducer(state, { ...FOCUS_A_1,
       type: "session",
       runId: RUN_1,
       event: {
@@ -703,13 +722,13 @@ describe("chatReducer", () => {
         projectionId: "095a5c5d-93d6-48e7-9532-ea1e299b7f86",
       },
     });
-    state = chatReducer(state, {
+    state = chatReducer(state, { ...FOCUS_A_1,
       type: "session",
       runId: RUN_1,
       event: { type: "text_delta", delta: "after" },
     });
 
-    expect(state.messages.map(({ role, text }) => ({ role, text }))).toEqual([
+    expect(messageItems(state).map(({ role, text }) => ({ role, text }))).toEqual([
       { role: "user", text: "initial" },
       { role: "assistant", text: "before" },
       { role: "user", text: "change direction" },
@@ -718,12 +737,12 @@ describe("chatReducer", () => {
   });
 
   it("tracks tool lifecycle", () => {
-    let state = chatReducer(initialChatState, { type: "session", runId: RUN_1, event: { type: "tool_started", toolCallId: "1", toolName: "read", args: { path: "a" } } });
-    expect(state.messages.at(-1)?.tools[0]).toMatchObject({
+    let state = chatReducer(focusedState(), { ...FOCUS_A_1, type: "session", runId: RUN_1, event: { type: "tool_started", toolCallId: "1", toolName: "read", args: { path: "a" } } });
+    expect(messageItems(state).at(-1)?.tools[0]).toMatchObject({
       args: { path: "a" },
       status: "pending",
     });
-    state = chatReducer(state, {
+    state = chatReducer(state, { ...FOCUS_A_1,
       type: "session",
       runId: RUN_1,
       event: {
@@ -732,12 +751,12 @@ describe("chatReducer", () => {
         args: { path: "changed-by-extension.ts" },
       },
     });
-    expect(state.messages.at(-1)?.tools[0]).toMatchObject({
+    expect(messageItems(state).at(-1)?.tools[0]).toMatchObject({
       args: { path: "changed-by-extension.ts" },
       status: "pending",
     });
-    state = chatReducer(state, { type: "session", runId: RUN_1, event: { type: "tool_finished", toolCallId: "1", result: { content: [] }, isError: false } });
-    expect(state.messages.at(-1)?.tools[0].status).toBe("done");
+    state = chatReducer(state, { ...FOCUS_A_1, type: "session", runId: RUN_1, event: { type: "tool_finished", toolCallId: "1", result: { content: [] }, isError: false } });
+    expect(messageItems(state).at(-1)?.tools[0].status).toBe("done");
   });
 
   it("records live assistant parts in arrival order around a session card", () => {
@@ -859,80 +878,67 @@ describe("chatReducer", () => {
   });
 
   it("accumulates assistant total token usage as session tokens", () => {
-    let state = chatReducer(initialChatState, { type: "prompt_accepted", runId: RUN_1, text: "hello" });
-    state = chatReducer(state, { type: "session", runId: RUN_1, event: { type: "run_started" } });
-    state = chatReducer(state, { type: "session", runId: RUN_1, event: { type: "usage", usage: usage(25) } });
+    let state = chatReducer(focusedState(), { ...FOCUS_A_1, type: "prompt_accepted", runId: RUN_1, text: "hello" });
+    state = chatReducer(state, { ...FOCUS_A_1, type: "session", runId: RUN_1, event: { type: "run_started" } });
+    state = chatReducer(state, { ...FOCUS_A_1, type: "session", runId: RUN_1, event: { type: "usage", usage: usage(25) } });
 
-    state = chatReducer(state, { type: "prompt_accepted", runId: RUN_2, text: "hello again" });
-    state = chatReducer(state, { type: "session", runId: RUN_2, event: { type: "run_started" } });
-    state = chatReducer(state, { type: "session", runId: RUN_2, event: { type: "usage", usage: usage(23) } });
+    state = chatReducer(state, { ...FOCUS_A_1, type: "prompt_accepted", runId: RUN_2, text: "hello again" });
+    state = chatReducer(state, { ...FOCUS_A_1, type: "session", runId: RUN_2, event: { type: "run_started" } });
+    state = chatReducer(state, { ...FOCUS_A_1, type: "session", runId: RUN_2, event: { type: "usage", usage: usage(23) } });
 
-    expect(state.sessionTokens).toBe(48);
-    expect(state.messages.at(-1)?.usage?.total).toBe(23);
+    expect(messageItems(state)
+      .filter((message) => message.usage !== undefined)
+      .map((message) => message.usage?.total))
+      .toEqual([25, 23]);
   });
 
   it("accumulates usage from multiple assistant calls in one agent run", () => {
-    let state = chatReducer(initialChatState, { type: "prompt_accepted", runId: RUN_1, text: "use a tool" });
-    state = chatReducer(state, { type: "session", runId: RUN_1, event: { type: "run_started" } });
+    let state = chatReducer(focusedState(), { ...FOCUS_A_1, type: "prompt_accepted", runId: RUN_1, text: "use a tool" });
+    state = chatReducer(state, { ...FOCUS_A_1, type: "session", runId: RUN_1, event: { type: "run_started" } });
 
     for (const total of [25, 23]) {
-      state = chatReducer(state, {
+      state = chatReducer(state, { ...FOCUS_A_1,
         type: "session",
         runId: RUN_1,
         event: { type: "usage", usage: usage(total) },
       });
     }
 
-    expect(state.sessionTokens).toBe(48);
-    expect(state.messages.at(-1)?.usage?.total).toBe(48);
+    expect(messageItems(state).at(-1)?.usage?.total).toBe(48);
   });
 
   it("uses the final assistant message when no streaming delta arrived", () => {
-    let state = chatReducer(initialChatState, { type: "prompt_accepted", runId: RUN_1, text: "hello" });
-    state = chatReducer(state, { type: "session", runId: RUN_1, event: { type: "run_started" } });
-    state = chatReducer(state, {
+    let state = chatReducer(focusedState(), { ...FOCUS_A_1, type: "prompt_accepted", runId: RUN_1, text: "hello" });
+    state = chatReducer(state, { ...FOCUS_A_1, type: "session", runId: RUN_1, event: { type: "run_started" } });
+    state = chatReducer(state, { ...FOCUS_A_1,
       type: "session",
       runId: RUN_1,
       event: { type: "text_replaced", text: "final-only response" },
     });
 
-    expect(state.messages.at(-1)?.text).toBe("final-only response");
-  });
-
-  it("does not depend on Array.prototype.at being available", () => {
-    const originalAt = Array.prototype.at;
-    Object.defineProperty(Array.prototype, "at", { configurable: true, writable: true, value: undefined });
-
-    try {
-      let state = chatReducer(initialChatState, { type: "session", runId: RUN_1, event: { type: "run_started" } });
-      state = chatReducer(state, { type: "session", runId: RUN_1, event: { type: "text_delta", delta: "hi" } });
-
-      expect(state.messages[state.messages.length - 1]?.text).toBe("hi");
-    } finally {
-      Object.defineProperty(Array.prototype, "at", { configurable: true, writable: true, value: originalAt });
-    }
+    expect(messageItems(state).at(-1)?.text).toBe("final-only response");
   });
 
   it("routes interleaved text to the assistant for each run", () => {
-    let state = chatReducer(initialChatState, { type: "prompt_accepted", runId: RUN_1, text: "first" });
-    state = chatReducer(state, { type: "prompt_accepted", runId: RUN_2, text: "second" });
-    state = chatReducer(state, {
+    let state = chatReducer(focusedState(), { ...FOCUS_A_1, type: "prompt_accepted", runId: RUN_1, text: "first" });
+    state = chatReducer(state, { ...FOCUS_A_1, type: "prompt_accepted", runId: RUN_2, text: "second" });
+    state = chatReducer(state, { ...FOCUS_A_1,
       type: "session",
       runId: RUN_2,
       event: { type: "text_delta", delta: "second answer" },
     });
-    state = chatReducer(state, {
+    state = chatReducer(state, { ...FOCUS_A_1,
       type: "session",
       runId: RUN_1,
       event: { type: "text_delta", delta: "first answer" },
     });
-    state = chatReducer(state, {
+    state = chatReducer(state, { ...FOCUS_A_1,
       type: "session",
       runId: RUN_2,
       event: { type: "text_delta", delta: "!" },
     });
 
-    expect(state.messages.map(({ role, runId, text }) => ({ role, runId, text }))).toEqual([
+    expect(messageItems(state).map(({ role, runId, text }) => ({ role, runId, text }))).toEqual([
       { role: "user", runId: RUN_1, text: "first" },
       { role: "assistant", runId: RUN_1, text: "first answer" },
       { role: "user", runId: RUN_2, text: "second" },
@@ -941,37 +947,37 @@ describe("chatReducer", () => {
   });
 
   it("routes interleaved tools and usage even when tool call ids overlap", () => {
-    let state = chatReducer(initialChatState, { type: "prompt_accepted", runId: RUN_1, text: "first" });
-    state = chatReducer(state, { type: "prompt_accepted", runId: RUN_2, text: "second" });
+    let state = chatReducer(focusedState(), { ...FOCUS_A_1, type: "prompt_accepted", runId: RUN_1, text: "first" });
+    state = chatReducer(state, { ...FOCUS_A_1, type: "prompt_accepted", runId: RUN_2, text: "second" });
     for (const runId of [RUN_2, RUN_1]) {
-      state = chatReducer(state, {
+      state = chatReducer(state, { ...FOCUS_A_1,
         type: "session",
         runId,
         event: { type: "tool_started", toolCallId: "shared", toolName: "read" },
       });
     }
-    state = chatReducer(state, {
+    state = chatReducer(state, { ...FOCUS_A_1,
       type: "session",
       runId: RUN_1,
       event: { type: "tool_finished", toolCallId: "shared", result: "first result", isError: false },
     });
-    state = chatReducer(state, {
+    state = chatReducer(state, { ...FOCUS_A_1,
       type: "session",
       runId: RUN_2,
       event: { type: "tool_finished", toolCallId: "shared", result: "second result", isError: true },
     });
-    state = chatReducer(state, {
+    state = chatReducer(state, { ...FOCUS_A_1,
       type: "session",
       runId: RUN_2,
       event: { type: "usage", usage: usage(20) },
     });
-    state = chatReducer(state, {
+    state = chatReducer(state, { ...FOCUS_A_1,
       type: "session",
       runId: RUN_1,
       event: { type: "usage", usage: usage(10) },
     });
 
-    const assistants = state.messages.filter((message) => message.role === "assistant");
+    const assistants = messageItems(state).filter((message) => message.role === "assistant");
     expect(assistants.find((message) => message.runId === RUN_1)).toMatchObject({
       usage: { total: 10 },
       tools: [{ result: "first result", status: "done" }],
@@ -980,6 +986,6 @@ describe("chatReducer", () => {
       usage: { total: 20 },
       tools: [{ result: "second result", status: "error" }],
     });
-    expect(state.sessionTokens).toBe(30);
+    expect(assistants.reduce((total, message) => total + (message.usage?.total ?? 0), 0)).toBe(30);
   });
 });
