@@ -12,7 +12,7 @@
     "build": "vite build && tsc -p tsconfig.server.json",
     "start": "node dist-server/server/index.js",
     "pretypecheck": "npm run context-compressor:build",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit && npm run context-compressor:typecheck",
+    "typecheck": "tsc && tsc -p tsconfig.server.json --noEmit && npm run context-compressor:typecheck",
     "pretest": "npm run context-compressor:build",
     "test": "vitest run --exclude \".worktrees/**\"",
     "context-compressor:build": "npm run build --workspace=@piweb/context-compressor",

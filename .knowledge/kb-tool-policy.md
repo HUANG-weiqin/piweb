@@ -1,6 +1,6 @@
 # 工具权限
 
-`updated: 2026-08-10`
+`updated: 2026-08-28`
 
 ## 这个模块是干什么的
 
@@ -110,7 +110,6 @@ canManageSessions only: wait_for_session / abort_session / delete_session
 - `src/server/git-inspect.ts`
 - `src/server/notebook-tools.ts`
 - `src/server/conversation-notebook.ts`
-- `src/server/project-run-coordinator.ts`
 - `src/shared/protocol.ts`
 - 对应的 `*.test.ts`
 

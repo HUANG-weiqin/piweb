@@ -82,7 +82,7 @@
 - `wait_for_session` 让当前工具调用阻塞，但不锁死 run：兼容的精确 `conversationId + runId` 等一个 durable settlement；aggregate `targets` 在调用时冻结 1–32 个去重目标，同一 waiter 注册到每个 key，首个 listed settlement 先从全部 key 原子注销并在结果中标明 conversationId。任何实际投递到当前 run 的新 peer/inbox 消息，或 SDK 已接受且尚未 raw-observed 的 browser/explicit guidance，也都可先结束两种 wait。消息只返回真实来源 metadata，guidance 只返回 outcome，正文仍由 custom/raw user message 注入一次。actor 的 one-shot guidance callback 必须由 host 返回是否真的认领到仍存在的 waiter；stale callback 不得提前烧掉 record。claimed inbox 用 `waitedByRunId`、guidance 用 per-record claimed 标记避免后续 wait 重复唤醒；temporary return/receipt 对 aggregate 中的 temporary target 也保持单一正文 owner。
 - 大上下文且当前模型 cache-read 经济时，静默 wait 的 exact 或 aggregate waiter 可持有一个三分钟、已 `unref` 的易失 timer；timer 到期必须进入 project lifecycle，复核 waiter identity 与 source run ownership 后才消费该 run 最多两次的 cache checkpoint 额度并返回 `{ outcome: "checkpoint" }`。该结果只促使同一 AgentSession 进行正常下一轮，不是 target result；后续 assistant usage 缺失、非法或 cache hit 低于 50% 时禁用本 run 剩余额度。所有其它 waiter 结算路径共用 detach 清 timer，进程退出不为保留远端缓存而延长生命周期。
 - 取消 run 必须先清空 SDK 尚未消费的 steering/follow-up queue 再 abort；否则旧引导可能跨越结算边界污染下一次 prompt。持久跨会话消息仍由 inbox delivery marker 决定是否重投，不能把 SDK 内存队列当成 durable truth。
-- 注册不可复用 runId、安装 active RunTicket 后立即发送 `run_queued`；它既是生命周期事件，也是浏览器提交 user draft 的唯一服务端接收回执。
+- 注册不可复用 runId、安装 active RunTicket 后立即发送 `run_queued`；它既是生命周期事件，也是 idle browser prompt 的接收回执。busy prompt 则只在 SDK 接受 steering 后发送 `prompt_admitted`。
 - SDK 异步 preflight 结束时会再次检查 run ticket；若期间已取消，会在真正启动 agent 前阻断。
 - AgentSession 构造完成后，工作台在 SDK extension hook 外再包一层 host tool gate；扩展先修改/阻止，工作台再用最终 validated args 决策。
 - 每个 `bash` 或 `grep` 工具结果在 Pi extension 的 `tool_result` hook 完成后，由宿主在 `afterToolCall` 直接压缩最终有效 content 的文本 part（image 和其它 part 保持原样）；`grep` 在通用采样后折叠连续同路径行，两个工具都会把同一结果中的非连续长重复行引用到首次输出行，并以原始输入重新执行 10% UTF-8 收益门槛。该 hook 发生在 SDK `tool_execution_end` 和 tool-result `message_end` 前，默认压缩内容进入 Agent 内存、SessionManager/JSONL、UI、后续上下文和 compaction。后续可信 extension 的 `message_end` 仍可显式替换消息；压缩是默认优化而非安全边界。未被再次替换时，被省略的原始行不持久化，也不提供 recovery。
@@ -99,7 +99,6 @@
 - focused history 由 ConversationActor 一次性捕获并完成 durable/live ownership 交接、语义折叠、peer enrichment 和最终窗口化；PiConnection 不得再次独立读取/裁剪 SessionManager。交接只认 `entry.message === rawMessage` 的对象身份，未匹配 live item 必须形成连续 suffix。user 使用 SDK 复用的原始对象；assistant 的 start 是 partial clone，必须在 `message_end` 改绑随后会被 AgentSession 持久化的 final 对象。初始 browser user slot 只绑定首条 user，后续 steer 各自拥有独立 slot。投影窗口按最终 JSON UTF-8 bytes 计算；窗口成员被卡片更新淘汰时必须发布完整 snapshot，而不是只发送无法删除旧 item 的 `conversation_item`。
 - 同一 project view 的索引刷新同时最多执行一轮；进行中收到的任意数量请求折叠为一次尾随扫描，尾随到达时前一轮结果不投影。页面恢复的 `refresh_view` 只接受精确 observation/focus 身份；busy 或 compacting actor 不重发 durable transcript，避免覆盖当前流式尾部。
 - close/focus change 先同步使观察身份和 UI route 失效，再 detach project view；它不会把仍在运行的 conversation actor 当作连接资源销毁。
-- 切到 read_only 是项目级 barrier：先同步取消其它连接的旧 run，等待它们 release，再持久化并发布确认；不能只在异步策略前后“多检查一次”。
 - WebSocket server handle 显式拥有升级监听、活动 socket、共享 RoleCatalog 与 ProjectSessionCoordinator；进程退出会先停止升级、断开客户端，再等待全部 connection 和 conversation actor dispose。
 - 目录浏览不启动系统窗口或子进程；服务端重新校验浏览位置，只返回目录名与绝对路径，并同时限制数量和序列化字节数。用户确认后仍必须由 initialize 独立校验并提交项目 cwd。
 - WebSocket upgrade 要求 loopback Origin 与请求 Host 精确一致；不能因为 hostname 是 localhost 就允许其它本机端口枚举目录或发送 Agent 命令。
@@ -128,7 +127,6 @@
 - `src/server/role-catalog.ts`
 - `src/server/conversation-actor.ts`
 - `src/server/project-session-coordinator.ts`
-- `src/server/project-prompt-queue.ts`
 - `src/server/directory-browser.ts`
 - `src/server/serial-task-queue.ts`
 - `src/server/session-events.ts`
@@ -153,7 +151,7 @@
 - 目录列表请求不能复用 commandId；客户端导航时保留上一次成功列表，但只能接收最新 commandId 的结果。浏览位置不能提前取得项目 handle、创建 `.piweb` 或触发项目资源加载。
 - 多连接配置同步依赖所有修改都经过 `PiRuntime.updateConfiguration()`。
 - 不要直接开放 `AgentSession.reload()`；其全局 provider reset 绕过工作台所有权边界。需要 reload 时先设计 runtime 协调入口。
-- extension `confirm` 只是扩展业务交互，不会改变项目工具模式；经过 Pi 工具入口的副作用仍必须经过工作台 tool gate。
+- extension `confirm` 只是扩展业务交互，不会改变 run 启动时冻结的 conversation 角色权限；经过 Pi 工具入口的副作用仍必须经过工作台 tool gate。
 - Pi core 已提供轮次后的 `shouldStopAfterTurn`，但当前 `AgentSession` 没有公开配置入口；`agent-turn-boundary.ts` 是唯一允许依赖 `Agent.createLoopConfig` 与 `hasQueuedMessages` 运行时形状的适配点。命中宿主 checkpoint 后只暂停 SDK 对 queued continuation 的观察，不能清空实际 steer/follow-up/custom 队列；actor 取得控制权后释放暂停、压缩并续跑。Pi 相关依赖必须精确锁定已验证版本；升级若移除这些形状，session 创建必须 fail closed，不能静默退化成在运行中直接 `compact()`、abort 工具或跳过轮次内压缩。
 - trust decision 不能写入项目 `.piweb`；否则恶意仓库可以随自身内容一起声明自己可信。
 - 项目扩展当前在服务进程内运行；无法安全强杀一个不返回的同步/异步 hook。只允许可信扩展，worker/子进程隔离是开放超时与动态 provider 的前置条件。

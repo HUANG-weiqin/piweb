@@ -1,10 +1,10 @@
 # 项目与持久会话
 
-`updated: 2026-08-27`
+`updated: 2026-08-28`
 
 ## 这个模块是干什么的
 
-项目存储层让工作台状态跟工作目录移动，而不是跟浏览器、WebSocket 或服务进程走。它持有项目清单、Pi 对话和跨会话 inbox；角色与 API Key 仍分别由用户级 `RoleStore` 和 Pi 全局 `AuthStorage` 管理。浏览器消息投递不建持久队列（见下）。
+项目存储层让工作台状态跟工作目录移动，而不是跟浏览器、WebSocket 或服务进程走。它持有项目清单、Pi 对话和跨会话 inbox；角色与 API Key 仍分别由用户级 `RoleStore` 和 Pi 全局 `CredentialStore` 管理。浏览器消息投递不建持久队列（见下）。
 
 ## 身份与生命周期
 
@@ -208,7 +208,6 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 - `src/server/conversation-history.ts`
 - `src/server/conversation-meta.ts`
 - `src/server/project-inbox.ts`
-- `src/server/project-prompt-queue.ts`
 - `src/server/conversation-notebook.ts`
 - `src/server/notebook-tools.ts`
 - `src/server/project-session-coordinator.ts`

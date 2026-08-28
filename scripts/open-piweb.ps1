@@ -1,7 +1,6 @@
 ﻿param(
   [ValidateSet("production", "development")]
-  [string]$Mode = "production",
-  [switch]$Gui
+  [string]$Mode = "production"
 )
 
 $ErrorActionPreference = "Stop"
@@ -167,13 +166,7 @@ try {
 }
 catch {
   $message = "启动失败：$($_.Exception.Message)"
-  if ($Gui) {
-    $shell = New-Object -ComObject WScript.Shell
-    $shell.Popup($message, 0, "Pi Web 启动失败", 16) | Out-Null
-  }
-  else {
-    Write-Host ""
-    Write-Host $message -ForegroundColor Red
-  }
+  Write-Host ""
+  Write-Host $message -ForegroundColor Red
   exit 1
 }

@@ -30,11 +30,10 @@ ServerEvent
 
 - `PublicState.activeRun`（以及由它派生的 busy）只描述当前 focus；项目其余会话的 activity 来自 `project_snapshot`。聊天 reducer 不维护第二份 busy。
 - `outstandingRunId` 只覆盖“浏览器已交给 WebSocket、服务端运行状态尚未被观察到”的本地传输间隙，并为 Stop 提供 runId；匹配的 PublicState、terminal 或 error 会结算它，它不伪装成 Agent 状态。
-- `PiSocket.send() === true` 只表示浏览器 transport 接受了帧，不表示服务端接受 prompt。只有匹配 focus 三元身份 + runId 的 `run_queued` 才是接收提交点：此时才能清空草稿并把 user message 投影进 transcript。
-- prompt 接收确认前断线或显式切换项目属于 unknown outcome。客户端按 `workspaceKey + projectId + conversationId` 保留未确认草稿，切到其它项目/会话时不投影，切回原 focus 后恢复草稿并提示用户核对，绝不自动重发；只有匹配 focus 三元身份 + runId 的 `run_queued` 才能清掉该未确认草稿。
-- 消息与忙闲无关，随时可发：composer 始终发送带新 `promptId + runId` 的 `prompt`。`WebSocket.send()` 后草稿保持不变，只有匹配 sessionId + promptId 的 `prompt_admitted` 才清空草稿并投影"等待中" user message（诚实显示未投递，不是"已发送"）；匹配的 `prompt_delivered` 才把它结算为已投递。断线或工作区切换前尚未确认的 prompt 按 `workspaceKey + projectId + conversationId` 保留当前草稿，用户继续编辑时同步更新该 retained draft。所有 retained intent 都绝不自动重放；进程重启后等待中消息消失（服务端无持久队列），UI 据 snapshot 反映真实状态。
+- `PiSocket.send() === true` 只表示浏览器 transport 接受了帧，不表示服务端接受 prompt。idle prompt 以匹配 focus 三元身份 + runId 的 `run_queued` 为接收点；busy prompt 则以匹配 focus 三元身份 + promptId 的 `prompt_admitted` 为接收点。只有对应回执才能清空草稿并投影 user intent。
+- prompt 接收确认前断线或显式切换项目属于 unknown outcome。客户端按 `workspaceKey + projectId + conversationId` 保留未确认草稿，切到其它项目/会话时不投影，切回原 focus 后恢复草稿并提示用户核对，绝不自动重发；只有对应 idle `run_queued` 或 busy `prompt_admitted` 才能清掉该未确认草稿。
+- composer 始终发送带新 `promptId + runId` 的 `prompt`。busy 时 `prompt_admitted` 只证明消息已进入 SDK 易失 steering 队列，因此 UI 显示“等待中”而不是“已发送”；匹配的 `prompt_delivered` 才把它结算为已投递。断线或工作区切换前尚未确认的 prompt 按 `workspaceKey + projectId + conversationId` 保留当前草稿，用户继续编辑时同步更新该 retained draft。所有 retained intent 都绝不自动重放；进程重启后等待中消息消失（服务端无持久队列），UI 据 snapshot 反映真实状态。
 - `conversation_snapshot.pendingPrompts` 是当前 focus 等待中列表的唯一 UI 真相；切换 focus 立即清空权威 reducer 投影，返回后等待服务端快照，迟到快照必须同时匹配 sessionId、conversationId 和 focusId。命中 presentation cache 时可以只读显示目标会话上一帧，但不能把其中 pending 项 hydrate 回 reducer 或当作已恢复真相。`prompt_delivered` 移除对应等待中项（按 promptId 精确匹配）；`run_finished(aborted)` 清空全部等待中项（SDK steering 队列已被 abort 清空）。相同正文的不同 promptId 必须分别显示和结算。
-- batch 在 SDK/JSONL 中仍是一个带 host metadata 的物理 user message，但 transcript 的 live 与 snapshot 投影只显示按 FIFO 拼接的用户原文，不能把 `hostInstruction/batchId/items` envelope 暴露进对话气泡；浏览器不自行解析或猜测这种宿主编码。
 - 每次 initialize 或重连生成新的 observation sessionId；每次 initialize/open/create/focus 由服务端返回新的 focusId。
 - 当前 transcript 身份是 `sessionId + conversationId + focusId`。即使 conversationId 再次相同，旧 focus 的 state/snapshot/live item 也必须丢弃。
 - LoopList 展开重置仍按完整 focus 身份；transcript item 的 React key 使用当前 observation 的 `sessionId + conversationId + item id`，仅同会话换 focus 时复用。未 ready 的空投影不显示空会话 onboarding，同步提示不参与主布局。
@@ -109,7 +108,7 @@ ServerEvent
 
 ## 坑点
 
-- 不带当前 project observation sessionId 的迟到状态不能恢复已关闭的工作区；只匹配 conversationId 也不够。durable prompt queue 属于服务端，浏览器只按完整 focus 身份投影快照；本地未确认草稿、队列命令 waiter 和手动压缩 pending 仍必须至少按 `workspaceKey + projectId + conversationId` 分区。
+- 不带当前 project observation sessionId 的迟到状态不能恢复已关闭的工作区；只匹配 conversationId 也不够。浏览器只按完整 focus 身份投影服务端 admissions；本地未确认草稿和手动压缩 pending 仍必须至少按 `workspaceKey + projectId + conversationId` 分区。
 - 设置、认证或 registry 错误不能作为 run finished 处理。
 - `message_end` 可能没有任何流式 delta；最终文本校准必须由服务端 projector 提供。
 - `run_started` 创建的客户端空 assistant 占位符必须在首个 `assistant_message_started` 到达时接管服务端 `projectionId`，并且只有确实找到占位符时才能走接管分支。否则同 focus 的 live snapshot hydrate 会改变 React message key，重挂载并关闭用户已经展开的工作过程；空 transcript 下也不能把 `findIndex() === -1` 误判为“占位符位于末尾”而吞掉 assistant start。

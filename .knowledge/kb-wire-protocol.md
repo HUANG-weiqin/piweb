@@ -64,9 +64,9 @@ ClientCommand
 - `project_snapshot` 等控制面快照的 `truncated` 与 conversation 的结构化 `window` 都只描述浏览器投影覆盖范围，不能解释成 durable 数据被删除。当前 conversation 没有公开分页 cursor；在 load-older 命令及 stale-cursor 语义落地前不能先暴露伪 cursor。
 - sessionId、focusId 和 acknowledged commandId 在一个连接内不可复用，runId 在一个 session 内不可复用；它们是关联身份，不承诺任意网络命令的 exactly-once。
 - `run_queued → run_started → run_finished(outcome)` 由工作台适配层合成，不把 SDK 的 agent lifecycle 当成线协议真相。
-- `prompt_admitted` 是接收回执：服务端已校验身份并让该 prompt 进入 SDK steering 队列（或已转成新 run）。浏览器只有收到精确匹配 focus 三元身份 + promptId 的这一帧，才能清草稿并投影"等待中" user message；`prompt_delivered` 才把它标为已投递。
+- `prompt_admitted` 是 busy prompt 的接收回执：服务端已校验身份并让它进入当前 run 的 SDK steering 队列。浏览器只有收到精确匹配 focus 三元身份 + promptId 的这一帧，才能清草稿并投影“等待中” user message；`prompt_delivered` 才把它标为已投递。
 - runId 描述执行生命周期，不描述气泡生命周期。projector 为每条物理 assistant message 发送 `assistant_message_started`，steer 被 SDK 真正取用时另用 `user_message` 标出同一 run 内的新用户段；后续文本、思考、工具和 usage 仍归该 run，但 reducer 只写入最新 assistant 段。UI 可以合并没有 card/compaction/user 边界的同 run 相邻段，最终 focused snapshot 仍以 Pi durable entry 的 ordered parts 为准。
-- `WebSocket.send()` 不是协议提交点。只有匹配 sessionId + promptId 的 `prompt_admitted` 才能清草稿；确认前断线是 unknown outcome，客户端必须保留草稿并在恢复后让用户核对，不能自动重试，也不能按正文去重。
+- `WebSocket.send()` 不是协议提交点。idle prompt 由匹配 focus + runId 的 `run_queued` 确认；busy prompt 由匹配 focus + promptId 的 `prompt_admitted` 确认。回执前断线是 unknown outcome，客户端必须保留草稿并在恢复后让用户核对，不能自动重试，也不能按正文去重。
 - 错误包含 `scope`，命令错误可包含 `operation`；需要精确结算的设置错误还必须携带 sessionId + commandId。通用设置错误不能结束一次运行。`refresh_models` 的失败只进入设置回执，不得落为全局运行错误。
 - context usage 保留 `measured | estimated | unknown` 来源，不把未知伪装成精确数字。
 
@@ -85,7 +85,6 @@ ClientCommand
 - `src/shared/protocol.ts`
 - `src/shared/protocol.test.ts`
 - `src/server/session-events.ts`
-- `src/server/project-prompt-queue.ts`
 - `src/server/session-events.test.ts`
 - `src/client/lib/socket.ts`
 

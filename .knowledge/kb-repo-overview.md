@@ -1,6 +1,6 @@
 # 仓库总览
 
-`updated: 2026-07-19`
+`updated: 2026-08-28`
 
 ## 这个模块是干什么的
 
@@ -21,7 +21,7 @@ while 连接存在:
   校验浏览器命令
   按控制语义串行或中断执行
   打开项目内持久 conversation
-  更新一个原子运行 bundle
+  由 conversation actor 更新唯一 active run
   将 SDK 事件投影成稳定事件
   发布带 sessionId/runId 的状态与增量
   客户端过滤旧身份并按 run 更新视图
@@ -31,8 +31,8 @@ while 连接存在:
 
 - 进程态：Pi 认证存储、用户级 project trust、基线模型目录及其配置修改队列。
 - 项目态：`.piweb` manifest、Pi JSONL 对话索引和 conversation writer lease。
-- session 态：cwd 隔离的模型目录、扩展生命周期、SessionManager 和 AgentSession。
-- 连接态：当前 session bundle、activeRun ticket、OAuth flow、命令队列和生命周期 generation。
+- conversation actor 态：cwd 隔离的模型目录、扩展生命周期、SessionManager、AgentSession 和唯一 activeRun ticket。
+- 连接态：项目 observation、当前 conversation focus、OAuth/UI 路由、命令队列和生命周期 generation。
 - 临时交互态：pre-session 目录浏览请求绑定 socket/commandId；extension UI request/response 绑定 session generation。两者都不进入持久对话。
 
 ## 决策
@@ -42,7 +42,7 @@ while 连接存在:
 - 不内建第二套 diff/history/revert、文件管理器或通用终端。未来若需要，只做无状态交接或薄集成。
 - 当前 AgentSession 使用项目自有 sessionDir 的 `SessionManager`；持久 conversation 与临时 session epoch 明确分离。
 - WebSocket 只做传输；会话身份和 SDK 事件都不能由 socket 隐式定义。
-- 远程访问和 OS 级隔离仍需单独设计；持久化与二元工具模式都不能替代 sandbox。
+- 远程访问和 OS 级隔离仍需单独设计；持久化与二元角色工具权限都不能替代 sandbox。
 
 ## 认知模型
 
@@ -74,7 +74,7 @@ while 连接存在:
 - 不要把浏览器连接等同于持久对话；projectId/conversationId 是 durable 身份，sessionId/runId 只是关联 epoch。
 - 不要把完整会话索引塞进高频 PublicState；项目索引与历史分别走有界快照。
 - 不要在 client/shared 中重新引入 `AgentSessionEvent`。
-- 不要在认证变更时新建第二份 `AuthStorage` 或绕过 `PiRuntime`。
+- 不要在认证变更时新建第二份 `CredentialStore` 或绕过 `PiRuntime`。
 - 不要把 Pi SDK 的动态 API/OAuth registry 当成 session 局部状态；它们是进程全局的，当前策略是拒绝项目扩展注册。
 - 不要以默认 trusted 的 SettingsManager 读取陌生项目；trust 必须在项目可执行资源加载前解析，且不能由 `.piweb` 持有。
 
