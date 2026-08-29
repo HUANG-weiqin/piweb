@@ -21,6 +21,7 @@ const DEFAULT_SIDEBAR_WIDTH = 286;
 const MIN_SIDEBAR_WIDTH = 240;
 const MAX_SIDEBAR_WIDTH = 640;
 const SIDEBAR_KEYBOARD_STEP = 16;
+const RECENT_IDLE_MEMBER_LIMIT = 3;
 const LAST_ACTIVE_FORMATTER = new Intl.DateTimeFormat("zh-CN", {
   month: "2-digit",
   day: "2-digit",
@@ -121,6 +122,150 @@ function orderedConversations(conversations: ConversationSummary[]): Conversatio
     .map(({ conversation }) => conversation);
 }
 
+function isActive(
+  conversation: ConversationSummary,
+  busyConversationId?: string,
+): boolean {
+  return conversation.id === busyConversationId
+    || activityRank(conversation.activity) < 4;
+}
+
+function latestTimestamp(conversations: readonly ConversationSummary[]): number {
+  return Math.max(...conversations.map(({ updatedAt }) => Date.parse(updatedAt)));
+}
+
+interface ConversationGroup {
+  root: ConversationSummary;
+  members: ConversationSummary[];
+  conversations: ConversationSummary[];
+}
+
+type GroupedEntry =
+  | { kind: "group"; group: ConversationGroup; index: number }
+  | { kind: "conversation"; conversation: ConversationSummary; index: number };
+
+function groupProjection(
+  conversations: ConversationSummary[],
+  currentConversationId?: string,
+  busyConversationId?: string,
+): {
+  entries: GroupedEntry[];
+  rootByConversationId: Map<string, string>;
+} {
+  const summariesById = new Map(
+    conversations.map((conversation) => [conversation.id, conversation]),
+  );
+  const descendantsByRoot = new Map<string, ConversationSummary[]>();
+  for (const conversation of conversations) {
+    const rootConversationId = conversation.rootConversationId;
+    if (
+      rootConversationId === undefined
+      || rootConversationId === conversation.id
+      || !summariesById.has(rootConversationId)
+    ) {
+      continue;
+    }
+    const descendants = descendantsByRoot.get(rootConversationId);
+    if (descendants === undefined) {
+      descendantsByRoot.set(rootConversationId, [conversation]);
+    } else {
+      descendants.push(conversation);
+    }
+  }
+
+  const groupedIds = new Set<string>();
+  const rootByConversationId = new Map<string, string>();
+  const groups: ConversationGroup[] = [];
+  for (const [rootConversationId, descendants] of descendantsByRoot) {
+    const root = summariesById.get(rootConversationId);
+    if (root === undefined || descendants.length === 0) continue;
+    const members = descendants
+      .map((conversation, index) => ({ conversation, index }))
+      .sort((left, right) => {
+        const currentDifference =
+          Number(right.conversation.id === currentConversationId)
+          - Number(left.conversation.id === currentConversationId);
+        if (currentDifference !== 0) return currentDifference;
+        const attentionDifference =
+          Number(Boolean(right.conversation.attention))
+          - Number(Boolean(left.conversation.attention));
+        if (attentionDifference !== 0) return attentionDifference;
+        const activeDifference =
+          Number(isActive(right.conversation, busyConversationId))
+          - Number(isActive(left.conversation, busyConversationId));
+        if (activeDifference !== 0) return activeDifference;
+        const activityDifference =
+          activityRank(left.conversation.activity)
+          - activityRank(right.conversation.activity);
+        if (activityDifference !== 0) return activityDifference;
+        const unreadDifference =
+          Number(Boolean(right.conversation.unread))
+          - Number(Boolean(left.conversation.unread));
+        if (unreadDifference !== 0) return unreadDifference;
+        const updatedDifference =
+          Date.parse(right.conversation.updatedAt)
+          - Date.parse(left.conversation.updatedAt);
+        return Number.isFinite(updatedDifference) && updatedDifference !== 0
+          ? updatedDifference
+          : left.index - right.index;
+      })
+      .map(({ conversation }) => conversation);
+    const groupedConversations = [root, ...members];
+    groupedIds.add(root.id);
+    rootByConversationId.set(root.id, root.id);
+    for (const member of members) {
+      groupedIds.add(member.id);
+      rootByConversationId.set(member.id, root.id);
+    }
+    groups.push({ root, members, conversations: groupedConversations });
+  }
+
+  const entries: GroupedEntry[] = [
+    ...groups.map((group, index) => ({ kind: "group" as const, group, index })),
+    ...conversations
+      .filter(({ id }) => !groupedIds.has(id))
+      .map((conversation, index) => ({
+        kind: "conversation" as const,
+        conversation,
+        index: groups.length + index,
+      })),
+  ];
+  entries.sort((left, right) => {
+    const leftConversations = left.kind === "group"
+      ? left.group.conversations
+      : [left.conversation];
+    const rightConversations = right.kind === "group"
+      ? right.group.conversations
+      : [right.conversation];
+    const leftCurrent = leftConversations.some(({ id }) => id === currentConversationId);
+    const rightCurrent = rightConversations.some(({ id }) => id === currentConversationId);
+    const currentDifference = Number(rightCurrent) - Number(leftCurrent);
+    if (currentDifference !== 0) return currentDifference;
+    const leftAttention = leftConversations.some(({ attention }) => attention === true);
+    const rightAttention = rightConversations.some(({ attention }) => attention === true);
+    const attentionDifference = Number(rightAttention) - Number(leftAttention);
+    if (attentionDifference !== 0) return attentionDifference;
+    const leftActive = leftConversations.some((conversation) =>
+      isActive(conversation, busyConversationId)
+    );
+    const rightActive = rightConversations.some((conversation) =>
+      isActive(conversation, busyConversationId)
+    );
+    const activeDifference = Number(rightActive) - Number(leftActive);
+    if (activeDifference !== 0) return activeDifference;
+    const leftUnread = leftConversations.some(({ unread }) => unread === true);
+    const rightUnread = rightConversations.some(({ unread }) => unread === true);
+    const unreadDifference = Number(rightUnread) - Number(leftUnread);
+    if (unreadDifference !== 0) return unreadDifference;
+    const updatedDifference = latestTimestamp(rightConversations)
+      - latestTimestamp(leftConversations);
+    return Number.isFinite(updatedDifference) && updatedDifference !== 0
+      ? updatedDifference
+      : left.index - right.index;
+  });
+  return { entries, rootByConversationId };
+}
+
 function ActivityIndicator({
   activity,
 }: {
@@ -168,6 +313,73 @@ function ActivityIndicator({
   }
 }
 
+function ConversationActionMenu({
+  conversation,
+  open,
+  actionsEnabled,
+  deletionBlocked,
+  active,
+  deletionPending,
+  onToggle,
+  onRequestRename,
+  onRequestDelete,
+}: {
+  conversation: ConversationSummary;
+  open: boolean;
+  actionsEnabled: boolean;
+  deletionBlocked: boolean;
+  active: boolean;
+  deletionPending: boolean;
+  onToggle(conversationId: string): void;
+  onRequestRename(conversation: ConversationSummary): void;
+  onRequestDelete(conversationId: string): void;
+}) {
+  const title = titleOf(conversation);
+  const menuId = `conversation-actions-${conversation.id}`;
+  return (
+    <div className="conversation-sidebar-action-menu">
+      <button
+        type="button"
+        className="conversation-sidebar-action-trigger ghost"
+        aria-label={`会话操作 ${title}`}
+        aria-expanded={open}
+        aria-controls={menuId}
+        aria-haspopup="menu"
+        disabled={!actionsEnabled || deletionBlocked}
+        onClick={() => onToggle(conversation.id)}
+      >
+        ···
+      </button>
+      {open && <div
+        id={menuId}
+        className="conversation-sidebar-action-popover"
+        role="menu"
+        aria-label={`${title} 会话操作`}
+      >
+        <button
+          type="button"
+          role="menuitem"
+          disabled={!actionsEnabled || deletionBlocked || active}
+          title={active ? "活跃会话结算后可以重命名" : "重命名会话"}
+          onClick={() => onRequestRename(conversation)}
+        >
+          改名
+        </button>
+        <button
+          type="button"
+          className="danger"
+          role="menuitem"
+          disabled={!actionsEnabled || deletionBlocked || active}
+          title={active ? "活跃会话需先终止并等待结算" : "删除会话"}
+          onClick={() => onRequestDelete(conversation.id)}
+        >
+          {deletionPending ? "删除中" : "删除"}
+        </button>
+      </div>}
+    </div>
+  );
+}
+
 const ConversationRow = memo(function ConversationRow({
   conversation,
   selected,
@@ -176,7 +388,9 @@ const ConversationRow = memo(function ConversationRow({
   deletionPending,
   deletionBlocked,
   busy,
+  actionMenuOpen,
   onSelect,
+  onToggleActionMenu,
   onRequestRename,
   onRequestDelete,
 }: {
@@ -187,7 +401,9 @@ const ConversationRow = memo(function ConversationRow({
   deletionPending: boolean;
   deletionBlocked: boolean;
   busy: boolean;
+  actionMenuOpen: boolean;
   onSelect(conversationId: string): void;
+  onToggleActionMenu(conversationId: string): void;
   onRequestRename(conversation: ConversationSummary): void;
   onRequestDelete(conversationId: string): void;
 }) {
@@ -265,31 +481,192 @@ const ConversationRow = memo(function ConversationRow({
           最后活跃 {formatLastActive(conversation.updatedAt)}
         </time>
       </button>
-      <div className="conversation-sidebar-actions">
-        <button
-          type="button"
-          className="conversation-sidebar-rename ghost"
-          aria-label={`重命名会话 ${title}`}
-          disabled={!actionsEnabled || deletionBlocked || active}
-          title={active ? "活跃会话结算后可以重命名" : "重命名会话"}
-          onClick={() => onRequestRename(conversation)}
-        >
-          改名
-        </button>
-        <button
-          type="button"
-          className="conversation-sidebar-delete ghost danger"
-          aria-label={`删除会话 ${title}`}
-          disabled={!actionsEnabled || deletionBlocked || active}
-          title={active ? "活跃会话需先终止并等待结算" : "删除会话"}
-          onClick={() => onRequestDelete(conversation.id)}
-        >
-          {deletionPending ? "删除中" : "删除"}
-        </button>
-      </div>
+      <ConversationActionMenu
+        conversation={conversation}
+        open={actionMenuOpen}
+        actionsEnabled={actionsEnabled}
+        deletionBlocked={deletionBlocked}
+        active={active}
+        deletionPending={deletionPending}
+        onToggle={onToggleActionMenu}
+        onRequestRename={onRequestRename}
+        onRequestDelete={onRequestDelete}
+      />
     </li>
   );
 });
+
+function rootIdentityIndex(rootConversationId: string): number {
+  let value = 0;
+  for (const character of rootConversationId) value += character.codePointAt(0) ?? 0;
+  return value % 6;
+}
+
+function ConversationGroupCard({
+  group,
+  expanded,
+  idleRevealed,
+  currentConversationId,
+  busyConversationId,
+  navigationEnabled,
+  actionsEnabled,
+  pendingDeletionId,
+  actionMenuConversationId,
+  onSelect,
+  onToggleExpanded,
+  onRevealIdle,
+  onToggleActionMenu,
+  onRequestRename,
+  onRequestDelete,
+}: {
+  group: ConversationGroup;
+  expanded: boolean;
+  idleRevealed: boolean;
+  currentConversationId?: string;
+  busyConversationId?: string;
+  navigationEnabled: boolean;
+  actionsEnabled: boolean;
+  pendingDeletionId?: string;
+  actionMenuConversationId: string;
+  onSelect(conversationId: string): void;
+  onToggleExpanded(rootConversationId: string): void;
+  onRevealIdle(rootConversationId: string): void;
+  onToggleActionMenu(conversationId: string): void;
+  onRequestRename(conversation: ConversationSummary): void;
+  onRequestDelete(conversationId: string): void;
+}) {
+  const { root, members, conversations } = group;
+  const deletionBlocked = Boolean(pendingDeletionId);
+  const controlsId = `conversation-group-${root.id}`;
+  const ordinaryIdle = members.filter((conversation) =>
+    conversation.id !== currentConversationId
+    && !isActive(conversation, busyConversationId)
+    && !conversation.attention
+    && !conversation.unread
+  );
+  const visibleIds = new Set(
+    (idleRevealed
+      ? members
+      : [
+          ...members.filter((conversation) =>
+            conversation.id === currentConversationId
+            || isActive(conversation, busyConversationId)
+            || conversation.attention
+            || conversation.unread
+          ),
+          ...ordinaryIdle.slice(0, RECENT_IDLE_MEMBER_LIMIT),
+        ]).map(({ id }) => id),
+  );
+  const visibleMembers = members.filter(({ id }) => visibleIds.has(id));
+  const hiddenIdleCount = ordinaryIdle.filter(({ id }) => !visibleIds.has(id)).length;
+  const runningCount = conversations.filter((conversation) => (
+    conversation.id === busyConversationId
+    || conversation.activity?.kind === "running"
+    || conversation.activity?.kind === "queued"
+    || conversation.activity?.kind === "cancelling"
+  )).length;
+  const waitingCount = conversations.filter(
+    ({ activity }) => activity?.kind === "waiting",
+  ).length;
+  const attentionCount = conversations.filter(({ attention }) => attention).length;
+  const unreadCount = conversations.filter(({ unread }) => unread).length;
+  const summaryParts = [`${members.length} 个 Agent`];
+  if (runningCount > 0) summaryParts.push(`${runningCount} 运行`);
+  if (waitingCount > 0) summaryParts.push(`${waitingCount} 等待`);
+  if (attentionCount > 0) summaryParts.push(`${attentionCount} 需处理`);
+  if (unreadCount > 0) summaryParts.push(`${unreadCount} 未读`);
+  if (summaryParts.length === 1) {
+    summaryParts.push(`最近 ${formatLastActive(
+      new Date(latestTimestamp(conversations)).toISOString(),
+    )}`);
+  }
+  const summary = summaryParts.join(" · ");
+  const title = titleOf(root);
+
+  return (
+    <li
+      className={`conversation-group-card identity-${rootIdentityIndex(root.id)}`}
+      data-root-conversation-id={root.id}
+    >
+      <header className="conversation-group-header">
+        <button
+          type="button"
+          className="conversation-group-root"
+          aria-current={root.id === currentConversationId ? "page" : undefined}
+          aria-label={root.id === currentConversationId
+            ? `当前会话 ${title}`
+            : `打开会话 ${title}`}
+          disabled={!navigationEnabled || deletionBlocked}
+          onClick={() => onSelect(root.id)}
+        >
+          <span className="conversation-sidebar-title">{title}</span>
+          <span className="conversation-sidebar-identity">
+            <span className="conversation-sidebar-role">
+              {root.role?.name ?? "角色加载中"}
+            </span>
+            <span className="conversation-sidebar-handle" title={root.id}>
+              {shortHandle(root.id)}
+            </span>
+          </span>
+        </button>
+        <button
+          type="button"
+          className="conversation-group-expand ghost"
+          aria-label={`${expanded ? "收起" : "展开"}协作组 ${title}`}
+          aria-expanded={expanded}
+          aria-controls={controlsId}
+          disabled={!navigationEnabled || deletionBlocked}
+          onClick={() => onToggleExpanded(root.id)}
+        >
+          {expanded ? "⌄" : "›"}
+        </button>
+        <ConversationActionMenu
+          conversation={root}
+          open={actionMenuConversationId === root.id}
+          actionsEnabled={actionsEnabled}
+          deletionBlocked={deletionBlocked}
+          active={isActive(root, busyConversationId)}
+          deletionPending={pendingDeletionId === root.id}
+          onToggle={onToggleActionMenu}
+          onRequestRename={onRequestRename}
+          onRequestDelete={onRequestDelete}
+        />
+      </header>
+      <p className="conversation-group-summary" aria-label={`协作组状态：${summary}`}>
+        {summary}
+      </p>
+      {expanded && <div id={controlsId} className="conversation-group-members">
+        <ul className="conversation-sidebar-list">
+          {visibleMembers.map((conversation) => (
+            <ConversationRow
+              key={conversation.id}
+              conversation={conversation}
+              selected={conversation.id === currentConversationId}
+              navigationEnabled={navigationEnabled}
+              actionsEnabled={actionsEnabled}
+              deletionPending={pendingDeletionId === conversation.id}
+              deletionBlocked={deletionBlocked}
+              busy={conversation.id === busyConversationId}
+              actionMenuOpen={actionMenuConversationId === conversation.id}
+              onSelect={onSelect}
+              onToggleActionMenu={onToggleActionMenu}
+              onRequestRename={onRequestRename}
+              onRequestDelete={onRequestDelete}
+            />
+          ))}
+        </ul>
+        {hiddenIdleCount > 0 && <button
+          type="button"
+          className="conversation-group-reveal ghost"
+          disabled={!navigationEnabled || deletionBlocked}
+          onClick={() => onRevealIdle(root.id)}
+        >
+          显示其余 {hiddenIdleCount} 个空闲 Agent
+        </button>}
+      </div>}
+    </li>
+  );
+}
 
 function ConversationSidebarView({
   conversations,
@@ -315,9 +692,25 @@ function ConversationSidebarView({
   const [confirmDeleteConversationId, setConfirmDeleteConversationId] = useState("");
   const [renameConversationId, setRenameConversationId] = useState("");
   const [renameDraft, setRenameDraft] = useState("");
+  const [viewMode, setViewMode] = useState<"grouped" | "all">("grouped");
+  const [expandedRoots, setExpandedRoots] = useState<Set<string>>(() => new Set());
+  const [revealedIdleRoots, setRevealedIdleRoots] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [actionMenuConversationId, setActionMenuConversationId] = useState("");
+  const observedCurrentConversationId = useRef<string | undefined>(undefined);
+  const lastFocusedRoot = useRef<string | undefined>(undefined);
   const sortedConversations = useMemo(
     () => orderedConversations(conversations),
     [conversations],
+  );
+  const grouped = useMemo(
+    () => groupProjection(
+      conversations,
+      currentConversationId,
+      busyConversationId,
+    ),
+    [conversations, currentConversationId, busyConversationId],
   );
   const deleteCandidate = conversations.find(
     ({ id }) => id === confirmDeleteConversationId,
@@ -328,9 +721,8 @@ function ConversationSidebarView({
   const renameCandidate = conversations.find(
     ({ id }) => id === renameConversationId,
   );
-  const renameCandidateActive =
-    renameCandidate?.id === busyConversationId
-    || (renameCandidate?.activity?.kind ?? "idle") !== "idle";
+  const renameCandidateActive = renameCandidate !== undefined
+    && isActive(renameCandidate, busyConversationId);
   const renameName = renameDraft.trim();
   const renameBlocked = !actionsEnabled || renameCandidateActive;
   const renameUnchanged =
@@ -383,6 +775,60 @@ function ConversationSidebarView({
     setConfirmDeleteConversationId("");
   }, [confirmDeleteConversationId, deleteCandidate]);
   useEffect(() => {
+    if (
+      currentConversationId !== undefined
+      && !conversations.some(({ id }) => id === currentConversationId)
+    ) {
+      return;
+    }
+    if (observedCurrentConversationId.current === currentConversationId) return;
+    observedCurrentConversationId.current = currentConversationId;
+    const rootConversationId = currentConversationId === undefined
+      ? undefined
+      : grouped.rootByConversationId.get(currentConversationId);
+    if (
+      rootConversationId !== undefined
+      && rootConversationId !== lastFocusedRoot.current
+    ) {
+      setExpandedRoots((current) => {
+        const next = new Set(current);
+        next.add(rootConversationId);
+        return next;
+      });
+    }
+    lastFocusedRoot.current = rootConversationId;
+  }, [conversations, currentConversationId, grouped.rootByConversationId]);
+  useEffect(() => {
+    if (!actionMenuConversationId) return;
+    const closeFromOutside = (event: MouseEvent) => {
+      const target = event.target;
+      if (
+        target instanceof Element
+        && target.closest(".conversation-sidebar-action-menu")
+      ) {
+        return;
+      }
+      setActionMenuConversationId("");
+    };
+    const closeFromEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setActionMenuConversationId("");
+    };
+    document.addEventListener("mousedown", closeFromOutside);
+    document.addEventListener("keydown", closeFromEscape);
+    return () => {
+      document.removeEventListener("mousedown", closeFromOutside);
+      document.removeEventListener("keydown", closeFromEscape);
+    };
+  }, [actionMenuConversationId]);
+  useEffect(() => {
+    if (
+      actionMenuConversationId
+      && !conversations.some(({ id }) => id === actionMenuConversationId)
+    ) {
+      setActionMenuConversationId("");
+    }
+  }, [actionMenuConversationId, conversations]);
+  useEffect(() => {
     const continueResize = (event: globalThis.PointerEvent) => {
       const resize = resizeState.current;
       if (!resize || resize.pointerId !== event.pointerId) return;
@@ -413,11 +859,33 @@ function ConversationSidebarView({
   }, [renameConversationId, renameCandidate]);
 
   const requestRename = useCallback((conversation: ConversationSummary) => {
+    setActionMenuConversationId("");
     setRenameDraft(titleOf(conversation));
     setRenameConversationId(conversation.id);
   }, []);
   const requestDelete = useCallback((conversationId: string) => {
+    setActionMenuConversationId("");
     setConfirmDeleteConversationId(conversationId);
+  }, []);
+  const toggleActionMenu = useCallback((conversationId: string) => {
+    setActionMenuConversationId((current) =>
+      current === conversationId ? "" : conversationId
+    );
+  }, []);
+  const toggleExpanded = useCallback((rootConversationId: string) => {
+    setExpandedRoots((current) => {
+      const next = new Set(current);
+      if (next.has(rootConversationId)) next.delete(rootConversationId);
+      else next.add(rootConversationId);
+      return next;
+    });
+  }, []);
+  const revealIdle = useCallback((rootConversationId: string) => {
+    setRevealedIdleRoots((current) => {
+      const next = new Set(current);
+      next.add(rootConversationId);
+      return next;
+    });
   }, []);
 
   return <>
@@ -442,25 +910,84 @@ function ConversationSidebarView({
 
       {!collapsed && (
         <nav className="conversation-sidebar-navigation" aria-label="项目会话">
+          <div
+            className="conversation-sidebar-view-toggle"
+            role="group"
+            aria-label="会话视图"
+          >
+            <button
+              type="button"
+              aria-pressed={viewMode === "grouped"}
+              disabled={!navigationEnabled || Boolean(pendingDeletionId)}
+              onClick={() => setViewMode("grouped")}
+            >
+              按任务
+            </button>
+            <button
+              type="button"
+              aria-pressed={viewMode === "all"}
+              disabled={!navigationEnabled || Boolean(pendingDeletionId)}
+              onClick={() => setViewMode("all")}
+            >
+              全部
+            </button>
+          </div>
           <ul className="conversation-sidebar-list">
-            {sortedConversations.map((conversation) => (
-              <ConversationRow
-                key={conversation.id}
-                conversation={conversation}
-                selected={conversation.id === currentConversationId}
-                navigationEnabled={navigationEnabled}
-                actionsEnabled={actionsEnabled}
-                deletionPending={pendingDeletionId === conversation.id}
-                deletionBlocked={Boolean(pendingDeletionId)}
-                busy={conversation.id === busyConversationId}
-                onSelect={onSelect}
-                onRequestRename={requestRename}
-                onRequestDelete={requestDelete}
-              />
-            ))}
+            {viewMode === "all"
+              ? sortedConversations.map((conversation) => (
+                  <ConversationRow
+                    key={conversation.id}
+                    conversation={conversation}
+                    selected={conversation.id === currentConversationId}
+                    navigationEnabled={navigationEnabled}
+                    actionsEnabled={actionsEnabled}
+                    deletionPending={pendingDeletionId === conversation.id}
+                    deletionBlocked={Boolean(pendingDeletionId)}
+                    busy={conversation.id === busyConversationId}
+                    actionMenuOpen={actionMenuConversationId === conversation.id}
+                    onSelect={onSelect}
+                    onToggleActionMenu={toggleActionMenu}
+                    onRequestRename={requestRename}
+                    onRequestDelete={requestDelete}
+                  />
+                ))
+              : grouped.entries.map((entry) => entry.kind === "group"
+                  ? <ConversationGroupCard
+                      key={`group:${entry.group.root.id}`}
+                      group={entry.group}
+                      expanded={expandedRoots.has(entry.group.root.id)}
+                      idleRevealed={revealedIdleRoots.has(entry.group.root.id)}
+                      currentConversationId={currentConversationId}
+                      busyConversationId={busyConversationId}
+                      navigationEnabled={navigationEnabled}
+                      actionsEnabled={actionsEnabled}
+                      pendingDeletionId={pendingDeletionId}
+                      actionMenuConversationId={actionMenuConversationId}
+                      onSelect={onSelect}
+                      onToggleExpanded={toggleExpanded}
+                      onRevealIdle={revealIdle}
+                      onToggleActionMenu={toggleActionMenu}
+                      onRequestRename={requestRename}
+                      onRequestDelete={requestDelete}
+                    />
+                  : <ConversationRow
+                      key={entry.conversation.id}
+                      conversation={entry.conversation}
+                      selected={entry.conversation.id === currentConversationId}
+                      navigationEnabled={navigationEnabled}
+                      actionsEnabled={actionsEnabled}
+                      deletionPending={pendingDeletionId === entry.conversation.id}
+                      deletionBlocked={Boolean(pendingDeletionId)}
+                      busy={entry.conversation.id === busyConversationId}
+                      actionMenuOpen={actionMenuConversationId === entry.conversation.id}
+                      onSelect={onSelect}
+                      onToggleActionMenu={toggleActionMenu}
+                      onRequestRename={requestRename}
+                      onRequestDelete={requestDelete}
+                    />)}
           </ul>
           {truncated && <p className="conversation-sidebar-truncated">
-            仅显示最近会话
+            仅显示最近协作组和会话
           </p>}
         </nav>
       )}

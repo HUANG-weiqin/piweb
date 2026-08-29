@@ -2083,9 +2083,37 @@ pre {
 }
 
 .conversation-sidebar-navigation {
+  min-width: 0;
   min-height: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   padding: 8px;
+}
+
+.conversation-sidebar-view-toggle {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px;
+  margin-bottom: 8px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--soft);
+}
+
+.conversation-sidebar-view-toggle button {
+  min-height: 40px;
+  padding: 5px 8px;
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+  font-size: 11px;
+}
+
+.conversation-sidebar-view-toggle button[aria-pressed="true"] {
+  color: inherit;
+  background: var(--panel);
+  box-shadow: var(--shadow-sm);
 }
 
 .conversation-sidebar-list {
@@ -2116,7 +2144,7 @@ pre {
   min-height: 0;
   display: grid;
   gap: 7px;
-  padding: 11px 80px 11px 10px;
+  padding: 11px 46px 11px 10px;
   border: 0;
   color: inherit;
   background: transparent;
@@ -2233,24 +2261,168 @@ pre {
   display: block;
 }
 
-.conversation-sidebar-actions {
+.conversation-sidebar-action-menu {
   position: absolute;
+  z-index: 3;
+  top: 7px;
   right: 7px;
-  bottom: 7px;
-  display: flex;
-  gap: 3px;
-  opacity: 0.58;
 }
 
-.conversation-sidebar-actions button {
-  min-height: 26px;
-  padding: 4px 6px;
+.conversation-sidebar-action-trigger {
+  width: 40px;
+  min-height: 40px;
+  padding: 0;
+  color: var(--muted);
+  font-size: 15px;
+  letter-spacing: 1px;
+}
+
+.conversation-sidebar-action-popover {
+  position: absolute;
+  z-index: 4;
+  top: calc(100% + 3px);
+  right: 0;
+  min-width: 104px;
+  display: grid;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel);
+  box-shadow: var(--shadow-sm);
+}
+
+.conversation-sidebar-action-popover button {
+  min-height: 38px;
+  justify-content: flex-start;
+  padding: 7px 10px;
+  border: 0;
+  background: transparent;
+  font-size: 11px;
+  text-align: left;
+}
+
+.conversation-group-card {
+  --group-identity: color-mix(in srgb, var(--accent) 42%, var(--line));
+  position: relative;
+  min-width: 0;
+  overflow: visible;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--group-identity);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--soft) 44%, transparent);
+}
+
+.conversation-group-card.identity-1 {
+  --group-identity: color-mix(in srgb, var(--success) 44%, var(--line));
+}
+
+.conversation-group-card.identity-2 {
+  --group-identity: color-mix(in srgb, var(--warning) 42%, var(--line));
+}
+
+.conversation-group-card.identity-3 {
+  --group-identity: color-mix(in srgb, var(--focus) 52%, var(--line));
+}
+
+.conversation-group-card.identity-4 {
+  --group-identity: color-mix(in srgb, var(--accent) 30%, var(--muted));
+}
+
+.conversation-group-card.identity-5 {
+  --group-identity: color-mix(in srgb, var(--success) 30%, var(--muted));
+}
+
+.conversation-group-header {
+  position: relative;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 40px 40px;
+  align-items: start;
+}
+
+.conversation-group-root {
+  min-width: 0;
+  min-height: 48px;
+  display: grid;
+  gap: 6px;
+  padding: 10px 7px 8px 10px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+}
+
+.conversation-group-root:not(:disabled):hover {
+  color: inherit;
+  background: var(--soft-hover);
+}
+
+.conversation-group-root[aria-current="page"] {
+  box-shadow: inset 2px 0 var(--accent);
+}
+
+.conversation-group-expand {
+  width: 40px;
+  min-height: 40px;
+  padding: 0;
+  border: 0;
+  font-size: 15px;
+}
+
+.conversation-group-header .conversation-sidebar-action-menu {
+  position: relative;
+  top: 0;
+  right: 0;
+  padding: 3px 3px 0 0;
+}
+
+.conversation-group-summary {
+  margin: 0;
+  padding: 0 10px 9px;
+  color: var(--muted);
   font-size: 10px;
+  line-height: 1.45;
 }
 
-.conversation-sidebar-item:hover .conversation-sidebar-actions,
-.conversation-sidebar-actions:focus-within {
-  opacity: 1;
+.conversation-group-members {
+  position: relative;
+  padding: 4px 5px 6px 14px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+}
+
+.conversation-group-members::before {
+  position: absolute;
+  top: 5px;
+  bottom: 12px;
+  left: 8px;
+  width: 1px;
+  content: "";
+  background: color-mix(in srgb, var(--group-identity) 55%, transparent);
+}
+
+.conversation-group-members .conversation-sidebar-item::before {
+  position: absolute;
+  top: 20px;
+  left: -6px;
+  width: 7px;
+  height: 1px;
+  content: "";
+  background: color-mix(in srgb, var(--group-identity) 55%, transparent);
+}
+
+.conversation-group-members .conversation-sidebar-item {
+  min-width: 0;
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+}
+
+.conversation-group-reveal {
+  width: 100%;
+  min-height: 40px;
+  margin-top: 5px;
+  padding: 6px 8px;
+  color: var(--muted);
+  font-size: 10px;
 }
 
 .conversation-sidebar-truncated {
