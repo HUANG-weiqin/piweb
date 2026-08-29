@@ -313,89 +313,15 @@ function ActivityIndicator({
   }
 }
 
-function ConversationActionMenu({
-  conversation,
-  open,
-  actionsEnabled,
-  deletionBlocked,
-  active,
-  onToggle,
-  onRequestRename,
-  onRequestDelete,
-}: {
-  conversation: ConversationSummary;
-  open: boolean;
-  actionsEnabled: boolean;
-  deletionBlocked: boolean;
-  active: boolean;
-  onToggle(conversationId: string): void;
-  onRequestRename(conversation: ConversationSummary): void;
-  onRequestDelete(conversationId: string): void;
-}) {
-  const title = titleOf(conversation);
-  const menuId = `conversation-actions-${conversation.id}`;
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  return (
-    <div
-      className="conversation-sidebar-action-menu"
-      onKeyDown={(event) => {
-        if (!open || event.key !== "Escape") return;
-        event.preventDefault();
-        event.stopPropagation();
-        onToggle(conversation.id);
-        triggerRef.current?.focus();
-      }}
-    >
-      <button
-        ref={triggerRef}
-        type="button"
-        className="conversation-sidebar-action-trigger ghost"
-        aria-label={`会话操作 ${title}`}
-        aria-expanded={open}
-        aria-controls={menuId}
-        disabled={!actionsEnabled || deletionBlocked}
-        onClick={() => onToggle(conversation.id)}
-      >
-        ···
-      </button>
-      {open && <div
-        id={menuId}
-        className="conversation-sidebar-action-popover"
-        role="group"
-        aria-label={`${title} 会话操作`}
-      >
-        <button
-          type="button"
-          disabled={!actionsEnabled || deletionBlocked || active}
-          title={active ? "活跃会话结算后可以重命名" : "重命名会话"}
-          onClick={() => onRequestRename(conversation)}
-        >
-          改名
-        </button>
-        <button
-          type="button"
-          className="danger"
-          disabled={!actionsEnabled || deletionBlocked || active}
-          title={active ? "活跃会话需先终止并等待结算" : "删除会话"}
-          onClick={() => onRequestDelete(conversation.id)}
-        >
-          删除
-        </button>
-      </div>}
-    </div>
-  );
-}
-
 const ConversationRow = memo(function ConversationRow({
   conversation,
   selected,
   navigationEnabled,
   actionsEnabled,
+  deletionPending,
   deletionBlocked,
   busy,
-  actionMenuOpen,
   onSelect,
-  onToggleActionMenu,
   onRequestRename,
   onRequestDelete,
 }: {
@@ -403,11 +329,10 @@ const ConversationRow = memo(function ConversationRow({
   selected: boolean;
   navigationEnabled: boolean;
   actionsEnabled: boolean;
+  deletionPending: boolean;
   deletionBlocked: boolean;
   busy: boolean;
-  actionMenuOpen: boolean;
   onSelect(conversationId: string): void;
-  onToggleActionMenu(conversationId: string): void;
   onRequestRename(conversation: ConversationSummary): void;
   onRequestDelete(conversationId: string): void;
 }) {
@@ -485,25 +410,31 @@ const ConversationRow = memo(function ConversationRow({
           最后活跃 {formatLastActive(conversation.updatedAt)}
         </time>
       </button>
-      <ConversationActionMenu
-        conversation={conversation}
-        open={actionMenuOpen}
-        actionsEnabled={actionsEnabled}
-        deletionBlocked={deletionBlocked}
-        active={active}
-        onToggle={onToggleActionMenu}
-        onRequestRename={onRequestRename}
-        onRequestDelete={onRequestDelete}
-      />
+      <div className="conversation-sidebar-actions">
+        <button
+          type="button"
+          className="conversation-sidebar-rename ghost"
+          aria-label={`重命名会话 ${title}`}
+          disabled={!actionsEnabled || deletionBlocked || active}
+          title={active ? "活跃会话结算后可以重命名" : "重命名会话"}
+          onClick={() => onRequestRename(conversation)}
+        >
+          改名
+        </button>
+        <button
+          type="button"
+          className="conversation-sidebar-delete ghost danger"
+          aria-label={`删除会话 ${title}`}
+          disabled={!actionsEnabled || deletionBlocked || active}
+          title={active ? "活跃会话需先终止并等待结算" : "删除会话"}
+          onClick={() => onRequestDelete(conversation.id)}
+        >
+          {deletionPending ? "删除中" : "删除"}
+        </button>
+      </div>
     </li>
   );
 });
-
-function rootIdentityIndex(rootConversationId: string): number {
-  let value = 0;
-  for (const character of rootConversationId) value += character.codePointAt(0) ?? 0;
-  return value % 6;
-}
 
 function ConversationGroupCard({
   group,
@@ -513,12 +444,10 @@ function ConversationGroupCard({
   busyConversationId,
   navigationEnabled,
   actionsEnabled,
-  deletionBlocked,
-  actionMenuConversationId,
+  pendingDeletionId,
   onSelect,
   onToggleExpanded,
   onRevealIdle,
-  onToggleActionMenu,
   onRequestRename,
   onRequestDelete,
 }: {
@@ -529,16 +458,15 @@ function ConversationGroupCard({
   busyConversationId?: string;
   navigationEnabled: boolean;
   actionsEnabled: boolean;
-  deletionBlocked: boolean;
-  actionMenuConversationId: string;
+  pendingDeletionId?: string;
   onSelect(conversationId: string): void;
   onToggleExpanded(rootConversationId: string): void;
   onRevealIdle(rootConversationId: string): void;
-  onToggleActionMenu(conversationId: string): void;
   onRequestRename(conversation: ConversationSummary): void;
   onRequestDelete(conversationId: string): void;
 }) {
   const { root, members, conversations } = group;
+  const deletionBlocked = Boolean(pendingDeletionId);
   const controlsId = `conversation-group-${root.id}`;
   const ordinaryIdle = members.filter((conversation) =>
     conversation.id !== currentConversationId
@@ -585,30 +513,30 @@ function ConversationGroupCard({
 
   return (
     <li
-      className={`conversation-group-card identity-${rootIdentityIndex(root.id)}`}
+      className="conversation-group-card"
       data-root-conversation-id={root.id}
     >
-      <header className="conversation-group-header">
-        <button
-          type="button"
-          className="conversation-group-root"
-          aria-current={root.id === currentConversationId ? "page" : undefined}
-          aria-label={root.id === currentConversationId
-            ? `当前会话 ${title}`
-            : `打开会话 ${title}`}
-          disabled={!navigationEnabled || deletionBlocked}
-          onClick={() => onSelect(root.id)}
+      <ul className="conversation-sidebar-list conversation-group-root-list">
+        <ConversationRow
+          conversation={root}
+          selected={root.id === currentConversationId}
+          navigationEnabled={navigationEnabled}
+          actionsEnabled={actionsEnabled}
+          deletionPending={pendingDeletionId === root.id}
+          deletionBlocked={deletionBlocked}
+          busy={root.id === busyConversationId}
+          onSelect={onSelect}
+          onRequestRename={onRequestRename}
+          onRequestDelete={onRequestDelete}
+        />
+      </ul>
+      <div className="conversation-group-meta">
+        <p
+          className="conversation-group-summary"
+          aria-label={`协作组状态：${summary}`}
         >
-          <span className="conversation-sidebar-title">{title}</span>
-          <span className="conversation-sidebar-identity">
-            <span className="conversation-sidebar-role">
-              {root.role?.name ?? "角色加载中"}
-            </span>
-            <span className="conversation-sidebar-handle" title={root.id}>
-              {shortHandle(root.id)}
-            </span>
-          </span>
-        </button>
+          {summary}
+        </p>
         <button
           type="button"
           className="conversation-group-expand ghost"
@@ -618,22 +546,9 @@ function ConversationGroupCard({
           disabled={!navigationEnabled || deletionBlocked}
           onClick={() => onToggleExpanded(root.id)}
         >
-          {expanded ? "⌄" : "›"}
+          {expanded ? "⌃" : "⌄"}
         </button>
-        <ConversationActionMenu
-          conversation={root}
-          open={actionMenuConversationId === root.id}
-          actionsEnabled={actionsEnabled}
-          deletionBlocked={deletionBlocked}
-          active={isActive(root, busyConversationId)}
-          onToggle={onToggleActionMenu}
-          onRequestRename={onRequestRename}
-          onRequestDelete={onRequestDelete}
-        />
-      </header>
-      <p className="conversation-group-summary" aria-label={`协作组状态：${summary}`}>
-        {summary}
-      </p>
+      </div>
       {expanded && <div id={controlsId} className="conversation-group-members">
         <ul className="conversation-sidebar-list">
           {visibleMembers.map((conversation) => (
@@ -643,11 +558,10 @@ function ConversationGroupCard({
               selected={conversation.id === currentConversationId}
               navigationEnabled={navigationEnabled}
               actionsEnabled={actionsEnabled}
+              deletionPending={pendingDeletionId === conversation.id}
               deletionBlocked={deletionBlocked}
               busy={conversation.id === busyConversationId}
-              actionMenuOpen={actionMenuConversationId === conversation.id}
               onSelect={onSelect}
-              onToggleActionMenu={onToggleActionMenu}
               onRequestRename={onRequestRename}
               onRequestDelete={onRequestDelete}
             />
@@ -697,7 +611,6 @@ function ConversationSidebarView({
   const [revealedIdleRoots, setRevealedIdleRoots] = useState<Set<string>>(
     () => new Set(),
   );
-  const [actionMenuConversationId, setActionMenuConversationId] = useState("");
   const observedScopeKey = useRef(scopeKey);
   const observedFocusedConversationId = useRef<string | undefined>(undefined);
   const lastFocusedRoot = useRef<string | undefined>(undefined);
@@ -782,7 +695,6 @@ function ConversationSidebarView({
     setViewMode("grouped");
     setExpandedRoots(new Set());
     setRevealedIdleRoots(new Set());
-    setActionMenuConversationId("");
   }, [scopeKey]);
   useEffect(() => {
     if (!confirmDeleteConversationId || deleteCandidate) return;
@@ -818,31 +730,6 @@ function ConversationSidebarView({
     scopeKey,
   ]);
   useEffect(() => {
-    if (!actionMenuConversationId) return;
-    const closeFromOutside = (event: MouseEvent) => {
-      const target = event.target;
-      if (
-        target instanceof Element
-        && target.closest(".conversation-sidebar-action-menu")
-      ) {
-        return;
-      }
-      setActionMenuConversationId("");
-    };
-    document.addEventListener("mousedown", closeFromOutside);
-    return () => {
-      document.removeEventListener("mousedown", closeFromOutside);
-    };
-  }, [actionMenuConversationId]);
-  useEffect(() => {
-    if (
-      actionMenuConversationId
-      && !conversations.some(({ id }) => id === actionMenuConversationId)
-    ) {
-      setActionMenuConversationId("");
-    }
-  }, [actionMenuConversationId, conversations]);
-  useEffect(() => {
     const continueResize = (event: globalThis.PointerEvent) => {
       const resize = resizeState.current;
       if (!resize || resize.pointerId !== event.pointerId) return;
@@ -873,18 +760,11 @@ function ConversationSidebarView({
   }, [renameConversationId, renameCandidate]);
 
   const requestRename = useCallback((conversation: ConversationSummary) => {
-    setActionMenuConversationId("");
     setRenameDraft(titleOf(conversation));
     setRenameConversationId(conversation.id);
   }, []);
   const requestDelete = useCallback((conversationId: string) => {
-    setActionMenuConversationId("");
     setConfirmDeleteConversationId(conversationId);
-  }, []);
-  const toggleActionMenu = useCallback((conversationId: string) => {
-    setActionMenuConversationId((current) =>
-      current === conversationId ? "" : conversationId
-    );
   }, []);
   const toggleExpanded = useCallback((rootConversationId: string) => {
     setExpandedRoots((current) => {
@@ -955,11 +835,10 @@ function ConversationSidebarView({
                     selected={conversation.id === currentConversationId}
                     navigationEnabled={navigationEnabled}
                     actionsEnabled={actionsEnabled}
+                    deletionPending={pendingDeletionId === conversation.id}
                     deletionBlocked={Boolean(pendingDeletionId)}
                     busy={conversation.id === busyConversationId}
-                    actionMenuOpen={actionMenuConversationId === conversation.id}
                     onSelect={onSelect}
-                    onToggleActionMenu={toggleActionMenu}
                     onRequestRename={requestRename}
                     onRequestDelete={requestDelete}
                   />
@@ -974,12 +853,10 @@ function ConversationSidebarView({
                       busyConversationId={busyConversationId}
                       navigationEnabled={navigationEnabled}
                       actionsEnabled={actionsEnabled}
-                      deletionBlocked={Boolean(pendingDeletionId)}
-                      actionMenuConversationId={actionMenuConversationId}
+                      pendingDeletionId={pendingDeletionId}
                       onSelect={onSelect}
                       onToggleExpanded={toggleExpanded}
                       onRevealIdle={revealIdle}
-                      onToggleActionMenu={toggleActionMenu}
                       onRequestRename={requestRename}
                       onRequestDelete={requestDelete}
                     />
@@ -989,11 +866,10 @@ function ConversationSidebarView({
                       selected={entry.conversation.id === currentConversationId}
                       navigationEnabled={navigationEnabled}
                       actionsEnabled={actionsEnabled}
+                      deletionPending={pendingDeletionId === entry.conversation.id}
                       deletionBlocked={Boolean(pendingDeletionId)}
                       busy={entry.conversation.id === busyConversationId}
-                      actionMenuOpen={actionMenuConversationId === entry.conversation.id}
                       onSelect={onSelect}
-                      onToggleActionMenu={toggleActionMenu}
                       onRequestRename={requestRename}
                       onRequestDelete={requestDelete}
                     />)}

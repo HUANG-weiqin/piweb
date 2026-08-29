@@ -1237,7 +1237,9 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "打开会话 C" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "收起会话栏" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "新建会话" })).toBeDisabled();
-    for (const button of screen.getAllByRole("button", { name: /会话操作/ })) {
+    for (const button of screen.getAllByRole("button", {
+      name: /^(重命名|删除)会话 /,
+    })) {
       expect(button).toBeDisabled();
     }
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeDisabled();
@@ -1744,7 +1746,9 @@ describe("App", () => {
     expect(screen.queryByRole("dialog", { name: "模型连接" }))
       .not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "新建会话" })).toBeDisabled();
-    for (const button of screen.getAllByRole("button", { name: /会话操作/ })) {
+    for (const button of screen.getAllByRole("button", {
+      name: /^(重命名|删除)会话 /,
+    })) {
       expect(button).toBeDisabled();
     }
     expect(latestCommand("refresh_view")).toEqual({
@@ -2114,7 +2118,8 @@ describe("App", () => {
       .not.toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
       .toBeDisabled();
-    expect(screen.getByRole("button", { name: "会话操作 B" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "重命名会话 B" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "删除会话 B" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "打开会话 A" })).toBeEnabled();
 
     const focusBId = "ae301850-745d-44dd-a30f-000000000201";
@@ -4730,9 +4735,8 @@ describe("App", () => {
     }));
 
     fireEvent.click(screen.getByRole("button", {
-      name: "会话操作 Older work",
+      name: "删除会话 Older work",
     }));
-    fireEvent.click(screen.getByRole("button", { name: "删除" }));
     fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
 
     const command = latestCommand("delete_conversation");
@@ -4741,7 +4745,7 @@ describe("App", () => {
       conversationId: CONVERSATION_B,
     });
     expect(screen.getByRole("button", {
-      name: "会话操作 Older work",
+      name: "删除会话 Older work",
     })).toBeDisabled();
     expect(screen.getByRole("button", {
       name: "打开会话 Older work",
@@ -4756,7 +4760,7 @@ describe("App", () => {
     }));
     expect(screen.getByText("对话已删除")).toBeInTheDocument();
     expect(screen.getByRole("button", {
-      name: "会话操作 Older work",
+      name: "删除会话 Older work",
     })).toBeEnabled();
   });
 
@@ -4806,10 +4810,9 @@ describe("App", () => {
         truncated: false,
       });
     });
-    fireEvent.click(screen.getByRole("button", { name: "会话操作 Delete me" }));
-    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除会话 Delete me" }));
     fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
-    expect(screen.getByRole("button", { name: "会话操作 Delete me" }))
+    expect(screen.getByRole("button", { name: "删除会话 Delete me" }))
       .toBeDisabled();
 
     fireEvent.click(screen.getByRole("button", { name: "打开工作区 second" }));
@@ -4845,7 +4848,7 @@ describe("App", () => {
       });
     });
 
-    expect(screen.getByRole("button", { name: "会话操作 Second project" }))
+    expect(screen.getByRole("button", { name: "删除会话 Second project" }))
       .toBeEnabled();
   });
 
@@ -4892,8 +4895,7 @@ describe("App", () => {
     });
 
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "会话操作 Current" }));
-    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除会话 Current" }));
     fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
 
     const command = latestCommand("delete_conversation");
@@ -5246,8 +5248,7 @@ describe("App", () => {
     const deletionCount = socketMock.send.mock.calls.filter(
       ([command]) => command.type === "delete_conversation",
     ).length;
-    fireEvent.click(screen.getByRole("button", { name: "会话操作 A" }));
-    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除会话 A" }));
     fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
     expect(socketMock.send.mock.calls.filter(
       ([command]) => command.type === "delete_conversation",
