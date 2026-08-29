@@ -161,6 +161,12 @@ interface SessionMessageWaitResult {
   runId?: string;
   messageId: string;
   sentAt: string;
+  /**
+   * The injected message is the designated return of a one-shot temporary
+   * session. Its body satisfies that delegation even if exact settlement
+   * persistence becomes observable slightly later.
+   */
+  fulfillsTemporaryReturn?: true;
 }
 
 /**
@@ -2750,15 +2756,12 @@ export class ProjectSessionCoordinator {
       this.appendSourceCardState(context, claimedPending, "delivered");
       return {
         kind: "result",
-        result: {
-          outcome: "message",
-          conversationId: claimedPending.fromConversationId,
-          ...(claimedPending.fromRunId === undefined
-            ? {}
-            : { runId: claimedPending.fromRunId }),
-          messageId: claimedPending.messageId,
-          sentAt: claimedPending.sentAt,
-        },
+        result: this.sessionMessageWaitResult(
+          context,
+          source,
+          claimedPending,
+          claimedPending.fromRunId,
+        ),
       };
     });
   }
@@ -2802,16 +2805,42 @@ export class ProjectSessionCoordinator {
         waitedByRunId: ownership.runId,
       });
       this.appendSourceCardState(context, claimedPending, "delivered");
-      return {
-        outcome: "message" as const,
-        conversationId: claimedPending.fromConversationId,
-        ...(claimedPending.fromRunId === undefined
-          ? {}
-          : { runId: claimedPending.fromRunId }),
-        messageId: claimedPending.messageId,
-        sentAt: claimedPending.sentAt,
-      };
+      return this.sessionMessageWaitResult(
+        context,
+        source,
+        claimedPending,
+        claimedPending.fromRunId,
+      );
     });
+  }
+
+  private sessionMessageWaitResult(
+    context: ProjectContext,
+    target: ConversationActor,
+    envelope: InboxEnvelope,
+    sourceRunId?: string,
+  ): SessionMessageWaitResult {
+    const messageRunId = envelope.fromRunId ?? sourceRunId;
+    const receipt = messageRunId === undefined
+      ? undefined
+      : this.temporaryReturnReceipt(
+          context,
+          target.conversationId,
+          envelope.fromConversationId,
+          messageRunId,
+        );
+    const fulfillsTemporaryReturn =
+      envelope.kind === "delegation_result"
+      || envelope.kind === "delegation_failure"
+      || receipt?.messageId === envelope.messageId;
+    return {
+      outcome: "message",
+      conversationId: envelope.fromConversationId,
+      ...(messageRunId === undefined ? {} : { runId: messageRunId }),
+      messageId: envelope.messageId,
+      sentAt: envelope.sentAt,
+      ...(fulfillsTemporaryReturn ? { fulfillsTemporaryReturn: true } : {}),
+    };
   }
 
   private async findClaimedPendingWaitReply(
@@ -3027,16 +3056,12 @@ export class ProjectSessionCoordinator {
                   claimedPending,
                   "delivered",
                 );
-                const result: SessionMessageWaitResult = {
-                  outcome: "message",
-                  conversationId: claimedPending.fromConversationId,
-                  ...(claimedPending.fromRunId === undefined
-                    ? {}
-                    : { runId: claimedPending.fromRunId }),
-                  messageId: claimedPending.messageId,
-                  sentAt: claimedPending.sentAt,
-                };
-                resolveCompletion(result);
+                resolveCompletion(this.sessionMessageWaitResult(
+                  context,
+                  source,
+                  claimedPending,
+                  claimedPending.fromRunId,
+                ));
               }
             }
 
@@ -4430,14 +4455,12 @@ export class ProjectSessionCoordinator {
     this.unregisterSessionWaiter(context, waiter);
     try {
       this.appendSourceCardState(context, envelope, "delivered");
-      const result: SessionMessageWaitResult = {
-        outcome: "message",
-        conversationId: envelope.fromConversationId,
-        runId: envelope.fromRunId ?? sourceRunId,
-        messageId: envelope.messageId,
-        sentAt: envelope.sentAt,
-      };
-      waiter.resolve(result);
+      waiter.resolve(this.sessionMessageWaitResult(
+        context,
+        target,
+        envelope,
+        sourceRunId,
+      ));
       this.emit(context, { type: "project_changed" });
       return true;
     } catch (error) {

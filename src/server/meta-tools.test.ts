@@ -63,6 +63,7 @@ describe("createMetaTools", () => {
     const tools = createMetaTools(sourceConversationId, service(), true);
     const startSession = tool(tools, "start_session");
     const startTemporarySession = tool(tools, "start_temporary_session");
+    const waitForSession = tool(tools, "wait_for_session");
 
     expect(startSession.promptGuidelines).toContain(
       "Before starting a persistent session, first call list_sessions with scope=created_by_me. Reuse a suitable existing session with send_session_message, and create a new persistent session only when none fits the responsibility.",
@@ -75,7 +76,13 @@ describe("createMetaTools", () => {
       "Use for throwaway work where you only need the initial final answer; use start_session instead when follow-up or later inspection is expected.",
     );
     expect(startTemporarySession.promptGuidelines).toContain(
-      "This still runs asynchronously: call wait_for_session when the answer is needed in this turn. If any delivered peer message resolves that wait and you still need the final settlement, call wait_for_session again for the same run.",
+      "This still runs asynchronously: call wait_for_session when the answer is needed in this turn. A message result with fulfillsTemporaryReturn:true is the designated one-shot return; consume its injected body and do not wait again merely for exact settlement. Re-wait only when that flag is absent and settlement still matters.",
+    );
+    expect(waitForSession.description).toContain(
+      "If a message result has fulfillsTemporaryReturn:true",
+    );
+    expect(waitForSession.promptGuidelines).toContain(
+      "When a message result has fulfillsTemporaryReturn:true, use the injected one-shot return and do not re-wait solely to observe settlement.",
     );
   });
 

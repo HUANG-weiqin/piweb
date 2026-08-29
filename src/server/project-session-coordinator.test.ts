@@ -8804,6 +8804,7 @@ describe("ProjectSessionCoordinator", () => {
         conversationId: temporary.conversationId,
         runId: temporary.runId,
         messageId: expect.any(String),
+        fulfillsTemporaryReturn: true,
       });
       expect(waitResult).not.toHaveProperty("finalText");
       const returnedMessages = fixture.runtime.control(caller.conversationId)
@@ -8937,12 +8938,14 @@ describe("ProjectSessionCoordinator", () => {
       conversationId: temporary.conversationId,
       runId: temporary.runId,
       messageId: expect.any(String),
+      fulfillsTemporaryReturn: true,
     });
     expect(secondWait).toMatchObject({
       outcome: "message",
       conversationId: temporary.conversationId,
       runId: temporary.runId,
     });
+    expect(secondWait).not.toHaveProperty("fulfillsTemporaryReturn");
     expect(thirdWait).toMatchObject({
       outcome: "completed",
       runId: temporary.runId,
