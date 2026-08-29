@@ -1690,6 +1690,54 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
+  it("lets the Agent request below-threshold compaction at a safe tool-turn boundary", async () => {
+    const fixture = await openActor();
+    const emit = () => fixture.runtime.session.eventListener;
+    const requestCompaction = fixture.runtime.createOptions?.workbenchCustomTools?.find(
+      ({ name }) => name === "request_context_compaction",
+    );
+    expect(requestCompaction).toBeDefined();
+
+    fixture.runtime.session.promptImplementation = async () => {
+      emit()?.(nativeEvent({ type: "agent_start" }));
+      const result = await requestCompaction?.execute("compact-call", {});
+      expect(result).toMatchObject({ details: { requested: true } });
+      expect(fixture.runtime.session.compactCalls).toBe(0);
+
+      fixture.runtime.session.contextPercent = 40;
+      expect(fixture.runtime.createOptions?.turnBoundaryCheck?.({
+        contextUsage: fixture.runtime.session.getContextUsage(),
+        hasToolResults: true,
+      })).toBe(true);
+      emit()?.(nativeEvent({ type: "agent_end" }));
+    };
+    fixture.runtime.session.resumeImplementation = async (message, options) => {
+      expect(message).toMatchObject({
+        customType: "piweb.compaction_resume.v1",
+        display: false,
+      });
+      expect(options).toMatchObject({ triggerTurn: true });
+      fixture.runtime.session.contextPercent = 20;
+      emit()?.(nativeEvent({ type: "agent_start" }));
+      emit()?.(nativeEvent({ type: "agent_end" }));
+    };
+
+    const settlement = await fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "compact before continuing a long task",
+      origin: "browser",
+    });
+
+    expect(settlement.outcome).toBe("completed");
+    expect(fixture.runtime.session.compactCalls).toBe(1);
+    expect(fixture.runtime.session.resumeCalls).toBe(1);
+    expect(fixture.events.filter((event) => (
+      event.type === "session_event"
+      && (event.event.type === "run_started" || event.event.type === "run_finished")
+    ))).toHaveLength(2);
+    await fixture.actor.dispose();
+  });
+
   it("does not inject a second resume when Pi continued after native compaction", async () => {
     const fixture = await openActor();
     const emit = () => fixture.runtime.session.eventListener;

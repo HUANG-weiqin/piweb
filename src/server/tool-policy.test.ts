@@ -26,6 +26,7 @@ describe("defaultToolPolicy", () => {
     "todo_read",
     "todo_write",
     "todo_pause",
+    "request_context_compaction",
   ])(
     "allows the host-owned %s tool in read-only mode",
     (toolName) => {
@@ -60,6 +61,7 @@ describe("defaultToolPolicy", () => {
     ["todo_read", "builtin"],
     ["todo_write", "project"],
     ["todo_pause", "extension"],
+    ["request_context_compaction", "extension"],
     ["list_sessions", "sdk"],
     ["current_session", "sdk"],
     ["start_session", "sdk"],

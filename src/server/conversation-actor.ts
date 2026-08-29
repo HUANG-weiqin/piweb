@@ -1,12 +1,14 @@
-import type {
-  AgentSession,
-  AgentSessionEvent,
-  ExtensionError,
-  ModelRegistry,
-  SessionManager,
-  SettingsManager,
+import {
+  defineTool,
+  type AgentSession,
+  type AgentSessionEvent,
+  type ExtensionError,
+  type ModelRegistry,
+  type SessionManager,
+  type SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import {
   DEFAULT_COMPACTION_THRESHOLD_PERCENT,
   type ConversationActivity,
@@ -295,6 +297,7 @@ interface RunTicket {
   compactionErrorReported: boolean;
   compactionRetryAtPercent?: number;
   sdkCompactionSucceeded: boolean;
+  contextCompactionRequested: boolean;
   turnBoundaryCompactionRequested: boolean;
   waitCacheCheckpointCount: number;
   waitCacheCheckpointDisabled: boolean;
@@ -622,6 +625,38 @@ export class ConversationActor {
     });
     appendReservedCustomEntry(this.sessionManager, entry);
     this.compactionThresholdPercent = entry.data.percent;
+  }
+
+  private createContextCompactionTool() {
+    return defineTool({
+      name: "request_context_compaction",
+      label: "Request context compaction",
+      description:
+        "Request one lossy context compaction after the current assistant/tool turn completes. The workbench keeps the same run active and resumes unfinished work afterward. Acceptance is not proof that compaction succeeded.",
+      promptSnippet:
+        "Request safe context compaction after the current tool turn.",
+      promptGuidelines: [
+        "Use request_context_compaction only when substantial work remains and early lossy compaction is worth the summary cost; the workbench already compacts automatically at its configured threshold.",
+      ],
+      parameters: Type.Object({}, { additionalProperties: false }),
+      execute: async () => {
+        const ticket = this.activeRun;
+        if (!ticket || ticket.phase !== "running") {
+          throw new Error(
+            "Context compaction can only be requested by the active running conversation",
+          );
+        }
+        ticket.contextCompactionRequested = true;
+        const details = { requested: true as const };
+        return {
+          content: [{
+            type: "text" as const,
+            text: "Context compaction requested for the end of this complete tool turn. This confirms acceptance, not completion.",
+          }],
+          details,
+        };
+      },
+    });
   }
 
   compactContext(): Promise<void> {
@@ -1442,6 +1477,7 @@ export class ConversationActor {
       sawSdkCompactionAttempt: false,
       compactionErrorReported: false,
       sdkCompactionSucceeded: false,
+      contextCompactionRequested: false,
       turnBoundaryCompactionRequested: false,
       waitCacheCheckpointCount: 0,
       waitCacheCheckpointDisabled: false,
@@ -2408,16 +2444,22 @@ export class ConversationActor {
       || ticket.phase === "queued"
       || isCancelling(ticket)
       || !input.hasToolResults
-      || ticket.sawSdkCompactionAttempt
     ) {
       return false;
     }
+    const contextCompactionRequested = ticket.contextCompactionRequested;
+    ticket.contextCompactionRequested = false;
+    if (ticket.sawSdkCompactionAttempt) return false;
+
     const percent = input.contextUsage?.percent;
+    if (!this.isCompactionAttemptDue(ticket, percent)) return false;
     if (
-      percent === null
-      || percent === undefined
-      || percent < this.compactionThresholdPercent
-      || !this.isCompactionAttemptDue(ticket, percent)
+      !contextCompactionRequested
+      && (
+        percent === null
+        || percent === undefined
+        || percent < this.compactionThresholdPercent
+      )
     ) {
       return false;
     }
@@ -2781,6 +2823,7 @@ export class ConversationActor {
               write: (items) => this.writeLoopList(items),
               pause: () => this.pauseLoopList(),
             }),
+            this.createContextCompactionTool(),
           ],
           sessionManager: this.sessionManager,
           toolCallGate: (input) => this.authorizeToolCall(input),
