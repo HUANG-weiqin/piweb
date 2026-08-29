@@ -468,6 +468,7 @@ function ConversationGroupCard({
   const { root, members, conversations } = group;
   const deletionBlocked = Boolean(pendingDeletionId);
   const controlsId = `conversation-group-${root.id}`;
+  const summaryId = `${controlsId}-summary`;
   const ordinaryIdle = members.filter((conversation) =>
     conversation.id !== currentConversationId
     && !isActive(conversation, busyConversationId)
@@ -530,25 +531,21 @@ function ConversationGroupCard({
           onRequestDelete={onRequestDelete}
         />
       </ul>
-      <div className="conversation-group-meta">
-        <p
-          className="conversation-group-summary"
-          aria-label={`协作组状态：${summary}`}
-        >
+      <button
+        type="button"
+        className="conversation-group-disclosure"
+        aria-label={`${expanded ? "收起" : "展开"}协作组 ${title}`}
+        aria-expanded={expanded}
+        aria-controls={controlsId}
+        aria-describedby={summaryId}
+        disabled={!navigationEnabled || deletionBlocked}
+        onClick={() => onToggleExpanded(root.id)}
+      >
+        <span id={summaryId} className="conversation-group-summary">
           {summary}
-        </p>
-        <button
-          type="button"
-          className="conversation-group-expand ghost"
-          aria-label={`${expanded ? "收起" : "展开"}协作组 ${title}`}
-          aria-expanded={expanded}
-          aria-controls={controlsId}
-          disabled={!navigationEnabled || deletionBlocked}
-          onClick={() => onToggleExpanded(root.id)}
-        >
-          {expanded ? "⌃" : "⌄"}
-        </button>
-      </div>
+        </span>
+        <span className="conversation-group-chevron" aria-hidden="true" />
+      </button>
       {expanded && <div id={controlsId} className="conversation-group-members">
         <ul className="conversation-sidebar-list">
           {visibleMembers.map((conversation) => (

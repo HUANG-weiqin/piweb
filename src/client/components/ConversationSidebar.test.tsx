@@ -673,11 +673,14 @@ describe("ConversationSidebar", () => {
     expect(cards).toHaveLength(3);
     expect(cards.map((card) => card.getAttribute("data-root-conversation-id")))
       .toEqual([rootA.id, rootB.id, rootC.id]);
-    expect(within(cards[0]!).getByLabelText(/协作组状态/)).toHaveTextContent(
+    const taskADisclosure = within(cards[0]!).getByRole("button", {
+      name: "收起协作组 任务 A",
+    });
+    expect(taskADisclosure).toHaveClass("conversation-group-disclosure");
+    expect(taskADisclosure).toHaveAccessibleDescription(
       /2 个 Agent · 1 运行 · 1 等待 · 1 需处理 · 1 未读 · 最近 /,
     );
-    expect(screen.getByRole("button", { name: "收起协作组 任务 A" }))
-      .toHaveAttribute("aria-expanded", "true");
+    expect(taskADisclosure).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("缺根会话")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "打开会话 任务 A" }));

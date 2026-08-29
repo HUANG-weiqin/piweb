@@ -2327,33 +2327,69 @@ pre {
   min-width: 0;
 }
 
-.conversation-group-meta {
-  min-width: 0;
-  display: flex;
+.conversation-group-disclosure {
+  width: calc(100% - 6px);
+  min-height: 40px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 4px;
-  padding: 0 4px 2px 10px;
+  gap: 8px;
+  margin: 1px 3px 3px;
+  padding: 5px 7px 5px 10px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  color: var(--muted);
+  background: transparent;
+  font-weight: 400;
+  text-align: left;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease,
+    transform 120ms ease;
+}
+
+.conversation-group-disclosure:not(:disabled):hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--soft) 72%, transparent);
 }
 
 .conversation-group-summary {
   min-width: 0;
-  flex: 1 1 auto;
   overflow: hidden;
-  margin: 0;
-  color: var(--muted);
   font-size: 10px;
   line-height: 1.45;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.conversation-group-expand {
-  width: 40px;
-  min-height: 40px;
-  flex: 0 0 auto;
-  padding: 0;
-  border: 0;
-  font-size: 15px;
+.conversation-group-chevron {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--soft) 68%, transparent);
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.conversation-group-chevron::before {
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  content: "";
+  transform: rotate(-45deg);
+  transition: transform 160ms ease;
+}
+
+.conversation-group-disclosure[aria-expanded="true"] .conversation-group-chevron {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.conversation-group-disclosure[aria-expanded="true"] .conversation-group-chevron::before {
+  transform: rotate(45deg);
 }
 
 .conversation-group-members {
