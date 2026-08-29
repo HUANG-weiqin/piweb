@@ -4,7 +4,7 @@
 
 ## 交付范围
 
-实现已批准的“按任务协作组”侧栏：服务端投影根会话事实并按组安全截断，客户端提供协作组/全部两种视图、折叠成员、状态摘要、低干扰动作和当前会话面包屑。
+实现已批准的“按任务协作组”侧栏：服务端投影根会话事实并按组安全截断，客户端提供唯一的协作组列表、折叠成员、状态摘要、低干扰动作和当前会话面包屑。
 
 预计影响 owner：
 
@@ -56,17 +56,17 @@
 ### 改动
 
 1. 在 `ConversationSidebar` 内派生 group projection，不进入 App 或持久状态。
-2. 增加本地 `grouped | all` 视图状态、展开组集合和“显示全部空闲成员”集合。
+2. 增加本地展开组集合和“显示全部空闲成员”集合；不维护第二种扁平视图。
 3. 只为拥有 Agent descendant 的根渲染卡片；其余放入独立会话区。
 4. 组摘要聚合 activity、waiting、attention、unread 与 latest update。
 5. 当前组按 focus 变化自动展开一次；背景更新不改变 focus/展开意图。
-6. 展开控制与会话导航分离；root、成员、独立会话与“全部”视图统一复用改版前的 conversation row 与现有生命周期 gate。
+6. 展开控制与会话导航分离；root、成员与独立会话统一复用改版前的 conversation row 与现有生命周期 gate。
 7. 保留改版前每行直接显示的改名/删除按钮，继续复用现有 modal，不增加动作菜单。
 
 ### 验证
 
 - 两个根及多层 descendants 正确分组。
-- 折叠、展开、全部视图、空闲成员 reveal 都可键盘操作。
+- 折叠、展开和空闲成员 reveal 都可键盘操作，且不渲染模式切换。
 - 点击 root/child 只调用原 `onSelect`。
 - focus 同步可导航但禁止 lifecycle action；离线全部冻结。
 - 当前、active、attention、unread 排序和语义状态正确。

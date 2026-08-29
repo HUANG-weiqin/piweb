@@ -95,36 +95,6 @@ function activityRank(activity: ConversationActivity | undefined): number {
   }
 }
 
-function orderedConversations(conversations: ConversationSummary[]): ConversationSummary[] {
-  return conversations
-    .map((conversation, index) => ({ conversation, index }))
-    .sort((left, right) => {
-      const activeDifference =
-        Number(activityRank(right.conversation.activity) < 4)
-        - Number(activityRank(left.conversation.activity) < 4);
-      if (activeDifference !== 0) return activeDifference;
-
-      const attentionDifference =
-        Number(Boolean(right.conversation.attention))
-        - Number(Boolean(left.conversation.attention));
-      if (attentionDifference !== 0) return attentionDifference;
-
-      const activityDifference =
-        activityRank(left.conversation.activity)
-        - activityRank(right.conversation.activity);
-      if (activityDifference !== 0) return activityDifference;
-
-      const updatedDifference =
-        Date.parse(right.conversation.updatedAt)
-        - Date.parse(left.conversation.updatedAt);
-      if (Number.isFinite(updatedDifference) && updatedDifference !== 0) {
-        return updatedDifference;
-      }
-      return left.index - right.index;
-    })
-    .map(({ conversation }) => conversation);
-}
-
 function isActive(
   conversation: ConversationSummary,
   busyConversationId?: string,
@@ -603,7 +573,6 @@ function ConversationSidebarView({
   const [confirmDeleteConversationId, setConfirmDeleteConversationId] = useState("");
   const [renameConversationId, setRenameConversationId] = useState("");
   const [renameDraft, setRenameDraft] = useState("");
-  const [viewMode, setViewMode] = useState<"grouped" | "all">("grouped");
   const [expandedRoots, setExpandedRoots] = useState<Set<string>>(() => new Set());
   const [revealedIdleRoots, setRevealedIdleRoots] = useState<Set<string>>(
     () => new Set(),
@@ -611,10 +580,6 @@ function ConversationSidebarView({
   const observedScopeKey = useRef(scopeKey);
   const observedFocusedConversationId = useRef<string | undefined>(undefined);
   const lastFocusedRoot = useRef<string | undefined>(undefined);
-  const sortedConversations = useMemo(
-    () => orderedConversations(conversations),
-    [conversations],
-  );
   const grouped = useMemo(
     () => groupProjection(
       conversations,
@@ -689,7 +654,6 @@ function ConversationSidebarView({
     setConfirmDeleteConversationId("");
     setRenameConversationId("");
     setRenameDraft("");
-    setViewMode("grouped");
     setExpandedRoots(new Set());
     setRevealedIdleRoots(new Set());
   }, [scopeKey]);
@@ -801,75 +765,37 @@ function ConversationSidebarView({
 
       {!collapsed && (
         <nav className="conversation-sidebar-navigation" aria-label="项目会话">
-          <div
-            className="conversation-sidebar-view-toggle"
-            role="group"
-            aria-label="会话视图"
-          >
-            <button
-              type="button"
-              aria-pressed={viewMode === "grouped"}
-              disabled={!navigationEnabled || Boolean(pendingDeletionId)}
-              onClick={() => setViewMode("grouped")}
-            >
-              按任务
-            </button>
-            <button
-              type="button"
-              aria-pressed={viewMode === "all"}
-              disabled={!navigationEnabled || Boolean(pendingDeletionId)}
-              onClick={() => setViewMode("all")}
-            >
-              全部
-            </button>
-          </div>
           <ul className="conversation-sidebar-list">
-            {viewMode === "all"
-              ? sortedConversations.map((conversation) => (
-                  <ConversationRow
-                    key={conversation.id}
-                    conversation={conversation}
-                    selected={conversation.id === currentConversationId}
-                    navigationEnabled={navigationEnabled}
-                    actionsEnabled={actionsEnabled}
-                    deletionPending={pendingDeletionId === conversation.id}
-                    deletionBlocked={Boolean(pendingDeletionId)}
-                    busy={conversation.id === busyConversationId}
-                    onSelect={onSelect}
-                    onRequestRename={requestRename}
-                    onRequestDelete={requestDelete}
-                  />
-                ))
-              : grouped.entries.map((entry) => entry.kind === "group"
-                  ? <ConversationGroupCard
-                      key={`group:${entry.group.root.id}`}
-                      group={entry.group}
-                      expanded={expandedRoots.has(entry.group.root.id)}
-                      idleRevealed={revealedIdleRoots.has(entry.group.root.id)}
-                      currentConversationId={currentConversationId}
-                      busyConversationId={busyConversationId}
-                      navigationEnabled={navigationEnabled}
-                      actionsEnabled={actionsEnabled}
-                      pendingDeletionId={pendingDeletionId}
-                      onSelect={onSelect}
-                      onToggleExpanded={toggleExpanded}
-                      onRevealIdle={revealIdle}
-                      onRequestRename={requestRename}
-                      onRequestDelete={requestDelete}
-                    />
-                  : <ConversationRow
-                      key={entry.conversation.id}
-                      conversation={entry.conversation}
-                      selected={entry.conversation.id === currentConversationId}
-                      navigationEnabled={navigationEnabled}
-                      actionsEnabled={actionsEnabled}
-                      deletionPending={pendingDeletionId === entry.conversation.id}
-                      deletionBlocked={Boolean(pendingDeletionId)}
-                      busy={entry.conversation.id === busyConversationId}
-                      onSelect={onSelect}
-                      onRequestRename={requestRename}
-                      onRequestDelete={requestDelete}
-                    />)}
+            {grouped.entries.map((entry) => entry.kind === "group"
+              ? <ConversationGroupCard
+                  key={`group:${entry.group.root.id}`}
+                  group={entry.group}
+                  expanded={expandedRoots.has(entry.group.root.id)}
+                  idleRevealed={revealedIdleRoots.has(entry.group.root.id)}
+                  currentConversationId={currentConversationId}
+                  busyConversationId={busyConversationId}
+                  navigationEnabled={navigationEnabled}
+                  actionsEnabled={actionsEnabled}
+                  pendingDeletionId={pendingDeletionId}
+                  onSelect={onSelect}
+                  onToggleExpanded={toggleExpanded}
+                  onRevealIdle={revealIdle}
+                  onRequestRename={requestRename}
+                  onRequestDelete={requestDelete}
+                />
+              : <ConversationRow
+                  key={entry.conversation.id}
+                  conversation={entry.conversation}
+                  selected={entry.conversation.id === currentConversationId}
+                  navigationEnabled={navigationEnabled}
+                  actionsEnabled={actionsEnabled}
+                  deletionPending={pendingDeletionId === entry.conversation.id}
+                  deletionBlocked={Boolean(pendingDeletionId)}
+                  busy={entry.conversation.id === busyConversationId}
+                  onSelect={onSelect}
+                  onRequestRename={requestRename}
+                  onRequestDelete={requestDelete}
+                />)}
           </ul>
           {truncated && <p className="conversation-sidebar-truncated">
             仅显示最近协作组和会话

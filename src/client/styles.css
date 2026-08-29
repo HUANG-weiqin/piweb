@@ -2131,32 +2131,6 @@ pre {
   padding: 8px;
 }
 
-.conversation-sidebar-view-toggle {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 3px;
-  margin-bottom: 8px;
-  padding: 3px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--soft);
-}
-
-.conversation-sidebar-view-toggle button {
-  min-height: 40px;
-  padding: 5px 8px;
-  border: 0;
-  color: var(--muted);
-  background: transparent;
-  font-size: 11px;
-}
-
-.conversation-sidebar-view-toggle button[aria-pressed="true"] {
-  color: inherit;
-  background: var(--panel);
-  box-shadow: var(--shadow-sm);
-}
-
 .conversation-sidebar-list {
   display: flex;
   flex-direction: column;
