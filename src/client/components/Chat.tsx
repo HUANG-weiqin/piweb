@@ -73,6 +73,10 @@ interface ChatProps {
   compactionThresholdBusy: boolean;
   compacting?: boolean;
   cwd: string;
+  conversationContext?: {
+    rootTitle: string;
+    currentTitle?: string;
+  };
   online: boolean;
   /** Transport is online, but focus-bound server controls may be frozen. */
   interactive?: boolean;
@@ -231,6 +235,7 @@ function ChatView({
   compactionThresholdBusy,
   compacting = false,
   cwd,
+  conversationContext,
   online,
   interactive = true,
   conversationReady,
@@ -523,6 +528,30 @@ function ChatView({
   return <main className="app-shell">
     <header className="topbar">
       <button className="brand" onClick={onChangeCwd}><span>π</span><span>Pi Web<small title={cwd}>{cwd}</small></span></button>
+      {conversationContext && <nav
+        className={`topbar-conversation-context${
+          conversationContext.currentTitle ? " has-current" : ""
+        }`}
+        aria-label="协作路径"
+      >
+        <span
+          className="topbar-conversation-root"
+          title={conversationContext.rootTitle}
+          aria-current={conversationContext.currentTitle ? undefined : "page"}
+        >
+          {conversationContext.rootTitle}
+        </span>
+        {conversationContext.currentTitle && <>
+          <span className="topbar-conversation-separator" aria-hidden="true">›</span>
+          <span
+            className="topbar-conversation-current"
+            title={conversationContext.currentTitle}
+            aria-current="page"
+          >
+            {conversationContext.currentTitle}
+          </span>
+        </>}
+      </nav>}
       <div className="topbar-controls">
         <button
           className="model-button"

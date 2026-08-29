@@ -162,6 +162,31 @@ describe("Chat", () => {
       .toBeInTheDocument();
   });
 
+  it("shows the focused Agent under its root task without inventing missing context", () => {
+    const rendered = render(view(emptyChat, "", undefined, {
+      conversationContext: {
+        rootTitle: "修复登录任务",
+        currentTitle: "测试 Agent",
+      },
+    }));
+
+    expect(screen.getByRole("navigation", { name: "协作路径" }))
+      .toHaveTextContent("修复登录任务›测试 Agent");
+    expect(screen.getByText("测试 Agent")).toHaveAttribute("aria-current", "page");
+
+    rendered.rerender(view(emptyChat, "", undefined, {
+      conversationContext: { rootTitle: "修复登录任务" },
+    }));
+    expect(screen.getByText("修复登录任务")).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+
+    rendered.rerender(view(emptyChat));
+    expect(screen.queryByRole("navigation", { name: "协作路径" }))
+      .not.toBeInTheDocument();
+  });
+
   it("mounts no Tasks panel or height when the list is absent or empty", () => {
     const { rerender } = render(view(emptyChat));
     expect(screen.queryByRole("region", { name: "Tasks" })).not.toBeInTheDocument();

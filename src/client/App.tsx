@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   DEFAULT_COMPACTION_THRESHOLD_PERCENT,
   MAX_PROMPT_CHARACTERS,
@@ -3087,6 +3087,40 @@ export function App() {
         activeRun: undefined,
       }
     : state;
+  const showRoleSelection = selectingRole || !visibleState?.conversationId;
+  const switchingFocus = pendingFocus?.operation === "focus_conversation"
+    || pendingFocus?.operation === "create_conversation";
+  const visibleConversationReady =
+    !switchingFocus && !transitioning && conversationReady;
+  const pendingTargetConversationId = pendingFocus?.operation === "focus_conversation"
+    ? pendingFocus.targetConversationId
+    : undefined;
+  const visibleConversationId = pendingTargetConversationId
+    ?? (showRoleSelection ? undefined : visibleState?.conversationId);
+  const visibleConversationContext = useMemo<
+    { rootTitle: string; currentTitle?: string } | undefined
+  >(() => {
+    if (!visibleConversationReady || !visibleConversationId) return undefined;
+    const currentConversation = conversations.find(
+      ({ id }) => id === visibleConversationId,
+    );
+    const rootConversation = currentConversation?.rootConversationId
+      ? conversations.find(
+          ({ id }) => id === currentConversation.rootConversationId,
+        )
+      : undefined;
+    if (!currentConversation || !rootConversation) return undefined;
+    const rootTitle = rootConversation.name?.trim()
+      || rootConversation.preview.trim()
+      || "新会话";
+    const currentTitle = currentConversation.name?.trim()
+      || currentConversation.preview.trim()
+      || "新会话";
+    return currentConversation.id === rootConversation.id
+      ? { rootTitle }
+      : { rootTitle, currentTitle };
+  }, [conversations, visibleConversationId, visibleConversationReady]);
+
   if (!activeCwd || !visibleState) return <>
     <div className="workbench">
       {workspaceRail}
@@ -3116,11 +3150,8 @@ export function App() {
     {feedback}
   </>;
 
-  const showRoleSelection = selectingRole || !visibleState.conversationId;
   const conversationCompacting =
     visibleState.compacting === true || Boolean(pendingContextCompaction);
-  const switchingFocus = pendingFocus?.operation === "focus_conversation"
-    || pendingFocus?.operation === "create_conversation";
   const showAttachedConversationProjection =
     conversationSyncing && pendingFocus === undefined;
   let visibleChat = chat;
@@ -3136,8 +3167,6 @@ export function App() {
   const visibleActiveRun = transitioning || switchingFocus
     ? undefined
     : visibleState.activeRun;
-  const visibleConversationReady =
-    !switchingFocus && !transitioning && conversationReady;
   const focusAwaitingSnapshot = Boolean(focusRef.current) && !conversationReady;
   const settingsEnabled = !transitioning && !focusAwaitingSnapshot;
   const visibleCompacting = transitioning ? false : conversationCompacting;
@@ -3151,18 +3180,13 @@ export function App() {
         ? historyWindow
         : EMPTY_CONVERSATION_WINDOW)
     : historyWindow;
-  const pendingTargetConversationId = pendingFocus?.operation === "focus_conversation"
-    ? pendingFocus.targetConversationId
-    : undefined;
-
   return <>
     <div className="workbench">
       {workspaceRail}
       <ConversationSidebar
         conversations={conversations}
         truncated={conversationIndexTruncated}
-        currentConversationId={pendingTargetConversationId
-          ?? (showRoleSelection ? undefined : visibleState.conversationId)}
+        currentConversationId={visibleConversationId}
         busyConversationId={
           visibleState.busy || outstandingRunId ? visibleState.conversationId : undefined
         }
@@ -3257,6 +3281,7 @@ export function App() {
               compactionThresholdBusy={Boolean(pendingCompactionThreshold)}
               compacting={visibleCompacting}
               cwd={visibleState.cwd}
+              conversationContext={visibleConversationContext}
               online={online}
               interactive={settingsEnabled}
               conversationReady={visibleConversationReady}

@@ -337,7 +337,44 @@ pre {
   gap: 8px;
 }
 
+.topbar-conversation-context {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  margin: 0 clamp(10px, 3vw, 36px);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 620;
+  white-space: nowrap;
+}
+
+.topbar-conversation-root,
+.topbar-conversation-current {
+  min-width: 0;
+  max-width: 48%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.topbar-conversation-context:not(.has-current) .topbar-conversation-root {
+  max-width: 100%;
+}
+
+.topbar-conversation-current {
+  color: color-mix(in srgb, currentColor 25%, var(--accent));
+}
+
+.topbar-conversation-separator {
+  flex: 0 0 auto;
+  color: color-mix(in srgb, var(--muted) 58%, transparent);
+}
+
 .brand {
+  min-width: 0;
+  flex-shrink: 1;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -352,6 +389,10 @@ pre {
 
 .brand:not(:disabled):hover {
   background: transparent;
+}
+
+.brand > span:last-child {
+  min-width: 0;
 }
 
 .brand > span:first-child {
@@ -3751,6 +3792,20 @@ pre {
 
   .topbar {
     padding: 0 12px;
+  }
+
+  .topbar-conversation-context {
+    justify-content: flex-start;
+    margin: 0 8px;
+  }
+
+  .topbar-conversation-context.has-current .topbar-conversation-root,
+  .topbar-conversation-context.has-current .topbar-conversation-separator {
+    display: none;
+  }
+
+  .topbar-conversation-current {
+    max-width: 100%;
   }
 
   .brand small {

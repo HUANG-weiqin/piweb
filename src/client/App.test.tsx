@@ -472,6 +472,70 @@ describe("App", () => {
     );
   });
 
+  it("shows focused collaboration context only from the ready root projection", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    const root = {
+      ...conversationSummary(CONVERSATION_B, "根任务"),
+      rootConversationId: CONVERSATION_B,
+    };
+    const child = {
+      ...conversationSummary(CONVERSATION_ID, "测试 Agent"),
+      rootConversationId: CONVERSATION_B,
+      createdBy: {
+        kind: "conversation" as const,
+        conversationId: CONVERSATION_B,
+      },
+    };
+
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversations: [root, child],
+        truncated: false,
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        items: [],
+        window: completeConversationWindow,
+      });
+    });
+
+    expect(screen.getByRole("navigation", { name: "协作路径" }))
+      .toHaveTextContent("根任务›测试 Agent");
+
+    act(() => socketMock.rawEmit?.({
+      type: "project_snapshot",
+      sessionId,
+      projectId: PROJECT_ID,
+      conversations: [root, {
+        ...conversationSummary(CONVERSATION_ID, "测试 Agent"),
+        createdBy: child.createdBy,
+      }],
+      truncated: false,
+    }));
+    expect(screen.queryByRole("navigation", { name: "协作路径" }))
+      .not.toBeInTheDocument();
+  });
+
   it("hydrates LoopList from focused snapshots and ignores stale live identities", () => {
     render(<App />);
     const sessionId = startFromSetup();
