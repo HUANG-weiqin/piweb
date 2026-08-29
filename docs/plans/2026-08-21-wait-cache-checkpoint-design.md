@@ -21,7 +21,7 @@
 
 ## 行为
 
-静默 wait 满足成本条件时，三分钟后返回：
+静默 wait 满足成本条件时，四分钟后返回：
 
 ```json
 { "outcome": "checkpoint" }
@@ -29,7 +29,7 @@
 
 这只是“尚未观察到目标结果”的非错误结果。Pi 正常结束当前工具调用并进入下一次模型请求；如果目标结果仍是当前工作的依赖，Agent 使用相同 `conversationId + runId` 再次等待。
 
-每个来源 run 最多成功产生两个 checkpoint。它们是 run-local 易失控制状态，不进入 JSONL；进程重启不会尝试恢复旧的 provider cache 租约。
+每个来源 run 最多成功产生八个 checkpoint。它们是 run-local 易失控制状态，不进入 JSONL；进程重启不会尝试恢复旧的 provider cache 租约。
 
 ## 成本门槛
 
@@ -37,13 +37,13 @@
 
 - `getContextUsage().tokens >= 32_000`，unknown/null 不启用；
 - 当前 AgentSession 的实际模型提供有限正数 input/cache-read 定价；
-- cache read 明显便宜，使两个 checkpoint 加最终一次 cached read 的输入价仍低于一次 uncached read：
+- cache read 明显便宜，使八个 checkpoint 加最终一次 cached read 的输入价仍低于一次 uncached read：
 
 ```text
 (maxCheckpoints + 1) * cacheReadRate < inputRate
 ```
 
-- 当前 exact run 尚未禁用 checkpoint 且未用完两次额度。
+- 当前 exact run 尚未禁用 checkpoint 且未用完八次额度。
 
 checkpoint 后下一条 assistant usage 是实际反馈。以：
 
@@ -88,6 +88,6 @@ Agent 也可以在 checkpoint 后选择不再等待。这是刻意保留的控�
 - eligible 静默 wait 到期返回 checkpoint，目标仍运行；
 - 小/未知上下文和不经济定价不触发；
 - settlement、guidance、abort、close 先赢时 timer 被清理；
-- 同一来源 run 最多两个 checkpoint；
+- 同一来源 run 最多八个 checkpoint；
 - checkpoint 后实际 cache hit 允许剩余额度，miss/unknown usage 禁用；
 - 现有 FIFO predecessor、temporary receipt、cycle、durable settlement 与 guidance one-shot 测试不回归。

@@ -86,7 +86,7 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
 ## 上下文前缀与缓存
 
 - 已进入模型上下文的 user、assistant、tool 和 incoming custom message 都是 append-only；新的宿主提示只附加到以后收到的新消息，不能回填或重写旧 entry。
-- 长时间 `wait_for_session` 不会产生 provider 流量，因此不能靠本地 actor/WebSocket 活跃保住远端 prompt cache。对于至少 32k tokens、当前模型有限正数定价满足 `3 * cacheRead < input` 的来源 run，宿主可在静默 3 分钟后让当前 exact 或 aggregate waiter 返回非错误 `{ outcome: "checkpoint" }`，由同一 AgentSession 自然发起下一轮；它不证明目标完成，仍需要结果时必须用相同 target 或冻结 target set 再 wait。每个来源 run 最多两个 checkpoint；下一条 assistant usage 的 `cacheRead / (input + cacheRead + cacheWrite)` 低于 50% 或缺失/非法时关闭该 run 后续 checkpoint。该状态只在 RunTicket 内易失保存，不做隐藏预热、无限心跳、自动压缩或持久恢复。
+- 长时间 `wait_for_session` 不会产生 provider 流量，因此不能靠本地 actor/WebSocket 活跃保住远端 prompt cache。对于至少 32k tokens、当前模型有限正数定价满足 `9 * cacheRead < input` 的来源 run，宿主可在静默 4 分钟后让当前 exact 或 aggregate waiter 返回非错误 `{ outcome: "checkpoint" }`，由同一 AgentSession 自然发起下一轮；它不证明目标完成，仍需要结果时必须用相同 target 或冻结 target set 再 wait。每个来源 run 最多八个 checkpoint；下一条 assistant usage 的 `cacheRead / (input + cacheRead + cacheWrite)` 低于 50% 或缺失/非法时关闭该 run 后续 checkpoint。该状态只在 RunTicket 内易失保存，不做隐藏预热、无限心跳、自动压缩或持久恢复。
 - 当前角色完整修订由 base conversation metadata 加后续角色变更记录得出；重新打开会话使用最后一次成功应用的角色。角色模板后续编辑不会自动改变既有会话，只有用户显式切换才会从下一轮改变 system prompt、模型、默认思考强度、权限与 meta 工具 schema。聊天页的思考强度控制仍只修改当前运行会话，不反写角色模板或角色快照。
 - 卡片状态、run settlement、temporary return receipt、meta operation 和 conversation metadata 使用普通 `custom` entry；SDK 的 `buildSessionContext()` 会忽略它们，因此状态更新既不改旧消息，也不污染模型缓存前缀。
 - 会话自动压缩阈值同样使用普通 `piweb.compaction_threshold.v1` custom entry 保存；缺省为 70%，允许 20%–90%，最后一条有效记录生效，不进入模型上下文。

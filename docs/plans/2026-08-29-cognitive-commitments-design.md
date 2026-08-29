@@ -100,7 +100,7 @@ singleWaitCommitment?: string; // trim 后最多 1000 字符
 }
 ```
 
-该 outcome 与三分钟静默产生的 `{ outcome: "checkpoint" }` 完全不同：前者表示等待从未开始，后者表示等待已经发生但仅返回 checkpoint。
+该 outcome 与四分钟静默产生的 `{ outcome: "checkpoint" }` 完全不同：前者表示等待从未开始，后者表示等待已经发生但仅返回 checkpoint。
 
 ## 5. 编辑额度状态机
 

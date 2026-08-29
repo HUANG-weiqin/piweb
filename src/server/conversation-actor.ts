@@ -216,9 +216,9 @@ const RUN_OWNERSHIP = Symbol("ConversationActor.runOwnership");
 // Avoid retrying every tool boundary without disabling protection for a long run.
 const COMPACTION_RETRY_GROWTH_PERCENT = 5;
 
-export const WAIT_CACHE_CHECKPOINT_DELAY_MS = 180_000;
+export const WAIT_CACHE_CHECKPOINT_DELAY_MS = 240_000;
 const WAIT_CACHE_CHECKPOINT_MIN_CONTEXT_TOKENS = 32_000;
-const MAX_WAIT_CACHE_CHECKPOINTS_PER_RUN = 2;
+const MAX_WAIT_CACHE_CHECKPOINTS_PER_RUN = 8;
 const WAIT_CACHE_CHECKPOINT_MIN_HIT_RATIO = 0.5;
 
 /**
@@ -1696,8 +1696,8 @@ export class ConversationActor {
     ) {
       return false;
     }
-    // Budget two refreshes plus the eventual target-result turn against one
-    // uncached read; equality has no guaranteed savings, so fail closed.
+    // Budget every allowed refresh plus the eventual target-result turn
+    // against one uncached read; equality has no guaranteed savings.
     if (
       (MAX_WAIT_CACHE_CHECKPOINTS_PER_RUN + 1) * cacheReadCost
       >= inputCost

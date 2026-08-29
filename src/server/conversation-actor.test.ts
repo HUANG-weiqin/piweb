@@ -4102,7 +4102,7 @@ describe("wait cache checkpoint policy", () => {
       { tokens: 31_999, input: 10, cacheRead: 1, expected: false },
       { tokens: null, input: 10, cacheRead: 1, expected: false },
       { tokens: 50_000, input: 10, cacheRead: 0, expected: false },
-      { tokens: 50_000, input: 3, cacheRead: 1, expected: false },
+      { tokens: 50_000, input: 9, cacheRead: 1, expected: false },
       { tokens: 50_000, input: 10, cacheRead: 1, expected: true },
     ] as const;
     for (const testCase of cases) {
@@ -4126,25 +4126,19 @@ describe("wait cache checkpoint policy", () => {
     const run = await startHeldActorRun(fixture, RUN_A);
     setWaitCacheInputs(fixture.runtime.session, 50_000, 10, 1);
 
-    let restore = fixture.actor.enterWaiting(run.ownership, target);
-    expect(fixture.actor.claimWaitCacheCheckpoint(run.ownership)).toBe(true);
-    expect(fixture.actor.canScheduleWaitCacheCheckpoint(run.ownership))
-      .toBe(false);
-    restore();
-    emitWaitCacheFeedback(
-      fixture.runtime.session,
-      waitCacheUsage(20, 80, 10),
-    );
+    for (let checkpoint = 0; checkpoint < 8; checkpoint += 1) {
+      const restore = fixture.actor.enterWaiting(run.ownership, target);
+      expect(fixture.actor.claimWaitCacheCheckpoint(run.ownership)).toBe(true);
+      expect(fixture.actor.canScheduleWaitCacheCheckpoint(run.ownership))
+        .toBe(false);
+      restore();
+      emitWaitCacheFeedback(
+        fixture.runtime.session,
+        waitCacheUsage(20, 80, 10),
+      );
+    }
 
-    restore = fixture.actor.enterWaiting(run.ownership, target);
-    expect(fixture.actor.claimWaitCacheCheckpoint(run.ownership)).toBe(true);
-    restore();
-    emitWaitCacheFeedback(
-      fixture.runtime.session,
-      waitCacheUsage(20, 80, 10),
-    );
-
-    restore = fixture.actor.enterWaiting(run.ownership, target);
+    const restore = fixture.actor.enterWaiting(run.ownership, target);
     expect(fixture.actor.canScheduleWaitCacheCheckpoint(run.ownership))
       .toBe(false);
     expect(fixture.actor.claimWaitCacheCheckpoint(run.ownership)).toBe(false);

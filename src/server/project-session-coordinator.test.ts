@@ -12251,6 +12251,10 @@ describe("ProjectSessionCoordinator", () => {
       vi.restoreAllMocks();
     });
 
+    it("uses a four-minute checkpoint delay", () => {
+      expect(WAIT_CACHE_CHECKPOINT_DELAY_MS).toBe(4 * 60 * 1_000);
+    });
+
     function makeWaitCacheEligible(control: FakeSessionControl): void {
       control.contextUsage = {
         tokens: 50_000,
@@ -12428,7 +12432,7 @@ describe("ProjectSessionCoordinator", () => {
       await sourceCompletion;
     });
 
-    it("uses positive cache feedback but never installs a third timer", async () => {
+    it("uses positive cache feedback but never installs a ninth timer", async () => {
       const fixture = await createFixture();
       const source = await fixture.coordinator.createUserConversation(
         fixture.handle,
@@ -12452,36 +12456,36 @@ describe("ProjectSessionCoordinator", () => {
         fixture.handle,
         target.conversationId,
         targetRunId,
-        "hold target through two checkpoints",
+        "hold target through eight checkpoints",
       );
       await targetStarted.promise;
 
       const timers = observeWaitCacheTimers();
-      const abortThirdWait = new AbortController();
-      const thirdWaitStarted = deferred();
+      const abortNinthWait = new AbortController();
+      const ninthWaitStarted = deferred();
       const waitResults: unknown[] = [];
-      let thirdWaitError: unknown;
+      let ninthWaitError: unknown;
       fixture.runtime.control(source.conversationId).enqueue(async (control) => {
-        for (const toolCallId of ["checkpoint-one", "checkpoint-two"]) {
+        for (let checkpoint = 1; checkpoint <= 8; checkpoint += 1) {
           waitResults.push(await executeTool(
             control,
             "wait_for_session",
-            toolCallId,
+            `checkpoint-${checkpoint}`,
             { conversationId: target.conversationId, runId: targetRunId },
           ));
           control.emitAssistantUsage(20, 80, 10);
         }
-        thirdWaitStarted.resolve();
+        ninthWaitStarted.resolve();
         try {
           await executeTool(
             control,
             "wait_for_session",
-            "checkpoint-three",
+            "checkpoint-nine",
             { conversationId: target.conversationId, runId: targetRunId },
-            abortThirdWait.signal,
+            abortNinthWait.signal,
           );
         } catch (error) {
-          thirdWaitError = error;
+          ninthWaitError = error;
         }
         control.emitFinal("checkpoint cap observed");
       });
@@ -12492,32 +12496,30 @@ describe("ProjectSessionCoordinator", () => {
         "wait repeatedly",
       );
 
-      await waitUntil(() => timers().length === 1, "first checkpoint timer");
-      const firstTimer = timers()[0];
-      if (!firstTimer) throw new Error("Expected first checkpoint timer");
-      clearTimeout(firstTimer.handle);
-      firstTimer.fire();
+      for (let index = 0; index < 8; index += 1) {
+        await waitUntil(
+          () => timers().length === index + 1,
+          `checkpoint timer ${index + 1}`,
+        );
+        const timer = timers()[index];
+        if (!timer) throw new Error("Expected checkpoint timer");
+        clearTimeout(timer.handle);
+        timer.fire();
+      }
 
-      await waitUntil(() => timers().length === 2, "second checkpoint timer");
-      const secondTimer = timers()[1];
-      if (!secondTimer) throw new Error("Expected second checkpoint timer");
-      clearTimeout(secondTimer.handle);
-      secondTimer.fire();
-
-      await thirdWaitStarted.promise;
+      await ninthWaitStarted.promise;
       await waitUntil(
         () => source.getActivity().kind === "waiting",
-        "third wait without a checkpoint timer",
+        "ninth wait without a checkpoint timer",
       );
-      expect(timers()).toHaveLength(2);
-      expect(waitResults).toEqual([
-        { outcome: "checkpoint" },
-        { outcome: "checkpoint" },
-      ]);
+      expect(timers()).toHaveLength(8);
+      expect(waitResults).toEqual(
+        Array.from({ length: 8 }, () => ({ outcome: "checkpoint" })),
+      );
 
-      abortThirdWait.abort();
+      abortNinthWait.abort();
       await sourceCompletion;
-      expect(thirdWaitError).toMatchObject({ name: "AbortError" });
+      expect(ninthWaitError).toMatchObject({ name: "AbortError" });
       releaseTarget.resolve();
       await targetCompletion;
     });
