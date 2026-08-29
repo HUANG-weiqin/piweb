@@ -1,6 +1,6 @@
 # 服务端运行时
 
-`updated: 2026-08-28`
+`updated: 2026-08-29`
 
 ## 这个模块是干什么的
 
@@ -79,12 +79,13 @@
 - 会话“回到此处”由 project lifecycle、ConversationActor operation queue 和 ProjectStore 原子截断共同完成；busy 或存在待处理 inbox 时拒绝。只有 durable JSONL 与同一 AgentSession 内存 context 都同步后，PiConnection 才依次发布 focused snapshot 和 command completion。
 - `setThinkingLevel()` 和 `setSessionName()` 会先改内存再持久化；工作台以 actor 实际后置条件为准，发布新 state 并单独报告持久化风险。相对地，`CredentialStore.modify/delete` 与 `ProjectStore.setToolMode` 都是持久写成功后才替换内存状态，不需要这种部分提交适配。
 - browser prompt 可随时尝试，但 busy admission 只在 actor 与 SDK 双重 live 边界允许；失败时不发 `prompt_admitted`，浏览器保留草稿。接受后不建新 run ticket、不写持久队列，当前工具序列结束后下一次模型调用前注入；steeringMode="all" 让排队消息（含 inbox）一次模型轮次全部注入。idle 时经 project lifecycle 起新 run且不越过已有 inbox 工作。abort 先清空 SDK steering/followUp 队列、admissions 与 guidance observations 再 abort，旧消息不能跨越结算边界污染下一次 run。admit 有界（单会话最多 64 条 pending），slash 开头拒绝。
-- `wait_for_session` 让当前工具调用阻塞，但不锁死 run：兼容的精确 `conversationId + runId` 等一个 durable settlement；aggregate `targets` 在调用时冻结 1–32 个去重目标，同一 waiter 注册到每个 key，首个 listed settlement 先从全部 key 原子注销并在结果中标明 conversationId。任何实际投递到当前 run 的新 peer/inbox 消息，或 SDK 已接受且尚未 raw-observed 的 browser/explicit guidance，也都可先结束两种 wait。消息只返回真实来源 metadata，guidance 只返回 outcome，正文仍由 custom/raw user message 注入一次。actor 的 one-shot guidance callback 必须由 host 返回是否真的认领到仍存在的 waiter；stale callback 不得提前烧掉 record。claimed inbox 用 `waitedByRunId`、guidance 用 per-record claimed 标记避免后续 wait 重复唤醒；temporary return/receipt 对 aggregate 中的 temporary target 也保持单一正文 owner。
+- `wait_for_session` 让当前工具调用阻塞，但不锁死 run：兼容的精确 `conversationId + runId` 等一个 durable settlement；aggregate `targets` 在调用时冻结 1–32 个去重目标，同一 waiter 注册到每个 key，首个 listed settlement 先从全部 key 原子注销并在结果中标明 conversationId。精确 wait 只有在所有即时 settlement/message/guidance 检查均未命中、即将真正阻塞时才要求非空 `singleWaitCommitment`；缺失时直接返回 `single_wait_commitment_required`，不切 waiting、不建立 waiter。aggregate 不使用该字段。任何实际投递到当前 run 的新 peer/inbox 消息，或 SDK 已接受且尚未 raw-observed 的 browser/explicit guidance，也都可先结束两种 wait。消息只返回真实来源 metadata，guidance 只返回 outcome，正文仍由 custom/raw user message 注入一次。actor 的 one-shot guidance callback 必须由 host 返回是否真的认领到仍存在的 waiter；stale callback 不得提前烧掉 record。claimed inbox 用 `waitedByRunId`、guidance 用 per-record claimed 标记避免后续 wait 重复唤醒；temporary return/receipt 对 aggregate 中的 temporary target 也保持单一正文 owner。
 - 大上下文且当前模型 cache-read 经济时，静默 wait 的 exact 或 aggregate waiter 可持有一个三分钟、已 `unref` 的易失 timer；timer 到期必须进入 project lifecycle，复核 waiter identity 与 source run ownership 后才消费该 run 最多两次的 cache checkpoint 额度并返回 `{ outcome: "checkpoint" }`。该结果只促使同一 AgentSession 进行正常下一轮，不是 target result；后续 assistant usage 缺失、非法或 cache hit 低于 50% 时禁用本 run 剩余额度。所有其它 waiter 结算路径共用 detach 清 timer，进程退出不为保留远端缓存而延长生命周期。
 - 取消 run 必须先清空 SDK 尚未消费的 steering/follow-up queue 再 abort；否则旧引导可能跨越结算边界污染下一次 prompt。持久跨会话消息仍由 inbox delivery marker 决定是否重投，不能把 SDK 内存队列当成 durable truth。
 - 注册不可复用 runId、安装 active RunTicket 后立即发送 `run_queued`；它既是生命周期事件，也是 idle browser prompt 的接收回执。busy prompt 则只在 SDK 接受 steering 后发送 `prompt_admitted`。
 - SDK 异步 preflight 结束时会再次检查 run ticket；若期间已取消，会在真正启动 agent 前阻断。
-- AgentSession 构造完成后，工作台在 SDK extension hook 外再包一层 host tool gate；扩展先修改/阻止，工作台再用最终 validated args 决策。
+- AgentSession 构造完成后，工作台在 SDK extension hook 外再包一层 host tool gate；扩展先修改/阻止，工作台再用最终 validated args 决策。PiRuntime 还在 extension/result-compression hook 之后安装对称的 host completion callback，传回同一调用的最终 args/source、原始 execute `isError` 与有效 details；extension post-hook 已抛错时仍先做观察性记账，再保持原异常传播。
+- ConversationActor 的每个 RunTicket 持有易失 edit ledger。`full_access` Agent 必须先用 `request_edit_budget` 声明预计修改的 distinct file 数量和理由；只有 builtin `edit/write` 受门控，首次成功修改 canonical path 才消耗，失败和同路径重试不消耗。准入与 completion 用 run-scoped signal + toolCallId 关联；ledger 不持久化，也不是文件系统 sandbox。
 - 每个 `bash` 或 `grep` 工具结果在 Pi extension 的 `tool_result` hook 完成后，由宿主在 `afterToolCall` 直接压缩最终有效 content 的文本 part（image 和其它 part 保持原样）；`grep` 在通用采样后折叠连续同路径行，两个工具都会把同一结果中的非连续长重复行引用到首次输出行，并以原始输入重新执行 10% UTF-8 收益门槛。该 hook 发生在 SDK `tool_execution_end` 和 tool-result `message_end` 前，默认压缩内容进入 Agent 内存、SessionManager/JSONL、UI、后续上下文和 compaction。后续可信 extension 的 `message_end` 仍可显式替换消息；压缩是默认优化而非安全边界。未被再次替换时，被省略的原始行不持久化，也不提供 recovery。
 - gate 启用时固定 sequential tool execution，避免 parallel preflight 在 abort 或权限收紧后执行已积累的调用。
 - `read_only` 只允许最终来源为 builtin 的 Pi 原生 `read/grep/find/ls`；`full_access` 允许所有工具和命令。扩展同名工具不能冒充 builtin。

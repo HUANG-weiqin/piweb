@@ -47,9 +47,19 @@ import {
 } from "./conversation-meta.js";
 import { createLoopListTools } from "./loop-list-tools.js";
 import {
+  canonicalMutationPathKey,
+  createEditBudgetLedger,
+  type EditBudgetLedger,
+  isBuiltinFileMutation,
+  MAX_EDIT_BUDGET_FILES_PER_REQUEST,
+  MAX_EDIT_BUDGET_REASON_CHARACTERS,
+  snapshotEditBudget,
+} from "./edit-budget.js";
+import {
   type CreatedPiSession,
   type CreatePiSessionOptions,
   type PiRuntimeLike,
+  type ToolCallCompletedInput,
   type ToolCallGateInput,
 } from "./pi-runtime.js";
 import {
@@ -163,7 +173,7 @@ export interface ConversationActorOpenOptions {
   toolPolicy?: ToolPolicy;
   createSessionOptions?: Omit<
     CreatePiSessionOptions,
-    "sessionManager" | "toolCallGate" | "extensionAbort"
+    "sessionManager" | "toolCallGate" | "toolCallCompleted" | "extensionAbort"
   >;
   persistSettlement?: (
     settlement: RunSettlement,
@@ -291,6 +301,11 @@ interface RunTicket {
    * removed when its raw user message_end is observed.
    */
   readonly pendingGuidanceObservations: PendingGuidanceObservation[];
+  readonly editBudget: EditBudgetLedger;
+  readonly pendingMutationPathKeys: Map<
+    string,
+    { pathKey: string; runSignal: AbortSignal | undefined }
+  >;
   toolMode: ToolMode;
   extensionErrorMessage?: string;
   sawSdkCompactionAttempt: boolean;
@@ -304,6 +319,14 @@ interface RunTicket {
   awaitingWaitCacheCheckpointUsage: boolean;
   abortPromise?: Promise<void>;
   finishPromise?: Promise<RunSettlement>;
+}
+
+function isPlainDetails(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 function deferred<T>(): Deferred<T> {
@@ -625,6 +648,77 @@ export class ConversationActor {
     });
     appendReservedCustomEntry(this.sessionManager, entry);
     this.compactionThresholdPercent = entry.data.percent;
+  }
+
+  private createEditBudgetTool() {
+    return defineTool({
+      name: "request_edit_budget",
+      label: "Request edit budget",
+      description:
+        "Declare the expected number of distinct files this run will modify before using builtin edit or write. Each successful first modification of a canonical file path consumes one slot; repeat edits to that file do not. Request more when scope grows. This gates only builtin edit/write and is not a filesystem sandbox.",
+      promptSnippet:
+        "Before builtin edit/write, declare how many distinct files this run expects to modify and why.",
+      promptGuidelines: [
+        "Call request_edit_budget before the first builtin edit or write in each run; estimate distinct files, not edit calls.",
+        "If the scope grows, request additional files and explain why before touching another new path.",
+        "Do not use bash, scripts, or extension tools to evade the budget; the host gate only covers builtin edit/write.",
+      ],
+      parameters: Type.Object({
+        fileCount: Type.Integer({
+          minimum: 1,
+          maximum: MAX_EDIT_BUDGET_FILES_PER_REQUEST,
+        }),
+        reason: Type.String({
+          minLength: 1,
+          description:
+            `Reason after trimming must contain 1 to ${MAX_EDIT_BUDGET_REASON_CHARACTERS} characters`,
+        }),
+      }, { additionalProperties: false }),
+      execute: async (_toolCallId, input) => {
+        const ticket = this.activeRun;
+        if (!ticket || ticket.phase !== "running") {
+          throw new Error(
+            "Edit budget can only be requested by the active running conversation",
+          );
+        }
+        const finalInput = input as { fileCount?: unknown; reason?: unknown };
+        if (
+          typeof finalInput.fileCount !== "number"
+          || !Number.isInteger(finalInput.fileCount)
+          || finalInput.fileCount < 1
+          || finalInput.fileCount > MAX_EDIT_BUDGET_FILES_PER_REQUEST
+        ) {
+          throw new Error(
+            `fileCount must be an integer from 1 to ${MAX_EDIT_BUDGET_FILES_PER_REQUEST}`,
+          );
+        }
+        if (typeof finalInput.reason !== "string") {
+          throw new Error("reason must be a string");
+        }
+        const reason = finalInput.reason.trim();
+        if (reason.length === 0) {
+          throw new Error("reason must contain a non-whitespace explanation");
+        }
+        if (reason.length > MAX_EDIT_BUDGET_REASON_CHARACTERS) {
+          throw new Error(
+            `reason exceeds ${MAX_EDIT_BUDGET_REASON_CHARACTERS} characters after trimming`,
+          );
+        }
+        ticket.editBudget.grantedFiles += finalInput.fileCount;
+        const details = {
+          outcome: "edit_budget_granted" as const,
+          addedFiles: finalInput.fileCount,
+          ...snapshotEditBudget(ticket.editBudget),
+        };
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify(details),
+          }],
+          details,
+        };
+      },
+    });
   }
 
   private createContextCompactionTool() {
@@ -1473,6 +1567,8 @@ export class ConversationActor {
       expectsInitialPromptRawUserMessage:
         input.expectsInitialPromptRawUserMessage,
       phase: "queued",
+      editBudget: createEditBudgetLedger(),
+      pendingMutationPathKeys: new Map(),
       toolMode: this.profileSnapshot.role.toolMode,
       sawSdkCompactionAttempt: false,
       compactionErrorReported: false,
@@ -1652,6 +1748,19 @@ export class ConversationActor {
     ) {
       ticket.waitCacheCheckpointDisabled = true;
     }
+  }
+
+  /** Claims guidance already accepted into this run before a wait blocks. */
+  claimPendingGuidanceForWait(
+    ownership: ConversationRunOwnership,
+  ): boolean {
+    const ticket = this.requireOwnedRunningTicket(ownership);
+    const record = ticket.pendingGuidanceObservations.find(
+      (candidate) => !candidate.waited,
+    );
+    if (!record) return false;
+    record.waited = true;
+    return true;
   }
 
   /**
@@ -2433,6 +2542,80 @@ export class ConversationActor {
     if (policy.action === "deny") {
       return { block: true, reason: policy.reason };
     }
+    if (isBuiltinFileMutation(input.toolName, input.toolSource)) {
+      const pathKey = await canonicalMutationPathKey(this.project.cwd, input.args);
+      if (
+        input.signal?.aborted
+        || this.activeRun !== ticket
+        || ticket.phase !== "running"
+      ) {
+        return {
+          block: true,
+          reason: "Run cancelled before edit budget validation",
+        };
+      }
+      if (pathKey === undefined) {
+        return {
+          block: true,
+          reason: "Edit was not executed because its final path argument is invalid",
+        };
+      }
+      const snapshot = snapshotEditBudget(ticket.editBudget);
+      if (
+        !ticket.editBudget.touchedPathKeys.has(pathKey)
+        && snapshot.remainingFiles === 0
+      ) {
+        ticket.editBudget.blockedAttempts += 1;
+        return {
+          block: true,
+          reason:
+            "Edit was not executed because this run has no budget for a new file. Call request_edit_budget with the expected distinct file count and a concise reason, then retry.",
+        };
+      }
+      ticket.pendingMutationPathKeys.set(input.toolCallId, {
+        pathKey,
+        runSignal: input.signal,
+      });
+    }
+    return undefined;
+  }
+
+  private completeToolCall(
+    input: ToolCallCompletedInput,
+  ): { details?: unknown } | undefined {
+    const ticket = this.activeRun;
+    if (!ticket || !isBuiltinFileMutation(input.toolName, input.toolSource)) {
+      return undefined;
+    }
+    const pending = ticket.pendingMutationPathKeys.get(input.toolCallId);
+    if (pending === undefined || pending.runSignal !== input.signal) {
+      return undefined;
+    }
+    ticket.pendingMutationPathKeys.delete(input.toolCallId);
+
+    let countedNewFile = false;
+    if (
+      !input.isError
+      && !ticket.editBudget.touchedPathKeys.has(pending.pathKey)
+    ) {
+      ticket.editBudget.touchedPathKeys.add(pending.pathKey);
+      countedNewFile = true;
+    }
+    const budgetDetails = {
+      countedNewFile,
+      ...snapshotEditBudget(ticket.editBudget),
+    };
+    if (input.details === undefined) {
+      return { details: { piwebEditBudget: budgetDetails } };
+    }
+    if (isPlainDetails(input.details)) {
+      return {
+        details: {
+          ...input.details,
+          piwebEditBudget: budgetDetails,
+        },
+      };
+    }
     return undefined;
   }
 
@@ -2823,10 +3006,14 @@ export class ConversationActor {
               write: (items) => this.writeLoopList(items),
               pause: () => this.pauseLoopList(),
             }),
+            ...(this.profileSnapshot.role.toolMode === "full_access"
+              ? [this.createEditBudgetTool()]
+              : []),
             this.createContextCompactionTool(),
           ],
           sessionManager: this.sessionManager,
           toolCallGate: (input) => this.authorizeToolCall(input),
+          toolCallCompleted: (input) => this.completeToolCall(input),
           extensionAbort: () => {
             void this.abortCurrentRun().catch((error) => {
               this.emitError(error);

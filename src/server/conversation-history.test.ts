@@ -225,7 +225,7 @@ describe("projectConversationHistory", () => {
     });
   });
 
-  it("keeps an unfinished wait tool pending instead of reporting a failure", () => {
+  it("restores an unfinished committed wait as pending with its declaration", () => {
     const manager = SessionManager.inMemory("E:\\work");
     manager.appendMessage(message({
       role: "user",
@@ -241,6 +241,7 @@ describe("projectConversationHistory", () => {
         arguments: {
           conversationId: "peer",
           runId: "peer-run",
+          singleWaitCommitment: "The peer result is on the critical path.",
         },
       }],
       stopReason: "toolUse",
@@ -253,6 +254,7 @@ describe("projectConversationHistory", () => {
       args: {
         conversationId: "peer",
         runId: "peer-run",
+        singleWaitCommitment: "The peer result is on the critical path.",
       },
       status: "pending",
     }]);

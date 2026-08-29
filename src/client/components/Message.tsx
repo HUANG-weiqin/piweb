@@ -15,6 +15,7 @@ import {
   type ToolItem,
 } from "../chat/reducer";
 import { ActivitySpinner } from "./ActivitySpinner";
+import { CommitmentCard, isCommitmentTool } from "./CommitmentCard";
 import { ToolCard, toolPresentation } from "./ToolCard";
 
 const TOOL_PREVIEW_LIMIT = 4;
@@ -210,10 +211,15 @@ function ThinkingPanel({
 
 type AssistantBlock =
   | { kind: "text"; text: string }
-  | { kind: "activity"; parts: ChatMessagePart[] };
+  | { kind: "activity"; parts: ChatMessagePart[] }
+  | { kind: "commitment"; tool: ToolItem };
 
-function assistantBlocks(parts: ChatMessagePart[]): AssistantBlock[] {
+function assistantBlocks(
+  parts: ChatMessagePart[],
+  tools: ToolItem[],
+): AssistantBlock[] {
   const blocks: AssistantBlock[] = [];
+  const toolsById = new Map(tools.map((tool) => [tool.id, tool]));
   for (const part of parts) {
     const previous = blocks[blocks.length - 1];
     if (part.kind === "text") {
@@ -225,6 +231,13 @@ function assistantBlocks(parts: ChatMessagePart[]): AssistantBlock[] {
         blocks.push({ kind: "text", text: part.text });
       }
       continue;
+    }
+    if (part.kind === "tool") {
+      const tool = toolsById.get(part.toolId);
+      if (tool && isCommitmentTool(tool)) {
+        blocks.push({ kind: "commitment", tool });
+        continue;
+      }
     }
     if (previous?.kind === "activity") {
       previous.parts.push(part);
@@ -523,7 +536,7 @@ function MessageView({
       {actions}
     </article>;
   }
-  const blocks = assistantBlocks(orderedMessageParts(message));
+  const blocks = assistantBlocks(orderedMessageParts(message), message.tools);
   const hasActivity = blocks.some((block) => block.kind === "activity");
   if (blocks.length === 0) blocks.push({ kind: "text", text: "" });
   const lastTextIndex = findLastIndex(blocks, (block) => block.kind === "text");
@@ -550,16 +563,25 @@ function MessageView({
   }
 
   return <article className="message assistant">
-    {blocks.map((block, index) => block.kind === "text"
-      ? <Fragment key={`text:${index}`}>
+    {blocks.map((block, index) => {
+      if (block.kind === "text") {
+        return <Fragment key={`text:${index}`}>
           {renderResponseBody(block.text, index)}
-        </Fragment>
-      : <ActivityGroup
-          key={`activity:${index}`}
-          parts={block.parts}
-          tools={message.tools}
-          activeThinking={activeThinking && index === lastActivityIndex}
-        />)}
+        </Fragment>;
+      }
+      if (block.kind === "commitment") {
+        return <CommitmentCard
+          key={`commitment:${block.tool.id}`}
+          tool={block.tool}
+        />;
+      }
+      return <ActivityGroup
+        key={`activity:${index}`}
+        parts={block.parts}
+        tools={message.tools}
+        activeThinking={activeThinking && index === lastActivityIndex}
+      />;
+    })}
     {actions}
   </article>;
 }

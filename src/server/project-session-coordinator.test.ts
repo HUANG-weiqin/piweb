@@ -529,6 +529,7 @@ async function executeTool(
   toolCallId: string,
   input: unknown,
   signal?: AbortSignal,
+  options: { omitSingleWaitCommitment?: boolean } = {},
 ): Promise<unknown> {
   const tool = control.options.workbenchCustomTools?.find(
     (candidate) => candidate.name === name,
@@ -543,9 +544,24 @@ async function executeTool(
       context: unknown,
     ): Promise<ToolResult>;
   };
+  const exactWaitInput = name === "wait_for_session"
+    && typeof input === "object"
+    && input !== null
+    && !Array.isArray(input)
+    && "conversationId" in input
+    && !("targets" in input)
+    && !("singleWaitCommitment" in input)
+    && !options.omitSingleWaitCommitment;
+  const normalizedInput = exactWaitInput
+    ? {
+        ...input,
+        singleWaitCommitment:
+          "This exact result is on the test's critical path and no independent local work remains.",
+      }
+    : input;
   const result = await executable.execute(
     toolCallId,
-    input,
+    normalizedInput,
     signal,
     undefined,
     {},
@@ -1681,6 +1697,7 @@ describe("ProjectSessionCoordinator", () => {
       "todo_read",
       "todo_write",
       "todo_pause",
+      "request_edit_budget",
       "request_context_compaction",
     ]);
     expect(first.profile.role).not.toEqual(second.profile.role);
@@ -4429,6 +4446,8 @@ describe("ProjectSessionCoordinator", () => {
           conversationId: target.conversationId,
           runId: firstRunId,
         },
+        undefined,
+        { omitSingleWaitCommitment: true },
       ) as RunSettlement;
       control.emitFinal("observed");
     });
@@ -4448,6 +4467,151 @@ describe("ProjectSessionCoordinator", () => {
     });
     expect(waited?.runId).not.toBe(secondRunId);
     expect(sourceActivities).not.toContain("waiting");
+  });
+
+  it("returns a settlement that races the final pre-commitment scan", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const targetStarted = deferred();
+    const releaseTarget = deferred();
+    const targetRunId = randomUUID();
+    fixture.runtime.control(target.conversationId).enqueue(
+      blocksUntil(targetStarted, releaseTarget, "raced target result"),
+    );
+    const targetCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      target.conversationId,
+      targetRunId,
+      "settle during the immediate wait scan",
+    );
+    await targetStarted.promise;
+
+    let waitResult: unknown;
+    let listCalls = 0;
+    const sourceActivities: string[] = [];
+    const unsubscribe = fixture.coordinator.subscribe(fixture.handle, (event) => {
+      if (event.type === "activity" && event.conversationId === source.conversationId) {
+        sourceActivities.push(event.activity.kind);
+      }
+    });
+    fixture.runtime.control(source.conversationId).enqueue(async (control) => {
+      const inbox = coordinatorInbox(fixture.handle);
+      const originalList = inbox.list.bind(inbox);
+      inbox.list = async (...args) => {
+        listCalls += 1;
+        if (listCalls === 4) {
+          releaseTarget.resolve();
+          await waitUntil(
+            () => target.getActivity().kind === "idle",
+            "target settlement during the final commitment scan",
+          );
+        }
+        return originalList(...args);
+      };
+      try {
+        waitResult = await executeTool(
+          control,
+          "wait_for_session",
+          "raced-uncommitted-exact-wait",
+          { conversationId: target.conversationId, runId: targetRunId },
+          undefined,
+          { omitSingleWaitCommitment: true },
+        );
+      } finally {
+        inbox.list = originalList;
+      }
+      control.emitFinal("observed the raced settlement");
+    });
+
+    await fixture.coordinator.prompt(
+      fixture.handle,
+      source.conversationId,
+      randomUUID(),
+      "wait only if the target is still running",
+    );
+    unsubscribe();
+    await targetCompletion;
+
+    expect(listCalls).toBeGreaterThanOrEqual(4);
+    expect(waitResult).toMatchObject({
+      runId: targetRunId,
+      outcome: "completed",
+      finalText: "raced target result",
+    });
+    expect(sourceActivities).not.toContain("waiting");
+  });
+
+  it("requires a commitment before an exact wait would block", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const targetStarted = deferred();
+    const releaseTarget = deferred();
+    const targetRunId = randomUUID();
+    fixture.runtime.control(target.conversationId).enqueue(
+      blocksUntil(targetStarted, releaseTarget, "target result"),
+    );
+    const targetCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      target.conversationId,
+      targetRunId,
+      "keep running",
+    );
+    await targetStarted.promise;
+
+    let waitResult: unknown;
+    const sourceActivities: string[] = [];
+    const unsubscribe = fixture.coordinator.subscribe(fixture.handle, (event) => {
+      if (event.type === "activity" && event.conversationId === source.conversationId) {
+        sourceActivities.push(event.activity.kind);
+      }
+    });
+    fixture.runtime.control(source.conversationId).enqueue(async (control) => {
+      waitResult = await executeTool(
+        control,
+        "wait_for_session",
+        "uncommitted-exact-wait",
+        { conversationId: target.conversationId, runId: targetRunId },
+        undefined,
+        { omitSingleWaitCommitment: true },
+      );
+      control.emitFinal("continued without blocking");
+    });
+
+    await fixture.coordinator.prompt(
+      fixture.handle,
+      source.conversationId,
+      randomUUID(),
+      "try to wait without a reason",
+    );
+    unsubscribe();
+
+    expect(waitResult).toMatchObject({
+      outcome: "single_wait_commitment_required",
+      message: expect.stringContaining("No wait was started"),
+    });
+    expect(sourceActivities).not.toContain("waiting");
+    const internal = fixture.handle as unknown as {
+      context: { waiters: Map<string, Set<unknown>> };
+    };
+    expect(internal.context.waiters.size).toBe(0);
+    expect(target.getActivity()).toEqual({ kind: "running", runId: targetRunId });
+
+    releaseTarget.resolve();
+    await targetCompletion;
   });
 
   it("resumes an aggregate wait when the second target settles and unregisters the first", async () => {
@@ -5324,6 +5488,8 @@ describe("ProjectSessionCoordinator", () => {
           conversationId: waitedPeer.conversationId,
           runId: RUN_A,
         },
+        undefined,
+        { omitSingleWaitCommitment: true },
       );
       control.beginNextModelTurn();
       waitResolved.resolve();
@@ -6089,6 +6255,8 @@ describe("ProjectSessionCoordinator", () => {
           conversationId: waitedPeer.conversationId,
           runId: RUN_A,
         },
+        undefined,
+        { omitSingleWaitCommitment: true },
       );
       secondResolved.resolve();
       control.emitUserMessage("initial prompt settlement");

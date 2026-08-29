@@ -99,8 +99,18 @@ export type ToolCallGate = (
   input: ToolCallGateInput,
 ) => Promise<{ block?: boolean; reason?: string } | undefined>;
 
+export interface ToolCallCompletedInput extends ToolCallGateInput {
+  isError: boolean;
+  details: unknown;
+}
+
+export type ToolCallCompleted = (
+  input: ToolCallCompletedInput,
+) => Promise<{ details?: unknown } | undefined> | { details?: unknown } | undefined;
+
 export interface CreatePiSessionOptions {
   toolCallGate?: ToolCallGate;
+  toolCallCompleted?: ToolCallCompleted;
   sessionManager?: SessionManager;
   extensionUI?: PortableExtensionUI;
   extensionAbort?: () => void;
@@ -695,6 +705,9 @@ export class PiRuntime implements PiRuntimeLike {
       if (options.toolCallGate) {
         this.installToolCallGate(createdSession, options.toolCallGate);
       }
+      if (options.toolCallCompleted) {
+        this.installToolCallCompletion(createdSession, options.toolCallCompleted);
+      }
       if (options.turnBoundaryCheck) {
         turnBoundaryController = installAgentTurnBoundaryCheck(
           createdSession,
@@ -990,6 +1003,49 @@ export class PiRuntime implements PiRuntimeLike {
         args: context.args,
         signal,
       });
+    };
+  }
+
+  private installToolCallCompletion(
+    session: AgentSession,
+    completed: ToolCallCompleted,
+  ): void {
+    const earlierHook = session.agent.afterToolCall;
+    session.agent.afterToolCall = async (context, signal) => {
+      const input = (): ToolCallCompletedInput => ({
+        toolCallId: String(context.toolCall.id),
+        toolName: String(context.toolCall.name),
+        toolSource: session.getAllTools().find((tool) => (
+          tool.name === context.toolCall.name
+        ))?.sourceInfo.source ?? "unknown",
+        args: context.args,
+        ...(signal === undefined ? {} : { signal }),
+        isError: context.isError,
+        details: context.result.details,
+      });
+
+      let earlierPatch: Awaited<ReturnType<NonNullable<typeof earlierHook>>>;
+      try {
+        earlierPatch = await earlierHook?.(context, signal);
+      } catch (error) {
+        // The builtin already executed. Give the host a chance to account for
+        // the observed side effect, while preserving the extension failure as
+        // the authoritative tool error.
+        try {
+          await completed(input());
+        } catch {
+          // Completion accounting is observational here and must not replace
+          // the extension error that already controls SDK settlement.
+        }
+        throw error;
+      }
+
+      const completionPatch = await completed({
+        ...input(),
+        details: earlierPatch?.details ?? context.result.details,
+      });
+      if (completionPatch?.details === undefined) return earlierPatch;
+      return { ...earlierPatch, details: completionPatch.details };
     };
   }
 

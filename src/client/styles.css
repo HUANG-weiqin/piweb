@@ -12,6 +12,9 @@
   --line: #dad6cb;
   --line-strong: #aaa397;
   --muted: #716d63;
+  --intent: #5d57a5;
+  --intent-soft: #f0eef9;
+  --intent-line: #cbc6e8;
   --accent: #24221d;
   --accent-hover: #3a372f;
   --on-accent: #ffffff;
@@ -1204,6 +1207,166 @@ pre {
   margin: 6px 0 2px;
   padding: 6px 9px;
   font-size: 12px;
+}
+
+.commitment-card {
+  margin: 9px 0 11px;
+  overflow: hidden;
+  border: 1px solid var(--intent-line);
+  border-left: 3px solid var(--intent);
+  border-radius: 11px;
+  color: color-mix(in srgb, var(--intent) 34%, var(--accent));
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--intent-soft) 82%, var(--panel)) 0%,
+    color-mix(in srgb, var(--intent-soft) 42%, var(--panel)) 100%
+  );
+}
+
+.commitment-card.is-warning {
+  border-color: color-mix(in srgb, var(--warning) 32%, var(--line));
+  border-left-color: var(--warning);
+  color: color-mix(in srgb, var(--warning) 72%, var(--accent));
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--warning-soft) 68%, var(--panel)) 0%,
+    color-mix(in srgb, var(--warning-soft) 26%, var(--panel)) 100%
+  );
+}
+
+.commitment-card.is-error {
+  border-color: color-mix(in srgb, var(--danger) 30%, var(--line));
+  border-left-color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 68%, var(--accent));
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--danger-soft) 62%, var(--panel)) 0%,
+    color-mix(in srgb, var(--danger-soft) 24%, var(--panel)) 100%
+  );
+}
+
+.commitment-card > summary {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto 12px;
+  min-height: 44px;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 11px 9px 9px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.commitment-card > summary::-webkit-details-marker {
+  display: none;
+}
+
+.commitment-card > summary::marker {
+  content: "";
+}
+
+.commitment-card > summary:hover {
+  background: color-mix(in srgb, var(--intent) 4%, transparent);
+}
+
+.commitment-card > summary:focus-visible {
+  outline: 2px solid color-mix(in srgb, currentColor 38%, transparent);
+  outline-offset: -3px;
+}
+
+.commitment-card.is-warning > summary:hover {
+  background: color-mix(in srgb, var(--warning) 5%, transparent);
+}
+
+.commitment-card.is-error > summary:hover {
+  background: color-mix(in srgb, var(--danger) 5%, transparent);
+}
+
+.commitment-node {
+  width: 9px;
+  height: 9px;
+  margin-left: 2px;
+  transform: rotate(45deg);
+  border: 2px solid currentColor;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+}
+
+.commitment-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.commitment-eyebrow {
+  color: currentColor;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.13em;
+}
+
+.commitment-copy strong {
+  overflow: hidden;
+  color: color-mix(in srgb, currentColor 58%, var(--accent));
+  font-size: 13px;
+  font-weight: 720;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.commitment-reason {
+  display: -webkit-box;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--muted) 88%, currentColor);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.commitment-facts {
+  display: flex;
+  max-width: 230px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.commitment-fact {
+  display: inline-flex;
+  min-height: 22px;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  border-radius: 999px;
+  color: color-mix(in srgb, currentColor 80%, var(--accent));
+  background: color-mix(in srgb, var(--panel-strong) 66%, transparent);
+  font-size: 11px;
+  font-weight: 680;
+  white-space: nowrap;
+}
+
+.commitment-spinner {
+  width: 12px;
+  height: 12px;
+}
+
+.commitment-chevron {
+  grid-column: 4;
+  font-size: 11px;
+  transition: transform 160ms ease;
+}
+
+.commitment-card[open] > summary .commitment-chevron {
+  transform: rotate(180deg);
+}
+
+.commitment-card > .tool-body {
+  padding: 2px 11px 9px 34px;
+  border-top: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+  color: var(--muted);
+  background: color-mix(in srgb, var(--panel) 42%, transparent);
 }
 
 .tool {
@@ -3674,6 +3837,9 @@ pre {
     --line: #3b3c34;
     --line-strong: #6d6b61;
     --muted: #aaa69b;
+    --intent: #aaa4f0;
+    --intent-soft: #29263d;
+    --intent-line: #4b4769;
     --accent: #efede5;
     --accent-hover: #ffffff;
     --on-accent: #1b1a16;
@@ -3832,6 +3998,22 @@ pre {
     row-gap: 1px;
   }
 
+  .commitment-card > summary {
+    grid-template-columns: 16px minmax(0, 1fr) 12px;
+  }
+
+  .commitment-facts {
+    max-width: none;
+    grid-row: 2;
+    grid-column: 2;
+    justify-content: flex-start;
+  }
+
+  .commitment-chevron {
+    grid-row: 1;
+    grid-column: 3;
+  }
+
   .activity-group-detail {
     display: none;
   }
@@ -3917,7 +4099,8 @@ pre {
   .workspace-opening-spinner,
   .compaction-spinner,
   .thinking-spinner,
-  .tool-spinner {
+  .tool-spinner,
+  .commitment-spinner {
     animation: none !important;
   }
 }

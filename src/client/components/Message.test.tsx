@@ -57,6 +57,88 @@ describe("Message", () => {
     expect(screen.getByText("工具调用（1）")).toBeInTheDocument();
   });
 
+  it("promotes commitments without duplicating them in the work process", () => {
+    const message: ChatMessage = {
+      id: "commitments",
+      runId: "run-commitments",
+      role: "assistant",
+      text: "",
+      thinking: "",
+      tools: [
+        {
+          id: "budget",
+          name: "request_edit_budget",
+          args: { fileCount: 2, reason: "修改两个客户端文件。" },
+          status: "done",
+        },
+        {
+          id: "committed-wait",
+          name: "wait_for_session",
+          args: {
+            conversationId: "reviewer",
+            runId: "review-run",
+            singleWaitCommitment: "审查结果位于提交前关键路径。",
+          },
+          status: "pending",
+        },
+        {
+          id: "warning-wait",
+          name: "wait_for_session",
+          args: { conversationId: "blocked-peer", runId: "blocked-run" },
+          result: {
+            content: [],
+            details: { outcome: "single_wait_commitment_required" },
+          },
+          status: "done",
+        },
+        {
+          id: "read",
+          name: "read",
+          args: { path: "src/index.ts" },
+          status: "done",
+        },
+        {
+          id: "plain-wait",
+          name: "wait_for_session",
+          args: {
+            conversationId: "other-peer",
+            runId: "other-run",
+            singleWaitCommitment: "   ",
+          },
+          status: "pending",
+        },
+        {
+          id: "invalid-aggregate-wait",
+          name: "wait_for_session",
+          args: {
+            targets: [{ conversationId: "peer", runId: "peer-run" }],
+            singleWaitCommitment: "This mixed shape must be rejected.",
+          },
+          result: { message: "wait_for_session cannot mix targets" },
+          status: "error",
+        },
+      ],
+      parts: [
+        { kind: "tool", toolId: "budget" },
+        { kind: "tool", toolId: "committed-wait" },
+        { kind: "tool", toolId: "warning-wait" },
+        { kind: "tool", toolId: "read" },
+        { kind: "tool", toolId: "plain-wait" },
+        { kind: "tool", toolId: "invalid-aggregate-wait" },
+      ],
+    };
+    const { container } = render(<Message message={message} />);
+
+    expect(container.querySelectorAll(".commitment-card")).toHaveLength(3);
+    expect(screen.getByText("编辑承诺")).toBeInTheDocument();
+    expect(screen.getByText("单会话等待承诺")).toBeInTheDocument();
+    expect(screen.getByText("等待未开始")).toBeInTheDocument();
+    expect(screen.getByText("1 步 · 3 次工具调用")).toBeInTheDocument();
+    expect(container.querySelectorAll("details.tool")).toHaveLength(3);
+    expect(container.querySelectorAll("details.tool-error")).toHaveLength(1);
+    expect(screen.queryByText("工具调用（4）")).not.toBeInTheDocument();
+  });
+
   it("expands the work process before its individual tool details", () => {
     const { container } = render(<Message message={toolsMessage} />);
 

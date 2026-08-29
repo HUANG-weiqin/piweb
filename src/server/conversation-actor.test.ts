@@ -3775,6 +3775,165 @@ describe("ConversationActor", () => {
     expect(lease.releases).toBe(1);
   });
 
+  it("grants and consumes a run-scoped distinct-file edit budget", async () => {
+    const fullAccessProfile = {
+      ...profile(),
+      role: { ...profile().role, toolMode: "full_access" as const },
+    };
+    const fixture = await openActor({ profile: fullAccessProfile });
+    const budgetTool = fixture.runtime.createOptions?.workbenchCustomTools?.find(
+      ({ name }) => name === "request_edit_budget",
+    );
+    expect(budgetTool).toBeDefined();
+
+    const gate = fixture.runtime.createOptions?.toolCallGate;
+    const complete = fixture.runtime.createOptions?.toolCallCompleted;
+    const signal = new AbortController().signal;
+    const decisions: Array<unknown> = [];
+    const completions: Array<unknown> = [];
+    fixture.runtime.session.promptImplementation = async () => {
+      decisions.push(await gate?.({
+        toolCallId: "blocked-before-grant",
+        toolName: "edit",
+        toolSource: "builtin",
+        args: { path: "src/server/conversation-actor.ts" },
+        signal,
+      }));
+      await expect(budgetTool!.execute("invalid-count", {
+        fileCount: 101,
+        reason: "A transformed request must keep the declared bounds.",
+      })).rejects.toThrow("fileCount must be an integer from 1 to 100");
+      await expect(budgetTool!.execute("invalid-reason", {
+        fileCount: 1,
+        reason: ` ${"x".repeat(2_001)} `,
+      })).rejects.toThrow("reason exceeds 2000 characters after trimming");
+      const grant = await budgetTool?.execute("grant-1", {
+        fileCount: 1,
+        reason: ` ${"x".repeat(2_000)} `,
+      });
+      completions.push(grant?.details);
+
+      decisions.push(await gate?.({
+        toolCallId: "first-edit",
+        toolName: "edit",
+        toolSource: "builtin",
+        args: { path: "src/server/conversation-actor.ts" },
+        signal,
+      }));
+      completions.push(await complete?.({
+        toolCallId: "first-edit",
+        toolName: "edit",
+        toolSource: "builtin",
+        args: { path: "src/server/conversation-actor.ts" },
+        signal: new AbortController().signal,
+        isError: false,
+        details: undefined,
+      }));
+      completions.push(await complete?.({
+        toolCallId: "first-edit",
+        toolName: "edit",
+        toolSource: "builtin",
+        args: { path: "src/server/conversation-actor.ts" },
+        signal,
+        isError: true,
+        details: { retained: true },
+      }));
+
+      decisions.push(await gate?.({
+        toolCallId: "retry-edit",
+        toolName: "edit",
+        toolSource: "builtin",
+        args: { path: "src/server/conversation-actor.ts" },
+        signal,
+      }));
+      completions.push(await complete?.({
+        toolCallId: "retry-edit",
+        toolName: "edit",
+        toolSource: "builtin",
+        args: { path: "src/server/conversation-actor.ts" },
+        signal,
+        isError: false,
+        details: undefined,
+      }));
+
+      decisions.push(await gate?.({
+        toolCallId: "same-file-alias",
+        toolName: "write",
+        toolSource: "builtin",
+        args: { path: "src/server/../server/conversation-actor.ts" },
+        signal,
+      }));
+      completions.push(await complete?.({
+        toolCallId: "same-file-alias",
+        toolName: "write",
+        toolSource: "builtin",
+        args: { path: "src/server/../server/conversation-actor.ts" },
+        signal,
+        isError: false,
+        details: undefined,
+      }));
+
+      decisions.push(await gate?.({
+        toolCallId: "second-file",
+        toolName: "edit",
+        toolSource: "builtin",
+        args: { path: "src/server/meta-tools.ts" },
+        signal,
+      }));
+    };
+
+    await fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "edit with an explicit scope",
+      origin: "browser",
+    });
+
+    expect(decisions[0]).toMatchObject({
+      block: true,
+      reason: expect.stringContaining("request_edit_budget"),
+    });
+    expect(completions[0]).toMatchObject({
+      outcome: "edit_budget_granted",
+      addedFiles: 1,
+      remainingFiles: 1,
+      blockedAttempts: 1,
+    });
+    expect(decisions[1]).toBeUndefined();
+    expect(completions[1]).toBeUndefined();
+    expect(completions[2]).toMatchObject({
+      details: {
+        retained: true,
+        piwebEditBudget: {
+          countedNewFile: false,
+          touchedFiles: 0,
+          remainingFiles: 1,
+        },
+      },
+    });
+    expect(decisions[2]).toBeUndefined();
+    expect(completions[3]).toMatchObject({
+      details: {
+        piwebEditBudget: {
+          countedNewFile: true,
+          touchedFiles: 1,
+          remainingFiles: 0,
+        },
+      },
+    });
+    expect(decisions[3]).toBeUndefined();
+    expect(completions[4]).toMatchObject({
+      details: {
+        piwebEditBudget: {
+          countedNewFile: false,
+          touchedFiles: 1,
+          remainingFiles: 0,
+        },
+      },
+    });
+    expect(decisions[4]).toMatchObject({ block: true });
+    await fixture.actor.dispose();
+  });
+
   it("uses the frozen role tool policy instead of mutable project state", async () => {
     const fixture = await openActor();
     const decisions: Array<

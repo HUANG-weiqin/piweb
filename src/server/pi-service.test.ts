@@ -1159,6 +1159,8 @@ describe("PiConnection lifecycle", () => {
             arguments: {
               conversationId: targetState.conversationId,
               runId: RUN_B,
+              singleWaitCommitment:
+                "This peer result is required before the integration can continue.",
             },
           }],
           stopReason: "toolUse",
@@ -1172,6 +1174,8 @@ describe("PiConnection lifecycle", () => {
           args: {
             conversationId: targetState.conversationId,
             runId: RUN_B,
+            singleWaitCommitment:
+              "This peer result is required before the integration can continue.",
           },
         }));
         const execute = (waitTool as unknown as {
@@ -1180,7 +1184,12 @@ describe("PiConnection lifecycle", () => {
         const waiting = execute.call(
           waitTool,
           "wait-tool",
-          { conversationId: targetState.conversationId, runId: RUN_B },
+          {
+            conversationId: targetState.conversationId,
+            runId: RUN_B,
+            singleWaitCommitment:
+              "This peer result is required before the integration can continue.",
+          },
           undefined,
           undefined,
           {},

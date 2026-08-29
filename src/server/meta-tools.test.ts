@@ -368,6 +368,36 @@ describe("createMetaTools", () => {
     );
   });
 
+  it("trims and forwards a single-wait commitment", async () => {
+    const fake = service();
+    const wait = tool(
+      createMetaTools(sourceConversationId, fake, true),
+      "wait_for_session",
+    );
+
+    await wait.execute(
+      "committed-wait",
+      {
+        conversationId: targetConversationId,
+        runId: targetRunId,
+        singleWaitCommitment: "  This review is on the critical path.  ",
+      },
+      undefined,
+      undefined,
+      {} as never,
+    );
+
+    expect(fake.waitForSession).toHaveBeenCalledWith(
+      sourceConversationId,
+      {
+        conversationId: targetConversationId,
+        runId: targetRunId,
+        singleWaitCommitment: "This review is on the critical path.",
+      },
+      undefined,
+    );
+  });
+
   it("forwards a bounded, de-duplicated aggregate wait set", async () => {
     const fake = service();
     const wait = tool(
@@ -429,6 +459,19 @@ describe("createMetaTools", () => {
           conversationId: secondTargetConversationId,
           runId: secondTargetRunId,
         }],
+      } as never,
+      undefined,
+      undefined,
+      {} as never,
+    )).rejects.toThrow(/cannot mix/i);
+    await expect(wait.execute(
+      "commitment-with-targets",
+      {
+        targets: [{
+          conversationId: secondTargetConversationId,
+          runId: secondTargetRunId,
+        }],
+        singleWaitCommitment: "not valid for aggregate waits",
       } as never,
       undefined,
       undefined,

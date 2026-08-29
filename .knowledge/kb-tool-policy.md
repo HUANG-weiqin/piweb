@@ -1,6 +1,6 @@
 # 工具权限
 
-`updated: 2026-08-28`
+`updated: 2026-08-29`
 
 ## 这个模块是干什么的
 
@@ -15,8 +15,10 @@ conversation role snapshot
 → project extension tool_call hook
 → stable JSON validation + recursive freeze
 → workbench ToolPolicy
+→ run-scoped edit-budget check（仅 builtin edit/write）
 → allow 或 hard deny
 → SDK block result 或 tool.execute
+→ 成功 mutation 的 completion accounting
 ```
 
 权限层本身没有通用的逐工具询问、一次性许可或命令白名单；`propose_role_revision` 是工具语义内的窄例外，必须等待 conversation-scoped editor 返回用户提交文本后才写角色 prompt。
@@ -30,7 +32,7 @@ conversation role snapshot
 
 ## 策略
 
-- `full_access` 允许所有工具和命令，不区分来源或目标位置；项目外路径和 `.piweb` 也不额外拦截。
+- `full_access` 在角色授权层允许所有工具和命令，不区分来源或目标位置；项目外路径和 `.piweb` 也不额外拦截。ConversationActor 另对 builtin `edit/write` 执行 run-scoped 编辑额度门，它是认知承诺而不是权限或路径 sandbox，`bash`、脚本和扩展工具仍可绕过。
 - `read_only` 对模型只展示 `source=builtin` 的 Pi 原生 `read / grep / find / ls`，以及 `source=sdk` 的宿主 `git_status / git_diff`、conversation-scoped `notebook_write / notebook_list / notebook_grep / notebook_read`、LoopList `todo_read / todo_write / todo_pause`、`request_context_compaction` 和 `list_roles / read_role / propose_role_revision`；`bash / edit / write`、会话编排 meta 和其他扩展工具不进入有效 registry、model tools 或 system prompt。
 - 执行 gate 独立重复同一 identity 约束；`read_only` 直接拒绝命令、项目写入、unknown、会话编排 meta，以及同名 extension/project 工具。三个角色工具只有 `source=sdk` 时放行；工具不可见不是权限边界，硬拒绝仍不可删除。
 - 扩展可以用 `read` 等名称覆盖内置工具；策略必须同时检查最终 `toolName` 和 SDK `ToolInfo.sourceInfo.source`，不能只按名称放行。PiRuntime 对每次 `setActiveToolsByName`（包括 extension refresh 和 `setActiveTools`）重新做 source-aware 投影，同名覆盖发生后宁可移除该工具，也不把扩展 schema/snippet 暴露给只读模型。
@@ -63,6 +65,7 @@ ConversationActor 按角色模式和会话管理能力注入宿主工具：
 read_only only: git_status / git_diff
 all roles: notebook_write / notebook_list / notebook_grep / notebook_read
 all roles: todo_read / todo_write / todo_pause
+full_access only: request_edit_budget
 all roles: request_context_compaction
 all roles: list_roles / read_role / propose_role_revision
 canManageSessions only: list_sessions / current_session / peek_session
@@ -71,6 +74,12 @@ canManageSessions only: wait_for_session / abort_session / delete_session
 ```
 
 这些宿主 schema 同样避免 `anyOf/oneOf`，以兼容对工具 schema 子集较严格的 provider。
+
+### 编辑额度承诺
+
+每个 RunTicket 从零额度开始。`request_edit_budget(fileCount, reason)` 只在 `full_access` 会话注册，单次声明 1–100 个 distinct file，理由 trim 后必须非空且不超过 2000 字符；同一 run 的多次声明相加。角色 ToolPolicy 先决策，随后只有最终来源为 builtin 的 `edit/write` 才检查额度。目标路径按 Pi 的 path 规范化相对 canonical project cwd 解析；存在文件使用 realpath，不存在文件使用规范化绝对路径，Windows identity 大小写折叠。首次**成功**修改一个新 canonical path 才消耗一格；失败调用和同路径重试不消耗。completion 以同一 run 的 AbortSignal + toolCallId 关联，旧 run 的迟到结果不能修改新 ticket。
+
+工具结果只报告 `grantedFiles / touchedFiles / remainingFiles / blockedAttempts` 等可观察事实，不把声明时刻伪装成“已遵守”。SDK extension 的 `tool_result` hook 先运行；即使该 hook 在 builtin 已成功后抛错，ledger 仍按原始 execute 状态记账，而原异常继续传播。普通 object details 可附加 `piwebEditBudget`，非对象 details 不覆盖。ledger 在 run 结算时自然销毁，不持久化，也不宣称覆盖 `bash` 或进程内项目扩展。
 
 它们仍是 Agent 工具调用，不是绕过 gate 的内部 RPC：
 

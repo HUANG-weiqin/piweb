@@ -9,6 +9,7 @@ const META_TOOL_NAMES = new Set([
   "list_sessions",
   "current_session",
   "peek_session",
+  "request_edit_budget",
   "start_session",
   "start_temporary_session",
   "send_session_message",
@@ -19,8 +20,10 @@ const META_TOOL_NAMES = new Set([
 
 const FIELD_LABELS: Record<string, string> = {
   activity: "运行状态",
+  addedFiles: "新增额度",
   attention: "需要关注",
   available: "可用",
+  blockedAttempts: "拦截次数",
   canManageSessions: "可管理会话",
   cmd: "命令",
   command: "命令",
@@ -35,7 +38,9 @@ const FIELD_LABELS: Record<string, string> = {
   diff: "变更预览",
   edits: "编辑",
   file: "文件",
+  fileCount: "预计文件数",
   glob: "文件范围",
+  grantedFiles: "总额度",
   handle: "句柄",
   id: "标识",
   ignoreCase: "忽略大小写",
@@ -49,12 +54,14 @@ const FIELD_LABELS: Record<string, string> = {
   nextCursor: "下一页游标",
   offset: "起始位置",
   ok: "状态",
+  outcome: "结果",
   patch: "补丁",
   path: "路径",
   pattern: "搜索内容",
   preview: "预览",
   provider: "提供商",
   reason: "原因",
+  remainingFiles: "剩余额度",
   result: "结果",
   revision: "版本",
   role: "角色",
@@ -63,17 +70,23 @@ const FIELD_LABELS: Record<string, string> = {
   scope: "查看范围",
   self: "当前会话",
   sessions: "会话",
+  singleWaitCommitment: "单独等待理由",
   state: "状态",
   status: "状态",
   task: "任务",
   temporary: "临时会话",
   timeout: "超时",
   title: "标题",
+  touchedFiles: "已修改文件",
   truncated: "内容已截断",
   updatedAt: "更新时间",
 };
 
 const FIELD_VALUE_LABELS: Record<string, Record<string, string>> = {
+  outcome: {
+    edit_budget_granted: "已授予编辑额度",
+    single_wait_commitment_required: "需要单会话等待承诺",
+  },
   kind: {
     cancelling: "正在终止",
     conversation: "Agent 会话",
@@ -318,6 +331,23 @@ function ToolResult({ name, result }: { name: string; result: unknown }) {
   return <ReadableValue value={result} />;
 }
 
+export function ToolDetails({ tool }: { tool: ToolItem }) {
+  return <div className="tool-body">
+    {tool.args !== undefined
+      ? <section className="tool-section">
+          <h4>调用内容</h4>
+          <ReadableValue value={tool.args} />
+        </section>
+      : null}
+    {tool.result !== undefined
+      ? <section className="tool-section">
+          <h4>结果</h4>
+          <ToolResult name={tool.name} result={tool.result} />
+        </section>
+      : null}
+  </div>;
+}
+
 export function ToolCard({ tool }: { tool: ToolItem }) {
   const presentation = toolPresentation(tool);
   const status = statusLabel(tool.status);
@@ -342,19 +372,6 @@ export function ToolCard({ tool }: { tool: ToolItem }) {
       </span>
       <span className="tool-chevron" aria-hidden="true">⌄</span>
     </summary>
-    <div className="tool-body">
-      {tool.args !== undefined
-        ? <section className="tool-section">
-            <h4>调用内容</h4>
-            <ReadableValue value={tool.args} />
-          </section>
-        : null}
-      {tool.result !== undefined
-        ? <section className="tool-section">
-            <h4>结果</h4>
-            <ToolResult name={tool.name} result={tool.result} />
-          </section>
-        : null}
-    </div>
+    <ToolDetails tool={tool} />
   </details>;
 }

@@ -519,20 +519,73 @@ describe("PiRuntime session ownership", () => {
       content: [{ type: "text" as const, text: originalText }],
       details: { executed: true },
     };
-    const created = await runtime.createSession(cwd);
+    const completed = vi.fn((input: { details: unknown }) => ({
+      details: {
+        ...(input.details as Record<string, unknown>),
+        observed: true,
+      },
+    }));
+    const created = await runtime.createSession(cwd, {
+      toolCallCompleted: completed,
+    });
     const afterToolCall = created.session.agent.afterToolCall;
     if (!afterToolCall) throw new Error("tool result hook was not installed");
 
     const patch = await afterToolCall({
-      toolCall: { name: "grep" },
+      toolCall: { id: "grep-call", name: "grep" },
+      args: { pattern: "x" },
       result: original,
+      isError: false,
     } as Parameters<typeof afterToolCall>[0]);
 
     expect(patch?.content).toEqual([{
       type: "text",
       text: expect.stringContaining("[... omitted"),
     }]);
+    expect(patch?.details).toEqual({ executed: true, observed: true });
+    expect(completed).toHaveBeenCalledWith(expect.objectContaining({
+      toolCallId: "grep-call",
+      toolName: "grep",
+      toolSource: "builtin",
+      args: { pattern: "x" },
+      isError: false,
+      details: { executed: true },
+    }));
     expect(original.content).toEqual([{ type: "text", text: originalText }]);
+    await created.dispose();
+  });
+
+  it("reports the original execution to completion accounting when an extension result hook fails", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-tool-completion-error-"));
+    const extensionError = new Error("extension result hook failed");
+    const runtime = await testRuntime(
+      () => [],
+      async (result) => {
+        result.session.agent.afterToolCall = async () => {
+          throw extensionError;
+        };
+      },
+    );
+    const completed = vi.fn();
+    const created = await runtime.createSession(cwd, {
+      toolCallCompleted: completed,
+    });
+    const afterToolCall = created.session.agent.afterToolCall;
+    if (!afterToolCall) throw new Error("tool result hook was not installed");
+
+    await expect(afterToolCall({
+      toolCall: { id: "edit-call", name: "edit" },
+      args: { path: "src/index.ts" },
+      result: { content: [], details: { executed: true } },
+      isError: false,
+    } as Parameters<typeof afterToolCall>[0])).rejects.toBe(extensionError);
+
+    expect(completed).toHaveBeenCalledWith(expect.objectContaining({
+      toolCallId: "edit-call",
+      toolName: "edit",
+      isError: false,
+      details: { executed: true },
+    }));
     await created.dispose();
   });
 

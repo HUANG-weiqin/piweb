@@ -176,12 +176,22 @@ interface SessionCheckpointWaitResult {
   outcome: "checkpoint";
 }
 
+interface SessionWaitCommitmentRequiredResult {
+  outcome: "single_wait_commitment_required";
+  message: string;
+}
+
 type SessionWaitResult =
   | RunSettlement
   | (RunSettlement & { conversationId: string })
   | SessionMessageWaitResult
   | SessionGuidanceWaitResult
-  | SessionCheckpointWaitResult;
+  | SessionCheckpointWaitResult
+  | SessionWaitCommitmentRequiredResult;
+
+type FinalExactWaitCheck =
+  | { kind: "result"; result: SessionWaitResult }
+  | { kind: "committed_reply" };
 
 interface CompletionWaiter extends WaiterBase {
   kind: "completion";
@@ -2350,6 +2360,7 @@ export class ProjectSessionCoordinator {
     sourceConversationId: string,
     targetConversationId: string,
     runId: string,
+    singleWaitCommitment?: string,
     signal?: AbortSignal,
   ): Promise<SessionWaitResult> {
     return this.waitForSessionTargets(
@@ -2357,6 +2368,7 @@ export class ProjectSessionCoordinator {
       sourceConversationId,
       "exact",
       Object.freeze([{ conversationId: targetConversationId, runId }]),
+      singleWaitCommitment,
       signal,
     );
   }
@@ -2372,6 +2384,7 @@ export class ProjectSessionCoordinator {
       sourceConversationId,
       "aggregate",
       targets,
+      undefined,
       signal,
     );
   }
@@ -2381,6 +2394,7 @@ export class ProjectSessionCoordinator {
     sourceConversationId: string,
     mode: "exact" | "aggregate",
     targets: readonly ConversationWaitingTarget[],
+    singleWaitCommitment?: string,
     signal?: AbortSignal,
   ): Promise<SessionWaitResult> {
     if (targets.some(({ conversationId }) => (
@@ -2462,16 +2476,24 @@ export class ProjectSessionCoordinator {
       return { committedReply, settlements, waitsForTemporaryReturn };
     });
     this.throwIfAborted(signal);
-    if (
-      preliminary.committedReply
-      || (mode === "exact" && preliminary.waitsForTemporaryReturn)
-    ) {
+    if (preliminary.committedReply) {
       return this.waitForSessionEvent(
         context,
         source,
         ownership,
         mode,
         targets,
+        signal,
+      );
+    }
+    if (mode === "exact" && preliminary.waitsForTemporaryReturn) {
+      return this.waitForSessionEventWithCommitment(
+        context,
+        source,
+        ownership,
+        mode,
+        targets,
+        singleWaitCommitment,
         signal,
       );
     }
@@ -2562,6 +2584,60 @@ export class ProjectSessionCoordinator {
         ? { conversationId: first.target.conversationId, ...cloned }
         : cloned;
     }
+    return this.waitForSessionEventWithCommitment(
+      context,
+      source,
+      ownership,
+      mode,
+      targets,
+      singleWaitCommitment,
+      signal,
+    );
+  }
+
+  private async waitForSessionEventWithCommitment(
+    context: ProjectContext,
+    source: ConversationActor,
+    ownership: ConversationRunOwnership,
+    mode: "exact" | "aggregate",
+    targets: readonly ConversationWaitingTarget[],
+    singleWaitCommitment: string | undefined,
+    signal?: AbortSignal,
+  ): Promise<SessionWaitResult> {
+    this.throwIfAborted(signal);
+    const immediate = await this.claimImmediateWaitInterruption(
+      context,
+      source,
+      ownership,
+      signal,
+    );
+    if (immediate) return immediate;
+
+    if (mode === "exact" && !singleWaitCommitment?.trim()) {
+      const finalCheck = await this.finalExactWaitCheck(
+        context,
+        source,
+        ownership,
+        targets[0]!,
+        signal,
+      );
+      if (finalCheck?.kind === "result") return finalCheck.result;
+      if (finalCheck?.kind === "committed_reply") {
+        return this.waitForSessionEvent(
+          context,
+          source,
+          ownership,
+          mode,
+          targets,
+          signal,
+        );
+      }
+      return {
+        outcome: "single_wait_commitment_required",
+        message:
+          "No wait was started. Explain why waiting for only this Agent is better than continuing useful local work or waiting for multiple independent targets, then call wait_for_session again with singleWaitCommitment.",
+      };
+    }
     return this.waitForSessionEvent(
       context,
       source,
@@ -2570,6 +2646,172 @@ export class ProjectSessionCoordinator {
       targets,
       signal,
     );
+  }
+
+  private async finalExactWaitCheck(
+    context: ProjectContext,
+    source: ConversationActor,
+    ownership: ConversationRunOwnership,
+    target: ConversationWaitingTarget,
+    signal?: AbortSignal,
+  ): Promise<FinalExactWaitCheck | undefined> {
+    return this.runLifecycle(context, async () => {
+      const assertOwnership = () => {
+        this.throwIfAborted(signal);
+        if (source.currentRunOwnership() !== ownership) {
+          throw new Error("The source run no longer owns this wait");
+        }
+      };
+      assertOwnership();
+      if (source.claimPendingGuidanceForWait(ownership)) {
+        this.emit(context, { type: "project_changed" });
+        return { kind: "result", result: { outcome: "guidance" } };
+      }
+
+      const receipt = this.temporaryReturnReceipt(
+        context,
+        source.conversationId,
+        target.conversationId,
+        target.runId,
+      );
+      const committedReplyCandidate = await this.findCommittedWaitReply(
+        context,
+        source.conversationId,
+        [target],
+        ownership.runId,
+      );
+      assertOwnership();
+      const committedReply = committedReplyCandidate
+        && !(
+          receipt !== undefined
+          && committedReplyCandidate.messageId === receipt.messageId
+          && committedReplyCandidate.waitedByRunId !== undefined
+        );
+      if (committedReply) return { kind: "committed_reply" };
+
+      const immediateSettlement = (): RunSettlement | undefined => {
+        if (receipt?.state === "settled") return receipt.settlement;
+        const actor = context.actors.get(target.conversationId);
+        const settlement = actor
+          ? this.findSettlement(context, actor, target.runId)
+          : context.completions.get(completionKey(
+              target.conversationId,
+              target.runId,
+            ));
+        return settlement
+          && !this.waitsForTemporaryReturn(
+            context,
+            source.conversationId,
+            target.conversationId,
+            target.runId,
+            settlement,
+          )
+          ? settlement
+          : undefined;
+      };
+      const initialSettlement = immediateSettlement();
+      if (initialSettlement) {
+        return {
+          kind: "result",
+          result: cloneSettlement(initialSettlement),
+        };
+      }
+
+      if (source.claimPendingGuidanceForWait(ownership)) {
+        this.emit(context, { type: "project_changed" });
+        return { kind: "result", result: { outcome: "guidance" } };
+      }
+      const claimedPending = await this.findClaimedPendingWaitReply(
+        context,
+        source,
+        ownership.runId,
+      );
+      assertOwnership();
+      if (source.claimPendingGuidanceForWait(ownership)) {
+        this.emit(context, { type: "project_changed" });
+        return { kind: "result", result: { outcome: "guidance" } };
+      }
+      const racedSettlement = immediateSettlement();
+      if (racedSettlement) {
+        return {
+          kind: "result",
+          result: cloneSettlement(racedSettlement),
+        };
+      }
+      if (!claimedPending) return undefined;
+      await context.inbox.updateState(claimedPending.messageId, {
+        state: "processing",
+        processingRunId: ownership.runId,
+        ...(claimedPending.processingDelivery === undefined
+          ? {}
+          : { processingDelivery: claimedPending.processingDelivery }),
+        waitedByRunId: ownership.runId,
+      });
+      this.appendSourceCardState(context, claimedPending, "delivered");
+      return {
+        kind: "result",
+        result: {
+          outcome: "message",
+          conversationId: claimedPending.fromConversationId,
+          ...(claimedPending.fromRunId === undefined
+            ? {}
+            : { runId: claimedPending.fromRunId }),
+          messageId: claimedPending.messageId,
+          sentAt: claimedPending.sentAt,
+        },
+      };
+    });
+  }
+
+  private async claimImmediateWaitInterruption(
+    context: ProjectContext,
+    source: ConversationActor,
+    ownership: ConversationRunOwnership,
+    signal?: AbortSignal,
+  ): Promise<SessionWaitResult | undefined> {
+    if (source.claimPendingGuidanceForWait(ownership)) {
+      this.emit(context, { type: "project_changed" });
+      return { outcome: "guidance" };
+    }
+    const candidate = await this.findClaimedPendingWaitReply(
+      context,
+      source,
+      ownership.runId,
+    );
+    if (!candidate) return undefined;
+    this.throwIfAborted(signal);
+    return this.runLifecycle(context, async () => {
+      this.throwIfAborted(signal);
+      if (source.currentRunOwnership() !== ownership) {
+        throw new Error("The source run no longer owns this wait");
+      }
+      const claimedPending = await this.findClaimedPendingWaitReply(
+        context,
+        source,
+        ownership.runId,
+      );
+      if (!claimedPending || claimedPending.messageId !== candidate.messageId) {
+        return undefined;
+      }
+      await context.inbox.updateState(claimedPending.messageId, {
+        state: "processing",
+        processingRunId: ownership.runId,
+        ...(claimedPending.processingDelivery === undefined
+          ? {}
+          : { processingDelivery: claimedPending.processingDelivery }),
+        waitedByRunId: ownership.runId,
+      });
+      this.appendSourceCardState(context, claimedPending, "delivered");
+      return {
+        outcome: "message" as const,
+        conversationId: claimedPending.fromConversationId,
+        ...(claimedPending.fromRunId === undefined
+          ? {}
+          : { runId: claimedPending.fromRunId }),
+        messageId: claimedPending.messageId,
+        sentAt: claimedPending.sentAt,
+      };
+    });
   }
 
   private async findClaimedPendingWaitReply(
@@ -3455,6 +3697,7 @@ export class ProjectSessionCoordinator {
             sourceConversationId,
             input.conversationId,
             input.runId,
+            input.singleWaitCommitment,
             signal,
           ),
       abortSession: async (sourceConversationId, input) => {
