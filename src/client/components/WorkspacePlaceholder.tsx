@@ -5,7 +5,7 @@ interface WorkspacePlaceholderProps {
   cwd: string;
   unavailable: boolean;
   onOpen(): void;
-  onRemove(): void;
+  onClose(): void;
   onRetry(): void;
 }
 
@@ -13,7 +13,7 @@ export function WorkspacePlaceholder({
   cwd,
   unavailable,
   onOpen,
-  onRemove,
+  onClose,
   onRetry,
 }: WorkspacePlaceholderProps) {
   if (!cwd) {
@@ -43,8 +43,8 @@ export function WorkspacePlaceholder({
           <button type="button" className="ghost" onClick={onOpen}>
             选择其它目录
           </button>
-          <button type="button" className="ghost danger" onClick={onRemove}>
-            从列表移除
+          <button type="button" className="ghost" onClick={onClose}>
+            关闭工作区
           </button>
         </div>
       </div>

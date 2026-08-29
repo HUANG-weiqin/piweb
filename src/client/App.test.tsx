@@ -766,6 +766,45 @@ describe("App", () => {
     expect(localStorage.getItem("piweb.lastCwd")).toBe("E:\\second");
   });
 
+  it("closes the current workspace to the empty state without opening another", () => {
+    localStorage.setItem("piweb.workspaces", JSON.stringify([
+      "E:\\first",
+      "E:\\second",
+    ]));
+    localStorage.setItem("piweb.lastCwd", "E:\\first");
+    const view = render(<App />);
+    const firstSessionId = latestCommand("initialize").sessionId;
+
+    fireEvent.click(screen.getByRole("button", {
+      name: "关闭工作区 first",
+    }));
+
+    expect(socketMock.send).toHaveBeenCalledWith({
+      type: "close_session",
+      sessionId: firstSessionId,
+    });
+    expect(socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "initialize",
+    )).toHaveLength(1);
+    expect(JSON.parse(localStorage.getItem("piweb.workspaces") ?? "[]"))
+      .toEqual(["E:\\second"]);
+    expect(localStorage.getItem("piweb.lastCwd")).toBe("");
+    expect(screen.getByRole("heading", { name: "还没有打开工作区" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "打开工作区 second" }))
+      .not.toHaveAttribute("aria-current");
+    expect(screen.queryByRole("button", { name: /关闭工作区/ }))
+      .not.toBeInTheDocument();
+
+    view.unmount();
+    render(<App />);
+    expect(socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "initialize",
+    )).toHaveLength(1);
+    expect(screen.getByRole("heading", { name: "还没有打开工作区" }))
+      .toBeInTheDocument();
+  });
+
   it("reopens a visited workspace with its cached conversation while syncing", () => {
     localStorage.setItem("piweb.workspaces", JSON.stringify([
       "E:\\first",
@@ -3131,7 +3170,7 @@ describe("App", () => {
     expect(latestCommand("initialize").conversation).toEqual({ kind: "recent" });
   });
 
-  it("removes the last unavailable workspace and closes its session", () => {
+  it("closes the last unavailable workspace and its session view", () => {
     socketMock.autoFocus = false;
     localStorage.setItem("piweb.workspaces", JSON.stringify(["E:\\work"]));
     localStorage.setItem("piweb.lastCwd", "E:\\work");
@@ -3146,7 +3185,7 @@ describe("App", () => {
       message: "workspace unavailable",
     }));
 
-    fireEvent.click(screen.getByRole("button", { name: "从列表移除" }));
+    fireEvent.click(screen.getByRole("button", { name: "关闭工作区" }));
     expect(socketMock.send).toHaveBeenCalledWith(expect.objectContaining({
       type: "close_session",
       sessionId: initializeCommand.sessionId,
@@ -3391,7 +3430,7 @@ describe("App", () => {
       .toEqual(["E:\\missing", "E:\\other"]);
   });
 
-  it("removes an unavailable workspace and opens the remaining workspace", () => {
+  it("closes an unavailable workspace to empty without opening another", () => {
     socketMock.autoFocus = false;
     localStorage.setItem("piweb.workspaces", JSON.stringify([
       "E:\\other",
@@ -3409,15 +3448,22 @@ describe("App", () => {
       sessionId: missing.sessionId,
       message: "Directory does not exist",
     }));
-    fireEvent.click(screen.getByRole("button", { name: "从列表移除" }));
+    fireEvent.click(screen.getByRole("button", { name: "关闭工作区" }));
 
-    expect(latestCommand("initialize")).toMatchObject({
-      cwd: "E:\\other",
-      conversation: { kind: "recent" },
+    expect(socketMock.send).toHaveBeenCalledWith({
+      type: "close_session",
+      sessionId: missing.sessionId,
     });
+    expect(socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "initialize",
+    )).toHaveLength(1);
     expect(JSON.parse(localStorage.getItem("piweb.workspaces") ?? "[]"))
       .toEqual(["E:\\other"]);
-    expect(localStorage.getItem("piweb.lastCwd")).toBe("E:\\other");
+    expect(localStorage.getItem("piweb.lastCwd")).toBe("");
+    expect(screen.getByRole("heading", { name: "还没有打开工作区" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "打开工作区 other" }))
+      .not.toHaveAttribute("aria-current");
     expect(screen.queryByRole("button", {
       name: /打开工作区 missing/,
     })).not.toBeInTheDocument();

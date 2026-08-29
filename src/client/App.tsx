@@ -157,9 +157,11 @@ function loadInitialWorkspaceState(): InitialWorkspaceState {
     workspaces.unshift(legacyCwd);
     if (workspaces.length > MAX_WORKSPACES) workspaces.pop();
   }
-  const activeCwd = workspaces.find(
-    (cwd) => workspaceKey(cwd) === workspaceKey(legacyCwd),
-  ) ?? workspaces[0] ?? "";
+  const activeCwd = legacyCwd
+    ? workspaces.find(
+        (cwd) => workspaceKey(cwd) === workspaceKey(legacyCwd),
+      ) ?? workspaces[0] ?? ""
+    : "";
   return { workspaces, activeCwd };
 }
 
@@ -2848,8 +2850,10 @@ export function App() {
     cacheCurrentConversationPresentation();
     initializeWorkspace(cwd);
   };
-  const removeWorkspace = (cwd: string) => {
+  const closeWorkspace = (cwd: string) => {
     const key = workspaceKey(cwd);
+    if (workspaceKey(activeCwdRef.current) !== key) return;
+
     forgetWorkspaceProjection(workspaceProjectionCacheRef.current, key);
     if (cachedWorkspacePresentationKeyRef.current === key) {
       clearTemporaryWorkspacePresentation();
@@ -2874,13 +2878,6 @@ export function App() {
       updated.delete(key);
       return updated;
     });
-    if (workspaceKey(activeCwdRef.current) !== key) return;
-
-    const fallback = next.at(-1);
-    if (fallback) {
-      initializeWorkspace(fallback);
-      return;
-    }
 
     const sessionId = sessionIdRef.current;
     if (sessionId) send({ type: "close_session", sessionId });
@@ -2909,6 +2906,7 @@ export function App() {
     updateDirectoryBrowser(undefined);
   };
   const handleWorkspaceSelect = useLatestCallback(switchWorkspace);
+  const handleWorkspaceClose = useLatestCallback(closeWorkspace);
   const handleWorkspaceAdd = useLatestCallback(openWorkspaceDialog);
   const handleSidebarCollapsedChange = useLatestCallback(
     (collapsed: boolean) => setSidebarCollapsed(collapsed),
@@ -3015,6 +3013,7 @@ export function App() {
     activityByWorkspace={projectActivityByWorkspace}
     activityCatalogTruncated={projectActivityTruncated}
     onSelect={handleWorkspaceSelect}
+    onClose={handleWorkspaceClose}
     onAdd={handleWorkspaceAdd}
   />;
   const workspaceSetupDialog = setupOpen && <div
@@ -3140,7 +3139,7 @@ export function App() {
         cwd={activeCwd}
         unavailable={unavailableWorkspaceKeys.has(workspaceKey(activeCwd))}
         onOpen={openWorkspaceDialog}
-        onRemove={() => removeWorkspace(activeCwd)}
+        onClose={() => closeWorkspace(activeCwd)}
         onRetry={() => switchWorkspace(activeCwd)}
       />
     </div>

@@ -8,6 +8,7 @@ interface WorkspaceRailProps {
   activityByWorkspace: ReadonlyMap<string, ProjectActivitySummary>;
   activityCatalogTruncated: boolean;
   onSelect(cwd: string): void;
+  onClose(cwd: string): void;
   onAdd(): void;
 }
 
@@ -55,6 +56,7 @@ function WorkspaceRailView({
   activityByWorkspace,
   activityCatalogTruncated,
   onSelect,
+  onClose,
   onAdd,
 }: WorkspaceRailProps) {
   const activeKey = workspaceKey(activeCwd);
@@ -85,30 +87,41 @@ function WorkspaceRailView({
         if (missing) titleLines.push("目录当前不可用");
         if (activityLabel) titleLines.push(activityLabel);
         if (activityUnknown) titleLines.push("全局活动目录已截断，状态未知");
-        return <button
+        return <div
           key={key}
-          type="button"
-          className={`workspace-rail-item tone-${workspaceTone(cwd)}${active ? " active" : ""}${missing ? " unavailable" : ""}`}
-          aria-label={`打开工作区 ${name}${unavailableLabel}${statusLabel}`}
-          aria-current={active ? "true" : undefined}
-          title={titleLines.join("\n")}
-          onClick={() => onSelect(cwd)}
+          className="workspace-rail-entry"
         >
-          <span aria-hidden="true">{name.slice(0, 1).toLocaleUpperCase()}</span>
-          {missing && <i className="workspace-rail-warning" aria-hidden="true">!</i>}
-          {!missing && busyCount > 0 && <i
-            className="workspace-rail-busy"
-            aria-hidden="true"
-          />}
-          {!missing && attentionCount > 0 && <i
-            className="workspace-rail-attention"
-            aria-hidden="true"
-          >{attentionCount > 9 ? "9+" : attentionCount}</i>}
-          {!missing && activityUnknown && <i
-            className="workspace-rail-unknown"
-            aria-hidden="true"
-          >?</i>}
-        </button>;
+          <button
+            type="button"
+            className={`workspace-rail-item tone-${workspaceTone(cwd)}${active ? " active" : ""}${missing ? " unavailable" : ""}`}
+            aria-label={`打开工作区 ${name}${unavailableLabel}${statusLabel}`}
+            aria-current={active ? "true" : undefined}
+            title={titleLines.join("\n")}
+            onClick={() => onSelect(cwd)}
+          >
+            <span aria-hidden="true">{name.slice(0, 1).toLocaleUpperCase()}</span>
+            {missing && <i className="workspace-rail-warning" aria-hidden="true">!</i>}
+            {!missing && busyCount > 0 && <i
+              className="workspace-rail-busy"
+              aria-hidden="true"
+            />}
+            {!missing && attentionCount > 0 && <i
+              className="workspace-rail-attention"
+              aria-hidden="true"
+            >{attentionCount > 9 ? "9+" : attentionCount}</i>}
+            {!missing && activityUnknown && <i
+              className="workspace-rail-unknown"
+              aria-hidden="true"
+            >?</i>}
+          </button>
+          {active && <button
+            type="button"
+            className="workspace-rail-close"
+            aria-label={`关闭工作区 ${name}`}
+            title={`关闭工作区 ${name}\n不会删除文件或会话`}
+            onClick={() => onClose(cwd)}
+          ><span aria-hidden="true">×</span></button>}
+        </div>;
       })}
     </div>
     <button

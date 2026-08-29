@@ -19,6 +19,7 @@ describe("WorkspaceRail", () => {
       attentionConversationCount: 0,
     }]]);
     const unavailable = new Set<string>();
+    const onClose = vi.fn();
 
     function Harness() {
       const [, setUnrelated] = useState(0);
@@ -50,6 +51,7 @@ describe("WorkspaceRail", () => {
           activityByWorkspace={activityByWorkspace}
           activityCatalogTruncated={false}
           onSelect={onSelect}
+          onClose={onClose}
           onAdd={onAdd}
         />
       </>;
@@ -61,9 +63,19 @@ describe("WorkspaceRail", () => {
     fireEvent.click(screen.getByRole("button", { name: "unrelated" }));
     expect(mapWorkspaces).toHaveBeenCalledTimes(initialMaps);
 
+    expect(screen.getByRole("button", { name: "关闭工作区 alpha" }))
+      .toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "关闭工作区 beta" }))
+      .not.toBeInTheDocument();
+
     fireEvent.click(screen.getByRole("button", { name: "打开工作区 beta" }));
     expect(screen.getByRole("button", { name: "打开工作区 beta" }))
       .toHaveAttribute("aria-current", "true");
+    expect(screen.queryByRole("button", { name: "关闭工作区 alpha" }))
+      .not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "关闭工作区 beta" }));
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(onClose).toHaveBeenCalledWith("E:\\beta");
 
     fireEvent.click(screen.getByRole("button", { name: "update activity" }));
     expect(screen.getByRole("button", {
