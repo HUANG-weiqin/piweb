@@ -2334,7 +2334,7 @@ pre {
 }
 
 .conversation-sidebar-action-popover button {
-  min-height: 38px;
+  min-height: 40px;
   justify-content: flex-start;
   padding: 7px 10px;
   border: 0;

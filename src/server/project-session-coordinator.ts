@@ -3840,7 +3840,6 @@ export class ProjectSessionCoordinator {
     scope: MetaToolSessionScope = "all",
   ) {
     const summaries = await this.listSessions(new ProjectSessionHandle(context));
-    await this.hydrateConversationProfiles(context);
     const candidates = summaries.map((summary) => {
       const profile =
         context.actors.get(summary.id)?.profile

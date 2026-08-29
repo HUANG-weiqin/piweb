@@ -1,6 +1,6 @@
 # 项目与持久会话
 
-`updated: 2026-08-28`
+`updated: 2026-08-29`
 
 ## 这个模块是干什么的
 
@@ -173,7 +173,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 
 - `PublicState` 是高频、小体积运行状态。
 - `role_catalog_snapshot` 是低频用户角色目录及当前可用性。
-- `project_snapshot` 是低频扁平会话索引，包含固化 role 摘要、activity、attention 和 temporary；后台 actor 变化不会切换 current focus。
+- `project_snapshot` 是低频会话索引，包含服务端解析的 root、固化 role 摘要、activity、attention 和 temporary；底层会话仍平级，浏览器可按 root 聚合导航。count 与 JSON byte 裁剪优先保留完整 root 组，任何省略都置 `truncated`；后台 actor 变化只更新索引，不会切换 current focus。
 - `project_activity_snapshot` 是进程级已加载项目的有界汇总，只投影 busy/attention 计数；它不复制会话索引、浏览器 unread 或 transcript。
 - 浏览器分别维护最多 4 项 workspace LRU 与 8 项 conversation presentation LRU，让工作区或同项目会话切换时立即画出目标上一帧；两者独立逐出，只存在内存，不接管 transcript、不保存 draft/pending command，也不能解锁命令。conversation cache 以 workspace/project/conversation 为键，保存 reducer 产出的 ChatState 展示引用及角色/window/control 投影，但绝不 hydrate 回当前 reducer。新 observation/focus 仍必须 exact open durable conversation，并以匹配新完整 focus 身份的服务端 snapshot 覆盖缓存。只有非截断 `project_snapshot` 的缺席才能证明条目已删除；截断快照不能据此逐出。
 - `conversation_preview` 是 command-correlated、无 focusId 的 cold 只读投影：常规 `inspectConversation(s)` 只返回 metadata，绝不附带或复制物理 entries；只有单目标 `inspectConversationPresentation` 在完整性证明后 opt-in 返回本次 JSON parse/migration 新拥有的 readonly entries 浅数组。只读 adapter 从最后物理 leaf 沿 parentId 还原 active branch，getter 只复制数组壳，canonical projector 不修改 entry，再经 peer enrichment 与最终 window pipeline。投影构造失败只跳过 preview，文件完整性/read/identity 失败仍 fail closed。它不取得 writer lease，不创建 SessionManager/AgentSession/model catalog/extension route，也不能启用任何 focus 命令；actor 或 actorOpening 已存在时禁止发送磁盘 preview，emit 前还要同步复核一次 actor/opening/deleting/closing。

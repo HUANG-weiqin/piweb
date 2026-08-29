@@ -1,6 +1,6 @@
 # 线协议
 
-`updated: 2026-08-27`
+`updated: 2026-08-29`
 
 ## 这个模块是干什么的
 
@@ -19,7 +19,7 @@ ClientCommand
 → App / reducer
 ```
 
-协议由 `PROTOCOL_VERSION` 标识，当前为 v35。工具参数和结果允许 `unknown`，但服务端在投影时会做有界遍历、转成 JSON-safe 数据并限制单值大小。
+协议由 `PROTOCOL_VERSION` 标识，当前为 v36。工具参数和结果允许 `unknown`，但服务端在投影时会做有界遍历、转成 JSON-safe 数据并限制单值大小。
 
 ## 决策
 
@@ -55,7 +55,7 @@ ClientCommand
 - `compact_context` 携带一次性 commandId 和精确 `sessionId + conversationId + focusId`；只允许空闲 conversation，成功后服务端先刷新 state / snapshot，再发送同 commandId 的完成事件。
 - `PublicState.compacting` 是当前 focused conversation 正在执行 Pi 标准压缩的可恢复瞬时状态；手动与自动压缩共用该字段。它独立于 `busy/activeRun`，因为自动压缩可能发生在 run 结算尾部，而手动压缩没有 runId。
 - `set_compaction_threshold` 携带一次性 commandId 和精确 `sessionId + conversationId + focusId`，只接受 20–90 的整数百分比；`PublicState.compactionThresholdPercent` 是当前会话权威值，成功或失败必须按 commandId 精确结算。
-- 高频 `PublicState` 不携带完整项目索引；项目空态允许 conversation/focus/model/runtime 字段缺席。`project_snapshot` 低频发布扁平会话列表及 role/activity/attention/unread/temporary，最多 100 项且整帧不超过 750,000 UTF-8 bytes；保留顺序优先 current、active、attention、unread，再按最后活跃时间。字段裁剪、条数省略或帧预算省略都会置 `truncated=true`。
+- 高频 `PublicState` 不携带完整项目索引；项目空态允许 conversation/focus/model/runtime 字段缺席。v36 的 `project_snapshot` 低频发布会话 summary 及 role/activity/attention/unread/temporary，并可携带服务端已解析、遵循 conversation ID 语法的 `rootConversationId`；不投影 orchestration depth/sourceRunId。最多 100 项且整帧不超过 750,000 UTF-8 bytes；保留顺序优先 current、active、attention、unread，再按最后活跃时间，但 count 与最终 JSON byte 裁剪优先把同一 root 组整体装入或移除。单组自身超过硬预算时只保留 root/current/最高优先成员且置 `truncated=true`，绝不突破 wire budget。字段裁剪、条数省略或帧预算省略同样都会置 `truncated=true`。
 - `role_catalog_snapshot` 独立发布用户级角色目录；最多 64 个角色，名称/简介与 durable store 一致按 80/1000 个 Unicode 字符校验，system prompt 按 128 KiB UTF-8、model provider/id 各按 1024 UTF-8 bytes 校验，不可用原因最多 4096 个字符。客户端命令帧仍限制为 1 MB；服务端事件使用独立的 64 MiB 上限，以容纳最坏情况下 JSON 转义后的完整有界角色目录。socket 发送边界必须先用同一 `serverEventSchema` 复验运行时事件，再执行序列化与发送上限；schema、序列化或大小失败会发送各自固定且可解析的 protocol error，然后以专用 close code 终止已经丢帧的 observation，不能在缺失关键帧后继续运行，也不能把浏览器必然拒绝的原帧发出去。
 - `conversation_snapshot` 携带固化角色，并且必须在有界 `ConversationHistoryItem[]` 与兼容 `messages[]` 中二选一，禁止重复发送两份 transcript。普通 user/assistant 是 `message`，跨会话 incoming/outgoing 是 `session_message`，Pi active branch 上的持久压缩记录是 `compaction` 分界项。session-message 的固化 endpoint title 可以比浏览器显示边界更长，投影时必须按 24 个 Unicode 字符裁剪，wire 校验也使用相同字符语义而不是 UTF-16 code unit。assistant message 额外用有界 `parts` 保存 text/thinking span 与 toolCallId 的原始顺序；span 只引用已有聚合字符串，不能在线路上复制整段正文或思考。工具调用状态区分 `pending | running | done | error`：没有对应 tool result 的调用仍在执行中，不能投影成失败。浏览器 timeline 的单 assistant 工作过程只保留最近 16 个 timeline part/tool 条目，并在 UI 中按最新到最旧显示；超过上限时置 `contentTruncated`，不能让较早工作挤掉最新内容。tools 截断时必须同步裁剪 parts，保留的 toolCallId 仍要有对应工具详情；若 parts 顺序或引用无法证明，服务端重建的 fallback parts 也只能填充剩余的 16 项预算，不能把 thinking/text 再叠加到上限之外，否则 `serverEventSchema` 会以协议错误关闭整个 observation。Agent `peek_session` 的 20 项上限属于另一观察边界，不能用来裁剪浏览器工具时间线。active snapshot 中属于当前 run 的 message 必须带真实 runId。`window` 必须显式携带 `omittedBefore / startsMidTurn / contentTruncated`；`startsMidTurn=true` 必然要求 `omittedBefore=true`。三者分别表示较早 item 被省略、窗口从一个语义 turn 内部开始、已选 item 的载荷被缩略，不能再压成一个含糊的 `truncated`。
 - `conversation_snapshot` 和 `session_event` 携带单调 `projectionSeq`。`conversation_item` 只带当前 transcript watermark 用于证明卡片更新没有跨过丢失的 run delta；它不得推进 watermark。浏览器只接受连续 run 增量；发现缺口时请求 `refresh_view` 并等待新的 snapshot，而不是猜测丢失的工作过程。

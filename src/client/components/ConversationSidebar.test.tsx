@@ -534,12 +534,12 @@ describe("ConversationSidebar", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "会话操作 接口设计" }));
-    expect(screen.getByRole("menuitem", { name: "删除" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "删除" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "会话操作 正在运行" }));
-    expect(screen.getByRole("menuitem", { name: "删除" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "删除" })).toBeDisabled();
 
     fireEvent.click(screen.getByRole("button", { name: "会话操作 接口设计" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
     expect(onDelete).not.toHaveBeenCalled();
     const dialog = screen.getByRole("alertdialog", { name: "确认删除会话" });
     expect(dialog).toHaveTextContent("派生的空闲子孙会话");
@@ -548,7 +548,7 @@ describe("ConversationSidebar", () => {
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "会话操作 接口设计" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
     fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
     expect(onDelete).toHaveBeenCalledWith(baseConversation.id);
   });
@@ -571,7 +571,7 @@ describe("ConversationSidebar", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "会话操作 接口设计" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "改名" }));
+    fireEvent.click(screen.getByRole("button", { name: "改名" }));
     expect(screen.getByRole("dialog", { name: "重命名会话" })).toBeInTheDocument();
     const nameInput = screen.getByRole("textbox", { name: "会话名称" });
     expect(nameInput).toHaveValue("接口设计");
@@ -602,8 +602,8 @@ describe("ConversationSidebar", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "会话操作 接口设计" }));
-    expect(screen.getByRole("menuitem", { name: "删除" })).toBeDisabled();
-    expect(screen.getByRole("menuitem", { name: "改名" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "删除" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "改名" })).toBeDisabled();
   });
 
   it("groups two roots, orders aggregate state, and navigates root and child", () => {
@@ -654,6 +654,7 @@ describe("ConversationSidebar", () => {
           childA,
         ]}
         currentConversationId={childA.id}
+        focusedConversationId={childA.id}
         collapsed={false}
         truncated={false}
         navigationEnabled
@@ -673,7 +674,7 @@ describe("ConversationSidebar", () => {
     expect(cards.map((card) => card.getAttribute("data-root-conversation-id")))
       .toEqual([rootA.id, rootB.id, rootC.id]);
     expect(within(cards[0]!).getByLabelText(/协作组状态/)).toHaveTextContent(
-      "2 个 Agent · 1 运行 · 1 等待 · 1 需处理 · 1 未读",
+      /2 个 Agent · 1 运行 · 1 等待 · 1 需处理 · 1 未读 · 最近 /,
     );
     expect(screen.getByRole("button", { name: "收起协作组 任务 A" }))
       .toHaveAttribute("aria-expanded", "true");
@@ -697,6 +698,7 @@ describe("ConversationSidebar", () => {
     ));
     const props = {
       currentConversationId: root.id,
+      focusedConversationId: root.id,
       collapsed: false,
       truncated: false,
       navigationEnabled: true,
@@ -745,6 +747,89 @@ describe("ConversationSidebar", () => {
     expect(screen.getAllByRole("listitem")).toHaveLength(7);
   });
 
+  it("expands only confirmed focus changes and resets group state per workspace", () => {
+    const rootA = conversation("root-focus-a", "任务 A");
+    const childA = conversation("child-focus-a", "A Agent", {
+      rootConversationId: rootA.id,
+      createdBy: { kind: "conversation", conversationId: rootA.id },
+    });
+    const rootB = conversation("root-focus-b", "任务 B");
+    const childB = conversation("child-focus-b", "B Agent", {
+      rootConversationId: rootB.id,
+      createdBy: { kind: "conversation", conversationId: rootB.id },
+    });
+    const common = {
+      conversations: [rootA, childA, rootB, childB],
+      collapsed: false,
+      truncated: false,
+      navigationEnabled: true,
+      actionsEnabled: true,
+      onToggleCollapsed: vi.fn(),
+      onSelect: vi.fn(),
+      onCreate: vi.fn(),
+      onRename: vi.fn(),
+      onDelete: vi.fn(() => true),
+    };
+    const { rerender } = render(
+      <ConversationSidebar
+        {...common}
+        scopeKey="workspace-a:project"
+        currentConversationId={childA.id}
+        focusedConversationId={childA.id}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "收起协作组 任务 A" }));
+    rerender(
+      <ConversationSidebar
+        {...common}
+        scopeKey="workspace-a:project"
+        currentConversationId={childB.id}
+        focusedConversationId={childA.id}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "展开协作组 任务 A" }))
+      .toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByRole("button", { name: "展开协作组 任务 B" }))
+      .toHaveAttribute("aria-expanded", "false");
+
+    rerender(
+      <ConversationSidebar
+        {...common}
+        scopeKey="workspace-a:project"
+        currentConversationId={childA.id}
+        focusedConversationId={childA.id}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "展开协作组 任务 A" }))
+      .toHaveAttribute("aria-expanded", "false");
+
+    rerender(
+      <ConversationSidebar
+        {...common}
+        scopeKey="workspace-a:project"
+        currentConversationId={childB.id}
+        focusedConversationId={childB.id}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "收起协作组 任务 B" }))
+      .toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(screen.getByRole("button", { name: "全部" }));
+
+    rerender(
+      <ConversationSidebar
+        {...common}
+        scopeKey="workspace-b:project"
+        currentConversationId={childA.id}
+        focusedConversationId={childA.id}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "按任务" }))
+      .toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "收起协作组 任务 A" }))
+      .toHaveAttribute("aria-expanded", "true");
+  });
+
   it("gates group controls and closes the compact action menu accessibly", () => {
     const root = conversation("root-gate", "受控任务");
     const child = conversation("child-gate", "受控 Agent", {
@@ -754,6 +839,7 @@ describe("ConversationSidebar", () => {
     const common = {
       conversations: [root, child],
       currentConversationId: root.id,
+      focusedConversationId: root.id,
       collapsed: false,
       truncated: false,
       onToggleCollapsed: vi.fn(),
@@ -794,13 +880,19 @@ describe("ConversationSidebar", () => {
     const menuButton = screen.getByRole("button", { name: "会话操作 受控任务" });
     fireEvent.click(menuButton);
     expect(menuButton).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByRole("menu", { name: "受控任务 会话操作" }))
-      .toBeInTheDocument();
-    fireEvent.keyDown(document, { key: "Escape" });
-    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    const actionGroup = screen.getByRole("group", {
+      name: "受控任务 会话操作",
+    });
+    const renameButton = within(actionGroup).getByRole("button", { name: "改名" });
+    renameButton.focus();
+    fireEvent.keyDown(renameButton, { key: "Escape" });
+    expect(screen.queryByRole("group", { name: "受控任务 会话操作" }))
+      .not.toBeInTheDocument();
+    expect(menuButton).toHaveFocus();
     fireEvent.click(menuButton);
     fireEvent.mouseDown(document.body);
-    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "受控任务 会话操作" }))
+      .not.toBeInTheDocument();
   });
 
   it("projects unread as a low-emphasis dot and owns the truncated-list hint", () => {

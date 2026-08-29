@@ -2,6 +2,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -41,6 +42,8 @@ interface ConversationSidebarProps {
   conversations: ConversationSummary[];
   truncated: boolean;
   currentConversationId?: string;
+  focusedConversationId?: string;
+  scopeKey?: string;
   busyConversationId?: string;
   collapsed: boolean;
   navigationEnabled: boolean;
@@ -173,12 +176,11 @@ function groupProjection(
     }
   }
 
-  const groupedIds = new Set<string>();
   const rootByConversationId = new Map<string, string>();
   const groups: ConversationGroup[] = [];
   for (const [rootConversationId, descendants] of descendantsByRoot) {
     const root = summariesById.get(rootConversationId);
-    if (root === undefined || descendants.length === 0) continue;
+    if (root === undefined) continue;
     const members = descendants
       .map((conversation, index) => ({ conversation, index }))
       .sort((left, right) => {
@@ -211,10 +213,8 @@ function groupProjection(
       })
       .map(({ conversation }) => conversation);
     const groupedConversations = [root, ...members];
-    groupedIds.add(root.id);
     rootByConversationId.set(root.id, root.id);
     for (const member of members) {
-      groupedIds.add(member.id);
       rootByConversationId.set(member.id, root.id);
     }
     groups.push({ root, members, conversations: groupedConversations });
@@ -223,7 +223,7 @@ function groupProjection(
   const entries: GroupedEntry[] = [
     ...groups.map((group, index) => ({ kind: "group" as const, group, index })),
     ...conversations
-      .filter(({ id }) => !groupedIds.has(id))
+      .filter(({ id }) => !rootByConversationId.has(id))
       .map((conversation, index) => ({
         kind: "conversation" as const,
         conversation,
@@ -319,7 +319,6 @@ function ConversationActionMenu({
   actionsEnabled,
   deletionBlocked,
   active,
-  deletionPending,
   onToggle,
   onRequestRename,
   onRequestDelete,
@@ -329,22 +328,31 @@ function ConversationActionMenu({
   actionsEnabled: boolean;
   deletionBlocked: boolean;
   active: boolean;
-  deletionPending: boolean;
   onToggle(conversationId: string): void;
   onRequestRename(conversation: ConversationSummary): void;
   onRequestDelete(conversationId: string): void;
 }) {
   const title = titleOf(conversation);
   const menuId = `conversation-actions-${conversation.id}`;
+  const triggerRef = useRef<HTMLButtonElement>(null);
   return (
-    <div className="conversation-sidebar-action-menu">
+    <div
+      className="conversation-sidebar-action-menu"
+      onKeyDown={(event) => {
+        if (!open || event.key !== "Escape") return;
+        event.preventDefault();
+        event.stopPropagation();
+        onToggle(conversation.id);
+        triggerRef.current?.focus();
+      }}
+    >
       <button
+        ref={triggerRef}
         type="button"
         className="conversation-sidebar-action-trigger ghost"
         aria-label={`会话操作 ${title}`}
         aria-expanded={open}
         aria-controls={menuId}
-        aria-haspopup="menu"
         disabled={!actionsEnabled || deletionBlocked}
         onClick={() => onToggle(conversation.id)}
       >
@@ -353,12 +361,11 @@ function ConversationActionMenu({
       {open && <div
         id={menuId}
         className="conversation-sidebar-action-popover"
-        role="menu"
+        role="group"
         aria-label={`${title} 会话操作`}
       >
         <button
           type="button"
-          role="menuitem"
           disabled={!actionsEnabled || deletionBlocked || active}
           title={active ? "活跃会话结算后可以重命名" : "重命名会话"}
           onClick={() => onRequestRename(conversation)}
@@ -368,12 +375,11 @@ function ConversationActionMenu({
         <button
           type="button"
           className="danger"
-          role="menuitem"
           disabled={!actionsEnabled || deletionBlocked || active}
           title={active ? "活跃会话需先终止并等待结算" : "删除会话"}
           onClick={() => onRequestDelete(conversation.id)}
         >
-          {deletionPending ? "删除中" : "删除"}
+          删除
         </button>
       </div>}
     </div>
@@ -385,7 +391,6 @@ const ConversationRow = memo(function ConversationRow({
   selected,
   navigationEnabled,
   actionsEnabled,
-  deletionPending,
   deletionBlocked,
   busy,
   actionMenuOpen,
@@ -398,7 +403,6 @@ const ConversationRow = memo(function ConversationRow({
   selected: boolean;
   navigationEnabled: boolean;
   actionsEnabled: boolean;
-  deletionPending: boolean;
   deletionBlocked: boolean;
   busy: boolean;
   actionMenuOpen: boolean;
@@ -487,7 +491,6 @@ const ConversationRow = memo(function ConversationRow({
         actionsEnabled={actionsEnabled}
         deletionBlocked={deletionBlocked}
         active={active}
-        deletionPending={deletionPending}
         onToggle={onToggleActionMenu}
         onRequestRename={onRequestRename}
         onRequestDelete={onRequestDelete}
@@ -510,7 +513,7 @@ function ConversationGroupCard({
   busyConversationId,
   navigationEnabled,
   actionsEnabled,
-  pendingDeletionId,
+  deletionBlocked,
   actionMenuConversationId,
   onSelect,
   onToggleExpanded,
@@ -526,7 +529,7 @@ function ConversationGroupCard({
   busyConversationId?: string;
   navigationEnabled: boolean;
   actionsEnabled: boolean;
-  pendingDeletionId?: string;
+  deletionBlocked: boolean;
   actionMenuConversationId: string;
   onSelect(conversationId: string): void;
   onToggleExpanded(rootConversationId: string): void;
@@ -536,7 +539,6 @@ function ConversationGroupCard({
   onRequestDelete(conversationId: string): void;
 }) {
   const { root, members, conversations } = group;
-  const deletionBlocked = Boolean(pendingDeletionId);
   const controlsId = `conversation-group-${root.id}`;
   const ordinaryIdle = members.filter((conversation) =>
     conversation.id !== currentConversationId
@@ -575,11 +577,9 @@ function ConversationGroupCard({
   if (waitingCount > 0) summaryParts.push(`${waitingCount} 等待`);
   if (attentionCount > 0) summaryParts.push(`${attentionCount} 需处理`);
   if (unreadCount > 0) summaryParts.push(`${unreadCount} 未读`);
-  if (summaryParts.length === 1) {
-    summaryParts.push(`最近 ${formatLastActive(
-      new Date(latestTimestamp(conversations)).toISOString(),
-    )}`);
-  }
+  summaryParts.push(`最近 ${formatLastActive(
+    new Date(latestTimestamp(conversations)).toISOString(),
+  )}`);
   const summary = summaryParts.join(" · ");
   const title = titleOf(root);
 
@@ -626,7 +626,6 @@ function ConversationGroupCard({
           actionsEnabled={actionsEnabled}
           deletionBlocked={deletionBlocked}
           active={isActive(root, busyConversationId)}
-          deletionPending={pendingDeletionId === root.id}
           onToggle={onToggleActionMenu}
           onRequestRename={onRequestRename}
           onRequestDelete={onRequestDelete}
@@ -644,7 +643,6 @@ function ConversationGroupCard({
               selected={conversation.id === currentConversationId}
               navigationEnabled={navigationEnabled}
               actionsEnabled={actionsEnabled}
-              deletionPending={pendingDeletionId === conversation.id}
               deletionBlocked={deletionBlocked}
               busy={conversation.id === busyConversationId}
               actionMenuOpen={actionMenuConversationId === conversation.id}
@@ -672,6 +670,8 @@ function ConversationSidebarView({
   conversations,
   truncated,
   currentConversationId,
+  focusedConversationId,
+  scopeKey = "",
   busyConversationId,
   collapsed,
   navigationEnabled,
@@ -698,7 +698,8 @@ function ConversationSidebarView({
     () => new Set(),
   );
   const [actionMenuConversationId, setActionMenuConversationId] = useState("");
-  const observedCurrentConversationId = useRef<string | undefined>(undefined);
+  const observedScopeKey = useRef(scopeKey);
+  const observedFocusedConversationId = useRef<string | undefined>(undefined);
   const lastFocusedRoot = useRef<string | undefined>(undefined);
   const sortedConversations = useMemo(
     () => orderedConversations(conversations),
@@ -715,9 +716,8 @@ function ConversationSidebarView({
   const deleteCandidate = conversations.find(
     ({ id }) => id === confirmDeleteConversationId,
   );
-  const deleteCandidateActive =
-    deleteCandidate?.id === busyConversationId
-    || (deleteCandidate?.activity?.kind ?? "idle") !== "idle";
+  const deleteCandidateActive = deleteCandidate !== undefined
+    && isActive(deleteCandidate, busyConversationId);
   const renameCandidate = conversations.find(
     ({ id }) => id === renameConversationId,
   );
@@ -770,22 +770,36 @@ function ConversationSidebarView({
     closeRenameDialog,
   );
 
+  useLayoutEffect(() => {
+    if (observedScopeKey.current === scopeKey) return;
+    observedScopeKey.current = scopeKey;
+    resizeState.current = undefined;
+    observedFocusedConversationId.current = undefined;
+    lastFocusedRoot.current = undefined;
+    setConfirmDeleteConversationId("");
+    setRenameConversationId("");
+    setRenameDraft("");
+    setViewMode("grouped");
+    setExpandedRoots(new Set());
+    setRevealedIdleRoots(new Set());
+    setActionMenuConversationId("");
+  }, [scopeKey]);
   useEffect(() => {
     if (!confirmDeleteConversationId || deleteCandidate) return;
     setConfirmDeleteConversationId("");
   }, [confirmDeleteConversationId, deleteCandidate]);
   useEffect(() => {
     if (
-      currentConversationId !== undefined
-      && !conversations.some(({ id }) => id === currentConversationId)
+      focusedConversationId !== undefined
+      && !conversations.some(({ id }) => id === focusedConversationId)
     ) {
       return;
     }
-    if (observedCurrentConversationId.current === currentConversationId) return;
-    observedCurrentConversationId.current = currentConversationId;
-    const rootConversationId = currentConversationId === undefined
+    if (observedFocusedConversationId.current === focusedConversationId) return;
+    observedFocusedConversationId.current = focusedConversationId;
+    const rootConversationId = focusedConversationId === undefined
       ? undefined
-      : grouped.rootByConversationId.get(currentConversationId);
+      : grouped.rootByConversationId.get(focusedConversationId);
     if (
       rootConversationId !== undefined
       && rootConversationId !== lastFocusedRoot.current
@@ -797,7 +811,12 @@ function ConversationSidebarView({
       });
     }
     lastFocusedRoot.current = rootConversationId;
-  }, [conversations, currentConversationId, grouped.rootByConversationId]);
+  }, [
+    conversations,
+    focusedConversationId,
+    grouped.rootByConversationId,
+    scopeKey,
+  ]);
   useEffect(() => {
     if (!actionMenuConversationId) return;
     const closeFromOutside = (event: MouseEvent) => {
@@ -810,14 +829,9 @@ function ConversationSidebarView({
       }
       setActionMenuConversationId("");
     };
-    const closeFromEscape = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") setActionMenuConversationId("");
-    };
     document.addEventListener("mousedown", closeFromOutside);
-    document.addEventListener("keydown", closeFromEscape);
     return () => {
       document.removeEventListener("mousedown", closeFromOutside);
-      document.removeEventListener("keydown", closeFromEscape);
     };
   }, [actionMenuConversationId]);
   useEffect(() => {
@@ -941,7 +955,6 @@ function ConversationSidebarView({
                     selected={conversation.id === currentConversationId}
                     navigationEnabled={navigationEnabled}
                     actionsEnabled={actionsEnabled}
-                    deletionPending={pendingDeletionId === conversation.id}
                     deletionBlocked={Boolean(pendingDeletionId)}
                     busy={conversation.id === busyConversationId}
                     actionMenuOpen={actionMenuConversationId === conversation.id}
@@ -961,7 +974,7 @@ function ConversationSidebarView({
                       busyConversationId={busyConversationId}
                       navigationEnabled={navigationEnabled}
                       actionsEnabled={actionsEnabled}
-                      pendingDeletionId={pendingDeletionId}
+                      deletionBlocked={Boolean(pendingDeletionId)}
                       actionMenuConversationId={actionMenuConversationId}
                       onSelect={onSelect}
                       onToggleExpanded={toggleExpanded}
@@ -976,7 +989,6 @@ function ConversationSidebarView({
                       selected={entry.conversation.id === currentConversationId}
                       navigationEnabled={navigationEnabled}
                       actionsEnabled={actionsEnabled}
-                      deletionPending={pendingDeletionId === entry.conversation.id}
                       deletionBlocked={Boolean(pendingDeletionId)}
                       busy={entry.conversation.id === busyConversationId}
                       actionMenuOpen={actionMenuConversationId === entry.conversation.id}

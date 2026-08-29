@@ -1,6 +1,6 @@
 # 会话协作组实现计划
 
-`status: active`
+`status: completed`
 
 ## 交付范围
 

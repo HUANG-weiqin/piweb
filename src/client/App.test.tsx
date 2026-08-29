@@ -4732,7 +4732,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", {
       name: "会话操作 Older work",
     }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
     fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
 
     const command = latestCommand("delete_conversation");
@@ -4807,7 +4807,7 @@ describe("App", () => {
       });
     });
     fireEvent.click(screen.getByRole("button", { name: "会话操作 Delete me" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
     fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
     expect(screen.getByRole("button", { name: "会话操作 Delete me" }))
       .toBeDisabled();
@@ -4893,7 +4893,7 @@ describe("App", () => {
 
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "会话操作 Current" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
     fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
 
     const command = latestCommand("delete_conversation");
@@ -5247,7 +5247,7 @@ describe("App", () => {
       ([command]) => command.type === "delete_conversation",
     ).length;
     fireEvent.click(screen.getByRole("button", { name: "会话操作 A" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
     fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
     expect(socketMock.send.mock.calls.filter(
       ([command]) => command.type === "delete_conversation",

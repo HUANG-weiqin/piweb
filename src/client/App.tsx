@@ -3150,6 +3150,15 @@ export function App() {
     {feedback}
   </>;
 
+  const currentFocus = focusRef.current;
+  const focusedConversationId = currentFocus?.sessionId === visibleState.sessionId
+    && (
+      visibleState.projectId === undefined
+      || currentFocus.projectId === visibleState.projectId
+    )
+    ? currentFocus.conversationId
+    : undefined;
+  const sidebarScopeKey = `${workspaceKey(activeCwd)}:${visibleState.projectId ?? ""}`;
   const conversationCompacting =
     visibleState.compacting === true || Boolean(pendingContextCompaction);
   const showAttachedConversationProjection =
@@ -3187,6 +3196,8 @@ export function App() {
         conversations={conversations}
         truncated={conversationIndexTruncated}
         currentConversationId={visibleConversationId}
+        focusedConversationId={focusedConversationId}
+        scopeKey={sidebarScopeKey}
         busyConversationId={
           visibleState.busy || outstandingRunId ? visibleState.conversationId : undefined
         }
