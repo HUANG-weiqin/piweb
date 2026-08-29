@@ -80,6 +80,73 @@ describe("projectConversationIndex", () => {
     expect(snapshot.conversations[0]?.id).toBe(active.id);
   });
 
+  it("keeps count-truncated groups atomic and promotes the current child group", () => {
+    const currentRoot = {
+      ...conversation(1_000),
+      name: "Current root",
+      preview: "Current root",
+      rootConversationId: conversation(1_000).id,
+      updatedAt: "2026-07-18T09:00:00.000Z",
+    };
+    const currentChild = {
+      ...conversation(1_001),
+      name: "Current child",
+      preview: "Current child",
+      rootConversationId: currentRoot.id,
+      updatedAt: "2026-07-18T09:01:00.000Z",
+    };
+    const newerSingletons = Array.from({ length: 97 }, (_, index) => ({
+      ...conversation(index),
+      name: `Singleton ${index}`,
+      preview: `Singleton ${index}`,
+      updatedAt: new Date(
+        Date.UTC(2026, 6, 18, 12, 0, index),
+      ).toISOString(),
+    }));
+    const cutoffRoot = {
+      ...conversation(2_000),
+      name: "Cutoff root",
+      preview: "Cutoff root",
+      rootConversationId: conversation(2_000).id,
+      updatedAt: "2026-07-18T11:00:00.000Z",
+    };
+    const cutoffChild = {
+      ...conversation(2_001),
+      name: "Cutoff child",
+      preview: "Cutoff child",
+      rootConversationId: cutoffRoot.id,
+      updatedAt: "2026-07-18T11:01:00.000Z",
+    };
+    const trailingSingleton = {
+      ...conversation(3_000),
+      name: "Trailing singleton",
+      preview: "Trailing singleton",
+      updatedAt: "2026-07-18T10:00:00.000Z",
+    };
+
+    const snapshot = projectConversationIndex([
+      ...newerSingletons,
+      cutoffRoot,
+      cutoffChild,
+      trailingSingleton,
+      currentRoot,
+      currentChild,
+    ], currentChild.id);
+    const retainedIds = new Set(snapshot.conversations.map(({ id }) => id));
+
+    expect(snapshot.conversations).toHaveLength(MAX_PROJECT_CONVERSATIONS);
+    expect(snapshot.conversations.slice(0, 2).map(({ id }) => id)).toEqual([
+      currentChild.id,
+      currentRoot.id,
+    ]);
+    expect(retainedIds.has(currentRoot.id)).toBe(true);
+    expect(retainedIds.has(currentChild.id)).toBe(true);
+    expect(retainedIds.has(cutoffRoot.id)).toBe(false);
+    expect(retainedIds.has(cutoffChild.id)).toBe(false);
+    expect(retainedIds.has(trailingSingleton.id)).toBe(true);
+    expect(snapshot.truncated).toBe(true);
+  });
+
   it("prioritizes the current, active, attention, and unread conversations", () => {
     const source = Array.from(
       { length: MAX_PROJECT_CONVERSATIONS + 20 },

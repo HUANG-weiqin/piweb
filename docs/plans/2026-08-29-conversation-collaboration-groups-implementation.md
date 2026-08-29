@@ -23,7 +23,7 @@
 ### 改动
 
 1. 将协议版本从 35 升至 36，并记录变更。
-2. 给 `ConversationSummary` 与 `project_snapshot` schema 增加可选、严格 UUID 的 `rootConversationId`。
+2. 给 `ConversationSummary` 与 `project_snapshot` schema 增加可选、遵循现有 conversation ID 语法的 `rootConversationId`。
 3. `ProjectSessionCoordinator.listSessions()` 在 summary 投影前保证 cold profile 已 hydrate。
 4. 使用现有 orchestration resolver 投影根；无 metadata 的 legacy conversation 以自身为根。
 5. 不投影 `depth` 或 `sourceRunId`。

@@ -21,13 +21,15 @@ export const MAX_LOOP_LIST_ITEM_TEXT_CHARACTERS = 512;
 export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
+// v36: project conversation summaries optionally project their collaboration
+// root so the browser can group descendants without receiving lineage details.
 // v35: aggregate wait-for-session activity projects a bounded target count
 // instead of pretending that the source waits on one exact target.
 // v34: focused snapshots and identity-bound live events project the bounded
 // conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
-export const PROTOCOL_VERSION = 35;
+export const PROTOCOL_VERSION = 36;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
@@ -626,6 +628,7 @@ type ConversationCreatedBy =
 
 export interface ConversationSummary {
   id: string;
+  rootConversationId?: string;
   name?: string;
   preview: string;
   createdAt: string;
@@ -1241,6 +1244,7 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     conversationId: conversationIdSchema.optional(),
     conversations: z.array(z.object({
       id: conversationIdSchema,
+      rootConversationId: conversationIdSchema.optional(),
       name: boundedCharactersString(
         MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
         "conversation.name",

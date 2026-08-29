@@ -938,6 +938,11 @@ export class ProjectSessionCoordinator {
       signal,
     );
     this.throwIfAborted(signal);
+    await raceWithAbort(
+      this.hydrateConversationProfiles(context),
+      signal,
+    );
+    this.throwIfAborted(signal);
     return this.projectConversationSummaries(context, summaries);
   }
 
@@ -964,8 +969,14 @@ export class ProjectSessionCoordinator {
       const actor = context.actors.get(summary.id);
       const profile = actor?.profile ?? context.profiles.get(summary.id);
       const activity = actor?.getActivity() ?? { kind: "idle" };
+      const rootConversationId = this.resolveOrchestration(
+        context,
+        summary.id,
+        profile,
+      ).rootConversationId;
       return {
         ...summary,
+        rootConversationId,
         ...(profile === undefined
           ? {}
           : {

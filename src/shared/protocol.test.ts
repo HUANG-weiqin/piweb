@@ -26,7 +26,7 @@ const messageId = "assistant:96b960be-b6bb-4a19-9cf2-78e77cb69425";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(35);
+    expect(PROTOCOL_VERSION).toBe(36);
   });
 
   it("accepts supported commands", () => {
@@ -599,6 +599,7 @@ describe("parseClientCommand", () => {
       conversationId,
       conversations: [{
           id: conversationId,
+          rootConversationId: "legacy.root-1",
           preview: "hello",
           createdAt: "2026-07-18T12:00:00.000Z",
           updatedAt: "2026-07-18T12:01:00.000Z",
@@ -628,10 +629,27 @@ describe("parseClientCommand", () => {
     if (projectSnapshot.type !== "project_snapshot") {
       throw new Error("project snapshot not parsed");
     }
-    expect(projectSnapshot.conversations[0]?.createdBy).toEqual({
-      kind: "conversation",
-      conversationId: targetConversationId,
+    expect(projectSnapshot.conversations[0]).toMatchObject({
+      rootConversationId: "legacy.root-1",
+      createdBy: {
+        kind: "conversation",
+        conversationId: targetConversationId,
+      },
     });
+    expect(() => parseServerEvent({
+      type: "project_snapshot",
+      sessionId,
+      projectId,
+      conversations: [{
+        id: conversationId,
+        rootConversationId: "not a valid id",
+        preview: "invalid root",
+        createdAt: "2026-07-18T12:00:00.000Z",
+        updatedAt: "2026-07-18T12:01:00.000Z",
+        messageCount: 1,
+      }],
+      truncated: false,
+    })).toThrow();
     expect(parseServerEvent({
       type: "project_snapshot",
       sessionId,

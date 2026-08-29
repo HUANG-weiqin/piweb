@@ -222,18 +222,60 @@ function boundedProjectSnapshotEvent(input: {
     conversations: [...index.conversations],
     truncated: index.truncated,
   };
+  const eventBytes = () => Buffer.byteLength(JSON.stringify(event), "utf8");
   while (
     event.conversations.length > 0
-    && Buffer.byteLength(JSON.stringify(event), "utf8")
-      > MAX_PROJECT_SNAPSHOT_BYTES
+    && eventBytes() > MAX_PROJECT_SNAPSHOT_BYTES
   ) {
-    event.conversations.pop();
+    const last = event.conversations.at(-1)!;
+    const lastRootConversationId = last.rootConversationId ?? last.id;
+    const hasEarlierGroup = event.conversations.some((conversation) =>
+      (conversation.rootConversationId ?? conversation.id)
+        !== lastRootConversationId
+    );
+    if (!hasEarlierGroup) break;
+    event.conversations = event.conversations.filter((conversation) =>
+      (conversation.rootConversationId ?? conversation.id)
+        !== lastRootConversationId
+    );
     event.truncated = true;
   }
+
   if (
-    Buffer.byteLength(JSON.stringify(event), "utf8")
-      > MAX_PROJECT_SNAPSHOT_BYTES
+    event.conversations.length > 0
+    && eventBytes() > MAX_PROJECT_SNAPSHOT_BYTES
   ) {
+    const groupRootConversationId =
+      event.conversations[0]!.rootConversationId
+      ?? event.conversations[0]!.id;
+    const protectedConversationIds = new Set<string>();
+    if (event.conversations.some(
+      ({ id }) => id === groupRootConversationId,
+    )) {
+      protectedConversationIds.add(groupRootConversationId);
+    }
+    if (
+      input.conversationId !== undefined
+      && event.conversations.some(({ id }) => id === input.conversationId)
+    ) {
+      protectedConversationIds.add(input.conversationId);
+    }
+    while (eventBytes() > MAX_PROJECT_SNAPSHOT_BYTES) {
+      let removalIndex = event.conversations.length - 1;
+      while (
+        removalIndex >= 0
+        && protectedConversationIds.has(
+          event.conversations[removalIndex]!.id,
+        )
+      ) {
+        removalIndex--;
+      }
+      if (removalIndex < 0) break;
+      event.conversations.splice(removalIndex, 1);
+      event.truncated = true;
+    }
+  }
+  if (eventBytes() > MAX_PROJECT_SNAPSHOT_BYTES) {
     throw new Error("Project snapshot envelope exceeds its wire budget");
   }
   return event;

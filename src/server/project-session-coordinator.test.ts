@@ -11050,6 +11050,43 @@ describe("ProjectSessionCoordinator", () => {
       expect(profile.orchestration!.sourceRunId).toBeUndefined();
     });
 
+    it("projects stable roots for cold implicit chains and no-metadata legacy sessions", async () => {
+      const fixture = await createFixture();
+      const role = fixture.roles.getConversationRole("default");
+      const rootId = randomUUID();
+      const childId = randomUUID();
+      const grandchildId = randomUUID();
+      const legacyId = randomUUID();
+      await fixture.handle.project.createConversation(rootId, {
+        role,
+        lifecycle: { kind: "normal" },
+        createdBy: { kind: "user" },
+      });
+      await fixture.handle.project.createConversation(childId, {
+        role,
+        lifecycle: { kind: "normal" },
+        createdBy: { kind: "conversation", conversationId: rootId },
+      });
+      await fixture.handle.project.createConversation(grandchildId, {
+        role,
+        lifecycle: { kind: "normal" },
+        createdBy: { kind: "conversation", conversationId: childId },
+      });
+      await fixture.handle.project.createConversation(legacyId);
+
+      const summaries = await fixture.coordinator.listSessions(fixture.handle);
+      const roots = new Map(summaries.map(({ id, rootConversationId }) => [
+        id,
+        rootConversationId,
+      ]));
+
+      expect(roots.get(rootId)).toBe(rootId);
+      expect(roots.get(childId)).toBe(rootId);
+      expect(roots.get(grandchildId)).toBe(rootId);
+      expect(roots.get(legacyId)).toBe(legacyId);
+      expect(fixture.runtime.createConversationIds).toEqual([]);
+    });
+
     it("inherits root+depth 1 from a user parent without sourceRunId when idle", async () => {
       const fixture = await createFixture();
       const source = await fixture.coordinator.createUserConversation(
@@ -11492,8 +11529,9 @@ describe("ProjectSessionCoordinator", () => {
         fixture.handle,
         firstId,
       )).rejects.toThrow("cycle detected");
-      const remainingIds = (await fixture.coordinator.listSessions(fixture.handle))
-        .map(({ id }) => id);
+      const remainingIds = (
+        await fixture.handle.project.refreshConversations()
+      ).map(({ id }) => id);
       expect(remainingIds).toContain(firstId);
       expect(remainingIds).toContain(secondId);
     });

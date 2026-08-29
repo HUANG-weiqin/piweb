@@ -4957,6 +4957,129 @@ describe("PiConnection coordinated project view", () => {
     }
   });
 
+  it("removes complete collaboration groups at the project snapshot byte budget", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      const createCommandId = randomUUID();
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: createCommandId,
+        sessionId: SESSION_A,
+        roleId: "default",
+      });
+      const attached = harness.events.findLast(
+        (event) =>
+          event.type === "focus_attached"
+          && event.commandId === createCommandId,
+      );
+      if (
+        attached?.type !== "focus_attached"
+        || attached.conversationId === undefined
+      ) {
+        throw new Error("conversation focus was not attached");
+      }
+
+      let nextConversationId = 1;
+      const generatedConversationId = () =>
+        `00000000-0000-4000-8000-${
+          (nextConversationId++).toString(16).padStart(12, "0")
+        }`;
+      const summaries: ConversationSummary[] = [];
+      const groupRoots: string[] = [];
+      for (let groupIndex = 0; groupIndex < 4; groupIndex++) {
+        const rootConversationId = groupIndex === 0
+          ? attached.conversationId
+          : generatedConversationId();
+        groupRoots.push(rootConversationId);
+        for (let memberIndex = 0; memberIndex < 25; memberIndex++) {
+          summaries.push({
+            id: memberIndex === 0
+              ? rootConversationId
+              : generatedConversationId(),
+            rootConversationId,
+            name: `Group ${groupIndex} member ${memberIndex}`,
+            preview: "界".repeat(500),
+            createdAt: "2026-07-18T12:00:00.000Z",
+            updatedAt: new Date(Date.UTC(
+              2026,
+              6,
+              18,
+              12,
+              groupIndex,
+              memberIndex,
+            )).toISOString(),
+            messageCount: memberIndex,
+            role: {
+              id: "default",
+              revision: 1,
+              name: "😀".repeat(80),
+              description: "😀".repeat(1_000),
+              model: {
+                provider: "😀".repeat(256),
+                id: "😀".repeat(256),
+              },
+              defaultThinkingLevel: "off",
+              toolMode: "read_only",
+              canManageSessions: false,
+            },
+            activity: { kind: "idle" },
+          });
+        }
+      }
+      vi.spyOn(harness.coordinator, "listSessions")
+        .mockResolvedValue(summaries);
+      const eventCount = harness.events.length;
+
+      await harness.connection.handle({
+        type: "refresh_view",
+        sessionId: SESSION_A,
+        projectId: latestState(harness.events).projectId,
+      });
+      await vi.waitFor(() => {
+        expect(harness.events.slice(eventCount).some(
+          (event) => event.type === "project_snapshot",
+        )).toBe(true);
+      });
+      const snapshot = harness.events.findLast(
+        (event) => event.type === "project_snapshot",
+      );
+      if (snapshot?.type !== "project_snapshot") {
+        throw new Error("project snapshot was not published");
+      }
+
+      const retainedByRoot = new Map<string, number>();
+      for (const conversation of snapshot.conversations) {
+        const rootConversationId = conversation.rootConversationId
+          ?? conversation.id;
+        retainedByRoot.set(
+          rootConversationId,
+          (retainedByRoot.get(rootConversationId) ?? 0) + 1,
+        );
+      }
+      expect(snapshot.conversations.length).toBeLessThan(summaries.length);
+      expect(snapshot.conversations).toContainEqual(expect.objectContaining({
+        id: attached.conversationId,
+        rootConversationId: attached.conversationId,
+      }));
+      expect([...retainedByRoot.values()].every((count) => count === 25))
+        .toBe(true);
+      expect(groupRoots.some((root) => !retainedByRoot.has(root))).toBe(true);
+      expect(snapshot.truncated).toBe(true);
+      expect(Buffer.byteLength(JSON.stringify(snapshot), "utf8"))
+        .toBeLessThanOrEqual(MAX_PROJECT_SNAPSHOT_BYTES);
+      expect(() => parseServerEvent(snapshot)).not.toThrow();
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
   it("bounds durable card titles and repairs missing peer titles for the wire", async () => {
     const harness = await coordinatedConnectionHarness();
     let externalHandle:
