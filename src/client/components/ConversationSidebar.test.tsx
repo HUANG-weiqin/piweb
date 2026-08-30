@@ -405,6 +405,8 @@ describe("ConversationSidebar", () => {
         name: kind === "queued" ? "排队中" : "运行中",
       });
       expect(status).toHaveClass(`activity-${kind}`);
+      expect(status.closest("[data-conversation-id]"))
+        .toHaveClass(`activity-${kind}`);
       expect(status.querySelector(".conversation-activity-spinner"))
         .toBeInTheDocument();
     },

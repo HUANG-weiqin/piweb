@@ -2491,6 +2491,14 @@ pre {
   font-weight: 680;
 }
 
+.conversation-sidebar-item.activity-running .conversation-sidebar-title {
+  color: var(--success);
+}
+
+.conversation-sidebar-item.activity-waiting .conversation-sidebar-title {
+  color: var(--warning);
+}
+
 .conversation-sidebar-indicators {
   display: inline-flex;
   align-items: center;
