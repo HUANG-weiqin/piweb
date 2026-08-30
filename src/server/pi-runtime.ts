@@ -727,7 +727,7 @@ export class PiRuntime implements PiRuntimeLike {
       }
       if (options.getServiceTier) {
         serviceTierOverride = installServiceTierOverride(
-          createdSession,
+          owner.runtime,
           options.getServiceTier,
         );
       }

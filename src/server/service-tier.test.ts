@@ -1,6 +1,8 @@
+import type { ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
 import type {
   AgentSession,
   AgentSessionEvent,
+  ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import type { ServiceTier } from "../shared/protocol.js";
@@ -10,14 +12,36 @@ import {
   modelServiceTiers,
 } from "./service-tier.js";
 
-function fakeSession(streamFunction: ReturnType<typeof vi.fn>): {
+type FakeModelRuntime = Pick<ModelRuntime, "stream" | "streamSimple">;
+
+function fakeModelRuntime() {
+  const stream = vi.fn(() => ({ source: "official-low-level-stream" }));
+  const streamSimple = vi.fn(() => ({ source: "official-simple-stream" }));
+  return {
+    modelRuntime: { stream, streamSimple } as unknown as FakeModelRuntime,
+    stream,
+    streamSimple,
+  };
+}
+
+function fakeSession(
+  modelRuntime: FakeModelRuntime,
+  decoratedOptions: Partial<ModelsSimpleStreamOptions> = {},
+): {
   session: AgentSession;
+  upstream: ReturnType<typeof vi.fn>;
   emit(event: { type: "compaction_start"; reason: "manual" }): void;
 } {
   const listeners = new Set<(event: AgentSessionEvent) => void>();
+  const upstream = vi.fn((model, context, options) => (
+    modelRuntime.streamSimple(model, context, {
+      ...options,
+      ...decoratedOptions,
+    })
+  ));
   return {
     session: {
-      agent: { streamFunction },
+      agent: { streamFunction: upstream },
       subscribe(listener: (event: AgentSessionEvent) => void) {
         listeners.add(listener);
         return () => {
@@ -25,6 +49,7 @@ function fakeSession(streamFunction: ReturnType<typeof vi.fn>): {
         };
       },
     } as unknown as AgentSession,
+    upstream,
     emit(event) {
       for (const listener of listeners) {
         listener(event as AgentSessionEvent);
@@ -33,65 +58,145 @@ function fakeSession(streamFunction: ReturnType<typeof vi.fn>): {
   };
 }
 
-describe("service tier compatibility boundary", () => {
-  it("projects only bounded, unique supported capabilities", () => {
-    expect(modelServiceTiers({ provider: "p", id: "m" })).toBeUndefined();
-    expect(modelServiceTiers({ serviceTiers: [] })).toEqual([]);
-    expect(modelServiceTiers({
-      serviceTiers: ["auto", "priority"],
-    })).toEqual(["auto", "priority"]);
+function codexModel(overrides: Record<string, unknown> = {}) {
+  return {
+    provider: "extension-codex",
+    id: "future-codex-model",
+    api: "openai-codex-responses",
+    name: "Future Codex model",
+    reasoning: true,
+    input: ["text"],
+    contextWindow: 100_000,
+    maxTokens: 8_192,
+    cost: {
+      input: 1,
+      output: 1,
+      cacheRead: 1,
+      cacheWrite: 1,
+    },
+    ...overrides,
+  };
+}
 
-    for (const serviceTiers of [
-      "priority",
-      ["priority", "priority"],
-      ["unknown"],
-      ["auto", "default", "flex", "scale", "priority", "auto"],
-    ]) {
-      expect(() => modelServiceTiers({ serviceTiers })).toThrow(
-        "invalid serviceTiers capability",
-      );
-    }
+const context = {
+  systemPrompt: "",
+  messages: [],
+  tools: [],
+};
+
+describe("service tier compatibility boundary", () => {
+  it("projects priority from the API route rather than provider or model metadata", () => {
+    expect(modelServiceTiers(codexModel({
+      provider: "another-provider",
+      id: "future-model",
+    }))).toEqual(["priority"]);
+    expect(modelServiceTiers({
+      provider: "openai-codex",
+      id: "known-model",
+      api: "another-api",
+      serviceTiers: ["priority"],
+    })).toBeUndefined();
   });
 
-  it("omits null and injects a validated live tier without changing other options", () => {
-    const original = vi.fn();
-    const { session } = fakeSession(original);
+  it("preserves the SDK request wrapper and dispatches priority through Pi's low-level route", async () => {
+    const { modelRuntime, stream, streamSimple } = fakeModelRuntime();
+    const transformHeaders = vi.fn(async (headers: Record<string, string>) => ({
+      ...headers,
+      "x-extension": "enabled",
+    }));
+    const { session, upstream } = fakeSession(modelRuntime, {
+      timeoutMs: 321,
+      websocketConnectTimeoutMs: 222,
+      maxRetries: 4,
+      maxRetryDelayMs: 987,
+      transformHeaders,
+    });
     let selected: ServiceTier | null = null;
-    const override = installServiceTierOverride(session, () => selected);
-    const options = { temperature: 0.25 };
-    const model = {
-      provider: "p",
-      id: "m",
-      serviceTiers: ["priority"],
-    };
+    const override = installServiceTierOverride(
+      modelRuntime,
+      () => selected,
+    );
+    const options = { temperature: 0.25, reasoning: "high" as const };
+    const model = codexModel();
 
-    session.agent.streamFunction(model as never, [] as never, options);
-    expect(original).toHaveBeenLastCalledWith(model, [], options);
+    expect(session.agent.streamFunction(
+      model as never,
+      context as never,
+      options,
+    )).toEqual({ source: "official-simple-stream" });
+    expect(upstream).toHaveBeenLastCalledWith(model, context, options);
+    expect(streamSimple).toHaveBeenLastCalledWith(
+      model,
+      context,
+      expect.objectContaining({
+        temperature: 0.25,
+        timeoutMs: 321,
+        transformHeaders,
+      }),
+    );
+    expect(stream).not.toHaveBeenCalled();
 
     selected = "priority";
-    session.agent.streamFunction(model as never, [] as never, options);
-    expect(original).toHaveBeenLastCalledWith(model, [], {
+    expect(session.agent.streamFunction(
+      model as never,
+      context as never,
+      options,
+    )).toEqual({ source: "official-low-level-stream" });
+    expect(upstream).toHaveBeenCalledTimes(2);
+    expect(streamSimple).toHaveBeenCalledTimes(1);
+    expect(stream).toHaveBeenCalledWith(model, context, expect.objectContaining({
       temperature: 0.25,
+      maxTokens: 8_192,
+      reasoningEffort: "high",
       serviceTier: "priority",
-    });
+      timeoutMs: 321,
+      websocketConnectTimeoutMs: 222,
+      maxRetries: 4,
+      maxRetryDelayMs: 987,
+      transformHeaders,
+    }));
+    const lowLevelOptions = stream.mock.calls[0]?.[2];
+    expect(await lowLevelOptions?.transformHeaders?.({ "x-auth": "token" }))
+      .toEqual({ "x-auth": "token", "x-extension": "enabled" });
 
     selected = "flex";
     expect(() => session.agent.streamFunction(
       model as never,
-      [] as never,
+      context as never,
       options,
     )).toThrow('does not support service tier "flex"');
-    expect(original).toHaveBeenCalledTimes(2);
+    expect(stream).toHaveBeenCalledTimes(1);
 
     override.dispose();
-    expect(session.agent.streamFunction).toBe(original);
+    expect(modelRuntime.streamSimple).toBe(streamSimple);
+    expect(session.agent.streamFunction).toBe(upstream);
   });
 
-  it("composes with compaction thinking after manual auth identity", async () => {
-    const original = vi.fn();
-    const { session, emit } = fakeSession(original);
+  it("fails closed after SDK decoration when a selected tier reaches another route", () => {
+    const { modelRuntime, stream, streamSimple } = fakeModelRuntime();
+    const { session, upstream } = fakeSession(modelRuntime, { timeoutMs: 321 });
+    const override = installServiceTierOverride(
+      modelRuntime,
+      () => "priority",
+    );
+
+    expect(() => session.agent.streamFunction(
+      codexModel({ api: "openai-responses" }) as never,
+      context as never,
+      {},
+    )).toThrow('does not support service tier "priority"');
+    expect(upstream).toHaveBeenCalledTimes(1);
+    expect(streamSimple).not.toHaveBeenCalled();
+    expect(stream).not.toHaveBeenCalled();
+
+    override.dispose();
+  });
+
+  it("composes with compaction thinking without changing manual auth identity", async () => {
+    const { modelRuntime, stream, streamSimple } = fakeModelRuntime();
+    const { session, upstream, emit } = fakeSession(modelRuntime);
     const serviceTierOverride = installServiceTierOverride(
-      session,
+      modelRuntime,
       () => "priority",
     );
     const compactionThinkingOverride = installCompactionThinkingOverride(
@@ -99,41 +204,39 @@ describe("service tier compatibility boundary", () => {
       "auto",
     );
 
+    expect(session.agent.streamFunction).toBe(upstream);
     emit({ type: "compaction_start", reason: "manual" });
-    expect(session.agent.streamFunction).toBe(original);
+    expect(session.agent.streamFunction).toBe(upstream);
 
     await Promise.resolve();
-    const model = {
-      provider: "p",
-      id: "m",
-      reasoning: true,
-      serviceTiers: ["priority"],
-    };
+    const model = codexModel();
     session.agent.streamFunction(
       model as never,
-      [] as never,
+      context as never,
       { reasoning: "max" },
     );
-    expect(original).toHaveBeenCalledWith(model, [], {
-      reasoning: "minimal",
+    expect(stream).toHaveBeenCalledWith(model, context, expect.objectContaining({
+      reasoningEffort: "minimal",
       serviceTier: "priority",
-    });
+    }));
 
     compactionThinkingOverride.dispose();
     serviceTierOverride.dispose();
-    expect(session.agent.streamFunction).toBe(original);
+    expect(session.agent.streamFunction).toBe(upstream);
+    expect(modelRuntime.streamSimple).toBe(streamSimple);
   });
 
-  it("does not reinstall after disposal during manual compaction", async () => {
-    const original = vi.fn();
-    const { session, emit } = fakeSession(original);
-    const override = installServiceTierOverride(session, () => "priority");
+  it("does not clobber a later runtime wrapper during disposal", () => {
+    const { modelRuntime } = fakeModelRuntime();
+    const override = installServiceTierOverride(
+      modelRuntime,
+      () => "priority",
+    );
+    const laterWrapper = vi.fn() as unknown as ModelRuntime["streamSimple"];
+    modelRuntime.streamSimple = laterWrapper;
 
-    emit({ type: "compaction_start", reason: "manual" });
-    expect(session.agent.streamFunction).toBe(original);
     override.dispose();
-    await Promise.resolve();
 
-    expect(session.agent.streamFunction).toBe(original);
+    expect(modelRuntime.streamSimple).toBe(laterWrapper);
   });
 });

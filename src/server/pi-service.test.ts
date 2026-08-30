@@ -4141,7 +4141,7 @@ describe("PiConnection coordinated project view", () => {
       const focused = latestState(harness.events);
       expect(focused.selectedServiceTier).toBeNull();
       Object.assign(harness.runtime.created[0]!.model!, {
-        serviceTiers: ["priority"],
+        api: "openai-codex-responses",
       });
       const commandId = randomUUID();
 

@@ -1,18 +1,22 @@
-import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import type { SimpleStreamOptions } from "@earendil-works/pi-ai";
 import {
-  serviceTierSchema,
-  type ServiceTier,
-} from "../shared/protocol.js";
+  clampThinkingLevel,
+  type Api,
+  type Context,
+  type Model,
+  type ModelsApiStreamOptions,
+  type ModelsSimpleStreamOptions,
+} from "@earendil-works/pi-ai";
+import { buildBaseOptions } from "@earendil-works/pi-ai/api/simple-options";
+import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import type { ServiceTier } from "../shared/protocol.js";
 
-type ServiceTierCapableModel = {
+const CODEX_RESPONSES_API = "openai-codex-responses" as const;
+const CODEX_SERVICE_TIERS = ["priority"] satisfies readonly ServiceTier[];
+
+type ServiceTierRouteModel = {
   provider?: unknown;
   id?: unknown;
-  serviceTiers?: unknown;
-};
-
-type ServiceTierStreamOptions = SimpleStreamOptions & {
-  serviceTier: ServiceTier;
+  api?: unknown;
 };
 
 export interface ServiceTierOverride {
@@ -20,7 +24,7 @@ export interface ServiceTierOverride {
 }
 
 function modelIdentity(model: unknown): string {
-  const compatible = model as ServiceTierCapableModel;
+  const compatible = model as ServiceTierRouteModel;
   return typeof compatible.provider === "string"
     && typeof compatible.id === "string"
     ? `${compatible.provider}/${compatible.id}`
@@ -28,36 +32,15 @@ function modelIdentity(model: unknown): string {
 }
 
 /**
- * Reads the SDK capability field at one compatibility boundary until the SDK
- * exposes it in its public Model type.
+ * Projects the stable request-route capability. Provider account and model
+ * eligibility remain authoritative at dispatch and are never guessed here.
  */
 export function modelServiceTiers(
   model: unknown,
 ): ServiceTier[] | undefined {
-  const value = (model as ServiceTierCapableModel).serviceTiers;
-  if (value === undefined) return undefined;
-  if (
-    !Array.isArray(value)
-    || value.length > serviceTierSchema.options.length
-  ) {
-    throw new Error(
-      `Model ${modelIdentity(model)} has an invalid serviceTiers capability`,
-    );
-  }
-
-  const tiers: ServiceTier[] = [];
-  const seen = new Set<ServiceTier>();
-  for (const candidate of value) {
-    const parsed = serviceTierSchema.safeParse(candidate);
-    if (!parsed.success || seen.has(parsed.data)) {
-      throw new Error(
-        `Model ${modelIdentity(model)} has an invalid serviceTiers capability`,
-      );
-    }
-    seen.add(parsed.data);
-    tiers.push(parsed.data);
-  }
-  return tiers;
+  return (model as ServiceTierRouteModel).api === CODEX_RESPONSES_API
+    ? [...CODEX_SERVICE_TIERS]
+    : undefined;
 }
 
 export function assertModelSupportsServiceTier(
@@ -70,64 +53,82 @@ export function assertModelSupportsServiceTier(
   );
 }
 
+type ServiceTierModelRuntime = Pick<
+  ModelRuntime,
+  "stream" | "streamSimple"
+>;
+
+function streamCodexWithServiceTier(
+  modelRuntime: ServiceTierModelRuntime,
+  model: Model<Api>,
+  context: Context,
+  options: ModelsSimpleStreamOptions | undefined,
+  tier: ServiceTier,
+) {
+  assertModelSupportsServiceTier(model, tier);
+
+  const codexModel = model as Model<typeof CODEX_RESPONSES_API>;
+  const base = {
+    ...buildBaseOptions(codexModel, context, options, options?.apiKey),
+    toolChoice: options?.toolChoice,
+  };
+  const clampedReasoning = options?.reasoning
+    ? clampThinkingLevel(codexModel, options.reasoning)
+    : undefined;
+  const reasoningEffort = clampedReasoning === "off"
+    ? undefined
+    : clampedReasoning;
+
+  return modelRuntime.stream(codexModel, context, {
+    ...base,
+    reasoningEffort,
+    serviceTier: tier,
+    // buildBaseOptions intentionally knows only provider options. Keep the
+    // ModelRuntime request transform added by coding-agent around streamSimple.
+    transformHeaders: options?.transformHeaders,
+  } satisfies ModelsApiStreamOptions<typeof CODEX_RESPONSES_API>);
+}
+
 /**
- * Validates and injects the live conversation selection at Pi's session-local
- * stream boundary. The same boundary is used for normal turns, tool loops,
- * and compaction requests.
+ * Applies the live conversation selection below coding-agent's session stream
+ * wrapper. That wrapper still owns settings, attribution, and extension header
+ * transforms; Pi's low-level route still owns auth, transport, response, and
+ * service-tier cost semantics. Pi Web owns only the missing simple conversion.
  */
 export function installServiceTierOverride(
-  session: AgentSession,
+  modelRuntime: ServiceTierModelRuntime,
   getServiceTier: () => ServiceTier | null,
 ): ServiceTierOverride {
-  let originalStream: typeof session.agent.streamFunction | undefined;
-  let overrideStream: typeof session.agent.streamFunction | undefined;
-  let generation = 0;
-
-  const restore = (): void => {
-    if (originalStream && session.agent.streamFunction === overrideStream) {
-      session.agent.streamFunction = originalStream;
+  const hadOwnStreamSimple = Object.hasOwn(modelRuntime, "streamSimple");
+  const originalStreamSimple = modelRuntime.streamSimple;
+  const overrideStreamSimple: ModelRuntime["streamSimple"] = (
+    model,
+    context,
+    options,
+  ) => {
+    const tier = getServiceTier();
+    if (tier === null) {
+      return originalStreamSimple.call(modelRuntime, model, context, options);
     }
-    originalStream = undefined;
-    overrideStream = undefined;
+    return streamCodexWithServiceTier(
+      modelRuntime,
+      model,
+      context,
+      options,
+      tier,
+    );
   };
-
-  const install = (): void => {
-    if (originalStream) return;
-    originalStream = session.agent.streamFunction;
-    const capturedStream = originalStream;
-    overrideStream = (model, context, options) => {
-      const tier = getServiceTier();
-      if (tier === null) return capturedStream(model, context, options);
-
-      assertModelSupportsServiceTier(model, tier);
-      const nextOptions: ServiceTierStreamOptions = {
-        ...options,
-        serviceTier: tier,
-      };
-      return capturedStream(model, context, nextOptions);
-    };
-    session.agent.streamFunction = overrideStream;
-  };
-
-  install();
-  const unsubscribe = session.subscribe((event) => {
-    if (event.type !== "compaction_start" || event.reason !== "manual") return;
-
-    // Pi chooses manual compaction auth immediately after this synchronous
-    // event by checking streamSimple identity. Temporarily expose the original
-    // stream, then reinstall before the summarizer reads streamFunction.
-    const startedGeneration = ++generation;
-    restore();
-    queueMicrotask(() => {
-      if (generation === startedGeneration) install();
-    });
-  });
+  modelRuntime.streamSimple = overrideStreamSimple;
 
   return {
     dispose(): void {
-      generation++;
-      unsubscribe();
-      restore();
+      if (modelRuntime.streamSimple !== overrideStreamSimple) return;
+      if (hadOwnStreamSimple) {
+        modelRuntime.streamSimple = originalStreamSimple;
+      } else {
+        delete (modelRuntime as { streamSimple?: ModelRuntime["streamSimple"] })
+          .streamSimple;
+      }
     },
   };
 }

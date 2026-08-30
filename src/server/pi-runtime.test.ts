@@ -167,32 +167,52 @@ async function testRuntime(
 }
 
 describe("PiRuntime session ownership", () => {
-  it("installs the service tier dispatch boundary for the session lifetime", async () => {
+  it("installs service tier below the official session request decorator", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-service-tier-"));
-    const upstream = vi.fn();
-    const runtime = await testRuntime(
-      () => [],
-      async (result) => {
-        result.session.agent.streamFunction = upstream as typeof result.session.agent.streamFunction;
-      },
-    );
+    const runtime = await testRuntime(() => []);
     const created = await runtime.createSession(cwd, {
       getServiceTier: () => "priority",
     });
-    const installed = created.session.agent.streamFunction;
+    const officialSessionStream = created.session.agent.streamFunction;
+    expect(Object.hasOwn(created.modelRuntime, "streamSimple")).toBe(true);
+    const lowLevelStream = vi.spyOn(created.modelRuntime, "stream")
+      .mockReturnValue({ source: "official-low-level-stream" } as never);
     const model = {
       provider: "test",
-      id: "model",
-      serviceTiers: ["priority"],
+      id: "future-model",
+      api: "openai-codex-responses",
+      baseUrl: "https://chatgpt.com/backend-api",
+      reasoning: true,
+      input: ["text"],
+      cost: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 },
+      contextWindow: 100_000,
+      maxTokens: 8_192,
     };
+    const context = { systemPrompt: "", messages: [], tools: [] };
 
-    installed(model as never, [] as never, {});
-    expect(upstream).toHaveBeenCalledWith(model, [], {
-      serviceTier: "priority",
+    await officialSessionStream(model as never, context as never, {
+      maxRetries: 4,
+      websocketConnectTimeoutMs: 222,
     });
+    expect(lowLevelStream).toHaveBeenCalledWith(
+      model,
+      context,
+      expect.objectContaining({
+        serviceTier: "priority",
+        timeoutMs: expect.any(Number),
+        websocketConnectTimeoutMs: 222,
+        maxRetries: 4,
+        maxRetryDelayMs: expect.any(Number),
+        transformHeaders: expect.any(Function),
+      }),
+    );
+    const lowLevelOptions = lowLevelStream.mock.calls[0]?.[2];
+    expect(await lowLevelOptions?.transformHeaders?.({ "x-test": "kept" }))
+      .toMatchObject({ "x-test": "kept" });
 
     await created.dispose();
-    expect(created.session.agent.streamFunction).toBe(upstream);
+    expect(created.session.agent.streamFunction).toBe(officialSessionStream);
+    expect(Object.hasOwn(created.modelRuntime, "streamSimple")).toBe(false);
   });
 
   it("recalculates context usage at each completed tool-turn boundary", async () => {

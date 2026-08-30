@@ -1531,12 +1531,12 @@ describe("ProjectSessionCoordinator", () => {
       { roleId: "default" },
     );
     Object.assign(actor.session.model!, {
-      serviceTiers: ["flex", "priority"],
+      api: "openai-codex-responses",
     });
     await fixture.coordinator.setServiceTier(
       fixture.handle,
       actor.conversationId,
-      "flex",
+      "priority",
     );
     const selectedId = actor.sessionManager.appendMessage({
       role: "user",
@@ -1563,7 +1563,7 @@ describe("ProjectSessionCoordinator", () => {
     const updatingTier = fixture.coordinator.setServiceTier(
       fixture.handle,
       actor.conversationId,
-      "priority",
+      null,
     ).finally(() => {
       tierSettled = true;
     });
@@ -1573,10 +1573,10 @@ describe("ProjectSessionCoordinator", () => {
     releaseInspection.resolve();
     await truncating;
     await updatingTier;
-    expect(actor.getServiceTier()).toBe("priority");
+    expect(actor.getServiceTier()).toBeNull();
     expect(aggregateReservedConversationEntries(
       actor.sessionManager.getEntries(),
-    ).serviceTier?.tier).toBe("priority");
+    ).serviceTier?.tier).toBeNull();
   });
 
   it("rejects a queued service tier write after deletion reservation", async () => {
@@ -1585,7 +1585,9 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: "default" },
     );
-    Object.assign(actor.session.model!, { serviceTiers: ["priority"] });
+    Object.assign(actor.session.model!, {
+      api: "openai-codex-responses",
+    });
     const context = (fixture.handle as unknown as {
       context: {
         lifecycle: SerialTaskQueue;

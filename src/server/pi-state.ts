@@ -9,7 +9,7 @@ interface ModelLike extends ThinkingCapableModel {
   provider: string;
   id: string;
   name?: string;
-  serviceTiers?: unknown;
+  api?: string;
   input?: string[];
   contextWindow?: number;
 }

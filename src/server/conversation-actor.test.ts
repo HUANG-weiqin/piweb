@@ -1566,38 +1566,40 @@ describe("ConversationActor", () => {
       updatedAt: "2026-07-19T10:00:00.000Z",
     }));
     const runtime = new FakeRuntime();
-    Object.assign(runtime.session.model!, { serviceTiers: ["flex"] });
+    Object.assign(runtime.session.model!, {
+      api: "openai-codex-responses",
+    });
     const fixture = await openActor({ sessionManager: manager, runtime });
 
     expect(fixture.actor.getServiceTier()).toBe("priority");
     expect(runtime.createOptions?.getServiceTier?.()).toBe("priority");
 
     fixture.actor.setServiceTier(null);
-    fixture.actor.setServiceTier("flex");
-    expect(runtime.createOptions?.getServiceTier?.()).toBe("flex");
+    fixture.actor.setServiceTier("priority");
+    expect(runtime.createOptions?.getServiceTier?.()).toBe("priority");
     expect(aggregateReservedConversationEntries(
       manager.getEntries(),
-    ).serviceTier?.tier).toBe("flex");
+    ).serviceTier?.tier).toBe("priority");
 
     vi.spyOn(manager, "appendCustomEntry").mockImplementationOnce(() => {
       throw new Error("disk full");
     });
     expect(() => fixture.actor.setServiceTier(null)).toThrow("disk full");
-    expect(fixture.actor.getServiceTier()).toBe("flex");
+    expect(fixture.actor.getServiceTier()).toBe("priority");
     await fixture.actor.dispose();
   });
 
   it("rejects a role model transition incompatible with the selected tier", async () => {
     const fixture = await openActor();
     Object.assign(fixture.runtime.session.model!, {
-      serviceTiers: ["priority"],
+      api: "openai-codex-responses",
     });
     fixture.actor.setServiceTier("priority");
     Object.assign(fixture.runtime.modelRegistry, {
       find: () => ({
         provider: "test",
         id: "other-model",
-        serviceTiers: ["flex"],
+        api: "openai-responses",
       }),
     });
     const nextRole = {

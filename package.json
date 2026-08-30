@@ -21,9 +21,9 @@
     "context-compressor:benchmark": "npm run context-compressor:build && tsx scripts/benchmark-context-compressor.ts"
   },
   "dependencies": {
+    "@earendil-works/pi-ai": "0.84.4",
+    "@earendil-works/pi-coding-agent": "0.84.4",
     "@piweb/context-compressor": "workspace:*",
-    "@earendil-works/pi-ai": "0.84.2",
-    "@earendil-works/pi-coding-agent": "0.84.2",
     "dompurify": "^3.2.6",
     "express": "^5.1.0",
     "marked": "^15.0.12",
