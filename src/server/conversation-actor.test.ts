@@ -12,10 +12,14 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
+import {
+  InMemoryCredentialStore,
+  type AssistantMessage,
+} from "@earendil-works/pi-ai";
 import {
   MAX_PROMPT_CHARACTERS,
   parseServerEvent,
+  type ConversationSummary,
   type ToolMode,
 } from "../shared/protocol.js";
 import type {
@@ -94,6 +98,7 @@ interface FakeSession extends AgentSession {
   toolCallGate?: ToolCallGate;
   promptCalls: Array<{ text: string; streamingBehavior?: "steer" | "followUp" }>;
   promptImplementation(text: string, options?: Parameters<AgentSession["prompt"]>[1]): Promise<void>;
+  setSessionNameImplementation(name: string): void;
   resumeCalls: number;
   turnBoundaryPaused: boolean;
   turnBoundaryPauseReleases: number;
@@ -130,6 +135,7 @@ function fakeSession(): FakeSession {
       getCommand: () => undefined,
     },
     promptImplementation: async () => undefined,
+    setSessionNameImplementation: () => undefined,
     resumeCalls: 0,
     turnBoundaryPaused: false,
     turnBoundaryPauseReleases: 0,
@@ -139,6 +145,9 @@ function fakeSession(): FakeSession {
     prompt: function (text: string, options?: Parameters<AgentSession["prompt"]>[1]) {
       this.promptCalls.push({ text, streamingBehavior: options?.streamingBehavior });
       return this.promptImplementation(text, options);
+    },
+    setSessionName: function (name: string) {
+      this.setSessionNameImplementation(name);
     },
     getSteeringMessages: function () {
       return this.steeringMessages;
@@ -207,7 +216,15 @@ function fakeSession(): FakeSession {
 
 class FakeRuntime implements PiRuntimeLike {
   readonly credentialStore = new InMemoryCredentialStore();
-  readonly modelRuntime = {} as ModelRuntime;
+  titleImplementation: ModelRuntime["completeSimple"] = async () =>
+    automaticTitleMessage("测试任务");
+  readonly titleCalls: Array<Parameters<ModelRuntime["completeSimple"]>> = [];
+  readonly modelRuntime = {
+    completeSimple: (...args: Parameters<ModelRuntime["completeSimple"]>) => {
+      this.titleCalls.push(args);
+      return this.titleImplementation(...args);
+    },
+  } as unknown as ModelRuntime;
   readonly modelRegistry = {} as ModelRegistry;
   readonly session = fakeSession();
   readonly settings = fakeSettings();
@@ -242,6 +259,9 @@ class FakeRuntime implements PiRuntimeLike {
         : undefined,
     };
     this.session.toolCallGate = options.toolCallGate;
+    this.session.setSessionNameImplementation = (name) => {
+      options.sessionManager?.appendSessionInfo(name);
+    };
     return {
       session: this.session,
       settings: this.settings,
@@ -367,7 +387,8 @@ interface ActorFixture {
   project: {
     cwd: string;
     toolMode: ToolMode;
-    refreshConversations(): Promise<[]>;
+    hasPersistedConversationNameIntent(): Promise<boolean>;
+    refreshConversations(): Promise<ConversationSummary[]>;
   };
 }
 
@@ -385,7 +406,9 @@ async function openActor(
   const project = overrides.project ?? {
     cwd: process.cwd(),
     toolMode: "full_access" as ToolMode,
-    refreshConversations: async () => [],
+    hasPersistedConversationNameIntent: async () =>
+      hasPersistedConversationNameIntent(manager),
+    refreshConversations: async () => conversationSummaries(manager),
   };
   const actor = await ConversationActor.open({
     conversationId: CONVERSATION_ID,
@@ -408,6 +431,52 @@ async function openActor(
   };
 }
 
+function automaticTitleMessage(text: string): AssistantMessage {
+  return {
+    role: "assistant",
+    content: [{ type: "text", text }],
+    api: "test",
+    provider: "test",
+    model: "model",
+    usage: {
+      input: 1,
+      output: 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 2,
+      cost: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        total: 0,
+      },
+    },
+    stopReason: "stop",
+    timestamp: Date.now(),
+  };
+}
+
+function hasPersistedConversationNameIntent(
+  manager: SessionManagerType,
+): boolean {
+  return manager.getEntries().some((entry) => entry.type === "session_info");
+}
+
+function conversationSummaries(
+  manager: SessionManagerType,
+): ConversationSummary[] {
+  const name = manager.getSessionName();
+  return [{
+    id: manager.getSessionId(),
+    ...(name === undefined ? {} : { name }),
+    preview: "",
+    createdAt: "2026-08-30T00:00:00.000Z",
+    updatedAt: "2026-08-30T00:00:00.000Z",
+    messageCount: 0,
+  }];
+}
+
 function nativeEvent(value: unknown): AgentSessionEvent {
   return value as AgentSessionEvent;
 }
@@ -424,6 +493,327 @@ function checkToolTurnBoundary(runtime: FakeRuntime): boolean {
 }
 
 describe("ConversationActor", () => {
+  describe("initial automatic title", () => {
+    it("durably names an eligible conversation before starting the Agent prompt", async () => {
+      const runtime = new FakeRuntime();
+      const manager = SessionManager.inMemory(process.cwd(), {
+        id: CONVERSATION_ID,
+      });
+      const titleResult = deferred<AssistantMessage>();
+      const order: string[] = [];
+      runtime.titleImplementation = async () => {
+        order.push("title");
+        return titleResult.promise;
+      };
+      const project = {
+        cwd: process.cwd(),
+        toolMode: "full_access" as ToolMode,
+        hasPersistedConversationNameIntent: async () => {
+          order.push("verify");
+          return hasPersistedConversationNameIntent(manager);
+        },
+        refreshConversations: async () => {
+          order.push("refresh");
+          return conversationSummaries(manager);
+        },
+      };
+      const fixture = await openActor({
+        runtime,
+        sessionManager: manager,
+        project,
+      });
+      runtime.session.setSessionNameImplementation = (name) => {
+        order.push("name");
+        manager.appendSessionInfo(name);
+      };
+      runtime.session.promptImplementation = async () => {
+        order.push("prompt");
+      };
+
+      const running = fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "让首轮会话自动生成简短标题",
+        origin: "browser",
+      });
+      await vi.waitFor(() => expect(runtime.titleCalls).toHaveLength(1));
+
+      expect(fixture.actor.getActivity()).toEqual({
+        kind: "queued",
+        runId: RUN_A,
+      });
+      expect(fixture.events).not.toContainEqual(expect.objectContaining({
+        type: "session_event",
+        runId: RUN_A,
+        event: { type: "run_queued" },
+      }));
+      expect(runtime.session.promptCalls).toEqual([]);
+      expect(manager.getSessionName()).toBeUndefined();
+      expect(runtime.titleCalls[0]?.[1]).toMatchObject({
+        messages: [{
+          role: "user",
+          content: "让首轮会话自动生成简短标题",
+        }],
+      });
+      expect(runtime.titleCalls[0]?.[1].tools).toBeUndefined();
+
+      titleResult.resolve(automaticTitleMessage(
+        "  会话首轮自动命名  \n这行解释不应进入标题",
+      ));
+      await expect(running).resolves.toMatchObject({ outcome: "completed" });
+
+      expect(manager.getSessionName()).toBe("会话首轮自动命名");
+      expect(order.slice(0, 5)).toEqual([
+        "title",
+        "name",
+        "verify",
+        "refresh",
+        "prompt",
+      ]);
+      expect(fixture.events).toContainEqual(expect.objectContaining({
+        type: "session_event",
+        runId: RUN_A,
+        event: { type: "run_queued" },
+      }));
+      await fixture.actor.dispose();
+    });
+
+    it("bounds and sanitizes a generated title", async () => {
+      const runtime = new FakeRuntime();
+      runtime.titleImplementation = async () => automaticTitleMessage(
+        `标题：${"界".repeat(30)}\u0000ignored`,
+      );
+      const fixture = await openActor({ runtime });
+
+      await fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "generate a bounded title",
+        origin: "browser",
+      });
+
+      expect(fixture.manager.getSessionName()).toBe("界".repeat(24));
+      await fixture.actor.dispose();
+    });
+
+    it("uses a generic durable fallback when title generation fails", async () => {
+      const runtime = new FakeRuntime();
+      runtime.titleImplementation = async () => {
+        throw new Error("title provider unavailable");
+      };
+      const fixture = await openActor({ runtime });
+
+      await expect(fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "continue despite title failure",
+        origin: "browser",
+      })).resolves.toMatchObject({ outcome: "completed" });
+
+      expect(fixture.manager.getSessionName()).toBe("新任务");
+      expect(runtime.session.promptCalls).toEqual([{
+        text: "continue despite title failure",
+        streamingBehavior: undefined,
+      }]);
+      await fixture.actor.dispose();
+    });
+
+    it("lets a durably proved explicit name win while generation is pending", async () => {
+      const runtime = new FakeRuntime();
+      const manager = SessionManager.inMemory(process.cwd(), {
+        id: CONVERSATION_ID,
+      });
+      const titleStarted = deferred();
+      const releaseTitle = deferred<AssistantMessage>();
+      let proofCalls = 0;
+      runtime.titleImplementation = async () => {
+        titleStarted.resolve();
+        return releaseTitle.promise;
+      };
+      const fixture = await openActor({
+        runtime,
+        sessionManager: manager,
+        project: {
+          cwd: process.cwd(),
+          toolMode: "full_access",
+          hasPersistedConversationNameIntent: async () => {
+            proofCalls += 1;
+            return hasPersistedConversationNameIntent(manager);
+          },
+          refreshConversations: async () => conversationSummaries(manager),
+        },
+      });
+
+      const running = fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "do not overwrite a manual name",
+        origin: "browser",
+      });
+      await titleStarted.promise;
+      manager.appendSessionInfo("人工标题");
+      releaseTitle.resolve(automaticTitleMessage("自动标题"));
+      await running;
+
+      expect(manager.getSessionName()).toBe("人工标题");
+      expect(proofCalls).toBe(1);
+      expect(runtime.session.promptCalls).toHaveLength(1);
+      await fixture.actor.dispose();
+    });
+
+    it("cancels pending title generation without starting the Agent", async () => {
+      const runtime = new FakeRuntime();
+      const titleStarted = deferred();
+      runtime.titleImplementation = async (_model, _context, options) => {
+        titleStarted.resolve();
+        return new Promise<AssistantMessage>((_resolve, reject) => {
+          options?.signal?.addEventListener("abort", () => {
+            const error = new Error("aborted");
+            error.name = "AbortError";
+            reject(error);
+          }, { once: true });
+        });
+      };
+      const fixture = await openActor({ runtime });
+
+      const running = fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "cancel while naming",
+        origin: "browser",
+      });
+      await titleStarted.promise;
+      await fixture.actor.abort(RUN_A);
+      await expect(running).resolves.toMatchObject({ outcome: "aborted" });
+
+      expect(runtime.session.promptCalls).toEqual([]);
+      expect(fixture.manager.getSessionName()).toBeUndefined();
+      await fixture.actor.dispose();
+    });
+
+    it("does not rename an unnamed conversation that already has transcript content", async () => {
+      const manager = SessionManager.inMemory(process.cwd(), {
+        id: CONVERSATION_ID,
+      });
+      manager.appendMessage(agentMessage({
+        role: "user",
+        content: "existing task",
+        timestamp: Date.now(),
+      }));
+      const runtime = new FakeRuntime();
+      const fixture = await openActor({
+        sessionManager: manager,
+        runtime,
+      });
+
+      await fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "later task",
+        origin: "browser",
+      });
+
+      expect(runtime.titleCalls).toEqual([]);
+      expect(manager.getSessionName()).toBeUndefined();
+      await fixture.actor.dispose();
+    });
+
+    it("does not rename an unnamed conversation with custom handoff context", async () => {
+      const manager = SessionManager.inMemory(process.cwd(), {
+        id: CONVERSATION_ID,
+      });
+      manager.appendCustomMessageEntry(
+        "test.peer_handoff",
+        "context supplied before the browser prompt",
+        false,
+      );
+      const runtime = new FakeRuntime();
+      const fixture = await openActor({ sessionManager: manager, runtime });
+
+      await fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "continue from the handoff",
+        origin: "browser",
+      });
+
+      expect(runtime.titleCalls).toEqual([]);
+      expect(manager.getSessionName()).toBeUndefined();
+      await fixture.actor.dispose();
+    });
+
+    it("does not auto-title a peer-created normal conversation", async () => {
+      const runtime = new FakeRuntime();
+      const fixture = await openActor({
+        runtime,
+        profile: {
+          ...profile(),
+          createdBy: {
+            kind: "conversation",
+            conversationId: TARGET_CONVERSATION_ID,
+          },
+        },
+      });
+
+      await fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "peer browser follow-up",
+        origin: "browser",
+      });
+
+      expect(runtime.titleCalls).toEqual([]);
+      expect(fixture.manager.getSessionName()).toBeUndefined();
+      await fixture.actor.dispose();
+    });
+
+    it("treats an explicit cleared title as a user title intent", async () => {
+      const manager = SessionManager.inMemory(process.cwd(), {
+        id: CONVERSATION_ID,
+      });
+      manager.appendSessionInfo("");
+      const runtime = new FakeRuntime();
+      const fixture = await openActor({
+        sessionManager: manager,
+        runtime,
+      });
+
+      await fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "do not replace the cleared title",
+        origin: "browser",
+      });
+
+      expect(runtime.titleCalls).toEqual([]);
+      expect(manager.getSessionName()).toBeUndefined();
+      expect(runtime.session.promptCalls).toHaveLength(1);
+      await fixture.actor.dispose();
+    });
+
+    it("fails the actor before acknowledgement when title persistence cannot be proved", async () => {
+      const runtime = new FakeRuntime();
+      const fixture = await openActor({ runtime });
+      runtime.session.setSessionNameImplementation = () => {
+        throw new Error("simulated title append failure");
+      };
+
+      await expect(fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "must have a durable title",
+        origin: "browser",
+      })).rejects.toThrow("not durably persisted");
+
+      expect(runtime.session.promptCalls).toEqual([]);
+      expect(fixture.events).not.toContainEqual(expect.objectContaining({
+        type: "session_event",
+        runId: RUN_A,
+        event: { type: "run_queued" },
+      }));
+      expect(
+        aggregateReservedConversationEntries(fixture.manager.getEntries())
+          .runSettlements,
+      ).toEqual([]);
+      expect(() => fixture.actor.startPrompt({
+        runId: RUN_B,
+        text: "cannot reuse a poisoned actor",
+        origin: "browser",
+      })).toThrow("not durably persisted");
+      await fixture.actor.dispose();
+    });
+  });
+
   describe("browser prompt admission while busy (A')", () => {
     const PROMPT_ID = "3c5b3e7a-1f2a-4b6e-8d0c-9a1b2c3d4e5f";
 
@@ -3158,8 +3548,12 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
-  it("publishes queued synchronously and permits only one active run", async () => {
-    const fixture = await openActor();
+  it("publishes queued synchronously for a named conversation and permits only one active run", async () => {
+    const manager = SessionManager.inMemory(process.cwd(), {
+      id: CONVERSATION_ID,
+    });
+    manager.appendSessionInfo("already named");
+    const fixture = await openActor({ sessionManager: manager });
     const promptStarted = deferred();
     const promptFinished = deferred();
     fixture.runtime.session.promptImplementation = async () => {
@@ -3795,6 +4189,7 @@ describe("ConversationActor", () => {
       project: {
         cwd: process.cwd(),
         toolMode: "full_access",
+        hasPersistedConversationNameIntent: async () => false,
         refreshConversations: async () => [],
       },
       sessionManager: manager,
@@ -3822,6 +4217,7 @@ describe("ConversationActor", () => {
       project: {
         cwd: process.cwd(),
         toolMode: "full_access",
+        hasPersistedConversationNameIntent: async () => false,
         refreshConversations: async () => [],
       },
       sessionManager: SessionManager.inMemory(process.cwd(), {

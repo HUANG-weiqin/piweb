@@ -808,6 +808,57 @@ export class ProjectStore {
   }
 
   /**
+   * Proves the latest title intent from one actor-owned session file without
+   * depending on the mutable whole-project SDK index. The actor's writer lease
+   * owns the supplied path; this boundary still revalidates path, identity,
+   * file stability, and the complete Pi session payload.
+   */
+  async hasPersistedConversationNameIntent(
+    conversationId: string,
+    sessionPath: string | undefined,
+  ): Promise<boolean> {
+    assertSessionId(conversationId, "conversationId");
+    if (sessionPath === undefined) {
+      throw new Error(
+        `Persistent session path is missing for conversation ${conversationId}`,
+      );
+    }
+    await this.assertSessionDirectorySafe();
+
+    for (
+      let attempt = 0;
+      attempt < MAX_INTEGRITY_PROOF_ATTEMPTS;
+      attempt += 1
+    ) {
+      try {
+        const expected = await this.fingerprintSafeSessionPath(sessionPath);
+        const verified = await this.readStableExpectedSessionFile(
+          expected,
+          conversationId,
+        );
+        const values = parseValidatedSessionValues(verified.raw);
+        for (let index = values.length - 1; index >= 1; index -= 1) {
+          const entry = values[index];
+          if (
+            typeof entry !== "object"
+            || entry === null
+            || !("type" in entry)
+            || entry.type !== "session_info"
+          ) continue;
+          return true;
+        }
+        return false;
+      } catch (error) {
+        if (
+          !(error instanceof SessionFileChangedError)
+          || attempt === MAX_INTEGRITY_PROOF_ATTEMPTS - 1
+        ) throw error;
+      }
+    }
+    throw new SessionFileChangedError(conversationId);
+  }
+
+  /**
    * Reads host-owned metadata without opening a writable Pi SessionManager or
    * changing the project's recent-conversation pointer.
    */

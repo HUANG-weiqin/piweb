@@ -15,7 +15,10 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
+import {
+  InMemoryCredentialStore,
+  type AssistantMessage,
+} from "@earendil-works/pi-ai";
 import {
   MAX_PROMPT_CHARACTERS,
   type ProjectActivitySummary,
@@ -98,6 +101,32 @@ function deferred<T = void>(): Deferred<T> {
 
 function agentMessage(value: unknown): AgentMessage {
   return value as AgentMessage;
+}
+
+function automaticTitleMessage(text: string): AssistantMessage {
+  return {
+    role: "assistant",
+    content: [{ type: "text", text }],
+    api: "test",
+    provider: "test",
+    model: "model-a",
+    usage: {
+      input: 1,
+      output: 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 2,
+      cost: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        total: 0,
+      },
+    },
+    stopReason: "stop",
+    timestamp: Date.now(),
+  };
 }
 
 type SessionBehavior = (control: FakeSessionControl) => Promise<void>;
@@ -248,7 +277,9 @@ class FakeSessionControl {
           if (control.listener === listener) control.listener = undefined;
         };
       },
-      setSessionName: (_name: string) => undefined,
+      setSessionName: (name: string) => {
+        control.manager.appendSessionInfo(name);
+      },
       getContextUsage: () => control.contextUsage,
     } as unknown as AgentSession;
   }
@@ -401,7 +432,15 @@ function blocksUntil(
 
 class FakeRuntime implements PiRuntimeLike {
   readonly credentialStore = new InMemoryCredentialStore();
-  readonly modelRuntime = {} as ModelRuntime;
+  titleImplementation: ModelRuntime["completeSimple"] = async () =>
+    automaticTitleMessage("测试任务");
+  readonly titleCalls: Array<Parameters<ModelRuntime["completeSimple"]>> = [];
+  readonly modelRuntime = {
+    completeSimple: (...args: Parameters<ModelRuntime["completeSimple"]>) => {
+      this.titleCalls.push(args);
+      return this.titleImplementation(...args);
+    },
+  } as unknown as ModelRuntime;
   readonly modelRegistry: ModelRegistry;
   sessionModelRegistry?: ModelRegistry;
   projectModelRegistry?: ModelRegistry;
@@ -1202,6 +1241,66 @@ describe("ProjectSessionCoordinator", () => {
       },
       "legacy queue directory removal",
     );
+  });
+
+  it("persists an automatic title before acknowledging a first user browser prompt", async () => {
+    const fixture = await createFixture();
+    fixture.runtime.titleImplementation = async () =>
+      automaticTitleMessage("自动生成标题");
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    let persistedAtAcknowledgement: Promise<boolean> | undefined;
+    actor.subscribe((event) => {
+      if (
+        event.type === "session_event"
+        && event.event.type === "run_queued"
+      ) {
+        persistedAtAcknowledgement = fixture.handle.project
+          .hasPersistedConversationNameIntent(
+            actor.conversationId,
+            actor.sessionManager.getSessionFile(),
+          );
+      }
+    });
+    fixture.runtime.control(actor.conversationId).enqueue(
+      completesWith("done"),
+    );
+
+    await fixture.coordinator.prompt(
+      fixture.handle,
+      actor.conversationId,
+      randomUUID(),
+      "实现新会话首次运行前自动命名",
+    );
+
+    expect(fixture.runtime.titleCalls).toHaveLength(1);
+    expect(fixture.runtime.titleCalls[0]?.[1]).toMatchObject({
+      messages: [{
+        role: "user",
+        content: "实现新会话首次运行前自动命名",
+      }],
+    });
+    await expect(persistedAtAcknowledgement).resolves.toBe(true);
+    await waitUntil(
+      () => fixture.handle.project.listConversations()
+        .find(({ id }) => id === actor.conversationId)?.name === "自动生成标题",
+      "the automatic title catalog projection",
+    );
+
+    const explicitlyNamed = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default", title: "人工标题" },
+    );
+    await fixture.coordinator.prompt(
+      fixture.handle,
+      explicitlyNamed.conversationId,
+      randomUUID(),
+      "保留人工标题",
+    );
+    expect(fixture.runtime.titleCalls).toHaveLength(1);
+    expect(explicitlyNamed.sessionManager.getSessionName()).toBe("人工标题");
   });
 
   it("does not rescan project activity for streaming session deltas", async () => {
@@ -9096,6 +9195,10 @@ describe("ProjectSessionCoordinator", () => {
       randomUUID(),
       "wait for the temporary explicit message",
     );
+    await waitUntil(
+      () => caller.getActivity().kind === "running",
+      "the caller run before temporary creation",
+    );
     const temporary = await fixture.coordinator.startPeerSession(
       fixture.handle,
       caller.conversationId,
@@ -9486,6 +9589,10 @@ describe("ProjectSessionCoordinator", () => {
       caller.conversationId,
       randomUUID(),
       "wait until steering rejects",
+    );
+    await waitUntil(
+      () => caller.getActivity().kind === "running",
+      "the caller run before temporary creation",
     );
     const temporary = await fixture.coordinator.startPeerSession(
       fixture.handle,
@@ -12440,6 +12547,10 @@ describe("ProjectSessionCoordinator", () => {
       );
       await waitUntil(
         () => source.getActivity().kind === "waiting",
+        "checkpoint waiter registration",
+      );
+      await waitUntil(
+        () => timers().length === 1,
         "wait-cache timer registration",
       );
 
@@ -12515,6 +12626,10 @@ describe("ProjectSessionCoordinator", () => {
       await waitUntil(
         () => source.getActivity().kind === "waiting",
         "settlement waiter registration",
+      );
+      await waitUntil(
+        () => timers().length === 1,
+        "settlement wait-cache timer registration",
       );
       const timer = timers()[0];
       if (!timer) throw new Error("Expected wait-cache timer");
@@ -12669,6 +12784,10 @@ describe("ProjectSessionCoordinator", () => {
       await waitUntil(
         () => source.getActivity().kind === "waiting",
         "aborted waiter registration",
+      );
+      await waitUntil(
+        () => timers().length === 1,
+        "aborted wait-cache timer registration",
       );
       const timer = timers()[0];
       if (!timer) throw new Error("Expected wait-cache timer");
