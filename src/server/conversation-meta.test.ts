@@ -17,6 +17,7 @@ import {
   PENDING_PROMPT_BATCH_CUSTOM_TYPE,
   PENDING_PROMPT_DELIVERY_CUSTOM_TYPE,
   RUN_SETTLEMENT_CUSTOM_TYPE,
+  SERVICE_TIER_CUSTOM_TYPE,
   TEMPORARY_RETURN_RECEIPT_CUSTOM_TYPE,
   aggregateReservedConversationEntries,
   appendReservedCustomEntry,
@@ -27,6 +28,7 @@ import {
   createConversationRoleChangeEntry,
   createMetaOperationEntry,
   createRunSettlementEntry,
+  createServiceTierSelectionEntry,
   createLoopListEntry,
   createLoopListContinueEntry,
   createTemporaryReturnReceiptEntry,
@@ -42,6 +44,7 @@ import {
   parsePendingPromptDeliveryEntry,
   parseReservedConversationEntry,
   parseRunSettlementEntry,
+  parseServiceTierSelectionEntry,
   parseTemporaryReturnReceiptEntry,
 } from "./conversation-meta.js";
 import type {
@@ -214,6 +217,32 @@ describe("conversation reserved entries", () => {
       changed,
       initial,
     ])).toThrow(/updatedAt cannot regress/i);
+  });
+
+  it("keeps the latest strict service tier selection", () => {
+    const initial = createServiceTierSelectionEntry({
+      tier: "priority",
+      updatedAt: timestamp,
+    });
+    const cleared = createServiceTierSelectionEntry({
+      tier: null,
+      updatedAt: "2026-07-19T10:01:00.000Z",
+    });
+
+    expect(initial.customType).toBe(SERVICE_TIER_CUSTOM_TYPE);
+    expect(parseServiceTierSelectionEntry(initial)).toEqual(initial);
+    expect(aggregateReservedConversationEntries([
+      initial,
+      cleared,
+    ]).serviceTier).toEqual(cleared.data);
+    expect(() => parseServiceTierSelectionEntry({
+      ...initial,
+      data: { ...initial.data, tier: "unknown" },
+    })).toThrow(/tier/i);
+    expect(() => aggregateReservedConversationEntries([
+      cleared,
+      initial,
+    ])).toThrow(/service tier updatedAt cannot regress/i);
   });
 
   it("round-trips and aggregates strict bounded LoopList state and continuation snapshots", () => {

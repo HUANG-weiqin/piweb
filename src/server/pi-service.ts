@@ -168,6 +168,7 @@ function queuedCommandScope(command: QueuedCommand): "session" | "epoch" | "glob
     case "select_model":
     case "set_thinking":
     case "set_compaction_threshold":
+    case "set_service_tier":
     case "compact_context":
     case "switch_conversation_role":
     case "rename_conversation":
@@ -1349,6 +1350,21 @@ export class PiConnection {
         this.emitCommandComplete(command);
         return;
       }
+      case "set_service_tier": {
+        const view = this.requireCoordinatedFocus(
+          command.sessionId,
+          command.conversationId,
+          command.focusId,
+        );
+        const { coordinator } = await this.requireCoordination();
+        await coordinator.setServiceTier(
+          view.handle,
+          command.conversationId,
+          command.serviceTier,
+        );
+        this.emitCommandComplete(command);
+        return;
+      }
       case "rename_conversation": {
         const view = this.requireCoordinatedView(command.sessionId);
         const { coordinator } = await this.requireCoordination();
@@ -1771,6 +1787,7 @@ export class PiConnection {
       projectId: view.handle.project.id,
       cwd: view.handle.project.cwd,
       busy: activity.kind !== "idle",
+      selectedServiceTier: actor?.getServiceTier() ?? null,
       ...(actor === undefined
         ? {}
         : {
@@ -2277,6 +2294,10 @@ export class PiConnection {
         throw new Error(
           "set_compaction_threshold requires persistent project coordination",
         );
+      case "set_service_tier":
+        throw new Error(
+          "set_service_tier requires persistent project coordination",
+        );
       case "compact_context":
         throw new Error(
           "compact_context requires persistent project coordination",
@@ -2733,6 +2754,7 @@ export class PiConnection {
       selectedModel: session.model && registry.hasConfiguredAuth(session.model)
         ? { provider: session.model.provider, id: session.model.id }
         : undefined,
+      selectedServiceTier: null,
       thinkingLevel: session.thinkingLevel as ThinkingLevel,
       toolMode: active.project.toolMode,
       availableThinkingLevels: session.getAvailableThinkingLevels() as ThinkingLevel[],

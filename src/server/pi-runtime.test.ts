@@ -167,6 +167,34 @@ async function testRuntime(
 }
 
 describe("PiRuntime session ownership", () => {
+  it("installs the service tier dispatch boundary for the session lifetime", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-service-tier-"));
+    const upstream = vi.fn();
+    const runtime = await testRuntime(
+      () => [],
+      async (result) => {
+        result.session.agent.streamFunction = upstream as typeof result.session.agent.streamFunction;
+      },
+    );
+    const created = await runtime.createSession(cwd, {
+      getServiceTier: () => "priority",
+    });
+    const installed = created.session.agent.streamFunction;
+    const model = {
+      provider: "test",
+      id: "model",
+      serviceTiers: ["priority"],
+    };
+
+    installed(model as never, [] as never, {});
+    expect(upstream).toHaveBeenCalledWith(model, [], {
+      serviceTier: "priority",
+    });
+
+    await created.dispose();
+    expect(created.session.agent.streamFunction).toBe(upstream);
+  });
+
   it("recalculates context usage at each completed tool-turn boundary", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-turn-boundary-"));
     const checks: unknown[] = [];

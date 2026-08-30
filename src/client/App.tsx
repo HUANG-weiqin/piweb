@@ -15,6 +15,7 @@ import {
   type ProjectActivitySummary,
   type RoleTemplate,
   type ServerEvent,
+  type ServiceTier,
   type ThinkingLevel,
 } from "../shared/protocol";
 import { chatReducer, initialChatState } from "./chat/reducer";
@@ -54,6 +55,7 @@ export const MAX_CACHED_WORKSPACES = 4;
 export const MAX_CACHED_CONVERSATION_PRESENTATIONS = 8;
 const MAX_SUPERSEDED_FOCUS_COMMANDS = 64;
 const RESUME_REFRESH_DELAY_MS = 16;
+const EMPTY_SERVICE_TIERS: readonly ServiceTier[] = [];
 const EMPTY_CONVERSATION_WINDOW: ConversationWindowCoverage = {
   omittedBefore: false,
   startsMidTurn: false,
@@ -193,6 +195,10 @@ interface PendingConversationTruncation {
 }
 
 interface PendingCompactionThreshold {
+  commandId: string;
+}
+
+interface PendingServiceTier extends ActiveFocus {
   commandId: string;
 }
 
@@ -442,6 +448,10 @@ export function App() {
     useState<PendingCompactionThreshold>();
   const pendingCompactionThresholdRef =
     useRef<PendingCompactionThreshold | undefined>(undefined);
+  const [pendingServiceTier, setPendingServiceTierState] =
+    useState<PendingServiceTier>();
+  const pendingServiceTierRef =
+    useRef<PendingServiceTier | undefined>(undefined);
   const [pendingContextCompaction, setPendingContextCompactionState] =
     useState<PendingContextCompaction>();
   const pendingContextCompactionRef =
@@ -775,6 +785,12 @@ export function App() {
     pendingCompactionThresholdRef.current = pending;
     setPendingCompactionThresholdState(pending);
   };
+  const updatePendingServiceTier = (
+    pending: PendingServiceTier | undefined,
+  ) => {
+    pendingServiceTierRef.current = pending;
+    setPendingServiceTierState(pending);
+  };
   const updatePendingContextCompaction = (
     pending: PendingContextCompaction | undefined,
   ) => {
@@ -900,6 +916,7 @@ export function App() {
     preservePresentation = false,
   ) => {
     updatePendingCompactionThreshold(undefined);
+    updatePendingServiceTier(undefined);
     updatePendingConversationTruncation(undefined);
     const previousProjectId = projectIdRef.current;
     projectIdRef.current = projectId;
@@ -997,6 +1014,7 @@ export function App() {
     setNotification(undefined);
     setSettingResult(undefined);
     updatePendingCompactionThreshold(undefined);
+    updatePendingServiceTier(undefined);
     clearAllPendingContextCompactions();
     updatePendingConversationRoleSwitch(undefined);
     updatePendingConversationTruncation(undefined);
@@ -1368,6 +1386,7 @@ export function App() {
             cwd: event.cwd,
             busy: false,
             compacting: false,
+            selectedServiceTier: null,
             thinkingLevel: previewThinkingLevel,
             toolMode: event.toolMode,
             availableThinkingLevels: [previewThinkingLevel],
@@ -1758,6 +1777,21 @@ export function App() {
         setAuth({});
       } else if (event.type === "command_complete") {
         if (event.sessionId !== sessionIdRef.current) return;
+        if (event.operation === "set_service_tier") {
+          const pending = pendingServiceTierRef.current;
+          if (
+            !pending
+            || pending.commandId !== event.commandId
+            || pending.sessionId !== event.sessionId
+            || !matchesFocus(
+              pending.sessionId,
+              pending.conversationId,
+              pending.focusId,
+            )
+          ) return;
+          updatePendingServiceTier(undefined);
+          return;
+        }
         if (event.operation === "set_compaction_threshold") {
           const pending = pendingCompactionThresholdRef.current;
           if (!pending || pending.commandId !== event.commandId) return;
@@ -1956,6 +1990,19 @@ export function App() {
             commandId: "",
             error: event.message,
           });
+          return;
+        }
+        if (event.operation === "set_service_tier" && event.commandId) {
+          const pending = pendingServiceTierRef.current;
+          if (
+            !pending
+            || pending.commandId !== event.commandId
+            || pending.sessionId !== event.sessionId
+            || pending.conversationId !== event.conversationId
+            || pending.focusId !== event.focusId
+          ) return;
+          updatePendingServiceTier(undefined);
+          setError(`修改服务层级失败：${event.message}`);
           return;
         }
         if (
@@ -2182,6 +2229,10 @@ export function App() {
         if (pendingConversationRoleSwitchRef.current) {
           updatePendingConversationRoleSwitch(undefined);
           setError("角色更换状态未确认，请检查恢复后的会话角色再重试。");
+        }
+        if (pendingServiceTierRef.current) {
+          updatePendingServiceTier(undefined);
+          setError("服务层级修改状态未确认，请重连后检查当前设置。");
         }
         updateOutstandingRunId("");
         authFlowIdRef.current = "";
@@ -2734,6 +2785,35 @@ export function App() {
     const sessionId = sessionIdRef.current;
     if (sessionId) send({ type: "set_thinking", sessionId, level });
   };
+  const setServiceTier = (serviceTier: ServiceTier | null): boolean => {
+    const focus = focusRef.current;
+    if (
+      !focus
+      || workspaceSyncingRef.current
+      || conversationSyncingRef.current
+      || !conversationReadyRef.current
+      || pendingFocusRef.current
+      || state?.busy
+      || state?.compacting
+      || pendingServiceTierRef.current
+    ) return false;
+    const pending = {
+      ...focus,
+      commandId: crypto.randomUUID(),
+    };
+    updatePendingServiceTier(pending);
+    setError("");
+    if (send({
+      type: "set_service_tier",
+      commandId: pending.commandId,
+      sessionId: focus.sessionId,
+      conversationId: focus.conversationId,
+      focusId: focus.focusId,
+      serviceTier,
+    })) return true;
+    updatePendingServiceTier(undefined);
+    return false;
+  };
   const setCompactionThreshold = (percent: number): boolean => {
     const focus = focusRef.current;
     if (
@@ -2949,6 +3029,7 @@ export function App() {
     ) setDrawer(true);
   });
   const handleChatThinking = useLatestCallback(setThinkingLevel);
+  const handleChatServiceTier = useLatestCallback(setServiceTier);
   const handleChatCompactionThreshold = useLatestCallback(setCompactionThreshold);
   const handleChatCompact = useLatestCallback(compactContext);
   const handleChatSwitchRole = useLatestCallback(switchConversationRole);
@@ -3149,6 +3230,12 @@ export function App() {
     {feedback}
   </>;
 
+  const visibleServiceTiers = visibleState.providers
+    .flatMap((provider) => provider.models)
+    .find((model) => (
+      model.provider === visibleState.selectedModel?.provider
+      && model.id === visibleState.selectedModel.id
+    ))?.serviceTiers ?? EMPTY_SERVICE_TIERS;
   const currentFocus = focusRef.current;
   const focusedConversationId = currentFocus?.sessionId === visibleState.sessionId
     && (
@@ -3284,6 +3371,9 @@ export function App() {
               roleSwitching={Boolean(pendingConversationRoleSwitch)}
               thinkingLevel={visibleState.thinkingLevel}
               availableThinkingLevels={visibleState.availableThinkingLevels}
+              serviceTiers={visibleServiceTiers}
+              selectedServiceTier={visibleState.selectedServiceTier ?? null}
+              serviceTierBusy={Boolean(pendingServiceTier)}
               compactionThresholdPercent={
                 visibleState.compactionThresholdPercent
                 ?? DEFAULT_COMPACTION_THRESHOLD_PERCENT
@@ -3305,6 +3395,7 @@ export function App() {
               onAbort={handleChatAbort}
               onSettings={handleChatSettings}
               onThinking={handleChatThinking}
+              onServiceTier={handleChatServiceTier}
               onCompactionThreshold={handleChatCompactionThreshold}
               onCompact={handleChatCompact}
               onSwitchRole={handleChatSwitchRole}

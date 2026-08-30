@@ -20,6 +20,7 @@ import {
   type LoopList,
   type PublicState,
   type RoleTemplate,
+  type ServiceTier,
   type ThinkingLevel,
   type TokenUsage,
 } from "../../shared/protocol";
@@ -39,6 +40,14 @@ import { SessionMessageCard } from "./SessionMessageCard";
 const FOLLOW_COMFORT_LIMIT_PX = 96;
 const FOLLOW_COMFORT_TARGET_PX = 32;
 const FOLLOW_REATTACH_LIMIT_PX = 2;
+
+const SERVICE_TIER_LABELS: Record<ServiceTier, string> = {
+  auto: "自动",
+  default: "默认",
+  flex: "弹性",
+  scale: "扩展",
+  priority: "快速",
+};
 
 const COMPACT_NUMBER_FORMAT = new Intl.NumberFormat("en-US", {
   maximumSignificantDigits: 3,
@@ -70,6 +79,9 @@ interface ChatProps {
   roleSwitching: boolean;
   thinkingLevel: ThinkingLevel;
   availableThinkingLevels?: ThinkingLevel[];
+  serviceTiers: readonly ServiceTier[];
+  selectedServiceTier: ServiceTier | null;
+  serviceTierBusy: boolean;
   compactionThresholdPercent: number;
   compactionThresholdBusy: boolean;
   compacting?: boolean;
@@ -93,6 +105,7 @@ interface ChatProps {
   onAbort(): void;
   onSettings(): void;
   onThinking(level: ThinkingLevel): void;
+  onServiceTier(serviceTier: ServiceTier | null): void;
   onCompactionThreshold(percent: number): boolean;
   onCompact(): void;
   onSwitchRole(roleId: string): void;
@@ -255,6 +268,9 @@ function ChatView({
   roleSwitching,
   thinkingLevel,
   availableThinkingLevels,
+  serviceTiers,
+  selectedServiceTier,
+  serviceTierBusy,
   compactionThresholdPercent,
   compactionThresholdBusy,
   compacting = false,
@@ -273,6 +289,7 @@ function ChatView({
   onAbort,
   onSettings,
   onThinking,
+  onServiceTier,
   onCompactionThreshold,
   onCompact,
   onSwitchRole,
@@ -282,6 +299,10 @@ function ChatView({
   rewindingMessageId,
 }: ChatProps) {
   const controlsEnabled = online && interactive;
+  const selectedServiceTierUnavailable = selectedServiceTier !== null
+    && !serviceTiers.includes(selectedServiceTier);
+  const showServiceTierControl = serviceTiers.length > 0
+    || selectedServiceTier !== null;
   let composerPlaceholder = "给 Pi 发送消息…";
   if (!conversationReady) composerPlaceholder = "正在恢复项目对话…";
   else if (rewindingMessageId) composerPlaceholder = "正在回到所选消息…";
@@ -771,6 +792,38 @@ function ChatView({
             ))}
           </select>
         </label>
+        {showServiceTierControl && <label className="service-tier-control">
+          <span>服务</span>
+          <select
+            aria-label="服务层级"
+            value={selectedServiceTier ?? ""}
+            disabled={
+              !controlsEnabled
+              || !conversationReady
+              || busy
+              || compacting
+              || serviceTierBusy
+            }
+            onChange={(event) => onServiceTier(
+              event.target.value
+                ? event.target.value as ServiceTier
+                : null,
+            )}
+          >
+            <option value="">供应商默认</option>
+            {selectedServiceTierUnavailable && (
+              <option value={selectedServiceTier} disabled>
+                {SERVICE_TIER_LABELS[selectedServiceTier]}（不可用）
+              </option>
+            )}
+            {serviceTiers.map((serviceTier) => <option
+              key={serviceTier}
+              value={serviceTier}
+            >
+              {SERVICE_TIER_LABELS[serviceTier]}
+            </option>)}
+          </select>
+        </label>}
         <div
           className="context-management"
           role="group"

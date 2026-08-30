@@ -630,6 +630,7 @@ export function projectConversationItemSlots(
       || reserved.kind === "temporary_return_receipt"
       || reserved.kind === "meta_operation"
       || reserved.kind === "compaction_threshold"
+      || reserved.kind === "service_tier"
       || reserved.kind === "compaction_resume"
       || reserved.kind === "loop_list"
       || reserved.kind === "loop_list_continue"

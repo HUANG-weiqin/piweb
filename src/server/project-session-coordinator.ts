@@ -9,6 +9,7 @@ import {
   type ConversationSummary,
   type ConversationWindowCoverage,
   type ProjectActivitySummary,
+  type ServiceTier,
   type ToolMode,
 } from "../shared/protocol.js";
 import {
@@ -1647,6 +1648,21 @@ export class ProjectSessionCoordinator {
     this.requireActor(context, conversationId)
       .setCompactionThresholdPercent(percent);
     this.emit(context, { type: "project_changed" });
+  }
+
+  async setServiceTier(
+    handle: ProjectSessionHandle,
+    conversationId: string,
+    tier: ServiceTier | null,
+  ): Promise<void> {
+    const context = this.requireContext(handle);
+    await this.runLifecycle(context, () => {
+      if (context.deleting.has(conversationId)) {
+        throw new Error(`Conversation is being deleted: ${conversationId}`);
+      }
+      this.requireActor(context, conversationId).setServiceTier(tier);
+      this.emit(context, { type: "project_changed" });
+    });
   }
 
   async compactContext(

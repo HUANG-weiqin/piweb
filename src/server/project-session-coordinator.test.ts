@@ -1524,6 +1524,106 @@ describe("ProjectSessionCoordinator", () => {
 
 
 
+  it("serializes a service tier update after an in-flight rewind", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    Object.assign(actor.session.model!, {
+      serviceTiers: ["flex", "priority"],
+    });
+    await fixture.coordinator.setServiceTier(
+      fixture.handle,
+      actor.conversationId,
+      "flex",
+    );
+    const selectedId = actor.sessionManager.appendMessage({
+      role: "user",
+      content: "rewind here",
+      timestamp: 1,
+    });
+    const inbox = coordinatorInbox(fixture.handle);
+    const listInbox = inbox.list.bind(inbox);
+    const inspectionStarted = deferred();
+    const releaseInspection = deferred();
+    vi.spyOn(inbox, "list").mockImplementation(async (options) => {
+      inspectionStarted.resolve();
+      await releaseInspection.promise;
+      return listInbox(options);
+    });
+
+    const truncating = fixture.coordinator.truncateConversation(
+      fixture.handle,
+      actor.conversationId,
+      selectedId,
+    );
+    await inspectionStarted.promise;
+    let tierSettled = false;
+    const updatingTier = fixture.coordinator.setServiceTier(
+      fixture.handle,
+      actor.conversationId,
+      "priority",
+    ).finally(() => {
+      tierSettled = true;
+    });
+    await Promise.resolve();
+    expect(tierSettled).toBe(false);
+
+    releaseInspection.resolve();
+    await truncating;
+    await updatingTier;
+    expect(actor.getServiceTier()).toBe("priority");
+    expect(aggregateReservedConversationEntries(
+      actor.sessionManager.getEntries(),
+    ).serviceTier?.tier).toBe("priority");
+  });
+
+  it("rejects a queued service tier write after deletion reservation", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    Object.assign(actor.session.model!, { serviceTiers: ["priority"] });
+    const context = (fixture.handle as unknown as {
+      context: {
+        lifecycle: SerialTaskQueue;
+        deleting: Set<string>;
+      };
+    }).context;
+    const gateStarted = deferred();
+    const releaseGate = deferred();
+    const gateTask = context.lifecycle.run(async () => {
+      gateStarted.resolve();
+      await releaseGate.promise;
+    });
+    await gateStarted.promise;
+
+    const updatingTier = fixture.coordinator.setServiceTier(
+      fixture.handle,
+      actor.conversationId,
+      "priority",
+    );
+    const updateRejection = expect(updatingTier).rejects.toThrow(
+      `Conversation is being deleted: ${actor.conversationId}`,
+    );
+    const deleting = fixture.coordinator.deleteConversation(
+      fixture.handle,
+      actor.conversationId,
+    );
+    expect(context.deleting.has(actor.conversationId)).toBe(true);
+
+    releaseGate.resolve();
+    await gateTask;
+    await updateRejection;
+    await expect(deleting).resolves.toBe(true);
+    expect(actor.getServiceTier()).toBeNull();
+    expect(aggregateReservedConversationEntries(
+      actor.sessionManager.getEntries(),
+    ).serviceTier).toBeUndefined();
+  });
+
   it("rejects rewind while the selected conversation is running", async () => {
     const fixture = await createFixture();
     const actor = await fixture.coordinator.createUserConversation(

@@ -21,6 +21,8 @@ export const MAX_LOOP_LIST_ITEM_TEXT_CHARACTERS = 512;
 export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
+// v37: focused conversations may select a model-advertised request service
+// tier, persisted by the host and validated again at dispatch.
 // v36: project conversation summaries optionally project their collaboration
 // root so the browser can group descendants without receiving lineage details.
 // v35: aggregate wait-for-session activity projects a bounded target count
@@ -29,7 +31,7 @@ export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 // conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
-export const PROTOCOL_VERSION = 36;
+export const PROTOCOL_VERSION = 37;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
@@ -118,6 +120,14 @@ const thinkingLevelSchema = z.enum([
   "max",
 ]);
 export type ThinkingLevel = z.infer<typeof thinkingLevelSchema>;
+export const serviceTierSchema = z.enum([
+  "auto",
+  "default",
+  "flex",
+  "scale",
+  "priority",
+]);
+export type ServiceTier = z.infer<typeof serviceTierSchema>;
 const toolModeSchema = z.enum(["read_only", "full_access"]);
 export type ToolMode = z.infer<typeof toolModeSchema>;
 const roleInputSchema = z.object({
@@ -271,6 +281,14 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
       .max(MAX_COMPACTION_THRESHOLD_PERCENT),
   }),
   z.object({
+    type: z.literal("set_service_tier"),
+    commandId: commandIdSchema,
+    sessionId: sessionIdSchema,
+    conversationId: conversationIdSchema,
+    focusId: focusIdSchema,
+    serviceTier: serviceTierSchema.nullable(),
+  }),
+  z.object({
     type: z.literal("compact_context"),
     commandId: commandIdSchema,
     sessionId: sessionIdSchema,
@@ -394,6 +412,7 @@ const ACKNOWLEDGED_COMMAND_OPERATIONS = [
   "refresh_models",
   "steer",
   "set_compaction_threshold",
+  "set_service_tier",
   "compact_context",
   "switch_conversation_role",
   "delete_conversation",
@@ -410,6 +429,7 @@ interface PublicModel {
   name: string;
   reasoning: boolean;
   thinkingLevels: ThinkingLevel[];
+  serviceTiers?: ServiceTier[];
   input: string[];
   contextWindow: number;
   available: boolean;
@@ -458,6 +478,7 @@ export interface PublicState {
     };
   };
   selectedModel?: { provider: string; id: string };
+  selectedServiceTier: ServiceTier | null;
   thinkingLevel: ThinkingLevel;
   toolMode: ToolMode;
   availableThinkingLevels: ThinkingLevel[];
@@ -853,6 +874,9 @@ const publicModelSchema: z.ZodType<PublicModel> = z.object({
   name: z.string(),
   reasoning: z.boolean(),
   thinkingLevels: z.array(thinkingLevelSchema).min(1),
+  serviceTiers: z.array(serviceTierSchema)
+    .max(serviceTierSchema.options.length)
+    .optional(),
   input: z.array(z.string()),
   contextWindow: z.number().finite(),
   available: z.boolean(),
@@ -890,6 +914,7 @@ const publicStateSchema: z.ZodType<PublicState> = z.object({
     }).optional(),
   }).optional(),
   selectedModel: z.object({ provider: z.string(), id: z.string() }).optional(),
+  selectedServiceTier: serviceTierSchema.nullable(),
   thinkingLevel: thinkingLevelSchema,
   toolMode: toolModeSchema,
   availableThinkingLevels: z.array(thinkingLevelSchema),
@@ -985,6 +1010,7 @@ const commandTypeSchema = z.enum([
   "select_model",
   "set_thinking",
   "set_compaction_threshold",
+  "set_service_tier",
   "compact_context",
   "switch_conversation_role",
   "rename_conversation",
@@ -1521,6 +1547,23 @@ export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.
       context.addIssue({
         code: z.ZodIssueCode.custom,
         message: "steer command errors require the complete command and run focus identity",
+        path: ["focusId"],
+      });
+    }
+    if (
+      event.type === "error"
+      && event.scope === "command"
+      && event.operation === "set_service_tier"
+      && (
+        event.sessionId === undefined
+        || event.commandId === undefined
+        || event.conversationId === undefined
+        || event.focusId === undefined
+      )
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Service tier command errors require the complete command focus identity",
         path: ["focusId"],
       });
     }

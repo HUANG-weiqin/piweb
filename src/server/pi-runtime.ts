@@ -25,7 +25,7 @@ import {
   type ModelsRefreshResult,
   type ModelsStore,
 } from "@earendil-works/pi-ai";
-import type { ToolMode } from "../shared/protocol.js";
+import type { ServiceTier, ToolMode } from "../shared/protocol.js";
 import type { PortableExtensionUI } from "./extension-ui.js";
 import { applyCodexAutoTransportPolicy } from "./codex-transport-policy.js";
 import {
@@ -47,6 +47,10 @@ import {
   installCompactionThinkingOverride,
 } from "./compaction-thinking.js";
 import { SerialTaskQueue } from "./serial-task-queue.js";
+import {
+  installServiceTierOverride,
+  type ServiceTierOverride,
+} from "./service-tier.js";
 import { clearCredentialCommandCache, FileCredentialStore } from "./credential-store.js";
 import {
   isReadOnlyToolIdentity,
@@ -124,6 +128,7 @@ export interface CreatePiSessionOptions {
   toolMode?: ToolMode;
   turnBoundaryCheck?: (input: AgentTurnBoundaryCheck) => boolean;
   getCompactionThresholdPercent?: () => number;
+  getServiceTier?: () => ServiceTier | null;
 }
 
 export interface CreatedPiSession {
@@ -546,6 +551,7 @@ export class PiRuntime implements PiRuntimeLike {
     let contextBudgetController: AgentContextBudgetController | undefined;
     let turnBoundaryController: AgentTurnBoundaryController | undefined;
     let compactionThinkingOverride: CompactionThinkingOverride | undefined;
+    let serviceTierOverride: ServiceTierOverride | undefined;
     let compactionBoundaryAdapter: CompactionBoundaryAdapter | undefined;
     let pendingExtensionErrors: ExtensionError[];
     const disposePreTeardownAdapters = (): void => {
@@ -562,6 +568,11 @@ export class PiRuntime implements PiRuntimeLike {
       }
       try {
         compactionThinkingOverride?.dispose();
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
+        serviceTierOverride?.dispose();
       } catch (error) {
         failures.push(error);
       }
@@ -712,6 +723,12 @@ export class PiRuntime implements PiRuntimeLike {
         turnBoundaryController = installAgentTurnBoundaryCheck(
           createdSession,
           options.turnBoundaryCheck,
+        );
+      }
+      if (options.getServiceTier) {
+        serviceTierOverride = installServiceTierOverride(
+          createdSession,
+          options.getServiceTier,
         );
       }
       compactionThinkingOverride = installCompactionThinkingOverride(

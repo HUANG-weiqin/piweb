@@ -3,11 +3,13 @@ import {
   supportedThinkingLevels,
   type ThinkingCapableModel,
 } from "./model-thinking.js";
+import { modelServiceTiers } from "./service-tier.js";
 
 interface ModelLike extends ThinkingCapableModel {
   provider: string;
   id: string;
   name?: string;
+  serviceTiers?: unknown;
   input?: string[];
   contextWindow?: number;
 }
@@ -47,16 +49,20 @@ export function buildPublicProviders(input: ProviderProjectionInput): PublicProv
         authLabel: status.label,
         oauth: input.oauthProviders.has(id),
         models: models
-          .map((model) => ({
-            provider: id,
-            id: model.id,
-            name: model.name ?? model.id,
-            reasoning: model.reasoning ?? false,
-            thinkingLevels: supportedThinkingLevels(model),
-            input: model.input ?? ["text"],
-            contextWindow: model.contextWindow ?? 0,
-            available: input.availableKeys.has(`${id}/${model.id}`),
-          }))
+          .map((model) => {
+            const serviceTiers = modelServiceTiers(model);
+            return {
+              provider: id,
+              id: model.id,
+              name: model.name ?? model.id,
+              reasoning: model.reasoning ?? false,
+              thinkingLevels: supportedThinkingLevels(model),
+              ...(serviceTiers === undefined ? {} : { serviceTiers }),
+              input: model.input ?? ["text"],
+              contextWindow: model.contextWindow ?? 0,
+              available: input.availableKeys.has(`${id}/${model.id}`),
+            };
+          })
           .sort((a, b) => Number(b.available) - Number(a.available) || a.id.localeCompare(b.id)),
       } satisfies PublicProvider;
     })

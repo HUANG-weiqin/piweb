@@ -15,6 +15,7 @@ const state: PublicState = {
   conversationId: "conversation-1",
   cwd: "E:\\work",
   busy: false,
+  selectedServiceTier: null,
   thinkingLevel: "off",
   toolMode: "full_access",
   availableThinkingLevels: ["off", "low"],

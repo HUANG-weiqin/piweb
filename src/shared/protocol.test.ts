@@ -26,7 +26,7 @@ const messageId = "assistant:96b960be-b6bb-4a19-9cf2-78e77cb69425";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(36);
+    expect(PROTOCOL_VERSION).toBe(37);
   });
 
   it("accepts supported commands", () => {
@@ -152,6 +152,17 @@ describe("parseClientCommand", () => {
       focusId,
       percent: 70,
     }).type).toBe("set_compaction_threshold");
+    expect(parseClientCommand({
+      type: "set_service_tier",
+      commandId,
+      sessionId,
+      conversationId,
+      focusId,
+      serviceTier: "priority",
+    })).toMatchObject({
+      type: "set_service_tier",
+      serviceTier: "priority",
+    });
     expect(parseClientCommand({
       type: "compact_context",
       commandId,
@@ -509,6 +520,7 @@ describe("parseClientCommand", () => {
         cwd: "E:\\work",
         busy: false,
         compacting: true,
+        selectedServiceTier: null,
         thinkingLevel: "off",
         toolMode: "full_access",
         availableThinkingLevels: ["off"],
@@ -535,6 +547,7 @@ describe("parseClientCommand", () => {
             runId: "e509167a-1cc3-4bb9-bb0d-845bf94d9c99",
           },
         },
+        selectedServiceTier: null,
         thinkingLevel: "off",
         toolMode: "full_access",
         availableThinkingLevels: ["off"],

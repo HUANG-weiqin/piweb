@@ -62,6 +62,9 @@ function view(
     roleSwitching={false}
     thinkingLevel="off"
     availableThinkingLevels={["off", "high"]}
+    serviceTiers={[]}
+    selectedServiceTier={null}
+    serviceTierBusy={false}
     compactionThresholdPercent={70}
     compactionThresholdBusy={false}
     cwd="E:\\work"
@@ -77,6 +80,7 @@ function view(
     onAbort={() => undefined}
     onSettings={() => undefined}
     onThinking={() => undefined}
+    onServiceTier={() => undefined}
     onCompactionThreshold={() => true}
     onCompact={() => true}
     onSwitchRole={() => true}
@@ -1337,6 +1341,87 @@ describe("Chat", () => {
     expect(onThinking).toHaveBeenCalledWith("high");
     expect(screen.queryByRole("combobox", { name: "项目工具权限" }))
       .not.toBeInTheDocument();
+  });
+
+  it("shows only advertised service tiers and keeps the server selection authoritative", () => {
+    const onServiceTier = vi.fn();
+    const rendered = render(view(emptyChat, "", undefined, {
+      serviceTiers: ["auto", "default", "scale", "priority"],
+      selectedServiceTier: null,
+      onServiceTier,
+    }));
+    const selector = screen.getByRole("combobox", { name: "服务层级" });
+
+    expect(selector).toHaveTextContent("供应商默认");
+    expect(selector).toHaveTextContent("自动");
+    expect(selector).toHaveTextContent("默认");
+    expect(selector).toHaveTextContent("扩展");
+    expect(selector).toHaveTextContent("快速");
+    expect(selector).not.toHaveTextContent("弹性");
+
+    fireEvent.change(selector, { target: { value: "priority" } });
+    expect(onServiceTier).toHaveBeenCalledWith("priority");
+    expect(selector).toHaveValue("");
+
+    rendered.rerender(view(emptyChat, "", undefined, {
+      serviceTiers: ["auto", "default", "scale", "priority"],
+      selectedServiceTier: "priority",
+      onServiceTier,
+    }));
+    expect(selector).toHaveValue("priority");
+  });
+
+  it("keeps an unavailable persisted service tier visible while allowing replacement or clearing", () => {
+    const onServiceTier = vi.fn();
+    render(view(emptyChat, "", undefined, {
+      serviceTiers: ["auto"],
+      selectedServiceTier: "flex",
+      onServiceTier,
+    }));
+    const selector = screen.getByRole("combobox", {
+      name: "服务层级",
+    }) as HTMLSelectElement;
+
+    expect(Array.from(selector.options, ({ text }) => text)).toEqual([
+      "供应商默认",
+      "弹性（不可用）",
+      "自动",
+    ]);
+    expect(selector).toHaveValue("flex");
+    expect(selector.options[1]).toBeDisabled();
+
+    fireEvent.change(selector, { target: { value: "auto" } });
+    fireEvent.change(selector, { target: { value: "" } });
+    expect(onServiceTier).toHaveBeenNthCalledWith(1, "auto");
+    expect(onServiceTier).toHaveBeenNthCalledWith(2, null);
+  });
+
+  it("hides an empty default service tier and disables visible tiers at every control gate", () => {
+    const rendered = render(view(emptyChat));
+    expect(screen.queryByRole("combobox", { name: "服务层级" }))
+      .not.toBeInTheDocument();
+
+    const disabledStates: Array<Partial<ComponentProps<typeof Chat>>> = [
+      { conversationReady: false },
+      { busy: true },
+      { compacting: true },
+      { interactive: false },
+      { serviceTierBusy: true },
+    ];
+    for (const disabledState of disabledStates) {
+      rendered.rerender(view(emptyChat, "", undefined, {
+        serviceTiers: ["priority"],
+        ...disabledState,
+      }));
+      expect(screen.getByRole("combobox", { name: "服务层级" }))
+        .toBeDisabled();
+    }
+
+    rendered.rerender(view(emptyChat, "", undefined, {
+      serviceTiers: ["priority"],
+    }));
+    expect(screen.getByRole("combobox", { name: "服务层级" }))
+      .toBeEnabled();
   });
 
   it("expands the compaction threshold on demand and saves on release", () => {

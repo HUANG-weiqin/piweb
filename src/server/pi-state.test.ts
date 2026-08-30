@@ -11,6 +11,7 @@ describe("buildPublicProviders", () => {
         name: "GPT",
         reasoning: true,
         thinkingLevelMap: { max: null },
+        serviceTiers: ["priority", "flex"],
         input: ["text"],
         contextWindow: 100,
       }],
@@ -22,6 +23,8 @@ describe("buildPublicProviders", () => {
     expect(providers.find((provider) => provider.id === "openai")?.models[0].available).toBe(true);
     expect(providers.find((provider) => provider.id === "openai")?.models[0].thinkingLevels)
       .toEqual(["off", "minimal", "low", "medium", "high"]);
+    expect(providers.find((provider) => provider.id === "openai")?.models[0].serviceTiers)
+      .toEqual(["priority", "flex"]);
     expect(providers.find((provider) => provider.id === "openai-codex")?.oauth).toBe(true);
     expect(JSON.stringify(providers)).not.toContain("secret");
   });

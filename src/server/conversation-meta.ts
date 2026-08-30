@@ -6,6 +6,7 @@ import {
   MAX_PENDING_PROMPTS_PER_CONVERSATION,
   MIN_COMPACTION_THRESHOLD_PERCENT,
   loopListSchema,
+  serviceTierSchema,
   type LoopList,
 } from "../shared/protocol.js";
 
@@ -25,6 +26,7 @@ export const META_OPERATION_CUSTOM_TYPE =
   "piweb.meta_operation.v1";
 export const COMPACTION_THRESHOLD_CUSTOM_TYPE =
   "piweb.compaction_threshold.v1";
+export const SERVICE_TIER_CUSTOM_TYPE = "piweb.service_tier.v1";
 export const COMPACTION_RESUME_CUSTOM_TYPE =
   "piweb.compaction_resume.v1";
 export const LOOP_LIST_CUSTOM_TYPE = "piweb.loop_list.v1";
@@ -256,6 +258,16 @@ const compactionThresholdSchema = z.object({
 const compactionThresholdEntrySchema = z.object({
   customType: z.literal(COMPACTION_THRESHOLD_CUSTOM_TYPE),
   data: compactionThresholdSchema,
+}).strict();
+
+const serviceTierSelectionSchema = z.object({
+  tier: serviceTierSchema.nullable(),
+  updatedAt: canonicalTimestampSchema("updatedAt"),
+}).strict();
+
+const serviceTierSelectionEntrySchema = z.object({
+  customType: z.literal(SERVICE_TIER_CUSTOM_TYPE),
+  data: serviceTierSelectionSchema,
 }).strict();
 
 const conversationKindSchema = z.enum([
@@ -700,6 +712,9 @@ export type CompactionThreshold =
   z.infer<typeof compactionThresholdSchema>;
 export type CompactionThresholdEntry =
   z.infer<typeof compactionThresholdEntrySchema>;
+export type ServiceTierSelection = z.infer<typeof serviceTierSelectionSchema>;
+export type ServiceTierSelectionEntry =
+  z.infer<typeof serviceTierSelectionEntrySchema>;
 
 export interface CustomEntryAppender {
   appendCustomEntry(customType: string, data?: unknown): string;
@@ -757,6 +772,10 @@ export type ReservedConversationEntry =
   | {
       kind: "compaction_threshold";
       entry: CompactionThresholdEntry;
+    }
+  | {
+      kind: "service_tier";
+      entry: ServiceTierSelectionEntry;
     };
 
 export interface ReservedConversationAggregate {
@@ -769,6 +788,7 @@ export interface ReservedConversationAggregate {
   temporaryReturnReceipts: TemporaryReturnReceipt[];
   metaOperations: MetaOperation[];
   compactionThreshold?: CompactionThreshold;
+  serviceTier?: ServiceTierSelection;
   loopList?: LoopListEntry["data"];
 }
 
@@ -958,6 +978,21 @@ export function createCompactionThresholdEntry(
   });
 }
 
+export function parseServiceTierSelectionEntry(
+  value: unknown,
+): ServiceTierSelectionEntry {
+  return serviceTierSelectionEntrySchema.parse(value);
+}
+
+export function createServiceTierSelectionEntry(
+  data: ServiceTierSelection,
+): ServiceTierSelectionEntry {
+  return parseServiceTierSelectionEntry({
+    customType: SERVICE_TIER_CUSTOM_TYPE,
+    data,
+  });
+}
+
 /**
  * Appends a validated deep snapshot to Pi's non-context custom-entry path.
  *
@@ -976,6 +1011,7 @@ export function appendReservedCustomEntry(
     | TemporaryReturnReceiptEntry
     | MetaOperationEntry
     | CompactionThresholdEntry
+    | ServiceTierSelectionEntry
     | LoopListEntry,
 ): string {
   const reserved = parseReservedConversationEntry(value);
@@ -1117,6 +1153,12 @@ export function parseReservedConversationEntry(
     return {
       kind: "compaction_threshold",
       entry: parseCompactionThresholdEntry(payload),
+    };
+  }
+  if (customType === SERVICE_TIER_CUSTOM_TYPE) {
+    return {
+      kind: "service_tier",
+      entry: parseServiceTierSelectionEntry(payload),
     };
   }
   throw new Error(`Unknown piweb reserved custom type: ${customType}`);
@@ -1281,6 +1323,7 @@ export function aggregateReservedConversationEntries(
   >();
   const metaOperations = new Map<string, MetaOperation>();
   let compactionThreshold: CompactionThreshold | undefined;
+  let serviceTier: ServiceTierSelection | undefined;
   let loopList: LoopListEntry["data"] | undefined;
   let roleChangedAt: string | undefined;
 
@@ -1524,6 +1567,17 @@ export function aggregateReservedConversationEntries(
       compactionThreshold = reserved.entry.data;
       continue;
     }
+    if (reserved.kind === "service_tier") {
+      if (
+        serviceTier
+        && Date.parse(reserved.entry.data.updatedAt)
+          < Date.parse(serviceTier.updatedAt)
+      ) {
+        throw new Error("Piweb service tier updatedAt cannot regress");
+      }
+      serviceTier = reserved.entry.data;
+      continue;
+    }
 
     const incoming = reserved.entry.data;
     const existing = runSettlements.get(incoming.runId);
@@ -1566,6 +1620,7 @@ export function aggregateReservedConversationEntries(
     ...(compactionThreshold === undefined
       ? {}
       : { compactionThreshold }),
+    ...(serviceTier === undefined ? {} : { serviceTier }),
     ...(loopList === undefined ? {} : { loopList }),
   };
 }

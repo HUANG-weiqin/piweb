@@ -41,9 +41,31 @@ const CONVERSATION_D = "7ed35f55-20e8-46f2-badc-6404f34f8b4a";
 const EXTENSION_REQUEST_A = "a81ab25f-041e-4559-b890-04c0eeb476e4";
 const FOCUS_A = "ae301850-745d-44dd-a30f-5e4b30fe44e1";
 const FOCUS_A_SECOND = "ae301850-745d-44dd-a30f-000000000003";
+const SERVICE_TIER_PROVIDER: PublicState["providers"][number] = {
+  id: "provider",
+  name: "Provider",
+  configured: true,
+  oauth: false,
+  models: [{
+    provider: "provider",
+    id: "model",
+    name: "Model",
+    reasoning: false,
+    thinkingLevels: ["off"],
+    input: ["text"],
+    contextWindow: 100_000,
+    available: true,
+    serviceTiers: ["auto", "priority"],
+  }],
+};
 
-type TestState = Omit<PublicState, "projectId" | "conversationId">
-  & Partial<Pick<PublicState, "projectId" | "conversationId">>;
+type TestState = Omit<
+  PublicState,
+  "projectId" | "conversationId" | "selectedServiceTier"
+> & Partial<Pick<
+  PublicState,
+  "projectId" | "conversationId" | "selectedServiceTier"
+>>;
 type RelaxedConversationSnapshot = Omit<
   Extract<ServerEvent, { type: "conversation_snapshot" }>,
   "focusId"
@@ -3727,6 +3749,244 @@ describe("App", () => {
       selector: ".compaction-threshold-value",
     }))
       .toBeInTheDocument();
+  });
+
+  it("sets the service tier for the exact focus without optimistically changing server state", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        selectedServiceTier: null,
+        providers: [SERVICE_TIER_PROVIDER],
+      },
+    }));
+    const selector = screen.getByRole("combobox", { name: "服务层级" });
+
+    fireEvent.change(selector, { target: { value: "priority" } });
+    const command = latestCommand("set_service_tier");
+    expect(command).toMatchObject({
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      serviceTier: "priority",
+    });
+    expect(selector).toHaveValue("");
+    expect(selector).toBeDisabled();
+
+    act(() => socketMock.emit?.({
+      type: "command_complete",
+      operation: "set_service_tier",
+      commandId: "3d227a2c-2f51-4811-8844-e8e566b09f05",
+      sessionId,
+    }));
+    expect(selector).toBeDisabled();
+
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          selectedServiceTier: "priority",
+          providers: [SERVICE_TIER_PROVIDER],
+        },
+      });
+      socketMock.emit?.({
+        type: "command_complete",
+        operation: "set_service_tier",
+        commandId: command.commandId,
+        sessionId,
+      });
+    });
+    expect(selector).toHaveValue("priority");
+    expect(selector).toBeEnabled();
+  });
+
+  it("clears service-tier pending state on focus changes and rejects stale ABA completion", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          selectedServiceTier: null,
+          providers: [SERVICE_TIER_PROVIDER],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversations: [
+          conversationSummary(CONVERSATION_ID, "A"),
+          conversationSummary(CONVERSATION_B, "B"),
+        ],
+        truncated: false,
+      });
+    });
+
+    fireEvent.change(screen.getByRole("combobox", { name: "服务层级" }), {
+      target: { value: "priority" },
+    });
+    const firstACommand = latestCommand("set_service_tier");
+
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        selectedServiceTier: null,
+        providers: [SERVICE_TIER_PROVIDER],
+      },
+    }));
+    expect(screen.getByRole("combobox", { name: "服务层级" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 A" }));
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        selectedServiceTier: null,
+        providers: [SERVICE_TIER_PROVIDER],
+      },
+    }));
+    const selector = screen.getByRole("combobox", { name: "服务层级" });
+    fireEvent.change(selector, { target: { value: "priority" } });
+    const secondACommand = latestCommand("set_service_tier");
+    expect(secondACommand.focusId).toBe(FOCUS_A_SECOND);
+    expect(selector).toBeDisabled();
+
+    act(() => socketMock.emit?.({
+      type: "command_complete",
+      operation: "set_service_tier",
+      commandId: firstACommand.commandId,
+      sessionId,
+    }));
+    expect(selector).toBeDisabled();
+
+    act(() => socketMock.rawEmit?.({
+      type: "error",
+      scope: "command",
+      operation: "set_service_tier",
+      commandId: secondACommand.commandId,
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A_SECOND,
+      message: "tier rejected",
+    }));
+    expect(selector).toBeEnabled();
+    expect(screen.getByRole("alert"))
+      .toHaveTextContent("修改服务层级失败：tier rejected");
+  });
+
+  it("keeps the authoritative tier and reports a failed service-tier send", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        selectedServiceTier: null,
+        providers: [SERVICE_TIER_PROVIDER],
+      },
+    }));
+    socketMock.send.mockReturnValueOnce(false);
+    const selector = screen.getByRole("combobox", { name: "服务层级" });
+
+    fireEvent.change(selector, { target: { value: "priority" } });
+
+    expect(selector).toHaveValue("");
+    expect(selector).toBeEnabled();
+    expect(screen.getByRole("alert")).toHaveTextContent("本地服务未连接");
+  });
+
+  it("clears an unconfirmed service-tier command when the connection drops", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        selectedServiceTier: null,
+        providers: [SERVICE_TIER_PROVIDER],
+      },
+    }));
+    fireEvent.change(screen.getByRole("combobox", { name: "服务层级" }), {
+      target: { value: "priority" },
+    });
+
+    act(() => socketMock.status?.(false));
+    expect(screen.getByRole("alert"))
+      .toHaveTextContent("服务层级修改状态未确认");
+
+    act(() => {
+      socketMock.status?.(true);
+      socketMock.emit?.({
+        type: "hello",
+        protocolVersion: PROTOCOL_VERSION,
+        startupCwd: "E:\\default",
+      });
+    });
+    const reconnectedSessionId = latestSessionId();
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId: reconnectedSessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        selectedServiceTier: null,
+        providers: [SERVICE_TIER_PROVIDER],
+      },
+    }));
+    expect(screen.getByRole("combobox", { name: "服务层级" })).toBeEnabled();
   });
 
   it("manually compacts only the exact focused conversation", () => {

@@ -19,6 +19,7 @@ import {
   type ConversationRoleSnapshot,
   type ConversationWindowCoverage,
   type SessionEvent,
+  type ServiceTier,
   type TokenUsage,
   type LoopList,
   type ToolMode,
@@ -39,6 +40,7 @@ import {
   createConversationMessageEntry,
   createConversationRoleChangeEntry,
   createRunSettlementEntry,
+  createServiceTierSelectionEntry,
   RUN_SETTLEMENT_CUSTOM_TYPE,
   type ConversationMeta,
   type ConversationMessageEntry,
@@ -68,6 +70,7 @@ import {
   type ProjectStore,
 } from "./project-store.js";
 import { SerialTaskQueue } from "./serial-task-queue.js";
+import { assertModelSupportsServiceTier } from "./service-tier.js";
 import { SessionEventProjector, snapshotWireValue } from "./session-events.js";
 import {
   defaultToolPolicy,
@@ -473,6 +476,7 @@ export class ConversationActor {
   private readonly pendingAdmissions: PendingPromptAdmission[] = [];
   private profileSnapshot: ConversationMeta;
   private compactionThresholdPercent: number;
+  private serviceTierSelection: ServiceTier | null;
   private loopListSnapshot: LoopList;
   private projectionSeq = 0;
   private liveProjection?: LiveConversationProjection;
@@ -510,6 +514,7 @@ export class ConversationActor {
     this.compactionThresholdPercent =
       reserved.compactionThreshold?.percent
       ?? DEFAULT_COMPACTION_THRESHOLD_PERCENT;
+    this.serviceTierSelection = reserved.serviceTier?.tier ?? null;
     this.loopListSnapshot = this.restoreLoopListFromActiveBranch();
     for (const settlement of reserved.runSettlements) {
       this.usedRunIds.add(settlement.runId);
@@ -648,6 +653,32 @@ export class ConversationActor {
     });
     appendReservedCustomEntry(this.sessionManager, entry);
     this.compactionThresholdPercent = entry.data.percent;
+  }
+
+  getServiceTier(): ServiceTier | null {
+    return this.serviceTierSelection;
+  }
+
+  setServiceTier(tier: ServiceTier | null): void {
+    this.assertUsable();
+    if (this.activeRun) {
+      throw new Error("Cannot change the service tier of a busy conversation");
+    }
+    if (this.compacting || this.truncating || this.switchingRole) {
+      throw new Error("Cannot change the service tier during another operation");
+    }
+    if (tier !== null) {
+      const model = this.session.model;
+      if (!model) throw new Error("Conversation has no selected model");
+      assertModelSupportsServiceTier(model, tier);
+    }
+
+    const entry = createServiceTierSelectionEntry({
+      tier,
+      updatedAt: this.now().toISOString(),
+    });
+    appendReservedCustomEntry(this.sessionManager, entry);
+    this.serviceTierSelection = entry.data.tier;
   }
 
   private createEditBudgetTool() {
@@ -813,14 +844,34 @@ export class ConversationActor {
         new Error("Conversation role switch is already running"),
       );
     }
+    const previousProfile = this.profileSnapshot;
+    const nextProfile = createConversationMetaEntry({
+      ...previousProfile,
+      role,
+    }).data;
+    if (
+      this.serviceTierSelection !== null
+      && JSON.stringify(previousProfile.role)
+        !== JSON.stringify(nextProfile.role)
+    ) {
+      const nextModel = this.modelRegistry.find(
+        nextProfile.role.model.provider,
+        nextProfile.role.model.id,
+      );
+      if (!nextModel) {
+        return Promise.reject(new Error(
+          `Role model is unavailable: ${nextProfile.role.model.provider}/${nextProfile.role.model.id}`,
+        ));
+      }
+      try {
+        assertModelSupportsServiceTier(nextModel, this.serviceTierSelection);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    }
     this.switchingRole = true;
     return this.operations.run(async () => {
-      const previousProfile = this.profileSnapshot;
       const previousOptions = this.createSessionOptions;
-      const nextProfile = createConversationMetaEntry({
-        ...previousProfile,
-        role,
-      }).data;
       let persisted = false;
       try {
         this.assertUsable();
@@ -921,6 +972,7 @@ export class ConversationActor {
         this.compactionThresholdPercent =
           reserved.compactionThreshold?.percent
           ?? DEFAULT_COMPACTION_THRESHOLD_PERCENT;
+        this.serviceTierSelection = reserved.serviceTier?.tier ?? null;
         this.loopListSnapshot = this.restoreLoopListFromActiveBranch();
         this.emitLoopList();
         this.usedRunIds.clear();
@@ -3021,6 +3073,7 @@ export class ConversationActor {
           },
           turnBoundaryCheck: (input) => this.checkTurnBoundary(input),
           getCompactionThresholdPercent: () => this.compactionThresholdPercent,
+          getServiceTier: () => this.serviceTierSelection,
         },
       );
       this.created = created;

@@ -4122,6 +4122,53 @@ describe("PiConnection coordinated project view", () => {
     }
   });
 
+  it("persists and acknowledges the focused conversation service tier", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        roleId: "default",
+      });
+      const focused = latestState(harness.events);
+      expect(focused.selectedServiceTier).toBeNull();
+      Object.assign(harness.runtime.created[0]!.model!, {
+        serviceTiers: ["priority"],
+      });
+      const commandId = randomUUID();
+
+      await harness.connection.handle({
+        type: "set_service_tier",
+        commandId,
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+        serviceTier: "priority",
+      });
+
+      expect(latestState(harness.events).selectedServiceTier).toBe("priority");
+      expect(harness.events).toContainEqual({
+        type: "command_complete",
+        operation: "set_service_tier",
+        commandId,
+        sessionId: SESSION_A,
+      });
+      expect(aggregateReservedConversationEntries(
+        harness.runtime.created[0]!.persistentManager!.getEntries(),
+      ).serviceTier?.tier).toBe("priority");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
   it("publishes recalculated context usage during an active run", async () => {
     const harness = await coordinatedConnectionHarness();
     try {

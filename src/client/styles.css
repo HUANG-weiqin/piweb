@@ -439,7 +439,8 @@ pre {
   color: var(--muted);
 }
 
-.thinking-level-control {
+.thinking-level-control,
+.service-tier-control {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -452,7 +453,8 @@ pre {
   white-space: nowrap;
 }
 
-.thinking-level-control select {
+.thinking-level-control select,
+.service-tier-control select {
   width: auto;
   min-height: 24px;
   padding: 3px 24px 3px 7px;

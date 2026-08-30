@@ -27,6 +27,7 @@ import {
   appendReservedCustomEntry,
   createConversationCardEntry,
   createLoopListEntry,
+  createServiceTierSelectionEntry,
   LOOP_LIST_CUSTOM_TYPE,
 } from "./conversation-meta.js";
 import {
@@ -1553,6 +1554,62 @@ describe("ConversationActor", () => {
       items: [{ id: "recover", text: "Recover later", checked: false }],
       armed: false,
     });
+    await fixture.actor.dispose();
+  });
+
+  it("restores, clears, and durably updates the live service tier selection", async () => {
+    const manager = SessionManager.inMemory(process.cwd(), {
+      id: CONVERSATION_ID,
+    });
+    appendReservedCustomEntry(manager, createServiceTierSelectionEntry({
+      tier: "priority",
+      updatedAt: "2026-07-19T10:00:00.000Z",
+    }));
+    const runtime = new FakeRuntime();
+    Object.assign(runtime.session.model!, { serviceTiers: ["flex"] });
+    const fixture = await openActor({ sessionManager: manager, runtime });
+
+    expect(fixture.actor.getServiceTier()).toBe("priority");
+    expect(runtime.createOptions?.getServiceTier?.()).toBe("priority");
+
+    fixture.actor.setServiceTier(null);
+    fixture.actor.setServiceTier("flex");
+    expect(runtime.createOptions?.getServiceTier?.()).toBe("flex");
+    expect(aggregateReservedConversationEntries(
+      manager.getEntries(),
+    ).serviceTier?.tier).toBe("flex");
+
+    vi.spyOn(manager, "appendCustomEntry").mockImplementationOnce(() => {
+      throw new Error("disk full");
+    });
+    expect(() => fixture.actor.setServiceTier(null)).toThrow("disk full");
+    expect(fixture.actor.getServiceTier()).toBe("flex");
+    await fixture.actor.dispose();
+  });
+
+  it("rejects a role model transition incompatible with the selected tier", async () => {
+    const fixture = await openActor();
+    Object.assign(fixture.runtime.session.model!, {
+      serviceTiers: ["priority"],
+    });
+    fixture.actor.setServiceTier("priority");
+    Object.assign(fixture.runtime.modelRegistry, {
+      find: () => ({
+        provider: "test",
+        id: "other-model",
+        serviceTiers: ["flex"],
+      }),
+    });
+    const nextRole = {
+      ...fixture.actor.profile.role,
+      model: { provider: "test", id: "other-model" },
+    };
+
+    await expect(fixture.actor.switchRole(nextRole, {})).rejects.toThrow(
+      'does not support service tier "priority"',
+    );
+    expect(fixture.runtime.disposeCalls).toBe(0);
+    expect(fixture.actor.profile.role.model.id).toBe("model");
     await fixture.actor.dispose();
   });
 
