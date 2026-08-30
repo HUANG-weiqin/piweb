@@ -297,7 +297,7 @@ interface RunTicket {
   readonly customSteerDeliveries: PendingCustomSteer[];
   /** The first raw user message belongs to startPrompt(), never guidance. */
   expectsInitialPromptRawUserMessage: boolean;
-  /** Original first prompt held by the queued host naming preflight. */
+  /** Original first prompt used by the queued host naming preflight. */
   autoTitlePrompt?: string;
   autoTitleAbortController?: AbortController;
   customSteerFlush?: Promise<void>;
@@ -1181,9 +1181,8 @@ export class ConversationActor {
   }
 
   /**
-   * Installs the unique run ticket. Eligible first browser prompts publish
-   * run_queued only after their durable title gate; all other runs publish it
-   * synchronously. The returned promise resolves with the exact settlement.
+   * Installs the unique run ticket and publishes run_queued synchronously.
+   * The returned promise resolves only with the exact durable settlement.
    */
   startPrompt(input: StartConversationPrompt): Promise<RunSettlement> {
     if (input.text.trim().length === 0) {
@@ -1704,10 +1703,8 @@ export class ConversationActor {
       awaitingWaitCacheCheckpointUsage: false,
     };
     this.activeRun = ticket;
-    if (ticket.autoTitlePrompt === undefined) {
-      this.beginLiveProjection(ticket, input.promptText);
-      this.emitSessionEvent(ticket, { type: "run_queued" });
-    }
+    this.beginLiveProjection(ticket, input.promptText);
+    this.emitSessionEvent(ticket, { type: "run_queued" });
     this.emitActivity();
 
     void this.operations.run(async () => {
@@ -2128,10 +2125,6 @@ export class ConversationActor {
     if (isCancelling(ticket)) {
       await this.settleRun(ticket, "aborted");
       return;
-    }
-    if (ticket.autoTitlePrompt !== undefined) {
-      this.beginLiveProjection(ticket, ticket.autoTitlePrompt);
-      this.emitSessionEvent(ticket, { type: "run_queued" });
     }
     await this.compactAtThreshold(ticket);
     if (this.activeRun !== ticket) return;

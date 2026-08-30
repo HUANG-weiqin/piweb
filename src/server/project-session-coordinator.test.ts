@@ -1244,10 +1244,10 @@ describe("ProjectSessionCoordinator", () => {
     );
   });
 
-  it("persists an automatic title before acknowledging a first user browser prompt", async () => {
+  it("acknowledges a first browser prompt before its automatic title finishes", async () => {
     const fixture = await createFixture();
-    fixture.runtime.titleImplementation = async () =>
-      automaticTitleMessage("自动生成标题");
+    const titleResult = deferred<AssistantMessage>();
+    fixture.runtime.titleImplementation = async () => titleResult.promise;
     const actor = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
@@ -1269,21 +1269,27 @@ describe("ProjectSessionCoordinator", () => {
       completesWith("done"),
     );
 
-    await fixture.coordinator.prompt(
+    const running = fixture.coordinator.prompt(
       fixture.handle,
       actor.conversationId,
       randomUUID(),
       "实现新会话首次运行前自动命名",
     );
 
-    expect(fixture.runtime.titleCalls).toHaveLength(1);
+    await vi.waitFor(() => expect(fixture.runtime.titleCalls).toHaveLength(1));
     expect(fixture.runtime.titleCalls[0]?.[1]).toMatchObject({
       messages: [{
         role: "user",
         content: "实现新会话首次运行前自动命名",
       }],
     });
-    await expect(persistedAtAcknowledgement).resolves.toBe(true);
+    expect(persistedAtAcknowledgement).toBeDefined();
+    await expect(persistedAtAcknowledgement).resolves.toBe(false);
+    expect(fixture.runtime.control(actor.conversationId).promptTexts).toEqual([]);
+
+    titleResult.resolve(automaticTitleMessage("自动生成标题"));
+    await running;
+    expect(actor.sessionManager.getSessionName()).toBe("自动生成标题");
     await waitUntil(
       () => fixture.handle.project.listConversations()
         .find(({ id }) => id === actor.conversationId)?.name === "自动生成标题",

@@ -495,7 +495,7 @@ function checkToolTurnBoundary(runtime: FakeRuntime): boolean {
 
 describe("ConversationActor", () => {
   describe("initial automatic title", () => {
-    it("durably names an eligible conversation before starting the Agent prompt", async () => {
+    it("acknowledges an eligible first prompt before naming, then names it before the Agent starts", async () => {
       const runtime = new FakeRuntime();
       const manager = SessionManager.inMemory(process.cwd(), {
         id: CONVERSATION_ID,
@@ -536,17 +536,18 @@ describe("ConversationActor", () => {
         text: "让首轮会话自动生成简短标题",
         origin: "browser",
       });
-      await vi.waitFor(() => expect(runtime.titleCalls).toHaveLength(1));
 
-      expect(fixture.actor.getActivity()).toEqual({
-        kind: "queued",
-        runId: RUN_A,
-      });
-      expect(fixture.events).not.toContainEqual(expect.objectContaining({
+      expect(fixture.events).toContainEqual(expect.objectContaining({
         type: "session_event",
         runId: RUN_A,
         event: { type: "run_queued" },
       }));
+      expect(fixture.actor.getActivity()).toEqual({
+        kind: "queued",
+        runId: RUN_A,
+      });
+      await vi.waitFor(() => expect(runtime.titleCalls).toHaveLength(1));
+
       expect(runtime.session.promptCalls).toEqual([]);
       expect(manager.getSessionName()).toBeUndefined();
       expect(runtime.titleCalls[0]?.[1]).toMatchObject({
@@ -570,11 +571,11 @@ describe("ConversationActor", () => {
         "refresh",
         "prompt",
       ]);
-      expect(fixture.events).toContainEqual(expect.objectContaining({
-        type: "session_event",
-        runId: RUN_A,
-        event: { type: "run_queued" },
-      }));
+      expect(fixture.events.filter((event) => (
+        event.type === "session_event"
+        && event.runId === RUN_A
+        && event.event.type === "run_queued"
+      ))).toHaveLength(1);
       await fixture.actor.dispose();
     });
 
@@ -783,7 +784,7 @@ describe("ConversationActor", () => {
       await fixture.actor.dispose();
     });
 
-    it("fails the actor before acknowledgement when title persistence cannot be proved", async () => {
+    it("fails an acknowledged run before Agent start when title persistence cannot be proved", async () => {
       const runtime = new FakeRuntime();
       const fixture = await openActor({ runtime });
       runtime.session.setSessionNameImplementation = () => {
@@ -797,7 +798,7 @@ describe("ConversationActor", () => {
       })).rejects.toThrow("not durably persisted");
 
       expect(runtime.session.promptCalls).toEqual([]);
-      expect(fixture.events).not.toContainEqual(expect.objectContaining({
+      expect(fixture.events).toContainEqual(expect.objectContaining({
         type: "session_event",
         runId: RUN_A,
         event: { type: "run_queued" },
