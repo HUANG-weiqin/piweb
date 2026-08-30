@@ -25,6 +25,15 @@ function resultFacts(tool: ToolItem): ToolRecord | undefined {
   return asRecord(result?.details) ?? result;
 }
 
+export function editBudgetRemainingFiles(tool: ToolItem): number | undefined {
+  const facts = resultFacts(tool);
+  if (tool.name === "request_edit_budget") {
+    return numberField(facts, "remainingFiles");
+  }
+  if (tool.name !== "edit" && tool.name !== "write") return undefined;
+  return numberField(asRecord(facts?.piwebEditBudget), "remainingFiles");
+}
+
 function waitWasNotStarted(tool: ToolItem): boolean {
   return tool.name === "wait_for_session"
     && resultFacts(tool)?.outcome === "single_wait_commitment_required";
@@ -44,7 +53,13 @@ export function isCommitmentTool(tool: ToolItem): boolean {
   );
 }
 
-export function CommitmentCard({ tool }: { tool: ToolItem }) {
+export function CommitmentCard({
+  tool,
+  observedEditBudgetRemainingFiles,
+}: {
+  tool: ToolItem;
+  observedEditBudgetRemainingFiles?: number | null;
+}) {
   const args = asRecord(tool.args);
   const facts = resultFacts(tool);
   const warning = waitWasNotStarted(tool);
@@ -70,9 +85,12 @@ export function CommitmentCard({ tool }: { tool: ToolItem }) {
       : `预计修改 ${fileCount} 个文件`;
     reason = stringField(args, "reason");
     const addedFiles = numberField(facts, "addedFiles");
-    const remainingFiles = numberField(facts, "remainingFiles");
     if (addedFiles !== undefined) chips.push(`新增额度 ${addedFiles}`);
-    if (remainingFiles !== undefined) chips.push(`剩余 ${remainingFiles}`);
+    if (observedEditBudgetRemainingFiles === null) {
+      chips.push("本轮剩余未知");
+    } else if (observedEditBudgetRemainingFiles !== undefined) {
+      chips.push(`本轮剩余 ${observedEditBudgetRemainingFiles}`);
+    }
   } else {
     const target = stringField(args, "conversationId");
     title = target ? `等待 ${target}` : "等待 Agent 会话";

@@ -31,6 +31,7 @@ import {
 } from "../chat/reducer";
 import { THINKING_LEVEL_LABELS } from "../lib/thinking-level";
 import { ActivitySpinner } from "./ActivitySpinner";
+import { editBudgetRemainingFiles } from "./CommitmentCard";
 import { ConversationRoleDialog } from "./ConversationRoleDialog";
 import { Message } from "./Message";
 import { SessionMessageCard } from "./SessionMessageCard";
@@ -176,6 +177,29 @@ function transcriptBlocks(items: ChatItem[]): TranscriptBlock[] {
   return blocks;
 }
 
+function editBudgetRemainingFilesByRun(
+  blocks: TranscriptBlock[],
+): Map<string, number | null> {
+  const remainingByRun = new Map<string, number | null>();
+  for (const block of blocks) {
+    if (block.kind !== "message" || block.message.role !== "assistant") continue;
+    for (const tool of block.message.tools) {
+      const remainingFiles = editBudgetRemainingFiles(tool);
+      if (remainingFiles !== undefined) {
+        remainingByRun.set(block.message.runId, remainingFiles);
+      } else if (
+        (tool.name === "request_edit_budget"
+          || tool.name === "edit"
+          || tool.name === "write")
+        && (tool.status === "done" || tool.status === "error")
+      ) {
+        remainingByRun.set(block.message.runId, null);
+      }
+    }
+  }
+  return remainingByRun;
+}
+
 function formatContextUsage({
   contextTokenCount,
   contextWindow,
@@ -296,6 +320,10 @@ function ChatView({
   );
   const items = chat.items;
   const blocks = useMemo(() => transcriptBlocks(items), [items]);
+  const editBudgetRemainingByRun = useMemo(
+    () => editBudgetRemainingFilesByRun(blocks),
+    [blocks],
+  );
   const transcriptFocusKey = chat.focus
     ? `${chat.focus.sessionId}:${chat.focus.conversationId}:${chat.focus.focusId}`
     : "unfocused";
@@ -613,6 +641,9 @@ function ChatView({
           rewinding={rewindingMessageId === block.message.id}
           activeThinking={isStreamingMessage && !hasActiveTool}
           streamingText={isStreamingMessage}
+          observedEditBudgetRemainingFiles={
+            editBudgetRemainingByRun.get(block.message.runId)
+          }
           collapsed={
             block.message.role === "assistant"
             && !expandedAssistantMessageIds.has(block.message.id)

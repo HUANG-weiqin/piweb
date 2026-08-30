@@ -41,7 +41,9 @@ describe("CommitmentCard", () => {
       },
       status: "done",
     };
-    const { container } = render(<CommitmentCard tool={tool} />);
+    const { container } = render(
+      <CommitmentCard tool={tool} observedEditBudgetRemainingFiles={2} />,
+    );
     const card = container.querySelector("details.commitment-card") as HTMLDetailsElement;
 
     expect(card.open).toBe(false);
@@ -52,7 +54,7 @@ describe("CommitmentCard", () => {
     expect(container.querySelector(".commitment-reason"))
       .toHaveAttribute("title", "修复 active run 与历史恢复之间的参数一致性。");
     expect(screen.getByText("新增额度 3")).toBeInTheDocument();
-    expect(screen.getByText("剩余 2")).toBeInTheDocument();
+    expect(screen.getByText("本轮剩余 2")).toBeInTheDocument();
 
     fireEvent.click(card.querySelector("summary") as HTMLElement);
 

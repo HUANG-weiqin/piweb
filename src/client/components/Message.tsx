@@ -458,6 +458,7 @@ interface MessageProps {
   activeThinking?: boolean;
   streamingText?: boolean;
   collapsed?: boolean;
+  observedEditBudgetRemainingFiles?: number | null;
 }
 
 function MessageView({
@@ -468,6 +469,7 @@ function MessageView({
   activeThinking = false,
   streamingText = false,
   collapsed = false,
+  observedEditBudgetRemainingFiles,
 }: MessageProps) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
 
@@ -573,6 +575,7 @@ function MessageView({
         return <CommitmentCard
           key={`commitment:${block.tool.id}`}
           tool={block.tool}
+          observedEditBudgetRemainingFiles={observedEditBudgetRemainingFiles}
         />;
       }
       return <ActivityGroup

@@ -253,9 +253,36 @@ function sanitizeWireValue(
   return output;
 }
 
+function ownDataProperty(value: unknown, key: string): unknown {
+  if (value === null || typeof value !== "object" || nodeTypes.isProxy(value)) return;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor?.enumerable === true && "value" in descriptor
+      ? descriptor.value
+      : undefined;
+  } catch {
+    return;
+  }
+}
+
+function retainedEditBudgetDetails(
+  value: unknown,
+): { piwebEditBudget: { remainingFiles: number } } | undefined {
+  const details = ownDataProperty(value, "details");
+  const budget = ownDataProperty(details, "piwebEditBudget");
+  const remainingFiles = ownDataProperty(budget, "remainingFiles");
+  if (
+    typeof remainingFiles !== "number"
+    || !Number.isSafeInteger(remainingFiles)
+    || remainingFiles < 0
+  ) return;
+  return { piwebEditBudget: { remainingFiles } };
+}
+
 export function toWireValue(value: unknown): unknown {
   if (value === undefined) return;
 
+  const retainedDetails = retainedEditBudgetDetails(value);
   const budget = { nodes: MAX_WIRE_NODES, truncated: false };
   const sanitized = sanitizeWireValue(value, new WeakSet<object>(), budget, 0);
   let json: string;
@@ -269,6 +296,7 @@ export function toWireValue(value: unknown): unknown {
     return {
       truncated: true,
       preview: json.slice(0, TRUNCATED_PREVIEW_CHARS),
+      ...(retainedDetails === undefined ? {} : { details: retainedDetails }),
     };
   }
 

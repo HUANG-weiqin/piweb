@@ -116,6 +116,37 @@ function compactToolValue(value: unknown): { value: unknown; truncated: boolean 
   return { value: OMITTED_TOOL_VALUE, truncated: true };
 }
 
+function editBudgetFact(value: unknown): unknown {
+  return record(record(value)?.details)?.piwebEditBudget;
+}
+
+function omittedToolResult(value: unknown): unknown {
+  const budget = editBudgetFact(value);
+  if (budget === undefined) return OMITTED_TOOL_VALUE;
+  const retained = {
+    content: OMITTED_TOOL_VALUE,
+    details: { piwebEditBudget: budget },
+  };
+  try {
+    if (
+      Buffer.byteLength(JSON.stringify(retained), "utf8")
+      <= MAX_HISTORY_TOOL_VALUE_BYTES
+    ) {
+      return retained;
+    }
+  } catch {
+    // Malformed historical details must not bypass the snapshot bound.
+  }
+  return OMITTED_TOOL_VALUE;
+}
+
+function compactToolResult(value: unknown): { value: unknown; truncated: boolean } {
+  const compacted = compactToolValue(value);
+  return compacted.truncated
+    ? { value: omittedToolResult(value), truncated: true }
+    : compacted;
+}
+
 function fallbackHistoryParts(
   text: string,
   thinking: string,
@@ -150,9 +181,21 @@ function compactHistoryMessage(
           .filter((part) => part.kind === "tool")
           .map((part) => part.toolCallId),
       );
-  const selectedTools = selectedPartToolIds === undefined
-    ? message.tools.slice(-MAX_HISTORY_TOOLS_PER_MESSAGE)
-    : message.tools.filter((tool) => selectedPartToolIds.has(tool.toolCallId));
+  const visibleToolIds = selectedPartToolIds ?? new Set(
+    message.tools
+      .slice(-MAX_HISTORY_TOOLS_PER_MESSAGE)
+      .map((tool) => tool.toolCallId),
+  );
+  const retainedToolIds = new Set(visibleToolIds);
+  const latestBudgetTool = [...message.tools].reverse().find(
+    (tool) => tool.toolName === "request_edit_budget"
+      || tool.toolName === "edit"
+      || tool.toolName === "write",
+  );
+  if (latestBudgetTool) retainedToolIds.add(latestBudgetTool.toolCallId);
+  const selectedTools = message.tools.filter(
+    (tool) => retainedToolIds.has(tool.toolCallId),
+  );
   let truncated = id.truncated
     || text.truncated
     || thinking.truncated
@@ -163,7 +206,7 @@ function compactHistoryMessage(
     const toolCallId = clipUtf8(tool.toolCallId, MAX_HISTORY_ID_BYTES);
     const toolName = clipUtf8(tool.toolName, MAX_HISTORY_ID_BYTES);
     const args = compactToolValue(tool.args);
-    const result = compactToolValue(tool.result);
+    const result = compactToolResult(tool.result);
     const toolTruncated = toolCallId.truncated
       || toolName.truncated
       || args.truncated
@@ -178,6 +221,9 @@ function compactHistoryMessage(
       status: tool.status,
     };
   });
+  const visibleTools = tools.filter((_, index) => (
+    visibleToolIds.has(selectedTools[index]!.toolCallId)
+  ));
   let partsLostOrder = false;
   const compactedParts = selectedParts?.flatMap((part): ConversationHistoryMessagePart[] => {
     if (part.kind === "tool") {
@@ -211,9 +257,11 @@ function compactHistoryMessage(
   });
   let parts = compactedParts;
   if (message.parts === undefined) {
-    parts = undefined;
+    parts = visibleTools.length === tools.length
+      ? undefined
+      : fallbackHistoryParts(text.value, thinking.value, visibleTools);
   } else if (partsLostOrder) {
-    parts = fallbackHistoryParts(text.value, thinking.value, tools);
+    parts = fallbackHistoryParts(text.value, thinking.value, visibleTools);
   }
   return {
     message: {
@@ -261,6 +309,8 @@ function projectConversationHistorySlots(
   const branch = sessionManager.getBranch();
   const messages: ConversationHistoryMessageSlot[] = [];
   let assistant: ConversationHistoryMessageSlot | undefined;
+  let unsettledMessageStart = 0;
+  const settledRunIds = new Set<string>();
   const seenCardIds = new Set<string>();
 
   const requireAssistant = (entryId: string): ConversationHistoryMessageSlot => {
@@ -288,6 +338,25 @@ function projectConversationHistorySlots(
       continue;
     }
     const reserved = parseReservedConversationEntry(entry);
+    if (reserved?.kind === "run_settlement") {
+      const runId = reserved.entry.data.runId;
+      if (settledRunIds.has(runId)) continue;
+      settledRunIds.add(runId);
+      // Settlement is the durable run boundary. Backfill every message since
+      // the previous boundary, including user guidance delivered mid-run.
+      for (let index = unsettledMessageStart; index < messages.length; index += 1) {
+        messages[index]!.message.runId = runId;
+      }
+      unsettledMessageStart = messages.length;
+      assistant = undefined;
+      continue;
+    }
+    if (reserved?.kind === "conversation_meta") {
+      // A migrated legacy transcript predates host-owned run settlements.
+      unsettledMessageStart = messages.length;
+      assistant = undefined;
+      continue;
+    }
     if (reserved?.kind === "conversation_message") {
       assistant = undefined;
       seenCardIds.add(reserved.entry.details.cardId);
@@ -771,6 +840,18 @@ function shortenPrefix(value: string): string {
   return `${value.slice(0, Math.floor(value.length / 2))}…`;
 }
 
+function visibleHistoryTools(
+  item: ConversationHistoryMessage,
+): ConversationHistoryTool[] {
+  if (item.parts === undefined) return item.tools;
+  const visibleToolIds = new Set(
+    item.parts
+      .filter((part) => part.kind === "tool")
+      .map((part) => part.toolCallId),
+  );
+  return item.tools.filter((tool) => visibleToolIds.has(tool.toolCallId));
+}
+
 function minimalConversationItem(
   item: ConversationHistoryItem,
 ): ConversationHistoryItem {
@@ -811,7 +892,9 @@ function fitConversationItem(
       tools: item.tools.map((tool) => ({
         ...tool,
         ...(tool.args === undefined ? {} : { args: OMITTED_TOOL_VALUE }),
-        ...(tool.result === undefined ? {} : { result: OMITTED_TOOL_VALUE }),
+        ...(tool.result === undefined
+          ? {}
+          : { result: omittedToolResult(tool.result) }),
       })),
     };
   }
@@ -824,13 +907,14 @@ function fitConversationItem(
       const value = item[field];
       if (!value) break;
       const shortened = shortenPrefix(value);
+      const visibleTools = visibleHistoryTools(item);
       item = {
         ...item,
         [field]: shortened,
         parts: fallbackHistoryParts(
           field === "text" ? shortened : item.text,
           field === "thinking" ? shortened : item.thinking,
-          item.tools,
+          visibleTools,
         ),
       };
       continue;

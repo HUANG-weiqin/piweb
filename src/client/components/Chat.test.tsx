@@ -148,6 +148,90 @@ describe("Chat", () => {
       .not.toBe(otherConversationArticle);
   });
 
+  it("updates an edit commitment from later same-run budget facts", () => {
+    const runId = "run-edit-budget";
+    const budgetMessage: ChatMessage = {
+      id: "budget-message",
+      runId,
+      role: "assistant",
+      text: "",
+      thinking: "",
+      tools: [{
+        id: "budget",
+        name: "request_edit_budget",
+        args: { fileCount: 2, reason: "修改两个文件。" },
+        result: {
+          details: {
+            outcome: "edit_budget_granted",
+            addedFiles: 2,
+            remainingFiles: 2,
+          },
+        },
+        status: "done",
+      }],
+    };
+    const guidanceMessage: ChatMessage = {
+      id: "guidance-message",
+      runId,
+      role: "user",
+      text: "继续处理。",
+      thinking: "",
+      tools: [],
+    };
+    const mutationMessage = (remainingFiles?: number): ChatMessage => ({
+      id: "mutation-message",
+      runId,
+      role: "assistant",
+      text: "",
+      thinking: "",
+      tools: [{
+        id: "edit",
+        name: "edit",
+        result: remainingFiles === undefined
+          ? { truncated: true, preview: "large result omitted" }
+          : {
+              details: {
+                piwebEditBudget: { remainingFiles },
+              },
+            },
+        status: "done",
+      }],
+    });
+
+    const rendered = render(view({
+      items: messageItems(budgetMessage),
+    }));
+    expect(screen.getByText("本轮剩余 2")).toBeInTheDocument();
+
+    rendered.rerender(view({
+      items: messageItems(
+        budgetMessage,
+        guidanceMessage,
+        mutationMessage(1),
+      ),
+    }));
+    expect(screen.getByText("本轮剩余 1")).toBeInTheDocument();
+    expect(screen.queryByText("本轮剩余 2")).not.toBeInTheDocument();
+
+    rendered.rerender(view({
+      items: messageItems(
+        budgetMessage,
+        guidanceMessage,
+        mutationMessage(0),
+      ),
+    }));
+    expect(screen.getByText("本轮剩余 0")).toBeInTheDocument();
+
+    rendered.rerender(view({
+      items: messageItems(
+        budgetMessage,
+        guidanceMessage,
+        mutationMessage(),
+      ),
+    }));
+    expect(screen.getByText("本轮剩余未知")).toBeInTheDocument();
+  });
+
   it("shows onboarding only after an empty conversation is ready", () => {
     const rendered = render(view(emptyChat, "", undefined, {
       conversationReady: false,

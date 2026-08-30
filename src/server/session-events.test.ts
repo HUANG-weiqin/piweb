@@ -296,6 +296,32 @@ describe("toWireValue", () => {
     expect(projected).toMatchObject({ truncated: true });
   });
 
+  it("retains the current edit budget when a large tool result is bounded", () => {
+    const projected = toWireValue({
+      content: [{ type: "text", text: "x".repeat(250_000) }],
+      details: {
+        ...Object.fromEntries(Array.from(
+          { length: 2_000 },
+          (_, index) => [`extension-${index}`, index],
+        )),
+        piwebEditBudget: {
+          countedNewFile: true,
+          grantedFiles: 2,
+          touchedFiles: 1,
+          remainingFiles: 1,
+          blockedAttempts: 0,
+        },
+      },
+    });
+
+    expect(projected).toMatchObject({
+      truncated: true,
+      details: { piwebEditBudget: { remainingFiles: 1 } },
+    });
+    expect(Buffer.byteLength(JSON.stringify(projected), "utf8"))
+      .toBeLessThan(200_000);
+  });
+
   it("bounds collection traversal before serializing extension payloads", () => {
     const projected = toWireValue(Array.from({ length: 10_000 }, (_, index) => index));
     expect(projected).toMatchObject({ truncated: true });

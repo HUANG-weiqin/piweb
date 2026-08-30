@@ -110,6 +110,183 @@ describe("projectConversationHistory", () => {
     ]);
   });
 
+  it("uses profile and settlement boundaries to identify one restored run", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    const runId = randomUUID();
+    const nextRunId = randomUUID();
+    manager.appendMessage(message({
+      role: "user",
+      content: "legacy prompt",
+      timestamp: 1,
+    }));
+    manager.appendMessage(message({
+      role: "assistant",
+      content: [{ type: "text", text: "legacy answer" }],
+      stopReason: "stop",
+      timestamp: 2,
+    }));
+    appendReservedCustomEntry(manager, createConversationMetaEntry({
+      role: {
+        id: "default",
+        revision: 1,
+        name: "Agent",
+        description: "",
+        systemPrompt: "",
+        model: { provider: "openai", id: "gpt-5.6" },
+      },
+      lifecycle: { kind: "normal" },
+      createdBy: { kind: "user" },
+    }));
+    manager.appendMessage(message({
+      role: "user",
+      content: "request an edit budget",
+      timestamp: 3,
+    }));
+    manager.appendMessage(message({
+      role: "assistant",
+      content: [{
+        type: "toolCall",
+        id: "read-call",
+        name: "read",
+        arguments: { path: "README.md" },
+      }],
+      stopReason: "toolUse",
+      timestamp: 4,
+    }));
+    manager.appendMessage(message({
+      role: "toolResult",
+      toolCallId: "read-call",
+      toolName: "read",
+      content: [{ type: "text", text: "project readme" }],
+      isError: false,
+      timestamp: 5,
+    }));
+    manager.appendMessage(message({
+      role: "user",
+      content: "also update the restored view",
+      timestamp: 6,
+    }));
+    manager.appendMessage(message({
+      role: "assistant",
+      content: [{ type: "text", text: "done" }],
+      stopReason: "stop",
+      timestamp: 7,
+    }));
+    const settlement = createRunSettlementEntry({
+      runId,
+      outcome: "completed",
+      finalText: "done",
+      settledAt: "2026-08-30T03:00:00.000Z",
+    });
+    appendReservedCustomEntry(manager, settlement);
+    manager.appendMessage(message({
+      role: "user",
+      content: "start another run",
+      timestamp: 8,
+    }));
+    appendReservedCustomEntry(manager, settlement);
+    manager.appendMessage(message({
+      role: "assistant",
+      content: [{ type: "text", text: "second answer" }],
+      stopReason: "stop",
+      timestamp: 9,
+    }));
+    appendReservedCustomEntry(manager, createRunSettlementEntry({
+      runId: nextRunId,
+      outcome: "completed",
+      finalText: "second answer",
+      settledAt: "2026-08-30T03:01:00.000Z",
+    }));
+    manager.appendMessage(message({
+      role: "user",
+      content: "start a third run",
+      timestamp: 10,
+    }));
+
+    const history = projectConversationHistory(manager);
+    expect(history.slice(0, 2).every(({ runId }) => runId === undefined)).toBe(true);
+    expect(history.slice(2, 6).map(({ runId: projectedRunId }) => projectedRunId))
+      .toEqual([runId, runId, runId, runId]);
+    expect(history.slice(6, 8).map(({ runId: projectedRunId }) => projectedRunId))
+      .toEqual([nextRunId, nextRunId]);
+    expect(history.at(-1)).not.toHaveProperty("runId");
+  });
+
+  it("keeps edit-budget facts when an oversized tool result is omitted", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    const budget = {
+      countedNewFile: true,
+      grantedFiles: 2,
+      touchedFiles: 1,
+      remainingFiles: 1,
+      blockedAttempts: 0,
+    };
+    manager.appendMessage(message({
+      role: "user",
+      content: "edit the large file",
+      timestamp: 1,
+    }));
+    manager.appendMessage(message({
+      role: "assistant",
+      content: [{
+        type: "toolCall",
+        id: "edit-call",
+        name: "edit",
+        arguments: { path: "large.ts" },
+      }],
+      stopReason: "toolUse",
+      timestamp: 2,
+    }));
+    manager.appendMessage(message({
+      role: "toolResult",
+      toolCallId: "edit-call",
+      toolName: "edit",
+      content: [{ type: "text", text: "x".repeat(9_000) }],
+      details: { piwebEditBudget: budget },
+      isError: false,
+      timestamp: 3,
+    }));
+    for (let index = 0; index < 17; index += 1) {
+      const toolCallId = `later-call-${index}`;
+      manager.appendMessage(message({
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: `thought-${index}-${"\u0000".repeat(10_000)}` },
+          { type: "text", text: `chunk-${index}-${"\u0000".repeat(10_000)}` },
+          {
+            type: "toolCall",
+            id: toolCallId,
+            name: "read",
+            arguments: { path: `file-${index}.ts` },
+          },
+        ],
+        stopReason: "toolUse",
+        timestamp: 4 + index * 2,
+      }));
+      manager.appendMessage(message({
+        role: "toolResult",
+        toolCallId,
+        toolName: "read",
+        content: [{ type: "text", text: "ok" }],
+        isError: false,
+        timestamp: 5 + index * 2,
+      }));
+    }
+
+    const snapshot = projectConversationHistorySnapshot(manager);
+    const assistant = snapshot.messages.at(-1);
+    expect(snapshot.window.contentTruncated).toBe(true);
+    expect(assistant?.tools.find((tool) => tool.toolCallId === "edit-call")?.result)
+      .toEqual({
+        content: "[历史工具数据过大，已省略]",
+        details: { piwebEditBudget: budget },
+      });
+    expect(assistant?.parts?.at(-1)).toMatchObject({ kind: "text" });
+    expect(assistant?.parts?.some(
+      (part) => part.kind === "tool" && part.toolCallId === "edit-call",
+    )).toBe(false);
+  });
+
   it("ignores non-context pending prompt batch manifests", () => {
     const manager = SessionManager.inMemory("E:\\work");
     const conversationId = randomUUID();
@@ -443,6 +620,45 @@ describe("projectConversationHistory", () => {
       })),
     });
     expect(snapshot.window.contentTruncated).toBe(true);
+  });
+
+  it("retains the latest budget grant as a hidden timeline fact", () => {
+    const budgetTool = {
+      toolCallId: "budget-call",
+      toolName: "request_edit_budget",
+      args: { fileCount: 2, reason: "expand the proven scope" },
+      result: { details: { remainingFiles: 3 } },
+      status: "done" as const,
+    };
+    const laterTools = Array.from({ length: 17 }, (_, index) => ({
+      toolCallId: `later-${index}`,
+      toolName: "read",
+      result: { ok: true },
+      status: "done" as const,
+    }));
+    const tools = [budgetTool, ...laterTools];
+    const snapshot = snapshotConversationItems([{
+      kind: "message",
+      id: "assistant-hidden-budget",
+      runId: "run-1",
+      role: "assistant",
+      text: "",
+      thinking: "",
+      tools,
+      parts: tools.map((tool) => ({
+        kind: "tool" as const,
+        toolCallId: tool.toolCallId,
+      })),
+    }]);
+    const assistant = snapshot.items[0];
+
+    expect(assistant).toMatchObject({ kind: "message" });
+    if (assistant.kind !== "message") throw new Error("expected message item");
+    expect(assistant.tools.find((tool) => tool.toolCallId === "budget-call")?.result)
+      .toEqual({ details: { remainingFiles: 3 } });
+    expect(assistant.parts?.some(
+      (part) => part.kind === "tool" && part.toolCallId === "budget-call",
+    )).toBe(false);
   });
 
   it("never emits more than sixteen parts when an oversized timeline is compacted", () => {
