@@ -298,6 +298,88 @@ describe("ConversationSidebar", () => {
     ]);
   });
 
+  it("keeps standalone positions stable when selection changes", () => {
+    const recent = conversation("recent-standalone", "最近会话", {
+      updatedAt: "2026-07-19T10:00:00.000Z",
+    });
+    const older = conversation("older-standalone", "较早会话", {
+      updatedAt: "2026-07-19T08:00:00.000Z",
+    });
+
+    function Harness() {
+      const [selectedId, setSelectedId] = useState(recent.id);
+      return <ConversationSidebar
+        conversations={[older, recent]}
+        currentConversationId={selectedId}
+        collapsed={false}
+        truncated={false}
+        navigationEnabled
+        actionsEnabled
+        onToggleCollapsed={vi.fn()}
+        onSelect={setSelectedId}
+        onCreate={vi.fn()}
+        onRename={vi.fn()}
+        onDelete={vi.fn(() => true)}
+      />;
+    }
+
+    const { container } = render(<Harness />);
+    const rowOrder = () => Array.from(
+      container.querySelectorAll<HTMLElement>(".hierarchy-standalone"),
+      (row) => row.dataset.conversationId,
+    );
+    expect(rowOrder()).toEqual([recent.id, older.id]);
+
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 较早会话" }));
+
+    expect(screen.getByRole("button", { name: "当前会话 较早会话" }))
+      .toHaveAttribute("aria-current", "page");
+    expect(rowOrder()).toEqual([recent.id, older.id]);
+  });
+
+  it("keeps collaboration member positions stable when selection changes", () => {
+    const root = conversation("stable-root", "稳定任务");
+    const recent = conversation("recent-member", "最近 Agent", {
+      rootConversationId: root.id,
+      updatedAt: "2026-07-19T10:00:00.000Z",
+    });
+    const older = conversation("older-member", "较早 Agent", {
+      rootConversationId: root.id,
+      updatedAt: "2026-07-19T08:00:00.000Z",
+    });
+
+    function Harness() {
+      const [selectedId, setSelectedId] = useState(recent.id);
+      return <ConversationSidebar
+        conversations={[root, older, recent]}
+        currentConversationId={selectedId}
+        focusedConversationId={root.id}
+        collapsed={false}
+        truncated={false}
+        navigationEnabled
+        actionsEnabled
+        onToggleCollapsed={vi.fn()}
+        onSelect={setSelectedId}
+        onCreate={vi.fn()}
+        onRename={vi.fn()}
+        onDelete={vi.fn(() => true)}
+      />;
+    }
+
+    const { container } = render(<Harness />);
+    const memberOrder = () => Array.from(
+      container.querySelectorAll<HTMLElement>(".hierarchy-member"),
+      (row) => row.dataset.conversationId,
+    );
+    expect(memberOrder()).toEqual([recent.id, older.id]);
+
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 较早 Agent" }));
+
+    expect(screen.getByRole("button", { name: "当前会话 较早 Agent" }))
+      .toHaveAttribute("aria-current", "page");
+    expect(memberOrder()).toEqual([recent.id, older.id]);
+  });
+
   it.each(["queued", "running"] as const)(
     "uses a semantic spinner for %s conversations",
     (kind) => {

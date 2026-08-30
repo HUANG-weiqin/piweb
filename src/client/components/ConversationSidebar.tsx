@@ -119,7 +119,6 @@ type GroupedEntry =
 
 function groupProjection(
   conversations: ConversationSummary[],
-  currentConversationId?: string,
   busyConversationId?: string,
 ): {
   entries: GroupedEntry[];
@@ -154,10 +153,6 @@ function groupProjection(
     const members = descendants
       .map((conversation, index) => ({ conversation, index }))
       .sort((left, right) => {
-        const currentDifference =
-          Number(right.conversation.id === currentConversationId)
-          - Number(left.conversation.id === currentConversationId);
-        if (currentDifference !== 0) return currentDifference;
         const attentionDifference =
           Number(Boolean(right.conversation.attention))
           - Number(Boolean(left.conversation.attention));
@@ -207,10 +202,6 @@ function groupProjection(
     const rightConversations = right.kind === "group"
       ? right.group.conversations
       : [right.conversation];
-    const leftCurrent = leftConversations.some(({ id }) => id === currentConversationId);
-    const rightCurrent = rightConversations.some(({ id }) => id === currentConversationId);
-    const currentDifference = Number(rightCurrent) - Number(leftCurrent);
-    if (currentDifference !== 0) return currentDifference;
     const leftAttention = leftConversations.some(({ attention }) => attention === true);
     const rightAttention = rightConversations.some(({ attention }) => attention === true);
     const attentionDifference = Number(rightAttention) - Number(leftAttention);
@@ -606,12 +597,8 @@ function ConversationSidebarView({
   const observedFocusedConversationId = useRef<string | undefined>(undefined);
   const lastFocusedRoot = useRef<string | undefined>(undefined);
   const grouped = useMemo(
-    () => groupProjection(
-      conversations,
-      currentConversationId,
-      busyConversationId,
-    ),
-    [conversations, currentConversationId, busyConversationId],
+    () => groupProjection(conversations, busyConversationId),
+    [conversations, busyConversationId],
   );
   const deleteCandidate = conversations.find(
     ({ id }) => id === confirmDeleteConversationId,
