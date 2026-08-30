@@ -8,6 +8,7 @@ import {
   loopListSchema,
   serviceTierSchema,
   type LoopList,
+  type ServiceTier,
 } from "../shared/protocol.js";
 
 export const CONVERSATION_META_CUSTOM_TYPE =
@@ -186,6 +187,8 @@ const roleSnapshotSchema = z.object({
     "xhigh",
     "max",
   ]).default("off"),
+  // Conversation snapshots written before role defaults inherit provider routing.
+  defaultServiceTier: serviceTierSchema.nullable().default(null),
   // Conversation snapshots written before role permissions default closed.
   toolMode: z.enum(["read_only", "full_access"]).default("read_only"),
   // Session orchestration is opt-in for metadata written before this field.
@@ -240,6 +243,8 @@ const conversationMetaEntrySchema = z.object({
 
 const conversationRoleChangeSchema = z.object({
   role: roleSnapshotSchema,
+  // Missing only on legacy role-change records; new writers always include it.
+  selectedServiceTier: serviceTierSchema.nullable().optional(),
   changedAt: canonicalTimestampSchema("changedAt"),
 }).strict();
 
@@ -820,7 +825,7 @@ export function parseConversationRoleChangeEntry(
 }
 
 export function createConversationRoleChangeEntry(
-  data: ConversationRoleChange,
+  data: ConversationRoleChange & { selectedServiceTier: ServiceTier | null },
 ): ConversationRoleChangeEntry {
   return parseConversationRoleChangeEntry({
     customType: CONVERSATION_ROLE_CHANGE_CUSTOM_TYPE,
@@ -1348,6 +1353,19 @@ export function aggregateReservedConversationEntries(
         && Date.parse(reserved.entry.data.changedAt) < Date.parse(roleChangedAt)
       ) {
         throw new Error("Piweb conversation role changedAt cannot regress");
+      }
+      if (reserved.entry.data.selectedServiceTier !== undefined) {
+        if (
+          serviceTier !== undefined
+          && Date.parse(reserved.entry.data.changedAt)
+            < Date.parse(serviceTier.updatedAt)
+        ) {
+          throw new Error("Piweb service tier updatedAt cannot regress");
+        }
+        serviceTier = {
+          tier: reserved.entry.data.selectedServiceTier,
+          updatedAt: reserved.entry.data.changedAt,
+        };
       }
       conversationMeta = {
         ...conversationMeta,

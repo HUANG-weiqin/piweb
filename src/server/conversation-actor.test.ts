@@ -30,6 +30,7 @@ import {
   aggregateReservedConversationEntries,
   appendReservedCustomEntry,
   createConversationCardEntry,
+  createConversationMetaEntry,
   createLoopListEntry,
   createServiceTierSelectionEntry,
   LOOP_LIST_CUSTOM_TYPE,
@@ -1947,6 +1948,54 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
+  it("inherits the frozen role tier while preserving explicit overrides across capability drift", async () => {
+    const inheritedProfile = profile();
+    inheritedProfile.role.defaultServiceTier = "priority";
+    const inheritedRuntime = new FakeRuntime();
+    Object.assign(inheritedRuntime.session.model!, {
+      api: "openai-codex-responses",
+    });
+    const inherited = await openActor({
+      profile: inheritedProfile,
+      runtime: inheritedRuntime,
+    });
+    expect(inherited.actor.getServiceTier()).toBe("priority");
+    await inherited.actor.dispose();
+
+    const manager = SessionManager.inMemory(process.cwd(), {
+      id: CONVERSATION_ID,
+    });
+    appendReservedCustomEntry(manager, createServiceTierSelectionEntry({
+      tier: null,
+      updatedAt: "2026-07-19T10:00:00.000Z",
+    }));
+    const clearedRuntime = new FakeRuntime();
+    const cleared = await openActor({
+      profile: inheritedProfile,
+      sessionManager: manager,
+      runtime: clearedRuntime,
+    });
+    expect(cleared.actor.getServiceTier()).toBeNull();
+    await cleared.actor.dispose();
+
+    const driftedManager = SessionManager.inMemory(process.cwd(), {
+      id: CONVERSATION_ID,
+    });
+    appendReservedCustomEntry(
+      driftedManager,
+      createServiceTierSelectionEntry({
+        tier: "priority",
+        updatedAt: "2026-07-19T10:00:00.000Z",
+      }),
+    );
+    const drifted = await openActor({
+      sessionManager: driftedManager,
+      runtime: new FakeRuntime(),
+    });
+    expect(drifted.actor.getServiceTier()).toBe("priority");
+    await drifted.actor.dispose();
+  });
+
   it("restores, clears, and durably updates the live service tier selection", async () => {
     const manager = SessionManager.inMemory(process.cwd(), {
       id: CONVERSATION_ID,
@@ -1979,29 +2028,33 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
-  it("rejects a role model transition incompatible with the selected tier", async () => {
-    const fixture = await openActor();
+  it("switches to the target role default tier and keeps a same-snapshot override", async () => {
+    const manager = SessionManager.inMemory(process.cwd(), {
+      id: CONVERSATION_ID,
+    });
+    appendReservedCustomEntry(manager, createConversationMetaEntry(profile()));
+    const fixture = await openActor({ sessionManager: manager });
     Object.assign(fixture.runtime.session.model!, {
       api: "openai-codex-responses",
     });
-    fixture.actor.setServiceTier("priority");
-    Object.assign(fixture.runtime.modelRegistry, {
-      find: () => ({
-        provider: "test",
-        id: "other-model",
-        api: "openai-responses",
-      }),
-    });
     const nextRole = {
       ...fixture.actor.profile.role,
+      revision: fixture.actor.profile.role.revision + 1,
       model: { provider: "test", id: "other-model" },
+      defaultServiceTier: "priority" as const,
     };
 
-    await expect(fixture.actor.switchRole(nextRole, {})).rejects.toThrow(
-      'does not support service tier "priority"',
-    );
-    expect(fixture.runtime.disposeCalls).toBe(0);
-    expect(fixture.actor.profile.role.model.id).toBe("model");
+    await fixture.actor.switchRole(nextRole, {});
+    expect(fixture.actor.getServiceTier()).toBe("priority");
+    expect(aggregateReservedConversationEntries(
+      fixture.manager.getEntries(),
+    ).serviceTier?.tier).toBe("priority");
+
+    fixture.actor.setServiceTier(null);
+    const disposeCalls = fixture.runtime.disposeCalls;
+    await fixture.actor.switchRole({ ...fixture.actor.profile.role }, {});
+    expect(fixture.actor.getServiceTier()).toBeNull();
+    expect(fixture.runtime.disposeCalls).toBe(disposeCalls);
     await fixture.actor.dispose();
   });
 

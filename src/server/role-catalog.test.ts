@@ -68,6 +68,7 @@ describe("RoleCatalog", () => {
       systemPrompt: "new prompt",
       model: model("provider", "model-a"),
       defaultThinkingLevel: "off",
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: false,
     });
@@ -102,6 +103,7 @@ describe("RoleCatalog", () => {
       systemPrompt: "",
       model: model("provider", "missing"),
       defaultThinkingLevel: "off",
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: true,
     })).rejects.toThrow("unavailable in the current project");
@@ -113,6 +115,7 @@ describe("RoleCatalog", () => {
       systemPrompt: "",
       model: model("provider", "missing"),
       defaultThinkingLevel: "off",
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: true,
     });
@@ -139,6 +142,7 @@ describe("RoleCatalog", () => {
       systemPrompt: "",
       model: model("extension", "project-model"),
       defaultThinkingLevel: "off",
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: false,
     })).rejects.toThrow("unavailable in the current project");
@@ -149,6 +153,7 @@ describe("RoleCatalog", () => {
       systemPrompt: "",
       model: model("extension", "project-model"),
       defaultThinkingLevel: "off",
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: false,
     }, projectModels);
@@ -172,6 +177,7 @@ describe("RoleCatalog", () => {
       systemPrompt: "",
       model: model("extension", "missing"),
       defaultThinkingLevel: "off",
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: false,
     }, projectModels)).rejects.toThrow("unavailable in the current project");
@@ -182,6 +188,7 @@ describe("RoleCatalog", () => {
       systemPrompt: "Keep the frozen model.",
       model: model("extension", "project-model"),
       defaultThinkingLevel: "off",
+      defaultServiceTier: null,
       toolMode: "full_access",
       canManageSessions: true,
     }, { getAvailable: () => [] })).resolves.toMatchObject({
@@ -202,6 +209,7 @@ describe("RoleCatalog", () => {
       systemPrompt: "Review.",
       model: model("provider", "model-a"),
       defaultThinkingLevel: "off",
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: false,
     });
@@ -223,6 +231,56 @@ describe("RoleCatalog", () => {
     expect(listener).toHaveBeenCalledTimes(2);
   });
 
+  it("validates role default service tiers by request route and reports drift", async () => {
+    const selected = {
+      ...model("provider", "codex"),
+      api: "openai-codex-responses",
+    };
+    const models = source([selected]);
+    const catalog = await RoleCatalog.open(models, await rolesPath());
+
+    const created = await catalog.createRole({
+      name: "Priority",
+      description: "",
+      systemPrompt: "",
+      model: model("provider", "codex"),
+      defaultThinkingLevel: "off",
+      defaultServiceTier: "priority",
+      toolMode: "read_only",
+      canManageSessions: false,
+    });
+    expect(catalog.getConversationRole(created.id).defaultServiceTier)
+      .toBe("priority");
+
+    models.available = [model("provider", "codex")];
+    expect(catalog.listRoles()).toContainEqual(expect.objectContaining({
+      id: created.id,
+      available: false,
+      unavailableReason: "模型不支持默认服务层级：priority",
+    }));
+    await expect(catalog.updateRole(created.id, created.revision, "", {
+      name: "Renamed while unavailable",
+      description: "",
+      systemPrompt: "",
+      model: model("provider", "codex"),
+      defaultThinkingLevel: "off",
+      defaultServiceTier: "priority",
+      toolMode: "read_only",
+      canManageSessions: false,
+    })).resolves.toMatchObject({ name: "Renamed while unavailable" });
+
+    await expect(catalog.createRole({
+      name: "Unsupported priority",
+      description: "",
+      systemPrompt: "",
+      model: model("provider", "codex"),
+      defaultThinkingLevel: "off",
+      defaultServiceTier: "priority",
+      toolMode: "read_only",
+      canManageSessions: false,
+    })).rejects.toThrow("does not support service tier priority");
+  });
+
   it("rejects a default thinking level unsupported by the role model", async () => {
     const selected = {
       ...model("provider", "limited"),
@@ -238,6 +296,7 @@ describe("RoleCatalog", () => {
       systemPrompt: "",
       model: model("provider", "limited"),
       defaultThinkingLevel: "max",
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: false,
     })).rejects.toThrow("does not support thinking level max");
@@ -247,6 +306,7 @@ describe("RoleCatalog", () => {
       systemPrompt: "",
       model: model("provider", "limited"),
       defaultThinkingLevel: "xhigh",
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: false,
     })).rejects.toThrow("does not support thinking level xhigh");
@@ -257,6 +317,7 @@ describe("RoleCatalog", () => {
       systemPrompt: "",
       model: model("provider", "limited"),
       defaultThinkingLevel: "high",
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: false,
     });

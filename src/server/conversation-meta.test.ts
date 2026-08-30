@@ -95,6 +95,7 @@ function metadata() {
         id: "gpt-5.6",
       },
       defaultThinkingLevel: "high" as const,
+      defaultServiceTier: null,
       toolMode: "read_only" as const,
       canManageSessions: true,
     },
@@ -301,6 +302,7 @@ describe("conversation reserved entries", () => {
         name: "Builder",
         toolMode: "full_access",
       },
+      selectedServiceTier: "priority",
       changedAt: "2026-07-19T10:01:00.000Z",
     });
 
@@ -310,10 +312,52 @@ describe("conversation reserved entries", () => {
       initial,
       changed,
     ]).conversationMeta?.role).toEqual(changed.data.role);
+    expect(aggregateReservedConversationEntries([
+      initial,
+      changed,
+    ]).serviceTier).toEqual({
+      tier: "priority",
+      updatedAt: changed.data.changedAt,
+    });
     expect(() => aggregateReservedConversationEntries([
       changed,
       initial,
     ])).toThrow(/before conversation metadata/i);
+  });
+
+  it("preserves the conversation tier for legacy role changes and applies explicit null", () => {
+    const initial = createConversationMetaEntry(metadata());
+    const selected = createServiceTierSelectionEntry({
+      tier: "priority",
+      updatedAt: timestamp,
+    });
+    const legacyChange = parseConversationRoleChangeEntry({
+      customType: CONVERSATION_ROLE_CHANGE_CUSTOM_TYPE,
+      data: {
+        role: { ...initial.data.role, revision: 4 },
+        changedAt: "2026-07-19T10:01:00.000Z",
+      },
+    });
+    const cleared = createConversationRoleChangeEntry({
+      role: { ...initial.data.role, revision: 5 },
+      selectedServiceTier: null,
+      changedAt: "2026-07-19T10:02:00.000Z",
+    });
+
+    expect(aggregateReservedConversationEntries([
+      initial,
+      selected,
+      legacyChange,
+    ]).serviceTier).toEqual(selected.data);
+    expect(aggregateReservedConversationEntries([
+      initial,
+      selected,
+      legacyChange,
+      cleared,
+    ]).serviceTier).toEqual({
+      tier: null,
+      updatedAt: cleared.data.changedAt,
+    });
   });
 
   it("keeps legacy conversation behavior closed", () => {
@@ -321,6 +365,7 @@ describe("conversation reserved entries", () => {
     const {
       canManageSessions: _omittedCapability,
       defaultThinkingLevel: _omittedThinkingLevel,
+      defaultServiceTier: _omittedServiceTier,
       ...legacyRole
     } = value.role;
 
@@ -330,6 +375,7 @@ describe("conversation reserved entries", () => {
     });
     expect(parsed.data.role.canManageSessions).toBe(false);
     expect(parsed.data.role.defaultThinkingLevel).toBe("off");
+    expect(parsed.data.role.defaultServiceTier).toBeNull();
   });
 
   it("rejects unknown, incomplete, and over-limit conversation metadata", () => {

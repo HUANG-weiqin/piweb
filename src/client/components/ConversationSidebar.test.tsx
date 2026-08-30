@@ -20,6 +20,7 @@ const baseConversation: ConversationSummary = {
     description: "负责系统设计",
     model: { provider: "openai", id: "gpt-5" },
     defaultThinkingLevel: "off",
+    defaultServiceTier: null,
     toolMode: "read_only",
     canManageSessions: true,
   },

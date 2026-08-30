@@ -26,7 +26,7 @@ const messageId = "assistant:96b960be-b6bb-4a19-9cf2-78e77cb69425";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(37);
+    expect(PROTOCOL_VERSION).toBe(38);
   });
 
   it("accepts supported commands", () => {
@@ -78,6 +78,7 @@ describe("parseClientCommand", () => {
         systemPrompt: "Review the implementation.",
         model: { provider: "openai", id: "gpt" },
         defaultThinkingLevel: "high",
+        defaultServiceTier: "priority",
         toolMode: "read_only",
         canManageSessions: false,
       },
@@ -95,6 +96,7 @@ describe("parseClientCommand", () => {
         systemPrompt: "",
         model: null,
         defaultThinkingLevel: "off",
+        defaultServiceTier: null,
         toolMode: "full_access",
         canManageSessions: true,
       },
@@ -327,6 +329,7 @@ describe("parseClientCommand", () => {
         systemPrompt: "",
         model: null,
         defaultThinkingLevel: "off",
+        defaultServiceTier: null,
         toolMode: "read_only",
         canManageSessions: false,
       },
@@ -375,6 +378,7 @@ describe("parseClientCommand", () => {
         systemPrompt: exactPrompt,
         model: null,
         defaultThinkingLevel: "high",
+        defaultServiceTier: null,
         toolMode: "read_only",
         canManageSessions: false,
       },
@@ -395,6 +399,7 @@ describe("parseClientCommand", () => {
         systemPrompt: `${exactPrompt}é`,
         model: null,
         defaultThinkingLevel: "off",
+        defaultServiceTier: null,
         toolMode: "read_only",
         canManageSessions: false,
       },
@@ -412,6 +417,35 @@ describe("parseClientCommand", () => {
         canManageSessions: false,
       },
     })).toThrow("defaultThinkingLevel");
+    expect(() => parseClientCommand({
+      type: "create_role",
+      commandId,
+      sessionId,
+      role: {
+        name: "Missing service tier default",
+        description: "",
+        systemPrompt: "",
+        model: null,
+        defaultThinkingLevel: "off",
+        toolMode: "read_only",
+        canManageSessions: false,
+      },
+    })).toThrow("defaultServiceTier");
+    expect(() => parseClientCommand({
+      type: "create_role",
+      commandId,
+      sessionId,
+      role: {
+        name: "Invalid service tier default",
+        description: "",
+        systemPrompt: "",
+        model: null,
+        defaultThinkingLevel: "off",
+        defaultServiceTier: "turbo",
+        toolMode: "read_only",
+        canManageSessions: false,
+      },
+    })).toThrow("defaultServiceTier");
   });
 
   it("aligns role name and description character limits with durable storage", () => {
@@ -426,6 +460,7 @@ describe("parseClientCommand", () => {
         systemPrompt: "",
         model: null,
         defaultThinkingLevel: "off",
+        defaultServiceTier: null,
         toolMode: "read_only",
         canManageSessions: false,
       },
@@ -443,6 +478,7 @@ describe("parseClientCommand", () => {
         systemPrompt: "",
         model: null,
         defaultThinkingLevel: "off",
+        defaultServiceTier: null,
         toolMode: "read_only",
         canManageSessions: false,
       },
@@ -457,6 +493,7 @@ describe("parseClientCommand", () => {
         systemPrompt: "",
         model: null,
         defaultThinkingLevel: "off",
+        defaultServiceTier: null,
         toolMode: "read_only",
         canManageSessions: false,
       },
@@ -598,6 +635,7 @@ describe("parseClientCommand", () => {
         systemPrompt: "",
         model: { provider: "openai", id: "gpt" },
         defaultThinkingLevel: "high",
+        defaultServiceTier: "priority",
         toolMode: "read_only",
         canManageSessions: true,
         createdAt: "2026-07-18T12:00:00.000Z",
@@ -624,6 +662,7 @@ describe("parseClientCommand", () => {
             description: "",
             model: { provider: "openai", id: "gpt" },
             defaultThinkingLevel: "high",
+            defaultServiceTier: "priority",
             toolMode: "read_only",
             canManageSessions: true,
           },
@@ -733,6 +772,7 @@ describe("parseClientCommand", () => {
         systemPrompt: "",
         model: { provider: "openai", id: "gpt" },
         defaultThinkingLevel: "high",
+        defaultServiceTier: "priority",
         toolMode: "read_only",
         canManageSessions: true,
       },
@@ -1004,6 +1044,7 @@ describe("parseClientCommand", () => {
       systemPrompt,
       model: { provider: "openai", id: "gpt" },
       defaultThinkingLevel: "high" as const,
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: index === 0,
       createdAt: "2026-07-18T12:00:00.000Z",
@@ -1210,6 +1251,7 @@ describe("parseServerEvent", () => {
         systemPrompt: "Review carefully.",
         model: { provider: "test", id: "model" },
         defaultThinkingLevel: "off" as const,
+        defaultServiceTier: null,
         toolMode: "read_only" as const,
         canManageSessions: false,
       },
@@ -1296,6 +1338,7 @@ describe("parseServerEvent", () => {
         id: "m".repeat(1_024),
       },
       defaultThinkingLevel: "off" as const,
+      defaultServiceTier: null,
       toolMode: "read_only" as const,
       canManageSessions: false,
       createdAt: "2026-07-18T12:00:00.000Z",

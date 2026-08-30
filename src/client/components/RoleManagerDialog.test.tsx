@@ -26,6 +26,7 @@ function role(
     systemPrompt: `${name} prompt`,
     model: { provider: "alpha", id: "good" },
     defaultThinkingLevel: "high",
+    defaultServiceTier: null,
     toolMode: "full_access",
     canManageSessions: true,
     createdAt: "2026-07-19T12:00:00.000Z",
@@ -48,6 +49,7 @@ const providers: PublicProvider[] = [
         name: "Good",
         reasoning: true,
         thinkingLevels: ["off", "minimal", "low", "medium", "high"],
+        serviceTiers: ["priority"],
         input: ["text"],
         contextWindow: 100_000,
         available: true,
@@ -172,6 +174,7 @@ describe("RoleManagerDialog", () => {
       systemPrompt: "Default prompt",
       model: { provider: "alpha", id: "good" },
       defaultThinkingLevel: "high",
+      defaultServiceTier: null,
       toolMode: "full_access",
       canManageSessions: true,
     });
@@ -274,6 +277,7 @@ describe("RoleManagerDialog", () => {
       systemPrompt: "Use primary sources.",
       model: { provider: "alpha", id: "good" },
       defaultThinkingLevel: "off",
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: false,
     });
@@ -341,6 +345,63 @@ describe("RoleManagerDialog", () => {
       1,
       "Default prompt",
       expect.objectContaining({ defaultThinkingLevel: "medium" }),
+    );
+  });
+
+  it("edits the role default service tier and resets it when the model changes", () => {
+    const update = vi.fn();
+    renderManager({
+      roles: [role("default", "Default", { defaultServiceTier: "priority" })],
+      onUpdate: update,
+    });
+
+    const serviceTier = screen.getByRole("combobox", {
+      name: "默认服务层级",
+    });
+    expect(within(serviceTier).getAllByRole("option").map((option) => (
+      option.textContent
+    ))).toEqual(["供应商默认", "快速"]);
+
+    fireEvent.change(screen.getByRole("combobox", { name: "角色模型" }), {
+      target: { value: JSON.stringify(["alpha", "plain"]) },
+    });
+    expect(serviceTier).toHaveValue("");
+    fireEvent.click(screen.getByRole("button", { name: "保存角色" }));
+    expect(update).toHaveBeenCalledWith(
+      "default",
+      1,
+      "Default prompt",
+      expect.objectContaining({ defaultServiceTier: null }),
+    );
+  });
+
+  it("preserves and labels an unavailable role service tier", () => {
+    const update = vi.fn();
+    renderManager({
+      roles: [role("default", "Default", {
+        defaultServiceTier: "priority",
+        available: false,
+      })],
+      providers: [],
+      onUpdate: update,
+    });
+
+    const serviceTier = screen.getByRole("combobox", {
+      name: "默认服务层级",
+    });
+    expect(serviceTier).toHaveValue("priority");
+    expect(within(serviceTier).getByRole("option", {
+      name: "当前不支持 · 快速",
+    })).toBeDisabled();
+    fireEvent.change(screen.getByRole("textbox", { name: "角色名称" }), {
+      target: { value: "Edited" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存角色" }));
+    expect(update).toHaveBeenCalledWith(
+      "default",
+      1,
+      "Default prompt",
+      expect.objectContaining({ defaultServiceTier: "priority" }),
     );
   });
 

@@ -4,6 +4,7 @@ import {
   readFile,
   readdir,
   rm,
+  stat,
   symlink,
   unlink,
   writeFile,
@@ -45,6 +46,7 @@ function draft(
     systemPrompt: "",
     model: initialModel,
     defaultThinkingLevel: "off",
+    defaultServiceTier: null,
     toolMode: "read_only",
     canManageSessions: false,
     ...overrides,
@@ -62,6 +64,7 @@ function persistedDefault(
     systemPrompt: "",
     model: initialModel,
     defaultThinkingLevel: "off",
+    defaultServiceTier: null,
     toolMode: "read_only",
     canManageSessions: false,
     createdAt: "2026-07-19T10:00:00.000Z",
@@ -79,11 +82,22 @@ function persistedRole(role: RoleTemplateV1) {
     systemPromptFile: `role-prompts/${role.id}.${role.revision}.md`,
     model: role.model,
     defaultThinkingLevel: role.defaultThinkingLevel,
+    defaultServiceTier: role.defaultServiceTier,
     toolMode: role.toolMode,
     canManageSessions: role.canManageSessions,
     createdAt: role.createdAt,
     updatedAt: role.updatedAt,
   };
+}
+
+function withoutServiceTier(role: RoleTemplateV1) {
+  const { defaultServiceTier: _defaultServiceTier, ...legacy } = role;
+  return legacy;
+}
+
+function withoutPersistedServiceTier(role: RoleTemplateV1) {
+  const { defaultServiceTier: _defaultServiceTier, ...legacy } = persistedRole(role);
+  return legacy;
 }
 
 function promptPath(rolesPath: string, role: RoleTemplateV1): string {
@@ -144,11 +158,11 @@ describe("RoleStore", () => {
     await mkdir(dirname(rolesPath), { recursive: true });
     await writeFile(rolesPath, `${JSON.stringify({
       version: 1,
-      roles: [persistedDefault({
+      roles: [withoutServiceTier(persistedDefault({
         revision: 3,
         name: "Default",
         description: "",
-      })],
+      }))],
     }, null, 2)}\n`, "utf8");
 
     const store = await RoleStore.open(rolesPath, initialModel);
@@ -179,7 +193,7 @@ describe("RoleStore", () => {
     });
     await writeFile(editedRolesPath, `${JSON.stringify({
       version: 1,
-      roles: [editedDefault],
+      roles: [withoutServiceTier(editedDefault)],
     }, null, 2)}\n`, "utf8");
 
     const editedStore = await RoleStore.open(editedRolesPath, initialModel);
@@ -197,7 +211,7 @@ describe("RoleStore", () => {
     await mkdir(dirname(rolesPath), { recursive: true });
     await writeFile(rolesPath, `${JSON.stringify({
       version: 4,
-      roles: [legacyRole],
+      roles: [withoutServiceTier(legacyRole)],
     }, null, 2)}\n`, "utf8");
 
     const store = await RoleStore.open(rolesPath, initialModel);
@@ -213,6 +227,37 @@ describe("RoleStore", () => {
 
     const reopened = await RoleStore.open(rolesPath, initialModel);
     expect(reopened.getRole("default")).toEqual(legacyRole);
+  });
+
+  it("migrates a v5 manifest default service tier without rewriting its prompt", async () => {
+    const rolesPath = await createRolesPath("piweb-role-store-v5-tier-");
+    const role = persistedDefault({ systemPrompt: "external prompt" });
+    await mkdir(join(dirname(rolesPath), "role-prompts"), { recursive: true });
+    const rolePromptPath = promptPath(rolesPath, role);
+    await writeFile(rolePromptPath, role.systemPrompt, "utf8");
+    const promptIdentity = await stat(rolePromptPath, { bigint: true });
+    await writeFile(rolesPath, `${JSON.stringify({
+      version: 5,
+      roles: [withoutPersistedServiceTier(role)],
+    }, null, 2)}\n`, "utf8");
+
+    const store = await RoleStore.open(rolesPath, initialModel);
+
+    expect(store.getRole("default")?.defaultServiceTier).toBeNull();
+    expect(JSON.parse(await readFile(rolesPath, "utf8"))).toEqual({
+      version: ROLE_STORE_VERSION,
+      roles: [persistedRole(role)],
+    });
+    await expect(readFile(rolePromptPath, "utf8"))
+      .resolves.toBe("external prompt");
+    const migratedPromptIdentity = await stat(rolePromptPath, { bigint: true });
+    expect({
+      dev: migratedPromptIdentity.dev,
+      ino: migratedPromptIdentity.ino,
+    }).toEqual({
+      dev: promptIdentity.dev,
+      ino: promptIdentity.ino,
+    });
   });
 
   it("reads an externally edited prompt on every public read", async () => {
@@ -248,7 +293,7 @@ describe("RoleStore", () => {
         version,
         roles: version === ROLE_STORE_VERSION
           ? [persistedRole(lower), persistedRole(upper)]
-          : [lower, upper],
+          : [withoutServiceTier(lower), withoutServiceTier(upper)],
       }, null, 2)}\n`;
       await writeFile(rolesPath, raw, "utf8");
 
@@ -321,6 +366,7 @@ describe("RoleStore", () => {
       canManageSessions: _omittedCapability,
       toolMode: _omittedToolMode,
       defaultThinkingLevel: _omittedThinkingLevel,
+      defaultServiceTier: _omittedServiceTier,
       ...legacyFields
     } = legacyRole;
     await writeFile(rolesPath, `${JSON.stringify({
@@ -333,10 +379,12 @@ describe("RoleStore", () => {
     expect(store.getRole("default")?.canManageSessions).toBe(false);
     expect(store.getRole("default")?.toolMode).toBe("read_only");
     expect(store.getRole("default")?.defaultThinkingLevel).toBe("off");
+    expect(store.getRole("default")?.defaultServiceTier).toBeNull();
     expect(JSON.parse(await readFile(rolesPath, "utf8"))).toMatchObject({
       version: ROLE_STORE_VERSION,
       roles: [{
         defaultThinkingLevel: "off",
+        defaultServiceTier: null,
         toolMode: "read_only",
       }],
     });
@@ -359,6 +407,7 @@ describe("RoleStore", () => {
       systemPrompt: "Be concise.",
       model: { provider: "other-provider", id: "other-model" },
       defaultThinkingLevel: "high",
+      defaultServiceTier: "priority",
       toolMode: "read_only",
       canManageSessions: false,
     });
@@ -371,6 +420,7 @@ describe("RoleStore", () => {
       systemPrompt: "Be concise.",
       model: { provider: "other-provider", id: "other-model" },
       defaultThinkingLevel: "high",
+      defaultServiceTier: "priority",
       canManageSessions: false,
       updatedAt: "2026-07-19T11:00:00.000Z",
     });
@@ -640,7 +690,10 @@ describe("RoleStore", () => {
         `piweb-role-store-v5-prompt-${kind}-`,
       );
       const role = persistedDefault();
-      const manifest = persistedRole(role) as Record<string, unknown>;
+      const manifest = withoutPersistedServiceTier(role) as Record<
+        string,
+        unknown
+      >;
       await mkdir(dirname(rolesPath), { recursive: true });
       const promptDirectory = join(dirname(rolesPath), "role-prompts");
       await mkdir(promptDirectory, { recursive: true });
@@ -648,7 +701,7 @@ describe("RoleStore", () => {
         manifest.systemPromptFile = "role-prompts/../outside.md";
       }
       const raw = `${JSON.stringify({
-        version: ROLE_STORE_VERSION,
+        version: 5,
         roles: [manifest],
       }, null, 2)}\n`;
       await writeFile(rolesPath, raw, "utf8");

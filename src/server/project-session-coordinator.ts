@@ -1005,6 +1005,7 @@ export class ProjectSessionCoordinator {
                 model: { ...profile.role.model },
                 defaultThinkingLevel:
                   profile.role.defaultThinkingLevel,
+                defaultServiceTier: profile.role.defaultServiceTier,
                 toolMode: profile.role.toolMode,
                 canManageSessions: profile.role.canManageSessions,
               },
@@ -1155,15 +1156,10 @@ export class ProjectSessionCoordinator {
     const context = this.requireContext(handle);
     return this.runLifecycle(context, async () => {
       const actor = this.requireActor(context, conversationId);
-      const template = this.roles.listRoles(actor.modelRegistry)
-        .find(({ id }) => id === roleId);
-      if (!template) throw new Error(`Role not found: ${roleId}`);
-      if (!template.available) {
-        throw new Error(
-          template.unavailableReason ?? `Role is unavailable: ${roleId}`,
-        );
-      }
-      const role = this.roles.getConversationRole(roleId);
+      const role = this.resolveAvailableConversationRole(
+        roleId,
+        actor.modelRegistry,
+      );
       const profile = {
         ...actor.profile,
         role,
@@ -1186,12 +1182,16 @@ export class ProjectSessionCoordinator {
     return this.runLifecycle(context, async () => {
       this.throwIfAborted(input.signal);
       const conversationId = randomUUID();
+      const role = this.resolveAvailableConversationRole(
+        input.roleId,
+        this.modelRegistryForProject(handle),
+      );
       const detachExtensionUI = input.extensionUI
         ? this.extensionUIRouter(context, conversationId)
             .attach(input.extensionUI)
         : undefined;
       const profile: ConversationMeta = {
-        role: this.roles.getConversationRole(input.roleId),
+        role,
         lifecycle: { kind: "normal" },
         createdBy: { kind: "user" },
         orchestration: {
@@ -1320,7 +1320,10 @@ export class ProjectSessionCoordinator {
 
       const targetTitle = normalizedTitle(input.title, input.task);
       const requestedRole = existingCard?.requestedRole
-        ?? this.roles.getConversationRole(input.roleId);
+        ?? this.resolveAvailableConversationRole(
+          input.roleId,
+          source.modelRegistry,
+        );
       if (requestedRole.id !== input.roleId) {
         throw new Error(
           "start_session idempotency key conflicts with an earlier request",
@@ -3503,6 +3506,7 @@ export class ProjectSessionCoordinator {
         systemPrompt: "",
         model: { ...model },
         defaultThinkingLevel: "off",
+        defaultServiceTier: null,
         toolMode: "read_only",
         canManageSessions: false,
       },
@@ -3550,6 +3554,7 @@ export class ProjectSessionCoordinator {
           systemPrompt: role.systemPrompt,
           model: role.model,
           defaultThinkingLevel: role.defaultThinkingLevel,
+          defaultServiceTier: role.defaultServiceTier,
           toolMode: role.toolMode,
           canManageSessions: role.canManageSessions,
           available: role.available,
@@ -3631,6 +3636,7 @@ export class ProjectSessionCoordinator {
               systemPrompt: finalPrompt,
               model: role.model === null ? null : { ...role.model },
               defaultThinkingLevel: role.defaultThinkingLevel,
+              defaultServiceTier: role.defaultServiceTier,
               toolMode: role.toolMode,
               canManageSessions: role.canManageSessions,
             },
@@ -6217,6 +6223,21 @@ export class ProjectSessionCoordinator {
     const actor = context.actors.get(conversationId);
     if (!actor) throw new Error(`Conversation is not active: ${conversationId}`);
     return actor;
+  }
+
+  private resolveAvailableConversationRole(
+    roleId: string,
+    modelRegistry: RoleCatalogModelRegistry,
+  ): ConversationRoleSnapshot {
+    const template = this.roles.listRoles(modelRegistry)
+      .find(({ id }) => id === roleId);
+    if (!template) throw new Error(`Role not found: ${roleId}`);
+    if (!template.available) {
+      throw new Error(
+        template.unavailableReason ?? `Role is unavailable: ${roleId}`,
+      );
+    }
+    return this.roles.getConversationRole(roleId);
   }
 
   private requireContext(handle: ProjectSessionHandle): ProjectContext {

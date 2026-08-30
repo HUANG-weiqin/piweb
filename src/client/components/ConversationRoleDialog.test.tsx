@@ -18,6 +18,7 @@ const role: ConversationRoleSnapshot = {
     id: "gpt-5",
   },
   defaultThinkingLevel: "off",
+  defaultServiceTier: null,
   toolMode: "read_only",
   canManageSessions: true,
 };

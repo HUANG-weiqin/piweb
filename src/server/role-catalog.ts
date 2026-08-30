@@ -15,6 +15,7 @@ import {
   supportedThinkingLevels,
   type ThinkingCapableModel,
 } from "./model-thinking.js";
+import { modelServiceTiers } from "./service-tier.js";
 
 export interface RoleCatalogModelSource {
   readonly modelRegistry: RoleCatalogModelRegistry;
@@ -63,6 +64,12 @@ function unavailableReason(
   if (!supportsThinkingLevel(model, role.defaultThinkingLevel)) {
     return `模型不支持默认思考强度：${role.defaultThinkingLevel}`;
   }
+  if (
+    role.defaultServiceTier !== null
+    && !modelServiceTiers(model)?.includes(role.defaultServiceTier)
+  ) {
+    return `模型不支持默认服务层级：${role.defaultServiceTier}`;
+  }
   return undefined;
 }
 
@@ -77,6 +84,7 @@ function cloneConversationRole(
     systemPrompt: role.systemPrompt,
     model: { ...role.model },
     defaultThinkingLevel: role.defaultThinkingLevel,
+    defaultServiceTier: role.defaultServiceTier,
     toolMode: role.toolMode,
     canManageSessions: role.canManageSessions,
   };
@@ -165,6 +173,7 @@ export class RoleCatalog {
     if (
       !modelsAreEqual(current.model, input.model)
       || current.defaultThinkingLevel !== input.defaultThinkingLevel
+      || current.defaultServiceTier !== input.defaultServiceTier
     ) {
       this.assertDraftAvailable(input, modelRegistry);
     }
@@ -221,7 +230,12 @@ export class RoleCatalog {
     modelRegistry: RoleCatalogModelRegistry,
   ): void {
     const model = input.model;
-    if (model === null) return;
+    if (model === null) {
+      if (input.defaultServiceTier !== null) {
+        throw new Error("Role without a model cannot select a service tier");
+      }
+      return;
+    }
     const selected = modelRegistry.getAvailable()
       .find((candidate) => modelKey(candidate) === modelKey(model));
     if (selected === undefined) {
@@ -234,6 +248,16 @@ export class RoleCatalog {
     if (!supportsThinkingLevel(selected, input.defaultThinkingLevel)) {
       throw new Error(
         `Role model does not support thinking level ${input.defaultThinkingLevel}: ${
+          model.provider
+        }/${model.id}`,
+      );
+    }
+    if (
+      input.defaultServiceTier !== null
+      && !modelServiceTiers(selected)?.includes(input.defaultServiceTier)
+    ) {
+      throw new Error(
+        `Role model does not support service tier ${input.defaultServiceTier}: ${
           model.provider
         }/${model.id}`,
       );

@@ -21,6 +21,8 @@ export const MAX_LOOP_LIST_ITEM_TEXT_CHARACTERS = 512;
 export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
+// v38: role templates and frozen conversation role snapshots carry a required
+// nullable default service tier, applied when no conversation override exists.
 // v37: focused conversations may select a model-advertised request service
 // tier, persisted by the host and validated again at dispatch.
 // v36: project conversation summaries optionally project their collaboration
@@ -31,7 +33,7 @@ export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 // conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
-export const PROTOCOL_VERSION = 37;
+export const PROTOCOL_VERSION = 38;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
@@ -145,6 +147,7 @@ const roleInputSchema = z.object({
   ),
   model: roleModelSchema.nullable(),
   defaultThinkingLevel: thinkingLevelSchema,
+  defaultServiceTier: serviceTierSchema.nullable(),
   toolMode: toolModeSchema,
   canManageSessions: z.boolean(),
 });
@@ -552,6 +555,7 @@ export interface RoleTemplate {
   systemPrompt: string;
   model: RoleModelSelection | null;
   defaultThinkingLevel: ThinkingLevel;
+  defaultServiceTier: ServiceTier | null;
   toolMode: ToolMode;
   canManageSessions: boolean;
   createdAt: string;
@@ -568,6 +572,7 @@ export interface ConversationRoleSnapshot {
   systemPrompt: string;
   model: RoleModelSelection;
   defaultThinkingLevel: ThinkingLevel;
+  defaultServiceTier: ServiceTier | null;
   toolMode: ToolMode;
   canManageSessions: boolean;
 }
@@ -1044,6 +1049,7 @@ const roleTemplateSchema: z.ZodType<RoleTemplate> = z.object({
   ),
   model: roleModelSchema.nullable(),
   defaultThinkingLevel: thinkingLevelSchema,
+  defaultServiceTier: serviceTierSchema.nullable(),
   toolMode: toolModeSchema,
   canManageSessions: z.boolean(),
   createdAt: z.string().datetime(),
@@ -1070,6 +1076,7 @@ const conversationRoleSnapshotSchema: z.ZodType<ConversationRoleSnapshot> = z.ob
   ),
   model: roleModelSchema,
   defaultThinkingLevel: thinkingLevelSchema,
+  defaultServiceTier: serviceTierSchema.nullable(),
   toolMode: toolModeSchema,
   canManageSessions: z.boolean(),
 });
@@ -1088,6 +1095,7 @@ const conversationRoleSummarySchema: z.ZodType<
   ),
   model: roleModelSchema,
   defaultThinkingLevel: thinkingLevelSchema,
+  defaultServiceTier: serviceTierSchema.nullable(),
   toolMode: toolModeSchema,
   canManageSessions: z.boolean(),
 });

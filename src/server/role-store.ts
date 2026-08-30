@@ -20,10 +20,11 @@ import { TextDecoder } from "node:util";
 import { basename, dirname, join } from "node:path";
 import {
   MAX_MODEL_REFERENCE_BYTES,
+  type ServiceTier,
   type ThinkingLevel,
 } from "../shared/protocol.js";
 
-export const ROLE_STORE_VERSION = 5;
+export const ROLE_STORE_VERSION = 6;
 export const MAX_ROLE_COUNT = 64;
 export const MAX_ROLE_NAME_CHARACTERS = 80;
 export const MAX_ROLE_DESCRIPTION_CHARACTERS = 1_000;
@@ -57,6 +58,7 @@ export interface RoleDraft {
   systemPrompt: string;
   model: RoleModelReference | null;
   defaultThinkingLevel: ThinkingLevel;
+  defaultServiceTier: ServiceTier | null;
   toolMode: "read_only" | "full_access";
   canManageSessions: boolean;
 }
@@ -83,14 +85,20 @@ interface ParsedCurrentRoleStoreDocument {
   document: RoleStoreDocument;
 }
 
-interface ParsedLegacyRoleStoreDocument {
-  migrated: true;
+interface ParsedInlineLegacyRoleStoreDocument {
+  migrated: "inline";
   legacyRoles: RoleTemplateV1[];
+}
+
+interface ParsedMetadataLegacyRoleStoreDocument {
+  migrated: "metadata";
+  document: RoleStoreDocument;
 }
 
 type ParsedRoleStoreDocument =
   | ParsedCurrentRoleStoreDocument
-  | ParsedLegacyRoleStoreDocument;
+  | ParsedInlineLegacyRoleStoreDocument
+  | ParsedMetadataLegacyRoleStoreDocument;
 
 type RoleStoreListener = () => void;
 
@@ -231,11 +239,28 @@ function assertThinkingLevel(
   }
 }
 
+function assertServiceTier(
+  value: unknown,
+  field: string,
+): asserts value is ServiceTier | null {
+  if (
+    value !== null
+    && value !== "auto"
+    && value !== "default"
+    && value !== "flex"
+    && value !== "scale"
+    && value !== "priority"
+  ) {
+    throw new Error(`${field} must be null or a supported service tier`);
+  }
+}
+
 function parseRoleMetadata(
   value: Record<string, unknown>,
   label: string,
   legacyBehavior: boolean,
-  legacyCanManageSessions = legacyBehavior,
+  legacyCanManageSessions: boolean,
+  legacyServiceTier: boolean,
 ): RoleMetadata {
   assertBoundedString(
     value.name,
@@ -271,11 +296,17 @@ function parseRoleMetadata(
     defaultThinkingLevel,
     `${label}.defaultThinkingLevel`,
   );
+  const defaultServiceTier = value.defaultServiceTier === undefined
+    && legacyServiceTier
+    ? null
+    : value.defaultServiceTier;
+  assertServiceTier(defaultServiceTier, `${label}.defaultServiceTier`);
   return {
     name: value.name,
     description: value.description,
     model: parseModelReference(value.model, `${label}.model`),
     defaultThinkingLevel,
+    defaultServiceTier,
     toolMode,
     canManageSessions,
   };
@@ -290,12 +321,13 @@ function parseRoleDraft(value: unknown, label: string): RoleDraft {
       "systemPrompt",
       "model",
       "defaultThinkingLevel",
+      "defaultServiceTier",
       "toolMode",
       "canManageSessions",
     ],
     label,
   );
-  const metadata = parseRoleMetadata(value, label, false);
+  const metadata = parseRoleMetadata(value, label, false, false, false);
   assertBoundedUtf8(
     value.systemPrompt,
     `${label}.systemPrompt`,
@@ -350,7 +382,7 @@ function parseLegacyRoleTemplate(
     label,
   );
   const identity = parseRoleIdentity(value, label);
-  const metadata = parseRoleMetadata(value, label, legacyBehavior, true);
+  const metadata = parseRoleMetadata(value, label, legacyBehavior, true, true);
   assertBoundedUtf8(
     value.systemPrompt,
     `${label}.systemPrompt`,
@@ -382,6 +414,7 @@ function assertSystemPromptFile(
 function parsePersistedRoleTemplate(
   value: unknown,
   index: number,
+  legacyServiceTier = false,
 ): PersistedRole {
   const label = `roles[${index}]`;
   assertExactObject(
@@ -394,6 +427,7 @@ function parsePersistedRoleTemplate(
       "systemPromptFile",
       "model",
       "defaultThinkingLevel",
+      ...(legacyServiceTier ? [] : ["defaultServiceTier"]),
       "toolMode",
       "canManageSessions",
       "createdAt",
@@ -410,7 +444,7 @@ function parsePersistedRoleTemplate(
   );
   return {
     ...identity,
-    ...parseRoleMetadata(value, label, false),
+    ...parseRoleMetadata(value, label, false, false, legacyServiceTier),
     systemPromptFile: value.systemPromptFile,
   };
 }
@@ -461,9 +495,9 @@ function parseRoleStoreDocument(
     const version = value.version;
     if (
       typeof version !== "number"
-      || ![1, 2, 3, 4, ROLE_STORE_VERSION].includes(version)
+      || ![1, 2, 3, 4, 5, ROLE_STORE_VERSION].includes(version)
     ) {
-      throw new Error(`version must be 1, 2, 3, 4 or ${ROLE_STORE_VERSION}`);
+      throw new Error(`version must be 1, 2, 3, 4, 5 or ${ROLE_STORE_VERSION}`);
     }
     if (!Array.isArray(value.roles)) {
       throw new Error("roles must be an array");
@@ -485,11 +519,24 @@ function parseRoleStoreDocument(
       };
     }
 
+    if (version === 5) {
+      const roles = value.roles.map((role, index) =>
+        parsePersistedRoleTemplate(role, index, true));
+      assertUniqueRoles(roles);
+      return {
+        migrated: "metadata",
+        document: {
+          version: ROLE_STORE_VERSION,
+          roles,
+        },
+      };
+    }
+
     const roles = value.roles.map((role, index) =>
       parseLegacyRoleTemplate(role, index, version !== 4));
     assertUniqueRoles(roles);
     return {
-      migrated: true,
+      migrated: "inline",
       legacyRoles: version === 1 ? migrateV1Roles(roles) : roles.map(cloneRole),
     };
   } catch (error) {
@@ -563,6 +610,7 @@ function toPersistedRole(role: RoleTemplateV1): PersistedRole {
     systemPromptFile: expectedSystemPromptFile(role.id, role.revision),
     model: cloneModel(role.model),
     defaultThinkingLevel: role.defaultThinkingLevel,
+    defaultServiceTier: role.defaultServiceTier,
     toolMode: role.toolMode,
     canManageSessions: role.canManageSessions,
     createdAt: role.createdAt,
@@ -894,7 +942,7 @@ export class RoleStore {
 
     if (existingRaw !== undefined) {
       const parsed = parseRoleStoreDocument(existingRaw, rolesPath);
-      if (parsed.migrated) {
+      if (parsed.migrated === "inline") {
         document = documentFromLegacyRoles(parsed.legacyRoles);
         await writeRolePromptsForRoles(rolesPath, parsed.legacyRoles);
         await writeRoleStoreAtomically(rolesPath, document);
@@ -908,6 +956,9 @@ export class RoleStore {
             cause: error,
           });
         }
+        if (parsed.migrated === "metadata") {
+          await writeRoleStoreAtomically(rolesPath, document);
+        }
       }
     } else {
       const model = parseModelReference(initialModel, "initialModel");
@@ -920,6 +971,7 @@ export class RoleStore {
         systemPrompt: "",
         model,
         defaultThinkingLevel: "off",
+        defaultServiceTier: null,
         toolMode: "read_only",
         canManageSessions: false,
         createdAt: timestamp,
@@ -1138,6 +1190,7 @@ function draftsAreEqual(
     && role.systemPrompt === draft.systemPrompt
     && modelsAreEqual(role.model, draft.model)
     && role.defaultThinkingLevel === draft.defaultThinkingLevel
+    && role.defaultServiceTier === draft.defaultServiceTier
     && role.toolMode === draft.toolMode
     && role.canManageSessions === draft.canManageSessions
   );
@@ -1163,6 +1216,7 @@ function readHydratedRole(
     systemPrompt: readRolePrompt(rolesPath, role),
     model: cloneModel(role.model),
     defaultThinkingLevel: role.defaultThinkingLevel,
+    defaultServiceTier: role.defaultServiceTier,
     toolMode: role.toolMode,
     canManageSessions: role.canManageSessions,
     createdAt: role.createdAt,

@@ -662,6 +662,7 @@ async function createFixture(
       systemPrompt: defaultRole.systemPrompt,
       model: defaultRole.model,
       defaultThinkingLevel: defaultRole.defaultThinkingLevel,
+      defaultServiceTier: defaultRole.defaultServiceTier,
       toolMode: "full_access",
       canManageSessions: true,
     },
@@ -1533,10 +1534,16 @@ describe("ProjectSessionCoordinator", () => {
   it("prefers a live actor registry and falls back to the project catalog", async () => {
     const fixture = await createFixture();
     const catalogRegistry = {
-      getAvailable: () => [{ provider: "project", id: "catalog" }],
+      getAvailable: () => [
+        { provider: "test", id: "model-a" },
+        { provider: "project", id: "catalog" },
+      ],
     } as unknown as ModelRegistry;
     const actorRegistry = {
-      getAvailable: () => [{ provider: "project", id: "actor" }],
+      getAvailable: () => [
+        { provider: "test", id: "model-a" },
+        { provider: "project", id: "actor" },
+      ],
     } as unknown as ModelRegistry;
     fixture.runtime.projectModelRegistry = catalogRegistry;
     fixture.runtime.sessionModelRegistry = actorRegistry;
@@ -1622,6 +1629,76 @@ describe("ProjectSessionCoordinator", () => {
   });
 
 
+
+  it("distinguishes a removed tier entry from a retained explicit null after rewind", async () => {
+    const fixture = await createFixture();
+    Object.assign(fixture.runtime.availableModels[0]!, {
+      api: "openai-codex-responses",
+    });
+    const defaultRole = getRoleTemplate(fixture.roles, "default");
+    await fixture.roles.updateRole(
+      defaultRole.id,
+      defaultRole.revision,
+      defaultRole.systemPrompt,
+      {
+        name: defaultRole.name,
+        description: defaultRole.description,
+        systemPrompt: defaultRole.systemPrompt,
+        model: defaultRole.model,
+        defaultThinkingLevel: defaultRole.defaultThinkingLevel,
+        defaultServiceTier: "priority",
+        toolMode: defaultRole.toolMode,
+        canManageSessions: defaultRole.canManageSessions,
+      },
+    );
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    expect(actor.getServiceTier()).toBe("priority");
+
+    const removedNullAnchor = actor.sessionManager.appendMessage({
+      role: "user",
+      content: "remove the following null override",
+      timestamp: 1,
+    });
+    actor.setServiceTier(null);
+    actor.sessionManager.appendMessage({
+      role: "user",
+      content: "later",
+      timestamp: 2,
+    });
+    await fixture.coordinator.truncateConversation(
+      fixture.handle,
+      actor.conversationId,
+      removedNullAnchor,
+    );
+    expect(actor.getServiceTier()).toBe("priority");
+    expect(aggregateReservedConversationEntries(
+      actor.sessionManager.getEntries(),
+    ).serviceTier).toBeUndefined();
+
+    actor.setServiceTier(null);
+    const retainedNullAnchor = actor.sessionManager.appendMessage({
+      role: "user",
+      content: "retain the preceding null override",
+      timestamp: 3,
+    });
+    actor.sessionManager.appendMessage({
+      role: "user",
+      content: "later again",
+      timestamp: 4,
+    });
+    await fixture.coordinator.truncateConversation(
+      fixture.handle,
+      actor.conversationId,
+      retainedNullAnchor,
+    );
+    expect(actor.getServiceTier()).toBeNull();
+    expect(aggregateReservedConversationEntries(
+      actor.sessionManager.getEntries(),
+    ).serviceTier?.tier).toBeNull();
+  });
 
   it("serializes a service tier update after an in-flight rewind", async () => {
     const fixture = await createFixture();
@@ -1808,6 +1885,7 @@ describe("ProjectSessionCoordinator", () => {
       systemPrompt: "Review the first revision.",
       model: { provider: "test", id: "model-a" },
       defaultThinkingLevel: "off",
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: false,
     });
@@ -1826,6 +1904,7 @@ describe("ProjectSessionCoordinator", () => {
         systemPrompt: "Review the second revision.",
         model: { provider: "test", id: "model-b" },
         defaultThinkingLevel: "high",
+        defaultServiceTier: null,
         toolMode: "full_access",
         canManageSessions: true,
       },
@@ -1904,6 +1983,32 @@ describe("ProjectSessionCoordinator", () => {
     expect(first.profile.role).not.toEqual(second.profile.role);
   });
 
+  it("rejects user creation before opening an unavailable default-tier role", async () => {
+    const fixture = await createFixture();
+    Object.assign(fixture.runtime.availableModels[0]!, {
+      api: "openai-codex-responses",
+    });
+    const role = await fixture.roles.createRole({
+      name: "Priority user role",
+      description: "Becomes unavailable after route drift",
+      systemPrompt: "",
+      model: { provider: "test", id: "model-a" },
+      defaultThinkingLevel: "off",
+      defaultServiceTier: "priority",
+      toolMode: "read_only",
+      canManageSessions: false,
+    });
+    Object.assign(fixture.runtime.availableModels[0]!, {
+      api: "openai-responses",
+    });
+    await expect(fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: role.id },
+    )).rejects.toThrow("模型不支持默认服务层级：priority");
+    await expect(fixture.coordinator.listSessions(fixture.handle))
+      .resolves.toEqual([]);
+  });
+
   it("switches an idle conversation to a durable role snapshot and rebuilds its runtime", async () => {
     const fixture = await createFixture();
     const role = await fixture.roles.createRole({
@@ -1912,6 +2017,7 @@ describe("ProjectSessionCoordinator", () => {
       systemPrompt: "Implement the requested change.",
       model: { provider: "test", id: "model-b" },
       defaultThinkingLevel: "high",
+      defaultServiceTier: null,
       toolMode: "full_access",
       canManageSessions: true,
     });
@@ -1919,6 +2025,10 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: "default", title: "Switch me" },
     );
+    Object.assign(actor.session.model!, {
+      api: "openai-codex-responses",
+    });
+    actor.setServiceTier("priority");
     const previousRuntime = fixture.runtime.control(actor.conversationId);
 
     const switched = await fixture.coordinator.switchConversationRole(
@@ -1929,6 +2039,7 @@ describe("ProjectSessionCoordinator", () => {
 
     expect(switched).toBe(actor);
     expect(previousRuntime.disposeCalls).toBe(1);
+    expect(actor.getServiceTier()).toBeNull();
     expect(actor.profile.role).toMatchObject({
       id: role.id,
       revision: role.revision,
@@ -1949,6 +2060,11 @@ describe("ProjectSessionCoordinator", () => {
       ).conversationMeta?.role.id,
     ).toBe(role.id);
     expect(
+      aggregateReservedConversationEntries(
+        actor.sessionManager.getEntries(),
+      ).serviceTier?.tier,
+    ).toBeNull();
+    expect(
       (await fixture.coordinator.listSessions(fixture.handle))
         .find(({ id }) => id === actor.conversationId)?.role?.id,
     ).toBe(role.id);
@@ -1962,6 +2078,7 @@ describe("ProjectSessionCoordinator", () => {
       systemPrompt: "",
       model: { provider: "test", id: "model-b" },
       defaultThinkingLevel: "off",
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: false,
     });
@@ -2001,6 +2118,7 @@ describe("ProjectSessionCoordinator", () => {
       systemPrompt: "This runtime will fail.",
       model: { provider: "test", id: "model-b" },
       defaultThinkingLevel: "off",
+      defaultServiceTier: null,
       toolMode: "full_access",
       canManageSessions: false,
     });
@@ -2008,6 +2126,10 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: "default" },
     );
+    Object.assign(actor.session.model!, {
+      api: "openai-codex-responses",
+    });
+    actor.setServiceTier("priority");
     fixture.runtime.beforeCreateSession = async (_conversationId, options) => {
       if (options.model?.id === "model-b") {
         throw new Error("replacement activation failed");
@@ -2022,11 +2144,12 @@ describe("ProjectSessionCoordinator", () => {
 
     expect(actor.profile.role.id).toBe("default");
     expect(actor.session.model?.id).toBe("model-a");
-    expect(
-      aggregateReservedConversationEntries(
-        actor.sessionManager.getEntries(),
-      ).conversationMeta?.role.id,
-    ).toBe("default");
+    expect(actor.getServiceTier()).toBe("priority");
+    const restored = aggregateReservedConversationEntries(
+      actor.sessionManager.getEntries(),
+    );
+    expect(restored.conversationMeta?.role.id).toBe("default");
+    expect(restored.serviceTier?.tier).toBe("priority");
   });
 
   it("removes the durable conversation when fixed-model session creation fails", async () => {
@@ -2070,6 +2193,7 @@ describe("ProjectSessionCoordinator", () => {
       systemPrompt: "Use the project provider.",
       model: projectModel,
       defaultThinkingLevel: "off",
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: false,
     }, runtime.sessionModelRegistry);
@@ -2106,6 +2230,7 @@ describe("ProjectSessionCoordinator", () => {
       systemPrompt: "The original prompt.",
       model: { provider: "test", id: "model-b" },
       defaultThinkingLevel: "high",
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: false,
     });
@@ -2115,6 +2240,7 @@ describe("ProjectSessionCoordinator", () => {
       systemPrompt: "Improve roles only when the user asks.",
       model: { provider: "test", id: "model-a" },
       defaultThinkingLevel: "off",
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: false,
     });
@@ -2160,6 +2286,7 @@ describe("ProjectSessionCoordinator", () => {
       systemPrompt: before.systemPrompt,
       model: before.model,
       defaultThinkingLevel: before.defaultThinkingLevel,
+      defaultServiceTier: before.defaultServiceTier,
       toolMode: before.toolMode,
       canManageSessions: before.canManageSessions,
       available: before.available,
@@ -2216,6 +2343,7 @@ describe("ProjectSessionCoordinator", () => {
         systemPrompt: replacement,
         model: before.model,
         defaultThinkingLevel: before.defaultThinkingLevel,
+        defaultServiceTier: before.defaultServiceTier,
         toolMode: before.toolMode,
         canManageSessions: before.canManageSessions,
         createdAt: before.createdAt,
@@ -2320,6 +2448,7 @@ describe("ProjectSessionCoordinator", () => {
       systemPrompt: "Keep this prompt.",
       model: { provider: "test", id: "model-a" },
       defaultThinkingLevel: "off",
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: false,
     });
@@ -2358,6 +2487,7 @@ describe("ProjectSessionCoordinator", () => {
       systemPrompt: "Keep this prompt.",
       model: { provider: "test", id: "model-a" },
       defaultThinkingLevel: "off",
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: false,
     });
@@ -2423,6 +2553,7 @@ describe("ProjectSessionCoordinator", () => {
       systemPrompt: "The captured base prompt.",
       model: { provider: "test", id: "model-a" },
       defaultThinkingLevel: "off",
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: false,
     });
@@ -2447,6 +2578,7 @@ describe("ProjectSessionCoordinator", () => {
               systemPrompt: "Concurrent revision",
               model: current.model,
               defaultThinkingLevel: current.defaultThinkingLevel,
+              defaultServiceTier: current.defaultServiceTier,
               toolMode: current.toolMode,
               canManageSessions: current.canManageSessions,
             },
@@ -2500,6 +2632,7 @@ describe("ProjectSessionCoordinator", () => {
       systemPrompt: "The captured base prompt.",
       model: { provider: "test", id: "model-a" },
       defaultThinkingLevel: "off",
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: false,
     });
@@ -2563,6 +2696,7 @@ describe("ProjectSessionCoordinator", () => {
       systemPrompt: "The captured base prompt.",
       model: { provider: "test", id: "model-a" },
       defaultThinkingLevel: "off",
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: false,
     });
@@ -2611,6 +2745,7 @@ describe("ProjectSessionCoordinator", () => {
           systemPrompt: current.systemPrompt,
           model: current.model,
           defaultThinkingLevel: current.defaultThinkingLevel,
+          defaultServiceTier: current.defaultServiceTier,
           toolMode: current.toolMode,
           canManageSessions: current.canManageSessions,
         },
@@ -2781,11 +2916,74 @@ describe("ProjectSessionCoordinator", () => {
     releaseDelegate.resolve(true);
   });
 
+  it.each([
+    { label: "persistent", temporary: false },
+    { label: "temporary", temporary: true },
+  ] as const)(
+    "rejects an unavailable default-tier role before a $label Agent start",
+    async ({ temporary }) => {
+      const fixture = await createFixture();
+      const source = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      Object.assign(fixture.runtime.availableModels[0]!, {
+        api: "openai-codex-responses",
+      });
+      const role = await fixture.roles.createRole({
+        name: `Priority ${temporary ? "temporary" : "persistent"} worker`,
+        description: "Becomes unavailable after route drift",
+        systemPrompt: "",
+        model: { provider: "test", id: "model-a" },
+        defaultThinkingLevel: "off",
+        defaultServiceTier: "priority",
+        toolMode: "read_only",
+        canManageSessions: false,
+      });
+      Object.assign(fixture.runtime.availableModels[0]!, {
+        api: "openai-responses",
+      });
+      await expect(fixture.coordinator.startPeerSession(
+        fixture.handle,
+        source.conversationId,
+        startInput({
+          roleId: role.id,
+          temporary,
+          idempotencyKey: `unavailable-tier-${temporary}`,
+        }),
+      )).rejects.toThrow("模型不支持默认服务层级：priority");
+      expect(aggregateReservedConversationEntries(
+        source.sessionManager.getEntries(),
+      ).cards).toEqual([]);
+      expect((await fixture.coordinator.listSessions(fixture.handle))
+        .map(({ id }) => id)).toEqual([source.conversationId]);
+    },
+  );
+
   it("starts a peer without waiting and retries the same idempotency key without duplicate delivery", async () => {
     const fixture = await createFixture();
     const source = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
+    );
+    Object.assign(fixture.runtime.availableModels[0]!, {
+      api: "openai-codex-responses",
+    });
+    const targetRole = getRoleTemplate(fixture.roles, "default");
+    await fixture.roles.updateRole(
+      targetRole.id,
+      targetRole.revision,
+      targetRole.systemPrompt,
+      {
+        name: targetRole.name,
+        description: targetRole.description,
+        systemPrompt: targetRole.systemPrompt,
+        model: targetRole.model,
+        defaultThinkingLevel: targetRole.defaultThinkingLevel,
+        defaultServiceTier: "priority",
+        toolMode: targetRole.toolMode,
+        canManageSessions: targetRole.canManageSessions,
+      },
     );
     const started = deferred();
     const release = deferred();
@@ -2800,6 +2998,11 @@ describe("ProjectSessionCoordinator", () => {
       input,
     );
     await started.promise;
+    expect((await fixture.coordinator.openConversation(
+      fixture.handle,
+      first.conversationId,
+      { updateRecent: false },
+    )).getServiceTier()).toBe("priority");
     expect(
       (await fixture.coordinator.listSessions(fixture.handle))
         .find(({ id }) => id === first.conversationId)?.activity,
@@ -3219,6 +3422,7 @@ describe("ProjectSessionCoordinator", () => {
       systemPrompt: "Use a different role.",
       model: { provider: "test", id: "model-a" },
       defaultThinkingLevel: "off",
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: false,
     });
@@ -3278,6 +3482,7 @@ describe("ProjectSessionCoordinator", () => {
       systemPrompt: "Use the original role prompt.",
       model: { provider: "test", id: "model-a" },
       defaultThinkingLevel: "off",
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: false,
     });
@@ -3327,6 +3532,7 @@ describe("ProjectSessionCoordinator", () => {
         systemPrompt: "Use the rewritten role prompt.",
         model: { provider: "test", id: "model-b" },
         defaultThinkingLevel: "off",
+        defaultServiceTier: null,
         toolMode: "full_access",
         canManageSessions: true,
       },
@@ -3879,6 +4085,7 @@ describe("ProjectSessionCoordinator", () => {
       systemPrompt: "Complete the assigned work.",
       model: { provider: "test", id: "model-a" },
       defaultThinkingLevel: "off",
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: false,
     });
@@ -10673,6 +10880,7 @@ describe("ProjectSessionCoordinator", () => {
       systemPrompt: "Use the frozen processing recovery prompt.",
       model: { provider: "test", id: "model-b" },
       defaultThinkingLevel: "off",
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: false,
     });

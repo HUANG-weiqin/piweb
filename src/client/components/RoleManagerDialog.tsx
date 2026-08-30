@@ -8,12 +8,21 @@ import type {
   PublicProvider,
   RoleModelSelection,
   RoleTemplate,
+  ServiceTier,
   ThinkingLevel,
 } from "../../shared/protocol";
 import { THINKING_LEVEL_LABELS } from "../lib/thinking-level";
 import { useModalFocus } from "../lib/use-modal-focus";
 
 const NEW_ROLE_ID = "__new__";
+
+const SERVICE_TIER_LABELS: Record<ServiceTier, string> = {
+  auto: "自动",
+  default: "默认",
+  flex: "弹性",
+  scale: "扩展",
+  priority: "快速",
+};
 
 type RoleOperation =
   | "create_role"
@@ -26,6 +35,7 @@ export interface RoleDraft {
   systemPrompt: string;
   model: RoleModelSelection | null;
   defaultThinkingLevel: ThinkingLevel;
+  defaultServiceTier: ServiceTier | null;
   toolMode: "read_only" | "full_access";
   canManageSessions: boolean;
 }
@@ -64,6 +74,7 @@ interface ModelOption {
   id: string;
   label: string;
   thinkingLevels: ThinkingLevel[];
+  serviceTiers: ServiceTier[];
 }
 
 const emptyDraft: RoleDraft = {
@@ -72,6 +83,7 @@ const emptyDraft: RoleDraft = {
   systemPrompt: "",
   model: null,
   defaultThinkingLevel: "off",
+  defaultServiceTier: null,
   toolMode: "read_only",
   canManageSessions: false,
 };
@@ -83,6 +95,7 @@ function roleDraft(role: RoleTemplate): RoleDraft {
     systemPrompt: role.systemPrompt,
     model: role.model === null ? null : { ...role.model },
     defaultThinkingLevel: role.defaultThinkingLevel,
+    defaultServiceTier: role.defaultServiceTier,
     toolMode: role.toolMode,
     canManageSessions: role.canManageSessions,
   };
@@ -120,6 +133,7 @@ function availableModelOptions(
         id: model.id,
         label: model.name,
         thinkingLevels: [...model.thinkingLevels],
+        serviceTiers: [...(model.serviceTiers ?? [])],
       }));
   });
 }
@@ -251,6 +265,10 @@ export function RoleManagerDialog({
       )
         ? current.defaultThinkingLevel
         : model.thinkingLevels[0] ?? "off",
+      defaultServiceTier: current.defaultServiceTier !== null
+        && model.serviceTiers.includes(current.defaultServiceTier)
+        ? current.defaultServiceTier
+        : null,
     }));
   };
   const currentModelOption = draft.model === null
@@ -262,6 +280,9 @@ export function RoleManagerDialog({
     draft.defaultThinkingLevel,
   );
   const thinkingLevelSelectable = availableThinkingLevels.length > 1;
+  const availableServiceTiers = currentModelOption?.serviceTiers ?? [];
+  const currentServiceTierAvailable = draft.defaultServiceTier === null
+    || availableServiceTiers.includes(draft.defaultServiceTier);
   const modelSelectValue = draft.model === null ? "" : modelValue(draft.model);
 
   return <div
@@ -417,6 +438,37 @@ export function RoleManagerDialog({
               {availableThinkingLevels.length === 1
                 ? "此模型没有可调思考强度，将使用模型默认行为。"
                 : "创建会话或切换到此角色时采用；聊天页调整只影响当前运行会话。"}
+            </p>
+          </div>
+          <div className="setting-field">
+            <label htmlFor="role-service-tier">默认服务层级</label>
+            <select
+              id="role-service-tier"
+              value={draft.defaultServiceTier === null
+                ? ""
+                : draft.defaultServiceTier}
+              disabled={operationBusy || draft.model === null}
+              onChange={(event) => updateDraft(
+                "defaultServiceTier",
+                event.target.value === ""
+                  ? null
+                  : event.target.value as ServiceTier,
+              )}
+            >
+              <option value="">供应商默认</option>
+              {!currentServiceTierAvailable && draft.defaultServiceTier !== null
+                && <option value={draft.defaultServiceTier} disabled>
+                  当前不支持 · {SERVICE_TIER_LABELS[draft.defaultServiceTier]}
+                </option>}
+              {availableServiceTiers.map((tier) => <option
+                key={tier}
+                value={tier}
+              >
+                {SERVICE_TIER_LABELS[tier]}
+              </option>)}
+            </select>
+            <p className="setting-note">
+              创建会话或切换到此角色时采用；聊天页可覆盖当前会话。
             </p>
           </div>
           <div className="setting-field">

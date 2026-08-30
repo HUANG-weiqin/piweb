@@ -1278,6 +1278,7 @@ describe("Chat", () => {
       systemPrompt: "Review exact evidence.",
       model: { provider: "provider", id: "model" },
       defaultThinkingLevel: "off",
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: true,
     };
@@ -1306,6 +1307,7 @@ describe("Chat", () => {
       systemPrompt: "Research exact evidence.",
       model: { provider: "provider", id: "model" },
       defaultThinkingLevel: "off",
+      defaultServiceTier: null,
       toolMode: "read_only",
       canManageSessions: false,
     };

@@ -589,7 +589,9 @@ export class ConversationActor {
     this.compactionThresholdPercent =
       reserved.compactionThreshold?.percent
       ?? DEFAULT_COMPACTION_THRESHOLD_PERCENT;
-    this.serviceTierSelection = reserved.serviceTier?.tier ?? null;
+    this.serviceTierSelection = reserved.serviceTier !== undefined
+      ? reserved.serviceTier.tier
+      : this.profileSnapshot.role.defaultServiceTier;
     this.loopListSnapshot = this.restoreLoopListFromActiveBranch();
     for (const settlement of reserved.runSettlements) {
       this.usedRunIds.add(settlement.runId);
@@ -920,30 +922,14 @@ export class ConversationActor {
       );
     }
     const previousProfile = this.profileSnapshot;
+    const previousServiceTier = this.serviceTierSelection;
     const nextProfile = createConversationMetaEntry({
       ...previousProfile,
       role,
     }).data;
-    if (
-      this.serviceTierSelection !== null
-      && JSON.stringify(previousProfile.role)
-        !== JSON.stringify(nextProfile.role)
-    ) {
-      const nextModel = this.modelRegistry.find(
-        nextProfile.role.model.provider,
-        nextProfile.role.model.id,
-      );
-      if (!nextModel) {
-        return Promise.reject(new Error(
-          `Role model is unavailable: ${nextProfile.role.model.provider}/${nextProfile.role.model.id}`,
-        ));
-      }
-      try {
-        assertModelSupportsServiceTier(nextModel, this.serviceTierSelection);
-      } catch (error) {
-        return Promise.reject(error);
-      }
-    }
+    const roleChanged = JSON.stringify(previousProfile.role)
+      !== JSON.stringify(nextProfile.role);
+    const nextServiceTier = nextProfile.role.defaultServiceTier;
     this.switchingRole = true;
     return this.operations.run(async () => {
       const previousOptions = this.createSessionOptions;
@@ -953,23 +939,20 @@ export class ConversationActor {
         if (this.activeRun) {
           throw new Error("Cannot switch the role of a busy conversation");
         }
-        if (
-          JSON.stringify(previousProfile.role)
-          === JSON.stringify(nextProfile.role)
-        ) {
-          return;
-        }
+        if (!roleChanged) return;
 
         await this.stopRuntimeSession();
         appendReservedCustomEntry(
           this.sessionManager,
           createConversationRoleChangeEntry({
             role: nextProfile.role,
+            selectedServiceTier: nextServiceTier,
             changedAt: this.now().toISOString(),
           }),
         );
         persisted = true;
         this.profileSnapshot = nextProfile;
+        this.serviceTierSelection = nextServiceTier;
         this.createSessionOptions = createSessionOptions;
         const pendingErrors = await this.startRuntimeSession(
           createSessionOptions,
@@ -984,11 +967,13 @@ export class ConversationActor {
               this.sessionManager,
               createConversationRoleChangeEntry({
                 role: previousProfile.role,
+                selectedServiceTier: previousServiceTier,
                 changedAt: this.now().toISOString(),
               }),
             );
           }
           this.profileSnapshot = previousProfile;
+          this.serviceTierSelection = previousServiceTier;
           this.createSessionOptions = previousOptions;
           const pendingErrors = await this.startRuntimeSession(
             previousOptions,
@@ -1047,7 +1032,9 @@ export class ConversationActor {
         this.compactionThresholdPercent =
           reserved.compactionThreshold?.percent
           ?? DEFAULT_COMPACTION_THRESHOLD_PERCENT;
-        this.serviceTierSelection = reserved.serviceTier?.tier ?? null;
+        this.serviceTierSelection = reserved.serviceTier !== undefined
+          ? reserved.serviceTier.tier
+          : this.profileSnapshot.role.defaultServiceTier;
         this.loopListSnapshot = this.restoreLoopListFromActiveBranch();
         this.emitLoopList();
         this.usedRunIds.clear();
