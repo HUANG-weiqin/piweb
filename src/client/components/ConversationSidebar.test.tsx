@@ -215,6 +215,48 @@ describe("ConversationSidebar", () => {
       .toHaveAttribute("data-conversation-id", "agent-created-12345678");
   });
 
+  it("gives primary conversations and nested Agents distinct visual roles", () => {
+    const root = conversation("root-visual", "发布主任务");
+    const member = conversation("member-visual", "检查回归 Agent", {
+      rootConversationId: root.id,
+      createdBy: { kind: "conversation", conversationId: root.id },
+    });
+    const standalone = conversation("standalone-visual", "独立主会话");
+
+    render(
+      <ConversationSidebar
+        conversations={[root, member, standalone]}
+        currentConversationId={member.id}
+        focusedConversationId={member.id}
+        collapsed={false}
+        truncated={false}
+        navigationEnabled
+        actionsEnabled
+        onToggleCollapsed={vi.fn()}
+        onSelect={vi.fn()}
+        onCreate={vi.fn()}
+        onRename={vi.fn()}
+        onDelete={vi.fn(() => true)}
+      />,
+    );
+
+    const rootRow = screen.getByRole("button", { name: "打开会话 发布主任务" })
+      .closest<HTMLElement>("[data-conversation-id]");
+    const memberRow = screen.getByRole("button", {
+      name: "当前会话 检查回归 Agent",
+    }).closest<HTMLElement>("[data-conversation-id]");
+    const standaloneRow = screen.getByRole("button", {
+      name: "打开会话 独立主会话",
+    }).closest<HTMLElement>("[data-conversation-id]");
+
+    expect(rootRow).toHaveClass("hierarchy-root");
+    expect(memberRow).toHaveClass("hierarchy-member");
+    expect(standaloneRow).toHaveClass("hierarchy-standalone");
+    expect(within(rootRow!).getByText("主任务")).toBeInTheDocument();
+    expect(within(standaloneRow!).getByText("主会话")).toBeInTheDocument();
+    expect(screen.getByText("协作 Agent")).toBeInTheDocument();
+  });
+
   it("orders standalone conversations with the grouped-view priority", () => {
     const attention = {
       ...baseConversation,

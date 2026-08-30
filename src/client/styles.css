@@ -2368,9 +2368,25 @@ pre {
   list-style: none;
 }
 
+.conversation-sidebar-navigation > .conversation-sidebar-list {
+  gap: 10px;
+}
+
 .conversation-sidebar-item {
   position: relative;
+  min-width: 0;
+  border: 1px solid transparent;
   border-radius: 12px;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.conversation-sidebar-item.hierarchy-standalone {
+  border-color: color-mix(in srgb, var(--line) 84%, transparent);
+  background: color-mix(in srgb, var(--panel-strong) 76%, transparent);
+  box-shadow: 0 1px 0 rgb(35 31 23 / 4%);
 }
 
 .conversation-sidebar-item.selected {
@@ -2378,8 +2394,18 @@ pre {
   box-shadow: inset 3px 0 var(--accent);
 }
 
+.conversation-sidebar-item.hierarchy-member.selected {
+  border-color: color-mix(in srgb, var(--intent-line) 74%, transparent);
+  background: color-mix(in srgb, var(--intent-soft) 82%, var(--panel));
+  box-shadow: inset 2px 0 var(--intent);
+}
+
 .conversation-sidebar-item.needs-attention {
   background: color-mix(in srgb, var(--warning-soft) 72%, transparent);
+}
+
+.conversation-sidebar-item.hierarchy-member.needs-attention {
+  background: color-mix(in srgb, var(--warning-soft) 58%, var(--intent-soft));
 }
 
 .conversation-sidebar-conversation {
@@ -2394,9 +2420,45 @@ pre {
   text-align: left;
 }
 
+.conversation-sidebar-item.hierarchy-member .conversation-sidebar-conversation {
+  gap: 5px;
+  padding: 9px 70px 9px 10px;
+  border-radius: 9px;
+}
+
 .conversation-sidebar-conversation:not(:disabled):hover {
   color: inherit;
   background: var(--soft-hover);
+}
+
+.conversation-sidebar-item.hierarchy-member
+  .conversation-sidebar-conversation:not(:disabled):hover {
+  background: color-mix(in srgb, var(--intent-soft) 72%, var(--soft-hover));
+}
+
+.conversation-sidebar-kind {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  line-height: 1;
+}
+
+.conversation-sidebar-kind::before {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--accent);
+  content: "";
+}
+
+.hierarchy-standalone .conversation-sidebar-kind::before {
+  border: 1px solid var(--line-strong);
+  background: transparent;
 }
 
 .conversation-sidebar-primary,
@@ -2414,6 +2476,19 @@ pre {
   font-weight: 750;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.conversation-sidebar-item:is(.hierarchy-root, .hierarchy-standalone)
+  .conversation-sidebar-title {
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 780;
+}
+
+.conversation-sidebar-item.hierarchy-member .conversation-sidebar-title {
+  color: color-mix(in srgb, var(--intent) 56%, var(--accent));
+  font-size: 12px;
+  font-weight: 680;
 }
 
 .conversation-sidebar-indicators {
@@ -2442,19 +2517,19 @@ pre {
   line-height: 1;
 }
 
-.activity-queued {
+.conversation-activity-indicator.activity-queued {
   color: var(--warning);
 }
 
-.activity-running {
+.conversation-activity-indicator.activity-running {
   color: var(--success);
 }
 
-.activity-waiting {
+.conversation-activity-indicator.activity-waiting {
   color: var(--warning);
 }
 
-.activity-cancelling {
+.conversation-activity-indicator.activity-cancelling {
   color: var(--danger);
 }
 
@@ -2504,6 +2579,16 @@ pre {
   display: block;
 }
 
+.conversation-sidebar-item.hierarchy-member :is(
+  .conversation-sidebar-role,
+  .conversation-sidebar-handle,
+  .conversation-sidebar-updated,
+  .conversation-temporary-badge,
+  .conversation-agent-badge
+) {
+  font-size: 9px;
+}
+
 .conversation-sidebar-actions {
   position: absolute;
   right: 7px;
@@ -2529,19 +2614,36 @@ pre {
   min-width: 0;
 }
 
+.conversation-group-card {
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--line) 92%, transparent);
+  border-radius: 15px;
+  background: color-mix(in srgb, var(--panel-strong) 78%, var(--panel));
+  box-shadow: 0 1px 0 rgb(35 31 23 / 5%);
+}
+
+.conversation-group-card button:focus-visible {
+  outline-offset: -4px;
+}
+
+.conversation-group-root-list .conversation-sidebar-item {
+  border-radius: 14px 14px 0 0;
+}
+
 .conversation-group-disclosure {
-  width: calc(100% - 6px);
+  width: 100%;
   min-height: 40px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
-  margin: 1px 3px 3px;
-  padding: 5px 7px 5px 10px;
-  border: 1px solid transparent;
-  border-radius: 9px;
+  margin: 0;
+  padding: 6px 9px 6px 12px;
+  border: 0;
+  border-top: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  border-radius: 0;
   color: var(--muted);
-  background: transparent;
+  background: color-mix(in srgb, var(--soft) 38%, transparent);
   font-weight: 400;
   text-align: left;
   transition:
@@ -2551,8 +2653,8 @@ pre {
 }
 
 .conversation-group-disclosure:not(:disabled):hover {
-  color: var(--text);
-  background: color-mix(in srgb, var(--soft) 72%, transparent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--soft) 78%, transparent);
 }
 
 .conversation-group-summary {
@@ -2596,27 +2698,41 @@ pre {
 
 .conversation-group-members {
   position: relative;
-  padding: 2px 0 4px 14px;
+  padding: 10px 7px 8px 22px;
+  border-top: 1px solid color-mix(in srgb, var(--intent-line) 58%, var(--line));
+  background: color-mix(in srgb, var(--intent-soft) 52%, var(--panel));
+}
+
+.conversation-group-members-label {
+  margin: 0 6px 8px 1px;
+  color: color-mix(in srgb, var(--intent) 76%, var(--accent));
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
 }
 
 .conversation-group-members::before {
   position: absolute;
-  top: 3px;
-  bottom: 10px;
-  left: 8px;
+  top: 33px;
+  bottom: 14px;
+  left: 13px;
   width: 1px;
   content: "";
-  background: var(--line);
+  background: color-mix(in srgb, var(--intent-line) 82%, var(--line));
+}
+
+.conversation-group-members .conversation-sidebar-list {
+  gap: 3px;
 }
 
 .conversation-group-members .conversation-sidebar-item::before {
   position: absolute;
-  top: 20px;
-  left: -6px;
-  width: 7px;
+  top: 18px;
+  left: -9px;
+  width: 10px;
   height: 1px;
   content: "";
-  background: var(--line);
+  background: color-mix(in srgb, var(--intent-line) 82%, var(--line));
 }
 
 .conversation-group-members .conversation-sidebar-item {
@@ -2628,7 +2744,7 @@ pre {
   min-height: 40px;
   margin-top: 5px;
   padding: 6px 8px;
-  color: var(--muted);
+  color: color-mix(in srgb, var(--intent) 62%, var(--muted));
   font-size: 10px;
 }
 

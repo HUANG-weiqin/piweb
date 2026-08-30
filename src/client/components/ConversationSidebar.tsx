@@ -283,8 +283,11 @@ function ActivityIndicator({
   }
 }
 
+type ConversationRowHierarchy = "root" | "member" | "standalone";
+
 const ConversationRow = memo(function ConversationRow({
   conversation,
+  hierarchy,
   selected,
   navigationEnabled,
   actionsEnabled,
@@ -296,6 +299,7 @@ const ConversationRow = memo(function ConversationRow({
   onRequestDelete,
 }: {
   conversation: ConversationSummary;
+  hierarchy: ConversationRowHierarchy;
   selected: boolean;
   navigationEnabled: boolean;
   actionsEnabled: boolean;
@@ -310,6 +314,7 @@ const ConversationRow = memo(function ConversationRow({
   const active = busy || (conversation.activity?.kind ?? "idle") !== "idle";
   const classes = [
     "conversation-sidebar-item",
+    `hierarchy-${hierarchy}`,
     `activity-${conversation.activity?.kind ?? "idle"}`,
     selected ? "selected" : "",
     conversation.attention ? "needs-attention" : "",
@@ -327,17 +332,24 @@ const ConversationRow = memo(function ConversationRow({
         disabled={!navigationEnabled || deletionBlocked}
         onClick={() => onSelect(conversation.id)}
       >
+        {hierarchy !== "member" && (
+          <span className="conversation-sidebar-kind">
+            {hierarchy === "root" ? "主任务" : "主会话"}
+          </span>
+        )}
         <span className="conversation-sidebar-primary">
           <span className="conversation-sidebar-title">{title}</span>
           <span className="conversation-sidebar-indicators">
-            {conversation.createdBy?.kind === "conversation" && (
-              <span
-                className="conversation-agent-badge"
-                title="由 Agent 创建"
-              >
-                Agent
-              </span>
-            )}
+            {hierarchy !== "member"
+              && conversation.createdBy?.kind === "conversation"
+              && (
+                <span
+                  className="conversation-agent-badge"
+                  title="由 Agent 创建"
+                >
+                  Agent
+                </span>
+              )}
             <ActivityIndicator activity={conversation.activity} />
             {conversation.attention && (
               <span
@@ -369,6 +381,16 @@ const ConversationRow = memo(function ConversationRow({
           >
             {shortHandle(conversation.id)}
           </span>
+          {hierarchy === "member"
+            && conversation.createdBy?.kind === "conversation"
+            && (
+              <span
+                className="conversation-agent-badge"
+                title="由 Agent 创建"
+              >
+                Agent
+              </span>
+            )}
           {conversation.temporary && (
             <span className="conversation-temporary-badge">临时</span>
           )}
@@ -490,6 +512,7 @@ function ConversationGroupCard({
       <ul className="conversation-sidebar-list conversation-group-root-list">
         <ConversationRow
           conversation={root}
+          hierarchy="root"
           selected={root.id === currentConversationId}
           navigationEnabled={navigationEnabled}
           actionsEnabled={actionsEnabled}
@@ -517,11 +540,13 @@ function ConversationGroupCard({
         <span className="conversation-group-chevron" aria-hidden="true" />
       </button>
       {expanded && <div id={controlsId} className="conversation-group-members">
+        <p className="conversation-group-members-label">协作 Agent</p>
         <ul className="conversation-sidebar-list">
           {visibleMembers.map((conversation) => (
             <ConversationRow
               key={conversation.id}
               conversation={conversation}
+              hierarchy="member"
               selected={conversation.id === currentConversationId}
               navigationEnabled={navigationEnabled}
               actionsEnabled={actionsEnabled}
@@ -786,6 +811,7 @@ function ConversationSidebarView({
               : <ConversationRow
                   key={entry.conversation.id}
                   conversation={entry.conversation}
+                  hierarchy="standalone"
                   selected={entry.conversation.id === currentConversationId}
                   navigationEnabled={navigationEnabled}
                   actionsEnabled={actionsEnabled}
