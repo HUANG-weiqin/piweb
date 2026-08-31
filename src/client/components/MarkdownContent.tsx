@@ -6,6 +6,7 @@ const MERMAID_MAX_SOURCE_LENGTH = 50_000;
 export const MERMAID_MAX_BLOCKS_PER_CONTENT = 8;
 export const MERMAID_MAX_TOTAL_SOURCE_LENGTH = 100_000;
 const MERMAID_RENDER_TIMEOUT_MS = 10_000;
+const MERMAID_MAX_DISPLAY_WIDTH = 8_192;
 const MERMAID_EXTERNAL_RESOURCE_PATTERN = /(?:@\s*\{|(?:\bimg|["']img["'])\s*:|<\s*(?:img|image|iframe|object|embed|video|audio|source|link)\b|@import\b|(?:url|image-set)\s*\(|(?:https?|ftp|file|blob|data):)/i;
 const MERMAID_SECURE_CONFIG_KEYS = [
   "secure",
@@ -101,6 +102,27 @@ function isMermaidFence(token: Tokens.Code): boolean {
   return token.lang?.trim().split(/\s+/, 1)[0]?.toLowerCase() === "mermaid";
 }
 
+function decodeCssEscapes(value: string): string {
+  return value
+    .replace(/\\(?:\r\n|[\n\r\f])/g, "")
+    .replace(/\\([\da-f]{1,6}[\t\n\f\r ]?|.)/gis, (_match, escaped: string) => {
+      const hex = escaped.match(/^[\da-f]{1,6}/i)?.[0];
+      if (!hex) return escaped[0] ?? "";
+      const codePoint = Number.parseInt(hex, 16);
+      return codePoint === 0 || codePoint > 0x10_FFFF
+        ? "\uFFFD"
+        : String.fromCodePoint(codePoint);
+    });
+}
+
+function normalizedResourceText(value: string): string {
+  return decodeCssEscapes(value).replace(/\/\*[\s\S]*?\*\//g, "");
+}
+
+function hasUnsupportedMermaidResource(value: string): boolean {
+  return MERMAID_EXTERNAL_RESOURCE_PATTERN.test(normalizedResourceText(value));
+}
+
 export function getMermaidSourceAnalysis(markdown: string): {
   hasMermaidFence: boolean;
   sourceLengths: readonly number[];
@@ -113,7 +135,7 @@ export function getMermaidSourceAnalysis(markdown: string): {
     const source = (token as Tokens.Code).text.replace(/\n$/, "") + "\n";
     if (
       source.length <= MERMAID_MAX_SOURCE_LENGTH
-      && !MERMAID_EXTERNAL_RESOURCE_PATTERN.test(source)
+      && !hasUnsupportedMermaidResource(source)
     ) {
       sourceLengths.push(source.length);
     }
@@ -143,11 +165,29 @@ function createMarker(): string {
 }
 
 function hasNonLocalCssResource(value: string): boolean {
-  const withoutLocalFragments = value.replace(
+  const withoutLocalFragments = normalizedResourceText(value).replace(
     /url\(\s*(["']?)#[^)"']+\1\s*\)/gi,
     "",
   );
   return /@import\b|(?:url|image-set)\s*\(/i.test(withoutLocalFragments);
+}
+
+function preserveReadableSvgWidth(svg: SVGSVGElement): void {
+  const viewBox = svg.getAttribute("viewBox")
+    ?.trim()
+    .split(/[\s,]+/)
+    .map(Number);
+  const naturalWidth = viewBox?.length === 4 ? viewBox[2] : undefined;
+  if (naturalWidth === undefined || !Number.isFinite(naturalWidth) || naturalWidth <= 0) {
+    return;
+  }
+  svg.style.removeProperty("min-width");
+  svg.style.setProperty(
+    "width",
+    `${Math.min(Math.ceil(naturalWidth), MERMAID_MAX_DISPLAY_WIDTH)}px`,
+    "important",
+  );
+  svg.style.setProperty("max-width", "none", "important");
 }
 
 function createDiagram(svg: string): HTMLDivElement {
@@ -157,7 +197,6 @@ function createDiagram(svg: string): HTMLDivElement {
   const safeSvg = DOMPurify.sanitize(svg, {
     USE_PROFILES: { svg: true, svgFilters: true },
     FORBID_TAGS: ["foreignObject", "image"],
-    ALLOWED_URI_REGEXP: /^(?:#|url\(\s*["']?#)/i,
   });
   const template = document.createElement("template");
   template.innerHTML = safeSvg;
@@ -180,6 +219,7 @@ function createDiagram(svg: string): HTMLDivElement {
       throw new Error("Mermaid returned an external CSS resource");
     }
   }
+  preserveReadableSvgWidth(svgElement);
   svgElement.setAttribute("role", "img");
   if (
     !svgElement.hasAttribute("aria-label")
@@ -250,7 +290,7 @@ function MarkdownContentView({
       let fallbackMessage: string | undefined;
       if (source.length > MERMAID_MAX_SOURCE_LENGTH) {
         fallbackMessage = "Mermaid 图内容过大，已显示源码。";
-      } else if (!fallbackMessage && MERMAID_EXTERNAL_RESOURCE_PATTERN.test(source)) {
+      } else if (!fallbackMessage && hasUnsupportedMermaidResource(source)) {
         fallbackMessage = "Mermaid 图包含不支持的资源或扩展语法，已显示源码。";
       } else if (
         renderedBlockCount >= mermaidMaxBlocks

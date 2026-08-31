@@ -439,7 +439,7 @@ describe("Message", () => {
     mermaidMock.initialize.mockClear();
     mermaidMock.render.mockReset().mockResolvedValue({
       svg: [
-        '<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)">',
+        '<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 2400 240" style="max-width: 2400px" onload="alert(1)">',
         "<script>alert(1)</script>",
         '<defs><linearGradient id="safe-gradient" /></defs>',
         '<rect fill="url(#safe-gradient)" />',
@@ -480,6 +480,9 @@ describe("Message", () => {
       expect.stringContaining("A[开始] --> B[完成]"),
     );
     expect(diagram.closest(".mermaid-diagram")).toBeInTheDocument();
+    expect(diagram.style.width).toBe("2400px");
+    expect(diagram.style.getPropertyPriority("width")).toBe("important");
+    expect(diagram.style.maxWidth).toBe("none");
     expect(diagram).not.toHaveAttribute("onload");
     expect(diagram.querySelector("script")).not.toBeInTheDocument();
     expect(diagram.querySelector("foreignObject")).not.toBeInTheDocument();
@@ -549,6 +552,26 @@ describe("Message", () => {
     expect(mermaidMock.render).not.toHaveBeenCalled();
   });
 
+  it("rejects CSS-escaped resources before invoking Mermaid", async () => {
+    mermaidMock.render.mockClear();
+    const message: ChatMessage = {
+      id: "mermaid-escaped-css-source",
+      runId: "run-mermaid-escaped-css-source",
+      role: "assistant",
+      text: "```mermaid\nflowchart LR\nA --> B\nstyle A fill:u\\72l(h\\74tp://127.0.0.1/pixel)\n```",
+      thinking: "",
+      tools: [],
+    };
+
+    const { container } = render(<Message message={message} />);
+
+    expect(await screen.findByRole("note"))
+      .toHaveTextContent("Mermaid 图包含不支持的资源或扩展语法，已显示源码。");
+    expect(container.querySelector("pre.mermaid-fallback code"))
+      .toHaveTextContent("127.0.0.1/pixel");
+    expect(mermaidMock.render).not.toHaveBeenCalled();
+  });
+
   it("rejects external image references returned in Mermaid SVG", async () => {
     mermaidMock.render.mockReset().mockResolvedValue({
       svg: '<svg xmlns="http://www.w3.org/2000/svg"><image href="https://attacker.example/pixel" /></svg>',
@@ -570,12 +593,11 @@ describe("Message", () => {
       .toHaveTextContent("A --> B");
   });
 
-  it("rejects non-local CSS resources returned in Mermaid SVG", async () => {
+  it("rejects CSS-escaped non-local resources returned in Mermaid SVG", async () => {
     mermaidMock.render.mockReset().mockResolvedValue({
       svg: [
         '<svg xmlns="http://www.w3.org/2000/svg">',
-        '<style>.node { fill: url("https://attacker.example/pixel"); }</style>',
-        '<rect class="node" />',
+        '<rect fill="u\\72l(h\\74tp://attacker.example/resource.svg#g)" />',
         "</svg>",
       ].join(""),
     });

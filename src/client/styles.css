@@ -879,7 +879,8 @@ pre {
 
 .markdown .mermaid-diagram svg {
   display: block;
-  max-width: 100%;
+  width: auto;
+  max-width: none;
   height: auto;
   margin: 0 auto;
 }
