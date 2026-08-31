@@ -11,6 +11,8 @@ import {
   MAX_CONVERSATION_MESSAGE_CONTENT_BYTES,
   MAX_ROLE_SYSTEM_PROMPT_BYTES,
   MAX_RUN_FINAL_TEXT_BYTES,
+  LEGACY_LOOP_LIST_CUSTOM_TYPE,
+  LEGACY_LOOP_LIST_CONTINUE_CUSTOM_TYPE,
   LOOP_LIST_CUSTOM_TYPE,
   LOOP_LIST_CONTINUE_CUSTOM_TYPE,
   META_OPERATION_CUSTOM_TYPE,
@@ -246,14 +248,68 @@ describe("conversation reserved entries", () => {
     ])).toThrow(/service tier updatedAt cannot regress/i);
   });
 
-  it("round-trips and aggregates strict bounded LoopList state and continuation snapshots", () => {
+  it("migrates v1 LoopList entries and round-trips strict v2 snapshots", () => {
+    const legacyItems = [
+      { id: "implement", text: "Implement LoopList", checked: false },
+      { id: "record", text: "Record result", checked: true },
+    ];
+    const legacy = {
+      customType: LEGACY_LOOP_LIST_CUSTOM_TYPE,
+      data: {
+        items: legacyItems,
+        armed: true,
+        updatedAt: "2026-07-19T09:59:00.000Z",
+      },
+    };
+    const legacyContinuation = {
+      customType: LEGACY_LOOP_LIST_CONTINUE_CUSTOM_TYPE,
+      content: [
+        "Current LoopList snapshot:",
+        "[ ] Implement LoopList (implement)",
+        "[x] Record result (record)",
+        "Continue working through the unchecked items. Update the list with todo_write as progress changes.",
+      ].join("\n"),
+      display: false,
+      details: {
+        runId: randomUUID(),
+        continuation: 1,
+        items: legacyItems,
+      },
+    };
+    const migrated = {
+      items: [
+        { id: "implement", text: "Implement LoopList", status: "pending" },
+        { id: "record", text: "Record result", status: "completed" },
+      ],
+      armed: true,
+      updatedAt: "2026-07-19T09:59:00.000Z",
+    };
+    const parsedLegacy = parseReservedConversationEntry(legacy);
+    const parsedLegacyContinuation = parseReservedConversationEntry(
+      legacyContinuation,
+    );
+    expect(parsedLegacy).toMatchObject({ kind: "loop_list" });
+    expect(parsedLegacyContinuation).toMatchObject({
+      kind: "loop_list_continue",
+    });
+    if (parsedLegacy?.kind !== "loop_list") {
+      throw new Error("Expected a legacy LoopList entry");
+    }
+    if (parsedLegacyContinuation?.kind !== "loop_list_continue") {
+      throw new Error("Expected a legacy LoopList continuation");
+    }
+    expect(parsedLegacy.entry.data).toEqual(migrated);
+    expect(parsedLegacyContinuation.entry.details.items).toEqual(migrated.items);
+    expect(parsedLegacy.entry.data.items)
+      .not.toContainEqual(expect.objectContaining({ status: "active" }));
+
     const initial = createLoopListEntry({
-      items: [{ id: "implement", text: "Implement LoopList", checked: false }],
+      items: [{ id: "implement", text: "Implement LoopList", status: "active" }],
       armed: true,
       updatedAt: timestamp,
     });
     const completed = createLoopListEntry({
-      items: [{ id: "implement", text: "Implement LoopList", checked: true }],
+      items: [{ id: "implement", text: "Implement LoopList", status: "completed" }],
       armed: false,
       updatedAt: "2026-07-19T10:01:00.000Z",
     });
@@ -271,6 +327,8 @@ describe("conversation reserved entries", () => {
     expect(parseLoopListEntry(initial)).toEqual(initial);
     expect(parseLoopListContinueEntry(continuation)).toEqual(continuation);
     expect(aggregateReservedConversationEntries([
+      legacy,
+      legacyContinuation,
       initial,
       continuation,
       completed,
@@ -283,6 +341,13 @@ describe("conversation reserved entries", () => {
         items: [...initial.data.items, initial.data.items[0]],
       },
     })).toThrow(/unique/i);
+    expect(() => parseLoopListEntry({
+      ...initial,
+      data: {
+        ...initial.data,
+        items: [{ id: "implement", text: "Legacy field", checked: false }],
+      },
+    })).toThrow();
     expect(() => parseLoopListContinueEntry({
       ...continuation,
       content: "tampered",

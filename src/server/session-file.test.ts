@@ -5,6 +5,8 @@ import {
   CONVERSATION_MESSAGE_CUSTOM_TYPE,
   CONVERSATION_META_CUSTOM_TYPE,
   RUN_SETTLEMENT_CUSTOM_TYPE,
+  LEGACY_LOOP_LIST_CUSTOM_TYPE,
+  LEGACY_LOOP_LIST_CONTINUE_CUSTOM_TYPE,
   LOOP_LIST_CUSTOM_TYPE,
   PENDING_PROMPT_BATCH_CUSTOM_TYPE,
   PENDING_PROMPT_DELIVERY_CUSTOM_TYPE,
@@ -615,10 +617,10 @@ describe("validatePiSessionFile", () => {
     const conversationId = randomUUID();
     const runId = randomUUID();
     const initialItems = [
-      { id: "implement", text: "Implement the change", checked: false },
+      { id: "implement", text: "Implement the change", status: "active" as const },
     ];
     const updatedItems = [
-      { id: "implement", text: "Verify the change", checked: false },
+      { id: "implement", text: "Verify the change", status: "pending" as const },
     ];
     const session = serialize([
       {
@@ -663,6 +665,72 @@ describe("validatePiSessionFile", () => {
       "valid-loop-list-continuations.jsonl",
       conversationId,
     )).toBe(conversationId);
+  });
+
+  it("accepts legacy LoopList state and continuation snapshots without inventing active work", () => {
+    const conversationId = randomUUID();
+    const runId = randomUUID();
+    const legacyItems = [
+      { id: "implement", text: "Implement the change", checked: false },
+      { id: "done", text: "Finished work", checked: true },
+    ];
+    const legacyState = {
+      type: "custom",
+      id: "00000001",
+      parentId: null,
+      timestamp,
+      customType: LEGACY_LOOP_LIST_CUSTOM_TYPE,
+      data: { items: legacyItems, armed: true, updatedAt: timestamp },
+    };
+    const legacyContinuation = {
+      type: "custom_message",
+      id: "00000002",
+      parentId: "00000001",
+      timestamp,
+      customType: LEGACY_LOOP_LIST_CONTINUE_CUSTOM_TYPE,
+      content: [
+        "Current LoopList snapshot:",
+        "[ ] Implement the change (implement)",
+        "[x] Finished work (done)",
+        "Continue working through the unchecked items. Update the list with todo_write as progress changes.",
+      ].join("\n"),
+      display: false,
+      details: { runId, continuation: 1, items: legacyItems },
+    };
+    const migratedItems = [
+      { id: "implement", text: "Implement the change", status: "pending" as const },
+      { id: "done", text: "Finished work", status: "completed" as const },
+    ];
+    const currentContinuation = loopListContinuationEntry(
+      "00000003",
+      "00000001",
+      runId,
+      1,
+      migratedItems,
+    );
+    const session = serialize([
+      {
+        type: "session",
+        version: 3,
+        id: conversationId,
+        timestamp,
+        cwd: "E:\\work",
+      },
+      legacyState,
+      legacyContinuation,
+      currentContinuation,
+    ]);
+
+    expect(validatePiSessionFile(
+      session,
+      "legacy-loop-list-continuations.jsonl",
+      conversationId,
+    )).toBe(conversationId);
+    expect(inspectPiSessionFile(
+      session,
+      "legacy-loop-list-continuations.jsonl",
+      conversationId,
+    ).loopList?.items).toEqual(migratedItems);
   });
 
   it.each([
@@ -716,7 +784,7 @@ describe("validatePiSessionFile", () => {
     const conversationId = randomUUID();
     const runId = randomUUID();
     const items = [
-      { id: "implement", text: "Implement the change", checked: false },
+      { id: "implement", text: "Implement the change", status: "active" as const },
     ];
     const session = serialize([
       {
@@ -846,8 +914,8 @@ describe("validatePiSessionFile", () => {
         customType: LOOP_LIST_CUSTOM_TYPE,
         data: {
           items: [
-            { id: "duplicate", text: "first", checked: false },
-            { id: "duplicate", text: "second", checked: false },
+            { id: "duplicate", text: "first", status: "pending" },
+            { id: "duplicate", text: "second", status: "active" },
           ],
           armed: true,
           updatedAt: timestamp,

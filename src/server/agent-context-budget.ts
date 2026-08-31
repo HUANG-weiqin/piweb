@@ -1,8 +1,11 @@
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type { LoopList } from "../shared/protocol.js";
 
 type ConvertToLlm = AgentSession["agent"]["convertToLlm"];
 type AgentMessage = Parameters<ConvertToLlm>[0][number];
 type LlmMessages = Awaited<ReturnType<ConvertToLlm>>;
+
+const PIWEB_WORK_RECORD_MAX_BYTES = 4096;
 
 export interface AgentContextBudgetController {
   dispose(): void;
@@ -56,9 +59,36 @@ function createTelemetry(
   return `<piweb_ctx used="${formatTokens(usage.tokens)}/${formatTokens(window)}" auto_compact="${thresholdPercent}%" remaining="${formatTokens(remaining)}"${warning} />`;
 }
 
-function appendTelemetry(
+function createWorkHint(loopList: LoopList): string | undefined {
+  const active = loopList.items
+    .filter((item) => item.status === "active")
+    .map(({ id, text }) => ({ id, text }));
+  if (active.length === 0) return undefined;
+
+  for (let included = active.length; included > 0; included -= 1) {
+    const omitted = active.length - included;
+    const record = `piweb_work=${JSON.stringify({
+      active: active.slice(0, included),
+      omitted,
+      ...(omitted > 0 ? { moreVia: "todo_read" } : {}),
+      onStatusChange: "todo_write",
+    })}`;
+    if (Buffer.byteLength(record, "utf8") <= PIWEB_WORK_RECORD_MAX_BYTES) {
+      return record;
+    }
+  }
+
+  return `piweb_work=${JSON.stringify({
+    active: [],
+    omitted: active.length,
+    moreVia: "todo_read",
+    onStatusChange: "todo_write",
+  })}`;
+}
+
+function appendProviderTail(
   messages: LlmMessages,
-  telemetry: string,
+  providerTail: string,
 ): LlmMessages {
   const lastMessage = messages.at(-1);
   if (
@@ -68,10 +98,10 @@ function appendTelemetry(
     return messages;
   }
 
-  const telemetryPart = { type: "text" as const, text: telemetry };
+  const tailPart = { type: "text" as const, text: providerTail };
   const content = typeof lastMessage.content === "string"
-    ? [{ type: "text" as const, text: lastMessage.content }, telemetryPart]
-    : [...lastMessage.content, telemetryPart];
+    ? [{ type: "text" as const, text: lastMessage.content }, tailPart]
+    : [...lastMessage.content, tailPart];
   return [
     ...messages.slice(0, -1),
     { ...lastMessage, content },
@@ -80,7 +110,8 @@ function appendTelemetry(
 
 export function installAgentContextBudget(
   session: AgentSession,
-  getCompactionThresholdPercent: () => number,
+  getCompactionThresholdPercent?: () => number,
+  getLoopList?: () => LoopList,
 ): AgentContextBudgetController {
   const agent = session.agent;
   const original = agent.convertToLlm;
@@ -94,14 +125,33 @@ export function installAgentContextBudget(
     messages: AgentMessage[],
   ): Promise<LlmMessages> {
     const converted = await original.call(this, messages);
-    try {
-      const usage = session.getContextUsage();
-      const thresholdPercent = getCompactionThresholdPercent();
-      const telemetry = createTelemetry(usage, thresholdPercent);
-      return telemetry ? appendTelemetry(converted, telemetry) : converted;
-    } catch {
-      return converted;
+    let telemetry: string | undefined;
+    if (getCompactionThresholdPercent) {
+      try {
+        telemetry = createTelemetry(
+          session.getContextUsage(),
+          getCompactionThresholdPercent(),
+        );
+      } catch {
+        // Provider context hints are transient and must not block a model call.
+      }
     }
+
+    let workHint: string | undefined;
+    if (getLoopList) {
+      try {
+        workHint = createWorkHint(getLoopList());
+      } catch {
+        // Preserve any available telemetry when the live work snapshot fails.
+      }
+    }
+
+    const providerTail = telemetry && workHint
+      ? `${telemetry}\n${workHint}`
+      : telemetry ?? workHint;
+    return providerTail
+      ? appendProviderTail(converted, providerTail)
+      : converted;
   }
 
   agent.convertToLlm = convertToLlm;

@@ -2776,7 +2776,7 @@ describe("PiConnection coordinated project view", () => {
       expect(todoPause).toBeDefined();
       harness.runtime.created.at(-1)!.prompt = async () => {
         await todoWrite?.execute("write", {
-          items: [{ id: "event", text: "Project this", checked: false }],
+          items: [{ id: "event", text: "Project this", status: "active" }],
         });
         await todoPause?.execute("pause", {});
       };
@@ -2804,7 +2804,7 @@ describe("PiConnection coordinated project view", () => {
       }
       expect(updates.at(-1)).toMatchObject({
         loopList: {
-          items: [{ id: "event", text: "Project this", checked: false }],
+          items: [{ id: "event", text: "Project this", status: "active" }],
           armed: false,
         },
       });

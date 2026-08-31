@@ -20,6 +20,7 @@ import {
   type InlineExtension,
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
+import type { LoopList } from "../shared/protocol.js";
 import { PiRuntime } from "./pi-runtime.js";
 
 initTheme();
@@ -379,6 +380,77 @@ describe("PiRuntime session ownership", () => {
 
     await created.dispose();
     expect(created.session.agent.transformContext).toBe(originalTransform);
+    expect(created.session.agent.convertToLlm).toBe(originalConverter);
+  });
+
+  it("projects the latest active LoopList without telemetry and restores the converter", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-work-hint-"));
+    let originalConverter: unknown;
+    const runtime = await testRuntime(
+      () => [],
+      async (result) => {
+        originalConverter = result.session.agent.convertToLlm;
+      },
+    );
+    let loopList: LoopList = {
+      items: [
+        { id: "waiting", text: "Wait", status: "pending" },
+        { id: "first", text: "First active item", status: "active" },
+      ],
+      armed: true,
+    };
+    const getLoopList = vi.fn(() => loopList);
+    const created = await runtime.createSession(cwd, { getLoopList });
+    const getContextUsage = vi.spyOn(created.session, "getContextUsage");
+    const input = [{
+      role: "user" as const,
+      content: [{ type: "text" as const, text: "input" }],
+      timestamp: 1,
+    }];
+    const sessionMessagesBefore = [...created.session.messages];
+
+    const first = await created.session.agent.convertToLlm(input);
+    loopList = {
+      items: [{ id: "second", text: "Latest active item", status: "active" }],
+      armed: true,
+    };
+    const second = await created.session.agent.convertToLlm(input);
+    loopList = {
+      items: [{ id: "done", text: "Finished", status: "completed" }],
+      armed: false,
+    };
+    const noActive = await created.session.agent.convertToLlm(input);
+
+    expect(first.at(-1)).toMatchObject({
+      role: "user",
+      content: [
+        { type: "text", text: "input" },
+        {
+          type: "text",
+          text: "piweb_work={\"active\":[{\"id\":\"first\",\"text\":\"First active item\"}],\"omitted\":0,\"onStatusChange\":\"todo_write\"}",
+        },
+      ],
+    });
+    expect(second.at(-1)).toMatchObject({
+      role: "user",
+      content: [
+        { type: "text", text: "input" },
+        {
+          type: "text",
+          text: "piweb_work={\"active\":[{\"id\":\"second\",\"text\":\"Latest active item\"}],\"omitted\":0,\"onStatusChange\":\"todo_write\"}",
+        },
+      ],
+    });
+    expect(noActive.at(-1)).toMatchObject({
+      role: "user",
+      content: [{ type: "text", text: "input" }],
+    });
+    expect(getLoopList).toHaveBeenCalledTimes(3);
+    expect(getContextUsage).not.toHaveBeenCalled();
+    expect(created.session.messages).toEqual(sessionMessagesBefore);
+    expect(created.session.agent.convertToLlm).not.toBe(originalConverter);
+
+    await created.dispose();
     expect(created.session.agent.convertToLlm).toBe(originalConverter);
   });
 

@@ -292,51 +292,66 @@ describe("Chat", () => {
     expect(screen.queryByRole("region", { name: "Tasks" })).not.toBeInTheDocument();
   });
 
-  it("shows a collapsed read-only Tasks panel and keeps completed nonempty lists", () => {
+  it("shows tri-state Tasks without conflating item activity with run execution", () => {
     const loopList = {
       items: [
-        { id: "done", text: "Finished item", checked: true },
-        { id: "next", text: "Pending item", checked: false },
+        { id: "done", text: "Finished item", status: "completed" as const },
+        { id: "active-one", text: "Active item one", status: "active" as const },
+        { id: "active-two", text: "Active item two", status: "active" as const },
+        { id: "next", text: "Pending item", status: "pending" as const },
       ],
       armed: false,
     };
-    const { rerender } = render(view(emptyChat, "", undefined, { loopList }));
+    const { rerender } = render(view(emptyChat, "", undefined, {
+      loopList,
+      busy: true,
+    }));
     const toggle = screen.getByRole("button", { name: /Tasks/ });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByText("已暂停")).toBeInTheDocument();
-    expect(screen.getByText("1/2 · 1 项未完成")).toBeInTheDocument();
+    expect(screen.getByText("1/4 · 3 项未完成")).toBeInTheDocument();
     expect(screen.queryByText("Pending item")).not.toBeInTheDocument();
 
     fireEvent.click(toggle);
     expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByRole("checkbox", { name: "Finished item" })).toBeDisabled();
-    expect(screen.getByRole("checkbox", { name: "Finished item" })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: "Pending item" })).not.toBeChecked();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "已完成" })).toBeInTheDocument();
+    expect(screen.getAllByRole("img", { name: "进行中" })).toHaveLength(2);
+    expect(screen.getByRole("img", { name: "待处理" })).toBeInTheDocument();
+    expect(screen.getByText("Active item one").closest("li"))
+      .toHaveClass("active");
+    expect(screen.getByText("Finished item").closest("li"))
+      .toHaveClass("completed");
+    expect(Array.from(screen.getAllByRole("listitem"), (item) =>
+      item.querySelector(".loop-list-item-text")?.textContent,
+    )).toEqual([
+      "Finished item",
+      "Active item one",
+      "Active item two",
+      "Pending item",
+    ]);
 
     rerender(view(emptyChat, "", undefined, {
-      loopList: {
-        items: [
-          { id: "done", text: "Finished item updated", checked: true },
-          { id: "replacement", text: "Replacement item", checked: false },
-        ],
-        armed: true,
-      },
+      loopList: { ...loopList, armed: true },
       busy: true,
     }));
     expect(screen.getByRole("button", { name: /Tasks/ }))
       .toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByText("Replacement item")).toBeInTheDocument();
     expect(screen.getByText("执行中")).toBeInTheDocument();
+    expect(screen.getAllByRole("img", { name: "进行中" })).toHaveLength(2);
 
     rerender(view(emptyChat, "", undefined, {
       loopList: {
-        items: loopList.items.map((item) => ({ ...item, checked: true })),
+        items: loopList.items.map((item) => ({
+          ...item,
+          status: "completed" as const,
+        })),
         armed: false,
       },
     }));
     expect(screen.getByRole("region", { name: "Tasks" })).toBeInTheDocument();
     expect(screen.getByText("已完成")).toBeInTheDocument();
-    expect(screen.getByText("2/2")).toBeInTheDocument();
+    expect(screen.getByText("4/4")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Tasks/ }))
       .toHaveAttribute("aria-expanded", "false");
   });
@@ -364,7 +379,7 @@ describe("Chat", () => {
 
     const { container } = render(view(emptyChat, "", undefined, {
       loopList: {
-        items: [{ id: "measure", text: "Measure", checked: false }],
+        items: [{ id: "measure", text: "Measure", status: "pending" }],
         armed: false,
       },
     }));
@@ -485,7 +500,7 @@ describe("Chat", () => {
       activeRun: { id: "run-1", phase: "running" },
       pendingAdmissions: admissions,
       loopList: {
-        items: [{ id: "active", text: "Finish current work", checked: false }],
+        items: [{ id: "active", text: "Finish current work", status: "active" }],
         armed: true,
       },
     }));

@@ -26,7 +26,7 @@ const messageId = "assistant:96b960be-b6bb-4a19-9cf2-78e77cb69425";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(38);
+    expect(PROTOCOL_VERSION).toBe(39);
   });
 
   it("accepts supported commands", () => {
@@ -1197,7 +1197,11 @@ describe("parseClientCommand", () => {
 describe("parseServerEvent", () => {
   it("parses bounded LoopList snapshots and focus-correlated live updates", () => {
     const loopList = {
-      items: [{ id: "verify", text: "Verify behavior", checked: false }],
+      items: [
+        { id: "plan", text: "Plan behavior", status: "pending" as const },
+        { id: "verify", text: "Verify behavior", status: "active" as const },
+        { id: "done", text: "Record result", status: "completed" as const },
+      ],
       armed: true,
     };
     expect(parseServerEvent({
@@ -1232,6 +1236,26 @@ describe("parseServerEvent", () => {
         items: [...loopList.items, loopList.items[0]],
       },
     })).toThrow(/unique/i);
+    expect(() => parseServerEvent({
+      type: "loop_list_update",
+      sessionId,
+      conversationId,
+      focusId,
+      loopList: {
+        items: [{ id: "legacy", text: "Old shape", checked: false }],
+        armed: true,
+      },
+    })).toThrow();
+    expect(() => parseServerEvent({
+      type: "loop_list_update",
+      sessionId,
+      conversationId,
+      focusId,
+      loopList: {
+        items: [{ id: "invalid", text: "Bad state", status: "running" }],
+        armed: true,
+      },
+    })).toThrow();
   });
 
   it("strictly parses a correlated read-only conversation preview", () => {
