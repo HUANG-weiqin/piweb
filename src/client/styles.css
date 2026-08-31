@@ -866,6 +866,36 @@ pre {
   overflow-wrap: anywhere;
 }
 
+.markdown .mermaid-diagram {
+  max-width: 100%;
+  margin: 0 0 1em;
+  overflow-x: auto;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-strong);
+  scrollbar-width: thin;
+}
+
+.markdown .mermaid-diagram svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
+
+.markdown pre.mermaid-fallback {
+  margin-bottom: 0.35em;
+  border-color: color-mix(in srgb, var(--warning) 42%, var(--line));
+}
+
+.markdown .mermaid-error {
+  display: block;
+  margin: 0 0 1em;
+  color: var(--warning);
+  font-size: 0.82em;
+}
+
 .thinking,
 .tools {
   margin: 11px 0;

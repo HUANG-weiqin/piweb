@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -16,6 +16,13 @@ import {
   type ChatState,
 } from "../chat/reducer";
 import { Chat } from "./Chat";
+
+const mermaidMock = vi.hoisted(() => ({
+  initialize: vi.fn(),
+  render: vi.fn(),
+}));
+
+vi.mock("mermaid", () => ({ default: mermaidMock }));
 
 function messageItems(...messages: ChatMessage[]): ChatMessageItem[] {
   return messages.map((message) => ({ kind: "message", ...message }));
@@ -845,6 +852,87 @@ describe("Chat", () => {
       behavior: "smooth",
       top: 468,
     });
+  });
+
+  it("keeps following after a Mermaid diagram changes transcript height", async () => {
+    let finishRender!: (result: { svg: string }) => void;
+    mermaidMock.render.mockReset().mockReturnValue(new Promise((resolve) => {
+      finishRender = resolve;
+    }));
+    const chat: ChatState = {
+      items: messageItems({
+        id: "assistant-mermaid",
+        runId: "run-mermaid",
+        role: "assistant",
+        text: "```mermaid\nflowchart LR\nA --> B\n```",
+        thinking: "",
+        tools: [],
+      }),
+    };
+    const rendered = render(view(chat));
+    const transcript = rendered.container.querySelector<HTMLElement>(
+      ".transcript",
+    );
+    if (!transcript) throw new Error("transcript not rendered");
+    let scrollHeight = 1_000;
+    const scrollTo = vi.fn();
+    Object.defineProperties(transcript, {
+      scrollHeight: { configurable: true, get: () => scrollHeight },
+      clientHeight: { configurable: true, value: 500 },
+      scrollTop: { configurable: true, writable: true, value: 400 },
+      scrollTo: { configurable: true, value: scrollTo },
+    });
+
+    await waitFor(() => expect(mermaidMock.render).toHaveBeenCalledTimes(1));
+    scrollHeight = 1_200;
+    finishRender({
+      svg: '<svg xmlns="http://www.w3.org/2000/svg"><text>diagram</text></svg>',
+    });
+
+    await waitFor(() => expect(scrollTo).toHaveBeenCalledWith({
+      behavior: "smooth",
+      top: 668,
+    }));
+  });
+
+  it("does not reclaim scroll after Mermaid settles when the user detached", async () => {
+    let finishRender!: (result: { svg: string }) => void;
+    mermaidMock.render.mockReset().mockReturnValue(new Promise((resolve) => {
+      finishRender = resolve;
+    }));
+    const chat: ChatState = {
+      items: messageItems({
+        id: "assistant-mermaid-detached",
+        runId: "run-mermaid-detached",
+        role: "assistant",
+        text: "```mermaid\nflowchart LR\nA --> B\n```",
+        thinking: "",
+        tools: [],
+      }),
+    };
+    const rendered = render(view(chat));
+    const transcript = rendered.container.querySelector<HTMLElement>(
+      ".transcript",
+    );
+    if (!transcript) throw new Error("transcript not rendered");
+    const scrollTo = vi.fn();
+    Object.defineProperties(transcript, {
+      scrollHeight: { configurable: true, value: 1_200 },
+      clientHeight: { configurable: true, value: 500 },
+      scrollTop: { configurable: true, writable: true, value: 400 },
+      scrollTo: { configurable: true, value: scrollTo },
+    });
+
+    await waitFor(() => expect(mermaidMock.render).toHaveBeenCalledTimes(1));
+    fireEvent.wheel(transcript, { deltaY: -40 });
+    scrollTo.mockClear();
+    finishRender({
+      svg: '<svg xmlns="http://www.w3.org/2000/svg"><text>diagram</text></svg>',
+    });
+
+    expect(await screen.findByRole("img", { name: "Mermaid 图" }))
+      .toHaveTextContent("diagram");
+    expect(scrollTo).not.toHaveBeenCalled();
   });
 
   it("shows the final received burst immediately when the run finishes", () => {

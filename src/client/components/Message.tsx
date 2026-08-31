@@ -6,8 +6,6 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import DOMPurify from "dompurify";
-import { marked } from "marked";
 import {
   orderedMessageParts,
   type ChatMessage,
@@ -16,15 +14,16 @@ import {
 } from "../chat/reducer";
 import { ActivitySpinner } from "./ActivitySpinner";
 import { CommitmentCard, isCommitmentTool } from "./CommitmentCard";
+import {
+  getMermaidSourceAnalysis,
+  MarkdownContent,
+  MERMAID_MAX_BLOCKS_PER_CONTENT,
+  MERMAID_MAX_TOTAL_SOURCE_LENGTH,
+} from "./MarkdownContent";
 import { ToolCard, toolPresentation } from "./ToolCard";
 
 const TOOL_PREVIEW_LIMIT = 4;
 const ACTIVITY_TIMELINE_LIMIT = 16;
-
-function renderMarkdown(markdown: string): string {
-  return DOMPurify.sanitize(marked.parse(markdown, { async: false }) as string);
-}
-
 interface StreamingMarkdownParts {
   stableBlocks: string[];
   tail: string;
@@ -118,31 +117,89 @@ function useStreamingMarkdownParts(text: string): StreamingMarkdownParts {
 
 const StreamingMarkdownBlock = memo(function StreamingMarkdownBlock({
   markdown,
+  renderMermaid,
+  mermaidMaxBlocks,
+  mermaidMaxTotalSourceLength,
+  onRenderSettled,
 }: {
   markdown: string;
+  renderMermaid: boolean;
+  mermaidMaxBlocks: number;
+  mermaidMaxTotalSourceLength: number;
+  onRenderSettled?(): void;
 }) {
-  const html = useMemo(() => renderMarkdown(markdown), [markdown]);
-  return <div
+  return <MarkdownContent
     className="markdown streaming-stable"
-    dangerouslySetInnerHTML={{ __html: html }}
+    markdown={markdown}
+    renderMermaid={renderMermaid}
+    mermaidMaxBlocks={mermaidMaxBlocks}
+    mermaidMaxTotalSourceLength={mermaidMaxTotalSourceLength}
+    onRenderSettled={onRenderSettled}
   />;
 });
 
 function StreamingMarkdown({
   text,
   placeholder,
+  renderMermaid,
+  mermaidMaxBlocks,
+  mermaidMaxTotalSourceLength,
+  onRenderSettled,
 }: {
   text: string;
   placeholder?: string;
+  renderMermaid: boolean;
+  mermaidMaxBlocks: number;
+  mermaidMaxTotalSourceLength: number;
+  onRenderSettled?(): void;
 }) {
   const { stableBlocks, tail } = useStreamingMarkdownParts(text);
+  const analysisCacheRef = useRef(new Map<
+    string,
+    ReturnType<typeof getMermaidSourceAnalysis>
+  >());
   const pendingText = tail || placeholder;
+  let mermaidBlockCount = 0;
+  let mermaidSourceLength = 0;
+
+  function cachedAnalysis(block: string): ReturnType<typeof getMermaidSourceAnalysis> {
+    const cache = analysisCacheRef.current;
+    const cached = cache.get(block);
+    if (cached) return cached;
+    const analysis = getMermaidSourceAnalysis(block);
+    if (cache.size >= 16) cache.clear();
+    cache.set(block, analysis);
+    return analysis;
+  }
 
   return <div className="markdown streaming-markdown">
-    {stableBlocks.map((block, index) => <StreamingMarkdownBlock
-      key={`streaming-block:${index}`}
-      markdown={block}
-    />)}
+    {stableBlocks.map((block, index) => {
+      const analysis = renderMermaid ? cachedAnalysis(block) : undefined;
+      const mermaidMaxBlocksForBlock = Math.max(
+        0,
+        mermaidMaxBlocks - mermaidBlockCount,
+      );
+      const mermaidMaxSourceLengthForBlock = Math.max(
+        0,
+        mermaidMaxTotalSourceLength - mermaidSourceLength,
+      );
+      for (const sourceLength of analysis?.sourceLengths ?? []) {
+        if (
+          mermaidBlockCount >= mermaidMaxBlocks
+          || mermaidSourceLength + sourceLength > mermaidMaxTotalSourceLength
+        ) continue;
+        mermaidBlockCount += 1;
+        mermaidSourceLength += sourceLength;
+      }
+      return <StreamingMarkdownBlock
+        key={`streaming-block:${index}`}
+        markdown={block}
+        renderMermaid={renderMermaid && !!analysis?.hasMermaidFence}
+        mermaidMaxBlocks={mermaidMaxBlocksForBlock}
+        mermaidMaxTotalSourceLength={mermaidMaxSourceLengthForBlock}
+        onRenderSettled={onRenderSettled}
+      />;
+    })}
     {pendingText ? <div className="streaming-tail">{pendingText}</div> : null}
   </div>;
 }
@@ -180,10 +237,6 @@ function ThinkingPanel({
   active: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  const html = useMemo(
-    () => open ? renderMarkdown(text) : "",
-    [open, text],
-  );
 
   return <details className={`thinking${active ? " is-active" : ""}`} open={open}>
     <summary onClick={(event) => {
@@ -202,9 +255,9 @@ function ThinkingPanel({
       <span>{active ? "正在思考" : "思考过程"}</span>
       <span className="thinking-chevron" aria-hidden="true">⌄</span>
     </summary>
-    {open && <div
+    {open && <MarkdownContent
       className="thinking-body markdown"
-      dangerouslySetInnerHTML={{ __html: html }}
+      markdown={text}
     />}
   </details>;
 }
@@ -445,9 +498,27 @@ function ActivityGroup({
   </details>;
 }
 
-const MarkdownBlock = memo(function MarkdownBlock({ text }: { text: string }) {
-  const html = useMemo(() => renderMarkdown(text), [text]);
-  return <div className="markdown" dangerouslySetInnerHTML={{ __html: html }} />;
+const MarkdownBlock = memo(function MarkdownBlock({
+  text,
+  renderMermaid,
+  mermaidMaxBlocks,
+  mermaidMaxTotalSourceLength,
+  onRenderSettled,
+}: {
+  text: string;
+  renderMermaid: boolean;
+  mermaidMaxBlocks: number;
+  mermaidMaxTotalSourceLength: number;
+  onRenderSettled?(): void;
+}) {
+  return <MarkdownContent
+    className="markdown"
+    markdown={text}
+    renderMermaid={renderMermaid}
+    mermaidMaxBlocks={mermaidMaxBlocks}
+    mermaidMaxTotalSourceLength={mermaidMaxTotalSourceLength}
+    onRenderSettled={onRenderSettled}
+  />;
 });
 
 interface MessageProps {
@@ -459,6 +530,7 @@ interface MessageProps {
   streamingText?: boolean;
   collapsed?: boolean;
   observedEditBudgetRemainingFiles?: number | null;
+  onContentSettled?(): void;
 }
 
 function MessageView({
@@ -470,8 +542,16 @@ function MessageView({
   streamingText = false,
   collapsed = false,
   observedEditBudgetRemainingFiles,
+  onContentSettled,
 }: MessageProps) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const [enhancedResponseIndexes, setEnhancedResponseIndexes] = useState(
+    () => new Set<number>(),
+  );
+  const mermaidSourceCacheRef = useRef(new Map<
+    string,
+    ReturnType<typeof getMermaidSourceAnalysis>
+  >());
 
   async function copyMessage() {
     try {
@@ -546,16 +626,67 @@ function MessageView({
     blocks,
     (block) => block.kind === "activity",
   );
+  let remainingMermaidBlocks = MERMAID_MAX_BLOCKS_PER_CONTENT;
+  let remainingMermaidSourceLength = MERMAID_MAX_TOTAL_SOURCE_LENGTH;
+
+  function cachedMermaidAnalysis(
+    text: string,
+  ): ReturnType<typeof getMermaidSourceAnalysis> {
+    const cache = mermaidSourceCacheRef.current;
+    const cached = cache.get(text);
+    if (cached) return cached;
+    const analysis = getMermaidSourceAnalysis(text);
+    if (cache.size >= 16) cache.clear();
+    cache.set(text, analysis);
+    return analysis;
+  }
 
   function renderResponseBody(text: string, index: number): ReactNode {
     const showingStreamingText = streamingText && index === lastTextIndex;
+    const renderMermaid = !collapsed || enhancedResponseIndexes.has(index);
+    const mermaidMaxBlocks = remainingMermaidBlocks;
+    const mermaidMaxTotalSourceLength = remainingMermaidSourceLength;
+    if (!showingStreamingText) {
+      let usedBlocks = 0;
+      let usedSourceLength = 0;
+      for (const sourceLength of cachedMermaidAnalysis(text).sourceLengths) {
+        if (
+          usedBlocks >= mermaidMaxBlocks
+          || usedSourceLength + sourceLength > mermaidMaxTotalSourceLength
+        ) continue;
+        usedBlocks += 1;
+        usedSourceLength += sourceLength;
+      }
+      remainingMermaidBlocks -= usedBlocks;
+      remainingMermaidSourceLength -= usedSourceLength;
+    }
     const body = showingStreamingText
       ? <StreamingMarkdown
           text={text}
           placeholder={hasActivity ? undefined : "…"}
+          renderMermaid={renderMermaid}
+          mermaidMaxBlocks={mermaidMaxBlocks}
+          mermaidMaxTotalSourceLength={mermaidMaxTotalSourceLength}
+          onRenderSettled={onContentSettled}
         />
-      : <MarkdownBlock text={text || (hasActivity ? "" : "…")} />;
-    return collapsed && text ? <details className="assistant-response">
+      : <MarkdownBlock
+          text={text || (hasActivity ? "" : "…")}
+          renderMermaid={renderMermaid}
+          mermaidMaxBlocks={mermaidMaxBlocks}
+          mermaidMaxTotalSourceLength={mermaidMaxTotalSourceLength}
+          onRenderSettled={onContentSettled}
+        />;
+    return collapsed && text ? <details
+      className="assistant-response"
+      onToggle={(event) => {
+        if (!event.currentTarget.open || enhancedResponseIndexes.has(index)) return;
+        setEnhancedResponseIndexes((current) => {
+          const next = new Set(current);
+          next.add(index);
+          return next;
+        });
+      }}
+    >
       <summary>
         <span className="assistant-response-title">回复正文</span>
         <span className="assistant-response-chevron" aria-hidden="true">⌄</span>

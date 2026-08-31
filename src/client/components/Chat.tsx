@@ -438,6 +438,9 @@ function ChatView({
       "smooth",
     );
   }, [scrollTranscript]);
+  const handleMessageContentSettled = useCallback(() => {
+    if (followOutputRef.current) followLatest();
+  }, [followLatest]);
   useLayoutEffect(() => {
     if (observedTranscriptKeyRef.current !== transcriptRenderScopeKey) {
       observedTranscriptKeyRef.current = transcriptRenderScopeKey;
@@ -665,6 +668,7 @@ function ChatView({
           observedEditBudgetRemainingFiles={
             editBudgetRemainingByRun.get(block.message.runId)
           }
+          onContentSettled={handleMessageContentSettled}
           collapsed={
             block.message.role === "assistant"
             && !expandedAssistantMessageIds.has(block.message.id)
