@@ -25,7 +25,7 @@ import {
   type ModelsRefreshResult,
   type ModelsStore,
 } from "@earendil-works/pi-ai";
-import type { ServiceTier, ToolMode } from "../shared/protocol.js";
+import type { LoopList, ServiceTier, ToolMode } from "../shared/protocol.js";
 import type { PortableExtensionUI } from "./extension-ui.js";
 import { applyCodexAutoTransportPolicy } from "./codex-transport-policy.js";
 import {
@@ -128,6 +128,7 @@ export interface CreatePiSessionOptions {
   toolMode?: ToolMode;
   turnBoundaryCheck?: (input: AgentTurnBoundaryCheck) => boolean;
   getCompactionThresholdPercent?: () => number;
+  getLoopList?: () => LoopList;
   getServiceTier?: () => ServiceTier | null;
 }
 
@@ -633,12 +634,13 @@ export class PiRuntime implements PiRuntimeLike {
       // Agent.steeringMode 公开 setter 直接改 PendingMessageQueue.mode（drain 时实时读取）。
       createdSession.agent.steeringMode = "all";
       installToolResultCompression(createdSession);
-      if (options.getCompactionThresholdPercent) {
+      if (options.getCompactionThresholdPercent || options.getLoopList) {
         // This host converter runs after the SDK extension transform and keeps
-        // telemetry inside the existing final input instead of creating a new turn.
+        // transient hints inside the existing final input instead of creating a new turn.
         contextBudgetController = installAgentContextBudget(
           createdSession,
           options.getCompactionThresholdPercent,
+          options.getLoopList,
         );
       }
       if (readOnlyToolProjection) {

@@ -18,6 +18,7 @@ import {
   type ConversationWindowCoverage,
   type PendingPromptAdmissionSnapshot as PendingAdmission,
   type LoopList,
+  type LoopListItemStatus,
   type PublicState,
   type RoleTemplate,
   type ServiceTier,
@@ -60,6 +61,18 @@ function distanceFromBottom(transcript: HTMLElement): number {
     transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight,
   );
 }
+
+const LOOP_LIST_ITEM_STATUS_LABELS: Record<LoopListItemStatus, string> = {
+  pending: "待处理",
+  active: "进行中",
+  completed: "已完成",
+};
+
+const LOOP_LIST_ITEM_STATUS_SYMBOLS: Record<LoopListItemStatus, string> = {
+  pending: "○",
+  active: "•",
+  completed: "✓",
+};
 
 interface ChatProps {
   chat: ChatState;
@@ -351,11 +364,14 @@ function ChatView({
   const transcriptRenderScopeKey = chat.focus
     ? `${observationSessionId}:${chat.focus.conversationId}`
     : "unfocused";
-  const loopListEmpty = loopList.items.length === 0;
-  const checkedLoopListItems = loopList.items.filter((item) => item.checked).length;
+  const loopListItems = loopList.items;
+  const loopListEmpty = loopListItems.length === 0;
+  const completedLoopListItems = loopListItems.filter(
+    (item) => item.status === "completed",
+  ).length;
   const loopListCompleted = !loopListEmpty
-    && checkedLoopListItems === loopList.items.length;
-  const remainingLoopListItems = loopList.items.length - checkedLoopListItems;
+    && completedLoopListItems === loopListItems.length;
+  const remainingLoopListItems = loopListItems.length - completedLoopListItems;
   let loopListStatusKey = "paused";
   let loopListStatusLabel = "已暂停";
   if (loopListCompleted) {
@@ -706,7 +722,7 @@ function ChatView({
           </div>
         ))}
       </section>}
-      {loopList.items.length > 0 && <section
+      {loopListItems.length > 0 && <section
         className="loop-list"
         aria-label="Tasks"
       >
@@ -721,23 +737,24 @@ function ChatView({
             {loopListStatusLabel}
           </span>
           <span className="loop-list-count">
-            {checkedLoopListItems}/{loopList.items.length}
+            {completedLoopListItems}/{loopListItems.length}
             {remainingLoopListItems > 0 && ` · ${remainingLoopListItems} 项未完成`}
           </span>
           <span aria-hidden="true">{loopListExpanded ? "⌃" : "⌄"}</span>
         </button>
         {loopListExpanded && <ul className="loop-list-items">
-          {loopList.items.map((item) => <li
+          {loopListItems.map((item) => <li
             key={item.id}
-            className={item.checked ? "checked" : ""}
+            className={`loop-list-item ${item.status}`}
           >
-            <input
-              type="checkbox"
-              checked={item.checked}
-              disabled
-              aria-label={item.text}
-            />
-            <span>{item.text}</span>
+            <span
+              className="loop-list-item-marker"
+              role="img"
+              aria-label={LOOP_LIST_ITEM_STATUS_LABELS[item.status]}
+            >
+              {LOOP_LIST_ITEM_STATUS_SYMBOLS[item.status]}
+            </span>
+            <span className="loop-list-item-text">{item.text}</span>
           </li>)}
         </ul>}
       </section>}

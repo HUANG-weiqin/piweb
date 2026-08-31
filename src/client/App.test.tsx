@@ -584,7 +584,7 @@ describe("App", () => {
         focusId: FOCUS_A,
         items: [],
         loopList: {
-          items: [{ id: "focused", text: "Focused item", checked: false }],
+          items: [{ id: "focused", text: "Focused item", status: "pending" }],
           armed: false,
         },
         window: completeConversationWindow,
@@ -600,7 +600,7 @@ describe("App", () => {
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A_SECOND,
         loopList: {
-          items: [{ id: "focused", text: "Focused item", checked: true }],
+          items: [{ id: "focused", text: "Focused item", status: "completed" }],
           armed: false,
         },
       });
@@ -614,7 +614,7 @@ describe("App", () => {
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A,
         loopList: {
-          items: [{ id: "focused", text: "Focused item", checked: true }],
+          items: [{ id: "focused", text: "Focused item", status: "completed" }],
           armed: false,
         },
       });

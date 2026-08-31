@@ -560,10 +560,10 @@ function inspectPiSessionFileInternal(
         }
         if (
           !loopList.armed
-          || !loopList.items.some((item) => !item.checked)
+          || !loopList.items.some((item) => item.status !== "completed")
         ) {
           throw new Error(
-            "Piweb LoopList continuation requires an armed ancestor LoopList with unchecked work",
+            "Piweb LoopList continuation requires an armed ancestor LoopList with unfinished work",
           );
         }
         const expectedContinuation = (continuations.get(runId) ?? 0) + 1;

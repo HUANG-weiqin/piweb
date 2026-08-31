@@ -11,7 +11,11 @@ import {
 const itemsSchema = Type.Array(Type.Object({
   id: Type.String({ minLength: 1, maxLength: MAX_LOOP_LIST_ITEM_ID_CHARACTERS }),
   text: Type.String({ minLength: 1, maxLength: MAX_LOOP_LIST_ITEM_TEXT_CHARACTERS }),
-  checked: Type.Boolean(),
+  status: Type.Union([
+    Type.Literal("pending"),
+    Type.Literal("active"),
+    Type.Literal("completed"),
+  ]),
 }, { additionalProperties: false }), { maxItems: MAX_LOOP_LIST_ITEMS });
 const writeSchema = Type.Object({ items: itemsSchema }, { additionalProperties: false });
 const emptySchema = Type.Object({}, { additionalProperties: false });
@@ -34,7 +38,7 @@ export function createLoopListTools(service: LoopListToolService): ToolDefinitio
     defineTool({
       name: "todo_read",
       label: "Read LoopList",
-      description: "Read the authoritative checkbox list for this conversation.",
+      description: "Read the authoritative task list for this conversation.",
       parameters: emptySchema,
       async execute(_toolCallId, input) {
         if (!Check(emptySchema, input)) throw new Error("Invalid todo_read input");
@@ -44,8 +48,11 @@ export function createLoopListTools(service: LoopListToolService): ToolDefinitio
     defineTool({
       name: "todo_write",
       label: "Write LoopList",
-      description: "Replace this conversation's full bounded checkbox list. Preserve stable item IDs for continuing items. Writing arms or resumes unchecked work.",
-      promptGuidelines: ["Replace the full list; there are no item-by-item mutation tools."],
+      description: "Replace this conversation's full bounded task list. Each item is pending, active, or completed; multiple items may be active. Preserve stable item IDs for continuing items. Writing arms or resumes non-completed work.",
+      promptGuidelines: [
+        "Replace the full list; there are no item-by-item mutation tools.",
+        "Mark at least one current task active before requesting edit budget, and update statuses as progress changes.",
+      ],
       parameters: writeSchema,
       async execute(_toolCallId, input) {
         if (!Check(writeSchema, input)) throw new Error("Invalid todo_write input");
@@ -55,7 +62,7 @@ export function createLoopListTools(service: LoopListToolService): ToolDefinitio
     defineTool({
       name: "todo_pause",
       label: "Pause LoopList",
-      description: "Pause automatic LoopList continuation while preserving all items and check states.",
+      description: "Pause automatic LoopList continuation while preserving all items and statuses.",
       parameters: emptySchema,
       async execute(_toolCallId, input) {
         if (!Check(emptySchema, input)) throw new Error("Invalid todo_pause input");

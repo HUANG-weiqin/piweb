@@ -4,6 +4,9 @@ import {
   MAX_MODEL_REFERENCE_BYTES,
   MAX_PENDING_PROMPT_ATTENTION_REASON_CHARACTERS,
   MAX_PENDING_PROMPTS_PER_CONVERSATION,
+  MAX_LOOP_LIST_ITEMS,
+  MAX_LOOP_LIST_ITEM_ID_CHARACTERS,
+  MAX_LOOP_LIST_ITEM_TEXT_CHARACTERS,
   MIN_COMPACTION_THRESHOLD_PERCENT,
   loopListSchema,
   serviceTierSchema,
@@ -30,8 +33,11 @@ export const COMPACTION_THRESHOLD_CUSTOM_TYPE =
 export const SERVICE_TIER_CUSTOM_TYPE = "piweb.service_tier.v1";
 export const COMPACTION_RESUME_CUSTOM_TYPE =
   "piweb.compaction_resume.v1";
-export const LOOP_LIST_CUSTOM_TYPE = "piweb.loop_list.v1";
-export const LOOP_LIST_CONTINUE_CUSTOM_TYPE = "piweb.loop_list_continue.v1";
+export const LEGACY_LOOP_LIST_CUSTOM_TYPE = "piweb.loop_list.v1";
+export const LOOP_LIST_CUSTOM_TYPE = "piweb.loop_list.v2";
+export const LEGACY_LOOP_LIST_CONTINUE_CUSTOM_TYPE =
+  "piweb.loop_list_continue.v1";
+export const LOOP_LIST_CONTINUE_CUSTOM_TYPE = "piweb.loop_list_continue.v2";
 export const MAX_LOOP_LIST_CONTINUATIONS_PER_RUN = 8;
 export const CONVERSATION_ROLE_CHANGE_CUSTOM_TYPE =
   "piweb.conversation_role_change.v1";
@@ -365,6 +371,69 @@ const conversationMessageEntrySchema = z.object({
   details: conversationMessageDetailsSchema,
 }).strict();
 
+function validateUniqueLoopListItemIds(
+  items: readonly { id: string }[],
+  context: z.RefinementCtx,
+): void {
+  const ids = new Set<string>();
+  for (let index = 0; index < items.length; index += 1) {
+    const id = items[index]!.id;
+    if (ids.has(id)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "LoopList item IDs must be unique",
+        path: [index, "id"],
+      });
+    }
+    ids.add(id);
+  }
+}
+
+const legacyLoopListItemSchema = z.object({
+  id: limitedString(
+    "loopList.items.id",
+    MAX_LOOP_LIST_ITEM_ID_CHARACTERS * 4,
+    { maximumCharacters: MAX_LOOP_LIST_ITEM_ID_CHARACTERS },
+  ).refine((value) => value.trim().length > 0, "item id must not be blank"),
+  text: limitedString(
+    "loopList.items.text",
+    MAX_LOOP_LIST_ITEM_TEXT_CHARACTERS * 4,
+    { maximumCharacters: MAX_LOOP_LIST_ITEM_TEXT_CHARACTERS },
+  ).refine((value) => value.trim().length > 0, "item text must not be blank"),
+  checked: z.boolean(),
+}).strict();
+
+const legacyLoopListSchema = z.object({
+  items: z.array(legacyLoopListItemSchema)
+    .max(MAX_LOOP_LIST_ITEMS)
+    .superRefine(validateUniqueLoopListItemIds),
+  armed: z.boolean(),
+}).strict();
+
+function normalizeLegacyLoopListItems(
+  items: z.infer<typeof legacyLoopListItemSchema>[],
+): LoopList["items"] {
+  return items.map((item) => ({
+    id: item.id,
+    text: item.text,
+    status: item.checked ? "completed" : "pending",
+  }));
+}
+
+const legacyLoopListEntrySchema = z.object({
+  customType: z.literal(LEGACY_LOOP_LIST_CUSTOM_TYPE),
+  data: legacyLoopListSchema.extend({
+    updatedAt: canonicalTimestampSchema("updatedAt"),
+  }).strict(),
+}).strict().transform((value) => ({
+  customType: value.customType,
+  data: {
+    items: normalizeLegacyLoopListItems(value.data.items),
+    armed: value.data.armed,
+    updatedAt: value.data.updatedAt,
+  },
+}));
+
 const loopListEntrySchema = z.object({
   customType: z.literal(LOOP_LIST_CUSTOM_TYPE),
   data: loopListSchema.extend({
@@ -372,13 +441,56 @@ const loopListEntrySchema = z.object({
   }).strict(),
 }).strict();
 
-function formatLoopListItems(items: LoopList["items"]): string {
+function formatLegacyLoopListItems(
+  items: z.infer<typeof legacyLoopListItemSchema>[],
+): string {
   return [
     "Current LoopList snapshot:",
     ...items.map((item) => `${item.checked ? "[x]" : "[ ]"} ${item.text} (${item.id})`),
     "Continue working through the unchecked items. Update the list with todo_write as progress changes.",
   ].join("\n");
 }
+
+function formatLoopListItems(items: LoopList["items"]): string {
+  const marker = {
+    pending: "[ ]",
+    active: "[>]",
+    completed: "[x]",
+  } as const;
+  return [
+    "Current LoopList snapshot:",
+    ...items.map((item) => `${marker[item.status]} ${item.text} (${item.id})`),
+    "Continue working through the non-completed items in any order. Update the list with todo_write whenever status changes.",
+  ].join("\n");
+}
+
+const legacyLoopListContinueEntrySchema = z.object({
+  customType: z.literal(LEGACY_LOOP_LIST_CONTINUE_CUSTOM_TYPE),
+  content: limitedString("content", MAX_CONVERSATION_MESSAGE_CONTENT_BYTES),
+  display: z.literal(false),
+  details: z.object({
+    runId: uuidSchema("runId"),
+    continuation: z.number().int().min(1).max(MAX_LOOP_LIST_CONTINUATIONS_PER_RUN),
+    items: legacyLoopListSchema.shape.items,
+  }).strict(),
+}).strict().superRefine((value, context) => {
+  if (value.content !== formatLegacyLoopListItems(value.details.items)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "LoopList continuation content must match its item snapshot",
+      path: ["content"],
+    });
+  }
+}).transform((value) => ({
+  customType: value.customType,
+  content: value.content,
+  display: value.display,
+  details: {
+    runId: value.details.runId,
+    continuation: value.details.continuation,
+    items: normalizeLegacyLoopListItems(value.details.items),
+  },
+}));
 
 const loopListContinueEntrySchema = z.object({
   customType: z.literal(LOOP_LIST_CONTINUE_CUSTOM_TYPE),
@@ -694,8 +806,14 @@ export type ConversationMessageEntry =
   z.infer<typeof conversationMessageEntrySchema>;
 export type CompactionResumeEntry =
   z.infer<typeof compactionResumeEntrySchema>;
+type LegacyLoopListEntry = z.infer<typeof legacyLoopListEntrySchema>;
 export type LoopListEntry = z.infer<typeof loopListEntrySchema>;
+type ParsedLoopListEntry = LegacyLoopListEntry | LoopListEntry;
+type LegacyLoopListContinueEntry =
+  z.infer<typeof legacyLoopListContinueEntrySchema>;
 export type LoopListContinueEntry = z.infer<typeof loopListContinueEntrySchema>;
+type ParsedLoopListContinueEntry =
+  LegacyLoopListContinueEntry | LoopListContinueEntry;
 export type RunSettlement = z.infer<typeof runSettlementSchema>;
 export type RunSettlementEntry =
   z.infer<typeof runSettlementEntrySchema>;
@@ -748,11 +866,11 @@ export type ReservedConversationEntry =
     }
   | {
       kind: "loop_list";
-      entry: LoopListEntry;
+      entry: ParsedLoopListEntry;
     }
   | {
       kind: "loop_list_continue";
-      entry: LoopListContinueEntry;
+      entry: ParsedLoopListContinueEntry;
     }
   | {
       kind: "run_settlement";
@@ -854,15 +972,29 @@ export function parseConversationMessageEntry(
   return conversationMessageEntrySchema.parse(value);
 }
 
+function parseLegacyLoopListEntry(value: unknown): LegacyLoopListEntry {
+  return legacyLoopListEntrySchema.parse(value);
+}
+
 export function parseLoopListEntry(value: unknown): LoopListEntry {
   return loopListEntrySchema.parse(value);
 }
 
-export function createLoopListEntry(data: LoopListEntry["data"]): LoopListEntry {
+export function createLoopListEntry(
+  data: LoopListEntry["data"],
+): LoopListEntry {
   return parseLoopListEntry({ customType: LOOP_LIST_CUSTOM_TYPE, data });
 }
 
-export function parseLoopListContinueEntry(value: unknown): LoopListContinueEntry {
+function parseLegacyLoopListContinueEntry(
+  value: unknown,
+): LegacyLoopListContinueEntry {
+  return legacyLoopListContinueEntrySchema.parse(value);
+}
+
+export function parseLoopListContinueEntry(
+  value: unknown,
+): LoopListContinueEntry {
   return loopListContinueEntrySchema.parse(value);
 }
 
@@ -1112,11 +1244,23 @@ export function parseReservedConversationEntry(
       entry: parseConversationMessageEntry(payload),
     };
   }
+  if (customType === LEGACY_LOOP_LIST_CUSTOM_TYPE) {
+    return { kind: "loop_list", entry: parseLegacyLoopListEntry(payload) };
+  }
   if (customType === LOOP_LIST_CUSTOM_TYPE) {
     return { kind: "loop_list", entry: parseLoopListEntry(payload) };
   }
+  if (customType === LEGACY_LOOP_LIST_CONTINUE_CUSTOM_TYPE) {
+    return {
+      kind: "loop_list_continue",
+      entry: parseLegacyLoopListContinueEntry(payload),
+    };
+  }
   if (customType === LOOP_LIST_CONTINUE_CUSTOM_TYPE) {
-    return { kind: "loop_list_continue", entry: parseLoopListContinueEntry(payload) };
+    return {
+      kind: "loop_list_continue",
+      entry: parseLoopListContinueEntry(payload),
+    };
   }
   if (customType === COMPACTION_RESUME_CUSTOM_TYPE) {
     return {

@@ -33,6 +33,7 @@ import {
   createConversationMetaEntry,
   createLoopListEntry,
   createServiceTierSelectionEntry,
+  LEGACY_LOOP_LIST_CUSTOM_TYPE,
   LOOP_LIST_CUSTOM_TYPE,
 } from "./conversation-meta.js";
 import {
@@ -1630,7 +1631,7 @@ describe("ConversationActor", () => {
     });
   });
 
-  it("continues an unfinished LoopList inside the same run and settles once checked", async () => {
+  it("continues an unfinished LoopList inside the same run and settles once completed", async () => {
     const fixture = await openActor();
     const emit = () => fixture.runtime.session.eventListener;
     const todoWrite = fixture.runtime.createOptions?.workbenchCustomTools?.find(
@@ -1641,7 +1642,7 @@ describe("ConversationActor", () => {
     fixture.runtime.session.promptImplementation = async () => {
       emit()?.(nativeEvent({ type: "agent_start" }));
       await todoWrite?.execute("todo-call-1", {
-        items: [{ id: "verify", text: "Verify the implementation", checked: false }],
+        items: [{ id: "verify", text: "Verify the implementation", status: "active" }],
       });
       emit()?.(nativeEvent({
         type: "message_end",
@@ -1655,7 +1656,7 @@ describe("ConversationActor", () => {
     };
     fixture.runtime.session.resumeImplementation = async (message, options) => {
       expect(message).toMatchObject({
-        customType: "piweb.loop_list_continue.v1",
+        customType: "piweb.loop_list_continue.v2",
         display: false,
         details: {
           runId: RUN_A,
@@ -1663,14 +1664,14 @@ describe("ConversationActor", () => {
           items: [{
             id: "verify",
             text: "Verify the implementation",
-            checked: false,
+            status: "active",
           }],
         },
       });
       expect(options).toMatchObject({ triggerTurn: true });
       emit()?.(nativeEvent({ type: "agent_start" }));
       await todoWrite?.execute("todo-call-2", {
-        items: [{ id: "verify", text: "Verify the implementation", checked: true }],
+        items: [{ id: "verify", text: "Verify the implementation", status: "completed" }],
       });
       emit()?.(nativeEvent({
         type: "message_end",
@@ -1702,7 +1703,7 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
-  it("settles without hidden continuation when the LoopList is checked", async () => {
+  it("settles without hidden continuation when the LoopList is completed", async () => {
     const fixture = await openActor();
     const todoWrite = fixture.runtime.createOptions?.workbenchCustomTools?.find(
       ({ name }) => name === "todo_write",
@@ -1710,7 +1711,7 @@ describe("ConversationActor", () => {
     expect(todoWrite).toBeDefined();
     fixture.runtime.session.promptImplementation = async () => {
       await todoWrite?.execute("todo-call", {
-        items: [{ id: "done", text: "Already done", checked: true }],
+        items: [{ id: "done", text: "Already done", status: "completed" }],
       });
     };
 
@@ -1731,7 +1732,7 @@ describe("ConversationActor", () => {
     );
     fixture.runtime.session.promptImplementation = async () => {
       await todoWrite?.execute("todo-call", {
-        items: [{ id: "blocked", text: "Still blocked", checked: false }],
+        items: [{ id: "blocked", text: "Still blocked", status: "active" }],
       });
     };
     fixture.runtime.session.resumeImplementation = async () => undefined;
@@ -1744,7 +1745,7 @@ describe("ConversationActor", () => {
 
     expect(fixture.runtime.session.resumeCalls).toBe(8);
     expect(fixture.actor.getLoopList()).toEqual({
-      items: [{ id: "blocked", text: "Still blocked", checked: false }],
+      items: [{ id: "blocked", text: "Still blocked", status: "active" }],
       armed: false,
     });
     await fixture.actor.dispose();
@@ -1753,7 +1754,7 @@ describe("ConversationActor", () => {
   it("restores the latest LoopList without auto-starting after process restart", async () => {
     const manager = SessionManager.inMemory(process.cwd(), { id: CONVERSATION_ID });
     appendReservedCustomEntry(manager, createLoopListEntry({
-      items: [{ id: "restore", text: "Resume explicitly", checked: false }],
+      items: [{ id: "restore", text: "Resume explicitly", status: "active" }],
       armed: true,
       updatedAt: "2026-07-19T10:00:00.000Z",
     }));
@@ -1761,11 +1762,39 @@ describe("ConversationActor", () => {
     const fixture = await openActor({ sessionManager: manager });
 
     expect(fixture.actor.getLoopList()).toEqual({
-      items: [{ id: "restore", text: "Resume explicitly", checked: false }],
+      items: [{ id: "restore", text: "Resume explicitly", status: "active" }],
       armed: true,
     });
     expect(fixture.runtime.session.promptCalls).toHaveLength(0);
     expect(fixture.actor.getActivity()).toEqual({ kind: "idle" });
+    await fixture.actor.dispose();
+  });
+
+  it("restores legacy LoopList items as pending or completed without inventing active work", async () => {
+    const manager = SessionManager.inMemory(process.cwd(), { id: CONVERSATION_ID });
+    manager.appendCustomEntry(LEGACY_LOOP_LIST_CUSTOM_TYPE, {
+      items: [
+        { id: "legacy-pending", text: "Pending legacy work", checked: false },
+        { id: "legacy-done", text: "Completed legacy work", checked: true },
+      ],
+      armed: true,
+      updatedAt: "2026-07-19T10:00:00.000Z",
+    });
+    const entriesBeforeOpen = structuredClone(manager.getEntries());
+
+    const fixture = await openActor({ sessionManager: manager });
+
+    expect(fixture.actor.getLoopList()).toEqual({
+      items: [
+        { id: "legacy-pending", text: "Pending legacy work", status: "pending" },
+        { id: "legacy-done", text: "Completed legacy work", status: "completed" },
+      ],
+      armed: true,
+    });
+    expect(fixture.actor.getLoopList().items).not.toContainEqual(
+      expect.objectContaining({ status: "active" }),
+    );
+    expect(manager.getEntries()).toEqual(entriesBeforeOpen);
     await fixture.actor.dispose();
   });
 
@@ -1779,14 +1808,14 @@ describe("ConversationActor", () => {
     const activeLoopListId = appendReservedCustomEntry(
       manager,
       createLoopListEntry({
-        items: [{ id: "active", text: "Active branch work", checked: false }],
+        items: [{ id: "active", text: "Active branch work", status: "active" }],
         armed: true,
         updatedAt: "2026-07-19T10:00:00.000Z",
       }),
     );
     manager.branch(rootId);
     appendReservedCustomEntry(manager, createLoopListEntry({
-      items: [{ id: "inactive", text: "Inactive branch work", checked: false }],
+      items: [{ id: "inactive", text: "Inactive branch work", status: "pending" }],
       armed: true,
       updatedAt: "2026-07-19T10:01:00.000Z",
     }));
@@ -1802,7 +1831,7 @@ describe("ConversationActor", () => {
     const fixture = await openActor({ sessionManager: manager });
 
     expect(fixture.actor.getLoopList()).toEqual({
-      items: [{ id: "active", text: "Active branch work", checked: false }],
+      items: [{ id: "active", text: "Active branch work", status: "active" }],
       armed: true,
     });
     await fixture.actor.dispose();
@@ -1821,14 +1850,14 @@ describe("ConversationActor", () => {
       promptNumber += 1;
       if (promptNumber === 1) {
         await todoWrite?.execute("todo-write", {
-          items: [{ id: "later", text: "Continue later", checked: false }],
+          items: [{ id: "later", text: "Continue later", status: "active" }],
         });
         await todoPause?.execute("todo-pause", {});
         return;
       }
       expect(fixture.actor.getLoopList().armed).toBe(true);
       await todoWrite?.execute("todo-complete", {
-        items: [{ id: "later", text: "Continue later", checked: true }],
+        items: [{ id: "later", text: "Continue later", status: "completed" }],
       });
     };
 
@@ -1836,7 +1865,7 @@ describe("ConversationActor", () => {
     expect(fixture.actor.getLoopList().armed).toBe(false);
     await fixture.actor.startPrompt({ runId: RUN_B, text: "resume", origin: "browser" });
     expect(fixture.actor.getLoopList()).toEqual({
-      items: [{ id: "later", text: "Continue later", checked: true }],
+      items: [{ id: "later", text: "Continue later", status: "completed" }],
       armed: false,
     });
     await fixture.actor.dispose();
@@ -1851,7 +1880,7 @@ describe("ConversationActor", () => {
     );
     fixture.runtime.session.promptImplementation = async () => {
       await todoWrite?.execute("todo-call", {
-        items: [{ id: "abort", text: "Preserve this", checked: false }],
+        items: [{ id: "abort", text: "Preserve this", status: "active" }],
       });
       started.resolve();
       await finished.promise;
@@ -1885,7 +1914,7 @@ describe("ConversationActor", () => {
     );
     fixture.runtime.session.promptImplementation = async () => {
       await todoWrite?.execute("todo-call", {
-        items: [{ id: "abort", text: "Preserve this", checked: false }],
+        items: [{ id: "abort", text: "Preserve this", status: "active" }],
       });
       started.resolve();
       await finished.promise;
@@ -1932,7 +1961,7 @@ describe("ConversationActor", () => {
     );
     fixture.runtime.session.promptImplementation = async () => {
       await todoWrite?.execute("todo-call", {
-        items: [{ id: "recover", text: "Recover later", checked: false }],
+        items: [{ id: "recover", text: "Recover later", status: "active" }],
       });
       throw new Error("model interrupted");
     };
@@ -1943,7 +1972,7 @@ describe("ConversationActor", () => {
       origin: "browser",
     })).resolves.toMatchObject({ outcome: "failed" });
     expect(fixture.actor.getLoopList()).toEqual({
-      items: [{ id: "recover", text: "Recover later", checked: false }],
+      items: [{ id: "recover", text: "Recover later", status: "active" }],
       armed: false,
     });
     await fixture.actor.dispose();
@@ -4386,7 +4415,7 @@ describe("ConversationActor", () => {
     expect(lease.releases).toBe(1);
   });
 
-  it("grants and consumes a run-scoped distinct-file edit budget", async () => {
+  it("requires active work, then grants and consumes a run-scoped edit budget", async () => {
     const fullAccessProfile = {
       ...profile(),
       role: { ...profile().role, toolMode: "full_access" as const },
@@ -4395,7 +4424,11 @@ describe("ConversationActor", () => {
     const budgetTool = fixture.runtime.createOptions?.workbenchCustomTools?.find(
       ({ name }) => name === "request_edit_budget",
     );
+    const todoWrite = fixture.runtime.createOptions?.workbenchCustomTools?.find(
+      ({ name }) => name === "todo_write",
+    );
     expect(budgetTool).toBeDefined();
+    expect(todoWrite).toBeDefined();
 
     const gate = fixture.runtime.createOptions?.toolCallGate;
     const complete = fixture.runtime.createOptions?.toolCallCompleted;
@@ -4403,6 +4436,28 @@ describe("ConversationActor", () => {
     const decisions: Array<unknown> = [];
     const completions: Array<unknown> = [];
     fixture.runtime.session.promptImplementation = async () => {
+      await expect(budgetTool!.execute("no-list", {
+        fileCount: 1,
+        reason: "No task has been selected yet.",
+      })).rejects.toThrow(/active LoopList item/i);
+      await todoWrite!.execute("pending-list", {
+        items: [{ id: "edit", text: "Edit the actor", status: "pending" }],
+      });
+      await expect(budgetTool!.execute("pending-only", {
+        fileCount: 1,
+        reason: "Pending work is not current work.",
+      })).rejects.toThrow(/active LoopList item/i);
+      await todoWrite!.execute("completed-list", {
+        items: [{ id: "edit", text: "Edit the actor", status: "completed" }],
+      });
+      await expect(budgetTool!.execute("completed-only", {
+        fileCount: 1,
+        reason: "Completed work is not current work.",
+      })).rejects.toThrow(/active LoopList item/i);
+      await todoWrite!.execute("active-list", {
+        items: [{ id: "edit", text: "Edit the actor", status: "active" }],
+      });
+
       decisions.push(await gate?.({
         toolCallId: "blocked-before-grant",
         toolName: "edit",
@@ -4423,6 +4478,9 @@ describe("ConversationActor", () => {
         reason: ` ${"x".repeat(2_000)} `,
       });
       completions.push(grant?.details);
+      await todoWrite!.execute("complete-after-grant", {
+        items: [{ id: "edit", text: "Edit the actor", status: "completed" }],
+      });
 
       decisions.push(await gate?.({
         toolCallId: "first-edit",

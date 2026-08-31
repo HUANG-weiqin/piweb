@@ -1685,44 +1685,39 @@ pre {
   overflow-wrap: anywhere;
 }
 
-.loop-list-items input[type="checkbox"] {
-  appearance: none;
-  display: grid;
-  place-content: center;
+.loop-list-item-marker {
+  display: inline-grid;
   flex: 0 0 16px;
   width: 16px;
   height: 16px;
-  min-height: 16px;
-  margin: 2px 0 0;
-  padding: 0;
+  place-items: center;
+  margin-top: 2px;
   border: 1px solid var(--line-strong);
   border-radius: 5px;
+  color: var(--muted);
   background: var(--panel-strong);
-  box-shadow: none;
-  opacity: 1;
-  cursor: default;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1;
 }
 
-.loop-list-items input[type="checkbox"]::before {
-  width: 4px;
-  height: 8px;
-  border: solid var(--on-accent);
-  border-width: 0 2px 2px 0;
-  content: "";
-  opacity: 0;
-  transform: rotate(45deg) translate(-1px, -1px);
+.loop-list-item.active .loop-list-item-marker {
+  border-color: var(--warning);
+  color: var(--warning);
+  background: var(--warning-soft);
 }
 
-.loop-list-items input[type="checkbox"]:checked {
+.loop-list-item.completed .loop-list-item-marker {
   border-color: var(--success);
+  color: var(--on-accent);
   background: var(--success);
 }
 
-.loop-list-items input[type="checkbox"]:checked::before {
-  opacity: 1;
+.loop-list-item.active .loop-list-item-text {
+  color: color-mix(in srgb, var(--warning) 76%, currentColor);
 }
 
-.loop-list-items .checked span {
+.loop-list-item.completed .loop-list-item-text {
   color: var(--muted);
   text-decoration: line-through;
 }

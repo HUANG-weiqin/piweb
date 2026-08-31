@@ -1,6 +1,6 @@
 # 工具权限
 
-`updated: 2026-08-29`
+`updated: 2026-08-31`
 
 ## 这个模块是干什么的
 
@@ -77,7 +77,7 @@ canManageSessions only: wait_for_session / abort_session / delete_session
 
 ### 编辑额度承诺
 
-每个 RunTicket 从零额度开始。`request_edit_budget(fileCount, reason)` 只在 `full_access` 会话注册，单次声明 1–100 个 distinct file，理由 trim 后必须非空且不超过 2000 字符；同一 run 的多次声明相加。角色 ToolPolicy 先决策，随后只有最终来源为 builtin 的 `edit/write` 才检查额度。目标路径按 Pi 的 path 规范化相对 canonical project cwd 解析；存在文件使用 realpath，不存在文件使用规范化绝对路径，Windows identity 大小写折叠。首次**成功**修改一个新 canonical path 才消耗一格；失败调用和同路径重试不消耗。completion 以同一 run 的 AbortSignal + toolCallId 关联，旧 run 的迟到结果不能修改新 ticket。
+每个 RunTicket 从零额度开始。`request_edit_budget(fileCount, reason)` 只在 `full_access` 会话注册，单次声明 1–100 个 distinct file，理由 trim 后必须非空且不超过 2000 字符；每次实际授予前，ConversationActor 的权威 LoopList 都必须至少有一个 `status=active` 项。参数或 active 前置条件拒绝时不改变 ledger；成功授予后，即使列表随后暂停或完成，已授予额度也不追溯撤销，后续追加额度则重新检查当时的 active 状态。同一 run 的多次成功声明相加。角色 ToolPolicy 先决策，随后只有最终来源为 builtin 的 `edit/write` 才检查额度。目标路径按 Pi 的 path 规范化相对 canonical project cwd 解析；存在文件使用 realpath，不存在文件使用规范化绝对路径，Windows identity 大小写折叠。首次**成功**修改一个新 canonical path 才消耗一格；失败调用和同路径重试不消耗。completion 以同一 run 的 AbortSignal + toolCallId 关联，旧 run 的迟到结果不能修改新 ticket。
 
 工具结果只报告 `grantedFiles / touchedFiles / remainingFiles / blockedAttempts` 等可观察事实，不把声明时刻伪装成“已遵守”。SDK extension 的 `tool_result` hook 先运行；即使该 hook 在 builtin 已成功后抛错，ledger 仍按原始 execute 状态记账，而原异常继续传播。普通 object details 可附加 `piwebEditBudget`，非对象 details 不覆盖。ledger 在 run 结算时自然销毁，不持久化，也不宣称覆盖 `bash` 或进程内项目扩展。
 

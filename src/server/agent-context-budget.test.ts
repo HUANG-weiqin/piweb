@@ -3,6 +3,7 @@ import type {
   ContextUsage,
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
+import type { LoopList } from "../shared/protocol.js";
 import { installAgentContextBudget } from "./agent-context-budget.js";
 
 type ConvertToLlm = AgentSession["agent"]["convertToLlm"];
@@ -176,7 +177,7 @@ describe("installAgentContextBudget", () => {
     expect(originalMessage.content).toBe("plain context");
   });
 
-  it("keeps every mixed content part before the appended telemetry", async () => {
+  it("keeps mixed content before one combined provider-tail part", async () => {
     const originalMessage: LlmMessages[number] = {
       role: "user",
       content: [
@@ -187,7 +188,10 @@ describe("installAgentContextBudget", () => {
     };
     const originalSnapshot = structuredClone(originalMessage);
     const { session } = fakeSession({ original: async () => [originalMessage] });
-    installAgentContextBudget(session, () => 70);
+    installAgentContextBudget(session, () => 70, () => ({
+      items: [{ id: "inspect", text: "Inspect image", status: "active" }],
+      armed: true,
+    }));
 
     const result = await session.agent.convertToLlm([]);
 
@@ -198,14 +202,17 @@ describe("installAgentContextBudget", () => {
         { type: "image", data: "image-data", mimeType: "image/png" },
         {
           type: "text",
-          text: "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
+          text: [
+            "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
+            "piweb_work={\"active\":[{\"id\":\"inspect\",\"text\":\"Inspect image\"}],\"omitted\":0,\"onStatusChange\":\"todo_write\"}",
+          ].join("\n"),
         },
       ],
     }]);
     expect(originalMessage).toEqual(originalSnapshot);
   });
 
-  it("preserves a final tool-result role and protocol position", async () => {
+  it("preserves a final tool-result role and protocol position for a work-only tail", async () => {
     const toolResult: LlmMessages[number] = {
       role: "toolResult",
       toolCallId: "call-1",
@@ -215,7 +222,10 @@ describe("installAgentContextBudget", () => {
       timestamp: 1,
     };
     const { session } = fakeSession({ original: async () => [toolResult] });
-    installAgentContextBudget(session, () => 70);
+    installAgentContextBudget(session, undefined, () => ({
+      items: [{ id: "verify", text: "Verify output", status: "active" }],
+      armed: true,
+    }));
 
     const result = await session.agent.convertToLlm([]);
 
@@ -225,11 +235,113 @@ describe("installAgentContextBudget", () => {
         { type: "text", text: "tool output" },
         {
           type: "text",
-          text: "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
+          text: "piweb_work={\"active\":[{\"id\":\"verify\",\"text\":\"Verify output\"}],\"omitted\":0,\"onStatusChange\":\"todo_write\"}",
         },
       ],
     }]);
     expect(result).toHaveLength(1);
+  });
+
+  it("escapes active work as canonical JSON after telemetry", async () => {
+    const loopList: LoopList = {
+      items: [
+        { id: "later", text: "Not current", status: "pending" },
+        { id: "active\"\\", text: "line\n雪", status: "active" },
+        { id: "done", text: "Already done", status: "completed" },
+      ],
+      armed: true,
+    };
+    const before = structuredClone(loopList);
+    const { session } = fakeSession();
+    installAgentContextBudget(session, () => 70, () => loopList);
+
+    const result = await session.agent.convertToLlm([]);
+
+    expect(telemetryText(result)).toBe([
+      "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
+      "piweb_work={\"active\":[{\"id\":\"active\\\"\\\\\",\"text\":\"line\\n雪\"}],\"omitted\":0,\"onStatusChange\":\"todo_write\"}",
+    ].join("\n"));
+    expect(loopList).toEqual(before);
+  });
+
+  it("reads the latest LoopList on every conversion when usage is unavailable", async () => {
+    const originalResult = [llmUser("converted")];
+    const getContextUsage = vi.fn<() => ContextUsage | undefined>(() => undefined);
+    const getLoopList = vi.fn<() => LoopList>()
+      .mockReturnValueOnce({
+        items: [{ id: "first", text: "First snapshot", status: "active" }],
+        armed: true,
+      })
+      .mockReturnValueOnce({
+        items: [{ id: "second", text: "Latest snapshot", status: "active" }],
+        armed: true,
+      })
+      .mockReturnValue({
+        items: [{ id: "waiting", text: "No active work", status: "pending" }],
+        armed: true,
+      });
+    const { session } = fakeSession({
+      original: async () => originalResult,
+      getContextUsage,
+    });
+    installAgentContextBudget(session, () => 70, getLoopList);
+
+    const first = await session.agent.convertToLlm([]);
+    const second = await session.agent.convertToLlm([]);
+    const neither = await session.agent.convertToLlm([]);
+
+    expect(telemetryText(first)).toBe(
+      "piweb_work={\"active\":[{\"id\":\"first\",\"text\":\"First snapshot\"}],\"omitted\":0,\"onStatusChange\":\"todo_write\"}",
+    );
+    expect(telemetryText(second)).toBe(
+      "piweb_work={\"active\":[{\"id\":\"second\",\"text\":\"Latest snapshot\"}],\"omitted\":0,\"onStatusChange\":\"todo_write\"}",
+    );
+    expect(neither).toBe(originalResult);
+    expect(getContextUsage).toHaveBeenCalledTimes(3);
+    expect(getLoopList).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps the complete work record within its UTF-8 budget", async () => {
+    const items: LoopList["items"] = Array.from({ length: 100 }, (_, index) => ({
+      id: `item-${index}`,
+      text: "界".repeat(512),
+      status: "active",
+    }));
+    const { session } = fakeSession();
+    installAgentContextBudget(session, undefined, () => ({ items, armed: true }));
+
+    const result = await session.agent.convertToLlm([]);
+    const record = telemetryText(result);
+    const payload = JSON.parse(record.slice("piweb_work=".length)) as {
+      active: Array<{ id: string; text: string }>;
+      omitted: number;
+      moreVia?: string;
+      onStatusChange: string;
+    };
+
+    expect(Buffer.byteLength(record, "utf8")).toBeLessThanOrEqual(4096);
+    expect(Object.keys(payload)).toEqual([
+      "active",
+      "omitted",
+      "moreVia",
+      "onStatusChange",
+    ]);
+    expect(payload.active).toEqual(
+      items.slice(0, payload.active.length).map(({ id, text }) => ({ id, text })),
+    );
+    expect(payload.omitted).toBe(items.length - payload.active.length);
+    expect(payload.omitted).toBeGreaterThan(0);
+    expect(payload.moreVia).toBe("todo_read");
+    expect(payload.onStatusChange).toBe("todo_write");
+
+    const next = items[payload.active.length]!;
+    const oneMore = `piweb_work=${JSON.stringify({
+      active: [...payload.active, { id: next.id, text: next.text }],
+      omitted: payload.omitted - 1,
+      ...(payload.omitted > 1 ? { moreVia: "todo_read" } : {}),
+      onStatusChange: "todo_write",
+    })}`;
+    expect(Buffer.byteLength(oneMore, "utf8")).toBeGreaterThan(4096);
   });
 
   it("uses the unrounded usage percentage at the exact warning boundary", async () => {
@@ -373,11 +485,16 @@ describe("installAgentContextBudget", () => {
     const converted = Object.freeze([convertedMessage]) as unknown as LlmMessages;
     const original: ConvertToLlm = async () => converted;
     const { session, sessionMessages, managerMessages } = fakeSession({ original });
+    const loopList: LoopList = {
+      items: [{ id: "active", text: "Current work", status: "active" }],
+      armed: true,
+    };
     const inputBefore = structuredClone(input);
     const convertedBefore = structuredClone(converted);
     const sessionBefore = structuredClone(sessionMessages);
     const managerBefore = structuredClone(managerMessages);
-    installAgentContextBudget(session, () => 70);
+    const loopListBefore = structuredClone(loopList);
+    installAgentContextBudget(session, () => 70, () => loopList);
 
     const result = await session.agent.convertToLlm(input);
 
@@ -386,6 +503,7 @@ describe("installAgentContextBudget", () => {
     expect(result).not.toBe(converted);
     expect(sessionMessages).toEqual(sessionBefore);
     expect(managerMessages).toEqual(managerBefore);
+    expect(loopList).toEqual(loopListBefore);
   });
 
   it("fails open when the converted context has no safe final input role", async () => {

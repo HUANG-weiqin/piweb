@@ -21,6 +21,8 @@ export const MAX_LOOP_LIST_ITEM_TEXT_CHARACTERS = 512;
 export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
+// v39: LoopList items project explicit pending, active, or completed status;
+// active is durable focus state and remains separate from the actor run state.
 // v38: role templates and frozen conversation role snapshots carry a required
 // nullable default service tier, applied when no conversation override exists.
 // v37: focused conversations may select a model-advertised request service
@@ -33,7 +35,7 @@ export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 // conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
-export const PROTOCOL_VERSION = 38;
+export const PROTOCOL_VERSION = 39;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
@@ -531,10 +533,12 @@ export interface PendingPromptAdmissionSnapshot {
   text: string;
 }
 
-interface LoopListItem {
+export type LoopListItemStatus = "pending" | "active" | "completed";
+
+export interface LoopListItem {
   id: string;
   text: string;
-  checked: boolean;
+  status: LoopListItemStatus;
 }
 
 export interface LoopList {
@@ -1201,7 +1205,7 @@ const loopListItemSchema = z.object({
     MAX_LOOP_LIST_ITEM_TEXT_CHARACTERS,
     "loopList.items.text",
   ).refine((value) => value.trim().length > 0, "item text must not be blank"),
-  checked: z.boolean(),
+  status: z.enum(["pending", "active", "completed"]),
 }).strict();
 
 export const loopListSchema = z.object({

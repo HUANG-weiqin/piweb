@@ -698,7 +698,7 @@ export class ConversationActor {
   private writeLoopList(items: LoopList["items"]): LoopList {
     return this.persistLoopList(
       items,
-      items.some((item) => !item.checked),
+      items.some((item) => item.status !== "completed"),
     );
   }
 
@@ -710,7 +710,9 @@ export class ConversationActor {
   private rearmLoopList(): void {
     if (
       this.loopListSnapshot.armed
-      || !this.loopListSnapshot.items.some((item) => !item.checked)
+      || !this.loopListSnapshot.items.some(
+        (item) => item.status !== "completed",
+      )
     ) return;
     this.writeLoopList(this.loopListSnapshot.items);
   }
@@ -763,10 +765,11 @@ export class ConversationActor {
       name: "request_edit_budget",
       label: "Request edit budget",
       description:
-        "Declare the expected number of distinct files this run will modify before using builtin edit or write. Each successful first modification of a canonical file path consumes one slot; repeat edits to that file do not. Request more when scope grows. This gates only builtin edit/write and is not a filesystem sandbox.",
+        "Declare the expected number of distinct files this run will modify before using builtin edit or write. At least one LoopList item must already be active. Each successful first modification of a canonical file path consumes one slot; repeat edits to that file do not. Request more when scope grows. This gates only builtin edit/write and is not a filesystem sandbox.",
       promptSnippet:
-        "Before builtin edit/write, declare how many distinct files this run expects to modify and why.",
+        "Before builtin edit/write, mark current LoopList work active, then declare how many distinct files this run expects to modify and why.",
       promptGuidelines: [
+        "Before requesting edit budget, use todo_write so at least one current task is active.",
         "Call request_edit_budget before the first builtin edit or write in each run; estimate distinct files, not edit calls.",
         "If the scope grows, request additional files and explain why before touching another new path.",
         "Do not use bash, scripts, or extension tools to evade the budget; the host gate only covers builtin edit/write.",
@@ -810,6 +813,13 @@ export class ConversationActor {
         if (reason.length > MAX_EDIT_BUDGET_REASON_CHARACTERS) {
           throw new Error(
             `reason exceeds ${MAX_EDIT_BUDGET_REASON_CHARACTERS} characters after trimming`,
+          );
+        }
+        if (!this.loopListSnapshot.items.some(
+          (item) => item.status === "active",
+        )) {
+          throw new Error(
+            "Edit budget requires at least one active LoopList item. Call todo_write first and mark current work active.",
           );
         }
         ticket.editBudget.grantedFiles += finalInput.fileCount;
@@ -2177,7 +2187,9 @@ export class ConversationActor {
         if (projectedFailure) throw new Error(projectedFailure);
         if (
           !this.loopListSnapshot.armed
-          || !this.loopListSnapshot.items.some((item) => !item.checked)
+          || !this.loopListSnapshot.items.some(
+            (item) => item.status !== "completed",
+          )
         ) break;
         if (
           loopListContinuationCount
@@ -3248,6 +3260,7 @@ export class ConversationActor {
           },
           turnBoundaryCheck: (input) => this.checkTurnBoundary(input),
           getCompactionThresholdPercent: () => this.compactionThresholdPercent,
+          getLoopList: () => this.getLoopList(),
           getServiceTier: () => this.serviceTierSelection,
         },
       );

@@ -1586,7 +1586,7 @@ describe("ProjectSessionCoordinator", () => {
     const activeLoopListId = appendReservedCustomEntry(
       actor.sessionManager,
       createLoopListEntry({
-        items: [{ id: "active", text: "Retained work", checked: false }],
+        items: [{ id: "active", text: "Retained work", status: "active" }],
         armed: true,
         updatedAt: "2026-07-19T10:00:00.000Z",
       }),
@@ -1595,7 +1595,7 @@ describe("ProjectSessionCoordinator", () => {
     const inactiveLoopListId = appendReservedCustomEntry(
       actor.sessionManager,
       createLoopListEntry({
-        items: [{ id: "inactive", text: "Discarded branch", checked: false }],
+        items: [{ id: "inactive", text: "Discarded branch", status: "pending" }],
         armed: true,
         updatedAt: "2026-07-19T10:01:00.000Z",
       }),
@@ -1633,7 +1633,7 @@ describe("ProjectSessionCoordinator", () => {
       actor.sessionManager.buildSessionContext().messages,
     );
     expect(actor.getLoopList()).toEqual({
-      items: [{ id: "active", text: "Retained work", checked: false }],
+      items: [{ id: "active", text: "Retained work", status: "active" }],
       armed: true,
     });
   });
