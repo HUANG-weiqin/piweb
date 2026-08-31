@@ -257,7 +257,11 @@ class FakeSessionControl {
           deliverAs: sendOptions?.deliverAs,
         };
         control.received.push(received);
-        if (received.deliverAs === "steer") {
+        if (
+          received.deliverAs === "steer"
+          && control.session.isStreaming
+          && sendOptions?.triggerTurn !== false
+        ) {
           control.pendingSteers.push(received);
           return;
         }
@@ -3742,7 +3746,7 @@ describe("ProjectSessionCoordinator", () => {
     expect(fixture.runtime.control(target.conversationId).received).toEqual([
       expect.objectContaining({
         content: expect.stringContaining("Handle this after the current task"),
-        triggerTurn: false,
+        triggerTurn: true,
         deliverAs: "steer",
       }),
     ]);
@@ -9228,7 +9232,7 @@ describe("ProjectSessionCoordinator", () => {
       expect(returnedMessages).toHaveLength(1);
       expect(returnedMessages[0]).toMatchObject({
         deliverAs: "steer",
-        triggerTurn: false,
+        triggerTurn: true,
       });
     },
   );
@@ -10120,7 +10124,7 @@ describe("ProjectSessionCoordinator", () => {
       .toContainEqual(expect.objectContaining({
         content: expect.stringContaining("temporary success"),
         deliverAs: "steer",
-        triggerTurn: false,
+        triggerTurn: true,
       }));
     expect(
       aggregateReservedConversationEntries(source.sessionManager.getEntries())

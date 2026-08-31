@@ -79,7 +79,13 @@ describe("createMetaTools", () => {
       "This still runs asynchronously: call wait_for_session when the answer is needed in this turn. A message result with fulfillsTemporaryReturn:true is the designated one-shot return; consume its injected body and do not wait again merely for exact settlement. Re-wait only when that flag is absent and settlement still matters.",
     );
     expect(waitForSession.description).toContain(
+      "the body has already been injected as a separate custom message into the same model request that receives this tool result",
+    );
+    expect(waitForSession.description).toContain(
       "If a message result has fulfillsTemporaryReturn:true",
+    );
+    expect(waitForSession.promptGuidelines).toContain(
+      "A message outcome's body is already in the model context that receives the wait result; use it there, and do not wait or peek merely to fetch the body.",
     );
     expect(waitForSession.promptGuidelines).toContain(
       "When a message result has fulfillsTemporaryReturn:true, use the injected one-shot return and do not re-wait solely to observe settlement.",

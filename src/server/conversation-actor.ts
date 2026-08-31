@@ -1592,12 +1592,15 @@ export class ConversationActor {
         // AgentSession only queues custom steering while its Pi run is live.
         // A ticket may be installed before SDK preflight reaches agent_start;
         // leave the durable envelope claimed and flush it from that event.
-        if (!this.session.isStreaming) return;
         while (
           this.activeRun === ticket
-          && ticket.phase !== "cancelling"
+          && (ticket.phase === "running" || ticket.phase === "waiting")
           && ticket.customSteerDeliveries.length > 0
         ) {
+          // Keep the streaming check adjacent to every SDK call: triggerTurn
+          // is required to enter Pi's live steering queue, but must never fall
+          // through to starting a new run if the owned run has already ended.
+          if (!this.session.isStreaming) return;
           const next = ticket.customSteerDeliveries[0]!;
           await this.session.sendCustomMessage({
             customType: next.message.customType,
@@ -1605,7 +1608,7 @@ export class ConversationActor {
             display: next.message.display,
             details: next.message.details,
           }, {
-            triggerTurn: false,
+            triggerTurn: true,
             deliverAs: "steer",
           });
           if (ticket.customSteerDeliveries[0] === next) {
@@ -1623,7 +1626,7 @@ export class ConversationActor {
       ticket.customSteerFlush = undefined;
       if (
         this.activeRun === ticket
-        && ticket.phase !== "cancelling"
+        && (ticket.phase === "running" || ticket.phase === "waiting")
         && this.session.isStreaming
         && ticket.customSteerDeliveries.length > 0
       ) {
@@ -2531,9 +2534,6 @@ export class ConversationActor {
 
   private onSessionEvent(event: AgentSessionEvent): void {
     const ticket = this.activeRun;
-    if (ticket && event.type === "agent_start") {
-      this.flushCustomSteers(ticket);
-    }
     if (
       ticket
       && event.type === "agent_start"
@@ -2594,6 +2594,10 @@ export class ConversationActor {
         );
       }
       return;
+    }
+
+    if (event.type === "agent_start") {
+      this.flushCustomSteers(ticket);
     }
 
     if (event.type === "message_end" && event.message.role === "user") {

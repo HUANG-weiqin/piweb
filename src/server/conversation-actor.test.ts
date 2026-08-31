@@ -3847,9 +3847,111 @@ describe("ConversationActor", () => {
     expect(queued).toEqual({
       content: "Peer supervision instruction",
       deliverAs: "steer",
-      triggerTurn: false,
+      triggerTurn: true,
     });
     promptFinished.resolve();
+    await completion;
+    await fixture.actor.dispose();
+  });
+
+  it("keeps a queued peer message out of an unowned extension turn", async () => {
+    const runtime = new FakeRuntime();
+    const titleResult = deferred<AssistantMessage>();
+    runtime.titleImplementation = async () => titleResult.promise;
+    const fixture = await openActor({ runtime });
+    // Model the real SDK abort window: abort() requests cancellation, but
+    // isStreaming remains true until the rogue physical run becomes idle.
+    runtime.session.abort = async () => {
+      runtime.session.abortCalls++;
+    };
+    const ownedStarted = deferred();
+    const ownedFinished = deferred();
+    runtime.session.promptImplementation = async () => {
+      runtime.session.isStreaming = true;
+      runtime.session.eventListener?.(nativeEvent({ type: "agent_start" }));
+      ownedStarted.resolve();
+      await ownedFinished.promise;
+      runtime.session.eventListener?.(nativeEvent({
+        type: "agent_end",
+        messages: [],
+      }));
+      runtime.session.isStreaming = false;
+    };
+
+    const queued: Array<{
+      content: unknown;
+      deliverAs: unknown;
+      triggerTurn: unknown;
+    }> = [];
+    runtime.session.resumeImplementation = async (message, options) => {
+      queued.push({
+        content: message.content,
+        deliverAs: options?.deliverAs,
+        triggerTurn: options?.triggerTurn,
+      });
+    };
+
+    const completion = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "name this conversation before starting",
+      origin: "browser",
+    });
+    await vi.waitFor(() => expect(runtime.titleCalls).toHaveLength(1));
+    expect(fixture.actor.getActivity()).toEqual({
+      kind: "queued",
+      runId: RUN_A,
+    });
+    const delivery = fixture.actor.steerCustomMessage(
+      RUN_A,
+      {
+        customType: "piweb.conversation_message.v1",
+        content: "Keep this for the owned run",
+        display: true,
+        details: {},
+      } as ConversationMessageEntry,
+    );
+
+    runtime.session.isStreaming = true;
+    runtime.session.eventListener?.(nativeEvent({ type: "agent_start" }));
+    await vi.waitFor(() => expect(runtime.session.abortCalls).toBe(1));
+    expect(runtime.session.resumeCalls).toBe(0);
+
+    // Even while the rogue run is still physically streaming, another
+    // delivery must remain attached to the queued workbench ticket.
+    const lateDelivery = fixture.actor.steerCustomMessage(
+      RUN_A,
+      {
+        customType: "piweb.conversation_message.v1",
+        content: "Also keep this for the owned run",
+        display: true,
+        details: {},
+      } as ConversationMessageEntry,
+    );
+    await Promise.resolve();
+    expect(runtime.session.resumeCalls).toBe(0);
+    runtime.session.isStreaming = false;
+
+    titleResult.resolve(automaticTitleMessage("Owned conversation"));
+    await ownedStarted.promise;
+    await expect(Promise.all([delivery, lateDelivery])).resolves.toEqual([
+      undefined,
+      undefined,
+    ]);
+    expect(runtime.session.resumeCalls).toBe(2);
+    expect(queued).toEqual([
+      {
+        content: "Keep this for the owned run",
+        deliverAs: "steer",
+        triggerTurn: true,
+      },
+      {
+        content: "Also keep this for the owned run",
+        deliverAs: "steer",
+        triggerTurn: true,
+      },
+    ]);
+
+    ownedFinished.resolve();
     await completion;
     await fixture.actor.dispose();
   });
