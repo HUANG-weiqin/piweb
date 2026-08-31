@@ -352,11 +352,11 @@ describe("PiRuntime session ownership", () => {
       {
         role: "user",
         content: [
+          { type: "text", text: "project context" },
           {
             type: "text",
             text: "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
           },
-          { type: "text", text: "project context" },
         ],
         timestamp: 1,
       },
@@ -364,11 +364,11 @@ describe("PiRuntime session ownership", () => {
     expect(second.at(-1)).toMatchObject({
       role: "user",
       content: [
+        { type: "text", text: "project context" },
         {
           type: "text",
           text: "<piweb_ctx used=\"10k/100k\" auto_compact=\"80%\" remaining=\"70k\" />",
         },
-        { type: "text", text: "project context" },
       ],
     });
     expect(second).toHaveLength(secondTransformed.length);

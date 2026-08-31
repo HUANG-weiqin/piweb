@@ -56,7 +56,7 @@ function createTelemetry(
   return `<piweb_ctx used="${formatTokens(usage.tokens)}/${formatTokens(window)}" auto_compact="${thresholdPercent}%" remaining="${formatTokens(remaining)}"${warning} />`;
 }
 
-function prependTelemetry(
+function appendTelemetry(
   messages: LlmMessages,
   telemetry: string,
 ): LlmMessages {
@@ -68,12 +68,10 @@ function prependTelemetry(
     return messages;
   }
 
+  const telemetryPart = { type: "text" as const, text: telemetry };
   const content = typeof lastMessage.content === "string"
-    ? [{ type: "text" as const, text: telemetry }, {
-        type: "text" as const,
-        text: lastMessage.content,
-      }]
-    : [{ type: "text" as const, text: telemetry }, ...lastMessage.content];
+    ? [{ type: "text" as const, text: lastMessage.content }, telemetryPart]
+    : [...lastMessage.content, telemetryPart];
   return [
     ...messages.slice(0, -1),
     { ...lastMessage, content },
@@ -100,7 +98,7 @@ export function installAgentContextBudget(
       const usage = session.getContextUsage();
       const thresholdPercent = getCompactionThresholdPercent();
       const telemetry = createTelemetry(usage, thresholdPercent);
-      return telemetry ? prependTelemetry(converted, telemetry) : converted;
+      return telemetry ? appendTelemetry(converted, telemetry) : converted;
     } catch {
       return converted;
     }

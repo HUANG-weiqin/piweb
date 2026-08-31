@@ -56,7 +56,7 @@ function fakeSession({
   return { session, sessionMessages, managerMessages };
 }
 
-function firstText(messages: LlmMessages): string {
+function telemetryText(messages: LlmMessages): string {
   const last = messages.at(-1);
   if (!last || (last.role !== "user" && last.role !== "toolResult")) {
     throw new Error("Expected a final user or tool-result message");
@@ -64,9 +64,9 @@ function firstText(messages: LlmMessages): string {
   const content = typeof last.content === "string"
     ? [{ type: "text" as const, text: last.content }]
     : last.content;
-  const first = content[0];
-  if (first?.type !== "text") throw new Error("Expected telemetry text");
-  return first.text;
+  const telemetry = content.at(-1);
+  if (telemetry?.type !== "text") throw new Error("Expected telemetry text");
+  return telemetry.text;
 }
 
 describe("installAgentContextBudget", () => {
@@ -122,7 +122,7 @@ describe("installAgentContextBudget", () => {
     expect(result[1]).toMatchObject({ role: "user" });
   });
 
-  it("prepends the exact telemetry inside the final user message without creating a new turn", async () => {
+  it("appends exact telemetry after the final user content without creating a new turn", async () => {
     const originalMessage = llmUser("continue the long task");
     const originalResult = [originalMessage];
     const { session } = fakeSession({
@@ -140,16 +140,69 @@ describe("installAgentContextBudget", () => {
     expect(result).toEqual([{
       role: "user",
       content: [
+        { type: "text", text: "continue the long task" },
         {
           type: "text",
           text: "<piweb_ctx used=\"51.9k/272k\" auto_compact=\"70%\" remaining=\"138.5k\" />",
         },
-        { type: "text", text: "continue the long task" },
       ],
       timestamp: 1,
     }]);
     expect(result).toHaveLength(originalResult.length);
     expect(originalResult).toEqual([originalMessage]);
+  });
+
+  it("keeps string content before the appended telemetry", async () => {
+    const originalMessage: LlmMessages[number] = {
+      role: "user",
+      content: "plain context",
+      timestamp: 1,
+    };
+    const { session } = fakeSession({ original: async () => [originalMessage] });
+    installAgentContextBudget(session, () => 70);
+
+    const result = await session.agent.convertToLlm([]);
+
+    expect(result).toEqual([{
+      ...originalMessage,
+      content: [
+        { type: "text", text: "plain context" },
+        {
+          type: "text",
+          text: "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
+        },
+      ],
+    }]);
+    expect(originalMessage.content).toBe("plain context");
+  });
+
+  it("keeps every mixed content part before the appended telemetry", async () => {
+    const originalMessage: LlmMessages[number] = {
+      role: "user",
+      content: [
+        { type: "text", text: "inspect this image" },
+        { type: "image", data: "image-data", mimeType: "image/png" },
+      ],
+      timestamp: 1,
+    };
+    const originalSnapshot = structuredClone(originalMessage);
+    const { session } = fakeSession({ original: async () => [originalMessage] });
+    installAgentContextBudget(session, () => 70);
+
+    const result = await session.agent.convertToLlm([]);
+
+    expect(result).toEqual([{
+      ...originalMessage,
+      content: [
+        { type: "text", text: "inspect this image" },
+        { type: "image", data: "image-data", mimeType: "image/png" },
+        {
+          type: "text",
+          text: "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
+        },
+      ],
+    }]);
+    expect(originalMessage).toEqual(originalSnapshot);
   });
 
   it("preserves a final tool-result role and protocol position", async () => {
@@ -169,11 +222,11 @@ describe("installAgentContextBudget", () => {
     expect(result).toEqual([{
       ...toolResult,
       content: [
+        { type: "text", text: "tool output" },
         {
           type: "text",
           text: "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
         },
-        { type: "text", text: "tool output" },
       ],
     }]);
     expect(result).toHaveLength(1);
@@ -197,10 +250,10 @@ describe("installAgentContextBudget", () => {
     const below = await session.agent.convertToLlm([]);
     const at = await session.agent.convertToLlm([]);
 
-    expect(firstText(below)).toBe(
+    expect(telemetryText(below)).toBe(
       "<piweb_ctx used=\"65k/100k\" auto_compact=\"70%\" remaining=\"5k\" />",
     );
-    expect(firstText(at)).toBe(
+    expect(telemetryText(at)).toBe(
       "<piweb_ctx used=\"65k/100k\" auto_compact=\"70%\" remaining=\"5k\" warning=\"Compaction soon; consider updating Agent Notebook.\" />",
     );
   });
@@ -223,10 +276,10 @@ describe("installAgentContextBudget", () => {
     const beforeCompaction = await session.agent.convertToLlm([]);
     const afterCompaction = await session.agent.convertToLlm([]);
 
-    expect(firstText(beforeCompaction)).toContain(
+    expect(telemetryText(beforeCompaction)).toContain(
       "warning=\"Compaction soon; consider updating Agent Notebook.\"",
     );
-    expect(firstText(afterCompaction)).toBe(
+    expect(telemetryText(afterCompaction)).toBe(
       "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
     );
   });
@@ -246,10 +299,10 @@ describe("installAgentContextBudget", () => {
     const first = await session.agent.convertToLlm([]);
     const second = await session.agent.convertToLlm([]);
 
-    expect(firstText(first)).toBe(
+    expect(telemetryText(first)).toBe(
       "<piweb_ctx used=\"60k/100k\" auto_compact=\"70%\" remaining=\"10k\" />",
     );
-    expect(firstText(second)).toBe(
+    expect(telemetryText(second)).toBe(
       "<piweb_ctx used=\"60k/100k\" auto_compact=\"80%\" remaining=\"20k\" />",
     );
     expect(getContextUsage).toHaveBeenCalledTimes(2);
@@ -268,7 +321,7 @@ describe("installAgentContextBudget", () => {
 
     const result = await session.agent.convertToLlm([]);
 
-    expect(firstText(result)).toBe(
+    expect(telemetryText(result)).toBe(
       "<piweb_ctx used=\"unknown/272k\" auto_compact=\"70%\" />",
     );
   });
@@ -320,14 +373,16 @@ describe("installAgentContextBudget", () => {
     const converted = Object.freeze([convertedMessage]) as unknown as LlmMessages;
     const original: ConvertToLlm = async () => converted;
     const { session, sessionMessages, managerMessages } = fakeSession({ original });
-    const sessionBefore = [...sessionMessages];
-    const managerBefore = [...managerMessages];
+    const inputBefore = structuredClone(input);
+    const convertedBefore = structuredClone(converted);
+    const sessionBefore = structuredClone(sessionMessages);
+    const managerBefore = structuredClone(managerMessages);
     installAgentContextBudget(session, () => 70);
 
     const result = await session.agent.convertToLlm(input);
 
-    expect(input).toEqual([inputMessage]);
-    expect(converted).toEqual([convertedMessage]);
+    expect(input).toEqual(inputBefore);
+    expect(converted).toEqual(convertedBefore);
     expect(result).not.toBe(converted);
     expect(sessionMessages).toEqual(sessionBefore);
     expect(managerMessages).toEqual(managerBefore);
