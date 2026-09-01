@@ -317,8 +317,14 @@ function sanitizeSpawnContext(context: BashSpawnContext): BashSpawnContext {
   return { ...context, env };
 }
 
-export function createReadOnlyBashTool(cwd: string): ToolDefinition {
-  const bash = createBashToolDefinition(cwd, { spawnHook: sanitizeSpawnContext });
+export function createReadOnlyBashTool(
+  cwd: string,
+  shellPath?: string,
+): ToolDefinition {
+  const bash = createBashToolDefinition(cwd, {
+    shellPath,
+    spawnHook: sanitizeSpawnContext,
+  });
   return defineTool({
     ...bash,
     description:

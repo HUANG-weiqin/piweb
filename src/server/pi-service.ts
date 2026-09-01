@@ -26,9 +26,6 @@ import type { ConversationActor } from "./conversation-actor.js";
 import { validateCwd } from "./cwd.js";
 import { ExtensionUIBroker } from "./extension-ui.js";
 import {
-  createReadOnlyBashTool,
-} from "./read-only-bash.js";
-import {
   type CreatedPiSession,
   type CredentialChangeIntent,
   type PiRuntimeLike,
@@ -371,9 +368,6 @@ export class PiConnection {
       created = await this.runtime.createSession(project.cwd, {
         sessionManager: selected.sessionManager,
         toolMode: initialMode,
-        workbenchCustomTools: initialMode === "read_only"
-          ? [createReadOnlyBashTool(project.cwd)]
-          : [],
         extensionUI: this.extensionUI.context({
           sessionId,
           generation,

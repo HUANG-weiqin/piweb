@@ -7,7 +7,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   createBashToolDefinition,
   type ToolDefinition,
@@ -70,6 +70,15 @@ function outputText(result: ToolResult): string {
 function shellPath(path: string): string {
   return path.replaceAll("\\", "/");
 }
+
+function findWindowsTestBash(): string | undefined {
+  if (process.platform !== "win32") return undefined;
+  const gitExecPath = execFileSync("git", ["--exec-path"], { encoding: "utf8" }).trim();
+  const candidate = resolve(gitExecPath, "..", "..", "..", "usr", "bin", "bash.exe");
+  return existsSync(candidate) ? candidate : undefined;
+}
+
+const TEST_BASH_PATH = findWindowsTestBash();
 
 const allowedCommands = [
   "git status --short",
@@ -235,7 +244,7 @@ describe("createReadOnlyBashTool", () => {
 
   beforeAll(() => {
     cwd = createRepository();
-    tool = createReadOnlyBashTool(cwd);
+    tool = createReadOnlyBashTool(cwd, TEST_BASH_PATH);
   });
 
   afterAll(() => {

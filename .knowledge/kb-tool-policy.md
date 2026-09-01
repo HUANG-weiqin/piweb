@@ -41,7 +41,7 @@ conversation role snapshot
 
 ## 受审查的只读 Bash
 
-`read_only` 会话注入一个 `source=sdk`、名称仍为 `bash` 的宿主包装器，它覆盖并替代 Pi builtin Bash；`full_access` 会话继续直接使用 Pi builtin Bash。包装器保留 Pi Bash 的参数 schema、timeout、AbortSignal、流式更新、输出截断和结果语义，但在任何进程执行前先审查最终 `command`，通过后才委托 `createBashToolDefinition(cwd)`。包装器不接受或追加 `shellCommandPrefix`，避免审查后再改变命令文本。
+`read_only` 会话由 `PiRuntime` 在 session services 解析完成后注入一个 `source=sdk`、名称仍为 `bash` 的宿主包装器，它使用同一 `SettingsManager` 的有效 `shellPath`，覆盖并替代 Pi builtin Bash；`full_access` 会话继续直接使用 Pi builtin Bash。包装器保留 Pi Bash 的参数 schema、timeout、AbortSignal、流式更新、输出截断和结果语义，但在任何进程执行前先审查最终 `command`，通过后才委托 `createBashToolDefinition(cwd, { shellPath })`。包装器不接受或追加 `shellCommandPrefix`，避免审查后再改变命令文本。
 
 审查只接受有长度上限、整串锚定的安全词法子集。每个程序名都必须是字面量并属于固定查询目录：受约束的 Git 查询、`rg`，以及目录/文件查看和纯 stdout 变换工具。受审查命令可以用 `|` 或 `&&` 组合；每个 segment 都独立复核。`cd [--] path` 只能位于同一次调用的后续查询之前，不能持久改变下一次工具调用的 cwd。换行、`; / || / &`、重定向、Shell 展开、环境赋值、命令路径和未知程序一律拒绝。`find` 的删除/执行/文件输出 action、`rg` 的 preprocessor/hostname program、Git 外部 filter/pager/output、`sort` 文件输出/外部 compressor/显式临时目录、`uniq` 输出文件、`tail` follow 和 `file` 解压/compile 等命令级副作用入口及其实际可用长选项缩写另行拒绝。允许安全的裸参数、单引号字面量，以及不含展开或转义的双引号字面量。
 

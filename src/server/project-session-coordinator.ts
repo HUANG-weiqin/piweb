@@ -47,7 +47,6 @@ import {
   projectConversationItemsSnapshot,
   snapshotConversationItems,
 } from "./conversation-history.js";
-import { createReadOnlyBashTool } from "./read-only-bash.js";
 
 function isNodeError(error: unknown, code: string): boolean {
   return (
@@ -2099,9 +2098,6 @@ export class ProjectSessionCoordinator {
       toolMode: profile.role.toolMode,
       extensionUI: this.extensionUIRouter(context, conversationId).ui,
       workbenchCustomTools: [
-        ...(profile.role.toolMode === "read_only"
-          ? [createReadOnlyBashTool(context.project.cwd)]
-          : []),
         ...createNotebookTools(context.project.stateDir, conversationId),
         ...createMetaTools(
           conversationId,

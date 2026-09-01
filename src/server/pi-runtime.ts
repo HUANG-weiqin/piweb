@@ -53,6 +53,7 @@ import {
   type ServiceTierOverride,
 } from "./service-tier.js";
 import { clearCredentialCommandCache, FileCredentialStore } from "./credential-store.js";
+import { createReadOnlyBashTool } from "./read-only-bash.js";
 import {
   isReadOnlyToolIdentity,
   READ_ONLY_TOOL_NAME_CEILING,
@@ -699,7 +700,7 @@ export class PiRuntime implements PiRuntimeLike {
       ? { provider: options.model.provider, id: options.model.id }
       : undefined;
     const roleSystemPrompt = options.roleSystemPrompt;
-    const workbenchCustomTools = options.workbenchCustomTools;
+    let workbenchCustomTools = options.workbenchCustomTools;
     const readOnlyToolProjection = options.toolMode === "read_only";
     const allowedToolNames = readOnlyToolProjection
       ? [...READ_ONLY_TOOL_NAME_CEILING]
@@ -795,6 +796,12 @@ export class PiRuntime implements PiRuntimeLike {
       });
       this.throwServiceDiagnostics(services.diagnostics);
       settings = services.settingsManager;
+      if (readOnlyToolProjection) {
+        workbenchCustomTools = [
+          createReadOnlyBashTool(cwd, settings.getShellPath()),
+          ...(workbenchCustomTools?.filter((tool) => tool.name !== "bash") ?? []),
+        ];
+      }
       const fixedModel = fixedModelReference
         ? this.resolveFixedModel(owner.registry, fixedModelReference)
         : undefined;

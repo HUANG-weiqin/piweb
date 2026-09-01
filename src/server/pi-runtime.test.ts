@@ -19,11 +19,11 @@ import {
   type CreateModelRuntimeOptions,
   type ExtensionAPI,
   type InlineExtension,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import type { LoopList } from "../shared/protocol.js";
 import { PiRuntime } from "./pi-runtime.js";
-import { createReadOnlyBashTool } from "./read-only-bash.js";
 
 initTheme();
 
@@ -136,6 +136,7 @@ async function testRuntime(
     options: Parameters<typeof createAgentSessionFromServices>[0],
   ) => Promise<void>,
   setupModelRuntime?: (runtime: ModelRuntime) => Promise<void> | void,
+  createSettings: () => SettingsManager = () => SettingsManager.inMemory(),
 ): Promise<PiRuntime> {
   const credentialStore = new InMemoryCredentialStore();
   return PiRuntime.create({
@@ -147,7 +148,7 @@ async function testRuntime(
       await setupModelRuntime?.(runtime);
       return runtime;
     },
-    createSettings: () => SettingsManager.inMemory(),
+    createSettings,
     createServices: (options) => createAgentSessionServices({
       ...options,
       agentDir: options.cwd,
@@ -493,6 +494,33 @@ describe("PiRuntime session ownership", () => {
     await created.dispose();
   });
 
+  it("builds read-only Bash with the effective SettingsManager shell path", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-read-only-shell-path-"));
+    const configuredShell = join(cwd, "configured-bash.exe");
+    const settings = SettingsManager.inMemory();
+    settings.setShellPath(configuredShell);
+    let bashTool: ToolDefinition | undefined;
+    const runtime = await testRuntime(
+      () => [],
+      async (_created, options) => {
+        bashTool = options.customTools?.find((tool) => tool.name === "bash");
+      },
+      undefined,
+      () => settings,
+    );
+
+    const created = await runtime.createSession(cwd, { toolMode: "read_only" });
+    expect(bashTool).toBeDefined();
+    await expect(bashTool!.execute(
+      "configured-shell",
+      { command: "pwd" } as never,
+      undefined,
+      undefined,
+      undefined as never,
+    )).rejects.toThrow(/Custom shell path not found:.*configured-bash\.exe/i);
+    await created.dispose();
+  });
+
   it("projects only safe native and host tools for read-only sessions", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-read-only-tools-"));
     const runtime = await testRuntime(() => [
@@ -513,7 +541,6 @@ describe("PiRuntime session ownership", () => {
     const created = await runtime.createSession(cwd, {
       toolMode: "read_only",
       workbenchCustomTools: [
-        createReadOnlyBashTool(cwd),
         workbenchTool(cwd, "notebook_list"),
         workbenchTool(cwd, "notebook_grep"),
         workbenchTool(cwd, "notebook_read"),
@@ -580,7 +607,6 @@ describe("PiRuntime session ownership", () => {
 
     const created = await runtime.createSession(cwd, {
       toolMode: "read_only",
-      workbenchCustomTools: [createReadOnlyBashTool(cwd)],
     });
     expect(created.session.getActiveToolNames()).not.toContain("find");
     expect(created.session.systemPrompt).not.toContain(staticMarker);

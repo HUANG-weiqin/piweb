@@ -2096,7 +2096,6 @@ describe("ProjectSessionCoordinator", () => {
       fixture.runtime.createOptions.get(first.conversationId)
         ?.workbenchCustomTools?.map(({ name }) => name),
     ).toEqual([
-      "bash",
       "notebook_write",
       "notebook_list",
       "notebook_grep",
