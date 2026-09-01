@@ -15,6 +15,7 @@ import {
   ModelRuntime,
   SessionManager,
   SettingsManager,
+  type AgentSession,
   type CreateModelRuntimeOptions,
   type ExtensionAPI,
   type InlineExtension,
@@ -274,6 +275,25 @@ describe("PiRuntime session ownership", () => {
     expect(created.session.agent.hasQueuedMessages()).toBe(true);
     await created.dispose();
     expect(loopOwner.createLoopConfig).toBe(originalCreateLoopConfig);
+  });
+
+  it("captures the exact synchronous user message queued through agent.steer", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-steering-identity-"));
+    const runtime = await testRuntime(() => []);
+    const created = await runtime.createSession(cwd);
+    const message: Parameters<typeof created.session.agent.steer>[0] = {
+      role: "user",
+      content: [{ type: "text", text: "queued guidance" }],
+      timestamp: 1,
+    };
+
+    const captured = created.captureSteeringMessage(() =>
+      created.session.agent.steer(message)
+    );
+
+    expect(captured?.message).toBe(message);
+    expect(created.session.agent.hasQueuedMessages()).toBe(true);
+    await created.dispose();
   });
 
   it("owns the supplied manager compaction boundary for the session lifetime", async () => {
@@ -740,6 +760,180 @@ describe("PiRuntime session ownership", () => {
     expect(managers[1]).toBe(manager);
     expect(explicitSession.session.sessionManager).toBe(manager);
     await explicitSession.dispose();
+  });
+
+  it("keeps extension model changes within the configured fixed identity through shutdown", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-fixed-extension-model-"));
+    const manager = SessionManager.inMemory(cwd);
+    let nativeSetModel: AgentSession["setModel"];
+    let shutdownDifferentModelError: string | undefined;
+    let sameIdentityResult: boolean | undefined;
+    const runtime = await testRuntime(
+      () => [
+        (pi) => {
+          pi.on("session_start", async (_event, context) => {
+            const alternate = context.modelRegistry.find(
+              "fixed-extension-provider",
+              "alternate-model",
+            );
+            if (!alternate) throw new Error("alternate test model missing");
+            await pi.setModel(alternate);
+          });
+          pi.on("session_shutdown", async (_event, context) => {
+            const alternate = context.modelRegistry.find(
+              "fixed-extension-provider",
+              "alternate-model",
+            );
+            const fixed = context.modelRegistry.find(
+              "fixed-extension-provider",
+              "fixed-model",
+            );
+            if (!alternate || !fixed) throw new Error("shutdown test model missing");
+            try {
+              await pi.setModel(alternate);
+            } catch (error) {
+              shutdownDifferentModelError = error instanceof Error
+                ? error.message
+                : String(error);
+            }
+            sameIdentityResult = await pi.setModel(fixed);
+          });
+        },
+      ],
+      async (result) => {
+        nativeSetModel = result.session.setModel;
+      },
+      async (modelRuntime) => {
+        modelRuntime.registerProvider("fixed-extension-provider", {
+          baseUrl: "https://example.invalid/v1",
+          apiKey: "fixed-extension-key",
+          api: "openai-completions",
+          models: [
+            providerModel("fixed-model"),
+            providerModel("alternate-model"),
+          ],
+        });
+        await modelRuntime.refresh({ allowNetwork: false });
+      },
+    );
+
+    const created = await runtime.createSession(cwd, {
+      sessionManager: manager,
+      model: {
+        provider: "fixed-extension-provider",
+        id: "fixed-model",
+      },
+    });
+    expect(created.session.setModel).not.toBe(nativeSetModel);
+    const modelChangesBeforeActivation = manager.getEntries().filter(
+      (entry) => entry.type === "model_change",
+    );
+
+    await created.activateExtensions();
+    expect(created.activateExtensionErrors(() => undefined)).toEqual([
+      expect.objectContaining({
+        event: "session_start",
+        error: expect.stringContaining("fixed-extension-provider/alternate-model"),
+      }),
+    ]);
+    expect(created.session.model).toMatchObject({
+      provider: "fixed-extension-provider",
+      id: "fixed-model",
+    });
+    expect(manager.getEntries().filter((entry) => entry.type === "model_change"))
+      .toEqual(modelChangesBeforeActivation);
+
+    await created.dispose();
+    expect(shutdownDifferentModelError).toContain(
+      "fixed-extension-provider/alternate-model",
+    );
+    expect(sameIdentityResult).toBe(true);
+    expect(manager.getEntries().filter((entry) => entry.type === "model_change"))
+      .toEqual([
+        ...modelChangesBeforeActivation,
+        expect.objectContaining({
+          provider: "fixed-extension-provider",
+          modelId: "fixed-model",
+        }),
+      ]);
+    expect(created.session.setModel).toBe(nativeSetModel);
+  });
+
+  it("gives extension contexts a defensive readonly session manager facade", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-extension-manager-"));
+    const manager = SessionManager.inMemory(cwd);
+    manager.appendCustomEntry("readonly-facade-test", {
+      nested: { value: "original" },
+    });
+    let startFacade: unknown;
+    let shutdownFacade: unknown;
+    let facadeKeys: string[] = [];
+    let startHasMutator = true;
+    let shutdownHasMutator = true;
+    const runtime = await testRuntime(() => [
+      (pi) => {
+        pi.on("session_start", (_event, context) => {
+          startFacade = context.sessionManager;
+          facadeKeys = Object.keys(context.sessionManager).sort();
+          startHasMutator = "appendCustomEntry" in context.sessionManager;
+          const entry = context.sessionManager.getEntries().find(
+            (candidate) => candidate.type === "custom"
+              && candidate.customType === "readonly-facade-test",
+          );
+          if (!entry || entry.type !== "custom") {
+            throw new Error("readonly facade test entry missing");
+          }
+          (entry.data as { nested: { value: string } }).nested.value = "mutated";
+        });
+        pi.on("session_shutdown", (_event, context) => {
+          shutdownFacade = context.sessionManager;
+          shutdownHasMutator = "appendCustomEntry" in context.sessionManager;
+        });
+      },
+    ]);
+
+    const created = await runtime.createSession(cwd, { sessionManager: manager });
+    const runner = created.session.extensionRunner as unknown as {
+      sessionManager: unknown;
+    };
+    expect(created.session.sessionManager).toBe(manager);
+    expect(runner.sessionManager).not.toBe(manager);
+
+    await created.activateExtensions();
+    created.activateExtensionErrors(() => undefined);
+    expect(startFacade).toBe(runner.sessionManager);
+    expect(startFacade).not.toBe(manager);
+    expect(startHasMutator).toBe(false);
+    expect(facadeKeys).toEqual([
+      "buildContextEntries",
+      "getBranch",
+      "getCwd",
+      "getEntries",
+      "getEntry",
+      "getHeader",
+      "getLabel",
+      "getLeafEntry",
+      "getLeafId",
+      "getSessionDir",
+      "getSessionFile",
+      "getSessionId",
+      "getSessionName",
+      "getTree",
+    ]);
+    expect(manager.getEntries().find(
+      (entry) => entry.type === "custom"
+        && entry.customType === "readonly-facade-test",
+    )).toMatchObject({
+      type: "custom",
+      customType: "readonly-facade-test",
+      data: { nested: { value: "original" } },
+    });
+
+    await created.dispose();
+    expect(shutdownFacade).toBe(startFacade);
+    expect(shutdownHasMutator).toBe(false);
+    expect(runner.sessionManager).toBe(manager);
+    expect(created.session.sessionManager).toBe(manager);
   });
 
   it.each([

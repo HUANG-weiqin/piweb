@@ -20,6 +20,7 @@ import {
   type AssistantMessage,
 } from "@earendil-works/pi-ai";
 import {
+  DEFAULT_COMPACTION_THRESHOLD_PERCENT,
   MAX_PROMPT_CHARACTERS,
   type ProjectActivitySummary,
   type RoleTemplate,
@@ -167,6 +168,8 @@ class FakeSessionControl {
    * (the actor only reads length/indices), matching the SDK's append order.
    */
   readonly steeringMessages: string[] = [];
+  /** Exact user message objects queued at the simulated SDK steering boundary. */
+  readonly steeringAgentMessages: AgentMessage[] = [];
   /** Simulated SDK preflight result for busy browser steer prompts. */
   steerPromptPreflightResult?: boolean;
   /** Simulated SDK queued text (may differ from the submitted prompt text). */
@@ -193,18 +196,24 @@ class FakeSessionControl {
   ) {
     this.behaviors.push(...initialBehaviors);
     const control = this;
+    const messages = manager.buildSessionContext().messages;
     this.session = {
       isStreaming: false,
-      messages: [],
+      messages,
       agent: {
         state: {
-          messages: [],
+          messages,
         },
       },
       model: options.model === undefined
         ? { provider: "test", id: "model-a" }
         : { ...options.model },
       thinkingLevel: options.thinkingLevel ?? "off",
+      setThinkingLevel: (level: Parameters<AgentSession["setThinkingLevel"]>[0]) => {
+        control.session.agent.state.thinkingLevel = level;
+        Object.assign(control.session, { thinkingLevel: level });
+        control.manager.appendThinkingLevelChange(level);
+      },
       extensionRunner: {
         getCommand: () => undefined,
       },
@@ -222,9 +231,13 @@ class FakeSessionControl {
           // emitUserMessage. Mirror the SDK: queue first, then preflight.
           const ok = control.steerPromptPreflightResult ?? true;
           if (ok && !control.steerPromptHandled) {
-            control.steeringMessages.push(
-              control.steerPromptExpandedText ?? text,
-            );
+            const queuedText = control.steerPromptExpandedText ?? text;
+            control.steeringMessages.push(queuedText);
+            control.steeringAgentMessages.push(agentMessage({
+              role: "user",
+              content: queuedText,
+              timestamp: Date.now(),
+            }));
           }
           options.preflightResult?.(ok);
           return;
@@ -237,12 +250,19 @@ class FakeSessionControl {
       steer: (text: string) => {
         control.steerTexts.push(text);
         const result = control.steerImplementation(text);
-        control.steeringMessages.push(control.steerExpandedText ?? text);
+        const queuedText = control.steerExpandedText ?? text;
+        control.steeringMessages.push(queuedText);
+        control.steeringAgentMessages.push(agentMessage({
+          role: "user",
+          content: queuedText,
+          timestamp: Date.now(),
+        }));
         return result;
       },
       clearQueue: () => {
         control.pendingSteers.splice(0);
         control.steeringMessages.splice(0);
+        control.steeringAgentMessages.splice(0);
       },
       sendCustomMessage: async (
         message: Parameters<AgentSession["sendCustomMessage"]>[0],
@@ -297,11 +317,16 @@ class FakeSessionControl {
   }
 
   emitUserMessage(text: string): void {
-    const message = agentMessage({
-      role: "user",
-      content: text,
-      timestamp: Date.now(),
-    });
+    const queuedIndex = this.steeringAgentMessages.findIndex((message) =>
+      message.role === "user" && message.content === text
+    );
+    const message = queuedIndex < 0
+      ? agentMessage({
+          role: "user",
+          content: text,
+          timestamp: Date.now(),
+        })
+      : this.steeringAgentMessages.splice(queuedIndex, 1)[0]!;
     this.manager.appendMessage(message);
     this.listener?.({
       type: "message_end",
@@ -465,6 +490,10 @@ class FakeRuntime implements PiRuntimeLike {
   ) => Promise<void>;
   beforeCreateProjectModelCatalog?: () => Promise<void>;
   beforeDisposeProjectModelCatalog?: () => Promise<void>;
+  beforeDisposeSession?: (
+    conversationId: string,
+    control: FakeSessionControl,
+  ) => Promise<void> | void;
   activateSession?: (
     conversationId: string,
     options: CreatePiSessionOptions,
@@ -515,6 +544,15 @@ class FakeRuntime implements PiRuntimeLike {
       settings: fakeSettings(),
       modelRuntime: this.modelRuntime,
       modelRegistry: this.sessionModelRegistry ?? this.modelRegistry,
+      captureSteeringMessage: (operation) => {
+        const before = control.steeringAgentMessages.length;
+        const result = operation();
+        const message = control.steeringAgentMessages[before];
+        return {
+          result,
+          ...(message === undefined ? {} : { message }),
+        };
+      },
       activateExtensions: () =>
         this.activateSession?.(conversationId, options)
         ?? Promise.resolve(),
@@ -523,6 +561,7 @@ class FakeRuntime implements PiRuntimeLike {
       ) => [],
       dynamicProviderNames: () => new Set(),
       dispose: async () => {
+        await this.beforeDisposeSession?.(conversationId, control);
         control.session.dispose();
       },
     };
@@ -1812,6 +1851,123 @@ describe("ProjectSessionCoordinator", () => {
     ).serviceTier).toBeUndefined();
   });
 
+  it("serializes threshold and thinking writes after an in-flight rewind", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const selectedId = actor.sessionManager.appendMessage({
+      role: "user",
+      content: "rewind here",
+      timestamp: 1,
+    });
+    const inbox = coordinatorInbox(fixture.handle);
+    const listInbox = inbox.list.bind(inbox);
+    const inspectionStarted = deferred();
+    const releaseInspection = deferred();
+    vi.spyOn(inbox, "list").mockImplementation(async (options) => {
+      inspectionStarted.resolve();
+      await releaseInspection.promise;
+      return listInbox(options);
+    });
+
+    const truncating = fixture.coordinator.truncateConversation(
+      fixture.handle,
+      actor.conversationId,
+      selectedId,
+    );
+    await inspectionStarted.promise;
+    let updatesSettled = false;
+    const updating = Promise.all([
+      fixture.coordinator.setCompactionThreshold(
+        fixture.handle,
+        actor.conversationId,
+        55,
+      ),
+      fixture.coordinator.setThinkingLevel(
+        fixture.handle,
+        actor.conversationId,
+        "high",
+      ),
+    ]).finally(() => {
+      updatesSettled = true;
+    });
+    await Promise.resolve();
+    expect(updatesSettled).toBe(false);
+
+    releaseInspection.resolve();
+    await truncating;
+    await updating;
+    expect(actor.getCompactionThresholdPercent()).toBe(55);
+    expect(actor.session.thinkingLevel).toBe("high");
+    const branch = actor.sessionManager.getBranch();
+    expect(aggregateReservedConversationEntries(
+      branch,
+    ).compactionThreshold?.percent).toBe(55);
+    expect(branch.at(-1)).toMatchObject({
+      type: "thinking_level_change",
+      thinkingLevel: "high",
+    });
+  });
+
+  it("rejects queued threshold and thinking writes after deletion reservation", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const context = (fixture.handle as unknown as {
+      context: {
+        lifecycle: SerialTaskQueue;
+        deleting: Set<string>;
+      };
+    }).context;
+    const gateStarted = deferred();
+    const releaseGate = deferred();
+    const gateTask = context.lifecycle.run(async () => {
+      gateStarted.resolve();
+      await releaseGate.promise;
+    });
+    await gateStarted.promise;
+
+    const updatingThreshold = fixture.coordinator.setCompactionThreshold(
+      fixture.handle,
+      actor.conversationId,
+      55,
+    );
+    const updatingThinking = fixture.coordinator.setThinkingLevel(
+      fixture.handle,
+      actor.conversationId,
+      "high",
+    );
+    const thresholdRejection = expect(updatingThreshold).rejects.toThrow(
+      `Conversation is being deleted: ${actor.conversationId}`,
+    );
+    const thinkingRejection = expect(updatingThinking).rejects.toThrow(
+      `Conversation is being deleted: ${actor.conversationId}`,
+    );
+    const deleting = fixture.coordinator.deleteConversation(
+      fixture.handle,
+      actor.conversationId,
+    );
+    expect(context.deleting.has(actor.conversationId)).toBe(true);
+
+    releaseGate.resolve();
+    await gateTask;
+    await thresholdRejection;
+    await thinkingRejection;
+    await expect(deleting).resolves.toBe(true);
+    expect(actor.getCompactionThresholdPercent())
+      .toBe(DEFAULT_COMPACTION_THRESHOLD_PERCENT);
+    expect(actor.sessionManager.getEntries()).not.toContainEqual(
+      expect.objectContaining({
+        type: "thinking_level_change",
+        thinkingLevel: "high",
+      }),
+    );
+  });
+
   it("rejects rewind while the selected conversation is running", async () => {
     const fixture = await createFixture();
     const actor = await fixture.coordinator.createUserConversation(
@@ -2039,6 +2195,11 @@ describe("ProjectSessionCoordinator", () => {
       api: "openai-codex-responses",
     });
     actor.setServiceTier("priority");
+    await fixture.coordinator.setThinkingLevel(
+      fixture.handle,
+      actor.conversationId,
+      "medium",
+    );
     const previousRuntime = fixture.runtime.control(actor.conversationId);
 
     const switched = await fixture.coordinator.switchConversationRole(
@@ -2050,6 +2211,7 @@ describe("ProjectSessionCoordinator", () => {
     expect(switched).toBe(actor);
     expect(previousRuntime.disposeCalls).toBe(1);
     expect(actor.getServiceTier()).toBeNull();
+    expect(actor.session.thinkingLevel).toBe("high");
     expect(actor.profile.role).toMatchObject({
       id: role.id,
       revision: role.revision,
@@ -2078,6 +2240,100 @@ describe("ProjectSessionCoordinator", () => {
       (await fixture.coordinator.listSessions(fixture.handle))
         .find(({ id }) => id === actor.conversationId)?.role?.id,
     ).toBe(role.id);
+  });
+
+  it("restores the retained role runtime and thinking level after rewind", async () => {
+    const fixture = await createFixture();
+    const role = await fixture.roles.createRole({
+      name: "Builder",
+      description: "Builds the selected change",
+      systemPrompt: "Implement the requested change.",
+      model: { provider: "test", id: "model-b" },
+      defaultThinkingLevel: "high",
+      defaultServiceTier: null,
+      toolMode: "full_access",
+      canManageSessions: true,
+    });
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const rewindEntryId = actor.sessionManager.appendMessage({
+      role: "user",
+      content: "rewind before the role change",
+      timestamp: 1,
+    });
+    await fixture.coordinator.switchConversationRole(
+      fixture.handle,
+      actor.conversationId,
+      role.id,
+    );
+    const switchedRuntime = fixture.runtime.control(actor.conversationId);
+    expect(actor.profile.role.id).toBe(role.id);
+    expect(actor.session.thinkingLevel).toBe("high");
+    let shutdownMutations = 0;
+    fixture.runtime.beforeDisposeSession = (conversationId, control) => {
+      if (
+        conversationId !== actor.conversationId
+        || control !== switchedRuntime
+      ) return;
+      shutdownMutations++;
+      fixture.runtime.beforeDisposeSession = undefined;
+      control.session.setThinkingLevel("medium");
+    };
+
+    await fixture.coordinator.truncateConversation(
+      fixture.handle,
+      actor.conversationId,
+      rewindEntryId,
+    );
+
+    expect(switchedRuntime.disposeCalls).toBe(1);
+    expect(shutdownMutations).toBe(1);
+    expect(actor.profile.role.id).toBe("default");
+    expect(actor.session.model?.id).toBe("model-a");
+    expect(actor.session.thinkingLevel).toBe("off");
+    expect(actor.sessionManager.getBranch()).not.toContainEqual(
+      expect.objectContaining({
+        type: "thinking_level_change",
+        thinkingLevel: "medium",
+      }),
+    );
+    expect(fixture.runtime.createOptions.get(actor.conversationId)).toMatchObject({
+      model: { provider: "test", id: "model-a" },
+      thinkingLevel: "off",
+      toolMode: actor.profile.role.toolMode,
+    });
+    expect(aggregateReservedConversationEntries(
+      actor.sessionManager.getBranch(),
+    ).conversationMeta?.role.id).toBe("default");
+    expect(
+      (await fixture.coordinator.listSessions(fixture.handle))
+        .find(({ id }) => id === actor.conversationId)?.role?.id,
+    ).toBe("default");
+  });
+
+  it("restores the stopped runtime when durable rewind is rejected", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const previousRuntime = fixture.runtime.control(actor.conversationId);
+
+    await expect(fixture.coordinator.truncateConversation(
+      fixture.handle,
+      actor.conversationId,
+      randomUUID(),
+    )).rejects.toThrow(/message not found/i);
+
+    expect(previousRuntime.disposeCalls).toBe(1);
+    expect(fixture.runtime.control(actor.conversationId)).not.toBe(
+      previousRuntime,
+    );
+    expect(actor.getState().fatalError).toBeUndefined();
+    expect(actor.profile.role.id).toBe("default");
+    expect(actor.session.model?.id).toBe("model-a");
   });
 
   it("rejects switching the role of a running conversation", async () => {
@@ -2140,6 +2396,10 @@ describe("ProjectSessionCoordinator", () => {
       api: "openai-codex-responses",
     });
     actor.setServiceTier("priority");
+    actor.session.setThinkingLevel("medium");
+    expect(
+      fixture.runtime.createOptions.get(actor.conversationId)?.thinkingLevel,
+    ).toBe("off");
     fixture.runtime.beforeCreateSession = async (_conversationId, options) => {
       if (options.model?.id === "model-b") {
         throw new Error("replacement activation failed");
@@ -2155,6 +2415,11 @@ describe("ProjectSessionCoordinator", () => {
     expect(actor.profile.role.id).toBe("default");
     expect(actor.session.model?.id).toBe("model-a");
     expect(actor.getServiceTier()).toBe("priority");
+    expect(actor.session.thinkingLevel).toBe("medium");
+    expect(actor.sessionManager.getBranch().at(-1)).toMatchObject({
+      type: "thinking_level_change",
+      thinkingLevel: "medium",
+    });
     const restored = aggregateReservedConversationEntries(
       actor.sessionManager.getEntries(),
     );

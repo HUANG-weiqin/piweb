@@ -23,6 +23,7 @@ import {
   type ServiceTier,
   type TokenUsage,
   type LoopList,
+  type ThinkingLevel,
   type ToolMode,
 } from "../shared/protocol.js";
 import type { AgentTurnBoundaryCheck } from "./agent-turn-boundary.js";
@@ -42,6 +43,7 @@ import {
   createConversationRoleChangeEntry,
   createRunSettlementEntry,
   createServiceTierSelectionEntry,
+  parseReservedConversationEntry,
   RUN_SETTLEMENT_CUSTOM_TYPE,
   type ConversationMeta,
   type ConversationMessageEntry,
@@ -79,6 +81,11 @@ import {
   type ToolPolicyDecision,
 } from "./tool-policy.js";
 
+type AgentMessage = Extract<
+  Parameters<AgentSession["agent"]["steer"]>[0],
+  { role: "user" }
+>;
+
 export type ConversationRunOrigin = "browser" | "inbox";
 
 export interface ConversationActorState {
@@ -88,6 +95,11 @@ export interface ConversationActorState {
   compacting: boolean;
   fatalError?: string;
   disposed: boolean;
+}
+
+export interface ThinkingLevelChangeResult {
+  partialFailure?: unknown;
+  settingsFailures: unknown[];
 }
 
 export type ConversationActorEvent =
@@ -183,6 +195,9 @@ export interface ConversationActorOpenOptions {
     CreatePiSessionOptions,
     "sessionManager" | "toolCallGate" | "toolCallCompleted" | "extensionAbort"
   >;
+  createSessionOptionsForProfile: (
+    profile: ConversationMeta,
+  ) => NonNullable<ConversationActorOpenOptions["createSessionOptions"]>;
   persistSettlement?: (
     settlement: RunSettlement,
     sessionManager: SessionManager,
@@ -277,12 +292,8 @@ interface PendingGuidanceObservation {
   readonly steer?: PendingGuidance;
   /** busy 浏览器 prompt admission（其 prompt_delivered 在 raw user message_end 结算）。 */
   readonly admission?: PendingPromptAdmission;
-  /**
-   * SDK 实际入队的 delivery text（浏览器 prompt 为验证后的 queued text；
-   * 显式 steer 为调用后同步捕获的 queued text）。raw user message_end
-   * 只认领 FIFO 头 deliveryText 匹配的记录。
-   */
-  readonly deliveryText: string;
+  /** SDK 入队的稳定对象身份；扩展可替换正文，但 SDK 保持此对象 identity。 */
+  readonly queuedMessage: AgentMessage;
   /** 本 run 的 wait 已在此 guidance 上唤醒过一次。 */
   waited: boolean;
 }
@@ -459,20 +470,6 @@ function rawUserMessageIsPersisted(
   ));
 }
 
-/** 提取 raw user message 的纯文本（与 AgentSession._getUserMessageText 一致）。 */
-function admittedUserMessageText(message: {
-  role: string;
-  content: string | Array<{ type: string; text?: string }>;
-}): string | undefined {
-  if (message.role !== "user") return undefined;
-  const content = message.content;
-  if (typeof content === "string") return content;
-  return content
-    .filter((c) => c.type === "text")
-    .map((c) => c.text ?? "")
-    .join("");
-}
-
 function isCancelling(ticket: RunTicket): boolean {
   return ticket.phase === "cancelling";
 }
@@ -523,6 +520,32 @@ function addUsage(
   };
 }
 
+function branchThinkingLevel(
+  entries: readonly unknown[],
+  fallback: ThinkingLevel,
+): ThinkingLevel {
+  let level = fallback;
+  for (const value of entries) {
+    if (
+      typeof value === "object"
+      && value !== null
+      && "type" in value
+      && value.type === "thinking_level_change"
+      && "thinkingLevel" in value
+    ) {
+      level = value.thinkingLevel as ThinkingLevel;
+      continue;
+    }
+    const reserved = parseReservedConversationEntry(value);
+    if (reserved?.kind === "conversation_meta") {
+      level = reserved.entry.data.role.defaultThinkingLevel;
+    } else if (reserved?.kind === "conversation_role_change") {
+      level = reserved.entry.data.role.defaultThinkingLevel;
+    }
+  }
+  return level;
+}
+
 /**
  * Owns exactly one persistent Pi conversation independently of any WebSocket.
  *
@@ -538,7 +561,9 @@ export class ConversationActor {
   private readonly runtime: PiRuntimeLike;
   private readonly toolPolicy: ToolPolicy;
   private createSessionOptions:
-    ConversationActorOpenOptions["createSessionOptions"];
+    NonNullable<ConversationActorOpenOptions["createSessionOptions"]>;
+  private readonly createSessionOptionsForProfile:
+    ConversationActorOpenOptions["createSessionOptionsForProfile"];
   private readonly persistSettlementCallback:
     NonNullable<ConversationActorOpenOptions["persistSettlement"]>;
   private readonly onCompletion?: ConversationActorOpenOptions["onCompletion"];
@@ -577,23 +602,33 @@ export class ConversationActor {
     this.conversationLease = options.conversationLease;
     this.runtime = options.runtime;
     this.toolPolicy = options.toolPolicy ?? defaultToolPolicy;
-    this.createSessionOptions = options.createSessionOptions;
+    this.createSessionOptionsForProfile = options.createSessionOptionsForProfile;
     this.onCompletion = options.onCompletion;
     this.onExtensionError = options.onExtensionError;
     this.cancelRunScope = options.cancelRunScope;
     this.now = options.now ?? (() => new Date());
     this.profileSnapshot = createConversationMetaEntry(options.profile).data;
-    const reserved = aggregateReservedConversationEntries(
+    this.createSessionOptions = {
+      ...options.createSessionOptions,
+      thinkingLevel: branchThinkingLevel(
+        this.sessionManager.getBranch(),
+        this.profileSnapshot.role.defaultThinkingLevel,
+      ),
+    };
+    const branchReserved = aggregateReservedConversationEntries(
+      this.sessionManager.getBranch(),
+    );
+    const ledger = aggregateReservedConversationEntries(
       this.sessionManager.getEntries(),
     );
     this.compactionThresholdPercent =
-      reserved.compactionThreshold?.percent
+      branchReserved.compactionThreshold?.percent
       ?? DEFAULT_COMPACTION_THRESHOLD_PERCENT;
-    this.serviceTierSelection = reserved.serviceTier !== undefined
-      ? reserved.serviceTier.tier
+    this.serviceTierSelection = branchReserved.serviceTier !== undefined
+      ? branchReserved.serviceTier.tier
       : this.profileSnapshot.role.defaultServiceTier;
     this.loopListSnapshot = this.restoreLoopListFromActiveBranch();
-    for (const settlement of reserved.runSettlements) {
+    for (const settlement of ledger.runSettlements) {
       this.usedRunIds.add(settlement.runId);
     }
     this.persistSettlementCallback = options.persistSettlement
@@ -726,12 +761,57 @@ export class ConversationActor {
   }
 
   setCompactionThresholdPercent(percent: number): void {
+    this.assertUsable();
+    if (this.truncating || this.switchingRole) {
+      throw new Error("Cannot change the compaction threshold during another operation");
+    }
     const entry = createCompactionThresholdEntry({
       percent,
       updatedAt: this.now().toISOString(),
     });
     appendReservedCustomEntry(this.sessionManager, entry);
     this.compactionThresholdPercent = entry.data.percent;
+  }
+
+  async setThinkingLevel(
+    level: ThinkingLevel,
+  ): Promise<ThinkingLevelChangeResult> {
+    this.assertUsable();
+    if (this.truncating || this.switchingRole) {
+      throw new Error("Cannot change the thinking level during another operation");
+    }
+    const previousLevel = this.session.thinkingLevel;
+    let partialFailure: unknown;
+    try {
+      this.session.setThinkingLevel(level);
+    } catch (error) {
+      if (this.session.thinkingLevel === previousLevel) throw error;
+      partialFailure = error;
+    }
+    this.createSessionOptions = {
+      ...this.createSessionOptions,
+      thinkingLevel: this.session.thinkingLevel,
+    };
+
+    let flushFailure: unknown;
+    try {
+      await this.settings.flush();
+    } catch (error) {
+      flushFailure = error;
+    }
+    const settingsFailures: unknown[] = [];
+    const reported = new Set<unknown>();
+    for (const item of this.settings.drainErrors()) {
+      reported.add(item.error);
+      settingsFailures.push(item.error);
+    }
+    if (flushFailure && !reported.has(flushFailure)) {
+      settingsFailures.push(flushFailure);
+    }
+    return {
+      ...(partialFailure === undefined ? {} : { partialFailure }),
+      settingsFailures,
+    };
   }
 
   getServiceTier(): ServiceTier | null {
@@ -913,7 +993,7 @@ export class ConversationActor {
   switchRole(
     role: ConversationRoleSnapshot,
     createSessionOptions:
-      ConversationActorOpenOptions["createSessionOptions"],
+      NonNullable<ConversationActorOpenOptions["createSessionOptions"]>,
   ): Promise<void> {
     this.assertUsable();
     if (this.activeRun) {
@@ -933,6 +1013,7 @@ export class ConversationActor {
     }
     const previousProfile = this.profileSnapshot;
     const previousServiceTier = this.serviceTierSelection;
+    const previousThinkingLevel = this.session.thinkingLevel;
     const nextProfile = createConversationMetaEntry({
       ...previousProfile,
       role,
@@ -981,12 +1062,17 @@ export class ConversationActor {
                 changedAt: this.now().toISOString(),
               }),
             );
+            this.sessionManager.appendThinkingLevelChange(previousThinkingLevel);
           }
           this.profileSnapshot = previousProfile;
           this.serviceTierSelection = previousServiceTier;
-          this.createSessionOptions = previousOptions;
+          const restoredOptions = {
+            ...previousOptions,
+            thinkingLevel: previousThinkingLevel,
+          };
+          this.createSessionOptions = restoredOptions;
           const pendingErrors = await this.startRuntimeSession(
-            previousOptions,
+            restoredOptions,
           );
           for (const pendingError of pendingErrors) {
             this.handleExtensionError(pendingError);
@@ -1022,7 +1108,10 @@ export class ConversationActor {
     }
     this.truncating = true;
     return this.operations.run(async () => {
+      const previousOptions = this.createSessionOptions;
+      const previousProfile = structuredClone(this.profileSnapshot);
       let persisted = false;
+      let runtimeStopped = false;
       try {
         this.assertUsable();
         if (this.activeRun) {
@@ -1030,31 +1119,87 @@ export class ConversationActor {
             "Cannot rewind a busy conversation; abort and wait first",
           );
         }
+        runtimeStopped = true;
+        await this.stopRuntimeSession();
         const sessionFile = await this.project.truncateConversation(
           this.conversationId,
           entryId,
         );
         persisted = true;
         this.sessionManager.setSessionFile(sessionFile);
-        const reserved = aggregateReservedConversationEntries(
-          this.sessionManager.getEntries(),
+        const branch = this.sessionManager.getBranch();
+        const branchReserved = aggregateReservedConversationEntries(branch);
+        const retainedProfile = branchReserved.conversationMeta;
+        if (retainedProfile === undefined) {
+          throw new Error("Rewound conversation is missing its profile metadata");
+        }
+        const roleChanged = JSON.stringify(this.profileSnapshot.role)
+          !== JSON.stringify(retainedProfile.role);
+        const thinkingLevel = branchThinkingLevel(
+          branch,
+          retainedProfile.role.defaultThinkingLevel,
         );
         this.compactionThresholdPercent =
-          reserved.compactionThreshold?.percent
+          branchReserved.compactionThreshold?.percent
           ?? DEFAULT_COMPACTION_THRESHOLD_PERCENT;
-        this.serviceTierSelection = reserved.serviceTier !== undefined
-          ? reserved.serviceTier.tier
-          : this.profileSnapshot.role.defaultServiceTier;
+        this.serviceTierSelection = branchReserved.serviceTier !== undefined
+          ? branchReserved.serviceTier.tier
+          : retainedProfile.role.defaultServiceTier;
         this.loopListSnapshot = this.restoreLoopListFromActiveBranch();
         this.emitLoopList();
         this.usedRunIds.clear();
-        for (const settlement of reserved.runSettlements) {
+        const ledger = aggregateReservedConversationEntries(
+          this.sessionManager.getEntries(),
+        );
+        for (const settlement of ledger.runSettlements) {
           this.usedRunIds.add(settlement.runId);
         }
-        this.session.agent.state.messages =
-          this.sessionManager.buildSessionContext().messages;
+        const createOptions = roleChanged
+          ? this.createSessionOptionsForProfile(retainedProfile)
+          : previousOptions;
+        this.profileSnapshot = structuredClone(retainedProfile);
+        this.createSessionOptions = {
+          ...createOptions,
+          thinkingLevel,
+        };
+        const pendingErrors = await this.startRuntimeSession(
+          this.createSessionOptions,
+        );
+        for (const extensionError of pendingErrors) {
+          this.handleExtensionError(extensionError);
+        }
       } catch (error) {
-        if (!persisted) throw error;
+        if (!persisted) {
+          if (!runtimeStopped) throw error;
+          const failures: unknown[] = [error];
+          try {
+            const branch = this.sessionManager.getBranch();
+            const restoredOptions = {
+              ...previousOptions,
+              thinkingLevel: branchThinkingLevel(
+                branch,
+                previousProfile.role.defaultThinkingLevel,
+              ),
+            };
+            this.profileSnapshot = previousProfile;
+            this.createSessionOptions = restoredOptions;
+            const pendingErrors = await this.startRuntimeSession(
+              restoredOptions,
+            );
+            for (const extensionError of pendingErrors) {
+              this.handleExtensionError(extensionError);
+            }
+          } catch (rollbackError) {
+            failures.push(rollbackError);
+            this.fatalError = new AggregateError(
+              failures,
+              "Failed to rewind conversation and restore its previous runtime",
+            );
+            this.emitError(this.fatalError, undefined, true);
+            throw this.fatalError;
+          }
+          throw error;
+        }
         this.fatalError = error instanceof Error
           ? error
           : new Error(String(error));
@@ -1293,6 +1438,15 @@ export class ConversationActor {
       text: string;
     },
   ): Promise<{ outcome: "admitted" }> {
+    // Pi checks every slash-prefixed prompt for an extension command through
+    // an await before it can reach agent.steer. The identity capture below is
+    // intentionally synchronous, so reject this busy-only path before the SDK
+    // can enqueue an unobserved message after capture has ended.
+    if (input.text.startsWith("/")) {
+      throw new Error(
+        "Slash-prefixed messages cannot be queued while an Agent run is active",
+      );
+    }
     // Fail closed BEFORE the SDK call:
     // - pre-stream: the SDK run is not streaming yet — a steer-mode prompt
     //   would start an unowned SDK run (and the later queue proof could not
@@ -1317,70 +1471,76 @@ export class ConversationActor {
     };
     this.pendingAdmissions.push(admission);
     let accepted = false;
+    let preflightResult: boolean | undefined;
+    let observation: PendingGuidanceObservation | undefined;
     try {
       await new Promise<void>((resolve, reject) => {
-        void this.session.prompt(input.text, {
-          streamingBehavior: "steer",
-          preflightResult: (ok) => {
-            if (!ok) {
-              reject(new Error("Prompt preflight rejected"));
-              return;
-            }
-            accepted = true;
-            // The SDK pushes this entry synchronously before its preflight
-            // continuation. Supported host admissions cannot append in that
-            // interval, while queue drains only remove from the front, so the
-            // tail is this prompt. A length proof would falsely reject when a
-            // predecessor drains while leaving this text queued.
-            const after = this.session.getSteeringMessages();
-            const deliveryText = after.at(-1);
-            if (deliveryText === undefined) {
-              // No own entry appeared (e.g. the SDK consumed the input
-              // without queueing): fail closed — no prompt_admitted, no
-              // wait wake, admission removed by the catch below.
-              reject(new Error(
-                "Prompt was handled without being queued for steering",
-              ));
-              return;
-            }
-            if (
-              this.activeRun !== ticket
-              || (
-                ticket.phase !== "running"
-                && ticket.phase !== "waiting"
-              )
-            ) {
-              reject(new Error(
-                "The agent run stopped accepting messages before admission completed",
-              ));
-              return;
-            }
-            resolve();
-            // The SDK has queued the browser prompt into the steering
-            // queue. Defer the observation record to a microtask so explicit
-            // steer acceptances (already queued) keep the unified FIFO in
-            // SDK queue order; then wake a waiting run's host interrupt if
-            // one is registered.
-            queueMicrotask(() => {
-              if (
-                this.activeRun === ticket
-                && ticket.phase !== "cancelling"
-              ) {
-                ticket.pendingGuidanceObservations.push({
-                  admission,
-                  deliveryText,
-                  waited: false,
+        let queued: Promise<void>;
+        try {
+          const captured = this.requireCreated().captureSteeringMessage(() =>
+            this.session.prompt(input.text, {
+              streamingBehavior: "steer",
+              preflightResult: (ok) => {
+                accepted = ok;
+                preflightResult = ok;
+                queueMicrotask(() => {
+                  if (!ok) {
+                    reject(new Error("Prompt preflight rejected"));
+                    return;
+                  }
+                  if (observation === undefined) {
+                    reject(new Error(
+                      "Prompt was handled without a steering identity",
+                    ));
+                    return;
+                  }
+                  if (
+                    this.activeRun !== ticket
+                    || (
+                      ticket.phase !== "running"
+                      && ticket.phase !== "waiting"
+                    )
+                  ) {
+                    reject(new Error(
+                      "The agent run stopped accepting messages before admission completed",
+                    ));
+                    return;
+                  }
+                  this.fireWaitingSteerInterrupt(ticket);
+                  resolve();
                 });
-                this.fireWaitingSteerInterrupt(ticket);
-              }
-            });
-          },
-        }).catch((error: unknown) => {
+              },
+            })
+          );
+          queued = Promise.resolve(captured.result);
+          if (captured.message === undefined) {
+            if (preflightResult !== false) {
+              throw new Error(
+                "Prompt was handled without being queued for steering",
+              );
+            }
+          } else {
+            observation = {
+              admission,
+              queuedMessage: captured.message,
+              waited: false,
+            };
+            ticket.pendingGuidanceObservations.push(observation);
+          }
+        } catch (error) {
+          reject(error);
+          return;
+        }
+        void queued.catch((error: unknown) => {
           // 主 promise 覆盖整个队列 drain；若投递确认已发生，忽略迟到错误。
           if (!accepted) reject(error);
         });
       });
     } catch (error) {
+      if (observation !== undefined) {
+        const index = ticket.pendingGuidanceObservations.indexOf(observation);
+        if (index >= 0) ticket.pendingGuidanceObservations.splice(index, 1);
+      }
       this.removePendingAdmission(input.promptId);
       throw error;
     }
@@ -1491,51 +1651,40 @@ export class ConversationActor {
     };
     // AgentSession.steer queues synchronously before its promise resolves. Do
     // not route this through the actor operation queue: that queue is occupied
-    // by the active run until settlement. The command itself settles only when
-    // the SDK later emits the queued user message into this exact run.
-    const beforeSteerQueueLength = this.session.getSteeringMessages().length;
+    // by the active run until settlement. Capture the exact AgentMessage object
+    // at Pi's agent.steer boundary so extension replacement cannot change its
+    // delivery identity.
     let queued: Promise<void>;
+    let observation: PendingGuidanceObservation | undefined;
     try {
-      queued = this.session.steer(trimmed);
+      const captured = this.requireCreated().captureSteeringMessage(() =>
+        this.session.steer(trimmed)
+      );
+      queued = Promise.resolve(captured.result);
+      if (captured.message === undefined) {
+        throw new Error("Steer was accepted without a steering identity");
+      }
+      observation = {
+        steer: pendingGuidance,
+        queuedMessage: captured.message,
+        waited: false,
+      };
+      ticket.pendingGuidanceObservations.push(observation);
     } catch (error) {
       removePendingGuidance();
       delivery.reject(error);
       return Promise.reject(error);
     }
-    // The real SDK pushes its steering entry synchronously inside the steer
-    // call (before the first await of its async body). Capture the exact
-    // queued delivery text now; the later raw user message_end carries it.
-    const afterSteer = this.session.getSteeringMessages();
-    const steerDeliveryText = afterSteer.length > beforeSteerQueueLength
-      ? afterSteer[beforeSteerQueueLength]
-      : undefined;
-    return Promise.resolve(queued).then(
+    return queued.then(
       () => {
-        // Fail closed: without the queued delivery text the raw end could
-        // never settle this delivery, and waking a wait on an un-queued
-        // guidance would be a fake acceptance. Do not accept before the
-        // steer promise settles.
-        if (steerDeliveryText === undefined) {
-          removePendingGuidance();
-          const error = new Error(
-            "Steer was accepted without a queued steering entry",
-          );
-          delivery.reject(error);
-          throw error;
-        }
-        // The SDK has queued the guidance: record it as accepted-but-
-        // unobserved and, if this exact run is currently waiting with a host
-        // interrupt, wake it now. The command promise still settles only on
-        // the raw user message_end proof below, where the record is retired.
-        ticket.pendingGuidanceObservations.push({
-          steer: pendingGuidance,
-          deliveryText: steerDeliveryText,
-          waited: false,
-        });
         this.fireWaitingSteerInterrupt(ticket);
         return delivery.promise;
       },
     ).catch((error: unknown) => {
+      if (observation !== undefined) {
+        const index = ticket.pendingGuidanceObservations.indexOf(observation);
+        if (index >= 0) ticket.pendingGuidanceObservations.splice(index, 1);
+      }
       removePendingGuidance();
       delivery.reject(error);
       throw error;
@@ -2636,17 +2785,11 @@ export class ConversationActor {
         return;
       }
 
-      // Subsequent raw ends claim the unified accepted-guidance FIFO head by
-      // its queued delivery text (browser + explicit in SDK acceptance
-      // order). Same-text messages stay ordered by kind and identity — never
-      // by a text search over arbitrary admissions.
-      const admittedText = admittedUserMessageText(rawMessage);
+      // Subsequent raw ends claim only the unified FIFO head by the exact
+      // AgentMessage object captured at agent.steer. Extensions may replace
+      // its content in place without changing identity.
       const head = ticket.pendingGuidanceObservations[0];
-      if (
-        head !== undefined
-        && admittedText !== undefined
-        && head.deliveryText === admittedText
-      ) {
+      if (head !== undefined && head.queuedMessage === rawMessage) {
         this.claimPendingGuidanceObservation(ticket, rawMessage, head);
         return;
       }

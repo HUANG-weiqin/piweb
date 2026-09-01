@@ -126,6 +126,12 @@ function fakeSession(): FakeSession {
     steerCalls: [],
     isStreaming: false,
     messages: [],
+    agent: {
+      state: {
+        messages: [],
+        thinkingLevel: "off",
+      },
+    },
     model: {
       provider: "test",
       id: "model",
@@ -235,6 +241,23 @@ class FakeRuntime implements PiRuntimeLike {
   activationError?: Error;
   pendingExtensionErrors: ExtensionError[] = [];
   extensionErrorHandler?: (error: ExtensionError) => void;
+  nextSteeringCapture?: AgentMessage;
+  readonly steeringCaptures: AgentMessage[] = [];
+  private nextSteeringTimestamp = 1;
+
+  takeSteeringCapture(expectedText: string): AgentMessage {
+    const index = this.steeringCaptures.findIndex((message) =>
+      message.role === "user"
+      && Array.isArray(message.content)
+      && message.content.some((part) =>
+        part.type === "text" && part.text === expectedText
+      )
+    );
+    if (index < 0) {
+      throw new Error(`No captured steering message for: ${expectedText}`);
+    }
+    return this.steeringCaptures.splice(index, 1)[0]!;
+  }
 
   async createProjectModelCatalog() {
     return {
@@ -261,8 +284,16 @@ class FakeRuntime implements PiRuntimeLike {
         : undefined,
     };
     this.session.toolCallGate = options.toolCallGate;
+    const thinkingLevel = options.thinkingLevel ?? "off";
+    this.session.agent.state.thinkingLevel = thinkingLevel;
+    Object.assign(this.session, { thinkingLevel });
     this.session.setSessionNameImplementation = (name) => {
       options.sessionManager?.appendSessionInfo(name);
+    };
+    this.session.setThinkingLevel = (level) => {
+      this.session.agent.state.thinkingLevel = level;
+      Object.assign(this.session, { thinkingLevel: level });
+      options.sessionManager?.appendThinkingLevelChange(level);
     };
     return {
       session: this.session,
@@ -273,6 +304,31 @@ class FakeRuntime implements PiRuntimeLike {
         if (!this.session.turnBoundaryPaused) return;
         this.session.turnBoundaryPaused = false;
         this.session.turnBoundaryPauseReleases++;
+      },
+      captureSteeringMessage: (operation) => {
+        const before = [...this.session.steeringMessages];
+        const explicitMessage = this.nextSteeringCapture;
+        this.nextSteeringCapture = undefined;
+        const result = operation();
+        const remaining = [...before];
+        const queuedText = this.session.steeringMessages.find((text) => {
+          const index = remaining.indexOf(text);
+          if (index < 0) return true;
+          remaining.splice(index, 1);
+          return false;
+        });
+        const message = explicitMessage ?? (queuedText === undefined
+          ? undefined
+          : agentMessage({
+              role: "user",
+              content: [{ type: "text", text: queuedText }],
+              timestamp: this.nextSteeringTimestamp++,
+            }));
+        if (message !== undefined) this.steeringCaptures.push(message);
+        return {
+          result,
+          ...(message === undefined ? {} : { message }),
+        };
       },
       activateExtensions: async () => {
         if (this.activationError) throw this.activationError;
@@ -420,6 +476,8 @@ async function openActor(
     conversationLease: lease,
     runtime,
     ...overrides,
+    createSessionOptionsForProfile:
+      overrides.createSessionOptionsForProfile ?? (() => ({})),
   });
   const events: ConversationActorEvent[] = [];
   actor.subscribe((event) => events.push(event));
@@ -973,6 +1031,7 @@ describe("ConversationActor", () => {
         runId: RUN_A,
         text: "shared text",
       });
+      const admittedRaw = fixture.runtime.takeSteeringCapture("shared text");
       await vi.waitFor(() =>
         expect(fixture.actor.pendingPromptAdmissions()).toHaveLength(1)
       );
@@ -992,12 +1051,68 @@ describe("ConversationActor", () => {
       expect(fixture.actor.pendingPromptAdmissions()).toHaveLength(1);
 
       // The second raw end is the admission's: precise promptId delivery.
-      const secondRaw = {
+      fixture.manager.appendMessage(admittedRaw);
+      emit()?.(nativeEvent({ type: "message_end", message: admittedRaw }));
+      await Promise.resolve();
+      expect(fixture.events).toContainEqual(expect.objectContaining({
+        type: "prompt_delivered",
+        promptId: PROMPT_ID,
+      }));
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
+
+      finishRun.resolve();
+      await running;
+      await fixture.actor.dispose();
+    });
+
+    it("uses queued object identity across extension replacement", async () => {
+      const fixture = await openActor();
+      const emit = () => fixture.runtime.session.eventListener;
+      const { runStarted, finishRun, running } = busyRun(fixture);
+      await runStarted.promise;
+
+      const initialRaw = agentMessage({
         role: "user",
-        content: [{ type: "text", text: "shared text" }],
-      };
-      fixture.manager.appendMessage(secondRaw as never);
-      emit()?.(nativeEvent({ type: "message_end", message: secondRaw }));
+        content: [{ type: "text", text: "long task" }],
+        timestamp: 1,
+      });
+      fixture.manager.appendMessage(initialRaw);
+      emit()?.(nativeEvent({ type: "message_end", message: initialRaw }));
+
+      const queuedMessage = agentMessage({
+        role: "user",
+        content: [{ type: "text", text: "follow up" }],
+        timestamp: 2,
+      });
+      fixture.runtime.nextSteeringCapture = queuedMessage;
+      await fixture.actor.admitBrowserPrompt({
+        promptId: PROMPT_ID,
+        runId: RUN_A,
+        text: "follow up",
+      });
+
+      const extensionMessage = agentMessage({
+        role: "user",
+        content: [{ type: "text", text: "follow up" }],
+        timestamp: 3,
+      });
+      fixture.manager.appendMessage(extensionMessage);
+      emit()?.(nativeEvent({
+        type: "message_end",
+        message: extensionMessage,
+      }));
+      await Promise.resolve();
+      expect(fixture.actor.pendingPromptAdmissions()).toHaveLength(1);
+      expect(fixture.events).not.toContainEqual(expect.objectContaining({
+        type: "prompt_delivered",
+        promptId: PROMPT_ID,
+      }));
+
+      Object.assign(queuedMessage, {
+        content: [{ type: "text", text: "extension replacement" }],
+      });
+      fixture.manager.appendMessage(queuedMessage);
+      emit()?.(nativeEvent({ type: "message_end", message: queuedMessage }));
       await Promise.resolve();
       expect(fixture.events).toContainEqual(expect.objectContaining({
         type: "prompt_delivered",
@@ -1045,20 +1160,18 @@ describe("ConversationActor", () => {
       await Promise.resolve();
 
       const steerPromise = fixture.actor.steer(RUN_A, "shared text");
+      const steerRaw = fixture.runtime.takeSteeringCapture("shared text");
       await fixture.actor.admitBrowserPrompt({
         promptId: PROMPT_ID,
         runId: RUN_A,
         text: "shared text",
       });
+      const admittedRaw = fixture.runtime.takeSteeringCapture("shared text");
 
       // The first raw end resolves ONLY the explicit steer; no browser
       // prompt_delivered fires for it.
-      const firstRaw = {
-        role: "user",
-        content: [{ type: "text", text: "shared text" }],
-      };
-      fixture.manager.appendMessage(firstRaw as never);
-      emit()?.(nativeEvent({ type: "message_end", message: firstRaw }));
+      fixture.manager.appendMessage(steerRaw);
+      emit()?.(nativeEvent({ type: "message_end", message: steerRaw }));
       await expect(steerPromise).resolves.toBeUndefined();
       expect(fixture.events).not.toContainEqual(expect.objectContaining({
         type: "prompt_delivered",
@@ -1066,12 +1179,8 @@ describe("ConversationActor", () => {
       expect(fixture.actor.pendingPromptAdmissions()).toHaveLength(1);
 
       // The second raw end delivers the browser promptId precisely.
-      const secondRaw = {
-        role: "user",
-        content: [{ type: "text", text: "shared text" }],
-      };
-      fixture.manager.appendMessage(secondRaw as never);
-      emit()?.(nativeEvent({ type: "message_end", message: secondRaw }));
+      fixture.manager.appendMessage(admittedRaw);
+      emit()?.(nativeEvent({ type: "message_end", message: admittedRaw }));
       await Promise.resolve();
       expect(fixture.events).toContainEqual(expect.objectContaining({
         type: "prompt_delivered",
@@ -1122,14 +1231,12 @@ describe("ConversationActor", () => {
         runId: RUN_A,
         text: "shared text",
       });
+      const admittedRaw = fixture.runtime.takeSteeringCapture("shared text");
       const steerPromise = fixture.actor.steer(RUN_A, "shared text");
+      const steerRaw = fixture.runtime.takeSteeringCapture("shared text");
 
-      const firstRaw = {
-        role: "user",
-        content: [{ type: "text", text: "shared text" }],
-      };
-      fixture.manager.appendMessage(firstRaw as never);
-      emit()?.(nativeEvent({ type: "message_end", message: firstRaw }));
+      fixture.manager.appendMessage(admittedRaw);
+      emit()?.(nativeEvent({ type: "message_end", message: admittedRaw }));
       await Promise.resolve();
       expect(fixture.events).toContainEqual(expect.objectContaining({
         type: "prompt_delivered",
@@ -1147,12 +1254,8 @@ describe("ConversationActor", () => {
       ]);
       expect(await steerSettledRace).toBe(false);
 
-      const secondRaw = {
-        role: "user",
-        content: [{ type: "text", text: "shared text" }],
-      };
-      fixture.manager.appendMessage(secondRaw as never);
-      emit()?.(nativeEvent({ type: "message_end", message: secondRaw }));
+      fixture.manager.appendMessage(steerRaw);
+      emit()?.(nativeEvent({ type: "message_end", message: steerRaw }));
       await expect(steerPromise).resolves.toBeUndefined();
 
       finishRun.resolve();
@@ -1192,6 +1295,7 @@ describe("ConversationActor", () => {
       await Promise.resolve();
 
       const steerPromise = fixture.actor.steer(RUN_A, "real guidance");
+      const real = fixture.runtime.takeSteeringCapture("real guidance");
       // An unrelated raw user end (e.g. an extension user message) must not
       // consume the host guidance record.
       const mismatched = {
@@ -1213,13 +1317,40 @@ describe("ConversationActor", () => {
       expect(await steerSettledRace).toBe(false);
 
       // The matching raw end settles it.
-      const real = {
-        role: "user",
-        content: [{ type: "text", text: "real guidance" }],
-      };
-      fixture.manager.appendMessage(real as never);
+      fixture.manager.appendMessage(real);
       emit()?.(nativeEvent({ type: "message_end", message: real }));
       await expect(steerPromise).resolves.toBeUndefined();
+
+      finishRun.resolve();
+      await running;
+      await fixture.actor.dispose();
+    });
+
+    it("rejects a slash-prefixed busy prompt before Pi's async command lookup", async () => {
+      const fixture = await openActor();
+      const { runStarted, finishRun, running } = busyRun(fixture);
+      await runStarted.promise;
+      fixture.runtime.session.promptImplementation = async (text, options) => {
+        // Pi 0.84.4 awaits slash-command lookup before it reaches agent.steer.
+        await Promise.resolve();
+        fixture.runtime.session.steeringMessages.push(text);
+        options?.preflightResult?.(true);
+      };
+
+      await expect(fixture.actor.admitBrowserPrompt({
+        promptId: PROMPT_ID,
+        runId: RUN_A,
+        text: "/unknown-command",
+      })).rejects.toThrow("Slash-prefixed messages cannot be queued");
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(fixture.runtime.session.promptCalls).toEqual([{
+        text: "long task",
+        streamingBehavior: undefined,
+      }]);
+      expect(fixture.runtime.session.steeringMessages).toEqual([]);
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
 
       finishRun.resolve();
       await running;
@@ -1304,6 +1435,7 @@ describe("ConversationActor", () => {
       // between the admission's own push and its preflight. The length-based
       // proof would falsely reject; own entry is the queue tail.
       const predecessor = fixture.actor.steer(RUN_A, "predecessor text");
+      const predRaw = fixture.runtime.takeSteeringCapture("predecessor text");
       let drained = false;
       beforePreflight = () => {
         drained = true;
@@ -1314,23 +1446,16 @@ describe("ConversationActor", () => {
         runId: RUN_A,
         text: "own text",
       })).resolves.toEqual({ outcome: "admitted" });
+      const ownRaw = fixture.runtime.takeSteeringCapture("own text");
       expect(drained).toBe(true);
       expect(fixture.runtime.session.steeringMessages).toEqual(["own text"]);
       expect(fixture.actor.pendingPromptAdmissions()).toHaveLength(1);
 
       // Raw ends arrive in SDK queue order: predecessor first, own second.
-      const predRaw = {
-        role: "user",
-        content: [{ type: "text", text: "predecessor text" }],
-      };
-      fixture.manager.appendMessage(predRaw as never);
+      fixture.manager.appendMessage(predRaw);
       emit()?.(nativeEvent({ type: "message_end", message: predRaw }));
       await expect(predecessor).resolves.toBeUndefined();
-      const ownRaw = {
-        role: "user",
-        content: [{ type: "text", text: "own text" }],
-      };
-      fixture.manager.appendMessage(ownRaw as never);
+      fixture.manager.appendMessage(ownRaw);
       emit()?.(nativeEvent({ type: "message_end", message: ownRaw }));
       await Promise.resolve();
       expect(fixture.events).toContainEqual(expect.objectContaining({
@@ -1416,6 +1541,7 @@ describe("ConversationActor", () => {
 
       // An explicit steer is accepted and remains unobserved.
       const guidance = fixture.actor.steer(RUN_A, "guidance text");
+      const rawGuidance = fixture.runtime.takeSteeringCapture("guidance text");
       await Promise.resolve();
 
       const ownership = fixture.actor.currentRunOwnership(RUN_A);
@@ -1457,11 +1583,7 @@ describe("ConversationActor", () => {
 
       // The raw delivery settles the steer precisely; no further wait wakes
       // on the already-claimed record.
-      const rawGuidance = {
-        role: "user",
-        content: [{ type: "text", text: "guidance text" }],
-      };
-      fixture.manager.appendMessage(rawGuidance as never);
+      fixture.manager.appendMessage(rawGuidance);
       emit()?.(nativeEvent({ type: "message_end", message: rawGuidance }));
       await expect(guidance).resolves.toBeUndefined();
       const restoreThird = fixture.actor.enterWaiting(ownershipValue, waitTarget);
@@ -1491,20 +1613,17 @@ describe("ConversationActor", () => {
         runId: RUN_B,
         text: "follow up",
       });
+      const rawMessage = fixture.runtime.takeSteeringCapture("follow up");
       await vi.waitFor(() => expect(fixture.actor.pendingPromptAdmissions()).toHaveLength(1));
 
-      // SDK 投递：先结算 initial raw（真实 SDK 顺序），再投递 admission。
+      // SDK 投递：先结算 initial raw（真实 SDK顺序），再投递 admission。
       const initialRaw = {
         role: "user",
         content: [{ type: "text", text: "long task" }],
       };
       fixture.manager.appendMessage(initialRaw as never);
       emit()?.(nativeEvent({ type: "message_end", message: initialRaw }));
-      const rawMessage = {
-        role: "user",
-        content: [{ type: "text", text: "follow up" }],
-      };
-      fixture.manager.appendMessage(rawMessage as never);
+      fixture.manager.appendMessage(rawMessage);
       emit()?.(nativeEvent({ type: "message_end", message: rawMessage }));
 
       await vi.waitFor(() => {
@@ -2085,6 +2204,28 @@ describe("ConversationActor", () => {
     await fixture.actor.switchRole({ ...fixture.actor.profile.role }, {});
     expect(fixture.actor.getServiceTier()).toBeNull();
     expect(fixture.runtime.disposeCalls).toBe(disposeCalls);
+    await fixture.actor.dispose();
+  });
+
+  it("restores branch-owned thinking and persists later changes", async () => {
+    const manager = SessionManager.inMemory(process.cwd(), {
+      id: CONVERSATION_ID,
+    });
+    appendReservedCustomEntry(manager, createConversationMetaEntry(profile()));
+    manager.appendThinkingLevelChange("high");
+
+    const fixture = await openActor({ sessionManager: manager });
+    expect(fixture.runtime.createOptions?.thinkingLevel).toBe("high");
+    expect(fixture.actor.session.thinkingLevel).toBe("high");
+
+    await expect(fixture.actor.setThinkingLevel("medium")).resolves.toEqual({
+      settingsFailures: [],
+    });
+    expect(fixture.actor.session.thinkingLevel).toBe("medium");
+    expect(fixture.manager.getBranch().at(-1)).toMatchObject({
+      type: "thinking_level_change",
+      thinkingLevel: "medium",
+    });
     await fixture.actor.dispose();
   });
 
@@ -3723,6 +3864,9 @@ describe("ConversationActor", () => {
     // The SDK queues the EXPANDED steer text; the raw delivery carries it.
     fixture.runtime.session.steerExpandedText = "template-expanded guidance";
     const guidance = fixture.actor.steer(RUN_A, "  change direction  ");
+    const transformedGuidance = fixture.runtime.takeSteeringCapture(
+      "template-expanded guidance",
+    );
     expect(fixture.runtime.session.steerCalls).toEqual(["change direction"]);
     fixture.runtime.session.eventListener?.({
       type: "message_start",
@@ -3750,11 +3894,6 @@ describe("ConversationActor", () => {
     } as AgentSessionEvent);
     await Promise.resolve();
     expect(guidanceDelivered).toBe(false);
-    const transformedGuidance = agentMessage({
-      role: "user",
-      content: [{ type: "text", text: "template-expanded guidance" }],
-      timestamp: Date.now(),
-    });
     fixture.manager.appendMessage(transformedGuidance);
     fixture.runtime.session.eventListener?.({
       type: "message_end",
@@ -3808,16 +3947,15 @@ describe("ConversationActor", () => {
     // so the record matches and the delivery fails on the persistence proof.
     fixture.runtime.session.steerExpandedText = "transformed but not persisted";
     const guidance = fixture.actor.steer(RUN_A, "guidance without append");
+    const rawGuidance = fixture.runtime.takeSteeringCapture(
+      "transformed but not persisted",
+    );
     // Let the SDK acceptance microtask register the observation record
     // before the raw delivery arrives (real SDK order: drain after accept).
     await Promise.resolve();
     fixture.runtime.session.eventListener?.({
       type: "message_end",
-      message: agentMessage({
-        role: "user",
-        content: [{ type: "text", text: "transformed but not persisted" }],
-        timestamp: Date.now(),
-      }),
+      message: rawGuidance,
     } as AgentSessionEvent);
     await expect(guidance).rejects.toThrow(/did not durably append/i);
     promptFinished.resolve();
@@ -4380,6 +4518,7 @@ describe("ConversationActor", () => {
       sessionManager: manager,
       conversationLease: lease,
       runtime,
+      createSessionOptionsForProfile: () => ({}),
     })).rejects.toThrow("extension activation failed");
 
     expect(runtime.disposeCalls).toBe(1);
@@ -4410,6 +4549,7 @@ describe("ConversationActor", () => {
       }),
       conversationLease: lease,
       runtime: new FakeRuntime(),
+      createSessionOptionsForProfile: () => ({}),
     })).rejects.toThrow();
 
     expect(lease.releases).toBe(1);

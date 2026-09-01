@@ -108,7 +108,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 
 同一 JSONL 还可包含：
 
-- `piweb.conversation_role_change.v1`：用户在 idle 边界显式应用的新完整角色快照，最后一条有效记录成为当前角色；
+- `piweb.conversation_role_change.v1`：用户在 idle 边界显式应用的新完整角色快照，最后一条有效记录成为当前角色，并把分支 thinking 重置为该角色默认值；
 - `piweb.conversation_card.v1`：发送方可见的 outgoing/委派状态；
 - `piweb.conversation_message.v1`：进入目标 LLM context 的 incoming 消息；
 - `piweb.run_settlement.v1`：精确 run outcome、final text 与临时回传报告标记；
@@ -120,6 +120,8 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 这些类型由宿主拥有。重复 profile、冲突 settlement、同 promptId/runId 指向不同 pending delivery receipt、方向变化、未知 `piweb.*` 类型或畸形 payload 都 fail closed。卡片以同 `cardId` 的最后状态投影；其来源/目标/正文/委派身份/request fingerprint/冻结角色不可变化，状态和时间只能单调前进，runId 一旦出现即固定，terminal outcome/result 不可改写。settlement 单调从未报告推进到已报告。
 
 旧 JSONL 第一次由 coordinator 在 writer lease 下正式打开时追加独立“旧会话” profile：system prompt 为空，模型优先取旧分支模型，否则取任一现存角色模型；它不依赖或重建初始化模板。
+
+角色、自动压缩阈值、service tier 和 thinking 都按 active branch 聚合；永久 run settlement ledger 才读取物理全集。thinking 从当前角色默认值开始，后续 Pi 原生 `thinking_level_change` 覆盖，新的角色变更再次重置。rewind 必须在 durable truncate 前停止当前 AgentSession，使 `session_shutdown` 的尾部写入也落在随后删除的 suffix 中；truncate 未提交时按 shutdown 后的实际 branch thinking 恢复旧 runtime，恢复失败才 fatal。提交后统一从 retained branch 重建 runtime；跨角色时还要换回 retained profile 的 model/system prompt/tools/权限，不能保留未来 runtime 继续写入。
 
 ## 持久 inbox 与恢复
 
@@ -142,9 +144,9 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 
 - normal 且由用户创建的 conversation 在首次 browser run 的 `queued` 阶段执行一次宿主命名门：仅当 JSONL 从未出现 `session_info` 且没有 message/custom-message/compaction context 时，使用该会话固定模型与 session-local `ModelRuntime.completeSimple()` 做无工具、无 transcript 的隔离摘要。输出清理为单行并按 24 个 Unicode 字符裁剪；普通模型失败、超时或空输出持久化“新任务”。模型请求期间出现任何显式标题 intent 都优先，Agent/peer 创建、已有标题或已有 context 的会话不参与。
 - 命名门不是浏览器消息接收回执的前置条件：actor 安装唯一 active run 后同步建立 live prompt 投影并发布 `run_queued`，让客户端立即确认并展示已接收的首轮消息；随后仍在 `queued` 阶段完成命名，并从 actor 持有 writer lease 的目标 JSONL 路径重新验证规范路径、稳定 fingerprint、完整 payload、conversation identity 和最新 `session_info` intent，证明持久标题后才调用正式 `AgentSession.prompt(originalText)`。全项目 catalog refresh 只是 best-effort UI 投影，不能充当 durable proof。abort/stale/dispose 取消隔离请求且不写 fallback；无法证明标题 intent 持久化时 actor 进入 fatal，不能在可能已部分提交的 SessionManager 上追加 run settlement。
-- busy 时浏览器 `prompt`（带 promptId）只在 actor phase 为 `running | waiting` 且 `session.isStreaming=true` 时由 actor 调用 `session.prompt(text, { streamingBehavior: "steer", preflightResult })`；pre-stream 窗口必须在触碰 SDK 前拒绝，否则 SDK 会把 steer-mode prompt 当成新 run。注册了 input extension handler 时同样拒绝 busy browser prompt，因为 handler 可 `handled` 而不入队。真正接受后，消息在当前 assistant turn 工具调用全部结束、下一次模型调用前注入。会话创建时把 `steeringMode` 固定为 `all`：排队消息一次模型轮次全部注入，inbox 消息同队列同样批量。宿主零 pump/零重建。idle 时经 project lifecycle 起新 run，且不越过已有 inbox 工作。
-- admitted 是 actor 内存 FIFO（`promptId + text + createdAt`），有界（单会话最多 64 条）；preflight 时从 SDK steering mirror 的队尾捕获该次实际 queued text（可与提交文本不同），不能用队列长度增长证明，因为前驱可同时从队首 drain。abort/正常结算/fatal 都清空 admissions 和 accepted observation。进程重启时未投递消息丢失——UI 必须诚实显示"等待中"而非"已发送"。
-- 投递证明：只在 raw user `message_end` 后，从同一 SessionManager entries 找到 `entry.message === rawMessage` 的对象引用。每个有 initial user 的 run 的首个 raw user end 无条件先归 initial；后续 busy browser admission 与显式 steer 按 SDK 接受顺序共用 accepted-but-unobserved FIFO，只由 FIFO 头的实际 queued text 匹配并按对象 identity 结算精确 promptId/delivery。未知 extension raw user message 不消费或越过 host record；run settlement 本身不是交付证明。admissions 不能跨 restart 恢复。
+- busy 时浏览器 `prompt`（带 promptId）只在 actor phase 为 `running | waiting` 且 `session.isStreaming=true` 时由 actor 调用 `session.prompt(text, { streamingBehavior: "steer", preflightResult })`；pre-stream 窗口必须在触碰 SDK 前拒绝，否则 SDK 会把 steer-mode prompt 当成新 run。busy 的 `/` 前缀 prompt 也在 SDK 前拒绝，因为 Pi 会先 await command lookup，越过宿主的同步对象身份捕获边界；idle slash 仍由普通 run 路径处理。注册了 input extension handler 时同样拒绝 busy browser prompt，因为 handler 可 `handled` 而不入队。真正接受后，消息在当前 assistant turn 工具调用全部结束、下一次模型调用前注入。会话创建时把 `steeringMode` 固定为 `all`：排队消息一次模型轮次全部注入，inbox 消息同队列同样批量。宿主零 pump/零重建。idle 时经 project lifecycle 起新 run，且不越过已有 inbox 工作。
+- admitted 是 actor 内存 FIFO（`promptId + text + createdAt`），有界（单会话最多 64 条）；宿主只在同步调用 `AgentSession.prompt(...steer)` / `steer()` 的栈内观察真实 `agent.steer(message)`，把该次 SDK 入队的原始 user `AgentMessage` 对象绑定到 accepted observation。不能用 steering mirror 文本或长度证明来源：前驱可同时 drain，可信 extension 也可产生同文 user message。abort/正常结算/fatal 都清空 admissions 和 accepted observation。进程重启时未投递消息丢失——UI 必须诚实显示"等待中"而非"已发送"。
+- 投递证明：只在 raw user `message_end` 后，从同一 SessionManager entries 找到 `entry.message === rawMessage` 的对象引用。每个有 initial user 的 run 的首个 raw user end 无条件先归 initial；后续 busy browser admission 与显式 steer 按 SDK 接受顺序共用 accepted-but-unobserved FIFO，并且只有 FIFO 头捕获的 queued object 与 raw object 为同一引用时才结算精确 promptId/delivery。extension 可在 `message_end` 原地替换正文而不改变该身份；同文 extension user message 不消费或越过 host record。run settlement 本身不是交付证明。admissions 不能跨 restart 恢复。
 - 存量 `.piweb/pending-prompts` 目录在项目打开时一次性迁移：queued 按 FIFO 经 admitBrowserPrompt 重投递（idle 起 run / busy 进 steer），dispatching/attention/损坏/超限记录直接丢弃，全部尝试后删除目录；中途关闭保留目录待下次重试（按 promptId 幂等）。不允许重新创建队列状态。
 - `piweb.pending_prompt_delivery.v1` / `piweb.pending_prompt_batch.v1` 的 schema、解析与聚合校验仍保留为 JSONL 历史格式的只读兼容层（fail closed 校验旧文件），但不再写入新记录。
 

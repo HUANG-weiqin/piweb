@@ -1342,7 +1342,7 @@ export class PiConnection {
           command.focusId,
         );
         const { coordinator } = await this.requireCoordination();
-        coordinator.setCompactionThreshold(
+        await coordinator.setCompactionThreshold(
           view.handle,
           command.conversationId,
           command.percent,
@@ -2095,47 +2095,25 @@ export class PiConnection {
     const view = this.requireCoordinatedView();
     const actor = view.actor;
     if (!actor) throw new Error("Choose a conversation first");
-    const previousLevel = actor.session.thinkingLevel;
-    let partialFailure: unknown;
-    try {
-      actor.session.setThinkingLevel(level);
-    } catch (error) {
-      if (actor.session.thinkingLevel === previousLevel) throw error;
-      partialFailure = error;
-    }
-    const failures = await this.flushActorSettings(actor);
+    const { coordinator } = await this.requireCoordination();
+    const result = await coordinator.setThinkingLevel(
+      view.handle,
+      actor.conversationId,
+      level,
+    );
     this.publishCoordinatedState();
-    for (const failure of failures) {
+    for (const failure of result.settingsFailures) {
       this.emitError("settings", failure, view.sessionId);
     }
-    if (partialFailure) {
+    if (result.partialFailure !== undefined) {
       this.emitError(
         "settings",
         `思考级别已用于当前会话，但会话记录或默认设置可能未保存：${
-          this.errorMessage(partialFailure)
+          this.errorMessage(result.partialFailure)
         }`,
         view.sessionId,
       );
     }
-  }
-
-  private async flushActorSettings(
-    actor: ConversationActor,
-  ): Promise<unknown[]> {
-    let failure: unknown;
-    try {
-      await actor.settings.flush();
-    } catch (error) {
-      failure = error;
-    }
-    const failures: unknown[] = [];
-    const reported = new Set<unknown>();
-    for (const item of actor.settings.drainErrors()) {
-      reported.add(item.error);
-      failures.push(item.error);
-    }
-    if (failure && !reported.has(failure)) failures.push(failure);
-    return failures;
   }
 
   private requireCoordinatedView(

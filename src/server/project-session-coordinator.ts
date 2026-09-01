@@ -10,6 +10,7 @@ import {
   type ConversationWindowCoverage,
   type ProjectActivitySummary,
   type ServiceTier,
+  type ThinkingLevel,
   type ToolMode,
 } from "../shared/protocol.js";
 import {
@@ -37,6 +38,7 @@ import {
   type ConversationActorEvent,
   type ConversationRunOwnership,
   type ConversationWaitingTarget,
+  type ThinkingLevelChangeResult,
   WAIT_CACHE_CHECKPOINT_DELAY_MS,
 } from "./conversation-actor.js";
 import {
@@ -1642,15 +1644,34 @@ export class ProjectSessionCoordinator {
     return this.requireActor(context, conversationId).steer(runId, text);
   }
 
-  setCompactionThreshold(
+  async setCompactionThreshold(
     handle: ProjectSessionHandle,
     conversationId: string,
     percent: number,
-  ): void {
+  ): Promise<void> {
     const context = this.requireContext(handle);
-    this.requireActor(context, conversationId)
-      .setCompactionThresholdPercent(percent);
-    this.emit(context, { type: "project_changed" });
+    await this.runLifecycle(context, () => {
+      if (context.deleting.has(conversationId)) {
+        throw new Error(`Conversation is being deleted: ${conversationId}`);
+      }
+      this.requireActor(context, conversationId)
+        .setCompactionThresholdPercent(percent);
+      this.emit(context, { type: "project_changed" });
+    });
+  }
+
+  async setThinkingLevel(
+    handle: ProjectSessionHandle,
+    conversationId: string,
+    level: ThinkingLevel,
+  ): Promise<ThinkingLevelChangeResult> {
+    const context = this.requireContext(handle);
+    return this.runLifecycle(context, () => {
+      if (context.deleting.has(conversationId)) {
+        throw new Error(`Conversation is being deleted: ${conversationId}`);
+      }
+      return this.requireActor(context, conversationId).setThinkingLevel(level);
+    });
   }
 
   async setServiceTier(
@@ -1731,6 +1752,7 @@ export class ProjectSessionCoordinator {
         );
       }
       await actor.truncateFromMessage(entryId);
+      context.profiles.set(conversationId, cloneProfile(actor.profile));
       this.emit(context, { type: "project_changed" });
     });
   }
@@ -2000,6 +2022,12 @@ export class ProjectSessionCoordinator {
         conversationId,
         profile,
       ),
+      createSessionOptionsForProfile: (retainedProfile) =>
+        this.createActorSessionOptions(
+          context,
+          conversationId,
+          retainedProfile,
+        ),
       persistSettlement: (settlement, sessionManager) => {
         appendReservedCustomEntry(
           sessionManager,
@@ -3477,7 +3505,7 @@ export class ProjectSessionCoordinator {
     manager: Awaited<ReturnType<ProjectStore["openConversation"]>>,
   ): ConversationMeta {
     const aggregate = aggregateReservedConversationEntries(
-      manager.getEntries(),
+      manager.getBranch(),
     );
     if (aggregate.conversationMeta) {
       return cloneProfile(aggregate.conversationMeta);

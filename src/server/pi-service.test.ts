@@ -57,6 +57,7 @@ interface FakeSession extends AgentSession {
   disposed: boolean;
   eventListener?: (event: AgentSessionEvent) => void;
   steerCalls: string[];
+  steeringAgentMessages: AgentMessage[];
   toolCallGate?: ToolCallGate;
   persistentManager?: SessionManager;
 }
@@ -77,6 +78,7 @@ function fakeSession(settings = fakeSettings()): FakeSession {
     compactCalls: 0,
     disposed: false,
     steerCalls: [],
+    steeringAgentMessages: [],
     isStreaming: false,
     model: { provider: "test", id: "model", contextWindow: 1000 },
     messages: [],
@@ -105,8 +107,17 @@ function fakeSession(settings = fakeSettings()): FakeSession {
     steer: async function (text: string) {
       this.steerCalls.push(text);
       this.steeringMessages.push(text);
+      this.steeringAgentMessages.push({
+        role: "user",
+        content: [{ type: "text", text }],
+        timestamp: Date.now(),
+      } as AgentMessage);
     },
-    clearQueue: () => ({ steering: [], followUp: [] }),
+    clearQueue: function () {
+      this.steeringMessages.splice(0);
+      this.steeringAgentMessages.splice(0);
+      return { steering: [], followUp: [] };
+    },
     abort: async function () {
       this.abortCalls++;
       this.isStreaming = false;
@@ -198,6 +209,15 @@ class FakeRuntime implements PiRuntimeLike {
       ...created,
       modelRuntime: this.modelRuntime,
       modelRegistry: this.sessionModelRegistry ?? this.modelRegistry,
+      captureSteeringMessage: (operation) => {
+        const before = created.session.steeringAgentMessages.length;
+        const result = operation();
+        const message = created.session.steeringAgentMessages[before];
+        return {
+          result,
+          ...(message === undefined ? {} : { message }),
+        };
+      },
       activateExtensions: () => this.activate(options),
       activateExtensionErrors: (handler) => {
         activatedHandler = handler;
@@ -4046,10 +4066,7 @@ describe("PiConnection coordinated project view", () => {
           commandId,
         }),
       );
-      const steeredUserMessage = {
-        role: "user",
-        content: [{ type: "text", text: "change direction" }],
-      } as AgentMessage;
+      const steeredUserMessage = session.steeringAgentMessages.shift()!;
       session.persistentManager?.appendMessage(steeredUserMessage);
       session.eventListener?.(nativeEvent({
         type: "message_end",

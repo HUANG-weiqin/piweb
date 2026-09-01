@@ -13,6 +13,7 @@ import {
   type CreateAgentSessionOptions,
   type CreateModelRuntimeOptions,
   type CreateAgentSessionResult,
+  type ExtensionContext,
   type ExtensionCommandContextActions,
   type ExtensionError,
   type ExtensionUIContext,
@@ -57,6 +58,11 @@ import {
   READ_ONLY_TOOL_NAME_CEILING,
 } from "./tool-policy.js";
 
+type AgentMessage = Extract<
+  Parameters<AgentSession["agent"]["steer"]>[0],
+  { role: "user" }
+>;
+
 interface ToolProjectionAdapter {
   dispose(): void;
 }
@@ -86,6 +92,158 @@ function installReadOnlyToolProjection(
     dispose(): void {
       if (session.setActiveToolsByName === projectedSetActiveTools) {
         session.setActiveToolsByName = nativeSetActiveTools;
+      }
+    },
+  };
+}
+
+type ExtensionReadonlySessionManager = ExtensionContext["sessionManager"];
+
+interface SessionBoundaryAdapter {
+  dispose(): void;
+}
+
+interface SteeringCaptureAdapter extends SessionBoundaryAdapter {
+  capture<T>(operation: () => T): {
+    result: T;
+    message?: AgentMessage;
+  };
+}
+
+function cloneSessionManagerResult<T>(value: T): T {
+  return structuredClone(value);
+}
+
+function createReadonlySessionManagerFacade(
+  sessionManager: SessionManager,
+): ExtensionReadonlySessionManager {
+  return Object.freeze({
+    getCwd: () => sessionManager.getCwd(),
+    getSessionDir: () => sessionManager.getSessionDir(),
+    getSessionId: () => sessionManager.getSessionId(),
+    getSessionFile: () => sessionManager.getSessionFile(),
+    getLeafId: () => sessionManager.getLeafId(),
+    getLeafEntry: () => cloneSessionManagerResult(sessionManager.getLeafEntry()),
+    getEntry: (id: string) => cloneSessionManagerResult(sessionManager.getEntry(id)),
+    getLabel: (id: string) => sessionManager.getLabel(id),
+    getBranch: (fromId?: string) => cloneSessionManagerResult(
+      sessionManager.getBranch(fromId),
+    ),
+    buildContextEntries: () => cloneSessionManagerResult(
+      sessionManager.buildContextEntries(),
+    ),
+    getHeader: () => cloneSessionManagerResult(sessionManager.getHeader()),
+    getEntries: () => cloneSessionManagerResult(sessionManager.getEntries()),
+    getTree: () => cloneSessionManagerResult(sessionManager.getTree()),
+    getSessionName: () => sessionManager.getSessionName(),
+  });
+}
+
+function installExtensionSessionManagerFacade(
+  session: AgentSession,
+  sessionManager: SessionManager,
+): SessionBoundaryAdapter {
+  const runner = session.extensionRunner as unknown as {
+    sessionManager: ExtensionReadonlySessionManager;
+  };
+  const descriptor = Object.getOwnPropertyDescriptor(runner, "sessionManager");
+  if (
+    !descriptor
+    || !("value" in descriptor)
+    || descriptor.writable !== true
+    || descriptor.value !== sessionManager
+  ) {
+    throw new Error(
+      "Pi extension runner cannot accept a readonly SessionManager facade",
+    );
+  }
+
+  const originalSessionManager = runner.sessionManager;
+  const facade = createReadonlySessionManagerFacade(sessionManager);
+  runner.sessionManager = facade;
+  if (runner.sessionManager !== facade) {
+    throw new Error(
+      "Pi extension runner did not retain its readonly SessionManager facade",
+    );
+  }
+
+  return {
+    dispose(): void {
+      runner.sessionManager = originalSessionManager;
+      if (runner.sessionManager !== originalSessionManager) {
+        throw new Error(
+          "Pi extension runner did not restore its original SessionManager",
+        );
+      }
+    },
+  };
+}
+
+function installSteeringCaptureBoundary(
+  session: AgentSession,
+): SteeringCaptureAdapter {
+  const nativeSteer = session.agent.steer;
+  let activeCapture: AgentMessage[] | undefined;
+  const observedSteer: typeof session.agent.steer = (message) => {
+    if (activeCapture !== undefined && message.role === "user") {
+      activeCapture.push(message);
+    }
+    return nativeSteer.call(session.agent, message);
+  };
+  session.agent.steer = observedSteer;
+  if (session.agent.steer !== observedSteer) {
+    throw new Error("Pi Agent cannot accept a steering identity boundary");
+  }
+
+  return {
+    capture<T>(operation: () => T) {
+      if (activeCapture !== undefined) {
+        throw new Error("Nested steering identity capture is not supported");
+      }
+      const messages: AgentMessage[] = [];
+      activeCapture = messages;
+      try {
+        const result = operation();
+        return {
+          result,
+          ...(messages.length === 1 ? { message: messages[0] } : {}),
+        };
+      } finally {
+        activeCapture = undefined;
+      }
+    },
+    dispose(): void {
+      session.agent.steer = nativeSteer;
+      if (session.agent.steer !== nativeSteer) {
+        throw new Error("Pi Agent did not restore its original steering boundary");
+      }
+    },
+  };
+}
+
+function installFixedModelBoundary(
+  session: AgentSession,
+  fixedModel: Readonly<{ provider: string; id: string }>,
+): SessionBoundaryAdapter {
+  const nativeSetModel = session.setModel;
+  const guardedSetModel: AgentSession["setModel"] = async (model, options) => {
+    if (model.provider !== fixedModel.provider || model.id !== fixedModel.id) {
+      throw new Error(
+        `Fixed model ${fixedModel.provider}/${fixedModel.id} cannot be changed to ${model.provider}/${model.id}`,
+      );
+    }
+    return nativeSetModel.call(session, model, options);
+  };
+  session.setModel = guardedSetModel;
+  if (session.setModel !== guardedSetModel) {
+    throw new Error("Pi AgentSession cannot accept a fixed-model boundary");
+  }
+
+  return {
+    dispose(): void {
+      session.setModel = nativeSetModel;
+      if (session.setModel !== nativeSetModel) {
+        throw new Error("Pi AgentSession did not restore its original model boundary");
       }
     },
   };
@@ -138,6 +296,10 @@ export interface CreatedPiSession {
   modelRuntime: ModelRuntime;
   modelRegistry: ModelRegistry;
   releaseTurnBoundaryPause?(): void;
+  captureSteeringMessage<T>(operation: () => T): {
+    result: T;
+    message?: AgentMessage;
+  };
   activateExtensions(): Promise<void>;
   activateExtensionErrors(handler: (error: ExtensionError) => void): readonly ExtensionError[];
   dynamicProviderNames(): ReadonlySet<string>;
@@ -549,6 +711,9 @@ export class PiRuntime implements PiRuntimeLike {
     let created: CreateAgentSessionResult;
     let createdSession: AgentSession | undefined;
     let toolProjectionAdapter: ToolProjectionAdapter | undefined;
+    let extensionSessionManagerAdapter: SessionBoundaryAdapter | undefined;
+    let fixedModelAdapter: SessionBoundaryAdapter | undefined;
+    let steeringCaptureAdapter: SteeringCaptureAdapter | undefined;
     let contextBudgetController: AgentContextBudgetController | undefined;
     let turnBoundaryController: AgentTurnBoundaryController | undefined;
     let compactionThinkingOverride: CompactionThinkingOverride | undefined;
@@ -584,6 +749,23 @@ export class PiRuntime implements PiRuntimeLike {
       }
       if (failures.length > 0) {
         throw new AggregateError(failures, "Failed to dispose pre-teardown adapters");
+      }
+    };
+    const disposeSessionBoundaryAdapters = (): void => {
+      const failures: unknown[] = [];
+      for (const adapter of [
+        fixedModelAdapter,
+        extensionSessionManagerAdapter,
+        steeringCaptureAdapter,
+      ]) {
+        try {
+          adapter?.dispose();
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      if (failures.length > 0) {
+        throw new AggregateError(failures, "Failed to dispose session boundary adapters");
       }
     };
     try {
@@ -627,6 +809,17 @@ export class PiRuntime implements PiRuntimeLike {
         tools: allowedToolNames,
       });
       createdSession = created.session;
+      extensionSessionManagerAdapter = installExtensionSessionManagerFacade(
+        createdSession,
+        sessionManager,
+      );
+      if (fixedModelReference) {
+        fixedModelAdapter = installFixedModelBoundary(
+          createdSession,
+          fixedModelReference,
+        );
+      }
+      steeringCaptureAdapter = installSteeringCaptureBoundary(createdSession);
       // 消息直通：busy 时浏览器 prompt 进 SDK steering 队列，排队消息必须一次
       // 全部注入（one-at-a-time 会让每条消息各占一个完整模型轮次，用户连发多条
       // 时 agent 逐条执行、无法整体理解意图）。inbox 消息同队列也批量注入。
@@ -768,6 +961,11 @@ export class PiRuntime implements PiRuntimeLike {
         } catch (teardownError) {
           failures.push(teardownError);
         }
+        try {
+          disposeSessionBoundaryAdapters();
+        } catch (cleanupError) {
+          failures.push(cleanupError);
+        }
         if (teardownSucceeded) {
           try {
             toolProjectionAdapter?.dispose();
@@ -791,6 +989,7 @@ export class PiRuntime implements PiRuntimeLike {
       owner,
       () => activationAttempted,
       disposePreTeardownAdapters,
+      disposeSessionBoundaryAdapters,
       () => toolProjectionAdapter?.dispose(),
     );
     let activationPromise: Promise<void> | undefined;
@@ -802,6 +1001,12 @@ export class PiRuntime implements PiRuntimeLike {
       modelRegistry: owner.registry,
       releaseTurnBoundaryPause: () => {
         turnBoundaryController?.releaseQueuePause();
+      },
+      captureSteeringMessage: (operation) => {
+        if (!steeringCaptureAdapter) {
+          throw new Error("Steering identity boundary is unavailable");
+        }
+        return steeringCaptureAdapter.capture(operation);
       },
       activateExtensions: () => {
         activationAttempted = true;
@@ -1117,7 +1322,8 @@ export class PiRuntime implements PiRuntimeLike {
     owner: SessionModelRuntime,
     shouldEmitShutdown: () => boolean,
     beforeTeardown?: () => void,
-    afterTeardown?: () => void,
+    afterTeardownAttempt?: () => void,
+    afterSuccessfulTeardown?: () => void,
   ): () => Promise<void> {
     let disposePromise: Promise<void> | undefined;
     return () => {
@@ -1137,9 +1343,14 @@ export class PiRuntime implements PiRuntimeLike {
         } catch (error) {
           failures.push(error);
         }
+        try {
+          afterTeardownAttempt?.();
+        } catch (error) {
+          failures.push(error);
+        }
         if (teardownSucceeded) {
           try {
-            afterTeardown?.();
+            afterSuccessfulTeardown?.();
           } catch (error) {
             failures.push(error);
           }
