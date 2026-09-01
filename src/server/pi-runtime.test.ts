@@ -23,6 +23,7 @@ import {
 import { describe, expect, it, vi } from "vitest";
 import type { LoopList } from "../shared/protocol.js";
 import { PiRuntime } from "./pi-runtime.js";
+import { createReadOnlyBashTool } from "./read-only-bash.js";
 
 initTheme();
 
@@ -512,8 +513,7 @@ describe("PiRuntime session ownership", () => {
     const created = await runtime.createSession(cwd, {
       toolMode: "read_only",
       workbenchCustomTools: [
-        workbenchTool(cwd, "git_status"),
-        workbenchTool(cwd, "git_diff"),
+        createReadOnlyBashTool(cwd),
         workbenchTool(cwd, "notebook_list"),
         workbenchTool(cwd, "notebook_grep"),
         workbenchTool(cwd, "notebook_read"),
@@ -528,8 +528,7 @@ describe("PiRuntime session ownership", () => {
       "grep",
       "find",
       "ls",
-      "git_status",
-      "git_diff",
+      "bash",
       "notebook_write",
       "notebook_list",
       "notebook_grep",
@@ -539,10 +538,12 @@ describe("PiRuntime session ownership", () => {
     expect(new Set(allTools.map((tool) => tool.name))).toEqual(expectedToolNames);
     expect(allTools.find((tool) => tool.name === "read")?.sourceInfo.source)
       .toBe("builtin");
-    expect(allTools.find((tool) => tool.name === "git_status")?.sourceInfo.source)
+    expect(allTools.find((tool) => tool.name === "bash")?.sourceInfo.source)
       .toBe("sdk");
-    expect(allTools.find((tool) => tool.name === "git_diff")?.sourceInfo.source)
-      .toBe("sdk");
+    expect(created.session.systemPrompt).toContain(
+      "Run reviewed Git, rg, and file queries",
+    );
+    expect(created.session.systemPrompt).not.toContain("Execute bash commands");
     expect(allTools.find((tool) => tool.name === "notebook_write")?.sourceInfo.source)
       .toBe("sdk");
     await created.dispose();
@@ -553,6 +554,7 @@ describe("PiRuntime session ownership", () => {
     const staticMarker = "STATIC_SHADOW_TOOL_MARKER";
     const startMarker = "SESSION_START_SHADOW_TOOL_MARKER";
     const dynamicMarker = "DYNAMIC_SHADOW_TOOL_MARKER";
+    const dynamicBashMarker = "DYNAMIC_BASH_SHADOW_TOOL_MARKER";
     const shutdownMarker = "SHUTDOWN_SHADOW_TOOL_MARKER";
     let extensionApi: ExtensionAPI | undefined;
     let sessionStarted = false;
@@ -565,11 +567,11 @@ describe("PiRuntime session ownership", () => {
         pi.on("session_start", () => {
           sessionStarted = true;
           pi.registerTool(shadowReadTool(cwd, "read", startMarker));
-          pi.setActiveTools(["read", "find", "grep", "ls", "git_status", "git_diff"]);
+          pi.setActiveTools(["read", "find", "grep", "ls", "bash"]);
         });
         pi.on("session_shutdown", (_event, context) => {
           pi.registerTool(shadowReadTool(cwd, "ls", shutdownMarker));
-          pi.setActiveTools(["read", "find", "grep", "ls", "git_status", "git_diff"]);
+          pi.setActiveTools(["read", "find", "grep", "ls", "bash"]);
           shutdownActiveTools = pi.getActiveTools();
           shutdownSystemPrompt = context.getSystemPrompt();
         });
@@ -578,10 +580,7 @@ describe("PiRuntime session ownership", () => {
 
     const created = await runtime.createSession(cwd, {
       toolMode: "read_only",
-      workbenchCustomTools: [
-        workbenchTool(cwd, "git_status"),
-        workbenchTool(cwd, "git_diff"),
-      ],
+      workbenchCustomTools: [createReadOnlyBashTool(cwd)],
     });
     expect(created.session.getActiveToolNames()).not.toContain("find");
     expect(created.session.systemPrompt).not.toContain(staticMarker);
@@ -590,17 +589,20 @@ describe("PiRuntime session ownership", () => {
     expect(sessionStarted).toBe(true);
     expect(created.session.getActiveToolNames()).not.toContain("read");
     expect(created.session.getActiveToolNames()).not.toContain("find");
+    expect(created.session.getActiveToolNames()).toContain("bash");
     expect(created.session.systemPrompt).not.toContain(staticMarker);
     expect(created.session.systemPrompt).not.toContain(startMarker);
 
     extensionApi?.registerTool(shadowReadTool(cwd, "grep", dynamicMarker));
-    extensionApi?.setActiveTools(["read", "find", "grep", "ls", "git_status", "git_diff"]);
-    expect(created.session.getActiveToolNames()).toEqual(["ls", "git_status", "git_diff"]);
+    extensionApi?.registerTool(shadowReadTool(cwd, "bash", dynamicBashMarker));
+    extensionApi?.setActiveTools(["read", "find", "grep", "ls", "bash"]);
+    expect(created.session.getActiveToolNames()).toEqual(["ls", "bash"]);
     expect(created.session.systemPrompt).not.toContain(dynamicMarker);
+    expect(created.session.systemPrompt).not.toContain(dynamicBashMarker);
 
     const projectedSetter = created.session.setActiveToolsByName;
     await created.dispose();
-    expect(shutdownActiveTools).toEqual(["git_status", "git_diff"]);
+    expect(shutdownActiveTools).toEqual(["bash"]);
     expect(shutdownSystemPrompt).not.toContain(shutdownMarker);
     expect(created.session.setActiveToolsByName).not.toBe(projectedSetter);
   });

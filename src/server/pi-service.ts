@@ -25,7 +25,9 @@ import { projectConversationHistorySnapshot } from "./conversation-history.js";
 import type { ConversationActor } from "./conversation-actor.js";
 import { validateCwd } from "./cwd.js";
 import { ExtensionUIBroker } from "./extension-ui.js";
-import { createGitTools } from "./git-inspect.js";
+import {
+  createReadOnlyBashTool,
+} from "./read-only-bash.js";
 import {
   type CreatedPiSession,
   type CredentialChangeIntent,
@@ -370,7 +372,7 @@ export class PiConnection {
         sessionManager: selected.sessionManager,
         toolMode: initialMode,
         workbenchCustomTools: initialMode === "read_only"
-          ? createGitTools(project.cwd)
+          ? [createReadOnlyBashTool(project.cwd)]
           : [],
         extensionUI: this.extensionUI.context({
           sessionId,

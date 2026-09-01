@@ -1,6 +1,6 @@
 # 工具权限
 
-`updated: 2026-08-31`
+`updated: 2026-09-01`
 
 ## 这个模块是干什么的
 
@@ -17,11 +17,12 @@ conversation role snapshot
 → workbench ToolPolicy
 → run-scoped edit-budget check（仅 builtin edit/write）
 → allow 或 hard deny
+→ 宿主 read_only bash 的有界词法与逐命令查询审查
 → SDK block result 或 tool.execute
 → 成功 mutation 的 completion accounting
 ```
 
-权限层本身没有通用的逐工具询问、一次性许可或命令白名单；`propose_role_revision` 是工具语义内的窄例外，必须等待 conversation-scoped editor 返回用户提交文本后才写角色 prompt。
+权限层本身没有通用的逐工具询问或一次性许可；唯一的命令白名单是宿主 `read_only` Bash 包装器内固定的查询 shell 文本目录。`propose_role_revision` 是另一项工具语义内的窄例外，必须等待 conversation-scoped editor 返回用户提交文本后才写角色 prompt。
 
 ## 状态所有权
 
@@ -33,16 +34,18 @@ conversation role snapshot
 ## 策略
 
 - `full_access` 在角色授权层允许所有工具和命令，不区分来源或目标位置；项目外路径和 `.piweb` 也不额外拦截。ConversationActor 另对 builtin `edit/write` 执行 run-scoped 编辑额度门，它是认知承诺而不是权限或路径 sandbox，`bash`、脚本和扩展工具仍可绕过。
-- `read_only` 对模型只展示 `source=builtin` 的 Pi 原生 `read / grep / find / ls`，以及 `source=sdk` 的宿主 `git_status / git_diff`、conversation-scoped `notebook_write / notebook_list / notebook_grep / notebook_read`、LoopList `todo_read / todo_write / todo_pause`、`request_context_compaction` 和 `list_roles / read_role / propose_role_revision`；`bash / edit / write`、会话编排 meta 和其他扩展工具不进入有效 registry、model tools 或 system prompt。
-- 执行 gate 独立重复同一 identity 约束；`read_only` 直接拒绝命令、项目写入、unknown、会话编排 meta，以及同名 extension/project 工具。三个角色工具只有 `source=sdk` 时放行；工具不可见不是权限边界，硬拒绝仍不可删除。
+- `read_only` 对模型只展示 `source=builtin` 的 Pi 原生 `read / grep / find / ls`，以及 `source=sdk` 的宿主受审查 `bash`、conversation-scoped `notebook_write / notebook_list / notebook_grep / notebook_read`、LoopList `todo_read / todo_write / todo_pause`、`request_context_compaction` 和 `list_roles / read_role / propose_role_revision`；builtin `bash`、`edit / write`、会话编排 meta 和其他扩展工具不进入有效 registry、model tools 或 system prompt。
+- 执行 gate 独立重复同一 identity 约束；`read_only` 直接拒绝项目写入、unknown、会话编排 meta，以及同名 builtin/extension/project Bash。宿主 Bash 和三个角色工具只有 `source=sdk` 时放行；工具不可见不是权限边界，硬拒绝仍不可删除。
 - 扩展可以用 `read` 等名称覆盖内置工具；策略必须同时检查最终 `toolName` 和 SDK `ToolInfo.sourceInfo.source`，不能只按名称放行。PiRuntime 对每次 `setActiveToolsByName`（包括 extension refresh 和 `setActiveTools`）重新做 source-aware 投影，同名覆盖发生后宁可移除该工具，也不把扩展 schema/snippet 暴露给只读模型。
 - Agent 的 `read_only` 只限制经过 Pi 工具入口的调用；工作台宿主仍会写 manifest 和 transcript。
 
-## Git 浅层投影
+## 受审查的只读 Bash
 
-Git 浅层投影拆成 `git_status(path?)` 和 `git_diff(scope, path?)` 两个宿主工具，只注入 `read_only` 会话；`full_access` Agent 用 `bash git ...`，避免每次只读 Git 包装都创建临时 synthetic `GIT_DIR`。`scope` 只存在于 `git_diff`，取值 `worktree | staged | all`。可选 path 必须是 canonical project cwd 内的相对路径。对模型暴露的参数 schema 必须是单个 object + enum，不使用顶层 `anyOf/oneOf` union；通过工具拆分避免模型把 diff 参数传给 status。宿主构造固定 argv，使用项目外解析出的绝对 Git executable、`shell:false`、同一次调用 deadline、AbortSignal，以及 stdout/stderr 共享的 50 KiB / 2000 行预算。
+`read_only` 会话注入一个 `source=sdk`、名称仍为 `bash` 的宿主包装器，它覆盖并替代 Pi builtin Bash；`full_access` 会话继续直接使用 Pi builtin Bash。包装器保留 Pi Bash 的参数 schema、timeout、AbortSignal、流式更新、输出截断和结果语义，但在任何进程执行前先审查最终 `command`，通过后才委托 `createBashToolDefinition(cwd)`。包装器不接受或追加 `shellCommandPrefix`，避免审查后再改变命令文本。
 
-Git 的“只读子命令”仍可能经 pager、external diff、textconv、content filter 或 fsmonitor 执行程序。主命令因此不读取真实 Git 配置：宿主先用固定 `rev-parse` 捕获并校验 repository top、git dir、index、objects、object format 和 HEAD，再为该次调用创建只含宿主 config/HEAD 的临时 synthetic `GIT_DIR`；work tree、index 和 object directory 显式绑定真实只读输入，global/system config 指向临时空文件，继承的 `GIT_*` 全部先删除。临时目录没有 `commondir`、hooks 或 info 链接，并在所有完成/失败路径清理。输出可能因未继承 `core.autocrlf/filemode/ignorecase`、sparse 和 info exclude 而比原生 Git 更嘈杂，这是关闭执行入口的保守代价。
+审查只接受有长度上限、整串锚定的安全词法子集。每个程序名都必须是字面量并属于固定查询目录：受约束的 Git 查询、`rg`，以及目录/文件查看和纯 stdout 变换工具。受审查命令可以用 `|` 或 `&&` 组合；每个 segment 都独立复核。`cd [--] path` 只能位于同一次调用的后续查询之前，不能持久改变下一次工具调用的 cwd。换行、`; / || / &`、重定向、Shell 展开、环境赋值、命令路径和未知程序一律拒绝。`find` 的删除/执行/文件输出 action、`rg` 的 preprocessor/hostname program、Git 外部 filter/pager/output、`sort` 文件输出/外部 compressor/显式临时目录、`uniq` 输出文件、`tail` follow 和 `file` 解压/compile 等命令级副作用入口及其实际可用长选项缩写另行拒绝。允许安全的裸参数、单引号字面量，以及不含展开或转义的双引号字面量。
+
+包装器在启动 Pi Bash 时还移除 `BASH_ENV / ENV / BASHOPTS / SHELLOPTS / PS4 / CDPATH / RIPGREP_CONFIG_PATH` 和导出的 `BASH_FUNC_*`，并固定 `GIT_OPTIONAL_LOCKS=0 / GIT_PAGER=cat`，减少审查文本之外的 shell startup、函数遮蔽、rg config、可选 Git 写入与 pager 注入。它的权威事实仍只是“请求文本属于保守的查询 shell 目录”，不是语义或 OS 级只读保证。真实 Bash 仍继承其余进程环境并经 PATH 解析程序；仓库/用户 Git 配置、attributes、pager、fsmonitor、credential/remote helper 和查询命令自身仍可能执行程序或产生写入。可信项目扩展也能绕开工具 gate。需要无人值守或敌对输入隔离时必须使用 OS/container/VM sandbox，不能扩大规则目录来假装获得安全边界。
 
 ## Agent Notebook 工具
 
@@ -62,7 +65,7 @@ Archive 是可恢复隐藏，不是删除：默认 list 不显示 archived，但
 ConversationActor 按角色模式和会话管理能力注入宿主工具：
 
 ```text
-read_only only: git_status / git_diff
+read_only only: bash（受审查的 Git/rg/文件查询 shell 包装器）
 all roles: notebook_write / notebook_list / notebook_grep / notebook_read
 all roles: todo_read / todo_write / todo_pause
 full_access only: request_edit_budget
@@ -118,7 +121,7 @@ canManageSessions only: wait_for_session / abort_session / delete_session
 - `src/server/conversation-actor.ts`
 - `src/server/project-session-coordinator.ts`
 - `src/server/meta-tools.ts`
-- `src/server/git-inspect.ts`
+- `src/server/read-only-bash.ts`
 - `src/server/notebook-tools.ts`
 - `src/server/conversation-notebook.ts`
 - `src/shared/protocol.ts`

@@ -14,8 +14,7 @@ describe("defaultToolPolicy", () => {
   );
 
   it.each([
-    "git_status",
-    "git_diff",
+    "bash",
     "notebook_write",
     "notebook_list",
     "notebook_grep",
@@ -40,6 +39,9 @@ describe("defaultToolPolicy", () => {
 
   it.each([
     ["bash", "builtin"],
+    ["bash", "project"],
+    ["bash", "extension"],
+    ["bash", "unknown"],
     ["write", "builtin"],
     ["edit", "builtin"],
     ["read", "project"],
@@ -47,14 +49,6 @@ describe("defaultToolPolicy", () => {
     ["find", "project"],
     ["ls", "extension"],
     ["custom", "unknown"],
-    ["git_status", "builtin"],
-    ["git_status", "project"],
-    ["git_status", "extension"],
-    ["git_status", "unknown"],
-    ["git_diff", "builtin"],
-    ["git_diff", "project"],
-    ["git_diff", "extension"],
-    ["git_diff", "unknown"],
     ["notebook_list", "builtin"],
     ["notebook_grep", "extension"],
     ["notebook_read", "project"],

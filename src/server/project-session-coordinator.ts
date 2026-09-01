@@ -47,7 +47,7 @@ import {
   projectConversationItemsSnapshot,
   snapshotConversationItems,
 } from "./conversation-history.js";
-import { createGitTools } from "./git-inspect.js";
+import { createReadOnlyBashTool } from "./read-only-bash.js";
 
 function isNodeError(error: unknown, code: string): boolean {
   return (
@@ -2100,7 +2100,7 @@ export class ProjectSessionCoordinator {
       extensionUI: this.extensionUIRouter(context, conversationId).ui,
       workbenchCustomTools: [
         ...(profile.role.toolMode === "read_only"
-          ? createGitTools(context.project.cwd)
+          ? [createReadOnlyBashTool(context.project.cwd)]
           : []),
         ...createNotebookTools(context.project.stateDir, conversationId),
         ...createMetaTools(
