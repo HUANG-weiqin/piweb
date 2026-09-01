@@ -3122,7 +3122,94 @@ describe("App", () => {
       .toBeEnabled();
   });
 
-  it("falls back to recent after a cached reconnect open fails", () => {
+  it("automatically falls back to recent when a cached conversation disappears in another workspace", () => {
+    localStorage.setItem("piweb.workspaces", JSON.stringify([
+      "E:\\work",
+      "E:\\other",
+    ]));
+    localStorage.setItem("piweb.lastCwd", "E:\\work");
+    render(<App />);
+    const first = latestCommand("initialize").sessionId;
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "state",
+        state: {
+          sessionId: first,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+          conversationId: CONVERSATION_ID,
+          focusId: FOCUS_A,
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId: first,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        messages: [],
+        window: {
+          omittedBefore: false,
+          startsMidTurn: false,
+          contentTruncated: false,
+        },
+      });
+    });
+
+    socketMock.autoFocus = false;
+    fireEvent.click(screen.getByRole("button", { name: "打开工作区 other" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开工作区 work" }));
+    const staleRestore = latestCommand("initialize");
+    expect(staleRestore).toMatchObject({
+      cwd: "E:\\work",
+      conversation: {
+        kind: "open",
+        conversationId: CONVERSATION_ID,
+      },
+    });
+
+    act(() => socketMock.emit?.({
+      type: "error",
+      scope: "command",
+      operation: "initialize",
+      commandId: staleRestore.commandId,
+      sessionId: staleRestore.sessionId,
+      message: `Conversation not found: ${CONVERSATION_ID}`,
+    }));
+
+    expect(screen.queryByRole("heading", { name: "工作区不可用" }))
+      .not.toBeInTheDocument();
+    const fallback = latestCommand("initialize");
+    expect(fallback).toMatchObject({
+      cwd: "E:\\work",
+      conversation: { kind: "recent" },
+    });
+    expect(fallback.sessionId).not.toBe(staleRestore.sessionId);
+    expect(screen.queryByText(/Conversation not found/)).not.toBeInTheDocument();
+
+    const initializeCount = socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "initialize",
+    ).length;
+    act(() => socketMock.emit?.({
+      type: "error",
+      scope: "command",
+      operation: "initialize",
+      commandId: fallback.commandId,
+      sessionId: fallback.sessionId,
+      message: "workspace unavailable",
+    }));
+    expect(socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "initialize",
+    )).toHaveLength(initializeCount);
+    expect(screen.getByRole("heading", { name: "工作区不可用" }))
+      .toBeInTheDocument();
+  });
+
+  it("settles the workspace when the automatic recent fallback cannot be sent", () => {
     localStorage.setItem("piweb.workspaces", JSON.stringify(["E:\\work"]));
     localStorage.setItem("piweb.lastCwd", "E:\\work");
     render(<App />);
@@ -3156,6 +3243,7 @@ describe("App", () => {
         },
       });
     });
+
     socketMock.autoFocus = false;
     act(() => {
       socketMock.status?.(false);
@@ -3166,32 +3254,31 @@ describe("App", () => {
         startupCwd: "E:\\default",
       });
     });
-    const reconnect = latestCommand("initialize");
-    expect(reconnect.conversation).toEqual({
+    const staleRestore = latestCommand("initialize");
+    expect(staleRestore.conversation).toEqual({
       kind: "open",
       conversationId: CONVERSATION_ID,
     });
+
+    socketMock.send.mockReturnValueOnce(false);
     act(() => socketMock.emit?.({
       type: "error",
       scope: "command",
       operation: "initialize",
-      commandId: reconnect.commandId,
-      sessionId: reconnect.sessionId,
-      message: "dead conversation",
+      commandId: staleRestore.commandId,
+      sessionId: staleRestore.sessionId,
+      message: `Conversation not found: ${CONVERSATION_ID}`,
     }));
+
+    const fallback = latestCommand("initialize");
+    expect(fallback).toMatchObject({
+      cwd: "E:\\work",
+      conversation: { kind: "recent" },
+    });
+    expect(fallback.sessionId).not.toBe(staleRestore.sessionId);
     expect(screen.getByRole("heading", { name: "工作区不可用" }))
       .toBeInTheDocument();
-
-    act(() => {
-      socketMock.status?.(false);
-      socketMock.status?.(true);
-      socketMock.emit?.({
-        type: "hello",
-        protocolVersion: PROTOCOL_VERSION,
-        startupCwd: "E:\\default",
-      });
-    });
-    expect(latestCommand("initialize").conversation).toEqual({ kind: "recent" });
+    expect(screen.getByRole("alert")).toHaveTextContent("本地服务未连接");
   });
 
   it("closes the last unavailable workspace and its session view", () => {

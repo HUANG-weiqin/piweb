@@ -2078,6 +2078,33 @@ export function App() {
             commandId: pending.commandId,
           });
           const deferred = deferredFocusAuthorityRef.current;
+          if (
+            pending.operation === "initialize"
+            && pending.initializeConversationKind === "open"
+          ) {
+            if (pending.cachedProjectId && pending.targetConversationId) {
+              forgetConversationPresentation(
+                conversationPresentationCacheRef.current,
+                conversationScopeKey(
+                  pending.workspaceKey,
+                  pending.cachedProjectId,
+                  pending.targetConversationId,
+                ),
+              );
+              forgetWorkspaceConversationProjection(
+                pending.workspaceKey,
+                pending.cachedProjectId,
+                pending.targetConversationId,
+              );
+            }
+            initialize(
+              activeCwdRef.current,
+              { kind: "recent" },
+              undefined,
+              socket,
+            );
+            return;
+          }
           updatePendingFocus(undefined);
           pendingFocusedStateRef.current = undefined;
           clearFocusReplacementAuthority();
@@ -2372,13 +2399,14 @@ export function App() {
     const path = setupCwd.trim();
     browseDirectory(path || undefined);
   };
-  const initialize = (
+  function initialize(
     cwd: string,
     conversation: Extract<ClientCommand, { type: "initialize" }>["conversation"] = {
       kind: "recent",
     },
     cached?: CachedWorkspaceProjection,
-  ) => {
+    transport?: PiSocket,
+  ) {
     const normalizedCwd = cwd.trim();
     const sessionId = crypto.randomUUID();
     const commandId = crypto.randomUUID();
@@ -2421,21 +2449,23 @@ export function App() {
         : {}),
       ...(cached ? { cachedProjectId: cached.projectId } : {}),
     });
-    const sent = send({
-      type: "initialize",
+    const command = {
+      type: "initialize" as const,
       commandId,
       sessionId,
       cwd: normalizedCwd,
       conversation,
-    });
-    if (!sent) transitionTiming.cancel(timingIntent);
-    if (!sent && cached) {
+    };
+    const sent = transport ? transport.send(command) : send(command);
+    if (!sent) {
+      transitionTiming.cancel(timingIntent);
+      if (transport) setError("本地服务未连接");
       updatePendingFocus(undefined);
-      discardCachedWorkspacePresentation();
+      if (cached) discardCachedWorkspacePresentation();
       updateWorkspaceSyncing(false);
       markWorkspaceUnavailable(normalizedCwd);
     }
-  };
+  }
   const initializeWorkspace = (cwd: string) => {
     const cached = getWorkspaceProjection(
       workspaceProjectionCacheRef.current,
