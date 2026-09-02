@@ -10,6 +10,13 @@ type ConvertToLlm = AgentSession["agent"]["convertToLlm"];
 type AgentMessage = Parameters<ConvertToLlm>[0][number];
 type LlmMessages = Awaited<ReturnType<ConvertToLlm>>;
 
+const ACTIVE_LOOP_LIST: LoopList = {
+  items: [{ id: "test", text: "Test active work", status: "active" }],
+  armed: true,
+};
+const ACTIVE_WORK_HINT = "piweb_work={\"active\":[{\"id\":\"test\",\"text\":\"Test active work\"}],\"omitted\":0,\"onStatusChange\":\"todo_write\"}";
+const getActiveLoopList = (): LoopList => ACTIVE_LOOP_LIST;
+
 function message(value: unknown): AgentMessage {
   return value as AgentMessage;
 }
@@ -57,7 +64,7 @@ function fakeSession({
   return { session, sessionMessages, managerMessages };
 }
 
-function telemetryText(messages: LlmMessages): string {
+function providerTailText(messages: LlmMessages): string {
   const last = messages.at(-1);
   if (!last || (last.role !== "user" && last.role !== "toolResult")) {
     throw new Error("Expected a final user or tool-result message");
@@ -65,9 +72,13 @@ function telemetryText(messages: LlmMessages): string {
   const content = typeof last.content === "string"
     ? [{ type: "text" as const, text: last.content }]
     : last.content;
-  const telemetry = content.at(-1);
-  if (telemetry?.type !== "text") throw new Error("Expected telemetry text");
-  return telemetry.text;
+  const providerTail = content.at(-1);
+  if (providerTail?.type !== "text") throw new Error("Expected provider-tail text");
+  return providerTail.text;
+}
+
+function telemetryText(messages: LlmMessages): string {
+  return providerTailText(messages).split("\n", 1)[0]!;
 }
 
 describe("installAgentContextBudget", () => {
@@ -109,7 +120,7 @@ describe("installAgentContextBudget", () => {
       return 70;
     });
     const { session } = fakeSession({ original, getContextUsage });
-    installAgentContextBudget(session, getThreshold);
+    installAgentContextBudget(session, getActiveLoopList, getThreshold);
     const input = [userMessage("input")];
 
     const result = await session.agent.convertToLlm(input);
@@ -134,7 +145,7 @@ describe("installAgentContextBudget", () => {
         percent: (51_900 / 272_000) * 100,
       }),
     });
-    installAgentContextBudget(session, () => 70);
+    installAgentContextBudget(session, getActiveLoopList, () => 70);
 
     const result = await session.agent.convertToLlm([userMessage("input")]);
 
@@ -144,7 +155,10 @@ describe("installAgentContextBudget", () => {
         { type: "text", text: "continue the long task" },
         {
           type: "text",
-          text: "<piweb_ctx used=\"51.9k/272k\" auto_compact=\"70%\" remaining=\"138.5k\" />",
+          text: [
+            "<piweb_ctx used=\"51.9k/272k\" auto_compact=\"70%\" remaining=\"138.5k\" />",
+            ACTIVE_WORK_HINT,
+          ].join("\n"),
         },
       ],
       timestamp: 1,
@@ -160,7 +174,7 @@ describe("installAgentContextBudget", () => {
       timestamp: 1,
     };
     const { session } = fakeSession({ original: async () => [originalMessage] });
-    installAgentContextBudget(session, () => 70);
+    installAgentContextBudget(session, getActiveLoopList, () => 70);
 
     const result = await session.agent.convertToLlm([]);
 
@@ -170,7 +184,10 @@ describe("installAgentContextBudget", () => {
         { type: "text", text: "plain context" },
         {
           type: "text",
-          text: "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
+          text: [
+            "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
+            ACTIVE_WORK_HINT,
+          ].join("\n"),
         },
       ],
     }]);
@@ -188,10 +205,15 @@ describe("installAgentContextBudget", () => {
     };
     const originalSnapshot = structuredClone(originalMessage);
     const { session } = fakeSession({ original: async () => [originalMessage] });
-    installAgentContextBudget(session, () => 70, () => ({
-      items: [{ id: "inspect", text: "Inspect image", status: "active" }],
-      armed: true,
-    }));
+    installAgentContextBudget(
+      session,
+      () => ({
+        items: [{ id: "inspect", text: "Inspect image", status: "active" }],
+        armed: true,
+      }),
+      () => 70,
+      () => 0,
+    );
 
     const result = await session.agent.convertToLlm([]);
 
@@ -204,7 +226,7 @@ describe("installAgentContextBudget", () => {
           type: "text",
           text: [
             "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
-            "piweb_work={\"active\":[{\"id\":\"inspect\",\"text\":\"Inspect image\"}],\"omitted\":0,\"onStatusChange\":\"todo_write\"}",
+            "piweb_work={\"active\":[{\"id\":\"inspect\",\"text\":\"Inspect image\"}],\"omitted\":0,\"editLeft\":0,\"onStatusChange\":\"todo_write\"}",
           ].join("\n"),
         },
       ],
@@ -222,7 +244,7 @@ describe("installAgentContextBudget", () => {
       timestamp: 1,
     };
     const { session } = fakeSession({ original: async () => [toolResult] });
-    installAgentContextBudget(session, undefined, () => ({
+    installAgentContextBudget(session, () => ({
       items: [{ id: "verify", text: "Verify output", status: "active" }],
       armed: true,
     }));
@@ -253,11 +275,11 @@ describe("installAgentContextBudget", () => {
     };
     const before = structuredClone(loopList);
     const { session } = fakeSession();
-    installAgentContextBudget(session, () => 70, () => loopList);
+    installAgentContextBudget(session, () => loopList, () => 70);
 
     const result = await session.agent.convertToLlm([]);
 
-    expect(telemetryText(result)).toBe([
+    expect(providerTailText(result)).toBe([
       "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
       "piweb_work={\"active\":[{\"id\":\"active\\\"\\\\\",\"text\":\"line\\n雪\"}],\"omitted\":0,\"onStatusChange\":\"todo_write\"}",
     ].join("\n"));
@@ -284,7 +306,7 @@ describe("installAgentContextBudget", () => {
       original: async () => originalResult,
       getContextUsage,
     });
-    installAgentContextBudget(session, () => 70, getLoopList);
+    installAgentContextBudget(session, getLoopList, () => 70);
 
     const first = await session.agent.convertToLlm([]);
     const second = await session.agent.convertToLlm([]);
@@ -297,8 +319,35 @@ describe("installAgentContextBudget", () => {
       "piweb_work={\"active\":[{\"id\":\"second\",\"text\":\"Latest snapshot\"}],\"omitted\":0,\"onStatusChange\":\"todo_write\"}",
     );
     expect(neither).toBe(originalResult);
-    expect(getContextUsage).toHaveBeenCalledTimes(3);
+    expect(getContextUsage).toHaveBeenCalledTimes(2);
     expect(getLoopList).toHaveBeenCalledTimes(3);
+  });
+
+  it("omits the whole transient tail when no work is active", async () => {
+    const originalResult = [llmUser("converted")];
+    const getContextUsage = vi.fn(() => ({
+      tokens: 10_000,
+      contextWindow: 100_000,
+      percent: 10,
+    }));
+    const getEditBudgetRemainingFiles = vi.fn(() => 3);
+    const { session } = fakeSession({
+      original: async () => originalResult,
+      getContextUsage,
+    });
+    installAgentContextBudget(
+      session,
+      () => ({
+        items: [{ id: "waiting", text: "Not active", status: "pending" }],
+        armed: true,
+      }),
+      () => 70,
+      getEditBudgetRemainingFiles,
+    );
+
+    await expect(session.agent.convertToLlm([])).resolves.toBe(originalResult);
+    expect(getContextUsage).not.toHaveBeenCalled();
+    expect(getEditBudgetRemainingFiles).not.toHaveBeenCalled();
   });
 
   it("keeps the complete work record within its UTF-8 budget", async () => {
@@ -308,14 +357,20 @@ describe("installAgentContextBudget", () => {
       status: "active",
     }));
     const { session } = fakeSession();
-    installAgentContextBudget(session, undefined, () => ({ items, armed: true }));
+    installAgentContextBudget(
+      session,
+      () => ({ items, armed: true }),
+      undefined,
+      () => 7,
+    );
 
     const result = await session.agent.convertToLlm([]);
-    const record = telemetryText(result);
+    const record = providerTailText(result);
     const payload = JSON.parse(record.slice("piweb_work=".length)) as {
       active: Array<{ id: string; text: string }>;
       omitted: number;
       moreVia?: string;
+      editLeft: number;
       onStatusChange: string;
     };
 
@@ -324,6 +379,7 @@ describe("installAgentContextBudget", () => {
       "active",
       "omitted",
       "moreVia",
+      "editLeft",
       "onStatusChange",
     ]);
     expect(payload.active).toEqual(
@@ -332,6 +388,7 @@ describe("installAgentContextBudget", () => {
     expect(payload.omitted).toBe(items.length - payload.active.length);
     expect(payload.omitted).toBeGreaterThan(0);
     expect(payload.moreVia).toBe("todo_read");
+    expect(payload.editLeft).toBe(7);
     expect(payload.onStatusChange).toBe("todo_write");
 
     const next = items[payload.active.length]!;
@@ -339,6 +396,7 @@ describe("installAgentContextBudget", () => {
       active: [...payload.active, { id: next.id, text: next.text }],
       omitted: payload.omitted - 1,
       ...(payload.omitted > 1 ? { moreVia: "todo_read" } : {}),
+      editLeft: payload.editLeft,
       onStatusChange: "todo_write",
     })}`;
     expect(Buffer.byteLength(oneMore, "utf8")).toBeGreaterThan(4096);
@@ -357,7 +415,7 @@ describe("installAgentContextBudget", () => {
         percent: 65,
       });
     const { session } = fakeSession({ getContextUsage });
-    installAgentContextBudget(session, () => 70);
+    installAgentContextBudget(session, getActiveLoopList, () => 70);
 
     const below = await session.agent.convertToLlm([]);
     const at = await session.agent.convertToLlm([]);
@@ -383,7 +441,7 @@ describe("installAgentContextBudget", () => {
         percent: 10,
       });
     const { session } = fakeSession({ getContextUsage });
-    installAgentContextBudget(session, () => 70);
+    installAgentContextBudget(session, getActiveLoopList, () => 70);
 
     const beforeCompaction = await session.agent.convertToLlm([]);
     const afterCompaction = await session.agent.convertToLlm([]);
@@ -406,7 +464,7 @@ describe("installAgentContextBudget", () => {
       .mockReturnValueOnce(70)
       .mockReturnValueOnce(80);
     const { session } = fakeSession({ getContextUsage });
-    installAgentContextBudget(session, getThreshold);
+    installAgentContextBudget(session, getActiveLoopList, getThreshold);
 
     const first = await session.agent.convertToLlm([]);
     const second = await session.agent.convertToLlm([]);
@@ -429,7 +487,7 @@ describe("installAgentContextBudget", () => {
         percent: null,
       }),
     });
-    installAgentContextBudget(session, () => 70);
+    installAgentContextBudget(session, getActiveLoopList, () => 70);
 
     const result = await session.agent.convertToLlm([]);
 
@@ -453,12 +511,12 @@ describe("installAgentContextBudget", () => {
         throw new Error("threshold unavailable");
       });
     const { session } = fakeSession({ original, getContextUsage });
-    installAgentContextBudget(session, getThreshold);
+    installAgentContextBudget(session, getActiveLoopList, getThreshold);
 
-    await expect(session.agent.convertToLlm([])).resolves.toBe(originalResult);
-    await expect(session.agent.convertToLlm([])).resolves.toBe(originalResult);
-    await expect(session.agent.convertToLlm([])).resolves.toBe(originalResult);
-    await expect(session.agent.convertToLlm([])).resolves.toBe(originalResult);
+    for (let index = 0; index < 4; index += 1) {
+      const result = await session.agent.convertToLlm([]);
+      expect(providerTailText(result)).toBe(ACTIVE_WORK_HINT);
+    }
     expect(getContextUsage).toHaveBeenCalledTimes(4);
     expect(getThreshold).toHaveBeenCalledTimes(4);
   });
@@ -471,7 +529,7 @@ describe("installAgentContextBudget", () => {
     const getContextUsage = vi.fn<() => ContextUsage | undefined>();
     const getThreshold = vi.fn(() => 70);
     const { session } = fakeSession({ original, getContextUsage });
-    installAgentContextBudget(session, getThreshold);
+    installAgentContextBudget(session, getActiveLoopList, getThreshold);
 
     await expect(session.agent.convertToLlm([])).rejects.toBe(failure);
     expect(getContextUsage).not.toHaveBeenCalled();
@@ -494,7 +552,7 @@ describe("installAgentContextBudget", () => {
     const sessionBefore = structuredClone(sessionMessages);
     const managerBefore = structuredClone(managerMessages);
     const loopListBefore = structuredClone(loopList);
-    installAgentContextBudget(session, () => 70, () => loopList);
+    installAgentContextBudget(session, () => loopList, () => 70);
 
     const result = await session.agent.convertToLlm(input);
 
@@ -526,7 +584,7 @@ describe("installAgentContextBudget", () => {
     };
     const originalResult: LlmMessages = [assistant];
     const { session } = fakeSession({ original: async () => originalResult });
-    installAgentContextBudget(session, () => 70);
+    installAgentContextBudget(session, getActiveLoopList, () => 70);
 
     await expect(session.agent.convertToLlm([])).resolves.toBe(originalResult);
   });
@@ -534,7 +592,11 @@ describe("installAgentContextBudget", () => {
   it("disposes idempotently and restores own and inherited property shapes", () => {
     const ownOriginal: ConvertToLlm = async () => [];
     const own = fakeSession({ original: ownOriginal });
-    const ownController = installAgentContextBudget(own.session, () => 70);
+    const ownController = installAgentContextBudget(
+      own.session,
+      getActiveLoopList,
+      () => 70,
+    );
     expect(Object.hasOwn(own.session.agent, "convertToLlm")).toBe(true);
     expect(own.session.agent.convertToLlm).not.toBe(ownOriginal);
 
@@ -551,6 +613,7 @@ describe("installAgentContextBudget", () => {
 
     const inheritedController = installAgentContextBudget(
       inherited.session,
+      getActiveLoopList,
       () => 70,
     );
     expect(Object.hasOwn(inherited.session.agent, "convertToLlm")).toBe(true);
@@ -564,16 +627,22 @@ describe("installAgentContextBudget", () => {
     const agent = Object.create(null) as AgentSession["agent"];
     const { session } = fakeSession({ agent });
 
-    expect(() => installAgentContextBudget(session, () => 70)).toThrow(
-      "Pi Agent does not expose convertToLlm",
-    );
+    expect(() => installAgentContextBudget(
+      session,
+      getActiveLoopList,
+      () => 70,
+    )).toThrow("Pi Agent does not expose convertToLlm");
   });
 
   it("does not restore over a converter installed after its wrapper", () => {
     const original: ConvertToLlm = async () => [];
     const foreign: ConvertToLlm = async () => [];
     const { session } = fakeSession({ original });
-    const controller = installAgentContextBudget(session, () => 70);
+    const controller = installAgentContextBudget(
+      session,
+      getActiveLoopList,
+      () => 70,
+    );
     session.agent.convertToLlm = foreign;
 
     controller.dispose();

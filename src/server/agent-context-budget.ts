@@ -59,18 +59,17 @@ function createTelemetry(
   return `<piweb_ctx used="${formatTokens(usage.tokens)}/${formatTokens(window)}" auto_compact="${thresholdPercent}%" remaining="${formatTokens(remaining)}"${warning} />`;
 }
 
-function createWorkHint(loopList: LoopList): string | undefined {
-  const active = loopList.items
-    .filter((item) => item.status === "active")
-    .map(({ id, text }) => ({ id, text }));
-  if (active.length === 0) return undefined;
-
+function createWorkHint(
+  active: Array<{ id: string; text: string }>,
+  editLeft?: number,
+): string {
   for (let included = active.length; included > 0; included -= 1) {
     const omitted = active.length - included;
     const record = `piweb_work=${JSON.stringify({
       active: active.slice(0, included),
       omitted,
       ...(omitted > 0 ? { moreVia: "todo_read" } : {}),
+      ...(editLeft === undefined ? {} : { editLeft }),
       onStatusChange: "todo_write",
     })}`;
     if (Buffer.byteLength(record, "utf8") <= PIWEB_WORK_RECORD_MAX_BYTES) {
@@ -82,6 +81,7 @@ function createWorkHint(loopList: LoopList): string | undefined {
     active: [],
     omitted: active.length,
     moreVia: "todo_read",
+    ...(editLeft === undefined ? {} : { editLeft }),
     onStatusChange: "todo_write",
   })}`;
 }
@@ -110,8 +110,9 @@ function appendProviderTail(
 
 export function installAgentContextBudget(
   session: AgentSession,
+  getLoopList: () => LoopList,
   getCompactionThresholdPercent?: () => number,
-  getLoopList?: () => LoopList,
+  getEditBudgetRemainingFiles?: () => number | undefined,
 ): AgentContextBudgetController {
   const agent = session.agent;
   const original = agent.convertToLlm;
@@ -125,6 +126,27 @@ export function installAgentContextBudget(
     messages: AgentMessage[],
   ): Promise<LlmMessages> {
     const converted = await original.call(this, messages);
+    let active: Array<{ id: string; text: string }>;
+    try {
+      active = getLoopList().items
+        .filter((item) => item.status === "active")
+        .map(({ id, text }) => ({ id, text }));
+      if (active.length === 0) return converted;
+    } catch {
+      // Active work is the admission boundary for all transient hints.
+      return converted;
+    }
+
+    let editBudgetRemainingFiles: number | undefined;
+    if (getEditBudgetRemainingFiles) {
+      try {
+        editBudgetRemainingFiles = getEditBudgetRemainingFiles();
+      } catch {
+        // The active-work reminder remains useful without this optional fact.
+      }
+    }
+    const workHint = createWorkHint(active, editBudgetRemainingFiles);
+
     let telemetry: string | undefined;
     if (getCompactionThresholdPercent) {
       try {
@@ -137,21 +159,8 @@ export function installAgentContextBudget(
       }
     }
 
-    let workHint: string | undefined;
-    if (getLoopList) {
-      try {
-        workHint = createWorkHint(getLoopList());
-      } catch {
-        // Preserve any available telemetry when the live work snapshot fails.
-      }
-    }
-
-    const providerTail = telemetry && workHint
-      ? `${telemetry}\n${workHint}`
-      : telemetry ?? workHint;
-    return providerTail
-      ? appendProviderTail(converted, providerTail)
-      : converted;
+    const providerTail = telemetry ? `${telemetry}\n${workHint}` : workHint;
+    return appendProviderTail(converted, providerTail);
   }
 
   agent.convertToLlm = convertToLlm;

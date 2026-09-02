@@ -23,7 +23,6 @@ describe("CommitmentCard", () => {
           type: "text",
           text: JSON.stringify({
             outcome: "edit_budget_granted",
-            addedFiles: 3,
             grantedFiles: 3,
             touchedFiles: 1,
             remainingFiles: 2,
@@ -32,7 +31,6 @@ describe("CommitmentCard", () => {
         }],
         details: {
           outcome: "edit_budget_granted",
-          addedFiles: 3,
           grantedFiles: 3,
           touchedFiles: 1,
           remainingFiles: 2,
@@ -53,7 +51,7 @@ describe("CommitmentCard", () => {
       .toHaveTextContent("修复 active run 与历史恢复之间的参数一致性。");
     expect(container.querySelector(".commitment-reason"))
       .toHaveAttribute("title", "修复 active run 与历史恢复之间的参数一致性。");
-    expect(screen.getByText("新增额度 3")).toBeInTheDocument();
+    expect(screen.getByText("本轮额度 3")).toBeInTheDocument();
     expect(screen.getByText("本轮剩余 2")).toBeInTheDocument();
 
     fireEvent.click(card.querySelector("summary") as HTMLElement);

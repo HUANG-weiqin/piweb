@@ -844,13 +844,13 @@ export class ConversationActor {
       name: "request_edit_budget",
       label: "Request edit budget",
       description:
-        "Declare the expected number of distinct files this run will modify before using builtin edit or write. At least one LoopList item must already be active. Each successful first modification of a canonical file path consumes one slot; repeat edits to that file do not. Request more when scope grows. This gates only builtin edit/write and is not a filesystem sandbox.",
+        "Set this run's total distinct-file edit budget before using builtin edit or write. At least one LoopList item must already be active. Each successful request replaces the previous total instead of adding to it; fileCount includes canonical paths already modified in this run. Each successful first modification consumes one slot; repeat edits to that file do not. This gates only builtin edit/write and is not a filesystem sandbox.",
       promptSnippet:
-        "Before builtin edit/write, mark current LoopList work active, then declare how many distinct files this run expects to modify and why.",
+        "Before builtin edit/write, mark current LoopList work active, then set the run's total distinct-file budget and explain why.",
       promptGuidelines: [
         "Before requesting edit budget, use todo_write so at least one current task is active.",
-        "Call request_edit_budget before the first builtin edit or write in each run; estimate distinct files, not edit calls.",
-        "If the scope grows, request additional files and explain why before touching another new path.",
+        "Call request_edit_budget before the first builtin edit or write in each run; fileCount is the total distinct-file scope, including files already modified.",
+        "A successful request replaces the prior total instead of adding to it. If scope changes, request the revised total before touching another new path.",
         "Do not use bash, scripts, or extension tools to evade the budget; the host gate only covers builtin edit/write.",
       ],
       parameters: Type.Object({
@@ -901,10 +901,9 @@ export class ConversationActor {
             "Edit budget requires at least one active LoopList item. Call todo_write first and mark current work active.",
           );
         }
-        ticket.editBudget.grantedFiles += finalInput.fileCount;
+        ticket.editBudget.grantedFiles = finalInput.fileCount;
         const details = {
           outcome: "edit_budget_granted" as const,
-          addedFiles: finalInput.fileCount,
           ...snapshotEditBudget(ticket.editBudget),
         };
         return {
@@ -3401,6 +3400,12 @@ export class ConversationActor {
           turnBoundaryCheck: (input) => this.checkTurnBoundary(input),
           getCompactionThresholdPercent: () => this.compactionThresholdPercent,
           getLoopList: () => this.getLoopList(),
+          getEditBudgetRemainingFiles: () => {
+            const ticket = this.activeRun;
+            return ticket?.toolMode === "full_access"
+              ? snapshotEditBudget(ticket.editBudget).remainingFiles
+              : undefined;
+          },
           getServiceTier: () => this.serviceTierSelection,
         },
       );

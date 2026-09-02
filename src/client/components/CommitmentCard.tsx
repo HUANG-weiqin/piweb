@@ -84,8 +84,8 @@ export function CommitmentCard({
       ? "申请编辑额度"
       : `预计修改 ${fileCount} 个文件`;
     reason = stringField(args, "reason");
-    const addedFiles = numberField(facts, "addedFiles");
-    if (addedFiles !== undefined) chips.push(`新增额度 ${addedFiles}`);
+    const grantedFiles = numberField(facts, "grantedFiles");
+    if (grantedFiles !== undefined) chips.push(`本轮额度 ${grantedFiles}`);
     if (observedEditBudgetRemainingFiles === null) {
       chips.push("本轮剩余未知");
     } else if (observedEditBudgetRemainingFiles !== undefined) {

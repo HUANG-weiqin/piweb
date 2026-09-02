@@ -288,6 +288,7 @@ export interface CreatePiSessionOptions {
   turnBoundaryCheck?: (input: AgentTurnBoundaryCheck) => boolean;
   getCompactionThresholdPercent?: () => number;
   getLoopList?: () => LoopList;
+  getEditBudgetRemainingFiles?: () => number | undefined;
   getServiceTier?: () => ServiceTier | null;
 }
 
@@ -834,13 +835,14 @@ export class PiRuntime implements PiRuntimeLike {
       // Agent.steeringMode 公开 setter 直接改 PendingMessageQueue.mode（drain 时实时读取）。
       createdSession.agent.steeringMode = "all";
       installToolResultCompression(createdSession);
-      if (options.getCompactionThresholdPercent || options.getLoopList) {
+      if (options.getLoopList) {
         // This host converter runs after the SDK extension transform and keeps
         // transient hints inside the existing final input instead of creating a new turn.
         contextBudgetController = installAgentContextBudget(
           createdSession,
-          options.getCompactionThresholdPercent,
           options.getLoopList,
+          options.getCompactionThresholdPercent,
+          options.getEditBudgetRemainingFiles,
         );
       }
       if (readOnlyToolProjection) {

@@ -4554,7 +4554,7 @@ describe("ConversationActor", () => {
     expect(lease.releases).toBe(1);
   });
 
-  it("requires active work, then grants and consumes a run-scoped edit budget", async () => {
+  it("requires active work, then replaces and consumes a run-scoped edit budget", async () => {
     const fullAccessProfile = {
       ...profile(),
       role: { ...profile().role, toolMode: "full_access" as const },
@@ -4574,6 +4574,7 @@ describe("ConversationActor", () => {
     const signal = new AbortController().signal;
     const decisions: Array<unknown> = [];
     const completions: Array<unknown> = [];
+    const editRemainingFiles: Array<unknown> = [];
     fixture.runtime.session.promptImplementation = async () => {
       await expect(budgetTool!.execute("no-list", {
         fileCount: 1,
@@ -4596,6 +4597,9 @@ describe("ConversationActor", () => {
       await todoWrite!.execute("active-list", {
         items: [{ id: "edit", text: "Edit the actor", status: "active" }],
       });
+      editRemainingFiles.push(
+        fixture.runtime.createOptions?.getEditBudgetRemainingFiles?.(),
+      );
 
       decisions.push(await gate?.({
         toolCallId: "blocked-before-grant",
@@ -4617,9 +4621,9 @@ describe("ConversationActor", () => {
         reason: ` ${"x".repeat(2_000)} `,
       });
       completions.push(grant?.details);
-      await todoWrite!.execute("complete-after-grant", {
-        items: [{ id: "edit", text: "Edit the actor", status: "completed" }],
-      });
+      editRemainingFiles.push(
+        fixture.runtime.createOptions?.getEditBudgetRemainingFiles?.(),
+      );
 
       decisions.push(await gate?.({
         toolCallId: "first-edit",
@@ -4663,6 +4667,20 @@ describe("ConversationActor", () => {
         isError: false,
         details: undefined,
       }));
+      editRemainingFiles.push(
+        fixture.runtime.createOptions?.getEditBudgetRemainingFiles?.(),
+      );
+      const replacement = await budgetTool?.execute("replace-grant", {
+        fileCount: 2,
+        reason: "Replace the run total after modifying the first file.",
+      });
+      completions.push(replacement?.details);
+      editRemainingFiles.push(
+        fixture.runtime.createOptions?.getEditBudgetRemainingFiles?.(),
+      );
+      await todoWrite!.execute("complete-after-grant", {
+        items: [{ id: "edit", text: "Edit the actor", status: "completed" }],
+      });
 
       decisions.push(await gate?.({
         toolCallId: "same-file-alias",
@@ -4688,6 +4706,25 @@ describe("ConversationActor", () => {
         args: { path: "src/server/meta-tools.ts" },
         signal,
       }));
+      completions.push(await complete?.({
+        toolCallId: "second-file",
+        toolName: "edit",
+        toolSource: "builtin",
+        args: { path: "src/server/meta-tools.ts" },
+        signal,
+        isError: false,
+        details: undefined,
+      }));
+      editRemainingFiles.push(
+        fixture.runtime.createOptions?.getEditBudgetRemainingFiles?.(),
+      );
+      decisions.push(await gate?.({
+        toolCallId: "third-file",
+        toolName: "write",
+        toolSource: "builtin",
+        args: { path: "src/server/pi-runtime.ts" },
+        signal,
+      }));
     };
 
     await fixture.actor.startPrompt({
@@ -4702,7 +4739,7 @@ describe("ConversationActor", () => {
     });
     expect(completions[0]).toMatchObject({
       outcome: "edit_budget_granted",
-      addedFiles: 1,
+      grantedFiles: 1,
       remainingFiles: 1,
       blockedAttempts: 1,
     });
@@ -4728,17 +4765,35 @@ describe("ConversationActor", () => {
         },
       },
     });
-    expect(decisions[3]).toBeUndefined();
     expect(completions[4]).toMatchObject({
+      outcome: "edit_budget_granted",
+      grantedFiles: 2,
+      touchedFiles: 1,
+      remainingFiles: 1,
+      blockedAttempts: 1,
+    });
+    expect(decisions[3]).toBeUndefined();
+    expect(completions[5]).toMatchObject({
       details: {
         piwebEditBudget: {
           countedNewFile: false,
           touchedFiles: 1,
+          remainingFiles: 1,
+        },
+      },
+    });
+    expect(decisions[4]).toBeUndefined();
+    expect(completions[6]).toMatchObject({
+      details: {
+        piwebEditBudget: {
+          countedNewFile: true,
+          touchedFiles: 2,
           remainingFiles: 0,
         },
       },
     });
-    expect(decisions[4]).toMatchObject({ block: true });
+    expect(decisions[5]).toMatchObject({ block: true });
+    expect(editRemainingFiles).toEqual([0, 1, 0, 1, 0]);
     await fixture.actor.dispose();
   });
 

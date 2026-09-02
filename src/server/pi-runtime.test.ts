@@ -344,6 +344,10 @@ describe("PiRuntime session ownership", () => {
     let thresholdPercent = 70;
     const created = await runtime.createSession(cwd, {
       sessionManager: manager,
+      getLoopList: () => ({
+        items: [{ id: "work", text: "Active work", status: "active" }],
+        armed: true,
+      }),
       getCompactionThresholdPercent: () => thresholdPercent,
     });
     await created.activateExtensions();
@@ -378,7 +382,10 @@ describe("PiRuntime session ownership", () => {
           { type: "text", text: "project context" },
           {
             type: "text",
-            text: "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
+            text: [
+              "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
+              "piweb_work={\"active\":[{\"id\":\"work\",\"text\":\"Active work\"}],\"omitted\":0,\"onStatusChange\":\"todo_write\"}",
+            ].join("\n"),
           },
         ],
         timestamp: 1,
@@ -390,7 +397,10 @@ describe("PiRuntime session ownership", () => {
         { type: "text", text: "project context" },
         {
           type: "text",
-          text: "<piweb_ctx used=\"10k/100k\" auto_compact=\"80%\" remaining=\"70k\" />",
+          text: [
+            "<piweb_ctx used=\"10k/100k\" auto_compact=\"80%\" remaining=\"70k\" />",
+            "piweb_work={\"active\":[{\"id\":\"work\",\"text\":\"Active work\"}],\"omitted\":0,\"onStatusChange\":\"todo_write\"}",
+          ].join("\n"),
         },
       ],
     });
@@ -422,7 +432,12 @@ describe("PiRuntime session ownership", () => {
       armed: true,
     };
     const getLoopList = vi.fn(() => loopList);
-    const created = await runtime.createSession(cwd, { getLoopList });
+    let editBudgetRemainingFiles = 2;
+    const getEditBudgetRemainingFiles = vi.fn(() => editBudgetRemainingFiles);
+    const created = await runtime.createSession(cwd, {
+      getLoopList,
+      getEditBudgetRemainingFiles,
+    });
     const getContextUsage = vi.spyOn(created.session, "getContextUsage");
     const input = [{
       role: "user" as const,
@@ -432,6 +447,7 @@ describe("PiRuntime session ownership", () => {
     const sessionMessagesBefore = [...created.session.messages];
 
     const first = await created.session.agent.convertToLlm(input);
+    editBudgetRemainingFiles = 1;
     loopList = {
       items: [{ id: "second", text: "Latest active item", status: "active" }],
       armed: true,
@@ -449,7 +465,7 @@ describe("PiRuntime session ownership", () => {
         { type: "text", text: "input" },
         {
           type: "text",
-          text: "piweb_work={\"active\":[{\"id\":\"first\",\"text\":\"First active item\"}],\"omitted\":0,\"onStatusChange\":\"todo_write\"}",
+          text: "piweb_work={\"active\":[{\"id\":\"first\",\"text\":\"First active item\"}],\"omitted\":0,\"editLeft\":2,\"onStatusChange\":\"todo_write\"}",
         },
       ],
     });
@@ -459,7 +475,7 @@ describe("PiRuntime session ownership", () => {
         { type: "text", text: "input" },
         {
           type: "text",
-          text: "piweb_work={\"active\":[{\"id\":\"second\",\"text\":\"Latest active item\"}],\"omitted\":0,\"onStatusChange\":\"todo_write\"}",
+          text: "piweb_work={\"active\":[{\"id\":\"second\",\"text\":\"Latest active item\"}],\"omitted\":0,\"editLeft\":1,\"onStatusChange\":\"todo_write\"}",
         },
       ],
     });
@@ -468,6 +484,7 @@ describe("PiRuntime session ownership", () => {
       content: [{ type: "text", text: "input" }],
     });
     expect(getLoopList).toHaveBeenCalledTimes(3);
+    expect(getEditBudgetRemainingFiles).toHaveBeenCalledTimes(2);
     expect(getContextUsage).not.toHaveBeenCalled();
     expect(created.session.messages).toEqual(sessionMessagesBefore);
     expect(created.session.agent.convertToLlm).not.toBe(originalConverter);
@@ -1545,6 +1562,12 @@ describe("PiRuntime session ownership", () => {
 
     await expect(runtime.createSession(cwd, {
       toolCallGate,
+      getLoopList: contextBudget
+        ? () => ({
+            items: [{ id: "test", text: "Test", status: "active" }],
+            armed: true,
+          })
+        : undefined,
       getCompactionThresholdPercent: contextBudget ? () => 70 : undefined,
     })).rejects.toThrow(expectedError);
     const refreshError = await runtime.refreshConfiguration().then(

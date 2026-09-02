@@ -58,7 +58,7 @@
 
 - 在每个 run 首次调用内置 `edit`/`write` 前申请。
 - `fileCount` 是预计首次成功修改的不同文件数量，不是 edit 调用次数。
-- 范围扩大时再次申请并说明原因。
+- 范围变化时再次申请新的总数并说明原因；新值覆盖旧值，且包含本 run 已修改文件。
 - 不要用 `bash` 绕过；该机制不是完整文件写保护。
 
 成功结果：
@@ -66,7 +66,6 @@
 ```ts
 {
   outcome: "edit_budget_granted";
-  addedFiles: number;
   grantedFiles: number;
   touchedFiles: number;
   remainingFiles: number;
@@ -74,7 +73,7 @@
 }
 ```
 
-多次申请做加法，不覆盖之前额度。工具仅在 `full_access` 会话可见；不加入 read-only SDK allowlist。
+多次申请覆盖本 run 的总额度，不做加法；已修改 canonical path 仍计入新总数。工具仅在 `full_access` 会话可见；不加入 read-only SDK allowlist。
 
 ### 4.2 `wait_for_session.singleWaitCommitment`
 
@@ -217,7 +216,7 @@ commitment 不保存到 coordinator，也不产生“已解锁”阶段；每次
 - eyebrow：`编辑承诺` / `单会话等待承诺`。
 - 主标题：`预计修改 3 个文件` / `等待 <会话>`。
 - 理由常显两行，溢出省略并保留 title。
-- 右侧紧凑 fact chips：`新增额度 3`、`剩余 2`、`等待中`。
+- 右侧紧凑 fact chips：`本轮额度 3`、`剩余 2`、`等待中`。
 - `single_wait_commitment_required` 改用 warning rail 和 `等待未开始`，但保持同一组件，不做红色错误大卡。
 - 已声明但工具动作被拒绝时使用紧凑 error rail 和 `执行失败` fact；其它已完成声明仍保持中性，不把声明伪装成合规结论。
 - pending wait 使用小 spinner；卡片本身不暗示用户审批。
@@ -230,7 +229,7 @@ commitment 不保存到 coordinator，也不产生“已解锁”阶段；每次
 
 ```text
 编辑承诺
-预计修改 3 个文件                   新增额度 3 · 剩余 3
+预计修改 3 个文件                   本轮额度 3 · 剩余 3
 修复 active run 与历史恢复之间的参数一致性。
 ```
 
@@ -273,7 +272,7 @@ commitment 不保存到 coordinator，也不产生“已解锁”阶段；每次
 
 边界测试：
 
-1. edit ledger：无额度拒绝；失败不消耗；同 canonical path 去重；新 path 消耗；追加额度恢复准入。
+1. edit ledger：无额度拒绝；失败不消耗；同 canonical path 去重；新 path 消耗；覆盖后的总额度决定后续准入。
 2. runtime：extension 变换后的 args 先进入 host gate，成功结果触发 completion callback，仍为 sequential。
 3. wait：即时 settlement 无承诺可返回；真正单目标阻塞无承诺立即返回且不进入 waiting；带承诺保持原 wait；aggregate 不受影响。
 4. history：request result 和 wait args/result 经 JSONL 恢复。
