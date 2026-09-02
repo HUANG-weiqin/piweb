@@ -358,6 +358,99 @@ describe("conversation reserved entries", () => {
     ])).toThrow(/LoopList updatedAt cannot regress/i);
   });
 
+  it("replays the current LoopList and active-context timers from stable item ids", () => {
+    const pending = createLoopListEntry({
+      items: [
+        { id: "implement", text: "Implement", status: "pending" },
+        { id: "verify", text: "Verify", status: "pending" },
+      ],
+      armed: true,
+      updatedAt: "2026-07-19T10:00:00.000Z",
+    });
+    const activeImplement = createLoopListEntry({
+      items: [
+        { id: "implement", text: "Implement", status: "active" },
+        { id: "verify", text: "Verify", status: "pending" },
+      ],
+      armed: true,
+      updatedAt: "2026-07-19T10:01:00.000Z",
+    });
+    const samePlanReordered = createLoopListEntry({
+      items: [
+        { id: "verify", text: "Verify thoroughly", status: "completed" },
+        { id: "implement", text: "Implement carefully", status: "active" },
+      ],
+      armed: true,
+      updatedAt: "2026-07-19T10:04:00.000Z",
+    });
+    const activeVerify = createLoopListEntry({
+      items: [
+        { id: "implement", text: "Implement carefully", status: "completed" },
+        { id: "verify", text: "Verify thoroughly", status: "active" },
+      ],
+      armed: true,
+      updatedAt: "2026-07-19T10:05:00.000Z",
+    });
+    const replacementPlan = createLoopListEntry({
+      items: [{ id: "ship", text: "Ship", status: "active" }],
+      armed: true,
+      updatedAt: "2026-07-19T10:06:00.000Z",
+    });
+    const withoutActive = createLoopListEntry({
+      items: [{ id: "ship", text: "Ship", status: "pending" }],
+      armed: false,
+      updatedAt: "2026-07-19T10:07:00.000Z",
+    });
+    const resumed = createLoopListEntry({
+      items: [{ id: "ship", text: "Ship", status: "active" }],
+      armed: true,
+      updatedAt: "2026-07-19T10:08:00.000Z",
+    });
+
+    expect(aggregateReservedConversationEntries([pending]).loopListTiming)
+      .toEqual({ listStartedAt: "2026-07-19T10:00:00.000Z" });
+    expect(aggregateReservedConversationEntries([
+      pending,
+      activeImplement,
+      samePlanReordered,
+    ]).loopListTiming).toEqual({
+      listStartedAt: "2026-07-19T10:00:00.000Z",
+      activeStartedAt: "2026-07-19T10:01:00.000Z",
+    });
+    expect(aggregateReservedConversationEntries([
+      pending,
+      activeImplement,
+      samePlanReordered,
+      activeVerify,
+    ]).loopListTiming).toEqual({
+      listStartedAt: "2026-07-19T10:00:00.000Z",
+      activeStartedAt: "2026-07-19T10:05:00.000Z",
+    });
+    expect(aggregateReservedConversationEntries([
+      pending,
+      activeImplement,
+      activeVerify,
+      replacementPlan,
+    ]).loopListTiming).toEqual({
+      listStartedAt: "2026-07-19T10:06:00.000Z",
+      activeStartedAt: "2026-07-19T10:06:00.000Z",
+    });
+    expect(aggregateReservedConversationEntries([
+      replacementPlan,
+      withoutActive,
+    ]).loopListTiming).toEqual({
+      listStartedAt: "2026-07-19T10:06:00.000Z",
+    });
+    expect(aggregateReservedConversationEntries([
+      replacementPlan,
+      withoutActive,
+      resumed,
+    ]).loopListTiming).toEqual({
+      listStartedAt: "2026-07-19T10:06:00.000Z",
+      activeStartedAt: "2026-07-19T10:08:00.000Z",
+    });
+  });
+
   it("applies durable role changes after the base conversation metadata", () => {
     const initial = createConversationMetaEntry(metadata());
     const changed = createConversationRoleChangeEntry({

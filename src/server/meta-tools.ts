@@ -22,6 +22,18 @@ type MetaToolWaitInput =
 
 const MAX_SINGLE_WAIT_COMMITMENT_CHARACTERS = 1_000;
 
+function formatLocalTimestamp(value: Date): string {
+  const offsetMinutes = -value.getTimezoneOffset();
+  const local = new Date(value.getTime() + offsetMinutes * 60_000)
+    .toISOString()
+    .slice(0, -1);
+  const sign = offsetMinutes >= 0 ? "+" : "-";
+  const absoluteOffset = Math.abs(offsetMinutes);
+  const hours = String(Math.floor(absoluteOffset / 60)).padStart(2, "0");
+  const minutes = String(absoluteOffset % 60).padStart(2, "0");
+  return `${local}${sign}${hours}:${minutes}`;
+}
+
 export type MetaToolSessionScope = "all" | "created_by_me";
 
 export interface MetaToolService {
@@ -224,7 +236,22 @@ export function createMetaTools(
   service: MetaToolService,
   canManageSessions: boolean,
 ): ToolDefinition[] {
-  const roleTools = [
+  const alwaysAvailableTools = [
+    defineTool({
+      name: "current_time",
+      label: "Current time",
+      description:
+        "Return the current local machine time as an RFC 3339 timestamp with UTC offset and the local IANA time zone. Use this instead of inferring the current time from model knowledge.",
+      promptSnippet: "Read the current local machine time and time zone.",
+      parameters: Type.Object({}, { additionalProperties: false }),
+      async execute() {
+        const instant = new Date();
+        return result({
+          localTime: formatLocalTimestamp(instant),
+          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        });
+      },
+    }),
     defineTool({
       name: "list_roles",
       label: "List roles",
@@ -270,9 +297,9 @@ export function createMetaTools(
       },
     }),
   ];
-  if (!canManageSessions) return roleTools;
+  if (!canManageSessions) return alwaysAvailableTools;
   return [
-    ...roleTools,
+    ...alwaysAvailableTools,
     defineTool({
       name: "list_sessions",
       label: "List sessions",

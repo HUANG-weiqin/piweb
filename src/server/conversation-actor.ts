@@ -32,6 +32,7 @@ import {
   snapshotConversationItems,
 } from "./conversation-history.js";
 import {
+  advanceLoopListTiming,
   aggregateReservedConversationEntries,
   appendReservedCustomEntry,
   createCompactionThresholdEntry,
@@ -47,6 +48,7 @@ import {
   RUN_SETTLEMENT_CUSTOM_TYPE,
   type ConversationMeta,
   type ConversationMessageEntry,
+  type LoopListTiming,
   type RunSettlement,
   MAX_LOOP_LIST_CONTINUATIONS_PER_RUN,
 } from "./conversation-meta.js";
@@ -577,6 +579,7 @@ export class ConversationActor {
   private compactionThresholdPercent: number;
   private serviceTierSelection: ServiceTier | null;
   private loopListSnapshot: LoopList;
+  private loopListTiming?: LoopListTiming;
   private projectionSeq = 0;
   private liveProjection?: LiveConversationProjection;
 
@@ -626,7 +629,7 @@ export class ConversationActor {
     this.serviceTierSelection = branchReserved.serviceTier !== undefined
       ? branchReserved.serviceTier.tier
       : this.profileSnapshot.role.defaultServiceTier;
-    this.loopListSnapshot = this.restoreLoopListFromActiveBranch();
+    this.loopListSnapshot = this.restoreLoopList(branchReserved);
     for (const settlement of ledger.runSettlements) {
       this.usedRunIds.add(settlement.runId);
     }
@@ -699,16 +702,31 @@ export class ConversationActor {
     return structuredClone(this.loopListSnapshot);
   }
 
-  private restoreLoopListFromActiveBranch(): LoopList {
-    const branchLoopList = aggregateReservedConversationEntries(
-      this.sessionManager.getBranch(),
-    ).loopList;
-    return branchLoopList
+  private restoreLoopList(
+    branch: ReturnType<typeof aggregateReservedConversationEntries>,
+  ): LoopList {
+    this.loopListTiming = structuredClone(branch.loopListTiming);
+    return branch.loopList
       ? structuredClone({
-          items: branchLoopList.items,
-          armed: branchLoopList.armed,
+          items: branch.loopList.items,
+          armed: branch.loopList.armed,
         })
       : { items: [], armed: false };
+  }
+
+  private getLoopListElapsedMinutes(): {
+    activeMin: number;
+    listMin: number;
+  } | undefined {
+    const timing = this.loopListTiming;
+    if (timing?.activeStartedAt === undefined) return;
+    const now = this.now().getTime();
+    const elapsed = (startedAt: string) =>
+      Math.floor(Math.max(0, now - Date.parse(startedAt)) / 60_000);
+    return {
+      activeMin: elapsed(timing.activeStartedAt),
+      listMin: elapsed(timing.listStartedAt),
+    };
   }
 
   private persistLoopList(
@@ -720,11 +738,18 @@ export class ConversationActor {
       armed,
       updatedAt: this.now().toISOString(),
     });
+    const timing = advanceLoopListTiming(
+      this.loopListSnapshot.items,
+      this.loopListTiming,
+      entry.data.items,
+      entry.data.updatedAt,
+    );
     appendReservedCustomEntry(this.sessionManager, entry);
     this.loopListSnapshot = structuredClone({
       items: entry.data.items,
       armed: entry.data.armed,
     });
+    this.loopListTiming = timing;
     this.emitLoopList();
     return this.getLoopList();
   }
@@ -1143,7 +1168,7 @@ export class ConversationActor {
         this.serviceTierSelection = branchReserved.serviceTier !== undefined
           ? branchReserved.serviceTier.tier
           : retainedProfile.role.defaultServiceTier;
-        this.loopListSnapshot = this.restoreLoopListFromActiveBranch();
+        this.loopListSnapshot = this.restoreLoopList(branchReserved);
         this.emitLoopList();
         this.usedRunIds.clear();
         const ledger = aggregateReservedConversationEntries(
@@ -3400,6 +3425,7 @@ export class ConversationActor {
           turnBoundaryCheck: (input) => this.checkTurnBoundary(input),
           getCompactionThresholdPercent: () => this.compactionThresholdPercent,
           getLoopList: () => this.getLoopList(),
+          getLoopListElapsedMinutes: () => this.getLoopListElapsedMinutes(),
           getEditBudgetRemainingFiles: () => {
             const ticket = this.activeRun;
             return ticket?.toolMode === "full_access"

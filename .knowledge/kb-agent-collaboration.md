@@ -1,6 +1,6 @@
 # Agent 协作
 
-`updated: 2026-08-31`
+`updated: 2026-09-02`
 
 ## 这个模块是干什么的
 
@@ -30,7 +30,7 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
 `ProjectSessionCoordinator` 由 socket server 共享，并按 canonical cwd 维护项目上下文。每个 `canonical cwd + conversationId` 最多一个 `ConversationActor`：
 
 - actor opening singleflight，浏览器和 Agent 打开同一会话会复用 actor 与 writer lease；
-- actor 同时持有 conversation-scoped LoopList：每项只有 `pending | active | completed` 一个持久状态，允许多个 active，数组顺序仅用于展示；active 表示当前关注而非运行证明，和 `armed`、`activeRun` 分开。新写入使用严格 `piweb.loop_list.v2` / `piweb.loop_list_continue.v2`；读取 v1 时只把 `checked=true/false` 映射为 completed/pending，绝不从 armed 推导 active，也不重写旧 JSONL。`todo_write` 只做有界整表替换并为任一非 completed 项 armed，`todo_pause` 原样暂停；full-access 的 `request_edit_budget` 仅在授予时要求至少一个 active，拒绝不能改变额度；成功申请覆盖本 run 的 distinct-file 总额度而非累加，已修改路径仍计入新总数，授予后列表变化不追溯撤销额度。run 自然结束时若仍 armed 且有非 completed 项，就写入隐藏的上下文快照并在同一 RunTicket/runId 内续跑，最多 8 次。完成/清空停止，异常、abort 或上限暂停；进程打开与 rewind 后只从 Pi active branch 恢复状态且不自动运行，不能让较晚写入的 inactive branch 覆盖当前列表，后续普通浏览器 prompt 才重新 armed。严格 JSONL 扫描仍校验物理全集，并要求 v1/v2 continuation 的规范化快照精确匹配最近祖先列表、该列表 armed 且有未完成项、同一 run 在各自 branch 上从 1 连续递增到最多 8。
+- actor 同时持有 conversation-scoped LoopList：每项只有 `pending | active | completed` 一个持久状态，允许多个 active，数组顺序仅用于展示；active 表示当前关注而非运行证明，和 `armed`、`activeRun` 分开。新写入使用严格 `piweb.loop_list.v2` / `piweb.loop_list_continue.v2`；读取 v1 时只把 `checked=true/false` 映射为 completed/pending，绝不从 armed 推导 active，也不重写旧 JSONL。`todo_write` 只做有界整表替换并为任一非 completed 项 armed，`todo_pause` 原样暂停；actor 不新增持久字段，而是从 active branch 的全量快照重放两个 wall-clock 锚点：稳定 item ID 的无序集合变化视为整份计划变化并重置 list/active，两次快照的 active ID 无序集合变化只重置 active；整表锚点从当前 plan snapshot 建立时开始，active 锚点只在存在 active 时保留；重排、改文案、纯 pending/completed 进度和 pause 不改变对应 identity，多个 active 共用一个 active-context 计时；full-access 的 `request_edit_budget` 仅在授予时要求至少一个 active，拒绝不能改变额度；成功申请覆盖本 run 的 distinct-file 总额度而非累加，已修改路径仍计入新总数，授予后列表变化不追溯撤销额度。run 自然结束时若仍 armed 且有非 completed 项，就写入隐藏的上下文快照并在同一 RunTicket/runId 内续跑，最多 8 次。完成/清空停止，异常、abort 或上限暂停；进程打开与 rewind 后只从 Pi active branch 恢复状态且不自动运行，不能让较晚写入的 inactive branch 覆盖当前列表，后续普通浏览器 prompt 才重新 armed。严格 JSONL 扫描仍校验物理全集，并要求 v1/v2 continuation 的规范化快照精确匹配最近祖先列表、该列表 armed 且有未完成项、同一 run 在各自 branch 上从 1 连续递增到最多 8。
 - 每个项目还 singleflight 建立一个无 AgentSession 的 project model catalog；空项目可据此显示项目扩展模型、管理角色和创建第一条会话，最后一个项目 handle 释放后统一 dispose；
 - actor 原子拥有角色快照、`SessionManager`、writer lease、隔离的 settings/model registry、`AgentSession`、唯一 `activeRun`、串行队列和观察者；
 - `activeRun` 的 `queued / running / waiting / cancelling` 是侧栏 activity 与 busy 的唯一来源；

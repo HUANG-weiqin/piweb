@@ -11,6 +11,11 @@ export interface AgentContextBudgetController {
   dispose(): void;
 }
 
+export interface LoopListElapsedMinutes {
+  activeMin: number;
+  listMin: number;
+}
+
 function formatTokens(tokens: number): string {
   const absoluteTokens = Math.abs(tokens);
   let divisor = 1;
@@ -61,6 +66,7 @@ function createTelemetry(
 
 function createWorkHint(
   active: Array<{ id: string; text: string }>,
+  elapsed?: LoopListElapsedMinutes,
   editLeft?: number,
 ): string {
   for (let included = active.length; included > 0; included -= 1) {
@@ -69,6 +75,7 @@ function createWorkHint(
       active: active.slice(0, included),
       omitted,
       ...(omitted > 0 ? { moreVia: "todo_read" } : {}),
+      ...(elapsed ?? {}),
       ...(editLeft === undefined ? {} : { editLeft }),
       onStatusChange: "todo_write",
     })}`;
@@ -81,6 +88,7 @@ function createWorkHint(
     active: [],
     omitted: active.length,
     moreVia: "todo_read",
+    ...(elapsed ?? {}),
     ...(editLeft === undefined ? {} : { editLeft }),
     onStatusChange: "todo_write",
   })}`;
@@ -113,6 +121,7 @@ export function installAgentContextBudget(
   getLoopList: () => LoopList,
   getCompactionThresholdPercent?: () => number,
   getEditBudgetRemainingFiles?: () => number | undefined,
+  getLoopListElapsedMinutes?: () => LoopListElapsedMinutes | undefined,
 ): AgentContextBudgetController {
   const agent = session.agent;
   const original = agent.convertToLlm;
@@ -137,6 +146,14 @@ export function installAgentContextBudget(
       return converted;
     }
 
+    let elapsedMinutes: LoopListElapsedMinutes | undefined;
+    if (getLoopListElapsedMinutes) {
+      try {
+        elapsedMinutes = getLoopListElapsedMinutes();
+      } catch {
+        // The active-work reminder remains useful without this optional fact.
+      }
+    }
     let editBudgetRemainingFiles: number | undefined;
     if (getEditBudgetRemainingFiles) {
       try {
@@ -145,7 +162,11 @@ export function installAgentContextBudget(
         // The active-work reminder remains useful without this optional fact.
       }
     }
-    const workHint = createWorkHint(active, editBudgetRemainingFiles);
+    const workHint = createWorkHint(
+      active,
+      elapsedMinutes,
+      editBudgetRemainingFiles,
+    );
 
     let telemetry: string | undefined;
     if (getCompactionThresholdPercent) {

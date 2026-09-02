@@ -42,6 +42,7 @@ describe("createMetaTools", () => {
     const tools = createMetaTools(sourceConversationId, service(), true);
 
     expect(tools.map(({ name }) => name)).toEqual([
+      "current_time",
       "list_roles",
       "read_role",
       "propose_role_revision",
@@ -114,6 +115,7 @@ describe("createMetaTools", () => {
 
     expect(createMetaTools(sourceConversationId, fake, false)
       .map(({ name }) => name)).toEqual([
+        "current_time",
         "list_roles",
         "read_role",
         "propose_role_revision",
@@ -121,6 +123,37 @@ describe("createMetaTools", () => {
     expect(Object.values(fake).every((method) => (
       vi.mocked(method).mock.calls.length === 0
     ))).toBe(true);
+  });
+
+  it("returns the current local machine time with its time zone", async () => {
+    const instant = new Date("2026-09-02T12:34:56.789Z");
+    vi.useFakeTimers();
+    vi.setSystemTime(instant);
+    try {
+      const currentTime = tool(
+        createMetaTools(sourceConversationId, service(), false),
+        "current_time",
+      );
+      const output = await currentTime.execute(
+        "current-time",
+        {},
+        undefined,
+        undefined,
+        {} as never,
+      );
+      const value = JSON.parse(output.content[0]!.text) as {
+        localTime: string;
+        timeZone: string;
+      };
+
+      expect(Date.parse(value.localTime)).toBe(instant.getTime());
+      expect(value.localTime).toMatch(/T\d{2}:\d{2}:\d{2}\.789(?:Z|[+-]\d{2}:\d{2})$/);
+      expect(value.timeZone).toBe(
+        Intl.DateTimeFormat().resolvedOptions().timeZone,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("binds role reads and proposals to the source conversation", async () => {

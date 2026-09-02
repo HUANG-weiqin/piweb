@@ -420,6 +420,50 @@ function normalizeLegacyLoopListItems(
   }));
 }
 
+export interface LoopListTiming {
+  listStartedAt: string;
+  activeStartedAt?: string;
+}
+
+function sameItemIds(
+  left: LoopList["items"] | undefined,
+  right: LoopList["items"],
+  activeOnly: boolean,
+): boolean {
+  if (left === undefined) return false;
+  const leftIds = new Set(
+    left.filter((item) => !activeOnly || item.status === "active")
+      .map((item) => item.id),
+  );
+  const rightIds = right.filter(
+    (item) => !activeOnly || item.status === "active",
+  );
+  return leftIds.size === rightIds.length
+    && rightIds.every((item) => leftIds.has(item.id));
+}
+
+export function advanceLoopListTiming(
+  previousItems: LoopList["items"] | undefined,
+  previous: LoopListTiming | undefined,
+  nextItems: LoopList["items"],
+  updatedAt: string,
+): LoopListTiming {
+  const hasActive = nextItems.some((item) => item.status === "active");
+  const planChanged = !sameItemIds(previousItems, nextItems, false);
+  const activeChanged = planChanged
+    || !sameItemIds(previousItems, nextItems, true);
+  const listStartedAt = planChanged
+    ? updatedAt
+    : previous?.listStartedAt ?? updatedAt;
+  const activeStartedAt = hasActive
+    ? (activeChanged ? updatedAt : previous?.activeStartedAt ?? updatedAt)
+    : undefined;
+  return {
+    listStartedAt,
+    ...(activeStartedAt === undefined ? {} : { activeStartedAt }),
+  };
+}
+
 const legacyLoopListEntrySchema = z.object({
   customType: z.literal(LEGACY_LOOP_LIST_CUSTOM_TYPE),
   data: legacyLoopListSchema.extend({
@@ -911,6 +955,7 @@ export interface ReservedConversationAggregate {
   compactionThreshold?: CompactionThreshold;
   serviceTier?: ServiceTierSelection;
   loopList?: LoopListEntry["data"];
+  loopListTiming?: LoopListTiming;
 }
 
 export function parseConversationReferenceSnapshot(
@@ -1472,6 +1517,7 @@ export function aggregateReservedConversationEntries(
   let compactionThreshold: CompactionThreshold | undefined;
   let serviceTier: ServiceTierSelection | undefined;
   let loopList: LoopListEntry["data"] | undefined;
+  let loopListTiming: LoopListTiming | undefined;
   let roleChangedAt: string | undefined;
 
   for (const value of values) {
@@ -1549,6 +1595,12 @@ export function aggregateReservedConversationEntries(
       ) {
         throw new Error("Piweb LoopList updatedAt cannot regress");
       }
+      loopListTiming = advanceLoopListTiming(
+        loopList?.items,
+        loopListTiming,
+        reserved.entry.data.items,
+        reserved.entry.data.updatedAt,
+      );
       loopList = reserved.entry.data;
       continue;
     }
@@ -1782,5 +1834,6 @@ export function aggregateReservedConversationEntries(
       : { compactionThreshold }),
     ...(serviceTier === undefined ? {} : { serviceTier }),
     ...(loopList === undefined ? {} : { loopList }),
+    ...(loopListTiming === undefined ? {} : { loopListTiming }),
   };
 }

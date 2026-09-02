@@ -2,6 +2,8 @@
 
 日期：2026-08-31
 
+更新：2026-09-02（增补 active / 整表双计时）
+
 状态：已实现（线协议 v39，持久格式 v2）
 
 ## 1. 问题
@@ -19,7 +21,7 @@
 
 - full-access Agent 在取得 builtin `edit` / `write` 额度前，conversation 必须已有至少一个 `active` 项；
 - LoopList 能区分待处理、当前活跃和已完成，并允许多个任务同时活跃；
-- 每次普通 Agent turn 的模型请求能看到当前活跃任务的极简提醒；
+- 每次普通 Agent turn 的模型请求能看到当前活跃任务的极简提醒，以及当前 active context 和整份当前计划已经历的分钟数；
 - 提醒不进入 AgentSession messages、SessionManager、Pi JSONL 或浏览器 transcript；
 - 动态提醒位于既有最后输入消息的末尾，尽量保留稳定上下文的 provider 前缀缓存。
 
@@ -30,7 +32,8 @@
 - 不把 LoopList 变成用户审批、安全凭证或通用工作流引擎；
 - 不扩大 edit budget 对 `bash`、脚本或扩展工具的保护范围；
 - 不强制纯分析、read-only 或完全不申请编辑额度的 run 建立列表；
-- 不把工作提醒注入 compaction / branch-summary 等独立 summarizer；它们只整理上下文而不决定下一步动作，下一次 Agent turn 会重新读取权威列表。
+- 不把工作提醒注入 compaction / branch-summary 等独立 summarizer；它们只整理上下文而不决定下一步动作，下一次 Agent turn 会重新读取权威列表；
+- 双计时是可跨重启重放的 civil wall-clock elapsed 估计；`listMin` 实际是当前稳定 ID 计划自建立以来的 age，二者都不等于 `activeRun` 实际运行时间，也不承诺抵抗系统校时、休眠或暂停。
 
 ## 3. 状态模型
 
@@ -65,6 +68,24 @@ interface LoopListItem {
 - `todo_pause` 只改变 armed，不改任务状态；
 - 自动续跑仍以 `armed && any(status !== "completed")` 为条件。
 
+### 3.1 双计时派生模型
+
+计时不增加第三份持久状态。Actor 按 active branch 顺序重放既有全量 LoopList snapshot 的 canonical `updatedAt`，只在内存中维护两个锚点：
+
+```text
+plan identity   = unordered Set<stable item id>  // 忽略顺序、文案和 status
+active identity = unordered Set<active item id>
+
+plan identity 变化   → listSince 重置；有 active 时 activeSince 同时重置
+active identity 变化 → 只重置 activeSince
+首个 plan snapshot   → 启动 listSince
+active identity 为空 → activeSince 清除，listSince 在计划未变化时保留
+```
+
+多个 active 项共同构成一个 active context，因此只有一个 `activeMin`，而不是每项各有计时。`todo_pause` 只改 armed；重排、改文案，以及不改变 active ID 集合的 pending/completed 更新都不重置相应锚点。整份计划的稳定 ID 集合变化时，即使只新增或删除一个 pending 项，也按用户所说的“整个 LoopList 变了”重置两者；新计划没有 active 时仍从 plan snapshot 启动 list 锚点，但 active 锚点要等到首次 active snapshot。
+
+Provider 投影按 `floor(max(0, now - since) / 60000)` 生成 `activeMin/listMin`。这允许系统时钟回拨后暂时归零或数值下降；若未来需要严格单调的实际工时，必须另建持久累计模型，不能给当前墙钟估计改名。Rewind 删除 suffix 后按保留分支重放，所以恢复原历史锚点，而不是把 rewind 时刻伪装成重新开始。
+
 ## 4. 编辑承诺边界
 
 `request_edit_budget` 在授予额度前读取 ConversationActor 的权威 LoopList：
@@ -86,7 +107,7 @@ interface LoopListItem {
 
 ```text
 <piweb_ctx ... />
-piweb_work={"active":[{"id":"protocol","text":"更新协议"},{"id":"tests","text":"补充反例"}],"omitted":0,"editLeft":2,"onStatusChange":"todo_write"}
+piweb_work={"active":[{"id":"protocol","text":"更新协议"},{"id":"tests","text":"补充反例"}],"omitted":0,"activeMin":3,"listMin":17,"editLeft":2,"onStatusChange":"todo_write"}
 ```
 
 约束：
@@ -96,7 +117,7 @@ piweb_work={"active":[{"id":"protocol","text":"更新协议"},{"id":"tests","tex
 - 绝不新增独立 user/custom turn；
 - 不修改 converter 输入、原始转换结果或 session-owned messages；
 - 上下文 telemetry 与 active 提醒合并在同一个动态尾部，避免多个动态边界；
-- `piweb_work=` 后使用固定字段顺序的 `JSON.stringify` 结果，不使用可被任务文本伪造的 XML closing tag 或自定义分隔符；换行、引号和控制字符均由 JSON 编码；full-access active run 可用时只增加一个极简 `editLeft` 数值，不另起一行；
+- `piweb_work=` 后使用固定字段顺序的 `JSON.stringify` 结果，不使用可被任务文本伪造的 XML closing tag 或自定义分隔符；换行、引号和控制字符均由 JSON 编码；active 存在时增加两个极简整数 `activeMin/listMin`，full-access active run 可用时再增加 `editLeft` 数值，都不另起一行；
 - `piweb_work=` 前缀与完整 JSON 合计最多 4096 UTF-8 bytes，只追加能完整放入的 item，不能在字符串或多字节字符中间截断；`omitted` 是未输出 active 项的精确数量，非零时再包含固定字段 `"moreVia":"todo_read"`；
 - 每个已输出 item 都包含稳定 ID；没有 active 项时整个瞬时尾部都不输出，包括 `<piweb_ctx>`；
 - provider 会看到该提醒；“不留历史”仅指不进入 Pi Web 的 durable transcript。
@@ -121,7 +142,7 @@ checked=true  → completed
 checked=false → pending
 ```
 
-`armed` 不能推导 `active`。旧会话第一次写入新格式后再持久化 v2；严格 session scan 仍需验证 active branch 的列表快照、continuation 编号和最近祖先一致性。
+`armed` 不能推导 `active`。旧会话第一次写入新格式后再持久化 v2；严格 session scan 仍需验证 active branch 的列表快照、continuation 编号和最近祖先一致性。两个计时锚点完全由这些已有 snapshot 的 `updatedAt` 重放，不写入 v2，也不要求 v3 或新的线协议字段；v1 没有 active，因此只能启动当前计划的 list age，不能推导或启动 active 计时。
 
 浏览器线协议已升级到 v39 的三态 item。UI 把 `active` 显示为“进行中”，但继续从 `activeRun` 单独显示 Agent 是否真的运行，不能把 task status 与 runtime activity 合并。
 
@@ -151,7 +172,8 @@ checked=false → pending
 1. 无 active 项时 edit budget 不授予；一个或多个 active 时授予；
 2. pending / active / completed 的 armed、pause、续跑与完成判定；
 3. v1 严格读取与无损映射，v2 严格写入和 active-branch 恢复；
-4. active 摘要使用规范 JSON、有界且带稳定 ID；包含换行、引号、伪分隔符的文本不能破坏结构，截断后 `omitted` 必须精确；
+4. active 摘要使用规范 JSON、有界且带稳定 ID；包含换行、引号、伪分隔符的文本不能破坏结构，截断后 `omitted` 必须精确；两个分钟字段也必须计入同一 4096-byte 上限；
 5. 瞬时提示位于最后输入消息末尾，不新增消息且不修改 SessionManager/JSONL；
-6. focused snapshot 与 live update 正确投影三态，UI 不把 active task 冒充 active run；
-7. `npm test`、`npm run typecheck`、`npm run build`、`git diff --check`。
+6. stable ID 集合变化重置双计时、active ID 集合变化只重置 active，重排/文案/单纯进度不误重置；restart/rewind 可从 active branch 重放，时钟负差钳零；
+7. focused snapshot 与 live update 正确投影三态，UI 不把 active task 冒充 active run；
+8. `npm test`、`npm run typecheck`、`npm run build`、`git diff --check`。

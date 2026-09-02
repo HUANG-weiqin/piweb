@@ -1888,6 +1888,65 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
+  it("restores and updates the two LoopList wall-clock timers", async () => {
+    const manager = SessionManager.inMemory(process.cwd(), { id: CONVERSATION_ID });
+    appendReservedCustomEntry(manager, createLoopListEntry({
+      items: [
+        { id: "implement", text: "Implement", status: "pending" },
+        { id: "verify", text: "Verify", status: "pending" },
+      ],
+      armed: true,
+      updatedAt: "2026-07-19T10:00:00.000Z",
+    }));
+    appendReservedCustomEntry(manager, createLoopListEntry({
+      items: [
+        { id: "implement", text: "Implement", status: "active" },
+        { id: "verify", text: "Verify", status: "pending" },
+      ],
+      armed: true,
+      updatedAt: "2026-07-19T10:01:00.000Z",
+    }));
+    appendReservedCustomEntry(manager, createLoopListEntry({
+      items: [
+        { id: "verify", text: "Verify thoroughly", status: "active" },
+        { id: "implement", text: "Implement carefully", status: "completed" },
+      ],
+      armed: true,
+      updatedAt: "2026-07-19T10:05:00.000Z",
+    }));
+    let now = new Date("2026-07-19T10:12:59.999Z");
+    const fixture = await openActor({
+      sessionManager: manager,
+      now: () => now,
+    });
+    const elapsed = () =>
+      fixture.runtime.createOptions?.getLoopListElapsedMinutes?.();
+    const todoWrite = fixture.runtime.createOptions?.workbenchCustomTools?.find(
+      ({ name }) => name === "todo_write",
+    );
+
+    expect(elapsed()).toEqual({ activeMin: 7, listMin: 12 });
+
+    now = new Date("2026-07-19T10:14:00.000Z");
+    await todoWrite?.execute("switch-active", {
+      items: [
+        { id: "implement", text: "Implementation done", status: "active" },
+        { id: "verify", text: "Verification done", status: "completed" },
+      ],
+    });
+    expect(elapsed()).toEqual({ activeMin: 0, listMin: 14 });
+
+    now = new Date("2026-07-19T10:15:00.000Z");
+    await todoWrite?.execute("replace-plan", {
+      items: [{ id: "ship", text: "Ship", status: "active" }],
+    });
+    expect(elapsed()).toEqual({ activeMin: 0, listMin: 0 });
+
+    now = new Date("2026-07-19T09:00:00.000Z");
+    expect(elapsed()).toEqual({ activeMin: 0, listMin: 0 });
+    await fixture.actor.dispose();
+  });
+
   it("restores legacy LoopList items as pending or completed without inventing active work", async () => {
     const manager = SessionManager.inMemory(process.cwd(), { id: CONVERSATION_ID });
     manager.appendCustomEntry(LEGACY_LOOP_LIST_CUSTOM_TYPE, {
@@ -1946,12 +2005,17 @@ describe("ConversationActor", () => {
 
     expect(aggregateReservedConversationEntries(manager.getEntries()).loopList)
       .toMatchObject({ items: [{ id: "inactive" }] });
-    const fixture = await openActor({ sessionManager: manager });
+    const fixture = await openActor({
+      sessionManager: manager,
+      now: () => new Date("2026-07-19T10:07:00.000Z"),
+    });
 
     expect(fixture.actor.getLoopList()).toEqual({
       items: [{ id: "active", text: "Active branch work", status: "active" }],
       armed: true,
     });
+    expect(fixture.runtime.createOptions?.getLoopListElapsedMinutes?.())
+      .toEqual({ activeMin: 7, listMin: 7 });
     await fixture.actor.dispose();
   });
 

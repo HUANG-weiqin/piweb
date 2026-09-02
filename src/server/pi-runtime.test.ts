@@ -434,9 +434,12 @@ describe("PiRuntime session ownership", () => {
     const getLoopList = vi.fn(() => loopList);
     let editBudgetRemainingFiles = 2;
     const getEditBudgetRemainingFiles = vi.fn(() => editBudgetRemainingFiles);
+    let elapsedMinutes = { activeMin: 4, listMin: 12 };
+    const getLoopListElapsedMinutes = vi.fn(() => elapsedMinutes);
     const created = await runtime.createSession(cwd, {
       getLoopList,
       getEditBudgetRemainingFiles,
+      getLoopListElapsedMinutes,
     });
     const getContextUsage = vi.spyOn(created.session, "getContextUsage");
     const input = [{
@@ -448,6 +451,7 @@ describe("PiRuntime session ownership", () => {
 
     const first = await created.session.agent.convertToLlm(input);
     editBudgetRemainingFiles = 1;
+    elapsedMinutes = { activeMin: 0, listMin: 13 };
     loopList = {
       items: [{ id: "second", text: "Latest active item", status: "active" }],
       armed: true,
@@ -465,7 +469,7 @@ describe("PiRuntime session ownership", () => {
         { type: "text", text: "input" },
         {
           type: "text",
-          text: "piweb_work={\"active\":[{\"id\":\"first\",\"text\":\"First active item\"}],\"omitted\":0,\"editLeft\":2,\"onStatusChange\":\"todo_write\"}",
+          text: "piweb_work={\"active\":[{\"id\":\"first\",\"text\":\"First active item\"}],\"omitted\":0,\"activeMin\":4,\"listMin\":12,\"editLeft\":2,\"onStatusChange\":\"todo_write\"}",
         },
       ],
     });
@@ -475,7 +479,7 @@ describe("PiRuntime session ownership", () => {
         { type: "text", text: "input" },
         {
           type: "text",
-          text: "piweb_work={\"active\":[{\"id\":\"second\",\"text\":\"Latest active item\"}],\"omitted\":0,\"editLeft\":1,\"onStatusChange\":\"todo_write\"}",
+          text: "piweb_work={\"active\":[{\"id\":\"second\",\"text\":\"Latest active item\"}],\"omitted\":0,\"activeMin\":0,\"listMin\":13,\"editLeft\":1,\"onStatusChange\":\"todo_write\"}",
         },
       ],
     });
@@ -485,6 +489,7 @@ describe("PiRuntime session ownership", () => {
     });
     expect(getLoopList).toHaveBeenCalledTimes(3);
     expect(getEditBudgetRemainingFiles).toHaveBeenCalledTimes(2);
+    expect(getLoopListElapsedMinutes).toHaveBeenCalledTimes(2);
     expect(getContextUsage).not.toHaveBeenCalled();
     expect(created.session.messages).toEqual(sessionMessagesBefore);
     expect(created.session.agent.convertToLlm).not.toBe(originalConverter);

@@ -32,6 +32,7 @@ import { applyCodexAutoTransportPolicy } from "./codex-transport-policy.js";
 import {
   type AgentContextBudgetController,
   installAgentContextBudget,
+  type LoopListElapsedMinutes,
 } from "./agent-context-budget.js";
 import { installToolResultCompression } from "./tool-result-compression.js";
 import {
@@ -289,6 +290,7 @@ export interface CreatePiSessionOptions {
   getCompactionThresholdPercent?: () => number;
   getLoopList?: () => LoopList;
   getEditBudgetRemainingFiles?: () => number | undefined;
+  getLoopListElapsedMinutes?: () => LoopListElapsedMinutes | undefined;
   getServiceTier?: () => ServiceTier | null;
 }
 
@@ -843,6 +845,7 @@ export class PiRuntime implements PiRuntimeLike {
           options.getLoopList,
           options.getCompactionThresholdPercent,
           options.getEditBudgetRemainingFiles,
+          options.getLoopListElapsedMinutes,
         );
       }
       if (readOnlyToolProjection) {

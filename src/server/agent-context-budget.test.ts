@@ -213,6 +213,7 @@ describe("installAgentContextBudget", () => {
       }),
       () => 70,
       () => 0,
+      () => ({ activeMin: 3, listMin: 11 }),
     );
 
     const result = await session.agent.convertToLlm([]);
@@ -226,7 +227,7 @@ describe("installAgentContextBudget", () => {
           type: "text",
           text: [
             "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
-            "piweb_work={\"active\":[{\"id\":\"inspect\",\"text\":\"Inspect image\"}],\"omitted\":0,\"editLeft\":0,\"onStatusChange\":\"todo_write\"}",
+            "piweb_work={\"active\":[{\"id\":\"inspect\",\"text\":\"Inspect image\"}],\"omitted\":0,\"activeMin\":3,\"listMin\":11,\"editLeft\":0,\"onStatusChange\":\"todo_write\"}",
           ].join("\n"),
         },
       ],
@@ -302,25 +303,35 @@ describe("installAgentContextBudget", () => {
         items: [{ id: "waiting", text: "No active work", status: "pending" }],
         armed: true,
       });
+    const getElapsedMinutes = vi.fn()
+      .mockReturnValueOnce({ activeMin: 2, listMin: 10 })
+      .mockReturnValueOnce({ activeMin: 3, listMin: 11 });
     const { session } = fakeSession({
       original: async () => originalResult,
       getContextUsage,
     });
-    installAgentContextBudget(session, getLoopList, () => 70);
+    installAgentContextBudget(
+      session,
+      getLoopList,
+      () => 70,
+      undefined,
+      getElapsedMinutes,
+    );
 
     const first = await session.agent.convertToLlm([]);
     const second = await session.agent.convertToLlm([]);
     const neither = await session.agent.convertToLlm([]);
 
     expect(telemetryText(first)).toBe(
-      "piweb_work={\"active\":[{\"id\":\"first\",\"text\":\"First snapshot\"}],\"omitted\":0,\"onStatusChange\":\"todo_write\"}",
+      "piweb_work={\"active\":[{\"id\":\"first\",\"text\":\"First snapshot\"}],\"omitted\":0,\"activeMin\":2,\"listMin\":10,\"onStatusChange\":\"todo_write\"}",
     );
     expect(telemetryText(second)).toBe(
-      "piweb_work={\"active\":[{\"id\":\"second\",\"text\":\"Latest snapshot\"}],\"omitted\":0,\"onStatusChange\":\"todo_write\"}",
+      "piweb_work={\"active\":[{\"id\":\"second\",\"text\":\"Latest snapshot\"}],\"omitted\":0,\"activeMin\":3,\"listMin\":11,\"onStatusChange\":\"todo_write\"}",
     );
     expect(neither).toBe(originalResult);
     expect(getContextUsage).toHaveBeenCalledTimes(2);
     expect(getLoopList).toHaveBeenCalledTimes(3);
+    expect(getElapsedMinutes).toHaveBeenCalledTimes(2);
   });
 
   it("omits the whole transient tail when no work is active", async () => {
@@ -331,6 +342,7 @@ describe("installAgentContextBudget", () => {
       percent: 10,
     }));
     const getEditBudgetRemainingFiles = vi.fn(() => 3);
+    const getElapsedMinutes = vi.fn(() => ({ activeMin: 2, listMin: 10 }));
     const { session } = fakeSession({
       original: async () => originalResult,
       getContextUsage,
@@ -343,11 +355,13 @@ describe("installAgentContextBudget", () => {
       }),
       () => 70,
       getEditBudgetRemainingFiles,
+      getElapsedMinutes,
     );
 
     await expect(session.agent.convertToLlm([])).resolves.toBe(originalResult);
     expect(getContextUsage).not.toHaveBeenCalled();
     expect(getEditBudgetRemainingFiles).not.toHaveBeenCalled();
+    expect(getElapsedMinutes).not.toHaveBeenCalled();
   });
 
   it("keeps the complete work record within its UTF-8 budget", async () => {
@@ -362,6 +376,7 @@ describe("installAgentContextBudget", () => {
       () => ({ items, armed: true }),
       undefined,
       () => 7,
+      () => ({ activeMin: 9, listMin: 42 }),
     );
 
     const result = await session.agent.convertToLlm([]);
@@ -370,6 +385,8 @@ describe("installAgentContextBudget", () => {
       active: Array<{ id: string; text: string }>;
       omitted: number;
       moreVia?: string;
+      activeMin: number;
+      listMin: number;
       editLeft: number;
       onStatusChange: string;
     };
@@ -379,6 +396,8 @@ describe("installAgentContextBudget", () => {
       "active",
       "omitted",
       "moreVia",
+      "activeMin",
+      "listMin",
       "editLeft",
       "onStatusChange",
     ]);
@@ -388,6 +407,8 @@ describe("installAgentContextBudget", () => {
     expect(payload.omitted).toBe(items.length - payload.active.length);
     expect(payload.omitted).toBeGreaterThan(0);
     expect(payload.moreVia).toBe("todo_read");
+    expect(payload.activeMin).toBe(9);
+    expect(payload.listMin).toBe(42);
     expect(payload.editLeft).toBe(7);
     expect(payload.onStatusChange).toBe("todo_write");
 
@@ -396,6 +417,8 @@ describe("installAgentContextBudget", () => {
       active: [...payload.active, { id: next.id, text: next.text }],
       omitted: payload.omitted - 1,
       ...(payload.omitted > 1 ? { moreVia: "todo_read" } : {}),
+      activeMin: payload.activeMin,
+      listMin: payload.listMin,
       editLeft: payload.editLeft,
       onStatusChange: "todo_write",
     })}`;
