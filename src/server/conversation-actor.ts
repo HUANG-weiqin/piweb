@@ -299,6 +299,11 @@ interface PendingGuidanceObservation {
   waited: boolean;
 }
 
+interface ReloadStopRequest {
+  readonly preserveSettlement: boolean;
+  readonly ready: Deferred<void>;
+}
+
 interface RunTicket {
   readonly id: string;
   readonly origin: ConversationRunOrigin;
@@ -349,6 +354,7 @@ interface RunTicket {
   waitCacheCheckpointCount: number;
   waitCacheCheckpointDisabled: boolean;
   awaitingWaitCacheCheckpointUsage: boolean;
+  reloadStop?: ReloadStopRequest;
   abortPromise?: Promise<void>;
   finishPromise?: Promise<RunSettlement>;
 }
@@ -1739,6 +1745,23 @@ export class ConversationActor {
     return delivery.promise;
   }
 
+  startReloadContinuation(runId: string): Promise<RunSettlement> {
+    return this.startRun(
+      {
+        runId,
+        origin: "browser",
+        recovered: true,
+        expectsInitialPromptRawUserMessage: false,
+      },
+      () => this.session.sendCustomMessage({
+        customType: "workbench.reload_resume.v1",
+        content:
+          "Continue the unfinished task from the retained conversation context and current workspace state without waiting for another user message. Before repeating any operation, verify the current workspace and any external side effects because the previous process may have stopped after an operation took effect.",
+        display: false,
+      }, { triggerTurn: true }),
+    );
+  }
+
   /**
    * Restarts the exact inbox run after its durable custom messages were
    * appended but the process stopped before a settlement was recorded.
@@ -1756,7 +1779,7 @@ export class ConversationActor {
       () => this.session.sendCustomMessage({
         customType: "workbench.inbox_resume.v1",
         content:
-          "恢复此前未结算的跨会话任务。请处理上下文中最后一批来自其他会话的消息。",
+          "恢复此前未结算的跨会话任务。请处理上下文中最后一批来自其他会话的消息；继续前先核对工作区与任何外部副作用的实际状态，不要盲目重复可能已经生效的操作。",
         display: false,
         details: { runId: input.runId },
       }, {
@@ -1861,7 +1884,7 @@ export class ConversationActor {
       origin: input.origin,
       ownership,
       projector: new SessionEventProjector({
-        suppressNextUserMessage: input.origin === "browser",
+        suppressNextUserMessage: input.expectsInitialPromptRawUserMessage,
       }),
       completion: deferred<RunSettlement>(),
       guidanceDeliveries: [],
@@ -2208,6 +2231,45 @@ export class ConversationActor {
     return this.cancelRun(ticket);
   }
 
+  activeRunForReload(): {
+    runId: string;
+    origin: ConversationRunOrigin;
+  } | undefined {
+    const ticket = this.activeRun;
+    if (!ticket || ticket.phase === "cancelling" || ticket.finishPromise) {
+      return undefined;
+    }
+    return { runId: ticket.id, origin: ticket.origin };
+  }
+
+  /**
+   * Stops the current Pi loop at its next completed assistant-turn boundary.
+   * Browser work settles normally so exact run waiters observe its end; a
+   * durably claimed inbox run can instead remain unsettled for the existing
+   * inbox recovery path after the process replacement.
+   */
+  stopForReload(preserveSettlement: boolean): Promise<void> {
+    const ticket = this.activeRun;
+    if (!ticket) {
+      return this.manualCompaction ?? Promise.resolve();
+    }
+    if (ticket.phase === "cancelling" || ticket.finishPromise) {
+      return ticket.completion.promise.then(() => undefined);
+    }
+    const existing = ticket.reloadStop;
+    if (existing) {
+      if (existing.preserveSettlement !== preserveSettlement) {
+        return Promise.reject(
+          new Error("Reload settlement policy changed while stopping a run"),
+        );
+      }
+      return existing.ready.promise;
+    }
+    const ready = deferred<void>();
+    ticket.reloadStop = { preserveSettlement, ready };
+    return ready.promise;
+  }
+
   /**
    * Disposes the AgentSession and either releases the writer lease or upgrades
    * it in place for exact deletion. The first dispose call owns the choice.
@@ -2324,6 +2386,7 @@ export class ConversationActor {
     let failure: unknown;
     try {
       await execute(ticket);
+      if (await this.finishReloadStop(ticket)) return;
       while (this.activeRun === ticket && !isCancelling(ticket)) {
         this.releaseTurnBoundaryPause();
         while (
@@ -2351,7 +2414,9 @@ export class ConversationActor {
             display: resume.display,
             details: resume.details,
           }, { triggerTurn: true });
+          if (await this.finishReloadStop(ticket)) return;
         }
+        if (await this.finishReloadStop(ticket)) return;
         const projectedFailure =
           ticket.extensionErrorMessage ?? ticket.projector.errorMessage;
         if (projectedFailure) throw new Error(projectedFailure);
@@ -2388,6 +2453,9 @@ export class ConversationActor {
         if (isCancelling(ticket)) outcome = "aborted";
       }
     } catch (error) {
+      if (ticket.reloadStop && this.activeRun === ticket) {
+        if (await this.finishReloadStop(ticket)) return;
+      }
       if (isCancelling(ticket) || this.activeRun !== ticket) {
         outcome = "aborted";
       } else {
@@ -2398,8 +2466,19 @@ export class ConversationActor {
       this.releaseTurnBoundaryPause();
     }
 
+    if (await this.finishReloadStop(ticket)) return;
     if (failure !== undefined) this.emitError(failure, ticket.id);
     await this.settleRun(ticket, outcome);
+  }
+
+  private async finishReloadStop(ticket: RunTicket): Promise<boolean> {
+    const request = ticket.reloadStop;
+    if (!request || this.activeRun !== ticket) return false;
+    if (!request.preserveSettlement) {
+      await this.settleRun(ticket, "aborted");
+    }
+    request.ready.resolve();
+    return true;
   }
 
   private shouldAutoTitleFirstBrowserPrompt(): boolean {
@@ -2618,11 +2697,16 @@ export class ConversationActor {
     );
     this.cancelScope(ticket.id);
     this.activeRun = undefined;
-    this.emitSessionEvent(ticket, {
-      type: "run_finished",
-      outcome,
-    });
-    if (!this.activeRun) this.emitActivity();
+    // Planned process replacement keeps its durable settlement internal. The
+    // reconnecting client observes the fresh continuation instead of a
+    // transient abort that asks the user to intervene.
+    if (!ticket.reloadStop) {
+      this.emitSessionEvent(ticket, {
+        type: "run_finished",
+        outcome,
+      });
+      if (!this.activeRun) this.emitActivity();
+    }
     const completion = {
       settlement,
       origin: ticket.origin,
@@ -2642,6 +2726,7 @@ export class ConversationActor {
       this.emitError(error, ticket.id);
     }
     ticket.completion.resolve(settlement);
+    ticket.reloadStop?.ready.resolve();
     void this.project.refreshConversations().catch((error) => {
       this.emitError(error, ticket.id);
     });
@@ -2649,6 +2734,7 @@ export class ConversationActor {
   }
 
   private failRunInfrastructure(ticket: RunTicket, error: unknown): void {
+    ticket.reloadStop?.ready.reject(error);
     if (this.activeRun === ticket) this.activeRun = undefined;
     if (this.liveProjection?.runId === ticket.id) this.liveProjection = undefined;
     for (const guidance of ticket.guidanceDeliveries.splice(0)) {
@@ -3029,10 +3115,16 @@ export class ConversationActor {
       !ticket
       || ticket.phase === "queued"
       || isCancelling(ticket)
-      || !input.hasToolResults
     ) {
       return false;
     }
+    if (
+      ticket.reloadStop
+      && ticket.pendingGuidanceObservations.length === 0
+    ) {
+      return true;
+    }
+    if (!input.hasToolResults) return false;
     const contextCompactionRequested = ticket.contextCompactionRequested;
     ticket.contextCompactionRequested = false;
     if (ticket.sawSdkCompactionAttempt) return false;

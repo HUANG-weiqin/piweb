@@ -88,6 +88,14 @@ Pi Web 是本机优先的极简 Agent 工作台。当前目标不是复制 Pi �
 - 保持改动小而可验证；不为尚未确认的功能预建抽象。
 - 新增或重命名知识页时，同步 `.knowledge/INDEX.md`。
 
+## 开发期热重载
+
+- `npm run dev` 和 `npm start` 由外部 supervisor 托管；当前实例需要加载已验证的代码改动时，Agent 可执行 `npm run reload`。
+- reload 先运行完整 `npm run build`。只有旧 server 已冻结 admission，并为已有 active run 安装 reload latch 后，命令才返回 `accepted`；该回执不等待最终 drain 或新进程 ready。
+- 默认 reload 等待完整 assistant turn（包括顺序工具调用及结果）到达安全边界。旧进程完全退出后才启动新进程；原 browser work 以隐藏的新 run 自动续做，durable inbox work 使用既有精确恢复路径。
+- `npm run reload -- --force` 会跳过安全等待并立即 best-effort 替换进程，不提供副作用 exactly-once 保证；续跑前必须核对工作区及外部副作用。
+- 仅在确实需要当前实例加载改动时调用 reload，不要在每次测试后自动重启。该能力不暴露为 Pi tool、公共 WebSocket 命令或 UI 操作。
+
 ## 完成门槛
 
 代码变更至少运行：

@@ -16,7 +16,10 @@ import {
   type DirectoryBrowser,
 } from "./directory-browser.js";
 import type { PiRuntimeLike } from "./pi-runtime.js";
-import { ProjectSessionCoordinator } from "./project-session-coordinator.js";
+import {
+  ProjectSessionCoordinator,
+  type ReloadConversationTarget,
+} from "./project-session-coordinator.js";
 import {
   PiConnection,
   type PiConnectionCoordination,
@@ -26,6 +29,13 @@ import { RoleCatalog } from "./role-catalog.js";
 
 export interface SocketServerHandle {
   readonly sockets: WebSocketServer;
+  prepareReload(
+    force: boolean,
+    onAdmissionFrozen: () => void,
+  ): Promise<ReloadConversationTarget[]>;
+  resumeAfterReload(
+    targets: readonly ReloadConversationTarget[],
+  ): Promise<ReloadConversationTarget[]>;
   close(): Promise<void>;
 }
 
@@ -233,6 +243,19 @@ export function attachSocketServer(
 
   return {
     sockets,
+    async prepareReload(force, onAdmissionFrozen) {
+      if (!coordinationPromise) {
+        onAdmissionFrozen();
+        return [];
+      }
+      const { coordinator } = await coordinationPromise;
+      return coordinator.prepareReload(force, onAdmissionFrozen);
+    },
+    async resumeAfterReload(targets) {
+      if (targets.length === 0) return [];
+      const { coordinator } = await coordination();
+      return coordinator.resumeAfterReload(targets);
+    },
     close() {
       if (closePromise) return closePromise;
       closePromise = (async () => {

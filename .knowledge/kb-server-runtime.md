@@ -1,6 +1,6 @@
 # 服务端运行时
 
-`updated: 2026-09-02`
+`updated: 2026-09-03`
 
 ## 这个模块是干什么的
 
@@ -21,7 +21,7 @@
 - 可为项目创建独立的 model catalog：走与 session 相同的 trust、resource loader、静态 provider 深快照和不安全 provider 拒绝路径，但不创建或启动 `AgentSession`。它让空项目也能列出项目扩展模型并配置第一条会话。
 - 串行执行认证/模型配置提交；OAuth provider 的交互式等待必须在队列外完成。
 - 每个 provider 的 credential intent 在用户操作开始时取得一次性 revision，提交时只允许当前最新 revision 写入，避免旧 OAuth 结果覆盖后来发生的 API Key 或 logout。
-- 变更后 reload/refresh，并通知活动连接发布新状态。
+- 变更后 reload/refresh，并通知活动连接发布新状态。若代码变更需要让当前运行中的 Pi Web 实例加载，由外部 supervisor 协调热重载：执行 `npm run reload`，需要跳过安全边界时执行 `npm run reload -- --force`。supervisor 先完成 `npm run build`；只有旧 server 冻结 admission 并为已有 active run 安装 reload latch 后，命令才返回 `accepted`，但该回执不等待最终 drain 或新进程 ready。默认模式等待每个 active assistant turn（含工具轮）到完整 turn boundary，随后旧进程完全退出，supervisor 才启动新实例并为 browser target 触发隐藏 continuation，让 Agent 自动以新 run 继续；force 只提供立即中断的 best-effort，续跑前必须核对工作区和外部副作用。该能力没有公共 Pi tool，也不新增项目持久状态。
 - 生产路径先 `createAgentSessionServices()` 加载 cwd 扩展/provider，再 `createAgentSessionFromServices()` 恢复持久模型，避免恢复顺序选错 fallback。
 
 `ProjectStoreRegistry` 也是进程级对象：

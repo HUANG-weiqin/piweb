@@ -1,6 +1,6 @@
 # Pi Web Knowledge Index
 
-`updated: 2026-07-20`
+`updated: 2026-09-03`
 
 知识库只记录长期稳定的架构事实、决策和坑点，不记录某次任务进度。
 
@@ -10,7 +10,7 @@
 |---|---|
 | [kb-repo-overview.md](kb-repo-overview.md) | 先理解产品边界、核心循环和模块关系 |
 | [kb-wire-protocol.md](kb-wire-protocol.md) | 修改 WebSocket 命令、事件、版本或 session epoch |
-| [kb-server-runtime.md](kb-server-runtime.md) | 修改 Pi SDK、认证、模型缓存、会话或并发控制 |
+| [kb-server-runtime.md](kb-server-runtime.md) | 修改 Pi SDK、认证、模型缓存、会话、并发控制或热重载 |
 | [kb-project-sessions.md](kb-project-sessions.md) | 修改 `.piweb`、项目身份、持久对话、恢复、索引或租约 |
 | [kb-agent-collaboration.md](kb-agent-collaboration.md) | 修改角色、conversation actor、跨会话消息、等待或临时会话 |
 | [kb-client-state.md](kb-client-state.md) | 修改 React App、聊天 reducer、重连和 UI 状态 |

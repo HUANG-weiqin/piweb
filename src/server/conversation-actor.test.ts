@@ -2566,6 +2566,208 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
+  it("stops a browser run at the next turn boundary without LoopList continuation", async () => {
+    const fixture = await openActor();
+    const emit = () => fixture.runtime.session.eventListener;
+    const runStarted = deferred();
+    const releaseRun = deferred();
+    const todoWrite = fixture.runtime.createOptions?.workbenchCustomTools?.find(
+      ({ name }) => name === "todo_write",
+    );
+    expect(todoWrite).toBeDefined();
+    fixture.runtime.session.promptImplementation = async () => {
+      emit()?.(nativeEvent({ type: "agent_start" }));
+      await todoWrite?.execute("todo-call", {
+        items: [{ id: "reload", text: "Continue after reload", status: "active" }],
+      });
+      runStarted.resolve();
+      await releaseRun.promise;
+      emit()?.(nativeEvent({ type: "agent_end" }));
+    };
+
+    const running = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "reload at a safe boundary",
+      origin: "browser",
+    });
+    await runStarted.promise;
+
+    let reloadReady = false;
+    const stopping = fixture.actor.stopForReload(false).then(() => {
+      reloadReady = true;
+    });
+    await Promise.resolve();
+    expect(reloadReady).toBe(false);
+
+    const turnBoundaryCheck = fixture.runtime.createOptions?.turnBoundaryCheck;
+    expect(turnBoundaryCheck).toBeDefined();
+    expect(turnBoundaryCheck?.({
+      contextUsage: fixture.runtime.session.getContextUsage(),
+      hasToolResults: false,
+    })).toBe(true);
+
+    releaseRun.resolve();
+    await expect(stopping).resolves.toBeUndefined();
+    await expect(running).resolves.toMatchObject({
+      runId: RUN_A,
+      outcome: "aborted",
+    });
+    expect(fixture.runtime.session.resumeCalls).toBe(0);
+    expect(fixture.events.some((event) => (
+      event.type === "session_event" && event.event.type === "run_finished"
+    ))).toBe(false);
+    expect(fixture.actor.getLoopList()).toEqual({
+      items: [{ id: "reload", text: "Continue after reload", status: "active" }],
+      armed: false,
+    });
+    expect(aggregateReservedConversationEntries(fixture.manager.getBranch())
+      .runSettlements).toEqual([
+        expect.objectContaining({ runId: RUN_A, outcome: "aborted" }),
+      ]);
+    expect(fixture.manager.getBranch().some((entry) => (
+      entry.type === "custom"
+      && entry.customType === "piweb.loop_list_continue.v2"
+    ))).toBe(false);
+    await fixture.actor.dispose();
+  });
+
+  it("stops at a safe boundary without settling when settlement is preserved", async () => {
+    const fixture = await openActor();
+    const emit = () => fixture.runtime.session.eventListener;
+    const runStarted = deferred();
+    const releaseRun = deferred();
+    fixture.runtime.session.promptImplementation = async () => {
+      emit()?.(nativeEvent({ type: "agent_start" }));
+      runStarted.resolve();
+      await releaseRun.promise;
+      emit()?.(nativeEvent({ type: "agent_end" }));
+    };
+
+    const running = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "preserve the unfinished run",
+      origin: "inbox",
+    });
+    await runStarted.promise;
+
+    const stopping = fixture.actor.stopForReload(true);
+    const turnBoundaryCheck = fixture.runtime.createOptions?.turnBoundaryCheck;
+    expect(turnBoundaryCheck?.({
+      contextUsage: fixture.runtime.session.getContextUsage(),
+      hasToolResults: false,
+    })).toBe(true);
+    releaseRun.resolve();
+
+    await expect(stopping).resolves.toBeUndefined();
+    expect(fixture.actor.getActivity()).toEqual({
+      kind: "running",
+      runId: RUN_A,
+    });
+    expect(aggregateReservedConversationEntries(fixture.manager.getBranch())
+      .runSettlements).toEqual([]);
+    expect(fixture.runtime.session.resumeCalls).toBe(0);
+    // The preserved completion belongs to the process-replacement boundary;
+    // the old process must not try to dispose it as a normal run.
+    void running;
+  });
+
+  it("starts a hidden reload continuation as a fresh completed run", async () => {
+    const fixture = await openActor();
+    const emit = () => fixture.runtime.session.eventListener;
+    let received: {
+      customType: string;
+      display: boolean;
+      triggerTurn: boolean;
+    } | undefined;
+    fixture.runtime.session.resumeImplementation = async (message, options) => {
+      received = {
+        customType: message.customType,
+        display: message.display,
+        triggerTurn: options?.triggerTurn === true,
+      };
+      emit()?.(nativeEvent({ type: "agent_start" }));
+      emit()?.(nativeEvent({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "reload resumed" }],
+          stopReason: "stop",
+        },
+      }));
+      emit()?.(nativeEvent({ type: "agent_end" }));
+    };
+
+    await expect(fixture.actor.startReloadContinuation(RUN_B))
+      .resolves.toMatchObject({
+        runId: RUN_B,
+        outcome: "completed",
+        finalText: "reload resumed",
+      });
+    expect(received).toEqual({
+      customType: "workbench.reload_resume.v1",
+      display: false,
+      triggerTurn: true,
+    });
+    expect(fixture.runtime.session.promptCalls).toEqual([]);
+    await fixture.actor.dispose();
+  });
+
+  it("projects the first busy user message during a hidden reload continuation", async () => {
+    const fixture = await openActor();
+    const emit = () => fixture.runtime.session.eventListener;
+    const runStarted = deferred();
+    const finishRun = deferred();
+    fixture.runtime.session.promptImplementation = async (text, options) => {
+      if (options?.streamingBehavior === "steer") {
+        fixture.runtime.session.steeringMessages.push(text);
+        options.preflightResult?.(true);
+      }
+    };
+    fixture.runtime.session.resumeImplementation = async () => {
+      fixture.runtime.session.isStreaming = true;
+      emit()?.(nativeEvent({ type: "agent_start" }));
+      runStarted.resolve();
+      await finishRun.promise;
+      emit()?.(nativeEvent({ type: "agent_end" }));
+      fixture.runtime.session.isStreaming = false;
+    };
+
+    const promptId = "prompt-after-reload";
+    const running = fixture.actor.startReloadContinuation(RUN_B);
+    await runStarted.promise;
+    await fixture.actor.admitBrowserPrompt({
+      promptId,
+      runId: RUN_A,
+      text: "guidance after reload",
+    });
+    const rawMessage = fixture.runtime.takeSteeringCapture(
+      "guidance after reload",
+    );
+    fixture.manager.appendMessage(rawMessage);
+    emit()?.(nativeEvent({ type: "message_start", message: rawMessage }));
+    emit()?.(nativeEvent({ type: "message_end", message: rawMessage }));
+
+    await vi.waitFor(() => {
+      expect(fixture.events).toContainEqual(expect.objectContaining({
+        type: "session_event",
+        runId: RUN_B,
+        event: expect.objectContaining({
+          type: "user_message",
+          text: "guidance after reload",
+        }),
+      }));
+      expect(fixture.events).toContainEqual(expect.objectContaining({
+        type: "prompt_delivered",
+        promptId,
+        runId: RUN_B,
+      }));
+    });
+
+    finishRun.resolve();
+    await running;
+    await fixture.actor.dispose();
+  });
+
   it("continues the unfinished task after a turn-boundary compaction failure", async () => {
     const fixture = await openActor();
     const emit = () => fixture.runtime.session.eventListener;

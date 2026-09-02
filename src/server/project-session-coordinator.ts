@@ -141,6 +141,13 @@ export interface ProjectActivityCatalogSnapshot {
   truncated: boolean;
 }
 
+export interface ReloadConversationTarget {
+  cwd: string;
+  conversationId: string;
+  /** False when opening the project is enough for durable inbox recovery. */
+  continueTask: boolean;
+}
+
 export type ProjectActivityListener = (
   snapshot: ProjectActivityCatalogSnapshot,
 ) => void;
@@ -1781,6 +1788,226 @@ export class ProjectSessionCoordinator {
     return projectConversationItemsSnapshot(actor.sessionManager);
   }
 
+  /**
+   * Freezes normal admission and stops active Pi loops at completed turn
+   * boundaries. The external supervisor owns the returned, process-replacement
+   * recovery list; no reload state is added to project persistence.
+   */
+  async prepareReload(
+    force: boolean,
+    onAdmissionFrozen: () => void,
+  ): Promise<ReloadConversationTarget[]> {
+    if (this.closing || this.disposed) {
+      throw new Error("Project session coordinator is closing");
+    }
+    this.closing = true;
+    this.disposed = true;
+    const lifecycleClosures = new Map<ProjectContext, Promise<void>>();
+    for (const context of this.contexts.values()) {
+      context.closing = true;
+      lifecycleClosures.set(context, context.lifecycle.close());
+      this.rejectContextWaiters(
+        context,
+        new Error("Session wait was interrupted by server reload"),
+      );
+    }
+
+    if (force) {
+      const targets = this.reloadTargets();
+      onAdmissionFrozen();
+      return targets;
+    }
+
+    const targets = new Map<string, ReloadConversationTarget>();
+    const stops = new Map<ConversationActor, Promise<void>>();
+    const addTarget = (
+      context: ProjectContext,
+      actor: ConversationActor,
+      continueTask: boolean,
+    ) => {
+      const key = `${context.project.cwd}\u0000${actor.conversationId}`;
+      const existing = targets.get(key);
+      targets.set(key, {
+        cwd: context.project.cwd,
+        conversationId: actor.conversationId,
+        continueTask: existing?.continueTask === true || continueTask,
+      });
+    };
+    const latchActor = async (
+      context: ProjectContext,
+      actor: ConversationActor,
+    ): Promise<void> => {
+      if (stops.has(actor)) return;
+      const candidate = actor.activeRunForReload();
+      if (!candidate) return;
+      let preserveSettlement = false;
+      if (candidate.origin === "inbox") {
+        try {
+          const envelopes = await context.inbox.list({
+            toConversationId: actor.conversationId,
+          });
+          preserveSettlement = envelopes.some((envelope) =>
+            envelope.state === "processing"
+            && envelope.processingRunId === candidate.runId
+          );
+        } catch (error) {
+          console.warn(
+            `Could not prove durable inbox recovery for ${actor.conversationId}; settling its current run before reload:`,
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      }
+      const stop = actor.stopForReload(preserveSettlement);
+      void stop.catch(() => undefined);
+      stops.set(actor, stop);
+      addTarget(context, actor, candidate.origin === "browser");
+    };
+
+    // The caller only acknowledges `npm run reload` after every run which
+    // already existed at admission freeze has a stop latch. Otherwise the
+    // invoking Bash result could cross one more provider boundary first.
+    await Promise.all(
+      [...this.contexts.values()].flatMap((context) =>
+        [...context.actors.values()].map((actor) => latchActor(context, actor))
+      ),
+    );
+    onAdmissionFrozen();
+
+    await Promise.allSettled([...this.projectAcquisitions]);
+    this.projectAcquisitions.clear();
+    await Promise.allSettled([...this.contextOpenings.values()]);
+    this.contextOpenings.clear();
+    const lifecycleResults = await Promise.allSettled(
+      [...this.contexts].map(async ([, context]) => {
+        await (lifecycleClosures.get(context) ?? context.lifecycle.close());
+        await this.drainRecentUpdates(context);
+      }),
+    );
+    for (const result of lifecycleResults) {
+      if (result.status === "rejected") {
+        console.warn(
+          "A project lifecycle could not finish draining for reload; captured recovery targets are retained:",
+          result.reason instanceof Error ? result.reason.message : String(result.reason),
+        );
+      }
+    }
+
+    const stopResults = await Promise.allSettled(
+      [...this.contexts.values()].flatMap((context) =>
+        [...context.actors.values()].map(async (actor) => {
+          await latchActor(context, actor);
+          await (stops.get(actor) ?? actor.stopForReload(false));
+        })
+      ),
+    );
+    for (const result of stopResults) {
+      if (result.status === "rejected") {
+        console.warn(
+          "A conversation could not reach its reload boundary; its recovery target was retained:",
+          result.reason instanceof Error ? result.reason.message : String(result.reason),
+        );
+      }
+    }
+
+    // A run can enter settlement between the initial snapshot and the latch.
+    // Since closing suppresses normal inbox completion handling, every durable
+    // envelope still needs its project reopened by the replacement process.
+    for (const context of this.contexts.values()) {
+      try {
+        for (const envelope of await context.inbox.list()) {
+          const actor = context.actors.get(envelope.toConversationId);
+          if (actor) addTarget(context, actor, false);
+          else {
+            const key = `${context.project.cwd}\u0000${envelope.toConversationId}`;
+            if (!targets.has(key)) {
+              targets.set(key, {
+                cwd: context.project.cwd,
+                conversationId: envelope.toConversationId,
+                continueTask: false,
+              });
+            }
+          }
+        }
+      } catch (error) {
+        console.warn(
+          `Could not enumerate pending inbox recovery for ${context.project.cwd}:`,
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
+    return [...targets.values()];
+  }
+
+  async resumeAfterReload(
+    targets: readonly ReloadConversationTarget[],
+  ): Promise<ReloadConversationTarget[]> {
+    const pending: ReloadConversationTarget[] = [];
+    const seen = new Set<string>();
+    for (const target of targets) {
+      const key = `${target.cwd}\u0000${target.conversationId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      let handle: ProjectSessionHandle | undefined;
+      try {
+        handle = await this.acquireProject(target.cwd, "read_only");
+        const context = this.requireContext(handle);
+        const started = await this.runLifecycle<boolean>(context, async () => {
+          if (!target.continueTask) return true;
+          const actor = await this.getOrOpenActor(
+            context,
+            target.conversationId,
+          );
+          if (actor.getActivity().kind !== "idle") return false;
+          const pump = await this.pumpTarget(context, target.conversationId);
+          if (pump !== "no_work" || actor.getActivity().kind !== "idle") {
+            return false;
+          }
+          const completion = actor.startReloadContinuation(randomUUID());
+          void completion.catch(() => undefined);
+          return true;
+        });
+        if (!started) pending.push({ ...target });
+      } catch (error) {
+        console.warn(
+          `Failed to resume reloaded conversation ${target.conversationId}:`,
+          error instanceof Error ? error.message : String(error),
+        );
+        pending.push({ ...target });
+      } finally {
+        handle?.release();
+      }
+    }
+    return pending;
+  }
+
+  private reloadTargets(): ReloadConversationTarget[] {
+    const targets: ReloadConversationTarget[] = [];
+    for (const context of this.contexts.values()) {
+      for (const actor of context.actors.values()) {
+        const candidate = actor.activeRunForReload();
+        if (candidate) {
+          targets.push({
+            cwd: context.project.cwd,
+            conversationId: actor.conversationId,
+            continueTask: candidate.origin === "browser",
+          });
+        }
+      }
+    }
+    return targets;
+  }
+
+  private rejectContextWaiters(context: ProjectContext, error: Error): void {
+    const waiters = new Set(
+      [...context.waiters.values()].flatMap((entries) => [...entries]),
+    );
+    context.waiters.clear();
+    for (const waiter of waiters) {
+      this.detachWaiter(waiter);
+      waiter.reject(error);
+    }
+  }
+
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.closing = true;
@@ -1800,14 +2027,10 @@ export class ProjectSessionCoordinator {
         for (const router of context.extensionUIRouters.values()) {
           router.clear();
         }
-        const closingWaiters = new Set(
-          [...context.waiters.values()].flatMap((waiters) => [...waiters]),
+        this.rejectContextWaiters(
+          context,
+          new Error("Project session coordinator is closed"),
         );
-        context.waiters.clear();
-        for (const waiter of closingWaiters) {
-          this.detachWaiter(waiter);
-          waiter.reject(new Error("Project session coordinator is closed"));
-        }
         await (
           lifecycleClosures.get(context)
           ?? context.lifecycle.close()

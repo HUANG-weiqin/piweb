@@ -830,6 +830,217 @@ describe("ProjectSessionCoordinator", () => {
     expect(fixture.runtime.projectCatalogCreations).toBe(0);
   });
 
+  it("prepares a browser reload target and freezes new work", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const started = deferred();
+    const release = deferred();
+    fixture.runtime.control(actor.conversationId).enqueue(
+      blocksUntil(started, release, "reload target finished"),
+    );
+    const running = fixture.coordinator.prompt(
+      fixture.handle,
+      actor.conversationId,
+      RUN_A,
+      "run before reload",
+    );
+    await started.promise;
+
+    const stopForReload = vi.spyOn(actor, "stopForReload");
+    const admissionFrozen = vi.fn();
+    const preparing = fixture.coordinator.prepareReload(
+      false,
+      admissionFrozen,
+    );
+    await expect(fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    )).rejects.toThrow(/closed|closing/i);
+    await vi.waitFor(() => {
+      expect(stopForReload).toHaveBeenCalledWith(false);
+      expect(admissionFrozen).toHaveBeenCalledOnce();
+    });
+    expect(stopForReload.mock.invocationCallOrder[0]).toBeLessThan(
+      admissionFrozen.mock.invocationCallOrder[0]!,
+    );
+
+    const turnBoundaryCheck = fixture.runtime.createOptions
+      .get(actor.conversationId)?.turnBoundaryCheck;
+    expect(turnBoundaryCheck).toBeDefined();
+    expect(turnBoundaryCheck?.({
+      contextUsage: fixture.runtime.control(actor.conversationId)
+        .session.getContextUsage?.(),
+      hasToolResults: false,
+    })).toBe(true);
+    release.resolve();
+
+    await expect(preparing).resolves.toEqual([{
+      cwd: fixture.cwd,
+      conversationId: actor.conversationId,
+      continueTask: true,
+    }]);
+    await expect(running).resolves.toMatchObject({
+      runId: RUN_A,
+      outcome: "aborted",
+    });
+  });
+
+  it("retains a reload target when its stop boundary fails", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const started = deferred();
+    const release = deferred();
+    fixture.runtime.control(actor.conversationId).enqueue(
+      blocksUntil(started, release, "completed after failed stop"),
+    );
+    const running = fixture.coordinator.prompt(
+      fixture.handle,
+      actor.conversationId,
+      RUN_A,
+      "retain my recovery target",
+    );
+    await started.promise;
+
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.spyOn(actor, "stopForReload").mockRejectedValue(
+      new Error("reload boundary persistence failed"),
+    );
+    try {
+      await expect(fixture.coordinator.prepareReload(
+        false,
+        () => undefined,
+      )).resolves.toEqual([{
+        cwd: fixture.cwd,
+        conversationId: actor.conversationId,
+        continueTask: true,
+      }]);
+      expect(warning).toHaveBeenCalledWith(
+        expect.stringContaining("recovery target was retained"),
+        "reload boundary persistence failed",
+      );
+    } finally {
+      warning.mockRestore();
+      release.resolve();
+    }
+    await expect(running).resolves.toMatchObject({ outcome: "completed" });
+  });
+
+  it("interrupts a session wait before draining reload boundaries", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const targetStarted = deferred();
+    const releaseTarget = deferred();
+    const targetRunId = randomUUID();
+    fixture.runtime.control(target.conversationId).enqueue(
+      blocksUntil(targetStarted, releaseTarget, "target finished"),
+    );
+    const targetCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      target.conversationId,
+      targetRunId,
+      "remain busy while the source waits",
+    );
+    await targetStarted.promise;
+
+    let waitError: unknown;
+    fixture.runtime.control(source.conversationId).enqueue(async (control) => {
+      try {
+        await executeTool(
+          control,
+          "wait_for_session",
+          "reload-interrupted-wait",
+          { conversationId: target.conversationId, runId: targetRunId },
+        );
+      } catch (error) {
+        waitError = error;
+      }
+      control.emitFinal("wait returned before the target settled");
+    });
+    const sourceCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      source.conversationId,
+      randomUUID(),
+      "wait for the target",
+    );
+    await waitUntil(
+      () => source.getActivity().kind === "waiting",
+      "source reload wait registration",
+    );
+
+    const admissionFrozen = vi.fn();
+    const preparing = fixture.coordinator.prepareReload(false, admissionFrozen);
+    await vi.waitFor(() => expect(admissionFrozen).toHaveBeenCalledOnce());
+    await expect(sourceCompletion).resolves.toMatchObject({ outcome: "aborted" });
+    expect(waitError).toMatchObject({
+      message: "Session wait was interrupted by server reload",
+    });
+    expect(target.getActivity()).toMatchObject({ kind: "running" });
+
+    releaseTarget.resolve();
+    await expect(targetCompletion).resolves.toMatchObject({ outcome: "aborted" });
+    await expect(preparing).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        conversationId: source.conversationId,
+        continueTask: true,
+      }),
+      expect.objectContaining({
+        conversationId: target.conversationId,
+        continueTask: true,
+      }),
+    ]));
+  });
+
+  it("starts a fresh hidden continuation for a reloaded browser target", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const continuation = vi.spyOn(actor, "startReloadContinuation")
+      .mockReturnValue(new Promise<RunSettlement>(() => undefined));
+
+    await expect(fixture.coordinator.resumeAfterReload([{
+      cwd: fixture.cwd,
+      conversationId: actor.conversationId,
+      continueTask: true,
+    }])).resolves.toEqual([]);
+
+    expect(continuation).toHaveBeenCalledOnce();
+    expect(continuation).toHaveBeenCalledWith(expect.any(String));
+    await fixture.coordinator.close();
+  });
+
+  it("only opens the project for a durable inbox reload target", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const continuation = vi.spyOn(actor, "startReloadContinuation");
+
+    await expect(fixture.coordinator.resumeAfterReload([{
+      cwd: fixture.cwd,
+      conversationId: actor.conversationId,
+      continueTask: false,
+    }])).resolves.toEqual([]);
+
+    expect(continuation).not.toHaveBeenCalled();
+    await fixture.coordinator.close();
+  });
+
   it("skips disk presentation for warm/opening actors and aborts stale reads", async () => {
     const fixture = await createFixture();
     const warm = await fixture.coordinator.createUserConversation(
@@ -3639,38 +3850,30 @@ describe("ProjectSessionCoordinator", () => {
     fixture.runtime.nextSessionBehaviors.push([
       completesWith("delegation handled before browser admission"),
     ]);
-    const inbox = coordinatorInbox(fixture.handle);
-    const originalPut = inbox.put.bind(inbox);
     const browserRunId = randomUUID();
-    let browserCompletion: Promise<RunSettlement> | undefined;
-    inbox.put = async (input) => {
-      const committed = await originalPut(input);
-      browserCompletion = fixture.coordinator.prompt(
-        fixture.handle,
-        input.toConversationId,
-        browserRunId,
-        "browser work cannot overtake durable inbox",
-      );
-      return committed;
-    };
-
-    let started;
-    try {
-      started = await fixture.coordinator.startPeerSession(
-        fixture.handle,
-        source.conversationId,
-        startInput({
-          task: "run before the browser admission",
-          idempotencyKey: "browser-after-inbox-commit",
-        }),
-      );
-    } finally {
-      inbox.put = originalPut;
-    }
+    const started = await fixture.coordinator.startPeerSession(
+      fixture.handle,
+      source.conversationId,
+      startInput({
+        task: "run before the browser admission",
+        idempotencyKey: "browser-after-inbox-commit",
+      }),
+    );
     expect(started).toMatchObject({
       conversationId: expect.any(String),
       runId: expect.any(String),
     });
+    await waitUntil(async () =>
+      (await fixture.coordinator.listSessions(fixture.handle))
+        .find(({ id }) => id === started.conversationId)
+        ?.activity.kind === "idle",
+    "the committed inbox run to settle");
+    const browserCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      started.conversationId,
+      browserRunId,
+      "browser work cannot overtake durable inbox",
+    );
     await expect(browserCompletion).resolves.toMatchObject({
       runId: browserRunId,
       outcome: "completed",

@@ -7,10 +7,11 @@
   "engines": { "node": ">=22.19.0" },
   "scripts": {
     "predev": "npm run context-compressor:build",
-    "dev": "concurrently -k \"vite\" \"node --import tsx/esm --watch src/server/index.ts\"",
+    "dev": "concurrently -k \"vite\" \"node scripts/piweb-supervisor.mjs --dev\"",
     "prebuild": "npm run context-compressor:build",
     "build": "vite build && tsc -p tsconfig.server.json",
-    "start": "node dist-server/server/index.js",
+    "start": "node scripts/piweb-supervisor.mjs",
+    "reload": "node scripts/piweb-reload.mjs",
     "pretypecheck": "npm run context-compressor:build",
     "typecheck": "tsc && tsc -p tsconfig.server.json --noEmit && npm run context-compressor:typecheck",
     "pretest": "npm run context-compressor:build",

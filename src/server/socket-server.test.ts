@@ -110,6 +110,35 @@ describe("isAllowedOrigin", () => {
     expect(isAllowedOrigin("http://127.0.0.1:31415", undefined)).toBe(false);
   });
 
+  it("does not acknowledge reload when coordination initialization fails", async () => {
+    const server = createServer();
+    const runtime = new SocketTestRuntime();
+    Object.assign(runtime.modelRegistry, {
+      getAvailable: () => {
+        throw new Error("role catalog unavailable");
+      },
+    });
+    const socketServer = attachSocketServer(server, "E:\\work", runtime);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+    await expect(socketServer.resumeAfterReload([{
+      cwd: "E:\\work",
+      conversationId: randomUUID(),
+      continueTask: true,
+    }])).rejects.toThrow("role catalog unavailable");
+    const admissionFrozen = vi.fn();
+    await expect(socketServer.prepareReload(false, admissionFrozen))
+      .rejects.toThrow("role catalog unavailable");
+    expect(admissionFrozen).not.toHaveBeenCalled();
+
+    await Promise.allSettled([
+      socketServer.close(),
+      new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      }),
+    ]);
+  });
+
   it("returns a correlated read-only directory listing", async () => {
     const directoryBrowser: DirectoryBrowser = async (path) => {
       expect(path).toBe("E:\\start");
