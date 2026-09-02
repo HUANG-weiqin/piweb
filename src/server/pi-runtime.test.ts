@@ -384,7 +384,7 @@ describe("PiRuntime session ownership", () => {
             type: "text",
             text: [
               "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
-              "piweb_work={\"active\":[{\"id\":\"work\",\"text\":\"Active work\"}],\"omitted\":0,\"onStatusChange\":\"todo_write\"}",
+              "piweb_work={\"active\":[{\"id\":\"work\",\"text\":\"Active work\"}]}",
             ].join("\n"),
           },
         ],
@@ -399,7 +399,7 @@ describe("PiRuntime session ownership", () => {
           type: "text",
           text: [
             "<piweb_ctx used=\"10k/100k\" auto_compact=\"80%\" remaining=\"70k\" />",
-            "piweb_work={\"active\":[{\"id\":\"work\",\"text\":\"Active work\"}],\"omitted\":0,\"onStatusChange\":\"todo_write\"}",
+            "piweb_work={\"active\":[{\"id\":\"work\",\"text\":\"Active work\"}]}",
           ].join("\n"),
         },
       ],
@@ -469,7 +469,7 @@ describe("PiRuntime session ownership", () => {
         { type: "text", text: "input" },
         {
           type: "text",
-          text: "piweb_work={\"active\":[{\"id\":\"first\",\"text\":\"First active item\"}],\"omitted\":0,\"activeMin\":4,\"listMin\":12,\"editLeft\":2,\"onStatusChange\":\"todo_write\"}",
+          text: "piweb_work={\"active\":[{\"id\":\"first\",\"text\":\"First active item\"}],\"activeMin\":4,\"listMin\":12,\"editLeft\":2}",
         },
       ],
     });
@@ -479,7 +479,7 @@ describe("PiRuntime session ownership", () => {
         { type: "text", text: "input" },
         {
           type: "text",
-          text: "piweb_work={\"active\":[{\"id\":\"second\",\"text\":\"Latest active item\"}],\"omitted\":0,\"activeMin\":0,\"listMin\":13,\"editLeft\":1,\"onStatusChange\":\"todo_write\"}",
+          text: "piweb_work={\"active\":[{\"id\":\"second\",\"text\":\"Latest active item\"}],\"activeMin\":0,\"listMin\":13,\"editLeft\":1}",
         },
       ],
     });

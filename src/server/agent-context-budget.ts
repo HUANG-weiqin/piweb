@@ -73,11 +73,9 @@ function createWorkHint(
     const omitted = active.length - included;
     const record = `piweb_work=${JSON.stringify({
       active: active.slice(0, included),
-      omitted,
-      ...(omitted > 0 ? { moreVia: "todo_read" } : {}),
+      ...(omitted > 0 ? { omitted } : {}),
       ...(elapsed ?? {}),
       ...(editLeft === undefined ? {} : { editLeft }),
-      onStatusChange: "todo_write",
     })}`;
     if (Buffer.byteLength(record, "utf8") <= PIWEB_WORK_RECORD_MAX_BYTES) {
       return record;
@@ -87,10 +85,8 @@ function createWorkHint(
   return `piweb_work=${JSON.stringify({
     active: [],
     omitted: active.length,
-    moreVia: "todo_read",
     ...(elapsed ?? {}),
     ...(editLeft === undefined ? {} : { editLeft }),
-    onStatusChange: "todo_write",
   })}`;
 }
 

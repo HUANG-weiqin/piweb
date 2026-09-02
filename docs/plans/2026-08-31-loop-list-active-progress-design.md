@@ -107,7 +107,7 @@ Provider 投影按 `floor(max(0, now - since) / 60000)` 生成 `activeMin/listMi
 
 ```text
 <piweb_ctx ... />
-piweb_work={"active":[{"id":"protocol","text":"更新协议"},{"id":"tests","text":"补充反例"}],"omitted":0,"activeMin":3,"listMin":17,"editLeft":2,"onStatusChange":"todo_write"}
+piweb_work={"active":[{"id":"protocol","text":"更新协议"},{"id":"tests","text":"补充反例"}],"activeMin":3,"listMin":17,"editLeft":2}
 ```
 
 约束：
@@ -118,7 +118,7 @@ piweb_work={"active":[{"id":"protocol","text":"更新协议"},{"id":"tests","tex
 - 不修改 converter 输入、原始转换结果或 session-owned messages；
 - 上下文 telemetry 与 active 提醒合并在同一个动态尾部，避免多个动态边界；
 - `piweb_work=` 后使用固定字段顺序的 `JSON.stringify` 结果，不使用可被任务文本伪造的 XML closing tag 或自定义分隔符；换行、引号和控制字符均由 JSON 编码；active 存在时增加两个极简整数 `activeMin/listMin`，full-access active run 可用时再增加 `editLeft` 数值，都不另起一行；
-- `piweb_work=` 前缀与完整 JSON 合计最多 4096 UTF-8 bytes，只追加能完整放入的 item，不能在字符串或多字节字符中间截断；`omitted` 是未输出 active 项的精确数量，非零时再包含固定字段 `"moreVia":"todo_read"`；
+- `piweb_work=` 前缀与完整 JSON 合计最多 4096 UTF-8 bytes，只追加能完整放入的 item，不能在字符串或多字节字符中间截断；仅发生截断时才输出 `omitted`，其值是未输出 active 项的精确数量；读取完整列表和更新状态的工具名已由工具 schema/description 提供，不在每轮尾部重复；
 - 每个已输出 item 都包含稳定 ID；没有 active 项时整个瞬时尾部都不输出，包括 `<piweb_ctx>`；
 - provider 会看到该提醒；“不留历史”仅指不进入 Pi Web 的 durable transcript。
 

@@ -14,7 +14,7 @@ const ACTIVE_LOOP_LIST: LoopList = {
   items: [{ id: "test", text: "Test active work", status: "active" }],
   armed: true,
 };
-const ACTIVE_WORK_HINT = "piweb_work={\"active\":[{\"id\":\"test\",\"text\":\"Test active work\"}],\"omitted\":0,\"onStatusChange\":\"todo_write\"}";
+const ACTIVE_WORK_HINT = "piweb_work={\"active\":[{\"id\":\"test\",\"text\":\"Test active work\"}]}";
 const getActiveLoopList = (): LoopList => ACTIVE_LOOP_LIST;
 
 function message(value: unknown): AgentMessage {
@@ -227,7 +227,7 @@ describe("installAgentContextBudget", () => {
           type: "text",
           text: [
             "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
-            "piweb_work={\"active\":[{\"id\":\"inspect\",\"text\":\"Inspect image\"}],\"omitted\":0,\"activeMin\":3,\"listMin\":11,\"editLeft\":0,\"onStatusChange\":\"todo_write\"}",
+            "piweb_work={\"active\":[{\"id\":\"inspect\",\"text\":\"Inspect image\"}],\"activeMin\":3,\"listMin\":11,\"editLeft\":0}",
           ].join("\n"),
         },
       ],
@@ -258,7 +258,7 @@ describe("installAgentContextBudget", () => {
         { type: "text", text: "tool output" },
         {
           type: "text",
-          text: "piweb_work={\"active\":[{\"id\":\"verify\",\"text\":\"Verify output\"}],\"omitted\":0,\"onStatusChange\":\"todo_write\"}",
+          text: "piweb_work={\"active\":[{\"id\":\"verify\",\"text\":\"Verify output\"}]}",
         },
       ],
     }]);
@@ -282,7 +282,7 @@ describe("installAgentContextBudget", () => {
 
     expect(providerTailText(result)).toBe([
       "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
-      "piweb_work={\"active\":[{\"id\":\"active\\\"\\\\\",\"text\":\"line\\n雪\"}],\"omitted\":0,\"onStatusChange\":\"todo_write\"}",
+      "piweb_work={\"active\":[{\"id\":\"active\\\"\\\\\",\"text\":\"line\\n雪\"}]}",
     ].join("\n"));
     expect(loopList).toEqual(before);
   });
@@ -323,10 +323,10 @@ describe("installAgentContextBudget", () => {
     const neither = await session.agent.convertToLlm([]);
 
     expect(telemetryText(first)).toBe(
-      "piweb_work={\"active\":[{\"id\":\"first\",\"text\":\"First snapshot\"}],\"omitted\":0,\"activeMin\":2,\"listMin\":10,\"onStatusChange\":\"todo_write\"}",
+      "piweb_work={\"active\":[{\"id\":\"first\",\"text\":\"First snapshot\"}],\"activeMin\":2,\"listMin\":10}",
     );
     expect(telemetryText(second)).toBe(
-      "piweb_work={\"active\":[{\"id\":\"second\",\"text\":\"Latest snapshot\"}],\"omitted\":0,\"activeMin\":3,\"listMin\":11,\"onStatusChange\":\"todo_write\"}",
+      "piweb_work={\"active\":[{\"id\":\"second\",\"text\":\"Latest snapshot\"}],\"activeMin\":3,\"listMin\":11}",
     );
     expect(neither).toBe(originalResult);
     expect(getContextUsage).toHaveBeenCalledTimes(2);
@@ -384,43 +384,35 @@ describe("installAgentContextBudget", () => {
     const payload = JSON.parse(record.slice("piweb_work=".length)) as {
       active: Array<{ id: string; text: string }>;
       omitted: number;
-      moreVia?: string;
       activeMin: number;
       listMin: number;
       editLeft: number;
-      onStatusChange: string;
     };
 
     expect(Buffer.byteLength(record, "utf8")).toBeLessThanOrEqual(4096);
     expect(Object.keys(payload)).toEqual([
       "active",
       "omitted",
-      "moreVia",
       "activeMin",
       "listMin",
       "editLeft",
-      "onStatusChange",
     ]);
     expect(payload.active).toEqual(
       items.slice(0, payload.active.length).map(({ id, text }) => ({ id, text })),
     );
     expect(payload.omitted).toBe(items.length - payload.active.length);
     expect(payload.omitted).toBeGreaterThan(0);
-    expect(payload.moreVia).toBe("todo_read");
     expect(payload.activeMin).toBe(9);
     expect(payload.listMin).toBe(42);
     expect(payload.editLeft).toBe(7);
-    expect(payload.onStatusChange).toBe("todo_write");
 
     const next = items[payload.active.length]!;
     const oneMore = `piweb_work=${JSON.stringify({
       active: [...payload.active, { id: next.id, text: next.text }],
-      omitted: payload.omitted - 1,
-      ...(payload.omitted > 1 ? { moreVia: "todo_read" } : {}),
+      ...(payload.omitted > 1 ? { omitted: payload.omitted - 1 } : {}),
       activeMin: payload.activeMin,
       listMin: payload.listMin,
       editLeft: payload.editLeft,
-      onStatusChange: "todo_write",
     })}`;
     expect(Buffer.byteLength(oneMore, "utf8")).toBeGreaterThan(4096);
   });
