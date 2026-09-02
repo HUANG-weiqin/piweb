@@ -33,7 +33,7 @@
 - 不扩大 edit budget 对 `bash`、脚本或扩展工具的保护范围；
 - 不强制纯分析、read-only 或完全不申请编辑额度的 run 建立列表；
 - 不把工作提醒注入 compaction / branch-summary 等独立 summarizer；它们只整理上下文而不决定下一步动作，下一次 Agent turn 会重新读取权威列表；
-- 双计时是可跨重启重放的 civil wall-clock elapsed 估计；`listMin` 实际是当前稳定 ID 计划自建立以来的 age，二者都不等于 `activeRun` 实际运行时间，也不承诺抵抗系统校时、休眠或暂停。
+- 双计时是可跨重启重放的 civil wall-clock elapsed 估计；`loopListElapsedMinutes` 实际是当前稳定 ID 计划自建立以来的 age，二者都不等于 `activeRun` 实际运行时间，也不承诺抵抗系统校时、休眠或暂停。
 
 ## 3. 状态模型
 
@@ -82,9 +82,9 @@ active identity 变化 → 只重置 activeSince
 active identity 为空 → activeSince 清除，listSince 在计划未变化时保留
 ```
 
-多个 active 项共同构成一个 active context，因此只有一个 `activeMin`，而不是每项各有计时。`todo_pause` 只改 armed；重排、改文案，以及不改变 active ID 集合的 pending/completed 更新都不重置相应锚点。整份计划的稳定 ID 集合变化时，即使只新增或删除一个 pending 项，也按用户所说的“整个 LoopList 变了”重置两者；新计划没有 active 时仍从 plan snapshot 启动 list 锚点，但 active 锚点要等到首次 active snapshot。
+多个 active 项共同构成一个 active context，因此只有一个 `activeElapsedMinutes`，而不是每项各有计时。`todo_pause` 只改 armed；重排、改文案，以及不改变 active ID 集合的 pending/completed 更新都不重置相应锚点。整份计划的稳定 ID 集合变化时，即使只新增或删除一个 pending 项，也按用户所说的“整个 LoopList 变了”重置两者；新计划没有 active 时仍从 plan snapshot 启动 list 锚点，但 active 锚点要等到首次 active snapshot。
 
-Provider 投影按 `floor(max(0, now - since) / 60000)` 生成 `activeMin/listMin`。这允许系统时钟回拨后暂时归零或数值下降；若未来需要严格单调的实际工时，必须另建持久累计模型，不能给当前墙钟估计改名。Rewind 删除 suffix 后按保留分支重放，所以恢复原历史锚点，而不是把 rewind 时刻伪装成重新开始。
+Provider 投影按 `floor(max(0, now - since) / 60000)` 生成 `activeElapsedMinutes/loopListElapsedMinutes`。这允许系统时钟回拨后暂时归零或数值下降；若未来需要严格单调的实际工时，必须另建持久累计模型，不能给当前墙钟估计改名。Rewind 删除 suffix 后按保留分支重放，所以恢复原历史锚点，而不是把 rewind 时刻伪装成重新开始。
 
 ## 4. 编辑承诺边界
 
@@ -107,7 +107,7 @@ Provider 投影按 `floor(max(0, now - since) / 60000)` 生成 `activeMin/listMi
 
 ```text
 <piweb_ctx ... />
-piweb_work={"active":[{"id":"protocol","text":"更新协议"},{"id":"tests","text":"补充反例"}],"activeMin":3,"listMin":17,"editLeft":2}
+piweb_work={"active":[{"id":"protocol","text":"更新协议"},{"id":"tests","text":"补充反例"}],"activeElapsedMinutes":3,"loopListElapsedMinutes":17,"editLeft":2}
 ```
 
 约束：
@@ -117,7 +117,7 @@ piweb_work={"active":[{"id":"protocol","text":"更新协议"},{"id":"tests","tex
 - 绝不新增独立 user/custom turn；
 - 不修改 converter 输入、原始转换结果或 session-owned messages；
 - 上下文 telemetry 与 active 提醒合并在同一个动态尾部，避免多个动态边界；
-- `piweb_work=` 后使用固定字段顺序的 `JSON.stringify` 结果，不使用可被任务文本伪造的 XML closing tag 或自定义分隔符；换行、引号和控制字符均由 JSON 编码；active 存在时增加两个极简整数 `activeMin/listMin`，full-access active run 可用时再增加 `editLeft` 数值，都不另起一行；
+- `piweb_work=` 后使用固定字段顺序的 `JSON.stringify` 结果，不使用可被任务文本伪造的 XML closing tag 或自定义分隔符；换行、引号和控制字符均由 JSON 编码；active 存在时增加两个自解释整数 `activeElapsedMinutes/loopListElapsedMinutes`，full-access active run 可用时再增加 `editLeft` 数值，都不另起一行；
 - `piweb_work=` 前缀与完整 JSON 合计最多 4096 UTF-8 bytes，只追加能完整放入的 item，不能在字符串或多字节字符中间截断；仅发生截断时才输出 `omitted`，其值是未输出 active 项的精确数量；读取完整列表和更新状态的工具名已由工具 schema/description 提供，不在每轮尾部重复；
 - 每个已输出 item 都包含稳定 ID；没有 active 项时整个瞬时尾部都不输出，包括 `<piweb_ctx>`；
 - provider 会看到该提醒；“不留历史”仅指不进入 Pi Web 的 durable transcript。

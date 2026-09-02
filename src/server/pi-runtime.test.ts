@@ -469,7 +469,7 @@ describe("PiRuntime session ownership", () => {
         { type: "text", text: "input" },
         {
           type: "text",
-          text: "piweb_work={\"active\":[{\"id\":\"first\",\"text\":\"First active item\"}],\"activeMin\":4,\"listMin\":12,\"editLeft\":2}",
+          text: "piweb_work={\"active\":[{\"id\":\"first\",\"text\":\"First active item\"}],\"activeElapsedMinutes\":4,\"loopListElapsedMinutes\":12,\"editLeft\":2}",
         },
       ],
     });
@@ -479,7 +479,7 @@ describe("PiRuntime session ownership", () => {
         { type: "text", text: "input" },
         {
           type: "text",
-          text: "piweb_work={\"active\":[{\"id\":\"second\",\"text\":\"Latest active item\"}],\"activeMin\":0,\"listMin\":13,\"editLeft\":1}",
+          text: "piweb_work={\"active\":[{\"id\":\"second\",\"text\":\"Latest active item\"}],\"activeElapsedMinutes\":0,\"loopListElapsedMinutes\":13,\"editLeft\":1}",
         },
       ],
     });

@@ -227,7 +227,7 @@ describe("installAgentContextBudget", () => {
           type: "text",
           text: [
             "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
-            "piweb_work={\"active\":[{\"id\":\"inspect\",\"text\":\"Inspect image\"}],\"activeMin\":3,\"listMin\":11,\"editLeft\":0}",
+            "piweb_work={\"active\":[{\"id\":\"inspect\",\"text\":\"Inspect image\"}],\"activeElapsedMinutes\":3,\"loopListElapsedMinutes\":11,\"editLeft\":0}",
           ].join("\n"),
         },
       ],
@@ -323,10 +323,10 @@ describe("installAgentContextBudget", () => {
     const neither = await session.agent.convertToLlm([]);
 
     expect(telemetryText(first)).toBe(
-      "piweb_work={\"active\":[{\"id\":\"first\",\"text\":\"First snapshot\"}],\"activeMin\":2,\"listMin\":10}",
+      "piweb_work={\"active\":[{\"id\":\"first\",\"text\":\"First snapshot\"}],\"activeElapsedMinutes\":2,\"loopListElapsedMinutes\":10}",
     );
     expect(telemetryText(second)).toBe(
-      "piweb_work={\"active\":[{\"id\":\"second\",\"text\":\"Latest snapshot\"}],\"activeMin\":3,\"listMin\":11}",
+      "piweb_work={\"active\":[{\"id\":\"second\",\"text\":\"Latest snapshot\"}],\"activeElapsedMinutes\":3,\"loopListElapsedMinutes\":11}",
     );
     expect(neither).toBe(originalResult);
     expect(getContextUsage).toHaveBeenCalledTimes(2);
@@ -384,8 +384,8 @@ describe("installAgentContextBudget", () => {
     const payload = JSON.parse(record.slice("piweb_work=".length)) as {
       active: Array<{ id: string; text: string }>;
       omitted: number;
-      activeMin: number;
-      listMin: number;
+      activeElapsedMinutes: number;
+      loopListElapsedMinutes: number;
       editLeft: number;
     };
 
@@ -393,8 +393,8 @@ describe("installAgentContextBudget", () => {
     expect(Object.keys(payload)).toEqual([
       "active",
       "omitted",
-      "activeMin",
-      "listMin",
+      "activeElapsedMinutes",
+      "loopListElapsedMinutes",
       "editLeft",
     ]);
     expect(payload.active).toEqual(
@@ -402,16 +402,16 @@ describe("installAgentContextBudget", () => {
     );
     expect(payload.omitted).toBe(items.length - payload.active.length);
     expect(payload.omitted).toBeGreaterThan(0);
-    expect(payload.activeMin).toBe(9);
-    expect(payload.listMin).toBe(42);
+    expect(payload.activeElapsedMinutes).toBe(9);
+    expect(payload.loopListElapsedMinutes).toBe(42);
     expect(payload.editLeft).toBe(7);
 
     const next = items[payload.active.length]!;
     const oneMore = `piweb_work=${JSON.stringify({
       active: [...payload.active, { id: next.id, text: next.text }],
       ...(payload.omitted > 1 ? { omitted: payload.omitted - 1 } : {}),
-      activeMin: payload.activeMin,
-      listMin: payload.listMin,
+      activeElapsedMinutes: payload.activeElapsedMinutes,
+      loopListElapsedMinutes: payload.loopListElapsedMinutes,
       editLeft: payload.editLeft,
     })}`;
     expect(Buffer.byteLength(oneMore, "utf8")).toBeGreaterThan(4096);

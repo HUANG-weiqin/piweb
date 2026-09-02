@@ -69,12 +69,18 @@ function createWorkHint(
   elapsed?: LoopListElapsedMinutes,
   editLeft?: number,
 ): string {
+  const elapsedFields = elapsed === undefined
+    ? {}
+    : {
+        activeElapsedMinutes: elapsed.activeMin,
+        loopListElapsedMinutes: elapsed.listMin,
+      };
   for (let included = active.length; included > 0; included -= 1) {
     const omitted = active.length - included;
     const record = `piweb_work=${JSON.stringify({
       active: active.slice(0, included),
       ...(omitted > 0 ? { omitted } : {}),
-      ...(elapsed ?? {}),
+      ...elapsedFields,
       ...(editLeft === undefined ? {} : { editLeft }),
     })}`;
     if (Buffer.byteLength(record, "utf8") <= PIWEB_WORK_RECORD_MAX_BYTES) {
@@ -85,7 +91,7 @@ function createWorkHint(
   return `piweb_work=${JSON.stringify({
     active: [],
     omitted: active.length,
-    ...(elapsed ?? {}),
+    ...elapsedFields,
     ...(editLeft === undefined ? {} : { editLeft }),
   })}`;
 }
