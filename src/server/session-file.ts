@@ -666,10 +666,9 @@ export function validatePiSessionFile(
   sessionPath: string,
   expectedConversationId?: string,
 ): string {
-  return inspectPiSessionFileInternal(
+  return inspectPiSessionFile(
     raw,
     sessionPath,
     expectedConversationId,
-    false,
   ).conversationId;
 }

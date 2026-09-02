@@ -934,7 +934,6 @@ describe("ConversationActor", () => {
       expect(fixture.actor.pendingPromptAdmissions()).toEqual([{
         promptId: PROMPT_ID,
         text: "follow up",
-        createdAt: expect.any(String),
       }]);
 
       finishRun.resolve();

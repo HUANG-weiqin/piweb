@@ -55,7 +55,7 @@ export type ChatItem =
   | ConversationCompactionMarker
   | ConversationMessageCard;
 
-export interface ChatFocus {
+interface ChatFocus {
   sessionId: string;
   conversationId: string;
   focusId: string;

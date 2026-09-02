@@ -23,12 +23,10 @@ import {
   App,
   MAX_CACHED_WORKSPACES,
   MAX_CACHED_CONVERSATION_PRESENTATIONS,
-  forgetConversationPresentation,
   getConversationPresentation,
   getWorkspaceProjection,
   rememberConversationPresentation,
   rememberWorkspaceProjection,
-  forgetWorkspaceProjection,
 } from "./App";
 
 const RUN_ID = "13f17393-974b-49a0-9c6a-3176f775912a";
@@ -3440,8 +3438,6 @@ describe("App", () => {
     expect(workspaceCache.size).toBe(MAX_CACHED_WORKSPACES);
     expect(workspaceCache.has("workspace-0")).toBe(true);
     expect(workspaceCache.has("workspace-1")).toBe(false);
-    forgetWorkspaceProjection(workspaceCache, "workspace-0");
-    expect(workspaceCache.has("workspace-0")).toBe(false);
 
     const conversationCache = new Map<string, number>();
     for (let index = 0; index < MAX_CACHED_CONVERSATION_PRESENTATIONS; index += 1) {
@@ -3452,8 +3448,6 @@ describe("App", () => {
     expect(conversationCache.size).toBe(MAX_CACHED_CONVERSATION_PRESENTATIONS);
     expect(conversationCache.has("scope-0")).toBe(true);
     expect(conversationCache.has("scope-1")).toBe(false);
-    forgetConversationPresentation(conversationCache, "scope-0");
-    expect(conversationCache.has("scope-0")).toBe(false);
   });
 
   it("keeps global project activity visible across workspace switches", () => {

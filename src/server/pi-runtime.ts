@@ -1128,19 +1128,14 @@ export class PiRuntime implements PiRuntimeLike {
         errors.push(error);
       }
     };
-    await attempt(async () => this.refreshModelRuntime(this.modelRuntime, options));
+    await attempt(async () => {
+      const result = await this.modelRuntime.refresh(options);
+      throwRefreshResultErrors(result);
+    });
     for (const owner of this.sessionRegistries) {
       await attempt(async () => owner.refresh({ ...options, allowNetwork: false }));
     }
     return errors;
-  }
-
-  private async refreshModelRuntime(
-    runtime: ModelRuntime,
-    options: ModelsRefreshOptions,
-  ): Promise<void> {
-    const result = await runtime.refresh(options);
-    throwRefreshResultErrors(result);
   }
 
   private throwConfigurationErrors(

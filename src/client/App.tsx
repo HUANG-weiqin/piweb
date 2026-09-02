@@ -67,11 +67,11 @@ interface InitialWorkspaceState {
   activeCwd: string;
 }
 
-export function rememberWorkspaceProjection<T>(
+function rememberProjection<T>(
   cache: Map<string, T>,
   key: string,
   projection: T,
-  limit = MAX_CACHED_WORKSPACES,
+  limit: number,
 ): void {
   cache.delete(key);
   cache.set(key, projection);
@@ -82,14 +82,7 @@ export function rememberWorkspaceProjection<T>(
   }
 }
 
-export function forgetWorkspaceProjection<T>(
-  cache: Map<string, T>,
-  key: string,
-): void {
-  cache.delete(key);
-}
-
-export function getWorkspaceProjection<T>(
+function getProjection<T>(
   cache: Map<string, T>,
   key: string,
 ): T | undefined {
@@ -100,38 +93,27 @@ export function getWorkspaceProjection<T>(
   return projection;
 }
 
+export function rememberWorkspaceProjection<T>(
+  cache: Map<string, T>,
+  key: string,
+  projection: T,
+  limit = MAX_CACHED_WORKSPACES,
+): void {
+  rememberProjection(cache, key, projection, limit);
+}
+
+export const getWorkspaceProjection = getProjection;
+
 export function rememberConversationPresentation<T>(
   cache: Map<string, T>,
   key: string,
   presentation: T,
   limit = MAX_CACHED_CONVERSATION_PRESENTATIONS,
 ): void {
-  cache.delete(key);
-  cache.set(key, presentation);
-  while (cache.size > limit) {
-    const oldest = cache.keys().next().value;
-    if (oldest === undefined) break;
-    cache.delete(oldest);
-  }
+  rememberProjection(cache, key, presentation, limit);
 }
 
-export function forgetConversationPresentation<T>(
-  cache: Map<string, T>,
-  key: string,
-): void {
-  cache.delete(key);
-}
-
-export function getConversationPresentation<T>(
-  cache: Map<string, T>,
-  key: string,
-): T | undefined {
-  const presentation = cache.get(key);
-  if (presentation === undefined) return undefined;
-  cache.delete(key);
-  cache.set(key, presentation);
-  return presentation;
-}
+export const getConversationPresentation = getProjection;
 
 
 function loadInitialWorkspaceState(): InitialWorkspaceState {
@@ -650,10 +632,7 @@ export function App() {
       cached?.projectId !== projectId
       || cached.conversationId !== conversationId
     ) return;
-    forgetWorkspaceProjection(
-      workspaceProjectionCacheRef.current,
-      workspaceKeyValue,
-    );
+    workspaceProjectionCacheRef.current.delete(workspaceKeyValue);
     if (cachedWorkspacePresentationKeyRef.current === workspaceKeyValue) {
       clearTemporaryWorkspacePresentation();
     }
@@ -664,7 +643,7 @@ export function App() {
   };
   const discardCachedWorkspacePresentation = () => {
     const key = cachedWorkspacePresentationKeyRef.current;
-    if (key) forgetWorkspaceProjection(workspaceProjectionCacheRef.current, key);
+    if (key) workspaceProjectionCacheRef.current.delete(key);
     clearTemporaryWorkspacePresentation();
     setState(undefined);
     authoritativeProjectMembershipRef.current.clear();
@@ -1575,10 +1554,7 @@ export function App() {
           event.projectId,
           event.conversationId,
         );
-        forgetConversationPresentation(
-          conversationPresentationCacheRef.current,
-          invalidatedConversationKey,
-        );
+        conversationPresentationCacheRef.current.delete(invalidatedConversationKey);
         clearTemporaryConversationPresentation();
         updateConversationSyncing(false);
         unconfirmedPromptByConversationRef.current.delete(
@@ -1643,7 +1619,7 @@ export function App() {
             && workspaceProjection.projectId === event.projectId
             && !existingConversationIds.has(workspaceProjection.conversationId)
           ) {
-            forgetWorkspaceProjection(workspaceProjectionCacheRef.current, workspaceKeyValue);
+            workspaceProjectionCacheRef.current.delete(workspaceKeyValue);
             if (cachedWorkspacePresentationKeyRef.current === workspaceKeyValue) {
               clearTemporaryWorkspacePresentation();
             }
@@ -1656,7 +1632,7 @@ export function App() {
             && presentation.projectId === event.projectId
             && !existingConversationIds.has(presentation.conversationId)
           ) {
-            forgetConversationPresentation(conversationPresentationCacheRef.current, cacheKey);
+            conversationPresentationCacheRef.current.delete(cacheKey);
             if (cachedConversationPresentationKeyRef.current === cacheKey) {
               clearTemporaryConversationPresentation();
             }
@@ -1835,8 +1811,7 @@ export function App() {
             pending.projectId,
             pending.conversationId,
           );
-          forgetConversationPresentation(
-            conversationPresentationCacheRef.current,
+          conversationPresentationCacheRef.current.delete(
             pendingConversationKey(pending),
           );
           if (cachedConversationPresentationKeyRef.current === pendingConversationKey(pending)) {
@@ -2083,8 +2058,7 @@ export function App() {
             && pending.initializeConversationKind === "open"
           ) {
             if (pending.cachedProjectId && pending.targetConversationId) {
-              forgetConversationPresentation(
-                conversationPresentationCacheRef.current,
+              conversationPresentationCacheRef.current.delete(
                 conversationScopeKey(
                   pending.workspaceKey,
                   pending.cachedProjectId,
@@ -2964,13 +2938,13 @@ export function App() {
     const key = workspaceKey(cwd);
     if (workspaceKey(activeCwdRef.current) !== key) return;
 
-    forgetWorkspaceProjection(workspaceProjectionCacheRef.current, key);
+    workspaceProjectionCacheRef.current.delete(key);
     if (cachedWorkspacePresentationKeyRef.current === key) {
       clearTemporaryWorkspacePresentation();
     }
     for (const [cacheKey, presentation] of conversationPresentationCacheRef.current) {
       if (presentation.workspaceKey === key) {
-        forgetConversationPresentation(conversationPresentationCacheRef.current, cacheKey);
+        conversationPresentationCacheRef.current.delete(cacheKey);
       }
     }
     if (cachedConversationPresentation?.workspaceKey === key) {

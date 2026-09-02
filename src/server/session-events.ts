@@ -345,10 +345,6 @@ export class SessionEventProjector {
       return [];
     }
 
-    if (event.type === "agent_settled") {
-      return [];
-    }
-
     if (
       event.type === "message_start"
       && event.message.role === "custom"

@@ -771,7 +771,7 @@ export type ServerEvent =
       window: ConversationWindowCoverage;
     }
   | {
-      /** 浏览器 prompt 已被服务端接受（busy 时进入 followUp 队列，尚未投递）。 */
+      /** 浏览器 prompt 已被服务端接受（busy 时进入 SDK steering 队列，尚未投递）。 */
       type: "prompt_admitted";
       sessionId: string;
       conversationId: string;

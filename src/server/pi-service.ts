@@ -1,13 +1,5 @@
 import { randomUUID } from "node:crypto";
 import type {
-  AgentSession,
-  AgentSessionEvent,
-  ExtensionError,
-  ModelRegistry,
-  SessionManager,
-  SettingsManager,
-} from "@earendil-works/pi-coding-agent";
-import type {
   AcknowledgedCommandOperation,
   ClientCommand,
   ConversationActivity,
@@ -15,29 +7,17 @@ import type {
   FocusAttachedOperation,
   PublicState,
   ServerEvent,
-  SessionEvent,
   ThinkingLevel,
-  ToolMode,
 } from "../shared/protocol.js";
-import { mostRestrictiveToolMode } from "../shared/tool-mode.js";
 import { AuthFlowBroker } from "./auth-flow.js";
-import { projectConversationHistorySnapshot } from "./conversation-history.js";
 import type { ConversationActor } from "./conversation-actor.js";
 import { validateCwd } from "./cwd.js";
 import { ExtensionUIBroker } from "./extension-ui.js";
 import {
-  type CreatedPiSession,
   type CredentialChangeIntent,
   type PiRuntimeLike,
-  type ToolCallGateInput,
 } from "./pi-runtime.js";
 import { buildPublicProviders } from "./pi-state.js";
-import {
-  ProjectStoreRegistry,
-  type ConversationLease,
-  type ProjectStore,
-  type ProjectStoreHandle,
-} from "./project-store.js";
 import {
   ProjectSessionCoordinator,
   type ConversationPresentation,
@@ -51,34 +31,7 @@ import {
 import type { RoleCatalog } from "./role-catalog.js";
 import { MODEL_REFRESH_TIMEOUT_MS } from "./model-refresh.js";
 import { SerialTaskQueue } from "./serial-task-queue.js";
-import { SessionEventProjector, snapshotWireValue } from "./session-events.js";
 import { resolveContextUsage } from "./session-usage.js";
-import {
-  defaultToolPolicy,
-  type ToolPolicy,
-  type ToolPolicyDecision,
-} from "./tool-policy.js";
-
-interface ActiveSession {
-  id: string;
-  generation: number;
-  cwd: string;
-  session: AgentSession;
-  sessionManager: SessionManager;
-  settings: SettingsManager;
-  modelRegistry: ModelRegistry;
-  dynamicProviderNames: () => ReadonlySet<string>;
-  project: ProjectStore;
-  projectHandle: ProjectStoreHandle;
-  conversationId: string;
-  focusId: string;
-  conversationLease: ConversationLease;
-  lifecycleAbort: AbortController;
-  dispose: () => Promise<void>;
-  unsubscribe: () => void;
-  unsubscribeProject: () => void;
-  disposePromise?: Promise<void>;
-}
 
 interface ManualModelRefresh {
   controller: AbortController;
@@ -88,25 +41,6 @@ interface ManualModelRefresh {
   underlying?: Promise<void>;
   timedOut: boolean;
   timer: ReturnType<typeof setTimeout>;
-}
-
-interface RunTicket {
-  id: string;
-  sessionId: string;
-  generation: number;
-  conversationId: string;
-  focusId: string;
-  phase: "queued" | "running" | "cancelling";
-  toolMode?: ToolMode;
-  projector: SessionEventProjector;
-  extensionErrorMessage?: string;
-  abortPromise?: Promise<void>;
-}
-
-interface SelectedConversation {
-  conversationId: string;
-  sessionManager: SessionManager;
-  lease: ConversationLease;
 }
 
 export interface PiConnectionCoordination {
@@ -140,60 +74,11 @@ interface ProjectSnapshotRefresh {
 }
 
 type ConnectionCommand = Exclude<ClientCommand, { type: "browse_directory" }>;
-type QueuedCommand = Exclude<ConnectionCommand, {
-  type:
-    | "abort"
-    | "auth_response"
-    | "cancel_auth"
-    | "close_session"
-    | "extension_ui_response"
-    | "initialize"
-    | "prompt"
-    | "refresh_view"
-    | "steer";
-}>;
-type ConversationTarget = NonNullable<
-  Extract<ClientCommand, { type: "initialize" }>["conversation"]
->;
-
 function assertNever(value: never): never {
   const type = (value as { type?: unknown }).type;
   throw new Error(`Unhandled command type: ${String(type)}`);
 }
 
-
-function queuedCommandScope(command: QueuedCommand): "session" | "epoch" | "global" {
-  switch (command.type) {
-    case "select_model":
-    case "set_thinking":
-    case "set_compaction_threshold":
-    case "set_service_tier":
-    case "compact_context":
-    case "switch_conversation_role":
-    case "rename_conversation":
-    case "delete_conversation":
-    case "truncate_conversation":
-    case "focus_conversation":
-    case "create_conversation":
-    case "create_role":
-    case "update_role":
-    case "delete_role":
-    case "set_api_key":
-      return "session";
-    case "login_oauth":
-      return "epoch";
-    case "refresh_models":
-      return "session";
-    case "logout":
-      return "global";
-    default:
-      return assertNever(command);
-  }
-}
-
-function isCancelling(ticket: RunTicket): boolean {
-  return ticket.phase === "cancelling";
-}
 
 export const MAX_PROJECT_SNAPSHOT_BYTES = 750_000;
 
@@ -292,8 +177,6 @@ export class PiConnection {
   private projectSnapshotRefresh?: ProjectSnapshotRefresh;
   private extensionScope = 0;
   private readonly focusedItemFingerprints = new Map<string, string>();
-  private active?: ActiveSession;
-  private activeRun?: RunTicket;
   private authFlow?: AuthFlowBroker;
   private requestedSessionId?: string;
   private readonly usedSessionIds = new Set<string>();
@@ -313,353 +196,20 @@ export class PiConnection {
   constructor(
     private readonly emit: (event: ServerEvent) => void,
     private readonly runtime: PiRuntimeLike,
-    private readonly toolPolicy: ToolPolicy = defaultToolPolicy,
-    private readonly projects: ProjectStoreRegistry = new ProjectStoreRegistry(),
-    private readonly coordinationProvider?: PiConnectionCoordinationProvider,
+    private readonly coordinationProvider: PiConnectionCoordinationProvider,
   ) {
     this.extensionUI = new ExtensionUIBroker(emit);
     this.unsubscribeRuntime = runtime.subscribe(() => {
-      if (this.coordinationProvider) {
-        this.publishCoordinatedState();
-        this.publishRoleCatalog();
-      } else {
-        this.publishState();
-      }
+      this.publishCoordinatedState();
+      this.publishRoleCatalog();
     });
   }
 
   get sessionId(): string | undefined {
-    return this.coordinatedView?.sessionId ?? this.active?.id;
-  }
-
-  private async initialize(
-    inputCwd: string,
-    sessionId: string,
-    generation: number,
-    target: ConversationTarget,
-    signal: AbortSignal,
-  ): Promise<void> {
-    const validatedCwd = await validateCwd(inputCwd);
-    if (this.disposed || generation !== this.generation || signal.aborted) return;
-
-    const previous = this.active;
-    if (previous) {
-      this.active = undefined;
-      await this.disposeBundle(previous);
-      if (this.disposed || generation !== this.generation || signal.aborted) return;
-    }
-
-    const projectHandle = await this.projects.acquireProject(
-      validatedCwd,
-      "full_access",
-    );
-    const project = projectHandle.store;
-    const lifecycleAbort = new AbortController();
-    const abortLifecycle = () => lifecycleAbort.abort();
-    signal.addEventListener("abort", abortLifecycle, { once: true });
-    if (signal.aborted) lifecycleAbort.abort();
-    let selected: SelectedConversation | undefined;
-    let created: CreatedPiSession | undefined;
-    let ownershipTransferred = false;
-    try {
-      const initialMode = project.toolMode;
-      selected = await this.selectConversation(project, target, signal);
-      if (this.disposed || generation !== this.generation || signal.aborted) return;
-      created = await this.runtime.createSession(project.cwd, {
-        sessionManager: selected.sessionManager,
-        toolMode: initialMode,
-        extensionUI: this.extensionUI.context({
-          sessionId,
-          generation,
-          signal: lifecycleAbort.signal,
-        }),
-        extensionAbort: () => this.abortFromExtension(sessionId, generation),
-        toolCallGate: (input) => this.authorizeToolCall(
-          sessionId,
-          generation,
-          input,
-        ),
-      });
-      if (this.disposed || generation !== this.generation || signal.aborted) {
-        await created.dispose();
-        created = undefined;
-        return;
-      }
-
-      await created.activateExtensions();
-      if (this.disposed || generation !== this.generation || signal.aborted) {
-        await created.dispose();
-        created = undefined;
-        return;
-      }
-
-      const unsubscribe = created.session.subscribe((event) => {
-        this.onSessionEvent(sessionId, generation, event);
-      });
-      const unsubscribeProject = project.subscribe(() => {
-        this.publishState();
-        this.publishProjectSnapshot();
-      });
-      this.active = {
-        id: sessionId,
-        generation,
-        cwd: project.cwd,
-        session: created.session,
-        sessionManager: selected.sessionManager,
-        settings: created.settings,
-        modelRegistry: created.modelRegistry,
-        dynamicProviderNames: created.dynamicProviderNames,
-        project,
-        projectHandle,
-        conversationId: selected.conversationId,
-        focusId: randomUUID(),
-        conversationLease: selected.lease,
-        lifecycleAbort,
-        dispose: created.dispose,
-        unsubscribe,
-        unsubscribeProject,
-      };
-      ownershipTransferred = true;
-      const pendingExtensionErrors = created.activateExtensionErrors((error) => {
-        this.onExtensionError(sessionId, generation, error);
-      });
-
-      this.publishState();
-      this.publishProjectSnapshot();
-      const history = projectConversationHistorySnapshot(selected.sessionManager);
-      this.emit({
-        type: "conversation_snapshot",
-        sessionId,
-        conversationId: selected.conversationId,
-        focusId: this.active.focusId,
-        messages: history.messages,
-        window: history.window,
-      });
-      for (const error of pendingExtensionErrors) {
-        this.emitExtensionError(sessionId, error);
-      }
-    } catch (error) {
-      if (!ownershipTransferred && created) {
-        try {
-          await created.dispose();
-        } catch (disposeError) {
-          throw new AggregateError(
-            [error, disposeError],
-            "Failed to initialize and dispose Pi session",
-          );
-        }
-      }
-      throw error;
-    } finally {
-      signal.removeEventListener("abort", abortLifecycle);
-      if (!ownershipTransferred) {
-        lifecycleAbort.abort();
-        selected?.lease.release();
-        projectHandle.release();
-      }
-    }
-  }
-
-  private async selectConversation(
-    project: ProjectStore,
-    target: ConversationTarget,
-    signal: AbortSignal,
-  ): Promise<SelectedConversation> {
-    const conversations = await project.refreshConversations();
-    this.throwIfAborted(signal);
-    let conversationId: string | undefined;
-    if (target.kind === "open") {
-      conversationId = target.conversationId;
-    } else if (target.kind === "recent") {
-      const knownIds = new Set(conversations.map(({ id }) => id));
-      conversationId = project.lastConversationId
-        && knownIds.has(project.lastConversationId)
-        ? project.lastConversationId
-        : conversations[0]?.id;
-    }
-
-    if (conversationId !== undefined) {
-      const lease = await this.projects.acquireConversationWhenAvailable(
-        project.cwd,
-        conversationId,
-        { signal },
-      );
-      try {
-        this.throwIfAborted(signal);
-        return {
-          conversationId,
-          sessionManager: await project.openConversation(conversationId),
-          lease,
-        };
-      } catch (error) {
-        lease.release();
-        throw error;
-      }
-    }
-
-    this.throwIfAborted(signal);
-    conversationId = randomUUID();
-    const lease = this.projects.acquireConversation(project.cwd, conversationId);
-    try {
-      this.throwIfAborted(signal);
-      return {
-        conversationId,
-        sessionManager: await project.createConversation(conversationId),
-        lease,
-      };
-    } catch (error) {
-      lease.release();
-      throw error;
-    }
+    return this.coordinatedView?.sessionId;
   }
 
   handle(command: ConnectionCommand): Promise<void> {
-    if (this.coordinationProvider) {
-      return this.handleCoordinated(command);
-    }
-    if (command.type === "abort") return this.abort(command.sessionId, command.runId);
-    if (command.type === "extension_ui_response") {
-      this.extensionUI.respond(command);
-      return Promise.resolve();
-    }
-    if (command.type === "auth_response") {
-      if (this.authFlow?.id === command.authFlowId) this.authFlow.respond(command);
-      return Promise.resolve();
-    }
-    if (command.type === "cancel_auth") {
-      this.cancelAuth(command.authFlowId);
-      return Promise.resolve();
-    }
-    if (command.type === "close_session") return this.closeSession(command.sessionId);
-    if (command.type === "refresh_view") {
-      this.refreshLegacyView(command);
-      return Promise.resolve();
-    }
-    if (command.type === "steer") {
-      return Promise.reject(
-        new Error("steer requires persistent project coordination"),
-      );
-    }
-    if (command.type === "initialize") {
-      if (this.usedSessionIds.has(command.sessionId)) {
-        return Promise.reject(new Error("Session ID was already used on this connection"));
-      }
-      this.cancelManualRefresh("Model refresh cancelled by connection lifecycle");
-      this.initializationAbort?.abort();
-      const initializationAbort = new AbortController();
-      this.initializationAbort = initializationAbort;
-      this.usedSessionIds.add(command.sessionId);
-      this.runIdsBySession.set(command.sessionId, new Set());
-      const generation = ++this.generation;
-      this.requestedSessionId = command.sessionId;
-      this.cancelAuth();
-      const previousRun = this.activeRun;
-      const cancel = previousRun
-        ? this.cancelRun(previousRun).catch((error) => {
-            this.emitError("session", error, previousRun.sessionId);
-          })
-        : Promise.resolve();
-      return this.operations.run(async () => {
-        await cancel;
-        this.assertOpen();
-        if (generation !== this.generation) return;
-        try {
-          await this.initialize(
-            command.cwd,
-            command.sessionId,
-            generation,
-            command.conversation ?? { kind: "recent" },
-            initializationAbort.signal,
-          );
-        } catch (error) {
-          if (
-            initializationAbort.signal.aborted
-            || generation !== this.generation
-            || this.disposed
-          ) {
-            return;
-          }
-          const failed = this.active;
-          this.active = undefined;
-          this.requestedSessionId = undefined;
-          if (failed) await this.disposeBundle(failed);
-          throw error;
-        } finally {
-          if (this.initializationAbort === initializationAbort) {
-            this.initializationAbort = undefined;
-          }
-        }
-      });
-    }
-    if (command.type === "refresh_models" && this.manualRefresh) {
-      return Promise.reject(new Error("A model refresh is already pending"));
-    }
-    if (
-      command.type === "select_model"
-      || command.type === "set_api_key"
-      || command.type === "refresh_models"
-      || command.type === "delete_conversation"
-    ) {
-      if (this.usedCommandIds.has(command.commandId)) {
-        return Promise.reject(new Error("Command ID was already used on this connection"));
-      }
-      this.usedCommandIds.add(command.commandId);
-    }
-    if (command.type === "prompt") return this.queuePrompt(command);
-    if (command.type === "login_oauth") {
-      if (this.usedAuthFlowIds.has(command.authFlowId)) {
-        return Promise.reject(new Error("Auth flow ID was already used on this connection"));
-      }
-      this.cancelAuth();
-      this.usedAuthFlowIds.add(command.authFlowId);
-      this.pendingAuthFlowIds.add(command.authFlowId);
-    }
-
-    const generation = this.generation;
-    this.admitCredentialIntent(command, generation, false);
-    const manualRefresh = command.type === "refresh_models"
-      ? this.startManualRefresh()
-      : undefined;
-    const scope = queuedCommandScope(command);
-    const operation = this.operations.run(async () => {
-      try {
-        this.assertOpen();
-        if (scope !== "global" && generation !== this.generation) return;
-        if (scope === "session") {
-          if (!("sessionId" in command) || !this.isActiveSession(command.sessionId, generation)) return;
-        }
-        if (command.type === "login_oauth" && this.cancelledAuthFlowIds.has(command.authFlowId)) {
-          return;
-        }
-        if (manualRefresh?.cancelled || manualRefresh?.timedOut) return;
-        await this.execute(command, manualRefresh);
-        if (
-          command.type === "select_model"
-          || command.type === "set_api_key"
-          || command.type === "refresh_models"
-          || command.type === "delete_conversation"
-        ) {
-          this.emit({
-            type: "command_complete",
-            operation: command.type,
-            commandId: command.commandId,
-            sessionId: command.sessionId,
-          });
-        }
-      } finally {
-        if (command.type === "login_oauth") {
-          this.pendingAuthFlowIds.delete(command.authFlowId);
-          this.cancelledAuthFlowIds.delete(command.authFlowId);
-        }
-        this.credentialIntents.delete(command);
-      }
-    });
-    return manualRefresh
-      ? this.observeManualRefresh(operation, manualRefresh)
-      : operation;
-  }
-
-  private handleCoordinated(command: ConnectionCommand): Promise<void> {
     if (command.type === "extension_ui_response") {
       this.extensionUI.respond(command);
       return Promise.resolve();
@@ -688,6 +238,11 @@ export class PiConnection {
           command.conversationId,
           command.focusId,
         );
+        const activity = view.actor!.getActivity();
+        if (activity.kind === "idle" || activity.runId !== command.runId) {
+          return Promise.resolve();
+        }
+        this.extensionUI.cancelScope(view.sessionId, view.extensionScope);
         return this.requireCoordination().then(({ coordinator }) =>
           coordinator.abort(
             view.handle,
@@ -861,7 +416,7 @@ export class PiConnection {
     }
 
     const generation = this.generation;
-    this.admitCredentialIntent(command, generation, true);
+    this.admitCredentialIntent(command, generation);
     let transitionAbort: AbortController | undefined;
     if (
       command.type === "focus_conversation"
@@ -1364,11 +919,28 @@ export class PiConnection {
       case "rename_conversation": {
         const view = this.requireCoordinatedView(command.sessionId);
         const { coordinator } = await this.requireCoordination();
-        await coordinator.renameConversation(
-          view.handle,
-          command.conversationId,
-          command.name,
-        );
+        try {
+          await coordinator.renameConversation(
+            view.handle,
+            command.conversationId,
+            command.name,
+          );
+        } catch (error) {
+          const normalizedName = command.name.replace(/[\r\n]+/g, " ").trim();
+          if (
+            view.actor?.conversationId !== command.conversationId
+            || view.actor.sessionManager.getSessionName() !== normalizedName
+          ) {
+            throw error;
+          }
+          this.emitError(
+            "settings",
+            `对话名称已用于当前会话，但可能未保存到项目历史：${
+              this.errorMessage(error)
+            }`,
+            view.sessionId,
+          );
+        }
         this.publishCoordinatedState();
         this.publishProjectSnapshotCoordinated();
         return;
@@ -1484,11 +1056,6 @@ export class PiConnection {
 
   private requireCoordination(): Promise<PiConnectionCoordination> {
     this.assertOpen();
-    if (!this.coordinationProvider) {
-      return Promise.reject(
-        new Error("Project session coordination is unavailable"),
-      );
-    }
     this.coordinationReady ??= this.coordinationProvider().then(
       (coordination) => {
         if (this.disposed) {
@@ -2156,35 +1723,6 @@ export class PiConnection {
     }
   }
 
-  private refreshLegacyView(
-    command: Extract<ClientCommand, { type: "refresh_view" }>,
-  ): void {
-    const active = this.active;
-    if (
-      !active
-      || active.id !== this.requestedSessionId
-      || active.generation !== this.generation
-      || active.id !== command.sessionId
-      || active.project.id !== command.projectId
-      || active.conversationId !== command.conversationId
-      || active.focusId !== command.focusId
-    ) {
-      return;
-    }
-    this.publishState();
-    this.publishProjectSnapshot();
-    if (this.activeRun) return;
-    const history = projectConversationHistorySnapshot(active.sessionManager);
-    this.emit({
-      type: "conversation_snapshot",
-      sessionId: active.id,
-      conversationId: active.conversationId,
-      focusId: active.focusId,
-      messages: history.messages,
-      window: history.window,
-    });
-  }
-
   private requireCoordinatedFocus(
     sessionId: string,
     conversationId: string,
@@ -2254,226 +1792,6 @@ export class PiConnection {
         failures,
         "Failed to detach project observation",
       );
-    }
-  }
-
-  private async execute(
-    command: QueuedCommand,
-    manualRefresh?: ManualModelRefresh,
-  ): Promise<void> {
-    switch (command.type) {
-      case "select_model": return this.selectModel(command.provider, command.modelId);
-      case "set_thinking": return this.setThinking(command.level);
-      case "set_compaction_threshold":
-        throw new Error(
-          "set_compaction_threshold requires persistent project coordination",
-        );
-      case "set_service_tier":
-        throw new Error(
-          "set_service_tier requires persistent project coordination",
-        );
-      case "compact_context":
-        throw new Error(
-          "compact_context requires persistent project coordination",
-        );
-      case "switch_conversation_role":
-        throw new Error(
-          "switch_conversation_role requires persistent project coordination",
-        );
-      case "rename_conversation":
-        return this.renameConversation(command.conversationId, command.name);
-      case "delete_conversation":
-        return this.deleteConversation(command.conversationId);
-      case "truncate_conversation":
-        throw new Error(
-          "truncate_conversation requires persistent project coordination",
-        );
-      case "focus_conversation":
-      case "create_conversation":
-      case "create_role":
-      case "update_role":
-      case "delete_role":
-        throw new Error(`${command.type} is unavailable until project coordination is initialized`);
-      case "set_api_key": return this.setApiKey(
-        command.provider,
-        command.key,
-        this.takeCredentialIntent(command),
-      );
-      case "login_oauth": return this.loginOAuth(
-        command.provider,
-        command.authFlowId,
-        this.takeCredentialIntent(command),
-      );
-      case "logout": return this.logout(
-        command.provider,
-        this.takeCredentialIntent(command),
-      );
-      case "refresh_models": return this.refreshModels(manualRefresh);
-      default: return assertNever(command);
-    }
-  }
-
-  private queuePrompt(command: Extract<ClientCommand, { type: "prompt" }>): Promise<void> {
-    const generation = this.generation;
-    if (this.disposed) return Promise.reject(new Error("Connection is closed"));
-    if (this.requestedSessionId !== command.sessionId) {
-      return this.usedSessionIds.has(command.sessionId)
-        ? Promise.resolve()
-        : Promise.reject(new Error("Session was not initialized"));
-    }
-    const runIds = this.runIdsBySession.get(command.sessionId);
-    if (!runIds) return Promise.reject(new Error("Session was not initialized"));
-    if (runIds.has(command.runId)) {
-      return Promise.reject(new Error("Run ID was already used in this session"));
-    }
-    if (this.activeRun) return Promise.reject(new Error("Agent is already running"));
-    runIds.add(command.runId);
-
-    const ticket: RunTicket = {
-      id: command.runId,
-      sessionId: command.sessionId,
-      generation,
-      conversationId:
-        command.conversationId ?? this.active?.conversationId ?? "",
-      focusId: command.focusId ?? this.active?.focusId ?? "",
-      phase: "queued",
-      toolMode: this.active?.id === command.sessionId
-        && this.active.generation === generation
-        ? this.active.project.toolMode
-        : undefined,
-      projector: new SessionEventProjector(),
-    };
-    this.activeRun = ticket;
-    this.emitRun(ticket, { type: "run_queued" });
-    this.publishState();
-
-    return this.operations.run(async () => {
-      if (this.activeRun !== ticket) return;
-      if (!this.isActiveSession(ticket.sessionId, ticket.generation)) {
-        this.finishRun(ticket, "aborted");
-        return;
-      }
-
-      const active = this.requireActive();
-      if (this.isExtensionCommand(active.session, command.text)) {
-        this.finishRun(ticket, "failed");
-        throw new Error(
-          "Extension slash commands are not supported until their detached Agent turns can be owned safely",
-        );
-      }
-      ticket.toolMode ??= active.project.toolMode;
-      ticket.phase = "running";
-      this.emitRun(ticket, { type: "run_started" });
-      this.publishState();
-
-      try {
-        await this.requireSession().prompt(command.text, {
-          preflightResult: (accepted) => {
-            if (accepted && isCancelling(ticket)) {
-              throw new Error("Run cancelled before agent start");
-            }
-          },
-        });
-        const failure = ticket.extensionErrorMessage ?? ticket.projector.errorMessage;
-        if (failure) throw new Error(failure);
-        this.finishRun(ticket, isCancelling(ticket) || ticket.projector.aborted ? "aborted" : "completed");
-      } catch (error) {
-        const cancelled = isCancelling(ticket) || this.activeRun !== ticket;
-        this.finishRun(ticket, cancelled ? "aborted" : "failed");
-        if (!cancelled) throw error;
-      }
-    });
-  }
-
-  private async selectModel(provider: string, modelId: string): Promise<void> {
-    const active = this.requireActive();
-    const model = active.modelRegistry.find(provider, modelId);
-    if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
-    const partialFailures: unknown[] = [];
-    try {
-      await active.session.setModel(model);
-    } catch (error) {
-      if (active.session.model !== model) throw error;
-      partialFailures.push(error);
-    }
-    const settingsFailures = await this.flushSettings();
-    this.publishState();
-    for (const failure of settingsFailures) {
-      this.emitError("settings", failure, active.id);
-    }
-    if (partialFailures.length > 0) {
-      const details = partialFailures.map((error) => this.errorMessage(error)).join("; ");
-      this.emitError(
-        "settings",
-        `模型已用于当前会话，但会话记录或默认设置可能未保存：${details}`,
-        active.id,
-      );
-    }
-  }
-
-  private async setThinking(level: ThinkingLevel): Promise<void> {
-    const active = this.requireActive();
-    const previousLevel = active.session.thinkingLevel;
-    let partialFailure: unknown;
-    try {
-      active.session.setThinkingLevel(level);
-    } catch (error) {
-      if (active.session.thinkingLevel === previousLevel) throw error;
-      partialFailure = error;
-    }
-    const settingsFailures = await this.flushSettings();
-    this.publishState();
-    for (const failure of settingsFailures) {
-      this.emitError("settings", failure, active.id);
-    }
-    if (partialFailure) {
-      this.emitError(
-        "settings",
-        `思考级别已用于当前会话，但会话记录或默认设置可能未保存：${this.errorMessage(partialFailure)}`,
-        active.id,
-      );
-    }
-  }
-
-  private async renameConversation(conversationId: string, name: string): Promise<void> {
-    const active = this.requireActive();
-    if (active.conversationId !== conversationId) {
-      throw new Error("Conversation is not active");
-    }
-    const normalizedName = name.replace(/[\r\n]+/g, " ").trim();
-    const partialFailures: unknown[] = [];
-    try {
-      active.session.setSessionName(name);
-    } catch (error) {
-      if (active.sessionManager.getSessionName() !== normalizedName) throw error;
-      partialFailures.push(error);
-    }
-    try {
-      await active.project.refreshConversations();
-    } catch (error) {
-      partialFailures.push(error);
-    }
-    this.publishState();
-    if (partialFailures.length > 0) {
-      const details = partialFailures.map((error) => this.errorMessage(error)).join("; ");
-      this.emitError(
-        "settings",
-        `对话名称已用于当前会话，但可能未保存到项目历史：${details}`,
-        active.id,
-      );
-    }
-  }
-
-  private async deleteConversation(conversationId: string): Promise<void> {
-    const active = this.requireActive();
-    if (active.conversationId === conversationId) {
-      throw new Error("Cannot delete the active conversation");
-    }
-    const lease = this.projects.acquireConversation(active.cwd, conversationId);
-    try {
-      await active.project.deleteConversation(conversationId);
-    } finally {
-      lease.release();
     }
   }
 
@@ -2635,20 +1953,13 @@ export class PiConnection {
   private admitCredentialIntent(
     command: ConnectionCommand,
     generation: number,
-    coordinated: boolean,
   ): void {
     if (this.disposed) return;
     let provider: string | undefined;
     let includeOAuth = false;
     switch (command.type) {
       case "set_api_key":
-        if (
-          !(
-            coordinated
-              ? this.isCoordinatedSession(command.sessionId, generation)
-              : this.isActiveSession(command.sessionId, generation)
-          )
-        ) return;
+        if (!this.isCoordinatedSession(command.sessionId, generation)) return;
         provider = command.provider;
         break;
       case "login_oauth":
@@ -2673,20 +1984,14 @@ export class PiConnection {
   }
 
   private isKnownProvider(provider: string, includeOAuth = false): boolean {
-    const active = this.active;
     const view = this.coordinatedView;
     const actor = view?.actor;
-    const registry =
-      actor?.modelRegistry
-      ?? active?.modelRegistry
-      ?? (
-        view
-          ? view.coordinator.modelRegistryForProject(view.handle)
-          : this.runtime.modelRegistry
-      );
+    const registry = actor?.modelRegistry
+      ?? (view
+        ? view.coordinator.modelRegistryForProject(view.handle)
+        : this.runtime.modelRegistry);
     const modelProvider = registry.getAll().some((model) => model.provider === provider)
-      || actor?.dynamicProviderNames().has(provider) === true
-      || active?.dynamicProviderNames().has(provider) === true;
+      || actor?.dynamicProviderNames().has(provider) === true;
     const oauthProvider = includeOAuth && this.isVisibleOAuthProvider(provider);
     return modelProvider || oauthProvider;
   }
@@ -2695,198 +2000,6 @@ export class PiConnection {
     if (!this.isKnownProvider(provider, includeOAuth)) {
       throw new Error(`Provider not found: ${provider}`);
     }
-  }
-
-  private state(): PublicState {
-    const active = this.requireActive();
-    const { session } = active;
-    const activeRun = this.activeRun?.sessionId === active.id
-      && this.activeRun.generation === active.generation
-      ? this.activeRun
-      : undefined;
-    const registry = active.modelRegistry;
-    const available = registry.getAvailable();
-    const oauthProviders = this.visibleOAuthProviders();
-    const stats = session.getSessionStats();
-    const contextUsage = resolveContextUsage({
-      contextWindow: session.model?.contextWindow ?? null,
-      messages: session.messages,
-      nativeUsage: stats.contextUsage,
-    });
-    return {
-      sessionId: active.id,
-      projectId: active.project.id,
-      conversationId: active.conversationId,
-      focusId: active.focusId,
-      conversationName: active.sessionManager.getSessionName() ?? undefined,
-      cwd: active.cwd,
-      busy: Boolean(activeRun),
-      activeRun: activeRun ? {
-        id: activeRun.id,
-        phase: activeRun.phase,
-      } : undefined,
-      selectedModel: session.model && registry.hasConfiguredAuth(session.model)
-        ? { provider: session.model.provider, id: session.model.id }
-        : undefined,
-      selectedServiceTier: null,
-      thinkingLevel: session.thinkingLevel as ThinkingLevel,
-      toolMode: active.project.toolMode,
-      availableThinkingLevels: session.getAvailableThinkingLevels() as ThinkingLevel[],
-      providers: buildPublicProviders({
-        models: registry.getAll(),
-        registeredProviderIds: registry.getRegisteredProviderIds(),
-        availableKeys: new Set(available.map((model) => `${model.provider}/${model.id}`)),
-        oauthProviders,
-        displayName: (provider) => registry.getProviderDisplayName(provider),
-        authStatus: (provider) => registry.getProviderAuthStatus(provider),
-      }),
-      registryError: registry.getError(),
-      sessionTokenUsage: {
-        input: stats.tokens.input,
-        output: stats.tokens.output,
-        cacheRead: stats.tokens.cacheRead,
-        cacheWrite: stats.tokens.cacheWrite,
-        total: stats.tokens.total,
-      },
-      contextUsage,
-    };
-  }
-
-  private publishState(): void {
-    const active = this.active;
-    if (
-      !this.disposed
-      && active
-      && active.id === this.requestedSessionId
-      && active.generation === this.generation
-    ) {
-      this.emit({ type: "state", state: this.state() });
-    }
-  }
-
-  private publishProjectSnapshot(): void {
-    const active = this.active;
-    if (
-      this.disposed
-      || !active
-      || active.id !== this.requestedSessionId
-      || active.generation !== this.generation
-    ) {
-      return;
-    }
-    this.emit(boundedProjectSnapshotEvent({
-      sessionId: active.id,
-      projectId: active.project.id,
-      conversationId: active.conversationId,
-      conversations: active.project.listConversations(),
-    }));
-  }
-
-  private requireSession(): AgentSession {
-    return this.requireActive().session;
-  }
-
-  private requireSettings(): SettingsManager {
-    return this.requireActive().settings;
-  }
-
-  private requireActive(): ActiveSession {
-    if (!this.active) throw new Error("Choose a working directory first");
-    return this.active;
-  }
-
-  private async flushSettings(): Promise<unknown[]> {
-    let failure: unknown;
-    try {
-      await this.requireSettings().flush();
-    } catch (error) {
-      failure = error;
-    }
-    const failures: unknown[] = [];
-    const reported = new Set<unknown>();
-    for (const item of this.active?.settings.drainErrors() ?? []) {
-      reported.add(item.error);
-      failures.push(item.error);
-    }
-    if (failure && !reported.has(failure)) failures.push(failure);
-    return failures;
-  }
-
-  private isActiveSession(sessionId: string, generation: number): boolean {
-    return !this.disposed
-      && this.requestedSessionId === sessionId
-      && this.generation === generation
-      && this.active?.id === sessionId
-      && this.active.generation === generation;
-  }
-
-  private onSessionEvent(sessionId: string, generation: number, event: AgentSessionEvent): void {
-    if (!this.isActiveSession(sessionId, generation)) return;
-    const run = this.activeRun;
-    if (
-      !run
-      || run.sessionId !== sessionId
-      || run.generation !== generation
-      || run.phase === "queued"
-    ) {
-      if (event.type === "agent_start") {
-        const active = this.active;
-        if (active?.id === sessionId && active.generation === generation) {
-          void active.session.abort().catch((error) => {
-            this.emitError("session", error, sessionId);
-          });
-          this.emitError(
-            "session",
-            "An extension started an Agent turn outside the workbench run lifecycle; it was stopped",
-            sessionId,
-          );
-        }
-      }
-      return;
-    }
-
-    for (const projected of run.projector.project(event)) {
-      this.emit({
-        type: "session_event",
-        sessionId,
-        conversationId: run.conversationId,
-        focusId: run.focusId,
-        runId: run.id,
-        event: projected,
-      });
-    }
-    if (event.type === "agent_start" || event.type === "agent_settled" || event.type === "agent_end" || event.type === "message_end") {
-      this.publishState();
-    }
-  }
-
-  private onExtensionError(sessionId: string, generation: number, error: ExtensionError): void {
-    if (
-      this.disposed
-      || this.requestedSessionId !== sessionId
-      || this.generation !== generation
-    ) return;
-
-    const run = this.activeRun;
-    const message = this.formatExtensionError(error);
-    if (
-      run
-      && run.sessionId === sessionId
-      && run.generation === generation
-      && run.phase !== "queued"
-    ) {
-      run.extensionErrorMessage ??= message;
-      return;
-    }
-    this.emitError("session", message, sessionId);
-  }
-
-  private emitExtensionError(sessionId: string, error: ExtensionError): void {
-    this.emitError("session", this.formatExtensionError(error), sessionId);
-  }
-
-  private formatExtensionError(error: ExtensionError): string {
-    return `Extension error in ${error.event} (${error.extensionPath}): ${error.error}`;
   }
 
   private visibleOAuthProviders(): Map<string, string> {
@@ -2900,63 +2013,6 @@ export class PiConnection {
 
   private isVisibleOAuthProvider(provider: string): boolean {
     return this.visibleOAuthProviders().has(provider);
-  }
-
-  private async authorizeToolCall(
-    sessionId: string,
-    generation: number,
-    input: ToolCallGateInput,
-  ): Promise<{ block?: boolean; reason?: string } | undefined> {
-    const ticket = this.activeRun;
-    if (
-      !ticket
-      || ticket.phase !== "running"
-      || ticket.sessionId !== sessionId
-      || ticket.generation !== generation
-      || !this.isActiveSession(sessionId, generation)
-    ) {
-      return { block: true, reason: "No active run owns this tool call" };
-    }
-    const active = this.requireActive();
-    let preparedArgs: unknown;
-    try {
-      preparedArgs = snapshotWireValue(input.args);
-    } catch {
-      preparedArgs = undefined;
-    }
-    this.emitRun(ticket, {
-      type: "tool_prepared",
-      toolCallId: input.toolCallId,
-      ...(preparedArgs === undefined ? {} : { args: preparedArgs }),
-    });
-
-    let policy: ToolPolicyDecision;
-    try {
-      policy = await this.toolPolicy({
-        mode: mostRestrictiveToolMode(
-          ticket.toolMode ?? "read_only",
-          active.project.toolMode,
-        ),
-        toolName: input.toolName,
-        toolSource: input.toolSource,
-      });
-    } catch (error) {
-      this.emitError("session", `Tool policy failed: ${this.errorMessage(error)}`, sessionId);
-      return { block: true, reason: "Tool policy failed; execution was blocked" };
-    }
-    if (
-      input.signal?.aborted
-      || this.activeRun !== ticket
-      || ticket.phase !== "running"
-      || !this.isActiveSession(sessionId, generation)
-    ) {
-      return { block: true, reason: "Run cancelled before tool execution" };
-    }
-
-    if (policy.action === "deny") {
-      return { block: true, reason: policy.reason };
-    }
-    return undefined;
   }
 
   private emitError(scope: "auth" | "session" | "settings", error: unknown, sessionId?: string): void {
@@ -2979,89 +2035,6 @@ export class PiConnection {
     throw error;
   }
 
-  private emitRun(ticket: RunTicket, event: SessionEvent): void {
-    if (this.disposed) return;
-    this.emit({
-      type: "session_event",
-      sessionId: ticket.sessionId,
-      conversationId: ticket.conversationId,
-      focusId: ticket.focusId,
-      runId: ticket.id,
-      event,
-    });
-  }
-
-  private finishRun(
-    ticket: RunTicket,
-    outcome: Extract<SessionEvent, { type: "run_finished" }>["outcome"],
-  ): void {
-    if (this.activeRun !== ticket) return;
-    this.extensionUI.cancelScope(ticket.sessionId, ticket.generation);
-    this.activeRun = undefined;
-    this.emitRun(ticket, { type: "run_finished", outcome });
-    this.publishState();
-    const active = this.active;
-    if (
-      active
-      && active.id === ticket.sessionId
-      && active.generation === ticket.generation
-    ) {
-      void active.project.refreshConversations().catch((error) => {
-        this.emitError("session", error, ticket.sessionId);
-      });
-    }
-  }
-
-  private abort(sessionId: string, runId: string): Promise<void> {
-    const ticket = this.activeRun;
-    if (!ticket || ticket.sessionId !== sessionId || ticket.id !== runId) return Promise.resolve();
-    return this.cancelRun(ticket);
-  }
-
-  private abortFromExtension(sessionId: string, generation: number): void {
-    const ticket = this.activeRun;
-    if (
-      !ticket
-      || ticket.sessionId !== sessionId
-      || ticket.generation !== generation
-    ) {
-      return;
-    }
-    void this.cancelRun(ticket).catch((error) => {
-      this.emitError("session", error, sessionId);
-    });
-  }
-
-  private isExtensionCommand(session: AgentSession, text: string): boolean {
-    if (!text.startsWith("/")) return false;
-    const spaceIndex = text.indexOf(" ");
-    const commandName = spaceIndex === -1
-      ? text.slice(1)
-      : text.slice(1, spaceIndex);
-    return session.extensionRunner.getCommand(commandName) !== undefined;
-  }
-
-  private cancelRun(ticket: RunTicket): Promise<void> {
-    if (this.activeRun !== ticket) return Promise.resolve();
-    this.extensionUI.cancelScope(ticket.sessionId, ticket.generation);
-    if (ticket.phase === "queued") {
-      ticket.phase = "cancelling";
-      this.finishRun(ticket, "aborted");
-      return Promise.resolve();
-    }
-    if (ticket.phase === "cancelling") return ticket.abortPromise ?? Promise.resolve();
-
-    ticket.phase = "cancelling";
-    this.publishState();
-    const active = this.active;
-    if (!active || active.id !== ticket.sessionId || active.generation !== ticket.generation) {
-      this.finishRun(ticket, "aborted");
-      return Promise.resolve();
-    }
-    ticket.abortPromise = Promise.resolve().then(() => active.session.abort());
-    return ticket.abortPromise;
-  }
-
   private cancelAuth(authFlowId?: string): void {
     if (authFlowId) {
       if (this.pendingAuthFlowIds.has(authFlowId)) this.cancelledAuthFlowIds.add(authFlowId);
@@ -3075,95 +2048,12 @@ export class PiConnection {
     this.authFlow = undefined;
   }
 
-  private closeSession(sessionId: string): Promise<void> {
-    if (this.requestedSessionId !== sessionId) return Promise.resolve();
-
-    this.cancelManualRefresh("Model refresh cancelled by connection lifecycle");
-    this.generation++;
-    this.requestedSessionId = undefined;
-    this.initializationAbort?.abort();
-    this.initializationAbort = undefined;
-    this.cancelAuth();
-    const ticket = this.activeRun;
-    const cancel = ticket
-      ? this.cancelRun(ticket).catch((error) => this.emitError("session", error, ticket.sessionId))
-      : Promise.resolve();
-
-    return this.operations.run(async () => {
-      await cancel;
-      const active = this.active;
-      this.active = undefined;
-      if (active) await this.disposeBundle(active);
-    });
-  }
-
-  private disposeBundle(bundle: ActiveSession): Promise<void> {
-    if (bundle.disposePromise) return bundle.disposePromise;
-    bundle.disposePromise = (async () => {
-      const failures: unknown[] = [];
-      bundle.lifecycleAbort.abort();
-      try {
-        bundle.unsubscribe();
-      } catch (error) {
-        failures.push(error);
-      }
-      try {
-        bundle.unsubscribeProject();
-      } catch (error) {
-        failures.push(error);
-      }
-      try {
-        await bundle.dispose();
-      } catch (error) {
-        failures.push(error);
-      }
-      try {
-        bundle.conversationLease.release();
-      } catch (error) {
-        failures.push(error);
-      }
-      try {
-        bundle.projectHandle.release();
-      } catch (error) {
-        failures.push(error);
-      }
-      if (failures.length > 0) {
-        throw new AggregateError(failures, "Failed to dispose Pi session bundle");
-      }
-    })();
-    return bundle.disposePromise;
-  }
-
   private assertOpen(): void {
     if (this.disposed) throw new Error("Connection is closed");
   }
 
   dispose(): Promise<void> {
     this.cancelManualRefresh("Model refresh cancelled by connection lifecycle");
-    if (this.coordinationProvider) {
-      return this.disposeCoordinated();
-    }
-    if (this.disposePromise) return this.disposePromise;
-    this.disposed = true;
-    this.generation++;
-    this.requestedSessionId = undefined;
-    this.initializationAbort?.abort();
-    this.initializationAbort = undefined;
-    this.unsubscribeRuntime();
-    this.cancelAuth();
-    this.extensionUI.cancelAll();
-    const ticket = this.activeRun;
-    const cancel = ticket ? this.cancelRun(ticket).catch(() => undefined) : Promise.resolve();
-    this.disposePromise = this.operations.run(async () => {
-      await cancel;
-      const active = this.active;
-      this.active = undefined;
-      if (active) await this.disposeBundle(active);
-    });
-    return this.disposePromise;
-  }
-
-  private disposeCoordinated(): Promise<void> {
     if (this.disposePromise) return this.disposePromise;
     this.disposed = true;
     this.generation++;

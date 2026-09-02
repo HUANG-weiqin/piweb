@@ -27,10 +27,10 @@ const CONVERSATION_ID_PATTERN =
 export const MAX_NOTE_TITLE_CHARS = 160;
 export const MAX_NOTE_CONTENT_BYTES = 32 * 1024;
 export const MAX_NOTE_COUNT = 128;
-export const MAX_NOTEBOOK_LIST_NOTES = 100;
-export const MAX_NOTEBOOK_GREP_MATCHES = 50;
+const MAX_NOTEBOOK_LIST_NOTES = 100;
+const MAX_NOTEBOOK_GREP_MATCHES = 50;
 export const MAX_NOTEBOOK_READ_TITLES = 8;
-export const MAX_NOTEBOOK_READ_BYTES = 64 * 1024;
+const MAX_NOTEBOOK_READ_BYTES = 64 * 1024;
 
 const MAX_NOTEBOOK_FILE_BYTES = MAX_NOTE_COUNT * (
   MAX_NOTE_CONTENT_BYTES + MAX_NOTE_TITLE_CHARS + 256
@@ -40,7 +40,7 @@ const SNIPPET_CHARS = 200;
 
 export type NotebookStatus = "active" | "archived" | "all";
 
-export interface NotebookNote {
+interface NotebookNote {
   title: string;
   content: string;
   archived: boolean;
@@ -68,7 +68,7 @@ export interface NotebookListResult {
   truncated: boolean;
 }
 
-export interface NotebookGrepMatch {
+interface NotebookGrepMatch {
   title: string;
   archived: boolean;
   field: "title" | "content";
@@ -84,7 +84,7 @@ export interface NotebookGrepResult {
   truncated: boolean;
 }
 
-export interface NotebookReadNote extends NotebookNoteMetadata {
+interface NotebookReadNote extends NotebookNoteMetadata {
   content: string;
   truncated: boolean;
 }

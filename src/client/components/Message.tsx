@@ -115,6 +115,20 @@ function useStreamingMarkdownParts(text: string): StreamingMarkdownParts {
   return useMemo(() => splitter.update(text), [splitter, text]);
 }
 
+type MermaidSourceAnalysis = ReturnType<typeof getMermaidSourceAnalysis>;
+
+function getCachedMermaidAnalysis(
+  cache: Map<string, MermaidSourceAnalysis>,
+  text: string,
+): MermaidSourceAnalysis {
+  const cached = cache.get(text);
+  if (cached) return cached;
+  const analysis = getMermaidSourceAnalysis(text);
+  if (cache.size >= 16) cache.clear();
+  cache.set(text, analysis);
+  return analysis;
+}
+
 const StreamingMarkdownBlock = memo(function StreamingMarkdownBlock({
   markdown,
   renderMermaid,
@@ -162,19 +176,11 @@ function StreamingMarkdown({
   let mermaidBlockCount = 0;
   let mermaidSourceLength = 0;
 
-  function cachedAnalysis(block: string): ReturnType<typeof getMermaidSourceAnalysis> {
-    const cache = analysisCacheRef.current;
-    const cached = cache.get(block);
-    if (cached) return cached;
-    const analysis = getMermaidSourceAnalysis(block);
-    if (cache.size >= 16) cache.clear();
-    cache.set(block, analysis);
-    return analysis;
-  }
-
   return <div className="markdown streaming-markdown">
     {stableBlocks.map((block, index) => {
-      const analysis = renderMermaid ? cachedAnalysis(block) : undefined;
+      const analysis = renderMermaid
+        ? getCachedMermaidAnalysis(analysisCacheRef.current, block)
+        : undefined;
       const mermaidMaxBlocksForBlock = Math.max(
         0,
         mermaidMaxBlocks - mermaidBlockCount,
@@ -629,18 +635,6 @@ function MessageView({
   let remainingMermaidBlocks = MERMAID_MAX_BLOCKS_PER_CONTENT;
   let remainingMermaidSourceLength = MERMAID_MAX_TOTAL_SOURCE_LENGTH;
 
-  function cachedMermaidAnalysis(
-    text: string,
-  ): ReturnType<typeof getMermaidSourceAnalysis> {
-    const cache = mermaidSourceCacheRef.current;
-    const cached = cache.get(text);
-    if (cached) return cached;
-    const analysis = getMermaidSourceAnalysis(text);
-    if (cache.size >= 16) cache.clear();
-    cache.set(text, analysis);
-    return analysis;
-  }
-
   function renderResponseBody(text: string, index: number): ReactNode {
     const showingStreamingText = streamingText && index === lastTextIndex;
     const renderMermaid = !collapsed || enhancedResponseIndexes.has(index);
@@ -649,7 +643,10 @@ function MessageView({
     if (!showingStreamingText) {
       let usedBlocks = 0;
       let usedSourceLength = 0;
-      for (const sourceLength of cachedMermaidAnalysis(text).sourceLengths) {
+      for (const sourceLength of getCachedMermaidAnalysis(
+        mermaidSourceCacheRef.current,
+        text,
+      ).sourceLengths) {
         if (
           usedBlocks >= mermaidMaxBlocks
           || usedSourceLength + sourceLength > mermaidMaxTotalSourceLength

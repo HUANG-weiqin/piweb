@@ -1,6 +1,6 @@
 import type { ToolMode } from "../shared/protocol.js";
 
-export interface ToolPolicyContext {
+interface ToolPolicyContext {
   mode: ToolMode;
   toolName: string;
   toolSource: string;

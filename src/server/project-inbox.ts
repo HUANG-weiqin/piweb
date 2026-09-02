@@ -26,15 +26,15 @@ import {
 } from "./conversation-meta.js";
 import { SerialTaskQueue } from "./serial-task-queue.js";
 
-export const INBOX_ENVELOPE_VERSION = 1;
-export const INBOX_TARGET_TOMBSTONE_VERSION = 1;
+const INBOX_ENVELOPE_VERSION = 1;
+const INBOX_TARGET_TOMBSTONE_VERSION = 1;
 export const MAX_INBOX_MESSAGES_PER_PROJECT = 256;
 export const MAX_INBOX_MESSAGES_PER_TARGET = 64;
-export const MAX_INBOX_TOMBSTONES_PER_PROJECT = 1_024;
+const MAX_INBOX_TOMBSTONES_PER_PROJECT = 1_024;
 export const MAX_INBOX_TOTAL_BYTES = 32 * 1024 * 1024;
 // Canonical tombstones are bounded independently so a full envelope
 // reservation can always create a deletion fence.
-export const MAX_INBOX_TOMBSTONE_TOTAL_BYTES = 1 * 1024 * 1024;
+const MAX_INBOX_TOMBSTONE_TOTAL_BYTES = 1 * 1024 * 1024;
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;

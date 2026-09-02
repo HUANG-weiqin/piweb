@@ -167,14 +167,13 @@ export interface ConversationActorCompletion {
 }
 
 /** 一次 busy 期间被 SDK steering 队列接受的浏览器 prompt（内存态，重启丢失为接受项）。 */
-export interface PendingPromptAdmission {
+interface PendingPromptAdmission {
   promptId: string;
   text: string;
-  createdAt: string;
 }
 
 /** 每个对话同时等待投递的上限（防连点打爆内存）。 */
-export const MAX_PENDING_ADMISSIONS = 64;
+const MAX_PENDING_ADMISSIONS = 64;
 
 export interface ConversationActorOpenOptions {
   conversationId: string;
@@ -1467,7 +1466,6 @@ export class ConversationActor {
     const admission: PendingPromptAdmission = {
       promptId: input.promptId,
       text: input.text,
-      createdAt: this.now().toISOString(),
     };
     this.pendingAdmissions.push(admission);
     let accepted = false;
@@ -1555,10 +1553,9 @@ export class ConversationActor {
 
   /** 当前等待投递的浏览器 prompt（快照/恢复用）。 */
   pendingPromptAdmissions(): readonly PendingPromptAdmission[] {
-    return this.pendingAdmissions.map(({ promptId, text, createdAt }) => ({
+    return this.pendingAdmissions.map(({ promptId, text }) => ({
       promptId,
       text,
-      createdAt,
     }));
   }
 

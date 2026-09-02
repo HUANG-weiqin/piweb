@@ -160,8 +160,6 @@ export function attachSocketServer(
     const connection = new PiConnection(
       (event) => safeSend(socket, event),
       runtime,
-      undefined,
-      projects,
       coordination,
     );
     connections.set(socket, connection);

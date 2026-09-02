@@ -31,7 +31,7 @@ export const META_OPERATION_CUSTOM_TYPE =
 export const COMPACTION_THRESHOLD_CUSTOM_TYPE =
   "piweb.compaction_threshold.v1";
 export const SERVICE_TIER_CUSTOM_TYPE = "piweb.service_tier.v1";
-export const COMPACTION_RESUME_CUSTOM_TYPE =
+const COMPACTION_RESUME_CUSTOM_TYPE =
   "piweb.compaction_resume.v1";
 export const LEGACY_LOOP_LIST_CUSTOM_TYPE = "piweb.loop_list.v1";
 export const LOOP_LIST_CUSTOM_TYPE = "piweb.loop_list.v2";
@@ -44,8 +44,8 @@ export const CONVERSATION_ROLE_CHANGE_CUSTOM_TYPE =
 export const TEMPORARY_RETURN_RECEIPT_CUSTOM_TYPE =
   "piweb.temporary_return_receipt.v1";
 
-export const MAX_ROLE_NAME_CHARACTERS = 80;
-export const MAX_ROLE_DESCRIPTION_CHARACTERS = 1_000;
+const MAX_ROLE_NAME_CHARACTERS = 80;
+const MAX_ROLE_DESCRIPTION_CHARACTERS = 1_000;
 export const MAX_ROLE_SYSTEM_PROMPT_BYTES = 128 * 1024;
 export const MAX_CONVERSATION_BODY_BYTES = 256 * 1024;
 export const MAX_CONVERSATION_MESSAGE_CONTENT_BYTES =
@@ -789,8 +789,6 @@ const rawCustomMessageEntrySchema = z.object({
 export type ConversationKind = z.infer<typeof conversationKindSchema>;
 export type ConversationReferenceSnapshot =
   z.infer<typeof conversationReferenceSnapshotSchema>;
-export type ConversationRoleSnapshot = z.infer<typeof roleSnapshotSchema>;
-export type ConversationCreatedBy = z.infer<typeof createdBySchema>;
 export type ConversationMeta = z.infer<typeof conversationMetaSchema>;
 export type ConversationOrchestration = z.infer<typeof orchestrationSchema>;
 export type ConversationMetaEntry =
@@ -1011,7 +1009,7 @@ export function createLoopListContinueEntry(input: {
   });
 }
 
-export function parseCompactionResumeEntry(
+function parseCompactionResumeEntry(
   value: unknown,
 ): CompactionResumeEntry {
   return compactionResumeEntrySchema.parse(value);

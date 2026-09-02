@@ -7,20 +7,20 @@ import { MAX_PROJECT_CONVERSATION_NAME_CHARACTERS } from "../shared/protocol.js"
 import { MAX_CONVERSATION_BODY_BYTES } from "./conversation-meta.js";
 import { MAX_ROLE_SYSTEM_PROMPT_BYTES } from "./role-store.js";
 
-export interface MetaToolSessionRef {
+interface MetaToolSessionRef {
   conversationId: string;
   runId: string;
 }
 
-export interface MetaToolExactWaitInput extends MetaToolSessionRef {
+interface MetaToolExactWaitInput extends MetaToolSessionRef {
   singleWaitCommitment?: string;
 }
 
-export type MetaToolWaitInput =
+type MetaToolWaitInput =
   | MetaToolExactWaitInput
   | { targets: readonly MetaToolSessionRef[] };
 
-export const MAX_SINGLE_WAIT_COMMITMENT_CHARACTERS = 1_000;
+const MAX_SINGLE_WAIT_COMMITMENT_CHARACTERS = 1_000;
 
 export type MetaToolSessionScope = "all" | "created_by_me";
 
