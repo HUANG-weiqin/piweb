@@ -53,6 +53,12 @@ const COMPACT_NUMBER_FORMAT = new Intl.NumberFormat("en-US", {
   maximumSignificantDigits: 3,
   useGrouping: false,
 });
+const TIMELINE_TIME_FORMAT = new Intl.DateTimeFormat("en-GB", {
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
 
 function distanceFromBottom(transcript: HTMLElement): number {
   return Math.max(
@@ -101,6 +107,8 @@ interface ChatProps {
   conversationContext?: {
     rootTitle: string;
     currentTitle?: string;
+    ordinal?: number;
+    agentCount?: number;
   };
   online: boolean;
   /** Transport is online, but focus-bound server controls may be frozen. */
@@ -131,6 +139,13 @@ function formatCompactTokens(tokens: number): string {
   if (tokens >= 1_000_000) return `${format(tokens / 1_000_000)}M`;
   if (tokens >= 1_000) return `${format(tokens / 1_000)}k`;
   return Math.round(tokens).toLocaleString("zh-CN");
+}
+
+function formatTimelineTime(timestamp: string): string {
+  const date = new Date(timestamp);
+  return Number.isNaN(date.valueOf())
+    ? timestamp
+    : TIMELINE_TIME_FORMAT.format(date);
 }
 
 type TranscriptBlock =
@@ -319,6 +334,13 @@ function ChatView({
   else if (compacting) composerPlaceholder = "正在压缩上下文…";
   else if (!model) composerPlaceholder = "请先登录并选择模型";
   else if (busy) composerPlaceholder = "发送后将排队等待处理…";
+  let conversationStatus = "IDLE";
+  if (compacting) conversationStatus = "COMPACTING";
+  else if (activeRun?.phase === "running") conversationStatus = "IN PROGRESS";
+  else if (activeRun?.phase === "queued") conversationStatus = "QUEUED";
+  else if (activeRun?.phase === "waiting") conversationStatus = "WAITING";
+  else if (activeRun?.phase === "cancelling") conversationStatus = "CANCELLING";
+  else if (busy) conversationStatus = "ACTIVE";
   const transcriptRef = useRef<HTMLElement>(null);
   const composerWrapRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -351,6 +373,18 @@ function ChatView({
   );
   const items = chat.items;
   const blocks = useMemo(() => transcriptBlocks(items), [items]);
+  const activeAssistantMessageId = useMemo(() => {
+    if (!activeRun) return undefined;
+    for (let index = blocks.length - 1; index >= 0; index -= 1) {
+      const block = blocks[index];
+      if (
+        block?.kind === "message"
+        && block.message.role === "assistant"
+        && block.message.runId === activeRun.id
+      ) return block.message.id;
+    }
+    return undefined;
+  }, [activeRun, blocks]);
   const editBudgetRemainingByRun = useMemo(
     () => editBudgetRemainingFilesByRun(blocks),
     [blocks],
@@ -584,26 +618,54 @@ function ChatView({
       {conversationContext && <nav
         className={`topbar-conversation-context${
           conversationContext.currentTitle ? " has-current" : ""
-        }`}
+        }${conversationContext.ordinal === undefined ? "" : " has-ordinal"}`}
         aria-label="协作路径"
       >
-        <span
-          className="topbar-conversation-root"
-          title={conversationContext.rootTitle}
-          aria-current={conversationContext.currentTitle ? undefined : "page"}
+        {conversationContext.ordinal !== undefined && <span
+          className="topbar-session-ordinal"
+          aria-hidden="true"
         >
-          {conversationContext.rootTitle}
-        </span>
-        {conversationContext.currentTitle && <>
-          <span className="topbar-conversation-separator" aria-hidden="true">›</span>
-          <span
-            className="topbar-conversation-current"
-            title={conversationContext.currentTitle}
-            aria-current="page"
-          >
-            {conversationContext.currentTitle}
+          {String(conversationContext.ordinal).padStart(2, "0")}
+        </span>}
+        <span className="topbar-conversation-copy">
+          <span className="topbar-conversation-eyebrow">ACTIVE CONVERSATION</span>
+          <span className="topbar-conversation-title">
+            <span
+              className="topbar-conversation-root"
+              title={conversationContext.rootTitle}
+              aria-current={conversationContext.currentTitle ? undefined : "page"}
+            >
+              {conversationContext.rootTitle}
+            </span>
+            {conversationContext.currentTitle && <>
+              <span className="topbar-conversation-separator" aria-hidden="true">›</span>
+              <span
+                className="topbar-conversation-current"
+                title={conversationContext.currentTitle}
+                aria-current="page"
+              >
+                {conversationContext.currentTitle}
+              </span>
+            </>}
           </span>
-        </>}
+          {(role?.name || conversationContext.agentCount !== undefined) && <span
+            className="topbar-conversation-metadata"
+          >
+            {conversationContext.agentCount !== undefined && <span>
+              {conversationContext.agentCount} AGENTS
+            </span>}
+            {role?.name && <span>{role.name}</span>}
+          </span>}
+        </span>
+        <span
+          className={`topbar-conversation-status${
+            conversationStatus === "IDLE" ? " status-idle" : ""
+          }`}
+          aria-label={`会话状态：${conversationStatus}`}
+        >
+          <span>STATUS</span>
+          <strong>{conversationStatus}</strong>
+        </span>
       </nav>}
       <div className="topbar-controls">
         <button
@@ -632,7 +694,15 @@ function ChatView({
           role="separator"
           aria-label="上下文已压缩"
         >
-          <span>上下文已压缩</span>
+          <time className="compaction-time" dateTime={block.timestamp}>
+            {formatTimelineTime(block.timestamp)}
+          </time>
+          <strong className="compaction-actor">SYSTEM</strong>
+          <span className="compaction-label">CONTEXT COMPACTION</span>
+          <span className="compaction-metric">
+            {formatCompactTokens(block.tokensBefore)} TOKENS
+          </span>
+          <span className="compaction-state">DONE</span>
         </div>;
         if (block.kind === "session_message") return <SessionMessageCard
           key={`${transcriptRenderScopeKey}:card:${block.cardId}`}
@@ -640,6 +710,8 @@ function ChatView({
           onOpenConversation={handleOpenConversation}
         />;
         const isActiveMessage = activeRun?.id === block.message.runId;
+        const isCurrentAssistantMessage =
+          block.message.id === activeAssistantMessageId;
         const hasActiveTool = block.message.tools.some((tool) => (
           tool.status === "pending" || tool.status === "running"
         ));
@@ -662,6 +734,10 @@ function ChatView({
           observedEditBudgetRemainingFiles={
             editBudgetRemainingByRun.get(block.message.runId)
           }
+          assistantActor={isCurrentAssistantMessage ? role?.name : undefined}
+          assistantState={isCurrentAssistantMessage
+            ? activeRun?.phase.toUpperCase()
+            : undefined}
           onContentSettled={handleMessageContentSettled}
           collapsed={
             block.message.role === "assistant"

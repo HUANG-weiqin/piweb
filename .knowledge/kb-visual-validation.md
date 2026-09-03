@@ -37,7 +37,7 @@ npm run visual:verify -- --wait 1200
 npm run visual:verify -- --fixture
 ```
 
-该 query 只在 Vite 开发模式生效。fixture 直接组合现有 WorkspaceRail、ConversationSidebar 与 Chat，不连接 WebSocket，也不读取或写入真实项目状态。fixture 模式会展开 Tasks 后截图，并跳过只适用于普通入口的 Setup 交互检查；不带 `--fixture` 时原有四尺寸和 Setup 检查保持不变。
+该 query 只在 Vite 开发模式生效。fixture 直接组合现有 WorkspaceRail、ConversationSidebar 与 Chat，不连接 WebSocket，也不读取或写入真实项目状态。fixture 模式会展开 Tasks，等待布局观察器稳定后再截图；桌面尺寸把 transcript 定位到时间线开头，以便同时核对事件顺序和真实的“回到最新消息”状态，600px 及以下则通过生产折叠按钮收起 ConversationSidebar 后核对中心区域。移动端不会把已经滚出视口的历史事件误判为布局失败。不带 `--fixture` 时原有四尺寸和 Setup 检查保持不变。
 
 ## 通过条件
 

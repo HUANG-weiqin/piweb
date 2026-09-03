@@ -3661,6 +3661,930 @@ pre {
   text-decoration: underline;
 }
 
+/* Rebel conversation identity and command-event timeline */
+
+.app-shell {
+  --rebel-black: #080807;
+  --rebel-raised: #141411;
+  --rebel-paper: #f0eadb;
+  --rebel-paper-muted: #aaa397;
+  --rebel-red: #e0221b;
+  --rebel-red-dark: #8d0f0c;
+  --rebel-line: #393832;
+  isolation: isolate;
+  background: var(--rebel-black);
+}
+
+.app-shell .topbar {
+  height: 96px;
+  display: grid;
+  grid-template-columns: minmax(112px, 148px) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 18px;
+  padding: 12px 24px 10px;
+  overflow: hidden;
+  border-bottom: 2px solid var(--rebel-paper);
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+  backdrop-filter: none;
+}
+
+.app-shell .topbar::after {
+  position: absolute;
+  right: 18%;
+  bottom: -1px;
+  width: 132px;
+  height: 7px;
+  content: "";
+  background: var(--rebel-red);
+  clip-path: polygon(0 38%, 88% 0, 100% 100%, 7% 82%);
+}
+
+.app-shell .brand {
+  min-width: 0;
+  align-self: center;
+  gap: 9px;
+  color: var(--rebel-paper);
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.app-shell .brand > span:first-child {
+  width: 40px;
+  height: 40px;
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-red);
+  clip-path: polygon(10% 0, 100% 12%, 86% 100%, 0 84%);
+  font-family: Georgia, serif;
+  font-size: 25px;
+  font-style: italic;
+  font-weight: 900;
+  transform: rotate(-3deg);
+}
+
+.app-shell .brand small {
+  max-width: 92px;
+  margin-top: 2px;
+  color: var(--rebel-paper-muted);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 8px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.app-shell .topbar-conversation-context {
+  height: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(126px, 154px);
+  align-items: center;
+  gap: 18px;
+  margin: 0;
+  color: var(--rebel-paper);
+  white-space: normal;
+}
+
+.app-shell .topbar-conversation-context.has-ordinal {
+  grid-template-columns: 74px minmax(0, 1fr) minmax(126px, 154px);
+}
+
+.topbar-session-ordinal {
+  position: relative;
+  z-index: 1;
+  align-self: center;
+  color: var(--rebel-red);
+  font-size: clamp(54px, 4.3vw, 70px);
+  font-style: italic;
+  font-weight: 950;
+  letter-spacing: -0.1em;
+  line-height: 0.8;
+  text-shadow: 3px 3px 0 var(--rebel-paper);
+  transform: rotate(-4deg) skewX(-7deg);
+}
+
+.topbar-conversation-copy {
+  min-width: 0;
+  display: grid;
+  align-content: center;
+  gap: 4px;
+}
+
+.topbar-conversation-eyebrow {
+  color: var(--rebel-red);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.16em;
+  line-height: 1;
+}
+
+.topbar-conversation-title {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  overflow: hidden;
+  color: var(--rebel-paper);
+  font-size: clamp(24px, 2.05vw, 33px);
+  font-style: italic;
+  font-weight: 950;
+  letter-spacing: -0.055em;
+  line-height: 1.08;
+}
+
+.app-shell .topbar-conversation-root,
+.app-shell .topbar-conversation-current {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  color: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-shell .topbar-conversation-context.has-current .topbar-conversation-root {
+  max-width: 34%;
+  color: var(--rebel-paper-muted);
+  font-size: 0.47em;
+  font-style: normal;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+}
+
+.app-shell .topbar-conversation-context.has-current .topbar-conversation-current {
+  max-width: 62%;
+  color: var(--rebel-paper);
+}
+
+.app-shell .topbar-conversation-separator {
+  color: var(--rebel-red);
+  font-size: 0.72em;
+  font-style: normal;
+}
+
+.topbar-conversation-metadata {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  color: var(--rebel-paper-muted);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.topbar-conversation-metadata > span + span::before {
+  margin-right: 8px;
+  color: var(--rebel-red);
+  content: "/";
+}
+
+.topbar-conversation-status {
+  min-width: 126px;
+  min-height: 60px;
+  display: grid;
+  align-content: center;
+  justify-items: start;
+  padding: 8px 13px 8px 17px;
+  color: var(--rebel-paper);
+  background: var(--rebel-red);
+  clip-path: polygon(8px 0, 100% 0, calc(100% - 9px) 100%, 0 calc(100% - 6px));
+  transform: rotate(-1deg);
+}
+
+.topbar-conversation-status > span {
+  color: var(--rebel-black);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 8px;
+  font-weight: 950;
+  letter-spacing: 0.15em;
+}
+
+.topbar-conversation-status strong {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 14px;
+  font-style: italic;
+  font-weight: 950;
+  letter-spacing: -0.035em;
+  line-height: 1.05;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topbar-conversation-status.status-idle {
+  color: var(--rebel-black);
+  background: var(--rebel-paper);
+}
+
+.topbar-conversation-status.status-idle > span {
+  color: var(--rebel-red);
+}
+
+.app-shell .topbar-controls {
+  align-self: center;
+  gap: 0;
+}
+
+.app-shell .model-button {
+  max-width: 156px;
+  min-height: 34px;
+  padding: 7px 10px;
+  overflow: hidden;
+  border: 1px solid var(--rebel-line);
+  border-radius: 0;
+  color: var(--rebel-paper-muted);
+  background: var(--rebel-raised);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-shell .model-button:not(:disabled):hover {
+  border-color: var(--rebel-red);
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+.app-shell .transcript {
+  padding-top: 10px;
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+  scrollbar-color: var(--rebel-line) var(--rebel-black);
+}
+
+.app-shell .transcript.has-content {
+  padding-bottom: calc(var(--composer-inset, 138px) + 96px);
+}
+
+.transcript .message {
+  position: relative;
+  margin: 0 0 32px;
+  padding-left: 112px;
+  color: var(--rebel-paper);
+  line-height: 1.72;
+}
+
+.transcript .message-event-header {
+  position: relative;
+  width: calc(100% + 112px);
+  min-height: 24px;
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 8px -112px;
+  padding: 0 0 5px;
+  border-bottom: 1px solid var(--rebel-line);
+  color: var(--rebel-paper-muted);
+  line-height: 1;
+  white-space: normal;
+}
+
+.transcript .message-event-header::before {
+  position: absolute;
+  left: 0;
+  width: 4px;
+  height: 13px;
+  content: "";
+  background: var(--rebel-red);
+  transform: skewY(-18deg);
+}
+
+.transcript .message-event-kind {
+  padding-left: 12px;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 8px;
+  font-weight: 850;
+  letter-spacing: 0.14em;
+}
+
+.transcript .message-event-actor {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--rebel-paper);
+  font-size: 13px;
+  font-style: italic;
+  font-weight: 900;
+  letter-spacing: -0.015em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.transcript .message-event-state {
+  padding: 3px 6px;
+  color: var(--rebel-paper-muted);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 8px;
+  font-weight: 850;
+  letter-spacing: 0.1em;
+}
+
+.transcript .message-event-header.is-running .message-event-state {
+  color: var(--rebel-paper);
+  background: var(--rebel-red);
+  clip-path: polygon(4px 0, 100% 0, calc(100% - 3px) 100%, 0 82%);
+}
+
+.transcript .message.user {
+  width: auto;
+  max-width: none;
+  margin-left: 0;
+  padding: 0 0 0 112px;
+  border: 0;
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: transparent;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.transcript .message.user .message-event-actor {
+  color: var(--rebel-red);
+  font-size: 15px;
+}
+
+.transcript .message.assistant {
+  padding-left: 112px;
+}
+
+.transcript .message.error {
+  margin-left: 112px;
+  padding: 9px 12px;
+  border: 0;
+  border-left: 5px solid var(--rebel-red);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-red-dark);
+  font-weight: 750;
+}
+
+.transcript .message-actions {
+  bottom: -25px;
+}
+
+.transcript .assistant-message-actions {
+  right: auto;
+  left: 112px;
+}
+
+.transcript .message-action {
+  border-radius: 0;
+  color: var(--rebel-paper-muted);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+}
+
+.transcript .message-action:not(:disabled):hover {
+  border-color: var(--rebel-line);
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+.transcript .compaction-marker {
+  display: grid;
+  grid-template-columns: 88px 92px minmax(0, 1fr) auto 52px;
+  align-items: center;
+  gap: 12px;
+  margin: 2px 0 10px;
+  padding: 7px 10px 7px 12px;
+  border-top: 1px solid var(--rebel-line);
+  border-bottom: 1px solid var(--rebel-line);
+  color: var(--rebel-paper-muted);
+  background: var(--rebel-raised);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+.transcript .compaction-marker::before,
+.transcript .compaction-marker::after {
+  display: none;
+}
+
+.transcript .compaction-time {
+  color: var(--rebel-paper-muted);
+}
+
+.transcript .compaction-actor {
+  color: var(--rebel-paper);
+  font-style: italic;
+  font-weight: 900;
+}
+
+.transcript .compaction-label {
+  overflow: hidden;
+  color: var(--rebel-paper);
+  font-weight: 750;
+  text-overflow: ellipsis;
+}
+
+.transcript .compaction-metric {
+  color: var(--rebel-paper-muted);
+}
+
+.transcript .compaction-state {
+  color: var(--rebel-red);
+  font-weight: 900;
+  text-align: right;
+}
+
+.transcript .compaction-progress {
+  margin: 12px 0 26px 112px;
+  padding: 10px 12px;
+  border: 0;
+  border-left: 5px solid var(--rebel-red);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+.transcript .compaction-progress-copy small {
+  color: var(--rebel-paper-muted);
+}
+
+.transcript .markdown {
+  color: color-mix(in srgb, var(--rebel-paper) 92%, var(--rebel-paper-muted));
+  font-size: 14px;
+  line-height: 1.76;
+}
+
+.transcript .markdown h1,
+.transcript .markdown h2,
+.transcript .markdown h3,
+.transcript .markdown h4,
+.transcript .markdown h5,
+.transcript .markdown h6 {
+  color: var(--rebel-paper);
+}
+
+.transcript .markdown h1,
+.transcript .markdown h2 {
+  border-bottom-color: var(--rebel-line);
+}
+
+.transcript .markdown blockquote {
+  border-left-color: var(--rebel-red);
+  color: var(--rebel-paper-muted);
+}
+
+.transcript .markdown a {
+  color: color-mix(in srgb, var(--rebel-red) 68%, var(--rebel-paper));
+}
+
+.transcript .markdown :not(pre) > code {
+  border-radius: 0;
+  color: var(--rebel-black);
+  background: var(--rebel-paper);
+}
+
+.transcript .markdown pre {
+  padding: 13px 15px;
+  border: 0;
+  border-left: 4px solid var(--rebel-red);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+.transcript .markdown th,
+.transcript .markdown td {
+  border-color: var(--rebel-line);
+}
+
+.transcript .markdown th {
+  background: var(--rebel-raised);
+}
+
+.transcript .markdown .mermaid-diagram {
+  border-color: var(--rebel-line);
+  border-radius: 0;
+  background: var(--rebel-raised);
+}
+
+.transcript .assistant-activity-group {
+  margin: 10px 0 12px;
+  border-top: 1px solid var(--rebel-line);
+  border-bottom: 1px solid var(--rebel-line);
+  color: var(--rebel-paper-muted);
+}
+
+.transcript .assistant-activity-group > summary {
+  grid-template-columns: minmax(0, 1fr) auto 14px;
+  gap: 9px;
+  min-height: 36px;
+  padding: 3px 7px 3px 0;
+}
+
+.transcript .assistant-activity-group > summary:hover,
+.transcript .assistant-activity-group[open] > summary {
+  color: var(--rebel-paper);
+}
+
+.transcript .activity-group-copy {
+  grid-column: 1;
+  grid-row: 1;
+  gap: 8px;
+}
+
+.transcript .activity-group-copy strong {
+  padding: 4px 8px;
+  color: var(--rebel-paper);
+  background: var(--rebel-red);
+  clip-path: polygon(4px 0, 100% 0, calc(100% - 5px) 100%, 0 82%);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 8px;
+  font-style: italic;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+}
+
+.transcript .activity-group-label {
+  color: var(--rebel-paper);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.transcript .assistant-activity-group.is-active .activity-group-label,
+.transcript .assistant-activity-group.is-error .activity-group-label {
+  color: var(--rebel-red);
+}
+
+.transcript .activity-group-detail,
+.transcript .activity-group-count {
+  color: var(--rebel-paper-muted);
+}
+
+.transcript .activity-group-status {
+  width: auto;
+  min-width: 22px;
+  height: 20px;
+  display: flex;
+  grid-column: 2;
+  grid-row: 1;
+  align-items: center;
+  gap: 5px;
+  color: var(--rebel-paper-muted);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+}
+
+.transcript .activity-group-status::after {
+  font-size: 8px;
+  font-weight: 850;
+  letter-spacing: 0.08em;
+}
+
+.transcript .assistant-activity-group.is-active .activity-group-status {
+  color: var(--rebel-red);
+}
+
+.transcript .assistant-activity-group.is-active .activity-group-status::after {
+  content: "RUNNING";
+}
+
+.transcript .assistant-activity-group.is-complete .activity-group-status::after {
+  content: "DONE";
+}
+
+.transcript .assistant-activity-group.is-error .activity-group-status {
+  color: var(--rebel-red);
+}
+
+.transcript .assistant-activity-group.is-error .activity-group-status::after {
+  content: "FAILED";
+}
+
+.transcript .activity-group-count {
+  grid-column: 1;
+  grid-row: 2;
+  padding-left: 1px;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 8px;
+}
+
+.transcript .activity-group-chevron {
+  grid-column: 3;
+  grid-row: 1 / span 2;
+  align-self: center;
+  color: var(--rebel-paper-muted);
+}
+
+.transcript .activity-timeline {
+  padding: 4px 0 8px 31px;
+  border-top: 1px solid var(--rebel-line);
+  background: var(--rebel-raised);
+}
+
+.transcript .activity-timeline::before {
+  background: var(--rebel-red-dark);
+}
+
+.transcript .activity-timeline > .thinking > summary::before,
+.transcript .activity-timeline > .tools > summary::before {
+  border-color: var(--rebel-paper-muted);
+  border-radius: 0;
+  background: var(--rebel-black);
+  transform: translateY(-50%) rotate(45deg);
+}
+
+.transcript .assistant-response-body {
+  color: var(--rebel-paper);
+}
+
+.transcript .tool-stack {
+  scrollbar-color: var(--rebel-line) var(--rebel-raised);
+}
+
+.transcript .tool {
+  border-bottom-color: var(--rebel-line);
+  color: var(--rebel-paper-muted);
+}
+
+.transcript .tool > summary {
+  min-height: 39px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 14px;
+  gap: 9px;
+  padding: 5px 2px;
+}
+
+.transcript .tool-summary {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.transcript .tool-summary strong {
+  color: var(--rebel-paper);
+}
+
+.transcript .tool-status {
+  width: auto;
+  min-width: 20px;
+  display: flex;
+  grid-column: 2;
+  grid-row: 1;
+  align-items: center;
+  gap: 5px;
+  color: var(--rebel-paper-muted);
+  font-family: "Cascadia Code", Consolas, monospace;
+}
+
+.transcript .tool-status::after {
+  font-size: 8px;
+  font-weight: 850;
+  letter-spacing: 0.07em;
+}
+
+.transcript .tool-running .tool-status,
+.transcript .tool-pending .tool-status,
+.transcript .tool-error .tool-status {
+  color: var(--rebel-red);
+}
+
+.transcript .tool-running .tool-status::after {
+  content: "RUNNING";
+}
+
+.transcript .tool-pending .tool-status::after {
+  content: "QUEUED";
+}
+
+.transcript .tool-done .tool-status::after {
+  content: "DONE";
+}
+
+.transcript .tool-error .tool-status::after {
+  content: "FAILED";
+}
+
+.transcript .tool-chevron {
+  grid-column: 3;
+  grid-row: 1;
+}
+
+.transcript .tool-body {
+  color: var(--rebel-paper-muted);
+}
+
+.transcript .tool-section + .tool-section {
+  border-top-color: var(--rebel-line);
+}
+
+.transcript .commitment-card {
+  position: relative;
+  margin: 12px 0;
+  border: 0;
+  border-left: 7px solid var(--rebel-red);
+  border-radius: 0;
+  color: var(--rebel-black);
+  background: var(--rebel-paper);
+  clip-path: polygon(0 4px, 99% 0, 100% calc(100% - 5px), 4px 100%);
+}
+
+.transcript .commitment-card.is-warning {
+  border-color: var(--rebel-red-dark);
+  color: var(--rebel-black);
+  background: var(--rebel-paper);
+}
+
+.transcript .commitment-card.is-error {
+  border-color: var(--rebel-paper);
+  color: var(--rebel-paper);
+  background: var(--rebel-red-dark);
+}
+
+.transcript .commitment-card > summary {
+  min-height: 66px;
+  grid-template-columns: 16px minmax(0, 1fr) auto 12px;
+  gap: 11px;
+  padding: 8px 13px 8px 9px;
+}
+
+.transcript .commitment-card.is-edit-budget > summary {
+  grid-template-columns: 108px minmax(0, 1fr) auto 12px;
+}
+
+.transcript .commitment-card > summary:hover,
+.transcript .commitment-card.is-warning > summary:hover,
+.transcript .commitment-card.is-error > summary:hover {
+  background: color-mix(in srgb, currentColor 6%, transparent);
+}
+
+.transcript .commitment-budget-metric {
+  min-width: 102px;
+  min-height: 56px;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  padding: 7px 9px;
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+  clip-path: polygon(7px 0, 100% 5px, calc(100% - 5px) 100%, 0 calc(100% - 6px));
+  transform: rotate(-1deg);
+}
+
+.transcript .commitment-budget-metric > span {
+  display: flex;
+  align-items: baseline;
+  line-height: 0.9;
+}
+
+.transcript .commitment-budget-metric strong {
+  font-size: 38px;
+  font-style: italic;
+  font-weight: 950;
+  letter-spacing: -0.08em;
+}
+
+.transcript .commitment-budget-metric > span > span {
+  color: var(--rebel-red);
+  font-size: 18px;
+  font-weight: 900;
+}
+
+.transcript .commitment-budget-metric small {
+  margin-top: 5px;
+  color: var(--rebel-paper-muted);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 7px;
+  font-weight: 850;
+  letter-spacing: 0.12em;
+}
+
+.transcript .commitment-eyebrow {
+  color: var(--rebel-red);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+}
+
+.transcript .commitment-copy strong {
+  color: var(--rebel-black);
+  font-size: 15px;
+  font-style: italic;
+  font-weight: 900;
+}
+
+.transcript .commitment-card.is-error .commitment-copy strong {
+  color: var(--rebel-paper);
+}
+
+.transcript .commitment-reason {
+  color: color-mix(in srgb, var(--rebel-black) 76%, var(--rebel-paper));
+  font-size: 11px;
+}
+
+.transcript .commitment-card.is-error .commitment-reason {
+  color: var(--rebel-paper-muted);
+}
+
+.transcript .commitment-fact {
+  min-height: 20px;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 8px;
+}
+
+.transcript .commitment-chevron {
+  color: currentColor;
+}
+
+.transcript .commitment-card > .tool-body {
+  padding: 10px 14px 12px 126px;
+  border-top-color: var(--rebel-line);
+  color: var(--rebel-paper-muted);
+  background: var(--rebel-black);
+}
+
+.transcript > .session-message-card {
+  max-width: none;
+  margin: 0 0 26px 112px;
+  border: 0;
+  border-top: 1px solid var(--rebel-line);
+  border-bottom: 1px solid var(--rebel-line);
+  border-left: 4px solid var(--rebel-red);
+  border-radius: 0;
+  color: var(--rebel-paper-muted);
+  background: transparent;
+}
+
+.transcript > .session-message-card.is-expanded {
+  margin-bottom: 26px;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.transcript > .session-message-card.direction-incoming {
+  border-left-color: var(--rebel-paper);
+}
+
+.transcript > .session-message-card.state-failed,
+.transcript > .session-message-card.state-aborted {
+  border-left-color: var(--rebel-red);
+  background: var(--rebel-red-dark);
+}
+
+.transcript .session-message-header {
+  background: transparent;
+}
+
+.transcript .session-message-card.is-expanded .session-message-header {
+  border-bottom-color: var(--rebel-line);
+}
+
+.transcript .session-message-toggle {
+  min-height: 42px;
+  border-radius: 0;
+  color: inherit;
+  background: transparent;
+}
+
+.transcript .session-message-direction {
+  color: var(--rebel-red);
+  font-family: "Cascadia Code", Consolas, monospace;
+  letter-spacing: 0.08em;
+}
+
+.transcript .session-message-peer {
+  color: var(--rebel-paper);
+}
+
+.transcript .session-message-status,
+.transcript .session-message-chevron,
+.transcript .session-message-endpoint-role,
+.transcript .session-message-endpoint-handle,
+.transcript .session-message-updated {
+  color: var(--rebel-paper-muted);
+}
+
+.transcript .session-message-details {
+  background: var(--rebel-raised);
+}
+
+.transcript .session-message-result {
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+}
+
 /* Drawer and settings */
 
 .drawer-backdrop,
@@ -4484,70 +5408,158 @@ pre {
     border-radius: 18px;
   }
 
-  .topbar {
-    padding: 0 12px;
+  .app-shell .topbar {
+    height: 84px;
+    grid-template-columns: minmax(0, 1fr) 58px;
+    gap: 8px;
+    padding: 8px 8px 8px 58px;
   }
 
-  .topbar-conversation-context {
-    justify-content: flex-start;
-    margin: 0 8px;
-  }
-
-  .topbar-conversation-context.has-current .topbar-conversation-root,
-  .topbar-conversation-context.has-current .topbar-conversation-separator {
+  .app-shell .brand {
     display: none;
   }
 
-  .topbar-conversation-current {
+  .app-shell .topbar-conversation-context {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 7px;
+    margin: 0;
+  }
+
+  .app-shell .topbar-conversation-context.has-ordinal {
+    grid-template-columns: 38px minmax(0, 1fr);
+  }
+
+  .topbar-session-ordinal {
+    font-size: 35px;
+    text-shadow: 2px 2px 0 var(--rebel-paper);
+  }
+
+  .topbar-conversation-eyebrow {
+    font-size: 7px;
+    letter-spacing: 0.08em;
+  }
+
+  .topbar-conversation-title {
+    gap: 4px;
+    font-size: 16px;
+  }
+
+  .app-shell .topbar-conversation-context.has-current .topbar-conversation-root,
+  .app-shell .topbar-conversation-context.has-current .topbar-conversation-separator {
+    display: none;
+  }
+
+  .app-shell .topbar-conversation-context.has-current .topbar-conversation-current {
     max-width: 100%;
   }
 
-  .brand small {
-    max-width: 27vw;
+  .topbar-conversation-metadata {
+    gap: 5px;
+    font-size: 7px;
+    letter-spacing: 0.03em;
   }
 
-  .model-button {
-    max-width: 37vw;
+  .topbar-conversation-metadata > span + span {
+    display: none;
   }
 
-  .transcript {
+  .topbar-conversation-status {
+    display: none;
+  }
+
+  .app-shell .model-button {
+    width: 58px;
+    max-width: 58px;
+    padding: 6px;
+    font-size: 7px;
+  }
+
+  .app-shell .transcript {
+    padding-top: 14px;
     padding-right: 15px;
     padding-bottom: 125px;
     padding-left: 15px;
   }
 
-  .message.user {
-    max-width: 90%;
+  .transcript .message,
+  .transcript .message.user,
+  .transcript .message.assistant {
+    padding-left: 0;
   }
 
-  .assistant-activity-group > summary {
-    grid-template-columns: 16px minmax(0, 1fr) 12px;
+  .transcript .message-event-header {
+    width: 100%;
+    grid-template-columns: 64px minmax(0, 1fr) auto;
+    gap: 7px;
+    margin-left: 0;
+  }
+
+  .transcript .message.error,
+  .transcript .compaction-progress,
+  .transcript > .session-message-card {
+    margin-left: 0;
+  }
+
+  .transcript .assistant-message-actions {
+    left: 0;
+  }
+
+  .transcript .compaction-marker {
+    grid-template-columns: 62px 62px minmax(0, 1fr) auto;
+    gap: 7px;
+    padding-right: 7px;
+    padding-left: 8px;
+    font-size: 7px;
+  }
+
+  .transcript .compaction-metric {
+    display: none;
+  }
+
+  .transcript .assistant-activity-group > summary {
+    grid-template-columns: minmax(0, 1fr) auto 12px;
     row-gap: 1px;
   }
 
-  .commitment-card > summary {
-    grid-template-columns: 16px minmax(0, 1fr) 12px;
+  .transcript .activity-group-detail {
+    display: none;
   }
 
-  .commitment-facts {
+  .transcript .activity-group-count {
+    grid-row: 2;
+    grid-column: 1;
+  }
+
+  .transcript .commitment-card > summary,
+  .transcript .commitment-card.is-edit-budget > summary {
+    grid-template-columns: 82px minmax(0, 1fr) 12px;
+    gap: 9px;
+  }
+
+  .transcript .commitment-budget-metric {
+    min-width: 78px;
+    min-height: 58px;
+    padding: 6px;
+  }
+
+  .transcript .commitment-budget-metric strong {
+    font-size: 31px;
+  }
+
+  .transcript .commitment-facts {
     max-width: none;
     grid-row: 2;
     grid-column: 2;
     justify-content: flex-start;
   }
 
-  .commitment-chevron {
+  .transcript .commitment-chevron {
     grid-row: 1;
     grid-column: 3;
   }
 
-  .activity-group-detail {
-    display: none;
-  }
-
-  .activity-group-count {
-    grid-row: 2;
-    grid-column: 2;
+  .transcript .commitment-card > .tool-body {
+    padding-left: 14px;
   }
 
   .composer-wrap {

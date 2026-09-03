@@ -22,7 +22,10 @@ import { ActivitySpinner } from "./components/ActivitySpinner";
 import { AuthDialog } from "./components/AuthDialog";
 import { Chat } from "./components/Chat";
 import { ConnectionDrawer } from "./components/ConnectionDrawer";
-import { ConversationSidebar } from "./components/ConversationSidebar";
+import {
+  ConversationSidebar,
+  conversationDisplayOrdinal,
+} from "./components/ConversationSidebar";
 import { DirectoryBrowserDialog } from "./components/DirectoryBrowserDialog";
 import {
   ExtensionDialog,
@@ -3269,29 +3272,59 @@ export function App() {
     : undefined;
   const visibleConversationId = pendingTargetConversationId
     ?? (showRoleSelection ? undefined : visibleState?.conversationId);
+  const visibleBusyConversationId = visibleState
+    && (visibleState.busy || outstandingRunId)
+    ? visibleState.conversationId
+    : undefined;
   const visibleConversationContext = useMemo<
-    { rootTitle: string; currentTitle?: string } | undefined
+    {
+      rootTitle: string;
+      currentTitle?: string;
+      ordinal?: number;
+      agentCount?: number;
+    } | undefined
   >(() => {
     if (!visibleConversationReady || !visibleConversationId) return undefined;
-    const currentConversation = conversations.find(
-      ({ id }) => id === visibleConversationId,
+    const conversationsById = new Map(
+      sidebarConversations.map((conversation) => [conversation.id, conversation]),
     );
-    const rootConversation = currentConversation?.rootConversationId
-      ? conversations.find(
-          ({ id }) => id === currentConversation.rootConversationId,
-        )
-      : undefined;
-    if (!currentConversation || !rootConversation) return undefined;
+    const currentConversation = conversationsById.get(visibleConversationId);
+    if (!currentConversation) return undefined;
+    const rootConversationId = currentConversation.rootConversationId;
+    const rootConversation = !rootConversationId
+      || rootConversationId === currentConversation.id
+      ? currentConversation
+      : conversationsById.get(rootConversationId);
+    if (!rootConversation) return undefined;
+
     const rootTitle = rootConversation.name?.trim()
       || rootConversation.preview.trim()
       || "新会话";
     const currentTitle = currentConversation.name?.trim()
       || currentConversation.preview.trim()
       || "新会话";
-    return currentConversation.id === rootConversation.id
-      ? { rootTitle }
-      : { rootTitle, currentTitle };
-  }, [conversations, visibleConversationId, visibleConversationReady]);
+    const agentCount = 1 + sidebarConversations.filter((conversation) => (
+      conversation.id !== rootConversation.id
+      && conversation.rootConversationId === rootConversation.id
+    )).length;
+    const ordinal = conversationDisplayOrdinal(
+      sidebarConversations,
+      currentConversation.id,
+      visibleBusyConversationId,
+    );
+    return {
+      rootTitle,
+      ...(currentConversation.id === rootConversation.id ? {} : { currentTitle }),
+      ...(ordinal === undefined ? {} : { ordinal }),
+      ...(conversationIndexTruncated ? {} : { agentCount }),
+    };
+  }, [
+    conversationIndexTruncated,
+    sidebarConversations,
+    visibleBusyConversationId,
+    visibleConversationId,
+    visibleConversationReady,
+  ]);
 
   if (!activeCwd || !visibleState) return <>
     <div className="workbench">
@@ -3370,9 +3403,7 @@ export function App() {
         currentConversationId={visibleConversationId}
         focusedConversationId={focusedConversationId}
         scopeKey={sidebarScopeKey}
-        busyConversationId={
-          visibleState.busy || outstandingRunId ? visibleState.conversationId : undefined
-        }
+        busyConversationId={visibleBusyConversationId}
         collapsed={sidebarCollapsed}
         navigationEnabled={
           online

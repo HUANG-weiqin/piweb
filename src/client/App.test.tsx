@@ -494,7 +494,7 @@ describe("App", () => {
     );
   });
 
-  it("shows focused collaboration context only from the ready root projection", () => {
+  it("shows ready conversation identity without inventing a missing root", () => {
     render(<App />);
     const sessionId = startFromSetup();
     const root = {
@@ -508,6 +508,10 @@ describe("App", () => {
         kind: "conversation" as const,
         conversationId: CONVERSATION_B,
       },
+    };
+    const attentionConversation = {
+      ...conversationSummary(CONVERSATION_C, "需处理会话"),
+      attention: true,
     };
 
     act(() => {
@@ -528,7 +532,7 @@ describe("App", () => {
         type: "project_snapshot",
         sessionId,
         projectId: PROJECT_ID,
-        conversations: [root, child],
+        conversations: [root, child, attentionConversation],
         truncated: false,
       });
       socketMock.rawEmit?.({
@@ -541,8 +545,11 @@ describe("App", () => {
       });
     });
 
-    expect(screen.getByRole("navigation", { name: "协作路径" }))
-      .toHaveTextContent("根任务›测试 Agent");
+    const collaborationPath = screen.getByRole("navigation", { name: "协作路径" });
+    expect(collaborationPath).toHaveTextContent("根任务›测试 Agent");
+    expect(collaborationPath.querySelector(".topbar-session-ordinal"))
+      .toHaveTextContent("02");
+    expect(collaborationPath).toHaveTextContent("2 AGENTS");
 
     act(() => socketMock.rawEmit?.({
       type: "project_snapshot",
@@ -554,8 +561,25 @@ describe("App", () => {
       }],
       truncated: false,
     }));
-    expect(screen.queryByRole("navigation", { name: "协作路径" }))
-      .not.toBeInTheDocument();
+    const standalonePath = screen.getByRole("navigation", { name: "协作路径" });
+    expect(standalonePath).toHaveTextContent("测试 Agent");
+    expect(standalonePath).not.toHaveTextContent("根任务›");
+    expect(standalonePath.querySelector(".topbar-session-ordinal"))
+      .toHaveTextContent("02");
+    expect(standalonePath).toHaveTextContent("1 AGENTS");
+
+    act(() => socketMock.rawEmit?.({
+      type: "project_snapshot",
+      sessionId,
+      projectId: PROJECT_ID,
+      conversations: [root, {
+        ...conversationSummary(CONVERSATION_ID, "测试 Agent"),
+        createdBy: child.createdBy,
+      }],
+      truncated: true,
+    }));
+    expect(screen.getByRole("navigation", { name: "协作路径" }))
+      .not.toHaveTextContent("AGENTS");
   });
 
   it("hydrates LoopList from focused snapshots and ignores stale live identities", () => {
@@ -6462,7 +6486,8 @@ describe("App", () => {
         truncated: false,
       });
     });
-    expect(screen.getByText("Updated A")).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "协作路径" }))
+      .toHaveTextContent("Updated A");
     expect(screen.getByRole("status", { name: "运行中" })).toBeInTheDocument();
 
     act(() => socketMock.status?.(false));

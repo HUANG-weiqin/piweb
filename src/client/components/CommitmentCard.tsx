@@ -69,9 +69,12 @@ export function CommitmentCard({
     && !editBudget
     && (tool.status === "pending" || tool.status === "running");
 
-  let eyebrow = editBudget ? "编辑承诺" : "单会话等待承诺";
+  let eyebrow = editBudget ? "BUDGET ESTIMATE" : "单会话等待承诺";
   let title: string;
   let reason: string;
+  let budgetMetric:
+    | { value: number; total?: number; label: string }
+    | undefined;
   const chips: string[] = failed ? ["执行失败"] : [];
 
   if (warning) {
@@ -85,7 +88,26 @@ export function CommitmentCard({
       : `预计修改 ${fileCount} 个文件`;
     reason = stringField(args, "reason");
     const grantedFiles = numberField(facts, "grantedFiles");
-    if (grantedFiles !== undefined) chips.push(`本轮额度 ${grantedFiles}`);
+    const resultRemainingFiles = editBudgetRemainingFiles(tool);
+    const remainingFiles = typeof observedEditBudgetRemainingFiles === "number"
+      ? observedEditBudgetRemainingFiles
+      : observedEditBudgetRemainingFiles === null
+        ? undefined
+        : resultRemainingFiles;
+    if (grantedFiles !== undefined) {
+      const remainingMatchesGrant = observedEditBudgetRemainingFiles === undefined
+        || observedEditBudgetRemainingFiles === resultRemainingFiles;
+      budgetMetric = remainingFiles === undefined
+        ? { value: grantedFiles, label: "FILES TOTAL" }
+        : {
+            value: remainingFiles,
+            ...(remainingMatchesGrant ? { total: grantedFiles } : {}),
+            label: "FILES LEFT",
+          };
+      chips.push(`本轮额度 ${grantedFiles}`);
+    } else if (fileCount !== undefined) {
+      budgetMetric = { value: fileCount, label: "FILES PLANNED" };
+    }
     if (observedEditBudgetRemainingFiles === null) {
       chips.push("本轮剩余未知");
     } else if (observedEditBudgetRemainingFiles !== undefined) {
@@ -98,9 +120,21 @@ export function CommitmentCard({
   }
 
   const toneClass = warning ? " is-warning" : failed ? " is-error" : "";
-  return <details className={`commitment-card${toneClass}`}>
+  const kindClass = editBudget ? " is-edit-budget" : "";
+  return <details className={`commitment-card${kindClass}${toneClass}`}>
     <summary>
-      <span className="commitment-node" aria-hidden="true" />
+      {budgetMetric ? <span
+        className="commitment-budget-metric"
+        aria-label={`${budgetMetric.value}${
+          budgetMetric.total === undefined ? "" : ` / ${budgetMetric.total}`
+        } ${budgetMetric.label}`}
+      >
+        <span>
+          <strong>{budgetMetric.value}</strong>
+          {budgetMetric.total !== undefined && <span>/{budgetMetric.total}</span>}
+        </span>
+        <small>{budgetMetric.label}</small>
+      </span> : <span className="commitment-node" aria-hidden="true" />}
       <span className="commitment-copy">
         <span className="commitment-eyebrow">{eyebrow}</span>
         <strong>{title}</strong>

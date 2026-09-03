@@ -227,6 +227,21 @@ function groupProjection(
   return { entries, rootByConversationId };
 }
 
+export function conversationDisplayOrdinal(
+  conversations: ConversationSummary[],
+  conversationId: string,
+  busyConversationId?: string,
+): number | undefined {
+  const grouped = groupProjection(conversations, busyConversationId);
+  const rootConversationId = grouped.rootByConversationId.get(conversationId)
+    ?? conversationId;
+  const index = grouped.entries.findIndex((entry) => entry.kind === "group"
+    ? entry.group.root.id === rootConversationId
+    : entry.conversation.id === rootConversationId
+  );
+  return index < 0 ? undefined : index + 1;
+}
+
 function ActivityIndicator({
   activity,
 }: {

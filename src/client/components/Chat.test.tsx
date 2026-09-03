@@ -153,6 +153,53 @@ describe("Chat", () => {
       .not.toBe(otherConversationArticle);
   });
 
+  it("labels only the latest same-run assistant as active", () => {
+    const runId = "run-with-steering";
+    const role = {
+      id: "tech-lead",
+      revision: 1,
+      name: "Tech Lead",
+      description: "",
+      systemPrompt: "",
+      model: { provider: "provider", id: "model" },
+      defaultThinkingLevel: "off" as const,
+      defaultServiceTier: null,
+      toolMode: "read_only" as const,
+      canManageSessions: false,
+    };
+    const assistant = (id: string, text: string): ChatMessage => ({
+      id,
+      runId,
+      role: "assistant",
+      text,
+      thinking: "",
+      tools: [],
+    });
+    const { container } = render(view({
+      items: messageItems(
+        assistant("assistant-before-steer", "before steer"),
+        {
+          id: "steering-user",
+          runId,
+          role: "user",
+          text: "steer",
+          thinking: "",
+          tools: [],
+        },
+        assistant("assistant-after-steer", "after steer"),
+      ),
+    }, "", role, {
+      busy: true,
+      activeRun: { id: runId, phase: "waiting" },
+    }));
+    const assistantMessages = container.querySelectorAll(".message.assistant");
+
+    expect(assistantMessages[0]?.querySelector(".message-event-header"))
+      .toHaveTextContent("AGENTAgentLOGGED");
+    expect(assistantMessages[1]?.querySelector(".message-event-header"))
+      .toHaveTextContent("AGENTTech LeadWAITING");
+  });
+
   it("updates an edit commitment from later same-run budget facts", () => {
     const runId = "run-edit-budget";
     const budgetMessage: ChatMessage = {
@@ -256,12 +303,21 @@ describe("Chat", () => {
       conversationContext: {
         rootTitle: "修复登录任务",
         currentTitle: "测试 Agent",
+        ordinal: 1,
+        agentCount: 4,
       },
+      busy: true,
+      activeRun: { id: "run-header", phase: "running" },
     }));
 
     expect(screen.getByRole("navigation", { name: "协作路径" }))
       .toHaveTextContent("修复登录任务›测试 Agent");
     expect(screen.getByText("测试 Agent")).toHaveAttribute("aria-current", "page");
+    expect(screen.getByText("01", { selector: ".topbar-session-ordinal" }))
+      .toBeInTheDocument();
+    expect(screen.getByText("4 AGENTS")).toBeInTheDocument();
+    expect(screen.getByLabelText("会话状态：IN PROGRESS"))
+      .toHaveTextContent("STATUSIN PROGRESS");
 
     rendered.rerender(view(emptyChat, "", undefined, {
       conversationContext: { rootTitle: "修复登录任务" },
@@ -1554,8 +1610,13 @@ describe("Chat", () => {
     expect(
       Array.from(transcript?.children ?? []).map((element) => element.className),
     ).toEqual(["message assistant", "compaction-marker", "message user"]);
-    expect(screen.getByRole("separator", { name: "上下文已压缩" }))
-      .toHaveTextContent("上下文已压缩");
+    const compaction = screen.getByRole("separator", { name: "上下文已压缩" });
+    expect(compaction).toHaveTextContent("SYSTEM");
+    expect(compaction).toHaveTextContent("CONTEXT COMPACTION");
+    expect(compaction).toHaveTextContent("63.8k TOKENS");
+    expect(compaction).toHaveTextContent("DONE");
+    expect(compaction.querySelector("time"))
+      .toHaveAttribute("datetime", "2026-07-19T10:00:00.000Z");
   });
 
   it("keeps outgoing session messages at their transcript timepoint", () => {

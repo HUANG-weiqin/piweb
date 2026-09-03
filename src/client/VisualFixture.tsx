@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type {
   ConversationRoleSnapshot,
   ConversationSummary,
@@ -5,7 +6,10 @@ import type {
 } from "../shared/protocol";
 import type { ChatState } from "./chat/reducer";
 import { Chat } from "./components/Chat";
-import { ConversationSidebar } from "./components/ConversationSidebar";
+import {
+  ConversationSidebar,
+  conversationDisplayOrdinal,
+} from "./components/ConversationSidebar";
 import { WorkspaceRail, workspaceKey } from "./components/WorkspaceRail";
 
 const ACTIVE_CWD = "E:\\workspaces\\piweb";
@@ -247,8 +251,15 @@ const chat: ChatState = {
 };
 
 const noOp = () => undefined;
+const activeConversationOrdinal = conversationDisplayOrdinal(
+  conversations,
+  ACTIVE_CONVERSATION_ID,
+  ACTIVE_CONVERSATION_ID,
+);
 
 export function VisualFixture() {
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
   return <div className="workbench" data-visual-fixture="populated-workbench">
     <WorkspaceRail
       workspaces={WORKSPACES}
@@ -267,10 +278,10 @@ export function VisualFixture() {
       focusedConversationId={ACTIVE_CONVERSATION_ID}
       scopeKey="visual-fixture"
       busyConversationId={ACTIVE_CONVERSATION_ID}
-      collapsed={false}
+      collapsed={sidebarCollapsed}
       navigationEnabled
       actionsEnabled
-      onToggleCollapsed={noOp}
+      onToggleCollapsed={() => setSidebarCollapsed((collapsed) => !collapsed)}
       onSelect={noOp}
       onCreate={noOp}
       onRename={noOp}
@@ -326,7 +337,11 @@ export function VisualFixture() {
         compactionThresholdPercent={70}
         compactionThresholdBusy={false}
         cwd={ACTIVE_CWD}
-        conversationContext={{ rootTitle: "建立稳定的视觉验证基线" }}
+        conversationContext={{
+          rootTitle: "建立稳定的视觉验证基线",
+          ordinal: activeConversationOrdinal,
+          agentCount: 4,
+        }}
         online
         interactive
         conversationReady

@@ -168,29 +168,41 @@ async function captureViewport(client, outputPath, width, height, index) {
       const tasks = fixture?.querySelector('.loop-list-toggle');
       if (!fixture || !tasks) return false;
       if (tasks.getAttribute('aria-expanded') !== 'true') tasks.click();
+      if (innerWidth <= 600) {
+        const sidebar = fixture.querySelector('.conversation-sidebar-toggle');
+        if (sidebar?.getAttribute('aria-expanded') === 'true') sidebar.click();
+      }
       return true;
     })()`);
     if (!ready) {
       throw new Error(`Populated workbench fixture was not ready at ${width}x${height}`);
     }
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 300));
+    if (width > 600) {
+      await client.evaluate(`(() => {
+        const transcript = document.querySelector('.transcript');
+        if (transcript) transcript.scrollTop = 0;
+      })()`);
+    }
     const missingSurfaces = await client.evaluate(`(() => {
       const selectors = [
         '.workspace-rail',
         '.conversation-sidebar',
-        '.compaction-marker',
-        '.message.user',
+        ...(innerWidth > 600 ? ['.compaction-marker', '.message.user'] : []),
         '.assistant-activity-group.is-active',
         '.commitment-card',
         '.loop-list-items',
         '.composer',
       ];
-      return selectors.filter((selector) => {
+      return selectors.flatMap((selector) => {
         const element = document.querySelector(selector);
-        if (!element) return true;
+        if (!element) return [selector + ' (missing)'];
         const rect = element.getBoundingClientRect();
         return rect.bottom <= 0 || rect.right <= 0
-          || rect.top >= innerHeight || rect.left >= innerWidth;
+          || rect.top >= innerHeight || rect.left >= innerWidth
+          ? [selector + ' (' + Math.round(rect.left) + ',' + Math.round(rect.top)
+              + '–' + Math.round(rect.right) + ',' + Math.round(rect.bottom) + ')']
+          : [];
       });
     })()`);
     if (missingSurfaces.length > 0) {
