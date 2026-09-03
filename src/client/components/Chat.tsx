@@ -15,7 +15,6 @@ import {
   type ConversationCompactionMarker,
   type ConversationMessageCard,
   type ConversationRoleSnapshot,
-  type ConversationWindowCoverage,
   type PendingPromptAdmissionSnapshot as PendingAdmission,
   type LoopList,
   type LoopListItemStatus,
@@ -107,7 +106,6 @@ interface ChatProps {
   /** Transport is online, but focus-bound server controls may be frozen. */
   interactive?: boolean;
   conversationReady: boolean;
-  historyWindow: ConversationWindowCoverage;
   draft: string;
   submitting: boolean;
   /** busy 时已接受、尚未投递的浏览器 prompt（显示为对话流中的等待中消息）。 */
@@ -292,7 +290,6 @@ function ChatView({
   online,
   interactive = true,
   conversationReady,
-  historyWindow,
   draft,
   submitting,
   pendingAdmissions,
@@ -581,18 +578,6 @@ function ChatView({
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); send(); }
   };
-  const historyNotices = [
-    historyWindow.omittedBefore && !historyWindow.startsMidTurn
-      ? "较早的对话记录未加载，当前仅显示最近内容。"
-      : undefined,
-    historyWindow.startsMidTurn
-      ? "当前可见记录从一轮对话的中间开始。"
-      : undefined,
-    historyWindow.contentTruncated
-      ? "较长消息或工具详情已缩短显示。"
-      : undefined,
-  ].filter((notice): notice is string => notice !== undefined);
-
   return <main className="app-shell">
     <header className="topbar">
       <button className="brand" onClick={onChangeCwd}><span>π</span><span>Pi Web<small title={cwd}>{cwd}</small></span></button>
@@ -632,13 +617,6 @@ function ChatView({
       </div>
     </header>
     {!online && <div className="banner">本地服务已断开，正在重连…</div>}
-    {historyNotices.length > 0 && <div
-      className="banner"
-      role="note"
-      aria-label="历史记录不完整"
-    >
-      {historyNotices.map((notice) => <div key={notice}>{notice}</div>)}
-    </div>}
     <section
       ref={transcriptRef}
       className={`transcript${blocks.length ? " has-content" : ""}`}

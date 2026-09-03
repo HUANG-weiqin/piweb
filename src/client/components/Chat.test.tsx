@@ -35,11 +35,6 @@ function firstMessage(chat: ChatState): ChatMessage {
 }
 
 const emptyChat: ChatState = { items: [] };
-const fullHistoryWindow = {
-  omittedBefore: false,
-  startsMidTurn: false,
-  contentTruncated: false,
-};
 
 function view(
   chat: ChatState,
@@ -77,7 +72,6 @@ function view(
     cwd="E:\\work"
     online
     conversationReady
-    historyWindow={fullHistoryWindow}
     draft={draft}
     submitting={false}
     pendingAdmissions={[]}
@@ -402,45 +396,7 @@ describe("Chat", () => {
     expect(onCompact).toHaveBeenCalledOnce();
   });
 
-  it("shows distinct history-window coverage notices", () => {
-    const { rerender } = render(view(emptyChat, "", undefined, {
-      historyWindow: { ...fullHistoryWindow, omittedBefore: true },
-    }));
-    expect(screen.getByRole("note", { name: "历史记录不完整" }))
-      .toHaveTextContent("较早的对话记录未加载，当前仅显示最近内容。");
-
-    rerender(view(emptyChat, "", undefined, {
-      historyWindow: {
-        ...fullHistoryWindow,
-        omittedBefore: true,
-        startsMidTurn: true,
-      },
-    }));
-    expect(screen.getByRole("note", { name: "历史记录不完整" }))
-      .toHaveTextContent("当前可见记录从一轮对话的中间开始。");
-
-    rerender(view(emptyChat, "", undefined, {
-      historyWindow: { ...fullHistoryWindow, contentTruncated: true },
-    }));
-    expect(screen.getByRole("note", { name: "历史记录不完整" }))
-      .toHaveTextContent("较长消息或工具详情已缩短显示。");
-  });
-
-  it("combines applicable history-window notices in one note", () => {
-    render(view(emptyChat, "", undefined, {
-      historyWindow: {
-        omittedBefore: true,
-        startsMidTurn: true,
-        contentTruncated: true,
-      },
-    }));
-
-    const note = screen.getByRole("note", { name: "历史记录不完整" });
-    expect(note).toHaveTextContent("当前可见记录从一轮对话的中间开始。");
-    expect(note).toHaveTextContent("较长消息或工具详情已缩短显示。");
-  });
-
-  it("hides the history-window note for complete history", () => {
+  it("does not render a history-window notice", () => {
     render(view(emptyChat));
 
     expect(screen.queryByRole("note", { name: "历史记录不完整" })).toBeNull();

@@ -1156,8 +1156,6 @@ describe("App", () => {
       .toBeInTheDocument();
     expect(screen.getByRole("status", { name: "正在同步工作区…" }))
       .toBeInTheDocument();
-    expect(screen.getByRole("note", { name: "历史记录不完整" }))
-      .toBeInTheDocument();
     expect(screen.getByRole("button", { name: "查看会话角色 Preview Reader" }))
       .toBeInTheDocument();
     expect(screen.getByTitle("模型连接")).toBeDisabled();
@@ -5026,9 +5024,6 @@ describe("App", () => {
     expect(screen.getByText("persisted question", { selector: "article" })).toBeInTheDocument();
     expect(screen.getByText("persisted answer").closest("article")).toBeInTheDocument();
     expect(screen.queryByText("wrong conversation")).not.toBeInTheDocument();
-    const historyWindow = screen.getByRole("note", { name: "历史记录不完整" });
-    expect(historyWindow).toHaveTextContent("当前可见记录从一轮对话的中间开始。");
-    expect(historyWindow).toHaveTextContent("较长消息或工具详情已缩短显示。");
   });
 
   it("waits for the matching conversation snapshot before enabling prompts", () => {

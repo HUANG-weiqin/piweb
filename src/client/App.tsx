@@ -8,7 +8,6 @@ import {
   type ClientCommand,
   type ConversationRoleSnapshot,
   type ConversationSummary,
-  type ConversationWindowCoverage,
   type DirectoryListing,
   type LoopList,
   type PublicState,
@@ -57,11 +56,6 @@ export const MAX_CACHED_CONVERSATION_PRESENTATIONS = 8;
 const MAX_SUPERSEDED_FOCUS_COMMANDS = 64;
 const RESUME_REFRESH_DELAY_MS = 16;
 const EMPTY_SERVICE_TIERS: readonly ServiceTier[] = [];
-const EMPTY_CONVERSATION_WINDOW: ConversationWindowCoverage = {
-  omittedBefore: false,
-  startsMidTurn: false,
-  contentTruncated: false,
-};
 
 function isAffectedByDeletionProjection(
   conversation: ConversationSummary,
@@ -243,7 +237,6 @@ interface CachedWorkspaceProjection {
   roles: RoleTemplate[];
   conversationRole?: ConversationRoleSnapshot;
   conversationIndexTruncated: boolean;
-  historyWindow: ConversationWindowCoverage;
   chat: typeof initialChatState;
 }
 
@@ -254,7 +247,6 @@ interface CachedConversationPresentation {
   conversationId: string;
   state: PublicState;
   conversationRole?: ConversationRoleSnapshot;
-  historyWindow: ConversationWindowCoverage;
   chat: typeof initialChatState;
 }
 
@@ -488,9 +480,6 @@ export function App() {
   const authoritativeProjectMembershipRef = useRef(
     new Map<string, ReadonlySet<string>>(),
   );
-  const [historyWindow, setHistoryWindow] = useState<ConversationWindowCoverage>(
-    EMPTY_CONVERSATION_WINDOW,
-  );
   const [conversationReady, setConversationReady] = useState(false);
   const conversationReadyRef = useRef(false);
   const workspaceProjectionCacheRef = useRef(
@@ -605,7 +594,6 @@ export function App() {
         roles: [...roles],
         conversationRole,
         conversationIndexTruncated,
-        historyWindow,
         chat,
       },
     );
@@ -641,7 +629,6 @@ export function App() {
         conversationId: focus.conversationId,
         state: { ...state },
         conversationRole,
-        historyWindow,
         // Keep the reducer-produced object by reference; this cache is display-only.
         chat,
       },
@@ -681,7 +668,6 @@ export function App() {
     setConversationRole(undefined);
     setLoopList({ items: [], armed: false });
     setConversationIndexTruncated(false);
-    setHistoryWindow(EMPTY_CONVERSATION_WINDOW);
     dispatch({ type: "reset" });
   };
   const showCachedWorkspacePresentation = (
@@ -702,7 +688,6 @@ export function App() {
     setRoles(cached.roles);
     setConversationRole(cached.conversationRole);
     setConversationIndexTruncated(cached.conversationIndexTruncated);
-    setHistoryWindow(cached.historyWindow);
   };
   const showCachedConversationPresentation = (
     cached: CachedConversationPresentation,
@@ -935,7 +920,6 @@ export function App() {
       showPendingContextCompaction(undefined);
       setConversationRole(undefined);
       setLoopList({ items: [], armed: false });
-      setHistoryWindow(EMPTY_CONVERSATION_WINDOW);
       updateConversationReady(false);
       setSelectingRole(true);
       dispatch({ type: "reset" });
@@ -950,7 +934,6 @@ export function App() {
     if (!preservePresentation) {
       setConversationRole(undefined);
       setLoopList({ items: [], armed: false });
-      setHistoryWindow(EMPTY_CONVERSATION_WINDOW);
       dispatch({ type: "focus_changed", ...focus });
     }
     updateConversationReady(false);
@@ -1017,7 +1000,6 @@ export function App() {
     setConversationRole(undefined);
     setLoopList({ items: [], armed: false });
     setConversationIndexTruncated(false);
-    setHistoryWindow(EMPTY_CONVERSATION_WINDOW);
     setExtensionUI([]);
     setNotification(undefined);
     setSettingResult(undefined);
@@ -1120,7 +1102,6 @@ export function App() {
     });
     setConversationRole(event.role);
     setLoopList(event.loopList ?? { items: [], armed: false });
-    setHistoryWindow(event.window);
     if (event.pendingPrompts !== undefined) {
       replacePendingAdmissions(
         event.pendingPrompts.map(({ promptId, text }) => ({ promptId, text })),
@@ -1171,7 +1152,6 @@ export function App() {
     conversationReady,
     conversationRole,
     conversations,
-    historyWindow,
     roles,
     state,
   ]);
@@ -1401,7 +1381,6 @@ export function App() {
             providers: [],
           },
           conversationRole: event.role,
-          historyWindow: event.window,
           chat: previewChat,
         };
         const cacheKey = conversationScopeKey(
@@ -3382,12 +3361,6 @@ export function App() {
     ? transitionPresentation?.conversationRole
       ?? (showAttachedConversationProjection ? conversationRole : undefined)
     : conversationRole;
-  const visibleHistoryWindow = transitioning
-    ? transitionPresentation?.historyWindow
-      ?? (showAttachedConversationProjection
-        ? historyWindow
-        : EMPTY_CONVERSATION_WINDOW)
-    : historyWindow;
   return <>
     <div className="workbench">
       {workspaceRail}
@@ -3525,7 +3498,6 @@ export function App() {
               online={online}
               interactive={settingsEnabled}
               conversationReady={visibleConversationReady}
-              historyWindow={visibleHistoryWindow}
               draft={draft}
               submitting={Boolean(pendingPrompt)}
               pendingAdmissions={pendingAdmissions}
