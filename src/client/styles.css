@@ -1622,17 +1622,6 @@ pre {
   height: 6px;
   border-radius: 50%;
   background: currentColor;
-  animation: pending-admission-pulse 1.6s ease-in-out infinite;
-}
-
-@keyframes pending-admission-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.3;
-  }
 }
 
 .composer-wrap {
@@ -5951,16 +5940,7 @@ pre {
   *::before,
   *::after {
     scroll-behavior: auto !important;
-    transition-duration: 0.01ms !important;
-  }
-
-  .conversation-activity-spinner,
-  .workspace-opening-spinner,
-  .conversation-deletion-spinner,
-  .compaction-spinner,
-  .thinking-spinner,
-  .tool-spinner,
-  .commitment-spinner {
+    transition: none !important;
     animation: none !important;
   }
 }
@@ -6700,5 +6680,83 @@ pre {
 
   .app-shell .model-button span {
     right: 4px;
+  }
+}
+
+/* Gate 6: short, state-owned motion for primary shell surfaces only */
+
+.workspace-rail,
+.conversation-sidebar,
+.app-shell {
+  --motion-punch-duration: 110ms;
+  --motion-slash-duration: 150ms;
+  --motion-stamp-duration: 130ms;
+  --motion-hit-easing: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.workspace-rail-item,
+.workspace-rail-item.active::before,
+.workspace-rail-close,
+.conversation-sidebar-resize-handle::after,
+.conversation-sidebar-item,
+.conversation-sidebar-conversation,
+.conversation-sidebar-actions,
+.conversation-group-disclosure,
+.app-shell .model-button,
+.app-shell .send {
+  transition-duration: var(--motion-punch-duration);
+  transition-timing-function: var(--motion-hit-easing);
+}
+
+.app-shell .model-button,
+.app-shell .send {
+  transition-property: color, background-color, border-color, box-shadow, transform;
+}
+
+.app-shell .model-button:not(:disabled):active,
+.app-shell .send:not(:disabled):active {
+  transform: translateY(1px) scale(0.98);
+}
+
+.conversation-group-chevron,
+.conversation-group-chevron::before {
+  transition-duration: var(--motion-slash-duration);
+  transition-timing-function: steps(3, end);
+}
+
+.transcript .compaction-state {
+  position: relative;
+}
+
+.transcript .compaction-state::after {
+  position: absolute;
+  inset: -4px -6px;
+  border: 2px solid currentColor;
+  content: "";
+  opacity: 0;
+  pointer-events: none;
+  transform: rotate(-2deg);
+  animation: rebel-motion-stamp var(--motion-stamp-duration) steps(3, end);
+}
+
+@keyframes rebel-motion-stamp {
+  0% {
+    opacity: 0;
+    transform: scale(0.72) rotate(-7deg);
+  }
+
+  34% {
+    opacity: 0.88;
+    transform: scale(1.05) rotate(-2deg);
+  }
+
+  68% {
+    opacity: 0.38;
+    transform: scale(1) rotate(-2deg);
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(1) rotate(-2deg);
   }
 }

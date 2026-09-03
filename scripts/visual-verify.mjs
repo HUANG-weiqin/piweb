@@ -29,6 +29,7 @@ for (let i = 2; i < process.argv.length; i += 1) {
 }
 
 const visualFixture = args.has("fixture");
+const motionEvidence = args.has("motion");
 let baseUrl = String(args.get("url") ?? "http://127.0.0.1:5173/");
 if (visualFixture) {
   const fixtureUrl = new URL(baseUrl);
@@ -38,9 +39,11 @@ if (visualFixture) {
 const requestedViewport = args.get("viewport");
 const viewports = requestedViewport
   ? [String(requestedViewport).split("x").map(Number)]
-  : visualFixture
-    ? [[1920, 1080], [1440, 900]]
-    : defaultViewports;
+  : motionEvidence
+    ? [[1440, 900]]
+    : visualFixture
+      ? [[1920, 1080], [1440, 900]]
+      : defaultViewports;
 const waitMs = Number(args.get("wait") ?? 900);
 const reducedMotion = args.has("reduced-motion");
 
@@ -307,6 +310,381 @@ async function captureViewport(client, outputPath, width, height, index) {
   return { name, ...diagnostics };
 }
 
+function sameLayout(left, right) {
+  return ["offsetLeft", "offsetTop", "offsetWidth", "offsetHeight"]
+    .every((key) => left[key] === right[key]);
+}
+
+function assertMotionCase(name, frames, expectedDuration, reduced) {
+  if (frames.some((frame) => frame.state.overflow)) {
+    throw new Error(`${name} motion introduced horizontal overflow`);
+  }
+  if (!frames.slice(1).every((frame) => sameLayout(frames[0].state.layout, frame.state.layout))) {
+    throw new Error(`${name} motion changed layout geometry`);
+  }
+  if (frames.at(-1).state.activeMotions.length > 0) {
+    throw new Error(`${name} motion remained active after settling`);
+  }
+  const observed = frames.flatMap((frame) => frame.state.activeMotions);
+  const completed = frames.at(-1).completedMotions ?? [];
+  if (reduced) {
+    if (observed.length > 0) throw new Error(`${name} reduced-motion path still animated`);
+    if (frames.some((frame) => frame.state.transitionProperty !== "none"
+      || frame.state.transitionDuration !== "0s"
+      || frame.state.animationName !== "none"
+      || frame.state.animationDuration !== "0s")) {
+      throw new Error(`${name} reduced-motion path retained CSS timing`);
+    }
+    return;
+  }
+  if (!observed.some((motion) => Math.abs(motion.durationMs - expectedDuration) < 0.5)) {
+    throw new Error(`${name} did not expose its ${expectedDuration}ms motion token`);
+  }
+  if (completed.length === 0
+    || completed.some((motion) => !Number.isFinite(motion.iterations))) {
+    throw new Error(`${name} did not naturally finish a finite motion`);
+  }
+  const layoutProperties = new Set([
+    "blockSize",
+    "bottom",
+    "height",
+    "inlineSize",
+    "left",
+    "margin",
+    "padding",
+    "right",
+    "top",
+    "width",
+  ]);
+  const animatedLayoutProperty = observed
+    .flatMap((motion) => motion.properties)
+    .find((property) => layoutProperties.has(property));
+  if (animatedLayoutProperty) {
+    throw new Error(`${name} animated layout property ${animatedLayoutProperty}`);
+  }
+}
+
+async function readMotionState(
+  client,
+  selector,
+  pseudo = null,
+  styleSelector = selector,
+) {
+  return client.evaluate(`(() => {
+    const element = document.querySelector(${JSON.stringify(selector)});
+    const styleElement = document.querySelector(${JSON.stringify(styleSelector)});
+    if (!element || !styleElement) {
+      throw new Error('Motion target missing: ' + ${JSON.stringify(selector)});
+    }
+    const style = getComputedStyle(styleElement, ${JSON.stringify(pseudo)});
+    const motionDetails = (animation) => {
+      const effect = animation.effect;
+      const timing = effect?.getTiming();
+      const keyframes = effect?.getKeyframes() ?? [];
+      const ignored = new Set(['offset', 'computedOffset', 'easing', 'composite']);
+      return {
+        type: animation.constructor.name,
+        name: animation.animationName ?? null,
+        property: animation.transitionProperty ?? null,
+        durationMs: typeof timing?.duration === 'number' ? timing.duration : null,
+        easing: timing?.easing ?? null,
+        playState: animation.playState,
+        properties: [...new Set(keyframes.flatMap((keyframe) =>
+          Object.keys(keyframe).filter((key) => !ignored.has(key))))],
+      };
+    };
+    return {
+      layout: {
+        offsetLeft: element.offsetLeft,
+        offsetTop: element.offsetTop,
+        offsetWidth: element.offsetWidth,
+        offsetHeight: element.offsetHeight,
+      },
+      visualRect: (() => {
+        const rect = element.getBoundingClientRect();
+        return {
+          left: rect.left,
+          top: rect.top,
+          width: rect.width,
+          height: rect.height,
+        };
+      })(),
+      transitionDuration: style.transitionDuration,
+      transitionProperty: style.transitionProperty,
+      transitionTimingFunction: style.transitionTimingFunction,
+      animationDuration: style.animationDuration,
+      animationName: style.animationName,
+      animationTimingFunction: style.animationTimingFunction,
+      visualStyle: {
+        backgroundColor: style.backgroundColor,
+        borderColor: style.borderColor,
+        boxShadow: style.boxShadow,
+        color: style.color,
+        opacity: style.opacity,
+        transform: style.transform,
+      },
+      activeMotions: element.getAnimations({ subtree: true })
+        .filter((animation) => animation.playState !== 'finished'
+          && animation.playState !== 'idle')
+        .map(motionDetails),
+      overflow: document.documentElement.scrollWidth > innerWidth + 1,
+      workbenchColumns: getComputedStyle(document.querySelector('.workbench'))
+        .gridTemplateColumns,
+      expanded: element.getAttribute('aria-expanded'),
+      membersPresent: !!element.closest('.conversation-group-card')
+        ?.querySelector('.conversation-group-members'),
+    };
+  })()`);
+}
+
+async function captureMotionFrame(
+  client,
+  outputPath,
+  name,
+  regionSelector,
+  stateSelector,
+  pseudo = null,
+  styleSelector = stateSelector,
+) {
+  const clip = await client.evaluate(`(() => {
+    const element = document.querySelector(${JSON.stringify(regionSelector)});
+    if (!element) throw new Error('Motion capture region missing: '
+      + ${JSON.stringify(regionSelector)});
+    const rect = element.getBoundingClientRect();
+    const padding = 12;
+    const x = Math.max(0, Math.floor(rect.left - padding));
+    const y = Math.max(0, Math.floor(rect.top - padding));
+    const right = Math.min(innerWidth, Math.ceil(rect.right + padding));
+    const bottom = Math.min(innerHeight, Math.ceil(rect.bottom + padding));
+    return { x, y, width: right - x, height: bottom - y, scale: 1 };
+  })()`);
+  const screenshot = await client.call("Page.captureScreenshot", {
+    format: "png",
+    clip,
+    captureBeyondViewport: false,
+  });
+  await writeFile(join(outputPath, name), Buffer.from(screenshot.data, "base64"));
+  return {
+    name,
+    clip,
+    state: await readMotionState(client, stateSelector, pseudo, styleSelector),
+  };
+}
+
+async function seekMotion(client, selector, progress) {
+  await client.evaluate(`(async () => {
+    await new Promise((resolveFrame) => requestAnimationFrame(resolveFrame));
+    const element = document.querySelector(${JSON.stringify(selector)});
+    if (!element) throw new Error('Motion target missing: ' + ${JSON.stringify(selector)});
+    element.getAnimations({ subtree: true }).forEach((animation) => {
+      const duration = animation.effect?.getTiming().duration;
+      animation.pause();
+      animation.currentTime = typeof duration === 'number' ? duration * ${progress} : 0;
+    });
+    await new Promise((resolveFrame) => requestAnimationFrame(resolveFrame));
+  })()`);
+}
+
+async function finishMotion(client, selector) {
+  return client.evaluate(`(async () => {
+    const element = document.querySelector(${JSON.stringify(selector)});
+    if (!element) throw new Error('Motion target missing: ' + ${JSON.stringify(selector)});
+    const animations = element.getAnimations({ subtree: true });
+    const completed = animations.map((animation) => {
+      const timing = animation.effect?.getTiming();
+      return {
+        type: animation.constructor.name,
+        name: animation.animationName ?? null,
+        property: animation.transitionProperty ?? null,
+        durationMs: typeof timing?.duration === 'number' ? timing.duration : null,
+        iterations: timing?.iterations ?? 1,
+        fill: timing?.fill ?? 'auto',
+      };
+    });
+    animations.forEach((animation) => animation.finish());
+    await new Promise((resolveFrame) => requestAnimationFrame(resolveFrame));
+    return completed;
+  })()`);
+}
+
+async function cancelMotion(client, selector) {
+  await client.evaluate(`(async () => {
+    const element = document.querySelector(${JSON.stringify(selector)});
+    element?.getAnimations({ subtree: true }).forEach((animation) => animation.cancel());
+    await new Promise((resolveFrame) => requestAnimationFrame(resolveFrame));
+  })()`);
+}
+
+async function forcePseudoState(client, selector, states) {
+  const { root } = await client.call("DOM.getDocument", { depth: 0 });
+  const { nodeId } = await client.call("DOM.querySelector", {
+    nodeId: root.nodeId,
+    selector,
+  });
+  if (!nodeId) throw new Error(`Motion target missing: ${selector}`);
+  await client.call("CSS.forcePseudoState", {
+    nodeId,
+    forcedPseudoClasses: states,
+  });
+  return nodeId;
+}
+
+async function captureMotionEvidence(client, outputPath, width, height) {
+  const cases = [];
+
+  const punchSelector = ".app-shell .model-button";
+  const punchFrames = [await captureMotionFrame(
+    client,
+    outputPath,
+    "motion-punch-01-start.png",
+    ".topbar-controls",
+    punchSelector,
+  )];
+  const punchNodeId = await forcePseudoState(client, punchSelector, ["hover", "active"]);
+  if (!reducedMotion) await seekMotion(client, punchSelector, 0.5);
+  punchFrames.push(await captureMotionFrame(
+    client,
+    outputPath,
+    `motion-punch-02-${reducedMotion ? "instant" : "mid"}.png`,
+    ".topbar-controls",
+    punchSelector,
+  ));
+  const punchCompletion = await finishMotion(client, punchSelector);
+  punchFrames.push({
+    ...(await captureMotionFrame(
+      client,
+      outputPath,
+      "motion-punch-03-settled.png",
+      ".topbar-controls",
+      punchSelector,
+    )),
+    completedMotions: punchCompletion,
+  });
+  assertMotionCase("PUNCH", punchFrames, 110, reducedMotion);
+  await client.call("CSS.forcePseudoState", {
+    nodeId: punchNodeId,
+    forcedPseudoClasses: [],
+  });
+  await cancelMotion(client, punchSelector);
+  cases.push({
+    name: "PUNCH",
+    trigger: "model access :active",
+    frames: punchFrames,
+  });
+
+  const slashSelector = ".conversation-group-disclosure";
+  await client.evaluate(`(async () => {
+    const disclosure = document.querySelector(${JSON.stringify(slashSelector)});
+    if (!disclosure) throw new Error('SLASH disclosure missing');
+    if (disclosure.getAttribute('aria-expanded') !== 'false') disclosure.click();
+    await new Promise((resolveFrame) => requestAnimationFrame(resolveFrame));
+  })()`);
+  await cancelMotion(client, slashSelector);
+  const slashFrames = [await captureMotionFrame(
+    client,
+    outputPath,
+    "motion-slash-01-start.png",
+    ".conversation-sidebar",
+    slashSelector,
+    "::before",
+    ".conversation-group-chevron",
+  )];
+  await client.evaluate(`(async () => {
+    document.querySelector(${JSON.stringify(slashSelector)})?.click();
+    await new Promise((resolveFrame) => requestAnimationFrame(resolveFrame));
+  })()`);
+  if (!reducedMotion) await seekMotion(client, slashSelector, 0.5);
+  slashFrames.push(await captureMotionFrame(
+    client,
+    outputPath,
+    `motion-slash-02-${reducedMotion ? "instant" : "mid"}.png`,
+    ".conversation-sidebar",
+    slashSelector,
+    "::before",
+    ".conversation-group-chevron",
+  ));
+  if (slashFrames[1].state.expanded !== "true" || !slashFrames[1].state.membersPresent) {
+    throw new Error("SLASH delayed the expanded state or member DOM");
+  }
+  const slashCompletion = await finishMotion(client, slashSelector);
+  slashFrames.push({
+    ...(await captureMotionFrame(
+      client,
+      outputPath,
+      "motion-slash-03-settled.png",
+      ".conversation-sidebar",
+      slashSelector,
+      "::before",
+      ".conversation-group-chevron",
+    )),
+    completedMotions: slashCompletion,
+  });
+  assertMotionCase("SLASH", slashFrames, 150, reducedMotion);
+  await cancelMotion(client, slashSelector);
+  cases.push({
+    name: "SLASH",
+    trigger: "conversation group expand",
+    frames: slashFrames,
+  });
+
+  const stampSelector = ".transcript .compaction-state";
+  const stampFrames = [await captureMotionFrame(
+    client,
+    outputPath,
+    "motion-stamp-01-start.png",
+    ".compaction-marker",
+    stampSelector,
+    "::after",
+  )];
+  await client.evaluate(`(async () => {
+    const element = document.querySelector(${JSON.stringify(stampSelector)});
+    if (!element) throw new Error('STAMP target missing');
+    element.classList.remove('compaction-state');
+    void element.offsetWidth;
+    element.classList.add('compaction-state');
+    await new Promise((resolveFrame) => requestAnimationFrame(resolveFrame));
+  })()`);
+  if (!reducedMotion) await seekMotion(client, stampSelector, 0.5);
+  stampFrames.push(await captureMotionFrame(
+    client,
+    outputPath,
+    `motion-stamp-02-${reducedMotion ? "instant" : "mid"}.png`,
+    ".compaction-marker",
+    stampSelector,
+    "::after",
+  ));
+  const stampCompletion = await finishMotion(client, stampSelector);
+  stampFrames.push({
+    ...(await captureMotionFrame(
+      client,
+      outputPath,
+      "motion-stamp-03-settled.png",
+      ".compaction-marker",
+      stampSelector,
+      "::after",
+    )),
+    completedMotions: stampCompletion,
+  });
+  assertMotionCase("STAMP", stampFrames, 130, reducedMotion);
+  if (["opacity", "transform"].some((property) =>
+    stampFrames[0].state.visualStyle[property]
+      !== stampFrames[2].state.visualStyle[property])) {
+    throw new Error("STAMP retained a visual effect after completion");
+  }
+  await cancelMotion(client, stampSelector);
+  cases.push({
+    name: "STAMP",
+    trigger: "terminal compaction DONE state",
+    frames: stampFrames,
+  });
+
+  return {
+    viewport: [width, height],
+    reducedMotion,
+    cases,
+  };
+}
+
 async function checkSetupFlow(client) {
   const opened = await client.evaluate(`(() => {
     const button = [...document.querySelectorAll('button')].find((element) => element.textContent?.includes('开启工作区'));
@@ -341,6 +719,7 @@ async function stopBrowser(child) {
 
 async function main() {
   for (const viewport of viewports) assertViewport(viewport);
+  if (motionEvidence && !visualFixture) throw new Error("--motion requires --fixture");
   const response = await fetch(baseUrl, { signal: AbortSignal.timeout(5000) });
   if (!response.ok) {
     throw new Error(`Visual verification target returned ${response.status} ${response.statusText}: ${baseUrl}`);
@@ -372,6 +751,11 @@ async function main() {
     await client.open();
     await client.call("Page.enable");
     await client.call("Runtime.enable");
+    if (motionEvidence) {
+      await client.call("DOM.enable");
+      await client.call("CSS.enable");
+      await client.call("Animation.enable");
+    }
     if (reducedMotion) {
       await client.call("Emulation.setEmulatedMedia", {
         features: [{ name: "prefers-reduced-motion", value: "reduce" }],
@@ -381,6 +765,16 @@ async function main() {
     const captures = [];
     for (const [index, viewport] of viewports.entries()) {
       captures.push(await captureViewport(client, runDir, viewport[0], viewport[1], index));
+    }
+    let motion = null;
+    if (motionEvidence) {
+      await client.call("Animation.setPlaybackRate", { playbackRate: 0.05 });
+      try {
+        const [width, height] = viewports.at(-1);
+        motion = await captureMotionEvidence(client, runDir, width, height);
+      } finally {
+        await client.call("Animation.setPlaybackRate", { playbackRate: 1 });
+      }
     }
     const setupFlow = visualFixture ? null : await checkSetupFlow(client);
     client.close();
@@ -392,6 +786,7 @@ async function main() {
       reducedMotion,
       ...(visualFixture ? { fixture: "workbench" } : {}),
       captures,
+      ...(motion ? { motion } : {}),
       setupFlow,
     };
     await writeFile(join(runDir, `manifest${reducedMotion ? "-reduced" : ""}.json`), `${JSON.stringify(manifest, null, 2)}\n`);
