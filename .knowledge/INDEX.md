@@ -14,6 +14,7 @@
 | [kb-project-sessions.md](kb-project-sessions.md) | 修改 `.piweb`、项目身份、持久对话、恢复、索引或租约 |
 | [kb-agent-collaboration.md](kb-agent-collaboration.md) | 修改角色、conversation actor、跨会话消息、等待或临时会话 |
 | [kb-client-state.md](kb-client-state.md) | 修改 React App、聊天 reducer、重连和 UI 状态 |
+| [kb-visual-validation.md](kb-visual-validation.md) | 使用本地无头浏览器检查界面尺寸、根节点、Setup/Escape 和 reduced-motion |
 | [kb-tool-policy.md](kb-tool-policy.md) | 修改只读/全部授权模式、工具来源判断或 SDK gate |
 | [_templet.md](_templet.md) | 新知识页模板 |
 

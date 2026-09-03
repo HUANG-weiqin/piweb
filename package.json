@@ -19,7 +19,8 @@
     "context-compressor:build": "npm run build --workspace=@piweb/context-compressor",
     "context-compressor:test": "vitest run packages/context-compressor/test/index.test.ts",
     "context-compressor:typecheck": "tsc -p packages/context-compressor/tsconfig.test.json",
-    "context-compressor:benchmark": "npm run context-compressor:build && tsx scripts/benchmark-context-compressor.ts"
+    "context-compressor:benchmark": "npm run context-compressor:build && tsx scripts/benchmark-context-compressor.ts",
+    "visual:verify": "node scripts/visual-verify.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.84.4",

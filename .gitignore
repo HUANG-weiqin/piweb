@@ -3,6 +3,7 @@ dist-client/
 dist-server/
 packages/context-compressor/dist/
 coverage/
+.visual-validation/
 .piweb/
 .worktrees/
 *.log
