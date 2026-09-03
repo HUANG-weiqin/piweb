@@ -167,7 +167,10 @@ async function captureViewport(client, outputPath, width, height, index) {
       const fixture = document.querySelector('[data-visual-fixture="populated-workbench"]');
       const tasks = fixture?.querySelector('.loop-list-toggle');
       if (!fixture || !tasks) return false;
-      if (tasks.getAttribute('aria-expanded') !== 'true') tasks.click();
+      if (
+        tasks.getClientRects().length > 0
+        && tasks.getAttribute('aria-expanded') !== 'true'
+      ) tasks.click();
       if (innerWidth <= 600) {
         const sidebar = fixture.querySelector('.conversation-sidebar-toggle');
         if (sidebar?.getAttribute('aria-expanded') === 'true') sidebar.click();
@@ -185,13 +188,22 @@ async function captureViewport(client, outputPath, width, height, index) {
       })()`);
     }
     const missingSurfaces = await client.evaluate(`(() => {
+      const missionVisible = document.querySelector('.mission-command')
+        ?.getClientRects().length > 0;
       const selectors = [
         '.workspace-rail',
         '.conversation-sidebar',
         ...(innerWidth > 600 ? ['.compaction-marker', '.message.user'] : []),
         '.assistant-activity-group.is-active',
         '.commitment-card',
-        '.loop-list-items',
+        ...(missionVisible
+          ? [
+            '.mission-command',
+            '.mission-objective-list',
+            '.mission-context',
+            '.mission-activity',
+          ]
+          : ['.loop-list-items']),
         '.composer',
       ];
       return selectors.flatMap((selector) => {
@@ -231,6 +243,8 @@ async function captureViewport(client, outputPath, width, height, index) {
         dialog: dialog?.getAttribute('aria-label') ?? null,
         activeElement: document.activeElement?.tagName ?? null,
         animations: [...new Set(animations)].slice(0, 12),
+        missionVisible: document.querySelector('.mission-command')
+          ?.getClientRects().length > 0,
       };
     })())`),
   );

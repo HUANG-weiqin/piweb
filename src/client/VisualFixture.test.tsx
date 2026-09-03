@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { VisualFixture } from "./VisualFixture";
 
@@ -45,6 +45,18 @@ describe("VisualFixture", () => {
       .toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Tasks" }))
       .toHaveTextContent("1/4 · 3 项未完成");
+    const mission = screen.getByRole("complementary", {
+      name: "Mission Command",
+    });
+    expect(within(mission).getByRole("heading", { name: "OBJECTIVES" }))
+      .toBeInTheDocument();
+    expect(within(mission).getByLabelText("3 个未完成目标"))
+      .toHaveTextContent("1 CLEARED");
+    expect(within(mission).getByText("复用真实工作台组件与状态样式")
+      .closest("li")).toHaveClass("is-active");
+    expect(mission).toHaveTextContent("Tech Lead");
+    expect(mission).toHaveTextContent("RUNRUNNING");
+    expect(within(mission).queryByRole("button")).not.toBeInTheDocument();
     expect(screen.getByDisplayValue("检查两张截图中的层级、密度与状态辨识度。"))
       .toBeInTheDocument();
   });

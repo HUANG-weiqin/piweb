@@ -79,6 +79,12 @@ const LOOP_LIST_ITEM_STATUS_SYMBOLS: Record<LoopListItemStatus, string> = {
   completed: "✓",
 };
 
+const MISSION_OBJECTIVE_STATUS_LABELS: Record<LoopListItemStatus, string> = {
+  pending: "REMAINING",
+  active: "CURRENT",
+  completed: "CLEARED",
+};
+
 interface ChatProps {
   chat: ChatState;
   observationSessionId: string;
@@ -274,6 +280,108 @@ function getSessionTokenUsage(chat: ChatState, usage?: TokenUsage): TokenUsage {
     cacheWrite: 0,
     total: 0,
   });
+}
+
+interface MissionCommandSurfaceProps {
+  loopListItems: LoopList["items"];
+  completedItemCount: number;
+  remainingItemCount: number;
+  contextTokenText: string;
+  contextPercent: number | null | undefined;
+  contextSource: ChatProps["contextSource"];
+  compactionThresholdPercent: number;
+  compacting: boolean;
+  activeRun: PublicState["activeRun"] | undefined;
+  role: ConversationRoleSnapshot | undefined;
+  pendingAdmissionCount: number;
+}
+
+function MissionCommandSurface({
+  loopListItems,
+  completedItemCount,
+  remainingItemCount,
+  contextTokenText,
+  contextPercent,
+  contextSource,
+  compactionThresholdPercent,
+  compacting,
+  activeRun,
+  role,
+  pendingAdmissionCount,
+}: MissionCommandSurfaceProps) {
+  const meterPercent = contextPercent == null
+    ? undefined
+    : Math.min(100, Math.max(0, contextPercent));
+
+  return <aside className="mission-command" aria-label="Mission Command">
+    <header className="mission-command-header">
+      <p className="mission-command-kicker">MISSION</p>
+      <div className="mission-command-title-row">
+        <h2>OBJECTIVES</h2>
+        <p
+          className="mission-objective-count"
+          aria-label={`${remainingItemCount} 个未完成目标`}
+        >
+          <strong>{remainingItemCount}</strong>
+          <span>REMAINING<br />{completedItemCount} CLEARED</span>
+        </p>
+      </div>
+    </header>
+
+    <section className="mission-objectives" aria-label="Objectives">
+      {loopListItems.length === 0
+        ? <p className="mission-objectives-empty">当前没有计划目标。</p>
+        : <ol className="mission-objective-list">
+          {loopListItems.map((item) => <li
+            key={item.id}
+            className={`mission-objective is-${item.status}`}
+          >
+            <span className="mission-objective-mark" aria-hidden="true" />
+            <span className="mission-objective-copy">
+              <small>{MISSION_OBJECTIVE_STATUS_LABELS[item.status]}</small>
+              <span>{item.text}</span>
+            </span>
+          </li>)}
+        </ol>}
+    </section>
+
+    <section className="mission-context" aria-label="Context Compaction">
+      <div className="mission-section-heading">
+        <h3>CONTEXT COMPACTION</h3>
+        <span>{contextSource?.toUpperCase() ?? "UNKNOWN"}</span>
+      </div>
+      {meterPercent === undefined
+        ? <div className="mission-context-meter is-unknown" aria-hidden="true" />
+        : <div
+          className="mission-context-meter"
+          role="meter"
+          aria-label={`上下文使用 ${Math.round(contextPercent!)}%`}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(contextPercent!)}
+        >
+          <span style={{ width: `${meterPercent}%` }} />
+        </div>}
+      <p className="mission-context-reading">{contextTokenText}</p>
+      <p className="mission-context-threshold">
+        AUTO COMPACT <strong>{compactionThresholdPercent}%</strong>
+      </p>
+    </section>
+
+    <section className="mission-activity" aria-label="Activity">
+      <div className="mission-section-heading">
+        <h3>ACTIVITY</h3>
+      </div>
+      <dl className="mission-activity-facts">
+        {role && <div><dt>ROLE</dt><dd>{role.name}</dd></div>}
+        <div><dt>RUN</dt><dd>{activeRun?.phase.toUpperCase() ?? "IDLE"}</dd></div>
+        {compacting && <div><dt>CONTEXT</dt><dd>COMPACTING</dd></div>}
+        {pendingAdmissionCount > 0 && <div>
+          <dt>ADMISSIONS</dt><dd>{pendingAdmissionCount} PENDING</dd>
+        </div>}
+      </dl>
+    </section>
+  </aside>;
 }
 
 function ChatView({
@@ -757,6 +865,19 @@ function ChatView({
         </span>
       </div>}
     </section>
+    <MissionCommandSurface
+      loopListItems={loopListItems}
+      completedItemCount={completedLoopListItems}
+      remainingItemCount={remainingLoopListItems}
+      contextTokenText={contextTokenText}
+      contextPercent={contextPercent}
+      contextSource={contextSource}
+      compactionThresholdPercent={compactionThresholdPercent}
+      compacting={compacting}
+      activeRun={activeRun}
+      role={role}
+      pendingAdmissionCount={pendingAdmissions.length}
+    />
     <div className="composer-wrap" ref={composerWrapRef}>
       {showJumpToLatest && <button
         type="button"

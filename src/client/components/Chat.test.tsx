@@ -1,6 +1,13 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -356,23 +363,27 @@ describe("Chat", () => {
       loopList,
       busy: true,
     }));
-    const toggle = screen.getByRole("button", { name: /Tasks/ });
+    const tasks = screen.getByRole("region", { name: "Tasks" });
+    const toggle = within(tasks).getByRole("button", { name: /Tasks/ });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
-    expect(screen.getByText("已暂停")).toBeInTheDocument();
-    expect(screen.getByText("1/4 · 3 项未完成")).toBeInTheDocument();
-    expect(screen.queryByText("Pending item")).not.toBeInTheDocument();
+    expect(within(tasks).getByText("已暂停")).toBeInTheDocument();
+    expect(within(tasks).getByText("1/4 · 3 项未完成")).toBeInTheDocument();
+    expect(within(tasks).queryByText("Pending item")).not.toBeInTheDocument();
 
     fireEvent.click(toggle);
     expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
-    expect(screen.getByRole("img", { name: "已完成" })).toBeInTheDocument();
-    expect(screen.getAllByRole("img", { name: "进行中" })).toHaveLength(2);
-    expect(screen.getByRole("img", { name: "待处理" })).toBeInTheDocument();
-    expect(screen.getByText("Active item one").closest("li"))
+    expect(within(tasks).queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(within(tasks).getByRole("img", { name: "已完成" }))
+      .toBeInTheDocument();
+    expect(within(tasks).getAllByRole("img", { name: "进行中" }))
+      .toHaveLength(2);
+    expect(within(tasks).getByRole("img", { name: "待处理" }))
+      .toBeInTheDocument();
+    expect(within(tasks).getByText("Active item one").closest("li"))
       .toHaveClass("active");
-    expect(screen.getByText("Finished item").closest("li"))
+    expect(within(tasks).getByText("Finished item").closest("li"))
       .toHaveClass("completed");
-    expect(Array.from(screen.getAllByRole("listitem"), (item) =>
+    expect(Array.from(within(tasks).getAllByRole("listitem"), (item) =>
       item.querySelector(".loop-list-item-text")?.textContent,
     )).toEqual([
       "Finished item",
@@ -404,6 +415,49 @@ describe("Chat", () => {
     expect(screen.getByText("4/4")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Tasks/ }))
       .toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("projects mission facts read-only from the same conversation state", () => {
+    render(view(emptyChat, "", undefined, {
+      loopList: {
+        armed: true,
+        items: [
+          { id: "done", text: "First objective", status: "completed" },
+          { id: "active", text: "Current objective", status: "active" },
+          { id: "next", text: "Next objective", status: "pending" },
+        ],
+      },
+      activeRun: { id: "run-1", phase: "waiting" },
+      compacting: true,
+      contextTokenCount: 62_000,
+      contextWindow: 100_000,
+      contextPercent: 62,
+      contextSource: "estimated",
+      compactionThresholdPercent: 75,
+      pendingAdmissions: [{ promptId: "prompt-1", text: "Queued guidance" }],
+    }));
+
+    const mission = screen.getByRole("complementary", {
+      name: "Mission Command",
+    });
+    expect(within(mission).getByRole("heading", { name: "OBJECTIVES" }))
+      .toBeInTheDocument();
+    expect(within(mission).getByLabelText("2 个未完成目标"))
+      .toHaveTextContent("2REMAINING1 CLEARED");
+    expect(Array.from(
+      mission.querySelectorAll(".mission-objective-copy > span"),
+      (item) => item.textContent,
+    )).toEqual(["First objective", "Current objective", "Next objective"]);
+    expect(within(mission).getByText("Current objective").closest("li"))
+      .toHaveClass("is-active");
+    expect(within(mission).getByRole("meter", { name: "上下文使用 62%" }))
+      .toHaveAttribute("aria-valuenow", "62");
+    expect(mission).toHaveTextContent("ESTIMATED");
+    expect(mission).toHaveTextContent("AUTO COMPACT 75%");
+    expect(mission).toHaveTextContent("RUNWAITING");
+    expect(mission).toHaveTextContent("CONTEXTCOMPACTING");
+    expect(mission).toHaveTextContent("ADMISSIONS1 PENDING");
+    expect(within(mission).queryByRole("button")).not.toBeInTheDocument();
   });
 
   it("publishes composer height and keeps followed output above its inset", () => {
