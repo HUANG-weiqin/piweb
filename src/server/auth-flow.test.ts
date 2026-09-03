@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { AuthEvent, AuthPrompt } from "@earendil-works/pi-ai";
 import { AuthFlowBroker } from "./auth-flow.js";
 
-const AUTH_FLOW_ID = "597eb8f8-2aa8-444a-ac04-681a3c483fac";
+const AUTH_FLOW_ID = "00000000-0000-4000-8000-0000000000a1";
 
 async function within<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;

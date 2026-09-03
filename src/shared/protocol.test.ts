@@ -14,7 +14,7 @@ import {
 
 const sessionId = "88f3af1d-d21d-40a0-b3c3-0f27593f274a";
 const runId = "6ff77ba8-6c29-45a7-9851-e9054d706df2";
-const authFlowId = "597eb8f8-2aa8-444a-ac04-681a3c483fac";
+const authFlowId = "00000000-0000-4000-8000-0000000000a1";
 const extensionRequestId = "a81ab25f-041e-4559-b890-04c0eeb476e4";
 const commandId = "b55e4225-e07f-4874-b760-015f7982d999";
 const conversationId = "0198f775-88f3-7af1-9c6a-3176f775912a";

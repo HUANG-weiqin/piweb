@@ -46,8 +46,8 @@ const SESSION_B = "e15c861c-e18f-4290-bc22-8932f3caaf4e";
 const SESSION_C = "b87435ff-2e88-41eb-8c09-694327af6270";
 const RUN_A = "ba39f161-b67f-47c9-9285-e391427ed7d0";
 const RUN_B = "65feacc3-00b4-45bd-80ee-5e18bc32f7dc";
-const AUTH_A = "597eb8f8-2aa8-444a-ac04-681a3c483fac";
-const AUTH_B = "2dfbf332-bc37-44f8-8af8-d497976a8a30";
+const AUTH_A = "00000000-0000-4000-8000-0000000000a1";
+const AUTH_B = "00000000-0000-4000-8000-0000000000b2";
 const COMMAND_A = "b55e4225-e07f-4874-b760-015f7982d999";
 const COMMAND_B = "8ee64aa3-c8a8-4e21-b521-66029ce3673b";
 
