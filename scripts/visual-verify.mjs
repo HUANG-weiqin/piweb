@@ -28,11 +28,19 @@ for (let i = 2; i < process.argv.length; i += 1) {
   args.set(key, value ?? true);
 }
 
-const baseUrl = String(args.get("url") ?? "http://127.0.0.1:5173/");
+const visualFixture = args.has("fixture");
+let baseUrl = String(args.get("url") ?? "http://127.0.0.1:5173/");
+if (visualFixture) {
+  const fixtureUrl = new URL(baseUrl);
+  fixtureUrl.searchParams.set("fixture", "workbench");
+  baseUrl = fixtureUrl.toString();
+}
 const requestedViewport = args.get("viewport");
 const viewports = requestedViewport
   ? [String(requestedViewport).split("x").map(Number)]
-  : defaultViewports;
+  : visualFixture
+    ? [[1920, 1080], [1440, 900]]
+    : defaultViewports;
 const waitMs = Number(args.get("wait") ?? 900);
 const reducedMotion = args.has("reduced-motion");
 
@@ -154,6 +162,42 @@ async function captureViewport(client, outputPath, width, height, index) {
   await client.call("Page.navigate", { url: baseUrl });
   await new Promise((resolveDelay) => setTimeout(resolveDelay, waitMs));
 
+  if (visualFixture) {
+    const ready = await client.evaluate(`(() => {
+      const fixture = document.querySelector('[data-visual-fixture="populated-workbench"]');
+      const tasks = fixture?.querySelector('.loop-list-toggle');
+      if (!fixture || !tasks) return false;
+      if (tasks.getAttribute('aria-expanded') !== 'true') tasks.click();
+      return true;
+    })()`);
+    if (!ready) {
+      throw new Error(`Populated workbench fixture was not ready at ${width}x${height}`);
+    }
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+    const missingSurfaces = await client.evaluate(`(() => {
+      const selectors = [
+        '.workspace-rail',
+        '.conversation-sidebar',
+        '.compaction-marker',
+        '.message.user',
+        '.assistant-activity-group.is-active',
+        '.commitment-card',
+        '.loop-list-items',
+        '.composer',
+      ];
+      return selectors.filter((selector) => {
+        const element = document.querySelector(selector);
+        if (!element) return true;
+        const rect = element.getBoundingClientRect();
+        return rect.bottom <= 0 || rect.right <= 0
+          || rect.top >= innerHeight || rect.left >= innerWidth;
+      });
+    })()`);
+    if (missingSurfaces.length > 0) {
+      throw new Error(`Fixture surfaces outside the screenshot: ${missingSurfaces.join(', ')}`);
+    }
+  }
+
   const diagnostics = JSON.parse(
     await client.evaluate(`JSON.stringify((() => {
       const root = document.documentElement;
@@ -182,9 +226,8 @@ async function captureViewport(client, outputPath, width, height, index) {
   if (!diagnostics.appRoot) {
     throw new Error(`Expected Pi Web app root was not rendered at ${width}x${height}`);
   }
-
   const screenshot = await client.call("Page.captureScreenshot", { format: "png" });
-  const name = `${String(index + 1).padStart(2, "0")}-${width}x${height}${reducedMotion ? "-reduced" : ""}.png`;
+  const name = `${String(index + 1).padStart(2, "0")}-${width}x${height}${visualFixture ? "-fixture" : ""}${reducedMotion ? "-reduced" : ""}.png`;
   await writeFile(join(outputPath, name), Buffer.from(screenshot.data, "base64"));
   return { name, ...diagnostics };
 }
@@ -264,7 +307,7 @@ async function main() {
     for (const [index, viewport] of viewports.entries()) {
       captures.push(await captureViewport(client, runDir, viewport[0], viewport[1], index));
     }
-    const setupFlow = await checkSetupFlow(client);
+    const setupFlow = visualFixture ? null : await checkSetupFlow(client);
     client.close();
 
     const manifest = {
@@ -272,13 +315,14 @@ async function main() {
       url: baseUrl,
       browser,
       reducedMotion,
+      ...(visualFixture ? { fixture: "workbench" } : {}),
       captures,
       setupFlow,
     };
     await writeFile(join(runDir, `manifest${reducedMotion ? "-reduced" : ""}.json`), `${JSON.stringify(manifest, null, 2)}\n`);
     console.log(JSON.stringify(manifest, null, 2));
     if (captures.some((capture) => capture.overflow)) throw new Error("Horizontal overflow detected in one or more viewports");
-    if (!setupFlow.openedDialog || !setupFlow.escapeClosed) {
+    if (!visualFixture && (!setupFlow.openedDialog || !setupFlow.escapeClosed)) {
       throw new Error("Setup dialog interaction check failed");
     }
   } finally {
