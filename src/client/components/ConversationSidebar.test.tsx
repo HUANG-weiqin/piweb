@@ -118,7 +118,7 @@ describe("ConversationSidebar", () => {
   });
 
   it("renders one flat list with title, role, short handle and last active time", () => {
-    render(
+    const { container } = render(
       <ConversationSidebar
         conversations={[
           baseConversation,
@@ -150,6 +150,10 @@ describe("ConversationSidebar", () => {
     expect(screen.getByText("测试恢复流程")).toBeInTheDocument();
     expect(screen.getByText("架构师")).toBeInTheDocument();
     expect(screen.getByText("角色加载中")).toBeInTheDocument();
+    expect(Array.from(
+      container.querySelectorAll(".conversation-sidebar-ordinal"),
+      (ordinal) => ordinal.textContent,
+    )).toEqual(["01", "02"]);
     expect(screen.getByText("#01234567")).toBeInTheDocument();
     expect(screen.getByText("#fedcba98")).toBeInTheDocument();
     expect(screen.getAllByText("最后活跃", { exact: false })).toHaveLength(2);

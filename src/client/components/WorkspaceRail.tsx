@@ -27,14 +27,6 @@ function workspaceName(cwd: string): string {
   return normalized.split(/[\\/]/).at(-1) || cwd;
 }
 
-function workspaceTone(cwd: string): number {
-  let hash = 0;
-  for (const character of workspaceKey(cwd)) {
-    hash = ((hash * 31) + character.codePointAt(0)!) >>> 0;
-  }
-  return hash % 8;
-}
-
 function workspaceActivityLabel(
   busyConversationCount: number,
   attentionConversationCount: number,
@@ -77,6 +69,17 @@ function WorkspaceRailView({
           attentionCount,
         );
         const unavailableLabel = missing ? "（不可用）" : "";
+        const rosterState = missing
+          ? "OFFLINE"
+          : active
+            ? "ACTIVE"
+            : busyCount > 0
+              ? "RUNNING"
+              : attentionCount > 0
+                ? "ALERT"
+                : activityUnknown
+                  ? "UNKNOWN"
+                  : "IDLE";
         let statusLabel = "";
         if (activityLabel) {
           statusLabel = `（${activityLabel}）`;
@@ -93,13 +96,19 @@ function WorkspaceRailView({
         >
           <button
             type="button"
-            className={`workspace-rail-item tone-${workspaceTone(cwd)}${active ? " active" : ""}${missing ? " unavailable" : ""}`}
+            className={`workspace-rail-item${active ? " active" : ""}${missing ? " unavailable" : ""}`}
             aria-label={`打开工作区 ${name}${unavailableLabel}${statusLabel}`}
             aria-current={active ? "true" : undefined}
             title={titleLines.join("\n")}
             onClick={() => onSelect(cwd)}
           >
-            <span aria-hidden="true">{name.slice(0, 1).toLocaleUpperCase()}</span>
+            <span className="workspace-rail-monogram" aria-hidden="true">
+              {name.slice(0, 1).toLocaleUpperCase()}
+            </span>
+            <span className="workspace-rail-name" aria-hidden="true">{name}</span>
+            <span className="workspace-rail-state" aria-hidden="true">
+              {rosterState}
+            </span>
             {missing && <i className="workspace-rail-warning" aria-hidden="true">!</i>}
             {!missing && busyCount > 0 && <i
               className="workspace-rail-busy"

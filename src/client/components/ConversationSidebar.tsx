@@ -279,6 +279,7 @@ type ConversationRowHierarchy = "root" | "member" | "standalone";
 const ConversationRow = memo(function ConversationRow({
   conversation,
   hierarchy,
+  ordinal,
   selected,
   navigationEnabled,
   actionsEnabled,
@@ -290,6 +291,7 @@ const ConversationRow = memo(function ConversationRow({
 }: {
   conversation: ConversationSummary;
   hierarchy: ConversationRowHierarchy;
+  ordinal?: string;
   selected: boolean;
   navigationEnabled: boolean;
   actionsEnabled: boolean;
@@ -321,6 +323,11 @@ const ConversationRow = memo(function ConversationRow({
         disabled={!navigationEnabled || deletionBlocked}
         onClick={() => onSelect(conversation.id)}
       >
+        {ordinal && (
+          <span className="conversation-sidebar-ordinal" aria-hidden="true">
+            {ordinal}
+          </span>
+        )}
         {hierarchy !== "member" && (
           <span className="conversation-sidebar-kind">
             {hierarchy === "root" ? "主任务" : "主会话"}
@@ -419,6 +426,7 @@ const ConversationRow = memo(function ConversationRow({
 
 function ConversationGroupCard({
   group,
+  ordinal,
   expanded,
   idleRevealed,
   currentConversationId,
@@ -433,6 +441,7 @@ function ConversationGroupCard({
   onRequestDelete,
 }: {
   group: ConversationGroup;
+  ordinal: string;
   expanded: boolean;
   idleRevealed: boolean;
   currentConversationId?: string;
@@ -501,6 +510,7 @@ function ConversationGroupCard({
         <ConversationRow
           conversation={root}
           hierarchy="root"
+          ordinal={ordinal}
           selected={root.id === currentConversationId}
           navigationEnabled={navigationEnabled}
           actionsEnabled={actionsEnabled}
@@ -757,7 +767,12 @@ function ConversationSidebarView({
       style={sidebarStyle}
     >
       <header className="conversation-sidebar-header">
-        {!collapsed && <h2>会话</h2>}
+        {!collapsed && (
+          <h2>
+            <span>SESSIONS</span>
+            <small>/ CONVERSATIONS</small>
+          </h2>
+        )}
         <button
           type="button"
           className="conversation-sidebar-toggle"
@@ -773,10 +788,13 @@ function ConversationSidebarView({
       {!collapsed && (
         <nav className="conversation-sidebar-navigation" aria-label="项目会话">
           <ul className="conversation-sidebar-list">
-            {grouped.entries.map((entry) => entry.kind === "group"
-              ? <ConversationGroupCard
+            {grouped.entries.map((entry, index) => {
+              const ordinal = String(index + 1).padStart(2, "0");
+              if (entry.kind === "group") {
+                return <ConversationGroupCard
                   key={`group:${entry.group.root.id}`}
                   group={entry.group}
+                  ordinal={ordinal}
                   expanded={expandedRoots.has(entry.group.root.id)}
                   idleRevealed={revealedIdleRoots.has(entry.group.root.id)}
                   currentConversationId={currentConversationId}
@@ -789,20 +807,23 @@ function ConversationSidebarView({
                   onRevealIdle={revealIdle}
                   onRequestRename={requestRename}
                   onRequestDelete={requestDelete}
-                />
-              : <ConversationRow
-                  key={entry.conversation.id}
-                  conversation={entry.conversation}
-                  hierarchy="standalone"
-                  selected={entry.conversation.id === currentConversationId}
-                  navigationEnabled={navigationEnabled}
-                  actionsEnabled={actionsEnabled}
-                  deletionBlocked={deletionBlocked}
-                  busy={entry.conversation.id === busyConversationId}
-                  onSelect={onSelect}
-                  onRequestRename={requestRename}
-                  onRequestDelete={requestDelete}
-                />)}
+                />;
+              }
+              return <ConversationRow
+                key={entry.conversation.id}
+                conversation={entry.conversation}
+                hierarchy="standalone"
+                ordinal={ordinal}
+                selected={entry.conversation.id === currentConversationId}
+                navigationEnabled={navigationEnabled}
+                actionsEnabled={actionsEnabled}
+                deletionBlocked={deletionBlocked}
+                busy={entry.conversation.id === busyConversationId}
+                onSelect={onSelect}
+                onRequestRename={requestRename}
+                onRequestDelete={requestDelete}
+              />;
+            })}
           </ul>
           {truncated && <p className="conversation-sidebar-truncated">
             仅显示最近协作组和会话
