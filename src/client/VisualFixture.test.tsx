@@ -57,6 +57,20 @@ describe("VisualFixture", () => {
     expect(mission).toHaveTextContent("Tech Lead");
     expect(mission).toHaveTextContent("RUNRUNNING");
     expect(within(mission).queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.getByText("COMMAND", {
+      selector: ".composer-command-label",
+    })).toHaveAttribute("aria-hidden", "true");
+    expect(screen.getByRole("button", { name: "发送" }))
+      .toHaveTextContent("SEND");
+    expect(screen.getByRole("button", { name: "停止" }))
+      .toHaveTextContent("STOP");
+    const composerMeta = container.querySelector(".composer-meta");
+    expect(composerMeta).toHaveTextContent("Tech Lead");
+    for (const key of ["TO", "MODEL", "EFFORT", "SERVICE"]) {
+      expect(within(composerMeta as HTMLElement).getByText(key, {
+        selector: ".composer-meta-key",
+      })).toBeInTheDocument();
+    }
     expect(screen.getByDisplayValue("检查两张截图中的层级、密度与状态辨识度。"))
       .toBeInTheDocument();
   });

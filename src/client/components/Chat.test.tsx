@@ -540,16 +540,25 @@ describe("Chat", () => {
     }));
 
     const input = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
+    const commandLabel = screen.getByText("COMMAND", {
+      selector: ".composer-command-label",
+    });
+    const sendButton = screen.getByRole("button", { name: "发送" });
+    const stopButton = screen.getByRole("button", { name: "停止" });
+    expect(commandLabel).toHaveAttribute("aria-hidden", "true");
+    expect(input.parentElement).toHaveClass("composer");
     expect(input).toBeEnabled();
     expect(input).toHaveAttribute(
       "placeholder",
       "发送后将排队等待处理…",
     );
+    expect(sendButton).toHaveTextContent("SEND");
+    expect(stopButton).toHaveTextContent("STOP");
 
-    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    fireEvent.click(sendButton);
     expect(onSend).toHaveBeenCalledWith("next instruction");
 
-    fireEvent.click(screen.getByRole("button", { name: "停止" }));
+    fireEvent.click(stopButton);
     expect(onAbort).toHaveBeenCalledOnce();
   });
 
@@ -1488,7 +1497,9 @@ describe("Chat", () => {
     });
 
     expect(children[0]).toHaveClass("conversation-role-pill");
+    expect(children[0]).toHaveTextContent("TO研究员MODELmodel");
     expect(children[1]).toHaveClass("thinking-level-control");
+    expect(children[1]).toHaveTextContent("EFFORT");
     expect(children[2]).toBe(contextManagement);
     expect(contextManagement).toContainElement(container.querySelector(".context-stat"));
     expect(contextManagement).toContainElement(screen.getByRole("button", {

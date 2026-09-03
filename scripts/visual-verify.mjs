@@ -190,6 +190,14 @@ async function captureViewport(client, outputPath, width, height, index) {
     const missingSurfaces = await client.evaluate(`(() => {
       const missionVisible = document.querySelector('.mission-command')
         ?.getClientRects().length > 0;
+      const commandSelectors = [
+        '.composer',
+        '.composer-command-label',
+        '.composer textarea',
+        '.composer-meta',
+        '.send.stop',
+        '.send:not(.stop)',
+      ];
       const selectors = [
         '.workspace-rail',
         '.conversation-sidebar',
@@ -204,9 +212,9 @@ async function captureViewport(client, outputPath, width, height, index) {
             '.mission-activity',
           ]
           : ['.loop-list-items']),
-        '.composer',
+        ...commandSelectors,
       ];
-      return selectors.flatMap((selector) => {
+      const issues = selectors.flatMap((selector) => {
         const element = document.querySelector(selector);
         if (!element) return [selector + ' (missing)'];
         const rect = element.getBoundingClientRect();
@@ -216,6 +224,22 @@ async function captureViewport(client, outputPath, width, height, index) {
               + '–' + Math.round(rect.right) + ',' + Math.round(rect.bottom) + ')']
           : [];
       });
+      for (const selector of commandSelectors) {
+        const element = document.querySelector(selector);
+        if (!element) continue;
+        const rect = element.getBoundingClientRect();
+        if (rect.left < -1 || rect.top < -1
+            || rect.right > innerWidth + 1 || rect.bottom > innerHeight + 1) {
+          issues.push(selector + ' (clipped ' + Math.round(rect.left) + ','
+            + Math.round(rect.top) + '–' + Math.round(rect.right) + ','
+            + Math.round(rect.bottom) + ')');
+        }
+      }
+      const textarea = document.querySelector('.composer textarea');
+      if (textarea?.getBoundingClientRect().width < 80) {
+        issues.push('.composer textarea (narrow)');
+      }
+      return issues;
     })()`);
     if (missingSurfaces.length > 0) {
       throw new Error(`Fixture surfaces outside the screenshot: ${missingSurfaces.join(', ')}`);

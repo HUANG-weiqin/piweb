@@ -951,6 +951,7 @@ function ChatView({
       </div>}
       {promptNotice && <div className="composer-notice" role="alert">{promptNotice}</div>}
       <div className="composer">
+        <span className="composer-command-label" aria-hidden="true">COMMAND</span>
         <textarea ref={textareaRef} aria-label="给 Pi 发送消息" value={draft} onChange={(e) => onDraftChange(e.target.value)} onKeyDown={keyDown} placeholder={composerPlaceholder} disabled={!controlsEnabled || !conversationReady || !model || submitting || compacting || roleSwitching || Boolean(rewindingMessageId)} rows={1} />
         <div className="composer-actions">
           {busy && <button
@@ -958,8 +959,8 @@ function ChatView({
             onClick={onAbort}
             aria-label="停止"
             disabled={!controlsEnabled || !conversationReady}
-          >■</button>}
-          <button className="send" onClick={send} disabled={!controlsEnabled || !conversationReady || !model || submitting || compacting || roleSwitching || Boolean(rewindingMessageId) || !draft.trim()} aria-label="发送">↑</button>
+          >STOP</button>}
+          <button className="send" onClick={send} disabled={!controlsEnabled || !conversationReady || !model || submitting || compacting || roleSwitching || Boolean(rewindingMessageId) || !draft.trim()} aria-label="发送">SEND</button>
         </div>
       </div>
       <div className="composer-meta">
@@ -969,11 +970,12 @@ function ChatView({
           aria-label={`查看会话角色 ${role.name}`}
           onClick={() => setRoleDetailsOpen(true)}
         >
-          <span>{role.name}</span>
-          <small>{role.model.id}</small>
+          <span className="composer-meta-key" aria-hidden="true">TO</span>
+          <span className="composer-meta-value">{role.name}</span>
+          <small><span className="composer-meta-key" aria-hidden="true">MODEL</span>{role.model.id}</small>
         </button>}
         <label className="thinking-level-control">
-          <span>思考</span>
+          <span className="composer-meta-key" aria-hidden="true">EFFORT</span>
           <select
             aria-label="思考级别"
             value={thinkingLevel}
@@ -989,7 +991,7 @@ function ChatView({
           </select>
         </label>
         {showServiceTierControl && <label className="service-tier-control">
-          <span>服务</span>
+          <span className="composer-meta-key" aria-hidden="true">SERVICE</span>
           <select
             aria-label="服务层级"
             value={selectedServiceTier ?? ""}
