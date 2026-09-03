@@ -48,7 +48,7 @@ interface ConversationSidebarProps {
   collapsed: boolean;
   navigationEnabled: boolean;
   actionsEnabled: boolean;
-  pendingDeletionId?: string;
+  deletionBlocked?: boolean;
   onToggleCollapsed(collapsed: boolean): void;
   onSelect(conversationId: string): void;
   onCreate(): void;
@@ -282,7 +282,6 @@ const ConversationRow = memo(function ConversationRow({
   selected,
   navigationEnabled,
   actionsEnabled,
-  deletionPending,
   deletionBlocked,
   busy,
   onSelect,
@@ -294,7 +293,6 @@ const ConversationRow = memo(function ConversationRow({
   selected: boolean;
   navigationEnabled: boolean;
   actionsEnabled: boolean;
-  deletionPending: boolean;
   deletionBlocked: boolean;
   busy: boolean;
   onSelect(conversationId: string): void;
@@ -412,7 +410,7 @@ const ConversationRow = memo(function ConversationRow({
           title={active ? "活跃会话需先终止并等待结算" : "删除会话"}
           onClick={() => onRequestDelete(conversation.id)}
         >
-          {deletionPending ? "删除中" : "删除"}
+          删除
         </button>
       </div>
     </li>
@@ -427,7 +425,7 @@ function ConversationGroupCard({
   busyConversationId,
   navigationEnabled,
   actionsEnabled,
-  pendingDeletionId,
+  deletionBlocked,
   onSelect,
   onToggleExpanded,
   onRevealIdle,
@@ -441,7 +439,7 @@ function ConversationGroupCard({
   busyConversationId?: string;
   navigationEnabled: boolean;
   actionsEnabled: boolean;
-  pendingDeletionId?: string;
+  deletionBlocked: boolean;
   onSelect(conversationId: string): void;
   onToggleExpanded(rootConversationId: string): void;
   onRevealIdle(rootConversationId: string): void;
@@ -449,7 +447,6 @@ function ConversationGroupCard({
   onRequestDelete(conversationId: string): void;
 }) {
   const { root, members, conversations } = group;
-  const deletionBlocked = Boolean(pendingDeletionId);
   const controlsId = `conversation-group-${root.id}`;
   const summaryId = `${controlsId}-summary`;
   const ordinaryIdle = members.filter((conversation) =>
@@ -507,7 +504,6 @@ function ConversationGroupCard({
           selected={root.id === currentConversationId}
           navigationEnabled={navigationEnabled}
           actionsEnabled={actionsEnabled}
-          deletionPending={pendingDeletionId === root.id}
           deletionBlocked={deletionBlocked}
           busy={root.id === busyConversationId}
           onSelect={onSelect}
@@ -541,7 +537,6 @@ function ConversationGroupCard({
               selected={conversation.id === currentConversationId}
               navigationEnabled={navigationEnabled}
               actionsEnabled={actionsEnabled}
-              deletionPending={pendingDeletionId === conversation.id}
               deletionBlocked={deletionBlocked}
               busy={conversation.id === busyConversationId}
               onSelect={onSelect}
@@ -573,7 +568,7 @@ function ConversationSidebarView({
   collapsed,
   navigationEnabled,
   actionsEnabled,
-  pendingDeletionId,
+  deletionBlocked = false,
   onToggleCollapsed,
   onSelect,
   onCreate,
@@ -643,7 +638,7 @@ function ConversationSidebarView({
     setSidebarWidth(clampSidebarWidth(nextWidth));
   };
   const closeDeleteDialog = () => {
-    if (!pendingDeletionId) setConfirmDeleteConversationId("");
+    if (!deletionBlocked) setConfirmDeleteConversationId("");
   };
   const closeRenameDialog = () => setRenameConversationId("");
   const deleteFocusRef = useModalFocus<HTMLDivElement>(
@@ -788,7 +783,7 @@ function ConversationSidebarView({
                   busyConversationId={busyConversationId}
                   navigationEnabled={navigationEnabled}
                   actionsEnabled={actionsEnabled}
-                  pendingDeletionId={pendingDeletionId}
+                  deletionBlocked={deletionBlocked}
                   onSelect={onSelect}
                   onToggleExpanded={toggleExpanded}
                   onRevealIdle={revealIdle}
@@ -802,8 +797,7 @@ function ConversationSidebarView({
                   selected={entry.conversation.id === currentConversationId}
                   navigationEnabled={navigationEnabled}
                   actionsEnabled={actionsEnabled}
-                  deletionPending={pendingDeletionId === entry.conversation.id}
-                  deletionBlocked={Boolean(pendingDeletionId)}
+                  deletionBlocked={deletionBlocked}
                   busy={entry.conversation.id === busyConversationId}
                   onSelect={onSelect}
                   onRequestRename={requestRename}
@@ -821,7 +815,7 @@ function ConversationSidebarView({
           type="button"
           className="conversation-sidebar-create"
           aria-label="新建会话"
-          disabled={!actionsEnabled || Boolean(pendingDeletionId)}
+          disabled={!actionsEnabled || deletionBlocked}
           onClick={onCreate}
         >
           <span aria-hidden="true">＋</span>
@@ -869,7 +863,7 @@ function ConversationSidebarView({
             type="button"
             className="ghost"
             data-modal-autofocus
-            disabled={Boolean(pendingDeletionId)}
+            disabled={deletionBlocked}
             onClick={() => setConfirmDeleteConversationId("")}
           >
             保留
@@ -877,7 +871,7 @@ function ConversationSidebarView({
           <button
             type="button"
             className="danger-button"
-            disabled={!actionsEnabled || Boolean(pendingDeletionId) || deleteCandidateActive}
+            disabled={!actionsEnabled || deletionBlocked || deleteCandidateActive}
             onClick={() => {
               if (onDelete(deleteCandidate.id)) {
                 setConfirmDeleteConversationId("");

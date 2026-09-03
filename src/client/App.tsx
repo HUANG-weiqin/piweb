@@ -19,6 +19,7 @@ import {
   type ThinkingLevel,
 } from "../shared/protocol";
 import { chatReducer, initialChatState } from "./chat/reducer";
+import { ActivitySpinner } from "./components/ActivitySpinner";
 import { AuthDialog } from "./components/AuthDialog";
 import { Chat } from "./components/Chat";
 import { ConnectionDrawer } from "./components/ConnectionDrawer";
@@ -61,6 +62,31 @@ const EMPTY_CONVERSATION_WINDOW: ConversationWindowCoverage = {
   startsMidTurn: false,
   contentTruncated: false,
 };
+
+function isAffectedByDeletionProjection(
+  conversation: ConversationSummary,
+  targetConversationId: string,
+): boolean {
+  return conversation.id === targetConversationId
+    || conversation.rootConversationId === targetConversationId;
+}
+
+function projectConversationsDuringDeletion(
+  conversations: ConversationSummary[],
+  targetConversationId?: string,
+  affectedFocusConversationId?: string,
+): ConversationSummary[] {
+  if (!targetConversationId && !affectedFocusConversationId) {
+    return conversations;
+  }
+  return conversations.filter((conversation) => (
+    conversation.id !== affectedFocusConversationId
+    && (
+      !targetConversationId
+      || !isAffectedByDeletionProjection(conversation, targetConversationId)
+    )
+  ));
+}
 
 interface InitialWorkspaceState {
   workspaces: string[];
@@ -168,7 +194,10 @@ interface PendingConversationDeletion {
   workspaceKey: string;
   projectId: string;
   conversationId: string;
-  focusId?: string;
+  affectedFocus?: {
+    conversationId: string;
+    focusId: string;
+  };
 }
 
 interface PendingConversationTruncation {
@@ -1541,9 +1570,25 @@ export function App() {
           || event.conversationId !== focus.conversationId
           || event.focusId !== focus.focusId
         ) return;
+        const invalidatedWorkspaceKey = currentWorkspaceKey();
+        const deletion = pendingConversationDeletionRef.current;
+        if (
+          deletion
+          && deletion.sessionId === event.sessionId
+          && deletion.workspaceKey === invalidatedWorkspaceKey
+          && deletion.projectId === event.projectId
+          && deletion.affectedFocus === undefined
+        ) {
+          updatePendingConversationDeletion({
+            ...deletion,
+            affectedFocus: {
+              conversationId: event.conversationId,
+              focusId: event.focusId,
+            },
+          });
+        }
         clearFocusReplacementAuthority();
         pendingFocusedStateRef.current = undefined;
-        const invalidatedWorkspaceKey = currentWorkspaceKey();
         const invalidatedConversationKey = conversationScopeKey(
           invalidatedWorkspaceKey,
           event.projectId,
@@ -1805,28 +1850,57 @@ export function App() {
             || pending.commandId !== event.commandId
             || pending.sessionId !== event.sessionId
           ) return;
+          const targetKey = pendingConversationKey(pending);
+          const affectedFocusKey = pending.affectedFocus
+            ? conversationScopeKey(
+                pending.workspaceKey,
+                pending.projectId,
+                pending.affectedFocus.conversationId,
+              )
+            : undefined;
+          setConversations((current) => projectConversationsDuringDeletion(
+            current,
+            pending.conversationId,
+            pending.affectedFocus?.conversationId,
+          ));
           updatePendingConversationDeletion(undefined);
           forgetWorkspaceConversationProjection(
             pending.workspaceKey,
             pending.projectId,
             pending.conversationId,
           );
-          conversationPresentationCacheRef.current.delete(
-            pendingConversationKey(pending),
-          );
-          if (cachedConversationPresentationKeyRef.current === pendingConversationKey(pending)) {
+          if (
+            pending.affectedFocus
+            && pending.affectedFocus.conversationId !== pending.conversationId
+          ) {
+            forgetWorkspaceConversationProjection(
+              pending.workspaceKey,
+              pending.projectId,
+              pending.affectedFocus.conversationId,
+            );
+          }
+          conversationPresentationCacheRef.current.delete(targetKey);
+          if (affectedFocusKey) {
+            conversationPresentationCacheRef.current.delete(affectedFocusKey);
+          }
+          if (
+            cachedConversationPresentationKeyRef.current === targetKey
+            || cachedConversationPresentationKeyRef.current === affectedFocusKey
+          ) {
             clearTemporaryConversationPresentation();
           }
 
-          unconfirmedPromptByConversationRef.current.delete(
-            pendingConversationKey(pending),
-          );
+          unconfirmedPromptByConversationRef.current.delete(targetKey);
+          if (affectedFocusKey) {
+            unconfirmedPromptByConversationRef.current.delete(affectedFocusKey);
+          }
           if (
-            pending.focusId !== undefined
+            pending.affectedFocus !== undefined
             && focusRef.current?.sessionId === pending.sessionId
             && focusRef.current.projectId === pending.projectId
-            && focusRef.current.conversationId === pending.conversationId
-            && focusRef.current.focusId === pending.focusId
+            && focusRef.current.conversationId
+              === pending.affectedFocus.conversationId
+            && focusRef.current.focusId === pending.affectedFocus.focusId
           ) {
             attachFocus(
               event.sessionId,
@@ -1849,7 +1923,11 @@ export function App() {
             setPromptNotice("");
             updatePendingPrompt(undefined);
             const deletedCompaction =
-              pendingContextCompactionRegistryRef.current.get(pending);
+              pendingContextCompactionRegistryRef.current.get({
+                workspaceKey: pending.workspaceKey,
+                projectId: pending.projectId,
+                conversationId: pending.affectedFocus.conversationId,
+              });
             if (deletedCompaction) {
               removePendingContextCompaction(deletedCompaction);
             }
@@ -2019,7 +2097,11 @@ export function App() {
           && event.commandId
         ) {
           const pending = pendingConversationDeletionRef.current;
-          if (!pending || pending.commandId !== event.commandId) return;
+          if (
+            !pending
+            || pending.commandId !== event.commandId
+            || pending.sessionId !== event.sessionId
+          ) return;
           updatePendingConversationDeletion(undefined);
           setError(`删除对话失败：${event.message}`);
           return;
@@ -2673,9 +2755,17 @@ export function App() {
     const sessionId = sessionIdRef.current;
     const conversation = conversations.find(({ id }) => id === conversationId);
     const projectId = projectIdRef.current;
-    const deletingFocusedConversation =
-      focusRef.current?.projectId === projectId
-      && focusRef.current?.conversationId === conversationId;
+    const focus = focusRef.current;
+    const affectedFocus = focus?.projectId === projectId
+      && conversations.some((candidate) => (
+        candidate.id === focus.conversationId
+        && isAffectedByDeletionProjection(candidate, conversationId)
+      ))
+      ? {
+          conversationId: focus.conversationId,
+          focusId: focus.focusId,
+        }
+      : undefined;
     if (
       !sessionId
       || workspaceSyncingRef.current
@@ -2685,7 +2775,7 @@ export function App() {
       || !conversation
       || (conversation.activity?.kind ?? "idle") !== "idle"
       || (
-        deletingFocusedConversation
+        affectedFocus
         && (Boolean(state?.busy) || Boolean(outstandingRunIdRef.current))
       )
       || Boolean(
@@ -2709,9 +2799,7 @@ export function App() {
       workspaceKey: currentWorkspaceKey(),
       projectId,
       conversationId,
-      ...(deletingFocusedConversation && focusRef.current
-        ? { focusId: focusRef.current.focusId }
-        : {}),
+      ...(affectedFocus ? { affectedFocus } : {}),
     };
     updatePendingConversationDeletion(pending);
     setError("");
@@ -3172,6 +3260,27 @@ export function App() {
       }
     : state;
   const showRoleSelection = selectingRole || !visibleState?.conversationId;
+  const visiblePendingConversationDeletion = pendingConversationDeletion
+    && visibleState
+    && pendingConversationDeletion.sessionId === visibleState.sessionId
+    && pendingConversationDeletion.workspaceKey === workspaceKey(activeCwd)
+    && pendingConversationDeletion.projectId === visibleState.projectId
+    ? pendingConversationDeletion
+    : undefined;
+  const sidebarConversations = useMemo(
+    () => projectConversationsDuringDeletion(
+      conversations,
+      visiblePendingConversationDeletion?.conversationId,
+      visiblePendingConversationDeletion?.affectedFocus?.conversationId,
+    ),
+    [
+      conversations,
+      visiblePendingConversationDeletion?.conversationId,
+      visiblePendingConversationDeletion?.affectedFocus?.conversationId,
+    ],
+  );
+  const showConversationDeletionProgress =
+    visiblePendingConversationDeletion?.affectedFocus !== undefined;
   const switchingFocus = pendingFocus?.operation === "focus_conversation"
     || pendingFocus?.operation === "create_conversation";
   const visibleConversationReady =
@@ -3283,7 +3392,7 @@ export function App() {
     <div className="workbench">
       {workspaceRail}
       <ConversationSidebar
-        conversations={conversations}
+        conversations={sidebarConversations}
         truncated={conversationIndexTruncated}
         currentConversationId={visibleConversationId}
         focusedConversationId={focusedConversationId}
@@ -3306,7 +3415,7 @@ export function App() {
           && !pendingFocus
           && !focusAwaitingSnapshot
         }
-        pendingDeletionId={pendingConversationDeletion?.conversationId}
+        deletionBlocked={Boolean(visiblePendingConversationDeletion)}
         onToggleCollapsed={handleSidebarCollapsedChange}
         onSelect={handleConversationSelect}
         onCreate={handleConversationCreate}
@@ -3328,7 +3437,34 @@ export function App() {
         >
           正在同步会话…
         </div>}
-        {showRoleSelection
+        {visiblePendingConversationDeletion
+          && !showConversationDeletionProgress
+          && <div
+            className="banner transition-status-overlay"
+            role="status"
+            aria-label="正在删除对话…"
+          >
+            正在删除对话…
+          </div>}
+        {showConversationDeletionProgress
+          ? <main
+              className="workspace-placeholder conversation-deletion-placeholder"
+            >
+              <div
+                className="workspace-placeholder-content"
+                role="status"
+                aria-label="正在删除对话…"
+              >
+                <ActivitySpinner
+                  className="conversation-deletion-spinner"
+                  strokeWidth={1.2}
+                />
+                <p className="eyebrow">DELETING CONVERSATION</p>
+                <h1>正在删除对话</h1>
+                <p>正在完成安全删除；若操作失败，会恢复仍可用的会话。</p>
+              </div>
+            </main>
+          : showRoleSelection
           ? <RoleSelectionPage
               roles={roles}
               pending={

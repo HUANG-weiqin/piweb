@@ -993,7 +993,7 @@ describe("ConversationSidebar", () => {
         {...common}
         navigationEnabled
         actionsEnabled
-        pendingDeletionId={child.id}
+        deletionBlocked
       />,
     );
     expect(screen.getByRole("button", { name: /协作组 受控任务/ }))

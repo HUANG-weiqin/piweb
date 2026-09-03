@@ -2244,16 +2244,22 @@ pre {
   margin-top: 6px;
 }
 
-.workspace-opening-spinner {
+.workspace-opening-spinner,
+.conversation-deletion-spinner {
   width: 36px;
   height: 36px;
   margin-bottom: 8px;
   color: var(--accent);
 }
 
-.workspace-opening-spinner .activity-spinner-track {
+.workspace-opening-spinner .activity-spinner-track,
+.conversation-deletion-spinner .activity-spinner-track {
   stroke: var(--muted);
   stroke-opacity: 0.2;
+}
+
+.workbench-main > .conversation-deletion-placeholder {
+  margin-left: 0;
 }
 
 .workspace-setup-dialog {
@@ -4249,6 +4255,7 @@ pre {
 
   .conversation-activity-spinner,
   .workspace-opening-spinner,
+  .conversation-deletion-spinner,
   .compaction-spinner,
   .thinking-spinner,
   .tool-spinner,

@@ -5084,7 +5084,7 @@ describe("App", () => {
     });
   });
 
-  it("deletes a non-current project conversation with a correlated command", () => {
+  it("optimistically hides a non-current deletion and restores the latest snapshot on error", () => {
     render(<App />);
     const sessionId = startFromSetup();
     act(() => socketMock.emit?.({
@@ -5102,26 +5102,27 @@ describe("App", () => {
         providers: [],
       },
     }));
+    const conversations: ConversationSummary[] = [{
+      id: CONVERSATION_ID,
+      name: "Current",
+      preview: "current",
+      createdAt: "2026-07-18T12:00:00.000Z",
+      updatedAt: "2026-07-18T12:01:00.000Z",
+      messageCount: 2,
+    }, {
+      id: CONVERSATION_B,
+      name: "Older work",
+      preview: "older",
+      createdAt: "2026-07-17T12:00:00.000Z",
+      updatedAt: "2026-07-17T12:01:00.000Z",
+      messageCount: 4,
+    }];
     act(() => socketMock.emit?.({
       type: "project_snapshot",
       sessionId,
       projectId: PROJECT_ID,
       conversationId: CONVERSATION_ID,
-      conversations: [{
-        id: CONVERSATION_ID,
-        name: "Current",
-        preview: "current",
-        createdAt: "2026-07-18T12:00:00.000Z",
-        updatedAt: "2026-07-18T12:01:00.000Z",
-        messageCount: 2,
-      }, {
-        id: CONVERSATION_B,
-        name: "Older work",
-        preview: "older",
-        createdAt: "2026-07-17T12:00:00.000Z",
-        updatedAt: "2026-07-17T12:01:00.000Z",
-        messageCount: 4,
-      }],
+      conversations,
       truncated: false,
     }));
 
@@ -5135,24 +5136,58 @@ describe("App", () => {
       sessionId,
       conversationId: CONVERSATION_B,
     });
-    expect(screen.getByRole("button", {
+    expect(screen.queryByRole("button", {
       name: "删除会话 Older work",
-    })).toBeDisabled();
-    expect(screen.getByRole("button", {
-      name: "打开会话 Older work",
-    })).toBeDisabled();
+    })).not.toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "正在删除对话…" }))
+      .toBeInTheDocument();
     expect(screen.getByRole("button", { name: "新建会话" })).toBeDisabled();
 
     act(() => socketMock.emit?.({
-      type: "command_complete",
+      type: "project_snapshot",
+      sessionId,
+      projectId: PROJECT_ID,
+      conversationId: CONVERSATION_ID,
+      conversations: conversations.map((conversation) => (
+        conversation.id === CONVERSATION_B
+          ? { ...conversation, name: "Older work refreshed" }
+          : conversation
+      )),
+      truncated: false,
+    }));
+    expect(screen.queryByRole("button", {
+      name: "删除会话 Older work refreshed",
+    })).not.toBeInTheDocument();
+
+    act(() => socketMock.emit?.({
+      type: "error",
+      scope: "command",
+      operation: "delete_conversation",
+      commandId: CONVERSATION_C,
+      sessionId,
+      message: "stale deletion error",
+    }));
+    expect(screen.queryByText("删除对话失败：stale deletion error"))
+      .not.toBeInTheDocument();
+    expect(screen.queryByRole("button", {
+      name: "删除会话 Older work refreshed",
+    })).not.toBeInTheDocument();
+
+    act(() => socketMock.emit?.({
+      type: "error",
+      scope: "command",
       operation: "delete_conversation",
       commandId: command.commandId,
       sessionId,
+      message: "delete blocked",
     }));
-    expect(screen.getByText("对话已删除")).toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "正在删除对话…" }))
+      .not.toBeInTheDocument();
     expect(screen.getByRole("button", {
-      name: "删除会话 Older work",
+      name: "删除会话 Older work refreshed",
     })).toBeEnabled();
+    expect(screen.getByText("删除对话失败：delete blocked"))
+      .toBeInTheDocument();
   });
 
   it("does not carry a pending deletion into another workspace", () => {
@@ -5203,8 +5238,8 @@ describe("App", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "删除会话 Delete me" }));
     fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
-    expect(screen.getByRole("button", { name: "删除会话 Delete me" }))
-      .toBeDisabled();
+    expect(screen.queryByRole("button", { name: "删除会话 Delete me" }))
+      .not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "打开工作区 second" }));
     const secondSessionId = latestCommand("initialize").sessionId;
@@ -5243,7 +5278,7 @@ describe("App", () => {
       .toBeEnabled();
   });
 
-  it("deletes the focused idle conversation and returns to explicit role selection", () => {
+  it("keeps deletion progress visible when deleting a focused group", () => {
     render(<App />);
     const sessionId = startFromSetup();
     act(() => {
@@ -5273,27 +5308,59 @@ describe("App", () => {
         sessionId,
         projectId: PROJECT_ID,
         conversations: [{
+          id: CONVERSATION_B,
+          name: "Root task",
+          preview: "root",
+          createdAt: "2026-07-17T12:00:00.000Z",
+          updatedAt: "2026-07-18T12:02:00.000Z",
+          messageCount: 2,
+          activity: { kind: "idle" },
+        }, {
           id: CONVERSATION_ID,
-          name: "Current",
+          name: "Current agent",
           preview: "current",
           createdAt: "2026-07-18T12:00:00.000Z",
           updatedAt: "2026-07-18T12:01:00.000Z",
           messageCount: 2,
           activity: { kind: "idle" },
+          rootConversationId: CONVERSATION_B,
         }],
         truncated: false,
       });
     });
 
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "删除会话 Current" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除会话 Root task" }));
     fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
 
     const command = latestCommand("delete_conversation");
     expect(command).toMatchObject({
       sessionId,
-      conversationId: CONVERSATION_ID,
+      conversationId: CONVERSATION_B,
     });
+    expect(screen.queryByRole("button", { name: "删除会话 Root task" }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "打开会话 Current agent" }))
+      .not.toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "正在删除对话…" }))
+      .toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "给 Pi 发送消息" }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "选择这个会话的角色" }))
+      .not.toBeInTheDocument();
+
+    act(() => socketMock.emit?.({
+      type: "focus_invalidated",
+      sessionId,
+      projectId: PROJECT_ID,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      reason: "deleted",
+    }));
+    expect(screen.getByRole("status", { name: "正在删除对话…" }))
+      .toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "选择这个会话的角色" }))
+      .not.toBeInTheDocument();
 
     act(() => socketMock.emit?.({
       type: "command_complete",
@@ -5304,10 +5371,12 @@ describe("App", () => {
 
     expect(screen.getByRole("heading", { name: "选择这个会话的角色" }))
       .toBeInTheDocument();
-    expect(screen.queryByRole("textbox", { name: "给 Pi 发送消息" }))
-      .not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "使用 Default 开始会话" }))
       .toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "删除会话 Root task" }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "打开会话 Current agent" }))
+      .not.toBeInTheDocument();
     expect(screen.getByText("对话已删除")).toBeInTheDocument();
 
     socketMock.autoFocus = false;
@@ -5321,6 +5390,114 @@ describe("App", () => {
       });
     });
     expect(latestCommand("initialize").conversation).toEqual({ kind: "recent" });
+  });
+
+  it("latches deletion progress when invalidation reveals a deeper cascade", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          projectId: PROJECT_ID,
+          conversationId: CONVERSATION_ID,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.emit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversations: [{
+          id: CONVERSATION_B,
+          name: "Root task",
+          preview: "root",
+          createdAt: "2026-07-17T12:00:00.000Z",
+          updatedAt: "2026-07-18T12:03:00.000Z",
+          messageCount: 3,
+          activity: { kind: "idle" },
+        }, {
+          id: CONVERSATION_C,
+          name: "Parent agent",
+          preview: "parent",
+          createdAt: "2026-07-18T12:00:00.000Z",
+          updatedAt: "2026-07-18T12:02:00.000Z",
+          messageCount: 2,
+          activity: { kind: "idle" },
+          rootConversationId: CONVERSATION_B,
+        }, {
+          id: CONVERSATION_ID,
+          name: "Focused descendant",
+          preview: "current",
+          createdAt: "2026-07-18T12:01:00.000Z",
+          updatedAt: "2026-07-18T12:01:00.000Z",
+          messageCount: 2,
+          activity: { kind: "idle" },
+          rootConversationId: CONVERSATION_B,
+        }],
+        truncated: false,
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", {
+      name: "删除会话 Parent agent",
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
+
+    const command = latestCommand("delete_conversation");
+    expect(command).toMatchObject({
+      sessionId,
+      conversationId: CONVERSATION_C,
+    });
+    expect(screen.queryByRole("button", { name: "删除会话 Parent agent" }))
+      .not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "当前会话 Focused descendant" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toBeInTheDocument();
+
+    act(() => socketMock.emit?.({
+      type: "focus_invalidated",
+      sessionId,
+      projectId: PROJECT_ID,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      reason: "deleted",
+    }));
+
+    expect(screen.getByRole("status", { name: "正在删除对话…" }))
+      .toBeInTheDocument();
+    expect(screen.queryByRole("button", {
+      name: "打开会话 Focused descendant",
+    })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "给 Pi 发送消息" }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "选择这个会话的角色" }))
+      .not.toBeInTheDocument();
+
+    act(() => socketMock.emit?.({
+      type: "command_complete",
+      operation: "delete_conversation",
+      commandId: command.commandId,
+      sessionId,
+    }));
+
+    expect(screen.getByRole("heading", { name: "选择这个会话的角色" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "删除会话 Root task" }))
+      .toBeEnabled();
+    expect(screen.queryByRole("button", { name: "删除会话 Parent agent" }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByRole("button", {
+      name: "打开会话 Focused descendant",
+    })).not.toBeInTheDocument();
   });
 
   it("does not unlock a running prompt for an unrelated settings error", () => {
