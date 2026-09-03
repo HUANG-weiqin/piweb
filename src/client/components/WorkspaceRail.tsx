@@ -70,15 +70,15 @@ function WorkspaceRailView({
         );
         const unavailableLabel = missing ? "（不可用）" : "";
         const rosterState = missing
-          ? "OFFLINE"
+          ? "OFF"
           : active
             ? "ACTIVE"
             : busyCount > 0
-              ? "RUNNING"
+              ? "RUN"
               : attentionCount > 0
-                ? "ALERT"
+                ? "ATTN"
                 : activityUnknown
-                  ? "UNKNOWN"
+                  ? "?"
                   : "IDLE";
         let statusLabel = "";
         if (activityLabel) {

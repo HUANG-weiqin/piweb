@@ -18,7 +18,7 @@ import {
 import { useModalFocus } from "../lib/use-modal-focus";
 import { ActivitySpinner } from "./ActivitySpinner";
 
-const DEFAULT_SIDEBAR_WIDTH = 286;
+const DEFAULT_SIDEBAR_WIDTH = 306;
 const MIN_SIDEBAR_WIDTH = 240;
 const MAX_SIDEBAR_WIDTH = 640;
 const SIDEBAR_KEYBOARD_STEP = 16;
@@ -537,7 +537,7 @@ function ConversationGroupCard({
         <span className="conversation-group-chevron" aria-hidden="true" />
       </button>
       {expanded && <div id={controlsId} className="conversation-group-members">
-        <p className="conversation-group-members-label">协作 Agent</p>
+        <p className="conversation-group-members-label">SUB-TEAM / AGENTS</p>
         <ul className="conversation-sidebar-list">
           {visibleMembers.map((conversation) => (
             <ConversationRow

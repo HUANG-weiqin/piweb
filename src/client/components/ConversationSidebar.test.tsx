@@ -259,7 +259,7 @@ describe("ConversationSidebar", () => {
     expect(standaloneRow).toHaveClass("hierarchy-standalone");
     expect(within(rootRow!).getByText("主任务")).toBeInTheDocument();
     expect(within(standaloneRow!).getByText("主会话")).toBeInTheDocument();
-    expect(screen.getByText("协作 Agent")).toBeInTheDocument();
+    expect(screen.getByText("SUB-TEAM / AGENTS")).toBeInTheDocument();
   });
 
   it("orders standalone conversations with the grouped-view priority", () => {
@@ -617,14 +617,14 @@ describe("ConversationSidebar", () => {
     const handle = screen.getByRole("separator", { name: "调整会话栏宽度" });
     expect(handle).toHaveAttribute("aria-valuemin", "240");
     expect(handle).toHaveAttribute("aria-valuemax", "640");
-    expect(handle).toHaveAttribute("aria-valuenow", "286");
+    expect(handle).toHaveAttribute("aria-valuenow", "306");
     expect(sidebar.style.getPropertyValue("--conversation-sidebar-width"))
-      .toBe("286px");
+      .toBe("306px");
 
     fireEvent.keyDown(handle, { key: "ArrowRight" });
-    expect(handle).toHaveAttribute("aria-valuenow", "302");
+    expect(handle).toHaveAttribute("aria-valuenow", "322");
     expect(sidebar.style.getPropertyValue("--conversation-sidebar-width"))
-      .toBe("302px");
+      .toBe("322px");
 
     fireEvent.keyDown(handle, { key: "End" });
     expect(handle).toHaveAttribute("aria-valuenow", "640");
