@@ -5697,10 +5697,6 @@ pre {
     margin-left: 52px;
   }
 
-  .workbench-main .topbar {
-    padding-left: 58px;
-  }
-
   .role-selection-page {
     padding: 84px 16px 24px 62px;
   }
@@ -5744,13 +5740,6 @@ pre {
   .setup-card {
     padding: 24px;
     border-radius: 18px;
-  }
-
-  .app-shell .topbar {
-    height: 84px;
-    grid-template-columns: minmax(0, 1fr) 58px;
-    gap: 8px;
-    padding: 8px 8px 8px 58px;
   }
 
   .app-shell .brand {
@@ -5803,13 +5792,6 @@ pre {
 
   .topbar-conversation-status {
     display: none;
-  }
-
-  .app-shell .model-button {
-    width: 58px;
-    max-width: 58px;
-    padding: 6px;
-    font-size: 7px;
   }
 
   .app-shell .transcript {
@@ -6473,5 +6455,250 @@ pre {
 
   .app-shell .composer-meta .compaction-threshold-control {
     grid-template-columns: max-content minmax(80px, 1fr) 34px;
+  }
+}
+
+/* Gate 5: workbench shell and topbar integration */
+
+.workbench {
+  background: #080807;
+}
+
+.app-shell .topbar {
+  grid-template-columns: minmax(150px, 158px) minmax(0, 1fr) minmax(148px, 164px);
+  gap: 0;
+  padding: 10px 12px 9px 18px;
+  border-bottom-width: 1px;
+  background:
+    linear-gradient(90deg, var(--rebel-black), var(--rebel-raised) 58%, var(--rebel-black));
+}
+
+.app-shell .topbar::after {
+  right: var(--mission-command-width, 0px);
+  bottom: -1px;
+  width: clamp(120px, 12vw, 184px);
+  height: 5px;
+  clip-path: polygon(0 42%, 92% 0, 100% 100%, 5% 82%);
+}
+
+.app-shell .brand {
+  position: relative;
+  grid-column: 1;
+  height: 72px;
+  padding-right: 14px;
+  overflow: hidden;
+}
+
+.app-shell .brand > span:last-child {
+  display: grid;
+  align-content: center;
+  gap: 1px;
+  line-height: 1;
+}
+
+.app-shell .brand > span:last-child::before {
+  color: var(--rebel-red);
+  content: "PROJECT";
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 8px;
+  font-weight: 900;
+  letter-spacing: 0.16em;
+}
+
+.app-shell .brand small {
+  max-width: 100px;
+  font-size: 9px;
+  line-height: 1.2;
+}
+
+.app-shell .topbar-conversation-context {
+  position: relative;
+  grid-column: 2;
+  height: 72px;
+  padding: 0 10px 0 6px;
+  background:
+    linear-gradient(104deg, rgb(224 34 27 / 13%) 0 84px, transparent 85px),
+    linear-gradient(90deg, rgb(20 20 17 / 88%), rgb(8 8 7 / 72%));
+  box-shadow:
+    inset 1px 0 var(--rebel-line),
+    inset -1px 0 var(--rebel-line),
+    inset 0 1px var(--rebel-line),
+    inset 0 -1px var(--rebel-line);
+}
+
+.app-shell .topbar-conversation-copy,
+.app-shell .topbar-conversation-status {
+  position: relative;
+  z-index: 1;
+}
+
+.app-shell .topbar-conversation-status {
+  min-width: 136px;
+  min-height: 58px;
+}
+
+.app-shell .topbar-controls {
+  grid-column: 3;
+  height: 72px;
+  padding: 8px 0 8px 12px;
+  box-shadow:
+    inset 0 1px var(--rebel-line),
+    inset 0 -1px var(--rebel-line);
+}
+
+.app-shell .model-button {
+  position: relative;
+  width: 100%;
+  max-width: 164px;
+  min-height: 56px;
+  padding: 20px 26px 7px 11px;
+  border-color: var(--rebel-line);
+  box-shadow: inset 3px 0 var(--rebel-red);
+  font-size: 10px;
+  text-align: left;
+}
+
+.app-shell .model-button::before {
+  position: absolute;
+  top: 7px;
+  left: 11px;
+  color: var(--rebel-red);
+  content: "MODEL";
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 8px;
+  font-weight: 900;
+  letter-spacing: 0.16em;
+  line-height: 1;
+}
+
+.app-shell .model-button span {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  margin: 0;
+  color: var(--rebel-paper);
+  transform: translateY(-18%);
+}
+
+@media (min-width: 601px) and (max-width: 1199px) {
+  .app-shell .topbar {
+    height: 84px;
+    grid-template-columns: minmax(0, 1fr) 70px;
+    gap: 8px;
+    padding: 7px 8px;
+  }
+
+  .app-shell .topbar::after,
+  .app-shell .brand,
+  .app-shell .topbar-conversation-status {
+    display: none;
+  }
+
+  .app-shell .topbar-conversation-context {
+    grid-column: 1;
+    height: 70px;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 7px;
+    padding: 0 8px;
+  }
+
+  .app-shell .topbar-conversation-context.has-ordinal {
+    grid-template-columns: 38px minmax(0, 1fr);
+  }
+
+  .app-shell .topbar-conversation-context.has-current .topbar-conversation-root,
+  .app-shell .topbar-conversation-context.has-current .topbar-conversation-separator,
+  .topbar-conversation-metadata > span + span {
+    display: none;
+  }
+
+  .app-shell .topbar-conversation-context.has-current .topbar-conversation-current {
+    max-width: 100%;
+  }
+
+  .topbar-session-ordinal {
+    font-size: 35px;
+    text-shadow: 2px 2px 0 var(--rebel-paper);
+  }
+
+  .topbar-conversation-title {
+    gap: 4px;
+    font-size: clamp(14px, 2vw, 20px);
+  }
+
+  .topbar-conversation-metadata {
+    gap: 5px;
+    font-size: 7px;
+    letter-spacing: 0.03em;
+  }
+
+  .app-shell .topbar-controls {
+    grid-column: 2;
+    height: 70px;
+    padding: 7px 0;
+    box-shadow: none;
+  }
+
+  .app-shell .model-button {
+    width: 70px;
+    max-width: 70px;
+    min-height: 56px;
+    padding: 20px 17px 6px 7px;
+    font-size: 8px;
+  }
+
+  .app-shell .model-button::before {
+    top: 7px;
+    left: 7px;
+    font-size: 7px;
+  }
+
+  .app-shell .model-button span {
+    right: 6px;
+  }
+}
+
+@media (max-width: 600px) {
+  .app-shell .topbar {
+    height: 84px;
+    grid-template-columns: minmax(0, 1fr) 58px;
+    gap: 8px;
+    padding: 8px 8px 8px 58px;
+  }
+
+  .app-shell .topbar::after {
+    display: none;
+  }
+
+  .app-shell .topbar-conversation-context {
+    grid-column: 1;
+    height: 68px;
+    padding: 0 6px;
+  }
+
+  .app-shell .topbar-controls {
+    grid-column: 2;
+    height: 68px;
+    padding: 7px 0;
+    box-shadow: none;
+  }
+
+  .app-shell .model-button {
+    width: 58px;
+    max-width: 58px;
+    min-height: 54px;
+    padding: 20px 13px 5px 6px;
+    font-size: 7px;
+  }
+
+  .app-shell .model-button::before {
+    top: 7px;
+    left: 6px;
+    font-size: 7px;
+    letter-spacing: 0.08em;
+  }
+
+  .app-shell .model-button span {
+    right: 4px;
   }
 }

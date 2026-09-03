@@ -190,6 +190,12 @@ async function captureViewport(client, outputPath, width, height, index) {
     const missingSurfaces = await client.evaluate(`(() => {
       const missionVisible = document.querySelector('.mission-command')
         ?.getClientRects().length > 0;
+      const shellSelectors = [
+        '.topbar',
+        '.topbar-conversation-context',
+        '.model-button',
+        ...(innerWidth >= 1200 ? ['.brand', '.topbar-conversation-status'] : []),
+      ];
       const commandSelectors = [
         '.composer',
         '.composer-command-label',
@@ -201,6 +207,7 @@ async function captureViewport(client, outputPath, width, height, index) {
       const selectors = [
         '.workspace-rail',
         '.conversation-sidebar',
+        ...shellSelectors,
         ...(innerWidth > 600 ? ['.compaction-marker', '.message.user'] : []),
         '.assistant-activity-group.is-active',
         '.commitment-card',
@@ -224,7 +231,7 @@ async function captureViewport(client, outputPath, width, height, index) {
               + '–' + Math.round(rect.right) + ',' + Math.round(rect.bottom) + ')']
           : [];
       });
-      for (const selector of commandSelectors) {
+      for (const selector of [...shellSelectors, ...commandSelectors]) {
         const element = document.querySelector(selector);
         if (!element) continue;
         const rect = element.getBoundingClientRect();
@@ -233,6 +240,24 @@ async function captureViewport(client, outputPath, width, height, index) {
           issues.push(selector + ' (clipped ' + Math.round(rect.left) + ','
             + Math.round(rect.top) + '–' + Math.round(rect.right) + ','
             + Math.round(rect.bottom) + ')');
+        }
+      }
+      if (innerWidth >= 1200) {
+        const brandRect = document.querySelector('.brand')?.getBoundingClientRect();
+        const contextRect = document.querySelector('.topbar-conversation-context')
+          ?.getBoundingClientRect();
+        const controlsRect = document.querySelector('.topbar-controls')
+          ?.getBoundingClientRect();
+        const copyRect = document.querySelector('.topbar-conversation-copy')
+          ?.getBoundingClientRect();
+        if (brandRect && contextRect && brandRect.right > contextRect.left + 1) {
+          issues.push('.topbar (project/context overlap)');
+        }
+        if (contextRect && controlsRect && contextRect.right > controlsRect.left + 1) {
+          issues.push('.topbar (context/model overlap)');
+        }
+        if (copyRect && copyRect.width < 180) {
+          issues.push('.topbar-conversation-copy (narrow)');
         }
       }
       const textarea = document.querySelector('.composer textarea');
