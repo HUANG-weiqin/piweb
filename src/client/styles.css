@@ -6760,3 +6760,965 @@ pre {
     transform: scale(1) rotate(-2deg);
   }
 }
+
+/* Gate 7: secondary surfaces — dossiers, signals, and lifecycle posters */
+
+:is(
+  .drawer,
+  .modal,
+  .role-selection-page,
+  .setup-shell,
+  .workspace-setup-dialog,
+  .workspace-placeholder,
+  .toast-stack
+) {
+  --rebel-black: #080807;
+  --rebel-raised: #171714;
+  --rebel-paper: #f0eadb;
+  --rebel-paper-muted: #aaa397;
+  --rebel-red: #e0221b;
+  --rebel-red-dark: #8d0f0c;
+  --rebel-line: #393832;
+}
+
+/* Lifecycle pages are posters, not detached application cards. */
+
+.setup-shell,
+.workspace-placeholder,
+.role-selection-page {
+  position: relative;
+  color: var(--rebel-paper);
+  background:
+    linear-gradient(116deg, transparent 0 69%, var(--rebel-red-dark) 69% 71%, transparent 71%),
+    repeating-linear-gradient(135deg, rgb(255 255 255 / 2%) 0 1px, transparent 1px 13px),
+    var(--rebel-black);
+}
+
+.setup-shell::before,
+.workspace-placeholder::before,
+.role-selection-page::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 9px;
+  background: var(--rebel-red);
+  content: "";
+  pointer-events: none;
+}
+
+.setup-card {
+  position: relative;
+  width: min(520px, 100%);
+  gap: 21px;
+  padding: 36px 38px 34px;
+  border: 3px solid var(--rebel-black);
+  border-radius: 0;
+  color: var(--rebel-black);
+  background: var(--rebel-paper);
+  box-shadow: 14px 14px 0 var(--rebel-red);
+  clip-path: polygon(0 0, calc(100% - 18px) 0, 100% 18px, 100% 100%, 12px 100%, 0 calc(100% - 12px));
+  backdrop-filter: none;
+}
+
+.setup-card::before {
+  position: absolute;
+  top: 0;
+  right: 36px;
+  padding: 4px 9px 5px;
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+  content: "LOCAL // WORKSPACE";
+  font: 850 8px/1.2 "Cascadia Code", Consolas, monospace;
+  letter-spacing: 0.12em;
+}
+
+.setup-brand {
+  gap: 17px;
+}
+
+.logo,
+.empty > div,
+.workspace-placeholder-mark {
+  border: 0;
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-red);
+  box-shadow: 5px 5px 0 var(--rebel-black);
+  clip-path: polygon(7px 0, 100% 5px, calc(100% - 5px) 100%, 0 calc(100% - 7px));
+  font-family: Georgia, serif;
+  font-style: italic;
+  font-weight: 900;
+}
+
+.setup-brand h1,
+.empty h1,
+.workspace-placeholder-content h1,
+.role-selection-header h1 {
+  font-style: italic;
+  font-weight: 950;
+  letter-spacing: -0.055em;
+  text-transform: uppercase;
+}
+
+.setup-card .eyebrow,
+.workspace-placeholder .eyebrow,
+.role-selection-page .eyebrow {
+  color: var(--rebel-red);
+  font-family: "Cascadia Code", Consolas, monospace;
+}
+
+.setup-intro,
+.setup-directory-hint,
+.setup-footnote {
+  color: color-mix(in srgb, var(--rebel-black) 68%, var(--rebel-paper));
+}
+
+.setup-intro code,
+.setup-card > pre,
+.workspace-placeholder-content code {
+  border: 0;
+  border-radius: 0;
+  color: inherit;
+  background: color-mix(in srgb, var(--rebel-black) 10%, var(--rebel-paper));
+}
+
+.setup-card input,
+.setup-card textarea,
+.setup-card select {
+  border: 2px solid var(--rebel-black);
+  border-radius: 0;
+  color: var(--rebel-black);
+  background: #fffdf5;
+  box-shadow: none;
+}
+
+.setup-card input:focus,
+.setup-card textarea:focus,
+.setup-card select:focus {
+  border-color: var(--rebel-red);
+  box-shadow: 4px 4px 0 color-mix(in srgb, var(--rebel-red) 24%, transparent);
+}
+
+.setup-card button,
+.workspace-placeholder button,
+.role-selection-page button {
+  border: 2px solid var(--rebel-black);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+  box-shadow: 4px 4px 0 var(--rebel-red);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  font-style: italic;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+}
+
+.setup-card button:not(:disabled):hover,
+.workspace-placeholder button:not(:disabled):hover,
+.role-selection-page button:not(:disabled):hover {
+  color: var(--rebel-paper);
+  background: var(--rebel-red);
+  box-shadow: 4px 4px 0 var(--rebel-black);
+}
+
+.setup-card button.ghost,
+.workspace-placeholder button.ghost,
+.role-selection-page button.ghost {
+  color: var(--rebel-black);
+  background: var(--rebel-paper);
+}
+
+.setup-card .status-dot {
+  border-radius: 0;
+  background: color-mix(in srgb, var(--rebel-black) 45%, var(--rebel-paper));
+  transform: rotate(45deg);
+}
+
+.setup-card .status-dot.online {
+  background: var(--rebel-red);
+  box-shadow: none;
+}
+
+.workspace-placeholder-content {
+  width: min(610px, 100%);
+  gap: 14px;
+  padding: 35px 38px 38px;
+  border-top: 3px solid var(--rebel-paper);
+  border-bottom: 3px solid var(--rebel-paper);
+  color: var(--rebel-paper-muted);
+  background: var(--rebel-raised);
+  box-shadow: 13px 13px 0 var(--rebel-red-dark);
+  clip-path: polygon(0 10px, 98% 0, 100% calc(100% - 13px), 8px 100%);
+}
+
+.workspace-placeholder-content h1,
+.workspace-placeholder-content strong {
+  color: var(--rebel-paper);
+}
+
+.workspace-placeholder-content code {
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+  font-family: "Cascadia Code", Consolas, monospace;
+}
+
+.workspace-placeholder-mark.warning {
+  color: var(--rebel-paper);
+  background: var(--rebel-red);
+  font-family: Inter, sans-serif;
+}
+
+.workspace-opening-spinner,
+.conversation-deletion-spinner {
+  color: var(--rebel-red);
+}
+
+.workspace-opening-spinner .activity-spinner-track,
+.conversation-deletion-spinner .activity-spinner-track {
+  stroke: var(--rebel-paper-muted);
+  stroke-opacity: 0.38;
+}
+
+/* Role selection is a dispatch board. */
+
+.role-selection-page {
+  gap: 34px;
+  padding: clamp(36px, 5vw, 68px) clamp(30px, 6vw, 96px);
+}
+
+.role-selection-header {
+  position: relative;
+  padding: 0 0 22px 20px;
+  border-bottom: 3px solid var(--rebel-paper);
+}
+
+.role-selection-header::before {
+  position: absolute;
+  top: 2px;
+  bottom: 22px;
+  left: 0;
+  width: 7px;
+  background: var(--rebel-red);
+  content: "";
+  transform: skewY(-10deg);
+}
+
+.role-selection-header h1 {
+  max-width: 760px;
+  color: var(--rebel-paper);
+  font-size: clamp(32px, 4.6vw, 58px);
+}
+
+.role-selection-header p:not(.eyebrow) {
+  max-width: 700px;
+  color: var(--rebel-paper-muted);
+  line-height: 1.55;
+}
+
+.role-card-grid {
+  grid-template-columns: repeat(auto-fit, minmax(255px, 1fr));
+  gap: 18px;
+}
+
+.role-card {
+  position: relative;
+  min-height: 206px;
+  gap: 13px;
+  padding: 23px 22px 20px;
+  overflow: hidden;
+  border: 0;
+  border-left: 7px solid var(--rebel-red);
+  border-radius: 0;
+  color: var(--rebel-black);
+  background: var(--rebel-paper);
+  box-shadow: 8px 8px 0 var(--rebel-red-dark);
+  clip-path: polygon(0 5px, 100% 0, calc(100% - 6px) 100%, 5px calc(100% - 2px));
+}
+
+.role-card::before {
+  position: absolute;
+  top: 0;
+  right: 12px;
+  width: 54px;
+  height: 5px;
+  background: var(--rebel-black);
+  content: "";
+  transform: skewX(-28deg);
+}
+
+.role-card:not(.role-card-add):hover,
+.role-card-add:not(:disabled):hover {
+  border-color: var(--rebel-red);
+  color: var(--rebel-black);
+  background: #fffdf5;
+  box-shadow: 8px 8px 0 var(--rebel-red);
+  transform: translateY(-2px);
+}
+
+.role-card.unavailable {
+  border-color: var(--rebel-paper-muted);
+  background: color-mix(in srgb, var(--rebel-paper) 82%, var(--rebel-black));
+  opacity: 0.72;
+}
+
+.role-card-heading {
+  color: var(--rebel-black);
+  font-size: 20px;
+  font-style: italic;
+  font-weight: 950;
+  text-transform: uppercase;
+}
+
+.role-card-description,
+.role-card-model {
+  color: color-mix(in srgb, var(--rebel-black) 68%, var(--rebel-paper));
+}
+
+.role-card-model {
+  padding-top: 9px;
+  border-top: 1px solid color-mix(in srgb, var(--rebel-black) 28%, var(--rebel-paper));
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.role-card-add {
+  border: 2px dashed var(--rebel-paper-muted);
+  border-left: 7px solid var(--rebel-paper-muted);
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+  box-shadow: none;
+}
+
+.role-card-add::before {
+  background: var(--rebel-red);
+}
+
+.role-card-action {
+  border: 2px solid var(--rebel-black) !important;
+  border-radius: 0 !important;
+  color: var(--rebel-black) !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.role-card-action:not(:disabled):hover {
+  color: var(--rebel-paper) !important;
+  background: var(--rebel-red) !important;
+}
+
+/* Shared overlay frame: hard veil, paper dossier, no lifecycle animation. */
+
+.drawer-backdrop,
+.modal-backdrop {
+  background: rgb(0 0 0 / 78%);
+  backdrop-filter: none;
+}
+
+.drawer {
+  padding: 0 30px 34px;
+  border-left: 3px solid var(--rebel-red);
+  color: var(--rebel-paper);
+  background:
+    repeating-linear-gradient(135deg, rgb(255 255 255 / 2%) 0 1px, transparent 1px 12px),
+    var(--rebel-black);
+  box-shadow: -14px 0 0 rgb(224 34 27 / 36%);
+}
+
+.drawer-header {
+  margin: 0 -30px 25px;
+  padding: 25px 30px 19px;
+  border-bottom: 3px solid var(--rebel-paper);
+  background: var(--rebel-black);
+  backdrop-filter: none;
+}
+
+.drawer-header h2 {
+  color: var(--rebel-paper);
+  font-size: 27px;
+  font-style: italic;
+  font-weight: 950;
+  letter-spacing: -0.045em;
+  text-transform: uppercase;
+}
+
+.drawer-header p:last-child,
+.drawer .setting-note,
+.drawer .step-heading p,
+.drawer .provider-identity small,
+.drawer .model small {
+  color: var(--rebel-paper-muted);
+}
+
+.drawer .eyebrow,
+.modal .eyebrow {
+  color: var(--rebel-red);
+  font-family: "Cascadia Code", Consolas, monospace;
+}
+
+.drawer .icon-button {
+  border: 2px solid var(--rebel-paper);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: transparent;
+}
+
+.drawer .icon-button:not(:disabled):hover {
+  color: var(--rebel-paper);
+  background: var(--rebel-red);
+}
+
+.drawer .settings-section {
+  gap: 14px;
+  padding: 25px 0;
+  border-top: 1px solid var(--rebel-line);
+}
+
+.drawer .current-model,
+.drawer .provider-summary,
+.drawer .model-list {
+  border: 1px solid var(--rebel-line);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+  box-shadow: none;
+}
+
+.drawer .current-model {
+  padding: 17px;
+  border-left: 6px solid var(--rebel-red);
+}
+
+.drawer .status-badge,
+.modal .status-badge {
+  border: 1px solid currentColor;
+  border-radius: 0;
+  color: var(--rebel-paper-muted);
+  background: transparent;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.drawer .status-badge.success {
+  color: var(--rebel-black);
+  background: var(--rebel-paper);
+}
+
+.drawer .step-number {
+  border: 0;
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-red);
+  clip-path: polygon(4px 0, 100% 2px, calc(100% - 3px) 100%, 0 calc(100% - 4px));
+}
+
+.drawer .provider-actions button,
+.drawer > button,
+.drawer .model,
+.drawer input,
+.drawer select {
+  border-radius: 0;
+}
+
+.drawer .provider-actions button,
+.drawer > button {
+  border: 1px solid var(--rebel-paper);
+  color: var(--rebel-paper);
+  background: transparent;
+}
+
+.drawer .provider-actions button:not(:disabled):hover,
+.drawer > button:not(:disabled):hover {
+  border-color: var(--rebel-red);
+  color: var(--rebel-paper);
+  background: var(--rebel-red);
+}
+
+.drawer input,
+.drawer select {
+  border-color: var(--rebel-line);
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+.drawer input:focus,
+.drawer select:focus {
+  border-color: var(--rebel-red);
+  box-shadow: 3px 3px 0 var(--rebel-red-dark);
+}
+
+.drawer .model {
+  border-bottom-color: var(--rebel-line);
+  color: var(--rebel-paper);
+}
+
+.drawer .model:not(:disabled):hover,
+.drawer .model.selected {
+  color: var(--rebel-paper);
+  background: color-mix(in srgb, var(--rebel-red) 28%, var(--rebel-raised));
+}
+
+.drawer .model b,
+.drawer .inline-status.success {
+  color: var(--rebel-paper);
+}
+
+.drawer .inline-status,
+.modal .inline-status,
+.directory-browser-error {
+  border-radius: 0;
+}
+
+.drawer .inline-status.success {
+  border-left: 4px solid var(--rebel-paper);
+  background: color-mix(in srgb, var(--rebel-paper) 12%, var(--rebel-black));
+}
+
+.drawer .inline-status.error,
+.drawer .credential-confirm {
+  border: 1px solid var(--rebel-red);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-red-dark);
+}
+
+.modal {
+  position: relative;
+  gap: 16px;
+  padding: 27px;
+  border: 3px solid var(--rebel-black);
+  border-radius: 0;
+  color: var(--rebel-black);
+  background: var(--rebel-paper);
+  box-shadow: 12px 12px 0 var(--rebel-red);
+  clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
+}
+
+.modal::before {
+  position: absolute;
+  top: 0;
+  right: 42px;
+  width: 74px;
+  height: 5px;
+  background: var(--rebel-red);
+  content: "";
+  transform: skewX(-28deg);
+}
+
+.modal-header {
+  min-height: 54px;
+  flex: 0 0 auto;
+  margin: -27px -27px 2px;
+  padding: 18px 21px 14px 27px;
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+}
+
+.modal-header h2 {
+  color: var(--rebel-paper);
+  font-size: 23px;
+  font-style: italic;
+  font-weight: 950;
+  letter-spacing: -0.04em;
+  text-transform: uppercase;
+}
+
+.modal .modal-description,
+.modal .progress,
+.modal small,
+.modal .directory-browser-note {
+  color: color-mix(in srgb, var(--rebel-black) 64%, var(--rebel-paper));
+}
+
+.modal .modal-header .modal-description,
+.modal .modal-header .progress,
+.modal .modal-header small {
+  color: var(--rebel-paper-muted);
+}
+
+.modal .icon-button {
+  border: 1px solid var(--rebel-paper);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: transparent;
+}
+
+.modal .icon-button:not(:disabled):hover {
+  color: var(--rebel-paper);
+  background: var(--rebel-red);
+}
+
+.modal button,
+.modal .primary-link {
+  border: 2px solid var(--rebel-black);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+  box-shadow: 3px 3px 0 var(--rebel-red);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.modal button:not(:disabled):hover,
+.modal .primary-link:hover {
+  border-color: var(--rebel-red);
+  color: var(--rebel-paper);
+  background: var(--rebel-red);
+  box-shadow: 3px 3px 0 var(--rebel-black);
+}
+
+.modal button.ghost,
+.modal .option-button {
+  color: var(--rebel-black);
+  background: transparent;
+  box-shadow: none;
+}
+
+.modal button.ghost:not(:disabled):hover,
+.modal .option-button:not(:disabled):hover {
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+}
+
+.modal input,
+.modal textarea,
+.modal select,
+.modal .device-code,
+.modal .directory-browser-location code,
+.modal .directory-browser-list {
+  border: 2px solid var(--rebel-black);
+  border-radius: 0;
+  color: var(--rebel-black);
+  background: #fffdf5;
+  box-shadow: none;
+}
+
+.modal input:focus,
+.modal textarea:focus,
+.modal select:focus {
+  border-color: var(--rebel-red);
+  box-shadow: 3px 3px 0 color-mix(in srgb, var(--rebel-red) 24%, transparent);
+}
+
+.modal .directory-browser-list {
+  padding: 8px;
+  background: color-mix(in srgb, var(--rebel-black) 8%, var(--rebel-paper));
+}
+
+.modal .directory-browser-entry {
+  border: 0;
+  color: var(--rebel-black);
+  background: transparent;
+  box-shadow: none;
+}
+
+.modal .directory-browser-entry:not(:disabled):hover {
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+}
+
+.modal .directory-browser-error {
+  border: 0;
+  border-left: 5px solid var(--rebel-red);
+  color: var(--rebel-paper);
+  background: var(--rebel-red-dark);
+}
+
+.modal .device-code {
+  padding: 17px;
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+  font-weight: 900;
+}
+
+.modal.role-manager-dialog {
+  width: min(1000px, 96vw);
+}
+
+.role-manager-layout {
+  gap: 23px;
+}
+
+.modal .role-manager-list {
+  gap: 4px;
+  padding-right: 13px;
+  border-right: 2px solid var(--rebel-black);
+}
+
+.modal .role-manager-list button {
+  border: 0;
+  border-left: 4px solid transparent;
+  color: var(--rebel-black);
+  background: transparent;
+  box-shadow: none;
+}
+
+.modal .role-manager-list button:not(:disabled):hover,
+.modal .role-manager-list button.selected {
+  border-left-color: var(--rebel-red);
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+}
+
+.modal .role-manager-list button.selected small {
+  color: var(--rebel-paper-muted);
+}
+
+.modal .role-capability-switch {
+  border: 2px solid var(--rebel-black);
+  border-radius: 0;
+  background: color-mix(in srgb, var(--rebel-black) 8%, var(--rebel-paper));
+}
+
+.modal .role-capability-switch input {
+  border: 2px solid var(--rebel-black);
+  border-radius: 0;
+  background: var(--rebel-paper);
+}
+
+.modal .role-capability-switch input::after {
+  border-radius: 0;
+  background: var(--rebel-black);
+}
+
+.modal .role-capability-switch input:checked {
+  border-color: var(--rebel-red);
+  background: var(--rebel-red);
+}
+
+.modal .role-capability-switch input:checked::after {
+  background: var(--rebel-paper);
+}
+
+.workspace-setup-dialog .setup-shell {
+  color: var(--rebel-black);
+  background: transparent;
+}
+
+.workspace-setup-dialog .setup-shell::before,
+.workspace-setup-dialog .setup-card::before {
+  display: none;
+}
+
+.workspace-setup-dialog .setup-card {
+  border-color: var(--rebel-black);
+  color: var(--rebel-black);
+  background: var(--rebel-paper);
+  box-shadow: 14px 14px 0 var(--rebel-red);
+}
+
+.workspace-setup-close {
+  top: 18px;
+  right: 19px;
+  border: 1px solid var(--rebel-black) !important;
+  border-radius: 0;
+  color: var(--rebel-paper) !important;
+  background: var(--rebel-black) !important;
+  box-shadow: 3px 3px 0 var(--rebel-red) !important;
+}
+
+/* Feedback stays a signal strip and never takes focus ownership. */
+
+.banner {
+  padding: 8px 14px;
+  border: 0;
+  border-left: 7px solid var(--rebel-paper);
+  color: var(--rebel-paper);
+  background: var(--rebel-red-dark);
+  font: 850 10px/1.4 "Cascadia Code", Consolas, monospace;
+  letter-spacing: 0.07em;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.transition-status-overlay {
+  top: 96px;
+}
+
+.toast-stack {
+  gap: 10px;
+}
+
+.toast {
+  position: relative;
+  padding: 13px 43px 13px 16px;
+  border: 2px solid var(--rebel-paper);
+  border-left: 7px solid var(--rebel-red);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+  box-shadow: 7px 7px 0 rgb(224 34 27 / 44%);
+  clip-path: polygon(0 3px, 100% 0, calc(100% - 5px) 100%, 3px 100%);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.notice-toast.warning {
+  border-color: var(--rebel-paper);
+  border-left-color: var(--rebel-red);
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+.error-toast,
+.notice-toast.error {
+  border-color: var(--rebel-paper);
+  border-left-color: var(--rebel-paper);
+  color: var(--rebel-paper);
+  background: var(--rebel-red-dark);
+}
+
+.toast-close {
+  position: absolute;
+  top: 8px;
+  right: 9px;
+  border: 1px solid currentColor;
+  border-radius: 0;
+  color: inherit;
+  background: transparent;
+  box-shadow: none;
+}
+
+/* Native disclosure owners keep their DOM and scroll behavior; only their
+   secondary visual rhythm is narrowed here. */
+
+.app-shell .token-tooltip {
+  border-left: 4px solid var(--rebel-red);
+  box-shadow: 5px 5px 0 rgb(0 0 0 / 42%);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+}
+
+.transcript .assistant-activity-group > summary,
+.transcript .tool > summary,
+.transcript .commitment-card > summary,
+.transcript .session-message-toggle {
+  cursor: pointer;
+}
+
+@media (max-width: 600px) {
+  .setup-shell,
+  .workspace-placeholder,
+  .role-selection-page {
+    background:
+      linear-gradient(125deg, transparent 0 82%, var(--rebel-red-dark) 82%),
+      var(--rebel-black);
+  }
+
+  .setup-card {
+    padding: 30px 23px 27px;
+    box-shadow: 8px 8px 0 var(--rebel-red);
+  }
+
+  .setup-card::before {
+    right: 24px;
+  }
+
+  .setup-directory-row {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-placeholder-content {
+    padding: 28px 22px 31px;
+    box-shadow: 8px 8px 0 var(--rebel-red-dark);
+  }
+
+  .workspace-placeholder-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .role-selection-page {
+    gap: 25px;
+    padding: 82px 17px 26px 64px;
+  }
+
+  .role-selection-header {
+    gap: 17px;
+    padding-left: 14px;
+  }
+
+  .role-selection-header h1 {
+    font-size: 31px;
+  }
+
+  .role-card-grid {
+    gap: 15px;
+  }
+
+  .role-card {
+    min-height: 184px;
+    box-shadow: 6px 6px 0 var(--rebel-red-dark);
+  }
+
+  .drawer {
+    padding-right: 18px;
+    padding-left: 18px;
+    border-left: 0;
+    border-top: 5px solid var(--rebel-red);
+    box-shadow: none;
+  }
+
+  .drawer-header {
+    margin-right: -18px;
+    margin-left: -18px;
+    padding-right: 18px;
+    padding-left: 18px;
+  }
+
+  .modal-backdrop {
+    align-items: end;
+  }
+
+  .modal {
+    padding: 23px 19px 21px;
+    border-width: 2px;
+    box-shadow: 0 -7px 0 var(--rebel-red);
+    clip-path: polygon(0 0, calc(100% - 13px) 0, 100% 13px, 100% 100%, 0 100%);
+  }
+
+  .modal-header {
+    margin: -23px -19px 1px;
+    padding: 17px 18px 14px 19px;
+  }
+
+  .modal::before {
+    right: 28px;
+  }
+
+  .role-manager-layout {
+    min-height: auto;
+  }
+
+  .modal .role-manager-list {
+    padding-right: 0;
+    padding-bottom: 10px;
+    border-right: 0;
+    border-bottom: 2px solid var(--rebel-black);
+  }
+
+  .conversation-role-switch,
+  .directory-browser-actions,
+  .extension-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .toast-stack {
+    top: 76px;
+  }
+
+  .toast {
+    box-shadow: 5px 5px 0 rgb(224 34 27 / 44%);
+  }
+
+  .transition-status-overlay {
+    top: 64px;
+  }
+}

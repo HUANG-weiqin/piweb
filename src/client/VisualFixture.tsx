@@ -167,7 +167,10 @@ const activityByWorkspace = new Map<string, ProjectActivitySummary>([
   }],
 ]);
 
-const chat: ChatState = {
+const DEFAULT_COMMITMENT_REASON = "只添加开发 fixture、截图入口与对应验证。";
+
+function createChat(commitmentReason: string): ChatState {
+  return {
   focus: {
     sessionId: "session-visual-fixture",
     conversationId: ACTIVE_CONVERSATION_ID,
@@ -205,7 +208,7 @@ const chat: ChatState = {
       name: "request_edit_budget",
       args: {
         fileCount: 5,
-        reason: "只添加开发 fixture、截图入口与对应验证。",
+        reason: commitmentReason,
       },
       result: {
         details: {
@@ -248,8 +251,10 @@ const chat: ChatState = {
       total: 29_600,
     },
   }],
-};
+  };
+}
 
+const chat = createChat(DEFAULT_COMMITMENT_REASON);
 const noOp = () => undefined;
 const activeConversationOrdinal = conversationDisplayOrdinal(
   conversations,
@@ -257,8 +262,15 @@ const activeConversationOrdinal = conversationDisplayOrdinal(
   ACTIVE_CONVERSATION_ID,
 );
 
-export function VisualFixture() {
+export function VisualFixture({
+  commitmentReason,
+}: {
+  commitmentReason?: string;
+} = {}) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const fixtureChat = commitmentReason === undefined
+    ? chat
+    : createChat(commitmentReason);
 
   return <div className="workbench" data-visual-fixture="populated-workbench">
     <WorkspaceRail
@@ -289,7 +301,7 @@ export function VisualFixture() {
     />
     <div className="workbench-main">
       <Chat
-        chat={chat}
+        chat={fixtureChat}
         observationSessionId="session-visual-fixture"
         busy
         activeRun={{ id: "run-visual-fixture", phase: "running" }}
