@@ -790,6 +790,10 @@ export class ConversationActor {
     return this.compacting;
   }
 
+  isRuntimeReady(): boolean {
+    return this.created !== undefined;
+  }
+
   setCompactionThresholdPercent(percent: number): void {
     this.assertUsable();
     if (this.truncating || this.switchingRole) {
