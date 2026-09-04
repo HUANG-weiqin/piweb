@@ -1178,6 +1178,7 @@ describe("App", () => {
 
     expect(screen.getByText("cold recent preview", { selector: "article" }))
       .toBeInTheDocument();
+    expect(screen.queryByRole("note", { name: "历史记录不完整" })).toBeNull();
     expect(screen.getByRole("status", { name: "正在同步工作区…" }))
       .toBeInTheDocument();
     expect(screen.getByRole("button", { name: "查看会话角色 Preview Reader" }))
@@ -1210,6 +1211,7 @@ describe("App", () => {
     }));
     expect(screen.getByText("cold recent preview", { selector: "article" }))
       .toBeInTheDocument();
+    expect(screen.queryByRole("note", { name: "历史记录不完整" })).toBeNull();
     expect(screen.getByRole("status", { name: "正在同步工作区…" }))
       .toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
@@ -2768,7 +2770,7 @@ describe("App", () => {
     render(<App />);
     const sessionId = startFromSetup();
     const window = {
-      omittedBefore: false,
+      omittedBefore: true,
       startsMidTurn: false,
       contentTruncated: false,
     };
@@ -2849,6 +2851,8 @@ describe("App", () => {
         },
       });
     });
+    expect(screen.getByRole("note", { name: "历史记录不完整" }))
+      .toBeInTheDocument();
     act(() => socketMock.rawEmit?.({
       ...projectSnapshot,
       conversations: [projectSnapshot.conversations[1]!],
@@ -2878,6 +2882,7 @@ describe("App", () => {
     expect(screen.getByText("A cached history")).toBeInTheDocument();
     expect(screen.getByText("A live card")).toBeInTheDocument();
     expect(screen.queryByText("B history")).not.toBeInTheDocument();
+    expect(screen.queryByRole("note", { name: "历史记录不完整" })).toBeNull();
     expect(screen.getByRole("status", { name: "正在同步会话…" })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "当前会话 A" })).toBeEnabled();
@@ -2896,6 +2901,7 @@ describe("App", () => {
       socketMock.rawEmit?.(stateFor(CONVERSATION_ID, focusA));
     });
     expect(screen.getByText("A cached history")).toBeInTheDocument();
+    expect(screen.queryByRole("note", { name: "历史记录不完整" })).toBeNull();
     expect(screen.getByRole("status", { name: "正在同步会话…" })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeDisabled();
 
@@ -2906,6 +2912,8 @@ describe("App", () => {
     )));
     expect(screen.queryByRole("status", { name: "正在同步会话…" })).not.toBeInTheDocument();
     expect(screen.getByText("fresh A history")).toBeInTheDocument();
+    expect(screen.getByRole("note", { name: "历史记录不完整" }))
+      .toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeEnabled();
 
     act(() => {
@@ -5365,6 +5373,10 @@ describe("App", () => {
     expect(screen.getByText("persisted question", { selector: "article" })).toBeInTheDocument();
     expect(screen.getByText("persisted answer").closest("article")).toBeInTheDocument();
     expect(screen.queryByText("wrong conversation")).not.toBeInTheDocument();
+    const marker = screen.getByRole("note", { name: "历史记录不完整" });
+    expect(marker).toHaveTextContent("较早的历史记录未显示");
+    expect(marker).toHaveTextContent("当前窗口从一轮对话中间开始");
+    expect(marker).toHaveTextContent("过大的消息内容已截断");
   });
 
   it("waits for the matching conversation snapshot before enabling prompts", () => {

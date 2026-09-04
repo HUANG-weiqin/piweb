@@ -481,6 +481,12 @@ function ChatView({
   );
   const items = chat.items;
   const blocks = useMemo(() => transcriptBlocks(items), [items]);
+  const historyWindow = chat.historyWindow;
+  const historyWindowIncomplete = Boolean(
+    historyWindow?.omittedBefore
+    || historyWindow?.startsMidTurn
+    || historyWindow?.contentTruncated,
+  );
   const activeAssistantMessageId = useMemo(() => {
     if (!activeRun) return undefined;
     for (let index = blocks.length - 1; index >= 0; index -= 1) {
@@ -794,6 +800,16 @@ function ChatView({
       onScroll={handleTranscriptScroll}
       onWheel={handleTranscriptWheel}
     >
+      {conversationReady && historyWindowIncomplete && <div
+        className="history-window-marker"
+        role="note"
+        aria-label="历史记录不完整"
+      >
+        <strong>历史记录不完整</strong>
+        {historyWindow?.omittedBefore && <span>较早的历史记录未显示</span>}
+        {historyWindow?.startsMidTurn && <span>当前窗口从一轮对话中间开始</span>}
+        {historyWindow?.contentTruncated && <span>过大的消息内容已截断</span>}
+      </div>}
       {conversationReady && !blocks.length && <div className="empty"><div>π</div><h1>想做点什么？</h1><p>Pi 可以读取、修改文件并执行命令。</p></div>}
       {blocks.map((block) => {
         if (block.kind === "compaction") return <div

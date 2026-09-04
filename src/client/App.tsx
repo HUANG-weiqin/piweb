@@ -1109,6 +1109,7 @@ export function App() {
           ...message,
         })),
       projectionSeq: event.projectionSeq,
+      historyWindow: event.window,
     });
     setConversationRole(event.role);
     setLoopList(event.loopList ?? { items: [], armed: false });

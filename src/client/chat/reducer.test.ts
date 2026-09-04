@@ -120,6 +120,91 @@ describe("chatReducer", () => {
     expect(messageItems(state).at(-1)?.usage?.total).toBe(9);
   });
 
+  it("replaces authoritative history coverage and preserves it across live items", () => {
+    const incompleteWindow = {
+      omittedBefore: true,
+      startsMidTurn: true,
+      contentTruncated: true,
+    };
+    let state = chatReducer(focusedState(), {
+      type: "hydrate",
+      ...FOCUS_A_1,
+      projectionSeq: 4,
+      items: [],
+      historyWindow: incompleteWindow,
+    });
+    state = chatReducer(state, {
+      type: "conversation_item",
+      ...FOCUS_A_1,
+      projectionSeq: 4,
+      item: sessionMessageCard(),
+    });
+    expect(state.historyWindow).toEqual(incompleteWindow);
+
+    const staleIdentity = chatReducer(state, {
+      type: "hydrate",
+      ...FOCUS_B,
+      projectionSeq: 5,
+      items: [],
+      historyWindow: {
+        omittedBefore: false,
+        startsMidTurn: false,
+        contentTruncated: false,
+      },
+    });
+    expect(staleIdentity).toBe(state);
+
+    state = chatReducer(state, {
+      type: "hydrate",
+      ...FOCUS_A_1,
+      projectionSeq: 4,
+      items: [],
+      historyWindow: {
+        omittedBefore: false,
+        startsMidTurn: false,
+        contentTruncated: false,
+      },
+    });
+    expect(state.historyWindow).toEqual({
+      omittedBefore: false,
+      startsMidTurn: false,
+      contentTruncated: false,
+    });
+
+    state = chatReducer(state, {
+      type: "hydrate",
+      ...FOCUS_A_1,
+      projectionSeq: 4,
+      items: [],
+    });
+    expect(state.historyWindow).toBeUndefined();
+  });
+
+  it("clears history coverage on same or changed focus and reset", () => {
+    const hydrate = (state: ChatState, focus = FOCUS_A_1) => chatReducer(state, {
+      type: "hydrate",
+      ...focus,
+      items: [],
+      historyWindow: {
+        omittedBefore: true,
+        startsMidTurn: false,
+        contentTruncated: false,
+      },
+    });
+    let state = hydrate(focusedState());
+
+    state = chatReducer(state, { type: "focus_changed", ...FOCUS_A_1 });
+    expect(state.historyWindow).toBeUndefined();
+
+    state = hydrate(state);
+    state = chatReducer(state, { type: "focus_changed", ...FOCUS_B });
+    expect(state.historyWindow).toBeUndefined();
+
+    state = hydrate(state, FOCUS_B);
+    state = chatReducer(state, { type: "reset" });
+    expect(state).toEqual(initialChatState);
+  });
+
   it("normalizes a large unique snapshot with linear identity reads", () => {
     let idReads = 0;
     const items = Array.from({ length: 1_000 }, (_, index) => {
@@ -273,6 +358,11 @@ describe("chatReducer", () => {
       ...FOCUS_A_1,
       projectionSeq: 5,
       items: [historyMessage("current", "assistant", "current")],
+      historyWindow: {
+        omittedBefore: true,
+        startsMidTurn: false,
+        contentTruncated: false,
+      },
     });
     state = chatReducer(state, {
       type: "session",
@@ -287,9 +377,19 @@ describe("chatReducer", () => {
       ...FOCUS_A_1,
       projectionSeq: 5,
       items: [historyMessage("stale", "assistant", "stale")],
+      historyWindow: {
+        omittedBefore: false,
+        startsMidTurn: false,
+        contentTruncated: false,
+      },
     });
 
     expect(stale).toBe(state);
+    expect(stale.historyWindow).toEqual({
+      omittedBefore: true,
+      startsMidTurn: false,
+      contentTruncated: false,
+    });
     expect(stale.lastProjectionSeq).toBe(6);
     expect(messageItems(stale).map(({ text }) => text)).toEqual([
       "current",
@@ -363,6 +463,70 @@ describe("chatReducer", () => {
     expect(state.projectionGap).toBe(true);
     expect(state.lastProjectionSeq).toBe(5);
     expect(state.items).toEqual([]);
+  });
+
+  it("clears authoritative history coverage on every projection-gap path", () => {
+    const incompleteWindow = {
+      omittedBefore: true,
+      startsMidTurn: false,
+      contentTruncated: false,
+    };
+    const cases: Array<{
+      name: string;
+      projectionSeq?: number;
+      apply(state: ChatState): ChatState;
+    }> = [{
+      name: "conversation item mismatches an existing watermark",
+      projectionSeq: 5,
+      apply: (state) => chatReducer(state, {
+        type: "conversation_item",
+        ...FOCUS_A_1,
+        projectionSeq: 6,
+        item: sessionMessageCard(),
+      }),
+    }, {
+      name: "conversation item introduces a watermark",
+      apply: (state) => chatReducer(state, {
+        type: "conversation_item",
+        ...FOCUS_A_1,
+        projectionSeq: 1,
+        item: sessionMessageCard(),
+      }),
+    }, {
+      name: "session event omits an existing watermark",
+      projectionSeq: 5,
+      apply: (state) => chatReducer(state, {
+        type: "session",
+        ...FOCUS_A_1,
+        runId: RUN_1,
+        event: { type: "run_started" },
+      }),
+    }, {
+      name: "session event skips the next watermark",
+      projectionSeq: 5,
+      apply: (state) => chatReducer(state, {
+        type: "session",
+        ...FOCUS_A_1,
+        runId: RUN_1,
+        projectionSeq: 7,
+        event: { type: "run_started" },
+      }),
+    }];
+
+    for (const testCase of cases) {
+      const state = chatReducer(focusedState(), {
+        type: "hydrate",
+        ...FOCUS_A_1,
+        items: [],
+        ...(testCase.projectionSeq === undefined
+          ? {}
+          : { projectionSeq: testCase.projectionSeq }),
+        historyWindow: incompleteWindow,
+      });
+      const gapped = testCase.apply(state);
+      expect(gapped.projectionGap, testCase.name).toBe(true);
+      expect(gapped.historyWindow, testCase.name).toBeUndefined();
+    }
   });
 
   it("accepts equal-watermark conversation items without advancing sequence", () => {

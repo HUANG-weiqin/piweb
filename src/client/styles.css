@@ -607,6 +607,37 @@ pre {
   background: var(--danger-soft);
 }
 
+.app-shell .history-window-marker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0 0 16px;
+  padding: 5px 0 5px 10px;
+  border-left: 4px solid var(--rebel-red);
+  color: var(--rebel-paper-muted);
+  background: transparent;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.app-shell .history-window-marker strong {
+  flex: 0 0 auto;
+  color: var(--rebel-paper);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+}
+
+.app-shell .history-window-marker span {
+  min-width: 0;
+}
+
 .compaction-marker {
   display: flex;
   align-items: center;

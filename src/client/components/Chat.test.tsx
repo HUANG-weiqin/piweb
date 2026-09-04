@@ -506,9 +506,72 @@ describe("Chat", () => {
     expect(onCompact).toHaveBeenCalledOnce();
   });
 
-  it("does not render a history-window notice", () => {
-    render(view(emptyChat));
+  it.each([
+    [
+      { omittedBefore: true, startsMidTurn: false, contentTruncated: false },
+      "较早的历史记录未显示",
+    ],
+    [
+      { omittedBefore: true, startsMidTurn: true, contentTruncated: false },
+      "当前窗口从一轮对话中间开始",
+    ],
+    [
+      { omittedBefore: false, startsMidTurn: false, contentTruncated: true },
+      "过大的消息内容已截断",
+    ],
+  ])("renders the independently described incomplete-history flag %#", (
+    historyWindow,
+    description,
+  ) => {
+    render(view({ items: [], historyWindow }));
 
+    expect(screen.getByRole("note", { name: "历史记录不完整" }))
+      .toHaveTextContent(description);
+  });
+
+  it("renders combined history coverage as a wrapping transcript child", () => {
+    const { container } = render(view({
+      items: [],
+      historyWindow: {
+        omittedBefore: true,
+        startsMidTurn: true,
+        contentTruncated: true,
+      },
+    }));
+
+    const marker = screen.getByRole("note", { name: "历史记录不完整" });
+    expect(marker.parentElement).toBe(container.querySelector(".transcript"));
+    expect(marker).toHaveTextContent("较早的历史记录未显示");
+    expect(marker).toHaveTextContent("当前窗口从一轮对话中间开始");
+    expect(marker).toHaveTextContent("过大的消息内容已截断");
+  });
+
+  it("removes an all-false marker and suppresses cached coverage while not ready", () => {
+    const incomplete = {
+      items: [],
+      historyWindow: {
+        omittedBefore: true,
+        startsMidTurn: false,
+        contentTruncated: false,
+      },
+    };
+    const rendered = render(view(incomplete));
+    expect(screen.getByRole("note", { name: "历史记录不完整" }))
+      .toBeInTheDocument();
+
+    rendered.rerender(view({
+      items: [],
+      historyWindow: {
+        omittedBefore: false,
+        startsMidTurn: false,
+        contentTruncated: false,
+      },
+    }));
+    expect(screen.queryByRole("note", { name: "历史记录不完整" })).toBeNull();
+
+    rendered.rerender(view(incomplete, "", undefined, {
+      conversationReady: false,
+    }));
     expect(screen.queryByRole("note", { name: "历史记录不完整" })).toBeNull();
   });
 
