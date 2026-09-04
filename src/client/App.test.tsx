@@ -4674,6 +4674,298 @@ describe("App", () => {
     expect(screen.getByText("keep this prompt", { selector: "article" })).toBeInTheDocument();
   });
 
+  function beginUnsentDraftReconnect(draft: string) {
+    render(<App />);
+    const originalSessionId = startFromSetup();
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId: originalSessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+    fireEvent.change(screen.getByRole("textbox", { name: "给 Pi 发送消息" }), {
+      target: { value: draft },
+    });
+    socketMock.autoFocus = false;
+    act(() => {
+      socketMock.status?.(false);
+      socketMock.status?.(true);
+      socketMock.emit?.({
+        type: "hello",
+        protocolVersion: PROTOCOL_VERSION,
+        startupCwd: "E:\\default",
+      });
+    });
+    const reconnect = latestCommand("initialize");
+    expect(reconnect.sessionId).not.toBe(originalSessionId);
+    return reconnect;
+  }
+
+  function replaceUnsentDraftReconnect(
+    previous: Extract<ClientCommand, { type: "initialize" }>,
+  ) {
+    act(() => {
+      socketMock.status?.(false);
+      socketMock.status?.(true);
+      socketMock.emit?.({
+        type: "hello",
+        protocolVersion: PROTOCOL_VERSION,
+        startupCwd: "E:\\default",
+      });
+    });
+    const reconnect = latestCommand("initialize");
+    expect(reconnect.sessionId).not.toBe(previous.sessionId);
+    expect(reconnect.commandId).not.toBe(previous.commandId);
+    expect(reconnect.conversation).toEqual({
+      kind: "open",
+      conversationId: CONVERSATION_ID,
+    });
+    return reconnect;
+  }
+
+  it("retains an unsent draft after an exact reconnect attachment and snapshot", () => {
+    const reconnect = beginUnsentDraftReconnect("unsent reconnect draft");
+    const reconnectFocusId = "ae301850-745d-44dd-a30f-000000000099";
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "focus_attached",
+        operation: "initialize",
+        commandId: reconnect.commandId!,
+        sessionId: reconnect.sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_ID,
+        focusId: reconnectFocusId,
+      });
+      socketMock.rawEmit?.({
+        type: "state",
+        state: {
+          sessionId: reconnect.sessionId,
+          projectId: PROJECT_ID,
+          conversationId: CONVERSATION_ID,
+          focusId: reconnectFocusId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId: reconnect.sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: reconnectFocusId,
+        messages: [],
+        window: completeConversationWindow,
+      });
+    });
+
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("unsent reconnect draft");
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toBeEnabled();
+    expect(socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "prompt",
+    )).toHaveLength(0);
+  });
+
+  it("carries an unsent draft owner across a second disconnect before attachment", () => {
+    const firstReconnect = beginUnsentDraftReconnect("draft across two reconnects");
+    const reconnect = replaceUnsentDraftReconnect(firstReconnect);
+    const reconnectFocusId = "ae301850-745d-44dd-a30f-000000000103";
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "focus_attached",
+        operation: "initialize",
+        commandId: reconnect.commandId!,
+        sessionId: reconnect.sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_ID,
+        focusId: reconnectFocusId,
+      });
+      socketMock.rawEmit?.({
+        type: "state",
+        state: {
+          sessionId: reconnect.sessionId,
+          projectId: PROJECT_ID,
+          conversationId: CONVERSATION_ID,
+          focusId: reconnectFocusId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId: reconnect.sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: reconnectFocusId,
+        messages: [],
+        window: completeConversationWindow,
+      });
+    });
+
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("draft across two reconnects");
+    expect(socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "prompt",
+    )).toHaveLength(0);
+  });
+
+  it.each([
+    ["project", "project-other", CONVERSATION_ID],
+    ["conversation", PROJECT_ID, CONVERSATION_B],
+  ])("clears a carried draft when the second reconnect attachment has a different %s", (
+    _identity,
+    attachedProjectId,
+    attachedConversationId,
+  ) => {
+    const firstReconnect = beginUnsentDraftReconnect("carried draft must not leak");
+    const reconnect = replaceUnsentDraftReconnect(firstReconnect);
+    const mismatchedFocusId = "ae301850-745d-44dd-a30f-000000000104";
+    const settledFocusId = _identity === "conversation"
+      ? "ae301850-745d-44dd-a30f-000000000105"
+      : mismatchedFocusId;
+    const settledProjectId = _identity === "project"
+      ? attachedProjectId
+      : PROJECT_ID;
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "focus_attached",
+        operation: "initialize",
+        commandId: reconnect.commandId!,
+        sessionId: reconnect.sessionId,
+        projectId: attachedProjectId,
+        conversationId: attachedConversationId,
+        focusId: mismatchedFocusId,
+      });
+      if (_identity === "conversation") {
+        socketMock.rawEmit?.({
+          type: "focus_attached",
+          operation: "initialize",
+          commandId: reconnect.commandId!,
+          sessionId: reconnect.sessionId,
+          projectId: PROJECT_ID,
+          conversationId: CONVERSATION_ID,
+          focusId: settledFocusId,
+        });
+      }
+      socketMock.rawEmit?.({
+        type: "state",
+        state: {
+          sessionId: reconnect.sessionId,
+          projectId: settledProjectId,
+          conversationId: CONVERSATION_ID,
+          focusId: settledFocusId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId: reconnect.sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: settledFocusId,
+        messages: [],
+        window: completeConversationWindow,
+      });
+    });
+
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("");
+    expect(socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "prompt",
+    )).toHaveLength(0);
+  });
+
+  it.each([
+    ["project", "project-other", CONVERSATION_ID],
+    ["conversation", PROJECT_ID, CONVERSATION_B],
+  ])("clears an unsent draft when the reconnect attachment has a different %s", (
+    _identity,
+    attachedProjectId,
+    attachedConversationId,
+  ) => {
+    const reconnect = beginUnsentDraftReconnect("must not cross focus authority");
+    const mismatchedFocusId = "ae301850-745d-44dd-a30f-000000000100";
+    const settledFocusId = _identity === "conversation"
+      ? "ae301850-745d-44dd-a30f-000000000101"
+      : mismatchedFocusId;
+    const settledProjectId = _identity === "project"
+      ? attachedProjectId
+      : PROJECT_ID;
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "focus_attached",
+        operation: "initialize",
+        commandId: reconnect.commandId!,
+        sessionId: reconnect.sessionId,
+        projectId: attachedProjectId,
+        conversationId: attachedConversationId,
+        focusId: mismatchedFocusId,
+      });
+      if (_identity === "conversation") {
+        socketMock.rawEmit?.({
+          type: "focus_attached",
+          operation: "initialize",
+          commandId: reconnect.commandId!,
+          sessionId: reconnect.sessionId,
+          projectId: PROJECT_ID,
+          conversationId: CONVERSATION_ID,
+          focusId: settledFocusId,
+        });
+      }
+      socketMock.rawEmit?.({
+        type: "state",
+        state: {
+          sessionId: reconnect.sessionId,
+          projectId: settledProjectId,
+          conversationId: CONVERSATION_ID,
+          focusId: settledFocusId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId: reconnect.sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: settledFocusId,
+        messages: [],
+        window: completeConversationWindow,
+      });
+    });
+
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("");
+    expect(socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "prompt",
+    )).toHaveLength(0);
+  });
+
   it("restores an unacknowledged prompt after reconnect without resending it", () => {
     render(<App />);
     const sessionId = startFromSetup();
@@ -4696,6 +4988,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     expect(latestCommand("prompt").sessionId).toBe(sessionId);
 
+    socketMock.autoFocus = false;
     act(() => socketMock.status?.(false));
     expect(input).toHaveValue("uncertain prompt");
     expect(screen.getByRole("alert")).toHaveTextContent("发送状态未确认");
@@ -4708,24 +5001,48 @@ describe("App", () => {
         startupCwd: "E:\\default",
       });
     });
-    const reconnectSessionId = latestSessionId();
-    expect(reconnectSessionId).not.toBe(sessionId);
-    act(() => socketMock.emit?.({
-      type: "state",
-      state: {
-        sessionId: reconnectSessionId,
-        cwd: "E:\\work",
-        busy: false,
-        thinkingLevel: "off",
-        toolMode: "full_access",
-        availableThinkingLevels: ["off"],
-        selectedModel: { provider: "provider", id: "model" },
-        providers: [],
-      },
-    }));
+    const reconnect = latestCommand("initialize");
+    const reconnectFocusId = "ae301850-745d-44dd-a30f-000000000102";
+    expect(reconnect.sessionId).not.toBe(sessionId);
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "focus_attached",
+        operation: "initialize",
+        commandId: reconnect.commandId!,
+        sessionId: reconnect.sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_ID,
+        focusId: reconnectFocusId,
+      });
+      socketMock.rawEmit?.({
+        type: "state",
+        state: {
+          sessionId: reconnect.sessionId,
+          projectId: PROJECT_ID,
+          conversationId: CONVERSATION_ID,
+          focusId: reconnectFocusId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId: reconnect.sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: reconnectFocusId,
+        messages: [],
+        window: completeConversationWindow,
+      });
+    });
 
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
       .toHaveValue("uncertain prompt");
+    expect(screen.getByRole("alert")).toHaveTextContent("发送状态未确认");
     expect(socketMock.send.mock.calls.filter(
       ([command]) => command.type === "prompt",
     )).toHaveLength(1);
@@ -6879,6 +7196,187 @@ describe("App", () => {
 
     expect(screen.getByRole("button", { name: "开启工作区" })).toBeEnabled();
     expect(screen.queryByText(/协议版本不兼容/)).not.toBeInTheDocument();
+  });
+
+  function startRunOwnershipCase(activeRunId?: string): string {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: Boolean(activeRunId),
+        ...(activeRunId
+          ? { activeRun: { id: activeRunId, phase: "running" as const } }
+          : {}),
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+    return sessionId;
+  }
+
+  function sendRunOwnershipPrompt(text: string) {
+    fireEvent.change(screen.getByRole("textbox", { name: "给 Pi 发送消息" }), {
+      target: { value: text },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    const prompt = latestCommand("prompt");
+    if (!prompt.promptId) throw new Error("promptId missing");
+    return { ...prompt, promptId: prompt.promptId };
+  }
+
+  it("keeps the active run as the STOP target before and after busy admission", () => {
+    const sessionId = startRunOwnershipCase(RUN_ID);
+    const followUp = sendRunOwnershipPrompt("busy follow-up");
+
+    fireEvent.click(screen.getByRole("button", { name: "停止" }));
+    expect(latestCommand("abort").runId).toBe(RUN_ID);
+
+    act(() => socketMock.emit?.({
+      type: "prompt_admitted",
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      promptId: followUp.promptId,
+      text: followUp.text,
+    }));
+    expect(screen.getByRole("region", { name: "等待处理的消息" }))
+      .toHaveTextContent("busy follow-up");
+
+    fireEvent.click(screen.getByRole("button", { name: "停止" }));
+    expect(socketMock.send.mock.calls
+      .map(([command]) => command)
+      .filter((command) => command.type === "abort")
+      .map((command) => command.runId))
+      .toEqual([RUN_ID, RUN_ID]);
+
+    act(() => socketMock.emit?.({
+      type: "session_event",
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      runId: RUN_ID,
+      event: { type: "run_finished", outcome: "aborted" },
+    }));
+    expect(screen.queryByRole("region", { name: "等待处理的消息" }))
+      .not.toBeInTheDocument();
+  });
+
+  it.each(["admission", "send failure"])(
+    "does not let a later follow-up replace a queued-only run owner after %s",
+    (outcome) => {
+      const sessionId = startRunOwnershipCase();
+      const initial = sendRunOwnershipPrompt("queued owner");
+      act(() => socketMock.emit?.({
+        type: "session_event",
+        sessionId,
+        runId: initial.runId,
+        event: { type: "run_queued" },
+      }));
+
+      if (outcome === "send failure") {
+        socketMock.send.mockReturnValueOnce(false);
+      }
+      const followUp = sendRunOwnershipPrompt("later follow-up");
+      if (outcome === "admission") {
+        act(() => socketMock.emit?.({
+          type: "prompt_admitted",
+          sessionId,
+          conversationId: CONVERSATION_ID,
+          focusId: FOCUS_A,
+          promptId: followUp.promptId,
+          text: followUp.text,
+        }));
+      }
+
+      fireEvent.click(screen.getByRole("button", { name: "停止" }));
+      expect(latestCommand("abort").runId).toBe(initial.runId);
+    },
+  );
+
+  it("uses the initial idle prompt as the STOP target before any run state acknowledgement", () => {
+    startRunOwnershipCase();
+    const initial = sendRunOwnershipPrompt("initial before state");
+
+    fireEvent.click(screen.getByRole("button", { name: "停止" }));
+    expect(latestCommand("abort").runId).toBe(initial.runId);
+  });
+
+  it("promotes an exact run_queued identity after the authoritative actor turns idle", () => {
+    const sessionId = startRunOwnershipCase(RUN_ID);
+    const promoted = sendRunOwnershipPrompt("promoted follow-up");
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.emit?.({
+        type: "session_event",
+        sessionId,
+        runId: promoted.runId,
+        event: { type: "run_queued" },
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "停止" }));
+    expect(latestCommand("abort").runId).toBe(promoted.runId);
+  });
+
+  it("keeps pending and run ownership through a stale admission", () => {
+    const sessionId = startRunOwnershipCase(RUN_ID);
+    const followUp = sendRunOwnershipPrompt("pending after stale admit");
+    act(() => socketMock.emit?.({
+      type: "prompt_admitted",
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      promptId: "c6716d07-bbc8-407d-8947-e777f41773ac",
+      text: "stale admitted row",
+    }));
+
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("pending after stale admit");
+    expect(screen.getByRole("region", { name: "等待处理的消息" }))
+      .toHaveTextContent("stale admitted row");
+    fireEvent.click(screen.getByRole("button", { name: "停止" }));
+    expect(latestCommand("abort").runId).toBe(RUN_ID);
+
+    act(() => {
+      socketMock.emit?.({
+        type: "prompt_admitted",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        promptId: followUp.promptId,
+        text: followUp.text,
+      });
+      socketMock.emit?.({
+        type: "session_event",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        runId: RUN_ID,
+        event: { type: "run_finished", outcome: "aborted" },
+      });
+    });
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("");
+    expect(screen.queryByRole("region", { name: "等待处理的消息" }))
+      .not.toBeInTheDocument();
   });
 
   it("admits a busy prompt with promptId and shows it as waiting until delivered", () => {

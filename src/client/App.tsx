@@ -274,6 +274,11 @@ interface PendingFocus {
   targetProjectId?: string;
   targetConversationId?: string;
   initializeConversationKind?: "recent" | "new" | "open";
+  reconnectDraftOwner?: {
+    workspaceKey: string;
+    projectId: string;
+    conversationId: string;
+  };
 }
 
 interface SupersededFocusCommand {
@@ -910,6 +915,7 @@ export function App() {
     conversationId: string | undefined,
     focusId: string | undefined,
     preservePresentation = false,
+    preserveDraft = false,
   ) => {
     updatePendingCompactionThreshold(undefined);
     updatePendingServiceTier(undefined);
@@ -942,7 +948,7 @@ export function App() {
     updateConversationReady(false);
     setSelectingRole(false);
     if (changedConversation) {
-      updateDraft("");
+      if (!preserveDraft) updateDraft("");
       setPromptNotice("");
       updatePendingPrompt(undefined);
       showPendingContextCompaction(focus);
@@ -972,6 +978,7 @@ export function App() {
     updateDraft("");
     setPromptNotice("");
     updatePendingPrompt(undefined);
+    updateOutstandingRunId(runId);
   };
   const markPendingPromptUnconfirmed = () => {
     const pending = pendingPromptRef.current;
@@ -1218,10 +1225,13 @@ export function App() {
         setProtocolReady(true);
         setSetupCwd((current) => current || event.startupCwd);
         if (activeCwdRef.current) {
+          const workspaceKey = currentWorkspaceKey();
+          const reconnectFocus = focusRef.current;
+          const replacedPendingFocus = pendingFocusRef.current;
           const previousConversationId = conversationIdRef.current;
           const cached = getWorkspaceProjection(
             workspaceProjectionCacheRef.current,
-            currentWorkspaceKey(),
+            workspaceKey,
           );
           let conversation: Extract<
             ClientCommand,
@@ -1240,6 +1250,26 @@ export function App() {
           } else {
             conversation = { kind: "recent" };
           }
+          const inheritedReconnectDraftOwner = replacedPendingFocus?.reconnectDraftOwner;
+          const reconnectDraftOwner = reconnectFocus
+            ? {
+                workspaceKey,
+                projectId: reconnectFocus.projectId,
+                conversationId: reconnectFocus.conversationId,
+              }
+            : replacedPendingFocus?.operation === "initialize"
+              && replacedPendingFocus.workspaceKey === workspaceKey
+              && inheritedReconnectDraftOwner
+              && inheritedReconnectDraftOwner.workspaceKey === workspaceKey
+              && conversation.kind === "open"
+              && conversation.conversationId === inheritedReconnectDraftOwner.conversationId
+              && (!cached || cached.projectId === inheritedReconnectDraftOwner.projectId)
+              ? {
+                  workspaceKey: inheritedReconnectDraftOwner.workspaceKey,
+                  projectId: inheritedReconnectDraftOwner.projectId,
+                  conversationId: inheritedReconnectDraftOwner.conversationId,
+                }
+              : undefined;
           const sessionId = crypto.randomUUID();
           const commandId = crypto.randomUUID();
           const timingIntent = {
@@ -1264,12 +1294,13 @@ export function App() {
           updatePendingFocus({
             commandId,
             operation: "initialize",
-            workspaceKey: currentWorkspaceKey(),
+            workspaceKey,
             initializeConversationKind: conversation.kind,
             ...(conversation.kind === "open"
               ? { targetConversationId: conversation.conversationId }
               : {}),
             ...(cached ? { cachedProjectId: cached.projectId } : {}),
+            ...(reconnectDraftOwner ? { reconnectDraftOwner } : {}),
           });
           const sent = socket.send({
             type: "initialize",
@@ -1447,6 +1478,23 @@ export function App() {
           setPendingFocus(nextPending);
           return;
         }
+        const correlatedReconnectDraftOwner =
+          pending?.operation === "initialize"
+          && event.operation === "initialize"
+          && pending.commandId === event.commandId
+          && pending.workspaceKey === currentWorkspaceKey()
+            ? pending.reconnectDraftOwner
+            : undefined;
+        if (
+          correlatedReconnectDraftOwner
+          && (
+            correlatedReconnectDraftOwner.workspaceKey !== currentWorkspaceKey()
+            || correlatedReconnectDraftOwner.projectId !== event.projectId
+            || correlatedReconnectDraftOwner.conversationId !== event.conversationId
+          )
+        ) {
+          updateDraft("");
+        }
         if (
           !pending
           || pending.commandId !== event.commandId
@@ -1497,12 +1545,19 @@ export function App() {
         });
         updatePendingFocus(undefined);
         updateConversationSyncing(event.operation === "focus_conversation");
+        const preserveReconnectDraft = Boolean(
+          correlatedReconnectDraftOwner
+          && correlatedReconnectDraftOwner.workspaceKey === pending.workspaceKey
+          && correlatedReconnectDraftOwner.projectId === event.projectId
+          && correlatedReconnectDraftOwner.conversationId === event.conversationId,
+        );
         attachFocus(
           event.sessionId,
           event.projectId,
           event.conversationId,
           event.focusId,
           Boolean(pending.cachedProjectId && !cachedProjectMismatch),
+          preserveReconnectDraft,
         );
         if (
           event.operation === "initialize"
@@ -1690,6 +1745,9 @@ export function App() {
           updateDraft("");
           setPromptNotice("");
           updatePendingPrompt(undefined);
+          if (outstandingRunIdRef.current === pending.runId) {
+            updateOutstandingRunId("");
+          }
         }
         addPendingAdmission({ promptId: event.promptId, text: event.text });
       } else if (event.type === "prompt_delivered") {
@@ -2524,6 +2582,7 @@ export function App() {
     const sessionId = sessionIdRef.current;
     const focus = focusRef.current;
     if (!sessionId || !focus || focus.sessionId !== sessionId) return false;
+    const knownRunOwnerId = state?.activeRun?.id || outstandingRunIdRef.current;
     const runId = crypto.randomUUID();
     const promptId = crypto.randomUUID();
     const pending: DirectPendingPrompt = {
@@ -2535,7 +2594,7 @@ export function App() {
     };
     setPromptNotice("");
     updatePendingPrompt(pending);
-    updateOutstandingRunId(runId);
+    if (!knownRunOwnerId) updateOutstandingRunId(runId);
     const ok = send({
       type: "prompt",
       sessionId,
@@ -2547,7 +2606,7 @@ export function App() {
     });
     if (!ok) {
       updatePendingPrompt(undefined);
-      updateOutstandingRunId("");
+      if (outstandingRunIdRef.current === runId) updateOutstandingRunId("");
       setPromptNotice("消息未发送，内容已保留，可以重试。");
     }
     return ok;
@@ -2567,7 +2626,7 @@ export function App() {
   };
   const abortCurrentRun = () => {
     if (!conversationReadyRef.current || pendingFocusRef.current) return;
-    const runId = outstandingRunIdRef.current || state?.activeRun?.id;
+    const runId = state?.activeRun?.id || outstandingRunIdRef.current;
     const sessionId = sessionIdRef.current;
     const focus = focusRef.current;
     if (sessionId && runId && focus) {
