@@ -31,6 +31,7 @@ import {
   appendReservedCustomEntry,
   createConversationCardEntry,
   createConversationMetaEntry,
+  createLoopListContinueEntry,
   createLoopListEntry,
   createServiceTierSelectionEntry,
   LEGACY_LOOP_LIST_CUSTOM_TYPE,
@@ -1818,6 +1819,57 @@ describe("ConversationActor", () => {
       event.type === "session_event"
       && (event.event.type === "run_started" || event.event.type === "run_finished")
     ))).toHaveLength(2);
+    await fixture.actor.dispose();
+  });
+
+  it("continues a recovered run after its latest persisted LoopList continuation", async () => {
+    const manager = SessionManager.inMemory(process.cwd(), { id: CONVERSATION_ID });
+    const items = [{
+      id: "recover",
+      text: "Continue after restart",
+      status: "active" as const,
+    }];
+    appendReservedCustomEntry(manager, createLoopListEntry({
+      items,
+      armed: true,
+      updatedAt: "2026-07-19T10:00:00.000Z",
+    }));
+    const previousContinuation = createLoopListContinueEntry({
+      runId: RUN_A,
+      continuation: 1,
+      items,
+    });
+    manager.appendCustomMessageEntry(
+      previousContinuation.customType,
+      previousContinuation.content,
+      previousContinuation.display,
+      previousContinuation.details,
+    );
+    const fixture = await openActor({ sessionManager: manager });
+    const todoWrite = fixture.runtime.createOptions?.workbenchCustomTools?.find(
+      ({ name }) => name === "todo_write",
+    );
+    const resumedTypes: string[] = [];
+    fixture.runtime.session.resumeImplementation = async (message) => {
+      resumedTypes.push(message.customType);
+      if (message.customType !== "piweb.loop_list_continue.v2") return;
+      expect(message.details).toMatchObject({
+        runId: RUN_A,
+        continuation: 2,
+        items,
+      });
+      await todoWrite?.execute("todo-complete", {
+        items: [{ ...items[0], status: "completed" }],
+      });
+    };
+
+    await expect(fixture.actor.resumeMessages({ runId: RUN_A })).resolves
+      .toMatchObject({ outcome: "completed" });
+
+    expect(resumedTypes).toEqual([
+      "workbench.inbox_resume.v1",
+      "piweb.loop_list_continue.v2",
+    ]);
     await fixture.actor.dispose();
   });
 

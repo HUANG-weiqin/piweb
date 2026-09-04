@@ -553,6 +553,22 @@ function branchThinkingLevel(
   return level;
 }
 
+function latestLoopListContinuationForRun(
+  entries: readonly unknown[],
+  runId: string,
+): number {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const reserved = parseReservedConversationEntry(entries[index]);
+    if (
+      reserved?.kind === "loop_list_continue"
+      && reserved.entry.details.runId === runId
+    ) {
+      return reserved.entry.details.continuation;
+    }
+  }
+  return 0;
+}
+
 /**
  * Owns exactly one persistent Pi conversation independently of any WebSocket.
  *
@@ -2381,7 +2397,12 @@ export class ConversationActor {
     this.emitSessionEvent(ticket, { type: "run_started" });
     this.emitActivity();
 
-    let loopListContinuationCount = 0;
+    let loopListContinuationCount = ticket.ownership.recovered
+      ? latestLoopListContinuationForRun(
+        this.sessionManager.getBranch(),
+        ticket.id,
+      )
+      : 0;
     let outcome: RunSettlement["outcome"] = "completed";
     let failure: unknown;
     try {
