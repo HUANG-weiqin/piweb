@@ -1955,13 +1955,14 @@ pre {
 
 .workspace-rail,
 .conversation-sidebar {
-  --rebel-black: #080807;
-  --rebel-raised: #121210;
-  --rebel-paper: #f0eadb;
-  --rebel-paper-muted: #b9b2a3;
-  --rebel-red: #e0221b;
-  --rebel-red-dark: #8d0f0c;
-  --rebel-line: rgb(240 234 219 / 24%);
+  --rebel-black: #171a1b;
+  --rebel-raised: #1d2222;
+  --rebel-paper: #d8d1c1;
+  --rebel-paper-muted: #ada596;
+  --rebel-on-oxide: #fff;
+  --rebel-red: #b94f43;
+  --rebel-red-dark: #71332e;
+  --rebel-line: rgb(216 209 193 / 22%);
 }
 
 .workspace-rail {
@@ -2057,7 +2058,7 @@ pre {
 }
 
 .workspace-rail-item.active {
-  color: var(--rebel-paper);
+  color: var(--rebel-on-oxide);
   background: transparent;
   box-shadow: none;
   transform: translateX(4px) rotate(-0.55deg);
@@ -2116,7 +2117,7 @@ pre {
 }
 
 .workspace-rail-item:not(.active) .workspace-rail-monogram {
-  color: #aaa398;
+  color: var(--rebel-paper-muted);
 }
 
 .workspace-rail-item:not(.active):hover .workspace-rail-monogram {
@@ -2192,7 +2193,7 @@ pre {
 
 .workspace-rail-close:not(:disabled):hover,
 .workspace-rail-close:not(:disabled):hover > span {
-  color: var(--rebel-paper);
+  color: var(--rebel-on-oxide);
   background: var(--rebel-red);
 }
 
@@ -2214,7 +2215,7 @@ pre {
   place-items: center;
   border: 2px solid var(--rebel-black);
   border-radius: 0;
-  color: var(--rebel-paper);
+  color: var(--rebel-on-oxide);
   background: var(--rebel-red);
   clip-path: polygon(3px 0, 100% 0, calc(100% - 2px) 100%, 0 calc(100% - 3px));
 }
@@ -2506,7 +2507,7 @@ pre {
 }
 
 .conversation-sidebar-toggle:not(:disabled):hover {
-  color: var(--rebel-paper);
+  color: var(--rebel-on-oxide);
   background: var(--rebel-red);
   transform: translateX(-2px) rotate(-1deg);
 }
@@ -2625,7 +2626,7 @@ pre {
 .conversation-sidebar-item.hierarchy-member
   .conversation-sidebar-conversation:not(:disabled):hover {
   color: inherit;
-  background: rgb(240 234 219 / 7%);
+  background: rgb(216 209 193 / 7%);
   transform: translateX(3px);
 }
 
@@ -2804,7 +2805,7 @@ pre {
 .conversation-activity-indicator.activity-cancelling {
   min-width: 30px;
   padding: 0 5px;
-  color: var(--rebel-paper);
+  color: var(--rebel-on-oxide);
   background: var(--rebel-red);
   clip-path: polygon(3px 0, 100% 1px, calc(100% - 3px) 100%, 0 calc(100% - 2px));
 }
@@ -2825,7 +2826,7 @@ pre {
   min-width: 36px;
   height: 18px;
   padding: 0 6px;
-  color: var(--rebel-paper);
+  color: var(--rebel-on-oxide);
   background: var(--rebel-red);
   box-shadow: 2px 2px 0 var(--rebel-black);
   clip-path: polygon(4px 0, 100% 2px, calc(100% - 4px) 100%, 0 calc(100% - 3px));
@@ -2939,7 +2940,7 @@ pre {
 }
 
 .conversation-sidebar-actions button:not(:disabled):hover {
-  color: var(--rebel-paper);
+  color: var(--rebel-on-oxide);
   background: var(--rebel-red);
 }
 
@@ -3115,9 +3116,13 @@ pre {
 }
 
 .conversation-sidebar-create:not(:disabled):hover {
-  color: var(--rebel-paper);
+  color: var(--rebel-on-oxide);
   background: var(--rebel-red);
   transform: translateX(2px) rotate(-0.5deg);
+}
+
+.conversation-sidebar-create:not(:disabled):hover > span:first-child {
+  color: var(--rebel-on-oxide);
 }
 
 @media (hover: none) {
@@ -3653,13 +3658,14 @@ pre {
 /* Rebel conversation identity and command-event timeline */
 
 .app-shell {
-  --rebel-black: #080807;
-  --rebel-raised: #141411;
-  --rebel-paper: #f0eadb;
-  --rebel-paper-muted: #aaa397;
-  --rebel-red: #e0221b;
-  --rebel-red-dark: #8d0f0c;
-  --rebel-line: #393832;
+  --rebel-black: #171a1b;
+  --rebel-raised: #202526;
+  --rebel-paper: #d8d1c1;
+  --rebel-paper-muted: #a39d91;
+  --rebel-on-oxide: #fff;
+  --rebel-red: #b94f43;
+  --rebel-red-dark: #71332e;
+  --rebel-line: #454b4b;
   isolation: isolate;
   background: var(--rebel-black);
 }
@@ -3704,7 +3710,7 @@ pre {
   width: 40px;
   height: 40px;
   border-radius: 0;
-  color: var(--rebel-paper);
+  color: var(--rebel-on-oxide);
   background: var(--rebel-red);
   clip-path: polygon(10% 0, 100% 12%, 86% 100%, 0 84%);
   font-family: Georgia, serif;
@@ -3843,14 +3849,14 @@ pre {
   align-content: center;
   justify-items: start;
   padding: 8px 13px 8px 17px;
-  color: var(--rebel-paper);
+  color: var(--rebel-on-oxide);
   background: var(--rebel-red);
   clip-path: polygon(8px 0, 100% 0, calc(100% - 9px) 100%, 0 calc(100% - 6px));
   transform: rotate(-1deg);
 }
 
 .topbar-conversation-status > span {
-  color: var(--rebel-black);
+  color: var(--rebel-on-oxide);
   font-family: "Cascadia Code", Consolas, monospace;
   font-size: 8px;
   font-weight: 950;
@@ -3982,7 +3988,7 @@ pre {
 }
 
 .transcript .message-event-header.is-running .message-event-state {
-  color: var(--rebel-paper);
+  color: var(--rebel-on-oxide);
   background: var(--rebel-red);
   clip-path: polygon(4px 0, 100% 0, calc(100% - 3px) 100%, 0 82%);
 }
@@ -4191,7 +4197,7 @@ pre {
 
 .transcript .activity-group-copy strong {
   padding: 4px 8px;
-  color: var(--rebel-paper);
+  color: var(--rebel-on-oxide);
   background: var(--rebel-red);
   clip-path: polygon(4px 0, 100% 0, calc(100% - 5px) 100%, 0 82%);
   font-family: "Cascadia Code", Consolas, monospace;
@@ -4209,7 +4215,7 @@ pre {
 
 .transcript .assistant-activity-group.is-active .activity-group-label,
 .transcript .assistant-activity-group.is-error .activity-group-label {
-  color: var(--rebel-red);
+  color: #d66a5a;
 }
 
 .transcript .activity-group-detail,
@@ -4238,7 +4244,7 @@ pre {
 }
 
 .transcript .assistant-activity-group.is-active .activity-group-status {
-  color: var(--rebel-red);
+  color: #d66a5a;
 }
 
 .transcript .assistant-activity-group.is-active .activity-group-status::after {
@@ -4250,7 +4256,7 @@ pre {
 }
 
 .transcript .assistant-activity-group.is-error .activity-group-status {
-  color: var(--rebel-red);
+  color: #d66a5a;
 }
 
 .transcript .assistant-activity-group.is-error .activity-group-status::after {
@@ -5409,18 +5415,18 @@ pre {
     margin: 3px 0;
     padding: 14px 10px;
     border-bottom: 0;
-    color: var(--rebel-paper);
+    color: var(--rebel-on-oxide);
     background: var(--rebel-red);
     clip-path: polygon(0 0, 100% 0, calc(100% - 9px) 100%, 0 100%);
   }
 
   .mission-objective.is-active .mission-objective-mark {
-    border-color: var(--rebel-paper);
-    background: var(--rebel-paper);
+    border-color: var(--rebel-on-oxide);
+    background: var(--rebel-on-oxide);
   }
 
   .mission-objective.is-active .mission-objective-copy small {
-    color: var(--rebel-black);
+    color: var(--rebel-on-oxide);
   }
 
   .mission-objective.is-completed {
@@ -5565,8 +5571,8 @@ pre {
 @media (prefers-color-scheme: dark) {
   :root {
     color: #e9e7df;
-    background: #12130f;
-    --canvas: #12130f;
+    background: #171a1b;
+    --canvas: #171a1b;
     --panel: #1b1c18;
     --panel-strong: #20211d;
     --soft: #282923;
@@ -6045,7 +6051,7 @@ pre {
   padding: 0 14px;
   border: 0;
   border-radius: 0;
-  color: var(--rebel-paper);
+  color: var(--rebel-on-oxide);
   background: var(--rebel-red);
   clip-path: polygon(8px 0, 100% 0, calc(100% - 7px) 100%, 0 100%);
   font-family: "Cascadia Code", Consolas, monospace;
@@ -6056,8 +6062,8 @@ pre {
 }
 
 .app-shell .send:not(:disabled):hover {
-  color: var(--rebel-paper);
-  background: color-mix(in srgb, var(--rebel-red) 88%, white);
+  color: var(--rebel-on-oxide);
+  background: color-mix(in srgb, var(--rebel-red) 88%, var(--rebel-paper));
 }
 
 .app-shell .send.stop {
@@ -6521,7 +6527,7 @@ pre {
 /* Gate 5: workbench shell and topbar integration */
 
 .workbench {
-  background: #080807;
+  background: #171a1b;
 }
 
 @media (min-width: 1921px) {
@@ -6593,8 +6599,8 @@ pre {
   height: 72px;
   padding: 0 10px 0 6px;
   background:
-    linear-gradient(104deg, rgb(224 34 27 / 13%) 0 84px, transparent 85px),
-    linear-gradient(90deg, rgb(20 20 17 / 88%), rgb(8 8 7 / 72%));
+    linear-gradient(104deg, rgb(185 79 67 / 13%) 0 84px, transparent 85px),
+    linear-gradient(90deg, rgb(32 37 38 / 88%), rgb(23 26 27 / 72%));
   box-shadow:
     inset 1px 0 var(--rebel-line),
     inset -1px 0 var(--rebel-line),
@@ -6868,13 +6874,14 @@ pre {
   .workspace-placeholder,
   .toast-stack
 ) {
-  --rebel-black: #080807;
-  --rebel-raised: #171714;
-  --rebel-paper: #f0eadb;
-  --rebel-paper-muted: #aaa397;
-  --rebel-red: #e0221b;
-  --rebel-red-dark: #8d0f0c;
-  --rebel-line: #393832;
+  --rebel-black: #171a1b;
+  --rebel-raised: #272d2d;
+  --rebel-paper: #d8d1c1;
+  --rebel-paper-muted: #a39d91;
+  --rebel-on-oxide: #fff;
+  --rebel-red: #b94f43;
+  --rebel-red-dark: #71332e;
+  --rebel-line: #454b4b;
 }
 
 /* Lifecycle pages are posters, not detached application cards. */
@@ -6886,7 +6893,7 @@ pre {
   color: var(--rebel-paper);
   background:
     linear-gradient(116deg, transparent 0 69%, var(--rebel-red-dark) 69% 71%, transparent 71%),
-    repeating-linear-gradient(135deg, rgb(255 255 255 / 2%) 0 1px, transparent 1px 13px),
+    repeating-linear-gradient(135deg, rgb(216 209 193 / 2%) 0 1px, transparent 1px 13px),
     var(--rebel-black);
 }
 
@@ -6936,7 +6943,7 @@ pre {
 .workspace-placeholder-mark {
   border: 0;
   border-radius: 0;
-  color: var(--rebel-paper);
+  color: var(--rebel-on-oxide);
   background: var(--rebel-red);
   box-shadow: 5px 5px 0 var(--rebel-black);
   clip-path: polygon(7px 0, 100% 5px, calc(100% - 5px) 100%, 0 calc(100% - 7px));
@@ -6983,7 +6990,7 @@ pre {
   border: 2px solid var(--rebel-black);
   border-radius: 0;
   color: var(--rebel-black);
-  background: #fffdf5;
+  background: color-mix(in srgb, var(--rebel-paper) 92%, white);
   box-shadow: none;
 }
 
@@ -7012,7 +7019,7 @@ pre {
 .setup-card button:not(:disabled):hover,
 .workspace-placeholder button:not(:disabled):hover,
 .role-selection-page button:not(:disabled):hover {
-  color: var(--rebel-paper);
+  color: var(--rebel-on-oxide);
   background: var(--rebel-red);
   box-shadow: 4px 4px 0 var(--rebel-black);
 }
@@ -7059,7 +7066,7 @@ pre {
 }
 
 .workspace-placeholder-mark.warning {
-  color: var(--rebel-paper);
+  color: var(--rebel-on-oxide);
   background: var(--rebel-red);
   font-family: Inter, sans-serif;
 }
@@ -7146,7 +7153,7 @@ pre {
 .role-card-add:not(:disabled):hover {
   border-color: var(--rebel-red);
   color: var(--rebel-black);
-  background: #fffdf5;
+  background: color-mix(in srgb, var(--rebel-paper) 92%, white);
   box-shadow: 8px 8px 0 var(--rebel-red);
   transform: translateY(-2px);
 }
@@ -7200,7 +7207,7 @@ pre {
 }
 
 .role-card-action:not(:disabled):hover {
-  color: var(--rebel-paper) !important;
+  color: var(--rebel-on-oxide) !important;
   background: var(--rebel-red) !important;
 }
 
@@ -7217,9 +7224,9 @@ pre {
   border-left: 3px solid var(--rebel-red);
   color: var(--rebel-paper);
   background:
-    repeating-linear-gradient(135deg, rgb(255 255 255 / 2%) 0 1px, transparent 1px 12px),
+    repeating-linear-gradient(135deg, rgb(216 209 193 / 2%) 0 1px, transparent 1px 12px),
     var(--rebel-black);
-  box-shadow: -14px 0 0 rgb(224 34 27 / 36%);
+  box-shadow: -14px 0 0 rgb(185 79 67 / 36%);
 }
 
 .drawer-header {
@@ -7261,7 +7268,7 @@ pre {
 }
 
 .drawer .icon-button:not(:disabled):hover {
-  color: var(--rebel-paper);
+  color: var(--rebel-on-oxide);
   background: var(--rebel-red);
 }
 
@@ -7307,7 +7314,7 @@ pre {
 .drawer .step-number {
   border: 0;
   border-radius: 0;
-  color: var(--rebel-paper);
+  color: var(--rebel-on-oxide);
   background: var(--rebel-red);
   clip-path: polygon(4px 0, 100% 2px, calc(100% - 3px) 100%, 0 calc(100% - 4px));
 }
@@ -7330,7 +7337,7 @@ pre {
 .drawer .provider-actions button:not(:disabled):hover,
 .drawer > button:not(:disabled):hover {
   border-color: var(--rebel-red);
-  color: var(--rebel-paper);
+  color: var(--rebel-on-oxide);
   background: var(--rebel-red);
 }
 
@@ -7444,7 +7451,7 @@ pre {
 }
 
 .modal .icon-button:not(:disabled):hover {
-  color: var(--rebel-paper);
+  color: var(--rebel-on-oxide);
   background: var(--rebel-red);
 }
 
@@ -7463,7 +7470,7 @@ pre {
 .modal button:not(:disabled):hover,
 .modal .primary-link:hover {
   border-color: var(--rebel-red);
-  color: var(--rebel-paper);
+  color: var(--rebel-on-oxide);
   background: var(--rebel-red);
   box-shadow: 3px 3px 0 var(--rebel-black);
 }
@@ -7490,7 +7497,7 @@ pre {
   border: 2px solid var(--rebel-black);
   border-radius: 0;
   color: var(--rebel-black);
-  background: #fffdf5;
+  background: color-mix(in srgb, var(--rebel-paper) 92%, white);
   box-shadow: none;
 }
 
@@ -7588,7 +7595,7 @@ pre {
 }
 
 .modal .role-capability-switch input:checked::after {
-  background: var(--rebel-paper);
+  background: var(--rebel-on-oxide);
 }
 
 .workspace-setup-dialog .setup-shell {
@@ -7648,7 +7655,7 @@ pre {
   border-radius: 0;
   color: var(--rebel-paper);
   background: var(--rebel-black);
-  box-shadow: 7px 7px 0 rgb(224 34 27 / 44%);
+  box-shadow: 7px 7px 0 rgb(185 79 67 / 44%);
   clip-path: polygon(0 3px, 100% 0, calc(100% - 5px) 100%, 3px 100%);
   font-family: "Cascadia Code", Consolas, monospace;
   font-size: 11px;
@@ -7811,7 +7818,7 @@ pre {
   }
 
   .toast {
-    box-shadow: 5px 5px 0 rgb(224 34 27 / 44%);
+    box-shadow: 5px 5px 0 rgb(185 79 67 / 44%);
   }
 
   .transition-status-overlay {
