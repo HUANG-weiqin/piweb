@@ -5599,7 +5599,7 @@ pre {
   }
 }
 
-@media (max-width: 600px) {
+@media (max-width: 960px) {
   .workbench {
     display: block;
   }
@@ -5685,7 +5685,9 @@ pre {
   .workspace-placeholder {
     margin-left: 52px;
   }
+}
 
+@media (max-width: 600px) {
   .role-selection-page {
     padding: 84px 16px 24px 62px;
   }
@@ -6438,10 +6440,104 @@ pre {
   }
 }
 
+@media (max-height: 900px) {
+  .app-shell > .composer-wrap:has(> .pending-admissions):has(> .loop-list .loop-list-items) .pending-admissions {
+    max-height: min(96px, 12dvh);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+  }
+
+  .app-shell > .composer-wrap:has(> .pending-admissions):has(> .loop-list .loop-list-items) .loop-list-items {
+    max-height: min(104px, 13dvh);
+  }
+}
+
+@media (max-width: 600px) and (max-height: 680px) {
+  .app-shell > .composer-wrap:has(> .pending-admissions):has(> .loop-list .loop-list-items) .pending-admissions {
+    max-height: 40px;
+  }
+
+  .app-shell > .composer-wrap:has(> .pending-admissions):has(> .loop-list .loop-list-items) .loop-list-items {
+    max-height: 20px;
+  }
+
+  .app-shell .composer-meta {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 82px 82px;
+  }
+
+  .app-shell .composer-meta .conversation-role-pill {
+    width: auto;
+    max-width: none;
+    min-height: 38px;
+    flex: none;
+    border-right: 1px solid var(--rebel-line);
+    border-bottom: 0;
+  }
+
+  .app-shell .composer-meta .thinking-level-control,
+  .app-shell .composer-meta .service-tier-control {
+    min-height: 38px;
+    display: grid;
+    grid-template-rows: auto 1fr;
+    gap: 1px;
+    padding: 2px 4px;
+    border-bottom: 0;
+  }
+
+  .app-shell .composer-meta .thinking-level-control select,
+  .app-shell .composer-meta .service-tier-control select {
+    width: 100%;
+    max-width: none;
+    min-height: 20px;
+    padding: 1px 15px 1px 3px;
+    font-size: 8px;
+  }
+
+  .app-shell .composer-meta .context-management {
+    grid-column: 1 / -1;
+    width: auto;
+    flex: none;
+  }
+
+  .app-shell .composer-meta .context-management-actions {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .app-shell .composer-meta .session-stats {
+    grid-row: auto;
+    grid-column: auto;
+    width: 100%;
+    min-width: 0;
+    overflow: hidden;
+    border-right: 1px solid var(--rebel-line);
+    border-bottom: 0;
+    font-size: 8px;
+    white-space: nowrap;
+  }
+}
+
 /* Gate 5: workbench shell and topbar integration */
 
 .workbench {
   background: #080807;
+}
+
+@media (min-width: 1921px) {
+  .workbench {
+    width: 1920px;
+    margin-right: auto;
+    margin-left: auto;
+  }
+
+  .drawer {
+    right: calc((100vw - 1920px) / 2);
+  }
+
+  .toast-stack {
+    right: calc((100vw - 1920px) / 2 + 20px);
+  }
 }
 
 .app-shell .topbar {
@@ -6638,7 +6734,7 @@ pre {
   }
 }
 
-@media (max-width: 600px) {
+@media (max-width: 960px) {
   .app-shell .topbar {
     height: 84px;
     grid-template-columns: minmax(0, 1fr) 58px;
