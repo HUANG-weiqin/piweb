@@ -292,6 +292,14 @@ function immutablePayload(envelope: InboxEnvelope): InboxEnvelopeInput {
   return payload;
 }
 
+export function inboxEnvelopePayloadFingerprint(
+  envelope: InboxEnvelope,
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify(immutablePayload(envelope)), "utf8")
+    .digest("hex");
+}
+
 function payloadsEqual(
   first: InboxEnvelope,
   second: InboxEnvelope,

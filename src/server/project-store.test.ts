@@ -21,6 +21,10 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CONVERSATION_META_CUSTOM_TYPE,
+  createConversationMessageEntry,
+  createMessageDeliveryReceiptEntry,
+  createRunSettlementEntry,
+  createTemporaryReturnReceiptEntry,
   type ConversationMeta,
 } from "./conversation-meta.js";
 import { ConversationNotebook } from "./conversation-notebook.js";
@@ -847,6 +851,177 @@ describe("ProjectStore", () => {
       { updateRecent: false },
     );
     expect(reopened.getEntries().map(({ id }) => id)).toEqual([retainedId]);
+  });
+
+  it("rewinds context while preserving delivery receipts and their exact run settlements", async () => {
+    const cwd = await createTemporaryDirectory("piweb-truncate-receipt-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversation = await store.createConversation();
+    const conversationId = conversation.getSessionId();
+    const retainedId = conversation.appendMessage({
+      role: "user",
+      content: "retained",
+      timestamp: 1,
+    });
+    const selectedId = conversation.appendMessage({
+      role: "user",
+      content: "rewind from here",
+      timestamp: 2,
+    });
+    const messageId = randomUUID();
+    const cardId = randomUUID();
+    const sourceConversationId = randomUUID();
+    const sourceRunId = randomUUID();
+    const targetRunId = randomUUID();
+    const incoming = createConversationMessageEntry({
+      content: "incoming marker that must be rewound",
+      display: true,
+      details: {
+        messageId,
+        cardId,
+        sentAt: "2026-01-01T00:01:00.000Z",
+        kind: "message",
+        body: "incoming marker that must be rewound",
+        fromSnapshot: {
+          conversationId: sourceConversationId,
+          role: { id: "default", name: "Sender" },
+        },
+        toSnapshot: {
+          conversationId,
+          role: { id: "default", name: "Recipient" },
+        },
+      },
+    });
+    conversation.appendCustomMessageEntry(
+      incoming.customType,
+      incoming.content,
+      incoming.display,
+      incoming.details,
+    );
+    const receipt = createMessageDeliveryReceiptEntry({
+      messageId,
+      cardId,
+      fromConversationId: sourceConversationId,
+      toConversationId: conversationId,
+      sourceRunId,
+      targetRunId,
+      kind: "message",
+      sentAt: incoming.details.sentAt,
+      payloadFingerprint: "a".repeat(64),
+      temporaryReturnAssignment: {
+        initialRunId: sourceRunId,
+        callerRunId: targetRunId,
+        assignedAt: "2026-01-01T00:01:30.000Z",
+      },
+      deliveredAt: "2026-01-01T00:02:00.000Z",
+    });
+    const receiptId = conversation.appendCustomEntry(
+      receipt.customType,
+      receipt.data,
+    );
+    const temporaryReceiptIdentity = {
+      temporaryConversationId: sourceConversationId,
+      initialRunId: sourceRunId,
+      messageId,
+      callerRunId: targetRunId,
+      claimedAt: receipt.data.temporaryReturnAssignment!.assignedAt,
+    };
+    const claimedTemporaryReceipt = createTemporaryReturnReceiptEntry({
+      ...temporaryReceiptIdentity,
+      state: "claimed",
+    });
+    const claimedTemporaryReceiptId = conversation.appendCustomEntry(
+      claimedTemporaryReceipt.customType,
+      claimedTemporaryReceipt.data,
+    );
+    const settledTemporaryReceipt = createTemporaryReturnReceiptEntry({
+      ...temporaryReceiptIdentity,
+      state: "settled",
+      settlement: {
+        runId: sourceRunId,
+        outcome: "completed",
+        finalText: "returned",
+        settledAt: "2026-01-01T00:02:30.000Z",
+        reportedAt: "2026-01-01T00:02:31.000Z",
+        returnMessageId: messageId,
+      },
+    });
+    const settledTemporaryReceiptId = conversation.appendCustomEntry(
+      settledTemporaryReceipt.customType,
+      settledTemporaryReceipt.data,
+    );
+    conversation.appendCustomEntry("test.unrelated", { keep: false });
+    const referencedSettlement = createRunSettlementEntry({
+      runId: targetRunId,
+      outcome: "completed",
+      finalText: "done",
+      settledAt: "2026-01-01T00:03:00.000Z",
+    });
+    const referencedSettlementId = conversation.appendCustomEntry(
+      referencedSettlement.customType,
+      referencedSettlement.data,
+    );
+    const unrelatedSettlement = createRunSettlementEntry({
+      runId: randomUUID(),
+      outcome: "completed",
+      finalText: "unrelated",
+      settledAt: "2026-01-01T00:04:00.000Z",
+    });
+    conversation.appendCustomEntry(
+      unrelatedSettlement.customType,
+      unrelatedSettlement.data,
+    );
+    const sessionFile = conversation.getSessionFile()!;
+    const before = (await readFile(sessionFile, "utf8"))
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+
+    await store.truncateConversation(conversationId, selectedId);
+
+    const persisted = (await readFile(sessionFile, "utf8"))
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(persisted.map(({ id }) => id)).toEqual([
+      conversation.getHeader()?.id,
+      retainedId,
+      receiptId,
+      claimedTemporaryReceiptId,
+      settledTemporaryReceiptId,
+      referencedSettlementId,
+    ]);
+    expect(persisted.find(({ id }) => id === receiptId)).toEqual({
+      ...before.find(({ id }) => id === receiptId),
+      parentId: retainedId,
+    });
+    expect(
+      persisted.find(({ id }) => id === claimedTemporaryReceiptId),
+    ).toEqual({
+      ...before.find(({ id }) => id === claimedTemporaryReceiptId),
+      parentId: receiptId,
+    });
+    expect(
+      persisted.find(({ id }) => id === settledTemporaryReceiptId),
+    ).toEqual({
+      ...before.find(({ id }) => id === settledTemporaryReceiptId),
+      parentId: claimedTemporaryReceiptId,
+    });
+    expect(persisted.find(({ id }) => id === referencedSettlementId)).toEqual({
+      ...before.find(({ id }) => id === referencedSettlementId),
+      parentId: settledTemporaryReceiptId,
+    });
+
+    const inspection = await store.inspectConversation(conversationId);
+    expect(inspection.deliveredMessageIds).toEqual([]);
+    expect(inspection.messageDeliveryReceipts).toEqual([receipt.data]);
+    expect(inspection.runSettlements).toEqual([referencedSettlement.data]);
+    const reopened = await store.openConversation(conversationId, {
+      updateRecent: false,
+    });
+    expect(reopened.buildSessionContext().messages).toEqual([
+      expect.objectContaining({ role: "user", content: "retained" }),
+    ]);
   });
 
   it("fails closed without rewriting when the truncation anchor is not a message", async () => {

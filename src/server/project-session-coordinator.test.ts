@@ -37,12 +37,14 @@ import {
   createConversationCardEntry,
   createConversationMessageEntry,
   createLoopListEntry,
+  createMessageDeliveryReceiptEntry,
   createMetaOperationEntry,
   createPendingPromptBatchEntry,
   createPendingPromptDeliveryEntry,
   createRunSettlementEntry,
   MAX_CONVERSATION_BODY_BYTES,
   RUN_SETTLEMENT_CUSTOM_TYPE,
+  TEMPORARY_RETURN_RECEIPT_CUSTOM_TYPE,
   type ConversationMeta,
   type RunSettlement,
 } from "./conversation-meta.js";
@@ -457,6 +459,57 @@ function blocksUntil(
       control.abortCurrent = undefined;
     }
   };
+}
+
+interface BlockedSourceRun {
+  runId: string;
+  completion: Promise<RunSettlement>;
+  release: Deferred<void>;
+}
+
+/** Run direct coordinator calls under the exact source-run admission boundary. */
+async function startBlockedSourceRun(
+  fixture: Fixture,
+  sourceConversationId: string,
+  promptText = "source work remains active",
+): Promise<BlockedSourceRun> {
+  const started = deferred();
+  const release = deferred();
+  fixture.runtime.control(sourceConversationId).enqueue(
+    blocksUntil(started, release),
+  );
+  const runId = randomUUID();
+  const completion = fixture.coordinator.prompt(
+    fixture.handle,
+    sourceConversationId,
+    runId,
+    promptText,
+  );
+  await started.promise;
+  return { runId, completion, release };
+}
+
+/** Admit one peer while its source owns an exact active run, then settle it. */
+async function startPeerFromActiveSource(
+  fixture: Fixture,
+  sourceConversationId: string,
+  input: StartPeerSessionInput,
+): Promise<{ conversationId: string; runId: string }> {
+  const sourceRun = await startBlockedSourceRun(
+    fixture,
+    sourceConversationId,
+    "admit one peer from an exact source run",
+  );
+  try {
+    return await fixture.coordinator.startPeerSession(
+      fixture.handle,
+      sourceConversationId,
+      { ...input, sourceRunId: sourceRun.runId },
+    );
+  } finally {
+    sourceRun.release.resolve();
+    await sourceRun.completion;
+  }
 }
 
 class FakeRuntime implements PiRuntimeLike {
@@ -1003,7 +1056,259 @@ describe("ProjectSessionCoordinator", () => {
     ]));
   });
 
-  it("starts a fresh hidden continuation for a reloaded browser target", async () => {
+  it.each(["idle", "fatal"] as const)(
+    "retains a receipt-only reload target for a known $0 actor",
+    async (state) => {
+      const fixture = await createFixture();
+      const actor = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const targetRunId = randomUUID();
+      appendReservedCustomEntry(
+        actor.sessionManager,
+        createMessageDeliveryReceiptEntry({
+          messageId: randomUUID(),
+          cardId: randomUUID(),
+          fromConversationId: randomUUID(),
+          toConversationId: actor.conversationId,
+          sourceRunId: randomUUID(),
+          targetRunId,
+          kind: "message",
+          sentAt: "2026-07-19T12:00:00.000Z",
+          payloadFingerprint: "a".repeat(64),
+          deliveredAt: "2026-07-19T12:00:01.000Z",
+        }),
+      );
+      if (state === "fatal") {
+        (actor as unknown as { fatalError: Error }).fatalError =
+          new Error("synthetic fatal actor");
+      }
+
+      const targets = await fixture.coordinator.prepareReload(
+        false,
+        () => undefined,
+      );
+      expect(targets).toEqual([{
+        cwd: fixture.cwd,
+        conversationId: actor.conversationId,
+        continueTask: false,
+      }]);
+      expect(actor.activeRunForReload()).toBeUndefined();
+      expect(actor.getActivity()).toEqual({ kind: "idle" });
+    },
+  );
+
+  it("retains a receipt-only reload target when aggregate inspection fails", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    vi.spyOn(fixture.handle.project, "inspectConversation")
+      .mockRejectedValue(new Error("aggregate inspection unavailable"));
+    await expect(fixture.coordinator.prepareReload(
+      false,
+      () => undefined,
+    )).resolves.toEqual([{
+      cwd: fixture.cwd,
+      conversationId: actor.conversationId,
+      continueTask: false,
+    }]);
+  });
+
+  it.each(["idle", "fatal"] as const)(
+    "freezes admission before force-reload durable discovery for a $0 actor",
+    async (state) => {
+      const fixture = await createFixture();
+      const receiptActor = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const sidecarTarget = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      if (state === "fatal") {
+        (receiptActor as unknown as { fatalError: Error }).fatalError =
+          new Error("synthetic fatal actor");
+      }
+      appendReservedCustomEntry(
+        receiptActor.sessionManager,
+        createMessageDeliveryReceiptEntry({
+          messageId: randomUUID(),
+          cardId: randomUUID(),
+          fromConversationId: randomUUID(),
+          toConversationId: receiptActor.conversationId,
+          sourceRunId: randomUUID(),
+          targetRunId: randomUUID(),
+          kind: "message",
+          sentAt: "2026-07-19T12:00:00.000Z",
+          payloadFingerprint: "d".repeat(64),
+          deliveredAt: "2026-07-19T12:00:01.000Z",
+        }),
+      );
+      const role = fixture.roles.getConversationRole("default");
+      const sidecarSource = randomUUID();
+      await coordinatorInbox(fixture.handle).put({
+        messageId: randomUUID(),
+        cardId: randomUUID(),
+        fromConversationId: sidecarSource,
+        toConversationId: sidecarTarget.conversationId,
+        sentAt: "2026-07-19T12:00:00.000Z",
+        kind: "message",
+        body: "force reload must discover this sidecar",
+        fromRunId: randomUUID(),
+        fromSnapshot: {
+          conversationId: sidecarSource,
+          role: { id: role.id, name: role.name },
+        },
+        toSnapshot: {
+          conversationId: sidecarTarget.conversationId,
+          role: { id: role.id, name: role.name },
+        },
+      });
+
+      const inbox = coordinatorInbox(fixture.handle);
+      const originalList = inbox.list.bind(inbox);
+      const enumerationStarted = deferred();
+      const releaseEnumeration = deferred();
+      inbox.list = async (...args) => {
+        enumerationStarted.resolve();
+        await releaseEnumeration.promise;
+        return originalList(...args);
+      };
+      let admissionFrozen = false;
+      let settled = false;
+      const preparing = fixture.coordinator.prepareReload(
+        true,
+        () => {
+          admissionFrozen = true;
+        },
+      ).then((targets) => {
+        settled = true;
+        return targets;
+      });
+      await waitUntil(() => admissionFrozen, "force reload admission freeze");
+      expect(settled).toBe(false);
+      await enumerationStarted.promise;
+      expect(settled).toBe(false);
+
+      releaseEnumeration.resolve();
+      await expect(preparing).resolves.toEqual([
+        {
+          cwd: fixture.cwd,
+          conversationId: receiptActor.conversationId,
+          continueTask: false,
+        },
+        {
+          cwd: fixture.cwd,
+          conversationId: sidecarTarget.conversationId,
+          continueTask: false,
+        },
+      ]);
+      inbox.list = originalList;
+    },
+  );
+
+  it("gates an actor-independent adopted reload callback on every durable receipt", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const adoptedRunId = randomUUID();
+    const pendingTargetRunId = randomUUID();
+    appendReservedCustomEntry(
+      actor.sessionManager,
+      createRunSettlementEntry({
+        runId: adoptedRunId,
+        outcome: "completed",
+        finalText: "adopted completion",
+        settledAt: "2026-07-19T12:00:00.000Z",
+      }),
+    );
+    appendReservedCustomEntry(
+      actor.sessionManager,
+      createMessageDeliveryReceiptEntry({
+        messageId: randomUUID(),
+        cardId: randomUUID(),
+        fromConversationId: randomUUID(),
+        toConversationId: actor.conversationId,
+        sourceRunId: randomUUID(),
+        targetRunId: pendingTargetRunId,
+        kind: "message",
+        sentAt: "2026-07-19T12:00:00.000Z",
+        payloadFingerprint: "b".repeat(64),
+        deliveredAt: "2026-07-19T12:00:01.000Z",
+      }),
+    );
+    const pendingStarted = deferred();
+    const releasePending = deferred();
+    fixture.runtime.control(actor.conversationId).enqueue(
+      blocksUntil(pendingStarted, releasePending, "later receipt run"),
+    );
+    const context = (fixture.handle as unknown as {
+      context: {
+        actors: Map<string, ConversationActor>;
+        actorUnsubscribes: Map<string, () => void>;
+        completions: Map<string, RunSettlement>;
+        reloadAdoptions: Map<string, unknown>;
+      };
+    }).context;
+    context.completions.delete(
+      `${actor.conversationId}\u0000${adoptedRunId}`,
+    );
+    const acknowledgement = deferred();
+    const onTargetCompleted = vi.fn(() => acknowledgement.promise);
+    const requestId = randomUUID();
+    await expect(fixture.coordinator.resumeAfterReload(
+      requestId,
+      [{
+        cwd: fixture.cwd,
+        conversationId: actor.conversationId,
+        continueTask: true,
+        continuationRunId: randomUUID(),
+        adoptedRunId,
+      }],
+      onTargetCompleted,
+    )).resolves.toEqual([{
+      cwd: fixture.cwd,
+      conversationId: actor.conversationId,
+      disposition: "adopted",
+      runId: adoptedRunId,
+    }]);
+    await pendingStarted.promise;
+    expect(onTargetCompleted).not.toHaveBeenCalled();
+
+    const unsubscribe = context.actorUnsubscribes.get(actor.conversationId);
+    unsubscribe?.();
+    context.actorUnsubscribes.delete(actor.conversationId);
+    context.actors.delete(actor.conversationId);
+    releasePending.resolve();
+    await waitUntil(
+      () => actor.getActivity().kind === "idle",
+      "the later receipt run to settle after actor eviction",
+    );
+    await actor.dispose();
+
+    await (fixture.coordinator as unknown as {
+      maybeCompleteReloadAdoption(
+        context: unknown,
+        conversationId: string,
+      ): Promise<void>;
+    }).maybeCompleteReloadAdoption(context, actor.conversationId);
+    await vi.waitFor(() => expect(onTargetCompleted).toHaveBeenCalledOnce());
+    expect(context.reloadAdoptions.has(actor.conversationId)).toBe(true);
+
+    acknowledgement.resolve();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    await vi.waitFor(() =>
+      expect(context.reloadAdoptions.has(actor.conversationId)).toBe(false),
+    );
+  });
+
+  it("starts a stable hidden continuation for a reloaded browser target", async () => {
     const fixture = await createFixture();
     const actor = await fixture.coordinator.createUserConversation(
       fixture.handle,
@@ -1011,19 +1316,151 @@ describe("ProjectSessionCoordinator", () => {
     );
     const continuation = vi.spyOn(actor, "startReloadContinuation")
       .mockReturnValue(new Promise<RunSettlement>(() => undefined));
+    const requestId = randomUUID();
+    const continuationRunId = randomUUID();
 
-    await expect(fixture.coordinator.resumeAfterReload([{
+    await expect(fixture.coordinator.resumeAfterReload(
+      requestId,
+      [{
+        cwd: fixture.cwd,
+        conversationId: actor.conversationId,
+        continueTask: true,
+        continuationRunId,
+      }],
+      async () => undefined,
+    )).resolves.toEqual([{
       cwd: fixture.cwd,
       conversationId: actor.conversationId,
-      continueTask: true,
-    }])).resolves.toEqual([]);
+      disposition: "adopted",
+      runId: continuationRunId,
+    }]);
 
     expect(continuation).toHaveBeenCalledOnce();
-    expect(continuation).toHaveBeenCalledWith(expect.any(String));
+    expect(continuation).toHaveBeenCalledWith({
+      requestId,
+      continuationRunId,
+    });
     await fixture.coordinator.close();
   });
 
-  it("only opens the project for a durable inbox reload target", async () => {
+  it("recovers an absorbed reload run from its exact durable marker", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const requestId = randomUUID();
+    const continuationRunId = randomUUID();
+    const adoptedRunId = randomUUID();
+    actor.sessionManager.appendCustomMessageEntry(
+      "workbench.reload_resume.v1",
+      "resume retained work",
+      false,
+      { requestId, continuationRunId, adoptedRunId },
+    );
+    appendReservedCustomEntry(
+      actor.sessionManager,
+      createRunSettlementEntry({
+        runId: adoptedRunId,
+        outcome: "completed",
+        finalText: "absorbed continuation settled",
+        settledAt: "2026-07-19T12:00:00.000Z",
+      }),
+    );
+    const acknowledgement = deferred();
+    const onTargetCompleted = vi.fn(() => acknowledgement.promise);
+    const standalone = vi.spyOn(actor, "startReloadContinuation");
+
+    await expect(fixture.coordinator.resumeAfterReload(
+      requestId,
+      [{
+        cwd: fixture.cwd,
+        conversationId: actor.conversationId,
+        continueTask: true,
+        continuationRunId,
+      }],
+      onTargetCompleted,
+    )).resolves.toEqual([{
+      cwd: fixture.cwd,
+      conversationId: actor.conversationId,
+      disposition: "adopted",
+      runId: adoptedRunId,
+    }]);
+    expect(standalone).not.toHaveBeenCalled();
+    expect(onTargetCompleted).toHaveBeenCalledWith({
+      requestId,
+      cwd: fixture.cwd,
+      conversationId: actor.conversationId,
+      runId: adoptedRunId,
+    });
+    acknowledgement.resolve();
+  });
+
+  it("holds settled browser reload ownership until completion acknowledgement", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const continuationRunId = randomUUID();
+    fixture.runtime.control(actor.conversationId).enqueue(async (control) => {
+      control.emitFinal("continuation already settled");
+    });
+    await expect(fixture.coordinator.prompt(
+      fixture.handle,
+      actor.conversationId,
+      continuationRunId,
+      "finish before the replacement process reports adoption",
+    )).resolves.toMatchObject({
+      runId: continuationRunId,
+      outcome: "completed",
+    });
+    const requestId = randomUUID();
+    const acknowledgement = deferred();
+    const onTargetCompleted = vi.fn(() => acknowledgement.promise);
+
+    await expect(fixture.coordinator.resumeAfterReload(
+      requestId,
+      [{
+        cwd: fixture.cwd,
+        conversationId: actor.conversationId,
+        continueTask: true,
+        continuationRunId,
+      }],
+      onTargetCompleted,
+    )).resolves.toEqual([{
+      cwd: fixture.cwd,
+      conversationId: actor.conversationId,
+      disposition: "adopted",
+      runId: continuationRunId,
+    }]);
+    expect(onTargetCompleted).toHaveBeenCalledWith({
+      requestId,
+      cwd: fixture.cwd,
+      conversationId: actor.conversationId,
+      runId: continuationRunId,
+    });
+    await expect(fixture.coordinator.truncateConversation(
+      fixture.handle,
+      actor.conversationId,
+      randomUUID(),
+    )).rejects.toThrow(
+      "Cannot rewind while reload completion acknowledgement is pending",
+    );
+    await expect(fixture.coordinator.deleteConversation(
+      fixture.handle,
+      actor.conversationId,
+    )).resolves.toBe(false);
+
+    acknowledgement.resolve();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    await expect(fixture.coordinator.deleteConversation(
+      fixture.handle,
+      actor.conversationId,
+    )).resolves.toBe(true);
+  });
+
+  it("completes a reload target that has no durable inbox work", async () => {
     const fixture = await createFixture();
     const actor = await fixture.coordinator.createUserConversation(
       fixture.handle,
@@ -1031,11 +1468,19 @@ describe("ProjectSessionCoordinator", () => {
     );
     const continuation = vi.spyOn(actor, "startReloadContinuation");
 
-    await expect(fixture.coordinator.resumeAfterReload([{
+    await expect(fixture.coordinator.resumeAfterReload(
+      randomUUID(),
+      [{
+        cwd: fixture.cwd,
+        conversationId: actor.conversationId,
+        continueTask: false,
+      }],
+      async () => undefined,
+    )).resolves.toEqual([{
       cwd: fixture.cwd,
       conversationId: actor.conversationId,
-      continueTask: false,
-    }])).resolves.toEqual([]);
+      disposition: "completed",
+    }]);
 
     expect(continuation).not.toHaveBeenCalled();
     await fixture.coordinator.close();
@@ -3413,6 +3858,10 @@ describe("ProjectSessionCoordinator", () => {
         fixture.handle,
         { roleId: "default" },
       );
+      const sourceRun = await startBlockedSourceRun(
+        fixture,
+        source.conversationId,
+      );
       Object.assign(fixture.runtime.availableModels[0]!, {
         api: "openai-codex-responses",
       });
@@ -3443,6 +3892,8 @@ describe("ProjectSessionCoordinator", () => {
       ).cards).toEqual([]);
       expect((await fixture.coordinator.listSessions(fixture.handle))
         .map(({ id }) => id)).toEqual([source.conversationId]);
+      sourceRun.release.resolve();
+      await sourceRun.completion;
     },
   );
 
@@ -3451,6 +3902,10 @@ describe("ProjectSessionCoordinator", () => {
     const source = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
+    );
+    const sourceRun = await startBlockedSourceRun(
+      fixture,
+      source.conversationId,
     );
     Object.assign(fixture.runtime.availableModels[0]!, {
       api: "openai-codex-responses",
@@ -3536,6 +3991,8 @@ describe("ProjectSessionCoordinator", () => {
     expect(settledRetry).toEqual(first);
     expect(fixture.runtime.control(first.conversationId).received).toHaveLength(1);
     expect(fixture.runtime.control(first.conversationId).abortCalls).toBe(0);
+    sourceRun.release.resolve();
+    await sourceRun.completion;
   });
 
   it("starts a peer from inside an active source turn without suspending the caller", async () => {
@@ -3613,6 +4070,14 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: "default", title: "Other coordinator" },
     );
+    const sourceRun = await startBlockedSourceRun(
+      fixture,
+      source.conversationId,
+    );
+    const otherAgentRun = await startBlockedSourceRun(
+      fixture,
+      otherAgent.conversationId,
+    );
     const ownTarget = await fixture.coordinator.startPeerSession(
       fixture.handle,
       source.conversationId,
@@ -3679,6 +4144,10 @@ describe("ProjectSessionCoordinator", () => {
     expect(owned.sessions.map(({ conversationId }) => conversationId))
       .toEqual([ownTarget.conversationId]);
 
+    sourceRun.release.resolve();
+    otherAgentRun.release.resolve();
+    await Promise.all([sourceRun.completion, otherAgentRun.completion]);
+
     await fixture.coordinator.close();
     const restarted = new ProjectSessionCoordinator(
       fixture.runtime,
@@ -3717,6 +4186,10 @@ describe("ProjectSessionCoordinator", () => {
     const source = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
+    );
+    const sourceRun = await startBlockedSourceRun(
+      fixture,
+      source.conversationId,
     );
     const targetCreationStarted = deferred<string>();
     const releaseTargetCreation = deferred();
@@ -3758,6 +4231,8 @@ describe("ProjectSessionCoordinator", () => {
       state: expect.stringMatching(/running|completed/),
       requestFingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
     });
+    sourceRun.release.resolve();
+    await sourceRun.completion;
   });
 
   it("creates an initial start_session inbox envelope already processing", async () => {
@@ -3765,6 +4240,10 @@ describe("ProjectSessionCoordinator", () => {
     const source = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
+    );
+    const sourceRun = await startBlockedSourceRun(
+      fixture,
+      source.conversationId,
     );
     const inbox = coordinatorInbox(fixture.handle);
     const replace = vi.spyOn(
@@ -3793,6 +4272,8 @@ describe("ProjectSessionCoordinator", () => {
         body: "atomically create processing inbox envelope",
       }),
     ]);
+    sourceRun.release.resolve();
+    await sourceRun.completion;
   });
 
   it("rolls back a new start_session target when inbox admission fails", async () => {
@@ -3800,6 +4281,10 @@ describe("ProjectSessionCoordinator", () => {
     const source = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
+    );
+    const sourceRun = await startBlockedSourceRun(
+      fixture,
+      source.conversationId,
     );
     const inbox = coordinatorInbox(fixture.handle);
     inbox.put = async () => {
@@ -3839,6 +4324,8 @@ describe("ProjectSessionCoordinator", () => {
       (await fixture.coordinator.listSessions(fixture.handle))
         .map(({ id }) => id),
     ).toEqual([source.conversationId]);
+    sourceRun.release.resolve();
+    await sourceRun.completion;
   });
 
   it("allows a browser run after a committed start_session inbox entry settles", async () => {
@@ -3846,6 +4333,10 @@ describe("ProjectSessionCoordinator", () => {
     const source = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
+    );
+    const sourceRun = await startBlockedSourceRun(
+      fixture,
+      source.conversationId,
     );
     fixture.runtime.nextSessionBehaviors.push([
       completesWith("delegation handled before browser admission"),
@@ -3886,6 +4377,8 @@ describe("ProjectSessionCoordinator", () => {
     expect(
       fixture.runtime.control(started.conversationId).received[0]?.content,
     ).toContain("run before the browser admission");
+    sourceRun.release.resolve();
+    await sourceRun.completion;
   });
 
   it("rejects start_session replays that change role, temporary mode, or title under the same idempotency key", async () => {
@@ -3893,6 +4386,10 @@ describe("ProjectSessionCoordinator", () => {
     const source = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
+    );
+    const sourceRun = await startBlockedSourceRun(
+      fixture,
+      source.conversationId,
     );
     const otherRole = await fixture.roles.createRole({
       name: "Different worker",
@@ -3946,6 +4443,8 @@ describe("ProjectSessionCoordinator", () => {
         ),
       });
     }
+    sourceRun.release.resolve();
+    await sourceRun.completion;
   });
 
   it("replays a failed start after restart with the precommitted role snapshot", async () => {
@@ -3953,6 +4452,10 @@ describe("ProjectSessionCoordinator", () => {
     const source = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
+    );
+    const sourceRun = await startBlockedSourceRun(
+      fixture,
+      source.conversationId,
     );
     const role = await fixture.roles.createRole({
       name: "Frozen worker",
@@ -4070,6 +4573,8 @@ describe("ProjectSessionCoordinator", () => {
       },
       state: expect.stringMatching(/running|completed/),
     });
+    sourceRun.release.resolve();
+    await sourceRun.completion;
   });
 
   it("keeps the user's durable recent conversation unchanged when an Agent starts a background session", async () => {
@@ -4077,6 +4582,10 @@ describe("ProjectSessionCoordinator", () => {
     const source = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default", title: "user focus" },
+    );
+    const sourceRun = await startBlockedSourceRun(
+      fixture,
+      source.conversationId,
     );
     expect(fixture.handle.project.lastConversationId).toBe(
       source.conversationId,
@@ -4098,6 +4607,8 @@ describe("ProjectSessionCoordinator", () => {
 
     const reopened = await ProjectStore.open(fixture.cwd, "full_access");
     expect(reopened.lastConversationId).toBe(source.conversationId);
+    sourceRun.release.resolve();
+    await sourceRun.completion;
   });
 
   it("captures a bounded preview title when an unnamed conversation sends a message", async () => {
@@ -4123,6 +4634,10 @@ describe("ProjectSessionCoordinator", () => {
     const displayTitle = "Investigate the renderi…";
     fixture.runtime.control(target.conversationId).enqueue(
       completesWith("message handled"),
+    );
+    const sourceRun = await startBlockedSourceRun(
+      fixture,
+      source.conversationId,
     );
 
     await executeTool(
@@ -4159,6 +4674,318 @@ describe("ProjectSessionCoordinator", () => {
         title: displayTitle,
       },
     });
+    sourceRun.release.resolve();
+    await sourceRun.completion;
+  });
+
+  it("releases target inbox capacity from durable receipts before run settlement", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const targetStarted = deferred();
+    const releaseTarget = deferred();
+    fixture.runtime.control(target.conversationId).enqueue(
+      blocksUntil(targetStarted, releaseTarget, "target settled"),
+    );
+    const targetRunId = randomUUID();
+    const targetCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      target.conversationId,
+      targetRunId,
+      "remain active while durable messages arrive",
+    );
+    await targetStarted.promise;
+
+    const firstBatchAdmitted = deferred();
+    const admitFinalMessage = deferred();
+    const finalMessageAdmitted = deferred<{
+      messageId: string;
+      status: string;
+    }>();
+    const releaseSource = deferred();
+    fixture.runtime.control(source.conversationId).enqueue(async (control) => {
+      try {
+        for (let index = 0; index < 64; index += 1) {
+          await executeTool(
+            control,
+            "send_session_message",
+            `receipt-capacity-${index}`,
+            {
+              conversationId: target.conversationId,
+              message: `durable capacity message ${index}`,
+            },
+          );
+        }
+        firstBatchAdmitted.resolve();
+        await admitFinalMessage.promise;
+        finalMessageAdmitted.resolve(await executeTool(
+          control,
+          "send_session_message",
+          "receipt-capacity-final",
+          {
+            conversationId: target.conversationId,
+            message: "the sixty-fifth message",
+          },
+        ) as { messageId: string; status: string });
+        await releaseSource.promise;
+        control.emitFinal("source settled");
+      } catch (error) {
+        firstBatchAdmitted.reject(error);
+        finalMessageAdmitted.reject(error);
+        throw error;
+      }
+    });
+    const sourceCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      source.conversationId,
+      randomUUID(),
+      "fill the target inbox",
+    );
+    await firstBatchAdmitted.promise;
+    expect(await coordinatorInbox(fixture.handle).list({
+      toConversationId: target.conversationId,
+    })).toHaveLength(64);
+
+    fixture.runtime.control(target.conversationId).beginNextModelTurn();
+    admitFinalMessage.resolve();
+    const finalMessage = await finalMessageAdmitted.promise;
+    expect(finalMessage).toMatchObject({
+      status: "queued",
+      messageId: expect.any(String),
+    });
+    const retained = await coordinatorInbox(fixture.handle).list({
+      toConversationId: target.conversationId,
+    });
+    expect(retained).toHaveLength(57);
+    expect(retained).toContainEqual(
+      expect.objectContaining({ messageId: finalMessage.messageId }),
+    );
+    expect(
+      aggregateReservedConversationEntries(
+        target.sessionManager.getEntries(),
+      ).messageDeliveryReceipts,
+    ).toHaveLength(8);
+
+    fixture.runtime.control(target.conversationId).beginNextModelTurn();
+    releaseTarget.resolve();
+    releaseSource.resolve();
+    await Promise.all([targetCompletion, sourceCompletion]);
+  }, 20_000);
+
+  it("projects ordinary cards at receipt but keeps delegation tasks running until settlement", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const ordinaryTarget = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const ordinaryStarted = deferred();
+    const releaseOrdinary = deferred();
+    fixture.runtime.control(ordinaryTarget.conversationId).enqueue(
+      blocksUntil(ordinaryStarted, releaseOrdinary, "ordinary settled"),
+    );
+    const childStarted = deferred();
+    const releaseChild = deferred();
+    fixture.runtime.nextSessionBehaviors.push([
+      blocksUntil(childStarted, releaseChild, "delegation settled"),
+    ]);
+    const deliveriesStarted = deferred();
+    const releaseSource = deferred();
+    let ordinaryMessageId = "";
+    let child:
+      | { conversationId: string; runId: string; temporary: boolean }
+      | undefined;
+    fixture.runtime.control(source.conversationId).enqueue(async (control) => {
+      const ordinary = await executeTool(
+        control,
+        "send_session_message",
+        "receipt-card-ordinary",
+        {
+          conversationId: ordinaryTarget.conversationId,
+          message: "ordinary receipt projection",
+        },
+      ) as { messageId: string };
+      ordinaryMessageId = ordinary.messageId;
+      child = await executeTool(
+        control,
+        "start_session",
+        "receipt-card-delegation",
+        {
+          roleId: "default",
+          task: "delegation receipt projection",
+          temporary: false,
+        },
+      ) as typeof child;
+      deliveriesStarted.resolve();
+      await releaseSource.promise;
+      control.emitFinal("source settled");
+    });
+    const sourceCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      source.conversationId,
+      randomUUID(),
+      "create both receipt projections",
+    );
+    await deliveriesStarted.promise;
+    await Promise.all([ordinaryStarted.promise, childStarted.promise]);
+    await waitUntil(
+      async () => (await coordinatorInbox(fixture.handle).list()).length === 0,
+      "both durable receipts to release their sidecars",
+    );
+
+    const cards = aggregateReservedConversationEntries(
+      source.sessionManager.getEntries(),
+    ).cards;
+    expect(cards.find(({ messageId }) => messageId === ordinaryMessageId))
+      .toMatchObject({ state: "delivered" });
+    expect(cards.find(({ toSnapshot }) =>
+      toSnapshot.conversationId === child!.conversationId
+    )).toMatchObject({
+      kind: "delegation_task",
+      state: "running",
+      runId: child!.runId,
+    });
+
+    releaseChild.resolve();
+    await waitUntil(
+      () => aggregateReservedConversationEntries(
+        source.sessionManager.getEntries(),
+      ).cards.some((card) =>
+        card.toSnapshot.conversationId === child!.conversationId
+        && card.state === "completed"
+      ),
+      "delegation settlement to complete the source card",
+    );
+    releaseOrdinary.resolve();
+    releaseSource.resolve();
+    await sourceCompletion;
+  });
+
+  it("retains a temporary return sidecar when claimed-receipt append fails", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const temporaryStarted = deferred();
+    const releaseTemporary = deferred();
+    fixture.runtime.nextSessionBehaviors.push([
+      blocksUntil(temporaryStarted, releaseTemporary, "temporary settled"),
+    ]);
+    const targetKnown = deferred<{ conversationId: string; runId: string }>();
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      await executeTool(
+        control,
+        "wait_for_session",
+        "temporary-receipt-append-failure-wait",
+        await targetKnown.promise,
+      );
+      control.beginNextModelTurn();
+      control.emitFinal("caller settled");
+    });
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      randomUUID(),
+      "wait for a temporary child",
+    );
+    await waitUntil(
+      () => caller.getActivity().kind === "running",
+      "the caller run to own the delegation",
+    );
+    const temporary = await fixture.coordinator.startPeerSession(
+      fixture.handle,
+      caller.conversationId,
+      startInput({
+        temporary: true,
+        idempotencyKey: "temporary-receipt-append-failure-child",
+      }),
+    );
+    targetKnown.resolve(temporary);
+    await temporaryStarted.promise;
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the caller to register its exact temporary wait",
+    );
+
+    const manager = caller.sessionManager as unknown as {
+      appendCustomEntry(customType: string, data: unknown): string;
+    };
+    const originalAppend = manager.appendCustomEntry.bind(manager);
+    manager.appendCustomEntry = (customType, data) => {
+      if (customType === TEMPORARY_RETURN_RECEIPT_CUSTOM_TYPE) {
+        throw new Error("simulated temporary receipt append failure");
+      }
+      return originalAppend(customType, data);
+    };
+    const idempotencyKey = "temporary-receipt-append-failure-message";
+    await expect(executeTool(
+      fixture.runtime.control(temporary.conversationId),
+      "send_session_message",
+      idempotencyKey,
+      {
+        conversationId: caller.conversationId,
+        message: "explicit return must remain durable",
+      },
+    )).rejects.toThrow("simulated temporary receipt append failure");
+
+    const retained = (await coordinatorInbox(fixture.handle).list({
+      toConversationId: caller.conversationId,
+    })).find(({ body }) => body === "explicit return must remain durable");
+    expect(retained).toMatchObject({
+      messageId: expect.any(String),
+      state: "queued",
+      fromRunId: temporary.runId,
+      temporaryReturnAssignment: {
+        initialRunId: temporary.runId,
+      },
+    });
+    await expect(executeTool(
+      fixture.runtime.control(temporary.conversationId),
+      "send_session_message",
+      "temporary-receipt-append-failure-second-message",
+      {
+        conversationId: caller.conversationId,
+        message: "a second message must not acquire the same wait",
+      },
+    )).rejects.toThrow("simulated temporary receipt append failure");
+    expect((await coordinatorInbox(fixture.handle).list({
+      toConversationId: caller.conversationId,
+    })).filter(({ temporaryReturnAssignment }) =>
+      temporaryReturnAssignment !== undefined
+    )).toHaveLength(1);
+    expect(
+      aggregateReservedConversationEntries(
+        caller.sessionManager.getEntries(),
+      ).temporaryReturnReceipts,
+    ).toEqual([]);
+    manager.appendCustomEntry = originalAppend;
+    await expect(executeTool(
+      fixture.runtime.control(temporary.conversationId),
+      "send_session_message",
+      idempotencyKey,
+      {
+        conversationId: caller.conversationId,
+        message: "explicit return must remain durable",
+      },
+    )).resolves.toMatchObject({ status: "queued" });
+    expect(
+      aggregateReservedConversationEntries(
+        caller.sessionManager.getEntries(),
+      ).temporaryReturnReceipts,
+    ).toHaveLength(1);
+
+    releaseTemporary.resolve();
+    await callerCompletion;
   });
 
   it("steers a durable message into a busy target's current run", async () => {
@@ -4167,6 +4994,7 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: "default" },
     );
+    await startBlockedSourceRun(fixture, source.conversationId);
     const target = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
@@ -4278,6 +5106,7 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: "default" },
     );
+    await startBlockedSourceRun(fixture, source.conversationId);
     const target = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
@@ -4343,6 +5172,7 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: "default" },
     );
+    await startBlockedSourceRun(fixture, source.conversationId);
     const target = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
@@ -4438,6 +5268,7 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: "default" },
     );
+    await startBlockedSourceRun(fixture, source.conversationId);
     const target = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
@@ -4515,6 +5346,7 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: "default" },
     );
+    await startBlockedSourceRun(fixture, source.conversationId);
     const target = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
@@ -4571,6 +5403,7 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: "default" },
     );
+    await startBlockedSourceRun(fixture, source.conversationId);
     const target = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: restrictedRole.id },
@@ -4606,6 +5439,7 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: "default" },
     );
+    await startBlockedSourceRun(fixture, source.conversationId);
     const target = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
@@ -4637,7 +5471,9 @@ describe("ProjectSessionCoordinator", () => {
       () => fixture.runtime.control(target.conversationId).received.length === 1,
       "the synchronous dispatch retry",
     );
-    expect(dispatchAttempts).toBe(2);
+    // A synchronous start failure replaces the actor before its bounded retry;
+    // the retry therefore runs through the replacement actor.
+    expect(dispatchAttempts).toBe(1);
     expect(
       fixture.runtime.control(target.conversationId).received[0]?.content,
     ).toContain("Retry this durable message");
@@ -4653,6 +5489,19 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: "default" },
     );
+    const targetStarted = deferred();
+    const releaseTarget = deferred();
+    fixture.runtime.control(target.conversationId).enqueue(
+      blocksUntil(targetStarted, releaseTarget, "release the idle batch target"),
+    );
+    const targetCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      target.conversationId,
+      randomUUID(),
+      "hold the target while the full batch is admitted",
+    );
+    await targetStarted.promise;
+
     const inbox = coordinatorInbox(fixture.handle);
     const firstMessageId = randomUUID();
     const secondMessageId = randomUUID();
@@ -4660,6 +5509,7 @@ describe("ProjectSessionCoordinator", () => {
       cardId: randomUUID(),
       fromConversationId: source.conversationId,
       toConversationId: target.conversationId,
+      fromRunId: randomUUID(),
       kind: "message" as const,
       fromSnapshot: {
         conversationId: source.conversationId,
@@ -4708,12 +5558,8 @@ describe("ProjectSessionCoordinator", () => {
       return originalUpdateState(messageId, update);
     };
 
-    await expect(fixture.coordinator.prompt(
-      fixture.handle,
-      target.conversationId,
-      randomUUID(),
-      "must wait behind the durable inbox batch",
-    )).rejects.toThrow("Durable conversation work was admitted");
+    releaseTarget.resolve();
+    await targetCompletion;
     await retryClaimStarted.promise;
 
     expect(starts).toBe(0);
@@ -4748,6 +5594,132 @@ describe("ProjectSessionCoordinator", () => {
     )).toEqual(["first", "second"]);
   });
 
+  it("keeps one claimed batch when a later running-card projection fails", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const sourceRun = await startBlockedSourceRun(
+      fixture,
+      source.conversationId,
+    );
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const targetStarted = deferred();
+    const releaseTarget = deferred();
+    fixture.runtime.control(target.conversationId).enqueue(
+      blocksUntil(targetStarted, releaseTarget, "release card projection batch"),
+    );
+    const targetCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      target.conversationId,
+      randomUUID(),
+      "hold target while the card projection batch is admitted",
+    );
+    await targetStarted.promise;
+
+    const role = fixture.roles.getConversationRole("default");
+    const fromSnapshot = {
+      conversationId: source.conversationId,
+      role: { id: role.id, name: role.name },
+    };
+    const toSnapshot = {
+      conversationId: target.conversationId,
+      role: { id: role.id, name: role.name },
+    };
+    const inbox = coordinatorInbox(fixture.handle);
+    const messages = [
+      {
+        messageId: randomUUID(),
+        cardId: randomUUID(),
+        sentAt: "2026-07-24T12:01:00.000Z",
+        body: "first card projection message",
+      },
+      {
+        messageId: randomUUID(),
+        cardId: randomUUID(),
+        sentAt: "2026-07-24T12:01:01.000Z",
+        body: "second card projection message",
+      },
+    ];
+    for (const message of messages) {
+      appendReservedCustomEntry(
+        source.sessionManager,
+        createConversationCardEntry({
+          messageId: message.messageId,
+          cardId: message.cardId,
+          body: message.body,
+          kind: "message",
+          fromSnapshot,
+          toSnapshot,
+          state: "queued",
+          updatedAt: message.sentAt,
+        }),
+      );
+      await inbox.put({
+        ...message,
+        fromConversationId: source.conversationId,
+        toConversationId: target.conversationId,
+        fromRunId: sourceRun.runId,
+        kind: "message",
+        fromSnapshot,
+        toSnapshot,
+      });
+    }
+
+    const manager = source.sessionManager;
+    const originalAppend = manager.appendCustomEntry.bind(manager);
+    let runningProjectionAttempts = 0;
+    manager.appendCustomEntry = (customType, data) => {
+      if (
+        customType === CONVERSATION_CARD_CUSTOM_TYPE
+        && typeof data === "object"
+        && data !== null
+        && "state" in data
+        && data.state === "running"
+      ) {
+        runningProjectionAttempts++;
+        if (runningProjectionAttempts === 2) {
+          throw new Error("second running-card projection failed");
+        }
+      }
+      return originalAppend(customType, data);
+    };
+    try {
+      releaseTarget.resolve();
+      await targetCompletion;
+      await waitUntil(
+        () => fixture.runtime.control(target.conversationId).received.length
+          === messages.length,
+        "the batch established before its card projection failure",
+      );
+    } finally {
+      manager.appendCustomEntry = originalAppend;
+    }
+
+    await waitUntil(async () => {
+      const cards = aggregateReservedConversationEntries(manager.getEntries())
+        .cards.filter(({ cardId }) =>
+          messages.some((message) => message.cardId === cardId)
+        );
+      return (await inbox.list({
+        toConversationId: target.conversationId,
+      })).length === 0
+        && cards.length === messages.length
+        && cards.every(({ state }) => state === "delivered");
+    }, "receipt-led repair after the running-card projection failure");
+    expect(runningProjectionAttempts).toBe(2);
+    expect(fixture.runtime.control(target.conversationId).received.map(
+      ({ content }) => messages.findIndex(({ body }) => content.includes(body)),
+    )).toEqual([0, 1]);
+
+    sourceRun.release.resolve();
+    await sourceRun.completion;
+  });
+
   it("preserves a recovered steering claim across synchronous dispatch rollback", async () => {
     const fixture = await createFixture();
     const source = await fixture.coordinator.createUserConversation(
@@ -4773,6 +5745,7 @@ describe("ProjectSessionCoordinator", () => {
     await started.promise;
     const control = fixture.runtime.control(target.conversationId);
     control.skipNextCustomMessagePersistence = true;
+    await startBlockedSourceRun(fixture, source.conversationId);
     const sent = await executeTool(
       fixture.runtime.control(source.conversationId),
       "send_session_message",
@@ -4803,14 +5776,16 @@ describe("ProjectSessionCoordinator", () => {
     release.resolve();
     await completion;
     await waitUntil(
-      () => dispatchAttempts >= 2,
-      "the bounded recovered dispatch retry",
+      async () => aggregateReservedConversationEntries(
+        fixture.runtime.control(target.conversationId).manager.getEntries(),
+      ).messageDeliveryReceipts.some((receipt) =>
+        receipt.messageId === sent.messageId
+        && receipt.targetRunId === recoveryRunId
+      ),
+      "the replacement actor's bounded recovered dispatch retry",
     );
-    await expect(inbox.get(sent.messageId)).resolves.toMatchObject({
-      state: "processing",
-      processingRunId: recoveryRunId,
-      processingDelivery: "steer",
-    });
+    expect(dispatchAttempts).toBe(1);
+    await expect(inbox.get(sent.messageId)).resolves.toBeUndefined();
   });
 
   it("retries one send_session_message tool call while running and after settlement without duplicate delivery", async () => {
@@ -4819,6 +5794,7 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: "default" },
     );
+    await startBlockedSourceRun(fixture, source.conversationId);
     const target = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
@@ -4856,7 +5832,12 @@ describe("ProjectSessionCoordinator", () => {
       "stable-send-tool-call",
       input,
     );
-    expect(runningRetry).toEqual(first);
+    expect(runningRetry).toEqual({
+      status: "delivered",
+      messageId: first.messageId,
+      conversationId: target.conversationId,
+      runId: first.runId,
+    });
     expect(fixture.runtime.control(target.conversationId).received).toHaveLength(1);
 
     release.resolve();
@@ -4886,7 +5867,7 @@ describe("ProjectSessionCoordinator", () => {
       runId: string;
     };
     expect(settledRetry).toEqual({
-      status: "completed",
+      status: "delivered",
       messageId: first.messageId,
       conversationId: target.conversationId,
       runId: first.runId,
@@ -4899,12 +5880,13 @@ describe("ProjectSessionCoordinator", () => {
     ).toEqual([first.messageId]);
   });
 
-  it("keeps the remaining processing batch and retries a failed terminal sidecar delete once", async () => {
+  it("cleans independent receipts around one retried sidecar delete", async () => {
     const fixture = await createFixture();
     const source = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
     );
+    await startBlockedSourceRun(fixture, source.conversationId);
     const target = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
@@ -4962,10 +5944,7 @@ describe("ProjectSessionCoordinator", () => {
       state: "processing",
       processingRunId: runId,
     });
-    await expect(inbox.get(third!.messageId)).resolves.toMatchObject({
-      state: "processing",
-      processingRunId: runId,
-    });
+    await expect(inbox.get(third!.messageId)).resolves.toBeUndefined();
     const context = (fixture.handle as unknown as {
       context: {
         processingBatches: Map<string, Array<{ messageId: string }>>;
@@ -4973,14 +5952,13 @@ describe("ProjectSessionCoordinator", () => {
     }).context;
     expect([...context.processingBatches.values()].flat().map(
       ({ messageId }) => messageId,
-    )).toEqual([second!.messageId, third!.messageId]);
+    )).toEqual([second!.messageId]);
     expect(
       aggregateReservedConversationEntries(source.sessionManager.getEntries())
         .cards.filter(({ messageId }) => messageId === first!.messageId),
     ).toEqual([expect.objectContaining({
-      state: "completed",
+      state: "delivered",
       runId,
-      result: "the original run settled",
     })]);
 
     releaseRetrySecondDelete.resolve();
@@ -5001,15 +5979,13 @@ describe("ProjectSessionCoordinator", () => {
     ).toEqual([
       expect.objectContaining({
         messageId: second!.messageId,
-        state: "completed",
+        state: "delivered",
         runId,
-        result: "the original run settled",
       }),
       expect.objectContaining({
         messageId: third!.messageId,
-        state: "completed",
+        state: "delivered",
         runId,
-        result: "the original run settled",
       }),
     ]);
 
@@ -5030,12 +6006,13 @@ describe("ProjectSessionCoordinator", () => {
     );
   });
 
-  it("persists the terminal sender card before deleting its sidecar so restart can repair an append failure", async () => {
+  it("releases a delivered sidecar and repairs its card without reopening the source model", async () => {
     const fixture = await createFixture();
     const source = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
     );
+    await startBlockedSourceRun(fixture, source.conversationId);
     const target = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
@@ -5054,10 +6031,10 @@ describe("ProjectSessionCoordinator", () => {
         && typeof data === "object"
         && data !== null
         && "state" in data
-        && data.state === "completed"
+        && data.state === "delivered"
       ) {
         terminalAppendFailures++;
-        throw new Error("simulated terminal card append failure");
+        throw new Error("simulated delivered card append failure");
       }
       return originalAppend(customType, data);
     };
@@ -5075,25 +6052,29 @@ describe("ProjectSessionCoordinator", () => {
         "terminal-card-before-delete",
         {
           conversationId: target.conversationId,
-          message: "preserve this sidecar until sender state is durable",
+          message: "repair this projection without retaining its sidecar",
         },
       ) as typeof sent;
       await waitUntil(
         () => terminalAppendFailures === 2,
-        "the exhausted terminal sender-card append retry",
+        "the exhausted delivered-card projection retries",
       );
     } finally {
       manager.appendCustomEntry = originalAppend;
     }
 
     expect(await coordinatorInbox(fixture.handle).get(sent.messageId))
-      .toMatchObject({
-        messageId: sent.messageId,
-        state: "processing",
-        processingRunId: sent.runId,
-      });
+      .toBeUndefined();
+    const sourceSessionStarts = fixture.runtime.createConversationIds.filter(
+      (conversationId) => conversationId === source.conversationId,
+    ).length;
 
     await fixture.coordinator.close();
+    fixture.runtime.beforeCreateSession = async (conversationId) => {
+      if (conversationId === source.conversationId) {
+        throw new Error("source model cannot start during projection repair");
+      }
+    };
     const restarted = new ProjectSessionCoordinator(
       fixture.runtime,
       fixture.roles,
@@ -5117,86 +6098,14 @@ describe("ProjectSessionCoordinator", () => {
             source.sessionManager.getEntries(),
           ).cards.find(({ messageId }) => messageId === sent.messageId)?.cardId,
       );
-      return terminal?.state === "completed"
+      return terminal?.state === "delivered"
         && terminal.runId === sent.runId
         && await coordinatorInbox(restartedHandle).get(sent.messageId)
           === undefined;
-    }, "restart repair of the terminal sender card");
-  });
-
-  it("writes the terminal sender card without starting an unavailable source model", async () => {
-    const fixture = await createFixture();
-    const source = await fixture.coordinator.createUserConversation(
-      fixture.handle,
-      { roleId: "default" },
-    );
-    const target = await fixture.coordinator.createUserConversation(
-      fixture.handle,
-      { roleId: "default" },
-    );
-    const targetStarted = deferred();
-    const releaseTarget = deferred();
-    fixture.runtime.control(target.conversationId).enqueue(
-      blocksUntil(
-        targetStarted,
-        releaseTarget,
-        "terminal state survives an unavailable source model",
-      ),
-    );
-    const sent = await executeTool(
-      fixture.runtime.control(source.conversationId),
-      "send_session_message",
-      "source-model-unavailable-at-finish",
-      {
-        conversationId: target.conversationId,
-        message: "finish this after my source actor is detached",
-      },
-    ) as {
-      messageId: string;
-      runId: string;
-    };
-    await targetStarted.promise;
-
-    const context = (fixture.handle as unknown as {
-      context: {
-        actors: Map<string, typeof source>;
-        actorUnsubscribes: Map<string, () => void>;
-      };
-    }).context;
-    context.actorUnsubscribes.get(source.conversationId)?.();
-    context.actorUnsubscribes.delete(source.conversationId);
-    context.actors.delete(source.conversationId);
-    await source.dispose();
-    fixture.runtime.beforeCreateSession = async (conversationId) => {
-      if (conversationId === source.conversationId) {
-        throw new Error("source model cannot start");
-      }
-    };
-
-    releaseTarget.resolve();
-    await waitUntil(
-      async () =>
-        await coordinatorInbox(fixture.handle).get(sent.messageId)
-          === undefined,
-      "terminal sender state before inbox cleanup",
-    );
-    const inspection = await fixture.handle.project.inspectConversation(
-      source.conversationId,
-    );
-    expect(
-      inspection.cards.find(({ messageId }) =>
-        messageId === sent.messageId
-      ),
-    ).toMatchObject({
-      state: "completed",
-      runId: sent.runId,
-      result: "terminal state survives an unavailable source model",
-    });
-    expect(
-      fixture.runtime.createConversationIds.filter(
-        (conversationId) => conversationId === source.conversationId,
-      ),
-    ).toHaveLength(1);
+    }, "restart repair of the delivered sender card");
+    expect(fixture.runtime.createConversationIds.filter(
+      (conversationId) => conversationId === source.conversationId,
+    )).toHaveLength(sourceSessionStarts);
   });
 
   it("repairs the same sender card after inbox commit wins over the queued-card append", async () => {
@@ -5205,6 +6114,7 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: "default" },
     );
+    await startBlockedSourceRun(fixture, source.conversationId);
     const target = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
@@ -5260,12 +6170,16 @@ describe("ProjectSessionCoordinator", () => {
       fixture.cwd,
       "full_access",
     );
-    await waitUntil(
-      async () =>
-        await coordinatorInbox(fixture.handle).get(pending!.messageId)
-          === undefined,
-      "recovered inbox delivery and sender card",
-    );
+    await waitUntil(async () => {
+      const inspection = await fixture.handle.project.inspectConversation(
+        source.conversationId,
+      );
+      return await coordinatorInbox(fixture.handle).get(pending!.messageId)
+          === undefined
+        && inspection.cards.some(({ cardId, state }) =>
+          cardId === pending!.cardId && state === "delivered"
+        );
+    }, "recovered inbox delivery and sender card");
     const inspection = await fixture.handle.project.inspectConversation(
       source.conversationId,
     );
@@ -5273,8 +6187,7 @@ describe("ProjectSessionCoordinator", () => {
       inspection.cards.find(({ cardId }) => cardId === pending!.cardId),
     ).toMatchObject({
       cardId: pending!.cardId,
-      state: "completed",
-      result: "ok",
+      state: "delivered",
     });
     expect(
       inspection.cards.filter(({ cardId }) => cardId === pending!.cardId),
@@ -5878,9 +6791,19 @@ describe("ProjectSessionCoordinator", () => {
     );
     await childStarted.promise;
 
+    const backlogSourceRun = await startBlockedSourceRun(
+      fixture,
+      backlogSender.conversationId,
+      "send the ordered backlog",
+    );
+    const callerAtGate = deferred();
+    const beginWait = deferred();
     const waitResolved = deferred();
     const releaseCaller = deferred();
     fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      callerAtGate.resolve();
+      await beginWait.promise;
+      control.beginNextModelTurn();
       await executeTool(
         control,
         "wait_for_session",
@@ -5899,13 +6822,13 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       caller.conversationId,
       callerRunId,
-      "wait while other peer messages arrive",
+      "consume one full steer batch before waiting",
     );
-    await waitUntil(
-      () => caller.getActivity().kind === "waiting",
-      "the caller wait before the ordered backlog",
-    );
+    await callerAtGate.promise;
 
+    let admissionTime = Date.now();
+    (fixture.coordinator as unknown as { now: () => Date }).now = () =>
+      new Date(admissionTime++);
     const batchSize = 8;
     for (let index = 1; index <= batchSize + 1; index++) {
       await executeTool(
@@ -5918,6 +6841,11 @@ describe("ProjectSessionCoordinator", () => {
         },
       );
     }
+    beginWait.resolve();
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the caller wait behind the ordered backlog",
+    );
     await expect(executeTool(
       fixture.runtime.control(child.conversationId),
       "send_session_message",
@@ -5929,12 +6857,17 @@ describe("ProjectSessionCoordinator", () => {
     )).resolves.toMatchObject({ status: "delivered_to_wait" });
     await waitResolved.promise;
 
+    const firstBatch = fixture.runtime.control(caller.conversationId)
+      .modelRequestCustomMessages[0];
+    expect(firstBatch).toHaveLength(batchSize);
+    expect(firstBatch?.[0]?.content).toContain("ordered backlog 1");
+    expect(firstBatch?.[batchSize - 1]?.content)
+      .toContain(`ordered backlog ${batchSize}`);
     const steers = fixture.runtime.control(caller.conversationId).pendingSteers;
-    expect(steers).toHaveLength(batchSize + 2);
-    expect(steers[batchSize]?.content)
+    expect(steers).toHaveLength(2);
+    expect(steers[0]?.content)
       .toContain(`ordered backlog ${batchSize + 1}`);
-    expect(steers[batchSize + 1]?.content)
-      .toContain("ordered exact wait reply");
+    expect(steers[1]?.content).toContain("ordered exact wait reply");
     expect(await coordinatorInbox(fixture.handle).list({
       toConversationId: caller.conversationId,
     })).toEqual(expect.arrayContaining([
@@ -5952,6 +6885,8 @@ describe("ProjectSessionCoordinator", () => {
 
     releaseCaller.resolve();
     await callerCompletion;
+    backlogSourceRun.release.resolve();
+    await backlogSourceRun.completion;
     releaseChild.resolve();
     await childCompletion;
   });
@@ -6061,9 +6996,9 @@ describe("ProjectSessionCoordinator", () => {
     expect(
       fixture.runtime.control(caller.conversationId).received[0]?.content,
     ).toContain("Reply while the child keeps working.");
-    expect((await coordinatorInbox(fixture.handle).list({
+    await waitUntil(async () => (await coordinatorInbox(fixture.handle).list({
       toConversationId: caller.conversationId,
-    }))).toHaveLength(0);
+    })).length === 0, "the exact-wait receipt sidecar cleanup");
 
     releaseChild.resolve();
     await expect(childCompletion).resolves.toMatchObject({
@@ -6537,6 +7472,11 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: "default" },
     );
+    const callerSourceRun = await startBlockedSourceRun(
+      fixture,
+      caller.conversationId,
+      "admit the temporary run before the unrelated wait",
+    );
     const temporaryStarted = deferred();
     const releaseTemporary = deferred();
     fixture.runtime.nextSessionBehaviors.push([
@@ -6551,6 +7491,8 @@ describe("ProjectSessionCoordinator", () => {
       }),
     );
     await temporaryStarted.promise;
+    callerSourceRun.release.resolve();
+    await callerSourceRun.completion;
     const messengerStarted = deferred();
     const releaseMessenger = deferred();
     const messenger = await fixture.coordinator.createUserConversation(
@@ -7407,6 +8349,11 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: "default" },
     );
+    const backlogSourceRun = await startBlockedSourceRun(
+      fixture,
+      backlogSender.conversationId,
+      "send the rejected through-drain backlog",
+    );
     const messengerStarted = deferred();
     const releaseMessenger = deferred();
     const messenger = await fixture.coordinator.createUserConversation(
@@ -7533,14 +8480,11 @@ describe("ProjectSessionCoordinator", () => {
     const inboxAfter = await coordinatorInbox(fixture.handle).list({
       toConversationId: caller.conversationId,
     });
-    expect(inboxAfter[batchSize]).toMatchObject({
-      body: `through predecessor ${batchSize + 1}`,
-      state: "queued",
-    });
-    expect(inboxAfter[batchSize + 1]).toMatchObject({
-      body: "wake message",
-      state: "queued",
-    });
+    expect(inboxAfter.find(({ body }) =>
+      body === `through predecessor ${batchSize + 1}`
+    )).toMatchObject({ state: "queued" });
+    expect(inboxAfter.find(({ body }) => body === "wake message"))
+      .toMatchObject({ state: "queued" });
     expect(
       (fixture.handle as unknown as {
         context: { waiters: Map<string, unknown> };
@@ -7566,6 +8510,8 @@ describe("ProjectSessionCoordinator", () => {
     );
     callerSession.sendCustomMessage = originalSend;
 
+    backlogSourceRun.release.resolve();
+    await backlogSourceRun.completion;
     releaseMessenger.resolve();
     await expect(messengerCompletion).resolves.toMatchObject({
       outcome: "completed",
@@ -7671,7 +8617,7 @@ describe("ProjectSessionCoordinator", () => {
     });
   });
 
-  it("rejects an exact wait if its sender-card projection cannot be appended", async () => {
+  it("does not let sender-card projection failure reject an exact wait or retain transport", async () => {
     const fixture = await createFixture();
     const caller = await fixture.coordinator.createUserConversation(
       fixture.handle,
@@ -7695,24 +8641,21 @@ describe("ProjectSessionCoordinator", () => {
     );
     await peerStarted.promise;
 
-    const waitRejected = deferred();
+    const waitResolved = deferred();
     const releaseCaller = deferred();
-    let waitError: unknown;
+    let waitResult: unknown;
     fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
-      try {
-        await executeTool(
-          control,
-          "wait_for_session",
-          "wait-for-card-append-failure",
-          {
-            conversationId: peer.conversationId,
-            runId: peerRunId,
-          },
-        );
-      } catch (error) {
-        waitError = error;
-        waitRejected.resolve();
-      }
+      waitResult = await executeTool(
+        control,
+        "wait_for_session",
+        "wait-for-card-append-failure",
+        {
+          conversationId: peer.conversationId,
+          runId: peerRunId,
+        },
+      );
+      control.beginNextModelTurn();
+      waitResolved.resolve();
       await releaseCaller.promise;
       control.emitFinal("caller recovered from projection failure");
     });
@@ -7745,7 +8688,7 @@ describe("ProjectSessionCoordinator", () => {
       return originalAppend(customType, data);
     };
 
-    await expect(executeTool(
+    const sent = await executeTool(
       fixture.runtime.control(peer.conversationId),
       "send_session_message",
       "reply-with-card-append-failure",
@@ -7753,41 +8696,30 @@ describe("ProjectSessionCoordinator", () => {
         conversationId: caller.conversationId,
         message: "the wait must settle even if projection fails",
       },
-    )).rejects.toThrow("simulated delivered-card append failure");
-    await waitRejected.promise;
-    expect(waitError).toMatchObject({
-      message: expect.stringContaining("delivered-card append failure"),
+    ) as { messageId: string };
+    expect(sent).toMatchObject({ status: "delivered_to_wait" });
+    await waitResolved.promise;
+    expect(waitResult).toMatchObject({
+      outcome: "message",
+      conversationId: peer.conversationId,
+      runId: peerRunId,
+      messageId: sent.messageId,
     });
-    expect(caller.getActivity().kind).toBe("running");
-    expect(await coordinatorInbox(fixture.handle).list({
-      toConversationId: caller.conversationId,
-    })).toContainEqual(expect.objectContaining({
-      waitedByRunId: callerRunId,
-    }));
-
-    const retryAbort = new AbortController();
-    const retryWait = executeTool(
-      fixture.runtime.control(caller.conversationId),
-      "wait_for_session",
-      "retry-after-card-append-failure",
-      {
-        conversationId: peer.conversationId,
-        runId: peerRunId,
-      },
-      retryAbort.signal,
-    );
-    await waitUntil(
-      () => caller.getActivity().kind === "waiting",
-      "a retry to skip the already consumed message",
-    );
-    const retryRejected = expect(retryWait).rejects.toMatchObject({
-      name: "AbortError",
-    });
-    retryAbort.abort();
-    await retryRejected;
-
     releaseCaller.resolve();
     await callerCompletion;
+    await waitUntil(
+      () => !rejectDeliveredCard,
+      "the repairable sender-card projection failure",
+    );
+    await waitUntil(async () => await coordinatorInbox(fixture.handle)
+      .get(sent.messageId) === undefined,
+    "the receipt-led sidecar cleanup");
+    await waitUntil(() => aggregateReservedConversationEntries(
+      peer.sessionManager.getEntries(),
+    ).cards.some((card) =>
+      card.messageId === sent.messageId && card.state === "delivered"
+    ), "the sender card projection retry");
+    manager.appendCustomEntry = originalAppend;
     releasePeer.resolve();
     await peerCompletion;
   });
@@ -8874,6 +9806,10 @@ describe("ProjectSessionCoordinator", () => {
         .map(({ id }) => id),
     ).toContain(source.conversationId);
 
+    const sourceRun = await startBlockedSourceRun(
+      fixture,
+      source.conversationId,
+    );
     const child = await fixture.coordinator.startPeerSession(
       fixture.handle,
       source.conversationId,
@@ -8924,6 +9860,8 @@ describe("ProjectSessionCoordinator", () => {
       (await fixture.coordinator.listSessions(fixture.handle))
         .map(({ id }) => id),
     ).not.toContain(target.conversationId);
+    sourceRun.release.resolve();
+    await sourceRun.completion;
 
     const reacquired = registry.acquireConversation(
       fixture.handle.project.cwd,
@@ -8938,6 +9876,7 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: "default" },
     );
+    const sourceRun = await startBlockedSourceRun(fixture, source.conversationId);
     const deletingTarget = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
@@ -9033,6 +9972,8 @@ describe("ProjectSessionCoordinator", () => {
           .received.length === 1,
       "the steered send to settle with the prompt",
     );
+    sourceRun.release.resolve();
+    await sourceRun.completion;
   });
 
   it("retries a durable ancestor tombstone after a descendant deletion releases its reservation", async () => {
@@ -9041,6 +9982,7 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: "default" },
     );
+    const rootRun = await startBlockedSourceRun(fixture, root.conversationId);
     const child = await fixture.coordinator.startPeerSession(
       fixture.handle,
       root.conversationId,
@@ -9049,6 +9991,8 @@ describe("ProjectSessionCoordinator", () => {
         idempotencyKey: "durable-root-retry-child",
       }),
     );
+    rootRun.release.resolve();
+    await rootRun.completion;
     await waitUntil(async () =>
       (await fixture.coordinator.listSessions(fixture.handle))
         .find(({ id }) => id === child.conversationId)
@@ -9099,6 +10043,8 @@ describe("ProjectSessionCoordinator", () => {
         && !ids.includes(child.conversationId)
         && (await inbox.listDeletedTargets()).length === 0;
     }, "durable ancestor retry after child deletion");
+    rootRun.release.resolve();
+    await rootRun.completion;
   });
 
   it("retries a durable ancestor tombstone after a busy descendant turns fatal", async () => {
@@ -9107,6 +10053,7 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: "default" },
     );
+    const rootRun = await startBlockedSourceRun(fixture, root.conversationId);
     const childStarted = deferred();
     const releaseChild = deferred();
     fixture.runtime.nextSessionBehaviors.push([
@@ -9120,6 +10067,8 @@ describe("ProjectSessionCoordinator", () => {
         idempotencyKey: "durable-root-retry-fatal-child",
       }),
     );
+    rootRun.release.resolve();
+    await rootRun.completion;
     await childStarted.promise;
     const childActor = await fixture.coordinator.openConversation(
       fixture.handle,
@@ -9170,6 +10119,7 @@ describe("ProjectSessionCoordinator", () => {
     const activity = fixture.coordinator.projectActivitySnapshot().projects
       .find(({ cwd }) => cwd === fixture.cwd);
     expect(activity?.attentionConversationCount).toBe(0);
+    await rootRun.completion;
   });
 
   it("does not drop failed inbox recovery for a transient delete reservation", async () => {
@@ -9178,10 +10128,12 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: "default" },
     );
+    const sourceRun = await startBlockedSourceRun(fixture, source.conversationId);
     const target = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
     );
+    const targetRun = await startBlockedSourceRun(fixture, target.conversationId);
     const childStarted = deferred();
     const releaseChild = deferred();
     fixture.runtime.nextSessionBehaviors.push([
@@ -9195,6 +10147,8 @@ describe("ProjectSessionCoordinator", () => {
         idempotencyKey: "failed-batch-transient-delete-child",
       }),
     );
+    targetRun.release.resolve();
+    await targetRun.completion;
     await childStarted.promise;
 
     const targetStarted = deferred();
@@ -9273,10 +10227,12 @@ describe("ProjectSessionCoordinator", () => {
     ]));
 
     releaseChild.resolve();
+    sourceRun.release.resolve();
     await waitUntil(
       () => context.backgroundTasks.size === 0,
       "transient delete failed-batch background tasks to settle",
     );
+    await sourceRun.completion;
   });
 
   it("continues failed inbox recovery when delete reserves during reopen", async () => {
@@ -9285,10 +10241,12 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: "default" },
     );
+    const sourceRun = await startBlockedSourceRun(fixture, source.conversationId);
     const target = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
     );
+    const targetRun = await startBlockedSourceRun(fixture, target.conversationId);
     const childStarted = deferred();
     const releaseChild = deferred();
     fixture.runtime.nextSessionBehaviors.push([
@@ -9302,6 +10260,8 @@ describe("ProjectSessionCoordinator", () => {
         idempotencyKey: "failed-batch-reopen-delete-child",
       }),
     );
+    targetRun.release.resolve();
+    await targetRun.completion;
     await childStarted.promise;
 
     const targetStarted = deferred();
@@ -9372,10 +10332,12 @@ describe("ProjectSessionCoordinator", () => {
     ]));
 
     releaseChild.resolve();
+    sourceRun.release.resolve();
     await waitUntil(
       () => context.backgroundTasks.size === 0,
       "reopen race failed-batch background tasks to settle",
     );
+    await sourceRun.completion;
   });
 
   it("does not retry failed inbox recovery indefinitely", async () => {
@@ -9384,6 +10346,7 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: "default" },
     );
+    const sourceRun = await startBlockedSourceRun(fixture, source.conversationId);
     const target = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
@@ -9439,10 +10402,15 @@ describe("ProjectSessionCoordinator", () => {
       ),
     ).toHaveLength(2);
     expect(await coordinatorInbox(fixture.handle).get(sent.messageId))
-      .toMatchObject({
-        state: "processing",
-        processingRunId: sent.runId,
-      });
+      .toBeUndefined();
+    expect(aggregateReservedConversationEntries(
+      fixture.runtime.control(target.conversationId).manager.getEntries(),
+    ).messageDeliveryReceipts).toContainEqual(expect.objectContaining({
+      messageId: sent.messageId,
+      targetRunId: sent.runId,
+    }));
+    sourceRun.release.resolve();
+    await sourceRun.completion;
   });
 
   it("does not abort a recovered run when delete reserves after dispatch", async () => {
@@ -9451,6 +10419,7 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: "default" },
     );
+    const sourceRun = await startBlockedSourceRun(fixture, source.conversationId);
     const target = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
@@ -9523,6 +10492,8 @@ describe("ProjectSessionCoordinator", () => {
       "recovered run to finish after racing delete",
     );
     expect(recoveredControl.abortCalls).toBe(0);
+    sourceRun.release.resolve();
+    await sourceRun.completion;
   });
 
   it("does not clear a descendant deletion reservation when an ancestor cascade races it", async () => {
@@ -9968,6 +10939,11 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: "default" },
     );
+    const callerSourceRun = await startBlockedSourceRun(
+      fixture,
+      caller.conversationId,
+      "admit the assigned-envelope recovery case",
+    );
     const temporaryStarted = deferred();
     const releaseTemporary = deferred();
     fixture.runtime.nextSessionBehaviors.push([
@@ -9986,9 +10962,12 @@ describe("ProjectSessionCoordinator", () => {
       }),
     );
     await temporaryStarted.promise;
+    callerSourceRun.release.resolve();
+    await callerSourceRun.completion;
 
     const role = fixture.roles.getConversationRole("default");
     const messageId = randomUUID();
+    const callerRunId = randomUUID();
     const assignedAt = new Date().toISOString();
     await coordinatorInbox(fixture.handle).put({
       messageId,
@@ -10001,7 +10980,7 @@ describe("ProjectSessionCoordinator", () => {
       fromRunId: temporary.runId,
       temporaryReturnAssignment: {
         initialRunId: temporary.runId,
-        callerRunId: randomUUID(),
+        callerRunId,
         assignedAt,
       },
       fromSnapshot: {
@@ -10012,6 +10991,10 @@ describe("ProjectSessionCoordinator", () => {
         conversationId: caller.conversationId,
         role: { id: role.id, name: role.name },
       },
+    });
+    await coordinatorInbox(fixture.handle).updateState(messageId, {
+      state: "processing",
+      processingRunId: callerRunId,
     });
     expect(
       aggregateReservedConversationEntries(
@@ -10070,6 +11053,10 @@ describe("ProjectSessionCoordinator", () => {
       caller.conversationId,
       randomUUID(),
       "wait for a receipt before B report persistence fails",
+    );
+    await waitUntil(
+      () => caller.getActivity().kind === "running",
+      "the caller run before temporary creation",
     );
     const temporary = await fixture.coordinator.startPeerSession(
       fixture.handle,
@@ -10479,6 +11466,7 @@ describe("ProjectSessionCoordinator", () => {
         "wait-after-temporary-deletion",
         target,
       ) as RunSettlement;
+      control.beginNextModelTurn();
       control.emitFinal("caller consumed the pending return once");
     });
     const callerCompletion = fixture.coordinator.prompt(
@@ -10503,14 +11491,18 @@ describe("ProjectSessionCoordinator", () => {
       const pending = await coordinatorInbox(fixture.handle).list({
         toConversationId: caller.conversationId,
       });
-      return !ids.includes(temporary.conversationId)
+      return ids.includes(temporary.conversationId)
         && pending.some(({ fromRunId, waitedByRunId }) =>
           fromRunId === temporary.runId && waitedByRunId === undefined
         );
-    }, "temporary deletion with its return still pending");
+    }, "temporary source retention with its return pending");
 
     beginWait.resolve();
     await callerCompletion;
+    await waitUntil(async () =>
+      !(await fixture.coordinator.listSessions(fixture.handle))
+        .some(({ id }) => id === temporary.conversationId),
+    "temporary deletion after its pending return is receipted");
     expect(waitResult).toMatchObject({
       outcome: "message",
       conversationId: temporary.conversationId,
@@ -10568,13 +11560,13 @@ describe("ProjectSessionCoordinator", () => {
       const pending = await inbox.list({
         toConversationId: source.conversationId,
       });
-      return !ids.includes(started.conversationId)
+      return ids.includes(started.conversationId)
         && pending.some(({ kind, body, state }) =>
           kind === "delegation_result"
           && body === "temporary success"
           && state === "processing"
         );
-    }, "temporary result steering followed by session deletion");
+    }, "temporary result steering before its delivery receipt");
 
     const pending = await inbox.list({
       toConversationId: source.conversationId,
@@ -10600,15 +11592,18 @@ describe("ProjectSessionCoordinator", () => {
     ).toHaveLength(0);
     expect(
       await readdir(fixture.handle.project.sessionDir),
-    ).toHaveLength(1);
+    ).toHaveLength(2);
 
     releaseSource.resolve();
     await sourceCompletion;
     await waitUntil(
-      async () => (await inbox.list({
-        toConversationId: source.conversationId,
-      })).length === 0,
-      "the steered temporary result to settle durably",
+      async () =>
+        (await inbox.list({
+          toConversationId: source.conversationId,
+        })).length === 0
+        && !(await fixture.coordinator.listSessions(fixture.handle))
+          .some(({ id }) => id === started.conversationId),
+      "the steered temporary result to settle durably before deletion",
     );
     expect(
       aggregateReservedConversationEntries(source.sessionManager.getEntries())
@@ -10616,11 +11611,299 @@ describe("ProjectSessionCoordinator", () => {
     ).toHaveLength(1);
   });
 
+  it("retains an explicit temporary return until the caller delivery receipt is reconciled", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const callerStarted = deferred();
+    const targetKnown = deferred<{ conversationId: string; runId: string }>();
+    const releaseCaller = deferred();
+    fixture.runtime.control(caller.conversationId).enqueue(async (control) => {
+      callerStarted.resolve();
+      await executeTool(
+        control,
+        "wait_for_session",
+        "delayed-explicit-return-wait",
+        await targetKnown.promise,
+      );
+      await releaseCaller.promise;
+      control.beginNextModelTurn();
+      control.emitFinal("caller completed after the return receipt");
+    });
+    const callerRunId = randomUUID();
+    const callerCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      caller.conversationId,
+      callerRunId,
+      "wait for a delayed explicit temporary return",
+    );
+    await callerStarted.promise;
+
+    const temporaryStarted = deferred();
+    const releaseTemporary = deferred();
+    fixture.runtime.nextSessionBehaviors.push([
+      blocksUntil(
+        temporaryStarted,
+        releaseTemporary,
+        "delayed explicit temporary result",
+      ),
+    ]);
+    const temporary = await fixture.coordinator.startPeerSession(
+      fixture.handle,
+      caller.conversationId,
+      startInput({
+        temporary: true,
+        idempotencyKey: "delayed-explicit-temporary-return",
+      }),
+    );
+    targetKnown.resolve(temporary);
+    await temporaryStarted.promise;
+    await waitUntil(
+      () => caller.getActivity().kind === "waiting",
+      "the caller's exact temporary wait",
+    );
+
+    await expect(executeTool(
+      fixture.runtime.control(temporary.conversationId),
+      "send_session_message",
+      "delayed-explicit-temporary-message",
+      {
+        conversationId: caller.conversationId,
+        message: "The explicit result waits for its delivery receipt.",
+      },
+    )).resolves.toMatchObject({ status: "delivered_to_wait" });
+    const inbox = coordinatorInbox(fixture.handle);
+    await waitUntil(async () => {
+      const pending = await inbox.list({
+        toConversationId: caller.conversationId,
+      });
+      return pending.some(({ fromRunId, state }) =>
+        fromRunId === temporary.runId && state === "processing"
+      );
+    }, "the explicit return sidecar to remain processing");
+    expect(aggregateReservedConversationEntries(
+      caller.sessionManager.getEntries(),
+    ).messageDeliveryReceipts).not.toContainEqual(
+      expect.objectContaining({ sourceRunId: temporary.runId }),
+    );
+
+    releaseTemporary.resolve();
+    await waitUntil(async () => {
+      const inspection = aggregateReservedConversationEntries(
+        caller.sessionManager.getEntries(),
+      );
+      return inspection.temporaryReturnReceipts.some((receipt) =>
+        receipt.temporaryConversationId === temporary.conversationId
+        && receipt.initialRunId === temporary.runId
+        && receipt.state === "settled"
+        && receipt.settlement.runId === temporary.runId
+      );
+    }, "the settled explicit temporary return receipt");
+    expect((await fixture.coordinator.listSessions(fixture.handle))
+      .some(({ id }) => id === temporary.conversationId)).toBe(true);
+
+    releaseCaller.resolve();
+    await callerCompletion;
+    await waitUntil(async () => {
+      const ids = (await fixture.coordinator.listSessions(fixture.handle))
+        .map(({ id }) => id);
+      return !ids.includes(temporary.conversationId)
+        && (await inbox.list({
+          toConversationId: caller.conversationId,
+        })).length === 0;
+    }, "the explicit receipt reconciliation and temporary deletion");
+    expect(aggregateReservedConversationEntries(
+      caller.sessionManager.getEntries(),
+    ).messageDeliveryReceipts).toContainEqual(expect.objectContaining({
+      sourceRunId: temporary.runId,
+      targetRunId: callerRunId,
+      kind: "message",
+      temporaryReturnAssignment: expect.objectContaining({
+        initialRunId: temporary.runId,
+        callerRunId: callerRunId,
+      }),
+    }));
+  });
+
+  it("retains an automatic temporary return until the caller delivery receipt is reconciled", async () => {
+    const fixture = await createFixture();
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const sourceRun = await startBlockedSourceRun(
+      fixture,
+      caller.conversationId,
+      "hold the caller while automatic return delivery is delayed",
+    );
+    fixture.runtime.nextSessionBehaviors.push([
+      completesWith("The automatic result waits for its receipt."),
+    ]);
+    const temporary = await fixture.coordinator.startPeerSession(
+      fixture.handle,
+      caller.conversationId,
+      startInput({
+        temporary: true,
+        idempotencyKey: "delayed-automatic-temporary-return",
+      }),
+    );
+    const temporaryActor = await fixture.coordinator.openConversation(
+      fixture.handle,
+      temporary.conversationId,
+      { updateRecent: false },
+    );
+    const lifecycle = temporaryActor.profile.lifecycle;
+    if (lifecycle.kind !== "temporary") {
+      throw new Error("Expected a temporary lifecycle");
+    }
+    const inbox = coordinatorInbox(fixture.handle);
+    await waitUntil(async () => {
+      const pending = await inbox.list({
+        toConversationId: caller.conversationId,
+      });
+      return pending.some(({ kind, messageId, state }) =>
+        kind === "delegation_result"
+        && messageId === lifecycle.returnMessageId
+        && state === "processing"
+      );
+    }, "the automatic return sidecar to remain processing");
+    expect(aggregateReservedConversationEntries(
+      caller.sessionManager.getEntries(),
+    ).messageDeliveryReceipts).not.toContainEqual(expect.objectContaining({
+      messageId: lifecycle.returnMessageId,
+    }));
+    expect((await fixture.coordinator.listSessions(fixture.handle))
+      .some(({ id }) => id === temporary.conversationId)).toBe(true);
+
+    sourceRun.release.resolve();
+    await sourceRun.completion;
+    await waitUntil(async () => {
+      const ids = (await fixture.coordinator.listSessions(fixture.handle))
+        .map(({ id }) => id);
+      return !ids.includes(temporary.conversationId)
+        && (await inbox.list({
+          toConversationId: caller.conversationId,
+        })).length === 0;
+    }, "the automatic receipt reconciliation and temporary deletion");
+    expect(aggregateReservedConversationEntries(
+      caller.sessionManager.getEntries(),
+    ).messageDeliveryReceipts).toContainEqual(expect.objectContaining({
+      messageId: lifecycle.returnMessageId,
+      sourceRunId: temporary.runId,
+      kind: "delegation_result",
+    }));
+  });
+
+  it("recovers a reported temporary source after its automatic receipt-only return crash window", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-temporary-receipt-crash-window-"));
+    temporaryDirectories.push(cwd);
+    const runtime = new FakeRuntime();
+    const roles = await RoleCatalog.open(
+      runtime,
+      join(cwd, "user", "roles.json"),
+    );
+    const store = await ProjectStore.open(cwd, "full_access");
+    const callerConversationId = randomUUID();
+    const temporaryConversationId = randomUUID();
+    const initialRunId = randomUUID();
+    const callerRunId = randomUUID();
+    const returnMessageId = randomUUID();
+    const delegationId = randomUUID();
+    await store.createConversation(
+      callerConversationId,
+      defaultProfile(roles),
+    );
+    const temporaryManager = await store.createConversation(
+      temporaryConversationId,
+      defaultProfile(roles, {
+        lifecycle: {
+          kind: "temporary",
+          callerConversationId,
+          delegationId,
+          returnMessageId,
+          initialRunId,
+        },
+        createdBy: {
+          kind: "conversation",
+          conversationId: callerConversationId,
+        },
+      }),
+    );
+    appendReservedCustomEntry(
+      temporaryManager,
+      createRunSettlementEntry({
+        runId: initialRunId,
+        outcome: "completed",
+        finalText: "receipt-only result after a crash window",
+        settledAt: "2026-07-19T12:00:00.000Z",
+        reportedAt: "2026-07-19T12:00:01.000Z",
+        returnMessageId,
+      }),
+    );
+    const callerManager = await store.openConversation(
+      callerConversationId,
+      { updateRecent: false },
+    );
+    appendReservedCustomEntry(
+      callerManager,
+      createMessageDeliveryReceiptEntry({
+        messageId: returnMessageId,
+        cardId: randomUUID(),
+        fromConversationId: temporaryConversationId,
+        toConversationId: callerConversationId,
+        sourceRunId: initialRunId,
+        targetRunId: callerRunId,
+        kind: "delegation_result",
+        sentAt: "2026-07-19T12:00:00.000Z",
+        payloadFingerprint: "c".repeat(64),
+        deliveredAt: "2026-07-19T12:00:02.000Z",
+      }),
+    );
+
+    const coordinator = new ProjectSessionCoordinator(runtime, roles);
+    const handle = await coordinator.acquireProject(cwd, "full_access");
+    const fixture = {
+      cwd,
+      runtime,
+      roles,
+      registry: new ProjectStoreRegistry(),
+      coordinator,
+      handle,
+    };
+    fixtures.push(fixture);
+    await waitUntil(async () =>
+      !(await coordinator.listSessions(handle)).some(({ id }) =>
+        id === temporaryConversationId
+      ),
+    "receipt-only temporary deletion after restart");
+    expect((await coordinator.listSessions(handle)).map(({ id }) => id))
+      .toContain(callerConversationId);
+    expect(aggregateReservedConversationEntries(
+      (await coordinator.openConversation(
+        handle,
+        callerConversationId,
+        { updateRecent: false },
+      )).sessionManager.getEntries(),
+    ).messageDeliveryReceipts).toContainEqual(expect.objectContaining({
+      messageId: returnMessageId,
+      sourceRunId: initialRunId,
+      targetRunId: callerRunId,
+      kind: "delegation_result",
+    }));
+  });
+
   it("runs delayed temporary cleanup before a browser prompt admitted behind it", async () => {
     const fixture = await createFixture();
     const source = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
+    );
+    const sourceRun = await startBlockedSourceRun(
+      fixture,
+      source.conversationId,
+      "admit the temporary cleanup case",
     );
     const blocker = await fixture.coordinator.createUserConversation(
       fixture.handle,
@@ -10645,6 +11928,8 @@ describe("ProjectSessionCoordinator", () => {
       }),
     );
     await initialRunStarted.promise;
+    sourceRun.release.resolve();
+    await sourceRun.completion;
 
     const inbox = coordinatorInbox(fixture.handle);
     const originalMarkDeleted = inbox.markTargetDeleted.bind(inbox);
@@ -10678,11 +11963,14 @@ describe("ProjectSessionCoordinator", () => {
     );
     releaseDeletion.resolve();
     await blockingDeletion;
-    await expect(secondRun).rejects.toThrow(/not active/i);
+    await expect(secondRun).resolves.toMatchObject({
+      outcome: "completed",
+      finalText: "ok",
+    });
     await waitUntil(async () =>
       !(await fixture.coordinator.listSessions(fixture.handle))
         .some(({ id }) => id === temporary.conversationId),
-    "temporary cleanup before browser admission");
+    "temporary cleanup after the already-admitted browser run");
     inbox.markTargetDeleted = originalMarkDeleted;
   });
 
@@ -10714,8 +12002,8 @@ describe("ProjectSessionCoordinator", () => {
       },
     ]);
 
-    const temporary = await fixture.coordinator.startPeerSession(
-      fixture.handle,
+    const temporary = await startPeerFromActiveSource(
+      fixture,
       source.conversationId,
       startInput({
         temporary: true,
@@ -10770,8 +12058,8 @@ describe("ProjectSessionCoordinator", () => {
       },
     ]);
 
-    const temporary = await fixture.coordinator.startPeerSession(
-      fixture.handle,
+    const temporary = await startPeerFromActiveSource(
+      fixture,
       source.conversationId,
       startInput({
         temporary: true,
@@ -10845,8 +12133,8 @@ describe("ProjectSessionCoordinator", () => {
       },
     ]);
 
-    const temporary = await fixture.coordinator.startPeerSession(
-      fixture.handle,
+    const temporary = await startPeerFromActiveSource(
+      fixture,
       source.conversationId,
       startInput({
         temporary: true,
@@ -11118,8 +12406,8 @@ describe("ProjectSessionCoordinator", () => {
       blocksUntil(targetStarted, releaseTarget, "temporary result"),
     ]);
 
-    const started = await fixture.coordinator.startPeerSession(
-      fixture.handle,
+    const started = await startPeerFromActiveSource(
+      fixture,
       caller.conversationId,
       startInput({
         temporary: true,
@@ -11127,6 +12415,11 @@ describe("ProjectSessionCoordinator", () => {
       }),
     );
     await targetStarted.promise;
+    const senderRun = await startBlockedSourceRun(
+      fixture,
+      sender.conversationId,
+      "send late work from an exact source run",
+    );
     await executeTool(
       fixture.runtime.control(sender.conversationId),
       "send_session_message",
@@ -11138,6 +12431,8 @@ describe("ProjectSessionCoordinator", () => {
     );
 
     releaseTarget.resolve();
+    senderRun.release.resolve();
+    await senderRun.completion;
     await waitUntil(async () =>
       !(await fixture.coordinator.listSessions(fixture.handle))
         .some(({ id }) => id === started.conversationId),
@@ -11149,8 +12444,7 @@ describe("ProjectSessionCoordinator", () => {
       body === "arrived while temporary target was busy"
     );
     expect(senderCard).toMatchObject({
-      state: "completed",
-      result: "temporary result",
+      state: "delivered",
     });
   });
 
@@ -11164,8 +12458,8 @@ describe("ProjectSessionCoordinator", () => {
       completesWith("x".repeat(MAX_CONVERSATION_BODY_BYTES + 1)),
     ]);
 
-    const started = await fixture.coordinator.startPeerSession(
-      fixture.handle,
+    const started = await startPeerFromActiveSource(
+      fixture,
       caller.conversationId,
       startInput({
         temporary: true,
@@ -11241,6 +12535,7 @@ describe("ProjectSessionCoordinator", () => {
       sentAt: "2026-07-19T12:00:00.000Z",
       kind: "message",
       body: "recover this exact delivery",
+      fromRunId: randomUUID(),
       fromSnapshot: {
         conversationId: sourceId,
         role: { id: "default", name: "Default" },
@@ -11413,6 +12708,7 @@ describe("ProjectSessionCoordinator", () => {
       },
     });
     const sentAt = "2020-01-01T00:00:00.000Z";
+    const sourceRunId = randomUUID();
     const fromSnapshot = {
       conversationId: sourceId,
       role: { id: "default", name: "Default" },
@@ -11435,6 +12731,11 @@ describe("ProjectSessionCoordinator", () => {
         delegationId,
         requestFingerprint,
         requestedRole: role,
+        orchestration: {
+          rootConversationId: sourceId,
+          depth: 1,
+          sourceRunId,
+        },
         updatedAt: sentAt,
       }),
     );
@@ -11447,6 +12748,7 @@ describe("ProjectSessionCoordinator", () => {
       sentAt,
       kind: "delegation_task",
       body: input.task,
+      fromRunId: sourceRunId,
       delegationId,
       requestFingerprint,
       fromSnapshot,
@@ -11673,6 +12975,7 @@ describe("ProjectSessionCoordinator", () => {
       sentAt: "2026-07-19T12:00:00.000Z",
       kind: "message",
       body: "this message must never cross the deletion fence",
+      fromRunId: randomUUID(),
       fromSnapshot: {
         conversationId: sourceId,
         role: { id: "default", name: "Default" },
@@ -11729,11 +13032,7 @@ describe("ProjectSessionCoordinator", () => {
       aggregateReservedConversationEntries(
         source.sessionManager.getEntries(),
       ).cards,
-    ).toContainEqual(expect.objectContaining({
-      cardId,
-      state: "failed",
-      result: expect.stringContaining("已删除"),
-    }));
+    ).not.toContainEqual(expect.objectContaining({ cardId }));
   });
 
   it("recovers a root deletion tombstone by cascading to descendants", async () => {
@@ -11787,7 +13086,7 @@ describe("ProjectSessionCoordinator", () => {
     "cascade tombstone cleanup");
   });
 
-  it("recovers a started abort intent before a processing inbox run can restart", async () => {
+  it("records a started abort intent before retrying its unreceipted inbox work", async () => {
     const cwd = await mkdtemp(join(
       tmpdir(),
       "piweb-session-abort-intent-recovery-",
@@ -11830,6 +13129,7 @@ describe("ProjectSessionCoordinator", () => {
       sentAt: "2026-07-19T12:00:00.000Z",
       kind: "message",
       body: "this interrupted run must be cancelled before recovery dispatch",
+      fromRunId: randomUUID(),
       fromSnapshot: {
         conversationId: sourceId,
         role: { id: "default", name: "Default" },
@@ -11868,7 +13168,10 @@ describe("ProjectSessionCoordinator", () => {
       { updateRecent: false },
     );
 
-    expect(runtime.control(targetId).received).toEqual([]);
+    expect(runtime.control(targetId).received).toHaveLength(1);
+    expect(runtime.control(targetId).received[0]?.content).toContain(
+      "this interrupted run must be cancelled before recovery dispatch",
+    );
     expect(
       aggregateReservedConversationEntries(
         target.sessionManager.getEntries(),
@@ -11889,7 +13192,7 @@ describe("ProjectSessionCoordinator", () => {
     }));
   });
 
-  it("resumes a processing inbox run from its delivery marker without appending the conversation message twice", async () => {
+  it("turns a durable marker and processing sidecar into a receipt before exact-run recovery", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-session-resume-marker-"));
     temporaryDirectories.push(cwd);
     const runtime = new FakeRuntime();
@@ -11900,7 +13203,10 @@ describe("ProjectSessionCoordinator", () => {
     const store = await ProjectStore.open(cwd, "full_access");
     const sourceId = randomUUID();
     const targetId = randomUUID();
-    await store.createConversation(sourceId, defaultProfile(roles));
+    const sourceManager = await store.createConversation(
+      sourceId,
+      defaultProfile(roles),
+    );
     const targetManager = await store.createConversation(
       targetId,
       defaultProfile(roles),
@@ -11909,6 +13215,7 @@ describe("ProjectSessionCoordinator", () => {
     const messageId = randomUUID();
     const cardId = randomUUID();
     const processingRunId = randomUUID();
+    const sourceRunId = randomUUID();
     const sentAt = "2026-07-19T12:00:00.000Z";
     const fromSnapshot = {
       conversationId: sourceId,
@@ -11918,6 +13225,21 @@ describe("ProjectSessionCoordinator", () => {
       conversationId: targetId,
       role: { id: "default", name: "Default" },
     };
+    appendReservedCustomEntry(
+      sourceManager,
+      createConversationCardEntry({
+        cardId,
+        kind: "message",
+        body: "resume this already-delivered message",
+        fromSnapshot,
+        toSnapshot,
+        state: "completed",
+        messageId,
+        runId: processingRunId,
+        result: "legacy settlement projection",
+        updatedAt: "2026-07-19T12:00:01.000Z",
+      }),
+    );
     await inbox.put({
       messageId,
       cardId,
@@ -11926,6 +13248,7 @@ describe("ProjectSessionCoordinator", () => {
       sentAt,
       kind: "message",
       body: "resume this already-delivered message",
+      fromRunId: sourceRunId,
       fromSnapshot,
       toSnapshot,
     });
@@ -11995,10 +13318,304 @@ describe("ProjectSessionCoordinator", () => {
       )).sessionManager.getEntries(),
     );
     expect(aggregate.deliveredMessageIds).toEqual([messageId]);
+    expect(aggregate.messageDeliveryReceipts).toEqual([
+      expect.objectContaining({
+        messageId,
+        sourceRunId,
+        targetRunId: processingRunId,
+      }),
+    ]);
     expect(aggregate.runSettlements).toContainEqual(expect.objectContaining({
       runId: processingRunId,
       outcome: "completed",
     }));
+    expect(aggregateReservedConversationEntries(
+      (await coordinator.openConversation(
+        handle,
+        sourceId,
+        { updateRecent: false },
+      )).sessionManager.getEntries(),
+    ).cards.find(({ cardId: candidate }) => candidate === cardId)).toMatchObject({
+      state: "completed",
+      result: "legacy settlement projection",
+    });
+  });
+
+  it("does not recreate transport when retry reconciliation proves prior delivery", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const toolCallId = "receipt-before-admission-retry";
+    const idempotencyKey = `${source.conversationId.length}:${source.conversationId}:${toolCallId}`;
+    const messageId = deterministicTestUuid("piweb.message", idempotencyKey);
+    const cardId = deterministicTestUuid("piweb.card", idempotencyKey);
+    const targetRunId = randomUUID();
+    const targetStarted = deferred();
+    const releaseTarget = deferred();
+    fixture.runtime.control(target.conversationId).enqueue(
+      blocksUntil(targetStarted, releaseTarget, "target run settled"),
+    );
+    const targetCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      target.conversationId,
+      targetRunId,
+      "keep the recipient run active during retry reconciliation",
+    );
+    await targetStarted.promise;
+    const sentAt = "2026-07-19T12:00:00.000Z";
+    const body = "this body was durably delivered before the retry";
+    const role = fixture.roles.getConversationRole("default");
+    const fromSnapshot = {
+      conversationId: source.conversationId,
+      role: { id: role.id, name: role.name },
+    };
+    const toSnapshot = {
+      conversationId: target.conversationId,
+      role: { id: role.id, name: role.name },
+    };
+    appendReservedCustomEntry(
+      source.sessionManager,
+      createConversationCardEntry({
+        cardId,
+        kind: "message",
+        body,
+        fromSnapshot,
+        toSnapshot,
+        state: "sending",
+        messageId,
+        updatedAt: sentAt,
+      }),
+    );
+    const inbox = coordinatorInbox(fixture.handle);
+    await inbox.put({
+      messageId,
+      cardId,
+      fromConversationId: source.conversationId,
+      toConversationId: target.conversationId,
+      sentAt,
+      kind: "message",
+      body,
+      fromRunId: RUN_A,
+      fromSnapshot,
+      toSnapshot,
+    });
+    await inbox.updateState(messageId, {
+      state: "processing",
+      processingRunId: targetRunId,
+    });
+    const marker = createConversationMessageEntry({
+      content: body,
+      display: true,
+      details: {
+        messageId,
+        cardId,
+        sentAt,
+        kind: "message",
+        body,
+        fromSnapshot,
+        toSnapshot,
+      },
+    });
+    target.sessionManager.appendCustomMessageEntry(
+      marker.customType,
+      marker.content,
+      marker.display,
+      marker.details,
+    );
+    expect(aggregateReservedConversationEntries(
+      target.sessionManager.getEntries(),
+    ).deliveredMessageIds).toEqual([messageId]);
+    let retryResult: unknown;
+    let retryError: unknown;
+    const reconciliationErrors: string[] = [];
+    const unsubscribe = fixture.coordinator.subscribe(fixture.handle, (event) => {
+      if (event.type === "error") reconciliationErrors.push(event.message);
+    });
+    fixture.runtime.control(source.conversationId).enqueue(async (control) => {
+      try {
+        retryResult = await executeTool(
+          control,
+          "send_session_message",
+          toolCallId,
+          { conversationId: target.conversationId, message: body },
+        );
+      } catch (error) {
+        retryError = error;
+      }
+      control.emitFinal("retry observed durable delivery");
+    });
+
+    await fixture.coordinator.prompt(
+      fixture.handle,
+      source.conversationId,
+      RUN_A,
+      "retry the interrupted send",
+    );
+
+    unsubscribe();
+    expect(reconciliationErrors).toEqual([]);
+    expect(retryError).toBeUndefined();
+    expect(retryResult).toMatchObject({
+      status: "delivered",
+      messageId,
+      conversationId: target.conversationId,
+      runId: targetRunId,
+    });
+    expect(await inbox.list()).toEqual([]);
+    expect(aggregateReservedConversationEntries(
+      source.sessionManager.getEntries(),
+    ).cards.find(({ cardId: candidate }) => candidate === cardId)).toMatchObject({
+      state: "delivered",
+      runId: targetRunId,
+    });
+    expect(aggregateReservedConversationEntries(
+      target.sessionManager.getEntries(),
+    ).messageDeliveryReceipts).toEqual([
+      expect.objectContaining({ messageId, targetRunId }),
+    ]);
+    expect(fixture.runtime.control(target.conversationId).received).toEqual([]);
+    releaseTarget.resolve();
+    await targetCompletion;
+  });
+
+  it.each(["queued", "processing"] as const)(
+    "retains and blocks a %s legacy sidecar without exact source-run identity",
+    async (state) => {
+      const cwd = await mkdtemp(join(
+        tmpdir(),
+        `piweb-session-legacy-${state}-inbox-`,
+      ));
+      temporaryDirectories.push(cwd);
+      const runtime = new FakeRuntime();
+      const roles = await RoleCatalog.open(
+        runtime,
+        join(cwd, "user", "roles.json"),
+      );
+      const store = await ProjectStore.open(cwd, "full_access");
+      const sourceId = randomUUID();
+      const targetId = randomUUID();
+      await store.createConversation(sourceId, defaultProfile(roles));
+      await store.createConversation(targetId, defaultProfile(roles));
+      const inbox = await ProjectInbox.open(join(store.stateDir, "inbox"));
+      const messageId = randomUUID();
+      await inbox.put({
+        messageId,
+        cardId: randomUUID(),
+        fromConversationId: sourceId,
+        toConversationId: targetId,
+        sentAt: "2026-07-19T12:00:00.000Z",
+        kind: "message",
+        body: `legacy ${state} work has no exact source run`,
+        fromSnapshot: {
+          conversationId: sourceId,
+          role: { id: "default", name: "Default" },
+        },
+        toSnapshot: {
+          conversationId: targetId,
+          role: { id: "default", name: "Default" },
+        },
+      });
+      if (state === "processing") {
+        await inbox.updateState(messageId, {
+          state: "processing",
+          processingRunId: randomUUID(),
+        });
+      }
+
+      const coordinator = new ProjectSessionCoordinator(runtime, roles);
+      const handle = await coordinator.acquireProject(cwd, "full_access");
+      fixtures.push({
+        cwd,
+        runtime,
+        roles,
+        registry: new ProjectStoreRegistry(),
+        coordinator,
+        handle,
+      });
+
+      await waitUntil(async () => (
+        await coordinator.listSessions(handle)
+      ).find(({ id }) => id === targetId)?.attention === true,
+      `${state} legacy sidecar attention`);
+      expect(runtime.controls.get(targetId)?.received ?? []).toEqual([]);
+      expect(await coordinatorInbox(handle).list()).toEqual([
+        expect.objectContaining({ messageId, state }),
+      ]);
+    },
+  );
+
+  it("recovers an unsettled receipt-only run without replaying a message body", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-session-receipt-only-"));
+    temporaryDirectories.push(cwd);
+    const runtime = new FakeRuntime();
+    const roles = await RoleCatalog.open(
+      runtime,
+      join(cwd, "user", "roles.json"),
+    );
+    const store = await ProjectStore.open(cwd, "full_access");
+    const sourceId = randomUUID();
+    const targetId = randomUUID();
+    const sourceRunId = randomUUID();
+    const targetRunId = randomUUID();
+    const messageId = randomUUID();
+    await store.createConversation(sourceId, defaultProfile(roles));
+    const targetManager = await store.createConversation(
+      targetId,
+      defaultProfile(roles),
+    );
+    appendReservedCustomEntry(
+      targetManager,
+      createMessageDeliveryReceiptEntry({
+        messageId,
+        cardId: randomUUID(),
+        fromConversationId: sourceId,
+        toConversationId: targetId,
+        sourceRunId,
+        targetRunId,
+        kind: "message",
+        sentAt: "2026-07-19T12:00:00.000Z",
+        payloadFingerprint: "a".repeat(64),
+        deliveredAt: "2026-07-19T12:00:01.000Z",
+      }),
+    );
+
+    const coordinator = new ProjectSessionCoordinator(runtime, roles);
+    const handle = await coordinator.acquireProject(cwd, "full_access");
+    fixtures.push({
+      cwd,
+      runtime,
+      roles,
+      registry: new ProjectStoreRegistry(),
+      coordinator,
+      handle,
+    });
+    await waitUntil(
+      () => runtime.controls.get(targetId)?.received.length === 1,
+      "the receipt-only exact run resume",
+    );
+    expect(runtime.control(targetId).received).toEqual([{
+      customType: "workbench.inbox_resume.v1",
+      content: expect.stringContaining("恢复此前未结算"),
+      display: false,
+      details: { runId: targetRunId },
+      triggerTurn: true,
+    }]);
+    await waitUntil(async () => {
+      const target = await coordinator.openConversation(
+        handle,
+        targetId,
+        { updateRecent: false },
+      );
+      return aggregateReservedConversationEntries(
+        target.sessionManager.getEntries(),
+      ).runSettlements.some(({ runId }) => runId === targetRunId);
+    }, "the receipt-only exact run settlement");
   });
 
   it("recovers an unreported temporary settlement, returns it once, and deletes the temporary session", async () => {
@@ -12048,6 +13665,7 @@ describe("ProjectSessionCoordinator", () => {
       cardId: deterministicTestUuid("piweb.return.card", returnMessageId),
       fromConversationId: targetId,
       toConversationId: sourceId,
+      fromRunId: initialRunId,
       sentAt: "2026-07-19T12:01:01.000Z",
       kind: "delegation_result",
       body: "result recovered after restart",
@@ -12153,7 +13771,7 @@ describe("ProjectSessionCoordinator", () => {
       expect(fixture.runtime.createConversationIds).toEqual([]);
     });
 
-    it("inherits root+depth 1 from a user parent without sourceRunId when idle", async () => {
+    it("inherits root+depth 1 from a user parent with an exact source run", async () => {
       const fixture = await createFixture();
       const source = await fixture.coordinator.createUserConversation(
         fixture.handle,
@@ -12164,15 +13782,22 @@ describe("ProjectSessionCoordinator", () => {
         depth: 0,
       });
 
-      // Source is idle, so no sourceRunId.
+      const sourceRun = await startBlockedSourceRun(
+        fixture,
+        source.conversationId,
+        "create the first orchestration child",
+      );
       const peer = await fixture.coordinator.startPeerSession(
         fixture.handle,
         source.conversationId,
         startInput({
           task: "orchestration depth check",
           idempotencyKey: "orchestration-peer-1",
+          sourceRunId: sourceRun.runId,
         }),
       );
+      sourceRun.release.resolve();
+      await sourceRun.completion;
       const peerActor = await fixture.coordinator.openConversation(
         fixture.handle,
         peer.conversationId,
@@ -12184,7 +13809,7 @@ describe("ProjectSessionCoordinator", () => {
         rootConversationId: source.conversationId,
         depth: 1,
       });
-      expect(profile.orchestration!.sourceRunId).toBeUndefined();
+      expect(profile.orchestration!.sourceRunId).toBe(sourceRun.runId);
     });
 
     it("propagates same root and depth 2 through two-level peer chain", async () => {
@@ -12194,16 +13819,16 @@ describe("ProjectSessionCoordinator", () => {
         { roleId: "default" },
       );
 
-      const first = await fixture.coordinator.startPeerSession(
-        fixture.handle,
+      const first = await startPeerFromActiveSource(
+        fixture,
         source.conversationId,
         startInput({
           task: "first level",
           idempotencyKey: "chain-peer-1",
         }),
       );
-      const second = await fixture.coordinator.startPeerSession(
-        fixture.handle,
+      const second = await startPeerFromActiveSource(
+        fixture,
         first.conversationId,
         startInput({
           task: "second level",
@@ -12405,8 +14030,8 @@ describe("ProjectSessionCoordinator", () => {
         bId,
         { updateRecent: false },
       );
-      const c = await fixture.coordinator.startPeerSession(
-        fixture.handle,
+      const c = await startPeerFromActiveSource(
+        fixture,
         bId,
         startInput({
           task: "legacy-lineage-child",
@@ -12446,8 +14071,8 @@ describe("ProjectSessionCoordinator", () => {
         task: "missing-parent",
         idempotencyKey: "missing-parent-test",
       });
-      await expect(fixture.coordinator.startPeerSession(
-        fixture.handle,
+      await expect(startPeerFromActiveSource(
+        fixture,
         bId,
         input,
       )).rejects.toThrow(/parent.*not found|orchestration/i);
@@ -12488,8 +14113,8 @@ describe("ProjectSessionCoordinator", () => {
         task: "cycle-test",
         idempotencyKey: "cycle-test-input",
       });
-      await expect(fixture.coordinator.startPeerSession(
-        fixture.handle,
+      await expect(startPeerFromActiveSource(
+        fixture,
         bId,
         input,
       )).rejects.toThrow(/cycle/i);
@@ -12543,16 +14168,16 @@ describe("ProjectSessionCoordinator", () => {
         fixture.handle,
         { roleId: "default" },
       );
-      const child = await fixture.coordinator.startPeerSession(
-        fixture.handle,
+      const child = await startPeerFromActiveSource(
+        fixture,
         source.conversationId,
         startInput({
           task: "cascade-child",
           idempotencyKey: "cascade-child",
         }),
       );
-      const grandchild = await fixture.coordinator.startPeerSession(
-        fixture.handle,
+      const grandchild = await startPeerFromActiveSource(
+        fixture,
         child.conversationId,
         startInput({
           task: "cascade-grandchild",
@@ -12608,8 +14233,8 @@ describe("ProjectSessionCoordinator", () => {
         fixture.handle,
         { roleId: "default" },
       );
-      const child = await fixture.coordinator.startPeerSession(
-        fixture.handle,
+      const child = await startPeerFromActiveSource(
+        fixture,
         source.conversationId,
         startInput({
           task: "busy cascade child",
@@ -12674,8 +14299,8 @@ describe("ProjectSessionCoordinator", () => {
         childId,
         { updateRecent: false },
       );
-      const peer = await fixture.coordinator.startPeerSession(
-        fixture.handle,
+      const peer = await startPeerFromActiveSource(
+        fixture,
         childId,
         startInput({
           task: "legacy-no-meta-parent",
@@ -12706,8 +14331,8 @@ describe("ProjectSessionCoordinator", () => {
       let parentId = source.conversationId;
       let deepest: { conversationId: string; runId: string } | undefined;
       for (let depth = 0; depth < MAX_DELEGATION_DEPTH; depth++) {
-        const peer = await fixture.coordinator.startPeerSession(
-          fixture.handle,
+        const peer = await startPeerFromActiveSource(
+          fixture,
           parentId,
           startInput({
             task: `depth level ${depth + 1}`,
@@ -12722,8 +14347,8 @@ describe("ProjectSessionCoordinator", () => {
         task: "one level too deep",
         idempotencyKey: "budget-depth-exceeded",
       });
-      await expect(fixture.coordinator.startPeerSession(
-        fixture.handle,
+      await expect(startPeerFromActiveSource(
+        fixture,
         parentId,
         exceeded,
       )).rejects.toThrow(/depth|maximum/i);
@@ -12856,8 +14481,8 @@ describe("ProjectSessionCoordinator", () => {
 
       const peerIds: string[] = [];
       for (let i = 0; i < MAX_LIVE_DELEGATION_DESCENDANTS; i++) {
-        const peer = await fixture.coordinator.startPeerSession(
-          fixture.handle,
+        const peer = await startPeerFromActiveSource(
+          fixture,
           source.conversationId,
           startInput({
             task: `live-descendant-${i}`,
@@ -12871,8 +14496,8 @@ describe("ProjectSessionCoordinator", () => {
         task: "too many descendants",
         idempotencyKey: "live-descendant-exceeded",
       });
-      await expect(fixture.coordinator.startPeerSession(
-        fixture.handle,
+      await expect(startPeerFromActiveSource(
+        fixture,
         source.conversationId,
         exceeded,
       )).rejects.toThrow(/limit|maximum/i);
@@ -12882,8 +14507,8 @@ describe("ProjectSessionCoordinator", () => {
         fixture.handle,
         peerIds[0]!,
       );
-      const afterDeletion = await fixture.coordinator.startPeerSession(
-        fixture.handle,
+      const afterDeletion = await startPeerFromActiveSource(
+        fixture,
         source.conversationId,
         startInput({
           task: "after descendant deletion",
@@ -12901,8 +14526,8 @@ describe("ProjectSessionCoordinator", () => {
       );
       const peerIds: string[] = [];
       for (let index = 0; index < MAX_LIVE_DELEGATION_DESCENDANTS; index++) {
-        const peer = await fixture.coordinator.startPeerSession(
-          fixture.handle,
+        const peer = await startPeerFromActiveSource(
+          fixture,
           source.conversationId,
           startInput({
             task: `reserved-delete-peer-${index}`,
@@ -12928,17 +14553,24 @@ describe("ProjectSessionCoordinator", () => {
         task: "reservation must not free a slot",
         idempotencyKey: "reserved-delete-exceeded",
       });
+      const raceSourceRun = await startBlockedSourceRun(
+        fixture,
+        source.conversationId,
+        "race the reserved descendant admission",
+      );
       const results = await Promise.allSettled([
         fixture.coordinator.startPeerSession(
           fixture.handle,
           source.conversationId,
-          exceededInput,
+          { ...exceededInput, sourceRunId: raceSourceRun.runId },
         ),
         fixture.coordinator.deleteConversation(
           fixture.handle,
           peerIds[0]!,
         ),
       ]);
+      raceSourceRun.release.resolve();
+      await raceSourceRun.completion;
       expect(results.map(({ status }) => status)).toEqual([
         "rejected",
         "rejected",
@@ -12983,8 +14615,10 @@ describe("ProjectSessionCoordinator", () => {
           throw new Error("simulated crash after precommit");
         }
       };
-      await expect(fixture.coordinator.startPeerSession(
-        fixture.handle, source.conversationId, precommitInput,
+      await expect(startPeerFromActiveSource(
+        fixture,
+        source.conversationId,
+        precommitInput,
       )).rejects.toThrow("simulated crash after precommit");
 
       await fixture.coordinator.close();
@@ -12996,9 +14630,15 @@ describe("ProjectSessionCoordinator", () => {
       const handle = await restarted.acquireProject(fixture.cwd, "full_access");
       await restarted.openConversation(handle, source.conversationId, { updateRecent: false });
 
+      const restartedFixture: Fixture = {
+        ...fixture,
+        coordinator: restarted,
+        handle,
+      };
       for (let i = 0; i < MAX_LIVE_DELEGATION_DESCENDANTS; i++) {
-        await restarted.startPeerSession(
-          handle, source.conversationId,
+        await startPeerFromActiveSource(
+          restartedFixture,
+          source.conversationId,
           startInput({ task: `filler-${i}`, idempotencyKey: `filler-${i}` }),
         );
       }

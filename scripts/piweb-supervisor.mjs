@@ -10,15 +10,22 @@ import {
   open,
   readFile,
   realpath,
-  rename,
   rm,
   stat,
-  writeFile,
 } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  applyReloadResumeDispositions,
+  completeReloadTarget,
+  isPreparedReloadTargets,
+  isReloadResumeDispositions,
+  readReloadManifest,
+  recordReloadTargets,
+  reloadTargetsForChild,
+} from "./piweb-reload-manifest.mjs";
 
 const DEFAULT_PORT = 31415;
 const MAX_RESUME_ATTEMPTS = 6;
@@ -57,6 +64,15 @@ async function runSupervisor(dev) {
   let shuttingDown = false;
   let shutdownPromise;
   let resumeResponse;
+  let resumeReconciledChild;
+  let pendingResumeChild;
+  let manifestMutation = Promise.resolve();
+
+  function queueManifestMutation(mutation) {
+    const result = manifestMutation.then(mutation, mutation);
+    manifestMutation = result.then(() => undefined, () => undefined);
+    return result;
+  }
 
   function unavailable(message) {
     const error = new Error(message);
@@ -188,9 +204,23 @@ async function runSupervisor(dev) {
   }
 
   function beginResume(child) {
-    if (resumePromise) return;
+    if (resumePromise) {
+      pendingResumeChild = child;
+      return;
+    }
+    pendingResumeChild = undefined;
     resumePromise = resumeFromManifest(child).finally(() => {
       resumePromise = undefined;
+      const pending = pendingResumeChild;
+      pendingResumeChild = undefined;
+      if (
+        pending
+        && !shuttingDown
+        && pending === serverChild
+        && serverChildReady
+      ) {
+        beginResume(pending);
+      }
     });
   }
 
@@ -248,19 +278,21 @@ async function runSupervisor(dev) {
         return;
       }
       operation.resolveChildAcceptance();
-      if (!isReloadTargets(message.targets)) {
+      if (!isPreparedReloadTargets(message.targets)) {
         console.error("Server child returned an invalid reload target list.");
         child.kill("SIGTERM");
         return;
       }
 
       operation.phase = "stopping";
-      operation.manifestWrite = recordReloadTargets(
-        manifestPath,
-        repoRoot,
-        appPort,
-        operation.requestId,
-        message.targets,
+      operation.manifestWrite = queueManifestMutation(() =>
+        recordReloadTargets(
+          manifestPath,
+          repoRoot,
+          appPort,
+          operation.requestId,
+          message.targets,
+        )
       );
       operation.manifestWrite.then(
         () => console.log(
@@ -280,15 +312,62 @@ async function runSupervisor(dev) {
         !response
         || response.child !== child
         || response.requestId !== message.requestId
+        || response.resumeId !== message.resumeId
       ) {
         return;
       }
       resumeResponse = undefined;
-      if (!isReloadTargets(message.pending)) {
-        response.reject(new Error("The server child returned an invalid pending target list."));
+      if (!isReloadResumeDispositions(message.dispositions)) {
+        response.reject(new Error("The server child returned invalid reload dispositions."));
       } else {
-        response.resolve(message.pending);
+        response.resolve(message.dispositions);
       }
+      return;
+    }
+
+    if (
+      message.type === "piweb_reload_target_completed"
+      && typeof message.requestId === "string"
+      && typeof message.cwd === "string"
+      && typeof message.conversationId === "string"
+      && typeof message.runId === "string"
+    ) {
+      void queueManifestMutation(() => completeReloadTarget(
+        manifestPath,
+        repoRoot,
+        appPort,
+        message.requestId,
+        {
+          cwd: message.cwd,
+          conversationId: message.conversationId,
+          runId: message.runId,
+        },
+      )).then(
+        async (removed) => {
+          if (removed) {
+            console.log(
+              `Reload ${message.requestId} completed target ${message.conversationId}.`,
+            );
+          }
+          if (child !== serverChild || !child.connected) return;
+          await sendIpc(child, {
+            type: removed
+              ? "piweb_reload_target_completion_ack"
+              : "piweb_reload_target_completion_rejected",
+            requestId: message.requestId,
+            cwd: message.cwd,
+            conversationId: message.conversationId,
+            runId: message.runId,
+          });
+        },
+        (error) => {
+          console.error("Could not record reload target completion.", error);
+          if (child === serverChild && child.connected) child.kill("SIGTERM");
+        },
+      ).catch((error) => {
+        console.error("Could not acknowledge reload target completion.", error);
+        if (child === serverChild && child.connected) child.kill("SIGTERM");
+      });
       return;
     }
 
@@ -313,7 +392,7 @@ async function runSupervisor(dev) {
     }
   }
 
-  async function sendResumeAndWait(child, manifest) {
+  async function sendResumeAndWait(child, manifest, targets) {
     if (resumeResponse) {
       throw new Error("Reload recovery already has a pending child response.");
     }
@@ -323,8 +402,10 @@ async function runSupervisor(dev) {
       resolveResponse = resolve;
       rejectResponse = reject;
     });
+    const resumeId = randomUUID();
     const response = {
       requestId: manifest.requestId,
+      resumeId,
       child,
       resolve: resolveResponse,
       reject: rejectResponse,
@@ -334,41 +415,83 @@ async function runSupervisor(dev) {
       await sendIpc(child, {
         type: "piweb_resume_reload",
         requestId: manifest.requestId,
-        targets: manifest.pending,
+        resumeId,
+        targets,
       });
     } catch (error) {
       if (resumeResponse === response) resumeResponse = undefined;
       throw error;
     }
-    return responsePromise;
+    return {
+      dispositions: await responsePromise,
+      resumeId,
+    };
   }
 
   async function resumeFromManifest(child) {
     try {
-      let manifest = await readReloadManifest(manifestPath, repoRoot, appPort);
+      let manifest = await queueManifestMutation(() =>
+        readReloadManifest(manifestPath, repoRoot, appPort)
+      );
       if (!manifest) {
+        await sendIpc(child, { type: "piweb_reload_reconciliation_complete" });
         resumePassDelayMs = RESUME_RETRY_DELAY_MS;
         if (reloadOperation?.phase === "resuming") reloadOperation = undefined;
         return;
       }
 
+      let includeAdopted = resumeReconciledChild !== child;
       for (let attempt = 1; attempt <= MAX_RESUME_ATTEMPTS; attempt += 1) {
         if (shuttingDown || child !== serverChild || !serverChildReady) {
           throw unavailable("The server child changed during reload recovery.");
         }
-        const pending = await sendResumeAndWait(child, manifest);
-        if (pending.length === 0) {
-          await rm(manifestPath, { force: true });
+        // Exactly one pass per child reconciles every durable target,
+        // including prior adoptions. Later passes in the same child retry only
+        // targets which still have no owner.
+        const targets = reloadTargetsForChild(manifest, includeAdopted);
+        if (targets.length === 0) {
           resumePassDelayMs = RESUME_RETRY_DELAY_MS;
-          manifest = undefined;
           break;
         }
+        if (includeAdopted) {
+          resumeReconciledChild = child;
+          includeAdopted = false;
+        }
+        const { dispositions, resumeId } = await sendResumeAndWait(
+          child,
+          manifest,
+          targets,
+        );
+        const applied = await queueManifestMutation(() =>
+          applyReloadResumeDispositions(
+            manifestPath,
+            repoRoot,
+            appPort,
+            manifest.requestId,
+            targets,
+            dispositions,
+          )
+        );
+        if (applied.stale || !applied.manifest) {
+          throw new Error("Reload dispositions lost their exact manifest authority.");
+        }
+        await sendIpc(child, {
+          type: "piweb_reload_resumed_applied",
+          requestId: manifest.requestId,
+          resumeId,
+        });
+        manifest = applied.manifest;
 
-        manifest = { ...manifest, pending };
-        await writeReloadManifest(manifestPath, manifest);
+        const retryCount = manifest.targets.filter(
+          (target) => target.state === "unadopted",
+        ).length;
+        if (retryCount === 0) {
+          resumePassDelayMs = RESUME_RETRY_DELAY_MS;
+          break;
+        }
         if (attempt === MAX_RESUME_ATTEMPTS) {
           console.warn(
-            `Reload ${manifest.requestId} still has ${pending.length} pending target(s); scheduling another recovery pass.`,
+            `Reload ${manifest.requestId} still has ${retryCount} unadopted target(s); scheduling another recovery pass.`,
           );
           scheduleResume(child);
           break;
@@ -577,7 +700,12 @@ async function runSupervisor(dev) {
       const controlClose = closeControlServer();
       stopProcess(buildChild, signal);
       stopProcess(serverChild, signal);
-      await Promise.allSettled([controlClose, serverChildExit, resumePromise].filter(Boolean));
+      await Promise.allSettled([
+        controlClose,
+        serverChildExit,
+        resumePromise,
+        manifestMutation,
+      ].filter(Boolean));
       await removeOwnControlDescriptor();
       process.exitCode = exitCode;
     })();
@@ -632,85 +760,6 @@ function readAppPort() {
     throw new Error(`Invalid PORT: ${rawPort}`);
   }
   return port;
-}
-
-function isReloadTargets(value) {
-  return Array.isArray(value) && value.every((target) => (
-    target
-    && typeof target === "object"
-    && typeof target.cwd === "string"
-    && target.cwd.length > 0
-    && typeof target.conversationId === "string"
-    && target.conversationId.length > 0
-    && typeof target.continueTask === "boolean"
-  ));
-}
-
-function isReloadManifest(value, repoRoot, appPort) {
-  return value
-    && typeof value === "object"
-    && value.version === 1
-    && value.repoCwd === repoRoot
-    && value.appPort === appPort
-    && typeof value.requestId === "string"
-    && value.requestId.length > 0
-    && isReloadTargets(value.pending);
-}
-
-function mergeTargets(previous, current) {
-  const targets = new Map();
-  for (const target of [...previous, ...current]) {
-    const key = JSON.stringify([target.cwd, target.conversationId]);
-    const existing = targets.get(key);
-    targets.set(key, existing
-      ? { ...target, continueTask: existing.continueTask || target.continueTask }
-      : target);
-  }
-  return [...targets.values()];
-}
-
-async function readReloadManifest(path, repoRoot, appPort) {
-  let value;
-  try {
-    value = JSON.parse(await readFile(path, "utf8"));
-  } catch (error) {
-    if (error?.code === "ENOENT") return undefined;
-    throw error;
-  }
-  if (!isReloadManifest(value, repoRoot, appPort)) {
-    throw new Error("The Pi Web reload manifest is invalid.");
-  }
-  return value;
-}
-
-async function recordReloadTargets(path, repoRoot, appPort, requestId, current) {
-  const previous = await readReloadManifest(path, repoRoot, appPort);
-  await writeReloadManifest(path, {
-    version: 1,
-    repoCwd: repoRoot,
-    appPort,
-    requestId,
-    pending: mergeTargets(previous?.pending ?? [], current),
-  });
-}
-
-async function writeReloadManifest(path, manifest) {
-  const temporaryPath = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
-  try {
-    await writeFile(temporaryPath, `${JSON.stringify(manifest)}\n`, {
-      encoding: "utf8",
-      flag: "wx",
-      mode: 0o600,
-    });
-    await rename(temporaryPath, path);
-    try {
-      await chmod(path, 0o600);
-    } catch {
-      // Windows may not enforce POSIX modes.
-    }
-  } finally {
-    await rm(temporaryPath, { force: true });
-  }
 }
 
 function sendJson(response, statusCode, body) {

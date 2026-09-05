@@ -15,6 +15,7 @@ import {
   MAX_INBOX_TOTAL_BYTES,
   ProjectInbox,
   createInboxEnvelope,
+  inboxEnvelopePayloadFingerprint,
   parseInboxEnvelope,
 } from "./project-inbox.js";
 
@@ -190,6 +191,28 @@ describe("ProjectInbox envelope schema", () => {
     expect(() => createInboxEnvelope(input({
       body: "   ",
     }))).toThrow(/body/i);
+  });
+});
+
+describe("inboxEnvelopePayloadFingerprint", () => {
+  it("binds immutable payload without binding transport state", () => {
+    const value = input({ fromRunId: randomUUID() });
+    const runId = randomUUID();
+    const queued = createInboxEnvelope(value);
+    const processing = createInboxEnvelope(value, {
+      state: "processing",
+      processingRunId: runId,
+      processingDelivery: "steer",
+      waitedByRunId: runId,
+    });
+
+    expect(inboxEnvelopePayloadFingerprint(processing)).toBe(
+      inboxEnvelopePayloadFingerprint(queued),
+    );
+    expect(inboxEnvelopePayloadFingerprint(createInboxEnvelope({
+      ...value,
+      body: "A different immutable body",
+    }))).not.toBe(inboxEnvelopePayloadFingerprint(queued));
   });
 });
 

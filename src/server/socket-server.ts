@@ -19,6 +19,8 @@ import type { PiRuntimeLike } from "./pi-runtime.js";
 import {
   ProjectSessionCoordinator,
   type ReloadConversationTarget,
+  type ReloadResumeDisposition,
+  type ReloadTargetCompletion,
 } from "./project-session-coordinator.js";
 import {
   PiConnection,
@@ -34,8 +36,15 @@ export interface SocketServerHandle {
     onAdmissionFrozen: () => void,
   ): Promise<ReloadConversationTarget[]>;
   resumeAfterReload(
+    requestId: string,
     targets: readonly ReloadConversationTarget[],
-  ): Promise<ReloadConversationTarget[]>;
+    onTargetCompleted: (completion: ReloadTargetCompletion) => Promise<void>,
+  ): Promise<ReloadResumeDisposition[]>;
+  acknowledgeReloadDispositions(
+    requestId: string,
+    dispositions: readonly ReloadResumeDisposition[],
+  ): Promise<void>;
+  releaseStartupAdmission(): void;
   close(): Promise<void>;
 }
 
@@ -128,6 +137,7 @@ export function attachSocketServer(
   startupCwd: string,
   runtime: PiRuntimeLike,
   directoryBrowser: DirectoryBrowser = listDirectory,
+  blockStartupAdmission = false,
 ): SocketServerHandle {
   const sockets = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES });
   const connections = new Map<WebSocket, PiConnection>();
@@ -135,6 +145,7 @@ export function attachSocketServer(
   const projects = new ProjectStoreRegistry();
   let coordinationPromise: Promise<PiConnectionCoordination> | undefined;
   let closePromise: Promise<void> | undefined;
+  let startupAdmissionBlocked = blockStartupAdmission;
 
   const coordination = (): Promise<PiConnectionCoordination> => {
     coordinationPromise ??= RoleCatalog.open(runtime).then((roles) => ({
@@ -169,6 +180,13 @@ export function attachSocketServer(
       )
     ) {
       socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+    if (startupAdmissionBlocked) {
+      socket.write(
+        "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nRetry-After: 1\r\n\r\n",
+      );
       socket.destroy();
       return;
     }
@@ -261,10 +279,24 @@ export function attachSocketServer(
       const { coordinator } = await coordinationPromise;
       return coordinator.prepareReload(force, onAdmissionFrozen);
     },
-    async resumeAfterReload(targets) {
+    async resumeAfterReload(requestId, targets, onTargetCompleted) {
       if (targets.length === 0) return [];
       const { coordinator } = await coordination();
-      return coordinator.resumeAfterReload(targets);
+      return coordinator.resumeAfterReload(
+        requestId,
+        targets,
+        onTargetCompleted,
+      );
+    },
+    async acknowledgeReloadDispositions(requestId, dispositions) {
+      const { coordinator } = await coordination();
+      await coordinator.acknowledgeReloadDispositions(
+        requestId,
+        dispositions,
+      );
+    },
+    releaseStartupAdmission() {
+      startupAdmissionBlocked = false;
     },
     close() {
       if (closePromise) return closePromise;

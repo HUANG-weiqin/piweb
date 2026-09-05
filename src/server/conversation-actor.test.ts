@@ -64,6 +64,8 @@ const TARGET_CONVERSATION_ID =
 const ROLE_ID = "b17204b1-6155-4fea-9be5-a70aaa670bf3";
 const RUN_A = "ba39f161-b67f-47c9-9285-e391427ed7d0";
 const RUN_B = "65feacc3-00b4-45bd-80ee-5e18bc32f7dc";
+const RELOAD_REQUEST_ID = "a73ba106-664e-4915-85d8-f82d12ed9658";
+const OTHER_RELOAD_REQUEST_ID = "5e2e5f95-8434-4a25-a760-428d929e7d6a";
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -2723,21 +2725,25 @@ describe("ConversationActor", () => {
     void running;
   });
 
-  it("starts a hidden reload continuation as a fresh completed run", async () => {
+  it("starts one hidden reload continuation for a duplicate request", async () => {
     const fixture = await openActor();
     const emit = () => fixture.runtime.session.eventListener;
+    const finishRun = deferred();
     let received: {
       customType: string;
       display: boolean;
+      details: unknown;
       triggerTurn: boolean;
     } | undefined;
     fixture.runtime.session.resumeImplementation = async (message, options) => {
       received = {
         customType: message.customType,
         display: message.display,
+        details: message.details,
         triggerTurn: options?.triggerTurn === true,
       };
       emit()?.(nativeEvent({ type: "agent_start" }));
+      await finishRun.promise;
       emit()?.(nativeEvent({
         type: "message_end",
         message: {
@@ -2749,18 +2755,225 @@ describe("ConversationActor", () => {
       emit()?.(nativeEvent({ type: "agent_end" }));
     };
 
-    await expect(fixture.actor.startReloadContinuation(RUN_B))
-      .resolves.toMatchObject({
-        runId: RUN_B,
-        outcome: "completed",
-        finalText: "reload resumed",
-      });
+    const input = {
+      requestId: RELOAD_REQUEST_ID,
+      continuationRunId: RUN_B,
+    };
+    const continuation = fixture.actor.startReloadContinuation(input);
+    expect(fixture.actor.startReloadContinuation(input)).toBe(continuation);
+    expect(() => fixture.actor.startReloadContinuation({
+      ...input,
+      requestId: OTHER_RELOAD_REQUEST_ID,
+    })).toThrow("conflicts with its active run");
+    finishRun.resolve();
+    await expect(continuation).resolves.toMatchObject({
+      runId: RUN_B,
+      outcome: "completed",
+      finalText: "reload resumed",
+    });
     expect(received).toEqual({
       customType: "workbench.reload_resume.v1",
       display: false,
+      details: {
+        ...input,
+        adoptedRunId: RUN_B,
+      },
       triggerTurn: true,
     });
+    expect(fixture.runtime.session.resumeCalls).toBe(1);
     expect(fixture.runtime.session.promptCalls).toEqual([]);
+    await fixture.actor.dispose();
+  });
+
+  it("uses a generic trigger when recovering a persisted reload marker", async () => {
+    const manager = SessionManager.inMemory(process.cwd(), {
+      id: CONVERSATION_ID,
+    });
+    manager.appendCustomMessageEntry(
+      "workbench.reload_resume.v1",
+      "original reload continuation",
+      false,
+      {
+        requestId: RELOAD_REQUEST_ID,
+        continuationRunId: RUN_B,
+        adoptedRunId: RUN_B,
+      },
+    );
+    const fixture = await openActor({ sessionManager: manager });
+    const emit = () => fixture.runtime.session.eventListener;
+    let receivedType: string | undefined;
+    fixture.runtime.session.resumeImplementation = async (message) => {
+      receivedType = message.customType;
+      emit()?.(nativeEvent({ type: "agent_start" }));
+      emit()?.(nativeEvent({ type: "agent_end" }));
+    };
+
+    expect(() => fixture.actor.startReloadContinuation({
+      requestId: OTHER_RELOAD_REQUEST_ID,
+      continuationRunId: RUN_B,
+    })).toThrow("conflicts with its marker");
+    expect(fixture.runtime.session.resumeCalls).toBe(0);
+
+    await fixture.actor.startReloadContinuation({
+      requestId: RELOAD_REQUEST_ID,
+      continuationRunId: RUN_B,
+    });
+
+    expect(receivedType).toBe("workbench.reload_recovery.v1");
+    expect(fixture.manager.getBranch().filter((entry) => (
+      entry.type === "custom_message"
+      && entry.customType === "workbench.reload_resume.v1"
+    ))).toHaveLength(1);
+    await fixture.actor.dispose();
+  });
+
+  it("rejects a legacy reload marker without correlation details", async () => {
+    const manager = SessionManager.inMemory(process.cwd(), {
+      id: CONVERSATION_ID,
+    });
+    manager.appendCustomMessageEntry(
+      "workbench.reload_resume.v1",
+      "legacy reload continuation",
+      false,
+    );
+    const fixture = await openActor({ sessionManager: manager });
+
+    expect(() => fixture.actor.reloadContinuationAdoptedRunId({
+      requestId: RELOAD_REQUEST_ID,
+      continuationRunId: RUN_B,
+    })).toThrow("invalid adopted identity");
+    expect(fixture.runtime.session.resumeCalls).toBe(0);
+    await fixture.actor.dispose();
+  });
+
+  it.each([
+    [
+      "legacy marker without adopted run identity",
+      [{
+        requestId: RELOAD_REQUEST_ID,
+        continuationRunId: RUN_B,
+      }],
+      "invalid adopted identity",
+    ],
+    [
+      "markers with conflicting adopted run identities",
+      [
+        {
+          requestId: RELOAD_REQUEST_ID,
+          continuationRunId: RUN_B,
+          adoptedRunId: RUN_A,
+        },
+        {
+          requestId: RELOAD_REQUEST_ID,
+          continuationRunId: RUN_B,
+          adoptedRunId: "39af7567-b6b6-41cf-af40-bf87385313ea",
+        },
+      ],
+      "conflicting adopted identities",
+    ],
+  ])("rejects %s", async (_name, details, expectedError) => {
+    const manager = SessionManager.inMemory(process.cwd(), {
+      id: CONVERSATION_ID,
+    });
+    for (const markerDetails of details) {
+      manager.appendCustomMessageEntry(
+        "workbench.reload_resume.v1",
+        "reload continuation",
+        false,
+        markerDetails,
+      );
+    }
+    const fixture = await openActor({ sessionManager: manager });
+
+    expect(() => fixture.actor.reloadContinuationAdoptedRunId({
+      requestId: RELOAD_REQUEST_ID,
+      continuationRunId: RUN_B,
+    })).toThrow(expectedError);
+    expect(fixture.runtime.session.resumeCalls).toBe(0);
+    await fixture.actor.dispose();
+  });
+
+  it("absorbs a duplicate reload continuation into the exact inbox run", async () => {
+    const fixture = await openActor();
+    const emit = () => fixture.runtime.session.eventListener;
+    const runStarted = deferred();
+    const allowReloadDelivery = deferred();
+    const finishRun = deferred();
+    const deliveries: Array<{
+      customType: string;
+      details: unknown;
+      deliverAs: string | undefined;
+    }> = [];
+    fixture.runtime.session.promptImplementation = async () => {
+      fixture.runtime.session.isStreaming = true;
+      emit()?.(nativeEvent({ type: "agent_start" }));
+      runStarted.resolve();
+      await finishRun.promise;
+      emit()?.(nativeEvent({ type: "agent_end" }));
+      fixture.runtime.session.isStreaming = false;
+    };
+    fixture.runtime.session.resumeImplementation = async (message, options) => {
+      deliveries.push({
+        customType: message.customType,
+        details: message.details,
+        deliverAs: options?.deliverAs,
+      });
+      await allowReloadDelivery.promise;
+      fixture.manager.appendCustomMessageEntry(
+        message.customType,
+        message.content,
+        message.display,
+        message.details,
+      );
+    };
+
+    const running = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "process durable inbox work",
+      origin: "inbox",
+    });
+    await runStarted.promise;
+    const input = {
+      requestId: RELOAD_REQUEST_ID,
+      continuationRunId: RUN_B,
+      runId: RUN_A,
+    };
+    const first = fixture.actor.queueReloadContinuation(input);
+    const duplicate = fixture.actor.queueReloadContinuation(input);
+    await expect(fixture.actor.queueReloadContinuation({
+      ...input,
+      requestId: OTHER_RELOAD_REQUEST_ID,
+    })).rejects.toThrow("conflicts with its delivery");
+    allowReloadDelivery.resolve();
+    await expect(Promise.all([first, duplicate])).resolves.toEqual([
+      undefined,
+      undefined,
+    ]);
+    await expect(fixture.actor.queueReloadContinuation({
+      ...input,
+      runId: "a88ee8be-5e6b-44ad-9e8a-06bff140ec1f",
+    })).rejects.toThrow("exact active inbox run");
+
+    expect(deliveries).toEqual([{
+      customType: "workbench.reload_resume.v1",
+      details: {
+        requestId: RELOAD_REQUEST_ID,
+        continuationRunId: RUN_B,
+        adoptedRunId: RUN_A,
+      },
+      deliverAs: "steer",
+    }]);
+    finishRun.resolve();
+    await running;
+    const continuation = {
+      requestId: RELOAD_REQUEST_ID,
+      continuationRunId: RUN_B,
+    };
+    expect(fixture.actor.reloadContinuationAdoptedRunId(continuation))
+      .toBe(RUN_A);
+    expect(() => fixture.actor.startReloadContinuation(continuation))
+      .toThrow("different adopted run");
+    expect(fixture.runtime.session.resumeCalls).toBe(1);
     await fixture.actor.dispose();
   });
 
@@ -2785,7 +2998,10 @@ describe("ConversationActor", () => {
     };
 
     const promptId = "prompt-after-reload";
-    const running = fixture.actor.startReloadContinuation(RUN_B);
+    const running = fixture.actor.startReloadContinuation({
+      requestId: RELOAD_REQUEST_ID,
+      continuationRunId: RUN_B,
+    });
     await runStarted.promise;
     await fixture.actor.admitBrowserPrompt({
       promptId,

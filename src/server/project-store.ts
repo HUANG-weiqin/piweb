@@ -32,6 +32,7 @@ import type {
 } from "../shared/protocol.js";
 import {
   createConversationMetaEntry,
+  parseReservedConversationEntry,
   type ConversationMeta,
 } from "./conversation-meta.js";
 import { deleteConversationNotebook } from "./conversation-notebook.js";
@@ -1010,7 +1011,50 @@ export class ProjectStore {
       if (anchor.type !== "message") {
         throw new Error(`Truncation anchor is not a message: ${entryId}`);
       }
-      const next = `${lines.slice(0, entryLine).join("\n")}\n`;
+
+      const parsedEntries = lines
+        .slice(1)
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const receiptTargetRunIds = new Set<string>();
+      for (const entry of parsedEntries) {
+        const reserved = parseReservedConversationEntry(entry);
+        if (reserved?.kind === "message_delivery_receipt") {
+          receiptTargetRunIds.add(reserved.entry.data.targetRunId);
+        }
+      }
+
+      const retainedLines = lines.slice(0, entryLine);
+      let retainedParentId: string | null = null;
+      for (let index = retainedLines.length - 1; index >= 1; index -= 1) {
+        const line = retainedLines[index]!;
+        if (line.trim().length === 0) continue;
+        retainedParentId = (JSON.parse(line) as { id: string }).id;
+        break;
+      }
+      for (let index = entryLine + 1; index < lines.length; index += 1) {
+        const line = lines[index]!;
+        if (line.trim().length === 0) continue;
+        const entry = JSON.parse(line) as Record<string, unknown>;
+        const reserved = parseReservedConversationEntry(entry);
+        if (
+          reserved?.kind !== "message_delivery_receipt"
+          && reserved?.kind !== "temporary_return_receipt"
+          && (
+            reserved?.kind !== "run_settlement"
+            || !receiptTargetRunIds.has(reserved.entry.data.runId)
+          )
+        ) {
+          continue;
+        }
+        const preserved = {
+          ...entry,
+          parentId: retainedParentId,
+        };
+        retainedLines.push(JSON.stringify(preserved));
+        retainedParentId = entry.id as string;
+      }
+      const next = `${retainedLines.join("\n")}\n`;
       validatePiSessionFile(next, safePath, conversationId);
 
       const temporaryPath = join(

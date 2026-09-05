@@ -227,6 +227,15 @@ export interface ResumeConversationMessages {
   runId: string;
 }
 
+export interface ReloadContinuationInput {
+  requestId: string;
+  continuationRunId: string;
+}
+
+export interface QueueReloadContinuationInput extends ReloadContinuationInput {
+  runId: string;
+}
+
 export interface ConversationWaitingTarget {
   conversationId: string;
   runId: string;
@@ -273,7 +282,7 @@ interface Deferred<T> {
 }
 
 interface PendingCustomSteer {
-  readonly message: ConversationMessageEntry;
+  readonly message: Parameters<AgentSession["sendCustomMessage"]>[0];
   readonly delivery: Deferred<void>;
 }
 
@@ -312,6 +321,15 @@ interface RunTicket {
   readonly completion: Deferred<RunSettlement>;
   readonly guidanceDeliveries: PendingGuidance[];
   readonly customSteerDeliveries: PendingCustomSteer[];
+  readonly reloadContinuationDeliveries: Map<
+    string,
+    {
+      readonly requestId: string;
+      readonly adoptedRunId: string;
+      readonly promise: Promise<void>;
+    }
+  >;
+  readonly reloadContinuation?: ReloadContinuationInput;
   /** The first raw user message belongs to startPrompt(), never guidance. */
   expectsInitialPromptRawUserMessage: boolean;
   /** Original first prompt used by the queued host naming preflight. */
@@ -479,6 +497,74 @@ function rawUserMessageIsPersisted(
 
 function isCancelling(ticket: RunTicket): boolean {
   return ticket.phase === "cancelling";
+}
+
+const RELOAD_RESUME_CUSTOM_TYPE = "workbench.reload_resume.v1";
+const RELOAD_RECOVERY_CUSTOM_TYPE = "workbench.reload_recovery.v1";
+const RELOAD_CONTINUATION_CONTENT =
+  "Continue the unfinished task from the retained conversation context and current workspace state without waiting for another user message. Before repeating any operation, verify the current workspace and any external side effects because the previous process may have stopped after an operation took effect.";
+
+function readReloadContinuationMarker(
+  entries: readonly unknown[],
+  input: ReloadContinuationInput,
+): string | undefined {
+  let markerRequestId: string | undefined;
+  let adoptedRunId: string | undefined;
+  for (const entry of entries) {
+    if (
+      typeof entry !== "object"
+      || entry === null
+      || !("type" in entry)
+      || entry.type !== "custom_message"
+      || !("customType" in entry)
+      || entry.customType !== RELOAD_RESUME_CUSTOM_TYPE
+    ) continue;
+    if (
+      !("details" in entry)
+      || !isPlainDetails(entry.details)
+      || typeof entry.details.continuationRunId !== "string"
+    ) {
+      throw new Error("Reload continuation marker has an invalid adopted identity");
+    }
+    if (entry.details.continuationRunId !== input.continuationRunId) continue;
+    if (
+      typeof entry.details.requestId !== "string"
+      || typeof entry.details.adoptedRunId !== "string"
+    ) {
+      throw new Error("Reload continuation marker has an invalid adopted identity");
+    }
+    if (
+      markerRequestId !== undefined
+      && (
+        markerRequestId !== entry.details.requestId
+        || adoptedRunId !== entry.details.adoptedRunId
+      )
+    ) {
+      throw new Error("Reload continuation markers have conflicting adopted identities");
+    }
+    markerRequestId = entry.details.requestId;
+    adoptedRunId = entry.details.adoptedRunId;
+  }
+  if (markerRequestId !== undefined && markerRequestId !== input.requestId) {
+    throw new Error("Reload continuation request identity conflicts with its marker");
+  }
+  return adoptedRunId;
+}
+
+function reloadContinuationMessage(
+  input: ReloadContinuationInput,
+  adoptedRunId: string,
+) {
+  return {
+    customType: RELOAD_RESUME_CUSTOM_TYPE,
+    content: RELOAD_CONTINUATION_CONTENT,
+    display: false,
+    details: {
+      requestId: input.requestId,
+      continuationRunId: input.continuationRunId,
+      adoptedRunId,
+    },
+  };
 }
 
 interface LiveConversationProjection {
@@ -1761,20 +1847,130 @@ export class ConversationActor {
     return delivery.promise;
   }
 
-  startReloadContinuation(runId: string): Promise<RunSettlement> {
+  /**
+   * Queues the browser reload instruction into an exact active inbox run. The
+   * stable continuation identity prevents a lost supervisor response from
+   * queueing the original instruction twice in one process; after a crash the
+   * persisted marker decides whether the original or a generic recovery
+   * trigger is needed.
+   */
+  queueReloadContinuation(input: QueueReloadContinuationInput): Promise<void> {
+    this.assertUsable();
+    const ticket = this.activeRun;
+    if (
+      !ticket
+      || ticket.id !== input.runId
+      || ticket.origin !== "inbox"
+      || ticket.phase === "cancelling"
+      || ticket.finishPromise !== undefined
+    ) {
+      return Promise.reject(
+        new Error("Reload continuation can only join the exact active inbox run"),
+      );
+    }
+    const markerRunId = this.reloadContinuationAdoptedRunId(input);
+    if (markerRunId !== undefined) {
+      return markerRunId === input.runId
+        ? Promise.resolve()
+        : Promise.reject(new Error(
+            "Reload continuation marker belongs to a different adopted run",
+          ));
+    }
+    const existing = ticket.reloadContinuationDeliveries.get(
+      input.continuationRunId,
+    );
+    if (existing) {
+      if (
+        existing.requestId !== input.requestId
+        || existing.adoptedRunId !== input.runId
+      ) {
+        return Promise.reject(
+          new Error("Reload continuation identity conflicts with its delivery"),
+        );
+      }
+      return existing.promise;
+    }
+
+    const delivery = deferred<void>();
+    const queued = delivery.promise.catch((error: unknown) => {
+      if (
+        ticket.reloadContinuationDeliveries.get(input.continuationRunId)?.promise
+        === queued
+      ) {
+        ticket.reloadContinuationDeliveries.delete(input.continuationRunId);
+      }
+      throw error;
+    });
+    ticket.reloadContinuationDeliveries.set(input.continuationRunId, {
+      requestId: input.requestId,
+      adoptedRunId: input.runId,
+      promise: queued,
+    });
+    ticket.customSteerDeliveries.push({
+      message: reloadContinuationMessage(input, input.runId),
+      delivery,
+    });
+    this.flushCustomSteers(ticket);
+    return queued;
+  }
+
+  reloadContinuationAdoptedRunId(
+    input: ReloadContinuationInput,
+  ): string | undefined {
+    this.assertUsable();
+    return readReloadContinuationMarker(
+      this.sessionManager.getBranch(),
+      input,
+    );
+  }
+
+  startReloadContinuation(
+    input: ReloadContinuationInput,
+  ): Promise<RunSettlement> {
+    const active = this.activeRun;
+    if (
+      active?.reloadContinuation?.continuationRunId
+      === input.continuationRunId
+    ) {
+      if (active.reloadContinuation.requestId !== input.requestId) {
+        throw new Error(
+          "Reload continuation request identity conflicts with its active run",
+        );
+      }
+      return active.completion.promise;
+    }
+    const markerRunId = this.reloadContinuationAdoptedRunId(input);
+    if (
+      markerRunId !== undefined
+      && markerRunId !== input.continuationRunId
+    ) {
+      throw new Error(
+        "Reload continuation marker belongs to a different adopted run",
+      );
+    }
     return this.startRun(
       {
-        runId,
+        runId: input.continuationRunId,
         origin: "browser",
         recovered: true,
         expectsInitialPromptRawUserMessage: false,
+        reloadContinuation: input,
       },
-      () => this.session.sendCustomMessage({
-        customType: "workbench.reload_resume.v1",
-        content:
-          "Continue the unfinished task from the retained conversation context and current workspace state without waiting for another user message. Before repeating any operation, verify the current workspace and any external side effects because the previous process may have stopped after an operation took effect.",
-        display: false,
-      }, { triggerTurn: true }),
+      () => this.session.sendCustomMessage(
+        markerRunId !== undefined
+          ? {
+              customType: RELOAD_RECOVERY_CUSTOM_TYPE,
+              content: RELOAD_CONTINUATION_CONTENT,
+              display: false,
+              details: {
+                requestId: input.requestId,
+                continuationRunId: input.continuationRunId,
+                adoptedRunId: input.continuationRunId,
+              },
+            }
+          : reloadContinuationMessage(input, input.continuationRunId),
+        { triggerTurn: true },
+      ),
     );
   }
 
@@ -1869,6 +2065,7 @@ export class ConversationActor {
       promptText?: string;
       expectsInitialPromptRawUserMessage: boolean;
       autoTitlePrompt?: string;
+      reloadContinuation?: ReloadContinuationInput;
     },
     execute: (ticket: RunTicket) => Promise<void>,
   ): Promise<RunSettlement> {
@@ -1906,6 +2103,10 @@ export class ConversationActor {
       guidanceDeliveries: [],
       pendingGuidanceObservations: [],
       customSteerDeliveries: [],
+      reloadContinuationDeliveries: new Map(),
+      ...(input.reloadContinuation === undefined
+        ? {}
+        : { reloadContinuation: { ...input.reloadContinuation } }),
       expectsInitialPromptRawUserMessage:
         input.expectsInitialPromptRawUserMessage,
       ...(input.autoTitlePrompt === undefined

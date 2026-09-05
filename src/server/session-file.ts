@@ -10,6 +10,7 @@ import {
   parseReservedConversationEntry,
   type ConversationCard,
   type ConversationMeta,
+  type MessageDeliveryReceipt,
   type MetaOperation,
   type PendingPromptBatch,
   type PendingPromptDelivery,
@@ -46,6 +47,7 @@ export interface PiSessionFileInspection {
   conversationMeta?: ConversationMeta;
   cards: ConversationCard[];
   deliveredMessageIds: string[];
+  messageDeliveryReceipts: MessageDeliveryReceipt[];
   runSettlements: RunSettlement[];
   pendingPromptDeliveries: PendingPromptDelivery[];
   pendingPromptBatches: PendingPromptBatch[];
@@ -533,6 +535,14 @@ function inspectPiSessionFileInternal(
       ) {
         throw new Error(
           "Piweb conversation message target must be the current conversation",
+        );
+      }
+      if (
+        entry?.kind === "message_delivery_receipt"
+        && entry.entry.data.toConversationId !== header.id
+      ) {
+        throw new Error(
+          "Piweb message delivery receipt target must be the current conversation",
         );
       }
       if (

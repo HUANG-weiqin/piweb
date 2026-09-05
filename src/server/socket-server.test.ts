@@ -203,6 +203,51 @@ describe("isAllowedOrigin", () => {
     await Promise.all([socketServer.close(), httpClosed, clientClosed]);
   });
 
+  it("blocks WebSocket admission until reload authority is reconciled", async () => {
+    const server = createServer();
+    const socketServer = attachSocketServer(
+      server,
+      "E:\\work",
+      new SocketTestRuntime(),
+      undefined,
+      true,
+    );
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("server did not bind a TCP port");
+    const url = `ws://127.0.0.1:${address.port}/ws`;
+    const origin = `http://127.0.0.1:${address.port}`;
+
+    const blocked = new WebSocket(url, { origin });
+    await new Promise<void>((resolve, reject) => {
+      blocked.once("unexpected-response", (_request, response) => {
+        try {
+          expect(response.statusCode).toBe(503);
+          response.resume();
+          resolve();
+        } catch (error) {
+          reject(error);
+        }
+      });
+      blocked.once("open", () => reject(new Error("blocked WebSocket unexpectedly opened")));
+      blocked.once("error", () => undefined);
+    });
+
+    socketServer.releaseStartupAdmission();
+    const admitted = new WebSocket(url, { origin });
+    await expect(nextEvent(admitted)).resolves.toEqual({
+      type: "hello",
+      protocolVersion: PROTOCOL_VERSION,
+      startupCwd: "E:\\work",
+    });
+
+    const clientClosed = new Promise<void>((resolve) => admitted.once("close", () => resolve()));
+    const httpClosed = new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+    await Promise.all([socketServer.close(), httpClosed, clientClosed]);
+  });
+
   it("does not acknowledge reload when coordination initialization fails", async () => {
     const server = createServer();
     const runtime = new SocketTestRuntime();
@@ -214,11 +259,16 @@ describe("isAllowedOrigin", () => {
     const socketServer = attachSocketServer(server, "E:\\work", runtime);
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 
-    await expect(socketServer.resumeAfterReload([{
-      cwd: "E:\\work",
-      conversationId: randomUUID(),
-      continueTask: true,
-    }])).rejects.toThrow("role catalog unavailable");
+    await expect(socketServer.resumeAfterReload(
+      randomUUID(),
+      [{
+        cwd: "E:\\work",
+        conversationId: randomUUID(),
+        continueTask: true,
+        continuationRunId: randomUUID(),
+      }],
+      async () => undefined,
+    )).rejects.toThrow("role catalog unavailable");
     const admissionFrozen = vi.fn();
     await expect(socketServer.prepareReload(false, admissionFrozen))
       .rejects.toThrow("role catalog unavailable");

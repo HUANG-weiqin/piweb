@@ -628,6 +628,7 @@ export function projectConversationItemSlots(
       || reserved.kind === "pending_prompt_delivery"
       || reserved.kind === "pending_prompt_batch"
       || reserved.kind === "temporary_return_receipt"
+      || reserved.kind === "message_delivery_receipt"
       || reserved.kind === "meta_operation"
       || reserved.kind === "compaction_threshold"
       || reserved.kind === "service_tier"

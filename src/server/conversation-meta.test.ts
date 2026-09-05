@@ -15,6 +15,7 @@ import {
   LEGACY_LOOP_LIST_CONTINUE_CUSTOM_TYPE,
   LOOP_LIST_CUSTOM_TYPE,
   LOOP_LIST_CONTINUE_CUSTOM_TYPE,
+  MESSAGE_DELIVERY_RECEIPT_CUSTOM_TYPE,
   META_OPERATION_CUSTOM_TYPE,
   PENDING_PROMPT_BATCH_CUSTOM_TYPE,
   PENDING_PROMPT_DELIVERY_CUSTOM_TYPE,
@@ -33,6 +34,7 @@ import {
   createServiceTierSelectionEntry,
   createLoopListEntry,
   createLoopListContinueEntry,
+  createMessageDeliveryReceiptEntry,
   createTemporaryReturnReceiptEntry,
   parseConversationCardEntry,
   parseCompactionThresholdEntry,
@@ -43,6 +45,7 @@ import {
   parsePendingPromptBatchEntry,
   parseLoopListEntry,
   parseLoopListContinueEntry,
+  parseMessageDeliveryReceiptEntry,
   parsePendingPromptDeliveryEntry,
   parseReservedConversationEntry,
   parseRunSettlementEntry,
@@ -50,6 +53,7 @@ import {
   parseTemporaryReturnReceiptEntry,
 } from "./conversation-meta.js";
 import type {
+  MessageDeliveryReceipt,
   PendingPromptBatch,
   PendingPromptBatchEntry,
   PendingPromptDelivery,
@@ -144,6 +148,21 @@ function message() {
       replyToMessageId: randomUUID(),
       delegationId: randomUUID(),
     },
+  };
+}
+
+function deliveryReceipt(): MessageDeliveryReceipt {
+  return {
+    messageId: randomUUID(),
+    cardId: randomUUID(),
+    fromConversationId: randomUUID(),
+    toConversationId: randomUUID(),
+    sourceRunId: randomUUID(),
+    targetRunId: randomUUID(),
+    kind: "message",
+    sentAt: timestamp,
+    payloadFingerprint: "a".repeat(64),
+    deliveredAt: "2026-07-19T10:01:00.000Z",
   };
 }
 
@@ -722,6 +741,50 @@ describe("conversation reserved entries", () => {
     })).toThrow(/content/i);
   });
 
+  it("records strict immutable message delivery receipts and rejects conflicting duplicates", () => {
+    const value = deliveryReceipt();
+    value.temporaryReturnAssignment = {
+      initialRunId: value.sourceRunId,
+      callerRunId: value.targetRunId,
+      assignedAt: timestamp,
+    };
+    const entry = createMessageDeliveryReceiptEntry(value);
+
+    expect(entry.customType).toBe(MESSAGE_DELIVERY_RECEIPT_CUSTOM_TYPE);
+    expect(parseMessageDeliveryReceiptEntry(entry)).toEqual(entry);
+    expect(parseReservedConversationEntry(entry)).toEqual({
+      kind: "message_delivery_receipt",
+      entry,
+    });
+    expect(aggregateReservedConversationEntries([entry, entry])).toMatchObject({
+      deliveredMessageIds: [],
+      messageDeliveryReceipts: [entry.data],
+    });
+
+    value.temporaryReturnAssignment.assignedAt =
+      "2026-07-19T10:02:00.000Z";
+    expect(entry.data.temporaryReturnAssignment?.assignedAt).toBe(timestamp);
+    expect(() => parseMessageDeliveryReceiptEntry({
+      ...entry,
+      data: { ...entry.data, unknown: true },
+    })).toThrow(/unknown|unrecognized/i);
+    expect(() => createMessageDeliveryReceiptEntry({
+      ...entry.data,
+      payloadFingerprint: "A".repeat(64),
+    })).toThrow(/payloadFingerprint/i);
+    expect(() => createMessageDeliveryReceiptEntry({
+      ...entry.data,
+      targetRunId: randomUUID(),
+    })).toThrow(/temporaryReturnAssignment/i);
+    expect(() => aggregateReservedConversationEntries([
+      entry,
+      createMessageDeliveryReceiptEntry({
+        ...entry.data,
+        deliveredAt: "2026-07-19T10:03:00.000Z",
+      }),
+    ])).toThrow(/conflicting.*message delivery receipt/i);
+  });
+
   it("records exact run settlements and requires complete report identity", () => {
     const pending = createRunSettlementEntry(settlement());
     const reported = createRunSettlementEntry({
@@ -1013,9 +1076,9 @@ describe("conversation reserved entries", () => {
         settlement,
       })).toThrow(/returnable/i);
     }
-    expect(() => aggregateReservedConversationEntries([
+    expect(aggregateReservedConversationEntries([
       claimed,
-    ])).toThrow(/requires an earlier initial delegation card/i);
+    ]).temporaryReturnReceipts).toEqual([claimed.data]);
     expect(() => aggregateReservedConversationEntries([
       delegation,
       settled,

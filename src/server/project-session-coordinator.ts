@@ -19,15 +19,18 @@ import {
   createConversationCardEntry,
   createConversationMetaEntry,
   createConversationMessageEntry,
+  createMessageDeliveryReceiptEntry,
   createMetaOperationEntry,
   createRunSettlementEntry,
   createTemporaryReturnReceiptEntry,
   MAX_CONVERSATION_BODY_BYTES,
+  parseReservedConversationEntry,
   type ConversationCard,
   type ConversationMessageEntry,
   type ConversationMeta,
   type ConversationOrchestration,
   type ConversationReferenceSnapshot,
+  type MessageDeliveryReceipt,
   type MetaOperation,
   type RunSettlement,
   type TemporaryReturnReceipt,
@@ -87,6 +90,7 @@ import type {
 } from "./pi-runtime.js";
 import type { PortableExtensionUI } from "./extension-ui.js";
 import {
+  inboxEnvelopePayloadFingerprint,
   ProjectInbox,
   type InboxEnvelope,
   type InboxEnvelopeInput,
@@ -146,6 +150,36 @@ export interface ReloadConversationTarget {
   conversationId: string;
   /** False when opening the project is enough for durable inbox recovery. */
   continueTask: boolean;
+  continuationRunId?: string;
+  adoptedRunId?: string;
+}
+
+export type ReloadResumeDisposition =
+  | { cwd: string; conversationId: string; disposition: "adopted"; runId: string }
+  | { cwd: string; conversationId: string; disposition: "completed" }
+  | { cwd: string; conversationId: string; disposition: "retry" };
+
+export interface ReloadTargetCompletion {
+  requestId: string;
+  cwd: string;
+  conversationId: string;
+  runId: string;
+}
+
+interface ReloadReservation {
+  requestId: string;
+  cwd: string;
+  conversationId: string;
+  deleteTemporaryAfterAck: boolean;
+  disposition?: ReloadResumeDisposition;
+}
+
+interface ReloadAdoption {
+  requestId: string;
+  runId: string;
+  notifying: boolean;
+  deleteTemporaryAfterAck: boolean;
+  onCompleted(completion: ReloadTargetCompletion): Promise<void>;
 }
 
 export type ProjectActivityListener = (
@@ -241,7 +275,7 @@ interface ProjectContext {
   readonly completions: Map<string, RunSettlement>;
   readonly processingBatches: Map<string, InboxEnvelope[]>;
   readonly failedBatchRetries: Set<string>;
-  readonly failedDispatchRetries: Set<string>;
+  readonly reloadAdoptions: Map<string, ReloadAdoption>;
   readonly extensionUIRouters: Map<string, ConversationExtensionUIRouter>;
   readonly lifecycle: SerialTaskQueue;
   readonly backgroundTasks: Set<Promise<void>>;
@@ -297,6 +331,10 @@ function contextKey(cwd: string): string {
   return process.platform === "win32" ? cwd.toLowerCase() : cwd;
 }
 
+function reloadReservationKey(cwd: string, conversationId: string): string {
+  return `${contextKey(cwd)}\u0000${conversationId}`;
+}
+
 function compareProjectActivity(
   left: ProjectActivitySummary,
   right: ProjectActivitySummary,
@@ -329,15 +367,6 @@ function isLowerProjectActivityPriority(
 
 function completionKey(conversationId: string, runId: string): string {
   return `${conversationId.length}:${conversationId}:${runId}`;
-}
-
-function dispatchRetryKey(
-  conversationId: string,
-  envelopes: readonly InboxEnvelope[],
-): string {
-  const first = envelopes[0];
-  if (!first) throw new Error("Cannot dispatch an empty inbox batch");
-  return `${conversationId.length}:${conversationId}:${first.messageId}`;
 }
 
 function deterministicUuid(namespace: string, value: string): string {
@@ -714,11 +743,14 @@ export class ProjectSessionCoordinator {
   private readonly contexts = new Map<string, ProjectContext>();
   private readonly contextOpenings = new Map<string, Promise<ProjectContext>>();
   private readonly projectAcquisitions = new Set<Promise<ProjectSessionHandle>>();
+  private readonly projectAcquisitionCwds =
+    new Map<Promise<ProjectSessionHandle>, string>();
   private readonly projectActivityListeners = new Set<ProjectActivityListener>();
   private readonly projectActivitySummaries =
     new Map<string, ProjectActivitySummary>();
   private readonly projectActivityCatalog =
     new Map<string, CachedProjectActivity>();
+  private readonly reloadReservations = new Map<string, ReloadReservation>();
   private projectActivityRevision = 0;
   private closing = false;
   private disposed = false;
@@ -739,10 +771,12 @@ export class ProjectSessionCoordinator {
     this.assertOpen();
     const acquisition = this.acquireProjectInternal(cwd, seedToolMode);
     this.projectAcquisitions.add(acquisition);
+    this.projectAcquisitionCwds.set(acquisition, cwd);
     try {
       return await acquisition;
     } finally {
       this.projectAcquisitions.delete(acquisition);
+      this.projectAcquisitionCwds.delete(acquisition);
     }
   }
 
@@ -815,7 +849,7 @@ export class ProjectSessionCoordinator {
         completions: new Map(),
         processingBatches: new Map(),
         failedBatchRetries: new Set(),
-        failedDispatchRetries: new Set(),
+        reloadAdoptions: new Map(),
         extensionUIRouters: new Map(),
         lifecycle: new SerialTaskQueue(),
         backgroundTasks: new Set(),
@@ -1297,6 +1331,14 @@ export class ProjectSessionCoordinator {
       let recoveredEnvelope = existingCard
         ? await context.inbox.get(messageId)
         : undefined;
+      const sourceRunId = recoveredEnvelope?.fromRunId
+        ?? existingCard?.orchestration?.sourceRunId
+        ?? source.currentRunOwnership()?.runId;
+      if (sourceRunId === undefined) {
+        throw new Error(
+          "start_session requires an exact active or recovered source run",
+        );
+      }
       if (existingCard) {
         if (
           existingCard.kind !== "delegation_task"
@@ -1350,13 +1392,10 @@ export class ProjectSessionCoordinator {
           sourceConversationId,
           source.profile,
         );
-        const sourceRunOwnership = source.currentRunOwnership();
         childOrchestration = {
           rootConversationId: sourceOrch.rootConversationId,
           depth: sourceOrch.depth + 1,
-          ...(sourceRunOwnership
-            ? { sourceRunId: sourceRunOwnership.runId }
-            : {}),
+          sourceRunId,
         };
       }
 
@@ -1507,7 +1546,10 @@ export class ProjectSessionCoordinator {
         );
       }
 
-      let queued: { envelope: InboxEnvelope };
+      let queued: {
+        status: "created" | "existing" | "delivered";
+        envelope: InboxEnvelope;
+      };
       try {
         queued = await this.enqueueEnvelope(context, source, target, {
           messageId,
@@ -1517,6 +1559,7 @@ export class ProjectSessionCoordinator {
           body: input.task,
           delegationId,
           requestFingerprint,
+          fromRunId: sourceRunId,
           requestedRole,
           orchestration: existingCard.orchestration,
           processingRunId: runId,
@@ -1567,7 +1610,7 @@ export class ProjectSessionCoordinator {
         throw error;
       }
       const activity = target.getActivity();
-      if (activity.kind === "idle") {
+      if (activity.kind === "idle" && queued.status !== "delivered") {
         const settled = this.findSettlement(context, target, runId);
         if (!settled) {
           await this.dispatchBatch(
@@ -1743,6 +1786,11 @@ export class ProjectSessionCoordinator {
   ): Promise<void> {
     const context = this.requireContext(handle);
     await this.runLifecycle(context, async () => {
+      if (this.isReloadProtected(context, conversationId)) {
+        throw new Error(
+          "Cannot rewind while reload completion acknowledgement is pending",
+        );
+      }
       const actor = await this.getOrOpenActor(context, conversationId);
       if (actor.getActivity().kind !== "idle") {
         throw new Error(
@@ -1755,6 +1803,19 @@ export class ProjectSessionCoordinator {
       if (pending.length > 0) {
         throw new Error(
           "Cannot rewind while this conversation has pending cross-session messages",
+        );
+      }
+      const aggregate = aggregateReservedConversationEntries(
+        actor.sessionManager.getEntries(),
+      );
+      const settledRunIds = new Set(
+        aggregate.runSettlements.map(({ runId }) => runId),
+      );
+      if (aggregate.messageDeliveryReceipts.some(
+        ({ targetRunId }) => !settledRunIds.has(targetRunId),
+      )) {
+        throw new Error(
+          "Cannot rewind while this conversation has an unsettled cross-session delivery",
         );
       }
       await actor.truncateFromMessage(entryId);
@@ -1812,27 +1873,96 @@ export class ProjectSessionCoordinator {
       );
     }
 
-    if (force) {
-      const targets = this.reloadTargets();
-      onAdmissionFrozen();
-      return targets;
-    }
-
+    const pendingProjectCwds = [...this.projectAcquisitionCwds.values()];
     const targets = new Map<string, ReloadConversationTarget>();
-    const stops = new Map<ConversationActor, Promise<void>>();
+    const addTargetId = (
+      cwd: string,
+      conversationId: string,
+      continueTask: boolean,
+    ) => {
+      const key = `${cwd}\u0000${conversationId}`;
+      const existing = targets.get(key);
+      targets.set(key, {
+        cwd,
+        conversationId,
+        continueTask: existing?.continueTask === true || continueTask,
+      });
+    };
     const addTarget = (
       context: ProjectContext,
       actor: ConversationActor,
       continueTask: boolean,
-    ) => {
-      const key = `${context.project.cwd}\u0000${actor.conversationId}`;
-      const existing = targets.get(key);
-      targets.set(key, {
-        cwd: context.project.cwd,
-        conversationId: actor.conversationId,
-        continueTask: existing?.continueTask === true || continueTask,
-      });
+    ) => addTargetId(
+      context.project.cwd,
+      actor.conversationId,
+      continueTask,
+    );
+    const inspectDurableProject = async (
+      project: ProjectStore,
+      inbox: ProjectInbox,
+    ): Promise<void> => {
+      for (const summary of await project.refreshConversations()) {
+        try {
+          const inspection = await project.inspectConversation(summary.id);
+          const settledRunIds = new Set(
+            inspection.runSettlements.map(({ runId }) => runId),
+          );
+          if (inspection.messageDeliveryReceipts.some(
+            ({ targetRunId }) => !settledRunIds.has(targetRunId),
+          )) {
+            addTargetId(project.cwd, summary.id, false);
+          }
+        } catch {
+          addTargetId(project.cwd, summary.id, false);
+        }
+      }
+      for (const envelope of await inbox.list()) {
+        addTargetId(project.cwd, envelope.toConversationId, false);
+      }
     };
+    const inspectDurableProjects = async (): Promise<void> => {
+      const inspected = new Set<string>();
+      for (const context of this.contexts.values()) {
+        await inspectDurableProject(context.project, context.inbox);
+        inspected.add(contextKey(context.project.cwd));
+      }
+      for (const cwd of pendingProjectCwds) {
+        const projectHandle = await this.projects.acquireProject(
+          cwd,
+          "read_only",
+        );
+        try {
+          const project = projectHandle.store;
+          const key = contextKey(project.cwd);
+          if (inspected.has(key)) continue;
+          const inbox = await ProjectInbox.open(join(project.stateDir, "inbox"));
+          await inspectDurableProject(project, inbox);
+          inspected.add(key);
+        } finally {
+          projectHandle.release();
+        }
+      }
+    };
+
+    if (force) {
+      for (const context of this.contexts.values()) {
+        for (const actor of context.actors.values()) {
+          const candidate = actor.activeRunForReload();
+          if (candidate) {
+            addTarget(context, actor, candidate.origin === "browser");
+          }
+        }
+      }
+      onAdmissionFrozen();
+      await Promise.allSettled([...this.projectAcquisitions]);
+      this.projectAcquisitions.clear();
+      await Promise.allSettled([...this.contextOpenings.values()]);
+      this.contextOpenings.clear();
+      await inspectDurableProjects();
+      return [...targets.values()];
+    }
+
+    const stops = new Map<ConversationActor, Promise<void>>();
     const latchActor = async (
       context: ProjectContext,
       actor: ConversationActor,
@@ -1846,13 +1976,23 @@ export class ProjectSessionCoordinator {
           const envelopes = await context.inbox.list({
             toConversationId: actor.conversationId,
           });
+          const aggregate = aggregateReservedConversationEntries(
+            actor.sessionManager.getEntries(),
+          );
+          const settledRunIds = new Set(
+            aggregate.runSettlements.map(({ runId }) => runId),
+          );
           preserveSettlement = envelopes.some((envelope) =>
             envelope.state === "processing"
             && envelope.processingRunId === candidate.runId
+          ) || aggregate.messageDeliveryReceipts.some((receipt) =>
+            receipt.targetRunId === candidate.runId
+            && !settledRunIds.has(candidate.runId)
           );
         } catch (error) {
+          preserveSettlement = true;
           console.warn(
-            `Could not prove durable inbox recovery for ${actor.conversationId}; settling its current run before reload:`,
+            `Could not inspect durable inbox recovery for ${actor.conversationId}; preserving its exact run for reload:`,
             error instanceof Error ? error.message : String(error),
           );
         }
@@ -1910,91 +2050,396 @@ export class ProjectSessionCoordinator {
     }
 
     // A run can enter settlement between the initial snapshot and the latch.
-    // Since closing suppresses normal inbox completion handling, every durable
-    // envelope still needs its project reopened by the replacement process.
-    for (const context of this.contexts.values()) {
-      try {
-        for (const envelope of await context.inbox.list()) {
-          const actor = context.actors.get(envelope.toConversationId);
-          if (actor) addTarget(context, actor, false);
-          else {
-            const key = `${context.project.cwd}\u0000${envelope.toConversationId}`;
-            if (!targets.has(key)) {
-              targets.set(key, {
-                cwd: context.project.cwd,
-                conversationId: envelope.toConversationId,
-                continueTask: false,
-              });
-            }
-          }
-        }
-      } catch (error) {
-        console.warn(
-          `Could not enumerate pending inbox recovery for ${context.project.cwd}:`,
-          error instanceof Error ? error.message : String(error),
-        );
-      }
-    }
+    // Since closing suppresses normal inbox completion handling, durable disk
+    // facts (including actor-absent and inspection-failed targets) are the
+    // final recovery authority.
+    await inspectDurableProjects();
     return [...targets.values()];
   }
 
   async resumeAfterReload(
+    requestId: string,
     targets: readonly ReloadConversationTarget[],
-  ): Promise<ReloadConversationTarget[]> {
-    const pending: ReloadConversationTarget[] = [];
+    onTargetCompleted: (completion: ReloadTargetCompletion) => Promise<void>,
+  ): Promise<ReloadResumeDisposition[]> {
+    const dispositions: ReloadResumeDisposition[] = [];
     const seen = new Set<string>();
+    for (const target of targets) {
+      const key = reloadReservationKey(target.cwd, target.conversationId);
+      const existing = this.reloadReservations.get(key);
+      if (existing && existing.requestId !== requestId) {
+        throw new Error("Reload reservation conflicts with another request");
+      }
+      if (!existing) {
+        this.reloadReservations.set(key, {
+          requestId,
+          cwd: target.cwd,
+          conversationId: target.conversationId,
+          deleteTemporaryAfterAck: false,
+        });
+      }
+    }
     for (const target of targets) {
       const key = `${target.cwd}\u0000${target.conversationId}`;
       if (seen.has(key)) continue;
       seen.add(key);
       let handle: ProjectSessionHandle | undefined;
+      let attemptContext: ProjectContext | undefined;
       try {
+        if (target.continueTask && target.continuationRunId === undefined) {
+          throw new Error("Reload continuation requires continuationRunId");
+        }
         handle = await this.acquireProject(target.cwd, "read_only");
         const context = this.requireContext(handle);
-        const started = await this.runLifecycle<boolean>(context, async () => {
-          if (!target.continueTask) return true;
-          const actor = await this.getOrOpenActor(
-            context,
-            target.conversationId,
-          );
-          if (actor.getActivity().kind !== "idle") return false;
-          const pump = await this.pumpTarget(context, target.conversationId);
-          if (pump !== "no_work" || actor.getActivity().kind !== "idle") {
-            return false;
-          }
-          const completion = actor.startReloadContinuation(randomUUID());
-          void completion.catch(() => undefined);
-          return true;
-        });
-        if (!started) pending.push({ ...target });
+        attemptContext = context;
+        const disposition = await this.runLifecycle<ReloadResumeDisposition>(
+          context,
+          async () => {
+            const actor = await this.getOrOpenActor(
+              context,
+              target.conversationId,
+            );
+            const markerAdoptedRunId = target.continueTask
+              ? actor.reloadContinuationAdoptedRunId({
+                  requestId,
+                  continuationRunId: target.continuationRunId!,
+                })
+              : undefined;
+            if (
+              target.adoptedRunId !== undefined
+              && markerAdoptedRunId !== undefined
+              && target.adoptedRunId !== markerAdoptedRunId
+            ) {
+              throw new Error(
+                "Reload manifest adoption conflicts with its continuation marker",
+              );
+            }
+            const adoptedRunId = target.adoptedRunId ?? markerAdoptedRunId;
+            const aggregate = aggregateReservedConversationEntries(
+              actor.sessionManager.getEntries(),
+            );
+            const settledRunId = target.continueTask
+              ? adoptedRunId ?? target.continuationRunId
+              : adoptedRunId;
+            const settled = settledRunId === undefined
+              ? undefined
+              : aggregate.runSettlements.find(
+                  ({ runId }) => runId === settledRunId,
+                );
+            if (settled) {
+              context.completions.set(
+                completionKey(target.conversationId, settledRunId!),
+                cloneSettlement(settled),
+              );
+              if (target.continueTask) {
+                this.registerReloadAdoption(
+                  context,
+                  target.conversationId,
+                  requestId,
+                  settledRunId!,
+                  onTargetCompleted,
+                );
+              }
+              if (actor.getActivity().kind === "idle") {
+                await this.pumpTarget(context, target.conversationId);
+              }
+              const drained = !await this.reloadTargetHasPendingWork(
+                context,
+                target.conversationId,
+              );
+              if (
+                !target.continueTask
+                && adoptedRunId === undefined
+                && drained
+              ) {
+                return {
+                  cwd: target.cwd,
+                  conversationId: target.conversationId,
+                  disposition: "completed",
+                };
+              }
+              this.registerReloadAdoption(
+                context,
+                target.conversationId,
+                requestId,
+                settledRunId!,
+                onTargetCompleted,
+              );
+              await this.maybeCompleteReloadAdoption(
+                context,
+                target.conversationId,
+              );
+              return {
+                cwd: target.cwd,
+                conversationId: target.conversationId,
+                disposition: "adopted",
+                runId: settledRunId!,
+              };
+            }
+
+            if (actor.getActivity().kind === "idle") {
+              await this.pumpTarget(context, target.conversationId);
+            }
+            let active = actor.activeRunForReload();
+            if (
+              adoptedRunId !== undefined
+              && active?.runId !== adoptedRunId
+            ) {
+              if (active) {
+                return {
+                  cwd: target.cwd,
+                  conversationId: target.conversationId,
+                  disposition: "retry",
+                };
+              }
+              this.registerReloadAdoption(
+                context,
+                target.conversationId,
+                requestId,
+                adoptedRunId,
+                onTargetCompleted,
+              );
+              if (!target.continueTask) {
+                void actor.resumeMessages({
+                  runId: adoptedRunId,
+                }).catch(() => undefined);
+              } else if (adoptedRunId === target.continuationRunId) {
+                void actor.startReloadContinuation({
+                  requestId,
+                  continuationRunId: target.continuationRunId!,
+                }).catch(() => undefined);
+              } else {
+                void actor.resumeMessages({
+                  runId: adoptedRunId,
+                }).catch(() => undefined);
+                await actor.queueReloadContinuation({
+                  requestId,
+                  continuationRunId: target.continuationRunId!,
+                  runId: adoptedRunId,
+                });
+              }
+              active = actor.activeRunForReload();
+            }
+
+            if (active) {
+              if (!target.continueTask && active.origin !== "inbox") {
+                return {
+                  cwd: target.cwd,
+                  conversationId: target.conversationId,
+                  disposition: "retry",
+                };
+              }
+              if (target.continueTask) {
+                if (active.origin === "inbox") {
+                  await actor.queueReloadContinuation({
+                    requestId,
+                    continuationRunId: target.continuationRunId!,
+                    runId: active.runId,
+                  });
+                } else if (active.runId === target.continuationRunId) {
+                  void actor.startReloadContinuation({
+                    requestId,
+                    continuationRunId: target.continuationRunId!,
+                  }).catch(() => undefined);
+                } else {
+                  return {
+                    cwd: target.cwd,
+                    conversationId: target.conversationId,
+                    disposition: "retry",
+                  };
+                }
+              }
+              this.registerReloadAdoption(
+                context,
+                target.conversationId,
+                requestId,
+                active.runId,
+                onTargetCompleted,
+              );
+              return {
+                cwd: target.cwd,
+                conversationId: target.conversationId,
+                disposition: "adopted",
+                runId: active.runId,
+              };
+            }
+
+            if (!target.continueTask) {
+              const pending = await context.inbox.list({
+                toConversationId: target.conversationId,
+              });
+              return {
+                cwd: target.cwd,
+                conversationId: target.conversationId,
+                disposition: pending.length === 0 ? "completed" : "retry",
+              };
+            }
+            const continuationRunId = target.continuationRunId!;
+            this.registerReloadAdoption(
+              context,
+              target.conversationId,
+              requestId,
+              continuationRunId,
+              onTargetCompleted,
+            );
+            void actor.startReloadContinuation({
+              requestId,
+              continuationRunId,
+            }).catch(() => undefined);
+            return {
+              cwd: target.cwd,
+              conversationId: target.conversationId,
+              disposition: "adopted",
+              runId: continuationRunId,
+            };
+          },
+        );
+        dispositions.push(disposition);
+        this.recordReloadDisposition(requestId, disposition);
       } catch (error) {
+        const reservation = this.reloadReservations.get(reloadReservationKey(
+          target.cwd,
+          target.conversationId,
+        ));
+        const provisionalAdoption = attemptContext?.reloadAdoptions.get(
+          target.conversationId,
+        );
+        if (
+          reservation?.requestId === requestId
+          && reservation.disposition === undefined
+          && provisionalAdoption?.requestId === requestId
+        ) {
+          attemptContext!.reloadAdoptions.delete(target.conversationId);
+        }
         console.warn(
           `Failed to resume reloaded conversation ${target.conversationId}:`,
           error instanceof Error ? error.message : String(error),
         );
-        pending.push({ ...target });
+        const disposition: ReloadResumeDisposition = {
+          cwd: target.cwd,
+          conversationId: target.conversationId,
+          disposition: "retry",
+        };
+        dispositions.push(disposition);
+        this.recordReloadDisposition(requestId, disposition);
       } finally {
         handle?.release();
       }
     }
-    return pending;
+    return dispositions;
   }
 
-  private reloadTargets(): ReloadConversationTarget[] {
-    const targets: ReloadConversationTarget[] = [];
-    for (const context of this.contexts.values()) {
-      for (const actor of context.actors.values()) {
-        const candidate = actor.activeRunForReload();
-        if (candidate) {
-          targets.push({
-            cwd: context.project.cwd,
-            conversationId: actor.conversationId,
-            continueTask: candidate.origin === "browser",
-          });
-        }
+  async acknowledgeReloadDispositions(
+    requestId: string,
+    dispositions: readonly ReloadResumeDisposition[],
+  ): Promise<void> {
+    const receivedByKey = new Map(dispositions.map((disposition) => [
+      reloadReservationKey(disposition.cwd, disposition.conversationId),
+      disposition,
+    ]));
+    if (receivedByKey.size !== dispositions.length) {
+      throw new Error("Reload disposition acknowledgement contains duplicates");
+    }
+    for (const received of dispositions) {
+      const reservation = this.reloadReservations.get(reloadReservationKey(
+        received.cwd,
+        received.conversationId,
+      ));
+      if (
+        !reservation
+        || reservation.requestId !== requestId
+        || reservation.disposition === undefined
+        || JSON.stringify(received) !== JSON.stringify(reservation.disposition)
+      ) {
+        throw new Error("Reload disposition acknowledgement identity conflicts");
       }
     }
-    return targets;
+
+    const cleanup: Promise<void>[] = [];
+    for (const disposition of dispositions) {
+      if (disposition.disposition === "adopted") continue;
+      const key = reloadReservationKey(
+        disposition.cwd,
+        disposition.conversationId,
+      );
+      const reservation = this.reloadReservations.get(key)!;
+      this.reloadReservations.delete(key);
+      if (reservation.deleteTemporaryAfterAck) {
+        cleanup.push(this.cleanupDeferredTemporaryConversation(
+          disposition.cwd,
+          disposition.conversationId,
+        ));
+      }
+    }
+    await Promise.all(cleanup.map(async (operation) => {
+      try {
+        await operation;
+      } catch {
+        // The supervisor already durably acknowledged this disposition.
+        // Normal project recovery will retry a deferred temporary deletion.
+      }
+    }));
+  }
+
+  private recordReloadDisposition(
+    requestId: string,
+    disposition: ReloadResumeDisposition,
+  ): void {
+    const reservation = this.reloadReservations.get(reloadReservationKey(
+      disposition.cwd,
+      disposition.conversationId,
+    ));
+    if (!reservation || reservation.requestId !== requestId) {
+      throw new Error("Reload disposition has no matching reservation");
+    }
+    if (
+      reservation.disposition
+      && JSON.stringify(reservation.disposition) !== JSON.stringify(disposition)
+    ) {
+      throw new Error("Reload disposition conflicts with its reservation");
+    }
+    reservation.disposition = disposition;
+  }
+
+  private isReloadProtected(
+    context: ProjectContext,
+    conversationId: string,
+  ): boolean {
+    return context.reloadAdoptions.has(conversationId)
+      || this.reloadReservations.has(reloadReservationKey(
+        context.project.cwd,
+        conversationId,
+      ));
+  }
+
+  private registerReloadAdoption(
+    context: ProjectContext,
+    conversationId: string,
+    requestId: string,
+    runId: string,
+    onCompleted: (completion: ReloadTargetCompletion) => Promise<void>,
+  ): void {
+    const existing = context.reloadAdoptions.get(conversationId);
+    if (existing) {
+      if (existing.requestId !== requestId || existing.runId !== runId) {
+        throw new Error("Reload adoption identity conflicts with active ownership");
+      }
+      return;
+    }
+    const reservation = this.reloadReservations.get(reloadReservationKey(
+      context.project.cwd,
+      conversationId,
+    ));
+    if (!reservation || reservation.requestId !== requestId) {
+      throw new Error("Reload adoption has no matching startup reservation");
+    }
+    context.reloadAdoptions.set(conversationId, {
+      requestId,
+      runId,
+      notifying: false,
+      deleteTemporaryAfterAck: reservation.deleteTemporaryAfterAck,
+      onCompleted,
+    });
   }
 
   private rejectContextWaiters(context: ProjectContext, error: Error): void {
@@ -2275,6 +2720,22 @@ export class ProjectSessionCoordinator {
     context.actors.set(conversationId, actor);
     context.profiles.set(conversationId, cloneProfile(profile));
     const unsubscribe = actor.subscribe((event) => {
+      if (
+        event.type === "session_event"
+        && (
+          event.event.type === "run_started"
+          || event.event.type === "user_message"
+          || event.event.type === "usage"
+        )
+        && !context.closing
+      ) {
+        this.trackBackground(
+          context,
+          this.runLifecycle(context, async () => {
+            await this.reconcileInbox(context, conversationId);
+          }),
+        );
+      }
       if (event.type === "error") {
         context.attention.add(conversationId);
         if (event.fatal && !context.closing) {
@@ -3019,7 +3480,6 @@ export class ProjectSessionCoordinator {
           : { processingDelivery: claimedPending.processingDelivery }),
         waitedByRunId: ownership.runId,
       });
-      this.appendSourceCardState(context, claimedPending, "delivered");
       return {
         kind: "result",
         result: this.sessionMessageWaitResult(
@@ -3070,7 +3530,6 @@ export class ProjectSessionCoordinator {
           : { processingDelivery: claimedPending.processingDelivery }),
         waitedByRunId: ownership.runId,
       });
-      this.appendSourceCardState(context, claimedPending, "delivered");
       return this.sessionMessageWaitResult(
         context,
         source,
@@ -3244,13 +3703,15 @@ export class ProjectSessionCoordinator {
               targets,
               ownership.runId,
             );
-            if (committedReply) {
-              await this.deliverEnvelopeToWaitingRun(
+            if (
+              committedReply
+              && await this.deliverEnvelopeToWaitingRun(
                 context,
                 source,
                 committedReply,
                 committedReply.fromRunId!,
-              );
+              )
+            ) {
               return;
             }
 
@@ -3317,11 +3778,6 @@ export class ProjectSessionCoordinator {
                 });
                 if (!this.sessionWaiterIsRegistered(context, waiter)) return;
                 this.unregisterSessionWaiter(context, waiter);
-                this.appendSourceCardState(
-                  context,
-                  claimedPending,
-                  "delivered",
-                );
                 resolveCompletion(this.sessionMessageWaitResult(
                   context,
                   source,
@@ -3516,11 +3972,7 @@ export class ProjectSessionCoordinator {
             settlement,
           );
         }
-        await this.deleteConversationInternal(
-          context,
-          actor.conversationId,
-          false,
-        );
+        await this.deleteCompletedTemporaryConversation(context, actor);
       } else {
         context.attention.add(actor.conversationId);
         this.emit(context, { type: "project_changed" });
@@ -3565,11 +4017,7 @@ export class ProjectSessionCoordinator {
         completionKey(actor.conversationId, reported.runId),
         cloneSettlement(reported),
       );
-      await this.deleteConversationInternal(
-        context,
-        actor.conversationId,
-        false,
-      );
+      await this.deleteCompletedTemporaryConversation(context, actor);
       return;
     }
     const oversized = settlement.outcome === "completed"
@@ -3603,9 +4051,7 @@ export class ProjectSessionCoordinator {
               settlement.finalText === null ? "，且没有 Agent 回复" : ""
             }`,
       delegationId: lifecycle.delegationId,
-      fromRunId: recoveredReturn
-        ? recoveredReturn.fromRunId
-        : settlement.runId,
+      fromRunId: settlement.runId,
     });
     const reported = createRunSettlementEntry({
       ...settlement,
@@ -3620,26 +4066,149 @@ export class ProjectSessionCoordinator {
       completionKey(actor.conversationId, reported.runId),
       cloneSettlement(reported),
     );
-    const deliveredToWait = await this.deliverEnvelopeToWaitingRun(
-      context,
-      caller,
-      returned.envelope,
-      settlement.runId,
-    );
+    const deliveredToWait = returned.status === "delivered"
+      || await this.deliverEnvelopeToWaitingRun(
+        context,
+        caller,
+        returned.envelope,
+        settlement.runId,
+      );
     if (!deliveredToWait) await this.steerActiveTarget(context, caller);
-    if (caller.getActivity().kind === "idle") {
+    if (
+      returned.status !== "delivered"
+      && caller.getActivity().kind === "idle"
+    ) {
       await this.pumpTarget(context, caller.conversationId);
     }
     if (successful) {
-      await this.deleteConversationInternal(
-        context,
-        actor.conversationId,
-        false,
-      );
+      await this.deleteCompletedTemporaryConversation(context, actor);
     } else {
       context.attention.add(actor.conversationId);
       this.emit(context, { type: "project_changed" });
     }
+  }
+
+  private async temporaryReturnDeliveryReceipt(
+    context: ProjectContext,
+    actor: ConversationActor,
+    settlement: RunSettlement,
+  ): Promise<MessageDeliveryReceipt | undefined> {
+    const lifecycle = actor.profile.lifecycle;
+    if (
+      lifecycle.kind !== "temporary"
+      || settlement.runId !== lifecycle.initialRunId
+      || settlement.reportedAt === undefined
+      || settlement.returnMessageId === undefined
+    ) {
+      return undefined;
+    }
+    return await this.withTemporaryReturnReceiptManager(
+      context,
+      lifecycle.callerConversationId,
+      (manager) => {
+        const aggregate = aggregateReservedConversationEntries(
+          manager.getEntries(),
+        );
+        const delivery = aggregate.messageDeliveryReceipts.find(
+          ({ messageId }) => messageId === settlement.returnMessageId,
+        );
+        if (!delivery) return undefined;
+        if (
+          delivery.fromConversationId !== actor.conversationId
+          || delivery.toConversationId !== lifecycle.callerConversationId
+          || delivery.sourceRunId !== lifecycle.initialRunId
+        ) {
+          throw new Error(
+            "Temporary return delivery receipt conflicts with lifecycle",
+          );
+        }
+        const claimed = aggregate.temporaryReturnReceipts.find((receipt) =>
+          receipt.temporaryConversationId === actor.conversationId
+          && receipt.initialRunId === lifecycle.initialRunId
+        );
+        if (claimed) {
+          if (
+            claimed.state !== "settled"
+            || JSON.stringify(claimed.settlement) !== JSON.stringify(settlement)
+            || claimed.messageId !== delivery.messageId
+            || claimed.callerRunId !== delivery.targetRunId
+            || delivery.kind !== "message"
+            || delivery.temporaryReturnAssignment?.initialRunId
+              !== claimed.initialRunId
+            || delivery.temporaryReturnAssignment.callerRunId
+              !== claimed.callerRunId
+            || delivery.temporaryReturnAssignment.assignedAt
+              !== claimed.claimedAt
+          ) {
+            throw new Error(
+              "Temporary return delivery receipt conflicts with assignment",
+            );
+          }
+        } else if (
+          delivery.messageId !== lifecycle.returnMessageId
+          || delivery.kind !== "delegation_result"
+          || delivery.temporaryReturnAssignment !== undefined
+        ) {
+          throw new Error(
+            "Automatic temporary return delivery receipt conflicts with lifecycle",
+          );
+        }
+        return delivery;
+      },
+    );
+  }
+
+  private async deleteCompletedTemporaryConversation(
+    context: ProjectContext,
+    actor: ConversationActor,
+  ): Promise<void> {
+    const lifecycle = actor.profile.lifecycle;
+    if (lifecycle.kind !== "temporary") return;
+    const settlement = aggregateReservedConversationEntries(
+      actor.sessionManager.getEntries(),
+    ).runSettlements.find(({ runId }) => runId === lifecycle.initialRunId);
+    if (
+      !settlement
+      || !temporarySettlementIsReturnable(settlement)
+      || !await this.temporaryReturnDeliveryReceipt(
+        context,
+        actor,
+        settlement,
+      )
+    ) {
+      return;
+    }
+    const adoption = context.reloadAdoptions.get(actor.conversationId);
+    if (adoption) {
+      adoption.deleteTemporaryAfterAck = true;
+      return;
+    }
+    const reservation = this.reloadReservations.get(reloadReservationKey(
+      context.project.cwd,
+      actor.conversationId,
+    ));
+    if (reservation) {
+      reservation.deleteTemporaryAfterAck = true;
+      return;
+    }
+    await this.deleteConversationInternal(
+      context,
+      actor.conversationId,
+      false,
+    );
+  }
+
+  private async cleanupDeferredTemporaryConversation(
+    cwd: string,
+    conversationId: string,
+  ): Promise<void> {
+    const context = this.contexts.get(contextKey(cwd));
+    if (!context || context.closing) return;
+    await this.runLifecycle(context, async () => {
+      const temporary = context.actors.get(conversationId);
+      if (temporary?.profile.lifecycle.kind !== "temporary") return;
+      await this.deleteConversationInternal(context, conversationId, false);
+    });
   }
 
   private async retryBlockedDeletions(
@@ -3669,11 +4238,7 @@ export class ProjectSessionCoordinator {
         continue;
       }
       try {
-        await this.deleteConversationInternal(
-          context,
-          actor.conversationId,
-          false,
-        );
+        await this.deleteCompletedTemporaryConversation(context, actor);
       } catch {
         context.attention.add(actor.conversationId);
         this.emit(context, { type: "project_changed" });
@@ -3708,7 +4273,10 @@ export class ProjectSessionCoordinator {
     context: ProjectContext,
     actor: ConversationActor,
   ): Promise<void> {
-    if (context.closing) return;
+    if (
+      context.closing
+      || context.actors.get(actor.conversationId) !== actor
+    ) return;
     const lifecycle = actor.profile.lifecycle;
     if (lifecycle.kind !== "temporary") return;
     const settlement = aggregateReservedConversationEntries(
@@ -4508,6 +5076,17 @@ export class ProjectSessionCoordinator {
         );
       }
       if (existingCard && existingCard.state !== "sending") {
+        if (recoveredEnvelope?.temporaryReturnAssignment) {
+          const recoveredTarget = await this.getOrOpenActor(
+            context,
+            targetConversationId,
+          );
+          this.materializeTemporaryReturnReceipt(
+            context,
+            recoveredTarget,
+            recoveredEnvelope,
+          );
+        }
         if (recoveredEnvelope?.state === "processing") {
           return {
             status: "processing",
@@ -4527,33 +5106,79 @@ export class ProjectSessionCoordinator {
       }
       const target = await this.getOrOpenActor(context, targetConversationId);
       this.throwIfAborted(signal);
+      const deliveryReceipt = aggregateReservedConversationEntries(
+        target.sessionManager.getEntries(),
+      ).messageDeliveryReceipts.find(
+        ({ messageId: candidate }) => candidate === messageId,
+      );
       const sourceRun = source.currentRunOwnership();
-      const temporaryReturnAssignment = recoveredEnvelope
-        ?.temporaryReturnAssignment ?? (
-          sourceRun
-            ? this.createTemporaryReturnAssignment(
-                context,
-                source,
-                target,
-                sourceRun.runId,
-              )
-            : undefined
+      let temporaryReturnAssignment = recoveredEnvelope
+        ?.temporaryReturnAssignment ?? deliveryReceipt
+          ?.temporaryReturnAssignment;
+      if (!temporaryReturnAssignment && sourceRun) {
+        const candidate = this.createTemporaryReturnAssignment(
+          context,
+          source,
+          target,
+          sourceRun.runId,
         );
+        if (candidate) {
+          const alreadyAssigned = (await context.inbox.list({
+            toConversationId: target.conversationId,
+          })).find((envelope) =>
+            envelope.fromConversationId === source.conversationId
+            && envelope.temporaryReturnAssignment?.initialRunId
+              === candidate.initialRunId
+            && envelope.temporaryReturnAssignment.callerRunId
+              === candidate.callerRunId
+          );
+          if (alreadyAssigned) {
+            this.materializeTemporaryReturnReceipt(
+              context,
+              target,
+              alreadyAssigned,
+            );
+          } else {
+            temporaryReturnAssignment = candidate;
+          }
+        }
+      }
+      const fromRunId = recoveredEnvelope?.fromRunId
+        ?? deliveryReceipt?.sourceRunId
+        ?? sourceRun?.runId;
+      if (fromRunId === undefined) {
+        throw new Error(
+          "send_session_message requires an exact active or recovered source run",
+        );
+      }
       const queued = await this.enqueueEnvelope(context, source, target, {
         messageId,
         cardId,
-        sentAt: recoveredEnvelope?.sentAt ?? this.now().toISOString(),
+        sentAt: recoveredEnvelope?.sentAt
+          ?? existingCard?.updatedAt
+          ?? this.now().toISOString(),
         kind: "message",
         body: message,
-        fromRunId: recoveredEnvelope
-          ? recoveredEnvelope.fromRunId
-          : sourceRun?.runId,
+        fromRunId,
         ...(temporaryReturnAssignment === undefined
           ? {}
           : { temporaryReturnAssignment }),
       });
       const envelope = queued.envelope;
       this.materializeTemporaryReturnReceipt(context, target, envelope);
+      if (queued.status === "delivered") {
+        const deliveredCard = aggregateReservedConversationEntries(
+          source.sessionManager.getEntries(),
+        ).cards.find(({ cardId: candidate }) => candidate === cardId);
+        return {
+          status: deliveredCard?.state ?? "delivered",
+          messageId: envelope.messageId,
+          conversationId: targetConversationId,
+          ...(deliveredCard?.runId === undefined
+            ? {}
+            : { runId: deliveredCard.runId }),
+        };
+      }
       if (
         queued.status === "existing"
         && envelope.state === "processing"
@@ -4566,12 +5191,11 @@ export class ProjectSessionCoordinator {
         };
       }
       if (
-        sourceRun
-        && await this.deliverEnvelopeToWaitingRun(
+        await this.deliverEnvelopeToWaitingRun(
           context,
           target,
           envelope,
-          sourceRun.runId,
+          fromRunId,
         )
       ) {
         const activity = target.getActivity();
@@ -4723,7 +5347,6 @@ export class ProjectSessionCoordinator {
 
     this.unregisterSessionWaiter(context, waiter);
     try {
-      this.appendSourceCardState(context, envelope, "delivered");
       waiter.resolve(this.sessionMessageWaitResult(
         context,
         target,
@@ -4780,11 +5403,12 @@ export class ProjectSessionCoordinator {
   ): void {
     const assignment = envelope.temporaryReturnAssignment;
     if (!assignment) return;
-    const source = context.actors.get(envelope.fromConversationId);
-    const lifecycle = source?.profile.lifecycle;
+    const lifecycle = (
+      context.actors.get(envelope.fromConversationId)?.profile
+      ?? context.profiles.get(envelope.fromConversationId)
+    )?.lifecycle;
     if (
-      !source
-      || lifecycle?.kind !== "temporary"
+      lifecycle?.kind !== "temporary"
       || lifecycle.initialRunId !== assignment.initialRunId
       || lifecycle.callerConversationId !== caller.conversationId
       || envelope.kind !== "message"
@@ -4795,14 +5419,23 @@ export class ProjectSessionCoordinator {
     const existing = this.temporaryReturnReceipt(
       context,
       caller.conversationId,
-      source.conversationId,
+      envelope.fromConversationId,
       assignment.initialRunId,
     );
-    if (existing) return;
+    if (existing) {
+      if (
+        existing.messageId !== envelope.messageId
+        || existing.callerRunId !== assignment.callerRunId
+        || existing.claimedAt !== assignment.assignedAt
+      ) {
+        throw new Error("Temporary return assignment conflicts with its receipt");
+      }
+      return;
+    }
     appendReservedCustomEntry(
       caller.sessionManager,
       createTemporaryReturnReceiptEntry({
-        temporaryConversationId: source.conversationId,
+        temporaryConversationId: envelope.fromConversationId,
         initialRunId: assignment.initialRunId,
         messageId: envelope.messageId,
         callerRunId: assignment.callerRunId,
@@ -4827,6 +5460,8 @@ export class ProjectSessionCoordinator {
       beforeThroughDelivery?: (envelope: InboxEnvelope) => Promise<void>;
     } = {},
   ): Promise<boolean> {
+    if (!await this.reconcileInbox(context, target.conversationId)) return false;
+    await this.reconcileReceiptLedger(context, target.conversationId);
     const activity = target.getActivity();
     if (activity.kind === "idle" || activity.kind === "cancelling") {
       return false;
@@ -4837,25 +5472,12 @@ export class ProjectSessionCoordinator {
     const pending = await context.inbox.list({
       toConversationId: target.conversationId,
     });
-    const delivered = new Set(
-      aggregateReservedConversationEntries(
-        target.sessionManager.getEntries(),
-      ).deliveredMessageIds,
-    );
     let claimed = pending.filter((envelope) => (
       envelope.state === "processing"
       && envelope.processingRunId === runId
-      && !delivered.has(envelope.messageId)
     )).length;
 
     for (const envelope of pending) {
-      if (delivered.has(envelope.messageId)) {
-        if (envelope.messageId === options.throughMessageId) {
-          await options.beforeThroughDelivery?.(envelope);
-          return true;
-        }
-        continue;
-      }
       if (envelope.state === "processing") {
         // A preceding batch belongs to another run and must settle or recover
         // before a later message can overtake it.
@@ -4873,6 +5495,7 @@ export class ProjectSessionCoordinator {
         return false;
       }
 
+      this.materializeTemporaryReturnReceipt(context, target, envelope);
       const processingEnvelope = await context.inbox.updateState(
         envelope.messageId,
         {
@@ -4904,6 +5527,15 @@ export class ProjectSessionCoordinator {
             processingEnvelope,
             delivery,
           );
+          void delivery.then(() => {
+            if (context.closing) return;
+            this.trackBackground(
+              context,
+              this.runLifecycle(context, async () => {
+                await this.reconcileInbox(context, target.conversationId);
+              }),
+            );
+          }, () => undefined);
         } else {
           await delivery;
         }
@@ -4913,12 +5545,8 @@ export class ProjectSessionCoordinator {
         // A run can end between claiming the sidecar and the SDK accepting its
         // steering queue. Do not treat in-memory delivery as durable; leave it
         // available for the next run unless Pi already wrote its marker.
-        const markers = new Set(
-          aggregateReservedConversationEntries(
-            target.sessionManager.getEntries(),
-          ).deliveredMessageIds,
-        );
-        if (markers.has(envelope.messageId)) {
+        await this.reconcileInbox(context, target.conversationId);
+        if (await context.inbox.get(envelope.messageId) === undefined) {
           claimed++;
           if (envelope.messageId === options.throughMessageId) return true;
           continue;
@@ -5008,23 +5636,86 @@ export class ProjectSessionCoordinator {
       | "kind"
       | "body"
       | "delegationId"
-      | "fromRunId"
       | "temporaryReturnAssignment"
     > & {
+      fromRunId: string;
       processingRunId?: string;
       requestFingerprint?: string;
       requestedRole?: ConversationMeta["role"];
       orchestration?: ConversationOrchestration;
     },
   ): Promise<{
-    status: "created" | "existing";
+    status: "created" | "existing" | "delivered";
     envelope: InboxEnvelope;
   }> {
-    const fromSnapshot = this.endpoint(context, source);
-    const toSnapshot = this.endpoint(context, target);
+    const preexistingEnvelope = await context.inbox.get(input.messageId);
+    if (!await this.reconcileInbox(context, target.conversationId)) {
+      throw new Error(
+        `Inbox target requires attention before admitting new work: ${target.conversationId}`,
+      );
+    }
     const existingCard = aggregateReservedConversationEntries(
       source.sessionManager.getEntries(),
     ).cards.find(({ cardId }) => cardId === input.cardId);
+    const fromSnapshot = existingCard?.fromSnapshot
+      ?? this.endpoint(context, source);
+    const toSnapshot = existingCard?.toSnapshot
+      ?? this.endpoint(context, target);
+    const receipt = aggregateReservedConversationEntries(
+      target.sessionManager.getEntries(),
+    ).messageDeliveryReceipts.find(
+      ({ messageId }) => messageId === input.messageId,
+    );
+    if (receipt) {
+      const deliveredEnvelope: InboxEnvelope = preexistingEnvelope
+        ? {
+            ...preexistingEnvelope,
+            state: "processing",
+            processingRunId: preexistingEnvelope.state === "processing"
+              ? preexistingEnvelope.processingRunId
+              : receipt.targetRunId,
+          }
+        : {
+        version: 1,
+        messageId: input.messageId,
+        cardId: input.cardId,
+        fromConversationId: source.conversationId,
+        toConversationId: target.conversationId,
+        sentAt: receipt.sentAt,
+        kind: input.kind,
+        body: input.body,
+        ...(input.delegationId === undefined
+          ? {}
+          : { delegationId: input.delegationId }),
+        ...(input.requestFingerprint === undefined
+          ? {}
+          : { requestFingerprint: input.requestFingerprint }),
+        fromRunId: input.fromRunId,
+        ...(input.temporaryReturnAssignment === undefined
+          ? {}
+          : {
+              temporaryReturnAssignment:
+                input.temporaryReturnAssignment,
+            }),
+        fromSnapshot,
+        toSnapshot,
+        state: "processing",
+        processingRunId: receipt.targetRunId,
+      };
+      this.assertReceiptMatchesEnvelope(receipt, deliveredEnvelope);
+      return {
+        status: "delivered",
+        envelope: deliveredEnvelope,
+      };
+    }
+    if (
+      preexistingEnvelope
+      && await context.inbox.get(input.messageId) === undefined
+    ) {
+      throw new Error(
+        `Inbox envelope disappeared without a receipt: ${input.messageId}`,
+      );
+    }
     const baseCard: ConversationCard = existingCard ?? {
         cardId: input.cardId,
         kind: input.kind,
@@ -5185,25 +5876,16 @@ export class ProjectSessionCoordinator {
     const existing = aggregateReservedConversationEntries(
       source.sessionManager.getEntries(),
     ).cards.find(({ cardId }) => cardId === envelope.cardId);
+    if (!existing) return;
     if (
-      existing?.state === state
+      existing.state === state
       && existing.runId === runId
       && existing.result === result
     ) {
       return;
     }
     this.appendCard(source, {
-      ...(existing ?? {
-        cardId: envelope.cardId,
-        kind: envelope.kind,
-        body: envelope.body,
-        fromSnapshot: envelope.fromSnapshot,
-        toSnapshot: envelope.toSnapshot,
-        messageId: envelope.messageId,
-        ...(envelope.delegationId === undefined
-          ? {}
-          : { delegationId: envelope.delegationId }),
-      }),
+      ...existing,
       state,
       ...(runId === undefined ? {} : { runId }),
       ...(result === undefined ? {} : { result }),
@@ -5222,8 +5904,9 @@ export class ProjectSessionCoordinator {
       const existing = aggregateReservedConversationEntries(
         manager.getEntries(),
       ).cards.find(({ cardId }) => cardId === envelope.cardId);
+      if (!existing) return;
       if (
-        existing?.state === state
+        existing.state === state
         && existing.runId === runId
         && existing.result === result
       ) {
@@ -5232,17 +5915,7 @@ export class ProjectSessionCoordinator {
       appendReservedCustomEntry(
         manager,
         createConversationCardEntry({
-          ...(existing ?? {
-            cardId: envelope.cardId,
-            kind: envelope.kind,
-            body: envelope.body,
-            fromSnapshot: envelope.fromSnapshot,
-            toSnapshot: envelope.toSnapshot,
-            messageId: envelope.messageId,
-            ...(envelope.delegationId === undefined
-              ? {}
-              : { delegationId: envelope.delegationId }),
-          }),
+          ...existing,
           state,
           ...(runId === undefined ? {} : { runId }),
           ...(result === undefined ? {} : { result }),
@@ -5251,28 +5924,435 @@ export class ProjectSessionCoordinator {
       );
     };
 
-    const activeSource = context.actors.get(envelope.fromConversationId);
-    if (activeSource) {
-      append(activeSource.sessionManager);
-      return;
-    }
-    const sourceExists = (await context.project.refreshConversations())
-      .some(({ id }) => id === envelope.fromConversationId);
-    if (!sourceExists) return;
-
-    const lease = await this.projects.acquireConversationWhenAvailable(
-      context.project.cwd,
+    await this.withStoredConversationManager(
+      context,
       envelope.fromConversationId,
+      append,
     );
-    try {
-      const manager = await context.project.openConversation(
-        envelope.fromConversationId,
-        { updateRecent: false },
+  }
+
+  private removeEnvelopeFromProcessingBatches(
+    context: ProjectContext,
+    messageId: string,
+  ): void {
+    for (const [key, batch] of context.processingBatches) {
+      const remaining = batch.filter((envelope) =>
+        envelope.messageId !== messageId
       );
-      append(manager);
-    } finally {
-      lease.release();
+      if (remaining.length === batch.length) continue;
+      if (remaining.length === 0) {
+        context.processingBatches.delete(key);
+      } else {
+        context.processingBatches.set(key, remaining);
+      }
     }
+  }
+
+  private assertReceiptMatchesEnvelope(
+    receipt: MessageDeliveryReceipt,
+    envelope: InboxEnvelope,
+  ): void {
+    if (
+      envelope.state !== "processing"
+      || envelope.processingRunId === undefined
+      || envelope.fromRunId === undefined
+      || receipt.messageId !== envelope.messageId
+      || receipt.cardId !== envelope.cardId
+      || receipt.fromConversationId !== envelope.fromConversationId
+      || receipt.toConversationId !== envelope.toConversationId
+      || receipt.sourceRunId !== envelope.fromRunId
+      || receipt.targetRunId !== envelope.processingRunId
+      || receipt.kind !== envelope.kind
+      || receipt.sentAt !== envelope.sentAt
+      || receipt.payloadFingerprint !== inboxEnvelopePayloadFingerprint(envelope)
+      || JSON.stringify(receipt.temporaryReturnAssignment)
+        !== JSON.stringify(envelope.temporaryReturnAssignment)
+    ) {
+      throw new Error(
+        `Inbox delivery identity conflicts with receipt ${envelope.messageId}`,
+      );
+    }
+  }
+
+  private findEnvelopeMarker(
+    manager: ConversationActor["sessionManager"],
+    envelope: InboxEnvelope,
+  ): ConversationMessageEntry | undefined {
+    const markers = manager.getEntries()
+      .map((entry) => parseReservedConversationEntry(entry))
+      .filter((entry) =>
+        entry?.kind === "conversation_message"
+        && entry.entry.details.messageId === envelope.messageId
+      );
+    if (markers.length > 1) {
+      throw new Error(
+        `Multiple inbox delivery markers found for ${envelope.messageId}`,
+      );
+    }
+    const marker = markers[0]?.kind === "conversation_message"
+      ? markers[0].entry
+      : undefined;
+    if (!marker) return undefined;
+    const expectedDetails = createConversationMessageEntry({
+      content: "marker identity",
+      display: true,
+      details: {
+        messageId: envelope.messageId,
+        cardId: envelope.cardId,
+        sentAt: envelope.sentAt,
+        kind: envelope.kind,
+        body: envelope.body,
+        fromSnapshot: envelope.fromSnapshot,
+        toSnapshot: envelope.toSnapshot,
+        ...(envelope.replyToMessageId === undefined
+          ? {}
+          : { replyToMessageId: envelope.replyToMessageId }),
+        ...(envelope.delegationId === undefined
+          ? {}
+          : { delegationId: envelope.delegationId }),
+      },
+    }).details;
+    if (JSON.stringify(marker.details) !== JSON.stringify(expectedDetails)) {
+      throw new Error(
+        `Inbox marker identity conflicts with sidecar ${envelope.messageId}`,
+      );
+    }
+    return marker;
+  }
+
+  private async ensureReceiptTemporaryAssignment(
+    context: ProjectContext,
+    receipt: MessageDeliveryReceipt,
+  ): Promise<void> {
+    const assignment = receipt.temporaryReturnAssignment;
+    if (!assignment) return;
+    if (
+      receipt.kind !== "message"
+      || receipt.sourceRunId !== assignment.initialRunId
+      || receipt.targetRunId !== assignment.callerRunId
+    ) {
+      throw new Error(
+        `Temporary return assignment conflicts with receipt ${receipt.messageId}`,
+      );
+    }
+    const identity = {
+      temporaryConversationId: receipt.fromConversationId,
+      initialRunId: assignment.initialRunId,
+      messageId: receipt.messageId,
+      callerRunId: assignment.callerRunId,
+    };
+    const inspectExisting = (
+      targetManager: ConversationActor["sessionManager"],
+    ): boolean => {
+      const existing = aggregateReservedConversationEntries(
+        targetManager.getEntries(),
+      ).temporaryReturnReceipts.find(
+        ({ messageId }) => messageId === receipt.messageId,
+      );
+      if (!existing) return false;
+      if (
+        existing.temporaryConversationId !== identity.temporaryConversationId
+        || existing.initialRunId !== identity.initialRunId
+        || existing.callerRunId !== identity.callerRunId
+        || existing.claimedAt !== assignment.assignedAt
+      ) {
+        throw new Error(
+          `Temporary return receipt identity conflicts for ${receipt.messageId}`,
+        );
+      }
+      return true;
+    };
+    let alreadyClaimed = false;
+    await this.withConversationManager(
+      context,
+      receipt.toConversationId,
+      async (targetManager) => {
+        alreadyClaimed = inspectExisting(targetManager);
+      },
+    );
+    if (alreadyClaimed) return;
+    await this.withConversationManager(
+      context,
+      receipt.fromConversationId,
+      async (sourceManager) => {
+        const sourceProfile = aggregateReservedConversationEntries(
+          sourceManager.getEntries(),
+        ).conversationMeta;
+        if (
+          sourceProfile?.lifecycle.kind !== "temporary"
+          || sourceProfile.lifecycle.callerConversationId
+            !== receipt.toConversationId
+          || sourceProfile.lifecycle.initialRunId !== assignment.initialRunId
+        ) {
+          throw new Error(
+            `Temporary return source identity conflicts for ${receipt.messageId}`,
+          );
+        }
+      },
+    );
+    await this.withConversationManager(
+      context,
+      receipt.toConversationId,
+      async (targetManager) => {
+        if (inspectExisting(targetManager)) return;
+        appendReservedCustomEntry(
+          targetManager,
+          createTemporaryReturnReceiptEntry({
+            state: "claimed",
+            ...identity,
+            claimedAt: assignment.assignedAt,
+          }),
+        );
+      },
+    );
+  }
+
+  private async projectReceiptSourceCard(
+    context: ProjectContext,
+    receipt: MessageDeliveryReceipt,
+    settlement?: RunSettlement,
+  ): Promise<void> {
+    const project = (manager: ConversationActor["sessionManager"]): void => {
+      const existing = aggregateReservedConversationEntries(
+        manager.getEntries(),
+      ).cards.find(({ cardId }) => cardId === receipt.cardId);
+      if (!existing) return;
+      if (
+        existing.messageId !== receipt.messageId
+        || existing.kind !== receipt.kind
+        || existing.fromSnapshot.conversationId !== receipt.fromConversationId
+        || existing.toSnapshot.conversationId !== receipt.toConversationId
+        || (
+          existing.runId !== undefined
+          && existing.runId !== receipt.targetRunId
+        )
+      ) {
+        throw new Error(
+          `Source card identity conflicts with receipt ${receipt.messageId}`,
+        );
+      }
+      if (
+        receipt.kind !== "delegation_task"
+        && (
+          existing.state === "completed"
+          || existing.state === "failed"
+          || existing.state === "aborted"
+        )
+      ) {
+        return;
+      }
+      const taskSettlement = receipt.kind === "delegation_task"
+        && settlement?.runId === receipt.targetRunId
+        ? settlement
+        : undefined;
+      const state: ConversationCard["state"] = taskSettlement
+        ? taskSettlement.outcome === "completed"
+          ? "completed"
+          : taskSettlement.outcome
+        : receipt.kind === "delegation_task"
+        ? "running"
+        : "delivered";
+      const result = taskSettlement
+        ? taskSettlement.finalText ?? undefined
+        : undefined;
+      if (
+        existing.state === state
+        && existing.runId === receipt.targetRunId
+        && existing.result === result
+      ) {
+        return;
+      }
+      const { result: _oldResult, ...base } = existing;
+      appendReservedCustomEntry(
+        manager,
+        createConversationCardEntry({
+          ...base,
+          state,
+          runId: receipt.targetRunId,
+          ...(result === undefined ? {} : { result }),
+          updatedAt: this.now().toISOString(),
+        }),
+      );
+    };
+
+    await this.withStoredConversationManager(
+      context,
+      receipt.fromConversationId,
+      project,
+    );
+  }
+
+  private async projectReceiptSourceCardBestEffort(
+    context: ProjectContext,
+    receipt: MessageDeliveryReceipt,
+    settlement?: RunSettlement,
+  ): Promise<void> {
+    try {
+      await this.projectReceiptSourceCard(context, receipt, settlement);
+    } catch (error) {
+      context.attention.add(receipt.fromConversationId);
+      context.attention.add(receipt.toConversationId);
+      this.emit(context, {
+        type: "error",
+        conversationId: receipt.fromConversationId,
+        runId: receipt.targetRunId,
+        message: error instanceof Error ? error.message : String(error),
+        fatal: false,
+      });
+    }
+  }
+
+  private async reconcileReceiptLedger(
+    context: ProjectContext,
+    targetConversationId: string,
+  ): Promise<string[]> {
+    let receipts: MessageDeliveryReceipt[] = [];
+    let settlements: RunSettlement[] = [];
+    await this.withConversationManager(
+      context,
+      targetConversationId,
+      async (manager) => {
+        const aggregate = aggregateReservedConversationEntries(
+          manager.getEntries(),
+        );
+        receipts = aggregate.messageDeliveryReceipts;
+        settlements = aggregate.runSettlements;
+      },
+    );
+    const settlementByRun = new Map(
+      settlements.map((settlement) => [settlement.runId, settlement]),
+    );
+    for (const receipt of receipts) {
+      await this.ensureReceiptTemporaryAssignment(context, receipt);
+      await this.projectReceiptSourceCardBestEffort(
+        context,
+        receipt,
+        settlementByRun.get(receipt.targetRunId),
+      );
+    }
+    return [...new Set(receipts
+      .filter((receipt) => !settlementByRun.has(receipt.targetRunId))
+      .map((receipt) => receipt.targetRunId))];
+  }
+
+  private async reconcileInbox(
+    context: ProjectContext,
+    targetConversationId?: string,
+  ): Promise<boolean> {
+    let blocked = false;
+    let reconciledDelivery = false;
+    const envelopes = await context.inbox.list(
+      targetConversationId === undefined ? undefined : { toConversationId: targetConversationId },
+    );
+    for (const envelope of envelopes) {
+      if (envelope.fromRunId === undefined) {
+        blocked = true;
+        context.attention.add(envelope.toConversationId);
+        context.attention.add(envelope.fromConversationId);
+        this.emit(context, {
+          type: "error",
+          conversationId: envelope.toConversationId,
+          runId: envelope.processingRunId,
+          message: `Inbox sidecar lacks exact source run identity for ${envelope.messageId}`,
+          fatal: false,
+        });
+        continue;
+      }
+      if (envelope.state !== "processing") continue;
+      try {
+        let receipt: MessageDeliveryReceipt | undefined;
+        let settlement: RunSettlement | undefined;
+        await this.withConversationManager(
+          context,
+          envelope.toConversationId,
+          async (manager) => {
+            const aggregate = aggregateReservedConversationEntries(
+              manager.getEntries(),
+            );
+            receipt = aggregate.messageDeliveryReceipts.find(
+              ({ messageId }) => messageId === envelope.messageId,
+            );
+            settlement = envelope.processingRunId === undefined
+              ? undefined
+              : aggregate.runSettlements.find(
+                  ({ runId }) => runId === envelope.processingRunId,
+                );
+            if (receipt) {
+              this.assertReceiptMatchesEnvelope(receipt, envelope);
+              return;
+            }
+            if (!this.findEnvelopeMarker(manager, envelope)) return;
+            if (
+              envelope.processingRunId === undefined
+              || envelope.fromRunId === undefined
+            ) {
+              throw new Error(
+                `Inbox sidecar lacks exact run identity for ${envelope.messageId}`,
+              );
+            }
+            receipt = {
+              messageId: envelope.messageId,
+              cardId: envelope.cardId,
+              fromConversationId: envelope.fromConversationId,
+              toConversationId: envelope.toConversationId,
+              sourceRunId: envelope.fromRunId,
+              targetRunId: envelope.processingRunId,
+              kind: envelope.kind,
+              sentAt: envelope.sentAt,
+              payloadFingerprint: inboxEnvelopePayloadFingerprint(envelope),
+              ...(envelope.temporaryReturnAssignment === undefined
+                ? {}
+                : {
+                  temporaryReturnAssignment: {
+                    ...envelope.temporaryReturnAssignment,
+                  },
+                }),
+              deliveredAt: this.now().toISOString(),
+            };
+            appendReservedCustomEntry(
+              manager,
+              createMessageDeliveryReceiptEntry(receipt),
+            );
+          },
+        );
+        if (!receipt) {
+          if (settlement) {
+            await context.inbox.updateState(envelope.messageId, {
+              state: "queued",
+            });
+            this.removeEnvelopeFromProcessingBatches(
+              context,
+              envelope.messageId,
+            );
+          }
+          continue;
+        }
+        await this.ensureReceiptTemporaryAssignment(context, receipt);
+        await context.inbox.delete(envelope.messageId);
+        this.removeEnvelopeFromProcessingBatches(context, envelope.messageId);
+        reconciledDelivery = true;
+        await this.projectReceiptSourceCardBestEffort(
+          context,
+          receipt,
+          settlement,
+        );
+      } catch (error) {
+        blocked = true;
+        context.attention.add(envelope.toConversationId);
+        context.attention.add(envelope.fromConversationId);
+        this.emit(context, {
+          type: "error",
+          conversationId: envelope.toConversationId,
+          runId: envelope.processingRunId,
+          message: error instanceof Error ? error.message : String(error),
+          fatal: false,
+        });
+      }
+    }
+    if (reconciledDelivery) {
+      await this.retryReturnableTemporaryDeletions(context);
+    }
+    return !blocked;
   }
 
   private async dispatchBatch(
@@ -5280,7 +6360,6 @@ export class ProjectSessionCoordinator {
     target: ConversationActor,
     envelopes: InboxEnvelope[],
     runId: string,
-    deliveredMessageIds: ReadonlySet<string> = new Set(),
   ): Promise<"started" | "not_started"> {
     if (target.getActivity().kind !== "idle") {
       throw new Error(`Conversation is already running: ${target.conversationId}`);
@@ -5289,9 +6368,12 @@ export class ProjectSessionCoordinator {
       envelope.state === "processing"
       && envelope.processingRunId === runId
     ));
+    const newlyClaimedMessageIds: string[] = [];
+    let startAttempted = false;
     let completion: Promise<RunSettlement>;
     try {
       for (const envelope of envelopes) {
+        this.materializeTemporaryReturnReceipt(context, target, envelope);
         if (
           envelope.state !== "processing"
           || envelope.processingRunId !== runId
@@ -5300,6 +6382,7 @@ export class ProjectSessionCoordinator {
             state: "processing",
             processingRunId: runId,
           });
+          newlyClaimedMessageIds.push(envelope.messageId);
         }
       }
       const processing = envelopes.map((envelope) => ({
@@ -5311,81 +6394,96 @@ export class ProjectSessionCoordinator {
         completionKey(target.conversationId, runId),
         processing,
       );
-      const undelivered = processing.filter(
-        ({ messageId }) => !deliveredMessageIds.has(messageId),
-      );
-      completion = undelivered.length === 0
-        ? target.resumeMessages({ runId })
-        : target.startMessages({
-            runId,
-            recovered: recoveredBatch,
-            messages: undelivered.map((envelope) => {
-              const message = this.createDeliveredMessageEntry(
-                target,
-                envelope,
-              );
-              return {
-                content: message.content,
-                display: message.display,
-                details: message.details,
-              };
-            }),
-        });
+      startAttempted = true;
+      completion = target.startMessages({
+        runId,
+        recovered: recoveredBatch,
+        messages: processing.map((envelope) => {
+          const message = this.createDeliveredMessageEntry(
+            target,
+            envelope,
+          );
+          return {
+            content: message.content,
+            display: message.display,
+            details: message.details,
+          };
+        }),
+      });
       for (const envelope of processing) {
-        this.appendSourceCardState(
-          context,
-          envelope,
-          "running",
-          runId,
-        );
+        try {
+          this.appendSourceCardState(
+            context,
+            envelope,
+            "running",
+            runId,
+          );
+        } catch (error) {
+          context.attention.add(envelope.fromConversationId);
+          this.emit(context, {
+            type: "error",
+            conversationId: envelope.fromConversationId,
+            runId,
+            message: error instanceof Error ? error.message : String(error),
+            fatal: false,
+          });
+        }
       }
     } catch (error) {
-      context.processingBatches.delete(
-        completionKey(target.conversationId, runId),
-      );
-      for (const envelope of envelopes) {
-        await context.inbox.updateState(
-          envelope.messageId,
-          envelope.state === "processing"
-            ? {
-                state: "processing",
-                processingRunId: envelope.processingRunId!,
-                ...(envelope.processingDelivery === undefined
-                  ? {}
-                  : { processingDelivery: envelope.processingDelivery }),
-                ...(envelope.waitedByRunId === undefined
-                  ? {}
-                  : { waitedByRunId: envelope.waitedByRunId }),
-              }
-            : { state: "queued" },
-        );
+      if (!startAttempted) {
+        try {
+          for (const messageId of newlyClaimedMessageIds.reverse()) {
+            const stored = await context.inbox.get(messageId);
+            if (
+              stored?.state === "processing"
+              && stored.processingRunId === runId
+            ) {
+              await context.inbox.updateState(messageId, { state: "queued" });
+            }
+          }
+          context.processingBatches.delete(
+            completionKey(target.conversationId, runId),
+          );
+          if (!context.closing) {
+            this.trackBackground(context, this.runLifecycle(context, async () => {
+              await this.pumpTarget(context, target.conversationId);
+            }));
+          }
+        } catch (rollbackError) {
+          if (!context.closing) {
+            this.trackBackground(context, this.runLifecycle(context, () =>
+              this.recoverFailedBatch(
+                context,
+                target.conversationId,
+                runId,
+                rollbackError,
+              )
+            ));
+          }
+        }
+        return "not_started";
       }
-      const retryKey = dispatchRetryKey(
-        target.conversationId,
-        envelopes,
-      );
-      context.attention.add(target.conversationId);
-      this.emit(context, {
-        type: "error",
-        conversationId: target.conversationId,
-        runId,
-        message: error instanceof Error ? error.message : String(error),
-        fatal: false,
-      });
-      if (
-        !context.closing
-        && !context.failedDispatchRetries.has(retryKey)
-      ) {
-        context.failedDispatchRetries.add(retryKey);
-        this.trackBackground(
-          context,
-          this.runLifecycle(context, async () => {
-            await this.pumpTarget(context, target.conversationId);
-          }),
-        );
+      // Once startMessages is attempted, keep the exact processing identity
+      // and replace the actor before one bounded retry. Rolling transport back
+      // across that ambiguous boundary could inject a duplicate message.
+      if (!context.closing) {
+        this.trackBackground(context, this.runLifecycle(context, () =>
+          this.recoverFailedBatch(
+            context,
+            target.conversationId,
+            runId,
+            error,
+          )
+        ));
       }
       return "not_started";
     }
+    this.trackBackground(
+      context,
+      this.runLifecycle(context, async () => {
+        await this.reconcileInbox(context, target.conversationId);
+      }),
+    );
     this.trackBackground(context, completion.then(
       () => undefined,
       (error) => this.runLifecycle(context, () => this.recoverFailedBatch(
@@ -5402,71 +6500,41 @@ export class ProjectSessionCoordinator {
     context: ProjectContext,
     targetConversationId: string,
     runId: string,
-    settlement: RunSettlement,
+    _settlement: RunSettlement,
   ): Promise<void> {
     const key = completionKey(targetConversationId, runId);
     const initialEnvelopes = context.processingBatches.get(key) ?? [];
-    const target = context.actors.get(targetConversationId);
-    const deliveredMessageIds = new Set(
-      target
-        ? aggregateReservedConversationEntries(
-            target.sessionManager.getEntries(),
-          ).deliveredMessageIds
-        : [],
-    );
-    const finishRemaining = async (retrying: boolean): Promise<void> => {
-      const remaining = [...(context.processingBatches.get(key) ?? [])];
-      while (remaining.length > 0) {
-        const envelope = remaining[0]!;
-        try {
-          const delivered = deliveredMessageIds.has(envelope.messageId);
-          if (!delivered && envelope.processingDelivery === "steer") {
-            // The SDK queue is transient. If abort/settlement won before Pi
-            // persisted the custom message marker, return this claimed steering
-            // envelope to FIFO delivery instead of claiming receipt.
-            await context.inbox.updateState(envelope.messageId, {
+    const finish = async (retrying: boolean): Promise<void> => {
+      try {
+        if (!await this.reconcileInbox(context, targetConversationId)) return;
+        await this.reconcileReceiptLedger(context, targetConversationId);
+        for (const envelope of initialEnvelopes) {
+          const stored = await context.inbox.get(envelope.messageId);
+          if (
+            stored?.state === "processing"
+            && stored.processingRunId === runId
+          ) {
+            await context.inbox.updateState(stored.messageId, {
               state: "queued",
             });
-          } else if (delivered || envelope.state !== "queued") {
-            const state = settlement.outcome === "completed"
-              ? "completed"
-              : settlement.outcome;
-            await this.appendTerminalSourceCardState(
-              context,
-              envelope,
-              state,
-              runId,
-              settlement.finalText ?? undefined,
-            );
-            await context.inbox.delete(envelope.messageId);
           }
-        } catch (error) {
-          // Keep the failed envelope and every later envelope recoverable in
-          // this process. A terminal card append may already have committed;
-          // its aggregation makes the one bounded retry safe before deletion.
-          context.processingBatches.set(key, remaining);
-          if (!retrying) {
-            await finishRemaining(true);
-            return;
-          }
-          throw error;
+          this.removeEnvelopeFromProcessingBatches(
+            context,
+            envelope.messageId,
+          );
         }
-        remaining.shift();
-        if (remaining.length === 0) {
-          context.processingBatches.delete(key);
-        } else {
-          context.processingBatches.set(key, remaining);
+      } catch (error) {
+        if (!retrying) {
+          await finish(true);
+          return;
         }
+        throw error;
       }
+      context.processingBatches.delete(key);
       context.failedBatchRetries.delete(key);
-      if (initialEnvelopes.length > 0) {
-        context.failedDispatchRetries.delete(
-          dispatchRetryKey(targetConversationId, initialEnvelopes),
-        );
-      }
       this.emit(context, { type: "project_changed" });
     };
-    await finishRemaining(false);
+    await finish(false);
   }
 
   private async recoverFailedBatch(
@@ -5593,6 +6661,10 @@ export class ProjectSessionCoordinator {
         await this.pumpTarget(context, actor.conversationId);
       }
       await this.retryBlockedDeletions(context);
+      await this.maybeCompleteReloadAdoption(
+        context,
+        actor.conversationId,
+      );
     }).catch((error) => {
       this.rejectRunWaiters(
         context,
@@ -5611,6 +6683,112 @@ export class ProjectSessionCoordinator {
     }));
   }
 
+
+  private async reloadTargetHasPendingWork(
+    context: ProjectContext,
+    conversationId: string,
+  ): Promise<boolean> {
+    const actor = context.actors.get(conversationId);
+    if (actor && actor.getActivity().kind !== "idle") return true;
+    const batchPrefix = `${conversationId.length}:${conversationId}:`;
+    if ([...context.processingBatches.keys()].some((key) =>
+      key.startsWith(batchPrefix)
+    )) {
+      return true;
+    }
+    try {
+      if ((await context.inbox.list({
+        toConversationId: conversationId,
+      })).length > 0) {
+        return true;
+      }
+      return await this.withConversationManager(
+        context,
+        conversationId,
+        (manager) => {
+          const aggregate = aggregateReservedConversationEntries(
+            manager.getEntries(),
+          );
+          const settledRunIds = new Set(
+            aggregate.runSettlements.map(({ runId }) => runId),
+          );
+          return aggregate.messageDeliveryReceipts.some(
+            ({ targetRunId }) => !settledRunIds.has(targetRunId),
+          );
+        },
+      );
+    } catch {
+      return true;
+    }
+  }
+
+  private async maybeCompleteReloadAdoption(
+    context: ProjectContext,
+    conversationId: string,
+  ): Promise<void> {
+    const adoption = context.reloadAdoptions.get(conversationId);
+    if (!adoption || adoption.notifying) return;
+    let settlement = context.completions.get(
+      completionKey(conversationId, adoption.runId),
+    );
+    if (!settlement) {
+      try {
+        settlement = await this.withConversationManager(
+          context,
+          conversationId,
+          (manager) => aggregateReservedConversationEntries(
+            manager.getEntries(),
+          ).runSettlements.find(({ runId }) => runId === adoption.runId),
+        );
+      } catch {
+        return;
+      }
+    }
+    if (
+      !settlement
+      || await this.reloadTargetHasPendingWork(context, conversationId)
+    ) return;
+    adoption.notifying = true;
+    void adoption.onCompleted({
+      requestId: adoption.requestId,
+      cwd: context.project.cwd,
+      conversationId,
+      runId: adoption.runId,
+    }).then(
+      () => {
+        if (context.reloadAdoptions.get(conversationId) !== adoption) return;
+        context.reloadAdoptions.delete(conversationId);
+        this.reloadReservations.delete(reloadReservationKey(
+          context.project.cwd,
+          conversationId,
+        ));
+        if (!adoption.deleteTemporaryAfterAck) return;
+        this.trackBackground(context, this.cleanupDeferredTemporaryConversation(
+          context.project.cwd,
+          conversationId,
+        ).catch((error) => {
+          context.attention.add(conversationId);
+          this.emit(context, {
+            type: "error",
+            conversationId,
+            runId: adoption.runId,
+            message: error instanceof Error ? error.message : String(error),
+            fatal: false,
+          });
+        }));
+      },
+      (error: unknown) => {
+        context.attention.add(conversationId);
+        this.emit(context, {
+          type: "error",
+          conversationId,
+          runId: adoption.runId,
+          message: error instanceof Error ? error.message : String(error),
+          fatal: false,
+        });
+      },
+    );
+  }
 
   private async recoverProject(context: ProjectContext): Promise<void> {
     if (context.closing) return;
@@ -5682,6 +6860,15 @@ export class ProjectSessionCoordinator {
             });
           }
         }
+        const settledRunIds = new Set(
+          inspection.runSettlements.map(({ runId }) => runId),
+        );
+        if (inspection.messageDeliveryReceipts.some((receipt) =>
+          !settledRunIds.has(receipt.targetRunId)
+          || receipt.kind === "delegation_task"
+        )) {
+          actorIds.add(summary.id);
+        }
         const profile = inspection.conversationMeta;
         if (!profile) continue;
         context.profiles.set(summary.id, cloneProfile(profile));
@@ -5715,49 +6902,51 @@ export class ProjectSessionCoordinator {
       if (context.closing) return;
       if (blockedTargets.has(envelope.toConversationId)) continue;
       try {
-        const source = await this.getOrOpenActor(
+        const project = (manager: ConversationActor["sessionManager"]) => {
+          const card = aggregateReservedConversationEntries(
+            manager.getEntries(),
+          ).cards.find(({ cardId }) => cardId === envelope.cardId);
+          if (card?.state !== "sending") return;
+          appendReservedCustomEntry(
+            manager,
+            createConversationCardEntry({
+              ...card,
+              state: envelope.state === "processing" ? "running" : "queued",
+              messageId: envelope.messageId,
+              ...(envelope.delegationId === undefined
+                ? {}
+                : { delegationId: envelope.delegationId }),
+              ...(envelope.requestFingerprint === undefined
+                ? {}
+                : { requestFingerprint: envelope.requestFingerprint }),
+              ...(envelope.processingRunId === undefined
+                ? {}
+                : { runId: envelope.processingRunId }),
+              updatedAt: this.now().toISOString(),
+            }),
+          );
+        };
+        await this.withStoredConversationManager(
           context,
           envelope.fromConversationId,
+          project,
         );
-        const card = aggregateReservedConversationEntries(
-          source.sessionManager.getEntries(),
-        ).cards.find(({ cardId }) => cardId === envelope.cardId);
-        if (!card || card.state === "sending") {
-          this.appendCard(source, {
-            ...(card ?? {
-              cardId: envelope.cardId,
-              kind: envelope.kind,
-              body: envelope.body,
-              fromSnapshot: envelope.fromSnapshot,
-              toSnapshot: envelope.toSnapshot,
-            }),
-            state: envelope.state === "processing" ? "running" : "queued",
-            messageId: envelope.messageId,
-            ...(envelope.delegationId === undefined
-              ? {}
-              : { delegationId: envelope.delegationId }),
-            ...(envelope.requestFingerprint === undefined
-              ? {}
-              : { requestFingerprint: envelope.requestFingerprint }),
-            ...(envelope.processingRunId === undefined
-              ? {}
-              : { runId: envelope.processingRunId }),
-            updatedAt: this.now().toISOString(),
-          });
-        }
       } catch {
         // A deleted source must not prevent the durable target delivery.
       }
     }
 
+    await this.reconcileInbox(context);
     for (const actorId of actorIds) {
       if (context.closing) return;
       try {
         await this.getOrOpenActor(context, actorId);
+        await this.pumpTarget(context, actorId);
       } catch {
         context.attention.add(actorId);
       }
     }
+    await this.retryBlockedDeletions(context);
     if (legacyPromptQueue.length > 0) {
       await this.redeliverLegacyPromptQueue(context, legacyPromptQueue);
     }
@@ -5980,6 +7169,49 @@ export class ProjectSessionCoordinator {
     );
   }
 
+  private async withStoredConversationManager<T>(
+    context: ProjectContext,
+    conversationId: string,
+    work: (
+      manager: ConversationActor["sessionManager"],
+    ) => Promise<T> | T,
+  ): Promise<T | undefined> {
+    const active = context.actors.get(conversationId);
+    if (active) return await work(active.sessionManager);
+    const opening = context.actorOpenings.get(conversationId);
+    if (opening) return await work((await opening).sessionManager);
+    if (!context.project.listConversations().some(
+      ({ id }) => id === conversationId
+    )) {
+      return undefined;
+    }
+
+    let lease: ReturnType<ProjectStoreRegistry["acquireConversation"]>;
+    try {
+      lease = this.projects.acquireConversation(
+        context.project.cwd,
+        conversationId,
+      );
+    } catch (error) {
+      const racedActive = context.actors.get(conversationId);
+      if (racedActive) return await work(racedActive.sessionManager);
+      const racedOpening = context.actorOpenings.get(conversationId);
+      if (racedOpening) {
+        return await work((await racedOpening).sessionManager);
+      }
+      throw error;
+    }
+    try {
+      const manager = await context.project.openConversation(
+        conversationId,
+        { updateRecent: false },
+      );
+      return await work(manager);
+    } finally {
+      lease.release();
+    }
+  }
+
   private async withConversationManager<T>(
     context: ProjectContext,
     conversationId: string,
@@ -6024,20 +7256,43 @@ export class ProjectSessionCoordinator {
     if (context.closing) return "no_work";
     if (context.deleting.has(conversationId)) return "blocked_by_deletion";
     const actor = context.actors.get(conversationId);
-    if (!actor || actor.getActivity().kind !== "idle") return "no_work";
+    if (!actor) return "no_work";
+    if (!await this.reconcileInbox(context, conversationId)) return "no_work";
+    const receiptRunIds = await this.reconcileReceiptLedger(
+      context,
+      conversationId,
+    );
+    if (receiptRunIds.length > 1) {
+      context.attention.add(conversationId);
+      throw new Error(
+        `Multiple unsettled inbox receipt runs found for ${conversationId}`,
+      );
+    }
+    if (actor.getActivity().kind !== "idle") return "no_work";
+    if (receiptRunIds.length === 1) {
+      const runId = receiptRunIds[0]!;
+      const completion = actor.resumeMessages({ runId });
+      this.trackBackground(context, completion.then(
+        () => undefined,
+        (error) => this.runLifecycle(context, () => this.recoverFailedBatch(
+          context,
+          conversationId,
+          runId,
+          error,
+        )),
+      ));
+      return "started";
+    }
     const pending = await context.inbox.list({
       toConversationId: conversationId,
     });
     if (context.closing) return "no_work";
     if (context.deleting.has(conversationId)) return "blocked_by_deletion";
-    if (pending.length === 0) {
-      return "no_work";
-    }
+    if (pending.length === 0) return "no_work";
 
     const aggregate = aggregateReservedConversationEntries(
       actor.sessionManager.getEntries(),
     );
-    const delivered = new Set(aggregate.deliveredMessageIds);
     const first = pending[0]!;
     let runId: string;
     if (first.state === "processing") {
@@ -6063,25 +7318,16 @@ export class ProjectSessionCoordinator {
       (settlement) => settlement.runId === runId,
     );
     if (settled) {
-      context.processingBatches.set(
-        completionKey(conversationId, runId),
-        batch,
+      context.attention.add(conversationId);
+      throw new Error(
+        `Queued inbox work conflicts with settled run ${runId}`,
       );
-      await this.finishBatch(
-        context,
-        conversationId,
-        runId,
-        settled,
-      );
-      await this.pumpTarget(context, conversationId);
-      return "settled";
     }
     const dispatch = await this.dispatchBatch(
       context,
       actor,
       batch,
       runId,
-      delivered,
     );
     return dispatch === "started" ? "started" : "no_work";
   }
@@ -6265,6 +7511,14 @@ export class ProjectSessionCoordinator {
       ) {
         throw new Error("An Agent cannot delete its own session");
       }
+      const reloadProtectedConversationId = cascadeIds.find((cascadeId) =>
+        this.isReloadProtected(context, cascadeId)
+      );
+      if (reloadProtectedConversationId !== undefined) {
+        throw new Error(
+          "Cannot delete while reload completion acknowledgement is pending",
+        );
+      }
       for (const cascadeId of cascadeIds) {
         if (cascadeId === conversationId) continue;
         if (!this.reserveDeletion(context, cascadeId)) {
@@ -6406,7 +7660,10 @@ export class ProjectSessionCoordinator {
     context: ProjectContext,
     conversationId: string,
   ): boolean {
-    if (context.deleting.has(conversationId)) return false;
+    if (
+      context.deleting.has(conversationId)
+      || this.isReloadProtected(context, conversationId)
+    ) return false;
     context.deleting.add(conversationId);
     return true;
   }

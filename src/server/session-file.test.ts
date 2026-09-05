@@ -8,6 +8,7 @@ import {
   LEGACY_LOOP_LIST_CUSTOM_TYPE,
   LEGACY_LOOP_LIST_CONTINUE_CUSTOM_TYPE,
   LOOP_LIST_CUSTOM_TYPE,
+  MESSAGE_DELIVERY_RECEIPT_CUSTOM_TYPE,
   PENDING_PROMPT_BATCH_CUSTOM_TYPE,
   PENDING_PROMPT_DELIVERY_CUSTOM_TYPE,
   createConversationCardEntry,
@@ -15,6 +16,7 @@ import {
   createConversationMetaEntry,
   createLoopListContinueEntry,
   createLoopListEntry,
+  createMessageDeliveryReceiptEntry,
   createRunSettlementEntry,
   parsePendingPromptBatchEntry,
   parsePendingPromptDeliveryEntry,
@@ -501,6 +503,18 @@ describe("validatePiSessionFile", () => {
       finalText: "Done",
       settledAt: "2026-01-01T00:03:00.000Z",
     });
+    const receipt = createMessageDeliveryReceiptEntry({
+      messageId,
+      cardId: incoming.details.cardId,
+      fromConversationId: incoming.details.fromSnapshot.conversationId,
+      toConversationId: conversationId,
+      sourceRunId: randomUUID(),
+      targetRunId: runId,
+      kind: incoming.details.kind,
+      sentAt: incoming.details.sentAt,
+      payloadFingerprint: "b".repeat(64),
+      deliveredAt: "2026-01-01T00:03:30.000Z",
+    });
     const delivery = deliveryEntry({
       promptId: randomUUID(),
       runId,
@@ -588,6 +602,11 @@ describe("validatePiSessionFile", () => {
         customType: PENDING_PROMPT_BATCH_CUSTOM_TYPE,
         data: batch.data,
       },
+      {
+        ...base("custom", "00000009", "00000008"),
+        customType: MESSAGE_DELIVERY_RECEIPT_CUSTOM_TYPE,
+        data: receipt.data,
+      },
     ]);
 
     expect(inspectPiSessionFile(
@@ -599,6 +618,7 @@ describe("validatePiSessionFile", () => {
       conversationMeta: meta.data,
       cards: [finalCard.data],
       deliveredMessageIds: [messageId],
+      messageDeliveryReceipts: [receipt.data],
       runSettlements: [settlement.data],
       pendingPromptDeliveries: [delivery.data],
       pendingPromptBatches: [batch.data],
@@ -982,6 +1002,30 @@ describe("validatePiSessionFile", () => {
       },
     ]), "foreign-message.jsonl")).toThrow(
       /message target.*current conversation/i,
+    );
+
+    const foreignReceipt = createMessageDeliveryReceiptEntry({
+      messageId: randomUUID(),
+      cardId: randomUUID(),
+      fromConversationId: randomUUID(),
+      toConversationId: randomUUID(),
+      sourceRunId: randomUUID(),
+      targetRunId: randomUUID(),
+      kind: "message",
+      sentAt: timestamp,
+      payloadFingerprint: "a".repeat(64),
+      deliveredAt: timestamp,
+    });
+    expect(() => inspectPiSessionFile(serialize([
+      header,
+      {
+        ...base,
+        type: "custom",
+        customType: MESSAGE_DELIVERY_RECEIPT_CUSTOM_TYPE,
+        data: foreignReceipt.data,
+      },
+    ]), "foreign-receipt.jsonl")).toThrow(
+      /receipt target.*current conversation/i,
     );
   });
 

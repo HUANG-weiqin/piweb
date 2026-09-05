@@ -1,6 +1,6 @@
 # Agent 协作
 
-`updated: 2026-09-04`
+`updated: 2026-09-05`
 
 ## 这个模块是干什么的
 
@@ -57,30 +57,33 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
     target-<conversationId hash>.tombstone.json
 ```
 
-每个 inbox envelope 是严格 v1 的单文件原子记录，保存稳定 `messageId/cardId`、来源/目标 conversation 快照、正文、消息种类、可选的冻结来源 `fromRunId`，以及 `queued | processing`。processing 状态还可保存接收方 `waitedByRunId` receipt；`fromRunId` 让 wait 在“消息先提交、wait 后注册”时能补查精确回复，receipt 防止同一接收 run 的后续 wait 重复观察同一 messageId。两者都是 durable sidecar 状态；目录、文件、身份、容量或内容异常都 fail closed。32 MiB envelope 容量按每条记录的最坏 processing 形态预留，所以已接受 queued 记录不会因状态字段增长而无法 claim；删除 tombstone 使用独立的 1 MiB / 1024 条预算，满 envelope reservation 仍能先建立 durable fence。scan 允许旧版 actual-fit、reservation 超限的目录打开并清理，但禁止继续创建，状态替换还会复核实际 next bytes，不能把兼容性变成越界。需要固定 initial runId 的 start_session envelope 在首次原子创建时就写成 processing，不存在先 commit queued、再二次改写的窗口。
+每个 inbox envelope 是严格 v1 的单文件原子记录，保存稳定 `messageId/cardId`、来源/目标 conversation 快照、正文、消息种类、冻结来源 `fromRunId`，以及 `queued | processing`。新 admission 必须携带 exact `fromRunId`；旧文件仍可解析，但缺失该身份时在投递前 fail closed，不能按正文、当前 actor 或最新 run 猜测。processing 状态还可保存接收方 `waitedByRunId`；它让同一 receiving run 的后续 wait 不重复观察同一 messageId。sidecar 只负责 transport：目标 JSONL 持久化严格的 `piweb.message_delivery_receipt.v1` 后即可删除，不再占用单目标 64 条配额直至 run settlement。receipt 保存 source/target conversation 与 exact run、immutable payload fingerprint、delivery 时间及可选 temporary assignment；它是隐藏、不可 rewind 的 delivery authority，incoming marker 与 sender card 都只是可 rewind/可修复投影。目录、文件、身份、容量或内容异常都 fail closed。32 MiB envelope 容量按每条记录的最坏 processing 形态预留，所以已接受 queued 记录不会因状态字段增长而无法 claim；删除 tombstone 使用独立的 1 MiB / 1024 条预算，满 envelope reservation 仍能先建立 durable fence。scan 允许旧版 actual-fit、reservation 超限的目录打开并清理，但禁止继续创建，状态替换还会复核实际 next bytes，不能把兼容性变成越界。需要固定 initial runId 的 start_session envelope 在首次原子创建时就写成 processing，不存在先 commit queued、再二次改写的窗口。
 
-发送线性化顺序：
+发送的 authority 顺序：
 
 ```text
 来源 JSONL 追加 sending 卡片
 → 原子写目标 inbox
 → 来源同 cardId 追加 queued 卡片
-→ busy target：先转 processing 并按精确 runId 作为 SDK custom steering 注入；idle target：写入 custom_message 并启动 run
-→ Pi 持久写入 custom_message marker
-→ 精确 run settlement 持久化
-→ 来源同 cardId 更新 terminal 状态
-→ 删除 sidecar
+→ claim exact targetRunId 并投递 custom message
+→ 目标 JSONL 持久写入 custom_message marker
+→ 目标 JSONL 追加 immutable delivery receipt
+→ 删除 transport sidecar，释放目标容量
+→ best-effort 修复来源 card 投影
+→ 精确 run settlement 持久化；delegation_task card 再随 settlement 终结
 ```
 
-- busy target 默认接收 steering：所有 peer message 种类（包括临时结果/失败）都先持久转为 `processing(runId)`，再以 `piweb.conversation_message.v1` custom message 放入当前 Pi turn 的 steering queue；它在当前工具调用结束、下次模型请求前生效，不创建第二个 run。busy 注入必须真正进入该 live run 的 SDK steering queue；只在 turn end 把 custom message 追加到 AgentSession state 不算交付，因为 Pi 当前 run 使用启动时冻结的 context snapshot，正文不会进入该 run 的下一次模型请求。普通发送以 durable claim 为确认点，不等待 pre-stream SDK 内存队列，因此不会与项目关闭或 preflight 互锁。只有 Pi 已把 custom message marker 写入 JSONL 且该精确 run 已结算，sidecar 才能删除；abort、启动失败或在 marker 前结算会将 envelope 恢复为 `queued` 并按 FIFO 重投。因此切换浏览器项目/focus、断线或进程重启都不能依赖内存 steering queue。目标 idle 时仍由 inbox pump 启动新 run。目标正通过 `wait_for_session` 阻塞时，wait 注册之后实际投递给其当前 run 的任何新 peer/inbox 消息（不再要求来源精确匹配所等 target）都会立即结算 wait 并返回消息真实来源 metadata；发送者若正处活跃 run，同一投递即返回 `delivered_to_wait`。wait 注册前已 claim 进当前 run queue 的未观察消息在注册时同样结算（见 wait_for_session 条目）。
+sender card 的 `running/delivered` 更新可因 active actor 的观察时点出现在 marker 两侧，但它不是 delivery authority。idle batch 必须先让 `startMessages()` 接受 exact targetRunId，再 best-effort 写 `running`，避免部分 card 写成功后回滚 transport 并在重试时换 runId。ordinary/result/failure 在 receipt 后投影为 `delivered`；只有 `delegation_task` 在 receipt 后保持 `running`，再由 exact settlement 投影为 `completed | failed | aborted`。receipt/temporary assignment 已经持久化后，card 投影失败只标 attention，由 ledger 以后修复，不能继续占用 sidecar 容量。
+
+- busy target 默认接收 steering：所有 peer message 种类（包括临时结果/失败）都先持久转为 `processing(runId)`，再以 `piweb.conversation_message.v1` custom message 放入当前 Pi turn 的 steering queue；它在当前工具调用结束、下次模型请求前生效，不创建第二个 run。busy 注入必须真正进入该 live run 的 SDK steering queue；只在 turn end 把 custom message 追加到 AgentSession state 不算交付，因为 Pi 当前 run 使用启动时冻结的 context snapshot，正文不会进入该 run 的下一次模型请求。普通发送以 durable claim 为确认点，不等待 pre-stream SDK 内存队列，因此不会与项目关闭或 preflight 互锁。Pi 已写入 exact custom marker 后，coordinator 会在同一 target JSONL 物化 immutable delivery receipt；receipt durable 后即可删除 sidecar，无需等待该 run settlement。marker 前 abort/启动失败或 settlement 会恢复 `queued` 并按 FIFO 重投；marker 已有但 receipt 未写的崩溃由 reconciliation 补写 receipt；receipt 已有时绝不再次注入正文，即使用户后来 rewind 掉 marker。因此切换浏览器项目/focus、断线或进程重启都不能依赖内存 steering queue。目标 idle 时仍由 inbox pump 启动新 run。目标正通过 `wait_for_session` 阻塞时，wait 注册之后实际投递给其当前 run 的任何新 peer/inbox 消息（不再要求来源精确匹配所等 target）都会立即结算 wait 并返回消息真实来源 metadata；发送者若正处活跃 run，同一投递即返回 `delivered_to_wait`。wait 注册前已 claim 进当前 run queue 的未观察消息在注册时同样结算（见 wait_for_session 条目）。
 - inbox commit 是取消边界：commit 前取消可拒绝，commit 后即使来源 run 随即取消，目标 pump 仍继续；同步启动失败会有界重试一次并保留 durable sidecar。
 - 同一目标严格按 `sentAt + messageId` 投递；busy steering 也只能认领最早的未送 envelope，不能越过更早的 queued 或其它 run 的 processing envelope。
 - 普通 inbox claim 每次最多批量投递 8 条。精确 wait 回复若排在该批之后，会先按 FIFO 把目标有界 inbox（单目标最多 64 条）中它之前的消息全部排入同一 steering queue，再排回复并结算 wait；否则未完成的 wait 工具会阻止前批 steering 被消费并形成死锁。through drain 中任一 predecessor（或 through envelope 本身）的 SDK steer 投递失败且无 durable marker 时 fail closed：把该 predecessor 恢复 `queued` 并 rethrow 原错误，由 `deliverEnvelopeToWaitingRun` 注销/reject waiter 并向 sender 抛错，through envelope 保持 queued，绝不回落到普通 claim 把 wake 消息误排入等待 run 后留下悬挂 waiter；普通非-through 批量路径仍保持异步 recover/return false 语义。这里的“批量”既描述 sidecar claim、FIFO 和 run ownership，也描述模型观察：steeringMode="all" 下同一轮工具序列结束后排队的多条 custom steer（含用户消息）会一次全部注入同一次模型调用。允许管理会话的目标 LLM 会收到来源标题、角色、完整 conversationId、正文、回复工具提示，以及“自行管理所创建会话生命周期”的提醒；关闭能力的角色只收到来源元信息和正文，不会看到任何会话工具名称或管理提示。隐藏提示只存在于 Agent 上下文，浏览器卡片仍只从 `details.body` 投影用户可见正文。
-- incoming 消息使用 `piweb.conversation_message.v1` 并进入目标上下文；outgoing/委派状态使用 `piweb.conversation_card.v1`，只用于投影。
+- incoming 消息使用 `piweb.conversation_message.v1` 并进入目标上下文；outgoing/委派状态使用 `piweb.conversation_card.v1`，只用于投影。`piweb.message_delivery_receipt.v1` 不进入模型或聊天历史，却永久阻止同一 messageId 被二次注入；幂等 replay 必须精确匹配整个 immutable envelope identity。
 - 同一 `cardId` 的后续 entry 原地覆盖卡片状态；浏览器和重启恢复不会刷出多张重复卡。消息可能先因目标 run 启动进入 `running`，随后才因精确 wait rendezvous 追加 `delivered` 确认；该 `running → delivered` 转换是合法的异步观察顺序，之后仍可进入 terminal 状态。
-- 每个 run 先追加 `piweb.run_settlement.v1`，记录精确 `runId/outcome/finalText`，再通知 waiter 和 inbox 清理。cycle check、waiter 注册与 committed inbox 补查处于项目 lifecycle 同一线性边界：发送先赢时按 `fromConversationId + fromRunId` 找回未被当前 receiving run receipt 的回复，注册先赢时发送路径直接 rendezvous；扫描/aggregate/投影失败，以及目标 exact run 在 settlement 前进入 fatal infrastructure 状态时，都必须移除 waiter 和 AbortSignal listener，不能留下 ghost wait edge。等待返回 durable settlement 或精确目标 run 主动发来的 message metadata；消息正文只通过 incoming custom message 注入一次，不能在 tool result 再复制一份。message metadata 与 incoming custom message 必须同在恢复该 Agent 的一次模型请求中，调用者不应为取得正文再 `wait_for_session` 或 `peek_session`。若 metadata 带 `fulfillsTemporaryReturn:true`，对应 incoming 正文就是 one-shot temporary 的指定回传，调用者不应只为观察稍后可见的 exact settlement 再次等待；普通消息不带该标志，仍只是一次 interruption。临时 initial run 的 caller waiter 会保留到自动回传 envelope 提交，只返回 message metadata，不再同时返回含同一正文的 settlement；但该 initial run 在 caller 正在精确等待时立即 `send_session_message`，会把 exact-wait assignment 与 message 一起原子写进 inbox envelope，这个 inbox commit 是替代成功自动回传的线性化点。宿主随后在 caller JSONL 物化严格的 `piweb.temporary_return_receipt.v1` claimed receipt（temporary conversation、initial run、message、caller run 和时间）；若进程在物化前退出，temporary completion 会从仍在的 assigned envelope 幂等补写。即使后续 inbox steering 或 SDK steer 拒绝，envelope 也会重投而 assignment 仍有效。成功 final 先将 caller receipt 升级为含完整 reported settlement 的 settled 状态，再标记 temporary settlement 并删除 temporary，因此即使 temporary JSONL 已删除，后续 wait 仍能从 caller receipt 返回最终 settlement，不再投递第二条 `delegation_result`；失败、中止、无 final 或超限仍照常投递 `delegation_failure`，以免失败消息与 settlement 竞态。每个 temporary initial run 最多一个 receipt，冲突 fail closed。等待与临时回传不能从“最后一条 assistant”猜结果。
-- 重启会扫描 inbox 与 reserved JSONL：修复 inbox 已提交但来源仍是 sending 的卡片，恢复 processing run、临时结果和目标 pump；已经 durable settled 的 run 不会重复执行。SDK custom-steer acceptance 若异步拒绝，coordinator 会在 lifecycle 边界复查 marker/settlement，幂等 finish 或 dispose/reopen 后恢复精确 processing run，不能让无 settlement 的 claim 永久阻断 FIFO。
-- terminal sender card 必须先于 sidecar 删除；两步间崩溃时，残留 sidecar 可在重启后完成对账。
+- 每个 run 追加 `piweb.run_settlement.v1`，记录精确 `runId/outcome/finalText`，再通知 waiter 并终结 delegation projection；ordinary sidecar 已在 delivery receipt 后清理，不再等待这里。cycle check、waiter 注册与 committed inbox 补查处于项目 lifecycle 同一线性边界：发送先赢时按 `fromConversationId + fromRunId` 找回未被当前 receiving run receipt 的回复，注册先赢时发送路径直接 rendezvous；扫描/aggregate/投影失败，以及目标 exact run 在 settlement 前进入 fatal infrastructure 状态时，都必须移除 waiter 和 AbortSignal listener，不能留下 ghost wait edge。等待返回 durable settlement 或精确目标 run 主动发来的 message metadata；消息正文只通过 incoming custom message 注入一次，不能在 tool result 再复制一份。message metadata 与 incoming custom message 必须同在恢复该 Agent 的一次模型请求中，调用者不应为取得正文再 `wait_for_session` 或 `peek_session`。若 metadata 带 `fulfillsTemporaryReturn:true`，对应 incoming 正文就是 one-shot temporary 的指定回传，调用者不应只为观察稍后可见的 exact settlement 再次等待；普通消息不带该标志，仍只是一次 interruption。临时 initial run 的 caller waiter 会保留到自动回传 envelope 提交，只返回 message metadata，不再同时返回含同一正文的 settlement；但该 initial run 在 caller 正在精确等待时立即 `send_session_message`，会把 exact-wait assignment 与 message 一起原子写进 inbox envelope，这个 inbox commit 是替代成功自动回传的线性化点。宿主随后在 caller JSONL 物化严格的 `piweb.temporary_return_receipt.v1` claimed receipt（temporary conversation、initial run、message、caller run 和时间）；若进程在物化前退出，temporary completion 会从仍在的 assigned envelope 幂等补写。即使后续 inbox steering 或 SDK steer 拒绝，envelope 也会重投而 assignment 仍有效。成功 final 先将 caller receipt 升级为含完整 reported settlement 的 settled 状态，再标记 temporary settlement 并删除 temporary，因此即使 temporary JSONL 已删除，后续 wait 仍能从 caller receipt 返回最终 settlement，不再投递第二条 `delegation_result`；失败、中止、无 final 或超限仍照常投递 `delegation_failure`，以免失败消息与 settlement 竞态。每个 temporary initial run 最多一个 receipt，冲突 fail closed。等待与临时回传不能从“最后一条 assistant”猜结果。
+- 重启会扫描 inbox 与 reserved JSONL：修复 inbox 已提交但来源仍是 sending 的卡片；用 marker+sidecar 补写 receipt，用 `delivery receipt(targetRunId) − run settlement(runId)` 找出 receipt-only 未完成 run，并在不重投正文的前提下恢复 exact run；多个候选或缺失精确来源身份都 fail closed。SDK custom-steer acceptance 若异步拒绝，coordinator 会在 lifecycle 边界复查 marker/receipt/settlement，幂等 finish 或 dispose/reopen 后恢复精确 processing run，不能让无 settlement 的 claim 永久阻断 FIFO。
+- receipt 与所需 temporary assignment authority 必须先于 sidecar 删除；source card projection 不在 transport 提交路径上。sidecar 删除后即使 card 写入失败或进程崩溃，永久 receipt ledger 也会在重启后 best-effort 修复既有 card；修复 inactive source 时只取得 raw writer lease，不得为 UI 投影启动模型 actor。普通 rewind 会结构性保留 delivery receipts、它们引用的 exact run settlements 以及 temporary return receipts；有未 settlement receipt 时必须拒绝 rewind，避免删掉 receipt-only recovery 唯一可见的 incoming payload。
 - 删除 conversation 会先冻结 target 的 metadata descendant set 并设置 deleting fence；任一成员 busy 时整次拒绝。随后按子孙到祖先顺序持久化 target tombstone、把只以当前被删会话为目标的 pending inbox 对应 sender card 终结并清理；tombstone 在内存中也是 open/create/pump/send 的硬 fence，删除事务中的后到消息被明确拒绝，它此前发往 cascade set 外的 outbound envelope 仍会继续送达。JSONL 删除完成后 tombstone 会幂等回收；若进程在这两步之间退出，下次项目打开先恢复 fence，再完成删除或只清理目标已不存在且没有 pending 消息的完成标记，避免重新打开目标或长期编排耗尽固定 tombstone 数量。
 
 ## 上下文前缀与缓存
@@ -88,7 +91,7 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
 - 已进入模型上下文的 user、assistant、tool 和 incoming custom message 都是 append-only；新的宿主提示只附加到以后收到的新消息，不能回填或重写旧 entry。
 - 长时间 `wait_for_session` 不会产生 provider 流量，因此不能靠本地 actor/WebSocket 活跃保住远端 prompt cache。对于至少 32k tokens、当前模型有限正数定价满足 `9 * cacheRead < input` 的来源 run，宿主可在静默 4 分钟后让当前 exact 或 aggregate waiter 返回非错误 `{ outcome: "checkpoint" }`，由同一 AgentSession 自然发起下一轮；它不证明目标完成，仍需要结果时必须用相同 target 或冻结 target set 再 wait。每个来源 run 最多八个 checkpoint；下一条 assistant usage 的 `cacheRead / (input + cacheRead + cacheWrite)` 低于 50% 或缺失/非法时关闭该 run 后续 checkpoint。该状态只在 RunTicket 内易失保存，不做隐藏预热、无限心跳、自动压缩或持久恢复。
 - 当前角色完整修订由 base conversation metadata 加后续角色变更记录得出；重新打开会话使用最后一次成功应用的角色。角色模板后续编辑不会自动改变既有会话，只有用户显式切换才会从下一轮改变 system prompt、模型、默认思考强度、默认服务层级、权限与 meta 工具 schema。聊天页的思考强度控制仍只修改当前运行会话，不反写角色模板或角色快照。
-- 卡片状态、run settlement、temporary return receipt、meta operation 和 conversation metadata 使用普通 `custom` entry；SDK 的 `buildSessionContext()` 会忽略它们，因此状态更新既不改旧消息，也不污染模型缓存前缀。
+- 卡片状态、run settlement、message delivery receipt、temporary return receipt、meta operation 和 conversation metadata 使用普通 `custom` entry；SDK 的 `buildSessionContext()` 会忽略它们，因此状态更新既不改旧消息，也不污染模型缓存前缀。
 - 当前会话可用 `piweb.service_tier.v1` 覆盖角色默认服务层级；没有该记录时使用冻结角色默认，显式 `null` 记录则覆盖为供应商默认。切换角色会重置为新角色默认，但不会把会话覆盖反写角色模板或快照。
 - 会话自动压缩阈值同样使用普通 `piweb.compaction_threshold.v1` custom entry 保存；缺省为 70%，允许 20%–90%，最后一条有效记录生效，不进入模型上下文。
 - 用户可在会话空闲时发送精确关联的 `compact_context` 命令手动调用 Pi 标准 `compact()`；运行中会话拒绝手动压缩，成功后重新发布 state 与 snapshot。Agent 可调用 conversation-scoped `request_context_compaction` 提交一次易失请求；工具结果只证明请求被接受，不证明压缩成功。Actor 会等当前 assistant/tool turn 完整结束，再复用阈值压缩的安全 checkpoint，在同一 `runId` 内压缩并恢复未完成任务；实际成功仍只由 Pi 原生 compaction entry 证明。
@@ -99,7 +102,7 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
 临时会话仍是扁平的一等 conversation，只给初始委派增加生命周期：
 
 - metadata 固定 caller conversation、delegation ID、return message ID 和精确 initial run ID；
-- initial run 成功且有最终 Agent 文本时，默认先把结果作为 durable inbox 消息发给 caller、把 settlement 标记为已报告，再删除临时会话；若该 run 的普通显式消息已在发送时持久占用 caller 的精确 wait，caller 持久 receipt 会使该消息替代这条成功自动回传；receipt 先记录完整 reported settlement，随后 temporary settlement 以该 messageId 标记已报告后删除，避免重复结论；
+- initial run 成功且有最终 Agent 文本时，默认先把结果作为 durable inbox 消息发给 caller 并把 settlement 标记为已报告；只有 caller JSONL 已持久化该 return message 的 exact `MessageDeliveryReceipt`，且 source initial run 的 reported settlement 与身份一致后，才能删除临时会话。若该 run 的普通显式消息已在发送时持久占用 caller 的精确 wait，caller 的 `TemporaryReturnReceipt(state=settled)` 与同一消息的 delivery receipt 会使该消息替代自动回传；仅有 sidecar admission、claim receipt 或 reported settlement 都不能授权删除。receipt 已写且 transport 已清理、但删除前崩溃时，project recovery 会重试该删除；
 - initial run 失败、中止或没有最终回复时，同样持久回传失败消息，但保留会话并标记 attention；
 - 后续重试的成功 run 不会误触发初始委派的自动删除。
 

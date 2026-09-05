@@ -99,6 +99,18 @@ function fakeSession(settings = fakeSettings()): FakeSession {
       };
     },
     prompt: async () => undefined,
+    sendCustomMessage: async function (
+      message: Parameters<AgentSession["sendCustomMessage"]>[0],
+      sendOptions: Parameters<AgentSession["sendCustomMessage"]>[1],
+    ) {
+      this.persistentManager?.appendCustomMessageEntry(
+        message.customType,
+        message.content,
+        message.display,
+        message.details,
+      );
+      if (sendOptions?.triggerTurn === true) await this.prompt("");
+    },
     steeringMessages: [],
     getSteeringMessages: function () {
       return this.steeringMessages;
@@ -5272,6 +5284,19 @@ describe("PiConnection coordinated project view", () => {
           >[0];
         };
       }).coordinatedView;
+      const peerSourceStarted = deferred();
+      const releasePeerSource = deferred();
+      firstSession.prompt = async () => {
+        peerSourceStarted.resolve();
+        await releasePeerSource.promise;
+      };
+      const peerSourceCompletion = harness.coordinator.prompt(
+        coordinatedView.handle,
+        firstAttach.conversationId,
+        randomUUID(),
+        "start exact background peer work",
+      );
+      await peerSourceStarted.promise;
       const peer = await harness.coordinator.startPeerSession(
         coordinatedView.handle,
         firstAttach.conversationId,
@@ -5282,6 +5307,9 @@ describe("PiConnection coordinated project view", () => {
           idempotencyKey: randomUUID(),
         },
       );
+      releasePeerSource.resolve();
+      await peerSourceCompletion;
+
       await vi.waitFor(() => {
         const settlement = harness.events.find((event) => (
           event.type === "conversation_run_settled"
@@ -5304,6 +5332,14 @@ describe("PiConnection coordinated project view", () => {
             settlement.outcome,
           );
         }
+      });
+      await vi.waitFor(async () => {
+        const inspection = await coordinatedView.handle.project
+          .inspectConversation(firstAttach.conversationId);
+        expect(inspection.cards.some((card) =>
+          card.toSnapshot.conversationId === peer.conversationId
+          && ["completed", "failed", "aborted"].includes(card.state)
+        )).toBe(true);
       });
 
       const refocusCommandId = randomUUID();

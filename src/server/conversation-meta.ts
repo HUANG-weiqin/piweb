@@ -20,6 +20,8 @@ export const CONVERSATION_CARD_CUSTOM_TYPE =
   "piweb.conversation_card.v1";
 export const CONVERSATION_MESSAGE_CUSTOM_TYPE =
   "piweb.conversation_message.v1";
+export const MESSAGE_DELIVERY_RECEIPT_CUSTOM_TYPE =
+  "piweb.message_delivery_receipt.v1";
 export const RUN_SETTLEMENT_CUSTOM_TYPE =
   "piweb.run_settlement.v1";
 export const PENDING_PROMPT_DELIVERY_CUSTOM_TYPE =
@@ -369,6 +371,49 @@ const conversationMessageEntrySchema = z.object({
   ),
   display: z.literal(true),
   details: conversationMessageDetailsSchema,
+}).strict();
+
+const messageDeliveryReceiptSchema = z.object({
+  messageId: uuidSchema("messageId"),
+  cardId: uuidSchema("cardId"),
+  fromConversationId: conversationIdSchema("fromConversationId"),
+  toConversationId: conversationIdSchema("toConversationId"),
+  sourceRunId: uuidSchema("sourceRunId"),
+  targetRunId: uuidSchema("targetRunId"),
+  kind: conversationKindSchema,
+  sentAt: canonicalTimestampSchema("sentAt"),
+  payloadFingerprint: z.string().regex(
+    SHA256_HEX_PATTERN,
+    "payloadFingerprint must be a lowercase SHA-256 hex digest",
+  ),
+  temporaryReturnAssignment: z.object({
+    initialRunId: uuidSchema("temporaryReturnAssignment.initialRunId"),
+    callerRunId: uuidSchema("temporaryReturnAssignment.callerRunId"),
+    assignedAt: canonicalTimestampSchema(
+      "temporaryReturnAssignment.assignedAt",
+    ),
+  }).strict().optional(),
+  deliveredAt: canonicalTimestampSchema("deliveredAt"),
+}).strict().superRefine((value, context) => {
+  const assignment = value.temporaryReturnAssignment;
+  if (assignment === undefined) return;
+  if (
+    value.kind !== "message"
+    || value.sourceRunId !== assignment.initialRunId
+    || value.targetRunId !== assignment.callerRunId
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message:
+        "temporaryReturnAssignment must identify the exact message source and target runs",
+      path: ["temporaryReturnAssignment"],
+    });
+  }
+});
+
+const messageDeliveryReceiptEntrySchema = z.object({
+  customType: z.literal(MESSAGE_DELIVERY_RECEIPT_CUSTOM_TYPE),
+  data: messageDeliveryReceiptSchema,
 }).strict();
 
 function validateUniqueLoopListItemIds(
@@ -846,6 +891,10 @@ export type ConversationCardEntry =
   z.infer<typeof conversationCardEntrySchema>;
 export type ConversationMessageEntry =
   z.infer<typeof conversationMessageEntrySchema>;
+export type MessageDeliveryReceipt =
+  z.infer<typeof messageDeliveryReceiptSchema>;
+export type MessageDeliveryReceiptEntry =
+  z.infer<typeof messageDeliveryReceiptEntrySchema>;
 export type CompactionResumeEntry =
   z.infer<typeof compactionResumeEntrySchema>;
 type LegacyLoopListEntry = z.infer<typeof legacyLoopListEntrySchema>;
@@ -903,6 +952,10 @@ export type ReservedConversationEntry =
       entry: ConversationMessageEntry;
     }
   | {
+      kind: "message_delivery_receipt";
+      entry: MessageDeliveryReceiptEntry;
+    }
+  | {
       kind: "compaction_resume";
       entry: CompactionResumeEntry;
     }
@@ -947,6 +1000,7 @@ export interface ReservedConversationAggregate {
   conversationMeta?: ConversationMeta;
   cards: ConversationCard[];
   deliveredMessageIds: string[];
+  messageDeliveryReceipts: MessageDeliveryReceipt[];
   runSettlements: RunSettlement[];
   pendingPromptDeliveries: PendingPromptDelivery[];
   pendingPromptBatches: PendingPromptBatch[];
@@ -1013,6 +1067,21 @@ export function parseConversationMessageEntry(
   value: unknown,
 ): ConversationMessageEntry {
   return conversationMessageEntrySchema.parse(value);
+}
+
+export function parseMessageDeliveryReceiptEntry(
+  value: unknown,
+): MessageDeliveryReceiptEntry {
+  return messageDeliveryReceiptEntrySchema.parse(value);
+}
+
+export function createMessageDeliveryReceiptEntry(
+  data: MessageDeliveryReceipt,
+): MessageDeliveryReceiptEntry {
+  return parseMessageDeliveryReceiptEntry({
+    customType: MESSAGE_DELIVERY_RECEIPT_CUSTOM_TYPE,
+    data,
+  });
 }
 
 function parseLegacyLoopListEntry(value: unknown): LegacyLoopListEntry {
@@ -1185,6 +1254,7 @@ export function appendReservedCustomEntry(
     | ConversationMetaEntry
     | ConversationRoleChangeEntry
     | ConversationCardEntry
+    | MessageDeliveryReceiptEntry
     | RunSettlementEntry
     | PendingPromptDeliveryEntry
     | PendingPromptBatchEntry
@@ -1285,6 +1355,12 @@ export function parseReservedConversationEntry(
     return {
       kind: "conversation_message",
       entry: parseConversationMessageEntry(payload),
+    };
+  }
+  if (customType === MESSAGE_DELIVERY_RECEIPT_CUSTOM_TYPE) {
+    return {
+      kind: "message_delivery_receipt",
+      entry: parseMessageDeliveryReceiptEntry(payload),
     };
   }
   if (customType === LEGACY_LOOP_LIST_CUSTOM_TYPE) {
@@ -1506,6 +1582,10 @@ export function aggregateReservedConversationEntries(
   let conversationMeta: ConversationMeta | undefined;
   const cards = new Map<string, ConversationCard>();
   const deliveredMessageIds = new Set<string>();
+  const messageDeliveryReceipts = new Map<
+    string,
+    MessageDeliveryReceipt
+  >();
   const runSettlements = new Map<string, RunSettlement>();
   const pendingPromptDeliveries = new Map<string, PendingPromptDelivery>();
   const pendingPromptBatches = new Map<string, PendingPromptBatch>();
@@ -1579,6 +1659,20 @@ export function aggregateReservedConversationEntries(
         );
       }
       deliveredMessageIds.add(messageId);
+      continue;
+    }
+    if (reserved.kind === "message_delivery_receipt") {
+      const incoming = reserved.entry.data;
+      const existing = messageDeliveryReceipts.get(incoming.messageId);
+      if (
+        existing !== undefined
+        && JSON.stringify(existing) !== JSON.stringify(incoming)
+      ) {
+        throw new Error(
+          `Conflicting piweb message delivery receipt for messageId ${incoming.messageId}`,
+        );
+      }
+      messageDeliveryReceipts.set(incoming.messageId, incoming);
       continue;
     }
     if (
@@ -1657,16 +1751,6 @@ export function aggregateReservedConversationEntries(
     if (reserved.kind === "temporary_return_receipt") {
       const incoming = reserved.entry.data;
       const key = `${incoming.temporaryConversationId.length}:${incoming.temporaryConversationId}:${incoming.initialRunId}`;
-      const delegation = [...cards.values()].find((card) =>
-        card.kind === "delegation_task"
-        && card.toSnapshot.conversationId === incoming.temporaryConversationId
-        && card.runId === incoming.initialRunId
-      );
-      if (!delegation) {
-        throw new Error(
-          "Piweb temporary return receipt requires an earlier initial delegation card",
-        );
-      }
       const existing = temporaryReturnReceipts.get(key);
       if (existing === undefined) {
         if (incoming.state !== "claimed") {
@@ -1824,6 +1908,7 @@ export function aggregateReservedConversationEntries(
       : { conversationMeta }),
     cards: [...cards.values()],
     deliveredMessageIds: [...deliveredMessageIds],
+    messageDeliveryReceipts: [...messageDeliveryReceipts.values()],
     runSettlements: [...runSettlements.values()],
     pendingPromptDeliveries: [...pendingPromptDeliveries.values()],
     pendingPromptBatches: [...pendingPromptBatches.values()],
