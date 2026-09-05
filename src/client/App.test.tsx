@@ -3777,6 +3777,85 @@ describe("App", () => {
     );
   });
 
+  it("dismisses nested directory browsing without changing Setup authority", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "开启工作区" }));
+    const input = screen.getByRole("textbox", { name: "项目目录" });
+    const draft = "  E:\\typed folder  ";
+    fireEvent.change(input, { target: { value: draft } });
+
+    const picker = screen.getByRole("button", { name: "选择文件夹" });
+    picker.focus();
+    fireEvent.click(picker);
+    const command = latestCommand("browse_directory");
+    expect(command.path).toBe("E:\\typed folder");
+    const browseCount = socketMock.send.mock.calls.filter(
+      ([sent]) => sent.type === "browse_directory",
+    ).length;
+    const initializeCount = socketMock.send.mock.calls.filter(
+      ([sent]) => sent.type === "initialize",
+    ).length;
+    expect(browseCount).toBe(1);
+    expect(initializeCount).toBe(0);
+
+    const directoryDialog = screen.getByRole("dialog", { name: "选择项目目录" });
+    const backdropMouseDown = new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(directoryDialog.parentElement!, backdropMouseDown);
+    expect(backdropMouseDown.defaultPrevented).toBe(true);
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "选择项目目录" }))
+        .not.toBeInTheDocument();
+      expect(screen.getByRole("dialog", { name: "开启工作区" }))
+        .toBeInTheDocument();
+      expect(input).toHaveValue(draft);
+      expect(picker.isConnected).toBe(true);
+      expect(picker).toHaveFocus();
+    });
+    expect(socketMock.send.mock.calls.filter(
+      ([sent]) => sent.type === "browse_directory",
+    )).toHaveLength(browseCount);
+    expect(socketMock.send.mock.calls.filter(
+      ([sent]) => sent.type === "initialize",
+    )).toHaveLength(initializeCount);
+
+    act(() => socketMock.emit?.({
+      type: "directory_listing",
+      commandId: command.commandId,
+      path: "E:\\late-closed",
+      parentPath: "E:\\",
+      directories: [{ name: "late child", path: "E:\\late-closed\\child" }],
+      truncated: false,
+    }));
+    expect(screen.queryByRole("dialog", { name: "选择项目目录" }))
+      .not.toBeInTheDocument();
+
+    act(() => socketMock.emit?.({
+      type: "error",
+      scope: "command",
+      operation: "browse_directory",
+      commandId: command.commandId,
+      message: "late closed listing error",
+    }));
+    expect(screen.queryByRole("dialog", { name: "选择项目目录" }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByText("late closed listing error"))
+      .not.toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "开启工作区" }))
+      .toBeInTheDocument();
+    expect(input).toHaveValue(draft);
+    expect(picker).toHaveFocus();
+    expect(socketMock.send.mock.calls.filter(
+      ([sent]) => sent.type === "browse_directory",
+    )).toHaveLength(browseCount);
+    expect(socketMock.send.mock.calls.filter(
+      ([sent]) => sent.type === "initialize",
+    )).toHaveLength(initializeCount);
+  });
+
   it("keeps the typed setup path when in-app selection is cancelled", () => {
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: "开启工作区" }));
