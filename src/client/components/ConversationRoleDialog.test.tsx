@@ -103,4 +103,43 @@ describe("ConversationRoleDialog", () => {
     expect(screen.queryByRole("dialog", { name: "更换会话角色" }))
       .not.toBeInTheDocument();
   });
+
+  it("discards a canceled role draft before the dialog is usable again", () => {
+    const close = vi.fn();
+    const onSwitch = vi.fn();
+    const alternative = {
+      ...roles[0]!,
+      id: "21f01ca1-e28e-4f5e-bb46-442a2fdadafd",
+      revision: 1,
+      name: "Builder",
+    };
+    const props = {
+      role,
+      roles: [...roles, alternative],
+      switchDisabled: false,
+      switching: false,
+      onSwitch,
+      onClose: close,
+    };
+    const view = render(<ConversationRoleDialog open {...props} />);
+    const select = () => screen.getByRole("combobox", {
+      name: "选择新的会话角色",
+    });
+
+    fireEvent.change(select(), { target: { value: alternative.id } });
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(close).toHaveBeenCalledOnce();
+    expect(onSwitch).not.toHaveBeenCalled();
+
+    view.rerender(<ConversationRoleDialog open={false} {...props} />);
+    view.rerender(<ConversationRoleDialog open {...props} />);
+
+    expect(select()).toHaveValue(role.id);
+    expect(screen.getByRole("button", { name: "应用角色" })).toBeDisabled();
+
+    fireEvent.change(select(), { target: { value: alternative.id } });
+    fireEvent.click(screen.getByRole("button", { name: "应用角色" }));
+    expect(onSwitch).toHaveBeenCalledOnce();
+    expect(onSwitch).toHaveBeenCalledWith(alternative.id);
+  });
 });

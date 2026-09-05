@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useLayoutEffect, useMemo, useState } from "react";
 import type {
   ConversationRoleSnapshot,
   RoleTemplate,
@@ -31,7 +31,7 @@ export function ConversationRoleDialog({
     [roles],
   );
   const [selectedRoleId, setSelectedRoleId] = useState("");
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open) return;
     setSelectedRoleId(
       availableRoles.find(({ id }) => id === role.id)?.id
