@@ -1,6 +1,6 @@
 # Pi Web
 
-一个本机专用的极简 Agent 工作台基座。它直接嵌入官方 `@earendil-works/pi-coding-agent` SDK，不重新实现模型、认证、工具或 Agent 循环；工作台只负责会话生命周期、稳定协议和 Web UI。
+一个本机优先的极简 Agent 工作台基座。它直接嵌入官方 `@earendil-works/pi-coding-agent` SDK，不重新实现模型、认证、工具或 Agent 循环；工作台只负责会话生命周期、稳定协议和 Web UI。
 
 极简原则：只实现必须由工作台拥有的运行状态、权限控制和持久会话。Git 已能完成的 diff/history/revert、编辑器已能完成的文件管理、终端已能完成的通用 shell，不在这里重复建设。
 
@@ -40,7 +40,7 @@
 - 只读模式只允许 Pi 原生 `read/grep/find/ls`、宿主 Git/Notebook/LoopList 工具，以及由用户编辑器确认的角色提示词查看/提案工具；命令、项目写入、会话编排、扩展和未知工具由服务端直接阻止
 - OAuth request/progress/response/cancel 使用 authFlowId 关联，取消后的迟到帧不会复活旧流程
 - 展示累计计费 token，并区分上下文 token 的 measured / estimated / unknown 来源
-- 仅监听 `127.0.0.1`
+- 始终只监听 `127.0.0.1`；可显式通过 Tailscale Serve 向自己的 tailnet 提供 HTTPS 访问
 
 ## 核心运行机制
 
@@ -109,6 +109,24 @@ npm start
 
 可用 `PORT` 环境变量更改端口；监听地址始终固定为 `127.0.0.1`。
 
+## 手机访问（Tailscale Serve）
+
+电脑和手机加入同一 tailnet 后，可在电脑执行一次：
+
+```bash
+tailscale serve --bg 31415
+```
+
+Tailscale 会显示一个仅在 tailnet 内可达的 `https://<设备名>.<tailnet>.ts.net` 地址；在手机浏览器打开并收藏即可。`--bg` 配置会在 Tailscale 重启后恢复。若使用了其它 `PORT`，这里也应改为对应端口。
+
+Pi Web 仍只监听 loopback。远程 WebSocket 只接受 HTTPS、Origin 与 Host 精确一致的 `.ts.net` 请求，并要求 Tailscale Serve 注入唯一的 `Tailscale-User-Login` 身份头；实际访问授权由 tailnet access rules 和设备分享设置负责。获得访问权的人能使用该工作台及其角色权限，因此只应授权可信账号。不要使用会公开到互联网的 `tailscale funnel`。
+
+停止手机访问：
+
+```bash
+tailscale serve reset
+```
+
 ## 使用
 
 1. 点击“选择文件夹”选取 Agent 工作目录，或手动输入绝对路径，然后进入项目。
@@ -155,7 +173,7 @@ Pi 会话格式与 SDK 用法可参考官方 [SDK 文档](https://pi.dev/docs/la
 - 扩展 slash command 暂时显式拒绝：其 handler 可脱离当前 prompt 启动新 Agent turn，在有专门的 run ownership 方案前不能伪装成安全支持。prompt template 与 skill expansion 不受此限制。
 - 项目扩展仍在服务进程内执行；第一版只适合可信扩展，阻塞式扩展 hook 也会阻塞对应 session。完整故障隔离需要后续 worker/子进程 runtime。
 - 项目信任只阻止目录在批准前加载可执行资源，不是 sandbox；仓库文本仍可能包含 prompt injection。
-- 当前安全模型只适用于可信本机用户。
+- 当前安全模型只适用于可信本机用户，以及经 tailnet access rules 明确获得 Tailscale Serve 访问权的可信账号。
 - 文件夹浏览器只枚举当前目录的一层子目录，不展示文件，也不提供新建、删除、重命名或搜索；跨盘时可先输入目标盘的绝对路径再继续浏览。
 
 这些是后续版本要显式设计的能力，不应通过绕过现有生命周期或协议边界临时拼接。
@@ -176,4 +194,4 @@ npm run build
 
 ## 安全边界
 
-这是本机工具，不适合通过反向代理、局域网或公网暴露。服务端只接受 localhost 且 Origin 与请求 Host 精确一致的 WebSocket 连接。工具策略降低误操作风险，但 Pi Agent 和可信扩展仍以启动服务的用户权限运行。
+服务端始终只监听 loopback，不适合绑定到局域网地址、通过通用反向代理暴露或发布到公网。唯一支持的远程入口是显式启用的 Tailscale Serve：WebSocket 必须来自同源 `.ts.net` HTTPS 页面，并带有 Serve 注入的唯一用户身份；授权边界由 tailnet access rules 和设备分享设置拥有。工具策略降低误操作风险，但 Pi Agent 和可信扩展仍以启动服务的用户权限运行。

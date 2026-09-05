@@ -44,17 +44,23 @@ interface DirectoryBrowserState {
 }
 
 export function isAllowedOrigin(
-  origin: string | undefined,
-  host: string | undefined,
+  origins: readonly string[] | undefined,
+  hosts: readonly string[] | undefined,
+  tailscaleUserLogins?: readonly string[],
 ): boolean {
-  if (!origin || !host) return false;
+  if (origins?.length !== 1 || hosts?.length !== 1) return false;
+  const origin = origins[0]!;
+  const host = hosts[0]!;
   try {
     const url = new URL(origin);
-    return (
-      (url.protocol === "http:" || url.protocol === "https:")
-      && (url.hostname === "127.0.0.1" || url.hostname === "localhost")
-      && url.host === host
-    );
+    if (url.origin !== origin || url.host !== host) return false;
+    if (url.hostname === "127.0.0.1" || url.hostname === "localhost") {
+      return url.protocol === "http:" || url.protocol === "https:";
+    }
+    return url.protocol === "https:"
+      && url.hostname.endsWith(".ts.net")
+      && tailscaleUserLogins?.length === 1
+      && tailscaleUserLogins[0]!.trim().length > 0;
   } catch {
     return false;
   }
@@ -156,7 +162,11 @@ export function attachSocketServer(
   const onUpgrade = (request: IncomingMessage, socket: Duplex, head: Buffer): void => {
     if (
       request.url !== "/ws"
-      || !isAllowedOrigin(request.headers.origin, request.headers.host)
+      || !isAllowedOrigin(
+        request.headersDistinct.origin,
+        request.headersDistinct.host,
+        request.headersDistinct["tailscale-user-login"],
+      )
     ) {
       socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
       socket.destroy();

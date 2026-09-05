@@ -87,27 +87,120 @@ function nextEvent(socket: WebSocket): Promise<ServerEvent> {
 describe("isAllowedOrigin", () => {
   it("allows local browser origins", () => {
     expect(isAllowedOrigin(
-      "http://127.0.0.1:5173",
-      "127.0.0.1:5173",
+      ["http://127.0.0.1:5173"],
+      ["127.0.0.1:5173"],
     )).toBe(true);
     expect(isAllowedOrigin(
-      "http://localhost:31415",
-      "localhost:31415",
+      ["http://localhost:31415"],
+      ["localhost:31415"],
     )).toBe(true);
     expect(isAllowedOrigin(
-      "https://127.0.0.1:5173",
-      "127.0.0.1:5173",
+      ["https://127.0.0.1:5173"],
+      ["127.0.0.1:5173"],
     )).toBe(true);
   });
 
-  it("rejects remote and malformed origins", () => {
-    expect(isAllowedOrigin("https://example.com", "example.com")).toBe(false);
-    expect(isAllowedOrigin("not a url", "127.0.0.1:31415")).toBe(false);
+  it("allows an authenticated same-origin Tailscale Serve request", () => {
+    const host = "desktop.example-tailnet.ts.net";
     expect(isAllowedOrigin(
-      "http://127.0.0.1:5173",
-      "127.0.0.1:31415",
+      [`https://${host}`],
+      [host],
+      ["owner@example.com"],
+    )).toBe(true);
+  });
+
+  it("rejects remote, ambiguous, and malformed origin headers", () => {
+    const tailscaleHost = "desktop.example-tailnet.ts.net";
+    const origin = `https://${tailscaleHost}`;
+    const identity = ["owner@example.com"];
+    expect(isAllowedOrigin(["https://example.com"], ["example.com"])).toBe(false);
+    expect(isAllowedOrigin(
+      ["https://example.com"],
+      ["example.com"],
+      identity,
     )).toBe(false);
-    expect(isAllowedOrigin("http://127.0.0.1:31415", undefined)).toBe(false);
+    expect(isAllowedOrigin(
+      [`http://${tailscaleHost}`],
+      [tailscaleHost],
+      identity,
+    )).toBe(false);
+    expect(isAllowedOrigin([origin], [tailscaleHost])).toBe(false);
+    expect(isAllowedOrigin([origin], [tailscaleHost], [""])).toBe(false);
+    expect(isAllowedOrigin(
+      [origin],
+      [tailscaleHost],
+      ["owner@example.com", "other@example.com"],
+    )).toBe(false);
+    expect(isAllowedOrigin(
+      [origin, origin],
+      [tailscaleHost],
+      identity,
+    )).toBe(false);
+    expect(isAllowedOrigin(
+      [origin],
+      [tailscaleHost, tailscaleHost],
+      identity,
+    )).toBe(false);
+    expect(isAllowedOrigin(
+      [origin],
+      ["other.example-tailnet.ts.net"],
+      identity,
+    )).toBe(false);
+    expect(isAllowedOrigin(
+      ["https://desktop.example-tailnet.ts.net.attacker.example"],
+      ["desktop.example-tailnet.ts.net.attacker.example"],
+      identity,
+    )).toBe(false);
+    for (const malformedOrigin of [
+      `https://user@${tailscaleHost}`,
+      `${origin}/path`,
+      `${origin}?query=1`,
+      `${origin}#fragment`,
+    ]) {
+      expect(isAllowedOrigin(
+        [malformedOrigin],
+        [tailscaleHost],
+        identity,
+      )).toBe(false);
+    }
+    expect(isAllowedOrigin(["not a url"], ["127.0.0.1:31415"])).toBe(false);
+    expect(isAllowedOrigin(
+      ["http://127.0.0.1:5173"],
+      ["127.0.0.1:31415"],
+    )).toBe(false);
+    expect(isAllowedOrigin(["http://127.0.0.1:31415"], undefined)).toBe(false);
+  });
+
+  it("accepts a WebSocket upgrade forwarded by Tailscale Serve", async () => {
+    const server = createServer();
+    const socketServer = attachSocketServer(
+      server,
+      "E:\\work",
+      new SocketTestRuntime(),
+    );
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("server did not bind a TCP port");
+
+    const host = "desktop.example-tailnet.ts.net";
+    const socket = new WebSocket(`ws://127.0.0.1:${address.port}/ws`, {
+      origin: `https://${host}`,
+      headers: {
+        host,
+        "tailscale-user-login": "owner@example.com",
+      },
+    });
+    await expect(nextEvent(socket)).resolves.toEqual({
+      type: "hello",
+      protocolVersion: PROTOCOL_VERSION,
+      startupCwd: "E:\\work",
+    });
+
+    const clientClosed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+    const httpClosed = new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+    await Promise.all([socketServer.close(), httpClosed, clientClosed]);
   });
 
   it("does not acknowledge reload when coordination initialization fails", async () => {

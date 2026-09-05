@@ -1,6 +1,6 @@
 # 仓库总览
 
-`updated: 2026-08-28`
+`updated: 2026-09-05`
 
 ## 这个模块是干什么的
 
@@ -42,7 +42,7 @@ while 连接存在:
 - 不内建第二套 diff/history/revert、文件管理器或通用终端。未来若需要，只做无状态交接或薄集成。
 - 当前 AgentSession 使用项目自有 sessionDir 的 `SessionManager`；持久 conversation 与临时 session epoch 明确分离。
 - WebSocket 只做传输；会话身份和 SDK 事件都不能由 socket 隐式定义。
-- 远程访问和 OS 级隔离仍需单独设计；持久化与二元角色工具权限都不能替代 sandbox。
+- 远程访问只支持显式启用的 Tailscale Serve：服务仍仅监听 loopback，WebSocket 以同源 `.ts.net` HTTPS 与 Serve 身份头为边界，授权归 tailnet access rules/设备分享；通用反向代理、局域网/公网监听和 Funnel 不受支持。OS 级隔离仍需单独设计，持久化与二元角色工具权限都不能替代 sandbox。
 
 ## 认知模型
 
