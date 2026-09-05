@@ -1043,7 +1043,7 @@ describe("Message", () => {
       <Message message={message} onRewind={onRewind} />,
     );
     expect(container.querySelector(".message-event-header"))
-      .toHaveTextContent("COMMANDBOSSSENT");
+      .toHaveTextContent("COMMANDUSERSENT");
     const copyButton = screen.getByRole("button", { name: "复制用户消息" });
     expect(copyButton.parentElement).not.toHaveClass("assistant-message-actions");
     fireEvent.click(copyButton);

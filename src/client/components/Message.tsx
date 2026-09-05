@@ -580,7 +580,7 @@ function MessageView({
   >
     <span className="message-event-kind">{isUser ? "COMMAND" : "AGENT"}</span>
     <strong className="message-event-actor">
-      {isUser ? "BOSS" : assistantActor?.trim() || "Agent"}
+      {isUser ? "USER" : assistantActor?.trim() || "Agent"}
     </strong>
     <span className="message-event-state">
       {isUser ? "SENT" : assistantState ?? "LOGGED"}

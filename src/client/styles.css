@@ -2113,6 +2113,19 @@ pre {
   transform: translateX(7px) rotate(-0.3deg);
 }
 
+.workspace-rail-item.running:not(.active) {
+  background: rgb(185 79 67 / 12%);
+  clip-path: polygon(2px 2px, 100% 0, calc(100% - 4px) 100%, 0 calc(100% - 3px));
+}
+
+.workspace-rail-item.running:not(.active) .workspace-rail-state {
+  color: var(--rebel-red);
+}
+
+.workspace-rail-item.running:not(.active) .workspace-rail-busy {
+  background: var(--rebel-red);
+}
+
 .workspace-rail-item.active:not(:disabled):hover::before {
   background: var(--rebel-red);
   transform: translateX(2px) rotate(0.55deg);
@@ -2548,6 +2561,11 @@ pre {
   justify-content: center;
   padding-right: 8px;
   padding-left: 8px;
+}
+
+.conversation-sidebar.collapsed .conversation-sidebar-header::after {
+  left: 13px;
+  width: 32px;
 }
 
 .conversation-sidebar-navigation {
@@ -4041,7 +4059,7 @@ pre {
   padding: 0 0 0 112px;
   border: 0;
   border-radius: 0;
-  color: var(--rebel-paper);
+  color: var(--rebel-red);
   background: transparent;
   font-size: 15px;
   font-weight: 650;

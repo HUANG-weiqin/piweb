@@ -33,7 +33,7 @@ describe("VisualFixture", () => {
     expect(screen.getByText("4 AGENTS")).toBeInTheDocument();
     expect(screen.getByLabelText("会话状态：IN PROGRESS"))
       .toBeInTheDocument();
-    expect(screen.getByText("BOSS")).toBeInTheDocument();
+    expect(screen.getByText("USER")).toBeInTheDocument();
     const activeAgentEvent = screen.getByText(
       "Tech Lead",
       { selector: ".message-event-actor" },
