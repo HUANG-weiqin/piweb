@@ -765,7 +765,7 @@ describe("ConversationSidebar", () => {
     expect(onRename).not.toHaveBeenCalled();
   });
 
-  it("keeps blocked delete confirmation focused and inert on its backdrop", async () => {
+  it("keeps blocked delete confirmation focused and inert", async () => {
     const onDelete = vi.fn(() => true);
     const props = backdropSidebarProps({ onDelete });
     const view = render(<ConversationSidebar {...props} />);
@@ -777,6 +777,24 @@ describe("ConversationSidebar", () => {
     })).toHaveFocus());
     view.rerender(<ConversationSidebar {...props} deletionBlocked />);
 
+    const keep = screen.getByRole("button", { name: "保留" });
+    const remove = screen.getByRole("button", { name: "永久删除" });
+    expect(keep).toBeDisabled();
+    expect(remove).toBeDisabled();
+
+    fireEvent.click(keep);
+    expect(dialog).toBeInTheDocument();
+    expect(keep).toHaveFocus();
+    expect(onDelete).not.toHaveBeenCalled();
+    fireEvent.click(remove);
+    expect(dialog).toBeInTheDocument();
+    expect(keep).toHaveFocus();
+    expect(onDelete).not.toHaveBeenCalled();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(dialog).toBeInTheDocument();
+    expect(keep).toHaveFocus();
+    expect(onDelete).not.toHaveBeenCalled();
+
     const backdropMouseDown = new MouseEvent("mousedown", {
       bubbles: true,
       cancelable: true,
@@ -785,7 +803,7 @@ describe("ConversationSidebar", () => {
 
     expect(backdropMouseDown.defaultPrevented).toBe(true);
     expect(dialog).toBeInTheDocument();
-    expect(dialog.contains(document.activeElement)).toBe(true);
+    expect(keep).toHaveFocus();
     expect(onDelete).not.toHaveBeenCalled();
   });
 

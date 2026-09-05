@@ -283,11 +283,34 @@ describe("ConnectionDrawer", () => {
     expect(keyInput).toHaveAttribute("type", "text");
     fireEvent.click(screen.getByRole("button", { name: "保存 API Key" }));
 
+    expect(saveKey).toHaveBeenCalledOnce();
     expect(saveKey).toHaveBeenCalledWith("test", "secret-key");
     expect(keyInput).toHaveValue("");
     expect(keyInput).toHaveAttribute("type", "password");
-    expect(screen.getByRole("button", { name: "正在保存…" })).toBeDisabled();
+    const close = screen.getByRole("button", { name: "关闭 API Key 设置" });
+    const cancel = screen.getByRole("button", { name: "取消" });
+    const visibility = screen.getByRole("button", { name: "显示" });
+    const save = screen.getByRole("button", { name: "正在保存…" });
+    expect(close).toBeDisabled();
+    expect(cancel).toBeDisabled();
+    expect(keyInput).toBeDisabled();
+    expect(visibility).toBeDisabled();
+    expect(save).toBeDisabled();
+    expect(keyInput).toHaveFocus();
+
+    fireEvent.click(close);
+    fireEvent.click(cancel);
+    fireEvent.keyDown(document, { key: "Escape" });
+    const backdropMouseDown = new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(dialog.parentElement!, backdropMouseDown);
+
+    expect(backdropMouseDown.defaultPrevented).toBe(true);
     expect(dialog).toBeInTheDocument();
+    expect(keyInput).toHaveFocus();
+    expect(saveKey).toHaveBeenCalledOnce();
 
     view.rerender(<ConnectionDrawer {...drawerProps({
       state,
