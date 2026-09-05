@@ -598,6 +598,13 @@ describe("ConversationSidebar", () => {
     expect(onSelect).toHaveBeenCalledWith(baseConversation.id);
     expect(onToggleCollapsed).toHaveBeenCalledWith(true);
 
+    const sidebar = screen.getByRole("complementary", { name: "项目会话栏" });
+    const enabledHandle = screen.getByRole("separator", { name: "调整会话栏宽度" });
+    fireEvent.pointerDown(enabledHandle, { button: 0, clientX: 306, pointerId: 1 });
+    expect(enabledHandle).toHaveAttribute("aria-valuenow", "306");
+    expect(sidebar.style.getPropertyValue("--conversation-sidebar-width"))
+      .toBe("306px");
+
     rerender(
       <ConversationSidebar
         conversations={[baseConversation]}
@@ -616,10 +623,30 @@ describe("ConversationSidebar", () => {
       .toBeDisabled();
     expect(screen.getByRole("button", { name: "收起会话栏" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "新建会话" })).toBeDisabled();
-    expect(screen.getByRole("separator", { name: "调整会话栏宽度" }))
-      .toHaveAttribute("aria-disabled", "true");
-    expect(screen.getByRole("separator", { name: "调整会话栏宽度" }))
-      .toHaveAttribute("tabindex", "-1");
+    const disabledHandle = screen.getByRole("separator", { name: "调整会话栏宽度" });
+    const expectUnchangedWidth = () => {
+      expect(disabledHandle).toHaveAttribute("aria-valuenow", "306");
+      expect(sidebar.style.getPropertyValue("--conversation-sidebar-width"))
+        .toBe("306px");
+    };
+    expect(disabledHandle).toHaveAttribute("aria-disabled", "true");
+    expect(disabledHandle).toHaveAttribute("tabindex", "-1");
+    expectUnchangedWidth();
+
+    fireEvent.pointerMove(disabledHandle, { clientX: 500, pointerId: 1 });
+    expectUnchangedWidth();
+    fireEvent.pointerUp(disabledHandle, { pointerId: 1 });
+    expectUnchangedWidth();
+    fireEvent.pointerDown(disabledHandle, { button: 0, clientX: 306, pointerId: 2 });
+    expectUnchangedWidth();
+    fireEvent.pointerMove(disabledHandle, { clientX: 500, pointerId: 2 });
+    expectUnchangedWidth();
+    fireEvent.pointerUp(disabledHandle, { pointerId: 2 });
+    expectUnchangedWidth();
+    for (const key of ["ArrowLeft", "ArrowRight", "Home", "End"]) {
+      fireEvent.keyDown(disabledHandle, { key });
+      expectUnchangedWidth();
+    }
   });
 
   it("resizes the expanded sidebar within fixed pointer and keyboard bounds", () => {

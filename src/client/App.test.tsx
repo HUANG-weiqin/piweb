@@ -3713,41 +3713,52 @@ describe("App", () => {
     })).not.toBeInTheDocument();
   });
 
-  it("browses folders in-app and selects only from the matching listing", () => {
+  it("keeps a newer directory request authoritative over stale listing outcomes", () => {
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: "开启工作区" }));
     const input = screen.getByRole("textbox", { name: "项目目录" });
     fireEvent.change(input, { target: { value: "E:\\typed" } });
     fireEvent.click(screen.getByRole("button", { name: "选择文件夹" }));
 
-    const command = latestCommand("browse_directory");
-    expect(command.path).toBe("E:\\typed");
+    const commandA = latestCommand("browse_directory");
+    expect(commandA.path).toBe("E:\\typed");
     expect(screen.getByRole("dialog", { name: "选择项目目录" })).toBeInTheDocument();
-    expect(socketMock.send).not.toHaveBeenCalledWith(
-      expect.objectContaining({ type: "initialize" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择文件夹" }));
+    const commandB = latestCommand("browse_directory");
+    expect(commandB.path).toBe("E:\\typed");
+    expect(commandB.commandId).not.toBe(commandA.commandId);
+    expect(screen.getByRole("status")).toHaveTextContent("正在读取目录…");
 
     act(() => socketMock.emit?.({
       type: "directory_listing",
-      commandId: RUN_ID,
+      commandId: commandA.commandId,
       path: "E:\\stale",
       parentPath: "E:\\",
-      directories: [],
+      directories: [{ name: "stale child", path: "E:\\stale\\child" }],
       truncated: false,
     }));
+    expect(screen.getByRole("dialog", { name: "选择项目目录" })).toBeInTheDocument();
     expect(screen.queryByText("E:\\stale")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "打开文件夹 stale child" }))
+      .not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("正在读取目录…");
+
     act(() => socketMock.emit?.({
       type: "error",
       scope: "command",
       operation: "browse_directory",
-      commandId: RUN_ID,
+      commandId: commandA.commandId,
       message: "stale listing error",
     }));
+    expect(screen.getByRole("dialog", { name: "选择项目目录" })).toBeInTheDocument();
     expect(screen.queryByText("stale listing error")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("正在读取目录…");
 
     act(() => socketMock.emit?.({
       type: "directory_listing",
-      commandId: command.commandId,
+      commandId: commandB.commandId,
       path: "E:\\typed",
       parentPath: "E:\\",
       directories: [{
@@ -3756,8 +3767,10 @@ describe("App", () => {
       }],
       truncated: false,
     }));
+    expect(screen.queryByText("正在读取目录…")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "打开文件夹 child" }));
     const childCommand = latestCommand("browse_directory");
+    expect(childCommand.commandId).not.toBe(commandB.commandId);
     expect(childCommand.path).toBe("E:\\typed\\child");
 
     act(() => socketMock.emit?.({
@@ -4597,30 +4610,93 @@ describe("App", () => {
     expect(screen.queryByRole("dialog", { name: "Choose a profile" })).not.toBeInTheDocument();
   });
 
-  it("drops stale extension UI on disconnect and ignores another session", () => {
+  it("correlates extension UI by session and request and clears it on disconnect", () => {
     render(<App />);
     const sessionId = startFromSetup();
+    const otherSessionId = "e15c861c-e18f-4290-bc22-8932f3caaf4e";
 
     act(() => {
       socketMock.emit?.({
         type: "extension_ui_request",
-        sessionId: "e15c861c-e18f-4290-bc22-8932f3caaf4e",
+        sessionId: otherSessionId,
         requestId: EXTENSION_REQUEST_A,
-        request: { kind: "confirm", title: "Stale", message: "Ignore me" },
+        request: { kind: "confirm", title: "Wrong session", message: "Ignore me" },
+      });
+      socketMock.emit?.({
+        type: "extension_ui_notification",
+        sessionId,
+        level: "info",
+        message: "Current notification",
+      });
+      socketMock.emit?.({
+        type: "extension_ui_notification",
+        sessionId: otherSessionId,
+        level: "error",
+        message: "Wrong notification",
       });
     });
-    expect(screen.queryByText("Stale")).not.toBeInTheDocument();
+    expect(screen.queryByText("Wrong session")).not.toBeInTheDocument();
+    expect(screen.queryByText("Wrong notification")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Current notification");
 
     act(() => socketMock.emit?.({
       type: "extension_ui_request",
       sessionId,
       requestId: EXTENSION_REQUEST_A,
-      request: { kind: "confirm", title: "Current", message: "Continue?" },
+      request: { kind: "input", title: "Current request", placeholder: "Type here" },
     }));
-    expect(screen.getByText("Current")).toBeInTheDocument();
+    const currentInput = screen.getByRole("textbox", { name: "Current request" });
+    fireEvent.change(currentInput, { target: { value: "local draft" } });
 
+    act(() => socketMock.emit?.({
+      type: "extension_ui_request",
+      sessionId,
+      requestId: EXTENSION_REQUEST_A,
+      request: { kind: "confirm", title: "Duplicate request", message: "Replace?" },
+    }));
+    expect(screen.getAllByRole("dialog", { name: "Current request" }))
+      .toHaveLength(1);
+    expect(screen.queryByText("Duplicate request")).not.toBeInTheDocument();
+    expect(currentInput).toHaveValue("local draft");
+    expect(screen.getByRole("status")).toHaveTextContent("Current notification");
+
+    act(() => {
+      socketMock.emit?.({
+        type: "extension_ui_closed",
+        sessionId: otherSessionId,
+        requestId: EXTENSION_REQUEST_A,
+      });
+      socketMock.emit?.({
+        type: "extension_ui_closed",
+        sessionId,
+        requestId: RUN_B,
+      });
+    });
+    expect(screen.getByRole("dialog", { name: "Current request" })).toBeInTheDocument();
+    expect(currentInput).toHaveValue("local draft");
+    expect(screen.getByRole("status")).toHaveTextContent("Current notification");
+
+    act(() => socketMock.emit?.({
+      type: "extension_ui_closed",
+      sessionId,
+      requestId: EXTENSION_REQUEST_A,
+    }));
+    expect(screen.queryByRole("dialog", { name: "Current request" }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByText("Duplicate request")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Current notification");
+
+    act(() => socketMock.emit?.({
+      type: "extension_ui_request",
+      sessionId,
+      requestId: RUN_B,
+      request: { kind: "confirm", title: "Disconnect cleanup", message: "Wait" },
+    }));
+    expect(screen.getByRole("dialog", { name: "Disconnect cleanup" }))
+      .toBeInTheDocument();
     act(() => socketMock.status?.(false));
-    expect(screen.queryByRole("dialog", { name: "Current" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Disconnect cleanup" }))
+      .not.toBeInTheDocument();
   });
 
   it("shows a session-correlated extension notification before state is ready", () => {
