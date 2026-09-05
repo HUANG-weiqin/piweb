@@ -328,6 +328,108 @@ describe("RoleManagerDialog", () => {
     expect(remove).toHaveBeenCalledWith("default", 1);
   });
 
+  it("preserves a dirty open form but reloads its current role when reopened", () => {
+    const update = vi.fn();
+    const baseRole = role("default", "Default", {
+      description: "Base description",
+      systemPrompt: "Base prompt N",
+      toolMode: "read_only",
+      canManageSessions: false,
+    });
+    const nextRole = role("default", "External N+1", {
+      revision: 2,
+      description: "External N+1 description",
+      systemPrompt: "External prompt N+1",
+      toolMode: "read_only",
+      canManageSessions: false,
+    });
+    const view = renderManager({
+      roles: [baseRole],
+      initialRoleId: "default",
+      onUpdate: update,
+    });
+
+    fireEvent.change(screen.getByRole("textbox", { name: "角色名称" }), {
+      target: { value: "Dirty name" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "角色简介" }), {
+      target: { value: "Dirty description" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "专属提示词" }), {
+      target: { value: "Dirty prompt" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "工具权限" }), {
+      target: { value: "full_access" },
+    });
+    fireEvent.click(screen.getByRole("switch", { name: /允许管理会话/ }));
+    fireEvent.click(screen.getByRole("button", { name: "保存角色" }));
+
+    const pending = { operation: "update_role" as const, commandId: "stale-command" };
+    view.rerender(<RoleManagerDialog
+      open
+      roles={[nextRole]}
+      providers={providers}
+      initialRoleId="default"
+      pending={pending}
+      result={{ ...pending, ok: false, message: "revision changed" }}
+      onClose={() => undefined}
+      onCreate={() => undefined}
+      onUpdate={update}
+      onDelete={() => undefined}
+    />);
+
+    expect(screen.getByRole("textbox", { name: "角色名称" })).toHaveValue("Dirty name");
+    expect(screen.getByRole("textbox", { name: "角色简介" })).toHaveValue("Dirty description");
+    expect(screen.getByRole("textbox", { name: "专属提示词" })).toHaveValue("Dirty prompt");
+    expect(screen.getByRole("combobox", { name: "工具权限" })).toHaveValue("full_access");
+    expect(screen.getByRole("switch", { name: /允许管理会话/ })).toBeChecked();
+    expect(screen.getByRole("alert")).toHaveTextContent("revision changed");
+
+    view.rerender(<RoleManagerDialog
+      open={false}
+      roles={[nextRole]}
+      providers={providers}
+      initialRoleId="default"
+      onClose={() => undefined}
+      onCreate={() => undefined}
+      onUpdate={update}
+      onDelete={() => undefined}
+    />);
+    view.rerender(<RoleManagerDialog
+      open
+      roles={[nextRole]}
+      providers={providers}
+      initialRoleId="default"
+      onClose={() => undefined}
+      onCreate={() => undefined}
+      onUpdate={update}
+      onDelete={() => undefined}
+    />);
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "角色名称" })).toHaveValue("External N+1");
+    expect(screen.getByRole("textbox", { name: "角色简介" }))
+      .toHaveValue("External N+1 description");
+    expect(screen.getByRole("textbox", { name: "专属提示词" }))
+      .toHaveValue("External prompt N+1");
+    expect(screen.getByRole("combobox", { name: "工具权限" })).toHaveValue("read_only");
+    expect(screen.getByRole("switch", { name: /允许管理会话/ })).not.toBeChecked();
+
+    fireEvent.click(screen.getByRole("button", { name: "保存角色" }));
+    expect(update).toHaveBeenLastCalledWith(
+      "default",
+      2,
+      "External prompt N+1",
+      expect.objectContaining({
+        name: "External N+1",
+        description: "External N+1 description",
+        systemPrompt: "External prompt N+1",
+        toolMode: "read_only",
+        canManageSessions: false,
+      }),
+    );
+  });
+
   it("shows an exact stale error without changing the dirty draft", () => {
     const update = vi.fn();
     const baseRole = role("default", "Default", { systemPrompt: "Base prompt N" });

@@ -7194,7 +7194,10 @@ describe("App", () => {
 
   it("settles a pending role update as unknown on disconnect and clears it on reconnect", () => {
     render(<App />);
-    const emitRoleReady = (sessionId: string) => act(() => {
+    const emitRoleReady = (
+      sessionId: string,
+      catalogRole: RoleTemplate = defaultRole(),
+    ) => act(() => {
       socketMock.emit?.({
         type: "state",
         state: {
@@ -7212,7 +7215,7 @@ describe("App", () => {
         type: "role_catalog_snapshot",
         sessionId,
         projectId: PROJECT_ID,
-        roles: [defaultRole()],
+        roles: [catalogRole],
       });
     });
     const sessionId = startFromSetup();
@@ -7285,14 +7288,45 @@ describe("App", () => {
     expect(screen.queryByText(/角色操作(结果未确认|未发送)/)).not.toBeInTheDocument();
 
     const reconnectSessionId = latestSessionId();
-    emitRoleReady(reconnectSessionId);
+    const authoritativeRole = defaultRole({
+      revision: 2,
+      name: "Default N+1",
+      description: "Authoritative N+1 description",
+      systemPrompt: "Authoritative prompt N+1",
+      toolMode: "read_only",
+      canManageSessions: false,
+    });
+    emitRoleReady(reconnectSessionId, authoritativeRole);
     fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
-    fireEvent.click(screen.getByRole("button", { name: "管理角色 Default" }));
+    fireEvent.click(screen.getByRole("button", { name: "管理角色 Default N+1" }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "角色名称" }))
+      .toHaveValue("Default N+1");
+    expect(screen.getByRole("textbox", { name: "角色简介" }))
+      .toHaveValue("Authoritative N+1 description");
+    expect(screen.getByRole("textbox", { name: "专属提示词" }))
+      .toHaveValue("Authoritative prompt N+1");
+    expect(screen.getByRole("combobox", { name: "工具权限" }))
+      .toHaveValue("read_only");
+    expect(screen.getByRole("switch", { name: /允许管理会话/ })).not.toBeChecked();
+
     fireEvent.change(screen.getByRole("textbox", { name: "角色名称" }), {
       target: { value: "Fresh independent update" },
     });
     fireEvent.click(screen.getByRole("button", { name: "保存角色" }));
     const freshUpdate = latestCommand("update_role");
+    expect(freshUpdate).toMatchObject({
+      roleId: "default",
+      expectedRevision: 2,
+      expectedSystemPrompt: "Authoritative prompt N+1",
+      role: {
+        name: "Fresh independent update",
+        description: "Authoritative N+1 description",
+        systemPrompt: "Authoritative prompt N+1",
+        toolMode: "read_only",
+        canManageSessions: false,
+      },
+    });
     expect(freshUpdate.commandId).not.toBe(pendingUpdate.commandId);
     expect(updateCount()).toBe(updatesBeforeReconnect + 1);
   });

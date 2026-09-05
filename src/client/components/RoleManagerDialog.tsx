@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -246,7 +247,7 @@ export function RoleManagerDialog({
     setDraft(next ? roleDraft(next) : emptyDraft);
   }, [draftSourceKey]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open) return;
     const nextRole = requestedRole(roles, initialRoleId);
     setSelectedRoleId(nextRole?.id ?? NEW_ROLE_ID);
