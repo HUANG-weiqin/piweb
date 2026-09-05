@@ -519,6 +519,52 @@ describe("App", () => {
     });
   });
 
+  it("restores exact focus owners through nested directory browsing", async () => {
+    render(<App />);
+
+    const launcher = screen.getByRole("button", { name: "开启工作区" });
+    launcher.focus();
+    fireEvent.click(launcher);
+    await waitFor(() => expect(screen.getByRole("textbox", {
+      name: "项目目录",
+    })).toHaveFocus());
+
+    const picker = screen.getByRole("button", { name: "选择文件夹" });
+    picker.focus();
+    expect(picker).toHaveFocus();
+    fireEvent.click(picker);
+
+    const directoryDialog = screen.getByRole("dialog", { name: "选择项目目录" });
+    const directoryClose = screen.getByRole("button", { name: "关闭目录选择" });
+    await waitFor(() => expect(directoryClose).toHaveFocus());
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(directoryDialog.contains(document.activeElement)).toBe(true);
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "选择项目目录" }))
+        .not.toBeInTheDocument();
+      expect(screen.getByRole("dialog", { name: "开启工作区" }))
+        .toBeInTheDocument();
+      expect(picker.isConnected).toBe(true);
+      expect(picker).toHaveFocus();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "关闭开启工作区" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "开启工作区" }))
+        .not.toBeInTheDocument();
+      expect(launcher.isConnected).toBe(true);
+      expect(launcher).toHaveFocus();
+    });
+    expect(socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "browse_directory",
+    )).toHaveLength(1);
+    expect(socketMock.send).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "initialize" }),
+    );
+  });
+
   it("dismisses Setup only from the exact backdrop and restores its launcher", async () => {
     render(<App />);
 

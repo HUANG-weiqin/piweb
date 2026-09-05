@@ -73,6 +73,17 @@ function ConnectionDrawerBackdropFixture({
   </>;
 }
 
+function ConnectionDrawerFocusOwnerFixture() {
+  const [open, setOpen] = useState(false);
+  return <>
+    <button onClick={() => setOpen(true)}>打开模型连接测试</button>
+    <ConnectionDrawer {...drawerProps({
+      open,
+      onClose: () => setOpen(false),
+    })} />
+  </>;
+}
+
 describe("ConnectionDrawer", () => {
   it("shows only models Pi reports as available", () => {
     renderDrawer();
@@ -153,6 +164,50 @@ describe("ConnectionDrawer", () => {
     expect(onOAuth).not.toHaveBeenCalled();
     expect(onLogout).not.toHaveBeenCalled();
     expect(onRefresh).not.toHaveBeenCalled();
+  });
+
+  it("restores exact focus owners through the nested API Key modal", async () => {
+    render(<ConnectionDrawerFocusOwnerFixture />);
+
+    const launcher = screen.getByRole("button", { name: "打开模型连接测试" });
+    expect(launcher.isConnected).toBe(true);
+    launcher.focus();
+    expect(launcher).toHaveFocus();
+    fireEvent.click(launcher);
+
+    const drawerClose = screen.getByRole("button", { name: "关闭" });
+    await waitFor(() => expect(drawerClose).toHaveFocus());
+
+    const keyTrigger = screen.getByRole("button", { name: "更新 API Key" });
+    expect(keyTrigger.isConnected).toBe(true);
+    keyTrigger.focus();
+    expect(keyTrigger).toHaveFocus();
+    fireEvent.click(keyTrigger);
+
+    const keyInput = screen.getByLabelText("API Key");
+    expect(keyInput).toHaveAttribute("data-modal-autofocus");
+    await waitFor(() => expect(keyInput).toHaveFocus());
+
+    const keyClose = screen.getByRole("button", { name: "关闭 API Key 设置" });
+    keyClose.focus();
+    fireEvent.click(keyClose);
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Test API Key" }))
+        .not.toBeInTheDocument();
+      expect(keyTrigger.isConnected).toBe(true);
+      expect(keyTrigger).toHaveFocus();
+    });
+
+    drawerClose.focus();
+    fireEvent.click(drawerClose);
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "模型连接" }))
+        .not.toBeInTheDocument();
+      expect(launcher.isConnected).toBe(true);
+      expect(launcher).toHaveFocus();
+    });
   });
 
   it("shows models only for the provider the user chose", () => {

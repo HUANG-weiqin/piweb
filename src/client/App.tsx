@@ -3183,7 +3183,7 @@ export function App() {
   const handleChatSwitchRole = useLatestCallback(switchConversationRole);
   const handleChatRewind = useLatestCallback(truncateConversation);
   const workspaceSetupFocusRef = useModalFocus<HTMLElement>(
-    setupOpen && !directoryBrowser,
+    setupOpen,
     setupOpen ? "workspace-setup" : "",
     closeWorkspaceDialog,
   );

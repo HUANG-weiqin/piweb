@@ -209,7 +209,7 @@ export function ConnectionDrawer({
     onKeyDialogChange(false);
   };
   const drawerFocusRef = useModalFocus<HTMLElement>(
-    open && !keyProvider,
+    open,
     "connection-drawer",
     onClose,
   );
