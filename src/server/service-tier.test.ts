@@ -1,16 +1,21 @@
 import type { ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
+import { closeOpenAICodexWebSocketSessions } from "@earendil-works/pi-ai/api/openai-codex-responses";
 import type {
   AgentSession,
   AgentSessionEvent,
   ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ServiceTier } from "../shared/protocol.js";
 import { installCompactionThinkingOverride } from "./compaction-thinking.js";
 import {
   installServiceTierOverride,
   modelServiceTiers,
 } from "./service-tier.js";
+
+vi.mock("@earendil-works/pi-ai/api/openai-codex-responses", () => ({
+  closeOpenAICodexWebSocketSessions: vi.fn(),
+}));
 
 type FakeModelRuntime = Pick<ModelRuntime, "stream" | "streamSimple">;
 
@@ -64,6 +69,7 @@ function codexModel(overrides: Record<string, unknown> = {}) {
     id: "future-codex-model",
     api: "openai-codex-responses",
     name: "Future Codex model",
+    baseUrl: "https://example.invalid/v1",
     reasoning: true,
     input: ["text"],
     contextWindow: 100_000,
@@ -85,6 +91,10 @@ const context = {
 };
 
 describe("service tier compatibility boundary", () => {
+  beforeEach(() => {
+    vi.mocked(closeOpenAICodexWebSocketSessions).mockClear();
+  });
+
   it("projects priority from the API route rather than provider or model metadata", () => {
     expect(modelServiceTiers(codexModel({
       provider: "another-provider",
@@ -170,6 +180,96 @@ describe("service tier compatibility boundary", () => {
     override.dispose();
     expect(modelRuntime.streamSimple).toBe(streamSimple);
     expect(session.agent.streamFunction).toBe(upstream);
+  });
+
+  it("adds Codex backend routing hints and fences cached sockets when they change", async () => {
+    const { modelRuntime, stream, streamSimple } = fakeModelRuntime();
+    const transformHeaders = vi.fn((headers: Record<string, string>) => ({
+      ...headers,
+      "x-extension": "enabled",
+    }));
+    const { session } = fakeSession(modelRuntime, {
+      sessionId: "session-a",
+      headers: {
+        "X-Codex-Routing-Hint": "stale",
+        "x-caller": "kept",
+      },
+      transformHeaders,
+    });
+    let selected: ServiceTier | null = null;
+    const override = installServiceTierOverride(
+      modelRuntime,
+      () => selected,
+    );
+    const model = codexModel({
+      provider: "openai-codex",
+      id: "gpt-5.6-sol",
+      name: "GPT-5.6 Sol",
+      baseUrl: "https://chatgpt.com/backend-api/",
+    });
+
+    session.agent.streamFunction(model as never, context as never, {});
+    const defaultOptions = streamSimple.mock.calls[0]?.[2];
+    expect(await defaultOptions?.transformHeaders?.(
+      defaultOptions.headers ?? {},
+    )).toEqual({
+      "x-caller": "kept",
+      "x-codex-routing-hint": "model=gpt-5.6-sol",
+      "x-extension": "enabled",
+    });
+    expect(transformHeaders).toHaveBeenLastCalledWith({
+      "x-caller": "kept",
+      "x-codex-routing-hint": "model=gpt-5.6-sol",
+    });
+    expect(closeOpenAICodexWebSocketSessions).not.toHaveBeenCalled();
+
+    selected = "priority";
+    session.agent.streamFunction(model as never, context as never, {});
+    const priorityOptions = stream.mock.calls[0]?.[2];
+    expect(priorityOptions).toEqual(expect.objectContaining({
+      serviceTier: "priority",
+      sessionId: "session-a",
+    }));
+    expect(await priorityOptions?.transformHeaders?.(
+      priorityOptions.headers ?? {},
+    )).toEqual({
+      "x-caller": "kept",
+      "x-codex-routing-hint": "model=gpt-5.6-sol;tier=priority",
+      "x-extension": "enabled",
+    });
+    expect(closeOpenAICodexWebSocketSessions)
+      .toHaveBeenCalledExactlyOnceWith("session-a");
+
+    session.agent.streamFunction(model as never, context as never, {});
+    expect(closeOpenAICodexWebSocketSessions).toHaveBeenCalledTimes(1);
+
+    selected = null;
+    session.agent.streamFunction(model as never, context as never, {});
+    expect(closeOpenAICodexWebSocketSessions).toHaveBeenCalledTimes(2);
+    expect(closeOpenAICodexWebSocketSessions)
+      .toHaveBeenLastCalledWith("session-a");
+
+    override.dispose();
+  });
+
+  it("never closes the global socket cache when session identity is absent", () => {
+    const { modelRuntime } = fakeModelRuntime();
+    let selected: ServiceTier | null = null;
+    const override = installServiceTierOverride(
+      modelRuntime,
+      () => selected,
+    );
+    const model = codexModel({
+      provider: "openai-codex",
+      baseUrl: "https://chatgpt.com/backend-api",
+    });
+
+    modelRuntime.streamSimple(model as never, context as never, undefined);
+    selected = "priority";
+    modelRuntime.streamSimple(model as never, context as never, undefined);
+
+    expect(closeOpenAICodexWebSocketSessions).not.toHaveBeenCalled();
+    override.dispose();
   });
 
   it("fails closed after SDK decoration when a selected tier reaches another route", () => {

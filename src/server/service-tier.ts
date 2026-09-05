@@ -6,11 +6,15 @@ import {
   type ModelsApiStreamOptions,
   type ModelsSimpleStreamOptions,
 } from "@earendil-works/pi-ai";
+import { closeOpenAICodexWebSocketSessions } from "@earendil-works/pi-ai/api/openai-codex-responses";
 import { buildBaseOptions } from "@earendil-works/pi-ai/api/simple-options";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ServiceTier } from "../shared/protocol.js";
 
 const CODEX_RESPONSES_API = "openai-codex-responses" as const;
+const OPENAI_CODEX_PROVIDER = "openai-codex";
+const OPENAI_CODEX_BACKEND = "https://chatgpt.com/backend-api";
+const CODEX_ROUTING_HINT_HEADER = "x-codex-routing-hint";
 const CODEX_SERVICE_TIERS = ["priority"] satisfies readonly ServiceTier[];
 
 type ServiceTierRouteModel = {
@@ -58,6 +62,35 @@ type ServiceTierModelRuntime = Pick<
   "stream" | "streamSimple"
 >;
 
+/** Mirrors the first-party OAuth backend hint without leaking it to custom routes. */
+function openAICodexRoutingHint(
+  model: Model<Api>,
+  tier: ServiceTier | null,
+): string | null {
+  if (
+    model.provider !== OPENAI_CODEX_PROVIDER
+    || model.api !== CODEX_RESPONSES_API
+    || model.baseUrl.replace(/\/+$/u, "") !== OPENAI_CODEX_BACKEND
+  ) {
+    return null;
+  }
+  return `model=${model.id}${tier === null ? "" : `;tier=${tier}`}`;
+}
+
+function withRoutingHint(
+  options: ModelsSimpleStreamOptions | undefined,
+  hint: string,
+): ModelsSimpleStreamOptions {
+  const headers = { ...options?.headers };
+  for (const name of Object.keys(headers)) {
+    if (name.toLowerCase() === CODEX_ROUTING_HINT_HEADER) {
+      delete headers[name];
+    }
+  }
+  headers[CODEX_ROUTING_HINT_HEADER] = hint;
+  return { ...options, headers };
+}
+
 function streamCodexWithServiceTier(
   modelRuntime: ServiceTierModelRuntime,
   model: Model<Api>,
@@ -65,8 +98,6 @@ function streamCodexWithServiceTier(
   options: ModelsSimpleStreamOptions | undefined,
   tier: ServiceTier,
 ) {
-  assertModelSupportsServiceTier(model, tier);
-
   const codexModel = model as Model<typeof CODEX_RESPONSES_API>;
   const base = {
     ...buildBaseOptions(codexModel, context, options, options?.apiKey),
@@ -93,7 +124,8 @@ function streamCodexWithServiceTier(
  * Applies the live conversation selection below coding-agent's session stream
  * wrapper. That wrapper still owns settings, attribution, and extension header
  * transforms; Pi's low-level route still owns auth, transport, response, and
- * service-tier cost semantics. Pi Web owns only the missing simple conversion.
+ * service-tier cost semantics. Pi Web owns the missing simple conversion and
+ * the Codex OAuth routing hint until the provider supplies both itself.
  */
 export function installServiceTierOverride(
   modelRuntime: ServiceTierModelRuntime,
@@ -101,20 +133,45 @@ export function installServiceTierOverride(
 ): ServiceTierOverride {
   const hadOwnStreamSimple = Object.hasOwn(modelRuntime, "streamSimple");
   const originalStreamSimple = modelRuntime.streamSimple;
+  // PiRuntime owns one ModelRuntime per AgentSession.
+  let lastRoutingHint: string | null | undefined;
   const overrideStreamSimple: ModelRuntime["streamSimple"] = (
     model,
     context,
     options,
   ) => {
     const tier = getServiceTier();
+    if (tier !== null) assertModelSupportsServiceTier(model, tier);
+
+    const routingHint = openAICodexRoutingHint(model, tier);
+    const sessionId = options?.sessionId;
+    if (sessionId) {
+      if (
+        lastRoutingHint !== undefined
+        && lastRoutingHint !== routingHint
+      ) {
+        // The Codex WebSocket cache does not include routing headers in its key.
+        closeOpenAICodexWebSocketSessions(sessionId);
+      }
+      lastRoutingHint = routingHint;
+    }
+    const routedOptions = routingHint === null
+      ? options
+      : withRoutingHint(options, routingHint);
+
     if (tier === null) {
-      return originalStreamSimple.call(modelRuntime, model, context, options);
+      return originalStreamSimple.call(
+        modelRuntime,
+        model,
+        context,
+        routedOptions,
+      );
     }
     return streamCodexWithServiceTier(
       modelRuntime,
       model,
       context,
-      options,
+      routedOptions,
       tier,
     );
   };
@@ -122,6 +179,7 @@ export function installServiceTierOverride(
 
   return {
     dispose(): void {
+      lastRoutingHint = undefined;
       if (modelRuntime.streamSimple !== overrideStreamSimple) return;
       if (hadOwnStreamSimple) {
         modelRuntime.streamSimple = originalStreamSimple;
