@@ -178,6 +178,78 @@ describe("ConnectionDrawer", () => {
     expect(screen.getByRole("status")).toHaveTextContent("API Key 已保存");
   });
 
+  it("closes from the API Key backdrop and disposes every local secret state", () => {
+    const saveKey = vi.fn(() => commandId);
+    const view = renderDrawer({ onKey: saveKey });
+
+    fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "failed-key" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "显示" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存 API Key" }));
+    view.rerender(<ConnectionDrawer {...drawerProps({
+      onKey: saveKey,
+      settingResult: {
+        operation: "set_api_key",
+        commandId,
+        ok: false,
+        message: "Key 保存失败",
+      },
+    })} />);
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "unsaved-key" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "显示" }));
+    saveKey.mockClear();
+
+    const dialog = screen.getByRole("dialog", { name: "Test API Key" });
+    const backdrop = dialog.parentElement;
+    expect(backdrop).toHaveClass("modal-backdrop");
+    fireEvent.mouseDown(backdrop!);
+
+    expect(saveKey).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog", { name: "Test API Key" }))
+      .not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
+    expect(screen.getByLabelText("API Key")).toHaveValue("");
+    expect(screen.getByLabelText("API Key")).toHaveAttribute("type", "password");
+    expect(screen.queryByText("Key 保存失败")).not.toBeInTheDocument();
+  });
+
+  it("does not close the API Key dialog from a bubbled form-child mouse-down", () => {
+    const saveKey = vi.fn();
+    renderDrawer({ onKey: saveKey });
+
+    fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
+    const keyInput = screen.getByLabelText("API Key");
+    fireEvent.change(keyInput, { target: { value: "unsaved-key" } });
+    fireEvent.mouseDown(keyInput);
+
+    expect(screen.getByRole("dialog", { name: "Test API Key" }))
+      .toBeInTheDocument();
+    expect(keyInput).toHaveValue("unsaved-key");
+    expect(saveKey).not.toHaveBeenCalled();
+  });
+
+  it("keeps the API Key backdrop inert while an exact save is pending", () => {
+    const saveKey = vi.fn(() => commandId);
+    renderDrawer({ onKey: saveKey });
+
+    fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "pending-key" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存 API Key" }));
+    const dialog = screen.getByRole("dialog", { name: "Test API Key" });
+    fireEvent.mouseDown(dialog.parentElement!);
+    fireEvent.click(screen.getByRole("button", { name: "正在保存…" }));
+
+    expect(dialog).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "正在保存…" })).toBeDisabled();
+    expect(saveKey).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps the API Key dialog open and actionable when saving fails", () => {
     const saveKey = vi.fn(() => commandId);
     const view = renderDrawer({ onKey: saveKey });

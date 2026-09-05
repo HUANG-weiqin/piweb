@@ -453,7 +453,11 @@ export function ConnectionDrawer({
         </div>
       </section>
     </aside>
-    {keyProvider && <div className="modal-backdrop" role="presentation"><form
+    {keyProvider && <div
+      className="modal-backdrop"
+      role="presentation"
+      onMouseDown={(event) => event.target === event.currentTarget && closeKeyDialog()}
+    ><form
       ref={keyFocusRef}
       className="modal"
       role="dialog"
