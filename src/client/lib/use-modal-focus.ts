@@ -9,10 +9,24 @@ const FOCUSABLE = [
   "[tabindex]:not([tabindex='-1'])",
 ].join(",");
 const modalStack: symbol[] = [];
+const modalContainers = new Map<symbol, HTMLElement>();
+
+function isFocusable(element: HTMLElement): boolean {
+  return element.matches(FOCUSABLE)
+    && !element.hidden
+    && element.getAttribute("aria-hidden") !== "true";
+}
 
 function focusableElements(container: HTMLElement): HTMLElement[] {
   return [...container.querySelectorAll<HTMLElement>(FOCUSABLE)]
-    .filter((element) => !element.hidden && element.getAttribute("aria-hidden") !== "true");
+    .filter(isFocusable);
+}
+
+function focusSafest(container: HTMLElement): void {
+  const preferred = container.querySelector<HTMLElement>(
+    "[data-modal-autofocus]:not([disabled])",
+  );
+  (preferred ?? focusableElements(container)[0] ?? container).focus();
 }
 
 /**
@@ -34,16 +48,25 @@ export function useModalFocus<T extends HTMLElement>(
   useEffect(() => {
     if (!active) return;
     const token = tokenRef.current;
+    const container = containerRef.current;
     modalStack.push(token);
+    if (container) modalContainers.set(token, container);
     previousFocusRef.current = document.activeElement instanceof HTMLElement
       ? document.activeElement
       : null;
     return () => {
       const index = modalStack.lastIndexOf(token);
       if (index >= 0) modalStack.splice(index, 1);
+      modalContainers.delete(token);
       const previous = previousFocusRef.current;
       previousFocusRef.current = null;
-      if (previous?.isConnected) previous.focus();
+      if (previous?.isConnected && isFocusable(previous)) {
+        previous.focus();
+        if (document.activeElement === previous) return;
+      }
+      const parentToken = modalStack.at(-1);
+      const parent = parentToken && modalContainers.get(parentToken);
+      if (parent?.isConnected) focusSafest(parent);
     };
   }, [active]);
 
@@ -51,10 +74,7 @@ export function useModalFocus<T extends HTMLElement>(
     if (!active) return;
     const container = containerRef.current;
     if (!container) return;
-    const preferred = container.querySelector<HTMLElement>(
-      "[data-modal-autofocus]:not([disabled])",
-    );
-    (preferred ?? focusableElements(container)[0] ?? container).focus();
+    focusSafest(container);
   }, [active, identity]);
 
   useEffect(() => {
