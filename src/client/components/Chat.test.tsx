@@ -417,7 +417,7 @@ describe("Chat", () => {
       .toHaveAttribute("aria-expanded", "false");
   });
 
-  it("projects mission facts read-only from the same conversation state", () => {
+  it("projects mission objectives and context read-only from conversation state", () => {
     render(view(emptyChat, "", undefined, {
       loopList: {
         armed: true,
@@ -454,9 +454,10 @@ describe("Chat", () => {
       .toHaveAttribute("aria-valuenow", "62");
     expect(mission).toHaveTextContent("ESTIMATED");
     expect(mission).toHaveTextContent("AUTO COMPACT 75%");
-    expect(mission).toHaveTextContent("RUNWAITING");
-    expect(mission).toHaveTextContent("CONTEXTCOMPACTING");
-    expect(mission).toHaveTextContent("ADMISSIONS1 PENDING");
+    expect(within(mission).queryByRole("region", { name: "Activity" }))
+      .not.toBeInTheDocument();
+    expect(within(mission).queryByRole("heading", { name: "ACTIVITY" }))
+      .not.toBeInTheDocument();
     expect(within(mission).queryByRole("button")).not.toBeInTheDocument();
   });
 

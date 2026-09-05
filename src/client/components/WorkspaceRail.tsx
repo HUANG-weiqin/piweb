@@ -64,6 +64,7 @@ function WorkspaceRailView({
         const activityUnknown = activityCatalogTruncated && !activity;
         const busyCount = activity?.busyConversationCount ?? 0;
         const attentionCount = activity?.attentionConversationCount ?? 0;
+        const running = !missing && busyCount > 0;
         const activityLabel = workspaceActivityLabel(
           busyCount,
           attentionCount,
@@ -96,7 +97,7 @@ function WorkspaceRailView({
         >
           <button
             type="button"
-            className={`workspace-rail-item${active ? " active" : ""}${missing ? " unavailable" : ""}`}
+            className={`workspace-rail-item${active ? " active" : ""}${missing ? " unavailable" : ""}${running ? " running" : ""}`}
             aria-label={`打开工作区 ${name}${unavailableLabel}${statusLabel}`}
             aria-current={active ? "true" : undefined}
             title={titleLines.join("\n")}

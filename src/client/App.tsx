@@ -45,6 +45,11 @@ import {
 } from "./components/WorkspaceRail";
 import { WorkspacePlaceholder } from "./components/WorkspacePlaceholder";
 import { createCompletionSound, type CompletionSound } from "./lib/completion-sound";
+import {
+  conversationDisplayTitle,
+  conversationTitleLookupKey,
+  createConversationTitleLookup,
+} from "./lib/conversation-display";
 import { PiSocket } from "./lib/socket";
 import { readStoredString, writeStoredString } from "./lib/storage";
 import { createTransitionTimingOwner } from "./lib/transition-timing";
@@ -3352,7 +3357,41 @@ export function App() {
     && (visibleState.busy || outstandingRunId)
     ? visibleState.conversationId
     : undefined;
-  const visibleConversationContext = useMemo<
+  const titleLookupSource = visibleConversationReady
+    && visibleState?.projectId
+    && visibleConversationId
+    && sidebarConversations.some(({ id }) => id === visibleConversationId)
+    ? {
+        projectId: visibleState.projectId,
+        conversations: sidebarConversations,
+      }
+    : undefined;
+  const titleLookupKey = useMemo(
+    () => titleLookupSource
+      ? conversationTitleLookupKey(
+          titleLookupSource.projectId,
+          titleLookupSource.conversations,
+          conversationIndexTruncated,
+        )
+      : "",
+    [
+      conversationIndexTruncated,
+      sidebarConversations,
+      visibleConversationId,
+      visibleConversationReady,
+      visibleState?.projectId,
+    ],
+  );
+  const visibleConversationTitleLookup = useMemo(
+    () => titleLookupSource
+      ? createConversationTitleLookup(
+          titleLookupSource.conversations,
+          conversationIndexTruncated,
+        )
+      : undefined,
+    [titleLookupKey],
+  );
+  const nextVisibleConversationContext = useMemo<
     {
       rootTitle: string;
       currentTitle?: string;
@@ -3373,12 +3412,8 @@ export function App() {
       : conversationsById.get(rootConversationId);
     if (!rootConversation) return undefined;
 
-    const rootTitle = rootConversation.name?.trim()
-      || rootConversation.preview.trim()
-      || "新会话";
-    const currentTitle = currentConversation.name?.trim()
-      || currentConversation.preview.trim()
-      || "新会话";
+    const rootTitle = conversationDisplayTitle(rootConversation);
+    const currentTitle = conversationDisplayTitle(currentConversation);
     const agentCount = 1 + sidebarConversations.filter((conversation) => (
       conversation.id !== rootConversation.id
       && conversation.rootConversationId === rootConversation.id
@@ -3386,7 +3421,6 @@ export function App() {
     const ordinal = conversationDisplayOrdinal(
       sidebarConversations,
       currentConversation.id,
-      visibleBusyConversationId,
     );
     return {
       rootTitle,
@@ -3397,10 +3431,16 @@ export function App() {
   }, [
     conversationIndexTruncated,
     sidebarConversations,
-    visibleBusyConversationId,
     visibleConversationId,
     visibleConversationReady,
   ]);
+  const visibleConversationContextKey = JSON.stringify(
+    nextVisibleConversationContext ?? null,
+  );
+  const visibleConversationContext = useMemo(
+    () => nextVisibleConversationContext,
+    [visibleConversationContextKey],
+  );
 
   if (!activeCwd || !visibleState) return <>
     <div className="workbench">
@@ -3602,6 +3642,7 @@ export function App() {
               compacting={visibleCompacting}
               cwd={visibleState.cwd}
               conversationContext={visibleConversationContext}
+              conversationTitleLookup={visibleConversationTitleLookup}
               online={online}
               interactive={settingsEnabled}
               conversationReady={visibleConversationReady}

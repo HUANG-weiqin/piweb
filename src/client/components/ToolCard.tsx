@@ -1,5 +1,9 @@
 import type { ReactNode } from "react";
 import type { ToolItem } from "../chat/reducer";
+import {
+  conversationTargetTitle,
+  type ConversationTitleLookup,
+} from "../lib/conversation-display";
 import { ActivitySpinner } from "./ActivitySpinner";
 
 type ToolRecord = Record<string, unknown>;
@@ -128,14 +132,22 @@ function stringField(record: ToolRecord | undefined, key: string): string {
   return typeof value === "string" ? value : "";
 }
 
-export function toolPresentation({
-  name,
-  args,
-}: Pick<ToolItem, "name" | "args">): {
+export function toolPresentation(
+  { name, args }: Pick<ToolItem, "name" | "args">,
+  conversationTitleLookup?: ConversationTitleLookup,
+): {
   label: string;
   target: string;
 } {
   const record = asRecord(args);
+  const conversationTarget = () => {
+    const conversationId = stringField(record, "conversationId");
+    return {
+      target: conversationId
+        ? conversationTargetTitle(conversationTitleLookup, conversationId)
+        : "",
+    };
+  };
   switch (name) {
     case "read":
       return { label: "读取文件", target: stringField(record, "path") };
@@ -173,7 +185,7 @@ export function toolPresentation({
     case "current_session":
       return { label: "查看当前会话", target: "自身会话信息" };
     case "peek_session":
-      return { label: "查看会话消息", target: stringField(record, "conversationId") };
+      return { label: "查看会话消息", ...conversationTarget() };
     case "start_session":
       return {
         label: "启动 Agent 会话",
@@ -185,13 +197,34 @@ export function toolPresentation({
         target: stringField(record, "title") || stringField(record, "roleId"),
       };
     case "send_session_message":
-      return { label: "发送会话消息", target: stringField(record, "conversationId") };
-    case "wait_for_session":
-      return { label: "等待 Agent 会话", target: stringField(record, "conversationId") };
+      return { label: "发送会话消息", ...conversationTarget() };
+    case "wait_for_session": {
+      const exactTarget = conversationTarget();
+      if (exactTarget.target) {
+        return { label: "等待 Agent 会话", ...exactTarget };
+      }
+      const targets = Array.isArray(record?.targets)
+        ? record.targets.flatMap((target) => {
+            const conversationId = stringField(asRecord(target), "conversationId");
+            return conversationId ? [conversationId] : [];
+          })
+        : [];
+      return targets.length === 0
+        ? { label: "等待 Agent 会话", target: "" }
+        : {
+            label: "等待 Agent 会话",
+            target: `${targets.length} 个会话 · ${targets
+              .map((conversationId) => conversationTargetTitle(
+                conversationTitleLookup,
+                conversationId,
+              ))
+              .join(" · ")}`,
+          };
+    }
     case "abort_session":
-      return { label: "终止 Agent 会话", target: stringField(record, "conversationId") };
+      return { label: "终止 Agent 会话", ...conversationTarget() };
     case "delete_session":
-      return { label: "删除 Agent 会话", target: stringField(record, "conversationId") };
+      return { label: "删除 Agent 会话", ...conversationTarget() };
     default:
       return { label: name.replaceAll("_", " "), target: "" };
   }
@@ -348,8 +381,14 @@ export function ToolDetails({ tool }: { tool: ToolItem }) {
   </div>;
 }
 
-export function ToolCard({ tool }: { tool: ToolItem }) {
-  const presentation = toolPresentation(tool);
+export function ToolCard({
+  tool,
+  conversationTitleLookup,
+}: {
+  tool: ToolItem;
+  conversationTitleLookup?: ConversationTitleLookup;
+}) {
+  const presentation = toolPresentation(tool, conversationTitleLookup);
   const status = statusLabel(tool.status);
   const isActive = tool.status === "pending" || tool.status === "running";
 
@@ -365,7 +404,10 @@ export function ToolCard({ tool }: { tool: ToolItem }) {
       <span className="tool-summary">
         <strong>{presentation.label}</strong>
         {presentation.target
-          ? <span className="tool-target" title={presentation.target}>
+          ? <span
+              className="tool-target"
+              title={presentation.target}
+            >
               {presentation.target}
             </span>
           : null}

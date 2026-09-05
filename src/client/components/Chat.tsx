@@ -30,6 +30,7 @@ import {
   type ChatMessage,
   type ChatState,
 } from "../chat/reducer";
+import type { ConversationTitleLookup } from "../lib/conversation-display";
 import { THINKING_LEVEL_LABELS } from "../lib/thinking-level";
 import { ActivitySpinner } from "./ActivitySpinner";
 import { editBudgetRemainingFiles } from "./CommitmentCard";
@@ -116,6 +117,7 @@ interface ChatProps {
     ordinal?: number;
     agentCount?: number;
   };
+  conversationTitleLookup?: ConversationTitleLookup;
   online: boolean;
   /** Transport is online, but focus-bound server controls may be frozen. */
   interactive?: boolean;
@@ -290,10 +292,6 @@ interface MissionCommandSurfaceProps {
   contextPercent: number | null | undefined;
   contextSource: ChatProps["contextSource"];
   compactionThresholdPercent: number;
-  compacting: boolean;
-  activeRun: PublicState["activeRun"] | undefined;
-  role: ConversationRoleSnapshot | undefined;
-  pendingAdmissionCount: number;
 }
 
 function MissionCommandSurface({
@@ -304,10 +302,6 @@ function MissionCommandSurface({
   contextPercent,
   contextSource,
   compactionThresholdPercent,
-  compacting,
-  activeRun,
-  role,
-  pendingAdmissionCount,
 }: MissionCommandSurfaceProps) {
   const meterPercent = contextPercent == null
     ? undefined
@@ -368,19 +362,6 @@ function MissionCommandSurface({
       </p>
     </section>
 
-    <section className="mission-activity" aria-label="Activity">
-      <div className="mission-section-heading">
-        <h3>ACTIVITY</h3>
-      </div>
-      <dl className="mission-activity-facts">
-        {role && <div><dt>ROLE</dt><dd>{role.name}</dd></div>}
-        <div><dt>RUN</dt><dd>{activeRun?.phase.toUpperCase() ?? "IDLE"}</dd></div>
-        {compacting && <div><dt>CONTEXT</dt><dd>COMPACTING</dd></div>}
-        {pendingAdmissionCount > 0 && <div>
-          <dt>ADMISSIONS</dt><dd>{pendingAdmissionCount} PENDING</dd>
-        </div>}
-      </dl>
-    </section>
   </aside>;
 }
 
@@ -410,6 +391,7 @@ function ChatView({
   compacting = false,
   cwd,
   conversationContext,
+  conversationTitleLookup,
   online,
   interactive = true,
   conversationReady,
@@ -862,6 +844,7 @@ function ChatView({
           assistantState={isCurrentAssistantMessage
             ? activeRun?.phase.toUpperCase()
             : undefined}
+          conversationTitleLookup={conversationTitleLookup}
           onContentSettled={handleMessageContentSettled}
           collapsed={
             block.message.role === "assistant"
@@ -889,10 +872,6 @@ function ChatView({
       contextPercent={contextPercent}
       contextSource={contextSource}
       compactionThresholdPercent={compactionThresholdPercent}
-      compacting={compacting}
-      activeRun={activeRun}
-      role={role}
-      pendingAdmissionCount={pendingAdmissions.length}
     />
     <div className="composer-wrap" ref={composerWrapRef}>
       {showJumpToLatest && <button

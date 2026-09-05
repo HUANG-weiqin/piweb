@@ -6,6 +6,7 @@ import type {
 } from "../shared/protocol";
 import type { ChatState } from "./chat/reducer";
 import { Chat } from "./components/Chat";
+import { createConversationTitleLookup } from "./lib/conversation-display";
 import {
   ConversationSidebar,
   conversationDisplayOrdinal,
@@ -135,8 +136,15 @@ const conversations: ConversationSummary[] = [
   conversation(
     "66666666-6666-4666-8666-666666666666",
     "模型与角色目录",
-    "生产配置未被 fixture 修改",
-    { updatedAt: "2026-09-03T16:35:00.000Z" },
+    "等待同伴确认生产配置",
+    {
+      updatedAt: "2026-09-03T16:35:00.000Z",
+      activity: {
+        kind: "waiting",
+        runId: "run-model-review",
+        targetCount: 1,
+      },
+    },
   ),
   conversation(
     "77777777-7777-4777-8777-777777777777",
@@ -168,6 +176,10 @@ const activityByWorkspace = new Map<string, ProjectActivitySummary>([
 ]);
 
 const DEFAULT_COMMITMENT_REASON = "只添加开发 fixture、截图入口与对应验证。";
+const LONG_TOOL_OUTPUT = Array.from(
+  { length: 28 },
+  (_, index) => `${String(index + 1).padStart(2, "0")} | visual-ledger-check | ${index % 3 === 0 ? "PASS" : "STABLE"}`,
+).join("\n");
 
 function createChat(commitmentReason: string): ChatState {
   return {
@@ -219,9 +231,64 @@ function createChat(commitmentReason: string): ChatState {
       },
       status: "done",
     }, {
+      id: "tool-wait-review",
+      name: "wait_for_session",
+      args: {
+        conversationId: "22222222-2222-4222-8222-222222222222",
+        runId: "run-layout-review",
+        singleWaitCommitment: "布局审查位于截图验收的关键路径。",
+      },
+      status: "pending",
+    }, {
+      id: "tool-ledger-read",
+      name: "read",
+      args: {
+        path: "src/client/components/transcript/visual-ledger/DeeplyNestedOperationLedger.tsx",
+        offset: 420,
+        limit: 180,
+      },
+      result: { details: { lines: 180, truncated: false } },
+      status: "done",
+    }, {
+      id: "tool-ledger-grep",
+      name: "grep",
+      args: { pattern: "assistant-activity-group", path: "src/client" },
+      result: { details: { matches: 14, truncated: false } },
+      status: "done",
+    }, {
+      id: "tool-ledger-find",
+      name: "find",
+      args: { pattern: "src/client/**/*.visual.tsx" },
+      result: { details: { message: "Fixture-only pattern intentionally returned no production files." } },
+      status: "error",
+    }, {
+      id: "tool-ledger-ls",
+      name: "wait_for_session",
+      args: {
+        targets: [{
+          conversationId: "33333333-3333-4333-8333-333333333333",
+          runId: "run-component-audit",
+        }, {
+          conversationId: "77777777-7777-4777-8777-777777777777",
+          runId: "run-history-audit",
+        }],
+      },
+      result: {
+        outcome: "settled",
+        conversationId: "33333333-3333-4333-8333-333333333333",
+        runId: "run-component-audit",
+      },
+      status: "done",
+    }, {
+      id: "tool-ledger-output",
+      name: "bash",
+      args: { command: "npm run test -- --run src/client/components/Message.test.tsx" },
+      result: { content: [{ type: "text", text: LONG_TOOL_OUTPUT }] },
+      status: "done",
+    }, {
       id: "tool-capture",
       name: "bash",
-      args: { command: "npm run visual:verify -- --fixture" },
+      args: { command: "npm run visual:verify -- --fixture --surfaces A" },
       status: "running",
     }],
     parts: [{
@@ -239,6 +306,24 @@ function createChat(commitmentReason: string): ChatState {
     }, {
       kind: "text",
       text: "编辑范围已经锁定，现在运行视觉验证。",
+    }, {
+      kind: "tool",
+      toolId: "tool-wait-review",
+    }, {
+      kind: "tool",
+      toolId: "tool-ledger-read",
+    }, {
+      kind: "tool",
+      toolId: "tool-ledger-grep",
+    }, {
+      kind: "tool",
+      toolId: "tool-ledger-find",
+    }, {
+      kind: "tool",
+      toolId: "tool-ledger-ls",
+    }, {
+      kind: "tool",
+      toolId: "tool-ledger-output",
     }, {
       kind: "tool",
       toolId: "tool-capture",
@@ -259,13 +344,18 @@ const noOp = () => undefined;
 const activeConversationOrdinal = conversationDisplayOrdinal(
   conversations,
   ACTIVE_CONVERSATION_ID,
-  ACTIVE_CONVERSATION_ID,
+);
+const conversationTitleLookup = createConversationTitleLookup(
+  conversations,
+  false,
 );
 
 export function VisualFixture({
   commitmentReason,
+  showComposerStates = false,
 }: {
   commitmentReason?: string;
+  showComposerStates?: boolean;
 } = {}) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const fixtureChat = commitmentReason === undefined
@@ -354,12 +444,21 @@ export function VisualFixture({
           ordinal: activeConversationOrdinal,
           agentCount: 4,
         }}
+        conversationTitleLookup={conversationTitleLookup}
         online
         interactive
         conversationReady
         draft="检查两张截图中的层级、密度与状态辨识度。"
         submitting={false}
-        pendingAdmissions={[]}
+        pendingAdmissions={showComposerStates
+          ? [{
+            promptId: "prompt-visual-fixture",
+            text: "先核对长路径与失败状态，再继续生成窄屏证据。",
+          }]
+          : []}
+        promptNotice={showComposerStates
+          ? "当前运行仍在处理；新指令会进入现有 steering 顺序。"
+          : undefined}
         onDraftChange={noOp}
         onSend={noOp}
         onAbort={noOp}
