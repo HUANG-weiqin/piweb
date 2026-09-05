@@ -18,6 +18,15 @@ const defaultViewports = [
   [390, 844],
 ];
 const secondaryInteractionWaitMs = 180;
+const ledgerViewports = [
+  [3440, 1440],
+  [1920, 1080],
+  [1440, 900],
+  [960, 900],
+  [390, 844],
+  [390, 600],
+];
+const jumpViewports = [[1440, 900], [390, 844], [390, 600]];
 const secondarySurfaceDefinitions = {
   drawer: { group: "A", expectedSelector: '.drawer[role="dialog"]' },
   "role-manager": { group: "A", expectedSelector: ".role-manager-dialog" },
@@ -35,10 +44,33 @@ const secondarySurfaceDefinitions = {
     expectedSelector: ".context-stat",
     additionalSelectors: ['.token-tooltip[role="tooltip"]'],
   },
+  "activity-expanded": {
+    group: "A",
+    expectedSelector: ".assistant-activity-group.is-active",
+    additionalSelectors: [".assistant-activity-group.is-active .activity-timeline", ".assistant-activity-group.is-active .tool-text"],
+    viewports: ledgerViewports,
+  },
   "commitment-expanded": {
     group: "A",
     expectedSelector: ".commitment-card",
     additionalSelectors: [".commitment-card .tool-text"],
+    viewports: ledgerViewports,
+  },
+  "jump-latest": {
+    group: "A",
+    expectedSelector: ".jump-latest",
+    viewports: jumpViewports,
+  },
+  "jump-latest-focus": {
+    group: "A",
+    expectedSelector: ".jump-latest",
+    viewports: jumpViewports,
+  },
+  "composer-states": {
+    group: "A",
+    expectedSelector: ".composer-wrap",
+    additionalSelectors: [".pending-admissions", ".loop-list-items", ".composer-notice"],
+    viewports: [[960, 900], [390, 844], [390, 600]],
   },
   setup: {
     group: "B",
@@ -239,6 +271,10 @@ async function waitForSecondarySurface(client, surface) {
   throw new Error(`Secondary surface fixture was not ready: ${surface}`);
 }
 
+function waitForSecondaryInteraction() {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, secondaryInteractionWaitMs));
+}
+
 async function revealContextTooltip(client) {
   const pointer = await client.evaluate(`(() => {
     const anchor = document.querySelector(".context-stat");
@@ -280,7 +316,7 @@ async function revealContextTooltip(client) {
       document.querySelector(".context-stat")?.focus({ preventScroll: true });
     })()`);
   }
-  await new Promise((resolveDelay) => setTimeout(resolveDelay, secondaryInteractionWaitMs));
+  await waitForSecondaryInteraction();
 
   const result = await client.evaluate(`(() => {
     const anchor = document.querySelector(".context-stat");
@@ -376,15 +412,14 @@ async function expandCommitmentCard(client) {
       issues.push("expanded commitment text has no internal overflow boundary");
     }
     const transcript = document.querySelector(".transcript");
-    if (!transcript) {
-      issues.push("missing .transcript scroll owner");
-    } else if (transcript.scrollHeight <= transcript.clientHeight) {
-      issues.push(".transcript has no meaningful scrolling boundary");
-    }
+    if (!transcript) issues.push("missing .transcript scroll owner");
     card.scrollIntoView({ block: "start", inline: "nearest", behavior: "instant" });
     const cardRect = card.getBoundingClientRect();
     const summaryRect = summary.getBoundingClientRect();
     const textRect = toolText?.getBoundingClientRect();
+    const body = card.querySelector(":scope > .tool-body");
+    const cardStyle = getComputedStyle(card);
+    const bodyPaddingLeft = body ? Number.parseFloat(getComputedStyle(body).paddingLeft) : NaN;
     const composerRect = document.querySelector(".composer")?.getBoundingClientRect();
     const safeBottom = Math.min(innerHeight, composerRect?.top ?? innerHeight);
     if (summaryRect.top < -1 || summaryRect.bottom > safeBottom + 1) {
@@ -396,12 +431,27 @@ async function expandCommitmentCard(client) {
     if (cardRect.right <= 0 || cardRect.left >= innerWidth || cardRect.bottom <= 0 || cardRect.top >= innerHeight) {
       issues.push("expanded commitment card is outside the viewport");
     }
+    if (cardStyle.overflow !== "visible" || cardStyle.clipPath !== "none") {
+      issues.push("expanded commitment card retains a clipping boundary");
+    }
+    if (!Number.isFinite(bodyPaddingLeft)
+      || (innerWidth > 600 && bodyPaddingLeft < 120)
+      || (innerWidth <= 600 && bodyPaddingLeft > 24)) {
+      issues.push("expanded edit-budget details are not aligned for this viewport");
+    }
+    summary.focus({ preventScroll: true });
+    if (document.activeElement !== summary) {
+      issues.push("commitment summary is not keyboard focusable");
+    }
+    summary.blur();
     return {
       issues,
       open: card.open,
       textLength: text.length,
       textScrollHeight: toolText?.scrollHeight ?? null,
       textClientHeight: toolText?.clientHeight ?? null,
+      bodyPaddingLeft,
+      clipPath: cardStyle.clipPath,
       scrollHeight: transcript?.scrollHeight ?? null,
       clientHeight: transcript?.clientHeight ?? null,
     };
@@ -409,6 +459,283 @@ async function expandCommitmentCard(client) {
   if (result.issues.length > 0) {
     throw new Error(`commitment-expanded interaction failed: ${result.issues.join(", ")}`);
   }
+  return result;
+}
+
+async function expandActivityLedger(client) {
+  const opened = await client.evaluate(`(() => {
+    const ledger = document.querySelector(".assistant-activity-group.is-active");
+    if (!ledger?.matches("details")) return false;
+    if (!ledger.open) ledger.querySelector(":scope > summary")?.click();
+    const tools = ledger.querySelector(".activity-timeline > details.tools");
+    if (!tools?.matches("details")) return false;
+    if (!tools.open) tools.querySelector(":scope > summary")?.click();
+    return true;
+  })()`);
+  if (!opened) throw new Error("activity-expanded could not open the activity and tool ledgers");
+  await waitForSecondaryInteraction();
+  await client.evaluate(`document.querySelector(
+    ".assistant-activity-group.is-active .tool-toggle",
+  )?.click()`);
+  await waitForSecondaryInteraction();
+  const outputOpened = await client.evaluate(`(() => {
+    const tools = document.querySelector(
+      ".assistant-activity-group.is-active .activity-timeline > details.tools",
+    );
+    const outputTool = [...(tools?.querySelectorAll("details.tool") ?? [])]
+      .find((tool) => tool.querySelector(".tool-target")
+        ?.textContent?.includes("Message.test.tsx"));
+    if (!outputTool) return false;
+    if (!outputTool.open) outputTool.querySelector(":scope > summary")?.click();
+    return true;
+  })()`);
+  if (!outputOpened) throw new Error("activity-expanded could not open the long-output tool");
+  await waitForSecondaryInteraction();
+  const result = await client.evaluate(`(() => {
+    const ledger = document.querySelector(".assistant-activity-group.is-active");
+    const tools = ledger?.querySelector(".activity-timeline > details.tools");
+    const toolCards = [...(tools?.querySelectorAll("details.tool") ?? [])];
+    const outputTool = toolCards.find((tool) => tool.querySelector(".tool-target")
+      ?.textContent?.includes("Message.test.tsx"));
+    ledger?.scrollIntoView({ block: "start", inline: "nearest", behavior: "instant" });
+    const text = outputTool?.querySelector(".tool-text");
+    const ledgerRect = ledger?.getBoundingClientRect();
+    const transcript = document.querySelector(".transcript");
+    const issues = [];
+    if (!ledger?.open) issues.push("activity ledger did not open after summary click");
+    if (!tools?.open) issues.push("nested tool ledger did not open after summary click");
+    if (toolCards.length !== 6) issues.push("expected six tool ledger rows, found " + toolCards.length);
+    if (!outputTool?.open) issues.push("long-output tool did not open after summary click");
+    if (!text) issues.push("missing long local tool output");
+    if (text && text.scrollHeight <= text.clientHeight + 1) {
+      issues.push("long tool output has no local scrolling boundary");
+    }
+    if (!transcript) issues.push("activity fixture is missing the transcript scroll owner");
+    if (!ledgerRect || ledgerRect.left < -1 || ledgerRect.right > innerWidth + 1) {
+      issues.push("expanded activity ledger crosses the viewport");
+    }
+    return {
+      issues,
+      open: ledger?.open ?? false,
+      toolsOpen: tools?.open ?? false,
+      toolCount: toolCards.length,
+      outputOpen: outputTool?.open ?? false,
+      outputScrollHeight: text?.scrollHeight ?? null,
+      outputClientHeight: text?.clientHeight ?? null,
+    };
+  })()`);
+  if (result.issues.length > 0) {
+    throw new Error(`activity-expanded interaction failed: ${result.issues.join(", ")}`);
+  }
+  return result;
+}
+
+async function wheelTranscriptUp(client) {
+  const pointer = await client.evaluate(`(() => {
+    const transcript = document.querySelector(".transcript");
+    if (!transcript) return { issues: ["missing transcript"] };
+    transcript.scrollTop = transcript.scrollHeight;
+    const rect = transcript.getBoundingClientRect();
+    return {
+      x: rect.left + rect.width / 2,
+      y: rect.top + Math.min(50, rect.height * 0.1),
+      before: transcript.scrollTop,
+      deltaY: -Math.max(320, Math.round(transcript.clientHeight * 0.7)),
+      issues: transcript.scrollHeight > transcript.clientHeight
+        ? []
+        : ["transcript has no scroll range"],
+    };
+  })()`);
+  if (pointer.issues.length > 0) {
+    throw new Error(`jump-latest wheel setup failed: ${pointer.issues.join(", ")}`);
+  }
+  await client.call("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: pointer.x,
+    y: pointer.y,
+    button: "none",
+    buttons: 0,
+  });
+  await client.call("Input.dispatchMouseEvent", {
+    type: "mouseWheel",
+    x: pointer.x,
+    y: pointer.y,
+    deltaX: 0,
+    deltaY: pointer.deltaY,
+  });
+  await waitForSecondaryInteraction();
+  const result = await client.evaluate(`(() => {
+    const transcript = document.querySelector(".transcript");
+    const jump = document.querySelector(".jump-latest");
+    const issues = [];
+    if (!transcript) return { issues: ["missing transcript after wheel"] };
+    if (transcript.scrollTop >= ${JSON.stringify(pointer.before)} - 2) {
+      issues.push("real upward wheel did not move the transcript");
+    }
+    if (!jump || jump.getClientRects().length === 0) {
+      issues.push("jump-latest did not become visible after real wheel detach");
+    }
+    return {
+      issues,
+      scrollTop: transcript.scrollTop,
+      distanceFromBottom: transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop,
+    };
+  })()`);
+  if (result.issues.length > 0) {
+    throw new Error(`jump-latest wheel interaction failed: ${result.issues.join(", ")}`);
+  }
+  return result;
+}
+
+async function clickJumpLatest(client) {
+  const pointer = await client.evaluate(`(() => {
+    const jump = document.querySelector(".jump-latest");
+    if (!jump) return { issues: ["missing jump-latest before pointer click"] };
+    const rect = jump.getBoundingClientRect();
+    return {
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
+      issues: rect.width >= 44 && rect.height >= 44
+        ? []
+        : ["jump-latest pointer target is smaller than 44px"],
+    };
+  })()`);
+  if (pointer.issues.length > 0) {
+    throw new Error(`jump-latest pointer setup failed: ${pointer.issues.join(", ")}`);
+  }
+  await client.call("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: pointer.x,
+    y: pointer.y,
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+  });
+  await client.call("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: pointer.x,
+    y: pointer.y,
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+  });
+  await waitForSecondaryInteraction();
+  const result = await client.evaluate(`(() => {
+    const transcript = document.querySelector(".transcript");
+    const distance = transcript
+      ? transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop
+      : Infinity;
+    const issues = [];
+    if (!transcript) issues.push("missing transcript after pointer click");
+    if (distance > 2) issues.push("pointer click did not jump to the bottom");
+    if (document.querySelector(".jump-latest")) {
+      issues.push("jump-latest remained after reaching the bottom");
+    }
+    return { issues, distanceFromBottom: distance };
+  })()`);
+  if (result.issues.length > 0) {
+    throw new Error(`jump-latest pointer interaction failed: ${result.issues.join(", ")}`);
+  }
+  return result;
+}
+
+async function exerciseJumpLatest(client, focusVisible) {
+  const activity = await expandActivityLedger(client);
+  const firstDetach = await wheelTranscriptUp(client);
+  const pointerJump = await clickJumpLatest(client);
+  const secondDetach = await wheelTranscriptUp(client);
+  await client.call("Input.dispatchKeyEvent", {
+    type: "keyDown",
+    key: "Tab",
+    code: "Tab",
+    windowsVirtualKeyCode: 9,
+  });
+  await client.call("Input.dispatchKeyEvent", {
+    type: "keyUp",
+    key: "Tab",
+    code: "Tab",
+    windowsVirtualKeyCode: 9,
+  });
+  const focus = await client.evaluate(`(() => {
+    const jump = document.querySelector(".jump-latest");
+    if (${JSON.stringify(focusVisible)}) jump?.focus({ preventScroll: true });
+    else jump?.blur();
+    const rect = jump?.getBoundingClientRect();
+    const focused = document.activeElement === jump;
+    const focusVisible = jump?.matches(":focus-visible") ?? false;
+    const issues = [];
+    if (!jump || !rect || rect.width <= 0 || rect.height <= 0) {
+      issues.push("jump-latest is not visible for capture");
+    }
+    if (rect && (rect.left < -1 || rect.right > innerWidth + 1
+      || rect.top < -1 || rect.bottom > innerHeight + 1)) {
+      issues.push("jump-latest crosses the viewport");
+    }
+    if (${JSON.stringify(focusVisible)} && (!focused || !focusVisible)) {
+      issues.push("jump-latest did not retain keyboard-visible focus");
+    }
+    if (!${JSON.stringify(focusVisible)} && focused) {
+      issues.push("normal jump-latest capture unexpectedly retained focus");
+    }
+    return { issues, focused, focusVisible };
+  })()`);
+  if (focus.issues.length > 0) {
+    throw new Error(`jump-latest focus state failed: ${focus.issues.join(", ")}`);
+  }
+  return { activity, firstDetach, pointerJump, secondDetach, ...focus };
+}
+
+async function exerciseComposerStates(client) {
+  await expandActivityLedger(client);
+  const hasTasks = await client.evaluate(`(() => {
+    const tasks = document.querySelector(".loop-list-toggle");
+    if (!tasks) return false;
+    if (tasks.getAttribute("aria-expanded") !== "true") tasks.click();
+    return true;
+  })()`);
+  if (!hasTasks) throw new Error("composer-states is missing Tasks");
+  await waitForSecondaryInteraction();
+  const opened = await client.evaluate(`document.querySelector(
+    ".loop-list-toggle",
+  )?.getAttribute("aria-expanded") === "true"`);
+  if (!opened) throw new Error("composer-states could not expand Tasks");
+  const detached = await wheelTranscriptUp(client);
+  await client.evaluate(`document.querySelector(".loop-list-toggle")?.click()`);
+  await waitForSecondaryInteraction();
+  await client.evaluate(`document.querySelector(".loop-list-toggle")?.click()`);
+  await waitForSecondaryInteraction();
+  const resized = await client.evaluate(`(() => {
+    const transcript = document.querySelector(".transcript");
+    const jump = document.querySelector(".jump-latest");
+    const pending = document.querySelector(".pending-admissions")?.getBoundingClientRect();
+    const tasks = document.querySelector(".loop-list")?.getBoundingClientRect();
+    const notice = document.querySelector(".composer-notice")?.getBoundingClientRect();
+    const composer = document.querySelector(".composer")?.getBoundingClientRect();
+    const issues = [];
+    if (!jump) issues.push("composer resize reclaimed detached transcript");
+    if (!document.querySelector(".loop-list-items")) issues.push("Tasks did not remain expanded");
+    if (!pending || !tasks || !notice || !composer) {
+      issues.push("composer state ledger is incomplete");
+    } else {
+      if (pending.bottom > tasks.top + 1) issues.push("pending admissions overlap Tasks");
+      if (tasks.bottom > notice.top + 1) issues.push("Tasks overlap composer notice");
+      if (notice.bottom > composer.top + 1) issues.push("composer notice overlaps composer");
+      if (pending.top < -1 || composer.bottom > innerHeight + 1) {
+        issues.push("composer state ledger crosses the viewport");
+      }
+    }
+    return {
+      issues,
+      distanceFromBottom: transcript
+        ? transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop
+        : null,
+    };
+  })()`);
+  if (resized.issues.length > 0) {
+    throw new Error(`composer-states interaction failed: ${resized.issues.join(", ")}`);
+  }
+  const pointerJump = await clickJumpLatest(client);
+  return { detached, resized, pointerJump, tasksExpanded: true };
 }
 
 async function inspectSecondarySurface(client, surface) {
@@ -580,21 +907,38 @@ async function captureViewport(client, outputPath, width, height, index, surface
   let diagnostics;
   if (surfaceMode) {
     await waitForSecondarySurface(client, surface.surface);
-    if (["context-tooltip", "commitment-expanded"].includes(surface.surface)) {
+    const usesWorkbench = [
+      "context-tooltip",
+      "activity-expanded",
+      "commitment-expanded",
+      "jump-latest",
+      "jump-latest-focus",
+      "composer-states",
+    ].includes(surface.surface);
+    if (usesWorkbench) {
       const collapsedMobileSidebar = await client.evaluate(`(() => {
-        if (innerWidth > 600) return false;
+        const compactRebelFixture = [
+          "activity-expanded",
+          "commitment-expanded",
+          "composer-states",
+        ].includes(${JSON.stringify(surface.surface)}) && innerWidth <= 960;
+        if (innerWidth > 600 && !compactRebelFixture) return false;
         const toggle = document.querySelector(".conversation-sidebar-toggle");
         if (toggle?.getAttribute("aria-expanded") !== "true") return false;
         toggle.click();
         return true;
       })()`);
-      if (collapsedMobileSidebar) {
-        await new Promise((resolveDelay) => setTimeout(resolveDelay, secondaryInteractionWaitMs));
-      }
+      if (collapsedMobileSidebar) await waitForSecondaryInteraction();
     }
+    let interaction = null;
     if (surface.surface === "context-tooltip") await revealContextTooltip(client);
-    if (surface.surface === "commitment-expanded") await expandCommitmentCard(client);
+    if (surface.surface === "activity-expanded") interaction = await expandActivityLedger(client);
+    if (surface.surface === "commitment-expanded") interaction = await expandCommitmentCard(client);
+    if (surface.surface === "jump-latest") interaction = await exerciseJumpLatest(client, false);
+    if (surface.surface === "jump-latest-focus") interaction = await exerciseJumpLatest(client, true);
+    if (surface.surface === "composer-states") interaction = await exerciseComposerStates(client);
     diagnostics = await inspectSecondarySurface(client, surface);
+    diagnostics.interaction = interaction;
   } else if (visualFixture) {
     const ready = await client.evaluate(`(() => {
       const fixture = document.querySelector('[data-visual-fixture="populated-workbench"]');
@@ -750,6 +1094,7 @@ async function captureViewport(client, outputPath, width, height, index, surface
       overflow: diagnostics.overflow,
       animations: diagnostics.animations,
       expectedSelector: diagnostics.expectedSelector,
+      ...(diagnostics.interaction ? { interaction: diagnostics.interaction } : {}),
     }
     : { name, ...diagnostics };
 }
@@ -1230,7 +1575,10 @@ async function main() {
           surface: surfaceName,
           ...secondarySurfaceDefinitions[surfaceName],
         };
-        for (const viewport of viewports) {
+        const surfaceViewports = requestedViewport || motionEvidence
+          ? viewports
+          : surface.viewports ?? viewports;
+        for (const viewport of surfaceViewports) {
           captures.push(await captureViewport(
             client,
             runDir,

@@ -11,7 +11,10 @@ import {
 import { useCallback, useState, type ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ConversationSummary } from "../../shared/protocol";
-import { ConversationSidebar } from "./ConversationSidebar";
+import {
+  ConversationSidebar,
+  conversationDisplayOrdinal,
+} from "./ConversationSidebar";
 
 const baseConversation: ConversationSummary = {
   id: "01234567-89ab-cdef-0123-456789abcdef",
@@ -136,9 +139,10 @@ describe("ConversationSidebar", () => {
       .toHaveAttribute("aria-current", "page");
 
     fireEvent.click(screen.getByRole("button", { name: "update facts" }));
-    const rows = screen.getAllByRole("listitem");
-    expect(within(rows[0]!).getByText("事实已更新")).toBeInTheDocument();
-    expect(within(rows[0]!).getByRole("status", { name: "运行中" }))
+    const runningRow = screen.getByText("事实已更新")
+      .closest<HTMLElement>("[data-conversation-id]");
+    expect(runningRow).toBeInTheDocument();
+    expect(within(runningRow!).getByRole("status", { name: "运行中" }))
       .toBeInTheDocument();
   });
 
@@ -287,45 +291,90 @@ describe("ConversationSidebar", () => {
     expect(screen.getByText("SUB-TEAM / AGENTS")).toBeInTheDocument();
   });
 
-  it("orders standalone conversations with the grouped-view priority", () => {
-    const attention = {
-      ...baseConversation,
-      id: "attention-123456",
-      name: "需要处理",
-      attention: true,
+  it("keeps root ordinals stable by creation identity while members stay dynamic", () => {
+    const early = conversation("early-standalone", "较早会话", {
+      createdAt: "2026-07-19T07:00:00.000Z",
       updatedAt: "2026-07-19T07:00:00.000Z",
+    });
+    const root = conversation("root-stable", "稳定任务", {
+      createdAt: "2026-07-19T08:00:00.000Z",
+    });
+    const member = conversation("member-active", "活跃 Agent", {
+      rootConversationId: root.id,
+      createdAt: "2026-07-19T06:00:00.000Z",
+      attention: true,
+      activity: { kind: "running", runId: "run-member" },
+    });
+    const tiedStandalone = conversation("standalone-tie", "同刻会话", {
+      createdAt: root.createdAt,
+      unread: true,
+      updatedAt: "2026-07-19T12:00:00.000Z",
+    });
+    const props = {
+      collapsed: false,
+      truncated: false,
+      navigationEnabled: true,
+      actionsEnabled: true,
+      onToggleCollapsed: vi.fn(),
+      onSelect: vi.fn(),
+      onCreate: vi.fn(),
+      onRename: vi.fn(),
+      onDelete: vi.fn(() => true),
     };
-    const running = {
-      ...baseConversation,
-      id: "running-12345678",
-      name: "正在运行",
-      activity: { kind: "running", runId: "run-1" } as const,
-      updatedAt: "2026-07-19T10:00:00.000Z",
-    };
-
-    render(
+    const { container, rerender } = render(
       <ConversationSidebar
-        conversations={[baseConversation, running, attention]}
-        collapsed={false}
-        truncated={false}
-        navigationEnabled
-        actionsEnabled
-        onToggleCollapsed={vi.fn()}
-        onSelect={vi.fn()}
-        onCreate={vi.fn()}
-        onRename={vi.fn()}
-        onDelete={vi.fn(() => true)}
+        {...props}
+        conversations={[tiedStandalone, member, early, root]}
+        focusedConversationId={member.id}
+        busyConversationId={member.id}
+      />,
+    );
+    const topLevelOrder = () => Array.from(
+      container.querySelectorAll<HTMLElement>(
+        ".hierarchy-root, .hierarchy-standalone",
+      ),
+      (row) => row.dataset.conversationId,
+    );
+    const ordinals = () => Array.from(
+      container.querySelectorAll(".conversation-sidebar-ordinal"),
+      (ordinal) => ordinal.textContent,
+    );
+
+    expect(topLevelOrder()).toEqual([early.id, root.id, tiedStandalone.id]);
+    expect(ordinals()).toEqual(["01", "02", "03"]);
+    expect(member.createdAt < early.createdAt).toBe(true);
+    expect(screen.getByText("活跃 Agent").closest("[data-conversation-id]")
+      ?.querySelector(".conversation-sidebar-ordinal")).toBeNull();
+    expect(conversationDisplayOrdinal(
+      [tiedStandalone, member, early, root],
+      member.id,
+    )).toBe(2);
+
+    const late = conversation("late-standalone", "新建会话", {
+      createdAt: "2026-07-19T09:00:00.000Z",
+    });
+    rerender(
+      <ConversationSidebar
+        {...props}
+        conversations={[
+          { ...root, updatedAt: "2026-07-19T13:00:00.000Z" },
+          { ...early, attention: true, updatedAt: "2026-07-19T14:00:00.000Z" },
+          late,
+          { ...member, activity: { kind: "idle" } },
+          { ...tiedStandalone, activity: { kind: "running", runId: "run-tie" } },
+        ]}
+        focusedConversationId={member.id}
+        busyConversationId={tiedStandalone.id}
       />,
     );
 
-    const rows = screen.getAllByRole("listitem");
-    expect(rows.map((row) => within(row).getByRole("button", {
-      name: /(?:打开|当前)会话/,
-    }).textContent)).toEqual([
-      expect.stringContaining("需要处理"),
-      expect.stringContaining("正在运行"),
-      expect.stringContaining("接口设计"),
+    expect(topLevelOrder()).toEqual([
+      early.id,
+      root.id,
+      tiedStandalone.id,
+      late.id,
     ]);
+    expect(ordinals()).toEqual(["01", "02", "03", "04"]);
   });
 
   it("keeps standalone positions stable when selection changes", () => {
@@ -358,13 +407,13 @@ describe("ConversationSidebar", () => {
       container.querySelectorAll<HTMLElement>(".hierarchy-standalone"),
       (row) => row.dataset.conversationId,
     );
-    expect(rowOrder()).toEqual([recent.id, older.id]);
+    expect(rowOrder()).toEqual([older.id, recent.id]);
 
     fireEvent.click(screen.getByRole("button", { name: "打开会话 较早会话" }));
 
     expect(screen.getByRole("button", { name: "当前会话 较早会话" }))
       .toHaveAttribute("aria-current", "page");
-    expect(rowOrder()).toEqual([recent.id, older.id]);
+    expect(rowOrder()).toEqual([older.id, recent.id]);
   });
 
   it("keeps collaboration member positions stable when selection changes", () => {

@@ -3,7 +3,9 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ConversationSummary } from "../../shared/protocol";
 import type { ChatMessage } from "../chat/reducer";
+import { createConversationTitleLookup } from "../lib/conversation-display";
 import { Message } from "./Message";
 
 const mermaidMock = vi.hoisted(() => ({
@@ -66,6 +68,46 @@ describe("Message", () => {
       .toHaveTextContent("src/index.ts");
     expect(screen.getByText("1 步 · 1 次工具调用")).toBeInTheDocument();
     expect(screen.getByText("工具调用（1）")).toBeInTheDocument();
+  });
+
+  it("uses the same conversation title in activity and tool summaries", () => {
+    const conversationId = "12345678-1234-4234-8234-123456789abc";
+    const conversation: ConversationSummary = {
+      id: conversationId,
+      name: "实现核对 Agent",
+      preview: "",
+      createdAt: "2026-07-19T08:00:00.000Z",
+      updatedAt: "2026-07-19T09:00:00.000Z",
+      messageCount: 1,
+      activity: { kind: "idle" },
+    };
+    const message: ChatMessage = {
+      ...toolsMessage,
+      tools: [{
+        id: "send-peer",
+        name: "send_session_message",
+        args: { conversationId, message: "请核对实现。" },
+        status: "done",
+      }],
+    };
+    const { container } = render(
+      <Message
+        message={message}
+        conversationTitleLookup={createConversationTitleLookup(
+          [conversation],
+          false,
+        )}
+      />,
+    );
+
+    expect(container.querySelector(".activity-group-detail"))
+      .toHaveTextContent("实现核对 Agent");
+    fireEvent.click(screen.getByText("工作过程"));
+    fireEvent.click(screen.getByText("工具调用（1）"));
+    expect(container.querySelector(".tool-target"))
+      .toHaveTextContent("实现核对 Agent");
+    expect(container.querySelector(".tool-target"))
+      .toHaveAttribute("title", "实现核对 Agent");
   });
 
   it("does not infer an active run from a stale pending tool", () => {

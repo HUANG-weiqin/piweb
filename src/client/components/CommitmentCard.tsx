@@ -1,4 +1,8 @@
 import type { ToolItem } from "../chat/reducer";
+import {
+  conversationTargetTitle,
+  type ConversationTitleLookup,
+} from "../lib/conversation-display";
 import { ActivitySpinner } from "./ActivitySpinner";
 import { ToolDetails } from "./ToolCard";
 
@@ -56,9 +60,11 @@ export function isCommitmentTool(tool: ToolItem): boolean {
 export function CommitmentCard({
   tool,
   observedEditBudgetRemainingFiles,
+  conversationTitleLookup,
 }: {
   tool: ToolItem;
   observedEditBudgetRemainingFiles?: number | null;
+  conversationTitleLookup?: ConversationTitleLookup;
 }) {
   const args = asRecord(tool.args);
   const facts = resultFacts(tool);
@@ -115,7 +121,9 @@ export function CommitmentCard({
     }
   } else {
     const target = stringField(args, "conversationId");
-    title = target ? `等待 ${target}` : "等待 Agent 会话";
+    title = target
+      ? `等待 ${conversationTargetTitle(conversationTitleLookup, target)}`
+      : "等待 Agent 会话";
     reason = stringField(args, "singleWaitCommitment");
   }
 

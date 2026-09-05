@@ -12,6 +12,7 @@ import {
   type ChatMessagePart,
   type ToolItem,
 } from "../chat/reducer";
+import type { ConversationTitleLookup } from "../lib/conversation-display";
 import { ActivitySpinner } from "./ActivitySpinner";
 import { CommitmentCard, isCommitmentTool } from "./CommitmentCard";
 import {
@@ -210,7 +211,13 @@ function StreamingMarkdown({
   </div>;
 }
 
-function ToolsPanel({ tools }: { tools: ChatMessage["tools"] }) {
+function ToolsPanel({
+  tools,
+  conversationTitleLookup,
+}: {
+  tools: ChatMessage["tools"];
+  conversationTitleLookup?: ConversationTitleLookup;
+}) {
   const [showAllTools, setShowAllTools] = useState(false);
   const hasOverflow = tools.length > TOOL_PREVIEW_LIMIT;
   const recentTools = tools.slice(-ACTIVITY_TIMELINE_LIMIT);
@@ -229,7 +236,11 @@ function ToolsPanel({ tools }: { tools: ChatMessage["tools"] }) {
     </summary>
     <div className="tool-stack">
       {!!hiddenToolsCount && <p className="tool-stack-note">已折叠 {hiddenToolsCount} 条更早工具调用</p>}
-      {visibleTools.slice().reverse().map((tool) => <ToolCard key={tool.id} tool={tool} />)}
+      {visibleTools.slice().reverse().map((tool) => <ToolCard
+        key={tool.id}
+        tool={tool}
+        conversationTitleLookup={conversationTitleLookup}
+      />)}
       {hasOverflow ? <button className="ghost tool-toggle" type="button" onClick={() => setShowAllTools((current) => !current)}>{showAllTools ? `收起到最近 ${TOOL_PREVIEW_LIMIT} 条` : expandLabel}</button> : null}
     </div>
   </details>;
@@ -388,13 +399,14 @@ function thinkingPreview(text: string): string {
 function activitySummary(
   runs: ActivityRun[],
   activeThinking: boolean,
+  conversationTitleLookup?: ConversationTitleLookup,
 ): ActivitySummary {
   const latestRun = runs.at(-1);
   const activeTool = findLatestTool(runs, (tool) => (
     tool.status === "pending" || tool.status === "running"
   ));
   if (activeTool) {
-    const presentation = toolPresentation(activeTool);
+    const presentation = toolPresentation(activeTool, conversationTitleLookup);
     return {
       tone: "active",
       label: `正在${presentation.label}`,
@@ -411,7 +423,7 @@ function activitySummary(
   if (latestRun?.kind === "tools") {
     const latestTool = latestRun.tools.at(-1);
     if (latestTool) {
-      const presentation = toolPresentation(latestTool);
+      const presentation = toolPresentation(latestTool, conversationTitleLookup);
       if (latestTool.status === "error") {
         return {
           tone: "error",
@@ -437,13 +449,19 @@ function ActivityGroup({
   parts,
   tools,
   activeThinking,
+  conversationTitleLookup,
 }: {
   parts: ChatMessagePart[];
   tools: ToolItem[];
   activeThinking: boolean;
+  conversationTitleLookup?: ConversationTitleLookup;
 }) {
   const runs = activityRuns(parts, tools);
-  const summary = activitySummary(runs, activeThinking);
+  const summary = activitySummary(
+    runs,
+    activeThinking,
+    conversationTitleLookup,
+  );
   const lastThinkingIndex = findLastIndex(
     runs,
     (run) => run.kind === "thinking",
@@ -499,7 +517,11 @@ function ActivityGroup({
             text={run.text}
             active={activeThinking && run === latestThinking}
           />
-        : <ToolsPanel key={`tools:${index}`} tools={run.tools} />)}
+        : <ToolsPanel
+            key={`tools:${index}`}
+            tools={run.tools}
+            conversationTitleLookup={conversationTitleLookup}
+          />)}
     </div>
   </details>;
 }
@@ -538,6 +560,7 @@ interface MessageProps {
   observedEditBudgetRemainingFiles?: number | null;
   assistantActor?: string;
   assistantState?: string;
+  conversationTitleLookup?: ConversationTitleLookup;
   onContentSettled?(): void;
 }
 
@@ -552,6 +575,7 @@ function MessageView({
   observedEditBudgetRemainingFiles,
   assistantActor,
   assistantState,
+  conversationTitleLookup,
   onContentSettled,
 }: MessageProps) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
@@ -722,6 +746,7 @@ function MessageView({
           key={`commitment:${block.tool.id}`}
           tool={block.tool}
           observedEditBudgetRemainingFiles={observedEditBudgetRemainingFiles}
+          conversationTitleLookup={conversationTitleLookup}
         />;
       }
       return <ActivityGroup
@@ -729,6 +754,7 @@ function MessageView({
         parts={block.parts}
         tools={message.tools}
         activeThinking={activeThinking && index === lastActivityIndex}
+        conversationTitleLookup={conversationTitleLookup}
       />;
     })}
     {actions}

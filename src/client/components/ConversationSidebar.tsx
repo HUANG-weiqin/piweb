@@ -15,6 +15,7 @@ import {
   type ConversationActivity,
   type ConversationSummary,
 } from "../../shared/protocol";
+import { conversationDisplayTitle } from "../lib/conversation-display";
 import { useModalFocus } from "../lib/use-modal-focus";
 import { ActivitySpinner } from "./ActivitySpinner";
 
@@ -60,19 +61,6 @@ function shortHandle(conversationId: string): string {
   return `#${conversationId.slice(0, 8)}`;
 }
 
-function titleOf(conversation: ConversationSummary): string {
-  const title = conversation.name?.trim()
-    || conversation.preview.trim()
-    || "新会话";
-  const characters = [...title];
-  if (characters.length <= MAX_PROJECT_CONVERSATION_NAME_CHARACTERS) {
-    return title;
-  }
-  return `${characters
-    .slice(0, MAX_PROJECT_CONVERSATION_NAME_CHARACTERS - 1)
-    .join("")}…`;
-}
-
 function clipTitleInput(value: string): string {
   return [...value]
     .slice(0, MAX_PROJECT_CONVERSATION_NAME_CHARACTERS)
@@ -114,8 +102,8 @@ interface ConversationGroup {
 }
 
 type GroupedEntry =
-  | { kind: "group"; group: ConversationGroup; index: number }
-  | { kind: "conversation"; conversation: ConversationSummary; index: number };
+  | { kind: "group"; group: ConversationGroup }
+  | { kind: "conversation"; conversation: ConversationSummary };
 
 function groupProjection(
   conversations: ConversationSummary[],
@@ -186,43 +174,22 @@ function groupProjection(
   }
 
   const entries: GroupedEntry[] = [
-    ...groups.map((group, index) => ({ kind: "group" as const, group, index })),
+    ...groups.map((group) => ({ kind: "group" as const, group })),
     ...conversations
       .filter(({ id }) => !rootByConversationId.has(id))
-      .map((conversation, index) => ({
+      .map((conversation) => ({
         kind: "conversation" as const,
         conversation,
-        index: groups.length + index,
       })),
   ];
   entries.sort((left, right) => {
-    const leftConversations = left.kind === "group"
-      ? left.group.conversations
-      : [left.conversation];
-    const rightConversations = right.kind === "group"
-      ? right.group.conversations
-      : [right.conversation];
-    const leftAttention = leftConversations.some(({ attention }) => attention === true);
-    const rightAttention = rightConversations.some(({ attention }) => attention === true);
-    const attentionDifference = Number(rightAttention) - Number(leftAttention);
-    if (attentionDifference !== 0) return attentionDifference;
-    const leftActive = leftConversations.some((conversation) =>
-      isActive(conversation, busyConversationId)
-    );
-    const rightActive = rightConversations.some((conversation) =>
-      isActive(conversation, busyConversationId)
-    );
-    const activeDifference = Number(rightActive) - Number(leftActive);
-    if (activeDifference !== 0) return activeDifference;
-    const leftUnread = leftConversations.some(({ unread }) => unread === true);
-    const rightUnread = rightConversations.some(({ unread }) => unread === true);
-    const unreadDifference = Number(rightUnread) - Number(leftUnread);
-    if (unreadDifference !== 0) return unreadDifference;
-    const updatedDifference = latestTimestamp(rightConversations)
-      - latestTimestamp(leftConversations);
-    return Number.isFinite(updatedDifference) && updatedDifference !== 0
-      ? updatedDifference
-      : left.index - right.index;
+    const leftRoot = left.kind === "group" ? left.group.root : left.conversation;
+    const rightRoot = right.kind === "group" ? right.group.root : right.conversation;
+    const createdDifference = Date.parse(leftRoot.createdAt)
+      - Date.parse(rightRoot.createdAt);
+    if (createdDifference !== 0) return createdDifference;
+    if (leftRoot.id === rightRoot.id) return 0;
+    return leftRoot.id < rightRoot.id ? -1 : 1;
   });
   return { entries, rootByConversationId };
 }
@@ -230,9 +197,8 @@ function groupProjection(
 export function conversationDisplayOrdinal(
   conversations: ConversationSummary[],
   conversationId: string,
-  busyConversationId?: string,
 ): number | undefined {
-  const grouped = groupProjection(conversations, busyConversationId);
+  const grouped = groupProjection(conversations);
   const rootConversationId = grouped.rootByConversationId.get(conversationId)
     ?? conversationId;
   const index = grouped.entries.findIndex((entry) => entry.kind === "group"
@@ -316,7 +282,7 @@ const ConversationRow = memo(function ConversationRow({
   onRequestRename(conversation: ConversationSummary): void;
   onRequestDelete(conversationId: string): void;
 }) {
-  const title = titleOf(conversation);
+  const title = conversationDisplayTitle(conversation);
   const active = busy || (conversation.activity?.kind ?? "idle") !== "idle";
   const classes = [
     "conversation-sidebar-item",
@@ -514,7 +480,7 @@ function ConversationGroupCard({
     new Date(latestTimestamp(conversations)).toISOString(),
   )}`);
   const summary = summaryParts.join(" · ");
-  const title = titleOf(root);
+  const title = conversationDisplayTitle(root);
 
   return (
     <li
@@ -632,8 +598,9 @@ function ConversationSidebarView({
     && isActive(renameCandidate, busyConversationId);
   const renameName = renameDraft.trim();
   const renameBlocked = !actionsEnabled || renameCandidateActive;
-  const renameUnchanged =
-    renameCandidate ? renameName === titleOf(renameCandidate) : false;
+  const renameUnchanged = renameCandidate
+    ? renameName === conversationDisplayTitle(renameCandidate)
+    : false;
   const sidebarStyle = {
     "--conversation-sidebar-width": `${sidebarWidth}px`,
   } as CSSProperties;
@@ -753,7 +720,7 @@ function ConversationSidebarView({
   }, [renameConversationId, renameCandidate]);
 
   const requestRename = useCallback((conversation: ConversationSummary) => {
-    setRenameDraft(titleOf(conversation));
+    setRenameDraft(conversationDisplayTitle(conversation));
     setRenameConversationId(conversation.id);
   }, []);
   const requestDelete = useCallback((conversationId: string) => {
@@ -893,7 +860,7 @@ function ConversationSidebarView({
       >
         <h2>永久删除会话？</h2>
         <p>
-          “{titleOf(deleteCandidate)}”及其历史，以及由它派生的空闲子孙会话，
+          “{conversationDisplayTitle(deleteCandidate)}”及其历史，以及由它派生的空闲子孙会话，
           将被永久删除，此操作无法撤销。
         </p>
         <div className="provider-actions">

@@ -19,8 +19,25 @@ describe("VisualFixture", () => {
     expect(screen.getByRole("button", {
       name: "当前会话 建立稳定的视觉验证基线",
     })).toHaveAttribute("aria-current", "page");
-    expect(screen.getByRole("status", { name: "等待其他会话" }))
-      .toBeInTheDocument();
+    expect(screen.getAllByRole("status", { name: "等待其他会话" }))
+      .toHaveLength(2);
+    const cleanWaitingRow = container.querySelector<HTMLElement>(
+      '[data-conversation-id="66666666-6666-4666-8666-666666666666"]',
+    )!;
+    const adjacentIdleRow = container.querySelector<HTMLElement>(
+      '[data-conversation-id="77777777-7777-4777-8777-777777777777"]',
+    )!;
+    expect(cleanWaitingRow).toHaveClass("activity-waiting");
+    expect(within(cleanWaitingRow).getByRole("status", {
+      name: "等待其他会话",
+    })).toHaveTextContent("⌛");
+    expect(within(cleanWaitingRow).getByText("Tech Lead", {
+      selector: ".conversation-sidebar-role",
+    })).toBeInTheDocument();
+    expect(adjacentIdleRow).toHaveClass("activity-idle");
+    expect(within(adjacentIdleRow).queryByRole("status", {
+      name: "等待其他会话",
+    })).not.toBeInTheDocument();
     expect(container.querySelector(".activity-running")).toBeInTheDocument();
     expect(container.querySelector(".activity-idle")).toBeInTheDocument();
 
@@ -41,6 +58,13 @@ describe("VisualFixture", () => {
     expect(activeAgentEvent).toHaveTextContent("AGENTTech LeadRUNNING");
     expect(screen.getByText("正在运行命令")).toBeInTheDocument();
     expect(screen.getByText("预计修改 5 个文件")).toBeInTheDocument();
+    expect(screen.getByText("等待 审查布局与滚动契约"))
+      .not.toHaveAttribute("title");
+    expect(screen.getByText("2 个会话 · 核对组件状态覆盖 · 历史验证记录"))
+      .toHaveAttribute(
+        "title",
+        "2 个会话 · 核对组件状态覆盖 · 历史验证记录",
+      );
     expect(screen.getByLabelText("4 / 5 FILES LEFT"))
       .toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Tasks" }))

@@ -19,6 +19,7 @@ import {
   type RoleTemplate,
   type ServerEvent,
 } from "../shared/protocol";
+import type { ConversationTitleLookup } from "./lib/conversation-display";
 import {
   App,
   MAX_CACHED_WORKSPACES,
@@ -121,7 +122,7 @@ vi.mock("./lib/completion-sound", () => ({
 }));
 
 const renderIsolationMock = vi.hoisted(() => ({
-  chat: vi.fn(),
+  chat: vi.fn((_lookup?: unknown) => undefined),
   message: vi.fn(),
 }));
 
@@ -139,7 +140,7 @@ vi.mock("./components/Chat", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./components/Chat")>();
   const { createElement, memo } = await import("react");
   function ChatRenderProbe(props: ComponentProps<typeof actual.Chat>) {
-    renderIsolationMock.chat();
+    renderIsolationMock.chat(props.conversationTitleLookup);
     return createElement(actual.Chat, props);
   }
   return { ...actual, Chat: memo(ChatRenderProbe) };
@@ -604,7 +605,7 @@ describe("App", () => {
   });
 
   it("shows ready conversation identity without inventing a missing root", () => {
-    render(<App />);
+    const { container } = render(<App />);
     const sessionId = startFromSetup();
     const root = {
       ...conversationSummary(CONVERSATION_B, "根任务"),
@@ -657,8 +658,48 @@ describe("App", () => {
     const collaborationPath = screen.getByRole("navigation", { name: "协作路径" });
     expect(collaborationPath).toHaveTextContent("根任务›测试 Agent");
     expect(collaborationPath.querySelector(".topbar-session-ordinal"))
-      .toHaveTextContent("02");
+      .toHaveTextContent("01");
+    expect(container.querySelector(
+      `[data-root-conversation-id="${CONVERSATION_B}"] .conversation-sidebar-ordinal`,
+    )).toHaveTextContent("01");
     expect(collaborationPath).toHaveTextContent("2 AGENTS");
+
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: true,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversations: [
+          { ...root, updatedAt: "2026-07-19T13:00:00.000Z" },
+          { ...child, updatedAt: "2026-07-19T13:00:00.000Z" },
+          {
+            ...attentionConversation,
+            attention: false,
+            activity: { kind: "running", runId: RUN_B },
+            updatedAt: "2026-07-19T14:00:00.000Z",
+          },
+        ],
+        truncated: false,
+      });
+    });
+    expect(collaborationPath.querySelector(".topbar-session-ordinal"))
+      .toHaveTextContent("01");
+    expect(container.querySelector(
+      `[data-root-conversation-id="${CONVERSATION_B}"] .conversation-sidebar-ordinal`,
+    )).toHaveTextContent("01");
 
     act(() => socketMock.rawEmit?.({
       type: "project_snapshot",
@@ -674,7 +715,7 @@ describe("App", () => {
     expect(standalonePath).toHaveTextContent("测试 Agent");
     expect(standalonePath).not.toHaveTextContent("根任务›");
     expect(standalonePath.querySelector(".topbar-session-ordinal"))
-      .toHaveTextContent("02");
+      .toHaveTextContent("01");
     expect(standalonePath).toHaveTextContent("1 AGENTS");
 
     act(() => socketMock.rawEmit?.({
@@ -689,6 +730,166 @@ describe("App", () => {
     }));
     expect(screen.getByRole("navigation", { name: "协作路径" }))
       .not.toHaveTextContent("AGENTS");
+  });
+
+  it("stabilizes project title lookup and fails it closed during deletion and focus transition", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    const current = conversationSummary(CONVERSATION_ID, "Current");
+    const target = conversationSummary(CONVERSATION_B, "审查 Agent");
+    const targetMessage = {
+      kind: "message" as const,
+      id: "assistant-target",
+      runId: RUN_ID,
+      role: "assistant" as const,
+      text: "",
+      thinking: "",
+      tools: [{
+        toolCallId: "send-target",
+        toolName: "send_session_message",
+        args: { conversationId: CONVERSATION_B, message: "请核对。" },
+        status: "done" as const,
+      }],
+      parts: [{ kind: "tool" as const, toolCallId: "send-target" }],
+    };
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\default",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversations: [current, target],
+        truncated: false,
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        items: [targetMessage],
+        window: completeConversationWindow,
+      });
+    });
+    expect(screen.getByText("审查 Agent", { selector: ".activity-group-detail" }))
+      .toBeInTheDocument();
+    const initialLookup = renderIsolationMock.chat.mock.calls.at(-1)?.[0] as
+      ConversationTitleLookup;
+
+    renderIsolationMock.chat.mockClear();
+    renderIsolationMock.message.mockClear();
+    const updatedCurrent = {
+      ...current,
+      updatedAt: "2026-07-19T10:00:00.000Z",
+    };
+    const updatedTarget = {
+      ...target,
+      updatedAt: "2026-07-19T11:00:00.000Z",
+    };
+    act(() => socketMock.rawEmit?.({
+      type: "project_snapshot",
+      sessionId,
+      projectId: PROJECT_ID,
+      conversations: [updatedCurrent, updatedTarget],
+      truncated: false,
+    }));
+    expect(renderIsolationMock.chat).not.toHaveBeenCalled();
+    expect(renderIsolationMock.message).not.toHaveBeenCalled();
+
+    const activeTarget = {
+      ...updatedTarget,
+      activity: { kind: "running" as const, runId: RUN_B },
+    };
+    act(() => socketMock.rawEmit?.({
+      type: "project_snapshot",
+      sessionId,
+      projectId: PROJECT_ID,
+      conversations: [updatedCurrent, activeTarget],
+      truncated: false,
+    }));
+    expect(renderIsolationMock.chat).not.toHaveBeenCalled();
+    expect(renderIsolationMock.message).not.toHaveBeenCalled();
+
+    act(() => socketMock.rawEmit?.({
+      type: "project_snapshot",
+      sessionId,
+      projectId: PROJECT_ID,
+      conversations: [updatedCurrent, activeTarget],
+      truncated: true,
+    }));
+    const truncatedLookup = renderIsolationMock.chat.mock.calls.at(-1)?.[0] as
+      ConversationTitleLookup;
+    expect(truncatedLookup).not.toBe(initialLookup);
+    expect(truncatedLookup.get(CONVERSATION_B)).toBe("审查 Agent #6a04656b");
+    expect(screen.getByText("审查 Agent #6a04656b", {
+      selector: ".activity-group-detail",
+    })).toBeInTheDocument();
+
+    const added = conversationSummary(
+      "33333333-3333-4333-8333-333333333333",
+      "新增 Agent",
+    );
+    act(() => socketMock.rawEmit?.({
+      type: "project_snapshot",
+      sessionId,
+      projectId: PROJECT_ID,
+      conversations: [updatedCurrent, activeTarget, added],
+      truncated: false,
+    }));
+    const addedLookup = renderIsolationMock.chat.mock.calls.at(-1)?.[0] as
+      ConversationTitleLookup;
+    expect(addedLookup).not.toBe(initialLookup);
+    expect(addedLookup.get(added.id)).toBe("新增 Agent");
+
+    act(() => socketMock.rawEmit?.({
+      type: "project_snapshot",
+      sessionId,
+      projectId: PROJECT_ID,
+      conversations: [
+        current,
+        { ...target, name: "已改名审查 Agent" },
+        added,
+      ],
+      truncated: false,
+    }));
+    const renamedLookup = renderIsolationMock.chat.mock.calls.at(-1)?.[0] as
+      ConversationTitleLookup;
+    expect(renamedLookup).not.toBe(addedLookup);
+    expect(screen.getByText("已改名审查 Agent", {
+      selector: ".activity-group-detail",
+    })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "删除会话 已改名审查 Agent" }));
+    fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
+    const deletionLookup = renderIsolationMock.chat.mock.calls.at(-1)?.[0] as
+      ConversationTitleLookup;
+    expect(deletionLookup.has(CONVERSATION_B)).toBe(false);
+    expect(screen.getByText("未知会话 #6a04656b", {
+      selector: ".activity-group-detail",
+    })).toBeInTheDocument();
+
+    const deleteCommand = latestCommand("delete_conversation");
+    act(() => socketMock.rawEmit?.({
+      type: "error",
+      scope: "command",
+      operation: "delete_conversation",
+      commandId: deleteCommand.commandId,
+      sessionId,
+      message: "blocked",
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 已改名审查 Agent" }));
+    expect(renderIsolationMock.chat.mock.calls.at(-1)?.[0]).toBeUndefined();
   });
 
   it("hydrates LoopList from focused snapshots and ignores stale live identities", () => {

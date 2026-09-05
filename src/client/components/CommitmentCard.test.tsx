@@ -2,7 +2,9 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
+import type { ConversationSummary } from "../../shared/protocol";
 import type { ToolItem } from "../chat/reducer";
+import { createConversationTitleLookup } from "../lib/conversation-display";
 import { CommitmentCard } from "./CommitmentCard";
 
 afterEach(() => {
@@ -71,24 +73,46 @@ describe("CommitmentCard", () => {
   });
 
   it("shows a pending single-session wait with its reason and spinner", () => {
+    const conversationId = "12345678-1234-4234-8234-123456789abc";
+    const conversation: ConversationSummary = {
+      id: conversationId,
+      name: "API 审查 Agent",
+      preview: "",
+      createdAt: "2026-07-19T08:00:00.000Z",
+      updatedAt: "2026-07-19T09:00:00.000Z",
+      messageCount: 1,
+      activity: { kind: "idle" },
+    };
     const tool: ToolItem = {
       id: "wait-1",
       name: "wait_for_session",
       args: {
-        conversationId: "API 审查 Agent",
+        conversationId,
         runId: "run-peer",
         singleWaitCommitment: "  该审查位于提交前关键路径；没有独立工作可继续。  ",
       },
       status: "pending",
     };
-    const { container } = render(<CommitmentCard tool={tool} />);
+    const { container } = render(
+      <CommitmentCard
+        tool={tool}
+        conversationTitleLookup={createConversationTitleLookup(
+          [conversation],
+          false,
+        )}
+      />,
+    );
 
     expect(screen.getByText("单会话等待承诺")).toBeInTheDocument();
-    expect(screen.getByText("等待 API 审查 Agent")).toBeInTheDocument();
+    expect(screen.getByText("等待 API 审查 Agent"))
+      .not.toHaveAttribute("title");
     expect(container.querySelector(".commitment-reason"))
       .toHaveTextContent("该审查位于提交前关键路径；没有独立工作可继续。");
     expect(screen.getByText("等待中")).toBeInTheDocument();
     expect(container.querySelector(".commitment-spinner")).toBeInTheDocument();
+
+    fireEvent.click(container.querySelector("summary")!);
+    expect(screen.getByText(conversationId)).toBeInTheDocument();
   });
 
   it("uses the warning variant when a single-session wait was not started", () => {

@@ -3,7 +3,9 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import { fireEvent } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
+import type { ConversationSummary } from "../../shared/protocol";
 import type { ToolItem } from "../chat/reducer";
+import { createConversationTitleLookup } from "../lib/conversation-display";
 import { ToolCard } from "./ToolCard";
 
 const tool: ToolItem = {
@@ -31,19 +33,95 @@ describe("ToolCard", () => {
     expect(summary).not.toHaveTextContent("---");
   });
 
-  it("shows an unfinished wait as active rather than failed", () => {
-    const waitingTool: ToolItem = {
-      id: "wait-1",
-      name: "wait_for_session",
-      args: { conversationId: "peer", runId: "peer-run" },
+  it.each([
+    ["peek_session", "查看会话消息"],
+    ["send_session_message", "发送会话消息"],
+    ["wait_for_session", "等待 Agent 会话"],
+    ["abort_session", "终止 Agent 会话"],
+    ["delete_session", "删除 Agent 会话"],
+  ])("resolves the project title for %s without hiding its raw details", (
+    name,
+    label,
+  ) => {
+    const conversationId = "12345678-1234-4234-8234-123456789abc";
+    const conversation: ConversationSummary = {
+      id: conversationId,
+      name: "架构审查",
+      preview: "",
+      createdAt: "2026-07-19T08:00:00.000Z",
+      updatedAt: "2026-07-19T09:00:00.000Z",
+      messageCount: 1,
+      activity: { kind: "idle" },
+    };
+    const targetedTool: ToolItem = {
+      id: `target-${name}`,
+      name,
+      args: { conversationId, runId: "peer-run" },
       status: "pending",
     };
-    const { container } = render(<ToolCard tool={waitingTool} />);
+    const { container } = render(
+      <ToolCard
+        tool={targetedTool}
+        conversationTitleLookup={createConversationTitleLookup(
+          [conversation],
+          false,
+        )}
+      />,
+    );
     const summary = container.querySelector("summary") as HTMLElement;
 
-    expect(screen.getByLabelText("等待执行")).toBeInTheDocument();
-    expect(summary).not.toHaveTextContent("执行失败");
-    expect(summary).toHaveTextContent("等待 Agent 会话");
+    expect(summary).toHaveTextContent(label);
+    expect(summary).toHaveTextContent("架构审查");
+    expect(summary.querySelector(".tool-target")).toHaveAttribute(
+      "title",
+      "架构审查",
+    );
+    expect(summary).not.toHaveTextContent(conversationId);
+
+    fireEvent.click(summary);
+    expect(screen.getByText(conversationId)).toBeInTheDocument();
+  });
+
+  it("keeps a multi-target wait aggregate while resolving every current title", () => {
+    const firstId = "11111111-1111-4111-8111-111111111111";
+    const secondId = "22222222-2222-4222-8222-222222222222";
+    const conversations = [
+      { id: firstId, name: "安全审查" },
+      { id: secondId, name: "视觉核对" },
+    ].map(({ id, name }): ConversationSummary => ({
+      id,
+      name,
+      preview: "",
+      createdAt: "2026-07-19T08:00:00.000Z",
+      updatedAt: "2026-07-19T09:00:00.000Z",
+      messageCount: 1,
+      activity: { kind: "idle" },
+    }));
+    const aggregateTool: ToolItem = {
+      id: "wait-many",
+      name: "wait_for_session",
+      args: {
+        targets: [
+          { conversationId: firstId, runId: "run-1" },
+          { conversationId: secondId, runId: "run-2" },
+        ],
+      },
+      status: "pending",
+    };
+    const { container } = render(
+      <ToolCard
+        tool={aggregateTool}
+        conversationTitleLookup={createConversationTitleLookup(
+          conversations,
+          false,
+        )}
+      />,
+    );
+    const summary = container.querySelector("summary") as HTMLElement;
+
+    expect(summary).toHaveTextContent("2 个会话");
+    expect(summary).toHaveTextContent("安全审查");
+    expect(summary).toHaveTextContent("视觉核对");
   });
 
   it("expands to reveal readable fields instead of raw JSON", () => {

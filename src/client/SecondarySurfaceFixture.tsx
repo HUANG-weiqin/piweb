@@ -29,7 +29,11 @@ const GROUP_A_SURFACES: readonly string[] = [
   "extension",
   "feedback",
   "context-tooltip",
+  "activity-expanded",
   "commitment-expanded",
+  "jump-latest",
+  "jump-latest-focus",
+  "composer-states",
 ];
 const GROUP_B_SURFACES: readonly string[] = [
   "setup",
@@ -182,12 +186,17 @@ const noOp = () => undefined;
 function WorkbenchOverlay({
   children,
   commitmentReason,
+  showComposerStates,
 }: {
   children?: ReactNode;
   commitmentReason?: string;
+  showComposerStates?: boolean;
 }) {
   return <>
-    <VisualFixture commitmentReason={commitmentReason} />
+    <VisualFixture
+      commitmentReason={commitmentReason}
+      showComposerStates={showComposerStates}
+    />
     {children}
   </>;
 }
@@ -351,6 +360,10 @@ function CommitmentExpandedSurface() {
   return <WorkbenchOverlay commitmentReason={LONG_COMMITMENT_REASON} />;
 }
 
+function ComposerStatesSurface() {
+  return <WorkbenchOverlay showComposerStates />;
+}
+
 function SetupSurface() {
   const [cwd, setCwd] = useState(FIXTURE_CWD);
   const [open, setOpen] = useState(true);
@@ -414,8 +427,14 @@ function renderSurface(surface: string): ReactNode {
       return <FeedbackSurface />;
     case "context-tooltip":
       return <ContextTooltipSurface />;
+    case "activity-expanded":
+    case "jump-latest":
+    case "jump-latest-focus":
+      return <WorkbenchOverlay />;
     case "commitment-expanded":
       return <CommitmentExpandedSurface />;
+    case "composer-states":
+      return <ComposerStatesSurface />;
     case "setup":
       return <SetupSurface />;
     case "role-selection":

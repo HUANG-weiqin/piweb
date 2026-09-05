@@ -117,6 +117,24 @@ const scenes: Array<{
     expect(tooltip).toHaveClass("token-tooltip");
   },
 }, {
+  surface: "activity-expanded",
+  group: "A",
+  assertSurface: (container) => {
+    const ledger = container.querySelector(
+      "details.assistant-activity-group.is-active",
+    ) as HTMLDetailsElement;
+    fireEvent.click(ledger.querySelector(":scope > summary") as HTMLElement);
+    const tools = ledger.querySelector(
+      ".activity-timeline > details.tools",
+    ) as HTMLDetailsElement;
+    fireEvent.click(tools.querySelector(":scope > summary") as HTMLElement);
+    fireEvent.click(within(tools).getByRole("button", { name: "展开全部 6 条" }));
+
+    expect(ledger.open).toBe(true);
+    expect(tools.open).toBe(true);
+    expect(tools.querySelectorAll("details.tool")).toHaveLength(6);
+  },
+}, {
   surface: "commitment-expanded",
   group: "A",
   assertSurface: (container) => {
@@ -130,6 +148,27 @@ const scenes: Array<{
     expect(card.open).toBe(true);
     expect(container.querySelector(".tool-text"))
       .toHaveTextContent("边界行 24 / 24");
+  },
+}, ...(["jump-latest", "jump-latest-focus"] as const).map((surface) => ({
+  surface,
+  group: "A" as const,
+  assertSurface: (container: HTMLElement) => {
+    expect(container.querySelector(".transcript")).toBeInTheDocument();
+    expect(container.querySelector(".composer-wrap")).toBeInTheDocument();
+  },
+})), {
+  surface: "composer-states",
+  group: "A",
+  assertSurface: () => {
+    expect(screen.getByRole("region", { name: "等待处理的消息" }))
+      .toHaveTextContent("先核对长路径与失败状态");
+    expect(screen.getByRole("alert"))
+      .toHaveTextContent("新指令会进入现有 steering 顺序");
+    const tasks = screen.getByRole("button", { name: /Tasks/ });
+    fireEvent.click(tasks);
+    expect(tasks).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("region", { name: "Tasks" }))
+      .toHaveTextContent("复用真实工作台组件与状态样式");
   },
 }, {
   surface: "setup",

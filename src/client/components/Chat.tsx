@@ -30,6 +30,7 @@ import {
   type ChatMessage,
   type ChatState,
 } from "../chat/reducer";
+import type { ConversationTitleLookup } from "../lib/conversation-display";
 import { THINKING_LEVEL_LABELS } from "../lib/thinking-level";
 import { ActivitySpinner } from "./ActivitySpinner";
 import { editBudgetRemainingFiles } from "./CommitmentCard";
@@ -116,6 +117,7 @@ interface ChatProps {
     ordinal?: number;
     agentCount?: number;
   };
+  conversationTitleLookup?: ConversationTitleLookup;
   online: boolean;
   /** Transport is online, but focus-bound server controls may be frozen. */
   interactive?: boolean;
@@ -389,6 +391,7 @@ function ChatView({
   compacting = false,
   cwd,
   conversationContext,
+  conversationTitleLookup,
   online,
   interactive = true,
   conversationReady,
@@ -841,6 +844,7 @@ function ChatView({
           assistantState={isCurrentAssistantMessage
             ? activeRun?.phase.toUpperCase()
             : undefined}
+          conversationTitleLookup={conversationTitleLookup}
           onContentSettled={handleMessageContentSettled}
           collapsed={
             block.message.role === "assistant"
