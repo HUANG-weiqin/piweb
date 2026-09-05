@@ -3353,6 +3353,10 @@ pre {
   .role-manager-list {
     max-height: clamp(160px, calc(85vh - 200px), 520px);
   }
+
+  .role-manager-list > button {
+    flex-shrink: 0;
+  }
 }
 
 .role-manager-list button {
