@@ -7192,6 +7192,111 @@ describe("App", () => {
       .toBeInTheDocument();
   });
 
+  it("settles a pending role update as unknown on disconnect and clears it on reconnect", () => {
+    render(<App />);
+    const emitRoleReady = (sessionId: string) => act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [SERVICE_TIER_PROVIDER],
+        },
+      });
+      socketMock.emit?.({
+        type: "role_catalog_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        roles: [defaultRole()],
+      });
+    });
+    const sessionId = startFromSetup();
+    emitRoleReady(sessionId);
+    fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
+    fireEvent.click(screen.getByRole("button", { name: "管理角色 Default" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "角色名称" }), {
+      target: { value: "Disconnected dirty name" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "角色简介" }), {
+      target: { value: "Disconnected dirty description" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "专属提示词" }), {
+      target: { value: "Disconnected dirty prompt" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "工具权限" }), {
+      target: { value: "full_access" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存角色" }));
+    const pendingUpdate = latestCommand("update_role");
+    const updateCount = () => socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "update_role",
+    ).length;
+    expect(updateCount()).toBe(1);
+
+    act(() => socketMock.status?.(false));
+
+    expect(screen.getByRole("alert")).toHaveTextContent("角色操作结果未确认");
+    expect(screen.getByRole("dialog", { name: "管理角色" }))
+      .not.toHaveAttribute("aria-busy", "true");
+    expect(screen.getByRole("button", { name: "关闭角色管理" })).toBeEnabled();
+    expect(screen.getByRole("textbox", { name: "角色名称" }))
+      .toHaveValue("Disconnected dirty name");
+    expect(screen.getByRole("textbox", { name: "角色简介" }))
+      .toHaveValue("Disconnected dirty description");
+    expect(screen.getByRole("textbox", { name: "专属提示词" }))
+      .toHaveValue("Disconnected dirty prompt");
+    expect(screen.getByRole("combobox", { name: "工具权限" }))
+      .toHaveValue("full_access");
+    expect(screen.getByRole("switch", { name: /允许管理会话/ })).toBeChecked();
+    expect(updateCount()).toBe(1);
+
+    act(() => socketMock.emit?.({
+      type: "command_complete",
+      operation: "update_role",
+      commandId: pendingUpdate.commandId,
+      sessionId,
+    }));
+    expect(screen.getByRole("alert")).toHaveTextContent("角色操作结果未确认");
+
+    fireEvent.click(screen.getByRole("button", { name: "保存角色" }));
+    expect(updateCount()).toBe(1);
+    expect(screen.getByText(/角色操作未发送/)).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "角色名称" }))
+      .toHaveValue("Disconnected dirty name");
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "管理角色" }))
+      .not.toBeInTheDocument();
+    const updatesBeforeReconnect = updateCount();
+    act(() => {
+      socketMock.status?.(true);
+      socketMock.emit?.({
+        type: "hello",
+        protocolVersion: PROTOCOL_VERSION,
+        startupCwd: "E:\\default",
+      });
+    });
+    expect(updateCount()).toBe(updatesBeforeReconnect);
+    expect(screen.queryByText(/角色操作(结果未确认|未发送)/)).not.toBeInTheDocument();
+
+    const reconnectSessionId = latestSessionId();
+    emitRoleReady(reconnectSessionId);
+    fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
+    fireEvent.click(screen.getByRole("button", { name: "管理角色 Default" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "角色名称" }), {
+      target: { value: "Fresh independent update" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存角色" }));
+    const freshUpdate = latestCommand("update_role");
+    expect(freshUpdate.commandId).not.toBe(pendingUpdate.commandId);
+    expect(updateCount()).toBe(updatesBeforeReconnect + 1);
+  });
+
   it("ignores callbacks from a socket instance disposed by StrictMode", () => {
     render(<StrictMode><App /></StrictMode>);
     expect(socketMock.instances.length).toBeGreaterThanOrEqual(2);

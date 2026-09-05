@@ -2342,6 +2342,15 @@ export function App() {
         setSettingResult(undefined);
         updateDirectoryBrowser(undefined);
         markPendingPromptUnconfirmed();
+        const pendingRoleOperation = pendingRoleOperationRef.current;
+        if (pendingRoleOperation) {
+          pendingRoleOperationRef.current = undefined;
+          setRoleOperationResult({
+            ...pendingRoleOperation,
+            ok: false,
+            message: "连接已断开，角色操作结果未确认；重连后请检查当前角色目录。",
+          });
+        }
         if (pendingConversationDeletionRef.current) {
           updatePendingConversationDeletion(undefined);
           setError("删除状态未确认，请检查项目对话列表后重试。");
@@ -3048,7 +3057,12 @@ export function App() {
     setRoleOperationResult(undefined);
     setError("");
     if (!send({ ...command, commandId, sessionId } as ClientCommand)) {
-      updatePendingRoleOperation(undefined);
+      pendingRoleOperationRef.current = undefined;
+      setRoleOperationResult({
+        ...pending,
+        ok: false,
+        message: "本地服务未连接，角色操作未发送；请重连后重试。",
+      });
     }
   };
   const switchWorkspace = (cwd: string) => {
