@@ -1,6 +1,14 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { useState } from "react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   PublicProvider,
@@ -111,7 +119,116 @@ function renderManager(overrides: Partial<Parameters<typeof RoleManagerDialog>[0
   return render(<RoleManagerDialog {...props} />);
 }
 
+type RoleManagerBackdropFixtureProps = Pick<
+  Parameters<typeof RoleManagerDialog>[0],
+  "pending" | "onClose" | "onCreate" | "onUpdate" | "onDelete"
+>;
+
+function RoleManagerBackdropFixture({
+  pending,
+  onClose,
+  onCreate,
+  onUpdate,
+  onDelete,
+}: RoleManagerBackdropFixtureProps) {
+  const [open, setOpen] = useState(false);
+  return <>
+    <button onClick={() => setOpen(true)}>打开角色管理测试</button>
+    <RoleManagerDialog
+      open={open}
+      roles={[role("default", "Default"), role("reviewer", "Reviewer")]}
+      providers={providers}
+      pending={pending}
+      onClose={() => {
+        onClose();
+        setOpen(false);
+      }}
+      onCreate={onCreate}
+      onUpdate={onUpdate}
+      onDelete={onDelete}
+    />
+  </>;
+}
+
 describe("RoleManagerDialog", () => {
+  it("dismisses only from the exact backdrop and restores its launcher", async () => {
+    const onClose = vi.fn();
+    const onCreate = vi.fn();
+    const onUpdate = vi.fn();
+    const onDelete = vi.fn();
+    render(<RoleManagerBackdropFixture
+      onClose={onClose}
+      onCreate={onCreate}
+      onUpdate={onUpdate}
+      onDelete={onDelete}
+    />);
+
+    const launcher = screen.getByRole("button", { name: "打开角色管理测试" });
+    launcher.focus();
+    fireEvent.click(launcher);
+    const dialog = screen.getByRole("dialog", { name: "管理角色" });
+    const backdrop = dialog.parentElement!;
+    await waitFor(() => expect(screen.getByRole("button", {
+      name: "关闭角色管理",
+    })).toHaveFocus());
+
+    const interiorMouseDown = new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(dialog, interiorMouseDown);
+    expect(interiorMouseDown.defaultPrevented).toBe(false);
+    expect(dialog).toBeInTheDocument();
+
+    const backdropMouseDown = new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(backdrop, backdropMouseDown);
+    expect(backdropMouseDown.defaultPrevented).toBe(true);
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "管理角色" }))
+        .not.toBeInTheDocument();
+      expect(launcher.isConnected).toBe(true);
+      expect(launcher).toHaveFocus();
+    });
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(onCreate).not.toHaveBeenCalled();
+    expect(onUpdate).not.toHaveBeenCalled();
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("keeps a busy role operation focused and inert on its backdrop", async () => {
+    const onClose = vi.fn();
+    const onCreate = vi.fn();
+    const onUpdate = vi.fn();
+    const onDelete = vi.fn();
+    render(<RoleManagerBackdropFixture
+      pending={{ operation: "delete_role", commandId: "pending-delete" }}
+      onClose={onClose}
+      onCreate={onCreate}
+      onUpdate={onUpdate}
+      onDelete={onDelete}
+    />);
+
+    fireEvent.click(screen.getByRole("button", { name: "打开角色管理测试" }));
+    const dialog = screen.getByRole("dialog", { name: "管理角色" });
+    await waitFor(() => expect(dialog).toHaveFocus());
+    const backdropMouseDown = new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(dialog.parentElement!, backdropMouseDown);
+
+    expect(backdropMouseDown.defaultPrevented).toBe(true);
+    expect(dialog).toBeInTheDocument();
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(onCreate).not.toHaveBeenCalled();
+    expect(onUpdate).not.toHaveBeenCalled();
+    expect(onDelete).not.toHaveBeenCalled();
+  });
   it("opens the role requested by its card", () => {
     renderManager({ initialRoleId: "reviewer" });
 
@@ -243,6 +360,323 @@ describe("RoleManagerDialog", () => {
         systemPrompt: "Draft prompt",
       }),
     );
+  });
+
+  it("keeps every dirty field and the immutable CAS base across a newer catalog revision", () => {
+    const update = vi.fn();
+    const remove = vi.fn();
+    const baseRole = role("default", "Default", {
+      description: "Base description",
+      systemPrompt: "Base prompt N",
+      model: { provider: "alpha", id: "plain" },
+      defaultThinkingLevel: "off",
+      toolMode: "read_only",
+      canManageSessions: false,
+    });
+    const view = renderManager({
+      roles: [baseRole],
+      onUpdate: update,
+      onDelete: remove,
+    });
+
+    fireEvent.change(screen.getByRole("textbox", { name: "角色名称" }), {
+      target: { value: "Dirty name" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "角色简介" }), {
+      target: { value: "Dirty description" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "专属提示词" }), {
+      target: { value: "Dirty prompt" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "角色模型" }), {
+      target: { value: JSON.stringify(["alpha", "good"]) },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "默认思考强度" }), {
+      target: { value: "medium" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "默认服务层级" }), {
+      target: { value: "priority" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "工具权限" }), {
+      target: { value: "full_access" },
+    });
+    fireEvent.click(screen.getByRole("switch", { name: /允许管理会话/ }));
+
+    view.rerender(<RoleManagerDialog
+      open
+      roles={[role("default", "External N+1", {
+        revision: 2,
+        description: "External description",
+        systemPrompt: "External prompt N+1",
+        model: { provider: "alpha", id: "plain" },
+        defaultThinkingLevel: "off",
+        toolMode: "read_only",
+        canManageSessions: false,
+      })]}
+      providers={providers}
+      onClose={() => undefined}
+      onCreate={() => undefined}
+      onUpdate={update}
+      onDelete={remove}
+    />);
+
+    expect(screen.getByRole("textbox", { name: "角色名称" })).toHaveValue("Dirty name");
+    expect(screen.getByRole("textbox", { name: "角色简介" })).toHaveValue("Dirty description");
+    expect(screen.getByRole("textbox", { name: "专属提示词" })).toHaveValue("Dirty prompt");
+    expect(screen.getByRole("combobox", { name: "角色模型" }))
+      .toHaveValue(JSON.stringify(["alpha", "good"]));
+    expect(screen.getByRole("combobox", { name: "默认思考强度" })).toHaveValue("medium");
+    expect(screen.getByRole("combobox", { name: "默认服务层级" })).toHaveValue("priority");
+    expect(screen.getByRole("combobox", { name: "工具权限" })).toHaveValue("full_access");
+    expect(screen.getByRole("switch", { name: /允许管理会话/ })).toBeChecked();
+
+    fireEvent.click(screen.getByRole("button", { name: "保存角色" }));
+    expect(update).toHaveBeenCalledWith("default", 1, "Base prompt N", {
+      name: "Dirty name",
+      description: "Dirty description",
+      systemPrompt: "Dirty prompt",
+      model: { provider: "alpha", id: "good" },
+      defaultThinkingLevel: "medium",
+      defaultServiceTier: "priority",
+      toolMode: "full_access",
+      canManageSessions: true,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "删除角色" }));
+    expect(remove).toHaveBeenCalledWith("default", 1);
+  });
+
+  it("preserves a dirty open form but reloads its current role when reopened", () => {
+    const update = vi.fn();
+    const baseRole = role("default", "Default", {
+      description: "Base description",
+      systemPrompt: "Base prompt N",
+      toolMode: "read_only",
+      canManageSessions: false,
+    });
+    const nextRole = role("default", "External N+1", {
+      revision: 2,
+      description: "External N+1 description",
+      systemPrompt: "External prompt N+1",
+      toolMode: "read_only",
+      canManageSessions: false,
+    });
+    const view = renderManager({
+      roles: [baseRole],
+      initialRoleId: "default",
+      onUpdate: update,
+    });
+
+    fireEvent.change(screen.getByRole("textbox", { name: "角色名称" }), {
+      target: { value: "Dirty name" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "角色简介" }), {
+      target: { value: "Dirty description" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "专属提示词" }), {
+      target: { value: "Dirty prompt" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "工具权限" }), {
+      target: { value: "full_access" },
+    });
+    fireEvent.click(screen.getByRole("switch", { name: /允许管理会话/ }));
+    fireEvent.click(screen.getByRole("button", { name: "保存角色" }));
+
+    const pending = { operation: "update_role" as const, commandId: "stale-command" };
+    view.rerender(<RoleManagerDialog
+      open
+      roles={[nextRole]}
+      providers={providers}
+      initialRoleId="default"
+      pending={pending}
+      result={{ ...pending, ok: false, message: "revision changed" }}
+      onClose={() => undefined}
+      onCreate={() => undefined}
+      onUpdate={update}
+      onDelete={() => undefined}
+    />);
+
+    expect(screen.getByRole("textbox", { name: "角色名称" })).toHaveValue("Dirty name");
+    expect(screen.getByRole("textbox", { name: "角色简介" })).toHaveValue("Dirty description");
+    expect(screen.getByRole("textbox", { name: "专属提示词" })).toHaveValue("Dirty prompt");
+    expect(screen.getByRole("combobox", { name: "工具权限" })).toHaveValue("full_access");
+    expect(screen.getByRole("switch", { name: /允许管理会话/ })).toBeChecked();
+    expect(screen.getByRole("alert")).toHaveTextContent("revision changed");
+
+    view.rerender(<RoleManagerDialog
+      open={false}
+      roles={[nextRole]}
+      providers={providers}
+      initialRoleId="default"
+      onClose={() => undefined}
+      onCreate={() => undefined}
+      onUpdate={update}
+      onDelete={() => undefined}
+    />);
+    view.rerender(<RoleManagerDialog
+      open
+      roles={[nextRole]}
+      providers={providers}
+      initialRoleId="default"
+      onClose={() => undefined}
+      onCreate={() => undefined}
+      onUpdate={update}
+      onDelete={() => undefined}
+    />);
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "角色名称" })).toHaveValue("External N+1");
+    expect(screen.getByRole("textbox", { name: "角色简介" }))
+      .toHaveValue("External N+1 description");
+    expect(screen.getByRole("textbox", { name: "专属提示词" }))
+      .toHaveValue("External prompt N+1");
+    expect(screen.getByRole("combobox", { name: "工具权限" })).toHaveValue("read_only");
+    expect(screen.getByRole("switch", { name: /允许管理会话/ })).not.toBeChecked();
+
+    fireEvent.click(screen.getByRole("button", { name: "保存角色" }));
+    expect(update).toHaveBeenLastCalledWith(
+      "default",
+      2,
+      "External prompt N+1",
+      expect.objectContaining({
+        name: "External N+1",
+        description: "External N+1 description",
+        systemPrompt: "External prompt N+1",
+        toolMode: "read_only",
+        canManageSessions: false,
+      }),
+    );
+  });
+
+  it("shows an exact stale error without changing the dirty draft", () => {
+    const update = vi.fn();
+    const baseRole = role("default", "Default", { systemPrompt: "Base prompt N" });
+    const view = renderManager({ roles: [baseRole], onUpdate: update });
+    fireEvent.change(screen.getByRole("textbox", { name: "角色名称" }), {
+      target: { value: "Stale dirty name" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "角色简介" }), {
+      target: { value: "Stale dirty description" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "专属提示词" }), {
+      target: { value: "Stale dirty prompt" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存角色" }));
+
+    const pending = { operation: "update_role" as const, commandId: "stale-command" };
+    view.rerender(<RoleManagerDialog
+      open
+      roles={[role("default", "External N+1", {
+        revision: 2,
+        systemPrompt: "External prompt N+1",
+      })]}
+      providers={providers}
+      pending={pending}
+      result={{ ...pending, ok: false, message: "revision changed" }}
+      onClose={() => undefined}
+      onCreate={() => undefined}
+      onUpdate={update}
+      onDelete={() => undefined}
+    />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("revision changed");
+    expect(screen.getByRole("textbox", { name: "角色名称" })).toHaveValue("Stale dirty name");
+    expect(screen.getByRole("textbox", { name: "角色简介" })).toHaveValue("Stale dirty description");
+    expect(screen.getByRole("textbox", { name: "专属提示词" })).toHaveValue("Stale dirty prompt");
+  });
+
+  it("rebases an exact own success once without letting its sticky result erase later edits", () => {
+    const update = vi.fn();
+    const view = renderManager({
+      roles: [role("default", "Default", { systemPrompt: "Base prompt N" })],
+      onUpdate: update,
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "角色名称" }), {
+      target: { value: "  Submitted N+1  " },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "角色简介" }), {
+      target: { value: "Submitted description" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "专属提示词" }), {
+      target: { value: "Submitted prompt N+1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存角色" }));
+    expect(update).toHaveBeenLastCalledWith(
+      "default",
+      1,
+      "Base prompt N",
+      expect.objectContaining({ name: "Submitted N+1" }),
+    );
+
+    const pending = { operation: "update_role" as const, commandId: "own-command" };
+    const committedN1 = role("default", "Submitted N+1", {
+      revision: 2,
+      description: "Submitted description",
+      systemPrompt: "Submitted prompt N+1",
+    });
+    view.rerender(<RoleManagerDialog
+      open
+      roles={[committedN1]}
+      providers={providers}
+      pending={pending}
+      result={{ ...pending, ok: true, message: "角色已保存" }}
+      onClose={() => undefined}
+      onCreate={() => undefined}
+      onUpdate={update}
+      onDelete={() => undefined}
+    />);
+    expect(screen.getByRole("textbox", { name: "角色名称" })).toHaveValue("Submitted N+1");
+
+    fireEvent.change(screen.getByRole("textbox", { name: "角色名称" }), {
+      target: { value: "Post-success local edit" },
+    });
+    view.rerender(<RoleManagerDialog
+      open
+      roles={[role("default", "External N+2", {
+        revision: 3,
+        description: "External N+2 description",
+        systemPrompt: "External prompt N+2",
+      })]}
+      providers={providers}
+      pending={pending}
+      result={{ ...pending, ok: true, message: "角色已保存" }}
+      onClose={() => undefined}
+      onCreate={() => undefined}
+      onUpdate={update}
+      onDelete={() => undefined}
+    />);
+    expect(screen.getByRole("textbox", { name: "角色名称" }))
+      .toHaveValue("Post-success local edit");
+
+    fireEvent.click(screen.getByRole("button", { name: "保存角色" }));
+    expect(update).toHaveBeenLastCalledWith(
+      "default",
+      2,
+      "Submitted prompt N+1",
+      expect.objectContaining({
+        name: "Post-success local edit",
+        description: "Submitted description",
+        systemPrompt: "Submitted prompt N+1",
+      }),
+    );
+  });
+
+  it("falls back to the first remaining role when the edited role disappears", () => {
+    const view = renderManager({ initialRoleId: "reviewer" });
+    view.rerender(<RoleManagerDialog
+      open
+      roles={[role("default", "Default N+1", { revision: 2 })]}
+      providers={providers}
+      initialRoleId="reviewer"
+      onClose={() => undefined}
+      onCreate={() => undefined}
+      onUpdate={() => undefined}
+      onDelete={() => undefined}
+    />);
+
+    expect(screen.getByRole("button", { name: "编辑角色 Default N+1" }))
+      .toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("textbox", { name: "角色名称" }))
+      .toHaveValue("Default N+1");
   });
 
   it("creates and deletes roles through callbacks without optimistic list changes", () => {
@@ -422,6 +856,7 @@ describe("RoleManagerDialog", () => {
   });
 
   it("only renders a result matching the exact pending command", () => {
+    const close = vi.fn();
     const pending = {
       operation: "update_role" as const,
       commandId: "command-1",
@@ -432,10 +867,13 @@ describe("RoleManagerDialog", () => {
       ok: false,
       message: "stale failure",
     };
-    const view = renderManager({ pending, result: mismatch });
+    const view = renderManager({ pending, result: mismatch, onClose: close });
 
     expect(screen.queryByText("stale failure")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "正在保存…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "关闭角色管理" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "关闭角色管理" }));
+    expect(close).not.toHaveBeenCalled();
 
     view.rerender(<RoleManagerDialog
       open

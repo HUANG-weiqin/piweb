@@ -1332,6 +1332,7 @@ export class PiConnection {
       || !view
       || view.sessionId !== this.requestedSessionId
       || view.generation !== this.generation
+      || view.actor?.isRuntimeReady() === false
     ) {
       return;
     }
@@ -1541,7 +1542,10 @@ export class PiConnection {
     const view = this.coordinatedView;
     if (!view || !this.isCurrentCoordinatedView(view)) return;
     void this.requireCoordination().then(({ coordinator }) => {
-      if (!this.isCurrentCoordinatedView(view)) return;
+      if (
+        !this.isCurrentCoordinatedView(view)
+        || view.actor?.isRuntimeReady() === false
+      ) return;
       this.emit({
         type: "role_catalog_snapshot",
         sessionId: view.sessionId,
@@ -1712,6 +1716,7 @@ export class PiConnection {
       || view.handle.project.id !== command.projectId
       || view.conversationId !== command.conversationId
       || view.focusId !== command.focusId
+      || view.actor?.isRuntimeReady() === false
     ) {
       return;
     }

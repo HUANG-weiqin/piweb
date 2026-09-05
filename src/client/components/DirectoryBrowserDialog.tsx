@@ -26,7 +26,15 @@ export function DirectoryBrowserDialog({
     onClose,
   );
 
-  return <div className="modal-backdrop" role="presentation">
+  return <div
+    className="modal-backdrop"
+    role="presentation"
+    onMouseDown={(event) => {
+      if (event.target !== event.currentTarget) return;
+      event.preventDefault();
+      onClose();
+    }}
+  >
     <section
       ref={focusRef}
       className="modal directory-browser-modal"

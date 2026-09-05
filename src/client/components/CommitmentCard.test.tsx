@@ -39,13 +39,13 @@ describe("CommitmentCard", () => {
       },
       status: "done",
     };
-    const { container } = render(
+    const { container, rerender } = render(
       <CommitmentCard tool={tool} observedEditBudgetRemainingFiles={2} />,
     );
     const card = container.querySelector("details.commitment-card") as HTMLDetailsElement;
 
     expect(card.open).toBe(false);
-    expect(screen.getByText("编辑承诺")).toBeInTheDocument();
+    expect(screen.getByText("BUDGET ESTIMATE")).toBeInTheDocument();
     expect(screen.getByText("预计修改 3 个文件")).toBeInTheDocument();
     expect(container.querySelector(".commitment-reason"))
       .toHaveTextContent("修复 active run 与历史恢复之间的参数一致性。");
@@ -53,6 +53,11 @@ describe("CommitmentCard", () => {
       .toHaveAttribute("title", "修复 active run 与历史恢复之间的参数一致性。");
     expect(screen.getByText("本轮额度 3")).toBeInTheDocument();
     expect(screen.getByText("本轮剩余 2")).toBeInTheDocument();
+    expect(screen.getByLabelText("2 / 3 FILES LEFT")).toBeInTheDocument();
+
+    rerender(<CommitmentCard tool={tool} observedEditBudgetRemainingFiles={10} />);
+    expect(screen.getByLabelText("10 FILES LEFT")).toBeInTheDocument();
+    expect(screen.queryByLabelText("10 / 3 FILES LEFT")).not.toBeInTheDocument();
 
     fireEvent.click(card.querySelector("summary") as HTMLElement);
 

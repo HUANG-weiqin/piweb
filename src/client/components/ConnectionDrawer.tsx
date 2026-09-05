@@ -209,7 +209,7 @@ export function ConnectionDrawer({
     onKeyDialogChange(false);
   };
   const drawerFocusRef = useModalFocus<HTMLElement>(
-    open && !keyProvider,
+    open,
     "connection-drawer",
     onClose,
   );
@@ -250,7 +250,11 @@ export function ConnectionDrawer({
     onKeyDialogChange(true);
     onClearSettingResult();
   };
-  return <div className="drawer-backdrop" role="presentation" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+  return <div className="drawer-backdrop" role="presentation" onMouseDown={(event) => {
+    if (event.target !== event.currentTarget) return;
+    event.preventDefault();
+    onClose();
+  }}>
     <aside
       ref={drawerFocusRef}
       className="drawer"
@@ -453,7 +457,15 @@ export function ConnectionDrawer({
         </div>
       </section>
     </aside>
-    {keyProvider && <div className="modal-backdrop" role="presentation"><form
+    {keyProvider && <div
+      className="modal-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target !== event.currentTarget) return;
+        event.preventDefault();
+        closeKeyDialog();
+      }}
+    ><form
       ref={keyFocusRef}
       className="modal"
       role="dialog"
@@ -487,7 +499,6 @@ export function ConnectionDrawer({
           maxLength={32_768}
           disabled={Boolean(savingKey)}
           onChange={(event) => setKey(event.target.value)}
-          autoFocus
           data-modal-autofocus
           autoComplete="new-password"
           spellCheck={false}

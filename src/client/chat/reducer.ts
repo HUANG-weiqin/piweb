@@ -3,6 +3,7 @@ import type {
   ConversationHistoryItem,
   ConversationHistoryMessage,
   ConversationMessageCard,
+  ConversationWindowCoverage,
   SessionEvent,
   TokenUsage,
 } from "../../shared/protocol";
@@ -68,6 +69,8 @@ export interface ChatState {
    */
   lastProjectionSeq?: number;
   projectionGap?: boolean;
+  /** Coverage declared by the last accepted authoritative history snapshot. */
+  historyWindow?: ConversationWindowCoverage;
   /**
    * The ordered transcript. Cards and ordinary messages share this one
    * projection so a card update cannot jump to the end of the conversation.
@@ -86,6 +89,7 @@ export type ChatAction =
       type: "hydrate";
       items: ConversationHistoryItem[];
       projectionSeq?: number;
+      historyWindow?: ConversationWindowCoverage;
     } & ChatFocus)
   | ({
       type: "conversation_item";
@@ -316,7 +320,11 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   if (action.type === "reset") return initialChatState;
 
   if (action.type === "focus_changed") {
-    if (sameFocus(state.focus, action)) return state;
+    if (sameFocus(state.focus, action)) {
+      return state.historyWindow === undefined
+        ? state
+        : { ...state, historyWindow: undefined };
+    }
     return {
       ...state,
       focus: {
@@ -327,6 +335,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       items: [],
       lastProjectionSeq: undefined,
       projectionGap: false,
+      historyWindow: undefined,
     };
   }
 
@@ -354,6 +363,13 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       },
       lastProjectionSeq: action.projectionSeq,
       projectionGap: false,
+      historyWindow: action.historyWindow === undefined
+        ? undefined
+        : {
+            omittedBefore: action.historyWindow.omittedBefore,
+            startsMidTurn: action.historyWindow.startsMidTurn,
+            contentTruncated: action.historyWindow.contentTruncated,
+          },
     };
   }
 
@@ -362,10 +378,10 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     if (state.projectionGap) return state;
     if (state.lastProjectionSeq !== undefined) {
       if (action.projectionSeq !== state.lastProjectionSeq) {
-        return { ...state, projectionGap: true };
+        return { ...state, projectionGap: true, historyWindow: undefined };
       }
     } else if (action.projectionSeq !== undefined) {
-      return { ...state, projectionGap: true };
+      return { ...state, projectionGap: true, historyWindow: undefined };
     }
     const items = upsertItem(state.items, historyItemToChatItem(action.item));
     return {
@@ -409,14 +425,14 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   const event = action.event;
   if (state.projectionGap) return state;
   if (state.lastProjectionSeq !== undefined && action.projectionSeq === undefined) {
-    return { ...state, projectionGap: true };
+    return { ...state, projectionGap: true, historyWindow: undefined };
   }
   if (action.projectionSeq !== undefined) {
     if (
       state.lastProjectionSeq === undefined
       || action.projectionSeq !== state.lastProjectionSeq + 1
     ) {
-      return { ...state, projectionGap: true };
+      return { ...state, projectionGap: true, historyWindow: undefined };
     }
     state = {
       ...state,

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type {
   ConversationRoleSnapshot,
   ConversationSummary,
@@ -5,7 +6,10 @@ import type {
 } from "../shared/protocol";
 import type { ChatState } from "./chat/reducer";
 import { Chat } from "./components/Chat";
-import { ConversationSidebar } from "./components/ConversationSidebar";
+import {
+  ConversationSidebar,
+  conversationDisplayOrdinal,
+} from "./components/ConversationSidebar";
 import { WorkspaceRail, workspaceKey } from "./components/WorkspaceRail";
 
 const ACTIVE_CWD = "E:\\workspaces\\piweb";
@@ -163,7 +167,10 @@ const activityByWorkspace = new Map<string, ProjectActivitySummary>([
   }],
 ]);
 
-const chat: ChatState = {
+const DEFAULT_COMMITMENT_REASON = "只添加开发 fixture、截图入口与对应验证。";
+
+function createChat(commitmentReason: string): ChatState {
+  return {
   focus: {
     sessionId: "session-visual-fixture",
     conversationId: ACTIVE_CONVERSATION_ID,
@@ -201,7 +208,7 @@ const chat: ChatState = {
       name: "request_edit_budget",
       args: {
         fileCount: 5,
-        reason: "只添加开发 fixture、截图入口与对应验证。",
+        reason: commitmentReason,
       },
       result: {
         details: {
@@ -244,11 +251,27 @@ const chat: ChatState = {
       total: 29_600,
     },
   }],
-};
+  };
+}
 
+const chat = createChat(DEFAULT_COMMITMENT_REASON);
 const noOp = () => undefined;
+const activeConversationOrdinal = conversationDisplayOrdinal(
+  conversations,
+  ACTIVE_CONVERSATION_ID,
+  ACTIVE_CONVERSATION_ID,
+);
 
-export function VisualFixture() {
+export function VisualFixture({
+  commitmentReason,
+}: {
+  commitmentReason?: string;
+} = {}) {
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const fixtureChat = commitmentReason === undefined
+    ? chat
+    : createChat(commitmentReason);
+
   return <div className="workbench" data-visual-fixture="populated-workbench">
     <WorkspaceRail
       workspaces={WORKSPACES}
@@ -267,10 +290,10 @@ export function VisualFixture() {
       focusedConversationId={ACTIVE_CONVERSATION_ID}
       scopeKey="visual-fixture"
       busyConversationId={ACTIVE_CONVERSATION_ID}
-      collapsed={false}
+      collapsed={sidebarCollapsed}
       navigationEnabled
       actionsEnabled
-      onToggleCollapsed={noOp}
+      onToggleCollapsed={() => setSidebarCollapsed((collapsed) => !collapsed)}
       onSelect={noOp}
       onCreate={noOp}
       onRename={noOp}
@@ -278,7 +301,7 @@ export function VisualFixture() {
     />
     <div className="workbench-main">
       <Chat
-        chat={chat}
+        chat={fixtureChat}
         observationSessionId="session-visual-fixture"
         busy
         activeRun={{ id: "run-visual-fixture", phase: "running" }}
@@ -326,7 +349,11 @@ export function VisualFixture() {
         compactionThresholdPercent={70}
         compactionThresholdBusy={false}
         cwd={ACTIVE_CWD}
-        conversationContext={{ rootTitle: "建立稳定的视觉验证基线" }}
+        conversationContext={{
+          rootTitle: "建立稳定的视觉验证基线",
+          ordinal: activeConversationOrdinal,
+          agentCount: 4,
+        }}
         online
         interactive
         conversationReady

@@ -1,7 +1,14 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { useCallback, useState } from "react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
+import { useCallback, useState, type ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ConversationSummary } from "../../shared/protocol";
 import { ConversationSidebar } from "./ConversationSidebar";
@@ -45,6 +52,24 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
 });
+
+function backdropSidebarProps(
+  overrides: Partial<ComponentProps<typeof ConversationSidebar>> = {},
+): ComponentProps<typeof ConversationSidebar> {
+  return {
+    conversations: [baseConversation],
+    collapsed: false,
+    truncated: false,
+    navigationEnabled: true,
+    actionsEnabled: true,
+    onToggleCollapsed: () => undefined,
+    onSelect: () => undefined,
+    onCreate: () => undefined,
+    onRename: () => undefined,
+    onDelete: () => true,
+    ...overrides,
+  };
+}
 
 describe("ConversationSidebar", () => {
   it("bails out of unrelated parent renders and still updates changed facts", () => {
@@ -118,7 +143,7 @@ describe("ConversationSidebar", () => {
   });
 
   it("renders one flat list with title, role, short handle and last active time", () => {
-    render(
+    const { container } = render(
       <ConversationSidebar
         conversations={[
           baseConversation,
@@ -150,6 +175,10 @@ describe("ConversationSidebar", () => {
     expect(screen.getByText("测试恢复流程")).toBeInTheDocument();
     expect(screen.getByText("架构师")).toBeInTheDocument();
     expect(screen.getByText("角色加载中")).toBeInTheDocument();
+    expect(Array.from(
+      container.querySelectorAll(".conversation-sidebar-ordinal"),
+      (ordinal) => ordinal.textContent,
+    )).toEqual(["01", "02"]);
     expect(screen.getByText("#01234567")).toBeInTheDocument();
     expect(screen.getByText("#fedcba98")).toBeInTheDocument();
     expect(screen.getAllByText("最后活跃", { exact: false })).toHaveLength(2);
@@ -255,7 +284,7 @@ describe("ConversationSidebar", () => {
     expect(standaloneRow).toHaveClass("hierarchy-standalone");
     expect(within(rootRow!).getByText("主任务")).toBeInTheDocument();
     expect(within(standaloneRow!).getByText("主会话")).toBeInTheDocument();
-    expect(screen.getByText("协作 Agent")).toBeInTheDocument();
+    expect(screen.getByText("SUB-TEAM / AGENTS")).toBeInTheDocument();
   });
 
   it("orders standalone conversations with the grouped-view priority", () => {
@@ -569,6 +598,13 @@ describe("ConversationSidebar", () => {
     expect(onSelect).toHaveBeenCalledWith(baseConversation.id);
     expect(onToggleCollapsed).toHaveBeenCalledWith(true);
 
+    const sidebar = screen.getByRole("complementary", { name: "项目会话栏" });
+    const enabledHandle = screen.getByRole("separator", { name: "调整会话栏宽度" });
+    fireEvent.pointerDown(enabledHandle, { button: 0, clientX: 306, pointerId: 1 });
+    expect(enabledHandle).toHaveAttribute("aria-valuenow", "306");
+    expect(sidebar.style.getPropertyValue("--conversation-sidebar-width"))
+      .toBe("306px");
+
     rerender(
       <ConversationSidebar
         conversations={[baseConversation]}
@@ -587,10 +623,30 @@ describe("ConversationSidebar", () => {
       .toBeDisabled();
     expect(screen.getByRole("button", { name: "收起会话栏" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "新建会话" })).toBeDisabled();
-    expect(screen.getByRole("separator", { name: "调整会话栏宽度" }))
-      .toHaveAttribute("aria-disabled", "true");
-    expect(screen.getByRole("separator", { name: "调整会话栏宽度" }))
-      .toHaveAttribute("tabindex", "-1");
+    const disabledHandle = screen.getByRole("separator", { name: "调整会话栏宽度" });
+    const expectUnchangedWidth = () => {
+      expect(disabledHandle).toHaveAttribute("aria-valuenow", "306");
+      expect(sidebar.style.getPropertyValue("--conversation-sidebar-width"))
+        .toBe("306px");
+    };
+    expect(disabledHandle).toHaveAttribute("aria-disabled", "true");
+    expect(disabledHandle).toHaveAttribute("tabindex", "-1");
+    expectUnchangedWidth();
+
+    fireEvent.pointerMove(disabledHandle, { clientX: 500, pointerId: 1 });
+    expectUnchangedWidth();
+    fireEvent.pointerUp(disabledHandle, { pointerId: 1 });
+    expectUnchangedWidth();
+    fireEvent.pointerDown(disabledHandle, { button: 0, clientX: 306, pointerId: 2 });
+    expectUnchangedWidth();
+    fireEvent.pointerMove(disabledHandle, { clientX: 500, pointerId: 2 });
+    expectUnchangedWidth();
+    fireEvent.pointerUp(disabledHandle, { pointerId: 2 });
+    expectUnchangedWidth();
+    for (const key of ["ArrowLeft", "ArrowRight", "Home", "End"]) {
+      fireEvent.keyDown(disabledHandle, { key });
+      expectUnchangedWidth();
+    }
   });
 
   it("resizes the expanded sidebar within fixed pointer and keyboard bounds", () => {
@@ -613,14 +669,14 @@ describe("ConversationSidebar", () => {
     const handle = screen.getByRole("separator", { name: "调整会话栏宽度" });
     expect(handle).toHaveAttribute("aria-valuemin", "240");
     expect(handle).toHaveAttribute("aria-valuemax", "640");
-    expect(handle).toHaveAttribute("aria-valuenow", "286");
+    expect(handle).toHaveAttribute("aria-valuenow", "306");
     expect(sidebar.style.getPropertyValue("--conversation-sidebar-width"))
-      .toBe("286px");
+      .toBe("306px");
 
     fireEvent.keyDown(handle, { key: "ArrowRight" });
-    expect(handle).toHaveAttribute("aria-valuenow", "302");
+    expect(handle).toHaveAttribute("aria-valuenow", "322");
     expect(sidebar.style.getPropertyValue("--conversation-sidebar-width"))
-      .toBe("302px");
+      .toBe("322px");
 
     fireEvent.keyDown(handle, { key: "End" });
     expect(handle).toHaveAttribute("aria-valuenow", "640");
@@ -633,6 +689,122 @@ describe("ConversationSidebar", () => {
     expect(handle).toHaveAttribute("aria-valuenow", "240");
     expect(sidebar.style.getPropertyValue("--conversation-sidebar-width"))
       .toBe("240px");
+  });
+
+  it("dismisses delete confirmation only from its exact backdrop", async () => {
+    const onDelete = vi.fn(() => true);
+    render(<ConversationSidebar {...backdropSidebarProps({ onDelete })} />);
+
+    const launcher = screen.getByRole("button", { name: "删除会话 接口设计" });
+    launcher.focus();
+    fireEvent.click(launcher);
+    const dialog = screen.getByRole("alertdialog", { name: "确认删除会话" });
+    const backdrop = dialog.parentElement!;
+    await waitFor(() => expect(screen.getByRole("button", {
+      name: "保留",
+    })).toHaveFocus());
+
+    const interiorMouseDown = new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(dialog, interiorMouseDown);
+    expect(interiorMouseDown.defaultPrevented).toBe(false);
+    expect(dialog).toBeInTheDocument();
+
+    const backdropMouseDown = new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(backdrop, backdropMouseDown);
+    expect(backdropMouseDown.defaultPrevented).toBe(true);
+
+    await waitFor(() => {
+      expect(screen.queryByRole("alertdialog", { name: "确认删除会话" }))
+        .not.toBeInTheDocument();
+      expect(launcher.isConnected).toBe(true);
+      expect(launcher).toHaveFocus();
+    });
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("dismisses rename only from its exact backdrop", async () => {
+    const onRename = vi.fn();
+    render(<ConversationSidebar {...backdropSidebarProps({ onRename })} />);
+
+    const launcher = screen.getByRole("button", { name: "重命名会话 接口设计" });
+    launcher.focus();
+    fireEvent.click(launcher);
+    const dialog = screen.getByRole("dialog", { name: "重命名会话" });
+    const backdrop = dialog.parentElement!;
+    await waitFor(() => expect(screen.getByRole("textbox", {
+      name: "会话名称",
+    })).toHaveFocus());
+
+    const interiorMouseDown = new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(dialog, interiorMouseDown);
+    expect(interiorMouseDown.defaultPrevented).toBe(false);
+    expect(dialog).toBeInTheDocument();
+
+    const backdropMouseDown = new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(backdrop, backdropMouseDown);
+    expect(backdropMouseDown.defaultPrevented).toBe(true);
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "重命名会话" }))
+        .not.toBeInTheDocument();
+      expect(launcher.isConnected).toBe(true);
+      expect(launcher).toHaveFocus();
+    });
+    expect(onRename).not.toHaveBeenCalled();
+  });
+
+  it("keeps blocked delete confirmation focused and inert", async () => {
+    const onDelete = vi.fn(() => true);
+    const props = backdropSidebarProps({ onDelete });
+    const view = render(<ConversationSidebar {...props} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "删除会话 接口设计" }));
+    const dialog = screen.getByRole("alertdialog", { name: "确认删除会话" });
+    await waitFor(() => expect(screen.getByRole("button", {
+      name: "保留",
+    })).toHaveFocus());
+    view.rerender(<ConversationSidebar {...props} deletionBlocked />);
+
+    const keep = screen.getByRole("button", { name: "保留" });
+    const remove = screen.getByRole("button", { name: "永久删除" });
+    expect(keep).toBeDisabled();
+    expect(remove).toBeDisabled();
+
+    fireEvent.click(keep);
+    expect(dialog).toBeInTheDocument();
+    expect(keep).toHaveFocus();
+    expect(onDelete).not.toHaveBeenCalled();
+    fireEvent.click(remove);
+    expect(dialog).toBeInTheDocument();
+    expect(keep).toHaveFocus();
+    expect(onDelete).not.toHaveBeenCalled();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(dialog).toBeInTheDocument();
+    expect(keep).toHaveFocus();
+    expect(onDelete).not.toHaveBeenCalled();
+
+    const backdropMouseDown = new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(dialog.parentElement!, backdropMouseDown);
+
+    expect(backdropMouseDown.defaultPrevented).toBe(true);
+    expect(dialog).toBeInTheDocument();
+    expect(keep).toHaveFocus();
+    expect(onDelete).not.toHaveBeenCalled();
   });
 
   it("confirms deletion for the current idle conversation and blocks active deletion", () => {

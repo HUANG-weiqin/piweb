@@ -17,11 +17,20 @@ function render(Root: typeof App) {
   );
 }
 
-if (
-  import.meta.env.DEV
-  && new URLSearchParams(window.location.search).get("fixture") === "workbench"
-) {
+const fixture = import.meta.env.DEV
+  ? new URLSearchParams(window.location.search).get("fixture")
+  : null;
+
+if (fixture === "workbench") {
   void import("./VisualFixture").then(({ VisualFixture }) => render(VisualFixture));
+} else if (fixture === "secondary") {
+  void import("./SecondarySurfaceFixture").then(({ SecondarySurfaceFixture }) => {
+    root.render(
+      <ErrorBoundary>
+        <SecondarySurfaceFixture />
+      </ErrorBoundary>,
+    );
+  });
 } else {
   render(App);
 }

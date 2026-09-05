@@ -44,7 +44,6 @@ export function Setup({
             value={cwd}
             onChange={(event) => onCwdChange(event.target.value)}
             placeholder="E:\\projects\\app"
-            autoFocus
             spellCheck={false}
           />
           <button

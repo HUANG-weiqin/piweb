@@ -36,6 +36,7 @@ import {
   aggregateReservedConversationEntries,
   appendReservedCustomEntry,
   createConversationCardEntry,
+  createLoopListEntry,
 } from "./conversation-meta.js";
 import { ProjectStoreRegistry } from "./project-store.js";
 import { ProjectSessionCoordinator } from "./project-session-coordinator.js";
@@ -3478,8 +3479,11 @@ describe("PiConnection coordinated project view", () => {
     }
   });
 
-  it("publishes the physically rewound snapshot before acknowledging the command", async () => {
+  it("keeps the focused view quiet while rewind replaces its runtime, then publishes the durable result", async () => {
     const harness = await coordinatedConnectionHarness();
+    const replacementStarted = deferred();
+    const finishReplacement = deferred();
+    let rewinding: Promise<void> | undefined;
     try {
       await harness.connection.handle({
         type: "initialize",
@@ -3496,6 +3500,14 @@ describe("PiConnection coordinated project view", () => {
       });
       const focused = latestState(harness.events);
       const manager = harness.runtime.created[0]!.persistentManager!;
+      const loopListId = appendReservedCustomEntry(
+        manager,
+        createLoopListEntry({
+          items: [{ id: "retained", text: "Retained work", status: "active" }],
+          armed: true,
+          updatedAt: "2026-07-19T10:00:00.000Z",
+        }),
+      );
       const retainedId = manager.appendMessage({
         role: "user",
         content: "retained",
@@ -3511,10 +3523,24 @@ describe("PiConnection coordinated project view", () => {
         content: "later",
         timestamp: 3,
       });
+
+      const create = harness.runtime.create;
+      harness.runtime.create = async (cwd) => {
+        replacementStarted.resolve();
+        await finishReplacement.promise;
+        return create(cwd);
+      };
       const commandId = randomUUID();
       const eventStart = harness.events.length;
+      const exactRefresh = {
+        type: "refresh_view" as const,
+        sessionId: SESSION_A,
+        projectId: focused.projectId,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+      };
 
-      await harness.connection.handle({
+      rewinding = harness.connection.handle({
         type: "truncate_conversation",
         commandId,
         sessionId: SESSION_A,
@@ -3522,6 +3548,36 @@ describe("PiConnection coordinated project view", () => {
         focusId: focused.focusId!,
         messageId: selectedId,
       });
+      await replacementStarted.promise;
+
+      await expect(harness.connection.handle(exactRefresh)).resolves
+        .toBeUndefined();
+      await expect(harness.runtime.updateConfiguration(() => undefined))
+        .resolves.toBeUndefined();
+      await Promise.resolve();
+
+      const gapEvents = harness.events.slice(eventStart);
+      expect(gapEvents).toContainEqual({
+        type: "loop_list_update",
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId,
+        focusId: focused.focusId,
+        loopList: {
+          items: [{ id: "retained", text: "Retained work", status: "active" }],
+          armed: true,
+        },
+      });
+      expect(gapEvents.some((event) =>
+        event.type === "state"
+        || event.type === "role_catalog_snapshot"
+        || event.type === "conversation_snapshot"
+        || event.type === "command_complete"
+        || event.type === "error"
+      )).toBe(false);
+
+      finishReplacement.resolve();
+      await rewinding;
+      rewinding = undefined;
 
       const commandEvents = harness.events.slice(eventStart);
       const snapshotIndex = commandEvents.findIndex(
@@ -3551,9 +3607,12 @@ describe("PiConnection coordinated project view", () => {
       });
       expect(manager.getEntries().map(({ id }) => id)).toEqual([
         expect.any(String),
+        loopListId,
         retainedId,
       ]);
     } finally {
+      finishReplacement.resolve();
+      await rewinding?.catch(() => undefined);
       await harness.cleanup();
     }
   });

@@ -18,7 +18,7 @@ import {
 import { useModalFocus } from "../lib/use-modal-focus";
 import { ActivitySpinner } from "./ActivitySpinner";
 
-const DEFAULT_SIDEBAR_WIDTH = 286;
+const DEFAULT_SIDEBAR_WIDTH = 306;
 const MIN_SIDEBAR_WIDTH = 240;
 const MAX_SIDEBAR_WIDTH = 640;
 const SIDEBAR_KEYBOARD_STEP = 16;
@@ -227,6 +227,21 @@ function groupProjection(
   return { entries, rootByConversationId };
 }
 
+export function conversationDisplayOrdinal(
+  conversations: ConversationSummary[],
+  conversationId: string,
+  busyConversationId?: string,
+): number | undefined {
+  const grouped = groupProjection(conversations, busyConversationId);
+  const rootConversationId = grouped.rootByConversationId.get(conversationId)
+    ?? conversationId;
+  const index = grouped.entries.findIndex((entry) => entry.kind === "group"
+    ? entry.group.root.id === rootConversationId
+    : entry.conversation.id === rootConversationId
+  );
+  return index < 0 ? undefined : index + 1;
+}
+
 function ActivityIndicator({
   activity,
 }: {
@@ -279,6 +294,7 @@ type ConversationRowHierarchy = "root" | "member" | "standalone";
 const ConversationRow = memo(function ConversationRow({
   conversation,
   hierarchy,
+  ordinal,
   selected,
   navigationEnabled,
   actionsEnabled,
@@ -290,6 +306,7 @@ const ConversationRow = memo(function ConversationRow({
 }: {
   conversation: ConversationSummary;
   hierarchy: ConversationRowHierarchy;
+  ordinal?: string;
   selected: boolean;
   navigationEnabled: boolean;
   actionsEnabled: boolean;
@@ -321,6 +338,11 @@ const ConversationRow = memo(function ConversationRow({
         disabled={!navigationEnabled || deletionBlocked}
         onClick={() => onSelect(conversation.id)}
       >
+        {ordinal && (
+          <span className="conversation-sidebar-ordinal" aria-hidden="true">
+            {ordinal}
+          </span>
+        )}
         {hierarchy !== "member" && (
           <span className="conversation-sidebar-kind">
             {hierarchy === "root" ? "主任务" : "主会话"}
@@ -419,6 +441,7 @@ const ConversationRow = memo(function ConversationRow({
 
 function ConversationGroupCard({
   group,
+  ordinal,
   expanded,
   idleRevealed,
   currentConversationId,
@@ -433,6 +456,7 @@ function ConversationGroupCard({
   onRequestDelete,
 }: {
   group: ConversationGroup;
+  ordinal: string;
   expanded: boolean;
   idleRevealed: boolean;
   currentConversationId?: string;
@@ -501,6 +525,7 @@ function ConversationGroupCard({
         <ConversationRow
           conversation={root}
           hierarchy="root"
+          ordinal={ordinal}
           selected={root.id === currentConversationId}
           navigationEnabled={navigationEnabled}
           actionsEnabled={actionsEnabled}
@@ -527,7 +552,7 @@ function ConversationGroupCard({
         <span className="conversation-group-chevron" aria-hidden="true" />
       </button>
       {expanded && <div id={controlsId} className="conversation-group-members">
-        <p className="conversation-group-members-label">协作 Agent</p>
+        <p className="conversation-group-members-label">SUB-TEAM / AGENTS</p>
         <ul className="conversation-sidebar-list">
           {visibleMembers.map((conversation) => (
             <ConversationRow
@@ -757,7 +782,12 @@ function ConversationSidebarView({
       style={sidebarStyle}
     >
       <header className="conversation-sidebar-header">
-        {!collapsed && <h2>会话</h2>}
+        {!collapsed && (
+          <h2>
+            <span>SESSIONS</span>
+            <small>/ CONVERSATIONS</small>
+          </h2>
+        )}
         <button
           type="button"
           className="conversation-sidebar-toggle"
@@ -773,10 +803,13 @@ function ConversationSidebarView({
       {!collapsed && (
         <nav className="conversation-sidebar-navigation" aria-label="项目会话">
           <ul className="conversation-sidebar-list">
-            {grouped.entries.map((entry) => entry.kind === "group"
-              ? <ConversationGroupCard
+            {grouped.entries.map((entry, index) => {
+              const ordinal = String(index + 1).padStart(2, "0");
+              if (entry.kind === "group") {
+                return <ConversationGroupCard
                   key={`group:${entry.group.root.id}`}
                   group={entry.group}
+                  ordinal={ordinal}
                   expanded={expandedRoots.has(entry.group.root.id)}
                   idleRevealed={revealedIdleRoots.has(entry.group.root.id)}
                   currentConversationId={currentConversationId}
@@ -789,20 +822,23 @@ function ConversationSidebarView({
                   onRevealIdle={revealIdle}
                   onRequestRename={requestRename}
                   onRequestDelete={requestDelete}
-                />
-              : <ConversationRow
-                  key={entry.conversation.id}
-                  conversation={entry.conversation}
-                  hierarchy="standalone"
-                  selected={entry.conversation.id === currentConversationId}
-                  navigationEnabled={navigationEnabled}
-                  actionsEnabled={actionsEnabled}
-                  deletionBlocked={deletionBlocked}
-                  busy={entry.conversation.id === busyConversationId}
-                  onSelect={onSelect}
-                  onRequestRename={requestRename}
-                  onRequestDelete={requestDelete}
-                />)}
+                />;
+              }
+              return <ConversationRow
+                key={entry.conversation.id}
+                conversation={entry.conversation}
+                hierarchy="standalone"
+                ordinal={ordinal}
+                selected={entry.conversation.id === currentConversationId}
+                navigationEnabled={navigationEnabled}
+                actionsEnabled={actionsEnabled}
+                deletionBlocked={deletionBlocked}
+                busy={entry.conversation.id === busyConversationId}
+                onSelect={onSelect}
+                onRequestRename={requestRename}
+                onRequestDelete={requestDelete}
+              />;
+            })}
           </ul>
           {truncated && <p className="conversation-sidebar-truncated">
             仅显示最近协作组和会话
@@ -842,7 +878,9 @@ function ConversationSidebarView({
       className="modal-backdrop"
       role="presentation"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) closeDeleteDialog();
+        if (event.target !== event.currentTarget) return;
+        event.preventDefault();
+        closeDeleteDialog();
       }}
     >
       <div
@@ -887,7 +925,9 @@ function ConversationSidebarView({
       className="modal-backdrop"
       role="presentation"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) closeRenameDialog();
+        if (event.target !== event.currentTarget) return;
+        event.preventDefault();
+        closeRenameDialog();
       }}
     >
       <form

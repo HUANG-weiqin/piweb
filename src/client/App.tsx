@@ -22,7 +22,10 @@ import { ActivitySpinner } from "./components/ActivitySpinner";
 import { AuthDialog } from "./components/AuthDialog";
 import { Chat } from "./components/Chat";
 import { ConnectionDrawer } from "./components/ConnectionDrawer";
-import { ConversationSidebar } from "./components/ConversationSidebar";
+import {
+  ConversationSidebar,
+  conversationDisplayOrdinal,
+} from "./components/ConversationSidebar";
 import { DirectoryBrowserDialog } from "./components/DirectoryBrowserDialog";
 import {
   ExtensionDialog,
@@ -271,6 +274,11 @@ interface PendingFocus {
   targetProjectId?: string;
   targetConversationId?: string;
   initializeConversationKind?: "recent" | "new" | "open";
+  reconnectDraftOwner?: {
+    workspaceKey: string;
+    projectId: string;
+    conversationId: string;
+  };
 }
 
 interface SupersededFocusCommand {
@@ -907,6 +915,7 @@ export function App() {
     conversationId: string | undefined,
     focusId: string | undefined,
     preservePresentation = false,
+    preserveDraft = false,
   ) => {
     updatePendingCompactionThreshold(undefined);
     updatePendingServiceTier(undefined);
@@ -939,7 +948,7 @@ export function App() {
     updateConversationReady(false);
     setSelectingRole(false);
     if (changedConversation) {
-      updateDraft("");
+      if (!preserveDraft) updateDraft("");
       setPromptNotice("");
       updatePendingPrompt(undefined);
       showPendingContextCompaction(focus);
@@ -969,6 +978,7 @@ export function App() {
     updateDraft("");
     setPromptNotice("");
     updatePendingPrompt(undefined);
+    updateOutstandingRunId(runId);
   };
   const markPendingPromptUnconfirmed = () => {
     const pending = pendingPromptRef.current;
@@ -1099,6 +1109,7 @@ export function App() {
           ...message,
         })),
       projectionSeq: event.projectionSeq,
+      historyWindow: event.window,
     });
     setConversationRole(event.role);
     setLoopList(event.loopList ?? { items: [], armed: false });
@@ -1215,10 +1226,13 @@ export function App() {
         setProtocolReady(true);
         setSetupCwd((current) => current || event.startupCwd);
         if (activeCwdRef.current) {
+          const workspaceKey = currentWorkspaceKey();
+          const reconnectFocus = focusRef.current;
+          const replacedPendingFocus = pendingFocusRef.current;
           const previousConversationId = conversationIdRef.current;
           const cached = getWorkspaceProjection(
             workspaceProjectionCacheRef.current,
-            currentWorkspaceKey(),
+            workspaceKey,
           );
           let conversation: Extract<
             ClientCommand,
@@ -1237,6 +1251,26 @@ export function App() {
           } else {
             conversation = { kind: "recent" };
           }
+          const inheritedReconnectDraftOwner = replacedPendingFocus?.reconnectDraftOwner;
+          const reconnectDraftOwner = reconnectFocus
+            ? {
+                workspaceKey,
+                projectId: reconnectFocus.projectId,
+                conversationId: reconnectFocus.conversationId,
+              }
+            : replacedPendingFocus?.operation === "initialize"
+              && replacedPendingFocus.workspaceKey === workspaceKey
+              && inheritedReconnectDraftOwner
+              && inheritedReconnectDraftOwner.workspaceKey === workspaceKey
+              && conversation.kind === "open"
+              && conversation.conversationId === inheritedReconnectDraftOwner.conversationId
+              && (!cached || cached.projectId === inheritedReconnectDraftOwner.projectId)
+              ? {
+                  workspaceKey: inheritedReconnectDraftOwner.workspaceKey,
+                  projectId: inheritedReconnectDraftOwner.projectId,
+                  conversationId: inheritedReconnectDraftOwner.conversationId,
+                }
+              : undefined;
           const sessionId = crypto.randomUUID();
           const commandId = crypto.randomUUID();
           const timingIntent = {
@@ -1261,12 +1295,13 @@ export function App() {
           updatePendingFocus({
             commandId,
             operation: "initialize",
-            workspaceKey: currentWorkspaceKey(),
+            workspaceKey,
             initializeConversationKind: conversation.kind,
             ...(conversation.kind === "open"
               ? { targetConversationId: conversation.conversationId }
               : {}),
             ...(cached ? { cachedProjectId: cached.projectId } : {}),
+            ...(reconnectDraftOwner ? { reconnectDraftOwner } : {}),
           });
           const sent = socket.send({
             type: "initialize",
@@ -1444,6 +1479,23 @@ export function App() {
           setPendingFocus(nextPending);
           return;
         }
+        const correlatedReconnectDraftOwner =
+          pending?.operation === "initialize"
+          && event.operation === "initialize"
+          && pending.commandId === event.commandId
+          && pending.workspaceKey === currentWorkspaceKey()
+            ? pending.reconnectDraftOwner
+            : undefined;
+        if (
+          correlatedReconnectDraftOwner
+          && (
+            correlatedReconnectDraftOwner.workspaceKey !== currentWorkspaceKey()
+            || correlatedReconnectDraftOwner.projectId !== event.projectId
+            || correlatedReconnectDraftOwner.conversationId !== event.conversationId
+          )
+        ) {
+          updateDraft("");
+        }
         if (
           !pending
           || pending.commandId !== event.commandId
@@ -1494,12 +1546,19 @@ export function App() {
         });
         updatePendingFocus(undefined);
         updateConversationSyncing(event.operation === "focus_conversation");
+        const preserveReconnectDraft = Boolean(
+          correlatedReconnectDraftOwner
+          && correlatedReconnectDraftOwner.workspaceKey === pending.workspaceKey
+          && correlatedReconnectDraftOwner.projectId === event.projectId
+          && correlatedReconnectDraftOwner.conversationId === event.conversationId,
+        );
         attachFocus(
           event.sessionId,
           event.projectId,
           event.conversationId,
           event.focusId,
           Boolean(pending.cachedProjectId && !cachedProjectMismatch),
+          preserveReconnectDraft,
         );
         if (
           event.operation === "initialize"
@@ -1687,6 +1746,9 @@ export function App() {
           updateDraft("");
           setPromptNotice("");
           updatePendingPrompt(undefined);
+          if (outstandingRunIdRef.current === pending.runId) {
+            updateOutstandingRunId("");
+          }
         }
         addPendingAdmission({ promptId: event.promptId, text: event.text });
       } else if (event.type === "prompt_delivered") {
@@ -2280,6 +2342,15 @@ export function App() {
         setSettingResult(undefined);
         updateDirectoryBrowser(undefined);
         markPendingPromptUnconfirmed();
+        const pendingRoleOperation = pendingRoleOperationRef.current;
+        if (pendingRoleOperation) {
+          pendingRoleOperationRef.current = undefined;
+          setRoleOperationResult({
+            ...pendingRoleOperation,
+            ok: false,
+            message: "连接已断开，角色操作结果未确认；重连后请检查当前角色目录。",
+          });
+        }
         if (pendingConversationDeletionRef.current) {
           updatePendingConversationDeletion(undefined);
           setError("删除状态未确认，请检查项目对话列表后重试。");
@@ -2521,6 +2592,7 @@ export function App() {
     const sessionId = sessionIdRef.current;
     const focus = focusRef.current;
     if (!sessionId || !focus || focus.sessionId !== sessionId) return false;
+    const knownRunOwnerId = state?.activeRun?.id || outstandingRunIdRef.current;
     const runId = crypto.randomUUID();
     const promptId = crypto.randomUUID();
     const pending: DirectPendingPrompt = {
@@ -2532,7 +2604,7 @@ export function App() {
     };
     setPromptNotice("");
     updatePendingPrompt(pending);
-    updateOutstandingRunId(runId);
+    if (!knownRunOwnerId) updateOutstandingRunId(runId);
     const ok = send({
       type: "prompt",
       sessionId,
@@ -2544,7 +2616,7 @@ export function App() {
     });
     if (!ok) {
       updatePendingPrompt(undefined);
-      updateOutstandingRunId("");
+      if (outstandingRunIdRef.current === runId) updateOutstandingRunId("");
       setPromptNotice("消息未发送，内容已保留，可以重试。");
     }
     return ok;
@@ -2564,7 +2636,7 @@ export function App() {
   };
   const abortCurrentRun = () => {
     if (!conversationReadyRef.current || pendingFocusRef.current) return;
-    const runId = outstandingRunIdRef.current || state?.activeRun?.id;
+    const runId = state?.activeRun?.id || outstandingRunIdRef.current;
     const sessionId = sessionIdRef.current;
     const focus = focusRef.current;
     if (sessionId && runId && focus) {
@@ -2985,7 +3057,12 @@ export function App() {
     setRoleOperationResult(undefined);
     setError("");
     if (!send({ ...command, commandId, sessionId } as ClientCommand)) {
-      updatePendingRoleOperation(undefined);
+      pendingRoleOperationRef.current = undefined;
+      setRoleOperationResult({
+        ...pending,
+        ok: false,
+        message: "本地服务未连接，角色操作未发送；请重连后重试。",
+      });
     }
   };
   const switchWorkspace = (cwd: string) => {
@@ -3106,7 +3183,7 @@ export function App() {
   const handleChatSwitchRole = useLatestCallback(switchConversationRole);
   const handleChatRewind = useLatestCallback(truncateConversation);
   const workspaceSetupFocusRef = useModalFocus<HTMLElement>(
-    setupOpen && !directoryBrowser,
+    setupOpen,
     setupOpen ? "workspace-setup" : "",
     closeWorkspaceDialog,
   );
@@ -3172,7 +3249,9 @@ export function App() {
     className="modal-backdrop workspace-setup-backdrop"
     role="presentation"
     onMouseDown={(event) => {
-      if (event.target === event.currentTarget) closeWorkspaceDialog();
+      if (event.target !== event.currentTarget) return;
+      event.preventDefault();
+      closeWorkspaceDialog();
     }}
   >
     <section
@@ -3269,29 +3348,59 @@ export function App() {
     : undefined;
   const visibleConversationId = pendingTargetConversationId
     ?? (showRoleSelection ? undefined : visibleState?.conversationId);
+  const visibleBusyConversationId = visibleState
+    && (visibleState.busy || outstandingRunId)
+    ? visibleState.conversationId
+    : undefined;
   const visibleConversationContext = useMemo<
-    { rootTitle: string; currentTitle?: string } | undefined
+    {
+      rootTitle: string;
+      currentTitle?: string;
+      ordinal?: number;
+      agentCount?: number;
+    } | undefined
   >(() => {
     if (!visibleConversationReady || !visibleConversationId) return undefined;
-    const currentConversation = conversations.find(
-      ({ id }) => id === visibleConversationId,
+    const conversationsById = new Map(
+      sidebarConversations.map((conversation) => [conversation.id, conversation]),
     );
-    const rootConversation = currentConversation?.rootConversationId
-      ? conversations.find(
-          ({ id }) => id === currentConversation.rootConversationId,
-        )
-      : undefined;
-    if (!currentConversation || !rootConversation) return undefined;
+    const currentConversation = conversationsById.get(visibleConversationId);
+    if (!currentConversation) return undefined;
+    const rootConversationId = currentConversation.rootConversationId;
+    const rootConversation = !rootConversationId
+      || rootConversationId === currentConversation.id
+      ? currentConversation
+      : conversationsById.get(rootConversationId);
+    if (!rootConversation) return undefined;
+
     const rootTitle = rootConversation.name?.trim()
       || rootConversation.preview.trim()
       || "新会话";
     const currentTitle = currentConversation.name?.trim()
       || currentConversation.preview.trim()
       || "新会话";
-    return currentConversation.id === rootConversation.id
-      ? { rootTitle }
-      : { rootTitle, currentTitle };
-  }, [conversations, visibleConversationId, visibleConversationReady]);
+    const agentCount = 1 + sidebarConversations.filter((conversation) => (
+      conversation.id !== rootConversation.id
+      && conversation.rootConversationId === rootConversation.id
+    )).length;
+    const ordinal = conversationDisplayOrdinal(
+      sidebarConversations,
+      currentConversation.id,
+      visibleBusyConversationId,
+    );
+    return {
+      rootTitle,
+      ...(currentConversation.id === rootConversation.id ? {} : { currentTitle }),
+      ...(ordinal === undefined ? {} : { ordinal }),
+      ...(conversationIndexTruncated ? {} : { agentCount }),
+    };
+  }, [
+    conversationIndexTruncated,
+    sidebarConversations,
+    visibleBusyConversationId,
+    visibleConversationId,
+    visibleConversationReady,
+  ]);
 
   if (!activeCwd || !visibleState) return <>
     <div className="workbench">
@@ -3370,9 +3479,7 @@ export function App() {
         currentConversationId={visibleConversationId}
         focusedConversationId={focusedConversationId}
         scopeKey={sidebarScopeKey}
-        busyConversationId={
-          visibleState.busy || outstandingRunId ? visibleState.conversationId : undefined
-        }
+        busyConversationId={visibleBusyConversationId}
         collapsed={sidebarCollapsed}
         navigationEnabled={
           online

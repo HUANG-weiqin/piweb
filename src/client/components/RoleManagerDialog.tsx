@@ -1,6 +1,8 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
 } from "react";
@@ -68,6 +70,19 @@ interface RoleManagerDialogProps {
   onDelete(roleId: string, expectedRevision: number): void;
 }
 
+interface RoleEditBase {
+  roleId: string;
+  revision: number;
+  systemPrompt: string;
+}
+
+interface SubmittedRoleUpdate {
+  base: RoleEditBase;
+  localDraft: RoleDraft;
+  sentDraft: RoleDraft;
+  commandId?: string;
+}
+
 interface ModelOption {
   value: string;
   provider: string;
@@ -98,6 +113,34 @@ function roleDraft(role: RoleTemplate): RoleDraft {
     defaultServiceTier: role.defaultServiceTier,
     toolMode: role.toolMode,
     canManageSessions: role.canManageSessions,
+  };
+}
+
+function copyDraft(draft: RoleDraft): RoleDraft {
+  return {
+    ...draft,
+    model: draft.model === null ? null : { ...draft.model },
+  };
+}
+
+function sameDraft(left: RoleDraft, right: RoleDraft): boolean {
+  return left.name === right.name
+    && left.description === right.description
+    && left.systemPrompt === right.systemPrompt
+    && (left.model === null
+      ? right.model === null
+      : right.model !== null && sameModel(left.model, right.model))
+    && left.defaultThinkingLevel === right.defaultThinkingLevel
+    && left.defaultServiceTier === right.defaultServiceTier
+    && left.toolMode === right.toolMode
+    && left.canManageSessions === right.canManageSessions;
+}
+
+function roleEditBase(role: RoleTemplate): RoleEditBase {
+  return {
+    roleId: role.id,
+    revision: role.revision,
+    systemPrompt: role.systemPrompt,
   };
 }
 
@@ -169,15 +212,16 @@ export function RoleManagerDialog({
   const [draft, setDraft] = useState<RoleDraft>(
     initialRole ? roleDraft(initialRole) : emptyDraft,
   );
-  const [baseSystemPrompt, setBaseSystemPrompt] = useState(
-    initialRole?.systemPrompt ?? "",
+  const [base, setBase] = useState<RoleEditBase | undefined>(
+    initialRole ? roleEditBase(initialRole) : undefined,
   );
+  const submittedUpdateRef = useRef<SubmittedRoleUpdate | undefined>(undefined);
   const selectedRole = roles.find(({ id }) => id === selectedRoleId);
   const creating = selectedRoleId === NEW_ROLE_ID;
   const draftSourceKey = creating
     ? NEW_ROLE_ID
     : selectedRole
-      ? `${selectedRole.id}:${selectedRole.revision}`
+      ? selectedRole.id
       : `missing:${selectedRoleId}:${roles[0]?.id ?? ""}`;
   const modelOptions = useMemo(
     () => availableModelOptions(providers),
@@ -188,28 +232,56 @@ export function RoleManagerDialog({
 
   useEffect(() => {
     if (creating) {
-      setBaseSystemPrompt("");
+      setBase(undefined);
       setDraft(emptyDraft);
       return;
     }
     if (selectedRole) {
-      setBaseSystemPrompt(selectedRole.systemPrompt);
+      setBase(roleEditBase(selectedRole));
       setDraft(roleDraft(selectedRole));
       return;
     }
     const next = roles[0];
     setSelectedRoleId(next?.id ?? NEW_ROLE_ID);
-    setBaseSystemPrompt(next?.systemPrompt ?? "");
+    setBase(next ? roleEditBase(next) : undefined);
     setDraft(next ? roleDraft(next) : emptyDraft);
   }, [draftSourceKey]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open) return;
     const nextRole = requestedRole(roles, initialRoleId);
     setSelectedRoleId(nextRole?.id ?? NEW_ROLE_ID);
-    setBaseSystemPrompt(nextRole?.systemPrompt ?? "");
+    setBase(nextRole ? roleEditBase(nextRole) : undefined);
     setDraft(nextRole ? roleDraft(nextRole) : emptyDraft);
   }, [open, initialRoleId]);
+
+  useEffect(() => {
+    const submitted = submittedUpdateRef.current;
+    if (!submitted) return;
+    if (
+      !submitted.commandId
+      && pending?.operation === "update_role"
+    ) {
+      submitted.commandId = pending.commandId;
+    }
+    if (
+      !submitted.commandId
+      || exactResult?.operation !== "update_role"
+      || exactResult.commandId !== submitted.commandId
+      || !exactResult.ok
+      || !selectedRole
+      || selectedRole.id !== submitted.base.roleId
+      || !sameDraft(roleDraft(selectedRole), submitted.sentDraft)
+    ) return;
+
+    submittedUpdateRef.current = undefined;
+    setBase(roleEditBase(selectedRole));
+    setDraft((current) => (
+      sameDraft(current, submitted.localDraft)
+        ? roleDraft(selectedRole)
+        : current
+    ));
+  }, [exactResult, pending, selectedRole]);
 
   const close = operationBusy ? undefined : onClose;
   const focusRef = useModalFocus<HTMLElement>(
@@ -222,13 +294,13 @@ export function RoleManagerDialog({
   const selectRole = (role: RoleTemplate) => {
     if (operationBusy) return;
     setSelectedRoleId(role.id);
-    setBaseSystemPrompt(role.systemPrompt);
+    setBase(roleEditBase(role));
     setDraft(roleDraft(role));
   };
   const selectNewRole = () => {
     if (operationBusy) return;
     setSelectedRoleId(NEW_ROLE_ID);
-    setBaseSystemPrompt("");
+    setBase(undefined);
     setDraft(emptyDraft);
   };
   const updateDraft = <K extends keyof RoleDraft>(
@@ -245,11 +317,16 @@ export function RoleManagerDialog({
     };
     if (creating) {
       onCreate(nextDraft);
-    } else if (selectedRole) {
+    } else if (selectedRole && base?.roleId === selectedRole.id) {
+      submittedUpdateRef.current = {
+        base: { ...base },
+        localDraft: copyDraft(draft),
+        sentDraft: copyDraft(nextDraft),
+      };
       onUpdate(
-        selectedRole.id,
-        selectedRole.revision,
-        baseSystemPrompt,
+        base.roleId,
+        base.revision,
+        base.systemPrompt,
         nextDraft,
       );
     }
@@ -288,7 +365,11 @@ export function RoleManagerDialog({
   return <div
     className="modal-backdrop"
     role="presentation"
-    onMouseDown={(event) => event.target === event.currentTarget && close?.()}
+    onMouseDown={(event) => {
+      if (event.target !== event.currentTarget) return;
+      event.preventDefault();
+      close?.();
+    }}
   >
     <section
       ref={focusRef}
@@ -524,7 +605,8 @@ export function RoleManagerDialog({
               className="danger-button"
               disabled={operationBusy}
               onClick={() => selectedRole
-                && onDelete(selectedRole.id, selectedRole.revision)}
+                && base?.roleId === selectedRole.id
+                && onDelete(base.roleId, base.revision)}
             >
               {operationBusy && pending?.operation === "delete_role"
                 ? "正在删除…"

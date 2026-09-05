@@ -536,6 +536,8 @@ interface MessageProps {
   streamingText?: boolean;
   collapsed?: boolean;
   observedEditBudgetRemainingFiles?: number | null;
+  assistantActor?: string;
+  assistantState?: string;
   onContentSettled?(): void;
 }
 
@@ -548,6 +550,8 @@ function MessageView({
   streamingText = false,
   collapsed = false,
   observedEditBudgetRemainingFiles,
+  assistantActor,
+  assistantState,
   onContentSettled,
 }: MessageProps) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
@@ -570,6 +574,18 @@ function MessageView({
 
   const isUser = message.role === "user";
   if (message.role === "error") return <article className="message error">{message.text}</article>;
+  const messageRunning = !isUser && assistantState !== undefined;
+  const eventHeader = <header
+    className={`message-event-header${messageRunning ? " is-running" : ""}`}
+  >
+    <span className="message-event-kind">{isUser ? "COMMAND" : "AGENT"}</span>
+    <strong className="message-event-actor">
+      {isUser ? "BOSS" : assistantActor?.trim() || "Agent"}
+    </strong>
+    <span className="message-event-state">
+      {isUser ? "SENT" : assistantState ?? "LOGGED"}
+    </span>
+  </header>;
   let copyLabel = isUser ? "复制用户消息" : "复制 Agent 回复";
   let copyTitle = isUser ? "复制用户原文" : "复制原始 Markdown";
   let copyText = "复制";
@@ -620,6 +636,7 @@ function MessageView({
   </div> : null;
   if (isUser) {
     return <article className="message user">
+      {eventHeader}
       {message.text}
       {actions}
     </article>;
@@ -693,6 +710,7 @@ function MessageView({
   }
 
   return <article className="message assistant">
+    {eventHeader}
     {blocks.map((block, index) => {
       if (block.kind === "text") {
         return <Fragment key={`text:${index}`}>

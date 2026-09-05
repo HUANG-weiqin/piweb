@@ -1,12 +1,53 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { useState } from "react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthDialog } from "./AuthDialog";
 
 afterEach(cleanup);
 
+function AuthFocusOwnerFixture({ kind }: { kind: "prompt" | "manual" }) {
+  const [open, setOpen] = useState(false);
+  return <>
+    <button onClick={() => setOpen(true)}>打开认证提示</button>
+    {open && <AuthDialog
+      requestId={`${kind}-request`}
+      request={{ kind, message: `${kind} value` }}
+      onRespond={() => undefined}
+      onCancel={() => setOpen(false)}
+    />}
+  </>;
+}
+
 describe("AuthDialog", () => {
+  it.each(["prompt", "manual"] as const)(
+    "restores the exact launcher after cancelling a %s input request",
+    async (kind) => {
+      render(<AuthFocusOwnerFixture kind={kind} />);
+
+      const launcher = screen.getByRole("button", { name: "打开认证提示" });
+      expect(launcher.isConnected).toBe(true);
+      launcher.focus();
+      expect(launcher).toHaveFocus();
+      fireEvent.click(launcher);
+
+      const input = screen.getByRole("textbox");
+      expect(input).toHaveAttribute("data-modal-autofocus");
+      await waitFor(() => expect(input).toHaveFocus());
+
+      const cancel = screen.getByRole("button", { name: "取消登录" });
+      cancel.focus();
+      fireEvent.click(cancel);
+
+      await waitFor(() => {
+        expect(screen.queryByRole("dialog", { name: "登录订阅账户" }))
+          .not.toBeInTheDocument();
+        expect(launcher.isConnected).toBe(true);
+        expect(launcher).toHaveFocus();
+      });
+    },
+  );
   it("preserves the current response while a higher-priority modal is visible", () => {
     const props = {
       requestId: "request-1",

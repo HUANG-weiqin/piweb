@@ -58,12 +58,29 @@ describe("Message", () => {
 
     expect(details).toBeTruthy();
     expect(details.open).toBe(false);
+    expect(container.querySelector(".message-event-header"))
+      .toHaveTextContent("AGENTAgentLOGGED");
     expect(screen.getByText("工作过程")).toBeInTheDocument();
     expect(screen.getByText("已完成读取文件")).toBeInTheDocument();
     expect(container.querySelector(".activity-group-detail"))
       .toHaveTextContent("src/index.ts");
     expect(screen.getByText("1 步 · 1 次工具调用")).toBeInTheDocument();
     expect(screen.getByText("工具调用（1）")).toBeInTheDocument();
+  });
+
+  it("does not infer an active run from a stale pending tool", () => {
+    const pendingMessage: ChatMessage = {
+      ...toolsMessage,
+      tools: [{ ...toolsMessage.tools[0], status: "pending" }],
+    };
+    const { container, rerender } = render(<Message message={pendingMessage} />);
+
+    expect(container.querySelector(".message-event-header"))
+      .toHaveTextContent("AGENTAgentLOGGED");
+
+    rerender(<Message message={pendingMessage} assistantState="WAITING" />);
+    expect(container.querySelector(".message-event-header"))
+      .toHaveTextContent("AGENTAgentWAITING");
   });
 
   it("promotes commitments without duplicating them in the work process", () => {
@@ -139,7 +156,9 @@ describe("Message", () => {
     const { container } = render(<Message message={message} />);
 
     expect(container.querySelectorAll(".commitment-card")).toHaveLength(3);
-    expect(screen.getByText("编辑承诺")).toBeInTheDocument();
+    expect(screen.getByText("BUDGET ESTIMATE")).toBeInTheDocument();
+    expect(screen.getByLabelText("2 FILES PLANNED"))
+      .toHaveTextContent("2FILES PLANNED");
     expect(screen.getByText("单会话等待承诺")).toBeInTheDocument();
     expect(screen.getByText("等待未开始")).toBeInTheDocument();
     expect(screen.getByText("1 步 · 3 次工具调用")).toBeInTheDocument();
@@ -367,6 +386,7 @@ describe("Message", () => {
     const article = container.querySelector("article") as HTMLElement;
     expect(Array.from(article.children).map((element) => element.className))
       .toEqual([
+        "message-event-header",
         "markdown",
         "assistant-activity-group is-complete",
         "markdown",
@@ -1019,7 +1039,11 @@ describe("Message", () => {
       tools: [],
     };
 
-    render(<Message message={message} onRewind={onRewind} />);
+    const { container } = render(
+      <Message message={message} onRewind={onRewind} />,
+    );
+    expect(container.querySelector(".message-event-header"))
+      .toHaveTextContent("COMMANDBOSSSENT");
     const copyButton = screen.getByRole("button", { name: "复制用户消息" });
     expect(copyButton.parentElement).not.toHaveClass("assistant-message-actions");
     fireEvent.click(copyButton);

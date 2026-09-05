@@ -114,7 +114,6 @@ export function ExtensionDialog({
               maxLength={200_000}
               disabled={!online || submitted}
               onChange={(event) => setValue(event.target.value)}
-              autoFocus
               data-modal-autofocus
             />
           : <input
@@ -124,7 +123,6 @@ export function ExtensionDialog({
               maxLength={200_000}
               disabled={!online || submitted}
               onChange={(event) => setValue(event.target.value)}
-              autoFocus
               data-modal-autofocus
             />}
         <button disabled={!online || submitted} type="submit">

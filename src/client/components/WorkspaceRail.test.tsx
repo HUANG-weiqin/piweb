@@ -65,12 +65,18 @@ describe("WorkspaceRail", () => {
 
     expect(screen.getByRole("button", { name: "关闭工作区 alpha" }))
       .toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "打开工作区 alpha（1 个会话忙碌中）" })
+      .querySelector(".workspace-rail-state"))
+      .toHaveTextContent("ACTIVE");
     expect(screen.queryByRole("button", { name: "关闭工作区 beta" }))
       .not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "打开工作区 beta" }));
     expect(screen.getByRole("button", { name: "打开工作区 beta" }))
       .toHaveAttribute("aria-current", "true");
+    expect(screen.getByRole("button", {
+      name: "打开工作区 alpha（1 个会话忙碌中）",
+    }).querySelector(".workspace-rail-state")).toHaveTextContent("RUN");
     expect(screen.queryByRole("button", { name: "关闭工作区 alpha" }))
       .not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "关闭工作区 beta" }));
