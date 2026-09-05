@@ -5356,8 +5356,7 @@ pre {
   .mission-section-heading,
   .mission-objective-copy small,
   .mission-objective-count span,
-  .mission-context-threshold,
-  .mission-activity-facts {
+  .mission-context-threshold {
     font-family: "Cascadia Code", Consolas, monospace;
   }
 
@@ -5415,8 +5414,7 @@ pre {
 
   .mission-objectives {
     min-height: 0;
-    max-height: 56%;
-    flex: 0 1 auto;
+    flex: 1 1 auto;
     display: flex;
     flex-direction: column;
     padding: 10px 12px 14px;
@@ -5576,55 +5574,7 @@ pre {
     color: var(--rebel-red);
   }
 
-  .mission-activity {
-    min-height: 0;
-    flex: 1 1 auto;
-    padding: 20px 18px 24px;
-    color: var(--rebel-paper);
-    background: var(--rebel-black);
-    border-top: 1px solid var(--rebel-line);
-  }
 
-  .mission-activity .mission-section-heading {
-    margin-bottom: 12px;
-    color: var(--rebel-red);
-  }
-
-  .mission-activity-facts {
-    display: grid;
-    gap: 0;
-    margin: 0;
-  }
-
-  .mission-activity-facts > div {
-    display: grid;
-    grid-template-columns: 74px minmax(0, 1fr);
-    align-items: baseline;
-    gap: 10px;
-    padding: 10px 0;
-    border-top: 1px solid var(--rebel-line);
-  }
-
-  .mission-activity-facts dt,
-  .mission-activity-facts dd {
-    margin: 0;
-    letter-spacing: 0.08em;
-  }
-
-  .mission-activity-facts dt {
-    color: var(--rebel-paper-muted);
-    font-size: 8px;
-  }
-
-  .mission-activity-facts dd {
-    overflow: hidden;
-    color: var(--rebel-paper);
-    font-size: 10px;
-    font-weight: 900;
-    text-align: right;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
 }
 
 @media (prefers-color-scheme: dark) {

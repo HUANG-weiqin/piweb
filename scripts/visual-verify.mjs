@@ -649,7 +649,6 @@ async function captureViewport(client, outputPath, width, height, index, surface
             '.mission-command',
             '.mission-objective-list',
             '.mission-context',
-            '.mission-activity',
           ]
           : ['.loop-list-items']),
         ...commandSelectors,

@@ -54,8 +54,10 @@ describe("VisualFixture", () => {
       .toHaveTextContent("1 CLEARED");
     expect(within(mission).getByText("复用真实工作台组件与状态样式")
       .closest("li")).toHaveClass("is-active");
-    expect(mission).toHaveTextContent("Tech Lead");
-    expect(mission).toHaveTextContent("RUNRUNNING");
+    expect(within(mission).queryByRole("region", { name: "Activity" }))
+      .not.toBeInTheDocument();
+    expect(within(mission).queryByRole("heading", { name: "ACTIVITY" }))
+      .not.toBeInTheDocument();
     expect(within(mission).queryByRole("button")).not.toBeInTheDocument();
     expect(screen.getByText("COMMAND", {
       selector: ".composer-command-label",
