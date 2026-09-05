@@ -6568,7 +6568,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: /^model\s*⌄$/ }));
     fireEvent.click(screen.getByRole("button", { name: "登录订阅账户" }));
     const first = latestCommand("login_oauth");
-    fireEvent.click(screen.getByRole("button", { name: "取消登录" }));
+    fireEvent.keyDown(document, { key: "Escape" });
     expect(latestCommand("cancel_auth")).toMatchObject({ authFlowId: first.authFlowId });
 
     act(() => {
