@@ -6041,9 +6041,7 @@ pre {
 
 .app-shell .composer:focus-within {
   border-color: transparent;
-  box-shadow:
-    inset 0 0 0 3px var(--rebel-red),
-    0 -6px 0 rgb(0 0 0 / 42%);
+  box-shadow: 0 -6px 0 rgb(0 0 0 / 42%);
 }
 
 .app-shell .composer-command-label {
@@ -6074,6 +6072,15 @@ pre {
   transform: skewY(-13deg);
 }
 
+.app-shell .composer:focus-within .composer-command-label {
+  color: var(--rebel-on-oxide);
+  background: var(--rebel-red);
+}
+
+.app-shell .composer:focus-within .composer-command-label::before {
+  background: var(--rebel-paper);
+}
+
 .app-shell .composer textarea {
   min-width: 0;
   min-height: 78px;
@@ -6088,6 +6095,14 @@ pre {
   font-size: 15px;
   font-weight: 650;
   line-height: 1.45;
+}
+
+.app-shell .composer:focus-within textarea {
+  background: color-mix(in srgb, var(--rebel-paper) 92%, white);
+}
+
+.app-shell .composer textarea:focus-visible {
+  outline: none;
 }
 
 .app-shell .composer textarea::placeholder {
@@ -6127,9 +6142,10 @@ pre {
 
 .app-shell .send.stop {
   width: 72px;
+  border: 0;
   color: var(--rebel-paper);
   background: var(--rebel-black);
-  box-shadow: inset 0 0 0 2px var(--rebel-paper);
+  box-shadow: none;
   clip-path: polygon(6px 0, 100% 0, calc(100% - 6px) 100%, 0 100%);
   font-size: 10px;
 }
@@ -6137,7 +6153,6 @@ pre {
 .app-shell .send.stop:not(:disabled):hover {
   color: var(--rebel-paper);
   background: var(--rebel-raised);
-  box-shadow: inset 0 0 0 2px var(--rebel-red);
 }
 
 .app-shell .composer-meta {
