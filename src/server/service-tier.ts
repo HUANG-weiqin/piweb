@@ -17,6 +17,11 @@ const OPENAI_CODEX_BACKEND = "https://chatgpt.com/backend-api";
 const CODEX_ROUTING_HINT_HEADER = "x-codex-routing-hint";
 const CODEX_SERVICE_TIERS = ["priority"] satisfies readonly ServiceTier[];
 
+/** Internal, enumerable request-local marker consumed before provider dispatch. */
+export const COMPACTION_SERVICE_TIER_SUPPRESSION = Symbol(
+  "piweb.compactionServiceTierSuppression",
+);
+
 type ServiceTierRouteModel = {
   provider?: unknown;
   id?: unknown;
@@ -91,6 +96,27 @@ function withRoutingHint(
   return { ...options, headers };
 }
 
+function consumeCompactionTierSuppression(
+  options: ModelsSimpleStreamOptions | undefined,
+): {
+  options: ModelsSimpleStreamOptions | undefined;
+  suppressesTier: boolean;
+} {
+  if (
+    !options
+    || !Object.hasOwn(options, COMPACTION_SERVICE_TIER_SUPPRESSION)
+  ) {
+    return { options, suppressesTier: false };
+  }
+  const providerOptions = {
+    ...options,
+  } as ModelsSimpleStreamOptions & {
+    [COMPACTION_SERVICE_TIER_SUPPRESSION]?: true;
+  };
+  delete providerOptions[COMPACTION_SERVICE_TIER_SUPPRESSION];
+  return { options: providerOptions, suppressesTier: true };
+}
+
 function streamCodexWithServiceTier(
   modelRuntime: ServiceTierModelRuntime,
   model: Model<Api>,
@@ -140,7 +166,8 @@ export function installServiceTierOverride(
     context,
     options,
   ) => {
-    const tier = getServiceTier();
+    const request = consumeCompactionTierSuppression(options);
+    const tier = request.suppressesTier ? null : getServiceTier();
     if (tier !== null) assertModelSupportsServiceTier(model, tier);
 
     const routingHint = openAICodexRoutingHint(model, tier);
@@ -156,8 +183,8 @@ export function installServiceTierOverride(
       lastRoutingHint = routingHint;
     }
     const routedOptions = routingHint === null
-      ? options
-      : withRoutingHint(options, routingHint);
+      ? request.options
+      : withRoutingHint(request.options, routingHint);
 
     if (tier === null) {
       return originalStreamSimple.call(

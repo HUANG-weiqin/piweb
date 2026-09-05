@@ -531,8 +531,18 @@ class FakeRuntime implements PiRuntimeLike {
   readonly modelListeners = new Set<() => void>();
   readonly createConversationIds: string[] = [];
   readonly availableModels: RoleCatalogModel[] = [
-    { provider: "test", id: "model-a", reasoning: true },
-    { provider: "test", id: "model-b", reasoning: true },
+    {
+      provider: "test",
+      id: "model-a",
+      reasoning: true,
+      contextWindow: 200_000,
+    },
+    {
+      provider: "test",
+      id: "model-b",
+      reasoning: true,
+      contextWindow: 200_000,
+    },
   ];
   readonly nextSessionBehaviors: SessionBehavior[][] = [];
   projectCatalogCreations = 0;
@@ -757,6 +767,7 @@ async function createFixture(
       description: defaultRole.description,
       systemPrompt: defaultRole.systemPrompt,
       model: defaultRole.model,
+      compactionModel: defaultRole.compactionModel,
       defaultThinkingLevel: defaultRole.defaultThinkingLevel,
       defaultServiceTier: defaultRole.defaultServiceTier,
       toolMode: "full_access",
@@ -2350,6 +2361,7 @@ describe("ProjectSessionCoordinator", () => {
         description: defaultRole.description,
         systemPrompt: defaultRole.systemPrompt,
         model: defaultRole.model,
+        compactionModel: defaultRole.compactionModel,
         defaultThinkingLevel: defaultRole.defaultThinkingLevel,
         defaultServiceTier: "priority",
         toolMode: defaultRole.toolMode,
@@ -2706,6 +2718,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Reviews lifecycle code",
       systemPrompt: "Review the first revision.",
       model: { provider: "test", id: "model-a" },
+      compactionModel: { provider: "test", id: "model-b" },
       defaultThinkingLevel: "off",
       defaultServiceTier: null,
       toolMode: "read_only",
@@ -2725,6 +2738,7 @@ describe("ProjectSessionCoordinator", () => {
         description: "Reviews concurrency",
         systemPrompt: "Review the second revision.",
         model: { provider: "test", id: "model-b" },
+        compactionModel: null,
         defaultThinkingLevel: "high",
         defaultServiceTier: null,
         toolMode: "full_access",
@@ -2741,11 +2755,13 @@ describe("ProjectSessionCoordinator", () => {
       name: "Reviewer",
       systemPrompt: "Review the first revision.",
       model: { provider: "test", id: "model-a" },
+      compactionModel: { provider: "test", id: "model-b" },
       canManageSessions: false,
     });
     expect(fixture.runtime.createOptions.get(first.conversationId)).toMatchObject({
       roleSystemPrompt: "Review the first revision.",
       model: { provider: "test", id: "model-a" },
+      compactionModel: { provider: "test", id: "model-b" },
       toolMode: "read_only",
     });
     expect(
@@ -2770,11 +2786,15 @@ describe("ProjectSessionCoordinator", () => {
       name: "Senior reviewer",
       systemPrompt: "Review the second revision.",
       model: { provider: "test", id: "model-b" },
+      compactionModel: null,
       canManageSessions: true,
     });
     expect(fixture.runtime.createOptions.get(second.conversationId)).toMatchObject({
       toolMode: "full_access",
     });
+    expect(
+      fixture.runtime.createOptions.get(second.conversationId)?.compactionModel,
+    ).toBeUndefined();
     expect(
       fixture.runtime.createOptions.get(second.conversationId)
         ?.workbenchCustomTools?.map(({ name }) => name),
@@ -2815,6 +2835,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Becomes unavailable after route drift",
       systemPrompt: "",
       model: { provider: "test", id: "model-a" },
+      compactionModel: null,
       defaultThinkingLevel: "off",
       defaultServiceTier: "priority",
       toolMode: "read_only",
@@ -2838,6 +2859,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Builds the selected change",
       systemPrompt: "Implement the requested change.",
       model: { provider: "test", id: "model-b" },
+      compactionModel: null,
       defaultThinkingLevel: "high",
       defaultServiceTier: null,
       toolMode: "full_access",
@@ -2905,6 +2927,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Builds the selected change",
       systemPrompt: "Implement the requested change.",
       model: { provider: "test", id: "model-b" },
+      compactionModel: null,
       defaultThinkingLevel: "high",
       defaultServiceTier: null,
       toolMode: "full_access",
@@ -2999,6 +3022,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "",
       systemPrompt: "",
       model: { provider: "test", id: "model-b" },
+      compactionModel: null,
       defaultThinkingLevel: "off",
       defaultServiceTier: null,
       toolMode: "read_only",
@@ -3039,6 +3063,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "",
       systemPrompt: "This runtime will fail.",
       model: { provider: "test", id: "model-b" },
+      compactionModel: null,
       defaultThinkingLevel: "off",
       defaultServiceTier: null,
       toolMode: "full_access",
@@ -3123,6 +3148,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Uses a project extension provider",
       systemPrompt: "Use the project provider.",
       model: projectModel,
+      compactionModel: null,
       defaultThinkingLevel: "off",
       defaultServiceTier: null,
       toolMode: "read_only",
@@ -3160,6 +3186,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Reviews prompts",
       systemPrompt: "The original prompt.",
       model: { provider: "test", id: "model-b" },
+      compactionModel: { provider: "test", id: "model-a" },
       defaultThinkingLevel: "high",
       defaultServiceTier: null,
       toolMode: "read_only",
@@ -3170,6 +3197,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "May only inspect project files and propose role prompts",
       systemPrompt: "Improve roles only when the user asks.",
       model: { provider: "test", id: "model-a" },
+      compactionModel: null,
       defaultThinkingLevel: "off",
       defaultServiceTier: null,
       toolMode: "read_only",
@@ -3203,6 +3231,7 @@ describe("ProjectSessionCoordinator", () => {
     expect(listed).toContainEqual(expect.objectContaining({
       id: targetRole.id,
       revision: before.revision,
+      compactionModel: before.compactionModel,
     }));
     await expect(executeTool(
       fixture.runtime.control(source.conversationId),
@@ -3216,6 +3245,7 @@ describe("ProjectSessionCoordinator", () => {
       description: before.description,
       systemPrompt: before.systemPrompt,
       model: before.model,
+      compactionModel: before.compactionModel,
       defaultThinkingLevel: before.defaultThinkingLevel,
       defaultServiceTier: before.defaultServiceTier,
       toolMode: before.toolMode,
@@ -3273,6 +3303,7 @@ describe("ProjectSessionCoordinator", () => {
         description: before.description,
         systemPrompt: replacement,
         model: before.model,
+        compactionModel: before.compactionModel,
         defaultThinkingLevel: before.defaultThinkingLevel,
         defaultServiceTier: before.defaultServiceTier,
         toolMode: before.toolMode,
@@ -3282,6 +3313,7 @@ describe("ProjectSessionCoordinator", () => {
       expect(existingTarget.profile.role).toMatchObject({
         revision: before.revision,
         systemPrompt: before.systemPrompt,
+        compactionModel: before.compactionModel,
       });
 
       const appliedEditorCallCount = editorCalls.length;
@@ -3363,9 +3395,13 @@ describe("ProjectSessionCoordinator", () => {
       expect(newTarget.profile.role).toMatchObject({
         revision: after.revision,
         systemPrompt: replacement,
+        compactionModel: before.compactionModel,
       });
       expect(fixture.runtime.createOptions.get(newTarget.conversationId))
-        .toMatchObject({ roleSystemPrompt: replacement });
+        .toMatchObject({
+          roleSystemPrompt: replacement,
+          compactionModel: before.compactionModel,
+        });
     } finally {
       detach();
     }
@@ -3378,6 +3414,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "",
       systemPrompt: "Keep this prompt.",
       model: { provider: "test", id: "model-a" },
+      compactionModel: null,
       defaultThinkingLevel: "off",
       defaultServiceTier: null,
       toolMode: "read_only",
@@ -3417,6 +3454,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "",
       systemPrompt: "Keep this prompt.",
       model: { provider: "test", id: "model-a" },
+      compactionModel: null,
       defaultThinkingLevel: "off",
       defaultServiceTier: null,
       toolMode: "read_only",
@@ -3483,6 +3521,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Before concurrent edit",
       systemPrompt: "The captured base prompt.",
       model: { provider: "test", id: "model-a" },
+      compactionModel: null,
       defaultThinkingLevel: "off",
       defaultServiceTier: null,
       toolMode: "read_only",
@@ -3508,6 +3547,7 @@ describe("ProjectSessionCoordinator", () => {
               description: current.description,
               systemPrompt: "Concurrent revision",
               model: current.model,
+              compactionModel: current.compactionModel,
               defaultThinkingLevel: current.defaultThinkingLevel,
               defaultServiceTier: current.defaultServiceTier,
               toolMode: current.toolMode,
@@ -3562,6 +3602,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "",
       systemPrompt: "The captured base prompt.",
       model: { provider: "test", id: "model-a" },
+      compactionModel: null,
       defaultThinkingLevel: "off",
       defaultServiceTier: null,
       toolMode: "read_only",
@@ -3626,6 +3667,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Before concurrent edit",
       systemPrompt: "The captured base prompt.",
       model: { provider: "test", id: "model-a" },
+      compactionModel: null,
       defaultThinkingLevel: "off",
       defaultServiceTier: null,
       toolMode: "read_only",
@@ -3675,6 +3717,7 @@ describe("ProjectSessionCoordinator", () => {
           description: "Changed while the editor was open",
           systemPrompt: current.systemPrompt,
           model: current.model,
+          compactionModel: current.compactionModel,
           defaultThinkingLevel: current.defaultThinkingLevel,
           defaultServiceTier: current.defaultServiceTier,
           toolMode: current.toolMode,
@@ -3870,6 +3913,7 @@ describe("ProjectSessionCoordinator", () => {
         description: "Becomes unavailable after route drift",
         systemPrompt: "",
         model: { provider: "test", id: "model-a" },
+        compactionModel: null,
         defaultThinkingLevel: "off",
         defaultServiceTier: "priority",
         toolMode: "read_only",
@@ -3920,6 +3964,7 @@ describe("ProjectSessionCoordinator", () => {
         description: targetRole.description,
         systemPrompt: targetRole.systemPrompt,
         model: targetRole.model,
+        compactionModel: targetRole.compactionModel,
         defaultThinkingLevel: targetRole.defaultThinkingLevel,
         defaultServiceTier: "priority",
         toolMode: targetRole.toolMode,
@@ -4396,6 +4441,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Must not replace the frozen start request",
       systemPrompt: "Use a different role.",
       model: { provider: "test", id: "model-a" },
+      compactionModel: null,
       defaultThinkingLevel: "off",
       defaultServiceTier: null,
       toolMode: "read_only",
@@ -4462,6 +4508,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "The originally selected role",
       systemPrompt: "Use the original role prompt.",
       model: { provider: "test", id: "model-a" },
+      compactionModel: null,
       defaultThinkingLevel: "off",
       defaultServiceTier: null,
       toolMode: "read_only",
@@ -4512,6 +4559,7 @@ describe("ProjectSessionCoordinator", () => {
         description: "A later role definition",
         systemPrompt: "Use the rewritten role prompt.",
         model: { provider: "test", id: "model-b" },
+        compactionModel: null,
         defaultThinkingLevel: "off",
         defaultServiceTier: null,
         toolMode: "full_access",
@@ -5394,6 +5442,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Works only in its own session",
       systemPrompt: "Complete the assigned work.",
       model: { provider: "test", id: "model-a" },
+      compactionModel: null,
       defaultThinkingLevel: "off",
       defaultServiceTier: null,
       toolMode: "read_only",
@@ -12631,6 +12680,7 @@ describe("ProjectSessionCoordinator", () => {
         id: "default",
         name: "旧会话",
         model: { provider: "test", id: "model-a" },
+        compactionModel: null,
         canManageSessions: false,
       },
     });
@@ -12652,6 +12702,7 @@ describe("ProjectSessionCoordinator", () => {
       description: "Must survive the processing crash boundary",
       systemPrompt: "Use the frozen processing recovery prompt.",
       model: { provider: "test", id: "model-b" },
+      compactionModel: { provider: "test", id: "model-a" },
       defaultThinkingLevel: "off",
       defaultServiceTier: null,
       toolMode: "read_only",
@@ -12789,6 +12840,7 @@ describe("ProjectSessionCoordinator", () => {
     );
     expect(runtime.createOptions.get(targetId)).toMatchObject({
       model: role.model,
+      compactionModel: role.compactionModel,
       roleSystemPrompt: role.systemPrompt,
     });
     expect(

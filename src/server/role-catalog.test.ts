@@ -17,8 +17,14 @@ async function rolesPath(): Promise<string> {
   return join(directory, "piweb", "roles.json");
 }
 
-function model(provider: string, id: string): RoleModelReference {
-  return { provider, id };
+function model(
+  provider: string,
+  id: string,
+  contextWindow = 200_000,
+): RoleCatalogModel {
+  const reference = { provider, id };
+  Object.defineProperty(reference, "contextWindow", { value: contextWindow });
+  return reference as RoleCatalogModel;
 }
 
 function source(initial: RoleCatalogModel[]): RoleCatalogModelSource & {
@@ -67,6 +73,7 @@ describe("RoleCatalog", () => {
       description: "changed",
       systemPrompt: "new prompt",
       model: model("provider", "model-a"),
+      compactionModel: null,
       defaultThinkingLevel: "off",
       defaultServiceTier: null,
       toolMode: "read_only",
@@ -102,6 +109,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "",
       model: model("provider", "missing"),
+      compactionModel: null,
       defaultThinkingLevel: "off",
       defaultServiceTier: null,
       toolMode: "read_only",
@@ -114,6 +122,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "",
       model: model("provider", "missing"),
+      compactionModel: null,
       defaultThinkingLevel: "off",
       defaultServiceTier: null,
       toolMode: "read_only",
@@ -141,6 +150,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "",
       model: model("extension", "project-model"),
+      compactionModel: null,
       defaultThinkingLevel: "off",
       defaultServiceTier: null,
       toolMode: "read_only",
@@ -152,6 +162,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "",
       model: model("extension", "project-model"),
+      compactionModel: null,
       defaultThinkingLevel: "off",
       defaultServiceTier: null,
       toolMode: "read_only",
@@ -176,6 +187,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "",
       model: model("extension", "missing"),
+      compactionModel: null,
       defaultThinkingLevel: "off",
       defaultServiceTier: null,
       toolMode: "read_only",
@@ -187,6 +199,7 @@ describe("RoleCatalog", () => {
       description: "The project provider is temporarily unavailable.",
       systemPrompt: "Keep the frozen model.",
       model: model("extension", "project-model"),
+      compactionModel: null,
       defaultThinkingLevel: "off",
       defaultServiceTier: null,
       toolMode: "full_access",
@@ -208,6 +221,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "Review.",
       model: model("provider", "model-a"),
+      compactionModel: null,
       defaultThinkingLevel: "off",
       defaultServiceTier: null,
       toolMode: "read_only",
@@ -231,6 +245,101 @@ describe("RoleCatalog", () => {
     expect(listener).toHaveBeenCalledTimes(2);
   });
 
+  it("validates explicit compaction models against available context windows", async () => {
+    const main = model("provider", "main", 100_000);
+    const compactor = model("provider", "compactor", 200_000);
+    const models = source([main, compactor]);
+    const catalog = await RoleCatalog.open(models, await rolesPath());
+    const input = {
+      name: "Compacting reviewer",
+      description: "",
+      systemPrompt: "",
+      model: main,
+      compactionModel: compactor,
+      defaultThinkingLevel: "off" as const,
+      defaultServiceTier: null,
+      toolMode: "read_only" as const,
+      canManageSessions: false,
+    };
+    const created = await catalog.createRole(input);
+    const snapshot = catalog.getConversationRole(created.id);
+    snapshot.model.id = "mutated-main";
+    snapshot.compactionModel!.id = "mutated-compactor";
+    expect(catalog.getConversationRole(created.id)).toMatchObject({
+      model: main,
+      compactionModel: compactor,
+    });
+
+    models.available = [main];
+    expect(catalog.listRoles()).toContainEqual(expect.objectContaining({
+      id: created.id,
+      available: false,
+      unavailableReason: "压缩模型当前不可用：provider/compactor",
+    }));
+    await expect(catalog.createRole({
+      ...input,
+      name: "Unavailable compactor",
+    })).rejects.toThrow("Role compaction model is unavailable");
+    await expect(catalog.updateRole(created.id, created.revision, "", {
+      ...input,
+      name: "Renamed while compactor is unavailable",
+    })).resolves.toMatchObject({
+      name: "Renamed while compactor is unavailable",
+    });
+    models.available = [model("provider", "main", 300_000), compactor];
+    expect(catalog.listRoles()).toContainEqual(expect.objectContaining({
+      id: created.id,
+      unavailableReason:
+        "压缩模型上下文窗口不能小于主模型（压缩模型：200000，主模型：300000）",
+    }));
+
+    const smallerCompactor = source([
+      model("provider", "small-main", 200_000),
+      model("provider", "small-compactor", 100_000),
+    ]);
+    const tooSmall = await RoleCatalog.open(smallerCompactor, await rolesPath());
+    await expect(tooSmall.createRole({
+      ...input,
+      name: "Too small compactor",
+      model: model("provider", "small-main", 200_000),
+      compactionModel: model("provider", "small-compactor", 100_000),
+    })).rejects.toThrow(
+      "context window must be at least the primary model (compaction: 100000, primary: 200000)",
+    );
+
+    const invalidWindow = await RoleCatalog.open(source([
+      model("provider", "invalid-main", Number.POSITIVE_INFINITY),
+      model("provider", "invalid-compactor", 200_000),
+    ]), await rolesPath());
+    await expect(invalidWindow.createRole({
+      ...input,
+      name: "Invalid context window",
+      model: model("provider", "invalid-main", Number.POSITIVE_INFINITY),
+      compactionModel: model("provider", "invalid-compactor", 200_000),
+    })).rejects.toThrow("context window must be a finite positive number");
+
+    const upgradedModels = source([
+      model("provider", "small", 100_000),
+      model("provider", "large", 300_000),
+      model("provider", "fixed-compactor", 200_000),
+    ]);
+    const upgraded = await RoleCatalog.open(upgradedModels, await rolesPath());
+    const role = await upgraded.createRole({
+      ...input,
+      name: "Upgradeable",
+      model: model("provider", "small", 100_000),
+      compactionModel: model("provider", "fixed-compactor", 200_000),
+    });
+    await expect(upgraded.updateRole(role.id, role.revision, "", {
+      ...input,
+      name: "Larger primary",
+      model: model("provider", "large", 300_000),
+      compactionModel: model("provider", "fixed-compactor", 200_000),
+    })).rejects.toThrow(
+      "context window must be at least the primary model (compaction: 200000, primary: 300000)",
+    );
+  });
+
   it("validates role default service tiers by request route and reports drift", async () => {
     const selected = {
       ...model("provider", "codex"),
@@ -244,6 +353,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "",
       model: model("provider", "codex"),
+      compactionModel: null,
       defaultThinkingLevel: "off",
       defaultServiceTier: "priority",
       toolMode: "read_only",
@@ -263,6 +373,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "",
       model: model("provider", "codex"),
+      compactionModel: null,
       defaultThinkingLevel: "off",
       defaultServiceTier: "priority",
       toolMode: "read_only",
@@ -274,6 +385,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "",
       model: model("provider", "codex"),
+      compactionModel: null,
       defaultThinkingLevel: "off",
       defaultServiceTier: "priority",
       toolMode: "read_only",
@@ -295,6 +407,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "",
       model: model("provider", "limited"),
+      compactionModel: null,
       defaultThinkingLevel: "max",
       defaultServiceTier: null,
       toolMode: "read_only",
@@ -305,6 +418,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "",
       model: model("provider", "limited"),
+      compactionModel: null,
       defaultThinkingLevel: "xhigh",
       defaultServiceTier: null,
       toolMode: "read_only",
@@ -316,6 +430,7 @@ describe("RoleCatalog", () => {
       description: "",
       systemPrompt: "",
       model: model("provider", "limited"),
+      compactionModel: null,
       defaultThinkingLevel: "high",
       defaultServiceTier: null,
       toolMode: "read_only",

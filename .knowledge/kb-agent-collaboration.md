@@ -1,6 +1,6 @@
 # Agent 协作
 
-`updated: 2026-09-05`
+`updated: 2026-09-06`
 
 ## 这个模块是干什么的
 
@@ -17,12 +17,12 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
 
 ## 角色
 
-- `RoleStore` 是用户级严格 v6 目录，`<Pi agent dir>/piweb/roles.json` 保存角色元数据与受控 Markdown 引用，提示词正文位于同级 `role-prompts/<roleId>.<revision>.md`；角色目录不由项目文件定义或重定向。角色 ID 按大小写不敏感唯一校验；RoleStore 对上层仍投影完整 `systemPrompt`，浏览器协议和管理界面不观察文件边界。
-- 角色包含稳定 ID、revision、名称、简介、system prompt、固定 provider/model、模型默认思考强度、nullable 默认服务层级、`read_only | full_access` 工具权限，以及 `canManageSessions` 能力。提示词文件必须与角色 ID/revision 精确匹配、是有限合法 UTF-8 的常规文件；每次读取重新 hydrate，因此外部编辑会影响后续模板读取，但没有 watcher 主动广播。读取使用同一打开句柄的有界内容，lstat/fstat 身份可用时复核，平台没有 O_NOFOLLOW 时不伪造保证。创建/更新先原子写新 revision Markdown，再原子替换 manifest，旧版 inline prompt 会保真迁移；成功重开时只清理严格受控且未引用的 prompt orphan。损坏、缺失、未知字段和未知版本 fail closed。更新使用 expected revision 加 UI base 的 expectedSystemPrompt，旧版角色的默认思考强度为 `off`、默认服务层级为 `null`、工具权限为 `read_only`、会话编排严格 opt-in。write tail 与 revision CAS 是单个 `RoleStore` 实例内的串行边界，不提供跨进程文件锁；同一 agent dir 不应由多个 Pi Web 服务并发写角色目录。
+- `RoleStore` 是用户级严格 v7 目录，`<Pi agent dir>/piweb/roles.json` 保存角色元数据与受控 Markdown 引用，提示词正文位于同级 `role-prompts/<roleId>.<revision>.md`；角色目录不由项目文件定义或重定向。角色 ID 按大小写不敏感唯一校验；RoleStore 对上层仍投影完整 `systemPrompt`，浏览器协议和管理界面不观察文件边界。
+- 角色包含稳定 ID、revision、名称、简介、system prompt、固定 primary provider/model、必填 nullable `compactionModel`、模型默认思考强度、nullable 默认服务层级、`read_only | full_access` 工具权限，以及 `canManageSessions` 能力；模板、draft 和 frozen snapshot 都保留该字段，`null` 跟随冻结 primary model。旧 v1–v6 role 文档及旧 conversation/card/role-change snapshot 缺失时归一化为 `null`，不增加语义 revision。提示词文件必须与角色 ID/revision 精确匹配、是有限合法 UTF-8 的常规文件；每次读取重新 hydrate，因此外部编辑会影响后续模板读取，但没有 watcher 主动广播。读取使用同一打开句柄的有界内容，lstat/fstat 身份可用时复核，平台没有 O_NOFOLLOW 时不伪造保证。创建/更新先原子写新 revision Markdown，再原子替换 manifest，旧版 inline prompt 会保真迁移；成功重开时只清理严格受控且未引用的 prompt orphan。损坏、缺失、未知字段和未知版本 fail closed。更新使用 expected revision 加 UI base 的 expectedSystemPrompt，旧版角色的默认思考强度为 `off`、默认服务层级为 `null`、工具权限为 `read_only`、会话编排严格 opt-in。write tail 与 revision CAS 是单个 `RoleStore` 实例内的串行边界，不提供跨进程文件锁；同一 agent dir 不应由多个 Pi Web 服务并发写角色目录。
 - 每个工作台 Agent 都能读取任意角色的完整定义，因此角色 system prompt 会进入调用模型和来源 conversation transcript，不是秘密存储，不得放 API Key 或其它敏感值。Agent 只能通过 `propose_role_revision` 提议完整替换 system prompt；用户在 conversation-scoped editor 中取消时不写，完成后宿主才按 expected revision + captured base prompt CAS 写下一 revision。取消有效到 `RoleStore` 的 commit 开始：入队前、排队任务开始和 commit 前都检查宿主创建的 `AbortError`，一旦 commit 已调用就按已授权提交处理，不尝试虚假回滚。CAS queue race 若基线已变化返回结构化 `stale`，基线未变化则继续抛出原始 I/O/可用性错误。名称、简介、模型、思考强度、默认服务层级、工具权限和会话管理能力均由旧模板复制，工具参数不能提交这些字段。
 - 初始化“默认 / 默认角色”只是首次展示模板，可以像其它角色一样编辑、删除，删除后不会重建；新会话仍必须显式选择角色。
-- `RoleCatalog` 用当前项目 actor 的 session-local 模型目录动态计算模板是否可用，因此项目静态 provider 也能参与选择；空项目使用 coordinator 持有的 project model catalog，它经过相同 trust/resource/provider 校验，但不会创建隐藏 AgentSession。角色 CRUD、模型列表和 API Key provider 校验都使用这条项目目录；非空默认服务层级还必须由固定模型的请求路由显式声明支持。真正创建仍会由 `PiRuntime` 在项目资源加载后再次校验固定模型。
-- 新会话把完整角色修订（包括默认思考强度、默认服务层级、工具权限与会话管理能力）复制到 `piweb.conversation_meta.v1`；用户和 Agent 创建的队友都从这份冻结快照取得初始服务层级。之后修改或删除模板不会自动改变旧会话；用户可在 idle 边界显式应用一个当前可用模板，宿主追加同时携带新有效服务层级的 `piweb.conversation_role_change.v1` 并用同一 SessionManager 重建 AgentSession，失败补偿也用一条记录恢复旧角色与旧有效层级。角色 prompt 追加到会话 system prompt，实际模型与初始思考强度必须与当前快照完全一致，SDK fallback/clamp 会被拒绝。旧 conversation metadata 缺少默认思考强度、默认服务层级、工具权限或能力字段时分别按 `off` / `null` / `read_only` / 关闭迁移；旧角色变更记录没有服务层级字段时保留当时的会话选择。
+- `RoleCatalog` 用当前项目 actor 的 session-local 模型目录动态计算模板是否可用，因此项目静态 provider 也能参与选择；空项目使用 coordinator 持有的 project model catalog，它经过相同 trust/resource/provider 校验，但不会创建隐藏 AgentSession。角色 CRUD、模型列表和 API Key provider 校验都使用这条项目目录；非空默认服务层级还必须由固定模型的请求路由显式声明支持。显式 `compactionModel` 也必须当前可用、contextWindow 为有限正数且不小于 primary；主模型或压缩模型变化时都重验。目录漂移可使模板 unavailable，但不会阻止已有 frozen conversation 打开；每次默认压缩仍 fresh-resolve 并重验，失败不回退。真正创建仍会由 `PiRuntime` 在项目资源加载后再次校验固定模型。
+- 新会话把完整角色修订（包括 primary model、nullable `compactionModel`、默认思考强度、默认服务层级、工具权限与会话管理能力）复制到 `piweb.conversation_meta.v1`；用户和 Agent 创建的队友都从这份冻结快照取得初始服务层级与压缩模型 identity。之后修改或删除模板不会自动改变旧会话；用户可在 idle 边界显式应用一个当前可用模板，宿主追加同时携带新有效服务层级的 `piweb.conversation_role_change.v1` 并用同一 SessionManager 重建 AgentSession，失败补偿也用一条记录恢复旧角色与旧有效层级。角色 prompt 追加到会话 system prompt，实际模型与初始思考强度必须与当前快照完全一致，SDK fallback/clamp 会被拒绝。旧 conversation metadata 缺少默认思考强度、默认服务层级、工具权限或能力字段时分别按 `off` / `null` / `read_only` / 关闭迁移；旧角色变更记录没有服务层级字段时保留当时的会话选择。
 - 旧会话第一次在独占 writer lease 下打开时迁移为独立“旧会话”快照；其 system prompt 固定为空，并尽量保留旧分支模型，不依赖初始化模板。
 
 ## Actor 所有权
@@ -32,7 +32,7 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
 - actor opening singleflight，浏览器和 Agent 打开同一会话会复用 actor 与 writer lease；
 - actor 同时持有 conversation-scoped LoopList：每项只有 `pending | active | completed` 一个持久状态，允许多个 active，数组顺序仅用于展示；active 表示当前关注而非运行证明，和 `armed`、`activeRun` 分开。新写入使用严格 `piweb.loop_list.v2` / `piweb.loop_list_continue.v2`；读取 v1 时只把 `checked=true/false` 映射为 completed/pending，绝不从 armed 推导 active，也不重写旧 JSONL。`todo_write` 只做有界整表替换并为任一非 completed 项 armed，`todo_pause` 原样暂停；actor 不新增持久字段，而是从 active branch 的全量快照重放两个 wall-clock 锚点：稳定 item ID 的无序集合变化视为整份计划变化并重置 list/active，两次快照的 active ID 无序集合变化只重置 active；整表锚点从当前 plan snapshot 建立时开始，active 锚点只在存在 active 时保留；重排、改文案、纯 pending/completed 进度和 pause 不改变对应 identity，多个 active 共用一个 active-context 计时；full-access 的 `request_edit_budget` 仅在授予时要求至少一个 active，拒绝不能改变额度；成功申请覆盖本 run 的 distinct-file 总额度而非累加，已修改路径仍计入新总数，授予后列表变化不追溯撤销额度。run 自然结束时若仍 armed 且有非 completed 项，就写入隐藏的上下文快照并在同一 RunTicket/runId 内续跑，最多 8 次。完成/清空停止，异常、abort 或上限暂停；进程打开与 rewind 后只从 Pi active branch 恢复状态且不自动运行，不能让较晚写入的 inactive branch 覆盖当前列表，后续普通浏览器 prompt 才重新 armed；若宿主按既有 runId 恢复被进程替换打断的 run，actor 必须先读取 active branch 上该 run 最新 continuation，再从下一个序号继续，8 次上限也跨恢复累计。严格 JSONL 扫描仍校验物理全集，并要求 v1/v2 continuation 的规范化快照精确匹配最近祖先列表、该列表 armed 且有未完成项、同一 run 在各自 branch 上从 1 连续递增到最多 8。
 - 每个项目还 singleflight 建立一个无 AgentSession 的 project model catalog；空项目可据此显示项目扩展模型、管理角色和创建第一条会话，最后一个项目 handle 释放后统一 dispose；
-- actor 原子拥有角色快照、`SessionManager`、writer lease、隔离的 settings/model registry、`AgentSession`、唯一 `activeRun`、串行队列和观察者；
+- actor 原子拥有角色快照（含冻结的 primary/compaction identity）、`SessionManager`、writer lease、隔离的 settings/model registry、`AgentSession`、唯一 `activeRun`、串行队列和观察者；coordinator 将该完整 frozen identity 传入每次 runtime create/reopen/switch/rollback/peer 路径，meta tools 不得丢失它；
 - `activeRun` 的 `queued / running / waiting / cancelling` 是侧栏 activity 与 busy 的唯一来源；
 - 浏览器切换焦点只更换观察者，不 abort、dispose 或暂停后台 actor；
 - coordinator close 会同步封闭新 lifecycle 入队并结算全部 extension UI/waiter，排空关闭前已接收的 lifecycle task 后再释放资源；尚未开始的 task 在任何持久写前失败，不能让 close 返回后继续追加卡片。迟到 actor/catalog 会立即 dispose，随后清理包括无浏览器观察者在内的全部 actor、后台恢复任务与项目 handle。
@@ -93,7 +93,7 @@ sender card 的 `running/delivered` 更新可因 active actor 的观察时点出
 - 当前角色完整修订由 base conversation metadata 加后续角色变更记录得出；重新打开会话使用最后一次成功应用的角色。角色模板后续编辑不会自动改变既有会话，只有用户显式切换才会从下一轮改变 system prompt、模型、默认思考强度、默认服务层级、权限与 meta 工具 schema。聊天页的思考强度控制仍只修改当前运行会话，不反写角色模板或角色快照。
 - 卡片状态、run settlement、message delivery receipt、temporary return receipt、meta operation 和 conversation metadata 使用普通 `custom` entry；SDK 的 `buildSessionContext()` 会忽略它们，因此状态更新既不改旧消息，也不污染模型缓存前缀。
 - 当前会话可用 `piweb.service_tier.v1` 覆盖角色默认服务层级；没有该记录时使用冻结角色默认，显式 `null` 记录则覆盖为供应商默认。切换角色会重置为新角色默认，但不会把会话覆盖反写角色模板或快照。
-- 会话自动压缩阈值同样使用普通 `piweb.compaction_threshold.v1` custom entry 保存；缺省为 70%，允许 20%–90%，最后一条有效记录生效，不进入模型上下文。
+- 会话自动压缩阈值同样使用普通 `piweb.compaction_threshold.v1` custom entry 保存；缺省为 70%，允许 20%–90%，最后一条有效记录生效，不进入模型上下文。默认压缩由 pinned Pi 0.84.4 的私有 `_runDefaultCompaction` 在 custom `session_before_compact` hook 之后执行：custom 结果直接采用并跳过 resolver，否则 `null` 跟随冻结 primary，显式模型每次 fresh-resolve 并重验可用性/有限正 contextWindow/`B >= A`，失败不调用 A fallback。Pi 原生 preparation、previous summary、split-turn、files、usage、abort、persistence 和 continuation 全部保留；普通 turn 永远使用冻结 primary。显式 B 清除 A 的 positional apiKey/headers/env，由 session-local `ModelRuntime` 为 B 重新解析认证且不继承 A service tier；request-local marker 在 provider 前剥离，Codex hint 只含 B model，socket fence 保留。压缩失败可保留 Pi 接点前已有的 transient overflow recovery 内存变化，但不追加 compaction entry 或成功 rebuild。
 - 用户可在会话空闲时发送精确关联的 `compact_context` 命令手动调用 Pi 标准 `compact()`；运行中会话拒绝手动压缩，成功后重新发布 state 与 snapshot。Agent 可调用 conversation-scoped `request_context_compaction` 提交一次易失请求；工具结果只证明请求被接受，不证明压缩成功。Actor 会等当前 assistant/tool turn 完整结束，再复用阈值压缩的安全 checkpoint，在同一 `runId` 内压缩并恢复未完成任务；实际成功仍只由 Pi 原生 compaction entry 证明。
 - 两个明确例外会有意改变模型输入：Pi 在上下文逼近上限时追加 compaction summary 并以摘要替换活动上下文，以及重新启动后项目资源本身发生变化导致基础 system prompt 变化。前者是继续运行所需，后者反映用户真实修改；工作台不为提高命中率伪装旧项目状态。
 
@@ -116,7 +116,7 @@ read_role
 propose_role_revision
 ```
 
-`list_roles` 返回有界角色元数据与 revision；`read_role` 一次读取一个角色的完整当前定义；`propose_role_revision` 要求调用方提交刚读取的 expected revision 和完整替换 prompt，只在用户 editor 提交后落版。提案可指向任意角色（包括调用者自身和 default），但不能创建/删除角色，也不能改认证、trust、既有会话角色或模型。prompt 已是目标值时返回 `already_current`；基线变化返回 `stale`；取消/中止返回 `cancelled`；用户改回基线返回 `unchanged`；成功返回新 revision。editor 返回后会重新读取基线，真正写入仍由 `RoleStore.updateRole` CAS 防止竞态。
+`list_roles` 返回有界角色元数据与 revision；`read_role` 一次读取一个角色的完整当前定义；`propose_role_revision` 要求调用方提交刚读取的 expected revision 和完整替换 prompt，只在用户 editor 提交后落版；prompt-only 提议的完整 draft 仍原样复制冻结的 compaction identity。提案可指向任意角色（包括调用者自身和 default），但不能创建/删除角色，也不能改认证、trust、既有会话角色或模型。prompt 已是目标值时返回 `already_current`；基线变化返回 `stale`；取消/中止返回 `cancelled`；用户改回基线返回 `unchanged`；成功返回新 revision。editor 返回后会重新读取基线，真正写入仍由 `RoleStore.updateRole` CAS 防止竞态。
 
 只有 frozen role 的 `canManageSessions=true` 时，actor 才额外注入九个会话编排工具：
 

@@ -24,7 +24,7 @@ import {
   type ThinkingLevel,
 } from "../shared/protocol.js";
 
-export const ROLE_STORE_VERSION = 6;
+export const ROLE_STORE_VERSION = 7;
 export const MAX_ROLE_COUNT = 64;
 export const MAX_ROLE_NAME_CHARACTERS = 80;
 export const MAX_ROLE_DESCRIPTION_CHARACTERS = 1_000;
@@ -57,6 +57,7 @@ export interface RoleDraft {
   description: string;
   systemPrompt: string;
   model: RoleModelReference | null;
+  compactionModel: RoleModelReference | null;
   defaultThinkingLevel: ThinkingLevel;
   defaultServiceTier: ServiceTier | null;
   toolMode: "read_only" | "full_access";
@@ -261,6 +262,7 @@ function parseRoleMetadata(
   legacyBehavior: boolean,
   legacyCanManageSessions: boolean,
   legacyServiceTier: boolean,
+  legacyCompactionModel: boolean,
 ): RoleMetadata {
   assertBoundedString(
     value.name,
@@ -301,10 +303,15 @@ function parseRoleMetadata(
     ? null
     : value.defaultServiceTier;
   assertServiceTier(defaultServiceTier, `${label}.defaultServiceTier`);
+  const compactionModel = value.compactionModel === undefined
+    && legacyCompactionModel
+    ? null
+    : parseModelReference(value.compactionModel, `${label}.compactionModel`);
   return {
     name: value.name,
     description: value.description,
     model: parseModelReference(value.model, `${label}.model`),
+    compactionModel,
     defaultThinkingLevel,
     defaultServiceTier,
     toolMode,
@@ -320,6 +327,7 @@ function parseRoleDraft(value: unknown, label: string): RoleDraft {
       "description",
       "systemPrompt",
       "model",
+      "compactionModel",
       "defaultThinkingLevel",
       "defaultServiceTier",
       "toolMode",
@@ -327,7 +335,7 @@ function parseRoleDraft(value: unknown, label: string): RoleDraft {
     ],
     label,
   );
-  const metadata = parseRoleMetadata(value, label, false, false, false);
+  const metadata = parseRoleMetadata(value, label, false, false, false, false);
   assertBoundedUtf8(
     value.systemPrompt,
     `${label}.systemPrompt`,
@@ -382,7 +390,14 @@ function parseLegacyRoleTemplate(
     label,
   );
   const identity = parseRoleIdentity(value, label);
-  const metadata = parseRoleMetadata(value, label, legacyBehavior, true, true);
+  const metadata = parseRoleMetadata(
+    value,
+    label,
+    legacyBehavior,
+    true,
+    true,
+    true,
+  );
   assertBoundedUtf8(
     value.systemPrompt,
     `${label}.systemPrompt`,
@@ -415,6 +430,7 @@ function parsePersistedRoleTemplate(
   value: unknown,
   index: number,
   legacyServiceTier = false,
+  legacyCompactionModel = false,
 ): PersistedRole {
   const label = `roles[${index}]`;
   assertExactObject(
@@ -426,6 +442,7 @@ function parsePersistedRoleTemplate(
       "description",
       "systemPromptFile",
       "model",
+      ...(legacyCompactionModel ? [] : ["compactionModel"]),
       "defaultThinkingLevel",
       ...(legacyServiceTier ? [] : ["defaultServiceTier"]),
       "toolMode",
@@ -444,7 +461,14 @@ function parsePersistedRoleTemplate(
   );
   return {
     ...identity,
-    ...parseRoleMetadata(value, label, false, false, legacyServiceTier),
+    ...parseRoleMetadata(
+      value,
+      label,
+      false,
+      false,
+      legacyServiceTier,
+      legacyCompactionModel,
+    ),
     systemPromptFile: value.systemPromptFile,
   };
 }
@@ -495,9 +519,11 @@ function parseRoleStoreDocument(
     const version = value.version;
     if (
       typeof version !== "number"
-      || ![1, 2, 3, 4, 5, ROLE_STORE_VERSION].includes(version)
+      || ![1, 2, 3, 4, 5, 6, ROLE_STORE_VERSION].includes(version)
     ) {
-      throw new Error(`version must be 1, 2, 3, 4, 5 or ${ROLE_STORE_VERSION}`);
+      throw new Error(
+        `version must be 1, 2, 3, 4, 5, 6 or ${ROLE_STORE_VERSION}`,
+      );
     }
     if (!Array.isArray(value.roles)) {
       throw new Error("roles must be an array");
@@ -519,9 +545,14 @@ function parseRoleStoreDocument(
       };
     }
 
-    if (version === 5) {
+    if (version === 5 || version === 6) {
       const roles = value.roles.map((role, index) =>
-        parsePersistedRoleTemplate(role, index, true));
+        parsePersistedRoleTemplate(
+          role,
+          index,
+          version === 5,
+          true,
+        ));
       assertUniqueRoles(roles);
       return {
         migrated: "metadata",
@@ -584,6 +615,7 @@ function cloneRole(role: RoleTemplateV1): RoleTemplateV1 {
   return {
     ...role,
     model: cloneModel(role.model),
+    compactionModel: cloneModel(role.compactionModel),
   };
 }
 
@@ -591,6 +623,7 @@ function clonePersistedRole(role: PersistedRole): PersistedRole {
   return {
     ...role,
     model: cloneModel(role.model),
+    compactionModel: cloneModel(role.compactionModel),
   };
 }
 
@@ -609,6 +642,7 @@ function toPersistedRole(role: RoleTemplateV1): PersistedRole {
     description: role.description,
     systemPromptFile: expectedSystemPromptFile(role.id, role.revision),
     model: cloneModel(role.model),
+    compactionModel: cloneModel(role.compactionModel),
     defaultThinkingLevel: role.defaultThinkingLevel,
     defaultServiceTier: role.defaultServiceTier,
     toolMode: role.toolMode,
@@ -970,6 +1004,7 @@ export class RoleStore {
         description: "默认角色",
         systemPrompt: "",
         model,
+        compactionModel: null,
         defaultThinkingLevel: "off",
         defaultServiceTier: null,
         toolMode: "read_only",
@@ -1189,6 +1224,7 @@ function draftsAreEqual(
     && role.description === draft.description
     && role.systemPrompt === draft.systemPrompt
     && modelsAreEqual(role.model, draft.model)
+    && modelsAreEqual(role.compactionModel, draft.compactionModel)
     && role.defaultThinkingLevel === draft.defaultThinkingLevel
     && role.defaultServiceTier === draft.defaultServiceTier
     && role.toolMode === draft.toolMode
@@ -1215,6 +1251,7 @@ function readHydratedRole(
     description: role.description,
     systemPrompt: readRolePrompt(rolesPath, role),
     model: cloneModel(role.model),
+    compactionModel: cloneModel(role.compactionModel),
     defaultThinkingLevel: role.defaultThinkingLevel,
     defaultServiceTier: role.defaultServiceTier,
     toolMode: role.toolMode,

@@ -45,9 +45,9 @@ import {
   installCompactionBoundary,
 } from "./compaction-boundary.js";
 import {
-  type CompactionThinkingOverride,
-  installCompactionThinkingOverride,
-} from "./compaction-thinking.js";
+  type DefaultCompactionRequestOverride,
+  installDefaultCompactionRequestOverride,
+} from "./compaction-request.js";
 import { SerialTaskQueue } from "./serial-task-queue.js";
 import {
   installServiceTierOverride,
@@ -279,6 +279,11 @@ export interface CreatePiSessionOptions {
   extensionUI?: PortableExtensionUI;
   extensionAbort?: () => void;
   model?: {
+    provider: string;
+    id: string;
+  };
+  /** Omitted follows the conversation model; explicit references are normalized by the caller. */
+  compactionModel?: {
     provider: string;
     id: string;
   };
@@ -702,6 +707,12 @@ export class PiRuntime implements PiRuntimeLike {
     const fixedModelReference = options.model
       ? { provider: options.model.provider, id: options.model.id }
       : undefined;
+    const compactionModelReference = options.compactionModel
+      ? {
+          provider: options.compactionModel.provider,
+          id: options.compactionModel.id,
+        }
+      : undefined;
     const roleSystemPrompt = options.roleSystemPrompt;
     let workbenchCustomTools = options.workbenchCustomTools;
     const readOnlyToolProjection = options.toolMode === "read_only";
@@ -720,7 +731,7 @@ export class PiRuntime implements PiRuntimeLike {
     let steeringCaptureAdapter: SteeringCaptureAdapter | undefined;
     let contextBudgetController: AgentContextBudgetController | undefined;
     let turnBoundaryController: AgentTurnBoundaryController | undefined;
-    let compactionThinkingOverride: CompactionThinkingOverride | undefined;
+    let compactionRequestOverride: DefaultCompactionRequestOverride | undefined;
     let serviceTierOverride: ServiceTierOverride | undefined;
     let compactionBoundaryAdapter: CompactionBoundaryAdapter | undefined;
     let pendingExtensionErrors: ExtensionError[];
@@ -737,7 +748,7 @@ export class PiRuntime implements PiRuntimeLike {
         failures.push(error);
       }
       try {
-        compactionThinkingOverride?.dispose();
+        compactionRequestOverride?.dispose();
       } catch (error) {
         failures.push(error);
       }
@@ -938,8 +949,10 @@ export class PiRuntime implements PiRuntimeLike {
           options.getServiceTier,
         );
       }
-      compactionThinkingOverride = installCompactionThinkingOverride(
+      compactionRequestOverride = installDefaultCompactionRequestOverride(
         createdSession,
+        owner.runtime,
+        compactionModelReference,
         resolvedTransport,
       );
 

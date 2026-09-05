@@ -36,6 +36,7 @@ export interface RoleDraft {
   description: string;
   systemPrompt: string;
   model: RoleModelSelection | null;
+  compactionModel: RoleModelSelection | null;
   defaultThinkingLevel: ThinkingLevel;
   defaultServiceTier: ServiceTier | null;
   toolMode: "read_only" | "full_access";
@@ -88,6 +89,7 @@ interface ModelOption {
   provider: string;
   id: string;
   label: string;
+  contextWindow: number;
   thinkingLevels: ThinkingLevel[];
   serviceTiers: ServiceTier[];
 }
@@ -97,6 +99,7 @@ const emptyDraft: RoleDraft = {
   description: "",
   systemPrompt: "",
   model: null,
+  compactionModel: null,
   defaultThinkingLevel: "off",
   defaultServiceTier: null,
   toolMode: "read_only",
@@ -109,6 +112,9 @@ function roleDraft(role: RoleTemplate): RoleDraft {
     description: role.description,
     systemPrompt: role.systemPrompt,
     model: role.model === null ? null : { ...role.model },
+    compactionModel: role.compactionModel === null
+      ? null
+      : { ...role.compactionModel },
     defaultThinkingLevel: role.defaultThinkingLevel,
     defaultServiceTier: role.defaultServiceTier,
     toolMode: role.toolMode,
@@ -120,6 +126,9 @@ function copyDraft(draft: RoleDraft): RoleDraft {
   return {
     ...draft,
     model: draft.model === null ? null : { ...draft.model },
+    compactionModel: draft.compactionModel === null
+      ? null
+      : { ...draft.compactionModel },
   };
 }
 
@@ -130,6 +139,10 @@ function sameDraft(left: RoleDraft, right: RoleDraft): boolean {
     && (left.model === null
       ? right.model === null
       : right.model !== null && sameModel(left.model, right.model))
+    && (left.compactionModel === null
+      ? right.compactionModel === null
+      : right.compactionModel !== null
+        && sameModel(left.compactionModel, right.compactionModel))
     && left.defaultThinkingLevel === right.defaultThinkingLevel
     && left.defaultServiceTier === right.defaultServiceTier
     && left.toolMode === right.toolMode
@@ -175,10 +188,15 @@ function availableModelOptions(
         provider: model.provider,
         id: model.id,
         label: model.name,
+        contextWindow: model.contextWindow,
         thinkingLevels: [...model.thinkingLevels],
         serviceTiers: [...(model.serviceTiers ?? [])],
       }));
   });
+}
+
+function contextWindowLabel(contextWindow: number): string {
+  return `${contextWindow.toLocaleString()} tokens`;
 }
 
 function matchesPending(
@@ -314,6 +332,9 @@ export function RoleManagerDialog({
       ...draft,
       name: draft.name.trim(),
       model: { ...draft.model },
+      compactionModel: draft.compactionModel === null
+        ? null
+        : { ...draft.compactionModel },
     };
     if (creating) {
       onCreate(nextDraft);
@@ -352,6 +373,19 @@ export function RoleManagerDialog({
     ? undefined
     : modelOptions.find((option) => sameModel(option, draft.model!));
   const currentModelAvailable = currentModelOption !== undefined;
+  const selectCompactionModel = (value: string) => {
+    if (value === "") {
+      updateDraft("compactionModel", null);
+      return;
+    }
+    const model = modelOptions.find((option) => option.value === value);
+    if (
+      !model
+      || (currentModelOption !== undefined
+        && model.contextWindow < currentModelOption.contextWindow)
+    ) return;
+    updateDraft("compactionModel", { provider: model.provider, id: model.id });
+  };
   const availableThinkingLevels = currentModelOption?.thinkingLevels ?? [];
   const currentThinkingLevelAvailable = availableThinkingLevels.includes(
     draft.defaultThinkingLevel,
@@ -360,7 +394,19 @@ export function RoleManagerDialog({
   const availableServiceTiers = currentModelOption?.serviceTiers ?? [];
   const currentServiceTierAvailable = draft.defaultServiceTier === null
     || availableServiceTiers.includes(draft.defaultServiceTier);
+  const compactionModelOption = draft.compactionModel === null
+    ? undefined
+    : modelOptions.find((option) => sameModel(option, draft.compactionModel!));
+  const compactionModelAvailable = compactionModelOption !== undefined;
+  const compactionModelIncompatible = Boolean(
+    currentModelOption
+    && compactionModelOption
+    && compactionModelOption.contextWindow < currentModelOption.contextWindow,
+  );
   const modelSelectValue = draft.model === null ? "" : modelValue(draft.model);
+  const compactionModelSelectValue = draft.compactionModel === null
+    ? ""
+    : modelValue(draft.compactionModel);
 
   return <div
     className="modal-backdrop"
@@ -488,6 +534,55 @@ export function RoleManagerDialog({
               })}
             </select>
             <p className="setting-note">仅列出已配置提供商当前可用的模型。</p>
+          </div>
+          <div className="setting-field">
+            <label htmlFor="role-compaction-model">上下文压缩模型</label>
+            <select
+              id="role-compaction-model"
+              value={compactionModelSelectValue}
+              disabled={operationBusy}
+              onChange={(event) => selectCompactionModel(event.target.value)}
+            >
+              <option value="">跟随角色模型（默认）</option>
+              {draft.compactionModel !== null
+                && (!compactionModelAvailable || compactionModelIncompatible)
+                && <option
+                  value={modelValue(draft.compactionModel)}
+                  disabled
+                >
+                  {compactionModelAvailable
+                    ? `当前不兼容 · ${compactionModelOption.label} · ${contextWindowLabel(compactionModelOption.contextWindow)}`
+                    : `当前不可用 · ${draft.compactionModel.id}`}
+                </option>}
+              {providers.map((provider) => {
+                const options = modelOptions.filter(
+                  (option) => option.provider === provider.id,
+                );
+                if (options.length === 0) return null;
+                return <optgroup key={provider.id} label={provider.name}>
+                  {options.map((option) => {
+                    const incompatible = currentModelOption !== undefined
+                      && option.contextWindow < currentModelOption.contextWindow;
+                    const currentInvalid = draft.compactionModel !== null
+                      && sameModel(option, draft.compactionModel)
+                      && incompatible;
+                    if (currentInvalid) return null;
+                    return <option
+                      key={option.value}
+                      value={option.value}
+                      disabled={incompatible}
+                    >
+                      {option.label} · {contextWindowLabel(option.contextWindow)}
+                    </option>;
+                  })}
+                </optgroup>;
+              })}
+            </select>
+            <p className="setting-note">
+              {compactionModelIncompatible
+                ? "当前压缩模型的上下文窗口小于角色模型；第一版不支持小窗口压缩模型，请明确选择其他模型或跟随角色模型。"
+                : "默认跟随角色模型；第一版不支持小窗口压缩模型。"}
+            </p>
           </div>
           <div className="setting-field">
             <label htmlFor="role-thinking-level">默认思考强度</label>
