@@ -491,7 +491,6 @@ export function ConnectionDrawer({
           maxLength={32_768}
           disabled={Boolean(savingKey)}
           onChange={(event) => setKey(event.target.value)}
-          autoFocus
           data-modal-autofocus
           autoComplete="new-password"
           spellCheck={false}

@@ -494,6 +494,31 @@ describe("App", () => {
     );
   });
 
+  it("restores the exact empty-workbench launcher after closing Setup", async () => {
+    render(<App />);
+
+    const launcher = screen.getByRole("button", { name: "开启工作区" });
+    expect(launcher.isConnected).toBe(true);
+    launcher.focus();
+    expect(launcher).toHaveFocus();
+    fireEvent.click(launcher);
+
+    const cwd = screen.getByRole("textbox", { name: "项目目录" });
+    expect(cwd).toHaveAttribute("data-modal-autofocus");
+    await waitFor(() => expect(cwd).toHaveFocus());
+
+    const close = screen.getByRole("button", { name: "关闭开启工作区" });
+    close.focus();
+    fireEvent.click(close);
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "开启工作区" }))
+        .not.toBeInTheDocument();
+      expect(launcher.isConnected).toBe(true);
+      expect(launcher).toHaveFocus();
+    });
+  });
+
   it("shows ready conversation identity without inventing a missing root", () => {
     render(<App />);
     const sessionId = startFromSetup();

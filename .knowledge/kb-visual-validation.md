@@ -69,3 +69,5 @@ motion 模式只驱动三个已有生产接缝：模型按钮按下的 PUNCH、�
 ## 边界
 
 该脚本不发送 prompt、不删除会话、不选择项目、不修改设置。motion 模式可在隔离 fixture 页面中暂时强制伪状态、点击本地 disclosure，并重启已存在的终态 CSS animation；它不触发对应产品命令，也不把证据钩子写入生产组件。fixture 只证明固定 props 下的生产组件 DOM/CSS、焦点边界和 ErrorBoundary fallback 可以渲染；App 没有独立组件 owner 的 feedback wrapper 与 Setup modal shell 只做同构的 fixture 投影，不复制 App 的 lifecycle、身份匹配、命令 guard 或持久状态。surface fixture 也不证明 WebSocket、真实 streaming、OAuth/Extension rendezvous 的完整流程。涉及这些内容时仍需生产状态测试或人工浏览器流程，并保护项目 `.piweb` 持久状态。
+
+焦点恢复还必须用真实浏览器原生指针/键盘路径验证：组件测试可以固定 connected launcher、effect 后的首选目标和关闭后的 exact element，但不能单独证明 React commit 中原生 autofocus 与 effect capture 的先后，也不能替代嵌套模态栈、backdrop 命中和 Escape 传播的生产 DOM 证据。

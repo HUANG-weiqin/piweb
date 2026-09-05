@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { useState } from "react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ExtensionUIRequest, ExtensionUIResponse } from "../../shared/protocol";
 import { ExtensionDialog } from "./ExtensionDialog";
 
 const REQUEST_A = "a81ab25f-041e-4559-b890-04c0eeb476e4";
@@ -9,7 +11,63 @@ const REQUEST_B = "668034c9-2181-4ea5-bbb0-6a5ef8cc9ff1";
 
 afterEach(cleanup);
 
+function ExtensionFocusOwnerFixture({
+  request,
+  onRespond,
+}: {
+  request: Extract<ExtensionUIRequest, { kind: "input" | "editor" }>;
+  onRespond(requestId: string, response: ExtensionUIResponse): void;
+}) {
+  const [open, setOpen] = useState(false);
+  return <>
+    <button onClick={() => setOpen(true)}>打开扩展输入</button>
+    <ExtensionDialog
+      pending={open ? { requestId: REQUEST_A, request } : undefined}
+      pendingCount={open ? 1 : 0}
+      online
+      onRespond={(requestId, response) => {
+        onRespond(requestId, response);
+        setOpen(false);
+        return true;
+      }}
+    />
+  </>;
+}
+
 describe("ExtensionDialog", () => {
+  it.each([
+    ["input", { kind: "input", title: "Input value", placeholder: "optional" }, "INPUT"],
+    ["editor", { kind: "editor", title: "Editor value", prefill: "seed" }, "TEXTAREA"],
+  ] as const)(
+    "restores the exact launcher after cancelling an %s request",
+    async (_kind, request, expectedTag) => {
+      const onRespond = vi.fn();
+      render(<ExtensionFocusOwnerFixture request={request} onRespond={onRespond} />);
+
+      const launcher = screen.getByRole("button", { name: "打开扩展输入" });
+      expect(launcher.isConnected).toBe(true);
+      launcher.focus();
+      expect(launcher).toHaveFocus();
+      fireEvent.click(launcher);
+
+      const input = screen.getByRole("textbox", { name: request.title });
+      expect(input.tagName).toBe(expectedTag);
+      expect(input).toHaveAttribute("data-modal-autofocus");
+      await waitFor(() => expect(input).toHaveFocus());
+
+      const cancel = screen.getByRole("button", { name: "取消" });
+      cancel.focus();
+      fireEvent.click(cancel);
+
+      expect(onRespond).toHaveBeenCalledWith(REQUEST_A, { kind: "cancel" });
+      await waitFor(() => {
+        expect(screen.queryByRole("dialog", { name: request.title }))
+          .not.toBeInTheDocument();
+        expect(launcher.isConnected).toBe(true);
+        expect(launcher).toHaveFocus();
+      });
+    },
+  );
   it("returns an explicit negative confirmation only once", () => {
     const onRespond = vi.fn(() => true);
     render(<ExtensionDialog

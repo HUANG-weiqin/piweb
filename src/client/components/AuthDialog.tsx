@@ -53,7 +53,6 @@ export function AuthDialog({ requestId, request, progress, visible = true, onRes
           value={value}
           placeholder={request.placeholder}
           onChange={(event) => setValue(event.target.value)}
-          autoFocus
           data-modal-autofocus
         />
         <button disabled={!request.allowEmpty && !value}>继续</button>
