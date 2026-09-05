@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { useState } from "react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PublicProvider, PublicState } from "../../shared/protocol";
 import { ConnectionDrawer } from "./ConnectionDrawer";
@@ -51,6 +52,27 @@ function renderDrawer(overrides: Partial<Parameters<typeof ConnectionDrawer>[0]>
   return render(<ConnectionDrawer {...drawerProps(overrides)} />);
 }
 
+function ConnectionDrawerBackdropFixture({
+  onKey,
+  onOAuth,
+  onLogout,
+  onRefresh,
+}: Pick<Parameters<typeof ConnectionDrawer>[0],
+  "onKey" | "onOAuth" | "onLogout" | "onRefresh">) {
+  const [open, setOpen] = useState(false);
+  return <>
+    <button onClick={() => setOpen(true)}>打开模型连接测试</button>
+    <ConnectionDrawer {...drawerProps({
+      open,
+      onClose: () => setOpen(false),
+      onKey,
+      onOAuth,
+      onLogout,
+      onRefresh,
+    })} />
+  </>;
+}
+
 describe("ConnectionDrawer", () => {
   it("shows only models Pi reports as available", () => {
     renderDrawer();
@@ -83,6 +105,54 @@ describe("ConnectionDrawer", () => {
     expect(screen.getByRole("button", { name: "关闭" })).toHaveFocus();
     fireEvent.keyDown(document, { key: "Escape" });
     expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("dismisses the drawer only from its exact backdrop and restores its launcher", async () => {
+    const onKey = vi.fn(() => undefined);
+    const onOAuth = vi.fn();
+    const onLogout = vi.fn();
+    const onRefresh = vi.fn(() => undefined);
+    render(<ConnectionDrawerBackdropFixture
+      onKey={onKey}
+      onOAuth={onOAuth}
+      onLogout={onLogout}
+      onRefresh={onRefresh}
+    />);
+
+    const launcher = screen.getByRole("button", { name: "打开模型连接测试" });
+    launcher.focus();
+    fireEvent.click(launcher);
+    const dialog = screen.getByRole("dialog", { name: "模型连接" });
+    const backdrop = dialog.parentElement!;
+    await waitFor(() => expect(screen.getByRole("button", {
+      name: "关闭",
+    })).toHaveFocus());
+
+    const interiorMouseDown = new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(dialog, interiorMouseDown);
+    expect(interiorMouseDown.defaultPrevented).toBe(false);
+    expect(dialog).toBeInTheDocument();
+
+    const backdropMouseDown = new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(backdrop, backdropMouseDown);
+    expect(backdropMouseDown.defaultPrevented).toBe(true);
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "模型连接" }))
+        .not.toBeInTheDocument();
+      expect(launcher.isConnected).toBe(true);
+      expect(launcher).toHaveFocus();
+    });
+    expect(onKey).not.toHaveBeenCalled();
+    expect(onOAuth).not.toHaveBeenCalled();
+    expect(onLogout).not.toHaveBeenCalled();
+    expect(onRefresh).not.toHaveBeenCalled();
   });
 
   it("shows models only for the provider the user chose", () => {
@@ -206,8 +276,13 @@ describe("ConnectionDrawer", () => {
     const dialog = screen.getByRole("dialog", { name: "Test API Key" });
     const backdrop = dialog.parentElement;
     expect(backdrop).toHaveClass("modal-backdrop");
-    fireEvent.mouseDown(backdrop!);
+    const backdropMouseDown = new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(backdrop!, backdropMouseDown);
 
+    expect(backdropMouseDown.defaultPrevented).toBe(true);
     expect(saveKey).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog", { name: "Test API Key" }))
       .not.toBeInTheDocument();
@@ -224,8 +299,13 @@ describe("ConnectionDrawer", () => {
     fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
     const keyInput = screen.getByLabelText("API Key");
     fireEvent.change(keyInput, { target: { value: "unsaved-key" } });
-    fireEvent.mouseDown(keyInput);
+    const interiorMouseDown = new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(keyInput, interiorMouseDown);
 
+    expect(interiorMouseDown.defaultPrevented).toBe(false);
     expect(screen.getByRole("dialog", { name: "Test API Key" }))
       .toBeInTheDocument();
     expect(keyInput).toHaveValue("unsaved-key");
@@ -242,10 +322,15 @@ describe("ConnectionDrawer", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "保存 API Key" }));
     const dialog = screen.getByRole("dialog", { name: "Test API Key" });
-    fireEvent.mouseDown(dialog.parentElement!);
-    fireEvent.click(screen.getByRole("button", { name: "正在保存…" }));
+    const backdropMouseDown = new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(dialog.parentElement!, backdropMouseDown);
 
+    expect(backdropMouseDown.defaultPrevented).toBe(true);
     expect(dialog).toBeInTheDocument();
+    expect(dialog.contains(document.activeElement)).toBe(true);
     expect(screen.getByRole("button", { name: "正在保存…" })).toBeDisabled();
     expect(saveKey).toHaveBeenCalledTimes(1);
   });

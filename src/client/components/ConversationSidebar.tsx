@@ -878,7 +878,9 @@ function ConversationSidebarView({
       className="modal-backdrop"
       role="presentation"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) closeDeleteDialog();
+        if (event.target !== event.currentTarget) return;
+        event.preventDefault();
+        closeDeleteDialog();
       }}
     >
       <div
@@ -923,7 +925,9 @@ function ConversationSidebarView({
       className="modal-backdrop"
       role="presentation"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) closeRenameDialog();
+        if (event.target !== event.currentTarget) return;
+        event.preventDefault();
+        closeRenameDialog();
       }}
     >
       <form

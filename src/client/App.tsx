@@ -3249,7 +3249,9 @@ export function App() {
     className="modal-backdrop workspace-setup-backdrop"
     role="presentation"
     onMouseDown={(event) => {
-      if (event.target === event.currentTarget) closeWorkspaceDialog();
+      if (event.target !== event.currentTarget) return;
+      event.preventDefault();
+      closeWorkspaceDialog();
     }}
   >
     <section

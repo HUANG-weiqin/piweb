@@ -365,7 +365,11 @@ export function RoleManagerDialog({
   return <div
     className="modal-backdrop"
     role="presentation"
-    onMouseDown={(event) => event.target === event.currentTarget && close?.()}
+    onMouseDown={(event) => {
+      if (event.target !== event.currentTarget) return;
+      event.preventDefault();
+      close?.();
+    }}
   >
     <section
       ref={focusRef}

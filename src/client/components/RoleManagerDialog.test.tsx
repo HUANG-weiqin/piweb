@@ -1,6 +1,14 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { useState } from "react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   PublicProvider,
@@ -111,7 +119,116 @@ function renderManager(overrides: Partial<Parameters<typeof RoleManagerDialog>[0
   return render(<RoleManagerDialog {...props} />);
 }
 
+type RoleManagerBackdropFixtureProps = Pick<
+  Parameters<typeof RoleManagerDialog>[0],
+  "pending" | "onClose" | "onCreate" | "onUpdate" | "onDelete"
+>;
+
+function RoleManagerBackdropFixture({
+  pending,
+  onClose,
+  onCreate,
+  onUpdate,
+  onDelete,
+}: RoleManagerBackdropFixtureProps) {
+  const [open, setOpen] = useState(false);
+  return <>
+    <button onClick={() => setOpen(true)}>打开角色管理测试</button>
+    <RoleManagerDialog
+      open={open}
+      roles={[role("default", "Default"), role("reviewer", "Reviewer")]}
+      providers={providers}
+      pending={pending}
+      onClose={() => {
+        onClose();
+        setOpen(false);
+      }}
+      onCreate={onCreate}
+      onUpdate={onUpdate}
+      onDelete={onDelete}
+    />
+  </>;
+}
+
 describe("RoleManagerDialog", () => {
+  it("dismisses only from the exact backdrop and restores its launcher", async () => {
+    const onClose = vi.fn();
+    const onCreate = vi.fn();
+    const onUpdate = vi.fn();
+    const onDelete = vi.fn();
+    render(<RoleManagerBackdropFixture
+      onClose={onClose}
+      onCreate={onCreate}
+      onUpdate={onUpdate}
+      onDelete={onDelete}
+    />);
+
+    const launcher = screen.getByRole("button", { name: "打开角色管理测试" });
+    launcher.focus();
+    fireEvent.click(launcher);
+    const dialog = screen.getByRole("dialog", { name: "管理角色" });
+    const backdrop = dialog.parentElement!;
+    await waitFor(() => expect(screen.getByRole("button", {
+      name: "关闭角色管理",
+    })).toHaveFocus());
+
+    const interiorMouseDown = new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(dialog, interiorMouseDown);
+    expect(interiorMouseDown.defaultPrevented).toBe(false);
+    expect(dialog).toBeInTheDocument();
+
+    const backdropMouseDown = new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(backdrop, backdropMouseDown);
+    expect(backdropMouseDown.defaultPrevented).toBe(true);
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "管理角色" }))
+        .not.toBeInTheDocument();
+      expect(launcher.isConnected).toBe(true);
+      expect(launcher).toHaveFocus();
+    });
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(onCreate).not.toHaveBeenCalled();
+    expect(onUpdate).not.toHaveBeenCalled();
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("keeps a busy role operation focused and inert on its backdrop", async () => {
+    const onClose = vi.fn();
+    const onCreate = vi.fn();
+    const onUpdate = vi.fn();
+    const onDelete = vi.fn();
+    render(<RoleManagerBackdropFixture
+      pending={{ operation: "delete_role", commandId: "pending-delete" }}
+      onClose={onClose}
+      onCreate={onCreate}
+      onUpdate={onUpdate}
+      onDelete={onDelete}
+    />);
+
+    fireEvent.click(screen.getByRole("button", { name: "打开角色管理测试" }));
+    const dialog = screen.getByRole("dialog", { name: "管理角色" });
+    await waitFor(() => expect(dialog).toHaveFocus());
+    const backdropMouseDown = new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(dialog.parentElement!, backdropMouseDown);
+
+    expect(backdropMouseDown.defaultPrevented).toBe(true);
+    expect(dialog).toBeInTheDocument();
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(onCreate).not.toHaveBeenCalled();
+    expect(onUpdate).not.toHaveBeenCalled();
+    expect(onDelete).not.toHaveBeenCalled();
+  });
   it("opens the role requested by its card", () => {
     renderManager({ initialRoleId: "reviewer" });
 

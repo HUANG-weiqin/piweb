@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { useState } from "react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ConversationRoleSnapshot } from "../../shared/protocol";
 import { ConversationRoleDialog } from "./ConversationRoleDialog";
@@ -30,7 +31,63 @@ const roles = [{
   available: true,
 }];
 
+function ConversationRoleBackdropFixture({
+  onSwitch,
+}: {
+  onSwitch(roleId: string): void;
+}) {
+  const [open, setOpen] = useState(false);
+  return <>
+    <button onClick={() => setOpen(true)}>打开会话角色</button>
+    <ConversationRoleDialog
+      open={open}
+      role={role}
+      roles={roles}
+      switchDisabled={false}
+      switching={false}
+      onSwitch={onSwitch}
+      onClose={() => setOpen(false)}
+    />
+  </>;
+}
+
 describe("ConversationRoleDialog", () => {
+  it("dismisses only from the exact backdrop and restores its launcher", async () => {
+    const onSwitch = vi.fn();
+    render(<ConversationRoleBackdropFixture onSwitch={onSwitch} />);
+
+    const launcher = screen.getByRole("button", { name: "打开会话角色" });
+    launcher.focus();
+    fireEvent.click(launcher);
+    const dialog = screen.getByRole("dialog", { name: "更换会话角色" });
+    const backdrop = dialog.parentElement!;
+    await waitFor(() => expect(screen.getByRole("button", {
+      name: "关闭",
+    })).toHaveFocus());
+
+    const interiorMouseDown = new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(dialog, interiorMouseDown);
+    expect(interiorMouseDown.defaultPrevented).toBe(false);
+    expect(dialog).toBeInTheDocument();
+
+    const backdropMouseDown = new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(backdrop, backdropMouseDown);
+    expect(backdropMouseDown.defaultPrevented).toBe(true);
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "更换会话角色" }))
+        .not.toBeInTheDocument();
+      expect(launcher.isConnected).toBe(true);
+      expect(launcher).toHaveFocus();
+    });
+    expect(onSwitch).not.toHaveBeenCalled();
+  });
   it("shows the current role and disables reapplying the same revision", () => {
     render(<ConversationRoleDialog
       open

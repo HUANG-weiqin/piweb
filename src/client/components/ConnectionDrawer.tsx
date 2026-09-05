@@ -250,7 +250,11 @@ export function ConnectionDrawer({
     onKeyDialogChange(true);
     onClearSettingResult();
   };
-  return <div className="drawer-backdrop" role="presentation" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+  return <div className="drawer-backdrop" role="presentation" onMouseDown={(event) => {
+    if (event.target !== event.currentTarget) return;
+    event.preventDefault();
+    onClose();
+  }}>
     <aside
       ref={drawerFocusRef}
       className="drawer"
@@ -456,7 +460,11 @@ export function ConnectionDrawer({
     {keyProvider && <div
       className="modal-backdrop"
       role="presentation"
-      onMouseDown={(event) => event.target === event.currentTarget && closeKeyDialog()}
+      onMouseDown={(event) => {
+        if (event.target !== event.currentTarget) return;
+        event.preventDefault();
+        closeKeyDialog();
+      }}
     ><form
       ref={keyFocusRef}
       className="modal"

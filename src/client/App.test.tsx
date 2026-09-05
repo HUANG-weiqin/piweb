@@ -519,6 +519,44 @@ describe("App", () => {
     });
   });
 
+  it("dismisses Setup only from the exact backdrop and restores its launcher", async () => {
+    render(<App />);
+
+    const launcher = screen.getByRole("button", { name: "开启工作区" });
+    launcher.focus();
+    fireEvent.click(launcher);
+    const dialog = screen.getByRole("dialog", { name: "开启工作区" });
+    const backdrop = dialog.parentElement!;
+    await waitFor(() => expect(screen.getByRole("textbox", {
+      name: "项目目录",
+    })).toHaveFocus());
+
+    const interiorMouseDown = new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(dialog, interiorMouseDown);
+    expect(interiorMouseDown.defaultPrevented).toBe(false);
+    expect(dialog).toBeInTheDocument();
+
+    const backdropMouseDown = new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(backdrop, backdropMouseDown);
+    expect(backdropMouseDown.defaultPrevented).toBe(true);
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "开启工作区" }))
+        .not.toBeInTheDocument();
+      expect(launcher.isConnected).toBe(true);
+      expect(launcher).toHaveFocus();
+    });
+    expect(socketMock.send).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "initialize" }),
+    );
+  });
+
   it("shows ready conversation identity without inventing a missing root", () => {
     render(<App />);
     const sessionId = startFromSetup();
