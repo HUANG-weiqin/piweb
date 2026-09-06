@@ -543,7 +543,28 @@ function conversationSummaries(
 }
 
 function nativeEvent(value: unknown): AgentSessionEvent {
-  return value as AgentSessionEvent;
+  const event = value as {
+    type?: string;
+    assistantMessageEvent?: {
+      type?: string;
+      delta?: unknown;
+      partial?: unknown;
+    };
+  };
+  const update = event.assistantMessageEvent;
+  if (
+    event.type === "message_update"
+    && update?.partial === undefined
+    && (update?.type === "text_delta" || update?.type === "thinking_delta")
+  ) {
+    update.partial = {
+      role: "assistant",
+      content: [update.type === "text_delta"
+        ? { type: "text", text: String(update.delta ?? "") }
+        : { type: "thinking", thinking: String(update.delta ?? "") }],
+    };
+  }
+  return event as AgentSessionEvent;
 }
 
 function agentMessage(value: unknown): AgentMessage {

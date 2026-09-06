@@ -69,12 +69,15 @@ interface RunOutputRateMeasurement {
   segmentStartedAt?: number;
 }
 
-interface CompletedOutputRate {
+interface OutputRate {
   runId: string;
   outputTokens: number;
   outputElapsedMs: number;
   tokensPerSecond: number;
 }
+
+type CompletedOutputRate = OutputRate;
+type LiveOutputRate = OutputRate;
 
 export interface ChatState {
   /**
@@ -90,6 +93,8 @@ export interface ChatState {
    * It never enters history snapshots or final token accounting.
    */
   completedOutputRate?: CompletedOutputRate;
+  /** Ephemeral Pi-base estimate for the active assistant segment only. */
+  liveOutputRate?: LiveOutputRate;
   /** Current run's final-usage measurements across assistant segments. */
   outputRateMeasurement?: RunOutputRateMeasurement;
   /**
@@ -338,6 +343,31 @@ function recordOutputUsage(
   };
 }
 
+function estimateOutputRate(
+  measurement: RunOutputRateMeasurement | undefined,
+  runId: string,
+  estimatedOutputTokens: number,
+  observedAt: number,
+): LiveOutputRate | undefined {
+  if (
+    measurement?.runId !== runId
+    || measurement.segmentStartedAt === undefined
+    || estimatedOutputTokens <= 0
+  ) return;
+
+  const outputElapsedMs = measurement.outputElapsedMs
+    + Math.max(0, observedAt - measurement.segmentStartedAt);
+  if (outputElapsedMs <= 0) return;
+
+  const outputTokens = measurement.outputTokens + estimatedOutputTokens;
+  return {
+    runId,
+    outputTokens,
+    outputElapsedMs,
+    tokensPerSecond: outputTokens * 1_000 / outputElapsedMs,
+  };
+}
+
 function appendPart(
   parts: ChatMessagePart[] | undefined,
   part: ChatMessagePart,
@@ -396,6 +426,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       projectionGap: false,
       historyWindow: undefined,
       completedOutputRate: undefined,
+      liveOutputRate: undefined,
       outputRateMeasurement: undefined,
     };
   }
@@ -439,6 +470,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       completedOutputRate: preservesSettledOutputRate
         ? state.completedOutputRate
         : undefined,
+      liveOutputRate: undefined,
       outputRateMeasurement: undefined,
     };
   }
@@ -514,6 +546,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     return {
       ...withItems(state, ensureAssistant(state.items, action.runId).items),
       completedOutputRate: undefined,
+      liveOutputRate: undefined,
       outputRateMeasurement: {
         runId: action.runId,
         outputTokens: 0,
@@ -555,6 +588,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             { ...placeholder, id: event.projectionId },
           ]),
           outputRateMeasurement,
+          liveOutputRate: undefined,
         };
       }
     }
@@ -576,6 +610,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         parts: [],
       }]),
       outputRateMeasurement,
+      liveOutputRate: undefined,
     };
   }
   if (event.type === "run_queued") return state;
@@ -586,6 +621,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         state.outputRateMeasurement,
         action.runId,
       ),
+      liveOutputRate: undefined,
       outputRateMeasurement: undefined,
     };
   }
@@ -677,6 +713,18 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     );
   }
 
+  if (event.type === "output_estimate") {
+    const liveOutputRate = estimateOutputRate(
+      state.outputRateMeasurement,
+      action.runId,
+      event.estimatedOutputTokens,
+      Date.now(),
+    );
+    return liveOutputRate === undefined
+      ? state
+      : { ...state, liveOutputRate };
+  }
+
   if (event.type === "usage") {
     const items = updateAssistant(state.items, action.runId, (assistant) => ({
       ...assistant,
@@ -688,9 +736,10 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       event.usage.output,
       Date.now(),
     );
+    const nextState = withItems(state, items);
     return outputRateMeasurement === state.outputRateMeasurement
-      ? withItems(state, items)
-      : { ...withItems(state, items), outputRateMeasurement };
+      ? { ...nextState, liveOutputRate: undefined }
+      : { ...nextState, outputRateMeasurement, liveOutputRate: undefined };
   }
 
   return state;
