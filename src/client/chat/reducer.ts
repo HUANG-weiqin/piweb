@@ -62,20 +62,19 @@ interface ChatFocus {
   focusId: string;
 }
 
-interface OutputProgressSample {
-  outputTokens: number;
-  observedAt: number;
-}
-
-interface LiveOutputProgress {
+interface RunOutputRateMeasurement {
   runId: string;
   outputTokens: number;
-  observedAt: number;
-  samples: OutputProgressSample[];
-  tokensPerSecond?: number;
+  outputElapsedMs: number;
+  segmentStartedAt?: number;
 }
 
-const OUTPUT_RATE_SAMPLE_WINDOW_MS = 2_000;
+interface CompletedOutputRate {
+  runId: string;
+  outputTokens: number;
+  outputElapsedMs: number;
+  tokensPerSecond: number;
+}
 
 export interface ChatState {
   /**
@@ -87,10 +86,12 @@ export interface ChatState {
   /** Coverage declared by the last accepted authoritative history snapshot. */
   historyWindow?: ConversationWindowCoverage;
   /**
-   * Ephemeral streamed output usage for the current assistant segment only.
+   * Ephemeral average output rate from the most recently settled run.
    * It never enters history snapshots or final token accounting.
    */
-  liveOutputProgress?: LiveOutputProgress;
+  completedOutputRate?: CompletedOutputRate;
+  /** Current run's final-usage measurements across assistant segments. */
+  outputRateMeasurement?: RunOutputRateMeasurement;
   /**
    * The ordered transcript. Cards and ordinary messages share this one
    * projection so a card update cannot jump to the end of the conversation.
@@ -299,34 +300,42 @@ function addUsage(current: TokenUsage | undefined, next: TokenUsage): TokenUsage
   };
 }
 
-function updateLiveOutputProgress(
-  current: LiveOutputProgress | undefined,
+function completeOutputRate(
+  measurement: RunOutputRateMeasurement | undefined,
+  runId: string,
+): CompletedOutputRate | undefined {
+  if (
+    measurement?.runId !== runId
+    || measurement.outputTokens <= 0
+    || measurement.outputElapsedMs <= 0
+  ) return;
+
+  return {
+    runId,
+    outputTokens: measurement.outputTokens,
+    outputElapsedMs: measurement.outputElapsedMs,
+    tokensPerSecond: measurement.outputTokens * 1_000 / measurement.outputElapsedMs,
+  };
+}
+
+function recordOutputUsage(
+  measurement: RunOutputRateMeasurement | undefined,
   runId: string,
   outputTokens: number,
   observedAt: number,
-): LiveOutputProgress {
-  const next = { outputTokens, observedAt };
-  if (!current || current.runId !== runId) {
-    return { runId, ...next, samples: [next] };
-  }
+): RunOutputRateMeasurement | undefined {
+  if (
+    measurement?.runId !== runId
+    || measurement.segmentStartedAt === undefined
+  ) return measurement;
 
-  const previous = current.samples.at(-1);
-  if (!previous || outputTokens < previous.outputTokens || observedAt <= previous.observedAt) {
-    return { runId, ...next, samples: [next] };
-  }
-  if (outputTokens === previous.outputTokens) return current;
-
-  const samples = [...current.samples, next].filter(
-    (sample) => sample.observedAt >= observedAt - OUTPUT_RATE_SAMPLE_WINDOW_MS,
-  );
-  const baseline = samples[0];
-  const elapsedMs = baseline === undefined ? 0 : observedAt - baseline.observedAt;
-  const tokensPerSecond = baseline !== undefined
-    && elapsedMs > 0
-    && outputTokens > baseline.outputTokens
-    ? (outputTokens - baseline.outputTokens) * 1_000 / elapsedMs
-    : undefined;
-  return { runId, ...next, samples, tokensPerSecond };
+  return {
+    ...measurement,
+    outputTokens: measurement.outputTokens + outputTokens,
+    outputElapsedMs: measurement.outputElapsedMs
+      + Math.max(0, observedAt - measurement.segmentStartedAt),
+    segmentStartedAt: undefined,
+  };
 }
 
 function appendPart(
@@ -386,7 +395,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       lastProjectionSeq: undefined,
       projectionGap: false,
       historyWindow: undefined,
-      liveOutputProgress: undefined,
+      completedOutputRate: undefined,
+      outputRateMeasurement: undefined,
     };
   }
 
@@ -421,7 +431,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             startsMidTurn: action.historyWindow.startsMidTurn,
             contentTruncated: action.historyWindow.contentTruncated,
           },
-      liveOutputProgress: undefined,
+      completedOutputRate: undefined,
+      outputRateMeasurement: undefined,
     };
   }
 
@@ -495,7 +506,12 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   if (event.type === "run_started") {
     return {
       ...withItems(state, ensureAssistant(state.items, action.runId).items),
-      liveOutputProgress: undefined,
+      completedOutputRate: undefined,
+      outputRateMeasurement: {
+        runId: action.runId,
+        outputTokens: 0,
+        outputElapsedMs: 0,
+      },
     };
   }
   if (event.type === "user_message") {
@@ -512,11 +528,13 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         tools: [],
         parts: [],
       }]),
-      liveOutputProgress: undefined,
     };
   }
   if (event.type === "assistant_message_started") {
     const items = state.items;
+    const outputRateMeasurement = state.outputRateMeasurement?.runId === action.runId
+      ? { ...state.outputRateMeasurement, segmentStartedAt: Date.now() }
+      : state.outputRateMeasurement;
     if (items.some((item) => item.id === event.projectionId)) return state;
     const placeholderIndex = items.findIndex((item) => (
       isEmptyAssistantPlaceholder(item, action.runId)
@@ -529,7 +547,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             ...items.slice(0, placeholderIndex),
             { ...placeholder, id: event.projectionId },
           ]),
-          liveOutputProgress: undefined,
+          outputRateMeasurement,
         };
       }
     }
@@ -550,22 +568,18 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         tools: [],
         parts: [],
       }]),
-      liveOutputProgress: undefined,
+      outputRateMeasurement,
     };
   }
   if (event.type === "run_queued") return state;
   if (event.type === "run_finished") {
-    return { ...state, liveOutputProgress: undefined };
-  }
-  if (event.type === "output_progress") {
     return {
       ...state,
-      liveOutputProgress: updateLiveOutputProgress(
-        state.liveOutputProgress,
+      completedOutputRate: completeOutputRate(
+        state.outputRateMeasurement,
         action.runId,
-        event.outputTokens,
-        Date.now(),
       ),
+      outputRateMeasurement: undefined,
     };
   }
 
@@ -624,7 +638,6 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           }),
         })),
       ),
-      liveOutputProgress: undefined,
     };
   }
 
@@ -662,7 +675,15 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       ...assistant,
       usage: addUsage(assistant.usage, event.usage),
     }));
-    return withItems(state, items);
+    const outputRateMeasurement = recordOutputUsage(
+      state.outputRateMeasurement,
+      action.runId,
+      event.usage.output,
+      Date.now(),
+    );
+    return outputRateMeasurement === state.outputRateMeasurement
+      ? withItems(state, items)
+      : { ...withItems(state, items), outputRateMeasurement };
   }
 
   return state;
