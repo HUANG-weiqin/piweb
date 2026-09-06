@@ -519,9 +519,12 @@ function readReloadContinuationMarker(
       || !("customType" in entry)
       || entry.customType !== RELOAD_RESUME_CUSTOM_TYPE
     ) continue;
+    // The pre-v2 writer emitted this custom type without details. Such an
+    // entry cannot identify the current continuation, so it is not adoption
+    // evidence and must not poison every later exact reload of the conversation.
+    if (!("details" in entry) || entry.details === undefined) continue;
     if (
-      !("details" in entry)
-      || !isPlainDetails(entry.details)
+      !isPlainDetails(entry.details)
       || typeof entry.details.continuationRunId !== "string"
     ) {
       throw new Error("Reload continuation marker has an invalid adopted identity");

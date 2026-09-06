@@ -2827,7 +2827,7 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
-  it("rejects a legacy reload marker without correlation details", async () => {
+  it("ignores an uncorrelated legacy marker for a new exact continuation", async () => {
     const manager = SessionManager.inMemory(process.cwd(), {
       id: CONVERSATION_ID,
     });
@@ -2838,10 +2838,10 @@ describe("ConversationActor", () => {
     );
     const fixture = await openActor({ sessionManager: manager });
 
-    expect(() => fixture.actor.reloadContinuationAdoptedRunId({
+    expect(fixture.actor.reloadContinuationAdoptedRunId({
       requestId: RELOAD_REQUEST_ID,
       continuationRunId: RUN_B,
-    })).toThrow("invalid adopted identity");
+    })).toBeUndefined();
     expect(fixture.runtime.session.resumeCalls).toBe(0);
     await fixture.actor.dispose();
   });
