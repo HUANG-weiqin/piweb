@@ -6,6 +6,7 @@ export function DirectoryBrowserDialog({
   loading,
   error,
   online,
+  covered = false,
   onNavigate,
   onOpenStartup,
   onSelect,
@@ -15,6 +16,7 @@ export function DirectoryBrowserDialog({
   loading: boolean;
   error?: string;
   online: boolean;
+  covered?: boolean;
   onNavigate(path: string): void;
   onOpenStartup(): void;
   onSelect(path: string): void;
@@ -38,8 +40,9 @@ export function DirectoryBrowserDialog({
     <section
       ref={focusRef}
       className="modal directory-browser-modal"
-      role="dialog"
-      aria-modal="true"
+      role={covered ? undefined : "dialog"}
+      aria-modal={covered ? undefined : "true"}
+      aria-hidden={covered ? "true" : undefined}
       aria-labelledby="directory-browser-title"
       aria-busy={loading}
       tabIndex={-1}

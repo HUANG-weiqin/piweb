@@ -8,6 +8,8 @@ import { useModalFocus } from "../lib/use-modal-focus";
 interface ConnectionDrawerProps {
   state: PublicState;
   open: boolean;
+  /** The drawer remains live beneath a higher-priority modal. */
+  covered?: boolean;
   online: boolean;
   settingResult?: {
     operation: AcknowledgedSettingOperation;
@@ -50,6 +52,7 @@ function modelActionLabel(selected: boolean): string {
 export function ConnectionDrawer({
   state,
   open,
+  covered = false,
   online,
   settingResult,
   onClose,
@@ -274,9 +277,9 @@ export function ConnectionDrawer({
     <aside
       ref={drawerFocusRef}
       className="drawer"
-      role={keyProvider ? undefined : "dialog"}
-      aria-modal={keyProvider ? undefined : true}
-      aria-hidden={keyProvider ? true : undefined}
+      role={keyProvider || covered ? undefined : "dialog"}
+      aria-modal={keyProvider || covered ? undefined : true}
+      aria-hidden={keyProvider || covered ? true : undefined}
       aria-label="模型连接"
       tabIndex={-1}
     >
@@ -484,8 +487,9 @@ export function ConnectionDrawer({
     ><form
       ref={keyFocusRef}
       className="modal"
-      role="dialog"
-      aria-modal="true"
+      role={covered ? undefined : "dialog"}
+      aria-modal={covered ? undefined : "true"}
+      aria-hidden={covered ? "true" : undefined}
       aria-label={`${keyProvider.name} API Key`}
       tabIndex={-1}
       onSubmit={submitKey}

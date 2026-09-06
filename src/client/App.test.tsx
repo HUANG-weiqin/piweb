@@ -1201,6 +1201,92 @@ describe("App", () => {
     );
   });
 
+  it("keeps only the top modal accessible while extension UI covers nested directory browsing", async () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+    fireEvent.click(screen.getByRole("button", { name: /Pi Web/ }));
+    fireEvent.click(screen.getByRole("button", { name: "选择文件夹" }));
+    const directoryClose = screen.getByRole("button", { name: "关闭目录选择" });
+    directoryClose.focus();
+    expect(screen.queryByRole("dialog", { name: "开启工作区" })).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "选择项目目录" })).toBeInTheDocument();
+
+    act(() => socketMock.emit?.({
+      type: "extension_ui_request",
+      sessionId,
+      requestId: EXTENSION_REQUEST_A,
+      request: { kind: "confirm", title: "Extension question", message: "Continue?" },
+    }));
+
+    expect(screen.getByRole("dialog", { name: "Extension question" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "选择项目目录" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "开启工作区" })).not.toBeInTheDocument();
+    expect(document.querySelector(".directory-browser-modal"))
+      .toHaveAttribute("aria-hidden", "true");
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+
+    act(() => socketMock.emit?.({
+      type: "extension_ui_closed",
+      sessionId,
+      requestId: EXTENSION_REQUEST_A,
+    }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "选择项目目录" })).toBeInTheDocument();
+      expect(directoryClose).toHaveFocus();
+    });
+  });
+
+  it("invalidates directory responses when initialize replaces its control scope", () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "开启工作区" }));
+    const input = screen.getByRole("textbox", { name: "项目目录" });
+    fireEvent.change(input, { target: { value: "E:\\next" } });
+    fireEvent.click(screen.getByRole("button", { name: "选择文件夹" }));
+    const browse = latestCommand("browse_directory");
+    const form = input.closest("form");
+    expect(form).not.toBeNull();
+
+    fireEvent.submit(form!);
+    expect(latestCommand("initialize").cwd).toBe("E:\\next");
+    expect(screen.queryByRole("dialog", { name: "选择项目目录" })).not.toBeInTheDocument();
+
+    act(() => {
+      socketMock.emit?.({
+        type: "directory_listing",
+        commandId: browse.commandId,
+        path: "E:\\late",
+        parentPath: "E:\\",
+        directories: [{ name: "late child", path: "E:\\late\\child" }],
+        truncated: false,
+      });
+      socketMock.emit?.({
+        type: "error",
+        scope: "command",
+        operation: "browse_directory",
+        commandId: browse.commandId,
+        message: "late listing error",
+      });
+    });
+
+    expect(screen.queryByRole("dialog", { name: "选择项目目录" })).not.toBeInTheDocument();
+    expect(screen.queryByText("E:\\late")).not.toBeInTheDocument();
+    expect(screen.queryByText("late listing error")).not.toBeInTheDocument();
+  });
+
   it("dismisses Setup only from the exact backdrop and restores its launcher", async () => {
     render(<App />);
 
@@ -6223,7 +6309,7 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "刷新模型" })).toBeDisabled();
   });
 
-  it("temporarily hides the model drawer while an extension interaction owns focus", () => {
+  it("keeps the model drawer live but covered while extension UI owns focus", async () => {
     render(<App />);
     const sessionId = startFromSetup();
     act(() => socketMock.emit?.({
@@ -6240,6 +6326,8 @@ describe("App", () => {
       },
     }));
     fireEvent.click(screen.getByRole("button", { name: /^model\s*⌄$/ }));
+    const drawerClose = screen.getByRole("button", { name: "关闭" });
+    drawerClose.focus();
     expect(screen.getByRole("dialog", { name: "模型连接" })).toBeInTheDocument();
 
     act(() => socketMock.emit?.({
@@ -6249,6 +6337,8 @@ describe("App", () => {
       request: { kind: "confirm", title: "Extension question", message: "Continue?" },
     }));
     expect(screen.queryByRole("dialog", { name: "模型连接" })).not.toBeInTheDocument();
+    expect(drawerClose).toBeInTheDocument();
+    expect(drawerClose.closest(".drawer")).toHaveAttribute("aria-hidden", "true");
     expect(screen.getByRole("dialog", { name: "Extension question" })).toBeInTheDocument();
 
     act(() => socketMock.emit?.({
@@ -6256,7 +6346,10 @@ describe("App", () => {
       sessionId,
       requestId: EXTENSION_REQUEST_A,
     }));
-    expect(screen.getByRole("dialog", { name: "模型连接" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "模型连接" })).toBeInTheDocument();
+      expect(drawerClose).toHaveFocus();
+    });
   });
 
   it("does not discard a Key entry when an extension interaction arrives", () => {

@@ -2860,6 +2860,10 @@ export function App() {
       return false;
     }
     transitionTiming.promote(timingAttempt);
+    // Directory browsing is connection-scoped, not a project transition.
+    // A new initialize replaces its local observation scope, so any late
+    // listing must find no live browser to update.
+    updateDirectoryBrowser(undefined);
     setError("");
     markPendingPromptUnconfirmed();
     updateDraft("");
@@ -3048,6 +3052,8 @@ export function App() {
       rememberSupersededFocusCommand(previousPending);
     }
     transitionTiming.promote(timingAttempt);
+    // A focus replacement also ends a connection-level directory browse.
+    updateDirectoryBrowser(undefined);
     setError("");
     clearPendingAdmissions();
     cacheCurrentConversationPresentation();
@@ -3127,6 +3133,7 @@ export function App() {
       return;
     }
     transitionTiming.promote(timingAttempt);
+    updateDirectoryBrowser(undefined);
     updatePendingFocus({
       commandId,
       operation: "create_conversation",
@@ -3687,11 +3694,6 @@ export function App() {
   const handleChatCompact = useLatestCallback(compactContext);
   const handleChatSwitchRole = useLatestCallback(switchConversationRole);
   const handleChatRewind = useLatestCallback(truncateConversation);
-  const workspaceSetupFocusRef = useModalFocus<HTMLElement>(
-    setupOpen,
-    setupOpen ? "workspace-setup" : "",
-    closeWorkspaceDialog,
-  );
   const online = transportOnline && protocolReady;
   const authModalVisible = Boolean(auth.request || auth.progress);
   const extensionPending = online
@@ -3699,10 +3701,16 @@ export function App() {
     && !settingsDialogOpen
     ? extensionUI[0]
     : undefined;
-  const blockingModalVisible = Boolean(
-    authModalVisible
-    || extensionPending
-    || setupOpen
+  // A covered surface remains mounted for its local state and focus-return
+  // chain, but only the top surface may remain an accessible modal.
+  const externalModalVisible = Boolean(authModalVisible || extensionPending);
+  const directoryBrowserCovered = externalModalVisible;
+  const workspaceSetupCovered = Boolean(directoryBrowser || externalModalVisible);
+  const blockingModalVisible = Boolean(externalModalVisible || setupOpen);
+  const workspaceSetupFocusRef = useModalFocus<HTMLElement>(
+    setupOpen,
+    setupOpen ? "workspace-setup" : "",
+    closeWorkspaceDialog,
   );
   const phoneRouteBlocked = Boolean(
     blockingModalVisible
@@ -3784,8 +3792,9 @@ export function App() {
     <section
       ref={workspaceSetupFocusRef}
       className="workspace-setup-dialog"
-      role="dialog"
-      aria-modal="true"
+      role={workspaceSetupCovered ? undefined : "dialog"}
+      aria-modal={workspaceSetupCovered ? undefined : "true"}
+      aria-hidden={workspaceSetupCovered ? "true" : undefined}
       aria-label="开启工作区"
       tabIndex={-1}
     >
@@ -3809,6 +3818,7 @@ export function App() {
   const directoryBrowserDialog = directoryBrowser && <DirectoryBrowserDialog
     listing={directoryBrowser.listing}
     loading={Boolean(directoryBrowser.commandId)}
+    covered={directoryBrowserCovered}
     error={directoryBrowser.error || undefined}
     online={online}
     onNavigate={browseDirectory}
@@ -4308,7 +4318,8 @@ export function App() {
     </div>
     {visibleState && <ConnectionDrawer
       state={visibleState}
-      open={drawer && !blockingModalVisible && !transitioning}
+      open={drawer && !transitioning}
+      covered={blockingModalVisible}
       online={online && settingsEnabled}
       settingResult={settingResult}
       onClose={() => setDrawer(false)}
@@ -4379,6 +4390,8 @@ export function App() {
           expectedRevision,
         })}
     />
+    {workspaceSetupDialog}
+    {directoryBrowserDialog}
     <AuthDialog {...auth} visible={authModalVisible} onRespond={(requestId, response) => {
       const authFlowId = authFlowIdRef.current;
       if (authFlowId) send({ type: "auth_response", authFlowId, requestId, ...response });
@@ -4388,8 +4401,6 @@ export function App() {
       authFlowIdRef.current = "";
       setAuth({});
     }} />
-    {workspaceSetupDialog}
-    {directoryBrowserDialog}
     {extensionDialog}
     {feedback}
   </>;
