@@ -41,7 +41,7 @@ npm run visual:verify -- --wait 1200
 npm run visual:verify -- --fixture
 ```
 
-该 query 只在 Vite 开发模式生效。fixture 直接组合现有 WorkspaceRail、ConversationSidebar 与 Chat，不连接 WebSocket，也不读取或写入真实项目状态。fixture 模式会展开 Tasks，等待布局观察器稳定后再截图；桌面尺寸把 transcript 定位到时间线开头，以便同时核对事件顺序和真实的“回到最新消息”状态，600px 及以下则通过生产折叠按钮收起 ConversationSidebar 后核对中心区域。移动端不会把已经滚出视口的历史事件误判为布局失败。不带 `--fixture` 时原有四尺寸和 Setup 检查保持不变。
+该 query 只在 Vite 开发模式生效。fixture 直接组合现有 WorkspaceRail、ConversationSidebar 与 Chat，不连接 WebSocket，也不读取或写入真实项目状态。fixture 模式会展开 Tasks，等待布局观察器稳定后再截图；桌面尺寸把 transcript 定位到时间线开头，以便同时核对事件顺序和真实的“回到最新消息”状态，并保留原有 1440×900、1920×1080 selector、几何和 interaction 路径。390px 及以下的 phone fixture 初始处于 conversations list，只让 ConversationSidebar 可见；脚本通过真实的“显示工作区”“打开当前会话”和返回按钮依次检查 workspaces、chat 场景的互斥根节点、主要 rect、文档横向溢出和至少 44px 触控目标，不能用隐藏的 rail/sidebar/main 冒充可见。进入 Chat 后通过真实 launcher 打开 Tasks 与控制 sheet，展开 Tasks 并核对 dialog/backdrop、4 项、内部 overflow、关闭按钮尺寸与焦点恢复；`secondary&surface=composer-states` 还会进入 Chat 后打开等待中 sheet，核对 1 条 pending admission 与短屏内部滚动边界。601–960px 的 compact fixture 及不带 `--fixture` 的原有尺寸和 Setup 检查保持原路径。
 
 次级界面矩阵使用 DEV-only `?fixture=secondary&surface=<name>`。脚本按 A（drawer、角色/目录/认证/扩展 dialog、feedback、已打开的 context tooltip、已展开的 activity/tool ledger、commitment、回到最新消息及其 focus-visible、composer 压力状态）和 B（setup、role-selection、empty、opening、unavailable、error-boundary）分组捕获生产组件：
 

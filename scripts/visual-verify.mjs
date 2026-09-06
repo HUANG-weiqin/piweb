@@ -391,7 +391,7 @@ async function revealContextTooltip(client) {
   }
 }
 
-async function expandCommitmentCard(client) {
+async function expandCommitmentCard(client, evidencePath = null, evidenceName = null) {
   const result = await client.evaluate(`(() => {
     const summary = document.querySelector(".commitment-card > summary");
     const issues = [];
@@ -451,13 +451,31 @@ async function expandCommitmentCard(client) {
       textScrollHeight: toolText?.scrollHeight ?? null,
       textClientHeight: toolText?.clientHeight ?? null,
       bodyPaddingLeft,
+      bodyRect: body ? (() => {
+        const rect = body.getBoundingClientRect();
+        return {
+          left: rect.left,
+          top: rect.top,
+          right: rect.right,
+          bottom: rect.bottom,
+          width: rect.width,
+          height: rect.height,
+        };
+      })() : null,
       clipPath: cardStyle.clipPath,
       scrollHeight: transcript?.scrollHeight ?? null,
       clientHeight: transcript?.clientHeight ?? null,
     };
   })()`);
   if (result.issues.length > 0) {
-    throw new Error(`commitment-expanded interaction failed: ${result.issues.join(", ")}`);
+    let evidence = "";
+    if (evidencePath) {
+      const screenshot = await client.call("Page.captureScreenshot", { format: "png" });
+      const name = evidenceName ?? "commitment-expanded-failure.png";
+      await writeFile(join(evidencePath, name), Buffer.from(screenshot.data, "base64"));
+      evidence = `; screenshot=${join(evidencePath, name)}`;
+    }
+    throw new Error(`commitment-expanded interaction failed: ${result.issues.join(", ")}; selector=.transcript .commitment-card.is-edit-budget > .tool-body; bodyPaddingLeft=${result.bodyPaddingLeft}; bodyRect=${JSON.stringify(result.bodyRect)}${evidence}`);
   }
   return result;
 }
@@ -685,7 +703,7 @@ async function exerciseJumpLatest(client, focusVisible) {
   return { activity, firstDetach, pointerJump, secondDetach, ...focus };
 }
 
-async function exerciseComposerStates(client) {
+async function exerciseComposerStates(client, evidencePath = null, evidenceName = null) {
   await expandActivityLedger(client);
   const hasTasks = await client.evaluate(`(() => {
     const tasks = document.querySelector(".loop-list-toggle");
@@ -724,15 +742,36 @@ async function exerciseComposerStates(client) {
         issues.push("composer state ledger crosses the viewport");
       }
     }
+    const rectSnapshot = (rect) => rect ? {
+      left: rect.left,
+      top: rect.top,
+      right: rect.right,
+      bottom: rect.bottom,
+      width: rect.width,
+      height: rect.height,
+    } : null;
     return {
       issues,
       distanceFromBottom: transcript
         ? transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop
         : null,
+      geometry: {
+        pending: rectSnapshot(pending),
+        tasks: rectSnapshot(tasks),
+        notice: rectSnapshot(notice),
+        composer: rectSnapshot(composer),
+      },
     };
   })()`);
   if (resized.issues.length > 0) {
-    throw new Error(`composer-states interaction failed: ${resized.issues.join(", ")}`);
+    let evidence = "";
+    if (evidencePath) {
+      const screenshot = await client.call("Page.captureScreenshot", { format: "png" });
+      const name = evidenceName ?? "composer-states-failure.png";
+      await writeFile(join(evidencePath, name), Buffer.from(screenshot.data, "base64"));
+      evidence = `; screenshot=${join(evidencePath, name)}`;
+    }
+    throw new Error(`composer-states interaction failed: ${resized.issues.join(", ")}; geometry=${JSON.stringify(resized.geometry)}${evidence}`);
   }
   const pointerJump = await clickJumpLatest(client);
   return { detached, resized, pointerJump, tasksExpanded: true };
@@ -892,6 +931,488 @@ async function inspectSecondarySurface(client, surface) {
   return result;
 }
 
+async function clickVisibleButton(client, selector) {
+  const result = await client.evaluate(`(() => {
+    const button = document.querySelector(${JSON.stringify(selector)});
+    if (!(button instanceof HTMLButtonElement)) {
+      return { issues: ["missing button " + ${JSON.stringify(selector)}] };
+    }
+    const rect = button.getBoundingClientRect();
+    const style = getComputedStyle(button);
+    if (button.hidden || style.display === "none" || style.visibility === "hidden"
+      || button.getClientRects().length === 0 || rect.width <= 0 || rect.height <= 0) {
+      return { issues: ["button is not visible " + ${JSON.stringify(selector)}] };
+    }
+    if (button.disabled) {
+      return { issues: ["button is disabled " + ${JSON.stringify(selector)}] };
+    }
+    return {
+      issues: [],
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
+    };
+  })()`);
+  if (result.issues.length > 0) {
+    throw new Error(`Mobile button interaction failed: ${result.issues.join(", ")}`);
+  }
+  await client.call("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: result.x,
+    y: result.y,
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+  });
+  await client.call("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: result.x,
+    y: result.y,
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+  });
+  await waitForSecondaryInteraction();
+}
+
+async function inspectMobileScene(client, scene) {
+  const result = await client.evaluate(`(() => {
+    const scene = ${JSON.stringify(scene)};
+    const issues = [];
+    const roots = {
+      workspaces: document.querySelector(".workspace-rail"),
+      conversations: document.querySelector(".conversation-sidebar"),
+      chat: document.querySelector(".workbench-main"),
+    };
+    const visible = (element) => {
+      if (!element || element.hidden) return false;
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden"
+        && element.getClientRects().length > 0 && rect.width > 0 && rect.height > 0;
+    };
+    const rectOf = (element) => {
+      if (!element) return null;
+      const rect = element.getBoundingClientRect();
+      return {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        width: rect.width,
+        height: rect.height,
+      };
+    };
+    const visibleRoots = Object.entries(roots)
+      .filter(([, element]) => visible(element))
+      .map(([name]) => name);
+    const expectedRoots = [scene];
+    if (visibleRoots.join("|") !== expectedRoots.join("|")) {
+      issues.push("mobile scene roots were not mutually exclusive: " + visibleRoots.join(", "));
+    }
+    const rects = {};
+    const checkVisible = (
+      selector,
+      label = selector,
+      touch = false,
+      withinViewport = true,
+    ) => {
+      const element = document.querySelector(selector);
+      const rect = rectOf(element);
+      rects[label] = rect;
+      if (!element || !visible(element) || !rect) {
+        issues.push(label + " is not visible");
+        return;
+      }
+      if (withinViewport && (rect.left < -1 || rect.top < -1
+        || rect.right > innerWidth + 1 || rect.bottom > innerHeight + 1)) {
+        issues.push(label + " crosses the viewport");
+      }
+      if (touch && (rect.width < 44 || rect.height < 44)) {
+        issues.push(label + " touch target is smaller than 44px");
+      }
+    };
+    const checkHorizontal = (selector, label = selector) => {
+      const element = document.querySelector(selector);
+      const rect = rectOf(element);
+      rects[label] = rect;
+      if (!element || !visible(element) || !rect) {
+        issues.push(label + " is not visible");
+        return;
+      }
+      if (rect.left < -1 || rect.right > innerWidth + 1) {
+        issues.push(label + " crosses the viewport horizontally");
+      }
+    };
+    const requireFullWidth = (rect, label) => {
+      if (!rect || rect.left > 1 || rect.right < innerWidth - 1 || rect.width < innerWidth * 0.9) {
+        issues.push(label + " is not approximately full viewport width");
+      }
+    };
+    const checkHidden = (name) => {
+      if (visible(roots[name])) issues.push(name + " should be hidden");
+    };
+    for (const name of Object.keys(roots)) {
+      if (name !== scene) checkHidden(name);
+    }
+
+    if (scene === "conversations") {
+      checkVisible(".conversation-sidebar .mobile-page-header", "mobile list header");
+      checkVisible(".conversation-sidebar-navigation", "conversation list");
+      checkVisible(".conversation-sidebar-footer", "conversation list footer");
+      checkVisible(".conversation-sidebar-create", "create conversation", true);
+      checkVisible(".conversation-sidebar .mobile-page-header button[aria-label=\\"显示工作区\\"]", "show workspaces", true);
+      checkVisible(".conversation-sidebar .mobile-page-header button[aria-label=\\"打开当前会话\\"]", "open current conversation", true);
+      const header = rectOf(document.querySelector(".conversation-sidebar .mobile-page-header"));
+      const list = rectOf(document.querySelector(".conversation-sidebar-navigation"));
+      const footer = rectOf(document.querySelector(".conversation-sidebar-footer"));
+      requireFullWidth(header, "mobile list header");
+      requireFullWidth(list, "conversation list");
+      requireFullWidth(footer, "conversation list footer");
+      if (header && (header.height < 44 || header.height > innerHeight * 0.4)) {
+        issues.push("mobile list header has an unreasonable height");
+      }
+      if (!header || !list || !footer
+        || header.bottom > list.top + 1
+        || list.bottom > footer.top + 1) {
+        issues.push("conversation header, navigation, and footer are not vertically ordered");
+      }
+    }
+    if (scene === "workspaces") {
+      checkVisible(".workspace-rail .mobile-page-header", "workspace header");
+      checkVisible(".workspace-rail-list", "workspace list", false, false);
+      requireFullWidth(
+        rectOf(document.querySelector(".workspace-rail .mobile-page-header")),
+        "workspace header",
+      );
+      checkHorizontal(".workspace-rail-list", "workspace list");
+      const workspaceListStyle = getComputedStyle(document.querySelector(".workspace-rail-list"));
+      if (!["auto", "scroll"].includes(workspaceListStyle.overflowY)) {
+        issues.push("workspace list has no internal vertical scroll owner");
+      }
+      const entries = [...document.querySelectorAll(".workspace-rail-entry")];
+      if (entries.length !== 4) issues.push("expected 4 workspace entries, found " + entries.length);
+      entries.forEach((entry, index) => {
+        const selector = ".workspace-rail-entry:nth-child(" + (index + 1) + ") .workspace-rail-item";
+        checkVisible(selector, "workspace entry " + (index + 1), true, false);
+        checkHorizontal(selector, "workspace entry " + (index + 1));
+      });
+      checkVisible(".workspace-rail-add", "add workspace", true);
+      checkVisible(".workspace-rail .mobile-page-header button[aria-label=\\"返回会话列表\\"]", "workspace back", true);
+      const add = document.querySelector(".workspace-rail-add");
+      if (add?.matches(":disabled")) issues.push("add workspace is disabled");
+    }
+    if (scene === "chat") {
+      checkVisible(".workbench-main .mobile-chat-header", "mobile chat header");
+      requireFullWidth(
+        rectOf(document.querySelector(".workbench-main .mobile-chat-header")),
+        "mobile chat header",
+      );
+      checkVisible(".workbench-main .transcript", "transcript");
+      checkVisible(".workbench-main .composer textarea", "composer textarea", true);
+      checkVisible(".workbench-main button.send:not(.stop)", "SEND", true);
+      checkVisible(".workbench-main button.send.stop", "STOP", true);
+      checkVisible(".workbench-main .mobile-composer-launchers", "mobile launchers");
+      checkVisible(".workbench-main .mobile-chat-header button[aria-label=\\"返回会话列表\\"]", "chat back", true);
+      checkVisible(".workbench-main .mobile-chat-header button[aria-label=\\"打开会话列表\\"]", "chat agents", true);
+      const launchers = [...document.querySelectorAll(
+        ".workbench-main .mobile-composer-launchers button",
+      )];
+      launchers.forEach((button, index) => checkVisible(
+        ".workbench-main .mobile-composer-launchers button:nth-child(" + (index + 1) + ")",
+        "launcher " + (index + 1),
+        true,
+      ));
+    }
+
+    const html = document.documentElement;
+    const body = document.body;
+    const overflow = Math.max(html.scrollWidth, body?.scrollWidth ?? 0) > innerWidth + 1;
+    if (overflow) issues.push("document has horizontal overflow");
+    return {
+      scene,
+      issues,
+      visibleRoots,
+      rects,
+      overflow,
+      viewport: [innerWidth, innerHeight],
+      document: {
+        clientWidth: html.clientWidth,
+        scrollWidth: html.scrollWidth,
+        scrollHeight: html.scrollHeight,
+      },
+    };
+  })()`);
+  if (result.issues.length > 0) {
+    throw new Error(`Mobile ${scene} scene failed: ${result.issues.join(", ")}`);
+  }
+  return result;
+}
+
+async function inspectMobileSheet(client, kind) {
+  const result = await client.evaluate(`(() => {
+    const kind = ${JSON.stringify(kind)};
+    const definitions = {
+      tasks: {
+        label: "任务",
+        surface: '.loop-list.mobile-sheet-surface:not([hidden])',
+        item: ".loop-list-item",
+        count: 4,
+        close: 'button[aria-label="关闭任务"]',
+      },
+      pending: {
+        label: "等待中",
+        surface: '.pending-admissions.mobile-sheet-surface:not([hidden])',
+        item: ".pending-admission-item",
+        count: 1,
+        close: 'button[aria-label="关闭等待中"]',
+      },
+      controls: {
+        label: "控制",
+        surface: '.composer-meta.mobile-sheet-surface:not([hidden])',
+        item: null,
+        count: 0,
+        close: 'button[aria-label="关闭控制"]',
+      },
+    };
+    const definition = definitions[kind];
+    const issues = [];
+    if (!definition) return { kind, issues: ["unknown mobile sheet " + kind] };
+    const visible = (element) => {
+      if (!element || element.hidden) return false;
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden"
+        && element.getClientRects().length > 0 && rect.width > 0 && rect.height > 0;
+    };
+    const rectOf = (element) => {
+      if (!element) return null;
+      const rect = element.getBoundingClientRect();
+      return {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        width: rect.width,
+        height: rect.height,
+      };
+    };
+    const dialog = document.querySelector(
+      '.composer-wrap[role="dialog"][aria-modal="true"]',
+    );
+    const surface = dialog?.querySelector(definition.surface);
+    const surfaces = [...(dialog?.querySelectorAll(".mobile-sheet-surface") ?? [])];
+    const backdrop = document.querySelector(".mobile-sheet-backdrop");
+    const close = dialog?.querySelector(definition.close);
+    const header = surface?.querySelector(".mobile-sheet-header");
+    const composer = dialog?.querySelector(".composer");
+    const stopButtons = [...(dialog?.querySelectorAll("button.send.stop") ?? [])]
+      .filter(visible);
+    if (!dialog || !visible(dialog)) issues.push("mobile sheet dialog is not visible");
+    if (dialog?.getAttribute("aria-label") !== definition.label) {
+      issues.push("mobile sheet dialog aria-label is not " + definition.label);
+    }
+    if (!surface || !visible(surface)) issues.push(kind + " surface is not visible");
+    if (!backdrop || !visible(backdrop)) issues.push(kind + " sheet backdrop is not visible");
+    if (!composer || !visible(composer)) issues.push(kind + " dialog composer is not visible");
+    if (stopButtons.length !== 1) {
+      issues.push("expected one visible STOP in mobile sheet dialog, found " + stopButtons.length);
+    }
+    const dialogRect = rectOf(dialog);
+    const surfaceRect = rectOf(surface);
+    const headerRect = rectOf(header);
+    const backdropRect = rectOf(backdrop);
+    const closeRect = rectOf(close);
+    if (dialogRect && (dialogRect.left < -1 || dialogRect.right > innerWidth + 1
+      || dialogRect.top < -1 || dialogRect.bottom > innerHeight + 1)) {
+      issues.push("mobile sheet dialog crosses the viewport");
+    }
+    if (surfaceRect && (surfaceRect.left < -1 || surfaceRect.right > innerWidth + 1
+      || surfaceRect.top < -1 || surfaceRect.bottom > innerHeight + 1)) {
+      issues.push(kind + " surface crosses the viewport");
+    }
+    if (backdropRect && (backdropRect.left > 1 || backdropRect.top > 1
+      || backdropRect.right < innerWidth - 1 || backdropRect.bottom < innerHeight - 1
+      || backdropRect.width < innerWidth * 0.9 || backdropRect.height < innerHeight * 0.9)) {
+      issues.push(kind + " sheet backdrop is not approximately full viewport");
+    }
+    if (!header || !visible(header)) issues.push(kind + " surface header is not visible");
+    if (!close || !visible(close)) issues.push(kind + " close button is not visible");
+    if (closeRect && (closeRect.width < 44 || closeRect.height < 44)) {
+      issues.push(kind + " close button is smaller than 44px");
+    }
+    if (kind === "controls") {
+      if (!headerRect || !surfaceRect
+        || headerRect.width < surfaceRect.width * 0.9
+        || headerRect.left > surfaceRect.left + 1
+        || headerRect.right < surfaceRect.left + surfaceRect.width * 0.9) {
+        issues.push("controls sheet header is not approximately full surface width");
+      }
+      if (closeRect && closeRect.left < innerWidth * 0.55) {
+        issues.push("controls sheet close button is not on the right side");
+      }
+    }
+    if (!dialog?.contains(document.activeElement)) {
+      issues.push(kind + " dialog did not retain focus inside its surface");
+    }
+    for (const sibling of surfaces) {
+      if (sibling !== surface && visible(sibling)) {
+        issues.push(kind + " has a visible hidden sibling surface");
+      }
+    }
+    const visibleSurfaceCount = surfaces.filter(visible).length;
+    if (visibleSurfaceCount !== 1) {
+      issues.push("expected one visible mobile sheet surface, found " + visibleSurfaceCount);
+    }
+    const surfaceStyle = surface ? getComputedStyle(surface) : null;
+    const overflowY = surfaceStyle?.overflowY ?? "";
+    if (!["auto", "scroll"].includes(overflowY)) {
+      issues.push(kind + " surface has no internal vertical scroll owner");
+    }
+    const itemElements = definition.item
+      ? [...surface.querySelectorAll(definition.item)].filter(visible)
+      : [];
+    const itemCount = itemElements.length;
+    if (itemCount !== definition.count) {
+      issues.push("expected " + definition.count + " " + kind + " items, found " + itemCount);
+    }
+    if (kind === "controls") {
+      const required = [
+        [".mobile-model-settings", "model entry"],
+        [".conversation-role-pill", "conversation role"],
+        ['select[aria-label="思考级别"]', "thinking level"],
+        ['select[aria-label="服务层级"]', "service tier"],
+        ['.context-management', "context management"],
+        ['button[aria-label="手动压缩上下文"]', "manual compaction"],
+      ];
+      for (const [selector, label] of required) {
+        const element = surface?.querySelector(selector);
+        if (!element || !visible(element)) issues.push(label + " is not visible");
+      }
+      if ((surface?.querySelectorAll(".compaction-threshold-toggle").length ?? 0) < 2) {
+        issues.push("compaction controls are incomplete");
+      }
+    }
+    const html = document.documentElement;
+    const body = document.body;
+    const overflow = Math.max(html.scrollWidth, body?.scrollWidth ?? 0) > innerWidth + 1;
+    if (overflow) issues.push(kind + " sheet introduced horizontal overflow");
+    return {
+      kind,
+      issues,
+      dialog: dialogRect,
+      sheet: surfaceRect,
+      header: headerRect,
+      backdrop: backdropRect,
+      close: closeRect,
+      focusedInside: Boolean(dialog?.contains(document.activeElement)),
+      focusedClose: document.activeElement === close,
+      overflow,
+      overflowY,
+      scrollHeight: surface?.scrollHeight ?? null,
+      clientHeight: surface?.clientHeight ?? null,
+      scrollRange: surface ? Math.max(0, surface.scrollHeight - surface.clientHeight) : null,
+      itemCount,
+    };
+  })()`);
+  if (result.issues.length > 0) {
+    throw new Error(`Mobile ${kind} sheet failed: ${result.issues.join(", ")}; dialog=${JSON.stringify(result.dialog)}; sheet=${JSON.stringify(result.sheet)}; header=${JSON.stringify(result.header)}; backdrop=${JSON.stringify(result.backdrop)}; close=${JSON.stringify(result.close)}`);
+  }
+  return result;
+}
+
+async function captureMobileScene(client, outputPath, width, height, index, scene, diagnostics) {
+  const screenshot = await client.call("Page.captureScreenshot", { format: "png" });
+  const name = `${String(index + 1).padStart(2, "0")}-${width}x${height}-fixture-${scene}.png`;
+  await writeFile(join(outputPath, name), Buffer.from(screenshot.data, "base64"));
+  return {
+    name,
+    fixture: "workbench",
+    mobileScene: scene,
+    viewport: [width, height],
+    appRoot: "app-shell",
+    overflow: diagnostics.overflow,
+    mobileDiagnostics: diagnostics,
+  };
+}
+
+async function exerciseMobileWorkbench(client, outputPath, width, height, index, options = {}) {
+  const shouldCapture = options.capture === true;
+  const pending = options.pending === true;
+  const captures = [];
+  const sceneDiagnostics = {};
+  const saveScene = async (scene) => {
+    const diagnostics = await inspectMobileScene(client, scene);
+    sceneDiagnostics[scene] = diagnostics;
+    if (shouldCapture) {
+      captures.push(await captureMobileScene(
+        client,
+        outputPath,
+        width,
+        height,
+        index + captures.length,
+        scene,
+        diagnostics,
+      ));
+    }
+    return diagnostics;
+  };
+  const saveSheet = async (kind) => {
+    const diagnostics = await inspectMobileSheet(client, kind);
+    if (shouldCapture) {
+      captures.push(await captureMobileScene(
+        client,
+        outputPath,
+        width,
+        height,
+        index + captures.length,
+        kind,
+        diagnostics,
+      ));
+    }
+    return diagnostics;
+  };
+
+  await saveScene("conversations");
+  await clickVisibleButton(client, 'button[aria-label="显示工作区"]');
+  await saveScene("workspaces");
+  await clickVisibleButton(client, 'button[aria-label="返回会话列表"]');
+  await saveScene("conversations");
+  await clickVisibleButton(client, 'button[aria-label="打开当前会话"]');
+  await saveScene("chat");
+
+  const taskLauncher = 'button[aria-label="打开任务"]';
+  await clickVisibleButton(client, taskLauncher);
+  const taskOpenFocus = await client.evaluate(`document.activeElement === document.querySelector('button[aria-label="关闭任务"]')`);
+  if (!taskOpenFocus) throw new Error("Mobile tasks sheet did not focus its close button");
+  await clickVisibleButton(client, '.composer-wrap[role="dialog"][aria-label="任务"] .loop-list-toggle');
+  const tasks = await saveSheet("tasks");
+  await clickVisibleButton(client, 'button[aria-label="关闭任务"]');
+  const afterTasks = await saveScene("chat");
+  const taskFocus = await client.evaluate(`document.activeElement === document.querySelector(${JSON.stringify(taskLauncher)})`);
+  if (!taskFocus) throw new Error("Mobile tasks sheet did not restore launcher focus");
+
+  const controlsLauncher = 'button[aria-label="打开控制"]';
+  await clickVisibleButton(client, controlsLauncher);
+  const controls = await saveSheet("controls");
+  if (!controls.focusedClose) throw new Error("Mobile controls sheet did not focus its close button");
+  await clickVisibleButton(client, 'button[aria-label="关闭控制"]');
+  const afterControls = await saveScene("chat");
+  const controlsFocus = await client.evaluate(`document.activeElement === document.querySelector(${JSON.stringify(controlsLauncher)})`);
+  if (!controlsFocus) throw new Error("Mobile controls sheet did not restore launcher focus");
+
+  let pendingDiagnostics = null;
+  if (pending) {
+    const pendingLauncher = 'button[aria-label="打开等待中"]';
+    await clickVisibleButton(client, pendingLauncher);
+    pendingDiagnostics = await saveSheet("pending");
+    if (!pendingDiagnostics.focusedClose) throw new Error("Mobile pending sheet did not focus its close button");
+  }
+  if (!shouldCapture) {
+    return { sceneDiagnostics, tasks, afterTasks, controls, afterControls, pending: pendingDiagnostics };
+  }
+  return captures;
+}
+
 async function captureViewport(client, outputPath, width, height, index, surface = null) {
   await client.call("Emulation.setDeviceMetricsOverride", {
     width,
@@ -915,14 +1436,24 @@ async function captureViewport(client, outputPath, width, height, index, surface
       "jump-latest-focus",
       "composer-states",
     ].includes(surface.surface);
-    if (usesWorkbench) {
+    let interaction = null;
+    if (usesWorkbench && width <= 600) {
+      interaction = await exerciseMobileWorkbench(
+        client,
+        null,
+        width,
+        height,
+        index,
+        { pending: surface.surface === "composer-states" },
+      );
+    } else if (usesWorkbench) {
+      const compactRebelFixture = [
+        "activity-expanded",
+        "commitment-expanded",
+        "composer-states",
+      ].includes(surface.surface) && width <= 960;
       const collapsedMobileSidebar = await client.evaluate(`(() => {
-        const compactRebelFixture = [
-          "activity-expanded",
-          "commitment-expanded",
-          "composer-states",
-        ].includes(${JSON.stringify(surface.surface)}) && innerWidth <= 960;
-        if (innerWidth > 600 && !compactRebelFixture) return false;
+        if (innerWidth > 600 && !${JSON.stringify(compactRebelFixture)}) return false;
         const toggle = document.querySelector(".conversation-sidebar-toggle");
         if (toggle?.getAttribute("aria-expanded") !== "true") return false;
         toggle.click();
@@ -930,16 +1461,36 @@ async function captureViewport(client, outputPath, width, height, index, surface
       })()`);
       if (collapsedMobileSidebar) await waitForSecondaryInteraction();
     }
-    let interaction = null;
-    if (surface.surface === "context-tooltip") await revealContextTooltip(client);
+    if (surface.surface === "context-tooltip") {
+      if (width <= 600) {
+        await clickVisibleButton(client, 'button[aria-label="打开控制"]');
+        await inspectMobileSheet(client, "controls");
+      }
+      await revealContextTooltip(client);
+    }
     if (surface.surface === "activity-expanded") interaction = await expandActivityLedger(client);
-    if (surface.surface === "commitment-expanded") interaction = await expandCommitmentCard(client);
+    if (surface.surface === "commitment-expanded") {
+      interaction = await expandCommitmentCard(
+        client,
+        width <= 600 ? outputPath : null,
+        width <= 600 ? `commitment-expanded-product-bug-${width}x${height}.png` : null,
+      );
+    }
     if (surface.surface === "jump-latest") interaction = await exerciseJumpLatest(client, false);
     if (surface.surface === "jump-latest-focus") interaction = await exerciseJumpLatest(client, true);
-    if (surface.surface === "composer-states") interaction = await exerciseComposerStates(client);
+    if (surface.surface === "composer-states" && width > 600) {
+      interaction = await exerciseComposerStates(
+        client,
+        outputPath,
+        `composer-states-product-bug-${width}x${height}.png`,
+      );
+    }
     diagnostics = await inspectSecondarySurface(client, surface);
     diagnostics.interaction = interaction;
   } else if (visualFixture) {
+    if (width <= 600) {
+      return exerciseMobileWorkbench(client, outputPath, width, height, index, { capture: true });
+    }
     const ready = await client.evaluate(`(() => {
       const fixture = document.querySelector('[data-visual-fixture="populated-workbench"]');
       const tasks = fixture?.querySelector('.loop-list-toggle');
@@ -948,10 +1499,6 @@ async function captureViewport(client, outputPath, width, height, index, surface
         tasks.getClientRects().length > 0
         && tasks.getAttribute('aria-expanded') !== 'true'
       ) tasks.click();
-      if (innerWidth <= 600) {
-        const sidebar = fixture.querySelector('.conversation-sidebar-toggle');
-        if (sidebar?.getAttribute('aria-expanded') === 'true') sidebar.click();
-      }
       return true;
     })()`);
     if (!ready) {
@@ -1579,20 +2126,24 @@ async function main() {
           ? viewports
           : surface.viewports ?? viewports;
         for (const viewport of surfaceViewports) {
-          captures.push(await captureViewport(
+          const capture = await captureViewport(
             client,
             runDir,
             viewport[0],
             viewport[1],
             index,
             surface,
-          ));
+          );
+          if (Array.isArray(capture)) captures.push(...capture);
+          else captures.push(capture);
           index += 1;
         }
       }
     } else {
       for (const [index, viewport] of viewports.entries()) {
-        captures.push(await captureViewport(client, runDir, viewport[0], viewport[1], index));
+        const capture = await captureViewport(client, runDir, viewport[0], viewport[1], index);
+        if (Array.isArray(capture)) captures.push(...capture);
+        else captures.push(capture);
       }
     }
     let motion = null;

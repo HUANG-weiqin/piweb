@@ -106,6 +106,248 @@ afterEach(() => {
 });
 
 describe("Chat", () => {
+  it("uses one phone composer while opening Tasks, pending work, and controls as latest-prop sheets", () => {
+    const onAbort = vi.fn();
+    const onSettings = vi.fn();
+    const mobile = {
+      title: "会话 A",
+      onBack: vi.fn(),
+      onShowConversations: vi.fn(),
+    };
+    const firstPending = [{ promptId: "pending-a", text: "等待中的 A" }];
+    const rendered = render(view(emptyChat, "", undefined, {
+      mobile,
+      busy: true,
+      activeRun: { id: "run-phone", phase: "running" },
+      loopList: {
+        armed: true,
+        items: [{ id: "task-a", text: "手机任务 A", status: "active" }],
+      },
+      pendingAdmissions: firstPending,
+      onAbort,
+      onSettings,
+    }));
+
+    expect(rendered.container.querySelectorAll(".app-shell")).toHaveLength(1);
+    expect(rendered.container.querySelectorAll("textarea")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "停止" }))
+      .toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "打开任务" }));
+    const tasksDialog = screen.getByRole("dialog", { name: "任务" });
+    expect(tasksDialog).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "停止" }));
+    expect(onAbort).toHaveBeenCalledTimes(1);
+    expect(rendered.container.querySelectorAll(".loop-list")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "关闭任务" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "打开等待中" }));
+    expect(screen.getByRole("dialog", { name: "等待中" })).toHaveTextContent("等待中的 A");
+    rendered.rerender(view(emptyChat, "", undefined, {
+      mobile,
+      busy: true,
+      activeRun: { id: "run-phone", phase: "running" },
+      loopList: {
+        armed: true,
+        items: [{ id: "task-a", text: "手机任务 B", status: "completed" }],
+      },
+      pendingAdmissions: [{ promptId: "pending-b", text: "等待中的 B" }],
+      onAbort,
+      onSettings,
+    }));
+    expect(screen.getByRole("dialog", { name: "等待中" }))
+      .toHaveTextContent("等待中的 B");
+    expect(screen.queryByText("等待中的 A")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "关闭等待中" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "打开控制" }));
+    expect(screen.getByRole("dialog", { name: "控制" })).toBeInTheDocument();
+    expect(rendered.container.querySelectorAll(".composer-meta")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "打开模型设置" }));
+    expect(onSettings).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("dialog", { name: "控制" })).not.toBeInTheDocument();
+
+    expect(onAbort).toHaveBeenCalledTimes(1);
+    expect(rendered.container.querySelectorAll("textarea")).toHaveLength(1);
+  });
+
+  it("traps phone sheet focus, restores its launcher, and closes across readiness changes", async () => {
+    const mobile = {
+      title: "会话 A",
+      onBack: vi.fn(),
+      onShowConversations: vi.fn(),
+    };
+    const rendered = render(view(emptyChat, "", undefined, { mobile }));
+    const launcher = screen.getByRole("button", { name: "打开控制" });
+    launcher.focus();
+    fireEvent.click(launcher);
+    const sheet = screen.getByRole("dialog", { name: "控制" });
+    const closeSheet = within(sheet).getByRole("button", { name: "关闭控制" });
+    await waitFor(() => expect(closeSheet).toHaveFocus());
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(sheet.contains(document.activeElement)).toBe(true);
+    expect(closeSheet).not.toHaveFocus();
+    closeSheet.focus();
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    expect(sheet.contains(document.activeElement)).toBe(true);
+    expect(closeSheet).not.toHaveFocus();
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(launcher).toHaveFocus());
+
+    fireEvent.click(launcher);
+    rendered.rerender(view(emptyChat, "", undefined, {
+      mobile,
+      conversationReady: false,
+    }));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "控制" }))
+        .not.toBeInTheDocument();
+    });
+    expect(launcher).toBeDisabled();
+    fireEvent.click(launcher);
+    expect(screen.queryByRole("dialog", { name: "控制" }))
+      .not.toBeInTheDocument();
+
+    rendered.rerender(view(emptyChat, "", undefined, { mobile }));
+    const restoredLauncher = screen.getByRole("button", { name: "打开控制" });
+    restoredLauncher.focus();
+    fireEvent.click(restoredLauncher);
+    rendered.rerender(view(emptyChat, "", undefined, {
+      mobile,
+      observationSessionId: "replacement-session",
+    }));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "控制" }))
+        .not.toBeInTheDocument();
+      expect(restoredLauncher).toHaveFocus();
+    });
+
+    fireEvent.click(restoredLauncher);
+    rendered.rerender(view(emptyChat));
+    expect(screen.queryByRole("dialog", { name: "控制" }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "关闭控制" }))
+      .not.toBeInTheDocument();
+    expect(rendered.container.querySelector(".composer-meta"))
+      .not.toHaveAttribute("hidden");
+  });
+
+  it("closes a phone sheet when its Chat projection becomes inactive and does not revive it", async () => {
+    const mobile = {
+      active: true,
+      title: "会话 A",
+      onBack: vi.fn(),
+      onShowConversations: vi.fn(),
+    };
+    const rendered = render(view(emptyChat, "", undefined, { mobile }));
+
+    fireEvent.click(screen.getByRole("button", { name: "打开控制" }));
+    expect(screen.getByRole("dialog", { name: "控制" })).toBeInTheDocument();
+
+    rendered.rerender(view(emptyChat, "", undefined, {
+      mobile: { ...mobile, active: false },
+    }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "控制" }))
+      .not.toBeInTheDocument());
+
+    rendered.rerender(view(emptyChat, "", undefined, { mobile }));
+    expect(screen.queryByRole("dialog", { name: "控制" })).not.toBeInTheDocument();
+  });
+
+  it("closes a phone role dialog when its Chat projection becomes inactive", async () => {
+    const onBlockingModalChange = vi.fn();
+    const role: ConversationRoleSnapshot = {
+      id: "default",
+      revision: 3,
+      name: "Reviewer",
+      description: "Reviews changes",
+      systemPrompt: "Review exact evidence.",
+      model: { provider: "provider", id: "model" },
+      defaultThinkingLevel: "off",
+      defaultServiceTier: null,
+      toolMode: "read_only",
+      canManageSessions: true,
+    };
+    const mobile = {
+      active: true,
+      title: "会话 A",
+      onBack: vi.fn(),
+      onShowConversations: vi.fn(),
+    };
+    const rendered = render(view(emptyChat, "", role, {
+      mobile,
+      onBlockingModalChange,
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: "打开控制" }));
+    fireEvent.click(screen.getByRole("button", {
+      name: "查看会话角色 Reviewer",
+    }));
+    expect(screen.getByRole("dialog", { name: "更换会话角色" }))
+      .toBeInTheDocument();
+    await waitFor(() => expect(onBlockingModalChange)
+      .toHaveBeenLastCalledWith(true));
+
+    rendered.rerender(view(emptyChat, "", role, {
+      mobile: { ...mobile, active: false },
+      onBlockingModalChange,
+    }));
+    await waitFor(() => expect(screen.queryByRole("dialog", {
+      name: "更换会话角色",
+    })).not.toBeInTheDocument());
+
+    rendered.rerender(view(emptyChat, "", role, {
+      mobile,
+      onBlockingModalChange,
+    }));
+    expect(onBlockingModalChange).toHaveBeenLastCalledWith(false);
+    expect(screen.queryByRole("dialog", { name: "更换会话角色" }))
+      .not.toBeInTheDocument();
+  });
+
+  it("keeps STOP in the phone sheet focus scope and excludes hidden sheet controls", async () => {
+    const mobile = {
+      title: "会话 A",
+      onBack: vi.fn(),
+      onShowConversations: vi.fn(),
+    };
+    const rendered = render(view(emptyChat, "", undefined, {
+      mobile,
+      busy: true,
+      activeRun: { id: "run-phone", phase: "running" },
+      loopList: {
+        armed: true,
+        items: [{ id: "task-a", text: "手机任务", status: "active" }],
+      },
+      pendingAdmissions: [{ promptId: "pending-a", text: "等待中的消息" }],
+    }));
+    const launcher = screen.getByRole("button", { name: "打开控制" });
+    launcher.focus();
+    fireEvent.click(launcher);
+
+    const scope = screen.getByRole("dialog", { name: "控制" });
+    const closeSheet = within(scope).getByRole("button", { name: "关闭控制" });
+    await waitFor(() => expect(closeSheet).toHaveFocus());
+    const hiddenTaskToggle = rendered.container.querySelector<HTMLElement>(
+      ".loop-list-toggle",
+    );
+    expect(hiddenTaskToggle).toBeTruthy();
+    expect(hiddenTaskToggle).not.toHaveFocus();
+
+    const stop = screen.getByRole("button", { name: "停止" });
+    expect(scope).toContainElement(stop);
+    for (let index = 0; index < 4; index += 1) {
+      fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    }
+    expect(stop).toHaveFocus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(screen.getByRole("button", { name: "打开任务" })).toHaveFocus();
+    expect(scope.contains(document.activeElement)).toBe(true);
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(launcher).toHaveFocus());
+  });
+
   it("scopes transcript item identity to the session and conversation, not the focus", () => {
     const message = (text: string) => ({
       id: "stable-message-id",

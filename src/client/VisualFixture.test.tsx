@@ -1,12 +1,40 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { VisualFixture } from "./VisualFixture";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 describe("VisualFixture", () => {
+  it("starts its phone adapter on the conversation page", () => {
+    vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
+      matches: query === "(max-width: 600px)",
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(() => true),
+    })));
+    const { container } = render(<VisualFixture />);
+
+    expect(screen.getByRole("complementary", { name: "项目会话栏" }))
+      .toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "工作区" }))
+      .not.toBeInTheDocument();
+    expect(container.querySelectorAll(".app-shell")).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", {
+      name: "当前会话 建立稳定的视觉验证基线",
+    }));
+    expect(screen.getByRole("main")).toHaveClass("app-shell");
+  });
+
   it("renders the stable populated workbench state through production components", () => {
     const { container } = render(<VisualFixture />);
 

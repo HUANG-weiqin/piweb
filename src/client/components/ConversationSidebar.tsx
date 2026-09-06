@@ -50,11 +50,17 @@ interface ConversationSidebarProps {
   navigationEnabled: boolean;
   actionsEnabled: boolean;
   deletionBlocked?: boolean;
+  mobile?: {
+    hidden: boolean;
+    onShowWorkspaces(): void;
+    onShowCurrentConversation?: () => void;
+  };
   onToggleCollapsed(collapsed: boolean): void;
   onSelect(conversationId: string): void;
   onCreate(): void;
   onRename(conversationId: string, name: string): void;
   onDelete(conversationId: string): boolean;
+  onBlockingModalChange?(blocking: boolean): void;
 }
 
 function shortHandle(conversationId: string): string {
@@ -560,13 +566,16 @@ function ConversationSidebarView({
   navigationEnabled,
   actionsEnabled,
   deletionBlocked = false,
+  mobile,
   onToggleCollapsed,
   onSelect,
   onCreate,
   onRename,
   onDelete,
+  onBlockingModalChange,
 }: ConversationSidebarProps) {
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
+  const sidebarCollapsed = collapsed && !mobile;
   const resizeState = useRef<{
     pointerId: number;
     startX: number;
@@ -634,15 +643,28 @@ function ConversationSidebarView({
   };
   const closeRenameDialog = () => setRenameConversationId("");
   const deleteFocusRef = useModalFocus<HTMLDivElement>(
-    Boolean(deleteCandidate),
+    Boolean(deleteCandidate) && !mobile?.hidden,
     confirmDeleteConversationId,
     closeDeleteDialog,
   );
   const renameFocusRef = useModalFocus<HTMLFormElement>(
-    Boolean(renameCandidate),
+    Boolean(renameCandidate) && !mobile?.hidden,
     renameConversationId,
     closeRenameDialog,
   );
+
+  useEffect(() => {
+    onBlockingModalChange?.(Boolean(
+      (deleteCandidate || renameCandidate) && !mobile?.hidden,
+    ));
+    return () => onBlockingModalChange?.(false);
+  }, [deleteCandidate, mobile?.hidden, onBlockingModalChange, renameCandidate]);
+
+  useEffect(() => {
+    if (!mobile?.hidden) return;
+    setConfirmDeleteConversationId("");
+    setRenameConversationId("");
+  }, [mobile?.hidden]);
 
   useLayoutEffect(() => {
     if (observedScopeKey.current === scopeKey) return;
@@ -712,8 +734,8 @@ function ConversationSidebarView({
     };
   }, []);
   useEffect(() => {
-    if (collapsed || !navigationEnabled) resizeState.current = undefined;
-  }, [collapsed, navigationEnabled]);
+    if (sidebarCollapsed || !navigationEnabled) resizeState.current = undefined;
+  }, [navigationEnabled, sidebarCollapsed]);
   useEffect(() => {
     if (!renameConversationId || renameCandidate) return;
     setRenameConversationId("");
@@ -744,12 +766,31 @@ function ConversationSidebarView({
 
   return <>
     <aside
-      className={`conversation-sidebar${collapsed ? " collapsed" : ""}`}
+      className={`conversation-sidebar${sidebarCollapsed ? " collapsed" : ""}`}
       aria-label="项目会话栏"
       style={sidebarStyle}
+      hidden={mobile?.hidden}
     >
+      {mobile && <header className="mobile-page-header">
+        <button
+          type="button"
+          aria-label="显示工作区"
+          onClick={mobile.onShowWorkspaces}
+        >工作区</button>
+        <div>
+          <small>AGENTS</small>
+          <h1>会话</h1>
+        </div>
+        {mobile.onShowCurrentConversation
+          ? <button
+              type="button"
+              aria-label="打开当前会话"
+              onClick={mobile.onShowCurrentConversation}
+            >当前</button>
+          : <span aria-hidden="true" />}
+      </header>}
       <header className="conversation-sidebar-header">
-        {!collapsed && (
+        {!sidebarCollapsed && (
           <h2>
             <span>SESSIONS</span>
             <small>/ CONVERSATIONS</small>
@@ -758,16 +799,16 @@ function ConversationSidebarView({
         <button
           type="button"
           className="conversation-sidebar-toggle"
-          aria-label={collapsed ? "展开会话栏" : "收起会话栏"}
-          aria-expanded={!collapsed}
+          aria-label={sidebarCollapsed ? "展开会话栏" : "收起会话栏"}
+          aria-expanded={!sidebarCollapsed}
           disabled={!navigationEnabled}
-          onClick={() => onToggleCollapsed(!collapsed)}
+          onClick={() => onToggleCollapsed(!sidebarCollapsed)}
         >
-          {collapsed ? "›" : "‹"}
+          {sidebarCollapsed ? "›" : "‹"}
         </button>
       </header>
 
-      {!collapsed && (
+      {!sidebarCollapsed && (
         <nav className="conversation-sidebar-navigation" aria-label="项目会话">
           <ul className="conversation-sidebar-list">
             {grouped.entries.map((entry, index) => {
@@ -822,10 +863,10 @@ function ConversationSidebarView({
           onClick={onCreate}
         >
           <span aria-hidden="true">＋</span>
-          {!collapsed && <span>新建会话</span>}
+          {!sidebarCollapsed && <span>新建会话</span>}
         </button>
       </footer>
-      {!collapsed && <div
+      {!sidebarCollapsed && <div
         className="conversation-sidebar-resize-handle"
         role="separator"
         aria-label="调整会话栏宽度"
@@ -841,7 +882,7 @@ function ConversationSidebarView({
         onPointerDown={startResize}
       />}
     </aside>
-    {deleteCandidate && <div
+    {deleteCandidate && !mobile?.hidden && <div
       className="modal-backdrop"
       role="presentation"
       onMouseDown={(event) => {
@@ -888,7 +929,7 @@ function ConversationSidebarView({
         </div>
       </div>
     </div>}
-    {renameCandidate && <div
+    {renameCandidate && !mobile?.hidden && <div
       className="modal-backdrop"
       role="presentation"
       onMouseDown={(event) => {

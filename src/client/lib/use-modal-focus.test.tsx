@@ -127,6 +127,23 @@ describe("useModalFocus restoration", () => {
     expect(screen.getByRole("button", { name: "outer preferred" })).not.toHaveFocus();
   });
 
+  it("skips controls hidden by a panel ancestor when choosing modal focus", () => {
+    function Fixture() {
+      const ref = useModalFocus<HTMLElement>(true, "dialog");
+      return <section ref={ref} tabIndex={-1}>
+        <div hidden><button data-modal-autofocus>Hidden preferred</button></div>
+        <button data-modal-autofocus>Visible preferred</button>
+      </section>;
+    }
+
+    render(<Fixture />);
+
+    expect(screen.getByRole("button", { name: "Visible preferred" }))
+      .toHaveFocus();
+    expect(screen.queryByRole("button", { name: "Hidden preferred" }))
+      .not.toBeInTheDocument();
+  });
+
   it("does not focus an arbitrary document control when no parent scope survives", () => {
     function Fixture() {
       const [open, setOpen] = useState(false);

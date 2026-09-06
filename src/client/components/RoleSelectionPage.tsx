@@ -3,6 +3,9 @@ import type { RoleTemplate } from "../../shared/protocol";
 interface RoleSelectionPageProps {
   roles: RoleTemplate[];
   pending?: boolean;
+  mobile?: {
+    onBack(): void;
+  };
   onStart(roleId: string): void;
   onManageRole(roleId: string): void;
   onAddRole(): void;
@@ -17,12 +20,27 @@ function roleModelLabel(role: RoleTemplate): string {
 export function RoleSelectionPage({
   roles,
   pending = false,
+  mobile,
   onStart,
   onManageRole,
   onAddRole,
   onSettings,
 }: RoleSelectionPageProps) {
-  return <main className="role-selection-page">
+  return <main className={`role-selection-page${
+    mobile ? " mobile-lifecycle-page" : ""
+  }`}>
+    {mobile && <header className="mobile-page-header">
+      <button
+        type="button"
+        aria-label="返回会话列表"
+        onClick={mobile.onBack}
+      >返回</button>
+      <div>
+        <small>AGENTS</small>
+        <h1>新建会话</h1>
+      </div>
+      <span aria-hidden="true" />
+    </header>}
     <header className="role-selection-header">
       <div>
         <p className="eyebrow">NEW CONVERSATION</p>

@@ -14,7 +14,7 @@ const modalContainers = new Map<symbol, HTMLElement>();
 function isFocusable(element: HTMLElement): boolean {
   return element.matches(FOCUSABLE)
     && !element.hidden
-    && element.getAttribute("aria-hidden") !== "true";
+    && element.closest("[hidden], [aria-hidden='true']") === null;
 }
 
 function focusableElements(container: HTMLElement): HTMLElement[] {
@@ -23,10 +23,11 @@ function focusableElements(container: HTMLElement): HTMLElement[] {
 }
 
 function focusSafest(container: HTMLElement): void {
-  const preferred = container.querySelector<HTMLElement>(
-    "[data-modal-autofocus]:not([disabled])",
-  );
-  (preferred ?? focusableElements(container)[0] ?? container).focus();
+  const focusable = focusableElements(container);
+  const preferred = focusable.find((element) => (
+    element.matches("[data-modal-autofocus]")
+  ));
+  (preferred ?? focusable[0] ?? container).focus();
 }
 
 /**
@@ -38,8 +39,10 @@ export function useModalFocus<T extends HTMLElement>(
   active: boolean,
   identity: string,
   onEscape?: () => void,
+  existingContainerRef?: RefObject<T | null>,
 ): RefObject<T | null> {
-  const containerRef = useRef<T>(null);
+  const ownedContainerRef = useRef<T>(null);
+  const containerRef = existingContainerRef ?? ownedContainerRef;
   const tokenRef = useRef(Symbol("modal-focus-scope"));
   const previousFocusRef = useRef<HTMLElement | null>(null);
   const escapeRef = useRef(onEscape);

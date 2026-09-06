@@ -50,11 +50,22 @@ import {
   conversationTitleLookupKey,
   createConversationTitleLookup,
 } from "./lib/conversation-display";
+import {
+  decodePhoneHistoryRoute,
+  phoneHistoryRouteEquals,
+  phoneHistoryRouteParent,
+  pushPhoneHistoryRoute,
+  readPhoneHistoryRoute,
+  replacePhoneHistoryRoute,
+  type PhoneHistoryRoute,
+} from "./lib/phone-history-route";
 import { PiSocket } from "./lib/socket";
 import { readStoredString, writeStoredString } from "./lib/storage";
 import { createTransitionTimingOwner } from "./lib/transition-timing";
 import { useLatestCallback } from "./lib/use-latest-callback";
 import { useModalFocus } from "./lib/use-modal-focus";
+import { usePhoneSceneFocus } from "./lib/use-phone-scene-focus";
+import { usePhoneViewport } from "./lib/use-phone-viewport";
 
 const CWD_KEY = "piweb.lastCwd";
 const WORKSPACES_KEY = "piweb.workspaces";
@@ -63,7 +74,9 @@ export const MAX_CACHED_WORKSPACES = 4;
 export const MAX_CACHED_CONVERSATION_PRESENTATIONS = 8;
 const MAX_SUPERSEDED_FOCUS_COMMANDS = 64;
 const RESUME_REFRESH_DELAY_MS = 16;
+const MAX_PHONE_HISTORY_ENTRIES = 8;
 const EMPTY_SERVICE_TIERS: readonly ServiceTier[] = [];
+type MobileScene = "workspaces" | "conversations" | "chat";
 
 function isAffectedByDeletionProjection(
   conversation: ConversationSummary,
@@ -93,6 +106,16 @@ function projectConversationsDuringDeletion(
 interface InitialWorkspaceState {
   workspaces: string[];
   activeCwd: string;
+}
+
+interface InitialPhoneNavigation {
+  route?: PhoneHistoryRoute;
+}
+
+function loadInitialPhoneNavigation(phoneViewport: boolean): InitialPhoneNavigation {
+  if (!phoneViewport) return {};
+  const route = readPhoneHistoryRoute();
+  return route ? { route } : {};
 }
 
 function rememberProjection<T>(
@@ -144,7 +167,9 @@ export function rememberConversationPresentation<T>(
 export const getConversationPresentation = getProjection;
 
 
-function loadInitialWorkspaceState(): InitialWorkspaceState {
+function loadInitialWorkspaceState(
+  phoneRoute?: PhoneHistoryRoute,
+): InitialWorkspaceState {
   const legacyCwd = readStoredString(CWD_KEY).trim();
   let parsed: unknown;
   try {
@@ -167,13 +192,23 @@ function loadInitialWorkspaceState(): InitialWorkspaceState {
   }
   if (legacyCwd && !seen.has(workspaceKey(legacyCwd))) {
     workspaces.unshift(legacyCwd);
+    seen.add(workspaceKey(legacyCwd));
     if (workspaces.length > MAX_WORKSPACES) workspaces.pop();
   }
-  const activeCwd = legacyCwd
-    ? workspaces.find(
-        (cwd) => workspaceKey(cwd) === workspaceKey(legacyCwd),
-      ) ?? workspaces[0] ?? ""
-    : "";
+  const routeCwd = phoneRoute?.screen === "workspaces"
+    ? undefined
+    : phoneRoute?.cwd;
+  if (routeCwd && !seen.has(workspaceKey(routeCwd))) {
+    workspaces.unshift(routeCwd);
+    seen.add(workspaceKey(routeCwd));
+    if (workspaces.length > MAX_WORKSPACES) workspaces.pop();
+  }
+  const activeCwd = routeCwd
+    ?? (legacyCwd
+      ? workspaces.find(
+          (cwd) => workspaceKey(cwd) === workspaceKey(legacyCwd),
+        ) ?? workspaces[0] ?? ""
+      : "");
   return { workspaces, activeCwd };
 }
 
@@ -399,7 +434,43 @@ type RoleCommandInput =
     };
 
 export function App() {
-  const [initialWorkspaces] = useState(loadInitialWorkspaceState);
+  const phoneViewport = usePhoneViewport();
+  const [initialPhoneNavigation] = useState(() =>
+    loadInitialPhoneNavigation(phoneViewport));
+  const [initialWorkspaces] = useState(() =>
+    loadInitialWorkspaceState(initialPhoneNavigation.route));
+  const [mobileScene, setMobileScene] = useState<MobileScene>(() => {
+    const route = initialPhoneNavigation.route;
+    if (route) return route.screen;
+    return initialWorkspaces.activeCwd ? "conversations" : "workspaces";
+  });
+  const mobileSceneRef = useRef(mobileScene);
+  const setPhoneScene = (scene: MobileScene) => {
+    mobileSceneRef.current = scene;
+    setMobileScene(scene);
+  };
+  const phoneRouteRef = useRef<PhoneHistoryRoute | undefined>(
+    initialPhoneNavigation.route,
+  );
+  const phoneHistoryActiveRef = useRef(phoneViewport);
+  const phoneHistoryEntriesRef = useRef<{
+    entries: PhoneHistoryRoute[];
+    index: number;
+  }>({ entries: [], index: -1 });
+  const deferredPhoneRouteRef = useRef<PhoneHistoryRoute | undefined>(undefined);
+  const phoneRouteHandlerRef = useRef<(route: PhoneHistoryRoute) => void>(
+    () => undefined,
+  );
+  const phoneRouteFailureHandlerRef = useRef<(pending: PendingFocus) => void>(
+    () => undefined,
+  );
+  const phoneRouteDowngradeChatRef = useRef<(conversationId: string) => void>(
+    () => undefined,
+  );
+  const phoneCreateRouteHandlerRef = useRef<(conversationId: string) => void>(
+    () => undefined,
+  );
+  const phoneWorkbenchRef = useRef<HTMLDivElement>(null);
   const [transitionTiming] = useState(createTransitionTimingOwner);
   const [transportOnline, setTransportOnline] = useState(false);
   const [protocolReady, setProtocolReady] = useState(false);
@@ -418,7 +489,11 @@ export function App() {
   const activeCwdRef = useRef(initialWorkspaces.activeCwd);
   const sessionIdRef = useRef("");
   const projectIdRef = useRef("");
-  const conversationIdRef = useRef("");
+  const conversationIdRef = useRef(
+    initialPhoneNavigation.route?.screen === "chat"
+      ? initialPhoneNavigation.route.conversationId
+      : "",
+  );
   const focusRef = useRef<ActiveFocus | undefined>(undefined);
   const [pendingFocus, setPendingFocus] = useState<PendingFocus>();
   const pendingFocusRef = useRef<PendingFocus | undefined>(undefined);
@@ -531,6 +606,8 @@ export function App() {
   const [roleOperationResult, setRoleOperationResult] =
     useState<RoleOperationResult>();
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
+  const [chatBlockingModal, setChatBlockingModal] = useState(false);
+  const [sidebarBlockingModal, setSidebarBlockingModal] = useState(false);
   const [error, setError] = useState("");
   const [settingResult, setSettingResult] = useState<{
     operation: AcknowledgedSettingOperation;
@@ -1173,6 +1250,77 @@ export function App() {
   ]);
 
   useEffect(() => {
+    const initialPhoneMount = phoneHistoryActiveRef.current;
+    if (!phoneViewport) {
+      phoneHistoryActiveRef.current = false;
+      phoneRouteRef.current = undefined;
+      phoneHistoryEntriesRef.current = { entries: [], index: -1 };
+      deferredPhoneRouteRef.current = undefined;
+      return;
+    }
+    phoneHistoryActiveRef.current = true;
+    if (initialPhoneMount) {
+      const restored = readPhoneHistoryRoute();
+      if (restored) {
+        phoneRouteRef.current = restored;
+        phoneHistoryEntriesRef.current = { entries: [], index: -1 };
+      } else {
+        const root: PhoneHistoryRoute = { screen: "workspaces" };
+        replacePhoneHistoryRoute(root);
+        const route = activeCwdRef.current
+          ? { screen: "conversations" as const, cwd: activeCwdRef.current }
+          : root;
+        if (route.screen === "conversations") pushPhoneHistoryRoute(route);
+        phoneRouteRef.current = route;
+        phoneHistoryEntriesRef.current = route.screen === "conversations"
+          ? { entries: [root, route], index: 1 }
+          : { entries: [root], index: 0 };
+      }
+    } else {
+      deferredPhoneRouteRef.current = undefined;
+      const route: PhoneHistoryRoute = activeCwdRef.current
+        ? mobileSceneRef.current === "chat" && focusRef.current
+          ? {
+              screen: "chat",
+              cwd: activeCwdRef.current,
+              conversationId: focusRef.current.conversationId,
+            }
+          : { screen: "conversations", cwd: activeCwdRef.current }
+        : { screen: "workspaces" };
+      replacePhoneHistoryRoute(route);
+      phoneRouteRef.current = route;
+      phoneHistoryEntriesRef.current = { entries: [route], index: 0 };
+      setPhoneScene(route.screen);
+    }
+    const onPopState = (event: PopStateEvent) => {
+      const next = decodePhoneHistoryRoute(event.state);
+      if (!next) {
+        const fallback: PhoneHistoryRoute = { screen: "workspaces" };
+        replacePhoneHistoryRoute(fallback);
+        phoneRouteRef.current = fallback;
+        phoneHistoryEntriesRef.current = { entries: [fallback], index: 0 };
+        phoneRouteHandlerRef.current(fallback);
+        return;
+      }
+      const owned = phoneHistoryEntriesRef.current;
+      const current = owned.entries[owned.index];
+      const parent = owned.entries[owned.index - 1];
+      if (current && parent
+        && phoneHistoryRouteEquals(current, phoneRouteRef.current)
+        && phoneHistoryRouteEquals(parent, next)
+      ) {
+        owned.index -= 1;
+      } else {
+        phoneHistoryEntriesRef.current = { entries: [], index: -1 };
+      }
+      phoneRouteRef.current = next;
+      phoneRouteHandlerRef.current(next);
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [phoneViewport]);
+
+  useEffect(() => {
     const sound = createCompletionSound();
     completionSoundRef.current = sound;
     const unlock = () => {
@@ -1586,6 +1734,9 @@ export function App() {
             conversationId: event.conversationId,
             focusId: event.focusId,
           }, pendingState);
+          if (event.operation === "create_conversation") {
+            phoneCreateRouteHandlerRef.current(event.conversationId);
+          }
         } else {
           setState((current) => current
             ? {
@@ -1613,6 +1764,7 @@ export function App() {
           || event.conversationId !== focus.conversationId
           || event.focusId !== focus.focusId
         ) return;
+        phoneRouteDowngradeChatRef.current(event.conversationId);
         const invalidatedWorkspaceKey = currentWorkspaceKey();
         const deletion = pendingConversationDeletionRef.current;
         if (
@@ -1725,6 +1877,14 @@ export function App() {
               clearTemporaryConversationPresentation();
             }
           }
+        }
+        const currentPhoneRoute = phoneRouteRef.current;
+        if (
+          !event.truncated
+          && currentPhoneRoute?.screen === "chat"
+          && !existingConversationIds.has(currentPhoneRoute.conversationId)
+        ) {
+          phoneRouteDowngradeChatRef.current(currentPhoneRoute.conversationId);
         }
         setConversations(event.conversations);
         setConversationIndexTruncated(event.truncated);
@@ -2181,6 +2341,7 @@ export function App() {
             commandId: pending.commandId,
           });
           const deferred = deferredFocusAuthorityRef.current;
+          phoneRouteFailureHandlerRef.current(pending);
           if (
             pending.operation === "initialize"
             && pending.initializeConversationKind === "open"
@@ -2575,14 +2736,16 @@ export function App() {
       if (cached) discardCachedWorkspacePresentation();
       updateWorkspaceSyncing(false);
       markWorkspaceUnavailable(normalizedCwd);
+      return false;
     }
+    return true;
   }
   const initializeWorkspace = (cwd: string) => {
     const cached = getWorkspaceProjection(
       workspaceProjectionCacheRef.current,
       workspaceKey(cwd),
     );
-    initialize(
+    return initialize(
       cwd,
       cached
         ? { kind: "open", conversationId: cached.conversationId }
@@ -2674,11 +2837,11 @@ export function App() {
       || pendingConversationTruncationRef.current
       || pendingPromptRef.current
       || pendingConversationRoleSwitchRef.current
-    ) return;
+    ) return false;
     if (
       previousPending?.operation === "focus_conversation"
       && previousPending.targetConversationId === conversationId
-    ) return;
+    ) return true;
     const replacingDifferentPendingTarget = Boolean(
       replacingPendingFocus
       && previousPending.targetConversationId !== conversationId,
@@ -2688,7 +2851,7 @@ export function App() {
       && focusRef.current?.conversationId === conversationId
     ) {
       setSelectingRole(false);
-      return;
+      return true;
     }
     const commandId = crypto.randomUUID();
     const timingIntent = {
@@ -2704,7 +2867,7 @@ export function App() {
     };
     setError("");
     if (replacingFocus) {
-      if (!send(command)) return;
+      if (!send(command)) return false;
       if (replacingPendingFocus) {
         rememberSupersededFocusCommand(previousPending);
       }
@@ -2769,7 +2932,9 @@ export function App() {
       if (sourceReady && focusRef.current === sourceFocus) {
         updateConversationReady(true);
       }
+      return false;
     }
+    return true;
   };
   const createConversation = (roleId: string) => {
     const sessionId = sessionIdRef.current;
@@ -3077,11 +3242,155 @@ export function App() {
     ) {
       setSetupOpen(false);
       updateDirectoryBrowser(undefined);
-      return;
+      return true;
     }
     cacheCurrentWorkspaceProjection();
     cacheCurrentConversationPresentation();
-    initializeWorkspace(cwd);
+    return initializeWorkspace(cwd);
+  };
+  const replaceCurrentPhoneRoute = (route: PhoneHistoryRoute) => {
+    if (!phoneViewport) return;
+    phoneRouteRef.current = route;
+    phoneHistoryEntriesRef.current = { entries: [route], index: 0 };
+    replacePhoneHistoryRoute(route);
+  };
+  const pushCurrentPhoneRoute = (route: PhoneHistoryRoute) => {
+    if (!phoneViewport || phoneHistoryRouteEquals(phoneRouteRef.current, route)) return;
+    const owned = phoneHistoryEntriesRef.current;
+    const current = owned.entries[owned.index];
+    if (current && phoneHistoryRouteEquals(current, phoneRouteRef.current)) {
+      const entries = [...owned.entries.slice(0, owned.index + 1), route];
+      const start = Math.max(0, entries.length - MAX_PHONE_HISTORY_ENTRIES);
+      phoneHistoryEntriesRef.current = {
+        entries: entries.slice(start),
+        index: entries.length - start - 1,
+      };
+    } else {
+      phoneHistoryEntriesRef.current = { entries: [route], index: 0 };
+    }
+    phoneRouteRef.current = route;
+    pushPhoneHistoryRoute(route);
+  };
+  const phoneFallbackRoute = (): PhoneHistoryRoute => (
+    activeCwdRef.current
+      ? { screen: "conversations", cwd: activeCwdRef.current }
+      : { screen: "workspaces" }
+  );
+  const navigatePhoneHistoryRoute = (route: PhoneHistoryRoute) => {
+    if (!phoneViewport) return;
+    if (phoneRouteBlocked) {
+      deferredPhoneRouteRef.current = route;
+      return;
+    }
+    phoneRouteRef.current = route;
+    setSelectingRole(false);
+    if (route.screen === "workspaces") {
+      setPhoneScene("workspaces");
+      return;
+    }
+    if (route.screen === "conversations") {
+      if (switchWorkspace(route.cwd)) {
+        setPhoneScene("conversations");
+        return;
+      }
+      const fallback = phoneFallbackRoute();
+      replaceCurrentPhoneRoute(fallback);
+      setPhoneScene(fallback.screen);
+      return;
+    }
+    const accepted = workspaceKey(route.cwd) === workspaceKey(activeCwdRef.current)
+      && state
+      ? focusConversation(route.conversationId)
+      : initialize(route.cwd, {
+          kind: "open",
+          conversationId: route.conversationId,
+        });
+    if (accepted) {
+      setPhoneScene("chat");
+      return;
+    }
+    const fallback = phoneFallbackRoute();
+    replaceCurrentPhoneRoute(fallback);
+    setPhoneScene(fallback.screen);
+  };
+  phoneRouteHandlerRef.current = navigatePhoneHistoryRoute;
+  phoneCreateRouteHandlerRef.current = (conversationId) => {
+    const route = phoneRouteRef.current;
+    if (
+      !phoneViewport
+      || route?.screen !== "conversations"
+      || workspaceKey(route.cwd) !== currentWorkspaceKey()
+      || mobileSceneRef.current !== "chat"
+    ) return;
+    pushCurrentPhoneRoute({
+      screen: "chat",
+      cwd: route.cwd,
+      conversationId,
+    });
+  };
+  phoneRouteFailureHandlerRef.current = (pending) => {
+    if (!phoneViewport) return;
+    const route = phoneRouteRef.current;
+    if (pending.operation === "create_conversation") {
+      if (route?.screen === "conversations") {
+        setSelectingRole(false);
+        setPhoneScene("conversations");
+      }
+      return;
+    }
+    if (route?.screen !== "chat") return;
+    if (
+      pending.operation === "initialize"
+      && pending.initializeConversationKind === "open"
+      && pending.targetConversationId === route.conversationId
+    ) {
+      replaceCurrentPhoneRoute({ screen: "conversations", cwd: route.cwd });
+      setPhoneScene("conversations");
+      return;
+    }
+    if (
+      pending.operation === "focus_conversation"
+      && pending.targetConversationId === route.conversationId
+    ) {
+      const fallback: PhoneHistoryRoute = pending.sourceFocus
+        ? {
+            screen: "chat",
+            cwd: route.cwd,
+            conversationId: pending.sourceFocus.conversationId,
+          }
+        : { screen: "conversations", cwd: route.cwd };
+      replaceCurrentPhoneRoute(fallback);
+      setPhoneScene(fallback.screen);
+    }
+  };
+  phoneRouteDowngradeChatRef.current = (conversationId) => {
+    if (!phoneViewport) return;
+    const route = phoneRouteRef.current;
+    if (
+      route?.screen !== "chat"
+      || workspaceKey(route.cwd) !== currentWorkspaceKey()
+      || route.conversationId !== conversationId
+    ) return;
+    replaceCurrentPhoneRoute({ screen: "conversations", cwd: route.cwd });
+    setSelectingRole(false);
+    setPhoneScene("conversations");
+  };
+  const goBackFromPhoneRoute = () => {
+    const route = phoneRouteRef.current;
+    if (!phoneViewport || !route) return;
+    const parent = phoneHistoryRouteParent(route);
+    if (!parent) return;
+    const owned = phoneHistoryEntriesRef.current;
+    if (
+      owned.index > 0
+      && phoneHistoryRouteEquals(owned.entries[owned.index], route)
+      && phoneHistoryRouteEquals(owned.entries[owned.index - 1], parent)
+    ) {
+      window.history.back();
+      return;
+    }
+    replaceCurrentPhoneRoute(parent);
+    phoneRouteHandlerRef.current(parent);
   };
   const closeWorkspace = (cwd: string) => {
     const key = workspaceKey(cwd);
@@ -3138,13 +3447,34 @@ export function App() {
     setSetupOpen(false);
     updateDirectoryBrowser(undefined);
   };
-  const handleWorkspaceSelect = useLatestCallback(switchWorkspace);
-  const handleWorkspaceClose = useLatestCallback(closeWorkspace);
+  const handleWorkspaceSelect = useLatestCallback((cwd: string) => {
+    if (switchWorkspace(cwd) && phoneViewport) {
+      setPhoneScene("conversations");
+      pushCurrentPhoneRoute({ screen: "conversations", cwd });
+    }
+  });
+  const handleWorkspaceClose = useLatestCallback((cwd: string) => {
+    const active = workspaceKey(cwd) === workspaceKey(activeCwdRef.current);
+    closeWorkspace(cwd);
+    if (active && phoneViewport) {
+      replaceCurrentPhoneRoute({ screen: "workspaces" });
+      setPhoneScene("workspaces");
+    }
+  });
   const handleWorkspaceAdd = useLatestCallback(openWorkspaceDialog);
   const handleSidebarCollapsedChange = useLatestCallback(
     (collapsed: boolean) => setSidebarCollapsed(collapsed),
   );
-  const handleConversationSelect = useLatestCallback(focusConversation);
+  const handleConversationSelect = useLatestCallback((conversationId: string) => {
+    if (focusConversation(conversationId) && phoneViewport) {
+      setPhoneScene("chat");
+      pushCurrentPhoneRoute({
+        screen: "chat",
+        cwd: activeCwdRef.current,
+        conversationId,
+      });
+    }
+  });
   const handleConversationCreate = useLatestCallback(() => {
     if (
       !workspaceSyncingRef.current
@@ -3152,6 +3482,7 @@ export function App() {
       && !focusedConversationNeedsSnapshot()
     ) {
       setSelectingRole(true);
+      if (phoneViewport) setPhoneScene("chat");
     }
   });
   const handleConversationRename = useLatestCallback(renameConversation);
@@ -3204,6 +3535,22 @@ export function App() {
     || extensionPending
     || setupOpen
   );
+  const phoneRouteBlocked = Boolean(
+    blockingModalVisible
+    || directoryBrowser
+    || drawer
+    || roleManagerOpen
+    || settingsDialogOpen
+    || chatBlockingModal
+    || sidebarBlockingModal
+  );
+  useEffect(() => {
+    if (!phoneViewport || phoneRouteBlocked) return;
+    const deferred = deferredPhoneRouteRef.current;
+    if (!deferred) return;
+    deferredPhoneRouteRef.current = undefined;
+    phoneRouteHandlerRef.current(deferred);
+  }, [phoneRouteBlocked, phoneViewport]);
   const extensionDialog = <ExtensionDialog
     pending={extensionUI[0]}
     pendingCount={extensionUI.length}
@@ -3246,6 +3593,11 @@ export function App() {
     unavailable={unavailableWorkspaceKeys}
     activityByWorkspace={projectActivityByWorkspace}
     activityCatalogTruncated={projectActivityTruncated}
+    mobile={phoneViewport ? {
+      hidden: mobileScene !== "workspaces",
+      canGoBack: phoneRouteRef.current?.screen !== "workspaces",
+      onBack: goBackFromPhoneRoute,
+    } : undefined}
     onSelect={handleWorkspaceSelect}
     onClose={handleWorkspaceClose}
     onAdd={handleWorkspaceAdd}
@@ -3280,7 +3632,7 @@ export function App() {
         unavailableLabel={protocolError ? "协议不兼容" : undefined}
         onCwdChange={setSetupCwd}
         onPickDirectory={openDirectoryBrowser}
-        onStart={switchWorkspace}
+        onStart={handleWorkspaceSelect}
       />
     </section>
   </div>;
@@ -3441,9 +3793,23 @@ export function App() {
     () => nextVisibleConversationContext,
     [visibleConversationContextKey],
   );
+  const mobileConversationTitle = useMemo(() => {
+    const mobileConversation = sidebarConversations.find(
+      ({ id }) => id === visibleConversationId,
+    );
+    return mobileConversation
+      ? conversationDisplayTitle(mobileConversation)
+      : "当前会话";
+  }, [sidebarConversations, visibleConversationId]);
+  const phoneSceneFocusKey = !activeCwd || !visibleState
+    ? mobileScene
+    : mobileScene === "chat" && showRoleSelection
+      ? "role-selection"
+      : mobileScene;
+  usePhoneSceneFocus(phoneViewport, phoneSceneFocusKey, phoneWorkbenchRef);
 
   if (!activeCwd || !visibleState) return <>
-    <div className="workbench">
+    <div className="workbench" ref={phoneWorkbenchRef}>
       {workspaceRail}
       <ConversationSidebar
         conversations={[]}
@@ -3451,15 +3817,21 @@ export function App() {
         collapsed={sidebarCollapsed}
         navigationEnabled={false}
         actionsEnabled={false}
+        mobile={phoneViewport ? {
+          hidden: mobileScene !== "conversations",
+          onShowWorkspaces: goBackFromPhoneRoute,
+        } : undefined}
         onToggleCollapsed={handleSidebarCollapsedChange}
         onSelect={handleConversationSelect}
         onCreate={handleConversationCreate}
         onRename={handleConversationRename}
         onDelete={handleConversationDelete}
+        onBlockingModalChange={phoneViewport ? setSidebarBlockingModal : undefined}
       />
       <WorkspacePlaceholder
         cwd={activeCwd}
         unavailable={unavailableWorkspaceKeys.has(workspaceKey(activeCwd))}
+        hidden={phoneViewport}
         onOpen={openWorkspaceDialog}
         onClose={() => closeWorkspace(activeCwd)}
         onRetry={() => switchWorkspace(activeCwd)}
@@ -3511,7 +3883,7 @@ export function App() {
       ?? (showAttachedConversationProjection ? conversationRole : undefined)
     : conversationRole;
   return <>
-    <div className="workbench">
+    <div className="workbench" ref={phoneWorkbenchRef}>
       {workspaceRail}
       <ConversationSidebar
         conversations={sidebarConversations}
@@ -3536,13 +3908,31 @@ export function App() {
           && !focusAwaitingSnapshot
         }
         deletionBlocked={Boolean(visiblePendingConversationDeletion)}
+        mobile={phoneViewport ? {
+          hidden: mobileScene !== "conversations",
+          onShowWorkspaces: goBackFromPhoneRoute,
+          ...(visibleConversationId ? {
+            onShowCurrentConversation: () => {
+              setPhoneScene("chat");
+              pushCurrentPhoneRoute({
+                screen: "chat",
+                cwd: activeCwdRef.current,
+                conversationId: visibleConversationId,
+              });
+            },
+          } : {}),
+        } : undefined}
         onToggleCollapsed={handleSidebarCollapsedChange}
         onSelect={handleConversationSelect}
         onCreate={handleConversationCreate}
         onRename={handleConversationRename}
         onDelete={handleConversationDelete}
+        onBlockingModalChange={phoneViewport ? setSidebarBlockingModal : undefined}
       />
-      <div className="workbench-main">
+      <div
+        className="workbench-main"
+        hidden={phoneViewport && mobileScene !== "chat"}
+      >
         {workspaceSyncing && <div
           className="banner transition-status-overlay"
           role="status"
@@ -3591,6 +3981,12 @@ export function App() {
                 pendingFocus?.operation === "create_conversation"
                 || transitioning
               }
+              mobile={phoneViewport ? {
+                onBack: () => {
+                  setSelectingRole(false);
+                  setPhoneScene("conversations");
+                },
+              } : undefined}
               onStart={createConversation}
               onManageRole={(roleId) => {
                 setRoleManagerInitialRoleId(roleId);
@@ -3643,6 +4039,13 @@ export function App() {
               cwd={visibleState.cwd}
               conversationContext={visibleConversationContext}
               conversationTitleLookup={visibleConversationTitleLookup}
+              mobile={phoneViewport ? {
+                active: mobileScene === "chat",
+                title: mobileConversationTitle,
+                onBack: goBackFromPhoneRoute,
+                onShowConversations: goBackFromPhoneRoute,
+              } : undefined}
+              onBlockingModalChange={phoneViewport ? setChatBlockingModal : undefined}
               online={online}
               interactive={settingsEnabled}
               conversationReady={visibleConversationReady}
