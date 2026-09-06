@@ -21,6 +21,11 @@ export const MAX_LOOP_LIST_ITEM_TEXT_CHARACTERS = 512;
 export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
+export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
+// v42: successful workspace and conversation switches may carry bounded host
+// phase durations on their correlated authority snapshot (or empty attach).
+// v41: default compaction attempts and successful durable provenance distinguish
+// the requested model identity from legacy and custom summaries.
 // v40: role templates and frozen conversation role snapshots carry a required
 // nullable compaction model; null follows the frozen primary model.
 // v39: LoopList items project explicit pending, active, or completed status;
@@ -37,7 +42,7 @@ export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 // conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
-export const PROTOCOL_VERSION = 40;
+export const PROTOCOL_VERSION = 42;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
@@ -74,6 +79,13 @@ const boundedUtf8String = (
     message: `${field} must be at most ${maximumBytes} UTF-8 bytes`,
   });
 });
+const modelReferenceString = (field: string) => boundedUtf8String(
+  MAX_MODEL_REFERENCE_BYTES,
+  field,
+).refine(
+  (value) => value.trim().length > 0,
+  `${field} must not be blank`,
+);
 const boundedCharactersString = (
   maximumCharacters: number,
   field: string,
@@ -101,20 +113,8 @@ const roleIdSchema = required.max(128).refine(
   'roleId must be "default" or a UUID',
 );
 const roleModelSchema = z.object({
-  provider: boundedUtf8String(
-    MAX_MODEL_REFERENCE_BYTES,
-    "role.model.provider",
-  ).refine(
-    (value) => value.trim().length > 0,
-    "role.model.provider must not be blank",
-  ),
-  id: boundedUtf8String(
-    MAX_MODEL_REFERENCE_BYTES,
-    "role.model.id",
-  ).refine(
-    (value) => value.trim().length > 0,
-    "role.model.id must not be blank",
-  ),
+  provider: modelReferenceString("role.model.provider"),
+  id: modelReferenceString("role.model.id"),
 });
 const thinkingLevelSchema = z.enum([
   "off",
@@ -468,6 +468,28 @@ export interface PublicContextUsage {
   source: "measured" | "estimated" | "unknown";
 }
 
+export interface PublicCompactionAttempt {
+  id: string;
+  generator: "default";
+  policy: "follow_primary" | "explicit";
+  requestTarget: {
+    provider: string;
+    id: string;
+  };
+}
+
+export type ConversationCompactionProvenance =
+  | {
+      generator: "default";
+      attemptId: string;
+      policy: "follow_primary" | "explicit";
+      requestTarget: {
+        provider: string;
+        id: string;
+      };
+    }
+  | { generator: "custom" };
+
 export interface PublicState {
   sessionId: string;
   projectId: string;
@@ -477,6 +499,7 @@ export interface PublicState {
   cwd: string;
   busy: boolean;
   compacting?: boolean;
+  compactionAttempt?: PublicCompactionAttempt;
   activeRun?: {
     id: string;
     phase: "queued" | "running" | "waiting" | "cancelling";
@@ -644,6 +667,7 @@ export interface ConversationCompactionMarker {
   id: string;
   timestamp: string;
   tokensBefore: number;
+  provenance?: ConversationCompactionProvenance;
 }
 
 export type ConversationHistoryItem =
@@ -722,6 +746,21 @@ const FOCUS_ATTACHED_OPERATIONS = [
 export type FocusAttachedOperation =
   typeof FOCUS_ATTACHED_OPERATIONS[number];
 
+export type TransitionDiagnosticOperation =
+  | "initialize"
+  | "focus_conversation";
+
+export interface TransitionDiagnostics {
+  version: 1;
+  commandId: string;
+  operation: TransitionDiagnosticOperation;
+  validationMs: number;
+  contextOrCatalogMs: number;
+  presentationOrTargetReadMs: number;
+  actorActivationOrLeaseMs: number;
+  snapshotProjectionMs: number | null;
+}
+
 export type ServerEvent =
   | { type: "hello"; protocolVersion: number; startupCwd: string }
   | ({ type: "directory_listing"; commandId: string } & DirectoryListing)
@@ -734,6 +773,7 @@ export type ServerEvent =
       projectId: string;
       focusId?: string;
       conversationId?: string;
+      transitionDiagnostics?: TransitionDiagnostics;
     }
   | {
       type: "focus_invalidated";
@@ -806,6 +846,7 @@ export type ServerEvent =
       pendingPrompts?: PendingPromptAdmissionSnapshot[];
       loopList?: LoopList;
       window: ConversationWindowCoverage;
+      transitionDiagnostics?: TransitionDiagnostics;
     }
   | {
       type: "loop_list_update";
@@ -910,6 +951,26 @@ const publicContextUsageSchema: z.ZodType<PublicContextUsage> = z.object({
   percent: z.number().finite().nullable(),
   source: z.enum(["measured", "estimated", "unknown"]),
 });
+const compactionRequestTargetSchema = z.object({
+  provider: modelReferenceString("compaction request target provider"),
+  id: modelReferenceString("compaction request target id"),
+}).strict();
+const publicCompactionAttemptSchema: z.ZodType<PublicCompactionAttempt> = z.object({
+  id: z.string().uuid(),
+  generator: z.literal("default"),
+  policy: z.enum(["follow_primary", "explicit"]),
+  requestTarget: compactionRequestTargetSchema,
+}).strict();
+const conversationCompactionProvenanceSchema: z.ZodType<ConversationCompactionProvenance> =
+  z.discriminatedUnion("generator", [
+    z.object({
+      generator: z.literal("default"),
+      attemptId: z.string().uuid(),
+      policy: z.enum(["follow_primary", "explicit"]),
+      requestTarget: compactionRequestTargetSchema,
+    }).strict(),
+    z.object({ generator: z.literal("custom") }).strict(),
+  ]);
 const publicStateSchema: z.ZodType<PublicState> = z.object({
   sessionId: sessionIdSchema,
   projectId: z.string().uuid(),
@@ -919,6 +980,7 @@ const publicStateSchema: z.ZodType<PublicState> = z.object({
   cwd: z.string(),
   busy: z.boolean(),
   compacting: z.boolean().optional(),
+  compactionAttempt: publicCompactionAttemptSchema.optional(),
   activeRun: z.object({
     id: runIdSchema,
     phase: z.enum(["queued", "running", "waiting", "cancelling"]),
@@ -1176,6 +1238,7 @@ const conversationHistoryItemSchema: z.ZodType<ConversationHistoryItem> =
       id: z.string(),
       timestamp: z.string().datetime(),
       tokensBefore: z.number().finite().nonnegative(),
+      provenance: conversationCompactionProvenanceSchema.optional(),
     }),
     z.object({
       kind: z.literal("session_message"),
@@ -1242,6 +1305,23 @@ const conversationWindowCoverageSchema: z.ZodType<ConversationWindowCoverage> = 
   contentTruncated: z.boolean(),
 });
 
+const transitionDiagnosticDurationSchema = z.number()
+  .finite()
+  .int()
+  .nonnegative()
+  .max(MAX_TRANSITION_DIAGNOSTIC_PHASE_MS);
+
+const transitionDiagnosticsSchema: z.ZodType<TransitionDiagnostics> = z.object({
+  version: z.literal(1),
+  commandId: commandIdSchema,
+  operation: z.enum(["initialize", "focus_conversation"]),
+  validationMs: transitionDiagnosticDurationSchema,
+  contextOrCatalogMs: transitionDiagnosticDurationSchema,
+  presentationOrTargetReadMs: transitionDiagnosticDurationSchema,
+  actorActivationOrLeaseMs: transitionDiagnosticDurationSchema,
+  snapshotProjectionMs: transitionDiagnosticDurationSchema.nullable(),
+}).strict();
+
 const serverEventUnionSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("hello"),
@@ -1268,6 +1348,7 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     projectId: z.string().uuid(),
     focusId: focusIdSchema.optional(),
     conversationId: conversationIdSchema.optional(),
+    transitionDiagnostics: transitionDiagnosticsSchema.optional(),
   }),
   z.object({
     type: z.literal("focus_invalidated"),
@@ -1370,6 +1451,7 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     }).strict()).max(MAX_PENDING_PROMPTS_PER_CONVERSATION).optional(),
     loopList: loopListSchema.optional(),
     window: conversationWindowCoverageSchema,
+    transitionDiagnostics: transitionDiagnosticsSchema.optional(),
   }).strict(),
   z.object({
     type: z.literal("loop_list_update"),
@@ -1504,6 +1586,33 @@ export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.
         code: z.ZodIssueCode.custom,
         message: `${event.operation} must attach an exact conversation focus`,
         path: ["focusId"],
+      });
+    }
+    if (event.type === "focus_attached" && event.transitionDiagnostics) {
+      const diagnostics = event.transitionDiagnostics;
+      if (
+        event.operation !== "initialize"
+        || event.focusId !== undefined
+        || event.conversationId !== undefined
+        || diagnostics.operation !== event.operation
+        || diagnostics.commandId !== event.commandId
+        || diagnostics.snapshotProjectionMs !== null
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "transition diagnostics on focus_attached require the matching empty initialize",
+          path: ["transitionDiagnostics"],
+        });
+      }
+    }
+    if (
+      event.type === "conversation_snapshot"
+      && event.transitionDiagnostics?.snapshotProjectionMs === null
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "conversation snapshot transition diagnostics require a projection duration",
+        path: ["transitionDiagnostics", "snapshotProjectionMs"],
       });
     }
     if (

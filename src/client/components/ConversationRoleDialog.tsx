@@ -5,6 +5,21 @@ import type {
 } from "../../shared/protocol";
 import { useModalFocus } from "../lib/use-modal-focus";
 
+function modelIdentityLabel(model: { provider: string; id: string }): string {
+  return `${model.provider} / ${model.id}`;
+}
+
+function compactionConfigurationLabel(role: ConversationRoleSnapshot): string {
+  if (role.compactionModel === null) {
+    return `跟随角色模型 · ${modelIdentityLabel(role.model)}`;
+  }
+  const matchesPrimary = role.compactionModel.provider === role.model.provider
+    && role.compactionModel.id === role.model.id;
+  return `专用配置 · ${modelIdentityLabel(role.compactionModel)}${
+    matchesPrimary ? "（与角色模型相同）" : ""
+  }`;
+}
+
 interface ConversationRoleDialogProps {
   open: boolean;
   role: ConversationRoleSnapshot;
@@ -87,8 +102,10 @@ export function ConversationRoleDialog({
 
       <div className="conversation-role-switch">
         <label htmlFor="conversation-role-select">
-          当前角色：{role.name} · {role.model.id}
+          当前角色：{role.name} · 修订 {role.revision}
         </label>
+        <small>角色模型：{modelIdentityLabel(role.model)}</small>
+        <small>Pi 默认压缩：{compactionConfigurationLabel(role)}</small>
         <select
           id="conversation-role-select"
           aria-label="选择新的会话角色"
@@ -117,7 +134,7 @@ export function ConversationRoleDialog({
         <small>
           {switchDisabled
             ? "请等待当前会话和待提交消息全部空闲。"
-            : "更换后，下一轮将使用新角色的模型、提示词和权限。"}
+            : "更换后，下一轮将使用新角色的模型、默认压缩配置、提示词和权限。"}
         </small>
       </div>
 

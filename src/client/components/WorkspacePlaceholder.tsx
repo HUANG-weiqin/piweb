@@ -5,6 +5,7 @@ interface WorkspacePlaceholderProps {
   cwd: string;
   unavailable: boolean;
   hidden?: boolean;
+  announceOpening?: boolean;
   onOpen(): void;
   onClose(): void;
   onRetry(): void;
@@ -14,6 +15,7 @@ export function WorkspacePlaceholder({
   cwd,
   unavailable,
   hidden,
+  announceOpening,
   onOpen,
   onClose,
   onRetry,
@@ -53,12 +55,17 @@ export function WorkspacePlaceholder({
     </main>;
   }
 
+  const name = workspaceName(cwd);
   return <main className="workspace-placeholder" hidden={hidden}>
-    <div className="workspace-placeholder-content">
+    <div
+      className="workspace-placeholder-content"
+      role={announceOpening ? "status" : undefined}
+      aria-label={announceOpening ? `正在打开工作区 ${name}` : undefined}
+    >
       <ActivitySpinner className="workspace-opening-spinner" strokeWidth={1.2} />
       <p className="eyebrow">OPENING WORKSPACE</p>
       <h1>正在打开工作区</h1>
-      <p>{workspaceName(cwd)}</p>
+      <p>{name}</p>
       <code>{cwd}</code>
     </div>
   </main>;

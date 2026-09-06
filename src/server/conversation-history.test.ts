@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-coding-agent";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
+import { MAX_MODEL_REFERENCE_BYTES } from "../shared/protocol.js";
+import { COMPACTION_PROVENANCE_NAMESPACE } from "./compaction-provenance.js";
 import {
   MAX_AGENT_PEEK_BYTES,
   MAX_AGENT_PEEK_ITEMS,
@@ -1143,6 +1145,76 @@ describe("projectConversationHistory", () => {
       expect.objectContaining({ kind: "message", text: "first answer" }),
       expect.objectContaining({ kind: "message", text: "after compaction" }),
     ]);
+  });
+
+  it("projects only bounded strict default provenance on the active branch and gives custom hooks priority", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    const asciiBoundary = "p".repeat(MAX_MODEL_REFERENCE_BYTES);
+    const multibyteBoundary = `${"模".repeat(Math.floor(MAX_MODEL_REFERENCE_BYTES / 3))}x`;
+    const firstKeptEntryId = manager.appendMessage(message({
+      role: "user",
+      content: "question",
+      timestamp: 1,
+    }));
+    const defaultAttemptId = randomUUID();
+    manager.appendCompaction("default summary", firstKeptEntryId, 100, {
+      [COMPACTION_PROVENANCE_NAMESPACE]: {
+        version: 1,
+        attemptId: defaultAttemptId,
+        generator: "default",
+        policy: "follow_primary",
+        requestTarget: { provider: asciiBoundary, id: multibyteBoundary },
+      },
+    });
+    manager.appendCompaction("custom summary", firstKeptEntryId, 101, {
+      [COMPACTION_PROVENANCE_NAMESPACE]: {
+        version: 1,
+        attemptId: randomUUID(),
+        generator: "default",
+        policy: "explicit",
+        requestTarget: { provider: "forged", id: "forged" },
+      },
+    }, true);
+    manager.appendCompaction("invalid summary", firstKeptEntryId, 102, {
+      [COMPACTION_PROVENANCE_NAMESPACE]: { version: 2 },
+    });
+    const invalidTargets = [
+      { provider: " \t", id: "model" },
+      { provider: "provider", id: `${asciiBoundary}x` },
+      { provider: `${multibyteBoundary}模`, id: "model" },
+    ];
+    for (const [index, requestTarget] of invalidTargets.entries()) {
+      manager.appendCompaction(`invalid target ${index}`, firstKeptEntryId, 103 + index, {
+        [COMPACTION_PROVENANCE_NAMESPACE]: {
+          version: 1,
+          attemptId: randomUUID(),
+          generator: "default",
+          policy: "explicit",
+          requestTarget,
+        },
+      });
+    }
+
+    const markers = projectConversationItems(manager)
+      .filter((item) => item.kind === "compaction");
+    expect(markers).toEqual([
+      expect.objectContaining({
+        provenance: {
+          generator: "default",
+          attemptId: defaultAttemptId,
+          policy: "follow_primary",
+          requestTarget: { provider: asciiBoundary, id: multibyteBoundary },
+        },
+      }),
+      expect.objectContaining({ provenance: { generator: "custom" } }),
+      ...Array.from({ length: 4 }, () =>
+        expect.not.objectContaining({ provenance: expect.anything() })),
+    ]);
+
+    manager.branch(firstKeptEntryId);
+    manager.appendCompaction("replacement summary", firstKeptEntryId, 103);
+    expect(projectConversationItems(manager).filter((item) => item.kind === "compaction"))
+      .toEqual([expect.not.objectContaining({ provenance: expect.anything() })]);
   });
 
   it("keeps a compaction boundary when older oversized turns are omitted", () => {

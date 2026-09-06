@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
+import { MAX_TRANSITION_DIAGNOSTIC_PHASE_MS } from "../shared/protocol.js";
 import type {
   AcknowledgedCommandOperation,
   ClientCommand,
@@ -8,6 +10,8 @@ import type {
   PublicState,
   ServerEvent,
   ThinkingLevel,
+  TransitionDiagnosticOperation,
+  TransitionDiagnostics,
 } from "../shared/protocol.js";
 import { AuthFlowBroker } from "./auth-flow.js";
 import type { ConversationActor } from "./conversation-actor.js";
@@ -86,6 +90,87 @@ type ProjectSnapshotEvent = Extract<
   ServerEvent,
   { type: "project_snapshot" }
 >;
+type ConversationSnapshotEvent = Extract<
+  ServerEvent,
+  { type: "conversation_snapshot" }
+>;
+type TransitionPhase = Exclude<
+  keyof TransitionDiagnostics,
+  "version" | "commandId" | "operation"
+>;
+
+class TransitionDiagnosticsRecorder {
+  private readonly durations: Record<TransitionPhase, number> = {
+    validationMs: 0,
+    contextOrCatalogMs: 0,
+    presentationOrTargetReadMs: 0,
+    actorActivationOrLeaseMs: 0,
+    snapshotProjectionMs: 0,
+  };
+
+  constructor(
+    private readonly commandId: string,
+    private readonly operation: TransitionDiagnosticOperation,
+    private readonly now: () => number,
+  ) {}
+
+  async measure<T>(phase: TransitionPhase, work: () => Promise<T>): Promise<T> {
+    const startedAt = this.readNow();
+    try {
+      return await work();
+    } finally {
+      this.record(phase, startedAt);
+    }
+  }
+
+  measureSync<T>(phase: TransitionPhase, work: () => T): T {
+    const startedAt = this.readNow();
+    try {
+      return work();
+    } finally {
+      this.record(phase, startedAt);
+    }
+  }
+
+  finish(hasSnapshot: boolean): TransitionDiagnostics {
+    return {
+      version: 1,
+      commandId: this.commandId,
+      operation: this.operation,
+      validationMs: this.duration("validationMs"),
+      contextOrCatalogMs: this.duration("contextOrCatalogMs"),
+      presentationOrTargetReadMs: this.duration("presentationOrTargetReadMs"),
+      actorActivationOrLeaseMs: this.duration("actorActivationOrLeaseMs"),
+      snapshotProjectionMs: hasSnapshot
+        ? this.duration("snapshotProjectionMs")
+        : null,
+    };
+  }
+
+  private record(phase: TransitionPhase, startedAt: number | undefined): void {
+    const finishedAt = this.readNow();
+    const elapsed = startedAt === undefined || finishedAt === undefined
+      ? 0
+      : Math.max(0, finishedAt - startedAt);
+    this.durations[phase] = Math.min(
+      MAX_TRANSITION_DIAGNOSTIC_PHASE_MS,
+      this.durations[phase] + elapsed,
+    );
+  }
+
+  private duration(phase: TransitionPhase): number {
+    return Math.round(this.durations[phase]);
+  }
+
+  private readNow(): number | undefined {
+    try {
+      const value = this.now();
+      return Number.isFinite(value) ? value : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+}
 
 function boundedProjectSnapshotEvent(input: {
   sessionId: string;
@@ -197,6 +282,7 @@ export class PiConnection {
     private readonly emit: (event: ServerEvent) => void,
     private readonly runtime: PiRuntimeLike,
     private readonly coordinationProvider: PiConnectionCoordinationProvider,
+    private readonly monotonicNow: () => number = () => performance.now(),
   ) {
     this.extensionUI = new ExtensionUIBroker(emit);
     this.unsubscribeRuntime = runtime.subscribe(() => {
@@ -488,6 +574,13 @@ export class PiConnection {
     const generation = ++this.generation;
     this.requestedSessionId = command.sessionId;
     this.cancelAuth();
+    const diagnostics = command.commandId === undefined
+      ? undefined
+      : new TransitionDiagnosticsRecorder(
+          command.commandId,
+          "initialize",
+          this.monotonicNow,
+        );
 
     return this.operations.run(async () => {
       this.assertOpen();
@@ -498,6 +591,7 @@ export class PiConnection {
           command,
           generation,
           initializationAbort.signal,
+          diagnostics,
         );
       } catch (error) {
         if (
@@ -522,12 +616,25 @@ export class PiConnection {
     command: Extract<ClientCommand, { type: "initialize" }>,
     generation: number,
     signal: AbortSignal,
+    diagnostics?: TransitionDiagnosticsRecorder,
   ): Promise<void> {
-    const cwd = await validateCwd(command.cwd);
+    const cwd = await this.measureTransitionPhase(
+      diagnostics,
+      "validationMs",
+      () => validateCwd(command.cwd),
+    );
     this.throwIfAborted(signal);
-    const { coordinator } = await this.requireCoordination();
+    const { coordinator } = await this.measureTransitionPhase(
+      diagnostics,
+      "contextOrCatalogMs",
+      () => this.requireCoordination(),
+    );
     this.throwIfAborted(signal);
-    const handle = await coordinator.acquireProject(cwd, "read_only");
+    const handle = await this.measureTransitionPhase(
+      diagnostics,
+      "contextOrCatalogMs",
+      () => coordinator.acquireProject(cwd, "read_only"),
+    );
     let transferred = false;
     let extensionScope: number | undefined;
     const extensionAbort = new AbortController();
@@ -554,7 +661,11 @@ export class PiConnection {
         unsubscribeRecentSeed = coordinator.subscribe(handle, (event) => {
           if (event.type !== "project_changed") recentSeedInvalidated = true;
         });
-        const recentSeed = await coordinator.listSessions(handle, signal);
+        const recentSeed = await this.measureTransitionPhase(
+          diagnostics,
+          "presentationOrTargetReadMs",
+          () => coordinator.listSessions(handle, signal),
+        );
         const knownIds = new Set(recentSeed.map(({ id }) => id));
         targetConversationId = handle.project.lastConversationId
           && knownIds.has(handle.project.lastConversationId)
@@ -566,10 +677,14 @@ export class PiConnection {
         command.commandId !== undefined
         && targetConversationId !== undefined
       ) {
-        const presentation = await coordinator.prepareConversationPresentation(
-          handle,
-          targetConversationId,
-          signal,
+        const presentation = await this.measureTransitionPhase(
+          diagnostics,
+          "presentationOrTargetReadMs",
+          () => coordinator.prepareConversationPresentation(
+            handle,
+            targetConversationId,
+            signal,
+          ),
         );
         this.throwIfAborted(signal);
         if (
@@ -598,24 +713,33 @@ export class PiConnection {
         generation: extensionScope,
         signal: extensionAbort.signal,
       });
-      await coordinator.ensureProjectModelCatalog(
-        handle,
-        extensionUI,
-        signal,
+      await this.measureTransitionPhase(
+        diagnostics,
+        "contextOrCatalogMs",
+        () => coordinator.ensureProjectModelCatalog(
+          handle,
+          extensionUI,
+          signal,
+        ),
       );
       this.throwIfAborted(signal);
       let actor: ConversationActor | undefined;
       if (target.kind === "new") {
-        if (!target.roleId) {
+        const roleId = target.roleId;
+        if (!roleId) {
           throw new Error(
             "A role must be selected before creating a conversation",
           );
         }
-        actor = await coordinator.createUserConversation(handle, {
-          roleId: target.roleId,
-          extensionUI,
-          signal: extensionAbort.signal,
-        });
+        actor = await this.measureTransitionPhase(
+          diagnostics,
+          "actorActivationOrLeaseMs",
+          () => coordinator.createUserConversation(handle, {
+            roleId,
+            extensionUI,
+            signal: extensionAbort.signal,
+          }),
+        );
         createdConversationId = actor.conversationId;
         unsubscribeExtensionUI = coordinator.attachExtensionUI(
           handle,
@@ -628,10 +752,14 @@ export class PiConnection {
           targetConversationId,
           extensionUI,
         );
-        actor = await coordinator.openConversation(
-          handle,
-          targetConversationId,
-          { signal },
+        actor = await this.measureTransitionPhase(
+          diagnostics,
+          "actorActivationOrLeaseMs",
+          () => coordinator.openConversation(
+            handle,
+            targetConversationId,
+            { signal },
+          ),
         );
       }
       if (target.kind === "recent") {
@@ -675,11 +803,16 @@ export class PiConnection {
       transferred = true;
       unsubscribeRecentSeed?.();
       unsubscribeRecentSeed = undefined;
+      const emptyTransitionDiagnostics = diagnostics !== undefined
+        && actor === undefined
+        ? diagnostics.finish(false)
+        : undefined;
       if (command.commandId !== undefined) {
         this.emitFocusAttached(
           view,
           "initialize",
           command.commandId,
+          emptyTransitionDiagnostics,
         );
       }
       this.publishCoordinatedState();
@@ -689,7 +822,9 @@ export class PiConnection {
         this.publishProjectSnapshotCoordinated();
       }
       this.publishRoleCatalog();
-      this.publishFocusedConversationSnapshot();
+      this.publishFocusedConversationSnapshot(
+        actor === undefined ? undefined : diagnostics,
+      );
     } finally {
       signal.removeEventListener("abort", abortExtensions);
       unsubscribeRecentSeed?.();
@@ -737,17 +872,31 @@ export class PiConnection {
   ): Promise<void> {
     switch (command.type) {
       case "focus_conversation": {
-        const view = this.requireCoordinatedView(command.sessionId);
-        const { coordinator } = await this.requireCoordination();
+        const diagnostics = new TransitionDiagnosticsRecorder(
+          command.commandId,
+          "focus_conversation",
+          this.monotonicNow,
+        );
+        const view = diagnostics.measureSync(
+          "validationMs",
+          () => this.requireCoordinatedView(command.sessionId),
+        );
+        const { coordinator } = await diagnostics.measure(
+          "contextOrCatalogMs",
+          () => this.requireCoordination(),
+        );
         const extensionAbort = transitionAbort ?? new AbortController();
         let extensionScope: number | undefined;
         let detachExtensionUI: (() => void) | undefined;
         let transferred = false;
         try {
-          const presentation = await coordinator.prepareConversationPresentation(
-            view.handle,
-            command.conversationId,
-            extensionAbort.signal,
+          const presentation = await diagnostics.measure(
+            "presentationOrTargetReadMs",
+            () => coordinator.prepareConversationPresentation(
+              view.handle,
+              command.conversationId,
+              extensionAbort.signal,
+            ),
           );
           if (
             extensionAbort.signal.aborted
@@ -779,13 +928,16 @@ export class PiConnection {
               signal: extensionAbort.signal,
             }),
           );
-          const actor = await coordinator.openConversation(
-            view.handle,
-            command.conversationId,
-            {
-              updateRecent: false,
-              signal: extensionAbort.signal,
-            },
+          const actor = await diagnostics.measure(
+            "actorActivationOrLeaseMs",
+            () => coordinator.openConversation(
+              view.handle,
+              command.conversationId,
+              {
+                updateRecent: false,
+                signal: extensionAbort.signal,
+              },
+            ),
           );
           if (
             extensionAbort.signal.aborted
@@ -799,6 +951,7 @@ export class PiConnection {
             detachExtensionUI,
             extensionScope,
             extensionAbort,
+            diagnostics,
           );
           transferred = true;
         } catch (error) {
@@ -1079,6 +1232,16 @@ export class PiConnection {
     return this.coordinationReady;
   }
 
+  private measureTransitionPhase<T>(
+    diagnostics: TransitionDiagnosticsRecorder | undefined,
+    phase: TransitionPhase,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    return diagnostics === undefined
+      ? work()
+      : diagnostics.measure(phase, work);
+  }
+
   private attachCoordinatedFocus(
     view: CoordinatedProjectView,
     actor: ConversationActor,
@@ -1087,6 +1250,7 @@ export class PiConnection {
     unsubscribeExtensionUI: () => void,
     extensionScope: number,
     extensionAbort: AbortController,
+    diagnostics?: TransitionDiagnosticsRecorder,
   ): void {
     if (this.coordinatedView !== view) {
       throw new Error("Project observation changed before focus attached");
@@ -1104,7 +1268,7 @@ export class PiConnection {
     this.focusedItemFingerprints.clear();
     this.emitFocusAttached(view, operation, commandId);
     this.publishCoordinatedState();
-    this.publishFocusedConversationSnapshot();
+    this.publishFocusedConversationSnapshot(diagnostics);
     if (operation === "focus_conversation") {
       const attachedFocusId = view.focusId;
       if (attachedFocusId === undefined) {
@@ -1156,6 +1320,7 @@ export class PiConnection {
     view: CoordinatedProjectView,
     operation: FocusAttachedOperation,
     commandId: string,
+    transitionDiagnostics?: TransitionDiagnostics,
   ): void {
     if (this.coordinatedView !== view || this.disposed) return;
     this.emit({
@@ -1164,6 +1329,9 @@ export class PiConnection {
       commandId,
       sessionId: view.sessionId,
       projectId: view.handle.project.id,
+      ...(transitionDiagnostics === undefined
+        ? {}
+        : { transitionDiagnostics }),
       ...(view.conversationId === undefined || view.focusId === undefined
         ? {}
         : {
@@ -1342,6 +1510,7 @@ export class PiConnection {
   private coordinatedState(view: CoordinatedProjectView): PublicState {
     const actor = view.actor;
     const activity = actor?.getActivity() ?? { kind: "idle" as const };
+    const compactionAttempt = actor?.getCompactionAttempt();
     const registry = actor?.modelRegistry
       ?? view.coordinator.modelRegistryForProject(view.handle);
     const available = registry.getAvailable();
@@ -1367,6 +1536,9 @@ export class PiConnection {
                 }
               : undefined,
             compacting: actor.isCompacting(),
+            ...(compactionAttempt === undefined
+              ? {}
+              : { compactionAttempt }),
           }),
       ...(activity.kind === "idle"
         ? {}
@@ -1562,45 +1734,57 @@ export class PiConnection {
     });
   }
 
-  private publishFocusedConversationSnapshot(): void {
+  private publishFocusedConversationSnapshot(
+    diagnostics?: TransitionDiagnosticsRecorder,
+  ): void {
     const view = this.coordinatedView;
     const actor = view?.actor;
+    const focusId = view?.focusId;
     if (
       this.disposed
       || !view
       || !actor
       || view.conversationId !== actor.conversationId
-      || view.focusId === undefined
+      || focusId === undefined
     ) {
       return;
     }
     try {
-      const projection = actor.projectConversationItems((items) => (
-        projectConversationPeers(
+      const build = (): ConversationSnapshotEvent => {
+        const projection = actor.projectConversationItems((items) => (
+          projectConversationPeers(
+            items,
+            view.handle.project.listConversations(),
+          )
+        ));
+        const items = projection.items;
+        this.focusedItemFingerprints.clear();
+        for (const item of items) {
+          this.focusedItemFingerprints.set(item.id, JSON.stringify(item));
+        }
+        return {
+          type: "conversation_snapshot",
+          sessionId: view.sessionId,
+          conversationId: actor.conversationId,
+          focusId,
+          role: actor.profile.role,
+          projectionSeq: projection.projectionSeq,
           items,
-          view.handle.project.listConversations(),
-        )
-      ));
-      const items = projection.items;
-      this.focusedItemFingerprints.clear();
-      for (const item of items) {
-        this.focusedItemFingerprints.set(item.id, JSON.stringify(item));
+          pendingPrompts: actor.pendingPromptAdmissions().map((admission) => ({
+            promptId: admission.promptId,
+            text: admission.text,
+          })),
+          loopList: actor.getLoopList(),
+          window: projection.window,
+        };
+      };
+      const event = diagnostics === undefined
+        ? build()
+        : diagnostics.measureSync("snapshotProjectionMs", build);
+      if (diagnostics !== undefined) {
+        event.transitionDiagnostics = diagnostics.finish(true);
       }
-      this.emit({
-        type: "conversation_snapshot",
-        sessionId: view.sessionId,
-        conversationId: actor.conversationId,
-        focusId: view.focusId,
-        role: actor.profile.role,
-        projectionSeq: projection.projectionSeq,
-        items,
-        pendingPrompts: actor.pendingPromptAdmissions().map((admission) => ({
-          promptId: admission.promptId,
-          text: admission.text,
-        })),
-        loopList: actor.getLoopList(),
-        window: projection.window,
-      });
+      this.emit(event);
     } catch (error) {
       this.emitError("session", error, view.sessionId);
     }

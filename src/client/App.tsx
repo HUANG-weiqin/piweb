@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 import {
   DEFAULT_COMPACTION_THRESHOLD_PERCENT,
   MAX_PROMPT_CHARACTERS,
@@ -61,7 +69,13 @@ import {
 } from "./lib/phone-history-route";
 import { PiSocket } from "./lib/socket";
 import { readStoredString, writeStoredString } from "./lib/storage";
-import { createTransitionTimingOwner } from "./lib/transition-timing";
+import {
+  createTransitionTimingOwner,
+  type ClientTransitionObservation,
+  type TransitionOrigin,
+  type TransitionPresentationSource,
+  type TransitionTimingAttempt,
+} from "./lib/transition-timing";
 import { useLatestCallback } from "./lib/use-latest-callback";
 import { useModalFocus } from "./lib/use-modal-focus";
 import { usePhoneSceneFocus } from "./lib/use-phone-scene-focus";
@@ -314,6 +328,7 @@ interface PendingFocus {
   targetProjectId?: string;
   targetConversationId?: string;
   initializeConversationKind?: "recent" | "new" | "open";
+  transitionOrigin?: TransitionOrigin;
   reconnectDraftOwner?: {
     workspaceKey: string;
     projectId: string;
@@ -338,6 +353,13 @@ interface DeferredFocusAuthority {
   focus: ActiveFocus;
   state?: PublicState;
   snapshot?: ConversationSnapshotEvent;
+}
+
+interface TimingFrameRequest {
+  attempt: TransitionTimingAttempt;
+  source: TransitionPresentationSource;
+  revision: number;
+  interactive?: ClientTransitionObservation;
 }
 
 function sameFocus(
@@ -472,6 +494,11 @@ export function App() {
   );
   const phoneWorkbenchRef = useRef<HTMLDivElement>(null);
   const [transitionTiming] = useState(createTransitionTimingOwner);
+  const [timingFrameRequest, setTimingFrameRequest] = useState<TimingFrameRequest>();
+  const timingFrameRevisionRef = useRef(0);
+  const transitionEventBufferRef = useRef<ServerEvent[] | undefined>(undefined);
+  const socketEventHandlerRef = useRef<(event: ServerEvent) => void>(() => undefined);
+  const hasCompletedInitialHandshakeRef = useRef(false);
   const [transportOnline, setTransportOnline] = useState(false);
   const [protocolReady, setProtocolReady] = useState(false);
   const [protocolError, setProtocolError] = useState("");
@@ -772,6 +799,7 @@ export function App() {
       focusId: undefined,
       busy: false,
       compacting: false,
+      compactionAttempt: undefined,
       activeRun: undefined,
     });
     setConversations(cached.conversations);
@@ -838,15 +866,6 @@ export function App() {
       if (!current.has(key)) return current;
       const next = new Set(current);
       next.delete(key);
-      return next;
-    });
-  };
-  const markWorkspaceUnavailable = (cwd: string) => {
-    const key = workspaceKey(cwd);
-    setUnavailableWorkspaceKeys((current) => {
-      if (current.has(key)) return current;
-      const next = new Set(current);
-      next.add(key);
       return next;
     });
   };
@@ -1080,6 +1099,57 @@ export function App() {
     conversationReadyRef.current = ready;
     setConversationReady(ready);
   };
+  const requestTransitionFrame = (
+    attempt: TransitionTimingAttempt | undefined,
+    source: TransitionPresentationSource,
+    interactive?: ClientTransitionObservation,
+  ) => {
+    if (!attempt) return;
+    const revision = ++timingFrameRevisionRef.current;
+    setTimingFrameRequest({ attempt, source, revision, interactive });
+  };
+  useLayoutEffect(() => {
+    if (!timingFrameRequest) return;
+    const request = timingFrameRequest;
+    const frame = window.requestAnimationFrame(() => {
+      if (
+        timingFrameRevisionRef.current !== request.revision
+        || !transitionTiming.isActive(request.attempt)
+      ) return;
+      const observation = request.interactive;
+      if (observation) {
+        const focus = focusRef.current;
+        const exactFocus = observation.conversationId === undefined
+          ? focus === undefined && sessionIdRef.current === observation.sessionId
+          : Boolean(
+              focus
+              && focus.sessionId === observation.sessionId
+              && focus.conversationId === observation.conversationId
+              && focus.focusId === observation.focusId
+              && conversationReadyRef.current,
+            );
+        if (!exactFocus) return;
+      }
+      transitionTiming.present(request.attempt, request.source);
+      if (observation) transitionTiming.interactive(request.attempt, observation);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [timingFrameRequest, transitionTiming]);
+  const sendTransitionCommand = (sendCommand: () => boolean) => {
+    const events: ServerEvent[] = [];
+    transitionEventBufferRef.current = events;
+    try {
+      return { sent: sendCommand(), events };
+    } catch {
+      setError("本地服务未连接");
+      return { sent: false, events: [] };
+    } finally {
+      transitionEventBufferRef.current = undefined;
+    }
+  };
+  const replayTransitionEvents = (events: ServerEvent[]) => {
+    for (const event of events) socketEventHandlerRef.current(event);
+  };
   const clearSessionProjection = () => {
     clearFocusReplacementAuthority();
     clearTemporaryWorkspacePresentation();
@@ -1162,6 +1232,7 @@ export function App() {
           activeRun: undefined,
           busy: false,
           compacting: false,
+          compactionAttempt: undefined,
           sessionTokenUsage: undefined,
           contextUsage: undefined,
         }
@@ -1173,13 +1244,20 @@ export function App() {
   ) => {
     const focus = focusRef.current;
     if (!focus) return;
-    if (settleReadiness) {
-      transitionTiming.ready({
-        sessionId: event.sessionId,
-        conversationId: event.conversationId,
-        focusId: event.focusId,
-      });
+    const snapshotObservation = {
+      sessionId: event.sessionId,
+      conversationId: event.conversationId,
+      focusId: event.focusId,
+    };
+    if (settleReadiness && event.transitionDiagnostics) {
+      transitionTiming.hostDiagnostics(
+        snapshotObservation,
+        event.transitionDiagnostics,
+      );
     }
+    const snapshotAttempt = settleReadiness
+      ? transitionTiming.snapshotAccepted(snapshotObservation)
+      : undefined;
     dispatch({
       type: "hydrate",
       sessionId: focus.sessionId,
@@ -1200,7 +1278,14 @@ export function App() {
         event.pendingPrompts.map(({ promptId, text }) => ({ promptId, text })),
       );
     }
-    if (settleReadiness && !pendingFocusRef.current) updateConversationReady(true);
+    if (settleReadiness && !pendingFocusRef.current) {
+      updateConversationReady(true);
+      requestTransitionFrame(snapshotAttempt, "snapshot", {
+        sessionId: event.sessionId,
+        conversationId: event.conversationId,
+        focusId: event.focusId,
+      });
+    }
     const snapshotPresentationKey = conversationScopeKey(
       currentWorkspaceKey(),
       projectIdRef.current,
@@ -1345,12 +1430,17 @@ export function App() {
   useEffect(() => {
     const epoch = ++socketEpochRef.current;
     const isCurrentSocket = () => socketEpochRef.current === epoch;
-    const socket = new PiSocket((event: ServerEvent) => {
+    const handleSocketEvent = (event: ServerEvent) => {
       if (!isCurrentSocket()) return;
+      const transitionEvents = transitionEventBufferRef.current;
+      if (transitionEvents) {
+        transitionEvents.push(event);
+        return;
+      }
       if (event.type === "hello") {
         if (event.protocolVersion !== PROTOCOL_VERSION) {
           const message = `协议版本不兼容：服务端 ${event.protocolVersion}，客户端 ${PROTOCOL_VERSION}`;
-          transitionTiming.cancel();
+          transitionTiming.cancel("protocol-error");
           setProtocolReady(false);
           setTransportOnline(false);
           setProjectActivityByWorkspace(new Map());
@@ -1380,6 +1470,10 @@ export function App() {
           return;
         }
         setProtocolError("");
+        const handshakeOrigin: TransitionOrigin = hasCompletedInitialHandshakeRef.current
+          ? "reconnect"
+          : "restore";
+        hasCompletedInitialHandshakeRef.current = true;
         setProtocolReady(true);
         setSetupCwd((current) => current || event.startupCwd);
         if (activeCwdRef.current) {
@@ -1442,12 +1536,26 @@ export function App() {
               : undefined;
           const sessionId = crypto.randomUUID();
           const commandId = crypto.randomUUID();
-          const timingIntent = {
-            kind: "workspace" as const,
+          const timingAttempt = transitionTiming.candidate({
+            kind: "workspace",
             sessionId,
             commandId,
-          };
-          transitionTiming.begin(timingIntent);
+            origin: handshakeOrigin,
+            intentViewport: phoneViewport ? "mobile" : "desktop",
+            cacheAtIntent: cached ? "hit" : "miss",
+          });
+          const { sent, events } = sendTransitionCommand(() => socket.send({
+            type: "initialize",
+            commandId,
+            sessionId,
+            cwd: activeCwdRef.current,
+            conversation,
+          }));
+          if (!sent) {
+            transitionTiming.fail(timingAttempt, "send-failed");
+            return;
+          }
+          transitionTiming.promote(timingAttempt);
           sessionIdRef.current = sessionId;
           authFlowIdRef.current = "";
           projectIdRef.current = "";
@@ -1466,20 +1574,15 @@ export function App() {
             operation: "initialize",
             workspaceKey: activeWorkspaceKey,
             initializeConversationKind: conversation.kind,
+            transitionOrigin: handshakeOrigin,
             ...(conversation.kind === "open"
               ? { targetConversationId: conversation.conversationId }
               : {}),
             ...(cached ? { cachedProjectId: cached.projectId } : {}),
             ...(reconnectDraftOwner ? { reconnectDraftOwner } : {}),
           });
-          const sent = socket.send({
-            type: "initialize",
-            commandId,
-            sessionId,
-            cwd: activeCwdRef.current,
-            conversation,
-          });
-          if (!sent) transitionTiming.cancel(timingIntent);
+          requestTransitionFrame(timingAttempt, cached ? "cache" : "placeholder");
+          replayTransitionEvents(events);
         }
       } else if (event.type === "directory_listing") {
         const current = directoryBrowserRef.current;
@@ -1598,6 +1701,14 @@ export function App() {
           preview,
         );
         showCachedConversationPresentation(preview, cacheKey);
+        requestTransitionFrame(
+          transitionTiming.attemptFor({
+            kind: pending.operation === "initialize" ? "workspace" : "conversation",
+            sessionId: event.sessionId,
+            commandId: event.commandId,
+          }),
+          "preview",
+        );
         if (pending.operation === "initialize") updateWorkspaceSyncing(true);
       } else if (event.type === "focus_attached") {
         if (event.sessionId !== sessionIdRef.current) return;
@@ -1706,13 +1817,20 @@ export function App() {
         ) {
           clearTemporaryConversationPresentation();
         }
-        transitionTiming.attach({
+        const attachedTimingAttempt = transitionTiming.attach({
           kind: event.operation === "initialize" ? "workspace" : "conversation",
           sessionId: event.sessionId,
           commandId: event.commandId,
           conversationId: event.conversationId,
           focusId: event.focusId,
         });
+        if (event.transitionDiagnostics) {
+          transitionTiming.hostDiagnostics({
+            sessionId: event.sessionId,
+            conversationId: event.conversationId,
+            focusId: event.focusId,
+          }, event.transitionDiagnostics);
+        }
         updatePendingFocus(undefined);
         updateConversationSyncing(event.operation === "focus_conversation");
         const preserveReconnectDraft = Boolean(
@@ -1734,7 +1852,9 @@ export function App() {
           && event.conversationId === undefined
           && event.focusId === undefined
         ) {
-          transitionTiming.ready({ sessionId: event.sessionId });
+          requestTransitionFrame(attachedTimingAttempt, "placeholder", {
+            sessionId: event.sessionId,
+          });
           clearTemporaryConversationPresentation();
           if (workspaceSyncingRef.current) {
             clearTemporaryWorkspacePresentation();
@@ -1765,6 +1885,7 @@ export function App() {
                 activeRun: undefined,
                 busy: false,
                 compacting: false,
+                compactionAttempt: undefined,
                 sessionTokenUsage: undefined,
                 contextUsage: undefined,
               }
@@ -2351,11 +2472,11 @@ export function App() {
             || pending.operation !== event.operation
             || !settlesPendingFocus
           ) return;
-          transitionTiming.cancel({
+          transitionTiming.failMatching({
             kind: pending.operation === "initialize" ? "workspace" : "conversation",
             sessionId: sessionIdRef.current,
             commandId: pending.commandId,
-          });
+          }, "server-error");
           const deferred = deferredFocusAuthorityRef.current;
           phoneRouteFailureHandlerRef.current(pending);
           if (
@@ -2381,6 +2502,7 @@ export function App() {
               { kind: "recent" },
               undefined,
               socket,
+              pending.transitionOrigin,
             );
             return;
           }
@@ -2420,9 +2542,6 @@ export function App() {
             conversationIdRef.current = "";
             updateWorkspaceSyncing(false);
             updateConversationSyncing(false);
-          }
-          if (event.operation === "initialize" && activeCwdRef.current) {
-            markWorkspaceUnavailable(activeCwdRef.current);
           }
           setError(fallbackRefreshFailed
             ? `${event.message}；恢复会话刷新请求发送失败`
@@ -2513,11 +2632,13 @@ export function App() {
           }
         }
       }
-    }, (connected) => {
+    };
+    socketEventHandlerRef.current = handleSocketEvent;
+    const socket = new PiSocket(handleSocketEvent, (connected) => {
       if (!isCurrentSocket()) return;
       setTransportOnline(connected);
       if (!connected) {
-        transitionTiming.cancel();
+        transitionTiming.cancel("disconnect");
         setProtocolReady(false);
         setProjectActivityByWorkspace(new Map());
         setProjectActivityTruncated(false);
@@ -2566,7 +2687,7 @@ export function App() {
     socketRef.current = socket;
     socket.connect();
     return () => {
-      transitionTiming.cancel();
+      transitionTiming.cancel("destroyed");
       if (socketEpochRef.current === epoch) socketEpochRef.current++;
       socket.close();
     };
@@ -2694,6 +2815,7 @@ export function App() {
     },
     cached?: CachedWorkspaceProjection,
     transport?: PiSocket,
+    origin: TransitionOrigin = "user",
   ) {
     const normalizedCwd = cwd.trim();
     const sessionId = crypto.randomUUID();
@@ -2702,8 +2824,27 @@ export function App() {
       kind: "workspace" as const,
       sessionId,
       commandId,
+      origin,
+      intentViewport: phoneViewport ? "mobile" as const : "desktop" as const,
+      cacheAtIntent: cached ? "hit" as const : "miss" as const,
     };
-    transitionTiming.begin(timingIntent);
+    const timingAttempt = transitionTiming.candidate(timingIntent);
+    const command = {
+      type: "initialize" as const,
+      commandId,
+      sessionId,
+      cwd: normalizedCwd,
+      conversation,
+    };
+    const { sent, events } = sendTransitionCommand(
+      () => transport ? transport.send(command) : send(command),
+    );
+    if (!sent) {
+      transitionTiming.fail(timingAttempt, "send-failed");
+      if (transport) setError("本地服务未连接");
+      return false;
+    }
+    transitionTiming.promote(timingAttempt);
     setError("");
     markPendingPromptUnconfirmed();
     updateDraft("");
@@ -2732,28 +2873,14 @@ export function App() {
       operation: "initialize",
       workspaceKey: currentWorkspaceKey(),
       initializeConversationKind: conversation?.kind ?? "recent",
+      transitionOrigin: origin,
       ...(conversation?.kind === "open"
         ? { targetConversationId: conversation.conversationId }
         : {}),
       ...(cached ? { cachedProjectId: cached.projectId } : {}),
     });
-    const command = {
-      type: "initialize" as const,
-      commandId,
-      sessionId,
-      cwd: normalizedCwd,
-      conversation,
-    };
-    const sent = transport ? transport.send(command) : send(command);
-    if (!sent) {
-      transitionTiming.cancel(timingIntent);
-      if (transport) setError("本地服务未连接");
-      updatePendingFocus(undefined);
-      if (cached) discardCachedWorkspacePresentation();
-      updateWorkspaceSyncing(false);
-      markWorkspaceUnavailable(normalizedCwd);
-      return false;
-    }
+    requestTransitionFrame(timingAttempt, cached ? "cache" : "placeholder");
+    replayTransitionEvents(events);
     return true;
   }
   const initializeWorkspace = (cwd: string) => {
@@ -2881,16 +3008,32 @@ export function App() {
       sessionId,
       conversationId,
     };
-    setError("");
-    if (replacingFocus) {
-      if (!send(command)) return false;
-      if (replacingPendingFocus) {
-        rememberSupersededFocusCommand(previousPending);
-      }
-      transitionTiming.begin(timingIntent);
-    } else {
-      transitionTiming.begin(timingIntent);
+    const targetProjectId = projectIdRef.current;
+    const targetCacheKey = targetProjectId
+      ? conversationScopeKey(workspaceKeyValue, targetProjectId, conversationId)
+      : "";
+    const targetPresentation = targetCacheKey
+      ? getConversationPresentation(
+          conversationPresentationCacheRef.current,
+          targetCacheKey,
+        )
+      : undefined;
+    const timingAttempt = transitionTiming.candidate({
+      ...timingIntent,
+      origin: "user",
+      intentViewport: phoneViewport ? "mobile" : "desktop",
+      cacheAtIntent: targetPresentation ? "hit" : "miss",
+    });
+    const { sent, events } = sendTransitionCommand(() => send(command));
+    if (!sent) {
+      transitionTiming.fail(timingAttempt, "send-failed");
+      return false;
     }
+    if (replacingPendingFocus) {
+      rememberSupersededFocusCommand(previousPending);
+    }
+    transitionTiming.promote(timingAttempt);
+    setError("");
     clearPendingAdmissions();
     cacheCurrentConversationPresentation();
     const sourceFocus = focusRef.current;
@@ -2913,16 +3056,6 @@ export function App() {
     ) {
       deferredFocusAuthorityRef.current = { focus: sourceFocus };
     }
-    const targetProjectId = projectIdRef.current;
-    const targetCacheKey = targetProjectId
-      ? conversationScopeKey(workspaceKeyValue, targetProjectId, conversationId)
-      : "";
-    const targetPresentation = targetCacheKey
-      ? getConversationPresentation(
-          conversationPresentationCacheRef.current,
-          targetCacheKey,
-        )
-      : undefined;
     if (targetPresentation) {
       showCachedConversationPresentation(targetPresentation, targetCacheKey);
     } else {
@@ -2939,17 +3072,11 @@ export function App() {
       ...(sourceFocus ? { sourceFocus } : {}),
       sourceReady,
     });
-    if (!replacingFocus && !send(command)) {
-      transitionTiming.cancel(timingIntent);
-      updatePendingFocus(undefined);
-      clearFocusReplacementAuthority();
-      clearTemporaryConversationPresentation();
-      updateConversationSyncing(false);
-      if (sourceReady && focusRef.current === sourceFocus) {
-        updateConversationReady(true);
-      }
-      return false;
-    }
+    requestTransitionFrame(
+      timingAttempt,
+      targetPresentation ? "cache" : "placeholder",
+    );
+    replayTransitionEvents(events);
     return true;
   };
   const createConversation = (roleId: string) => {
@@ -2966,27 +3093,33 @@ export function App() {
       || focusedConversationNeedsSnapshot()
     ) return;
     const commandId = crypto.randomUUID();
-    const timingIntent = {
-      kind: "conversation" as const,
+    const timingAttempt = transitionTiming.candidate({
+      kind: "conversation",
       sessionId,
       commandId,
-    };
-    transitionTiming.begin(timingIntent);
+      origin: "user",
+      intentViewport: phoneViewport ? "mobile" : "desktop",
+      cacheAtIntent: "n/a",
+    });
+    const { sent, events } = sendTransitionCommand(() => send({
+      type: "create_conversation",
+      commandId,
+      sessionId,
+      roleId,
+    }));
+    if (!sent) {
+      transitionTiming.fail(timingAttempt, "send-failed");
+      return;
+    }
+    transitionTiming.promote(timingAttempt);
     updatePendingFocus({
       commandId,
       operation: "create_conversation",
       workspaceKey: currentWorkspaceKey(),
     });
     setError("");
-    if (!send({
-      type: "create_conversation",
-      commandId,
-      sessionId,
-      roleId,
-    })) {
-      transitionTiming.cancel(timingIntent);
-      updatePendingFocus(undefined);
-    }
+    requestTransitionFrame(timingAttempt, "placeholder");
+    replayTransitionEvents(events);
   };
   const deleteConversation = (conversationId: string): boolean => {
     const sessionId = sessionIdRef.current;
@@ -3252,6 +3385,10 @@ export function App() {
     }
   };
   const switchWorkspace = (cwd: string) => {
+    if (!transportOnline || !protocolReady) {
+      setError(protocolReady ? "本地服务未连接" : "本地服务尚未完成协议握手");
+      return false;
+    }
     if (
       workspaceKey(cwd) === workspaceKey(activeCwdRef.current)
       && state
@@ -3439,7 +3576,7 @@ export function App() {
 
     const sessionId = sessionIdRef.current;
     if (sessionId) send({ type: "close_session", sessionId });
-    transitionTiming.cancel();
+    transitionTiming.cancel("destroyed");
     activeCwdRef.current = "";
     sessionIdRef.current = "";
     conversationIdRef.current = "";
@@ -3609,6 +3746,7 @@ export function App() {
     unavailable={unavailableWorkspaceKeys}
     activityByWorkspace={projectActivityByWorkspace}
     activityCatalogTruncated={projectActivityTruncated}
+    navigationEnabled={online}
     mobile={phoneViewport ? {
       hidden: mobileScene !== "workspaces",
       canGoBack: phoneRouteRef.current?.screen !== "workspaces",
@@ -3687,6 +3825,7 @@ export function App() {
         focusId: undefined,
         busy: false,
         compacting: false,
+        compactionAttempt: undefined,
         activeRun: undefined,
       }
     : state;
@@ -3817,6 +3956,11 @@ export function App() {
       ? conversationDisplayTitle(mobileConversation)
       : "当前会话";
   }, [sidebarConversations, visibleConversationId]);
+  const openingConversationTitle = pendingTargetConversationId
+    ? sidebarConversations.find(({ id }) => id === pendingTargetConversationId)
+    : undefined;
+  const showConversationOpening = pendingFocus?.operation === "focus_conversation"
+    && !activeConversationPresentation;
   const phoneSceneFocusKey = !activeCwd || !visibleState
     ? mobileScene
     : mobileScene === "chat" && showRoleSelection
@@ -3834,7 +3978,7 @@ export function App() {
         navigationEnabled={false}
         actionsEnabled={false}
         mobile={phoneViewport ? {
-          hidden: mobileScene !== "conversations",
+          hidden: mobileScene !== "conversations" || Boolean(activeCwd),
           onShowWorkspaces: goBackFromPhoneRoute,
         } : undefined}
         onToggleCollapsed={handleSidebarCollapsedChange}
@@ -3847,7 +3991,8 @@ export function App() {
       <WorkspacePlaceholder
         cwd={activeCwd}
         unavailable={unavailableWorkspaceKeys.has(workspaceKey(activeCwd))}
-        hidden={phoneViewport}
+        hidden={phoneViewport ? mobileScene !== "conversations" : false}
+        announceOpening={phoneViewport && mobileScene === "conversations"}
         onOpen={openWorkspaceDialog}
         onClose={() => closeWorkspace(activeCwd)}
         onRetry={() => switchWorkspace(activeCwd)}
@@ -3894,6 +4039,11 @@ export function App() {
   const focusAwaitingSnapshot = Boolean(focusRef.current) && !conversationReady;
   const settingsEnabled = !transitioning && !focusAwaitingSnapshot;
   const visibleCompacting = transitioning ? false : conversationCompacting;
+  const visibleCompactionAttempt = visibleState.compacting === true
+    && currentFocus
+    && stateMatchesFocus(visibleState, currentFocus)
+    ? visibleState.compactionAttempt
+    : undefined;
   const visibleConversationRole = transitioning
     ? transitionPresentation?.conversationRole
       ?? (showAttachedConversationProjection ? conversationRole : undefined)
@@ -3959,9 +4109,16 @@ export function App() {
         {conversationSyncing && <div
           className="banner transition-status-overlay"
           role="status"
-          aria-label="正在同步会话…"
+          aria-label={showConversationOpening
+            ? openingConversationTitle
+              ? `正在同步会话…；正在打开会话 ${conversationDisplayTitle(openingConversationTitle)}`
+              : "正在同步会话…；正在打开会话"
+            : "正在同步会话…"}
         >
           正在同步会话…
+          {showConversationOpening && (openingConversationTitle
+            ? ` · 正在打开会话 ${conversationDisplayTitle(openingConversationTitle)}`
+            : " · 正在打开会话")}
         </div>}
         {visiblePendingConversationDeletion
           && !showConversationDeletionProgress
@@ -4052,6 +4209,7 @@ export function App() {
               }
               compactionThresholdBusy={Boolean(pendingCompactionThreshold)}
               compacting={visibleCompacting}
+              compactionAttempt={visibleCompactionAttempt}
               cwd={visibleState.cwd}
               conversationContext={visibleConversationContext}
               conversationTitleLookup={visibleConversationTitleLookup}

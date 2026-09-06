@@ -820,7 +820,7 @@ describe("Chat", () => {
     expect(screen.queryByRole("note", { name: "历史记录不完整" })).toBeNull();
   });
 
-  it("shows animated compaction progress inside the transcript", () => {
+  it("shows generic compaction progress without inferring a request model", () => {
     const { container } = render(view(emptyChat, "", undefined, {
       compacting: true,
     }));
@@ -829,9 +829,34 @@ describe("Chat", () => {
       name: "正在压缩上下文",
     });
     expect(progress).toHaveTextContent("正在压缩上下文");
+    expect(progress).toHaveTextContent("整理较早消息并保留关键信息");
+    expect(progress).not.toHaveTextContent("模型");
     expect(container.querySelector(".transcript")?.lastElementChild)
       .toBe(progress);
     expect(progress.querySelector(".compaction-spinner")).toBeInTheDocument();
+  });
+
+  it("shows an exact live default request target without replacing the primary model", () => {
+    render(view(emptyChat, "", undefined, {
+      compacting: true,
+      model: { provider: "primary-provider", id: "shared-id" },
+      compactionAttempt: {
+        id: "9a2d87b2-848e-48ed-996d-5f1aecdc6a87",
+        generator: "default",
+        policy: "explicit",
+        requestTarget: { provider: "summary-provider", id: "shared-id" },
+      },
+    }));
+
+    const progress = screen.getByRole("status", {
+      name: "正在压缩上下文",
+    });
+    expect(progress).toHaveTextContent(
+      "Pi 默认摘要请求管线目标：summary-provider / shared-id · 专用配置",
+    );
+    expect(screen.getByRole("button", { name: /shared-id/ }))
+      .toHaveTextContent("shared-id");
+    expect(progress).not.toHaveTextContent("primary-provider");
   });
 
   it("keeps send and stop available while the Agent is busy", () => {
@@ -1985,13 +2010,57 @@ describe("Chat", () => {
     expect(
       Array.from(transcript?.children ?? []).map((element) => element.className),
     ).toEqual(["message assistant", "compaction-marker", "message user"]);
-    const compaction = screen.getByRole("separator", { name: "上下文已压缩" });
+    const compaction = screen.getByRole("separator", {
+      name: "上下文已压缩：模型未记录",
+    });
     expect(compaction).toHaveTextContent("SYSTEM");
     expect(compaction).toHaveTextContent("CONTEXT COMPACTION");
+    expect(compaction).toHaveTextContent("模型未记录");
     expect(compaction).toHaveTextContent("63.8k TOKENS");
     expect(compaction).toHaveTextContent("DONE");
     expect(compaction.querySelector("time"))
       .toHaveAttribute("datetime", "2026-07-19T10:00:00.000Z");
+  });
+
+  it("labels durable default, custom, and legacy compaction provenance truthfully", () => {
+    render(view({
+      items: [{
+        kind: "compaction",
+        id: "default-compaction",
+        timestamp: "2026-07-19T10:00:00.000Z",
+        tokensBefore: 100,
+        provenance: {
+          generator: "default",
+          attemptId: "9a2d87b2-848e-48ed-996d-5f1aecdc6a87",
+          policy: "follow_primary",
+          requestTarget: { provider: "summary-provider", id: "summary-model" },
+        },
+      }, {
+        kind: "compaction",
+        id: "custom-compaction",
+        timestamp: "2026-07-19T10:01:00.000Z",
+        tokensBefore: 90,
+        provenance: { generator: "custom" },
+      }, {
+        kind: "compaction",
+        id: "legacy-compaction",
+        timestamp: "2026-07-19T10:02:00.000Z",
+        tokensBefore: 80,
+      }],
+    }));
+
+    const markers = screen.getAllByRole("separator");
+    const defaultLabel =
+      "Pi 默认摘要 · 请求目标：summary-provider / summary-model · 跟随角色模型";
+    expect(markers[0]).toHaveTextContent(defaultLabel);
+    expect(markers[0]).toHaveAccessibleName(`上下文已压缩：${defaultLabel}`);
+    expect(markers[1]).toHaveTextContent("自定义摘要 · 模型归因未记录");
+    expect(markers[1]).toHaveAccessibleName(
+      "上下文已压缩：自定义摘要 · 模型归因未记录",
+    );
+    expect(markers[2]).toHaveTextContent("模型未记录");
+    expect(markers[2]).toHaveAccessibleName("上下文已压缩：模型未记录");
+    expect(markers[1]).not.toHaveTextContent("未使用模型");
   });
 
   it("keeps outgoing session messages at their transcript timepoint", () => {

@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   MAX_MESSAGE_BYTES,
+  MAX_MODEL_REFERENCE_BYTES,
   MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
   MAX_ROLE_COUNT,
   MAX_ROLE_DESCRIPTION_CHARACTERS,
   MAX_ROLE_NAME_CHARACTERS,
   MAX_ROLE_SYSTEM_PROMPT_BYTES,
   MAX_SERVER_EVENT_BYTES,
+  MAX_TRANSITION_DIAGNOSTIC_PHASE_MS,
   parseClientCommand,
   parseServerEvent,
   PROTOCOL_VERSION,
@@ -24,9 +26,20 @@ const targetConversationId = "cbcd831e-599b-40d6-9252-e79939ca49f4";
 const roleId = "f23db1e6-c657-4dac-8b7e-a14fdecc5f21";
 const messageId = "assistant:96b960be-b6bb-4a19-9cf2-78e77cb69425";
 
+const transitionDiagnostics = {
+  version: 1 as const,
+  commandId,
+  operation: "focus_conversation" as const,
+  validationMs: 1,
+  contextOrCatalogMs: 2,
+  presentationOrTargetReadMs: 3,
+  actorActivationOrLeaseMs: 4,
+  snapshotProjectionMs: 5,
+};
+
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(40);
+    expect(PROTOCOL_VERSION).toBe(42);
   });
 
   it("accepts supported commands", () => {
@@ -565,6 +578,105 @@ describe("parseClientCommand", () => {
     })).toThrow();
   });
 
+  it("accepts only bounded transition diagnostics on their authority envelope", () => {
+    expect(parseServerEvent({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId,
+      focusId,
+      items: [],
+      window: {
+        omittedBefore: false,
+        startsMidTurn: false,
+        contentTruncated: false,
+      },
+      transitionDiagnostics,
+    })).toMatchObject({ transitionDiagnostics });
+
+    const emptyDiagnostics = {
+      ...transitionDiagnostics,
+      operation: "initialize" as const,
+      snapshotProjectionMs: null,
+    };
+    expect(parseServerEvent({
+      type: "focus_attached",
+      operation: "initialize",
+      commandId,
+      sessionId,
+      projectId,
+      transitionDiagnostics: emptyDiagnostics,
+    })).toMatchObject({ transitionDiagnostics: emptyDiagnostics });
+
+    for (const invalid of [-1, 0.5, Number.NaN, Number.POSITIVE_INFINITY,
+      MAX_TRANSITION_DIAGNOSTIC_PHASE_MS + 1]) {
+      expect(() => parseServerEvent({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId,
+        focusId,
+        items: [],
+        window: {
+          omittedBefore: false,
+          startsMidTurn: false,
+          contentTruncated: false,
+        },
+        transitionDiagnostics: {
+          ...transitionDiagnostics,
+          validationMs: invalid,
+        },
+      })).toThrow();
+    }
+    expect(() => parseServerEvent({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId,
+      focusId,
+      items: [],
+      window: {
+        omittedBefore: false,
+        startsMidTurn: false,
+        contentTruncated: false,
+      },
+      transitionDiagnostics: {
+        ...transitionDiagnostics,
+        snapshotProjectionMs: null,
+      },
+    })).toThrow("projection duration");
+    expect(() => parseServerEvent({
+      type: "focus_attached",
+      operation: "initialize",
+      commandId,
+      sessionId,
+      projectId,
+      transitionDiagnostics: {
+        ...emptyDiagnostics,
+        commandId: "0c2678cb-eed2-4090-b95c-b5a75bf57ef4",
+      },
+    })).toThrow("matching empty initialize");
+    expect(() => parseServerEvent({
+      type: "focus_attached",
+      operation: "initialize",
+      commandId,
+      sessionId,
+      projectId,
+      conversationId,
+      focusId,
+      transitionDiagnostics: emptyDiagnostics,
+    })).toThrow("matching empty initialize");
+    for (const operation of ["focus_conversation", "create_conversation"] as const) {
+      expect(() => parseServerEvent({
+        type: "focus_attached",
+        operation,
+        commandId,
+        sessionId,
+        projectId,
+        conversationId,
+        focusId,
+        transitionDiagnostics,
+      })).toThrow("matching empty initialize");
+    }
+  });
+
   it("preserves secret auth prompt metadata without exposing a value", () => {
     expect(parseServerEvent({
       type: "auth_request",
@@ -589,6 +701,12 @@ describe("parseClientCommand", () => {
         cwd: "E:\\work",
         busy: false,
         compacting: true,
+        compactionAttempt: {
+          id: "9a2d87b2-848e-48ed-996d-5f1aecdc6a87",
+          generator: "default",
+          policy: "explicit",
+          requestTarget: { provider: "openai", id: "gpt-summary" },
+        },
         selectedServiceTier: null,
         thinkingLevel: "off",
         toolMode: "full_access",
@@ -597,7 +715,13 @@ describe("parseClientCommand", () => {
       },
     })).toMatchObject({
       type: "state",
-      state: { compacting: true },
+      state: {
+        compacting: true,
+        compactionAttempt: expect.objectContaining({
+          generator: "default",
+          policy: "explicit",
+        }),
+      },
     });
     expect(parseServerEvent({
       type: "state",
@@ -837,7 +961,13 @@ describe("parseClientCommand", () => {
           id: "compaction-entry-1",
           timestamp: "2026-07-18T12:01:00.000Z",
           tokensBefore: 63_771,
-        },
+          provenance: {
+            generator: "default",
+            attemptId: "9a2d87b2-848e-48ed-996d-5f1aecdc6a87",
+            policy: "follow_primary",
+            requestTarget: { provider: "openai", id: "gpt" },
+          },
+        }
       ],
       window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
     }).type).toBe("conversation_snapshot");
@@ -1427,6 +1557,70 @@ describe("parseServerEvent", () => {
         model: { ...role.model, provider: "p".repeat(1_025) },
       }],
     })).toThrow();
+  });
+
+  it("bounds live and durable compaction request identities by UTF-8 bytes", () => {
+    const attemptId = "9a2d87b2-848e-48ed-996d-5f1aecdc6a87";
+    const asciiBoundary = "p".repeat(MAX_MODEL_REFERENCE_BYTES);
+    const multibyteBoundary = `${"模".repeat(Math.floor(MAX_MODEL_REFERENCE_BYTES / 3))}x`;
+    const validTarget = { provider: asciiBoundary, id: multibyteBoundary };
+    const stateEvent = (requestTarget: { provider: string; id: string }) => ({
+      type: "state" as const,
+      state: {
+        sessionId,
+        projectId,
+        cwd: "E:\\work",
+        busy: false,
+        compacting: true,
+        compactionAttempt: {
+          id: attemptId,
+          generator: "default" as const,
+          policy: "explicit" as const,
+          requestTarget,
+        },
+        selectedServiceTier: null,
+        thinkingLevel: "off" as const,
+        toolMode: "full_access" as const,
+        availableThinkingLevels: ["off" as const],
+        providers: [],
+      },
+    });
+    const snapshotEvent = (requestTarget: { provider: string; id: string }) => ({
+      type: "conversation_snapshot" as const,
+      sessionId,
+      conversationId,
+      focusId,
+      items: [{
+        kind: "compaction" as const,
+        id: "compaction-entry",
+        timestamp: "2026-07-18T12:01:00.000Z",
+        tokensBefore: 100,
+        provenance: {
+          generator: "default" as const,
+          attemptId,
+          policy: "follow_primary" as const,
+          requestTarget,
+        },
+      }],
+      window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
+    });
+
+    expect(parseServerEvent(stateEvent(validTarget))).toMatchObject({
+      state: { compactionAttempt: { requestTarget: validTarget } },
+    });
+    expect(parseServerEvent(snapshotEvent(validTarget))).toMatchObject({
+      items: [{ provenance: { requestTarget: validTarget } }],
+    });
+
+    const invalidTargets = [
+      { provider: " \t", id: "model" },
+      { provider: "provider", id: `${asciiBoundary}x` },
+      { provider: `${multibyteBoundary}模`, id: "model" },
+    ];
+    for (const requestTarget of invalidTargets) {
+      expect(() => parseServerEvent(stateEvent(requestTarget))).toThrow();
+      expect(() => parseServerEvent(snapshotEvent(requestTarget))).toThrow();
+    }
   });
 
   it("accepts durable legacy Pi conversation identities", () => {

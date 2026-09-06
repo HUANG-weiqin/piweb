@@ -19,6 +19,7 @@ import {
   type ConversationHistoryTool,
   type ConversationRoleSnapshot,
   type ConversationWindowCoverage,
+  type PublicCompactionAttempt,
   type SessionEvent,
   type ServiceTier,
   type TokenUsage,
@@ -95,6 +96,7 @@ export interface ConversationActorState {
   profile: ConversationMeta;
   activity: ConversationActivity;
   compacting: boolean;
+  compactionAttempt?: PublicCompactionAttempt;
   fatalError?: string;
   disposed: boolean;
 }
@@ -393,6 +395,20 @@ function deferred<T>(): Deferred<T> {
     reject = rejectPromise;
   });
   return { promise, resolve, reject };
+}
+
+function cloneCompactionAttempt(
+  attempt: PublicCompactionAttempt,
+): PublicCompactionAttempt {
+  return {
+    id: attempt.id,
+    generator: attempt.generator,
+    policy: attempt.policy,
+    requestTarget: {
+      provider: attempt.requestTarget.provider,
+      id: attempt.requestTarget.id,
+    },
+  };
 }
 
 function cloneActivity(activity: ConversationActivity): ConversationActivity {
@@ -699,6 +715,8 @@ export class ConversationActor {
   private activeRun?: RunTicket;
   private opening = true;
   private compacting = false;
+  private compactionAttempt?: PublicCompactionAttempt;
+  private runtimeGeneration = 0;
   private hostCompactionInProgress = false;
   private truncating = false;
   private switchingRole = false;
@@ -893,6 +911,12 @@ export class ConversationActor {
 
   isCompacting(): boolean {
     return this.compacting;
+  }
+
+  getCompactionAttempt(): PublicCompactionAttempt | undefined {
+    return this.compacting && this.compactionAttempt
+      ? cloneCompactionAttempt(this.compactionAttempt)
+      : undefined;
   }
 
   isRuntimeReady(): boolean {
@@ -1381,11 +1405,13 @@ export class ConversationActor {
   }
 
   getState(): ConversationActorState {
+    const compactionAttempt = this.getCompactionAttempt();
     return {
       conversationId: this.conversationId,
       profile: this.profile,
       activity: this.getActivity(),
       compacting: this.compacting,
+      ...(compactionAttempt === undefined ? {} : { compactionAttempt }),
       ...(this.fatalError === undefined
         ? {}
         : { fatalError: this.fatalError.message }),
@@ -2506,6 +2532,7 @@ export class ConversationActor {
     const transferLeaseForDeletion =
       options.transferLeaseForDeletion === true;
     const ticket = this.activeRun;
+    this.invalidateCompactionAttemptRuntime();
 
     this.disposePromise = (async () => {
       const failures: unknown[] = [];
@@ -2879,9 +2906,42 @@ export class ConversationActor {
   }
 
   private updateCompacting(compacting: boolean): void {
-    if (this.compacting === compacting) return;
+    const clearAttempt = !compacting && this.compactionAttempt !== undefined;
+    if (this.compacting === compacting && !clearAttempt) return;
     this.compacting = compacting;
+    if (!compacting) this.compactionAttempt = undefined;
     this.emitCompaction();
+  }
+
+  private observeCompactionAttempt(
+    runtimeGeneration: number,
+    event: Parameters<NonNullable<CreatePiSessionOptions["compactionAttemptObserver"]>>[0],
+  ): void {
+    try {
+      if (
+        runtimeGeneration !== this.runtimeGeneration
+        || this.disposing
+        || this.disposed
+      ) return;
+      if (event.type === "started") {
+        if (!this.compacting) return;
+        const attempt = cloneCompactionAttempt(event.attempt);
+        if (this.compactionAttempt) return;
+        this.compactionAttempt = attempt;
+        this.emitCompaction();
+        return;
+      }
+      if (this.compactionAttempt?.id !== event.id) return;
+      this.compactionAttempt = undefined;
+      this.emitCompaction();
+    } catch {
+      // Compaction provenance is observational; it must not affect the request.
+    }
+  }
+
+  private invalidateCompactionAttemptRuntime(): void {
+    this.runtimeGeneration += 1;
+    this.updateCompacting(false);
   }
 
   private settleRun(
@@ -3716,6 +3776,7 @@ export class ConversationActor {
     createSessionOptions:
       ConversationActorOpenOptions["createSessionOptions"],
   ): Promise<readonly ExtensionError[]> {
+    const runtimeGeneration = ++this.runtimeGeneration;
     let created: CreatedPiSession | undefined;
     let unsubscribe: (() => void) | undefined;
     try {
@@ -3754,6 +3815,9 @@ export class ConversationActor {
               : undefined;
           },
           getServiceTier: () => this.serviceTierSelection,
+          compactionAttemptObserver: (event) => {
+            this.observeCompactionAttempt(runtimeGeneration, event);
+          },
         },
       );
       this.created = created;
@@ -3774,6 +3838,9 @@ export class ConversationActor {
       }
       this.unsubscribeSession = undefined;
       this.created = undefined;
+      if (this.runtimeGeneration === runtimeGeneration) {
+        this.invalidateCompactionAttemptRuntime();
+      }
       if (created) {
         try {
           await created.dispose();
@@ -3792,6 +3859,7 @@ export class ConversationActor {
   }
 
   private async stopRuntimeSession(): Promise<void> {
+    this.invalidateCompactionAttemptRuntime();
     const failures: unknown[] = [];
     try {
       this.unsubscribeSession?.();

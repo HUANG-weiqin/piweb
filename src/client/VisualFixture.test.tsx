@@ -71,7 +71,7 @@ describe("VisualFixture", () => {
 
     expect(screen.getByText("继续：固定丰富状态，并生成两张桌面截图。"))
       .toBeInTheDocument();
-    expect(screen.getByRole("separator", { name: "上下文已压缩" }))
+    expect(screen.getByRole("separator", { name: "上下文已压缩：模型未记录" }))
       .toBeInTheDocument();
     expect(screen.getByText("01", { selector: ".topbar-session-ordinal" }))
       .toBeInTheDocument();

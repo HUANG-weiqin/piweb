@@ -101,9 +101,35 @@ describe("ConversationRoleDialog", () => {
     />);
 
     const dialog = screen.getByRole("dialog", { name: "更换会话角色" });
-    expect(dialog).toHaveTextContent("Reviewer");
-    expect(dialog).toHaveTextContent("gpt-5");
+    expect(dialog).toHaveTextContent("当前角色：Reviewer · 修订 7");
+    expect(dialog).toHaveTextContent("角色模型：openai / gpt-5");
+    expect(dialog).toHaveTextContent(
+      "Pi 默认压缩：跟随角色模型 · openai / gpt-5",
+    );
     expect(screen.getByRole("button", { name: "应用角色" })).toBeDisabled();
+  });
+
+  it("keeps an explicit compaction model distinct when it equals the primary", () => {
+    const explicitRole: ConversationRoleSnapshot = {
+      ...role,
+      compactionModel: { ...role.model },
+    };
+    render(<ConversationRoleDialog
+      open
+      role={explicitRole}
+      roles={roles}
+      switchDisabled={false}
+      switching={false}
+      onSwitch={() => true}
+      onClose={() => undefined}
+    />);
+
+    const dialog = screen.getByRole("dialog", { name: "更换会话角色" });
+    expect(dialog).toHaveTextContent("角色模型：openai / gpt-5");
+    expect(dialog).toHaveTextContent(
+      "Pi 默认压缩：专用配置 · openai / gpt-5（与角色模型相同）",
+    );
+    expect(dialog).not.toHaveTextContent("Pi 默认压缩：跟随角色模型");
   });
 
   it("applies another available role only while switching is enabled", () => {

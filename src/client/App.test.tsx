@@ -556,6 +556,84 @@ describe("App", () => {
     });
   });
 
+  it("fails closed before protocol readiness when selecting a workspace", () => {
+    socketMock.helloVersion = PROTOCOL_VERSION + 1;
+    localStorage.setItem("piweb.workspaces", JSON.stringify([
+      "E:\\first",
+      "E:\\second",
+    ]));
+    localStorage.setItem("piweb.lastCwd", "E:\\first");
+
+    render(<App />);
+
+    const target = screen.getByRole("button", { name: "打开工作区 second" });
+    expect(target).toBeDisabled();
+    fireEvent.click(target);
+
+    expect(socketMock.send).not.toHaveBeenCalledWith(expect.objectContaining({
+      type: "initialize",
+      cwd: "E:\\second",
+    }));
+    expect(screen.getByRole("button", { name: "打开工作区 first" }))
+      .toHaveAttribute("aria-current", "true");
+    expect(target).not.toHaveClass("unavailable");
+  });
+
+  it("keeps the current workspace projection when rail navigation is offline", () => {
+    localStorage.setItem("piweb.workspaces", JSON.stringify([
+      "E:\\first",
+      "E:\\second",
+    ]));
+    localStorage.setItem("piweb.lastCwd", "E:\\first");
+    render(<App />);
+    const sessionId = latestSessionId();
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\first",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        messages: [{
+          id: "offline-source",
+          role: "assistant",
+          text: "offline source projection",
+          thinking: "",
+          tools: [],
+        }],
+        window: completeConversationWindow,
+      });
+    });
+    const initializeCount = socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "initialize",
+    ).length;
+
+    act(() => socketMock.status?.(false));
+    const target = screen.getByRole("button", { name: "打开工作区 second" });
+    expect(target).toBeDisabled();
+    fireEvent.click(target);
+
+    expect(socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "initialize",
+    )).toHaveLength(initializeCount);
+    expect(screen.getByText("offline source projection")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "打开工作区 first" }))
+      .toHaveAttribute("aria-current", "true");
+    expect(target).not.toHaveClass("unavailable");
+  });
+
   it("does not write or subscribe to Browser History outside the phone breakpoint", () => {
     mockPhoneViewport(false);
     const pushState = vi.spyOn(history, "pushState");
@@ -2430,7 +2508,7 @@ describe("App", () => {
     });
     expect(screen.getByText("B attached preview", { selector: "article" }))
       .toBeInTheDocument();
-    expect(screen.getByRole("status", { name: "正在同步会话…" }))
+    expect(screen.getByRole("status", { name: /正在同步会话/ }))
       .toBeInTheDocument();
     expect(screen.getByRole("button", { name: "打开会话 C" })).toBeEnabled();
     const focusCommandsBeforeCurrentClick = sentFocusCommandCount();
@@ -2507,6 +2585,78 @@ describe("App", () => {
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeEnabled();
   });
 
+  it("treats a throwing focus replacement send as rejected without cancelling the active transition", async () => {
+    const measure = vi.spyOn(performance, "measure");
+    const sessionId = startFocusReplacementProject();
+    await act(async () => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    });
+    measure.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    const focusB = latestCommand("focus_conversation");
+    socketMock.send.mockImplementationOnce(() => {
+      socketMock.rawEmit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversations: [conversationSummary(CONVERSATION_D, "buffered throw event")],
+        truncated: false,
+      });
+      throw new Error("synchronous send failure");
+    });
+
+    expect(() => fireEvent.click(
+      screen.getByRole("button", { name: "打开会话 C" }),
+    )).not.toThrow();
+    expect(latestCommand("focus_conversation").conversationId).toBe(CONVERSATION_C);
+    expect(screen.getByRole("alert")).toHaveTextContent("本地服务未连接");
+    expect(screen.getByRole("button", { name: "当前会话 B" }))
+      .toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("button", { name: "打开会话 C" }))
+      .toBeInTheDocument();
+    expect(screen.queryByText("buffered throw event")).not.toBeInTheDocument();
+
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "focus_attached",
+        operation: "focus_conversation",
+        commandId: focusB.commandId,
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_B,
+        focusId: FOCUS_A_SECOND,
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_B,
+        focusId: FOCUS_A_SECOND,
+        messages: [{
+          id: "focus-b-after-send-throw",
+          role: "assistant",
+          text: "focus B remained authoritative",
+          thinking: "",
+          tools: [],
+        }],
+        window: completeConversationWindow,
+      });
+    });
+
+    await waitFor(() => {
+      const details = measure.mock.calls
+        .filter(([name]) => name === "piweb.transition")
+        .map(([, options]) => (options as PerformanceMeasureOptions).detail);
+      expect(details).toHaveLength(2);
+      expect(details.map(({ termination }) => termination)).toEqual([
+        { kind: "failure", reason: "send-failed" },
+        { kind: "success" },
+      ]);
+    });
+    expect(screen.getByText("focus B remained authoritative"))
+      .toBeInTheDocument();
+  });
+
   it("shows a deferred fallback read-only and refreshes before restoring readiness", () => {
     const sessionId = startFocusReplacementProject();
 
@@ -2563,7 +2713,7 @@ describe("App", () => {
     });
 
     expect(screen.queryByText("deferred authoritative B")).not.toBeInTheDocument();
-    expect(screen.getByRole("status", { name: "正在同步会话…" }))
+    expect(screen.getByRole("status", { name: /正在同步会话/ }))
       .toBeInTheDocument();
 
     act(() => socketMock.rawEmit?.({
@@ -2971,7 +3121,7 @@ describe("App", () => {
 
     socketMock.autoFocus = false;
     fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
-    expect(screen.getByRole("status", { name: "正在同步会话…" }))
+    expect(screen.getByRole("status", { name: /正在同步会话/ }))
       .toHaveClass("transition-status-overlay");
     const secondWorkspace = screen.getByRole("button", { name: "打开工作区 second" });
     expect(secondWorkspace).toBeEnabled();
@@ -3248,7 +3398,7 @@ describe("App", () => {
     }));
     fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
 
-    expect(screen.getByRole("status", { name: "正在同步会话…" }))
+    expect(screen.getByRole("status", { name: /正在同步会话/ }))
       .toBeInTheDocument();
     expect(screen.queryByText("late deleted B preview"))
       .not.toBeInTheDocument();
@@ -3258,7 +3408,8 @@ describe("App", () => {
       .toBeDisabled();
   });
 
-  it("does not treat absence from a truncated project snapshot as deletion proof", () => {
+  it("keeps a truncated-absence preview read-only and records it after paint", async () => {
+    const measure = vi.spyOn(performance, "measure");
     render(<App />);
     const sessionId = startFromSetup();
     const conversationA = {
@@ -3321,10 +3472,150 @@ describe("App", () => {
     expect(screen.getByText("preview absent only from truncated index", {
       selector: "article",
     })).toBeInTheDocument();
-    expect(screen.getByRole("status", { name: "正在同步会话…" }))
+    expect(screen.getByRole("status", { name: /正在同步会话/ }))
       .toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
       .toBeDisabled();
+
+    await act(async () => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => {
+        requestAnimationFrame(() => resolve());
+      }));
+    });
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "focus_attached",
+        operation: "focus_conversation",
+        commandId: focus.commandId!,
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_B,
+        focusId: FOCUS_A_SECOND,
+      });
+      socketMock.rawEmit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+          conversationId: CONVERSATION_B,
+          focusId: FOCUS_A_SECOND,
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_B,
+        focusId: FOCUS_A_SECOND,
+        messages: [],
+        window: completeConversationWindow,
+      });
+    });
+    await waitFor(() => expect(measure.mock.calls.some(([, options]) => (
+      (options as PerformanceMeasureOptions).detail?.firstPresentation?.source === "preview"
+    ))).toBe(true));
+  });
+
+  it("copies exact host phase diagnostics into transition detail without retaining wire identities", async () => {
+    const measure = vi.spyOn(performance, "measure");
+    socketMock.autoFocus = false;
+    render(<App />);
+    const sessionId = startFromSetup();
+    const initialize = latestCommand("initialize");
+    const transitionDiagnostics = {
+      version: 1 as const,
+      commandId: initialize.commandId!,
+      operation: "initialize" as const,
+      validationMs: 1,
+      contextOrCatalogMs: 2,
+      presentationOrTargetReadMs: 3,
+      actorActivationOrLeaseMs: 4,
+      snapshotProjectionMs: 5,
+    };
+
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "focus_attached",
+        operation: "initialize",
+        commandId: initialize.commandId!,
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        messages: [],
+        window: completeConversationWindow,
+        transitionDiagnostics,
+      });
+    });
+
+    await waitFor(() => expect(measure).toHaveBeenCalled());
+    const detail = (measure.mock.calls.find(
+      ([name]) => name === "piweb.transition",
+    )?.[1] as PerformanceMeasureOptions | undefined)?.detail;
+    expect(detail).toMatchObject({
+      host: {
+        version: 1,
+        validationMs: 1,
+        contextOrCatalogMs: 2,
+        presentationOrTargetReadMs: 3,
+        actorActivationOrLeaseMs: 4,
+        snapshotProjectionMs: 5,
+      },
+      termination: { kind: "success" },
+    });
+    expect(JSON.stringify(detail)).not.toContain(initialize.commandId);
+    expect(JSON.stringify(detail)).not.toContain(sessionId);
+    expect(JSON.stringify(detail)).not.toContain(CONVERSATION_ID);
+  });
+
+  it("consumes empty initialize host diagnostics from the correlated attach", async () => {
+    const measure = vi.spyOn(performance, "measure");
+    socketMock.autoFocus = false;
+    render(<App />);
+    const sessionId = startFromSetup();
+    const initialize = latestCommand("initialize");
+
+    act(() => socketMock.rawEmit?.({
+      type: "focus_attached",
+      operation: "initialize",
+      commandId: initialize.commandId!,
+      sessionId,
+      projectId: PROJECT_ID,
+      transitionDiagnostics: {
+        version: 1,
+        commandId: initialize.commandId!,
+        operation: "initialize",
+        validationMs: 1,
+        contextOrCatalogMs: 2,
+        presentationOrTargetReadMs: 3,
+        actorActivationOrLeaseMs: 0,
+        snapshotProjectionMs: null,
+      },
+    }));
+
+    await waitFor(() => expect(measure).toHaveBeenCalledWith(
+      "piweb.transition",
+      expect.objectContaining({
+        detail: expect.objectContaining({
+          host: expect.objectContaining({
+            snapshotProjectionMs: null,
+          }),
+          interactiveMs: expect.any(Number),
+          termination: { kind: "success" },
+        }),
+      }),
+    ));
   });
 
   it("rejects mismatched previews and clears temporary previews on replacement and disconnect", () => {
@@ -3552,8 +3843,13 @@ describe("App", () => {
     socketMock.autoFocus = false;
     fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
     expect(screen.queryByText("source A")).not.toBeInTheDocument();
-    expect(screen.getByRole("status", { name: "正在同步会话…" })).toBeInTheDocument();
+    const transitionStatuses = screen.getAllByRole("status");
+    expect(transitionStatuses).toHaveLength(1);
+    expect(transitionStatuses[0]).toHaveAccessibleName(
+      "正在同步会话…；正在打开会话 B",
+    );
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "新建会话" })).toBeDisabled();
 
     const command = latestCommand("focus_conversation");
     act(() => socketMock.rawEmit?.({
@@ -3597,7 +3893,7 @@ describe("App", () => {
         },
       });
     });
-    expect(screen.getByRole("status", { name: "正在同步会话…" })).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: /正在同步会话/ })).toBeInTheDocument();
     expect(screen.queryByText("late source snapshot")).not.toBeInTheDocument();
     expect(screen.queryByText("late source live")).not.toBeInTheDocument();
 
@@ -3738,7 +4034,7 @@ describe("App", () => {
     expect(screen.getByText("A live card")).toBeInTheDocument();
     expect(screen.queryByText("B history")).not.toBeInTheDocument();
     expect(screen.queryByRole("note", { name: "历史记录不完整" })).toBeNull();
-    expect(screen.getByRole("status", { name: "正在同步会话…" })).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: /正在同步会话/ })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "当前会话 A" })).toBeEnabled();
 
@@ -3757,7 +4053,7 @@ describe("App", () => {
     });
     expect(screen.getByText("A cached history")).toBeInTheDocument();
     expect(screen.queryByRole("note", { name: "历史记录不完整" })).toBeNull();
-    expect(screen.getByRole("status", { name: "正在同步会话…" })).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: /正在同步会话/ })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeDisabled();
 
     act(() => socketMock.rawEmit?.(snapshotFor(
@@ -3797,7 +4093,7 @@ describe("App", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "打开会话 A" }));
     expect(screen.queryByText("fresh A history")).not.toBeInTheDocument();
-    expect(screen.getByRole("status", { name: "正在同步会话…" })).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: /正在同步会话/ })).toBeInTheDocument();
   });
 
   it("reconnects a pending phone focus to its durable chat route", () => {
@@ -4149,11 +4445,13 @@ describe("App", () => {
     expect(socketMock.send.mock.calls.filter(
       ([command]) => command.type === "initialize",
     )).toHaveLength(initializeCount);
-    expect(screen.getByRole("heading", { name: "工作区不可用" }))
-      .toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "工作区不可用" }))
+      .not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("workspace unavailable");
   });
 
-  it("settles the workspace when the automatic recent fallback cannot be sent", () => {
+  it("keeps a reconnect fallback send failure non-destructive and preserves its timing origin", async () => {
+    const measure = vi.spyOn(performance, "measure");
     localStorage.setItem("piweb.workspaces", JSON.stringify(["E:\\work"]));
     localStorage.setItem("piweb.lastCwd", "E:\\work");
     render(<App />);
@@ -4220,35 +4518,134 @@ describe("App", () => {
       conversation: { kind: "recent" },
     });
     expect(fallback.sessionId).not.toBe(staleRestore.sessionId);
-    expect(screen.getByRole("heading", { name: "工作区不可用" }))
-      .toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "工作区不可用" }))
+      .not.toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("本地服务未连接");
+    await waitFor(() => expect(measure.mock.calls.some(([, options]) => {
+      const detail = (options as PerformanceMeasureOptions).detail;
+      return detail?.origin === "reconnect"
+        && detail.termination?.reason === "send-failed";
+    })).toBe(true));
   });
 
-  it("closes the last unavailable workspace and its session view", () => {
-    socketMock.autoFocus = false;
-    localStorage.setItem("piweb.workspaces", JSON.stringify(["E:\\work"]));
-    localStorage.setItem("piweb.lastCwd", "E:\\work");
+  it("shows an explicit opening target for a phone workspace cache miss", () => {
+    mockPhoneViewport();
+    localStorage.setItem("piweb.workspaces", JSON.stringify([
+      "E:\\first",
+      "E:\\second",
+    ]));
+    localStorage.setItem("piweb.lastCwd", "E:\\first");
     render(<App />);
-    const initializeCommand = latestCommand("initialize");
-    act(() => socketMock.emit?.({
-      type: "error",
-      scope: "command",
-      operation: "initialize",
-      commandId: initializeCommand.commandId,
-      sessionId: initializeCommand.sessionId,
-      message: "workspace unavailable",
+    const sessionId = latestSessionId();
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\first",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        messages: [{
+          id: "phone-source",
+          role: "assistant",
+          text: "phone source projection",
+          thinking: "",
+          tools: [],
+        }],
+        window: completeConversationWindow,
+      });
+    });
+    socketMock.autoFocus = false;
+
+    act(() => popPhoneRoute({ screen: "workspaces" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开工作区 second" }));
+
+    const opening = screen.getByRole("status", { name: "正在打开工作区 second" });
+    expect(opening).toHaveAttribute("tabindex", "-1");
+    expect(document.activeElement).toBe(opening);
+    expect(screen.queryByText("phone source projection")).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "给 Pi 发送消息" })).not.toBeInTheDocument();
+  });
+
+  it("preserves the current workspace projection when a rail switch cannot send", async () => {
+    localStorage.setItem("piweb.workspaces", JSON.stringify(["E:\\other"]));
+    const measure = vi.spyOn(performance, "measure");
+    socketMock.autoFocus = false;
+    render(<App />);
+    const sessionId = startFromSetup();
+    const initialize = latestCommand("initialize");
+    act(() => {
+      socketMock.emit?.({
+        type: "focus_attached",
+        operation: "initialize",
+        commandId: initialize.commandId!,
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+      });
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\default",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+          conversationId: CONVERSATION_ID,
+          focusId: FOCUS_A,
+        },
+      });
+    });
+    act(() => socketMock.rawEmit?.({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      messages: [{
+        id: "preserved-source",
+        role: "user",
+        text: "preserved workspace transcript",
+        thinking: "",
+        tools: [],
+      }],
+      window: completeConversationWindow,
     }));
 
-    fireEvent.click(screen.getByRole("button", { name: "关闭工作区" }));
-    expect(socketMock.send).toHaveBeenCalledWith(expect.objectContaining({
-      type: "close_session",
-      sessionId: initializeCommand.sessionId,
-    }));
+    socketMock.send.mockReturnValueOnce(false);
+    fireEvent.click(screen.getByRole("button", { name: "打开工作区 other" }));
+
+    expect(latestCommand("initialize")).toMatchObject({ cwd: "E:\\other" });
+    expect(screen.getByRole("button", { name: "打开工作区 default" }))
+      .toHaveAttribute("aria-current", "true");
+    expect(screen.getByText("preserved workspace transcript", { selector: "article" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeEnabled();
     expect(screen.queryByRole("status", { name: "正在同步工作区…" }))
       .not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "还没有打开工作区" }))
-      .toBeInTheDocument();
+
+    await waitFor(() => expect(measure).toHaveBeenCalledWith(
+      "piweb.transition",
+      expect.objectContaining({
+        detail: expect.objectContaining({
+          termination: { kind: "failure", reason: "send-failed" },
+        }),
+      }),
+    ));
   });
 
   it("recovers from a cached workspace initialize failure", () => {
@@ -4299,8 +4696,8 @@ describe("App", () => {
       message: "无法打开项目",
     }));
 
-    expect(screen.getByRole("heading", { name: "工作区不可用" }))
-      .toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "工作区不可用" }))
+      .not.toBeInTheDocument();
     expect(screen.queryByRole("status", { name: "正在同步工作区…" }))
       .not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "打开工作区 second" }));
@@ -4448,7 +4845,7 @@ describe("App", () => {
       .toBeInTheDocument();
   });
 
-  it("keeps a missing workspace visible and allows switching away", () => {
+  it("keeps a workspace with a generic initialize failure visible and allows switching away", () => {
     socketMock.autoFocus = false;
     localStorage.setItem("piweb.workspaces", JSON.stringify([
       "E:\\missing",
@@ -4467,11 +4864,11 @@ describe("App", () => {
       message: "Directory does not exist",
     }));
 
-    expect(screen.getByRole("heading", { name: "工作区不可用" }))
+    expect(screen.queryByRole("heading", { name: "工作区不可用" }))
+      .not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("Directory does not exist");
+    expect(screen.getByRole("button", { name: "打开工作区 missing" }))
       .toBeInTheDocument();
-    expect(screen.getByRole("button", {
-      name: "打开工作区 missing（不可用）",
-    })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", {
       name: "打开工作区 other",
@@ -4479,45 +4876,6 @@ describe("App", () => {
     expect(latestCommand("initialize").cwd).toBe("E:\\other");
     expect(JSON.parse(localStorage.getItem("piweb.workspaces") ?? "[]"))
       .toEqual(["E:\\missing", "E:\\other"]);
-  });
-
-  it("closes an unavailable workspace to empty without opening another", () => {
-    socketMock.autoFocus = false;
-    localStorage.setItem("piweb.workspaces", JSON.stringify([
-      "E:\\other",
-      "E:\\missing",
-    ]));
-    localStorage.setItem("piweb.lastCwd", "E:\\missing");
-    render(<App />);
-    const missing = latestCommand("initialize");
-
-    act(() => socketMock.emit?.({
-      type: "error",
-      scope: "command",
-      operation: "initialize",
-      commandId: missing.commandId,
-      sessionId: missing.sessionId,
-      message: "Directory does not exist",
-    }));
-    fireEvent.click(screen.getByRole("button", { name: "关闭工作区" }));
-
-    expect(socketMock.send).toHaveBeenCalledWith({
-      type: "close_session",
-      sessionId: missing.sessionId,
-    });
-    expect(socketMock.send.mock.calls.filter(
-      ([command]) => command.type === "initialize",
-    )).toHaveLength(1);
-    expect(JSON.parse(localStorage.getItem("piweb.workspaces") ?? "[]"))
-      .toEqual(["E:\\other"]);
-    expect(localStorage.getItem("piweb.lastCwd")).toBe("");
-    expect(screen.getByRole("heading", { name: "还没有打开工作区" }))
-      .toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "打开工作区 other" }))
-      .not.toHaveAttribute("aria-current");
-    expect(screen.queryByRole("button", {
-      name: /打开工作区 missing/,
-    })).not.toBeInTheDocument();
   });
 
   it("keeps a newer directory request authoritative over stale listing outcomes", () => {
@@ -5149,27 +5507,146 @@ describe("App", () => {
     expect(screen.getByText("上下文已压缩")).toBeInTheDocument();
   });
 
-  it("projects automatic compaction progress from focused state", () => {
+  it("projects only the exact focused compaction attempt without changing the primary model", () => {
     render(<App />);
     const sessionId = startFromSetup();
+    const firstAttempt = {
+      id: "549d0646-12f1-44fa-a620-85b860808ae4",
+      generator: "default" as const,
+      policy: "explicit" as const,
+      requestTarget: { provider: "summary-provider", id: "summary-model" },
+    };
+    const primaryModel = { provider: "primary-provider", id: "primary-model" };
 
-    act(() => socketMock.emit?.({
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: true,
+          compacting: true,
+          compactionAttempt: firstAttempt,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          selectedModel: primaryModel,
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversations: [
+          conversationSummary(CONVERSATION_ID, "A"),
+          conversationSummary(CONVERSATION_B, "B"),
+        ],
+        truncated: false,
+      });
+    });
+
+    expect(screen.getByRole("status", { name: "正在压缩上下文" }))
+      .toHaveTextContent(
+        "Pi 默认摘要请求管线目标：summary-provider / summary-model · 专用配置",
+      );
+    expect(screen.getByTitle("模型连接")).toHaveTextContent("primary-model");
+
+    socketMock.autoFocus = false;
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    expect(screen.queryByText(/summary-provider \/ summary-model/))
+      .not.toBeInTheDocument();
+
+    const focus = latestCommand("focus_conversation");
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "focus_attached",
+        operation: "focus_conversation",
+        commandId: focus.commandId,
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_B,
+        focusId: FOCUS_A_SECOND,
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_B,
+        focusId: FOCUS_A_SECOND,
+        messages: [],
+        window: completeConversationWindow,
+      });
+    });
+    expect(screen.queryByText(/summary-provider \/ summary-model/))
+      .not.toBeInTheDocument();
+
+    act(() => socketMock.rawEmit?.({
       type: "state",
       state: {
         sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_B,
+        focusId: FOCUS_A_SECOND,
         cwd: "E:\\work",
-        busy: true,
-        compacting: true,
+        busy: false,
+        compacting: false,
         thinkingLevel: "off",
         toolMode: "read_only",
         availableThinkingLevels: ["off"],
-        selectedModel: { provider: "provider", id: "model" },
+        selectedModel: primaryModel,
         providers: [],
       },
     }));
+    expect(screen.getByTitle("模型连接")).toHaveTextContent("primary-model");
 
+    const secondAttempt = {
+      ...firstAttempt,
+      id: "4765925b-b4d3-4233-915d-17dd27fd2898",
+      requestTarget: { provider: "second-provider", id: "second-summary" },
+    };
+    act(() => socketMock.rawEmit?.({
+      type: "state",
+      state: {
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_B,
+        focusId: FOCUS_A_SECOND,
+        cwd: "E:\\work",
+        busy: true,
+        compacting: true,
+        compactionAttempt: secondAttempt,
+        thinkingLevel: "off",
+        toolMode: "read_only",
+        availableThinkingLevels: ["off"],
+        selectedModel: primaryModel,
+        providers: [],
+      },
+    }));
     expect(screen.getByRole("status", { name: "正在压缩上下文" }))
-      .toBeInTheDocument();
+      .toHaveTextContent("second-provider / second-summary");
+    expect(screen.getByTitle("模型连接")).toHaveTextContent("primary-model");
+
+    act(() => socketMock.rawEmit?.({
+      type: "state",
+      state: {
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_B,
+        focusId: FOCUS_A_SECOND,
+        cwd: "E:\\work",
+        busy: false,
+        compacting: false,
+        thinkingLevel: "off",
+        toolMode: "read_only",
+        availableThinkingLevels: ["off"],
+        selectedModel: primaryModel,
+        providers: [],
+      },
+    }));
+    expect(screen.queryByRole("status", { name: "正在压缩上下文" }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByText(/second-provider \/ second-summary/))
+      .not.toBeInTheDocument();
   });
 
   it("switches an idle focused conversation role with exact command correlation", () => {
@@ -5682,10 +6159,9 @@ describe("App", () => {
   });
 
   it("does not add a message when prompt sending fails", () => {
-    socketMock.send.mockReturnValue(false);
-
     render(<App />);
     const sessionId = startFromSetup();
+    socketMock.send.mockReturnValue(false);
 
     act(() => socketMock.emit?.({
       type: "state",
