@@ -1219,24 +1219,7 @@ export function App() {
   ) => {
     if (pendingState && stateMatchesFocus(pendingState, focus)) {
       applyPublicState(pendingState);
-      return;
     }
-    setState((current) => current
-      ? {
-          ...current,
-          projectId: focus.projectId,
-          conversationId: focus.conversationId,
-          focusId: focus.focusId,
-          conversationName: undefined,
-          selectedModel: undefined,
-          activeRun: undefined,
-          busy: false,
-          compacting: false,
-          compactionAttempt: undefined,
-          sessionTokenUsage: undefined,
-          contextUsage: undefined,
-        }
-      : current);
   };
   const applyConversationSnapshot = (
     event: ConversationSnapshotEvent,
@@ -1832,7 +1815,10 @@ export function App() {
           }, event.transitionDiagnostics);
         }
         updatePendingFocus(undefined);
-        updateConversationSyncing(event.operation === "focus_conversation");
+        updateConversationSyncing(
+          event.operation === "focus_conversation"
+          || event.operation === "create_conversation",
+        );
         const preserveReconnectDraft = Boolean(
           correlatedReconnectDraftOwner
           && correlatedReconnectDraftOwner.workspaceKey === pending.workspaceKey
@@ -3848,6 +3834,14 @@ export function App() {
   } else if (workspaceSyncing) {
     transitionPresentation = cachedWorkspacePresentation;
   }
+  const currentFocus = focusRef.current?.sessionId === sessionIdRef.current
+    ? focusRef.current
+    : undefined;
+  // focus_attached owns only the target identity. A runtime projection is
+  // usable only after its complete state identity exactly matches that focus.
+  const runtimeState = currentFocus && (!state || !stateMatchesFocus(state, currentFocus))
+    ? undefined
+    : state;
   const visibleState = transitionPresentation
     ? {
         ...transitionPresentation.state,
@@ -3858,8 +3852,11 @@ export function App() {
         compactionAttempt: undefined,
         activeRun: undefined,
       }
-    : state;
-  const showRoleSelection = selectingRole || !visibleState?.conversationId;
+    : runtimeState;
+  const attachedRuntimeUnknown = Boolean(currentFocus && !visibleState);
+  const showRoleSelection = selectingRole || (
+    !currentFocus && !visibleState?.conversationId
+  );
   const visiblePendingConversationDeletion = pendingConversationDeletion
     && visibleState
     && pendingConversationDeletion.sessionId === visibleState.sessionId
@@ -3889,7 +3886,9 @@ export function App() {
     ? pendingFocus.targetConversationId
     : undefined;
   const visibleConversationId = pendingTargetConversationId
-    ?? (showRoleSelection ? undefined : visibleState?.conversationId);
+    ?? (showRoleSelection
+      ? undefined
+      : visibleState?.conversationId ?? currentFocus?.conversationId);
   const visibleBusyConversationId = visibleState
     && (visibleState.busy || outstandingRunId)
     ? visibleState.conversationId
@@ -3991,14 +3990,17 @@ export function App() {
     : undefined;
   const showConversationOpening = pendingFocus?.operation === "focus_conversation"
     && !activeConversationPresentation;
-  const phoneSceneFocusKey = !activeCwd || !visibleState
+  const phoneSceneFocusKey = !activeCwd || (!visibleState && !currentFocus)
     ? mobileScene
     : mobileScene === "chat" && showRoleSelection
       ? "role-selection"
       : mobileScene;
   usePhoneSceneFocus(phoneViewport, phoneSceneFocusKey, phoneWorkbenchRef);
 
-  if (!activeCwd || !visibleState) return <>
+  if (
+    !activeCwd
+    || (!visibleState && (!currentFocus || !conversationSyncing))
+  ) return <>
     <div className="workbench" ref={phoneWorkbenchRef}>
       {workspaceRail}
       <ConversationSidebar
@@ -4034,23 +4036,29 @@ export function App() {
     {feedback}
   </>;
 
-  const visibleServiceTiers = visibleState.providers
+  const visibleServiceTiers = visibleState?.providers
     .flatMap((provider) => provider.models)
     .find((model) => (
       model.provider === visibleState.selectedModel?.provider
       && model.id === visibleState.selectedModel.id
     ))?.serviceTiers ?? EMPTY_SERVICE_TIERS;
-  const currentFocus = focusRef.current;
-  const focusedConversationId = currentFocus?.sessionId === visibleState.sessionId
-    && (
-      visibleState.projectId === undefined
-      || currentFocus.projectId === visibleState.projectId
+  const focusedConversationId = currentFocus && (
+    !visibleState
+    || (
+      currentFocus.sessionId === visibleState.sessionId
+      && (
+        visibleState.projectId === undefined
+        || currentFocus.projectId === visibleState.projectId
+      )
     )
+  )
     ? currentFocus.conversationId
     : undefined;
-  const sidebarScopeKey = `${workspaceKey(activeCwd)}:${visibleState.projectId ?? ""}`;
+  const sidebarScopeKey = `${workspaceKey(activeCwd)}:${
+    visibleState?.projectId ?? currentFocus?.projectId ?? ""
+  }`;
   const conversationCompacting =
-    visibleState.compacting === true || Boolean(pendingContextCompaction);
+    visibleState?.compacting === true || Boolean(pendingContextCompaction);
   const showAttachedConversationProjection =
     conversationSyncing && pendingFocus === undefined;
   let visibleChat = chat;
@@ -4060,16 +4068,16 @@ export function App() {
   } else if (switchingFocus) {
     visibleChat = initialChatState;
   }
-  const visibleBusy = transitioning || switchingFocus
+  const visibleBusy = transitioning || switchingFocus || !visibleState
     ? false
     : visibleState.busy || Boolean(outstandingRunId);
-  const visibleActiveRun = transitioning || switchingFocus
+  const visibleActiveRun = transitioning || switchingFocus || !visibleState
     ? undefined
     : visibleState.activeRun;
-  const focusAwaitingSnapshot = Boolean(focusRef.current) && !conversationReady;
-  const settingsEnabled = !transitioning && !focusAwaitingSnapshot;
+  const focusAwaitingSnapshot = Boolean(currentFocus) && !conversationReady;
+  const settingsEnabled = !transitioning && !focusAwaitingSnapshot && !attachedRuntimeUnknown;
   const visibleCompacting = transitioning ? false : conversationCompacting;
-  const visibleCompactionAttempt = visibleState.compacting === true
+  const visibleCompactionAttempt = visibleState?.compacting === true
     && currentFocus
     && stateMatchesFocus(visibleState, currentFocus)
     ? visibleState.compactionAttempt
@@ -4177,6 +4185,31 @@ export function App() {
                 <p>正在完成安全删除；若操作失败，会恢复仍可用的会话。</p>
               </div>
             </main>
+          : !visibleState
+          ? <main className="app-shell workspace-placeholder">
+              {phoneViewport && <header className="topbar">
+                <div className="mobile-chat-header">
+                  <button
+                    type="button"
+                    aria-label="返回会话列表"
+                    onClick={goBackFromPhoneRoute}
+                  >返回</button>
+                  <div>
+                    <span>PI WEB</span>
+                    <strong>正在同步会话</strong>
+                  </div>
+                </div>
+              </header>}
+              <div className="workspace-placeholder-content">
+                <ActivitySpinner
+                  className="conversation-deletion-spinner"
+                  strokeWidth={1.2}
+                />
+                <p className="eyebrow">SYNCHRONIZING CONVERSATION</p>
+                <h1>正在同步会话</h1>
+                <p>正在等待此会话的运行状态。</p>
+              </div>
+            </main>
           : showRoleSelection
           ? <RoleSelectionPage
               roles={roles}
@@ -4273,7 +4306,7 @@ export function App() {
             />}
       </div>
     </div>
-    <ConnectionDrawer
+    {visibleState && <ConnectionDrawer
       state={visibleState}
       open={drawer && !blockingModalVisible && !transitioning}
       online={online && settingsEnabled}
@@ -4314,11 +4347,11 @@ export function App() {
        }}
       onClearSettingResult={clearSettingResult}
       onKeyDialogChange={setSettingsDialogOpen}
-    />
+    />}
     <RoleManagerDialog
       open={roleManagerOpen && !blockingModalVisible && !transitioning}
       roles={roles}
-      providers={visibleState.providers}
+      providers={visibleState?.providers ?? []}
       initialRoleId={roleManagerInitialRoleId}
       pending={pendingRoleOperation}
       result={roleOperationResult}

@@ -928,6 +928,10 @@ describe("App", () => {
       cwd: "E:\\work",
       conversationId: CONVERSATION_B,
     });
+    expect(screen.getByRole("heading", { name: "正在同步会话" }))
+      .toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "给 Pi 发送消息" }))
+      .not.toBeInTheDocument();
   });
 
   it("projects phone navigation locally without duplicating Chat or following late events", async () => {
@@ -1519,8 +1523,11 @@ describe("App", () => {
       sessionId,
       message: "blocked",
     }));
+    renderIsolationMock.chat.mockClear();
     fireEvent.click(screen.getByRole("button", { name: "打开会话 已改名审查 Agent" }));
-    expect(renderIsolationMock.chat.mock.calls.at(-1)?.[0]).toBeUndefined();
+    expect(screen.getByRole("heading", { name: "正在同步会话" }))
+      .toBeInTheDocument();
+    expect(renderIsolationMock.chat).not.toHaveBeenCalled();
   });
 
   it("hydrates LoopList from focused snapshots and ignores stale live identities", () => {
@@ -2661,6 +2668,27 @@ describe("App", () => {
         { kind: "success" },
       ]);
     });
+    expect(screen.queryByText("focus replacement source A"))
+      .not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "给 Pi 发送消息" }))
+      .not.toBeInTheDocument();
+
+    act(() => socketMock.rawEmit?.({
+      type: "state",
+      state: {
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_B,
+        focusId: FOCUS_A_SECOND,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "read_only",
+        availableThinkingLevels: ["off", "high"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
     expect(screen.getByText("focus B remained authoritative"))
       .toBeInTheDocument();
   });
@@ -2837,12 +2865,11 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "当前会话 B" })).toBeEnabled();
     expect(screen.queryByText("focus replacement source A"))
       .not.toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeDisabled();
-    const settingsButton = screen.getByTitle("模型连接");
-    expect(settingsButton).toBeDisabled();
-    fireEvent.click(settingsButton);
-    expect(screen.queryByRole("dialog", { name: "模型连接" }))
+    expect(screen.getByRole("heading", { name: "正在同步会话" }))
+      .toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "给 Pi 发送消息" }))
       .not.toBeInTheDocument();
+    expect(screen.queryByTitle("模型连接")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "新建会话" })).toBeDisabled();
     for (const button of screen.getAllByRole("button", {
       name: /^(重命名|删除)会话 /,
@@ -7758,8 +7785,82 @@ describe("App", () => {
 
     expect(screen.queryByRole("button", { name: "停止" }))
       .not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "正在同步会话" }))
+      .toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "给 Pi 发送消息" }))
+      .not.toBeInTheDocument();
+  });
+
+  it("requires a new exact state when reopening the same conversation with a new focus", () => {
+    const sessionId = startFocusReplacementProject();
+
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    const focusB = latestCommand("focus_conversation");
+    act(() => socketMock.rawEmit?.({
+      type: "focus_attached",
+      operation: "focus_conversation",
+      commandId: focusB.commandId!,
+      sessionId,
+      projectId: PROJECT_ID,
+      conversationId: CONVERSATION_B,
+      focusId: "ae301850-745d-44dd-a30f-000000000401",
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 A" }));
+    const reopenedA = latestCommand("focus_conversation");
+    act(() => socketMock.rawEmit?.({
+      type: "focus_attached",
+      operation: "focus_conversation",
+      commandId: reopenedA.commandId!,
+      sessionId,
+      projectId: PROJECT_ID,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A_SECOND,
+    }));
+
+    expect(screen.getByText("focus replacement source A"))
+      .toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "停止" }))
+      .not.toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
       .toBeDisabled();
+
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "state",
+        state: {
+          sessionId,
+          projectId: PROJECT_ID,
+          conversationId: CONVERSATION_ID,
+          focusId: FOCUS_A_SECOND,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off", "high"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A_SECOND,
+        messages: [{
+          id: "reopened-a-snapshot",
+          role: "assistant",
+          text: "new A focus runtime",
+          thinking: "",
+          tools: [],
+        }],
+        window: completeConversationWindow,
+      });
+    });
+
+    expect(screen.getByText("new A focus runtime")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toBeEnabled();
   });
 
   it("keeps a pending compaction scoped to its originating conversation", () => {
