@@ -382,6 +382,7 @@ describe("PiRuntime session ownership", () => {
           env,
           reason,
         ) {
+          const compactionStream = this.agent.streamFunction;
           calls.push({
             receiver: this,
             args: [
@@ -396,7 +397,7 @@ describe("PiRuntime session ownership", () => {
             ],
             targetAuth: await this._getSummarizationRequestAuth(requestModel),
           });
-          await (await this.agent.streamFunction(
+          await (await compactionStream(
             requestModel as never,
             { systemPrompt: "", messages: [], tools: [] } as never,
             {
