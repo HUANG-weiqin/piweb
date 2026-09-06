@@ -1333,7 +1333,7 @@ describe("ConversationActor", () => {
       const { runStarted, finishRun, running } = busyRun(fixture);
       await runStarted.promise;
       fixture.runtime.session.promptImplementation = async (text, options) => {
-        // Pi 0.84.4 awaits slash-command lookup before it reaches agent.steer.
+        // Pi 0.85.1 awaits slash-command lookup before it reaches agent.steer.
         await Promise.resolve();
         fixture.runtime.session.steeringMessages.push(text);
         options?.preflightResult?.(true);

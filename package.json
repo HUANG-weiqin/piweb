@@ -23,8 +23,8 @@
     "visual:verify": "node scripts/visual-verify.mjs"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "0.84.4",
-    "@earendil-works/pi-coding-agent": "0.84.4",
+    "@earendil-works/pi-ai": "0.85.1",
+    "@earendil-works/pi-coding-agent": "0.85.1",
     "@piweb/context-compressor": "workspace:*",
     "dompurify": "^3.2.6",
     "express": "^5.1.0",

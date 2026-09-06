@@ -43,7 +43,7 @@ compactionModel: RoleModelSelection | null
 - 不调用主模型作为 fallback；
 - 不追加 `compaction` entry，也不执行成功压缩后的 `buildSessionContext()` 重建；原 JSONL 保持完整。
 
-这里不承诺恢复 Pi 在接点之前已经做出的 transient overflow-recovery 修改。Pi 0.84.4 会在可恢复 overflow 后、进入 `_runDefaultCompaction` 前设置 recovery-attempt 标记，并从内存 `agent.state.messages` 移除末尾失败 assistant；默认压缩随后失败时 Pi 不恢复这两项。宿主保留这一本来就存在的 Pi 失败语义，不把它误写成“内存 context 完全不变”，也不扩大接点去复制/回滚 SDK 私有状态。manual 和普通 threshold 路径没有这项 overflow 前置修改。
+这里不承诺恢复 Pi 在接点之前已经做出的 transient overflow-recovery 修改。Pi 0.85.1 会在可恢复 overflow 后、进入 `_runDefaultCompaction` 前设置 recovery-attempt 标记，并从内存 `agent.state.messages` 移除末尾失败 assistant；默认压缩随后失败时 Pi 不恢复这两项。宿主保留这一本来就存在的 Pi 失败语义，不把它误写成“内存 context 完全不变”，也不扩大接点去复制/回滚 SDK 私有状态。manual 和普通 threshold 路径没有这项 overflow 前置修改。
 
 已有 frozen conversation 不因压缩模型后来从目录消失而无法打开。它仍能使用主模型工作；只有真正进入 **Pi 默认压缩生成器**时才 lazy resolve 并失败。用户可恢复模型配置，或在会话空闲后切换到一个有效角色。
 
@@ -139,7 +139,7 @@ create/update 的服务端校验是权威边界。update 触发重新校验的�
 
 ## 6. 最窄运行时接点
 
-锁定 `@earendil-works/pi-coding-agent@0.84.4`：manual 与 SDK auto 在 `session_before_compact` 后，custom result 直接采用，只有无 custom result 时共同进入 `_runDefaultCompaction(...)`。它继续调用 Pi 原生 `compact()`。
+锁定 `@earendil-works/pi-coding-agent@0.85.1`：manual 与 SDK auto 在 `session_before_compact` 后，custom result 直接采用，只有无 custom result 时共同进入 `_runDefaultCompaction(...)`。它继续调用 Pi 原生 `compact()`。
 
 这是私有但精确的 pinned-version seam。安装 adapter 时必须检查该方法存在且为函数；不匹配时 session 创建 fail closed。现有 `compaction-thinking.ts` 重命名为 `compaction-request.ts`，event-window adapter 改为 `installDefaultCompactionRequestOverride(session, transport, resolveCompactionModel?)`，resolver 缺席表示 `null`。
 
@@ -232,7 +232,7 @@ git diff --check
 
 ## 10. 已知边界
 
-1. 私有 SDK seam 由 pinned 0.84.4、shape assertion与测试约束；升级时优先推动公开 default-compaction request hook。
+1. 私有 SDK seam 由 pinned 0.85.1、shape assertion与测试约束；升级时优先推动公开 default-compaction request hook。
 2. Pi 仍预读主 auth，但实际 B request不继承。
 3. overflow失败时 seam前已形成的 transient recovery state不回滚；JSONL不因压缩失败增删entry。
 4. 小窗口模型不支持，未来另做 chunked summarization。
