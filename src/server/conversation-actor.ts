@@ -187,7 +187,6 @@ export interface ConversationActorOpenOptions {
   project: Pick<
     ProjectStore,
     | "cwd"
-    | "toolMode"
     | "hasPersistedConversationNameIntent"
     | "refreshConversations"
     | "truncateConversation"
@@ -317,6 +316,26 @@ interface ReloadStopRequest {
   readonly ready: Deferred<void>;
 }
 
+type WaitingRunState = {
+  readonly phase: "waiting";
+  /** Immutable target snapshot for this one visible wait. */
+  readonly waitingFor: ConversationWaitingFor;
+  /**
+   * One-shot host callback fired when guidance is accepted into the SDK
+   * steering queue of this exact waiting run. Used by the host to end a
+   * blocked wait_for_session tool call so the queued guidance can be consumed
+   * at the next model request. Returns true only when the host's exact
+   * waiter still exists and successfully claimed the guidance; false leaves
+   * the record available for the next wait. Cleared on fire, on wait
+   * restore, or by the caller's unsubscribe.
+   */
+  waitSteerInterrupt?: () => boolean;
+};
+
+type RunState =
+  | { readonly phase: "queued" | "running" | "cancelling" }
+  | WaitingRunState;
+
 interface RunTicket {
   readonly id: string;
   readonly origin: ConversationRunOrigin;
@@ -340,19 +359,8 @@ interface RunTicket {
   autoTitlePrompt?: string;
   autoTitleAbortController?: AbortController;
   customSteerFlush?: Promise<void>;
-  phase: "queued" | "running" | "waiting" | "cancelling";
-  waitingFor?: ConversationWaitingFor;
-  waitingEpoch?: symbol;
-  /**
-   * One-shot host callback fired when guidance is accepted into the SDK
-   * steering queue of this exact waiting run. Used by the host to end a
-   * blocked wait_for_session tool call so the queued guidance can be consumed
-   * at the next model request. Returns true only when the host's exact
-   * waiter still exists and successfully claimed the guidance; false leaves
-   * the record available for the next wait. Cleared on fire, on wait
-   * restore, or by the caller's unsubscribe.
-   */
-  waitSteerInterrupt?: () => boolean;
+  /** Replaced atomically on each run lifecycle transition. */
+  state: RunState;
   /**
    * Accepted-but-not-observed guidance in SDK acceptance order (unified FIFO
    * across explicit steers and busy browser prompts). Persists across waits
@@ -514,7 +522,7 @@ function rawUserMessageIsPersisted(
 }
 
 function isCancelling(ticket: RunTicket): boolean {
-  return ticket.phase === "cancelling";
+  return ticket.state.phase === "cancelling";
 }
 
 const RELOAD_RESUME_CUSTOM_TYPE = "workbench.reload_resume.v1";
@@ -1047,7 +1055,7 @@ export class ConversationActor {
       }, { additionalProperties: false }),
       execute: async (_toolCallId, input) => {
         const ticket = this.activeRun;
-        if (!ticket || ticket.phase !== "running") {
+        if (!ticket || ticket.state.phase !== "running") {
           throw new Error(
             "Edit budget can only be requested by the active running conversation",
           );
@@ -1117,7 +1125,7 @@ export class ConversationActor {
       parameters: Type.Object({}, { additionalProperties: false }),
       execute: async () => {
         const ticket = this.activeRun;
-        if (!ticket || ticket.phase !== "running") {
+        if (!ticket || ticket.state.phase !== "running") {
           throw new Error(
             "Context compaction can only be requested by the active running conversation",
           );
@@ -1405,26 +1413,24 @@ export class ConversationActor {
   getActivity(): ConversationActivity {
     const ticket = this.activeRun;
     if (!ticket) return { kind: "idle" };
-    switch (ticket.phase) {
+    const state = ticket.state;
+    switch (state.phase) {
       case "queued":
       case "running":
       case "cancelling":
-        return { kind: ticket.phase, runId: ticket.id };
+        return { kind: state.phase, runId: ticket.id };
       case "waiting":
-        if (!ticket.waitingFor) {
-          throw new Error("Waiting run is missing its target");
-        }
-        return "targets" in ticket.waitingFor
+        return "targets" in state.waitingFor
           ? {
               kind: "waiting",
               runId: ticket.id,
-              targetCount: ticket.waitingFor.targets.length,
+              targetCount: state.waitingFor.targets.length,
             }
           : {
               kind: "waiting",
               runId: ticket.id,
-              targetConversationId: ticket.waitingFor.conversationId,
-              targetRunId: ticket.waitingFor.runId,
+              targetConversationId: state.waitingFor.conversationId,
+              targetRunId: state.waitingFor.runId,
             };
     }
   }
@@ -1607,8 +1613,8 @@ export class ConversationActor {
       });
     }
     if (
-      ticket.phase !== "running"
-      && ticket.phase !== "waiting"
+      ticket.state.phase !== "running"
+      && ticket.state.phase !== "waiting"
     ) {
       // The SDK run is not live (queued) or is cancelling: a steering
       // admission could escape into a second SDK run or survive queue cleanup.
@@ -1685,8 +1691,8 @@ export class ConversationActor {
                   if (
                     this.activeRun !== ticket
                     || (
-                      ticket.phase !== "running"
-                      && ticket.phase !== "waiting"
+                      ticket.state.phase !== "running"
+                      && ticket.state.phase !== "waiting"
                     )
                   ) {
                     reject(new Error(
@@ -1815,7 +1821,7 @@ export class ConversationActor {
     if (
       !ticket
       || ticket.id !== runId
-      || (ticket.phase !== "running" && ticket.phase !== "waiting")
+      || (ticket.state.phase !== "running" && ticket.state.phase !== "waiting")
     ) {
       return Promise.reject(
         new Error("The target run is not currently able to accept guidance"),
@@ -1892,7 +1898,7 @@ export class ConversationActor {
     if (
       !ticket
       || ticket.id !== runId
-      || ticket.phase === "cancelling"
+      || ticket.state.phase === "cancelling"
     ) {
       return Promise.reject(
         new Error("The target run is not currently able to accept a session message"),
@@ -1919,7 +1925,7 @@ export class ConversationActor {
       !ticket
       || ticket.id !== input.runId
       || ticket.origin !== "inbox"
-      || ticket.phase === "cancelling"
+      || ticket.state.phase === "cancelling"
       || ticket.finishPromise !== undefined
     ) {
       return Promise.reject(
@@ -2067,7 +2073,7 @@ export class ConversationActor {
         // leave the durable envelope claimed and flush it from that event.
         while (
           this.activeRun === ticket
-          && (ticket.phase === "running" || ticket.phase === "waiting")
+          && (ticket.state.phase === "running" || ticket.state.phase === "waiting")
           && ticket.customSteerDeliveries.length > 0
         ) {
           // Keep the streaming check adjacent to every SDK call: triggerTurn
@@ -2099,7 +2105,7 @@ export class ConversationActor {
       ticket.customSteerFlush = undefined;
       if (
         this.activeRun === ticket
-        && (ticket.phase === "running" || ticket.phase === "waiting")
+        && (ticket.state.phase === "running" || ticket.state.phase === "waiting")
         && this.session.isStreaming
         && ticket.customSteerDeliveries.length > 0
       ) {
@@ -2178,7 +2184,7 @@ export class ConversationActor {
       ...(input.autoTitlePrompt === undefined
         ? {}
         : { autoTitlePrompt: input.autoTitlePrompt }),
-      phase: "queued",
+      state: { phase: "queued" },
       editBudget,
       pendingMutationPathKeys: new Map(),
       toolMode: this.profileSnapshot.role.toolMode,
@@ -2209,8 +2215,8 @@ export class ConversationActor {
     if (
       !ticket
       || (runId !== undefined && ticket.id !== runId)
-      || ticket.phase === "queued"
-      || ticket.phase === "cancelling"
+      || ticket.state.phase === "queued"
+      || ticket.state.phase === "cancelling"
     ) {
       return;
     }
@@ -2225,12 +2231,13 @@ export class ConversationActor {
     // execution is sequential. Parallel blocking tools would require a
     // multi-wait activity model instead of overwriting this single phase.
     const ticket = this.requireOwnedRunningTicket(ownership);
-    const waitingEpoch = Symbol("wait_for_session");
-    ticket.phase = "waiting";
-    ticket.waitingFor = "targets" in waitingFor
-      ? { targets: waitingFor.targets.map((target) => ({ ...target })) }
-      : { ...waitingFor };
-    ticket.waitingEpoch = waitingEpoch;
+    const waiting: WaitingRunState = {
+      phase: "waiting",
+      waitingFor: "targets" in waitingFor
+        ? { targets: waitingFor.targets.map((target) => ({ ...target })) }
+        : { ...waitingFor },
+    };
+    ticket.state = waiting;
     this.emitActivity();
 
     let restored = false;
@@ -2240,15 +2247,11 @@ export class ConversationActor {
       if (
         this.activeRun !== ticket
         || ticket.ownership !== ownership
-        || ticket.phase !== "waiting"
-        || ticket.waitingEpoch !== waitingEpoch
+        || ticket.state !== waiting
       ) {
         return;
       }
-      ticket.phase = "running";
-      ticket.waitingFor = undefined;
-      ticket.waitingEpoch = undefined;
-      ticket.waitSteerInterrupt = undefined;
+      ticket.state = { phase: "running" };
       this.emitActivity();
     };
   }
@@ -2274,7 +2277,7 @@ export class ConversationActor {
       !ticket
       || ticket.ownership !== ownership
       || ownership[RUN_OWNERSHIP] !== ticket.ownership[RUN_OWNERSHIP]
-      || ticket.phase !== "waiting"
+      || ticket.state.phase !== "waiting"
     ) {
       return false;
     }
@@ -2390,18 +2393,19 @@ export class ConversationActor {
     callback: () => boolean,
   ): () => void {
     const ticket = this.activeRun;
+    const waiting = ticket?.state;
     if (
       !ticket
       || ticket.ownership !== ownership
       || ownership[RUN_OWNERSHIP] !== ticket.ownership[RUN_OWNERSHIP]
-      || ticket.phase !== "waiting"
+      || waiting?.phase !== "waiting"
     ) {
       throw new Error("The run is not currently waiting under this ownership");
     }
-    if (ticket.waitSteerInterrupt !== undefined) {
+    if (waiting.waitSteerInterrupt !== undefined) {
       throw new Error("A waiting steer interrupt is already registered");
     }
-    ticket.waitSteerInterrupt = callback;
+    waiting.waitSteerInterrupt = callback;
     // Consume guidance already accepted into the SDK queue (including before
     // this wait registered or while the registration was still queued behind
     // the serial lifecycle task).
@@ -2410,8 +2414,11 @@ export class ConversationActor {
     return () => {
       if (!active) return;
       active = false;
-      if (ticket.waitSteerInterrupt === callback) {
-        ticket.waitSteerInterrupt = undefined;
+      if (
+        ticket.state === waiting
+        && waiting.waitSteerInterrupt === callback
+      ) {
+        waiting.waitSteerInterrupt = undefined;
       }
     };
   }
@@ -2423,14 +2430,15 @@ export class ConversationActor {
    * its raw user message_end is observed.
    */
   private fireWaitingSteerInterrupt(ticket: RunTicket): void {
-    if (this.activeRun !== ticket || ticket.phase !== "waiting") return;
-    if (ticket.waitSteerInterrupt === undefined) return;
+    const waiting = ticket.state;
+    if (this.activeRun !== ticket || waiting.phase !== "waiting") return;
+    if (waiting.waitSteerInterrupt === undefined) return;
     const record = ticket.pendingGuidanceObservations.find(
       (candidate) => !candidate.waited,
     );
     if (!record) return;
-    const interrupt = ticket.waitSteerInterrupt;
-    ticket.waitSteerInterrupt = undefined;
+    const interrupt = waiting.waitSteerInterrupt;
+    waiting.waitSteerInterrupt = undefined;
     let claimed = false;
     try {
       claimed = interrupt() === true;
@@ -2519,7 +2527,7 @@ export class ConversationActor {
     origin: ConversationRunOrigin;
   } | undefined {
     const ticket = this.activeRun;
-    if (!ticket || ticket.phase === "cancelling" || ticket.finishPromise) {
+    if (!ticket || ticket.state.phase === "cancelling" || ticket.finishPromise) {
       return undefined;
     }
     return { runId: ticket.id, origin: ticket.origin };
@@ -2536,7 +2544,7 @@ export class ConversationActor {
     if (!ticket) {
       return this.manualCompaction ?? Promise.resolve();
     }
-    if (ticket.phase === "cancelling" || ticket.finishPromise) {
+    if (ticket.state.phase === "cancelling" || ticket.finishPromise) {
       return ticket.completion.promise.then(() => undefined);
     }
     const existing = ticket.reloadStop;
@@ -2657,11 +2665,11 @@ export class ConversationActor {
     }
     await this.compactAtThreshold(ticket);
     if (this.activeRun !== ticket) return;
-    if (ticket.phase === "cancelling") {
+    if (ticket.state.phase === "cancelling") {
       await this.settleRun(ticket, "aborted");
       return;
     }
-    ticket.phase = "running";
+    ticket.state = { phase: "running" };
     this.emitSessionEvent(ticket, { type: "run_started" });
     this.emitActivity();
 
@@ -2981,7 +2989,7 @@ export class ConversationActor {
     ticket: RunTicket,
     outcome: RunSettlement["outcome"],
   ): Promise<RunSettlement> {
-    if (outcome !== "completed" && ticket.phase !== "cancelling") {
+    if (outcome !== "completed" && ticket.state.phase !== "cancelling") {
       this.tryPauseLoopList(ticket);
     }
     ticket.finishPromise ??= this.finishRun(ticket, outcome);
@@ -3095,18 +3103,16 @@ export class ConversationActor {
         this.emitError(error, ticket.id);
       }
     }
-    if (ticket.phase === "queued") {
-      ticket.phase = "cancelling";
+    if (ticket.state.phase === "queued") {
+      ticket.state = { phase: "cancelling" };
       this.emitActivity();
       return this.settleRun(ticket, "aborted").then(() => undefined);
     }
-    if (ticket.phase === "cancelling") {
+    if (ticket.state.phase === "cancelling") {
       return ticket.abortPromise ?? Promise.resolve();
     }
 
-    ticket.phase = "cancelling";
-    ticket.waitingFor = undefined;
-    ticket.waitingEpoch = undefined;
+    ticket.state = { phase: "cancelling" };
     this.emitActivity();
     ticket.abortPromise = Promise.resolve().then(() => {
       this.session.clearQueue();
@@ -3173,7 +3179,7 @@ export class ConversationActor {
     }
     if (
       !ticket
-      || ticket.phase === "queued"
+      || ticket.state.phase === "queued"
     ) {
       if (event.type === "agent_start") {
         void this.session.abort().catch((error) => {
@@ -3292,7 +3298,7 @@ export class ConversationActor {
     const ticket = this.activeRun;
     const message =
       `Extension error in ${error.event} (${error.extensionPath}): ${error.error}`;
-    if (ticket && ticket.phase !== "queued") {
+    if (ticket && ticket.state.phase !== "queued") {
       ticket.extensionErrorMessage ??= message;
       return;
     }
@@ -3303,7 +3309,7 @@ export class ConversationActor {
     input: ToolCallGateInput,
   ): Promise<{ block?: boolean; reason?: string } | undefined> {
     const ticket = this.activeRun;
-    if (!ticket || ticket.phase !== "running") {
+    if (!ticket || ticket.state.phase !== "running") {
       return {
         block: true,
         reason: "No active run owns this tool call",
@@ -3343,7 +3349,7 @@ export class ConversationActor {
     if (
       input.signal?.aborted
       || this.activeRun !== ticket
-      || ticket.phase !== "running"
+      || ticket.state.phase !== "running"
     ) {
       return {
         block: true,
@@ -3358,7 +3364,7 @@ export class ConversationActor {
       if (
         input.signal?.aborted
         || this.activeRun !== ticket
-        || ticket.phase !== "running"
+        || ticket.state.phase !== "running"
       ) {
         return {
           block: true,
@@ -3453,7 +3459,7 @@ export class ConversationActor {
     const ticket = this.activeRun;
     if (
       !ticket
-      || ticket.phase === "queued"
+      || ticket.state.phase === "queued"
       || isCancelling(ticket)
     ) {
       return false;
@@ -3493,7 +3499,7 @@ export class ConversationActor {
       !ticket
       || ticket.ownership !== ownership
       || ownership[RUN_OWNERSHIP] !== ticket.ownership[RUN_OWNERSHIP]
-      || ticket.phase !== "running"
+      || ticket.state.phase !== "running"
     ) {
       throw new Error("Run ownership is stale or is not currently running");
     }

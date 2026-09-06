@@ -71,6 +71,10 @@ interface ProjectManifestV1 {
   version: typeof MANIFEST_VERSION;
   projectId: string;
   createdAt: string;
+  /**
+   * Retained only because v1 project manifests require it. Conversation role
+   * snapshots, not this project field, own all current tool permissions.
+   */
   toolMode: ToolMode;
   lastConversationId?: string;
 }
@@ -898,8 +902,15 @@ export class ProjectStore {
     this.manifest = manifest;
   }
 
-  static async open(cwd: string, seedToolMode: ToolMode): Promise<ProjectStore> {
-    assertToolMode(seedToolMode);
+  /**
+   * `manifestCompatibilityToolMode` is written only when creating the legacy
+   * v1 manifest shape. It is never consulted for runtime authorization.
+   */
+  static async open(
+    cwd: string,
+    manifestCompatibilityToolMode: ToolMode,
+  ): Promise<ProjectStore> {
+    assertToolMode(manifestCompatibilityToolMode);
     const canonicalCwd = await canonicalDirectory(cwd);
     const stateDir = join(canonicalCwd, PROJECT_STATE_DIRECTORY);
     const sessionDir = join(stateDir, SESSION_DIRECTORY);
@@ -926,7 +937,7 @@ export class ProjectStore {
         version: MANIFEST_VERSION,
         projectId: randomUUID(),
         createdAt: new Date().toISOString(),
-        toolMode: seedToolMode,
+        toolMode: manifestCompatibilityToolMode,
       };
       await writeManifestAtomically(manifestPath, manifest);
     }
@@ -950,10 +961,6 @@ export class ProjectStore {
     );
     store.conversations = store.cachedCatalogConversations();
     return store;
-  }
-
-  get toolMode(): ToolMode {
-    return this.manifest.toolMode;
   }
 
   get lastConversationId(): string | undefined {
@@ -2406,15 +2413,15 @@ export class ProjectStoreRegistry {
 
   async acquireProject(
     cwd: string,
-    seedToolMode: ToolMode,
+    manifestCompatibilityToolMode: ToolMode,
   ): Promise<ProjectStoreHandle> {
-    assertToolMode(seedToolMode);
+    assertToolMode(manifestCompatibilityToolMode);
     const canonicalCwd = await canonicalDirectory(cwd);
     const key = pathIdentity(canonicalCwd);
     const entry = this.getOrCreateProjectEntry(
       key,
       canonicalCwd,
-      seedToolMode,
+      manifestCompatibilityToolMode,
     );
     entry.references += 1;
 
@@ -2522,13 +2529,13 @@ export class ProjectStoreRegistry {
   private getOrCreateProjectEntry(
     key: string,
     canonicalCwd: string,
-    seedToolMode: ToolMode,
+    manifestCompatibilityToolMode: ToolMode,
   ): ProjectStoreRegistryEntry {
     const existing = this.stores.get(key);
     if (existing !== undefined) return existing;
 
     const entry: ProjectStoreRegistryEntry = {
-      opening: ProjectStore.open(canonicalCwd, seedToolMode),
+      opening: ProjectStore.open(canonicalCwd, manifestCompatibilityToolMode),
       references: 0,
     };
     this.stores.set(key, entry);

@@ -1937,6 +1937,15 @@ describe("App", () => {
       cwd: "E:\\first",
       conversation: { kind: "open", conversationId: CONVERSATION_ID },
     });
+    const initializeCount = socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "initialize",
+    ).length;
+    fireEvent.click(screen.getByRole("button", {
+      name: "打开工作区 first",
+    }));
+    expect(socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "initialize",
+    )).toHaveLength(initializeCount);
     expect(socketMock.send.mock.calls.some(([command]) => (
       command.type === "close_session"
     ))).toBe(false);

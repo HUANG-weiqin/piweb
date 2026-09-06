@@ -123,7 +123,10 @@ describe("ProjectStore", () => {
     expect(reopened.cwd).toBe(await realpath(cwd));
     expect(reopened.stateDir).toBe(join(reopened.cwd, ".piweb"));
     expect(reopened.sessionDir).toBe(join(reopened.stateDir, "sessions"));
-    expect(reopened.toolMode).toBe("read_only");
+    expect(JSON.parse(await readFile(
+      join(reopened.stateDir, "project.json"),
+      "utf8",
+    ))).toMatchObject({ toolMode: "read_only" });
     expect(reopened.lastConversationId).toBe(conversationId);
   });
 
@@ -146,15 +149,11 @@ describe("ProjectStore", () => {
 
     expect(store).toMatchObject({
       id: projectId,
-      toolMode: "full_access",
       lastConversationId,
     });
-    await expect(readFile(manifestPath, "utf8")).resolves.not.toContain(
-      "workspace_write",
-    );
-    await expect(readFile(manifestPath, "utf8")).resolves.toContain(
-      '"toolMode": "full_access"',
-    );
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    expect(manifest.toolMode).toBe("full_access");
+    expect(JSON.stringify(manifest)).not.toContain("workspace_write");
   });
 
   it("fails closed without replacing an invalid manifest", async () => {
@@ -216,18 +215,22 @@ describe("ProjectStore", () => {
 
     expect(listener).toHaveBeenCalledTimes(1);
     expect(listener).toHaveBeenCalledWith();
-    await expect(ProjectStore.open(cwd, "read_only")).resolves.toMatchObject({
-      toolMode: "full_access",
-      lastConversationId: undefined,
-    });
+    const reopened = await ProjectStore.open(cwd, "read_only");
+    expect(reopened.lastConversationId).toBeUndefined();
+    expect(JSON.parse(await readFile(
+      join(reopened.stateDir, "project.json"),
+      "utf8",
+    ))).toMatchObject({ toolMode: "full_access" });
   });
 
-  it("seeds a new project with full-access mode", async () => {
+  it("seeds a new project with a full-access compatibility value", async () => {
     const cwd = await createTemporaryDirectory("piweb-project-full-access-");
+    const store = await ProjectStore.open(cwd, "full_access");
 
-    await expect(ProjectStore.open(cwd, "full_access")).resolves.toMatchObject({
-      toolMode: "full_access",
-    });
+    expect(JSON.parse(await readFile(
+      join(store.stateDir, "project.json"),
+      "utf8",
+    ))).toMatchObject({ toolMode: "full_access" });
   });
 
   it("persists and lists a conversation before it has an assistant message", async () => {

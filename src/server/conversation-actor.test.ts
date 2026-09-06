@@ -4923,6 +4923,29 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
+  it("keeps an immutable wait target snapshot", async () => {
+    const fixture = await openActor();
+    const run = await startHeldActorRun(fixture, RUN_A);
+    const target = {
+      conversationId: TARGET_CONVERSATION_ID,
+      runId: RUN_B,
+    };
+
+    const restore = fixture.actor.enterWaiting(run.ownership, target);
+    target.runId = "mutated-after-entering-wait";
+
+    expect(fixture.actor.getActivity()).toEqual({
+      kind: "waiting",
+      runId: RUN_A,
+      targetConversationId: TARGET_CONVERSATION_ID,
+      targetRunId: RUN_B,
+    });
+
+    restore();
+    await run.finish();
+    await fixture.actor.dispose();
+  });
+
   it("persists exact final text before publishing terminal", async () => {
     const order: string[] = [];
     const fixture = await openActor({

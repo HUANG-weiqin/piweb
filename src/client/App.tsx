@@ -286,10 +286,45 @@ interface ActiveFocus {
   focusId: string;
 }
 
+type ConversationPresentationState = Pick<
+  PublicState,
+  | "conversationName"
+  | "cwd"
+  | "selectedModel"
+  | "selectedServiceTier"
+  | "thinkingLevel"
+  | "toolMode"
+  | "availableThinkingLevels"
+  | "providers"
+  | "registryError"
+  | "sessionTokenUsage"
+  | "contextUsage"
+  | "compactionThresholdPercent"
+>;
+
+function presentationFromState(
+  state: PublicState,
+): ConversationPresentationState {
+  return {
+    conversationName: state.conversationName,
+    cwd: state.cwd,
+    selectedModel: state.selectedModel,
+    selectedServiceTier: state.selectedServiceTier,
+    thinkingLevel: state.thinkingLevel,
+    toolMode: state.toolMode,
+    availableThinkingLevels: state.availableThinkingLevels,
+    providers: state.providers,
+    registryError: state.registryError,
+    sessionTokenUsage: state.sessionTokenUsage,
+    contextUsage: state.contextUsage,
+    compactionThresholdPercent: state.compactionThresholdPercent,
+  };
+}
+
 interface CachedWorkspaceProjection {
   projectId: string;
   conversationId: string;
-  state: PublicState;
+  presentation: ConversationPresentationState;
   conversations: ConversationSummary[];
   roles: RoleTemplate[];
   conversationRole?: ConversationRoleSnapshot;
@@ -302,7 +337,7 @@ interface CachedConversationPresentation {
   workspaceKey: string;
   projectId: string;
   conversationId: string;
-  state: PublicState;
+  presentation: ConversationPresentationState;
   conversationRole?: ConversationRoleSnapshot;
   chat: typeof initialChatState;
 }
@@ -706,7 +741,7 @@ export function App() {
       {
         projectId: focus.projectId,
         conversationId: focus.conversationId,
-        state: { ...state },
+        presentation: presentationFromState(state),
         conversations: [...conversations],
         roles: [...roles],
         conversationRole,
@@ -744,7 +779,7 @@ export function App() {
         workspaceKey: currentWorkspaceKey(),
         projectId: focus.projectId,
         conversationId: focus.conversationId,
-        state: { ...state },
+        presentation: presentationFromState(state),
         conversationRole,
         // Keep the reducer-produced object by reference; this cache is display-only.
         chat,
@@ -789,19 +824,9 @@ export function App() {
   };
   const showCachedWorkspacePresentation = (
     cached: CachedWorkspaceProjection,
-    sessionId: string,
   ) => {
     cachedWorkspacePresentationKeyRef.current = currentWorkspaceKey();
     setCachedWorkspacePresentation(cached);
-    setState({
-      ...cached.state,
-      sessionId,
-      focusId: undefined,
-      busy: false,
-      compacting: false,
-      compactionAttempt: undefined,
-      activeRun: undefined,
-    });
     setConversations(cached.conversations);
     setRoles(cached.roles);
     setConversationRole(cached.conversationRole);
@@ -1551,7 +1576,7 @@ export function App() {
           dispatch({ type: "reset" });
           clearSessionProjection();
           updateWorkspaceSyncing(Boolean(cached));
-          if (cached) showCachedWorkspacePresentation(cached, sessionId);
+          if (cached) showCachedWorkspacePresentation(cached);
           updatePendingFocus({
             commandId,
             operation: "initialize",
@@ -1657,13 +1682,8 @@ export function App() {
           workspaceKey: pending.workspaceKey,
           projectId: event.projectId,
           conversationId: event.conversationId,
-          state: {
-            sessionId: event.sessionId,
-            projectId: event.projectId,
-            conversationId: event.conversationId,
+          presentation: {
             cwd: event.cwd,
-            busy: false,
-            compacting: false,
             selectedServiceTier: null,
             thinkingLevel: previewThinkingLevel,
             toolMode: event.toolMode,
@@ -2885,7 +2905,7 @@ export function App() {
     setAuth({});
     autoOpened.current = false;
     updateWorkspaceSyncing(Boolean(cached));
-    if (cached) showCachedWorkspacePresentation(cached, sessionId);
+    if (cached) showCachedWorkspacePresentation(cached);
     dispatch({ type: "reset" });
     updatePendingFocus({
       commandId,
@@ -3412,9 +3432,18 @@ export function App() {
       setError(protocolReady ? "本地服务未连接" : "本地服务尚未完成协议握手");
       return false;
     }
+    const targetWorkspaceKey = workspaceKey(cwd);
+    const pending = pendingFocusRef.current;
     if (
-      workspaceKey(cwd) === workspaceKey(activeCwdRef.current)
-      && state
+      targetWorkspaceKey === workspaceKey(activeCwdRef.current)
+      && (
+        state !== undefined
+        || workspaceSyncingRef.current
+        || (
+          pending?.operation === "initialize"
+          && pending.workspaceKey === targetWorkspaceKey
+        )
+      )
     ) {
       setSetupOpen(false);
       updateDirectoryBrowser(undefined);
@@ -3847,31 +3876,41 @@ export function App() {
   const currentFocus = focusRef.current?.sessionId === sessionIdRef.current
     ? focusRef.current
     : undefined;
-  // focus_attached owns only the target identity. A runtime projection is
-  // usable only after its complete state identity exactly matches that focus.
-  const runtimeState = currentFocus && (!state || !stateMatchesFocus(state, currentFocus))
-    ? undefined
-    : state;
-  const visibleState = transitionPresentation
-    ? {
-        ...transitionPresentation.state,
-        sessionId: sessionIdRef.current,
-        focusId: undefined,
-        busy: false,
-        compacting: false,
-        compactionAttempt: undefined,
-        activeRun: undefined,
-      }
-    : runtimeState;
-  const attachedRuntimeUnknown = Boolean(currentFocus && !visibleState);
+  const focusTransitionPending = pendingFocus?.operation === "focus_conversation";
+  // A cache is a read-only presentation, never a substitute for the live
+  // state whose full identity matches the current focus.
+  const runtimeState = state && !focusTransitionPending && (
+    currentFocus
+      ? stateMatchesFocus(state, currentFocus)
+      : state.sessionId === sessionIdRef.current && state.focusId === undefined
+  )
+    ? state
+    : undefined;
+  // On a cache miss retain only the prior shell configuration while the
+  // target is opening. Its transcript is reset below and it never enables a
+  // control or contributes a runtime activity value.
+  const sourcePresentation = focusTransitionPending
+    && state
+    && state.sessionId === sessionIdRef.current
+    ? presentationFromState(state)
+    : undefined;
+  const visiblePresentation = transitionPresentation?.presentation
+    ?? (runtimeState ? presentationFromState(runtimeState) : sourcePresentation);
+  const visibleProjectId = runtimeState?.projectId
+    ?? transitionPresentation?.projectId
+    ?? currentFocus?.projectId;
+  const visiblePresentationConversationId = runtimeState?.conversationId
+    ?? transitionPresentation?.conversationId
+    ?? currentFocus?.conversationId;
+  const attachedRuntimeUnknown = Boolean(currentFocus && !runtimeState);
   const showRoleSelection = selectingRole || (
-    !currentFocus && !visibleState?.conversationId
+    !currentFocus && !visiblePresentationConversationId
   );
   const visiblePendingConversationDeletion = pendingConversationDeletion
-    && visibleState
-    && pendingConversationDeletion.sessionId === visibleState.sessionId
+    && runtimeState
+    && pendingConversationDeletion.sessionId === runtimeState.sessionId
     && pendingConversationDeletion.workspaceKey === workspaceKey(activeCwd)
-    && pendingConversationDeletion.projectId === visibleState.projectId
+    && pendingConversationDeletion.projectId === runtimeState.projectId
     ? pendingConversationDeletion
     : undefined;
   const sidebarConversations = useMemo(
@@ -3896,19 +3935,17 @@ export function App() {
     ? pendingFocus.targetConversationId
     : undefined;
   const visibleConversationId = pendingTargetConversationId
-    ?? (showRoleSelection
-      ? undefined
-      : visibleState?.conversationId ?? currentFocus?.conversationId);
-  const visibleBusyConversationId = visibleState
-    && (visibleState.busy || outstandingRunId)
-    ? visibleState.conversationId
+    ?? (showRoleSelection ? undefined : visiblePresentationConversationId);
+  const visibleBusyConversationId = runtimeState
+    && (runtimeState.busy || outstandingRunId)
+    ? runtimeState.conversationId
     : undefined;
   const titleLookupSource = visibleConversationReady
-    && visibleState?.projectId
+    && visibleProjectId
     && visibleConversationId
     && sidebarConversations.some(({ id }) => id === visibleConversationId)
     ? {
-        projectId: visibleState.projectId,
+        projectId: visibleProjectId,
         conversations: sidebarConversations,
       }
     : undefined;
@@ -3925,7 +3962,7 @@ export function App() {
       sidebarConversations,
       visibleConversationId,
       visibleConversationReady,
-      visibleState?.projectId,
+      visibleProjectId,
     ],
   );
   const visibleConversationTitleLookup = useMemo(
@@ -4000,7 +4037,7 @@ export function App() {
     : undefined;
   const showConversationOpening = pendingFocus?.operation === "focus_conversation"
     && !activeConversationPresentation;
-  const phoneSceneFocusKey = !activeCwd || (!visibleState && !currentFocus)
+  const phoneSceneFocusKey = !activeCwd || (!visiblePresentation && !currentFocus)
     ? mobileScene
     : mobileScene === "chat" && showRoleSelection
       ? "role-selection"
@@ -4009,7 +4046,7 @@ export function App() {
 
   if (
     !activeCwd
-    || (!visibleState && (!currentFocus || !conversationSyncing))
+    || (!visiblePresentation && (!currentFocus || !conversationSyncing))
   ) return <>
     <div className="workbench" ref={phoneWorkbenchRef}>
       {workspaceRail}
@@ -4046,29 +4083,21 @@ export function App() {
     {feedback}
   </>;
 
-  const visibleServiceTiers = visibleState?.providers
+  const visibleServiceTiers = visiblePresentation?.providers
     .flatMap((provider) => provider.models)
     .find((model) => (
-      model.provider === visibleState.selectedModel?.provider
-      && model.id === visibleState.selectedModel.id
+      model.provider === visiblePresentation.selectedModel?.provider
+      && model.id === visiblePresentation.selectedModel.id
     ))?.serviceTiers ?? EMPTY_SERVICE_TIERS;
-  const focusedConversationId = currentFocus && (
-    !visibleState
-    || (
-      currentFocus.sessionId === visibleState.sessionId
-      && (
-        visibleState.projectId === undefined
-        || currentFocus.projectId === visibleState.projectId
-      )
-    )
-  )
+  const focusedConversationId = currentFocus && runtimeState
     ? currentFocus.conversationId
     : undefined;
   const sidebarScopeKey = `${workspaceKey(activeCwd)}:${
-    visibleState?.projectId ?? currentFocus?.projectId ?? ""
+    visibleProjectId ?? ""
   }`;
-  const conversationCompacting =
-    visibleState?.compacting === true || Boolean(pendingContextCompaction);
+  const conversationCompacting = runtimeState !== undefined && (
+    runtimeState.compacting === true || Boolean(pendingContextCompaction)
+  );
   const showAttachedConversationProjection =
     conversationSyncing && pendingFocus === undefined;
   let visibleChat = chat;
@@ -4078,19 +4107,20 @@ export function App() {
   } else if (switchingFocus) {
     visibleChat = initialChatState;
   }
-  const visibleBusy = transitioning || switchingFocus || !visibleState
+  const visibleBusy = transitioning || switchingFocus || !runtimeState
     ? false
-    : visibleState.busy || Boolean(outstandingRunId);
-  const visibleActiveRun = transitioning || switchingFocus || !visibleState
+    : runtimeState.busy || Boolean(outstandingRunId);
+  const visibleActiveRun = transitioning || switchingFocus || !runtimeState
     ? undefined
-    : visibleState.activeRun;
+    : runtimeState.activeRun;
   const focusAwaitingSnapshot = Boolean(currentFocus) && !conversationReady;
-  const settingsEnabled = !transitioning && !focusAwaitingSnapshot && !attachedRuntimeUnknown;
+  const settingsEnabled = Boolean(runtimeState)
+    && !transitioning
+    && !focusAwaitingSnapshot
+    && !attachedRuntimeUnknown;
   const visibleCompacting = transitioning ? false : conversationCompacting;
-  const visibleCompactionAttempt = visibleState?.compacting === true
-    && currentFocus
-    && stateMatchesFocus(visibleState, currentFocus)
-    ? visibleState.compactionAttempt
+  const visibleCompactionAttempt = runtimeState?.compacting === true
+    ? runtimeState.compactionAttempt
     : undefined;
   const visibleConversationRole = transitioning
     ? transitionPresentation?.conversationRole
@@ -4195,7 +4225,7 @@ export function App() {
                 <p>正在完成安全删除；若操作失败，会恢复仍可用的会话。</p>
               </div>
             </main>
-          : !visibleState
+          : !visiblePresentation
           ? <main className="app-shell workspace-placeholder">
               {phoneViewport && <header className="topbar">
                 <div className="mobile-chat-header">
@@ -4243,26 +4273,31 @@ export function App() {
                 setRoleManagerOpen(true);
               }}
               onSettings={() => {
-                if (!focusedConversationNeedsSnapshot()) setDrawer(true);
+                if (settingsEnabled) setDrawer(true);
               }}
             />
           : <Chat
               chat={visibleChat}
-              observationSessionId={visibleState.sessionId}
+              observationSessionId={
+                runtimeState?.sessionId
+                ?? currentFocus?.sessionId
+                ?? sessionIdRef.current
+              }
               busy={visibleBusy}
               activeRun={visibleActiveRun}
               loopList={loopList}
-              sessionTokenUsage={visibleState.sessionTokenUsage}
-              contextTokenCount={visibleState.contextUsage?.tokens}
-              contextWindow={visibleState.contextUsage?.contextWindow}
-              contextPercent={visibleState.contextUsage?.percent}
-              contextSource={visibleState.contextUsage?.source}
-              model={visibleState.selectedModel}
+              sessionTokenUsage={visiblePresentation.sessionTokenUsage}
+              contextTokenCount={visiblePresentation.contextUsage?.tokens}
+              contextWindow={visiblePresentation.contextUsage?.contextWindow}
+              contextPercent={visiblePresentation.contextUsage?.percent}
+              contextSource={visiblePresentation.contextUsage?.source}
+              model={visiblePresentation.selectedModel}
               role={visibleConversationRole}
               roles={roles}
               roleSwitchDisabled={
-                transitioning
-                || visibleState.busy
+                !runtimeState
+                || transitioning
+                || runtimeState.busy
                 || Boolean(outstandingRunId)
                 || Boolean(pendingPrompt)
                 || pendingAdmissions.length > 0
@@ -4271,19 +4306,19 @@ export function App() {
                 || conversationCompacting
               }
               roleSwitching={Boolean(pendingConversationRoleSwitch)}
-              thinkingLevel={visibleState.thinkingLevel}
-              availableThinkingLevels={visibleState.availableThinkingLevels}
+              thinkingLevel={visiblePresentation.thinkingLevel}
+              availableThinkingLevels={visiblePresentation.availableThinkingLevels}
               serviceTiers={visibleServiceTiers}
-              selectedServiceTier={visibleState.selectedServiceTier ?? null}
+              selectedServiceTier={visiblePresentation.selectedServiceTier ?? null}
               serviceTierBusy={Boolean(pendingServiceTier)}
               compactionThresholdPercent={
-                visibleState.compactionThresholdPercent
+                visiblePresentation.compactionThresholdPercent
                 ?? DEFAULT_COMPACTION_THRESHOLD_PERCENT
               }
               compactionThresholdBusy={Boolean(pendingCompactionThreshold)}
               compacting={visibleCompacting}
               compactionAttempt={visibleCompactionAttempt}
-              cwd={visibleState.cwd}
+              cwd={visiblePresentation.cwd}
               conversationContext={visibleConversationContext}
               conversationTitleLookup={visibleConversationTitleLookup}
               mobile={phoneViewport ? {
@@ -4316,8 +4351,8 @@ export function App() {
             />}
       </div>
     </div>
-    {visibleState && <ConnectionDrawer
-      state={visibleState}
+    {runtimeState && <ConnectionDrawer
+      state={runtimeState}
       open={drawer && !transitioning}
       covered={blockingModalVisible}
       online={online && settingsEnabled}
@@ -4362,7 +4397,7 @@ export function App() {
     <RoleManagerDialog
       open={roleManagerOpen && !blockingModalVisible && !transitioning}
       roles={roles}
-      providers={visibleState?.providers ?? []}
+      providers={runtimeState?.providers ?? []}
       initialRoleId={roleManagerInitialRoleId}
       pending={pendingRoleOperation}
       result={roleOperationResult}
