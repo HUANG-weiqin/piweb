@@ -653,6 +653,16 @@ describe("parseClientCommand", () => {
         commandId: "0c2678cb-eed2-4090-b95c-b5a75bf57ef4",
       },
     })).toThrow("matching empty initialize");
+    expect(() => parseServerEvent({
+      type: "focus_attached",
+      operation: "initialize",
+      commandId,
+      sessionId,
+      projectId,
+      conversationId,
+      focusId,
+      transitionDiagnostics: emptyDiagnostics,
+    })).toThrow("matching empty initialize");
     for (const operation of ["focus_conversation", "create_conversation"] as const) {
       expect(() => parseServerEvent({
         type: "focus_attached",

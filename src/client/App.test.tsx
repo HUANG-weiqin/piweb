@@ -3539,6 +3539,7 @@ describe("App", () => {
           host: expect.objectContaining({
             snapshotProjectionMs: null,
           }),
+          interactiveMs: expect.any(Number),
           termination: { kind: "success" },
         }),
       }),

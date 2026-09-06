@@ -17,6 +17,7 @@ import { describe, expect, it, vi } from "vitest";
 import { InMemoryCredentialStore, type CredentialStore } from "@earendil-works/pi-ai";
 import {
   MAX_PROJECT_CONVERSATIONS,
+  MAX_TRANSITION_DIAGNOSTIC_PHASE_MS,
   parseServerEvent,
   type ConversationSummary,
   type ServerEvent,
@@ -553,6 +554,11 @@ async function replaceCoordinatedInitialization(
     type: "focus_attached",
     commandId: staleCommandId,
   }));
+  expect(harness.events).not.toContainEqual(expect.objectContaining({
+    transitionDiagnostics: expect.objectContaining({
+      commandId: staleCommandId,
+    }),
+  }));
   expect(latestState(harness.events).conversationId).toBe(
     currentConversationId,
   );
@@ -699,6 +705,80 @@ describe("PiConnection coordinated controls", () => {
     }
   });
 
+  it.each([
+    [
+      "throwing",
+      () => () => { throw new Error("clock unavailable"); },
+      0,
+    ],
+    [
+      "non-finite",
+      () => {
+        let call = 0;
+        return () => call++ % 2 === 0
+          ? Number.NaN
+          : Number.POSITIVE_INFINITY;
+      },
+      0,
+    ],
+    [
+      "backward",
+      () => {
+        let call = 0;
+        return () => call++ % 2 === 0 ? 10 : 5;
+      },
+      0,
+    ],
+    [
+      "over-cap",
+      () => {
+        let call = 0;
+        return () => call++ % 2 === 0
+          ? 0
+          : MAX_TRANSITION_DIAGNOSTIC_PHASE_MS + 1;
+      },
+      MAX_TRANSITION_DIAGNOSTIC_PHASE_MS,
+    ],
+  ] as const)(
+    "keeps transitions successful and diagnostics bounded for a %s clock",
+    async (_label, createClock, expectedDuration) => {
+      const harness = await coordinatedConnectionHarness(
+        new FakeRuntime(),
+        createClock(),
+      );
+      try {
+        await expect(harness.connection.handle({
+          type: "initialize",
+          commandId: COMMAND_A,
+          sessionId: SESSION_A,
+          cwd: harness.cwd,
+          conversation: { kind: "recent" },
+        })).resolves.toBeUndefined();
+
+        const attach = harness.events.find((event) =>
+          event.type === "focus_attached" && event.commandId === COMMAND_A
+        );
+        if (
+          attach?.type !== "focus_attached"
+          || attach.transitionDiagnostics === undefined
+        ) throw new Error("empty focus was not attached with diagnostics");
+        expect(parseServerEvent(attach)).toEqual(attach);
+        expect(attach.transitionDiagnostics).toEqual({
+          version: 1,
+          commandId: COMMAND_A,
+          operation: "initialize",
+          validationMs: expectedDuration,
+          contextOrCatalogMs: expectedDuration,
+          presentationOrTargetReadMs: expectedDuration,
+          actorActivationOrLeaseMs: 0,
+          snapshotProjectionMs: null,
+        });
+      } finally {
+        await harness.cleanup();
+      }
+    },
+  );
+
   it.each(["initialize", "focus_conversation"] as const)(
     "keeps %s authority ahead of a failing diagnostic snapshot projection",
     async (operation) => {
@@ -786,8 +866,9 @@ describe("PiConnection coordinated controls", () => {
         expect(stateIndex).toBeGreaterThan(attachIndex);
         expect(errorIndex).toBeGreaterThan(stateIndex);
         expect(transitionEvents).not.toContainEqual(expect.objectContaining({
-          type: "conversation_snapshot",
-          transitionDiagnostics: expect.anything(),
+          transitionDiagnostics: expect.objectContaining({
+            commandId: COMMAND_B,
+          }),
         }));
       } finally {
         actorHandle?.release();
