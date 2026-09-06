@@ -5338,27 +5338,146 @@ describe("App", () => {
     expect(screen.getByText("上下文已压缩")).toBeInTheDocument();
   });
 
-  it("projects automatic compaction progress from focused state", () => {
+  it("projects only the exact focused compaction attempt without changing the primary model", () => {
     render(<App />);
     const sessionId = startFromSetup();
+    const firstAttempt = {
+      id: "549d0646-12f1-44fa-a620-85b860808ae4",
+      generator: "default" as const,
+      policy: "explicit" as const,
+      requestTarget: { provider: "summary-provider", id: "summary-model" },
+    };
+    const primaryModel = { provider: "primary-provider", id: "primary-model" };
 
-    act(() => socketMock.emit?.({
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: true,
+          compacting: true,
+          compactionAttempt: firstAttempt,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          selectedModel: primaryModel,
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversations: [
+          conversationSummary(CONVERSATION_ID, "A"),
+          conversationSummary(CONVERSATION_B, "B"),
+        ],
+        truncated: false,
+      });
+    });
+
+    expect(screen.getByRole("status", { name: "正在压缩上下文" }))
+      .toHaveTextContent(
+        "Pi 默认摘要请求管线目标：summary-provider / summary-model · 专用配置",
+      );
+    expect(screen.getByTitle("模型连接")).toHaveTextContent("primary-model");
+
+    socketMock.autoFocus = false;
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    expect(screen.queryByText(/summary-provider \/ summary-model/))
+      .not.toBeInTheDocument();
+
+    const focus = latestCommand("focus_conversation");
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "focus_attached",
+        operation: "focus_conversation",
+        commandId: focus.commandId,
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_B,
+        focusId: FOCUS_A_SECOND,
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_B,
+        focusId: FOCUS_A_SECOND,
+        messages: [],
+        window: completeConversationWindow,
+      });
+    });
+    expect(screen.queryByText(/summary-provider \/ summary-model/))
+      .not.toBeInTheDocument();
+
+    act(() => socketMock.rawEmit?.({
       type: "state",
       state: {
         sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_B,
+        focusId: FOCUS_A_SECOND,
         cwd: "E:\\work",
-        busy: true,
-        compacting: true,
+        busy: false,
+        compacting: false,
         thinkingLevel: "off",
         toolMode: "read_only",
         availableThinkingLevels: ["off"],
-        selectedModel: { provider: "provider", id: "model" },
+        selectedModel: primaryModel,
         providers: [],
       },
     }));
+    expect(screen.getByTitle("模型连接")).toHaveTextContent("primary-model");
 
+    const secondAttempt = {
+      ...firstAttempt,
+      id: "4765925b-b4d3-4233-915d-17dd27fd2898",
+      requestTarget: { provider: "second-provider", id: "second-summary" },
+    };
+    act(() => socketMock.rawEmit?.({
+      type: "state",
+      state: {
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_B,
+        focusId: FOCUS_A_SECOND,
+        cwd: "E:\\work",
+        busy: true,
+        compacting: true,
+        compactionAttempt: secondAttempt,
+        thinkingLevel: "off",
+        toolMode: "read_only",
+        availableThinkingLevels: ["off"],
+        selectedModel: primaryModel,
+        providers: [],
+      },
+    }));
     expect(screen.getByRole("status", { name: "正在压缩上下文" }))
-      .toBeInTheDocument();
+      .toHaveTextContent("second-provider / second-summary");
+    expect(screen.getByTitle("模型连接")).toHaveTextContent("primary-model");
+
+    act(() => socketMock.rawEmit?.({
+      type: "state",
+      state: {
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_B,
+        focusId: FOCUS_A_SECOND,
+        cwd: "E:\\work",
+        busy: false,
+        compacting: false,
+        thinkingLevel: "off",
+        toolMode: "read_only",
+        availableThinkingLevels: ["off"],
+        selectedModel: primaryModel,
+        providers: [],
+      },
+    }));
+    expect(screen.queryByRole("status", { name: "正在压缩上下文" }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByText(/second-provider \/ second-summary/))
+      .not.toBeInTheDocument();
   });
 
   it("switches an idle focused conversation role with exact command correlation", () => {

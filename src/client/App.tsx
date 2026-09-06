@@ -799,6 +799,7 @@ export function App() {
       focusId: undefined,
       busy: false,
       compacting: false,
+      compactionAttempt: undefined,
       activeRun: undefined,
     });
     setConversations(cached.conversations);
@@ -1228,6 +1229,7 @@ export function App() {
           activeRun: undefined,
           busy: false,
           compacting: false,
+          compactionAttempt: undefined,
           sessionTokenUsage: undefined,
           contextUsage: undefined,
         }
@@ -1866,6 +1868,7 @@ export function App() {
                 activeRun: undefined,
                 busy: false,
                 compacting: false,
+                compactionAttempt: undefined,
                 sessionTokenUsage: undefined,
                 contextUsage: undefined,
               }
@@ -3805,6 +3808,7 @@ export function App() {
         focusId: undefined,
         busy: false,
         compacting: false,
+        compactionAttempt: undefined,
         activeRun: undefined,
       }
     : state;
@@ -4018,6 +4022,11 @@ export function App() {
   const focusAwaitingSnapshot = Boolean(focusRef.current) && !conversationReady;
   const settingsEnabled = !transitioning && !focusAwaitingSnapshot;
   const visibleCompacting = transitioning ? false : conversationCompacting;
+  const visibleCompactionAttempt = visibleState.compacting === true
+    && currentFocus
+    && stateMatchesFocus(visibleState, currentFocus)
+    ? visibleState.compactionAttempt
+    : undefined;
   const visibleConversationRole = transitioning
     ? transitionPresentation?.conversationRole
       ?? (showAttachedConversationProjection ? conversationRole : undefined)
@@ -4183,6 +4192,7 @@ export function App() {
               }
               compactionThresholdBusy={Boolean(pendingCompactionThreshold)}
               compacting={visibleCompacting}
+              compactionAttempt={visibleCompactionAttempt}
               cwd={visibleState.cwd}
               conversationContext={visibleConversationContext}
               conversationTitleLookup={visibleConversationTitleLookup}
