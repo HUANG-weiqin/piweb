@@ -77,6 +77,17 @@ function sameIdentity(
   return left.provider === right.provider && left.id === right.id;
 }
 
+function notifyCompactionAttempt(
+  observer: DefaultCompactionAttemptObserver | undefined,
+  event: Parameters<DefaultCompactionAttemptObserver>[0],
+): void {
+  try {
+    observer?.(event);
+  } catch {
+    // Observation must never change the outcome of Pi's compaction request.
+  }
+}
+
 function withDefaultCompactionProvenance(
   result: unknown,
   attempt: PublicCompactionAttempt,
@@ -149,8 +160,6 @@ export function installDefaultCompactionRequestOverride(
 
     active = true;
     let attempt: ReturnType<typeof createDefaultCompactionAttempt> | undefined;
-    let capturedStream: typeof session.agent.streamFunction | undefined;
-    let compactionStream: typeof session.agent.streamFunction | undefined;
     try {
       const requestArgs = [...args];
       if (explicitCompactionModel) {
@@ -174,9 +183,8 @@ export function installDefaultCompactionRequestOverride(
         "Pi default compaction request model",
       );
 
-      const originalStream = session.agent.streamFunction;
-      capturedStream = originalStream;
-      compactionStream = (
+      const capturedStream = session.agent.streamFunction;
+      const compactionStream: typeof session.agent.streamFunction = (
         model,
         context,
         options,
@@ -192,7 +200,7 @@ export function installDefaultCompactionRequestOverride(
             explicitCompactionModel ? "explicit" : "follow_primary",
             actualTarget,
           );
-          observer?.({ type: "started", attempt });
+          notifyCompactionAttempt(observer, { type: "started", attempt });
         }
         const reasoning = clampThinkingLevel(model, COMPACTION_THINKING_TARGET);
         const requestOptions = {
@@ -213,21 +221,28 @@ export function installDefaultCompactionRequestOverride(
             { enumerable: true, value: true },
           );
         }
-        return originalStream(model, context, requestOptions);
+        return capturedStream(model, context, requestOptions);
       };
 
       session.agent.streamFunction = compactionStream;
-      const result = Reflect.apply(original, privateSession, requestArgs);
+      let result: Promise<unknown>;
+      try {
+        // Pi captures streamFunction by value before this async method returns.
+        result = Reflect.apply(original, privateSession, requestArgs);
+      } finally {
+        if (session.agent.streamFunction === compactionStream) {
+          session.agent.streamFunction = capturedStream;
+        }
+      }
       const settled = await result;
       if (!attempt) {
         throw new Error("Unsupported Pi default compaction result without a request stream");
       }
       return withDefaultCompactionProvenance(settled, attempt);
     } finally {
-      if (compactionStream && capturedStream && session.agent.streamFunction === compactionStream) {
-        session.agent.streamFunction = capturedStream;
+      if (attempt) {
+        notifyCompactionAttempt(observer, { type: "ended", id: attempt.id });
       }
-      if (attempt) observer?.({ type: "ended", id: attempt.id });
       active = false;
     }
   };

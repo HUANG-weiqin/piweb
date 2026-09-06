@@ -4461,6 +4461,100 @@ describe("PiConnection coordinated project view", () => {
     }
   });
 
+  it("projects only the focused actor attempt and rebuilds it on refocus and reconnect", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      const initial = await initializeNewConversation(harness);
+      if (!initial.conversationId) throw new Error("Initial conversation was not focused");
+      const firstConversationId = initial.conversationId;
+      const firstSession = harness.runtime.created.at(-1);
+      const firstObserver = harness.runtime.lastCreateOptions?.compactionAttemptObserver;
+      if (!firstSession || !firstObserver) throw new Error("Missing first runtime observer");
+      const firstAttempt = {
+        id: "8d7fae9f-71db-4c54-9ee1-d7185b2fdb9c",
+        generator: "default" as const,
+        policy: "explicit" as const,
+        requestTarget: { provider: "summary-provider", id: "summary-model" },
+      };
+
+      firstSession.eventListener?.(nativeEvent({
+        type: "compaction_start",
+        reason: "manual",
+      }));
+      firstObserver({ type: "started", attempt: firstAttempt });
+      expect(latestState(harness.events)).toMatchObject({
+        conversationId: firstConversationId,
+        compacting: true,
+        compactionAttempt: firstAttempt,
+      });
+
+      const secondConversationId = await createColdConversation(harness, "second");
+      await harness.connection.handle({
+        type: "focus_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId: secondConversationId,
+      });
+      expect(latestState(harness.events)).toMatchObject({
+        conversationId: secondConversationId,
+        compacting: false,
+      });
+      expect(latestState(harness.events)).not.toHaveProperty("compactionAttempt");
+
+      const stateCount = harness.events.filter((event) => event.type === "state").length;
+      const replacementAttempt = {
+        ...firstAttempt,
+        id: "68f4fa0f-4f72-4b66-ad49-55312d9e6d2f",
+        requestTarget: { provider: "test", id: "model" },
+      };
+      firstSession.eventListener?.(nativeEvent({
+        type: "compaction_end",
+        reason: "manual",
+        aborted: false,
+        willRetry: false,
+      }));
+      firstSession.eventListener?.(nativeEvent({
+        type: "compaction_start",
+        reason: "manual",
+      }));
+      firstObserver({ type: "started", attempt: replacementAttempt });
+      expect(harness.events.filter((event) => event.type === "state")).toHaveLength(stateCount);
+      expect(latestState(harness.events)).toMatchObject({
+        conversationId: secondConversationId,
+        compacting: false,
+      });
+      expect(latestState(harness.events)).not.toHaveProperty("compactionAttempt");
+
+      await harness.connection.handle({
+        type: "focus_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId: firstConversationId,
+      });
+      expect(latestState(harness.events)).toMatchObject({
+        conversationId: firstConversationId,
+        compacting: true,
+        compactionAttempt: replacementAttempt,
+      });
+
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_B,
+        cwd: harness.cwd,
+        conversation: { kind: "open", conversationId: firstConversationId },
+      });
+      expect(latestState(harness.events)).toMatchObject({
+        sessionId: SESSION_B,
+        conversationId: firstConversationId,
+        compacting: true,
+        compactionAttempt: replacementAttempt,
+      });
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
   it("refreshes only the exact settled browser view", async () => {
     const harness = await coordinatedConnectionHarness();
     const started = deferred();

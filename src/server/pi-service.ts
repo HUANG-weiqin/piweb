@@ -1342,6 +1342,7 @@ export class PiConnection {
   private coordinatedState(view: CoordinatedProjectView): PublicState {
     const actor = view.actor;
     const activity = actor?.getActivity() ?? { kind: "idle" as const };
+    const compactionAttempt = actor?.getCompactionAttempt();
     const registry = actor?.modelRegistry
       ?? view.coordinator.modelRegistryForProject(view.handle);
     const available = registry.getAvailable();
@@ -1367,6 +1368,9 @@ export class PiConnection {
                 }
               : undefined,
             compacting: actor.isCompacting(),
+            ...(compactionAttempt === undefined
+              ? {}
+              : { compactionAttempt }),
           }),
       ...(activity.kind === "idle"
         ? {}

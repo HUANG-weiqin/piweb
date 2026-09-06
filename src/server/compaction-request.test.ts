@@ -204,7 +204,7 @@ describe("installDefaultCompactionRequestOverride", () => {
     override.dispose();
   });
 
-  it("keeps the compaction stream installed until split summaries settle", async () => {
+  it("restores the session stream after Pi captures it while split summaries use the capture", async () => {
     const result = deferred<ReturnType<typeof defaultResult>>();
     let streamFromDefault: AgentSession["agent"]["streamFunction"] | undefined;
     const fixture = fakeSession(async (current) => {
@@ -217,15 +217,14 @@ describe("installDefaultCompactionRequestOverride", () => {
     }, { provider: "compact-provider", id: "compact-model" });
 
     const operation = fixture.invoke(...defaultArgs());
-    expect(fixture.session.agent.streamFunction).not.toBe(fixture.originalStream);
+    expect(fixture.session.agent.streamFunction).toBe(fixture.originalStream);
     streamFromDefault?.(compactionModel as never, {} as never, { reasoning: "high" });
     streamFromDefault?.(compactionModel as never, {} as never, { reasoning: "max" });
     expect(fixture.originalStream).toHaveBeenCalledTimes(2);
-    expect(fixture.session.agent.streamFunction).not.toBe(fixture.originalStream);
+    expect(fixture.session.agent.streamFunction).toBe(fixture.originalStream);
 
     result.resolve(defaultResult(defaultArgs()));
     await expect(operation).resolves.toMatchObject({ summary: "summary" });
-    expect(fixture.session.agent.streamFunction).toBe(fixture.originalStream);
     override.dispose();
   });
 
@@ -422,6 +421,33 @@ describe("installDefaultCompactionRequestOverride", () => {
         requestTarget: { provider: primary.provider, id: primary.id },
       }),
     });
+    override.dispose();
+  });
+
+  it("does not let observer failures alter a successful provider result", async () => {
+    const observer = vi.fn(() => {
+      throw new Error("observer failed");
+    });
+    const fixture = fakeSession(async (current, args) => {
+      current.agent.streamFunction(args[1] as never, {} as never, {});
+      return defaultResult(args);
+    });
+    const override = installDefaultCompactionRequestOverride(
+      fixture.session,
+      { getModel: () => model() },
+      undefined,
+      "auto",
+      observer,
+    );
+
+    await expect(fixture.invoke(...defaultArgs())).resolves.toMatchObject({
+      summary: "summary",
+      details: expect.objectContaining({
+        [COMPACTION_PROVENANCE_NAMESPACE]: expect.anything(),
+      }),
+    });
+    expect(fixture.originalStream).toHaveBeenCalledOnce();
+    expect(observer).toHaveBeenCalledTimes(2);
     override.dispose();
   });
 

@@ -2528,6 +2528,96 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
+  it("projects a default request attempt only after its exact callback and clears it by ID", async () => {
+    const fixture = await openActor();
+    const emit = fixture.runtime.session.eventListener;
+    const observer = fixture.runtime.createOptions?.compactionAttemptObserver;
+    const attempt = {
+      id: "2b9ca838-1eea-46da-9aed-6eaf11216b6e",
+      generator: "default" as const,
+      policy: "explicit" as const,
+      requestTarget: { provider: "summary-provider", id: "summary-model" },
+    };
+
+    expect(() => observer?.({ type: "started", attempt })).not.toThrow();
+    expect(fixture.actor.getState()).toEqual(expect.objectContaining({
+      compacting: false,
+    }));
+    expect(fixture.actor.getState()).not.toHaveProperty("compactionAttempt");
+
+    emit?.(nativeEvent({ type: "compaction_start", reason: "manual" }));
+    expect(fixture.actor.getState()).toEqual(expect.objectContaining({
+      compacting: true,
+    }));
+    expect(fixture.actor.getState()).not.toHaveProperty("compactionAttempt");
+
+    observer?.({ type: "started", attempt });
+    const visible = fixture.actor.getCompactionAttempt();
+    expect(visible).toEqual(attempt);
+    visible!.requestTarget.id = "mutated-by-observer";
+    expect(fixture.actor.getState()).toEqual(expect.objectContaining({
+      compacting: true,
+      compactionAttempt: attempt,
+    }));
+
+    expect(() => observer?.({
+      type: "started",
+      attempt: { ...attempt, id: "4a08c995-86d0-448b-b327-6a412e943e4a" },
+    })).not.toThrow();
+    expect(fixture.actor.getCompactionAttempt()).toEqual(attempt);
+    observer?.({ type: "ended", id: "5cab7e47-2a4b-4e93-8507-5042747e93a9" });
+    expect(fixture.actor.getCompactionAttempt()).toEqual(attempt);
+    observer?.({ type: "ended", id: attempt.id });
+    expect(fixture.actor.getState()).toEqual(expect.objectContaining({
+      compacting: true,
+    }));
+    expect(fixture.actor.getState()).not.toHaveProperty("compactionAttempt");
+
+    observer?.({ type: "started", attempt });
+    expect(fixture.actor.getCompactionAttempt()).toEqual(attempt);
+    emit?.(nativeEvent({
+      type: "compaction_end",
+      reason: "manual",
+      aborted: false,
+      willRetry: false,
+    }));
+    expect(fixture.actor.getState()).toEqual(expect.objectContaining({
+      compacting: false,
+    }));
+    expect(fixture.actor.getState()).not.toHaveProperty("compactionAttempt");
+    await fixture.actor.dispose();
+  });
+
+  it("ignores old runtime compaction callbacks after replacement", async () => {
+    const fixture = await openActor();
+    const oldObserver = fixture.runtime.createOptions?.compactionAttemptObserver;
+    const nextRole = {
+      ...fixture.actor.profile.role,
+      revision: fixture.actor.profile.role.revision + 1,
+      model: { provider: "test", id: "replacement-model" },
+    };
+    await fixture.actor.switchRole(nextRole, {});
+    const currentObserver = fixture.runtime.createOptions?.compactionAttemptObserver;
+    const currentAttempt = {
+      id: "419f612d-8e0d-4d56-a624-0e1f8c0d38de",
+      generator: "default" as const,
+      policy: "follow_primary" as const,
+      requestTarget: { provider: "test", id: "replacement-model" },
+    };
+
+    expect(currentObserver).not.toBe(oldObserver);
+    fixture.runtime.session.eventListener?.(
+      nativeEvent({ type: "compaction_start", reason: "manual" }),
+    );
+    expect(() => oldObserver?.({ type: "started", attempt: currentAttempt })).not.toThrow();
+    expect(fixture.actor.getCompactionAttempt()).toBeUndefined();
+
+    currentObserver?.({ type: "started", attempt: currentAttempt });
+    oldObserver?.({ type: "ended", id: currentAttempt.id });
+    expect(fixture.actor.getCompactionAttempt()).toEqual(currentAttempt);
+    await fixture.actor.dispose();
+  });
+
   it("does not inject a second resume when Pi continued after native compaction", async () => {
     const fixture = await openActor();
     const emit = () => fixture.runtime.session.eventListener;
