@@ -1,6 +1,10 @@
 import { useLayoutEffect, useRef, type RefObject } from "react";
 
-const PHONE_SCENE_HEADER = ".mobile-page-header, .mobile-chat-header";
+const PHONE_SCENE_HEADER = [
+  ".mobile-page-header",
+  ".mobile-chat-header",
+  ".workspace-placeholder-content[role='status']",
+].join(", ");
 
 function visibleSceneHeader(root: HTMLElement): HTMLElement | undefined {
   return [...root.querySelectorAll<HTMLElement>(PHONE_SCENE_HEADER)].find(

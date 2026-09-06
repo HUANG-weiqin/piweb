@@ -1,170 +1,282 @@
-type ClientTransitionKind = "workspace" | "conversation";
+export type ClientTransitionKind = "workspace" | "conversation";
+export type TransitionOrigin = "user" | "restore" | "reconnect";
+export type TransitionCacheAtIntent = "hit" | "miss" | "n/a";
+export type TransitionPresentationSource = "placeholder" | "cache" | "preview" | "snapshot";
+export type TransitionCancellation = "replacement" | "disconnect" | "destroyed" | "protocol-error";
 
-interface ClientTransitionIntent {
+export interface ClientTransitionIntent {
   kind: ClientTransitionKind;
   sessionId: string;
   commandId: string;
+  origin: TransitionOrigin;
+  intentViewport: "desktop" | "mobile";
+  cacheAtIntent: TransitionCacheAtIntent;
 }
 
-interface ClientTransitionAttachment extends ClientTransitionIntent {
+export interface ClientTransitionAttachment {
+  kind: ClientTransitionKind;
+  sessionId: string;
+  commandId: string;
   conversationId?: string;
   focusId?: string;
 }
 
-interface ClientTransitionObservation {
+export interface ClientTransitionObservation {
   sessionId: string;
   conversationId?: string;
   focusId?: string;
 }
 
+export interface TransitionMeasureDetail {
+  version: 1;
+  kind: ClientTransitionKind;
+  origin: TransitionOrigin;
+  intentViewport: "desktop" | "mobile";
+  cacheAtIntent: TransitionCacheAtIntent;
+  firstPresentation?: {
+    source: TransitionPresentationSource;
+    ms: number;
+  };
+  previewPresentedMs?: number;
+  attachMs?: number;
+  snapshotAcceptedMs?: number;
+  interactiveMs?: number;
+  terminalMs: number;
+  termination:
+    | { kind: "success" }
+    | { kind: "failure"; reason: "send-failed" | "server-error" }
+    | { kind: "cancelled"; reason: TransitionCancellation };
+}
+
+export interface TransitionTimingAttempt {
+  readonly token: symbol;
+}
+
 interface TransitionPerformanceSurface {
-  mark(name: string): unknown;
-  measure(name: string, startMark: string, endMark: string): unknown;
-  clearMarks(name?: string): void;
+  now(): number;
+  measure(name: string, options: PerformanceMeasureOptions): unknown;
+  clearMeasures(name?: string): void;
+  getEntriesByName(name: string, type?: string): PerformanceEntryList;
 }
 
-const TRANSITION_MEASURE_NAMES = {
-  workspace: {
-    attach: "piweb.workspace.intent-to-attach",
-    ready: "piweb.workspace.intent-to-ready",
-  },
-  conversation: {
-    attach: "piweb.conversation.intent-to-attach",
-    ready: "piweb.conversation.intent-to-ready",
-  },
-} as const;
-
-interface TransitionTimingOwner {
-  begin(intent: ClientTransitionIntent): void;
-  attach(attachment: ClientTransitionAttachment): void;
-  ready(observation: ClientTransitionObservation): void;
-  cancel(intent?: ClientTransitionIntent): void;
+interface ActiveTransition {
+  attempt: TransitionTimingAttempt;
+  intent: ClientTransitionIntent;
+  intentMs: number;
+  attachment?: ClientTransitionAttachment;
+  detail: Omit<TransitionMeasureDetail, "terminalMs" | "termination">;
 }
 
-interface ActiveTransition extends ClientTransitionIntent {
-  marks: {
-    intent: string;
-    attach: string;
-    ready: string;
-  };
-  attachment?: {
-    conversationId?: string;
-    focusId?: string;
-  };
+export const TRANSITION_PERFORMANCE_ENTRY_NAME = "piweb.transition";
+export const MAX_RETAINED_TRANSITION_MEASURES = 100;
+
+export interface TransitionTimingOwner {
+  candidate(intent: ClientTransitionIntent): TransitionTimingAttempt;
+  promote(attempt: TransitionTimingAttempt): boolean;
+  fail(attempt: TransitionTimingAttempt, reason: "send-failed"): void;
+  failMatching(intent: Pick<ClientTransitionIntent, "kind" | "sessionId" | "commandId">, reason: "server-error"): void;
+  attemptFor(intent: Pick<ClientTransitionIntent, "kind" | "sessionId" | "commandId">): TransitionTimingAttempt | undefined;
+  attach(attachment: ClientTransitionAttachment): TransitionTimingAttempt | undefined;
+  snapshotAccepted(observation: ClientTransitionObservation): TransitionTimingAttempt | undefined;
+  present(attempt: TransitionTimingAttempt, source: TransitionPresentationSource): void;
+  interactive(attempt: TransitionTimingAttempt, observation: ClientTransitionObservation): void;
+  cancel(reason: TransitionCancellation, intent?: Pick<ClientTransitionIntent, "kind" | "sessionId" | "commandId">): void;
+  isActive(attempt: TransitionTimingAttempt): boolean;
 }
 
 function supportsTransitionTiming(
   surface: Partial<TransitionPerformanceSurface> | null,
 ): surface is TransitionPerformanceSurface {
   return surface !== null
-    && typeof surface.mark === "function"
+    && typeof surface.now === "function"
     && typeof surface.measure === "function"
-    && typeof surface.clearMarks === "function";
-}
-
-function marksFor(intent: ClientTransitionIntent): ActiveTransition["marks"] {
-  const prefix = [
-    "piweb.transition",
-    intent.kind,
-    intent.sessionId,
-    intent.commandId,
-  ].join(".");
-  return {
-    intent: `${prefix}.intent`,
-    attach: `${prefix}.attach`,
-    ready: `${prefix}.ready`,
-  };
+    && typeof surface.clearMeasures === "function"
+    && typeof surface.getEntriesByName === "function";
 }
 
 class PerformanceTransitionTimingOwner implements TransitionTimingOwner {
   private active?: ActiveTransition;
+  private readonly candidates = new Set<ActiveTransition>();
 
   constructor(private readonly performance?: TransitionPerformanceSurface) {}
 
-  begin(intent: ClientTransitionIntent): void {
-    this.cancel();
+  candidate(intent: ClientTransitionIntent): TransitionTimingAttempt {
+    const attempt: TransitionTimingAttempt = { token: Symbol("transition") };
     const active: ActiveTransition = {
-      ...intent,
-      marks: marksFor(intent),
+      attempt,
+      intent,
+      intentMs: this.now(),
+      detail: {
+        version: 1,
+        kind: intent.kind,
+        origin: intent.origin,
+        intentViewport: intent.intentViewport,
+        cacheAtIntent: intent.cacheAtIntent,
+      },
     };
-    this.active = active;
-    this.mark(active.marks.intent);
+    this.candidates.add(active);
+    return attempt;
   }
 
-  attach(attachment: ClientTransitionAttachment): void {
+  promote(attempt: TransitionTimingAttempt): boolean {
+    const candidate = this.findCandidate(attempt);
+    if (!candidate) return false;
+    if (this.active) this.terminal(this.active, { kind: "cancelled", reason: "replacement" });
+    this.candidates.delete(candidate);
+    this.active = candidate;
+    return true;
+  }
+
+  fail(attempt: TransitionTimingAttempt, reason: "send-failed"): void {
+    const candidate = this.findCandidate(attempt);
+    if (candidate) {
+      this.candidates.delete(candidate);
+      this.terminal(candidate, { kind: "failure", reason });
+      return;
+    }
+    if (this.active?.attempt === attempt) {
+      this.terminal(this.active, { kind: "failure", reason });
+    }
+  }
+
+  failMatching(
+    intent: Pick<ClientTransitionIntent, "kind" | "sessionId" | "commandId">,
+    reason: "server-error",
+  ): void {
+    if (this.active && this.matchesIntent(this.active, intent)) {
+      this.terminal(this.active, { kind: "failure", reason });
+    }
+  }
+
+  attemptFor(
+    intent: Pick<ClientTransitionIntent, "kind" | "sessionId" | "commandId">,
+  ): TransitionTimingAttempt | undefined {
+    return this.active && this.matchesIntent(this.active, intent)
+      ? this.active.attempt
+      : undefined;
+  }
+
+  attach(attachment: ClientTransitionAttachment): TransitionTimingAttempt | undefined {
+    const active = this.active;
+    if (!active || active.attachment || !this.matchesIntent(active, attachment)) return undefined;
+    active.attachment = attachment;
+    active.detail.attachMs = this.elapsed(active);
+    return active.attempt;
+  }
+
+  snapshotAccepted(observation: ClientTransitionObservation): TransitionTimingAttempt | undefined {
+    const active = this.active;
+    if (!active || !this.matchesObservation(active, observation)) return undefined;
+    if (active.detail.snapshotAcceptedMs === undefined) {
+      active.detail.snapshotAcceptedMs = this.elapsed(active);
+    }
+    return active.attempt;
+  }
+
+  present(attempt: TransitionTimingAttempt, source: TransitionPresentationSource): void {
+    const active = this.active;
+    if (!active || active.attempt !== attempt) return;
+    const elapsed = this.elapsed(active);
+    if (active.detail.firstPresentation === undefined) {
+      active.detail.firstPresentation = { source, ms: elapsed };
+    }
+    if (source === "preview" && active.detail.previewPresentedMs === undefined) {
+      active.detail.previewPresentedMs = elapsed;
+    }
+  }
+
+  interactive(attempt: TransitionTimingAttempt, observation: ClientTransitionObservation): void {
     const active = this.active;
     if (
       !active
-      || active.attachment !== undefined
-      || !this.matchesIntent(active, attachment)
+      || active.attempt !== attempt
+      || !this.matchesObservation(active, observation)
+      || active.detail.interactiveMs !== undefined
     ) return;
-    active.attachment = {
-      conversationId: attachment.conversationId,
-      focusId: attachment.focusId,
-    };
-    this.measure(
-      TRANSITION_MEASURE_NAMES[active.kind].attach,
-      active.marks.intent,
-      active.marks.attach,
-    );
+    active.detail.interactiveMs = this.elapsed(active);
+    this.terminal(active, { kind: "success" });
   }
 
-  ready(observation: ClientTransitionObservation): void {
-    const active = this.active;
-    if (
-      !active?.attachment
-      || active.sessionId !== observation.sessionId
-      || active.attachment.conversationId !== observation.conversationId
-      || active.attachment.focusId !== observation.focusId
-    ) return;
-    this.measure(
-      TRANSITION_MEASURE_NAMES[active.kind].ready,
-      active.marks.intent,
-      active.marks.ready,
-    );
-    this.clearMark(active.marks.intent);
-    this.active = undefined;
+  cancel(
+    reason: TransitionCancellation,
+    intent?: Pick<ClientTransitionIntent, "kind" | "sessionId" | "commandId">,
+  ): void {
+    if (!this.active || (intent && !this.matchesIntent(this.active, intent))) return;
+    this.terminal(this.active, { kind: "cancelled", reason });
   }
 
-  cancel(intent?: ClientTransitionIntent): void {
-    const active = this.active;
-    if (!active || (intent && !this.matchesIntent(active, intent))) return;
-    this.clearMark(active.marks.intent);
-    this.clearMark(active.marks.attach);
-    this.clearMark(active.marks.ready);
-    this.active = undefined;
+  isActive(attempt: TransitionTimingAttempt): boolean {
+    return this.active?.attempt === attempt;
+  }
+
+  private findCandidate(attempt: TransitionTimingAttempt): ActiveTransition | undefined {
+    return [...this.candidates].find((candidate) => candidate.attempt === attempt);
   }
 
   private matchesIntent(
     active: ActiveTransition,
-    intent: ClientTransitionIntent,
+    intent: Pick<ClientTransitionIntent, "kind" | "sessionId" | "commandId">,
   ): boolean {
-    return active.kind === intent.kind
-      && active.sessionId === intent.sessionId
-      && active.commandId === intent.commandId;
+    return active.intent.kind === intent.kind
+      && active.intent.sessionId === intent.sessionId
+      && active.intent.commandId === intent.commandId;
   }
 
-  private mark(name: string): void {
-    this.attempt(() => this.performance?.mark(name));
+  private matchesObservation(
+    active: ActiveTransition,
+    observation: ClientTransitionObservation,
+  ): boolean {
+    return active.attachment !== undefined
+      && active.attachment.sessionId === observation.sessionId
+      && active.attachment.conversationId === observation.conversationId
+      && active.attachment.focusId === observation.focusId;
   }
 
-  private measure(name: string, startMark: string, endMark: string): void {
+  private terminal(
+    active: ActiveTransition,
+    termination: TransitionMeasureDetail["termination"],
+  ): void {
+    this.candidates.delete(active);
+    if (this.active === active) this.active = undefined;
+    const terminalMs = this.elapsed(active);
+    const detail: TransitionMeasureDetail = {
+      ...active.detail,
+      terminalMs,
+      termination,
+    };
     this.attempt(() => {
-      this.performance?.mark(endMark);
-      this.performance?.measure(name, startMark, endMark);
+      const entries = this.performance?.getEntriesByName(
+        TRANSITION_PERFORMANCE_ENTRY_NAME,
+        "measure",
+      ) ?? [];
+      if (entries.length >= MAX_RETAINED_TRANSITION_MEASURES) {
+        this.performance?.clearMeasures(TRANSITION_PERFORMANCE_ENTRY_NAME);
+      }
+      this.performance?.measure(TRANSITION_PERFORMANCE_ENTRY_NAME, {
+        start: active.intentMs,
+        duration: terminalMs,
+        detail,
+      });
     });
-    this.clearMark(endMark);
   }
 
-  private clearMark(name: string): void {
-    this.attempt(() => this.performance?.clearMarks(name));
+  private elapsed(active: ActiveTransition): number {
+    return Math.max(0, this.now() - active.intentMs);
+  }
+
+  private now(): number {
+    try {
+      return this.performance?.now() ?? 0;
+    } catch {
+      return 0;
+    }
   }
 
   private attempt(operation: () => unknown): void {
     try {
       operation();
     } catch {
-      // Timing probes must never affect the transition they observe.
+      // Observability must not change a client transition's control flow.
     }
   }
 }

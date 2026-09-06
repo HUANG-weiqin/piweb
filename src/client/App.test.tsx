@@ -2508,7 +2508,7 @@ describe("App", () => {
     });
     expect(screen.getByText("B attached preview", { selector: "article" }))
       .toBeInTheDocument();
-    expect(screen.getByRole("status", { name: "正在同步会话…" }))
+    expect(screen.getByRole("status", { name: /正在同步会话/ }))
       .toBeInTheDocument();
     expect(screen.getByRole("button", { name: "打开会话 C" })).toBeEnabled();
     const focusCommandsBeforeCurrentClick = sentFocusCommandCount();
@@ -2641,7 +2641,7 @@ describe("App", () => {
     });
 
     expect(screen.queryByText("deferred authoritative B")).not.toBeInTheDocument();
-    expect(screen.getByRole("status", { name: "正在同步会话…" }))
+    expect(screen.getByRole("status", { name: /正在同步会话/ }))
       .toBeInTheDocument();
 
     act(() => socketMock.rawEmit?.({
@@ -3049,7 +3049,7 @@ describe("App", () => {
 
     socketMock.autoFocus = false;
     fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
-    expect(screen.getByRole("status", { name: "正在同步会话…" }))
+    expect(screen.getByRole("status", { name: /正在同步会话/ }))
       .toHaveClass("transition-status-overlay");
     const secondWorkspace = screen.getByRole("button", { name: "打开工作区 second" });
     expect(secondWorkspace).toBeEnabled();
@@ -3326,7 +3326,7 @@ describe("App", () => {
     }));
     fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
 
-    expect(screen.getByRole("status", { name: "正在同步会话…" }))
+    expect(screen.getByRole("status", { name: /正在同步会话/ }))
       .toBeInTheDocument();
     expect(screen.queryByText("late deleted B preview"))
       .not.toBeInTheDocument();
@@ -3336,7 +3336,8 @@ describe("App", () => {
       .toBeDisabled();
   });
 
-  it("does not treat absence from a truncated project snapshot as deletion proof", () => {
+  it("keeps a truncated-absence preview read-only and records it after paint", async () => {
+    const measure = vi.spyOn(performance, "measure");
     render(<App />);
     const sessionId = startFromSetup();
     const conversationA = {
@@ -3399,10 +3400,53 @@ describe("App", () => {
     expect(screen.getByText("preview absent only from truncated index", {
       selector: "article",
     })).toBeInTheDocument();
-    expect(screen.getByRole("status", { name: "正在同步会话…" }))
+    expect(screen.getByRole("status", { name: /正在同步会话/ }))
       .toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
       .toBeDisabled();
+
+    await act(async () => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => {
+        requestAnimationFrame(() => resolve());
+      }));
+    });
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "focus_attached",
+        operation: "focus_conversation",
+        commandId: focus.commandId!,
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_B,
+        focusId: FOCUS_A_SECOND,
+      });
+      socketMock.rawEmit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+          conversationId: CONVERSATION_B,
+          focusId: FOCUS_A_SECOND,
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_B,
+        focusId: FOCUS_A_SECOND,
+        messages: [],
+        window: completeConversationWindow,
+      });
+    });
+    await waitFor(() => expect(measure.mock.calls.some(([, options]) => (
+      (options as PerformanceMeasureOptions).detail?.firstPresentation?.source === "preview"
+    ))).toBe(true));
   });
 
   it("rejects mismatched previews and clears temporary previews on replacement and disconnect", () => {
@@ -3630,7 +3674,11 @@ describe("App", () => {
     socketMock.autoFocus = false;
     fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
     expect(screen.queryByText("source A")).not.toBeInTheDocument();
-    expect(screen.getByRole("status", { name: "正在打开会话 B" })).toBeInTheDocument();
+    const transitionStatuses = screen.getAllByRole("status");
+    expect(transitionStatuses).toHaveLength(1);
+    expect(transitionStatuses[0]).toHaveAccessibleName(
+      "正在同步会话…；正在打开会话 B",
+    );
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "新建会话" })).toBeDisabled();
 
@@ -3676,7 +3724,7 @@ describe("App", () => {
         },
       });
     });
-    expect(screen.getByRole("status", { name: "正在同步会话…" })).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: /正在同步会话/ })).toBeInTheDocument();
     expect(screen.queryByText("late source snapshot")).not.toBeInTheDocument();
     expect(screen.queryByText("late source live")).not.toBeInTheDocument();
 
@@ -3817,7 +3865,7 @@ describe("App", () => {
     expect(screen.getByText("A live card")).toBeInTheDocument();
     expect(screen.queryByText("B history")).not.toBeInTheDocument();
     expect(screen.queryByRole("note", { name: "历史记录不完整" })).toBeNull();
-    expect(screen.getByRole("status", { name: "正在同步会话…" })).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: /正在同步会话/ })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "当前会话 A" })).toBeEnabled();
 
@@ -3836,7 +3884,7 @@ describe("App", () => {
     });
     expect(screen.getByText("A cached history")).toBeInTheDocument();
     expect(screen.queryByRole("note", { name: "历史记录不完整" })).toBeNull();
-    expect(screen.getByRole("status", { name: "正在同步会话…" })).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: /正在同步会话/ })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeDisabled();
 
     act(() => socketMock.rawEmit?.(snapshotFor(
@@ -3876,7 +3924,7 @@ describe("App", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "打开会话 A" }));
     expect(screen.queryByText("fresh A history")).not.toBeInTheDocument();
-    expect(screen.getByRole("status", { name: "正在同步会话…" })).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: /正在同步会话/ })).toBeInTheDocument();
   });
 
   it("reconnects a pending phone focus to its durable chat route", () => {
@@ -4228,11 +4276,13 @@ describe("App", () => {
     expect(socketMock.send.mock.calls.filter(
       ([command]) => command.type === "initialize",
     )).toHaveLength(initializeCount);
-    expect(screen.getByRole("heading", { name: "工作区不可用" }))
-      .toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "工作区不可用" }))
+      .not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("workspace unavailable");
   });
 
-  it("does not mark a workspace unavailable when the automatic recent fallback cannot be sent", () => {
+  it("keeps a reconnect fallback send failure non-destructive and preserves its timing origin", async () => {
+    const measure = vi.spyOn(performance, "measure");
     localStorage.setItem("piweb.workspaces", JSON.stringify(["E:\\work"]));
     localStorage.setItem("piweb.lastCwd", "E:\\work");
     render(<App />);
@@ -4301,9 +4351,12 @@ describe("App", () => {
     expect(fallback.sessionId).not.toBe(staleRestore.sessionId);
     expect(screen.queryByRole("heading", { name: "工作区不可用" }))
       .not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "正在打开工作区" }))
-      .toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("本地服务未连接");
+    await waitFor(() => expect(measure.mock.calls.some(([, options]) => {
+      const detail = (options as PerformanceMeasureOptions).detail;
+      return detail?.origin === "reconnect"
+        && detail.termination?.reason === "send-failed";
+    })).toBe(true));
   });
 
   it("shows an explicit opening target for a phone workspace cache miss", () => {
@@ -4349,36 +4402,81 @@ describe("App", () => {
     act(() => popPhoneRoute({ screen: "workspaces" }));
     fireEvent.click(screen.getByRole("button", { name: "打开工作区 second" }));
 
-    expect(screen.getByRole("status", { name: "正在打开工作区 second" }))
-      .toBeInTheDocument();
+    const opening = screen.getByRole("status", { name: "正在打开工作区 second" });
+    expect(opening).toHaveAttribute("tabindex", "-1");
+    expect(document.activeElement).toBe(opening);
     expect(screen.queryByText("phone source projection")).not.toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "给 Pi 发送消息" })).not.toBeInTheDocument();
   });
 
-  it("closes the last unavailable workspace and its session view", () => {
+  it("preserves the current workspace projection when a rail switch cannot send", async () => {
+    localStorage.setItem("piweb.workspaces", JSON.stringify(["E:\\other"]));
+    const measure = vi.spyOn(performance, "measure");
     socketMock.autoFocus = false;
-    localStorage.setItem("piweb.workspaces", JSON.stringify(["E:\\work"]));
-    localStorage.setItem("piweb.lastCwd", "E:\\work");
     render(<App />);
-    const initializeCommand = latestCommand("initialize");
-    act(() => socketMock.emit?.({
-      type: "error",
-      scope: "command",
-      operation: "initialize",
-      commandId: initializeCommand.commandId,
-      sessionId: initializeCommand.sessionId,
-      message: "workspace unavailable",
+    const sessionId = startFromSetup();
+    const initialize = latestCommand("initialize");
+    act(() => {
+      socketMock.emit?.({
+        type: "focus_attached",
+        operation: "initialize",
+        commandId: initialize.commandId!,
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+      });
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\default",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+          conversationId: CONVERSATION_ID,
+          focusId: FOCUS_A,
+        },
+      });
+    });
+    act(() => socketMock.rawEmit?.({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      messages: [{
+        id: "preserved-source",
+        role: "user",
+        text: "preserved workspace transcript",
+        thinking: "",
+        tools: [],
+      }],
+      window: completeConversationWindow,
     }));
 
-    fireEvent.click(screen.getByRole("button", { name: "关闭工作区" }));
-    expect(socketMock.send).toHaveBeenCalledWith(expect.objectContaining({
-      type: "close_session",
-      sessionId: initializeCommand.sessionId,
-    }));
+    socketMock.send.mockReturnValueOnce(false);
+    fireEvent.click(screen.getByRole("button", { name: "打开工作区 other" }));
+
+    expect(latestCommand("initialize")).toMatchObject({ cwd: "E:\\other" });
+    expect(screen.getByRole("button", { name: "打开工作区 default" }))
+      .toHaveAttribute("aria-current", "true");
+    expect(screen.getByText("preserved workspace transcript", { selector: "article" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeEnabled();
     expect(screen.queryByRole("status", { name: "正在同步工作区…" }))
       .not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "还没有打开工作区" }))
-      .toBeInTheDocument();
+
+    await waitFor(() => expect(measure).toHaveBeenCalledWith(
+      "piweb.transition",
+      expect.objectContaining({
+        detail: expect.objectContaining({
+          termination: { kind: "failure", reason: "send-failed" },
+        }),
+      }),
+    ));
   });
 
   it("recovers from a cached workspace initialize failure", () => {
@@ -4429,8 +4527,8 @@ describe("App", () => {
       message: "无法打开项目",
     }));
 
-    expect(screen.getByRole("heading", { name: "工作区不可用" }))
-      .toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "工作区不可用" }))
+      .not.toBeInTheDocument();
     expect(screen.queryByRole("status", { name: "正在同步工作区…" }))
       .not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "打开工作区 second" }));
@@ -4578,7 +4676,7 @@ describe("App", () => {
       .toBeInTheDocument();
   });
 
-  it("keeps a missing workspace visible and allows switching away", () => {
+  it("keeps a workspace with a generic initialize failure visible and allows switching away", () => {
     socketMock.autoFocus = false;
     localStorage.setItem("piweb.workspaces", JSON.stringify([
       "E:\\missing",
@@ -4597,11 +4695,11 @@ describe("App", () => {
       message: "Directory does not exist",
     }));
 
-    expect(screen.getByRole("heading", { name: "工作区不可用" }))
+    expect(screen.queryByRole("heading", { name: "工作区不可用" }))
+      .not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("Directory does not exist");
+    expect(screen.getByRole("button", { name: "打开工作区 missing" }))
       .toBeInTheDocument();
-    expect(screen.getByRole("button", {
-      name: "打开工作区 missing（不可用）",
-    })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", {
       name: "打开工作区 other",
@@ -4609,45 +4707,6 @@ describe("App", () => {
     expect(latestCommand("initialize").cwd).toBe("E:\\other");
     expect(JSON.parse(localStorage.getItem("piweb.workspaces") ?? "[]"))
       .toEqual(["E:\\missing", "E:\\other"]);
-  });
-
-  it("closes an unavailable workspace to empty without opening another", () => {
-    socketMock.autoFocus = false;
-    localStorage.setItem("piweb.workspaces", JSON.stringify([
-      "E:\\other",
-      "E:\\missing",
-    ]));
-    localStorage.setItem("piweb.lastCwd", "E:\\missing");
-    render(<App />);
-    const missing = latestCommand("initialize");
-
-    act(() => socketMock.emit?.({
-      type: "error",
-      scope: "command",
-      operation: "initialize",
-      commandId: missing.commandId,
-      sessionId: missing.sessionId,
-      message: "Directory does not exist",
-    }));
-    fireEvent.click(screen.getByRole("button", { name: "关闭工作区" }));
-
-    expect(socketMock.send).toHaveBeenCalledWith({
-      type: "close_session",
-      sessionId: missing.sessionId,
-    });
-    expect(socketMock.send.mock.calls.filter(
-      ([command]) => command.type === "initialize",
-    )).toHaveLength(1);
-    expect(JSON.parse(localStorage.getItem("piweb.workspaces") ?? "[]"))
-      .toEqual(["E:\\other"]);
-    expect(localStorage.getItem("piweb.lastCwd")).toBe("");
-    expect(screen.getByRole("heading", { name: "还没有打开工作区" }))
-      .toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "打开工作区 other" }))
-      .not.toHaveAttribute("aria-current");
-    expect(screen.queryByRole("button", {
-      name: /打开工作区 missing/,
-    })).not.toBeInTheDocument();
   });
 
   it("keeps a newer directory request authoritative over stale listing outcomes", () => {
@@ -5812,10 +5871,9 @@ describe("App", () => {
   });
 
   it("does not add a message when prompt sending fails", () => {
-    socketMock.send.mockReturnValue(false);
-
     render(<App />);
     const sessionId = startFromSetup();
+    socketMock.send.mockReturnValue(false);
 
     act(() => socketMock.emit?.({
       type: "state",

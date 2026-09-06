@@ -1,164 +1,228 @@
 import { describe, expect, it, vi } from "vitest";
-import { createTransitionTimingOwner } from "./transition-timing";
+import {
+  createTransitionTimingOwner,
+  MAX_RETAINED_TRANSITION_MEASURES,
+  TRANSITION_PERFORMANCE_ENTRY_NAME,
+  type TransitionMeasureDetail,
+} from "./transition-timing";
 
-const MEASURES = {
-  workspace: {
-    attach: "piweb.workspace.intent-to-attach",
-    ready: "piweb.workspace.intent-to-ready",
-  },
-  conversation: {
-    attach: "piweb.conversation.intent-to-attach",
-    ready: "piweb.conversation.intent-to-ready",
-  },
-} as const;
-
-function createPerformanceRecorder() {
-  const mark = vi.fn();
-  const measure = vi.fn();
-  const clearMarks = vi.fn();
+function intent(
+  kind: "workspace" | "conversation" = "conversation",
+  suffix = "a",
+) {
   return {
-    surface: { mark, measure, clearMarks },
-    mark,
-    measure,
-    clearMarks,
+    kind,
+    sessionId: `session-${suffix}`,
+    commandId: `command-${suffix}`,
+    origin: "user" as const,
+    intentViewport: "desktop" as const,
+    cacheAtIntent: "miss" as const,
   };
 }
 
+function attachment(candidate = intent()) {
+  return {
+    kind: candidate.kind,
+    sessionId: candidate.sessionId,
+    commandId: candidate.commandId,
+    conversationId: `conversation-${candidate.commandId}`,
+    focusId: `focus-${candidate.commandId}`,
+  };
+}
+
+function createPerformanceRecorder() {
+  let now = 0;
+  const entries: Array<{ name: string; detail: TransitionMeasureDetail }> = [];
+  const measure = vi.fn((name: string, options: PerformanceMeasureOptions) => {
+    entries.push({ name, detail: options.detail as TransitionMeasureDetail });
+  });
+  const clearMeasures = vi.fn((name?: string) => {
+    for (let index = entries.length - 1; index >= 0; index--) {
+      if (name === undefined || entries[index]?.name === name) entries.splice(index, 1);
+    }
+  });
+  return {
+    surface: {
+      now: () => now,
+      measure,
+      clearMeasures,
+      getEntriesByName: vi.fn(() => entries as unknown as PerformanceEntryList),
+    },
+    entries,
+    measure,
+    clearMeasures,
+    advance(milliseconds: number) {
+      now += milliseconds;
+    },
+  };
+}
+
+function completeConversation(
+  timing: ReturnType<typeof createTransitionTimingOwner>,
+  candidate: ReturnType<typeof intent>,
+  source: "placeholder" | "cache" | "preview" | "snapshot" = "snapshot",
+) {
+  const attempt = timing.candidate(candidate);
+  timing.promote(attempt);
+  const attached = attachment(candidate);
+  timing.attach(attached);
+  timing.snapshotAccepted(attached);
+  timing.present(attempt, source);
+  timing.interactive(attempt, attached);
+}
+
 describe("transition timing owner", () => {
-  it("measures one workspace intent-to-attach and intent-to-ready", () => {
+  it("settles a send-failed candidate without cancelling the active transition", () => {
     const performance = createPerformanceRecorder();
     const timing = createTransitionTimingOwner(performance.surface);
-    const intent = {
-      kind: "workspace" as const,
-      sessionId: "session-a",
-      commandId: "command-a",
-    };
-    const attached = {
-      ...intent,
-      conversationId: "conversation-a",
-      focusId: "focus-a",
-    };
+    const activeIntent = intent("workspace", "active");
+    const active = timing.candidate(activeIntent);
+    timing.promote(active);
 
-    timing.begin(intent);
-    timing.attach(attached);
-    timing.attach(attached);
-    timing.ready({
-      sessionId: intent.sessionId,
-      conversationId: attached.conversationId,
-      focusId: attached.focusId,
-    });
-    timing.ready({
-      sessionId: intent.sessionId,
-      conversationId: attached.conversationId,
-      focusId: attached.focusId,
-    });
+    performance.advance(5);
+    const rejectedIntent = intent("workspace", "rejected");
+    const rejected = timing.candidate(rejectedIntent);
+    timing.fail(rejected, "send-failed");
+    expect(timing.isActive(active)).toBe(true);
 
-    const intentMark = performance.mark.mock.calls[0]?.[0];
-    const attachMark = performance.mark.mock.calls[1]?.[0];
-    const readyMark = performance.mark.mock.calls[2]?.[0];
-    expect(performance.measure).toHaveBeenCalledTimes(2);
-    expect(performance.measure).toHaveBeenNthCalledWith(
-      1,
-      MEASURES.workspace.attach,
-      intentMark,
-      attachMark,
-    );
-    expect(performance.measure).toHaveBeenNthCalledWith(
-      2,
-      MEASURES.workspace.ready,
-      intentMark,
-      readyMark,
-    );
-    expect(performance.clearMarks).toHaveBeenCalledWith(intentMark);
-    expect(performance.clearMarks).toHaveBeenCalledWith(attachMark);
-    expect(performance.clearMarks).toHaveBeenCalledWith(readyMark);
+    const attached = attachment(activeIntent);
+    timing.attach(attached);
+    timing.present(active, "placeholder");
+    timing.interactive(active, attached);
+
+    expect(performance.entries.map(({ detail }) => detail.termination)).toEqual([
+      { kind: "failure", reason: "send-failed" },
+      { kind: "success" },
+    ]);
   });
 
-  it("clears replacement and failure marks without settling stale identities", () => {
+  it("replaces only a promoted attempt and records first presentation once while retaining preview timing", () => {
     const performance = createPerformanceRecorder();
     const timing = createTransitionTimingOwner(performance.surface);
-    const replaced = {
-      kind: "workspace" as const,
-      sessionId: "session-old",
-      commandId: "command-old",
-    };
-    const current = {
-      kind: "conversation" as const,
-      sessionId: "session-current",
-      commandId: "command-current",
-    };
+    const first = timing.candidate(intent("conversation", "first"));
+    timing.promote(first);
+    const secondIntent = intent("conversation", "second");
+    const second = timing.candidate(secondIntent);
+    timing.promote(second);
 
-    timing.begin(replaced);
-    const replacedIntentMark = performance.mark.mock.calls.at(-1)?.[0];
-    timing.begin(current);
-    const currentIntentMark = performance.mark.mock.calls.at(-1)?.[0];
+    performance.advance(3);
+    timing.present(second, "preview");
+    performance.advance(3);
+    timing.present(second, "snapshot");
+    const attached = attachment(secondIntent);
+    timing.attach(attached);
+    timing.snapshotAccepted(attached);
+    timing.interactive(second, attached);
 
-    expect(performance.clearMarks).toHaveBeenCalledWith(replacedIntentMark);
-    timing.attach({
-      ...replaced,
-      conversationId: "conversation-old",
-      focusId: "focus-old",
+    expect(performance.entries[0]?.detail.termination).toEqual({
+      kind: "cancelled",
+      reason: "replacement",
     });
-    timing.cancel(replaced);
+    expect(performance.entries[1]?.detail).toMatchObject({
+      firstPresentation: { source: "preview", ms: 3 },
+      previewPresentedMs: 3,
+      termination: { kind: "success" },
+    });
+  });
+
+  it("requires the attached snapshot identity before completing an interactive conversation", () => {
+    const performance = createPerformanceRecorder();
+    const timing = createTransitionTimingOwner(performance.surface);
+    const candidate = intent();
+    const attempt = timing.candidate(candidate);
+    timing.promote(attempt);
+    const attached = attachment(candidate);
+    timing.attach(attached);
+
+    timing.snapshotAccepted({ ...attached, focusId: "stale-focus" });
+    timing.interactive(attempt, { ...attached, focusId: "stale-focus" });
     expect(performance.measure).not.toHaveBeenCalled();
 
-    timing.attach({
-      ...current,
-      conversationId: "conversation-current",
-      focusId: "focus-current",
+    performance.advance(7);
+    timing.snapshotAccepted(attached);
+    timing.present(attempt, "snapshot");
+    timing.interactive(attempt, attached);
+    expect(performance.entries).toHaveLength(1);
+    expect(performance.entries[0]?.detail).toMatchObject({
+      snapshotAcceptedMs: 7,
+      interactiveMs: 7,
+      termination: { kind: "success" },
     });
-    timing.ready({
-      sessionId: replaced.sessionId,
-      conversationId: "conversation-old",
-      focusId: "focus-old",
-    });
-    timing.cancel({ ...current, commandId: "stale-command" });
-    timing.ready({
-      sessionId: current.sessionId,
-      conversationId: "conversation-current",
-      focusId: "focus-current",
-    });
-    expect(performance.measure).toHaveBeenCalledWith(
-      MEASURES.conversation.attach,
-      currentIntentMark,
-      expect.any(String),
-    );
-    expect(performance.measure).toHaveBeenCalledWith(
-      MEASURES.conversation.ready,
-      currentIntentMark,
-      expect.any(String),
-    );
+  });
 
-    const failed = {
-      kind: "conversation" as const,
-      sessionId: "session-failed",
-      commandId: "command-failed",
+  it("allows an exactly attached empty workspace to become interactive without a snapshot", () => {
+    const performance = createPerformanceRecorder();
+    const timing = createTransitionTimingOwner(performance.surface);
+    const candidate = intent("workspace");
+    const attempt = timing.candidate(candidate);
+    timing.promote(attempt);
+    const empty = {
+      kind: candidate.kind,
+      sessionId: candidate.sessionId,
+      commandId: candidate.commandId,
     };
-    timing.begin(failed);
-    const failedIntentMark = performance.mark.mock.calls.at(-1)?.[0];
-    timing.cancel(failed);
-    expect(performance.clearMarks).toHaveBeenCalledWith(failedIntentMark);
-    expect(performance.measure).toHaveBeenCalledTimes(2);
+    timing.attach(empty);
+    timing.present(attempt, "placeholder");
+    timing.interactive(attempt, { sessionId: candidate.sessionId });
+
+    expect(performance.entries[0]?.detail).toMatchObject({
+      kind: "workspace",
+      firstPresentation: { source: "placeholder", ms: 0 },
+      termination: { kind: "success" },
+    });
+    expect(performance.entries[0]?.detail).not.toHaveProperty("snapshotAcceptedMs");
+  });
+
+  it("emits sanitized versioned details through a bounded PerformanceEntry consumer surface", () => {
+    const performance = createPerformanceRecorder();
+    const timing = createTransitionTimingOwner(performance.surface);
+    for (let index = 0; index <= MAX_RETAINED_TRANSITION_MEASURES; index++) {
+      completeConversation(timing, intent("conversation", String(index)));
+    }
+
+    expect(performance.clearMeasures).toHaveBeenCalledWith(
+      TRANSITION_PERFORMANCE_ENTRY_NAME,
+    );
+    expect(performance.entries).toHaveLength(1);
+    const entry = performance.entries[0];
+    expect(entry?.name).toBe(TRANSITION_PERFORMANCE_ENTRY_NAME);
+    expect(entry?.detail).toEqual({
+      version: 1,
+      kind: "conversation",
+      origin: "user",
+      intentViewport: "desktop",
+      cacheAtIntent: "miss",
+      firstPresentation: { source: "snapshot", ms: 0 },
+      attachMs: 0,
+      snapshotAcceptedMs: 0,
+      interactiveMs: 0,
+      terminalMs: 0,
+      termination: { kind: "success" },
+    });
+    expect(JSON.stringify(entry?.detail)).not.toContain("session-");
+    expect(JSON.stringify(entry?.detail)).not.toContain("command-");
+    expect(JSON.stringify(entry?.detail)).not.toContain("conversation-");
   });
 
   it("is a no-op when the Performance API is unavailable or incomplete", () => {
-    const partialMark = vi.fn();
+    const partialNow = vi.fn(() => 0);
     const unavailable = createTransitionTimingOwner(null);
-    const incomplete = createTransitionTimingOwner({ mark: partialMark });
-    const intent = {
-      kind: "workspace" as const,
-      sessionId: "session-a",
-      commandId: "command-a",
-    };
+    const incomplete = createTransitionTimingOwner({ now: partialNow });
 
     for (const timing of [unavailable, incomplete]) {
+      const candidate = timing.candidate(intent());
       expect(() => {
-        timing.begin(intent);
-        timing.attach(intent);
-        timing.ready({ sessionId: intent.sessionId });
-        timing.cancel();
+        timing.promote(candidate);
+        timing.attach({
+          kind: "conversation",
+          sessionId: "session-a",
+          commandId: "command-a",
+        });
+        timing.present(candidate, "placeholder");
+        timing.interactive(candidate, { sessionId: "session-a" });
+        timing.cancel("destroyed");
       }).not.toThrow();
     }
-    expect(partialMark).not.toHaveBeenCalled();
+    expect(partialNow).not.toHaveBeenCalled();
   });
 });
