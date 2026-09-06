@@ -200,7 +200,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 ## 当前边界
 
 - 没有 archive、用户多选批量删除、fork/import、附件和跨设备同步；Agent 会话列表只有有界 cursor，不构成浏览器历史分页。
-- 完整列表、显式 audit 与 cascade delete 仍由宿主完整验证项目全部 JSONL，并由 Pi `listAll()` 再扫描一次；这不是显式 target open/preview 的前置条件。path-keyed catalog 是原子版本化、可损坏即丢弃的展示/诊断 observation：完整 proof 才写入已验证的 summary，cold current-index 只以 `coverage: "unknown"` 投影它；后台每次只 scrub 一个 body。它不能替代当次 target proof。
+- 完整列表、显式 audit 与 cascade delete 仍由宿主完整验证项目全部 JSONL，并由 Pi `listAll()` 再扫描一次；这不是显式 target open/preview 的前置条件。path-keyed catalog v2 是原子版本化、可损坏即丢弃的展示/诊断 observation：summary 按 `(relativePath, dev, ino, header claim)` 保留为可陈旧的 display cache，body 的 `valid | invalid | unverified` 只证明当前完整 fingerprint；同 inode/header 的 append 会保留 summary 并重新验证 body，file/header identity 改变才丢弃它。`SessionFileChangedError` 不记为 invalid，而是放弃该轮写入并由下一次 census 重试；scrub 提交按当前 catalog CAS，不能覆盖期间完成的完整 proof。cold current-index 只以 `coverage: "unknown"` 投影缓存；它不能替代当次 target proof。
 - 没有跨进程 writer lock 和断电级 durability。
 - Pi JSONL header eager materialization 依赖锁定 SDK 的 v3 session format；升级 SDK 时必须用测试验证 header/open/list 行为。
 - `.piweb` 可能包含敏感内容；Git 忽略策略由项目所有者决定。

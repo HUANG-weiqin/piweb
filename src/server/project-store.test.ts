@@ -34,6 +34,10 @@ const temporaryDirectories: string[] = [];
 
 interface ProjectStoreIntegrityInternals {
   listSafeSessionFiles(allowedQuarantinePath?: string): Promise<unknown>;
+  readStableExpectedSessionFile(
+    expectedFile: { path: string },
+    conversationId: string,
+  ): Promise<unknown>;
   clearLastConversationIf(conversationId: string): Promise<void>;
   renameSessionFile(source: string, destination: string): Promise<void>;
   unlinkSessionFile(path: string): Promise<void>;
@@ -1520,6 +1524,144 @@ describe("ProjectStore", () => {
         relativePath: "corrupt-body.jsonl",
         header: { kind: "claims", conversationId: corruptId },
         body: { kind: "invalid" },
+      }),
+    ]));
+  });
+
+  it("retains a display summary while scrub reproves an appended body", async () => {
+    const cwd = await createTemporaryDirectory("piweb-catalog-summary-proof-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversation = await store.createConversation();
+    const catalogPath = join(store.stateDir, "conversation-catalog.json");
+
+    conversation.appendSessionInfo("appended after the cached summary");
+    await expect(store.scrubOneCatalogObservation()).resolves.toBe(true);
+
+    const catalog = JSON.parse(await readFile(catalogPath, "utf8")) as {
+      version: number;
+      observations: Array<{
+        header: { conversationId?: string };
+        body: { kind: string };
+        summary?: { id: string };
+      }>;
+    };
+    expect(catalog.version).toBe(2);
+    expect(catalog.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        header: { kind: "claims", conversationId: conversation.getSessionId() },
+        body: { kind: "valid" },
+        summary: expect.objectContaining({ id: conversation.getSessionId() }),
+      }),
+    ]));
+
+    const reopened = await ProjectStore.open(cwd, "full_access");
+    expect(reopened.listConversations()).toEqual([
+      expect.objectContaining({ id: conversation.getSessionId() }),
+    ]);
+  });
+
+  it("reads a legacy catalog cache and normalizes it on the next scrub", async () => {
+    const cwd = await createTemporaryDirectory("piweb-catalog-v1-upgrade-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversation = await store.createConversation();
+    const catalogPath = join(store.stateDir, "conversation-catalog.json");
+    const legacy = JSON.parse(await readFile(catalogPath, "utf8")) as {
+      version: number;
+    };
+    legacy.version = 1;
+    await writeFile(catalogPath, `${JSON.stringify(legacy)}\n`);
+
+    const reopened = await ProjectStore.open(cwd, "full_access");
+    expect(reopened.listConversations()).toEqual([
+      expect.objectContaining({ id: conversation.getSessionId() }),
+    ]);
+    await expect(reopened.scrubOneCatalogObservation()).resolves.toBe(false);
+    await expect(readFile(catalogPath, "utf8")).resolves.toContain('"version": 2');
+  });
+
+  it("retries an unstable catalog body without recording it invalid", async () => {
+    const cwd = await createTemporaryDirectory("piweb-catalog-unstable-body-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversation = await store.createConversation();
+    const catalogPath = join(store.stateDir, "conversation-catalog.json");
+    const internals = store as unknown as ProjectStoreIntegrityInternals;
+    const originalRead = internals.readStableExpectedSessionFile.bind(store);
+
+    conversation.appendSessionInfo("first body update");
+    vi.spyOn(internals, "readStableExpectedSessionFile").mockImplementationOnce(
+      async (expectedFile, conversationId) => {
+        conversation.appendSessionInfo("changed during scrub");
+        return originalRead(expectedFile, conversationId);
+      },
+    );
+
+    await expect(store.scrubOneCatalogObservation()).resolves.toBe(true);
+    const afterRace = JSON.parse(await readFile(catalogPath, "utf8")) as {
+      observations: Array<{
+        header: { conversationId?: string };
+        body: { kind: string };
+        summary?: { id: string };
+      }>;
+    };
+    expect(afterRace.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        header: { kind: "claims", conversationId: conversation.getSessionId() },
+        body: { kind: "valid" },
+        summary: expect.objectContaining({ id: conversation.getSessionId() }),
+      }),
+    ]));
+
+    await expect(store.scrubOneCatalogObservation()).resolves.toBe(true);
+    const settled = JSON.parse(await readFile(catalogPath, "utf8")) as {
+      observations: Array<{
+        header: { conversationId?: string };
+        body: { kind: string };
+        summary?: { id: string };
+      }>;
+    };
+    expect(settled.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        header: { kind: "claims", conversationId: conversation.getSessionId() },
+        body: { kind: "valid" },
+        summary: expect.objectContaining({ id: conversation.getSessionId() }),
+      }),
+    ]));
+  });
+
+  it("does not let a delayed scrub overwrite a newer full catalog proof", async () => {
+    const cwd = await createTemporaryDirectory("piweb-catalog-scrub-cas-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversation = await store.createConversation();
+    const catalogPath = join(store.stateDir, "conversation-catalog.json");
+    const internals = store as unknown as ProjectStoreIntegrityInternals;
+    const originalRead = internals.readStableExpectedSessionFile.bind(store);
+    const enteredRead = createDeferred<void>();
+    const releaseRead = createDeferred<void>();
+
+    conversation.appendSessionInfo("newer full proof");
+    vi.spyOn(internals, "readStableExpectedSessionFile").mockImplementationOnce(
+      async (expectedFile, conversationId) => {
+        enteredRead.resolve();
+        await releaseRead.promise;
+        return originalRead(expectedFile, conversationId);
+      },
+    );
+    const scrub = store.scrubOneCatalogObservation();
+    await enteredRead.promise;
+    await store.refreshConversations();
+    releaseRead.resolve();
+    await expect(scrub).resolves.toBe(true);
+
+    const catalog = JSON.parse(await readFile(catalogPath, "utf8")) as {
+      observations: Array<{
+        header: { conversationId?: string };
+        summary?: { name?: string };
+      }>;
+    };
+    expect(catalog.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        header: { kind: "claims", conversationId: conversation.getSessionId() },
+        summary: expect.objectContaining({ name: "newer full proof" }),
       }),
     ]));
   });

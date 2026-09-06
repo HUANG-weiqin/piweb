@@ -51,7 +51,8 @@ import {
 } from "./session-file.js";
 
 const MANIFEST_VERSION = 1;
-const CONVERSATION_CATALOG_VERSION = 1;
+const CONVERSATION_CATALOG_VERSION = 2;
+const LEGACY_CONVERSATION_CATALOG_VERSION = 1;
 const MAX_CONVERSATION_CATALOG_BYTES = 4 * 1024 * 1024;
 const PROJECT_STATE_DIRECTORY = ".piweb";
 const PROJECT_MANIFEST_FILE = "project.json";
@@ -108,7 +109,7 @@ interface CatalogObservation {
   diagnostic?: string;
 }
 
-interface ConversationCatalogV1 {
+interface ConversationCatalog {
   version: typeof CONVERSATION_CATALOG_VERSION;
   coverage:
     | { kind: "unknown" }
@@ -453,7 +454,10 @@ function parseCatalogConversationSummary(
   };
 }
 
-function parseCatalogObservation(value: unknown): CatalogObservation {
+function parseCatalogObservation(
+  value: unknown,
+  sourceVersion: number,
+): CatalogObservation {
   if (!isRecord(value)) throw new Error("catalog observation must be an object");
   assertCatalogKeys(value, [
     "relativePath",
@@ -517,12 +521,21 @@ function parseCatalogObservation(value: unknown): CatalogObservation {
   if (
     summary !== undefined
     && (
-      value.body.kind !== "valid"
-      || header.kind !== "claims"
+      header.kind !== "claims"
       || header.conversationId !== summary.id
+      || (
+        sourceVersion === LEGACY_CONVERSATION_CATALOG_VERSION
+        && value.body.kind !== "valid"
+      )
     )
   ) {
-    throw new Error("catalog summary has no matching valid identity");
+    throw new Error("catalog summary has no matching identity");
+  }
+  if (
+    header.kind === "conclusively_invalid"
+    && (summary !== undefined || value.body.kind !== "unverified")
+  ) {
+    throw new Error("invalid catalog header cannot carry body evidence or summary");
   }
   if (!isCanonicalIsoDate(value.observedAt)) {
     throw new Error("catalog observedAt must be a canonical ISO timestamp");
@@ -544,16 +557,21 @@ function parseCatalogObservation(value: unknown): CatalogObservation {
   };
 }
 
-function parseConversationCatalog(raw: string): ConversationCatalogV1 {
+function parseConversationCatalog(raw: string): ConversationCatalog {
   const value: unknown = JSON.parse(raw);
   if (!isRecord(value)) throw new Error("catalog must be an object");
   assertCatalogKeys(value, ["version", "coverage", "observations"]);
-  if (value.version !== CONVERSATION_CATALOG_VERSION) {
+  const sourceVersion = value.version === LEGACY_CONVERSATION_CATALOG_VERSION
+    ? LEGACY_CONVERSATION_CATALOG_VERSION
+    : value.version === CONVERSATION_CATALOG_VERSION
+    ? CONVERSATION_CATALOG_VERSION
+    : undefined;
+  if (sourceVersion === undefined) {
     throw new Error("catalog version is unsupported");
   }
   if (!isRecord(value.coverage)) throw new Error("catalog coverage must be an object");
   assertCatalogKeys(value.coverage, ["kind", "generation"]);
-  let coverage: ConversationCatalogV1["coverage"];
+  let coverage: ConversationCatalog["coverage"];
   if (value.coverage.kind === "unknown") {
     coverage = { kind: "unknown" };
   } else if (
@@ -568,7 +586,8 @@ function parseConversationCatalog(raw: string): ConversationCatalogV1 {
   if (!Array.isArray(value.observations) || value.observations.length > 10_000) {
     throw new Error("catalog observations are invalid");
   }
-  const observations = value.observations.map(parseCatalogObservation)
+  const observations = value.observations
+    .map((observation) => parseCatalogObservation(observation, sourceVersion))
     .sort((first, second) => first.relativePath.localeCompare(second.relativePath));
   if (observations.some((entry, index) =>
     index > 0 && entry.relativePath === observations[index - 1]?.relativePath
@@ -584,7 +603,7 @@ function parseConversationCatalog(raw: string): ConversationCatalogV1 {
 
 async function readConversationCatalog(
   catalogPath: string,
-): Promise<ConversationCatalogV1 | undefined> {
+): Promise<ConversationCatalog | undefined> {
   try {
     const information = await stat(catalogPath, { bigint: true });
     if (!information.isFile() || information.size > MAX_CONVERSATION_CATALOG_BYTES) {
@@ -600,7 +619,7 @@ async function readConversationCatalog(
 
 async function writeConversationCatalogAtomically(
   catalogPath: string,
-  catalog: ConversationCatalogV1,
+  catalog: ConversationCatalog,
 ): Promise<void> {
   const temporaryPath = join(
     dirname(catalogPath),
@@ -855,7 +874,7 @@ export class ProjectStore {
   private manifest: ProjectManifestV1;
   private conversations: ConversationSummary[] = [];
   private verifiedCatalog?: VerifiedSessionCatalog;
-  private conversationCatalog?: ConversationCatalogV1;
+  private conversationCatalog?: ConversationCatalog;
   private writeTail: Promise<void> = Promise.resolve();
   private refreshTail: Promise<void> = Promise.resolve();
   private catalogWriteTail: Promise<void> = Promise.resolve();
@@ -976,9 +995,9 @@ export class ProjectStore {
   private cachedCatalogConversations(): ConversationSummary[] {
     return (this.conversationCatalog?.observations ?? [])
       .flatMap((observation) =>
-        observation.body.kind === "valid" && observation.summary !== undefined
-          ? [{ ...observation.summary }]
-          : []
+        observation.summary === undefined
+          ? []
+          : [{ ...observation.summary }]
       )
       .sort((first, second) => {
         const byModified = Date.parse(second.updatedAt) - Date.parse(first.updatedAt);
@@ -1039,29 +1058,37 @@ export class ProjectStore {
     const observedAt = new Date().toISOString();
     const observations = namespace.evidence.map((evidence) => {
       const relativePath = this.catalogRelativePath(evidence.file);
-      const header = evidence.conversationId === undefined
-        ? { kind: "conclusively_invalid" as const }
-        : { kind: "claims" as const, conversationId: evidence.conversationId };
+      const header: CatalogHeaderEvidence = evidence.conversationId === undefined
+        ? { kind: "conclusively_invalid" }
+        : { kind: "claims", conversationId: evidence.conversationId };
       const previous = priorByPath.get(relativePath);
       if (
         previous !== undefined
         && this.catalogFingerprintMatches(previous, evidence.file)
-        && previous.header.kind === header.kind
-        && (
-          header.kind === "conclusively_invalid"
-          || (
-            previous.header.kind === "claims"
-            && previous.header.conversationId === header.conversationId
-          )
-        )
+        && this.catalogDisplayIdentityMatches(previous, evidence.file, header)
       ) {
-        return previous;
+        return {
+          ...previous,
+          fingerprint: { ...previous.fingerprint },
+          header: previous.header.kind === "claims"
+            ? { ...previous.header }
+            : { kind: "conclusively_invalid" },
+          body: { ...previous.body },
+          ...(previous.summary === undefined
+            ? {}
+            : { summary: { ...previous.summary } }),
+        } satisfies CatalogObservation;
       }
+      const summary = previous?.summary !== undefined
+        && this.catalogDisplayIdentityMatches(previous, evidence.file, header)
+        ? { ...previous.summary }
+        : undefined;
       return {
         relativePath,
         fingerprint: this.catalogFingerprint(evidence.file),
         header,
         body: { kind: "unverified" as const },
+        ...(summary === undefined ? {} : { summary }),
         observedAt,
         ...(header.kind === "conclusively_invalid"
           ? { diagnostic: "Session header is conclusively invalid" }
@@ -1085,13 +1112,17 @@ export class ProjectStore {
         target.body = { kind: "valid" };
         delete target.diagnostic;
       } catch (error) {
+        // The census fingerprint no longer names the bytes that failed to
+        // validate. Leave the cache unchanged so the next scrub starts again
+        // from a fresh namespace observation instead of calling it invalid.
+        if (error instanceof SessionFileChangedError) return true;
         target.body = { kind: "invalid" };
         target.diagnostic = this.catalogDiagnostic(error);
       }
       target.observedAt = new Date().toISOString();
     }
 
-    const catalog: ConversationCatalogV1 = {
+    const catalog: ConversationCatalog = {
       version: CONVERSATION_CATALOG_VERSION,
       coverage: {
         kind: "complete",
@@ -1102,12 +1133,15 @@ export class ProjectStore {
       ),
     };
     try {
-      await this.persistConversationCatalog(catalog);
+      const persisted = await this.persistConversationCatalog(catalog, {
+        expectedCurrent: prior,
+      });
+      return target !== undefined || !persisted;
     } catch {
       // A cache write cannot turn a proven transcript operation into failure.
       this.conversationCatalog = undefined;
+      return target !== undefined;
     }
-    return target !== undefined;
   }
 
   async createConversation(
@@ -1613,6 +1647,25 @@ export class ProjectStore {
       && observation.fingerprint.ctimeNs === fingerprint.ctimeNs;
   }
 
+  /** A display summary is stable across body changes, not file replacement. */
+  private catalogDisplayIdentityMatches(
+    observation: CatalogObservation,
+    file: Readonly<SessionFileFingerprint>,
+    header: CatalogHeaderEvidence,
+  ): boolean {
+    const fingerprint = this.catalogFingerprint(file);
+    if (
+      observation.fingerprint.dev !== fingerprint.dev
+      || observation.fingerprint.ino !== fingerprint.ino
+      || observation.header.kind !== header.kind
+    ) return false;
+    return header.kind === "conclusively_invalid"
+      || (
+        observation.header.kind === "claims"
+        && observation.header.conversationId === header.conversationId
+      );
+  }
+
   private namespaceGeneration(namespace: NamespaceHeaderCensus): string {
     const hash = createHash("sha256");
     for (const evidence of namespace.evidence) {
@@ -1635,21 +1688,29 @@ export class ProjectStore {
   }
 
   private async persistConversationCatalog(
-    catalog: ConversationCatalogV1,
-  ): Promise<void> {
+    catalog: ConversationCatalog,
+    options?: { expectedCurrent: ConversationCatalog | undefined },
+  ): Promise<boolean> {
+    let persisted = false;
     const next = this.catalogWriteTail.then(async () => {
+      if (
+        options !== undefined
+        && this.conversationCatalog !== options.expectedCurrent
+      ) return;
       await this.assertStateDirectorySafe();
       await writeConversationCatalogAtomically(
         this.conversationCatalogPath,
         catalog,
       );
       this.conversationCatalog = catalog;
+      persisted = true;
     });
     this.catalogWriteTail = next.then(
       () => undefined,
       () => undefined,
     );
     await next;
+    return persisted;
   }
 
   private async publishVerifiedConversationCatalog(
