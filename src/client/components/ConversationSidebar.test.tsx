@@ -289,7 +289,8 @@ describe("ConversationSidebar", () => {
     expect(standaloneRow).toHaveClass("hierarchy-standalone");
     expect(within(rootRow!).getByText("主任务")).toBeInTheDocument();
     expect(within(standaloneRow!).getByText("主会话")).toBeInTheDocument();
-    expect(screen.getByText("SUB-TEAM / AGENTS")).toBeInTheDocument();
+    expect(screen.getByText("协作 Agent · 属于 发布主任务"))
+      .toBeInTheDocument();
   });
 
   it("orders top-level conversations newest first while members stay dynamic", () => {
