@@ -1241,12 +1241,19 @@ export function App() {
   ) => {
     const focus = focusRef.current;
     if (!focus) return;
+    const snapshotObservation = {
+      sessionId: event.sessionId,
+      conversationId: event.conversationId,
+      focusId: event.focusId,
+    };
+    if (settleReadiness && event.transitionDiagnostics) {
+      transitionTiming.hostDiagnostics(
+        snapshotObservation,
+        event.transitionDiagnostics,
+      );
+    }
     const snapshotAttempt = settleReadiness
-      ? transitionTiming.snapshotAccepted({
-          sessionId: event.sessionId,
-          conversationId: event.conversationId,
-          focusId: event.focusId,
-        })
+      ? transitionTiming.snapshotAccepted(snapshotObservation)
       : undefined;
     dispatch({
       type: "hydrate",
@@ -1814,6 +1821,13 @@ export function App() {
           conversationId: event.conversationId,
           focusId: event.focusId,
         });
+        if (event.transitionDiagnostics) {
+          transitionTiming.hostDiagnostics({
+            sessionId: event.sessionId,
+            conversationId: event.conversationId,
+            focusId: event.focusId,
+          }, event.transitionDiagnostics);
+        }
         updatePendingFocus(undefined);
         updateConversationSyncing(event.operation === "focus_conversation");
         const preserveReconnectDraft = Boolean(

@@ -352,7 +352,10 @@ function configureOAuth(
   });
 }
 
-async function coordinatedConnectionHarness(runtime = new FakeRuntime()) {
+async function coordinatedConnectionHarness(
+  runtime = new FakeRuntime(),
+  monotonicNow?: () => number,
+) {
   const cwd = await realpath(
     await mkdtemp(join(tmpdir(), "piweb-coordinated-")),
   );
@@ -388,6 +391,7 @@ async function coordinatedConnectionHarness(runtime = new FakeRuntime()) {
     (event) => events.push(event),
     runtime,
     async () => ({ coordinator, roles }),
+    monotonicNow,
   );
   const cleanup = async () => {
     await connection.dispose();
@@ -555,6 +559,243 @@ async function replaceCoordinatedInitialization(
 }
 
 describe("PiConnection coordinated controls", () => {
+  it("attributes successful initialize and focus phases only on their first authority envelope", async () => {
+    let tick = 0;
+    const harness = await coordinatedConnectionHarness(
+      new FakeRuntime(),
+      () => ++tick,
+    );
+    try {
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: COMMAND_A,
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+      });
+      const emptyAttach = harness.events.find((event) =>
+        event.type === "focus_attached" && event.commandId === COMMAND_A
+      );
+      expect(emptyAttach).toMatchObject({
+        type: "focus_attached",
+        operation: "initialize",
+        transitionDiagnostics: {
+          version: 1,
+          commandId: COMMAND_A,
+          operation: "initialize",
+          validationMs: 1,
+          contextOrCatalogMs: 3,
+          presentationOrTargetReadMs: 1,
+          actorActivationOrLeaseMs: 0,
+          snapshotProjectionMs: null,
+        },
+      });
+
+      const firstConversationId = await createColdConversation(harness, "first");
+      const initializeStart = harness.events.length;
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: COMMAND_B,
+        sessionId: SESSION_B,
+        cwd: harness.cwd,
+        conversation: { kind: "open", conversationId: firstConversationId },
+      });
+      const initializedEvents = harness.events.slice(initializeStart);
+      const initializedAttach = initializedEvents.find((event) =>
+        event.type === "focus_attached" && event.commandId === COMMAND_B
+      );
+      if (
+        initializedAttach?.type !== "focus_attached"
+        || !initializedAttach.focusId
+      ) throw new Error("initialized focus was not attached");
+      expect(initializedAttach).not.toHaveProperty("transitionDiagnostics");
+      const initializedSnapshot = initializedEvents.find((event) =>
+        event.type === "conversation_snapshot"
+        && event.focusId === initializedAttach.focusId
+      );
+      expect(initializedSnapshot).toMatchObject({
+        transitionDiagnostics: {
+          version: 1,
+          commandId: COMMAND_B,
+          operation: "initialize",
+          validationMs: 1,
+          contextOrCatalogMs: 3,
+          presentationOrTargetReadMs: 1,
+          actorActivationOrLeaseMs: 1,
+          snapshotProjectionMs: 1,
+        },
+      });
+
+      const secondConversationId = await createColdConversation(harness, "second");
+      const coldFocusCommandId = randomUUID();
+      const coldFocusStart = harness.events.length;
+      await harness.connection.handle({
+        type: "focus_conversation",
+        commandId: coldFocusCommandId,
+        sessionId: SESSION_B,
+        conversationId: secondConversationId,
+      });
+      const coldFocusSnapshot = harness.events.slice(coldFocusStart).find((event) =>
+        event.type === "conversation_snapshot"
+        && event.conversationId === secondConversationId
+      );
+      expect(coldFocusSnapshot).toMatchObject({
+        transitionDiagnostics: {
+          commandId: coldFocusCommandId,
+          operation: "focus_conversation",
+          validationMs: 1,
+          contextOrCatalogMs: 1,
+          presentationOrTargetReadMs: 1,
+          actorActivationOrLeaseMs: 1,
+          snapshotProjectionMs: 1,
+        },
+      });
+
+      const warmFocusCommandId = randomUUID();
+      const warmFocusStart = harness.events.length;
+      await harness.connection.handle({
+        type: "focus_conversation",
+        commandId: warmFocusCommandId,
+        sessionId: SESSION_B,
+        conversationId: firstConversationId,
+      });
+      const warmEvents = harness.events.slice(warmFocusStart);
+      const warmAttach = warmEvents.find((event) =>
+        event.type === "focus_attached" && event.commandId === warmFocusCommandId
+      );
+      if (warmAttach?.type !== "focus_attached" || !warmAttach.focusId) {
+        throw new Error("warm focus was not attached");
+      }
+      expect(warmEvents.find((event) =>
+        event.type === "conversation_snapshot"
+        && event.focusId === warmAttach.focusId
+      )).toMatchObject({
+        transitionDiagnostics: {
+          commandId: warmFocusCommandId,
+          operation: "focus_conversation",
+          validationMs: 1,
+          contextOrCatalogMs: 1,
+          presentationOrTargetReadMs: 1,
+          actorActivationOrLeaseMs: 1,
+          snapshotProjectionMs: 1,
+        },
+      });
+
+      const refreshStart = harness.events.length;
+      await harness.connection.handle({
+        type: "refresh_view",
+        sessionId: SESSION_B,
+        projectId: latestState(harness.events).projectId,
+        conversationId: firstConversationId,
+        focusId: warmAttach.focusId,
+      });
+      const refreshedSnapshots = harness.events.slice(refreshStart).filter(
+        (event) => event.type === "conversation_snapshot",
+      );
+      expect(refreshedSnapshots).toHaveLength(1);
+      expect(refreshedSnapshots[0]).not.toHaveProperty("transitionDiagnostics");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it.each(["initialize", "focus_conversation"] as const)(
+    "keeps %s authority ahead of a failing diagnostic snapshot projection",
+    async (operation) => {
+      const harness = await coordinatedConnectionHarness();
+      let actorHandle: Awaited<ReturnType<
+        typeof harness.coordinator.acquireProject
+      >> | undefined;
+      try {
+        await harness.connection.handle({
+          type: "initialize",
+          commandId: COMMAND_A,
+          sessionId: SESSION_A,
+          cwd: harness.cwd,
+          conversation: { kind: "recent" },
+        });
+        const targetConversationId = await createColdConversation(
+          harness,
+          "projection target",
+        );
+        actorHandle = await harness.coordinator.acquireProject(
+          harness.cwd,
+          "read_only",
+        );
+        await harness.coordinator.ensureProjectModelCatalog(actorHandle);
+        const actor = await harness.coordinator.openConversation(
+          actorHandle,
+          targetConversationId,
+          { updateRecent: false },
+        );
+
+        const transitionStart = harness.events.length;
+        let eventsAtProjection: ServerEvent[] | undefined;
+        vi.spyOn(actor, "projectConversationItems").mockImplementation(() => {
+          eventsAtProjection ??= harness.events.slice(transitionStart);
+          throw new Error("diagnostic projection failed");
+        });
+
+        if (operation === "initialize") {
+          await harness.connection.handle({
+            type: "initialize",
+            commandId: COMMAND_B,
+            sessionId: SESSION_B,
+            cwd: harness.cwd,
+            conversation: {
+              kind: "open",
+              conversationId: targetConversationId,
+            },
+          });
+        } else {
+          await harness.connection.handle({
+            type: "focus_conversation",
+            commandId: COMMAND_B,
+            sessionId: SESSION_A,
+            conversationId: targetConversationId,
+          });
+        }
+
+        const transitionEvents = harness.events.slice(transitionStart);
+        const attach = transitionEvents.find((event) =>
+          event.type === "focus_attached" && event.commandId === COMMAND_B
+        );
+        if (attach?.type !== "focus_attached" || !attach.focusId) {
+          throw new Error("focus was not attached before projection");
+        }
+        expect(eventsAtProjection).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            type: "focus_attached",
+            commandId: COMMAND_B,
+            focusId: attach.focusId,
+          }),
+          expect.objectContaining({
+            type: "state",
+            state: expect.objectContaining({ focusId: attach.focusId }),
+          }),
+        ]));
+        const attachIndex = transitionEvents.indexOf(attach);
+        const stateIndex = transitionEvents.findIndex((event) =>
+          event.type === "state" && event.state.focusId === attach.focusId
+        );
+        const errorIndex = transitionEvents.findIndex((event) =>
+          event.type === "error"
+          && event.message.includes("diagnostic projection failed")
+        );
+        expect(attachIndex).toBeGreaterThanOrEqual(0);
+        expect(stateIndex).toBeGreaterThan(attachIndex);
+        expect(errorIndex).toBeGreaterThan(stateIndex);
+        expect(transitionEvents).not.toContainEqual(expect.objectContaining({
+          type: "conversation_snapshot",
+          transitionDiagnostics: expect.anything(),
+        }));
+      } finally {
+        actorHandle?.release();
+        await harness.cleanup();
+      }
+    },
+  );
+
   it("fails closed when the shared coordination provider cannot be acquired", async () => {
     const cwd = await realpath(await mkdtemp(join(tmpdir(), "piweb-coordination-failure-")));
     const runtime = new FakeRuntime();
@@ -3646,13 +3887,18 @@ describe("PiConnection coordinated project view", () => {
         busy: false,
       });
       expect(state).not.toHaveProperty("conversationId");
-      expect(harness.events).toContainEqual({
+      expect(harness.events).toContainEqual(expect.objectContaining({
         type: "focus_attached",
         operation: "initialize",
         commandId,
         sessionId: SESSION_A,
         projectId: latestState(harness.events).projectId,
-      });
+        transitionDiagnostics: expect.objectContaining({
+          commandId,
+          operation: "initialize",
+          snapshotProjectionMs: null,
+        }),
+      }));
       expect(harness.events).toContainEqual(expect.objectContaining({
         type: "role_catalog_snapshot",
         sessionId: SESSION_A,

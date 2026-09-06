@@ -21,6 +21,9 @@ export const MAX_LOOP_LIST_ITEM_TEXT_CHARACTERS = 512;
 export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
+export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
+// v42: successful workspace and conversation switches may carry bounded host
+// phase durations on their correlated authority snapshot (or empty attach).
 // v41: default compaction attempts and successful durable provenance distinguish
 // the requested model identity from legacy and custom summaries.
 // v40: role templates and frozen conversation role snapshots carry a required
@@ -39,7 +42,7 @@ export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 // conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
-export const PROTOCOL_VERSION = 41;
+export const PROTOCOL_VERSION = 42;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
@@ -743,6 +746,21 @@ const FOCUS_ATTACHED_OPERATIONS = [
 export type FocusAttachedOperation =
   typeof FOCUS_ATTACHED_OPERATIONS[number];
 
+export type TransitionDiagnosticOperation =
+  | "initialize"
+  | "focus_conversation";
+
+export interface TransitionDiagnostics {
+  version: 1;
+  commandId: string;
+  operation: TransitionDiagnosticOperation;
+  validationMs: number;
+  contextOrCatalogMs: number;
+  presentationOrTargetReadMs: number;
+  actorActivationOrLeaseMs: number;
+  snapshotProjectionMs: number | null;
+}
+
 export type ServerEvent =
   | { type: "hello"; protocolVersion: number; startupCwd: string }
   | ({ type: "directory_listing"; commandId: string } & DirectoryListing)
@@ -755,6 +773,7 @@ export type ServerEvent =
       projectId: string;
       focusId?: string;
       conversationId?: string;
+      transitionDiagnostics?: TransitionDiagnostics;
     }
   | {
       type: "focus_invalidated";
@@ -827,6 +846,7 @@ export type ServerEvent =
       pendingPrompts?: PendingPromptAdmissionSnapshot[];
       loopList?: LoopList;
       window: ConversationWindowCoverage;
+      transitionDiagnostics?: TransitionDiagnostics;
     }
   | {
       type: "loop_list_update";
@@ -1285,6 +1305,23 @@ const conversationWindowCoverageSchema: z.ZodType<ConversationWindowCoverage> = 
   contentTruncated: z.boolean(),
 });
 
+const transitionDiagnosticDurationSchema = z.number()
+  .finite()
+  .int()
+  .nonnegative()
+  .max(MAX_TRANSITION_DIAGNOSTIC_PHASE_MS);
+
+const transitionDiagnosticsSchema: z.ZodType<TransitionDiagnostics> = z.object({
+  version: z.literal(1),
+  commandId: commandIdSchema,
+  operation: z.enum(["initialize", "focus_conversation"]),
+  validationMs: transitionDiagnosticDurationSchema,
+  contextOrCatalogMs: transitionDiagnosticDurationSchema,
+  presentationOrTargetReadMs: transitionDiagnosticDurationSchema,
+  actorActivationOrLeaseMs: transitionDiagnosticDurationSchema,
+  snapshotProjectionMs: transitionDiagnosticDurationSchema.nullable(),
+}).strict();
+
 const serverEventUnionSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("hello"),
@@ -1311,6 +1348,7 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     projectId: z.string().uuid(),
     focusId: focusIdSchema.optional(),
     conversationId: conversationIdSchema.optional(),
+    transitionDiagnostics: transitionDiagnosticsSchema.optional(),
   }),
   z.object({
     type: z.literal("focus_invalidated"),
@@ -1413,6 +1451,7 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     }).strict()).max(MAX_PENDING_PROMPTS_PER_CONVERSATION).optional(),
     loopList: loopListSchema.optional(),
     window: conversationWindowCoverageSchema,
+    transitionDiagnostics: transitionDiagnosticsSchema.optional(),
   }).strict(),
   z.object({
     type: z.literal("loop_list_update"),
@@ -1547,6 +1586,33 @@ export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.
         code: z.ZodIssueCode.custom,
         message: `${event.operation} must attach an exact conversation focus`,
         path: ["focusId"],
+      });
+    }
+    if (event.type === "focus_attached" && event.transitionDiagnostics) {
+      const diagnostics = event.transitionDiagnostics;
+      if (
+        event.operation !== "initialize"
+        || event.focusId !== undefined
+        || event.conversationId !== undefined
+        || diagnostics.operation !== event.operation
+        || diagnostics.commandId !== event.commandId
+        || diagnostics.snapshotProjectionMs !== null
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "transition diagnostics on focus_attached require the matching empty initialize",
+          path: ["transitionDiagnostics"],
+        });
+      }
+    }
+    if (
+      event.type === "conversation_snapshot"
+      && event.transitionDiagnostics?.snapshotProjectionMs === null
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "conversation snapshot transition diagnostics require a projection duration",
+        path: ["transitionDiagnostics", "snapshotProjectionMs"],
       });
     }
     if (

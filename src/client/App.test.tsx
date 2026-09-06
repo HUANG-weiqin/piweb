@@ -3449,6 +3449,102 @@ describe("App", () => {
     ))).toBe(true));
   });
 
+  it("copies exact host phase diagnostics into transition detail without retaining wire identities", async () => {
+    const measure = vi.spyOn(performance, "measure");
+    socketMock.autoFocus = false;
+    render(<App />);
+    const sessionId = startFromSetup();
+    const initialize = latestCommand("initialize");
+    const transitionDiagnostics = {
+      version: 1 as const,
+      commandId: initialize.commandId!,
+      operation: "initialize" as const,
+      validationMs: 1,
+      contextOrCatalogMs: 2,
+      presentationOrTargetReadMs: 3,
+      actorActivationOrLeaseMs: 4,
+      snapshotProjectionMs: 5,
+    };
+
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "focus_attached",
+        operation: "initialize",
+        commandId: initialize.commandId!,
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        messages: [],
+        window: completeConversationWindow,
+        transitionDiagnostics,
+      });
+    });
+
+    await waitFor(() => expect(measure).toHaveBeenCalled());
+    const detail = (measure.mock.calls.find(
+      ([name]) => name === "piweb.transition",
+    )?.[1] as PerformanceMeasureOptions | undefined)?.detail;
+    expect(detail).toMatchObject({
+      host: {
+        version: 1,
+        validationMs: 1,
+        contextOrCatalogMs: 2,
+        presentationOrTargetReadMs: 3,
+        actorActivationOrLeaseMs: 4,
+        snapshotProjectionMs: 5,
+      },
+      termination: { kind: "success" },
+    });
+    expect(JSON.stringify(detail)).not.toContain(initialize.commandId);
+    expect(JSON.stringify(detail)).not.toContain(sessionId);
+    expect(JSON.stringify(detail)).not.toContain(CONVERSATION_ID);
+  });
+
+  it("consumes empty initialize host diagnostics from the correlated attach", async () => {
+    const measure = vi.spyOn(performance, "measure");
+    socketMock.autoFocus = false;
+    render(<App />);
+    const sessionId = startFromSetup();
+    const initialize = latestCommand("initialize");
+
+    act(() => socketMock.rawEmit?.({
+      type: "focus_attached",
+      operation: "initialize",
+      commandId: initialize.commandId!,
+      sessionId,
+      projectId: PROJECT_ID,
+      transitionDiagnostics: {
+        version: 1,
+        commandId: initialize.commandId!,
+        operation: "initialize",
+        validationMs: 1,
+        contextOrCatalogMs: 2,
+        presentationOrTargetReadMs: 3,
+        actorActivationOrLeaseMs: 0,
+        snapshotProjectionMs: null,
+      },
+    }));
+
+    await waitFor(() => expect(measure).toHaveBeenCalledWith(
+      "piweb.transition",
+      expect.objectContaining({
+        detail: expect.objectContaining({
+          host: expect.objectContaining({
+            snapshotProjectionMs: null,
+          }),
+          termination: { kind: "success" },
+        }),
+      }),
+    ));
+  });
+
   it("rejects mismatched previews and clears temporary previews on replacement and disconnect", () => {
     render(<App />);
     const sessionId = startFromSetup();

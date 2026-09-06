@@ -19,7 +19,7 @@ ClientCommand
 → App / reducer
 ```
 
-协议由 `PROTOCOL_VERSION` 标识，当前为 v41。角色模板、冻结角色快照、角色 catalog 与 conversation snapshot 的 role payload 都必须包含必填 nullable `compactionModel`；`null` 跟随冻结 primary model，不新增 command。v41 另把实际 default compaction request attempt 与 durable 成功 provenance 显式投影，二者都不能从配置推导。工具参数和结果允许 `unknown`，但服务端在投影时会做有界遍历、转成 JSON-safe 数据并限制单值大小。
+协议由 `PROTOCOL_VERSION` 标识，当前为 v42。v42 允许成功的 workspace initialize 与 conversation focus 在既有 authority envelope 上携带一次性 host phase diagnostics；它不新增事件、状态或持久记录。角色模板、冻结角色快照、角色 catalog 与 conversation snapshot 的 role payload 都必须包含必填 nullable `compactionModel`；`null` 跟随冻结 primary model，不新增 command。v41 另把实际 default compaction request attempt 与 durable 成功 provenance 显式投影，二者都不能从配置推导。工具参数和结果允许 `unknown`，但服务端在投影时会做有界遍历、转成 JSON-safe 数据并限制单值大小。
 
 ## 决策
 
@@ -41,6 +41,7 @@ ClientCommand
 - 扩展 `notify` 是有界、session-scoped 的 fire-and-forget 事件，不赋予任何工具许可。
 - initialize 的 conversation target 是 `recent | new(roleId) | open(conversationId)`；客户端不能提交 session 文件路径。空项目的 `recent` 返回“项目已打开、没有 active conversation”，不会偷偷创建 default 会话。
 - `focus_conversation` 和 `create_conversation` 使用一次性 commandId；服务端用同 commandId 的 `focus_attached` 确认新 focus。客户端在精确确认前不能把 pending target 当成当前 transcript。
+- v42 的可选 `transitionDiagnostics` 只属于成功的 `initialize | focus_conversation` 调用，不覆盖独立 `create_conversation` 命令、错误或后续 refresh。非空 focus 只把它附在本次 attach 后的首个 `conversation_snapshot`；空项目 `initialize(recent)` 没有 snapshot，才附在无 conversation/focus 的 `focus_attached`，且 `snapshotProjectionMs=null`。payload 使用同一 commandId 与 operation 关联，version 固定为 1；`validationMs / contextOrCatalogMs / presentationOrTargetReadMs / actorActivationOrLeaseMs` 以及非空 focus 的 `snapshotProjectionMs` 都是 0–3,600,000 的有限非负整数。actor phase 是 lease、权威文件证明与 runtime activation 的整体 envelope；snapshot phase 只测同步构建，不含 enqueue、delivery 或异步 `project_snapshot`。它不进入 `PublicState` 或磁盘，失败仍只走既有 error，浏览器必须再匹配 active transition 的 session、command、operation 与已 attach focus 后才消费。
 - `conversation_preview` 是 v33 的只读展示事件，只携带 `sessionId + commandId + projectId + conversationId` 关联的 cwd、toolMode、可选固化角色和有界 items/window；它没有 focusId，不是 transcript 或命令 authority。只有 cold exact/recent/focus 在只读完整性证明、当前命令身份以及 emit 前同步 actor/opening gate 都仍有效时才可能发送；display projection 失败可静默跳过，warm actor 直接等待其 live snapshot。后续精确 `focus_attached + conversation_snapshot` 才建立可执行 focus 并替换 preview。
 - `refresh_view` 是页面恢复后的无等待只读重同步，必须精确携带当前 `sessionId + projectId` 以及成对出现的 `conversationId + focusId`；身份已经变化时服务端静默丢弃。它刷新 state、角色目录和项目索引；只要 focused actor 未压缩，就可重发 conversation snapshot。active run 的 snapshot 由 actor 把 durable active branch 与尚未持久化的 live suffix 精确交接后生成，不能用纯持久快照覆盖正在流式生成的尾部，也不能把同一物理消息重复投影两次。
 - `refresh_models` 是 session-scoped 的联网配置命令，必须携带当前 `sessionId + commandId`。它使用 `refreshConfiguration({ allowNetwork: true, force: true, signal })`；成功只能由同一 correlation 的 `command_complete` 证明，失败由同一 correlation 的 command error 结算，不能用普通 state/catalog 更新冒充成功。连接内 commandId 不可复用；15 秒超时是明确失败，断线属于 unknown，生命周期替换会取消旧命令，三者都不得自动重发。服务启动后另有一次非阻塞、`force:true`、15 秒可取消的后台刷新，离线跳过；运行中仅手动强刷，不发送 wire 回执。

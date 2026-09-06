@@ -8,6 +8,7 @@ import {
   MAX_ROLE_NAME_CHARACTERS,
   MAX_ROLE_SYSTEM_PROMPT_BYTES,
   MAX_SERVER_EVENT_BYTES,
+  MAX_TRANSITION_DIAGNOSTIC_PHASE_MS,
   parseClientCommand,
   parseServerEvent,
   PROTOCOL_VERSION,
@@ -25,9 +26,20 @@ const targetConversationId = "cbcd831e-599b-40d6-9252-e79939ca49f4";
 const roleId = "f23db1e6-c657-4dac-8b7e-a14fdecc5f21";
 const messageId = "assistant:96b960be-b6bb-4a19-9cf2-78e77cb69425";
 
+const transitionDiagnostics = {
+  version: 1 as const,
+  commandId,
+  operation: "focus_conversation" as const,
+  validationMs: 1,
+  contextOrCatalogMs: 2,
+  presentationOrTargetReadMs: 3,
+  actorActivationOrLeaseMs: 4,
+  snapshotProjectionMs: 5,
+};
+
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(41);
+    expect(PROTOCOL_VERSION).toBe(42);
   });
 
   it("accepts supported commands", () => {
@@ -564,6 +576,95 @@ describe("parseClientCommand", () => {
       directories: [],
       truncated: false,
     })).toThrow();
+  });
+
+  it("accepts only bounded transition diagnostics on their authority envelope", () => {
+    expect(parseServerEvent({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId,
+      focusId,
+      items: [],
+      window: {
+        omittedBefore: false,
+        startsMidTurn: false,
+        contentTruncated: false,
+      },
+      transitionDiagnostics,
+    })).toMatchObject({ transitionDiagnostics });
+
+    const emptyDiagnostics = {
+      ...transitionDiagnostics,
+      operation: "initialize" as const,
+      snapshotProjectionMs: null,
+    };
+    expect(parseServerEvent({
+      type: "focus_attached",
+      operation: "initialize",
+      commandId,
+      sessionId,
+      projectId,
+      transitionDiagnostics: emptyDiagnostics,
+    })).toMatchObject({ transitionDiagnostics: emptyDiagnostics });
+
+    for (const invalid of [-1, 0.5, Number.NaN, Number.POSITIVE_INFINITY,
+      MAX_TRANSITION_DIAGNOSTIC_PHASE_MS + 1]) {
+      expect(() => parseServerEvent({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId,
+        focusId,
+        items: [],
+        window: {
+          omittedBefore: false,
+          startsMidTurn: false,
+          contentTruncated: false,
+        },
+        transitionDiagnostics: {
+          ...transitionDiagnostics,
+          validationMs: invalid,
+        },
+      })).toThrow();
+    }
+    expect(() => parseServerEvent({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId,
+      focusId,
+      items: [],
+      window: {
+        omittedBefore: false,
+        startsMidTurn: false,
+        contentTruncated: false,
+      },
+      transitionDiagnostics: {
+        ...transitionDiagnostics,
+        snapshotProjectionMs: null,
+      },
+    })).toThrow("projection duration");
+    expect(() => parseServerEvent({
+      type: "focus_attached",
+      operation: "initialize",
+      commandId,
+      sessionId,
+      projectId,
+      transitionDiagnostics: {
+        ...emptyDiagnostics,
+        commandId: "0c2678cb-eed2-4090-b95c-b5a75bf57ef4",
+      },
+    })).toThrow("matching empty initialize");
+    for (const operation of ["focus_conversation", "create_conversation"] as const) {
+      expect(() => parseServerEvent({
+        type: "focus_attached",
+        operation,
+        commandId,
+        sessionId,
+        projectId,
+        conversationId,
+        focusId,
+        transitionDiagnostics,
+      })).toThrow("matching empty initialize");
+    }
   });
 
   it("preserves secret auth prompt metadata without exposing a value", () => {

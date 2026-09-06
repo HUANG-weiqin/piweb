@@ -1,3 +1,5 @@
+import type { TransitionDiagnostics } from "../../shared/protocol";
+
 export type ClientTransitionKind = "workspace" | "conversation";
 export type TransitionOrigin = "user" | "restore" | "reconnect";
 export type TransitionCacheAtIntent = "hit" | "miss" | "n/a";
@@ -27,6 +29,15 @@ export interface ClientTransitionObservation {
   focusId?: string;
 }
 
+export interface TransitionHostPhaseDetail {
+  version: 1;
+  validationMs: number;
+  contextOrCatalogMs: number;
+  presentationOrTargetReadMs: number;
+  actorActivationOrLeaseMs: number;
+  snapshotProjectionMs: number | null;
+}
+
 export interface TransitionMeasureDetail {
   version: 1;
   kind: ClientTransitionKind;
@@ -41,6 +52,7 @@ export interface TransitionMeasureDetail {
   attachMs?: number;
   snapshotAcceptedMs?: number;
   interactiveMs?: number;
+  host?: TransitionHostPhaseDetail;
   terminalMs: number;
   termination:
     | { kind: "success" }
@@ -77,6 +89,10 @@ export interface TransitionTimingOwner {
   failMatching(intent: Pick<ClientTransitionIntent, "kind" | "sessionId" | "commandId">, reason: "server-error"): void;
   attemptFor(intent: Pick<ClientTransitionIntent, "kind" | "sessionId" | "commandId">): TransitionTimingAttempt | undefined;
   attach(attachment: ClientTransitionAttachment): TransitionTimingAttempt | undefined;
+  hostDiagnostics(
+    observation: ClientTransitionObservation,
+    diagnostics: TransitionDiagnostics,
+  ): TransitionTimingAttempt | undefined;
   snapshotAccepted(observation: ClientTransitionObservation): TransitionTimingAttempt | undefined;
   present(attempt: TransitionTimingAttempt, source: TransitionPresentationSource): void;
   interactive(attempt: TransitionTimingAttempt, observation: ClientTransitionObservation): void;
@@ -161,6 +177,32 @@ class PerformanceTransitionTimingOwner implements TransitionTimingOwner {
     if (!active || active.attachment || !this.matchesIntent(active, attachment)) return undefined;
     active.attachment = attachment;
     active.detail.attachMs = this.elapsed(active);
+    return active.attempt;
+  }
+
+  hostDiagnostics(
+    observation: ClientTransitionObservation,
+    diagnostics: TransitionDiagnostics,
+  ): TransitionTimingAttempt | undefined {
+    const active = this.active;
+    const expectedOperation = active?.intent.kind === "workspace"
+      ? "initialize"
+      : "focus_conversation";
+    if (
+      !active
+      || active.detail.host !== undefined
+      || diagnostics.commandId !== active.intent.commandId
+      || diagnostics.operation !== expectedOperation
+      || !this.matchesObservation(active, observation)
+    ) return undefined;
+    active.detail.host = {
+      version: diagnostics.version,
+      validationMs: diagnostics.validationMs,
+      contextOrCatalogMs: diagnostics.contextOrCatalogMs,
+      presentationOrTargetReadMs: diagnostics.presentationOrTargetReadMs,
+      actorActivationOrLeaseMs: diagnostics.actorActivationOrLeaseMs,
+      snapshotProjectionMs: diagnostics.snapshotProjectionMs,
+    };
     return active.attempt;
   }
 

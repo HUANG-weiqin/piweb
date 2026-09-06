@@ -30,6 +30,19 @@ function attachment(candidate = intent()) {
   };
 }
 
+function diagnostics(commandId: string, operation: "initialize" | "focus_conversation" = "focus_conversation") {
+  return {
+    version: 1 as const,
+    commandId,
+    operation,
+    validationMs: 1,
+    contextOrCatalogMs: 2,
+    presentationOrTargetReadMs: 3,
+    actorActivationOrLeaseMs: 4,
+    snapshotProjectionMs: operation === "initialize" ? null : 5,
+  };
+}
+
 function createPerformanceRecorder() {
   let now = 0;
   const entries: Array<{ name: string; detail: TransitionMeasureDetail }> = [];
@@ -173,6 +186,66 @@ describe("transition timing owner", () => {
     expect(performance.entries[0]?.detail).not.toHaveProperty("snapshotAcceptedMs");
   });
 
+  it("consumes host diagnostics once for the exact command and attached focus without retaining identities", () => {
+    const performance = createPerformanceRecorder();
+    const timing = createTransitionTimingOwner(performance.surface);
+    const firstIntent = intent("conversation", "first");
+    const firstAttempt = timing.candidate(firstIntent);
+    timing.promote(firstAttempt);
+    const firstAttachment = attachment(firstIntent);
+    timing.attach(firstAttachment);
+
+    expect(timing.hostDiagnostics(
+      { ...firstAttachment, focusId: "stale-focus" },
+      diagnostics(firstIntent.commandId),
+    )).toBeUndefined();
+    expect(timing.hostDiagnostics(
+      firstAttachment,
+      diagnostics("command-stale"),
+    )).toBeUndefined();
+
+    const secondIntent = intent("conversation", "second");
+    const secondAttempt = timing.candidate(secondIntent);
+    timing.promote(secondAttempt);
+    const secondAttachment = attachment(secondIntent);
+    timing.attach(secondAttachment);
+    expect(timing.hostDiagnostics(
+      firstAttachment,
+      diagnostics(firstIntent.commandId),
+    )).toBeUndefined();
+    expect(timing.hostDiagnostics(
+      secondAttachment,
+      diagnostics(secondIntent.commandId),
+    )).toBe(secondAttempt);
+    timing.hostDiagnostics(secondAttachment, {
+      ...diagnostics(secondIntent.commandId),
+      validationMs: 99,
+    });
+    timing.snapshotAccepted(secondAttachment);
+    timing.present(secondAttempt, "snapshot");
+    timing.interactive(secondAttempt, secondAttachment);
+
+    expect(performance.entries.at(-1)?.detail).toMatchObject({
+      host: {
+        version: 1,
+        validationMs: 1,
+        contextOrCatalogMs: 2,
+        presentationOrTargetReadMs: 3,
+        actorActivationOrLeaseMs: 4,
+        snapshotProjectionMs: 5,
+      },
+      termination: { kind: "success" },
+    });
+    const serialized = JSON.stringify(performance.entries.at(-1)?.detail);
+    expect(serialized).not.toContain("command-");
+    expect(serialized).not.toContain("session-");
+    expect(serialized).not.toContain("conversation-");
+    expect(timing.hostDiagnostics(
+      secondAttachment,
+      diagnostics(secondIntent.commandId),
+    )).toBeUndefined();
+  });
+
   it("emits sanitized versioned details through a bounded PerformanceEntry consumer surface", () => {
     const performance = createPerformanceRecorder();
     const timing = createTransitionTimingOwner(performance.surface);
@@ -202,6 +275,28 @@ describe("transition timing owner", () => {
     expect(JSON.stringify(entry?.detail)).not.toContain("session-");
     expect(JSON.stringify(entry?.detail)).not.toContain("command-");
     expect(JSON.stringify(entry?.detail)).not.toContain("conversation-");
+  });
+
+  it("keeps transition control flow intact when Performance measurement throws", () => {
+    const surface = {
+      now: () => 0,
+      measure: () => { throw new Error("measurement failed"); },
+      clearMeasures: () => undefined,
+      getEntriesByName: () => [] as unknown as PerformanceEntryList,
+    };
+    const timing = createTransitionTimingOwner(surface);
+    const candidate = intent();
+    const attempt = timing.candidate(candidate);
+    const attached = attachment(candidate);
+
+    expect(() => {
+      timing.promote(attempt);
+      timing.attach(attached);
+      timing.hostDiagnostics(attached, diagnostics(candidate.commandId));
+      timing.snapshotAccepted(attached);
+      timing.interactive(attempt, attached);
+    }).not.toThrow();
+    expect(timing.isActive(attempt)).toBe(false);
   });
 
   it("is a no-op when the Performance API is unavailable or incomplete", () => {
