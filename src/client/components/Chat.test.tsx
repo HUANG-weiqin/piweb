@@ -829,7 +829,8 @@ describe("Chat", () => {
       name: "正在压缩上下文",
     });
     expect(progress).toHaveTextContent("正在压缩上下文");
-    expect(progress).toHaveTextContent("默认摘要请求模型尚未记录");
+    expect(progress).toHaveTextContent("整理较早消息并保留关键信息");
+    expect(progress).not.toHaveTextContent("模型");
     expect(container.querySelector(".transcript")?.lastElementChild)
       .toBe(progress);
     expect(progress.querySelector(".compaction-spinner")).toBeInTheDocument();
@@ -2009,7 +2010,9 @@ describe("Chat", () => {
     expect(
       Array.from(transcript?.children ?? []).map((element) => element.className),
     ).toEqual(["message assistant", "compaction-marker", "message user"]);
-    const compaction = screen.getByRole("separator", { name: "上下文已压缩" });
+    const compaction = screen.getByRole("separator", {
+      name: "上下文已压缩：模型未记录",
+    });
     expect(compaction).toHaveTextContent("SYSTEM");
     expect(compaction).toHaveTextContent("CONTEXT COMPACTION");
     expect(compaction).toHaveTextContent("模型未记录");
@@ -2046,12 +2049,17 @@ describe("Chat", () => {
       }],
     }));
 
-    const markers = screen.getAllByRole("separator", { name: "上下文已压缩" });
-    expect(markers[0]).toHaveTextContent(
-      "Pi 默认摘要 · 请求目标：summary-provider / summary-model · 跟随角色模型",
-    );
+    const markers = screen.getAllByRole("separator");
+    const defaultLabel =
+      "Pi 默认摘要 · 请求目标：summary-provider / summary-model · 跟随角色模型";
+    expect(markers[0]).toHaveTextContent(defaultLabel);
+    expect(markers[0]).toHaveAccessibleName(`上下文已压缩：${defaultLabel}`);
     expect(markers[1]).toHaveTextContent("自定义摘要 · 模型归因未记录");
+    expect(markers[1]).toHaveAccessibleName(
+      "上下文已压缩：自定义摘要 · 模型归因未记录",
+    );
     expect(markers[2]).toHaveTextContent("模型未记录");
+    expect(markers[2]).toHaveAccessibleName("上下文已压缩：模型未记录");
     expect(markers[1]).not.toHaveTextContent("未使用模型");
   });
 

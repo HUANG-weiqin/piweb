@@ -894,7 +894,7 @@ function ChatView({
             key={`${transcriptRenderScopeKey}:compaction:${block.id}`}
             className="compaction-marker"
             role="separator"
-            aria-label="上下文已压缩"
+            aria-label={`上下文已压缩：${provenanceLabel}`}
           >
             <time className="compaction-time" dateTime={block.timestamp}>
               {formatTimelineTime(block.timestamp)}
@@ -961,7 +961,7 @@ function ChatView({
           <strong>正在压缩上下文</strong>
           <small>{compactionAttempt
             ? liveCompactionAttemptLabel(compactionAttempt)
-            : "正在准备摘要；默认摘要请求模型尚未记录。"}</small>
+            : "整理较早消息并保留关键信息…"}</small>
         </span>
       </div>}
     </section>
