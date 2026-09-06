@@ -31,12 +31,14 @@ import {
   appendReservedCustomEntry,
   createConversationCardEntry,
   createConversationMetaEntry,
+  createEditBudgetEntry,
   createLoopListContinueEntry,
   createLoopListEntry,
   createServiceTierSelectionEntry,
   LEGACY_LOOP_LIST_CUSTOM_TYPE,
   LOOP_LIST_CUSTOM_TYPE,
 } from "./conversation-meta.js";
+import { canonicalMutationPathKey } from "./edit-budget.js";
 import {
   ConversationActor,
   createPendingPromptBatchGuidance,
@@ -5443,7 +5445,7 @@ describe("ConversationActor", () => {
         piwebEditBudget: {
           countedNewFile: false,
           touchedFiles: 0,
-          remainingFiles: 1,
+          remainingFiles: 0,
         },
       },
     });
@@ -5486,6 +5488,60 @@ describe("ConversationActor", () => {
     });
     expect(decisions[5]).toMatchObject({ block: true });
     expect(editRemainingFiles).toEqual([0, 1, 0, 1, 0]);
+    await fixture.actor.dispose();
+  });
+
+  it("restores exact-run edit charges before an inbox recovery can mutate", async () => {
+    const manager = SessionManager.inMemory(process.cwd(), {
+      id: CONVERSATION_ID,
+    });
+    const chargedPath = await canonicalMutationPathKey(process.cwd(), {
+      path: "src/server/conversation-actor.ts",
+    });
+    expect(chargedPath).toBeDefined();
+    appendReservedCustomEntry(manager, createEditBudgetEntry({
+      kind: "grant",
+      runId: RUN_A,
+      fileCount: 1,
+    }));
+    appendReservedCustomEntry(manager, createEditBudgetEntry({
+      kind: "charge",
+      runId: RUN_A,
+      pathKey: chargedPath!,
+    }));
+    const fullAccessProfile = {
+      ...profile(),
+      role: { ...profile().role, toolMode: "full_access" as const },
+    };
+    const fixture = await openActor({
+      profile: fullAccessProfile,
+      sessionManager: manager,
+    });
+    const gate = fixture.runtime.createOptions?.toolCallGate;
+    const signal = new AbortController().signal;
+    const decisions: Array<{ block?: boolean } | undefined> = [];
+    fixture.runtime.session.resumeImplementation = async () => {
+      fixture.runtime.session.eventListener?.(nativeEvent({ type: "agent_start" }));
+      decisions.push(await gate?.({
+        toolCallId: "charged-retry",
+        toolName: "edit",
+        toolSource: "builtin",
+        args: { path: "src/server/conversation-actor.ts" },
+        signal,
+      }));
+      decisions.push(await gate?.({
+        toolCallId: "new-after-recovery",
+        toolName: "write",
+        toolSource: "builtin",
+        args: { path: "src/server/meta-tools.ts" },
+        signal,
+      }));
+      fixture.runtime.session.eventListener?.(nativeEvent({ type: "agent_end" }));
+    };
+
+    await fixture.actor.resumeMessages({ runId: RUN_A });
+
+    expect(decisions).toEqual([undefined, expect.objectContaining({ block: true })]);
     await fixture.actor.dispose();
   });
 

@@ -21,6 +21,7 @@ import {
   createConversationCardEntry,
   createConversationMessageEntry,
   createConversationMetaEntry,
+  createEditBudgetEntry,
   createRunSettlementEntry,
   parsePendingPromptBatchEntry,
   PENDING_PROMPT_BATCH_CUSTOM_TYPE,
@@ -1062,6 +1063,11 @@ describe("projectConversationHistory", () => {
       outcome: "completed",
       finalText: "Internal settlement",
       settledAt: "2026-07-19T10:03:00.000Z",
+    }));
+    appendReservedCustomEntry(manager, createEditBudgetEntry({
+      kind: "grant",
+      runId: randomUUID(),
+      fileCount: 1,
     }));
     const resume = createCompactionResumeEntry({
       content:

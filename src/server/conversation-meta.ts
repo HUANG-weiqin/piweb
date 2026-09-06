@@ -1,5 +1,12 @@
 import { z } from "zod";
 import {
+  EDIT_BUDGET_CUSTOM_TYPE,
+  MAX_EDIT_BUDGET_FILES_PER_REQUEST,
+  MAX_EDIT_BUDGET_PATH_KEY_BYTES,
+  type EditBudgetEvent,
+  validateEditBudgetEvents,
+} from "./edit-budget.js";
+import {
   MAX_COMPACTION_THRESHOLD_PERCENT,
   MAX_MODEL_REFERENCE_BYTES,
   MAX_PENDING_PROMPT_ATTENTION_REASON_CHARACTERS,
@@ -666,6 +673,25 @@ const runSettlementEntrySchema = z.object({
   data: runSettlementSchema,
 }).strict();
 
+const editBudgetEventSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("grant"),
+    runId: uuidSchema("runId"),
+    fileCount: z.number().int().min(1).max(MAX_EDIT_BUDGET_FILES_PER_REQUEST),
+  }).strict(),
+  z.object({
+    kind: z.literal("charge"),
+    runId: uuidSchema("runId"),
+    pathKey: limitedString("pathKey", MAX_EDIT_BUDGET_PATH_KEY_BYTES)
+      .refine((value) => !value.includes("\0"), "pathKey must not contain NUL"),
+  }).strict(),
+]);
+
+const editBudgetEntrySchema = z.object({
+  customType: z.literal(EDIT_BUDGET_CUSTOM_TYPE),
+  data: editBudgetEventSchema,
+}).strict();
+
 const pendingPromptDeliverySchema = z.object({
   promptId: uuidSchema("promptId"),
   runId: uuidSchema("runId"),
@@ -925,6 +951,7 @@ type ParsedLoopListContinueEntry =
 export type RunSettlement = z.infer<typeof runSettlementSchema>;
 export type RunSettlementEntry =
   z.infer<typeof runSettlementEntrySchema>;
+export type EditBudgetEntry = z.infer<typeof editBudgetEntrySchema>;
 export type PendingPromptDelivery =
   z.infer<typeof pendingPromptDeliverySchema>;
 export type PendingPromptDeliveryEntry =
@@ -989,6 +1016,10 @@ export type ReservedConversationEntry =
       entry: RunSettlementEntry;
     }
   | {
+      kind: "edit_budget";
+      entry: EditBudgetEntry;
+    }
+  | {
       kind: "pending_prompt_delivery";
       entry: PendingPromptDeliveryEntry;
     }
@@ -1019,6 +1050,7 @@ export interface ReservedConversationAggregate {
   deliveredMessageIds: string[];
   messageDeliveryReceipts: MessageDeliveryReceipt[];
   runSettlements: RunSettlement[];
+  editBudgetEvents: EditBudgetEvent[];
   pendingPromptDeliveries: PendingPromptDelivery[];
   pendingPromptBatches: PendingPromptBatch[];
   temporaryReturnReceipts: TemporaryReturnReceipt[];
@@ -1178,6 +1210,19 @@ export function parseRunSettlementEntry(
   return runSettlementEntrySchema.parse(value);
 }
 
+export function parseEditBudgetEntry(value: unknown): EditBudgetEntry {
+  return editBudgetEntrySchema.parse(value);
+}
+
+export function createEditBudgetEntry(
+  data: EditBudgetEvent,
+): EditBudgetEntry {
+  return parseEditBudgetEntry({
+    customType: EDIT_BUDGET_CUSTOM_TYPE,
+    data,
+  });
+}
+
 export function createRunSettlementEntry(
   data: RunSettlement,
 ): RunSettlementEntry {
@@ -1273,6 +1318,7 @@ export function appendReservedCustomEntry(
     | ConversationCardEntry
     | MessageDeliveryReceiptEntry
     | RunSettlementEntry
+    | EditBudgetEntry
     | PendingPromptDeliveryEntry
     | PendingPromptBatchEntry
     | TemporaryReturnReceiptEntry
@@ -1408,6 +1454,12 @@ export function parseReservedConversationEntry(
     return {
       kind: "run_settlement",
       entry: parseRunSettlementEntry(payload),
+    };
+  }
+  if (customType === EDIT_BUDGET_CUSTOM_TYPE) {
+    return {
+      kind: "edit_budget",
+      entry: parseEditBudgetEntry(payload),
     };
   }
   if (customType === PENDING_PROMPT_DELIVERY_CUSTOM_TYPE) {
@@ -1604,6 +1656,7 @@ export function aggregateReservedConversationEntries(
     MessageDeliveryReceipt
   >();
   const runSettlements = new Map<string, RunSettlement>();
+  const editBudgetEvents: EditBudgetEvent[] = [];
   const pendingPromptDeliveries = new Map<string, PendingPromptDelivery>();
   const pendingPromptBatches = new Map<string, PendingPromptBatch>();
   const temporaryReturnReceipts = new Map<
@@ -1713,6 +1766,10 @@ export function aggregateReservedConversationEntries(
         reserved.entry.data.updatedAt,
       );
       loopList = reserved.entry.data;
+      continue;
+    }
+    if (reserved.kind === "edit_budget") {
+      editBudgetEvents.push(reserved.entry.data);
       continue;
     }
     if (reserved.kind === "pending_prompt_delivery") {
@@ -1919,6 +1976,8 @@ export function aggregateReservedConversationEntries(
     runSettlements.set(incoming.runId, incoming);
   }
 
+  validateEditBudgetEvents(editBudgetEvents);
+
   return {
     ...(conversationMeta === undefined
       ? {}
@@ -1927,6 +1986,7 @@ export function aggregateReservedConversationEntries(
     deliveredMessageIds: [...deliveredMessageIds],
     messageDeliveryReceipts: [...messageDeliveryReceipts.values()],
     runSettlements: [...runSettlements.values()],
+    editBudgetEvents,
     pendingPromptDeliveries: [...pendingPromptDeliveries.values()],
     pendingPromptBatches: [...pendingPromptBatches.values()],
     temporaryReturnReceipts: [...temporaryReturnReceipts.values()],

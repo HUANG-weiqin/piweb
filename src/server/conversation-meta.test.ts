@@ -27,6 +27,7 @@ import {
   createCompactionThresholdEntry,
   createConversationCardEntry,
   createConversationMessageEntry,
+  createEditBudgetEntry,
   createConversationMetaEntry,
   createConversationRoleChangeEntry,
   createMetaOperationEntry,
@@ -38,6 +39,7 @@ import {
   createTemporaryReturnReceiptEntry,
   parseConversationCardEntry,
   parseCompactionThresholdEntry,
+  parseEditBudgetEntry,
   parseConversationMessageEntry,
   parseConversationMetaEntry,
   parseConversationRoleChangeEntry,
@@ -210,6 +212,36 @@ describe("conversation reserved entries", () => {
     value.role.name = "mutated";
     expect(entry.data.role.name).toBe("Worker");
     expect(parseConversationMetaEntry(entry)).toEqual(entry);
+  });
+
+  it("keeps edit-budget grants and irreversible charges as reserved entries", () => {
+    const runId = randomUUID();
+    const grant = createEditBudgetEntry({
+      kind: "grant",
+      runId,
+      fileCount: 1,
+    });
+    const charge = createEditBudgetEntry({
+      kind: "charge",
+      runId,
+      pathKey: "/project/src/file.ts",
+    });
+
+    expect(parseEditBudgetEntry(grant)).toEqual(grant);
+    expect(parseReservedConversationEntry(charge)).toEqual({
+      kind: "edit_budget",
+      entry: charge,
+    });
+    expect(aggregateReservedConversationEntries([grant, charge]))
+      .toMatchObject({ editBudgetEvents: [grant.data, charge.data] });
+    expect(() => aggregateReservedConversationEntries([charge])).toThrow(
+      /exceeds the granted file count/i,
+    );
+    expect(() => createEditBudgetEntry({
+      kind: "charge",
+      runId,
+      pathKey: "\0",
+    })).toThrow(/pathKey/i);
   });
 
   it("keeps the latest valid conversation compaction threshold", () => {

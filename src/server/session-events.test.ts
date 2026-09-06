@@ -307,6 +307,7 @@ describe("toWireValue", () => {
         piwebEditBudget: {
           countedNewFile: true,
           grantedFiles: 2,
+          chargedFiles: 2,
           touchedFiles: 1,
           remainingFiles: 1,
           blockedAttempts: 0,
@@ -316,7 +317,16 @@ describe("toWireValue", () => {
 
     expect(projected).toMatchObject({
       truncated: true,
-      details: { piwebEditBudget: { remainingFiles: 1 } },
+      details: {
+        piwebEditBudget: {
+          countedNewFile: true,
+          grantedFiles: 2,
+          chargedFiles: 2,
+          touchedFiles: 1,
+          remainingFiles: 1,
+          blockedAttempts: 0,
+        },
+      },
     });
     expect(Buffer.byteLength(JSON.stringify(projected), "utf8"))
       .toBeLessThan(200_000);

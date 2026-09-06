@@ -38,6 +38,7 @@ import {
   appendReservedCustomEntry,
   createCompactionThresholdEntry,
   createCompactionResumeEntry,
+  createEditBudgetEntry,
   createLoopListContinueEntry,
   createLoopListEntry,
   createConversationMetaEntry,
@@ -57,6 +58,7 @@ import { createLoopListTools } from "./loop-list-tools.js";
 import {
   canonicalMutationPathKey,
   createEditBudgetLedger,
+  restoreEditBudgetLedger,
   type EditBudgetLedger,
   isBuiltinFileMutation,
   MAX_EDIT_BUDGET_FILES_PER_REQUEST,
@@ -1080,6 +1082,11 @@ export class ConversationActor {
             "Edit budget requires at least one active LoopList item. Call todo_write first and mark current work active.",
           );
         }
+        appendReservedCustomEntry(this.sessionManager, createEditBudgetEntry({
+          kind: "grant",
+          runId: ticket.id,
+          fileCount: finalInput.fileCount,
+        }));
         ticket.editBudget.grantedFiles = finalInput.fileCount;
         const details = {
           outcome: "edit_budget_granted" as const,
@@ -2134,6 +2141,14 @@ export class ConversationActor {
     if (this.usedRunIds.has(input.runId)) {
       throw new Error("Run ID was already used in this conversation actor");
     }
+    const editBudget = input.recovered
+      ? restoreEditBudgetLedger(
+        aggregateReservedConversationEntries(
+          this.sessionManager.getBranch(),
+        ).editBudgetEvents,
+        input.runId,
+      )
+      : createEditBudgetLedger();
     if (input.origin === "browser") this.rearmLoopList();
     this.usedRunIds.add(input.runId);
     const ownership: ConversationRunOwnership = Object.freeze({
@@ -2164,7 +2179,7 @@ export class ConversationActor {
         ? {}
         : { autoTitlePrompt: input.autoTitlePrompt }),
       phase: "queued",
-      editBudget: createEditBudgetLedger(),
+      editBudget,
       pendingMutationPathKeys: new Map(),
       toolMode: this.profileSnapshot.role.toolMode,
       sawSdkCompactionAttempt: false,
@@ -3357,16 +3372,34 @@ export class ConversationActor {
         };
       }
       const snapshot = snapshotEditBudget(ticket.editBudget);
-      if (
-        !ticket.editBudget.touchedPathKeys.has(pathKey)
-        && snapshot.remainingFiles === 0
-      ) {
+      const isNewCharge = !ticket.editBudget.chargedPathKeys.has(pathKey);
+      if (isNewCharge && snapshot.remainingFiles === 0) {
         ticket.editBudget.blockedAttempts += 1;
         return {
           block: true,
           reason:
             "Edit was not executed because this run has no budget for a new file. Call request_edit_budget with the expected distinct file count and a concise reason, then retry.",
         };
+      }
+      if (isNewCharge) {
+        try {
+          appendReservedCustomEntry(this.sessionManager, createEditBudgetEntry({
+            kind: "charge",
+            runId: ticket.id,
+            pathKey,
+          }));
+        } catch (error) {
+          this.emitError(
+            `Could not persist edit budget charge: ${errorMessage(error)}`,
+            ticket.id,
+          );
+          return {
+            block: true,
+            reason:
+              "Edit was not executed because its budget charge could not be recorded durably",
+          };
+        }
+        ticket.editBudget.chargedPathKeys.add(pathKey);
       }
       ticket.pendingMutationPathKeys.set(input.toolCallId, {
         pathKey,

@@ -5,23 +5,52 @@ import { describe, expect, it } from "vitest";
 import {
   canonicalMutationPathKey,
   createEditBudgetLedger,
+  restoreEditBudgetLedger,
   snapshotEditBudget,
+  validateEditBudgetEvents,
 } from "./edit-budget.js";
 
 describe("edit budget accounting", () => {
   it("reports grants, distinct touches, and remaining files", () => {
     const ledger = createEditBudgetLedger();
     ledger.grantedFiles = 2;
+    ledger.chargedPathKeys.add("one");
     ledger.touchedPathKeys.add("one");
     ledger.touchedPathKeys.add("one");
     ledger.blockedAttempts = 1;
 
     expect(snapshotEditBudget(ledger)).toEqual({
       grantedFiles: 2,
+      chargedFiles: 1,
       touchedFiles: 1,
       remainingFiles: 1,
       blockedAttempts: 1,
     });
+  });
+
+  it("replays irreversible exact-run charges and rejects an ungranted charge", () => {
+    const runId = "f74fedb8-ea07-49a6-bd47-3036f7b06a27";
+    const otherRunId = "0dd23f7c-80c8-4713-b7a7-33c00177a101";
+    const events = [
+      { kind: "grant" as const, runId, fileCount: 1 },
+      { kind: "charge" as const, runId, pathKey: "/project/one.ts" },
+      { kind: "grant" as const, runId, fileCount: 2 },
+      { kind: "charge" as const, runId, pathKey: "/project/two.ts" },
+      { kind: "charge" as const, runId, pathKey: "/project/one.ts" },
+      { kind: "grant" as const, runId: otherRunId, fileCount: 99 },
+    ];
+
+    validateEditBudgetEvents(events);
+    expect(snapshotEditBudget(restoreEditBudgetLedger(events, runId))).toEqual({
+      grantedFiles: 2,
+      chargedFiles: 2,
+      touchedFiles: 0,
+      remainingFiles: 0,
+      blockedAttempts: 0,
+    });
+    expect(() => validateEditBudgetEvents([
+      { kind: "charge", runId, pathKey: "/project/ungranted.ts" },
+    ])).toThrow(/exceeds the granted file count/i);
   });
 
   it("uses Pi-style path normalization and folds aliases of an existing file", async () => {

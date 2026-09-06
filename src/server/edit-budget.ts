@@ -3,17 +3,36 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+export const EDIT_BUDGET_CUSTOM_TYPE = "piweb.edit_budget.v1";
 export const MAX_EDIT_BUDGET_FILES_PER_REQUEST = 100;
 export const MAX_EDIT_BUDGET_REASON_CHARACTERS = 2_000;
+export const MAX_EDIT_BUDGET_PATH_KEY_BYTES = 32 * 1024;
+
+/** A non-context, append-only proof of an edit-budget decision. */
+export type EditBudgetEvent =
+  | {
+    kind: "grant";
+    runId: string;
+    fileCount: number;
+  }
+  | {
+    kind: "charge";
+    runId: string;
+    pathKey: string;
+  };
 
 export interface EditBudgetLedger {
   grantedFiles: number;
+  /** Paths durably authorized before their builtin call was allowed to run. */
+  readonly chargedPathKeys: Set<string>;
+  /** Paths whose successful modification this live process actually observed. */
   readonly touchedPathKeys: Set<string>;
   blockedAttempts: number;
 }
 
 export interface EditBudgetSnapshot {
   grantedFiles: number;
+  chargedFiles: number;
   touchedFiles: number;
   remainingFiles: number;
   blockedAttempts: number;
@@ -22,6 +41,7 @@ export interface EditBudgetSnapshot {
 export function createEditBudgetLedger(): EditBudgetLedger {
   return {
     grantedFiles: 0,
+    chargedPathKeys: new Set(),
     touchedPathKeys: new Set(),
     blockedAttempts: 0,
   };
@@ -30,13 +50,70 @@ export function createEditBudgetLedger(): EditBudgetLedger {
 export function snapshotEditBudget(
   ledger: EditBudgetLedger,
 ): EditBudgetSnapshot {
-  const touchedFiles = ledger.touchedPathKeys.size;
+  const chargedFiles = ledger.chargedPathKeys.size;
   return {
     grantedFiles: ledger.grantedFiles,
-    touchedFiles,
-    remainingFiles: Math.max(0, ledger.grantedFiles - touchedFiles),
+    chargedFiles,
+    touchedFiles: ledger.touchedPathKeys.size,
+    remainingFiles: Math.max(0, ledger.grantedFiles - chargedFiles),
     blockedAttempts: ledger.blockedAttempts,
   };
+}
+
+/**
+ * Replays exact-run entries in transcript order. A charge is deliberately
+ * irreversible: a builtin write can take effect before it later reports an
+ * error or observes abort, so only a durable pre-call charge survives safely.
+ */
+export function restoreEditBudgetLedger(
+  events: readonly EditBudgetEvent[],
+  runId: string,
+): EditBudgetLedger {
+  const ledger = createEditBudgetLedger();
+  for (const event of events) {
+    if (event.runId !== runId) continue;
+    if (event.kind === "grant") {
+      ledger.grantedFiles = event.fileCount;
+      continue;
+    }
+    if (
+      !ledger.chargedPathKeys.has(event.pathKey)
+      && snapshotEditBudget(ledger).remainingFiles === 0
+    ) {
+      throw new Error(
+        `Edit budget charge exceeds the granted file count for run ${runId}`,
+      );
+    }
+    ledger.chargedPathKeys.add(event.pathKey);
+  }
+  return ledger;
+}
+
+/** Validates every run's independent journal without granting cross-run state. */
+export function validateEditBudgetEvents(
+  events: readonly EditBudgetEvent[],
+): void {
+  const ledgers = new Map<string, EditBudgetLedger>();
+  for (const event of events) {
+    let ledger = ledgers.get(event.runId);
+    if (ledger === undefined) {
+      ledger = createEditBudgetLedger();
+      ledgers.set(event.runId, ledger);
+    }
+    if (event.kind === "grant") {
+      ledger.grantedFiles = event.fileCount;
+      continue;
+    }
+    if (
+      !ledger.chargedPathKeys.has(event.pathKey)
+      && snapshotEditBudget(ledger).remainingFiles === 0
+    ) {
+      throw new Error(
+        `Edit budget charge exceeds the granted file count for run ${event.runId}`,
+      );
+    }
+    ledger.chargedPathKeys.add(event.pathKey);
+  }
 }
 
 export function isBuiltinFileMutation(

@@ -267,7 +267,7 @@ function ownDataProperty(value: unknown, key: string): unknown {
 
 function retainedEditBudgetDetails(
   value: unknown,
-): { piwebEditBudget: { remainingFiles: number } } | undefined {
+): { piwebEditBudget: Record<string, number | boolean> } | undefined {
   const details = ownDataProperty(value, "details");
   const budget = ownDataProperty(details, "piwebEditBudget");
   const remainingFiles = ownDataProperty(budget, "remainingFiles");
@@ -276,7 +276,27 @@ function retainedEditBudgetDetails(
     || !Number.isSafeInteger(remainingFiles)
     || remainingFiles < 0
   ) return;
-  return { piwebEditBudget: { remainingFiles } };
+  const retained: Record<string, number | boolean> = { remainingFiles };
+  for (const key of [
+    "grantedFiles",
+    "chargedFiles",
+    "touchedFiles",
+    "blockedAttempts",
+  ]) {
+    const count = ownDataProperty(budget, key);
+    if (
+      typeof count === "number"
+      && Number.isSafeInteger(count)
+      && count >= 0
+    ) {
+      retained[key] = count;
+    }
+  }
+  const countedNewFile = ownDataProperty(budget, "countedNewFile");
+  if (typeof countedNewFile === "boolean") {
+    retained.countedNewFile = countedNewFile;
+  }
+  return { piwebEditBudget: retained };
 }
 
 export function toWireValue(value: unknown): unknown {
