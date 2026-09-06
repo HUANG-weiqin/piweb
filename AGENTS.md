@@ -24,20 +24,20 @@ Pi Web 是本机优先的极简 Agent 工作台。当前目标不是复制 Pi �
 
 - 新功能先判断它是否必须参与 Agent 生命周期、权限决策、持久会话或协议关联；如果不需要，并且外部工具可以完整替代，就不进入工作台核心。
 - Git 负责 diff、历史、回滚和分支；编辑器负责文件浏览与人工编辑；终端负责通用交互式 shell。工作台最多提供浅层交接，不维护第二份真相。
-- `src/shared/protocol.ts` 是浏览器与服务端的唯一线协议；浏览器不得导入 Pi SDK 事件类型。
+- `src/shared/protocol.ts` 是浏览器与服务端的唯一线协议，当前为 v40；浏览器不得导入 Pi SDK 事件类型。角色模板、冻结角色快照、角色目录和 conversation snapshot 的角色 payload 都必须携带必填 nullable `compactionModel`，不新增命令。
 - initialize 前的只读目录浏览只属于 socket control；必须用一次性 commandId 关联有界列表。浏览 `path` 不是项目 cwd，不得创建项目状态或触发资源加载；用户确认后仍由 initialize 独立校验。
-- `PiRuntime` 进程级共享 `CredentialStore` 与基线 `ModelRegistry`，每个 session 另有隔离的模型目录；所有认证/模型缓存修改必须从串行入口经过。
+- `PiRuntime` 进程级共享 `CredentialStore` 与基线 `ModelRegistry`，每个 session 另有隔离的模型目录；所有认证/模型缓存修改必须从串行入口经过。Pi 0.85.1 的私有 `_runDefaultCompaction` 是唯一默认压缩适配点：custom `session_before_compact` 结果直接采用，否则 fresh-resolve 冻结的显式压缩模型并保留 Pi 原生准备、摘要、split-turn、文件、usage、abort、持久化和 continuation；失败不回退、不追加 compaction/rebuild，接点前 Pi transient overflow recovery 变化不承诺回滚。
 - 项目扩展可以注册工具、hooks 和静态 provider 配置；在引入 worker/进程隔离前，必须拒绝进程全局的 `streamSimple` 与 OAuth provider 注册。
 - 项目资源必须在 trust resolution 后加载；默认 `SettingsManager` 不得以 `projectTrusted=true` 启动。
 - 允许的 provider 配置必须先深快照再交给 SDK，不能保留扩展传入的可变对象引用。
-- `ProjectStoreRegistry` 按 canonical cwd 在活动 handle 生命周期内复用项目 store，末次 release 后逐出；`.piweb/project.json` 是 durable manifest，`.piweb/sessions` 是受控 Pi sessionDir。
+- `ProjectStoreRegistry` 按 canonical cwd 在活动 handle 生命周期内复用项目 store，末次 release 后逐出；`.piweb/project.json` 是 durable manifest，`.piweb/sessions` 是受控 Pi sessionDir。角色快照中的 compaction identity 随 conversation 持久化并由 coordinator 在 reopen/rollback 及 peer 路径中保持，不由当前目录刷新改写。
 - `ConversationActor` 原子持有一个持久 conversation 的 project store、`SessionManager`、writer lease、角色/LoopList 快照、AgentSession runtime 和唯一 active run；`PiConnection` 只持有项目观察、当前 focus 与连接级临时交互。
 - `projectId`、`conversationId`、`sessionId` 和 `runId` 属于不同生命周期，禁止合并或互相替代。
 - 同一进程内一个 `canonical cwd + conversationId` 只能有一个 writer lease；租约必须在 Pi `open()` 前取得，并在所有失败/关闭路径释放。
 - 已有对话重连可有界等待旧 lease；等待必须 FIFO、可取消，不能通过第二个 writer 解决。
 - 删除只接受 conversationId：目标及其 metadata descendant set 中任一 busy/compacting conversation 都必须拒绝；删除前先冻结 cascade set，非当前目标必须 fail-fast 取得独占 writer lease，并在完整路径/identity 校验后逐个精确 unlink JSONL；删除与索引刷新共用串行边界。
 - Pi `SessionManager.listAll()` 不是完整性证明：宿主必须验证受控目录内全部常规 JSONL 的尾换行、有限 JSON 数值、header、经迁移后的 entry payload/tree，并要求磁盘全集与 SDK 索引按规范路径和 conversationId 一一对应；任何遗漏、损坏、重复或扫描期变化都 fail closed。
-- 工具权限属于用户级角色模板，并进入 conversation 当前角色快照；新角色和旧角色迁移默认 `read_only`，模板后续编辑不得自动改变已有会话。每个 Agent 可读取任意角色完整定义，并在用户明确要求后通过 `propose_role_revision` 提议完整替换 system prompt；只有 conversation-scoped editor 返回用户提交文本后才能按 expected revision + base prompt CAS 写入下一模板 revision，名称、简介、模型、思考强度与权限必须原样保留。用户仍只可在会话空闲时显式应用一个当前可用角色，宿主必须追加角色变更记录并用同一 SessionManager 重建运行时；失败要恢复上一角色或将 actor 置为 fatal。
+- 工具权限属于用户级角色模板，并进入 conversation 当前角色快照；RoleStore v7 的模板、draft 和 frozen snapshot 都必须有 nullable `compactionModel`：`null` 跟随冻结 primary model，显式模型只用于默认压缩；旧 v1–v6 角色文档及旧 conversation/card/role-change 快照缺失该字段时归 `null`，不增加语义 revision。显式压缩模型在 create/update/switch 时必须可用且 finite positive `contextWindow >= primary`，目录漂移不阻止已有会话打开，但每次默认压缩 fresh-resolve/revalidate，失败不 fallback。模板后续编辑不得自动改变已有会话。每个 Agent 可读取任意角色完整定义，并在用户明确要求后通过 `propose_role_revision` 提议完整替换 system prompt；只有 conversation-scoped editor 返回用户提交文本后才能按 expected revision + base prompt CAS 写入下一模板 revision，名称、简介、模型、思考强度、压缩模型与权限必须原样保留。用户仍只可在会话空闲时显式应用一个当前可用角色，coordinator 将完整冻结 identity 传给每个 runtime create/reopen/switch/rollback/peer 路径，宿主必须追加角色变更记录并用同一 SessionManager 重建运行时；失败要恢复上一角色或将 actor 置为 fatal。
 - 浏览器不是 transcript owner；恢复必须从服务端 `conversation_snapshot` hydrate，localStorage 只保存最后工作目录与最近工作区目录列表（`piweb.lastCwd` / `piweb.workspaces`）。
 - LoopList 是 conversation-scoped 的宿主权威三态任务列表，每项只能是 `pending | active | completed`，允许多个 active 且顺序只用于展示；active 是持久关注状态，不能替代 `armed` 或 `activeRun`。只允许 `todo_read/todo_write/todo_pause` 三个 SDK 工具整表读写或暂停；新状态和 continuation 用严格 v2 custom entry 持久化，读取 v1 时只把 checked 映射为 pending/completed，绝不推导 active。full-access Agent 的 `request_edit_budget` 在授予额度时必须看到至少一个 active；成功申请把 `fileCount` 覆盖为本 run 的总 distinct-file 上限（包含已修改文件），拒绝不能改变额度。armed 且存在非 completed 项时，actor 在同一 runId 内用隐藏 custom message 最多续跑 8 次，完成或空列表才自然结算，达到上限、异常和 abort 都暂停；重启不得自动开跑，后续普通用户 prompt 可重置 armed。actor 从 active branch 的既有全量快照和 `updatedAt` 重放派生两个 wall-clock 计时锚点，不新增持久字段：无序稳定 item ID 集合变化表示整份计划变化并重置两者，无序 active ID 集合变化只重置 active 锚点；整表锚点从当前 plan snapshot 建立时开始，active 锚点只在存在 active 时保留。仅当存在 active 项时，每次普通 Agent turn 的 provider 请求才把最多 4096 UTF-8 bytes 的规范 `piweb_work` 摘要（含自解释、向下取整且负值钳零的 `activeElapsedMinutes/loopListElapsedMinutes`，full-access run 还带极简 `editLeft` 剩余数）与 `<piweb_ctx>` 合并进同一个瞬时尾部 text part；无 active 时完全不注入该尾部，且任何提示都不写入会话历史；独立的 compaction/branch-summary summarizer 不消费执行任务提醒，下一 Agent turn 会重新读取权威列表。完整列表只进入 focused snapshot 与三元 focus 身份关联的低频事件，不能进入 PublicState、project snapshot、localStorage 或 sidebar。
 - 客户端收到匹配的 history snapshot 前不得发送 prompt；state 提交和历史恢复是两个观察边界。

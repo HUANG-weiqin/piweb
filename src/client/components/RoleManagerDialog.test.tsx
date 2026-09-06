@@ -33,6 +33,7 @@ function role(
     description: `${name} description`,
     systemPrompt: `${name} prompt`,
     model: { provider: "alpha", id: "good" },
+    compactionModel: null,
     defaultThinkingLevel: "high",
     defaultServiceTier: null,
     toolMode: "full_access",
@@ -276,6 +277,90 @@ describe("RoleManagerDialog", () => {
     expect(screen.queryByRole("option", { name: /Hidden/ })).not.toBeInTheDocument();
   });
 
+  it("allows an explicit compaction model and preserves it when the main model changes", () => {
+    const create = vi.fn();
+    renderManager({ onCreate: create });
+
+    fireEvent.click(screen.getByRole("button", { name: "新建角色" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "角色名称" }), {
+      target: { value: "Researcher" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "角色模型" }), {
+      target: { value: JSON.stringify(["alpha", "good"]) },
+    });
+    const compactionModel = screen.getByRole("combobox", {
+      name: "上下文压缩模型",
+    });
+    fireEvent.change(compactionModel, {
+      target: { value: JSON.stringify(["alpha", "good"]) },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "角色模型" }), {
+      target: { value: JSON.stringify(["alpha", "plain"]) },
+    });
+
+    expect(compactionModel).toHaveValue(JSON.stringify(["alpha", "good"]));
+    fireEvent.click(screen.getByRole("button", { name: "创建角色" }));
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({
+      model: { provider: "alpha", id: "plain" },
+      compactionModel: { provider: "alpha", id: "good" },
+    }));
+  });
+
+  it("disables smaller compaction models and explains the first-version limit", () => {
+    renderManager();
+
+    const compactionModel = screen.getByRole("combobox", {
+      name: "上下文压缩模型",
+    });
+    expect(within(compactionModel).getByRole("option", {
+      name: /Plain.*10/,
+    })).toBeDisabled();
+    expect(screen.getByText(
+      "默认跟随角色模型；第一版不支持小窗口压缩模型。",
+    )).toBeInTheDocument();
+  });
+
+  it("preserves an incompatible saved compaction model after the main model changes", () => {
+    renderManager({
+      roles: [role("default", "Default", {
+        model: { provider: "alpha", id: "plain" },
+        compactionModel: { provider: "alpha", id: "plain" },
+        defaultThinkingLevel: "off",
+      })],
+    });
+
+    fireEvent.change(screen.getByRole("combobox", { name: "角色模型" }), {
+      target: { value: JSON.stringify(["alpha", "good"]) },
+    });
+
+    const compactionModel = screen.getByRole("combobox", {
+      name: "上下文压缩模型",
+    });
+    expect(compactionModel).toHaveValue(JSON.stringify(["alpha", "plain"]));
+    expect(within(compactionModel).getByRole("option", {
+      name: /当前不兼容.*Plain/,
+    })).toBeDisabled();
+    expect(screen.getByText(
+      "当前压缩模型的上下文窗口小于角色模型；第一版不支持小窗口压缩模型，请明确选择其他模型或跟随角色模型。",
+    )).toBeInTheDocument();
+  });
+
+  it("preserves a retired saved compaction model instead of following the main model", () => {
+    renderManager({
+      roles: [role("default", "Default", {
+        compactionModel: { provider: "alpha", id: "retired" },
+      })],
+    });
+
+    const compactionModel = screen.getByRole("combobox", {
+      name: "上下文压缩模型",
+    });
+    expect(compactionModel).toHaveValue(JSON.stringify(["alpha", "retired"]));
+    expect(within(compactionModel).getByRole("option", {
+      name: "当前不可用 · retired",
+    })).toBeDisabled();
+  });
+
   it("submits an update without changing the durable role projection", () => {
     const update = vi.fn();
     renderManager({ onUpdate: update });
@@ -290,6 +375,7 @@ describe("RoleManagerDialog", () => {
       description: "Default description",
       systemPrompt: "Default prompt",
       model: { provider: "alpha", id: "good" },
+      compactionModel: null,
       defaultThinkingLevel: "high",
       defaultServiceTier: null,
       toolMode: "full_access",
@@ -369,6 +455,7 @@ describe("RoleManagerDialog", () => {
       description: "Base description",
       systemPrompt: "Base prompt N",
       model: { provider: "alpha", id: "plain" },
+      compactionModel: { provider: "alpha", id: "plain" },
       defaultThinkingLevel: "off",
       toolMode: "read_only",
       canManageSessions: false,
@@ -387,6 +474,9 @@ describe("RoleManagerDialog", () => {
     });
     fireEvent.change(screen.getByRole("textbox", { name: "专属提示词" }), {
       target: { value: "Dirty prompt" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "上下文压缩模型" }), {
+      target: { value: JSON.stringify(["alpha", "good"]) },
     });
     fireEvent.change(screen.getByRole("combobox", { name: "角色模型" }), {
       target: { value: JSON.stringify(["alpha", "good"]) },
@@ -409,6 +499,7 @@ describe("RoleManagerDialog", () => {
         description: "External description",
         systemPrompt: "External prompt N+1",
         model: { provider: "alpha", id: "plain" },
+        compactionModel: null,
         defaultThinkingLevel: "off",
         toolMode: "read_only",
         canManageSessions: false,
@@ -425,6 +516,8 @@ describe("RoleManagerDialog", () => {
     expect(screen.getByRole("textbox", { name: "专属提示词" })).toHaveValue("Dirty prompt");
     expect(screen.getByRole("combobox", { name: "角色模型" }))
       .toHaveValue(JSON.stringify(["alpha", "good"]));
+    expect(screen.getByRole("combobox", { name: "上下文压缩模型" }))
+      .toHaveValue(JSON.stringify(["alpha", "good"]));
     expect(screen.getByRole("combobox", { name: "默认思考强度" })).toHaveValue("medium");
     expect(screen.getByRole("combobox", { name: "默认服务层级" })).toHaveValue("priority");
     expect(screen.getByRole("combobox", { name: "工具权限" })).toHaveValue("full_access");
@@ -436,6 +529,7 @@ describe("RoleManagerDialog", () => {
       description: "Dirty description",
       systemPrompt: "Dirty prompt",
       model: { provider: "alpha", id: "good" },
+      compactionModel: { provider: "alpha", id: "good" },
       defaultThinkingLevel: "medium",
       defaultServiceTier: "priority",
       toolMode: "full_access",
@@ -710,6 +804,7 @@ describe("RoleManagerDialog", () => {
       description: "Finds primary sources",
       systemPrompt: "Use primary sources.",
       model: { provider: "alpha", id: "good" },
+      compactionModel: null,
       defaultThinkingLevel: "off",
       defaultServiceTier: null,
       toolMode: "read_only",

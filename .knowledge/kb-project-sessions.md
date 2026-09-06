@@ -1,6 +1,6 @@
 # 项目与持久会话
 
-`updated: 2026-08-30`
+`updated: 2026-09-06`
 
 ## 这个模块是干什么的
 
@@ -64,7 +64,7 @@ initialize(cwd, target)
 → coordinator singleflight 取得/等待 writer lease
 → SessionManager.create/open(..., current cwd override)
 → 创建或读取 conversation profile 与其追加式角色变更
-→ PiRuntime 用固定 role model/prompt/tools 创建 ConversationActor
+→ PiRuntime 用冻结 role 的 primary/compaction model、prompt/tools 创建 ConversationActor
 → PiConnection attach observer 并分配 focusId
 → focus attached + state + focused conversation snapshot
 → 异步 project refresh + role catalog
@@ -102,26 +102,26 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 
 新对话在 header 后、AgentSession 创建前写唯一 base `piweb.conversation_meta.v1`：
 
-- 完整角色 `id/revision/name/description/systemPrompt/model`；
+- 完整角色 `id/revision/name/description/systemPrompt/model/compactionModel`；`compactionModel` 为必填 nullable，`null` 跟随该 conversation 冻结的 primary model。
 - `normal` 或 `temporary` lifecycle；
 - `user` 或来源 conversation 的 `createdBy`。
 
 同一 JSONL 还可包含：
 
-- `piweb.conversation_role_change.v1`：用户在 idle 边界显式应用的新完整角色快照，最后一条有效记录成为当前角色，并把分支 thinking 重置为该角色默认值；
+- `piweb.conversation_role_change.v1`：用户在 idle 边界显式应用的新完整角色快照（含 `compactionModel`），最后一条有效记录成为当前角色，并把分支 thinking 重置为该角色默认值；
 - `piweb.conversation_card.v1`：发送方可见的 outgoing/委派状态；
 - `piweb.conversation_message.v1`：进入目标 LLM context 的 incoming 消息；
 - `piweb.run_settlement.v1`：精确 run outcome、final text 与临时回传报告标记；
 - `piweb.pending_prompt_delivery.v1`：精确 `promptId + runId + deliveredAt` 的 host receipt，证明对应 user message 已先由 Pi 持久追加；
 - `piweb.meta_operation.v1`：破坏性 meta 工具的 started/completed 幂等状态；
 - `piweb.compaction_threshold.v1`：当前会话 20%–90% 的自动压缩阈值，缺省为 70%，最后一条单调时间记录生效。
-- `piweb.compaction_resume.v1`：压缩后继续同一 workbench run 的隐藏 `custom_message`，必须 `display=false` 且只携带合法 `runId`，只校验不投影为卡片或 settlement。
+- `piweb.compaction_resume.v1`：压缩后继续同一 workbench run 的隐藏 `custom_message`，必须 `display=false` 且只携带合法 `runId`，只校验不投影为卡片或 settlement。默认压缩由 Pi 0.85.1 私有 `_runDefaultCompaction` 在 `session_before_compact` 后执行；custom 结果直接采用并跳过模型解析，否则每次 attempt fresh-resolve 冻结的 compaction identity。显式模型必须可用、contextWindow 为有限正数且不小于本次 primary，失败无 fallback；旧 metadata、role-change 与 card `requestedRole` 缺失字段均归 `null`，不增加语义 revision。
 
 这些类型由宿主拥有。重复 profile、冲突 settlement、同 promptId/runId 指向不同 pending delivery receipt、方向变化、未知 `piweb.*` 类型或畸形 payload 都 fail closed。卡片以同 `cardId` 的最后状态投影；其来源/目标/正文/委派身份/request fingerprint/冻结角色不可变化，状态和时间只能单调前进，runId 一旦出现即固定，terminal outcome/result 不可改写。settlement 单调从未报告推进到已报告。
 
 旧 JSONL 第一次由 coordinator 在 writer lease 下正式打开时追加独立“旧会话” profile：system prompt 为空，模型优先取旧分支模型，否则取任一现存角色模型；它不依赖或重建初始化模板。
 
-角色、自动压缩阈值、service tier 和 thinking 都按 active branch 聚合；永久 run settlement ledger 才读取物理全集。thinking 从当前角色默认值开始，后续 Pi 原生 `thinking_level_change` 覆盖，新的角色变更再次重置。rewind 必须在 durable truncate 前停止当前 AgentSession，使 `session_shutdown` 的尾部写入也落在随后删除的 suffix 中；truncate 未提交时按 shutdown 后的实际 branch thinking 恢复旧 runtime，恢复失败才 fatal。提交后统一从 retained branch 重建 runtime；跨角色时还要换回 retained profile 的 model/system prompt/tools/权限，不能保留未来 runtime 继续写入。
+角色、自动压缩阈值、service tier 和 thinking 都按 active branch 聚合；角色的 primary/compaction identity 由冻结快照及 role-change 记录恢复，模板或目录刷新不改写既有 conversation。永久 run settlement ledger 才读取物理全集。coordinator 在 create/reopen/switch/rollback/peer 路径和 meta tools 中都传递该完整 frozen identity。thinking 从当前角色默认值开始，后续 Pi 原生 `thinking_level_change` 覆盖，新的角色变更再次重置。rewind 必须在 durable truncate 前停止当前 AgentSession，使 `session_shutdown` 的尾部写入也落在随后删除的 suffix 中；truncate 未提交时按 shutdown 后的实际 branch thinking 恢复旧 runtime，恢复失败才 fatal。提交后统一从 retained branch 重建 runtime；跨角色时还要换回 retained profile 的 model/system prompt/tools/权限，不能保留未来 runtime 继续写入。
 
 ## 持久 inbox 与恢复
 

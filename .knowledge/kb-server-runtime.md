@@ -1,6 +1,6 @@
 # 服务端运行时
 
-`updated: 2026-09-05`
+`updated: 2026-09-06`
 
 ## 这个模块是干什么的
 
@@ -10,10 +10,11 @@
 
 `PiRuntime` 是进程级对象：
 
-- 唯一持有共享 `CredentialStore` 与基线 `ModelRuntime` / `ModelRegistry`；认证和模型缓存由 Pi 0.84.4 runtime 统一读取。文件凭据按文件 identity/size/高精度时间戳复用已验证快照，同一 revision 的 provider 扇出读取不得重复取得跨进程排他锁；revision 变化时只允许一轮可取消的共享 reload 在锁内重新解析，写入仍锁定并让下一次读取重新验证磁盘。
+- 唯一持有共享 `CredentialStore` 与基线 `ModelRuntime` / `ModelRegistry`；认证和模型缓存由 Pi 0.85.1 runtime 统一读取。文件凭据按文件 identity/size/高精度时间戳复用已验证快照，同一 revision 的 provider 扇出读取不得重复取得跨进程排他锁；revision 变化时只允许一轮可取消的共享 reload 在锁内重新解析，写入仍锁定并让下一次读取重新验证磁盘。
 - 持有 Pi 用户级 `ProjectTrustStore`；受保护的项目资源在 trust resolution 前不能进入最终 resource loader。
 - 为每个 session 或 project model catalog 创建独立 `ModelRuntime` / `ModelRegistry`，隔离 cwd 扩展的静态模型、base URL 和 headers；owner 必须在 AgentSession 创建后确认其 `modelRuntime` 身份。
-- 服务层级要区分请求适配器能力与账号/模型资格：`src/server/service-tier.ts` 只在 `model.api` 为 Pi 官方 `openai-codex-responses` 请求路由时投影 `priority`，不按 provider 或 model ID 维护清单；因此同一路由的未来模型自动获得选项。角色目录用同一请求路由能力验证非空默认层级；ConversationActor 没有会话覆盖记录时读取冻结角色默认，有记录时连显式 `null` 也必须优先，并在角色切换时重置到新默认。账号与具体模型是否接受 priority 仍由供应商在 dispatch 时裁决，错误不得被捕获后降级。Pi Web 固定使用未修改的官方 Pi 0.84.4 包；由于官方 `streamSimple()` 尚不传播 tier，这个唯一依赖适配边界复用官方 `buildBaseOptions` / `clampThinkingLevel` 后调用 session 自己的 `ModelRuntime.stream()` 并传入 tier，让认证、transport、响应解析和计费继续由官方低层适配器拥有。
+- 服务层级要区分请求适配器能力与账号/模型资格：`src/server/service-tier.ts` 只在 `model.api` 为 Pi 官方 `openai-codex-responses` 请求路由时投影 `priority`，不按 provider 或 model ID 维护清单；因此同一路由的未来模型自动获得选项。角色目录用同一请求路由能力验证非空默认层级；ConversationActor 没有会话覆盖记录时读取冻结角色默认，有记录时连显式 `null` 也必须优先，并在角色切换时重置到新默认。账号与具体模型是否接受 priority 仍由供应商在 dispatch 时裁决，错误不得被捕获后降级。Pi Web 固定使用未修改的官方 Pi 0.85.1 包；由于官方 `streamSimple()` 尚不传播 tier，这个唯一依赖适配边界复用官方 `buildBaseOptions` / `clampThinkingLevel` 后调用 session 自己的 `ModelRuntime.stream()` 并传入 tier，让认证、transport、响应解析和计费继续由官方低层适配器拥有。
+- 默认 context compaction 固定接入 Pi 0.85.1 的私有 `_runDefaultCompaction`，位置在 custom `session_before_compact` hook 之后；custom 结果直接采用并跳过 resolver，否则每次 attempt fresh-resolve 冻结的 compaction identity。`null` 使用冻结 primary，显式 B 必须可用且有限正 contextWindow `>=` 本次 primary A，否则明确失败、绝不 fallback。Pi 原生 preparation、previous summary、split-turn、files、usage、abort、persistence 和 continuation 不被重写；普通 turn 仍使用冻结 primary。显式 B 会清除 A 的 positional apiKey/headers/env，由 session-local `ModelRuntime` 重新解析认证且不继承 A service tier；request-local marker 在 provider 前剥离，Codex hint 保留但只含 B model，socket fence 仍生效。压缩失败不追加 compaction entry 或成功 rebuild，但 Pi seam 前已有的 transient overflow-recovery 内存变化可能保留。
 - API key 与 logout 只通过 `CredentialStore.modify/delete` 持久化；OAuth 在配置队列外使用 baseline provider 的 `auth.oauth.login(AuthInteraction)`，成功后再经 credential intent CAS 写入。扩展 OAuth 与进程全局 provider 注册仍 fail closed。
 - 扩展 provider 只能通过 session-local runtime 注册可快照的静态配置；`streamSimple`、OAuth、`refreshModels` 和 native provider 注册会 fail closed，不允许绕过宿主的进程级边界。合法注册的静态 provider 即使暂时没有模型也必须保留在连接投影中，才能配置凭据并通过后续目录刷新恢复。
 - Pi 内置 provider 的远程目录缓存有意由各 runtime 共享同一用户级 `models-store.json`；项目扩展不能注册会写目录缓存的动态/native provider，因此共享缓存只承载 Pi 官方目录，项目差异仍只存在于 session-local 静态 overlay。
@@ -33,8 +34,8 @@
 
 `RoleCatalog` 是进程级用户角色目录：
 
-- 严格读写 `<Pi agent dir>/piweb/roles.json` 元数据和同级 `role-prompts/<roleId>.<revision>.md` 提示词；对上层仍返回完整模板。新 revision 的 Markdown 先于 manifest 原子发布，v1–v4 inline prompt 会保真迁移，缺失、越界、非法 UTF-8、链接或路径不匹配均 fail closed；首次初始化赠送可编辑、可删除的“默认 / 默认角色”普通模板，删除后不自动重建；旧迁移只重命名未改过的默认文案，不覆盖用户编辑；
-- 用共享模型目录动态计算模板可用性；
+- 严格 v7 读写 `<Pi agent dir>/piweb/roles.json` 元数据和同级 `role-prompts/<roleId>.<revision>.md` 提示词；模板/draft/frozen role 都有必填 nullable `compactionModel`，`null` 跟随冻结 primary model。v1–v6 role 文档缺失该字段时补 `null` 并原子迁移，不增加语义 revision；对上层仍返回完整模板。新 revision 的 Markdown 先于 manifest 原子发布，v1–v4 inline prompt 会保真迁移，缺失、越界、非法 UTF-8、链接或路径不匹配均 fail closed；首次初始化赠送可编辑、可删除的“默认 / 默认角色”普通模板，删除后不自动重建；旧迁移只重命名未改过的默认文案，不覆盖用户编辑；
+- 用共享模型目录动态计算模板可用性；显式 `compactionModel` 必须可用、contextWindow 为有限正数且不小于 primary，create/update/switch 都重验；目录漂移可令模板 unavailable，但不阻止 frozen conversation 打开，默认压缩每次仍 fresh-resolve/revalidate 且无 fallback；
 - 创建或切换会话角色时返回完整深快照，不把模板对象引用交给 session；角色默认思考强度必须属于固定模型实际支持的档位，无可调档位的模型使用唯一有效值。工作台投影模型可选思考档位必须与 Pi SDK 的 `getSupportedThinkingLevels()` 语义一致：`null` 表示禁用，`xhigh/max` 只有显式映射时才可选。
 - 未携带角色快照的旧会话迁移为独立“旧会话”快照；可复用其历史模型或任一现存角色模型，但不依赖、也不重建已删除的初始化模板。
 
@@ -42,7 +43,7 @@
 
 - 按 canonical cwd 维护 project context、无 AgentSession 的 project model catalog、持久 inbox、恢复任务和 observers；
 - 按 `canonical cwd + conversationId` singleflight 打开唯一 `ConversationActor`；
-- actor 持有 `SessionManager + writer lease + settings/model registry + AgentSession + activeRun`，与 WebSocket 是否连接无关；
+- actor 持有 `SessionManager + writer lease + settings/model registry + AgentSession + activeRun` 及完整冻结 role identity（含 primary/compaction model），与 WebSocket 是否连接无关；coordinator 在 create/reopen/switch/rollback/peer 每条 runtime 路径都显式传递该 identity，meta tools 也保留它；
 - inbox、permanent delivery receipt、完成 ledger、waiter、临时回传、reload adoption/reservation 和删除都经过项目/actor 串行边界；
 - 维护进程级项目活动目录，每个 context 的摘要独立缓存，只在 busy/compacting/attention 汇总真正变化时通知全局 observer；高频 `session_event` 不触发目录扫描，可发布目录始终限制为 100 项，遗漏项目一旦变化就进入目录并优先替换最旧的低活动项；
 - server close 会同步封闭新 acquisition 与项目 lifecycle queue；已排队但未开始的 task 在持久写前失败，队列完全 drain 后才 dispose 尚在打开的 actor/catalog、全部后台 actor、项目 model catalog 并释放共享项目 handle。
@@ -77,7 +78,7 @@
 - `PiRuntime` 对每个交给 `AgentSession` 的 `SessionManager` 安装实例级 compaction boundary adapter：追加压缩前只沿精确 active branch 检查 retained physical message，若 `toolResult` 的严格更早 assistant `toolCall` 落在边界前则把 `firstKeptEntryId` 反复回退到依赖闭包；缺失、乱序或非当前分支候选都在写入前 fail closed。普通 custom metadata 和 context-visible `custom_message` 不改变配对规则；adapter 在 AgentSession teardown 前恢复该实例原有方法，不修改 SDK prototype。
 - 每次普通 Agent turn 的模型调用前，`PiRuntime` 在 SDK extension context hook 之后包装 Agent 的 LLM converter，先读取 ConversationActor 的最新 LoopList；仅当至少一项 active 时，才继续读取 actor 从 active-branch 快照重放所得的分钟计时、本 run 的 edit budget 剩余数、当次 `getContextUsage()` 与实时自动压缩阈值。两个分钟值是 civil wall-clock elapsed 的向下取整估计且对负差钳零：稳定 item ID 无序集合变化重置 list/active 两个锚点，active ID 无序集合变化只重置 active 锚点；list 锚点从当前 plan snapshot 建立时开始，active 锚点只在存在 active 时保留；因此顺序、文案、armed 和不改变 active 集合的 status 更新都不重置对应计时，多个 active 共用同一个 active-context 计时。锚点不扩张 v2 entry，而由既有 `updatedAt` 重放，restart 与 rewind 恢复保留分支的历史时间语义。Pi 的 compaction/branch-summary 使用独立 summarizer，不经过该 converter，也不消费执行任务提醒；它们只整理上下文，不决定下一步动作，下一次 Agent turn 会重新读取权威 LoopList。它把可用的瞬时 `<piweb_ctx>` 与 active 工作摘要合并进同一个最终 text part，再追加到已有的最后一条 user/toolResult provider message；动态内容位于稳定消息正文之后，使下一次请求仍可复用截至该正文的 provider 前缀缓存。工作摘要固定为 `piweb_work=` 加字段顺序稳定的 JSON：active 项只含 id/text，确有截断时才带精确 `omitted` 数量，随后是两个自解释数值 `activeElapsedMinutes/loopListElapsedMinutes`，以及 full-access active run 可用时的 `editLeft`；如何读取完整列表和更新状态已由工具 schema/description 说明，不在每轮尾部重复工具名。完整记录最多 4096 UTF-8 bytes，只保留完整 item。无 active 时整个瞬时尾部（包括 `<piweb_ctx>`）都不追加；usage 不可用时仍可单独输出 active 摘要。绝不能追加独立 custom AgentMessage，因为 Pi 会把 custom 转成新的尾部 user turn。距阈值 5 个百分点时才提示可考虑更新 Agent Notebook；提示不写入 AgentSession messages、SessionManager 或 JSONL，不改变原消息角色、数量和工具协议顺序，额度读取失败只省略 `editLeft`，计时读取失败也只省略两个分钟字段。
 - OpenAI Codex Responses 的 `auto` transport 在 AgentSession 创建前通过 session-local settings override 解析为 `sse`，让普通 turn、SDK retry 与 compaction summary 共用 zstd SSE；用户显式选择的 `sse | websocket | websocket-cached` 原样保留，override 不写回用户或项目 settings。完整 provider JSON、cached WebSocket delta、实际 WebSocket frame 与压缩 SSE body 是不同观察边界；工作台不得再用 raw context/provider body 字节阈值伪造 `context_length_exceeded` 或触发 durable compaction，generic WebSocket/request-buffer error 也必须保持 transport error。
-- 空闲会话可通过精确 focus 关联的 `switch_conversation_role` 应用当前可用角色。Actor 同步封锁新 run，停止旧 AgentSession，追加角色变更记录（该记录同时把 active-branch thinking 重置为新角色默认值），再用同一 SessionManager 和新角色 model/prompt/meta tools 重建；替换 runtime 打开失败时追加上一角色及失败前实际 thinking 作为补偿并恢复旧 runtime，补偿也失败则 actor fatal。conversationId、history、lifecycle 与 createdBy 不变。
+- 空闲会话可通过精确 focus 关联的 `switch_conversation_role` 应用当前可用角色。Actor 同步封锁新 run，停止旧 AgentSession，追加包含 primary/compaction identity 的角色变更记录（该记录同时把 active-branch thinking 重置为新角色默认值），再用同一 SessionManager 和新角色 model/prompt/meta tools 重建；替换 runtime 打开失败时追加上一角色及失败前实际 thinking 作为补偿并恢复旧 runtime，补偿也失败则 actor fatal。conversationId、history、lifecycle 与 createdBy 不变。
 - API Key 在共享配置队列完成后才确认；API Key、OAuth 与 logout 共用按 provider 排序的一次性 credential intent，旧操作若已被更新 intent 取代就不得写入或发送成功回执。凭据本身影响所有项目，但发起命令必须仍属于提交时的 observation session/generation，避免迟到页面修改全局认证。会话模型由角色快照固定，中途 `select_model` 明确拒绝，可信 extension 的 `pi.setModel()` 也必须经过 session-local fixed-model guard；actor 重开时再次校验实际模型，不能 SDK fallback。
 - API Key、角色 CRUD 和删除等需要结算的操作都带原 sessionId + commandId，连接内复用 commandId 会被拒绝。手动 `refresh_models` 同样是 session-scoped 的精确 command：必须携带 `sessionId + commandId`，使用 `allowNetwork:true, force:true` 和 15 秒全操作 deadline；成功回 `command_complete`，失败回同一 correlation 的 error，不能只刷新公共状态。超时或生命周期取消会立即结算调用方，但底层 refresh 真正退出前仍占用单连接 refresh slot，不能积累第二个底层刷新。
 - 会话“回到此处”由 project lifecycle、ConversationActor operation queue 和 ProjectStore 原子截断共同完成；busy、存在待处理 inbox、未 settlement delivery receipt 或 reload completion ACK gate 时拒绝。actor 先停止当前 runtime，让 extension `session_shutdown` 的写入仍位于待删 suffix，再执行 durable truncate；truncate 会结构性重挂并保留 permanent delivery receipts、它们引用的 exact run settlements 和全部 temporary return receipt transitions，同时允许删去 incoming marker/card 投影。truncate 未提交时从 shutdown 后的实际 branch thinking 恢复旧 runtime，恢复失败才 fatal。提交后统一按 retained active branch 重建 runtime；跨角色时同时恢复固定 model/system prompt/tools/权限，同角色也恢复 retained messages/thinking。只有 durable JSONL、runtime 与 coordinator profile cache 都同步后，PiConnection 才依次发布 focused snapshot 和 command completion。
@@ -157,7 +158,7 @@
 - 多连接配置同步依赖所有修改都经过 `PiRuntime.updateConfiguration()`。
 - 不要直接开放 `AgentSession.reload()`；其全局 provider reset 绕过工作台所有权边界。需要 reload 时先设计 runtime 协调入口。
 - extension `confirm` 只是扩展业务交互，不会改变 run 启动时冻结的 conversation 角色权限；经过 Pi 工具入口的副作用仍必须经过工作台 tool gate。
-- Pi core 已提供轮次后的 `shouldStopAfterTurn`，但当前 `AgentSession` 没有公开配置入口；`agent-turn-boundary.ts` 是唯一允许依赖 `Agent.createLoopConfig` 与 `hasQueuedMessages` 运行时形状的适配点。命中宿主 checkpoint 后只暂停 SDK 对 queued continuation 的观察，不能清空实际 steer/follow-up/custom 队列；actor 取得控制权后释放暂停、压缩并续跑。Pi 相关依赖必须精确锁定已验证版本；升级若移除这些形状，session 创建必须 fail closed，不能静默退化成在运行中直接 `compact()`、abort 工具或跳过轮次内压缩。
+- Pi core 已提供轮次后的 `shouldStopAfterTurn`，但当前 `AgentSession` 没有公开配置入口；`agent-turn-boundary.ts` 是唯一允许依赖 `Agent.createLoopConfig` 与 `hasQueuedMessages` 运行时形状的适配点。默认 compaction 还依赖 0.85.1 私有 `_runDefaultCompaction`，版本/shape 不符时 session 创建必须 fail closed；custom compaction 不经过该 resolver。命中宿主 checkpoint 后只暂停 SDK 对 queued continuation 的观察，不能清空实际 steer/follow-up/custom 队列；actor 取得控制权后释放暂停、压缩并续跑。Pi 相关依赖必须精确锁定已验证版本；升级若移除这些形状，session 创建必须 fail closed，不能静默退化成在运行中直接 `compact()`、abort 工具或跳过轮次内压缩。
 - trust decision 不能写入项目 `.piweb`；否则恶意仓库可以随自身内容一起声明自己可信。
 - 项目扩展当前在服务进程内运行；无法安全强杀一个不返回的同步/异步 hook。只允许可信扩展，worker/子进程隔离是开放超时与动态 provider 的前置条件。
 - writer lease 目前只覆盖同一服务进程；两个进程同时写同一 JSONL 仍不安全。

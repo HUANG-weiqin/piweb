@@ -405,6 +405,7 @@ function defaultRole(overrides: Partial<RoleTemplate> = {}): RoleTemplate {
     description: "General purpose",
     systemPrompt: "Be useful.",
     model: { provider: "provider", id: "model" },
+    compactionModel: null,
     defaultThinkingLevel: "off",
     defaultServiceTier: null,
     toolMode: "read_only",
@@ -426,6 +427,7 @@ function defaultConversationRole(
     description: "General purpose",
     systemPrompt: "Be useful.",
     model: { provider: "provider", id: "model" },
+    compactionModel: null,
     defaultThinkingLevel: "off",
     defaultServiceTier: null,
     toolMode: "read_only",
@@ -5145,6 +5147,7 @@ describe("App", () => {
           description: "General purpose",
           systemPrompt: "Be useful.",
           model: { provider: "provider", id: "model" },
+          compactionModel: null,
           defaultThinkingLevel: "off",
           defaultServiceTier: null,
           toolMode: "read_only",
@@ -5197,6 +5200,7 @@ describe("App", () => {
           description: nextRole.description,
           systemPrompt: nextRole.systemPrompt,
           model: nextRole.model!,
+          compactionModel: nextRole.compactionModel,
           defaultThinkingLevel: nextRole.defaultThinkingLevel,
           defaultServiceTier: nextRole.defaultServiceTier,
           toolMode: nextRole.toolMode,
@@ -8171,9 +8175,14 @@ describe("App", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "角色名称" }), {
       target: { value: "Edited default" },
     });
+    const commandCountBeforeSave = socketMock.send.mock.calls.length;
     fireEvent.click(screen.getByRole("button", { name: "保存角色" }));
+    expect(socketMock.send.mock.calls).toHaveLength(commandCountBeforeSave + 1);
     const update = latestCommand("update_role");
-    expect(update).toMatchObject({ expectedSystemPrompt: "Be useful." });
+    expect(update).toMatchObject({
+      expectedSystemPrompt: "Be useful.",
+      role: { compactionModel: null },
+    });
 
     act(() => socketMock.emit?.({
       type: "command_complete",

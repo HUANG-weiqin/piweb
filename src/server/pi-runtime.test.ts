@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import {
   InMemoryCredentialStore,
   InMemoryModelsStore,
+  createAssistantMessageEventStream,
   type Api,
   type Transport,
 } from "@earendil-works/pi-ai";
@@ -217,6 +218,293 @@ describe("PiRuntime session ownership", () => {
     await created.dispose();
     expect(created.session.agent.streamFunction).toBe(officialSessionStream);
     expect(Object.hasOwn(created.modelRuntime, "streamSimple")).toBe(false);
+  });
+
+  it("does not resolve an explicit compaction model when Pi's manual hook supplies the summary", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-compaction-hook-"));
+    const manager = SessionManager.inMemory(cwd);
+    manager.appendMessage({
+      role: "user",
+      content: [{ type: "text", text: "first message ".repeat(100) }],
+      timestamp: 1,
+    });
+    manager.appendMessage({
+      role: "user",
+      content: [{ type: "text", text: "second message ".repeat(100) }],
+      timestamp: 2,
+    });
+    let hookCalls = 0;
+    const runtime = await testRuntime(
+      () => [
+        (pi) => {
+          pi.on("session_before_compact", (event) => {
+            hookCalls++;
+            return {
+              compaction: {
+                summary: "extension summary",
+                firstKeptEntryId: event.preparation.firstKeptEntryId,
+                tokensBefore: event.preparation.tokensBefore,
+              },
+            };
+          });
+        },
+      ],
+      undefined,
+      async (modelRuntime) => {
+        modelRuntime.registerProvider("compaction-test", {
+          baseUrl: "https://example.invalid/v1",
+          apiKey: "test-key",
+          api: "openai-completions",
+          models: [
+            providerModel("main-model"),
+            { ...providerModel("summary-model"), contextWindow: 2_048 },
+          ],
+        });
+        await modelRuntime.refresh({ allowNetwork: false });
+      },
+      () => SettingsManager.inMemory({
+        compaction: { reserveTokens: 1, keepRecentTokens: 1 },
+      }),
+    );
+    const created = await runtime.createSession(cwd, {
+      sessionManager: manager,
+      model: { provider: "compaction-test", id: "main-model" },
+      compactionModel: { provider: "compaction-test", id: "summary-model" },
+    });
+    await created.activateExtensions();
+    const getModel = vi.spyOn(created.modelRuntime, "getModel");
+    getModel.mockClear();
+
+    await created.session.compact();
+
+    expect(hookCalls).toBe(1);
+    expect(getModel).not.toHaveBeenCalled();
+    expect(manager.getEntries()).toContainEqual(expect.objectContaining({
+      type: "compaction",
+      summary: "extension summary",
+      fromHook: true,
+    }));
+    await created.dispose();
+  });
+
+  it("routes real manual and automatic default compaction through the frozen target request", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-compaction-default-"));
+    const manager = SessionManager.inMemory(cwd);
+    const appendMessages = () => {
+      manager.appendMessage({
+        role: "user",
+        content: [{ type: "text", text: "first message ".repeat(100) }],
+        timestamp: Date.now(),
+      });
+      manager.appendMessage({
+        role: "user",
+        content: [{ type: "text", text: "second message ".repeat(100) }],
+        timestamp: Date.now() + 1,
+      });
+    };
+    appendMessages();
+    const reference = { provider: "compact-provider", id: "compact-model" };
+    const calls: Array<{ receiver: unknown; args: unknown[]; targetAuth: unknown }> = [];
+    const providerRequests: Array<{ model: unknown; options: unknown }> = [];
+    const runtime = await testRuntime(
+      () => [],
+      async (result) => {
+        const privateSession = result.session as AgentSession & {
+          _runDefaultCompaction(
+            preparation: { firstKeptEntryId: string; tokensBefore: number },
+            requestModel: unknown,
+            apiKey: unknown,
+            headers: unknown,
+            customInstructions: unknown,
+            signal: unknown,
+            env: unknown,
+            reason: unknown,
+          ): Promise<unknown>;
+          _getSummarizationRequestAuth(model: unknown): Promise<unknown>;
+        };
+        const modelRuntime = result.session.modelRuntime;
+        vi.spyOn(modelRuntime, "getAuth").mockImplementation(async (model) => {
+          if (model.provider === "main-provider") {
+            return {
+              auth: {
+                apiKey: "main-api-key-sentinel",
+                baseUrl: "https://main.invalid/v1",
+                headers: { "x-main-sentinel": "must-not-leak" },
+              },
+              env: { MAIN_ENV_SENTINEL: "must-not-leak" },
+            } as never;
+          }
+          return {
+            auth: {
+              apiKey: "compact-api-key-sentinel",
+              baseUrl: "https://compact-auth.invalid/v1",
+              headers: { "x-compact": "kept" },
+            },
+            env: { COMPACT_ENV: "kept" },
+          } as never;
+        });
+        const compactProvider = modelRuntime.getProvider("compact-provider");
+        if (!compactProvider) throw new Error("Missing compact test provider");
+        (compactProvider as { streamSimple: typeof compactProvider.streamSimple }).streamSimple = (
+          requestModel,
+          _context,
+          requestOptions,
+        ) => {
+          providerRequests.push({ model: requestModel, options: requestOptions });
+          const stream = createAssistantMessageEventStream();
+          queueMicrotask(() => stream.end({
+            role: "assistant",
+            content: [{ type: "text", text: "provider summary" }],
+            api: "openai-completions",
+            provider: "compact-provider",
+            model: "compact-model",
+            stopReason: "stop",
+            usage: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: 0,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            },
+            timestamp: Date.now(),
+          } as never));
+          return stream;
+        };
+        privateSession._runDefaultCompaction = async function (
+          preparation,
+          requestModel,
+          apiKey,
+          headers,
+          customInstructions,
+          signal,
+          env,
+          reason,
+        ) {
+          calls.push({
+            receiver: this,
+            args: [
+              preparation,
+              requestModel,
+              apiKey,
+              headers,
+              customInstructions,
+              signal,
+              env,
+              reason,
+            ],
+            targetAuth: await this._getSummarizationRequestAuth(requestModel),
+          });
+          await (await this.agent.streamFunction(
+            requestModel as never,
+            { systemPrompt: "", messages: [], tools: [] } as never,
+            {
+              timeoutMs: 321,
+              websocketConnectTimeoutMs: 222,
+              maxRetries: 4,
+              maxRetryDelayMs: 987,
+            },
+          )).result();
+          return {
+            summary: "instrumented default summary",
+            firstKeptEntryId: preparation.firstKeptEntryId,
+            tokensBefore: preparation.tokensBefore,
+          };
+        };
+        reference.id = "mutated-after-create";
+      },
+      async (modelRuntime) => {
+        modelRuntime.registerProvider("main-provider", {
+          baseUrl: "https://main.invalid/v1",
+          apiKey: "main-api-key",
+          api: "openai-completions",
+          models: [providerModel("main-model")],
+        });
+        modelRuntime.registerProvider("compact-provider", {
+          baseUrl: "https://compact.invalid/v1",
+          apiKey: "compact-api-key",
+          api: "openai-completions",
+          models: [{ ...providerModel("compact-model"), contextWindow: 2_048 }],
+        });
+        await modelRuntime.refresh({ allowNetwork: false });
+      },
+      () => SettingsManager.inMemory({
+        compaction: { reserveTokens: 1, keepRecentTokens: 1 },
+      }),
+    );
+    const created = await runtime.createSession(cwd, {
+      sessionManager: manager,
+      model: { provider: "main-provider", id: "main-model" },
+      compactionModel: reference,
+    });
+
+    await created.session.compact();
+    appendMessages();
+    await (created.session as AgentSession & {
+      _runAutoCompaction(reason: string, willRetry: boolean): Promise<boolean>;
+    })._runAutoCompaction("threshold", false);
+
+    expect(calls).toHaveLength(2);
+    expect(calls.map((call) => call.receiver)).toEqual([
+      created.session,
+      created.session,
+    ]);
+    for (const call of calls) {
+      expect(call.args).toHaveLength(8);
+      expect(call.args[1]).toMatchObject({
+        provider: "compact-provider",
+        id: "compact-model",
+        baseUrl: "https://compact.invalid/v1",
+      });
+      expect(call.args[2]).toBeUndefined();
+      expect(call.args[3]).toBeUndefined();
+      expect(call.args[6]).toBeUndefined();
+      expect(call.targetAuth).toMatchObject({
+        model: expect.objectContaining({ baseUrl: "https://compact-auth.invalid/v1" }),
+        apiKey: "compact-api-key-sentinel",
+      });
+    }
+    expect(calls.map((call) => call.args[7])).toEqual(["manual", "threshold"]);
+    for (const request of providerRequests) {
+      expect(request.options).not.toMatchObject({
+        apiKey: "main-api-key-sentinel",
+        headers: expect.objectContaining({ "x-main-sentinel": "must-not-leak" }),
+        env: expect.objectContaining({ MAIN_ENV_SENTINEL: "must-not-leak" }),
+      });
+    }
+    expect(providerRequests).toEqual([
+      {
+        model: expect.objectContaining({
+          provider: "compact-provider",
+          baseUrl: "https://compact-auth.invalid/v1",
+        }),
+        options: expect.objectContaining({
+          apiKey: "compact-api-key-sentinel",
+          headers: { "x-compact": "kept" },
+          env: { COMPACT_ENV: "kept" },
+          timeoutMs: 321,
+          websocketConnectTimeoutMs: 222,
+          maxRetries: 4,
+          maxRetryDelayMs: 987,
+        }),
+      },
+      {
+        model: expect.objectContaining({
+          provider: "compact-provider",
+          baseUrl: "https://compact-auth.invalid/v1",
+        }),
+        options: expect.objectContaining({
+          apiKey: "compact-api-key-sentinel",
+          headers: { "x-compact": "kept" },
+          env: { COMPACT_ENV: "kept" },
+          timeoutMs: 321,
+          websocketConnectTimeoutMs: 222,
+          maxRetries: 4,
+          maxRetryDelayMs: 987,
+        }),
+      },
+    ]);
+    await created.dispose();
   });
 
   it("recalculates context usage at each completed tool-turn boundary", async () => {

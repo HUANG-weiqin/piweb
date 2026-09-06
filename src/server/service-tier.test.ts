@@ -7,8 +7,9 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ServiceTier } from "../shared/protocol.js";
-import { installCompactionThinkingOverride } from "./compaction-thinking.js";
+import { installDefaultCompactionRequestOverride } from "./compaction-request.js";
 import {
+  COMPACTION_SERVICE_TIER_SUPPRESSION,
   installServiceTierOverride,
   modelServiceTiers,
 } from "./service-tier.js";
@@ -292,38 +293,85 @@ describe("service tier compatibility boundary", () => {
     override.dispose();
   });
 
-  it("composes with compaction thinking without changing manual auth identity", async () => {
+  it("composes with default compaction by capturing the decorated stream synchronously", async () => {
     const { modelRuntime, stream, streamSimple } = fakeModelRuntime();
-    const { session, upstream, emit } = fakeSession(modelRuntime);
+    const { session, upstream } = fakeSession(modelRuntime);
     const serviceTierOverride = installServiceTierOverride(
       modelRuntime,
       () => "priority",
     );
-    const compactionThinkingOverride = installCompactionThinkingOverride(
+    const privateSession = session as AgentSession & {
+      _runDefaultCompaction(...args: unknown[]): Promise<unknown>;
+    };
+    async function runDefaultCompaction(
+      _preparation: unknown,
+      requestModel: unknown,
+      _apiKey: unknown,
+      _headers: unknown,
+      _customInstructions: unknown,
+      _signal: unknown,
+      _env: unknown,
+      _reason: unknown,
+    ): Promise<unknown> {
+      return this.agent.streamFunction(
+        requestModel as never,
+        context as never,
+        { reasoning: "max" },
+      );
+    }
+    Object.setPrototypeOf(privateSession, {
+      ...Object.getPrototypeOf(privateSession),
+      _runDefaultCompaction: runDefaultCompaction,
+    });
+    const compactionRequestOverride = installDefaultCompactionRequestOverride(
       session,
-      "auto",
+      { getModel: () => undefined },
     );
-
-    expect(session.agent.streamFunction).toBe(upstream);
-    emit({ type: "compaction_start", reason: "manual" });
-    expect(session.agent.streamFunction).toBe(upstream);
-
-    await Promise.resolve();
     const model = codexModel();
-    session.agent.streamFunction(
-      model as never,
-      context as never,
-      { reasoning: "max" },
+
+    expect(session.agent.streamFunction).toBe(upstream);
+    await privateSession._runDefaultCompaction(
+      {}, model, undefined, undefined, undefined, undefined, undefined, "manual",
     );
     expect(stream).toHaveBeenCalledWith(model, context, expect.objectContaining({
       reasoningEffort: "minimal",
       serviceTier: "priority",
     }));
 
-    compactionThinkingOverride.dispose();
+    compactionRequestOverride.dispose();
     serviceTierOverride.dispose();
     expect(session.agent.streamFunction).toBe(upstream);
     expect(modelRuntime.streamSimple).toBe(streamSimple);
+  });
+
+  it("consumes an explicit compaction marker before provider dispatch", () => {
+    const { modelRuntime, stream, streamSimple } = fakeModelRuntime();
+    const override = installServiceTierOverride(modelRuntime, () => "priority");
+    const model = codexModel({
+      provider: "openai-codex",
+      id: "gpt-5.6-sol",
+      baseUrl: "https://chatgpt.com/backend-api",
+    });
+    modelRuntime.streamSimple(model as never, context as never, {
+      sessionId: "session-a",
+    });
+    const options = {
+      sessionId: "session-a",
+      [COMPACTION_SERVICE_TIER_SUPPRESSION]: true as const,
+    };
+
+    modelRuntime.streamSimple(model as never, context as never, options);
+
+    expect(stream).toHaveBeenCalledOnce();
+    const providerOptions = streamSimple.mock.calls[0]?.[2];
+    expect(Reflect.ownKeys(providerOptions ?? {}))
+      .not.toContain(COMPACTION_SERVICE_TIER_SUPPRESSION);
+    expect(providerOptions?.headers).toEqual({
+      "x-codex-routing-hint": "model=gpt-5.6-sol",
+    });
+    expect(closeOpenAICodexWebSocketSessions)
+      .toHaveBeenCalledExactlyOnceWith("session-a");
+    override.dispose();
   });
 
   it("does not clobber a later runtime wrapper during disposal", () => {

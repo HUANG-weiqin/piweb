@@ -18,6 +18,7 @@ const role: ConversationRoleSnapshot = {
     provider: "openai",
     id: "gpt-5",
   },
+  compactionModel: null,
   defaultThinkingLevel: "off",
   defaultServiceTier: null,
   toolMode: "read_only",

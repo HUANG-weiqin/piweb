@@ -100,6 +100,7 @@ function metadata() {
         provider: "openai",
         id: "gpt-5.6",
       },
+      compactionModel: null,
       defaultThinkingLevel: "high" as const,
       defaultServiceTier: null,
       toolMode: "read_only" as const,
@@ -541,6 +542,7 @@ describe("conversation reserved entries", () => {
     const value = metadata();
     const {
       canManageSessions: _omittedCapability,
+      compactionModel: _omittedCompactionModel,
       defaultThinkingLevel: _omittedThinkingLevel,
       defaultServiceTier: _omittedServiceTier,
       ...legacyRole
@@ -551,8 +553,33 @@ describe("conversation reserved entries", () => {
       data: { ...value, role: legacyRole },
     });
     expect(parsed.data.role.canManageSessions).toBe(false);
+    expect(parsed.data.role.compactionModel).toBeNull();
     expect(parsed.data.role.defaultThinkingLevel).toBe("off");
     expect(parsed.data.role.defaultServiceTier).toBeNull();
+  });
+
+  it("migrates v1 role snapshots in metadata, role changes, and requested cards", () => {
+    const value = metadata();
+    const { compactionModel: _compactionModel, ...legacyRole } = value.role;
+    const legacyMeta = parseConversationMetaEntry({
+      customType: CONVERSATION_META_CUSTOM_TYPE,
+      data: { ...value, role: legacyRole },
+    });
+    const legacyChange = parseConversationRoleChangeEntry({
+      customType: CONVERSATION_ROLE_CHANGE_CUSTOM_TYPE,
+      data: {
+        role: { ...legacyRole, revision: 4 },
+        changedAt: "2026-07-19T10:01:00.000Z",
+      },
+    });
+    const legacyCard = parseConversationCardEntry({
+      customType: CONVERSATION_CARD_CUSTOM_TYPE,
+      data: { ...card(), requestedRole: legacyRole },
+    });
+
+    expect(legacyMeta.data.role.compactionModel).toBeNull();
+    expect(legacyChange.data.role.compactionModel).toBeNull();
+    expect(legacyCard.data.requestedRole?.compactionModel).toBeNull();
   });
 
   it("rejects unknown, incomplete, and over-limit conversation metadata", () => {
