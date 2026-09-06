@@ -1383,19 +1383,31 @@ export function App() {
         setProtocolReady(true);
         setSetupCwd((current) => current || event.startupCwd);
         if (activeCwdRef.current) {
-          const workspaceKey = currentWorkspaceKey();
+          const activeWorkspaceKey = currentWorkspaceKey();
           const reconnectFocus = focusRef.current;
           const replacedPendingFocus = pendingFocusRef.current;
           const previousConversationId = conversationIdRef.current;
           const cached = getWorkspaceProjection(
             workspaceProjectionCacheRef.current,
-            workspaceKey,
+            activeWorkspaceKey,
           );
+          const phoneRoute = phoneHistoryActiveRef.current
+            ? phoneRouteRef.current
+            : undefined;
+          const phoneRouteConversationId = phoneRoute?.screen === "chat"
+            && workspaceKey(phoneRoute.cwd) === activeWorkspaceKey
+            ? phoneRoute.conversationId
+            : undefined;
           let conversation: Extract<
             ClientCommand,
             { type: "initialize" }
           >["conversation"];
-          if (cached) {
+          if (phoneRouteConversationId) {
+            conversation = {
+              kind: "open",
+              conversationId: phoneRouteConversationId,
+            };
+          } else if (cached) {
             conversation = {
               kind: "open",
               conversationId: cached.conversationId,
@@ -1411,14 +1423,14 @@ export function App() {
           const inheritedReconnectDraftOwner = replacedPendingFocus?.reconnectDraftOwner;
           const reconnectDraftOwner = reconnectFocus
             ? {
-                workspaceKey,
+                workspaceKey: activeWorkspaceKey,
                 projectId: reconnectFocus.projectId,
                 conversationId: reconnectFocus.conversationId,
               }
             : replacedPendingFocus?.operation === "initialize"
-              && replacedPendingFocus.workspaceKey === workspaceKey
+              && replacedPendingFocus.workspaceKey === activeWorkspaceKey
               && inheritedReconnectDraftOwner
-              && inheritedReconnectDraftOwner.workspaceKey === workspaceKey
+              && inheritedReconnectDraftOwner.workspaceKey === activeWorkspaceKey
               && conversation.kind === "open"
               && conversation.conversationId === inheritedReconnectDraftOwner.conversationId
               && (!cached || cached.projectId === inheritedReconnectDraftOwner.projectId)
@@ -1452,7 +1464,7 @@ export function App() {
           updatePendingFocus({
             commandId,
             operation: "initialize",
-            workspaceKey,
+            workspaceKey: activeWorkspaceKey,
             initializeConversationKind: conversation.kind,
             ...(conversation.kind === "open"
               ? { targetConversationId: conversation.conversationId }

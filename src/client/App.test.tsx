@@ -3800,6 +3800,67 @@ describe("App", () => {
     expect(screen.getByRole("status", { name: "正在同步会话…" })).toBeInTheDocument();
   });
 
+  it("reconnects a pending phone focus to its durable chat route", () => {
+    mockPhoneViewport();
+    localStorage.setItem("piweb.lastCwd", "E:\\work");
+    render(<App />);
+    const initial = latestCommand("initialize");
+
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "state",
+        state: {
+          sessionId: initial.sessionId,
+          projectId: PROJECT_ID,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          providers: [],
+          conversationId: CONVERSATION_ID,
+          focusId: FOCUS_A,
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "project_snapshot",
+        sessionId: initial.sessionId,
+        projectId: PROJECT_ID,
+        conversations: [
+          conversationSummary(CONVERSATION_ID, "A"),
+          conversationSummary(CONVERSATION_B, "B"),
+        ],
+        truncated: false,
+      });
+    });
+
+    socketMock.autoFocus = false;
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    expect(latestCommand("focus_conversation")).toMatchObject({
+      conversationId: CONVERSATION_B,
+    });
+    expect(currentPhoneRoute()).toEqual({
+      screen: "chat",
+      cwd: "E:\\work",
+      conversationId: CONVERSATION_B,
+    });
+
+    act(() => {
+      socketMock.status?.(false);
+      socketMock.status?.(true);
+      socketMock.emit?.({
+        type: "hello",
+        protocolVersion: PROTOCOL_VERSION,
+        startupCwd: "E:\\default",
+      });
+    });
+
+    expect(latestCommand("initialize")).toMatchObject({
+      cwd: "E:\\work",
+      conversation: { kind: "open", conversationId: CONVERSATION_B },
+    });
+  });
+
   it("reconnects from the active workspace cache and waits for a fresh snapshot", () => {
     localStorage.setItem("piweb.workspaces", JSON.stringify([
       "E:\\first",
