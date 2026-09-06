@@ -39,7 +39,7 @@ const transitionDiagnostics = {
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(43);
+    expect(PROTOCOL_VERSION).toBe(44);
   });
 
   it("accepts supported commands", () => {
@@ -1043,6 +1043,14 @@ describe("parseClientCommand", () => {
       conversationId,
       focusId,
       event: { type: "run_queued" },
+    }).type).toBe("session_event");
+    expect(parseServerEvent({
+      type: "session_event",
+      sessionId,
+      runId,
+      conversationId,
+      focusId,
+      event: { type: "output_progress", outputTokens: 42 },
     }).type).toBe("session_event");
     expect(parseServerEvent({
       type: "session_event",

@@ -19,7 +19,7 @@ ClientCommand
 → App / reducer
 ```
 
-协议由 `PROTOCOL_VERSION` 标识，当前为 v43。v43 让 `project_snapshot.coverage` 明确区分完整成员证明与不完整观察，浏览器只有在 `coverage: "complete"` 且未截断时才能把缺席视为删除证据。v42 允许成功的 workspace initialize 与 conversation focus 在既有 authority envelope 上携带一次性 host phase diagnostics；它不新增事件、状态或持久记录。角色模板、冻结角色快照、角色 catalog 与 conversation snapshot 的 role payload 都必须包含必填 nullable `compactionModel`；`null` 跟随冻结 primary model，不新增 command。v41 另把实际 default compaction request attempt 与 durable 成功 provenance 显式投影，二者都不能从配置推导。工具参数和结果允许 `unknown`，但服务端在投影时会做有界遍历、转成 JSON-safe 数据并限制单值大小。
+协议由 `PROTOCOL_VERSION` 标识，当前为 v44。v44 的 `output_progress` 只携带当前 assistant segment 累计的 streamed output token 快照；浏览器以本地时间在短滑动窗口内派生右侧 Context Compaction 的输出速率。它不进入 `PublicState`、history snapshot 或最终 usage 累计；无可用 streaming usage 时必须显示 `—`。v43 让 `project_snapshot.coverage` 明确区分完整成员证明与不完整观察，浏览器只有在 `coverage: "complete"` 且未截断时才能把缺席视为删除证据。v42 允许成功的 workspace initialize 与 conversation focus 在既有 authority envelope 上携带一次性 host phase diagnostics；它不新增事件、状态或持久记录。角色模板、冻结角色快照、角色 catalog 与 conversation snapshot 的 role payload 都必须包含必填 nullable `compactionModel`；`null` 跟随冻结 primary model，不新增 command。v41 另把实际 default compaction request attempt 与 durable 成功 provenance 显式投影，二者都不能从配置推导。工具参数和结果允许 `unknown`，但服务端在投影时会做有界遍历、转成 JSON-safe 数据并限制单值大小。
 
 ## 决策
 
