@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   MAX_MESSAGE_BYTES,
+  MAX_MODEL_REFERENCE_BYTES,
   MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
   MAX_ROLE_COUNT,
   MAX_ROLE_DESCRIPTION_CHARACTERS,
@@ -1445,6 +1446,70 @@ describe("parseServerEvent", () => {
         model: { ...role.model, provider: "p".repeat(1_025) },
       }],
     })).toThrow();
+  });
+
+  it("bounds live and durable compaction request identities by UTF-8 bytes", () => {
+    const attemptId = "9a2d87b2-848e-48ed-996d-5f1aecdc6a87";
+    const asciiBoundary = "p".repeat(MAX_MODEL_REFERENCE_BYTES);
+    const multibyteBoundary = `${"模".repeat(Math.floor(MAX_MODEL_REFERENCE_BYTES / 3))}x`;
+    const validTarget = { provider: asciiBoundary, id: multibyteBoundary };
+    const stateEvent = (requestTarget: { provider: string; id: string }) => ({
+      type: "state" as const,
+      state: {
+        sessionId,
+        projectId,
+        cwd: "E:\\work",
+        busy: false,
+        compacting: true,
+        compactionAttempt: {
+          id: attemptId,
+          generator: "default" as const,
+          policy: "explicit" as const,
+          requestTarget,
+        },
+        selectedServiceTier: null,
+        thinkingLevel: "off" as const,
+        toolMode: "full_access" as const,
+        availableThinkingLevels: ["off" as const],
+        providers: [],
+      },
+    });
+    const snapshotEvent = (requestTarget: { provider: string; id: string }) => ({
+      type: "conversation_snapshot" as const,
+      sessionId,
+      conversationId,
+      focusId,
+      items: [{
+        kind: "compaction" as const,
+        id: "compaction-entry",
+        timestamp: "2026-07-18T12:01:00.000Z",
+        tokensBefore: 100,
+        provenance: {
+          generator: "default" as const,
+          attemptId,
+          policy: "follow_primary" as const,
+          requestTarget,
+        },
+      }],
+      window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
+    });
+
+    expect(parseServerEvent(stateEvent(validTarget))).toMatchObject({
+      state: { compactionAttempt: { requestTarget: validTarget } },
+    });
+    expect(parseServerEvent(snapshotEvent(validTarget))).toMatchObject({
+      items: [{ provenance: { requestTarget: validTarget } }],
+    });
+
+    const invalidTargets = [
+      { provider: " \t", id: "model" },
+      { provider: "provider", id: `${asciiBoundary}x` },
+      { provider: `${multibyteBoundary}模`, id: "model" },
+    ];
+    for (const requestTarget of invalidTargets) {
+      expect(() => parseServerEvent(stateEvent(requestTarget))).toThrow();
+      expect(() => parseServerEvent(snapshotEvent(requestTarget))).toThrow();
+    }
   });
 
   it("accepts durable legacy Pi conversation identities", () => {

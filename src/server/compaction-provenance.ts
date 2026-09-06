@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { types as nodeTypes } from "node:util";
-import type {
-  ConversationCompactionProvenance,
-  PublicCompactionAttempt,
+import {
+  MAX_MODEL_REFERENCE_BYTES,
+  type ConversationCompactionProvenance,
+  type PublicCompactionAttempt,
 } from "../shared/protocol.js";
 
 export const COMPACTION_PROVENANCE_NAMESPACE = "piweb.compaction_provenance.v1";
@@ -48,14 +49,17 @@ function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): 
     && ownKeys.every((key) => typeof key === "string" && keys.includes(key));
 }
 
+function validModelReferencePart(value: unknown): value is string {
+  return typeof value === "string"
+    && value.trim().length > 0
+    && Buffer.byteLength(value, "utf8") <= MAX_MODEL_REFERENCE_BYTES;
+}
+
 function validRequestTarget(value: unknown): value is { provider: string; id: string } {
   const target = plainRecord(value);
-  return target !== undefined
-    && hasExactKeys(target, ["provider", "id"])
-    && typeof ownDataProperty(target, "provider") === "string"
-    && ownDataProperty(target, "provider") !== ""
-    && typeof ownDataProperty(target, "id") === "string"
-    && ownDataProperty(target, "id") !== "";
+  if (target === undefined || !hasExactKeys(target, ["provider", "id"])) return false;
+  return validModelReferencePart(ownDataProperty(target, "provider"))
+    && validModelReferencePart(ownDataProperty(target, "id"));
 }
 
 function validDurableDefaultProvenance(
@@ -147,22 +151,29 @@ function assertJsonSafePlainRecord(value: unknown, label: string): Record<string
 function durableProvenance(
   attempt: PublicCompactionAttempt,
 ): DurableDefaultCompactionProvenance {
-  return {
-    version: 1,
+  const provenance = {
+    version: 1 as const,
     attemptId: attempt.id,
-    generator: "default",
+    generator: "default" as const,
     policy: attempt.policy,
     requestTarget: {
       provider: attempt.requestTarget.provider,
       id: attempt.requestTarget.id,
     },
   };
+  if (!validDurableDefaultProvenance(provenance)) {
+    throw new Error("Default compaction provenance is invalid");
+  }
+  return provenance;
 }
 
 export function createDefaultCompactionAttempt(
   policy: PublicCompactionAttempt["policy"],
   requestTarget: PublicCompactionAttempt["requestTarget"],
 ): PublicCompactionAttempt {
+  if (!validRequestTarget(requestTarget)) {
+    throw new Error("Default compaction request target has an invalid model identity");
+  }
   return {
     id: randomUUID(),
     generator: "default",

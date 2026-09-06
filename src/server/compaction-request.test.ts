@@ -1,5 +1,6 @@
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
+import { MAX_MODEL_REFERENCE_BYTES } from "../shared/protocol.js";
 import {
   COMPACTION_PROVENANCE_NAMESPACE,
   mergeDefaultCompactionProvenance,
@@ -451,6 +452,34 @@ describe("installDefaultCompactionRequestOverride", () => {
     override.dispose();
   });
 
+  it.each([
+    ["blank provider", { provider: " \t" }],
+    ["oversized id", { id: "m".repeat(MAX_MODEL_REFERENCE_BYTES + 1) }],
+    [
+      "oversized multibyte provider",
+      { provider: "模".repeat(Math.floor(MAX_MODEL_REFERENCE_BYTES / 3) + 1) },
+    ],
+  ])("rejects an invalid %s before provider dispatch", async (_label, overrides) => {
+    const events: unknown[] = [];
+    const fixture = fakeSession(async (current, args) => {
+      current.agent.streamFunction(args[1] as never, {} as never, {});
+      return defaultResult(args);
+    });
+    const override = installDefaultCompactionRequestOverride(
+      fixture.session,
+      { getModel: () => model() },
+      undefined,
+      "auto",
+      (event) => events.push(event),
+    );
+
+    await expect(fixture.invoke(...defaultArgs(model(overrides))))
+      .rejects.toThrow("invalid model identity");
+    expect(fixture.originalStream).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
+    override.dispose();
+  });
+
   it("fails closed if a split request changes the provider or model identity", async () => {
     const events: unknown[] = [];
     const fixture = fakeSession(async (current, args) => {
@@ -514,6 +543,10 @@ describe("installDefaultCompactionRequestOverride", () => {
     });
     expect(mergeDefaultCompactionProvenance({ readFiles: ["README.md"] }, attempt))
       .toMatchObject({ readFiles: ["README.md"] });
+    expect(() => mergeDefaultCompactionProvenance(undefined, {
+      ...attempt,
+      requestTarget: { provider: " ", id: "model" },
+    })).toThrow("provenance is invalid");
     for (const details of [null, [], new Date(), {
       [COMPACTION_PROVENANCE_NAMESPACE]: {},
     }]) {

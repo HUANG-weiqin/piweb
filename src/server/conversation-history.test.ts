@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-coding-agent";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
+import { MAX_MODEL_REFERENCE_BYTES } from "../shared/protocol.js";
 import { COMPACTION_PROVENANCE_NAMESPACE } from "./compaction-provenance.js";
 import {
   MAX_AGENT_PEEK_BYTES,
@@ -1146,8 +1147,10 @@ describe("projectConversationHistory", () => {
     ]);
   });
 
-  it("projects only strict default provenance on the active branch and gives custom hooks priority", () => {
+  it("projects only bounded strict default provenance on the active branch and gives custom hooks priority", () => {
     const manager = SessionManager.inMemory("E:\\work");
+    const asciiBoundary = "p".repeat(MAX_MODEL_REFERENCE_BYTES);
+    const multibyteBoundary = `${"模".repeat(Math.floor(MAX_MODEL_REFERENCE_BYTES / 3))}x`;
     const firstKeptEntryId = manager.appendMessage(message({
       role: "user",
       content: "question",
@@ -1160,7 +1163,7 @@ describe("projectConversationHistory", () => {
         attemptId: defaultAttemptId,
         generator: "default",
         policy: "follow_primary",
-        requestTarget: { provider: "provider", id: "model" },
+        requestTarget: { provider: asciiBoundary, id: multibyteBoundary },
       },
     });
     manager.appendCompaction("custom summary", firstKeptEntryId, 101, {
@@ -1175,6 +1178,22 @@ describe("projectConversationHistory", () => {
     manager.appendCompaction("invalid summary", firstKeptEntryId, 102, {
       [COMPACTION_PROVENANCE_NAMESPACE]: { version: 2 },
     });
+    const invalidTargets = [
+      { provider: " \t", id: "model" },
+      { provider: "provider", id: `${asciiBoundary}x` },
+      { provider: `${multibyteBoundary}模`, id: "model" },
+    ];
+    for (const [index, requestTarget] of invalidTargets.entries()) {
+      manager.appendCompaction(`invalid target ${index}`, firstKeptEntryId, 103 + index, {
+        [COMPACTION_PROVENANCE_NAMESPACE]: {
+          version: 1,
+          attemptId: randomUUID(),
+          generator: "default",
+          policy: "explicit",
+          requestTarget,
+        },
+      });
+    }
 
     const markers = projectConversationItems(manager)
       .filter((item) => item.kind === "compaction");
@@ -1184,11 +1203,12 @@ describe("projectConversationHistory", () => {
           generator: "default",
           attemptId: defaultAttemptId,
           policy: "follow_primary",
-          requestTarget: { provider: "provider", id: "model" },
+          requestTarget: { provider: asciiBoundary, id: multibyteBoundary },
         },
       }),
       expect.objectContaining({ provenance: { generator: "custom" } }),
-      expect.not.objectContaining({ provenance: expect.anything() }),
+      ...Array.from({ length: 4 }, () =>
+        expect.not.objectContaining({ provenance: expect.anything() })),
     ]);
 
     manager.branch(firstKeptEntryId);

@@ -76,6 +76,13 @@ const boundedUtf8String = (
     message: `${field} must be at most ${maximumBytes} UTF-8 bytes`,
   });
 });
+const modelReferenceString = (field: string) => boundedUtf8String(
+  MAX_MODEL_REFERENCE_BYTES,
+  field,
+).refine(
+  (value) => value.trim().length > 0,
+  `${field} must not be blank`,
+);
 const boundedCharactersString = (
   maximumCharacters: number,
   field: string,
@@ -103,20 +110,8 @@ const roleIdSchema = required.max(128).refine(
   'roleId must be "default" or a UUID',
 );
 const roleModelSchema = z.object({
-  provider: boundedUtf8String(
-    MAX_MODEL_REFERENCE_BYTES,
-    "role.model.provider",
-  ).refine(
-    (value) => value.trim().length > 0,
-    "role.model.provider must not be blank",
-  ),
-  id: boundedUtf8String(
-    MAX_MODEL_REFERENCE_BYTES,
-    "role.model.id",
-  ).refine(
-    (value) => value.trim().length > 0,
-    "role.model.id must not be blank",
-  ),
+  provider: modelReferenceString("role.model.provider"),
+  id: modelReferenceString("role.model.id"),
 });
 const thinkingLevelSchema = z.enum([
   "off",
@@ -937,8 +932,8 @@ const publicContextUsageSchema: z.ZodType<PublicContextUsage> = z.object({
   source: z.enum(["measured", "estimated", "unknown"]),
 });
 const compactionRequestTargetSchema = z.object({
-  provider: required,
-  id: required,
+  provider: modelReferenceString("compaction request target provider"),
+  id: modelReferenceString("compaction request target id"),
 }).strict();
 const publicCompactionAttemptSchema: z.ZodType<PublicCompactionAttempt> = z.object({
   id: z.string().uuid(),
