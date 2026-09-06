@@ -1140,6 +1140,9 @@ export function App() {
     transitionEventBufferRef.current = events;
     try {
       return { sent: sendCommand(), events };
+    } catch {
+      setError("本地服务未连接");
+      return { sent: false, events: [] };
     } finally {
       transitionEventBufferRef.current = undefined;
     }

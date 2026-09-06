@@ -2585,6 +2585,78 @@ describe("App", () => {
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeEnabled();
   });
 
+  it("treats a throwing focus replacement send as rejected without cancelling the active transition", async () => {
+    const measure = vi.spyOn(performance, "measure");
+    const sessionId = startFocusReplacementProject();
+    await act(async () => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    });
+    measure.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    const focusB = latestCommand("focus_conversation");
+    socketMock.send.mockImplementationOnce(() => {
+      socketMock.rawEmit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversations: [conversationSummary(CONVERSATION_D, "buffered throw event")],
+        truncated: false,
+      });
+      throw new Error("synchronous send failure");
+    });
+
+    expect(() => fireEvent.click(
+      screen.getByRole("button", { name: "打开会话 C" }),
+    )).not.toThrow();
+    expect(latestCommand("focus_conversation").conversationId).toBe(CONVERSATION_C);
+    expect(screen.getByRole("alert")).toHaveTextContent("本地服务未连接");
+    expect(screen.getByRole("button", { name: "当前会话 B" }))
+      .toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("button", { name: "打开会话 C" }))
+      .toBeInTheDocument();
+    expect(screen.queryByText("buffered throw event")).not.toBeInTheDocument();
+
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "focus_attached",
+        operation: "focus_conversation",
+        commandId: focusB.commandId,
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_B,
+        focusId: FOCUS_A_SECOND,
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_B,
+        focusId: FOCUS_A_SECOND,
+        messages: [{
+          id: "focus-b-after-send-throw",
+          role: "assistant",
+          text: "focus B remained authoritative",
+          thinking: "",
+          tools: [],
+        }],
+        window: completeConversationWindow,
+      });
+    });
+
+    await waitFor(() => {
+      const details = measure.mock.calls
+        .filter(([name]) => name === "piweb.transition")
+        .map(([, options]) => (options as PerformanceMeasureOptions).detail);
+      expect(details).toHaveLength(2);
+      expect(details.map(({ termination }) => termination)).toEqual([
+        { kind: "failure", reason: "send-failed" },
+        { kind: "success" },
+      ]);
+    });
+    expect(screen.getByText("focus B remained authoritative"))
+      .toBeInTheDocument();
+  });
+
   it("shows a deferred fallback read-only and refreshes before restoring readiness", () => {
     const sessionId = startFocusReplacementProject();
 
