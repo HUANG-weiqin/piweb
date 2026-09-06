@@ -306,6 +306,7 @@ describe("PiRuntime session ownership", () => {
     const reference = { provider: "compact-provider", id: "compact-model" };
     const calls: Array<{ receiver: unknown; args: unknown[]; targetAuth: unknown }> = [];
     const providerRequests: Array<{ model: unknown; options: unknown }> = [];
+    const compactionAttemptEvents: unknown[] = [];
     const runtime = await testRuntime(
       () => [],
       async (result) => {
@@ -436,6 +437,7 @@ describe("PiRuntime session ownership", () => {
       sessionManager: manager,
       model: { provider: "main-provider", id: "main-model" },
       compactionModel: reference,
+      compactionAttemptObserver: (event) => compactionAttemptEvents.push(event),
     });
 
     await created.session.compact();
@@ -445,6 +447,35 @@ describe("PiRuntime session ownership", () => {
     })._runAutoCompaction("threshold", false);
 
     expect(calls).toHaveLength(2);
+    expect(compactionAttemptEvents.map((event) => (event as { type: string }).type)).toEqual([
+      "started",
+      "ended",
+      "started",
+      "ended",
+    ]);
+    expect(compactionAttemptEvents[0]).toMatchObject({
+      type: "started",
+      attempt: {
+        generator: "default",
+        policy: "explicit",
+        requestTarget: { provider: "compact-provider", id: "compact-model" },
+      },
+    });
+    expect(compactionAttemptEvents[1]).toEqual({
+      type: "ended",
+      id: (compactionAttemptEvents[0] as { attempt: { id: string } }).attempt.id,
+    });
+    expect(manager.getEntries().filter((entry) => entry.type === "compaction"))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          details: expect.objectContaining({
+            "piweb.compaction_provenance.v1": expect.objectContaining({
+              generator: "default",
+              policy: "explicit",
+            }),
+          }),
+        }),
+      ]));
     expect(calls.map((call) => call.receiver)).toEqual([
       created.session,
       created.session,

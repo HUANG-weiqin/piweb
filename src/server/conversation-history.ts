@@ -13,6 +13,7 @@ import {
   type ConversationCard,
   type ConversationMessageEntry,
 } from "./conversation-meta.js";
+import { projectDefaultCompactionProvenance } from "./compaction-provenance.js";
 import { toWireValue } from "./session-events.js";
 
 export const MAX_HISTORY_SNAPSHOT_BYTES = 750_000;
@@ -594,6 +595,9 @@ export function projectConversationItemSlots(
   });
   for (const entry of sessionManager.getBranch()) {
     if (entry.type !== "compaction") continue;
+    const provenance = entry.fromHook === true
+      ? { generator: "custom" as const }
+      : projectDefaultCompactionProvenance(entry.details);
     positionedItems.push({
       slot: {
         item: {
@@ -601,6 +605,7 @@ export function projectConversationItemSlots(
           id: entry.id,
           timestamp: entry.timestamp,
           tokensBefore: entry.tokensBefore,
+          ...(provenance === undefined ? {} : { provenance }),
         },
       },
       physicalIndex:

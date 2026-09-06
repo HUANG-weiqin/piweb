@@ -21,6 +21,8 @@ export const MAX_LOOP_LIST_ITEM_TEXT_CHARACTERS = 512;
 export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
+// v41: default compaction attempts and successful durable provenance distinguish
+// the requested model identity from legacy and custom summaries.
 // v40: role templates and frozen conversation role snapshots carry a required
 // nullable compaction model; null follows the frozen primary model.
 // v39: LoopList items project explicit pending, active, or completed status;
@@ -37,7 +39,7 @@ export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 // conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
-export const PROTOCOL_VERSION = 40;
+export const PROTOCOL_VERSION = 41;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
@@ -468,6 +470,28 @@ export interface PublicContextUsage {
   source: "measured" | "estimated" | "unknown";
 }
 
+export interface PublicCompactionAttempt {
+  id: string;
+  generator: "default";
+  policy: "follow_primary" | "explicit";
+  requestTarget: {
+    provider: string;
+    id: string;
+  };
+}
+
+export type ConversationCompactionProvenance =
+  | {
+      generator: "default";
+      attemptId: string;
+      policy: "follow_primary" | "explicit";
+      requestTarget: {
+        provider: string;
+        id: string;
+      };
+    }
+  | { generator: "custom" };
+
 export interface PublicState {
   sessionId: string;
   projectId: string;
@@ -477,6 +501,7 @@ export interface PublicState {
   cwd: string;
   busy: boolean;
   compacting?: boolean;
+  compactionAttempt?: PublicCompactionAttempt;
   activeRun?: {
     id: string;
     phase: "queued" | "running" | "waiting" | "cancelling";
@@ -644,6 +669,7 @@ export interface ConversationCompactionMarker {
   id: string;
   timestamp: string;
   tokensBefore: number;
+  provenance?: ConversationCompactionProvenance;
 }
 
 export type ConversationHistoryItem =
@@ -910,6 +936,26 @@ const publicContextUsageSchema: z.ZodType<PublicContextUsage> = z.object({
   percent: z.number().finite().nullable(),
   source: z.enum(["measured", "estimated", "unknown"]),
 });
+const compactionRequestTargetSchema = z.object({
+  provider: required,
+  id: required,
+}).strict();
+const publicCompactionAttemptSchema: z.ZodType<PublicCompactionAttempt> = z.object({
+  id: z.string().uuid(),
+  generator: z.literal("default"),
+  policy: z.enum(["follow_primary", "explicit"]),
+  requestTarget: compactionRequestTargetSchema,
+}).strict();
+const conversationCompactionProvenanceSchema: z.ZodType<ConversationCompactionProvenance> =
+  z.discriminatedUnion("generator", [
+    z.object({
+      generator: z.literal("default"),
+      attemptId: z.string().uuid(),
+      policy: z.enum(["follow_primary", "explicit"]),
+      requestTarget: compactionRequestTargetSchema,
+    }).strict(),
+    z.object({ generator: z.literal("custom") }).strict(),
+  ]);
 const publicStateSchema: z.ZodType<PublicState> = z.object({
   sessionId: sessionIdSchema,
   projectId: z.string().uuid(),
@@ -919,6 +965,7 @@ const publicStateSchema: z.ZodType<PublicState> = z.object({
   cwd: z.string(),
   busy: z.boolean(),
   compacting: z.boolean().optional(),
+  compactionAttempt: publicCompactionAttemptSchema.optional(),
   activeRun: z.object({
     id: runIdSchema,
     phase: z.enum(["queued", "running", "waiting", "cancelling"]),
@@ -1176,6 +1223,7 @@ const conversationHistoryItemSchema: z.ZodType<ConversationHistoryItem> =
       id: z.string(),
       timestamp: z.string().datetime(),
       tokensBefore: z.number().finite().nonnegative(),
+      provenance: conversationCompactionProvenanceSchema.optional(),
     }),
     z.object({
       kind: z.literal("session_message"),

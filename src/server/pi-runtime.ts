@@ -48,6 +48,7 @@ import {
   type DefaultCompactionRequestOverride,
   installDefaultCompactionRequestOverride,
 } from "./compaction-request.js";
+import type { DefaultCompactionAttemptObserver } from "./compaction-provenance.js";
 import { SerialTaskQueue } from "./serial-task-queue.js";
 import {
   installServiceTierOverride,
@@ -287,6 +288,7 @@ export interface CreatePiSessionOptions {
     provider: string;
     id: string;
   };
+  compactionAttemptObserver?: DefaultCompactionAttemptObserver;
   thinkingLevel?: CreateAgentSessionOptions["thinkingLevel"];
   roleSystemPrompt?: string;
   workbenchCustomTools?: ToolDefinition[];
@@ -954,6 +956,7 @@ export class PiRuntime implements PiRuntimeLike {
         owner.runtime,
         compactionModelReference,
         resolvedTransport,
+        options.compactionAttemptObserver,
       );
 
       const startupProviderErrors = owner.takeStartupProviderErrors();

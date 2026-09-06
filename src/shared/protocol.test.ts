@@ -26,7 +26,7 @@ const messageId = "assistant:96b960be-b6bb-4a19-9cf2-78e77cb69425";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(40);
+    expect(PROTOCOL_VERSION).toBe(41);
   });
 
   it("accepts supported commands", () => {
@@ -589,6 +589,12 @@ describe("parseClientCommand", () => {
         cwd: "E:\\work",
         busy: false,
         compacting: true,
+        compactionAttempt: {
+          id: "9a2d87b2-848e-48ed-996d-5f1aecdc6a87",
+          generator: "default",
+          policy: "explicit",
+          requestTarget: { provider: "openai", id: "gpt-summary" },
+        },
         selectedServiceTier: null,
         thinkingLevel: "off",
         toolMode: "full_access",
@@ -597,7 +603,13 @@ describe("parseClientCommand", () => {
       },
     })).toMatchObject({
       type: "state",
-      state: { compacting: true },
+      state: {
+        compacting: true,
+        compactionAttempt: expect.objectContaining({
+          generator: "default",
+          policy: "explicit",
+        }),
+      },
     });
     expect(parseServerEvent({
       type: "state",
@@ -837,7 +849,13 @@ describe("parseClientCommand", () => {
           id: "compaction-entry-1",
           timestamp: "2026-07-18T12:01:00.000Z",
           tokensBefore: 63_771,
-        },
+          provenance: {
+            generator: "default",
+            attemptId: "9a2d87b2-848e-48ed-996d-5f1aecdc6a87",
+            policy: "follow_primary",
+            requestTarget: { provider: "openai", id: "gpt" },
+          },
+        }
       ],
       window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
     }).type).toBe("conversation_snapshot");
