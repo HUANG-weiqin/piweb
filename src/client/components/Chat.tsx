@@ -62,6 +62,36 @@ const TIMELINE_TIME_FORMAT = new Intl.DateTimeFormat("en-GB", {
   hour12: false,
 });
 
+function modelIdentityLabel(model: { provider: string; id: string }): string {
+  return `${model.provider} / ${model.id}`;
+}
+
+function compactionPolicyLabel(
+  policy: "follow_primary" | "explicit",
+): string {
+  return policy === "follow_primary" ? "跟随角色模型" : "专用配置";
+}
+
+function compactionMarkerLabel(
+  provenance: ConversationCompactionMarker["provenance"],
+): string {
+  if (provenance === undefined) return "模型未记录";
+  if (provenance.generator === "custom") {
+    return "自定义摘要 · 模型归因未记录";
+  }
+  return `Pi 默认摘要 · 请求目标：${
+    modelIdentityLabel(provenance.requestTarget)
+  } · ${compactionPolicyLabel(provenance.policy)}`;
+}
+
+function liveCompactionAttemptLabel(
+  attempt: NonNullable<PublicState["compactionAttempt"]>,
+): string {
+  return `Pi 默认摘要请求管线目标：${
+    modelIdentityLabel(attempt.requestTarget)
+  } · ${compactionPolicyLabel(attempt.policy)}`;
+}
+
 function distanceFromBottom(transcript: HTMLElement): number {
   return Math.max(
     0,
@@ -111,6 +141,7 @@ interface ChatProps {
   compactionThresholdPercent: number;
   compactionThresholdBusy: boolean;
   compacting?: boolean;
+  compactionAttempt?: PublicState["compactionAttempt"];
   cwd: string;
   conversationContext?: {
     rootTitle: string;
@@ -397,6 +428,7 @@ function ChatView({
   compactionThresholdPercent,
   compactionThresholdBusy,
   compacting = false,
+  compactionAttempt,
   cwd,
   conversationContext,
   conversationTitleLookup,
@@ -856,22 +888,27 @@ function ChatView({
       </div>}
       {conversationReady && !blocks.length && <div className="empty"><div>π</div><h1>想做点什么？</h1><p>Pi 可以读取、修改文件并执行命令。</p></div>}
       {blocks.map((block) => {
-        if (block.kind === "compaction") return <div
-          key={`${transcriptRenderScopeKey}:compaction:${block.id}`}
-          className="compaction-marker"
-          role="separator"
-          aria-label="上下文已压缩"
-        >
-          <time className="compaction-time" dateTime={block.timestamp}>
-            {formatTimelineTime(block.timestamp)}
-          </time>
-          <strong className="compaction-actor">SYSTEM</strong>
-          <span className="compaction-label">CONTEXT COMPACTION</span>
-          <span className="compaction-metric">
-            {formatCompactTokens(block.tokensBefore)} TOKENS
-          </span>
-          <span className="compaction-state">DONE</span>
-        </div>;
+        if (block.kind === "compaction") {
+          const provenanceLabel = compactionMarkerLabel(block.provenance);
+          return <div
+            key={`${transcriptRenderScopeKey}:compaction:${block.id}`}
+            className="compaction-marker"
+            role="separator"
+            aria-label="上下文已压缩"
+          >
+            <time className="compaction-time" dateTime={block.timestamp}>
+              {formatTimelineTime(block.timestamp)}
+            </time>
+            <strong className="compaction-actor">SYSTEM</strong>
+            <span className="compaction-label" title={provenanceLabel}>
+              CONTEXT COMPACTION · {provenanceLabel}
+            </span>
+            <span className="compaction-metric">
+              {formatCompactTokens(block.tokensBefore)} TOKENS
+            </span>
+            <span className="compaction-state">DONE</span>
+          </div>;
+        }
         if (block.kind === "session_message") return <SessionMessageCard
           key={`${transcriptRenderScopeKey}:card:${block.cardId}`}
           card={block}
@@ -922,7 +959,9 @@ function ChatView({
         <ActivitySpinner className="compaction-spinner" />
         <span className="compaction-progress-copy">
           <strong>正在压缩上下文</strong>
-          <small>整理较早消息并保留关键信息…</small>
+          <small>{compactionAttempt
+            ? liveCompactionAttemptLabel(compactionAttempt)
+            : "正在准备摘要；默认摘要请求模型尚未记录。"}</small>
         </span>
       </div>}
     </section>
