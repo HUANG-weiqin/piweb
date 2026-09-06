@@ -415,6 +415,11 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       )
     ) return state;
     const items = normalizeHistory(action.items);
+    // A completion snapshot follows its terminal session event at the same
+    // projection sequence. Preserve its client-only settled rate, while a
+    // newer snapshot still drops a value whose lifecycle we did not observe.
+    const preservesSettledOutputRate = state.lastProjectionSeq !== undefined
+      && action.projectionSeq === state.lastProjectionSeq;
     return {
       ...withItems(state, items),
       focus: {
@@ -431,7 +436,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             startsMidTurn: action.historyWindow.startsMidTurn,
             contentTruncated: action.historyWindow.contentTruncated,
           },
-      completedOutputRate: undefined,
+      completedOutputRate: preservesSettledOutputRate
+        ? state.completedOutputRate
+        : undefined,
       outputRateMeasurement: undefined,
     };
   }

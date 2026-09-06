@@ -1148,6 +1148,70 @@ describe("chatReducer", () => {
     }
   });
 
+  it("keeps a settled output rate through its same-sequence completion snapshot", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-09-06T16:00:00.000Z"));
+      let state = chatReducer(focusedState(), {
+        ...FOCUS_A_1,
+        type: "hydrate",
+        projectionSeq: 0,
+        items: [],
+      });
+      state = chatReducer(state, {
+        ...FOCUS_A_1,
+        type: "session",
+        runId: RUN_1,
+        projectionSeq: 1,
+        event: { type: "run_started" },
+      });
+      state = chatReducer(state, {
+        ...FOCUS_A_1,
+        type: "session",
+        runId: RUN_1,
+        projectionSeq: 2,
+        event: { type: "assistant_message_started", projectionId: "assistant-1" },
+      });
+      vi.advanceTimersByTime(1_000);
+      state = chatReducer(state, {
+        ...FOCUS_A_1,
+        type: "session",
+        runId: RUN_1,
+        projectionSeq: 3,
+        event: {
+          type: "usage",
+          usage: { input: 0, output: 10, cacheRead: 0, cacheWrite: 0, total: 10 },
+        },
+      });
+      state = chatReducer(state, {
+        ...FOCUS_A_1,
+        type: "session",
+        runId: RUN_1,
+        projectionSeq: 4,
+        event: { type: "run_finished", outcome: "completed" },
+      });
+      expect(state.completedOutputRate?.tokensPerSecond).toBe(10);
+
+      state = chatReducer(state, {
+        ...FOCUS_A_1,
+        type: "hydrate",
+        projectionSeq: 4,
+        items: [],
+      });
+      expect(state.completedOutputRate?.tokensPerSecond).toBe(10);
+
+      state = chatReducer(state, {
+        ...FOCUS_A_1,
+        type: "hydrate",
+        projectionSeq: 5,
+        items: [],
+      });
+      expect(state.completedOutputRate).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("uses the final assistant message when no streaming delta arrived", () => {
     let state = chatReducer(focusedState(), { ...FOCUS_A_1, type: "prompt_accepted", runId: RUN_1, text: "hello" });
     state = chatReducer(state, { ...FOCUS_A_1, type: "session", runId: RUN_1, event: { type: "run_started" } });
