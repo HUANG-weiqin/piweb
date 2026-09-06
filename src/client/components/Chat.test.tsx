@@ -263,6 +263,7 @@ describe("Chat", () => {
       description: "Reviews changes",
       systemPrompt: "Review exact evidence.",
       model: { provider: "provider", id: "model" },
+      compactionModel: null,
       defaultThinkingLevel: "off",
       defaultServiceTier: null,
       toolMode: "read_only",
