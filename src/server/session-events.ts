@@ -400,24 +400,17 @@ export class SessionEventProjector {
 
     if (event.type === "message_update") {
       const delta = event.assistantMessageEvent;
-      const outputTokens = projectUsage(record(event.message)?.usage)?.output;
-      const outputProgress: SessionEvent[] = outputTokens !== undefined && outputTokens > 0
-        ? [{ type: "output_progress", outputTokens }]
-        : [];
       if (delta.type === "thinking_delta") {
-        return [
-          ...outputProgress,
-          { type: "thinking_delta", delta: String(delta.delta ?? "") },
-        ];
+        return [{ type: "thinking_delta", delta: String(delta.delta ?? "") }];
       }
-      if (delta.type !== "text_delta") return outputProgress;
+      if (delta.type !== "text_delta") return [];
 
       const prefix = this.segmentCompletedText && !this.currentMessageText
         ? "\n\n"
         : "";
       const text = String(delta.delta ?? "");
       this.currentMessageText += text;
-      return [...outputProgress, { type: "text_delta", delta: prefix + text }];
+      return [{ type: "text_delta", delta: prefix + text }];
     }
 
     if (event.type === "message_end" && event.message.role === "assistant") {

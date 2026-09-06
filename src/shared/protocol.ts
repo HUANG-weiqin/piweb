@@ -22,7 +22,9 @@ export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
-// v44: live assistant output progress is a non-persistent stream projection
+// v45: the browser derives the latest settled run's average output rate from
+// final assistant usage; no intermediate usage projection crosses the wire.
+// v44: live assistant output progress was a non-persistent stream projection
 // for deriving a current output token rate in the focused browser.
 // v43: project snapshots identify whether absent conversation rows are
 // authoritative membership evidence or merely an incomplete observation.
@@ -46,7 +48,7 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
-export const PROTOCOL_VERSION = 44;
+export const PROTOCOL_VERSION = 45;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
@@ -734,8 +736,6 @@ export type SessionEvent =
   | { type: "run_finished"; outcome: "completed" | "aborted" | "failed" }
   | { type: "user_message"; projectionId: string; text: string }
   | { type: "assistant_message_started"; projectionId: string }
-  /** Cumulative output tokens for the current streamed assistant segment. */
-  | { type: "output_progress"; outputTokens: number }
   | { type: "text_delta"; delta: string }
   | { type: "text_replaced"; text: string }
   | { type: "thinking_delta"; delta: string }
@@ -1054,10 +1054,6 @@ const sessionEventSchema: z.ZodType<SessionEvent> = z.discriminatedUnion("type",
   z.object({
     type: z.literal("assistant_message_started"),
     projectionId: z.string().uuid(),
-  }),
-  z.object({
-    type: z.literal("output_progress"),
-    outputTokens: z.number().finite().nonnegative(),
   }),
   z.object({ type: z.literal("text_delta"), delta: z.string() }),
   z.object({ type: z.literal("text_replaced"), text: z.string() }),

@@ -42,7 +42,6 @@ import { SessionMessageCard } from "./SessionMessageCard";
 const FOLLOW_COMFORT_LIMIT_PX = 96;
 const FOLLOW_COMFORT_TARGET_PX = 32;
 const FOLLOW_REATTACH_LIMIT_PX = 2;
-const LIVE_OUTPUT_RATE_STALE_MS = 3_000;
 
 const SERVICE_TIER_LABELS: Record<ServiceTier, string> = {
   auto: "自动",
@@ -407,7 +406,7 @@ function MissionCommandSurface({
         </div>}
       <p className="mission-context-reading">{contextTokenText}</p>
       <p className="mission-context-rate">
-        <span>OUTPUT RATE</span>
+        <span>AVG OUTPUT RATE</span>
         <strong>{outputTokensPerSecond === undefined
           ? "—"
           : formatOutputTokenRate(outputTokensPerSecond)}</strong>
@@ -528,37 +527,7 @@ function ChatView({
     contextPercent,
     contextSource,
   }), [contextPercent, contextSource, contextTokenCount, contextWindow]);
-  const liveOutputProgress = activeRun?.phase === "running"
-    && chat.liveOutputProgress?.runId === activeRun.id
-    ? chat.liveOutputProgress
-    : undefined;
-  const [outputRateInvalidatedAt, setOutputRateInvalidatedAt] = useState<number>();
-  useEffect(() => {
-    if (activeRun?.phase !== "running") setOutputRateInvalidatedAt(Date.now());
-  }, [activeRun?.id, activeRun?.phase]);
-  const [expiredOutputRateAt, setExpiredOutputRateAt] = useState<number>();
-  useEffect(() => {
-    if (!liveOutputProgress) {
-      setExpiredOutputRateAt(undefined);
-      return;
-    }
-    const timeout = window.setTimeout(() => {
-      setExpiredOutputRateAt(liveOutputProgress.observedAt);
-    }, Math.max(
-      0,
-      liveOutputProgress.observedAt + LIVE_OUTPUT_RATE_STALE_MS - Date.now(),
-    ));
-    return () => window.clearTimeout(timeout);
-  }, [liveOutputProgress?.observedAt]);
-  const outputTokensPerSecond = liveOutputProgress?.tokensPerSecond !== undefined
-    && expiredOutputRateAt !== liveOutputProgress.observedAt
-    && (
-      outputRateInvalidatedAt === undefined
-      || liveOutputProgress.observedAt > outputRateInvalidatedAt
-    )
-    && Date.now() - liveOutputProgress.observedAt < LIVE_OUTPUT_RATE_STALE_MS
-    ? liveOutputProgress.tokensPerSecond
-    : undefined;
+  const outputTokensPerSecond = chat.completedOutputRate?.tokensPerSecond;
   const tokenUsage = useMemo(
     () => getSessionTokenUsage(chat, sessionTokenUsage),
     [chat, sessionTokenUsage],

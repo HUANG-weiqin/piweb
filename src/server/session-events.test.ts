@@ -38,7 +38,7 @@ describe("SessionEventProjector", () => {
     ]);
   });
 
-  it("projects cumulative output progress during an assistant update", () => {
+  it("projects streamed text without intermediate usage", () => {
     const projector = new SessionEventProjector();
     projector.project(nativeEvent({ type: "agent_start" }));
 
@@ -57,7 +57,6 @@ describe("SessionEventProjector", () => {
       },
       assistantMessageEvent: { type: "text_delta", delta: "reply" },
     }))).toEqual([
-      { type: "output_progress", outputTokens: 5 },
       { type: "text_delta", delta: "reply" },
     ]);
   });

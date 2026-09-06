@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import {
-  act,
   cleanup,
   fireEvent,
   render,
@@ -706,49 +705,29 @@ describe("Chat", () => {
     expect(within(mission).queryByRole("button")).not.toBeInTheDocument();
   });
 
-  it("shows the live output rate only while its current sample is fresh", () => {
-    vi.useFakeTimers();
-    try {
-      vi.setSystemTime(new Date("2026-09-06T16:00:00.000Z"));
-      const rendered = render(view(emptyChat, "", undefined, {
-        activeRun: { id: "run-1", phase: "running" },
-      }));
-      expect(rendered.container.querySelector(".mission-context-rate"))
-        .toHaveTextContent("OUTPUT RATE—");
+  it("shows the most recent settled run's average output rate", () => {
+    const rendered = render(view(emptyChat));
+    expect(rendered.container.querySelector(".mission-context-rate"))
+      .toHaveTextContent("AVG OUTPUT RATE—");
 
-      const liveChat: ChatState = {
-        items: [],
-        liveOutputProgress: {
-          runId: "run-1",
-          outputTokens: 48,
-          observedAt: Date.now(),
-          samples: [{ outputTokens: 24, observedAt: Date.now() - 1_000 }],
-          tokensPerSecond: 24.5,
-        },
-      };
-      rendered.rerender(view(liveChat, "", undefined, {
-        activeRun: { id: "run-1", phase: "running" },
-      }));
-      expect(rendered.container.querySelector(".mission-context-rate"))
-        .toHaveTextContent("OUTPUT RATE24.5 TOK/S");
+    const completedChat: ChatState = {
+      items: [],
+      completedOutputRate: {
+        runId: "run-1",
+        outputTokens: 48,
+        outputElapsedMs: 1_959,
+        tokensPerSecond: 24.5,
+      },
+    };
+    rendered.rerender(view(completedChat));
+    expect(rendered.container.querySelector(".mission-context-rate"))
+      .toHaveTextContent("AVG OUTPUT RATE24.5 TOK/S");
 
-      rendered.rerender(view(liveChat, "", undefined, {
-        activeRun: { id: "run-1", phase: "waiting" },
-      }));
-      expect(rendered.container.querySelector(".mission-context-rate"))
-        .toHaveTextContent("OUTPUT RATE—");
-
-      rendered.rerender(view(liveChat, "", undefined, {
-        activeRun: { id: "run-1", phase: "running" },
-      }));
-      expect(rendered.container.querySelector(".mission-context-rate"))
-        .toHaveTextContent("OUTPUT RATE—");
-      act(() => vi.advanceTimersByTime(3_000));
-      expect(rendered.container.querySelector(".mission-context-rate"))
-        .toHaveTextContent("OUTPUT RATE—");
-    } finally {
-      vi.useRealTimers();
-    }
+    rendered.rerender(view({ items: [] }, "", undefined, {
+      activeRun: { id: "run-2", phase: "running" },
+    }));
+    expect(rendered.container.querySelector(".mission-context-rate"))
+      .toHaveTextContent("AVG OUTPUT RATE—");
   });
 
   it("publishes composer height and keeps followed output above its inset", () => {
