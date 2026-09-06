@@ -21,6 +21,11 @@ import {
 } from "../shared/protocol";
 import type { ConversationTitleLookup } from "./lib/conversation-display";
 import {
+  decodePhoneHistoryRoute,
+  encodePhoneHistoryRoute,
+  type PhoneHistoryRoute,
+} from "./lib/phone-history-route";
+import {
   App,
   MAX_CACHED_WORKSPACES,
   MAX_CACHED_CONVERSATION_PRESENTATIONS,
@@ -281,7 +286,9 @@ socketMock.helloVersion = PROTOCOL_VERSION;
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   localStorage.clear();
+  history.replaceState(null, "");
   socketMock.emit = undefined;
   socketMock.rawEmit = undefined;
   socketMock.status = undefined;
@@ -296,6 +303,57 @@ afterEach(() => {
   socketMock.autoFocus = true;
   socketMock.focusSequence = 0;
 });
+
+function mockPhoneViewport(initiallyPhone = true): {
+  setPhoneViewport(phone: boolean): void;
+} {
+  let phoneViewport = initiallyPhone;
+  const listeners = new Set<(event: MediaQueryListEvent) => void>();
+  const media = {
+    get matches() {
+      return phoneViewport;
+    },
+    media: "(max-width: 600px)",
+    onchange: null,
+    addEventListener: (type: string, listener: EventListenerOrEventListenerObject) => {
+      if (type === "change" && typeof listener === "function") {
+        listeners.add(listener as (event: MediaQueryListEvent) => void);
+      }
+    },
+    removeEventListener: (type: string, listener: EventListenerOrEventListenerObject) => {
+      if (type === "change" && typeof listener === "function") {
+        listeners.delete(listener as (event: MediaQueryListEvent) => void);
+      }
+    },
+    addListener: (listener: (event: MediaQueryListEvent) => void) => listeners.add(listener),
+    removeListener: (listener: (event: MediaQueryListEvent) => void) => listeners.delete(listener),
+    dispatchEvent: vi.fn(() => true),
+  };
+  vi.stubGlobal("matchMedia", vi.fn(() => media));
+  return {
+    setPhoneViewport(phone: boolean) {
+      phoneViewport = phone;
+      const event = { matches: phone, media: media.media } as MediaQueryListEvent;
+      for (const listener of listeners) listener(event);
+    },
+  };
+}
+
+function phoneRoute(route: PhoneHistoryRoute): PhoneHistoryRoute {
+  history.replaceState(encodePhoneHistoryRoute(route), "");
+  return route;
+}
+
+function currentPhoneRoute(): PhoneHistoryRoute | undefined {
+  return decodePhoneHistoryRoute(history.state);
+}
+
+function popPhoneRoute(route: PhoneHistoryRoute): void {
+  history.replaceState(encodePhoneHistoryRoute(route), "");
+  window.dispatchEvent(new PopStateEvent("popstate", {
+    state: encodePhoneHistoryRoute(route),
+  }));
+}
 
 function latestSessionId(): string {
   for (let index = socketMock.send.mock.calls.length - 1; index >= 0; index--) {
@@ -481,6 +539,491 @@ function sentFocusCommandCount(): number {
 }
 
 describe("App", () => {
+  it("opens an initial phone chat route with an exact conversation open", () => {
+    mockPhoneViewport();
+    phoneRoute({
+      screen: "chat",
+      cwd: "E:\\route-workspace",
+      conversationId: CONVERSATION_B,
+    });
+    localStorage.setItem("piweb.lastCwd", "E:\\stored-workspace");
+
+    render(<App />);
+
+    expect(latestCommand("initialize")).toMatchObject({
+      cwd: "E:\\route-workspace",
+      conversation: { kind: "open", conversationId: CONVERSATION_B },
+    });
+  });
+
+  it("does not write or subscribe to Browser History outside the phone breakpoint", () => {
+    mockPhoneViewport(false);
+    const pushState = vi.spyOn(history, "pushState");
+    const replaceState = vi.spyOn(history, "replaceState");
+    const addEventListener = vi.spyOn(window, "addEventListener");
+    localStorage.setItem("piweb.lastCwd", "E:\\work");
+
+    render(<App />);
+
+    expect(pushState).not.toHaveBeenCalled();
+    expect(replaceState).not.toHaveBeenCalled();
+    expect(addEventListener.mock.calls.some(([type]) => type === "popstate"))
+      .toBe(false);
+  });
+
+  it("enters phone from desktop from current authority without replaying stale history", () => {
+    const viewport = mockPhoneViewport(false);
+    phoneRoute({
+      screen: "chat",
+      cwd: "E:\\stale",
+      conversationId: CONVERSATION_B,
+    });
+    localStorage.setItem("piweb.lastCwd", "E:\\work");
+
+    render(<App />);
+    const sentBeforePhone = socketMock.send.mock.calls.length;
+    act(() => viewport.setPhoneViewport(true));
+
+    expect(currentPhoneRoute()).toEqual({
+      screen: "conversations",
+      cwd: "E:\\work",
+    });
+    expect(socketMock.send).toHaveBeenCalledTimes(sentBeforePhone);
+  });
+
+  it("defers the latest phone pop until an open workspace dialog is explicitly closed", async () => {
+    mockPhoneViewport();
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "添加工作区" }));
+    expect(screen.getByRole("dialog", { name: "开启工作区" }))
+      .toBeInTheDocument();
+
+    act(() => popPhoneRoute({ screen: "conversations", cwd: "E:\\work" }));
+    expect(screen.getByRole("dialog", { name: "开启工作区" }))
+      .toBeInTheDocument();
+    expect(socketMock.send).not.toHaveBeenCalledWith(expect.objectContaining({
+      type: "initialize",
+      cwd: "E:\\work",
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: "关闭开启工作区" }));
+    await waitFor(() => expect(latestCommand("initialize")).toMatchObject({
+      cwd: "E:\\work",
+      conversation: { kind: "recent" },
+    }));
+  });
+
+  it("drops a deferred phone pop when resizing away from phone", () => {
+    const viewport = mockPhoneViewport();
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "添加工作区" }));
+    act(() => popPhoneRoute({ screen: "conversations", cwd: "E:\\work" }));
+
+    act(() => viewport.setPhoneViewport(false));
+    fireEvent.click(screen.getByRole("button", { name: "关闭开启工作区" }));
+    act(() => viewport.setPhoneViewport(true));
+
+    expect(currentPhoneRoute()).toEqual({ screen: "workspaces" });
+    expect(socketMock.send).not.toHaveBeenCalledWith(expect.objectContaining({
+      type: "initialize",
+      cwd: "E:\\work",
+    }));
+  });
+
+  it("pushes only accepted phone navigation and keeps a popped list visible after late focus events", () => {
+    mockPhoneViewport();
+    localStorage.setItem("piweb.lastCwd", "E:\\work");
+    localStorage.setItem("piweb.workspaces", JSON.stringify(["E:\\work"]));
+    render(<App />);
+    const sessionId = latestSessionId();
+
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.emit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversations: [
+          conversationSummary(CONVERSATION_ID, "A"),
+          conversationSummary(CONVERSATION_B, "B"),
+        ],
+        truncated: false,
+      });
+    });
+
+    expect(currentPhoneRoute()).toEqual({ screen: "conversations", cwd: "E:\\work" });
+    socketMock.send.mockReturnValue(false);
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    expect(currentPhoneRoute()).toEqual({ screen: "conversations", cwd: "E:\\work" });
+
+    socketMock.send.mockReturnValue(true);
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    expect(currentPhoneRoute()).toEqual({
+      screen: "chat",
+      cwd: "E:\\work",
+      conversationId: CONVERSATION_B,
+    });
+
+    act(() => popPhoneRoute({ screen: "conversations", cwd: "E:\\work" }));
+    expect(screen.getByRole("complementary", { name: "项目会话栏" }))
+      .toBeInTheDocument();
+    act(() => socketMock.rawEmit?.({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId: CONVERSATION_B,
+      focusId: FOCUS_A_SECOND,
+      messages: [{
+        id: "late-popped-focus",
+        role: "assistant",
+        text: "late focus",
+        thinking: "",
+        tools: [],
+      }],
+      window: completeConversationWindow,
+    }));
+    expect(screen.getByRole("complementary", { name: "项目会话栏" }))
+      .toBeInTheDocument();
+  });
+
+  it("replaces a failed phone chat route and only treats a complete project snapshot as absence", () => {
+    mockPhoneViewport();
+    socketMock.autoFocus = false;
+    phoneRoute({
+      screen: "chat",
+      cwd: "E:\\work",
+      conversationId: CONVERSATION_B,
+    });
+    render(<App />);
+    const failedSessionId = latestSessionId();
+    const failedInitialize = latestCommand("initialize");
+
+    act(() => socketMock.rawEmit?.({
+      type: "error",
+      scope: "command",
+      operation: "initialize",
+      commandId: failedInitialize.commandId,
+      sessionId: failedSessionId,
+      conversationId: CONVERSATION_B,
+      message: "conversation is gone",
+    }));
+    expect(currentPhoneRoute()).toEqual({ screen: "conversations", cwd: "E:\\work" });
+    expect(latestCommand("initialize").conversation).toEqual({ kind: "recent" });
+
+    cleanup();
+    socketMock.instances.splice(0);
+    socketMock.send.mockClear();
+    socketMock.autoFocus = true;
+    phoneRoute({
+      screen: "chat",
+      cwd: "E:\\work",
+      conversationId: CONVERSATION_B,
+    });
+    render(<App />);
+    const sessionId = latestSessionId();
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.emit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversations: [conversationSummary(CONVERSATION_ID, "A")],
+        truncated: true,
+      });
+    });
+    expect(currentPhoneRoute()).toEqual({
+      screen: "chat",
+      cwd: "E:\\work",
+      conversationId: CONVERSATION_B,
+    });
+
+    act(() => socketMock.emit?.({
+      type: "project_snapshot",
+      sessionId,
+      projectId: PROJECT_ID,
+      conversations: [conversationSummary(CONVERSATION_ID, "A")],
+      truncated: false,
+    }));
+    expect(currentPhoneRoute()).toEqual({ screen: "conversations", cwd: "E:\\work" });
+    expect(screen.getByRole("complementary", { name: "项目会话栏" }))
+      .toBeInTheDocument();
+  });
+
+  it("pushes a durable chat route only after a desktop-to-phone role creation attaches its conversation", () => {
+    const viewport = mockPhoneViewport(false);
+    socketMock.autoFocus = false;
+    localStorage.setItem("piweb.lastCwd", "E:\\work");
+    render(<App />);
+    const sessionId = latestSessionId();
+    const initialize = latestCommand("initialize");
+
+    act(() => {
+      socketMock.emit?.({
+        type: "focus_attached",
+        operation: "initialize",
+        commandId: initialize.commandId!,
+        sessionId,
+        projectId: PROJECT_ID,
+      });
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          projectId: PROJECT_ID,
+          conversationId: undefined,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          providers: [],
+        },
+      });
+      socketMock.emit?.({
+        type: "role_catalog_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        roles: [defaultRole()],
+      });
+      socketMock.emit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversations: [],
+        truncated: false,
+      });
+    });
+    fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
+    fireEvent.click(screen.getByRole("button", { name: "使用 Default 开始会话" }));
+    const create = latestCommand("create_conversation");
+
+    act(() => viewport.setPhoneViewport(true));
+    expect(screen.getByRole("main")).toHaveClass("role-selection-page");
+    expect(currentPhoneRoute()).toEqual({
+      screen: "conversations",
+      cwd: "E:\\work",
+    });
+
+    act(() => socketMock.emit?.({
+      type: "focus_attached",
+      operation: "create_conversation",
+      commandId: create.commandId!,
+      sessionId,
+      projectId: PROJECT_ID,
+      conversationId: CONVERSATION_B,
+      focusId: FOCUS_A_SECOND,
+    }));
+
+    expect(currentPhoneRoute()).toEqual({
+      screen: "chat",
+      cwd: "E:\\work",
+      conversationId: CONVERSATION_B,
+    });
+  });
+
+  it("projects phone navigation locally without duplicating Chat or following late events", async () => {
+    mockPhoneViewport();
+    localStorage.setItem("piweb.lastCwd", "E:\\work");
+    localStorage.setItem(
+      "piweb.workspaces",
+      JSON.stringify(["E:\\work", "E:\\other"]),
+    );
+    const rendered = render(<App />);
+    const sessionId = latestSessionId();
+
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off", "high"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversations: [
+          conversationSummary(CONVERSATION_ID, "A"),
+          conversationSummary(CONVERSATION_B, "B"),
+        ],
+        truncated: false,
+      });
+    });
+
+    expect(screen.getByRole("complementary", { name: "项目会话栏" }))
+      .toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "工作区" }))
+      .not.toBeInTheDocument();
+    expect(rendered.container.querySelectorAll(".app-shell")).toHaveLength(1);
+    expect(document.body).toHaveFocus();
+
+    fireEvent.click(screen.getByRole("button", { name: "当前会话 A" }));
+    expect(screen.getByRole("main")).toHaveClass("app-shell");
+    expect(screen.queryByRole("complementary", { name: "项目会话栏" }))
+      .not.toBeInTheDocument();
+
+    const sentBeforeBack = socketMock.send.mock.calls.length;
+    const chatBack = screen.getByRole("button", { name: "返回会话列表" });
+    chatBack.focus();
+    fireEvent.click(chatBack);
+    await waitFor(() => expect(screen.getByRole("complementary", { name: "项目会话栏" }))
+      .toBeInTheDocument());
+    expect(screen.getByRole("heading", { name: "会话" }).closest("header"))
+      .toHaveFocus();
+    expect(socketMock.send).toHaveBeenCalledTimes(sentBeforeBack);
+
+    act(() => socketMock.rawEmit?.({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      messages: [{
+        id: "late-phone-message",
+        role: "assistant",
+        text: "late phone event",
+        thinking: "",
+        tools: [],
+      }],
+      window: completeConversationWindow,
+    }));
+    expect(screen.getByRole("complementary", { name: "项目会话栏" }))
+      .toBeInTheDocument();
+
+    const newConversation = screen.getByRole("button", { name: "新建会话" });
+    newConversation.focus();
+    fireEvent.click(newConversation);
+    expect(screen.getByRole("main")).toHaveClass("role-selection-page");
+    expect(screen.getByRole("heading", { name: "新建会话" }).closest("header"))
+      .toHaveFocus();
+    const sentBeforeRoleBack = socketMock.send.mock.calls.length;
+    const roleBack = screen.getByRole("button", { name: "返回会话列表" });
+    roleBack.focus();
+    fireEvent.click(roleBack);
+    expect(screen.getByRole("complementary", { name: "项目会话栏" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "会话" }).closest("header"))
+      .toHaveFocus();
+    expect(socketMock.send).toHaveBeenCalledTimes(sentBeforeRoleBack);
+
+    socketMock.send.mockReturnValue(false);
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    expect(screen.getByRole("complementary", { name: "项目会话栏" }))
+      .toBeInTheDocument();
+    expect(rendered.container.querySelectorAll(".app-shell")).toHaveLength(1);
+
+    socketMock.send.mockReturnValue(true);
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    expect(screen.getByRole("main")).toHaveClass("app-shell");
+    const focusCommandsAfterAcceptedSelection = sentFocusCommandCount();
+    fireEvent.click(screen.getByRole("button", { name: "返回会话列表" }));
+    await waitFor(() => expect(screen.getByRole("complementary", { name: "项目会话栏" }))
+      .toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "当前会话 B" }));
+    expect(screen.getByRole("main")).toHaveClass("app-shell");
+    expect(sentFocusCommandCount()).toBe(focusCommandsAfterAcceptedSelection);
+    fireEvent.click(screen.getByRole("button", { name: "返回会话列表" }));
+    await waitFor(() => expect(screen.getByRole("complementary", { name: "项目会话栏" }))
+      .toBeInTheDocument());
+
+    socketMock.send.mockReturnValue(false);
+    const sentBeforeWorkspaceBack = socketMock.send.mock.calls.length;
+    const workspaceLauncher = screen.getByRole("button", { name: "显示工作区" });
+    workspaceLauncher.focus();
+    fireEvent.click(workspaceLauncher);
+    await waitFor(() => expect(screen.getByRole("navigation", { name: "工作区" }))
+      .toBeInTheDocument());
+    expect(screen.getByRole("heading", { name: "工作区" }).closest("header"))
+      .toHaveFocus();
+    expect(screen.queryByRole("complementary", { name: "项目会话栏" }))
+      .not.toBeInTheDocument();
+    expect(socketMock.send).toHaveBeenCalledTimes(sentBeforeWorkspaceBack);
+
+    fireEvent.click(screen.getByRole("button", {
+      name: "打开工作区 other",
+    }));
+    expect(screen.getByRole("navigation", { name: "工作区" }))
+      .toBeInTheDocument();
+    expect(latestCommand("initialize").cwd).toBe("E:\\other");
+  });
+
+  it("leaves initial phone focus alone until an empty project opens role selection", () => {
+    mockPhoneViewport();
+    socketMock.autoFocus = false;
+    localStorage.setItem("piweb.lastCwd", "E:\\work");
+    localStorage.setItem("piweb.workspaces", JSON.stringify(["E:\\work"]));
+    render(<App />);
+    const sessionId = latestSessionId();
+    const initialize = latestCommand("initialize");
+
+    act(() => {
+      socketMock.emit?.({
+        type: "focus_attached",
+        operation: "initialize",
+        commandId: initialize.commandId!,
+        sessionId,
+        projectId: PROJECT_ID,
+      });
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          projectId: PROJECT_ID,
+          conversationId: undefined,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          providers: [],
+        },
+      });
+      socketMock.emit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversations: [],
+        truncated: false,
+      });
+    });
+
+    expect(document.body).toHaveFocus();
+    const newConversation = screen.getByRole("button", { name: "新建会话" });
+    newConversation.focus();
+    fireEvent.click(newConversation);
+    expect(screen.getByRole("heading", { name: "新建会话" }).closest("header"))
+      .toHaveFocus();
+  });
+
   it("shows an empty workbench before the first workspace is opened", () => {
     render(<App />);
 
@@ -3255,6 +3798,67 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "打开会话 A" }));
     expect(screen.queryByText("fresh A history")).not.toBeInTheDocument();
     expect(screen.getByRole("status", { name: "正在同步会话…" })).toBeInTheDocument();
+  });
+
+  it("reconnects a pending phone focus to its durable chat route", () => {
+    mockPhoneViewport();
+    localStorage.setItem("piweb.lastCwd", "E:\\work");
+    render(<App />);
+    const initial = latestCommand("initialize");
+
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "state",
+        state: {
+          sessionId: initial.sessionId,
+          projectId: PROJECT_ID,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          providers: [],
+          conversationId: CONVERSATION_ID,
+          focusId: FOCUS_A,
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "project_snapshot",
+        sessionId: initial.sessionId,
+        projectId: PROJECT_ID,
+        conversations: [
+          conversationSummary(CONVERSATION_ID, "A"),
+          conversationSummary(CONVERSATION_B, "B"),
+        ],
+        truncated: false,
+      });
+    });
+
+    socketMock.autoFocus = false;
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    expect(latestCommand("focus_conversation")).toMatchObject({
+      conversationId: CONVERSATION_B,
+    });
+    expect(currentPhoneRoute()).toEqual({
+      screen: "chat",
+      cwd: "E:\\work",
+      conversationId: CONVERSATION_B,
+    });
+
+    act(() => {
+      socketMock.status?.(false);
+      socketMock.status?.(true);
+      socketMock.emit?.({
+        type: "hello",
+        protocolVersion: PROTOCOL_VERSION,
+        startupCwd: "E:\\default",
+      });
+    });
+
+    expect(latestCommand("initialize")).toMatchObject({
+      cwd: "E:\\work",
+      conversation: { kind: "open", conversationId: CONVERSATION_B },
+    });
   });
 
   it("reconnects from the active workspace cache and waits for a fresh snapshot", () => {

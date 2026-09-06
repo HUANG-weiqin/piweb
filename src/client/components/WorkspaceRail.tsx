@@ -7,6 +7,11 @@ interface WorkspaceRailProps {
   unavailable: ReadonlySet<string>;
   activityByWorkspace: ReadonlyMap<string, ProjectActivitySummary>;
   activityCatalogTruncated: boolean;
+  mobile?: {
+    hidden: boolean;
+    canGoBack: boolean;
+    onBack(): void;
+  };
   onSelect(cwd: string): void;
   onClose(cwd: string): void;
   onAdd(): void;
@@ -47,12 +52,31 @@ function WorkspaceRailView({
   unavailable,
   activityByWorkspace,
   activityCatalogTruncated,
+  mobile,
   onSelect,
   onClose,
   onAdd,
 }: WorkspaceRailProps) {
   const activeKey = workspaceKey(activeCwd);
-  return <nav className="workspace-rail" aria-label="工作区">
+  return <nav
+    className="workspace-rail"
+    aria-label="工作区"
+    hidden={mobile?.hidden}
+  >
+    {mobile && <header className="mobile-page-header">
+      {mobile.canGoBack
+        ? <button
+            type="button"
+            aria-label="返回会话列表"
+            onClick={mobile.onBack}
+          >返回</button>
+        : <span aria-hidden="true" />}
+      <div>
+        <small>PI WEB</small>
+        <h1>工作区</h1>
+      </div>
+      <span aria-hidden="true" />
+    </header>}
     <div className="workspace-rail-brand" aria-hidden="true">π</div>
     <div className="workspace-rail-list">
       {workspaces.map((cwd) => {

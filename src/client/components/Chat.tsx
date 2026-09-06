@@ -32,6 +32,7 @@ import {
 } from "../chat/reducer";
 import type { ConversationTitleLookup } from "../lib/conversation-display";
 import { THINKING_LEVEL_LABELS } from "../lib/thinking-level";
+import { useModalFocus } from "../lib/use-modal-focus";
 import { ActivitySpinner } from "./ActivitySpinner";
 import { editBudgetRemainingFiles } from "./CommitmentCard";
 import { ConversationRoleDialog } from "./ConversationRoleDialog";
@@ -118,6 +119,12 @@ interface ChatProps {
     agentCount?: number;
   };
   conversationTitleLookup?: ConversationTitleLookup;
+  mobile?: {
+    active?: boolean;
+    title: string;
+    onBack(): void;
+    onShowConversations(): void;
+  };
   online: boolean;
   /** Transport is online, but focus-bound server controls may be frozen. */
   interactive?: boolean;
@@ -138,6 +145,7 @@ interface ChatProps {
   onSwitchRole(roleId: string): void;
   onChangeCwd(): void;
   onOpenConversation?(conversationId: string): void;
+  onBlockingModalChange?(blocking: boolean): void;
   onRewind(messageId: string, text: string): void;
   rewindingMessageId?: string;
 }
@@ -392,6 +400,7 @@ function ChatView({
   cwd,
   conversationContext,
   conversationTitleLookup,
+  mobile,
   online,
   interactive = true,
   conversationReady,
@@ -410,9 +419,12 @@ function ChatView({
   onSwitchRole,
   onChangeCwd,
   onOpenConversation,
+  onBlockingModalChange,
   onRewind,
   rewindingMessageId,
 }: ChatProps) {
+  const mobileEnabled = mobile !== undefined;
+  const mobileActive = mobile?.active ?? mobileEnabled;
   const controlsEnabled = online && interactive;
   const selectedServiceTierUnavailable = selectedServiceTier !== null
     && !serviceTiers.includes(selectedServiceTier);
@@ -443,6 +455,17 @@ function ChatView({
   const [loopListExpanded, setLoopListExpanded] = useState(false);
   const [roleDetailsOpen, setRoleDetailsOpen] = useState(false);
   const [compactionThresholdOpen, setCompactionThresholdOpen] = useState(false);
+  const [mobileSheet, setMobileSheet] = useState<"tasks" | "pending" | "controls">();
+  const visibleMobileSheet = mobileActive && conversationReady
+    ? mobileSheet
+    : undefined;
+  const closeMobileSheet = useCallback(() => setMobileSheet(undefined), []);
+  const mobileSheetFocusRef = useModalFocus<HTMLDivElement>(
+    visibleMobileSheet !== undefined,
+    visibleMobileSheet ?? "",
+    closeMobileSheet,
+    composerWrapRef,
+  );
   const [compactionThresholdDraft, setCompactionThresholdDraft] =
     useState(compactionThresholdPercent);
   const requestedCompactionThreshold = useRef(compactionThresholdPercent);
@@ -511,6 +534,23 @@ function ChatView({
   useEffect(() => {
     setLoopListExpanded(false);
   }, [transcriptFocusKey, loopListCompleted, loopListEmpty]);
+  useEffect(() => {
+    closeMobileSheet();
+  }, [closeMobileSheet, observationSessionId, transcriptFocusKey]);
+  useEffect(() => {
+    if (!conversationReady || !mobileActive) closeMobileSheet();
+    if (!mobileActive) setRoleDetailsOpen(false);
+  }, [closeMobileSheet, conversationReady, mobileActive]);
+  useEffect(() => {
+    onBlockingModalChange?.(roleDetailsOpen);
+    return () => onBlockingModalChange?.(false);
+  }, [onBlockingModalChange, roleDetailsOpen]);
+  useEffect(() => {
+    if (
+      (mobileSheet === "tasks" && loopListEmpty)
+      || (mobileSheet === "pending" && pendingAdmissions.length === 0)
+    ) closeMobileSheet();
+  }, [closeMobileSheet, loopListEmpty, mobileSheet, pendingAdmissions.length]);
   const activeRunId = activeRun?.id;
   const expandedAssistantMessageIds = useMemo(() => {
     const assistantMessages = blocks.flatMap((block) => (
@@ -710,6 +750,28 @@ function ChatView({
   };
   return <main className="app-shell">
     <header className="topbar">
+      {mobile && <div className="mobile-chat-header">
+        <button
+          type="button"
+          aria-label="返回会话列表"
+          onClick={() => {
+            closeMobileSheet();
+            mobile.onBack();
+          }}
+        >返回</button>
+        <div className="mobile-chat-identity">
+          <small>{conversationStatus}</small>
+          <strong>{mobile.title}</strong>
+        </div>
+        <button
+          type="button"
+          aria-label="打开会话列表"
+          onClick={() => {
+            closeMobileSheet();
+            mobile.onShowConversations();
+          }}
+        >AGENTS</button>
+      </div>}
       <button className="brand" onClick={onChangeCwd}><span>π</span><span>Pi Web<small title={cwd}>{cwd}</small></span></button>
       {conversationContext && <nav
         className={`topbar-conversation-context${
@@ -873,7 +935,20 @@ function ChatView({
       contextSource={contextSource}
       compactionThresholdPercent={compactionThresholdPercent}
     />
-    <div className="composer-wrap" ref={composerWrapRef}>
+    <div
+      className="composer-wrap"
+      ref={mobileSheetFocusRef}
+      role={visibleMobileSheet ? "dialog" : undefined}
+      aria-modal={visibleMobileSheet ? "true" : undefined}
+      aria-label={visibleMobileSheet === "tasks"
+        ? "任务"
+        : visibleMobileSheet === "pending"
+          ? "等待中"
+          : visibleMobileSheet === "controls"
+            ? "控制"
+            : undefined}
+      tabIndex={visibleMobileSheet ? -1 : undefined}
+    >
       {showJumpToLatest && <button
         type="button"
         className="jump-latest"
@@ -881,10 +956,28 @@ function ChatView({
       >
         ↓ 回到最新消息
       </button>}
+      {visibleMobileSheet && <div
+        className="mobile-sheet-backdrop"
+        role="presentation"
+        onMouseDown={(event) => {
+          event.preventDefault();
+          closeMobileSheet();
+        }}
+      />}
       {pendingAdmissions.length > 0 && <section
-        className="pending-admissions"
-        aria-label="等待处理的消息"
+        className={`pending-admissions${mobile ? " mobile-sheet-surface" : ""}`}
+        aria-label={mobile ? "等待中" : "等待处理的消息"}
+        hidden={Boolean(mobile && visibleMobileSheet !== "pending")}
       >
+        {visibleMobileSheet === "pending" && <header className="mobile-sheet-header">
+          <h2>等待中</h2>
+          <button
+            type="button"
+            data-modal-autofocus
+            aria-label="关闭等待中"
+            onClick={closeMobileSheet}
+          >×</button>
+        </header>}
         {pendingAdmissions.map((admission) => (
           <div
             key={admission.promptId}
@@ -897,9 +990,19 @@ function ChatView({
         ))}
       </section>}
       {loopListItems.length > 0 && <section
-        className="loop-list"
-        aria-label="Tasks"
+        className={`loop-list${mobile ? " mobile-sheet-surface" : ""}`}
+        aria-label={visibleMobileSheet === "tasks" ? "任务" : "Tasks"}
+        hidden={Boolean(mobile && visibleMobileSheet !== "tasks")}
       >
+        {visibleMobileSheet === "tasks" && <header className="mobile-sheet-header">
+          <h2>任务</h2>
+          <button
+            type="button"
+            data-modal-autofocus
+            aria-label="关闭任务"
+            onClick={closeMobileSheet}
+          >×</button>
+        </header>}
         <button
           type="button"
           className="loop-list-toggle"
@@ -958,12 +1061,59 @@ function ChatView({
           <button className="send" onClick={send} disabled={!controlsEnabled || !conversationReady || !model || submitting || compacting || roleSwitching || Boolean(rewindingMessageId) || !draft.trim()} aria-label="发送">SEND</button>
         </div>
       </div>
-      <div className="composer-meta">
+      {mobile && <div className="mobile-composer-launchers" aria-label="会话辅助面板">
+        {loopListItems.length > 0 && <button
+          type="button"
+          aria-label="打开任务"
+          disabled={!conversationReady}
+          aria-expanded={visibleMobileSheet === "tasks"}
+          onClick={() => setMobileSheet("tasks")}
+        >TASKS <span>{remainingLoopListItems}</span></button>}
+        {pendingAdmissions.length > 0 && <button
+          type="button"
+          aria-label="打开等待中"
+          disabled={!conversationReady}
+          aria-expanded={visibleMobileSheet === "pending"}
+          onClick={() => setMobileSheet("pending")}
+        >WAIT <span>{pendingAdmissions.length}</span></button>}
+        <button
+          type="button"
+          aria-label="打开控制"
+          disabled={!conversationReady}
+          aria-expanded={visibleMobileSheet === "controls"}
+          onClick={() => setMobileSheet("controls")}
+        >控制</button>
+      </div>}
+      <div
+        className={`composer-meta${mobile ? " mobile-sheet-surface" : ""}`}
+        hidden={Boolean(mobile && visibleMobileSheet !== "controls")}
+      >
+        {visibleMobileSheet === "controls" && <header className="mobile-sheet-header">
+          <h2>控制</h2>
+          <button
+            type="button"
+            data-modal-autofocus
+            aria-label="关闭控制"
+            onClick={closeMobileSheet}
+          >×</button>
+        </header>}
+        {mobile && <button
+          type="button"
+          className="mobile-model-settings"
+          disabled={!controlsEnabled}
+          onClick={() => {
+            closeMobileSheet();
+            onSettings();
+          }}
+        >打开模型设置</button>}
         {role && <button
           type="button"
           className="conversation-role-pill"
           aria-label={`查看会话角色 ${role.name}`}
-          onClick={() => setRoleDetailsOpen(true)}
+          onClick={() => {
+            closeMobileSheet();
+            setRoleDetailsOpen(true);
+          }}
         >
           <span className="composer-meta-key" aria-hidden="true">TO</span>
           <span className="composer-meta-value">{role.name}</span>

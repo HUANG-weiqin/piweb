@@ -4,6 +4,7 @@ import { workspaceName } from "./WorkspaceRail";
 interface WorkspacePlaceholderProps {
   cwd: string;
   unavailable: boolean;
+  hidden?: boolean;
   onOpen(): void;
   onClose(): void;
   onRetry(): void;
@@ -12,12 +13,13 @@ interface WorkspacePlaceholderProps {
 export function WorkspacePlaceholder({
   cwd,
   unavailable,
+  hidden,
   onOpen,
   onClose,
   onRetry,
 }: WorkspacePlaceholderProps) {
   if (!cwd) {
-    return <main className="workspace-placeholder">
+    return <main className="workspace-placeholder" hidden={hidden}>
       <div className="workspace-placeholder-content">
         <div className="workspace-placeholder-mark">π</div>
         <p className="eyebrow">PI WEB</p>
@@ -29,7 +31,7 @@ export function WorkspacePlaceholder({
   }
 
   if (unavailable) {
-    return <main className="workspace-placeholder">
+    return <main className="workspace-placeholder" hidden={hidden}>
       <div className="workspace-placeholder-content">
         <div className="workspace-placeholder-mark warning">!</div>
         <p className="eyebrow">WORKSPACE UNAVAILABLE</p>
@@ -51,7 +53,7 @@ export function WorkspacePlaceholder({
     </main>;
   }
 
-  return <main className="workspace-placeholder">
+  return <main className="workspace-placeholder" hidden={hidden}>
     <div className="workspace-placeholder-content">
       <ActivitySpinner className="workspace-opening-spinner" strokeWidth={1.2} />
       <p className="eyebrow">OPENING WORKSPACE</p>

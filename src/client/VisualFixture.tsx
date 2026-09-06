@@ -7,6 +7,7 @@ import type {
 import type { ChatState } from "./chat/reducer";
 import { Chat } from "./components/Chat";
 import { createConversationTitleLookup } from "./lib/conversation-display";
+import { usePhoneViewport } from "./lib/use-phone-viewport";
 import {
   ConversationSidebar,
   conversationDisplayOrdinal,
@@ -360,6 +361,10 @@ export function VisualFixture({
   showComposerStates?: boolean;
 } = {}) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const phoneViewport = usePhoneViewport();
+  const [mobileScene, setMobileScene] = useState<"workspaces" | "conversations" | "chat">(
+    "conversations",
+  );
   const fixtureChat = commitmentReason === undefined
     ? chat
     : createChat(commitmentReason);
@@ -371,7 +376,12 @@ export function VisualFixture({
       unavailable={new Set([workspaceKey(WORKSPACES[3]!)])}
       activityByWorkspace={activityByWorkspace}
       activityCatalogTruncated={false}
-      onSelect={noOp}
+      mobile={phoneViewport ? {
+        hidden: mobileScene !== "workspaces",
+        canGoBack: true,
+        onBack: () => setMobileScene("conversations"),
+      } : undefined}
+      onSelect={() => setMobileScene("conversations")}
       onClose={noOp}
       onAdd={noOp}
     />
@@ -385,13 +395,21 @@ export function VisualFixture({
       collapsed={sidebarCollapsed}
       navigationEnabled
       actionsEnabled
+      mobile={phoneViewport ? {
+        hidden: mobileScene !== "conversations",
+        onShowWorkspaces: () => setMobileScene("workspaces"),
+        onShowCurrentConversation: () => setMobileScene("chat"),
+      } : undefined}
       onToggleCollapsed={() => setSidebarCollapsed((collapsed) => !collapsed)}
-      onSelect={noOp}
+      onSelect={() => setMobileScene("chat")}
       onCreate={noOp}
       onRename={noOp}
       onDelete={() => true}
     />
-    <div className="workbench-main">
+    <div
+      className="workbench-main"
+      hidden={phoneViewport && mobileScene !== "chat"}
+    >
       <Chat
         chat={fixtureChat}
         observationSessionId="session-visual-fixture"
@@ -447,6 +465,11 @@ export function VisualFixture({
           agentCount: 4,
         }}
         conversationTitleLookup={conversationTitleLookup}
+        mobile={phoneViewport ? {
+          title: "建立稳定的视觉验证基线",
+          onBack: () => setMobileScene("conversations"),
+          onShowConversations: () => setMobileScene("conversations"),
+        } : undefined}
         online
         interactive
         conversationReady

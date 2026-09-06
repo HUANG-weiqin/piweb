@@ -741,6 +741,27 @@ describe("ConversationSidebar", () => {
       .toBe("240px");
   });
 
+  it("reports rename and delete dialogs as phone route blockers", async () => {
+    const onBlockingModalChange = vi.fn();
+    render(<ConversationSidebar {...backdropSidebarProps({
+      mobile: {
+        hidden: false,
+        onShowWorkspaces: () => undefined,
+      },
+      onBlockingModalChange,
+    })} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "重命名会话 接口设计" }));
+    await waitFor(() => expect(onBlockingModalChange).toHaveBeenLastCalledWith(true));
+    fireEvent.click(screen.getByRole("button", { name: "关闭重命名" }));
+    await waitFor(() => expect(onBlockingModalChange).toHaveBeenLastCalledWith(false));
+
+    fireEvent.click(screen.getByRole("button", { name: "删除会话 接口设计" }));
+    await waitFor(() => expect(onBlockingModalChange).toHaveBeenLastCalledWith(true));
+    fireEvent.click(screen.getByRole("button", { name: "保留" }));
+    await waitFor(() => expect(onBlockingModalChange).toHaveBeenLastCalledWith(false));
+  });
+
   it("dismisses delete confirmation only from its exact backdrop", async () => {
     const onDelete = vi.fn(() => true);
     render(<ConversationSidebar {...backdropSidebarProps({ onDelete })} />);
