@@ -1071,6 +1071,64 @@ describe("chatReducer", () => {
     expect(messageItems(state).at(-1)?.usage?.total).toBe(48);
   });
 
+  it("derives a live Pi-base output rate and replaces it with final usage", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-09-06T16:00:00.000Z"));
+      let state = focusedState();
+      state = chatReducer(state, {
+        ...FOCUS_A_1,
+        type: "session",
+        runId: RUN_1,
+        event: { type: "run_started" },
+      });
+      state = chatReducer(state, {
+        ...FOCUS_A_1,
+        type: "session",
+        runId: RUN_1,
+        event: { type: "assistant_message_started", projectionId: "assistant-1" },
+      });
+      vi.advanceTimersByTime(1_000);
+      state = chatReducer(state, {
+        ...FOCUS_A_1,
+        type: "session",
+        runId: RUN_1,
+        event: { type: "output_estimate", estimatedOutputTokens: 8 },
+      });
+      expect(state.liveOutputRate).toMatchObject({
+        runId: RUN_1,
+        outputTokens: 8,
+        outputElapsedMs: 1_000,
+        tokensPerSecond: 8,
+      });
+
+      state = chatReducer(state, {
+        ...FOCUS_A_1,
+        type: "session",
+        runId: RUN_1,
+        event: {
+          type: "usage",
+          usage: { input: 0, output: 6, cacheRead: 0, cacheWrite: 0, total: 6 },
+        },
+      });
+      expect(state.liveOutputRate).toBeUndefined();
+      state = chatReducer(state, {
+        ...FOCUS_A_1,
+        type: "session",
+        runId: RUN_1,
+        event: { type: "run_finished", outcome: "completed" },
+      });
+      expect(state.completedOutputRate).toMatchObject({
+        runId: RUN_1,
+        outputTokens: 6,
+        outputElapsedMs: 1_000,
+        tokensPerSecond: 6,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("derives a settled average output rate from final usage across assistant segments", () => {
     vi.useFakeTimers();
     try {

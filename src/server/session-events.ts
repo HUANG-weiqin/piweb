@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { types as nodeTypes } from "node:util";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import { estimateMessageTokens } from "@earendil-works/pi-ai/utils/estimate";
 import type { SessionEvent, TokenUsage } from "../shared/protocol.js";
 import { CONVERSATION_MESSAGE_CUSTOM_TYPE } from "./conversation-meta.js";
 
@@ -335,6 +336,7 @@ export class SessionEventProjector {
   private currentMessageText = "";
   private finalErrorMessage?: string;
   private finalAborted = false;
+  private lastOutputEstimateAt?: number;
   private suppressNextUserMessage: boolean;
 
   constructor(options: { suppressNextUserMessage?: boolean } = {}) {
@@ -353,6 +355,22 @@ export class SessionEventProjector {
     return this.runCompletedText.length === 0 ? null : this.runCompletedText;
   }
 
+  private projectOutputEstimate(
+    partial: Parameters<typeof estimateMessageTokens>[0],
+  ): SessionEvent[] {
+    const observedAt = Date.now();
+    if (
+      this.lastOutputEstimateAt !== undefined
+      && observedAt - this.lastOutputEstimateAt < 250
+    ) return [];
+
+    this.lastOutputEstimateAt = observedAt;
+    return [{
+      type: "output_estimate",
+      estimatedOutputTokens: estimateMessageTokens(partial),
+    }];
+  }
+
   project(event: AgentSessionEvent): SessionEvent[] {
     if (event.type === "agent_start") {
       if (this.finalErrorMessage || this.finalAborted) {
@@ -360,6 +378,7 @@ export class SessionEventProjector {
       }
       this.segmentCompletedText = "";
       this.currentMessageText = "";
+      this.lastOutputEstimateAt = undefined;
       this.finalErrorMessage = undefined;
       this.finalAborted = false;
       return [];
@@ -392,6 +411,7 @@ export class SessionEventProjector {
       this.runTextBeforeSegment = this.runCompletedText;
       this.segmentCompletedText = "";
       this.currentMessageText = "";
+      this.lastOutputEstimateAt = undefined;
       return [{
         type: "assistant_message_started",
         projectionId: randomUUID(),
@@ -401,7 +421,10 @@ export class SessionEventProjector {
     if (event.type === "message_update") {
       const delta = event.assistantMessageEvent;
       if (delta.type === "thinking_delta") {
-        return [{ type: "thinking_delta", delta: String(delta.delta ?? "") }];
+        return [
+          { type: "thinking_delta", delta: String(delta.delta ?? "") },
+          ...this.projectOutputEstimate(delta.partial),
+        ];
       }
       if (delta.type !== "text_delta") return [];
 
@@ -410,7 +433,10 @@ export class SessionEventProjector {
         : "";
       const text = String(delta.delta ?? "");
       this.currentMessageText += text;
-      return [{ type: "text_delta", delta: prefix + text }];
+      return [
+        { type: "text_delta", delta: prefix + text },
+        ...this.projectOutputEstimate(delta.partial),
+      ];
     }
 
     if (event.type === "message_end" && event.message.role === "assistant") {

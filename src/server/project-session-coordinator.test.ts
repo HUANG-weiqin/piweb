@@ -387,6 +387,10 @@ class FakeSessionControl {
       assistantMessageEvent: {
         type: "text_delta",
         delta,
+        partial: {
+          role: "assistant",
+          content: [{ type: "text", text: delta }],
+        },
       },
     } as unknown as AgentSessionEvent);
   }

@@ -195,11 +195,11 @@ function formatTimelineTime(timestamp: string): string {
     : TIMELINE_TIME_FORMAT.format(date);
 }
 
-function formatOutputTokenRate(tokensPerSecond: number): string {
+function formatOutputTokenRate(tokensPerSecond: number, estimated = false): string {
   const value = tokensPerSecond >= 1_000
     ? `${COMPACT_NUMBER_FORMAT.format(tokensPerSecond / 1_000)}k`
     : COMPACT_NUMBER_FORMAT.format(tokensPerSecond);
-  return `${value} TOK/S`;
+  return `${estimated ? "~ " : ""}${value} TOK/S`;
 }
 
 type TranscriptBlock =
@@ -336,6 +336,7 @@ interface MissionCommandSurfaceProps {
   remainingItemCount: number;
   contextTokenText: string;
   outputTokensPerSecond?: number;
+  outputRateEstimated: boolean;
   contextPercent: number | null | undefined;
   contextSource: ChatProps["contextSource"];
   compactionThresholdPercent: number;
@@ -347,6 +348,7 @@ function MissionCommandSurface({
   remainingItemCount,
   contextTokenText,
   outputTokensPerSecond,
+  outputRateEstimated,
   contextPercent,
   contextSource,
   compactionThresholdPercent,
@@ -409,7 +411,7 @@ function MissionCommandSurface({
         <span>AVG OUTPUT RATE</span>
         <strong>{outputTokensPerSecond === undefined
           ? "—"
-          : formatOutputTokenRate(outputTokensPerSecond)}</strong>
+          : formatOutputTokenRate(outputTokensPerSecond, outputRateEstimated)}</strong>
       </p>
       <p className="mission-context-threshold">
         AUTO COMPACT <strong>{compactionThresholdPercent}%</strong>
@@ -527,7 +529,9 @@ function ChatView({
     contextPercent,
     contextSource,
   }), [contextPercent, contextSource, contextTokenCount, contextWindow]);
-  const outputTokensPerSecond = chat.completedOutputRate?.tokensPerSecond;
+  const outputTokensPerSecond = chat.liveOutputRate?.tokensPerSecond
+    ?? chat.completedOutputRate?.tokensPerSecond;
+  const outputRateEstimated = chat.liveOutputRate !== undefined;
   const tokenUsage = useMemo(
     () => getSessionTokenUsage(chat, sessionTokenUsage),
     [chat, sessionTokenUsage],
@@ -987,6 +991,7 @@ function ChatView({
       remainingItemCount={remainingLoopListItems}
       contextTokenText={contextTokenText}
       outputTokensPerSecond={outputTokensPerSecond}
+      outputRateEstimated={outputRateEstimated}
       contextPercent={contextPercent}
       contextSource={contextSource}
       compactionThresholdPercent={compactionThresholdPercent}

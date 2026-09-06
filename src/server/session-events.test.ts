@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import {
   SessionEventProjector,
@@ -38,35 +38,77 @@ describe("SessionEventProjector", () => {
     ]);
   });
 
-  it("projects streamed text without intermediate usage", () => {
+  it("projects streamed text with an ephemeral Pi-base output estimate", () => {
     const projector = new SessionEventProjector();
     projector.project(nativeEvent({ type: "agent_start" }));
 
+    const partial = {
+      role: "assistant",
+      content: [{ type: "text", text: "reply" }],
+    };
     expect(projector.project(nativeEvent({
       type: "message_update",
-      message: {
-        role: "assistant",
-        content: [],
-        usage: {
-          input: 3,
-          output: 5,
-          cacheRead: 0,
-          cacheWrite: 0,
-          totalTokens: 8,
-        },
+      message: partial,
+      assistantMessageEvent: {
+        type: "text_delta",
+        delta: "reply",
+        partial,
       },
-      assistantMessageEvent: { type: "text_delta", delta: "reply" },
     }))).toEqual([
       { type: "text_delta", delta: "reply" },
+      { type: "output_estimate", estimatedOutputTokens: 2 },
     ]);
+  });
+
+  it("caps Pi-base output estimates at one projection per 250ms", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-09-06T16:00:00.000Z"));
+      const projector = new SessionEventProjector();
+      projector.project(nativeEvent({ type: "agent_start" }));
+      const first = {
+        role: "assistant",
+        content: [{ type: "text", text: "first" }],
+      };
+      expect(projector.project(nativeEvent({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "first", partial: first },
+      }))).toHaveLength(2);
+
+      vi.advanceTimersByTime(249);
+      const second = {
+        role: "assistant",
+        content: [{ type: "text", text: "second" }],
+      };
+      expect(projector.project(nativeEvent({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "second", partial: second },
+      }))).toEqual([{ type: "text_delta", delta: "second" }]);
+
+      vi.advanceTimersByTime(1);
+      const third = {
+        role: "assistant",
+        content: [{ type: "text", text: "third" }],
+      };
+      expect(projector.project(nativeEvent({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "third", partial: third },
+      }))).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("calibrates streamed text from the final assistant message", () => {
     const projector = new SessionEventProjector();
     projector.project(nativeEvent({ type: "agent_start" }));
+    const partial = {
+      role: "assistant",
+      content: [{ type: "text", text: "partial" }],
+    };
     projector.project(nativeEvent({
       type: "message_update",
-      assistantMessageEvent: { type: "text_delta", delta: "partial" },
+      assistantMessageEvent: { type: "text_delta", delta: "partial", partial },
     }));
 
     expect(projector.project(nativeEvent({

@@ -710,6 +710,19 @@ describe("Chat", () => {
     expect(rendered.container.querySelector(".mission-context-rate"))
       .toHaveTextContent("AVG OUTPUT RATE—");
 
+    const liveChat: ChatState = {
+      items: [],
+      liveOutputRate: {
+        runId: "run-1",
+        outputTokens: 48,
+        outputElapsedMs: 1_959,
+        tokensPerSecond: 24.5,
+      },
+    };
+    rendered.rerender(view(liveChat));
+    expect(rendered.container.querySelector(".mission-context-rate"))
+      .toHaveTextContent("AVG OUTPUT RATE~ 24.5 TOK/S");
+
     const completedChat: ChatState = {
       items: [],
       completedOutputRate: {

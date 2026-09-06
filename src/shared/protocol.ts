@@ -22,6 +22,8 @@ export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
+// v46: live assistant output estimates use Pi's base message estimator and
+// remain distinct from final provider usage and all durable projections.
 // v45: the browser derives the latest settled run's average output rate from
 // final assistant usage; no intermediate usage projection crosses the wire.
 // v44: live assistant output progress was a non-persistent stream projection
@@ -48,7 +50,7 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
-export const PROTOCOL_VERSION = 45;
+export const PROTOCOL_VERSION = 46;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
@@ -743,6 +745,7 @@ export type SessionEvent =
   | { type: "tool_prepared"; toolCallId: string; args?: unknown }
   | { type: "tool_updated"; toolCallId: string; result?: unknown }
   | { type: "tool_finished"; toolCallId: string; result?: unknown; isError: boolean }
+  | { type: "output_estimate"; estimatedOutputTokens: number }
   | { type: "usage"; usage: TokenUsage };
 
 type ErrorScope = "auth" | "command" | "protocol" | "session" | "settings";
@@ -1079,6 +1082,10 @@ const sessionEventSchema: z.ZodType<SessionEvent> = z.discriminatedUnion("type",
     toolCallId: z.string(),
     result: z.unknown().optional(),
     isError: z.boolean(),
+  }),
+  z.object({
+    type: z.literal("output_estimate"),
+    estimatedOutputTokens: z.number().int().nonnegative(),
   }),
   z.object({ type: z.literal("usage"), usage: tokenUsageSchema }),
 ]);
