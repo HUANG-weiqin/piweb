@@ -2001,6 +2001,50 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
+  it("does not persist a regressing LoopList timestamp after the civil clock rolls back", async () => {
+    const manager = SessionManager.inMemory(process.cwd(), { id: CONVERSATION_ID });
+    appendReservedCustomEntry(manager, createLoopListEntry({
+      items: [{ id: "recover", text: "Recover", status: "active" }],
+      armed: true,
+      updatedAt: "2026-07-19T10:00:00.000Z",
+    }));
+    let now = new Date("2026-07-19T09:00:00.000Z");
+    const fixture = await openActor({
+      sessionManager: manager,
+      now: () => now,
+    });
+    const todoWrite = fixture.runtime.createOptions?.workbenchCustomTools?.find(
+      ({ name }) => name === "todo_write",
+    );
+
+    await todoWrite?.execute("write-after-clock-rollback", {
+      items: [{ id: "recover", text: "Recover safely", status: "active" }],
+    });
+    expect(aggregateReservedConversationEntries(manager.getBranch()).loopList)
+      .toMatchObject({ updatedAt: "2026-07-19T10:00:00.000Z" });
+    await fixture.actor.dispose();
+
+    const reopened = await openActor({
+      sessionManager: manager,
+      now: () => now,
+    });
+    expect(reopened.actor.getLoopList()).toEqual({
+      items: [{ id: "recover", text: "Recover safely", status: "active" }],
+      armed: true,
+    });
+
+    now = new Date("2026-07-19T10:01:00.000Z");
+    const laterTodoWrite = reopened.runtime.createOptions?.workbenchCustomTools?.find(
+      ({ name }) => name === "todo_write",
+    );
+    await laterTodoWrite?.execute("write-after-clock-recovers", {
+      items: [{ id: "recover", text: "Recover completely", status: "completed" }],
+    });
+    expect(aggregateReservedConversationEntries(manager.getBranch()).loopList)
+      .toMatchObject({ updatedAt: "2026-07-19T10:01:00.000Z" });
+    await reopened.actor.dispose();
+  });
+
   it("restores legacy LoopList items as pending or completed without inventing active work", async () => {
     const manager = SessionManager.inMemory(process.cwd(), { id: CONVERSATION_ID });
     manager.appendCustomEntry(LEGACY_LOOP_LIST_CUSTOM_TYPE, {
@@ -2059,9 +2103,10 @@ describe("ConversationActor", () => {
 
     expect(aggregateReservedConversationEntries(manager.getEntries()).loopList)
       .toMatchObject({ items: [{ id: "inactive" }] });
+    let now = new Date("2026-07-19T10:07:00.000Z");
     const fixture = await openActor({
       sessionManager: manager,
-      now: () => new Date("2026-07-19T10:07:00.000Z"),
+      now: () => now,
     });
 
     expect(fixture.actor.getLoopList()).toEqual({
@@ -2070,7 +2115,30 @@ describe("ConversationActor", () => {
     });
     expect(fixture.runtime.createOptions?.getLoopListElapsedMinutes?.())
       .toEqual({ activeMin: 7, listMin: 7 });
+
+    now = new Date("2026-07-19T09:00:00.000Z");
+    const todoWrite = fixture.runtime.createOptions?.workbenchCustomTools?.find(
+      ({ name }) => name === "todo_write",
+    );
+    await todoWrite?.execute("write-after-inactive-branch-clock-rollback", {
+      items: [{ id: "active", text: "Active branch remains current", status: "active" }],
+    });
+    expect(aggregateReservedConversationEntries(manager.getEntries()).loopList)
+      .toMatchObject({
+        items: [{ id: "active", text: "Active branch remains current" }],
+        updatedAt: "2026-07-19T10:01:00.000Z",
+      });
     await fixture.actor.dispose();
+
+    const reopened = await openActor({
+      sessionManager: manager,
+      now: () => now,
+    });
+    expect(reopened.actor.getLoopList()).toEqual({
+      items: [{ id: "active", text: "Active branch remains current", status: "active" }],
+      armed: true,
+    });
+    await reopened.actor.dispose();
   });
 
   it("re-arms a paused unfinished LoopList on a later browser prompt", async () => {

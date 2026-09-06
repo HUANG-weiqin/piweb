@@ -1,4 +1,4 @@
-import { realpath } from "node:fs/promises";
+import { readlink, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -84,14 +84,59 @@ function normalizePiPath(value: string): string {
   return normalized;
 }
 
-function isMissingPathError(error: unknown): boolean {
+function filesystemErrorCode(error: unknown): string | undefined {
   return typeof error === "object"
     && error !== null
     && "code" in error
-    && (
-      (error as { code?: unknown }).code === "ENOENT"
-      || (error as { code?: unknown }).code === "ENOTDIR"
-    );
+    && typeof (error as { code?: unknown }).code === "string"
+    ? (error as { code: string }).code
+    : undefined;
+}
+
+async function canonicalizeMissingPath(
+  absolutePath: string,
+  seenSymlinks = new Set<string>(),
+): Promise<string> {
+  const suffix: string[] = [];
+  let candidate = absolutePath;
+  for (;;) {
+    try {
+      return path.join(await realpath(candidate), ...suffix);
+    } catch (error) {
+      const code = filesystemErrorCode(error);
+      // A non-directory parent is not a createable missing target. Keep Pi's
+      // existing lexical identity and let the builtin tool report its failure.
+      if (code === "ENOTDIR") return absolutePath;
+      if (code !== "ENOENT") throw error;
+
+      let target: string | undefined;
+      try {
+        target = await readlink(candidate);
+      } catch (readError) {
+        const readCode = filesystemErrorCode(readError);
+        if (readCode !== "ENOENT" && readCode !== "EINVAL") throw readError;
+      }
+      if (target !== undefined) {
+        const key = process.platform === "win32"
+          ? candidate.toLowerCase()
+          : candidate;
+        if (seenSymlinks.has(key)) {
+          throw new Error("Cannot canonicalize a cyclic dangling symlink");
+        }
+        seenSymlinks.add(key);
+        const resolvedTarget = path.resolve(path.dirname(candidate), target);
+        return canonicalizeMissingPath(
+          path.join(resolvedTarget, ...suffix),
+          seenSymlinks,
+        );
+      }
+
+      const parent = path.dirname(candidate);
+      if (parent === candidate) return absolutePath;
+      suffix.unshift(path.basename(candidate));
+      candidate = parent;
+    }
+  }
 }
 
 function mutationPathArgument(args: unknown): string | undefined {
@@ -123,13 +168,20 @@ export async function canonicalMutationPathKey(
     return undefined;
   }
 
-  let canonicalPath = absolutePath;
+  let canonicalPath: string;
   try {
     canonicalPath = await realpath(absolutePath);
   } catch (error) {
-    // Pi's mutation queue also keeps the lexical absolute path when the target
-    // does not yet exist, but propagates other filesystem failures.
-    if (!isMissingPathError(error)) throw error;
+    const code = filesystemErrorCode(error);
+    // Resolve a missing target from its nearest existing parent, following
+    // dangling symlink chains so creation keeps the same identity later.
+    if (code === "ENOENT") {
+      canonicalPath = await canonicalizeMissingPath(absolutePath);
+    } else if (code === "ENOTDIR") {
+      canonicalPath = absolutePath;
+    } else {
+      throw error;
+    }
   }
   const normalizedKey = path.normalize(canonicalPath);
   return process.platform === "win32"

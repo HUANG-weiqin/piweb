@@ -269,7 +269,7 @@ interface PendingContextCompaction extends ActiveFocus {
   workspaceKey: string;
 }
 
-interface PendingConversationRoleSwitch {
+interface PendingConversationRoleSwitch extends ActiveFocus {
   commandId: string;
 }
 
@@ -1919,6 +1919,16 @@ export function App() {
             },
           });
         }
+        const pendingRoleSwitch = pendingConversationRoleSwitchRef.current;
+        if (
+          pendingRoleSwitch
+          && pendingRoleSwitch.sessionId === event.sessionId
+          && pendingRoleSwitch.projectId === event.projectId
+          && pendingRoleSwitch.conversationId === event.conversationId
+          && pendingRoleSwitch.focusId === event.focusId
+        ) {
+          updatePendingConversationRoleSwitch(undefined);
+        }
         clearFocusReplacementAuthority();
         pendingFocusedStateRef.current = undefined;
         const invalidatedConversationKey = conversationScopeKey(
@@ -2186,7 +2196,11 @@ export function App() {
         }
         if (event.operation === "switch_conversation_role") {
           const pending = pendingConversationRoleSwitchRef.current;
-          if (!pending || pending.commandId !== event.commandId) return;
+          if (
+            !pending
+            || pending.commandId !== event.commandId
+            || pending.sessionId !== event.sessionId
+          ) return;
           updatePendingConversationRoleSwitch(undefined);
           setNotification({
             id: ++notificationIdRef.current,
@@ -2439,7 +2453,13 @@ export function App() {
           && event.commandId
         ) {
           const pending = pendingConversationRoleSwitchRef.current;
-          if (!pending || pending.commandId !== event.commandId) return;
+          if (
+            !pending
+            || pending.commandId !== event.commandId
+            || pending.sessionId !== event.sessionId
+            || pending.conversationId !== event.conversationId
+            || pending.focusId !== event.focusId
+          ) return;
           updatePendingConversationRoleSwitch(undefined);
           setError(`更换会话角色失败：${event.message}`);
           return;
@@ -3353,6 +3373,7 @@ export function App() {
       return false;
     }
     const pending = {
+      ...focus,
       commandId: crypto.randomUUID(),
     };
     updatePendingConversationRoleSwitch(pending);

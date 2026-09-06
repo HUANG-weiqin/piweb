@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -44,6 +44,64 @@ describe("edit budget accounting", () => {
       expect(normalized).toBe(direct);
       expect(leadingSpace).not.toBe(direct);
       await expect(canonicalMutationPathKey(cwd, {})).resolves.toBeUndefined();
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a missing directory-symlink target stable after creation", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-edit-budget-"));
+    const target = join(cwd, "target");
+    const link = join(cwd, "link");
+    try {
+      await mkdir(target);
+      await symlink(target, link, process.platform === "win32" ? "junction" : "dir");
+
+      const before = await canonicalMutationPathKey(cwd, { path: "link/new.ts" });
+      await writeFile(join(link, "new.ts"), "export {};\n", "utf8");
+      const after = await canonicalMutationPathKey(cwd, { path: "link/new.ts" });
+      const direct = await canonicalMutationPathKey(cwd, { path: "target/new.ts" });
+
+      expect(before).toBeDefined();
+      expect(after).toBe(before);
+      expect(direct).toBe(before);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a chained dangling final symlink target stable after creation", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-edit-budget-"));
+    const targetDirectory = join(cwd, "target");
+    const target = join(targetDirectory, "new.ts");
+    const middle = join(cwd, "middle.ts");
+    const link = join(cwd, "link.ts");
+    try {
+      await mkdir(targetDirectory);
+      try {
+        await symlink(target, middle, "file");
+        await symlink(middle, link, "file");
+      } catch (error) {
+        if (
+          process.platform === "win32"
+          && error instanceof Error
+          && "code" in error
+          && ((error as NodeJS.ErrnoException).code === "EPERM"
+            || (error as NodeJS.ErrnoException).code === "EACCES")
+        ) {
+          return;
+        }
+        throw error;
+      }
+
+      const before = await canonicalMutationPathKey(cwd, { path: "link.ts" });
+      await writeFile(link, "export {};\n", "utf8");
+      const after = await canonicalMutationPathKey(cwd, { path: "link.ts" });
+      const direct = await canonicalMutationPathKey(cwd, { path: "target/new.ts" });
+
+      expect(before).toBeDefined();
+      expect(after).toBe(before);
+      expect(direct).toBe(before);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

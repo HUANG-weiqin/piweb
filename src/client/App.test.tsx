@@ -5794,6 +5794,94 @@ describe("App", () => {
       .toBeEnabled();
   });
 
+  it("retires a role-switch pending intent when its focus is invalidated", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    const nextRole = defaultRole({
+      id: "21f01ca1-e28e-4f5e-bb46-442a2fdadafd",
+      revision: 2,
+      name: "Builder",
+      systemPrompt: "Build carefully.",
+      toolMode: "full_access",
+    });
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.emit?.({
+        type: "role_catalog_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        roles: [defaultRole(), nextRole],
+      });
+      socketMock.emit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        role: {
+          id: "default",
+          revision: 1,
+          name: "Default",
+          description: "General purpose",
+          systemPrompt: "Be useful.",
+          model: { provider: "provider", id: "model" },
+          compactionModel: null,
+          defaultThinkingLevel: "off",
+          defaultServiceTier: null,
+          toolMode: "read_only",
+          canManageSessions: true,
+        },
+        messages: [],
+        window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", {
+      name: "查看会话角色 Default",
+    }));
+    fireEvent.change(screen.getByRole("combobox", {
+      name: "选择新的会话角色",
+    }), {
+      target: { value: nextRole.id },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "应用角色" }));
+    const command = latestCommand("switch_conversation_role");
+
+    act(() => socketMock.emit?.({
+      type: "focus_invalidated",
+      sessionId,
+      projectId: PROJECT_ID,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      reason: "deleted",
+    }));
+    act(() => socketMock.emit?.({
+      type: "error",
+      scope: "command",
+      operation: "switch_conversation_role",
+      commandId: command.commandId,
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      message: "The deleted conversation cannot change roles",
+    }));
+
+    expect(screen.queryByText(/更换会话角色失败/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "使用 Default 开始会话" }));
+    expect(latestCommand("create_conversation")).toMatchObject({ sessionId });
+  });
+
   it("rewinds only a user message and restores its text over the current draft", async () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     const writeText = vi.fn().mockResolvedValue(undefined);

@@ -707,6 +707,7 @@ export class ConversationActor {
   private serviceTierSelection: ServiceTier | null;
   private loopListSnapshot: LoopList;
   private loopListTiming?: LoopListTiming;
+  private loopListUpdatedAt?: string;
   private projectionSeq = 0;
   private liveProjection?: LiveConversationProjection;
 
@@ -758,7 +759,10 @@ export class ConversationActor {
     this.serviceTierSelection = branchReserved.serviceTier !== undefined
       ? branchReserved.serviceTier.tier
       : this.profileSnapshot.role.defaultServiceTier;
-    this.loopListSnapshot = this.restoreLoopList(branchReserved);
+    this.loopListSnapshot = this.restoreLoopList(
+      branchReserved,
+      ledger.loopList?.updatedAt,
+    );
     for (const settlement of ledger.runSettlements) {
       this.usedRunIds.add(settlement.runId);
     }
@@ -833,8 +837,13 @@ export class ConversationActor {
 
   private restoreLoopList(
     branch: ReturnType<typeof aggregateReservedConversationEntries>,
+    latestPhysicalLoopListUpdatedAt?: string,
   ): LoopList {
     this.loopListTiming = structuredClone(branch.loopListTiming);
+    // The visible plan follows the active branch, but physical JSONL validation
+    // requires new entries not to regress behind an inactive branch's watermark.
+    this.loopListUpdatedAt = latestPhysicalLoopListUpdatedAt
+      ?? branch.loopList?.updatedAt;
     return branch.loopList
       ? structuredClone({
           items: branch.loopList.items,
@@ -862,10 +871,15 @@ export class ConversationActor {
     items: LoopList["items"],
     armed: boolean,
   ): LoopList {
+    const now = this.now().toISOString();
+    const updatedAt = this.loopListUpdatedAt !== undefined
+      && Date.parse(now) < Date.parse(this.loopListUpdatedAt)
+      ? this.loopListUpdatedAt
+      : now;
     const entry = createLoopListEntry({
       items,
       armed,
-      updatedAt: this.now().toISOString(),
+      updatedAt,
     });
     const timing = advanceLoopListTiming(
       this.loopListSnapshot.items,
@@ -879,6 +893,7 @@ export class ConversationActor {
       armed: entry.data.armed,
     });
     this.loopListTiming = timing;
+    this.loopListUpdatedAt = entry.data.updatedAt;
     this.emitLoopList();
     return this.getLoopList();
   }
@@ -1307,12 +1322,15 @@ export class ConversationActor {
         this.serviceTierSelection = branchReserved.serviceTier !== undefined
           ? branchReserved.serviceTier.tier
           : retainedProfile.role.defaultServiceTier;
-        this.loopListSnapshot = this.restoreLoopList(branchReserved);
-        this.emitLoopList();
-        this.usedRunIds.clear();
         const ledger = aggregateReservedConversationEntries(
           this.sessionManager.getEntries(),
         );
+        this.loopListSnapshot = this.restoreLoopList(
+          branchReserved,
+          ledger.loopList?.updatedAt,
+        );
+        this.emitLoopList();
+        this.usedRunIds.clear();
         for (const settlement of ledger.runSettlements) {
           this.usedRunIds.add(settlement.runId);
         }
