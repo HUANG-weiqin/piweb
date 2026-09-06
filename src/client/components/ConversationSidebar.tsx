@@ -185,8 +185,8 @@ function groupProjection(
   entries.sort((left, right) => {
     const leftRoot = left.kind === "group" ? left.group.root : left.conversation;
     const rightRoot = right.kind === "group" ? right.group.root : right.conversation;
-    const createdDifference = Date.parse(leftRoot.createdAt)
-      - Date.parse(rightRoot.createdAt);
+    const createdDifference = Date.parse(rightRoot.createdAt)
+      - Date.parse(leftRoot.createdAt);
     if (createdDifference !== 0) return createdDifference;
     if (leftRoot.id === rightRoot.id) return 0;
     return leftRoot.id < rightRoot.id ? -1 : 1;

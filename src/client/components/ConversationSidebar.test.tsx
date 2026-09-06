@@ -291,7 +291,7 @@ describe("ConversationSidebar", () => {
     expect(screen.getByText("SUB-TEAM / AGENTS")).toBeInTheDocument();
   });
 
-  it("keeps root ordinals stable by creation identity while members stay dynamic", () => {
+  it("orders top-level conversations newest first while members stay dynamic", () => {
     const early = conversation("early-standalone", "较早会话", {
       createdAt: "2026-07-19T07:00:00.000Z",
       updatedAt: "2026-07-19T07:00:00.000Z",
@@ -340,7 +340,7 @@ describe("ConversationSidebar", () => {
       (ordinal) => ordinal.textContent,
     );
 
-    expect(topLevelOrder()).toEqual([early.id, root.id, tiedStandalone.id]);
+    expect(topLevelOrder()).toEqual([root.id, tiedStandalone.id, early.id]);
     expect(ordinals()).toEqual(["01", "02", "03"]);
     expect(member.createdAt < early.createdAt).toBe(true);
     expect(screen.getByText("活跃 Agent").closest("[data-conversation-id]")
@@ -348,7 +348,7 @@ describe("ConversationSidebar", () => {
     expect(conversationDisplayOrdinal(
       [tiedStandalone, member, early, root],
       member.id,
-    )).toBe(2);
+    )).toBe(1);
 
     const late = conversation("late-standalone", "新建会话", {
       createdAt: "2026-07-19T09:00:00.000Z",
@@ -369,10 +369,10 @@ describe("ConversationSidebar", () => {
     );
 
     expect(topLevelOrder()).toEqual([
-      early.id,
+      late.id,
       root.id,
       tiedStandalone.id,
-      late.id,
+      early.id,
     ]);
     expect(ordinals()).toEqual(["01", "02", "03", "04"]);
   });
