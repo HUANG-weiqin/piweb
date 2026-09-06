@@ -524,7 +524,9 @@ function ConversationGroupCard({
         <span className="conversation-group-chevron" aria-hidden="true" />
       </button>
       {expanded && <div id={controlsId} className="conversation-group-members">
-        <p className="conversation-group-members-label">SUB-TEAM / AGENTS</p>
+        <p className="conversation-group-members-label">
+          协作 Agent · 属于 {title}
+        </p>
         <ul className="conversation-sidebar-list">
           {visibleMembers.map((conversation) => (
             <ConversationRow
