@@ -26,6 +26,7 @@ function role(
     description: `${name} description`,
     systemPrompt: `${name} prompt`,
     model: { provider: "openai", id: "gpt-5" },
+    compactionModel: null,
     defaultThinkingLevel: "off",
     defaultServiceTier: null,
     toolMode: "read_only",

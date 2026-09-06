@@ -1,6 +1,6 @@
 # 客户端状态
 
-`updated: 2026-09-05`
+`updated: 2026-09-06`
 
 ## 这个模块是干什么的
 
@@ -65,11 +65,11 @@ ServerEvent
 - OAuth UI 只接收当前 authFlowId；取消或新 flow 之后的旧 request/progress/complete 一律忽略。
 - 右侧抽屉只负责“提供商 → 凭据 → 可用模型”的连接状态，不承载权限、会话生命周期或 Agent 行为控制。模型刷新按钮始终显示，即使没有 provider、provider 未配置、目录为空或已有模型；只按 online、busy 和当前 refresh command pending 禁用。点击后固化 `sessionId + commandId`，只显示精确匹配的 pending/result，成功保留 `ok=true`，失败显示 error/alert；断线或 session replacement 清除 pending 并显示 unknown/重试提示。远程供应商目录刷新失败只属于设置回执，不落为全局错误。composer 底部控制按“当前角色 → 思考级别 → 上下文管理”排列；上下文用量、自动压缩和手动压缩属于同一个无外框视觉组，自动压缩阈值也在该组内展开。角色管理从新会话页的角色卡齿轮或添加卡进入，齿轮必须定位到对应角色；角色默认思考强度只列出所选模型真实支持的档位，模型没有可调档位时显示并锁定“模型默认”。角色默认服务层级同样只读取所选模型的 `PublicModel.serviceTiers`，不按 provider/model 猜测；`null` 显示“供应商默认”，`priority` 显示“快速”，切换到不支持现有非空层级的模型时回到 `null`。会话改名位于左侧会话栏。
 - 服务层级采用“冻结角色默认 + 当前会话覆盖”：用户或 Agent 创建会话时从角色快照取得默认值，因此队友不会丢失角色的快速设置；composer 仍可只为当前会话调整并持久化覆盖，显式切换角色则重置到新角色默认。composer 选项只读取服务端对当前模型 `PublicModel.serviceTiers` 的显式投影，不按 provider 或 model ID 猜测；服务端没有投影 tier 且当前选择为 `null` 时不显示。`null` 在 UI 中显示为“供应商默认”，`priority` 在线路值中保持不变但显示为“快速”。已持久化 tier 因模型目录漂移而不再可用时，仍以禁用的“不可用”选项显示，同时继续列出当前请求路由投影的 tiers；用户可清回 `null` 或直接替换为任一受支持 tier，客户端不能静默替换。提交不做乐观更新，只在 history 已恢复、会话 idle 且未压缩时发送；pending 固化 `sessionId + conversationId + focusId + commandId`，只有同一 focus 的精确回执才能结算，断线则提示状态未知。
-- 会话不直接选择模型或权限；它只在空闲时整体应用一个当前可用角色。角色管理只列已配置提供商当前可用模型，并把 provider/model、默认服务层级与工具权限固定到模板；新角色默认使用供应商服务层级且工具权限为只读。角色表单还显式控制“允许管理会话”：新建角色默认关闭，编辑时按模板原值显示；关闭意味着 Agent 完全看不到工作台会话工具。
+- 会话不直接选择模型或权限；它只在空闲时整体应用一个当前可用角色。角色管理只列已配置提供商当前可用模型，并把 primary provider/model、nullable `compactionModel`、默认服务层级与工具权限固定到模板；角色表单提供专用“上下文压缩模型”选择器，默认“跟随角色模型”，候选显示 context window，已知小于 primary 的候选禁用。已保存但 retired 或不兼容的显式值仍保留并显示，附带修复提示，不静默改成 follow；切换 primary 也不静默改变显式 compaction model；该 UI 不新增 conversation command。新角色默认使用供应商服务层级且工具权限为只读。角色表单还显式控制“允许管理会话”：新建角色默认关闭，编辑时按模板原值显示；关闭意味着 Agent 完全看不到工作台会话工具。
 - Pi 凭据属于当前用户并由所有项目共享；移除凭据必须明确提示全局影响并二次确认。空模型列表的恢复动作必须真的发送 `refresh_models`，不能用“重新打开设置”冒充刷新。
 - API Key 保存和角色 CRUD 只由匹配 sessionId + operation + commandId 的 `command_complete` / error 结算；模型刷新同样只接受精确 `refresh_models + sessionId + commandId` 的成功/失败回执，stale 回执必须忽略；任何中途 state/catalog 刷新都不能关闭等待态。角色 update/delete 同时带 expectedRevision，update 还携带对话框独立保存的 `expectedSystemPrompt`，同 revision 的目录刷新不能静默替换编辑中的 base/draft。
-- 初始化“默认”模板在角色管理中与其它角色相同，可编辑、可删除。失效模板保留原 provider/model 展示，不能静默换成其它模型。
-- Chat composer 底部显示会话当前角色 pill；详情展示快照 revision、简介、prompt、模型、工具权限和会话管理能力，并列出当前项目可用模板。只有 history 已恢复、会话 idle、没有待提交消息或其它破坏性命令时才允许发送精确 `switch_conversation_role`；等待态只由匹配 commandId 的完成或错误结算。
+- 初始化“默认”模板在角色管理中与其它角色相同，可编辑、可删除。失效模板保留原 primary/compaction provider/model 展示，不能静默换成其它模型或清除显式压缩选择。
+- Chat composer 底部显示会话当前角色 pill；详情展示快照 revision、简介、primary/compaction model、工具权限和会话管理能力，并列出当前项目可用模板。只有 history 已恢复、会话 idle、没有待提交消息或其它破坏性命令时才允许发送精确 `switch_conversation_role`；等待态只由匹配 commandId 的完成或错误结算，切换应用的是完整 frozen role identity。
 - 非空 LoopList 在 composer 内上方以只读折叠面板显示“执行中 / 已暂停 / 已完成”（CSS 状态键仍为 `executing/paused/completed`），折叠摘要只把 `completed` 计入完成数，pending 与 active 都计入剩余项。展开后按稳定数组顺序用非交互状态标记分别显示“待处理 / 进行中 / 已完成”，允许多个 active；item active 不能替代 `activeRun`，整体“执行中”仍只由 `armed && busy` 派生。Agent 对非空列表的 ID/文字/状态更新不能擅自收起用户已展开的面板，只有 focus 变化、清空或转为全完成才收起。全完成仍保留，空列表则完全不挂载容器、不占高度。composer 用 ResizeObserver 发布实际高度给 transcript inset，避免覆盖最新消息。
 - 宽桌面把同一份 LoopList、上下文用量/阈值额外投影为只读 Mission Command 侧栏；它只重复投影这两类权威数据，不持有状态、不提供控制，也不重新解释 active 为 run execution。Mission 不再投影角色、run、compacting 与 admissions 摘要，相关状态继续由 topbar、transcript、composer 各自投影。Mission 侧栏与 composer 内 Tasks 由同一个 CSS 断点严格互斥：前者只在宽屏显示，后者在窄屏恢复，因此任一时刻只有一套目标列表可见和可交互。该投影只缩窄 transcript/composer 的可用宽度，不包裹或接管 transcript 的滚动、direct children、keys、follow 逻辑，也不改变 composer ref、ResizeObserver 或 `--composer-inset` 所有权。
 - composer 的 Rebel command 外观仍由 `Chat` 在原有 `.composer-wrap` 内纯投影：`COMMAND`、`SEND`、`STOP` 与 `TO / MODEL / EFFORT / SERVICE / CONTEXT` 只是既有 textarea、按钮、select、角色详情和上下文控件的可见身份，不新增状态或控制路径。textarea 仍直接持有原 ref、受控 draft、自动高度与键盘/IME handler；发送、steer、abort、disabled gate、popover、tooltip、range、Tasks fallback、composer ResizeObserver 和 `--composer-inset` 行为不变。窄屏只压缩该视觉编排，不能移除必要控件。

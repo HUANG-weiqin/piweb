@@ -45,6 +45,7 @@ function draft(
     description: "",
     systemPrompt: "",
     model: initialModel,
+    compactionModel: null,
     defaultThinkingLevel: "off",
     defaultServiceTier: null,
     toolMode: "read_only",
@@ -63,6 +64,7 @@ function persistedDefault(
     description: "默认角色",
     systemPrompt: "",
     model: initialModel,
+    compactionModel: null,
     defaultThinkingLevel: "off",
     defaultServiceTier: null,
     toolMode: "read_only",
@@ -81,6 +83,7 @@ function persistedRole(role: RoleTemplateV1) {
     description: role.description,
     systemPromptFile: `role-prompts/${role.id}.${role.revision}.md`,
     model: role.model,
+    compactionModel: role.compactionModel,
     defaultThinkingLevel: role.defaultThinkingLevel,
     defaultServiceTier: role.defaultServiceTier,
     toolMode: role.toolMode,
@@ -91,12 +94,25 @@ function persistedRole(role: RoleTemplateV1) {
 }
 
 function withoutServiceTier(role: RoleTemplateV1) {
-  const { defaultServiceTier: _defaultServiceTier, ...legacy } = role;
+  const {
+    compactionModel: _compactionModel,
+    defaultServiceTier: _defaultServiceTier,
+    ...legacy
+  } = role;
   return legacy;
 }
 
 function withoutPersistedServiceTier(role: RoleTemplateV1) {
-  const { defaultServiceTier: _defaultServiceTier, ...legacy } = persistedRole(role);
+  const {
+    compactionModel: _compactionModel,
+    defaultServiceTier: _defaultServiceTier,
+    ...legacy
+  } = persistedRole(role);
+  return legacy;
+}
+
+function withoutPersistedCompactionModel(role: RoleTemplateV1) {
+  const { compactionModel: _compactionModel, ...legacy } = persistedRole(role);
   return legacy;
 }
 
@@ -244,6 +260,7 @@ describe("RoleStore", () => {
     const store = await RoleStore.open(rolesPath, initialModel);
 
     expect(store.getRole("default")?.defaultServiceTier).toBeNull();
+    expect(store.getRole("default")?.compactionModel).toBeNull();
     expect(JSON.parse(await readFile(rolesPath, "utf8"))).toEqual({
       version: ROLE_STORE_VERSION,
       roles: [persistedRole(role)],
@@ -257,6 +274,32 @@ describe("RoleStore", () => {
     }).toEqual({
       dev: promptIdentity.dev,
       ino: promptIdentity.ino,
+    });
+  });
+
+  it("migrates a v6 manifest compaction model without changing role revision", async () => {
+    const rolesPath = await createRolesPath("piweb-role-store-v6-compactor-");
+    const role = persistedDefault({
+      revision: 7,
+      systemPrompt: "external prompt",
+      updatedAt: "2026-07-19T10:01:00.000Z",
+    });
+    await mkdir(join(dirname(rolesPath), "role-prompts"), { recursive: true });
+    await writeFile(promptPath(rolesPath, role), role.systemPrompt, "utf8");
+    await writeFile(rolesPath, `${JSON.stringify({
+      version: 6,
+      roles: [withoutPersistedCompactionModel(role)],
+    }, null, 2)}\n`, "utf8");
+
+    const store = await RoleStore.open(rolesPath, initialModel);
+
+    expect(store.getRole("default")).toEqual({
+      ...role,
+      compactionModel: null,
+    });
+    expect(JSON.parse(await readFile(rolesPath, "utf8"))).toEqual({
+      version: ROLE_STORE_VERSION,
+      roles: [persistedRole({ ...role, compactionModel: null })],
     });
   });
 
@@ -365,6 +408,7 @@ describe("RoleStore", () => {
     const {
       canManageSessions: _omittedCapability,
       toolMode: _omittedToolMode,
+      compactionModel: _omittedCompactionModel,
       defaultThinkingLevel: _omittedThinkingLevel,
       defaultServiceTier: _omittedServiceTier,
       ...legacyFields
@@ -379,6 +423,7 @@ describe("RoleStore", () => {
     expect(store.getRole("default")?.canManageSessions).toBe(false);
     expect(store.getRole("default")?.toolMode).toBe("read_only");
     expect(store.getRole("default")?.defaultThinkingLevel).toBe("off");
+    expect(store.getRole("default")?.compactionModel).toBeNull();
     expect(store.getRole("default")?.defaultServiceTier).toBeNull();
     expect(JSON.parse(await readFile(rolesPath, "utf8"))).toMatchObject({
       version: ROLE_STORE_VERSION,
@@ -406,6 +451,7 @@ describe("RoleStore", () => {
       description: "General purpose",
       systemPrompt: "Be concise.",
       model: { provider: "other-provider", id: "other-model" },
+      compactionModel: null,
       defaultThinkingLevel: "high",
       defaultServiceTier: "priority",
       toolMode: "read_only",
@@ -742,10 +788,15 @@ describe("RoleStore", () => {
       defaultThinkingLevel: _omittedThinkingLevel,
       ...missingThinkingLevel
     } = persistedDefault();
+    const {
+      compactionModel: _omittedCompactionModel,
+      ...missingCompactionModel
+    } = persistedRole(persistedDefault());
     const invalidDocuments: unknown[] = [
       "{",
       { version: 5, roles: [persistedDefault()] },
       { version: ROLE_STORE_VERSION, roles: [missingThinkingLevel] },
+      { version: ROLE_STORE_VERSION, roles: [missingCompactionModel] },
       { version: 1, roles: [persistedDefault()], extra: true },
       {
         version: 1,

@@ -185,6 +185,23 @@ const roleSnapshotSchema = z.object({
       "role.model.id must not be blank",
     ),
   }).strict(),
+  // Conversation snapshots written before compaction model selection use main.
+  compactionModel: z.object({
+    provider: limitedString(
+      "role.compactionModel.provider",
+      MAX_MODEL_REFERENCE_BYTES,
+    ).refine(
+      (value) => value.trim().length > 0,
+      "role.compactionModel.provider must not be blank",
+    ),
+    id: limitedString(
+      "role.compactionModel.id",
+      MAX_MODEL_REFERENCE_BYTES,
+    ).refine(
+      (value) => value.trim().length > 0,
+      "role.compactionModel.id must not be blank",
+    ),
+  }).strict().nullable().default(null),
   // Conversation snapshots written before role-scoped defaults stay closed.
   defaultThinkingLevel: z.enum([
     "off",

@@ -27,7 +27,9 @@ export interface RoleCatalogModelRegistry {
 }
 
 export interface RoleCatalogModel
-  extends RoleModelReference, ThinkingCapableModel {}
+  extends RoleModelReference, ThinkingCapableModel {
+  contextWindow: number;
+}
 
 type RoleCatalogListener = () => void;
 
@@ -56,7 +58,13 @@ function supportsThinkingLevel(
 function unavailableReason(
   role: RoleTemplateV1,
   model: RoleCatalogModel | undefined,
+  compactionModel: RoleCatalogModel | undefined,
 ): string | undefined {
+  if (role.compactionModel !== null && compactionModel === undefined) {
+    return `压缩模型当前不可用：${
+      role.compactionModel.provider
+    }/${role.compactionModel.id}`;
+  }
   if (role.model === null) return "尚未为此角色选择模型";
   if (model === undefined) {
     return `模型当前不可用：${role.model.provider}/${role.model.id}`;
@@ -69,6 +77,21 @@ function unavailableReason(
     && !modelServiceTiers(model)?.includes(role.defaultServiceTier)
   ) {
     return `模型不支持默认服务层级：${role.defaultServiceTier}`;
+  }
+  if (compactionModel === undefined) return undefined;
+  if (!Number.isFinite(model.contextWindow) || model.contextWindow <= 0) {
+    return "主模型上下文窗口必须是有限正数";
+  }
+  if (
+    !Number.isFinite(compactionModel.contextWindow)
+    || compactionModel.contextWindow <= 0
+  ) {
+    return "压缩模型上下文窗口必须是有限正数";
+  }
+  if (compactionModel.contextWindow < model.contextWindow) {
+    return `压缩模型上下文窗口不能小于主模型（压缩模型：${
+      compactionModel.contextWindow
+    }，主模型：${model.contextWindow}）`;
   }
   return undefined;
 }
@@ -83,6 +106,9 @@ function cloneConversationRole(
     description: role.description,
     systemPrompt: role.systemPrompt,
     model: { ...role.model },
+    compactionModel: role.compactionModel === null
+      ? null
+      : { ...role.compactionModel },
     defaultThinkingLevel: role.defaultThinkingLevel,
     defaultServiceTier: role.defaultServiceTier,
     toolMode: role.toolMode,
@@ -129,10 +155,16 @@ export class RoleCatalog {
       const model = role.model === null
         ? undefined
         : available.get(modelKey(role.model));
-      const reason = unavailableReason(role, model);
+      const compactionModel = role.compactionModel === null
+        ? undefined
+        : available.get(modelKey(role.compactionModel));
+      const reason = unavailableReason(role, model, compactionModel);
       return {
         ...role,
         model: role.model === null ? null : { ...role.model },
+        compactionModel: role.compactionModel === null
+          ? null
+          : { ...role.compactionModel },
         available: reason === undefined,
         ...(reason === undefined ? {} : { unavailableReason: reason }),
       };
@@ -172,6 +204,7 @@ export class RoleCatalog {
     if (!current) throw new Error(`Role not found: ${roleId}`);
     if (
       !modelsAreEqual(current.model, input.model)
+      || !modelsAreEqual(current.compactionModel, input.compactionModel)
       || current.defaultThinkingLevel !== input.defaultThinkingLevel
       || current.defaultServiceTier !== input.defaultServiceTier
     ) {
@@ -229,21 +262,57 @@ export class RoleCatalog {
     input: RoleDraft,
     modelRegistry: RoleCatalogModelRegistry,
   ): void {
+    const available = modelRegistry.getAvailable();
     const model = input.model;
+    const compactionModel = input.compactionModel;
+    const selectedCompactionModel = compactionModel === null
+      ? undefined
+      : available.find((candidate) => (
+        modelKey(candidate) === modelKey(compactionModel)
+      ));
+    if (compactionModel !== null && selectedCompactionModel === undefined) {
+      throw new Error(
+        `Role compaction model is unavailable in the current project: ${
+          compactionModel.provider
+        }/${compactionModel.id}`,
+      );
+    }
     if (model === null) {
       if (input.defaultServiceTier !== null) {
         throw new Error("Role without a model cannot select a service tier");
       }
       return;
     }
-    const selected = modelRegistry.getAvailable()
-      .find((candidate) => modelKey(candidate) === modelKey(model));
+    const selected = available.find((candidate) => (
+      modelKey(candidate) === modelKey(model)
+    ));
     if (selected === undefined) {
       throw new Error(
         `Role model is unavailable in the current project: ${
           model.provider
         }/${model.id}`,
       );
+    }
+    if (selectedCompactionModel !== undefined) {
+      if (!Number.isFinite(selected.contextWindow) || selected.contextWindow <= 0) {
+        throw new Error("Role model context window must be a finite positive number");
+      }
+      if (
+        !Number.isFinite(selectedCompactionModel.contextWindow)
+        || selectedCompactionModel.contextWindow <= 0
+      ) {
+        throw new Error(
+          "Role compaction model context window must be a finite positive number",
+        );
+      }
+      if (selectedCompactionModel.contextWindow < selected.contextWindow) {
+        throw new Error(
+          "Role compaction model context window must be at least the primary model "
+          + `(compaction: ${selectedCompactionModel.contextWindow}, primary: ${
+            selected.contextWindow
+          })`,
+        );
+      }
     }
     if (!supportsThinkingLevel(selected, input.defaultThinkingLevel)) {
       throw new Error(

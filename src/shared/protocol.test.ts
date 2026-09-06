@@ -26,7 +26,7 @@ const messageId = "assistant:96b960be-b6bb-4a19-9cf2-78e77cb69425";
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(39);
+    expect(PROTOCOL_VERSION).toBe(40);
   });
 
   it("accepts supported commands", () => {
@@ -77,6 +77,7 @@ describe("parseClientCommand", () => {
         description: "Finds lifecycle bugs",
         systemPrompt: "Review the implementation.",
         model: { provider: "openai", id: "gpt" },
+        compactionModel: { provider: "openai", id: "gpt-compactor" },
         defaultThinkingLevel: "high",
         defaultServiceTier: "priority",
         toolMode: "read_only",
@@ -95,6 +96,7 @@ describe("parseClientCommand", () => {
         description: "",
         systemPrompt: "",
         model: null,
+        compactionModel: null,
         defaultThinkingLevel: "off",
         defaultServiceTier: null,
         toolMode: "full_access",
@@ -211,6 +213,34 @@ describe("parseClientCommand", () => {
     expect(parseClientCommand({ type: "auth_response", authFlowId, requestId: "1", value: "code" }).type).toBe("auth_response");
     expect(parseClientCommand({ type: "cancel_auth", authFlowId }).type).toBe("cancel_auth");
     expect(parseClientCommand({ type: "close_session", sessionId }).type).toBe("close_session");
+  });
+
+  it("requires a nullable compaction model in role commands", () => {
+    const role = {
+      name: "Reviewer",
+      description: "",
+      systemPrompt: "",
+      model: null,
+      compactionModel: null,
+      defaultThinkingLevel: "off",
+      defaultServiceTier: null,
+      toolMode: "read_only",
+      canManageSessions: false,
+    };
+
+    expect(parseClientCommand({
+      type: "create_role",
+      commandId,
+      sessionId,
+      role,
+    })).toMatchObject({ type: "create_role", role });
+    const { compactionModel: _compactionModel, ...missingCompactionModel } = role;
+    expect(() => parseClientCommand({
+      type: "create_role",
+      commandId,
+      sessionId,
+      role: missingCompactionModel,
+    })).toThrow("compactionModel");
   });
 
   it("counts conversation title limits by Unicode character", () => {
@@ -377,6 +407,7 @@ describe("parseClientCommand", () => {
         description: "",
         systemPrompt: exactPrompt,
         model: null,
+        compactionModel: null,
         defaultThinkingLevel: "high",
         defaultServiceTier: null,
         toolMode: "read_only",
@@ -459,6 +490,7 @@ describe("parseClientCommand", () => {
         description: "d".repeat(MAX_ROLE_DESCRIPTION_CHARACTERS),
         systemPrompt: "",
         model: null,
+        compactionModel: null,
         defaultThinkingLevel: "off",
         defaultServiceTier: null,
         toolMode: "read_only",
@@ -634,6 +666,7 @@ describe("parseClientCommand", () => {
         description: "",
         systemPrompt: "",
         model: { provider: "openai", id: "gpt" },
+        compactionModel: null,
         defaultThinkingLevel: "high",
         defaultServiceTier: "priority",
         toolMode: "read_only",
@@ -661,6 +694,7 @@ describe("parseClientCommand", () => {
             name: "Default",
             description: "",
             model: { provider: "openai", id: "gpt" },
+            compactionModel: null,
             defaultThinkingLevel: "high",
             defaultServiceTier: "priority",
             toolMode: "read_only",
@@ -771,6 +805,7 @@ describe("parseClientCommand", () => {
         description: "",
         systemPrompt: "",
         model: { provider: "openai", id: "gpt" },
+        compactionModel: null,
         defaultThinkingLevel: "high",
         defaultServiceTier: "priority",
         toolMode: "read_only",
@@ -1043,6 +1078,7 @@ describe("parseClientCommand", () => {
       description: "",
       systemPrompt,
       model: { provider: "openai", id: "gpt" },
+      compactionModel: null,
       defaultThinkingLevel: "high" as const,
       defaultServiceTier: null,
       toolMode: "read_only",
@@ -1274,6 +1310,7 @@ describe("parseServerEvent", () => {
         description: "Reviews code",
         systemPrompt: "Review carefully.",
         model: { provider: "test", id: "model" },
+        compactionModel: null,
         defaultThinkingLevel: "off" as const,
         defaultServiceTier: null,
         toolMode: "read_only" as const,
@@ -1361,6 +1398,7 @@ describe("parseServerEvent", () => {
         provider: "p".repeat(1_024),
         id: "m".repeat(1_024),
       },
+      compactionModel: null,
       defaultThinkingLevel: "off" as const,
       defaultServiceTier: null,
       toolMode: "read_only" as const,

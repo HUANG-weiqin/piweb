@@ -1045,6 +1045,9 @@ export class ProjectSessionCoordinator {
                 name: profile.role.name,
                 description: profile.role.description,
                 model: { ...profile.role.model },
+                compactionModel: profile.role.compactionModel === null
+                  ? null
+                  : { ...profile.role.compactionModel },
                 defaultThinkingLevel:
                   profile.role.defaultThinkingLevel,
                 defaultServiceTier: profile.role.defaultServiceTier,
@@ -2777,6 +2780,9 @@ export class ProjectSessionCoordinator {
   ): CreatePiSessionOptions {
     return {
       model: { ...profile.role.model },
+      ...(profile.role.compactionModel === null
+        ? {}
+        : { compactionModel: { ...profile.role.compactionModel } }),
       thinkingLevel: profile.role.defaultThinkingLevel,
       roleSystemPrompt: profile.role.systemPrompt,
       toolMode: profile.role.toolMode,
@@ -4320,6 +4326,7 @@ export class ProjectSessionCoordinator {
         description: "从旧版本迁移的会话",
         systemPrompt: "",
         model: { ...model },
+        compactionModel: null,
         defaultThinkingLevel: "off",
         defaultServiceTier: null,
         toolMode: "read_only",
@@ -4354,6 +4361,7 @@ export class ProjectSessionCoordinator {
           name: role.name,
           description: role.description,
           model: role.model,
+          compactionModel: role.compactionModel,
           available: role.available,
           ...(role.unavailableReason
             ? { unavailableReason: role.unavailableReason }
@@ -4368,6 +4376,7 @@ export class ProjectSessionCoordinator {
           description: role.description,
           systemPrompt: role.systemPrompt,
           model: role.model,
+          compactionModel: role.compactionModel,
           defaultThinkingLevel: role.defaultThinkingLevel,
           defaultServiceTier: role.defaultServiceTier,
           toolMode: role.toolMode,
@@ -4450,6 +4459,9 @@ export class ProjectSessionCoordinator {
               description: role.description,
               systemPrompt: finalPrompt,
               model: role.model === null ? null : { ...role.model },
+              compactionModel: role.compactionModel === null
+                ? null
+                : { ...role.compactionModel },
               defaultThinkingLevel: role.defaultThinkingLevel,
               defaultServiceTier: role.defaultServiceTier,
               toolMode: role.toolMode,

@@ -21,6 +21,8 @@ export const MAX_LOOP_LIST_ITEM_TEXT_CHARACTERS = 512;
 export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
+// v40: role templates and frozen conversation role snapshots carry a required
+// nullable compaction model; null follows the frozen primary model.
 // v39: LoopList items project explicit pending, active, or completed status;
 // active is durable focus state and remains separate from the actor run state.
 // v38: role templates and frozen conversation role snapshots carry a required
@@ -35,7 +37,7 @@ export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 // conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
-export const PROTOCOL_VERSION = 39;
+export const PROTOCOL_VERSION = 40;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
@@ -148,6 +150,7 @@ const roleInputSchema = z.object({
     "role.systemPrompt",
   ),
   model: roleModelSchema.nullable(),
+  compactionModel: roleModelSchema.nullable(),
   defaultThinkingLevel: thinkingLevelSchema,
   defaultServiceTier: serviceTierSchema.nullable(),
   toolMode: toolModeSchema,
@@ -558,6 +561,7 @@ export interface RoleTemplate {
   description: string;
   systemPrompt: string;
   model: RoleModelSelection | null;
+  compactionModel: RoleModelSelection | null;
   defaultThinkingLevel: ThinkingLevel;
   defaultServiceTier: ServiceTier | null;
   toolMode: ToolMode;
@@ -575,6 +579,7 @@ export interface ConversationRoleSnapshot {
   description: string;
   systemPrompt: string;
   model: RoleModelSelection;
+  compactionModel: RoleModelSelection | null;
   defaultThinkingLevel: ThinkingLevel;
   defaultServiceTier: ServiceTier | null;
   toolMode: ToolMode;
@@ -1052,6 +1057,7 @@ const roleTemplateSchema: z.ZodType<RoleTemplate> = z.object({
     "role.systemPrompt",
   ),
   model: roleModelSchema.nullable(),
+  compactionModel: roleModelSchema.nullable(),
   defaultThinkingLevel: thinkingLevelSchema,
   defaultServiceTier: serviceTierSchema.nullable(),
   toolMode: toolModeSchema,
@@ -1079,6 +1085,7 @@ const conversationRoleSnapshotSchema: z.ZodType<ConversationRoleSnapshot> = z.ob
     "role.systemPrompt",
   ),
   model: roleModelSchema,
+  compactionModel: roleModelSchema.nullable(),
   defaultThinkingLevel: thinkingLevelSchema,
   defaultServiceTier: serviceTierSchema.nullable(),
   toolMode: toolModeSchema,
@@ -1098,6 +1105,7 @@ const conversationRoleSummarySchema: z.ZodType<
     "role.description",
   ),
   model: roleModelSchema,
+  compactionModel: roleModelSchema.nullable(),
   defaultThinkingLevel: thinkingLevelSchema,
   defaultServiceTier: serviceTierSchema.nullable(),
   toolMode: toolModeSchema,
