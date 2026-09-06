@@ -2751,7 +2751,6 @@ export function App() {
       updatePendingFocus(undefined);
       if (cached) discardCachedWorkspacePresentation();
       updateWorkspaceSyncing(false);
-      markWorkspaceUnavailable(normalizedCwd);
       return false;
     }
     return true;
@@ -3252,6 +3251,10 @@ export function App() {
     }
   };
   const switchWorkspace = (cwd: string) => {
+    if (!transportOnline || !protocolReady) {
+      setError(protocolReady ? "本地服务未连接" : "本地服务尚未完成协议握手");
+      return false;
+    }
     if (
       workspaceKey(cwd) === workspaceKey(activeCwdRef.current)
       && state
@@ -3609,6 +3612,7 @@ export function App() {
     unavailable={unavailableWorkspaceKeys}
     activityByWorkspace={projectActivityByWorkspace}
     activityCatalogTruncated={projectActivityTruncated}
+    navigationEnabled={online}
     mobile={phoneViewport ? {
       hidden: mobileScene !== "workspaces",
       canGoBack: phoneRouteRef.current?.screen !== "workspaces",
@@ -3817,6 +3821,11 @@ export function App() {
       ? conversationDisplayTitle(mobileConversation)
       : "当前会话";
   }, [sidebarConversations, visibleConversationId]);
+  const openingConversationTitle = pendingTargetConversationId
+    ? sidebarConversations.find(({ id }) => id === pendingTargetConversationId)
+    : undefined;
+  const showConversationOpening = pendingFocus?.operation === "focus_conversation"
+    && !activeConversationPresentation;
   const phoneSceneFocusKey = !activeCwd || !visibleState
     ? mobileScene
     : mobileScene === "chat" && showRoleSelection
@@ -3834,7 +3843,7 @@ export function App() {
         navigationEnabled={false}
         actionsEnabled={false}
         mobile={phoneViewport ? {
-          hidden: mobileScene !== "conversations",
+          hidden: mobileScene !== "conversations" || Boolean(activeCwd),
           onShowWorkspaces: goBackFromPhoneRoute,
         } : undefined}
         onToggleCollapsed={handleSidebarCollapsedChange}
@@ -3847,7 +3856,8 @@ export function App() {
       <WorkspacePlaceholder
         cwd={activeCwd}
         unavailable={unavailableWorkspaceKeys.has(workspaceKey(activeCwd))}
-        hidden={phoneViewport}
+        hidden={phoneViewport ? mobileScene !== "conversations" : false}
+        announceOpening={phoneViewport && mobileScene === "conversations"}
         onOpen={openWorkspaceDialog}
         onClose={() => closeWorkspace(activeCwd)}
         onRetry={() => switchWorkspace(activeCwd)}
@@ -3962,6 +3972,16 @@ export function App() {
           aria-label="正在同步会话…"
         >
           正在同步会话…
+          {showConversationOpening && <span
+            role="status"
+            aria-label={openingConversationTitle
+              ? `正在打开会话 ${conversationDisplayTitle(openingConversationTitle)}`
+              : "正在打开会话"}
+          >
+            {openingConversationTitle
+              ? ` · 正在打开会话 ${conversationDisplayTitle(openingConversationTitle)}`
+              : " · 正在打开会话"}
+          </span>}
         </div>}
         {visiblePendingConversationDeletion
           && !showConversationDeletionProgress

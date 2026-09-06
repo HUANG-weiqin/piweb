@@ -93,4 +93,28 @@ describe("WorkspaceRail", () => {
       name: "打开工作区 beta（2 个会话需要注意）",
     })).toBeInTheDocument();
   });
+
+  it("disables workspace selection without changing its unavailable state", () => {
+    const onSelect = vi.fn();
+    render(
+      <WorkspaceRail
+        workspaces={["E:\\alpha", "E:\\beta"]}
+        activeCwd="E:\\alpha"
+        unavailable={new Set()}
+        activityByWorkspace={new Map()}
+        activityCatalogTruncated={false}
+        navigationEnabled={false}
+        onSelect={onSelect}
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+      />,
+    );
+
+    const target = screen.getByRole("button", { name: "打开工作区 beta" });
+    expect(target).toBeDisabled();
+    expect(target).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(target);
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(target).not.toHaveClass("unavailable");
+  });
 });

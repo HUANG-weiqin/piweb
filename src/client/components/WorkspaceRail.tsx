@@ -7,6 +7,7 @@ interface WorkspaceRailProps {
   unavailable: ReadonlySet<string>;
   activityByWorkspace: ReadonlyMap<string, ProjectActivitySummary>;
   activityCatalogTruncated: boolean;
+  navigationEnabled?: boolean;
   mobile?: {
     hidden: boolean;
     canGoBack: boolean;
@@ -52,6 +53,7 @@ function WorkspaceRailView({
   unavailable,
   activityByWorkspace,
   activityCatalogTruncated,
+  navigationEnabled = true,
   mobile,
   onSelect,
   onClose,
@@ -124,6 +126,8 @@ function WorkspaceRailView({
             className={`workspace-rail-item${active ? " active" : ""}${missing ? " unavailable" : ""}${running ? " running" : ""}`}
             aria-label={`打开工作区 ${name}${unavailableLabel}${statusLabel}`}
             aria-current={active ? "true" : undefined}
+            aria-disabled={!navigationEnabled || undefined}
+            disabled={!navigationEnabled}
             title={titleLines.join("\n")}
             onClick={() => onSelect(cwd)}
           >

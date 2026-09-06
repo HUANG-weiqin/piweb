@@ -556,6 +556,84 @@ describe("App", () => {
     });
   });
 
+  it("fails closed before protocol readiness when selecting a workspace", () => {
+    socketMock.helloVersion = PROTOCOL_VERSION + 1;
+    localStorage.setItem("piweb.workspaces", JSON.stringify([
+      "E:\\first",
+      "E:\\second",
+    ]));
+    localStorage.setItem("piweb.lastCwd", "E:\\first");
+
+    render(<App />);
+
+    const target = screen.getByRole("button", { name: "打开工作区 second" });
+    expect(target).toBeDisabled();
+    fireEvent.click(target);
+
+    expect(socketMock.send).not.toHaveBeenCalledWith(expect.objectContaining({
+      type: "initialize",
+      cwd: "E:\\second",
+    }));
+    expect(screen.getByRole("button", { name: "打开工作区 first" }))
+      .toHaveAttribute("aria-current", "true");
+    expect(target).not.toHaveClass("unavailable");
+  });
+
+  it("keeps the current workspace projection when rail navigation is offline", () => {
+    localStorage.setItem("piweb.workspaces", JSON.stringify([
+      "E:\\first",
+      "E:\\second",
+    ]));
+    localStorage.setItem("piweb.lastCwd", "E:\\first");
+    render(<App />);
+    const sessionId = latestSessionId();
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\first",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        messages: [{
+          id: "offline-source",
+          role: "assistant",
+          text: "offline source projection",
+          thinking: "",
+          tools: [],
+        }],
+        window: completeConversationWindow,
+      });
+    });
+    const initializeCount = socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "initialize",
+    ).length;
+
+    act(() => socketMock.status?.(false));
+    const target = screen.getByRole("button", { name: "打开工作区 second" });
+    expect(target).toBeDisabled();
+    fireEvent.click(target);
+
+    expect(socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "initialize",
+    )).toHaveLength(initializeCount);
+    expect(screen.getByText("offline source projection")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "打开工作区 first" }))
+      .toHaveAttribute("aria-current", "true");
+    expect(target).not.toHaveClass("unavailable");
+  });
+
   it("does not write or subscribe to Browser History outside the phone breakpoint", () => {
     mockPhoneViewport(false);
     const pushState = vi.spyOn(history, "pushState");
@@ -3552,8 +3630,9 @@ describe("App", () => {
     socketMock.autoFocus = false;
     fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
     expect(screen.queryByText("source A")).not.toBeInTheDocument();
-    expect(screen.getByRole("status", { name: "正在同步会话…" })).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "正在打开会话 B" })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "新建会话" })).toBeDisabled();
 
     const command = latestCommand("focus_conversation");
     act(() => socketMock.rawEmit?.({
@@ -4153,7 +4232,7 @@ describe("App", () => {
       .toBeInTheDocument();
   });
 
-  it("settles the workspace when the automatic recent fallback cannot be sent", () => {
+  it("does not mark a workspace unavailable when the automatic recent fallback cannot be sent", () => {
     localStorage.setItem("piweb.workspaces", JSON.stringify(["E:\\work"]));
     localStorage.setItem("piweb.lastCwd", "E:\\work");
     render(<App />);
@@ -4220,9 +4299,60 @@ describe("App", () => {
       conversation: { kind: "recent" },
     });
     expect(fallback.sessionId).not.toBe(staleRestore.sessionId);
-    expect(screen.getByRole("heading", { name: "工作区不可用" }))
+    expect(screen.queryByRole("heading", { name: "工作区不可用" }))
+      .not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "正在打开工作区" }))
       .toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("本地服务未连接");
+  });
+
+  it("shows an explicit opening target for a phone workspace cache miss", () => {
+    mockPhoneViewport();
+    localStorage.setItem("piweb.workspaces", JSON.stringify([
+      "E:\\first",
+      "E:\\second",
+    ]));
+    localStorage.setItem("piweb.lastCwd", "E:\\first");
+    render(<App />);
+    const sessionId = latestSessionId();
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\first",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        messages: [{
+          id: "phone-source",
+          role: "assistant",
+          text: "phone source projection",
+          thinking: "",
+          tools: [],
+        }],
+        window: completeConversationWindow,
+      });
+    });
+    socketMock.autoFocus = false;
+
+    act(() => popPhoneRoute({ screen: "workspaces" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开工作区 second" }));
+
+    expect(screen.getByRole("status", { name: "正在打开工作区 second" }))
+      .toBeInTheDocument();
+    expect(screen.queryByText("phone source projection")).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "给 Pi 发送消息" })).not.toBeInTheDocument();
   });
 
   it("closes the last unavailable workspace and its session view", () => {
