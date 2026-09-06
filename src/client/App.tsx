@@ -1984,7 +1984,9 @@ export function App() {
         discardCachedWorkspacePresentationIfProjectMismatch(event.projectId);
         projectIdRef.current = event.projectId;
         const existingConversationIds = new Set(event.conversations.map(({ id }) => id));
-        if (!event.truncated) {
+        const membershipIsAuthoritative = event.coverage === "complete"
+          && !event.truncated;
+        if (membershipIsAuthoritative) {
           authoritativeProjectMembershipRef.current.set(
             event.projectId,
             existingConversationIds,
@@ -2004,7 +2006,7 @@ export function App() {
         }
         for (const [cacheKey, presentation] of conversationPresentationCacheRef.current) {
           if (
-            !event.truncated
+            membershipIsAuthoritative
             && presentation.workspaceKey === currentWorkspaceKey()
             && presentation.projectId === event.projectId
             && !existingConversationIds.has(presentation.conversationId)
@@ -2017,14 +2019,21 @@ export function App() {
         }
         const currentPhoneRoute = phoneRouteRef.current;
         if (
-          !event.truncated
+          membershipIsAuthoritative
           && currentPhoneRoute?.screen === "chat"
           && !existingConversationIds.has(currentPhoneRoute.conversationId)
         ) {
           phoneRouteDowngradeChatRef.current(currentPhoneRoute.conversationId);
         }
-        setConversations(event.conversations);
-        setConversationIndexTruncated(event.truncated);
+        setConversations((current) => membershipIsAuthoritative
+          ? event.conversations
+          : [
+              ...event.conversations,
+              ...current.filter(({ id }) => !existingConversationIds.has(id)),
+            ]);
+        setConversationIndexTruncated(
+          event.truncated || event.coverage !== "complete",
+        );
       } else if (event.type === "conversation_run_settled") {
         if (
           event.sessionId !== sessionIdRef.current

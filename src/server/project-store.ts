@@ -1,9 +1,10 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import {
   link,
   lstat,
   mkdir,
+  open as openFile,
   readdir,
   readFile,
   realpath,
@@ -31,6 +32,10 @@ import type {
   ToolMode,
 } from "../shared/protocol.js";
 import {
+  MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
+  MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS,
+} from "../shared/protocol.js";
+import {
   createConversationMetaEntry,
   parseReservedConversationEntry,
   type ConversationMeta,
@@ -45,8 +50,11 @@ import {
 } from "./session-file.js";
 
 const MANIFEST_VERSION = 1;
+const CONVERSATION_CATALOG_VERSION = 1;
+const MAX_CONVERSATION_CATALOG_BYTES = 4 * 1024 * 1024;
 const PROJECT_STATE_DIRECTORY = ".piweb";
 const PROJECT_MANIFEST_FILE = "project.json";
+const CONVERSATION_CATALOG_FILE = "conversation-catalog.json";
 const SESSION_DIRECTORY = "sessions";
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -54,6 +62,7 @@ const SESSION_ID_PATTERN =
   /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 const DEFAULT_CONVERSATION_LEASE_TIMEOUT_MS = 5_000;
 const MAX_INTEGRITY_PROOF_ATTEMPTS = 8;
+const MAX_SESSION_HEADER_BYTES = 64 * 1024;
 const DELETE_QUARANTINE_SUFFIX = ".delete-quarantine";
 
 interface ProjectManifestV1 {
@@ -62,6 +71,48 @@ interface ProjectManifestV1 {
   createdAt: string;
   toolMode: ToolMode;
   lastConversationId?: string;
+}
+
+type CatalogHeaderEvidence =
+  | { kind: "claims"; conversationId: string }
+  | { kind: "conclusively_invalid" };
+
+type CatalogBodyEvidence =
+  | { kind: "unverified" }
+  | { kind: "valid" }
+  | { kind: "invalid" };
+
+interface CatalogConversationSummary {
+  id: string;
+  name?: string;
+  preview: string;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+}
+
+interface CatalogObservation {
+  relativePath: string;
+  fingerprint: {
+    dev: string;
+    ino: string;
+    size: string;
+    mtimeNs: string;
+    ctimeNs: string;
+  };
+  header: CatalogHeaderEvidence;
+  body: CatalogBodyEvidence;
+  summary?: CatalogConversationSummary;
+  observedAt: string;
+  diagnostic?: string;
+}
+
+interface ConversationCatalogV1 {
+  version: typeof CONVERSATION_CATALOG_VERSION;
+  coverage:
+    | { kind: "unknown" }
+    | { kind: "complete"; generation: string };
+  observations: CatalogObservation[];
 }
 
 export interface ConversationLease {
@@ -121,6 +172,26 @@ interface VerifiedSessionReadBatch {
   targets: ReadonlyMap<string, VerifiedSessionFileRead>;
 }
 
+/**
+ * Namespace evidence deliberately excludes mutable body fingerprints. A normal
+ * append to an unrelated conversation must not invalidate an exact target
+ * proof; its path/inode and first-line identity claim remain the authority for
+ * this scope.
+ */
+interface NamespaceHeaderEvidence {
+  file: Readonly<SessionFileFingerprint>;
+  conversationId?: string;
+}
+
+interface NamespaceHeaderCensus {
+  evidence: readonly Readonly<NamespaceHeaderEvidence>[];
+}
+
+interface VerifiedTargetSessionFileRead {
+  target: VerifiedSessionFileRead;
+  namespace: NamespaceHeaderCensus;
+}
+
 interface QuarantinedSessionFile {
   originalPath: string;
   quarantinePath: string;
@@ -155,6 +226,45 @@ class SessionFileChangedError extends Error {
   constructor(conversationId: string) {
     super(`Conversation changed while it was being read: ${conversationId}`);
   }
+}
+
+function sessionFileIdentitiesEqual(
+  first: Readonly<SessionFileFingerprint>,
+  second: Readonly<SessionFileFingerprint>,
+): boolean {
+  return first.pathKey === second.pathKey
+    && first.dev === second.dev
+    && first.ino === second.ino;
+}
+
+function namespaceTargetEvidenceEqual(
+  first: NamespaceHeaderCensus,
+  second: NamespaceHeaderCensus,
+  conversationId: string,
+): boolean {
+  const firstCandidates = first.evidence.filter(
+    (entry) => entry.conversationId === conversationId,
+  );
+  const secondCandidates = second.evidence.filter(
+    (entry) => entry.conversationId === conversationId,
+  );
+  return firstCandidates.length === secondCandidates.length
+    && firstCandidates.every((entry, index) => {
+      const other = secondCandidates[index];
+      return other !== undefined
+        && sessionFileIdentitiesEqual(entry.file, other.file);
+    });
+}
+
+function sessionFileIdentitySetsEqual(
+  first: readonly Readonly<SessionFileFingerprint>[],
+  second: readonly Readonly<SessionFileFingerprint>[],
+): boolean {
+  return first.length === second.length
+    && first.every((file, index) => {
+      const other = second[index];
+      return other !== undefined && sessionFileIdentitiesEqual(file, other);
+    });
 }
 
 function isNodeError(error: unknown, code: string): boolean {
@@ -281,6 +391,230 @@ function parseManifest(raw: string, manifestPath: string): ParsedManifest {
     throw new Error(`Invalid project manifest at ${manifestPath}: ${detail}`, {
       cause: error,
     });
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function assertCatalogKeys(
+  record: Record<string, unknown>,
+  allowed: readonly string[],
+): void {
+  for (const key of Object.keys(record)) {
+    if (!allowed.includes(key)) {
+      throw new Error(`unknown catalog field ${JSON.stringify(key)}`);
+    }
+  }
+}
+
+function parseCatalogConversationSummary(
+  value: unknown,
+): CatalogConversationSummary {
+  if (!isRecord(value)) throw new Error("catalog summary must be an object");
+  assertCatalogKeys(value, [
+    "id",
+    "name",
+    "preview",
+    "createdAt",
+    "updatedAt",
+    "messageCount",
+  ]);
+  assertSessionId(value.id, "catalog summary id");
+  if (
+    typeof value.preview !== "string"
+    || Array.from(value.preview).length > MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS
+    || !isCanonicalIsoDate(value.createdAt)
+    || !isCanonicalIsoDate(value.updatedAt)
+    || typeof value.messageCount !== "number"
+    || !Number.isInteger(value.messageCount)
+    || value.messageCount < 0
+  ) {
+    throw new Error("catalog summary is invalid");
+  }
+  if (
+    value.name !== undefined
+    && (
+      typeof value.name !== "string"
+      || Array.from(value.name).length > MAX_PROJECT_CONVERSATION_NAME_CHARACTERS
+    )
+  ) {
+    throw new Error("catalog summary name is invalid");
+  }
+  return {
+    id: value.id,
+    ...(value.name === undefined ? {} : { name: value.name }),
+    preview: value.preview,
+    createdAt: value.createdAt,
+    updatedAt: value.updatedAt,
+    messageCount: value.messageCount,
+  };
+}
+
+function parseCatalogObservation(value: unknown): CatalogObservation {
+  if (!isRecord(value)) throw new Error("catalog observation must be an object");
+  assertCatalogKeys(value, [
+    "relativePath",
+    "fingerprint",
+    "header",
+    "body",
+    "summary",
+    "observedAt",
+    "diagnostic",
+  ]);
+  if (
+    typeof value.relativePath !== "string"
+    || value.relativePath !== basename(value.relativePath)
+    || !value.relativePath.endsWith(".jsonl")
+  ) {
+    throw new Error("catalog relativePath must be a session filename");
+  }
+  if (!isRecord(value.fingerprint)) {
+    throw new Error("catalog fingerprint must be an object");
+  }
+  assertCatalogKeys(value.fingerprint, [
+    "dev",
+    "ino",
+    "size",
+    "mtimeNs",
+    "ctimeNs",
+  ]);
+  const fingerprint: CatalogObservation["fingerprint"] = {
+    dev: String(value.fingerprint.dev),
+    ino: String(value.fingerprint.ino),
+    size: String(value.fingerprint.size),
+    mtimeNs: String(value.fingerprint.mtimeNs),
+    ctimeNs: String(value.fingerprint.ctimeNs),
+  };
+  if (Object.values(fingerprint).some((part) => !/^\d+$/.test(part))) {
+    throw new Error("catalog fingerprint must contain decimal strings");
+  }
+  if (!isRecord(value.header)) throw new Error("catalog header must be an object");
+  assertCatalogKeys(value.header, ["kind", "conversationId"]);
+  let header: CatalogHeaderEvidence;
+  if (value.header.kind === "claims") {
+    assertSessionId(value.header.conversationId, "catalog conversationId");
+    header = { kind: "claims", conversationId: value.header.conversationId };
+  } else if (value.header.kind === "conclusively_invalid") {
+    header = { kind: "conclusively_invalid" };
+  } else {
+    throw new Error("catalog header kind is invalid");
+  }
+  if (!isRecord(value.body)) throw new Error("catalog body must be an object");
+  assertCatalogKeys(value.body, ["kind"]);
+  if (
+    value.body.kind !== "unverified"
+    && value.body.kind !== "valid"
+    && value.body.kind !== "invalid"
+  ) {
+    throw new Error("catalog body kind is invalid");
+  }
+  const summary = value.summary === undefined
+    ? undefined
+    : parseCatalogConversationSummary(value.summary);
+  if (
+    summary !== undefined
+    && (
+      value.body.kind !== "valid"
+      || header.kind !== "claims"
+      || header.conversationId !== summary.id
+    )
+  ) {
+    throw new Error("catalog summary has no matching valid identity");
+  }
+  if (!isCanonicalIsoDate(value.observedAt)) {
+    throw new Error("catalog observedAt must be a canonical ISO timestamp");
+  }
+  if (
+    value.diagnostic !== undefined
+    && (typeof value.diagnostic !== "string" || value.diagnostic.length > 512)
+  ) {
+    throw new Error("catalog diagnostic is invalid");
+  }
+  return {
+    relativePath: value.relativePath,
+    fingerprint,
+    header,
+    body: { kind: value.body.kind },
+    ...(summary === undefined ? {} : { summary }),
+    observedAt: value.observedAt,
+    ...(value.diagnostic === undefined ? {} : { diagnostic: value.diagnostic }),
+  };
+}
+
+function parseConversationCatalog(raw: string): ConversationCatalogV1 {
+  const value: unknown = JSON.parse(raw);
+  if (!isRecord(value)) throw new Error("catalog must be an object");
+  assertCatalogKeys(value, ["version", "coverage", "observations"]);
+  if (value.version !== CONVERSATION_CATALOG_VERSION) {
+    throw new Error("catalog version is unsupported");
+  }
+  if (!isRecord(value.coverage)) throw new Error("catalog coverage must be an object");
+  assertCatalogKeys(value.coverage, ["kind", "generation"]);
+  let coverage: ConversationCatalogV1["coverage"];
+  if (value.coverage.kind === "unknown") {
+    coverage = { kind: "unknown" };
+  } else if (
+    value.coverage.kind === "complete"
+    && typeof value.coverage.generation === "string"
+    && /^[a-f0-9]{64}$/.test(value.coverage.generation)
+  ) {
+    coverage = { kind: "complete", generation: value.coverage.generation };
+  } else {
+    throw new Error("catalog coverage is invalid");
+  }
+  if (!Array.isArray(value.observations) || value.observations.length > 10_000) {
+    throw new Error("catalog observations are invalid");
+  }
+  const observations = value.observations.map(parseCatalogObservation)
+    .sort((first, second) => first.relativePath.localeCompare(second.relativePath));
+  if (observations.some((entry, index) =>
+    index > 0 && entry.relativePath === observations[index - 1]?.relativePath
+  )) {
+    throw new Error("catalog contains duplicate paths");
+  }
+  return {
+    version: CONVERSATION_CATALOG_VERSION,
+    coverage,
+    observations,
+  };
+}
+
+async function readConversationCatalog(
+  catalogPath: string,
+): Promise<ConversationCatalogV1 | undefined> {
+  try {
+    const information = await stat(catalogPath, { bigint: true });
+    if (!information.isFile() || information.size > MAX_CONVERSATION_CATALOG_BYTES) {
+      return undefined;
+    }
+    return parseConversationCatalog(await readFile(catalogPath, "utf8"));
+  } catch {
+    // This is a disposable observation cache. Corruption only forfeits cached
+    // presentation and is rebuilt from the transcript without changing it.
+    return undefined;
+  }
+}
+
+async function writeConversationCatalogAtomically(
+  catalogPath: string,
+  catalog: ConversationCatalogV1,
+): Promise<void> {
+  const temporaryPath = join(
+    dirname(catalogPath),
+    `.${basename(catalogPath)}.${process.pid}.${randomUUID()}.tmp`,
+  );
+  try {
+    await writeFile(
+      temporaryPath,
+      `${JSON.stringify(catalog, null, 2)}\n`,
+      { encoding: "utf8", flag: "wx" },
+    );
+    await rename(temporaryPath, catalogPath);
+  } catch (error) {
+    await unlink(temporaryPath).catch(() => undefined);
+    throw error;
   }
 }
 
@@ -515,12 +849,15 @@ export class ProjectStore {
   readonly sessionDir: string;
 
   private readonly manifestPath: string;
+  private readonly conversationCatalogPath: string;
   private readonly listeners = new Set<ProjectStoreListener>();
   private manifest: ProjectManifestV1;
   private conversations: ConversationSummary[] = [];
   private verifiedCatalog?: VerifiedSessionCatalog;
+  private conversationCatalog?: ConversationCatalogV1;
   private writeTail: Promise<void> = Promise.resolve();
   private refreshTail: Promise<void> = Promise.resolve();
+  private catalogWriteTail: Promise<void> = Promise.resolve();
 
   private constructor(
     cwd: string,
@@ -534,6 +871,10 @@ export class ProjectStore {
     this.stateDir = stateDir;
     this.sessionDir = sessionDir;
     this.manifestPath = manifestPath;
+    this.conversationCatalogPath = join(
+      stateDir,
+      CONVERSATION_CATALOG_FILE,
+    );
     this.manifest = manifest;
   }
 
@@ -584,6 +925,10 @@ export class ProjectStore {
       manifest,
     );
     await store.recoverAbandonedSessionQuarantines();
+    store.conversationCatalog = await readConversationCatalog(
+      store.conversationCatalogPath,
+    );
+    store.conversations = store.cachedCatalogConversations();
     return store;
   }
 
@@ -627,8 +972,28 @@ export class ProjectStore {
     });
   }
 
+  private cachedCatalogConversations(): ConversationSummary[] {
+    return (this.conversationCatalog?.observations ?? [])
+      .flatMap((observation) =>
+        observation.body.kind === "valid" && observation.summary !== undefined
+          ? [{ ...observation.summary }]
+          : []
+      )
+      .sort((first, second) => {
+        const byModified = Date.parse(second.updatedAt) - Date.parse(first.updatedAt);
+        if (byModified !== 0) return byModified;
+        return second.id.localeCompare(first.id);
+      });
+  }
+
   listConversations(): ConversationSummary[] {
     return this.conversations.map(cloneSummary);
+  }
+
+  /** Waits for disposable observation writes scheduled by an owned operation. */
+  async drainPendingObservations(): Promise<void> {
+    await this.refreshTail;
+    await this.catalogWriteTail;
   }
 
   refreshConversations(): Promise<ConversationSummary[]> {
@@ -647,6 +1012,101 @@ export class ProjectStore {
       this.conversations = conversations;
       this.emit();
     }
+  }
+
+  /**
+   * Performs at most one full body validation for the disposable catalog.
+   * It deliberately has no bearing on transcript authority, exact opening, or
+   * destructive operations; callers may run it at low priority and retry the
+   * next row after yielding.
+   */
+  async scrubOneCatalogObservation(): Promise<boolean> {
+    const namespace = await this.readStableNamespaceHeaderCensus();
+    const prior = this.conversationCatalog;
+    const priorByPath = new Map(
+      prior?.observations.map((observation) => [
+        observation.relativePath,
+        observation,
+      ]),
+    );
+    const evidenceByPath = new Map(
+      namespace.evidence.map((evidence) => [
+        this.catalogRelativePath(evidence.file),
+        evidence,
+      ]),
+    );
+    const observedAt = new Date().toISOString();
+    const observations = namespace.evidence.map((evidence) => {
+      const relativePath = this.catalogRelativePath(evidence.file);
+      const header = evidence.conversationId === undefined
+        ? { kind: "conclusively_invalid" as const }
+        : { kind: "claims" as const, conversationId: evidence.conversationId };
+      const previous = priorByPath.get(relativePath);
+      if (
+        previous !== undefined
+        && this.catalogFingerprintMatches(previous, evidence.file)
+        && previous.header.kind === header.kind
+        && (
+          header.kind === "conclusively_invalid"
+          || (
+            previous.header.kind === "claims"
+            && previous.header.conversationId === header.conversationId
+          )
+        )
+      ) {
+        return previous;
+      }
+      return {
+        relativePath,
+        fingerprint: this.catalogFingerprint(evidence.file),
+        header,
+        body: { kind: "unverified" as const },
+        observedAt,
+        ...(header.kind === "conclusively_invalid"
+          ? { diagnostic: "Session header is conclusively invalid" }
+          : {}),
+      } satisfies CatalogObservation;
+    });
+    const target = observations.find((observation) =>
+      observation.header.kind === "claims"
+      && observation.body.kind === "unverified"
+    );
+    const targetConversationId = target?.header.kind === "claims"
+      ? target.header.conversationId
+      : undefined;
+    if (target !== undefined && targetConversationId !== undefined) {
+      const evidence = evidenceByPath.get(target.relativePath)!;
+      try {
+        await this.readStableExpectedSessionFile(
+          evidence.file,
+          targetConversationId,
+        );
+        target.body = { kind: "valid" };
+        delete target.diagnostic;
+      } catch (error) {
+        target.body = { kind: "invalid" };
+        target.diagnostic = this.catalogDiagnostic(error);
+      }
+      target.observedAt = new Date().toISOString();
+    }
+
+    const catalog: ConversationCatalogV1 = {
+      version: CONVERSATION_CATALOG_VERSION,
+      coverage: {
+        kind: "complete",
+        generation: this.namespaceGeneration(namespace),
+      },
+      observations: observations.sort((first, second) =>
+        first.relativePath.localeCompare(second.relativePath)
+      ),
+    };
+    try {
+      await this.persistConversationCatalog(catalog);
+    } catch {
+      // A cache write cannot turn a proven transcript operation into failure.
+      this.conversationCatalog = undefined;
+    }
+    return target !== undefined;
   }
 
   async createConversation(
@@ -724,8 +1184,8 @@ export class ProjectStore {
     conversationId: string,
     options: { updateRecent?: boolean } = {},
   ): Promise<SessionManager> {
-    const batch = await this.readVerifiedSessionFileBatch([conversationId]);
-    const target = batch.targets.get(conversationId)!;
+    const { target, namespace } =
+      await this.readVerifiedTargetSessionFile(conversationId);
     const preOpenValues = parseValidatedSessionValues(target.raw);
     const preOpenVersion = validatedSessionVersion(preOpenValues);
 
@@ -754,14 +1214,11 @@ export class ProjectStore {
       this.verifiedCatalog = undefined;
       throw error;
     }
-    let expectedFilesAfterOpen: readonly Readonly<SessionFileFingerprint>[] =
-      batch.catalog.files;
     if (!fingerprintsEqual(target.fingerprint, afterOpen)) {
       this.verifiedCatalog = undefined;
       if (
         preOpenVersion >= CURRENT_SESSION_VERSION
-        || target.fingerprint.dev !== afterOpen.dev
-        || target.fingerprint.ino !== afterOpen.ino
+        || !sessionFileIdentitiesEqual(target.fingerprint, afterOpen)
       ) {
         throw new SessionFileChangedError(conversationId);
       }
@@ -785,16 +1242,17 @@ export class ProjectStore {
           `Conversation migration does not match the opened session: ${conversationId}`,
         );
       }
-      expectedFilesAfterOpen = batch.catalog.files.map((file) =>
-        file.pathKey === target.fingerprint.pathKey ? postOpen.fingerprint : file
-      );
     }
 
     try {
-      const filesAfterOpen = await this.listSafeSessionFiles();
-      if (!fingerprintSetsEqual(expectedFilesAfterOpen, filesAfterOpen)) {
+      const namespaceAfterOpen = await this.readStableNamespaceHeaderCensus();
+      if (!namespaceTargetEvidenceEqual(
+        namespace,
+        namespaceAfterOpen,
+        conversationId,
+      )) {
         throw new SessionDirectoryChangedError(
-          `Project session directory changed while conversation ${conversationId} was being opened`,
+          `Project session namespace changed while conversation ${conversationId} was being opened`,
         );
       }
     } catch (error) {
@@ -866,8 +1324,9 @@ export class ProjectStore {
   async inspectConversation(
     conversationId: string,
   ): Promise<PiSessionFileInspection> {
-    const inspections = await this.inspectConversations([conversationId]);
-    return inspections.get(conversationId)!;
+    assertSessionId(conversationId, "conversationId");
+    const { target } = await this.readVerifiedTargetSessionFile(conversationId);
+    return inspectPiSessionFile(target.raw, target.path, conversationId);
   }
 
   /**
@@ -878,8 +1337,7 @@ export class ProjectStore {
     conversationId: string,
   ): Promise<PiSessionFilePresentationInspection> {
     assertSessionId(conversationId, "conversationId");
-    const batch = await this.readVerifiedSessionFileBatch([conversationId]);
-    const target = batch.targets.get(conversationId)!;
+    const { target } = await this.readVerifiedTargetSessionFile(conversationId);
     return inspectPiSessionFilePresentation(
       target.raw,
       target.path,
@@ -1110,6 +1568,128 @@ export class ProjectStore {
     });
   }
 
+  private catalogRelativePath(file: Readonly<SessionFileFingerprint>): string {
+    const relativePath = relative(this.sessionDir, file.path);
+    if (
+      relativePath !== basename(relativePath)
+      || !relativePath.endsWith(".jsonl")
+    ) {
+      throw new Error(`Invalid catalog session path: ${file.path}`);
+    }
+    return relativePath;
+  }
+
+  private catalogFingerprint(
+    file: Readonly<SessionFileFingerprint>,
+  ): CatalogObservation["fingerprint"] {
+    return {
+      dev: file.dev.toString(),
+      ino: file.ino.toString(),
+      size: file.size.toString(),
+      mtimeNs: file.mtimeNs.toString(),
+      ctimeNs: file.ctimeNs.toString(),
+    };
+  }
+
+  private catalogFingerprintMatches(
+    observation: CatalogObservation,
+    file: Readonly<SessionFileFingerprint>,
+  ): boolean {
+    const fingerprint = this.catalogFingerprint(file);
+    return observation.fingerprint.dev === fingerprint.dev
+      && observation.fingerprint.ino === fingerprint.ino
+      && observation.fingerprint.size === fingerprint.size
+      && observation.fingerprint.mtimeNs === fingerprint.mtimeNs
+      && observation.fingerprint.ctimeNs === fingerprint.ctimeNs;
+  }
+
+  private namespaceGeneration(namespace: NamespaceHeaderCensus): string {
+    const hash = createHash("sha256");
+    for (const evidence of namespace.evidence) {
+      const file = evidence.file;
+      hash.update(this.catalogRelativePath(file));
+      hash.update("\0");
+      hash.update(file.dev.toString());
+      hash.update("\0");
+      hash.update(file.ino.toString());
+      hash.update("\0");
+      hash.update(evidence.conversationId ?? "");
+      hash.update("\n");
+    }
+    return hash.digest("hex");
+  }
+
+  private catalogDiagnostic(error: unknown): string {
+    const message = error instanceof Error ? error.message : String(error);
+    return message.slice(0, 512);
+  }
+
+  private async persistConversationCatalog(
+    catalog: ConversationCatalogV1,
+  ): Promise<void> {
+    const next = this.catalogWriteTail.then(async () => {
+      await this.assertStateDirectorySafe();
+      await writeConversationCatalogAtomically(
+        this.conversationCatalogPath,
+        catalog,
+      );
+      this.conversationCatalog = catalog;
+    });
+    this.catalogWriteTail = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    await next;
+  }
+
+  private async publishVerifiedConversationCatalog(
+    catalog: VerifiedSessionCatalog,
+  ): Promise<void> {
+    const observedAt = new Date().toISOString();
+    const summariesByPath = new Map(
+      catalog.information.map((information) => [
+        pathIdentity(information.path),
+        toConversationSummary(information),
+      ]),
+    );
+    const observations = catalog.files.map((file) => {
+      const conversationId = catalog.validatedIdsByPath.get(file.pathKey);
+      const summary = summariesByPath.get(file.pathKey);
+      if (conversationId === undefined || summary === undefined) {
+        throw new Error(`Verified catalog omitted a session identity: ${file.path}`);
+      }
+      return {
+        relativePath: this.catalogRelativePath(file),
+        fingerprint: this.catalogFingerprint(file),
+        header: { kind: "claims" as const, conversationId },
+        body: { kind: "valid" as const },
+        summary: {
+          id: summary.id,
+          ...(summary.name === undefined ? {} : { name: summary.name }),
+          preview: summary.preview,
+          createdAt: summary.createdAt,
+          updatedAt: summary.updatedAt,
+          messageCount: summary.messageCount,
+        },
+        observedAt,
+      } satisfies CatalogObservation;
+    });
+    const namespace: NamespaceHeaderCensus = {
+      evidence: catalog.files.map((file) => ({
+        file,
+        conversationId: catalog.validatedIdsByPath.get(file.pathKey),
+      })),
+    };
+    await this.persistConversationCatalog({
+      version: CONVERSATION_CATALOG_VERSION,
+      coverage: {
+        kind: "complete",
+        generation: this.namespaceGeneration(namespace),
+      },
+      observations,
+    });
+  }
+
   private enqueueConversationOperation<T>(task: () => Promise<T>): Promise<T> {
     const result = this.refreshTail.then(task);
     this.refreshTail = result.then(
@@ -1286,6 +1866,13 @@ export class ProjectStore {
       fingerprintsByPath: indexFingerprintsByPath(frozenCatalogFiles),
     });
     this.verifiedCatalog = catalog;
+    try {
+      await this.publishVerifiedConversationCatalog(catalog);
+    } catch {
+      // The catalog is an observation cache; a failed replacement only loses
+      // acceleration and must not invalidate the complete transcript proof.
+      this.conversationCatalog = undefined;
+    }
     return catalog;
   }
 
@@ -1361,6 +1948,125 @@ export class ProjectStore {
       mtimeNs: information.mtimeNs,
       ctimeNs: information.ctimeNs,
     };
+  }
+
+  /**
+   * Proves the namespace needed to resolve one exact conversation without
+   * reading any transcript body. A header that cannot be parsed within the
+   * fixed first-line limit is conclusively not an identity candidate; I/O and
+   * path uncertainty still fail the census closed.
+   */
+  private async readStableNamespaceHeaderCensus(): Promise<NamespaceHeaderCensus> {
+    const filesBeforeRead = await this.listSafeSessionFiles();
+    const evidence: NamespaceHeaderEvidence[] = [];
+    for (const file of filesBeforeRead) {
+      evidence.push(await this.readSessionHeaderEvidence(file));
+    }
+    const filesAfterRead = await this.listSafeSessionFiles();
+    if (!sessionFileIdentitySetsEqual(filesBeforeRead, filesAfterRead)) {
+      throw new SessionDirectoryChangedError(
+        "Project session namespace changed while headers were being read",
+      );
+    }
+    return { evidence: Object.freeze(evidence) };
+  }
+
+  private async readSessionHeaderEvidence(
+    expectedFile: Readonly<SessionFileFingerprint>,
+  ): Promise<NamespaceHeaderEvidence> {
+    const beforeRead = await this.fingerprintSafeSessionPath(expectedFile.path);
+    if (!sessionFileIdentitiesEqual(expectedFile, beforeRead)) {
+      throw new SessionDirectoryChangedError(
+        "Project session namespace changed while a header was being read",
+      );
+    }
+
+    const handle = await openFile(beforeRead.path, "r");
+    let headerLine: string | undefined;
+    try {
+      const buffer = Buffer.allocUnsafe(MAX_SESSION_HEADER_BYTES);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      const lineEnd = buffer.subarray(0, bytesRead).indexOf(0x0a);
+      if (lineEnd >= 0) {
+        headerLine = buffer.subarray(0, lineEnd).toString("utf8");
+      }
+    } finally {
+      await handle.close();
+    }
+
+    const afterRead = await this.fingerprintSafeSessionPath(beforeRead.path);
+    if (!sessionFileIdentitiesEqual(beforeRead, afterRead)) {
+      throw new SessionDirectoryChangedError(
+        "Project session namespace changed while a header was being read",
+      );
+    }
+
+    if (headerLine === undefined) return { file: afterRead };
+    try {
+      return {
+        file: afterRead,
+        conversationId: validatePiSessionFile(
+          `${headerLine}\n`,
+          afterRead.path,
+        ),
+      };
+    } catch {
+      return { file: afterRead };
+    }
+  }
+
+  private async readVerifiedTargetSessionFile(
+    conversationId: string,
+  ): Promise<VerifiedTargetSessionFileRead> {
+    assertSessionId(conversationId, "conversationId");
+    for (
+      let attempt = 0;
+      attempt < MAX_INTEGRITY_PROOF_ATTEMPTS;
+      attempt += 1
+    ) {
+      try {
+        const namespaceBeforeTarget = await this.readStableNamespaceHeaderCensus();
+        const candidates = namespaceBeforeTarget.evidence.filter(
+          (entry) => entry.conversationId === conversationId,
+        );
+        if (candidates.length === 0) {
+          throw new Error(`Conversation not found: ${conversationId}`);
+        }
+        if (candidates.length > 1) {
+          throw new Error(
+            `Duplicate conversation identity ${conversationId}: ${candidates.map(({ file }) => file.path).join(", ")}`,
+          );
+        }
+
+        const target = await this.readStableExpectedSessionFile(
+          candidates[0]!.file,
+          conversationId,
+        );
+        const namespaceAfterTarget = await this.readStableNamespaceHeaderCensus();
+        if (!namespaceTargetEvidenceEqual(
+          namespaceBeforeTarget,
+          namespaceAfterTarget,
+          conversationId,
+        )) {
+          throw new SessionDirectoryChangedError(
+            `Project session namespace changed while conversation ${conversationId} was being read`,
+          );
+        }
+        return { target, namespace: namespaceAfterTarget };
+      } catch (error) {
+        this.verifiedCatalog = undefined;
+        if (
+          (
+            !(error instanceof SessionDirectoryChangedError)
+            && !(error instanceof SessionFileChangedError)
+          )
+          || attempt === MAX_INTEGRITY_PROOF_ATTEMPTS - 1
+        ) {
+          throw error;
+        }
+      }
+    }
+    throw new SessionDirectoryChangedError();
   }
 
   private async readVerifiedSessionFileBatch(

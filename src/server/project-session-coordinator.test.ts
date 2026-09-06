@@ -848,6 +848,28 @@ function deterministicTestUuid(namespace: string, value: string): string {
 }
 
 describe("ProjectSessionCoordinator", () => {
+  it("acquires a project before its background full audit completes", async () => {
+    const originalRefresh = ProjectStore.prototype.refreshConversations;
+    const releaseAudit = deferred();
+    vi.spyOn(ProjectStore.prototype, "refreshConversations").mockImplementation(
+      async function () {
+        await releaseAudit.promise;
+        return originalRefresh.call(this);
+      },
+    );
+
+    const acquisition = createFixture();
+    const acquiredBeforeAudit = await Promise.race([
+      acquisition.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)),
+    ]);
+    releaseAudit.resolve();
+    const fixture = await acquisition;
+
+    expect(acquiredBeforeAudit).toBe(true);
+    expect(fixture.handle.project.listConversations()).toEqual([]);
+  });
+
   it("prepares bounded cold history and role without executable resources", async () => {
     const fixture = await createFixture();
     const conversationId = randomUUID();

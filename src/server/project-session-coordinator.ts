@@ -864,10 +864,9 @@ export class ProjectSessionCoordinator {
         ...contextDraft,
         unsubscribeProject,
       };
-      const conversations = await project.refreshConversations();
-      await inbox.pruneCompletedTargetTombstones(
-        new Set(conversations.map(({ id }) => id)),
-      );
+      // Context acquisition is observation-only for the project catalog. A
+      // complete transcript audit belongs to background recovery; exact actor
+      // activation obtains its own target proof after it has a writer lease.
       for (const conversationId of await inbox.listDeletedTargets()) {
         context.deleting.add(conversationId);
       }
@@ -878,6 +877,7 @@ export class ProjectSessionCoordinator {
         context,
         this.runLifecycle(context, () => this.recoverProject(context)),
       );
+      this.trackBackground(context, this.scrubProjectCatalog(context));
       return context;
     } catch (error) {
       unsubscribeProject?.();
@@ -2505,6 +2505,7 @@ export class ProjectSessionCoordinator {
         }
         await Promise.allSettled([...context.actorOpenings.values()]);
         await this.drainBackground(context);
+        await context.project.drainPendingObservations();
         context.extensionUIRouters.clear();
         try {
           context.unsubscribeProject();
@@ -6802,11 +6803,20 @@ export class ProjectSessionCoordinator {
     );
   }
 
+  private async scrubProjectCatalog(context: ProjectContext): Promise<void> {
+    while (!context.closing) {
+      const advanced = await context.project.scrubOneCatalogObservation();
+      if (!advanced) return;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+  }
+
   private async recoverProject(context: ProjectContext): Promise<void> {
     if (context.closing) return;
     const legacyPromptQueue = await this.readLegacyPendingPromptQueue(context);
     let summaries = await context.project.refreshConversations();
     const existingIds = new Set(summaries.map(({ id }) => id));
+    await context.inbox.pruneCompletedTargetTombstones(existingIds);
     for (const conversationId of await context.inbox.listDeletedTargets()) {
       if (context.closing) return;
       if (!existingIds.has(conversationId)) {

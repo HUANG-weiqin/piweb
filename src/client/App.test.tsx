@@ -70,6 +70,10 @@ type TestState = Omit<
   PublicState,
   "projectId" | "conversationId" | "selectedServiceTier"
 >>;
+type RelaxedProjectSnapshot = Omit<
+  Extract<ServerEvent, { type: "project_snapshot" }>,
+  "coverage"
+> & { coverage?: "complete" | "unknown" };
 type RelaxedConversationSnapshot = Omit<
   Extract<ServerEvent, { type: "conversation_snapshot" }>,
   "focusId"
@@ -90,11 +94,15 @@ type TestServerEvent = Exclude<
   | { type: "conversation_item" }
 >
   | { type: "state"; state: TestState }
+  | RelaxedProjectSnapshot
   | RelaxedConversationSnapshot
   | RelaxedSessionEvent
   | RelaxedConversationItem;
 
 function completeEvent(event: TestServerEvent): TestServerEvent {
+  if (event.type === "project_snapshot") {
+    return { ...event, coverage: event.coverage ?? "complete" };
+  }
   if (event.type !== "state") return event;
   return {
     ...event,
@@ -3406,6 +3414,24 @@ describe("App", () => {
       .not.toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
       .toBeDisabled();
+  });
+
+  it("preserves absent conversation rows from an unknown-coverage snapshot", () => {
+    const sessionId = startFocusReplacementProject([
+      conversationSummary(CONVERSATION_B, "B"),
+    ]);
+
+    act(() => socketMock.rawEmit?.({
+      type: "project_snapshot",
+      sessionId,
+      projectId: PROJECT_ID,
+      conversations: [conversationSummary(CONVERSATION_ID, "A")],
+      truncated: false,
+      coverage: "unknown",
+    }));
+
+    expect(screen.getByRole("button", { name: "打开会话 B" }))
+      .toBeInTheDocument();
   });
 
   it("keeps a truncated-absence preview read-only and records it after paint", async () => {

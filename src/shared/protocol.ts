@@ -22,6 +22,8 @@ export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
+// v43: project snapshots identify whether absent conversation rows are
+// authoritative membership evidence or merely an incomplete observation.
 // v42: successful workspace and conversation switches may carry bounded host
 // phase durations on their correlated authority snapshot (or empty attach).
 // v41: default compaction attempts and successful durable provenance distinguish
@@ -42,7 +44,7 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
-export const PROTOCOL_VERSION = 42;
+export const PROTOCOL_VERSION = 43;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
@@ -701,6 +703,8 @@ export interface ConversationSummary {
   createdBy?: ConversationCreatedBy;
 }
 
+export type ProjectSnapshotCoverage = "complete" | "unknown";
+
 export interface ProjectActivitySummary {
   projectId: string;
   cwd: string;
@@ -796,6 +800,7 @@ export type ServerEvent =
       conversationId?: string;
       conversations: ConversationSummary[];
       truncated: boolean;
+      coverage: ProjectSnapshotCoverage;
     }
   | {
       type: "project_activity_snapshot";
@@ -1397,6 +1402,7 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
       ]).optional(),
     })).max(MAX_PROJECT_CONVERSATIONS),
     truncated: z.boolean(),
+    coverage: z.enum(["complete", "unknown"]),
   }),
   z.object({
     type: z.literal("project_activity_snapshot"),

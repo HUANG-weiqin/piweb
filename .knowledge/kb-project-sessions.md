@@ -57,10 +57,10 @@ initialize(cwd, target)
 → canonicalize cwd
 → ProjectSessionCoordinator.acquireProject()
 → 校验 .piweb 与 sessions 不是 symlink/junction
-→ refreshConversations()，枚举并验证全部 JSONL，再与 SessionManager.listAll(custom sessionDir) 一一核对
+→ 建立 project context 与 inbox tombstone fence，不等待全项目 transcript audit
 → 严格扫描 inbox，并用 JSONL receipt 保守对账 crash 窗口
-→ recent 用一次完整索引刷新选择目标；open 选择 exact conversation；new 必须显式 roleId
-→ cold exact/recent 可先从验证后的 SessionEntry 构造只读 active branch 与有界 preview（无 lease/runtime）
+→ recent 仍用一次完整索引刷新选择目标；显式 open 选择 exact conversation；new 必须显式 roleId
+→ cold exact/recent 可先从验证后的目标 JSONL 构造只读 active branch 与有界 preview（无 lease/runtime）
 → coordinator singleflight 取得/等待 writer lease
 → SessionManager.create/open(..., current cwd override)
 → 创建或读取 conversation profile 与其追加式角色变更
@@ -74,7 +74,7 @@ initialize(cwd, target)
 
 同一连接的 initialize B 被 C 替换时，B 只撤销自己对 recent 扫描、project model catalog singleflight、conversation actor singleflight，以及 actor 已 resolve 后 recent manifest write 的等待，不能继续占住 `PiConnection` 串行队列。扫描、catalog 创建、writer lease、文件打开、actor activation 和已准入 recent write 仍由 ProjectStore/coordinator 拥有并独立结算；caller signal 不作为这些 owner-owned promise 的操作取消信号。带 signal 的 open 只有在 recent write 等待成功且仍未 abort 后才确认 focus/清除 attention；无 signal 的内部调用仍保持 await write 前立即确认。B 退出时立即释放 project handle、recent seed subscription 与 extension UI route，C 可在 B 的底层 promise 完成前 attach；迟到的 B 结果不得发布 focus 或清除 attention。
 
-focus 切换先 exact open：warm actor 直接复用，cold actor 仍完成目标存在性与 JSONL 完整性证明；focused snapshot 发布不等待 `lastConversationId` 保存或全项目索引刷新。focus attach 会立即确认并清除当时已有的 attention；这个观察确认与 recent 持久写是两个边界，之后新产生的错误或 UI 等待不能被迟到的旧写清除。recent intent 随后立即进入 ProjectStore 的原子写队列；focus 后台写和 initialize/open 的 awaited 写共用该调用顺序，A→B→A 的最终指针不能被旧任务覆盖。已准入 recent 写由 coordinator 在 close 前 drain；写失败只向仍精确观察该 focusId 的连接报告 session error，不撤销已经提交的 focus。
+focus 切换先 exact open：warm actor 直接复用；cold actor 在取得 writer lease 后做有界目录 header census，要求目标 ID 恰有一个合法 claim，再完整验证目标 JSONL payload/tree 并公开 `SessionManager.open()`。无关 body 损坏或 append 不阻断该目标；同 ID 的另一合法 header 必须拒绝。focused snapshot 发布不等待 `lastConversationId` 保存、全项目索引刷新或后台 full audit。focus attach 会立即确认并清除当时已有的 attention；这个观察确认与 recent 持久写是两个边界，之后新产生的错误或 UI 等待不能被迟到的旧写清除。recent intent 随后立即进入 ProjectStore 的原子写队列；focus 后台写和 initialize/open 的 awaited 写共用该调用顺序，A→B→A 的最终指针不能被旧任务覆盖。已准入 recent 写由 coordinator 在 close 前 drain；写失败只向仍精确观察该 focusId 的连接报告 session error，不撤销已经提交的 focus。
 
 显式 `open` 只接受浏览器从服务端索引获得的 conversationId。服务端重新列举受控目录并解析文件路径，不能接受客户端文件路径。Pi 的 `open(nonexistent)` 会创建 manager 而不是可靠报错，所以必须先证明目标存在。
 
@@ -156,7 +156,8 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 
 - 使用项目自有的 custom `sessionDir`；不能依赖 Pi 默认 cwd 编码目录作为 project key。
 - 列举使用 `SessionManager.listAll(sessionDir)`，避免项目移动后被旧 header cwd 过滤；但不能信任它的完整性，因为 SDK 会静默跳过部分损坏文件。
-- 每次索引刷新都先后快照受控目录中的全部常规 `.jsonl`，目录在 SDK 扫描期间变化会 fail closed。宿主完整读取每个文件，验证尾换行、逐行 JSON、有限数值、header identity，以及经 Pi 内存迁移后的 entry payload / tree 引用；随后要求 SDK 索引与该磁盘全集按规范路径和 ID 精确一一对应。
+- 完整索引刷新、显式 audit 与 cascade delete 都先后快照受控目录中的全部常规 `.jsonl`，目录在 SDK 扫描期间变化会 fail closed。宿主完整读取每个文件，验证尾换行、逐行 JSON、有限数值、header identity，以及经 Pi 内存迁移后的 entry payload / tree 引用；随后要求 SDK 索引与该磁盘全集按规范路径和 ID 精确一一对应。
+- 单目标 preview/open 不依赖该完整索引：用 file descriptor 读取每个受控常规文件的有界首行，只把能通过 session header 验证的同 ID 文件当作 collision candidate；随后稳定读取并完整验证目标。头行无法在上限内解析的文件没有 identity claim；I/O、路径或扫描期不确定性不能被当作无关。proof commit 复验所有 target candidate 的 path/inode/header claim，正常无关 body append 不改变该 scope。
 - 打开时第三个参数传当前 canonical cwd；JSONL header 保留原 cwd，运行态使用新位置。旧会话允许 header cwd 缺失或为空，但存在时必须是字符串。
 - 新 Pi manager 默认要到首条 assistant 消息才创建文件。工作台一次写入合法 header 和 conversation metadata 后丢弃 pending manager，再用公开 `open()` 重开。
 - `SessionManager` 没有 flush/close/fsync，也没有内建锁；正常 append 是同步 JSONL 写入。
@@ -177,9 +178,9 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 
 - `PublicState` 是高频、小体积运行状态。
 - `role_catalog_snapshot` 是低频用户角色目录及当前可用性。
-- `project_snapshot` 是低频会话索引，包含服务端解析的 root、固化 role 摘要、activity、attention 和 temporary；底层会话仍平级，浏览器可按 root 聚合导航。count 与 JSON byte 裁剪优先保留完整 root 组，任何省略都置 `truncated`；后台 actor 变化只更新索引，不会切换 current focus。
+- `project_snapshot` 是低频会话索引，包含服务端解析的 root、固化 role 摘要、activity、attention 和 temporary；底层会话仍平级，浏览器可按 root 聚合导航。它还带 `coverage`：fresh full refresh 是 `complete`，cold/recent 当前索引 seed 是 `unknown`。count 与 JSON byte 裁剪优先保留完整 root 组，任何省略都置 `truncated`；后台 actor 变化只更新索引，不会切换 current focus。
 - `project_activity_snapshot` 是进程级已加载项目的有界汇总，只投影 busy/attention 计数；它不复制会话索引、浏览器 unread 或 transcript。
-- 浏览器分别维护最多 4 项 workspace LRU 与 8 项 conversation presentation LRU，让工作区或同项目会话切换时立即画出目标上一帧；两者独立逐出，只存在内存，不接管 transcript、不保存 draft/pending command，也不能解锁命令。conversation cache 以 workspace/project/conversation 为键，保存 reducer 产出的 ChatState 展示引用及角色/window/control 投影，但绝不 hydrate 回当前 reducer。新 observation/focus 仍必须 exact open durable conversation，并以匹配新完整 focus 身份的服务端 snapshot 覆盖缓存。只有非截断 `project_snapshot` 的缺席才能证明条目已删除；截断快照不能据此逐出。
+- 浏览器分别维护最多 4 项 workspace LRU 与 8 项 conversation presentation LRU，让工作区或同项目会话切换时立即画出目标上一帧；两者独立逐出，只存在内存，不接管 transcript、不保存 draft/pending command，也不能解锁命令。conversation cache 以 workspace/project/conversation 为键，保存 reducer 产出的 ChatState 展示引用及角色/window/control 投影，但绝不 hydrate 回当前 reducer。新 observation/focus 仍必须 exact open durable conversation，并以匹配新完整 focus 身份的服务端 snapshot 覆盖缓存。只有 `coverage: "complete"` 且非截断 `project_snapshot` 的缺席才能证明条目已删除；`unknown` 或截断快照不能据此逐出。
 - `conversation_preview` 是 command-correlated、无 focusId 的 cold 只读投影：常规 `inspectConversation(s)` 只返回 metadata，绝不附带或复制物理 entries；只有单目标 `inspectConversationPresentation` 在完整性证明后 opt-in 返回本次 JSON parse/migration 新拥有的 readonly entries 浅数组。只读 adapter 从最后物理 leaf 沿 parentId 还原 active branch，getter 只复制数组壳，canonical projector 不修改 entry，再经 peer enrichment 与最终 window pipeline。投影构造失败只跳过 preview，文件完整性/read/identity 失败仍 fail closed。它不取得 writer lease，不创建 SessionManager/AgentSession/model catalog/extension route，也不能启用任何 focus 命令；actor 或 actorOpening 已存在时禁止发送磁盘 preview，emit 前还要同步复核一次 actor/opening/deleting/closing。
 - `conversation_snapshot` 是当前 focus 的一次性 active-branch 权威投影，包含固化角色和 message/session-message/compaction discriminated items，并限制总字节以及单消息/tool/card payload。投影只有一条 canonical pipeline：捕获 durable physical slots → 用 raw SDK message 对象身份把已持久化 live message 精确交给 durable slot → semantic fold → peer enrichment → 一次最终 exact-JSON-byte window。不能按角色、文本或数量猜测交接，也不能分别裁 durable/live 后再拼接。
 - 每条物理 user/assistant message 在任一时刻只能由 durable slot 或未持久化 live suffix 一方拥有。Pi 对 user 的 start/end/persistence 复用同一对象，但 pi-agent-core 的 assistant `message_start` 是 partial 浅拷贝，真正被 AgentSession 持久化的是 `message_end` 的 final 对象；因此 assistant live slot 必须在 end 时改绑 final identity，不能把 start payload 当成 durable identity。browser 初始 prompt slot 也只能绑定首条 user，后续 steer 不得覆盖它。exact handoff 后 durable item 保留当前 runId；live tool 状态只可覆盖尚无 durable tool result 的 pending 工具，一旦 JSONL 已有 result 就由 durable 状态获胜。compaction、user/steer 与卡片首次出现是时间线语义边界；不再保留“最后一次 compaction 后才使用 live”的特判。
@@ -199,7 +200,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 ## 当前边界
 
 - 没有 archive、用户多选批量删除、fork/import、附件和跨设备同步；Agent 会话列表只有有界 cursor，不构成浏览器历史分页。
-- 每次索引刷新会由宿主完整验证该项目全部 JSONL，并由 Pi `listAll()` 再扫描一次；这是第一版用完整性换简单性的选择。长期项目需要在引入分页时一并设计增量 catalog 和等价的完整性证明。
+- 完整列表、显式 audit 与 cascade delete 仍由宿主完整验证项目全部 JSONL，并由 Pi `listAll()` 再扫描一次；这不是显式 target open/preview 的前置条件。path-keyed catalog 是原子版本化、可损坏即丢弃的展示/诊断 observation：完整 proof 才写入已验证的 summary，cold current-index 只以 `coverage: "unknown"` 投影它；后台每次只 scrub 一个 body。它不能替代当次 target proof。
 - 没有跨进程 writer lock 和断电级 durability。
 - Pi JSONL header eager materialization 依赖锁定 SDK 的 v3 session format；升级 SDK 时必须用测试验证 header/open/list 行为。
 - `.piweb` 可能包含敏感内容；Git 忽略策略由项目所有者决定。

@@ -8,6 +8,7 @@ import type {
   ConversationSummary,
   FocusAttachedOperation,
   PublicState,
+  ProjectSnapshotCoverage,
   ServerEvent,
   ThinkingLevel,
   TransitionDiagnosticOperation,
@@ -177,6 +178,7 @@ function boundedProjectSnapshotEvent(input: {
   projectId: string;
   conversationId?: string;
   conversations: readonly ConversationSummary[];
+  coverage: ProjectSnapshotCoverage;
 }): ProjectSnapshotEvent {
   const index = projectConversationIndex(
     input.conversations,
@@ -191,6 +193,7 @@ function boundedProjectSnapshotEvent(input: {
       : { conversationId: input.conversationId }),
     conversations: [...index.conversations],
     truncated: index.truncated,
+    coverage: input.coverage,
   };
   const eventBytes = () => Buffer.byteLength(JSON.stringify(event), "utf8");
   while (
@@ -817,7 +820,7 @@ export class PiConnection {
       }
       this.publishCoordinatedState();
       if (initialRecentConversations !== undefined && !recentSeedInvalidated) {
-        this.emitProjectSnapshot(view, initialRecentConversations);
+        this.emitProjectSnapshot(view, initialRecentConversations, "unknown");
       } else {
         this.publishProjectSnapshotCoordinated();
       }
@@ -1649,7 +1652,7 @@ export class PiConnection {
           );
           if (!this.isCurrentCoordinatedView(view)) return;
           if (refresh.trailing) continue;
-          this.emitProjectSnapshot(view, conversations);
+          this.emitProjectSnapshot(view, conversations, "complete");
         } catch (error) {
           latestError = error;
           latestFailed = true;
@@ -1671,6 +1674,7 @@ export class PiConnection {
   private emitProjectSnapshot(
     view: CoordinatedProjectView,
     conversations: ConversationSummary[],
+    coverage: ProjectSnapshotCoverage,
   ): void {
     const liveConversationIds = new Set(
       conversations.map(({ id }) => id),
@@ -1704,6 +1708,7 @@ export class PiConnection {
         ...conversation,
         unread: view.unreadConversationIds.has(conversation.id),
       })),
+      coverage,
       ...(view.conversationId === undefined
         ? {}
         : { conversationId: view.conversationId }),

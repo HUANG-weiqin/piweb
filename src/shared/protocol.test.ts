@@ -39,7 +39,7 @@ const transitionDiagnostics = {
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(42);
+    expect(PROTOCOL_VERSION).toBe(43);
   });
 
   it("accepts supported commands", () => {
@@ -834,6 +834,7 @@ describe("parseClientCommand", () => {
           },
       }],
       truncated: false,
+      coverage: "complete",
     });
     expect(projectSnapshot.type).toBe("project_snapshot");
     if (projectSnapshot.type !== "project_snapshot") {
@@ -873,7 +874,9 @@ describe("parseClientCommand", () => {
         activity: { kind: "waiting", runId, targetCount: 2 },
       }],
       truncated: false,
+      coverage: "unknown",
     })).toMatchObject({
+      coverage: "unknown",
       conversations: [{
         activity: { kind: "waiting", runId, targetCount: 2 },
       }],

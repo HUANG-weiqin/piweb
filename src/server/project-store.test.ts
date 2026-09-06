@@ -1304,7 +1304,7 @@ describe("ProjectStore", () => {
     expect(listAll).toHaveBeenCalledTimes(2);
   });
 
-  it("reproves after an unrelated file changes in the target-read window", async () => {
+  it("does not reprove a target after an unrelated body append", async () => {
     const cwd = await createTemporaryDirectory("piweb-catalog-read-race-");
     const store = await ProjectStore.open(cwd, "full_access");
     const target = await store.createConversation();
@@ -1330,7 +1330,109 @@ describe("ProjectStore", () => {
       conversationId: target.getSessionId(),
     }));
     expect(fingerprintEnumerations).toBeGreaterThan(2);
-    expect(listAll).toHaveBeenCalledTimes(1);
+    expect(listAll).not.toHaveBeenCalled();
+  });
+
+  it("opens a healthy target without reading an unrelated malformed body", async () => {
+    const cwd = await createTemporaryDirectory("piweb-local-target-proof-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const target = await store.createConversation();
+    const corruptPath = join(store.sessionDir, "corrupt-body.jsonl");
+    await writeSessionHeader(corruptPath, randomUUID(), store.cwd);
+    await writeFile(
+      corruptPath,
+      `${await readFile(corruptPath, "utf8")}{"type":"message"\n`,
+    );
+    const listAll = vi.spyOn(SessionManager, "listAll");
+
+    const reopened = await store.openConversation(target.getSessionId(), {
+      updateRecent: false,
+    });
+
+    expect(reopened.getSessionId()).toBe(target.getSessionId());
+    expect(listAll).not.toHaveBeenCalled();
+  });
+
+  it("rejects a duplicate target header even when its body is malformed", async () => {
+    const cwd = await createTemporaryDirectory("piweb-local-header-collision-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const target = await store.createConversation();
+    const unaffected = await store.createConversation();
+    const duplicatePath = join(store.sessionDir, "duplicate-header.jsonl");
+    await writeSessionHeader(duplicatePath, target.getSessionId(), store.cwd);
+    await writeFile(
+      duplicatePath,
+      `${await readFile(duplicatePath, "utf8")}{"type":"message"\n`,
+    );
+
+    await expect(
+      store.openConversation(target.getSessionId(), { updateRecent: false }),
+    ).rejects.toThrow(`Duplicate conversation identity ${target.getSessionId()}`);
+    await expect(
+      store.openConversation(unaffected.getSessionId(), {
+        updateRecent: false,
+      }),
+    ).resolves.toMatchObject({
+      getSessionId: expect.any(Function),
+    });
+  });
+
+  it("persists a disposable path-keyed catalog and rebuilds past corruption", async () => {
+    const cwd = await createTemporaryDirectory("piweb-observation-catalog-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversation = await store.createConversation();
+    const catalogPath = join(store.stateDir, "conversation-catalog.json");
+
+    await expect(readFile(catalogPath, "utf8")).resolves.toEqual(
+      expect.stringContaining(`"conversationId": "${conversation.getSessionId()}"`),
+    );
+    const cached = await ProjectStore.open(cwd, "full_access");
+    expect(cached.listConversations()).toEqual([
+      expect.objectContaining({ id: conversation.getSessionId() }),
+    ]);
+
+    await writeFile(catalogPath, "not JSON\n");
+    const reopened = await ProjectStore.open(cwd, "full_access");
+
+    await expect(
+      reopened.openConversation(conversation.getSessionId(), {
+        updateRecent: false,
+      }),
+    ).resolves.toMatchObject({ getSessionId: expect.any(Function) });
+  });
+
+  it("records an invalid body as a local catalog observation", async () => {
+    const cwd = await createTemporaryDirectory("piweb-catalog-scrub-invalid-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    await store.createConversation();
+    const corruptId = randomUUID();
+    const corruptPath = join(store.sessionDir, "corrupt-body.jsonl");
+    await writeSessionHeader(corruptPath, corruptId, store.cwd);
+    await writeFile(
+      corruptPath,
+      `${await readFile(corruptPath, "utf8")}{"type":"message"\n`,
+    );
+
+    await expect(store.scrubOneCatalogObservation()).resolves.toBe(true);
+    const catalog = JSON.parse(
+      await readFile(join(store.stateDir, "conversation-catalog.json"), "utf8"),
+    ) as {
+      coverage: { kind: string };
+      observations: Array<{
+        relativePath: string;
+        header: { kind: string; conversationId?: string };
+        body: { kind: string };
+      }>;
+    };
+
+    expect(catalog.coverage).toEqual({ kind: "complete", generation: expect.any(String) });
+    expect(catalog.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        relativePath: "corrupt-body.jsonl",
+        header: { kind: "claims", conversationId: corruptId },
+        body: { kind: "invalid" },
+      }),
+    ]));
   });
 
   it("invalidates the catalog when SDK open migrates the target file", async () => {
@@ -1385,7 +1487,7 @@ describe("ProjectStore", () => {
     ).rejects.toThrow("changed while it was being read");
   });
 
-  it("rejects an unrelated malformed file added during SDK open", async () => {
+  it("opens despite an unrelated conclusively invalid header added during SDK open", async () => {
     const cwd = await createTemporaryDirectory("piweb-catalog-sdk-unrelated-");
     const store = await ProjectStore.open(cwd, "full_access");
     const conversation = await store.createConversation();
@@ -1403,7 +1505,9 @@ describe("ProjectStore", () => {
       store.openConversation(conversation.getSessionId(), {
         updateRecent: false,
       }),
-    ).rejects.toThrow("changed while conversation");
+    ).resolves.toMatchObject({
+      getSessionId: expect.any(Function),
+    });
     await expect(readFile(malformedPath, "utf8")).resolves.toBe(
       '{"type":"session"\n',
     );
@@ -1605,7 +1709,7 @@ describe("ProjectStore", () => {
       const open = vi.spyOn(SessionManager, "open");
 
       await expect(store.openConversation(conversationId)).rejects.toThrow(
-        /empty|identity|header|unsupported/,
+        `Conversation not found: ${conversationId}`,
       );
       expect(open).not.toHaveBeenCalled();
       await expect(readFile(sessionFile, "utf8")).resolves.toBe(invalidFile);
