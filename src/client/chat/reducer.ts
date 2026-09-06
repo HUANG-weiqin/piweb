@@ -62,6 +62,21 @@ interface ChatFocus {
   focusId: string;
 }
 
+interface OutputProgressSample {
+  outputTokens: number;
+  observedAt: number;
+}
+
+interface LiveOutputProgress {
+  runId: string;
+  outputTokens: number;
+  observedAt: number;
+  samples: OutputProgressSample[];
+  tokensPerSecond?: number;
+}
+
+const OUTPUT_RATE_SAMPLE_WINDOW_MS = 2_000;
+
 export interface ChatState {
   /**
    * Last server-owned transcript projection sequence observed for this focus.
@@ -71,6 +86,11 @@ export interface ChatState {
   projectionGap?: boolean;
   /** Coverage declared by the last accepted authoritative history snapshot. */
   historyWindow?: ConversationWindowCoverage;
+  /**
+   * Ephemeral streamed output usage for the current assistant segment only.
+   * It never enters history snapshots or final token accounting.
+   */
+  liveOutputProgress?: LiveOutputProgress;
   /**
    * The ordered transcript. Cards and ordinary messages share this one
    * projection so a card update cannot jump to the end of the conversation.
@@ -279,6 +299,36 @@ function addUsage(current: TokenUsage | undefined, next: TokenUsage): TokenUsage
   };
 }
 
+function updateLiveOutputProgress(
+  current: LiveOutputProgress | undefined,
+  runId: string,
+  outputTokens: number,
+  observedAt: number,
+): LiveOutputProgress {
+  const next = { outputTokens, observedAt };
+  if (!current || current.runId !== runId) {
+    return { runId, ...next, samples: [next] };
+  }
+
+  const previous = current.samples.at(-1);
+  if (!previous || outputTokens < previous.outputTokens || observedAt <= previous.observedAt) {
+    return { runId, ...next, samples: [next] };
+  }
+  if (outputTokens === previous.outputTokens) return current;
+
+  const samples = [...current.samples, next].filter(
+    (sample) => sample.observedAt >= observedAt - OUTPUT_RATE_SAMPLE_WINDOW_MS,
+  );
+  const baseline = samples[0];
+  const elapsedMs = baseline === undefined ? 0 : observedAt - baseline.observedAt;
+  const tokensPerSecond = baseline !== undefined
+    && elapsedMs > 0
+    && outputTokens > baseline.outputTokens
+    ? (outputTokens - baseline.outputTokens) * 1_000 / elapsedMs
+    : undefined;
+  return { runId, ...next, samples, tokensPerSecond };
+}
+
 function appendPart(
   parts: ChatMessagePart[] | undefined,
   part: ChatMessagePart,
@@ -336,6 +386,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       lastProjectionSeq: undefined,
       projectionGap: false,
       historyWindow: undefined,
+      liveOutputProgress: undefined,
     };
   }
 
@@ -370,6 +421,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             startsMidTurn: action.historyWindow.startsMidTurn,
             contentTruncated: action.historyWindow.contentTruncated,
           },
+      liveOutputProgress: undefined,
     };
   }
 
@@ -441,21 +493,27 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     };
   }
   if (event.type === "run_started") {
-    return withItems(state, ensureAssistant(state.items, action.runId).items);
+    return {
+      ...withItems(state, ensureAssistant(state.items, action.runId).items),
+      liveOutputProgress: undefined,
+    };
   }
   if (event.type === "user_message") {
     const items = state.items;
     if (items.some((item) => item.id === event.projectionId)) return state;
-    return withItems(state, [...items, {
-      kind: "message",
-      id: event.projectionId,
-      runId: action.runId,
-      role: "user",
-      text: event.text,
-      thinking: "",
-      tools: [],
-      parts: [],
-    }]);
+    return {
+      ...withItems(state, [...items, {
+        kind: "message",
+        id: event.projectionId,
+        runId: action.runId,
+        role: "user",
+        text: event.text,
+        thinking: "",
+        tools: [],
+        parts: [],
+      }]),
+      liveOutputProgress: undefined,
+    };
   }
   if (event.type === "assistant_message_started") {
     const items = state.items;
@@ -466,10 +524,13 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     if (placeholderIndex >= 0 && placeholderIndex === items.length - 1) {
       const placeholder = items[placeholderIndex];
       if (placeholder && isMessage(placeholder)) {
-        return withItems(state, [
-          ...items.slice(0, placeholderIndex),
-          { ...placeholder, id: event.projectionId },
-        ]);
+        return {
+          ...withItems(state, [
+            ...items.slice(0, placeholderIndex),
+            { ...placeholder, id: event.projectionId },
+          ]),
+          liveOutputProgress: undefined,
+        };
       }
     }
     const currentItems = placeholderIndex < 0
@@ -478,18 +539,35 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           ...items.slice(0, placeholderIndex),
           ...items.slice(placeholderIndex + 1),
         ];
-    return withItems(state, [...currentItems, {
-      kind: "message",
-      id: event.projectionId,
-      runId: action.runId,
-      role: "assistant",
-      text: "",
-      thinking: "",
-      tools: [],
-      parts: [],
-    }]);
+    return {
+      ...withItems(state, [...currentItems, {
+        kind: "message",
+        id: event.projectionId,
+        runId: action.runId,
+        role: "assistant",
+        text: "",
+        thinking: "",
+        tools: [],
+        parts: [],
+      }]),
+      liveOutputProgress: undefined,
+    };
   }
-  if (event.type === "run_queued" || event.type === "run_finished") return state;
+  if (event.type === "run_queued") return state;
+  if (event.type === "run_finished") {
+    return { ...state, liveOutputProgress: undefined };
+  }
+  if (event.type === "output_progress") {
+    return {
+      ...state,
+      liveOutputProgress: updateLiveOutputProgress(
+        state.liveOutputProgress,
+        action.runId,
+        event.outputTokens,
+        Date.now(),
+      ),
+    };
+  }
 
   if (
     event.type === "text_delta"
@@ -534,17 +612,20 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       // Pi emits tool_execution_start before host policy validation.
       status: "pending",
     };
-    return withItems(
-      state,
-      updateAssistant(state.items, action.runId, (assistant) => ({
-        ...assistant,
-        tools: [...assistant.tools, tool],
-        parts: appendPart(assistant.parts, {
-          kind: "tool",
-          toolId: tool.id,
-        }),
-      })),
-    );
+    return {
+      ...withItems(
+        state,
+        updateAssistant(state.items, action.runId, (assistant) => ({
+          ...assistant,
+          tools: [...assistant.tools, tool],
+          parts: appendPart(assistant.parts, {
+            kind: "tool",
+            toolId: tool.id,
+          }),
+        })),
+      ),
+      liveOutputProgress: undefined,
+    };
   }
 
   if (event.type === "tool_prepared") {

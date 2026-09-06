@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type {
   ConversationHistoryItem,
   ConversationMessageCard,
@@ -1069,6 +1069,57 @@ describe("chatReducer", () => {
     }
 
     expect(messageItems(state).at(-1)?.usage?.total).toBe(48);
+  });
+
+  it("derives a live output rate from cumulative progress and clears it at segment boundaries", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-09-06T16:00:00.000Z"));
+      let state = focusedState();
+      state = chatReducer(state, {
+        ...FOCUS_A_1,
+        type: "session",
+        runId: RUN_1,
+        event: { type: "run_started" },
+      });
+      state = chatReducer(state, {
+        ...FOCUS_A_1,
+        type: "session",
+        runId: RUN_1,
+        event: { type: "output_progress", outputTokens: 5 },
+      });
+      vi.advanceTimersByTime(1_000);
+      state = chatReducer(state, {
+        ...FOCUS_A_1,
+        type: "session",
+        runId: RUN_1,
+        event: { type: "output_progress", outputTokens: 35 },
+      });
+
+      expect(state.liveOutputProgress).toMatchObject({
+        runId: RUN_1,
+        outputTokens: 35,
+        tokensPerSecond: 30,
+      });
+
+      state = chatReducer(state, {
+        ...FOCUS_A_1,
+        type: "session",
+        runId: RUN_1,
+        event: { type: "tool_started", toolCallId: "tool-1", toolName: "read" },
+      });
+      expect(state.liveOutputProgress).toBeUndefined();
+
+      state = chatReducer(state, {
+        ...FOCUS_A_1,
+        type: "session",
+        runId: RUN_1,
+        event: { type: "run_finished", outcome: "completed" },
+      });
+      expect(state.liveOutputProgress).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("uses the final assistant message when no streaming delta arrived", () => {

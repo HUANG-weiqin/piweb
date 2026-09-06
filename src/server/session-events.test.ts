@@ -38,6 +38,30 @@ describe("SessionEventProjector", () => {
     ]);
   });
 
+  it("projects cumulative output progress during an assistant update", () => {
+    const projector = new SessionEventProjector();
+    projector.project(nativeEvent({ type: "agent_start" }));
+
+    expect(projector.project(nativeEvent({
+      type: "message_update",
+      message: {
+        role: "assistant",
+        content: [],
+        usage: {
+          input: 3,
+          output: 5,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 8,
+        },
+      },
+      assistantMessageEvent: { type: "text_delta", delta: "reply" },
+    }))).toEqual([
+      { type: "output_progress", outputTokens: 5 },
+      { type: "text_delta", delta: "reply" },
+    ]);
+  });
+
   it("calibrates streamed text from the final assistant message", () => {
     const projector = new SessionEventProjector();
     projector.project(nativeEvent({ type: "agent_start" }));

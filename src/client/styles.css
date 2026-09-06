@@ -5917,6 +5917,28 @@ pre {
     line-height: 1.35;
   }
 
+  .mission-context-rate {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 10px 0 0;
+    padding-top: 8px;
+    border-top: 1px solid color-mix(in srgb, var(--rebel-paper) 22%, transparent);
+    font: 800 8px "Cascadia Code", Consolas, monospace;
+    letter-spacing: 0.1em;
+  }
+
+  .mission-context-rate > span {
+    color: var(--rebel-paper-muted);
+  }
+
+  .mission-context-rate strong {
+    color: var(--rebel-red);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+  }
+
   .mission-context-threshold {
     display: flex;
     justify-content: space-between;
