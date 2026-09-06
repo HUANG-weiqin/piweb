@@ -1341,6 +1341,57 @@ describe("ProjectSessionCoordinator", () => {
     );
   });
 
+  it("waits for compaction to end before completing an adopted reload target", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const adoptedRunId = randomUUID();
+    appendReservedCustomEntry(
+      actor.sessionManager,
+      createRunSettlementEntry({
+        runId: adoptedRunId,
+        outcome: "completed",
+        finalText: "settled before compaction ended",
+        settledAt: "2026-07-19T12:00:00.000Z",
+      }),
+    );
+    const actorInternals = actor as unknown as {
+      updateCompacting(compacting: boolean): void;
+    };
+    actorInternals.updateCompacting(true);
+    const onTargetCompleted = vi.fn(async () => undefined);
+
+    await expect(fixture.coordinator.resumeAfterReload(
+      randomUUID(),
+      [{
+        cwd: fixture.cwd,
+        conversationId: actor.conversationId,
+        continueTask: true,
+        continuationRunId: randomUUID(),
+        adoptedRunId,
+      }],
+      onTargetCompleted,
+    )).resolves.toEqual([{
+      cwd: fixture.cwd,
+      conversationId: actor.conversationId,
+      disposition: "adopted",
+      runId: adoptedRunId,
+    }]);
+    expect(onTargetCompleted).not.toHaveBeenCalled();
+
+    actorInternals.updateCompacting(false);
+
+    await vi.waitFor(() => expect(onTargetCompleted).toHaveBeenCalledOnce());
+    expect(onTargetCompleted).toHaveBeenCalledWith({
+      requestId: expect.any(String),
+      cwd: fixture.cwd,
+      conversationId: actor.conversationId,
+      runId: adoptedRunId,
+    });
+  });
+
   it("starts a stable hidden continuation for a reloaded browser target", async () => {
     const fixture = await createFixture();
     const actor = await fixture.coordinator.createUserConversation(
@@ -2354,9 +2405,10 @@ describe("ProjectSessionCoordinator", () => {
     expect(actor.sessionManager.getEntries().map(({ id }) => id)).toEqual([
       expect.any(String),
       activeLoopListId,
-      inactiveLoopListId,
       retainedId,
     ]);
+    expect(actor.sessionManager.getEntries().map(({ id }) => id))
+      .not.toContain(inactiveLoopListId);
     expect(actor.session.agent.state.messages).toEqual(
       actor.sessionManager.buildSessionContext().messages,
     );

@@ -2740,6 +2740,19 @@ export class ProjectSessionCoordinator {
           }),
         );
       }
+      if (
+        event.type === "compaction"
+        && !event.compacting
+        && !context.closing
+      ) {
+        this.trackBackground(
+          context,
+          this.runLifecycle(context, () => this.maybeCompleteReloadAdoption(
+            context,
+            conversationId,
+          )),
+        );
+      }
       if (event.type === "error") {
         context.attention.add(conversationId);
         if (event.fatal && !context.closing) {
@@ -6702,7 +6715,10 @@ export class ProjectSessionCoordinator {
     conversationId: string,
   ): Promise<boolean> {
     const actor = context.actors.get(conversationId);
-    if (actor && actor.getActivity().kind !== "idle") return true;
+    if (
+      actor
+      && (actor.getActivity().kind !== "idle" || actor.isCompacting())
+    ) return true;
     const batchPrefix = `${conversationId.length}:${conversationId}:`;
     if ([...context.processingBatches.keys()].some((key) =>
       key.startsWith(batchPrefix)

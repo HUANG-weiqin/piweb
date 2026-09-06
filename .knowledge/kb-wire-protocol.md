@@ -19,7 +19,7 @@ ClientCommand
 → App / reducer
 ```
 
-协议由 `PROTOCOL_VERSION` 标识，当前为 v42。v42 允许成功的 workspace initialize 与 conversation focus 在既有 authority envelope 上携带一次性 host phase diagnostics；它不新增事件、状态或持久记录。角色模板、冻结角色快照、角色 catalog 与 conversation snapshot 的 role payload 都必须包含必填 nullable `compactionModel`；`null` 跟随冻结 primary model，不新增 command。v41 另把实际 default compaction request attempt 与 durable 成功 provenance 显式投影，二者都不能从配置推导。工具参数和结果允许 `unknown`，但服务端在投影时会做有界遍历、转成 JSON-safe 数据并限制单值大小。
+协议由 `PROTOCOL_VERSION` 标识，当前为 v43。v43 让 `project_snapshot.coverage` 明确区分完整成员证明与不完整观察，浏览器只有在 `coverage: "complete"` 且未截断时才能把缺席视为删除证据。v42 允许成功的 workspace initialize 与 conversation focus 在既有 authority envelope 上携带一次性 host phase diagnostics；它不新增事件、状态或持久记录。角色模板、冻结角色快照、角色 catalog 与 conversation snapshot 的 role payload 都必须包含必填 nullable `compactionModel`；`null` 跟随冻结 primary model，不新增 command。v41 另把实际 default compaction request attempt 与 durable 成功 provenance 显式投影，二者都不能从配置推导。工具参数和结果允许 `unknown`，但服务端在投影时会做有界遍历、转成 JSON-safe 数据并限制单值大小。
 
 ## 决策
 
@@ -50,7 +50,7 @@ ClientCommand
 - 工具模式只有 `read_only | full_access`，由角色模板持有并复制到 conversation 当前角色快照；角色 CRUD payload 必须同时携带模型默认思考强度和工具模式。v27 不接受 `initialize.toolMode` 与 `set_tool_mode`，协议仍没有逐工具询问命令或待回答状态。
 - `rename_conversation` 同时匹配当前 sessionId 和目标 conversationId。
 - `delete_conversation` 携带 sessionId、一次性 commandId 和目标 conversationId；浏览器不能提交文件路径。成功和失败都用同一 sessionId + commandId 精确结算。
-- `truncate_conversation` 携带一次性 commandId、精确 `sessionId + conversationId + focusId` 和 snapshot 中的 durable messageId。assistant 聚合 ID 使用 `assistant:<entryId>`，仅由服务端剥离前缀并解析物理锚点；成功前服务端先发布截断后的完整 focused snapshot，再发送同 commandId 的完成事件，客户端不得本地猜测删除结果。
+- `truncate_conversation` 携带一次性 commandId、精确 `sessionId + conversationId + focusId` 和 snapshot 中的 durable messageId。assistant 聚合 ID 使用 `assistant:<entryId>`，仅由服务端剥离前缀并解析物理锚点；锚点必须属于最终物理 leaf 定义的 active branch，截断只保留它之前的 active-branch 前缀，并重新接上不可 rewind 的 delivery/temporary receipt 及其所需 settlement ledger。成功前服务端先发布截断后的完整 focused snapshot，再发送同 commandId 的完成事件，客户端不得本地猜测删除结果。
 - 角色 CRUD 使用 `create_role/update_role/delete_role + sessionId + commandId`；create/update 的 role payload 必须包含 nullable `compactionModel`、nullable `defaultServiceTier` 与 `canManageSessions`，update/delete 还携带 expectedRevision；`update_role` 另携带当前 UI base 的必填 `expectedSystemPrompt`，服务端在串行边界重新读取并拒绝外部 prompt 冲突，不能用迟到 snapshot 冒充提交成功。初始化模板没有删除特权。
 - 会话 primary 模型、nullable `compactionModel`、初始思考强度、默认服务层级、工具权限和会话管理能力都来自当前角色快照；切换角色不会隐式改变显式 compaction model。v27 的 `switch_conversation_role` 携带精确 `sessionId + conversationId + focusId + commandId + roleId`，只允许 idle focus，并在服务端发布新 state、project snapshot 与 conversation snapshot 后完成；直接 `select_model` 仍明确拒绝。API Key 命令继续按 sessionId + commandId 精确结算。
 - `compact_context` 携带一次性 commandId 和精确 `sessionId + conversationId + focusId`；只允许空闲 conversation，成功后服务端先刷新 state / snapshot，再发送同 commandId 的完成事件。

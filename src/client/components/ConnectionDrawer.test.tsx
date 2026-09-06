@@ -457,6 +457,35 @@ describe("ConnectionDrawer", () => {
     expect(screen.getByRole("button", { name: "取消" })).toBeEnabled();
   });
 
+  it("releases an unconfirmed API Key save when the observation session changes", () => {
+    const saveKey = vi.fn(() => commandId);
+    const view = renderDrawer({ onKey: saveKey });
+    fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "unconfirmed-key" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存 API Key" }));
+
+    view.rerender(<ConnectionDrawer {...drawerProps({
+      state: { ...state, sessionId: "session-2" },
+      onKey: saveKey,
+      settingResult: {
+        operation: "set_api_key",
+        commandId,
+        ok: true,
+        message: "",
+      },
+    })} />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("保存状态未确认");
+    expect(screen.getByLabelText("API Key")).toHaveValue("");
+    expect(screen.getByRole("button", { name: "保存 API Key" })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "retry-key" },
+    });
+    expect(screen.getByRole("button", { name: "保存 API Key" })).toBeEnabled();
+  });
+
   it("confirms the global impact before removing a local credential", () => {
     const logout = vi.fn();
     renderDrawer({ onLogout: logout });

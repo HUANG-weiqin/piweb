@@ -60,9 +60,10 @@ export function conversationDisplayTitle(
 }
 
 function clip(value: string, maxLength: number): { value: string; truncated: boolean } {
-  if (value.length <= maxLength) return { value, truncated: false };
+  const characters = [...value];
+  if (characters.length <= maxLength) return { value, truncated: false };
   return {
-    value: `${value.slice(0, Math.max(0, maxLength - 1))}…`,
+    value: `${characters.slice(0, Math.max(0, maxLength - 1)).join("")}…`,
     truncated: true,
   };
 }

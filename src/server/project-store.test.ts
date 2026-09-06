@@ -853,6 +853,95 @@ describe("ProjectStore", () => {
     expect(reopened.getEntries().map(({ id }) => id)).toEqual([retainedId]);
   });
 
+  it("rejects a message anchor that is no longer on the active branch", async () => {
+    const cwd = await createTemporaryDirectory("piweb-truncate-inactive-branch-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversation = await store.createConversation();
+    const rootId = conversation.appendMessage({
+      role: "user",
+      content: "branch root",
+      timestamp: 0,
+    });
+    const activeId = conversation.appendMessage({
+      role: "user",
+      content: "active branch",
+      timestamp: 1,
+    });
+    conversation.branch(rootId);
+    const inactiveId = conversation.appendMessage({
+      role: "user",
+      content: "abandoned branch",
+      timestamp: 2,
+    });
+    conversation.branch(activeId);
+    conversation.appendMessage({
+      role: "user",
+      content: "active leaf",
+      timestamp: 3,
+    });
+    const sessionFile = conversation.getSessionFile()!;
+    const before = await readFile(sessionFile, "utf8");
+
+    await expect(store.truncateConversation(
+      conversation.getSessionId(),
+      inactiveId,
+    )).rejects.toThrow(/active branch/i);
+    await expect(readFile(sessionFile, "utf8")).resolves.toBe(before);
+  });
+
+  it("retains the active branch prefix instead of an earlier abandoned physical leaf", async () => {
+    const cwd = await createTemporaryDirectory("piweb-truncate-active-prefix-");
+    const store = await ProjectStore.open(cwd, "full_access");
+    const conversation = await store.createConversation();
+    const rootId = conversation.appendMessage({
+      role: "user",
+      content: "branch root",
+      timestamp: 0,
+    });
+    const activeParentId = conversation.appendMessage({
+      role: "user",
+      content: "active parent",
+      timestamp: 1,
+    });
+    conversation.branch(rootId);
+    const abandonedId = conversation.appendMessage({
+      role: "user",
+      content: "abandoned physical leaf",
+      timestamp: 2,
+    });
+    conversation.branch(activeParentId);
+    const selectedId = conversation.appendMessage({
+      role: "user",
+      content: "selected active message",
+      timestamp: 3,
+    });
+    conversation.appendMessage({
+      role: "user",
+      content: "later active message",
+      timestamp: 4,
+    });
+
+    await store.truncateConversation(conversation.getSessionId(), selectedId);
+
+    const persisted = (await readFile(conversation.getSessionFile()!, "utf8"))
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line) as { id?: string });
+    expect(persisted.map(({ id }) => id)).toEqual([
+      conversation.getHeader()?.id,
+      rootId,
+      activeParentId,
+    ]);
+    expect(persisted.map(({ id }) => id)).not.toContain(abandonedId);
+    const reopened = await store.openConversation(conversation.getSessionId(), {
+      updateRecent: false,
+    });
+    expect(reopened.buildSessionContext().messages).toEqual([
+      expect.objectContaining({ role: "user", content: "branch root" }),
+      expect.objectContaining({ role: "user", content: "active parent" }),
+    ]);
+  });
+
   it("rewinds context while preserving delivery receipts and their exact run settlements", async () => {
     const cwd = await createTemporaryDirectory("piweb-truncate-receipt-");
     const store = await ProjectStore.open(cwd, "full_access");

@@ -42,6 +42,7 @@ import {
 } from "./conversation-meta.js";
 import { deleteConversationNotebook } from "./conversation-notebook.js";
 import {
+  createReadonlySessionEntriesAdapter,
   inspectPiSessionFile,
   inspectPiSessionFilePresentation,
   validatePiSessionFile,
@@ -1474,6 +1475,16 @@ export class ProjectStore {
         .slice(1)
         .filter((line) => line.trim().length > 0)
         .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const activeBranch = createReadonlySessionEntriesAdapter(
+        inspectPiSessionFilePresentation(raw, safePath, conversationId).entries,
+      ).getBranch();
+      const anchorIndex = activeBranch.findIndex(({ id }) => id === entryId);
+      if (anchorIndex < 0) {
+        throw new Error(`Truncation anchor is not on the active branch: ${entryId}`);
+      }
+      const retainedEntryIds = new Set(
+        activeBranch.slice(0, anchorIndex).map(({ id }) => id),
+      );
       const receiptTargetRunIds = new Set<string>();
       for (const entry of parsedEntries) {
         const reserved = parseReservedConversationEntry(entry);
@@ -1482,18 +1493,17 @@ export class ProjectStore {
         }
       }
 
-      const retainedLines = lines.slice(0, entryLine);
-      let retainedParentId: string | null = null;
-      for (let index = retainedLines.length - 1; index >= 1; index -= 1) {
-        const line = retainedLines[index]!;
-        if (line.trim().length === 0) continue;
-        retainedParentId = (JSON.parse(line) as { id: string }).id;
-        break;
-      }
-      for (let index = entryLine + 1; index < lines.length; index += 1) {
+      const retainedLines = [lines[0]!];
+      for (let index = 1; index < lines.length; index += 1) {
         const line = lines[index]!;
         if (line.trim().length === 0) continue;
-        const entry = JSON.parse(line) as Record<string, unknown>;
+        const entry = JSON.parse(line) as { id: string };
+        if (retainedEntryIds.has(entry.id)) retainedLines.push(line);
+      }
+      let retainedParentId = activeBranch[anchorIndex - 1]?.id ?? null;
+      for (const entry of parsedEntries) {
+        const entryId = entry.id as string;
+        if (retainedEntryIds.has(entryId)) continue;
         const reserved = parseReservedConversationEntry(entry);
         if (
           reserved?.kind !== "message_delivery_receipt"
@@ -1510,7 +1520,7 @@ export class ProjectStore {
           parentId: retainedParentId,
         };
         retainedLines.push(JSON.stringify(preserved));
-        retainedParentId = entry.id as string;
+        retainedParentId = entryId;
       }
       const next = `${retainedLines.join("\n")}\n`;
       validatePiSessionFile(next, safePath, conversationId);

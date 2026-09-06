@@ -94,6 +94,7 @@ function parseSafeSegments(command: string): ParsedSegment[] | undefined {
       && command[index] !== "|"
     ) {
       const current = command[index];
+      if (index === rawStart && current === "~") return;
       let pattern = BARE_ATOM_PATTERN;
       let quoted = false;
       if (current === "'") {

@@ -54,6 +54,25 @@ describe("PiSocket", () => {
     expect(transport.close).toHaveBeenCalledOnce();
   });
 
+  it("reports a synchronous transport send failure without changing connection state", () => {
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const statuses = vi.fn();
+    const socket = new PiSocket(vi.fn(), statuses);
+    socket.connect();
+    const transport = FakeWebSocket.instances[0]!;
+    transport.send.mockImplementation(() => {
+      throw new Error("transport closed between ready check and send");
+    });
+
+    expect(socket.send({
+      type: "refresh_models",
+      commandId: "8ee64aa3-c8a8-4e21-b521-66029ce3673b",
+      sessionId: "e6ef0bbf-45e7-46fc-b00b-9202d7515f15",
+    })).toBe(false);
+    expect(statuses).not.toHaveBeenCalled();
+    expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
   it("reconnects immediately after the first unexpected close", () => {
     vi.useFakeTimers();
     vi.stubGlobal("WebSocket", FakeWebSocket);

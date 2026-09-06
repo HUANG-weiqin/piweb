@@ -86,9 +86,15 @@ export class PiSocket {
   }
 
   send(command: ClientCommand): boolean {
-    if (this.socket?.readyState !== WebSocket.OPEN) return false;
-    this.socket.send(JSON.stringify(command));
-    return true;
+    const socket = this.socket;
+    if (socket?.readyState !== WebSocket.OPEN) return false;
+    const payload = JSON.stringify(command);
+    try {
+      socket.send(payload);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   close(): void {

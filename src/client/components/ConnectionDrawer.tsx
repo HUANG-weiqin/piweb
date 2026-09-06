@@ -67,6 +67,7 @@ export function ConnectionDrawer({
   const [keyError, setKeyError] = useState("");
   const [savingKey, setSavingKey] = useState<{
     providerId: string;
+    sessionId: string;
     commandId: string;
   }>();
   const [savedKeyProviderId, setSavedKeyProviderId] = useState("");
@@ -86,6 +87,7 @@ export function ConnectionDrawer({
   useEffect(() => {
     if (
       !savingKey
+      || savingKey.sessionId !== state.sessionId
       || settingResult?.operation !== "set_api_key"
       || settingResult.commandId !== savingKey.commandId
     ) return;
@@ -107,6 +109,7 @@ export function ConnectionDrawer({
     onKeyDialogChange,
     savingKey,
     settingResult,
+    state.sessionId,
   ]);
 
   useEffect(() => {
@@ -125,6 +128,15 @@ export function ConnectionDrawer({
     });
     onClearSettingResult();
   }, [onClearSettingResult, refreshingModels, settingResult, state.sessionId]);
+
+  useEffect(() => {
+    if (!savingKey || savingKey.sessionId === state.sessionId) return;
+    setSavingKey(undefined);
+    setKey("");
+    setShowKey(false);
+    setKeyError("观察会话已更换，保存状态未确认；请重试。");
+    onClearSettingResult();
+  }, [onClearSettingResult, savingKey, state.sessionId]);
 
   useEffect(() => {
     if (!refreshingModels || refreshingModels.sessionId === state.sessionId) return;
@@ -227,7 +239,11 @@ export function ConnectionDrawer({
     setKeyError("");
     const commandId = onKey(keyProvider.id, value);
     if (commandId) {
-      setSavingKey({ providerId: keyProvider.id, commandId });
+      setSavingKey({
+        providerId: keyProvider.id,
+        sessionId: state.sessionId,
+        commandId,
+      });
       setKey("");
       setShowKey(false);
     }

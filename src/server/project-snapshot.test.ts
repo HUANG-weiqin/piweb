@@ -35,6 +35,29 @@ describe("projectConversationIndex", () => {
     expect(clipped?.endsWith("…")).toBe(true);
   });
 
+  it("clips project index strings by code point without splitting astral characters", () => {
+    const emoji = "😀";
+    const atLimit = projectConversationIndex([{
+      ...conversation(1),
+      name: emoji.repeat(24),
+      preview: emoji.repeat(500),
+    }]);
+    expect(atLimit.conversations[0]?.name).toBe(emoji.repeat(24));
+    expect(atLimit.conversations[0]?.preview).toBe(emoji.repeat(500));
+
+    const clipped = projectConversationIndex([{
+      ...conversation(1),
+      name: emoji.repeat(25),
+      preview: emoji.repeat(501),
+    }]);
+    expect([...clipped.conversations[0]!.name!]).toHaveLength(24);
+    expect([...clipped.conversations[0]!.preview]).toHaveLength(500);
+    expect(clipped.conversations[0]?.name).toBe(`${emoji.repeat(23)}…`);
+    expect(clipped.conversations[0]?.preview).toBe(`${emoji.repeat(499)}…`);
+    expect(() => encodeURIComponent(clipped.conversations[0]!.name!)).not.toThrow();
+    expect(() => encodeURIComponent(clipped.conversations[0]!.preview)).not.toThrow();
+  });
+
   it("bounds the browser projection without mutating the durable index", () => {
     const source = Array.from(
       { length: MAX_PROJECT_CONVERSATIONS + 1 },
