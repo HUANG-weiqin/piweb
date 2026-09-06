@@ -1621,19 +1621,56 @@ export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.
         path: ["transitionDiagnostics", "snapshotProjectionMs"],
       });
     }
-    if (
-      event.type === "state"
-      && (
-        (event.state.focusId === undefined)
-        !== (event.state.conversationId === undefined)
-      )
-    ) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message:
-          "state focusId and conversationId must either both be present or both be absent",
-        path: ["state", "focusId"],
-      });
+    if (event.type === "state") {
+      const state = event.state;
+      const hasFocus = state.focusId !== undefined && state.conversationId !== undefined;
+      if ((state.focusId === undefined) !== (state.conversationId === undefined)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "state focusId and conversationId must either both be present or both be absent",
+          path: ["state", "focusId"],
+        });
+      }
+      if (state.busy !== (state.activeRun !== undefined)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "state busy must exactly match activeRun presence",
+          path: ["state", "activeRun"],
+        });
+      }
+      if (state.activeRun !== undefined && !hasFocus) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "state activeRun requires a complete conversation focus",
+          path: ["state", "activeRun"],
+        });
+      }
+      if (
+        !hasFocus
+        && (
+          state.conversationName !== undefined
+          || state.selectedModel !== undefined
+          || state.compacting !== undefined
+          || state.compactionAttempt !== undefined
+          || state.sessionTokenUsage !== undefined
+          || state.contextUsage !== undefined
+          || state.compactionThresholdPercent !== undefined
+        )
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "state actor-scoped fields require a complete conversation focus",
+          path: ["state", "conversationId"],
+        });
+      }
+      if (state.compactionAttempt !== undefined && state.compacting !== true) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "state compactionAttempt requires compacting",
+          path: ["state", "compactionAttempt"],
+        });
+      }
     }
     if (
       event.type === "error"

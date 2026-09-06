@@ -692,12 +692,74 @@ describe("parseClientCommand", () => {
     })).toThrow();
   });
 
+  it("enforces PublicState cross-field wire invariants", () => {
+    const baseState = {
+      sessionId,
+      projectId,
+      cwd: "E:\\work",
+      busy: false,
+      selectedServiceTier: null,
+      thinkingLevel: "off",
+      toolMode: "full_access",
+      availableThinkingLevels: ["off"],
+      providers: [],
+    };
+    const focusedState = { ...baseState, conversationId, focusId };
+    const activeRun = { id: runId, phase: "running" };
+    const compactionAttempt = {
+      id: "9a2d87b2-848e-48ed-996d-5f1aecdc6a87",
+      generator: "default",
+      policy: "explicit",
+      requestTarget: { provider: "openai", id: "gpt-summary" },
+    };
+    const stateEvent = (state: object) => ({ type: "state", state });
+
+    expect(parseServerEvent(stateEvent(baseState))).toMatchObject({
+      state: { busy: false },
+    });
+    expect(parseServerEvent(stateEvent({
+      ...focusedState,
+      compacting: true,
+    }))).toMatchObject({ state: { compacting: true } });
+
+    expect(() => parseServerEvent(stateEvent({ ...baseState, conversationId })))
+      .toThrow("focusId and conversationId");
+    expect(() => parseServerEvent(stateEvent({ ...baseState, busy: true })))
+      .toThrow("busy must exactly match activeRun");
+    expect(() => parseServerEvent(stateEvent({ ...focusedState, activeRun })))
+      .toThrow("busy must exactly match activeRun");
+    expect(() => parseServerEvent(stateEvent({
+      ...baseState,
+      busy: true,
+      activeRun,
+    }))).toThrow("activeRun requires a complete conversation focus");
+    for (const actorFields of [
+      { conversationName: "Named" },
+      { selectedModel: { provider: "openai", id: "gpt" } },
+      { compacting: false },
+      { compacting: true, compactionAttempt },
+      { sessionTokenUsage: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 } },
+      { contextUsage: { tokens: 1, contextWindow: 100, percent: 1, source: "measured" } },
+      { compactionThresholdPercent: 80 },
+    ]) {
+      expect(() => parseServerEvent(stateEvent({ ...baseState, ...actorFields })))
+        .toThrow("actor-scoped fields require a complete conversation focus");
+    }
+    expect(() => parseServerEvent(stateEvent({
+      ...focusedState,
+      compacting: false,
+      compactionAttempt,
+    }))).toThrow("compactionAttempt requires compacting");
+  });
+
   it("validates run correlation on state, events, outcomes, and errors", () => {
     expect(parseServerEvent({
       type: "state",
       state: {
         sessionId,
         projectId,
+        conversationId,
+        focusId,
         cwd: "E:\\work",
         busy: false,
         compacting: true,
@@ -1572,6 +1634,8 @@ describe("parseServerEvent", () => {
       state: {
         sessionId,
         projectId,
+        conversationId,
+        focusId,
         cwd: "E:\\work",
         busy: false,
         compacting: true,
