@@ -205,6 +205,10 @@ function createChat(commitmentReason: string): ChatState {
     text: "继续：固定丰富状态，并生成两张桌面截图。",
     thinking: "",
     tools: [],
+    parts: [{
+      kind: "text",
+      text: "继续：固定丰富状态，并生成两张桌面截图。",
+    }],
   }, {
     kind: "message",
     id: "message-active",

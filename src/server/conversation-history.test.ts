@@ -12,7 +12,6 @@ import {
   projectConversationItems,
   projectConversationItemsSnapshot,
   projectConversationHistory,
-  projectConversationHistorySnapshot,
   snapshotConversationItems,
 } from "./conversation-history.js";
 import {
@@ -23,23 +22,10 @@ import {
   createConversationMetaEntry,
   createEditBudgetEntry,
   createRunSettlementEntry,
-  parsePendingPromptBatchEntry,
-  PENDING_PROMPT_BATCH_CUSTOM_TYPE,
-} from "./conversation-meta.js";
-import type {
-  PendingPromptBatch,
-  PendingPromptBatchEntry,
 } from "./conversation-meta.js";
 
 function message(value: unknown): AgentMessage {
   return value as AgentMessage;
-}
-
-function batchEntry(data: PendingPromptBatch): PendingPromptBatchEntry {
-  return parsePendingPromptBatchEntry({
-    customType: PENDING_PROMPT_BATCH_CUSTOM_TYPE,
-    data,
-  });
 }
 
 
@@ -93,6 +79,7 @@ describe("projectConversationHistory", () => {
       expect.objectContaining({
         role: "user",
         text: "inspect the project",
+        parts: [{ kind: "text", offset: 0, length: 19 }],
       }),
       expect.objectContaining({
         role: "assistant",
@@ -109,25 +96,19 @@ describe("projectConversationHistory", () => {
           },
           status: "done",
         }],
+        parts: [
+          { kind: "thinking", offset: 0, length: 17 },
+          { kind: "tool", toolCallId: "tool-1" },
+          { kind: "text", offset: 0, length: 21 },
+        ],
       }),
     ]);
   });
 
-  it("uses profile and settlement boundaries to identify one restored run", () => {
+  it("uses settlement boundaries to identify restored runs", () => {
     const manager = SessionManager.inMemory("E:\\work");
     const runId = randomUUID();
     const nextRunId = randomUUID();
-    manager.appendMessage(message({
-      role: "user",
-      content: "legacy prompt",
-      timestamp: 1,
-    }));
-    manager.appendMessage(message({
-      role: "assistant",
-      content: [{ type: "text", text: "legacy answer" }],
-      stopReason: "stop",
-      timestamp: 2,
-    }));
     appendReservedCustomEntry(manager, createConversationMetaEntry({
       role: {
         id: "default",
@@ -136,9 +117,25 @@ describe("projectConversationHistory", () => {
         description: "",
         systemPrompt: "",
         model: { provider: "openai", id: "gpt-5.6" },
+        compactionModel: null,
+        defaultThinkingLevel: "off",
+        defaultServiceTier: null,
+        toolMode: "read_only",
+        canManageSessions: false,
       },
       lifecycle: { kind: "normal" },
       createdBy: { kind: "user" },
+    }));
+    manager.appendMessage(message({
+      role: "user",
+      content: "first prompt",
+      timestamp: 1,
+    }));
+    manager.appendMessage(message({
+      role: "assistant",
+      content: [{ type: "text", text: "legacy answer" }],
+      stopReason: "stop",
+      timestamp: 2,
     }));
     manager.appendMessage(message({
       role: "user",
@@ -207,9 +204,8 @@ describe("projectConversationHistory", () => {
     }));
 
     const history = projectConversationHistory(manager);
-    expect(history.slice(0, 2).every(({ runId }) => runId === undefined)).toBe(true);
-    expect(history.slice(2, 6).map(({ runId: projectedRunId }) => projectedRunId))
-      .toEqual([runId, runId, runId, runId]);
+    expect(history.slice(0, 6).map(({ runId: projectedRunId }) => projectedRunId))
+      .toEqual([runId, runId, runId, runId, runId, runId]);
     expect(history.slice(6, 8).map(({ runId: projectedRunId }) => projectedRunId))
       .toEqual([nextRunId, nextRunId]);
     expect(history.at(-1)).not.toHaveProperty("runId");
@@ -276,93 +272,20 @@ describe("projectConversationHistory", () => {
       }));
     }
 
-    const snapshot = projectConversationHistorySnapshot(manager);
-    const assistant = snapshot.messages.at(-1);
+    const snapshot = projectConversationItemsSnapshot(manager);
+    const assistant = snapshot.items.at(-1);
+    expect(assistant).toMatchObject({ kind: "message" });
+    if (assistant?.kind !== "message") throw new Error("expected message item");
     expect(snapshot.window.contentTruncated).toBe(true);
-    expect(assistant?.tools.find((tool) => tool.toolCallId === "edit-call")?.result)
+    expect(assistant.tools.find((tool) => tool.toolCallId === "edit-call")?.result)
       .toEqual({
         content: "[历史工具数据过大，已省略]",
         details: { piwebEditBudget: budget },
       });
-    expect(assistant?.parts?.at(-1)).toMatchObject({ kind: "text" });
-    expect(assistant?.parts?.some(
+    expect(assistant.parts.at(-1)).toMatchObject({ kind: "tool" });
+    expect(assistant.parts.some(
       (part) => part.kind === "tool" && part.toolCallId === "edit-call",
     )).toBe(false);
-  });
-
-  it("ignores non-context pending prompt batch manifests", () => {
-    const manager = SessionManager.inMemory("E:\\work");
-    const conversationId = randomUUID();
-    manager.appendMessage(message({
-      role: "user",
-      content: "keep this visible",
-      timestamp: 1,
-    }));
-    appendReservedCustomEntry(manager, batchEntry({
-      batchId: randomUUID(),
-      conversationId,
-      runId: randomUUID(),
-      items: [{
-        promptId: randomUUID(),
-        createdAt: "2026-07-29T10:00:00.000Z",
-        payloadSha256: "a".repeat(64),
-      }],
-      state: "prepared",
-      updatedAt: "2026-07-29T10:00:00.000Z",
-    }));
-
-    expect(projectConversationHistory(manager)).toEqual([
-      expect.objectContaining({ role: "user", text: "keep this visible" }),
-    ]);
-    expect(projectConversationItems(manager)).toEqual([
-      expect.objectContaining({ kind: "message", text: "keep this visible" }),
-    ]);
-  });
-
-
-
-  it("does not decode user JSON outside an exact started batch envelope", () => {
-    const manager = SessionManager.inMemory("E:\\work");
-    const batch = {
-      batchId: randomUUID(),
-      conversationId: randomUUID(),
-      runId: randomUUID(),
-      items: [{
-        promptId: randomUUID(),
-        createdAt: "2026-07-29T11:00:00.000Z",
-        payloadSha256: "c".repeat(64),
-      }],
-    };
-    const guidance = JSON.stringify({
-      hostInstruction: "以下消息属于同一批，请作为整体处理。",
-      batchId: batch.batchId,
-      items: [{ ordinal: 1, text: "user-authored JSON" }],
-    });
-    appendReservedCustomEntry(manager, batchEntry({
-      ...batch,
-      state: "prepared",
-      updatedAt: "2026-07-29T11:00:01.000Z",
-    }));
-    manager.appendMessage(message({ role: "user", content: guidance, timestamp: 1 }));
-    appendReservedCustomEntry(manager, batchEntry({
-      ...batch,
-      state: "started",
-      updatedAt: "2026-07-29T11:00:02.000Z",
-    }));
-    manager.appendMessage(message({ role: "user", content: ` ${guidance}`, timestamp: 2 }));
-    appendReservedCustomEntry(manager, batchEntry({
-      ...batch,
-      state: "failed",
-      updatedAt: "2026-07-29T11:00:03.000Z",
-      reason: "SDK rejected the batch",
-    }));
-    manager.appendMessage(message({ role: "user", content: guidance, timestamp: 3 }));
-
-    expect(projectConversationHistory(manager).map(({ text }) => text)).toEqual([
-      guidance,
-      ` ${guidance}`,
-      guidance,
-    ]);
   });
 
   it("projects only the selected branch and preserves failed tool results", () => {
@@ -506,15 +429,18 @@ describe("projectConversationHistory", () => {
       }));
     }
 
-    const snapshot = projectConversationHistorySnapshot(manager);
+    const snapshot = projectConversationItemsSnapshot(manager);
     expect(snapshot.window).toEqual({
       omittedBefore: true,
       startsMidTurn: false,
       contentTruncated: true,
     });
-    expect(Buffer.byteLength(JSON.stringify(snapshot.messages), "utf8"))
+    expect(Buffer.byteLength(JSON.stringify(snapshot.items), "utf8"))
       .toBeLessThanOrEqual(MAX_HISTORY_SNAPSHOT_BYTES);
-    expect(snapshot.messages.at(-1)?.text).toContain("answer-11");
+    expect(snapshot.items.at(-1)).toMatchObject({
+      kind: "message",
+      text: expect.stringContaining("answer-11"),
+    });
     expect(projectConversationHistory(manager)).toHaveLength(24);
   });
 
@@ -730,14 +656,17 @@ describe("projectConversationHistory", () => {
       }));
     }
 
-    const snapshot = projectConversationHistorySnapshot(manager);
+    const snapshot = projectConversationItemsSnapshot(manager);
     expect(snapshot.window).toEqual({
       omittedBefore: true,
       startsMidTurn: false,
       contentTruncated: false,
     });
-    expect(snapshot.messages[0]?.role).toBe("user");
-    expect(snapshot.messages.at(-1)?.text).toContain("answer-7");
+    expect(snapshot.items[0]).toMatchObject({ kind: "message", role: "user" });
+    expect(snapshot.items.at(-1)).toMatchObject({
+      kind: "message",
+      text: expect.stringContaining("answer-7"),
+    });
   });
 
   it("hydrates incoming and outgoing session-message cards beside wrapped messages", () => {
@@ -813,7 +742,6 @@ describe("projectConversationHistory", () => {
 
     const snapshot = projectConversationItemsSnapshot(manager);
     expect(snapshot.items).toEqual(items);
-    expect(snapshot.messages).toEqual(projectConversationHistory(manager));
     expect(snapshot.window).toEqual({
       omittedBefore: false,
       startsMidTurn: false,
@@ -1054,6 +982,11 @@ describe("projectConversationHistory", () => {
           provider: "openai",
           id: "gpt-5.6",
         },
+        compactionModel: null,
+        defaultThinkingLevel: "off",
+        defaultServiceTier: null,
+        toolMode: "read_only",
+        canManageSessions: false,
       },
       lifecycle: { kind: "normal" },
       createdBy: { kind: "user" },
@@ -1318,6 +1251,11 @@ describe("projectConversationHistory", () => {
         description: "",
         systemPrompt: "internal prompt",
         model: { provider: "openai", id: "gpt-5.6" },
+        compactionModel: null,
+        defaultThinkingLevel: "off",
+        defaultServiceTier: null,
+        toolMode: "read_only",
+        canManageSessions: false,
       },
       lifecycle: { kind: "normal" },
       createdBy: { kind: "user" },

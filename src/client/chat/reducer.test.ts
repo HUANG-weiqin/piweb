@@ -51,6 +51,7 @@ function historyMessage(
     text,
     thinking: "",
     tools: [],
+    parts: text ? [{ kind: "text", offset: 0, length: text.length }] : [],
     ...(total > 0 ? { usage: usage(total) } : {}),
   };
 }
@@ -326,6 +327,7 @@ describe("chatReducer", () => {
         text: "hello",
         thinking: "",
         tools: [],
+        parts: [{ kind: "text", offset: 0, length: 5 }],
       }],
     });
 
@@ -588,6 +590,7 @@ describe("chatReducer", () => {
         text: "caught up",
         thinking: "",
         tools: [],
+        parts: [{ kind: "text", offset: 0, length: 9 }],
       }],
     });
     state = chatReducer(state, {
@@ -745,6 +748,7 @@ describe("chatReducer", () => {
         text: "inspect",
         thinking: "",
         tools: [],
+        parts: [{ kind: "text", offset: 0, length: 7 }],
       }, {
         kind: "message",
         id: "assistant-1",
@@ -758,6 +762,11 @@ describe("chatReducer", () => {
           result: "ok",
           status: "done",
         }],
+        parts: [
+          { kind: "thinking", offset: 0, length: 8 },
+          { kind: "tool", toolCallId: "tool-1" },
+          { kind: "text", offset: 0, length: 4 },
+        ],
         usage: {
           input: 2,
           output: 3,

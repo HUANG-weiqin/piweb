@@ -19,6 +19,7 @@ const runId = "6ff77ba8-6c29-45a7-9851-e9054d706df2";
 const authFlowId = "00000000-0000-4000-8000-0000000000a1";
 const extensionRequestId = "a81ab25f-041e-4559-b890-04c0eeb476e4";
 const commandId = "b55e4225-e07f-4874-b760-015f7982d999";
+const promptId = "c6716d07-bbc8-407d-8947-e777f41773ac";
 const conversationId = "0198f775-88f3-7af1-9c6a-3176f775912a";
 const projectId = "f25ee8d8-34f0-4c30-a045-b2a69f2e28bd";
 const focusId = "ef01fdc2-8f55-4125-a22d-b0b764b4546b";
@@ -39,7 +40,7 @@ const transitionDiagnostics = {
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(46);
+    expect(PROTOCOL_VERSION).toBe(47);
   });
 
   it("accepts supported commands", () => {
@@ -129,6 +130,7 @@ describe("parseClientCommand", () => {
       conversationId,
       focusId: commandId,
       runId,
+      promptId,
       text: "hello",
     }).type).toBe("prompt");
     expect(parseClientCommand({
@@ -153,13 +155,6 @@ describe("parseClientCommand", () => {
       requestId: extensionRequestId,
       response: { kind: "confirm", confirmed: true },
     }).type).toBe("extension_ui_response");
-    expect(parseClientCommand({
-      type: "select_model",
-      commandId,
-      sessionId,
-      provider: "openai",
-      modelId: "gpt",
-    }).type).toBe("select_model");
     expect(parseClientCommand({ type: "set_thinking", sessionId, level: "high" }).type).toBe("set_thinking");
     expect(parseClientCommand({
       type: "set_compaction_threshold",
@@ -282,6 +277,26 @@ describe("parseClientCommand", () => {
   it("requires valid session and run ids on session-scoped commands", () => {
     expect(() => parseClientCommand({ type: "prompt", sessionId, runId, text: "  " })).toThrow();
     expect(() => parseClientCommand({ type: "prompt", text: "hello" })).toThrow();
+    expect(() => parseClientCommand({
+      type: "prompt",
+      sessionId,
+      conversationId,
+      focusId,
+      runId,
+      text: "hello",
+    })).toThrow("promptId");
+    expect(() => parseClientCommand({
+      type: "initialize",
+      sessionId,
+      cwd: "E:\\work",
+      conversation: { kind: "recent" },
+    })).toThrow("commandId");
+    expect(() => parseClientCommand({
+      type: "initialize",
+      commandId,
+      sessionId,
+      cwd: "E:\\work",
+    })).toThrow("conversation");
     expect(() => parseClientCommand({ type: "abort", sessionId, runId: "not-a-uuid" })).toThrow();
     expect(() => parseClientCommand({
       type: "extension_ui_response",
@@ -289,7 +304,13 @@ describe("parseClientCommand", () => {
       requestId: extensionRequestId,
       response: { kind: "select", value: "x".repeat(501) },
     })).toThrow();
-    expect(() => parseClientCommand({ type: "select_model", provider: "openai", modelId: "gpt" })).toThrow();
+    expect(() => parseClientCommand({
+      type: "select_model",
+      commandId,
+      sessionId,
+      provider: "openai",
+      modelId: "gpt",
+    })).toThrow();
     expect(() => parseClientCommand({
       type: "set_api_key",
       commandId: "not-a-uuid",
@@ -349,6 +370,7 @@ describe("parseClientCommand", () => {
     })).toThrow("commandId");
     expect(() => parseClientCommand({
       type: "initialize",
+      commandId,
       sessionId,
       cwd: "E:\\work",
       conversation: { kind: "new" },
@@ -1131,12 +1153,6 @@ describe("parseClientCommand", () => {
     }).type).toBe("command_complete");
     expect(parseServerEvent({
       type: "command_complete",
-      operation: "select_model",
-      commandId,
-      sessionId,
-    }).type).toBe("command_complete");
-    expect(parseServerEvent({
-      type: "command_complete",
       operation: "delete_conversation",
       commandId,
       sessionId,
@@ -1191,6 +1207,7 @@ describe("parseClientCommand", () => {
       type: "command_complete",
       operation: "select_model",
       commandId,
+      sessionId,
     })).toThrow();
     expect(() => parseServerEvent({
       type: "error",
@@ -1334,6 +1351,7 @@ describe("parseClientCommand", () => {
       text: "hello",
       thinking: "",
       tools: [],
+      parts: [{ kind: "text" as const, offset: 0, length: 5 }],
     };
     expect(parseServerEvent({
       type: "conversation_snapshot",
@@ -1401,16 +1419,30 @@ describe("parseClientCommand", () => {
       conversationId,
       focusId,
       messages: [message],
-      items: [{ kind: "message", ...message }],
       window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
-    })).toThrow("exactly one");
+    })).toThrow("items");
     expect(() => parseServerEvent({
       type: "conversation_snapshot",
       sessionId,
       conversationId,
       focusId,
       window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
-    })).toThrow("exactly one");
+    })).toThrow("items");
+    expect(() => parseServerEvent({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId,
+      focusId,
+      items: [{
+        kind: "message",
+        id: "message-without-parts",
+        role: "user",
+        text: "hello",
+        thinking: "",
+        tools: [],
+      }],
+      window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
+    })).toThrow("parts");
     expect(() => parseServerEvent({
       type: "project_snapshot",
       sessionId,

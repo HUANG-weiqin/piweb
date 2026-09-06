@@ -69,6 +69,9 @@ function input(overrides: Record<string, unknown> = {}) {
     toSnapshot: peer(toConversationId),
     ...(kind === "message" ? {} : { delegationId: randomUUID() }),
     ...overrides,
+    fromRunId: typeof overrides.fromRunId === "string"
+      ? overrides.fromRunId
+      : randomUUID(),
   };
 }
 
@@ -164,10 +167,9 @@ describe("ProjectInbox envelope schema", () => {
       ...envelope,
       fromRunId: "not-a-run-id",
     })).toThrow(/fromRunId/i);
-    const correlated = createInboxEnvelope(input({
-      fromRunId: randomUUID(),
-    }));
-    expect(parseInboxEnvelope(correlated)).toEqual(correlated);
+    const missingFromRunId = { ...envelope } as Record<string, unknown>;
+    delete missingFromRunId.fromRunId;
+    expect(() => parseInboxEnvelope(missingFromRunId)).toThrow(/fromRunId/i);
     const initialRunId = randomUUID();
     const assigned = createInboxEnvelope(input({
       fromRunId: initialRunId,

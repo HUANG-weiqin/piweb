@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readFile, readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
   MAX_PROJECT_ACTIVITY_SUMMARIES,
@@ -17,7 +16,6 @@ import {
   aggregateReservedConversationEntries,
   appendReservedCustomEntry,
   createConversationCardEntry,
-  createConversationMetaEntry,
   createConversationMessageEntry,
   createMessageDeliveryReceiptEntry,
   createMetaOperationEntry,
@@ -50,32 +48,6 @@ import {
   projectConversationItemsSnapshot,
   snapshotConversationItems,
 } from "./conversation-history.js";
-
-function isNodeError(error: unknown, code: string): boolean {
-  return (
-    error instanceof Error
-    && "code" in error
-    && (error as NodeJS.ErrnoException).code === code
-  );
-}
-
-function isLegacyQueuedPrompt(value: unknown): value is {
-  promptId: string;
-  conversationId: string;
-  text: string;
-  createdAt: string;
-} {
-  if (typeof value !== "object" || value === null) return false;
-  const record = value as Record<string, unknown>;
-  return (
-    record.version === 1
-    && record.state === "queued"
-    && typeof record.promptId === "string"
-    && typeof record.conversationId === "string"
-    && typeof record.text === "string"
-    && typeof record.createdAt === "string"
-  );
-}
 
 import {
   createMetaTools,
@@ -427,20 +399,14 @@ function cloneProfile(profile: ConversationMeta): ConversationMeta {
 }
 
 interface MetaSessionCreationProjection {
-  createdBy: ConversationMeta["createdBy"] | { kind: "unknown" };
+  createdBy: ConversationMeta["createdBy"];
   createdByMe: boolean;
 }
 
 function sessionCreationProjection(
-  profile: ConversationMeta | undefined,
+  profile: ConversationMeta,
   sourceConversationId: string,
 ): MetaSessionCreationProjection {
-  if (!profile) {
-    return {
-      createdBy: { kind: "unknown" as const },
-      createdByMe: false,
-    };
-  }
   return {
     createdBy: structuredClone(profile.createdBy),
     createdByMe:
@@ -764,12 +730,9 @@ export class ProjectSessionCoordinator {
     private readonly now: () => Date = () => new Date(),
   ) {}
 
-  async acquireProject(
-    cwd: string,
-    seedToolMode: ToolMode,
-  ): Promise<ProjectSessionHandle> {
+  async acquireProject(cwd: string): Promise<ProjectSessionHandle> {
     this.assertOpen();
-    const acquisition = this.acquireProjectInternal(cwd, seedToolMode);
+    const acquisition = this.acquireProjectInternal(cwd);
     this.projectAcquisitions.add(acquisition);
     this.projectAcquisitionCwds.set(acquisition, cwd);
     try {
@@ -782,9 +745,8 @@ export class ProjectSessionCoordinator {
 
   private async acquireProjectInternal(
     cwd: string,
-    seedToolMode: ToolMode,
   ): Promise<ProjectSessionHandle> {
-    const acquired = await this.projects.acquireProject(cwd, seedToolMode);
+    const acquired = await this.projects.acquireProject(cwd);
     if (this.disposed) {
       acquired.release();
       this.assertOpen();
@@ -1014,10 +976,19 @@ export class ProjectSessionCoordinator {
     handle: ProjectSessionHandle,
   ): ConversationSummary[] {
     const context = this.requireContext(handle);
-    return this.projectConversationSummaries(
-      context,
-      context.project.listConversations(),
-    );
+    return context.project.listConversations().map((summary) => {
+      const actor = context.actors.get(summary.id);
+      const profile = actor?.profile ?? context.profiles.get(summary.id);
+      if (profile === undefined) {
+        return {
+          ...summary,
+          rootConversationId: summary.id,
+          activity: actor?.getActivity() ?? { kind: "idle" },
+          attention: context.attention.has(summary.id),
+        };
+      }
+      return this.projectConversationSummaries(context, [summary])[0]!;
+    });
   }
 
   private projectConversationSummaries(
@@ -1027,6 +998,9 @@ export class ProjectSessionCoordinator {
     return summaries.map((summary) => {
       const actor = context.actors.get(summary.id);
       const profile = actor?.profile ?? context.profiles.get(summary.id);
+      if (profile === undefined) {
+        throw new Error(`Conversation ${summary.id} profile metadata is missing`);
+      }
       const activity = actor?.getActivity() ?? { kind: "idle" };
       const rootConversationId = this.resolveOrchestration(
         context,
@@ -1036,27 +1010,22 @@ export class ProjectSessionCoordinator {
       return {
         ...summary,
         rootConversationId,
-        ...(profile === undefined
-          ? {}
-          : {
-              role: {
-                id: profile.role.id,
-                revision: profile.role.revision,
-                name: profile.role.name,
-                description: profile.role.description,
-                model: { ...profile.role.model },
-                compactionModel: profile.role.compactionModel === null
-                  ? null
-                  : { ...profile.role.compactionModel },
-                defaultThinkingLevel:
-                  profile.role.defaultThinkingLevel,
-                defaultServiceTier: profile.role.defaultServiceTier,
-                toolMode: profile.role.toolMode,
-                canManageSessions: profile.role.canManageSessions,
-              },
-              temporary: profile.lifecycle.kind === "temporary",
-              createdBy: structuredClone(profile.createdBy),
-            }),
+        role: {
+          id: profile.role.id,
+          revision: profile.role.revision,
+          name: profile.role.name,
+          description: profile.role.description,
+          model: { ...profile.role.model },
+          compactionModel: profile.role.compactionModel === null
+            ? null
+            : { ...profile.role.compactionModel },
+          defaultThinkingLevel: profile.role.defaultThinkingLevel,
+          defaultServiceTier: profile.role.defaultServiceTier,
+          toolMode: profile.role.toolMode,
+          canManageSessions: profile.role.canManageSessions,
+        },
+        temporary: profile.lifecycle.kind === "temporary",
+        createdBy: structuredClone(profile.createdBy),
         activity,
         attention: context.attention.has(summary.id),
       };
@@ -1096,6 +1065,9 @@ export class ProjectSessionCoordinator {
       return undefined;
     }
 
+    const profile = inspection.conversationMeta;
+    if (profile === undefined) return undefined;
+
     try {
       const adapter = createReadonlySessionEntriesAdapter(inspection.entries);
       const durableItems = projectConversationItemSlots(adapter)
@@ -1106,10 +1078,8 @@ export class ProjectSessionCoordinator {
       ));
       return {
         cwd: context.project.cwd,
-        toolMode: inspection.conversationMeta?.role.toolMode ?? "read_only",
-        ...(inspection.conversationMeta === undefined
-          ? {}
-          : { role: inspection.conversationMeta.role }),
+        toolMode: profile.role.toolMode,
+        role: profile.role,
         items: snapshot.items,
         window: snapshot.window,
       };
@@ -1431,17 +1401,9 @@ export class ProjectSessionCoordinator {
             (card) => card.kind === "delegation_task"
               && card.orchestration?.sourceRunId === sourceRunId,
           ).length;
-          const activeSourceRun = source.currentRunOwnership(sourceRunId);
-          const legacyRecoveredCount = activeSourceRun?.recovered
-            ? sourceAggregate.cards.filter(
-                (card) => card.kind === "delegation_task"
-                  && card.orchestration === undefined,
-              ).length
-            : 0;
-          const existingCount = runCardCount + legacyRecoveredCount;
           const totalCount = !existingCard
-            ? existingCount + 1
-            : existingCount;
+            ? runCardCount + 1
+            : runCardCount;
           if (totalCount > MAX_PEER_SESSIONS_PER_RUN) {
             throw new Error(
               `Peer session limit ${MAX_PEER_SESSIONS_PER_RUN} reached for this run`,
@@ -1930,10 +1892,7 @@ export class ProjectSessionCoordinator {
         inspected.add(contextKey(context.project.cwd));
       }
       for (const cwd of pendingProjectCwds) {
-        const projectHandle = await this.projects.acquireProject(
-          cwd,
-          "read_only",
-        );
+        const projectHandle = await this.projects.acquireProject(cwd);
         try {
           const project = projectHandle.store;
           const key = contextKey(project.cwd);
@@ -2092,7 +2051,7 @@ export class ProjectSessionCoordinator {
         if (target.continueTask && target.continuationRunId === undefined) {
           throw new Error("Reload continuation requires continuationRunId");
         }
-        handle = await this.acquireProject(target.cwd, "read_only");
+        handle = await this.acquireProject(target.cwd);
         const context = this.requireContext(handle);
         attemptContext = context;
         const disposition = await this.runLifecycle<ReloadResumeDisposition>(
@@ -2650,7 +2609,7 @@ export class ProjectSessionCoordinator {
           conversationId,
           { updateRecent: false },
         );
-        const profile = this.loadOrMigrateProfile(manager);
+        const profile = this.loadProfile(manager);
         return await this.openOwnedActor(
           context,
           conversationId,
@@ -4308,52 +4267,16 @@ export class ProjectSessionCoordinator {
     );
   }
 
-  private loadOrMigrateProfile(
+  private loadProfile(
     manager: Awaited<ReturnType<ProjectStore["openConversation"]>>,
   ): ConversationMeta {
-    const aggregate = aggregateReservedConversationEntries(
+    const profile = aggregateReservedConversationEntries(
       manager.getBranch(),
-    );
-    if (aggregate.conversationMeta) {
-      return cloneProfile(aggregate.conversationMeta);
+    ).conversationMeta;
+    if (profile === undefined) {
+      throw new Error("Conversation profile metadata is missing");
     }
-
-    const legacyModel = manager.buildSessionContext().model;
-    const fallbackModel = this.roles.listRoles()
-      .find((role) => role.model !== null)?.model ?? null;
-    const model = legacyModel === null
-      ? fallbackModel
-      : {
-          provider: legacyModel.provider,
-          id: legacyModel.modelId,
-        };
-    if (model === null) {
-      throw new Error(
-        "The legacy conversation has no model and no role model is available",
-      );
-    }
-    const profile: ConversationMeta = {
-      role: {
-        id: "default",
-        revision: 1,
-        name: "旧会话",
-        description: "从旧版本迁移的会话",
-        systemPrompt: "",
-        model: { ...model },
-        compactionModel: null,
-        defaultThinkingLevel: "off",
-        defaultServiceTier: null,
-        toolMode: "read_only",
-        canManageSessions: false,
-      },
-      lifecycle: { kind: "normal" },
-      createdBy: { kind: "user" },
-    };
-    appendReservedCustomEntry(
-      manager,
-      createConversationMetaEntry(profile),
-    );
-    return profile;
+    return cloneProfile(profile);
   }
 
   private metaService(context: ProjectContext): MetaToolService {
@@ -4796,7 +4719,9 @@ export class ProjectSessionCoordinator {
       if (summary.id === rootConversationId) continue;
       const profile = context.actors.get(summary.id)?.profile
         ?? context.profiles.get(summary.id);
-      if (!profile) continue;
+      if (!profile) {
+        throw new Error(`Conversation ${summary.id} profile metadata is missing`);
+      }
       try {
         const resolved = this.resolveOrchestration(
           context,
@@ -4833,12 +4758,15 @@ export class ProjectSessionCoordinator {
         missingIds,
       );
       for (const [conversationId, inspection] of inspections) {
-        if (inspection.conversationMeta) {
-          context.profiles.set(
-            conversationId,
-            cloneProfile(inspection.conversationMeta),
+        if (inspection.conversationMeta === undefined) {
+          throw new Error(
+            `Conversation ${conversationId} profile metadata is missing`,
           );
         }
+        context.profiles.set(
+          conversationId,
+          cloneProfile(inspection.conversationMeta),
+        );
       }
     }
   }
@@ -4876,12 +4804,11 @@ export class ProjectSessionCoordinator {
       ?? context.profiles.get(conversationId);
 
     if (!resolvedProfile) {
-      // Conversation exists on disk but has no conversationMeta — pre-feature
-      // legacy file with no createdBy information. Treat as user root.
-      if (!knownIds.has(conversationId)) {
-        throw new Error(`Conversation ${conversationId} not found`);
-      }
-      return { rootConversationId: conversationId, depth: 0 };
+      throw new Error(
+        knownIds.has(conversationId)
+          ? `Conversation ${conversationId} profile metadata is missing`
+          : `Conversation ${conversationId} not found`,
+      );
     }
 
     const { createdBy, orchestration } = resolvedProfile;
@@ -4942,16 +4869,13 @@ export class ProjectSessionCoordinator {
     const parentProfile = context.actors.get(parentId)?.profile
       ?? context.profiles.get(parentId);
 
-    // Parent exists on disk but has no profile — treat as pre-feature user root.
     if (!parentProfile) {
-      if (!knownIds.has(parentId)) {
-        throw new Error(
-          `Cannot resolve orchestration for ${conversationId}: ` +
-          `parent ${parentId} not found and no explicit orchestration`,
-        );
-      }
-      // Parent file exists with no conversationMeta — treat as user root.
-      return { rootConversationId: parentId, depth: 1 };
+      throw new Error(
+        knownIds.has(parentId)
+          ? `Conversation ${parentId} profile metadata is missing`
+          : `Cannot resolve orchestration for ${conversationId}: ` +
+            `parent ${parentId} not found and no explicit orchestration`,
+      );
     }
 
     const parent = this.resolveOrchestration(
@@ -4975,6 +4899,9 @@ export class ProjectSessionCoordinator {
       const profile =
         context.actors.get(summary.id)?.profile
         ?? context.profiles.get(summary.id);
+      if (profile === undefined) {
+        throw new Error(`Conversation ${summary.id} profile metadata is missing`);
+      }
       return {
         summary,
         creation: sessionCreationProjection(profile, sourceConversationId),
@@ -5025,6 +4952,9 @@ export class ProjectSessionCoordinator {
     const profile =
       context.actors.get(summary.id)?.profile
       ?? context.profiles.get(summary.id);
+    if (profile === undefined) {
+      throw new Error(`Conversation ${summary.id} profile metadata is missing`);
+    }
     return {
       conversationId,
       title: conversationDisplayTitle(summary) ?? "未命名会话",
@@ -5779,9 +5709,7 @@ export class ProjectSessionCoordinator {
       ...(input.requestFingerprint === undefined
         ? {}
         : { requestFingerprint: input.requestFingerprint }),
-      ...(input.fromRunId === undefined
-        ? {}
-        : { fromRunId: input.fromRunId }),
+      fromRunId: input.fromRunId,
       ...(input.temporaryReturnAssignment === undefined
         ? {}
         : {
@@ -6829,7 +6757,6 @@ export class ProjectSessionCoordinator {
 
   private async recoverProject(context: ProjectContext): Promise<void> {
     if (context.closing) return;
-    const legacyPromptQueue = await this.readLegacyPendingPromptQueue(context);
     let summaries = await context.project.refreshConversations();
     const existingIds = new Set(summaries.map(({ id }) => id));
     await context.inbox.pruneCompletedTargetTombstones(existingIds);
@@ -6872,10 +6799,6 @@ export class ProjectSessionCoordinator {
         )
         .map(({ toConversationId }) => toConversationId),
     );
-    for (const item of legacyPromptQueue) {
-      if (context.closing) return;
-      actorIds.add(item.conversationId);
-    }
     for (const summary of summaries) {
       if (context.closing) return;
       if (blockedTargets.has(summary.id)) {
@@ -6908,7 +6831,9 @@ export class ProjectSessionCoordinator {
           actorIds.add(summary.id);
         }
         const profile = inspection.conversationMeta;
-        if (!profile) continue;
+        if (!profile) {
+          throw new Error(`Conversation ${summary.id} profile metadata is missing`);
+        }
         context.profiles.set(summary.id, cloneProfile(profile));
         const lifecycle = profile.lifecycle;
         if (
@@ -6985,97 +6910,7 @@ export class ProjectSessionCoordinator {
       }
     }
     await this.retryBlockedDeletions(context);
-    if (legacyPromptQueue.length > 0) {
-      await this.redeliverLegacyPromptQueue(context, legacyPromptQueue);
-    }
     this.emit(context, { type: "project_changed" });
-  }
-
-
-  /**
-   * 一次性迁移：读取旧版 .piweb/pending-prompts 队列文件中仍处于 queued 的
-   * 消息，按 createdAt FIFO 排序后返回；会话 id 收集到 actorIds 以便打开 actor。
-   * dispatching/attention/损坏/超限记录直接丢弃（A' 不保留重启恢复语义）。
-   */
-  private async readLegacyPendingPromptQueue(
-    context: ProjectContext,
-  ): Promise<Array<{
-    promptId: string;
-    conversationId: string;
-    text: string;
-  }>> {
-    const directory = join(context.project.stateDir, "pending-prompts");
-    let names: string[];
-    try {
-      names = await readdir(directory);
-    } catch (error) {
-      if (isNodeError(error, "ENOENT")) return [];
-      throw error;
-    }
-    const queued: Array<{
-      promptId: string;
-      conversationId: string;
-      text: string;
-      createdAt: string;
-    }> = [];
-    for (const name of names) {
-      if (!name.endsWith(".json")) continue;
-      try {
-        const path = join(directory, name);
-        const fileStats = await stat(path);
-        if (!fileStats.isFile() || fileStats.size > 1024 * 1024) continue;
-        const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
-        if (!isLegacyQueuedPrompt(parsed)) continue;
-        queued.push(parsed);
-      } catch {
-        // 损坏或无法解析的旧记录直接丢弃。
-      }
-    }
-    queued.sort((first, second) => {
-      const byCreatedAt =
-        Date.parse(first.createdAt) - Date.parse(second.createdAt);
-      if (byCreatedAt !== 0) return byCreatedAt;
-      return first.promptId.localeCompare(second.promptId);
-    });
-    return queued;
-  }
-
-  /**
-   * 尽力而为投递迁移队列：actor 已打开的会话直接 admit（busy 进 steer
-   * 队列、idle 起新 run）；投递失败或会话不可用则丢弃该条。全部尝试后
-   * 删除旧队列目录；中途关闭则保留目录待下次重试（admit 按 promptId 幂等）。
-   */
-  private async redeliverLegacyPromptQueue(
-    context: ProjectContext,
-    queue: Array<{
-      promptId: string;
-      conversationId: string;
-      text: string;
-    }>,
-  ): Promise<void> {
-    for (const item of queue) {
-      if (context.closing) return;
-      const actor = context.actors.get(item.conversationId);
-      if (!actor) continue;
-      try {
-        await actor.admitBrowserPrompt({
-          promptId: item.promptId,
-          runId: randomUUID(),
-          text: item.text,
-        });
-      } catch (error) {
-        // 一次性迁移：无法投递的旧记录丢弃，不进入 A' 的新投递路径。
-        console.warn(
-          `[prompt-streamlining] dropped legacy pending prompt ${item.promptId}:`,
-          error instanceof Error ? error.message : String(error),
-        );
-      }
-    }
-    if (context.closing) return;
-    await rm(join(context.project.stateDir, "pending-prompts"), {
-      recursive: true,
-      force: true,
-    });
   }
 
   private async recoverStartedAbortOperation(
@@ -7412,9 +7247,10 @@ export class ProjectSessionCoordinator {
     for (const candidateId of conversationIds) {
       const profile = context.actors.get(candidateId)?.profile
         ?? context.profiles.get(candidateId);
-      if (profile) {
-        this.resolveOrchestration(context, candidateId, profile);
+      if (profile === undefined) {
+        throw new Error(`Conversation ${candidateId} profile metadata is missing`);
       }
+      this.resolveOrchestration(context, candidateId, profile);
     }
   }
 
@@ -7435,9 +7271,10 @@ export class ProjectSessionCoordinator {
 
     const profile = context.actors.get(conversationId)?.profile
       ?? context.profiles.get(conversationId);
-    if (!profile || profile.createdBy.kind !== "conversation") {
-      return false;
+    if (profile === undefined) {
+      throw new Error(`Conversation ${conversationId} profile metadata is missing`);
     }
+    if (profile.createdBy.kind !== "conversation") return false;
 
     const parentId = profile.createdBy.conversationId;
     if (parentId === ancestorConversationId) return true;
@@ -7467,7 +7304,9 @@ export class ProjectSessionCoordinator {
 
     const profile = context.actors.get(conversationId)?.profile
       ?? context.profiles.get(conversationId);
-    if (!profile) return 1;
+    if (profile === undefined) {
+      throw new Error(`Conversation ${conversationId} profile metadata is missing`);
+    }
     if (profile.createdBy.kind === "conversation") {
       const parentId = profile.createdBy.conversationId;
       if (parentId === rootConversationId) return 1;

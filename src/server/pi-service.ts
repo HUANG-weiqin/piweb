@@ -636,7 +636,7 @@ export class PiConnection {
     const handle = await this.measureTransitionPhase(
       diagnostics,
       "contextOrCatalogMs",
-      () => coordinator.acquireProject(cwd, "read_only"),
+      () => coordinator.acquireProject(cwd),
     );
     let transferred = false;
     let extensionScope: number | undefined;
@@ -653,7 +653,7 @@ export class PiConnection {
     try {
       this.throwIfAborted(signal);
 
-      const target = command.conversation ?? { kind: "recent" as const };
+      const target = command.conversation;
       let targetConversationId = target.kind === "open"
         ? target.conversationId
         : undefined;
@@ -1035,11 +1035,7 @@ export class PiConnection {
         }
         return;
       }
-      case "select_model":
-        throw new Error(
-          "Conversation model is fixed by its role and cannot be changed",
-        );
-      case "set_thinking":
+case "set_thinking":
         await this.setCoordinatedThinking(command.level);
         return;
       case "set_compaction_threshold": {

@@ -9,11 +9,6 @@ import {
 import {
   MAX_COMPACTION_THRESHOLD_PERCENT,
   MAX_MODEL_REFERENCE_BYTES,
-  MAX_PENDING_PROMPT_ATTENTION_REASON_CHARACTERS,
-  MAX_PENDING_PROMPTS_PER_CONVERSATION,
-  MAX_LOOP_LIST_ITEMS,
-  MAX_LOOP_LIST_ITEM_ID_CHARACTERS,
-  MAX_LOOP_LIST_ITEM_TEXT_CHARACTERS,
   MIN_COMPACTION_THRESHOLD_PERCENT,
   loopListSchema,
   serviceTierSchema,
@@ -31,10 +26,6 @@ export const MESSAGE_DELIVERY_RECEIPT_CUSTOM_TYPE =
   "piweb.message_delivery_receipt.v1";
 export const RUN_SETTLEMENT_CUSTOM_TYPE =
   "piweb.run_settlement.v1";
-export const PENDING_PROMPT_DELIVERY_CUSTOM_TYPE =
-  "piweb.pending_prompt_delivery.v1";
-export const PENDING_PROMPT_BATCH_CUSTOM_TYPE =
-  "piweb.pending_prompt_batch.v1";
 export const META_OPERATION_CUSTOM_TYPE =
   "piweb.meta_operation.v1";
 export const COMPACTION_THRESHOLD_CUSTOM_TYPE =
@@ -42,10 +33,7 @@ export const COMPACTION_THRESHOLD_CUSTOM_TYPE =
 export const SERVICE_TIER_CUSTOM_TYPE = "piweb.service_tier.v1";
 const COMPACTION_RESUME_CUSTOM_TYPE =
   "piweb.compaction_resume.v1";
-export const LEGACY_LOOP_LIST_CUSTOM_TYPE = "piweb.loop_list.v1";
 export const LOOP_LIST_CUSTOM_TYPE = "piweb.loop_list.v2";
-export const LEGACY_LOOP_LIST_CONTINUE_CUSTOM_TYPE =
-  "piweb.loop_list_continue.v1";
 export const LOOP_LIST_CONTINUE_CUSTOM_TYPE = "piweb.loop_list_continue.v2";
 export const MAX_LOOP_LIST_CONTINUATIONS_PER_RUN = 8;
 export const CONVERSATION_ROLE_CHANGE_CUSTOM_TYPE =
@@ -192,7 +180,6 @@ const roleSnapshotSchema = z.object({
       "role.model.id must not be blank",
     ),
   }).strict(),
-  // Conversation snapshots written before compaction model selection use main.
   compactionModel: z.object({
     provider: limitedString(
       "role.compactionModel.provider",
@@ -208,8 +195,7 @@ const roleSnapshotSchema = z.object({
       (value) => value.trim().length > 0,
       "role.compactionModel.id must not be blank",
     ),
-  }).strict().nullable().default(null),
-  // Conversation snapshots written before role-scoped defaults stay closed.
+  }).strict().nullable(),
   defaultThinkingLevel: z.enum([
     "off",
     "minimal",
@@ -218,13 +204,10 @@ const roleSnapshotSchema = z.object({
     "high",
     "xhigh",
     "max",
-  ]).default("off"),
-  // Conversation snapshots written before role defaults inherit provider routing.
-  defaultServiceTier: serviceTierSchema.nullable().default(null),
-  // Conversation snapshots written before role permissions default closed.
-  toolMode: z.enum(["read_only", "full_access"]).default("read_only"),
-  // Session orchestration is opt-in for metadata written before this field.
-  canManageSessions: z.boolean().default(false),
+  ]),
+  defaultServiceTier: serviceTierSchema.nullable(),
+  toolMode: z.enum(["read_only", "full_access"]),
+  canManageSessions: z.boolean(),
 }).strict();
 
 const lifecycleSchema = z.discriminatedUnion("kind", [
@@ -275,8 +258,7 @@ const conversationMetaEntrySchema = z.object({
 
 const conversationRoleChangeSchema = z.object({
   role: roleSnapshotSchema,
-  // Missing only on legacy role-change records; new writers always include it.
-  selectedServiceTier: serviceTierSchema.nullable().optional(),
+  selectedServiceTier: serviceTierSchema.nullable(),
   changedAt: canonicalTimestampSchema("changedAt"),
 }).strict();
 
@@ -440,55 +422,6 @@ const messageDeliveryReceiptEntrySchema = z.object({
   data: messageDeliveryReceiptSchema,
 }).strict();
 
-function validateUniqueLoopListItemIds(
-  items: readonly { id: string }[],
-  context: z.RefinementCtx,
-): void {
-  const ids = new Set<string>();
-  for (let index = 0; index < items.length; index += 1) {
-    const id = items[index]!.id;
-    if (ids.has(id)) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "LoopList item IDs must be unique",
-        path: [index, "id"],
-      });
-    }
-    ids.add(id);
-  }
-}
-
-const legacyLoopListItemSchema = z.object({
-  id: limitedString(
-    "loopList.items.id",
-    MAX_LOOP_LIST_ITEM_ID_CHARACTERS * 4,
-    { maximumCharacters: MAX_LOOP_LIST_ITEM_ID_CHARACTERS },
-  ).refine((value) => value.trim().length > 0, "item id must not be blank"),
-  text: limitedString(
-    "loopList.items.text",
-    MAX_LOOP_LIST_ITEM_TEXT_CHARACTERS * 4,
-    { maximumCharacters: MAX_LOOP_LIST_ITEM_TEXT_CHARACTERS },
-  ).refine((value) => value.trim().length > 0, "item text must not be blank"),
-  checked: z.boolean(),
-}).strict();
-
-const legacyLoopListSchema = z.object({
-  items: z.array(legacyLoopListItemSchema)
-    .max(MAX_LOOP_LIST_ITEMS)
-    .superRefine(validateUniqueLoopListItemIds),
-  armed: z.boolean(),
-}).strict();
-
-function normalizeLegacyLoopListItems(
-  items: z.infer<typeof legacyLoopListItemSchema>[],
-): LoopList["items"] {
-  return items.map((item) => ({
-    id: item.id,
-    text: item.text,
-    status: item.checked ? "completed" : "pending",
-  }));
-}
-
 export interface LoopListTiming {
   listStartedAt: string;
   activeStartedAt?: string;
@@ -533,36 +466,12 @@ export function advanceLoopListTiming(
   };
 }
 
-const legacyLoopListEntrySchema = z.object({
-  customType: z.literal(LEGACY_LOOP_LIST_CUSTOM_TYPE),
-  data: legacyLoopListSchema.extend({
-    updatedAt: canonicalTimestampSchema("updatedAt"),
-  }).strict(),
-}).strict().transform((value) => ({
-  customType: value.customType,
-  data: {
-    items: normalizeLegacyLoopListItems(value.data.items),
-    armed: value.data.armed,
-    updatedAt: value.data.updatedAt,
-  },
-}));
-
 const loopListEntrySchema = z.object({
   customType: z.literal(LOOP_LIST_CUSTOM_TYPE),
   data: loopListSchema.extend({
     updatedAt: canonicalTimestampSchema("updatedAt"),
   }).strict(),
 }).strict();
-
-function formatLegacyLoopListItems(
-  items: z.infer<typeof legacyLoopListItemSchema>[],
-): string {
-  return [
-    "Current LoopList snapshot:",
-    ...items.map((item) => `${item.checked ? "[x]" : "[ ]"} ${item.text} (${item.id})`),
-    "Continue working through the unchecked items. Update the list with todo_write as progress changes.",
-  ].join("\n");
-}
 
 function formatLoopListItems(items: LoopList["items"]): string {
   const marker = {
@@ -576,34 +485,6 @@ function formatLoopListItems(items: LoopList["items"]): string {
     "Continue working through the non-completed items in any order. Update the list with todo_write whenever status changes.",
   ].join("\n");
 }
-
-const legacyLoopListContinueEntrySchema = z.object({
-  customType: z.literal(LEGACY_LOOP_LIST_CONTINUE_CUSTOM_TYPE),
-  content: limitedString("content", MAX_CONVERSATION_MESSAGE_CONTENT_BYTES),
-  display: z.literal(false),
-  details: z.object({
-    runId: uuidSchema("runId"),
-    continuation: z.number().int().min(1).max(MAX_LOOP_LIST_CONTINUATIONS_PER_RUN),
-    items: legacyLoopListSchema.shape.items,
-  }).strict(),
-}).strict().superRefine((value, context) => {
-  if (value.content !== formatLegacyLoopListItems(value.details.items)) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "LoopList continuation content must match its item snapshot",
-      path: ["content"],
-    });
-  }
-}).transform((value) => ({
-  customType: value.customType,
-  content: value.content,
-  display: value.display,
-  details: {
-    runId: value.details.runId,
-    continuation: value.details.continuation,
-    items: normalizeLegacyLoopListItems(value.details.items),
-  },
-}));
 
 const loopListContinueEntrySchema = z.object({
   customType: z.literal(LOOP_LIST_CONTINUE_CUSTOM_TYPE),
@@ -690,112 +571,6 @@ const editBudgetEventSchema = z.discriminatedUnion("kind", [
 const editBudgetEntrySchema = z.object({
   customType: z.literal(EDIT_BUDGET_CUSTOM_TYPE),
   data: editBudgetEventSchema,
-}).strict();
-
-const pendingPromptDeliverySchema = z.object({
-  promptId: uuidSchema("promptId"),
-  runId: uuidSchema("runId"),
-  batchId: uuidSchema("batchId").optional(),
-  deliveredAt: canonicalTimestampSchema("deliveredAt"),
-}).strict();
-
-const pendingPromptDeliveryEntrySchema = z.object({
-  customType: z.literal(PENDING_PROMPT_DELIVERY_CUSTOM_TYPE),
-  data: pendingPromptDeliverySchema,
-}).strict();
-
-const pendingPromptBatchItemSchema = z.object({
-  promptId: uuidSchema("promptId"),
-  createdAt: canonicalTimestampSchema("createdAt"),
-  payloadSha256: z.string().regex(
-    SHA256_HEX_PATTERN,
-    "payloadSha256 must be a lowercase SHA-256 hex digest",
-  ),
-}).strict();
-
-const pendingPromptBatchIdentityFields = {
-  batchId: uuidSchema("batchId"),
-  conversationId: conversationIdSchema("conversationId"),
-  runId: uuidSchema("runId"),
-  items: z.array(pendingPromptBatchItemSchema)
-    .min(1)
-    .max(MAX_PENDING_PROMPTS_PER_CONVERSATION),
-};
-
-const pendingPromptBatchReasonSchema = z.string()
-  .min(1)
-  .max(MAX_PENDING_PROMPT_ATTENTION_REASON_CHARACTERS)
-  .refine((value) => value.trim().length > 0, "pending prompt batch reason must not be blank");
-
-const pendingPromptBatchSchema = z.discriminatedUnion("state", [
-  z.object({
-    ...pendingPromptBatchIdentityFields,
-    state: z.literal("prepared"),
-    updatedAt: canonicalTimestampSchema("updatedAt"),
-  }).strict(),
-  z.object({
-    ...pendingPromptBatchIdentityFields,
-    state: z.literal("started"),
-    updatedAt: canonicalTimestampSchema("updatedAt"),
-  }).strict(),
-  z.object({
-    ...pendingPromptBatchIdentityFields,
-    state: z.literal("delivered"),
-    updatedAt: canonicalTimestampSchema("updatedAt"),
-  }).strict(),
-  z.object({
-    ...pendingPromptBatchIdentityFields,
-    state: z.literal("completed"),
-    updatedAt: canonicalTimestampSchema("updatedAt"),
-  }).strict(),
-  z.object({
-    ...pendingPromptBatchIdentityFields,
-    state: z.literal("failed"),
-    updatedAt: canonicalTimestampSchema("updatedAt"),
-    reason: pendingPromptBatchReasonSchema,
-  }).strict(),
-  z.object({
-    ...pendingPromptBatchIdentityFields,
-    state: z.literal("attention"),
-    updatedAt: canonicalTimestampSchema("updatedAt"),
-    reason: pendingPromptBatchReasonSchema,
-  }).strict(),
-]).superRefine((value, context) => {
-  const promptIds = new Set<string>();
-  let previous: { createdAt: string; promptId: string } | undefined;
-  for (let index = 0; index < value.items.length; index += 1) {
-    const item = value.items[index]!;
-    if (promptIds.has(item.promptId)) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "pending prompt batch items must have unique promptId values",
-        path: ["items", index, "promptId"],
-      });
-    }
-    promptIds.add(item.promptId);
-    if (
-      previous !== undefined
-      && (
-        Date.parse(item.createdAt) < Date.parse(previous.createdAt)
-        || (
-          item.createdAt === previous.createdAt
-          && item.promptId.localeCompare(previous.promptId) <= 0
-        )
-      )
-    ) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "pending prompt batch items must be ordered by createdAt and promptId",
-        path: ["items", index],
-      });
-    }
-    previous = item;
-  }
-});
-
-const pendingPromptBatchEntrySchema = z.object({
-  customType: z.literal(PENDING_PROMPT_BATCH_CUSTOM_TYPE),
-  data: pendingPromptBatchSchema,
 }).strict();
 
 const temporaryReturnReceiptIdentitySchema = z.object({
@@ -940,25 +715,12 @@ export type MessageDeliveryReceiptEntry =
   z.infer<typeof messageDeliveryReceiptEntrySchema>;
 export type CompactionResumeEntry =
   z.infer<typeof compactionResumeEntrySchema>;
-type LegacyLoopListEntry = z.infer<typeof legacyLoopListEntrySchema>;
 export type LoopListEntry = z.infer<typeof loopListEntrySchema>;
-type ParsedLoopListEntry = LegacyLoopListEntry | LoopListEntry;
-type LegacyLoopListContinueEntry =
-  z.infer<typeof legacyLoopListContinueEntrySchema>;
 export type LoopListContinueEntry = z.infer<typeof loopListContinueEntrySchema>;
-type ParsedLoopListContinueEntry =
-  LegacyLoopListContinueEntry | LoopListContinueEntry;
 export type RunSettlement = z.infer<typeof runSettlementSchema>;
 export type RunSettlementEntry =
   z.infer<typeof runSettlementEntrySchema>;
 export type EditBudgetEntry = z.infer<typeof editBudgetEntrySchema>;
-export type PendingPromptDelivery =
-  z.infer<typeof pendingPromptDeliverySchema>;
-export type PendingPromptDeliveryEntry =
-  z.infer<typeof pendingPromptDeliveryEntrySchema>;
-export type PendingPromptBatch = z.infer<typeof pendingPromptBatchSchema>;
-export type PendingPromptBatchEntry =
-  z.infer<typeof pendingPromptBatchEntrySchema>;
 export type TemporaryReturnReceipt =
   z.infer<typeof temporaryReturnReceiptSchema>;
 export type TemporaryReturnReceiptEntry =
@@ -1005,11 +767,11 @@ export type ReservedConversationEntry =
     }
   | {
       kind: "loop_list";
-      entry: ParsedLoopListEntry;
+      entry: LoopListEntry;
     }
   | {
       kind: "loop_list_continue";
-      entry: ParsedLoopListContinueEntry;
+      entry: LoopListContinueEntry;
     }
   | {
       kind: "run_settlement";
@@ -1018,14 +780,6 @@ export type ReservedConversationEntry =
   | {
       kind: "edit_budget";
       entry: EditBudgetEntry;
-    }
-  | {
-      kind: "pending_prompt_delivery";
-      entry: PendingPromptDeliveryEntry;
-    }
-  | {
-      kind: "pending_prompt_batch";
-      entry: PendingPromptBatchEntry;
     }
   | {
       kind: "temporary_return_receipt";
@@ -1051,8 +805,6 @@ export interface ReservedConversationAggregate {
   messageDeliveryReceipts: MessageDeliveryReceipt[];
   runSettlements: RunSettlement[];
   editBudgetEvents: EditBudgetEvent[];
-  pendingPromptDeliveries: PendingPromptDelivery[];
-  pendingPromptBatches: PendingPromptBatch[];
   temporaryReturnReceipts: TemporaryReturnReceipt[];
   metaOperations: MetaOperation[];
   compactionThreshold?: CompactionThreshold;
@@ -1133,10 +885,6 @@ export function createMessageDeliveryReceiptEntry(
   });
 }
 
-function parseLegacyLoopListEntry(value: unknown): LegacyLoopListEntry {
-  return legacyLoopListEntrySchema.parse(value);
-}
-
 export function parseLoopListEntry(value: unknown): LoopListEntry {
   return loopListEntrySchema.parse(value);
 }
@@ -1145,12 +893,6 @@ export function createLoopListEntry(
   data: LoopListEntry["data"],
 ): LoopListEntry {
   return parseLoopListEntry({ customType: LOOP_LIST_CUSTOM_TYPE, data });
-}
-
-function parseLegacyLoopListContinueEntry(
-  value: unknown,
-): LegacyLoopListContinueEntry {
-  return legacyLoopListContinueEntrySchema.parse(value);
 }
 
 export function parseLoopListContinueEntry(
@@ -1232,18 +974,6 @@ export function createRunSettlementEntry(
   });
 }
 
-export function parsePendingPromptDeliveryEntry(
-  value: unknown,
-): PendingPromptDeliveryEntry {
-  return pendingPromptDeliveryEntrySchema.parse(value);
-}
-
-export function parsePendingPromptBatchEntry(
-  value: unknown,
-): PendingPromptBatchEntry {
-  return pendingPromptBatchEntrySchema.parse(value);
-}
-
 export function parseTemporaryReturnReceiptEntry(
   value: unknown,
 ): TemporaryReturnReceiptEntry {
@@ -1319,8 +1049,6 @@ export function appendReservedCustomEntry(
     | MessageDeliveryReceiptEntry
     | RunSettlementEntry
     | EditBudgetEntry
-    | PendingPromptDeliveryEntry
-    | PendingPromptBatchEntry
     | TemporaryReturnReceiptEntry
     | MetaOperationEntry
     | CompactionThresholdEntry
@@ -1426,17 +1154,8 @@ export function parseReservedConversationEntry(
       entry: parseMessageDeliveryReceiptEntry(payload),
     };
   }
-  if (customType === LEGACY_LOOP_LIST_CUSTOM_TYPE) {
-    return { kind: "loop_list", entry: parseLegacyLoopListEntry(payload) };
-  }
   if (customType === LOOP_LIST_CUSTOM_TYPE) {
     return { kind: "loop_list", entry: parseLoopListEntry(payload) };
-  }
-  if (customType === LEGACY_LOOP_LIST_CONTINUE_CUSTOM_TYPE) {
-    return {
-      kind: "loop_list_continue",
-      entry: parseLegacyLoopListContinueEntry(payload),
-    };
   }
   if (customType === LOOP_LIST_CONTINUE_CUSTOM_TYPE) {
     return {
@@ -1460,18 +1179,6 @@ export function parseReservedConversationEntry(
     return {
       kind: "edit_budget",
       entry: parseEditBudgetEntry(payload),
-    };
-  }
-  if (customType === PENDING_PROMPT_DELIVERY_CUSTOM_TYPE) {
-    return {
-      kind: "pending_prompt_delivery",
-      entry: parsePendingPromptDeliveryEntry(payload),
-    };
-  }
-  if (customType === PENDING_PROMPT_BATCH_CUSTOM_TYPE) {
-    return {
-      kind: "pending_prompt_batch",
-      entry: parsePendingPromptBatchEntry(payload),
     };
   }
   if (customType === TEMPORARY_RETURN_RECEIPT_CUSTOM_TYPE) {
@@ -1500,30 +1207,6 @@ export function parseReservedConversationEntry(
   }
   throw new Error(`Unknown piweb reserved custom type: ${customType}`);
 }
-
-function pendingPromptBatchIdentity(batch: PendingPromptBatch): string {
-  return JSON.stringify({
-    batchId: batch.batchId,
-    conversationId: batch.conversationId,
-    runId: batch.runId,
-    items: batch.items,
-  });
-}
-
-const TERMINAL_PENDING_PROMPT_BATCH_STATES = new Set<
-  PendingPromptBatch["state"]
->(["completed", "failed", "attention"]);
-
-const ALLOWED_PENDING_PROMPT_BATCH_TRANSITIONS: Readonly<
-  Record<PendingPromptBatch["state"], ReadonlySet<PendingPromptBatch["state"]>>
-> = {
-  prepared: new Set(["started", "failed", "attention"]),
-  started: new Set(["delivered", "failed", "attention"]),
-  delivered: new Set(["completed", "attention"]),
-  completed: new Set(),
-  failed: new Set(),
-  attention: new Set(),
-};
 
 function settlementCore(settlement: RunSettlement): string {
   return JSON.stringify({
@@ -1657,8 +1340,6 @@ export function aggregateReservedConversationEntries(
   >();
   const runSettlements = new Map<string, RunSettlement>();
   const editBudgetEvents: EditBudgetEvent[] = [];
-  const pendingPromptDeliveries = new Map<string, PendingPromptDelivery>();
-  const pendingPromptBatches = new Map<string, PendingPromptBatch>();
   const temporaryReturnReceipts = new Map<
     string,
     TemporaryReturnReceipt
@@ -1692,19 +1373,17 @@ export function aggregateReservedConversationEntries(
       ) {
         throw new Error("Piweb conversation role changedAt cannot regress");
       }
-      if (reserved.entry.data.selectedServiceTier !== undefined) {
-        if (
-          serviceTier !== undefined
-          && Date.parse(reserved.entry.data.changedAt)
-            < Date.parse(serviceTier.updatedAt)
-        ) {
-          throw new Error("Piweb service tier updatedAt cannot regress");
-        }
-        serviceTier = {
-          tier: reserved.entry.data.selectedServiceTier,
-          updatedAt: reserved.entry.data.changedAt,
-        };
+      if (
+        serviceTier !== undefined
+        && Date.parse(reserved.entry.data.changedAt)
+          < Date.parse(serviceTier.updatedAt)
+      ) {
+        throw new Error("Piweb service tier updatedAt cannot regress");
       }
+      serviceTier = {
+        tier: reserved.entry.data.selectedServiceTier,
+        updatedAt: reserved.entry.data.changedAt,
+      };
       conversationMeta = {
         ...conversationMeta,
         role: reserved.entry.data.role,
@@ -1770,56 +1449,6 @@ export function aggregateReservedConversationEntries(
     }
     if (reserved.kind === "edit_budget") {
       editBudgetEvents.push(reserved.entry.data);
-      continue;
-    }
-    if (reserved.kind === "pending_prompt_delivery") {
-      const incoming = reserved.entry.data;
-      const existingPrompt = pendingPromptDeliveries.get(incoming.promptId);
-      if (
-        existingPrompt !== undefined
-        && JSON.stringify(existingPrompt) !== JSON.stringify(incoming)
-      ) {
-        throw new Error(
-          `Conflicting piweb pending prompt delivery for promptId ${incoming.promptId}`,
-        );
-      }
-      pendingPromptDeliveries.set(incoming.promptId, incoming);
-      continue;
-    }
-    if (reserved.kind === "pending_prompt_batch") {
-      const incoming = reserved.entry.data;
-      const existing = pendingPromptBatches.get(incoming.batchId);
-      if (existing === undefined) {
-        if (incoming.state !== "prepared") {
-          throw new Error(
-            `Piweb pending prompt batch ${incoming.batchId} must begin in prepared state`,
-          );
-        }
-        pendingPromptBatches.set(incoming.batchId, incoming);
-        continue;
-      }
-      if (JSON.stringify(existing) === JSON.stringify(incoming)) continue;
-      if (pendingPromptBatchIdentity(existing) !== pendingPromptBatchIdentity(incoming)) {
-        throw new Error(
-          `Conflicting piweb pending prompt batch identity for batchId ${incoming.batchId}`,
-        );
-      }
-      if (Date.parse(incoming.updatedAt) < Date.parse(existing.updatedAt)) {
-        throw new Error(
-          `Piweb pending prompt batch updatedAt cannot regress for batchId ${incoming.batchId}`,
-        );
-      }
-      if (TERMINAL_PENDING_PROMPT_BATCH_STATES.has(existing.state)) {
-        throw new Error(
-          `Piweb pending prompt batch terminal state cannot change for batchId ${incoming.batchId}`,
-        );
-      }
-      if (!ALLOWED_PENDING_PROMPT_BATCH_TRANSITIONS[existing.state].has(incoming.state)) {
-        throw new Error(
-          `Piweb pending prompt batch state cannot transition from ${existing.state} to ${incoming.state} for batchId ${incoming.batchId}`,
-        );
-      }
-      pendingPromptBatches.set(incoming.batchId, incoming);
       continue;
     }
     if (reserved.kind === "temporary_return_receipt") {
@@ -1987,8 +1616,6 @@ export function aggregateReservedConversationEntries(
     messageDeliveryReceipts: [...messageDeliveryReceipts.values()],
     runSettlements: [...runSettlements.values()],
     editBudgetEvents,
-    pendingPromptDeliveries: [...pendingPromptDeliveries.values()],
-    pendingPromptBatches: [...pendingPromptBatches.values()],
     temporaryReturnReceipts: [...temporaryReturnReceipts.values()],
     metaOperations: [...metaOperations.values()],
     ...(compactionThreshold === undefined

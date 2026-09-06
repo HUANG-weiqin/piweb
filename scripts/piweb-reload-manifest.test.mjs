@@ -33,52 +33,24 @@ async function manifestPath() {
 }
 
 describe("reload manifest v2", () => {
-  it("atomically migrates a legacy pending handoff before exposing its continuation identity", async () => {
+  it("rejects a legacy v1 handoff without changing the file", async () => {
     const path = await manifestPath();
-    await writeFile(path, `${JSON.stringify({
+    const legacy = `${JSON.stringify({
       version: 1,
       repoCwd: REPO_ROOT,
       appPort: APP_PORT,
       requestId: REQUEST_ID,
-      pending: [
-        {
-          cwd: REPO_ROOT,
-          conversationId: CONVERSATION_ID,
-          continueTask: true,
-        },
-        {
-          cwd: REPO_ROOT,
-          conversationId: OTHER_CONVERSATION_ID,
-          continueTask: false,
-        },
-      ],
-    })}\n`, "utf8");
+      pending: [{
+        cwd: REPO_ROOT,
+        conversationId: CONVERSATION_ID,
+        continueTask: true,
+      }],
+    })}\n`;
+    await writeFile(path, legacy, "utf8");
 
-    const migrated = await readReloadManifest(path, REPO_ROOT, APP_PORT);
-    expect(migrated).toMatchObject({
-      version: 2,
-      requestId: REQUEST_ID,
-      targets: [
-        {
-          cwd: REPO_ROOT,
-          conversationId: CONVERSATION_ID,
-          continueTask: true,
-          state: "unadopted",
-          continuationRunId: expect.stringMatching(/^[0-9a-f-]{36}$/),
-        },
-        {
-          cwd: REPO_ROOT,
-          conversationId: OTHER_CONVERSATION_ID,
-          continueTask: false,
-          state: "unadopted",
-        },
-      ],
-    });
-    expect(migrated.targets[1]).not.toHaveProperty("continuationRunId");
-
-    const reread = await readReloadManifest(path, REPO_ROOT, APP_PORT);
-    expect(reread).toEqual(migrated);
-    expect(JSON.parse(await readFile(path, "utf8"))).toEqual(migrated);
+    await expect(readReloadManifest(path, REPO_ROOT, APP_PORT))
+      .rejects.toThrow("reload manifest is invalid");
+    expect(await readFile(path, "utf8")).toBe(legacy);
   });
 
   it("retains a stable continuation through a lost response and child reconciliation", async () => {

@@ -13,6 +13,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   PROTOCOL_VERSION,
   type ClientCommand,
+  type ConversationHistoryItem,
+  type ConversationHistoryMessage,
   type ConversationRoleSnapshot,
   type ConversationSummary,
   type PublicState,
@@ -98,6 +100,32 @@ type TestServerEvent = Exclude<
   | RelaxedConversationSnapshot
   | RelaxedSessionEvent
   | RelaxedConversationItem;
+
+type ConversationMessageItem = Extract<
+  ConversationHistoryItem,
+  { kind: "message" }
+>;
+
+function snapshotItems(
+  messages: Array<Omit<ConversationHistoryMessage, "parts">>,
+): ConversationMessageItem[] {
+  return messages.map((message) => ({
+    kind: "message",
+    ...message,
+    parts: [
+      ...(message.thinking
+        ? [{ kind: "thinking" as const, offset: 0, length: message.thinking.length }]
+        : []),
+      ...message.tools.map((tool) => ({
+        kind: "tool" as const,
+        toolCallId: tool.toolCallId,
+      })),
+      ...(message.text
+        ? [{ kind: "text" as const, offset: 0, length: message.text.length }]
+        : []),
+    ],
+  }));
+}
 
 function completeEvent(event: TestServerEvent): TestServerEvent {
   if (event.type === "project_snapshot") {
@@ -231,7 +259,7 @@ vi.mock("./lib/socket", () => ({
             sessionId: completed.state.sessionId,
             conversationId: completed.state.conversationId,
             focusId: completed.state.focusId,
-            messages: [],
+            items: [],
             window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
           });
         }
@@ -465,14 +493,13 @@ function conversationPreview(
     cwd: "E:\\work",
     toolMode: "read_only",
     role: defaultConversationRole(),
-    items: [{
-      kind: "message",
+    items: snapshotItems([{
       id: `preview-${text}`,
       role: "user",
       text,
       thinking: "",
       tools: [],
-    }],
+    }]),
     window: {
       omittedBefore: false,
       startsMidTurn: false,
@@ -526,13 +553,13 @@ function startFocusReplacementProject(
       sessionId,
       conversationId: CONVERSATION_ID,
       focusId: FOCUS_A,
-      messages: [{
+      items: snapshotItems([{
         id: "focus-replacement-source-a",
         role: "user",
         text: "focus replacement source A",
         thinking: "",
         tools: [],
-      }],
+      }]),
       window: completeConversationWindow,
     });
   });
@@ -554,8 +581,6 @@ describe("App", () => {
       cwd: "E:\\route-workspace",
       conversationId: CONVERSATION_B,
     });
-    localStorage.setItem("piweb.lastCwd", "E:\\stored-workspace");
-
     render(<App />);
 
     expect(latestCommand("initialize")).toMatchObject({
@@ -570,7 +595,6 @@ describe("App", () => {
       "E:\\first",
       "E:\\second",
     ]));
-    localStorage.setItem("piweb.lastCwd", "E:\\first");
 
     render(<App />);
 
@@ -592,7 +616,6 @@ describe("App", () => {
       "E:\\first",
       "E:\\second",
     ]));
-    localStorage.setItem("piweb.lastCwd", "E:\\first");
     render(<App />);
     const sessionId = latestSessionId();
     act(() => {
@@ -614,13 +637,13 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A,
-        messages: [{
+        items: snapshotItems([{
           id: "offline-source",
           role: "assistant",
           text: "offline source projection",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window: completeConversationWindow,
       });
     });
@@ -647,7 +670,7 @@ describe("App", () => {
     const pushState = vi.spyOn(history, "pushState");
     const replaceState = vi.spyOn(history, "replaceState");
     const addEventListener = vi.spyOn(window, "addEventListener");
-    localStorage.setItem("piweb.lastCwd", "E:\\work");
+    localStorage.setItem("piweb.workspaces", JSON.stringify(["E:\\work"]));
 
     render(<App />);
 
@@ -664,7 +687,7 @@ describe("App", () => {
       cwd: "E:\\stale",
       conversationId: CONVERSATION_B,
     });
-    localStorage.setItem("piweb.lastCwd", "E:\\work");
+    localStorage.setItem("piweb.workspaces", JSON.stringify(["E:\\work"]));
 
     render(<App />);
     const sentBeforePhone = socketMock.send.mock.calls.length;
@@ -718,7 +741,6 @@ describe("App", () => {
 
   it("pushes only accepted phone navigation and keeps a popped list visible after late focus events", () => {
     mockPhoneViewport();
-    localStorage.setItem("piweb.lastCwd", "E:\\work");
     localStorage.setItem("piweb.workspaces", JSON.stringify(["E:\\work"]));
     render(<App />);
     const sessionId = latestSessionId();
@@ -770,13 +792,13 @@ describe("App", () => {
       sessionId,
       conversationId: CONVERSATION_B,
       focusId: FOCUS_A_SECOND,
-      messages: [{
+      items: snapshotItems([{
         id: "late-popped-focus",
         role: "assistant",
         text: "late focus",
         thinking: "",
         tools: [],
-      }],
+      }]),
       window: completeConversationWindow,
     }));
     expect(screen.getByRole("complementary", { name: "项目会话栏" }))
@@ -861,7 +883,7 @@ describe("App", () => {
   it("pushes a durable chat route only after a desktop-to-phone role creation attaches its conversation", () => {
     const viewport = mockPhoneViewport(false);
     socketMock.autoFocus = false;
-    localStorage.setItem("piweb.lastCwd", "E:\\work");
+    localStorage.setItem("piweb.workspaces", JSON.stringify(["E:\\work"]));
     render(<App />);
     const sessionId = latestSessionId();
     const initialize = latestCommand("initialize");
@@ -936,7 +958,6 @@ describe("App", () => {
 
   it("projects phone navigation locally without duplicating Chat or following late events", async () => {
     mockPhoneViewport();
-    localStorage.setItem("piweb.lastCwd", "E:\\work");
     localStorage.setItem(
       "piweb.workspaces",
       JSON.stringify(["E:\\work", "E:\\other"]),
@@ -997,13 +1018,13 @@ describe("App", () => {
       sessionId,
       conversationId: CONVERSATION_ID,
       focusId: FOCUS_A,
-      messages: [{
+      items: snapshotItems([{
         id: "late-phone-message",
         role: "assistant",
         text: "late phone event",
         thinking: "",
         tools: [],
-      }],
+      }]),
       window: completeConversationWindow,
     }));
     expect(screen.getByRole("complementary", { name: "项目会话栏" }))
@@ -1069,7 +1090,6 @@ describe("App", () => {
   it("leaves initial phone focus alone until an empty project opens role selection", () => {
     mockPhoneViewport();
     socketMock.autoFocus = false;
-    localStorage.setItem("piweb.lastCwd", "E:\\work");
     localStorage.setItem("piweb.workspaces", JSON.stringify(["E:\\work"]));
     render(<App />);
     const sessionId = latestSessionId();
@@ -1803,12 +1823,11 @@ describe("App", () => {
     expect(current.unlock).toHaveBeenCalledTimes(2);
   });
 
-  it("remembers an opened workspace and restores the last one on startup", () => {
+  it("restores the most recently saved workspace on startup", () => {
     localStorage.setItem("piweb.workspaces", JSON.stringify([
-      "E:\\first",
       "E:\\last",
+      "E:\\first",
     ]));
-    localStorage.setItem("piweb.lastCwd", "E:\\last");
 
     render(<App />);
 
@@ -1825,7 +1844,6 @@ describe("App", () => {
       "E:\\first",
       "E:\\second",
     ]));
-    localStorage.setItem("piweb.lastCwd", "E:\\first");
     render(<App />);
     const firstSessionId = latestCommand("initialize").sessionId;
 
@@ -1843,15 +1861,15 @@ describe("App", () => {
       cwd: "E:\\second",
       conversation: { kind: "recent" },
     });
-    expect(localStorage.getItem("piweb.lastCwd")).toBe("E:\\second");
+    expect(JSON.parse(localStorage.getItem("piweb.workspaces") ?? "[]"))
+      .toEqual(["E:\\second", "E:\\first"]);
   });
 
-  it("closes the current workspace to the empty state without opening another", () => {
+  it("closes the current workspace without opening another until the next startup", () => {
     localStorage.setItem("piweb.workspaces", JSON.stringify([
       "E:\\first",
       "E:\\second",
     ]));
-    localStorage.setItem("piweb.lastCwd", "E:\\first");
     const view = render(<App />);
     const firstSessionId = latestCommand("initialize").sessionId;
 
@@ -1868,7 +1886,6 @@ describe("App", () => {
     )).toHaveLength(1);
     expect(JSON.parse(localStorage.getItem("piweb.workspaces") ?? "[]"))
       .toEqual(["E:\\second"]);
-    expect(localStorage.getItem("piweb.lastCwd")).toBe("");
     expect(screen.getByRole("heading", { name: "还没有打开工作区" }))
       .toBeInTheDocument();
     expect(screen.getByRole("button", { name: "打开工作区 second" }))
@@ -1880,9 +1897,11 @@ describe("App", () => {
     render(<App />);
     expect(socketMock.send.mock.calls.filter(
       ([command]) => command.type === "initialize",
-    )).toHaveLength(1);
-    expect(screen.getByRole("heading", { name: "还没有打开工作区" }))
-      .toBeInTheDocument();
+    )).toHaveLength(2);
+    expect(latestCommand("initialize")).toMatchObject({
+      cwd: "E:\\second",
+      conversation: { kind: "recent" },
+    });
   });
 
   it("reopens a visited workspace with its cached conversation while syncing", () => {
@@ -1890,7 +1909,6 @@ describe("App", () => {
       "E:\\first",
       "E:\\second",
     ]));
-    localStorage.setItem("piweb.lastCwd", "E:\\first");
     render(<App />);
     const firstSessionId = latestCommand("initialize").sessionId;
     const snapshotWindow = {
@@ -1918,14 +1936,14 @@ describe("App", () => {
         sessionId: firstSessionId,
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A,
-        messages: [{
+        items: snapshotItems([{
           id: "cached-user",
           runId: RUN_ID,
           role: "user",
           text: "缓存中的 A 对话",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window: snapshotWindow,
       });
     });
@@ -1977,14 +1995,14 @@ describe("App", () => {
         sessionId: firstSessionId,
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A,
-        messages: [{
+        items: snapshotItems([{
           id: "stale-user",
           runId: RUN_ID,
           role: "user",
           text: "不应覆盖缓存",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window: snapshotWindow,
       });
     });
@@ -2012,14 +2030,14 @@ describe("App", () => {
         sessionId: latestCommand("initialize").sessionId,
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A,
-        messages: [{
+        items: snapshotItems([{
           id: "fresh-user",
           runId: RUN_B,
           role: "user",
           text: "新的权威 A 对话",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window: snapshotWindow,
       });
     });
@@ -2061,14 +2079,14 @@ describe("App", () => {
         sessionId: originalSessionId,
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A,
-        messages: [{
+        items: snapshotItems([{
           id: "cached-before-empty",
           runId: RUN_ID,
           role: "user",
           text: "cached conversation before empty project",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window,
       });
     });
@@ -2176,13 +2194,13 @@ describe("App", () => {
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A_SECOND,
         role: defaultConversationRole(),
-        messages: [{
+        items: snapshotItems([{
           id: "reconnect-authoritative",
           role: "user",
           text: "exact reconnect authoritative",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window,
       });
     });
@@ -2199,7 +2217,6 @@ describe("App", () => {
 
   it("renders a correlated recent-initialize preview read-only until the exact snapshot", () => {
     localStorage.setItem("piweb.workspaces", JSON.stringify(["E:\\work"]));
-    localStorage.setItem("piweb.lastCwd", "E:\\work");
     socketMock.autoFocus = false;
     render(<App />);
 
@@ -2283,13 +2300,13 @@ describe("App", () => {
         conversationId: CONVERSATION_B,
         focusId: FOCUS_A_SECOND,
         role: defaultConversationRole(),
-        messages: [{
+        items: snapshotItems([{
           id: "fresh-authoritative-b",
           role: "user",
           text: "fresh authoritative conversation",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window: {
           omittedBefore: false,
           startsMidTurn: false,
@@ -2348,13 +2365,13 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A,
-        messages: [{
+        items: snapshotItems([{
           id: "source-a-before-rapid-navigation",
           role: "user",
           text: "source A before rapid navigation",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window,
       });
     });
@@ -2412,13 +2429,13 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A,
-        messages: [{
+        items: snapshotItems([{
           id: "late-a-snapshot",
           role: "assistant",
           text: "late A snapshot",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window,
       });
       socketMock.rawEmit?.({
@@ -2450,13 +2467,13 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_B,
         focusId: staleBFocusId,
-        messages: [{
+        items: snapshotItems([{
           id: "late-b-snapshot-before-c-attach",
           role: "assistant",
           text: "late B snapshot before C attach",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window,
       });
       socketMock.rawEmit?.({
@@ -2503,13 +2520,13 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_B,
         focusId: staleBFocusId,
-        messages: [{
+        items: snapshotItems([{
           id: "late-b-snapshot-after-c-attach",
           role: "assistant",
           text: "late B snapshot after C attach",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window,
       });
       socketMock.rawEmit?.({
@@ -2533,13 +2550,13 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_C,
         focusId: focusCId,
-        messages: [{
+        items: snapshotItems([{
           id: "authoritative-c-after-replacement",
           role: "assistant",
           text: "authoritative C after replacement",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window,
       });
     });
@@ -2639,13 +2656,13 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_B,
         focusId: focusBId,
-        messages: [{
+        items: snapshotItems([{
           id: "late-authoritative-b",
           role: "assistant",
           text: "late authoritative B",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window,
       });
       socketMock.rawEmit?.({
@@ -2678,13 +2695,13 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_C,
         focusId: focusCId,
-        messages: [{
+        items: snapshotItems([{
           id: "fresh-authoritative-c-after-attached-b",
           role: "assistant",
           text: "fresh authoritative C after attached B",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window,
       });
     });
@@ -2742,13 +2759,13 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_B,
         focusId: FOCUS_A_SECOND,
-        messages: [{
+        items: snapshotItems([{
           id: "focus-b-after-send-throw",
           role: "assistant",
           text: "focus B remained authoritative",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window: completeConversationWindow,
       });
     });
@@ -2832,13 +2849,13 @@ describe("App", () => {
         conversationId: CONVERSATION_B,
         focusId: focusBId,
         role: defaultConversationRole({ name: "Fallback B" }),
-        messages: [{
+        items: snapshotItems([{
           id: "deferred-authoritative-b",
           role: "assistant",
           text: "deferred authoritative B",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window: completeConversationWindow,
       });
     });
@@ -2852,15 +2869,14 @@ describe("App", () => {
       sessionId,
       conversationId: CONVERSATION_B,
       focusId: focusBId,
-      item: {
-        kind: "message",
+      item: snapshotItems([{
         id: "live-suffix-before-fallback-refresh",
         runId: RUN_B,
         role: "assistant",
         text: "live suffix recovered by refresh",
         thinking: "",
         tools: [],
-      },
+      }])[0] !,
     }));
     expect(screen.queryByText("live suffix recovered by refresh"))
       .not.toBeInTheDocument();
@@ -2901,7 +2917,7 @@ describe("App", () => {
       conversationId: CONVERSATION_B,
       focusId: focusBId,
       role: defaultConversationRole({ name: "Fallback B" }),
-      messages: [{
+      items: snapshotItems([{
         id: "refreshed-authoritative-b",
         role: "assistant",
         text: "deferred authoritative B",
@@ -2913,7 +2929,7 @@ describe("App", () => {
         text: "live suffix recovered by refresh",
         thinking: "",
         tools: [],
-      }],
+      }]),
       window: completeConversationWindow,
     }));
 
@@ -3005,13 +3021,13 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_B,
         focusId: focusBId,
-        messages: [{
+        items: snapshotItems([{
           id: "late-fallback-b-snapshot",
           role: "assistant",
           text: "late fallback B snapshot",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window: completeConversationWindow,
       });
     });
@@ -3073,13 +3089,13 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_B,
         focusId: focusBId,
-        messages: [{
+        items: snapshotItems([{
           id: "multi-hop-b",
           role: "assistant",
           text: "multi-hop fallback B",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window: completeConversationWindow,
       });
       socketMock.rawEmit?.(attachC);
@@ -3106,13 +3122,13 @@ describe("App", () => {
         conversationId: CONVERSATION_C,
         focusId: focusCId,
         role: defaultConversationRole({ name: "Newest Fallback C" }),
-        messages: [{
+        items: snapshotItems([{
           id: "multi-hop-c",
           role: "assistant",
           text: "multi-hop fallback C",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window: completeConversationWindow,
       });
       socketMock.rawEmit?.({
@@ -3165,13 +3181,13 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_C,
         focusId: focusCId,
-        messages: [{
+        items: snapshotItems([{
           id: "stale-c-after-d-success",
           role: "assistant",
           text: "stale C after D success",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window: completeConversationWindow,
       });
       socketMock.rawEmit?.({
@@ -3195,13 +3211,13 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_D,
         focusId: focusDId,
-        messages: [{
+        items: snapshotItems([{
           id: "latest-d-authoritative",
           role: "assistant",
           text: "latest D authoritative",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window: completeConversationWindow,
       });
     });
@@ -3220,7 +3236,6 @@ describe("App", () => {
       "E:\\first",
       "E:\\second",
     ]));
-    localStorage.setItem("piweb.lastCwd", "E:\\first");
     render(<App />);
     const sessionId = latestCommand("initialize").sessionId;
     act(() => {
@@ -3313,13 +3328,13 @@ describe("App", () => {
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A,
         role: defaultConversationRole(),
-        messages: [{
+        items: snapshotItems([{
           id: "source-a",
           role: "user",
           text: "source A authoritative",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window,
       });
     });
@@ -3382,13 +3397,13 @@ describe("App", () => {
         conversationId: CONVERSATION_B,
         focusId: focusBId,
         role: defaultConversationRole(),
-        messages: [{
+        items: snapshotItems([{
           id: "fresh-b",
           role: "user",
           text: "B authoritative snapshot",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window,
       });
     });
@@ -3475,13 +3490,13 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A,
-        messages: [{
+        items: snapshotItems([{
           id: "source-before-deletion",
           role: "user",
           text: "source before deletion",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window,
       });
     });
@@ -3660,7 +3675,7 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_B,
         focusId: FOCUS_A_SECOND,
-        messages: [],
+        items: [],
         window: completeConversationWindow,
       });
     });
@@ -3701,7 +3716,7 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A,
-        messages: [],
+        items: [],
         window: completeConversationWindow,
         transitionDiagnostics,
       });
@@ -3814,13 +3829,13 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A,
-        messages: [{
+        items: snapshotItems([{
           id: "source-before-stale-preview",
           role: "user",
           text: "source before stale preview",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window,
       });
     });
@@ -3977,14 +3992,14 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A,
-        messages: [{
+        items: snapshotItems([{
           id: "source-history",
           runId: RUN_ID,
           role: "user",
           text: "source A",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window,
       });
     });
@@ -4015,14 +4030,14 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A,
-        messages: [{
+        items: snapshotItems([{
           id: "late-source",
           runId: RUN_ID,
           role: "user",
           text: "late source snapshot",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window,
       });
       socketMock.rawEmit?.({
@@ -4030,15 +4045,14 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A,
-        item: {
-          kind: "message",
+        item: snapshotItems([{
           id: "late-source-live",
           runId: RUN_B,
           role: "assistant",
           text: "late source live",
           thinking: "",
           tools: [],
-        },
+        }])[0] !,
       });
     });
     expect(screen.getByRole("status", { name: /正在同步会话/ })).toBeInTheDocument();
@@ -4119,14 +4133,14 @@ describe("App", () => {
       sessionId,
       conversationId,
       focusId,
-      messages: [{
+      items: snapshotItems([{
         id: `${conversationId}-history`,
         runId: RUN_ID,
         role: "user",
         text,
         thinking: "",
         tools: [],
-      }],
+      }]),
       window,
     });
 
@@ -4139,15 +4153,14 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A,
-        item: {
-          kind: "message",
+        item: snapshotItems([{
           id: "a-live-item",
           runId: RUN_B,
           role: "assistant",
           text: "A live card",
           thinking: "",
           tools: [],
-        },
+        }])[0] !,
       });
     });
     expect(screen.getByRole("note", { name: "历史记录不完整" }))
@@ -4246,7 +4259,7 @@ describe("App", () => {
 
   it("reconnects a pending phone focus to its durable chat route", () => {
     mockPhoneViewport();
-    localStorage.setItem("piweb.lastCwd", "E:\\work");
+    localStorage.setItem("piweb.workspaces", JSON.stringify(["E:\\work"]));
     render(<App />);
     const initial = latestCommand("initialize");
 
@@ -4310,7 +4323,6 @@ describe("App", () => {
       "E:\\first",
       "E:\\second",
     ]));
-    localStorage.setItem("piweb.lastCwd", "E:\\first");
     render(<App />);
     const first = latestCommand("initialize");
     const window = {
@@ -4340,14 +4352,14 @@ describe("App", () => {
         sessionId: first.sessionId,
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A,
-        messages: [{
+        items: snapshotItems([{
           id: "first-cache",
           runId: RUN_ID,
           role: "user",
           text: "first cache",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window,
       });
     });
@@ -4384,14 +4396,14 @@ describe("App", () => {
         sessionId: second.sessionId,
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A_SECOND,
-        messages: [{
+        items: snapshotItems([{
           id: "second-cache",
           runId: RUN_B,
           role: "user",
           text: "second cache",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window,
       });
     });
@@ -4427,7 +4439,7 @@ describe("App", () => {
         sessionId: firstReturn.sessionId,
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A_SECOND,
-        messages: [],
+        items: [],
         window,
       });
     });
@@ -4492,14 +4504,14 @@ describe("App", () => {
       sessionId: reconnect.sessionId,
       conversationId: CONVERSATION_ID,
       focusId: FOCUS_A_SECOND,
-      messages: [{
+      items: snapshotItems([{
         id: "fresh-second",
         runId: RUN_ID,
         role: "user",
         text: "fresh second",
         thinking: "",
         tools: [],
-      }],
+      }]),
       window,
     }));
     expect(screen.queryByRole("status", { name: "正在同步工作区…" }))
@@ -4515,7 +4527,6 @@ describe("App", () => {
       "E:\\work",
       "E:\\other",
     ]));
-    localStorage.setItem("piweb.lastCwd", "E:\\work");
     render(<App />);
     const first = latestCommand("initialize").sessionId;
     act(() => {
@@ -4539,7 +4550,7 @@ describe("App", () => {
         sessionId: first,
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A,
-        messages: [],
+        items: [],
         window: {
           omittedBefore: false,
           startsMidTurn: false,
@@ -4601,7 +4612,6 @@ describe("App", () => {
   it("keeps a reconnect fallback send failure non-destructive and preserves its timing origin", async () => {
     const measure = vi.spyOn(performance, "measure");
     localStorage.setItem("piweb.workspaces", JSON.stringify(["E:\\work"]));
-    localStorage.setItem("piweb.lastCwd", "E:\\work");
     render(<App />);
     const first = latestCommand("initialize").sessionId;
     act(() => {
@@ -4625,7 +4635,7 @@ describe("App", () => {
         sessionId: first,
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A,
-        messages: [],
+        items: [],
         window: {
           omittedBefore: false,
           startsMidTurn: false,
@@ -4682,7 +4692,6 @@ describe("App", () => {
       "E:\\first",
       "E:\\second",
     ]));
-    localStorage.setItem("piweb.lastCwd", "E:\\first");
     render(<App />);
     const sessionId = latestSessionId();
     act(() => {
@@ -4704,13 +4713,13 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A,
-        messages: [{
+        items: snapshotItems([{
           id: "phone-source",
           role: "assistant",
           text: "phone source projection",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window: completeConversationWindow,
       });
     });
@@ -4727,11 +4736,14 @@ describe("App", () => {
   });
 
   it("preserves the current workspace projection when a rail switch cannot send", async () => {
-    localStorage.setItem("piweb.workspaces", JSON.stringify(["E:\\other"]));
+    localStorage.setItem("piweb.workspaces", JSON.stringify([
+      "E:\\default",
+      "E:\\other",
+    ]));
     const measure = vi.spyOn(performance, "measure");
     socketMock.autoFocus = false;
     render(<App />);
-    const sessionId = startFromSetup();
+    const sessionId = latestSessionId();
     const initialize = latestCommand("initialize");
     act(() => {
       socketMock.emit?.({
@@ -4764,13 +4776,13 @@ describe("App", () => {
       sessionId,
       conversationId: CONVERSATION_ID,
       focusId: FOCUS_A,
-      messages: [{
+      items: snapshotItems([{
         id: "preserved-source",
         role: "user",
         text: "preserved workspace transcript",
         thinking: "",
         tools: [],
-      }],
+      }]),
       window: completeConversationWindow,
     }));
 
@@ -4801,7 +4813,6 @@ describe("App", () => {
       "E:\\first",
       "E:\\second",
     ]));
-    localStorage.setItem("piweb.lastCwd", "E:\\first");
     render(<App />);
     const firstSessionId = latestCommand("initialize").sessionId;
     act(() => {
@@ -4823,7 +4834,7 @@ describe("App", () => {
         sessionId: firstSessionId,
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A,
-        messages: [],
+        items: [],
         window: {
           omittedBefore: false,
           startsMidTurn: false,
@@ -4860,7 +4871,6 @@ describe("App", () => {
       "E:\\first",
       "E:\\second",
     ]));
-    localStorage.setItem("piweb.lastCwd", "E:\\first");
     render(<App />);
     const firstSessionId = latestCommand("initialize").sessionId;
     act(() => {
@@ -4882,14 +4892,14 @@ describe("App", () => {
         sessionId: firstSessionId,
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A,
-        messages: [{
+        items: snapshotItems([{
           id: "mismatch-cache",
           runId: RUN_ID,
           role: "user",
           text: "旧项目画面",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window: {
           omittedBefore: false,
           startsMidTurn: false,
@@ -4947,7 +4957,6 @@ describe("App", () => {
       "E:\\second",
       "E:\\omitted",
     ]));
-    localStorage.setItem("piweb.lastCwd", "E:\\first");
     render(<App />);
 
     act(() => socketMock.emit?.({
@@ -4999,7 +5008,6 @@ describe("App", () => {
       "E:\\missing",
       "E:\\other",
     ]));
-    localStorage.setItem("piweb.lastCwd", "E:\\missing");
     render(<App />);
     const missing = latestCommand("initialize");
 
@@ -5023,7 +5031,7 @@ describe("App", () => {
     }));
     expect(latestCommand("initialize").cwd).toBe("E:\\other");
     expect(JSON.parse(localStorage.getItem("piweb.workspaces") ?? "[]"))
-      .toEqual(["E:\\missing", "E:\\other"]);
+      .toEqual(["E:\\other", "E:\\missing"]);
   });
 
   it("keeps a newer directory request authoritative over stale listing outcomes", () => {
@@ -5721,7 +5729,7 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_B,
         focusId: FOCUS_A_SECOND,
-        messages: [],
+        items: [],
         window: completeConversationWindow,
       });
     });
@@ -5845,7 +5853,7 @@ describe("App", () => {
           toolMode: "read_only",
           canManageSessions: true,
         },
-        messages: [],
+        items: [],
         window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
       });
     });
@@ -5898,7 +5906,7 @@ describe("App", () => {
           toolMode: nextRole.toolMode,
           canManageSessions: nextRole.canManageSessions,
         },
-        messages: [],
+        items: [],
         window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
       });
       socketMock.emit?.({
@@ -5964,7 +5972,7 @@ describe("App", () => {
           toolMode: "read_only",
           canManageSessions: true,
         },
-        messages: [],
+        items: [],
         window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
       });
     });
@@ -6033,21 +6041,19 @@ describe("App", () => {
         type: "conversation_snapshot",
         sessionId,
         conversationId: CONVERSATION_ID,
-        items: [{
-          kind: "message",
+        items: snapshotItems([{
           id: userMessageId,
           role: "user",
           text: "需要保留吗？",
           thinking: "",
           tools: [],
         }, {
-          kind: "message",
           id: `assistant:${assistantEntryId}`,
           role: "assistant",
           text: "**Agent 原文**",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
       });
     });
@@ -6564,7 +6570,7 @@ describe("App", () => {
         sessionId: reconnect.sessionId,
         conversationId: CONVERSATION_ID,
         focusId: reconnectFocusId,
-        messages: [],
+        items: [],
         window: completeConversationWindow,
       });
     });
@@ -6613,7 +6619,7 @@ describe("App", () => {
         sessionId: reconnect.sessionId,
         conversationId: CONVERSATION_ID,
         focusId: reconnectFocusId,
-        messages: [],
+        items: [],
         window: completeConversationWindow,
       });
     });
@@ -6684,7 +6690,7 @@ describe("App", () => {
         sessionId: reconnect.sessionId,
         conversationId: CONVERSATION_ID,
         focusId: settledFocusId,
-        messages: [],
+        items: [],
         window: completeConversationWindow,
       });
     });
@@ -6754,7 +6760,7 @@ describe("App", () => {
         sessionId: reconnect.sessionId,
         conversationId: CONVERSATION_ID,
         focusId: settledFocusId,
-        messages: [],
+        items: [],
         window: completeConversationWindow,
       });
     });
@@ -6835,7 +6841,7 @@ describe("App", () => {
         sessionId: reconnect.sessionId,
         conversationId: CONVERSATION_ID,
         focusId: reconnectFocusId,
-        messages: [],
+        items: [],
         window: completeConversationWindow,
       });
     });
@@ -6853,7 +6859,6 @@ describe("App", () => {
       "E:\\first",
       "E:\\second",
     ]));
-    localStorage.setItem("piweb.lastCwd", "E:\\first");
     render(<App />);
     const firstSessionId = latestCommand("initialize").sessionId;
     act(() => socketMock.emit?.({
@@ -6983,7 +6988,7 @@ describe("App", () => {
       conversationId: CONVERSATION_ID,
       focusId: FOCUS_A,
       projectionSeq: 1,
-      messages: [],
+      items: [],
       window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
     }));
     socketMock.send.mockClear();
@@ -7132,7 +7137,7 @@ describe("App", () => {
         type: "conversation_snapshot",
         sessionId,
         conversationId: CONVERSATION_ID,
-        messages: [{
+        items: snapshotItems([{
           id: "persisted-user",
           role: "user",
           text: "persisted question",
@@ -7144,20 +7149,20 @@ describe("App", () => {
           text: "persisted answer",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window: { omittedBefore: true, startsMidTurn: true, contentTruncated: true },
       });
       socketMock.emit?.({
         type: "conversation_snapshot",
         sessionId,
         conversationId: CONVERSATION_B,
-        messages: [{
+        items: snapshotItems([{
           id: "stale",
           role: "assistant",
           text: "wrong conversation",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
       });
     });
@@ -7201,7 +7206,7 @@ describe("App", () => {
       sessionId,
       conversationId: CONVERSATION_B,
       focusId: FOCUS_A,
-      messages: [],
+      items: [],
       window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
     }));
     expect(input).toBeDisabled();
@@ -7211,7 +7216,7 @@ describe("App", () => {
       sessionId,
       conversationId: CONVERSATION_ID,
       focusId: FOCUS_A,
-      messages: [],
+      items: [],
       window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
     }));
     expect(input).toBeEnabled();
@@ -7335,7 +7340,6 @@ describe("App", () => {
       "E:\\first",
       "E:\\second",
     ]));
-    localStorage.setItem("piweb.lastCwd", "E:\\first");
     render(<App />);
     const firstSessionId = latestCommand("initialize").sessionId;
     act(() => {
@@ -7791,13 +7795,13 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A,
-        messages: [{
+        items: snapshotItems([{
           id: "assistant-a",
           role: "assistant",
           text: "A still working",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
       });
     });
@@ -7812,7 +7816,7 @@ describe("App", () => {
       sessionId,
       conversationId: CONVERSATION_ID,
       focusId: FOCUS_A,
-      messages: [],
+      items: [],
       window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
     }));
 
@@ -7949,13 +7953,13 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A_SECOND,
-        messages: [{
+        items: snapshotItems([{
           id: "reopened-a-snapshot",
           role: "assistant",
           text: "new A focus runtime",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window: completeConversationWindow,
       });
     });
@@ -8871,13 +8875,13 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A,
-        messages: [{
+        items: snapshotItems([{
           id: "stale-a",
           role: "assistant",
           text: "late from first A focus",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
       });
       socketMock.rawEmit?.({
@@ -8885,13 +8889,13 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A_SECOND,
-        messages: [{
+        items: snapshotItems([{
           id: "fresh-a",
           role: "assistant",
           text: "fresh second A focus",
           thinking: "",
           tools: [],
-        }],
+        }]),
         window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
       });
       socketMock.rawEmit?.({
@@ -8899,14 +8903,13 @@ describe("App", () => {
         sessionId,
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A,
-        item: {
-          kind: "message",
+        item: snapshotItems([{
           id: "stale-live-a",
           role: "assistant",
           text: "late live item",
           thinking: "",
           tools: [],
-        },
+        }])[0] !,
       });
     });
 

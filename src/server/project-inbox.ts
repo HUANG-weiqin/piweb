@@ -89,7 +89,7 @@ const envelopeSchema = z.object({
     SHA256_HEX_PATTERN,
     "requestFingerprint must be a lowercase SHA-256 hex digest",
   ).optional(),
-  fromRunId: uuidSchema("fromRunId").optional(),
+  fromRunId: uuidSchema("fromRunId"),
   temporaryReturnAssignment: z.object({
     initialRunId: uuidSchema("temporaryReturnAssignment.initialRunId"),
     callerRunId: uuidSchema("temporaryReturnAssignment.callerRunId"),
@@ -138,7 +138,7 @@ export interface InboxEnvelope {
   delegationId?: string;
   requestFingerprint?: string;
   /** Frozen source run correlation used by durable wait rendezvous. */
-  fromRunId?: string;
+  fromRunId: string;
   /** Atomic proof that this message owned a temporary caller's exact wait. */
   temporaryReturnAssignment?: {
     initialRunId: string;
@@ -444,9 +444,7 @@ export function parseInboxEnvelope(value: unknown): InboxEnvelope {
     ...(raw.requestFingerprint === undefined
       ? {}
       : { requestFingerprint: raw.requestFingerprint }),
-    ...(raw.fromRunId === undefined
-      ? {}
-      : { fromRunId: raw.fromRunId }),
+    fromRunId: raw.fromRunId,
     ...(raw.temporaryReturnAssignment === undefined
       ? {}
       : {

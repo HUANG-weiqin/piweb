@@ -452,6 +452,7 @@ describe("isAllowedOrigin", () => {
       commandId: initializeCommandId,
       sessionId,
       cwd: join(tmpdir(), `piweb-missing-${randomUUID()}`),
+      conversation: { kind: "recent" },
     }));
     await expect(commandError).resolves.toMatchObject({
       type: "error",
@@ -494,6 +495,7 @@ describe("isAllowedOrigin", () => {
     const promptConversationId = randomUUID();
     const promptFocusId = randomUUID();
     const promptRunId = randomUUID();
+    const promptId = randomUUID();
     const promptError = nextEvent(socket);
     socket.send(JSON.stringify({
       type: "prompt",
@@ -501,6 +503,7 @@ describe("isAllowedOrigin", () => {
       conversationId: promptConversationId,
       focusId: promptFocusId,
       runId: promptRunId,
+      promptId,
       text: "retain the exact rejected focus",
     }));
     await expect(promptError).resolves.toMatchObject({

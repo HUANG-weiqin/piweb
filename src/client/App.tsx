@@ -81,7 +81,6 @@ import { useModalFocus } from "./lib/use-modal-focus";
 import { usePhoneSceneFocus } from "./lib/use-phone-scene-focus";
 import { usePhoneViewport } from "./lib/use-phone-viewport";
 
-const CWD_KEY = "piweb.lastCwd";
 const WORKSPACES_KEY = "piweb.workspaces";
 const MAX_WORKSPACES = 30;
 export const MAX_CACHED_WORKSPACES = 4;
@@ -184,7 +183,6 @@ export const getConversationPresentation = getProjection;
 function loadInitialWorkspaceState(
   phoneRoute?: PhoneHistoryRoute,
 ): InitialWorkspaceState {
-  const legacyCwd = readStoredString(CWD_KEY).trim();
   let parsed: unknown;
   try {
     parsed = JSON.parse(readStoredString(WORKSPACES_KEY) || "[]");
@@ -204,11 +202,6 @@ function loadInitialWorkspaceState(
       if (workspaces.length === MAX_WORKSPACES) break;
     }
   }
-  if (legacyCwd && !seen.has(workspaceKey(legacyCwd))) {
-    workspaces.unshift(legacyCwd);
-    seen.add(workspaceKey(legacyCwd));
-    if (workspaces.length > MAX_WORKSPACES) workspaces.pop();
-  }
   const routeCwd = phoneRoute?.screen === "workspaces"
     ? undefined
     : phoneRoute?.cwd;
@@ -217,12 +210,7 @@ function loadInitialWorkspaceState(
     seen.add(workspaceKey(routeCwd));
     if (workspaces.length > MAX_WORKSPACES) workspaces.pop();
   }
-  const activeCwd = routeCwd
-    ?? (legacyCwd
-      ? workspaces.find(
-          (cwd) => workspaceKey(cwd) === workspaceKey(legacyCwd),
-        ) ?? workspaces[0] ?? ""
-      : "");
+  const activeCwd = routeCwd ?? workspaces[0] ?? "";
   return { workspaces, activeCwd };
 }
 
@@ -876,11 +864,10 @@ export function App() {
     const existingIndex = current.findIndex(
       (candidate) => workspaceKey(candidate) === key,
     );
-    const next = existingIndex === -1
-      ? [...current, cwd].slice(-MAX_WORKSPACES)
-      : current.map((candidate, index) =>
-          index === existingIndex ? cwd : candidate
-        );
+    const next = [
+      cwd,
+      ...current.filter((_, index) => index !== existingIndex),
+    ].slice(0, MAX_WORKSPACES);
     workspacesRef.current = next;
     setWorkspaces(next);
     writeStoredString(WORKSPACES_KEY, JSON.stringify(next));
@@ -1227,7 +1214,6 @@ export function App() {
     setSetupCwd(nextState.cwd);
     rememberWorkspace(nextState.cwd);
     markWorkspaceAvailable(nextState.cwd);
-    writeStoredString(CWD_KEY, nextState.cwd);
     setError(nextState.registryError ?? "");
     if (
       nextState.conversationId
@@ -1271,11 +1257,7 @@ export function App() {
       sessionId: focus.sessionId,
       conversationId: focus.conversationId,
       focusId: focus.focusId,
-      items: event.items
-        ?? (event.messages ?? []).map((message) => ({
-          kind: "message" as const,
-          ...message,
-        })),
+      items: event.items,
       projectionSeq: event.projectionSeq,
       historyWindow: event.window,
     });
@@ -2627,7 +2609,6 @@ export function App() {
         if (
           event.commandId
           && (event.operation === "set_api_key"
-            || event.operation === "select_model"
             || event.operation === "refresh_models")
         ) {
           if (!event.sessionId) {
@@ -2891,7 +2872,6 @@ export function App() {
     clearSessionProjection();
     setSetupOpen(false);
     rememberWorkspace(normalizedCwd);
-    writeStoredString(CWD_KEY, normalizedCwd);
     setActiveCwd(normalizedCwd);
     activeCwdRef.current = normalizedCwd;
     sessionIdRef.current = sessionId;
@@ -3633,7 +3613,6 @@ export function App() {
     sessionIdRef.current = "";
     conversationIdRef.current = "";
     focusRef.current = undefined;
-    writeStoredString(CWD_KEY, "");
     setActiveCwd("");
     setSetupCwd("");
     setError("");

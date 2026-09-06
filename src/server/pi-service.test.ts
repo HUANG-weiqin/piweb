@@ -5884,14 +5884,6 @@ describe("PiConnection coordinated project view", () => {
         });
       });
 
-      await expect(harness.connection.handle({
-        type: "select_model",
-        commandId: randomUUID(),
-        sessionId: SESSION_A,
-        provider: "test",
-        modelId: "model",
-      })).rejects.toThrow("fixed by its role");
-
       const deleteCommandId = randomUUID();
       await harness.connection.handle({
         type: "delete_conversation",

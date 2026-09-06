@@ -101,23 +101,6 @@ function isReloadManifest(value, repoRoot, appPort) {
     && new Set(value.targets.map(targetKey)).size === value.targets.length;
 }
 
-function isLegacyReloadManifest(value, repoRoot, appPort) {
-  return isRecord(value)
-    && hasOnlyKeys(value, [
-      "version",
-      "repoCwd",
-      "appPort",
-      "requestId",
-      "pending",
-    ])
-    && value.version === 1
-    && value.repoCwd === repoRoot
-    && value.appPort === appPort
-    && isUuid(value.requestId)
-    && isPreparedReloadTargets(value.pending)
-    && new Set(value.pending.map(targetKey)).size === value.pending.length;
-}
-
 export async function readReloadManifest(path, repoRoot, appPort) {
   let value;
   try {
@@ -127,26 +110,7 @@ export async function readReloadManifest(path, repoRoot, appPort) {
     throw error;
   }
   if (isReloadManifest(value, repoRoot, appPort)) return value;
-  if (!isLegacyReloadManifest(value, repoRoot, appPort)) {
-    throw new Error("The Pi Web reload manifest is invalid.");
-  }
-
-  // A v1 pending target had no adoption identity. Persist its v2
-  // continuation identity before exposing it to a child so every later read
-  // observes the same crash-safe handoff authority.
-  const manifest = {
-    version: 2,
-    repoCwd: value.repoCwd,
-    appPort: value.appPort,
-    requestId: value.requestId,
-    targets: mergeTargets([], value.pending),
-  };
-  if (manifest.targets.length === 0) {
-    await rm(path, { force: true });
-    return undefined;
-  }
-  await writeReloadManifest(path, manifest);
-  return manifest;
+  throw new Error("The Pi Web reload manifest is invalid.");
 }
 
 function mergeTargets(previous, current) {

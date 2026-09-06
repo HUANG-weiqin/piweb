@@ -4,7 +4,6 @@ import {
   readFile,
   readdir,
   rm,
-  stat,
   symlink,
   unlink,
   writeFile,
@@ -93,29 +92,6 @@ function persistedRole(role: RoleTemplateV1) {
   };
 }
 
-function withoutServiceTier(role: RoleTemplateV1) {
-  const {
-    compactionModel: _compactionModel,
-    defaultServiceTier: _defaultServiceTier,
-    ...legacy
-  } = role;
-  return legacy;
-}
-
-function withoutPersistedServiceTier(role: RoleTemplateV1) {
-  const {
-    compactionModel: _compactionModel,
-    defaultServiceTier: _defaultServiceTier,
-    ...legacy
-  } = persistedRole(role);
-  return legacy;
-}
-
-function withoutPersistedCompactionModel(role: RoleTemplateV1) {
-  const { compactionModel: _compactionModel, ...legacy } = persistedRole(role);
-  return legacy;
-}
-
 function promptPath(rolesPath: string, role: RoleTemplateV1): string {
   return join(
     dirname(rolesPath),
@@ -167,140 +143,46 @@ describe("RoleStore", () => {
     expect(reopened.listRoles()).toEqual([persistedDefault()]);
   });
 
-  it("migrates the untouched v1 default copy without overwriting later edits", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-07-19T11:00:00.000Z"));
-    const rolesPath = await createRolesPath("piweb-role-store-v1-default-");
-    await mkdir(dirname(rolesPath), { recursive: true });
-    await writeFile(rolesPath, `${JSON.stringify({
-      version: 1,
-      roles: [withoutServiceTier(persistedDefault({
-        revision: 3,
-        name: "Default",
-        description: "",
-      }))],
-    }, null, 2)}\n`, "utf8");
+  it("rejects legacy versions and missing required v7 fields without rewriting", async () => {
+    const invalidDocuments: unknown[] = [
+      ...[1, 2, 3, 4, 5, 6].map((version) => ({
+        version,
+        roles: [persistedRole(persistedDefault())],
+      })),
+      ...[
+        "id",
+        "revision",
+        "name",
+        "description",
+        "systemPromptFile",
+        "model",
+        "compactionModel",
+        "defaultThinkingLevel",
+        "defaultServiceTier",
+        "toolMode",
+        "canManageSessions",
+        "createdAt",
+        "updatedAt",
+      ].map((field) => {
+        const role = persistedRole(persistedDefault()) as Record<string, unknown>;
+        delete role[field];
+        return { version: ROLE_STORE_VERSION, roles: [role] };
+      }),
+    ];
 
-    const store = await RoleStore.open(rolesPath, initialModel);
+    for (const [index, document] of invalidDocuments.entries()) {
+      const rolesPath = await createRolesPath(
+        `piweb-role-store-strict-v7-${index}-`,
+      );
+      await mkdir(dirname(rolesPath), { recursive: true });
+      const raw = `${JSON.stringify(document, null, 2)}\n`;
+      await writeFile(rolesPath, raw, "utf8");
 
-    expect(store.getRole("default")).toEqual(persistedDefault({
-      revision: 4,
-      updatedAt: "2026-07-19T11:00:00.000Z",
-    }));
-    const migratedDefault = persistedDefault({
-      revision: 4,
-      updatedAt: "2026-07-19T11:00:00.000Z",
-    });
-    expect(JSON.parse(await readFile(rolesPath, "utf8"))).toEqual({
-      version: ROLE_STORE_VERSION,
-      roles: [persistedRole(migratedDefault)],
-    });
-    await expect(
-      readFile(promptPath(rolesPath, migratedDefault), "utf8"),
-    ).resolves.toBe("");
-
-    const editedRolesPath = await createRolesPath(
-      "piweb-role-store-v1-edited-default-",
-    );
-    await mkdir(dirname(editedRolesPath), { recursive: true });
-    const editedDefault = persistedDefault({
-      name: "General",
-      description: "",
-    });
-    await writeFile(editedRolesPath, `${JSON.stringify({
-      version: 1,
-      roles: [withoutServiceTier(editedDefault)],
-    }, null, 2)}\n`, "utf8");
-
-    const editedStore = await RoleStore.open(editedRolesPath, initialModel);
-    expect(editedStore.getRole("default")).toEqual(editedDefault);
-  });
-
-  it("migrates v4 prompts byte-for-byte and reopens the v5 store", async () => {
-    const rolesPath = await createRolesPath("piweb-role-store-v4-prompt-");
-    const systemPrompt = "\uFEFF  first line\r\nsecond line with é\n\u0000trailing  ";
-    const legacyRole = persistedDefault({
-      revision: 7,
-      systemPrompt,
-      updatedAt: "2026-07-19T10:01:00.000Z",
-    });
-    await mkdir(dirname(rolesPath), { recursive: true });
-    await writeFile(rolesPath, `${JSON.stringify({
-      version: 4,
-      roles: [withoutServiceTier(legacyRole)],
-    }, null, 2)}\n`, "utf8");
-
-    const store = await RoleStore.open(rolesPath, initialModel);
-
-    expect(store.listRoles()).toEqual([legacyRole]);
-    expect(JSON.parse(await readFile(rolesPath, "utf8"))).toEqual({
-      version: ROLE_STORE_VERSION,
-      roles: [persistedRole(legacyRole)],
-    });
-    await expect(
-      readFile(promptPath(rolesPath, legacyRole), "utf8"),
-    ).resolves.toBe(systemPrompt);
-
-    const reopened = await RoleStore.open(rolesPath, initialModel);
-    expect(reopened.getRole("default")).toEqual(legacyRole);
-  });
-
-  it("migrates a v5 manifest default service tier without rewriting its prompt", async () => {
-    const rolesPath = await createRolesPath("piweb-role-store-v5-tier-");
-    const role = persistedDefault({ systemPrompt: "external prompt" });
-    await mkdir(join(dirname(rolesPath), "role-prompts"), { recursive: true });
-    const rolePromptPath = promptPath(rolesPath, role);
-    await writeFile(rolePromptPath, role.systemPrompt, "utf8");
-    const promptIdentity = await stat(rolePromptPath, { bigint: true });
-    await writeFile(rolesPath, `${JSON.stringify({
-      version: 5,
-      roles: [withoutPersistedServiceTier(role)],
-    }, null, 2)}\n`, "utf8");
-
-    const store = await RoleStore.open(rolesPath, initialModel);
-
-    expect(store.getRole("default")?.defaultServiceTier).toBeNull();
-    expect(store.getRole("default")?.compactionModel).toBeNull();
-    expect(JSON.parse(await readFile(rolesPath, "utf8"))).toEqual({
-      version: ROLE_STORE_VERSION,
-      roles: [persistedRole(role)],
-    });
-    await expect(readFile(rolePromptPath, "utf8"))
-      .resolves.toBe("external prompt");
-    const migratedPromptIdentity = await stat(rolePromptPath, { bigint: true });
-    expect({
-      dev: migratedPromptIdentity.dev,
-      ino: migratedPromptIdentity.ino,
-    }).toEqual({
-      dev: promptIdentity.dev,
-      ino: promptIdentity.ino,
-    });
-  });
-
-  it("migrates a v6 manifest compaction model without changing role revision", async () => {
-    const rolesPath = await createRolesPath("piweb-role-store-v6-compactor-");
-    const role = persistedDefault({
-      revision: 7,
-      systemPrompt: "external prompt",
-      updatedAt: "2026-07-19T10:01:00.000Z",
-    });
-    await mkdir(join(dirname(rolesPath), "role-prompts"), { recursive: true });
-    await writeFile(promptPath(rolesPath, role), role.systemPrompt, "utf8");
-    await writeFile(rolesPath, `${JSON.stringify({
-      version: 6,
-      roles: [withoutPersistedCompactionModel(role)],
-    }, null, 2)}\n`, "utf8");
-
-    const store = await RoleStore.open(rolesPath, initialModel);
-
-    expect(store.getRole("default")).toEqual({
-      ...role,
-      compactionModel: null,
-    });
-    expect(JSON.parse(await readFile(rolesPath, "utf8"))).toEqual({
-      version: ROLE_STORE_VERSION,
-      roles: [persistedRole({ ...role, compactionModel: null })],
-    });
+      await expect(RoleStore.open(rolesPath, initialModel)).rejects.toThrow(
+        "Invalid role store",
+      );
+      await expect(readFile(rolesPath, "utf8")).resolves.toBe(raw);
+    }
   });
 
   it("reads an externally edited prompt on every public read", async () => {
@@ -315,36 +197,27 @@ describe("RoleStore", () => {
     expect(store.getRole("default")?.systemPrompt).toBe("edited outside the store");
   });
 
-  it("rejects role IDs that differ only by case in every supported store version", async () => {
+  it("rejects role IDs that differ only by case in the v7 store", async () => {
     const id = "f23db1e6-c657-4dac-8b7e-a14fdecc5f21";
     const lower = persistedDefault({ id, name: "Lower" });
     const upper = persistedDefault({ id: id.toUpperCase(), name: "Upper" });
+    const rolesPath = await createRolesPath("piweb-role-store-case-id-");
+    await mkdir(dirname(rolesPath), { recursive: true });
+    await mkdir(join(dirname(rolesPath), "role-prompts"), {
+      recursive: true,
+    });
+    await writeFile(promptPath(rolesPath, lower), lower.systemPrompt);
+    await writeFile(promptPath(rolesPath, upper), upper.systemPrompt);
+    const raw = `${JSON.stringify({
+      version: ROLE_STORE_VERSION,
+      roles: [persistedRole(lower), persistedRole(upper)],
+    }, null, 2)}\n`;
+    await writeFile(rolesPath, raw, "utf8");
 
-    for (const version of [1, 2, 3, 4, ROLE_STORE_VERSION]) {
-      const rolesPath = await createRolesPath(
-        `piweb-role-store-case-id-${version}-`,
-      );
-      await mkdir(dirname(rolesPath), { recursive: true });
-      if (version === ROLE_STORE_VERSION) {
-        await mkdir(join(dirname(rolesPath), "role-prompts"), {
-          recursive: true,
-        });
-        await writeFile(promptPath(rolesPath, lower), lower.systemPrompt);
-        await writeFile(promptPath(rolesPath, upper), upper.systemPrompt);
-      }
-      const raw = `${JSON.stringify({
-        version,
-        roles: version === ROLE_STORE_VERSION
-          ? [persistedRole(lower), persistedRole(upper)]
-          : [withoutServiceTier(lower), withoutServiceTier(upper)],
-      }, null, 2)}\n`;
-      await writeFile(rolesPath, raw, "utf8");
-
-      await expect(RoleStore.open(rolesPath, initialModel)).rejects.toThrow(
-        "duplicate role id",
-      );
-      await expect(readFile(rolesPath, "utf8")).resolves.toBe(raw);
-    }
+    await expect(RoleStore.open(rolesPath, initialModel)).rejects.toThrow(
+      "duplicate role id",
+    );
+    await expect(readFile(rolesPath, "utf8")).resolves.toBe(raw);
   });
 
   it("rejects a stale prompt base and saves after reloading the current prompt", async () => {
@@ -399,40 +272,6 @@ describe("RoleStore", () => {
     const store = await RoleStore.open(rolesPath, null);
 
     expect(store.getRole("default")?.model).toBeNull();
-  });
-
-  it("defaults legacy role behavior closed", async () => {
-    const rolesPath = await createRolesPath("piweb-role-store-legacy-capability-");
-    await mkdir(dirname(rolesPath), { recursive: true });
-    const legacyRole = persistedDefault();
-    const {
-      canManageSessions: _omittedCapability,
-      toolMode: _omittedToolMode,
-      compactionModel: _omittedCompactionModel,
-      defaultThinkingLevel: _omittedThinkingLevel,
-      defaultServiceTier: _omittedServiceTier,
-      ...legacyFields
-    } = legacyRole;
-    await writeFile(rolesPath, `${JSON.stringify({
-      version: 2,
-      roles: [legacyFields],
-    }, null, 2)}\n`, "utf8");
-
-    const store = await RoleStore.open(rolesPath, null);
-
-    expect(store.getRole("default")?.canManageSessions).toBe(false);
-    expect(store.getRole("default")?.toolMode).toBe("read_only");
-    expect(store.getRole("default")?.defaultThinkingLevel).toBe("off");
-    expect(store.getRole("default")?.compactionModel).toBeNull();
-    expect(store.getRole("default")?.defaultServiceTier).toBeNull();
-    expect(JSON.parse(await readFile(rolesPath, "utf8"))).toMatchObject({
-      version: ROLE_STORE_VERSION,
-      roles: [{
-        defaultThinkingLevel: "off",
-        defaultServiceTier: null,
-        toolMode: "read_only",
-      }],
-    });
   });
 
   it("allows editing and deleting the seeded role without recreating it", async () => {
@@ -723,7 +562,7 @@ describe("RoleStore", () => {
     });
   });
 
-  it("fails closed on invalid v5 prompt references and files", async () => {
+  it("fails closed on invalid v7 prompt references and files", async () => {
     for (const kind of [
       "missing",
       "invalid-utf8",
@@ -733,13 +572,10 @@ describe("RoleStore", () => {
       "path-traversal",
     ] as const) {
       const rolesPath = await createRolesPath(
-        `piweb-role-store-v5-prompt-${kind}-`,
+        `piweb-role-store-v7-prompt-${kind}-`,
       );
       const role = persistedDefault();
-      const manifest = withoutPersistedServiceTier(role) as Record<
-        string,
-        unknown
-      >;
+      const manifest = persistedRole(role) as Record<string, unknown>;
       await mkdir(dirname(rolesPath), { recursive: true });
       const promptDirectory = join(dirname(rolesPath), "role-prompts");
       await mkdir(promptDirectory, { recursive: true });
@@ -747,7 +583,7 @@ describe("RoleStore", () => {
         manifest.systemPromptFile = "role-prompts/../outside.md";
       }
       const raw = `${JSON.stringify({
-        version: 5,
+        version: ROLE_STORE_VERSION,
         roles: [manifest],
       }, null, 2)}\n`;
       await writeFile(rolesPath, raw, "utf8");
@@ -783,44 +619,42 @@ describe("RoleStore", () => {
     }
   });
 
-  it("fails closed on corrupt, unknown, or structurally invalid v1 files", async () => {
+  it("fails closed on corrupt, unknown, or structurally invalid v7 files", async () => {
+    const persisted = persistedRole(persistedDefault());
     const {
       defaultThinkingLevel: _omittedThinkingLevel,
       ...missingThinkingLevel
-    } = persistedDefault();
+    } = persisted;
     const {
       compactionModel: _omittedCompactionModel,
       ...missingCompactionModel
-    } = persistedRole(persistedDefault());
+    } = persisted;
     const invalidDocuments: unknown[] = [
       "{",
-      { version: 5, roles: [persistedDefault()] },
       { version: ROLE_STORE_VERSION, roles: [missingThinkingLevel] },
       { version: ROLE_STORE_VERSION, roles: [missingCompactionModel] },
-      { version: 1, roles: [persistedDefault()], extra: true },
+      { version: ROLE_STORE_VERSION, roles: [persisted], extra: true },
       {
-        version: 1,
-        roles: [{ ...persistedDefault(), extra: true }],
+        version: ROLE_STORE_VERSION,
+        roles: [{ ...persisted, extra: true }],
       },
       {
-        version: 1,
-        roles: [persistedDefault({
+        version: ROLE_STORE_VERSION,
+        roles: [{
+          ...persisted,
           model: {
             ...initialModel,
             available: true,
           } as unknown as RoleModelReference,
-        })],
+        }],
       },
       {
-        version: 1,
-        roles: [persistedDefault({ id: "not-default" })],
+        version: ROLE_STORE_VERSION,
+        roles: [{ ...persisted, id: "not-default" }],
       },
       {
-        version: 1,
-        roles: [
-          persistedDefault(),
-          persistedDefault({ name: "Duplicate default" }),
-        ],
+        version: ROLE_STORE_VERSION,
+        roles: [persisted, { ...persisted, name: "Duplicate default" }],
       },
     ];
 

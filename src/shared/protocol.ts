@@ -14,7 +14,6 @@ export const MAX_PROJECT_CONVERSATION_NAME_CHARACTERS = 24;
 export const MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS = 500;
 export const MAX_PROMPT_CHARACTERS = 200_000;
 export const MAX_PENDING_PROMPTS_PER_CONVERSATION = 64;
-export const MAX_PENDING_PROMPT_ATTENTION_REASON_CHARACTERS = 1_000;
 export const MAX_LOOP_LIST_ITEMS = 100;
 export const MAX_LOOP_LIST_ITEM_ID_CHARACTERS = 128;
 export const MAX_LOOP_LIST_ITEM_TEXT_CHARACTERS = 512;
@@ -33,7 +32,7 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // v42: successful workspace and conversation switches may carry bounded host
 // phase durations on their correlated authority snapshot (or empty attach).
 // v41: default compaction attempts and successful durable provenance distinguish
-// the requested model identity from legacy and custom summaries.
+// the requested model identity from built-in and custom summaries.
 // v40: role templates and frozen conversation role snapshots carry a required
 // nullable compaction model; null follows the frozen primary model.
 // v39: LoopList items project explicit pending, active, or completed status;
@@ -50,7 +49,7 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
-export const PROTOCOL_VERSION = 46;
+export const PROTOCOL_VERSION = 47;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
@@ -207,7 +206,7 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
   }),
   z.object({
     type: z.literal("initialize"),
-    commandId: commandIdSchema.optional(),
+    commandId: commandIdSchema,
     sessionId: sessionIdSchema,
     cwd: required.max(4096),
     conversation: z.discriminatedUnion("kind", [
@@ -217,7 +216,7 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
         roleId: roleIdSchema.optional(),
       }),
       z.object({ kind: z.literal("open"), conversationId: conversationIdSchema }),
-    ]).optional(),
+    ]),
   }),
   z.object({
     type: z.literal("focus_conversation"),
@@ -249,7 +248,7 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
     focusId: commandIdSchema,
     runId: runIdSchema,
     /** 客户端生成的消息身份；busy 时用于 prompt_admitted/prompt_delivered 关联。 */
-    promptId: z.string().uuid().optional(),
+    promptId: z.string().uuid(),
     text: required.max(MAX_PROMPT_CHARACTERS),
   }),
   z.object({
@@ -273,13 +272,6 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
     sessionId: sessionIdSchema,
     requestId: extensionUIRequestIdSchema,
     response: extensionUIResponseSchema,
-  }),
-  z.object({
-    type: z.literal("select_model"),
-    commandId: commandIdSchema,
-    sessionId: sessionIdSchema,
-    provider: required,
-    modelId: required,
   }),
   z.object({
     type: z.literal("set_thinking"),
@@ -388,13 +380,6 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
 
 const clientCommandSchema = clientCommandUnionSchema.superRefine(
   (command, context) => {
-    if (command.type === "initialize" && command.commandId === undefined) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "initialize requires an exact commandId",
-        path: ["commandId"],
-      });
-    }
     if (
       command.type === "initialize"
       && command.conversation?.kind === "new"
@@ -421,9 +406,8 @@ const clientCommandSchema = clientCommandUnionSchema.superRefine(
 );
 
 export type ClientCommand = z.infer<typeof clientCommandSchema>;
-export type AcknowledgedSettingOperation = "select_model" | "set_api_key" | "refresh_models";
+export type AcknowledgedSettingOperation = "set_api_key" | "refresh_models";
 const ACKNOWLEDGED_COMMAND_OPERATIONS = [
-  "select_model",
   "set_api_key",
   "refresh_models",
   "steer",
@@ -557,7 +541,7 @@ export interface ConversationHistoryMessage {
   text: string;
   thinking: string;
   tools: ConversationHistoryTool[];
-  parts?: ConversationHistoryMessagePart[];
+  parts: ConversationHistoryMessagePart[];
   usage?: TokenUsage;
 }
 
@@ -852,8 +836,7 @@ export type ServerEvent =
       focusId: string;
       role?: ConversationRoleSnapshot;
       projectionSeq?: number;
-      messages?: ConversationHistoryMessage[];
-      items?: ConversationHistoryItem[];
+      items: ConversationHistoryItem[];
       /** busy 时已接受、尚未投递的浏览器 prompt（服务端内存态，重启丢失为接受项）。 */
       pendingPrompts?: PendingPromptAdmissionSnapshot[];
       loopList?: LoopList;
@@ -1099,7 +1082,6 @@ const commandTypeSchema = z.enum([
   "steer",
   "abort",
   "extension_ui_response",
-  "select_model",
   "set_thinking",
   "set_compaction_threshold",
   "set_service_tier",
@@ -1243,7 +1225,7 @@ const conversationHistoryMessageSchema = z.object({
       kind: z.literal("tool"),
       toolCallId: z.string(),
     }),
-  ])).max(200).optional(),
+  ])).max(200),
   usage: tokenUsageSchema.optional(),
 });
 const conversationHistoryItemSchema: z.ZodType<ConversationHistoryItem> =
@@ -1460,8 +1442,7 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     focusId: focusIdSchema,
     role: conversationRoleSnapshotSchema.optional(),
     projectionSeq: z.number().int().nonnegative().optional(),
-    messages: z.array(conversationHistoryMessageSchema).optional(),
-    items: z.array(conversationHistoryItemSchema).optional(),
+    items: z.array(conversationHistoryItemSchema),
     pendingPrompts: z.array(z.object({
       promptId: z.string().uuid(),
       text: required.max(MAX_PROMPT_CHARACTERS),
@@ -1558,20 +1539,6 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
 
 export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.superRefine(
   (event, context) => {
-    if (
-      event.type === "conversation_snapshot"
-      && (
-        (event.messages === undefined)
-        === (event.items === undefined)
-      )
-    ) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message:
-          "conversation_snapshot requires exactly one of messages or items",
-        path: ["items"],
-      });
-    }
     if (
       (event.type === "conversation_snapshot"
         || event.type === "conversation_preview")
@@ -1754,8 +1721,7 @@ export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.
       event.type === "error"
       && event.commandId
       && (
-        event.operation === "select_model"
-        || event.operation === "steer"
+        event.operation === "steer"
         || event.operation === "set_api_key"
         || event.operation === "refresh_models"
         || event.operation === "delete_conversation"

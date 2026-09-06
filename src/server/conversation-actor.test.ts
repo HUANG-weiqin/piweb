@@ -35,13 +35,11 @@ import {
   createLoopListContinueEntry,
   createLoopListEntry,
   createServiceTierSelectionEntry,
-  LEGACY_LOOP_LIST_CUSTOM_TYPE,
   LOOP_LIST_CUSTOM_TYPE,
 } from "./conversation-meta.js";
 import { canonicalMutationPathKey } from "./edit-budget.js";
 import {
   ConversationActor,
-  createPendingPromptBatchGuidance,
   type ConversationActorEvent,
   type ConversationActorOpenOptions,
 } from "./conversation-actor.js";
@@ -434,7 +432,11 @@ function profile(): ConversationMeta {
         provider: "test",
         id: "model",
       },
+      compactionModel: null,
+      defaultThinkingLevel: "off",
+      defaultServiceTier: null,
       toolMode: "read_only",
+      canManageSessions: false,
     },
     lifecycle: { kind: "normal" },
     createdBy: { kind: "user" },
@@ -2066,34 +2068,6 @@ describe("ConversationActor", () => {
     expect(aggregateReservedConversationEntries(manager.getBranch()).loopList)
       .toMatchObject({ updatedAt: "2026-07-19T10:01:00.000Z" });
     await reopened.actor.dispose();
-  });
-
-  it("restores legacy LoopList items as pending or completed without inventing active work", async () => {
-    const manager = SessionManager.inMemory(process.cwd(), { id: CONVERSATION_ID });
-    manager.appendCustomEntry(LEGACY_LOOP_LIST_CUSTOM_TYPE, {
-      items: [
-        { id: "legacy-pending", text: "Pending legacy work", checked: false },
-        { id: "legacy-done", text: "Completed legacy work", checked: true },
-      ],
-      armed: true,
-      updatedAt: "2026-07-19T10:00:00.000Z",
-    });
-    const entriesBeforeOpen = structuredClone(manager.getEntries());
-
-    const fixture = await openActor({ sessionManager: manager });
-
-    expect(fixture.actor.getLoopList()).toEqual({
-      items: [
-        { id: "legacy-pending", text: "Pending legacy work", status: "pending" },
-        { id: "legacy-done", text: "Completed legacy work", status: "completed" },
-      ],
-      armed: true,
-    });
-    expect(fixture.actor.getLoopList().items).not.toContainEqual(
-      expect.objectContaining({ status: "active" }),
-    );
-    expect(manager.getEntries()).toEqual(entriesBeforeOpen);
-    await fixture.actor.dispose();
   });
 
   it("restores LoopList state from the active branch instead of a later inactive branch", async () => {

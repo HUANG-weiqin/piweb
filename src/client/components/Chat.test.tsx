@@ -31,14 +31,34 @@ const mermaidMock = vi.hoisted(() => ({
 
 vi.mock("mermaid", () => ({ default: mermaidMock }));
 
-function messageItems(...messages: ChatMessage[]): ChatMessageItem[] {
-  return messages.map((message) => ({ kind: "message", ...message }));
+type ChatMessageFixture = Omit<ChatMessage, "parts"> & {
+  parts?: ChatMessage["parts"];
+};
+
+function messageFixture(fixture: ChatMessageFixture): ChatMessage {
+  const { parts, thinking, tools, text } = fixture;
+  return {
+    ...fixture,
+    parts: parts ?? [
+      ...(thinking ? [{ kind: "thinking" as const, text: thinking }] : []),
+      ...tools.map((tool) => ({ kind: "tool" as const, toolId: tool.id })),
+      ...(text ? [{ kind: "text" as const, text }] : []),
+    ],
+  };
 }
 
-function firstMessage(chat: ChatState): ChatMessage {
+function messageItem(fixture: ChatMessageFixture): ChatMessageItem {
+  return { kind: "message", ...messageFixture(fixture) };
+}
+
+function messageItems(...messages: ChatMessageFixture[]): ChatMessageItem[] {
+  return messages.map(messageItem);
+}
+
+function firstMessage(chat: ChatState): ChatMessageFixture {
   const item = chat.items[0];
   if (!item || item.kind !== "message") throw new Error("message not found");
-  return item;
+  return { ...item, parts: undefined };
 }
 
 const emptyChat: ChatState = { items: [] };
@@ -418,7 +438,7 @@ describe("Chat", () => {
       toolMode: "read_only" as const,
       canManageSessions: false,
     };
-    const assistant = (id: string, text: string): ChatMessage => ({
+    const assistant = (id: string, text: string): ChatMessageFixture => ({
       id,
       runId,
       role: "assistant",
@@ -453,7 +473,7 @@ describe("Chat", () => {
 
   it("updates an edit commitment from later same-run budget facts", () => {
     const runId = "run-edit-budget";
-    const budgetMessage: ChatMessage = {
+    const budgetMessage: ChatMessageFixture = {
       id: "budget-message",
       runId,
       role: "assistant",
@@ -473,7 +493,7 @@ describe("Chat", () => {
         status: "done",
       }],
     };
-    const guidanceMessage: ChatMessage = {
+    const guidanceMessage: ChatMessageFixture = {
       id: "guidance-message",
       runId,
       role: "user",
@@ -481,7 +501,7 @@ describe("Chat", () => {
       thinking: "",
       tools: [],
     };
-    const mutationMessage = (remainingFiles?: number): ChatMessage => ({
+    const mutationMessage = (remainingFiles?: number): ChatMessageFixture => ({
       id: "mutation-message",
       runId,
       role: "assistant",
@@ -1180,11 +1200,10 @@ describe("Chat", () => {
 
     rendered.rerender(view({
       ...firstChat,
-      items: [{
-        kind: "message",
+      items: [messageItem({
         ...firstMessage(firstChat),
         text: "first streamed chunk while detached",
-      }],
+      })],
     }, "", undefined, {
       busy: true,
       activeRun: { id: "run-1", phase: "running" },
@@ -1199,11 +1218,10 @@ describe("Chat", () => {
     scrollHeight = 1_030;
     rendered.rerender(view({
       ...firstChat,
-      items: [{
-        kind: "message",
+      items: [messageItem({
         ...firstMessage(firstChat),
         text: "first streamed chunk while detached and the next delta",
-      }],
+      })],
     }, "", undefined, {
       busy: true,
       activeRun: { id: "run-1", phase: "running" },
@@ -1302,7 +1320,7 @@ describe("Chat", () => {
 
     rendered.rerender(view({
       ...firstChat,
-      items: [{ kind: "message", ...firstMessage(firstChat), text: completeText }],
+      items: [messageItem({ ...firstMessage(firstChat), text: completeText })],
     }, "", undefined, {
       busy: true,
       activeRun: { id: "run-1", phase: "running" },
@@ -1530,6 +1548,7 @@ describe("Chat", () => {
         text: "检查项目",
         thinking: "",
         tools: [],
+        parts: [{ kind: "text", offset: 0, length: "检查项目".length }],
       }, {
         kind: "message",
         id: "assistant-live",
@@ -2020,28 +2039,26 @@ describe("Chat", () => {
 
   it("renders a compaction divider between the surrounding messages", () => {
     const { container } = render(view({
-      items: [{
-        kind: "message",
+      items: [messageItem({
         id: "assistant-before",
         runId: "run-before",
         role: "assistant",
         text: "压缩前的回复",
         thinking: "",
         tools: [],
-      }, {
+      }), {
         kind: "compaction",
         id: "compaction-1",
         timestamp: "2026-07-19T10:00:00.000Z",
         tokensBefore: 63_771,
-      }, {
-        kind: "message",
+      }, messageItem({
         id: "user-after",
         runId: "run-after",
         role: "user",
         text: "压缩后的问题",
         thinking: "",
         tools: [],
-      }],
+      })],
     }));
 
     const transcript = container.querySelector(".transcript");
@@ -2123,16 +2140,14 @@ describe("Chat", () => {
       result: "Review complete",
     };
     const { container } = render(view({
-      items: [{
-        kind: "message",
+      items: [messageItem({
         id: "user-1",
         runId: "run-1",
         role: "user",
         text: "Delegate the review",
         thinking: "",
         tools: [],
-      }, {
-        kind: "message",
+      }), messageItem({
         id: "assistant-before",
         runId: "run-1",
         role: "assistant",
@@ -2143,15 +2158,14 @@ describe("Chat", () => {
           name: "start_session",
           status: "done",
         }],
-      }, card, {
-        kind: "message",
+      }), card, messageItem({
         id: "assistant-after",
         runId: "run-1",
         role: "assistant",
         text: "最终回复",
         thinking: "",
         tools: [],
-      }],
+      })],
     }));
 
     const renderedCard = screen.getByRole("article", {
@@ -2192,23 +2206,21 @@ describe("Chat", () => {
       updatedAt: "2026-07-19T10:01:00.000Z",
     };
     const { container } = render(view({
-      items: [{
-        kind: "message",
+      items: [messageItem({
         id: "assistant-before",
         runId: "run-1",
         role: "assistant",
         text: "收到消息前",
         thinking: "",
         tools: [],
-      }, card, {
-        kind: "message",
+      }), card, messageItem({
         id: "assistant-after",
         runId: "run-1",
         role: "assistant",
         text: "收到消息后",
         thinking: "",
         tools: [],
-      }],
+      })],
     }));
 
     const transcript = container.querySelector(".transcript");

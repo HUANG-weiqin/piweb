@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { renameSync, rmSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import {
   link,
   mkdir,
@@ -111,14 +111,14 @@ afterEach(async () => {
 });
 
 describe("ProjectStore", () => {
-  it("creates a stable project manifest and reopens it", async () => {
+  it("creates a stable v2 project manifest and reopens it", async () => {
     const cwd = await createTemporaryDirectory("piweb-project-");
-    const first = await ProjectStore.open(cwd, "read_only");
+    const first = await ProjectStore.open(cwd);
     const conversationId = randomUUID();
 
     await first.setLastConversation(conversationId);
 
-    const reopened = await ProjectStore.open(cwd, "full_access");
+    const reopened = await ProjectStore.open(cwd);
     expect(reopened.id).toBe(first.id);
     expect(reopened.cwd).toBe(await realpath(cwd));
     expect(reopened.stateDir).toBe(join(reopened.cwd, ".piweb"));
@@ -126,34 +126,32 @@ describe("ProjectStore", () => {
     expect(JSON.parse(await readFile(
       join(reopened.stateDir, "project.json"),
       "utf8",
-    ))).toMatchObject({ toolMode: "read_only" });
+    ))).toEqual({
+      version: 2,
+      projectId: first.id,
+      createdAt: expect.any(String),
+      lastConversationId: conversationId,
+    });
     expect(reopened.lastConversationId).toBe(conversationId);
   });
 
-  it("migrates the removed workspace mode to full access on disk", async () => {
+  it("rejects a v1 manifest without rewriting it", async () => {
     const cwd = await createTemporaryDirectory("piweb-legacy-project-mode-");
     const stateDirectory = join(cwd, ".piweb");
     const manifestPath = join(stateDirectory, "project.json");
-    const projectId = randomUUID();
-    const lastConversationId = randomUUID();
-    await mkdir(stateDirectory);
-    await writeFile(manifestPath, `${JSON.stringify({
+    const legacyManifest = `${JSON.stringify({
       version: 1,
-      projectId,
+      projectId: randomUUID(),
       createdAt: "2026-07-18T12:00:00.000Z",
       toolMode: "workspace_write",
-      lastConversationId,
-    }, null, 2)}\n`);
+    }, null, 2)}\n`;
+    await mkdir(stateDirectory);
+    await writeFile(manifestPath, legacyManifest);
 
-    const store = await ProjectStore.open(cwd, "read_only");
-
-    expect(store).toMatchObject({
-      id: projectId,
-      lastConversationId,
-    });
-    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-    expect(manifest.toolMode).toBe("full_access");
-    expect(JSON.stringify(manifest)).not.toContain("workspace_write");
+    await expect(ProjectStore.open(cwd)).rejects.toThrow(
+      "Invalid project manifest",
+    );
+    await expect(readFile(manifestPath, "utf8")).resolves.toBe(legacyManifest);
   });
 
   it("fails closed without replacing an invalid manifest", async () => {
@@ -164,7 +162,7 @@ describe("ProjectStore", () => {
     await mkdir(stateDirectory);
     await writeFile(manifestPath, invalidManifest);
 
-    await expect(ProjectStore.open(cwd, "full_access")).rejects.toThrow(
+    await expect(ProjectStore.open(cwd)).rejects.toThrow(
       "Invalid project manifest",
     );
     await expect(readFile(manifestPath, "utf8")).resolves.toBe(invalidManifest);
@@ -175,7 +173,7 @@ describe("ProjectStore", () => {
     const outside = await createTemporaryDirectory("piweb-linked-state-target-");
     await createDirectoryLink(outside, join(cwd, ".piweb"));
 
-    await expect(ProjectStore.open(cwd, "full_access")).rejects.toThrow(
+    await expect(ProjectStore.open(cwd)).rejects.toThrow(
       "Project state directory",
     );
     await expect(
@@ -192,7 +190,7 @@ describe("ProjectStore", () => {
     await mkdir(stateDirectory);
     await createDirectoryLink(outside, join(stateDirectory, "sessions"));
 
-    await expect(ProjectStore.open(cwd, "full_access")).rejects.toThrow(
+    await expect(ProjectStore.open(cwd)).rejects.toThrow(
       "Project session directory",
     );
     await expect(readdir(outside)).resolves.toEqual([]);
@@ -203,7 +201,7 @@ describe("ProjectStore", () => {
 
   it("durably serializes recent conversation changes and notifies subscribers", async () => {
     const cwd = await createTemporaryDirectory("piweb-project-recent-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversationId = randomUUID();
     const listener = vi.fn();
     const unsubscribe = store.subscribe(listener);
@@ -215,27 +213,21 @@ describe("ProjectStore", () => {
 
     expect(listener).toHaveBeenCalledTimes(1);
     expect(listener).toHaveBeenCalledWith();
-    const reopened = await ProjectStore.open(cwd, "read_only");
+    const reopened = await ProjectStore.open(cwd);
     expect(reopened.lastConversationId).toBeUndefined();
     expect(JSON.parse(await readFile(
       join(reopened.stateDir, "project.json"),
       "utf8",
-    ))).toMatchObject({ toolMode: "full_access" });
-  });
-
-  it("seeds a new project with a full-access compatibility value", async () => {
-    const cwd = await createTemporaryDirectory("piweb-project-full-access-");
-    const store = await ProjectStore.open(cwd, "full_access");
-
-    expect(JSON.parse(await readFile(
-      join(store.stateDir, "project.json"),
-      "utf8",
-    ))).toMatchObject({ toolMode: "full_access" });
+    ))).toEqual({
+      version: 2,
+      projectId: store.id,
+      createdAt: expect.any(String),
+    });
   });
 
   it("persists and lists a conversation before it has an assistant message", async () => {
     const cwd = await createTemporaryDirectory("piweb-empty-conversation-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversationId = randomUUID();
 
     const conversation = await store.createConversation(conversationId);
@@ -264,7 +256,7 @@ describe("ProjectStore", () => {
 
   it("validates metadata and normally opens deeply nested custom entry data", async () => {
     const cwd = await createTemporaryDirectory("piweb-deep-session-entry-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     const sessionFile = conversation.getSessionFile()!;
     const depth = 2_500;
@@ -288,7 +280,7 @@ describe("ProjectStore", () => {
 
   it("does not strand a conversation file when the initial SDK open fails", async () => {
     const cwd = await createTemporaryDirectory("piweb-create-open-failure-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversationId = randomUUID();
     const before = await readdir(store.sessionDir);
     const open = vi.spyOn(SessionManager, "open").mockImplementationOnce(() => {
@@ -305,7 +297,7 @@ describe("ProjectStore", () => {
 
   it("creates the header and immutable role metadata in one initial file", async () => {
     const cwd = await createTemporaryDirectory("piweb-meta-conversation-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversationId = randomUUID();
     const meta: ConversationMeta = {
       role: {
@@ -315,6 +307,11 @@ describe("ProjectStore", () => {
         description: "Reviews lifecycle code",
         systemPrompt: "Review carefully.",
         model: { provider: "provider", id: "model" },
+        compactionModel: null,
+        defaultThinkingLevel: "off",
+        defaultServiceTier: null,
+        toolMode: "read_only",
+        canManageSessions: false,
       },
       lifecycle: { kind: "normal" },
       createdBy: { kind: "user" },
@@ -346,7 +343,7 @@ describe("ProjectStore", () => {
     const cwd = await createTemporaryDirectory(
       "piweb-background-conversation-",
     );
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const foreground = await store.createConversation();
     const background = await store.createConversation(
       randomUUID(),
@@ -356,7 +353,7 @@ describe("ProjectStore", () => {
 
     expect(background.getSessionId()).not.toBe(foreground.getSessionId());
     expect(store.lastConversationId).toBe(foreground.getSessionId());
-    await expect(ProjectStore.open(cwd, "read_only")).resolves.toMatchObject({
+    await expect(ProjectStore.open(cwd)).resolves.toMatchObject({
       lastConversationId: foreground.getSessionId(),
     });
     expect(store.listConversations().map(({ id }) => id)).toEqual(
@@ -369,7 +366,7 @@ describe("ProjectStore", () => {
 
   it("deletes exactly one persisted conversation and clears a stale recent pointer", async () => {
     const cwd = await createTemporaryDirectory("piweb-delete-conversation-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const retained = await store.createConversation();
     const deleted = await store.createConversation();
     const deletedPath = deleted.getSessionFile();
@@ -396,7 +393,7 @@ describe("ProjectStore", () => {
 
   it("recovers an abandoned deletion quarantine before the first refresh", async () => {
     const cwd = await createTemporaryDirectory("piweb-delete-crash-recovery-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     const conversationId = conversation.getSessionId();
     const sessionFile = conversation.getSessionFile()!;
@@ -407,7 +404,7 @@ describe("ProjectStore", () => {
     );
     await rename(sessionFile, quarantinePath);
 
-    const reopened = await ProjectStore.open(cwd, "full_access");
+    const reopened = await ProjectStore.open(cwd);
 
     await expect(readFile(sessionFile, "utf8")).resolves.toBe(originalRaw);
     await expect(readFile(quarantinePath, "utf8")).rejects.toMatchObject({
@@ -422,7 +419,7 @@ describe("ProjectStore", () => {
     const cwd = await createTemporaryDirectory(
       "piweb-delete-same-process-recovery-",
     );
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     const conversationId = conversation.getSessionId();
     const sessionFile = conversation.getSessionFile()!;
@@ -456,7 +453,7 @@ describe("ProjectStore", () => {
     const cwd = await createTemporaryDirectory(
       "piweb-delete-crash-after-recovery-link-",
     );
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     const conversationId = conversation.getSessionId();
     const sessionFile = conversation.getSessionFile()!;
@@ -468,7 +465,7 @@ describe("ProjectStore", () => {
     await rename(sessionFile, quarantinePath);
     await link(quarantinePath, sessionFile);
 
-    const reopened = await ProjectStore.open(cwd, "full_access");
+    const reopened = await ProjectStore.open(cwd);
 
     await expect(readFile(sessionFile, "utf8")).resolves.toBe(originalRaw);
     await expect(readFile(quarantinePath, "utf8")).rejects.toMatchObject({
@@ -486,7 +483,7 @@ describe("ProjectStore", () => {
     const cwd = await createTemporaryDirectory(
       "piweb-corrupt-delete-quarantine-",
     );
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const originalPath = join(store.sessionDir, "corrupt-conversation.jsonl");
     const quarantinePath = join(
       store.sessionDir,
@@ -495,7 +492,7 @@ describe("ProjectStore", () => {
     const corruptRaw = '{"type":"session"\n';
     await writeFile(quarantinePath, corruptRaw);
 
-    await expect(ProjectStore.open(cwd, "full_access")).rejects.toThrow(
+    await expect(ProjectStore.open(cwd)).rejects.toThrow(
       "invalid JSON",
     );
 
@@ -507,7 +504,7 @@ describe("ProjectStore", () => {
 
   it("preserves a colliding abandoned quarantine before catalog fails closed", async () => {
     const cwd = await createTemporaryDirectory("piweb-delete-crash-collision-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     const conversationId = conversation.getSessionId();
     const sessionFile = conversation.getSessionFile()!;
@@ -519,7 +516,7 @@ describe("ProjectStore", () => {
     await rename(sessionFile, quarantinePath);
     await writeFile(sessionFile, originalRaw);
 
-    const reopened = await ProjectStore.open(cwd, "full_access");
+    const reopened = await ProjectStore.open(cwd);
 
     await expect(readFile(sessionFile, "utf8")).resolves.toBe(originalRaw);
     await expect(readFile(quarantinePath, "utf8")).rejects.toMatchObject({
@@ -539,14 +536,14 @@ describe("ProjectStore", () => {
 
   it("fails closed on malformed and non-file deletion quarantines", async () => {
     const cwd = await createTemporaryDirectory("piweb-invalid-delete-quarantine-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const malformedPath = join(
       store.sessionDir,
       ".conversation.jsonl.not-a-uuid.delete-quarantine",
     );
     await writeSessionHeader(malformedPath, randomUUID(), store.cwd);
 
-    await expect(ProjectStore.open(cwd, "full_access")).rejects.toThrow(
+    await expect(ProjectStore.open(cwd)).rejects.toThrow(
       "Invalid conversation deletion quarantine filename",
     );
     await expect(readFile(malformedPath, "utf8")).resolves.toContain(
@@ -559,7 +556,7 @@ describe("ProjectStore", () => {
       `.conversation.jsonl.${randomUUID()}.delete-quarantine`,
     );
     await mkdir(directoryPath);
-    await expect(ProjectStore.open(cwd, "full_access")).rejects.toThrow(
+    await expect(ProjectStore.open(cwd)).rejects.toThrow(
       "must be a regular project-owned file",
     );
 
@@ -568,14 +565,14 @@ describe("ProjectStore", () => {
       "piweb-delete-quarantine-link-target-",
     );
     await createDirectoryLink(outside, directoryPath);
-    await expect(ProjectStore.open(cwd, "full_access")).rejects.toThrow(
+    await expect(ProjectStore.open(cwd)).rejects.toThrow(
       "must be a regular project-owned file",
     );
   });
 
   it("deletes a conversation-scoped notebook sidecar with its conversation", async () => {
     const cwd = await createTemporaryDirectory("piweb-delete-notebook-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const retained = await store.createConversation();
     const deleted = await store.createConversation();
     await new ConversationNotebook(
@@ -609,7 +606,7 @@ describe("ProjectStore", () => {
 
   it("fails before deleting the transcript when its notebook path is not a file", async () => {
     const cwd = await createTemporaryDirectory("piweb-invalid-notebook-delete-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     const conversationId = conversation.getSessionId();
     const sessionFile = conversation.getSessionFile();
@@ -646,7 +643,7 @@ describe("ProjectStore", () => {
 
   it("restores a path replacement swapped in at the quarantine rename boundary", async () => {
     const cwd = await createTemporaryDirectory("piweb-delete-replacement-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     const conversationId = conversation.getSessionId();
     const sessionFile = conversation.getSessionFile()!;
@@ -676,7 +673,7 @@ describe("ProjectStore", () => {
 
   it("preserves quarantine as recovery JSONL when the original path is occupied", async () => {
     const cwd = await createTemporaryDirectory("piweb-delete-recovery-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     const conversationId = conversation.getSessionId();
     const sessionFile = conversation.getSessionFile()!;
@@ -706,7 +703,7 @@ describe("ProjectStore", () => {
 
   it("projects an unrelated conversation added at quarantine unlink", async () => {
     const cwd = await createTemporaryDirectory("piweb-delete-unlink-add-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const deleted = await store.createConversation();
     const retained = await store.createConversation();
     const addedId = randomUUID();
@@ -732,7 +729,7 @@ describe("ProjectStore", () => {
 
   it("projects retained conversations from the catalog generation that deletion proved", async () => {
     const cwd = await createTemporaryDirectory("piweb-delete-generation-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const deleted = await store.createConversation();
     const retained = await store.createConversation();
     const addedId = randomUUID();
@@ -765,7 +762,7 @@ describe("ProjectStore", () => {
 
   it("publishes a conversation added after the first post-quarantine proof", async () => {
     const cwd = await createTemporaryDirectory("piweb-delete-post-proof-add-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const deleted = await store.createConversation();
     const retained = await store.createConversation();
     const addedId = randomUUID();
@@ -789,7 +786,7 @@ describe("ProjectStore", () => {
 
   it("restores quarantine when an unrelated file becomes corrupt after proof", async () => {
     const cwd = await createTemporaryDirectory("piweb-delete-post-proof-corrupt-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const deleted = await store.createConversation();
     const retained = await store.createConversation();
     const deletedPath = deleted.getSessionFile()!;
@@ -821,7 +818,7 @@ describe("ProjectStore", () => {
 
   it("physically truncates the selected message and every later entry", async () => {
     const cwd = await createTemporaryDirectory("piweb-truncate-conversation-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     const retainedId = conversation.appendMessage({
       role: "user",
@@ -862,7 +859,7 @@ describe("ProjectStore", () => {
 
   it("rejects a message anchor that is no longer on the active branch", async () => {
     const cwd = await createTemporaryDirectory("piweb-truncate-inactive-branch-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     const rootId = conversation.appendMessage({
       role: "user",
@@ -898,7 +895,7 @@ describe("ProjectStore", () => {
 
   it("retains the active branch prefix instead of an earlier abandoned physical leaf", async () => {
     const cwd = await createTemporaryDirectory("piweb-truncate-active-prefix-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     const rootId = conversation.appendMessage({
       role: "user",
@@ -951,7 +948,7 @@ describe("ProjectStore", () => {
 
   it("rewinds context while preserving delivery receipts and their exact run settlements", async () => {
     const cwd = await createTemporaryDirectory("piweb-truncate-receipt-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     const conversationId = conversation.getSessionId();
     const retainedId = conversation.appendMessage({
@@ -1124,7 +1121,7 @@ describe("ProjectStore", () => {
     const cwd = await createTemporaryDirectory(
       "piweb-invalid-truncate-anchor-",
     );
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     const customId = conversation.appendCustomEntry("test.anchor", {
       value: true,
@@ -1141,7 +1138,7 @@ describe("ProjectStore", () => {
 
   it("serializes deletion behind an older refresh and only clears the matching recent pointer", async () => {
     const cwd = await createTemporaryDirectory("piweb-delete-refresh-race-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const retained = await store.createConversation();
     const deleted = await store.createConversation();
     await store.setLastConversation(deleted.getSessionId());
@@ -1172,7 +1169,7 @@ describe("ProjectStore", () => {
   it("fails closed before Pi scans a linked JSONL session entry", async () => {
     const cwd = await createTemporaryDirectory("piweb-linked-entry-");
     const outside = await createTemporaryDirectory("piweb-linked-entry-target-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     await createDirectoryLink(outside, join(store.sessionDir, "escape.jsonl"));
     const listAll = vi.spyOn(SessionManager, "listAll");
 
@@ -1184,7 +1181,7 @@ describe("ProjectStore", () => {
 
   it("creates, lists, reopens, and reads renamed conversation information", async () => {
     const cwd = await createTemporaryDirectory("piweb-conversation-info-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
 
     conversation.appendSessionInfo("  Build the parser  ");
@@ -1219,7 +1216,7 @@ describe("ProjectStore", () => {
 
   it("serializes queued refreshes and reuses one unchanged verified scan", async () => {
     const cwd = await createTemporaryDirectory("piweb-refresh-queue-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     conversation.appendSessionInfo("fresh scan");
     const information = await SessionManager.listAll(store.sessionDir);
@@ -1246,7 +1243,7 @@ describe("ProjectStore", () => {
 
   it("reuses one verified catalog across unchanged refresh, open, and inspect", async () => {
     const cwd = await createTemporaryDirectory("piweb-verified-catalog-reuse-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const listAll = vi.spyOn(SessionManager, "listAll");
     const conversation = await store.createConversation();
 
@@ -1261,7 +1258,7 @@ describe("ProjectStore", () => {
 
   it("bulk-inspects targets with one catalog scan and one final directory proof", async () => {
     const cwd = await createTemporaryDirectory("piweb-catalog-bulk-inspect-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversations = [
       await store.createConversation(),
       await store.createConversation(),
@@ -1286,7 +1283,7 @@ describe("ProjectStore", () => {
 
   it("deep-copies SDK catalog values before unchanged reuse", async () => {
     const cwd = await createTemporaryDirectory("piweb-catalog-copy-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversationId = randomUUID();
     const sessionFile = join(store.sessionDir, "copied.jsonl");
     await writeSessionHeader(sessionFile, conversationId, store.cwd);
@@ -1315,7 +1312,7 @@ describe("ProjectStore", () => {
 
   it("rescans after add and remove change the session fingerprint set", async () => {
     const cwd = await createTemporaryDirectory("piweb-catalog-add-remove-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     await store.createConversation();
     const listAll = vi.spyOn(SessionManager, "listAll");
     const addedId = randomUUID();
@@ -1335,7 +1332,7 @@ describe("ProjectStore", () => {
 
   it("rescans after same-path replacement and in-place changes", async () => {
     const cwd = await createTemporaryDirectory("piweb-catalog-file-change-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     const sessionFile = conversation.getSessionFile()!;
     const original = await readFile(sessionFile, "utf8");
@@ -1360,7 +1357,7 @@ describe("ProjectStore", () => {
 
   it("exhausts the proof budget when every SDK scan changes the fingerprint set", async () => {
     const cwd = await createTemporaryDirectory("piweb-catalog-scan-race-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     conversation.appendSessionInfo("force a fresh integrity scan");
     const originalListAll = SessionManager.listAll.bind(SessionManager);
@@ -1381,7 +1378,7 @@ describe("ProjectStore", () => {
 
   it("reproves the complete catalog after one transient SDK scan mutation", async () => {
     const cwd = await createTemporaryDirectory("piweb-catalog-scan-retry-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     conversation.appendSessionInfo("force a fresh integrity scan");
     const originalListAll = SessionManager.listAll.bind(SessionManager);
@@ -1402,7 +1399,7 @@ describe("ProjectStore", () => {
 
   it("does not reprove a target after an unrelated body append", async () => {
     const cwd = await createTemporaryDirectory("piweb-catalog-read-race-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const target = await store.createConversation();
     const unrelated = await store.createConversation();
     const listAll = vi.spyOn(SessionManager, "listAll");
@@ -1431,7 +1428,7 @@ describe("ProjectStore", () => {
 
   it("opens a healthy target without reading an unrelated malformed body", async () => {
     const cwd = await createTemporaryDirectory("piweb-local-target-proof-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const target = await store.createConversation();
     const corruptPath = join(store.sessionDir, "corrupt-body.jsonl");
     await writeSessionHeader(corruptPath, randomUUID(), store.cwd);
@@ -1451,7 +1448,7 @@ describe("ProjectStore", () => {
 
   it("rejects a duplicate target header even when its body is malformed", async () => {
     const cwd = await createTemporaryDirectory("piweb-local-header-collision-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const target = await store.createConversation();
     const unaffected = await store.createConversation();
     const duplicatePath = join(store.sessionDir, "duplicate-header.jsonl");
@@ -1475,20 +1472,20 @@ describe("ProjectStore", () => {
 
   it("persists a disposable path-keyed catalog and rebuilds past corruption", async () => {
     const cwd = await createTemporaryDirectory("piweb-observation-catalog-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     const catalogPath = join(store.stateDir, "conversation-catalog.json");
 
     await expect(readFile(catalogPath, "utf8")).resolves.toEqual(
       expect.stringContaining(`"conversationId": "${conversation.getSessionId()}"`),
     );
-    const cached = await ProjectStore.open(cwd, "full_access");
+    const cached = await ProjectStore.open(cwd);
     expect(cached.listConversations()).toEqual([
       expect.objectContaining({ id: conversation.getSessionId() }),
     ]);
 
     await writeFile(catalogPath, "not JSON\n");
-    const reopened = await ProjectStore.open(cwd, "full_access");
+    const reopened = await ProjectStore.open(cwd);
 
     await expect(
       reopened.openConversation(conversation.getSessionId(), {
@@ -1499,7 +1496,7 @@ describe("ProjectStore", () => {
 
   it("records an invalid body as a local catalog observation", async () => {
     const cwd = await createTemporaryDirectory("piweb-catalog-scrub-invalid-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     await store.createConversation();
     const corruptId = randomUUID();
     const corruptPath = join(store.sessionDir, "corrupt-body.jsonl");
@@ -1533,7 +1530,7 @@ describe("ProjectStore", () => {
 
   it("retains a display summary while scrub reproves an appended body", async () => {
     const cwd = await createTemporaryDirectory("piweb-catalog-summary-proof-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     const catalogPath = join(store.stateDir, "conversation-catalog.json");
 
@@ -1557,15 +1554,15 @@ describe("ProjectStore", () => {
       }),
     ]));
 
-    const reopened = await ProjectStore.open(cwd, "full_access");
+    const reopened = await ProjectStore.open(cwd);
     expect(reopened.listConversations()).toEqual([
       expect.objectContaining({ id: conversation.getSessionId() }),
     ]);
   });
 
-  it("reads a legacy catalog cache and normalizes it on the next scrub", async () => {
+  it("discards a v1 catalog cache and rebuilds it from transcripts", async () => {
     const cwd = await createTemporaryDirectory("piweb-catalog-v1-upgrade-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     const catalogPath = join(store.stateDir, "conversation-catalog.json");
     const legacy = JSON.parse(await readFile(catalogPath, "utf8")) as {
@@ -1574,17 +1571,23 @@ describe("ProjectStore", () => {
     legacy.version = 1;
     await writeFile(catalogPath, `${JSON.stringify(legacy)}\n`);
 
-    const reopened = await ProjectStore.open(cwd, "full_access");
-    expect(reopened.listConversations()).toEqual([
-      expect.objectContaining({ id: conversation.getSessionId() }),
-    ]);
-    await expect(reopened.scrubOneCatalogObservation()).resolves.toBe(false);
-    await expect(readFile(catalogPath, "utf8")).resolves.toContain('"version": 2');
+    const reopened = await ProjectStore.open(cwd);
+    expect(reopened.listConversations()).toEqual([]);
+    await expect(reopened.scrubOneCatalogObservation()).resolves.toBe(true);
+    expect(JSON.parse(await readFile(catalogPath, "utf8"))).toMatchObject({
+      version: 2,
+      observations: [expect.objectContaining({
+        header: {
+          kind: "claims",
+          conversationId: conversation.getSessionId(),
+        },
+      })],
+    });
   });
 
   it("retries an unstable catalog body without recording it invalid", async () => {
     const cwd = await createTemporaryDirectory("piweb-catalog-unstable-body-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     const catalogPath = join(store.stateDir, "conversation-catalog.json");
     const internals = store as unknown as ProjectStoreIntegrityInternals;
@@ -1633,7 +1636,7 @@ describe("ProjectStore", () => {
 
   it("does not let a delayed scrub overwrite a newer full catalog proof", async () => {
     const cwd = await createTemporaryDirectory("piweb-catalog-scrub-cas-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     const catalogPath = join(store.stateDir, "conversation-catalog.json");
     const internals = store as unknown as ProjectStoreIntegrityInternals;
@@ -1669,12 +1672,12 @@ describe("ProjectStore", () => {
     ]));
   });
 
-  it("invalidates the catalog when SDK open migrates the target file", async () => {
+  it("rejects a legacy session file without allowing SDK migration", async () => {
     const cwd = await createTemporaryDirectory("piweb-catalog-sdk-migration-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversationId = randomUUID();
     const sessionFile = join(store.sessionDir, "legacy.jsonl");
-    await writeFile(sessionFile, [
+    const legacy = [
       JSON.stringify({
         type: "session",
         version: 1,
@@ -1688,22 +1691,18 @@ describe("ProjectStore", () => {
         message: { role: "user", content: "legacy", timestamp: 1 },
       }),
       "",
-    ].join("\n"));
-    const listAll = vi.spyOn(SessionManager, "listAll");
+    ].join("\n");
+    await writeFile(sessionFile, legacy);
 
-    await store.refreshConversations();
-    await store.openConversation(conversationId, { updateRecent: false });
-    await store.refreshConversations();
-
-    expect(listAll).toHaveBeenCalledTimes(2);
-    await expect(readFile(sessionFile, "utf8")).resolves.toContain(
-      '"version":3',
+    await expect(store.refreshConversations()).rejects.toThrow(
+      "unsupported header version",
     );
+    await expect(readFile(sessionFile, "utf8")).resolves.toBe(legacy);
   });
 
   it("rejects a current-version file changed by SDK open", async () => {
     const cwd = await createTemporaryDirectory("piweb-catalog-sdk-current-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     const originalOpen = SessionManager.open.bind(SessionManager);
     vi.spyOn(SessionManager, "open").mockImplementationOnce(
@@ -1723,7 +1722,7 @@ describe("ProjectStore", () => {
 
   it("opens despite an unrelated conclusively invalid header added during SDK open", async () => {
     const cwd = await createTemporaryDirectory("piweb-catalog-sdk-unrelated-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     const malformedPath = join(store.sessionDir, "malformed-during-open.jsonl");
     const originalOpen = SessionManager.open.bind(SessionManager);
@@ -1747,35 +1746,9 @@ describe("ProjectStore", () => {
     );
   });
 
-  it("rejects an invalid replacement inserted during legacy SDK migration", async () => {
-    const cwd = await createTemporaryDirectory("piweb-catalog-sdk-replace-");
-    const store = await ProjectStore.open(cwd, "full_access");
-    const conversationId = randomUUID();
-    const sessionFile = join(store.sessionDir, "legacy.jsonl");
-    const invalidReplacement = join(store.sessionDir, ".invalid.tmp");
-    const invalidRaw = '{"type":"session"\n';
-    await writeSessionHeader(sessionFile, conversationId, store.cwd, 1);
-    await writeFile(invalidReplacement, invalidRaw);
-    await store.refreshConversations();
-    const originalOpen = SessionManager.open.bind(SessionManager);
-    vi.spyOn(SessionManager, "open").mockImplementationOnce(
-      (path, sessionDir, cwdOverride) => {
-        const conversation = originalOpen(path, sessionDir, cwdOverride);
-        rmSync(path);
-        renameSync(invalidReplacement, path);
-        return conversation;
-      },
-    );
-
-    await expect(
-      store.openConversation(conversationId, { updateRecent: false }),
-    ).rejects.toThrow("changed while it was being read");
-    await expect(readFile(sessionFile, "utf8")).resolves.toBe(invalidRaw);
-  });
-
   it("rejects a partial JSONL tail before Pi can rewrite the session", async () => {
     const cwd = await createTemporaryDirectory("piweb-partial-session-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     const sessionFile = conversation.getSessionFile()!;
     const original = await readFile(sessionFile, "utf8");
@@ -1792,7 +1765,7 @@ describe("ProjectStore", () => {
 
   it("rejects malformed JSONL entries before Pi can discard them", async () => {
     const cwd = await createTemporaryDirectory("piweb-malformed-session-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     const sessionFile = conversation.getSessionFile()!;
     const original = await readFile(sessionFile, "utf8");
@@ -1809,7 +1782,7 @@ describe("ProjectStore", () => {
 
   it("fails closed when Pi's index silently omits a corrupt recent conversation", async () => {
     const cwd = await createTemporaryDirectory("piweb-omitted-session-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const recent = await store.createConversation();
     const fallback = await store.createConversation();
     const recentFile = recent.getSessionFile()!;
@@ -1827,7 +1800,7 @@ describe("ProjectStore", () => {
 
   it("fails closed when a JSON number produces an invalid Pi summary date", async () => {
     const cwd = await createTemporaryDirectory("piweb-non-finite-session-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const recent = await store.createConversation();
     const fallback = await store.createConversation();
     const recentFile = recent.getSessionFile()!;
@@ -1857,7 +1830,7 @@ describe("ProjectStore", () => {
 
   it("rejects an invalid SDK summary instead of filtering out a conversation", async () => {
     const cwd = await createTemporaryDirectory("piweb-invalid-summary-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     const sessionFile = conversation.getSessionFile()!;
     conversation.appendSessionInfo("force a fresh integrity scan");
@@ -1877,7 +1850,7 @@ describe("ProjectStore", () => {
 
   it("rejects a structurally invalid Pi entry instead of restoring empty history", async () => {
     const cwd = await createTemporaryDirectory("piweb-invalid-entry-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     const sessionFile = conversation.getSessionFile()!;
     const header = await readFile(sessionFile, "utf8");
@@ -1893,7 +1866,7 @@ describe("ProjectStore", () => {
 
   it("validates a non-empty matching Pi header before opening a listed file", async () => {
     const cwd = await createTemporaryDirectory("piweb-invalid-header-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversationId = randomUUID();
     const sessionFile = join(store.sessionDir, "listed.jsonl");
     const invalidFiles = [
@@ -1953,7 +1926,7 @@ describe("ProjectStore", () => {
 
   it("rejects duplicate conversation identities in separate JSONL files", async () => {
     const cwd = await createTemporaryDirectory("piweb-duplicate-session-");
-    const store = await ProjectStore.open(cwd, "full_access");
+    const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
     const sessionFile = conversation.getSessionFile()!;
     await writeFile(
@@ -1972,7 +1945,7 @@ describe("ProjectStore", () => {
     const movedCwd = join(parent, "moved");
     await mkdir(originalCwd);
     const canonicalOriginalCwd = await realpath(originalCwd);
-    const original = await ProjectStore.open(originalCwd, "full_access");
+    const original = await ProjectStore.open(originalCwd);
     const conversation = await original.createConversation();
     conversation.appendMessage({
       role: "user",
@@ -1982,7 +1955,7 @@ describe("ProjectStore", () => {
 
     await rename(originalCwd, movedCwd);
 
-    const moved = await ProjectStore.open(movedCwd, "read_only");
+    const moved = await ProjectStore.open(movedCwd);
     expect(moved.id).toBe(original.id);
     const summaries = await moved.refreshConversations();
     expect(summaries.map(({ id }) => id)).toEqual([
@@ -1999,8 +1972,8 @@ describe("ProjectStoreRegistry", () => {
   it("reuses canonical projects and exclusively leases conversation writers", async () => {
     const cwd = await createTemporaryDirectory("piweb-project-registry-");
     const registry = new ProjectStoreRegistry();
-    const first = await registry.acquireProject(cwd, "full_access");
-    const second = await registry.acquireProject(join(cwd, "."), "read_only");
+    const first = await registry.acquireProject(cwd);
+    const second = await registry.acquireProject(join(cwd, "."));
     expect(second.store).toBe(first.store);
 
     const conversationId = randomUUID();
@@ -2028,17 +2001,14 @@ describe("ProjectStoreRegistry", () => {
       "piweb-project-registry-copy-",
     );
     const registry = new ProjectStoreRegistry();
-    const original = await registry.acquireProject(
-      originalCwd,
-      "full_access",
-    );
+    const original = await registry.acquireProject(originalCwd);
     const copiedStateDirectory = join(copiedCwd, ".piweb");
     await mkdir(copiedStateDirectory);
     await writeFile(
       join(copiedStateDirectory, "project.json"),
       await readFile(join(original.store.stateDir, "project.json"), "utf8"),
     );
-    const copied = await registry.acquireProject(copiedCwd, "read_only");
+    const copied = await registry.acquireProject(copiedCwd);
     expect(copied.store.id).toBe(original.store.id);
 
     const conversationId = randomUUID();
@@ -2064,21 +2034,21 @@ describe("ProjectStoreRegistry", () => {
     const cwd = await createTemporaryDirectory("piweb-project-handles-");
     const registry = new ProjectStoreRegistry();
     const [first, second] = await Promise.all([
-      registry.acquireProject(cwd, "full_access"),
-      registry.acquireProject(join(cwd, "."), "read_only"),
+      registry.acquireProject(cwd),
+      registry.acquireProject(join(cwd, ".")),
     ]);
     expect(second.store).toBe(first.store);
     const originalId = first.store.id;
 
     first.release();
     first.release();
-    const stillShared = await registry.acquireProject(cwd, "read_only");
+    const stillShared = await registry.acquireProject(cwd);
     expect(stillShared.store).toBe(second.store);
     second.release();
     stillShared.release();
 
     await rm(join(cwd, ".piweb"), { force: true, recursive: true });
-    const rebuilt = await registry.acquireProject(cwd, "read_only");
+    const rebuilt = await registry.acquireProject(cwd);
     expect(rebuilt.store).not.toBe(first.store);
     expect(rebuilt.store.id).not.toBe(originalId);
     rebuilt.release();

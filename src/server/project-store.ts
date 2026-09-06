@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from "node:crypto";
-import { isDeepStrictEqual } from "node:util";
 import {
   link,
   lstat,
@@ -23,14 +22,10 @@ import {
   sep,
 } from "node:path";
 import {
-  CURRENT_SESSION_VERSION,
   SessionManager,
   type SessionInfo,
 } from "@earendil-works/pi-coding-agent";
-import type {
-  ConversationSummary,
-  ToolMode,
-} from "../shared/protocol.js";
+import type { ConversationSummary } from "../shared/protocol.js";
 import {
   MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
   MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS,
@@ -50,9 +45,8 @@ import {
   type PiSessionFilePresentationInspection,
 } from "./session-file.js";
 
-const MANIFEST_VERSION = 1;
+const MANIFEST_VERSION = 2;
 const CONVERSATION_CATALOG_VERSION = 2;
-const LEGACY_CONVERSATION_CATALOG_VERSION = 1;
 const MAX_CONVERSATION_CATALOG_BYTES = 4 * 1024 * 1024;
 const PROJECT_STATE_DIRECTORY = ".piweb";
 const PROJECT_MANIFEST_FILE = "project.json";
@@ -67,15 +61,10 @@ const MAX_INTEGRITY_PROOF_ATTEMPTS = 8;
 const MAX_SESSION_HEADER_BYTES = 64 * 1024;
 const DELETE_QUARANTINE_SUFFIX = ".delete-quarantine";
 
-interface ProjectManifestV1 {
+interface ProjectManifest {
   version: typeof MANIFEST_VERSION;
   projectId: string;
   createdAt: string;
-  /**
-   * Retained only because v1 project manifests require it. Conversation role
-   * snapshots, not this project field, own all current tool permissions.
-   */
-  toolMode: ToolMode;
   lastConversationId?: string;
 }
 
@@ -281,17 +270,6 @@ function isNodeError(error: unknown, code: string): boolean {
   );
 }
 
-function isToolMode(value: unknown): value is ToolMode {
-  return value === "read_only"
-    || value === "full_access";
-}
-
-function assertToolMode(value: unknown): asserts value is ToolMode {
-  if (!isToolMode(value)) {
-    throw new Error(`Invalid tool mode: ${String(value)}`);
-  }
-}
-
 function isCanonicalIsoDate(value: unknown): value is string {
   if (typeof value !== "string") return false;
   const time = Date.parse(value);
@@ -332,12 +310,7 @@ function parseDeletionQuarantineBasename(name: string): string {
   return originalBasename;
 }
 
-interface ParsedManifest {
-  manifest: ProjectManifestV1;
-  migratedLegacyToolMode: boolean;
-}
-
-function parseManifest(raw: string, manifestPath: string): ParsedManifest {
+function parseManifest(raw: string, manifestPath: string): ProjectManifest {
   let value: unknown;
   try {
     value = JSON.parse(raw);
@@ -357,7 +330,6 @@ function parseManifest(raw: string, manifestPath: string): ParsedManifest {
       "version",
       "projectId",
       "createdAt",
-      "toolMode",
       "lastConversationId",
     ]);
     for (const key of Object.keys(record)) {
@@ -373,24 +345,17 @@ function parseManifest(raw: string, manifestPath: string): ParsedManifest {
     if (!isCanonicalIsoDate(record.createdAt)) {
       throw new Error("createdAt must be a canonical ISO timestamp");
     }
-    const migratedLegacyToolMode = record.toolMode === "workspace_write";
-    const toolMode = migratedLegacyToolMode ? "full_access" : record.toolMode;
-    assertToolMode(toolMode);
     if (record.lastConversationId !== undefined) {
       assertSessionId(record.lastConversationId, "lastConversationId");
     }
 
     return {
-      manifest: {
-        version: MANIFEST_VERSION,
-        projectId: record.projectId,
-        createdAt: record.createdAt,
-        toolMode,
-        ...(record.lastConversationId === undefined
-          ? {}
-          : { lastConversationId: record.lastConversationId }),
-      },
-      migratedLegacyToolMode,
+      version: MANIFEST_VERSION,
+      projectId: record.projectId,
+      createdAt: record.createdAt,
+      ...(record.lastConversationId === undefined
+        ? {}
+        : { lastConversationId: record.lastConversationId }),
     };
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
@@ -458,10 +423,7 @@ function parseCatalogConversationSummary(
   };
 }
 
-function parseCatalogObservation(
-  value: unknown,
-  sourceVersion: number,
-): CatalogObservation {
+function parseCatalogObservation(value: unknown): CatalogObservation {
   if (!isRecord(value)) throw new Error("catalog observation must be an object");
   assertCatalogKeys(value, [
     "relativePath",
@@ -527,10 +489,6 @@ function parseCatalogObservation(
     && (
       header.kind !== "claims"
       || header.conversationId !== summary.id
-      || (
-        sourceVersion === LEGACY_CONVERSATION_CATALOG_VERSION
-        && value.body.kind !== "valid"
-      )
     )
   ) {
     throw new Error("catalog summary has no matching identity");
@@ -565,12 +523,7 @@ function parseConversationCatalog(raw: string): ConversationCatalog {
   const value: unknown = JSON.parse(raw);
   if (!isRecord(value)) throw new Error("catalog must be an object");
   assertCatalogKeys(value, ["version", "coverage", "observations"]);
-  const sourceVersion = value.version === LEGACY_CONVERSATION_CATALOG_VERSION
-    ? LEGACY_CONVERSATION_CATALOG_VERSION
-    : value.version === CONVERSATION_CATALOG_VERSION
-    ? CONVERSATION_CATALOG_VERSION
-    : undefined;
-  if (sourceVersion === undefined) {
+  if (value.version !== CONVERSATION_CATALOG_VERSION) {
     throw new Error("catalog version is unsupported");
   }
   if (!isRecord(value.coverage)) throw new Error("catalog coverage must be an object");
@@ -591,7 +544,7 @@ function parseConversationCatalog(raw: string): ConversationCatalog {
     throw new Error("catalog observations are invalid");
   }
   const observations = value.observations
-    .map((observation) => parseCatalogObservation(observation, sourceVersion))
+    .map((observation) => parseCatalogObservation(observation))
     .sort((first, second) => first.relativePath.localeCompare(second.relativePath));
   if (observations.some((entry, index) =>
     index > 0 && entry.relativePath === observations[index - 1]?.relativePath
@@ -644,7 +597,7 @@ async function writeConversationCatalogAtomically(
 
 async function writeManifestAtomically(
   manifestPath: string,
-  manifest: ProjectManifestV1,
+  manifest: ProjectManifest,
 ): Promise<void> {
   const temporaryPath = join(
     dirname(manifestPath),
@@ -779,11 +732,6 @@ function parseValidatedSessionValues(raw: string): unknown[] {
     .map((line) => JSON.parse(line) as unknown);
 }
 
-function validatedSessionVersion(values: readonly unknown[]): number {
-  const header = values[0] as { version?: number };
-  return header.version ?? 1;
-}
-
 async function assertCanonicalOwnedDirectory(
   expectedPath: string,
   label: string,
@@ -875,7 +823,7 @@ export class ProjectStore {
   private readonly manifestPath: string;
   private readonly conversationCatalogPath: string;
   private readonly listeners = new Set<ProjectStoreListener>();
-  private manifest: ProjectManifestV1;
+  private manifest: ProjectManifest;
   private conversations: ConversationSummary[] = [];
   private verifiedCatalog?: VerifiedSessionCatalog;
   private conversationCatalog?: ConversationCatalog;
@@ -888,7 +836,7 @@ export class ProjectStore {
     stateDir: string,
     sessionDir: string,
     manifestPath: string,
-    manifest: ProjectManifestV1,
+    manifest: ProjectManifest,
   ) {
     this.id = manifest.projectId;
     this.cwd = cwd;
@@ -902,15 +850,7 @@ export class ProjectStore {
     this.manifest = manifest;
   }
 
-  /**
-   * `manifestCompatibilityToolMode` is written only when creating the legacy
-   * v1 manifest shape. It is never consulted for runtime authorization.
-   */
-  static async open(
-    cwd: string,
-    manifestCompatibilityToolMode: ToolMode,
-  ): Promise<ProjectStore> {
-    assertToolMode(manifestCompatibilityToolMode);
+  static async open(cwd: string): Promise<ProjectStore> {
     const canonicalCwd = await canonicalDirectory(cwd);
     const stateDir = join(canonicalCwd, PROJECT_STATE_DIRECTORY);
     const sessionDir = join(stateDir, SESSION_DIRECTORY);
@@ -918,13 +858,9 @@ export class ProjectStore {
     await mkdir(stateDir, { recursive: true });
     await assertCanonicalOwnedDirectory(stateDir, "Project state directory");
 
-    let manifest: ProjectManifestV1;
+    let manifest: ProjectManifest;
     try {
-      const parsed = parseManifest(await readFile(manifestPath, "utf8"), manifestPath);
-      manifest = parsed.manifest;
-      if (parsed.migratedLegacyToolMode) {
-        await writeManifestAtomically(manifestPath, manifest);
-      }
+      manifest = parseManifest(await readFile(manifestPath, "utf8"), manifestPath);
     } catch (error) {
       if (!isNodeError(error, "ENOENT")) throw error;
       await mkdir(sessionDir, { recursive: true });
@@ -937,7 +873,6 @@ export class ProjectStore {
         version: MANIFEST_VERSION,
         projectId: randomUUID(),
         createdAt: new Date().toISOString(),
-        toolMode: manifestCompatibilityToolMode,
       };
       await writeManifestAtomically(manifestPath, manifest);
     }
@@ -984,11 +919,10 @@ export class ProjectStore {
     return this.enqueueWrite(async () => {
       if (conversationId === this.manifest.lastConversationId) return;
       await this.assertStateDirectorySafe();
-      const next: ProjectManifestV1 = {
+      const next: ProjectManifest = {
         version: MANIFEST_VERSION,
         projectId: this.manifest.projectId,
         createdAt: this.manifest.createdAt,
-        toolMode: this.manifest.toolMode,
         ...(conversationId === undefined
           ? {}
           : { lastConversationId: conversationId }),
@@ -1228,8 +1162,6 @@ export class ProjectStore {
   ): Promise<SessionManager> {
     const { target, namespace } =
       await this.readVerifiedTargetSessionFile(conversationId);
-    const preOpenValues = parseValidatedSessionValues(target.raw);
-    const preOpenVersion = validatedSessionVersion(preOpenValues);
 
     let conversation: SessionManager;
     try {
@@ -1258,32 +1190,7 @@ export class ProjectStore {
     }
     if (!fingerprintsEqual(target.fingerprint, afterOpen)) {
       this.verifiedCatalog = undefined;
-      if (
-        preOpenVersion >= CURRENT_SESSION_VERSION
-        || !sessionFileIdentitiesEqual(target.fingerprint, afterOpen)
-      ) {
-        throw new SessionFileChangedError(conversationId);
-      }
-
-      const postOpen = await this.readStableExpectedSessionFile(
-        afterOpen,
-        conversationId,
-      );
-      const postOpenValues = parseValidatedSessionValues(postOpen.raw);
-      const postOpenHeader = postOpenValues[0] as { version?: number };
-      if (postOpenHeader.version !== CURRENT_SESSION_VERSION) {
-        throw new Error(
-          `Conversation migration did not produce the current session version: ${conversationId}`,
-        );
-      }
-      if (
-        !isDeepStrictEqual(conversation.getHeader(), postOpenValues[0])
-        || !isDeepStrictEqual(conversation.getEntries(), postOpenValues.slice(1))
-      ) {
-        throw new Error(
-          `Conversation migration does not match the opened session: ${conversationId}`,
-        );
-      }
+      throw new SessionFileChangedError(conversationId);
     }
 
     try {
@@ -1607,11 +1514,10 @@ export class ProjectStore {
     return this.enqueueWrite(async () => {
       if (this.manifest.lastConversationId !== conversationId) return;
       await this.assertStateDirectorySafe();
-      const next: ProjectManifestV1 = {
+      const next: ProjectManifest = {
         version: MANIFEST_VERSION,
         projectId: this.manifest.projectId,
         createdAt: this.manifest.createdAt,
-        toolMode: this.manifest.toolMode,
       };
       await writeManifestAtomically(this.manifestPath, next);
       this.manifest = next;
@@ -2411,18 +2317,10 @@ export class ProjectStoreRegistry {
   private readonly stores = new Map<string, ProjectStoreRegistryEntry>();
   private readonly leases = new Map<string, ConversationLeaseState>();
 
-  async acquireProject(
-    cwd: string,
-    manifestCompatibilityToolMode: ToolMode,
-  ): Promise<ProjectStoreHandle> {
-    assertToolMode(manifestCompatibilityToolMode);
+  async acquireProject(cwd: string): Promise<ProjectStoreHandle> {
     const canonicalCwd = await canonicalDirectory(cwd);
     const key = pathIdentity(canonicalCwd);
-    const entry = this.getOrCreateProjectEntry(
-      key,
-      canonicalCwd,
-      manifestCompatibilityToolMode,
-    );
+    const entry = this.getOrCreateProjectEntry(key, canonicalCwd);
     entry.references += 1;
 
     let store: ProjectStore;
@@ -2529,13 +2427,12 @@ export class ProjectStoreRegistry {
   private getOrCreateProjectEntry(
     key: string,
     canonicalCwd: string,
-    manifestCompatibilityToolMode: ToolMode,
   ): ProjectStoreRegistryEntry {
     const existing = this.stores.get(key);
     if (existing !== undefined) return existing;
 
     const entry: ProjectStoreRegistryEntry = {
-      opening: ProjectStore.open(canonicalCwd, manifestCompatibilityToolMode),
+      opening: ProjectStore.open(canonicalCwd),
       references: 0,
     };
     this.stores.set(key, entry);

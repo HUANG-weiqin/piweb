@@ -11,14 +11,10 @@ import {
   MAX_CONVERSATION_MESSAGE_CONTENT_BYTES,
   MAX_ROLE_SYSTEM_PROMPT_BYTES,
   MAX_RUN_FINAL_TEXT_BYTES,
-  LEGACY_LOOP_LIST_CUSTOM_TYPE,
-  LEGACY_LOOP_LIST_CONTINUE_CUSTOM_TYPE,
   LOOP_LIST_CUSTOM_TYPE,
   LOOP_LIST_CONTINUE_CUSTOM_TYPE,
   MESSAGE_DELIVERY_RECEIPT_CUSTOM_TYPE,
   META_OPERATION_CUSTOM_TYPE,
-  PENDING_PROMPT_BATCH_CUSTOM_TYPE,
-  PENDING_PROMPT_DELIVERY_CUSTOM_TYPE,
   RUN_SETTLEMENT_CUSTOM_TYPE,
   SERVICE_TIER_CUSTOM_TYPE,
   TEMPORARY_RETURN_RECEIPT_CUSTOM_TYPE,
@@ -44,11 +40,9 @@ import {
   parseConversationMetaEntry,
   parseConversationRoleChangeEntry,
   parseMetaOperationEntry,
-  parsePendingPromptBatchEntry,
   parseLoopListEntry,
   parseLoopListContinueEntry,
   parseMessageDeliveryReceiptEntry,
-  parsePendingPromptDeliveryEntry,
   parseReservedConversationEntry,
   parseRunSettlementEntry,
   parseServiceTierSelectionEntry,
@@ -56,27 +50,9 @@ import {
 } from "./conversation-meta.js";
 import type {
   MessageDeliveryReceipt,
-  PendingPromptBatch,
-  PendingPromptBatchEntry,
-  PendingPromptDelivery,
-  PendingPromptDeliveryEntry,
 } from "./conversation-meta.js";
 
 const timestamp = "2026-07-19T10:00:00.000Z";
-
-function deliveryEntry(data: PendingPromptDelivery): PendingPromptDeliveryEntry {
-  return parsePendingPromptDeliveryEntry({
-    customType: PENDING_PROMPT_DELIVERY_CUSTOM_TYPE,
-    data,
-  });
-}
-
-function batchEntry(data: PendingPromptBatch): PendingPromptBatchEntry {
-  return parsePendingPromptBatchEntry({
-    customType: PENDING_PROMPT_BATCH_CUSTOM_TYPE,
-    data,
-  });
-}
 
 
 function peer(conversationId = randomUUID()) {
@@ -300,60 +276,24 @@ describe("conversation reserved entries", () => {
     ])).toThrow(/service tier updatedAt cannot regress/i);
   });
 
-  it("migrates v1 LoopList entries and round-trips strict v2 snapshots", () => {
-    const legacyItems = [
-      { id: "implement", text: "Implement LoopList", checked: false },
-      { id: "record", text: "Record result", checked: true },
-    ];
-    const legacy = {
-      customType: LEGACY_LOOP_LIST_CUSTOM_TYPE,
-      data: {
-        items: legacyItems,
-        armed: true,
-        updatedAt: "2026-07-19T09:59:00.000Z",
-      },
-    };
-    const legacyContinuation = {
-      customType: LEGACY_LOOP_LIST_CONTINUE_CUSTOM_TYPE,
-      content: [
-        "Current LoopList snapshot:",
-        "[ ] Implement LoopList (implement)",
-        "[x] Record result (record)",
-        "Continue working through the unchecked items. Update the list with todo_write as progress changes.",
-      ].join("\n"),
+  it("accepts only v2 LoopList snapshots and continuations", () => {
+    expect(() => parseReservedConversationEntry({
+      customType: "piweb.loop_list.v1",
+      data: { items: [], armed: true, updatedAt: timestamp },
+    })).toThrow(/unknown piweb reserved custom type/i);
+    expect(() => parseReservedConversationEntry({
+      customType: "piweb.loop_list_continue.v1",
+      content: "legacy",
       display: false,
-      details: {
-        runId: randomUUID(),
-        continuation: 1,
-        items: legacyItems,
-      },
-    };
-    const migrated = {
-      items: [
-        { id: "implement", text: "Implement LoopList", status: "pending" },
-        { id: "record", text: "Record result", status: "completed" },
-      ],
-      armed: true,
-      updatedAt: "2026-07-19T09:59:00.000Z",
-    };
-    const parsedLegacy = parseReservedConversationEntry(legacy);
-    const parsedLegacyContinuation = parseReservedConversationEntry(
-      legacyContinuation,
-    );
-    expect(parsedLegacy).toMatchObject({ kind: "loop_list" });
-    expect(parsedLegacyContinuation).toMatchObject({
-      kind: "loop_list_continue",
-    });
-    if (parsedLegacy?.kind !== "loop_list") {
-      throw new Error("Expected a legacy LoopList entry");
+      details: { runId: randomUUID(), continuation: 1, items: [] },
+    })).toThrow(/unknown piweb reserved custom type/i);
+    for (const customType of [
+      "piweb.pending_prompt_delivery.v1",
+      "piweb.pending_prompt_batch.v1",
+    ]) {
+      expect(() => parseReservedConversationEntry({ customType, data: {} }))
+        .toThrow(/unknown piweb reserved custom type/i);
     }
-    if (parsedLegacyContinuation?.kind !== "loop_list_continue") {
-      throw new Error("Expected a legacy LoopList continuation");
-    }
-    expect(parsedLegacy.entry.data).toEqual(migrated);
-    expect(parsedLegacyContinuation.entry.details.items).toEqual(migrated.items);
-    expect(parsedLegacy.entry.data.items)
-      .not.toContainEqual(expect.objectContaining({ status: "active" }));
 
     const initial = createLoopListEntry({
       items: [{ id: "implement", text: "Implement LoopList", status: "active" }],
@@ -379,8 +319,6 @@ describe("conversation reserved entries", () => {
     expect(parseLoopListEntry(initial)).toEqual(initial);
     expect(parseLoopListContinueEntry(continuation)).toEqual(continuation);
     expect(aggregateReservedConversationEntries([
-      legacy,
-      legacyContinuation,
       initial,
       continuation,
       completed,
@@ -535,83 +473,33 @@ describe("conversation reserved entries", () => {
     ])).toThrow(/before conversation metadata/i);
   });
 
-  it("preserves the conversation tier for legacy role changes and applies explicit null", () => {
-    const initial = createConversationMetaEntry(metadata());
-    const selected = createServiceTierSelectionEntry({
-      tier: "priority",
-      updatedAt: timestamp,
-    });
-    const legacyChange = parseConversationRoleChangeEntry({
+  it("requires current role snapshots and a selected tier on role changes", () => {
+    const value = metadata();
+    for (const field of [
+      "compactionModel",
+      "defaultThinkingLevel",
+      "defaultServiceTier",
+      "toolMode",
+      "canManageSessions",
+    ]) {
+      const legacyRole: Record<string, unknown> = { ...value.role };
+      delete legacyRole[field];
+      expect(() => parseConversationMetaEntry({
+        customType: CONVERSATION_META_CUSTOM_TYPE,
+        data: { ...value, role: legacyRole },
+      })).toThrow();
+      expect(() => parseConversationCardEntry({
+        customType: CONVERSATION_CARD_CUSTOM_TYPE,
+        data: { ...card(), requestedRole: legacyRole },
+      })).toThrow();
+    }
+    expect(() => parseConversationRoleChangeEntry({
       customType: CONVERSATION_ROLE_CHANGE_CUSTOM_TYPE,
       data: {
-        role: { ...initial.data.role, revision: 4 },
-        changedAt: "2026-07-19T10:01:00.000Z",
+        role: value.role,
+        changedAt: timestamp,
       },
-    });
-    const cleared = createConversationRoleChangeEntry({
-      role: { ...initial.data.role, revision: 5 },
-      selectedServiceTier: null,
-      changedAt: "2026-07-19T10:02:00.000Z",
-    });
-
-    expect(aggregateReservedConversationEntries([
-      initial,
-      selected,
-      legacyChange,
-    ]).serviceTier).toEqual(selected.data);
-    expect(aggregateReservedConversationEntries([
-      initial,
-      selected,
-      legacyChange,
-      cleared,
-    ]).serviceTier).toEqual({
-      tier: null,
-      updatedAt: cleared.data.changedAt,
-    });
-  });
-
-  it("keeps legacy conversation behavior closed", () => {
-    const value = metadata();
-    const {
-      canManageSessions: _omittedCapability,
-      compactionModel: _omittedCompactionModel,
-      defaultThinkingLevel: _omittedThinkingLevel,
-      defaultServiceTier: _omittedServiceTier,
-      ...legacyRole
-    } = value.role;
-
-    const parsed = parseConversationMetaEntry({
-      customType: CONVERSATION_META_CUSTOM_TYPE,
-      data: { ...value, role: legacyRole },
-    });
-    expect(parsed.data.role.canManageSessions).toBe(false);
-    expect(parsed.data.role.compactionModel).toBeNull();
-    expect(parsed.data.role.defaultThinkingLevel).toBe("off");
-    expect(parsed.data.role.defaultServiceTier).toBeNull();
-  });
-
-  it("migrates v1 role snapshots in metadata, role changes, and requested cards", () => {
-    const value = metadata();
-    const { compactionModel: _compactionModel, ...legacyRole } = value.role;
-    const legacyMeta = parseConversationMetaEntry({
-      customType: CONVERSATION_META_CUSTOM_TYPE,
-      data: { ...value, role: legacyRole },
-    });
-    const legacyChange = parseConversationRoleChangeEntry({
-      customType: CONVERSATION_ROLE_CHANGE_CUSTOM_TYPE,
-      data: {
-        role: { ...legacyRole, revision: 4 },
-        changedAt: "2026-07-19T10:01:00.000Z",
-      },
-    });
-    const legacyCard = parseConversationCardEntry({
-      customType: CONVERSATION_CARD_CUSTOM_TYPE,
-      data: { ...card(), requestedRole: legacyRole },
-    });
-
-    expect(legacyMeta.data.role.compactionModel).toBeNull();
-    expect(legacyChange.data.role.compactionModel).toBeNull();
-    expect(legacyCard.data.requestedRole?.compactionModel).toBeNull();
+    })).toThrow(/selectedServiceTier/i);
   });
 
   it("rejects unknown, incomplete, and over-limit conversation metadata", () => {
@@ -871,191 +759,6 @@ describe("conversation reserved entries", () => {
       ...settlement(),
       finalText: "x".repeat(MAX_RUN_FINAL_TEXT_BYTES + 1),
     })).toThrow(/finalText/i);
-  });
-
-  it("records pending prompt delivery receipts by prompt identity, allowing one run to deliver several prompts", () => {
-    const delivery = deliveryEntry({
-      promptId: randomUUID(),
-      runId: randomUUID(),
-      deliveredAt: timestamp,
-    });
-    const batchDelivery = deliveryEntry({
-      promptId: randomUUID(),
-      runId: delivery.data.runId,
-      batchId: randomUUID(),
-      deliveredAt: "2026-07-19T10:00:30.000Z",
-    });
-    const sameRunDifferentPrompt = deliveryEntry({
-      promptId: randomUUID(),
-      runId: delivery.data.runId,
-      deliveredAt: "2026-07-19T10:01:00.000Z",
-    });
-    expect(delivery.customType).toBe(PENDING_PROMPT_DELIVERY_CUSTOM_TYPE);
-    expect(parsePendingPromptDeliveryEntry(delivery)).toEqual(delivery);
-    expect(delivery.data.batchId).toBeUndefined();
-    expect(parsePendingPromptDeliveryEntry(batchDelivery)).toEqual(batchDelivery);
-    expect(parseReservedConversationEntry(delivery)).toEqual({
-      kind: "pending_prompt_delivery",
-      entry: delivery,
-    });
-    expect(aggregateReservedConversationEntries([delivery, delivery])
-      .pendingPromptDeliveries).toEqual([delivery.data]);
-    expect(aggregateReservedConversationEntries([
-      delivery,
-      batchDelivery,
-      sameRunDifferentPrompt,
-    ]).pendingPromptDeliveries).toEqual([
-      delivery.data,
-      batchDelivery.data,
-      sameRunDifferentPrompt.data,
-    ]);
-    expect(() => aggregateReservedConversationEntries([
-      delivery,
-      deliveryEntry({
-        ...delivery.data,
-        deliveredAt: "2026-07-19T10:01:00.000Z",
-      }),
-    ])).toThrow(/conflicting.*pending prompt delivery/i);
-    expect(() => aggregateReservedConversationEntries([
-      delivery,
-      deliveryEntry({
-        ...delivery.data,
-        runId: randomUUID(),
-      }),
-    ])).toThrow(/conflicting.*pending prompt delivery/i);
-    expect(() => deliveryEntry({
-      ...delivery.data,
-      promptId: "not-a-uuid",
-    })).toThrow(/promptId/i);
-  });
-
-  it("folds immutable pending prompt batch manifests through strict state transitions", () => {
-    const prepared = batchEntry({
-      batchId: randomUUID(),
-      conversationId: randomUUID(),
-      runId: randomUUID(),
-      items: [
-        {
-          promptId: randomUUID(),
-          createdAt: timestamp,
-          payloadSha256: "a".repeat(64),
-        },
-        {
-          promptId: randomUUID(),
-          createdAt: "2026-07-19T10:00:01.000Z",
-          payloadSha256: "b".repeat(64),
-        },
-      ],
-      state: "prepared",
-      updatedAt: timestamp,
-    });
-    const started = batchEntry({
-      ...prepared.data,
-      state: "started",
-      updatedAt: "2026-07-19T10:01:00.000Z",
-    });
-    const delivered = batchEntry({
-      ...started.data,
-      state: "delivered",
-      updatedAt: "2026-07-19T10:02:00.000Z",
-    });
-    const completed = batchEntry({
-      ...delivered.data,
-      state: "completed",
-      updatedAt: "2026-07-19T10:03:00.000Z",
-    });
-    const preparedAttention = batchEntry({
-      ...prepared.data,
-      state: "attention",
-      reason: "sidecar disappeared during recovery",
-      updatedAt: "2026-07-19T10:04:00.000Z",
-    });
-    const deliveredAttention = batchEntry({
-      ...delivered.data,
-      state: "attention",
-      reason: "delivery proof was lost",
-      updatedAt: "2026-07-19T10:04:00.000Z",
-    });
-
-    expect(prepared.customType).toBe(PENDING_PROMPT_BATCH_CUSTOM_TYPE);
-    expect(parsePendingPromptBatchEntry(prepared)).toEqual(prepared);
-    expect(parseReservedConversationEntry(prepared)).toEqual({
-      kind: "pending_prompt_batch",
-      entry: prepared,
-    });
-    expect(aggregateReservedConversationEntries([
-      prepared,
-      prepared,
-      started,
-      delivered,
-      completed,
-      completed,
-    ]).pendingPromptBatches).toEqual([completed.data]);
-    expect(aggregateReservedConversationEntries([
-      prepared,
-      preparedAttention,
-    ]).pendingPromptBatches).toEqual([preparedAttention.data]);
-    expect(aggregateReservedConversationEntries([
-      prepared,
-      started,
-      delivered,
-      deliveredAttention,
-    ]).pendingPromptBatches).toEqual([deliveredAttention.data]);
-    expect(() => aggregateReservedConversationEntries([started]))
-      .toThrow(/begin in prepared/i);
-    expect(() => aggregateReservedConversationEntries([
-      prepared,
-      delivered,
-    ])).toThrow(/cannot transition/i);
-    expect(() => aggregateReservedConversationEntries([
-      prepared,
-      batchEntry({
-        ...started.data,
-        runId: randomUUID(),
-      }),
-    ])).toThrow(/conflicting.*identity/i);
-    expect(() => aggregateReservedConversationEntries([
-      prepared,
-      started,
-      batchEntry({
-        ...started.data,
-        state: "failed",
-        updatedAt: "2026-07-19T10:02:00.000Z",
-        reason: "deterministic rejection",
-      }),
-      batchEntry({
-        ...started.data,
-        updatedAt: "2026-07-19T10:03:00.000Z",
-      }),
-    ])).toThrow(/terminal state/i);
-    expect(() => parsePendingPromptBatchEntry({
-      customType: PENDING_PROMPT_BATCH_CUSTOM_TYPE,
-      data: {
-        ...prepared.data,
-        items: [{
-          ...prepared.data.items[0],
-          payloadSha256: "A".repeat(64),
-        }],
-        reason: "forbidden",
-      },
-    })).toThrow(/unrecognized|unknown/i);
-    expect(() => parsePendingPromptBatchEntry({
-      customType: PENDING_PROMPT_BATCH_CUSTOM_TYPE,
-      data: {
-        ...prepared.data,
-        items: [{
-          ...prepared.data.items[0],
-          payloadSha256: "A".repeat(64),
-        }],
-      },
-    })).toThrow(/payloadSha256/i);
-    expect(() => parsePendingPromptBatchEntry({
-      customType: PENDING_PROMPT_BATCH_CUSTOM_TYPE,
-      data: {
-        ...prepared.data,
-        state: "failed",
-      },
-    })).toThrow(/reason/i);
   });
 
   it("records caller-owned temporary return receipt transitions strictly", () => {

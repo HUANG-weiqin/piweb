@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import type {
@@ -39,8 +39,6 @@ import {
   createLoopListEntry,
   createMessageDeliveryReceiptEntry,
   createMetaOperationEntry,
-  createPendingPromptBatchEntry,
-  createPendingPromptDeliveryEntry,
   createRunSettlementEntry,
   MAX_CONVERSATION_BODY_BYTES,
   RUN_SETTLEMENT_CUSTOM_TYPE,
@@ -783,7 +781,7 @@ async function createFixture(
     roles,
     registry,
   );
-  const handle = await coordinator.acquireProject(cwd, "full_access");
+  const handle = await coordinator.acquireProject(cwd);
   const fixture = {
     cwd,
     runtime,
@@ -1958,79 +1956,6 @@ describe("ProjectSessionCoordinator", () => {
     }
   });
 
-  it("migrates legacy queued pending prompts on reopen and drops attention records", async () => {
-    const fixture = await createFixture();
-    const actor = await fixture.coordinator.createUserConversation(
-      fixture.handle,
-      { roleId: "default" },
-    );
-    const conversationId = actor.conversationId;
-    await fixture.coordinator.close();
-
-    const queueDir = join(fixture.cwd, ".piweb", "pending-prompts");
-    await mkdir(queueDir, { recursive: true });
-    const queuedId = randomUUID();
-    await writeFile(
-      join(queueDir, `${queuedId}.json`),
-      JSON.stringify({
-        version: 1,
-        promptId: queuedId,
-        conversationId,
-        text: "legacy queued message",
-        createdAt: "2026-07-01T10:00:00.000Z",
-        state: "queued",
-      }),
-    );
-    const attentionId = randomUUID();
-    await writeFile(
-      join(queueDir, `${attentionId}.json`),
-      JSON.stringify({
-        version: 1,
-        promptId: attentionId,
-        conversationId,
-        text: "legacy attention message",
-        createdAt: "2026-07-01T10:01:00.000Z",
-        state: "attention",
-        reason: "uncertain delivery",
-      }),
-    );
-    await writeFile(
-      join(queueDir, "corrupt.json"),
-      "{not-json",
-    );
-
-    const restarted = new ProjectSessionCoordinator(
-      fixture.runtime,
-      fixture.roles,
-      fixture.registry,
-    );
-    const restartedHandle = await restarted.acquireProject(
-      fixture.cwd,
-      "full_access",
-    );
-    fixture.coordinator = restarted;
-    fixture.handle = restartedHandle;
-
-    await waitUntil(
-      () => fixture.runtime.control(conversationId)
-        .promptTexts.includes("legacy queued message"),
-      "legacy queued message redelivery",
-    );
-    expect(fixture.runtime.control(conversationId).promptTexts)
-      .not.toContain("legacy attention message");
-    await waitUntil(
-      async () => {
-        try {
-          await readdir(queueDir);
-          return false;
-        } catch {
-          return true;
-        }
-      },
-      "legacy queue directory removal",
-    );
-  });
-
   it("acknowledges a first browser prompt before its automatic title finishes", async () => {
     const fixture = await createFixture();
     const titleResult = deferred<AssistantMessage>();
@@ -2193,8 +2118,8 @@ describe("ProjectSessionCoordinator", () => {
     >[] = [];
     try {
       const acquisitions = [
-        coordinator.acquireProject(cwd, "full_access"),
-        coordinator.acquireProject(cwd, "full_access"),
+        coordinator.acquireProject(cwd),
+        coordinator.acquireProject(cwd),
       ];
       await registry.firstAcquireStarted.promise;
       await waitUntil(
@@ -2240,7 +2165,7 @@ describe("ProjectSessionCoordinator", () => {
       registry,
     );
     try {
-      const acquisition = coordinator.acquireProject(cwd, "full_access");
+      const acquisition = coordinator.acquireProject(cwd);
       await registry.firstAcquireStarted.promise;
       let closeSettled = false;
       const closing = coordinator.close().finally(() => {
@@ -11990,7 +11915,7 @@ describe("ProjectSessionCoordinator", () => {
     );
 
     const coordinator = new ProjectSessionCoordinator(runtime, roles);
-    const handle = await coordinator.acquireProject(cwd, "full_access");
+    const handle = await coordinator.acquireProject(cwd);
     const fixture = {
       cwd,
       runtime,
@@ -12678,7 +12603,7 @@ describe("ProjectSessionCoordinator", () => {
     });
 
     const coordinator = new ProjectSessionCoordinator(runtime, roles);
-    const handle = await coordinator.acquireProject(cwd, "full_access");
+    const handle = await coordinator.acquireProject(cwd);
     const liveInbox = coordinatorInbox(handle);
     const fixture = {
       cwd,
@@ -12714,54 +12639,6 @@ describe("ProjectSessionCoordinator", () => {
       runId: processingRunId,
       outcome: "completed",
     }));
-  });
-
-  it("migrates a legacy conversation after the seeded role was deleted", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-legacy-without-role-"));
-    temporaryDirectories.push(cwd);
-    const runtime = new FakeRuntime();
-    const roles = await RoleCatalog.open(
-      runtime,
-      join(cwd, "user", "roles.json"),
-    );
-    const seeded = getRoleTemplate(roles, "default");
-    await roles.deleteRole(seeded.id, seeded.revision);
-    expect(roles.listRoles()).toEqual([]);
-
-    const store = await ProjectStore.open(cwd, "full_access");
-    const conversationId = randomUUID();
-    const legacy = await store.createConversation(conversationId);
-    legacy.appendModelChange("test", "model-a");
-
-    const coordinator = new ProjectSessionCoordinator(runtime, roles);
-    const handle = await coordinator.acquireProject(cwd, "full_access");
-    fixtures.push({
-      cwd,
-      runtime,
-      roles,
-      registry: new ProjectStoreRegistry(),
-      coordinator,
-      handle,
-    });
-
-    const opened = await coordinator.openConversation(
-      handle,
-      conversationId,
-      { updateRecent: false },
-    );
-    expect(
-      aggregateReservedConversationEntries(
-        opened.sessionManager.getEntries(),
-      ).conversationMeta,
-    ).toMatchObject({
-      role: {
-        id: "default",
-        name: "旧会话",
-        model: { provider: "test", id: "model-a" },
-        compactionModel: null,
-        canManageSessions: false,
-      },
-    });
   });
 
   it("recovers a processing start_session with its exact task, role, and run only once", async () => {
@@ -12889,7 +12766,7 @@ describe("ProjectSessionCoordinator", () => {
     });
 
     const coordinator = new ProjectSessionCoordinator(runtime, roles);
-    const handle = await coordinator.acquireProject(cwd, "full_access");
+    const handle = await coordinator.acquireProject(cwd);
     fixtures.push({
       cwd,
       runtime,
@@ -13122,7 +12999,7 @@ describe("ProjectSessionCoordinator", () => {
     await rename(targetPath, quarantinePath);
 
     const coordinator = new ProjectSessionCoordinator(runtime, roles);
-    const handle = await coordinator.acquireProject(cwd, "full_access");
+    const handle = await coordinator.acquireProject(cwd);
     fixtures.push({
       cwd,
       runtime,
@@ -13197,7 +13074,7 @@ describe("ProjectSessionCoordinator", () => {
     );
 
     const coordinator = new ProjectSessionCoordinator(runtime, roles);
-    const handle = await coordinator.acquireProject(cwd, "full_access");
+    const handle = await coordinator.acquireProject(cwd);
     fixtures.push({
       cwd,
       runtime,
@@ -13275,7 +13152,7 @@ describe("ProjectSessionCoordinator", () => {
     });
 
     const coordinator = new ProjectSessionCoordinator(runtime, roles);
-    const handle = await coordinator.acquireProject(cwd, "full_access");
+    const handle = await coordinator.acquireProject(cwd);
     fixtures.push({
       cwd,
       runtime,
@@ -13413,7 +13290,7 @@ describe("ProjectSessionCoordinator", () => {
     );
 
     const coordinator = new ProjectSessionCoordinator(runtime, roles);
-    const handle = await coordinator.acquireProject(cwd, "full_access");
+    const handle = await coordinator.acquireProject(cwd);
     const fixture = {
       cwd,
       runtime,
@@ -13614,72 +13491,6 @@ describe("ProjectSessionCoordinator", () => {
     await targetCompletion;
   });
 
-  it.each(["queued", "processing"] as const)(
-    "retains and blocks a %s legacy sidecar without exact source-run identity",
-    async (state) => {
-      const cwd = await mkdtemp(join(
-        tmpdir(),
-        `piweb-session-legacy-${state}-inbox-`,
-      ));
-      temporaryDirectories.push(cwd);
-      const runtime = new FakeRuntime();
-      const roles = await RoleCatalog.open(
-        runtime,
-        join(cwd, "user", "roles.json"),
-      );
-      const store = await ProjectStore.open(cwd, "full_access");
-      const sourceId = randomUUID();
-      const targetId = randomUUID();
-      await store.createConversation(sourceId, defaultProfile(roles));
-      await store.createConversation(targetId, defaultProfile(roles));
-      const inbox = await ProjectInbox.open(join(store.stateDir, "inbox"));
-      const messageId = randomUUID();
-      await inbox.put({
-        messageId,
-        cardId: randomUUID(),
-        fromConversationId: sourceId,
-        toConversationId: targetId,
-        sentAt: "2026-07-19T12:00:00.000Z",
-        kind: "message",
-        body: `legacy ${state} work has no exact source run`,
-        fromSnapshot: {
-          conversationId: sourceId,
-          role: { id: "default", name: "Default" },
-        },
-        toSnapshot: {
-          conversationId: targetId,
-          role: { id: "default", name: "Default" },
-        },
-      });
-      if (state === "processing") {
-        await inbox.updateState(messageId, {
-          state: "processing",
-          processingRunId: randomUUID(),
-        });
-      }
-
-      const coordinator = new ProjectSessionCoordinator(runtime, roles);
-      const handle = await coordinator.acquireProject(cwd, "full_access");
-      fixtures.push({
-        cwd,
-        runtime,
-        roles,
-        registry: new ProjectStoreRegistry(),
-        coordinator,
-        handle,
-      });
-
-      await waitUntil(async () => (
-        await coordinator.listSessions(handle)
-      ).find(({ id }) => id === targetId)?.attention === true,
-      `${state} legacy sidecar attention`);
-      expect(runtime.controls.get(targetId)?.received ?? []).toEqual([]);
-      expect(await coordinatorInbox(handle).list()).toEqual([
-        expect.objectContaining({ messageId, state }),
-      ]);
-    },
-  );
-
   it("recovers an unsettled receipt-only run without replaying a message body", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-session-receipt-only-"));
     temporaryDirectories.push(cwd);
@@ -13716,7 +13527,7 @@ describe("ProjectSessionCoordinator", () => {
     );
 
     const coordinator = new ProjectSessionCoordinator(runtime, roles);
-    const handle = await coordinator.acquireProject(cwd, "full_access");
+    const handle = await coordinator.acquireProject(cwd);
     fixtures.push({
       cwd,
       runtime,
@@ -13811,7 +13622,7 @@ describe("ProjectSessionCoordinator", () => {
     });
 
     const coordinator = new ProjectSessionCoordinator(runtime, roles);
-    const handle = await coordinator.acquireProject(cwd, "full_access");
+    const handle = await coordinator.acquireProject(cwd);
     const fixture = {
       cwd,
       runtime,
@@ -13864,13 +13675,12 @@ describe("ProjectSessionCoordinator", () => {
       expect(profile.orchestration!.sourceRunId).toBeUndefined();
     });
 
-    it("projects stable roots for cold implicit chains and no-metadata legacy sessions", async () => {
+    it("projects stable roots for cold implicit chains", async () => {
       const fixture = await createFixture();
       const role = fixture.roles.getConversationRole("default");
       const rootId = randomUUID();
       const childId = randomUUID();
       const grandchildId = randomUUID();
-      const legacyId = randomUUID();
       await fixture.handle.project.createConversation(rootId, {
         role,
         lifecycle: { kind: "normal" },
@@ -13886,8 +13696,6 @@ describe("ProjectSessionCoordinator", () => {
         lifecycle: { kind: "normal" },
         createdBy: { kind: "conversation", conversationId: childId },
       });
-      await fixture.handle.project.createConversation(legacyId);
-
       const summaries = await fixture.coordinator.listSessions(fixture.handle);
       const roots = new Map(summaries.map(({ id, rootConversationId }) => [
         id,
@@ -13897,7 +13705,6 @@ describe("ProjectSessionCoordinator", () => {
       expect(roots.get(rootId)).toBe(rootId);
       expect(roots.get(childId)).toBe(rootId);
       expect(roots.get(grandchildId)).toBe(rootId);
-      expect(roots.get(legacyId)).toBe(legacyId);
       expect(fixture.runtime.createConversationIds).toEqual([]);
     });
 
@@ -14134,11 +13941,11 @@ describe("ProjectSessionCoordinator", () => {
       });
     });
 
-    it("resolves implicit lineage from legacy conversations without orchestration", async () => {
+    it("resolves implicit lineage from current metadata without orchestration", async () => {
       const fixture = await createFixture();
       const role = fixture.roles.getConversationRole("default");
 
-      // A: user-created, no orchestration (pre-feature legacy).
+      // A: user-created, no orchestration.
       const aId = randomUUID();
       await fixture.handle.project.createConversation(aId, {
         role,
@@ -14146,7 +13953,7 @@ describe("ProjectSessionCoordinator", () => {
         createdBy: { kind: "user" },
       });
 
-      // B: created by A, no orchestration (legacy peer).
+      // B: created by A, no orchestration.
       const bId = randomUUID();
       await fixture.handle.project.createConversation(bId, {
         role,
@@ -14164,8 +13971,8 @@ describe("ProjectSessionCoordinator", () => {
         fixture,
         bId,
         startInput({
-          task: "legacy-lineage-child",
-          idempotencyKey: "legacy-lineage-c",
+          task: "implicit-lineage-child",
+          idempotencyKey: "implicit-lineage-c",
         }),
       );
 
@@ -14258,7 +14065,7 @@ describe("ProjectSessionCoordinator", () => {
       ).toBeUndefined();
     });
 
-    it("cascades deletion through legacy implicit children", async () => {
+    it("cascades deletion through implicit children without orchestration", async () => {
       const fixture = await createFixture();
       const role = fixture.roles.getConversationRole("default");
       const parentId = randomUUID();
@@ -14405,16 +14212,12 @@ describe("ProjectSessionCoordinator", () => {
       await childRun;
     });
 
-    it("treats an existing parent without conversationMeta as user root for implicit child", async () => {
+    it("rejects implicit lineage when the parent metadata is missing", async () => {
       const fixture = await createFixture();
       const role = fixture.roles.getConversationRole("default");
-
-      // Parent file exists but has no conversationMeta (pre-feature legacy).
       const parentId = randomUUID();
-      // Create a minimal session file without any custom entries.
       await fixture.handle.project.createConversation(parentId);
 
-      // Child references the parent via createdBy, no orchestration.
       const childId = randomUUID();
       await fixture.handle.project.createConversation(childId, {
         role,
@@ -14422,31 +14225,23 @@ describe("ProjectSessionCoordinator", () => {
         createdBy: { kind: "conversation", conversationId: parentId },
       });
 
-      // Open child and create a peer — resolveOrchestration should treat
-      // the no-meta parent as a user root.
       const childActor = await fixture.coordinator.openConversation(
         fixture.handle,
         childId,
         { updateRecent: false },
       );
-      const peer = await startPeerFromActiveSource(
+      const input = startInput({
+        task: "missing-parent-metadata",
+        idempotencyKey: "missing-parent-metadata",
+      });
+      await expect(startPeerFromActiveSource(
         fixture,
         childId,
-        startInput({
-          task: "legacy-no-meta-parent",
-          idempotencyKey: "legacy-no-meta-parent",
-        }),
-      );
-
-      const peerActor = await fixture.coordinator.openConversation(
-        fixture.handle,
-        peer.conversationId,
-        { updateRecent: false },
-      );
-      expect(peerActor.profile.orchestration).toMatchObject({
-        rootConversationId: parentId,
-        depth: 2,
-      });
+        input,
+      )).rejects.toThrow(/profile metadata is missing/i);
+      expect(aggregateReservedConversationEntries(
+        childActor.sessionManager.getEntries(),
+      ).cards.find(({ body }) => body === input.task)).toBeUndefined();
     });
   });
 
@@ -14757,7 +14552,7 @@ describe("ProjectSessionCoordinator", () => {
       const restarted = new ProjectSessionCoordinator(
         fixture.runtime, fixture.roles, fixture.registry,
       );
-      const handle = await restarted.acquireProject(fixture.cwd, "full_access");
+      const handle = await restarted.acquireProject(fixture.cwd);
       await restarted.openConversation(handle, source.conversationId, { updateRecent: false });
 
       const restartedFixture: Fixture = {
@@ -14790,125 +14585,6 @@ describe("ProjectSessionCoordinator", () => {
       await restarted.close();
     }, 15_000);
 
-    it("charges terminal legacy cards to a recovered source run after restart", async () => {
-      const fixture = await createFixture();
-      const source = await fixture.coordinator.createUserConversation(
-        fixture.handle,
-        { roleId: "default" },
-      );
-      const runId = randomUUID();
-      appendReservedCustomEntry(
-        source.sessionManager,
-        createConversationCardEntry({
-          cardId: randomUUID(),
-          kind: "delegation_task",
-          body: "run-correlated delegation",
-          fromSnapshot: {
-            conversationId: source.conversationId,
-            role: { id: "default", name: "Default" },
-          },
-          toSnapshot: {
-            conversationId: randomUUID(),
-            role: { id: "default", name: "Default" },
-          },
-          state: "completed",
-          messageId: randomUUID(),
-          delegationId: randomUUID(),
-          orchestration: {
-            rootConversationId: source.conversationId,
-            depth: 1,
-            sourceRunId: runId,
-          },
-          updatedAt: "2026-07-19T10:00:00.000Z",
-        }),
-      );
-      const legacyStates = ["completed", "failed", "aborted"] as const;
-      const legacyCount = MAX_PEER_SESSIONS_PER_RUN - 1;
-      for (let index = 0; index < legacyCount; index++) {
-        const state = legacyStates[index % legacyStates.length]!;
-        appendReservedCustomEntry(
-          source.sessionManager,
-          createConversationCardEntry({
-            cardId: randomUUID(),
-            kind: "delegation_task",
-            body: `legacy ${state} delegation`,
-            fromSnapshot: {
-              conversationId: source.conversationId,
-              role: { id: "default", name: "Default" },
-            },
-            toSnapshot: {
-              conversationId: randomUUID(),
-              role: { id: "default", name: "Default" },
-            },
-            state,
-            messageId: randomUUID(),
-            delegationId: randomUUID(),
-            updatedAt: `2026-07-19T10:${String(index).padStart(2, "0")}:00.000Z`,
-          }),
-        );
-      }
-
-      await fixture.coordinator.close();
-      const restarted = new ProjectSessionCoordinator(
-        fixture.runtime,
-        fixture.roles,
-        fixture.registry,
-      );
-      const handle = await restarted.acquireProject(fixture.cwd, "full_access");
-      const sourceActor = await restarted.openConversation(
-        handle,
-        source.conversationId,
-        { updateRecent: false },
-      );
-
-      let journalOutcome: string | undefined;
-      fixture.runtime.control(source.conversationId).enqueue(
-        async (control) => {
-          const exceeded = executeTool(
-            control,
-            "start_session",
-            "journal-exceeded",
-            {
-              roleId: "default",
-              task: "journal limit",
-              temporary: false,
-            },
-          );
-          await expect(exceeded).rejects.toThrow(/limit|maximum/i);
-          journalOutcome = "blocked";
-          control.emitFinal("journal recovery verified");
-        },
-      );
-      expect((await sourceActor.resumeMessages({ runId })).outcome)
-        .toBe("completed");
-      expect(journalOutcome).toBe("blocked");
-
-      let freshConversationId: string | undefined;
-      fixture.runtime.control(source.conversationId).enqueue(
-        async (control) => {
-          const fresh = await executeTool(
-            control,
-            "start_session",
-            "post-recovery-fresh-run",
-            {
-              roleId: "default",
-              task: "legacy cards do not poison future runs",
-              temporary: false,
-            },
-          ) as { conversationId: string };
-          freshConversationId = fresh.conversationId;
-          control.emitFinal("fresh run accepted");
-        },
-      );
-      expect((await restarted.prompt(
-        handle,
-        source.conversationId,
-        randomUUID(),
-        "start a fresh run",
-      )).outcome).toBe("completed");
-      expect(freshConversationId).toEqual(expect.any(String));
-      await restarted.close();
-    });
   });
 
   describe("wait cache checkpoints", () => {
@@ -15309,14 +14985,11 @@ class ConcurrentProjectOpenRegistry extends ProjectStoreRegistry {
 
   override async acquireProject(
     cwd: string,
-    seedToolMode: Parameters<
-      ProjectStoreRegistry["acquireProject"]
-    >[1],
   ): Promise<ProjectStoreHandle> {
     this.acquireCalls++;
     this.firstAcquireStarted.resolve();
     await this.releaseAcquires.promise;
-    const handle = await super.acquireProject(cwd, seedToolMode);
+    const handle = await super.acquireProject(cwd);
     let released = false;
     return {
       store: handle.store,

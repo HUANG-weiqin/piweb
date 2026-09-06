@@ -1,16 +1,13 @@
 import { randomUUID } from "node:crypto";
+import { CURRENT_SESSION_VERSION } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import {
   CONVERSATION_CARD_CUSTOM_TYPE,
   CONVERSATION_MESSAGE_CUSTOM_TYPE,
   CONVERSATION_META_CUSTOM_TYPE,
   RUN_SETTLEMENT_CUSTOM_TYPE,
-  LEGACY_LOOP_LIST_CUSTOM_TYPE,
-  LEGACY_LOOP_LIST_CONTINUE_CUSTOM_TYPE,
   LOOP_LIST_CUSTOM_TYPE,
   MESSAGE_DELIVERY_RECEIPT_CUSTOM_TYPE,
-  PENDING_PROMPT_BATCH_CUSTOM_TYPE,
-  PENDING_PROMPT_DELIVERY_CUSTOM_TYPE,
   createConversationCardEntry,
   createConversationMessageEntry,
   createConversationMetaEntry,
@@ -18,14 +15,6 @@ import {
   createLoopListEntry,
   createMessageDeliveryReceiptEntry,
   createRunSettlementEntry,
-  parsePendingPromptBatchEntry,
-  parsePendingPromptDeliveryEntry,
-} from "./conversation-meta.js";
-import type {
-  PendingPromptBatch,
-  PendingPromptBatchEntry,
-  PendingPromptDelivery,
-  PendingPromptDeliveryEntry,
 } from "./conversation-meta.js";
 import {
   createReadonlySessionEntriesAdapter,
@@ -33,20 +22,6 @@ import {
   inspectPiSessionFilePresentation,
   validatePiSessionFile,
 } from "./session-file.js";
-
-function batchEntry(data: PendingPromptBatch): PendingPromptBatchEntry {
-  return parsePendingPromptBatchEntry({
-    customType: PENDING_PROMPT_BATCH_CUSTOM_TYPE,
-    data,
-  });
-}
-
-function deliveryEntry(data: PendingPromptDelivery): PendingPromptDeliveryEntry {
-  return parsePendingPromptDeliveryEntry({
-    customType: PENDING_PROMPT_DELIVERY_CUSTOM_TYPE,
-    data,
-  });
-}
 
 const timestamp = "2026-01-01T00:00:00.000Z";
 
@@ -110,6 +85,11 @@ function metadata() {
         provider: "openai",
         id: "gpt-5.6",
       },
+      compactionModel: null,
+      defaultThinkingLevel: "off",
+      defaultServiceTier: null,
+      toolMode: "read_only",
+      canManageSessions: false,
     },
     lifecycle: {
       kind: "normal" as const,
@@ -224,53 +204,26 @@ describe("validatePiSessionFile", () => {
     )).toBe(conversationId);
   });
 
-  it("validates legacy linear entries after Pi's in-memory migration", () => {
+  it.each([
+    { name: "old", version: 1 },
+    { name: "missing", version: undefined },
+    { name: "future", version: CURRENT_SESSION_VERSION + 1 },
+  ])("rejects $name session header versions", ({ version }) => {
     const conversationId = randomUUID();
-    const legacy = serialize([
+    const session = serialize([
       {
         type: "session",
-        version: 1,
+        ...(version === undefined ? {} : { version }),
         id: conversationId,
         timestamp,
       },
-      {
-        type: "message",
-        timestamp,
-        message: { role: "user", content: "legacy" },
-      },
-      {
-        type: "session_info",
-        timestamp,
-        name: "Legacy",
-      },
     ]);
 
-    const inspection = inspectPiSessionFile(
-      legacy,
-      "legacy.jsonl",
+    expect(() => inspectPiSessionFile(
+      session,
+      `${version ?? "missing"}-version.jsonl`,
       conversationId,
-    );
-    expect(inspection).not.toHaveProperty("entries");
-    const presentation = inspectPiSessionFilePresentation(
-      legacy,
-      "legacy.jsonl",
-      conversationId,
-    );
-    expect(presentation.entries).toHaveLength(2);
-    expect(presentation.entries.every(({ id }) => id.length > 0)).toBe(true);
-    expect(presentation.entries[0]).toMatchObject({
-      type: "message",
-      parentId: null,
-    });
-    expect(presentation.entries[1]).toMatchObject({
-      type: "session_info",
-      parentId: presentation.entries[0]!.id,
-    });
-    expect(validatePiSessionFile(
-      legacy,
-      "legacy.jsonl",
-      conversationId,
-    )).toBe(conversationId);
+    )).toThrow(/unsupported header version/i);
   });
 
   it("returns shallow readonly arrays and follows the final leaf active branch", () => {
@@ -515,23 +468,6 @@ describe("validatePiSessionFile", () => {
       payloadFingerprint: "b".repeat(64),
       deliveredAt: "2026-01-01T00:03:30.000Z",
     });
-    const delivery = deliveryEntry({
-      promptId: randomUUID(),
-      runId,
-      deliveredAt: "2026-01-01T00:03:30.000Z",
-    });
-    const batch = batchEntry({
-      batchId: randomUUID(),
-      conversationId,
-      runId,
-      items: [{
-        promptId: randomUUID(),
-        createdAt: "2026-01-01T00:03:15.000Z",
-        payloadSha256: "a".repeat(64),
-      }],
-      state: "prepared",
-      updatedAt: "2026-01-01T00:03:20.000Z",
-    });
     const meta = createConversationMetaEntry(metadata());
     const base = (
       type: string,
@@ -593,17 +529,7 @@ describe("validatePiSessionFile", () => {
         data: finalCard.data,
       },
       {
-        ...base("custom", "00000007", "00000006"),
-        customType: PENDING_PROMPT_DELIVERY_CUSTOM_TYPE,
-        data: delivery.data,
-      },
-      {
-        ...base("custom", "00000008", "00000007"),
-        customType: PENDING_PROMPT_BATCH_CUSTOM_TYPE,
-        data: batch.data,
-      },
-      {
-        ...base("custom", "00000009", "00000008"),
+        ...base("custom", "00000009", "00000006"),
         customType: MESSAGE_DELIVERY_RECEIPT_CUSTOM_TYPE,
         data: receipt.data,
       },
@@ -620,8 +546,6 @@ describe("validatePiSessionFile", () => {
       deliveredMessageIds: [messageId],
       messageDeliveryReceipts: [receipt.data],
       runSettlements: [settlement.data],
-      pendingPromptDeliveries: [delivery.data],
-      pendingPromptBatches: [batch.data],
       temporaryReturnReceipts: [],
       editBudgetEvents: [],
       metaOperations: [],
@@ -686,72 +610,6 @@ describe("validatePiSessionFile", () => {
       "valid-loop-list-continuations.jsonl",
       conversationId,
     )).toBe(conversationId);
-  });
-
-  it("accepts legacy LoopList state and continuation snapshots without inventing active work", () => {
-    const conversationId = randomUUID();
-    const runId = randomUUID();
-    const legacyItems = [
-      { id: "implement", text: "Implement the change", checked: false },
-      { id: "done", text: "Finished work", checked: true },
-    ];
-    const legacyState = {
-      type: "custom",
-      id: "00000001",
-      parentId: null,
-      timestamp,
-      customType: LEGACY_LOOP_LIST_CUSTOM_TYPE,
-      data: { items: legacyItems, armed: true, updatedAt: timestamp },
-    };
-    const legacyContinuation = {
-      type: "custom_message",
-      id: "00000002",
-      parentId: "00000001",
-      timestamp,
-      customType: LEGACY_LOOP_LIST_CONTINUE_CUSTOM_TYPE,
-      content: [
-        "Current LoopList snapshot:",
-        "[ ] Implement the change (implement)",
-        "[x] Finished work (done)",
-        "Continue working through the unchecked items. Update the list with todo_write as progress changes.",
-      ].join("\n"),
-      display: false,
-      details: { runId, continuation: 1, items: legacyItems },
-    };
-    const migratedItems = [
-      { id: "implement", text: "Implement the change", status: "pending" as const },
-      { id: "done", text: "Finished work", status: "completed" as const },
-    ];
-    const currentContinuation = loopListContinuationEntry(
-      "00000003",
-      "00000001",
-      runId,
-      1,
-      migratedItems,
-    );
-    const session = serialize([
-      {
-        type: "session",
-        version: 3,
-        id: conversationId,
-        timestamp,
-        cwd: "E:\\work",
-      },
-      legacyState,
-      legacyContinuation,
-      currentContinuation,
-    ]);
-
-    expect(validatePiSessionFile(
-      session,
-      "legacy-loop-list-continuations.jsonl",
-      conversationId,
-    )).toBe(conversationId);
-    expect(inspectPiSessionFile(
-      session,
-      "legacy-loop-list-continuations.jsonl",
-      conversationId,
-    ).loopList?.items).toEqual(migratedItems);
   });
 
   it.each([

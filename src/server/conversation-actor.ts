@@ -610,11 +610,11 @@ function runMessageId(runId: string, role: "user" | "assistant"): string {
 }
 
 function appendHistoryPart(
-  parts: ConversationHistoryMessagePart[] | undefined,
+  parts: ConversationHistoryMessagePart[],
   part: ConversationHistoryMessagePart,
 ): ConversationHistoryMessagePart[] {
-  if (part.kind !== "tool" && part.length <= 0) return parts ?? [];
-  const current = parts ?? [];
+  if (part.kind !== "tool" && part.length <= 0) return parts;
+  const current = parts;
   const last = current[current.length - 1];
   if (
     part.kind !== "tool"
@@ -3678,7 +3678,7 @@ export class ConversationActor {
       const assistant = this.ensureLiveAssistant(ticket);
       assistant.text = event.text;
       assistant.parts = [
-        ...(assistant.parts ?? []).filter((part) => part.kind !== "text"),
+        ...assistant.parts.filter((part) => part.kind !== "text"),
         ...(event.text ? [{ kind: "text" as const, offset: 0, length: event.text.length }] : []),
       ];
       return;

@@ -1,7 +1,5 @@
 import {
   CURRENT_SESSION_VERSION,
-  migrateSessionEntries,
-  type FileEntry,
   type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import type { LoopList } from "../shared/protocol.js";
@@ -12,8 +10,6 @@ import {
   type ConversationMeta,
   type MessageDeliveryReceipt,
   type MetaOperation,
-  type PendingPromptBatch,
-  type PendingPromptDelivery,
   type RunSettlement,
 } from "./conversation-meta.js";
 
@@ -49,8 +45,6 @@ export interface PiSessionFileInspection {
   deliveredMessageIds: string[];
   messageDeliveryReceipts: MessageDeliveryReceipt[];
   runSettlements: RunSettlement[];
-  pendingPromptDeliveries: PendingPromptDelivery[];
-  pendingPromptBatches: PendingPromptBatch[];
   metaOperations: MetaOperation[];
   loopList?: LoopList & { updatedAt: string };
   lastActivityAt: string;
@@ -60,7 +54,7 @@ export type ReadonlySessionEntry = Readonly<SessionEntry>;
 
 export interface PiSessionFilePresentationInspection
   extends PiSessionFileInspection {
-  /** Newly parsed, migrated, and validated physical entries. */
+  /** Newly parsed and validated physical entries. */
   entries: readonly ReadonlySessionEntry[];
 }
 
@@ -432,14 +426,7 @@ function inspectPiSessionFileInternal(
   if (!isRecord(header) || header.type !== "session") {
     throw new Error(`Session file has an invalid header: ${sessionPath}`);
   }
-  if (
-    header.version !== undefined
-    && (
-      !Number.isInteger(header.version)
-      || (header.version as number) < 1
-      || (header.version as number) > CURRENT_SESSION_VERSION
-    )
-  ) {
+  if (header.version !== CURRENT_SESSION_VERSION) {
     throw new Error(
       `Session file has an unsupported header version: ${sessionPath}`,
     );
@@ -475,15 +462,6 @@ function inspectPiSessionFileInternal(
   ) {
     throw new Error(
       `Session file has an invalid parent session: ${sessionPath}`,
-    );
-  }
-
-  try {
-    migrateSessionEntries(values as FileEntry[]);
-  } catch (error) {
-    throw new Error(
-      `Session file has an invalid session entry: ${sessionPath}`,
-      { cause: error },
     );
   }
 
@@ -543,14 +521,6 @@ function inspectPiSessionFileInternal(
       ) {
         throw new Error(
           "Piweb message delivery receipt target must be the current conversation",
-        );
-      }
-      if (
-        entry?.kind === "pending_prompt_batch"
-        && entry.entry.data.conversationId !== header.id
-      ) {
-        throw new Error(
-          "Piweb pending prompt batch conversation must be the current conversation",
         );
       }
       if (entry?.kind === "loop_list") {

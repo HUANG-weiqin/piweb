@@ -24,7 +24,6 @@ const MAX_HISTORY_TOOL_VALUE_BYTES = 8_000;
 // The work-process timeline is intentionally bounded to the newest entries.
 // The UI renders this suffix newest-first, so older activity never displaces
 // the currently useful work from the history snapshot.
-const MAX_HISTORY_TOOLS_PER_MESSAGE = 16;
 const MAX_HISTORY_PARTS_PER_MESSAGE = 16;
 const MAX_HISTORY_ID_BYTES = 500;
 const OMITTED_TOOL_VALUE = "[历史工具数据过大，已省略]";
@@ -148,44 +147,17 @@ function compactToolResult(value: unknown): { value: unknown; truncated: boolean
     : compacted;
 }
 
-function fallbackHistoryParts(
-  text: string,
-  thinking: string,
-  tools: ConversationHistoryTool[],
-): ConversationHistoryMessagePart[] {
-  const parts: ConversationHistoryMessagePart[] = [];
-  if (thinking) {
-    parts.push({ kind: "thinking", offset: 0, length: thinking.length });
-  }
-  const toolBudget = Math.max(
-    0,
-    MAX_HISTORY_PARTS_PER_MESSAGE - parts.length - (text ? 1 : 0),
-  );
-  for (const tool of tools.slice(-toolBudget)) {
-    parts.push({ kind: "tool", toolCallId: tool.toolCallId });
-  }
-  if (text) parts.push({ kind: "text", offset: 0, length: text.length });
-  return parts;
-}
-
 function compactHistoryMessage(
   message: ConversationHistoryMessage,
 ): { message: ConversationHistoryMessage; truncated: boolean } {
   const id = clipUtf8(message.id, MAX_HISTORY_ID_BYTES);
   const text = clipUtf8(message.text, MAX_HISTORY_TEXT_BYTES);
   const thinking = clipUtf8(message.thinking, MAX_HISTORY_TEXT_BYTES);
-  const selectedParts = message.parts?.slice(-MAX_HISTORY_PARTS_PER_MESSAGE);
-  const selectedPartToolIds = selectedParts === undefined
-    ? undefined
-    : new Set(
-        selectedParts
-          .filter((part) => part.kind === "tool")
-          .map((part) => part.toolCallId),
-      );
-  const visibleToolIds = selectedPartToolIds ?? new Set(
-    message.tools
-      .slice(-MAX_HISTORY_TOOLS_PER_MESSAGE)
-      .map((tool) => tool.toolCallId),
+  const selectedParts = message.parts.slice(-MAX_HISTORY_PARTS_PER_MESSAGE);
+  const visibleToolIds = new Set(
+    selectedParts
+      .filter((part) => part.kind === "tool")
+      .map((part) => part.toolCallId),
   );
   const retainedToolIds = new Set(visibleToolIds);
   const latestBudgetTool = [...message.tools].reverse().find(
@@ -201,7 +173,7 @@ function compactHistoryMessage(
     || text.truncated
     || thinking.truncated
     || selectedTools.length !== message.tools.length
-    || (selectedParts?.length ?? 0) !== (message.parts?.length ?? 0);
+    || selectedParts.length !== message.parts.length;
   const compactedToolIds = new Map<string, string>();
   const tools = selectedTools.map((tool) => {
     const toolCallId = clipUtf8(tool.toolCallId, MAX_HISTORY_ID_BYTES);
@@ -222,16 +194,11 @@ function compactHistoryMessage(
       status: tool.status,
     };
   });
-  const visibleTools = tools.filter((_, index) => (
-    visibleToolIds.has(selectedTools[index]!.toolCallId)
-  ));
-  let partsLostOrder = false;
-  const compactedParts = selectedParts?.flatMap((part): ConversationHistoryMessagePart[] => {
+  const compactedParts = selectedParts.flatMap((part): ConversationHistoryMessagePart[] => {
     if (part.kind === "tool") {
       const toolCallId = compactedToolIds.get(part.toolCallId);
       if (toolCallId === undefined) {
         truncated = true;
-        partsLostOrder = true;
         return [];
       }
       return [{ kind: "tool", toolCallId }];
@@ -241,29 +208,16 @@ function compactHistoryMessage(
       : thinking.value.length;
     if (part.offset >= aggregateLength) {
       truncated = true;
-      partsLostOrder = true;
       return [];
     }
     const length = Math.min(part.length, aggregateLength - part.offset);
     if (length <= 0) {
       truncated = true;
-      partsLostOrder = true;
       return [];
     }
-    if (length !== part.length) {
-      truncated = true;
-      partsLostOrder = true;
-    }
+    if (length !== part.length) truncated = true;
     return [{ kind: part.kind, offset: part.offset, length }];
   });
-  let parts = compactedParts;
-  if (message.parts === undefined) {
-    parts = visibleTools.length === tools.length
-      ? undefined
-      : fallbackHistoryParts(text.value, thinking.value, visibleTools);
-  } else if (partsLostOrder) {
-    parts = fallbackHistoryParts(text.value, thinking.value, visibleTools);
-  }
   return {
     message: {
       ...message,
@@ -271,7 +225,7 @@ function compactHistoryMessage(
       text: text.value,
       thinking: thinking.value,
       tools,
-      ...(parts === undefined ? {} : { parts }),
+      parts: compactedParts,
       usage: message.usage ? { ...message.usage } : undefined,
     },
     truncated,
@@ -288,15 +242,6 @@ export interface ConversationHistoryItemSlot {
   item: ConversationHistoryItem;
   /** Exact physical Pi messages represented by this durable semantic slot. */
   sourceMessages?: ReadonlyArray<{ entryId: string; message: unknown }>;
-}
-
-function finalizeHistoryMessage(
-  message: ConversationHistoryMessage,
-): ConversationHistoryMessage {
-  return {
-    ...message,
-    parts: message.parts?.length ? message.parts : undefined,
-  };
 }
 
 /**
@@ -353,7 +298,7 @@ function projectConversationHistorySlots(
       continue;
     }
     if (reserved?.kind === "conversation_meta") {
-      // A migrated legacy transcript predates host-owned run settlements.
+      // Initial metadata establishes a durable conversation boundary.
       unsettledMessageStart = messages.length;
       assistant = undefined;
       continue;
@@ -388,6 +333,9 @@ function projectConversationHistorySlots(
           text,
           thinking: "",
           tools: [],
+          parts: text
+            ? [{ kind: "text", offset: 0, length: text.length }]
+            : [],
         },
       });
       continue;
@@ -409,7 +357,7 @@ function projectConversationHistorySlots(
               ? target.text.length + 2
               : 0;
             target.text = appendParagraph(target.text, block.text);
-            target.parts?.push({
+            target.parts.push({
               kind: "text",
               offset,
               length: block.text.length,
@@ -423,7 +371,7 @@ function projectConversationHistorySlots(
               ? target.thinking.length + 2
               : 0;
             target.thinking = appendParagraph(target.thinking, block.thinking);
-            target.parts?.push({
+            target.parts.push({
               kind: "thinking",
               offset,
               length: block.thinking.length,
@@ -442,7 +390,7 @@ function projectConversationHistorySlots(
               // an unfinished call as a failure in a restored snapshot.
               status: "pending",
             });
-            target.parts?.push({ kind: "tool", toolCallId: block.id });
+            target.parts.push({ kind: "tool", toolCallId: block.id });
           }
         }
       }
@@ -454,7 +402,7 @@ function projectConversationHistorySlots(
         const offset = target.text ? target.text.length + 2 : 0;
         const failureText = `运行失败：${message.errorMessage}`;
         target.text = appendParagraph(target.text, `运行失败：${message.errorMessage}`);
-        target.parts?.push({
+        target.parts.push({
           kind: "text",
           offset,
           length: failureText.length,
@@ -462,7 +410,7 @@ function projectConversationHistorySlots(
       } else if (message.stopReason === "aborted") {
         const offset = target.text ? target.text.length + 2 : 0;
         target.text = appendParagraph(target.text, "运行已中止。");
-        target.parts?.push({ kind: "text", offset, length: 6 });
+        target.parts.push({ kind: "text", offset, length: 6 });
       }
       continue;
     }
@@ -484,7 +432,7 @@ function projectConversationHistorySlots(
           status: "error",
         };
         target.tools.push(tool);
-        target.parts?.push({
+        target.parts.push({
           kind: "tool",
           toolCallId: message.toolCallId,
         });
@@ -499,12 +447,12 @@ function projectConversationHistorySlots(
 
   return messages.map((slot) => ({
     ...slot,
-    message: finalizeHistoryMessage({
+    message: {
       ...slot.message,
       tools: slot.message.tools.map((tool): ConversationHistoryTool => ({ ...tool })),
-      parts: slot.message.parts?.map((part) => ({ ...part })),
+      parts: slot.message.parts.map((part) => ({ ...part })),
       usage: slot.message.usage ? { ...slot.message.usage } : undefined,
-    }),
+    },
     sourceMessages: [...slot.sourceMessages],
   }));
 }
@@ -631,8 +579,6 @@ export function projectConversationItemSlots(
       || reserved.kind === "conversation_role_change"
       || reserved.kind === "run_settlement"
       || reserved.kind === "edit_budget"
-      || reserved.kind === "pending_prompt_delivery"
-      || reserved.kind === "pending_prompt_batch"
       || reserved.kind === "temporary_return_receipt"
       || reserved.kind === "message_delivery_receipt"
       || reserved.kind === "meta_operation"
@@ -727,14 +673,6 @@ function compactConversationItem(
     },
     truncated: body.truncated || result?.truncated === true,
   };
-}
-
-function historyMessageFromItem(
-  item: ConversationHistoryItem,
-): ConversationHistoryMessage | undefined {
-  if (item.kind !== "message") return;
-  const { kind: _kind, ...message } = item;
-  return message;
 }
 
 export type AgentConversationPeekItem =
@@ -848,18 +786,6 @@ function shortenPrefix(value: string): string {
   return `${value.slice(0, Math.floor(value.length / 2))}…`;
 }
 
-function visibleHistoryTools(
-  item: ConversationHistoryMessage,
-): ConversationHistoryTool[] {
-  if (item.parts === undefined) return item.tools;
-  const visibleToolIds = new Set(
-    item.parts
-      .filter((part) => part.kind === "tool")
-      .map((part) => part.toolCallId),
-  );
-  return item.tools.filter((tool) => visibleToolIds.has(tool.toolCallId));
-}
-
 function minimalConversationItem(
   item: ConversationHistoryItem,
 ): ConversationHistoryItem {
@@ -869,7 +795,7 @@ function minimalConversationItem(
       text: "",
       thinking: "",
       tools: [],
-      parts: undefined,
+      parts: [],
     };
   }
   if (item.kind === "compaction") return { ...item };
@@ -915,15 +841,23 @@ function fitConversationItem(
       const value = item[field];
       if (!value) break;
       const shortened = shortenPrefix(value);
-      const visibleTools = visibleHistoryTools(item);
+      const text = field === "text" ? shortened : item.text;
+      const thinking = field === "thinking" ? shortened : item.thinking;
       item = {
         ...item,
         [field]: shortened,
-        parts: fallbackHistoryParts(
-          field === "text" ? shortened : item.text,
-          field === "thinking" ? shortened : item.thinking,
-          visibleTools,
-        ),
+        parts: item.parts.flatMap((part): ConversationHistoryMessagePart[] => {
+          if (part.kind === "tool") return [part];
+          const aggregateLength = part.kind === "text"
+            ? text.length
+            : thinking.length;
+          if (part.offset >= aggregateLength) return [];
+          return [{
+            kind: part.kind,
+            offset: part.offset,
+            length: Math.min(part.length, aggregateLength - part.offset),
+          }];
+        }),
       };
       continue;
     }
@@ -960,7 +894,6 @@ function startsNewTurn(item: ConversationHistoryItem, hasTurns: boolean): boolea
 export function snapshotConversationItems(
   sourceItems: ConversationHistoryItem[],
 ): {
-  messages: ConversationHistoryMessage[];
   items: ConversationHistoryItem[];
   window: ConversationWindowCoverage;
 } {
@@ -1017,44 +950,15 @@ export function snapshotConversationItems(
     startsMidTurn,
     contentTruncated: selected.some((item) => item.truncated),
   };
-  return {
-    messages: items
-      .map(historyMessageFromItem)
-      .filter(
-        (message): message is ConversationHistoryMessage =>
-          message !== undefined,
-      ),
-    items,
-    window,
-  };
+  return { items, window };
 }
 
-/**
- * Produces a bounded mixed-item snapshot while retaining the legacy messages
- * projection for callers that have not adopted cards yet.
- */
+/** Produces the bounded mixed-item browser snapshot. */
 export function projectConversationItemsSnapshot(
   sessionManager: ReadonlySessionEntriesSource,
 ): {
-  messages: ConversationHistoryMessage[];
   items: ConversationHistoryItem[];
   window: ConversationWindowCoverage;
 } {
   return snapshotConversationItems(projectConversationItems(sessionManager));
-}
-
-/**
- * Produces a bounded recent-history frame. Full history remains in the Pi JSONL
- * file; the browser projection is deliberately capped until pagination lands.
- */
-export function projectConversationHistorySnapshot(
-  sessionManager: ReadonlySessionBranchSource,
-): { messages: ConversationHistoryMessage[]; window: ConversationWindowCoverage } {
-  const snapshot = snapshotConversationItems(
-    projectConversationHistory(sessionManager).map((message) => ({
-      kind: "message" as const,
-      ...message,
-    })),
-  );
-  return { messages: snapshot.messages, window: snapshot.window };
 }

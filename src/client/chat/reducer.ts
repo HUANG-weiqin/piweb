@@ -31,23 +31,12 @@ export interface ChatMessage {
   text: string;
   thinking: string;
   tools: ToolItem[];
-  parts?: ChatMessagePart[];
+  parts: ChatMessagePart[];
   usage?: TokenUsage;
 }
 
 export function orderedMessageParts(message: ChatMessage): ChatMessagePart[] {
-  if (message.parts !== undefined) return message.parts;
-  // Compatibility only: snapshots written before ordered parts used this UI order.
-  return [
-    ...(message.thinking
-      ? [{ kind: "thinking" as const, text: message.thinking }]
-      : []),
-    ...message.tools.map((tool) => ({
-      kind: "tool" as const,
-      toolId: tool.id,
-    })),
-    ...(message.text ? [{ kind: "text" as const, text: message.text }] : []),
-  ];
+  return message.parts;
 }
 
 export type ChatMessageItem = { kind: "message" } & ChatMessage;
@@ -146,7 +135,7 @@ function isEmptyAssistantPlaceholder(
     && !item.text
     && !item.thinking
     && item.tools.length === 0
-    && (item.parts?.length ?? 0) === 0
+    && item.parts.length === 0
     && item.usage === undefined;
 }
 
@@ -167,7 +156,7 @@ function historyMessageToItem(
   message: ConversationHistoryMessage,
   runId = message.runId ?? `history:${message.id}`,
 ): ChatMessageItem {
-  const parts = message.parts?.flatMap((part): ChatMessagePart[] => {
+  const parts = message.parts.flatMap((part): ChatMessagePart[] => {
     if (part.kind === "tool") {
       return message.tools.some((tool) => tool.toolCallId === part.toolCallId)
         ? [{ kind: "tool", toolId: part.toolCallId }]
@@ -191,7 +180,7 @@ function historyMessageToItem(
       result: tool.result,
       status: tool.status,
     })),
-    ...(parts === undefined ? {} : { parts }),
+    parts,
     usage: message.usage,
   };
 }

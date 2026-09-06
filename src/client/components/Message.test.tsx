@@ -36,6 +36,7 @@ describe("Message", () => {
         status: "done",
       },
     ],
+    parts: [{ kind: "tool", toolId: "1" }],
   };
 
   const manyToolsMessage: ChatMessage = {
@@ -51,6 +52,14 @@ describe("Message", () => {
       { id: "4", name: "read", args: { path: "old-4" }, result: { ok: true }, status: "done" },
       { id: "5", name: "bash", args: { cmd: "new-1" }, result: { ok: true }, status: "done" },
       { id: "6", name: "edit", args: { file: "new-2" }, result: { ok: true }, status: "done" },
+    ],
+    parts: [
+      { kind: "tool", toolId: "1" },
+      { kind: "tool", toolId: "2" },
+      { kind: "tool", toolId: "3" },
+      { kind: "tool", toolId: "4" },
+      { kind: "tool", toolId: "5" },
+      { kind: "tool", toolId: "6" },
     ],
   };
 
@@ -89,6 +98,7 @@ describe("Message", () => {
         args: { conversationId, message: "请核对实现。" },
         status: "done",
       }],
+      parts: [{ kind: "tool", toolId: "send-peer" }],
     };
     const { container } = render(
       <Message
@@ -238,6 +248,7 @@ describe("Message", () => {
       text: "",
       thinking: "正在检查现有实现。",
       tools: [],
+      parts: [{ kind: "thinking", text: "正在检查现有实现。" }],
     };
     const { container, rerender } = render(
       <Message message={message} activeThinking />,
@@ -336,6 +347,7 @@ describe("Message", () => {
       text: "",
       thinking: "**Planning** `Message.tsx` updates",
       tools: [],
+      parts: [{ kind: "thinking", text: "**Planning** `Message.tsx` updates" }],
     };
 
     const { container } = render(<Message message={message} />);
@@ -359,6 +371,17 @@ describe("Message", () => {
         "<script>alert('unsafe')</script>",
       ].join("\n"),
       tools: [],
+      parts: [{
+        kind: "thinking",
+        text: [
+          "## 分析",
+          "",
+          "- 检查状态",
+          "- 执行 `typecheck`",
+          "",
+          "<script>alert('unsafe')</script>",
+        ].join("\n"),
+      }],
     };
 
     const { container } = render(<Message message={message} />);
@@ -446,11 +469,7 @@ describe("Message", () => {
   });
 
   it("preserves rich markdown structure for scoped transcript styling", () => {
-    const message: ChatMessage = {
-      id: "4",
-      runId: "run-4",
-      role: "assistant",
-      text: [
+    const richText = [
         "# 主标题",
         "",
         "第一段。",
@@ -476,9 +495,15 @@ describe("Message", () => {
         "```ts",
         "const wideValue = true;",
         "```",
-      ].join("\n"),
+    ].join("\n");
+    const message: ChatMessage = {
+      id: "4",
+      runId: "run-4",
+      role: "assistant",
+      text: richText,
       thinking: "",
       tools: [],
+      parts: [{ kind: "text", text: richText }],
     };
 
     const { container } = render(<Message message={message} />);
@@ -522,6 +547,15 @@ describe("Message", () => {
       ].join("\n"),
       thinking: "",
       tools: [],
+      parts: [{
+        kind: "text",
+        text: [
+          "```mermaid",
+          "flowchart LR",
+          "  A[开始] --> B[完成]",
+          "```",
+        ].join("\n"),
+      }],
     };
 
     const { container } = render(
@@ -566,6 +600,7 @@ describe("Message", () => {
       text: "```mermaid\nflowchart LR\nA --> B\n```",
       thinking: "",
       tools: [],
+      parts: [{ kind: "text", text: "```mermaid\nflowchart LR\nA --> B\n```" }],
     };
 
     render(<StrictMode><Message message={message} /></StrictMode>);
@@ -584,6 +619,10 @@ describe("Message", () => {
       text: '<pre data-piweb-mermaid="forged"><code class="language-mermaid">flowchart LR; A-->B</code></pre>',
       thinking: "",
       tools: [],
+      parts: [{
+        kind: "text",
+        text: '<pre data-piweb-mermaid="forged"><code class="language-mermaid">flowchart LR; A-->B</code></pre>',
+      }],
     };
 
     const { container } = render(<Message message={message} />);
@@ -603,6 +642,10 @@ describe("Message", () => {
       text: '```mermaid\nflowchart LR\nA@{ "i\\u006dg": "//127.0.0.1:8123/pixel" }\n```',
       thinking: "",
       tools: [],
+      parts: [{
+        kind: "text",
+        text: '```mermaid\nflowchart LR\nA@{ "i\\u006dg": "//127.0.0.1:8123/pixel" }\n```',
+      }],
     };
 
     const { container } = render(<Message message={message} />);
@@ -623,6 +666,10 @@ describe("Message", () => {
       text: "```mermaid\nflowchart LR\nA --> B\nstyle A fill:u\\72l(h\\74tp://127.0.0.1/pixel)\n```",
       thinking: "",
       tools: [],
+      parts: [{
+        kind: "text",
+        text: "```mermaid\nflowchart LR\nA --> B\nstyle A fill:u\\72l(h\\74tp://127.0.0.1/pixel)\n```",
+      }],
     };
 
     const { container } = render(<Message message={message} />);
@@ -645,6 +692,7 @@ describe("Message", () => {
       text: "```mermaid\nflowchart LR\nA --> B\n```",
       thinking: "",
       tools: [],
+      parts: [{ kind: "text", text: "```mermaid\nflowchart LR\nA --> B\n```" }],
     };
 
     const { container } = render(<Message message={message} />);
@@ -670,6 +718,7 @@ describe("Message", () => {
       text: "```mermaid\nflowchart LR\nA --> B\n```",
       thinking: "",
       tools: [],
+      parts: [{ kind: "text", text: "```mermaid\nflowchart LR\nA --> B\n```" }],
     };
 
     const { container } = render(<Message message={message} />);
@@ -690,6 +739,7 @@ describe("Message", () => {
       text: "```mermaid\nnot a diagram\n```",
       thinking: "",
       tools: [],
+      parts: [{ kind: "text", text: "```mermaid\nnot a diagram\n```" }],
     };
 
     const { container } = render(
@@ -712,6 +762,10 @@ describe("Message", () => {
       text: `\`\`\`mermaid\nflowchart LR\n${"A".repeat(50_001)}\n\`\`\``,
       thinking: "",
       tools: [],
+      parts: [{
+        kind: "text",
+        text: `\`\`\`mermaid\nflowchart LR\n${"A".repeat(50_001)}\n\`\`\``,
+      }],
     };
 
     const { container } = render(<Message message={message} />);
@@ -738,6 +792,14 @@ describe("Message", () => {
       ].join("\n")).join("\n\n"),
       thinking: "",
       tools: [],
+      parts: [{
+        kind: "text",
+        text: Array.from({ length: 10 }, (_, index) => [
+          "```mermaid",
+          `flowchart LR; A${index} --> B${index}`,
+          "```",
+        ].join("\n")).join("\n\n"),
+      }],
     };
 
     const { container } = render(<Message message={message} />);
@@ -847,6 +909,7 @@ describe("Message", () => {
       text: "```mermaid\nflowchart LR\nA --> B\n```",
       thinking: "",
       tools: [],
+      parts: [{ kind: "text", text: "```mermaid\nflowchart LR\nA --> B\n```" }],
     };
 
     const { container } = render(<Message message={message} collapsed />);
@@ -869,6 +932,7 @@ describe("Message", () => {
       text: ["# 已完成标题", "", "当前 **未完成"].join("\n"),
       thinking: "",
       tools: [],
+      parts: [{ kind: "text", text: ["# 已完成标题", "", "当前 **未完成"].join("\n") }],
     };
 
     const { container } = render(<Message message={message} streamingText />);
@@ -893,6 +957,7 @@ describe("Message", () => {
       text: "```mermaid\nflowchart LR\nA --> B",
       thinking: "",
       tools: [],
+      parts: [{ kind: "text", text: "```mermaid\nflowchart LR\nA --> B" }],
     };
     const rendered = render(<Message message={message} streamingText />);
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -902,7 +967,11 @@ describe("Message", () => {
       .toHaveTextContent("flowchart LR");
 
     rendered.rerender(<Message
-      message={{ ...message, text: `${message.text}\n\`\`\`\n` }}
+      message={{
+        ...message,
+        text: `${message.text}\n\`\`\`\n`,
+        parts: [{ kind: "text", text: `${message.text}\n\`\`\`\n` }],
+      }}
       streamingText
     />);
 
@@ -926,6 +995,14 @@ describe("Message", () => {
       ].join("\n")).join("\n\n")}\n`,
       thinking: "",
       tools: [],
+      parts: [{
+        kind: "text",
+        text: `${Array.from({ length: 10 }, (_, index) => [
+          "```mermaid",
+          `flowchart LR; A${index} --> B${index}`,
+          "```",
+        ].join("\n")).join("\n\n")}\n`,
+      }],
     };
 
     render(<Message message={message} streamingText />);
@@ -958,6 +1035,10 @@ describe("Message", () => {
       text: `${Array.from({ length: 8 }, (_, index) => overloadedBlock(index)).join("\n")}\n`,
       thinking: "",
       tools: [],
+      parts: [{
+        kind: "text",
+        text: `${Array.from({ length: 8 }, (_, index) => overloadedBlock(index)).join("\n")}\n`,
+      }],
     };
 
     render(<Message message={message} streamingText />);
@@ -983,6 +1064,16 @@ describe("Message", () => {
       ].join("\n"),
       thinking: "",
       tools: [],
+      parts: [{
+        kind: "text",
+        text: [
+          "```ts",
+          "const value = true;",
+          "```",
+          "",
+          "继续生成",
+        ].join("\n"),
+      }],
     };
 
     const { container } = render(<Message message={message} streamingText />);
@@ -1001,13 +1092,18 @@ describe("Message", () => {
       text: "# 稳定标题\n\n正在生成",
       thinking: "",
       tools: [],
+      parts: [{ kind: "text", text: "# 稳定标题\n\n正在生成" }],
     };
 
     const { container, rerender } = render(<Message message={message} streamingText />);
     const stableBlock = container.querySelector(".streaming-stable");
 
     rerender(<Message
-      message={{ ...message, text: "# 稳定标题\n\n正在生成更多内容" }}
+      message={{
+        ...message,
+        text: "# 稳定标题\n\n正在生成更多内容",
+        parts: [{ kind: "text", text: "# 稳定标题\n\n正在生成更多内容" }],
+      }}
       streamingText
     />);
 
@@ -1031,6 +1127,18 @@ describe("Message", () => {
       ].join("\n"),
       thinking: "",
       tools: [],
+      parts: [{
+        kind: "text",
+        text: [
+          "```ts",
+          "const value = true;",
+          "``` still code",
+          "more code",
+          "```",
+          "",
+          "继续生成",
+        ].join("\n"),
+      }],
     };
 
     const { container } = render(<Message message={message} streamingText />);
@@ -1053,6 +1161,7 @@ describe("Message", () => {
       text: "**原始 Markdown**",
       thinking: "",
       tools: [],
+      parts: [{ kind: "text", text: "**原始 Markdown**" }],
     };
 
     render(<Message message={message} />);
@@ -1079,6 +1188,7 @@ describe("Message", () => {
       text: "用户原文",
       thinking: "",
       tools: [],
+      parts: [{ kind: "text", text: "用户原文" }],
     };
 
     const { container } = render(
@@ -1109,6 +1219,7 @@ describe("Message", () => {
       text: "Agent 回复",
       thinking: "",
       tools: [],
+      parts: [{ kind: "text", text: "Agent 回复" }],
     };
 
     render(<Message message={message} onRewind={onRewind} />);
@@ -1128,6 +1239,7 @@ describe("Message", () => {
       text: "```mermaid\nflowchart LR\nA --> B\n```",
       thinking: "",
       tools: [],
+      parts: [{ kind: "text", text: "```mermaid\nflowchart LR\nA --> B\n```" }],
     };
     const first = render(<Message message={message} />);
     await vi.advanceTimersByTimeAsync(0);
@@ -1155,6 +1267,7 @@ describe("Message", () => {
       text: "用户原文",
       thinking: "",
       tools: [],
+      parts: [{ kind: "text", text: "用户原文" }],
     };
 
     render(<Message message={message} onRewind={onRewind} />);
