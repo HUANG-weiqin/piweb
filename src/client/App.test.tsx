@@ -777,7 +777,6 @@ describe("App", () => {
     socketMock.autoFocus = false;
     localStorage.setItem("piweb.lastCwd", "E:\\work");
     render(<App />);
-    act(() => viewport.setPhoneViewport(true));
     const sessionId = latestSessionId();
     const initialize = latestCommand("initialize");
 
@@ -820,6 +819,13 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
     fireEvent.click(screen.getByRole("button", { name: "使用 Default 开始会话" }));
     const create = latestCommand("create_conversation");
+
+    act(() => viewport.setPhoneViewport(true));
+    expect(screen.getByRole("main")).toHaveClass("role-selection-page");
+    expect(currentPhoneRoute()).toEqual({
+      screen: "conversations",
+      cwd: "E:\\work",
+    });
 
     act(() => socketMock.emit?.({
       type: "focus_attached",

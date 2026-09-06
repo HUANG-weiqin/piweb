@@ -1290,7 +1290,11 @@ export function App() {
       replacePhoneHistoryRoute(route);
       phoneRouteRef.current = route;
       phoneHistoryEntriesRef.current = { entries: [route], index: 0 };
-      setPhoneScene(route.screen);
+      const continuingRoleCreation = selectingRole || (
+        pendingFocusRef.current?.operation === "create_conversation"
+        && pendingFocusRef.current.workspaceKey === currentWorkspaceKey()
+      );
+      setPhoneScene(continuingRoleCreation ? "chat" : route.screen);
     }
     const onPopState = (event: PopStateEvent) => {
       const next = decodePhoneHistoryRoute(event.state);
