@@ -18,6 +18,7 @@ import {
   RUN_SETTLEMENT_CUSTOM_TYPE,
   SERVICE_TIER_CUSTOM_TYPE,
   TEMPORARY_RETURN_RECEIPT_CUSTOM_TYPE,
+  WAIT_POLL_CUSTOM_TYPE,
   aggregateReservedConversationEntries,
   appendReservedCustomEntry,
   createCompactionThresholdEntry,
@@ -33,6 +34,7 @@ import {
   createLoopListContinueEntry,
   createMessageDeliveryReceiptEntry,
   createTemporaryReturnReceiptEntry,
+  createWaitPollEntry,
   parseConversationCardEntry,
   parseCompactionThresholdEntry,
   parseEditBudgetEntry,
@@ -47,6 +49,7 @@ import {
   parseRunSettlementEntry,
   parseServiceTierSelectionEntry,
   parseTemporaryReturnReceiptEntry,
+  parseWaitPollEntry,
 } from "./conversation-meta.js";
 import type {
   MessageDeliveryReceipt,
@@ -943,12 +946,52 @@ describe("conversation reserved entries", () => {
     } as never)).toThrow(/unknown|unrecognized|union/i);
   });
 
+  it("records bounded cumulative wait polls for recovered runs", () => {
+    const first = createWaitPollEntry({ runId: randomUUID(), count: 1 });
+    const second = createWaitPollEntry({
+      runId: first.data.runId,
+      count: 2,
+    });
+
+    expect(first.customType).toBe(WAIT_POLL_CUSTOM_TYPE);
+    expect(parseWaitPollEntry(first)).toEqual(first);
+    expect(parseReservedConversationEntry(first)).toEqual({
+      kind: "wait_poll",
+      entry: first,
+    });
+    expect(aggregateReservedConversationEntries([first, second]).waitPolls)
+      .toEqual([first.data, second.data]);
+    expect(() => aggregateReservedConversationEntries([first, first]))
+      .toThrow(/wait-poll sequence.*expected 2.*got 1/i);
+    expect(() => aggregateReservedConversationEntries([
+      first,
+      createWaitPollEntry({ runId: first.data.runId, count: 3 }),
+    ])).toThrow(/wait-poll sequence.*expected 2.*got 3/i);
+    expect(() => aggregateReservedConversationEntries([
+      first,
+      createRunSettlementEntry({
+        ...settlement(),
+        runId: first.data.runId,
+      }),
+      second,
+    ])).toThrow(/wait poll cannot follow settlement/i);
+    expect(() => parseWaitPollEntry({
+      ...first,
+      data: { ...first.data, count: 9 },
+    })).toThrow(/less than or equal|8/i);
+    expect(() => parseWaitPollEntry({
+      ...first,
+      data: { ...first.data, extra: true },
+    })).toThrow(/unknown|unrecognized/i);
+  });
+
   it("routes only known piweb reserved custom types", () => {
     const meta = createConversationMetaEntry(metadata());
     const cardEntry = createConversationCardEntry(card());
     const messageEntry = createConversationMessageEntry(message());
     const run = createRunSettlementEntry(settlement());
     const operation = createMetaOperationEntry(startedOperation());
+    const waitPoll = createWaitPollEntry({ runId: randomUUID(), count: 1 });
 
     expect(parseReservedConversationEntry(meta)).toEqual({
       kind: "conversation_meta",
@@ -969,6 +1012,10 @@ describe("conversation reserved entries", () => {
     expect(parseReservedConversationEntry(operation)).toEqual({
       kind: "meta_operation",
       entry: operation,
+    });
+    expect(parseReservedConversationEntry(waitPoll)).toEqual({
+      kind: "wait_poll",
+      entry: waitPoll,
     });
     const resume = {
       customType: "piweb.compaction_resume.v1",

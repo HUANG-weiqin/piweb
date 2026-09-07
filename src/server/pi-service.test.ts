@@ -1689,10 +1689,11 @@ describe("PiConnection coordinated controls", () => {
     const harness = await coordinatedConnectionHarness();
     const waitStarted = deferred();
     const targetStarted = deferred();
+    const releaseTarget = deferred();
     const reconnectEvents: ServerEvent[] = [];
     let reconnect: PiConnection | undefined;
-    let worker: PiConnection | undefined;
     let prompt: Promise<void> | undefined;
+    let targetPrompt: Promise<unknown> | undefined;
     try {
       await harness.connection.handle({
         type: "initialize",
@@ -1837,6 +1838,7 @@ describe("PiConnection coordinated controls", () => {
       targetSession.prompt = async () => {
         targetStarted.resolve();
         targetSession.eventListener?.(nativeEvent({ type: "agent_start" }));
+        await releaseTarget.promise;
         targetSession.eventListener?.(nativeEvent({
           type: "message_end",
           message: {
@@ -1846,6 +1848,16 @@ describe("PiConnection coordinated controls", () => {
         }));
         targetSession.eventListener?.(nativeEvent({ type: "agent_settled" }));
       };
+      const coordinatedView = (harness.connection as unknown as {
+        coordinatedView: { handle: Parameters<ProjectSessionCoordinator["prompt"]>[0] };
+      }).coordinatedView;
+      targetPrompt = harness.coordinator.prompt(
+        coordinatedView.handle,
+        targetState.conversationId,
+        RUN_B,
+        "finish the peer run",
+      );
+      await targetStarted.promise;
 
       prompt = harness.connection.handle({
         type: "prompt",
@@ -1900,32 +1912,7 @@ describe("PiConnection coordinated controls", () => {
         })]),
       });
 
-      const workerEvents: ServerEvent[] = [];
-      worker = new PiConnection(
-        (event) => workerEvents.push(event),
-        harness.runtime,
-        async () => ({
-          coordinator: harness.coordinator,
-          roles: harness.roles,
-        }),
-      );
-      await worker.handle({
-        type: "initialize",
-        commandId: randomUUID(),
-        sessionId: SESSION_C,
-        cwd: harness.cwd,
-        conversation: { kind: "open", conversationId: targetState.conversationId },
-      });
-      const targetFocused = latestState(workerEvents);
-      const targetPrompt = worker.handle({
-        type: "prompt",
-        sessionId: SESSION_C,
-        conversationId: targetFocused.conversationId,
-        focusId: targetFocused.focusId,
-        runId: RUN_B,
-        text: "finish the peer run",
-      });
-      await targetStarted.promise;
+      releaseTarget.resolve();
       await targetPrompt;
       await prompt;
 
@@ -1959,8 +1946,9 @@ describe("PiConnection coordinated controls", () => {
         }),
       ]));
     } finally {
+      releaseTarget.resolve();
+      await targetPrompt?.catch(() => undefined);
       await prompt?.catch(() => undefined);
-      await worker?.dispose();
       await reconnect?.dispose();
       await harness.cleanup();
     }

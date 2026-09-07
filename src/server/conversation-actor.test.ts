@@ -35,6 +35,7 @@ import {
   createLoopListContinueEntry,
   createLoopListEntry,
   createServiceTierSelectionEntry,
+  createWaitPollEntry,
   LOOP_LIST_CUSTOM_TYPE,
 } from "./conversation-meta.js";
 import { canonicalMutationPathKey } from "./edit-budget.js";
@@ -1578,51 +1579,65 @@ describe("ConversationActor", () => {
         conversationId: CONVERSATION_ID,
         runId: "dummy-target-run",
       };
-      const restore = fixture.actor.enterWaiting(ownershipValue, waitTarget);
+      const firstAttempt = fixture.actor.installWaitAttempt(ownershipValue, {
+        mode: "exact",
+        targets: [waitTarget],
+      });
 
       // First wait: the host callback is stale (its waiter was already
-      // removed by abort/settlement/message before withWaiting's restore
+      // removed by abort/settlement/message before its terminal cleanup
       // ran). It must NOT burn the record.
       const staleCalls: boolean[] = [];
       fixture.actor.onWaitingSteerAdmitted(
         ownershipValue,
+        firstAttempt,
         () => {
           staleCalls.push(true);
           return false;
         },
       );
-      restore();
+      fixture.actor.cancelWaitAttempt(ownershipValue, firstAttempt);
 
       // Second wait: registers before the raw guidance delivery; the SAME
       // record must wake it immediately.
-      const restoreSecond = fixture.actor.enterWaiting(ownershipValue, waitTarget);
+      const guidanceCauses: unknown[] = [];
+      const secondAttempt = fixture.actor.installWaitAttempt(ownershipValue, {
+        mode: "exact",
+        targets: [waitTarget],
+        onTerminal: (cause) => guidanceCauses.push(cause),
+      });
       let secondCalls = 0;
       fixture.actor.onWaitingSteerAdmitted(
         ownershipValue,
+        secondAttempt,
         () => {
           secondCalls++;
           return true;
         },
       );
-      restoreSecond();
       expect(staleCalls).toEqual([true]);
       expect(secondCalls).toBe(1);
+      expect(guidanceCauses).toEqual([{ kind: "guidance" }]);
 
       // The raw delivery settles the steer precisely; no further wait wakes
       // on the already-claimed record.
       fixture.manager.appendMessage(rawGuidance);
       emit()?.(nativeEvent({ type: "message_end", message: rawGuidance }));
       await expect(guidance).resolves.toBeUndefined();
-      const restoreThird = fixture.actor.enterWaiting(ownershipValue, waitTarget);
+      const thirdAttempt = fixture.actor.installWaitAttempt(ownershipValue, {
+        mode: "exact",
+        targets: [waitTarget],
+      });
       let thirdCalls = 0;
       fixture.actor.onWaitingSteerAdmitted(
         ownershipValue,
+        thirdAttempt,
         () => {
           thirdCalls++;
           return true;
         },
       );
-      restoreThird();
+      fixture.actor.cancelWaitAttempt(ownershipValue, thirdAttempt);
       expect(thirdCalls).toBe(0);
 
       finishRun.resolve();
@@ -4680,15 +4695,22 @@ describe("ConversationActor", () => {
       };
     };
 
+    const messageId = FOCUS_ID;
+    const ownership = fixture.actor.currentRunOwnership(RUN_A);
+    if (!ownership) throw new Error("Expected custom-message run ownership");
     const delivery = fixture.actor.steerCustomMessage(
       RUN_A,
       {
         customType: "piweb.conversation_message.v1",
         content: "Peer supervision instruction",
         display: true,
-        details: {},
+        details: { messageId },
       } as ConversationMessageEntry,
     );
+    expect(fixture.actor.hasAcceptedCustomMessageForWait(
+      ownership,
+      messageId,
+    )).toBe(false);
     expect(fixture.runtime.session.resumeCalls).toBe(0);
 
     (fixture.runtime.session as unknown as { isStreaming: boolean })
@@ -4699,6 +4721,22 @@ describe("ConversationActor", () => {
 
     await expect(delivery).resolves.toBeUndefined();
     expect(fixture.runtime.session.resumeCalls).toBe(1);
+    expect(fixture.actor.hasAcceptedCustomMessageForWait(
+      ownership,
+      messageId,
+    )).toBe(true);
+    expect(fixture.actor.claimAcceptedCustomMessageForWait(
+      ownership,
+      messageId,
+    )).toBe(true);
+    expect(fixture.actor.claimAcceptedCustomMessageForWait(
+      ownership,
+      messageId,
+    )).toBe(false);
+    expect(fixture.actor.retireAcceptedCustomMessageForWait(
+      ownership,
+      messageId,
+    )).toBe(true);
     expect(queued).toEqual({
       content: "Peer supervision instruction",
       deliverAs: "steer",
@@ -4706,6 +4744,43 @@ describe("ConversationActor", () => {
     });
     promptFinished.resolve();
     await completion;
+    await fixture.actor.dispose();
+  });
+
+  it("settles an accepted custom peer message when its wait is cancelled in flight", async () => {
+    const fixture = await openActor();
+    const run = await startHeldActorRun(fixture, RUN_A);
+    const sent = deferred();
+    fixture.runtime.session.isStreaming = true;
+    fixture.runtime.session.resumeImplementation = () => sent.promise;
+    const attempt = fixture.actor.installWaitAttempt(run.ownership, {
+      mode: "exact",
+      targets: [{
+        conversationId: TARGET_CONVERSATION_ID,
+        runId: RUN_B,
+      }],
+    });
+
+    const messageId = FOCUS_ID;
+    const delivery = fixture.actor.steerCustomMessage(RUN_A, {
+      customType: "piweb.conversation_message.v1",
+      content: "Arrived while cancelling the wait",
+      display: true,
+      details: { messageId },
+    } as ConversationMessageEntry);
+    await vi.waitFor(() => expect(fixture.runtime.session.resumeCalls).toBe(1));
+    expect(fixture.actor.cancelWaitAttempt(run.ownership, attempt)).toBe(true);
+
+    sent.resolve();
+    await expect(delivery).resolves.toBeUndefined();
+    await Promise.resolve();
+    expect(fixture.runtime.session.resumeCalls).toBe(1);
+    expect(fixture.actor.hasAcceptedCustomMessageForWait(
+      run.ownership,
+      messageId,
+    )).toBe(true);
+
+    await run.finish();
     await fixture.actor.dispose();
   });
 
@@ -4847,7 +4922,7 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
-  it("restores waiting in finally and a stale restore cannot revive a run", async () => {
+  it("restores an explicit wait and a stale ownership cannot revive a run", async () => {
     const fixture = await openActor();
     const promptStarted = deferred();
     const promptFinished = deferred();
@@ -4868,33 +4943,34 @@ describe("ConversationActor", () => {
     const ownership = fixture.actor.currentRunOwnership(RUN_A);
     if (!ownership) throw new Error("run ownership was not exposed");
 
-    await expect(fixture.actor.withWaiting(
-      ownership,
-      {
+    const firstAttempt = fixture.actor.installWaitAttempt(ownership, {
+      mode: "exact",
+      targets: [{
         conversationId: TARGET_CONVERSATION_ID,
         runId: RUN_B,
-      },
-      async () => {
-        expect(fixture.actor.getActivity()).toEqual({
-          kind: "waiting",
-          runId: RUN_A,
-          targetConversationId: TARGET_CONVERSATION_ID,
-          targetRunId: RUN_B,
-        });
-        throw new Error("target failed");
-      },
-    )).rejects.toThrow("target failed");
+      }],
+    });
+    expect(fixture.actor.getActivity()).toEqual({
+      kind: "waiting",
+      runId: RUN_A,
+      targetConversationId: TARGET_CONVERSATION_ID,
+      targetRunId: RUN_B,
+    });
+    expect(fixture.actor.cancelWaitAttempt(ownership, firstAttempt)).toBe(true);
     expect(fixture.actor.getActivity()).toEqual({
       kind: "running",
       runId: RUN_A,
     });
 
-    const restore = fixture.actor.enterWaiting(ownership, {
-      conversationId: TARGET_CONVERSATION_ID,
-      runId: RUN_B,
+    const abortAttempt = fixture.actor.installWaitAttempt(ownership, {
+      mode: "exact",
+      targets: [{
+        conversationId: TARGET_CONVERSATION_ID,
+        runId: RUN_B,
+      }],
     });
     const aborting = fixture.actor.abort(RUN_A);
-    restore();
+    expect(fixture.actor.cancelWaitAttempt(ownership, abortAttempt)).toBe(false);
     expect(fixture.actor.getActivity()).toEqual({
       kind: "cancelling",
       runId: RUN_A,
@@ -4908,9 +4984,12 @@ describe("ConversationActor", () => {
       origin: "browser",
     });
     await expect(Promise.resolve().then(() => {
-      fixture.actor.enterWaiting(ownership, {
-        conversationId: TARGET_CONVERSATION_ID,
-        runId: RUN_A,
+      fixture.actor.installWaitAttempt(ownership, {
+        mode: "exact",
+        targets: [{
+          conversationId: TARGET_CONVERSATION_ID,
+          runId: RUN_A,
+        }],
       });
     })).rejects.toThrow("stale");
     promptFinished.resolve();
@@ -4926,7 +5005,10 @@ describe("ConversationActor", () => {
       runId: RUN_B,
     };
 
-    const restore = fixture.actor.enterWaiting(run.ownership, target);
+    const attempt = fixture.actor.installWaitAttempt(run.ownership, {
+      mode: "exact",
+      targets: [target],
+    });
     target.runId = "mutated-after-entering-wait";
 
     expect(fixture.actor.getActivity()).toEqual({
@@ -4936,7 +5018,7 @@ describe("ConversationActor", () => {
       targetRunId: RUN_B,
     });
 
-    restore();
+    fixture.actor.cancelWaitAttempt(run.ownership, attempt);
     await run.finish();
     await fixture.actor.dispose();
   });
@@ -5659,7 +5741,7 @@ async function startHeldActorRun(fixture: ActorFixture, runId: string) {
   };
   const completion = fixture.actor.startPrompt({
     runId,
-    text: "hold run for wait-cache policy",
+    text: "hold run for wait-attempt policy",
     origin: "browser",
   });
   await started.promise;
@@ -5674,127 +5756,281 @@ async function startHeldActorRun(fixture: ActorFixture, runId: string) {
   };
 }
 
-function setWaitCacheInputs(
-  session: FakeSession,
-  tokens: number | null,
-  input: number,
-  cacheRead: number,
-): void {
-  session.contextTokens = tokens;
-  const model = session.model;
-  if (!model) throw new Error("Expected a test model");
-  model.cost = { input, output: 1, cacheRead, cacheWrite: 1 };
-}
-
-function waitCacheUsage(
-  input: number,
-  cacheRead: number,
-  cacheWrite: number,
-) {
-  return {
-    input,
-    output: 1,
-    cacheRead,
-    cacheWrite,
-    totalTokens: input + cacheRead + cacheWrite + 1,
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-  };
-}
-
-function emitWaitCacheFeedback(
-  session: FakeSession,
-  usage?: ReturnType<typeof waitCacheUsage>,
-): void {
-  session.eventListener?.(nativeEvent({
-    type: "message_end",
-    message: {
-      role: "assistant",
-      content: [],
-      stopReason: "stop",
-      ...(usage === undefined ? {} : { usage }),
-    },
-  }));
-}
-
-describe("wait cache checkpoint policy", () => {
+describe("wait attempt ownership", () => {
   const target = {
     conversationId: TARGET_CONVERSATION_ID,
     runId: RUN_B,
   };
 
-  it("fails closed unless context and model economics qualify", async () => {
+  it("freezes the local attempt and reserves delivery before a poll can win", async () => {
     const fixture = await openActor();
     const run = await startHeldActorRun(fixture, RUN_A);
-    const restore = fixture.actor.enterWaiting(run.ownership, target);
+    const terminalCauses: unknown[] = [];
+    const onTerminal = vi.fn((cause) => terminalCauses.push(cause));
+    const installedTarget = { ...target };
+    const attempt = fixture.actor.installWaitAttempt(run.ownership, {
+      mode: "exact",
+      targets: [installedTarget],
+      onTerminal,
+    });
+    installedTarget.runId = "changed-after-install";
 
-    const cases = [
-      { tokens: 31_999, input: 10, cacheRead: 1, expected: false },
-      { tokens: null, input: 10, cacheRead: 1, expected: false },
-      { tokens: 50_000, input: 10, cacheRead: 0, expected: false },
-      { tokens: 50_000, input: 9, cacheRead: 1, expected: false },
-      { tokens: 50_000, input: 10, cacheRead: 1, expected: true },
-    ] as const;
-    for (const testCase of cases) {
-      setWaitCacheInputs(
-        fixture.runtime.session,
-        testCase.tokens,
-        testCase.input,
-        testCase.cacheRead,
-      );
-      expect(fixture.actor.canScheduleWaitCacheCheckpoint(run.ownership))
-        .toBe(testCase.expected);
-    }
+    expect(fixture.actor.getCurrentWaitAttempt()).toMatchObject({
+      ownership: run.ownership,
+      handle: attempt,
+      mode: "exact",
+      targets: [{
+        conversationId: TARGET_CONVERSATION_ID,
+        runId: RUN_B,
+      }],
+      status: "open",
+    });
+    expect(fixture.actor.claimWaitAttemptDelivery(run.ownership, attempt))
+      .toBe(true);
+    expect(fixture.actor.getWaitAttempt(run.ownership, attempt)?.status)
+      .toBe("delivering");
+    expect(fixture.actor.claimWaitPoll(run.ownership, attempt)).toBe(false);
+    expect(fixture.actor.completeWaitAttempt(run.ownership, attempt)).toBe(false);
+    expect(fixture.actor.completeWaitAttempt(
+      run.ownership,
+      attempt,
+      "delivering",
+      { kind: "message", messageId: FOCUS_ID },
+    )).toBe(true);
+    expect(onTerminal).toHaveBeenCalledTimes(1);
+    expect(terminalCauses).toEqual([
+      { kind: "message", messageId: FOCUS_ID },
+    ]);
+    expect(Object.isFrozen(terminalCauses[0]!)).toBe(true);
+    expect(fixture.actor.cancelWaitAttempt(run.ownership, attempt)).toBe(false);
+    expect(onTerminal).toHaveBeenCalledTimes(1);
+    expect(fixture.actor.getCurrentWaitAttempt()).toBeUndefined();
+    expect(fixture.actor.getActivity()).toEqual({
+      kind: "running",
+      runId: RUN_A,
+    });
 
-    restore();
     await run.finish();
     await fixture.actor.dispose();
   });
 
-  it("requires positive cache feedback and caps checkpoints per run", async () => {
+  it("releases the registered wait cleanup when an active run aborts", async () => {
     const fixture = await openActor();
     const run = await startHeldActorRun(fixture, RUN_A);
-    setWaitCacheInputs(fixture.runtime.session, 50_000, 10, 1);
+    const terminalCauses: unknown[] = [];
+    const onTerminal = vi.fn((cause) => terminalCauses.push(cause));
+    fixture.actor.installWaitAttempt(run.ownership, {
+      mode: "exact",
+      targets: [target],
+      onTerminal,
+    });
+    fixture.runtime.session.abort = async () => {
+      void run.finish();
+    };
 
-    for (let checkpoint = 0; checkpoint < 8; checkpoint += 1) {
-      const restore = fixture.actor.enterWaiting(run.ownership, target);
-      expect(fixture.actor.claimWaitCacheCheckpoint(run.ownership)).toBe(true);
-      expect(fixture.actor.canScheduleWaitCacheCheckpoint(run.ownership))
-        .toBe(false);
-      restore();
-      emitWaitCacheFeedback(
-        fixture.runtime.session,
-        waitCacheUsage(20, 80, 10),
-      );
-    }
+    await fixture.actor.abort(RUN_A);
+    await run.finish();
 
-    const restore = fixture.actor.enterWaiting(run.ownership, target);
-    expect(fixture.actor.canScheduleWaitCacheCheckpoint(run.ownership))
-      .toBe(false);
-    expect(fixture.actor.claimWaitCacheCheckpoint(run.ownership)).toBe(false);
-    restore();
+    expect(onTerminal).toHaveBeenCalledTimes(1);
+    expect(terminalCauses).toEqual([{ kind: "abort" }]);
+    expect(fixture.actor.getCurrentWaitAttempt()).toBeUndefined();
+    await fixture.actor.dispose();
+  });
+
+  it("reports poll, error, cancellation, and settlement terminal causes", async () => {
+    const fixture = await openActor();
+    const run = await startHeldActorRun(fixture, RUN_A);
+    const causes: unknown[] = [];
+    const onTerminal = (cause: unknown) => causes.push(cause);
+
+    const poll = fixture.actor.installWaitAttempt(run.ownership, {
+      mode: "exact",
+      targets: [target],
+      onTerminal,
+    });
+    expect(fixture.actor.claimWaitPoll(run.ownership, poll)).toBe(true);
+
+    const deliveryError = new Error("delivery failed");
+    const failedDelivery = fixture.actor.installWaitAttempt(run.ownership, {
+      mode: "exact",
+      targets: [target],
+      onTerminal,
+    });
+    expect(fixture.actor.claimWaitAttemptDelivery(
+      run.ownership,
+      failedDelivery,
+    )).toBe(true);
+    expect(fixture.actor.completeWaitAttempt(
+      run.ownership,
+      failedDelivery,
+      "delivering",
+      { kind: "error", error: deliveryError },
+    )).toBe(true);
+
+    const cancelled = fixture.actor.installWaitAttempt(run.ownership, {
+      mode: "exact",
+      targets: [target],
+      onTerminal,
+    });
+    expect(fixture.actor.cancelWaitAttempt(run.ownership, cancelled)).toBe(true);
+
+    const settled = fixture.actor.installWaitAttempt(run.ownership, {
+      mode: "exact",
+      targets: [target],
+      onTerminal,
+    });
+    expect(fixture.actor.completeWaitAttempt(run.ownership, settled)).toBe(true);
+
+    expect(causes).toEqual([
+      { kind: "poll" },
+      { kind: "error", error: deliveryError },
+      { kind: "cancelled" },
+      { kind: "settlement" },
+    ]);
+    expect(causes.every((cause) => Object.isFrozen(cause))).toBe(true);
 
     await run.finish();
     await fixture.actor.dispose();
   });
 
-  it.each([
-    ["missing", undefined],
-    ["invalid", waitCacheUsage(Number.NaN, 80, 10)],
-    ["low-hit", waitCacheUsage(80, 10, 10)],
-  ])("disables later checkpoints after %s usage", async (_name, usage) => {
+  it("rejects stale attempt handles after a later attempt is installed", async () => {
     const fixture = await openActor();
     const run = await startHeldActorRun(fixture, RUN_A);
-    setWaitCacheInputs(fixture.runtime.session, 50_000, 10, 1);
+    const first = fixture.actor.installWaitAttempt(run.ownership, {
+      mode: "exact",
+      targets: [target],
+    });
+    expect(fixture.actor.cancelWaitAttempt(run.ownership, first)).toBe(true);
+    const second = fixture.actor.installWaitAttempt(run.ownership, {
+      mode: "exact",
+      targets: [target],
+    });
 
-    let restore = fixture.actor.enterWaiting(run.ownership, target);
-    expect(fixture.actor.claimWaitCacheCheckpoint(run.ownership)).toBe(true);
-    restore();
-    emitWaitCacheFeedback(fixture.runtime.session, usage);
+    expect(fixture.actor.claimWaitPoll(run.ownership, first)).toBe(false);
+    expect(fixture.actor.completeWaitAttempt(run.ownership, first)).toBe(false);
+    expect(fixture.actor.cancelWaitAttempt(run.ownership, first)).toBe(false);
+    expect(() => fixture.actor.onWaitingSteerAdmitted(
+      run.ownership,
+      first,
+      () => true,
+    )).toThrow(/not currently waiting/i);
+    expect(fixture.actor.getWaitAttempt(run.ownership, second)?.status)
+      .toBe("open");
 
-    restore = fixture.actor.enterWaiting(run.ownership, target);
-    expect(fixture.actor.canScheduleWaitCacheCheckpoint(run.ownership))
-      .toBe(false);
-    restore();
+    fixture.actor.cancelWaitAttempt(run.ownership, second);
+    await run.finish();
+    await fixture.actor.dispose();
+  });
+
+  it("restores a recovered run's durable wait-poll budget", async () => {
+    const manager = SessionManager.inMemory(process.cwd(), {
+      id: CONVERSATION_ID,
+    });
+    for (let count = 1; count <= 3; count += 1) {
+      appendReservedCustomEntry(manager, createWaitPollEntry({
+        runId: RUN_A,
+        count,
+      }));
+    }
+    const runtime = new FakeRuntime();
+    const started = deferred();
+    const release = deferred();
+    runtime.session.resumeImplementation = async () => {
+      runtime.session.eventListener?.(nativeEvent({ type: "agent_start" }));
+      started.resolve();
+      await release.promise;
+      runtime.session.eventListener?.(nativeEvent({ type: "agent_end" }));
+    };
+    const fixture = await openActor({ sessionManager: manager, runtime });
+    const recovery = fixture.actor.resumeMessages({ runId: RUN_A });
+    await started.promise;
+    const ownership = fixture.actor.currentRunOwnership(RUN_A);
+    if (!ownership) throw new Error("Expected recovered run ownership");
+
+    expect(fixture.actor.getWaitPollBudget(ownership)).toEqual({
+      used: 3,
+      remaining: 5,
+    });
+    for (let index = 3; index < 8; index += 1) {
+      const attempt = fixture.actor.installWaitAttempt(ownership, {
+        mode: "exact",
+        targets: [target],
+      });
+      expect(fixture.actor.claimWaitPoll(ownership, attempt)).toBe(true);
+    }
+    expect(fixture.actor.getWaitPollBudget(ownership)).toEqual({
+      used: 8,
+      remaining: 0,
+    });
+
+    release.resolve();
+    await recovery;
+    await fixture.actor.dispose();
+  });
+
+  it("fails closed when a recovered wait-poll sequence has a gap", async () => {
+    const manager = SessionManager.inMemory(process.cwd(), {
+      id: CONVERSATION_ID,
+    });
+    appendReservedCustomEntry(manager, createWaitPollEntry({
+      runId: RUN_A,
+      count: 1,
+    }));
+    appendReservedCustomEntry(manager, createWaitPollEntry({
+      runId: RUN_A,
+      count: 3,
+    }));
+    await expect(openActor({ sessionManager: manager })).rejects.toThrow(
+      /invalid piweb wait-poll sequence/i,
+    );
+  });
+
+  it("rejects a fresh run that reuses an active-branch wait-poll journal", async () => {
+    const manager = SessionManager.inMemory(process.cwd(), {
+      id: CONVERSATION_ID,
+    });
+    appendReservedCustomEntry(manager, createWaitPollEntry({
+      runId: RUN_A,
+      count: 1,
+    }));
+    const fixture = await openActor({ sessionManager: manager });
+
+    expect(() => fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "must not revive a recovered run as fresh",
+      origin: "browser",
+    })).toThrow(/fresh run cannot reuse a runId/i);
+    await fixture.actor.dispose();
+  });
+
+  it("caps fixed wait polls at eight claims per run", async () => {
+    const fixture = await openActor();
+    const run = await startHeldActorRun(fixture, RUN_A);
+
+    for (let index = 0; index < 8; index += 1) {
+      const attempt = fixture.actor.installWaitAttempt(run.ownership, {
+        mode: "exact",
+        targets: [target],
+      });
+      expect(fixture.actor.getWaitPollBudget(run.ownership)).toEqual({
+        used: index,
+        remaining: 8 - index,
+      });
+      expect(fixture.actor.claimWaitPoll(run.ownership, attempt)).toBe(true);
+    }
+
+    expect(fixture.actor.getWaitPollBudget(run.ownership)).toEqual({
+      used: 8,
+      remaining: 0,
+    });
+    const ninthAttempt = fixture.actor.installWaitAttempt(run.ownership, {
+      mode: "exact",
+      targets: [target],
+    });
+    expect(fixture.actor.claimWaitPoll(run.ownership, ninthAttempt)).toBe(false);
+    expect(fixture.actor.getWaitAttempt(run.ownership, ninthAttempt)?.status)
+      .toBe("open");
+    expect(fixture.actor.cancelWaitAttempt(run.ownership, ninthAttempt)).toBe(true);
 
     await run.finish();
     await fixture.actor.dispose();

@@ -22,6 +22,7 @@ import {
   createConversationMetaEntry,
   createEditBudgetEntry,
   createRunSettlementEntry,
+  createWaitPollEntry,
 } from "./conversation-meta.js";
 
 function message(value: unknown): AgentMessage {
@@ -1001,6 +1002,10 @@ describe("projectConversationHistory", () => {
       kind: "grant",
       runId: randomUUID(),
       fileCount: 1,
+    }));
+    appendReservedCustomEntry(manager, createWaitPollEntry({
+      runId: randomUUID(),
+      count: 1,
     }));
     const resume = createCompactionResumeEntry({
       content:

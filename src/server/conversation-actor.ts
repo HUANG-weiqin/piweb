@@ -46,6 +46,7 @@ import {
   createConversationRoleChangeEntry,
   createRunSettlementEntry,
   createServiceTierSelectionEntry,
+  createWaitPollEntry,
   parseReservedConversationEntry,
   RUN_SETTLEMENT_CUSTOM_TYPE,
   type ConversationMeta,
@@ -53,6 +54,7 @@ import {
   type LoopListTiming,
   type RunSettlement,
   MAX_LOOP_LIST_CONTINUATIONS_PER_RUN,
+  MAX_WAIT_POLL_COUNT,
 } from "./conversation-meta.js";
 import { createLoopListTools } from "./loop-list-tools.js";
 import {
@@ -240,22 +242,64 @@ export interface QueueReloadContinuationInput extends ReloadContinuationInput {
 }
 
 export interface ConversationWaitingTarget {
-  conversationId: string;
-  runId: string;
+  readonly conversationId: string;
+  readonly runId: string;
 }
 
-export type ConversationWaitingFor =
-  | ConversationWaitingTarget
-  | { targets: readonly ConversationWaitingTarget[] };
+export type ConversationWaitAttemptMode = "exact" | "aggregate";
+export type ConversationWaitAttemptStatus = "open" | "delivering" | "terminal";
+
+/** Immutable winner reported once when a local wait attempt terminalizes. */
+export type ConversationWaitAttemptTerminalCause =
+  | { readonly kind: "message"; readonly messageId: string }
+  | { readonly kind: "guidance" }
+  | { readonly kind: "poll" }
+  | { readonly kind: "abort" }
+  | { readonly kind: "cancelled" }
+  | { readonly kind: "settlement" }
+  | { readonly kind: "error"; readonly error: unknown };
+
+type NonMessageWaitAttemptTerminalCause = Exclude<
+  ConversationWaitAttemptTerminalCause,
+  { readonly kind: "message" }
+>;
+
+/** Opaque actor capability for one installed wait attempt. */
+export interface ConversationWaitAttempt {
+  readonly [WAIT_ATTEMPT]: symbol;
+}
+
+export interface ConversationWaitAttemptSnapshot {
+  readonly mode: ConversationWaitAttemptMode;
+  readonly targets: readonly ConversationWaitingTarget[];
+  readonly status: ConversationWaitAttemptStatus;
+}
+
+/** Read-only current wait identity for coordinator-wide actor scans. */
+export interface CurrentConversationWaitAttempt
+  extends ConversationWaitAttemptSnapshot {
+  readonly ownership: ConversationRunOwnership;
+  readonly handle: ConversationWaitAttempt;
+}
+
+export interface ConversationWaitPollBudget {
+  readonly used: number;
+  readonly remaining: number;
+}
+
+export interface InstallConversationWaitAttempt {
+  readonly mode: ConversationWaitAttemptMode;
+  readonly targets: readonly ConversationWaitingTarget[];
+  /** Synchronously releases coordinator-owned registrations after terminal CAS. */
+  readonly onTerminal?: (cause: ConversationWaitAttemptTerminalCause) => void;
+}
 
 const RUN_OWNERSHIP = Symbol("ConversationActor.runOwnership");
+const WAIT_ATTEMPT = Symbol("ConversationActor.waitAttempt");
 // Avoid retrying every tool boundary without disabling protection for a long run.
 const COMPACTION_RETRY_GROWTH_PERCENT = 5;
 
-export const WAIT_CACHE_CHECKPOINT_DELAY_MS = 240_000;
-const WAIT_CACHE_CHECKPOINT_MIN_CONTEXT_TOKENS = 32_000;
-const MAX_WAIT_CACHE_CHECKPOINTS_PER_RUN = 8;
-const WAIT_CACHE_CHECKPOINT_MIN_HIT_RATIO = 0.5;
+export const MAX_WAIT_POLLS_PER_RUN = MAX_WAIT_POLL_COUNT;
 const AUTO_TITLE_FALLBACK = "新任务";
 const AUTO_TITLE_INPUT_CHARACTERS = 6_000;
 const AUTO_TITLE_MAX_TOKENS = 256;
@@ -287,6 +331,14 @@ interface Deferred<T> {
 interface PendingCustomSteer {
   readonly message: Parameters<AgentSession["sendCustomMessage"]>[0];
   readonly delivery: Deferred<void>;
+  /** Present only for ordinary peer messages eligible to wake a later wait. */
+  readonly acceptedMessageId?: string;
+}
+
+interface AcceptedCustomMessageObservation {
+  readonly messageId: string;
+  /** This run already consumed the one wake allowed for this message. */
+  waited: boolean;
 }
 
 interface PendingGuidance {
@@ -316,20 +368,25 @@ interface ReloadStopRequest {
   readonly ready: Deferred<void>;
 }
 
-type WaitingRunState = {
-  readonly phase: "waiting";
-  /** Immutable target snapshot for this one visible wait. */
-  readonly waitingFor: ConversationWaitingFor;
+interface ActiveWaitAttempt {
+  readonly handle: ConversationWaitAttempt;
+  readonly mode: ConversationWaitAttemptMode;
+  /** Frozen target snapshot; this is the only target owner for a wait. */
+  readonly targets: readonly ConversationWaitingTarget[];
+  status: ConversationWaitAttemptStatus;
+  /** Coordinator registration cleanup, invoked exactly once after terminal CAS. */
+  onTerminal?: (cause: ConversationWaitAttemptTerminalCause) => void;
   /**
-   * One-shot host callback fired when guidance is accepted into the SDK
-   * steering queue of this exact waiting run. Used by the host to end a
-   * blocked wait_for_session tool call so the queued guidance can be consumed
-   * at the next model request. Returns true only when the host's exact
-   * waiter still exists and successfully claimed the guidance; false leaves
-   * the record available for the next wait. Cleared on fire, on wait
-   * restore, or by the caller's unsubscribe.
+   * One-shot host callback fired when guidance is accepted into this exact
+   * waiting run's SDK steering queue. It returns true only while the host
+   * waiter still exists; the actor then performs the terminal CAS.
    */
   waitSteerInterrupt?: () => boolean;
+}
+
+type WaitingRunState = {
+  readonly phase: "waiting";
+  readonly attempt: ActiveWaitAttempt;
 };
 
 type RunState =
@@ -344,6 +401,8 @@ interface RunTicket {
   readonly completion: Deferred<RunSettlement>;
   readonly guidanceDeliveries: PendingGuidance[];
   readonly customSteerDeliveries: PendingCustomSteer[];
+  /** SDK-accepted ordinary peer steers not yet proven durably observed. */
+  readonly acceptedCustomMessageObservations: AcceptedCustomMessageObservation[];
   readonly reloadContinuationDeliveries: Map<
     string,
     {
@@ -381,9 +440,7 @@ interface RunTicket {
   sdkCompactionSucceeded: boolean;
   contextCompactionRequested: boolean;
   turnBoundaryCompactionRequested: boolean;
-  waitCacheCheckpointCount: number;
-  waitCacheCheckpointDisabled: boolean;
-  awaitingWaitCacheCheckpointUsage: boolean;
+  waitPollCount: number;
   reloadStop?: ReloadStopRequest;
   abortPromise?: Promise<void>;
   finishPromise?: Promise<RunSettlement>;
@@ -419,6 +476,46 @@ function cloneCompactionAttempt(
       id: attempt.requestTarget.id,
     },
   };
+}
+
+function cloneWaitTargets(
+  targets: readonly ConversationWaitingTarget[],
+): readonly ConversationWaitingTarget[] {
+  return Object.freeze(targets.map((target) => Object.freeze({
+    conversationId: target.conversationId,
+    runId: target.runId,
+  })));
+}
+
+function snapshotWaitAttempt(
+  attempt: ActiveWaitAttempt,
+): ConversationWaitAttemptSnapshot {
+  return Object.freeze({
+    mode: attempt.mode,
+    targets: cloneWaitTargets(attempt.targets),
+    status: attempt.status,
+  });
+}
+
+function immutableWaitAttemptTerminalCause(
+  cause: ConversationWaitAttemptTerminalCause,
+): ConversationWaitAttemptTerminalCause {
+  switch (cause.kind) {
+    case "message":
+      return Object.freeze({ kind: "message", messageId: cause.messageId });
+    case "error":
+      return Object.freeze({ kind: "error", error: cause.error });
+    case "guidance":
+      return Object.freeze({ kind: "guidance" });
+    case "poll":
+      return Object.freeze({ kind: "poll" });
+    case "abort":
+      return Object.freeze({ kind: "abort" });
+    case "cancelled":
+      return Object.freeze({ kind: "cancelled" });
+    case "settlement":
+      return Object.freeze({ kind: "settlement" });
+  }
 }
 
 function cloneActivity(activity: ConversationActivity): ConversationActivity {
@@ -1419,19 +1516,21 @@ export class ConversationActor {
       case "running":
       case "cancelling":
         return { kind: state.phase, runId: ticket.id };
-      case "waiting":
-        return "targets" in state.waitingFor
+      case "waiting": {
+        const { attempt } = state;
+        return attempt.mode === "aggregate"
           ? {
               kind: "waiting",
               runId: ticket.id,
-              targetCount: state.waitingFor.targets.length,
+              targetCount: attempt.targets.length,
             }
           : {
               kind: "waiting",
               runId: ticket.id,
-              targetConversationId: state.waitingFor.conversationId,
-              targetRunId: state.waitingFor.runId,
+              targetConversationId: attempt.targets[0]!.conversationId,
+              targetRunId: attempt.targets[0]!.runId,
             };
+      }
     }
   }
 
@@ -1906,7 +2005,11 @@ export class ConversationActor {
     }
 
     const delivery = deferred<void>();
-    ticket.customSteerDeliveries.push({ message, delivery });
+    ticket.customSteerDeliveries.push({
+      message,
+      delivery,
+      acceptedMessageId: message.details.messageId,
+    });
     this.flushCustomSteers(ticket);
     return delivery.promise;
   }
@@ -2090,10 +2193,16 @@ export class ConversationActor {
             triggerTurn: true,
             deliverAs: "steer",
           });
-          if (ticket.customSteerDeliveries[0] === next) {
-            ticket.customSteerDeliveries.shift();
-            next.delivery.resolve();
+          // A wait can be cancelled while the SDK call is in flight. Its
+          // successful acceptance is independent of that lifecycle change:
+          // settle the exact FIFO head unless run teardown already rejected
+          // and removed it, otherwise a later flush would deliver it twice.
+          if (ticket.customSteerDeliveries[0] !== next) return;
+          if (next.acceptedMessageId !== undefined) {
+            this.recordAcceptedCustomMessage(ticket, next.acceptedMessageId);
           }
+          ticket.customSteerDeliveries.shift();
+          next.delivery.resolve();
         }
       } catch (error) {
         this.rejectCustomSteers(ticket, error);
@@ -2118,6 +2227,30 @@ export class ConversationActor {
     ticket.customSteerFlush = undefined;
     for (const pending of ticket.customSteerDeliveries.splice(0)) {
       pending.delivery.reject(error);
+    }
+  }
+
+  private recordAcceptedCustomMessage(ticket: RunTicket, messageId: string): void {
+    if (ticket.acceptedCustomMessageObservations.some(
+      (candidate) => candidate.messageId === messageId,
+    )) {
+      return;
+    }
+    ticket.acceptedCustomMessageObservations.push({ messageId, waited: false });
+  }
+
+  private retireDurablyObservedCustomMessages(ticket: RunTicket): void {
+    const delivered = new Set(aggregateReservedConversationEntries(
+      this.sessionManager.getEntries(),
+    ).deliveredMessageIds);
+    for (
+      let index = ticket.acceptedCustomMessageObservations.length - 1;
+      index >= 0;
+      index -= 1
+    ) {
+      if (delivered.has(ticket.acceptedCustomMessageObservations[index]!.messageId)) {
+        ticket.acceptedCustomMessageObservations.splice(index, 1);
+      }
     }
   }
 
@@ -2147,11 +2280,19 @@ export class ConversationActor {
     if (this.usedRunIds.has(input.runId)) {
       throw new Error("Run ID was already used in this conversation actor");
     }
+    const branch = this.sessionManager.getBranch();
+    const branchReserved = aggregateReservedConversationEntries(branch);
+    const waitPollCount = branchReserved.waitPolls.filter(
+      (poll) => poll.runId === input.runId,
+    ).length;
+    if (!input.recovered && waitPollCount !== 0) {
+      throw new Error(
+        "A fresh run cannot reuse a runId with a durable wait-poll journal",
+      );
+    }
     const editBudget = input.recovered
       ? restoreEditBudgetLedger(
-        aggregateReservedConversationEntries(
-          this.sessionManager.getBranch(),
-        ).editBudgetEvents,
+        branchReserved.editBudgetEvents,
         input.runId,
       )
       : createEditBudgetLedger();
@@ -2175,6 +2316,7 @@ export class ConversationActor {
       guidanceDeliveries: [],
       pendingGuidanceObservations: [],
       customSteerDeliveries: [],
+      acceptedCustomMessageObservations: [],
       reloadContinuationDeliveries: new Map(),
       ...(input.reloadContinuation === undefined
         ? {}
@@ -2193,9 +2335,7 @@ export class ConversationActor {
       sdkCompactionSucceeded: false,
       contextCompactionRequested: false,
       turnBoundaryCompactionRequested: false,
-      waitCacheCheckpointCount: 0,
-      waitCacheCheckpointDisabled: false,
-      awaitingWaitCacheCheckpointUsage: false,
+      waitPollCount,
     };
     this.activeRun = ticket;
     this.beginLiveProjection(ticket, input.promptText);
@@ -2223,146 +2363,171 @@ export class ConversationActor {
     return ticket.ownership;
   }
 
-  enterWaiting(
+  /**
+   * Installs the one wait attempt owned by this run. Coordinator code retains
+   * only this opaque handle; the actor owns the frozen targets, status, and
+   * terminal cleanup so stale async work cannot alter a later wait.
+   */
+  installWaitAttempt(
     ownership: ConversationRunOwnership,
-    waitingFor: ConversationWaitingFor,
-  ): () => void {
-    // SAFETY: one run has one visible waiting operation because gated tool
-    // execution is sequential. Parallel blocking tools would require a
-    // multi-wait activity model instead of overwriting this single phase.
+    input: InstallConversationWaitAttempt,
+  ): ConversationWaitAttempt {
     const ticket = this.requireOwnedRunningTicket(ownership);
-    const waiting: WaitingRunState = {
-      phase: "waiting",
-      waitingFor: "targets" in waitingFor
-        ? { targets: waitingFor.targets.map((target) => ({ ...target })) }
-        : { ...waitingFor },
-    };
-    ticket.state = waiting;
-    this.emitActivity();
-
-    let restored = false;
-    return () => {
-      if (restored) return;
-      restored = true;
-      if (
-        this.activeRun !== ticket
-        || ticket.ownership !== ownership
-        || ticket.state !== waiting
-      ) {
-        return;
-      }
-      ticket.state = { phase: "running" };
-      this.emitActivity();
-    };
-  }
-
-  async withWaiting<T>(
-    ownership: ConversationRunOwnership,
-    waitingFor: ConversationWaitingFor,
-    work: () => Promise<T> | T,
-  ): Promise<T> {
-    const restore = this.enterWaiting(ownership, waitingFor);
-    try {
-      return await work();
-    } finally {
-      restore();
+    if (
+      input.targets.length === 0
+      || (input.mode === "exact" && input.targets.length !== 1)
+    ) {
+      throw new Error("A wait attempt must have its required frozen targets");
     }
+    const attempt: ActiveWaitAttempt = {
+      handle: Object.freeze({ [WAIT_ATTEMPT]: Symbol(ticket.id) }),
+      mode: input.mode,
+      targets: cloneWaitTargets(input.targets),
+      status: "open",
+      ...(input.onTerminal === undefined ? {} : { onTerminal: input.onTerminal }),
+    };
+    ticket.state = { phase: "waiting", attempt };
+    this.emitActivity();
+    return attempt.handle;
   }
 
-  canScheduleWaitCacheCheckpoint(
+  /** Returns a copy of the exact installed attempt, never mutable actor state. */
+  getWaitAttempt(
     ownership: ConversationRunOwnership,
-  ): boolean {
+    handle: ConversationWaitAttempt,
+  ): ConversationWaitAttemptSnapshot | undefined {
+    const current = this.currentWaitAttempt(ownership, handle);
+    return current ? snapshotWaitAttempt(current.attempt) : undefined;
+  }
+
+  /**
+   * Returns the current local attempt for coordinator-wide scans without
+   * exposing mutable actor state or a second waiter registry.
+   */
+  getCurrentWaitAttempt(): CurrentConversationWaitAttempt | undefined {
+    const ticket = this.activeRun;
+    const waiting = ticket?.state;
+    if (!ticket || waiting?.phase !== "waiting") return;
+    return Object.freeze({
+      ownership: ticket.ownership,
+      handle: waiting.attempt.handle,
+      ...snapshotWaitAttempt(waiting.attempt),
+    });
+  }
+
+  /** Reads the fixed per-run wait-poll budget. */
+  getWaitPollBudget(
+    ownership: ConversationRunOwnership,
+  ): ConversationWaitPollBudget | undefined {
     const ticket = this.activeRun;
     if (
       !ticket
       || ticket.ownership !== ownership
       || ownership[RUN_OWNERSHIP] !== ticket.ownership[RUN_OWNERSHIP]
-      || ticket.state.phase !== "waiting"
+      || ticket.state.phase === "queued"
+      || ticket.state.phase === "cancelling"
     ) {
-      return false;
+      return;
     }
-    if (ticket.waitCacheCheckpointDisabled) return false;
-    if (
-      ticket.waitCacheCheckpointCount
-      >= MAX_WAIT_CACHE_CHECKPOINTS_PER_RUN
-    ) {
-      return false;
-    }
-    if (ticket.awaitingWaitCacheCheckpointUsage) return false;
-    const tokens = this.session.getContextUsage?.()?.tokens;
-    if (
-      typeof tokens !== "number"
-      || !Number.isFinite(tokens)
-      || tokens < WAIT_CACHE_CHECKPOINT_MIN_CONTEXT_TOKENS
-    ) {
-      return false;
-    }
-    const cost = this.session.model?.cost;
-    if (!cost) return false;
-    const inputCost = cost.input;
-    const cacheReadCost = cost.cacheRead;
-    if (
-      typeof inputCost !== "number"
-      || typeof cacheReadCost !== "number"
-      || !Number.isFinite(inputCost)
-      || !Number.isFinite(cacheReadCost)
-      || inputCost <= 0
-      || cacheReadCost <= 0
-    ) {
-      return false;
-    }
-    // Budget every allowed refresh plus the eventual target-result turn
-    // against one uncached read; equality has no guaranteed savings.
-    if (
-      (MAX_WAIT_CACHE_CHECKPOINTS_PER_RUN + 1) * cacheReadCost
-      >= inputCost
-    ) {
-      return false;
-    }
-    return true;
+    return Object.freeze({
+      used: ticket.waitPollCount,
+      remaining: MAX_WAIT_POLLS_PER_RUN - ticket.waitPollCount,
+    });
   }
 
-  claimWaitCacheCheckpoint(
+  /**
+   * Synchronously reserves an open wait for FIFO message delivery before its
+   * caller awaits SDK steering. Other terminal sources, including cache
+   * timers, cannot win while the attempt is delivering.
+   */
+  claimWaitAttemptDelivery(
     ownership: ConversationRunOwnership,
+    handle: ConversationWaitAttempt,
   ): boolean {
-    if (!this.canScheduleWaitCacheCheckpoint(ownership)) return false;
-    const ticket = this.activeRun!;
-    ticket.waitCacheCheckpointCount += 1;
-    ticket.awaitingWaitCacheCheckpointUsage = true;
+    const current = this.currentWaitAttempt(ownership, handle);
+    if (!current || current.attempt.status !== "open") return false;
+    current.attempt.status = "delivering";
     return true;
   }
 
-  private handleWaitCacheCheckpointAssistantUsage(
-    ticket: RunTicket,
-    message: AssistantMessage,
-  ): void {
-    if (!ticket.awaitingWaitCacheCheckpointUsage) return;
-    const usage = message.usage;
-    ticket.awaitingWaitCacheCheckpointUsage = false;
+  /**
+   * Completes an attempt from its expected state. Ordinary wait outcomes use
+   * the default open state; the FIFO delivery path must explicitly complete
+   * its prior delivering claim after its awaited SDK work returns.
+   */
+  completeWaitAttempt(
+    ownership: ConversationRunOwnership,
+    handle: ConversationWaitAttempt,
+    expectedStatus?: "open",
+    cause?: NonMessageWaitAttemptTerminalCause,
+  ): boolean;
+  completeWaitAttempt(
+    ownership: ConversationRunOwnership,
+    handle: ConversationWaitAttempt,
+    expectedStatus: "delivering",
+    cause?: ConversationWaitAttemptTerminalCause,
+  ): boolean;
+  completeWaitAttempt(
+    ownership: ConversationRunOwnership,
+    handle: ConversationWaitAttempt,
+    expectedStatus: "open" | "delivering" = "open",
+    cause: ConversationWaitAttemptTerminalCause = { kind: "settlement" },
+  ): boolean {
+    const current = this.currentWaitAttempt(ownership, handle);
+    return current !== undefined && this.terminalizeWaitAttempt(
+      current.ticket,
+      current.attempt,
+      expectedStatus,
+      true,
+      cause,
+    );
+  }
+
+  /** Cancels an open or delivering attempt, making its callbacks inert. */
+  cancelWaitAttempt(
+    ownership: ConversationRunOwnership,
+    handle: ConversationWaitAttempt,
+    cause: NonMessageWaitAttemptTerminalCause = { kind: "cancelled" },
+  ): boolean {
+    const current = this.currentWaitAttempt(ownership, handle);
+    return current !== undefined && this.terminalizeWaitAttempt(
+      current.ticket,
+      current.attempt,
+      undefined,
+      true,
+      cause,
+    );
+  }
+
+  /**
+   * Atomically consumes one fixed poll allowance and terminalizes this open
+   * attempt. A delivering attempt cannot be claimed by a timer.
+   */
+  claimWaitPoll(
+    ownership: ConversationRunOwnership,
+    handle: ConversationWaitAttempt,
+  ): boolean {
+    const current = this.currentWaitAttempt(ownership, handle);
     if (
-      !usage
-      || typeof usage.input !== "number"
-      || typeof usage.cacheRead !== "number"
-      || typeof usage.cacheWrite !== "number"
-      || !Number.isFinite(usage.input)
-      || !Number.isFinite(usage.cacheRead)
-      || !Number.isFinite(usage.cacheWrite)
+      !current
+      || current.attempt.status !== "open"
+      || current.ticket.waitPollCount >= MAX_WAIT_POLLS_PER_RUN
     ) {
-      ticket.waitCacheCheckpointDisabled = true;
-      return;
+      return false;
     }
-    const denom = usage.input + usage.cacheRead + usage.cacheWrite;
-    if (!Number.isFinite(denom) || denom <= 0) {
-      ticket.waitCacheCheckpointDisabled = true;
-      return;
-    }
-    const ratio = usage.cacheRead / denom;
-    if (
-      !Number.isFinite(ratio)
-      || ratio < WAIT_CACHE_CHECKPOINT_MIN_HIT_RATIO
-    ) {
-      ticket.waitCacheCheckpointDisabled = true;
-    }
+    const nextCount = current.ticket.waitPollCount + 1;
+    appendReservedCustomEntry(
+      this.sessionManager,
+      createWaitPollEntry({ runId: current.ticket.id, count: nextCount }),
+    );
+    current.ticket.waitPollCount = nextCount;
+    return this.terminalizeWaitAttempt(
+      current.ticket,
+      current.attempt,
+      "open",
+      true,
+      { kind: "poll" },
+    );
   }
 
   /** Claims guidance already accepted into this run before a wait blocks. */
@@ -2379,33 +2544,71 @@ export class ConversationActor {
   }
 
   /**
-   * Registers a one-shot, ownership-scoped callback that fires when guidance
-   * (an explicit steer or a busy browser prompt) is accepted into the SDK
-   * steering queue of this exact waiting run, or when such guidance was
-   * already accepted but not yet observed by a raw user message_end. Fires at
-   * most once; unregistering before then is safe and the actor also clears it
-   * when the wait ends. Rejects when the run is not currently waiting under
-   * this ownership. The host uses this to end a blocked wait_for_session tool
-   * call without inventing a peer identity.
+   * True only for an ordinary peer custom message that this exact active run
+   * had accepted into Pi's steering queue and has not durably observed yet.
+   */
+  hasAcceptedCustomMessageForWait(
+    ownership: ConversationRunOwnership,
+    messageId: string,
+  ): boolean {
+    const ticket = this.currentAcceptedCustomMessageTicket(ownership);
+    if (!ticket) return false;
+    this.retireDurablyObservedCustomMessages(ticket);
+    return ticket.acceptedCustomMessageObservations.some(
+      (candidate) => candidate.messageId === messageId && !candidate.waited,
+    );
+  }
+
+  /** Claims the one wait wake permitted for an SDK-accepted peer message. */
+  claimAcceptedCustomMessageForWait(
+    ownership: ConversationRunOwnership,
+    messageId: string,
+  ): boolean {
+    const ticket = this.currentAcceptedCustomMessageTicket(ownership);
+    if (!ticket) return false;
+    this.retireDurablyObservedCustomMessages(ticket);
+    const record = ticket.acceptedCustomMessageObservations.find(
+      (candidate) => candidate.messageId === messageId && !candidate.waited,
+    );
+    if (!record) return false;
+    record.waited = true;
+    return true;
+  }
+
+  /** Removes an accepted observation after coordinator reconciliation proves it. */
+  retireAcceptedCustomMessageForWait(
+    ownership: ConversationRunOwnership,
+    messageId: string,
+  ): boolean {
+    const ticket = this.currentAcceptedCustomMessageTicket(ownership);
+    if (!ticket) return false;
+    const index = ticket.acceptedCustomMessageObservations.findIndex(
+      (candidate) => candidate.messageId === messageId,
+    );
+    if (index < 0) return false;
+    ticket.acceptedCustomMessageObservations.splice(index, 1);
+    return true;
+  }
+
+  /**
+   * Registers a one-shot interrupt for accepted guidance. The callback only
+   * reports whether the coordinator waiter is still live; the actor burns the
+   * guidance record only if its following terminal CAS wins.
    */
   onWaitingSteerAdmitted(
     ownership: ConversationRunOwnership,
+    handle: ConversationWaitAttempt,
     callback: () => boolean,
   ): () => void {
-    const ticket = this.activeRun;
-    const waiting = ticket?.state;
-    if (
-      !ticket
-      || ticket.ownership !== ownership
-      || ownership[RUN_OWNERSHIP] !== ticket.ownership[RUN_OWNERSHIP]
-      || waiting?.phase !== "waiting"
-    ) {
+    const current = this.currentWaitAttempt(ownership, handle);
+    if (!current || current.attempt.status !== "open") {
       throw new Error("The run is not currently waiting under this ownership");
     }
-    if (waiting.waitSteerInterrupt !== undefined) {
+    const { ticket, waiting, attempt } = current;
+    if (attempt.waitSteerInterrupt !== undefined) {
       throw new Error("A waiting steer interrupt is already registered");
     }
-    waiting.waitSteerInterrupt = callback;
+    attempt.waitSteerInterrupt = callback;
     // Consume guidance already accepted into the SDK queue (including before
     // this wait registered or while the registration was still queued behind
     // the serial lifecycle task).
@@ -2416,29 +2619,32 @@ export class ConversationActor {
       active = false;
       if (
         ticket.state === waiting
-        && waiting.waitSteerInterrupt === callback
+        && waiting.attempt === attempt
+        && attempt.waitSteerInterrupt === callback
       ) {
-        waiting.waitSteerInterrupt = undefined;
+        attempt.waitSteerInterrupt = undefined;
       }
     };
   }
 
   /**
    * Fires the registered waiting interrupt once for the first accepted-but-
-   * unobserved guidance record. Marks that record waited so a later wait of
-   * this run is never re-woken by the same guidance, independently of when
-   * its raw user message_end is observed.
+   * unobserved guidance record. A stale callback leaves the record available
+   * for the next wait; a true callback burns it only when terminal CAS wins.
    */
   private fireWaitingSteerInterrupt(ticket: RunTicket): void {
     const waiting = ticket.state;
     if (this.activeRun !== ticket || waiting.phase !== "waiting") return;
-    if (waiting.waitSteerInterrupt === undefined) return;
+    const { attempt } = waiting;
+    if (attempt.status !== "open" || attempt.waitSteerInterrupt === undefined) {
+      return;
+    }
     const record = ticket.pendingGuidanceObservations.find(
       (candidate) => !candidate.waited,
     );
     if (!record) return;
-    const interrupt = waiting.waitSteerInterrupt;
-    waiting.waitSteerInterrupt = undefined;
+    const interrupt = attempt.waitSteerInterrupt;
+    attempt.waitSteerInterrupt = undefined;
     let claimed = false;
     try {
       claimed = interrupt() === true;
@@ -2446,14 +2652,102 @@ export class ConversationActor {
       this.emitError(error, ticket.id);
       return;
     }
-    // Only the host's exact waiter claiming the guidance burns the record.
-    // A stale callback (waiter already removed by abort/settlement/message
-    // before withWaiting's restore ran) must leave the record for the next
-    // wait; otherwise a subsequent blocking tool or wait registered before
-    // the raw guidance injection would deadlock.
-    if (claimed) {
+    if (
+      claimed
+      && this.terminalizeWaitAttempt(
+        ticket,
+        attempt,
+        "open",
+        true,
+        { kind: "guidance" },
+      )
+    ) {
       record.waited = true;
     }
+  }
+
+  private currentAcceptedCustomMessageTicket(
+    ownership: ConversationRunOwnership,
+  ): RunTicket | undefined {
+    const ticket = this.activeRun;
+    if (
+      !ticket
+      || ticket.ownership !== ownership
+      || ownership[RUN_OWNERSHIP] !== ticket.ownership[RUN_OWNERSHIP]
+      || (ticket.state.phase !== "running" && ticket.state.phase !== "waiting")
+    ) {
+      return;
+    }
+    return ticket;
+  }
+
+  private currentWaitAttempt(
+    ownership: ConversationRunOwnership,
+    handle?: ConversationWaitAttempt,
+  ): {
+    ticket: RunTicket;
+    waiting: WaitingRunState;
+    attempt: ActiveWaitAttempt;
+  } | undefined {
+    const ticket = this.activeRun;
+    const waiting = ticket?.state;
+    if (
+      !ticket
+      || ticket.ownership !== ownership
+      || ownership[RUN_OWNERSHIP] !== ticket.ownership[RUN_OWNERSHIP]
+      || waiting?.phase !== "waiting"
+      || (handle !== undefined && waiting.attempt.handle !== handle)
+    ) {
+      return;
+    }
+    return { ticket, waiting, attempt: waiting.attempt };
+  }
+
+  private terminalizeWaitAttempt(
+    ticket: RunTicket,
+    attempt: ActiveWaitAttempt,
+    expectedStatus: "open" | "delivering" | undefined,
+    restoreRunning: boolean,
+    cause: ConversationWaitAttemptTerminalCause,
+  ): boolean {
+    const waiting = ticket.state;
+    if (
+      this.activeRun !== ticket
+      || waiting.phase !== "waiting"
+      || waiting.attempt !== attempt
+      || attempt.status === "terminal"
+      || (expectedStatus !== undefined && attempt.status !== expectedStatus)
+    ) {
+      return false;
+    }
+    attempt.status = "terminal";
+    attempt.waitSteerInterrupt = undefined;
+    const onTerminal = attempt.onTerminal;
+    attempt.onTerminal = undefined;
+    const terminalCause = immutableWaitAttemptTerminalCause(cause);
+    if (restoreRunning) ticket.state = { phase: "running" };
+    try {
+      onTerminal?.(terminalCause);
+    } catch (error) {
+      this.emitError(error, ticket.id);
+    }
+    if (restoreRunning) this.emitActivity();
+    return true;
+  }
+
+  private cancelInstalledWaitAttempt(
+    ticket: RunTicket,
+    cause: ConversationWaitAttemptTerminalCause,
+  ): void {
+    const waiting = ticket.state;
+    if (waiting.phase !== "waiting") return;
+    this.terminalizeWaitAttempt(
+      ticket,
+      waiting.attempt,
+      undefined,
+      false,
+      cause,
+    );
   }
 
   /**
@@ -3019,6 +3313,7 @@ export class ConversationActor {
       );
     }
     ticket.pendingGuidanceObservations.splice(0);
+    ticket.acceptedCustomMessageObservations.splice(0);
     // Un-delivered browser admissions must not leak into a later run.
     this.clearPendingAdmissions();
     this.rejectCustomSteers(
@@ -3026,6 +3321,7 @@ export class ConversationActor {
       new Error("Run ended before queued session messages were delivered"),
     );
     this.cancelScope(ticket.id);
+    this.cancelInstalledWaitAttempt(ticket, { kind: "settlement" });
     this.activeRun = undefined;
     // Planned process replacement keeps its durable settlement internal. The
     // reconnecting client observes the fresh continuation instead of a
@@ -3065,12 +3361,16 @@ export class ConversationActor {
 
   private failRunInfrastructure(ticket: RunTicket, error: unknown): void {
     ticket.reloadStop?.ready.reject(error);
-    if (this.activeRun === ticket) this.activeRun = undefined;
+    if (this.activeRun === ticket) {
+      this.cancelInstalledWaitAttempt(ticket, { kind: "error", error });
+      this.activeRun = undefined;
+    }
     if (this.liveProjection?.runId === ticket.id) this.liveProjection = undefined;
     for (const guidance of ticket.guidanceDeliveries.splice(0)) {
       guidance.delivery.reject(error);
     }
     ticket.pendingGuidanceObservations.splice(0);
+    ticket.acceptedCustomMessageObservations.splice(0);
     this.clearPendingAdmissions();
     this.rejectCustomSteers(ticket, error);
     this.fatalError = error instanceof Error
@@ -3112,12 +3412,14 @@ export class ConversationActor {
       return ticket.abortPromise ?? Promise.resolve();
     }
 
+    this.cancelInstalledWaitAttempt(ticket, { kind: "abort" });
     ticket.state = { phase: "cancelling" };
     this.emitActivity();
     ticket.abortPromise = Promise.resolve().then(() => {
       this.session.clearQueue();
       this.clearPendingAdmissions();
       ticket.pendingGuidanceObservations.splice(0);
+      ticket.acceptedCustomMessageObservations.splice(0);
       return this.session.abort();
     });
     return ticket.abortPromise;
@@ -3243,16 +3545,6 @@ export class ConversationActor {
       // projecting final text/usage.
       const assistant = this.ensureLiveAssistant(ticket);
       this.liveProjection.rawMessagesByItemId.set(assistant.id, event.message);
-    }
-
-    if (
-      event.type === "message_end"
-      && event.message.role === "assistant"
-    ) {
-      this.handleWaitCacheCheckpointAssistantUsage(
-        ticket,
-        event.message,
-      );
     }
 
     const rawStartedMessage = event.type === "message_start"

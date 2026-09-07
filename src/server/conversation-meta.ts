@@ -36,6 +36,8 @@ const COMPACTION_RESUME_CUSTOM_TYPE =
 export const LOOP_LIST_CUSTOM_TYPE = "piweb.loop_list.v2";
 export const LOOP_LIST_CONTINUE_CUSTOM_TYPE = "piweb.loop_list_continue.v2";
 export const MAX_LOOP_LIST_CONTINUATIONS_PER_RUN = 8;
+export const WAIT_POLL_CUSTOM_TYPE = "piweb.wait_poll.v1";
+export const MAX_WAIT_POLL_COUNT = 8;
 export const CONVERSATION_ROLE_CHANGE_CUSTOM_TYPE =
   "piweb.conversation_role_change.v1";
 export const TEMPORARY_RETURN_RECEIPT_CUSTOM_TYPE =
@@ -573,6 +575,17 @@ const editBudgetEntrySchema = z.object({
   data: editBudgetEventSchema,
 }).strict();
 
+/** Cumulative claimed wait polls for one recoverable logical run. */
+const waitPollSchema = z.object({
+  runId: uuidSchema("runId"),
+  count: z.number().int().min(1).max(MAX_WAIT_POLL_COUNT),
+}).strict();
+
+const waitPollEntrySchema = z.object({
+  customType: z.literal(WAIT_POLL_CUSTOM_TYPE),
+  data: waitPollSchema,
+}).strict();
+
 const temporaryReturnReceiptIdentitySchema = z.object({
   temporaryConversationId: conversationIdSchema("temporaryConversationId"),
   initialRunId: uuidSchema("initialRunId"),
@@ -721,6 +734,8 @@ export type RunSettlement = z.infer<typeof runSettlementSchema>;
 export type RunSettlementEntry =
   z.infer<typeof runSettlementEntrySchema>;
 export type EditBudgetEntry = z.infer<typeof editBudgetEntrySchema>;
+export type WaitPoll = z.infer<typeof waitPollSchema>;
+export type WaitPollEntry = z.infer<typeof waitPollEntrySchema>;
 export type TemporaryReturnReceipt =
   z.infer<typeof temporaryReturnReceiptSchema>;
 export type TemporaryReturnReceiptEntry =
@@ -782,6 +797,10 @@ export type ReservedConversationEntry =
       entry: EditBudgetEntry;
     }
   | {
+      kind: "wait_poll";
+      entry: WaitPollEntry;
+    }
+  | {
       kind: "temporary_return_receipt";
       entry: TemporaryReturnReceiptEntry;
     }
@@ -805,6 +824,7 @@ export interface ReservedConversationAggregate {
   messageDeliveryReceipts: MessageDeliveryReceipt[];
   runSettlements: RunSettlement[];
   editBudgetEvents: EditBudgetEvent[];
+  waitPolls: WaitPoll[];
   temporaryReturnReceipts: TemporaryReturnReceipt[];
   metaOperations: MetaOperation[];
   compactionThreshold?: CompactionThreshold;
@@ -965,6 +985,17 @@ export function createEditBudgetEntry(
   });
 }
 
+export function parseWaitPollEntry(value: unknown): WaitPollEntry {
+  return waitPollEntrySchema.parse(value);
+}
+
+export function createWaitPollEntry(data: WaitPoll): WaitPollEntry {
+  return parseWaitPollEntry({
+    customType: WAIT_POLL_CUSTOM_TYPE,
+    data,
+  });
+}
+
 export function createRunSettlementEntry(
   data: RunSettlement,
 ): RunSettlementEntry {
@@ -1049,6 +1080,7 @@ export function appendReservedCustomEntry(
     | MessageDeliveryReceiptEntry
     | RunSettlementEntry
     | EditBudgetEntry
+    | WaitPollEntry
     | TemporaryReturnReceiptEntry
     | MetaOperationEntry
     | CompactionThresholdEntry
@@ -1179,6 +1211,12 @@ export function parseReservedConversationEntry(
     return {
       kind: "edit_budget",
       entry: parseEditBudgetEntry(payload),
+    };
+  }
+  if (customType === WAIT_POLL_CUSTOM_TYPE) {
+    return {
+      kind: "wait_poll",
+      entry: parseWaitPollEntry(payload),
     };
   }
   if (customType === TEMPORARY_RETURN_RECEIPT_CUSTOM_TYPE) {
@@ -1340,6 +1378,8 @@ export function aggregateReservedConversationEntries(
   >();
   const runSettlements = new Map<string, RunSettlement>();
   const editBudgetEvents: EditBudgetEvent[] = [];
+  const waitPollCounts = new Map<string, number>();
+  const waitPolls: WaitPoll[] = [];
   const temporaryReturnReceipts = new Map<
     string,
     TemporaryReturnReceipt
@@ -1449,6 +1489,23 @@ export function aggregateReservedConversationEntries(
     }
     if (reserved.kind === "edit_budget") {
       editBudgetEvents.push(reserved.entry.data);
+      continue;
+    }
+    if (reserved.kind === "wait_poll") {
+      const { runId, count } = reserved.entry.data;
+      if (runSettlements.has(runId)) {
+        throw new Error(
+          `Piweb wait poll cannot follow settlement for runId ${runId}`,
+        );
+      }
+      const expected = (waitPollCounts.get(runId) ?? 0) + 1;
+      if (count !== expected) {
+        throw new Error(
+          `Invalid piweb wait-poll sequence for runId ${runId}: expected ${expected}, got ${count}`,
+        );
+      }
+      waitPollCounts.set(runId, count);
+      waitPolls.push(reserved.entry.data);
       continue;
     }
     if (reserved.kind === "temporary_return_receipt") {
@@ -1616,6 +1673,7 @@ export function aggregateReservedConversationEntries(
     messageDeliveryReceipts: [...messageDeliveryReceipts.values()],
     runSettlements: [...runSettlements.values()],
     editBudgetEvents,
+    waitPolls,
     temporaryReturnReceipts: [...temporaryReturnReceipts.values()],
     metaOperations: [...metaOperations.values()],
     ...(compactionThreshold === undefined

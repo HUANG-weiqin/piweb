@@ -571,14 +571,13 @@ describe("createMetaTools", () => {
     expect(fake.abortSession).not.toHaveBeenCalled();
   });
 
-  it("documents checkpoint as not proof and requires the same IDs", () => {
+  it("documents bounded polling as not proof of completion", () => {
     const wait = tool(
       createMetaTools(sourceConversationId, service(), true),
       "wait_for_session",
     );
     expect(wait.description).toContain("{\"outcome\":\"checkpoint\"}");
-    expect(wait.description).toContain(
-      "call again with the same conversationId+runId",
-    );
+    expect(wait.description).toContain("{\"outcome\":\"wait_exhausted\"}");
+    expect(wait.description).toContain("Neither result proves target completion");
   });
 });
