@@ -3,12 +3,13 @@ import {
   lstat,
   mkdtemp,
   readFile,
+  rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   MAX_INBOX_MESSAGES_PER_PROJECT,
   MAX_INBOX_MESSAGES_PER_TARGET,
@@ -20,12 +21,27 @@ import {
 } from "./project-inbox.js";
 
 const timestamp = "2026-07-19T10:00:00.000Z";
+const temporaryDirectories: string[] = [];
+
+async function temporaryDirectory(prefix: string): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), prefix));
+  temporaryDirectories.push(directory);
+  return directory;
+}
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryDirectories.splice(0).map((directory) =>
+      rm(directory, { force: true, recursive: true }),
+    ),
+  );
+});
 
 async function temporaryInbox(prefix: string): Promise<{
   directory: string;
   inbox: ProjectInbox;
 }> {
-  const root = await mkdtemp(join(tmpdir(), prefix));
+  const root = await temporaryDirectory(prefix);
   const directory = join(root, "inbox");
   return {
     directory,
@@ -428,9 +444,7 @@ describe("ProjectInbox", () => {
 
   it("fails closed on linked entries, malformed files, and filename identity mismatch", async () => {
     const linked = await temporaryInbox("piweb-inbox-linked-");
-    const outside = await mkdtemp(
-      join(tmpdir(), "piweb-inbox-outside-"),
-    );
+    const outside = await temporaryDirectory("piweb-inbox-outside-");
     await symlink(
       outside,
       join(linked.directory, `${randomUUID()}.json`),
@@ -487,8 +501,8 @@ describe("ProjectInbox", () => {
     const linked = await temporaryInbox(
       "piweb-inbox-tombstone-linked-",
     );
-    const outside = await mkdtemp(
-      join(tmpdir(), "piweb-inbox-tombstone-outside-"),
+    const outside = await temporaryDirectory(
+      "piweb-inbox-tombstone-outside-",
     );
     await symlink(
       outside,
@@ -587,8 +601,8 @@ describe("ProjectInbox", () => {
   });
 
   it("rejects a linked inbox directory", async () => {
-    const root = await mkdtemp(join(tmpdir(), "piweb-inbox-dir-link-"));
-    const outside = await mkdtemp(join(tmpdir(), "piweb-inbox-dir-target-"));
+    const root = await temporaryDirectory("piweb-inbox-dir-link-");
+    const outside = await temporaryDirectory("piweb-inbox-dir-target-");
     const link = join(root, "inbox");
     await symlink(outside, link, process.platform === "win32" ? "junction" : "dir");
 

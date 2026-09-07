@@ -1,10 +1,26 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-coding-agent";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { installCompactionBoundary } from "./compaction-boundary.js";
+
+const temporaryDirectories: string[] = [];
+
+async function temporaryDirectory(prefix: string): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), prefix));
+  temporaryDirectories.push(directory);
+  return directory;
+}
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryDirectories.splice(0).map((directory) =>
+      rm(directory, { force: true, recursive: true }),
+    ),
+  );
+});
 
 function message(value: unknown): AgentMessage {
   return value as AgentMessage;
@@ -79,7 +95,7 @@ describe("installCompactionBoundary", () => {
   ] as const)(
     "rewinds a %s boundary across card metadata and a custom message",
     async (_label, proposedAt) => {
-      const cwd = await mkdtemp(join(tmpdir(), "piweb-compaction-boundary-"));
+      const cwd = await temporaryDirectory("piweb-compaction-boundary-");
       const manager = SessionManager.create(cwd, cwd);
       const assistantId = manager.appendMessage(assistantToolCall("tool-1"));
       const metadataId = manager.appendCustomEntry(

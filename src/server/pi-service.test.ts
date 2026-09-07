@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, realpath } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -13,7 +13,7 @@ import type {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { InMemoryCredentialStore, type CredentialStore } from "@earendil-works/pi-ai";
 import {
   MAX_PROJECT_CONVERSATIONS,
@@ -52,6 +52,21 @@ const AUTH_A = "00000000-0000-4000-8000-0000000000a1";
 const AUTH_B = "00000000-0000-4000-8000-0000000000b2";
 const COMMAND_A = "b55e4225-e07f-4874-b760-015f7982d999";
 const COMMAND_B = "8ee64aa3-c8a8-4e21-b521-66029ce3673b";
+const temporaryDirectories: string[] = [];
+
+async function temporaryDirectory(prefix: string): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), prefix));
+  temporaryDirectories.push(directory);
+  return directory;
+}
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryDirectories.splice(0).map((directory) =>
+      rm(directory, { force: true, recursive: true }),
+    ),
+  );
+});
 
 interface FakeSession extends AgentSession {
   abortCalls: number;
@@ -379,7 +394,7 @@ async function coordinatedConnectionHarness(
   monotonicNow?: () => number,
 ) {
   const cwd = await realpath(
-    await mkdtemp(join(tmpdir(), "piweb-coordinated-")),
+    await temporaryDirectory("piweb-coordinated-"),
   );
   const model = {
     provider: "test",
@@ -899,7 +914,9 @@ describe("PiConnection coordinated controls", () => {
   );
 
   it("fails closed when the shared coordination provider cannot be acquired", async () => {
-    const cwd = await realpath(await mkdtemp(join(tmpdir(), "piweb-coordination-failure-")));
+    const cwd = await realpath(
+      await temporaryDirectory("piweb-coordination-failure-"),
+    );
     const runtime = new FakeRuntime();
     const connection = new PiConnection(
       () => undefined,
@@ -2507,7 +2524,7 @@ describe("PiConnection coordinated project view", () => {
   it("lets a newer initialize attach while a stale recent scan continues", async () => {
     const harness = await coordinatedConnectionHarness();
     const currentCwd = await realpath(
-      await mkdtemp(join(tmpdir(), "piweb-current-initialize-scan-")),
+      await temporaryDirectory("piweb-current-initialize-scan-"),
     );
     const scanStarted = deferred();
     const releaseScan = deferred();
@@ -2558,7 +2575,7 @@ describe("PiConnection coordinated project view", () => {
   it("lets a newer initialize attach while a stale model catalog opens", async () => {
     const harness = await coordinatedConnectionHarness();
     const currentCwd = await realpath(
-      await mkdtemp(join(tmpdir(), "piweb-current-initialize-catalog-")),
+      await temporaryDirectory("piweb-current-initialize-catalog-"),
     );
     const catalogStarted = deferred();
     const releaseCatalog = deferred();
@@ -2613,7 +2630,7 @@ describe("PiConnection coordinated project view", () => {
   it("lets a newer initialize attach while a stale actor activation continues", async () => {
     const harness = await coordinatedConnectionHarness();
     const currentCwd = await realpath(
-      await mkdtemp(join(tmpdir(), "piweb-current-initialize-actor-")),
+      await temporaryDirectory("piweb-current-initialize-actor-"),
     );
     const activationStarted = deferred();
     const releaseActivation = deferred();
@@ -2707,7 +2724,7 @@ describe("PiConnection coordinated project view", () => {
   it("lets a newer initialize attach while a stale recent write continues", async () => {
     const harness = await coordinatedConnectionHarness();
     const currentCwd = await realpath(
-      await mkdtemp(join(tmpdir(), "piweb-current-initialize-recent-write-")),
+      await temporaryDirectory("piweb-current-initialize-recent-write-"),
     );
     const writeStarted = deferred();
     const releaseWrite = deferred();
@@ -3724,7 +3741,7 @@ describe("PiConnection coordinated project view", () => {
   it("switches projects without waiting for a conversation role rebuild", async () => {
     const harness = await coordinatedConnectionHarness();
     const cwdB = await realpath(
-      await mkdtemp(join(tmpdir(), "piweb-role-switch-second-")),
+      await temporaryDirectory("piweb-role-switch-second-"),
     );
     const activationStarted = deferred();
     const finishActivation = deferred();
@@ -5222,7 +5239,7 @@ describe("PiConnection coordinated project view", () => {
   it("keeps runs self-contained while switching between projects", async () => {
     const harness = await coordinatedConnectionHarness();
     const cwdB = await realpath(
-      await mkdtemp(join(tmpdir(), "piweb-coordinated-second-")),
+      await temporaryDirectory("piweb-coordinated-second-"),
     );
     const startedA = deferred();
     const finishA = deferred();

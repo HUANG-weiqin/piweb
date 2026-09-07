@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import {
   InMemoryCredentialStore,
   InMemoryModelsStore,
@@ -22,13 +22,29 @@ import {
   type InlineExtension,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LoopList } from "../shared/protocol.js";
 import { PiRuntime } from "./pi-runtime.js";
 import { projectConversationHistory } from "./conversation-history.js";
 import type { ComputerToolResult, WindowsDesktopAdapter } from "./computer-use.js";
 
 initTheme();
+
+const temporaryDirectories: string[] = [];
+
+async function temporaryDirectory(prefix: string): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), prefix));
+  temporaryDirectories.push(directory);
+  return directory;
+}
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryDirectories.splice(0).map((directory) =>
+      rm(directory, { force: true, recursive: true }),
+    ),
+  );
+});
 
 function deferred(): { promise: Promise<void>; resolve(): void } {
   let resolve!: () => void;
@@ -180,7 +196,7 @@ async function testRuntime(
 
 describe("PiRuntime session ownership", () => {
   it("installs service tier below the official session request decorator", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-service-tier-"));
+    const cwd = await temporaryDirectory("piweb-runtime-service-tier-");
     const runtime = await testRuntime(() => []);
     const created = await runtime.createSession(cwd, {
       getServiceTier: () => "priority",
@@ -228,7 +244,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("does not resolve an explicit compaction model when Pi's manual hook supplies the summary", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-compaction-hook-"));
+    const cwd = await temporaryDirectory("piweb-runtime-compaction-hook-");
     const manager = SessionManager.inMemory(cwd);
     manager.appendMessage({
       role: "user",
@@ -295,7 +311,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("routes real manual and automatic default compaction through the frozen target request", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-compaction-default-"));
+    const cwd = await temporaryDirectory("piweb-runtime-compaction-default-");
     const manager = SessionManager.inMemory(cwd);
     const appendMessages = () => {
       manager.appendMessage({
@@ -547,7 +563,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("recalculates context usage at each completed tool-turn boundary", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-turn-boundary-"));
+    const cwd = await temporaryDirectory("piweb-runtime-turn-boundary-");
     const checks: unknown[] = [];
     let upstreamReceiver: unknown;
     let originalCreateLoopConfig: unknown;
@@ -607,7 +623,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("captures the exact synchronous user message queued through agent.steer", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-steering-identity-"));
+    const cwd = await temporaryDirectory("piweb-runtime-steering-identity-");
     const runtime = await testRuntime(() => []);
     const created = await runtime.createSession(cwd);
     const message: Parameters<typeof created.session.agent.steer>[0] = {
@@ -626,7 +642,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("owns the supplied manager compaction boundary for the session lifetime", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-compaction-boundary-"));
+    const cwd = await temporaryDirectory("piweb-runtime-compaction-boundary-");
     const manager = SessionManager.inMemory(cwd);
     const nativeAppendCompaction = manager.appendCompaction;
     const runtime = await testRuntime(() => []);
@@ -641,7 +657,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("projects live context-budget telemetry without creating a trailing user turn", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-context-budget-"));
+    const cwd = await temporaryDirectory("piweb-runtime-context-budget-");
     const manager = SessionManager.inMemory(cwd);
     const projectMessage = {
       role: "custom" as const,
@@ -743,7 +759,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("projects the latest active LoopList without telemetry and restores the converter", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-work-hint-"));
+    const cwd = await temporaryDirectory("piweb-runtime-work-hint-");
     let originalConverter: unknown;
     const runtime = await testRuntime(
       () => [],
@@ -826,7 +842,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("activates Pi's structured read-only tools by default", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-read-tools-"));
+    const cwd = await temporaryDirectory("piweb-runtime-read-tools-");
     const runtime = await testRuntime(() => []);
 
     const created = await runtime.createSession(cwd);
@@ -844,7 +860,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("builds read-only Bash with the effective SettingsManager shell path", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-read-only-shell-path-"));
+    const cwd = await temporaryDirectory("piweb-runtime-read-only-shell-path-");
     const configuredShell = join(cwd, "configured-bash.exe");
     const settings = SettingsManager.inMemory();
     settings.setShellPath(configuredShell);
@@ -871,7 +887,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("projects only safe native and host tools for read-only sessions", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-read-only-tools-"));
+    const cwd = await temporaryDirectory("piweb-runtime-read-only-tools-");
     const runtime = await testRuntime(() => [
       (pi) => {
         const originalRead = createReadTool(cwd);
@@ -926,7 +942,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("keeps read-only projection across extension tool refreshes", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-dynamic-read-only-tools-"));
+    const cwd = await temporaryDirectory("piweb-runtime-dynamic-read-only-tools-");
     const staticMarker = "STATIC_SHADOW_TOOL_MARKER";
     const startMarker = "SESSION_START_SHADOW_TOOL_MARKER";
     const dynamicMarker = "DYNAMIC_SHADOW_TOOL_MARKER";
@@ -983,7 +999,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("reports an extension that shadows read as a non-builtin tool", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-shadowed-read-"));
+    const cwd = await temporaryDirectory("piweb-runtime-shadowed-read-");
     const runtime = await testRuntime(() => [
       (pi) => {
         const originalRead = createReadTool(cwd);
@@ -1026,7 +1042,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("installs tool result compression without changing the executed result", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-tool-result-compression-"));
+    const cwd = await temporaryDirectory("piweb-runtime-tool-result-compression-");
     const runtime = await testRuntime(() => []);
     const originalText = Array.from(
       { length: 160 },
@@ -1073,7 +1089,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("reports the original execution to completion accounting when an extension result hook fails", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-tool-completion-error-"));
+    const cwd = await temporaryDirectory("piweb-runtime-tool-completion-error-");
     const extensionError = new Error("extension result hook failed");
     const runtime = await testRuntime(
       () => [],
@@ -1107,7 +1123,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("sets steeringMode=all so queued prompts drain in one model turn", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-steering-mode-"));
+    const cwd = await temporaryDirectory("piweb-runtime-steering-mode-");
     const runtime = await testRuntime(() => []);
 
     const created = await runtime.createSession(cwd);
@@ -1117,7 +1133,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("defaults to an in-memory manager and passes an explicit manager through", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-manager-"));
+    const cwd = await temporaryDirectory("piweb-runtime-manager-");
     const managers: SessionManager[] = [];
     const runtime = await testRuntime(
       () => [],
@@ -1140,7 +1156,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("keeps extension model changes within the configured fixed identity through shutdown", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-fixed-extension-model-"));
+    const cwd = await temporaryDirectory("piweb-runtime-fixed-extension-model-");
     const manager = SessionManager.inMemory(cwd);
     let nativeSetModel: AgentSession["setModel"];
     let shutdownDifferentModelError: string | undefined;
@@ -1237,7 +1253,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("gives extension contexts a defensive readonly session manager facade", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-extension-manager-"));
+    const cwd = await temporaryDirectory("piweb-runtime-extension-manager-");
     const manager = SessionManager.inMemory(cwd);
     manager.appendCustomEntry("readonly-facade-test", {
       nested: { value: "original" },
@@ -1322,7 +1338,7 @@ describe("PiRuntime session ownership", () => {
   ] as const)(
     "constructs a fixed %s session with transport resolved from %s/%s",
     async (provider, api, transport, expectedTransport) => {
-      const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-transport-"));
+      const cwd = await temporaryDirectory("piweb-runtime-transport-");
       const fixture = await fixedModelTransportRuntime(transport, provider, api);
 
       const created = await fixture.runtime.createSession(cwd, {
@@ -1339,7 +1355,7 @@ describe("PiRuntime session ownership", () => {
 
 
   it("passes a fixed authenticated model and workbench tools through session creation", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-role-"));
+    const cwd = await temporaryDirectory("piweb-runtime-role-");
     const tools = [workbenchTool(cwd)];
     let received: Parameters<typeof createAgentSessionFromServices>[0] | undefined;
     const runtime = await testRuntime(
@@ -1384,7 +1400,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("exposes computer only to a full-access exact-run session without loading Windows FFI", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-computer-"));
+    const cwd = await temporaryDirectory("piweb-runtime-computer-");
     const received: Array<Parameters<typeof createAgentSessionFromServices>[0]> = [];
     const runtime = await testRuntime(
       () => [],
@@ -1420,7 +1436,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("rejects a non-vision computer invocation before adapter creation", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-computer-novision-"));
+    const cwd = await temporaryDirectory("piweb-runtime-computer-novision-");
     let factoryCalls = 0;
     const runtime = await testRuntime(
       () => [],
@@ -1465,7 +1481,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("expires an authorized frame before the next provider decision when its tool call never executes", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-computer-frame-"));
+    const cwd = await temporaryDirectory("piweb-runtime-computer-frame-");
     const adapter: WindowsDesktopAdapter = {
       capture: async () => ({
         png: Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10]),
@@ -1586,7 +1602,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("loads project providers before resolving a fixed role model and appends the role prompt", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-services-role-"));
+    const cwd = await temporaryDirectory("piweb-runtime-services-role-");
     const credentialStore = new InMemoryCredentialStore();
     const tools = [workbenchTool(cwd)];
     let received: Parameters<typeof createAgentSessionFromServices>[0] | undefined;
@@ -1651,7 +1667,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("loads a project model catalog without creating or activating an AgentSession", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-project-catalog-"));
+    const cwd = await temporaryDirectory("piweb-runtime-project-catalog-");
     const credentialStore = new InMemoryCredentialStore();
     let catalogRefreshes = 0;
     let sessionCreations = 0;
@@ -1734,7 +1750,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("fails closed before session creation when the fixed model is missing or unauthenticated", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-role-model-guard-"));
+    const cwd = await temporaryDirectory("piweb-runtime-role-model-guard-");
     let factoryCalls = 0;
     const runtime = await testRuntime(
       () => [],
@@ -1765,7 +1781,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("tears down when session creation falls back from the fixed role model", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-role-fallback-"));
+    const cwd = await temporaryDirectory("piweb-runtime-role-fallback-");
     let disposals = 0;
     const runtime = await testRuntime(
       () => [],
@@ -1803,8 +1819,8 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("resolves project trust before loading protected project resources", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-trust-project-"));
-    const agentDir = await mkdtemp(join(tmpdir(), "piweb-runtime-trust-agent-"));
+    const cwd = await temporaryDirectory("piweb-runtime-trust-project-");
+    const agentDir = await temporaryDirectory("piweb-runtime-trust-agent-");
     await mkdir(join(cwd, ".pi"), { recursive: true });
     await writeFile(join(cwd, ".pi", "settings.json"), "{}\n", "utf8");
     const remembered = new Map<string, boolean>();
@@ -1856,8 +1872,8 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("fails project trust closed when protected resources have no interactive decision", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-untrusted-project-"));
-    const agentDir = await mkdtemp(join(tmpdir(), "piweb-runtime-untrusted-agent-"));
+    const cwd = await temporaryDirectory("piweb-runtime-untrusted-project-");
+    const agentDir = await temporaryDirectory("piweb-runtime-untrusted-agent-");
     await mkdir(join(cwd, ".pi"), { recursive: true });
     await writeFile(join(cwd, ".pi", "settings.json"), "{}\n", "utf8");
     const credentialStore = new InMemoryCredentialStore();
@@ -1887,7 +1903,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("registers project providers before restoring a persisted model", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-restore-provider-"));
+    const cwd = await temporaryDirectory("piweb-runtime-restore-provider-");
     const credentialStore = new InMemoryCredentialStore();
     const manager = SessionManager.inMemory(cwd);
     manager.appendModelChange("restored-provider", "restored-model");
@@ -1932,7 +1948,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("releases the isolated registry when two-stage session creation fails", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-create-failure-"));
+    const cwd = await temporaryDirectory("piweb-runtime-create-failure-");
     const manager = SessionManager.inMemory(cwd);
     const nativeAppendCompaction = manager.appendCompaction;
     const credentialStore = new InMemoryCredentialStore();
@@ -2070,7 +2086,7 @@ describe("PiRuntime session ownership", () => {
     toolCallGate,
     contextBudget,
   }) => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-assembly-failure-"));
+    const cwd = await temporaryDirectory("piweb-runtime-assembly-failure-");
     let disposals = 0;
     let ownerRefreshes = 0;
     let originalConverter: unknown;
@@ -2117,8 +2133,8 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("binds extension lifecycle, surfaces errors, and isolates project providers", async () => {
-    const cwdA = await mkdtemp(join(tmpdir(), "piweb-runtime-a-"));
-    const cwdB = await mkdtemp(join(tmpdir(), "piweb-runtime-b-"));
+    const cwdA = await temporaryDirectory("piweb-runtime-a-");
+    const cwdB = await temporaryDirectory("piweb-runtime-b-");
     let starts = 0;
     let shutdowns = 0;
     const runtime = await testRuntime((cwd) => cwd === cwdA
@@ -2168,7 +2184,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("binds portable extension UI in rpc mode and fails closed for host-owned session actions", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-extension-ui-"));
+    const cwd = await temporaryDirectory("piweb-runtime-extension-ui-");
     const observations: unknown[] = [];
     const runtime = await testRuntime(() => [
       (pi: ExtensionAPI) => {
@@ -2228,8 +2244,8 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("fails initialization when an extension requests a process-global provider", async () => {
-    const cwdA = await mkdtemp(join(tmpdir(), "piweb-runtime-global-"));
-    const cwdB = await mkdtemp(join(tmpdir(), "piweb-runtime-clean-"));
+    const cwdA = await temporaryDirectory("piweb-runtime-global-");
+    const cwdB = await temporaryDirectory("piweb-runtime-clean-");
     const runtime = await testRuntime((cwd) => cwd === cwdA
       ? [
           (pi) => {
@@ -2261,7 +2277,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("rejects native provider registrations before session creation", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-unsafe-native-"));
+    const cwd = await temporaryDirectory("piweb-runtime-unsafe-native-");
     const runtime = await PiRuntime.create({
       credentialStore: new InMemoryCredentialStore(),
       modelsStore: new InMemoryModelsStore(),
@@ -2279,7 +2295,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("rejects refreshModels provider registrations before session creation", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-unsafe-refresh-"));
+    const cwd = await temporaryDirectory("piweb-runtime-unsafe-refresh-");
     const runtime = await testRuntime(() => [
       (pi) => {
         pi.registerProvider("unsafe-refresh", {
@@ -2330,8 +2346,8 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("does not let a long configuration flow block session creation or disposal", async () => {
-    const cwdA = await mkdtemp(join(tmpdir(), "piweb-runtime-lock-a-"));
-    const cwdB = await mkdtemp(join(tmpdir(), "piweb-runtime-lock-b-"));
+    const cwdA = await temporaryDirectory("piweb-runtime-lock-a-");
+    const cwdB = await temporaryDirectory("piweb-runtime-lock-b-");
     const runtime = await testRuntime(() => []);
     const first = await runtime.createSession(cwdA);
     await first.activateExtensions();
@@ -2361,7 +2377,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("does not rebind a disposed session when an in-flight refresh settles", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-dispose-refresh-"));
+    const cwd = await temporaryDirectory("piweb-runtime-dispose-refresh-");
     const runtime = await testRuntime(() => [
       (pi) => {
         pi.registerProvider("dispose-refresh", {
@@ -2395,8 +2411,8 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("refreshes every model registry and notifies after one registry fails", async () => {
-    const cwdA = await mkdtemp(join(tmpdir(), "piweb-runtime-refresh-a-"));
-    const cwdB = await mkdtemp(join(tmpdir(), "piweb-runtime-refresh-b-"));
+    const cwdA = await temporaryDirectory("piweb-runtime-refresh-a-");
+    const cwdB = await temporaryDirectory("piweb-runtime-refresh-b-");
     const runtime = await testRuntime(() => []);
     const first = await runtime.createSession(cwdA);
     const second = await runtime.createSession(cwdB);
@@ -2430,7 +2446,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("snapshots extension provider config before the extension can mutate it", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-snapshot-"));
+    const cwd = await temporaryDirectory("piweb-runtime-snapshot-");
     let retained: Parameters<ExtensionAPI["registerProvider"]>[1] | undefined;
     const runtime = await testRuntime(() => [
       (pi) => {
@@ -2470,7 +2486,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("rebinds the selected model object after registry refresh", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-model-refresh-"));
+    const cwd = await temporaryDirectory("piweb-runtime-model-refresh-");
     const runtime = await testRuntime(() => [
       (pi) => {
         pi.registerProvider("refreshable", {
@@ -2532,7 +2548,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("reconciles a model refreshed while the session factory is still resolving", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-bind-race-"));
+    const cwd = await temporaryDirectory("piweb-runtime-bind-race-");
     const factoryReached = deferred();
     const factoryGate = deferred();
     let nativeSession: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
@@ -2580,7 +2596,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("does not emit shutdown for a prepared session that was never activated", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-unactivated-"));
+    const cwd = await temporaryDirectory("piweb-runtime-unactivated-");
     let starts = 0;
     let shutdowns = 0;
     const runtime = await testRuntime(() => [
@@ -2601,7 +2617,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("surfaces extension load errors after the session becomes active", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-load-error-"));
+    const cwd = await temporaryDirectory("piweb-runtime-load-error-");
     const runtime = await testRuntime(() => [
       () => {
         throw new Error("extension failed to load");
@@ -2621,7 +2637,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("rejects disposal when a shutdown handler fails but still releases the session", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-shutdown-error-"));
+    const cwd = await temporaryDirectory("piweb-runtime-shutdown-error-");
     let shutdowns = 0;
     const runtime = await testRuntime(() => [
       (pi) => {
@@ -2641,7 +2657,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("continues teardown when extension error listener registration fails", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-listener-cleanup-"));
+    const cwd = await temporaryDirectory("piweb-runtime-listener-cleanup-");
     let aborts = 0;
     let waits = 0;
     let disposals = 0;
@@ -2697,7 +2713,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("runs extension tool hooks before the host gate and forces sequential execution", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-tool-gate-"));
+    const cwd = await temporaryDirectory("piweb-runtime-tool-gate-");
     const runtime = await testRuntime(() => [
       (pi) => {
         pi.on("tool_call", (event) => {
@@ -2769,7 +2785,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("skips extension hooks when the tool signal is missing or already aborted", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-tool-abort-"));
+    const cwd = await temporaryDirectory("piweb-runtime-tool-abort-");
     let extensionCalls = 0;
     let gateCalls = 0;
     const runtime = await testRuntime(() => [
@@ -2817,7 +2833,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("deep-freezes extension-mutated JSON args before the host gate", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-tool-freeze-"));
+    const cwd = await temporaryDirectory("piweb-runtime-tool-freeze-");
     const mutationAttempted = deferred();
     let retained: {
       path: string;
@@ -2894,7 +2910,7 @@ describe("PiRuntime session ownership", () => {
   });
 
   it("blocks non-JSON or unstable tool arguments before the host gate", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-tool-json-"));
+    const cwd = await temporaryDirectory("piweb-runtime-tool-json-");
     let gateCalls = 0;
     const runtime = await testRuntime(() => []);
     const created = await runtime.createSession(cwd, {

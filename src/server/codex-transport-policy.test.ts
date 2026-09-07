@@ -1,10 +1,26 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isContextOverflow, type AssistantMessage } from "@earendil-works/pi-ai";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { applyCodexAutoTransportPolicy } from "./codex-transport-policy.js";
+
+const temporaryDirectories: string[] = [];
+
+async function temporaryDirectory(prefix: string): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), prefix));
+  temporaryDirectories.push(directory);
+  return directory;
+}
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryDirectories.splice(0).map((directory) =>
+      rm(directory, { force: true, recursive: true }),
+    ),
+  );
+});
 
 function errorMessage(errorMessage: string): AssistantMessage {
   return {
@@ -65,8 +81,8 @@ describe("applyCodexAutoTransportPolicy", () => {
   );
 
   it("does not persist its disk-backed override", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "piweb-codex-policy-cwd-"));
-    const agentDir = await mkdtemp(join(tmpdir(), "piweb-codex-policy-agent-"));
+    const cwd = await temporaryDirectory("piweb-codex-policy-cwd-");
+    const agentDir = await temporaryDirectory("piweb-codex-policy-agent-");
     const settingsPath = join(agentDir, "settings.json");
     await writeFile(settingsPath, '{"transport":"auto"}\n', "utf8");
     const settings = SettingsManager.create(cwd, agentDir);
