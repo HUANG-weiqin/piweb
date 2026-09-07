@@ -1779,10 +1779,10 @@ describe("PiConnection coordinated controls", () => {
             id: "wait-tool",
             name: "wait_for_session",
             arguments: {
-              conversationId: targetState.conversationId,
-              runId: RUN_B,
-              singleWaitCommitment:
-                "This peer result is required before the integration can continue.",
+              targets: [{
+                conversationId: targetState.conversationId,
+                runId: RUN_B,
+              }],
             },
           }],
           stopReason: "toolUse",
@@ -1794,10 +1794,10 @@ describe("PiConnection coordinated controls", () => {
           toolCallId: "wait-tool",
           toolName: "wait_for_session",
           args: {
-            conversationId: targetState.conversationId,
-            runId: RUN_B,
-            singleWaitCommitment:
-              "This peer result is required before the integration can continue.",
+            targets: [{
+              conversationId: targetState.conversationId,
+              runId: RUN_B,
+            }],
           },
         }));
         const execute = (waitTool as unknown as {
@@ -1807,10 +1807,10 @@ describe("PiConnection coordinated controls", () => {
           waitTool,
           "wait-tool",
           {
-            conversationId: targetState.conversationId,
-            runId: RUN_B,
-            singleWaitCommitment:
-              "This peer result is required before the integration can continue.",
+            targets: [{
+              conversationId: targetState.conversationId,
+              runId: RUN_B,
+            }],
           },
           undefined,
           undefined,

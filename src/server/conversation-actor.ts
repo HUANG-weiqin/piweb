@@ -288,7 +288,6 @@ export interface ConversationWaitingTarget {
   readonly runId: string;
 }
 
-export type ConversationWaitAttemptMode = "exact" | "aggregate";
 export type ConversationWaitAttemptStatus = "open" | "delivering" | "terminal";
 
 /** Immutable winner reported once when a local wait attempt terminalizes. */
@@ -312,7 +311,6 @@ export interface ConversationWaitAttempt {
 }
 
 export interface ConversationWaitAttemptSnapshot {
-  readonly mode: ConversationWaitAttemptMode;
   readonly targets: readonly ConversationWaitingTarget[];
   readonly status: ConversationWaitAttemptStatus;
 }
@@ -325,7 +323,6 @@ export interface CurrentConversationWaitAttempt
 }
 
 export interface InstallConversationWaitAttempt {
-  readonly mode: ConversationWaitAttemptMode;
   readonly targets: readonly ConversationWaitingTarget[];
   /** Synchronously releases coordinator-owned registrations after terminal CAS. */
   readonly onTerminal?: (cause: ConversationWaitAttemptTerminalCause) => void;
@@ -406,7 +403,6 @@ interface ReloadStopRequest {
 
 interface ActiveWaitAttempt {
   readonly handle: ConversationWaitAttempt;
-  readonly mode: ConversationWaitAttemptMode;
   /** Frozen target snapshot; this is the only target owner for a wait. */
   readonly targets: readonly ConversationWaitingTarget[];
   status: ConversationWaitAttemptStatus;
@@ -526,7 +522,6 @@ function snapshotWaitAttempt(
   attempt: ActiveWaitAttempt,
 ): ConversationWaitAttemptSnapshot {
   return Object.freeze({
-    mode: attempt.mode,
     targets: cloneWaitTargets(attempt.targets),
     status: attempt.status,
   });
@@ -562,18 +557,11 @@ function cloneActivity(activity: ConversationActivity): ConversationActivity {
     case "cancelling":
       return { kind: activity.kind, runId: activity.runId };
     case "waiting":
-      return "targetCount" in activity
-        ? {
-            kind: "waiting",
-            runId: activity.runId,
-            targetCount: activity.targetCount,
-          }
-        : {
-            kind: "waiting",
-            runId: activity.runId,
-            targetConversationId: activity.targetConversationId,
-            targetRunId: activity.targetRunId,
-          };
+      return {
+        kind: "waiting",
+        runId: activity.runId,
+        targetCount: activity.targetCount,
+      };
   }
 }
 
@@ -1562,21 +1550,12 @@ export class ConversationActor {
       case "running":
       case "cancelling":
         return { kind: state.phase, runId: ticket.id };
-      case "waiting": {
-        const { attempt } = state;
-        return attempt.mode === "aggregate"
-          ? {
-              kind: "waiting",
-              runId: ticket.id,
-              targetCount: attempt.targets.length,
-            }
-          : {
-              kind: "waiting",
-              runId: ticket.id,
-              targetConversationId: attempt.targets[0]!.conversationId,
-              targetRunId: attempt.targets[0]!.runId,
-            };
-      }
+      case "waiting":
+        return {
+          kind: "waiting",
+          runId: ticket.id,
+          targetCount: state.attempt.targets.length,
+        };
     }
   }
 
@@ -2355,16 +2334,9 @@ export class ConversationActor {
     if (this.usedRunIds.has(input.runId)) {
       throw new Error("Run ID was already used in this conversation actor");
     }
-    const branch = this.sessionManager.getBranch();
-    const branchReserved = aggregateReservedConversationEntries(branch);
-    const hasLegacyWaitPoll = branchReserved.waitPolls.some(
-      (poll) => poll.runId === input.runId,
+    const branchReserved = aggregateReservedConversationEntries(
+      this.sessionManager.getBranch(),
     );
-    if (!input.recovered && hasLegacyWaitPoll) {
-      throw new Error(
-        "A fresh run cannot reuse a runId with a durable wait-poll journal",
-      );
-    }
     const editBudget = input.recovered
       ? restoreEditBudgetLedger(
         branchReserved.editBudgetEvents,
@@ -2447,15 +2419,11 @@ export class ConversationActor {
     input: InstallConversationWaitAttempt,
   ): ConversationWaitAttempt {
     const ticket = this.requireOwnedRunningTicket(ownership);
-    if (
-      input.targets.length === 0
-      || (input.mode === "exact" && input.targets.length !== 1)
-    ) {
-      throw new Error("A wait attempt must have its required frozen targets");
+    if (input.targets.length === 0) {
+      throw new Error("A wait attempt must have at least one frozen target");
     }
     const attempt: ActiveWaitAttempt = {
       handle: Object.freeze({ [WAIT_ATTEMPT]: Symbol(ticket.id) }),
-      mode: input.mode,
       targets: cloneWaitTargets(input.targets),
       status: "open",
       ...(input.onTerminal === undefined ? {} : { onTerminal: input.onTerminal }),

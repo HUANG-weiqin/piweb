@@ -368,7 +368,7 @@ describe("createMetaTools", () => {
     );
   });
 
-  it("passes exact wait and abort identities without inventing lifecycle behavior", async () => {
+  it("passes wait targets and abort identities without inventing lifecycle behavior", async () => {
     const fake = service();
     const tools = createMetaTools(sourceConversationId, fake, true);
     const signal = new AbortController().signal;
@@ -379,7 +379,7 @@ describe("createMetaTools", () => {
 
     await tool(tools, "wait_for_session").execute(
       "wait-1",
-      target,
+      { targets: [target] },
       signal,
       undefined,
       {} as never,
@@ -394,7 +394,7 @@ describe("createMetaTools", () => {
 
     expect(fake.waitForSession).toHaveBeenCalledWith(
       sourceConversationId,
-      target,
+      { targets: [target] },
       signal,
     );
     expect(fake.abortSession).toHaveBeenCalledWith(
@@ -404,36 +404,6 @@ describe("createMetaTools", () => {
         idempotencyKey:
           `${sourceConversationId.length}:${sourceConversationId}:abort-1`,
       },
-    );
-  });
-
-  it("trims and forwards a single-wait commitment", async () => {
-    const fake = service();
-    const wait = tool(
-      createMetaTools(sourceConversationId, fake, true),
-      "wait_for_session",
-    );
-
-    await wait.execute(
-      "committed-wait",
-      {
-        conversationId: targetConversationId,
-        runId: targetRunId,
-        singleWaitCommitment: "  This review is on the critical path.  ",
-      },
-      undefined,
-      undefined,
-      {} as never,
-    );
-
-    expect(fake.waitForSession).toHaveBeenCalledWith(
-      sourceConversationId,
-      {
-        conversationId: targetConversationId,
-        runId: targetRunId,
-        singleWaitCommitment: "This review is on the critical path.",
-      },
-      undefined,
     );
   });
 
@@ -482,7 +452,7 @@ describe("createMetaTools", () => {
     expect(forwarded.targets.every(Object.isFrozen)).toBe(true);
   });
 
-  it("rejects malformed or mixed aggregate waits before lifecycle services", async () => {
+  it("rejects malformed target waits before lifecycle services", async () => {
     const fake = service();
     const wait = tool(
       createMetaTools(sourceConversationId, fake, true),
@@ -490,32 +460,15 @@ describe("createMetaTools", () => {
     );
 
     await expect(wait.execute(
-      "mixed-wait",
+      "missing-targets",
       {
         conversationId: targetConversationId,
         runId: targetRunId,
-        targets: [{
-          conversationId: secondTargetConversationId,
-          runId: secondTargetRunId,
-        }],
       } as never,
       undefined,
       undefined,
       {} as never,
-    )).rejects.toThrow(/cannot mix/i);
-    await expect(wait.execute(
-      "commitment-with-targets",
-      {
-        targets: [{
-          conversationId: secondTargetConversationId,
-          runId: secondTargetRunId,
-        }],
-        singleWaitCommitment: "not valid for aggregate waits",
-      } as never,
-      undefined,
-      undefined,
-      {} as never,
-    )).rejects.toThrow(/cannot mix/i);
+    )).rejects.toThrow(/requires targets/i);
     await expect(wait.execute(
       "empty-wait",
       { targets: [] } as never,
@@ -547,7 +500,7 @@ describe("createMetaTools", () => {
 
     await expect(tool(tools, "wait_for_session").execute(
       "invalid-wait",
-      malformedTarget,
+      { targets: [malformedTarget] },
       undefined,
       undefined,
       {} as never,

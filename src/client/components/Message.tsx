@@ -746,7 +746,6 @@ function MessageView({
           key={`commitment:${block.tool.id}`}
           tool={block.tool}
           observedEditBudgetRemainingFiles={observedEditBudgetRemainingFiles}
-          conversationTitleLookup={conversationTitleLookup}
         />;
       }
       return <ActivityGroup

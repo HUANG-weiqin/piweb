@@ -91,8 +91,7 @@ const conversations: ConversationSummary[] = [
       activity: {
         kind: "waiting",
         runId: "run-layout-review",
-        targetConversationId: ACTIVE_CONVERSATION_ID,
-        targetRunId: "run-visual-fixture",
+        targetCount: 1,
       },
       attention: true,
       createdBy: {
@@ -240,9 +239,10 @@ function createChat(commitmentReason: string): ChatState {
       id: "tool-wait-review",
       name: "wait_for_session",
       args: {
-        conversationId: "22222222-2222-4222-8222-222222222222",
-        runId: "run-layout-review",
-        singleWaitCommitment: "布局审查位于截图验收的关键路径。",
+        targets: [{
+          conversationId: "22222222-2222-4222-8222-222222222222",
+          runId: "run-layout-review",
+        }],
       },
       status: "pending",
     }, {

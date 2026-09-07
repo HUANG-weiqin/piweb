@@ -22,7 +22,6 @@ import {
   createConversationMetaEntry,
   createEditBudgetEntry,
   createRunSettlementEntry,
-  createWaitPollEntry,
 } from "./conversation-meta.js";
 
 function message(value: unknown): AgentMessage {
@@ -343,9 +342,7 @@ describe("projectConversationHistory", () => {
         id: "wait-call",
         name: "wait_for_session",
         arguments: {
-          conversationId: "peer",
-          runId: "peer-run",
-          singleWaitCommitment: "The peer result is on the critical path.",
+          targets: [{ conversationId: "peer", runId: "peer-run" }],
         },
       }],
       stopReason: "toolUse",
@@ -356,9 +353,7 @@ describe("projectConversationHistory", () => {
       toolCallId: "wait-call",
       toolName: "wait_for_session",
       args: {
-        conversationId: "peer",
-        runId: "peer-run",
-        singleWaitCommitment: "The peer result is on the critical path.",
+        targets: [{ conversationId: "peer", runId: "peer-run" }],
       },
       status: "pending",
     }]);
@@ -1005,10 +1000,6 @@ describe("projectConversationHistory", () => {
       kind: "grant",
       runId: randomUUID(),
       fileCount: 1,
-    }));
-    appendReservedCustomEntry(manager, createWaitPollEntry({
-      runId: randomUUID(),
-      count: 1,
     }));
     const resume = createCompactionResumeEntry({
       content:

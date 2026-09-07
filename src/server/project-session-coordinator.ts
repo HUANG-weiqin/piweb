@@ -187,11 +187,6 @@ interface SessionCheckpointWaitResult {
   outcome: "checkpoint";
 }
 
-interface SessionWaitCommitmentRequiredResult {
-  outcome: "single_wait_commitment_required";
-  message: string;
-}
-
 interface SessionTargetUnreachableResult {
   outcome: "target_unreachable";
   conversationId: string;
@@ -199,12 +194,10 @@ interface SessionTargetUnreachableResult {
 }
 
 type SessionWaitResult =
-  | RunSettlement
   | (RunSettlement & { conversationId: string })
   | SessionMessageWaitResult
   | SessionGuidanceWaitResult
   | SessionCheckpointWaitResult
-  | SessionWaitCommitmentRequiredResult
   | SessionTargetUnreachableResult;
 
 interface CompletionWaiter extends WaiterBase {
@@ -2715,9 +2708,7 @@ export class ProjectSessionCoordinator {
   private async waitForSessionTargetsLocal(
     context: ProjectContext,
     sourceConversationId: string,
-    mode: "exact" | "aggregate",
     targets: readonly ConversationWaitingTarget[],
-    singleWaitCommitment: string | undefined,
     signal?: AbortSignal,
   ): Promise<SessionWaitResult> {
     if (targets.some((target) => target.conversationId === sourceConversationId)) {
@@ -2790,10 +2781,10 @@ export class ProjectSessionCoordinator {
         const first = settlements.sort((left, right) =>
           targets.indexOf(left.target) - targets.indexOf(right.target)
         )[0]!;
-        const settlement = cloneSettlement(first.settlement);
-        return mode === "aggregate"
-          ? { conversationId: first.target.conversationId, ...settlement }
-          : settlement;
+        return {
+          conversationId: first.target.conversationId,
+          ...cloneSettlement(first.settlement),
+        };
       }
       for (const target of targets) {
         const actor = context.actors.get(target.conversationId);
@@ -2812,10 +2803,10 @@ export class ProjectSessionCoordinator {
         assertOwnership();
         const durable = inspection.runSettlements.find((entry) => entry.runId === target.runId);
         if (durable) {
-          const settlement = cloneSettlement(durable);
-          return mode === "aggregate"
-            ? { conversationId: target.conversationId, ...settlement }
-            : settlement;
+          return {
+            conversationId: target.conversationId,
+            ...cloneSettlement(durable),
+          };
         }
         if (!inspection.conversationMeta) return { outcome: "target_unreachable", ...target };
         const opened = await raceWithAbort(
@@ -2825,10 +2816,10 @@ export class ProjectSessionCoordinator {
         assertOwnership();
         const openedSettlement = this.findSettlement(context, opened, target.runId);
         if (openedSettlement) {
-          const settlement = cloneSettlement(openedSettlement);
-          return mode === "aggregate"
-            ? { conversationId: target.conversationId, ...settlement }
-            : settlement;
+          return {
+            conversationId: target.conversationId,
+            ...cloneSettlement(openedSettlement),
+          };
         }
         const openedActivity = opened.getActivity();
         if (openedActivity.kind === "idle" || openedActivity.runId !== target.runId) {
@@ -2850,12 +2841,6 @@ export class ProjectSessionCoordinator {
         first.fromRunId,
       );
     }
-    if (mode === "exact" && !singleWaitCommitment?.trim() && !first) {
-      return {
-        outcome: "single_wait_commitment_required",
-        message: "No wait was started. Explain why waiting for only this Agent is better than continuing useful local work or waiting for multiple independent targets, then call wait_for_session again with singleWaitCommitment.",
-      };
-    }
     let handle!: ConversationWaitAttempt;
     let terminalCause: ConversationWaitAttemptTerminalCause | undefined;
     let resolveTerminal!: () => void;
@@ -2873,7 +2858,6 @@ export class ProjectSessionCoordinator {
           return;
         }
         handle = source.installWaitAttempt(ownership, {
-          mode,
           targets,
           onTerminal: (cause) => {
             terminalCause = cause;
@@ -2992,35 +2976,6 @@ export class ProjectSessionCoordinator {
       if (signal && abortListener) signal.removeEventListener("abort", abortListener);
       if (handle) source.cancelWaitAttempt(ownership, handle);
     }
-  }
-
-  private waitForSession(
-    context: ProjectContext,
-    sourceConversationId: string,
-    targetConversationId: string,
-    runId: string,
-    singleWaitCommitment?: string,
-    signal?: AbortSignal,
-  ): Promise<SessionWaitResult> {
-    return this.waitForSessionTargetsLocal(
-      context,
-      sourceConversationId,
-      "exact",
-      Object.freeze([{ conversationId: targetConversationId, runId }]),
-      singleWaitCommitment,
-      signal,
-    );
-  }
-
-  private waitForSessions(
-    context: ProjectContext,
-    sourceConversationId: string,
-    targets: readonly ConversationWaitingTarget[],
-    signal?: AbortSignal,
-  ): Promise<SessionWaitResult> {
-    return this.waitForSessionTargetsLocal(
-      context, sourceConversationId, "aggregate", targets, undefined, signal,
-    );
   }
 
 
@@ -3396,21 +3351,12 @@ export class ProjectSessionCoordinator {
         sourceConversationId,
         input,
         signal,
-      ) => "targets" in input
-        ? this.waitForSessions(
-            context,
-            sourceConversationId,
-            input.targets,
-            signal,
-          )
-        : this.waitForSession(
-            context,
-            sourceConversationId,
-            input.conversationId,
-            input.runId,
-            input.singleWaitCommitment,
-            signal,
-          ),
+      ) => this.waitForSessionTargetsLocal(
+        context,
+        sourceConversationId,
+        input.targets,
+        signal,
+      ),
       abortSession: async (sourceConversationId, input) => {
         if (sourceConversationId === input.conversationId) {
           throw new Error("An Agent cannot abort its own current run");

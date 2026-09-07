@@ -18,15 +18,7 @@ interface MetaToolSessionRef {
   runId: string;
 }
 
-interface MetaToolExactWaitInput extends MetaToolSessionRef {
-  singleWaitCommitment?: string;
-}
-
-type MetaToolWaitInput =
-  | MetaToolExactWaitInput
-  | { targets: readonly MetaToolSessionRef[] };
-
-const MAX_SINGLE_WAIT_COMMITMENT_CHARACTERS = 1_000;
+type MetaToolWaitInput = { targets: readonly MetaToolSessionRef[] };
 
 function formatLocalTimestamp(value: Date): string {
   const offsetMinutes = -value.getTimezoneOffset();
@@ -146,58 +138,27 @@ function assertCanonicalRunId(runId: string): void {
 }
 
 function normalizeWaitInput(input: {
-  conversationId?: string;
-  runId?: string;
   targets?: Array<{ conversationId: string; runId: string }>;
-  singleWaitCommitment?: string;
 }): MetaToolWaitInput {
-  if (input.targets !== undefined) {
-    if (
-      input.conversationId !== undefined
-      || input.runId !== undefined
-      || input.singleWaitCommitment !== undefined
-    ) {
-      throw new Error(
-        "wait_for_session cannot mix targets with conversationId, runId, or singleWaitCommitment",
-      );
-    }
-    if (input.targets.length < 1 || input.targets.length > 32) {
-      throw new Error("wait_for_session targets must contain 1 to 32 items");
-    }
-    const seen = new Set<string>();
-    const targets: MetaToolSessionRef[] = [];
-    for (const target of input.targets) {
-      assertCanonicalRunId(target.runId);
-      const key = `${target.conversationId.length}:${target.conversationId}:${target.runId}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      targets.push(Object.freeze({
-        conversationId: target.conversationId,
-        runId: target.runId,
-      }));
-    }
-    return { targets: Object.freeze(targets) };
+  if (input.targets === undefined) {
+    throw new Error("wait_for_session requires targets");
   }
-  if (input.conversationId === undefined || input.runId === undefined) {
-    throw new Error(
-      "wait_for_session requires conversationId+runId or targets",
-    );
+  if (input.targets.length < 1 || input.targets.length > 32) {
+    throw new Error("wait_for_session targets must contain 1 to 32 items");
   }
-  assertCanonicalRunId(input.runId);
-  const singleWaitCommitment = input.singleWaitCommitment?.trim();
-  if (
-    singleWaitCommitment !== undefined
-    && singleWaitCommitment.length > MAX_SINGLE_WAIT_COMMITMENT_CHARACTERS
-  ) {
-    throw new Error(
-      `singleWaitCommitment exceeds ${MAX_SINGLE_WAIT_COMMITMENT_CHARACTERS} characters`,
-    );
+  const seen = new Set<string>();
+  const targets: MetaToolSessionRef[] = [];
+  for (const target of input.targets) {
+    assertCanonicalRunId(target.runId);
+    const key = `${target.conversationId.length}:${target.conversationId}:${target.runId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    targets.push(Object.freeze({
+      conversationId: target.conversationId,
+      runId: target.runId,
+    }));
   }
-  return {
-    conversationId: input.conversationId,
-    runId: input.runId,
-    ...(singleWaitCommitment ? { singleWaitCommitment } : {}),
-  };
+  return { targets: Object.freeze(targets) };
 }
 
 function normalizeSessionScope(scope: string | undefined): MetaToolSessionScope | undefined {
@@ -417,27 +378,16 @@ export function createMetaTools(
       name: "wait_for_session",
       label: "Wait for session",
       description:
-        "Explicitly wait for the next relevant event while keeping the current turn responsive. Pass one exact conversationId+runId pair, or targets with 1-32 peer run identities to wait for the first listed durable settlement; an aggregate settlement also identifies its conversationId. A single exact wait that would truly block requires singleWaitCommitment explaining why waiting is better than continuing useful local work or waiting on multiple independent targets; immediate settlement/message/guidance results do not require it. The wait may instead return message metadata when a peer/inbox message is claimed into the current run's steering queue (delivered after the wait starts, or already claimed before it registered but not yet observed — from any conversation or run), or guidance metadata when user guidance is accepted into the current run's steering queue (an explicit steer or a busy browser message, accepted before or after the wait registered). When this call returns message metadata, the body has already been injected as a separate custom message into the same model request that receives this tool result; use that message now instead of calling wait_for_session or peek_session merely to obtain the body. Otherwise call again only when the message did not satisfy the dependency and final settlement still matters. An exact run without authoritative recovery or delivery reachability returns target_unreachable; aggregate waits do the same for an unavailable listed target. There is no global cycle rejection. A silent wait may return {\"outcome\":\"checkpoint\"} after four minutes. This is not target completion; call wait again only if the result remains necessary.",
-      promptSnippet: "Wait for one exact peer run or the first of a bounded target set.",
+        "Explicitly wait for the next relevant event while keeping the current turn responsive. Pass targets with 1-32 peer run identities to wait for the first listed durable settlement, which identifies its conversationId. The wait may instead return message metadata when a peer/inbox message is claimed into the current run's steering queue (delivered after the wait starts, or already claimed before it registered but not yet observed — from any conversation or run), or guidance metadata when user guidance is accepted into the current run's steering queue (an explicit steer or a busy browser message, accepted before or after the wait registered). When this call returns message metadata, the body has already been injected as a separate custom message into the same model request that receives this tool result; use that message now instead of calling wait_for_session or peek_session merely to obtain the body. Otherwise call again only when the message did not satisfy the dependency and final settlement still matters. A target without authoritative recovery or delivery reachability returns target_unreachable. There is no global cycle rejection. A silent wait may return {\"outcome\":\"checkpoint\"} after four minutes. This is not target completion; call wait again only if the result remains necessary.",
+      promptSnippet: "Wait for the first durable settlement from a bounded target set.",
       promptGuidelines: [
-        "For a single exact wait that may block, provide singleWaitCommitment with a concise reason; immediate results are returned without it.",
         "A message outcome's body is already in the model context that receives the wait result; use it there, and do not wait or peek merely to fetch the body.",
-        "Do not use singleWaitCommitment with targets; aggregate waits keep their existing semantics.",
       ],
       parameters: Type.Object({
-        conversationId: Type.Optional(
-          Type.String({ minLength: 1, maxLength: 256 }),
-        ),
-        runId: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
-        targets: Type.Optional(Type.Array(sessionTargetParameters, {
+        targets: Type.Array(sessionTargetParameters, {
           minItems: 1,
           maxItems: 32,
-        })),
-        singleWaitCommitment: Type.Optional(Type.String({
-          minLength: 1,
-          description:
-            `Reason after trimming must not exceed ${MAX_SINGLE_WAIT_COMMITMENT_CHARACTERS} characters`,
-        })),
+        }),
       }, { additionalProperties: false }),
       async execute(_toolCallId, input, signal) {
         return result(await service.waitForSession(

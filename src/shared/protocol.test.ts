@@ -40,7 +40,7 @@ const transitionDiagnostics = {
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(50);
+    expect(PROTOCOL_VERSION).toBe(51);
   });
 
   it("accepts supported commands", () => {
@@ -1018,7 +1018,7 @@ describe("parseClientCommand", () => {
       projectId,
       conversations: [{
         id: conversationId,
-        preview: "ambiguous wait projection",
+        preview: "legacy exact wait projection",
         createdAt: "2026-07-18T12:00:00.000Z",
         updatedAt: "2026-07-18T12:01:00.000Z",
         messageCount: 1,

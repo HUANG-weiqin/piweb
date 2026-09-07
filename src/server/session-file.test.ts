@@ -546,7 +546,6 @@ describe("validatePiSessionFile", () => {
       deliveredMessageIds: [messageId],
       messageDeliveryReceipts: [receipt.data],
       runSettlements: [settlement.data],
-      waitPolls: [],
       editBudgetEvents: [],
       metaOperations: [],
       lastActivityAt: "2026-01-01T00:05:00.000Z",

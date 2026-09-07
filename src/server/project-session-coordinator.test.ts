@@ -675,7 +675,6 @@ async function executeTool(
   toolCallId: string,
   input: unknown,
   signal?: AbortSignal,
-  options: { omitSingleWaitCommitment?: boolean } = {},
 ): Promise<unknown> {
   const tool = control.options.workbenchCustomTools?.find(
     (candidate) => candidate.name === name,
@@ -690,26 +689,12 @@ async function executeTool(
       context: unknown,
     ): Promise<ToolResult>;
   };
-  const exactWaitInput = name === "wait_for_session"
-    && typeof input === "object"
-    && input !== null
-    && !Array.isArray(input)
-    && "conversationId" in input
-    && !("targets" in input)
-    && !("singleWaitCommitment" in input)
-    && !options.omitSingleWaitCommitment;
   const sessionMessageInput = name === "send_session_message"
     && typeof input === "object"
     && input !== null
     && !Array.isArray(input)
     && !("summary" in input);
-  const normalizedInput = exactWaitInput
-    ? {
-        ...input,
-        singleWaitCommitment:
-          "This exact result is on the test's critical path and no independent local work remains.",
-      }
-    : sessionMessageInput
+  const normalizedInput = sessionMessageInput
     ? {
         ...input,
         summary: "Test user summary",
@@ -1058,7 +1043,12 @@ describe("ProjectSessionCoordinator", () => {
           control,
           "wait_for_session",
           "reload-interrupted-wait",
-          { conversationId: target.conversationId, runId: targetRunId },
+          {
+            targets: [{
+              conversationId: target.conversationId,
+              runId: targetRunId,
+            }],
+          },
         );
       } catch (error) {
         waitError = error;
@@ -6124,7 +6114,7 @@ describe("ProjectSessionCoordinator", () => {
     ).toHaveLength(1);
   });
 
-  it("waits for the exact durable settlement first and does not enter waiting for an already-settled run", async () => {
+  it("waits for the durable settlement first and does not enter waiting for an already-settled run", async () => {
     const fixture = await createFixture();
     const source = await fixture.coordinator.createUserConversation(
       fixture.handle,
@@ -6172,11 +6162,11 @@ describe("ProjectSessionCoordinator", () => {
         "wait_for_session",
         "wait-durable",
         {
-          conversationId: target.conversationId,
-          runId: firstRunId,
+          targets: [{
+            conversationId: target.conversationId,
+            runId: firstRunId,
+          }],
         },
-        undefined,
-        { omitSingleWaitCommitment: true },
       ) as RunSettlement;
       control.emitFinal("observed");
     });
@@ -6190,6 +6180,7 @@ describe("ProjectSessionCoordinator", () => {
     unsubscribe();
 
     expect(waited).toMatchObject({
+      conversationId: target.conversationId,
       runId: firstRunId,
       outcome: "completed",
       finalText: "first exact result",
@@ -6248,10 +6239,13 @@ describe("ProjectSessionCoordinator", () => {
         waitResult = await executeTool(
           control,
           "wait_for_session",
-          "raced-uncommitted-exact-wait",
-          { conversationId: target.conversationId, runId: targetRunId },
-          undefined,
-          { omitSingleWaitCommitment: true },
+          "raced-uncommitted-wait",
+          {
+            targets: [{
+              conversationId: target.conversationId,
+              runId: targetRunId,
+            }],
+          },
         );
       } finally {
         inbox.list = originalList;
@@ -6270,77 +6264,12 @@ describe("ProjectSessionCoordinator", () => {
 
     expect(listCalls).toBeGreaterThanOrEqual(2);
     expect(waitResult).toMatchObject({
+      conversationId: target.conversationId,
       runId: targetRunId,
       outcome: "completed",
       finalText: "raced target result",
     });
     expect(sourceActivities).not.toContain("waiting");
-  });
-
-  it("requires a commitment before an exact wait would block", async () => {
-    const fixture = await createFixture();
-    const source = await fixture.coordinator.createUserConversation(
-      fixture.handle,
-      { roleId: "default" },
-    );
-    const target = await fixture.coordinator.createUserConversation(
-      fixture.handle,
-      { roleId: "default" },
-    );
-    const targetStarted = deferred();
-    const releaseTarget = deferred();
-    const targetRunId = randomUUID();
-    fixture.runtime.control(target.conversationId).enqueue(
-      blocksUntil(targetStarted, releaseTarget, "target result"),
-    );
-    const targetCompletion = fixture.coordinator.prompt(
-      fixture.handle,
-      target.conversationId,
-      targetRunId,
-      "keep running",
-    );
-    await targetStarted.promise;
-
-    let waitResult: unknown;
-    const sourceActivities: string[] = [];
-    const unsubscribe = fixture.coordinator.subscribe(fixture.handle, (event) => {
-      if (event.type === "activity" && event.conversationId === source.conversationId) {
-        sourceActivities.push(event.activity.kind);
-      }
-    });
-    fixture.runtime.control(source.conversationId).enqueue(async (control) => {
-      waitResult = await executeTool(
-        control,
-        "wait_for_session",
-        "uncommitted-exact-wait",
-        { conversationId: target.conversationId, runId: targetRunId },
-        undefined,
-        { omitSingleWaitCommitment: true },
-      );
-      control.emitFinal("continued without blocking");
-    });
-
-    await fixture.coordinator.prompt(
-      fixture.handle,
-      source.conversationId,
-      randomUUID(),
-      "try to wait without a reason",
-    );
-    unsubscribe();
-
-    expect(waitResult).toMatchObject({
-      outcome: "single_wait_commitment_required",
-      message: expect.stringContaining("No wait was started"),
-    });
-    expect(sourceActivities).not.toContain("waiting");
-    const internal = fixture.handle as unknown as {
-      context: { completionWaiters: Map<string, Set<unknown>> };
-    };
-    expect(internal.context.completionWaiters.size).toBe(0);
-    expect(target.getActivity()).toEqual({ kind: "running", runId: targetRunId });
-
-    releaseTarget.resolve();
-    await targetCompletion;
   });
 
   it("resumes an aggregate wait when the second target settles and unregisters the first", async () => {
@@ -6574,8 +6503,10 @@ describe("ProjectSessionCoordinator", () => {
             "wait_for_session",
             `wait-for-${outcome}`,
             {
-              conversationId: target.conversationId,
-              runId: targetRunId,
+              targets: [{
+                conversationId: target.conversationId,
+                runId: targetRunId,
+              }],
             },
           ) as RunSettlement;
           restoredInsideRun = source.getActivity().kind;
@@ -6605,6 +6536,7 @@ describe("ProjectSessionCoordinator", () => {
       unsubscribe();
 
       expect(waited).toMatchObject({
+        conversationId: target.conversationId,
         runId: targetRunId,
         outcome,
         finalText: expectedFinalText,
@@ -6638,8 +6570,10 @@ describe("ProjectSessionCoordinator", () => {
         "wait_for_session",
         "wait-after-correlated-message",
         {
-          conversationId: peer.conversationId,
-          runId: peerRunId,
+          targets: [{
+            conversationId: peer.conversationId,
+            runId: peerRunId,
+          }],
         },
       ) as RunSettlement;
       control.emitFinal("caller observed the committed reply");
@@ -6739,8 +6673,10 @@ describe("ProjectSessionCoordinator", () => {
         "wait_for_session",
         "wait-behind-backlog",
         {
-          conversationId: child.conversationId,
-          runId: childRunId,
+          targets: [{
+            conversationId: child.conversationId,
+            runId: childRunId,
+          }],
         },
       );
       waitResolved.resolve();
@@ -6854,8 +6790,10 @@ describe("ProjectSessionCoordinator", () => {
         "wait_for_session",
         "wait-for-child-reply",
         {
-          conversationId: child.conversationId,
-          runId: childRunId,
+          targets: [{
+            conversationId: child.conversationId,
+            runId: childRunId,
+          }],
         },
       ) as RunSettlement;
       control.beginNextModelTurn();
@@ -6968,8 +6906,10 @@ describe("ProjectSessionCoordinator", () => {
         "wait_for_session",
         "wait-for-wrong-run",
         {
-          conversationId: peer.conversationId,
-          runId: RUN_A,
+          targets: [{
+            conversationId: peer.conversationId,
+            runId: RUN_A,
+          }],
         },
       );
       control.emitFinal("caller observed the unreachable run");
@@ -7060,8 +7000,10 @@ describe("ProjectSessionCoordinator", () => {
         "wait_for_session",
         "wait-behind-pre-registration-backlog",
         {
-          conversationId: waitedPeer.conversationId,
-          runId: RUN_A,
+          targets: [{
+            conversationId: waitedPeer.conversationId,
+            runId: RUN_A,
+          }],
         },
       );
       control.beginNextModelTurn();
@@ -7190,11 +7132,11 @@ describe("ProjectSessionCoordinator", () => {
         "wait_for_session",
         "wait-after-pre-claimed-message",
         {
-          conversationId: waitedPeer.conversationId,
-          runId: RUN_A,
+          targets: [{
+            conversationId: waitedPeer.conversationId,
+            runId: RUN_A,
+          }],
         },
-        undefined,
-        { omitSingleWaitCommitment: true },
       );
       control.beginNextModelTurn();
       waitResolved.resolve();
@@ -7298,8 +7240,10 @@ describe("ProjectSessionCoordinator", () => {
         "wait_for_session",
         "wait-while-registration-is-gated",
         {
-          conversationId: waitedPeer.conversationId,
-          runId: peerRun.runId,
+          targets: [{
+            conversationId: waitedPeer.conversationId,
+            runId: peerRun.runId,
+          }],
         },
       );
       guidanceResolved.resolve();
@@ -7376,8 +7320,10 @@ describe("ProjectSessionCoordinator", () => {
         "wait_for_session",
         "wait-for-guidance",
         {
-          conversationId: waitedPeer.conversationId,
-          runId: RUN_A,
+          targets: [{
+            conversationId: waitedPeer.conversationId,
+            runId: RUN_A,
+          }],
         },
       );
       waitResolved.resolve();
@@ -7441,8 +7387,10 @@ describe("ProjectSessionCoordinator", () => {
         "wait_for_session",
         "wait-for-browser-prompt",
         {
-          conversationId: waitedPeer.conversationId,
-          runId: peerRun.runId,
+          targets: [{
+            conversationId: waitedPeer.conversationId,
+            runId: peerRun.runId,
+          }],
         },
       );
       waitResolved.resolve();
@@ -7525,8 +7473,10 @@ describe("ProjectSessionCoordinator", () => {
           "wait_for_session",
           "wait-behind-ghost-admission",
           {
-            conversationId: waitedPeer.conversationId,
-            runId: peerRun.runId,
+            targets: [{
+              conversationId: waitedPeer.conversationId,
+              runId: peerRun.runId,
+            }],
           },
           abort.signal,
         );
@@ -7609,8 +7559,10 @@ describe("ProjectSessionCoordinator", () => {
         "wait_for_session",
         "wait-for-expanded-delivery",
         {
-          conversationId: waitedPeer.conversationId,
-          runId: peerRun.runId,
+          targets: [{
+            conversationId: waitedPeer.conversationId,
+            runId: peerRun.runId,
+          }],
         },
       );
       firstResolved.resolve();
@@ -7624,8 +7576,10 @@ describe("ProjectSessionCoordinator", () => {
         "wait_for_session",
         "wait-after-expanded-delivery",
         {
-          conversationId: waitedPeer.conversationId,
-          runId: peerRun.runId,
+          targets: [{
+            conversationId: waitedPeer.conversationId,
+            runId: peerRun.runId,
+          }],
         },
       );
       secondResolved.resolve();
@@ -7720,8 +7674,10 @@ describe("ProjectSessionCoordinator", () => {
         "wait_for_session",
         "wait-after-accepted-guidance",
         {
-          conversationId: waitedPeer.conversationId,
-          runId: RUN_A,
+          targets: [{
+            conversationId: waitedPeer.conversationId,
+            runId: RUN_A,
+          }],
         },
       );
       waitResolved.resolve();
@@ -7792,8 +7748,10 @@ describe("ProjectSessionCoordinator", () => {
           "wait_for_session",
           "wait-after-rejected-guidance",
           {
-            conversationId: waitedPeer.conversationId,
-            runId: peerRun.runId,
+            targets: [{
+              conversationId: waitedPeer.conversationId,
+              runId: peerRun.runId,
+            }],
           },
           abort.signal,
         );
@@ -7885,8 +7843,10 @@ describe("ProjectSessionCoordinator", () => {
         "wait_for_session",
         "fifo-first-wait",
         {
-          conversationId: waitedPeer.conversationId,
-          runId: peerRun.runId,
+          targets: [{
+            conversationId: waitedPeer.conversationId,
+            runId: peerRun.runId,
+          }],
         },
       );
       firstResolved.resolve();
@@ -7896,11 +7856,11 @@ describe("ProjectSessionCoordinator", () => {
         "wait_for_session",
         "fifo-second-wait",
         {
-          conversationId: waitedPeer.conversationId,
-          runId: peerRun.runId,
+          targets: [{
+            conversationId: waitedPeer.conversationId,
+            runId: peerRun.runId,
+          }],
         },
-        undefined,
-        { omitSingleWaitCommitment: true },
       );
       secondResolved.resolve();
       control.emitUserMessage("initial prompt settlement");
@@ -7992,8 +7952,10 @@ describe("ProjectSessionCoordinator", () => {
         "wait_for_session",
         "claimed-first-wait",
         {
-          conversationId: waitedPeer.conversationId,
-          runId: peerRun.runId,
+          targets: [{
+            conversationId: waitedPeer.conversationId,
+            runId: peerRun.runId,
+          }],
         },
       );
       firstResolved.resolve();
@@ -8003,8 +7965,10 @@ describe("ProjectSessionCoordinator", () => {
         "wait_for_session",
         "claimed-second-wait",
         {
-          conversationId: waitedPeer.conversationId,
-          runId: peerRun.runId,
+          targets: [{
+            conversationId: waitedPeer.conversationId,
+            runId: peerRun.runId,
+          }],
         },
       );
       secondResolved.resolve();
@@ -8092,8 +8056,10 @@ describe("ProjectSessionCoordinator", () => {
         "wait_for_session",
         "browser-observed-first-wait",
         {
-          conversationId: waitedPeer.conversationId,
-          runId: peerRun.runId,
+          targets: [{
+            conversationId: waitedPeer.conversationId,
+            runId: peerRun.runId,
+          }],
         },
       );
       firstResolved.resolve();
@@ -8105,8 +8071,10 @@ describe("ProjectSessionCoordinator", () => {
         "wait_for_session",
         "browser-observed-second-wait",
         {
-          conversationId: waitedPeer.conversationId,
-          runId: peerRun.runId,
+          targets: [{
+            conversationId: waitedPeer.conversationId,
+            runId: peerRun.runId,
+          }],
         },
       );
       secondResolved.resolve();
@@ -8227,8 +8195,10 @@ describe("ProjectSessionCoordinator", () => {
           "wait_for_session",
           "wait-behind-failed-predecessor",
           {
-            conversationId: waitedPeer.conversationId,
-            runId: peerRun.runId,
+            targets: [{
+              conversationId: waitedPeer.conversationId,
+              runId: peerRun.runId,
+            }],
           },
         );
       } catch (error) {
@@ -8384,8 +8354,10 @@ describe("ProjectSessionCoordinator", () => {
         "wait_for_session",
         "first-wait-for-one-message",
         {
-          conversationId: peer.conversationId,
-          runId: peerRunId,
+          targets: [{
+            conversationId: peer.conversationId,
+            runId: peerRunId,
+          }],
         },
       ) as RunSettlement;
       control.beginNextModelTurn();
@@ -8396,8 +8368,10 @@ describe("ProjectSessionCoordinator", () => {
         "wait_for_session",
         "second-wait-after-one-message",
         {
-          conversationId: peer.conversationId,
-          runId: peerRunId,
+          targets: [{
+            conversationId: peer.conversationId,
+            runId: peerRunId,
+          }],
         },
       ) as RunSettlement;
       control.emitFinal("caller observed message then settlement");
@@ -8443,6 +8417,7 @@ describe("ProjectSessionCoordinator", () => {
     await peerCompletion;
     await callerCompletion;
     expect(secondResult).toMatchObject({
+      conversationId: peer.conversationId,
       outcome: "completed",
       runId: peerRunId,
     });
@@ -8481,8 +8456,10 @@ describe("ProjectSessionCoordinator", () => {
         "wait_for_session",
         "wait-for-card-append-failure",
         {
-          conversationId: peer.conversationId,
-          runId: peerRunId,
+          targets: [{
+            conversationId: peer.conversationId,
+            runId: peerRunId,
+          }],
         },
       );
       control.beginNextModelTurn();
@@ -8585,8 +8562,10 @@ describe("ProjectSessionCoordinator", () => {
         "wait_for_session",
         "wait-before-delivery-marker",
         {
-          conversationId: child.conversationId,
-          runId: childRunId,
+          targets: [{
+            conversationId: child.conversationId,
+            runId: childRunId,
+          }],
         },
       );
       control.emitFinal("caller settled before the steering marker");
@@ -8674,8 +8653,10 @@ describe("ProjectSessionCoordinator", () => {
           "wait_for_session",
           "cancelled-wait",
           {
-            conversationId: child.conversationId,
-            runId: childRunId,
+            targets: [{
+              conversationId: child.conversationId,
+              runId: childRunId,
+            }],
           },
           waitAbort.signal,
         );
@@ -8783,8 +8764,10 @@ describe("ProjectSessionCoordinator", () => {
       "wait_for_session",
       "wait-with-reconciliation-failure",
       {
-        conversationId: second.conversationId,
-        runId: secondRunId,
+        targets: [{
+          conversationId: second.conversationId,
+          runId: secondRunId,
+        }],
       },
     )).rejects.toThrow("wait reconciliation scan failure");
     inbox.list = originalList;
@@ -8796,8 +8779,10 @@ describe("ProjectSessionCoordinator", () => {
       "wait_for_session",
       "reverse-wait-after-reconciliation-failure",
       {
-        conversationId: first.conversationId,
-        runId: firstRunId,
+        targets: [{
+          conversationId: first.conversationId,
+          runId: firstRunId,
+        }],
       },
       reverseAbort.signal,
     );
@@ -8838,8 +8823,10 @@ describe("ProjectSessionCoordinator", () => {
           "wait_for_session",
           "wait-before-receipt-write-failure",
           {
-            conversationId: peer.conversationId,
-            runId: peerRunId,
+            targets: [{
+              conversationId: peer.conversationId,
+              runId: peerRunId,
+            }],
           },
           waitAbort.signal,
         );
@@ -8918,8 +8905,10 @@ describe("ProjectSessionCoordinator", () => {
       "wait_for_session",
       "reverse-wait-after-receipt-write-failure",
       {
-        conversationId: caller.conversationId,
-        runId: callerRunId,
+        targets: [{
+          conversationId: caller.conversationId,
+          runId: callerRunId,
+        }],
       },
       reverseAbort.signal,
     );
@@ -8974,8 +8963,10 @@ describe("ProjectSessionCoordinator", () => {
           "wait_for_session",
           "wait-for-fatal-settlement-persistence",
           {
-            conversationId: target.conversationId,
-            runId: targetRunId,
+            targets: [{
+              conversationId: target.conversationId,
+              runId: targetRunId,
+            }],
           },
           waitAbort.signal,
         );
@@ -9063,8 +9054,10 @@ describe("ProjectSessionCoordinator", () => {
       "wait_for_session",
       "first-waits-second",
       {
-        conversationId: second.conversationId,
-        runId: secondRunId,
+        targets: [{
+          conversationId: second.conversationId,
+          runId: secondRunId,
+        }],
       },
     );
     await waitUntil(
@@ -9077,8 +9070,10 @@ describe("ProjectSessionCoordinator", () => {
       "wait_for_session",
       "second-waits-first",
       {
-        conversationId: first.conversationId,
-        runId: firstRunId,
+        targets: [{
+          conversationId: first.conversationId,
+          runId: firstRunId,
+        }],
       },
       secondAbort.signal,
     );
@@ -9094,6 +9089,7 @@ describe("ProjectSessionCoordinator", () => {
     await expect(secondWait).rejects.toMatchObject({ name: "AbortError" });
     releaseSecond.resolve();
     await expect(firstWait).resolves.toMatchObject({
+      conversationId: second.conversationId,
       runId: secondRunId,
       outcome: "completed",
     });
@@ -9146,14 +9142,24 @@ describe("ProjectSessionCoordinator", () => {
       fixture.runtime.control(first.conversationId),
       "wait_for_session",
       "concurrent-first-waits-second",
-      { conversationId: second.conversationId, runId: secondRunId },
+      {
+        targets: [{
+          conversationId: second.conversationId,
+          runId: secondRunId,
+        }],
+      },
       firstWaitAbort.signal,
     );
     const secondWait = executeTool(
       fixture.runtime.control(second.conversationId),
       "wait_for_session",
       "concurrent-second-waits-first",
-      { conversationId: first.conversationId, runId: firstRunId },
+      {
+        targets: [{
+          conversationId: first.conversationId,
+          runId: firstRunId,
+        }],
+      },
       secondWaitAbort.signal,
     );
     await waitUntil(
@@ -9204,8 +9210,10 @@ describe("ProjectSessionCoordinator", () => {
           "wait_for_session",
           "abort-during-target-open",
           {
-            conversationId: targetConversationId,
-            runId: targetRunId,
+            targets: [{
+              conversationId: targetConversationId,
+              runId: targetRunId,
+            }],
           },
           abort.signal,
         );
@@ -9341,8 +9349,10 @@ describe("ProjectSessionCoordinator", () => {
           "wait_for_session",
           "wait-unstartable-target",
           {
-            conversationId: targetConversationId,
-            runId: targetRunId,
+            targets: [{
+              conversationId: targetConversationId,
+              runId: targetRunId,
+            }],
           },
         );
       } catch (error) {
@@ -9369,6 +9379,7 @@ describe("ProjectSessionCoordinator", () => {
     });
     expect(waitError).toBeUndefined();
     expect(waited).toMatchObject({
+      conversationId: targetConversationId,
       runId: targetRunId,
       outcome: "completed",
       finalText: "durable result without a live target model",
@@ -12382,7 +12393,12 @@ describe("ProjectSessionCoordinator", () => {
           control,
           "wait_for_session",
           "checkpoint-wait",
-          { conversationId: target.conversationId, runId: targetRunId },
+          {
+            targets: [{
+              conversationId: target.conversationId,
+              runId: targetRunId,
+            }],
+          },
         );
         waitReturned.resolve();
         await releaseSource.promise;
@@ -12446,7 +12462,12 @@ describe("ProjectSessionCoordinator", () => {
           control,
           "wait_for_session",
           "guidance-wins-poll-race",
-          { conversationId: target.conversationId, runId: targetRun.runId },
+          {
+            targets: [{
+              conversationId: target.conversationId,
+              runId: targetRun.runId,
+            }],
+          },
         );
         control.emitUserMessage("initial prompt settlement");
         control.emitUserMessage("guidance during poll inbox scan");
@@ -12526,7 +12547,12 @@ describe("ProjectSessionCoordinator", () => {
           control,
           "wait_for_session",
           "settlement-wait",
-          { conversationId: target.conversationId, runId: targetRunId },
+          {
+            targets: [{
+              conversationId: target.conversationId,
+              runId: targetRunId,
+            }],
+          },
         );
         waitReturned.resolve();
         control.emitFinal("settlement observed");
@@ -12553,6 +12579,7 @@ describe("ProjectSessionCoordinator", () => {
       await waitReturned.promise;
 
       expect(waitResult).toMatchObject({
+        conversationId: target.conversationId,
         outcome: "completed",
         runId: targetRunId,
       });
@@ -12593,7 +12620,12 @@ describe("ProjectSessionCoordinator", () => {
             control,
             "wait_for_session",
             `checkpoint-${checkpoint}`,
-            { conversationId: target.conversationId, runId: targetRunId },
+            {
+              targets: [{
+                conversationId: target.conversationId,
+                runId: targetRunId,
+              }],
+            },
           ));
         }
         control.emitFinal("unbounded checkpoints observed");
@@ -12664,7 +12696,12 @@ describe("ProjectSessionCoordinator", () => {
             control,
             "wait_for_session",
             "aborted-checkpoint-wait",
-            { conversationId: target.conversationId, runId: targetRunId },
+            {
+              targets: [{
+                conversationId: target.conversationId,
+                runId: targetRunId,
+              }],
+            },
             abort.signal,
           );
         } catch (error) {

@@ -35,7 +35,6 @@ import {
   createLoopListContinueEntry,
   createLoopListEntry,
   createServiceTierSelectionEntry,
-  createWaitPollEntry,
   LOOP_LIST_CUSTOM_TYPE,
 } from "./conversation-meta.js";
 import { canonicalMutationPathKey } from "./edit-budget.js";
@@ -1687,7 +1686,6 @@ describe("ConversationActor", () => {
         runId: "dummy-target-run",
       };
       const firstAttempt = fixture.actor.installWaitAttempt(ownershipValue, {
-        mode: "exact",
         targets: [waitTarget],
       });
 
@@ -1709,7 +1707,6 @@ describe("ConversationActor", () => {
       // record must wake it immediately.
       const guidanceCauses: unknown[] = [];
       const secondAttempt = fixture.actor.installWaitAttempt(ownershipValue, {
-        mode: "exact",
         targets: [waitTarget],
         onTerminal: (cause) => guidanceCauses.push(cause),
       });
@@ -1732,7 +1729,6 @@ describe("ConversationActor", () => {
       emit()?.(nativeEvent({ type: "message_end", message: rawGuidance }));
       await expect(guidance).resolves.toBeUndefined();
       const thirdAttempt = fixture.actor.installWaitAttempt(ownershipValue, {
-        mode: "exact",
         targets: [waitTarget],
       });
       let thirdCalls = 0;
@@ -4861,7 +4857,6 @@ describe("ConversationActor", () => {
     fixture.runtime.session.isStreaming = true;
     fixture.runtime.session.resumeImplementation = () => sent.promise;
     const attempt = fixture.actor.installWaitAttempt(run.ownership, {
-      mode: "exact",
       targets: [{
         conversationId: TARGET_CONVERSATION_ID,
         runId: RUN_B,
@@ -5051,7 +5046,6 @@ describe("ConversationActor", () => {
     if (!ownership) throw new Error("run ownership was not exposed");
 
     const firstAttempt = fixture.actor.installWaitAttempt(ownership, {
-      mode: "exact",
       targets: [{
         conversationId: TARGET_CONVERSATION_ID,
         runId: RUN_B,
@@ -5060,8 +5054,7 @@ describe("ConversationActor", () => {
     expect(fixture.actor.getActivity()).toEqual({
       kind: "waiting",
       runId: RUN_A,
-      targetConversationId: TARGET_CONVERSATION_ID,
-      targetRunId: RUN_B,
+      targetCount: 1,
     });
     expect(fixture.actor.cancelWaitAttempt(ownership, firstAttempt)).toBe(true);
     expect(fixture.actor.getActivity()).toEqual({
@@ -5070,7 +5063,6 @@ describe("ConversationActor", () => {
     });
 
     const abortAttempt = fixture.actor.installWaitAttempt(ownership, {
-      mode: "exact",
       targets: [{
         conversationId: TARGET_CONVERSATION_ID,
         runId: RUN_B,
@@ -5092,7 +5084,6 @@ describe("ConversationActor", () => {
     });
     await expect(Promise.resolve().then(() => {
       fixture.actor.installWaitAttempt(ownership, {
-        mode: "exact",
         targets: [{
           conversationId: TARGET_CONVERSATION_ID,
           runId: RUN_A,
@@ -5113,7 +5104,6 @@ describe("ConversationActor", () => {
     };
 
     const attempt = fixture.actor.installWaitAttempt(run.ownership, {
-      mode: "exact",
       targets: [target],
     });
     target.runId = "mutated-after-entering-wait";
@@ -5121,8 +5111,7 @@ describe("ConversationActor", () => {
     expect(fixture.actor.getActivity()).toEqual({
       kind: "waiting",
       runId: RUN_A,
-      targetConversationId: TARGET_CONVERSATION_ID,
-      targetRunId: RUN_B,
+      targetCount: 1,
     });
 
     fixture.actor.cancelWaitAttempt(run.ownership, attempt);
@@ -5876,7 +5865,6 @@ describe("wait attempt ownership", () => {
     const onTerminal = vi.fn((cause) => terminalCauses.push(cause));
     const installedTarget = { ...target };
     const attempt = fixture.actor.installWaitAttempt(run.ownership, {
-      mode: "exact",
       targets: [installedTarget],
       onTerminal,
     });
@@ -5885,7 +5873,6 @@ describe("wait attempt ownership", () => {
     expect(fixture.actor.getCurrentWaitAttempt()).toMatchObject({
       ownership: run.ownership,
       handle: attempt,
-      mode: "exact",
       targets: [{
         conversationId: TARGET_CONVERSATION_ID,
         runId: RUN_B,
@@ -5926,7 +5913,6 @@ describe("wait attempt ownership", () => {
     const terminalCauses: unknown[] = [];
     const onTerminal = vi.fn((cause) => terminalCauses.push(cause));
     fixture.actor.installWaitAttempt(run.ownership, {
-      mode: "exact",
       targets: [target],
       onTerminal,
     });
@@ -5950,7 +5936,6 @@ describe("wait attempt ownership", () => {
     const onTerminal = (cause: unknown) => causes.push(cause);
 
     const poll = fixture.actor.installWaitAttempt(run.ownership, {
-      mode: "exact",
       targets: [target],
       onTerminal,
     });
@@ -5963,7 +5948,6 @@ describe("wait attempt ownership", () => {
 
     const deliveryError = new Error("delivery failed");
     const failedDelivery = fixture.actor.installWaitAttempt(run.ownership, {
-      mode: "exact",
       targets: [target],
       onTerminal,
     });
@@ -5979,14 +5963,12 @@ describe("wait attempt ownership", () => {
     )).toBe(true);
 
     const cancelled = fixture.actor.installWaitAttempt(run.ownership, {
-      mode: "exact",
       targets: [target],
       onTerminal,
     });
     expect(fixture.actor.cancelWaitAttempt(run.ownership, cancelled)).toBe(true);
 
     const settled = fixture.actor.installWaitAttempt(run.ownership, {
-      mode: "exact",
       targets: [target],
       onTerminal,
     });
@@ -6008,12 +5990,10 @@ describe("wait attempt ownership", () => {
     const fixture = await openActor();
     const run = await startHeldActorRun(fixture, RUN_A);
     const first = fixture.actor.installWaitAttempt(run.ownership, {
-      mode: "exact",
       targets: [target],
     });
     expect(fixture.actor.cancelWaitAttempt(run.ownership, first)).toBe(true);
     const second = fixture.actor.installWaitAttempt(run.ownership, {
-      mode: "exact",
       targets: [target],
     });
 
@@ -6029,41 +6009,6 @@ describe("wait attempt ownership", () => {
 
     fixture.actor.cancelWaitAttempt(run.ownership, second);
     await run.finish();
-    await fixture.actor.dispose();
-  });
-
-  it("fails closed when a recovered wait-poll sequence has a gap", async () => {
-    const manager = SessionManager.inMemory(process.cwd(), {
-      id: CONVERSATION_ID,
-    });
-    appendReservedCustomEntry(manager, createWaitPollEntry({
-      runId: RUN_A,
-      count: 1,
-    }));
-    appendReservedCustomEntry(manager, createWaitPollEntry({
-      runId: RUN_A,
-      count: 3,
-    }));
-    await expect(openActor({ sessionManager: manager })).rejects.toThrow(
-      /invalid piweb wait-poll sequence/i,
-    );
-  });
-
-  it("rejects a fresh run that reuses an active-branch wait-poll journal", async () => {
-    const manager = SessionManager.inMemory(process.cwd(), {
-      id: CONVERSATION_ID,
-    });
-    appendReservedCustomEntry(manager, createWaitPollEntry({
-      runId: RUN_A,
-      count: 1,
-    }));
-    const fixture = await openActor({ sessionManager: manager });
-
-    expect(() => fixture.actor.startPrompt({
-      runId: RUN_A,
-      text: "must not revive a recovered run as fresh",
-      origin: "browser",
-    })).toThrow(/fresh run cannot reuse a runId/i);
     await fixture.actor.dispose();
   });
 

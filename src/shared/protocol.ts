@@ -27,6 +27,8 @@ export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
+// v51: wait-for-session activity always projects a target count; the legacy
+// single-target activity shape is no longer accepted.
 // v50: session-message cards project a bounded user-facing summary; legacy
 // durable messages project an empty summary.
 // v49: browser prompts may carry bounded local raster image attachments.
@@ -54,13 +56,13 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // tier, persisted by the host and validated again at dispatch.
 // v36: project conversation summaries optionally project their collaboration
 // root so the browser can group descendants without receiving lineage details.
-// v35: aggregate wait-for-session activity projects a bounded target count
-// instead of pretending that the source waits on one exact target.
+// v35: wait-for-session activity projects a bounded target count
+// instead of exposing a single target from a target set.
 // v34: focused snapshots and identity-bound live events project the bounded
 // conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
-export const PROTOCOL_VERSION = 50;
+export const PROTOCOL_VERSION = 51;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
@@ -663,12 +665,6 @@ export type ConversationActivity =
   | {
       kind: "waiting";
       runId: string;
-      targetConversationId: string;
-      targetRunId: string;
-    }
-  | {
-      kind: "waiting";
-      runId: string;
       targetCount: number;
     };
 
@@ -1233,12 +1229,6 @@ const conversationActivitySchema: z.ZodType<ConversationActivity> = z.union([
   z.object({ kind: z.literal("queued"), runId: runIdSchema }),
   z.object({ kind: z.literal("running"), runId: runIdSchema }),
   z.object({ kind: z.literal("cancelling"), runId: runIdSchema }),
-  z.object({
-    kind: z.literal("waiting"),
-    runId: runIdSchema,
-    targetConversationId: conversationIdSchema,
-    targetRunId: runIdSchema,
-  }).strict(),
   z.object({
     kind: z.literal("waiting"),
     runId: runIdSchema,

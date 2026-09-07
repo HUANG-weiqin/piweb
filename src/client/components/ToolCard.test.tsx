@@ -56,7 +56,9 @@ describe("ToolCard", () => {
     const targetedTool: ToolItem = {
       id: `target-${name}`,
       name,
-      args: { conversationId, runId: "peer-run" },
+      args: name === "wait_for_session"
+        ? { targets: [{ conversationId, runId: "peer-run" }] }
+        : { conversationId, runId: "peer-run" },
       status: "pending",
     };
     const { container } = render(
@@ -71,10 +73,13 @@ describe("ToolCard", () => {
     const summary = container.querySelector("summary") as HTMLElement;
 
     expect(summary).toHaveTextContent(label);
-    expect(summary).toHaveTextContent("架构审查");
+    const targetTitle = name === "wait_for_session"
+      ? "1 个会话 · 架构审查"
+      : "架构审查";
+    expect(summary).toHaveTextContent(targetTitle);
     expect(summary.querySelector(".tool-target")).toHaveAttribute(
       "title",
-      "架构审查",
+      targetTitle,
     );
     expect(summary).not.toHaveTextContent(conversationId);
 

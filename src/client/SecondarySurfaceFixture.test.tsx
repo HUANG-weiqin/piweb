@@ -128,11 +128,11 @@ const scenes: Array<{
       ".activity-timeline > details.tools",
     ) as HTMLDetailsElement;
     fireEvent.click(tools.querySelector(":scope > summary") as HTMLElement);
-    fireEvent.click(within(tools).getByRole("button", { name: "展开全部 6 条" }));
+    fireEvent.click(within(tools).getByRole("button", { name: "展开全部 7 条" }));
 
     expect(ledger.open).toBe(true);
     expect(tools.open).toBe(true);
-    expect(tools.querySelectorAll("details.tool")).toHaveLength(6);
+    expect(tools.querySelectorAll("details.tool")).toHaveLength(7);
   },
 }, {
   surface: "commitment-expanded",

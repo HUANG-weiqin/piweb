@@ -73,7 +73,6 @@ const FIELD_LABELS: Record<string, string> = {
   scope: "查看范围",
   self: "当前会话",
   sessions: "会话",
-  singleWaitCommitment: "单独等待理由",
   state: "状态",
   status: "状态",
   task: "任务",
@@ -87,7 +86,6 @@ const FIELD_LABELS: Record<string, string> = {
 const FIELD_VALUE_LABELS: Record<string, Record<string, string>> = {
   outcome: {
     edit_budget_granted: "已授予编辑额度",
-    single_wait_commitment_required: "需要单会话等待承诺",
   },
   kind: {
     cancelling: "正在终止",
@@ -192,10 +190,6 @@ export function toolPresentation(
     case "send_session_message":
       return { label: "发送会话消息", ...conversationTarget() };
     case "wait_for_session": {
-      const exactTarget = conversationTarget();
-      if (exactTarget.target) {
-        return { label: "等待 Agent 会话", ...exactTarget };
-      }
       const targets = Array.isArray(record?.targets)
         ? record.targets.flatMap((target) => {
             const conversationId = stringField(asRecord(target), "conversationId");

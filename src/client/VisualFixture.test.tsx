@@ -86,8 +86,6 @@ describe("VisualFixture", () => {
     expect(activeAgentEvent).toHaveTextContent("AGENTTech LeadRUNNING");
     expect(screen.getByText("正在运行命令")).toBeInTheDocument();
     expect(screen.getByText("预计修改 5 个文件")).toBeInTheDocument();
-    expect(screen.getByText("等待 审查布局与滚动契约"))
-      .not.toHaveAttribute("title");
     expect(screen.getByText("2 个会话 · 核对组件状态覆盖 · 历史验证记录"))
       .toHaveAttribute(
         "title",

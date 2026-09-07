@@ -502,8 +502,7 @@ describe("ConversationSidebar", () => {
           activity: {
             kind: "waiting",
             runId: "run-1",
-            targetConversationId: "target",
-            targetRunId: "run-2",
+            targetCount: 1,
           },
         }]}
         collapsed={false}
