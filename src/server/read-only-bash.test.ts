@@ -109,7 +109,6 @@ const allowedCommands = [
   "git tag --list 'v*'",
   "git remote",
   "git remote -v",
-  "git remote get-url origin",
   "git stash list",
   "git stash show",
   "git reflog show -1",

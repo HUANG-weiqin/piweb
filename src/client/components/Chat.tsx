@@ -6,7 +6,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type ChangeEvent,
   type ClipboardEvent,
   type KeyboardEvent,
   type WheelEvent,
@@ -123,6 +122,8 @@ const MISSION_OBJECTIVE_STATUS_LABELS: Record<LoopListItemStatus, string> = {
   active: "CURRENT",
   completed: "CLEARED",
 };
+
+type LoopListExecutionStatus = "paused" | "executing" | "completed";
 
 interface ChatProps {
   chat: ChatState;
@@ -343,6 +344,8 @@ interface MissionCommandSurfaceProps {
   loopListItems: LoopList["items"];
   completedItemCount: number;
   remainingItemCount: number;
+  loopListStatusKey?: LoopListExecutionStatus;
+  loopListStatusLabel?: string;
   contextTokenText: string;
   outputTokensPerSecond?: number;
   outputRateEstimated: boolean;
@@ -355,6 +358,8 @@ function MissionCommandSurface({
   loopListItems,
   completedItemCount,
   remainingItemCount,
+  loopListStatusKey,
+  loopListStatusLabel,
   contextTokenText,
   outputTokensPerSecond,
   outputRateEstimated,
@@ -368,7 +373,12 @@ function MissionCommandSurface({
 
   return <aside className="mission-command" aria-label="Mission Command">
     <header className="mission-command-header">
-      <p className="mission-command-kicker">MISSION</p>
+      <p className="mission-command-kicker">
+        <span>MISSION</span>
+        {loopListStatusLabel && <span
+          className={`mission-command-status is-${loopListStatusKey}`}
+        >STATUS · {loopListStatusLabel}</span>}
+      </p>
       <div className="mission-command-title-row">
         <h2>OBJECTIVES</h2>
         <p
@@ -527,7 +537,6 @@ function ChatView({
   const transcriptRef = useRef<HTMLElement>(null);
   const composerWrapRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const imageInputRef = useRef<HTMLInputElement>(null);
   const [attachmentError, setAttachmentError] = useState("");
   const attachmentScope = chat.focus
     ? `${observationSessionId}:${chat.focus.sessionId}:${chat.focus.conversationId}:${chat.focus.focusId}`
@@ -623,7 +632,7 @@ function ChatView({
   const loopListCompleted = !loopListEmpty
     && completedLoopListItems === loopListItems.length;
   const remainingLoopListItems = loopListItems.length - completedLoopListItems;
-  let loopListStatusKey = "paused";
+  let loopListStatusKey: LoopListExecutionStatus = "paused";
   let loopListStatusLabel = "已暂停";
   if (loopListCompleted) {
     loopListStatusKey = "completed";
@@ -878,10 +887,6 @@ function ChatView({
     draftImagesRef.current = nextImages;
     onImagesChangeRef.current(nextImages);
   };
-  const selectImages = (event: ChangeEvent<HTMLInputElement>) => {
-    void addImages(Array.from(event.target.files ?? []));
-    event.target.value = "";
-  };
   const pasteImages = (event: ClipboardEvent<HTMLTextAreaElement>) => {
     const files = Array.from(event.clipboardData.files);
     if (files.length === 0) return;
@@ -1104,6 +1109,8 @@ function ChatView({
       loopListItems={loopListItems}
       completedItemCount={completedLoopListItems}
       remainingItemCount={remainingLoopListItems}
+      loopListStatusKey={loopListEmpty ? undefined : loopListStatusKey}
+      loopListStatusLabel={loopListEmpty ? undefined : loopListStatusLabel}
       contextTokenText={contextTokenText}
       outputTokensPerSecond={outputTokensPerSecond}
       outputRateEstimated={outputRateEstimated}
@@ -1245,21 +1252,6 @@ function ChatView({
             aria-label="停止"
             disabled={!controlsEnabled || !conversationReady}
           >STOP</button>}
-          <button
-            type="button"
-            className="attach-image"
-            aria-label="添加图片"
-            disabled={!controlsEnabled || !conversationReady || !model || submitting || compacting || roleSwitching || Boolean(rewindingMessageId)}
-            onClick={() => imageInputRef.current?.click()}
-          >IMG</button>
-          <input
-            ref={imageInputRef}
-            hidden
-            type="file"
-            accept="image/png,image/jpeg,image/webp,image/gif"
-            multiple
-            onChange={selectImages}
-          />
           <button className="send" onClick={send} disabled={!controlsEnabled || !conversationReady || !model || submitting || compacting || roleSwitching || Boolean(rewindingMessageId) || (!draft.trim() && draftImages.length === 0)} aria-label="发送">SEND</button>
         </div>
       </div>
@@ -1439,7 +1431,6 @@ function ChatView({
             </span>
           </label>}
         </div>
-        <small className="composer-tip">Enter 发送 · Shift+Enter 换行 · 对话随项目自动保存</small>
       </div>
     </div>
     {role && <ConversationRoleDialog

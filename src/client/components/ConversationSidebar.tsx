@@ -787,12 +787,7 @@ function ConversationSidebarView({
           : <span aria-hidden="true" />}
       </header>}
       <header className="conversation-sidebar-header">
-        {!sidebarCollapsed && (
-          <h2>
-            <span>SESSIONS</span>
-            <small>/ CONVERSATIONS</small>
-          </h2>
-        )}
+        {!sidebarCollapsed && <h2>SESSIONS</h2>}
         <button
           type="button"
           className="conversation-sidebar-toggle"
@@ -851,7 +846,7 @@ function ConversationSidebarView({
         </nav>
       )}
 
-      <footer className="conversation-sidebar-footer">
+      {!sidebarCollapsed && <footer className="conversation-sidebar-footer">
         <button
           type="button"
           className="conversation-sidebar-create"
@@ -859,10 +854,10 @@ function ConversationSidebarView({
           disabled={!actionsEnabled || deletionBlocked}
           onClick={onCreate}
         >
-          <span aria-hidden="true">＋</span>
-          {!sidebarCollapsed && <span>新建会话</span>}
+          <span aria-hidden="true">+</span>
+          <span>新建会话</span>
         </button>
-      </footer>
+      </footer>}
       {!sidebarCollapsed && <div
         className="conversation-sidebar-resize-handle"
         role="separator"

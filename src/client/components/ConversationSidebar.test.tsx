@@ -569,7 +569,7 @@ describe("ConversationSidebar", () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 
-  it("is controlled when collapsed and keeps an explicit create action at the bottom", () => {
+  it("is controlled when collapsed and hides the create action", () => {
     const onToggleCollapsed = vi.fn();
     const onCreate = vi.fn();
     const { rerender } = render(
@@ -608,9 +608,9 @@ describe("ConversationSidebar", () => {
     );
     expect(screen.getByRole("complementary", { name: "项目会话栏" })).toHaveClass("collapsed");
     expect(screen.queryByRole("navigation", { name: "项目会话" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "新建会话" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "展开会话栏" }));
     expect(onToggleCollapsed).toHaveBeenLastCalledWith(false);
-    expect(screen.getByRole("button", { name: "新建会话" })).toBeInTheDocument();
     expect(screen.queryByRole("separator", { name: "调整会话栏宽度" }))
       .not.toBeInTheDocument();
   });

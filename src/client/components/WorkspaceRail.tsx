@@ -168,7 +168,7 @@ function WorkspaceRailView({
       aria-label="添加工作区"
       title="添加工作区"
       onClick={onAdd}
-    >＋</button>
+    ><span aria-hidden="true">+</span></button>
   </nav>;
 }
 

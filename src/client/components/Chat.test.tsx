@@ -359,12 +359,11 @@ describe("Chat", () => {
 
     const stop = screen.getByRole("button", { name: "停止" });
     expect(scope).toContainElement(stop);
-    for (let index = 0; index < 5; index += 1) {
+    for (let index = 0; index < 4; index += 1) {
       fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
     }
     expect(stop).toHaveFocus();
-    fireEvent.keyDown(document, { key: "Tab" });
-    expect(screen.getByRole("button", { name: "添加图片" })).toHaveFocus();
+    expect(screen.queryByRole("button", { name: "添加图片" })).not.toBeInTheDocument();
     fireEvent.keyDown(document, { key: "Tab" });
     expect(screen.getByRole("button", { name: "打开任务" })).toHaveFocus();
     expect(scope.contains(document.activeElement)).toBe(true);
@@ -729,6 +728,25 @@ describe("Chat", () => {
     expect(within(mission).queryByRole("button")).not.toBeInTheDocument();
   });
 
+  it.each([
+    [false, "已暂停", "is-paused"],
+    [true, "执行中", "is-executing"],
+  ])("labels Mission status separately from active objectives: %s", (busy, label, statusClass) => {
+    render(view(emptyChat, "", undefined, {
+      busy,
+      activeRun: busy ? { id: "run-1", phase: "running" } : undefined,
+      loopList: {
+        armed: true,
+        items: [{ id: "active", text: "Current objective", status: "active" }],
+      },
+    }));
+
+    const mission = screen.getByRole("complementary", { name: "Mission Command" });
+    expect(within(mission).getByText(`STATUS · ${label}`)).toHaveClass(statusClass);
+    expect(within(mission).getByText("Current objective").closest("li"))
+      .toHaveClass("is-active");
+  });
+
   it("shows the most recent settled run's average output rate", () => {
     const rendered = render(view(emptyChat));
     expect(rendered.container.querySelector(".mission-context-rate"))
@@ -993,15 +1011,14 @@ describe("Chat", () => {
     }
     vi.stubGlobal("FileReader", ControlledFileReader);
     const onImagesChange = vi.fn();
-    const rendered = render(view(emptyChat, "", undefined, { onImagesChange }));
-    const input = rendered.container.querySelector<HTMLInputElement>("input[type=file]");
-    expect(input).not.toBeNull();
+    render(view(emptyChat, "", undefined, { onImagesChange }));
+    const textarea = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
 
-    fireEvent.change(input!, {
-      target: { files: [new File(["A"], "a.png", { type: "image/png" })] },
+    fireEvent.paste(textarea, {
+      clipboardData: { files: [new File(["A"], "a.png", { type: "image/png" })] },
     });
-    fireEvent.change(input!, {
-      target: { files: [new File(["B"], "b.png", { type: "image/png" })] },
+    fireEvent.paste(textarea, {
+      clipboardData: { files: [new File(["B"], "b.png", { type: "image/png" })] },
     });
     await waitFor(() => expect(ControlledFileReader.pending).toHaveLength(1));
     ControlledFileReader.pending[0]!.finish("data:image/png;base64,iVBORw0KGgo=");
