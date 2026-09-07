@@ -18,12 +18,18 @@ export interface LoopListElapsedMinutes {
 }
 
 /**
- * A run-scoped image which is copied only into the provider request. It never
+ * Run-scoped computer evidence copied only into the provider request. It never
  * becomes an AgentMessage or a persisted tool result.
  */
+export interface ComputerProviderImagePart {
+  readonly label: string;
+  readonly image: ImageContent;
+}
+
 export interface ComputerProviderImage {
   readonly sourceToolCallId: string;
-  readonly image: ImageContent;
+  /** PiRuntime supplies one or two ordered, labeled evidence images. */
+  readonly images: readonly ComputerProviderImagePart[];
 }
 
 export interface ComputerProviderImageResolver {
@@ -111,7 +117,7 @@ function createWorkHint(
   })}`;
 }
 
-function appendProviderImage(
+function appendProviderEvidence(
   messages: LlmMessages,
   candidate: ComputerProviderImage | undefined,
 ): { messages: LlmMessages; presented?: string } {
@@ -130,9 +136,13 @@ function appendProviderImage(
   if (index < 0) return { messages };
   const target = messages[index]!;
   if (target.role !== "toolResult") return { messages };
+  const evidenceParts = candidate.images.flatMap(({ label, image }) => [
+    { type: "text" as const, text: label },
+    image,
+  ]);
   const content = typeof target.content === "string"
-    ? [{ type: "text" as const, text: target.content }, candidate.image]
-    : [...target.content, candidate.image];
+    ? [{ type: "text" as const, text: target.content }, ...evidenceParts]
+    : [...target.content, ...evidenceParts];
   return {
     messages: [
       ...messages.slice(0, index),
@@ -193,12 +203,12 @@ export function installAgentContextBudget(
       // A stale image boundary must not block unrelated model traffic.
       candidate = undefined;
     }
-    const injected = appendProviderImage(providerMessages, candidate);
+    const injected = appendProviderEvidence(providerMessages, candidate);
     providerMessages = injected.messages;
     if (injected.presented !== undefined) {
-      // Mark only after an exact converted tool result received the copy. A
-      // mark failure rejects conversion, so this logical decision retries with
-      // the same retained bytes instead of sending an unauthorizable image.
+      // Mark only after every ordered evidence part was copied to its exact
+      // converted tool result. A mark failure rejects conversion, so this
+      // logical decision retries with the same retained bytes and labels.
       computerProviderImage?.presented(injected.presented);
     }
 

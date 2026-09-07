@@ -2,7 +2,9 @@
 
 日期：2026-09-07
 
-状态：**已实现；待 Windows 人工 smoke**
+状态：**历史最小基线；其单图与旧动作范围已被升级合同替换**
+
+> **Superseded（2026-09-07）**：本文保留为最初最小实现的历史设计。当前 Computer Use 合同（before/after pair、`move`/`mouseHold`/`drag`、foreground binding、settle 与 provider-only 双图）以 [观察与输入能力升级设计稿](2026-09-07-computer-use-observation-input-upgrade-design.md) 为准；本文所述“最多一张 PNG”和旧 action 集不再是现行约束。
 
 ## 1. 目标
 

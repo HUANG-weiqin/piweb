@@ -40,6 +40,13 @@ import {
 import {
   createWindowsDesktopAdapter,
   DesktopController,
+  MAX_COMPUTER_DRAG_DURATION_MS,
+  MAX_COMPUTER_HOLD_MS,
+  MAX_COMPUTER_SCROLL_DELTA,
+  MAX_COMPUTER_SETTLE_MS,
+  MAX_COMPUTER_TYPE_BYTES,
+  MAX_COMPUTER_WAIT_MS,
+  SUPPORTED_DESKTOP_KEYS,
   type ComputerToolResult,
   type WindowsDesktopAdapter,
 } from "./computer-use.js";
@@ -775,18 +782,27 @@ export class PiRuntime implements PiRuntimeLike {
           if (authorizedFrameOwner !== undefined) clearObservation();
           return undefined;
         }
-        const image = controller.prepareProviderImage(
+        const evidence = controller.prepareProviderEvidence(
           pending.owner,
           pending.sourceToolCallId,
         );
-        if (!image) return undefined;
+        if (!evidence) return undefined;
         return {
-          sourceToolCallId: image.sourceToolCallId,
-          image: {
-            type: "image",
-            data: Buffer.from(image.png).toString("base64"),
-            mimeType: image.mimeType,
-          },
+          sourceToolCallId: evidence.sourceToolCallId,
+          images: evidence.images.map((image) => ({
+            label: image.kind === "current"
+              ? "[computer observation current]"
+              : image.kind === "before"
+                ? "[computer observation before action batch]"
+                : image.kind === "after"
+                  ? "[computer observation after action batch]"
+                  : "[computer observation before action batch; after unavailable]",
+            image: {
+              type: "image" as const,
+              data: Buffer.from(image.png).toString("base64"),
+              mimeType: image.mimeType,
+            },
+          })),
         };
       },
       presented: (sourceToolCallId) => {
@@ -794,7 +810,7 @@ export class PiRuntime implements PiRuntimeLike {
         if (
           !pending
           || pending.sourceToolCallId !== sourceToolCallId
-          || !controller?.markProviderImagePresented(
+          || !controller?.markProviderEvidencePresented(
             pending.owner,
             sourceToolCallId,
           )
@@ -806,7 +822,9 @@ export class PiRuntime implements PiRuntimeLike {
     const lifecycle: ComputerUseSessionLifecycle = {
       completeAssistantDecision: (toolCallIds) => {
         const pending = pendingImage;
+        const decisionOwner = pending?.owner ?? authorizedFrameOwner ?? leaseOwner;
         pendingImage = undefined;
+        if (decisionOwner !== undefined) controller?.beginAssistantDecision(decisionOwner);
         if (!pending || !controller) {
           // A later successful assistant decision closes a frame whose first
           // call was rejected before it reached this custom tool.
@@ -827,13 +845,20 @@ export class PiRuntime implements PiRuntimeLike {
         if (owner !== undefined) await controller?.release(owner);
       },
     };
+    const supportedComputerKeys = Object.keys(SUPPORTED_DESKTOP_KEYS).join(", ");
     const actionParameters = Type.Object({
       kind: Type.String(),
       x: Type.Optional(Type.Number()),
       y: Type.Optional(Type.Number()),
+      fromX: Type.Optional(Type.Number()),
+      fromY: Type.Optional(Type.Number()),
+      toX: Type.Optional(Type.Number()),
+      toY: Type.Optional(Type.Number()),
       button: Type.Optional(Type.String()),
       text: Type.Optional(Type.String()),
       keys: Type.Optional(Type.Array(Type.String())),
+      holdMs: Type.Optional(Type.Number()),
+      durationMs: Type.Optional(Type.Number()),
       deltaX: Type.Optional(Type.Number()),
       deltaY: Type.Optional(Type.Number()),
       ms: Type.Optional(Type.Number()),
@@ -841,18 +866,26 @@ export class PiRuntime implements PiRuntimeLike {
     const tool = defineTool({
       name: "computer",
       label: "Computer",
-      description:
-        "Observe the current primary Windows display and send a small sequential batch of local foreground desktop input. Coordinates are screenshot pixels and require an image from the current provider decision.",
+      description: [
+        "Observe the current primary Windows display and send one sequential local foreground batch of at most 8 actions.",
+        "Kinds: click{x,y,button?}; move{x,y}; mouseHold{x,y,button?,holdMs?}; drag{fromX,fromY,toX,toY,button?,durationMs?}; type{text}; keypress{keys,holdMs?}; scroll{x,y,deltaX?,deltaY?}; wait{ms}.",
+        `button is left or right. keypress keys (1-4) are: ${supportedComputerKeys}.`,
+        `Limits: type ${MAX_COMPUTER_TYPE_BYTES} UTF-8 bytes; holdMs <= ${MAX_COMPUTER_HOLD_MS}; durationMs <= ${MAX_COMPUTER_DRAG_DURATION_MS}; wait ms <= ${MAX_COMPUTER_WAIT_MS}; abs scroll delta <= ${MAX_COMPUTER_SCROLL_DELTA} with at least one nonzero scroll delta; settleMs 0-${MAX_COMPUTER_SETTLE_MS}.`,
+        "Coordinate actions use only current from an initial single image, or after from paired/after-only evidence. before and historical_before are comparison-only and never authorize coordinates. observe:true captures current (no actions) or post-action evidence after a short settle; an action observation can attach before and after images and therefore costs about twice the visual tokens. observe:false returns no image. sent means Windows accepted host dispatch, not that the app succeeded.",
+        "If the result is foreground_mismatch, dispatch was blocked: re-observe before retrying coordinate input.",
+      ].join(" "),
       promptSnippet:
-        "Use computer({ actions: [], observe: true }) before coordinate actions. Only use click/scroll coordinates from the current provider turn's screenshot; re-observe after UI-changing actions when confirmation is needed.",
+        "Use computer({ actions: [], observe: true }) before coordinate actions. Only use current-provider-image coordinates. Re-observe after UI-changing actions; do not infer application success from sent.",
       promptGuidelines: [
-        "Call observe first before using click or scroll coordinates.",
-        "Coordinates are valid only for the screenshot attached to the current provider turn.",
-        "Actions are sent sequentially and report host dispatch, not application success.",
+        "Use only the listed flat action fields; unsupported fields, keys, buttons, or out-of-range durations are rejected before desktop input.",
+        "Call observe first before coordinate actions. Use current only for an initial single image, and after only for paired/after-only evidence; before and historical_before never authorize coordinates.",
+        "observe:true captures provider-only evidence (default post-action settle is 150ms); an action pair carries two images and about twice the visual-token cost. observe:false does not capture. Actions are sequential; sent is host dispatch, not UI/business success.",
+        "A foreground_mismatch means no input was sent; re-observe before any coordinate retry.",
       ],
       parameters: Type.Object({
         actions: Type.Array(actionParameters, { maxItems: 8 }),
         observe: Type.Boolean(),
+        settleMs: Type.Optional(Type.Number()),
       }, { additionalProperties: false }),
       execute: async (toolCallId, input, signal) => {
         const owner = options.getOwner();
@@ -879,29 +912,25 @@ export class PiRuntime implements PiRuntimeLike {
             visionSupported: true,
           });
         } catch (error) {
-          if (authorizedFrameOwner === owner) controller.clearObservation(owner);
-          authorizedFrameOwner = undefined;
+          // Schema, extension, and host preflight failures happen before a
+          // controller primitive/capture attempt. Keep this decision's frame
+          // for an exact sibling; resolver.get retires it at the next provider
+          // conversion boundary if nothing was admitted.
           throw error;
         }
-        if (result.details.outcome !== "desktop_busy") {
-          const authorizedOwner = authorizedFrameOwner;
-          authorizedFrameOwner = undefined;
-          // `execute` can reject an already-aborted run before the controller
-          // admits it. Retire that exact old frame here; a captured replacement
-          // is the only successful result that must survive this boundary.
-          if (
-            authorizedOwner === owner
-            && result.details.observation?.status !== "captured"
-          ) {
-            controller.clearObservation(owner);
-          }
-        }
-        if (result.details.observation?.status === "captured") {
+        const evidence = controller.prepareProviderEvidence(owner, toolCallId);
+        if (evidence) {
+          // Includes a completed pair/current/after-only observation and the
+          // deliberately non-authorizing historical-before after_missing case.
           pendingImage = { owner, sourceToolCallId: toolCallId };
+          authorizedFrameOwner = undefined;
         } else if (
           result.details.outcome === "completed"
           || result.details.outcome === "interrupted"
         ) {
+          // Do not clear an unconsumed authorized frame here. A pre-admission
+          // abort has no desktop side effect and retains it for its sibling;
+          // the next conversion boundary still retires it if unused.
           pendingImage = undefined;
         }
         return {

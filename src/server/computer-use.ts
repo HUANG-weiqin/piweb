@@ -4,13 +4,22 @@ import { deflateSync } from "node:zlib";
 export const MAX_COMPUTER_ACTIONS = 8;
 export const MAX_COMPUTER_TYPE_BYTES = 4_096;
 export const MAX_COMPUTER_WAIT_MS = 5_000;
+export const MAX_COMPUTER_HOLD_MS = 5_000;
+export const MAX_COMPUTER_DRAG_DURATION_MS = 5_000;
+export const MAX_COMPUTER_SETTLE_MS = 2_000;
+/** A short post-action sampling delay; initial observations remain immediate. */
+export const DEFAULT_COMPUTER_SETTLE_MS = 150;
 /** Bounds one whole capture/action batch, not merely one wait primitive. */
 export const MAX_COMPUTER_CALL_MS = 15_000;
 export const MAX_COMPUTER_SCROLL_DELTA = 10_000;
 export const MAX_DESKTOP_PNG_BYTES = 16 * 1024 * 1024;
+/** A comparison retains no more raw PNG bytes than the prior single-image limit. */
+export const MAX_COMPUTER_PAIR_PNG_BYTES = MAX_DESKTOP_PNG_BYTES;
 
 const MAX_CAPTURE_DIMENSION = 32_768;
 const MAX_CAPTURE_PIXELS = 32 * 1024 * 1024;
+/** Bounds one synchronous SendInput call while allowing timers/abort between text chunks. */
+const MAX_TYPE_CODE_UNITS_PER_NATIVE_BATCH = 128;
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 
 export const SUPPORTED_DESKTOP_KEYS: Readonly<Record<string, number>> = Object.freeze({
@@ -92,6 +101,12 @@ export interface DesktopBounds {
   height: number;
 }
 
+/** Opaque, process-local foreground binding; never projected outside the desktop boundary. */
+export interface DesktopForegroundIdentity {
+  hwnd: string;
+  processId: number;
+}
+
 export interface DesktopCapture {
   /** A complete PNG. The controller copies and bounds it before retaining it. */
   png: Uint8Array;
@@ -99,6 +114,8 @@ export interface DesktopCapture {
   height: number;
   /** Physical input-coordinate bounds for the captured primary display. */
   bounds: DesktopBounds;
+  /** Stable immediately before and after capture; validates later input target context. */
+  foreground: DesktopForegroundIdentity;
 }
 
 export interface DesktopPoint {
@@ -112,14 +129,42 @@ export interface DesktopClick {
   button: "left" | "right";
 }
 
+export interface DesktopMove {
+  point: DesktopPoint;
+}
+
 export interface DesktopScroll {
   point: DesktopPoint;
   deltaX: number;
   deltaY: number;
 }
 
-/** `unknown` means Windows did not confirm that the complete primitive was sent. */
-export type DesktopPrimitiveDispatch = "sent" | "unknown";
+export interface DesktopMouseHold {
+  point: DesktopPoint;
+  button: "left" | "right";
+  holdMs: number;
+}
+
+export interface DesktopDrag {
+  from: DesktopPoint;
+  to: DesktopPoint;
+  button: "left" | "right";
+  /** Fixed time from confirmed down to the endpoint move; no smooth path is promised. */
+  durationMs: number;
+}
+
+/**
+ * The public action status remains sent/unknown. This richer internal result
+ * is reserved for the exceptional case where an adapter cannot confirm it
+ * released a key or button that may have been pressed.
+ */
+export interface DesktopPressedStateUncertain {
+  status: "unknown";
+  pressedState: "uncertain";
+}
+
+/** `unknown` without pressedState uncertainty is clean enough to release the lease. */
+export type DesktopPrimitiveDispatch = "sent" | "unknown" | DesktopPressedStateUncertain;
 
 /**
  * The only platform boundary used by DesktopController. Fakes can implement it
@@ -127,21 +172,42 @@ export type DesktopPrimitiveDispatch = "sent" | "unknown";
  */
 export interface WindowsDesktopAdapter {
   capture(signal: AbortSignal): Promise<DesktopCapture>;
+  getForegroundIdentity(signal: AbortSignal): Promise<DesktopForegroundIdentity>;
   click(input: DesktopClick, signal: AbortSignal): Promise<DesktopPrimitiveDispatch>;
   type(text: string, signal: AbortSignal): Promise<DesktopPrimitiveDispatch>;
-  keypress(keys: readonly string[], signal: AbortSignal): Promise<DesktopPrimitiveDispatch>;
+  keypress(
+    keys: readonly string[],
+    signal: AbortSignal,
+    holdMs?: number,
+  ): Promise<DesktopPrimitiveDispatch>;
+  move(input: DesktopMove, signal: AbortSignal): Promise<DesktopPrimitiveDispatch>;
+  mouseHold(input: DesktopMouseHold, signal: AbortSignal): Promise<DesktopPrimitiveDispatch>;
+  drag(input: DesktopDrag, signal: AbortSignal): Promise<DesktopPrimitiveDispatch>;
   scroll(input: DesktopScroll, signal: AbortSignal): Promise<DesktopPrimitiveDispatch>;
   wait(ms: number, signal: AbortSignal): Promise<DesktopPrimitiveDispatch>;
   dispose?(): Promise<void> | void;
 }
 
+export type DesktopProviderEvidenceKind =
+  | "current"
+  | "before"
+  | "after"
+  | "historical_before";
+
 export interface DesktopProviderImage {
   sourceToolCallId: string;
+  kind: DesktopProviderEvidenceKind;
   mimeType: "image/png";
-  /** A caller-owned copy. Mutating it cannot alter the retained observation. */
+  /** A caller-owned copy. Mutating it cannot alter retained evidence. */
   png: Uint8Array;
   width: number;
   height: number;
+}
+
+export interface DesktopProviderEvidence {
+  sourceToolCallId: string;
+  /** One image for current/after-only/historical-before, two for a pair. */
+  images: readonly DesktopProviderImage[];
 }
 
 export interface DesktopControllerRequest {
@@ -160,13 +226,39 @@ export interface ComputerActionResult {
   status: ComputerActionStatus;
 }
 
+export type ComputerCapturedObservation = {
+  status: "captured";
+  width: number;
+  height: number;
+};
+
+export type ComputerUnavailableObservation = { status: "unavailable" };
+
+export type ComputerObservation =
+  | (ComputerCapturedObservation & {
+      before?: ComputerCapturedObservation;
+      after?: ComputerCapturedObservation;
+      comparison?: "paired" | "after_only";
+    })
+  | (ComputerUnavailableObservation & {
+      before?: ComputerCapturedObservation;
+      after?: ComputerUnavailableObservation;
+      comparison?: "after_missing" | "pair_too_large";
+    });
+
 export interface ComputerResultDetails {
   outcome: "completed" | "interrupted" | "desktop_busy" | "rejected";
   actions: readonly ComputerActionResult[];
-  observation?:
-    | { status: "captured"; width: number; height: number }
-    | { status: "unavailable" };
-  reason?: "vision_required" | "controller_disposed" | "aborted" | "timed_out";
+  observation?: ComputerObservation;
+  reason?:
+    | "vision_required"
+    | "controller_disposed"
+    | "pressed_state_uncertain"
+    | "decision_consumed"
+    | "pair_too_large"
+    | "foreground_mismatch"
+    | "aborted"
+    | "timed_out";
 }
 
 export interface ComputerToolResult {
@@ -174,44 +266,70 @@ export interface ComputerToolResult {
   details: ComputerResultDetails;
 }
 
-export type ComputerActionKind = "click" | "type" | "keypress" | "scroll" | "wait";
+export type ComputerActionKind =
+  | "click"
+  | "move"
+  | "mouseHold"
+  | "drag"
+  | "type"
+  | "keypress"
+  | "scroll"
+  | "wait";
 
 type ValidatedAction =
   | { kind: "click"; x: number; y: number; button: "left" | "right" }
+  | { kind: "move"; x: number; y: number }
+  | { kind: "mouseHold"; x: number; y: number; button: "left" | "right"; holdMs: number }
+  | {
+      kind: "drag";
+      fromX: number;
+      fromY: number;
+      toX: number;
+      toY: number;
+      button: "left" | "right";
+      durationMs: number;
+    }
   | { kind: "type"; text: string }
-  | { kind: "keypress"; keys: readonly string[] }
+  | { kind: "keypress"; keys: readonly string[]; holdMs: number }
   | { kind: "scroll"; x: number; y: number; deltaX: number; deltaY: number }
   | { kind: "wait"; ms: number };
 
 interface ValidatedInput {
   actions: readonly ValidatedAction[];
   observe: boolean;
+  settleMs: number;
 }
 
 interface Frame {
   width: number;
   height: number;
   bounds: DesktopBounds;
+  foreground: DesktopForegroundIdentity;
 }
 
-interface PendingImage {
-  state: "pending_image";
-  owner: object;
-  sourceToolCallId: string;
-  /** True only after the converter appended this image to a provider request. */
-  presented: boolean;
+interface RetainedImage {
   png: Buffer;
   frame: Frame;
 }
 
-interface AuthorizedFrame {
+interface PendingEvidence {
+  state: "pending_evidence";
+  owner: object;
+  sourceToolCallId: string;
+  /** True only after the converter appended every evidence part to a provider request. */
+  presented: boolean;
+  images: readonly { kind: DesktopProviderEvidenceKind; image: RetainedImage }[];
+  /** Only current/after evidence can become a future coordinate frame. */
+  coordinateImage?: RetainedImage;
+}
+
+interface AuthorizedFrame extends RetainedImage {
   state: "authorized_frame";
   owner: object;
   toolCallIds: ReadonlySet<string>;
-  frame: Frame;
 }
 
-type ObservationState = PendingImage | AuthorizedFrame;
+type ObservationState = PendingEvidence | AuthorizedFrame;
 
 interface ActiveOperation {
   owner: object;
@@ -278,25 +396,68 @@ function normalizeKey(value: unknown): string {
   return normalized;
 }
 
+function normalizeButton(value: unknown, label: string): "left" | "right" {
+  const button = value ?? "left";
+  if (button !== "left" && button !== "right") {
+    throw new Error(`${label} button must be left or right`);
+  }
+  return button;
+}
+
 function normalizeAction(value: unknown): ValidatedAction {
   if (!isPlainRecord(value) || typeof value.kind !== "string") {
     throw new Error("computer action must be a flat object with a kind");
   }
 
   switch (value.kind) {
-    case "click": {
+    case "click":
       assertOnlyFields(value, ["kind", "x", "y", "button"], "click");
-      const button = value.button ?? "left";
-      if (button !== "left" && button !== "right") {
-        throw new Error("click button must be left or right");
-      }
       return {
         kind: "click",
         x: assertIntegerInRange(value.x, "click x", 0, MAX_CAPTURE_DIMENSION - 1),
         y: assertIntegerInRange(value.y, "click y", 0, MAX_CAPTURE_DIMENSION - 1),
-        button,
+        button: normalizeButton(value.button, "click"),
       };
-    }
+    case "move":
+      assertOnlyFields(value, ["kind", "x", "y"], "move");
+      return {
+        kind: "move",
+        x: assertIntegerInRange(value.x, "move x", 0, MAX_CAPTURE_DIMENSION - 1),
+        y: assertIntegerInRange(value.y, "move y", 0, MAX_CAPTURE_DIMENSION - 1),
+      };
+    case "mouseHold":
+      assertOnlyFields(value, ["kind", "x", "y", "button", "holdMs"], "mouseHold");
+      return {
+        kind: "mouseHold",
+        x: assertIntegerInRange(value.x, "mouseHold x", 0, MAX_CAPTURE_DIMENSION - 1),
+        y: assertIntegerInRange(value.y, "mouseHold y", 0, MAX_CAPTURE_DIMENSION - 1),
+        button: normalizeButton(value.button, "mouseHold"),
+        holdMs: value.holdMs === undefined
+          ? 0
+          : assertIntegerInRange(value.holdMs, "mouseHold holdMs", 0, MAX_COMPUTER_HOLD_MS),
+      };
+    case "drag":
+      assertOnlyFields(
+        value,
+        ["kind", "fromX", "fromY", "toX", "toY", "button", "durationMs"],
+        "drag",
+      );
+      return {
+        kind: "drag",
+        fromX: assertIntegerInRange(value.fromX, "drag fromX", 0, MAX_CAPTURE_DIMENSION - 1),
+        fromY: assertIntegerInRange(value.fromY, "drag fromY", 0, MAX_CAPTURE_DIMENSION - 1),
+        toX: assertIntegerInRange(value.toX, "drag toX", 0, MAX_CAPTURE_DIMENSION - 1),
+        toY: assertIntegerInRange(value.toY, "drag toY", 0, MAX_CAPTURE_DIMENSION - 1),
+        button: normalizeButton(value.button, "drag"),
+        durationMs: value.durationMs === undefined
+          ? 0
+          : assertIntegerInRange(
+            value.durationMs,
+            "drag durationMs",
+            0,
+            MAX_COMPUTER_DRAG_DURATION_MS,
+          ),
+      };
     case "type": {
       assertOnlyFields(value, ["kind", "text"], "type");
       if (typeof value.text !== "string") throw new Error("type text must be a string");
@@ -307,12 +468,18 @@ function normalizeAction(value: unknown): ValidatedAction {
       return { kind: "type", text: value.text };
     }
     case "keypress": {
-      assertOnlyFields(value, ["kind", "keys"], "keypress");
+      assertOnlyFields(value, ["kind", "keys", "holdMs"], "keypress");
       if (!Array.isArray(value.keys) || value.keys.length < 1 || value.keys.length > 4) {
         throw new Error("keypress keys must contain 1 to 4 supported keys");
       }
       const keys = value.keys.map(normalizeKey);
-      return { kind: "keypress", keys: Object.freeze(keys) };
+      return {
+        kind: "keypress",
+        keys: Object.freeze(keys),
+        holdMs: value.holdMs === undefined
+          ? 0
+          : assertIntegerInRange(value.holdMs, "keypress holdMs", 0, MAX_COMPUTER_HOLD_MS),
+      };
     }
     case "scroll": {
       assertOnlyFields(value, ["kind", "x", "y", "deltaX", "deltaY"], "scroll");
@@ -356,7 +523,7 @@ function normalizeAction(value: unknown): ValidatedAction {
 
 function normalizeInput(value: unknown): ValidatedInput {
   if (!isPlainRecord(value)) throw new Error("computer input must be a flat object");
-  assertOnlyFields(value, ["actions", "observe"], "computer input");
+  assertOnlyFields(value, ["actions", "observe", "settleMs"], "computer input");
   if (!Array.isArray(value.actions) || typeof value.observe !== "boolean") {
     throw new Error("computer input requires actions and observe");
   }
@@ -366,6 +533,14 @@ function normalizeInput(value: unknown): ValidatedInput {
   if (value.actions.length === 0 && value.observe === false) {
     throw new Error("computer requires an action or observe=true");
   }
+  const settleMs = value.settleMs === undefined
+    ? value.observe && value.actions.length > 0
+      ? DEFAULT_COMPUTER_SETTLE_MS
+      : 0
+    : assertIntegerInRange(value.settleMs, "computer settleMs", 0, MAX_COMPUTER_SETTLE_MS);
+  if ((!value.observe || value.actions.length === 0) && settleMs !== 0) {
+    throw new Error("computer settleMs requires actions and observe=true");
+  }
   const actions: ValidatedAction[] = [];
   for (let index = 0; index < value.actions.length; index += 1) {
     if (!Object.hasOwn(value.actions, index)) {
@@ -373,14 +548,66 @@ function normalizeInput(value: unknown): ValidatedInput {
     }
     actions.push(normalizeAction(value.actions[index]));
   }
-  return { actions: Object.freeze(actions), observe: value.observe };
+  return { actions: Object.freeze(actions), observe: value.observe, settleMs };
 }
 
-function hasCoordinateAction(action: ValidatedAction): action is Extract<
-  ValidatedAction,
-  { x: number; y: number }
-> {
-  return action.kind === "click" || action.kind === "scroll";
+function hasCoordinateAction(action: ValidatedAction): boolean {
+  return action.kind === "click"
+    || action.kind === "move"
+    || action.kind === "mouseHold"
+    || action.kind === "drag"
+    || action.kind === "scroll";
+}
+
+function validateActionCoordinates(frame: Frame, action: ValidatedAction): void {
+  switch (action.kind) {
+    case "click":
+    case "move":
+    case "mouseHold":
+    case "scroll":
+      mapPoint(frame, action.x, action.y);
+      return;
+    case "drag":
+      mapPoint(frame, action.fromX, action.fromY);
+      mapPoint(frame, action.toX, action.toY);
+      return;
+    default:
+      return;
+  }
+}
+
+function actionCanLeavePressedState(action: ValidatedAction): boolean {
+  return action.kind === "click"
+    || action.kind === "mouseHold"
+    || action.kind === "drag"
+    || action.kind === "type"
+    || action.kind === "keypress";
+}
+
+function dispatchStatus(value: DesktopPrimitiveDispatch): "sent" | "unknown" {
+  return typeof value === "string" ? value : value.status;
+}
+
+function hasPressedStateUncertainty(value: DesktopPrimitiveDispatch): boolean {
+  return typeof value !== "string" && value.pressedState === "uncertain";
+}
+
+function validateForegroundIdentity(value: unknown): DesktopForegroundIdentity {
+  if (!isPlainRecord(value) || typeof value.hwnd !== "string" || value.hwnd.length === 0) {
+    throw new Error("Desktop capture has invalid foreground identity");
+  }
+  const processId = value.processId;
+  if (!Number.isInteger(processId) || typeof processId !== "number" || processId < 1 || processId > 0xffff_ffff) {
+    throw new Error("Desktop capture has invalid foreground identity");
+  }
+  return Object.freeze({ hwnd: value.hwnd, processId });
+}
+
+function sameForeground(
+  first: DesktopForegroundIdentity,
+  second: DesktopForegroundIdentity,
+): boolean {
+  return first.hwnd === second.hwnd && first.processId === second.processId;
 }
 
 function validateFrame(value: DesktopCapture): Frame {
@@ -418,6 +645,7 @@ function validateFrame(value: DesktopCapture): Frame {
       width: bounds.width,
       height: bounds.height,
     }),
+    foreground: validateForegroundIdentity(value.foreground),
   });
 }
 
@@ -553,45 +781,58 @@ export class DesktopController {
   private releaseOwner: object | undefined;
   private activeOperation: ActiveOperation | undefined;
   private observation: ObservationState | undefined;
+  /** One controller-admitted batch exhausts all sibling calls in that decision. */
+  private readonly spentDecisionOwners = new WeakSet<object>();
+  /** Set only when a compound input cannot confirm a final key/button up. */
+  private pressedStateUncertain = false;
   private disposed = false;
   private disposePromise: Promise<void> | undefined;
 
   constructor(private readonly adapter: WindowsDesktopAdapter) {}
 
   /**
-   * Returns a fresh PNG copy for one provider decision. It relies on the exact
-   * source tool-call correlation, not AgentMessage object identity, so it is
-   * safe across SDK structured clones and retries.
+   * Returns fresh provider-only evidence for one exact converted tool result.
+   * The stored bytes stay retained for a converter retry until presentation
+   * succeeds; no AgentMessage or persisted tool result is mutated.
    */
-  prepareProviderImage(
+  prepareProviderEvidence(
     owner: object,
     sourceToolCallId: string,
-  ): DesktopProviderImage | undefined {
+  ): DesktopProviderEvidence | undefined {
     const observation = this.observation;
     if (
-      observation?.state !== "pending_image"
+      observation?.state !== "pending_evidence"
       || observation.owner !== owner
       || observation.sourceToolCallId !== sourceToolCallId
     ) {
       return undefined;
     }
     return Object.freeze({
-      sourceToolCallId: observation.sourceToolCallId,
-      mimeType: "image/png" as const,
-      png: Uint8Array.from(observation.png),
-      width: observation.frame.width,
-      height: observation.frame.height,
+      sourceToolCallId,
+      images: Object.freeze(observation.images.map(({ kind, image }) => Object.freeze({
+        sourceToolCallId,
+        kind,
+        mimeType: "image/png" as const,
+        png: Uint8Array.from(image.png),
+        width: image.frame.width,
+        height: image.frame.height,
+      }))),
     });
   }
 
-  /**
-   * The LLM converter calls this only after it appended the matching image to
-   * its LLM-only tool result. It leaves the PNG available for provider retry.
-   */
-  markProviderImagePresented(owner: object, sourceToolCallId: string): boolean {
+  /** Compatibility wrapper for the earlier single-image resolver contract. */
+  prepareProviderImage(
+    owner: object,
+    sourceToolCallId: string,
+  ): DesktopProviderImage | undefined {
+    return this.prepareProviderEvidence(owner, sourceToolCallId)?.images[0];
+  }
+
+  /** The converter calls this only after all evidence parts were appended. */
+  markProviderEvidencePresented(owner: object, sourceToolCallId: string): boolean {
     const observation = this.observation;
     if (
-      observation?.state !== "pending_image"
+      observation?.state !== "pending_evidence"
       || observation.owner !== owner
       || observation.sourceToolCallId !== sourceToolCallId
     ) {
@@ -601,11 +842,15 @@ export class DesktopController {
     return true;
   }
 
+  /** Compatibility wrapper for the earlier single-image resolver contract. */
+  markProviderImagePresented(owner: object, sourceToolCallId: string): boolean {
+    return this.markProviderEvidencePresented(owner, sourceToolCallId);
+  }
+
   /**
-   * Called only after the provider produced a successful assistant message.
-   * It requires converter presentation proof, drops PNG bytes, and grants its
-   * coordinate frame to exactly that message's computer tool-call IDs. An
-   * empty list drops an unused image.
+   * Called only after a provider assistant decision. Historical before-only
+   * evidence deliberately authorizes nothing; current/after evidence grants
+   * coordinates only to the listed sibling computer calls.
    */
   authorizeFrame(owner: object, computerToolCallIds: readonly string[]): boolean {
     const toolCallIds = new Set<string>();
@@ -618,27 +863,37 @@ export class DesktopController {
 
     const observation = this.observation;
     if (
-      observation?.state !== "pending_image"
+      observation?.state !== "pending_evidence"
       || observation.owner !== owner
       || !observation.presented
     ) {
       return false;
     }
-    if (toolCallIds.size === 0) {
+    const coordinateImage = observation.coordinateImage;
+    if (toolCallIds.size === 0 || coordinateImage === undefined) {
       this.observation = undefined;
       return false;
     }
+    // A successfully projected image necessarily belongs to the next
+    // assistant decision, so it re-arms that owner's single admitted batch.
+    this.spentDecisionOwners.delete(owner);
     this.observation = {
       state: "authorized_frame",
       owner,
       toolCallIds,
-      frame: observation.frame,
+      png: coordinateImage.png,
+      frame: coordinateImage.frame,
     };
     return true;
   }
 
   clearObservation(owner: object): void {
     if (this.observation?.owner === owner) this.observation = undefined;
+  }
+
+  /** Host-only boundary between assistant decisions; never called by a tool execution. */
+  beginAssistantDecision(owner: object): void {
+    this.spentDecisionOwners.delete(owner);
   }
 
   async release(owner: object): Promise<void> {
@@ -649,6 +904,7 @@ export class DesktopController {
     }
     if (this.leaseOwner === owner) {
       this.clearObservation(owner);
+      this.spentDecisionOwners.delete(owner);
       this.leaseOwner = undefined;
     }
     if (this.releaseOwner === owner) this.releaseOwner = undefined;
@@ -678,35 +934,48 @@ export class DesktopController {
       throw new Error("computer requires an AbortSignal");
     }
 
+    // All schema work precedes lease acquisition or capability consumption.
     const input = normalizeInput(request.input);
     const results = actionResults(input.actions);
     if (!request.visionSupported) {
-      return makeResult({
-        outcome: "rejected",
-        reason: "vision_required",
-        actions: results,
-      });
+      return makeResult({ outcome: "rejected", reason: "vision_required", actions: results });
     }
     if (request.signal.aborted) {
       return makeResult({ outcome: "interrupted", reason: "aborted", actions: results });
     }
+    if (this.pressedStateUncertain) {
+      return makeResult({
+        outcome: "rejected",
+        reason: "pressed_state_uncertain",
+        actions: results,
+      });
+    }
+    if (this.spentDecisionOwners.has(request.owner)) {
+      return makeResult({
+        outcome: "rejected",
+        reason: "decision_consumed",
+        actions: results,
+      });
+    }
 
     const coordinateActions = input.actions.filter(hasCoordinateAction);
+    const authorized = this.getAuthorizedFrame(request.owner, request.toolCallId);
     let coordinateFrame: Frame | undefined;
     if (coordinateActions.length > 0) {
-      const observation = this.observation;
-      if (
-        observation?.state !== "authorized_frame"
-        || observation.owner !== request.owner
-        || !observation.toolCallIds.has(request.toolCallId)
-      ) {
+      if (authorized === undefined) {
         throw new Error("Coordinate actions require an authorized current observation");
       }
-      coordinateFrame = observation.frame;
+      coordinateFrame = authorized.frame;
       for (const action of coordinateActions) {
-        mapPoint(coordinateFrame, action.x, action.y);
+        validateActionCoordinates(coordinateFrame, action);
       }
     }
+    // Any actual action from this decision may produce an after comparison
+    // against the image the decision saw, even if the action itself has no
+    // coordinates (for example type or keypress).
+    const before = input.observe && input.actions.length > 0 && authorized !== undefined
+      ? this.copyRetainedImage(authorized)
+      : undefined;
 
     if (this.disposed) {
       return makeResult({
@@ -716,9 +985,8 @@ export class DesktopController {
       });
     }
     const operation = this.beginOperation(request.owner);
-    if (!operation) {
-      return makeResult({ outcome: "desktop_busy", actions: results });
-    }
+    if (!operation) return makeResult({ outcome: "desktop_busy", actions: results });
+
     const deadline = new AbortController();
     const deadlineAt = performance.now() + MAX_COMPUTER_CALL_MS;
     let timedOut = false;
@@ -738,80 +1006,150 @@ export class DesktopController {
       timedOut ? "timed_out" : "aborted";
 
     let operationDeferred = false;
-    const finishAfterQuiescence = (pending: Promise<unknown>): void => {
+    const finishAfterQuiescence = (
+      pending: Promise<unknown>,
+      action?: ValidatedAction,
+    ): void => {
       if (operationDeferred) return;
       operationDeferred = true;
       void pending.then(
-        () => this.finishOperation(operation),
-        () => this.finishOperation(operation),
+        (value) => {
+          if (action && this.dispatchLeavesPressedStateUncertain(action, value)) {
+            this.pressedStateUncertain = true;
+          }
+          this.finishOperation(operation);
+        },
+        () => {
+          if (action && actionCanLeavePressedState(action)) this.pressedStateUncertain = true;
+          this.finishOperation(operation);
+        },
       );
+    };
+    const verifyForeground = async (frame: Frame): Promise<"match" | "mismatch" | "aborted"> => {
+      const pending = Promise.resolve().then(() => this.adapter.getForegroundIdentity(effectiveRequest.signal));
+      const attempt = await awaitUntilAbort(pending, effectiveRequest.signal);
+      if (attempt.state === "aborted") {
+        finishAfterQuiescence(pending);
+        return "aborted";
+      }
+      // A synchronous FFI failure can return only after the timer callback was
+      // starved. Monotonic expiry remains the truthful result in that case.
+      if (expireDeadline() || effectiveRequest.signal.aborted) return "aborted";
+      if (attempt.state === "failed") return "mismatch";
+      try {
+        return sameForeground(frame.foreground, validateForegroundIdentity(attempt.value))
+          ? "match"
+          : "mismatch";
+      } catch {
+        return "mismatch";
+      }
     };
 
     try {
       if (input.actions.length === 0) {
+        if (expireDeadline() || effectiveRequest.signal.aborted) {
+          return makeResult({
+            outcome: "interrupted",
+            reason: interruptionReason(),
+            actions: results,
+          });
+        }
+        // The capture attempt itself is the admitted primitive that retires
+        // any older frame. Preflight cancellation above leaves it reusable.
+        this.spentDecisionOwners.add(request.owner);
         this.clearObservation(request.owner);
         return await this.captureResult(
           effectiveRequest,
           results,
+          undefined,
+          "current",
+          input.settleMs,
           interruptionReason,
           expireDeadline,
           finishAfterQuiescence,
         );
       }
 
-      // A batch is now admitted. Even a wait or later failure makes the old
-      // picture stale, so clear globally before its first primitive attempt.
-      this.clearObservation(request.owner);
+      let admitted = false;
       for (let index = 0; index < input.actions.length; index += 1) {
         if (expireDeadline() || effectiveRequest.signal.aborted) {
-          return makeResult({
-            outcome: "interrupted",
-            reason: interruptionReason(),
-            actions: results,
-            observation: { status: "unavailable" },
-          });
+          return this.interruptedResult(
+            effectiveRequest,
+            results,
+            admitted ? before : undefined,
+            interruptionReason(),
+          );
         }
-
+        // A foreground binding is a lease-scoped safety precondition, not a
+        // capability consumer. Read failure/mismatch retires only the stale
+        // frame and sends no input; cancellation preserves it for a sibling.
+        if (!admitted && authorized !== undefined) {
+          const foreground = await verifyForeground(authorized.frame);
+          if (foreground === "aborted") {
+            return makeResult({
+              outcome: "interrupted",
+              reason: interruptionReason(),
+              actions: results,
+            });
+          }
+          if (foreground !== "match") {
+            this.spentDecisionOwners.add(request.owner);
+            this.clearObservation(request.owner);
+            return makeResult({
+              outcome: "rejected",
+              reason: "foreground_mismatch",
+              actions: results,
+            });
+          }
+        }
+        // A successfully validated call consumes its capability only at the
+        // first concrete adapter attempt, never on schema/host rejection.
+        if (!admitted) {
+          admitted = true;
+          this.spentDecisionOwners.add(request.owner);
+          this.clearObservation(request.owner);
+        }
         const action = input.actions[index]!;
-        const pendingDispatch = this.dispatch(
-          action,
-          coordinateFrame,
-          effectiveRequest.signal,
-        );
+        const pendingDispatch = this.dispatch(action, coordinateFrame, effectiveRequest.signal);
         const attempt = await awaitUntilAbort(pendingDispatch, effectiveRequest.signal);
         if (attempt.state === "aborted") {
-          finishAfterQuiescence(pendingDispatch);
+          finishAfterQuiescence(pendingDispatch, action);
           results[index]!.status = "unknown";
-          return makeResult({
-            outcome: "interrupted",
-            reason: interruptionReason(),
-            actions: results,
-            observation: { status: "unavailable" },
-          });
+          return this.interruptedResult(
+            effectiveRequest,
+            results,
+            before,
+            interruptionReason(),
+          );
         }
 
-        // A native/encoding call can block the event loop past the timer. Do
-        // this on both success and failure paths before reporting its result.
+        // Native calls can block the event loop past the timer. Check both
+        // success and failure paths before exposing their state.
         const deadlineExpired = expireDeadline();
-        if (attempt.state === "failed" || attempt.value !== "sent") {
+        if (attempt.state === "failed") {
+          if (actionCanLeavePressedState(action)) this.pressedStateUncertain = true;
           results[index]!.status = "unknown";
-          return makeResult({
-            outcome: "interrupted",
-            reason: deadlineExpired || effectiveRequest.signal.aborted
-              ? interruptionReason()
-              : undefined,
-            actions: results,
-            observation: { status: "unavailable" },
-          });
+          return this.interruptedResult(
+            effectiveRequest,
+            results,
+            before,
+            deadlineExpired || effectiveRequest.signal.aborted ? interruptionReason() : undefined,
+          );
+        }
+        const status = dispatchStatus(attempt.value);
+        if (hasPressedStateUncertainty(attempt.value)) this.pressedStateUncertain = true;
+        if (status !== "sent") {
+          results[index]!.status = "unknown";
+          return this.interruptedResult(
+            effectiveRequest,
+            results,
+            before,
+            deadlineExpired || effectiveRequest.signal.aborted ? interruptionReason() : undefined,
+          );
         }
         results[index]!.status = "sent";
         if (deadlineExpired || effectiveRequest.signal.aborted) {
-          return makeResult({
-            outcome: "interrupted",
-            reason: interruptionReason(),
-            actions: results,
-            observation: { status: "unavailable" },
-          });
+          return this.interruptedResult(effectiveRequest, results, before, interruptionReason());
         }
       }
 
@@ -825,6 +1163,9 @@ export class DesktopController {
       return await this.captureResult(
         effectiveRequest,
         results,
+        before,
+        "after",
+        input.settleMs,
         interruptionReason,
         expireDeadline,
         finishAfterQuiescence,
@@ -837,7 +1178,7 @@ export class DesktopController {
   }
 
   private beginOperation(owner: object): ActiveOperation | undefined {
-    if (this.disposed || this.releaseOwner === owner) return undefined;
+    if (this.disposed || this.pressedStateUncertain || this.releaseOwner === owner) return undefined;
     if (this.leaseOwner === undefined) this.leaseOwner = owner;
     if (this.leaseOwner !== owner || this.activeOperation !== undefined) return undefined;
     const operation = createActiveOperation(owner);
@@ -848,6 +1189,91 @@ export class DesktopController {
   private finishOperation(operation: ActiveOperation): void {
     if (this.activeOperation === operation) this.activeOperation = undefined;
     operation.settle();
+  }
+
+  private getAuthorizedFrame(owner: object, toolCallId: string): AuthorizedFrame | undefined {
+    const observation = this.observation;
+    return observation?.state === "authorized_frame"
+      && observation.owner === owner
+      && observation.toolCallIds.has(toolCallId)
+      ? observation
+      : undefined;
+  }
+
+  private copyRetainedImage(image: RetainedImage): RetainedImage {
+    return { png: image.png, frame: image.frame };
+  }
+
+  private installEvidence(
+    owner: object,
+    sourceToolCallId: string,
+    images: readonly { kind: DesktopProviderEvidenceKind; image: RetainedImage }[],
+    coordinateImage?: RetainedImage,
+  ): void {
+    if (images.length < 1 || images.length > 2) {
+      throw new Error("computer evidence must contain one or two images");
+    }
+    this.observation = {
+      state: "pending_evidence",
+      owner,
+      sourceToolCallId,
+      presented: false,
+      images: Object.freeze(images.map(({ kind, image }) => Object.freeze({
+        kind,
+        image: this.copyRetainedImage(image),
+      }))),
+      ...(coordinateImage === undefined ? {} : { coordinateImage: this.copyRetainedImage(coordinateImage) }),
+    };
+  }
+
+  private capturedObservation(image: RetainedImage): ComputerCapturedObservation {
+    return Object.freeze({
+      status: "captured" as const,
+      width: image.frame.width,
+      height: image.frame.height,
+    });
+  }
+
+  private interruptedResult(
+    request: DesktopControllerRequest,
+    results: ComputerActionResult[],
+    before: RetainedImage | undefined,
+    reason: "aborted" | "timed_out" | undefined,
+  ): ComputerToolResult {
+    if (before === undefined) {
+      this.clearObservation(request.owner);
+      return makeResult({
+        outcome: "interrupted",
+        reason,
+        actions: results,
+        observation: { status: "unavailable" },
+      });
+    }
+    this.installEvidence(request.owner, request.toolCallId, [{
+      kind: "historical_before",
+      image: before,
+    }]);
+    return makeResult({
+      outcome: "interrupted",
+      reason,
+      actions: results,
+      observation: {
+        status: "unavailable",
+        before: this.capturedObservation(before),
+        after: { status: "unavailable" },
+        comparison: "after_missing",
+      },
+    });
+  }
+
+  private dispatchLeavesPressedStateUncertain(
+    action: ValidatedAction,
+    value: unknown,
+  ): boolean {
+    return actionCanLeavePressedState(action)
+      && isPlainRecord(value)
+      && value.status === "unknown"
+      && value.pressedState === "uncertain";
   }
 
   private async dispatch(
@@ -861,10 +1287,27 @@ export class DesktopController {
           point: mapPoint(coordinateFrame!, action.x, action.y),
           button: action.button,
         }, signal);
+      case "move":
+        return this.adapter.move({
+          point: mapPoint(coordinateFrame!, action.x, action.y),
+        }, signal);
+      case "mouseHold":
+        return this.adapter.mouseHold({
+          point: mapPoint(coordinateFrame!, action.x, action.y),
+          button: action.button,
+          holdMs: action.holdMs,
+        }, signal);
+      case "drag":
+        return this.adapter.drag({
+          from: mapPoint(coordinateFrame!, action.fromX, action.fromY),
+          to: mapPoint(coordinateFrame!, action.toX, action.toY),
+          button: action.button,
+          durationMs: action.durationMs,
+        }, signal);
       case "type":
         return this.adapter.type(action.text, signal);
       case "keypress":
-        return this.adapter.keypress(action.keys, signal);
+        return this.adapter.keypress(action.keys, signal, action.holdMs);
       case "scroll":
         return this.adapter.scroll({
           point: mapPoint(coordinateFrame!, action.x, action.y),
@@ -879,67 +1322,95 @@ export class DesktopController {
   private async captureResult(
     request: DesktopControllerRequest,
     results: ComputerActionResult[],
+    before: RetainedImage | undefined,
+    mode: "current" | "after",
+    settleMs: number,
     interruptionReason: () => "aborted" | "timed_out",
     expireDeadline: () => boolean,
     finishAfterQuiescence: (pending: Promise<unknown>) => void,
   ): Promise<ComputerToolResult> {
+    const interrupted = (reason: "aborted" | "timed_out" | undefined): ComputerToolResult =>
+      this.interruptedResult(request, results, mode === "after" ? before : undefined, reason);
     try {
-      if (expireDeadline() || request.signal.aborted) {
-        throw new Error(interruptionReason());
+      if (expireDeadline() || request.signal.aborted) return interrupted(interruptionReason());
+      if (settleMs > 0) {
+        const pendingSettle = this.adapter.wait(settleMs, request.signal);
+        const settleAttempt = await awaitUntilAbort(pendingSettle, request.signal);
+        if (settleAttempt.state === "aborted") {
+          finishAfterQuiescence(pendingSettle);
+          return interrupted(interruptionReason());
+        }
+        const settleDeadlineExpired = expireDeadline();
+        if (
+          settleAttempt.state === "failed"
+          || (settleAttempt.state === "settled" && dispatchStatus(settleAttempt.value) !== "sent")
+        ) {
+          return interrupted(
+            settleDeadlineExpired || request.signal.aborted ? interruptionReason() : undefined,
+          );
+        }
+        if (settleDeadlineExpired || request.signal.aborted) return interrupted(interruptionReason());
       }
+
       const pendingCapture = this.adapter.capture(request.signal);
       const attempt = await awaitUntilAbort(pendingCapture, request.signal);
       if (attempt.state === "aborted") {
         finishAfterQuiescence(pendingCapture);
-        this.clearObservation(request.owner);
-        return makeResult({
-          outcome: "interrupted",
-          reason: interruptionReason(),
-          actions: results,
-          observation: { status: "unavailable" },
-        });
+        return interrupted(interruptionReason());
       }
       const deadlineExpired = expireDeadline();
       if (attempt.state === "failed") {
+        return interrupted(deadlineExpired || request.signal.aborted ? interruptionReason() : undefined);
+      }
+      if (deadlineExpired || request.signal.aborted) return interrupted(interruptionReason());
+
+      const after: RetainedImage = {
+        frame: validateFrame(attempt.value),
+        png: validatePng(attempt.value.png),
+      };
+      if (before !== undefined && before.png.byteLength + after.png.byteLength > MAX_COMPUTER_PAIR_PNG_BYTES) {
         this.clearObservation(request.owner);
         return makeResult({
           outcome: "interrupted",
-          reason: deadlineExpired || request.signal.aborted
-            ? interruptionReason()
-            : undefined,
+          reason: "pair_too_large",
           actions: results,
-          observation: { status: "unavailable" },
+          observation: { status: "unavailable", comparison: "pair_too_large" },
         });
       }
-      if (deadlineExpired || request.signal.aborted) {
-        throw new Error(interruptionReason());
+
+      if (before !== undefined) {
+        this.installEvidence(request.owner, request.toolCallId, [
+          { kind: "before", image: before },
+          { kind: "after", image: after },
+        ], after);
+        return makeResult({
+          outcome: "completed",
+          actions: results,
+          observation: {
+            ...this.capturedObservation(after),
+            before: this.capturedObservation(before),
+            after: this.capturedObservation(after),
+            comparison: "paired",
+          },
+        });
       }
-      const frame = validateFrame(attempt.value);
-      const png = validatePng(attempt.value.png);
-      this.observation = {
-        state: "pending_image",
-        owner: request.owner,
-        sourceToolCallId: request.toolCallId,
-        presented: false,
-        png,
-        frame,
-      };
+
+      const kind: DesktopProviderEvidenceKind = mode === "current" ? "current" : "after";
+      this.installEvidence(request.owner, request.toolCallId, [{ kind, image: after }], after);
       return makeResult({
         outcome: "completed",
         actions: results,
-        observation: { status: "captured", width: frame.width, height: frame.height },
+        observation: mode === "current"
+          ? this.capturedObservation(after)
+          : {
+              ...this.capturedObservation(after),
+              after: this.capturedObservation(after),
+              comparison: "after_only",
+            },
       });
     } catch {
       const deadlineExpired = expireDeadline();
-      this.clearObservation(request.owner);
-      return makeResult({
-        outcome: "interrupted",
-        reason: deadlineExpired || request.signal.aborted
-          ? interruptionReason()
-          : undefined,
-        actions: results,
-        observation: { status: "unavailable" },
-      });
+      return interrupted(deadlineExpired || request.signal.aborted ? interruptionReason() : undefined);
     }
   }
 }
@@ -962,6 +1433,8 @@ interface KoffiApi {
 
 interface WindowsFunctions {
   setThreadDpiAwarenessContext: NativeFunction;
+  getForegroundWindow: NativeFunction;
+  getWindowThreadProcessId: NativeFunction;
   monitorFromPoint: NativeFunction;
   getMonitorInfo: NativeFunction;
   getDc: NativeFunction;
@@ -1027,7 +1500,7 @@ function asKoffiApi(value: unknown): KoffiApi {
 }
 
 function isNullHandle(value: unknown): boolean {
-  return value === null || value === undefined || value === 0;
+  return value === null || value === undefined || value === 0 || value === 0n;
 }
 
 function assertHandle(value: unknown, label: string): unknown {
@@ -1111,6 +1584,7 @@ class KoffiWindowsDesktopAdapter implements WindowsDesktopAdapter {
   async capture(signal: AbortSignal): Promise<DesktopCapture> {
     return this.withPhysicalDpi(() => {
       if (signal.aborted) throw abortError();
+      const foregroundBefore = this.readForegroundIdentity();
       let screenDc: unknown;
       let memoryDc: unknown;
       let bitmap: unknown;
@@ -1173,12 +1647,17 @@ class KoffiWindowsDesktopAdapter implements WindowsDesktopAdapter {
           throw new Error("BitBlt failed");
         }
         if (signal.aborted) throw abortError();
+        const foregroundAfter = this.readForegroundIdentity();
+        if (!sameForeground(foregroundBefore, foregroundAfter)) {
+          throw new Error("Foreground changed during desktop capture");
+        }
         const bgra = Buffer.from(this.view(assertHandle(bits[0], "CreateDIBSection bits"), width * height * 4));
         return {
           png: encodePngFromBgra(width, height, bgra),
           width,
           height,
           bounds,
+          foreground: foregroundAfter,
         };
       } finally {
         if (selected && memoryDc !== undefined && previousObject !== undefined) {
@@ -1213,57 +1692,186 @@ class KoffiWindowsDesktopAdapter implements WindowsDesktopAdapter {
     });
   }
 
+  async getForegroundIdentity(signal: AbortSignal): Promise<DesktopForegroundIdentity> {
+    if (signal.aborted) throw abortError();
+    return this.readForegroundIdentity();
+  }
+
   async click(input: DesktopClick, signal: AbortSignal): Promise<DesktopPrimitiveDispatch> {
-    return this.withPhysicalDpi(() => {
-      if (signal.aborted) throw abortError();
-      const flags = input.button === "left"
-        ? [MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP]
-        : [MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP];
-      return this.send([
+    if (signal.aborted) throw abortError();
+    const [down, up] = this.mouseButtonFlags(input.button);
+    let complete = false;
+    let mayHavePressed = false;
+    let released!: ReturnType<KoffiWindowsDesktopAdapter["bestEffortRelease"]>;
+    try {
+      const started = this.attemptInputWithPhysicalDpi([
         this.mouseInput(input.point, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0),
-        this.mouseInput(input.point, flags[0]!, 0),
-        this.mouseInput(input.point, flags[1]!, 0),
+        this.mouseInput(input.point, down, 0),
       ]);
-    });
+      complete = started.status === "sent";
+      // Start is [move, down], so count=1 cannot leave a button down.
+      mayHavePressed = this.mayHavePressed(started, 1);
+    } catch {
+      // Unexpected post-attempt errors remain conservative.
+      mayHavePressed = true;
+    } finally {
+      released = this.bestEffortRelease([this.mouseInput(input.point, up, 0)]);
+    }
+    return this.completeAfterRelease(complete, released, mayHavePressed);
+  }
+
+  async move(input: DesktopMove, signal: AbortSignal): Promise<DesktopPrimitiveDispatch> {
+    if (signal.aborted) throw abortError();
+    return this.sendWithPhysicalDpi([
+      this.mouseInput(input.point, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0),
+    ]);
+  }
+
+  async mouseHold(input: DesktopMouseHold, signal: AbortSignal): Promise<DesktopPrimitiveDispatch> {
+    if (signal.aborted) throw abortError();
+    const [down, up] = this.mouseButtonFlags(input.button);
+    let complete = false;
+    let mayHavePressed = false;
+    let released!: ReturnType<KoffiWindowsDesktopAdapter["bestEffortRelease"]>;
+    try {
+      const started = this.attemptInputWithPhysicalDpi([
+        this.mouseInput(input.point, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0),
+        this.mouseInput(input.point, down, 0),
+      ]);
+      complete = started.status === "sent";
+      // Start is [move, down], so count=1 cannot leave a button down.
+      mayHavePressed = this.mayHavePressed(started, 1);
+      if (complete && input.holdMs > 0) {
+        try {
+          await this.wait(input.holdMs, signal);
+        } catch {
+          complete = false;
+        }
+      }
+    } catch {
+      mayHavePressed = true;
+    } finally {
+      released = this.bestEffortRelease([this.mouseInput(input.point, up, 0)]);
+    }
+    return this.completeAfterRelease(complete, released, mayHavePressed);
+  }
+
+  async drag(input: DesktopDrag, signal: AbortSignal): Promise<DesktopPrimitiveDispatch> {
+    if (signal.aborted) throw abortError();
+    const [down, up] = this.mouseButtonFlags(input.button);
+    let complete = false;
+    let mayHavePressed = false;
+    let released!: ReturnType<KoffiWindowsDesktopAdapter["bestEffortRelease"]>;
+    try {
+      const started = this.attemptInputWithPhysicalDpi([
+        this.mouseInput(input.from, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0),
+        this.mouseInput(input.from, down, 0),
+      ]);
+      complete = started.status === "sent";
+      // Start is [move, down], so count=1 cannot leave a button down.
+      mayHavePressed = this.mayHavePressed(started, 1);
+      if (complete && input.durationMs > 0) {
+        try {
+          await this.wait(input.durationMs, signal);
+        } catch {
+          complete = false;
+        }
+      }
+      if (complete && !signal.aborted) {
+        complete = this.sendWithPhysicalDpi([
+          this.mouseInput(input.to, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0),
+        ]) === "sent";
+      } else {
+        complete = false;
+      }
+    } catch {
+      mayHavePressed = true;
+    } finally {
+      released = this.bestEffortRelease([this.mouseInput(input.to, up, 0)]);
+    }
+    return this.completeAfterRelease(complete, released, mayHavePressed);
   }
 
   async type(text: string, signal: AbortSignal): Promise<DesktopPrimitiveDispatch> {
-    return this.withPhysicalDpi(() => {
-      if (signal.aborted) throw abortError();
+    if (signal.aborted) throw abortError();
+    for (let offset = 0; offset < text.length; offset += MAX_TYPE_CODE_UNITS_PER_NATIVE_BATCH) {
+      if (signal.aborted) return "unknown";
+      const end = Math.min(text.length, offset + MAX_TYPE_CODE_UNITS_PER_NATIVE_BATCH);
+      const codeUnits: number[] = [];
       const inputs: NativeInput[] = [];
-      for (let index = 0; index < text.length; index += 1) {
+      for (let index = offset; index < end; index += 1) {
         const codeUnit = text.charCodeAt(index);
+        codeUnits.push(codeUnit);
+        // A chunk contains complete Unicode down/up pairs. If SendInput stops
+        // on an odd prefix, exactly one Unicode key may still be down.
         inputs.push(this.unicodeInput(codeUnit, false), this.unicodeInput(codeUnit, true));
       }
-      return inputs.length === 0 ? "sent" : this.send(inputs);
-    });
+      const started = this.attemptInputWithPhysicalDpi(inputs);
+      if (started.status !== "sent") {
+        const mayHavePressed = started.sentCount === undefined
+          ? started.sendAttempted
+          : started.sentCount % 2 === 1;
+        if (!mayHavePressed) return "unknown";
+        const released = this.bestEffortRelease(
+          [...codeUnits].reverse().map((codeUnit) => this.unicodeInput(codeUnit, true)),
+        );
+        return this.completeAfterRelease(false, released, true);
+      }
+      // A macrotask checkpoint lets the controller deadline/abort timer run
+      // between bounded native dispatches instead of after thousands of FFI calls.
+      if (end < text.length) {
+        try {
+          await this.wait(0, signal);
+        } catch {
+          return "unknown";
+        }
+      }
+    }
+    return "sent";
   }
 
-  async keypress(keys: readonly string[], signal: AbortSignal): Promise<DesktopPrimitiveDispatch> {
-    return this.withPhysicalDpi(() => {
-      if (signal.aborted) throw abortError();
-      const inputs = keys.map((key) => this.keyboardInput(SUPPORTED_DESKTOP_KEYS[key]!, false));
-      for (let index = keys.length - 1; index >= 0; index -= 1) {
-        inputs.push(this.keyboardInput(SUPPORTED_DESKTOP_KEYS[keys[index]!]!, true));
+  async keypress(
+    keys: readonly string[],
+    signal: AbortSignal,
+    holdMs = 0,
+  ): Promise<DesktopPrimitiveDispatch> {
+    if (signal.aborted) throw abortError();
+    const down = keys.map((key) => this.keyboardInput(SUPPORTED_DESKTOP_KEYS[key]!, false));
+    const up = [...keys].reverse().map((key) => this.keyboardInput(SUPPORTED_DESKTOP_KEYS[key]!, true));
+    let complete = false;
+    let mayHavePressed = false;
+    let released!: ReturnType<KoffiWindowsDesktopAdapter["bestEffortRelease"]>;
+    try {
+      const started = this.attemptInputWithPhysicalDpi(down);
+      complete = started.status === "sent";
+      mayHavePressed = this.mayHavePressed(started, 0);
+      if (complete && holdMs > 0) {
+        try {
+          await this.wait(holdMs, signal);
+        } catch {
+          complete = false;
+        }
       }
-      return this.send(inputs);
-    });
+    } catch {
+      mayHavePressed = true;
+    } finally {
+      released = this.bestEffortRelease(up);
+    }
+    return this.completeAfterRelease(complete, released, mayHavePressed);
   }
 
   async scroll(input: DesktopScroll, signal: AbortSignal): Promise<DesktopPrimitiveDispatch> {
-    return this.withPhysicalDpi(() => {
-      if (signal.aborted) throw abortError();
-      const inputs = [
-        this.mouseInput(input.point, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0),
-      ];
-      if (input.deltaY !== 0) {
-        inputs.push(this.mouseInput(input.point, MOUSEEVENTF_WHEEL, input.deltaY));
-      }
-      if (input.deltaX !== 0) {
-        inputs.push(this.mouseInput(input.point, MOUSEEVENTF_HWHEEL, input.deltaX));
-      }
-      return this.send(inputs);
-    });
+    if (signal.aborted) throw abortError();
+    const inputs = [
+      this.mouseInput(input.point, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0),
+    ];
+    if (input.deltaY !== 0) {
+      inputs.push(this.mouseInput(input.point, MOUSEEVENTF_WHEEL, input.deltaY));
+    }
+    if (input.deltaX !== 0) {
+      inputs.push(this.mouseInput(input.point, MOUSEEVENTF_HWHEEL, input.deltaX));
+    }
+    return this.sendWithPhysicalDpi(inputs);
   }
 
   async wait(ms: number, signal: AbortSignal): Promise<DesktopPrimitiveDispatch> {
@@ -1282,6 +1890,130 @@ class KoffiWindowsDesktopAdapter implements WindowsDesktopAdapter {
       signal.addEventListener("abort", onAbort, { once: true });
     });
     return "sent";
+  }
+
+  private readForegroundIdentity(): DesktopForegroundIdentity {
+    const hwnd = assertHandle(this.native.getForegroundWindow(), "GetForegroundWindow");
+    if (
+      (typeof hwnd !== "number" || !Number.isInteger(hwnd))
+      && typeof hwnd !== "bigint"
+    ) {
+      throw new Error("GetForegroundWindow returned invalid handle");
+    }
+    const processId: unknown[] = [0];
+    if (this.native.getWindowThreadProcessId(hwnd, processId) === 0) {
+      throw new Error("GetWindowThreadProcessId failed");
+    }
+    const pid = processId[0];
+    if (typeof pid !== "number" || !Number.isInteger(pid) || pid < 1 || pid > 0xffff_ffff) {
+      throw new Error("GetWindowThreadProcessId returned invalid process ID");
+    }
+    return Object.freeze({ hwnd: hwnd.toString(), processId: pid });
+  }
+
+  private mouseButtonFlags(button: "left" | "right"): readonly [number, number] {
+    return button === "left"
+      ? [MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP]
+      : [MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP];
+  }
+
+  private sendWithPhysicalDpi(inputs: readonly NativeInput[]): "sent" | "unknown" {
+    const attempt = this.inspectSendWithPhysicalDpi(inputs);
+    if ("error" in attempt) throw attempt.error;
+    // A failed DPI restore does not undo a known SendInput result, but it makes
+    // the enclosing primitive incomplete rather than falsely reporting sent.
+    return attempt.restoreFailed ? "unknown" : attempt.result.status;
+  }
+
+  /**
+   * Unlike ordinary move/scroll, a down sequence needs the exact inserted
+   * prefix. A DPI setup failure before SendInput has no possible press; a
+   * thrown SendInput is conservative because Windows may have accepted input.
+   */
+  private attemptInputWithPhysicalDpi(inputs: readonly NativeInput[]): {
+    status: "sent" | "unknown";
+    sentCount: number | undefined;
+    sendAttempted: boolean;
+  } {
+    const attempt = this.inspectSendWithPhysicalDpi(inputs);
+    if ("error" in attempt) {
+      return { status: "unknown", sentCount: undefined, sendAttempted: attempt.sendAttempted };
+    }
+    return {
+      status: attempt.restoreFailed ? "unknown" : attempt.result.status,
+      sentCount: attempt.result.count,
+      sendAttempted: true,
+    };
+  }
+
+  private mayHavePressed(
+    attempt: ReturnType<KoffiWindowsDesktopAdapter["attemptInputWithPhysicalDpi"]>,
+    firstPressedInputIndex: number,
+  ): boolean {
+    if (!attempt.sendAttempted) return false;
+    // An invalid/throwing native result has no reliable prefix; SendInput may
+    // have reached the named down input before reporting the error.
+    return attempt.sentCount === undefined || attempt.sentCount > firstPressedInputIndex;
+  }
+
+  private inspectSendWithPhysicalDpi(inputs: readonly NativeInput[]):
+    | { result: { status: "sent" | "unknown"; count: number | undefined }; restoreFailed: boolean }
+    | { error: unknown; sendAttempted: boolean } {
+    let previous: unknown;
+    try {
+      previous = assertHandle(
+        this.native.setThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2),
+        "SetThreadDpiAwarenessContext",
+      );
+    } catch (error) {
+      return { error, sendAttempted: false };
+    }
+
+    let operationFailed = false;
+    let operationError: unknown;
+    let result!: { status: "sent" | "unknown"; count: number | undefined };
+    try {
+      result = this.send(inputs);
+    } catch (error) {
+      operationFailed = true;
+      operationError = error;
+    }
+    let restoreFailed = false;
+    try {
+      if (this.native.setThreadDpiAwarenessContext(previous) === 0) restoreFailed = true;
+    } catch {
+      restoreFailed = true;
+    }
+    if (operationFailed) return { error: operationError, sendAttempted: true };
+    return { result, restoreFailed };
+  }
+
+  /**
+   * A cleanup failure is qualitatively different from an ordinary unknown
+   * dispatch: Windows may still have a key or button down, so the controller
+   * must permanently retain the desktop lease rather than hand it to a run.
+   */
+  private bestEffortRelease(inputs: readonly NativeInput[]): {
+    confirmed: boolean;
+    status: "sent" | "unknown";
+  } {
+    const attempt = this.inspectSendWithPhysicalDpi(inputs);
+    if ("error" in attempt) return { confirmed: false, status: "unknown" };
+    return {
+      confirmed: attempt.result.status === "sent",
+      status: attempt.result.status === "sent" && !attempt.restoreFailed ? "sent" : "unknown",
+    };
+  }
+
+  private completeAfterRelease(
+    complete: boolean,
+    released: ReturnType<KoffiWindowsDesktopAdapter["bestEffortRelease"]>,
+    mayHavePressed: boolean,
+  ): DesktopPrimitiveDispatch {
+    if (!released.confirmed && mayHavePressed) {
+      return { status: "unknown", pressedState: "uncertain" };
+    }
+    return complete && released.status === "sent" ? "sent" : "unknown";
   }
 
   private withPhysicalDpi<T>(operation: () => T): T {
@@ -1372,10 +2104,45 @@ class KoffiWindowsDesktopAdapter implements WindowsDesktopAdapter {
     return Math.round(((value - start) * 65_535) / (length - 1));
   }
 
-  private send(inputs: readonly NativeInput[]): DesktopPrimitiveDispatch {
-    const sent = this.native.sendInput(inputs.length, inputs, this.inputSize);
-    return sent === inputs.length ? "sent" : "unknown";
+  private send(inputs: readonly NativeInput[]): {
+    status: "sent" | "unknown";
+    count: number | undefined;
+  } {
+    const rawCount = this.native.sendInput(inputs.length, inputs, this.inputSize);
+    const count = typeof rawCount === "number"
+      && Number.isInteger(rawCount)
+      && rawCount >= 0
+      && rawCount <= inputs.length
+      ? rawCount
+      : undefined;
+    return {
+      status: count === inputs.length ? "sent" : "unknown",
+      count,
+    };
   }
+}
+
+/**
+ * Internal test seam: exercises the real compound-input adapter against a
+ * scripted native boundary without importing Koffi or touching the desktop.
+ */
+export interface WindowsDesktopInputTestNative {
+  setThreadDpiAwarenessContext(...args: unknown[]): unknown;
+  sendInput(...args: unknown[]): unknown;
+}
+
+export function createWindowsDesktopInputAdapterForTest(
+  native: WindowsDesktopInputTestNative,
+): WindowsDesktopAdapter {
+  return new KoffiWindowsDesktopAdapter(
+    native as unknown as WindowsFunctions,
+    0,
+    0,
+    1,
+    () => {
+      throw new Error("capture is unavailable in the input adapter test seam");
+    },
+  );
 }
 
 export async function createWindowsDesktopAdapter(): Promise<WindowsDesktopAdapter> {
@@ -1457,6 +2224,12 @@ export async function createWindowsDesktopAdapter(): Promise<WindowsDesktopAdapt
     const native: WindowsFunctions = {
       setThreadDpiAwarenessContext: user32.func(
         "intptr_t __stdcall SetThreadDpiAwarenessContext(intptr_t value)",
+      ),
+      getForegroundWindow: user32.func(
+        "intptr_t __stdcall GetForegroundWindow()",
+      ),
+      getWindowThreadProcessId: user32.func(
+        "uint32_t __stdcall GetWindowThreadProcessId(intptr_t hWnd, _Out_ uint32_t *processId)",
       ),
       monitorFromPoint: user32.func(
         "void * __stdcall MonitorFromPoint(POINT point, uint32_t flags)",

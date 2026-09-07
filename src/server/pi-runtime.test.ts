@@ -1416,6 +1416,28 @@ describe("PiRuntime session ownership", () => {
     });
     expect(received.at(-1)?.customTools?.map((tool) => tool.name)).toContain("computer");
     expect(full.session.getActiveToolNames()).toContain("computer");
+    const computer = full.session.getToolDefinition("computer");
+    if (!computer) throw new Error("Computer tool was not installed");
+    expect(computer.description).toContain("mouseHold{x,y,button?,holdMs?}");
+    expect(computer.description).toContain("drag{fromX,fromY,toX,toY,button?,durationMs?}");
+    expect(computer.description).toContain("button is left or right");
+    expect(computer.description).toContain("batch of at most 8 actions");
+    expect(computer.description).toContain("at least one nonzero scroll delta");
+    expect(computer.description).toContain("settleMs 0-2000");
+    expect(computer.description).toContain("current from an initial single image, or after from paired/after-only evidence");
+    expect(computer.description).toContain("before and historical_before are comparison-only");
+    expect(computer.description).toContain("about twice the visual tokens");
+    expect(computer.description).toContain("foreground_mismatch");
+    expect(computer.description).toContain("sent means Windows accepted host dispatch");
+    expect(computer.promptGuidelines).toContain(
+      "observe:true captures provider-only evidence (default post-action settle is 150ms); an action pair carries two images and about twice the visual-token cost. observe:false does not capture. Actions are sequential; sent is host dispatch, not UI/business success.",
+    );
+    expect(computer.promptGuidelines).toContain(
+      "Call observe first before coordinate actions. Use current only for an initial single image, and after only for paired/after-only evidence; before and historical_before never authorize coordinates.",
+    );
+    expect(computer.promptGuidelines).toContain(
+      "A foreground_mismatch means no input was sent; re-observe before any coordinate retry.",
+    );
     await full.dispose();
 
     const readOnly = await runtime.createSession(cwd, {
@@ -1480,16 +1502,22 @@ describe("PiRuntime session ownership", () => {
     }
   });
 
-  it("expires an authorized frame before the next provider decision when its tool call never executes", async () => {
+  it("preserves preflighted frames for exact siblings and retires them at the next provider conversion", async () => {
     const cwd = await temporaryDirectory("piweb-runtime-computer-frame-");
+    let captureIndex = 0;
     const adapter: WindowsDesktopAdapter = {
       capture: async () => ({
-        png: Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10]),
+        png: Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, ++captureIndex]),
         width: 10,
         height: 10,
         bounds: { x: 0, y: 0, width: 10, height: 10 },
+        foreground: { hwnd: "10", processId: 10 },
       }),
+      getForegroundIdentity: async () => ({ hwnd: "10", processId: 10 }),
       click: async () => "sent",
+      move: async () => "sent",
+      mouseHold: async () => "sent",
+      drag: async () => "sent",
       type: async () => "sent",
       keypress: async () => "sent",
       scroll: async () => "sent",
@@ -1566,36 +1594,89 @@ describe("PiRuntime session ownership", () => {
 
       const providerInput = await created.session.agent.convertToLlm([source] as never);
       expect(JSON.stringify(providerInput)).toContain("iVBOR");
-      created.computerUse.completeAssistantDecision(["rejected-before-execute"]);
+      created.computerUse.completeAssistantDecision([
+        "rejected-before-execute",
+        "admitted-sibling",
+      ]);
 
-      // This is the provider request after SDK schema/extension/host-gate
-      // rejection of that call. It must retire the old coordinate frame.
-      await created.session.agent.convertToLlm([{
-        ...source,
-        toolCallId: "rejected-before-execute",
-        content: [{ type: "text", text: "rejected" }],
-      }] as never);
+      // The controller rejects malformed local input before any desktop
+      // primitive. That must leave the same assistant decision's exact sibling
+      // capability intact.
       await expect(execute("rejected-before-execute", {
+        actions: [{ kind: "click", x: "not-a-coordinate", y: 1 }],
+        observe: false,
+      }, signal)).rejects.toThrow("integer");
+      const paired = await execute("admitted-sibling", {
+        actions: [{ kind: "click", x: 1, y: 1 }],
+        observe: true,
+        settleMs: 0,
+      }, signal);
+      expect(paired.details).toMatchObject({
+        outcome: "completed",
+        observation: { comparison: "paired" },
+      });
+      const pairProviderInput = await created.session.agent.convertToLlm([{
+        ...source,
+        toolCallId: "admitted-sibling",
+        content: paired.content,
+      }] as never);
+      const pairProviderJson = JSON.stringify(pairProviderInput);
+      const beforeLabel = "[computer observation before action batch]";
+      const afterLabel = "[computer observation after action batch]";
+      const beforePng = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1]).toString("base64");
+      const afterPng = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 2]).toString("base64");
+      const pairParts = [beforeLabel, beforePng, afterLabel, afterPng]
+        .map((part) => pairProviderJson.indexOf(part));
+      expect(pairParts.every((index) => index >= 0)).toBe(true);
+      expect(pairParts).toEqual([...pairParts].sort((left, right) => left - right));
+      expect(pairProviderJson).not.toContain("\"hwnd\"");
+      expect(pairProviderJson).not.toContain("\"processId\"");
+      await expect(execute("sibling-after-admission", {
+        actions: [{ kind: "click", x: 1, y: 1 }],
+        observe: false,
+      }, signal)).resolves.toMatchObject({
+        details: { outcome: "rejected", reason: "decision_consumed" },
+      });
+
+      // By contrast, an unused capability is retired only when a new provider
+      // conversion begins, not merely because a local sibling was preflighted.
+      const observedAgain = await execute("observe-next-decision", { actions: [], observe: true }, signal);
+      const nextSource = {
+        ...source,
+        toolCallId: "observe-next-decision",
+        content: observedAgain.content,
+      };
+      await created.session.agent.convertToLlm([nextSource] as never);
+      created.computerUse.completeAssistantDecision(["unexecuted-next-decision"]);
+      await created.session.agent.convertToLlm([{
+        ...nextSource,
+        toolCallId: "next-provider-request",
+        content: [{ type: "text", text: "next decision" }],
+      }] as never);
+      await expect(execute("unexecuted-next-decision", {
         actions: [{ kind: "click", x: 1, y: 1 }],
         observe: false,
       }, signal)).rejects.toThrow("authorized current observation");
 
-      // A call that reaches this custom tool with an already-aborted signal
-      // also never enters controller admission and must retire its own frame.
-      const observedAgain = await execute("observe-aborted", { actions: [], observe: true }, signal);
-      const abortedSource = { ...source, toolCallId: "observe-aborted", content: observedAgain.content };
+      // An already-aborted invocation likewise reaches no primitive and leaves
+      // an exact sibling usable until its decision boundary.
+      const observedThird = await execute("observe-aborted", { actions: [], observe: true }, signal);
+      const abortedSource = { ...source, toolCallId: "observe-aborted", content: observedThird.content };
       await created.session.agent.convertToLlm([abortedSource] as never);
-      created.computerUse.completeAssistantDecision(["aborted-before-admission"]);
+      created.computerUse.completeAssistantDecision([
+        "aborted-before-admission",
+        "after-abort-sibling",
+      ]);
       const aborted = new AbortController();
       aborted.abort();
-      await execute("aborted-before-admission", {
-        actions: [{ kind: "click", x: 1, y: 1 }],
-        observe: false,
-      }, aborted.signal);
       await expect(execute("aborted-before-admission", {
         actions: [{ kind: "click", x: 1, y: 1 }],
         observe: false,
-      }, signal)).rejects.toThrow("authorized current observation");
+      }, aborted.signal)).resolves.toMatchObject({ details: { outcome: "interrupted" } });
+      await expect(execute("after-abort-sibling", {
+        actions: [{ kind: "click", x: 1, y: 1 }],
+        observe: false,
+      }, signal)).resolves.toMatchObject({ details: { outcome: "completed" } });
     } finally {
       await created.dispose();
     }
