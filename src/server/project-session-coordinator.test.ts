@@ -698,11 +698,21 @@ async function executeTool(
     && !("targets" in input)
     && !("singleWaitCommitment" in input)
     && !options.omitSingleWaitCommitment;
+  const sessionMessageInput = name === "send_session_message"
+    && typeof input === "object"
+    && input !== null
+    && !Array.isArray(input)
+    && !("summary" in input);
   const normalizedInput = exactWaitInput
     ? {
         ...input,
         singleWaitCommitment:
           "This exact result is on the test's critical path and no independent local work remains.",
+      }
+    : sessionMessageInput
+    ? {
+        ...input,
+        summary: "Test user summary",
       }
     : input;
   const result = await executable.execute(
@@ -4670,6 +4680,7 @@ describe("ProjectSessionCoordinator", () => {
       fixture,
       source.conversationId,
     );
+    const summary = "保留源会话标题，并审查消息卡片。";
 
     await executeTool(
       fixture.runtime.control(source.conversationId),
@@ -4677,6 +4688,7 @@ describe("ProjectSessionCoordinator", () => {
       "send-with-preview-title",
       {
         conversationId: target.conversationId,
+        summary,
         message: "Keep the source title on this card",
       },
     );
@@ -4695,7 +4707,11 @@ describe("ProjectSessionCoordinator", () => {
       toSnapshot: {
         conversationId: target.conversationId,
       },
+      summary,
     });
+    expect(
+      fixture.runtime.control(target.conversationId).received[0]?.content,
+    ).not.toContain(summary);
     expect(
       aggregateReservedConversationEntries(source.sessionManager.getEntries())
         .cards.find(({ body }) => body === "Keep the source title on this card"),
@@ -4704,6 +4720,7 @@ describe("ProjectSessionCoordinator", () => {
         conversationId: source.conversationId,
         title: displayTitle,
       },
+      summary,
     });
     sourceRun.release.resolve();
     await sourceRun.completion;
@@ -11192,6 +11209,7 @@ describe("ProjectSessionCoordinator", () => {
     );
     await targetStarted.promise;
     const sentAt = "2026-07-19T12:00:00.000Z";
+    const summary = "Confirm the pre-admission delivery was reconciled.";
     const body = "this body was durably delivered before the retry";
     const role = fixture.roles.getConversationRole("default");
     const fromSnapshot = {
@@ -11207,6 +11225,7 @@ describe("ProjectSessionCoordinator", () => {
       createConversationCardEntry({
         cardId,
         kind: "message",
+        summary,
         body,
         fromSnapshot,
         toSnapshot,
@@ -11223,6 +11242,7 @@ describe("ProjectSessionCoordinator", () => {
       toConversationId: target.conversationId,
       sentAt,
       kind: "message",
+      summary,
       body,
       fromRunId: RUN_A,
       fromSnapshot,
@@ -11240,6 +11260,7 @@ describe("ProjectSessionCoordinator", () => {
         cardId,
         sentAt,
         kind: "message",
+        summary,
         body,
         fromSnapshot,
         toSnapshot,
@@ -11266,7 +11287,7 @@ describe("ProjectSessionCoordinator", () => {
           control,
           "send_session_message",
           toolCallId,
-          { conversationId: target.conversationId, message: body },
+          { conversationId: target.conversationId, summary, message: body },
         );
       } catch (error) {
         retryError = error;

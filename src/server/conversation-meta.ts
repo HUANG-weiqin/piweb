@@ -9,6 +9,8 @@ import {
 import {
   MAX_COMPACTION_THRESHOLD_PERCENT,
   MAX_MODEL_REFERENCE_BYTES,
+  MAX_SESSION_MESSAGE_SUMMARY_BYTES,
+  MAX_SESSION_MESSAGE_SUMMARY_CHARACTERS,
   MIN_COMPACTION_THRESHOLD_PERCENT,
   loopListSchema,
   serviceTierSchema,
@@ -62,6 +64,27 @@ const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/;
 
 function utf8Bytes(value: string): number {
   return Buffer.byteLength(value, "utf8");
+}
+
+export function normalizeConversationMessageSummary(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new Error("summary must be a string");
+  }
+  const summary = value.trim();
+  if (summary.length === 0) {
+    throw new Error("summary must not be blank");
+  }
+  if (utf8Bytes(summary) > MAX_SESSION_MESSAGE_SUMMARY_BYTES) {
+    throw new Error(
+      `summary exceeds ${MAX_SESSION_MESSAGE_SUMMARY_BYTES} UTF-8 bytes`,
+    );
+  }
+  if ([...summary].length > MAX_SESSION_MESSAGE_SUMMARY_CHARACTERS) {
+    throw new Error(
+      `summary exceeds ${MAX_SESSION_MESSAGE_SUMMARY_CHARACTERS} characters`,
+    );
+  }
+  return summary;
 }
 
 function limitedString(
@@ -285,6 +308,20 @@ const conversationKindSchema = z.enum([
   "delegation_task",
 ]);
 
+const conversationMessageSummarySchema = z.string().transform(
+  (value, context) => {
+    try {
+      return normalizeConversationMessageSummary(value);
+    } catch (error) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return z.NEVER;
+    }
+  },
+);
+
 const conversationCardSchema = z.object({
   cardId: uuidSchema("cardId"),
   kind: conversationKindSchema,
@@ -292,6 +329,7 @@ const conversationCardSchema = z.object({
     "body",
     MAX_CONVERSATION_BODY_BYTES,
   ).refine((value) => value.trim().length > 0, "body must not be blank"),
+  summary: conversationMessageSummarySchema.optional(),
   fromSnapshot: conversationReferenceSnapshotSchema,
   toSnapshot: conversationReferenceSnapshotSchema,
   state: z.enum([
@@ -349,6 +387,7 @@ const conversationMessageDetailsSchema = z.object({
     "body",
     MAX_CONVERSATION_BODY_BYTES,
   ).refine((value) => value.trim().length > 0, "body must not be blank"),
+  summary: conversationMessageSummarySchema.optional(),
   fromSnapshot: conversationReferenceSnapshotSchema,
   toSnapshot: conversationReferenceSnapshotSchema,
   replyToMessageId: uuidSchema("replyToMessageId").optional(),
@@ -1184,6 +1223,7 @@ function cardIdentity(card: ConversationCard): string {
   return JSON.stringify({
     kind: card.kind,
     body: card.body,
+    summary: card.summary,
     fromSnapshot: card.fromSnapshot,
     toSnapshot: card.toSnapshot,
     messageId: card.messageId,

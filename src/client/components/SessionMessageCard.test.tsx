@@ -17,7 +17,8 @@ const outgoingCard: ConversationMessageCard = {
   cardId: "card-1",
   direction: "outgoing",
   state: "queued",
-  body: "请检查会话恢复路径。",
+  body: "请检查会话恢复路径的细节。",
+  summary: "请检查会话恢复路径。",
   from: {
     conversationId: "source-12345678",
     title: "主控会话",
@@ -50,8 +51,11 @@ describe("SessionMessageCard", () => {
     expect(within(card).getByText("发出")).toBeInTheDocument();
     expect(within(card).getByRole("status", { name: "消息状态：已排队" })).toHaveTextContent("已排队");
     expect(within(card).getByText("发给 审查会话")).toBeInTheDocument();
+    expect(within(card).getByLabelText("给你的摘要预览")).toHaveTextContent(
+      outgoingCard.summary,
+    );
     expect(within(card).queryByText("主控会话")).not.toBeInTheDocument();
-    expect(within(card).queryByText("请检查会话恢复路径。")).not.toBeInTheDocument();
+    expect(within(card).queryByText(outgoingCard.body)).not.toBeInTheDocument();
 
     fireEvent.click(
       within(card).getByRole("button", {
@@ -70,7 +74,43 @@ describe("SessionMessageCard", () => {
     expect(within(card).getByText("#source-1")).toBeInTheDocument();
     expect(within(card).getByText("审查员")).toBeInTheDocument();
     expect(within(card).getByText("#target-8")).toBeInTheDocument();
-    expect(within(card).getByText("请检查会话恢复路径。")).toBeInTheDocument();
+    expect(within(card).getByText("请检查会话恢复路径的细节。")).toBeInTheDocument();
+  });
+
+  it("keeps the complete multiline summary in its labeled expanded section", () => {
+    const summary = "先确认恢复顺序。\n\n再检查租约释放。";
+    render(<SessionMessageCard card={{ ...outgoingCard, summary }} />);
+
+    expect(screen.queryByRole("region", { name: "给你的摘要" })).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "展开发出的会话消息：审查会话",
+      }),
+    );
+
+    const summarySection = screen.getByRole("region", { name: "给你的摘要" });
+    expect(summarySection).toBeInTheDocument();
+    expect(summarySection.querySelector(".session-message-summary-copy")?.textContent).toBe(
+      summary,
+    );
+  });
+
+  it("does not fall back to the body when a legacy summary is empty", () => {
+    const body = "这段正文不应成为摘要预览。";
+    render(<SessionMessageCard card={{ ...outgoingCard, summary: "", body }} />);
+    const card = screen.getByRole("article", { name: "发出的会话消息" });
+
+    expect(within(card).queryByLabelText("给你的摘要预览")).not.toBeInTheDocument();
+    expect(within(card).queryByText(body)).not.toBeInTheDocument();
+
+    fireEvent.click(
+      within(card).getByRole("button", {
+        name: "展开发出的会话消息：审查会话",
+      }),
+    );
+
+    expect(within(card).queryByRole("region", { name: "给你的摘要" })).not.toBeInTheDocument();
+    expect(within(card).getByText(body)).toBeInTheDocument();
   });
 
   it("renders incoming direction and falls back for an unnamed endpoint", () => {

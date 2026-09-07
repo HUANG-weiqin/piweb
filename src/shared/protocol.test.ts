@@ -40,7 +40,7 @@ const transitionDiagnostics = {
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(49);
+    expect(PROTOCOL_VERSION).toBe(50);
   });
 
   it("accepts supported commands", () => {
@@ -1077,6 +1077,7 @@ describe("parseClientCommand", () => {
           direction: "incoming",
           state: "queued",
           body: "Please review the actor.",
+          summary: "请审查 actor 的当前实现。",
           from: {
             conversationId: targetConversationId,
             title: "Coordinator",

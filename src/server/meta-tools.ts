@@ -3,8 +3,14 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { MAX_PROJECT_CONVERSATION_NAME_CHARACTERS } from "../shared/protocol.js";
-import { MAX_CONVERSATION_BODY_BYTES } from "./conversation-meta.js";
+import {
+  MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
+  MAX_SESSION_MESSAGE_SUMMARY_CHARACTERS,
+} from "../shared/protocol.js";
+import {
+  MAX_CONVERSATION_BODY_BYTES,
+  normalizeConversationMessageSummary,
+} from "./conversation-meta.js";
 import { MAX_ROLE_SYSTEM_PROMPT_BYTES } from "./role-store.js";
 
 interface MetaToolSessionRef {
@@ -79,6 +85,7 @@ export interface MetaToolService {
     sourceConversationId: string,
     input: {
       conversationId: string;
+      summary: string;
       message: string;
       idempotencyKey: string;
     },
@@ -378,8 +385,18 @@ export function createMetaTools(
       description:
         "Durably send a first-class session message to a peer. A busy target receives it as steering after its current tool turn and before its next model request; it remains durable until Pi records the target message and the exact run settles. If that peer is currently waiting (wait_for_session), the delivered message also resolves that wait immediately, even when the wait targets a different conversation or run.",
       promptSnippet: "Send a durable message to another Agent session.",
+      promptGuidelines: [
+        "Always provide summary: a plain-language explanation for the user of what this message asks or reports. It appears on the collapsed message card; keep the full task or evidence in message.",
+      ],
       parameters: Type.Object({
         conversationId: Type.String({ minLength: 1, maxLength: 256 }),
+        summary: Type.String({
+          minLength: 1,
+          // TypeBox counts UTF-16 code units; the shared runtime validator
+          // enforces the actual 500-Unicode-character contract.
+          maxLength: MAX_SESSION_MESSAGE_SUMMARY_CHARACTERS * 2,
+          description: "Plain-language user summary, at most 500 Unicode characters and 2 KiB UTF-8.",
+        }),
         message: Type.String({
           minLength: 1,
           maxLength: MAX_CONVERSATION_BODY_BYTES,
@@ -387,8 +404,10 @@ export function createMetaTools(
       }, { additionalProperties: false }),
       async execute(toolCallId, input, signal) {
         assertConversationBody(input.message, "message");
+        const summary = normalizeConversationMessageSummary(input.summary);
         return result(await service.sendSessionMessage(sourceConversationId, {
           conversationId: input.conversationId,
+          summary,
           message: input.message,
           idempotencyKey: sideEffectKey(sourceConversationId, toolCallId),
         }, signal));

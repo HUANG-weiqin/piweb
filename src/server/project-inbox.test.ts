@@ -154,6 +154,7 @@ describe("ProjectInbox envelope schema", () => {
       version: 1,
       state: "queued",
     });
+    expect(envelope).not.toHaveProperty("summary");
     expect(parseInboxEnvelope(envelope)).toEqual(envelope);
     expect(() => parseInboxEnvelope({
       ...envelope,
@@ -197,6 +198,17 @@ describe("ProjectInbox envelope schema", () => {
     expect(() => createInboxEnvelope(input({
       body: "   ",
     }))).toThrow(/body/i);
+    expect(() => createInboxEnvelope(input({
+      summary: "   ",
+    }))).toThrow(/summary/i);
+  });
+
+  it("canonicalizes optional summaries without populating legacy envelopes", () => {
+    const summary = "  Parser findings\nneed review.  ";
+    const envelope = createInboxEnvelope(input({ summary }));
+
+    expect(envelope.summary).toBe("Parser findings\nneed review.");
+    expect(parseInboxEnvelope(envelope)).toEqual(envelope);
   });
 });
 
@@ -219,6 +231,43 @@ describe("inboxEnvelopePayloadFingerprint", () => {
       ...value,
       body: "A different immutable body",
     }))).not.toBe(inboxEnvelopePayloadFingerprint(queued));
+    expect(inboxEnvelopePayloadFingerprint(createInboxEnvelope({
+      ...value,
+      summary: "A different user summary.",
+    }))).not.toBe(inboxEnvelopePayloadFingerprint(queued));
+  });
+
+  it("keeps a summary-bearing receipt-only reconstruction fingerprint-stable", () => {
+    const runId = randomUUID();
+    const canonical = createInboxEnvelope(input({
+      summary: "Reconcile a receipt-only message.",
+      fromRunId: runId,
+    }), {
+      state: "processing",
+      processingRunId: runId,
+    });
+    // This matches the receipt-only recovery construction, whose field order
+    // need not match the order produced by the envelope parser.
+    const reconstructed = {
+      version: canonical.version,
+      messageId: canonical.messageId,
+      cardId: canonical.cardId,
+      fromConversationId: canonical.fromConversationId,
+      toConversationId: canonical.toConversationId,
+      sentAt: canonical.sentAt,
+      kind: canonical.kind,
+      summary: canonical.summary!,
+      body: canonical.body,
+      fromRunId: canonical.fromRunId,
+      fromSnapshot: canonical.fromSnapshot,
+      toSnapshot: canonical.toSnapshot,
+      state: canonical.state,
+      processingRunId: canonical.processingRunId!,
+    };
+
+    expect(inboxEnvelopePayloadFingerprint(reconstructed)).toBe(
+      inboxEnvelopePayloadFingerprint(canonical),
+    );
   });
 });
 
@@ -260,6 +309,10 @@ describe("ProjectInbox", () => {
     await expect(inbox.put({
       ...value,
       body: "different",
+    })).rejects.toThrow(/conflict/i);
+    await expect(inbox.put({
+      ...value,
+      summary: "Different user summary.",
     })).rejects.toThrow(/conflict/i);
     await expect(inbox.list()).resolves.toEqual([
       expect.objectContaining({ body: value.body }),

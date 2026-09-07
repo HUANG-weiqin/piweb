@@ -2,6 +2,10 @@ import { randomUUID } from "node:crypto";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import {
+  MAX_SESSION_MESSAGE_SUMMARY_BYTES,
+  MAX_SESSION_MESSAGE_SUMMARY_CHARACTERS,
+} from "../shared/protocol.js";
+import {
   COMPACTION_THRESHOLD_CUSTOM_TYPE,
   CONVERSATION_CARD_CUSTOM_TYPE,
   CONVERSATION_MESSAGE_CUSTOM_TYPE,
@@ -33,6 +37,7 @@ import {
   createLoopListEntry,
   createLoopListContinueEntry,
   createMessageDeliveryReceiptEntry,
+  normalizeConversationMessageSummary,
   parseConversationCardEntry,
   parseCompactionThresholdEntry,
   parseEditBudgetEntry,
@@ -184,6 +189,44 @@ describe("conversation reserved entries", () => {
     value.role.name = "mutated";
     expect(entry.data.role.name).toBe("Worker");
     expect(parseConversationMetaEntry(entry)).toEqual(entry);
+  });
+
+  it("keeps optional message summaries canonical without rewriting legacy entries", () => {
+    const legacyCard = createConversationCardEntry(card());
+    const legacyMessage = createConversationMessageEntry(message());
+    const summary = "  Delegated parser work\nneeds review.  ";
+
+    expect(legacyCard.data).not.toHaveProperty("summary");
+    expect(legacyMessage.details).not.toHaveProperty("summary");
+    expect(parseConversationCardEntry(legacyCard)).toEqual(legacyCard);
+    expect(parseConversationMessageEntry(legacyMessage)).toEqual(legacyMessage);
+    expect(normalizeConversationMessageSummary(summary)).toBe(
+      "Delegated parser work\nneeds review.",
+    );
+    expect(createConversationCardEntry({
+      ...card(),
+      summary,
+    }).data.summary).toBe("Delegated parser work\nneeds review.");
+    const incoming = message();
+    expect(createConversationMessageEntry({
+      ...incoming,
+      details: { ...incoming.details, summary },
+    }).details.summary).toBe("Delegated parser work\nneeds review.");
+  });
+
+  it("rejects blank and over-limit message summaries", () => {
+    expect(() => normalizeConversationMessageSummary(null)).toThrow(/string/i);
+    expect(() => normalizeConversationMessageSummary(" \n ")).toThrow(/blank/i);
+    expect(() => normalizeConversationMessageSummary(
+      "x".repeat(MAX_SESSION_MESSAGE_SUMMARY_CHARACTERS + 1),
+    )).toThrow(/characters/i);
+    expect(() => normalizeConversationMessageSummary(
+      "😀".repeat(Math.floor(MAX_SESSION_MESSAGE_SUMMARY_BYTES / 4) + 1),
+    )).toThrow(/UTF-8 bytes/i);
+    expect(() => createConversationCardEntry({
+      ...card(),
+      summary: " ",
+    })).toThrow(/summary/i);
   });
 
   it("keeps edit-budget grants and irreversible charges as reserved entries", () => {
@@ -1067,6 +1110,7 @@ describe("conversation reserved entries", () => {
     const runId = randomUUID();
     const initial = createConversationCardEntry({
       ...card(),
+      summary: "Parser implementation task.",
       requestFingerprint: "a".repeat(64),
       requestedRole: metadata().role,
       orchestration: {
@@ -1115,6 +1159,7 @@ describe("conversation reserved entries", () => {
     const identityMutations = [
       { kind: "message" as const },
       { body: "A different task" },
+      { summary: "A different user summary." },
       { fromSnapshot: peer() },
       { toSnapshot: peer() },
       { messageId: randomUUID() },

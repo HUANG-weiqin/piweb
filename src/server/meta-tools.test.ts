@@ -207,6 +207,45 @@ describe("createMetaTools", () => {
     }]);
   });
 
+  it("requires a user summary and forwards its canonical form", async () => {
+    const fake = service();
+    const send = tool(createMetaTools(sourceConversationId, fake, true), "send_session_message");
+
+    await expect(send.execute(
+      "missing-summary",
+      {
+        conversationId: targetConversationId,
+        message: "Review the durable message path.",
+      },
+      undefined,
+      undefined,
+      {} as never,
+    )).rejects.toThrow(/summary/i);
+    expect(fake.sendSessionMessage).not.toHaveBeenCalled();
+
+    await send.execute(
+      "summary",
+      {
+        conversationId: targetConversationId,
+        summary: "  请审查持久消息路径。\n并报告风险。  ",
+        message: "Review the durable message path.",
+      },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    expect(fake.sendSessionMessage).toHaveBeenCalledWith(
+      sourceConversationId,
+      {
+        conversationId: targetConversationId,
+        summary: "请审查持久消息路径。\n并报告风险。",
+        message: "Review the durable message path.",
+        idempotencyKey: `${sourceConversationId.length}:${sourceConversationId}:summary`,
+      },
+      undefined,
+    );
+  });
+
   it("aligns task and message limits with the durable UTF-8 byte contract", async () => {
     const fake = service();
     const tools = createMetaTools(sourceConversationId, fake, true);
@@ -226,6 +265,7 @@ describe("createMetaTools", () => {
       "large-message",
       {
         conversationId: "target",
+        summary: "large message",
         message: largeLegalAscii,
       },
       undefined,
@@ -250,6 +290,7 @@ describe("createMetaTools", () => {
       "oversized-message",
       {
         conversationId: "target",
+        summary: "oversized message",
         message: oversizedUtf8,
       },
       undefined,

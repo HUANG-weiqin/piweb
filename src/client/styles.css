@@ -3747,6 +3747,21 @@ pre {
   white-space: nowrap;
 }
 
+.session-message-summary-preview {
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 0;
+  padding: 0 14px 12px;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
 .session-message-status {
   color: var(--muted);
 }
@@ -3794,6 +3809,27 @@ pre {
 
 .session-message-route-arrow {
   color: var(--muted);
+}
+
+.session-message-summary {
+  display: grid;
+  gap: 5px;
+  margin: 0 14px 14px;
+  padding: 12px;
+  border-left: 3px solid var(--focus);
+  background: var(--soft);
+}
+
+.session-message-summary-label {
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.session-message-summary-copy {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .session-message-body {
@@ -4977,6 +5013,20 @@ pre {
 .transcript .session-message-endpoint-handle,
 .transcript .session-message-updated {
   color: var(--rebel-paper-muted);
+}
+
+.transcript .session-message-summary-preview {
+  color: var(--rebel-paper);
+}
+
+.transcript .session-message-summary {
+  border-left-color: var(--rebel-red);
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+}
+
+.transcript .session-message-summary-label {
+  color: var(--rebel-paper);
 }
 
 .transcript .session-message-details {

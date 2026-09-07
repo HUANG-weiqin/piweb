@@ -703,6 +703,7 @@ describe("projectConversationHistory", () => {
         sentAt: "2026-07-19T10:01:00.000Z",
         kind: "message",
         body: "Parser review complete",
+        summary: "解析器审查已完成，等待你决定下一步。",
         fromSnapshot: peer(),
         toSnapshot: peer(),
         delegationId: randomUUID(),
@@ -723,6 +724,7 @@ describe("projectConversationHistory", () => {
         direction: "outgoing",
         state: "queued",
         body: "Review the parser",
+        summary: "",
         sentAt: outgoing.data.updatedAt,
       }),
       expect.objectContaining({
@@ -736,6 +738,7 @@ describe("projectConversationHistory", () => {
         direction: "incoming",
         state: "delivered",
         body: "Parser review complete",
+        summary: "解析器审查已完成，等待你决定下一步。",
         sentAt: incoming.details.sentAt,
       }),
     ]);

@@ -20,6 +20,7 @@ import {
 import { z } from "zod";
 import {
   MAX_CONVERSATION_BODY_BYTES,
+  normalizeConversationMessageSummary,
   parseConversationReferenceSnapshot,
   type ConversationKind,
   type ConversationReferenceSnapshot,
@@ -69,6 +70,20 @@ const conversationIdSchema = (field: string) =>
     }
   });
 
+const conversationMessageSummarySchema = z.string().transform(
+  (value, context) => {
+    try {
+      return normalizeConversationMessageSummary(value);
+    } catch (error) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return z.NEVER;
+    }
+  },
+);
+
 const envelopeSchema = z.object({
   version: z.literal(INBOX_ENVELOPE_VERSION),
   messageId: uuidSchema("messageId"),
@@ -81,6 +96,7 @@ const envelopeSchema = z.object({
     "delegation_task",
   ]),
   body: z.string(),
+  summary: conversationMessageSummarySchema.optional(),
   replyToMessageId: uuidSchema("replyToMessageId").optional(),
   delegationId: uuidSchema("delegationId").optional(),
   requestFingerprint: z.string().regex(
@@ -127,6 +143,7 @@ export interface InboxEnvelope {
   sentAt: string;
   kind: ConversationKind;
   body: string;
+  summary?: string;
   replyToMessageId?: string;
   delegationId?: string;
   requestFingerprint?: string;
@@ -261,15 +278,31 @@ function targetIdentity(conversationId: string): string {
 }
 
 function immutablePayload(envelope: InboxEnvelope): InboxEnvelopeInput {
-  const {
-    version: _version,
-    state: _state,
-    processingRunId: _processingRunId,
-    processingDelivery: _processingDelivery,
-    waitedByRunId: _waitedByRunId,
-    ...payload
-  } = envelope;
-  return payload;
+  // Use a declared field order rather than object insertion order: receipt-only
+  // recovery can reconstruct an otherwise identical envelope in a different
+  // order, and its immutable payload fingerprint must remain stable.
+  return {
+    messageId: envelope.messageId,
+    cardId: envelope.cardId,
+    fromConversationId: envelope.fromConversationId,
+    toConversationId: envelope.toConversationId,
+    sentAt: envelope.sentAt,
+    kind: envelope.kind,
+    body: envelope.body,
+    ...(envelope.summary === undefined ? {} : { summary: envelope.summary }),
+    ...(envelope.replyToMessageId === undefined
+      ? {}
+      : { replyToMessageId: envelope.replyToMessageId }),
+    ...(envelope.delegationId === undefined
+      ? {}
+      : { delegationId: envelope.delegationId }),
+    ...(envelope.requestFingerprint === undefined
+      ? {}
+      : { requestFingerprint: envelope.requestFingerprint }),
+    fromRunId: envelope.fromRunId,
+    fromSnapshot: envelope.fromSnapshot,
+    toSnapshot: envelope.toSnapshot,
+  };
 }
 
 export function inboxEnvelopePayloadFingerprint(
@@ -403,6 +436,7 @@ export function parseInboxEnvelope(value: unknown): InboxEnvelope {
     sentAt: raw.sentAt,
     kind: raw.kind,
     body: raw.body,
+    ...(raw.summary === undefined ? {} : { summary: raw.summary }),
     ...(raw.replyToMessageId === undefined
       ? {}
       : { replyToMessageId: raw.replyToMessageId }),

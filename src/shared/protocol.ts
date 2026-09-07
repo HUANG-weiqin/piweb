@@ -12,6 +12,9 @@ export const MAX_PROJECT_CONVERSATIONS = 100;
 export const MAX_PROJECT_ACTIVITY_SUMMARIES = 100;
 export const MAX_PROJECT_CONVERSATION_NAME_CHARACTERS = 24;
 export const MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS = 500;
+/** 用户可见的跨会话消息摘要：有界载荷，但可写成短段落。 */
+export const MAX_SESSION_MESSAGE_SUMMARY_CHARACTERS = 500;
+export const MAX_SESSION_MESSAGE_SUMMARY_BYTES = 2 * 1024;
 export const MAX_PROMPT_CHARACTERS = 200_000;
 /** 每条浏览器 prompt 最多携带四张小型本地图片，合计解码后不超过 512 KiB。 */
 export const MAX_PROMPT_IMAGE_COUNT = 4;
@@ -24,6 +27,8 @@ export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
+// v50: session-message cards project a bounded user-facing summary; legacy
+// durable messages project an empty summary.
 // v49: browser prompts may carry bounded local raster image attachments.
 // v48: project conversation summaries no longer expose a peer lifecycle flag;
 // all Agent-created peer sessions are persistent.
@@ -55,7 +60,7 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
-export const PROTOCOL_VERSION = 49;
+export const PROTOCOL_VERSION = 50;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
@@ -691,6 +696,8 @@ export interface ConversationMessageCard {
     | "failed"
     | "aborted";
   body: string;
+  /** 用户可见的发送方摘要；旧持久消息投影为空字符串。 */
+  summary: string;
   from: SessionMessageEndpoint;
   to: SessionMessageEndpoint;
   sentAt: string;
@@ -1304,6 +1311,20 @@ const conversationHistoryItemSchema: z.ZodType<ConversationHistoryItem> =
         "aborted",
       ]),
       body: z.string().max(200_000),
+      summary: z.string().superRefine((value, context) => {
+        if ([...value].length > MAX_SESSION_MESSAGE_SUMMARY_CHARACTERS) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `summary must be at most ${MAX_SESSION_MESSAGE_SUMMARY_CHARACTERS} characters`,
+          });
+        }
+        if (utf8Bytes(value) > MAX_SESSION_MESSAGE_SUMMARY_BYTES) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `summary must be at most ${MAX_SESSION_MESSAGE_SUMMARY_BYTES} UTF-8 bytes`,
+          });
+        }
+      }),
       from: sessionMessageEndpointSchema,
       to: sessionMessageEndpointSchema,
       sentAt: z.string().datetime(),

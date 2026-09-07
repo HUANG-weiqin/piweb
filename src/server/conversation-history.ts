@@ -475,6 +475,9 @@ function projectOutgoingCard(
     direction: "outgoing",
     state: card.state,
     body: card.body,
+    // Legacy durable cards have no summary; the browser receives a stable
+    // empty value rather than inferring one from the body or endpoint.
+    summary: card.summary ?? "",
     from: card.fromSnapshot,
     to: card.toSnapshot,
     sentAt,
@@ -501,6 +504,9 @@ function projectIncomingCard(
     direction: "incoming",
     state: "delivered",
     body: message.body,
+    // Legacy delivered markers have no summary; preserve that absence as an
+    // empty browser projection rather than inventing user-facing content.
+    summary: message.summary ?? "",
     from: message.fromSnapshot,
     to: message.toSnapshot,
     sentAt: message.sentAt,

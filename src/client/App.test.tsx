@@ -8940,6 +8940,7 @@ describe("App", () => {
       cardId: "11c51221-a321-44d4-8f29-502f77f0a799",
       direction: "outgoing" as const,
       state: "queued" as const,
+      summary: "Review the implementation.",
       body: "review this",
       from: {
         conversationId: CONVERSATION_ID,

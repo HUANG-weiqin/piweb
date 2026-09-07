@@ -21,6 +21,7 @@ import {
   createMessageDeliveryReceiptEntry,
   createMetaOperationEntry,
   createRunSettlementEntry,
+  normalizeConversationMessageSummary,
   parseReservedConversationEntry,
   type ConversationCard,
   type ConversationMessageEntry,
@@ -3386,6 +3387,7 @@ export class ProjectSessionCoordinator {
         context,
         sourceConversationId,
         input.conversationId,
+        input.summary,
         input.message,
         input.idempotencyKey,
         signal,
@@ -3896,11 +3898,13 @@ export class ProjectSessionCoordinator {
     context: ProjectContext,
     sourceConversationId: string,
     targetConversationId: string,
+    summary: string,
     message: string,
     idempotencyKey: string,
     signal?: AbortSignal,
   ) {
     return this.runLifecycle(context, async () => {
+      const normalizedSummary = normalizeConversationMessageSummary(summary);
       this.throwIfAborted(signal);
       if (sourceConversationId === targetConversationId) {
         throw new Error("Use the current conversation directly instead of messaging itself");
@@ -3918,6 +3922,7 @@ export class ProjectSessionCoordinator {
         existingCard
         && (
           existingCard.kind !== "message"
+          || existingCard.summary !== normalizedSummary
           || existingCard.body !== message
           || existingCard.toSnapshot.conversationId !== targetConversationId
         )
@@ -3967,6 +3972,7 @@ export class ProjectSessionCoordinator {
           ?? existingCard?.updatedAt
           ?? this.now().toISOString(),
         kind: "message",
+        summary: normalizedSummary,
         body: message,
         fromRunId,
       });
@@ -4320,6 +4326,7 @@ export class ProjectSessionCoordinator {
       | "cardId"
       | "sentAt"
       | "kind"
+      | "summary"
       | "body"
       | "delegationId"
     > & {
@@ -4368,6 +4375,7 @@ export class ProjectSessionCoordinator {
         toConversationId: target.conversationId,
         sentAt: receipt.sentAt,
         kind: input.kind,
+        ...(input.summary === undefined ? {} : { summary: input.summary }),
         body: input.body,
         ...(input.delegationId === undefined
           ? {}
@@ -4398,6 +4406,7 @@ export class ProjectSessionCoordinator {
     const baseCard: ConversationCard = existingCard ?? {
         cardId: input.cardId,
         kind: input.kind,
+        ...(input.summary === undefined ? {} : { summary: input.summary }),
         body: input.body,
         fromSnapshot,
         toSnapshot,
@@ -4425,6 +4434,7 @@ export class ProjectSessionCoordinator {
       toConversationId: target.conversationId,
       sentAt: input.sentAt,
       kind: input.kind,
+      ...(input.summary === undefined ? {} : { summary: input.summary }),
       body: input.body,
       ...(input.delegationId === undefined
         ? {}
@@ -4512,6 +4522,7 @@ export class ProjectSessionCoordinator {
         cardId: envelope.cardId,
         sentAt: envelope.sentAt,
         kind: envelope.kind,
+        ...(envelope.summary === undefined ? {} : { summary: envelope.summary }),
         body: envelope.body,
         fromSnapshot: envelope.fromSnapshot,
         toSnapshot: envelope.toSnapshot,
@@ -4660,6 +4671,7 @@ export class ProjectSessionCoordinator {
         cardId: envelope.cardId,
         sentAt: envelope.sentAt,
         kind: envelope.kind,
+        ...(envelope.summary === undefined ? {} : { summary: envelope.summary }),
         body: envelope.body,
         fromSnapshot: envelope.fromSnapshot,
         toSnapshot: envelope.toSnapshot,

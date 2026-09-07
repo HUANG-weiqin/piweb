@@ -55,6 +55,9 @@ export function SessionMessageCard({
   const [expanded, setExpanded] = useState(false);
   const detailsId = useId();
   const peerTitle = peer.title?.trim() || "未命名会话";
+  const summary = card.summary ?? "";
+  const hasSummary = summary.length > 0;
+  const summaryPreview = summary.replace(/\s+/gu, " ").trim();
 
   return (
     <article
@@ -90,6 +93,12 @@ export function SessionMessageCard({
         </button>
       </header>
 
+      {!expanded && hasSummary && summaryPreview && (
+        <p className="session-message-summary-preview" aria-label="给你的摘要预览">
+          {summaryPreview}
+        </p>
+      )}
+
       {expanded && (
         <div id={detailsId} className="session-message-details">
           <div className="session-message-route">
@@ -97,6 +106,21 @@ export function SessionMessageCard({
             <span className="session-message-route-arrow" aria-hidden="true">→</span>
             <Endpoint endpoint={card.to} kind="to" />
           </div>
+
+          {hasSummary && (
+            <section
+              className="session-message-summary"
+              aria-labelledby={`${detailsId}-summary-label`}
+            >
+              <strong
+                id={`${detailsId}-summary-label`}
+                className="session-message-summary-label"
+              >
+                给你的摘要
+              </strong>
+              <p className="session-message-summary-copy">{summary}</p>
+            </section>
+          )}
 
           <p className="session-message-body">{card.body}</p>
 

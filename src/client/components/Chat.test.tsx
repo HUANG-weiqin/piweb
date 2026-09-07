@@ -2203,6 +2203,7 @@ describe("Chat", () => {
       cardId: "11111111-1111-4111-8111-111111111111",
       direction: "outgoing",
       state: "completed",
+      summary: "Review the implementation.",
       body: "Review the implementation",
       from: {
         conversationId: "source",
@@ -2270,6 +2271,7 @@ describe("Chat", () => {
       cardId: "22222222-2222-4222-8222-222222222222",
       direction: "incoming",
       state: "delivered",
+      summary: "Review completed.",
       body: "Review complete",
       from: {
         conversationId: "source",

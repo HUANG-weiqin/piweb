@@ -78,6 +78,7 @@ function sessionMessageCard(
     cardId: "card-1",
     direction: "outgoing",
     state,
+    summary: "Review the recovery path.",
     body: "review the recovery path",
     from: {
       conversationId: "conversation-a",
