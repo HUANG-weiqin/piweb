@@ -2628,16 +2628,29 @@ pre {
 }
 
 .conversation-sidebar-item.selected {
-  width: 100%;
-  margin-left: 0;
-  border-left: 4px solid var(--rebel-red);
-  background: color-mix(in srgb, var(--rebel-red) 12%, var(--rebel-raised));
-  transform: none;
+  width: calc(100% - 18px);
+  margin-left: 4px;
+  transform: translateX(3px);
 }
 
-.conversation-sidebar-item.selected::before,
+.conversation-sidebar-item.selected::before {
+  position: absolute;
+  z-index: -1;
+  inset: -2px -3px 0 -4px;
+  background: var(--rebel-paper);
+  clip-path: polygon(0 12px, 14px 3px, 73% 0, 100% 7px, calc(100% - 9px) 100%, 5px calc(100% - 3px));
+  content: "";
+  transform: translateY(-1px) rotate(-0.45deg);
+}
+
 .conversation-sidebar-item.selected::after {
-  display: none;
+  position: absolute;
+  z-index: -2;
+  inset: 13px -16px -9px 26px;
+  background: var(--rebel-red);
+  clip-path: polygon(7px 0, 100% 4px, calc(100% - 5px) calc(100% - 3px), 0 100%, 3px 9px);
+  content: "";
+  transform: rotate(0.6deg);
 }
 
 .conversation-sidebar-conversation {
@@ -2667,14 +2680,14 @@ pre {
 }
 
 .conversation-sidebar-item.selected .conversation-sidebar-conversation {
-  min-height: 80px;
-  padding-top: 10px;
-  padding-bottom: 10px;
+  min-height: 100px;
+  padding-top: 12px;
+  padding-bottom: 14px;
 }
 
 .conversation-sidebar-item.selected .conversation-sidebar-conversation:not(:disabled):hover {
-  color: var(--rebel-paper);
-  background: rgb(216 209 193 / 7%);
+  color: var(--rebel-black);
+  background: transparent;
 }
 
 .conversation-sidebar-item:is(.hierarchy-root, .hierarchy-standalone)
@@ -2693,21 +2706,21 @@ pre {
   grid-column: 1;
   align-self: start;
   color: #777368;
-  font-size: 27px;
+  font-size: 40px;
   font-style: italic;
-  font-weight: 900;
-  letter-spacing: -0.07em;
-  line-height: 0.92;
+  font-weight: 950;
+  letter-spacing: -0.1em;
+  line-height: 0.9;
   transform: skewX(-7deg);
 }
 
 .conversation-sidebar-item.selected .conversation-sidebar-ordinal {
   position: relative;
   z-index: 2;
-  margin-left: 0;
+  margin-left: -14px;
   color: var(--rebel-red);
-  font-size: 27px;
-  transform: skewX(-7deg);
+  font-size: 56px;
+  transform: translate(-3px, -6px) skewX(-7deg) rotate(-1deg);
 }
 
 .conversation-sidebar-kind {
@@ -2727,15 +2740,16 @@ pre {
 }
 
 .conversation-sidebar-item.selected .conversation-sidebar-kind {
-  color: var(--rebel-paper-muted);
+  color: #4b4740;
 }
 
 .conversation-sidebar-item.selected .conversation-sidebar-kind::before {
-  width: 10px;
-  height: 3px;
+  width: 13px;
+  height: 5px;
   display: block;
   flex: 0 0 auto;
   background: var(--rebel-red);
+  clip-path: polygon(0 0, 100% 1px, 9px 100%, 1px 4px);
 }
 
 .conversation-sidebar-primary,
@@ -2764,10 +2778,10 @@ pre {
 .conversation-sidebar-item.selected .conversation-sidebar-title {
   display: -webkit-box;
   overflow: hidden;
-  color: var(--rebel-paper);
-  font-size: 14px;
-  font-weight: 850;
-  line-height: 1.25;
+  color: var(--rebel-black);
+  font-size: 16px;
+  font-weight: 900;
+  line-height: 1.18;
   text-overflow: ellipsis;
   white-space: normal;
   -webkit-box-orient: vertical;
@@ -2777,7 +2791,7 @@ pre {
 .conversation-sidebar-item.selected .conversation-sidebar-primary,
 .conversation-sidebar-item.selected .conversation-sidebar-identity,
 .conversation-sidebar-item.selected .conversation-sidebar-updated {
-  color: var(--rebel-paper-muted);
+  color: var(--rebel-black);
 }
 
 .conversation-sidebar-item.hierarchy-member .conversation-sidebar-conversation {
@@ -2976,12 +2990,12 @@ pre {
 }
 
 .conversation-agent-badge {
-  padding: 2px 5px;
-  border: 1px solid color-mix(in srgb, currentColor 38%, transparent);
+  padding: 0;
+  border: 0;
   border-radius: 0;
   background: transparent;
   font-weight: 850;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
