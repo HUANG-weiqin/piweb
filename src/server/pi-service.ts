@@ -367,6 +367,7 @@ export class PiConnection {
             command.runId,
             command.text,
             command.promptId,
+            command.images,
           )
         ).then(() => undefined);
       } catch (error) {
@@ -392,6 +393,7 @@ export class PiConnection {
             command.conversationId,
             command.runId,
             command.text,
+            command.images,
           )
         ).then(() => {
           this.emitCommandComplete(command);

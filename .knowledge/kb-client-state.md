@@ -1,6 +1,6 @@
 # 客户端状态
 
-`updated: 2026-09-06`
+`updated: 2026-09-07`
 
 ## 这个模块是干什么的
 
@@ -31,6 +31,7 @@ ServerEvent
 - `PublicState.activeRun`（以及由它派生的 busy）只描述当前 focus；项目其余会话的 activity 来自 `project_snapshot`。聊天 reducer 不维护第二份 busy。
 - `outstandingRunId` 只保存尚未被 authoritative `PublicState.activeRun` 取代的 initial/queued run candidate，并在服务端状态尚未可见的间隙为 Stop 提供 fallback；Stop 总是优先使用当前 `activeRun.id`。busy prompt 自带的 disposable runId 不能覆盖已知 active/queued owner；只有 exact `run_queued` 才把一次 race-to-idle prompt 提升为新 owner，exact `prompt_admitted` 也只能移除它自己留下的 disposable candidate。matching state、terminal 或 error 会结算 candidate，它不伪装成第二份 Agent 状态。
 - `PiSocket.send() === true` 只表示浏览器 transport 接受了帧，不表示服务端接受 prompt。idle prompt 以匹配 focus 三元身份 + runId 的 `run_queued` 为接收点；busy prompt 则以匹配 focus 三元身份 + promptId 的 `prompt_admitted` 为接收点。只有对应回执才能清空草稿并投影 user intent。
+- composer 草稿可以含本地 PNG/JPEG/WebP/GIF 图片（最多 4 张、解码合计最多 512 KiB）：选择或粘贴后只在 App 的易失 draft / 未确认草稿中保留，预览可单独移除；图片-only 可发送。发出前客户端还按完整命令 JSON 检查 1 MiB socket 上限，服务端仍是 MIME、Base64、签名和模型视觉能力的最终裁决者。确认前断线保留同一附件草稿供用户核对，绝不自动重发；接受后的 waiting/history 仅投影 `[图片]`，不让 Base64 进入浏览器快照、PublicState 或 localStorage。
 - prompt 接收确认前断线或显式切换项目属于 unknown outcome。客户端按 `workspaceKey + projectId + conversationId` 保留未确认草稿，切到其它项目/会话时不投影，切回原 focus 后恢复草稿并提示用户核对，绝不自动重发。普通 transport reconnect 在清空旧 focus authority 前冻结同一 owner；若 initialize 在 attach 前再次被重连替换，只继承该三字段 owner，不继承旧 session/focus/command，并继续要求同 workspace、`kind=open` 同 conversation，以及已有 cache 时同 project。最终只有新 correlated `focus_attached` 精确命中全部 owner 字段才保留，任一身份不匹配都清除。只有对应 idle `run_queued` 或 busy `prompt_admitted` 才能清掉已确认 owner 的未确认草稿。
 - composer 始终发送带新 `promptId + runId` 的 `prompt`。busy 时 `prompt_admitted` 只证明消息已进入 SDK 易失 steering 队列，因此 UI 显示“等待中”而不是“已发送”；匹配的 `prompt_delivered` 才把它结算为已投递。断线或工作区切换前尚未确认的 prompt 按 `workspaceKey + projectId + conversationId` 保留当前草稿，用户继续编辑时同步更新该 retained draft。所有 retained intent 都绝不自动重放；进程重启后等待中消息消失（服务端无持久队列），UI 据 snapshot 反映真实状态。
 - `conversation_snapshot.pendingPrompts` 是当前 focus 等待中列表的唯一 UI 真相；切换 focus 立即清空权威 reducer 投影，返回后等待服务端快照，迟到快照必须同时匹配 sessionId、conversationId 和 focusId。命中 presentation cache 时可以只读显示目标会话上一帧，但不能把其中 pending 项 hydrate 回 reducer 或当作已恢复真相。`prompt_delivered` 移除对应等待中项（按 promptId 精确匹配）；`run_finished(aborted)` 清空全部等待中项（SDK steering 队列已被 abort 清空）。相同正文的不同 promptId 必须分别显示和结算。

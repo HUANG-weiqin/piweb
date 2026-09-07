@@ -56,11 +56,13 @@ function projectUserText(message: unknown): string {
   return value.content
     .map((item) => {
       const block = record(item);
-      return block?.type === "text" && typeof block.text === "string"
-        ? block.text
-        : "";
+      if (block?.type === "text" && typeof block.text === "string") {
+        return block.text;
+      }
+      return block?.type === "image" ? "[图片]" : "";
     })
-    .join("");
+    .filter(Boolean)
+    .join("\n");
 }
 
 function joinMessageText(completed: string, current: string): string {

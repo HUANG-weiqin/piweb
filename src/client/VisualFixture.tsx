@@ -477,6 +477,10 @@ export function VisualFixture({
         interactive
         conversationReady
         draft="检查两张截图中的层级、密度与状态辨识度。"
+        draftImages={[{
+          mimeType: "image/png",
+          data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLh+QAAAABJRU5ErkJggg==",
+        }]}
         submitting={false}
         pendingAdmissions={showComposerStates
           ? [{
@@ -488,6 +492,7 @@ export function VisualFixture({
           ? "当前运行仍在处理；新指令会进入现有 steering 顺序。"
           : undefined}
         onDraftChange={noOp}
+        onImagesChange={noOp}
         onSend={noOp}
         onAbort={noOp}
         onSettings={noOp}

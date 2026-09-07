@@ -40,7 +40,7 @@ const transitionDiagnostics = {
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(48);
+    expect(PROTOCOL_VERSION).toBe(49);
   });
 
   it("accepts supported commands", () => {
@@ -141,7 +141,14 @@ describe("parseClientCommand", () => {
       focusId,
       runId,
       text: "change direction",
-    }).type).toBe("steer");
+      images: [{
+        mimeType: "image/png",
+        data: "iVBORw0KGgo=",
+      }],
+    })).toMatchObject({
+      type: "steer",
+      images: [{ mimeType: "image/png", data: "iVBORw0KGgo=" }],
+    });
     expect(parseClientCommand({
       type: "abort",
       sessionId,
@@ -421,6 +428,29 @@ describe("parseClientCommand", () => {
     })).toThrow();
     expect(() => parseClientCommand({ type: "close_session" })).toThrow();
     expect(() => parseClientCommand({ type: "login_oauth", provider: "openai" })).toThrow();
+  });
+
+  it("rejects unsupported image attachments", () => {
+    expect(() => parseClientCommand({
+      type: "prompt",
+      sessionId,
+      conversationId,
+      focusId,
+      runId,
+      promptId,
+      text: "",
+      images: [{ mimeType: "image/svg+xml", data: "PHN2Zz4=" }],
+    })).toThrow();
+    expect(() => parseClientCommand({
+      type: "prompt",
+      sessionId,
+      conversationId,
+      focusId,
+      runId,
+      promptId,
+      text: "",
+      images: [{ mimeType: "image/png", data: "not base64" }],
+    })).toThrow();
   });
 
   it("rejects the removed set_tool_mode command", () => {

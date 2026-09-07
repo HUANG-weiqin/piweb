@@ -7,7 +7,7 @@ import {
   type SessionManager,
   type SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import {
   DEFAULT_COMPACTION_THRESHOLD_PERCENT,
@@ -20,6 +20,7 @@ import {
   type ConversationRoleSnapshot,
   type ConversationWindowCoverage,
   type PublicCompactionAttempt,
+  type PromptImage,
   type SessionEvent,
   type ServiceTier,
   type TokenUsage,
@@ -92,6 +93,48 @@ type AgentMessage = Extract<
   Parameters<AgentSession["agent"]["steer"]>[0],
   { role: "user" }
 >;
+
+function hasImagePrefix(bytes: Uint8Array, prefix: readonly number[]): boolean {
+  return bytes.length >= prefix.length
+    && prefix.every((value, index) => bytes[index] === value);
+}
+
+function promptImageHasExpectedSignature(image: PromptImage): boolean {
+  const bytes = Buffer.from(image.data, "base64");
+  switch (image.mimeType) {
+    case "image/png":
+      return hasImagePrefix(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    case "image/jpeg":
+      return hasImagePrefix(bytes, [0xff, 0xd8, 0xff]);
+    case "image/gif":
+      return hasImagePrefix(bytes, [0x47, 0x49, 0x46, 0x38, 0x37, 0x61])
+        || hasImagePrefix(bytes, [0x47, 0x49, 0x46, 0x38, 0x39, 0x61]);
+    case "image/webp":
+      return hasImagePrefix(bytes, [0x52, 0x49, 0x46, 0x46])
+        && hasImagePrefix(bytes.subarray(8), [0x57, 0x45, 0x42, 0x50]);
+  }
+}
+
+function promptImagesForModel(
+  session: AgentSession,
+  images: readonly PromptImage[] | undefined,
+): ImageContent[] | undefined {
+  if (images === undefined || images.length === 0) return undefined;
+  const model = session.model;
+  if (!model?.input.includes("image")) {
+    throw new Error("The current model does not support image input");
+  }
+  for (const image of images) {
+    if (!promptImageHasExpectedSignature(image)) {
+      throw new Error(`Image data does not match ${image.mimeType}`);
+    }
+  }
+  return images.map((image) => ({
+    type: "image",
+    data: image.data,
+    mimeType: image.mimeType,
+  }));
+}
 
 export type ConversationRunOrigin = "browser" | "inbox";
 
@@ -219,6 +262,7 @@ export interface ConversationActorOpenOptions {
 export interface StartConversationPrompt {
   runId: string;
   text: string;
+  images?: readonly PromptImage[];
   origin: ConversationRunOrigin;
 }
 
@@ -1634,28 +1678,33 @@ export class ConversationActor {
    * The returned promise resolves only with the exact durable settlement.
    */
   startPrompt(input: StartConversationPrompt): Promise<RunSettlement> {
-    if (input.text.trim().length === 0) {
-      throw new Error("Prompt text must not be empty");
+    const text = input.text.trim();
+    const images = promptImagesForModel(this.session, input.images);
+    if (!text && images === undefined) {
+      throw new Error("Prompt text or an image is required");
     }
-    if (this.isExtensionCommand(input.text)) {
+    if (text && this.isExtensionCommand(text)) {
       throw new Error(
         "Extension slash commands are not supported until their detached Agent turns can be owned safely",
       );
     }
     const autoTitlePrompt = input.origin === "browser"
+      && text
       && this.shouldAutoTitleFirstBrowserPrompt()
-        ? input.text
+        ? text
         : undefined;
+    const projectionText = text || (images === undefined ? undefined : "[图片]");
     return this.startRun(
       {
         runId: input.runId,
         origin: input.origin,
         recovered: false,
-        promptText: input.origin === "browser" ? input.text : undefined,
+        promptText: input.origin === "browser" ? projectionText : undefined,
         expectsInitialPromptRawUserMessage: true,
         ...(autoTitlePrompt === undefined ? {} : { autoTitlePrompt }),
       },
-      (ticket) => this.session.prompt(input.text, {
+      (ticket) => this.session.prompt(text, {
+        ...(images === undefined ? {} : { images }),
         preflightResult: (accepted) => {
           if (accepted && isCancelling(ticket)) {
             throw new Error("Run cancelled before agent start");
@@ -1676,8 +1725,14 @@ export class ConversationActor {
     promptId: string;
     runId: string;
     text: string;
+    images?: readonly PromptImage[];
   }): Promise<RunSettlement | { outcome: "admitted" }> {
     this.assertUsable();
+    const text = input.text.trim();
+    const images = promptImagesForModel(this.session, input.images);
+    if (!text && images === undefined) {
+      throw new Error("Prompt text or an image is required");
+    }
     if (this.truncating) {
       throw new Error("Conversation is being rewound");
     }
@@ -1695,19 +1750,21 @@ export class ConversationActor {
         `Too many pending messages (${MAX_PENDING_ADMISSIONS}); wait for the agent to catch up`,
       );
     }
-    if (this.isExtensionCommand(input.text)) {
+    if (text && this.isExtensionCommand(text)) {
       throw new Error(
         "Extension slash commands are not supported until their detached Agent turns can be owned safely",
       );
     }
+    const prompt = { ...input, text };
     // 注意：不进入 operations 串行队列——run 进行中队列被 executeRun 占用，
     // admit 必须在 run 进行中直接调用 SDK steer。
     // 若检查时已 idle（当前 run 刚结束），转 startPrompt（其内部在串行队列执行）。
     const ticket = this.activeRun;
     if (!ticket) {
       return this.startPrompt({
-        runId: input.runId,
-        text: input.text,
+        runId: prompt.runId,
+        text: prompt.text,
+        images: prompt.images,
         origin: "browser",
       });
     }
@@ -1721,7 +1778,7 @@ export class ConversationActor {
       // emitted.
       throw new Error("The agent run is not ready to accept a message");
     }
-    return this.admitSteerPrompt(ticket, input);
+    return this.admitSteerPrompt(ticket, prompt, images);
   }
 
   private async admitSteerPrompt(
@@ -1730,7 +1787,9 @@ export class ConversationActor {
       promptId: string;
       runId: string;
       text: string;
+      images?: readonly PromptImage[];
     },
+    images: ImageContent[] | undefined,
   ): Promise<{ outcome: "admitted" }> {
     // Pi checks every slash-prefixed prompt for an extension command through
     // an await before it can reach agent.steer. The identity capture below is
@@ -1760,7 +1819,7 @@ export class ConversationActor {
     }
     const admission: PendingPromptAdmission = {
       promptId: input.promptId,
-      text: input.text,
+      text: input.text || "[图片]",
     };
     this.pendingAdmissions.push(admission);
     let accepted = false;
@@ -1773,6 +1832,7 @@ export class ConversationActor {
           const captured = this.requireCreated().captureSteeringMessage(() =>
             this.session.prompt(input.text, {
               streamingBehavior: "steer",
+              ...(images === undefined ? {} : { images }),
               preflightResult: (ok) => {
                 accepted = ok;
                 preflightResult = ok;
@@ -1841,7 +1901,7 @@ export class ConversationActor {
       type: "prompt_admitted",
       conversationId: this.conversationId,
       promptId: input.promptId,
-      text: input.text,
+      text: admission.text,
     });
     return { outcome: "admitted" };
   }
@@ -1893,14 +1953,19 @@ export class ConversationActor {
     );
   }
 
-  steer(runId: string, text: string): Promise<void> {
-    return this.steerWithProjectedText(runId, text);
+  steer(
+    runId: string,
+    text: string,
+    images?: readonly PromptImage[],
+  ): Promise<void> {
+    return this.steerWithProjectedText(runId, text, undefined, images);
   }
 
   private steerWithProjectedText(
     runId: string,
     text: string,
     projectedText?: string,
+    imageAttachments?: readonly PromptImage[],
   ): Promise<void> {
     try {
       this.assertUsable();
@@ -1908,8 +1973,14 @@ export class ConversationActor {
       return Promise.reject(error);
     }
     const trimmed = text.trim();
-    if (!trimmed) {
-      return Promise.reject(new Error("Steering text must not be empty"));
+    let images: ImageContent[] | undefined;
+    try {
+      images = promptImagesForModel(this.session, imageAttachments);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    if (!trimmed && images === undefined) {
+      return Promise.reject(new Error("Steering text or an image is required"));
     }
     if (this.isExtensionCommand(trimmed)) {
       return Promise.reject(
@@ -1950,7 +2021,9 @@ export class ConversationActor {
     let observation: PendingGuidanceObservation | undefined;
     try {
       const captured = this.requireCreated().captureSteeringMessage(() =>
-        this.session.steer(trimmed)
+        images === undefined
+          ? this.session.steer(trimmed)
+          : this.session.steer(trimmed, images)
       );
       queued = Promise.resolve(captured.result);
       if (captured.message === undefined) {

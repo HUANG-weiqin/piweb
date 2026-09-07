@@ -100,9 +100,11 @@ function view(
     online
     conversationReady
     draft={draft}
+    draftImages={[]}
     submitting={false}
     pendingAdmissions={[]}
     onDraftChange={() => undefined}
+    onImagesChange={() => undefined}
     onSend={() => true}
 
     onAbort={() => undefined}
@@ -357,10 +359,12 @@ describe("Chat", () => {
 
     const stop = screen.getByRole("button", { name: "停止" });
     expect(scope).toContainElement(stop);
-    for (let index = 0; index < 4; index += 1) {
+    for (let index = 0; index < 5; index += 1) {
       fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
     }
     expect(stop).toHaveFocus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(screen.getByRole("button", { name: "添加图片" })).toHaveFocus();
     fireEvent.keyDown(document, { key: "Tab" });
     expect(screen.getByRole("button", { name: "打开任务" })).toHaveFocus();
     expect(scope.contains(document.activeElement)).toBe(true);
@@ -947,10 +951,67 @@ describe("Chat", () => {
     expect(stopButton).toHaveTextContent("STOP");
 
     fireEvent.click(sendButton);
-    expect(onSend).toHaveBeenCalledWith("next instruction");
+    expect(onSend).toHaveBeenCalledWith("next instruction", []);
 
     fireEvent.click(stopButton);
     expect(onAbort).toHaveBeenCalledOnce();
+  });
+
+  it("previews, removes, and sends image-only drafts", () => {
+    const image = { mimeType: "image/png" as const, data: "iVBORw0KGgo=" };
+    const onSend = vi.fn();
+    const onImagesChange = vi.fn();
+    render(view(emptyChat, "", undefined, {
+      draftImages: [image],
+      onImagesChange,
+      onSend,
+    }));
+
+    expect(screen.getByRole("img", { name: "待发送图片 1" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(onSend).toHaveBeenCalledWith("", [image]);
+
+    fireEvent.click(screen.getByRole("button", { name: "移除图片 1" }));
+    expect(onImagesChange).toHaveBeenCalledWith([]);
+  });
+
+  it("serializes concurrent image reads against the latest draft", async () => {
+    class ControlledFileReader {
+      static pending: ControlledFileReader[] = [];
+      result: string | ArrayBuffer | null = null;
+      onerror: (() => void) | null = null;
+      onload: (() => void) | null = null;
+
+      readAsDataURL(): void {
+        ControlledFileReader.pending.push(this);
+      }
+
+      finish(data: string): void {
+        this.result = data;
+        this.onload?.();
+      }
+    }
+    vi.stubGlobal("FileReader", ControlledFileReader);
+    const onImagesChange = vi.fn();
+    const rendered = render(view(emptyChat, "", undefined, { onImagesChange }));
+    const input = rendered.container.querySelector<HTMLInputElement>("input[type=file]");
+    expect(input).not.toBeNull();
+
+    fireEvent.change(input!, {
+      target: { files: [new File(["A"], "a.png", { type: "image/png" })] },
+    });
+    fireEvent.change(input!, {
+      target: { files: [new File(["B"], "b.png", { type: "image/png" })] },
+    });
+    await waitFor(() => expect(ControlledFileReader.pending).toHaveLength(1));
+    ControlledFileReader.pending[0]!.finish("data:image/png;base64,iVBORw0KGgo=");
+    await waitFor(() => expect(ControlledFileReader.pending).toHaveLength(2));
+    ControlledFileReader.pending[1]!.finish("data:image/png;base64,R0lGODlh");
+
+    await waitFor(() => expect(onImagesChange).toHaveBeenLastCalledWith([
+      { mimeType: "image/png", data: "iVBORw0KGgo=" },
+      { mimeType: "image/png", data: "R0lGODlh" },
+    ]));
   });
 
   it("shows admitted prompts above Tasks while the agent is busy", () => {

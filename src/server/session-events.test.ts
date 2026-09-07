@@ -205,6 +205,21 @@ describe("SessionEventProjector", () => {
     );
   });
 
+  it("projects image-only user messages without exposing image data", () => {
+    const projector = new SessionEventProjector();
+    expect(projector.project(nativeEvent({
+      type: "message_start",
+      message: {
+        role: "user",
+        content: [{ type: "image", mimeType: "image/png", data: "secret-base64" }],
+      },
+    }))).toEqual([{
+      type: "user_message",
+      projectionId: expect.any(String),
+      text: "[图片]",
+    }]);
+  });
+
   it("splits live assistant output around a delivered session message", () => {
     const projector = new SessionEventProjector();
     projector.project(nativeEvent({ type: "agent_start" }));

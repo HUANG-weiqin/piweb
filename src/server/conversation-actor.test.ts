@@ -102,7 +102,11 @@ interface FakeSession extends AgentSession {
   /** Simulated input-extension handlers (admission precheck). */
   hasInputExtensionHandlers?: boolean;
   toolCallGate?: ToolCallGate;
-  promptCalls: Array<{ text: string; streamingBehavior?: "steer" | "followUp" }>;
+  promptCalls: Array<{
+    text: string;
+    streamingBehavior?: "steer" | "followUp";
+    images?: unknown;
+  }>;
   promptImplementation(text: string, options?: Parameters<AgentSession["prompt"]>[1]): Promise<void>;
   setSessionNameImplementation(name: string): void;
   resumeCalls: number;
@@ -140,6 +144,7 @@ function fakeSession(): FakeSession {
       provider: "test",
       id: "model",
       contextWindow: 1_000,
+      input: ["text", "image"],
       cost: { input: 10, output: 1, cacheRead: 1, cacheWrite: 1 },
     },
     thinkingLevel: "off",
@@ -155,7 +160,11 @@ function fakeSession(): FakeSession {
     steeringMessages: [],
     promptCalls: [],
     prompt: function (text: string, options?: Parameters<AgentSession["prompt"]>[1]) {
-      this.promptCalls.push({ text, streamingBehavior: options?.streamingBehavior });
+      this.promptCalls.push({
+        text,
+        streamingBehavior: options?.streamingBehavior,
+        ...(options?.images === undefined ? {} : { images: options.images }),
+      });
       return this.promptImplementation(text, options);
     },
     setSessionName: function (name: string) {
@@ -582,6 +591,41 @@ function checkToolTurnBoundary(runtime: FakeRuntime): boolean {
 }
 
 describe("ConversationActor", () => {
+  describe("image prompts", () => {
+    it("passes valid raster attachments to the Pi prompt without altering text", async () => {
+      const fixture = await openActor();
+      await fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "inspect this image",
+        images: [{ mimeType: "image/png", data: "iVBORw0KGgo=" }],
+        origin: "browser",
+      });
+
+      expect(fixture.runtime.session.promptCalls).toContainEqual({
+        text: "inspect this image",
+        streamingBehavior: undefined,
+        images: [{
+          type: "image",
+          mimeType: "image/png",
+          data: "iVBORw0KGgo=",
+        }],
+      });
+      await fixture.actor.dispose();
+    });
+
+    it("rejects a MIME/signature mismatch before starting a run", async () => {
+      const fixture = await openActor();
+      expect(() => fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "",
+        images: [{ mimeType: "image/png", data: "R0lGODlh" }],
+        origin: "browser",
+      })).toThrow("Image data does not match image/png");
+      expect(fixture.runtime.session.promptCalls).toEqual([]);
+      await fixture.actor.dispose();
+    });
+  });
+
   describe("initial automatic title", () => {
     it("acknowledges an eligible first prompt before naming, then names it before the Agent starts", async () => {
       const runtime = new FakeRuntime();

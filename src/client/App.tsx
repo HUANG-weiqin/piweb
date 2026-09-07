@@ -9,6 +9,7 @@ import {
 } from "react";
 import {
   DEFAULT_COMPACTION_THRESHOLD_PERCENT,
+  MAX_MESSAGE_BYTES,
   MAX_PROMPT_CHARACTERS,
   PROTOCOL_VERSION,
   type AcknowledgedSettingOperation,
@@ -20,6 +21,7 @@ import {
   type LoopList,
   type PublicState,
   type ProjectActivitySummary,
+  type PromptImage,
   type RoleTemplate,
   type ServerEvent,
   type ServiceTier,
@@ -219,6 +221,12 @@ interface DirectPendingPrompt extends ActiveFocus {
   runId: string;
   promptId: string;
   text: string;
+  images: PromptImage[];
+}
+
+interface UnconfirmedPromptDraft {
+  text: string;
+  images: PromptImage[];
 }
 
 /** busy 时已接受、尚未投递的浏览器 prompt（服务端内存态）。 */
@@ -557,9 +565,17 @@ export function App() {
   const authFlowIdRef = useRef("");
   const [draft, setDraft] = useState("");
   const updateDraft = (text: string) => setDraft(text);
+  const [draftImages, setDraftImages] = useState<PromptImage[]>([]);
+  const updateDraftImages = (images: PromptImage[]) => setDraftImages(images);
+  const clearDraft = () => {
+    updateDraft("");
+    updateDraftImages([]);
+  };
   const [pendingPrompt, setPendingPrompt] = useState<DirectPendingPrompt>();
   const pendingPromptRef = useRef<DirectPendingPrompt | undefined>(undefined);
-  const unconfirmedPromptByConversationRef = useRef(new Map<string, string>());
+  const unconfirmedPromptByConversationRef = useRef(
+    new Map<string, UnconfirmedPromptDraft>(),
+  );
   const [pendingAdmissions, setPendingAdmissions] = useState<PendingAdmission[]>([]);
   const pendingAdmissionsRef = useRef<PendingAdmission[]>([]);
   const replacePendingAdmissions = (admissions: PendingAdmission[]) => {
@@ -842,13 +858,14 @@ export function App() {
       unconfirmedPromptKey(focus),
     );
     if (unconfirmed === undefined) return;
-    updateDraft(unconfirmed);
+    updateDraft(unconfirmed.text);
+    updateDraftImages(unconfirmed.images);
     setPromptNotice(UNCONFIRMED_PROMPT_NOTICE);
   };
   const rememberUnconfirmedPrompt = (pending: DirectPendingPrompt) => {
     unconfirmedPromptByConversationRef.current.set(
       pendingConversationKey(pending),
-      pending.text,
+      { text: pending.text, images: pending.images },
     );
   };
   const forgetUnconfirmedPrompt = (
@@ -1061,7 +1078,7 @@ export function App() {
     updateConversationReady(false);
     setSelectingRole(false);
     if (changedConversation) {
-      if (!preserveDraft) updateDraft("");
+      if (!preserveDraft) clearDraft();
       setPromptNotice("");
       updatePendingPrompt(undefined);
       showPendingContextCompaction(focus);
@@ -1084,11 +1101,11 @@ export function App() {
     dispatch({
       type: "prompt_accepted",
       runId,
-      text: pending.text,
+      text: pending.text || "[图片]",
       ...focus,
     });
     forgetUnconfirmedPrompt(pending);
-    updateDraft("");
+    clearDraft();
     setPromptNotice("");
     updatePendingPrompt(undefined);
     updateOutstandingRunId(runId);
@@ -1104,6 +1121,7 @@ export function App() {
     rememberUnconfirmedPrompt(pending);
     if (pendingIsCurrent) {
       updateDraft(pending.text);
+      updateDraftImages(pending.images);
       setPromptNotice(UNCONFIRMED_PROMPT_NOTICE);
     }
   };
@@ -1759,7 +1777,7 @@ export function App() {
             || correlatedReconnectDraftOwner.conversationId !== event.conversationId
           )
         ) {
-          updateDraft("");
+          clearDraft();
         }
         if (
           !pending
@@ -1956,7 +1974,7 @@ export function App() {
               busy: false,
             }
           : current);
-        updateDraft("");
+        clearDraft();
         setPromptNotice("");
         updatePendingPrompt(undefined);
         updateOutstandingRunId("");
@@ -2052,7 +2070,7 @@ export function App() {
           && pending.focusId === event.focusId
         ) {
           forgetUnconfirmedPrompt(pending);
-          updateDraft("");
+          clearDraft();
           setPromptNotice("");
           updatePendingPrompt(undefined);
           if (outstandingRunIdRef.current === pending.runId) {
@@ -2273,7 +2291,7 @@ export function App() {
                   busy: false,
                 }
               : current);
-            updateDraft("");
+            clearDraft();
             setPromptNotice("");
             updatePendingPrompt(undefined);
             const deletedCompaction =
@@ -2867,7 +2885,7 @@ export function App() {
     updateDirectoryBrowser(undefined);
     setError("");
     markPendingPromptUnconfirmed();
-    updateDraft("");
+    clearDraft();
     setPromptNotice("");
     clearSessionProjection();
     setSetupOpen(false);
@@ -2915,9 +2933,9 @@ export function App() {
       cached,
     );
   };
-  const sendPrompt = (text: string): boolean => {
+  const sendPrompt = (text: string, images: PromptImage[]): boolean => {
     const trimmed = text.trim();
-    if (!trimmed || !conversationReadyRef.current) return false;
+    if ((!trimmed && images.length === 0) || !conversationReadyRef.current) return false;
     if (pendingConversationTruncationRef.current) return false;
     const sessionId = sessionIdRef.current;
     const focus = focusRef.current;
@@ -2925,25 +2943,32 @@ export function App() {
     const knownRunOwnerId = state?.activeRun?.id || outstandingRunIdRef.current;
     const runId = crypto.randomUUID();
     const promptId = crypto.randomUUID();
-    const pending: DirectPendingPrompt = {
-      ...focus,
-      workspaceKey: currentWorkspaceKey(),
-      runId,
-      promptId,
-      text: trimmed,
-    };
-    setPromptNotice("");
-    updatePendingPrompt(pending);
-    if (!knownRunOwnerId) updateOutstandingRunId(runId);
-    const ok = send({
-      type: "prompt",
+    const command = {
+      type: "prompt" as const,
       sessionId,
       conversationId: focus.conversationId,
       focusId: focus.focusId,
       runId,
       promptId,
       text: trimmed,
-    });
+      ...(images.length === 0 ? {} : { images }),
+    };
+    if (new TextEncoder().encode(JSON.stringify(command)).byteLength > MAX_MESSAGE_BYTES) {
+      setPromptNotice("图片和消息合计超过单条传输上限，请移除图片或缩短消息。");
+      return false;
+    }
+    const pending: DirectPendingPrompt = {
+      ...focus,
+      workspaceKey: currentWorkspaceKey(),
+      runId,
+      promptId,
+      text: trimmed,
+      images,
+    };
+    setPromptNotice("");
+    updatePendingPrompt(pending);
+    if (!knownRunOwnerId) updateOutstandingRunId(runId);
+    const ok = send(command);
     if (!ok) {
       updatePendingPrompt(undefined);
       if (outstandingRunIdRef.current === runId) updateOutstandingRunId("");
@@ -2951,10 +2976,10 @@ export function App() {
     }
     return ok;
   };
-  const submitPrompt = (text: string): boolean => {
+  const submitPrompt = (text: string, images: PromptImage[]): boolean => {
     const trimmed = text.trim();
     if (
-      !trimmed
+      (!trimmed && images.length === 0)
       || !conversationReadyRef.current
       || pendingConversationRoleSwitchRef.current
     ) return false;
@@ -2962,7 +2987,7 @@ export function App() {
       setPromptNotice(`单条消息最多 ${MAX_PROMPT_CHARACTERS.toLocaleString()} 个字符。`);
       return false;
     }
-    return sendPrompt(trimmed);
+    return sendPrompt(trimmed, images);
   };
   const abortCurrentRun = () => {
     if (!conversationReadyRef.current || pendingFocusRef.current) return;
@@ -3671,23 +3696,29 @@ export function App() {
   });
   const handleConversationRename = useLatestCallback(renameConversation);
   const handleConversationDelete = useLatestCallback(deleteConversation);
+  const updateUnconfirmedPromptDraft = (next: UnconfirmedPromptDraft) => {
+    const focus = focusRef.current;
+    if (!focus) return;
+    const key = unconfirmedPromptKey(focus);
+    if (!unconfirmedPromptByConversationRef.current.has(key)) return;
+    if (!next.text && next.images.length === 0) {
+      unconfirmedPromptByConversationRef.current.delete(key);
+    } else {
+      unconfirmedPromptByConversationRef.current.set(key, next);
+    }
+  };
   const handleChatDraftChange = useLatestCallback((text: string) => {
     updateDraft(text);
-    const focus = focusRef.current;
-    if (focus) {
-      const key = unconfirmedPromptKey(focus);
-      const unconfirmed = unconfirmedPromptByConversationRef.current.get(key);
-      if (unconfirmed) {
-        if (text) {
-          unconfirmedPromptByConversationRef.current.set(key, text);
-        } else {
-          unconfirmedPromptByConversationRef.current.delete(key);
-        }
-      }
-    }
+    updateUnconfirmedPromptDraft({ text, images: draftImages });
     if (promptNotice) setPromptNotice("");
   });
-  const handleChatSend = useLatestCallback(submitPrompt);
+  const handleChatImagesChange = useLatestCallback((images: PromptImage[]) => {
+    updateDraftImages(images);
+    updateUnconfirmedPromptDraft({ text: draft, images });
+    if (promptNotice) setPromptNotice("");
+  });
+  const handleChatSend = useLatestCallback((text: string, images: PromptImage[]) =>
+    submitPrompt(text, images));
   const handleChatAbort = useLatestCallback(abortCurrentRun);
   const handleChatSettings = useLatestCallback(() => {
     if (
@@ -4311,10 +4342,12 @@ export function App() {
               interactive={settingsEnabled}
               conversationReady={visibleConversationReady}
               draft={draft}
+              draftImages={draftImages}
               submitting={Boolean(pendingPrompt)}
               pendingAdmissions={pendingAdmissions}
               promptNotice={promptNotice || undefined}
               onDraftChange={handleChatDraftChange}
+              onImagesChange={handleChatImagesChange}
               onSend={handleChatSend}
               onAbort={handleChatAbort}
               onSettings={handleChatSettings}

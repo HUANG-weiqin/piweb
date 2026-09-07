@@ -6557,6 +6557,49 @@ pre {
   background: var(--rebel-black);
 }
 
+.app-shell .composer-attachments {
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  overflow-x: auto;
+  background: var(--rebel-black);
+}
+
+.app-shell .composer-attachment {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.app-shell .composer-attachment img {
+  display: block;
+  width: 72px;
+  height: 54px;
+  object-fit: cover;
+  border: 1px solid var(--rebel-line);
+}
+
+.app-shell .composer-attachment button {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 20px;
+  min-height: 20px;
+  padding: 0;
+  border: 1px solid var(--rebel-paper);
+  border-radius: 50%;
+  color: var(--rebel-paper);
+  background: var(--rebel-red);
+}
+
+.app-shell .attach-image {
+  min-width: 48px;
+  border: 0;
+  color: var(--rebel-black);
+  background: color-mix(in srgb, var(--rebel-paper) 82%, var(--rebel-red));
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-weight: 900;
+}
+
 .app-shell .composer {
   position: relative;
   min-height: 78px;

@@ -13,6 +13,9 @@ export const MAX_PROJECT_ACTIVITY_SUMMARIES = 100;
 export const MAX_PROJECT_CONVERSATION_NAME_CHARACTERS = 24;
 export const MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS = 500;
 export const MAX_PROMPT_CHARACTERS = 200_000;
+/** 每条浏览器 prompt 最多携带四张小型本地图片，合计解码后不超过 512 KiB。 */
+export const MAX_PROMPT_IMAGE_COUNT = 4;
+export const MAX_PROMPT_IMAGE_BYTES = 512 * 1024;
 export const MAX_PENDING_PROMPTS_PER_CONVERSATION = 64;
 export const MAX_LOOP_LIST_ITEMS = 100;
 export const MAX_LOOP_LIST_ITEM_ID_CHARACTERS = 128;
@@ -21,6 +24,7 @@ export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
+// v49: browser prompts may carry bounded local raster image attachments.
 // v48: project conversation summaries no longer expose a peer lifecycle flag;
 // all Agent-created peer sessions are persistent.
 // v46: live assistant output estimates use Pi's base message estimator and
@@ -51,7 +55,7 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
-export const PROTOCOL_VERSION = 48;
+export const PROTOCOL_VERSION = 49;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
@@ -95,6 +99,48 @@ const modelReferenceString = (field: string) => boundedUtf8String(
   (value) => value.trim().length > 0,
   `${field} must not be blank`,
 );
+
+export const PROMPT_IMAGE_MIME_TYPES = [
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+] as const;
+export type PromptImageMimeType = (typeof PROMPT_IMAGE_MIME_TYPES)[number];
+export function promptImageMimeType(
+  value: string,
+): PromptImageMimeType | undefined {
+  return PROMPT_IMAGE_MIME_TYPES.find((mimeType) => mimeType === value);
+}
+const promptImageMimeTypeSchema = z.enum(PROMPT_IMAGE_MIME_TYPES);
+const MAX_PROMPT_IMAGE_DATA_CHARACTERS =
+  Math.ceil(MAX_PROMPT_IMAGE_BYTES / 3) * 4;
+const canonicalBase64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+export function decodedPromptImageBytes(data: string): number {
+  return (data.length / 4) * 3
+    - (data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0);
+}
+const promptImageSchema = z.object({
+  mimeType: promptImageMimeTypeSchema,
+  data: z.string()
+    .min(4)
+    .max(MAX_PROMPT_IMAGE_DATA_CHARACTERS)
+    .regex(canonicalBase64, "image data must be canonical base64"),
+}).strict();
+export type PromptImage = z.infer<typeof promptImageSchema>;
+const promptImagesSchema = z.array(promptImageSchema)
+  .max(MAX_PROMPT_IMAGE_COUNT)
+  .superRefine((images, context) => {
+    const bytes = images.reduce((total, image) => (
+      total + decodedPromptImageBytes(image.data)
+    ), 0);
+    if (bytes <= MAX_PROMPT_IMAGE_BYTES) return;
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `prompt images must be at most ${MAX_PROMPT_IMAGE_BYTES} bytes in total`,
+    });
+  });
+const promptTextSchema = z.string().trim().max(MAX_PROMPT_CHARACTERS);
 const boundedCharactersString = (
   maximumCharacters: number,
   field: string,
@@ -251,7 +297,9 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
     runId: runIdSchema,
     /** 客户端生成的消息身份；busy 时用于 prompt_admitted/prompt_delivered 关联。 */
     promptId: z.string().uuid(),
-    text: required.max(MAX_PROMPT_CHARACTERS),
+    /** 图片可单独构成一条消息；空文本由 actor 与图片一并校验。 */
+    text: promptTextSchema,
+    images: promptImagesSchema.optional(),
   }),
   z.object({
     type: z.literal("steer"),
@@ -260,7 +308,8 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
     conversationId: conversationIdSchema,
     focusId: focusIdSchema,
     runId: runIdSchema,
-    text: required.max(MAX_PROMPT_CHARACTERS),
+    text: promptTextSchema,
+    images: promptImagesSchema.optional(),
   }),
   z.object({
     type: z.literal("abort"),

@@ -1,6 +1,6 @@
 # 线协议
 
-`updated: 2026-09-06`
+`updated: 2026-09-07`
 
 ## 这个模块是干什么的
 
@@ -19,7 +19,7 @@ ClientCommand
 → App / reducer
 ```
 
-协议由 `src/shared/protocol.ts` 的 `PROTOCOL_VERSION` 标识；版本变更摘要紧邻该常量。v47 是有意的非兼容格式切换：`initialize` 必须带 `commandId` 和显式 conversation target，`prompt` 必须带 `promptId`；`conversation_snapshot` 只携带 `items`，assistant 的有序 `parts` 必填。旧 `messages` transcript、缺失 `parts`、`select_model` 命令及相应浏览器 fallback 都不再接受。v46 的 `output_estimate` 是当前 assistant segment 的 Pi 基础 token 估算，只作为 focused run 的 live `session_event`；它不进入 `PublicState`、history snapshot、持久化或最终 usage 累计。浏览器将它与此前已结束 segment 的最终 usage 及各 segment 的浏览器观察时长合并，显示带 `~` 的实时平均 `TOK/S`；本 segment 的最终 `usage` 到达后立即撤销估算，run 结束后仍只显示真实 usage 派生的结果。v45 删除 `output_progress`；浏览器在每个 run 结束时，用既有最终 assistant `usage.output` 与各 assistant segment 的浏览器观察时长派生最近结束 run 的平均输出速率。该易失指标不进入 `PublicState`、history snapshot 或最终 usage 累计；terminal `session_event` 后以相同 projectionSeq 到达的 focused snapshot 只重放 transcript，不能清除该指标；更高 seq 的 snapshot 则清除它。没有可用最终 usage 或有效时长时显示 `—`。v43 让 `project_snapshot.coverage` 明确区分完整成员证明与不完整观察，浏览器只有在 `coverage: "complete"` 且未截断时才能把缺席视为删除证据。v42 允许成功的 workspace initialize 与 conversation focus 在既有 authority envelope 上携带一次性 host phase diagnostics；它不新增事件、状态或持久记录。角色模板、冻结角色快照、角色 catalog 与 conversation snapshot 的 role payload 都必须包含必填 nullable `compactionModel`；`null` 跟随冻结 primary model，不新增 command。v41 另把实际 default compaction request attempt 与 durable 成功 provenance 显式投影，二者都不能从配置推导。工具参数和结果允许 `unknown`，但服务端在投影时会做有界遍历、转成 JSON-safe 数据并限制单值大小。
+协议由 `src/shared/protocol.ts` 的 `PROTOCOL_VERSION` 标识；版本变更摘要紧邻该常量。v49 允许 `prompt` 和 `steer` 追加可选 `images`：仅 PNG/JPEG/WebP/GIF、canonical Base64、最多 4 张且解码后合计最多 512 KiB；文本可以为空但 Actor 必须至少收到文本或图片。图片数据会随 Pi 原始 user message 进入其受控 JSONL 历史，但绝不进入 `pendingPrompts`、回执、PublicState 或任何浏览器快照；图片-only 的安全显示占位为 `[图片]`。v47 是有意的非兼容格式切换：`initialize` 必须带 `commandId` 和显式 conversation target，`prompt` 必须带 `promptId`；`conversation_snapshot` 只携带 `items`，assistant 的有序 `parts` 必填。旧 `messages` transcript、缺失 `parts`、`select_model` 命令及相应浏览器 fallback 都不再接受。v46 的 `output_estimate` 是当前 assistant segment 的 Pi 基础 token 估算，只作为 focused run 的 live `session_event`；它不进入 `PublicState`、history snapshot、持久化或最终 usage 累计。浏览器将它与此前已结束 segment 的最终 usage 及各 segment 的浏览器观察时长合并，显示带 `~` 的实时平均 `TOK/S`；本 segment 的最终 `usage` 到达后立即撤销估算，run 结束后仍只显示真实 usage 派生的结果。v45 删除 `output_progress`；浏览器在每个 run 结束时，用既有最终 assistant `usage.output` 与各 assistant segment 的浏览器观察时长派生最近结束 run 的平均输出速率。该易失指标不进入 `PublicState`、history snapshot 或最终 usage 累计；terminal `session_event` 后以相同 projectionSeq 到达的 focused snapshot 只重放 transcript，不能清除该指标；更高 seq 的 snapshot 则清除它。没有可用最终 usage 或有效时长时显示 `—`。v43 让 `project_snapshot.coverage` 明确区分完整成员证明与不完整观察，浏览器只有在 `coverage: "complete"` 且未截断时才能把缺席视为删除证据。v42 允许成功的 workspace initialize 与 conversation focus 在既有 authority envelope 上携带一次性 host phase diagnostics；它不新增事件、状态或持久记录。角色模板、冻结角色快照、角色 catalog 与 conversation snapshot 的 role payload 都必须包含必填 nullable `compactionModel`；`null` 跟随冻结 primary model，不新增 command。v41 另把实际 default compaction request attempt 与 durable 成功 provenance 显式投影，二者都不能从配置推导。工具参数和结果允许 `unknown`，但服务端在投影时会做有界遍历、转成 JSON-safe 数据并限制单值大小。
 
 ## 决策
 

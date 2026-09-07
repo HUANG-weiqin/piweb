@@ -8,6 +8,7 @@ import {
   type ConversationSummary,
   type ConversationWindowCoverage,
   type ProjectActivitySummary,
+  type PromptImage,
   type ServiceTier,
   type ThinkingLevel,
   type ToolMode,
@@ -1509,6 +1510,7 @@ export class ProjectSessionCoordinator {
     runId: string,
     text: string,
     promptId?: string,
+    images?: readonly PromptImage[],
   ): Promise<RunSettlement | { outcome: "admitted" }> {
     const context = this.requireContext(handle);
     const admitted = await this.runLifecycle(context, async () => {
@@ -1523,7 +1525,7 @@ export class ProjectSessionCoordinator {
             "promptId is required while the agent is busy",
           );
         }
-        return actor.admitBrowserPrompt({ promptId, runId, text });
+        return actor.admitBrowserPrompt({ promptId, runId, text, images });
       }
       const pump = await this.pumpTarget(context, conversationId);
       if (pump === "blocked_by_deletion" || context.deleting.has(conversationId)) {
@@ -1544,6 +1546,7 @@ export class ProjectSessionCoordinator {
         completion: actor.startPrompt({
           runId,
           text,
+          images,
           origin: "browser",
         }),
       };
@@ -1557,6 +1560,7 @@ export class ProjectSessionCoordinator {
     conversationId: string,
     runId: string,
     text: string,
+    images?: readonly PromptImage[],
   ): Promise<void> {
     const context = this.requireContext(handle);
     if (context.deleting.has(conversationId)) {
@@ -1564,7 +1568,7 @@ export class ProjectSessionCoordinator {
         new Error(`Conversation is being deleted: ${conversationId}`),
       );
     }
-    return this.requireActor(context, conversationId).steer(runId, text);
+    return this.requireActor(context, conversationId).steer(runId, text, images);
   }
 
   async setCompactionThreshold(

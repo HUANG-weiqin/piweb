@@ -6,12 +6,18 @@ import {
   useMemo,
   useRef,
   useState,
+  type ChangeEvent,
+  type ClipboardEvent,
   type KeyboardEvent,
   type WheelEvent,
 } from "react";
 import {
+  decodedPromptImageBytes,
   MAX_COMPACTION_THRESHOLD_PERCENT,
+  MAX_PROMPT_IMAGE_BYTES,
+  MAX_PROMPT_IMAGE_COUNT,
   MIN_COMPACTION_THRESHOLD_PERCENT,
+  promptImageMimeType,
   type ConversationCompactionMarker,
   type ConversationMessageCard,
   type ConversationRoleSnapshot,
@@ -19,6 +25,7 @@ import {
   type LoopList,
   type LoopListItemStatus,
   type PublicState,
+  type PromptImage,
   type RoleTemplate,
   type ServiceTier,
   type ThinkingLevel,
@@ -161,12 +168,14 @@ interface ChatProps {
   interactive?: boolean;
   conversationReady: boolean;
   draft: string;
+  draftImages: PromptImage[];
   submitting: boolean;
   /** busy 时已接受、尚未投递的浏览器 prompt（显示为对话流中的等待中消息）。 */
   pendingAdmissions: PendingAdmission[];
   promptNotice?: string;
   onDraftChange(text: string): void;
-  onSend(text: string): void;
+  onImagesChange(images: PromptImage[]): void;
+  onSend(text: string, images: PromptImage[]): void;
   onAbort(): void;
   onSettings(): void;
   onThinking(level: ThinkingLevel): void;
@@ -421,6 +430,27 @@ function MissionCommandSurface({
   </aside>;
 }
 
+function readImage(file: File, mimeType: PromptImage["mimeType"]): Promise<PromptImage> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("无法读取图片"));
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result !== "string") {
+        reject(new Error("无法读取图片"));
+        return;
+      }
+      const comma = result.indexOf(",");
+      if (comma < 0) {
+        reject(new Error("图片编码无效"));
+        return;
+      }
+      resolve({ mimeType, data: result.slice(comma + 1) });
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 function ChatView({
   chat,
   observationSessionId,
@@ -454,10 +484,12 @@ function ChatView({
   interactive = true,
   conversationReady,
   draft,
+  draftImages,
   submitting,
   pendingAdmissions,
   promptNotice,
   onDraftChange,
+  onImagesChange,
   onSend,
   onAbort,
   onSettings,
@@ -495,6 +527,15 @@ function ChatView({
   const transcriptRef = useRef<HTMLElement>(null);
   const composerWrapRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const [attachmentError, setAttachmentError] = useState("");
+  const attachmentScope = chat.focus
+    ? `${observationSessionId}:${chat.focus.sessionId}:${chat.focus.conversationId}:${chat.focus.focusId}`
+    : `unfocused:${observationSessionId}`;
+  const attachmentScopeRef = useRef(attachmentScope);
+  const attachmentReadQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const draftImagesRef = useRef(draftImages);
+  const onImagesChangeRef = useRef(onImagesChange);
   const followOutputRef = useRef(true);
   const lastScrollTopRef = useRef(0);
 
@@ -523,6 +564,14 @@ function ChatView({
     setCompactionThresholdDraft(compactionThresholdPercent);
     requestedCompactionThreshold.current = compactionThresholdPercent;
   }, [compactionThresholdBusy, compactionThresholdPercent]);
+  useLayoutEffect(() => {
+    if (attachmentScopeRef.current !== attachmentScope) {
+      attachmentScopeRef.current = attachmentScope;
+      attachmentReadQueueRef.current = Promise.resolve();
+    }
+    draftImagesRef.current = draftImages;
+    onImagesChangeRef.current = onImagesChange;
+  }, [attachmentScope, draftImages, onImagesChange]);
   const contextTokenText = useMemo(() => formatContextUsage({
     contextTokenCount,
     contextWindow,
@@ -773,10 +822,76 @@ function ChatView({
     lastScrollTopRef.current = transcript.scrollTop;
     setShowJumpToLatest(false);
   };
+  const addImages = (files: File[]): Promise<void> => {
+    const scope = attachmentScopeRef.current;
+    const queued = attachmentReadQueueRef.current.then(async () => {
+      if (scope !== attachmentScopeRef.current) return;
+      const accepted = files.flatMap((file) => {
+        const mimeType = promptImageMimeType(file.type);
+        return mimeType === undefined ? [] : [{ file, mimeType }];
+      });
+      if (accepted.length === 0) {
+        setAttachmentError("只支持 PNG、JPEG、WebP 或 GIF 图片。");
+        return;
+      }
+      if (accepted.length > MAX_PROMPT_IMAGE_COUNT) {
+        setAttachmentError(`每条消息最多附加 ${MAX_PROMPT_IMAGE_COUNT} 张图片。`);
+        return;
+      }
+      const incomingBytes = accepted.reduce((total, { file }) => total + file.size, 0);
+      if (incomingBytes > MAX_PROMPT_IMAGE_BYTES) {
+        setAttachmentError(`图片合计最多 ${Math.floor(MAX_PROMPT_IMAGE_BYTES / 1024)} KiB。`);
+        return;
+      }
+      try {
+        const images = await Promise.all(accepted.map(({ file, mimeType }) =>
+          readImage(file, mimeType)));
+        if (scope !== attachmentScopeRef.current) return;
+        const currentImages = draftImagesRef.current;
+        if (currentImages.length + images.length > MAX_PROMPT_IMAGE_COUNT) {
+          setAttachmentError(`每条消息最多附加 ${MAX_PROMPT_IMAGE_COUNT} 张图片。`);
+          return;
+        }
+        const totalBytes = currentImages.reduce(
+          (total, image) => total + decodedPromptImageBytes(image.data),
+          incomingBytes,
+        );
+        if (totalBytes > MAX_PROMPT_IMAGE_BYTES) {
+          setAttachmentError(`图片合计最多 ${Math.floor(MAX_PROMPT_IMAGE_BYTES / 1024)} KiB。`);
+          return;
+        }
+        const nextImages = [...currentImages, ...images];
+        draftImagesRef.current = nextImages;
+        onImagesChangeRef.current(nextImages);
+        setAttachmentError("");
+      } catch (error) {
+        if (scope === attachmentScopeRef.current) {
+          setAttachmentError(error instanceof Error ? error.message : "无法读取图片");
+        }
+      }
+    });
+    attachmentReadQueueRef.current = queued.catch(() => undefined);
+    return queued;
+  };
+  const removeImage = (index: number) => {
+    const nextImages = draftImagesRef.current.filter((_, current) => current !== index);
+    draftImagesRef.current = nextImages;
+    onImagesChangeRef.current(nextImages);
+  };
+  const selectImages = (event: ChangeEvent<HTMLInputElement>) => {
+    void addImages(Array.from(event.target.files ?? []));
+    event.target.value = "";
+  };
+  const pasteImages = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(event.clipboardData.files);
+    if (files.length === 0) return;
+    event.preventDefault();
+    void addImages(files);
+  };
   const send = () => {
     const value = draft.trim();
     if (
-      !value
+      (!value && draftImages.length === 0)
       || submitting
       || compacting
       || rewindingMessageId
@@ -784,7 +899,7 @@ function ChatView({
       || !controlsEnabled
       || !conversationReady
     ) return;
-    onSend(value);
+    onSend(value, draftImages);
   };
   const commitCompactionThreshold = () => {
     if (
@@ -1109,9 +1224,20 @@ function ChatView({
         正在彻底删除所选消息及之后的内容…
       </div>}
       {promptNotice && <div className="composer-notice" role="alert">{promptNotice}</div>}
+      {attachmentError && <div className="composer-notice" role="alert">{attachmentError}</div>}
+      {draftImages.length > 0 && <div className="composer-attachments" aria-label="待发送图片">
+        {draftImages.map((image, index) => <div className="composer-attachment" key={`${image.mimeType}:${image.data.slice(0, 32)}`}>
+          <img src={`data:${image.mimeType};base64,${image.data}`} alt={`待发送图片 ${index + 1}`} />
+          <button
+            type="button"
+            aria-label={`移除图片 ${index + 1}`}
+            onClick={() => removeImage(index)}
+          >×</button>
+        </div>)}
+      </div>}
       <div className="composer">
         <span className="composer-command-label" aria-hidden="true">COMMAND</span>
-        <textarea ref={textareaRef} aria-label="给 Pi 发送消息" value={draft} onChange={(e) => onDraftChange(e.target.value)} onKeyDown={keyDown} placeholder={composerPlaceholder} disabled={!controlsEnabled || !conversationReady || !model || submitting || compacting || roleSwitching || Boolean(rewindingMessageId)} rows={1} />
+        <textarea ref={textareaRef} aria-label="给 Pi 发送消息" value={draft} onChange={(e) => onDraftChange(e.target.value)} onKeyDown={keyDown} onPaste={pasteImages} placeholder={composerPlaceholder} disabled={!controlsEnabled || !conversationReady || !model || submitting || compacting || roleSwitching || Boolean(rewindingMessageId)} rows={1} />
         <div className="composer-actions">
           {busy && <button
             className="send stop"
@@ -1119,7 +1245,22 @@ function ChatView({
             aria-label="停止"
             disabled={!controlsEnabled || !conversationReady}
           >STOP</button>}
-          <button className="send" onClick={send} disabled={!controlsEnabled || !conversationReady || !model || submitting || compacting || roleSwitching || Boolean(rewindingMessageId) || !draft.trim()} aria-label="发送">SEND</button>
+          <button
+            type="button"
+            className="attach-image"
+            aria-label="添加图片"
+            disabled={!controlsEnabled || !conversationReady || !model || submitting || compacting || roleSwitching || Boolean(rewindingMessageId)}
+            onClick={() => imageInputRef.current?.click()}
+          >IMG</button>
+          <input
+            ref={imageInputRef}
+            hidden
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/gif"
+            multiple
+            onChange={selectImages}
+          />
+          <button className="send" onClick={send} disabled={!controlsEnabled || !conversationReady || !model || submitting || compacting || roleSwitching || Boolean(rewindingMessageId) || (!draft.trim() && draftImages.length === 0)} aria-label="发送">SEND</button>
         </div>
       </div>
       {mobile && <div className="mobile-composer-launchers" aria-label="会话辅助面板">
