@@ -1422,6 +1422,7 @@ describe("PiRuntime session ownership", () => {
     expect(computer.description).toContain("drag{fromX,fromY,toX,toY,button?,durationMs?}");
     expect(computer.description).toContain("button is left or right");
     expect(computer.description).toContain("batch of at most 8 actions");
+    expect(computer.description).toContain("foregroundWindow:true");
     expect(computer.description).toContain("at least one nonzero scroll delta");
     expect(computer.description).toContain("settleMs 0-2000");
     expect(computer.description).toContain("current from an initial single image, or after from paired/after-only evidence");
@@ -1430,13 +1431,13 @@ describe("PiRuntime session ownership", () => {
     expect(computer.description).toContain("foreground_mismatch");
     expect(computer.description).toContain("sent means Windows accepted host dispatch");
     expect(computer.promptGuidelines).toContain(
-      "observe:true captures provider-only evidence (default post-action settle is 150ms); an action pair carries two images and about twice the visual-token cost. observe:false does not capture. Actions are sequential; sent is host dispatch, not UI/business success.",
+      "foregroundWindow?: boolean defaults false and requires observe:true. It captures only the current foreground window's intersection with the primary display; after evidence uses the then-current foreground window. observe:true captures provider-only evidence (default post-action settle is 150ms); an action pair carries two images and about twice the visual-token cost. observe:false does not capture. Actions are sequential; sent is host dispatch, not UI/business success.",
     );
     expect(computer.promptGuidelines).toContain(
       "Call observe first before coordinate actions. Use current only for an initial single image, and after only for paired/after-only evidence; before and historical_before never authorize coordinates.",
     );
     expect(computer.promptGuidelines).toContain(
-      "A foreground_mismatch means no input was sent; re-observe before any coordinate retry.",
+      "A foreground_mismatch may follow prior sent actions; its first not_started action and all remaining actions were not dispatched. Inspect per-action statuses, then re-observe before any coordinate retry.",
     );
     await full.dispose();
 
@@ -1505,15 +1506,39 @@ describe("PiRuntime session ownership", () => {
   it("preserves preflighted frames for exact siblings and retires them at the next provider conversion", async () => {
     const cwd = await temporaryDirectory("piweb-runtime-computer-frame-");
     let captureIndex = 0;
+    const primaryBounds = { x: 0, y: 0, width: 30, height: 20 };
+    const windowBinding = {
+      foreground: { hwnd: "10", processId: 10 },
+      rawBounds: { x: 0, y: 0, width: 10, height: 10 },
+      captureBounds: { x: 0, y: 0, width: 10, height: 10 },
+      inputBounds: primaryBounds,
+    };
+    const popupBinding = {
+      foreground: { hwnd: "20", processId: 20 },
+      rawBounds: { x: 5, y: 2, width: 20, height: 5 },
+      captureBounds: { x: 5, y: 2, width: 20, height: 5 },
+      inputBounds: primaryBounds,
+    };
     const adapter: WindowsDesktopAdapter = {
-      capture: async () => ({
-        png: Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, ++captureIndex]),
-        width: 10,
-        height: 10,
-        bounds: { x: 0, y: 0, width: 10, height: 10 },
-        foreground: { hwnd: "10", processId: 10 },
-      }),
+      capture: async (scope) => {
+        const index = ++captureIndex;
+        const foregroundWindow = scope === "foreground_window"
+          ? index === 2 ? popupBinding : windowBinding
+          : undefined;
+        const captureBounds = foregroundWindow?.captureBounds ?? primaryBounds;
+        return {
+          png: Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, index]),
+          width: captureBounds.width,
+          height: captureBounds.height,
+          scope,
+          captureBounds,
+          inputBounds: primaryBounds,
+          foreground: foregroundWindow?.foreground ?? windowBinding.foreground,
+          ...(foregroundWindow === undefined ? {} : { foregroundWindow }),
+        };
+      },
       getForegroundIdentity: async () => ({ hwnd: "10", processId: 10 }),
+      getForegroundWindowBinding: async () => windowBinding,
       click: async () => "sent",
       move: async () => "sent",
       mouseHold: async () => "sent",
@@ -1557,7 +1582,11 @@ describe("PiRuntime session ownership", () => {
     const signal = new AbortController().signal;
 
     try {
-      const observed = await execute("observe-call", { actions: [], observe: true }, signal);
+      const observed = await execute("observe-call", {
+        actions: [],
+        observe: true,
+        foregroundWindow: true,
+      }, signal);
       const source = {
         role: "toolResult",
         toolCallId: "observe-call",
@@ -1575,7 +1604,7 @@ describe("PiRuntime session ownership", () => {
           type: "toolCall",
           id: "observe-call",
           name: "computer",
-          arguments: { actions: [], observe: true },
+          arguments: { actions: [], observe: true, foregroundWindow: true },
         }],
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
         stopReason: "toolUse",
@@ -1593,7 +1622,11 @@ describe("PiRuntime session ownership", () => {
       expect(ordinaryChain).not.toContain("png");
 
       const providerInput = await created.session.agent.convertToLlm([source] as never);
-      expect(JSON.stringify(providerInput)).toContain("iVBOR");
+      const providerJson = JSON.stringify(providerInput);
+      expect(providerJson).toContain("iVBOR");
+      expect(providerJson).toContain("[computer observation current; scope=foreground_window; size=10x10 px]");
+      expect(providerJson).not.toContain("\\\"hwnd\\\"");
+      expect(providerJson).not.toContain("\\\"rawBounds\\\"");
       created.computerUse.completeAssistantDecision([
         "rejected-before-execute",
         "admitted-sibling",
@@ -1609,6 +1642,7 @@ describe("PiRuntime session ownership", () => {
       const paired = await execute("admitted-sibling", {
         actions: [{ kind: "click", x: 1, y: 1 }],
         observe: true,
+        foregroundWindow: true,
         settleMs: 0,
       }, signal);
       expect(paired.details).toMatchObject({
@@ -1621,8 +1655,8 @@ describe("PiRuntime session ownership", () => {
         content: paired.content,
       }] as never);
       const pairProviderJson = JSON.stringify(pairProviderInput);
-      const beforeLabel = "[computer observation before action batch]";
-      const afterLabel = "[computer observation after action batch]";
+      const beforeLabel = "[computer observation before action batch; scope=foreground_window; size=10x10 px]";
+      const afterLabel = "[computer observation after action batch; scope=foreground_window; size=20x5 px]";
       const beforePng = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1]).toString("base64");
       const afterPng = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 2]).toString("base64");
       const pairParts = [beforeLabel, beforePng, afterLabel, afterPng]

@@ -789,20 +789,23 @@ export class PiRuntime implements PiRuntimeLike {
         if (!evidence) return undefined;
         return {
           sourceToolCallId: evidence.sourceToolCallId,
-          images: evidence.images.map((image) => ({
-            label: image.kind === "current"
-              ? "[computer observation current]"
-              : image.kind === "before"
-                ? "[computer observation before action batch]"
-                : image.kind === "after"
-                  ? "[computer observation after action batch]"
-                  : "[computer observation before action batch; after unavailable]",
-            image: {
-              type: "image" as const,
-              data: Buffer.from(image.png).toString("base64"),
-              mimeType: image.mimeType,
-            },
-          })),
+          images: evidence.images.map((image) => {
+            const description = `scope=${image.scope}; size=${image.width}x${image.height} px`;
+            return {
+              label: image.kind === "current"
+                ? `[computer observation current; ${description}]`
+                : image.kind === "before"
+                  ? `[computer observation before action batch; ${description}]`
+                  : image.kind === "after"
+                    ? `[computer observation after action batch; ${description}]`
+                    : `[computer observation before action batch; after unavailable; ${description}]`,
+              image: {
+                type: "image" as const,
+                data: Buffer.from(image.png).toString("base64"),
+                mimeType: image.mimeType,
+              },
+            };
+          }),
         };
       },
       presented: (sourceToolCallId) => {
@@ -867,24 +870,25 @@ export class PiRuntime implements PiRuntimeLike {
       name: "computer",
       label: "Computer",
       description: [
-        "Observe the current primary Windows display and send one sequential local foreground batch of at most 8 actions.",
+        "Observe the current primary Windows display, or foregroundWindow:true's current foreground-window intersection with that primary display, and send one sequential local foreground batch of at most 8 actions.",
         "Kinds: click{x,y,button?}; move{x,y}; mouseHold{x,y,button?,holdMs?}; drag{fromX,fromY,toX,toY,button?,durationMs?}; type{text}; keypress{keys,holdMs?}; scroll{x,y,deltaX?,deltaY?}; wait{ms}.",
         `button is left or right. keypress keys (1-4) are: ${supportedComputerKeys}.`,
         `Limits: type ${MAX_COMPUTER_TYPE_BYTES} UTF-8 bytes; holdMs <= ${MAX_COMPUTER_HOLD_MS}; durationMs <= ${MAX_COMPUTER_DRAG_DURATION_MS}; wait ms <= ${MAX_COMPUTER_WAIT_MS}; abs scroll delta <= ${MAX_COMPUTER_SCROLL_DELTA} with at least one nonzero scroll delta; settleMs 0-${MAX_COMPUTER_SETTLE_MS}.`,
-        "Coordinate actions use only current from an initial single image, or after from paired/after-only evidence. before and historical_before are comparison-only and never authorize coordinates. observe:true captures current (no actions) or post-action evidence after a short settle; an action observation can attach before and after images and therefore costs about twice the visual tokens. observe:false returns no image. sent means Windows accepted host dispatch, not that the app succeeded.",
-        "If the result is foreground_mismatch, dispatch was blocked: re-observe before retrying coordinate input.",
+        "Coordinate actions use only current from an initial single image, or after from paired/after-only evidence. before and historical_before are comparison-only and never authorize coordinates. foregroundWindow defaults false and is valid only with observe:true; it crops a provider-only observation to the then-current foreground window's primary-display intersection, not a window selector. observe:true captures current (no actions) or post-action evidence after a short settle; an action observation can attach before and after images and therefore costs about twice the visual tokens. observe:false returns no image. sent means Windows accepted host dispatch, not that the app succeeded.",
+        "If the result is foreground_mismatch, prior sent statuses may have run; the first not_started action and all remaining actions were not dispatched. Inspect per-action statuses, then re-observe before retrying coordinate input.",
       ].join(" "),
       promptSnippet:
-        "Use computer({ actions: [], observe: true }) before coordinate actions. Only use current-provider-image coordinates. Re-observe after UI-changing actions; do not infer application success from sent.",
+        "Use computer({ actions: [], observe: true, foregroundWindow: true }) for a smaller foreground-window observation when it intersects the primary display; otherwise omit foregroundWindow. Only use current-provider-image coordinates. Re-observe after UI-changing actions; do not infer application success from sent.",
       promptGuidelines: [
         "Use only the listed flat action fields; unsupported fields, keys, buttons, or out-of-range durations are rejected before desktop input.",
         "Call observe first before coordinate actions. Use current only for an initial single image, and after only for paired/after-only evidence; before and historical_before never authorize coordinates.",
-        "observe:true captures provider-only evidence (default post-action settle is 150ms); an action pair carries two images and about twice the visual-token cost. observe:false does not capture. Actions are sequential; sent is host dispatch, not UI/business success.",
-        "A foreground_mismatch means no input was sent; re-observe before any coordinate retry.",
+        "foregroundWindow?: boolean defaults false and requires observe:true. It captures only the current foreground window's intersection with the primary display; after evidence uses the then-current foreground window. observe:true captures provider-only evidence (default post-action settle is 150ms); an action pair carries two images and about twice the visual-token cost. observe:false does not capture. Actions are sequential; sent is host dispatch, not UI/business success.",
+        "A foreground_mismatch may follow prior sent actions; its first not_started action and all remaining actions were not dispatched. Inspect per-action statuses, then re-observe before any coordinate retry.",
       ],
       parameters: Type.Object({
         actions: Type.Array(actionParameters, { maxItems: 8 }),
         observe: Type.Boolean(),
+        foregroundWindow: Type.Optional(Type.Boolean()),
         settleMs: Type.Optional(Type.Number()),
       }, { additionalProperties: false }),
       execute: async (toolCallId, input, signal) => {

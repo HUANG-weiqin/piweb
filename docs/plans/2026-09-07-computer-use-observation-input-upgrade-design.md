@@ -12,7 +12,16 @@
 - pair 两张原始 PNG 合计上限为 16 MiB；超限显式 `pair_too_large`，不降级伪装成单图或 pair。
 - 非空 `observe:true` action batch 默认在 after capture 前 settle 150ms；初始 observe 与 `observe:false` 保持零等待。
 - `keypress` hold、`mouseHold`、`drag` 在 adapter 内完成 down/hold/move/up；仅无法确认可能已按下的 key/button 已释放时永久 taint controller，普通 `unknown` 不阻止后续 lease。
-- capture 内部以归一化 HWND + PID 绑定前台身份：capture 前后必须一致，授权批在第一个输入 primitive 前再次核对；不一致即零派发、清除 stale frame 并返回 `foreground_mismatch`。该身份仅为内部安全判断，绝不进入 provider、tool result、JSONL 或 wire；HWND/PID reuse 与 check→SendInput 的 TOCTOU 仍是已知剩余限制。
+- capture 内部以归一化 HWND + PID 绑定前台身份：capture 前后必须一致，授权批在第一个实际 primitive 前再次核对；不一致即零派发、清除 stale frame 并返回 `foreground_mismatch`。该身份仅为内部安全判断，绝不进入 provider、tool result、JSONL 或 wire；HWND/PID reuse 与 check→SendInput 的 TOCTOU 仍是已知剩余限制。
+
+### 0.1 前台窗口观察 focus（2026-09-07）
+
+`computer` 新增可选的 `foregroundWindow?: boolean`，默认 `false`；只有 `observe:true` 可使用，`foregroundWindow:true + observe:false` 在 controller primitive 前拒绝且不消费 sibling frame。省略时严格保持完整主显示器行为。
+
+- `true` 截取**当时**前台顶层窗口的 `GetWindowRect` 与主显示器的非空矩形交集。`IsIconic`、空交集、几何/API 读取失败或 capture 前后 binding 漂移都 fail closed；绝不退回完整屏、selector、`PrintWindow` 或隐藏/遮挡内容读取。action 的 after 在动作/settle 后重新取当时前台窗口，因此 A 可产生 popup B 的 after。
+- image-local 坐标先经 `captureBounds`（PNG 的物理 crop）映射，再以完整主显示器 `inputBounds` 归一化给 `SendInput`。两者刻意分离；本版 PNG `width/height` 必须精确等于 `captureBounds` 尺寸。仅允许主显示器交集，故不支持 secondary-only capture、`region/scale` 或 `MOUSEEVENTF_VIRTUALDESK`。
+- window binding 只在进程内保存：opaque HWND/PID、raw `GetWindowRect`、crop 和 primary input bounds。capture 在同一 PMv2 DPI context 前后比较完整 binding。已有的身份检查仍紧邻首个实际 primitive；此外每个 coordinate action 紧邻 dispatch 前都重读并比较完整 window binding。任何 `foreground_mismatch` 都可能已有 `sent`；第一个 `not_started` action 和所有余项均未派发，结果必须检查逐项 status 后重新 observe。
+- provider-only label 对每图仅说明 `scope=primary_display|foreground_window` 和 `size=WxH px`；不包含 HWND/PID、title、物理 origin/raw bounds。PNG、binding 和 label 均不进入 wire/JSONL/result details；pair 的 before/after 可有不同 scope/size。
 
 ## 1. 核心目标
 
@@ -106,9 +115,9 @@ provider decision sees A
 `agent-context-budget.ts` 的 provider-only clone 扩展为支持最多两个 image part，并添加明确的文字标签：
 
 ```text
-[computer observation before action batch]
+[computer observation before action batch; scope=foreground_window; size=800x600 px]
 <before image>
-[computer observation after action batch]
+[computer observation after action batch; scope=foreground_window; size=640x480 px]
 <after image>
 ```
 

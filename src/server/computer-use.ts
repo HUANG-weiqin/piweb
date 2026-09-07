@@ -101,10 +101,24 @@ export interface DesktopBounds {
   height: number;
 }
 
+/** The screen area represented by one PNG; primary remains the compatibility default. */
+export type DesktopCaptureScope = "primary_display" | "foreground_window";
+
 /** Opaque, process-local foreground binding; never projected outside the desktop boundary. */
 export interface DesktopForegroundIdentity {
   hwnd: string;
   processId: number;
+}
+
+export interface DesktopForegroundWindowBinding {
+  /** Includes the opaque HWND/PID identity only inside the desktop boundary. */
+  foreground: DesktopForegroundIdentity;
+  /** Physical GetWindowRect geometry before primary-display clipping. */
+  rawBounds: DesktopBounds;
+  /** The physical rectangle whose pixels are in the captured PNG. */
+  captureBounds: DesktopBounds;
+  /** The complete primary display used for SendInput absolute normalization. */
+  inputBounds: DesktopBounds;
 }
 
 export interface DesktopCapture {
@@ -112,16 +126,21 @@ export interface DesktopCapture {
   png: Uint8Array;
   width: number;
   height: number;
-  /** Physical input-coordinate bounds for the captured primary display. */
-  bounds: DesktopBounds;
+  scope: DesktopCaptureScope;
+  /** Physical rectangle whose pixels are in the PNG. */
+  captureBounds: DesktopBounds;
+  /** Complete primary display used only for SendInput absolute normalization. */
+  inputBounds: DesktopBounds;
   /** Stable immediately before and after capture; validates later input target context. */
   foreground: DesktopForegroundIdentity;
+  /** Present only for a foreground-window crop; never projected to a provider. */
+  foregroundWindow?: DesktopForegroundWindowBinding;
 }
 
 export interface DesktopPoint {
   x: number;
   y: number;
-  bounds: DesktopBounds;
+  inputBounds: DesktopBounds;
 }
 
 export interface DesktopClick {
@@ -171,8 +190,9 @@ export type DesktopPrimitiveDispatch = "sent" | "unknown" | DesktopPressedStateU
  * without loading Koffi or touching the local desktop.
  */
 export interface WindowsDesktopAdapter {
-  capture(signal: AbortSignal): Promise<DesktopCapture>;
+  capture(scope: DesktopCaptureScope, signal: AbortSignal): Promise<DesktopCapture>;
   getForegroundIdentity(signal: AbortSignal): Promise<DesktopForegroundIdentity>;
+  getForegroundWindowBinding(signal: AbortSignal): Promise<DesktopForegroundWindowBinding>;
   click(input: DesktopClick, signal: AbortSignal): Promise<DesktopPrimitiveDispatch>;
   type(text: string, signal: AbortSignal): Promise<DesktopPrimitiveDispatch>;
   keypress(
@@ -202,6 +222,8 @@ export interface DesktopProviderImage {
   png: Uint8Array;
   width: number;
   height: number;
+  /** Safe provider-only description; no window identity or physical geometry. */
+  scope: DesktopCaptureScope;
 }
 
 export interface DesktopProviderEvidence {
@@ -297,14 +319,18 @@ type ValidatedAction =
 interface ValidatedInput {
   actions: readonly ValidatedAction[];
   observe: boolean;
+  foregroundWindow: boolean;
   settleMs: number;
 }
 
 interface Frame {
   width: number;
   height: number;
-  bounds: DesktopBounds;
+  scope: DesktopCaptureScope;
+  captureBounds: DesktopBounds;
+  inputBounds: DesktopBounds;
   foreground: DesktopForegroundIdentity;
+  foregroundWindow?: DesktopForegroundWindowBinding;
 }
 
 interface RetainedImage {
@@ -523,9 +549,16 @@ function normalizeAction(value: unknown): ValidatedAction {
 
 function normalizeInput(value: unknown): ValidatedInput {
   if (!isPlainRecord(value)) throw new Error("computer input must be a flat object");
-  assertOnlyFields(value, ["actions", "observe", "settleMs"], "computer input");
+  assertOnlyFields(value, ["actions", "observe", "foregroundWindow", "settleMs"], "computer input");
   if (!Array.isArray(value.actions) || typeof value.observe !== "boolean") {
     throw new Error("computer input requires actions and observe");
+  }
+  if (value.foregroundWindow !== undefined && typeof value.foregroundWindow !== "boolean") {
+    throw new Error("computer foregroundWindow must be a boolean");
+  }
+  const foregroundWindow = value.foregroundWindow ?? false;
+  if (foregroundWindow && !value.observe) {
+    throw new Error("computer foregroundWindow requires observe=true");
   }
   if (value.actions.length > MAX_COMPUTER_ACTIONS) {
     throw new Error(`computer actions exceed ${MAX_COMPUTER_ACTIONS}`);
@@ -548,7 +581,12 @@ function normalizeInput(value: unknown): ValidatedInput {
     }
     actions.push(normalizeAction(value.actions[index]));
   }
-  return { actions: Object.freeze(actions), observe: value.observe, settleMs };
+  return {
+    actions: Object.freeze(actions),
+    observe: value.observe,
+    foregroundWindow,
+    settleMs,
+  };
 }
 
 function hasCoordinateAction(action: ValidatedAction): boolean {
@@ -610,7 +648,90 @@ function sameForeground(
   return first.hwnd === second.hwnd && first.processId === second.processId;
 }
 
-function validateFrame(value: DesktopCapture): Frame {
+function sameBounds(first: DesktopBounds, second: DesktopBounds): boolean {
+  return first.x === second.x
+    && first.y === second.y
+    && first.width === second.width
+    && first.height === second.height;
+}
+
+function intersectBounds(first: DesktopBounds, second: DesktopBounds): DesktopBounds | undefined {
+  const left = Math.max(first.x, second.x);
+  const top = Math.max(first.y, second.y);
+  const right = Math.min(first.x + first.width, second.x + second.width);
+  const bottom = Math.min(first.y + first.height, second.y + second.height);
+  return right > left && bottom > top
+    ? { x: left, y: top, width: right - left, height: bottom - top }
+    : undefined;
+}
+
+function validateBounds(
+  value: unknown,
+  label: string,
+  maximumDimension: number | undefined,
+): DesktopBounds {
+  if (
+    !isPlainRecord(value)
+    || typeof value.x !== "number"
+    || !Number.isSafeInteger(value.x)
+    || typeof value.y !== "number"
+    || !Number.isSafeInteger(value.y)
+    || typeof value.width !== "number"
+    || !Number.isSafeInteger(value.width)
+    || value.width < 1
+    || (maximumDimension !== undefined && value.width > maximumDimension)
+    || typeof value.height !== "number"
+    || !Number.isSafeInteger(value.height)
+    || value.height < 1
+    || (maximumDimension !== undefined && value.height > maximumDimension)
+  ) {
+    throw new Error(`Desktop capture has invalid ${label}`);
+  }
+  return Object.freeze({
+    x: value.x,
+    y: value.y,
+    width: value.width,
+    height: value.height,
+  });
+}
+
+function validateForegroundWindowBinding(value: unknown): DesktopForegroundWindowBinding {
+  if (!isPlainRecord(value)) throw new Error("Desktop capture has invalid foreground-window binding");
+  const foreground = validateForegroundIdentity(value.foreground);
+  const rawBounds = validateBounds(value.rawBounds, "foreground-window raw bounds", undefined);
+  const captureBounds = validateBounds(
+    value.captureBounds,
+    "foreground-window capture bounds",
+    MAX_CAPTURE_DIMENSION,
+  );
+  const inputBounds = validateBounds(
+    value.inputBounds,
+    "foreground-window input bounds",
+    MAX_CAPTURE_DIMENSION,
+  );
+  const expectedCaptureBounds = intersectBounds(rawBounds, inputBounds);
+  if (expectedCaptureBounds === undefined || !sameBounds(captureBounds, expectedCaptureBounds)) {
+    throw new Error("Desktop capture has invalid foreground-window crop");
+  }
+  return Object.freeze({ foreground, rawBounds, captureBounds, inputBounds });
+}
+
+function sameForegroundWindowBinding(
+  frame: Frame,
+  current: DesktopForegroundWindowBinding,
+): boolean {
+  const expected = frame.foregroundWindow;
+  return expected !== undefined
+    && sameForeground(frame.foreground, current.foreground)
+    && sameForeground(expected.foreground, current.foreground)
+    && sameBounds(expected.rawBounds, current.rawBounds)
+    && sameBounds(expected.captureBounds, current.captureBounds)
+    && sameBounds(expected.inputBounds, current.inputBounds)
+    && sameBounds(frame.captureBounds, current.captureBounds)
+    && sameBounds(frame.inputBounds, current.inputBounds);
+}
+
+function validateFrame(value: DesktopCapture, expectedScope: DesktopCaptureScope): Frame {
   if (
     !Number.isInteger(value.width)
     || value.width < 1
@@ -619,33 +740,45 @@ function validateFrame(value: DesktopCapture): Frame {
     || value.height < 1
     || value.height > MAX_CAPTURE_DIMENSION
     || value.width * value.height > MAX_CAPTURE_PIXELS
+    || value.scope !== expectedScope
   ) {
-    throw new Error("Desktop capture has invalid dimensions");
+    throw new Error("Desktop capture has invalid dimensions or scope");
   }
-  const { bounds } = value;
+  const captureBounds = validateBounds(value.captureBounds, "capture bounds", MAX_CAPTURE_DIMENSION);
+  const inputBounds = validateBounds(value.inputBounds, "input bounds", MAX_CAPTURE_DIMENSION);
+  if (value.width !== captureBounds.width || value.height !== captureBounds.height) {
+    throw new Error("Desktop capture dimensions do not match capture bounds");
+  }
+  const foreground = validateForegroundIdentity(value.foreground);
+  if (expectedScope === "primary_display") {
+    if (value.foregroundWindow !== undefined || !sameBounds(captureBounds, inputBounds)) {
+      throw new Error("Desktop primary capture has invalid bounds");
+    }
+    return Object.freeze({
+      width: value.width,
+      height: value.height,
+      scope: expectedScope,
+      captureBounds,
+      inputBounds,
+      foreground,
+    });
+  }
+  const foregroundWindow = validateForegroundWindowBinding(value.foregroundWindow);
   if (
-    !isPlainRecord(bounds)
-    || !Number.isInteger(bounds.x)
-    || !Number.isInteger(bounds.y)
-    || !Number.isInteger(bounds.width)
-    || bounds.width < 1
-    || bounds.width > MAX_CAPTURE_DIMENSION
-    || !Number.isInteger(bounds.height)
-    || bounds.height < 1
-    || bounds.height > MAX_CAPTURE_DIMENSION
+    !sameForeground(foreground, foregroundWindow.foreground)
+    || !sameBounds(captureBounds, foregroundWindow.captureBounds)
+    || !sameBounds(inputBounds, foregroundWindow.inputBounds)
   ) {
-    throw new Error("Desktop capture has invalid bounds");
+    throw new Error("Desktop foreground-window capture binding is inconsistent");
   }
   return Object.freeze({
     width: value.width,
     height: value.height,
-    bounds: Object.freeze({
-      x: bounds.x,
-      y: bounds.y,
-      width: bounds.width,
-      height: bounds.height,
-    }),
-    foreground: validateForegroundIdentity(value.foreground),
+    scope: expectedScope,
+    captureBounds,
+    inputBounds,
+    foreground,
+    foregroundWindow,
   });
 }
 
@@ -679,9 +812,9 @@ function mapPoint(frame: Frame, x: number, y: number): DesktopPoint {
     );
   };
   return Object.freeze({
-    x: mapAxis(x, frame.width, frame.bounds.x, frame.bounds.width),
-    y: mapAxis(y, frame.height, frame.bounds.y, frame.bounds.height),
-    bounds: frame.bounds,
+    x: mapAxis(x, frame.width, frame.captureBounds.x, frame.captureBounds.width),
+    y: mapAxis(y, frame.height, frame.captureBounds.y, frame.captureBounds.height),
+    inputBounds: frame.inputBounds,
   });
 }
 
@@ -816,6 +949,7 @@ export class DesktopController {
         png: Uint8Array.from(image.png),
         width: image.frame.width,
         height: image.frame.height,
+        scope: image.frame.scope,
       }))),
     });
   }
@@ -1025,7 +1159,7 @@ export class DesktopController {
         },
       );
     };
-    const verifyForeground = async (frame: Frame): Promise<"match" | "mismatch" | "aborted"> => {
+    const verifyForegroundIdentity = async (frame: Frame): Promise<"match" | "mismatch" | "aborted"> => {
       const pending = Promise.resolve().then(() => this.adapter.getForegroundIdentity(effectiveRequest.signal));
       const attempt = await awaitUntilAbort(pending, effectiveRequest.signal);
       if (attempt.state === "aborted") {
@@ -1038,6 +1172,23 @@ export class DesktopController {
       if (attempt.state === "failed") return "mismatch";
       try {
         return sameForeground(frame.foreground, validateForegroundIdentity(attempt.value))
+          ? "match"
+          : "mismatch";
+      } catch {
+        return "mismatch";
+      }
+    };
+    const verifyForegroundWindow = async (frame: Frame): Promise<"match" | "mismatch" | "aborted"> => {
+      const pending = Promise.resolve().then(() => this.adapter.getForegroundWindowBinding(effectiveRequest.signal));
+      const attempt = await awaitUntilAbort(pending, effectiveRequest.signal);
+      if (attempt.state === "aborted") {
+        finishAfterQuiescence(pending);
+        return "aborted";
+      }
+      if (expireDeadline() || effectiveRequest.signal.aborted) return "aborted";
+      if (attempt.state === "failed") return "mismatch";
+      try {
+        return sameForegroundWindowBinding(frame, validateForegroundWindowBinding(attempt.value))
           ? "match"
           : "mismatch";
       } catch {
@@ -1063,6 +1214,7 @@ export class DesktopController {
           results,
           undefined,
           "current",
+          input.foregroundWindow ? "foreground_window" : "primary_display",
           input.settleMs,
           interruptionReason,
           expireDeadline,
@@ -1080,11 +1232,11 @@ export class DesktopController {
             interruptionReason(),
           );
         }
-        // A foreground binding is a lease-scoped safety precondition, not a
-        // capability consumer. Read failure/mismatch retires only the stale
-        // frame and sends no input; cancellation preserves it for a sibling.
+        const action = input.actions[index]!;
+        // Preserve the existing foreground identity check immediately before
+        // the first actual primitive, including non-coordinate actions.
         if (!admitted && authorized !== undefined) {
-          const foreground = await verifyForeground(authorized.frame);
+          const foreground = await verifyForegroundIdentity(authorized.frame);
           if (foreground === "aborted") {
             return makeResult({
               outcome: "interrupted",
@@ -1102,6 +1254,32 @@ export class DesktopController {
             });
           }
         }
+        // A window crop maps local image pixels through mutable screen geometry.
+        // Re-read its full binding immediately before every coordinate dispatch,
+        // including a later click after wait/type or an earlier coordinate action.
+        if (hasCoordinateAction(action) && coordinateFrame?.foregroundWindow !== undefined) {
+          const foreground = await verifyForegroundWindow(coordinateFrame);
+          if (foreground === "aborted") {
+            return admitted
+              ? this.interruptedResult(effectiveRequest, results, before, interruptionReason())
+              : makeResult({
+                  outcome: "interrupted",
+                  reason: interruptionReason(),
+                  actions: results,
+                });
+          }
+          if (foreground !== "match") {
+            this.spentDecisionOwners.add(request.owner);
+            this.clearObservation(request.owner);
+            return admitted
+              ? this.interruptedResult(effectiveRequest, results, before, "foreground_mismatch")
+              : makeResult({
+                  outcome: "rejected",
+                  reason: "foreground_mismatch",
+                  actions: results,
+                });
+          }
+        }
         // A successfully validated call consumes its capability only at the
         // first concrete adapter attempt, never on schema/host rejection.
         if (!admitted) {
@@ -1109,7 +1287,6 @@ export class DesktopController {
           this.spentDecisionOwners.add(request.owner);
           this.clearObservation(request.owner);
         }
-        const action = input.actions[index]!;
         const pendingDispatch = this.dispatch(action, coordinateFrame, effectiveRequest.signal);
         const attempt = await awaitUntilAbort(pendingDispatch, effectiveRequest.signal);
         if (attempt.state === "aborted") {
@@ -1165,6 +1342,7 @@ export class DesktopController {
         results,
         before,
         "after",
+        input.foregroundWindow ? "foreground_window" : "primary_display",
         input.settleMs,
         interruptionReason,
         expireDeadline,
@@ -1238,7 +1416,7 @@ export class DesktopController {
     request: DesktopControllerRequest,
     results: ComputerActionResult[],
     before: RetainedImage | undefined,
-    reason: "aborted" | "timed_out" | undefined,
+    reason: "aborted" | "timed_out" | "foreground_mismatch" | undefined,
   ): ComputerToolResult {
     if (before === undefined) {
       this.clearObservation(request.owner);
@@ -1324,6 +1502,7 @@ export class DesktopController {
     results: ComputerActionResult[],
     before: RetainedImage | undefined,
     mode: "current" | "after",
+    scope: DesktopCaptureScope,
     settleMs: number,
     interruptionReason: () => "aborted" | "timed_out",
     expireDeadline: () => boolean,
@@ -1352,7 +1531,7 @@ export class DesktopController {
         if (settleDeadlineExpired || request.signal.aborted) return interrupted(interruptionReason());
       }
 
-      const pendingCapture = this.adapter.capture(request.signal);
+      const pendingCapture = this.adapter.capture(scope, request.signal);
       const attempt = await awaitUntilAbort(pendingCapture, request.signal);
       if (attempt.state === "aborted") {
         finishAfterQuiescence(pendingCapture);
@@ -1365,7 +1544,7 @@ export class DesktopController {
       if (deadlineExpired || request.signal.aborted) return interrupted(interruptionReason());
 
       const after: RetainedImage = {
-        frame: validateFrame(attempt.value),
+        frame: validateFrame(attempt.value, scope),
         png: validatePng(attempt.value.png),
       };
       if (before !== undefined && before.png.byteLength + after.png.byteLength > MAX_COMPUTER_PAIR_PNG_BYTES) {
@@ -1435,6 +1614,8 @@ interface WindowsFunctions {
   setThreadDpiAwarenessContext: NativeFunction;
   getForegroundWindow: NativeFunction;
   getWindowThreadProcessId: NativeFunction;
+  isIconic: NativeFunction;
+  getWindowRect: NativeFunction;
   monitorFromPoint: NativeFunction;
   getMonitorInfo: NativeFunction;
   getDc: NativeFunction;
@@ -1568,9 +1749,33 @@ function abortError(): Error {
   return error;
 }
 
+interface DesktopCaptureBinding {
+  foreground: DesktopForegroundIdentity;
+  captureBounds: DesktopBounds;
+  inputBounds: DesktopBounds;
+  foregroundWindow?: DesktopForegroundWindowBinding;
+}
+
+function sameCaptureBinding(first: DesktopCaptureBinding, second: DesktopCaptureBinding): boolean {
+  if (
+    !sameForeground(first.foreground, second.foreground)
+    || !sameBounds(first.captureBounds, second.captureBounds)
+    || !sameBounds(first.inputBounds, second.inputBounds)
+  ) {
+    return false;
+  }
+  if (first.foregroundWindow === undefined || second.foregroundWindow === undefined) {
+    return first.foregroundWindow === second.foregroundWindow;
+  }
+  return sameForeground(first.foregroundWindow.foreground, second.foregroundWindow.foreground)
+    && sameBounds(first.foregroundWindow.rawBounds, second.foregroundWindow.rawBounds)
+    && sameBounds(first.foregroundWindow.captureBounds, second.foregroundWindow.captureBounds)
+    && sameBounds(first.foregroundWindow.inputBounds, second.foregroundWindow.inputBounds);
+}
+
 /**
- * Koffi-backed primary-display adapter. Koffi is dynamically imported and its
- * Windows DLLs are loaded only by createWindowsDesktopAdapter().
+ * Koffi-backed primary-display/foreground-crop adapter. Koffi is dynamically
+ * imported and its Windows DLLs are loaded only by createWindowsDesktopAdapter().
  */
 class KoffiWindowsDesktopAdapter implements WindowsDesktopAdapter {
   constructor(
@@ -1581,25 +1786,17 @@ class KoffiWindowsDesktopAdapter implements WindowsDesktopAdapter {
     private readonly view: (pointer: unknown, length: number) => Uint8Array,
   ) {}
 
-  async capture(signal: AbortSignal): Promise<DesktopCapture> {
+  async capture(scope: DesktopCaptureScope, signal: AbortSignal): Promise<DesktopCapture> {
     return this.withPhysicalDpi(() => {
       if (signal.aborted) throw abortError();
-      const foregroundBefore = this.readForegroundIdentity();
+      const bindingBefore = this.readCaptureBinding(scope);
       let screenDc: unknown;
       let memoryDc: unknown;
       let bitmap: unknown;
       let previousObject: unknown;
       let selected = false;
       try {
-        const monitor = assertHandle(
-          this.native.monitorFromPoint({ x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY),
-          "MonitorFromPoint",
-        );
-        const monitorInfo: Record<string, unknown> = { cbSize: this.monitorInfoSize };
-        if (this.native.getMonitorInfo(monitor, monitorInfo) === 0) {
-          throw new Error("GetMonitorInfoW failed");
-        }
-        const bounds = this.monitorBounds(monitorInfo.rcMonitor);
+        const bounds = bindingBefore.captureBounds;
         const width = bounds.width;
         const height = bounds.height;
         if (
@@ -1647,17 +1844,22 @@ class KoffiWindowsDesktopAdapter implements WindowsDesktopAdapter {
           throw new Error("BitBlt failed");
         }
         if (signal.aborted) throw abortError();
-        const foregroundAfter = this.readForegroundIdentity();
-        if (!sameForeground(foregroundBefore, foregroundAfter)) {
-          throw new Error("Foreground changed during desktop capture");
+        const bindingAfter = this.readCaptureBinding(scope);
+        if (!sameCaptureBinding(bindingBefore, bindingAfter)) {
+          throw new Error("Foreground or capture geometry changed during desktop capture");
         }
         const bgra = Buffer.from(this.view(assertHandle(bits[0], "CreateDIBSection bits"), width * height * 4));
         return {
           png: encodePngFromBgra(width, height, bgra),
           width,
           height,
-          bounds,
-          foreground: foregroundAfter,
+          scope,
+          captureBounds: bindingAfter.captureBounds,
+          inputBounds: bindingAfter.inputBounds,
+          foreground: bindingAfter.foreground,
+          ...(bindingAfter.foregroundWindow === undefined
+            ? {}
+            : { foregroundWindow: bindingAfter.foregroundWindow }),
         };
       } finally {
         if (selected && memoryDc !== undefined && previousObject !== undefined) {
@@ -1695,6 +1897,11 @@ class KoffiWindowsDesktopAdapter implements WindowsDesktopAdapter {
   async getForegroundIdentity(signal: AbortSignal): Promise<DesktopForegroundIdentity> {
     if (signal.aborted) throw abortError();
     return this.readForegroundIdentity();
+  }
+
+  async getForegroundWindowBinding(signal: AbortSignal): Promise<DesktopForegroundWindowBinding> {
+    if (signal.aborted) throw abortError();
+    return this.withPhysicalDpi(() => this.readForegroundWindowBinding());
   }
 
   async click(input: DesktopClick, signal: AbortSignal): Promise<DesktopPrimitiveDispatch> {
@@ -1892,7 +2099,62 @@ class KoffiWindowsDesktopAdapter implements WindowsDesktopAdapter {
     return "sent";
   }
 
+  private readCaptureBinding(scope: DesktopCaptureScope): DesktopCaptureBinding {
+    const inputBounds = this.readPrimaryBounds();
+    if (scope === "primary_display") {
+      const foreground = this.readForegroundIdentity();
+      return Object.freeze({ foreground, captureBounds: inputBounds, inputBounds });
+    }
+    const foregroundWindow = this.readForegroundWindowBinding(inputBounds);
+    return Object.freeze({
+      foreground: foregroundWindow.foreground,
+      captureBounds: foregroundWindow.captureBounds,
+      inputBounds: foregroundWindow.inputBounds,
+      foregroundWindow,
+    });
+  }
+
+  private readPrimaryBounds(): DesktopBounds {
+    const monitor = assertHandle(
+      this.native.monitorFromPoint({ x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY),
+      "MonitorFromPoint",
+    );
+    const monitorInfo: Record<string, unknown> = { cbSize: this.monitorInfoSize };
+    if (this.native.getMonitorInfo(monitor, monitorInfo) === 0) {
+      throw new Error("GetMonitorInfoW failed");
+    }
+    return Object.freeze(this.monitorBounds(monitorInfo.rcMonitor));
+  }
+
+  private readForegroundWindowBinding(
+    inputBounds = this.readPrimaryBounds(),
+  ): DesktopForegroundWindowBinding {
+    const target = this.readForeground();
+    const iconic = this.native.isIconic(target.hwnd);
+    if (typeof iconic !== "number" || !Number.isInteger(iconic)) {
+      throw new Error("IsIconic returned invalid result");
+    }
+    if (iconic !== 0) throw new Error("Foreground window is minimized");
+    const rectangle: Record<string, unknown> = { left: 0, top: 0, right: 0, bottom: 0 };
+    if (this.native.getWindowRect(target.hwnd, rectangle) === 0) {
+      throw new Error("GetWindowRect failed");
+    }
+    const rawBounds = this.monitorBounds(rectangle);
+    const captureBounds = intersectBounds(rawBounds, inputBounds);
+    if (captureBounds === undefined) throw new Error("Foreground window is outside the primary display");
+    return Object.freeze({
+      foreground: target.identity,
+      rawBounds: Object.freeze(rawBounds),
+      captureBounds: Object.freeze(captureBounds),
+      inputBounds,
+    });
+  }
+
   private readForegroundIdentity(): DesktopForegroundIdentity {
+    return this.readForeground().identity;
+  }
+
+  private readForeground(): { hwnd: unknown; identity: DesktopForegroundIdentity } {
     const hwnd = assertHandle(this.native.getForegroundWindow(), "GetForegroundWindow");
     if (
       (typeof hwnd !== "number" || !Number.isInteger(hwnd))
@@ -1908,7 +2170,7 @@ class KoffiWindowsDesktopAdapter implements WindowsDesktopAdapter {
     if (typeof pid !== "number" || !Number.isInteger(pid) || pid < 1 || pid > 0xffff_ffff) {
       throw new Error("GetWindowThreadProcessId returned invalid process ID");
     }
-    return Object.freeze({ hwnd: hwnd.toString(), processId: pid });
+    return Object.freeze({ hwnd, identity: Object.freeze({ hwnd: hwnd.toString(), processId: pid }) });
   }
 
   private mouseButtonFlags(button: "left" | "right"): readonly [number, number] {
@@ -2058,8 +2320,8 @@ class KoffiWindowsDesktopAdapter implements WindowsDesktopAdapter {
       type: INPUT_MOUSE,
       u: {
         mi: {
-          dx: this.absoluteCoordinate(point.x, point.bounds.x, point.bounds.width),
-          dy: this.absoluteCoordinate(point.y, point.bounds.y, point.bounds.height),
+          dx: this.absoluteCoordinate(point.x, point.inputBounds.x, point.inputBounds.width),
+          dy: this.absoluteCoordinate(point.y, point.inputBounds.y, point.inputBounds.height),
           mouseData: mouseData >>> 0,
           dwFlags: flags,
           time: 0,
@@ -2142,6 +2404,37 @@ export function createWindowsDesktopInputAdapterForTest(
     () => {
       throw new Error("capture is unavailable in the input adapter test seam");
     },
+  );
+}
+
+/** Internal test seam for capture geometry and GDI cleanup; never loads Koffi. */
+export interface WindowsDesktopCaptureTestNative extends WindowsDesktopInputTestNative {
+  getForegroundWindow(...args: unknown[]): unknown;
+  getWindowThreadProcessId(...args: unknown[]): unknown;
+  isIconic(...args: unknown[]): unknown;
+  getWindowRect(...args: unknown[]): unknown;
+  monitorFromPoint(...args: unknown[]): unknown;
+  getMonitorInfo(...args: unknown[]): unknown;
+  getDc(...args: unknown[]): unknown;
+  releaseDc(...args: unknown[]): unknown;
+  createCompatibleDc(...args: unknown[]): unknown;
+  deleteDc(...args: unknown[]): unknown;
+  createDibSection(...args: unknown[]): unknown;
+  selectObject(...args: unknown[]): unknown;
+  deleteObject(...args: unknown[]): unknown;
+  bitBlt(...args: unknown[]): unknown;
+}
+
+export function createWindowsDesktopCaptureAdapterForTest(
+  native: WindowsDesktopCaptureTestNative,
+  view: (pointer: unknown, length: number) => Uint8Array = (_pointer, length) => new Uint8Array(length),
+): WindowsDesktopAdapter {
+  return new KoffiWindowsDesktopAdapter(
+    native as unknown as WindowsFunctions,
+    1,
+    1,
+    1,
+    view,
   );
 }
 
@@ -2230,6 +2523,10 @@ export async function createWindowsDesktopAdapter(): Promise<WindowsDesktopAdapt
       ),
       getWindowThreadProcessId: user32.func(
         "uint32_t __stdcall GetWindowThreadProcessId(intptr_t hWnd, _Out_ uint32_t *processId)",
+      ),
+      isIconic: user32.func("int __stdcall IsIconic(intptr_t hWnd)"),
+      getWindowRect: user32.func(
+        "int __stdcall GetWindowRect(intptr_t hWnd, _Out_ RECT *rect)",
       ),
       monitorFromPoint: user32.func(
         "void * __stdcall MonitorFromPoint(POINT point, uint32_t flags)",

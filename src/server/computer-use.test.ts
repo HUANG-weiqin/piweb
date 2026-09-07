@@ -2,26 +2,64 @@ import { performance } from "node:perf_hooks";
 import { describe, expect, it, vi } from "vitest";
 import {
   createWindowsDesktopAdapter,
+  createWindowsDesktopCaptureAdapterForTest,
   createWindowsDesktopInputAdapterForTest,
   DesktopController,
   MAX_COMPUTER_CALL_MS,
   type DesktopCapture,
+  type DesktopCaptureScope,
   type DesktopClick,
   type DesktopForegroundIdentity,
+  type DesktopForegroundWindowBinding,
   type DesktopPrimitiveDispatch,
   type DesktopScroll,
   type WindowsDesktopAdapter,
+  type WindowsDesktopCaptureTestNative,
 } from "./computer-use.js";
 
 const PNG = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10]);
 
+const PRIMARY_BOUNDS = { x: 0, y: 0, width: 100, height: 50 };
+
+function foregroundWindowBinding(
+  overrides: Partial<DesktopForegroundWindowBinding> = {},
+): DesktopForegroundWindowBinding {
+  return {
+    foreground: { hwnd: "100", processId: 100 },
+    rawBounds: { x: 20, y: 10, width: 40, height: 20 },
+    captureBounds: { x: 20, y: 10, width: 40, height: 20 },
+    inputBounds: PRIMARY_BOUNDS,
+    ...overrides,
+  };
+}
+
 function capture(overrides: Partial<DesktopCapture> = {}): DesktopCapture {
+  const width = overrides.width ?? 100;
+  const height = overrides.height ?? 50;
+  const bounds = { x: 0, y: 0, width, height };
   return {
     png: PNG,
-    width: 100,
-    height: 50,
-    bounds: { x: 0, y: 0, width: 100, height: 50 },
+    width,
+    height,
+    scope: "primary_display",
+    captureBounds: bounds,
+    inputBounds: bounds,
     foreground: { hwnd: "100", processId: 100 },
+    ...overrides,
+  };
+}
+
+function foregroundWindowCapture(overrides: Partial<DesktopCapture> = {}): DesktopCapture {
+  const binding = overrides.foregroundWindow ?? foregroundWindowBinding();
+  return {
+    ...capture(),
+    scope: "foreground_window",
+    width: binding.captureBounds.width,
+    height: binding.captureBounds.height,
+    captureBounds: binding.captureBounds,
+    inputBounds: binding.inputBounds,
+    foreground: binding.foreground,
+    foregroundWindow: binding,
     ...overrides,
   };
 }
@@ -47,9 +85,12 @@ class FakeDesktopAdapter implements WindowsDesktopAdapter {
   readonly mouseHolds: unknown[] = [];
   readonly drags: unknown[] = [];
   readonly waits: number[] = [];
+  readonly captureScopes: DesktopCaptureScope[] = [];
   captures: Array<DesktopCapture | Error> = [capture()];
   foregroundResult: DesktopForegroundIdentity | Error = { hwnd: "100", processId: 100 };
+  foregroundWindowResults: Array<DesktopForegroundWindowBinding | Error> = [foregroundWindowBinding()];
   foregroundChecks = 0;
+  foregroundWindowChecks = 0;
   clickResult: DesktopPrimitiveDispatch = "sent";
   typeResult: DesktopPrimitiveDispatch = "sent";
   keypressResult: DesktopPrimitiveDispatch = "sent";
@@ -67,8 +108,9 @@ class FakeDesktopAdapter implements WindowsDesktopAdapter {
   onWait: ((signal: AbortSignal) => Promise<DesktopPrimitiveDispatch>) | undefined;
   disposed = false;
 
-  async capture(_signal: AbortSignal): Promise<DesktopCapture> {
+  async capture(scope: DesktopCaptureScope, _signal: AbortSignal): Promise<DesktopCapture> {
     this.calls.push("capture");
+    this.captureScopes.push(scope);
     const next = this.captures.shift() ?? capture();
     if (next instanceof Error) throw next;
     return next;
@@ -78,6 +120,13 @@ class FakeDesktopAdapter implements WindowsDesktopAdapter {
     this.foregroundChecks += 1;
     if (this.foregroundResult instanceof Error) throw this.foregroundResult;
     return this.foregroundResult;
+  }
+
+  async getForegroundWindowBinding(_signal: AbortSignal): Promise<DesktopForegroundWindowBinding> {
+    this.foregroundWindowChecks += 1;
+    const next = this.foregroundWindowResults.shift() ?? foregroundWindowBinding();
+    if (next instanceof Error) throw next;
+    return next;
   }
 
   async click(input: DesktopClick, _signal: AbortSignal): Promise<DesktopPrimitiveDispatch> {
@@ -203,10 +252,120 @@ function scriptedInputNative(
   };
 }
 
+interface NativeCaptureCall {
+  bitBlts: Array<{ width: number; height: number; sourceX: number; sourceY: number }>;
+  selectObjectCalls: number;
+  deleteObjectCalls: number;
+  deleteDcCalls: number;
+  releaseDcCalls: number;
+  getWindowRectCalls: number;
+  isIconicCalls: number;
+}
+
+function scriptedCaptureNative(options: {
+  primary?: { left: number; top: number; right: number; bottom: number };
+  primaryBounds?: readonly { left: number; top: number; right: number; bottom: number }[];
+  foregroundHandles?: readonly number[];
+  windowRects?: readonly { left: number; top: number; right: number; bottom: number }[];
+  iconicResults?: readonly number[];
+} = {}): { native: WindowsDesktopCaptureTestNative; calls: NativeCaptureCall } {
+  const primaryBounds = [...(options.primaryBounds ?? [
+    options.primary ?? { left: 0, top: 0, right: 100, bottom: 50 },
+  ])];
+  const foregroundHandles = [...(options.foregroundHandles ?? [100, 100])];
+  const windowRects = [...(options.windowRects ?? [{ left: 20, top: 10, right: 60, bottom: 30 }])];
+  const iconicResults = [...(options.iconicResults ?? [0, 0])];
+  const primaryFallback = primaryBounds.at(-1)!;
+  const foregroundFallback = foregroundHandles.at(-1)!;
+  const rectFallback = windowRects.at(-1)!;
+  const iconicFallback = iconicResults.at(-1)!;
+  const calls: NativeCaptureCall = {
+    bitBlts: [],
+    selectObjectCalls: 0,
+    deleteObjectCalls: 0,
+    deleteDcCalls: 0,
+    releaseDcCalls: 0,
+    getWindowRectCalls: 0,
+    isIconicCalls: 0,
+  };
+  const next = <T>(values: T[], fallback: T): T => values.shift() ?? fallback;
+  const native: WindowsDesktopCaptureTestNative = {
+    setThreadDpiAwarenessContext: () => 1,
+    sendInput: () => 0,
+    getForegroundWindow: () => next(foregroundHandles, foregroundFallback),
+    getWindowThreadProcessId: (hwnd: unknown, output: unknown) => {
+      if (!Array.isArray(output) || typeof hwnd !== "number") throw new Error("invalid process ID output");
+      output[0] = hwnd;
+      return 1;
+    },
+    isIconic: () => {
+      calls.isIconicCalls += 1;
+      return next(iconicResults, iconicFallback);
+    },
+    getWindowRect: (_hwnd: unknown, rectangle: unknown) => {
+      calls.getWindowRectCalls += 1;
+      if (rectangle === null || typeof rectangle !== "object") throw new Error("invalid window rect");
+      Object.assign(rectangle, next(windowRects, rectFallback));
+      return 1;
+    },
+    monitorFromPoint: () => 1,
+    getMonitorInfo: (_monitor: unknown, info: unknown) => {
+      if (info === null || typeof info !== "object") throw new Error("invalid monitor info");
+      Object.assign(info, { rcMonitor: next(primaryBounds, primaryFallback) });
+      return 1;
+    },
+    getDc: () => 2,
+    releaseDc: () => {
+      calls.releaseDcCalls += 1;
+      return 1;
+    },
+    createCompatibleDc: () => 3,
+    deleteDc: () => {
+      calls.deleteDcCalls += 1;
+      return 1;
+    },
+    createDibSection: (_dc: unknown, _info: unknown, _colors: unknown, bits: unknown) => {
+      if (!Array.isArray(bits)) throw new Error("invalid DIB bits output");
+      bits[0] = 4;
+      return 4;
+    },
+    selectObject: () => {
+      calls.selectObjectCalls += 1;
+      return 5;
+    },
+    deleteObject: () => {
+      calls.deleteObjectCalls += 1;
+      return 1;
+    },
+    bitBlt: (
+      _destinationDc: unknown,
+      _destinationX: unknown,
+      _destinationY: unknown,
+      width: unknown,
+      height: unknown,
+      _sourceDc: unknown,
+      sourceX: unknown,
+      sourceY: unknown,
+    ) => {
+      if (
+        typeof width !== "number"
+        || typeof height !== "number"
+        || typeof sourceX !== "number"
+        || typeof sourceY !== "number"
+      ) {
+        throw new Error("invalid BitBlt arguments");
+      }
+      calls.bitBlts.push({ width, height, sourceX, sourceY });
+      return 1;
+    },
+  };
+  return { native, calls };
+}
+
 const NATIVE_POINT = {
   x: 4,
   y: 5,
-  bounds: { x: 0, y: 0, width: 100, height: 50 },
+  inputBounds: PRIMARY_BOUNDS,
 };
 
 interface ProviderEvidenceFixture {
@@ -216,6 +375,7 @@ interface ProviderEvidenceFixture {
     png: Uint8Array;
     width: number;
     height: number;
+    scope: string;
   }[];
 }
 
@@ -619,7 +779,10 @@ describe("DesktopController", () => {
   it("maps screenshot pixels to physical bounds without clamping and executes a batch in order", async () => {
     const adapter = new FakeDesktopAdapter();
     adapter.captures = [capture({
-      bounds: { x: 10, y: 20, width: 200, height: 100 },
+      width: 200,
+      height: 100,
+      captureBounds: { x: 10, y: 20, width: 200, height: 100 },
+      inputBounds: { x: 10, y: 20, width: 200, height: 100 },
     })];
     const controller = new DesktopController(adapter);
     const owner = {};
@@ -628,14 +791,14 @@ describe("DesktopController", () => {
     controller.markProviderImagePresented(owner, "observe");
     controller.authorizeFrame(owner, ["batch"]);
     await expect(controller.execute(request(owner, "batch", {
-      actions: [{ kind: "click", x: 100, y: 0 }],
+      actions: [{ kind: "click", x: 200, y: 0 }],
       observe: false,
     }))).rejects.toThrow("outside the current observation");
     expect(adapter.calls).toEqual(["capture"]);
 
     const batch = await controller.execute(request(owner, "batch", {
       actions: [
-        { kind: "click", x: 99, y: 49, button: "right" },
+        { kind: "click", x: 199, y: 99, button: "right" },
         { kind: "type", text: "hello" },
         { kind: "keypress", keys: ["CTRL", "l"] },
         { kind: "scroll", x: 0, y: 0, deltaX: -120, deltaY: 240 },
@@ -663,7 +826,7 @@ describe("DesktopController", () => {
     ]);
     expect(adapter.clicks[0]).toMatchObject({
       button: "right",
-      point: { x: 209, y: 119, bounds: { x: 10, y: 20, width: 200, height: 100 } },
+      point: { x: 209, y: 119, inputBounds: { x: 10, y: 20, width: 200, height: 100 } },
     });
     expect(adapter.scrolls[0]).toMatchObject({
       point: { x: 10, y: 20 },
@@ -747,6 +910,23 @@ describe("DesktopController", () => {
     expect(controller.prepareProviderImage(owner, "third")).toMatchObject({ width: 101 });
   });
 
+  it("rejects a capture whose image dimensions do not equal its physical crop", async () => {
+    const adapter = new FakeDesktopAdapter();
+    adapter.captures = [capture({
+      width: 101,
+      captureBounds: { x: 0, y: 0, width: 100, height: 50 },
+      inputBounds: { x: 0, y: 0, width: 100, height: 50 },
+    })];
+    const result = await new DesktopController(adapter).execute(request({}, "mismatched-crop", {
+      actions: [],
+      observe: true,
+    }));
+    expect(result.details).toMatchObject({
+      outcome: "interrupted",
+      observation: { status: "unavailable" },
+    });
+  });
+
   it("keeps initial current evidence separate from A/B pair evidence and grants only B coordinates", async () => {
     const adapter = new FakeDesktopAdapter();
     const before = Uint8Array.from([...PNG, 1]);
@@ -756,19 +936,22 @@ describe("DesktopController", () => {
         png: before,
         width: 10,
         height: 10,
-        bounds: { x: 0, y: 0, width: 10, height: 10 },
+        captureBounds: { x: 0, y: 0, width: 10, height: 10 },
+        inputBounds: { x: 0, y: 0, width: 10, height: 10 },
       }),
       capture({
         png: after,
         width: 20,
         height: 20,
-        bounds: { x: 0, y: 0, width: 20, height: 20 },
+        captureBounds: { x: 0, y: 0, width: 20, height: 20 },
+        inputBounds: { x: 0, y: 0, width: 20, height: 20 },
       }),
       capture({
         png: Uint8Array.from([...PNG, 3]),
         width: 30,
         height: 30,
-        bounds: { x: 0, y: 0, width: 30, height: 30 },
+        captureBounds: { x: 0, y: 0, width: 30, height: 30 },
+        inputBounds: { x: 0, y: 0, width: 30, height: 30 },
       }),
     ];
     const controller = new DesktopController(adapter);
@@ -986,6 +1169,143 @@ describe("DesktopController", () => {
     expect(adapter.foregroundChecks).toBe(2);
     expect(JSON.stringify(result.details)).not.toContain("200");
     expect(JSON.stringify(providerEvidence(controller, owner, "new-window"))).not.toContain("200");
+  });
+
+  it("maps a foreground-window crop locally while preserving primary-display input normalization", async () => {
+    const binding = foregroundWindowBinding();
+    const adapter = new FakeDesktopAdapter();
+    adapter.captures = [foregroundWindowCapture({ foregroundWindow: binding })];
+    adapter.foregroundWindowResults = [binding, binding];
+    const controller = new DesktopController(adapter);
+    const owner = {};
+
+    await controller.execute(request(owner, "window-observe", {
+      actions: [],
+      observe: true,
+      foregroundWindow: true,
+    }));
+    expect(adapter.captureScopes).toEqual(["foreground_window"]);
+    expect(providerEvidence(controller, owner, "window-observe")?.images).toMatchObject([
+      { kind: "current", scope: "foreground_window", width: 40, height: 20 },
+    ]);
+    markProviderEvidencePresented(controller, owner, "window-observe");
+    expect(controller.authorizeFrame(owner, ["window-clicks"])).toBe(true);
+
+    await expect(controller.execute(request(owner, "window-clicks", {
+      actions: [
+        { kind: "click", x: 0, y: 0 },
+        { kind: "click", x: 39, y: 19 },
+      ],
+      observe: false,
+    }))).resolves.toMatchObject({ details: { outcome: "completed" } });
+    expect(adapter.clicks).toEqual([
+      {
+        point: { x: 20, y: 10, inputBounds: PRIMARY_BOUNDS },
+        button: "left",
+      },
+      {
+        point: { x: 59, y: 29, inputBounds: PRIMARY_BOUNDS },
+        button: "left",
+      },
+    ]);
+    expect(adapter.foregroundChecks).toBe(1);
+    expect(adapter.foregroundWindowChecks).toBe(2);
+  });
+
+  it("keeps the first-primitive identity check and rechecks every window coordinate dispatch", async () => {
+    const binding = foregroundWindowBinding();
+    const changed = foregroundWindowBinding({
+      rawBounds: { x: 20, y: 10, width: 41, height: 20 },
+      captureBounds: { x: 20, y: 10, width: 41, height: 20 },
+    });
+    const adapter = new FakeDesktopAdapter();
+    adapter.captures = [foregroundWindowCapture({ foregroundWindow: binding })];
+    adapter.foregroundWindowResults = [binding, changed];
+    const controller = new DesktopController(adapter);
+    const owner = {};
+
+    await controller.execute(request(owner, "window-observe", {
+      actions: [],
+      observe: true,
+      foregroundWindow: true,
+    }));
+    markProviderEvidencePresented(controller, owner, "window-observe");
+    expect(controller.authorizeFrame(owner, ["window-batch"])).toBe(true);
+
+    await expect(controller.execute(request(owner, "window-batch", {
+      actions: [
+        { kind: "wait", ms: 0 },
+        { kind: "click", x: 1, y: 1 },
+        { kind: "click", x: 2, y: 2 },
+      ],
+      observe: false,
+    }))).resolves.toMatchObject({
+      details: {
+        outcome: "interrupted",
+        reason: "foreground_mismatch",
+        actions: [
+          { index: 0, status: "sent" },
+          { index: 1, status: "sent" },
+          { index: 2, status: "not_started" },
+        ],
+      },
+    });
+    expect(adapter.foregroundChecks).toBe(1);
+    expect(adapter.foregroundWindowChecks).toBe(2);
+    expect(adapter.clicks).toHaveLength(1);
+  });
+
+  it("blocks a first foreground-window coordinate when primary input topology drifted", async () => {
+    const binding = foregroundWindowBinding();
+    const topologyDrifted = foregroundWindowBinding({
+      inputBounds: { x: 0, y: 0, width: 101, height: 50 },
+    });
+    const adapter = new FakeDesktopAdapter();
+    adapter.captures = [foregroundWindowCapture({ foregroundWindow: binding })];
+    adapter.foregroundWindowResults = [topologyDrifted];
+    const controller = new DesktopController(adapter);
+    const owner = {};
+
+    await controller.execute(request(owner, "window-observe", {
+      actions: [],
+      observe: true,
+      foregroundWindow: true,
+    }));
+    markProviderEvidencePresented(controller, owner, "window-observe");
+    expect(controller.authorizeFrame(owner, ["window-first-coordinate"])).toBe(true);
+
+    await expect(controller.execute(request(owner, "window-first-coordinate", {
+      actions: [{ kind: "click", x: 1, y: 1 }],
+      observe: false,
+    }))).resolves.toMatchObject({
+      details: {
+        outcome: "rejected",
+        reason: "foreground_mismatch",
+        actions: [{ index: 0, status: "not_started" }],
+      },
+    });
+    expect(adapter.foregroundChecks).toBe(1);
+    expect(adapter.foregroundWindowChecks).toBe(1);
+    expect(adapter.clicks).toEqual([]);
+  });
+
+  it("rejects foregroundWindow without observe before consuming an authorized sibling frame", async () => {
+    const adapter = new FakeDesktopAdapter();
+    const controller = new DesktopController(adapter);
+    const owner = {};
+    await controller.execute(request(owner, "observe", { actions: [], observe: true }));
+    markProviderEvidencePresented(controller, owner, "observe");
+    expect(controller.authorizeFrame(owner, ["invalid-scope", "sibling"])).toBe(true);
+
+    await expect(controller.execute(request(owner, "invalid-scope", {
+      actions: [{ kind: "click", x: 1, y: 1 }],
+      observe: false,
+      foregroundWindow: true,
+    }))).rejects.toThrow("foregroundWindow requires observe=true");
+    await expect(controller.execute(request(owner, "sibling", {
+      actions: [{ kind: "click", x: 1, y: 1 }],
+      observe: false,
+    }))).resolves.toMatchObject({ details: { outcome: "completed" } });
   });
 
   it("fails closed with zero dispatch when foreground identity is malformed", async () => {
@@ -1226,6 +1546,112 @@ describe("DesktopController", () => {
     }))).details).toMatchObject({
       outcome: "rejected",
       reason: "controller_disposed",
+    });
+  });
+});
+
+describe("KoffiWindowsDesktopAdapter capture seam", () => {
+  it("keeps the unchanged primary-display capture source and size", async () => {
+    const scripted = scriptedCaptureNative();
+    const adapter = createWindowsDesktopCaptureAdapterForTest(scripted.native);
+
+    const result = await adapter.capture("primary_display", new AbortController().signal);
+    expect(result).toMatchObject({
+      scope: "primary_display",
+      width: 100,
+      height: 50,
+      captureBounds: PRIMARY_BOUNDS,
+      inputBounds: PRIMARY_BOUNDS,
+    });
+    expect(result.foregroundWindow).toBeUndefined();
+    expect(scripted.calls.bitBlts).toEqual([{ width: 100, height: 50, sourceX: 0, sourceY: 0 }]);
+    expect(scripted.calls.getWindowRectCalls).toBe(0);
+    expect(scripted.calls.isIconicCalls).toBe(0);
+  });
+
+  it("clips a negative foreground window to the primary display before BitBlt", async () => {
+    const rectangle = { left: -10, top: 5, right: 20, bottom: 25 };
+    const scripted = scriptedCaptureNative({ windowRects: [rectangle, rectangle] });
+    const adapter = createWindowsDesktopCaptureAdapterForTest(scripted.native);
+
+    const result = await adapter.capture("foreground_window", new AbortController().signal);
+    expect(result).toMatchObject({
+      scope: "foreground_window",
+      width: 20,
+      height: 20,
+      captureBounds: { x: 0, y: 5, width: 20, height: 20 },
+      inputBounds: PRIMARY_BOUNDS,
+      foregroundWindow: {
+        rawBounds: { x: -10, y: 5, width: 30, height: 20 },
+        captureBounds: { x: 0, y: 5, width: 20, height: 20 },
+      },
+    });
+    expect(scripted.calls.bitBlts).toEqual([{ width: 20, height: 20, sourceX: 0, sourceY: 5 }]);
+  });
+
+  it("fails closed without BitBlt for minimized or primary-disjoint foreground windows", async () => {
+    const minimized = scriptedCaptureNative({ iconicResults: [1] });
+    await expect(createWindowsDesktopCaptureAdapterForTest(minimized.native).capture(
+      "foreground_window",
+      new AbortController().signal,
+    )).rejects.toThrow();
+    expect(minimized.calls.bitBlts).toEqual([]);
+
+    const outside = scriptedCaptureNative({
+      windowRects: [{ left: -40, top: 5, right: -10, bottom: 25 }],
+    });
+    await expect(createWindowsDesktopCaptureAdapterForTest(outside.native).capture(
+      "foreground_window",
+      new AbortController().signal,
+    )).rejects.toThrow();
+    expect(outside.calls.bitBlts).toEqual([]);
+  });
+
+  it("rejects capture-time geometry, identity, or primary topology drift after releasing every GDI handle", async () => {
+    const first = { left: 20, top: 10, right: 60, bottom: 30 };
+    const shifted = { left: 21, top: 10, right: 61, bottom: 30 };
+    const geometry = scriptedCaptureNative({ windowRects: [first, shifted] });
+    await expect(createWindowsDesktopCaptureAdapterForTest(geometry.native).capture(
+      "foreground_window",
+      new AbortController().signal,
+    )).rejects.toThrow();
+    expect(geometry.calls.bitBlts).toHaveLength(1);
+    expect(geometry.calls).toMatchObject({
+      selectObjectCalls: 2,
+      deleteObjectCalls: 1,
+      deleteDcCalls: 1,
+      releaseDcCalls: 1,
+    });
+
+    const identity = scriptedCaptureNative({ foregroundHandles: [100, 101] });
+    await expect(createWindowsDesktopCaptureAdapterForTest(identity.native).capture(
+      "foreground_window",
+      new AbortController().signal,
+    )).rejects.toThrow();
+    expect(identity.calls.bitBlts).toHaveLength(1);
+    expect(identity.calls).toMatchObject({
+      selectObjectCalls: 2,
+      deleteObjectCalls: 1,
+      deleteDcCalls: 1,
+      releaseDcCalls: 1,
+    });
+
+    const topology = scriptedCaptureNative({
+      primaryBounds: [
+        { left: 0, top: 0, right: 100, bottom: 50 },
+        { left: 0, top: 0, right: 101, bottom: 50 },
+      ],
+    });
+    await expect(createWindowsDesktopCaptureAdapterForTest(topology.native).capture(
+      "foreground_window",
+      new AbortController().signal,
+    )).rejects.toThrow();
+    expect(topology.calls.bitBlts).toEqual([{ width: 40, height: 20, sourceX: 20, sourceY: 10 }]);
+    expect(topology.calls).toMatchObject({
+      selectObjectCalls: 2,
+      deleteObjectCalls: 1,
+      deleteDcCalls: 1,
+      releaseDcCalls: 1,
     });
   });
 });
