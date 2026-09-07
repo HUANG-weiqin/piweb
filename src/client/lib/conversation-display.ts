@@ -5,7 +5,7 @@ import {
 
 export type ConversationTitleLookup = ReadonlyMap<string, string>;
 
-function shortHandle(conversationId: string): string {
+export function shortConversationHandle(conversationId: string): string {
   return `#${conversationId.slice(0, 8)}`;
 }
 
@@ -41,7 +41,7 @@ function titleEntries(
       id,
       !conversationIndexTruncated && titleCounts.get(title) === 1
         ? title
-        : `${title} ${shortHandle(id)}`,
+        : `${title} ${shortConversationHandle(id)}`,
     ] as const)
     .sort(([leftId], [rightId]) => (
       leftId === rightId ? 0 : leftId < rightId ? -1 : 1
@@ -72,5 +72,5 @@ export function conversationTargetTitle(
   conversationId: string,
 ): string {
   return lookup?.get(conversationId)
-    ?? `未知会话 ${shortHandle(conversationId)}`;
+    ?? `未知会话 ${shortConversationHandle(conversationId)}`;
 }

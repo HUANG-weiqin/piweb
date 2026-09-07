@@ -48,9 +48,13 @@ describe("edit budget accounting", () => {
       remainingFiles: 0,
       blockedAttempts: 0,
     });
-    expect(() => validateEditBudgetEvents([
-      { kind: "charge", runId, pathKey: "/project/ungranted.ts" },
-    ])).toThrow(/exceeds the granted file count/i);
+    const ungrantedEvents = [
+      { kind: "charge" as const, runId, pathKey: "/project/ungranted.ts" },
+    ];
+    expect(() => restoreEditBudgetLedger(ungrantedEvents, runId))
+      .toThrow(/exceeds the granted file count/i);
+    expect(() => validateEditBudgetEvents(ungrantedEvents))
+      .toThrow(/exceeds the granted file count/i);
   });
 
   it("uses Pi-style path normalization and folds aliases of an existing file", async () => {

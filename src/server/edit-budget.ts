@@ -60,6 +60,25 @@ export function snapshotEditBudget(
   };
 }
 
+function applyEditBudgetEvent(
+  ledger: EditBudgetLedger,
+  event: EditBudgetEvent,
+): void {
+  if (event.kind === "grant") {
+    ledger.grantedFiles = event.fileCount;
+    return;
+  }
+  if (
+    !ledger.chargedPathKeys.has(event.pathKey)
+    && snapshotEditBudget(ledger).remainingFiles === 0
+  ) {
+    throw new Error(
+      `Edit budget charge exceeds the granted file count for run ${event.runId}`,
+    );
+  }
+  ledger.chargedPathKeys.add(event.pathKey);
+}
+
 /**
  * Replays exact-run entries in transcript order. A charge is deliberately
  * irreversible: a builtin write can take effect before it later reports an
@@ -71,20 +90,7 @@ export function restoreEditBudgetLedger(
 ): EditBudgetLedger {
   const ledger = createEditBudgetLedger();
   for (const event of events) {
-    if (event.runId !== runId) continue;
-    if (event.kind === "grant") {
-      ledger.grantedFiles = event.fileCount;
-      continue;
-    }
-    if (
-      !ledger.chargedPathKeys.has(event.pathKey)
-      && snapshotEditBudget(ledger).remainingFiles === 0
-    ) {
-      throw new Error(
-        `Edit budget charge exceeds the granted file count for run ${runId}`,
-      );
-    }
-    ledger.chargedPathKeys.add(event.pathKey);
+    if (event.runId === runId) applyEditBudgetEvent(ledger, event);
   }
   return ledger;
 }
@@ -100,19 +106,7 @@ export function validateEditBudgetEvents(
       ledger = createEditBudgetLedger();
       ledgers.set(event.runId, ledger);
     }
-    if (event.kind === "grant") {
-      ledger.grantedFiles = event.fileCount;
-      continue;
-    }
-    if (
-      !ledger.chargedPathKeys.has(event.pathKey)
-      && snapshotEditBudget(ledger).remainingFiles === 0
-    ) {
-      throw new Error(
-        `Edit budget charge exceeds the granted file count for run ${event.runId}`,
-      );
-    }
-    ledger.chargedPathKeys.add(event.pathKey);
+    applyEditBudgetEvent(ledger, event);
   }
 }
 

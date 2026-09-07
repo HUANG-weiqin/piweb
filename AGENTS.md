@@ -24,7 +24,7 @@ Pi Web 是本机优先的极简 Agent 工作台。当前目标不是复制 Pi �
 
 - 新功能先判断它是否必须参与 Agent 生命周期、权限决策、持久会话或协议关联；如果不需要，并且外部工具可以完整替代，就不进入工作台核心。
 - Git 负责 diff、历史、回滚和分支；编辑器负责文件浏览与人工编辑；终端负责通用交互式 shell。工作台最多提供浅层交接，不维护第二份真相。
-- `src/shared/protocol.ts` 是浏览器与服务端的唯一线协议，当前为 v43；浏览器不得导入 Pi SDK 事件类型。角色模板、冻结角色快照、角色目录和 conversation snapshot 的角色 payload 都必须携带必填 nullable `compactionModel`，不新增命令。
+- `src/shared/protocol.ts` 是浏览器与服务端的唯一线协议；`PROTOCOL_VERSION` 是当前版本的唯一来源，浏览器不得导入 Pi SDK 事件类型。角色模板、冻结角色快照、角色目录和 conversation snapshot 的角色 payload 都必须携带必填 nullable `compactionModel`，不新增命令。
 - initialize 前的只读目录浏览只属于 socket control；必须用一次性 commandId 关联有界列表。浏览 `path` 不是项目 cwd，不得创建项目状态或触发资源加载；用户确认后仍由 initialize 独立校验。
 - `PiRuntime` 进程级共享 `CredentialStore` 与基线 `ModelRegistry`，每个 session 另有隔离的模型目录；所有认证/模型缓存修改必须从串行入口经过。Pi 0.85.1 的私有 `_runDefaultCompaction` 是唯一默认压缩适配点：custom `session_before_compact` 结果直接采用，否则 fresh-resolve 冻结的显式压缩模型并保留 Pi 原生准备、摘要、split-turn、文件、usage、abort、持久化和 continuation；失败不回退、不追加 compaction/rebuild，接点前 Pi transient overflow recovery 变化不承诺回滚。
 - 项目扩展可以注册工具、hooks 和静态 provider 配置；在引入 worker/进程隔离前，必须拒绝进程全局的 `streamSimple` 与 OAuth provider 注册。

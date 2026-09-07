@@ -15,7 +15,10 @@ import {
   type ConversationActivity,
   type ConversationSummary,
 } from "../../shared/protocol";
-import { conversationDisplayTitle } from "../lib/conversation-display";
+import {
+  conversationDisplayTitle,
+  shortConversationHandle,
+} from "../lib/conversation-display";
 import { useModalFocus } from "../lib/use-modal-focus";
 import { ActivitySpinner } from "./ActivitySpinner";
 
@@ -61,10 +64,6 @@ interface ConversationSidebarProps {
   onRename(conversationId: string, name: string): void;
   onDelete(conversationId: string): boolean;
   onBlockingModalChange?(blocking: boolean): void;
-}
-
-function shortHandle(conversationId: string): string {
-  return `#${conversationId.slice(0, 8)}`;
 }
 
 function clipTitleInput(value: string): string {
@@ -361,7 +360,7 @@ const ConversationRow = memo(function ConversationRow({
             className="conversation-sidebar-handle"
             title={conversation.id}
           >
-            {shortHandle(conversation.id)}
+            {shortConversationHandle(conversation.id)}
           </span>
           {hierarchy === "member"
             && conversation.createdBy?.kind === "conversation"

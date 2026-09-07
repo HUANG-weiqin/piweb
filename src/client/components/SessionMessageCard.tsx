@@ -3,6 +3,7 @@ import type {
   ConversationMessageCard,
   SessionMessageEndpoint,
 } from "../../shared/protocol";
+import { shortConversationHandle } from "../lib/conversation-display";
 
 const STATE_LABELS: Record<ConversationMessageCard["state"], string> = {
   sending: "发送中",
@@ -14,10 +15,6 @@ const STATE_LABELS: Record<ConversationMessageCard["state"], string> = {
   failed: "失败",
   aborted: "已终止",
 };
-
-function shortHandle(conversationId: string): string {
-  return `#${conversationId.slice(0, 8)}`;
-}
 
 function Endpoint({
   endpoint,
@@ -37,7 +34,7 @@ function Endpoint({
         className="session-message-endpoint-handle"
         title={endpoint.conversationId}
       >
-        {shortHandle(endpoint.conversationId)}
+        {shortConversationHandle(endpoint.conversationId)}
       </span>
     </section>
   );
