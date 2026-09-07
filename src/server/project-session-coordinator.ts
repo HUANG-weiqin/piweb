@@ -197,10 +197,6 @@ interface SessionTargetUnreachableResult {
   runId: string;
 }
 
-interface SessionWaitExhaustedResult {
-  outcome: "wait_exhausted";
-}
-
 type SessionWaitResult =
   | RunSettlement
   | (RunSettlement & { conversationId: string })
@@ -208,8 +204,7 @@ type SessionWaitResult =
   | SessionGuidanceWaitResult
   | SessionCheckpointWaitResult
   | SessionWaitCommitmentRequiredResult
-  | SessionTargetUnreachableResult
-  | SessionWaitExhaustedResult;
+  | SessionTargetUnreachableResult;
 
 interface CompletionWaiter extends WaiterBase {
   kind: "completion";
@@ -2860,9 +2855,6 @@ export class ProjectSessionCoordinator {
         message: "No wait was started. Explain why waiting for only this Agent is better than continuing useful local work or waiting for multiple independent targets, then call wait_for_session again with singleWaitCommitment.",
       };
     }
-    if (source.getWaitPollBudget(ownership)?.remaining === 0) {
-      return { outcome: "wait_exhausted" };
-    }
     let handle!: ConversationWaitAttempt;
     let terminalCause: ConversationWaitAttemptTerminalCause | undefined;
     let resolveTerminal!: () => void;
@@ -2945,7 +2937,9 @@ export class ProjectSessionCoordinator {
                 }
                 return;
               }
-              source.claimWaitPoll(ownership, handle);
+              source.completeWaitAttempt(ownership, handle, "open", {
+                kind: "poll",
+              });
             }).catch((error: unknown) => {
               source.cancelWaitAttempt(ownership, handle, { kind: "error", error });
             });

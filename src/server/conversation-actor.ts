@@ -47,7 +47,6 @@ import {
   createConversationRoleChangeEntry,
   createRunSettlementEntry,
   createServiceTierSelectionEntry,
-  createWaitPollEntry,
   parseReservedConversationEntry,
   RUN_SETTLEMENT_CUSTOM_TYPE,
   type ConversationMeta,
@@ -55,7 +54,6 @@ import {
   type LoopListTiming,
   type RunSettlement,
   MAX_LOOP_LIST_CONTINUATIONS_PER_RUN,
-  MAX_WAIT_POLL_COUNT,
 } from "./conversation-meta.js";
 import { createLoopListTools } from "./loop-list-tools.js";
 import {
@@ -326,11 +324,6 @@ export interface CurrentConversationWaitAttempt
   readonly handle: ConversationWaitAttempt;
 }
 
-export interface ConversationWaitPollBudget {
-  readonly used: number;
-  readonly remaining: number;
-}
-
 export interface InstallConversationWaitAttempt {
   readonly mode: ConversationWaitAttemptMode;
   readonly targets: readonly ConversationWaitingTarget[];
@@ -343,7 +336,6 @@ const WAIT_ATTEMPT = Symbol("ConversationActor.waitAttempt");
 // Avoid retrying every tool boundary without disabling protection for a long run.
 const COMPACTION_RETRY_GROWTH_PERCENT = 5;
 
-export const MAX_WAIT_POLLS_PER_RUN = MAX_WAIT_POLL_COUNT;
 const AUTO_TITLE_FALLBACK = "新任务";
 const AUTO_TITLE_INPUT_CHARACTERS = 6_000;
 const AUTO_TITLE_MAX_TOKENS = 256;
@@ -484,7 +476,6 @@ interface RunTicket {
   sdkCompactionSucceeded: boolean;
   contextCompactionRequested: boolean;
   turnBoundaryCompactionRequested: boolean;
-  waitPollCount: number;
   reloadStop?: ReloadStopRequest;
   abortPromise?: Promise<void>;
   finishPromise?: Promise<RunSettlement>;
@@ -2366,10 +2357,10 @@ export class ConversationActor {
     }
     const branch = this.sessionManager.getBranch();
     const branchReserved = aggregateReservedConversationEntries(branch);
-    const waitPollCount = branchReserved.waitPolls.filter(
+    const hasLegacyWaitPoll = branchReserved.waitPolls.some(
       (poll) => poll.runId === input.runId,
-    ).length;
-    if (!input.recovered && waitPollCount !== 0) {
+    );
+    if (!input.recovered && hasLegacyWaitPoll) {
       throw new Error(
         "A fresh run cannot reuse a runId with a durable wait-poll journal",
       );
@@ -2419,7 +2410,6 @@ export class ConversationActor {
       sdkCompactionSucceeded: false,
       contextCompactionRequested: false,
       turnBoundaryCompactionRequested: false,
-      waitPollCount,
     };
     this.activeRun = ticket;
     this.beginLiveProjection(ticket, input.promptText);
@@ -2499,26 +2489,6 @@ export class ConversationActor {
     });
   }
 
-  /** Reads the fixed per-run wait-poll budget. */
-  getWaitPollBudget(
-    ownership: ConversationRunOwnership,
-  ): ConversationWaitPollBudget | undefined {
-    const ticket = this.activeRun;
-    if (
-      !ticket
-      || ticket.ownership !== ownership
-      || ownership[RUN_OWNERSHIP] !== ticket.ownership[RUN_OWNERSHIP]
-      || ticket.state.phase === "queued"
-      || ticket.state.phase === "cancelling"
-    ) {
-      return;
-    }
-    return Object.freeze({
-      used: ticket.waitPollCount,
-      remaining: MAX_WAIT_POLLS_PER_RUN - ticket.waitPollCount,
-    });
-  }
-
   /**
    * Synchronously reserves an open wait for FIFO message delivery before its
    * caller awaits SDK steering. Other terminal sources, including cache
@@ -2580,37 +2550,6 @@ export class ConversationActor {
       undefined,
       true,
       cause,
-    );
-  }
-
-  /**
-   * Atomically consumes one fixed poll allowance and terminalizes this open
-   * attempt. A delivering attempt cannot be claimed by a timer.
-   */
-  claimWaitPoll(
-    ownership: ConversationRunOwnership,
-    handle: ConversationWaitAttempt,
-  ): boolean {
-    const current = this.currentWaitAttempt(ownership, handle);
-    if (
-      !current
-      || current.attempt.status !== "open"
-      || current.ticket.waitPollCount >= MAX_WAIT_POLLS_PER_RUN
-    ) {
-      return false;
-    }
-    const nextCount = current.ticket.waitPollCount + 1;
-    appendReservedCustomEntry(
-      this.sessionManager,
-      createWaitPollEntry({ runId: current.ticket.id, count: nextCount }),
-    );
-    current.ticket.waitPollCount = nextCount;
-    return this.terminalizeWaitAttempt(
-      current.ticket,
-      current.attempt,
-      "open",
-      true,
-      { kind: "poll" },
     );
   }
 

@@ -12298,7 +12298,7 @@ describe("ProjectSessionCoordinator", () => {
 
   });
 
-  describe("wait cache checkpoints", () => {
+  describe("wait checkpoints", () => {
     afterEach(() => {
       vi.restoreAllMocks();
     });
@@ -12306,17 +12306,6 @@ describe("ProjectSessionCoordinator", () => {
     it("uses a four-minute checkpoint delay", () => {
       expect(WAIT_POLL_DELAY_MS).toBe(4 * 60 * 1_000);
     });
-
-    function makeWaitCacheEligible(control: FakeSessionControl): void {
-      control.contextUsage = {
-        tokens: 50_000,
-        contextWindow: 200_000,
-        percent: 25,
-      };
-      const model = control.session.model;
-      if (!model) throw new Error("Expected a test model");
-      model.cost = { input: 10, output: 1, cacheRead: 1, cacheWrite: 1 };
-    }
 
     function observeWaitCacheTimers() {
       const spy = vi.spyOn(global, "setTimeout");
@@ -12349,10 +12338,6 @@ describe("ProjectSessionCoordinator", () => {
         fixture.handle,
         { roleId: "default" },
       );
-      makeWaitCacheEligible(
-        fixture.runtime.control(source.conversationId),
-      );
-
       const targetStarted = deferred();
       const releaseTarget = deferred();
       fixture.runtime.control(target.conversationId).enqueue(
@@ -12418,74 +12403,6 @@ describe("ProjectSessionCoordinator", () => {
       });
     });
 
-    it("propagates a poll journal append failure instead of hanging", async () => {
-      const fixture = await createFixture();
-      const source = await fixture.coordinator.createUserConversation(
-        fixture.handle,
-        { roleId: "default" },
-      );
-      const target = await fixture.coordinator.createUserConversation(
-        fixture.handle,
-        { roleId: "default" },
-      );
-      makeWaitCacheEligible(
-        fixture.runtime.control(source.conversationId),
-      );
-      const targetRun = await startBlockedSourceRun(
-        fixture,
-        target.conversationId,
-        "hold the target through a failed poll append",
-      );
-      const timers = observeWaitCacheTimers();
-      let waitError: unknown;
-      fixture.runtime.control(source.conversationId).enqueue(async (control) => {
-        try {
-          await executeTool(
-            control,
-            "wait_for_session",
-            "failed-poll-journal",
-            { conversationId: target.conversationId, runId: targetRun.runId },
-          );
-        } catch (error) {
-          waitError = error;
-        }
-        control.emitFinal("poll append failure observed");
-      });
-      const sourceCompletion = fixture.coordinator.prompt(
-        fixture.handle,
-        source.conversationId,
-        randomUUID(),
-        "wait until the poll journal fails",
-      );
-      await waitUntil(
-        () => source.getActivity().kind === "waiting",
-        "the poll append failure wait",
-      );
-      await waitUntil(() => timers().length === 1, "the poll timer");
-      const manager = source.sessionManager as unknown as {
-        appendCustomEntry(customType: string, data: unknown): string;
-      };
-      const originalAppend = manager.appendCustomEntry.bind(manager);
-      let failPollAppend = true;
-      manager.appendCustomEntry = (customType, data) => {
-        if (failPollAppend) {
-          failPollAppend = false;
-          throw new Error("simulated poll journal append failure");
-        }
-        return originalAppend(customType, data);
-      };
-      const timer = timers()[0];
-      if (!timer) throw new Error("Expected poll timer");
-      timer.fire();
-      await expect(sourceCompletion).resolves.toMatchObject({ outcome: "completed" });
-      expect(waitError).toMatchObject({
-        message: "simulated poll journal append failure",
-      });
-      manager.appendCustomEntry = originalAppend;
-      targetRun.release.resolve();
-      await targetRun.completion;
-    });
-
     it("lets accepted guidance win a poll recheck that is awaiting inbox state", async () => {
       const fixture = await createFixture();
       const source = await fixture.coordinator.createUserConversation(
@@ -12495,9 +12412,6 @@ describe("ProjectSessionCoordinator", () => {
       const target = await fixture.coordinator.createUserConversation(
         fixture.handle,
         { roleId: "default" },
-      );
-      makeWaitCacheEligible(
-        fixture.runtime.control(source.conversationId),
       );
       const targetRun = await startBlockedSourceRun(
         fixture,
@@ -12547,14 +12461,12 @@ describe("ProjectSessionCoordinator", () => {
         }
         return originalList(...args);
       };
-      const claim = vi.spyOn(source, "claimWaitPoll");
       const timer = timers()[0];
       if (!timer) throw new Error("Expected poll timer");
       timer.fire();
       await guidance;
       await expect(sourceCompletion).resolves.toMatchObject({ outcome: "completed" });
       expect(waitResult).toEqual({ outcome: "guidance" });
-      expect(claim).not.toHaveBeenCalled();
       inbox.list = originalList;
       targetRun.release.resolve();
       await targetRun.completion;
@@ -12570,10 +12482,6 @@ describe("ProjectSessionCoordinator", () => {
         fixture.handle,
         { roleId: "default" },
       );
-      makeWaitCacheEligible(
-        fixture.runtime.control(source.conversationId),
-      );
-
       const targetStarted = deferred();
       const releaseTarget = deferred();
       fixture.runtime.control(target.conversationId).enqueue(
@@ -12618,7 +12526,6 @@ describe("ProjectSessionCoordinator", () => {
       );
       const timer = timers()[0];
       if (!timer) throw new Error("Expected wait-cache timer");
-      const claim = vi.spyOn(source, "claimWaitPoll");
 
       releaseTarget.resolve();
       await targetCompletion;
@@ -12630,11 +12537,10 @@ describe("ProjectSessionCoordinator", () => {
       });
       expect(clearTimer).toHaveBeenCalledWith(timer.handle);
       timer.fire();
-      expect(claim).not.toHaveBeenCalled();
       await sourceCompletion;
     });
 
-    it("uses positive cache feedback but never installs a ninth timer", async () => {
+    it("continues checkpointing without a per-run quota", async () => {
       const fixture = await createFixture();
       const source = await fixture.coordinator.createUserConversation(
         fixture.handle,
@@ -12644,10 +12550,6 @@ describe("ProjectSessionCoordinator", () => {
         fixture.handle,
         { roleId: "default" },
       );
-      makeWaitCacheEligible(
-        fixture.runtime.control(source.conversationId),
-      );
-
       const targetStarted = deferred();
       const releaseTarget = deferred();
       fixture.runtime.control(target.conversationId).enqueue(
@@ -12658,32 +12560,22 @@ describe("ProjectSessionCoordinator", () => {
         fixture.handle,
         target.conversationId,
         targetRunId,
-        "hold target through eight checkpoints",
+        "hold target through nine checkpoints",
       );
       await targetStarted.promise;
 
       const timers = observeWaitCacheTimers();
-      const ninthWaitStarted = deferred();
       const waitResults: unknown[] = [];
-      let ninthWaitResult: unknown;
       fixture.runtime.control(source.conversationId).enqueue(async (control) => {
-        for (let checkpoint = 1; checkpoint <= 8; checkpoint += 1) {
+        for (let checkpoint = 1; checkpoint <= 9; checkpoint += 1) {
           waitResults.push(await executeTool(
             control,
             "wait_for_session",
             `checkpoint-${checkpoint}`,
             { conversationId: target.conversationId, runId: targetRunId },
           ));
-          control.emitAssistantUsage(20, 80, 10);
         }
-        ninthWaitStarted.resolve();
-        ninthWaitResult = await executeTool(
-          control,
-          "wait_for_session",
-          "checkpoint-nine",
-          { conversationId: target.conversationId, runId: targetRunId },
-        );
-        control.emitFinal("checkpoint cap observed");
+        control.emitFinal("unbounded checkpoints observed");
       });
       const sourceCompletion = fixture.coordinator.prompt(
         fixture.handle,
@@ -12692,7 +12584,7 @@ describe("ProjectSessionCoordinator", () => {
         "wait repeatedly",
       );
 
-      for (let index = 0; index < 8; index += 1) {
+      for (let index = 0; index < 9; index += 1) {
         await waitUntil(
           () => timers().length === index + 1,
           `checkpoint timer ${index + 1}`,
@@ -12703,13 +12595,15 @@ describe("ProjectSessionCoordinator", () => {
         timer.fire();
       }
 
-      await ninthWaitStarted.promise;
-      expect(timers()).toHaveLength(8);
+      await waitUntil(
+        () => waitResults.length === 9,
+        "ninth checkpoint result",
+      );
+      expect(timers()).toHaveLength(9);
       expect(waitResults).toEqual(
-        Array.from({ length: 8 }, () => ({ outcome: "checkpoint" })),
+        Array.from({ length: 9 }, () => ({ outcome: "checkpoint" })),
       );
       await sourceCompletion;
-      expect(ninthWaitResult).toEqual({ outcome: "wait_exhausted" });
       releaseTarget.resolve();
       await targetCompletion;
     });
@@ -12724,10 +12618,6 @@ describe("ProjectSessionCoordinator", () => {
         fixture.handle,
         { roleId: "default" },
       );
-      makeWaitCacheEligible(
-        fixture.runtime.control(source.conversationId),
-      );
-
       const targetStarted = deferred();
       const releaseTarget = deferred();
       fixture.runtime.control(target.conversationId).enqueue(
@@ -12778,7 +12668,6 @@ describe("ProjectSessionCoordinator", () => {
       );
       const timer = timers()[0];
       if (!timer) throw new Error("Expected wait-cache timer");
-      const claim = vi.spyOn(source, "claimWaitPoll");
 
       abort.abort();
       await waitReturned.promise;
@@ -12786,7 +12675,6 @@ describe("ProjectSessionCoordinator", () => {
       expect(waitError).toMatchObject({ name: "AbortError" });
       expect(clearTimer).toHaveBeenCalledWith(timer.handle);
       timer.fire();
-      expect(claim).not.toHaveBeenCalled();
       await sourceCompletion;
       releaseTarget.resolve();
       await targetCompletion;

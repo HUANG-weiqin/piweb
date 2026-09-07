@@ -523,13 +523,12 @@ describe("createMetaTools", () => {
     expect(fake.abortSession).not.toHaveBeenCalled();
   });
 
-  it("documents bounded polling as not proof of completion", () => {
+  it("documents checkpoints as not proof of completion", () => {
     const wait = tool(
       createMetaTools(sourceConversationId, service(), true),
       "wait_for_session",
     );
     expect(wait.description).toContain("{\"outcome\":\"checkpoint\"}");
-    expect(wait.description).toContain("{\"outcome\":\"wait_exhausted\"}");
-    expect(wait.description).toContain("Neither result proves target completion");
+    expect(wait.description).toContain("This is not target completion");
   });
 });

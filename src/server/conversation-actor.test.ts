@@ -5869,7 +5869,7 @@ describe("wait attempt ownership", () => {
     runId: RUN_B,
   };
 
-  it("freezes the local attempt and reserves delivery before a poll can win", async () => {
+  it("freezes the local attempt and reserves delivery before a terminal transition can win", async () => {
     const fixture = await openActor();
     const run = await startHeldActorRun(fixture, RUN_A);
     const terminalCauses: unknown[] = [];
@@ -5896,7 +5896,6 @@ describe("wait attempt ownership", () => {
       .toBe(true);
     expect(fixture.actor.getWaitAttempt(run.ownership, attempt)?.status)
       .toBe("delivering");
-    expect(fixture.actor.claimWaitPoll(run.ownership, attempt)).toBe(false);
     expect(fixture.actor.completeWaitAttempt(run.ownership, attempt)).toBe(false);
     expect(fixture.actor.completeWaitAttempt(
       run.ownership,
@@ -5955,7 +5954,12 @@ describe("wait attempt ownership", () => {
       targets: [target],
       onTerminal,
     });
-    expect(fixture.actor.claimWaitPoll(run.ownership, poll)).toBe(true);
+    expect(fixture.actor.completeWaitAttempt(
+      run.ownership,
+      poll,
+      "open",
+      { kind: "poll" },
+    )).toBe(true);
 
     const deliveryError = new Error("delivery failed");
     const failedDelivery = fixture.actor.installWaitAttempt(run.ownership, {
@@ -6013,7 +6017,6 @@ describe("wait attempt ownership", () => {
       targets: [target],
     });
 
-    expect(fixture.actor.claimWaitPoll(run.ownership, first)).toBe(false);
     expect(fixture.actor.completeWaitAttempt(run.ownership, first)).toBe(false);
     expect(fixture.actor.cancelWaitAttempt(run.ownership, first)).toBe(false);
     expect(() => fixture.actor.onWaitingSteerAdmitted(
@@ -6026,52 +6029,6 @@ describe("wait attempt ownership", () => {
 
     fixture.actor.cancelWaitAttempt(run.ownership, second);
     await run.finish();
-    await fixture.actor.dispose();
-  });
-
-  it("restores a recovered run's durable wait-poll budget", async () => {
-    const manager = SessionManager.inMemory(process.cwd(), {
-      id: CONVERSATION_ID,
-    });
-    for (let count = 1; count <= 3; count += 1) {
-      appendReservedCustomEntry(manager, createWaitPollEntry({
-        runId: RUN_A,
-        count,
-      }));
-    }
-    const runtime = new FakeRuntime();
-    const started = deferred();
-    const release = deferred();
-    runtime.session.resumeImplementation = async () => {
-      runtime.session.eventListener?.(nativeEvent({ type: "agent_start" }));
-      started.resolve();
-      await release.promise;
-      runtime.session.eventListener?.(nativeEvent({ type: "agent_end" }));
-    };
-    const fixture = await openActor({ sessionManager: manager, runtime });
-    const recovery = fixture.actor.resumeMessages({ runId: RUN_A });
-    await started.promise;
-    const ownership = fixture.actor.currentRunOwnership(RUN_A);
-    if (!ownership) throw new Error("Expected recovered run ownership");
-
-    expect(fixture.actor.getWaitPollBudget(ownership)).toEqual({
-      used: 3,
-      remaining: 5,
-    });
-    for (let index = 3; index < 8; index += 1) {
-      const attempt = fixture.actor.installWaitAttempt(ownership, {
-        mode: "exact",
-        targets: [target],
-      });
-      expect(fixture.actor.claimWaitPoll(ownership, attempt)).toBe(true);
-    }
-    expect(fixture.actor.getWaitPollBudget(ownership)).toEqual({
-      used: 8,
-      remaining: 0,
-    });
-
-    release.resolve();
-    await recovery;
     await fixture.actor.dispose();
   });
 
@@ -6110,36 +6067,4 @@ describe("wait attempt ownership", () => {
     await fixture.actor.dispose();
   });
 
-  it("caps fixed wait polls at eight claims per run", async () => {
-    const fixture = await openActor();
-    const run = await startHeldActorRun(fixture, RUN_A);
-
-    for (let index = 0; index < 8; index += 1) {
-      const attempt = fixture.actor.installWaitAttempt(run.ownership, {
-        mode: "exact",
-        targets: [target],
-      });
-      expect(fixture.actor.getWaitPollBudget(run.ownership)).toEqual({
-        used: index,
-        remaining: 8 - index,
-      });
-      expect(fixture.actor.claimWaitPoll(run.ownership, attempt)).toBe(true);
-    }
-
-    expect(fixture.actor.getWaitPollBudget(run.ownership)).toEqual({
-      used: 8,
-      remaining: 0,
-    });
-    const ninthAttempt = fixture.actor.installWaitAttempt(run.ownership, {
-      mode: "exact",
-      targets: [target],
-    });
-    expect(fixture.actor.claimWaitPoll(run.ownership, ninthAttempt)).toBe(false);
-    expect(fixture.actor.getWaitAttempt(run.ownership, ninthAttempt)?.status)
-      .toBe("open");
-    expect(fixture.actor.cancelWaitAttempt(run.ownership, ninthAttempt)).toBe(true);
-
-    await run.finish();
-    await fixture.actor.dispose();
-  });
 });
