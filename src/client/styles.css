@@ -2968,7 +2968,6 @@ pre {
 .conversation-sidebar-role,
 .conversation-sidebar-handle,
 .conversation-sidebar-updated,
-.conversation-temporary-badge,
 .conversation-agent-badge {
   color: #77736a;
   font-size: 8px;
@@ -2978,7 +2977,6 @@ pre {
   .conversation-sidebar-role,
   .conversation-sidebar-handle,
   .conversation-sidebar-updated,
-  .conversation-temporary-badge,
   .conversation-agent-badge
 ) {
   color: #514c43;
@@ -2997,19 +2995,12 @@ pre {
   font-family: "Cascadia Code", Consolas, monospace;
 }
 
-.conversation-temporary-badge,
 .conversation-agent-badge {
   border-radius: 0;
   background: transparent;
   font-weight: 850;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-}
-
-.conversation-temporary-badge {
-  margin-left: auto;
-  padding: 0;
-  color: #77736a;
 }
 
 .conversation-agent-badge {

@@ -73,7 +73,7 @@ full_access only: request_edit_budget
 all roles: request_context_compaction
 all roles: list_roles / read_role / propose_role_revision
 canManageSessions only: list_sessions / current_session / peek_session
-canManageSessions only: start_session / start_temporary_session / send_session_message
+canManageSessions only: start_session / send_session_message
 canManageSessions only: wait_for_session / abort_session / delete_session
 ```
 
@@ -92,7 +92,7 @@ canManageSessions only: wait_for_session / abort_session / delete_session
 - `read_only` 允许 `notebook_write`，因为它只写当前 conversation 的宿主工作记忆 sidecar，生命周期等同 transcript，不是项目源码写入；
 - `read_only` 允许 `request_context_compaction`，因为它只预约当前 run 的安全轮次边界并最终写 Pi 原生 compaction entry，不修改项目源码；请求是易失控制意图，工具结果不冒充持久成功证明；
 - `read_only` 允许读取所有用户级角色 prompt，它们会进入调用模型与当前 transcript，因此角色 prompt 不能保存秘密；`propose_role_revision` 的 Agent 参数只包含目标、expected revision、完整替换 prompt 和理由，名称、模型及权限字段不存在于 schema。取消有效到 `RoleStore` commit 开始；CAS queue race 返回 `stale`，commit 开始后按已授权提交处理；用户取消或中止 run 在此之前都不会落版；
-- `read_only` 不因 list/peek 看似只读而部分开放会话控制面；九个会话编排工具仍全部拒绝；
+- `read_only` 不因 list/peek 看似只读而部分开放会话控制面；八个会话编排工具仍全部拒绝；
 - `full_access` 才允许 Agent 创建、通信、等待、中止和删除 peer conversation；删除会级联 metadata descendants，但 self delete、级联删除自身、self abort/wait、busy delete、stale runId 等生命周期约束仍由 coordinator 独立校验；
 - 用户从 UI 发起的角色管理、焦点切换和宿主持久化不经过 Agent tool gate，仍受协议身份与各自串行边界约束。
 

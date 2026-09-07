@@ -17,7 +17,6 @@ import {
   META_OPERATION_CUSTOM_TYPE,
   RUN_SETTLEMENT_CUSTOM_TYPE,
   SERVICE_TIER_CUSTOM_TYPE,
-  TEMPORARY_RETURN_RECEIPT_CUSTOM_TYPE,
   WAIT_POLL_CUSTOM_TYPE,
   aggregateReservedConversationEntries,
   appendReservedCustomEntry,
@@ -30,11 +29,10 @@ import {
   createMetaOperationEntry,
   createRunSettlementEntry,
   createServiceTierSelectionEntry,
+  createWaitPollEntry,
   createLoopListEntry,
   createLoopListContinueEntry,
   createMessageDeliveryReceiptEntry,
-  createTemporaryReturnReceiptEntry,
-  createWaitPollEntry,
   parseConversationCardEntry,
   parseCompactionThresholdEntry,
   parseEditBudgetEntry,
@@ -48,7 +46,6 @@ import {
   parseReservedConversationEntry,
   parseRunSettlementEntry,
   parseServiceTierSelectionEntry,
-  parseTemporaryReturnReceiptEntry,
   parseWaitPollEntry,
 } from "./conversation-meta.js";
 import type {
@@ -88,11 +85,7 @@ function metadata() {
       canManageSessions: true,
     },
     lifecycle: {
-      kind: "temporary" as const,
-      callerConversationId: randomUUID(),
-      delegationId: randomUUID(),
-      returnMessageId: randomUUID(),
-      initialRunId: randomUUID(),
+      kind: "normal" as const,
     },
     createdBy: {
       kind: "conversation" as const,
@@ -523,7 +516,7 @@ describe("conversation reserved entries", () => {
           returnMessageId: randomUUID(),
         },
       },
-    })).toThrow(/initialRunId/i);
+    })).toThrow(/kind|normal|invalid/i);
     expect(() => createConversationMetaEntry({
       ...metadata(),
       role: {
@@ -693,11 +686,6 @@ describe("conversation reserved entries", () => {
 
   it("records strict immutable message delivery receipts and rejects conflicting duplicates", () => {
     const value = deliveryReceipt();
-    value.temporaryReturnAssignment = {
-      initialRunId: value.sourceRunId,
-      callerRunId: value.targetRunId,
-      assignedAt: timestamp,
-    };
     const entry = createMessageDeliveryReceiptEntry(value);
 
     expect(entry.customType).toBe(MESSAGE_DELIVERY_RECEIPT_CUSTOM_TYPE);
@@ -711,9 +699,6 @@ describe("conversation reserved entries", () => {
       messageDeliveryReceipts: [entry.data],
     });
 
-    value.temporaryReturnAssignment.assignedAt =
-      "2026-07-19T10:02:00.000Z";
-    expect(entry.data.temporaryReturnAssignment?.assignedAt).toBe(timestamp);
     expect(() => parseMessageDeliveryReceiptEntry({
       ...entry,
       data: { ...entry.data, unknown: true },
@@ -722,10 +707,6 @@ describe("conversation reserved entries", () => {
       ...entry.data,
       payloadFingerprint: "A".repeat(64),
     })).toThrow(/payloadFingerprint/i);
-    expect(() => createMessageDeliveryReceiptEntry({
-      ...entry.data,
-      targetRunId: randomUUID(),
-    })).toThrow(/temporaryReturnAssignment/i);
     expect(() => aggregateReservedConversationEntries([
       entry,
       createMessageDeliveryReceiptEntry({
@@ -735,21 +716,11 @@ describe("conversation reserved entries", () => {
     ])).toThrow(/conflicting.*message delivery receipt/i);
   });
 
-  it("records exact run settlements and requires complete report identity", () => {
+  it("records exact run settlements", () => {
     const pending = createRunSettlementEntry(settlement());
-    const reported = createRunSettlementEntry({
-      ...settlement(),
-      reportedAt: "2026-07-19T10:01:00.000Z",
-      returnMessageId: randomUUID(),
-    });
 
     expect(pending.customType).toBe(RUN_SETTLEMENT_CUSTOM_TYPE);
     expect(parseRunSettlementEntry(pending)).toEqual(pending);
-    expect(parseRunSettlementEntry(reported)).toEqual(reported);
-    expect(() => createRunSettlementEntry({
-      ...settlement(),
-      reportedAt: "2026-07-19T10:01:00.000Z",
-    })).toThrow(/returnMessageId/i);
     expect(() => createRunSettlementEntry({
       ...settlement(),
       finalText: Number.NaN,
@@ -762,106 +733,6 @@ describe("conversation reserved entries", () => {
       ...settlement(),
       finalText: "x".repeat(MAX_RUN_FINAL_TEXT_BYTES + 1),
     })).toThrow(/finalText/i);
-  });
-
-  it("records caller-owned temporary return receipt transitions strictly", () => {
-    const temporaryConversationId = randomUUID();
-    const initialRunId = randomUUID();
-    const messageId = randomUUID();
-    const delegation = createConversationCardEntry({
-      ...card(),
-      kind: "delegation_task",
-      toSnapshot: peer(temporaryConversationId),
-      runId: initialRunId,
-      state: "running",
-    });
-    const claimed = createTemporaryReturnReceiptEntry({
-      temporaryConversationId,
-      initialRunId,
-      messageId,
-      callerRunId: randomUUID(),
-      claimedAt: timestamp,
-      state: "claimed",
-    });
-    const reported = createRunSettlementEntry({
-      runId: initialRunId,
-      outcome: "completed",
-      finalText: "final answer",
-      settledAt: timestamp,
-      reportedAt: "2026-07-19T10:01:00.000Z",
-      returnMessageId: messageId,
-    }).data;
-    const settled = createTemporaryReturnReceiptEntry({
-      ...claimed.data,
-      state: "settled",
-      settlement: reported,
-    });
-
-    expect(claimed.customType).toBe(TEMPORARY_RETURN_RECEIPT_CUSTOM_TYPE);
-    expect(parseTemporaryReturnReceiptEntry(claimed)).toEqual(claimed);
-    expect(parseReservedConversationEntry(claimed)).toEqual({
-      kind: "temporary_return_receipt",
-      entry: claimed,
-    });
-    expect(aggregateReservedConversationEntries([
-      delegation,
-      claimed,
-      claimed,
-      settled,
-      settled,
-    ]).temporaryReturnReceipts).toEqual([settled.data]);
-    expect(() => createTemporaryReturnReceiptEntry({
-      ...claimed.data,
-      callerRunId: "not-a-uuid",
-    })).toThrow(/callerRunId/i);
-    expect(() => parseTemporaryReturnReceiptEntry({
-      ...claimed,
-      data: { ...claimed.data, extra: true },
-    })).toThrow(/unknown|unrecognized/i);
-    expect(() => createTemporaryReturnReceiptEntry({
-      ...settled.data,
-      settlement: { ...reported, runId: randomUUID() },
-    })).toThrow(/initial run/i);
-    expect(() => createTemporaryReturnReceiptEntry({
-      ...settled.data,
-      settlement: { ...reported, returnMessageId: randomUUID() },
-    })).toThrow(/messageId/i);
-    for (const settlement of [
-      { ...reported, outcome: "failed" as const },
-      { ...reported, outcome: "aborted" as const },
-      { ...reported, finalText: null },
-      { ...reported, finalText: "   " },
-      {
-        ...reported,
-        finalText: "x".repeat(MAX_CONVERSATION_BODY_BYTES + 1),
-      },
-    ]) {
-      expect(() => createTemporaryReturnReceiptEntry({
-        ...settled.data,
-        settlement,
-      })).toThrow(/returnable/i);
-    }
-    expect(aggregateReservedConversationEntries([
-      claimed,
-    ]).temporaryReturnReceipts).toEqual([claimed.data]);
-    expect(() => aggregateReservedConversationEntries([
-      delegation,
-      settled,
-    ])).toThrow(/must begin in claimed state/i);
-    expect(() => aggregateReservedConversationEntries([
-      delegation,
-      claimed,
-      createTemporaryReturnReceiptEntry({
-        ...claimed.data,
-        messageId: randomUUID(),
-      }),
-    ])).toThrow(/conflicting.*temporary return receipt/i);
-    expect(() => aggregateReservedConversationEntries([
-      delegation,
-      claimed,
-      settled,
-      claimed,
-    ])).toThrow(/state cannot regress/i);
   });
 
   it("records strict delete-session operation states", () => {
@@ -1121,7 +992,6 @@ describe("conversation reserved entries", () => {
 
   it("accepts Pi legacy conversation IDs but rejects a reserved nested custom carrier", () => {
     const value = metadata();
-    value.lifecycle.callerConversationId = "legacy.session_1";
     value.createdBy.conversationId = "legacy-session";
     expect(createConversationMetaEntry(value)).toBeDefined();
 
@@ -1144,11 +1014,6 @@ describe("conversation reserved entries", () => {
     });
     const incoming = createConversationMessageEntry(message());
     const pending = createRunSettlementEntry(settlement());
-    const reported = createRunSettlementEntry({
-      ...pending.data,
-      reportedAt: "2026-07-19T10:03:00.000Z",
-      returnMessageId: randomUUID(),
-    });
     const operationStarted = createMetaOperationEntry(
       startedOperation(),
     );
@@ -1166,7 +1031,7 @@ describe("conversation reserved entries", () => {
       pending,
       pending,
       finalCard,
-      reported,
+      pending,
       operationStarted,
       operationCompleted,
       { customType: "extension.state", data: {} },
@@ -1176,7 +1041,7 @@ describe("conversation reserved entries", () => {
     expect(aggregate.deliveredMessageIds).toEqual([
       incoming.details.messageId,
     ]);
-    expect(aggregate.runSettlements).toEqual([reported.data]);
+    expect(aggregate.runSettlements).toEqual([pending.data]);
     expect(aggregate.metaOperations).toEqual([
       operationCompleted.data,
     ]);
@@ -1196,10 +1061,6 @@ describe("conversation reserved entries", () => {
         finalText: "different",
       }),
     ])).toThrow(/conflicting.*settlement/i);
-    expect(() => aggregateReservedConversationEntries([
-      reported,
-      pending,
-    ])).toThrow(/cannot change or regress/i);
   });
 
   it("requires immutable card identity and monotonic lifecycle updates", () => {

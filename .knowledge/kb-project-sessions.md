@@ -102,7 +102,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 新对话在 header 后、AgentSession 创建前写唯一 base `piweb.conversation_meta.v1`：
 
 - 完整角色 `id/revision/name/description/systemPrompt/model/compactionModel/defaultThinkingLevel/defaultServiceTier/toolMode/canManageSessions`；`compactionModel` 为必填 nullable，`null` 跟随该 conversation 冻结的 primary model。
-- `normal` 或 `temporary` lifecycle；
+- `normal` lifecycle；
 - `user` 或来源 conversation 的 `createdBy`。
 
 同一 JSONL 还可包含：
@@ -110,7 +110,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 - `piweb.conversation_role_change.v1`：用户在 idle 边界显式应用的新完整角色快照（含 `compactionModel`），最后一条有效记录成为当前角色，并把分支 thinking 重置为该角色默认值；
 - `piweb.conversation_card.v1`：发送方可见的 outgoing/委派状态；
 - `piweb.conversation_message.v1`：进入目标 LLM context 的 incoming 消息；
-- `piweb.run_settlement.v1`：精确 run outcome、final text 与临时回传报告标记；
+- `piweb.run_settlement.v1`：精确 run outcome 与 final text；
 - `piweb.meta_operation.v1`：破坏性 meta 工具的 started/completed 幂等状态；
 - `piweb.compaction_threshold.v1`：当前会话 20%–90% 的自动压缩阈值，缺省为 70%，最后一条单调时间记录生效。
 - `piweb.compaction_resume.v1`：压缩后继续同一 workbench run 的隐藏 `custom_message`，必须 `display=false` 且只携带合法 `runId`，只校验不投影为卡片或 settlement。默认压缩由 Pi 0.85.1 私有 `_runDefaultCompaction` 在 `session_before_compact` 后执行；custom 结果直接采用并跳过模型解析，否则每次 attempt fresh-resolve 冻结的 compaction identity。显式模型必须可用、contextWindow 为有限正数且不小于本次 primary，失败无 fallback；缺少当前必填 role snapshot 字段的 JSONL 一律 fail closed，不做读时补值或语义迁移。
@@ -128,9 +128,8 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 - 发送方先追加 `sending` 卡片，再原子提交 envelope，最后追加同 cardId 的 `queued` 状态；持久接收发生在目标处理之前。`start_session` 因目标 profile 必须先创建 target；若 inbox admission 抛错，宿主先按 exact messageId 复查 commit：已存在 envelope 就保留 target 供 replay 修复，确认不存在时则把 source card 终结为带原因的 `failed` 并删除本次新建 target。这样失败返回不能留下 orphan target 或永久 `sending`，相同 idempotency key 重放也稳定返回原 admission failure。
 - busy 目标把最早 queued envelope 持久 claim 为 `processing(runId, processingDelivery="steer")`，再由 actor 以 incoming `custom_message` 排入精确 run 的 SDK steering queue；当前工具调用不被中断。idle 后 inbox pump 才用确定 runId 启动新 run。普通发送在 durable claim 后即可返回，不等待 pre-stream SDK 内存队列，避免项目关闭与 provider/compaction preflight 互锁。
 - run settlement durable 后，pump 先对账目标 JSONL incoming marker：带 steer 标记但尚无 marker 的 claim 恢复 queued；已有 marker 才把发送方卡片推进到 completed/failed/aborted 并删除 sidecar。多 envelope 终结逐条从进程内 processing batch 精确移除；中途失败时保留失败项和后续项，并在同一 lifecycle 至多立即重试一次。terminal card 已追加但 sidecar 删除失败时，重试依赖 card 聚合幂等继续删除；仅整批成功才清除失败 retry key。idle batch 的逐条 `queued → processing` claim 属于同一 dispatch start/rollback 边界：任一 claim 失败时必须按每条原始 state 回滚整个 batch、不得启动 actor，再沿用一次 retry pump；同步 dispatch rollback 必须保留 `processingDelivery`，崩溃时残留 sidecar 用于恢复对账。
-- wait 在项目 lifecycle 内把 cycle check、waiter 注册与 durable inbox 补查原子化：发送先赢时按目标 conversation + `fromRunId` 找回未被当前 receiving run receipt 的消息，注册先赢时发送直接结算 waiter，避免消息或 settlement 在订阅前到达而永久错过或同一 messageId 被连续 wait 重放。异常路径必须 remove+detach waiter；目标 exact run 在 durable settlement 前 fatal 时也必须按 runId reject 全部 waiter。临时 initial run 对 caller 只通过尚未 receipt 的回传 incoming message 交付正文，wait tool result 只返回 metadata；return 已 receipt/清理后再次 wait 返回 reported settlement。
-- 启动恢复会扫描全部 sidecar、profile 和 settlement：修复 inbox 已提交而来源卡片仍是 sending 的窗口，恢复 processing batch，继续临时回传，并只执行尚未 settled 的 run。
-- 临时 conversation 只观察 metadata 中的 `initialRunId`。成功且有 final text 时先 durable enqueue caller、标记 settlement 已报告，再自动删除；失败、中止或无回复同样回传失败，但保留目标并标记 attention。
+- wait 在项目 lifecycle 内把 cycle check、waiter 注册与 durable inbox 补查原子化：发送先赢时按目标 conversation + `fromRunId` 找回未被当前 receiving run receipt 的消息，注册先赢时发送直接结算 waiter，避免消息或 settlement 在订阅前到达而永久错过或同一 messageId 被连续 wait 重放。异常路径必须 remove+detach waiter；目标 exact run 在 durable settlement 前 fatal 时也必须按 runId reject 全部 waiter。wait tool result 只返回消息 metadata；消息正文只通过 incoming message 注入一次，已 receipt 的消息不会被再次投递。
+- 启动恢复会扫描全部 sidecar、profile 和 settlement：修复 inbox 已提交而来源卡片仍是 sending 的窗口，恢复 processing batch，恢复可恢复的 inbox delivery，并只执行尚未 settled 的 run。
 - 删除 conversation 先冻结并 fence 目标及其 metadata descendants，任何成员 busy 都拒绝整次删除；随后先持久化目标 tombstone，再持久化 descendants tombstone，并按子孙到祖先顺序终结/删除每个目标的 pending envelope、删除 JSONL。事务中的后到消息明确失败，已发往 cascade set 之外的 outbound envelope 不受来源删除影响。删除完成后回收 tombstone，重启时也会安全清理“目标已不存在且无 pending”的残留标记。
 - tombstone 从磁盘恢复到内存 deleting set 后才允许 actor open/create 和 inbox pump；因此进程在删除中途退出也不能让目标短暂复活。持久删除失败时 fence 与 tombstone 保留，直到后续恢复真正完成。
 - 恢复会在任何 inbox actor pump 前扫描 `piweb.meta_operation.v1`。若发现 started 但未 completed 的精确 abort intent，会先中止仍匹配的活动 run，或把崩溃中断的 processing run 结算为 aborted，再完成来源卡片/sidecar/ledger 对账。
@@ -176,7 +175,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 
 - `PublicState` 是高频、小体积运行状态。
 - `role_catalog_snapshot` 是低频用户角色目录及当前可用性。
-- `project_snapshot` 是低频会话索引，包含服务端解析的 root、固化 role 摘要、activity、attention 和 temporary；底层会话仍平级，浏览器可按 root 聚合导航。它还带 `coverage`：fresh full refresh 是 `complete`，cold/recent 当前索引 seed 是 `unknown`。count 与 JSON byte 裁剪优先保留完整 root 组，任何省略都置 `truncated`；后台 actor 变化只更新索引，不会切换 current focus。
+- `project_snapshot` 是低频会话索引，包含服务端解析的 root、固化 role 摘要、activity、attention；底层会话仍平级，浏览器可按 root 聚合导航。它还带 `coverage`：fresh full refresh 是 `complete`，cold/recent 当前索引 seed 是 `unknown`。count 与 JSON byte 裁剪优先保留完整 root 组，任何省略都置 `truncated`；后台 actor 变化只更新索引，不会切换 current focus。
 - `project_activity_snapshot` 是进程级已加载项目的有界汇总，只投影 busy/attention 计数；它不复制会话索引、浏览器 unread 或 transcript。
 - 浏览器分别维护最多 4 项 workspace LRU 与 8 项 conversation presentation LRU，让工作区或同项目会话切换时立即画出目标上一帧；两者独立逐出，只存在内存，不接管 transcript、不保存 draft/pending command，也不能解锁命令。conversation cache 以 workspace/project/conversation 为键，保存 reducer 产出的 ChatState 展示引用及角色/window/control 投影，但绝不 hydrate 回当前 reducer。新 observation/focus 仍必须 exact open durable conversation，并以匹配新完整 focus 身份的服务端 snapshot 覆盖缓存。只有 `coverage: "complete"` 且非截断 `project_snapshot` 的缺席才能证明条目已删除；`unknown` 或截断快照不能据此逐出。
 - `conversation_preview` 是 command-correlated、无 focusId 的 cold 只读投影：常规 `inspectConversation(s)` 只返回 metadata，绝不附带或复制物理 entries；只有单目标 `inspectConversationPresentation` 在完整性证明后 opt-in 返回本次 JSON parse 新拥有的 readonly entries 浅数组。只读 adapter 从最后物理 leaf 沿 parentId 还原 active branch，getter 只复制数组壳，canonical projector 不修改 entry，再经 peer enrichment 与最终 window pipeline。投影构造失败只跳过 preview，文件完整性/read/identity 失败仍 fail closed。它不取得 writer lease，不创建 SessionManager/AgentSession/model catalog/extension route，也不能启用任何 focus 命令；actor 或 actorOpening 已存在时禁止发送磁盘 preview，emit 前还要同步复核一次 actor/opening/deleting/closing。

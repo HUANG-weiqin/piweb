@@ -24,7 +24,6 @@ import {
   createConversationMessageEntry,
   createMessageDeliveryReceiptEntry,
   createRunSettlementEntry,
-  createTemporaryReturnReceiptEntry,
   type ConversationMeta,
 } from "./conversation-meta.js";
 import { ConversationNotebook } from "./conversation-notebook.js";
@@ -1001,47 +1000,11 @@ describe("ProjectStore", () => {
       kind: "message",
       sentAt: incoming.details.sentAt,
       payloadFingerprint: "a".repeat(64),
-      temporaryReturnAssignment: {
-        initialRunId: sourceRunId,
-        callerRunId: targetRunId,
-        assignedAt: "2026-01-01T00:01:30.000Z",
-      },
       deliveredAt: "2026-01-01T00:02:00.000Z",
     });
     const receiptId = conversation.appendCustomEntry(
       receipt.customType,
       receipt.data,
-    );
-    const temporaryReceiptIdentity = {
-      temporaryConversationId: sourceConversationId,
-      initialRunId: sourceRunId,
-      messageId,
-      callerRunId: targetRunId,
-      claimedAt: receipt.data.temporaryReturnAssignment!.assignedAt,
-    };
-    const claimedTemporaryReceipt = createTemporaryReturnReceiptEntry({
-      ...temporaryReceiptIdentity,
-      state: "claimed",
-    });
-    const claimedTemporaryReceiptId = conversation.appendCustomEntry(
-      claimedTemporaryReceipt.customType,
-      claimedTemporaryReceipt.data,
-    );
-    const settledTemporaryReceipt = createTemporaryReturnReceiptEntry({
-      ...temporaryReceiptIdentity,
-      state: "settled",
-      settlement: {
-        runId: sourceRunId,
-        outcome: "completed",
-        finalText: "returned",
-        settledAt: "2026-01-01T00:02:30.000Z",
-        reportedAt: "2026-01-01T00:02:31.000Z",
-        returnMessageId: messageId,
-      },
-    });
-    const settledTemporaryReceiptId = conversation.appendCustomEntry(
-      settledTemporaryReceipt.customType,
-      settledTemporaryReceipt.data,
     );
     conversation.appendCustomEntry("test.unrelated", { keep: false });
     const referencedSettlement = createRunSettlementEntry({
@@ -1080,29 +1043,15 @@ describe("ProjectStore", () => {
       conversation.getHeader()?.id,
       retainedId,
       receiptId,
-      claimedTemporaryReceiptId,
-      settledTemporaryReceiptId,
       referencedSettlementId,
     ]);
     expect(persisted.find(({ id }) => id === receiptId)).toEqual({
       ...before.find(({ id }) => id === receiptId),
       parentId: retainedId,
     });
-    expect(
-      persisted.find(({ id }) => id === claimedTemporaryReceiptId),
-    ).toEqual({
-      ...before.find(({ id }) => id === claimedTemporaryReceiptId),
-      parentId: receiptId,
-    });
-    expect(
-      persisted.find(({ id }) => id === settledTemporaryReceiptId),
-    ).toEqual({
-      ...before.find(({ id }) => id === settledTemporaryReceiptId),
-      parentId: claimedTemporaryReceiptId,
-    });
     expect(persisted.find(({ id }) => id === referencedSettlementId)).toEqual({
       ...before.find(({ id }) => id === referencedSettlementId),
-      parentId: settledTemporaryReceiptId,
+      parentId: receiptId,
     });
 
     const inspection = await store.inspectConversation(conversationId);

@@ -1455,7 +1455,6 @@ export class ProjectStore {
         const reserved = parseReservedConversationEntry(entry);
         if (
           reserved?.kind !== "message_delivery_receipt"
-          && reserved?.kind !== "temporary_return_receipt"
           && (
             reserved?.kind !== "run_settlement"
             || !receiptTargetRunIds.has(reserved.entry.data.runId)

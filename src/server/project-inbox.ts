@@ -79,8 +79,6 @@ const envelopeSchema = z.object({
   kind: z.enum([
     "message",
     "delegation_task",
-    "delegation_result",
-    "delegation_failure",
   ]),
   body: z.string(),
   replyToMessageId: uuidSchema("replyToMessageId").optional(),
@@ -90,11 +88,6 @@ const envelopeSchema = z.object({
     "requestFingerprint must be a lowercase SHA-256 hex digest",
   ).optional(),
   fromRunId: uuidSchema("fromRunId"),
-  temporaryReturnAssignment: z.object({
-    initialRunId: uuidSchema("temporaryReturnAssignment.initialRunId"),
-    callerRunId: uuidSchema("temporaryReturnAssignment.callerRunId"),
-    assignedAt: canonicalTimestampSchema("temporaryReturnAssignment.assignedAt"),
-  }).strict().optional(),
   fromSnapshot: z.unknown(),
   toSnapshot: z.unknown(),
   state: z.enum(["queued", "processing"]),
@@ -139,12 +132,6 @@ export interface InboxEnvelope {
   requestFingerprint?: string;
   /** Frozen source run correlation used by durable wait rendezvous. */
   fromRunId: string;
-  /** Atomic proof that this message owned a temporary caller's exact wait. */
-  temporaryReturnAssignment?: {
-    initialRunId: string;
-    callerRunId: string;
-    assignedAt: string;
-  };
   fromSnapshot: ConversationReferenceSnapshot;
   toSnapshot: ConversationReferenceSnapshot;
   state: "queued" | "processing";
@@ -244,13 +231,6 @@ function statsAreIdentical(first: Stats, second: Stats): boolean {
 function cloneEnvelope(envelope: InboxEnvelope): InboxEnvelope {
   return {
     ...envelope,
-    ...(envelope.temporaryReturnAssignment === undefined
-      ? {}
-      : {
-          temporaryReturnAssignment: {
-            ...envelope.temporaryReturnAssignment,
-          },
-        }),
     fromSnapshot: {
       ...envelope.fromSnapshot,
       role: { ...envelope.fromSnapshot.role },
@@ -399,18 +379,6 @@ export function parseInboxEnvelope(value: unknown): InboxEnvelope {
   ) {
     throw new Error(`delegationId is required for kind ${raw.kind}`);
   }
-  if (
-    raw.temporaryReturnAssignment !== undefined
-    && (
-      raw.kind !== "message"
-      || raw.fromRunId !== raw.temporaryReturnAssignment.initialRunId
-    )
-  ) {
-    throw new Error(
-      "temporaryReturnAssignment requires a message from its exact initial run",
-    );
-  }
-
   const fromSnapshot = parseConversationReferenceSnapshot(
     raw.fromSnapshot,
   );
@@ -445,13 +413,6 @@ export function parseInboxEnvelope(value: unknown): InboxEnvelope {
       ? {}
       : { requestFingerprint: raw.requestFingerprint }),
     fromRunId: raw.fromRunId,
-    ...(raw.temporaryReturnAssignment === undefined
-      ? {}
-      : {
-          temporaryReturnAssignment: {
-            ...raw.temporaryReturnAssignment,
-          },
-        }),
     fromSnapshot,
     toSnapshot,
     state: raw.state,

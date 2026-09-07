@@ -21,6 +21,8 @@ export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
+// v48: project conversation summaries no longer expose a peer lifecycle flag;
+// all Agent-created peer sessions are persistent.
 // v46: live assistant output estimates use Pi's base message estimator and
 // remain distinct from final provider usage and all durable projections.
 // v45: the browser derives the latest settled run's average output rate from
@@ -49,7 +51,7 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
-export const PROTOCOL_VERSION = 47;
+export const PROTOCOL_VERSION = 48;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
@@ -689,7 +691,6 @@ export interface ConversationSummary {
   activity?: ConversationActivity;
   attention?: boolean;
   unread?: boolean;
-  temporary?: boolean;
   createdBy?: ConversationCreatedBy;
 }
 
@@ -1383,7 +1384,6 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
       activity: conversationActivitySchema.optional(),
       attention: z.boolean().optional(),
       unread: z.boolean().optional(),
-      temporary: z.boolean().optional(),
       createdBy: z.discriminatedUnion("kind", [
         z.object({
           kind: z.literal("user"),

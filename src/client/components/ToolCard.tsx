@@ -15,7 +15,6 @@ const META_TOOL_NAMES = new Set([
   "peek_session",
   "request_edit_budget",
   "start_session",
-  "start_temporary_session",
   "send_session_message",
   "wait_for_session",
   "abort_session",
@@ -78,7 +77,6 @@ const FIELD_LABELS: Record<string, string> = {
   state: "状态",
   status: "状态",
   task: "任务",
-  temporary: "临时会话",
   timeout: "超时",
   title: "标题",
   touchedFiles: "已修改文件",
@@ -189,11 +187,6 @@ export function toolPresentation(
     case "start_session":
       return {
         label: "启动 Agent 会话",
-        target: stringField(record, "title") || stringField(record, "roleId"),
-      };
-    case "start_temporary_session":
-      return {
-        label: "启动临时 Agent 会话",
         target: stringField(record, "title") || stringField(record, "roleId"),
       };
     case "send_session_message":

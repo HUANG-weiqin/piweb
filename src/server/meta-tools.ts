@@ -71,7 +71,6 @@ export interface MetaToolService {
       roleId: string;
       task: string;
       title?: string;
-      temporary: boolean;
       idempotencyKey: string;
     },
     signal: AbortSignal | undefined,
@@ -369,29 +368,6 @@ export function createMetaTools(
           roleId: input.roleId,
           task: input.task,
           ...(input.title === undefined ? {} : { title: input.title }),
-          temporary: false,
-          idempotencyKey: sideEffectKey(sourceConversationId, toolCallId),
-        }, signal));
-      },
-    }),
-    defineTool({
-      name: "start_temporary_session",
-      label: "Start temporary session",
-      description:
-        "Start a one-shot peer Agent session for audits, investigations, or quick reviews. Its successful initial final normally returns to the caller and the peer session is automatically deleted; an explicit peer message that resolves the caller's exact initial-run wait replaces that automatic return.",
-      promptSnippet: "Start a one-shot Agent session that auto-deletes after success.",
-      promptGuidelines: [
-        "Use for throwaway work where you only need the initial final answer; use start_session instead when follow-up or later inspection is expected.",
-        "This still runs asynchronously: call wait_for_session when the answer is needed in this turn. A message result with fulfillsTemporaryReturn:true is the designated one-shot return; consume its injected body and do not wait again merely for exact settlement. Re-wait only when that flag is absent and settlement still matters.",
-      ],
-      parameters: startSessionParameters,
-      async execute(toolCallId, input, signal) {
-        assertConversationBody(input.task, "task");
-        return result(await service.startSession(sourceConversationId, {
-          roleId: input.roleId,
-          task: input.task,
-          ...(input.title === undefined ? {} : { title: input.title }),
-          temporary: true,
           idempotencyKey: sideEffectKey(sourceConversationId, toolCallId),
         }, signal));
       },
@@ -422,12 +398,11 @@ export function createMetaTools(
       name: "wait_for_session",
       label: "Wait for session",
       description:
-        "Explicitly wait for the next relevant event while keeping the current turn responsive. Pass one exact conversationId+runId pair, or targets with 1-32 peer run identities to wait for the first listed durable settlement; an aggregate settlement also identifies its conversationId. A single exact wait that would truly block requires singleWaitCommitment explaining why waiting is better than continuing useful local work or waiting on multiple independent targets; immediate settlement/message/guidance results do not require it. The wait may instead return message metadata when a peer/inbox message is claimed into the current run's steering queue (delivered after the wait starts, or already claimed before it registered but not yet observed — from any conversation or run), or guidance metadata when user guidance is accepted into the current run's steering queue (an explicit steer or a busy browser message, accepted before or after the wait registered). When this call returns message metadata, the body has already been injected as a separate custom message into the same model request that receives this tool result; use that message now instead of calling wait_for_session or peek_session merely to obtain the body. If a message result has fulfillsTemporaryReturn:true, that body is the designated one-shot return: consume it and do not wait again merely for exact settlement. Otherwise call again only when the message did not satisfy the dependency and final settlement still matters. An exact run without authoritative recovery or delivery reachability returns target_unreachable; aggregate waits do the same for an unavailable listed target. There is no global cycle rejection. A silent wait may return {\"outcome\":\"checkpoint\"} after four minutes at most eight times for the logical source run, including after recovery; the next silent wait returns {\"outcome\":\"wait_exhausted\"}. Neither result proves target completion.",
+        "Explicitly wait for the next relevant event while keeping the current turn responsive. Pass one exact conversationId+runId pair, or targets with 1-32 peer run identities to wait for the first listed durable settlement; an aggregate settlement also identifies its conversationId. A single exact wait that would truly block requires singleWaitCommitment explaining why waiting is better than continuing useful local work or waiting on multiple independent targets; immediate settlement/message/guidance results do not require it. The wait may instead return message metadata when a peer/inbox message is claimed into the current run's steering queue (delivered after the wait starts, or already claimed before it registered but not yet observed — from any conversation or run), or guidance metadata when user guidance is accepted into the current run's steering queue (an explicit steer or a busy browser message, accepted before or after the wait registered). When this call returns message metadata, the body has already been injected as a separate custom message into the same model request that receives this tool result; use that message now instead of calling wait_for_session or peek_session merely to obtain the body. Otherwise call again only when the message did not satisfy the dependency and final settlement still matters. An exact run without authoritative recovery or delivery reachability returns target_unreachable; aggregate waits do the same for an unavailable listed target. There is no global cycle rejection. A silent wait may return {\"outcome\":\"checkpoint\"} after four minutes at most eight times for the logical source run, including after recovery; the next silent wait returns {\"outcome\":\"wait_exhausted\"}. Neither result proves target completion.",
       promptSnippet: "Wait for one exact peer run or the first of a bounded target set.",
       promptGuidelines: [
         "For a single exact wait that may block, provide singleWaitCommitment with a concise reason; immediate results are returned without it.",
         "A message outcome's body is already in the model context that receives the wait result; use it there, and do not wait or peek merely to fetch the body.",
-        "When a message result has fulfillsTemporaryReturn:true, use the injected one-shot return and do not re-wait solely to observe settlement.",
         "Do not use singleWaitCommitment with targets; aggregate waits keep their existing semantics.",
       ],
       parameters: Type.Object({

@@ -3074,8 +3074,7 @@ export class ConversationActor {
 
   private shouldAutoTitleFirstBrowserPrompt(): boolean {
     const entries = this.sessionManager.getEntries();
-    return this.profileSnapshot.lifecycle.kind === "normal"
-      && this.profileSnapshot.createdBy.kind === "user"
+    return this.profileSnapshot.createdBy.kind === "user"
       && !entries.some(hasSessionNameIntent)
       && this.session.messages.length === 0
       && !entries.some(hasContextBearingEntry);

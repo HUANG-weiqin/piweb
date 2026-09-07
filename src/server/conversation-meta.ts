@@ -40,8 +40,6 @@ export const WAIT_POLL_CUSTOM_TYPE = "piweb.wait_poll.v1";
 export const MAX_WAIT_POLL_COUNT = 8;
 export const CONVERSATION_ROLE_CHANGE_CUSTOM_TYPE =
   "piweb.conversation_role_change.v1";
-export const TEMPORARY_RETURN_RECEIPT_CUSTOM_TYPE =
-  "piweb.temporary_return_receipt.v1";
 
 const MAX_ROLE_NAME_CHARACTERS = 80;
 const MAX_ROLE_DESCRIPTION_CHARACTERS = 1_000;
@@ -212,18 +210,9 @@ const roleSnapshotSchema = z.object({
   canManageSessions: z.boolean(),
 }).strict();
 
-const lifecycleSchema = z.discriminatedUnion("kind", [
-  z.object({
-    kind: z.literal("normal"),
-  }).strict(),
-  z.object({
-    kind: z.literal("temporary"),
-    callerConversationId: conversationIdSchema("callerConversationId"),
-    delegationId: uuidSchema("delegationId"),
-    returnMessageId: uuidSchema("returnMessageId"),
-    initialRunId: uuidSchema("initialRunId"),
-  }).strict(),
-]);
+const lifecycleSchema = z.object({
+  kind: z.literal("normal"),
+}).strict();
 
 const createdBySchema = z.discriminatedUnion("kind", [
   z.object({
@@ -294,8 +283,6 @@ const serviceTierSelectionEntrySchema = z.object({
 const conversationKindSchema = z.enum([
   "message",
   "delegation_task",
-  "delegation_result",
-  "delegation_failure",
 ]);
 
 const conversationCardSchema = z.object({
@@ -394,30 +381,8 @@ const messageDeliveryReceiptSchema = z.object({
     SHA256_HEX_PATTERN,
     "payloadFingerprint must be a lowercase SHA-256 hex digest",
   ),
-  temporaryReturnAssignment: z.object({
-    initialRunId: uuidSchema("temporaryReturnAssignment.initialRunId"),
-    callerRunId: uuidSchema("temporaryReturnAssignment.callerRunId"),
-    assignedAt: canonicalTimestampSchema(
-      "temporaryReturnAssignment.assignedAt",
-    ),
-  }).strict().optional(),
   deliveredAt: canonicalTimestampSchema("deliveredAt"),
-}).strict().superRefine((value, context) => {
-  const assignment = value.temporaryReturnAssignment;
-  if (assignment === undefined) return;
-  if (
-    value.kind !== "message"
-    || value.sourceRunId !== assignment.initialRunId
-    || value.targetRunId !== assignment.callerRunId
-  ) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      message:
-        "temporaryReturnAssignment must identify the exact message source and target runs",
-      path: ["temporaryReturnAssignment"],
-    });
-  }
-});
+}).strict();
 
 const messageDeliveryReceiptEntrySchema = z.object({
   customType: z.literal(MESSAGE_DELIVERY_RECEIPT_CUSTOM_TYPE),
@@ -531,25 +496,7 @@ const runSettlementSchema = z.object({
     { allowEmpty: true },
   ).nullable(),
   settledAt: canonicalTimestampSchema("settledAt"),
-  reportedAt: canonicalTimestampSchema("reportedAt").optional(),
-  returnMessageId: uuidSchema("returnMessageId").optional(),
-}).strict().superRefine((value, context) => {
-  if (
-    (value.reportedAt === undefined)
-    !== (value.returnMessageId === undefined)
-  ) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      message:
-        "reportedAt and returnMessageId must either both be present or both be absent",
-      path: [
-        value.reportedAt === undefined
-          ? "reportedAt"
-          : "returnMessageId",
-      ],
-    });
-  }
-});
+}).strict();
 
 const runSettlementEntrySchema = z.object({
   customType: z.literal(RUN_SETTLEMENT_CUSTOM_TYPE),
@@ -584,48 +531,6 @@ const waitPollSchema = z.object({
 const waitPollEntrySchema = z.object({
   customType: z.literal(WAIT_POLL_CUSTOM_TYPE),
   data: waitPollSchema,
-}).strict();
-
-const temporaryReturnReceiptIdentitySchema = z.object({
-  temporaryConversationId: conversationIdSchema("temporaryConversationId"),
-  initialRunId: uuidSchema("initialRunId"),
-  messageId: uuidSchema("messageId"),
-  callerRunId: uuidSchema("callerRunId"),
-  claimedAt: canonicalTimestampSchema("claimedAt"),
-}).strict();
-
-const temporaryReturnReceiptSchema = z.discriminatedUnion("state", [
-  temporaryReturnReceiptIdentitySchema.extend({
-    state: z.literal("claimed"),
-  }).strict(),
-  temporaryReturnReceiptIdentitySchema.extend({
-    state: z.literal("settled"),
-    settlement: runSettlementSchema,
-  }).strict(),
-]).superRefine((value, context) => {
-  if (value.state !== "settled") return;
-  if (
-    value.settlement.runId !== value.initialRunId
-    || value.settlement.returnMessageId !== value.messageId
-    || value.settlement.reportedAt === undefined
-    || value.settlement.outcome !== "completed"
-    || value.settlement.finalText === null
-    || value.settlement.finalText.trim().length === 0
-    || Buffer.byteLength(value.settlement.finalText, "utf8")
-      > MAX_CONVERSATION_BODY_BYTES
-  ) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      message:
-        "settled temporary return receipt must report a returnable initial run through its messageId",
-      path: ["settlement"],
-    });
-  }
-});
-
-const temporaryReturnReceiptEntrySchema = z.object({
-  customType: z.literal(TEMPORARY_RETURN_RECEIPT_CUSTOM_TYPE),
-  data: temporaryReturnReceiptSchema,
 }).strict();
 
 const metaOperationBaseSchema = {
@@ -736,10 +641,6 @@ export type RunSettlementEntry =
 export type EditBudgetEntry = z.infer<typeof editBudgetEntrySchema>;
 export type WaitPoll = z.infer<typeof waitPollSchema>;
 export type WaitPollEntry = z.infer<typeof waitPollEntrySchema>;
-export type TemporaryReturnReceipt =
-  z.infer<typeof temporaryReturnReceiptSchema>;
-export type TemporaryReturnReceiptEntry =
-  z.infer<typeof temporaryReturnReceiptEntrySchema>;
 export type MetaOperation = z.infer<typeof metaOperationSchema>;
 export type MetaOperationEntry =
   z.infer<typeof metaOperationEntrySchema>;
@@ -801,10 +702,6 @@ export type ReservedConversationEntry =
       entry: WaitPollEntry;
     }
   | {
-      kind: "temporary_return_receipt";
-      entry: TemporaryReturnReceiptEntry;
-    }
-  | {
       kind: "meta_operation";
       entry: MetaOperationEntry;
     }
@@ -825,7 +722,6 @@ export interface ReservedConversationAggregate {
   runSettlements: RunSettlement[];
   editBudgetEvents: EditBudgetEvent[];
   waitPolls: WaitPoll[];
-  temporaryReturnReceipts: TemporaryReturnReceipt[];
   metaOperations: MetaOperation[];
   compactionThreshold?: CompactionThreshold;
   serviceTier?: ServiceTierSelection;
@@ -985,17 +881,6 @@ export function createEditBudgetEntry(
   });
 }
 
-export function parseWaitPollEntry(value: unknown): WaitPollEntry {
-  return waitPollEntrySchema.parse(value);
-}
-
-export function createWaitPollEntry(data: WaitPoll): WaitPollEntry {
-  return parseWaitPollEntry({
-    customType: WAIT_POLL_CUSTOM_TYPE,
-    data,
-  });
-}
-
 export function createRunSettlementEntry(
   data: RunSettlement,
 ): RunSettlementEntry {
@@ -1005,17 +890,13 @@ export function createRunSettlementEntry(
   });
 }
 
-export function parseTemporaryReturnReceiptEntry(
-  value: unknown,
-): TemporaryReturnReceiptEntry {
-  return temporaryReturnReceiptEntrySchema.parse(value);
+export function parseWaitPollEntry(value: unknown): WaitPollEntry {
+  return waitPollEntrySchema.parse(value);
 }
 
-export function createTemporaryReturnReceiptEntry(
-  data: TemporaryReturnReceipt,
-): TemporaryReturnReceiptEntry {
-  return parseTemporaryReturnReceiptEntry({
-    customType: TEMPORARY_RETURN_RECEIPT_CUSTOM_TYPE,
+export function createWaitPollEntry(data: WaitPoll): WaitPollEntry {
+  return parseWaitPollEntry({
+    customType: WAIT_POLL_CUSTOM_TYPE,
     data,
   });
 }
@@ -1081,7 +962,6 @@ export function appendReservedCustomEntry(
     | RunSettlementEntry
     | EditBudgetEntry
     | WaitPollEntry
-    | TemporaryReturnReceiptEntry
     | MetaOperationEntry
     | CompactionThresholdEntry
     | ServiceTierSelectionEntry
@@ -1219,12 +1099,6 @@ export function parseReservedConversationEntry(
       entry: parseWaitPollEntry(payload),
     };
   }
-  if (customType === TEMPORARY_RETURN_RECEIPT_CUSTOM_TYPE) {
-    return {
-      kind: "temporary_return_receipt",
-      entry: parseTemporaryReturnReceiptEntry(payload),
-    };
-  }
   if (customType === META_OPERATION_CUSTOM_TYPE) {
     return {
       kind: "meta_operation",
@@ -1244,15 +1118,6 @@ export function parseReservedConversationEntry(
     };
   }
   throw new Error(`Unknown piweb reserved custom type: ${customType}`);
-}
-
-function settlementCore(settlement: RunSettlement): string {
-  return JSON.stringify({
-    runId: settlement.runId,
-    outcome: settlement.outcome,
-    finalText: settlement.finalText,
-    settledAt: settlement.settledAt,
-  });
 }
 
 const TERMINAL_CARD_STATES = new Set<ConversationCard["state"]>([
@@ -1380,10 +1245,6 @@ export function aggregateReservedConversationEntries(
   const editBudgetEvents: EditBudgetEvent[] = [];
   const waitPollCounts = new Map<string, number>();
   const waitPolls: WaitPoll[] = [];
-  const temporaryReturnReceipts = new Map<
-    string,
-    TemporaryReturnReceipt
-  >();
   const metaOperations = new Map<string, MetaOperation>();
   let compactionThreshold: CompactionThreshold | undefined;
   let serviceTier: ServiceTierSelection | undefined;
@@ -1508,46 +1369,6 @@ export function aggregateReservedConversationEntries(
       waitPolls.push(reserved.entry.data);
       continue;
     }
-    if (reserved.kind === "temporary_return_receipt") {
-      const incoming = reserved.entry.data;
-      const key = `${incoming.temporaryConversationId.length}:${incoming.temporaryConversationId}:${incoming.initialRunId}`;
-      const existing = temporaryReturnReceipts.get(key);
-      if (existing === undefined) {
-        if (incoming.state !== "claimed") {
-          throw new Error(
-            "Piweb temporary return receipt must begin in claimed state",
-          );
-        }
-        temporaryReturnReceipts.set(key, incoming);
-        continue;
-      }
-      if (JSON.stringify(existing) === JSON.stringify(incoming)) continue;
-      const sameIdentity = JSON.stringify({
-        temporaryConversationId: existing.temporaryConversationId,
-        initialRunId: existing.initialRunId,
-        messageId: existing.messageId,
-        callerRunId: existing.callerRunId,
-        claimedAt: existing.claimedAt,
-      }) === JSON.stringify({
-        temporaryConversationId: incoming.temporaryConversationId,
-        initialRunId: incoming.initialRunId,
-        messageId: incoming.messageId,
-        callerRunId: incoming.callerRunId,
-        claimedAt: incoming.claimedAt,
-      });
-      if (!sameIdentity) {
-        throw new Error(
-          `Conflicting piweb temporary return receipt for ${key}`,
-        );
-      }
-      if (existing.state !== "claimed" || incoming.state !== "settled") {
-        throw new Error(
-          `Piweb temporary return receipt state cannot regress for ${key}`,
-        );
-      }
-      temporaryReturnReceipts.set(key, incoming);
-      continue;
-    }
     if (reserved.kind === "meta_operation") {
       const incoming = reserved.entry.data;
       const existing = metaOperations.get(incoming.operationId);
@@ -1644,22 +1465,9 @@ export function aggregateReservedConversationEntries(
     if (JSON.stringify(existing) === JSON.stringify(incoming)) {
       continue;
     }
-    if (settlementCore(existing) !== settlementCore(incoming)) {
-      throw new Error(
-        `Conflicting piweb run settlement for runId ${incoming.runId}`,
-      );
-    }
-    if (existing.reportedAt !== undefined) {
-      throw new Error(
-        `Piweb run settlement report state cannot change or regress for runId ${incoming.runId}`,
-      );
-    }
-    if (incoming.reportedAt === undefined) {
-      throw new Error(
-        `Conflicting pending piweb run settlement for runId ${incoming.runId}`,
-      );
-    }
-    runSettlements.set(incoming.runId, incoming);
+    throw new Error(
+      `Conflicting piweb run settlement for runId ${incoming.runId}`,
+    );
   }
 
   validateEditBudgetEvents(editBudgetEvents);
@@ -1674,7 +1482,6 @@ export function aggregateReservedConversationEntries(
     runSettlements: [...runSettlements.values()],
     editBudgetEvents,
     waitPolls,
-    temporaryReturnReceipts: [...temporaryReturnReceipts.values()],
     metaOperations: [...metaOperations.values()],
     ...(compactionThreshold === undefined
       ? {}

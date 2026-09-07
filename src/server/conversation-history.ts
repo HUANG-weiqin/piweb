@@ -580,7 +580,6 @@ export function projectConversationItemSlots(
       || reserved.kind === "run_settlement"
       || reserved.kind === "edit_budget"
       || reserved.kind === "wait_poll"
-      || reserved.kind === "temporary_return_receipt"
       || reserved.kind === "message_delivery_receipt"
       || reserved.kind === "meta_operation"
       || reserved.kind === "compaction_threshold"

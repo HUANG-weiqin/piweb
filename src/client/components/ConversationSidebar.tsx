@@ -297,7 +297,6 @@ const ConversationRow = memo(function ConversationRow({
     selected ? "selected" : "",
     conversation.attention ? "needs-attention" : "",
     conversation.unread ? "has-unread" : "",
-    conversation.temporary ? "is-temporary" : "",
   ].filter(Boolean).join(" ");
 
   return (
@@ -374,9 +373,6 @@ const ConversationRow = memo(function ConversationRow({
                 Agent
               </span>
             )}
-          {conversation.temporary && (
-            <span className="conversation-temporary-badge">临时</span>
-          )}
         </span>
         <time
           className="conversation-sidebar-updated"

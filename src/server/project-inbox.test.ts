@@ -170,26 +170,14 @@ describe("ProjectInbox envelope schema", () => {
     const missingFromRunId = { ...envelope } as Record<string, unknown>;
     delete missingFromRunId.fromRunId;
     expect(() => parseInboxEnvelope(missingFromRunId)).toThrow(/fromRunId/i);
-    const initialRunId = randomUUID();
-    const assigned = createInboxEnvelope(input({
-      fromRunId: initialRunId,
+    expect(() => parseInboxEnvelope({
+      ...envelope,
       temporaryReturnAssignment: {
-        initialRunId,
+        initialRunId: randomUUID(),
         callerRunId: randomUUID(),
         assignedAt: timestamp,
       },
-    }));
-    expect(parseInboxEnvelope(assigned)).toEqual(assigned);
-    expect(() => createInboxEnvelope(input({
-      kind: "delegation_result",
-      delegationId: randomUUID(),
-      fromRunId: initialRunId,
-      temporaryReturnAssignment: assigned.temporaryReturnAssignment,
-    }))).toThrow(/temporaryReturnAssignment/i);
-    expect(() => createInboxEnvelope(input({
-      fromRunId: randomUUID(),
-      temporaryReturnAssignment: assigned.temporaryReturnAssignment,
-    }))).toThrow(/temporaryReturnAssignment/i);
+    })).toThrow(/unknown|unrecognized/i);
     expect(() => createInboxEnvelope(input({
       body: "   ",
     }))).toThrow(/body/i);

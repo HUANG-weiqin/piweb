@@ -3088,7 +3088,6 @@ describe("PiConnection coordinated project view", () => {
         role: expect.objectContaining({ id: "default" }),
         activity: { kind: "idle" },
         createdBy: { kind: "user" },
-        temporary: false,
         attention: false,
       });
     } finally {
@@ -5797,7 +5796,6 @@ describe("PiConnection coordinated project view", () => {
         {
           roleId: "default",
           task: "agent-created background work",
-          temporary: false,
           idempotencyKey: randomUUID(),
         },
       );

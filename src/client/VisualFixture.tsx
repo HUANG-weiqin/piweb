@@ -123,7 +123,6 @@ const conversations: ConversationSummary[] = [
       rootConversationId: ACTIVE_CONVERSATION_ID,
       role: { ...conversationRole, id: "executor", name: "Executor" },
       activity: { kind: "queued", runId: "run-capture" },
-      temporary: true,
       createdBy: {
         kind: "conversation",
         conversationId: ACTIVE_CONVERSATION_ID,

@@ -50,7 +50,6 @@ describe("createMetaTools", () => {
       "current_session",
       "peek_session",
       "start_session",
-      "start_temporary_session",
       "send_session_message",
       "wait_for_session",
       "abort_session",
@@ -60,36 +59,19 @@ describe("createMetaTools", () => {
       .not.toMatch(/anyOf|oneOf/);
   });
 
-  it("guides Agents to choose persistent versus temporary sessions", () => {
+  it("guides Agents on persistent sessions and waiting", () => {
     const tools = createMetaTools(sourceConversationId, service(), true);
     const startSession = tool(tools, "start_session");
-    const startTemporarySession = tool(tools, "start_temporary_session");
     const waitForSession = tool(tools, "wait_for_session");
 
     expect(startSession.promptGuidelines).toContain(
       "Before starting a persistent session, first call list_sessions with scope=created_by_me. Reuse a suitable existing session with send_session_message, and create a new persistent session only when none fits the responsibility.",
     );
-    expect(startTemporarySession.description).toContain("one-shot");
-    expect(startTemporarySession.description).toContain(
-      "replaces that automatic return",
-    );
-    expect(startTemporarySession.promptGuidelines).toContain(
-      "Use for throwaway work where you only need the initial final answer; use start_session instead when follow-up or later inspection is expected.",
-    );
-    expect(startTemporarySession.promptGuidelines).toContain(
-      "This still runs asynchronously: call wait_for_session when the answer is needed in this turn. A message result with fulfillsTemporaryReturn:true is the designated one-shot return; consume its injected body and do not wait again merely for exact settlement. Re-wait only when that flag is absent and settlement still matters.",
-    );
     expect(waitForSession.description).toContain(
       "the body has already been injected as a separate custom message into the same model request that receives this tool result",
     );
-    expect(waitForSession.description).toContain(
-      "If a message result has fulfillsTemporaryReturn:true",
-    );
     expect(waitForSession.promptGuidelines).toContain(
       "A message outcome's body is already in the model context that receives the wait result; use it there, and do not wait or peek merely to fetch the body.",
-    );
-    expect(waitForSession.promptGuidelines).toContain(
-      "When a message result has fulfillsTemporaryReturn:true, use the injected one-shot return and do not re-wait solely to observe settlement.",
     );
   });
 
@@ -214,7 +196,6 @@ describe("createMetaTools", () => {
       {
         roleId: "reviewer",
         task: "Review the actor",
-        temporary: false,
         idempotencyKey: `${sourceConversationId.length}:${sourceConversationId}:tool-call-1`,
       },
       signal,
@@ -224,35 +205,6 @@ describe("createMetaTools", () => {
       type: "text",
       text: JSON.stringify({ conversationId: "target", runId: "run" }),
     }]);
-  });
-
-  it("binds source identity and starts temporary sessions without adding a wait", async () => {
-    const fake = service();
-    const tools = createMetaTools(sourceConversationId, fake, true);
-    const signal = new AbortController().signal;
-
-    await tool(tools, "start_temporary_session").execute(
-      "tool-call-2",
-      {
-        roleId: "reviewer",
-        task: "Review the actor once",
-      },
-      signal,
-      undefined,
-      {} as never,
-    );
-
-    expect(fake.startSession).toHaveBeenCalledWith(
-      sourceConversationId,
-      {
-        roleId: "reviewer",
-        task: "Review the actor once",
-        temporary: true,
-        idempotencyKey: `${sourceConversationId.length}:${sourceConversationId}:tool-call-2`,
-      },
-      signal,
-    );
-    expect(fake.waitForSession).not.toHaveBeenCalled();
   });
 
   it("aligns task and message limits with the durable UTF-8 byte contract", async () => {
