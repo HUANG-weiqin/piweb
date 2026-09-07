@@ -722,13 +722,10 @@ function sameForegroundWindowBinding(
 ): boolean {
   const expected = frame.foregroundWindow;
   return expected !== undefined
-    && sameForeground(frame.foreground, current.foreground)
     && sameForeground(expected.foreground, current.foreground)
     && sameBounds(expected.rawBounds, current.rawBounds)
     && sameBounds(expected.captureBounds, current.captureBounds)
-    && sameBounds(expected.inputBounds, current.inputBounds)
-    && sameBounds(frame.captureBounds, current.captureBounds)
-    && sameBounds(frame.inputBounds, current.inputBounds);
+    && sameBounds(expected.inputBounds, current.inputBounds);
 }
 
 function validateFrame(value: DesktopCapture, expectedScope: DesktopCaptureScope): Frame {
@@ -1767,10 +1764,9 @@ function sameCaptureBinding(first: DesktopCaptureBinding, second: DesktopCapture
   if (first.foregroundWindow === undefined || second.foregroundWindow === undefined) {
     return first.foregroundWindow === second.foregroundWindow;
   }
-  return sameForeground(first.foregroundWindow.foreground, second.foregroundWindow.foreground)
-    && sameBounds(first.foregroundWindow.rawBounds, second.foregroundWindow.rawBounds)
-    && sameBounds(first.foregroundWindow.captureBounds, second.foregroundWindow.captureBounds)
-    && sameBounds(first.foregroundWindow.inputBounds, second.foregroundWindow.inputBounds);
+  // readCaptureBinding derives the outer fields from this nested binding, so
+  // the common comparisons above already cover identity, crop, and topology.
+  return sameBounds(first.foregroundWindow.rawBounds, second.foregroundWindow.rawBounds);
 }
 
 /**

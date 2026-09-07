@@ -12,6 +12,7 @@ import {
   type DesktopForegroundIdentity,
   type DesktopForegroundWindowBinding,
   type DesktopPrimitiveDispatch,
+  type DesktopProviderEvidence,
   type DesktopScroll,
   type WindowsDesktopAdapter,
   type WindowsDesktopCaptureTestNative,
@@ -263,14 +264,13 @@ interface NativeCaptureCall {
 }
 
 function scriptedCaptureNative(options: {
-  primary?: { left: number; top: number; right: number; bottom: number };
   primaryBounds?: readonly { left: number; top: number; right: number; bottom: number }[];
   foregroundHandles?: readonly number[];
   windowRects?: readonly { left: number; top: number; right: number; bottom: number }[];
   iconicResults?: readonly number[];
 } = {}): { native: WindowsDesktopCaptureTestNative; calls: NativeCaptureCall } {
   const primaryBounds = [...(options.primaryBounds ?? [
-    options.primary ?? { left: 0, top: 0, right: 100, bottom: 50 },
+    { left: 0, top: 0, right: 100, bottom: 50 },
   ])];
   const foregroundHandles = [...(options.foregroundHandles ?? [100, 100])];
   const windowRects = [...(options.windowRects ?? [{ left: 20, top: 10, right: 60, bottom: 30 }])];
@@ -368,28 +368,12 @@ const NATIVE_POINT = {
   inputBounds: PRIMARY_BOUNDS,
 };
 
-interface ProviderEvidenceFixture {
-  sourceToolCallId: string;
-  images: readonly {
-    kind: string;
-    png: Uint8Array;
-    width: number;
-    height: number;
-    scope: string;
-  }[];
-}
-
 function providerEvidence(
   controller: DesktopController,
   owner: object,
   toolCallId: string,
-): ProviderEvidenceFixture | undefined {
-  return (controller as unknown as {
-    prepareProviderEvidence(
-      candidateOwner: object,
-      sourceToolCallId: string,
-    ): ProviderEvidenceFixture | undefined;
-  }).prepareProviderEvidence(owner, toolCallId);
+): DesktopProviderEvidence | undefined {
+  return controller.prepareProviderEvidence(owner, toolCallId);
 }
 
 function markProviderEvidencePresented(
@@ -397,12 +381,7 @@ function markProviderEvidencePresented(
   owner: object,
   toolCallId: string,
 ): boolean {
-  return (controller as unknown as {
-    markProviderEvidencePresented(
-      candidateOwner: object,
-      sourceToolCallId: string,
-    ): boolean;
-  }).markProviderEvidencePresented(owner, toolCallId);
+  return controller.markProviderEvidencePresented(owner, toolCallId);
 }
 
 describe("DesktopController", () => {
