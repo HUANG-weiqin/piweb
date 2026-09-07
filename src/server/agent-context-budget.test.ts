@@ -665,4 +665,66 @@ describe("installAgentContextBudget", () => {
 
     expect(session.agent.convertToLlm).toBe(foreign);
   });
+
+  it("adds a computer PNG only to the exact converted tool result and marks delivery", async () => {
+    const toolResult: LlmMessages[number] = {
+      role: "toolResult",
+      toolCallId: "capture-call",
+      toolName: "computer",
+      content: [{ type: "text", text: "captured" }],
+      isError: false,
+      timestamp: 1,
+    };
+    const presented = vi.fn();
+    const { session } = fakeSession({ original: async () => [toolResult] });
+    installAgentContextBudget(
+      session,
+      () => ({ items: [], armed: false }),
+      undefined,
+      undefined,
+      undefined,
+      {
+        get: () => ({
+          sourceToolCallId: "capture-call",
+          image: { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+        }),
+        presented,
+      },
+    );
+
+    const result = await session.agent.convertToLlm([]);
+
+    expect(result).toEqual([{
+      ...toolResult,
+      content: [
+        { type: "text", text: "captured" },
+        { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+      ],
+    }]);
+    expect(toolResult.content).toEqual([{ type: "text", text: "captured" }]);
+    expect(presented).toHaveBeenCalledExactlyOnceWith("capture-call");
+  });
+
+  it("does not present a computer PNG when its exact tool result is absent", async () => {
+    const presented = vi.fn();
+    const originalResult = [llmUser("ordinary")];
+    const { session } = fakeSession({ original: async () => originalResult });
+    installAgentContextBudget(
+      session,
+      () => ({ items: [], armed: false }),
+      undefined,
+      undefined,
+      undefined,
+      {
+        get: () => ({
+          sourceToolCallId: "missing-capture-call",
+          image: { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+        }),
+        presented,
+      },
+    );
+
+    await expect(session.agent.convertToLlm([])).resolves.toBe(originalResult);
+    expect(presented).not.toHaveBeenCalled();
+  });
 });

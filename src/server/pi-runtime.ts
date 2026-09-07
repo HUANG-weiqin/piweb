@@ -2,6 +2,7 @@ import { types as nodeTypes } from "node:util";
 import {
   createAgentSessionFromServices,
   createAgentSessionServices,
+  defineTool,
   getAgentDir,
   hasTrustRequiringProjectResources,
   ModelRegistry,
@@ -19,6 +20,7 @@ import {
   type ExtensionUIContext,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import {
   InMemoryModelsStore,
   type CredentialStore,
@@ -31,9 +33,16 @@ import type { PortableExtensionUI } from "./extension-ui.js";
 import { applyCodexAutoTransportPolicy } from "./codex-transport-policy.js";
 import {
   type AgentContextBudgetController,
+  type ComputerProviderImageResolver,
   installAgentContextBudget,
   type LoopListElapsedMinutes,
 } from "./agent-context-budget.js";
+import {
+  createWindowsDesktopAdapter,
+  DesktopController,
+  type ComputerToolResult,
+  type WindowsDesktopAdapter,
+} from "./computer-use.js";
 import { installToolResultCompression } from "./tool-result-compression.js";
 import {
   type AgentTurnBoundaryCheck,
@@ -273,6 +282,20 @@ export type ToolCallCompleted = (
   input: ToolCallCompletedInput,
 ) => Promise<{ details?: unknown } | undefined> | { details?: unknown } | undefined;
 
+export interface ComputerUseSessionOptions {
+  /** Returns the exact currently running conversation capability, if any. */
+  getOwner(): object | undefined;
+}
+
+export interface ComputerUseSessionLifecycle {
+  /** Grants a consumed frame to only the computer calls from this decision. */
+  completeAssistantDecision(toolCallIds: readonly string[]): void;
+  /** Drops transient pixels/frame without releasing the process desktop lease. */
+  clearObservation(): void;
+  /** Drops transient state and releases the exact run's lease after quiescence. */
+  release(): Promise<void>;
+}
+
 export interface CreatePiSessionOptions {
   toolCallGate?: ToolCallGate;
   toolCallCompleted?: ToolCallCompleted;
@@ -299,6 +322,8 @@ export interface CreatePiSessionOptions {
   getEditBudgetRemainingFiles?: () => number | undefined;
   getLoopListElapsedMinutes?: () => LoopListElapsedMinutes | undefined;
   getServiceTier?: () => ServiceTier | null;
+  /** Present only for a full-access actor that owns an exact active run. */
+  computerUse?: ComputerUseSessionOptions;
 }
 
 export interface CreatedPiSession {
@@ -314,6 +339,7 @@ export interface CreatedPiSession {
   activateExtensions(): Promise<void>;
   activateExtensionErrors(handler: (error: ExtensionError) => void): readonly ExtensionError[];
   dynamicProviderNames(): ReadonlySet<string>;
+  computerUse?: ComputerUseSessionLifecycle;
   dispose(): Promise<void>;
 }
 
@@ -363,6 +389,8 @@ export interface PiRuntimeOptions {
   createServices?: typeof createAgentSessionServices;
   createSessionFromServices?: typeof createAgentSessionFromServices;
   projectTrustStore?: Pick<ProjectTrustStore, "get" | "set">;
+  /** Test seam; production lazily creates the Koffi-backed Windows adapter. */
+  createWindowsDesktopAdapter?: () => Promise<WindowsDesktopAdapter>;
 }
 
 const TRUST_PROJECT_AND_REMEMBER = "信任此项目并记住";
@@ -602,6 +630,8 @@ export class PiRuntime implements PiRuntimeLike {
   private readonly servicesFactory: typeof createAgentSessionServices;
   private readonly sessionFromServicesFactory: typeof createAgentSessionFromServices;
   private readonly projectTrustStore: Pick<ProjectTrustStore, "get" | "set">;
+  private readonly createDesktopAdapter: () => Promise<WindowsDesktopAdapter>;
+  private desktopControllerPromise?: Promise<DesktopController>;
 
   private constructor(
     options: PiRuntimeOptions,
@@ -622,6 +652,8 @@ export class PiRuntime implements PiRuntimeLike {
     this.servicesFactory = options.createServices ?? createAgentSessionServices;
     this.sessionFromServicesFactory = options.createSessionFromServices ?? createAgentSessionFromServices;
     this.projectTrustStore = options.projectTrustStore ?? new ProjectTrustStore(getAgentDir());
+    this.createDesktopAdapter = options.createWindowsDesktopAdapter
+      ?? createWindowsDesktopAdapter;
   }
 
   static async create(options: PiRuntimeOptions = {}): Promise<PiRuntime> {
@@ -636,6 +668,12 @@ export class PiRuntime implements PiRuntimeLike {
       allowModelNetwork: options.allowModelNetwork === true,
     });
     return new PiRuntime(options, credentialStore, modelRuntime);
+  }
+
+  private getDesktopController(): Promise<DesktopController> {
+    this.desktopControllerPromise ??= this.createDesktopAdapter()
+      .then((adapter) => new DesktopController(adapter));
+    return this.desktopControllerPromise;
   }
 
   private async createSessionModelRuntime(
@@ -705,6 +743,176 @@ export class PiRuntime implements PiRuntimeLike {
     };
   }
 
+  private createComputerUseBinding(
+    options: ComputerUseSessionOptions,
+    supportsVision: () => boolean,
+  ): {
+    tool: ToolDefinition;
+    resolver: ComputerProviderImageResolver;
+    lifecycle: ComputerUseSessionLifecycle;
+  } {
+    let controller: DesktopController | undefined;
+    let leaseOwner: object | undefined;
+    let pendingImage: { owner: object; sourceToolCallId: string } | undefined;
+    // A frame outlives PNG delivery only until the assistant's exact tool
+    // batch starts. If preflight rejects that batch, the next provider
+    // decision must clear it before it can reuse stale coordinates.
+    let authorizedFrameOwner: object | undefined;
+
+    const clearObservation = (): void => {
+      const owner = pendingImage?.owner ?? authorizedFrameOwner ?? leaseOwner;
+      pendingImage = undefined;
+      authorizedFrameOwner = undefined;
+      if (owner !== undefined) controller?.clearObservation(owner);
+    };
+    const resolver: ComputerProviderImageResolver = {
+      get: () => {
+        const pending = pendingImage;
+        if (!pending || !controller) {
+          // This is the boundary after a rejected/preflighted computer call:
+          // no new PNG is entering this decision, so an unexecuted old frame
+          // cannot survive to a later assistant decision.
+          if (authorizedFrameOwner !== undefined) clearObservation();
+          return undefined;
+        }
+        const image = controller.prepareProviderImage(
+          pending.owner,
+          pending.sourceToolCallId,
+        );
+        if (!image) return undefined;
+        return {
+          sourceToolCallId: image.sourceToolCallId,
+          image: {
+            type: "image",
+            data: Buffer.from(image.png).toString("base64"),
+            mimeType: image.mimeType,
+          },
+        };
+      },
+      presented: (sourceToolCallId) => {
+        const pending = pendingImage;
+        if (
+          !pending
+          || pending.sourceToolCallId !== sourceToolCallId
+          || !controller?.markProviderImagePresented(
+            pending.owner,
+            sourceToolCallId,
+          )
+        ) {
+          throw new Error("Computer image was not available for provider delivery");
+        }
+      },
+    };
+    const lifecycle: ComputerUseSessionLifecycle = {
+      completeAssistantDecision: (toolCallIds) => {
+        const pending = pendingImage;
+        pendingImage = undefined;
+        if (!pending || !controller) {
+          // A later successful assistant decision closes a frame whose first
+          // call was rejected before it reached this custom tool.
+          clearObservation();
+          return;
+        }
+        if (controller.authorizeFrame(pending.owner, toolCallIds)) {
+          authorizedFrameOwner = pending.owner;
+        } else {
+          controller.clearObservation(pending.owner);
+        }
+      },
+      clearObservation,
+      release: async () => {
+        const owner = leaseOwner;
+        clearObservation();
+        leaseOwner = undefined;
+        if (owner !== undefined) await controller?.release(owner);
+      },
+    };
+    const actionParameters = Type.Object({
+      kind: Type.String(),
+      x: Type.Optional(Type.Number()),
+      y: Type.Optional(Type.Number()),
+      button: Type.Optional(Type.String()),
+      text: Type.Optional(Type.String()),
+      keys: Type.Optional(Type.Array(Type.String())),
+      deltaX: Type.Optional(Type.Number()),
+      deltaY: Type.Optional(Type.Number()),
+      ms: Type.Optional(Type.Number()),
+    }, { additionalProperties: false });
+    const tool = defineTool({
+      name: "computer",
+      label: "Computer",
+      description:
+        "Observe the current primary Windows display and send a small sequential batch of local foreground desktop input. Coordinates are screenshot pixels and require an image from the current provider decision.",
+      promptSnippet:
+        "Use computer({ actions: [], observe: true }) before coordinate actions. Only use click/scroll coordinates from the current provider turn's screenshot; re-observe after UI-changing actions when confirmation is needed.",
+      promptGuidelines: [
+        "Call observe first before using click or scroll coordinates.",
+        "Coordinates are valid only for the screenshot attached to the current provider turn.",
+        "Actions are sent sequentially and report host dispatch, not application success.",
+      ],
+      parameters: Type.Object({
+        actions: Type.Array(actionParameters, { maxItems: 8 }),
+        observe: Type.Boolean(),
+      }, { additionalProperties: false }),
+      execute: async (toolCallId, input, signal) => {
+        const owner = options.getOwner();
+        if (owner === undefined) {
+          throw new Error("Computer use requires the exact active conversation run");
+        }
+        if (!supportsVision()) {
+          throw new Error("Computer use requires a model that supports image input");
+        }
+        if (signal === undefined) {
+          throw new Error("Computer use requires the run abort signal");
+        }
+        controller ??= await this.getDesktopController();
+        // Record the exact candidate before execute so abort/reload cleanup can
+        // wait for a native primitive that has already acquired its lease.
+        leaseOwner = owner;
+        let result: ComputerToolResult;
+        try {
+          result = await controller.execute({
+            owner,
+            toolCallId,
+            input,
+            signal,
+            visionSupported: true,
+          });
+        } catch (error) {
+          if (authorizedFrameOwner === owner) controller.clearObservation(owner);
+          authorizedFrameOwner = undefined;
+          throw error;
+        }
+        if (result.details.outcome !== "desktop_busy") {
+          const authorizedOwner = authorizedFrameOwner;
+          authorizedFrameOwner = undefined;
+          // `execute` can reject an already-aborted run before the controller
+          // admits it. Retire that exact old frame here; a captured replacement
+          // is the only successful result that must survive this boundary.
+          if (
+            authorizedOwner === owner
+            && result.details.observation?.status !== "captured"
+          ) {
+            controller.clearObservation(owner);
+          }
+        }
+        if (result.details.observation?.status === "captured") {
+          pendingImage = { owner, sourceToolCallId: toolCallId };
+        } else if (
+          result.details.outcome === "completed"
+          || result.details.outcome === "interrupted"
+        ) {
+          pendingImage = undefined;
+        }
+        return {
+          content: result.content.map((part) => ({ ...part })),
+          details: result.details,
+        };
+      },
+    });
+    return { tool, resolver, lifecycle };
+  }
+
   async createSession(cwd: string, options: CreatePiSessionOptions = {}): Promise<CreatedPiSession> {
     const fixedModelReference = options.model
       ? { provider: options.model.provider, id: options.model.id }
@@ -727,6 +935,20 @@ export class PiRuntime implements PiRuntimeLike {
     let resolvedTransport: ReturnType<SettingsManager["getTransport"]>;
     let created: CreateAgentSessionResult;
     let createdSession: AgentSession | undefined;
+    let computerProviderImage: ComputerProviderImageResolver | undefined;
+    let computerUseLifecycle: ComputerUseSessionLifecycle | undefined;
+    if (options.computerUse && options.toolMode === "full_access") {
+      const binding = this.createComputerUseBinding(
+        options.computerUse,
+        () => createdSession?.model?.input.includes("image") === true,
+      );
+      computerProviderImage = binding.resolver;
+      computerUseLifecycle = binding.lifecycle;
+      workbenchCustomTools = [
+        ...(workbenchCustomTools ?? []),
+        binding.tool,
+      ];
+    }
     let toolProjectionAdapter: ToolProjectionAdapter | undefined;
     let extensionSessionManagerAdapter: SessionBoundaryAdapter | undefined;
     let fixedModelAdapter: SessionBoundaryAdapter | undefined;
@@ -850,15 +1072,16 @@ export class PiRuntime implements PiRuntimeLike {
       // Agent.steeringMode 公开 setter 直接改 PendingMessageQueue.mode（drain 时实时读取）。
       createdSession.agent.steeringMode = "all";
       installToolResultCompression(createdSession);
-      if (options.getLoopList) {
+      if (options.getLoopList || computerProviderImage) {
         // This host converter runs after the SDK extension transform and keeps
         // transient hints inside the existing final input instead of creating a new turn.
         contextBudgetController = installAgentContextBudget(
           createdSession,
-          options.getLoopList,
+          options.getLoopList ?? (() => ({ items: [], armed: false })),
           options.getCompactionThresholdPercent,
           options.getEditBudgetRemainingFiles,
           options.getLoopListElapsedMinutes,
+          computerProviderImage,
         );
       }
       if (readOnlyToolProjection) {
@@ -1019,6 +1242,9 @@ export class PiRuntime implements PiRuntimeLike {
       disposePreTeardownAdapters,
       disposeSessionBoundaryAdapters,
       () => toolProjectionAdapter?.dispose(),
+      async () => {
+        await computerUseLifecycle?.release();
+      },
     );
     let activationPromise: Promise<void> | undefined;
 
@@ -1081,6 +1307,7 @@ export class PiRuntime implements PiRuntimeLike {
         return pendingExtensionErrors.splice(0);
       },
       dynamicProviderNames: () => owner.names(),
+      ...(computerUseLifecycle === undefined ? {} : { computerUse: computerUseLifecycle }),
       dispose,
     };
   }
@@ -1347,6 +1574,7 @@ export class PiRuntime implements PiRuntimeLike {
     beforeTeardown?: () => void,
     afterTeardownAttempt?: () => void,
     afterSuccessfulTeardown?: () => void,
+    releaseComputerUse?: () => Promise<void>,
   ): () => Promise<void> {
     let disposePromise: Promise<void> | undefined;
     return () => {
@@ -1354,6 +1582,11 @@ export class PiRuntime implements PiRuntimeLike {
         owner.deactivate();
         this.sessionRegistries.delete(owner);
         const failures: unknown[] = [];
+        try {
+          await releaseComputerUse?.();
+        } catch (error) {
+          failures.push(error);
+        }
         try {
           beforeTeardown?.();
         } catch (error) {

@@ -253,6 +253,7 @@ class FakeRuntime implements PiRuntimeLike {
   disposeCalls = 0;
   activationError?: Error;
   pendingExtensionErrors: ExtensionError[] = [];
+  computerUse?: CreatedPiSession["computerUse"];
   extensionErrorHandler?: (error: ExtensionError) => void;
   nextSteeringCapture?: AgentMessage;
   readonly steeringCaptures: AgentMessage[] = [];
@@ -351,6 +352,7 @@ class FakeRuntime implements PiRuntimeLike {
         return this.pendingExtensionErrors.splice(0);
       },
       dynamicProviderNames: () => new Set(),
+      ...(this.computerUse === undefined ? {} : { computerUse: this.computerUse }),
       dispose: async () => {
         this.disposeCalls++;
         this.session.dispose();
@@ -591,6 +593,67 @@ function checkToolTurnBoundary(runtime: FakeRuntime): boolean {
 }
 
 describe("ConversationActor", () => {
+  describe("computer lifecycle", () => {
+    it("authorizes only this assistant's computer calls and clears/release on lifecycle boundaries", async () => {
+      const runtime = new FakeRuntime();
+      const completeAssistantDecision = vi.fn();
+      const clearObservation = vi.fn();
+      const release = vi.fn(async () => undefined);
+      runtime.computerUse = {
+        completeAssistantDecision,
+        clearObservation,
+        release,
+      };
+      const frozenProfile = profile();
+      const finishPrompt = deferred<void>();
+      runtime.session.promptImplementation = async () => {
+        runtime.session.eventListener?.(nativeEvent({ type: "agent_start" }));
+        runtime.session.isStreaming = true;
+        await finishPrompt.promise;
+        runtime.session.eventListener?.(nativeEvent({ type: "agent_end" }));
+      };
+      frozenProfile.role = {
+        ...frozenProfile.role,
+        toolMode: "full_access",
+      };
+      const fixture = await openActor({ runtime, profile: frozenProfile });
+
+      expect(runtime.createOptions?.computerUse).toBeDefined();
+      const running = fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "observe the desktop",
+        origin: "browser",
+      });
+      await vi.waitFor(() => expect(runtime.session.promptCalls).toHaveLength(1));
+      expect(fixture.actor.getActivity()).toEqual({ kind: "running", runId: RUN_A });
+      expect(runtime.session.eventListener).toBeTypeOf("function");
+      runtime.session.eventListener?.(nativeEvent({
+        type: "message_end",
+        message: {
+          ...automaticTitleMessage(""),
+          stopReason: "toolUse",
+          content: [{
+            type: "toolCall",
+            id: "computer-call",
+            name: "computer",
+            arguments: { actions: [], observe: true },
+          }],
+        },
+      }));
+      await vi.waitFor(() => {
+        expect(completeAssistantDecision).toHaveBeenCalledWith(["computer-call"]);
+      });
+
+      runtime.session.eventListener?.(nativeEvent({ type: "compaction_start" }));
+      await vi.waitFor(() => expect(clearObservation).toHaveBeenCalled());
+      await fixture.actor.abort(RUN_A);
+      finishPrompt.resolve();
+      await running;
+      await vi.waitFor(() => expect(release).toHaveBeenCalled());
+      await fixture.actor.dispose();
+    });
+  });
+
   describe("image prompts", () => {
     it("passes valid raster attachments to the Pi prompt without altering text", async () => {
       const fixture = await openActor();

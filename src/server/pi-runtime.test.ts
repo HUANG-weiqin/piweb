@@ -25,6 +25,8 @@ import {
 import { describe, expect, it, vi } from "vitest";
 import type { LoopList } from "../shared/protocol.js";
 import { PiRuntime } from "./pi-runtime.js";
+import { projectConversationHistory } from "./conversation-history.js";
+import type { ComputerToolResult, WindowsDesktopAdapter } from "./computer-use.js";
 
 initTheme();
 
@@ -138,9 +140,14 @@ async function testRuntime(
   ) => Promise<void>,
   setupModelRuntime?: (runtime: ModelRuntime) => Promise<void> | void,
   createSettings: () => SettingsManager = () => SettingsManager.inMemory(),
+  runtimeOptions: Pick<
+    Parameters<typeof PiRuntime.create>[0],
+    "createWindowsDesktopAdapter"
+  > = {},
 ): Promise<PiRuntime> {
   const credentialStore = new InMemoryCredentialStore();
   return PiRuntime.create({
+    ...runtimeOptions,
     credentialStore,
     modelsStore: new InMemoryModelsStore(),
     createModelsStore: () => new InMemoryModelsStore(),
@@ -1374,6 +1381,208 @@ describe("PiRuntime session ownership", () => {
     await runtime.refreshConfiguration();
     expect(created.session.model).toBeUndefined();
     await created.dispose();
+  });
+
+  it("exposes computer only to a full-access exact-run session without loading Windows FFI", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-computer-"));
+    const received: Array<Parameters<typeof createAgentSessionFromServices>[0]> = [];
+    const runtime = await testRuntime(
+      () => [],
+      async (_created, options) => {
+        received.push(options);
+      },
+    );
+    const owner = {};
+
+    const full = await runtime.createSession(cwd, {
+      toolMode: "full_access",
+      computerUse: { getOwner: () => owner },
+    });
+    expect(received.at(-1)?.customTools?.map((tool) => tool.name)).toContain("computer");
+    expect(full.session.getActiveToolNames()).toContain("computer");
+    await full.dispose();
+
+    const readOnly = await runtime.createSession(cwd, {
+      toolMode: "read_only",
+      computerUse: { getOwner: () => owner },
+    });
+    expect(received.at(-1)?.customTools?.map((tool) => tool.name)).not.toContain("computer");
+    expect(readOnly.session.getActiveToolNames()).not.toContain("computer");
+    await readOnly.dispose();
+
+    const implicit = await runtime.createSession(cwd, {
+      computerUse: { getOwner: () => owner },
+    });
+    expect(received.at(-1)?.customTools?.map((tool) => tool.name) ?? [])
+      .not.toContain("computer");
+    expect(implicit.session.getActiveToolNames()).not.toContain("computer");
+    await implicit.dispose();
+  });
+
+  it("rejects a non-vision computer invocation before adapter creation", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-computer-novision-"));
+    let factoryCalls = 0;
+    const runtime = await testRuntime(
+      () => [],
+      undefined,
+      async (modelRuntime) => {
+        modelRuntime.registerProvider("computer-text", {
+          baseUrl: "https://example.invalid/v1",
+          apiKey: "test-key",
+          api: "openai-completions",
+          models: [{ ...providerModel("computer-text"), input: ["text"] }],
+        });
+        await modelRuntime.refresh({ allowNetwork: false });
+      },
+      undefined,
+      {
+        createWindowsDesktopAdapter: async () => {
+          factoryCalls += 1;
+          throw new Error("adapter must not be created");
+        },
+      },
+    );
+    const created = await runtime.createSession(cwd, {
+      toolMode: "full_access",
+      model: { provider: "computer-text", id: "computer-text" },
+      computerUse: { getOwner: () => ({}) },
+    });
+    const computer = created.session.getToolDefinition("computer");
+    if (!computer) throw new Error("Computer tool was not installed");
+    const execute = computer.execute as (
+      toolCallId: string,
+      params: unknown,
+      signal: AbortSignal,
+    ) => Promise<unknown>;
+
+    try {
+      await expect(execute("no-vision", { actions: [], observe: true }, new AbortController().signal))
+        .rejects.toThrow("supports image input");
+      expect(factoryCalls).toBe(0);
+    } finally {
+      await created.dispose();
+    }
+  });
+
+  it("expires an authorized frame before the next provider decision when its tool call never executes", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-runtime-computer-frame-"));
+    const adapter: WindowsDesktopAdapter = {
+      capture: async () => ({
+        png: Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10]),
+        width: 10,
+        height: 10,
+        bounds: { x: 0, y: 0, width: 10, height: 10 },
+      }),
+      click: async () => "sent",
+      type: async () => "sent",
+      keypress: async () => "sent",
+      scroll: async () => "sent",
+      wait: async () => "sent",
+    };
+    const runtime = await testRuntime(
+      () => [],
+      undefined,
+      async (modelRuntime) => {
+        modelRuntime.registerProvider("computer-vision", {
+          baseUrl: "https://example.invalid/v1",
+          apiKey: "test-key",
+          api: "openai-completions",
+          models: [{
+            ...providerModel("computer-vision"),
+            input: ["text", "image"],
+          }],
+        });
+        await modelRuntime.refresh({ allowNetwork: false });
+      },
+      undefined,
+      { createWindowsDesktopAdapter: async () => adapter },
+    );
+    const owner = {};
+    const created = await runtime.createSession(cwd, {
+      toolMode: "full_access",
+      model: { provider: "computer-vision", id: "computer-vision" },
+      computerUse: { getOwner: () => owner },
+    });
+    const computer = created.session.getToolDefinition("computer");
+    if (!computer || !created.computerUse) throw new Error("Computer tool was not installed");
+    const execute = computer.execute as (
+      toolCallId: string,
+      params: unknown,
+      signal: AbortSignal,
+    ) => Promise<ComputerToolResult>;
+    const signal = new AbortController().signal;
+
+    try {
+      const observed = await execute("observe-call", { actions: [], observe: true }, signal);
+      const source = {
+        role: "toolResult",
+        toolCallId: "observe-call",
+        toolName: "computer",
+        content: observed.content,
+        isError: false,
+        timestamp: 1,
+      };
+      // The only image copy is still transient. Ordinary tool event,
+      // SessionManager/history, and JSON wire fixture all receive this exact
+      // PNG-free result object.
+      created.session.sessionManager.appendMessage({
+        role: "assistant",
+        content: [{
+          type: "toolCall",
+          id: "observe-call",
+          name: "computer",
+          arguments: { actions: [], observe: true },
+        }],
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+        stopReason: "toolUse",
+        timestamp: 0,
+      } as never);
+      created.session.sessionManager.appendMessage({ ...source, details: observed.details } as never);
+      const history = projectConversationHistory(created.session.sessionManager);
+      const ordinaryChain = JSON.stringify({
+        toolEvent: { ...source, details: observed.details },
+        historySnapshot: history,
+        websocketFixture: { type: "conversation_snapshot", history },
+      });
+      expect(ordinaryChain).not.toContain("iVBOR");
+      expect(ordinaryChain).not.toContain("image");
+      expect(ordinaryChain).not.toContain("png");
+
+      const providerInput = await created.session.agent.convertToLlm([source] as never);
+      expect(JSON.stringify(providerInput)).toContain("iVBOR");
+      created.computerUse.completeAssistantDecision(["rejected-before-execute"]);
+
+      // This is the provider request after SDK schema/extension/host-gate
+      // rejection of that call. It must retire the old coordinate frame.
+      await created.session.agent.convertToLlm([{
+        ...source,
+        toolCallId: "rejected-before-execute",
+        content: [{ type: "text", text: "rejected" }],
+      }] as never);
+      await expect(execute("rejected-before-execute", {
+        actions: [{ kind: "click", x: 1, y: 1 }],
+        observe: false,
+      }, signal)).rejects.toThrow("authorized current observation");
+
+      // A call that reaches this custom tool with an already-aborted signal
+      // also never enters controller admission and must retire its own frame.
+      const observedAgain = await execute("observe-aborted", { actions: [], observe: true }, signal);
+      const abortedSource = { ...source, toolCallId: "observe-aborted", content: observedAgain.content };
+      await created.session.agent.convertToLlm([abortedSource] as never);
+      created.computerUse.completeAssistantDecision(["aborted-before-admission"]);
+      const aborted = new AbortController();
+      aborted.abort();
+      await execute("aborted-before-admission", {
+        actions: [{ kind: "click", x: 1, y: 1 }],
+        observe: false,
+      }, aborted.signal);
+      await expect(execute("aborted-before-admission", {
+        actions: [{ kind: "click", x: 1, y: 1 }],
+        observe: false,
+      }, signal)).rejects.toThrow("authorized current observation");
+    } finally {
+      await created.dispose();
+    }
   });
 
   it("loads project providers before resolving a fixed role model and appends the role prompt", async () => {

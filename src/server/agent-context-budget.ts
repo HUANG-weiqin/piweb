@@ -1,4 +1,5 @@
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type { ImageContent } from "@earendil-works/pi-ai";
 import type { LoopList } from "../shared/protocol.js";
 
 type ConvertToLlm = AgentSession["agent"]["convertToLlm"];
@@ -14,6 +15,20 @@ export interface AgentContextBudgetController {
 export interface LoopListElapsedMinutes {
   activeMin: number;
   listMin: number;
+}
+
+/**
+ * A run-scoped image which is copied only into the provider request. It never
+ * becomes an AgentMessage or a persisted tool result.
+ */
+export interface ComputerProviderImage {
+  readonly sourceToolCallId: string;
+  readonly image: ImageContent;
+}
+
+export interface ComputerProviderImageResolver {
+  get(): ComputerProviderImage | undefined;
+  presented(sourceToolCallId: string): void;
 }
 
 function formatTokens(tokens: number): string {
@@ -96,6 +111,38 @@ function createWorkHint(
   })}`;
 }
 
+function appendProviderImage(
+  messages: LlmMessages,
+  candidate: ComputerProviderImage | undefined,
+): { messages: LlmMessages; presented?: string } {
+  if (!candidate) return { messages };
+  let index = -1;
+  for (let cursor = messages.length - 1; cursor >= 0; cursor -= 1) {
+    const message = messages[cursor]!;
+    if (
+      message.role === "toolResult"
+      && message.toolCallId === candidate.sourceToolCallId
+    ) {
+      index = cursor;
+      break;
+    }
+  }
+  if (index < 0) return { messages };
+  const target = messages[index]!;
+  if (target.role !== "toolResult") return { messages };
+  const content = typeof target.content === "string"
+    ? [{ type: "text" as const, text: target.content }, candidate.image]
+    : [...target.content, candidate.image];
+  return {
+    messages: [
+      ...messages.slice(0, index),
+      { ...target, content },
+      ...messages.slice(index + 1),
+    ],
+    presented: candidate.sourceToolCallId,
+  };
+}
+
 function appendProviderTail(
   messages: LlmMessages,
   providerTail: string,
@@ -124,6 +171,7 @@ export function installAgentContextBudget(
   getCompactionThresholdPercent?: () => number,
   getEditBudgetRemainingFiles?: () => number | undefined,
   getLoopListElapsedMinutes?: () => LoopListElapsedMinutes | undefined,
+  computerProviderImage?: ComputerProviderImageResolver,
 ): AgentContextBudgetController {
   const agent = session.agent;
   const original = agent.convertToLlm;
@@ -137,15 +185,32 @@ export function installAgentContextBudget(
     messages: AgentMessage[],
   ): Promise<LlmMessages> {
     const converted = await original.call(this, messages);
+    let providerMessages = converted;
+    let candidate: ComputerProviderImage | undefined;
+    try {
+      candidate = computerProviderImage?.get();
+    } catch {
+      // A stale image boundary must not block unrelated model traffic.
+      candidate = undefined;
+    }
+    const injected = appendProviderImage(providerMessages, candidate);
+    providerMessages = injected.messages;
+    if (injected.presented !== undefined) {
+      // Mark only after an exact converted tool result received the copy. A
+      // mark failure rejects conversion, so this logical decision retries with
+      // the same retained bytes instead of sending an unauthorizable image.
+      computerProviderImage?.presented(injected.presented);
+    }
+
     let active: Array<{ id: string; text: string }>;
     try {
       active = getLoopList().items
         .filter((item) => item.status === "active")
         .map(({ id, text }) => ({ id, text }));
-      if (active.length === 0) return converted;
+      if (active.length === 0) return providerMessages;
     } catch {
-      // Active work is the admission boundary for all transient hints.
-      return converted;
+      // Active work is the admission boundary for the LoopList hint only.
+      return providerMessages;
     }
 
     let elapsedMinutes: LoopListElapsedMinutes | undefined;
@@ -183,7 +248,7 @@ export function installAgentContextBudget(
     }
 
     const providerTail = telemetry ? `${telemetry}\n${workHint}` : workHint;
-    return appendProviderTail(converted, providerTail);
+    return appendProviderTail(providerMessages, providerTail);
   }
 
   agent.convertToLlm = convertToLlm;

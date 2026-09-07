@@ -1,6 +1,6 @@
 # 服务端运行时
 
-`updated: 2026-09-06`
+`updated: 2026-09-07`
 
 ## 这个模块是干什么的
 
@@ -26,6 +26,7 @@
 - 每个 provider 的 credential intent 在用户操作开始时取得一次性 revision，提交时只允许当前最新 revision 写入，避免旧 OAuth 结果覆盖后来发生的 API Key 或 logout。
 - 变更后 reload/refresh，并通知活动连接发布新状态。若代码变更需要让当前运行中的 Pi Web 实例加载，由外部 supervisor 协调热重载：执行 `npm run reload`，需要跳过安全边界时执行 `npm run reload -- --force`。supervisor 先完成 `npm run build`；只有旧 server 冻结 admission 并为已有 active run 安装 reload latch 后，命令才返回 `accepted`，但该回执不等待最终 drain 或新进程 ready。默认模式等待每个 active assistant turn（含工具轮）到完整 turn boundary，随后旧进程完全退出，supervisor 才启动新实例；force 只提供立即中断的 best-effort，续跑前必须核对工作区和外部副作用。OS 临时目录中的严格 reload manifest v2 是唯一 durable handoff authority：每个 target 保存稳定 continuationRunId 与 `unadopted | adopted(exact adoptedRunId)`，supervisor 只用 exact requestId/runId CAS 更新。replacement child 在任何 project acquire/recovery 前同步预装全部 target reservation，并暂时拒绝 WebSocket upgrade；它串行执行每个 exact `requestId + resumeId` pass，只有 supervisor 原子应用 disposition 后返回的 exact ACK 才能释放首轮 startup barrier。`process.send` callback 只证明 IPC transport acceptance，不能清 reservation、flush completion 或删除 manifest target。first durable disposition set 即使包含 retry 也释放全局 WebSocket barrier；adopted target 则继续阻止 rewind/delete，直到 actor idle、没有 active reload run、queued/processing inbox、receipt-only run 或 processing batch，并收到 supervisor 的 exact target completion ACK。已存在的严格 legacy v1 manifest 会先原子迁移为 v2，再向 child 暴露新生成的稳定 continuation identity；pre-v2 writer 留下的无 `details` conversation reload marker 不提供 adoption 证据，也不能阻断后来具有新稳定 identity 的 exact target，读取时将其视为不相关并为当前 manifest continuation 建立新的精确 marker；已携带当前 `continuationRunId` 但缺少 `requestId` / `adoptedRunId` 或发生冲突的 marker 仍 fail closed，不能按当前 actor 或邻近 settlement 猜测。该能力没有公共 Pi tool，也不新增项目持久状态。
 - 生产路径先 `createAgentSessionServices()` 加载 cwd 扩展/provider，再 `createAgentSessionFromServices()` 恢复持久模型，避免恢复顺序选错 fallback。
+- Windows 极简 `computer` 只在 frozen role 为 `full_access` 且 Actor 提供 exact active `ConversationRunOwnership` 时作为 custom tool 安装；`read_only` 既不可见也由既有 source-aware gate 拒绝。`PiRuntime` 惰性创建一个进程级 `DesktopController`，其 Koffi/Win32 adapter 只在真实首次调用加载。controller 以 ownership 对象 identity fail-fast 串行 desktop lease；取消、terminal、reload、dispose 请求 release，但 native in-flight primitive settle 后才交给下一 owner。截图 PNG 只暂存 controller：`computer` 结果带 source `toolCallId`，`agent-context-budget` 在 provider-only `convertToLlm` clone 的同一 toolResult 追加 image，并回调 presented marker；成功 assistant 仅将 frame 授权给该 assistant 的精确 computer call IDs。PNG/base64 不进 result/details/JSONL/projector/wire；compaction/reload/abort 均清 observation。
 
 `ProjectStoreRegistry` 也是进程级对象：
 

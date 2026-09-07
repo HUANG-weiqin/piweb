@@ -601,6 +601,17 @@ function clipUnicode(value: string, maximum: number): string {
   return result;
 }
 
+function computerToolCallIds(message: AssistantMessage): readonly string[] {
+  if (message.stopReason !== "toolUse") return [];
+  const ids: string[] = [];
+  for (const part of message.content) {
+    if (part.type === "toolCall" && part.name === "computer") {
+      ids.push(part.id);
+    }
+  }
+  return ids;
+}
+
 function automaticTitleFrom(message: AssistantMessage): string | undefined {
   if (
     message.stopReason === "error"
@@ -2923,6 +2934,9 @@ export class ConversationActor {
       }
       return existing.ready.promise;
     }
+    // A handoff has no right to carry a provider-only picture into the new
+    // runtime, even while the old turn waits for its safe boundary.
+    this.created?.computerUse?.clearObservation();
     const ready = deferred<void>();
     ticket.reloadStop = { preserveSettlement, ready };
     return ready.promise;
@@ -3369,6 +3383,11 @@ export class ConversationActor {
     if (this.activeRun !== ticket) {
       return ticket.completion.promise;
     }
+    try {
+      await this.created?.computerUse?.release();
+    } catch (error) {
+      this.emitError(error, ticket.id);
+    }
     const settlement = createRunSettlementEntry({
       runId: ticket.id,
       outcome,
@@ -3432,6 +3451,9 @@ export class ConversationActor {
   }
 
   private failRunInfrastructure(ticket: RunTicket, error: unknown): void {
+    void this.created?.computerUse?.release().catch((releaseError) => {
+      this.emitError(releaseError, ticket.id);
+    });
     ticket.reloadStop?.ready.reject(error);
     if (this.activeRun === ticket) {
       this.cancelInstalledWaitAttempt(ticket, { kind: "error", error });
@@ -3464,6 +3486,12 @@ export class ConversationActor {
 
   private cancelRun(ticket: RunTicket): Promise<void> {
     if (this.activeRun !== ticket) return Promise.resolve();
+    // Request release now so no later primitive can begin while abort travels
+    // through Pi. DesktopController retains the exact lease until in-flight
+    // native work quiesces.
+    void this.created?.computerUse?.release().catch((error) => {
+      this.emitError(error, ticket.id);
+    });
     this.tryPauseLoopList(ticket);
     ticket.autoTitleAbortController?.abort();
     ticket.autoTitleAbortController = undefined;
@@ -3520,6 +3548,7 @@ export class ConversationActor {
       }
     }
     if (event.type === "compaction_start") {
+      this.created?.computerUse?.clearObservation();
       if (ticket && !this.hostCompactionInProgress) {
         ticket.sawSdkCompactionAttempt = true;
         ticket.sdkCompactionSucceeded = false;
@@ -3604,6 +3633,19 @@ export class ConversationActor {
       }
       // A mismatched raw user end (e.g. an extension user message) must not
       // consume or overtake host guidance records.
+    }
+
+    if (event.type === "message_end" && event.message.role === "assistant") {
+      if (event.message.stopReason === "toolUse") {
+        this.created?.computerUse?.completeAssistantDecision(
+          computerToolCallIds(event.message),
+        );
+      } else if (
+        event.message.stopReason !== "error"
+        && event.message.stopReason !== "aborted"
+      ) {
+        this.created?.computerUse?.clearObservation();
+      }
     }
 
     if (
@@ -4236,6 +4278,18 @@ export class ConversationActor {
               : undefined;
           },
           getServiceTier: () => this.serviceTierSelection,
+          ...(this.profileSnapshot.role.toolMode === "full_access"
+            ? {
+                computerUse: {
+                  getOwner: () => {
+                    const ticket = this.activeRun;
+                    return ticket?.state.phase === "running"
+                      ? ticket.ownership
+                      : undefined;
+                  },
+                },
+              }
+            : {}),
           compactionAttemptObserver: (event) => {
             this.observeCompactionAttempt(runtimeGeneration, event);
           },
@@ -4290,6 +4344,11 @@ export class ConversationActor {
     this.unsubscribeSession = undefined;
     const created = this.created;
     this.created = undefined;
+    try {
+      await created?.computerUse?.release();
+    } catch (error) {
+      failures.push(error);
+    }
     try {
       await created?.dispose();
     } catch (error) {

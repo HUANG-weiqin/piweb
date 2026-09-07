@@ -62,6 +62,7 @@ describe("defaultToolPolicy", () => {
     ["list_sessions", "sdk"],
     ["current_session", "sdk"],
     ["start_session", "sdk"],
+    ["computer", "sdk"],
   ])(
     "denies %s from %s in read-only mode",
     (toolName, toolSource) => {
