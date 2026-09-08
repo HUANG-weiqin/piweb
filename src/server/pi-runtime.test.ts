@@ -1434,7 +1434,7 @@ describe("PiRuntime session ownership", () => {
       "foregroundWindow?: boolean defaults false and requires observe:true. It captures only the current foreground window's intersection with the primary display; after evidence uses the then-current foreground window. observe:true captures provider-only evidence (default post-action settle is 150ms); an action pair carries two images and about twice the visual-token cost. observe:false does not capture. Actions are sequential; sent is host dispatch, not UI/business success.",
     );
     expect(computer.promptGuidelines).toContain(
-      "Call observe first before coordinate actions. Use current only for an initial single image, and after only for paired/after-only evidence; before and historical_before never authorize coordinates.",
+      "Call observe first before coordinate actions. Use current only for an initial single image, and after only for paired/after-only evidence; before and historical_before never authorize coordinates. Coordinates are image-local pixels: (0,0) is the visible current/after image's top-left, including a foreground-window crop; never use desktop-global coordinates.",
     );
     expect(computer.promptGuidelines).toContain(
       "A foreground_mismatch may follow prior sent actions; its first not_started action and all remaining actions were not dispatched. Inspect per-action statuses, then re-observe before any coordinate retry.",

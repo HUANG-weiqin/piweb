@@ -445,22 +445,25 @@ describe("DesktopController", () => {
       observe: true,
     }));
     expect(controller.authorizeFrame(owner, ["premature-click"])).toBe(false);
-    const firstImage = controller.prepareProviderImage(owner, sourceToolCallId);
-    expect(firstImage).toMatchObject({
+    const evidence = providerEvidence(controller, owner, sourceToolCallId);
+    expect(evidence).toMatchObject({
       sourceToolCallId,
-      mimeType: "image/png",
-      width: 100,
-      height: 50,
+      images: [{
+        sourceToolCallId,
+        mimeType: "image/png",
+        width: 100,
+        height: 50,
+      }],
     });
-    expect(controller.prepareProviderImage({}, sourceToolCallId)).toBeUndefined();
-    expect(controller.prepareProviderImage(owner, "other-source")).toBeUndefined();
-    firstImage!.png[0] = 0;
-    expect(controller.prepareProviderImage(owner, sourceToolCallId)!.png[0]).toBe(137);
+    expect(providerEvidence(controller, {}, sourceToolCallId)).toBeUndefined();
+    expect(providerEvidence(controller, owner, "other-source")).toBeUndefined();
+    evidence!.images[0]!.png[0] = 0;
+    expect(providerEvidence(controller, owner, sourceToolCallId)!.images[0]!.png[0]).toBe(137);
 
     expect(controller.authorizeFrame(owner, ["click-call"])).toBe(false);
-    expect(controller.markProviderImagePresented(owner, sourceToolCallId)).toBe(true);
+    expect(markProviderEvidencePresented(controller, owner, sourceToolCallId)).toBe(true);
     expect(controller.authorizeFrame(owner, ["click-call"])).toBe(true);
-    expect(controller.prepareProviderImage(owner, sourceToolCallId)).toBeUndefined();
+    expect(providerEvidence(controller, owner, sourceToolCallId)).toBeUndefined();
     await expect(controller.execute(request(owner, "wrong-call", {
       actions: [{ kind: "click", x: 1, y: 1 }],
       observe: false,
@@ -491,8 +494,8 @@ describe("DesktopController", () => {
     const controller = new DesktopController(adapter);
     const owner = {};
     await controller.execute(request(owner, "observe", { actions: [], observe: true }));
-    controller.prepareProviderImage(owner, "observe");
-    controller.markProviderImagePresented(owner, "observe");
+    providerEvidence(controller, owner, "observe");
+    markProviderEvidencePresented(controller, owner, "observe");
     expect(controller.authorizeFrame(owner, ["first", "second"])).toBe(true);
 
     let nestedOutcome: "error" | "result" | undefined;
@@ -766,8 +769,8 @@ describe("DesktopController", () => {
     const controller = new DesktopController(adapter);
     const owner = {};
     await controller.execute(request(owner, "observe", { actions: [], observe: true }));
-    controller.prepareProviderImage(owner, "observe");
-    controller.markProviderImagePresented(owner, "observe");
+    providerEvidence(controller, owner, "observe");
+    markProviderEvidencePresented(controller, owner, "observe");
     controller.authorizeFrame(owner, ["batch"]);
     await expect(controller.execute(request(owner, "batch", {
       actions: [{ kind: "click", x: 200, y: 0 }],
@@ -821,8 +824,8 @@ describe("DesktopController", () => {
     const owner = {};
     const signalController = new AbortController();
     await abortController.execute(request(owner, "observe", { actions: [], observe: true }));
-    abortController.prepareProviderImage(owner, "observe");
-    abortController.markProviderImagePresented(owner, "observe");
+    providerEvidence(abortController, owner, "observe");
+    markProviderEvidencePresented(abortController, owner, "observe");
     abortController.authorizeFrame(owner, ["abort-batch"]);
     abortAdapter.onClick = () => signalController.abort();
 
@@ -872,7 +875,7 @@ describe("DesktopController", () => {
     const owner = {};
 
     await controller.execute(request(owner, "first", { actions: [], observe: true }));
-    expect(controller.prepareProviderImage(owner, "first")).toBeDefined();
+    expect(providerEvidence(controller, owner, "first")).toBeDefined();
 
     controller.beginAssistantDecision(owner);
     const failed = await controller.execute(request(owner, "second", { actions: [], observe: true }));
@@ -880,13 +883,15 @@ describe("DesktopController", () => {
       outcome: "interrupted",
       observation: { status: "unavailable" },
     });
-    expect(controller.prepareProviderImage(owner, "first")).toBeUndefined();
-    expect(controller.prepareProviderImage(owner, "second")).toBeUndefined();
+    expect(providerEvidence(controller, owner, "first")).toBeUndefined();
+    expect(providerEvidence(controller, owner, "second")).toBeUndefined();
 
     controller.beginAssistantDecision(owner);
     await controller.execute(request(owner, "third", { actions: [], observe: true }));
-    expect(controller.prepareProviderImage(owner, "first")).toBeUndefined();
-    expect(controller.prepareProviderImage(owner, "third")).toMatchObject({ width: 101 });
+    expect(providerEvidence(controller, owner, "first")).toBeUndefined();
+    expect(providerEvidence(controller, owner, "third")).toMatchObject({
+      images: [{ width: 101 }],
+    });
   });
 
   it("rejects a capture whose image dimensions do not equal its physical crop", async () => {

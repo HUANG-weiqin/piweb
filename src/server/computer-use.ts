@@ -951,14 +951,6 @@ export class DesktopController {
     });
   }
 
-  /** Compatibility wrapper for the earlier single-image resolver contract. */
-  prepareProviderImage(
-    owner: object,
-    sourceToolCallId: string,
-  ): DesktopProviderImage | undefined {
-    return this.prepareProviderEvidence(owner, sourceToolCallId)?.images[0];
-  }
-
   /** The converter calls this only after all evidence parts were appended. */
   markProviderEvidencePresented(owner: object, sourceToolCallId: string): boolean {
     const observation = this.observation;
@@ -971,11 +963,6 @@ export class DesktopController {
     }
     observation.presented = true;
     return true;
-  }
-
-  /** Compatibility wrapper for the earlier single-image resolver contract. */
-  markProviderImagePresented(owner: object, sourceToolCallId: string): boolean {
-    return this.markProviderEvidencePresented(owner, sourceToolCallId);
   }
 
   /**
