@@ -1711,6 +1711,192 @@ describe("App", () => {
     expect(screen.queryByRole("region", { name: "Tasks" })).not.toBeInTheDocument();
   });
 
+  it("does not apply App state from stale same-focus snapshots", async () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    const currentPromptId = "10000000-0000-4000-8000-000000000001";
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: true,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        projectionSeq: 5,
+        role: defaultConversationRole({ name: "Current role" }),
+        items: [],
+        loopList: {
+          items: [{ id: "current", text: "Current task", status: "active" }],
+          armed: true,
+        },
+        pendingPrompts: [{ promptId: currentPromptId, text: "Current waiting" }],
+        window: completeConversationWindow,
+      });
+      socketMock.rawEmit?.({
+        type: "session_event",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        runId: RUN_ID,
+        projectionSeq: 6,
+        event: { type: "run_queued" },
+      });
+    });
+    expect(screen.getByRole("button", { name: "查看会话角色 Current role" }))
+      .toBeInTheDocument();
+    expect(screen.getByText("Current task")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "等待处理的消息" }))
+      .toHaveTextContent("Current waiting");
+
+    act(() => socketMock.rawEmit?.({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      projectionSeq: 5,
+      role: defaultConversationRole({ name: "Watermark stale role" }),
+      items: [],
+      loopList: {
+        items: [{ id: "watermark", text: "Watermark stale task", status: "completed" }],
+        armed: false,
+      },
+      pendingPrompts: [{
+        promptId: "10000000-0000-4000-8000-000000000002",
+        text: "Watermark stale waiting",
+      }],
+      window: completeConversationWindow,
+    }));
+    expect(screen.queryByRole("button", { name: "查看会话角色 Watermark stale role" }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByText("Watermark stale task")).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "等待处理的消息" }))
+      .toHaveTextContent("Current waiting");
+
+    act(() => socketMock.rawEmit?.({
+      type: "session_event",
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      runId: RUN_ID,
+      projectionSeq: 8,
+      event: { type: "run_queued" },
+    }));
+    await waitFor(() => expect(screen.getByRole("textbox", {
+      name: "给 Pi 发送消息",
+    })).toBeDisabled());
+
+    act(() => socketMock.rawEmit?.({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      projectionSeq: 6,
+      role: defaultConversationRole({ name: "Gap stale role" }),
+      items: [],
+      loopList: {
+        items: [{ id: "gap", text: "Gap stale task", status: "completed" }],
+        armed: false,
+      },
+      pendingPrompts: [{
+        promptId: "10000000-0000-4000-8000-000000000003",
+        text: "Gap stale waiting",
+      }],
+      window: completeConversationWindow,
+    }));
+    expect(screen.getByRole("button", { name: "查看会话角色 Current role" }))
+      .toBeInTheDocument();
+    expect(screen.queryByText("Gap stale task")).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "等待处理的消息" }))
+      .toHaveTextContent("Current waiting");
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeDisabled();
+  });
+
+  it("rejects a foreign-project state for the current focus", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "read_only",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "current-model" },
+        providers: [],
+      },
+    }));
+    expect(screen.getByTitle("模型连接")).toHaveTextContent("current-model");
+
+    act(() => socketMock.rawEmit?.({
+      type: "state",
+      state: {
+        sessionId,
+        projectId: "8177b28d-c21d-40c2-b45f-6714ae096421",
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        cwd: "E:\\foreign",
+        busy: true,
+        thinkingLevel: "high",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off", "high"],
+        selectedModel: { provider: "foreign", id: "foreign-model" },
+        providers: [],
+      },
+    }));
+    expect(screen.getByTitle("模型连接")).toHaveTextContent("current-model");
+    expect(screen.getByTitle("模型连接")).not.toHaveTextContent("foreign-model");
+  });
+
+  it("applies a matching target state deferred while conversation focus is pending", () => {
+    const sessionId = startFocusReplacementProject();
+    socketMock.autoFocus = false;
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    const focus = latestCommand("focus_conversation");
+    const targetFocusId = "ae301850-745d-44dd-a30f-000000000711";
+
+    act(() => socketMock.rawEmit?.({
+      type: "state",
+      state: {
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_B,
+        focusId: targetFocusId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "read_only",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "deferred-model" },
+        providers: [],
+      },
+    }));
+    act(() => socketMock.rawEmit?.({
+      type: "focus_attached",
+      operation: "focus_conversation",
+      commandId: focus.commandId!,
+      sessionId,
+      projectId: PROJECT_ID,
+      conversationId: CONVERSATION_B,
+      focusId: targetFocusId,
+    }));
+
+    expect(screen.getByTitle("模型连接")).toHaveTextContent("deferred-model");
+  });
+
   it("plays one project-scoped chime for a completed user run", () => {
     render(<App />);
     const sessionId = startFromSetup();

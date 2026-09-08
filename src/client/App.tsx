@@ -27,7 +27,11 @@ import {
   type ServiceTier,
   type ThinkingLevel,
 } from "../shared/protocol";
-import { chatReducer, initialChatState } from "./chat/reducer";
+import {
+  chatReducer,
+  initialChatState,
+  type ChatAction,
+} from "./chat/reducer";
 import { ActivitySpinner } from "./components/ActivitySpinner";
 import { AuthDialog } from "./components/AuthDialog";
 import { Chat } from "./components/Chat";
@@ -690,6 +694,14 @@ export function App() {
   }>();
   const notificationIdRef = useRef(0);
   const [chat, dispatch] = useReducer(chatReducer, initialChatState);
+  const chatRef = useRef(chat);
+  const dispatchChat = (action: ChatAction): boolean => {
+    const next = chatReducer(chatRef.current, action);
+    if (next === chatRef.current) return false;
+    chatRef.current = next;
+    dispatch(action);
+    return true;
+  };
   const socketRef = useRef<PiSocket | undefined>(undefined);
   const completionSoundRef = useRef<CompletionSound | undefined>(undefined);
   const socketEpochRef = useRef(0);
@@ -824,7 +836,7 @@ export function App() {
     setConversationRole(undefined);
     setLoopList({ items: [], armed: false });
     setConversationIndexTruncated(false);
-    dispatch({ type: "reset" });
+    dispatchChat({ type: "reset" });
   };
   const showCachedWorkspacePresentation = (
     cached: CachedWorkspaceProjection,
@@ -1061,7 +1073,7 @@ export function App() {
       setLoopList({ items: [], armed: false });
       updateConversationReady(false);
       setSelectingRole(true);
-      dispatch({ type: "reset" });
+      dispatchChat({ type: "reset" });
       return;
     }
     const changedConversation = previousProjectId !== projectId
@@ -1073,7 +1085,7 @@ export function App() {
     if (!preservePresentation) {
       setConversationRole(undefined);
       setLoopList({ items: [], armed: false });
-      dispatch({ type: "focus_changed", ...focus });
+      dispatchChat({ type: "focus_changed", ...focus });
     }
     updateConversationReady(false);
     setSelectingRole(false);
@@ -1098,7 +1110,7 @@ export function App() {
     ) return;
     const focus = focusRef.current;
     if (!focus) return;
-    dispatch({
+    dispatchChat({
       type: "prompt_accepted",
       runId,
       text: pending.text || "[图片]",
@@ -1256,6 +1268,15 @@ export function App() {
   ) => {
     const focus = focusRef.current;
     if (!focus) return;
+    if (!dispatchChat({
+      type: "hydrate",
+      sessionId: focus.sessionId,
+      conversationId: focus.conversationId,
+      focusId: focus.focusId,
+      items: event.items,
+      projectionSeq: event.projectionSeq,
+      historyWindow: event.window,
+    })) return;
     const snapshotObservation = {
       sessionId: event.sessionId,
       conversationId: event.conversationId,
@@ -1270,15 +1291,6 @@ export function App() {
     const snapshotAttempt = settleReadiness
       ? transitionTiming.snapshotAccepted(snapshotObservation)
       : undefined;
-    dispatch({
-      type: "hydrate",
-      sessionId: focus.sessionId,
-      conversationId: focus.conversationId,
-      focusId: focus.focusId,
-      items: event.items,
-      projectionSeq: event.projectionSeq,
-      historyWindow: event.window,
-    });
     setConversationRole(event.role);
     setLoopList(event.loopList ?? { items: [], armed: false });
     if (event.pendingPrompts !== undefined) {
@@ -1472,7 +1484,7 @@ export function App() {
           updateOutstandingRunId("");
           setAuth({});
           clearSessionProjection();
-          dispatch({ type: "reset" });
+          dispatchChat({ type: "reset" });
           setError(message);
           socket.close();
           return;
@@ -1573,7 +1585,7 @@ export function App() {
             : "";
           updateOutstandingRunId("");
           setAuth({});
-          dispatch({ type: "reset" });
+          dispatchChat({ type: "reset" });
           clearSessionProjection();
           updateWorkspaceSyncing(Boolean(cached));
           if (cached) showCachedWorkspacePresentation(cached);
@@ -1623,10 +1635,7 @@ export function App() {
         }
         if (
           currentFocus
-          && (
-            event.state.conversationId !== currentFocus.conversationId
-            || event.state.focusId !== currentFocus.focusId
-          )
+          && !stateMatchesFocus(event.state, currentFocus)
         ) {
           if (pendingFocusRef.current && event.state.conversationId && event.state.focusId) {
             pendingFocusedStateRef.current = event.state;
@@ -2116,7 +2125,7 @@ export function App() {
         }
         const focus = focusRef.current;
         if (!focus) return;
-        dispatch({
+        dispatchChat({
           type: "session",
           runId: event.runId,
           event: event.event,
@@ -2127,7 +2136,7 @@ export function App() {
         if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;
         const focus = focusRef.current;
         if (!focus) return;
-        dispatch({
+        dispatchChat({
           type: "conversation_item",
           sessionId: focus.sessionId,
           conversationId: focus.conversationId,
@@ -2655,7 +2664,7 @@ export function App() {
             && event.focusId
             && !promptRejectedBeforeAcceptance
           ) {
-            dispatch({
+            dispatchChat({
               type: "error",
               runId: event.runId,
               message: event.message,
@@ -2904,7 +2913,7 @@ export function App() {
     autoOpened.current = false;
     updateWorkspaceSyncing(Boolean(cached));
     if (cached) showCachedWorkspacePresentation(cached);
-    dispatch({ type: "reset" });
+    dispatchChat({ type: "reset" });
     updatePendingFocus({
       commandId,
       operation: "initialize",
@@ -3643,7 +3652,7 @@ export function App() {
     setError("");
     updateWorkspaceSyncing(false);
     clearSessionProjection();
-    dispatch({ type: "reset" });
+    dispatchChat({ type: "reset" });
   };
   const openWorkspaceDialog = () => {
     setSetupCwd(activeCwdRef.current || setupCwd);

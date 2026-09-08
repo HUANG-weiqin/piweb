@@ -1436,11 +1436,6 @@ pre {
   white-space: nowrap;
 }
 
-.commitment-spinner {
-  width: 12px;
-  height: 12px;
-}
-
 .commitment-chevron {
   grid-column: 4;
   font-size: 11px;
@@ -3008,11 +3003,6 @@ pre {
   font-weight: 850;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-}
-
-.conversation-temporary-badge {
-  margin-left: auto;
-  color: #77736a;
 }
 .conversation-agent-badge {
   color: var(--rebel-paper-muted);
