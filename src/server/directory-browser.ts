@@ -1,4 +1,4 @@
-import { readdir, stat } from "node:fs/promises";
+import { opendir, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { Dirent } from "node:fs";
 import {
@@ -8,6 +8,8 @@ import {
 import { validateCwd } from "./cwd.js";
 
 const MAX_DIRECTORIES = 500;
+const MAX_DIRECTORY_SCAN_ENTRIES = MAX_DIRECTORIES * 4;
+const MAX_DIRECTORY_STAT_CONCURRENCY = 16;
 const MAX_LISTING_BYTES = MAX_MESSAGE_BYTES - (64 * 1024);
 const MAX_PATH_LENGTH = 4096;
 
@@ -16,8 +18,6 @@ async function toDirectory(
   entry: Dirent,
 ): Promise<DirectoryListing["directories"][number] | undefined> {
   const path = join(currentPath, entry.name);
-  if (entry.isDirectory()) return { name: entry.name, path };
-  if (!entry.isSymbolicLink()) return undefined;
   try {
     return (await stat(path)).isDirectory()
       ? { name: entry.name, path }
@@ -77,25 +77,61 @@ export async function listDirectory(value: string): Promise<DirectoryListing> {
     throw new Error(`目录不存在或无法访问：${requested}`);
   }
 
-  let entries: Dirent[];
+  const directories: DirectoryListing["directories"] = [];
+  let enumerationTruncated = false;
   try {
-    entries = await readdir(currentPath, { withFileTypes: true });
+    const directory = await opendir(currentPath);
+    try {
+      const pendingDirectories: Array<
+        Promise<DirectoryListing["directories"][number] | undefined>
+      > = [];
+      const flushPendingDirectories = async (): Promise<void> => {
+        const resolved = await Promise.all(pendingDirectories.splice(0));
+        for (const entry of resolved) {
+          if (entry !== undefined) directories.push(entry);
+        }
+      };
+      let entriesScanned = 0;
+      while (entriesScanned < MAX_DIRECTORY_SCAN_ENTRIES) {
+        const entry = await directory.read();
+        if (entry === null) break;
+        entriesScanned += 1;
+        if (entry.isDirectory()) {
+          directories.push({ name: entry.name, path: join(currentPath, entry.name) });
+        } else if (entry.isSymbolicLink()) {
+          pendingDirectories.push(toDirectory(currentPath, entry));
+        }
+        if (
+          pendingDirectories.length === MAX_DIRECTORY_STAT_CONCURRENCY
+          || directories.length > MAX_DIRECTORIES
+        ) {
+          await flushPendingDirectories();
+        }
+        if (directories.length > MAX_DIRECTORIES) {
+          enumerationTruncated = true;
+          break;
+        }
+      }
+      if (!enumerationTruncated && entriesScanned === MAX_DIRECTORY_SCAN_ENTRIES) {
+        enumerationTruncated = (await directory.read()) !== null;
+      }
+      await flushPendingDirectories();
+      if (directories.length > MAX_DIRECTORIES) enumerationTruncated = true;
+    } finally {
+      await directory.close();
+    }
   } catch {
     throw new Error(`无法读取目录：${currentPath}`);
   }
 
-  const directories = (await Promise.all(
-    entries.map((entry) => toDirectory(currentPath, entry)),
-  ))
-    .filter((entry): entry is DirectoryListing["directories"][number] => Boolean(entry))
-    .sort((left, right) => left.name.localeCompare(
-      right.name,
-      undefined,
-      { numeric: true, sensitivity: "base" },
-    ));
-
+  directories.sort((left, right) => left.name.localeCompare(
+    right.name,
+    undefined,
+    { numeric: true, sensitivity: "base" },
+  ));
   const parentPath = dirname(currentPath) === currentPath
     ? null
     : dirname(currentPath);
-  return buildDirectoryListing(currentPath, parentPath, directories);
+  const listing = buildDirectoryListing(currentPath, parentPath, directories);
+  return { ...listing, truncated: listing.truncated || enumerationTruncated };
 }

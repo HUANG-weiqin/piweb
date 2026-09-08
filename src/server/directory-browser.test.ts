@@ -38,6 +38,22 @@ describe("listDirectory", () => {
     });
   });
 
+  it("bounds enumeration at the result cap and keeps the visible directories sorted", async () => {
+    const root = await mkdtemp(join(tmpdir(), "piweb-directory-browser-bounded-"));
+    temporaryDirectories.push(root);
+    await Promise.all(Array.from({ length: 501 }, async (_, index) => {
+      await mkdir(join(root, `directory-${index}`));
+    }));
+
+    const listing = await listDirectory(root);
+
+    expect(listing.truncated).toBe(true);
+    expect(listing.directories).toEqual(Array.from({ length: 500 }, (_, index) => ({
+      name: `directory-${index}`,
+      path: join(resolve(root), `directory-${index}`),
+    })));
+  });
+
   it("rejects missing paths instead of returning an empty directory", async () => {
     const missing = join(tmpdir(), "piweb-directory-browser-missing");
     await expect(listDirectory(missing)).rejects.toThrow("目录不存在或无法访问");
