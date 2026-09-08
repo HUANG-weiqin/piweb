@@ -68,6 +68,7 @@ import {
 } from "./project-inbox.js";
 import {
   ProjectStoreRegistry,
+  type ConversationDeletionLease,
   type ProjectStore,
   type ProjectStoreHandle,
 } from "./project-store.js";
@@ -205,6 +206,10 @@ interface CompletionWaiter extends WaiterBase {
   resolve(settlement: RunSettlement): void;
 }
 
+
+type DeletionLeasePreflight =
+  | { kind: "actor"; actor: ConversationActor }
+  | { kind: "cold"; lease: ConversationDeletionLease };
 
 interface ProjectContext {
   readonly key: string;
@@ -5859,6 +5864,7 @@ export class ProjectSessionCoordinator {
   ): Promise<boolean> {
     const ownedReservationIds = new Set<string>();
     const durableFenceIds = new Set<string>();
+    const deletionPreflights = new Map<string, DeletionLeasePreflight>();
     if (deletionReserved) {
       if (!context.deleting.has(conversationId)) {
         throw new Error(
@@ -5919,6 +5925,14 @@ export class ProjectSessionCoordinator {
         }
         ownedReservationIds.add(cascadeId);
       }
+      const openingConversationId = cascadeIds.find((cascadeId) =>
+        context.actorOpenings.has(cascadeId)
+      );
+      if (openingConversationId !== undefined) {
+        throw new Error(
+          "Cannot delete a conversation while it is opening; wait first",
+        );
+      }
       const busyConversationId = cascadeIds.find((cascadeId) => {
         const actor = context.actors.get(cascadeId);
         return actor !== undefined
@@ -5928,6 +5942,27 @@ export class ProjectSessionCoordinator {
         throw new Error(
           "Cannot delete a busy conversation or one that is compacting; wait first",
         );
+      }
+
+      for (const cascadeId of cascadeIds) {
+        const actor = context.actors.get(cascadeId);
+        if (actor !== undefined) {
+          deletionPreflights.set(cascadeId, { kind: "actor", actor });
+          continue;
+        }
+        const writer = this.projects.acquireConversation(
+          context.project.cwd,
+          cascadeId,
+        );
+        try {
+          deletionPreflights.set(cascadeId, {
+            kind: "cold",
+            lease: writer.upgradeToDeletion(),
+          });
+        } catch (error) {
+          writer.release();
+          throw error;
+        }
       }
 
       for (const source of context.actors.values()) {
@@ -5953,6 +5988,7 @@ export class ProjectSessionCoordinator {
         await this.deleteSingleConversationInternal(
           context,
           cascadeId,
+          deletionPreflights,
         );
       }
       await this.retryBlockedDeletions(context);
@@ -5967,12 +6003,17 @@ export class ProjectSessionCoordinator {
         }
       }
       throw error;
+    } finally {
+      for (const preflight of deletionPreflights.values()) {
+        if (preflight.kind === "cold") preflight.lease.release();
+      }
     }
   }
 
   private async deleteSingleConversationInternal(
     context: ProjectContext,
     conversationId: string,
+    deletionPreflights: Map<string, DeletionLeasePreflight>,
   ): Promise<boolean> {
     const known = context.project.listConversations()
       .some(({ id }) => id === conversationId);
@@ -5996,7 +6037,28 @@ export class ProjectSessionCoordinator {
         "Cannot delete a busy conversation or one that is compacting; wait first",
       );
     }
-    let deletionLease;
+    const preflight = deletionPreflights.get(conversationId);
+    if (preflight === undefined) {
+      throw new Error(
+        `Conversation deletion lease preflight was lost: ${conversationId}`,
+      );
+    }
+    let coldDeletionLease: ConversationDeletionLease | undefined;
+    if (actor !== undefined) {
+      if (preflight.kind !== "actor" || preflight.actor !== actor) {
+        throw new Error(
+          `Conversation deletion lease preflight changed: ${conversationId}`,
+        );
+      }
+    } else {
+      if (preflight.kind !== "cold") {
+        throw new Error(
+          `Conversation deletion lease preflight changed: ${conversationId}`,
+        );
+      }
+      coldDeletionLease = preflight.lease;
+    }
+    let deletionLease: ConversationDeletionLease | undefined;
     let durableDeletionIntent = false;
     try {
       await context.inbox.markTargetDeleted(
@@ -6023,13 +6085,11 @@ export class ProjectSessionCoordinator {
         deletionLease = await actor.dispose({
           transferLeaseForDeletion: true,
         });
+        deletionPreflights.delete(conversationId);
         context.actors.delete(conversationId);
       } else {
-        const writer = this.projects.acquireConversation(
-          context.project.cwd,
-          conversationId,
-        );
-        deletionLease = writer.upgradeToDeletion();
+        deletionLease = coldDeletionLease;
+        deletionPreflights.delete(conversationId);
       }
       if (!deletionLease) {
         throw new Error("Conversation deletion lease was not transferred");

@@ -11911,6 +11911,204 @@ describe("ProjectSessionCoordinator", () => {
       expect(remainingIds).toContain(secondId);
     });
 
+    it("preflights every cold descendant lease before creating a cascade tombstone", async () => {
+      const registry = new TrackingProjectStoreRegistry();
+      const fixture = await createFixture(registry);
+      const root = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const firstChildId = "10000000-0000-4000-8000-000000000001";
+      const blockedChildId = "20000000-0000-4000-8000-000000000001";
+      const childProfile = () => defaultProfile(
+        fixture.roles,
+        {
+          createdBy: {
+            kind: "conversation",
+            conversationId: root.conversationId,
+          },
+          orchestration: {
+            rootConversationId: root.conversationId,
+            depth: 1,
+          },
+        },
+      );
+      await fixture.handle.project.createConversation(
+        firstChildId,
+        childProfile(),
+      );
+      await fixture.handle.project.createConversation(
+        blockedChildId,
+        childProfile(),
+      );
+      await fixture.handle.project.refreshConversations();
+
+      const inbox = coordinatorInbox(fixture.handle);
+      const markTargetDeleted = vi.spyOn(inbox, "markTargetDeleted");
+      const deleteConversation = vi.spyOn(
+        fixture.handle.project,
+        "deleteConversation",
+      );
+      registry.events.length = 0;
+      const blocker = registry.acquireConversation(
+        fixture.cwd,
+        blockedChildId,
+      );
+      try {
+        await expect(fixture.coordinator.deleteConversation(
+          fixture.handle,
+          root.conversationId,
+        )).rejects.toThrow("already leased");
+      } finally {
+        blocker.release();
+      }
+
+      expect(markTargetDeleted).not.toHaveBeenCalled();
+      expect(deleteConversation).not.toHaveBeenCalled();
+      expect(await inbox.listDeletedTargets()).toEqual([]);
+      expect(
+        (await fixture.coordinator.listSessions(fixture.handle))
+          .map(({ id }) => id),
+      ).toEqual(expect.arrayContaining([
+        root.conversationId,
+        firstChildId,
+        blockedChildId,
+      ]));
+      expect(
+        registry.events.filter(({ conversationId }) =>
+          conversationId === firstChildId
+        ),
+      ).toEqual([
+        { conversationId: firstChildId, kind: "upgrade" },
+        { conversationId: firstChildId, kind: "deletion_release" },
+      ]);
+      const releasedPreflight = registry.acquireConversation(
+        fixture.cwd,
+        firstChildId,
+      );
+      releasedPreflight.release();
+    });
+
+    it("rejects a descendant actor opening before creating a cascade tombstone", async () => {
+      const fixture = await createFixture();
+      const root = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const childId = randomUUID();
+      await fixture.handle.project.createConversation(
+        childId,
+        defaultProfile(fixture.roles, {
+          createdBy: {
+            kind: "conversation",
+            conversationId: root.conversationId,
+          },
+          orchestration: {
+            rootConversationId: root.conversationId,
+            depth: 1,
+          },
+        }),
+      );
+      await fixture.handle.project.refreshConversations();
+
+      const openingStarted = deferred();
+      const releaseOpening = deferred();
+      fixture.runtime.beforeCreateSession = async (conversationId) => {
+        if (conversationId !== childId) return;
+        openingStarted.resolve();
+        await releaseOpening.promise;
+      };
+      const opening = fixture.coordinator.openConversation(
+        fixture.handle,
+        childId,
+        { updateRecent: false },
+      );
+      await openingStarted.promise;
+
+      const inbox = coordinatorInbox(fixture.handle);
+      const markTargetDeleted = vi.spyOn(inbox, "markTargetDeleted");
+      const deleteConversation = vi.spyOn(
+        fixture.handle.project,
+        "deleteConversation",
+      );
+      await expect(fixture.coordinator.deleteConversation(
+        fixture.handle,
+        root.conversationId,
+      )).rejects.toThrow("while it is opening");
+      expect(markTargetDeleted).not.toHaveBeenCalled();
+      expect(deleteConversation).not.toHaveBeenCalled();
+      expect(await inbox.listDeletedTargets()).toEqual([]);
+
+      releaseOpening.resolve();
+      await opening;
+      fixture.runtime.beforeCreateSession = undefined;
+    });
+
+    it("preflights cold descendants before tombstoning a warm root actor", async () => {
+      const registry = new TrackingProjectStoreRegistry();
+      const fixture = await createFixture(registry);
+      const root = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const childId = randomUUID();
+      await fixture.handle.project.createConversation(
+        childId,
+        defaultProfile(fixture.roles, {
+          createdBy: {
+            kind: "conversation",
+            conversationId: root.conversationId,
+          },
+          orchestration: {
+            rootConversationId: root.conversationId,
+            depth: 1,
+          },
+        }),
+      );
+      await fixture.handle.project.refreshConversations();
+
+      registry.events.length = 0;
+      const acquireConversation = vi.spyOn(registry, "acquireConversation");
+      const inbox = coordinatorInbox(fixture.handle);
+      const markTargetDeleted = inbox.markTargetDeleted.bind(inbox);
+      let childPreflightBeforeRootTombstone = false;
+      inbox.markTargetDeleted = async (...args) => {
+        if (args[0] === root.conversationId) {
+          childPreflightBeforeRootTombstone = registry.events.some(
+            ({ conversationId, kind }) =>
+              conversationId === childId && kind === "upgrade",
+          );
+        }
+        await markTargetDeleted(...args);
+      };
+
+      await expect(fixture.coordinator.deleteConversation(
+        fixture.handle,
+        root.conversationId,
+      )).resolves.toBe(true);
+
+      expect(childPreflightBeforeRootTombstone).toBe(true);
+      expect(
+        acquireConversation.mock.calls.filter(([, conversationId]) =>
+          conversationId === root.conversationId
+        ),
+      ).toEqual([]);
+      expect(
+        registry.events.filter(({ conversationId }) =>
+          conversationId === root.conversationId
+        ),
+      ).toEqual([
+        { conversationId: root.conversationId, kind: "upgrade" },
+        { conversationId: root.conversationId, kind: "deletion_release" },
+      ]);
+      expect(
+        registry.events.filter(({ conversationId }) => conversationId === childId),
+      ).toEqual([
+        { conversationId: childId, kind: "upgrade" },
+        { conversationId: childId, kind: "deletion_release" },
+      ]);
+    });
+
     it("rejects cascade deletion while any descendant is busy", async () => {
       const fixture = await createFixture();
       const source = await fixture.coordinator.createUserConversation(
