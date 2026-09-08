@@ -80,7 +80,7 @@ focus 切换先 exact open：warm actor 直接复用；cold actor 在取得 writ
 删除同样只接受 conversationId，并遵守 actor 边界：
 
 - 目标及其 descendant set 中任一 busy conversation 都不可删除，必须先精确 abort 并等待 run 结算；Agent 永远不能删除自己，也不能通过删除祖先把自己级联删除。
-- 删除先基于 conversation metadata 冻结目标的 descendant set，再为每个目标设置 deleting fence；持久 tombstone 先写删除目标本身，再写 descendants，确保崩溃恢复至少能从目标重新推导 cascade。已打开的 idle actor 把当前 writer lease 在 registry 内原子升级为 deletion lease；未打开目标先 fail-fast 取得独占 lease。升级、精确 unlink 和索引刷新之间不能出现 release/reacquire 窗口。
+- 删除先基于 conversation metadata 冻结目标的 descendant set，再为每个目标设置 deleting fence；在任何 tombstone、inbox 或 source-card 持久副作用前，必须形成完整 lease bundle：已打开 idle actor 的既有 writer lease 计入 bundle，且只在实际删除时原地转为 deletion lease；每个 cold member 都先 fail-fast 取得独占 writer 并升级。任一预检失败要释放本次取得的 lease/fence，不能留下新的 durable 删除副作用。bundle 完整后才先写删除目标 tombstone、再写 descendants，确保崩溃恢复至少能从目标重新推导 cascade；升级、精确 unlink 和索引刷新之间不能出现 release/reacquire 窗口。
 - 删除与索引刷新共用同一串行队列。服务端完整校验 sessions 目录、由 ID 解析内部常规 JSONL、复验 header identity，再按子孙到祖先顺序逐个精确 `unlink`；每个 conversation 的 `.piweb/notebooks/<conversationId>.json` notebook sidecar 同步删除。notebook 目标与其 stale temp 必须先证明是项目目录内常规文件，并在 transcript/最近指针发生不可逆修改前以 `unlink` 清理；禁止对预期文件路径使用 recursive `rm`，异常目录或链接必须 fail closed 且保留 transcript。
 - transcript 删除先原子 rename 到宿主保留的 `.<original-basename>.<uuid>.delete-quarantine`。项目每次打开及每次串行删除开始时，都在任何 catalog/refresh 前严格扫描并恢复这类文件：名称、UUID、目录内常规 canonical 路径、稳定内容和 header identity 任一非法都 fail closed。普通 catalog 遇到任何 leftover quarantine 都拒绝；只有正常删除在 unlink 前的两次 proof 可显式传入并忽略该次删除的精确 quarantine 路径，unlink 后的最终 proof 不再例外。合法 orphan 通过 exclusive hard link 恢复到原名；若上次恢复在 link 后、quarantine unlink 前崩溃，原名与 quarantine 的一次 fingerprint 会证明二者仍是同一 inode，此时只清理 quarantine；不同 inode 的真实碰撞才改存 `.delete-recovery.jsonl`，再由随后完整 catalog 对重复 identity 或损坏内容 fail closed。这样 rename 后崩溃不会让 tombstone 因索引暂时缺席而被误清理。
 - unlink quarantine 不是删除成功边界。宿主必须在 unlink 后重新取得完整 verified catalog，并只从该 proof 发布索引；同 conversationId 的路径替换会明确失败且保留 replacement，协调层也保留 tombstone 供安全重试。无关的合法新增会由这次 proof 纳入投影。
@@ -90,7 +90,7 @@ focus 切换先 exact open：warm actor 直接复用；cold actor 在取得 writ
 
 “回到此处”是当前 conversation 内的物理后缀截断，不是 branch 或浏览器隐藏：
 
-- snapshot 的 user ID 直接对应 Pi message entry，assistant 聚合 ID 的 `assistant:` 后缀对应该聚合首个物理 message entry；所选 entry 本身和它之后的所有 JSONL entry 都被删除，更早行保持字节不变。
+- snapshot 的 user ID 直接对应 Pi message entry，assistant 聚合 ID 的 `assistant:` 后缀对应该聚合首个物理 message entry；所选 entry 及其后 context-bearing branch entry 会删除，更早行保持字节不变。唯一 ledger 例外是 suffix 中的 `piweb.message_delivery_receipt.v1` 及其引用的 `piweb.run_settlement.v1`：它们必须原子保留并重挂到 retained parent，避免 rewind 令已投递消息或已结算 run 复活。
 - 只允许 idle actor 执行；目标还有 queued/processing inbox 时拒绝，避免截断恢复账本后重复投递。已经送达其它 conversation 的外部效果不回滚。
 - store 在项目会话串行边界内完整验证原文件与候选前缀，复验路径及扫描期间文件身份，写临时文件后原子替换；候选不是 message、文件变化、链接、损坏或身份错配都不覆盖原文件。
 - durable 替换后，同一 actor 必须 reload SessionManager，并从其 active context 重建 Agent 内存 messages、runId 集合和压缩阈值。若磁盘已提交但内存同步失败，actor 进入 fatal 状态，禁止用旧 parent 继续追加。
@@ -110,10 +110,12 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 - `piweb.conversation_role_change.v1`：用户在 idle 边界显式应用的新完整角色快照（含 `compactionModel`），最后一条有效记录成为当前角色，并把分支 thinking 重置为该角色默认值；
 - `piweb.conversation_card.v1`：发送方可见的 outgoing/委派状态；
 - `piweb.conversation_message.v1`：进入目标 LLM context 的 incoming 消息；
+- `piweb.message_delivery_receipt.v1`：不可 rewind 的 transport ledger；
 - `piweb.run_settlement.v1`：精确 run outcome 与 final text；
 - `piweb.meta_operation.v1`：破坏性 meta 工具的 started/completed 幂等状态；
 - `piweb.compaction_threshold.v1`：当前会话 20%–90% 的自动压缩阈值，缺省为 70%，最后一条单调时间记录生效。
 - `piweb.compaction_resume.v1`：压缩后继续同一 workbench run 的隐藏 `custom_message`，必须 `display=false` 且只携带合法 `runId`，只校验不投影为卡片或 settlement。默认压缩由 Pi 0.85.1 私有 `_runDefaultCompaction` 在 `session_before_compact` 后执行；custom 结果直接采用并跳过模型解析，否则每次 attempt fresh-resolve 冻结的 compaction identity。显式模型必须可用、contextWindow 为有限正数且不小于本次 primary，失败无 fallback；缺少当前必填 role snapshot 字段的 JSONL 一律 fail closed，不做读时补值或语义迁移。
+- 历史 `piweb.wait_poll.v1` 只接受严格合法的旧 `custom` carrier（UUID `runId`、1–8 整数 `count`、无额外字段），验证后不恢复任何 poll/quota/wait 生命周期状态；畸形记录和其它未知 `piweb.*` 仍 fail closed。
 
 这些类型由宿主拥有。重复 profile、冲突 settlement、方向变化、未知 `piweb.*` 类型或畸形 payload 都 fail closed。卡片以同 `cardId` 的最后状态投影；其来源/目标/正文/委派身份/request fingerprint/冻结角色不可变化，状态和时间只能单调前进，runId 一旦出现即固定，terminal outcome/result 不可改写。settlement 单调从未报告推进到已报告。
 
