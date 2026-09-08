@@ -553,10 +553,6 @@ export interface PublicState {
   activeRun?: {
     id: string;
     phase: "queued" | "running" | "waiting" | "cancelling";
-    waitingFor?: {
-      conversationId: string;
-      runId: string;
-    };
   };
   selectedModel?: { provider: string; id: string };
   selectedServiceTier: ServiceTier | null;
@@ -1032,11 +1028,7 @@ const publicStateSchema: z.ZodType<PublicState> = z.object({
   activeRun: z.object({
     id: runIdSchema,
     phase: z.enum(["queued", "running", "waiting", "cancelling"]),
-    waitingFor: z.object({
-      conversationId: conversationIdSchema,
-      runId: runIdSchema,
-    }).optional(),
-  }).optional(),
+  }).strict().optional(),
   selectedModel: z.object({ provider: z.string(), id: z.string() }).optional(),
   selectedServiceTier: serviceTierSchema.nullable(),
   thinkingLevel: thinkingLevelSchema,

@@ -526,6 +526,35 @@ describe("isAllowedOrigin", () => {
 });
 
 describe("safeSend", () => {
+  it("serializes the successful schema parse without raw unknown fields", () => {
+    const sent: string[] = [];
+    const close = vi.fn();
+    const socket = {
+      readyState: WebSocket.OPEN,
+      send(payload: string) {
+        sent.push(payload);
+      },
+      close,
+    } as unknown as WebSocket;
+    const event = {
+      type: "extension_ui_notification",
+      sessionId: randomUUID(),
+      level: "info",
+      message: "valid projection",
+      rawOnly: "must not reach the wire",
+    } as unknown as ServerEvent;
+
+    safeSend(socket, event);
+
+    expect(sent).toEqual([JSON.stringify({
+      type: "extension_ui_notification",
+      sessionId: event.sessionId,
+      level: "info",
+      message: "valid projection",
+    })]);
+    expect(close).not.toHaveBeenCalled();
+  });
+
   it("replaces a schema-invalid server event and terminates the observation", () => {
     const sent: string[] = [];
     const close = vi.fn();

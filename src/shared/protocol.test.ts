@@ -803,6 +803,18 @@ describe("parseClientCommand", () => {
       busy: true,
       activeRun,
     }))).toThrow("activeRun requires a complete conversation focus");
+    expect(() => parseServerEvent(stateEvent({
+      ...focusedState,
+      busy: true,
+      activeRun: {
+        id: runId,
+        phase: "waiting",
+        waitingFor: {
+          conversationId: targetConversationId,
+          runId: "e509167a-1cc3-4bb9-bb0d-845bf94d9c99",
+        },
+      },
+    }))).toThrow();
     for (const actorFields of [
       { conversationName: "Named" },
       { selectedModel: { provider: "openai", id: "gpt" } },
@@ -867,10 +879,6 @@ describe("parseClientCommand", () => {
         activeRun: {
           id: runId,
           phase: "waiting",
-          waitingFor: {
-            conversationId: targetConversationId,
-            runId: "e509167a-1cc3-4bb9-bb0d-845bf94d9c99",
-          },
         },
         selectedServiceTier: null,
         thinkingLevel: "off",

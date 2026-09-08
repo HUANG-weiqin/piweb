@@ -1592,16 +1592,7 @@ case "set_thinking":
   private publicActiveRun(
     activity: Exclude<ConversationActivity, { kind: "idle" }>,
   ): NonNullable<PublicState["activeRun"]> {
-    if (activity.kind !== "waiting") {
-      return {
-        id: activity.runId,
-        phase: activity.kind,
-      };
-    }
-    return {
-      id: activity.runId,
-      phase: "waiting",
-    };
+    return { id: activity.runId, phase: activity.kind };
   }
 
   private publishProjectSnapshotCoordinated(): void {

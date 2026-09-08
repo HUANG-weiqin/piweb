@@ -305,25 +305,27 @@ function retainedEditBudgetDetails(
 export function toWireValue(value: unknown): unknown {
   if (value === undefined) return;
 
-  const retainedDetails = retainedEditBudgetDetails(value);
-  const budget = { nodes: MAX_WIRE_NODES, truncated: false };
-  const sanitized = sanitizeWireValue(value, new WeakSet<object>(), budget, 0);
-  let json: string;
   try {
-    json = JSON.stringify(sanitized);
+    const retainedDetails = retainedEditBudgetDetails(value);
+    const budget = { nodes: MAX_WIRE_NODES, truncated: false };
+    const sanitized = sanitizeWireValue(value, new WeakSet<object>(), budget, 0);
+    const json = JSON.stringify(sanitized);
+
+    if (budget.truncated || Buffer.byteLength(json, "utf8") > MAX_WIRE_VALUE_BYTES) {
+      return {
+        truncated: true,
+        preview: json.slice(0, TRUNCATED_PREVIEW_CHARS),
+        ...(retainedDetails === undefined ? {} : { details: retainedDetails }),
+      };
+    }
+
+    return JSON.parse(json) as unknown;
   } catch {
-    return safeString(value);
+    const fallback = safeString(value);
+    return Buffer.byteLength(fallback, "utf8") <= MAX_WIRE_VALUE_BYTES
+      ? fallback
+      : "[Unserializable]";
   }
-
-  if (budget.truncated || Buffer.byteLength(json, "utf8") > MAX_WIRE_VALUE_BYTES) {
-    return {
-      truncated: true,
-      preview: json.slice(0, TRUNCATED_PREVIEW_CHARS),
-      ...(retainedDetails === undefined ? {} : { details: retainedDetails }),
-    };
-  }
-
-  return JSON.parse(json) as unknown;
 }
 
 /**

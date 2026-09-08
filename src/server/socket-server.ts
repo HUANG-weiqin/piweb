@@ -100,8 +100,9 @@ export function safeSend(
   let payload: string;
   let invalidObservation = false;
   try {
-    if (serverEventSchema.safeParse(event).success) {
-      payload = JSON.stringify(event);
+    const parsed = serverEventSchema.safeParse(event);
+    if (parsed.success) {
+      payload = JSON.stringify(parsed.data);
     } else {
       payload = SERVER_EVENT_SCHEMA_ERROR;
       invalidObservation = true;

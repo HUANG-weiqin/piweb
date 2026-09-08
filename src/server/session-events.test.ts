@@ -431,6 +431,29 @@ describe("toWireValue", () => {
     expect(() => toWireValue(value)).not.toThrow();
     expect(toWireValue(value)).toBe("[Unserializable]");
   });
+
+  it("does not throw when a proxy array rejects inspection", () => {
+    const value = new Proxy([], {
+      get: () => {
+        throw new Error("cannot inspect array");
+      },
+    });
+
+    expect(() => toWireValue(value)).not.toThrow();
+    expect(toWireValue(value)).toBe("[Unserializable]");
+  });
+
+  it("bounds a proxy fallback that stringifies to a huge value", () => {
+    const value = new Proxy([], {
+      get: (_target, key) => {
+        if (key === Symbol.toPrimitive) return () => "x".repeat(250_000);
+        throw new Error("cannot inspect array");
+      },
+    });
+
+    expect(() => toWireValue(value)).not.toThrow();
+    expect(toWireValue(value)).toBe("[Unserializable]");
+  });
 });
 
 describe("snapshotWireValue", () => {
