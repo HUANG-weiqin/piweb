@@ -81,6 +81,26 @@ interface RoleStoreDocument {
   roles: PersistedRole[];
 }
 
+interface ParsedCurrentRoleStoreDocument {
+  migrated: false;
+  document: RoleStoreDocument;
+}
+
+interface ParsedInlineLegacyRoleStoreDocument {
+  migrated: "inline";
+  legacyRoles: RoleTemplateV1[];
+}
+
+interface ParsedMetadataLegacyRoleStoreDocument {
+  migrated: "metadata";
+  document: RoleStoreDocument;
+}
+
+type ParsedRoleStoreDocument =
+  | ParsedCurrentRoleStoreDocument
+  | ParsedInlineLegacyRoleStoreDocument
+  | ParsedMetadataLegacyRoleStoreDocument;
+
 type RoleStoreListener = () => void;
 
 function isNodeError(error: unknown, code: string): boolean {
@@ -239,6 +259,10 @@ function assertServiceTier(
 function parseRoleMetadata(
   value: Record<string, unknown>,
   label: string,
+  legacyBehavior: boolean,
+  legacyCanManageSessions: boolean,
+  legacyServiceTier: boolean,
+  legacyCompactionModel: boolean,
 ): RoleMetadata {
   assertBoundedString(
     value.name,
@@ -253,29 +277,45 @@ function parseRoleMetadata(
     `${label}.description`,
     MAX_ROLE_DESCRIPTION_CHARACTERS,
   );
-  if (typeof value.canManageSessions !== "boolean") {
+  if (value.canManageSessions !== undefined && value.canManageSessions !== null
+    && typeof value.canManageSessions !== "boolean") {
     throw new Error(`${label}.canManageSessions must be a boolean`);
   }
-  if (value.toolMode !== "read_only" && value.toolMode !== "full_access") {
+  const canManageSessions = legacyCanManageSessions
+    ? (value.canManageSessions ?? false)
+    : value.canManageSessions;
+  if (typeof canManageSessions !== "boolean") {
+    throw new Error(`${label}.canManageSessions must be a boolean`);
+  }
+  const toolMode = value.toolMode
+    ?? (legacyBehavior ? "read_only" : undefined);
+  if (toolMode !== "read_only" && toolMode !== "full_access") {
     throw new Error(`${label}.toolMode must be read_only or full_access`);
   }
+  const defaultThinkingLevel = value.defaultThinkingLevel
+    ?? (legacyBehavior ? "off" : undefined);
   assertThinkingLevel(
-    value.defaultThinkingLevel,
+    defaultThinkingLevel,
     `${label}.defaultThinkingLevel`,
   );
-  assertServiceTier(value.defaultServiceTier, `${label}.defaultServiceTier`);
+  const defaultServiceTier = value.defaultServiceTier === undefined
+    && legacyServiceTier
+    ? null
+    : value.defaultServiceTier;
+  assertServiceTier(defaultServiceTier, `${label}.defaultServiceTier`);
+  const compactionModel = value.compactionModel === undefined
+    && legacyCompactionModel
+    ? null
+    : parseModelReference(value.compactionModel, `${label}.compactionModel`);
   return {
     name: value.name,
     description: value.description,
     model: parseModelReference(value.model, `${label}.model`),
-    compactionModel: parseModelReference(
-      value.compactionModel,
-      `${label}.compactionModel`,
-    ),
-    defaultThinkingLevel: value.defaultThinkingLevel,
-    defaultServiceTier: value.defaultServiceTier,
-    toolMode: value.toolMode,
-    canManageSessions: value.canManageSessions,
+    compactionModel,
+    defaultThinkingLevel,
+    defaultServiceTier,
+    toolMode,
+    canManageSessions,
   };
 }
 
@@ -295,7 +335,7 @@ function parseRoleDraft(value: unknown, label: string): RoleDraft {
     ],
     label,
   );
-  const metadata = parseRoleMetadata(value, label);
+  const metadata = parseRoleMetadata(value, label, false, false, false, false);
   assertBoundedUtf8(
     value.systemPrompt,
     `${label}.systemPrompt`,
@@ -326,6 +366,50 @@ function parseRoleIdentity(
   };
 }
 
+function parseLegacyRoleTemplate(
+  value: unknown,
+  index: number,
+  legacyBehavior: boolean,
+): RoleTemplateV1 {
+  const label = `roles[${index}]`;
+  assertExactObject(
+    value,
+    [
+      "id",
+      "revision",
+      "name",
+      "description",
+      "systemPrompt",
+      "model",
+      "defaultThinkingLevel",
+      "toolMode",
+      "canManageSessions",
+      "createdAt",
+      "updatedAt",
+    ],
+    label,
+  );
+  const identity = parseRoleIdentity(value, label);
+  const metadata = parseRoleMetadata(
+    value,
+    label,
+    legacyBehavior,
+    true,
+    true,
+    true,
+  );
+  assertBoundedUtf8(
+    value.systemPrompt,
+    `${label}.systemPrompt`,
+    MAX_ROLE_SYSTEM_PROMPT_BYTES,
+  );
+  return {
+    ...identity,
+    ...metadata,
+    systemPrompt: value.systemPrompt,
+  };
+}
+
 function expectedSystemPromptFile(roleId: string, revision: number): string {
   return `${ROLE_PROMPTS_DIRECTORY}/${roleId}.${revision}.md`;
 }
@@ -345,6 +429,8 @@ function assertSystemPromptFile(
 function parsePersistedRoleTemplate(
   value: unknown,
   index: number,
+  legacyServiceTier = false,
+  legacyCompactionModel = false,
 ): PersistedRole {
   const label = `roles[${index}]`;
   assertExactObject(
@@ -356,9 +442,9 @@ function parsePersistedRoleTemplate(
       "description",
       "systemPromptFile",
       "model",
-      "compactionModel",
+      ...(legacyCompactionModel ? [] : ["compactionModel"]),
       "defaultThinkingLevel",
-      "defaultServiceTier",
+      ...(legacyServiceTier ? [] : ["defaultServiceTier"]),
       "toolMode",
       "canManageSessions",
       "createdAt",
@@ -375,7 +461,14 @@ function parsePersistedRoleTemplate(
   );
   return {
     ...identity,
-    ...parseRoleMetadata(value, label),
+    ...parseRoleMetadata(
+      value,
+      label,
+      false,
+      false,
+      legacyServiceTier,
+      legacyCompactionModel,
+    ),
     systemPromptFile: value.systemPromptFile,
   };
 }
@@ -411,7 +504,7 @@ function assertUniqueRoles(
 function parseRoleStoreDocument(
   raw: string,
   rolesPath: string,
-): RoleStoreDocument {
+): ParsedRoleStoreDocument {
   let value: unknown;
   try {
     value = JSON.parse(raw);
@@ -423,8 +516,14 @@ function parseRoleStoreDocument(
 
   try {
     assertExactObject(value, ["version", "roles"], "role store");
-    if (value.version !== ROLE_STORE_VERSION) {
-      throw new Error(`version must be ${ROLE_STORE_VERSION}`);
+    const version = value.version;
+    if (
+      typeof version !== "number"
+      || ![1, 2, 3, 4, 5, 6, ROLE_STORE_VERSION].includes(version)
+    ) {
+      throw new Error(
+        `version must be 1, 2, 3, 4, 5, 6 or ${ROLE_STORE_VERSION}`,
+      );
     }
     if (!Array.isArray(value.roles)) {
       throw new Error("roles must be an array");
@@ -433,12 +532,43 @@ function parseRoleStoreDocument(
       throw new Error(`roles must contain at most ${MAX_ROLE_COUNT} roles`);
     }
 
+    if (version === ROLE_STORE_VERSION) {
+      const roles = value.roles.map((role, index) =>
+        parsePersistedRoleTemplate(role, index));
+      assertUniqueRoles(roles);
+      return {
+        migrated: false,
+        document: {
+          version: ROLE_STORE_VERSION,
+          roles,
+        },
+      };
+    }
+
+    if (version === 5 || version === 6) {
+      const roles = value.roles.map((role, index) =>
+        parsePersistedRoleTemplate(
+          role,
+          index,
+          version === 5,
+          true,
+        ));
+      assertUniqueRoles(roles);
+      return {
+        migrated: "metadata",
+        document: {
+          version: ROLE_STORE_VERSION,
+          roles,
+        },
+      };
+    }
+
     const roles = value.roles.map((role, index) =>
-      parsePersistedRoleTemplate(role, index));
+      parseLegacyRoleTemplate(role, index, version !== 4));
     assertUniqueRoles(roles);
     return {
-      version: ROLE_STORE_VERSION,
-      roles,
+      migrated: "inline",
+      legacyRoles: version === 1 ? migrateV1Roles(roles) : roles.map(cloneRole),
     };
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
@@ -446,6 +576,33 @@ function parseRoleStoreDocument(
       cause: error,
     });
   }
+}
+
+function migrateV1Roles(roles: readonly RoleTemplateV1[]): RoleTemplateV1[] {
+  const defaultRole = roles.find(({ id }) => id === "default");
+  if (!defaultRole) return roles.map(cloneRole);
+  const hasDefaultNameConflict = roles.some((role) => (
+    role.id !== "default"
+    && normalizedRoleName(role.name) === normalizedRoleName("默认")
+  ));
+  const shouldMigrateDefault = (
+    defaultRole.name === "Default"
+    && defaultRole.description === ""
+    && defaultRole.revision < Number.MAX_SAFE_INTEGER
+    && !hasDefaultNameConflict
+  );
+  if (!shouldMigrateDefault) return roles.map(cloneRole);
+
+  const migratedAt = new Date().toISOString();
+  return roles.map((role) => role.id === "default"
+    ? {
+        ...role,
+        revision: role.revision + 1,
+        name: "默认",
+        description: "默认角色",
+        updatedAt: migratedAt,
+      }
+    : cloneRole(role));
 }
 
 function cloneModel(
@@ -492,6 +649,15 @@ function toPersistedRole(role: RoleTemplateV1): PersistedRole {
     canManageSessions: role.canManageSessions,
     createdAt: role.createdAt,
     updatedAt: role.updatedAt,
+  };
+}
+
+function documentFromLegacyRoles(
+  roles: readonly RoleTemplateV1[],
+): RoleStoreDocument {
+  return {
+    version: ROLE_STORE_VERSION,
+    roles: roles.map(toPersistedRole),
   };
 }
 
@@ -677,6 +843,15 @@ async function writeRolePromptAtomically(
   }
 }
 
+async function writeRolePromptsForRoles(
+  rolesPath: string,
+  roles: readonly RoleTemplateV1[],
+): Promise<void> {
+  for (const role of roles) {
+    await writeRolePromptAtomically(rolesPath, toPersistedRole(role), role.systemPrompt);
+  }
+}
+
 async function writeRoleStoreAtomically(
   rolesPath: string,
   document: RoleStoreDocument,
@@ -800,14 +975,24 @@ export class RoleStore {
     }
 
     if (existingRaw !== undefined) {
-      document = parseRoleStoreDocument(existingRaw, rolesPath);
-      try {
-        validateRolePrompts(rolesPath, document);
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        throw new Error(`Invalid role store at ${rolesPath}: ${detail}`, {
-          cause: error,
-        });
+      const parsed = parseRoleStoreDocument(existingRaw, rolesPath);
+      if (parsed.migrated === "inline") {
+        document = documentFromLegacyRoles(parsed.legacyRoles);
+        await writeRolePromptsForRoles(rolesPath, parsed.legacyRoles);
+        await writeRoleStoreAtomically(rolesPath, document);
+      } else {
+        document = parsed.document;
+        try {
+          validateRolePrompts(rolesPath, document);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          throw new Error(`Invalid role store at ${rolesPath}: ${detail}`, {
+            cause: error,
+          });
+        }
+        if (parsed.migrated === "metadata") {
+          await writeRoleStoreAtomically(rolesPath, document);
+        }
       }
     } else {
       const model = parseModelReference(initialModel, "initialModel");

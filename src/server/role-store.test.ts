@@ -143,32 +143,154 @@ describe("RoleStore", () => {
     expect(reopened.listRoles()).toEqual([persistedDefault()]);
   });
 
-  it("rejects legacy versions and missing required v7 fields without rewriting", async () => {
-    const invalidDocuments: unknown[] = [
-      ...[1, 2, 3, 4, 5, 6].map((version) => ({
-        version,
-        roles: [persistedRole(persistedDefault())],
-      })),
-      ...[
-        "id",
-        "revision",
-        "name",
-        "description",
-        "systemPromptFile",
-        "model",
-        "compactionModel",
-        "defaultThinkingLevel",
-        "defaultServiceTier",
-        "toolMode",
-        "canManageSessions",
-        "createdAt",
-        "updatedAt",
-      ].map((field) => {
-        const role = persistedRole(persistedDefault()) as Record<string, unknown>;
-        delete role[field];
-        return { version: ROLE_STORE_VERSION, roles: [role] };
-      }),
+  it("migrates a v1 inline role to v7 with compactionModel null without changing its revision", async () => {
+    const rolesPath = await createRolesPath("piweb-role-store-v1-migration-");
+    const role = persistedDefault({
+      revision: 7,
+      name: "Established v1",
+      description: "Legacy inline prompt",
+      systemPrompt: "Preserve this prompt",
+    });
+    const {
+      compactionModel: _omittedCompactionModel,
+      defaultServiceTier: _omittedServiceTier,
+      ...legacyRole
+    } = role;
+    await mkdir(dirname(rolesPath), { recursive: true });
+    await writeFile(rolesPath, `${JSON.stringify({
+      version: 1,
+      roles: [legacyRole],
+    }, null, 2)}\n`, "utf8");
+
+    const store = await RoleStore.open(rolesPath, initialModel);
+
+    expect(store.listRoles()).toEqual([role]);
+    expect(JSON.parse(await readFile(rolesPath, "utf8"))).toEqual({
+      version: ROLE_STORE_VERSION,
+      roles: [persistedRole(role)],
+    });
+    await expect(readFile(promptPath(rolesPath, role), "utf8")).resolves.toBe(
+      role.systemPrompt,
+    );
+  });
+
+  it("migrates v2-v4 inline roles to v7 with compactionModel null while preserving revisions and prompts", async () => {
+    const cases = [
+      {
+        version: 2,
+        defaultThinkingLevel: "off" as const,
+        toolMode: "read_only" as const,
+        omitLegacyBehaviorFields: true,
+      },
+      {
+        version: 3,
+        defaultThinkingLevel: "high" as const,
+        toolMode: "full_access" as const,
+        omitLegacyBehaviorFields: false,
+      },
+      {
+        version: 4,
+        defaultThinkingLevel: "high" as const,
+        toolMode: "full_access" as const,
+        omitLegacyBehaviorFields: false,
+      },
     ];
+
+    for (const {
+      version,
+      defaultThinkingLevel,
+      toolMode,
+      omitLegacyBehaviorFields,
+    } of cases) {
+      const rolesPath = await createRolesPath(
+        `piweb-role-store-v${version}-inline-migration-`,
+      );
+      const role = persistedDefault({
+        revision: version + 20,
+        name: `Established v${version}`,
+        description: "Legacy inline prompt",
+        systemPrompt: `Preserve v${version} prompt`,
+        defaultThinkingLevel,
+        toolMode,
+      });
+      const legacyRole = { ...role } as Record<string, unknown>;
+      delete legacyRole.canManageSessions;
+      delete legacyRole.compactionModel;
+      delete legacyRole.defaultServiceTier;
+      if (omitLegacyBehaviorFields) {
+        delete legacyRole.defaultThinkingLevel;
+        delete legacyRole.toolMode;
+      }
+      await mkdir(dirname(rolesPath), { recursive: true });
+      await writeFile(rolesPath, `${JSON.stringify({
+        version,
+        roles: [legacyRole],
+      }, null, 2)}\n`, "utf8");
+
+      const store = await RoleStore.open(rolesPath, initialModel);
+
+      expect(store.listRoles()).toEqual([role]);
+      expect(JSON.parse(await readFile(rolesPath, "utf8"))).toEqual({
+        version: ROLE_STORE_VERSION,
+        roles: [persistedRole(role)],
+      });
+      await expect(readFile(promptPath(rolesPath, role), "utf8")).resolves.toBe(
+        role.systemPrompt,
+      );
+    }
+  });
+
+  it("migrates v5 and v6 metadata roles to v7 with compactionModel null without changing their revisions", async () => {
+    for (const version of [5, 6] as const) {
+      const rolesPath = await createRolesPath(
+        `piweb-role-store-v${version}-migration-`,
+      );
+      const role = persistedDefault({
+        revision: version + 10,
+        name: `Established v${version}`,
+        description: "Legacy metadata prompt",
+        systemPrompt: `Preserve v${version} prompt`,
+      });
+      const persisted = persistedRole(role) as Record<string, unknown>;
+      delete persisted.compactionModel;
+      if (version === 5) delete persisted.defaultServiceTier;
+      await mkdir(join(dirname(rolesPath), "role-prompts"), { recursive: true });
+      await writeFile(promptPath(rolesPath, role), role.systemPrompt, "utf8");
+      await writeFile(rolesPath, `${JSON.stringify({
+        version,
+        roles: [persisted],
+      }, null, 2)}\n`, "utf8");
+
+      const store = await RoleStore.open(rolesPath, initialModel);
+
+      expect(store.listRoles()).toEqual([role]);
+      expect(JSON.parse(await readFile(rolesPath, "utf8"))).toEqual({
+        version: ROLE_STORE_VERSION,
+        roles: [persistedRole(role)],
+      });
+    }
+  });
+
+  it("rejects missing required v7 fields without rewriting", async () => {
+    const invalidDocuments: unknown[] = [
+      "id",
+      "revision",
+      "name",
+      "description",
+      "systemPromptFile",
+      "model",
+      "compactionModel",
+      "defaultThinkingLevel",
+      "defaultServiceTier",
+      "toolMode",
+      "canManageSessions",
+      "createdAt",
+      "updatedAt",
+    ].map((field) => {
+      const role = persistedRole(persistedDefault()) as Record<string, unknown>;
+      delete role[field];
+      return { version: ROLE_STORE_VERSION, roles: [role] };
+    });
 
     for (const [index, document] of invalidDocuments.entries()) {
       const rolesPath = await createRolesPath(
