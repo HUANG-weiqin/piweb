@@ -4409,6 +4409,50 @@ pre {
   color: color-mix(in srgb, var(--rebel-red) 68%, var(--rebel-paper));
 }
 
+.transcript .message-image-link {
+  min-width: 0;
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 2px 3px;
+  padding: 4px 8px;
+  border: 1px solid var(--rebel-line);
+  border-left: 2px solid var(--rebel-red);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+  transition: none;
+  font: 800 9px/1 "Cascadia Code", Consolas, monospace;
+  letter-spacing: 0.07em;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.transcript .message-image-link:not(:disabled):hover {
+  border-color: var(--rebel-red);
+  color: var(--rebel-on-oxide);
+  background: var(--rebel-red);
+}
+
+.transcript .message-image-link:not(:disabled):active {
+  border-color: var(--rebel-red-dark);
+  color: var(--rebel-paper);
+  background: color-mix(
+    in srgb,
+    var(--rebel-red-dark) 82%,
+    var(--rebel-black)
+  );
+  transform: none;
+}
+
+.transcript .message-image-link:focus-visible {
+  outline: 2px solid var(--rebel-paper);
+  outline-offset: 2px;
+}
+
 .transcript .markdown :not(pre) > code {
   border-radius: 0;
   color: var(--rebel-black);
@@ -6591,6 +6635,11 @@ pre {
   .transcript .tool-body,
   .transcript .commitment-card > .tool-body {
     padding-left: 12px;
+  }
+
+  .transcript .message-image-link {
+    min-height: 44px;
+    padding: 8px 10px;
   }
 
   .composer-wrap {

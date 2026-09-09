@@ -69,8 +69,13 @@ describe("VisualFixture", () => {
     expect(container.querySelector(".activity-running")).toBeInTheDocument();
     expect(container.querySelector(".activity-idle")).toBeInTheDocument();
 
-    expect(screen.getByText("继续：固定丰富状态，并生成两张桌面截图。"))
-      .toBeInTheDocument();
+    const imageLinks = screen.getAllByRole("button", {
+      name: "在新标签页中打开图片 1",
+    });
+    expect(imageLinks).toHaveLength(2);
+    for (const imageLink of imageLinks) {
+      expect(imageLink).toHaveTextContent("查看图片 01 ↗");
+    }
     expect(screen.getByRole("separator", { name: "上下文已压缩：模型未记录" }))
       .toBeInTheDocument();
     expect(screen.getByText("01", { selector: ".topbar-session-ordinal" }))

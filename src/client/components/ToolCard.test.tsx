@@ -243,7 +243,7 @@ describe("ToolCard", () => {
     });
     expect(links).toHaveLength(2);
     expect(container.querySelector(".tool-section:last-child")?.textContent)
-      .toBe("结果before[图片]after[图片]");
+      .toBe("结果before查看图片 01 ↗after查看图片 02 ↗");
 
     fireEvent.click(links[1]!);
     expect(onOpenImage).toHaveBeenCalledWith({

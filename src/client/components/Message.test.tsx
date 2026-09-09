@@ -80,9 +80,11 @@ describe("Message", () => {
     };
     render(<Message message={message} onOpenImage={onOpenImage} />);
 
-    fireEvent.click(screen.getByRole("button", {
+    const imageLink = screen.getByRole("button", {
       name: "在新标签页中打开图片 1",
-    }));
+    });
+    expect(imageLink).toHaveTextContent("查看图片 01 ↗");
+    fireEvent.click(imageLink);
 
     expect(onOpenImage).toHaveBeenCalledWith({
       messageId: "image-message",
