@@ -13,6 +13,8 @@ import {
 
 type ToolRecord = Record<string, unknown>;
 
+const UNAVAILABLE_IMAGE_PLACEHOLDER = "[图片已省略]";
+
 const META_TOOL_NAMES = new Set([
   "list_roles",
   "list_sessions",
@@ -355,7 +357,7 @@ function ToolResult({
           onOpenImage={onOpenImage}
         />
       : <span className="tool-value" key={`image:${index}`}>
-          {PROMPT_IMAGE_PLACEHOLDER}
+          {UNAVAILABLE_IMAGE_PLACEHOLDER}
         </span>];
   }) ?? [];
   const remainingImageNodes = (resultImageRefs ?? [])

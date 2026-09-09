@@ -252,6 +252,34 @@ describe("ToolCard", () => {
     });
   });
 
+  it("renders an unmatched image marker as explicitly unavailable", () => {
+    const unavailableTool: ToolItem = {
+      id: "unavailable-image-tool",
+      name: "custom_image_tool",
+      result: {
+        content: [
+          { type: "image" },
+          { type: "image" },
+        ],
+      },
+      resultImageRefs: [{
+        contentIndex: 1,
+        source: { messageId: "retained-tool-result", imageOrdinal: 1 },
+      }],
+      status: "done",
+    };
+    const { container } = render(
+      <ToolCard tool={unavailableTool} onOpenImage={vi.fn()} />,
+    );
+
+    fireEvent.click(container.querySelector("summary") as HTMLElement);
+
+    expect(screen.getByText("[图片已省略]")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", {
+      name: /在新标签页中打开图片/,
+    })).toHaveLength(1);
+  });
+
   it("describes an empty tool result without exposing implementation values", () => {
     const emptyTool: ToolItem = {
       ...tool,

@@ -147,7 +147,22 @@ function editBudgetFact(value: unknown): unknown {
 }
 
 function omittedToolResult(value: unknown): unknown {
+  const sourceContent = record(value)?.content;
+  const markerContent = Array.isArray(sourceContent)
+    ? sourceContent.map((block) => (
+      record(block)?.type === "image" ? { type: "image" } : null
+    ))
+    : undefined;
+  const hasImageMarker = markerContent?.some((block) => block !== null) === true;
   const budget = editBudgetFact(value);
+  if (hasImageMarker) {
+    return {
+      content: markerContent,
+      ...(budget === undefined
+        ? {}
+        : { details: { piwebEditBudget: budget } }),
+    };
+  }
   if (budget === undefined) return OMITTED_TOOL_VALUE;
   const retained = {
     content: OMITTED_TOOL_VALUE,
@@ -945,11 +960,75 @@ function fitConversationItem(
   }
 
   if (jsonBytes(item) <= maxBytes) return { item, truncated };
+  if (item.kind === "message") {
+    item = fitToolImageReferences(item, maxBytes);
+    if (jsonBytes(item) <= maxBytes) return { item, truncated };
+  }
   const minimal = minimalConversationItem(item);
   if (jsonBytes(minimal) > maxBytes) {
     throw new Error("Conversation history item cannot fit the snapshot budget");
   }
   return { item: minimal, truncated: true };
+}
+
+function limitToolImageReferences<T extends ConversationHistoryMessage>(
+  message: T,
+  limit: number,
+): T {
+  let remaining = limit;
+  const retainedCounts = new Array<number>(message.tools.length).fill(0);
+  for (let index = message.tools.length - 1; index >= 0; index -= 1) {
+    const count = Math.min(
+      message.tools[index]?.resultImageRefs?.length ?? 0,
+      remaining,
+    );
+    retainedCounts[index] = count;
+    remaining -= count;
+  }
+  return {
+    ...message,
+    tools: message.tools.map((tool, index) => {
+      const count = retainedCounts[index] ?? 0;
+      if (tool.resultImageRefs === undefined) return tool;
+      if (count > 0) {
+        return {
+          ...tool,
+          resultImageRefs: tool.resultImageRefs.slice(-count),
+        };
+      }
+      const withoutReferences = { ...tool };
+      delete withoutReferences.resultImageRefs;
+      return withoutReferences;
+    }),
+  } as T;
+}
+
+function fitToolImageReferences<T extends ConversationHistoryMessage>(
+  message: T,
+  maxBytes: number,
+): T {
+  const total = message.tools.reduce(
+    (sum, tool) => sum + (tool.resultImageRefs?.length ?? 0),
+    0,
+  );
+  if (total === 0) return message;
+
+  let lower = 0;
+  let upper = total;
+  let best = limitToolImageReferences(message, 0);
+  if (jsonBytes(best) > maxBytes) return best;
+
+  while (lower < upper) {
+    const candidateLimit = Math.ceil((lower + upper) / 2);
+    const candidate = limitToolImageReferences(message, candidateLimit);
+    if (jsonBytes(candidate) <= maxBytes) {
+      lower = candidateLimit;
+      best = candidate;
+    } else {
+      upper = candidateLimit - 1;
+    }
+  }
+  return best;
 }
 
 function startsNewTurn(item: ConversationHistoryItem, hasTurns: boolean): boolean {

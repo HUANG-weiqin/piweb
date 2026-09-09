@@ -281,38 +281,96 @@ export interface ToolResultWireProjection {
 export function projectToolResultForWire(
   value: unknown,
 ): ToolResultWireProjection {
-  const content = ownDataProperty(value, "content");
-  if (!Array.isArray(content) || nodeTypes.isProxy(content)) {
-    return { value: toWireValue(value), imageContentIndexes: [] };
+  if (
+    value !== null
+    && typeof value === "object"
+    && nodeTypes.isProxy(value)
+  ) {
+    return {
+      value: "[Uninspectable tool result]",
+      imageContentIndexes: [],
+    };
   }
 
-  let projectedContent: unknown[];
+  let content: unknown;
   try {
-    projectedContent = new Array(content.length);
+    if (value === null || typeof value !== "object") {
+      return { value: toWireValue(value), imageContentIndexes: [] };
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(value, "content");
+    if (descriptor === undefined) {
+      return { value: toWireValue(value), imageContentIndexes: [] };
+    }
+    if (!descriptor.enumerable || !("value" in descriptor)) {
+      return {
+        value: "[Uninspectable tool result]",
+        imageContentIndexes: [],
+      };
+    }
+    content = descriptor.value;
   } catch {
+    return {
+      value: "[Uninspectable tool result]",
+      imageContentIndexes: [],
+    };
+  }
+  if (!Array.isArray(content)) {
     return { value: toWireValue(value), imageContentIndexes: [] };
   }
+  if (nodeTypes.isProxy(content)) {
+    return {
+      value: "[Uninspectable tool result]",
+      imageContentIndexes: [],
+    };
+  }
+
+  const projectedContent = new Array(content.length);
   const imageContentIndexes: number[] = [];
+  let replacedUninspectableBlock = false;
   const inspectedLength = Math.min(content.length, MAX_COLLECTION_ITEMS);
   for (let index = 0; index < inspectedLength; index += 1) {
     let block: unknown;
     try {
       const descriptor = Object.getOwnPropertyDescriptor(content, String(index));
-      block = descriptor?.enumerable === true && "value" in descriptor
-        ? descriptor.value
+      if (descriptor?.enumerable !== true || !("value" in descriptor)) {
+        projectedContent[index] = "[Uninspectable]";
+        replacedUninspectableBlock = true;
+        continue;
+      }
+      block = descriptor.value;
+      if (
+        block !== null
+        && typeof block === "object"
+        && nodeTypes.isProxy(block)
+      ) {
+        projectedContent[index] = "[Uninspectable]";
+        replacedUninspectableBlock = true;
+        continue;
+      }
+      const typeDescriptor = block !== null && typeof block === "object"
+        ? Object.getOwnPropertyDescriptor(block, "type")
         : undefined;
+      if (
+        typeDescriptor !== undefined
+        && (typeDescriptor.enumerable !== true || !("value" in typeDescriptor))
+      ) {
+        projectedContent[index] = "[Uninspectable]";
+        replacedUninspectableBlock = true;
+        continue;
+      }
+      if (typeDescriptor?.value === "image") {
+        projectedContent[index] = { type: "image" };
+        imageContentIndexes.push(index);
+      } else {
+        projectedContent[index] = block;
+      }
     } catch {
-      block = "[Uninspectable]";
-    }
-    if (ownDataProperty(block, "type") === "image") {
-      projectedContent[index] = { type: "image" };
-      imageContentIndexes.push(index);
-    } else {
-      projectedContent[index] = block;
+      projectedContent[index] = "[Uninspectable]";
+      replacedUninspectableBlock = true;
     }
   }
 
-  if (imageContentIndexes.length === 0) {
+  if (imageContentIndexes.length === 0 && !replacedUninspectableBlock) {
     return { value: toWireValue(value), imageContentIndexes };
   }
 

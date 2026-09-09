@@ -190,7 +190,9 @@ describe("projectConversationHistory", () => {
     expect(assistant).toMatchObject({ kind: "message" });
     if (assistant?.kind !== "message") throw new Error("expected message item");
     expect(assistant.tools[0]).toMatchObject({
-      result: "[历史工具数据过大，已省略]",
+      result: {
+        content: [null, { type: "image" }],
+      },
       resultImageRefs: [{
         contentIndex: 1,
         source: { messageId: toolResultId, imageOrdinal: 0 },
@@ -656,6 +658,65 @@ describe("projectConversationHistory", () => {
         toolCallId: tool.toolCallId,
       })),
     });
+    expect(snapshot.window.contentTruncated).toBe(true);
+  });
+
+  it("trims the oldest tool-image locators without erasing their markers", () => {
+    const tools = Array.from({ length: 4 }, (_, toolIndex) => {
+      const resultImageRefs = Array.from({ length: 2_000 }, (_, imageOrdinal) => ({
+        contentIndex: imageOrdinal,
+        source: {
+          messageId: `tool-result-${toolIndex}-${"x".repeat(40)}`,
+          imageOrdinal,
+        },
+      }));
+      return {
+        toolCallId: `image-tool-${toolIndex}`,
+        toolName: "custom_image_tool",
+        result: {
+          content: resultImageRefs.map(() => ({ type: "image" })),
+        },
+        resultImageRefs,
+        status: "done" as const,
+      };
+    });
+    const snapshot = snapshotConversationItems([{
+      kind: "message",
+      id: "assistant-image-overflow",
+      role: "assistant",
+      text: "",
+      thinking: "",
+      tools,
+      parts: tools.map((tool) => ({
+        kind: "tool" as const,
+        toolCallId: tool.toolCallId,
+      })),
+    }]);
+    const assistant = snapshot.items[0];
+
+    expect(assistant).toMatchObject({ kind: "message" });
+    if (assistant.kind !== "message") throw new Error("expected message item");
+    const retainedPositions = assistant.tools.flatMap((tool, toolIndex) => (
+      tool.resultImageRefs?.map((reference) => (
+        toolIndex * 2_000 + reference.source.imageOrdinal
+      )) ?? []
+    ));
+    const markerCount = assistant.tools.reduce((sum, tool) => {
+      const content = (tool.result as { content?: unknown[] } | undefined)?.content;
+      return sum + (content?.filter((block) => (
+        (block as { type?: unknown } | null)?.type === "image"
+      )).length ?? 0);
+    }, 0);
+
+    expect(assistant.tools).toHaveLength(4);
+    expect(assistant.parts).toHaveLength(4);
+    expect(markerCount).toBe(8_000);
+    expect(retainedPositions.length).toBeGreaterThan(0);
+    expect(retainedPositions.length).toBeLessThan(8_000);
+    expect(retainedPositions[0]).toBeGreaterThan(0);
+    expect(retainedPositions.at(-1)).toBe(7_999);
+    expect(Buffer.byteLength(JSON.stringify(snapshot.items), "utf8"))
+      .toBeLessThanOrEqual(MAX_HISTORY_SNAPSHOT_BYTES);
     expect(snapshot.window.contentTruncated).toBe(true);
   });
 

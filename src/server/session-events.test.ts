@@ -276,6 +276,44 @@ describe("SessionEventProjector", () => {
     }
   });
 
+  it("fails closed for proxied tool-result content before generic projection", () => {
+    const projector = new SessionEventProjector();
+    const proxiedContent = new Proxy([{
+      type: "image",
+      mimeType: "image/png",
+      data: "proxied-content-secret",
+    }], {});
+    const proxiedBlock = new Proxy({
+      type: "image",
+      mimeType: "image/png",
+      data: "proxied-block-secret",
+    }, {});
+
+    const [updated] = projector.project(nativeEvent({
+      type: "tool_execution_update",
+      toolCallId: "proxy-content",
+      toolName: "custom",
+      partialResult: { content: proxiedContent },
+    }));
+    const [finished] = projector.project(nativeEvent({
+      type: "tool_execution_end",
+      toolCallId: "proxy-block",
+      toolName: "custom",
+      result: { content: [proxiedBlock] },
+      isError: false,
+    }));
+
+    expect(updated).toMatchObject({
+      type: "tool_updated",
+      result: "[Uninspectable tool result]",
+    });
+    expect(finished).toMatchObject({
+      type: "tool_finished",
+      result: { content: ["[Uninspectable]"] },
+    });
+    expect(JSON.stringify([updated, finished])).not.toContain("secret");
+  });
+
   it("splits live assistant output around a delivered session message", () => {
     const projector = new SessionEventProjector();
     projector.project(nativeEvent({ type: "agent_start" }));
