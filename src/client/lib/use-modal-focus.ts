@@ -40,11 +40,12 @@ export function useModalFocus<T extends HTMLElement>(
   identity: string,
   onEscape?: () => void,
   existingContainerRef?: RefObject<T | null>,
+  resolveReturnFocus?: () => HTMLElement | null,
 ): RefObject<T | null> {
   const ownedContainerRef = useRef<T>(null);
   const containerRef = existingContainerRef ?? ownedContainerRef;
   const tokenRef = useRef(Symbol("modal-focus-scope"));
-  const previousFocusRef = useRef<HTMLElement | null>(null);
+  const returnFocusResolverRef = useRef<(() => HTMLElement | null) | null>(null);
   const escapeRef = useRef(onEscape);
   escapeRef.current = onEscape;
 
@@ -54,18 +55,21 @@ export function useModalFocus<T extends HTMLElement>(
     const container = containerRef.current;
     modalStack.push(token);
     if (container) modalContainers.set(token, container);
-    previousFocusRef.current = document.activeElement instanceof HTMLElement
+    const previousFocus = document.activeElement instanceof HTMLElement
       ? document.activeElement
       : null;
+    // Freeze the semantic resolver, not its current DOM node, so responsive
+    // launchers can be replaced while the modal remains open.
+    returnFocusResolverRef.current = resolveReturnFocus ?? (() => previousFocus);
     return () => {
       const index = modalStack.lastIndexOf(token);
       if (index >= 0) modalStack.splice(index, 1);
       modalContainers.delete(token);
-      const previous = previousFocusRef.current;
-      previousFocusRef.current = null;
-      if (previous?.isConnected && isFocusable(previous)) {
-        previous.focus();
-        if (document.activeElement === previous) return;
+      const returnFocus = returnFocusResolverRef.current?.() ?? null;
+      returnFocusResolverRef.current = null;
+      if (returnFocus?.isConnected && isFocusable(returnFocus)) {
+        returnFocus.focus();
+        if (document.activeElement === returnFocus) return;
       }
       const parentToken = modalStack.at(-1);
       const parent = parentToken && modalContainers.get(parentToken);

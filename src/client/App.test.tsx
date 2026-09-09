@@ -1089,7 +1089,7 @@ describe("App", () => {
   });
 
   it("projects phone navigation locally without duplicating Chat or following late events", async () => {
-    mockPhoneViewport();
+    const viewport = mockPhoneViewport();
     localStorage.setItem(
       "piweb.workspaces",
       JSON.stringify(["E:\\work", "E:\\other"]),
@@ -1134,6 +1134,33 @@ describe("App", () => {
     expect(screen.getByRole("main")).toHaveClass("app-shell");
     expect(screen.queryByRole("complementary", { name: "项目会话栏" }))
       .not.toBeInTheDocument();
+
+    const settingsLauncher = screen.getByRole("button", { name: "打开设置" });
+    expect(settingsLauncher).toHaveTextContent("设置");
+    expect(screen.queryByRole("button", { name: "打开会话列表" }))
+      .not.toBeInTheDocument();
+    settingsLauncher.focus();
+    fireEvent.click(settingsLauncher);
+    await waitFor(() => expect(screen.getByRole("button", { name: "关闭" }))
+      .toHaveFocus());
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(settingsLauncher).toHaveFocus());
+
+    fireEvent.click(settingsLauncher);
+    await waitFor(() => expect(screen.getByRole("button", { name: "关闭" }))
+      .toHaveFocus());
+    act(() => viewport.setPhoneViewport(false));
+    const desktopSettingsLauncher = screen.getByRole("button", { name: "设置" });
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(desktopSettingsLauncher).toHaveFocus());
+
+    fireEvent.click(desktopSettingsLauncher);
+    await waitFor(() => expect(screen.getByRole("button", { name: "关闭" }))
+      .toHaveFocus());
+    act(() => viewport.setPhoneViewport(true));
+    const responsiveSettingsLauncher = screen.getByRole("button", { name: "打开设置" });
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(responsiveSettingsLauncher).toHaveFocus());
 
     const sentBeforeBack = socketMock.send.mock.calls.length;
     const chatBack = screen.getByRole("button", { name: "返回会话列表" });

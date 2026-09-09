@@ -134,7 +134,6 @@ describe("Chat", () => {
     const mobile = {
       title: "会话 A",
       onBack: vi.fn(),
-      onShowConversations: vi.fn(),
     };
     const firstPending = [{ promptId: "pending-a", text: "等待中的 A" }];
     const rendered = render(view(emptyChat, "", undefined, {
@@ -154,6 +153,12 @@ describe("Chat", () => {
     expect(rendered.container.querySelectorAll("textarea")).toHaveLength(1);
     expect(screen.getByRole("button", { name: "停止" }))
       .toBeInTheDocument();
+    const settingsLauncher = screen.getByRole("button", { name: "打开设置" });
+    expect(settingsLauncher).toHaveTextContent("设置");
+    expect(screen.queryByRole("button", { name: "打开会话列表" }))
+      .not.toBeInTheDocument();
+    fireEvent.click(settingsLauncher);
+    expect(onSettings).toHaveBeenCalledTimes(1);
 
     fireEvent.click(screen.getByRole("button", { name: "打开任务" }));
     const tasksDialog = screen.getByRole("dialog", { name: "任务" });
@@ -183,11 +188,11 @@ describe("Chat", () => {
     fireEvent.click(screen.getByRole("button", { name: "关闭等待中" }));
 
     fireEvent.click(screen.getByRole("button", { name: "打开控制" }));
-    expect(screen.getByRole("dialog", { name: "控制" })).toBeInTheDocument();
+    const controlsDialog = screen.getByRole("dialog", { name: "控制" });
+    expect(controlsDialog).toBeInTheDocument();
     expect(rendered.container.querySelectorAll(".composer-meta")).toHaveLength(1);
-    fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
-    expect(onSettings).toHaveBeenCalledTimes(1);
-    expect(screen.queryByRole("dialog", { name: "控制" })).not.toBeInTheDocument();
+    expect(within(controlsDialog).queryByRole("button", { name: "打开设置" }))
+      .not.toBeInTheDocument();
 
     expect(onAbort).toHaveBeenCalledTimes(1);
     expect(rendered.container.querySelectorAll("textarea")).toHaveLength(1);
@@ -197,7 +202,6 @@ describe("Chat", () => {
     const mobile = {
       title: "会话 A",
       onBack: vi.fn(),
-      onShowConversations: vi.fn(),
     };
     const rendered = render(view(emptyChat, "", undefined, { mobile }));
     const launcher = screen.getByRole("button", { name: "打开控制" });
@@ -259,7 +263,6 @@ describe("Chat", () => {
       active: true,
       title: "会话 A",
       onBack: vi.fn(),
-      onShowConversations: vi.fn(),
     };
     const rendered = render(view(emptyChat, "", undefined, { mobile }));
 
@@ -295,7 +298,6 @@ describe("Chat", () => {
       active: true,
       title: "会话 A",
       onBack: vi.fn(),
-      onShowConversations: vi.fn(),
     };
     const rendered = render(view(emptyChat, "", role, {
       mobile,
@@ -332,7 +334,6 @@ describe("Chat", () => {
     const mobile = {
       title: "会话 A",
       onBack: vi.fn(),
-      onShowConversations: vi.fn(),
     };
     const rendered = render(view(emptyChat, "", undefined, {
       mobile,

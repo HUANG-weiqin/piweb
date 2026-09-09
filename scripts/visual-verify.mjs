@@ -27,8 +27,13 @@ const ledgerViewports = [
   [390, 600],
 ];
 const jumpViewports = [[1440, 900], [390, 844], [390, 600]];
+const settingsViewports = [[1440, 900], [390, 844], [320, 600]];
 const secondarySurfaceDefinitions = {
-  drawer: { group: "A", expectedSelector: '.drawer[role="dialog"]' },
+  drawer: {
+    group: "A",
+    expectedSelector: '.drawer[role="dialog"]',
+    viewports: settingsViewports,
+  },
   "role-manager": { group: "A", expectedSelector: ".role-manager-dialog" },
   "role-switch": { group: "A", expectedSelector: ".conversation-role-dialog" },
   directory: { group: "A", expectedSelector: ".directory-browser-modal" },
@@ -1113,7 +1118,10 @@ async function inspectMobileScene(client, scene) {
       checkVisible(".workbench-main button.send.stop", "STOP", true);
       checkVisible(".workbench-main .mobile-composer-launchers", "mobile launchers");
       checkVisible(".workbench-main .mobile-chat-header button[aria-label=\\"返回会话列表\\"]", "chat back", true);
-      checkVisible(".workbench-main .mobile-chat-header button[aria-label=\\"打开会话列表\\"]", "chat agents", true);
+      checkVisible(".workbench-main .mobile-chat-header button[aria-label=\\"打开设置\\"]", "chat settings", true);
+      if (document.querySelector('.workbench-main .mobile-chat-header button[aria-label="打开会话列表"]')) {
+        issues.push("mobile chat header retains the redundant AGENTS launcher");
+      }
       const launchers = [...document.querySelectorAll(
         ".workbench-main .mobile-composer-launchers button",
       )];
@@ -1277,7 +1285,6 @@ async function inspectMobileSheet(client, kind) {
     }
     if (kind === "controls") {
       const required = [
-        [".mobile-model-settings", "model entry"],
         [".conversation-role-pill", "conversation role"],
         ['select[aria-label="思考级别"]', "thinking level"],
         ['select[aria-label="服务层级"]', "service tier"],
@@ -1287,6 +1294,9 @@ async function inspectMobileSheet(client, kind) {
       for (const [selector, label] of required) {
         const element = surface?.querySelector(selector);
         if (!element || !visible(element)) issues.push(label + " is not visible");
+      }
+      if (surface?.querySelector('button[aria-label="打开设置"], .mobile-model-settings')) {
+        issues.push("controls sheet retains a duplicate Settings launcher");
       }
       if ((surface?.querySelectorAll(".compaction-threshold-toggle").length ?? 0) < 2) {
         issues.push("compaction controls are incomplete");
@@ -1316,6 +1326,104 @@ async function inspectMobileSheet(client, kind) {
   })()`);
   if (result.issues.length > 0) {
     throw new Error(`Mobile ${kind} sheet failed: ${result.issues.join(", ")}; dialog=${JSON.stringify(result.dialog)}; sheet=${JSON.stringify(result.sheet)}; header=${JSON.stringify(result.header)}; backdrop=${JSON.stringify(result.backdrop)}; close=${JSON.stringify(result.close)}`);
+  }
+  return result;
+}
+
+async function inspectMobileSettings(client, scrolled = false) {
+  const result = await client.evaluate(`(() => {
+    const expectScrolled = ${scrolled ? "true" : "false"};
+    const issues = [];
+    const visible = (element) => {
+      if (!element || element.hidden) return false;
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden"
+        && element.getClientRects().length > 0 && rect.width > 0 && rect.height > 0;
+    };
+    const rectOf = (element) => {
+      if (!element) return null;
+      const rect = element.getBoundingClientRect();
+      return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom,
+        width: rect.width, height: rect.height };
+    };
+    const drawer = document.querySelector('.drawer[role="dialog"][aria-label="设置"]');
+    const backdrop = drawer?.parentElement;
+    const header = drawer?.querySelector(".drawer-header");
+    const close = drawer?.querySelector('button[aria-label="关闭"]');
+    const options = [...(drawer?.querySelectorAll(".color-scheme-option") ?? [])];
+    const modelHeading = [...(drawer?.querySelectorAll("h3") ?? [])]
+      .find((heading) => heading.textContent?.trim() === "模型目录");
+    const drawerRect = rectOf(drawer);
+    const headerRect = rectOf(header);
+    const closeRect = rectOf(close);
+    const modelHeadingRect = rectOf(modelHeading);
+    if (!visible(drawer)) issues.push("Settings drawer is not visible");
+    if (!drawerRect || Math.abs(drawerRect.left) > 1 || Math.abs(drawerRect.top) > 6
+      || Math.abs(drawerRect.right - innerWidth) > 1
+      || Math.abs(drawerRect.bottom - innerHeight) > 1) {
+      issues.push("Settings is not an edge-to-edge mobile surface");
+    }
+    const drawerStyle = drawer ? getComputedStyle(drawer) : null;
+    const backdropStyle = backdrop ? getComputedStyle(backdrop) : null;
+    if (drawerStyle?.position !== "fixed") issues.push("Settings mobile surface is not fixed");
+    if (!['auto', 'scroll'].includes(drawerStyle?.overflowY ?? "")) {
+      issues.push("Settings has no internal vertical scroll owner");
+    }
+    if (drawerStyle?.overscrollBehaviorY !== "contain") {
+      issues.push("Settings scroll can chain into the page");
+    }
+    if (backdropStyle?.overflow !== "hidden") issues.push("Settings backdrop does not lock background overflow");
+    if (getComputedStyle(header).position !== "sticky") issues.push("Settings header is not sticky");
+    if (!closeRect || closeRect.width < 44 || closeRect.height < 44) {
+      issues.push("Settings close target is smaller than 44px");
+    }
+    if (options.length !== 2) issues.push("expected two single-column theme cards");
+    options.forEach((option, index) => {
+      const rect = rectOf(option);
+      if (!rect || rect.height < 44 || rect.left < -1 || rect.right > innerWidth + 1) {
+        issues.push("theme card " + (index + 1) + " is not a full touch target");
+      }
+      if (index > 0) {
+        const previous = rectOf(options[index - 1]);
+        if (rect && previous && rect.top < previous.bottom - 1) {
+          issues.push("theme cards are not arranged in one column");
+        }
+      }
+    });
+    const clippedText = [...(drawer?.querySelectorAll(
+      ".drawer-header p:last-child, .settings-section-heading p, .current-model strong, .current-model small, .provider-identity strong, .provider-identity small, .model strong, .model small",
+    ) ?? [])].filter((element) => element.scrollWidth > element.clientWidth + 1);
+    if (clippedText.length > 0) issues.push("Settings contains horizontally clipped text");
+    if (document.querySelector('.composer-meta.mobile-sheet-surface:not([hidden])')) {
+      issues.push("Controls sheet remained open behind Settings");
+    }
+    const html = document.documentElement;
+    const body = document.body;
+    const overflow = Math.max(html.scrollWidth, body?.scrollWidth ?? 0) > innerWidth + 1;
+    if (overflow) issues.push("Settings introduced horizontal overflow");
+    if ((document.scrollingElement?.scrollTop ?? 0) !== 0) issues.push("background document scrolled");
+    if (expectScrolled) {
+      if ((drawer?.scrollTop ?? 0) <= 0) issues.push("Settings did not scroll");
+      if (!modelHeadingRect || modelHeadingRect.bottom <= (headerRect?.bottom ?? 0)
+        || modelHeadingRect.top >= innerHeight) {
+        issues.push("model directory is not reachable after scrolling");
+      }
+    }
+    return {
+      issues,
+      drawer: drawerRect,
+      header: headerRect,
+      close: closeRect,
+      modelHeading: modelHeadingRect,
+      scrollTop: drawer?.scrollTop ?? null,
+      scrollRange: drawer ? drawer.scrollHeight - drawer.clientHeight : null,
+      bodyScrollTop: document.scrollingElement?.scrollTop ?? null,
+      overflow,
+    };
+  })()`);
+  if (result.issues.length > 0) {
+    throw new Error(`Mobile Settings failed: ${result.issues.join(", ")}; ${JSON.stringify(result)}`);
   }
   return result;
 }
@@ -1400,6 +1508,53 @@ async function exerciseMobileWorkbench(client, outputPath, width, height, index,
   const controlsFocus = await client.evaluate(`document.activeElement === document.querySelector(${JSON.stringify(controlsLauncher)})`);
   if (!controlsFocus) throw new Error("Mobile controls sheet did not restore launcher focus");
 
+  // Exercise the hand-off from an existing Controls focus scope. The stable
+  // header launcher, rather than the disappearing sheet control, owns return focus.
+  await clickVisibleButton(client, controlsLauncher);
+  const settingsLauncher = '.mobile-chat-header button[aria-label="打开设置"]';
+  const requestedSettings = await client.evaluate(`(() => {
+    const launcher = document.querySelector(${JSON.stringify(settingsLauncher)});
+    if (!(launcher instanceof HTMLButtonElement)) return false;
+    launcher.click();
+    return true;
+  })()`);
+  if (!requestedSettings) throw new Error("Mobile Settings launcher was unavailable");
+  await waitForSecondaryInteraction();
+  const settings = await inspectMobileSettings(client);
+  if (shouldCapture) {
+    captures.push(await captureMobileScene(
+      client, outputPath, width, height, index + captures.length, "settings", settings,
+    ));
+  }
+  await client.call("Input.dispatchMouseEvent", {
+    type: "mouseWheel",
+    x: Math.max(1, width - 18),
+    y: Math.max(1, Math.round(height * 0.7)),
+    deltaX: 0,
+    deltaY: 10_000,
+  });
+  await waitForSecondaryInteraction();
+  const settingsScrolled = await inspectMobileSettings(client, true);
+  if (shouldCapture) {
+    captures.push(await captureMobileScene(
+      client, outputPath, width, height, index + captures.length,
+      "settings-connections", settingsScrolled,
+    ));
+  }
+  await client.call("Input.dispatchKeyEvent", {
+    type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27,
+  });
+  await client.call("Input.dispatchKeyEvent", {
+    type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27,
+  });
+  await waitForSecondaryInteraction();
+  const settingsFocus = await client.evaluate(`document.activeElement === document.querySelector(${JSON.stringify(settingsLauncher)})`);
+  if (!settingsFocus) throw new Error("Mobile Settings did not restore its stable header launcher");
+  await clickVisibleButton(client, settingsLauncher);
+  await clickVisibleButton(client, '.drawer button[aria-label="关闭"]');
+  const settingsCloseFocus = await client.evaluate(`document.activeElement === document.querySelector(${JSON.stringify(settingsLauncher)})`);
+  if (!settingsCloseFocus) throw new Error("Mobile Settings close did not restore its header launcher");
+
   let pendingDiagnostics = null;
   if (pending) {
     const pendingLauncher = 'button[aria-label="打开等待中"]';
@@ -1408,7 +1563,16 @@ async function exerciseMobileWorkbench(client, outputPath, width, height, index,
     if (!pendingDiagnostics.focusedClose) throw new Error("Mobile pending sheet did not focus its close button");
   }
   if (!shouldCapture) {
-    return { sceneDiagnostics, tasks, afterTasks, controls, afterControls, pending: pendingDiagnostics };
+    return {
+      sceneDiagnostics,
+      tasks,
+      afterTasks,
+      controls,
+      afterControls,
+      settings,
+      settingsScrolled,
+      pending: pendingDiagnostics,
+    };
   }
   return captures;
 }
