@@ -231,12 +231,16 @@ function createChat(commitmentReason: string): ChatState {
     id: "message-follow-up",
     runId: "run-follow-up",
     role: "user",
-    text: "继续：固定丰富状态，并生成两张桌面截图。",
+    text: "继续：固定历史证据[图片]并生成两张桌面截图。",
     thinking: "",
     tools: [],
     parts: [{
       kind: "text",
-      text: "继续：固定丰富状态，并生成两张桌面截图。",
+      text: "继续：固定历史证据[图片]并生成两张桌面截图。",
+    }],
+    imageRefs: [{
+      offset: 9,
+      source: { messageId: "message-follow-up", imageOrdinal: 0 },
     }],
   }, {
     kind: "message",
@@ -250,6 +254,10 @@ function createChat(commitmentReason: string): ChatState {
       name: "read",
       args: { path: "src/client/components/Chat.tsx" },
       result: { details: { lines: 911, truncated: false } },
+      resultImageRefs: [{
+        contentIndex: 0,
+        source: { messageId: "tool-read-result", imageOrdinal: 0 },
+      }],
       status: "done",
     }, {
       id: "tool-budget",
@@ -538,6 +546,7 @@ export function VisualFixture({
         onSwitchRole={noOp}
         onChangeCwd={noOp}
         onOpenConversation={noOp}
+        onOpenImage={noOp}
         onRewind={noOp}
       />
     </div>
