@@ -101,14 +101,19 @@ function modelConnectionsSummary(
   preferencesOnline: boolean,
   refreshing: boolean,
 ): string {
-  const pending = refreshing ? "正在刷新模型 · " : "";
+  let summary: string;
   if (!preferencesOnline) {
-    return state ? `${pending}离线 · ${modelStateSummary(state)}` : `${pending}离线 · 无可管理会话`;
+    summary = state ? `离线 · ${modelStateSummary(state)}` : "离线 · 无可管理会话";
+  } else if (!state) {
+    summary = "当前会话未就绪";
+  } else if (!online) {
+    summary = `当前会话暂不可管理 · ${modelStateSummary(state)}`;
+  } else if (state.busy) {
+    summary = `会话运行中 · ${modelStateSummary(state)}`;
+  } else {
+    summary = modelStateSummary(state);
   }
-  if (!state) return `${pending}当前会话未就绪`;
-  if (!online) return `${pending}当前会话暂不可管理 · ${modelStateSummary(state)}`;
-  if (state.busy) return `${pending}会话运行中 · ${modelStateSummary(state)}`;
-  return `${pending}${modelStateSummary(state)}`;
+  return refreshing ? `正在刷新模型 · ${summary}` : summary;
 }
 
 function modelStateSummary(state: PublicState): string {
