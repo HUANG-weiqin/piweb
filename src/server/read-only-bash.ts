@@ -289,7 +289,7 @@ function isReviewedSegment(segment: ParsedSegment): boolean {
   }
 }
 
-function isReviewedCommand(command: string): boolean {
+export function isReviewedCommand(command: string): boolean {
   const segments = parseSafeSegments(command);
   return segments !== undefined && segments.every(isReviewedSegment);
 }
