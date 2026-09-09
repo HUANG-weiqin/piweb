@@ -44,7 +44,7 @@
 - 创建或切换会话角色时返回完整深快照，不把模板对象引用交给 session；角色默认思考强度必须属于固定模型实际支持的档位，无可调档位的模型使用唯一有效值。工作台投影模型可选思考档位必须与 Pi SDK 的 `getSupportedThinkingLevels()` 语义一致：`null` 表示禁用，`xhigh/max` 只有显式映射时才可选。
 - 未携带角色快照的旧会话迁移为独立“旧会话”快照；可复用其历史模型或任一现存角色模型，但不依赖、也不重建已删除的初始化模板。
 
-`UiPreferencesStore` 是进程级用户界面偏好 owner：严格 v1 读写同一 `<Pi agent dir>/piweb/ui-preferences.json`，当前只接受 `quiet-rebel | classic-rebel`。缺失、不可读或 schema 损坏都以 `quiet-rebel` 安全启动并保留启动 warning；损坏状态要求下一次显式选择修复，即使用户选择默认值也不能短路。每次提交在进程级 tail 上串行，以同目录独占临时文件写完后原子 rename；磁盘成功后才替换内存快照并允许 socket 广播，失败会清理临时文件且不得改变旧快照。socket server 会在 reload/close 同步冻结新偏好修改：普通 reload 先 drain 已接受写入再公开 admission-frozen，force reload 则按 best-effort 合同不等待旧写入；重复 reload 若 coordinator 在 freeze callback 前拒绝，外层也必须立即失败而不能悬挂。它不进入项目 `.piweb`、RoleCatalog、conversation lifecycle 或浏览器持久状态。
+`UiPreferencesStore` 是进程级用户界面偏好 owner：严格 v1 读写同一 `<Pi agent dir>/piweb/ui-preferences.json`，当前只接受 `quiet-rebel | classic-rebel`。文件缺失是正常首次启动，以 `quiet-rebel` 开始且不产生 warning；不可读或 schema 损坏同样安全回退并保留启动 warning。损坏状态要求下一次显式选择修复，即使用户选择默认值也不能短路。每次提交在进程级 tail 上串行，以同目录独占临时文件写完后原子 rename；磁盘成功后才替换内存快照并允许 socket 广播，失败会 best-effort 清理临时文件且不得改变旧快照。socket server 会在 reload/close 同步冻结新偏好修改和新的 lazy coordination acquisition：普通 reload 先 drain 已接受写入再公开 admission-frozen，且等待期间不能从 absent coordinator 新建出未安装 latch 的 run；force reload 则按 best-effort 合同不等待旧写入。重复 reload 若 coordinator 在 freeze callback 前拒绝，外层也必须立即失败而不能悬挂。它不进入项目 `.piweb`、RoleCatalog、conversation lifecycle 或浏览器持久状态。
 
 `ProjectSessionCoordinator` 是 conversation 生命周期拥有者：
 
@@ -55,7 +55,7 @@
 - 维护进程级项目活动目录，每个 context 的摘要独立缓存，只在 busy/compacting/attention 汇总真正变化时通知全局 observer；高频 `session_event` 不触发目录扫描，可发布目录始终限制为 100 项，遗漏项目一旦变化就进入目录并优先替换最旧的低活动项；
 - server close 会同步封闭新 acquisition 与项目 lifecycle queue；已排队但未开始的 task 在持久写前失败，队列完全 drain 后才 dispose 尚在打开的 actor/catalog、全部后台 actor、项目 model catalog 并释放共享项目 handle。
 
-只读目录浏览属于 socket server 的 pre-session 控制边界：每次请求只枚举指定位置的一层子目录，结果按 commandId 返回；它不进入 `PiConnection` actor，也不参与项目或会话持久化。
+只读目录浏览属于 socket server 的 pre-session 控制边界：每次请求只枚举指定位置的一层子目录，结果按 commandId 返回；它不进入 `PiConnection` actor，也不参与项目或会话持久化。socket control 与 `PiConnection` 共用同一连接级 commandId registry，因此目录、偏好和 session 命令之间也不能复用身份。
 
 `PiConnection` 是每 WebSocket 一个的项目观察与焦点控制器：
 

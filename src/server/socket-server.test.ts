@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -478,6 +479,24 @@ describe("isAllowedOrigin", () => {
       commandId,
     });
 
+    const crossCommandSessionId = randomUUID();
+    const crossCommandError = nextEvent(source);
+    source.send(JSON.stringify({
+      type: "initialize",
+      commandId,
+      sessionId: crossCommandSessionId,
+      cwd: join(tmpdir(), `piweb-missing-${randomUUID()}`),
+      conversation: { kind: "recent" },
+    }));
+    await expect(crossCommandError).resolves.toMatchObject({
+      type: "error",
+      scope: "command",
+      operation: "initialize",
+      sessionId: crossCommandSessionId,
+      commandId,
+      message: expect.stringContaining("already used"),
+    });
+
     failWrite = true;
     const failedCommandId = randomUUID();
     const writeError = nextEvent(source);
@@ -546,6 +565,100 @@ describe("isAllowedOrigin", () => {
       sourceClosed,
       observerClosed,
     ]);
+  });
+
+  it("freezes lazy coordination before draining preferences for normal reload", async () => {
+    const projectCwd = await mkdtemp(join(tmpdir(), "piweb-reload-freeze-"));
+    const server = createServer();
+    const runtime = new SocketTestRuntime();
+    const getAvailable = vi.fn(() => {
+      throw new Error("lazy coordination was created during reload");
+    });
+    Object.assign(runtime.modelRegistry, { getAvailable });
+    let releaseWrite: (() => void) | undefined;
+    let markWriteStarted: (() => void) | undefined;
+    const writeStarted = new Promise<void>((resolve) => {
+      markWriteStarted = resolve;
+    });
+    const preferences = {
+      get: () => ({ colorScheme: "quiet-rebel" as const }),
+      setColorScheme: async () => {
+        markWriteStarted?.();
+        await new Promise<void>((resolve) => {
+          releaseWrite = resolve;
+        });
+        return { colorScheme: "classic-rebel" as const };
+      },
+    };
+    const socketServer = attachSocketServer(
+      server,
+      "E:\\work",
+      runtime,
+      undefined,
+      false,
+      preferences,
+    );
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("server did not bind a TCP port");
+    const socket = new WebSocket(`ws://127.0.0.1:${address.port}/ws`, {
+      origin: `http://127.0.0.1:${address.port}`,
+    });
+    await nextEvent(socket);
+
+    const admittedCommandId = randomUUID();
+    socket.send(JSON.stringify({
+      type: "set_color_scheme",
+      commandId: admittedCommandId,
+      colorScheme: "classic-rebel",
+    }));
+    await writeStarted;
+
+    const admissionFrozen = vi.fn();
+    const reload = socketServer.prepareReload(false, admissionFrozen);
+    void reload.catch(() => undefined);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(admissionFrozen).not.toHaveBeenCalled();
+
+    const sessionId = randomUUID();
+    const initializeCommandId = randomUUID();
+    const initializeError = nextEvent(socket);
+    socket.send(JSON.stringify({
+      type: "initialize",
+      commandId: initializeCommandId,
+      sessionId,
+      cwd: projectCwd,
+      conversation: { kind: "recent" },
+    }));
+
+    try {
+      await expect(initializeError).resolves.toMatchObject({
+        type: "error",
+        scope: "command",
+        operation: "initialize",
+        sessionId,
+        commandId: initializeCommandId,
+        message: expect.stringContaining("admission is frozen"),
+      });
+      expect(getAvailable).not.toHaveBeenCalled();
+    } finally {
+      releaseWrite?.();
+    }
+
+    const admittedChange = nextEvent(socket);
+    await expect(admittedChange).resolves.toMatchObject({
+      type: "ui_preferences_changed",
+      commandId: admittedCommandId,
+    });
+    await expect(reload).resolves.toEqual([]);
+    expect(admissionFrozen).toHaveBeenCalledOnce();
+
+    const socketClosed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+    const httpClosed = new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+    await Promise.all([socketServer.close(), httpClosed, socketClosed]);
+    await rm(projectCwd, { recursive: true, force: true });
   });
 
   it("freezes preference admission without waiting for an in-flight write on force reload", async () => {
