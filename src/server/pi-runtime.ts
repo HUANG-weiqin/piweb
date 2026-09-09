@@ -445,6 +445,8 @@ export interface PiRuntimeLike {
   readonly modelRuntime: ModelRuntime;
   readonly modelRegistry: ModelRegistry;
   createSession(cwd: string, options?: CreatePiSessionOptions): Promise<CreatedPiSession>;
+  /** Absence fails closed; this never uses the no-SDK-resources trust shortcut. */
+  ensureProjectAnalysisTrust?(cwd: string, ui?: PortableExtensionUI, signal?: AbortSignal): Promise<boolean>;
   createProjectModelCatalog(
     cwd: string,
     options?: CreateProjectModelCatalogOptions,
@@ -767,6 +769,17 @@ export class PiRuntime implements PiRuntimeLike {
       allowModelNetwork: false,
     });
     return new SessionModelRuntime(runtime, fixedModel);
+  }
+
+  async ensureProjectAnalysisTrust(
+    cwd: string,
+    ui?: PortableExtensionUI,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    return this.resolveProjectTrust(cwd, this.createSettings(cwd), ui, {
+      requireExecutionTrust: true,
+      signal,
+    });
   }
 
   async createProjectModelCatalog(
@@ -1644,34 +1657,42 @@ export class PiRuntime implements PiRuntimeLike {
     cwd: string,
     settings: SettingsManager,
     ui: PortableExtensionUI | undefined,
+    options: { requireExecutionTrust?: boolean; signal?: AbortSignal } = {},
   ): Promise<boolean> {
-    if (!hasTrustRequiringProjectResources(cwd)) return true;
+    if (options.signal?.aborted) return false;
+    if (!options.requireExecutionTrust && !hasTrustRequiringProjectResources(cwd)) return true;
+    const deniedMessage = options.requireExecutionTrust
+      ? "项目未受信任，未启动本机语言服务。"
+      : "项目资源未受信任，已跳过项目设置、skills 和 extensions。";
     const saved = this.projectTrustStore.get(cwd);
     if (saved !== null) {
-      if (!saved) {
-        ui?.notify("项目资源未受信任，已跳过项目设置、skills 和 extensions。", "warning");
-      }
+      if (!saved) ui?.notify(deniedMessage, "warning");
       return saved;
     }
 
+    // Pi deliberately reads this policy from global settings, never project settings.
     switch (settings.getDefaultProjectTrust()) {
       case "always": return true;
       case "never":
-        ui?.notify("项目资源未受信任，已跳过项目设置、skills 和 extensions。", "warning");
+        ui?.notify(deniedMessage, "warning");
         return false;
       case "ask": break;
     }
     if (!ui) return false;
 
     const selected = await ui.select(
-      `是否信任项目资源？\n${cwd}`,
+      options.requireExecutionTrust
+        ? `是否信任项目并运行本机语言服务？\n${cwd}\n语言服务可能执行构建工具、插件或写入缓存，并非 OS 只读沙箱。“仅本次”覆盖当前工作区服务生命周期。`
+        : `是否信任项目资源？\n${cwd}`,
       [
         TRUST_PROJECT_AND_REMEMBER,
         TRUST_PROJECT_ONCE,
         DECLINE_PROJECT_AND_REMEMBER,
         DECLINE_PROJECT_ONCE,
       ],
+      options.signal ? { signal: options.signal } : undefined,
     );
+    if (options.signal?.aborted) return false;
     if (selected === TRUST_PROJECT_AND_REMEMBER) {
       this.projectTrustStore.set(cwd, true);
       return true;
@@ -1680,7 +1701,7 @@ export class PiRuntime implements PiRuntimeLike {
     if (selected === DECLINE_PROJECT_AND_REMEMBER) {
       this.projectTrustStore.set(cwd, false);
     }
-    ui.notify("项目资源未受信任，已跳过项目设置、skills 和 extensions。", "warning");
+    ui.notify(deniedMessage, "warning");
     return false;
   }
 

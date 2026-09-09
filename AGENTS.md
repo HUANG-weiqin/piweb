@@ -29,6 +29,7 @@ Pi Web 是本机优先的极简 Agent 工作台。当前目标不是复制 Pi �
 - `PiRuntime` 进程级共享 `CredentialStore` 与基线 `ModelRegistry`，每个 session 另有隔离的模型目录；所有认证/模型缓存修改必须从串行入口经过。Pi 0.85.1 的私有 `_runDefaultCompaction` 是唯一默认压缩适配点：custom `session_before_compact` 结果直接采用，否则 fresh-resolve 冻结的显式压缩模型并保留 Pi 原生准备、摘要、split-turn、文件、usage、abort、持久化和 continuation；失败不回退、不追加 compaction/rebuild，接点前 Pi transient overflow recovery 变化不承诺回滚。
 - 项目扩展可以注册工具、hooks 和静态 provider 配置；在引入 worker/进程隔离前，必须拒绝进程全局的 `streamSimple` 与 OAuth provider 注册。
 - 项目资源必须在 trust resolution 后加载；默认 `SettingsManager` 不得以 `projectTrusted=true` 启动。
+- 本机 stdio LSP 由 `ProjectContext` 在强制解析既有用户级 project trust 后惰性拥有；无 SDK 资源的信任捷径不能授权进程。三个只读 SDK 工具固定为 `lsp_symbols/lsp_definition/lsp_references`，路径必须在当前工作区内，位置为 1-based UTF-16。连接按 canonical root + 完整冻结配置指纹共享；只串行磁盘复核/同步/派发，响应等待在门外，caller 取消不能杀其它 actor 使用的进程。已知变化无有效同步覆盖则停止复用；不修改 Pi 内核、浏览器协议，不建立第二套索引或虚拟源码读取。语言差异只属于 `src/server/lsp/servers/` 声明或局部适配，用户配置仅从 `<Pi agent dir>/piweb/lsp.json` 读取。
 - 允许的 provider 配置必须先深快照再交给 SDK，不能保留扩展传入的可变对象引用。
 - `ProjectStoreRegistry` 按 canonical cwd 在活动 handle 生命周期内复用项目 store，末次 release 后逐出；`.piweb/project.json` 是 durable manifest，`.piweb/sessions` 是受控 Pi sessionDir。角色快照中的 compaction identity 随 conversation 持久化并由 coordinator 在 reopen/rollback 及 peer 路径中保持，不由当前目录刷新改写。
 - `ConversationActor` 原子持有一个持久 conversation 的 project store、`SessionManager`、writer lease、角色/LoopList 快照、AgentSession runtime 和唯一 active run；`PiConnection` 只持有项目观察、当前 focus 与连接级临时交互。
@@ -62,7 +63,7 @@ Pi Web 是本机优先的极简 Agent 工作台。当前目标不是复制 Pi �
 - 工具策略必须位于项目扩展 `tool_call` hook 之后、真实 `tool.execute` 之前，并只按 run 启动时冻结的 conversation role 权限决策。
 - 会话角色切换命令必须精确匹配 `sessionId + conversationId + focusId + commandId`；busy 会话拒绝，切换不能改变 conversationId、历史、lifecycle 或 createdBy。
 - 工具 gate 启用时固定使用 sequential execution，避免 SDK parallel preflight 在 abort 或模式收紧后执行已积累的 thunk。
-- `read_only` 的有效工具集只投影 `source=builtin` 的 Pi 原生 `read/grep/find/ls`，以及 `source=sdk` 的宿主受审查 `bash`、conversation-scoped notebook/LoopList 工具、本机时间 `current_time`、`request_context_compaction` 和 `list_roles/read_role/propose_role_revision`；`PiRuntime` 必须用当前 session 的有效 `SettingsManager.shellPath` 创建宿主 `bash`；该工具先用有界词法与命令级规则审查 Git、rg 和常用文件查询，可组合受审查管道/`&&`，`cd` 只改变同一次调用的目录，然后才委托 Pi 的真实 Bash；builtin/project/extension 同名工具仍拒绝。该规则只是防误操作的文本 guardrail，不保证 PATH、Git 配置或 helper 没有副作用；压缩工具只预约当前完整 tool turn 后的安全 checkpoint，返回 accepted 不是成功证明，最后一个角色工具只能经用户 editor 提交后由宿主写角色 prompt。其它命令、项目写入、未知工具和会话编排 meta 仍由服务端 gate 硬拒绝。`full_access` 直接允许所有工具，不是角色目录或项目外路径的 OS sandbox。
+- `read_only` 的有效工具集只投影 `source=builtin` 的 Pi 原生 `read/grep/find/ls`，以及 `source=sdk` 的宿主受审查 `bash`、conversation-scoped notebook/LoopList 工具、本机时间 `current_time`、只读 `lsp_symbols/lsp_definition/lsp_references`、`request_context_compaction` 和 `list_roles/read_role/propose_role_revision`；`PiRuntime` 必须用当前 session 的有效 `SettingsManager.shellPath` 创建宿主 `bash`；该工具先用有界词法与命令级规则审查 Git、rg 和常用文件查询，可组合受审查管道/`&&`，`cd` 只改变同一次调用的目录，然后才委托 Pi 的真实 Bash；builtin/project/extension 同名工具仍拒绝。该规则只是防误操作的文本 guardrail，不保证 PATH、Git 配置或 helper 没有副作用；压缩工具只预约当前完整 tool turn 后的安全 checkpoint，返回 accepted 不是成功证明，最后一个角色工具只能经用户 editor 提交后由宿主写角色 prompt。其它命令、项目写入、未知工具和会话编排 meta 仍由服务端 gate 硬拒绝。`full_access` 直接允许所有工具，不是角色目录或项目外路径的 OS sandbox。
 - `.piweb` 是宿主持久状态；只读模式不阻止宿主保存，但 `full_access` 也不会替 Agent 额外保护该目录。
 - 项目列表和历史是低频、有界协议快照，不能重新塞回每个高频 `PublicState` 更新。
 

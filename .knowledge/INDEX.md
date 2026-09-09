@@ -1,6 +1,6 @@
 # Pi Web Knowledge Index
 
-`updated: 2026-09-03`
+`updated: 2026-09-09`
 
 知识库只记录长期稳定的架构事实、决策和坑点，不记录某次任务进度。
 
@@ -17,6 +17,7 @@
 | [kb-visual-validation.md](kb-visual-validation.md) | 使用本地无头浏览器检查界面尺寸、根节点、Setup/Escape 和 reduced-motion |
 | [kb-ui-development-workflow.md](kb-ui-development-workflow.md) | UI 修改、预览、验证、合并与发布前 smoke 流程 |
 | [kb-tool-policy.md](kb-tool-policy.md) | 修改只读/全部授权模式、工具来源判断或 SDK gate |
+| [kb-lsp.md](kb-lsp.md) | 配置本机 LSP、修改共享连接、磁盘同步和只读语义查询 |
 | [_templet.md](_templet.md) | 新知识页模板 |
 
 ## 模块图
@@ -29,6 +30,7 @@ src/server/socket-server.ts
   → RoleCatalog（用户级角色目录）
   → ProjectStoreRegistry（按项目共享）
   → ProjectSessionCoordinator（按项目共享 conversation actor）
+      → WorkspaceLsp（惰性、本机 stdio、按 root/config 共享）
       → ConversationActor（每持久会话一个）
           → Pi SDK AgentSession
   → PiConnection（每连接项目观察与焦点）

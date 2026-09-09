@@ -51,6 +51,7 @@ import type {
   PiRuntimeLike,
 } from "./pi-runtime.js";
 import type { PortableExtensionUI } from "./extension-ui.js";
+import { WorkspaceLsp } from "./lsp/workspace.js";
 import { ProjectInbox } from "./project-inbox.js";
 import {
   MAX_DELEGATION_DEPTH,
@@ -515,6 +516,7 @@ async function startPeerFromActiveSource(
 
 class FakeRuntime implements PiRuntimeLike {
   readonly credentialStore = new InMemoryCredentialStore();
+  ensureProjectAnalysisTrust?: PiRuntimeLike["ensureProjectAnalysisTrust"];
   titleImplementation: ModelRuntime["completeSimple"] = async () =>
     automaticTitleMessage("测试任务");
   readonly titleCalls: Array<Parameters<ModelRuntime["completeSimple"]>> = [];
@@ -843,6 +845,72 @@ function deterministicTestUuid(namespace: string, value: string): string {
 }
 
 describe("ProjectSessionCoordinator", () => {
+  it("owns one trusted LSP workspace across actors and disposes it only after actor teardown", async () => {
+    const fixture = await createFixture();
+    const trust = vi.fn(async () => true);
+    fixture.runtime.ensureProjectAnalysisTrust = trust;
+    const query = vi.spyOn(WorkspaceLsp.prototype, "query").mockResolvedValue({
+      server: "test", root: fixture.cwd, uri: "file:///test.cs", value: [],
+    });
+    const closeAdmission = vi.spyOn(WorkspaceLsp.prototype, "closeAdmission");
+    const dispose = vi.spyOn(WorkspaceLsp.prototype, "dispose");
+    const first = await fixture.coordinator.createUserConversation(fixture.handle, { roleId: "default", title: "A" });
+    const second = await fixture.coordinator.createUserConversation(fixture.handle, { roleId: "default", title: "B" });
+    const input = { path: "source.cs", scope: "document" };
+    await executeTool(fixture.runtime.control(first.conversationId), "lsp_symbols", "a", input, new AbortController().signal);
+    await first.dispose();
+    expect(dispose).not.toHaveBeenCalled();
+    await executeTool(fixture.runtime.control(second.conversationId), "lsp_symbols", "b", input, new AbortController().signal);
+    expect(trust).toHaveBeenCalledTimes(1);
+    expect(query.mock.contexts[0]).toBe(query.mock.contexts[1]);
+    fixture.runtime.beforeDisposeSession = async () => {
+      expect(closeAdmission).toHaveBeenCalledTimes(1);
+      expect(dispose).not.toHaveBeenCalled();
+    };
+    await fixture.coordinator.close();
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not create an LSP owner without trust or after a cancelled trust dialog", async () => {
+    const fixture = await createFixture();
+    const query = vi.spyOn(WorkspaceLsp.prototype, "query").mockResolvedValue({
+      server: "test", root: fixture.cwd, uri: "file:///test.cs", value: [],
+    });
+    const created = await fixture.coordinator.createUserConversation(fixture.handle, { roleId: "default", title: "A" });
+    const control = fixture.runtime.control(created.conversationId);
+    const input = { path: "source.cs", scope: "document" };
+    await expect(executeTool(control, "lsp_symbols", "no-seam", input, new AbortController().signal)).rejects.toThrow("[untrusted]");
+    const decision = deferred<boolean>();
+    fixture.runtime.ensureProjectAnalysisTrust = vi.fn(() => decision.promise);
+    const abort = new AbortController();
+    const cancelled = executeTool(control, "lsp_symbols", "cancelled", input, abort.signal);
+    const rejection = expect(cancelled).rejects.toThrow("[cancelled]");
+    abort.abort();
+    decision.resolve(true);
+    await rejection;
+    expect(query).not.toHaveBeenCalled();
+    fixture.runtime.ensureProjectAnalysisTrust = vi.fn(async () => true);
+    await executeTool(control, "lsp_symbols", "later", input, new AbortController().signal);
+    expect(fixture.runtime.ensureProjectAnalysisTrust).toHaveBeenCalledTimes(1);
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not admit LSP work when a positive trust answer arrives after context closure", async () => {
+    const fixture = await createFixture();
+    const query = vi.spyOn(WorkspaceLsp.prototype, "query");
+    const decision = deferred<boolean>();
+    fixture.runtime.ensureProjectAnalysisTrust = vi.fn(() => decision.promise);
+    const created = await fixture.coordinator.createUserConversation(fixture.handle, { roleId: "default", title: "A" });
+    const pending = executeTool(fixture.runtime.control(created.conversationId), "lsp_symbols", "closing", {
+      path: "source.cs", scope: "document",
+    }, new AbortController().signal);
+    const rejection = expect(pending).rejects.toThrow("[unavailable]");
+    await fixture.coordinator.close();
+    decision.resolve(true);
+    await rejection;
+    expect(query).not.toHaveBeenCalled();
+  });
+
   it("acquires a project before its background full audit completes", async () => {
     const originalRefresh = ProjectStore.prototype.refreshConversations;
     const releaseAudit = deferred();
@@ -2771,6 +2839,9 @@ describe("ProjectSessionCoordinator", () => {
       "notebook_list",
       "notebook_grep",
       "notebook_read",
+      "lsp_symbols",
+      "lsp_definition",
+      "lsp_references",
       "current_time",
       "list_roles",
       "read_role",
@@ -2802,6 +2873,9 @@ describe("ProjectSessionCoordinator", () => {
       "notebook_list",
       "notebook_grep",
       "notebook_read",
+      "lsp_symbols",
+      "lsp_definition",
+      "lsp_references",
       "current_time",
       "list_roles",
       "read_role",

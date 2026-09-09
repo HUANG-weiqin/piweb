@@ -55,6 +55,10 @@ import {
   type MetaToolSessionScope,
 } from "./meta-tools.js";
 import { createNotebookTools } from "./notebook-tools.js";
+import { LspError } from "./lsp/contracts.js";
+import { resolveLspServer } from "./lsp/definition.js";
+import { createLspTools } from "./lsp/tools.js";
+import { WorkspaceLsp } from "./lsp/workspace.js";
 import type {
   CreatedProjectModelCatalog,
   CreatePiSessionOptions,
@@ -236,6 +240,8 @@ interface ProjectContext {
   readonly unsubscribeProject: () => void;
   modelCatalog?: CreatedProjectModelCatalog;
   modelCatalogOpening?: Promise<CreatedProjectModelCatalog>;
+  /** Exists only after positive project execution trust; survives actor rebuild/focus changes. */
+  lsp?: WorkspaceLsp;
   closing: boolean;
 }
 
@@ -2329,6 +2335,7 @@ export class ProjectSessionCoordinator {
     const lifecycleClosures = new Map<ProjectContext, Promise<void>>();
     for (const context of this.contexts.values()) {
       context.closing = true;
+      context.lsp?.closeAdmission();
       lifecycleClosures.set(context, context.lifecycle.close());
     }
     this.closePromise = (async () => {
@@ -2370,6 +2377,12 @@ export class ProjectSessionCoordinator {
           }
         }
         await Promise.allSettled([...context.actorOpenings.values()]);
+        try {
+          await context.lsp?.dispose();
+        } catch (error) {
+          failures.push(error);
+        }
+        context.lsp = undefined;
         await this.drainBackground(context);
         await context.project.drainPendingObservations();
         context.extensionUIRouters.clear();
@@ -2668,6 +2681,27 @@ export class ProjectSessionCoordinator {
       extensionUI: this.extensionUIRouter(context, conversationId).ui,
       workbenchCustomTools: [
         ...createNotebookTools(context.project.stateDir, conversationId),
+        ...createLspTools(context.project.cwd, {
+          query: async (input, signal) => {
+            if (context.closing) throw new LspError("unavailable", "LSP workspace is closing");
+            if (!context.lsp) {
+              // Dialogs belong to the caller; shared initialization does not. A cancelled
+              // dialog neither grants trust nor poisons another actor's own decision.
+              const trusted = await this.runtime.ensureProjectAnalysisTrust?.(
+                context.project.cwd,
+                this.extensionUIRouter(context, conversationId).ui,
+                signal,
+              );
+              if (signal.aborted) throw new LspError("cancelled", "LSP trust request cancelled");
+              if (context.closing) throw new LspError("unavailable", "LSP workspace is closing");
+              if (!trusted) throw new LspError("untrusted", "Project execution trust is required for local language servers");
+              context.lsp ??= new WorkspaceLsp(context.project.cwd, {
+                resolveServer: (file) => resolveLspServer(context.project.cwd, file),
+              });
+            }
+            return context.lsp.query(input, signal);
+          },
+        }),
         ...createMetaTools(
           conversationId,
           this.metaService(context),

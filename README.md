@@ -10,6 +10,7 @@
 - 复用 `~/.pi/agent/auth.json` 中的 API Key 和订阅登录
 - 支持 Pi 公开的全部 API Key 提供商及 OAuth 订阅提供商
 - 使用 Pi 默认编码工具：`read`、`grep`、`find`、`ls`、`bash`、`edit`、`write`
+- 可选本机 stdio LSP：`lsp_symbols / lsp_definition / lsp_references`，工作区内多 Agent 共用语言服务，取消一个查询不会关闭其他 Agent 使用的连接
 - 用户可定义 Agent 角色：名称、简介、专属提示词和已配置提供商的固定模型
 - 首次提供可编辑、可删除的 default 角色；新会话仍必须显式选角色，不会自动套用 default
 - 模板后续编辑不会自动追溯到已有会话；会话空闲时可显式应用任一当前可用角色，并从下一轮整体切换模型、提示词与权限
@@ -83,6 +84,12 @@
 
 - Node.js 22.19 或更高版本
 - Windows 上如需使用 `bash` 工具，应安装 Git Bash，或在 Pi 的 `settings.json` 中配置 `shellPath`
+
+## 可选：本机 LSP
+
+语言服务器由用户预先安装，再配置 `<Pi agent dir>/piweb/lsp.json`；工作台不会自动下载或运行安装命令。首次使用须通过既有项目信任检查，即使项目没有 `.pi` 扩展资源也不跳过。只读角色可用这三个查询工具，但语言服务可能运行构建工具/插件或写缓存，不是 OS 只读沙箱。
+
+C# 使用官方 `roslyn-language-server --stdio --autoLoadProjects`（需要匹配的 .NET 运行时），不使用 raw 编译器协议。配置、root 选择、UTF-16 位置、同步和资源限制见 [本机 LSP 查询](.knowledge/kb-lsp.md)。没有用户配置时返回 `not_enabled`；未支持的能力与成功的空结果明确区分。
 
 ## 开发运行
 
