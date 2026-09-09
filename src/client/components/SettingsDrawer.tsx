@@ -511,7 +511,11 @@ export function SettingsDrawer({
 }: SettingsDrawerProps) {
   const [route, setRoute] = useState<SettingsRoute>("home");
   const [providerId, setProviderId] = useState(() => initialProviderId(state));
-  const [keyProvider, setKeyProvider] = useState<{ id: string; name: string }>();
+  const [keyProvider, setKeyProvider] = useState<{
+    id: string;
+    name: string;
+    sessionId: string;
+  }>();
   const [key, setKey] = useState("");
   const [showKey, setShowKey] = useState(false);
   const [keyError, setKeyError] = useState("");
@@ -560,6 +564,17 @@ export function SettingsDrawer({
   }, [providerId, providers, state]);
 
   useEffect(() => {
+    if (!keyProvider) return;
+    if (open && online && keyProvider.sessionId === sessionId) return;
+    setKeyProvider(undefined);
+    setKey("");
+    setSavingKey(undefined);
+    setShowKey(false);
+    setKeyError("");
+    onKeyDialogChange(false);
+  }, [keyProvider, online, onKeyDialogChange, open, sessionId]);
+
+  useEffect(() => {
     if (!savingKey || savingKey.sessionId !== sessionId || !keyResult) return;
     if (!keyResult.ok) {
       setSavingKey(undefined);
@@ -589,32 +604,16 @@ export function SettingsDrawer({
   }, [onConsumeSettingResult, refreshResult, refreshingModels, sessionId]);
 
   useEffect(() => {
-    if (!savingKey || savingKey.sessionId === sessionId) return;
-    setSavingKey(undefined);
-    setKey("");
-    setShowKey(false);
-    setKeyError("观察会话已更换，保存状态未确认；请重试。");
-  }, [savingKey, sessionId]);
-
-  useEffect(() => {
     if (!refreshingModels || refreshingModels.sessionId === sessionId) return;
     setRefreshingModels(undefined);
     setRefreshStatus({ ok: false, message: "观察会话已更换，刷新状态未确认；请重试。" });
   }, [refreshingModels, sessionId]);
 
   useEffect(() => {
-    if (online) return;
-    if (savingKey) {
-      setSavingKey(undefined);
-      setKey("");
-      setShowKey(false);
-      setKeyError("连接已断开，无法确认 Key 是否保存；请重连后重试。");
-    }
-    if (refreshingModels) {
-      setRefreshingModels(undefined);
-      setRefreshStatus({ ok: false, message: "连接已断开，刷新状态未确认；请重连后重试。" });
-    }
-  }, [online, refreshingModels, savingKey]);
+    if (online || !refreshingModels) return;
+    setRefreshingModels(undefined);
+    setRefreshStatus({ ok: false, message: "连接已断开，刷新状态未确认；请重连后重试。" });
+  }, [online, refreshingModels]);
 
   useEffect(() => {
     if (!savedKeyProviderId) return;
@@ -708,7 +707,7 @@ export function SettingsDrawer({
     const provider = providers.find(({ id }) => id === nextProviderId);
     if (!provider) return;
     setProviderId(nextProviderId);
-    setKeyProvider({ id: provider.id, name: provider.name });
+    setKeyProvider({ id: provider.id, name: provider.name, sessionId });
     setKey("");
     setShowKey(false);
     setKeyError("");
