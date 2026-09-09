@@ -6504,19 +6504,100 @@ pre {
     padding-left: 10px;
   }
 
+  .drawer-backdrop {
+    overflow: hidden;
+    overscroll-behavior: contain;
+  }
+
   .drawer {
-    width: 100vw;
-    padding: 0 16px max(24px, env(safe-area-inset-bottom));
+    --drawer-inline-start: max(16px, env(safe-area-inset-left));
+    --drawer-inline-end: max(16px, env(safe-area-inset-right));
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    max-width: none;
+    height: 100vh;
+    height: 100dvh;
+    overflow-x: hidden;
+    overscroll-behavior: contain;
+    padding:
+      0
+      var(--drawer-inline-end)
+      max(24px, env(safe-area-inset-bottom))
+      var(--drawer-inline-start);
     border-left: 0;
+    box-shadow: none;
   }
 
   .drawer-header {
-    margin-right: -16px;
-    margin-left: -16px;
+    min-height: 64px;
+    align-items: center;
+    margin-right: calc(-1 * var(--drawer-inline-end));
+    margin-left: calc(-1 * var(--drawer-inline-start));
     padding:
-      max(18px, env(safe-area-inset-top))
-      16px
-      15px;
+      max(10px, env(safe-area-inset-top))
+      var(--drawer-inline-end)
+      12px
+      var(--drawer-inline-start);
+  }
+
+  .drawer-header > div {
+    min-width: 0;
+  }
+
+  .drawer-header p:last-child,
+  .drawer .current-model strong,
+  .drawer .current-model small,
+  .drawer .provider-identity strong,
+  .drawer .provider-identity small,
+  .drawer .model strong,
+  .drawer .model small {
+    overflow: visible;
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+    white-space: normal;
+  }
+
+  .drawer .icon-button {
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
+  }
+
+  .color-scheme-options {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .color-scheme-option {
+    grid-template-columns: 44px minmax(0, 1fr);
+    min-height: 96px;
+  }
+
+  .color-scheme-option input {
+    grid-row: 1;
+    grid-column: 1;
+    justify-self: center;
+  }
+
+  .color-scheme-option > span:last-child {
+    grid-row: 1;
+    grid-column: 2;
+  }
+
+  .color-scheme-option .color-scheme-swatch {
+    width: 100%;
+    grid-row: 2;
+    grid-column: 1 / -1;
+  }
+
+  .drawer .model {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .drawer .model b {
+    margin-left: auto;
   }
 
   .model-list {
@@ -8626,18 +8707,9 @@ pre {
   }
 
   .drawer {
-    padding-right: 18px;
-    padding-left: 18px;
     border-left: 0;
     border-top: 5px solid var(--rebel-red);
     box-shadow: none;
-  }
-
-  .drawer-header {
-    margin-right: -18px;
-    margin-left: -18px;
-    padding-right: 18px;
-    padding-left: 18px;
   }
 
   .modal-backdrop {
@@ -8694,8 +8766,7 @@ pre {
 .mobile-page-header,
 .mobile-chat-header,
 .mobile-composer-launchers,
-.mobile-sheet-header,
-.mobile-model-settings {
+.mobile-sheet-header {
   display: none;
 }
 
@@ -8788,8 +8859,7 @@ pre {
   .mobile-page-header button,
   .mobile-chat-header button,
   .mobile-composer-launchers button,
-  .mobile-sheet-header button,
-  .mobile-model-settings {
+  .mobile-sheet-header button {
     min-height: 44px;
     border: 1px solid var(--rebel-line-strong);
     border-radius: 0;
@@ -8995,6 +9065,20 @@ pre {
     width: 100%;
   }
 
+  .mobile-settings-button {
+    min-width: 72px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    padding: 0 9px;
+  }
+
+  .mobile-settings-button > span:first-child {
+    font-size: 16px;
+    line-height: 1;
+  }
+
   .app-shell .transcript {
     padding: 12px 12px calc(var(--composer-inset, 118px) + 18px);
   }
@@ -9164,13 +9248,6 @@ pre {
 
   .transcript .commitment-card.is-edit-budget > .tool-body {
     padding-left: 12px;
-  }
-
-  .mobile-model-settings {
-    width: 100%;
-    display: block;
-    flex: 1 1 100%;
-    margin-bottom: 8px;
   }
 
   .app-shell .mobile-sheet-surface,

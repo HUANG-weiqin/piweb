@@ -1,11 +1,13 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type {
   ConversationRoleSnapshot,
   ConversationSummary,
   ProjectActivitySummary,
+  PublicState,
 } from "../shared/protocol";
 import type { ChatState } from "./chat/reducer";
 import { Chat } from "./components/Chat";
+import { ConnectionDrawer } from "./components/ConnectionDrawer";
 import { createConversationTitleLookup } from "./lib/conversation-display";
 import { usePhoneViewport } from "./lib/use-phone-viewport";
 import {
@@ -36,6 +38,35 @@ const role: ConversationRoleSnapshot = {
   defaultServiceTier: "priority",
   toolMode: "full_access",
   canManageSessions: true,
+};
+
+const drawerState: PublicState = {
+  sessionId: "session-visual-fixture",
+  projectId: "project-visual-fixture",
+  conversationId: ACTIVE_CONVERSATION_ID,
+  cwd: ACTIVE_CWD,
+  busy: false,
+  selectedModel: role.model,
+  selectedServiceTier: "priority",
+  thinkingLevel: "high",
+  toolMode: "full_access",
+  availableThinkingLevels: ["off", "low", "medium", "high"],
+  providers: [{
+    id: role.model.provider,
+    name: "OpenAI",
+    configured: true,
+    oauth: false,
+    models: [{
+      provider: role.model.provider,
+      id: role.model.id,
+      name: "GPT-5.6 Luna",
+      reasoning: true,
+      thinkingLevels: ["off", "low", "medium", "high"],
+      input: ["text", "image"],
+      contextWindow: 468_000,
+      available: true,
+    }],
+  }],
 };
 
 const conversationRole: NonNullable<ConversationSummary["role"]> = {
@@ -364,6 +395,8 @@ export function VisualFixture({
   showComposerStates?: boolean;
 } = {}) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsReturnFocusRef = useRef<(() => HTMLElement | null) | null>(null);
   const phoneViewport = usePhoneViewport();
   const [mobileScene, setMobileScene] = useState<"workspaces" | "conversations" | "chat">(
     "conversations",
@@ -471,7 +504,6 @@ export function VisualFixture({
         mobile={phoneViewport ? {
           title: "建立稳定的视觉验证基线",
           onBack: () => setMobileScene("conversations"),
-          onShowConversations: () => setMobileScene("conversations"),
         } : undefined}
         online
         interactive
@@ -495,7 +527,10 @@ export function VisualFixture({
         onImagesChange={noOp}
         onSend={noOp}
         onAbort={noOp}
-        onSettings={noOp}
+        onSettings={(resolveReturnFocus) => {
+          settingsReturnFocusRef.current = resolveReturnFocus ?? null;
+          setSettingsOpen(true);
+        }}
         onThinking={noOp}
         onServiceTier={noOp}
         onCompactionThreshold={() => true}
@@ -506,5 +541,28 @@ export function VisualFixture({
         onRewind={noOp}
       />
     </div>
+    <ConnectionDrawer
+      state={drawerState}
+      open={settingsOpen}
+      resolveReturnFocus={settingsReturnFocusRef.current ?? undefined}
+      online
+      preferencesOnline
+      colorScheme="quiet-rebel"
+      colorSchemePending={false}
+      colorSchemeUnsaved={false}
+      colorSchemeError=""
+      onClose={() => {
+        setSettingsOpen(false);
+        settingsReturnFocusRef.current = null;
+      }}
+      onColorSchemeChange={noOp}
+      onRetryColorScheme={noOp}
+      onKey={() => undefined}
+      onOAuth={noOp}
+      onLogout={noOp}
+      onRefresh={() => undefined}
+      onClearSettingResult={noOp}
+      onKeyDialogChange={noOp}
+    />
   </div>;
 }

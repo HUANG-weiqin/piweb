@@ -162,7 +162,6 @@ interface ChatProps {
     active?: boolean;
     title: string;
     onBack(): void;
-    onShowConversations(): void;
   };
   online: boolean;
   /** Transport is online, but focus-bound server controls may be frozen. */
@@ -178,7 +177,7 @@ interface ChatProps {
   onImagesChange(images: PromptImage[]): void;
   onSend(text: string, images: PromptImage[]): void;
   onAbort(): void;
-  onSettings(): void;
+  onSettings(resolveReturnFocus?: () => HTMLElement | null): void;
   onThinking(level: ThinkingLevel): void;
   onServiceTier(serviceTier: ServiceTier | null): void;
   onCompactionThreshold(percent: number): boolean;
@@ -540,6 +539,12 @@ function ChatView({
   const transcriptRef = useRef<HTMLElement>(null);
   const composerWrapRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const mobileSettingsLauncherRef = useRef<HTMLButtonElement>(null);
+  const desktopSettingsLauncherRef = useRef<HTMLButtonElement>(null);
+  const resolveSettingsLauncher = useCallback(
+    () => mobileSettingsLauncherRef.current ?? desktopSettingsLauncherRef.current,
+    [],
+  );
   const [attachmentError, setAttachmentError] = useState("");
   const attachmentScope = chat.focus
     ? `${observationSessionId}:${chat.focus.sessionId}:${chat.focus.conversationId}:${chat.focus.focusId}`
@@ -939,13 +944,15 @@ function ChatView({
           <strong>{mobile.title}</strong>
         </div>
         <button
+          ref={mobileSettingsLauncherRef}
           type="button"
-          aria-label="打开会话列表"
+          className="mobile-settings-button"
+          aria-label="打开设置"
           onClick={() => {
             closeMobileSheet();
-            mobile.onShowConversations();
+            onSettings(resolveSettingsLauncher);
           }}
-        >AGENTS</button>
+        ><span aria-hidden="true">⚙</span><span>设置</span></button>
       </div>}
       <button className="brand" onClick={onChangeCwd}><span>π</span><span>Pi Web<small title={cwd}>{cwd}</small></span></button>
       {conversationContext && <nav
@@ -1000,9 +1007,10 @@ function ChatView({
       </nav>}
       <div className="topbar-controls">
         <button
+          ref={desktopSettingsLauncherRef}
           className="model-button"
           title="设置"
-          onClick={onSettings}
+          onClick={() => onSettings(resolveSettingsLauncher)}
         >
           设置<span hidden>{model?.id}</span><span aria-hidden="true">⌄</span>
         </button>
@@ -1292,14 +1300,6 @@ function ChatView({
             onClick={closeMobileSheet}
           >×</button>
         </header>}
-        {mobile && <button
-          type="button"
-          className="mobile-model-settings"
-          onClick={() => {
-            closeMobileSheet();
-            onSettings();
-          }}
-        >打开设置</button>}
         {role && <button
           type="button"
           className="conversation-role-pill"

@@ -680,6 +680,7 @@ export function App() {
     setConversationSyncing(syncing);
   };
   const [drawer, setDrawer] = useState(false);
+  const drawerReturnFocusRef = useRef<(() => HTMLElement | null) | null>(null);
   const [committedColorScheme, setCommittedColorSchemeState] =
     useState<ColorScheme>("quiet-rebel");
   const committedColorSchemeRef = useRef<ColorScheme>("quiet-rebel");
@@ -1323,6 +1324,7 @@ export function App() {
       && !autoOpened.current
     ) {
       autoOpened.current = true;
+      drawerReturnFocusRef.current = null;
       setDrawer(true);
     }
   };
@@ -3909,6 +3911,7 @@ export function App() {
   const openWorkspaceDialog = () => {
     setSetupCwd(activeCwdRef.current || setupCwd);
     setSetupOpen(true);
+    drawerReturnFocusRef.current = null;
     setDrawer(false);
     setRoleManagerOpen(false);
     if (!protocolError) setError("");
@@ -3970,7 +3973,12 @@ export function App() {
   const handleChatSend = useLatestCallback((text: string, images: PromptImage[]) =>
     submitPrompt(text, images));
   const handleChatAbort = useLatestCallback(abortCurrentRun);
-  const handleChatSettings = useLatestCallback(() => setDrawer(true));
+  const handleChatSettings = useLatestCallback((
+    resolveReturnFocus?: () => HTMLElement | null,
+  ) => {
+    drawerReturnFocusRef.current = resolveReturnFocus ?? null;
+    setDrawer(true);
+  });
   const handleChatThinking = useLatestCallback(setThinkingLevel);
   const handleChatServiceTier = useLatestCallback(setServiceTier);
   const handleChatCompactionThreshold = useLatestCallback(setCompactionThreshold);
@@ -4526,7 +4534,10 @@ export function App() {
                 setRoleManagerInitialRoleId(null);
                 setRoleManagerOpen(true);
               }}
-              onSettings={() => setDrawer(true)}
+              onSettings={() => {
+                drawerReturnFocusRef.current = null;
+                setDrawer(true);
+              }}
             />
           : <Chat
               chat={visibleChat}
@@ -4577,7 +4588,6 @@ export function App() {
                 active: mobileScene === "chat",
                 title: mobileConversationTitle,
                 onBack: goBackFromPhoneRoute,
-                onShowConversations: goBackFromPhoneRoute,
               } : undefined}
               onBlockingModalChange={phoneViewport ? setChatBlockingModal : undefined}
               online={online}
@@ -4610,6 +4620,7 @@ export function App() {
       state={runtimeState}
       open={drawer}
       covered={blockingModalVisible}
+      resolveReturnFocus={drawerReturnFocusRef.current ?? undefined}
       online={online && settingsEnabled}
       preferencesOnline={online}
       colorScheme={visibleColorScheme}
@@ -4617,7 +4628,10 @@ export function App() {
       colorSchemeUnsaved={Boolean(unsavedColorScheme)}
       colorSchemeError={colorSchemeSaveError}
       settingResult={settingResult}
-      onClose={() => setDrawer(false)}
+      onClose={() => {
+        setDrawer(false);
+        drawerReturnFocusRef.current = null;
+      }}
       onColorSchemeChange={(colorScheme) => saveColorScheme(colorScheme)}
       onRetryColorScheme={() => {
         const colorScheme = unsavedColorSchemeRef.current;

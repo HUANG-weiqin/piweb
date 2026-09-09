@@ -11,6 +11,8 @@ interface ConnectionDrawerProps {
   open: boolean;
   /** The drawer remains live beneath a higher-priority modal. */
   covered?: boolean;
+  /** Resolves the visible launcher even if a responsive layout replaced its DOM node. */
+  resolveReturnFocus?: () => HTMLElement | null;
   /** Whether conversation-scoped connection controls can mutate runtime state. */
   online: boolean;
   /** Whether process-global preferences can be persisted. */
@@ -66,6 +68,7 @@ export function ConnectionDrawer({
   state,
   open,
   covered = false,
+  resolveReturnFocus,
   online,
   preferencesOnline,
   colorScheme,
@@ -251,6 +254,8 @@ export function ConnectionDrawer({
     open,
     "settings-drawer",
     onClose,
+    undefined,
+    resolveReturnFocus,
   );
   const keyFocusRef = useModalFocus<HTMLFormElement>(
     Boolean(open && keyProvider),
