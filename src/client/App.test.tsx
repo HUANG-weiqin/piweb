@@ -7385,8 +7385,49 @@ describe("App", () => {
       },
     }));
 
+    const restored = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
+    expect(restored).toHaveValue("pending across projects");
+    expect(screen.getByRole("alert")).toHaveTextContent("发送状态未确认");
+    expect(socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "prompt",
+    )).toHaveLength(1);
+
+    fireEvent.change(restored, { target: { value: "edited after unknown outcome" } });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "打开工作区 second" }));
+    const editedSecondSessionId = latestCommand("initialize").sessionId;
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId: editedSecondSessionId,
+        cwd: "E:\\second",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "打开工作区 first" }));
+    const editedFirstSessionId = latestCommand("initialize").sessionId;
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId: editedFirstSessionId,
+        cwd: "E:\\first",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
-      .toHaveValue("pending across projects");
+      .toHaveValue("edited after unknown outcome");
     expect(screen.getByRole("alert")).toHaveTextContent("发送状态未确认");
     expect(socketMock.send.mock.calls.filter(
       ([command]) => command.type === "prompt",
