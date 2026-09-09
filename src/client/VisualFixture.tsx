@@ -551,6 +551,7 @@ export function VisualFixture({
       colorSchemePending={false}
       colorSchemeUnsaved={false}
       colorSchemeError=""
+      settingResults={{}}
       onClose={() => {
         setSettingsOpen(false);
         settingsReturnFocusRef.current = null;
@@ -561,7 +562,7 @@ export function VisualFixture({
       onOAuth={noOp}
       onLogout={noOp}
       onRefresh={() => undefined}
-      onClearSettingResult={noOp}
+      onConsumeSettingResult={noOp}
       onKeyDialogChange={noOp}
     />
   </div>;

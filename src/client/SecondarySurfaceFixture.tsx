@@ -228,6 +228,7 @@ function DrawerSurface({ page = "home" }: {
       colorSchemePending={false}
       colorSchemeUnsaved={false}
       colorSchemeError=""
+      settingResults={{}}
       onClose={() => setOpen(false)}
       onColorSchemeChange={noOp}
       onRetryColorScheme={noOp}
@@ -235,7 +236,7 @@ function DrawerSurface({ page = "home" }: {
       onOAuth={noOp}
       onLogout={noOp}
       onRefresh={() => undefined}
-      onClearSettingResult={noOp}
+      onConsumeSettingResult={noOp}
       onKeyDialogChange={noOp}
     />
   </WorkbenchOverlay>;

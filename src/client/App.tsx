@@ -12,7 +12,6 @@ import {
   MAX_MESSAGE_BYTES,
   MAX_PROMPT_CHARACTERS,
   PROTOCOL_VERSION,
-  type AcknowledgedSettingOperation,
   type AuthRequest,
   type ClientCommand,
   type ColorScheme,
@@ -36,7 +35,11 @@ import {
 import { ActivitySpinner } from "./components/ActivitySpinner";
 import { AuthDialog } from "./components/AuthDialog";
 import { Chat } from "./components/Chat";
-import { SettingsDrawer } from "./components/SettingsDrawer";
+import {
+  SettingsDrawer,
+  type SettingOperationResult,
+  type SettingOperationResults,
+} from "./components/SettingsDrawer";
 import {
   ConversationSidebar,
   conversationDisplayOrdinal,
@@ -721,12 +724,11 @@ export function App() {
   const [chatBlockingModal, setChatBlockingModal] = useState(false);
   const [sidebarBlockingModal, setSidebarBlockingModal] = useState(false);
   const [error, setError] = useState("");
-  const [settingResult, setSettingResult] = useState<{
-    operation: AcknowledgedSettingOperation;
-    commandId: string;
-    ok: boolean;
-    message: string;
-  }>();
+  const [settingResults, setSettingResults] = useState<SettingOperationResults>({});
+  const pendingSettingCommandsRef = useRef<Partial<Record<
+    SettingOperationResult["operation"],
+    Pick<SettingOperationResult, "sessionId" | "commandId">
+  >>>({});
   const [auth, setAuth] = useState<{ requestId?: string; request?: AuthRequest; progress?: string }>({});
   const [extensionUI, setExtensionUI] = useState<PendingExtensionUI[]>([]);
   const [notification, setNotification] = useState<{
@@ -1279,7 +1281,8 @@ export function App() {
     setConversationIndexTruncated(false);
     setExtensionUI([]);
     setNotification(undefined);
-    setSettingResult(undefined);
+    pendingSettingCommandsRef.current = {};
+    setSettingResults({});
     updatePendingCompactionThreshold(undefined);
     updatePendingServiceTier(undefined);
     clearAllPendingContextCompactions();
@@ -2492,13 +2495,27 @@ export function App() {
           });
           return;
         }
-        if (event.operation === "steer") return;
-        setSettingResult({
-          operation: event.operation as AcknowledgedSettingOperation,
+        if (
+          event.operation !== "set_api_key"
+          && event.operation !== "refresh_models"
+        ) return;
+        const pending = pendingSettingCommandsRef.current[event.operation];
+        if (
+          !pending
+          || pending.sessionId !== event.sessionId
+          || pending.commandId !== event.commandId
+        ) return;
+        const result: SettingOperationResult = {
+          operation: event.operation,
+          sessionId: event.sessionId,
           commandId: event.commandId,
           ok: true,
           message: "",
-        });
+        };
+        setSettingResults((current) => ({
+          ...current,
+          [result.operation]: result,
+        }));
       } else if (event.type === "error") {
         const pendingImageOpen = event.operation === "open_image" && event.commandId
           ? pendingImageOpensRef.current.get(event.commandId)
@@ -2812,12 +2829,23 @@ export function App() {
             setError("设置命令响应缺少会话标识");
             return;
           }
-          setSettingResult({
+          const pending = pendingSettingCommandsRef.current[event.operation];
+          if (
+            !pending
+            || pending.sessionId !== event.sessionId
+            || pending.commandId !== event.commandId
+          ) return;
+          const result: SettingOperationResult = {
             operation: event.operation,
+            sessionId: event.sessionId,
             commandId: event.commandId,
             ok: false,
             message: event.message,
-          });
+          };
+          setSettingResults((current) => ({
+            ...current,
+            [result.operation]: result,
+          }));
         } else {
           setError(event.message);
         }
@@ -2856,7 +2884,8 @@ export function App() {
         setProtocolReady(false);
         setProjectActivityByWorkspace(new Map());
         setProjectActivityTruncated(false);
-        setSettingResult(undefined);
+        pendingSettingCommandsRef.current = {};
+        setSettingResults({});
         if (pendingColorSchemeRef.current) {
           updatePendingColorScheme(undefined);
           setColorSchemeSaveError("连接已断开，无法确认配色是否保存；重连后请重试。");
@@ -3060,7 +3089,21 @@ export function App() {
       focusId: focus.focusId,
     });
   }, [chat.projectionGap, protocolReady, state?.compacting, transportOnline]);
-  const clearSettingResult = useCallback(() => setSettingResult(undefined), []);
+  const consumeSettingResult = useCallback((consumed: SettingOperationResult) => {
+    const pending = pendingSettingCommandsRef.current[consumed.operation];
+    if (
+      pending?.sessionId === consumed.sessionId
+      && pending.commandId === consumed.commandId
+    ) delete pendingSettingCommandsRef.current[consumed.operation];
+    setSettingResults((current) => {
+      const result = current[consumed.operation];
+      if (
+        result?.sessionId !== consumed.sessionId
+        || result.commandId !== consumed.commandId
+      ) return current;
+      return { ...current, [consumed.operation]: undefined };
+    });
+  }, []);
   const browseDirectory = (path?: string) => {
     const current = directoryBrowserRef.current;
     const commandId = crypto.randomUUID();
@@ -4627,7 +4670,7 @@ export function App() {
       colorSchemePending={Boolean(pendingColorScheme)}
       colorSchemeUnsaved={Boolean(unsavedColorScheme)}
       colorSchemeError={colorSchemeSaveError}
-      settingResult={settingResult}
+      settingResults={settingResults}
       onClose={() => {
         setDrawer(false);
         drawerReturnFocusRef.current = null;
@@ -4641,10 +4684,13 @@ export function App() {
         const commandId = crypto.randomUUID();
         const sessionId = sessionIdRef.current;
         if (!sessionId || focusedConversationNeedsSnapshot()) return undefined;
-        setSettingResult(undefined);
-        return send({ type: "set_api_key", commandId, sessionId, provider, key })
-          ? commandId
-          : undefined;
+        setSettingResults((current) => ({ ...current, set_api_key: undefined }));
+        pendingSettingCommandsRef.current.set_api_key = { sessionId, commandId };
+        if (send({ type: "set_api_key", commandId, sessionId, provider, key })) {
+          return commandId;
+        }
+        delete pendingSettingCommandsRef.current.set_api_key;
+        return undefined;
       }}
       onOAuth={(provider) => {
         if (focusedConversationNeedsSnapshot()) return;
@@ -4665,12 +4711,13 @@ export function App() {
          const commandId = crypto.randomUUID();
          const sessionId = sessionIdRef.current;
          if (!sessionId || focusedConversationNeedsSnapshot()) return undefined;
-         setSettingResult(undefined);
-         return send({ type: "refresh_models", commandId, sessionId })
-           ? commandId
-           : undefined;
+         setSettingResults((current) => ({ ...current, refresh_models: undefined }));
+         pendingSettingCommandsRef.current.refresh_models = { sessionId, commandId };
+         if (send({ type: "refresh_models", commandId, sessionId })) return commandId;
+         delete pendingSettingCommandsRef.current.refresh_models;
+         return undefined;
        }}
-      onClearSettingResult={clearSettingResult}
+      onConsumeSettingResult={consumeSettingResult}
       onKeyDialogChange={setSettingsDialogOpen}
     />
     <RoleManagerDialog

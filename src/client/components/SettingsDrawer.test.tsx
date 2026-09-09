@@ -4,7 +4,10 @@ import { useState } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PublicProvider, PublicState } from "../../shared/protocol";
-import { SettingsDrawer } from "./SettingsDrawer";
+import {
+  SettingsDrawer,
+  type SettingOperationResult,
+} from "./SettingsDrawer";
 
 afterEach(cleanup);
 
@@ -32,7 +35,13 @@ const state: PublicState = {
   }],
 };
 
-function settingsProps(overrides: Partial<Parameters<typeof SettingsDrawer>[0]> = {}) {
+type SettingsDrawerProps = Parameters<typeof SettingsDrawer>[0];
+type SettingsDrawerTestOverrides = Partial<SettingsDrawerProps> & {
+  settingResult?: Omit<SettingOperationResult, "sessionId"> & { sessionId?: string };
+};
+
+function settingsProps(overrides: SettingsDrawerTestOverrides = {}) {
+  const { settingResult, settingResults, ...props } = overrides;
   return {
     state,
     open: true,
@@ -42,6 +51,12 @@ function settingsProps(overrides: Partial<Parameters<typeof SettingsDrawer>[0]> 
     colorSchemePending: false,
     colorSchemeUnsaved: false,
     colorSchemeError: "",
+    settingResults: settingResults ?? (settingResult ? {
+      [settingResult.operation]: {
+        ...settingResult,
+        sessionId: settingResult.sessionId ?? props.state?.sessionId ?? state.sessionId,
+      },
+    } : {}),
     onClose: () => undefined,
     onColorSchemeChange: () => undefined,
     onRetryColorScheme: () => undefined,
@@ -49,13 +64,13 @@ function settingsProps(overrides: Partial<Parameters<typeof SettingsDrawer>[0]> 
     onOAuth: () => undefined,
     onLogout: () => undefined,
     onRefresh: () => undefined,
-    onClearSettingResult: () => undefined,
+    onConsumeSettingResult: () => undefined,
     onKeyDialogChange: () => undefined,
-    ...overrides,
-  } satisfies Parameters<typeof SettingsDrawer>[0];
+    ...props,
+  } satisfies SettingsDrawerProps;
 }
 
-function renderSettings(overrides: Partial<Parameters<typeof SettingsDrawer>[0]> = {}) {
+function renderSettings(overrides: SettingsDrawerTestOverrides = {}) {
   return render(<SettingsDrawer {...settingsProps(overrides)} />);
 }
 
@@ -63,7 +78,7 @@ function openModelConnections() {
   fireEvent.click(screen.getByRole("button", { name: "打开模型连接设置" }));
 }
 
-function renderDrawer(overrides: Partial<Parameters<typeof SettingsDrawer>[0]> = {}) {
+function renderDrawer(overrides: SettingsDrawerTestOverrides = {}) {
   const view = renderSettings(overrides);
   openModelConnections();
   return view;
@@ -498,6 +513,56 @@ describe("SettingsDrawer", () => {
     expect(saveKey).not.toHaveBeenCalled();
   });
 
+  it("clears an unsubmitted Key when its provider leaves the catalog", () => {
+    const view = renderDrawer();
+    fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "catalog-secret" },
+    });
+
+    view.rerender(<SettingsDrawer {...settingsProps({
+      state: { ...state, providers: [] },
+    })} />);
+    expect(screen.queryByRole("dialog", { name: "Test API Key" }))
+      .not.toBeInTheDocument();
+
+    view.rerender(<SettingsDrawer {...settingsProps()} />);
+    fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
+    expect(screen.getByLabelText("API Key")).toHaveValue("");
+  });
+
+  it("keeps the pending API Key owner through same-session provider catalog drift", () => {
+    const saveKey = vi.fn(() => commandId);
+    const view = renderDrawer({ onKey: saveKey });
+
+    fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "pending-key" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存 API Key" }));
+
+    view.rerender(<SettingsDrawer {...settingsProps({
+      state: { ...state, providers: [] },
+      onKey: saveKey,
+    })} />);
+    expect(screen.getByRole("dialog", { name: "Test API Key" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "正在保存…" })).toBeDisabled();
+    expect(screen.getByLabelText("API Key")).toHaveValue("");
+
+    view.rerender(<SettingsDrawer {...settingsProps({
+      state: { ...state, providers: [] },
+      onKey: saveKey,
+      settingResult: {
+        operation: "set_api_key",
+        commandId,
+        ok: false,
+        message: "Key 保存失败",
+      },
+    })} />);
+    expect(screen.queryByRole("dialog", { name: "Test API Key" }))
+      .not.toBeInTheDocument();
+  });
+
   it("keeps the API Key backdrop inert while an exact save is pending", () => {
     const saveKey = vi.fn(() => commandId);
     renderDrawer({ onKey: saveKey });
@@ -548,8 +613,55 @@ describe("SettingsDrawer", () => {
     expect(screen.getByRole("button", { name: "保存 API Key" })).toBeEnabled();
   });
 
-  it("clears an unconfirmed Key and releases the dialog after disconnect", () => {
-    const view = renderDrawer({ onKey: () => commandId });
+  it("clears an unsubmitted Key and provider owner when the drawer closes", () => {
+    const view = renderDrawer();
+    fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "drawer-secret" },
+    });
+
+    view.rerender(<SettingsDrawer {...settingsProps({ open: false })} />);
+    view.rerender(<SettingsDrawer {...settingsProps()} />);
+    openModelConnections();
+    fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
+    expect(screen.getByLabelText("API Key")).toHaveValue("");
+  });
+
+  it("clears an unsubmitted Key and provider owner after disconnect", () => {
+    const view = renderDrawer();
+    fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "offline-secret" },
+    });
+
+    view.rerender(<SettingsDrawer {...settingsProps({ online: false })} />);
+    expect(screen.queryByRole("dialog", { name: "Test API Key" }))
+      .not.toBeInTheDocument();
+
+    view.rerender(<SettingsDrawer {...settingsProps()} />);
+    fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
+    expect(screen.getByLabelText("API Key")).toHaveValue("");
+  });
+
+  it("clears an unsubmitted Key when its opening session is replaced", () => {
+    const view = renderDrawer();
+    fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "old-session-secret" },
+    });
+
+    view.rerender(<SettingsDrawer {...settingsProps({
+      state: { ...state, sessionId: "session-2" },
+    })} />);
+    expect(screen.queryByRole("dialog", { name: "Test API Key" }))
+      .not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
+    expect(screen.getByLabelText("API Key")).toHaveValue("");
+  });
+
+  it("clears an unconfirmed Key and closes its provider owner after disconnect", () => {
+    const onKeyDialogChange = vi.fn();
+    const view = renderDrawer({ onKey: () => commandId, onKeyDialogChange });
     fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
     fireEvent.change(screen.getByLabelText("API Key"), {
       target: { value: "unconfirmed-key" },
@@ -559,15 +671,24 @@ describe("SettingsDrawer", () => {
     view.rerender(<SettingsDrawer {...settingsProps({
       online: false,
       onKey: () => commandId,
+      onKeyDialogChange,
     })} />);
+    expect(screen.queryByRole("dialog", { name: "Test API Key" }))
+      .not.toBeInTheDocument();
+    expect(onKeyDialogChange).toHaveBeenLastCalledWith(false);
+
+    view.rerender(<SettingsDrawer {...settingsProps({
+      onKey: () => commandId,
+      onKeyDialogChange,
+    })} />);
+    fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
     expect(screen.getByLabelText("API Key")).toHaveValue("");
-    expect(screen.getByRole("alert")).toHaveTextContent("无法确认");
-    expect(screen.getByRole("button", { name: "取消" })).toBeEnabled();
   });
 
-  it("releases an unconfirmed API Key save when the observation session changes", () => {
+  it("closes an unconfirmed API Key owner when the observation session changes", () => {
     const saveKey = vi.fn(() => commandId);
-    const view = renderDrawer({ onKey: saveKey });
+    const onKeyDialogChange = vi.fn();
+    const view = renderDrawer({ onKey: saveKey, onKeyDialogChange });
     fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
     fireEvent.change(screen.getByLabelText("API Key"), {
       target: { value: "unconfirmed-key" },
@@ -577,6 +698,7 @@ describe("SettingsDrawer", () => {
     view.rerender(<SettingsDrawer {...settingsProps({
       state: { ...state, sessionId: "session-2" },
       onKey: saveKey,
+      onKeyDialogChange,
       settingResult: {
         operation: "set_api_key",
         commandId,
@@ -585,13 +707,12 @@ describe("SettingsDrawer", () => {
       },
     })} />);
 
-    expect(screen.getByRole("alert")).toHaveTextContent("保存状态未确认");
+    expect(screen.queryByRole("dialog", { name: "Test API Key" }))
+      .not.toBeInTheDocument();
+    expect(onKeyDialogChange).toHaveBeenLastCalledWith(false);
+    fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
     expect(screen.getByLabelText("API Key")).toHaveValue("");
     expect(screen.getByRole("button", { name: "保存 API Key" })).toBeDisabled();
-    fireEvent.change(screen.getByLabelText("API Key"), {
-      target: { value: "retry-key" },
-    });
-    expect(screen.getByRole("button", { name: "保存 API Key" })).toBeEnabled();
   });
 
   it("confirms the global impact before removing a local credential", () => {
