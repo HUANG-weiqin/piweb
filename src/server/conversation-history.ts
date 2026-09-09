@@ -6,6 +6,7 @@ import type {
   ConversationHistoryMessage,
   ConversationHistoryMessagePart,
   ConversationHistoryTool,
+  ConversationHistoryToolImageReference,
   ConversationMessageCard,
   ConversationWindowCoverage,
   TokenUsage,
@@ -16,7 +17,10 @@ import {
   type ConversationMessageEntry,
 } from "./conversation-meta.js";
 import { projectDefaultCompactionProvenance } from "./compaction-provenance.js";
-import { toWireValue } from "./session-events.js";
+import {
+  projectToolResultForWire,
+  toWireValue,
+} from "./session-events.js";
 
 export const MAX_HISTORY_SNAPSHOT_BYTES = 750_000;
 export const MAX_AGENT_PEEK_BYTES = 256 * 1024;
@@ -45,7 +49,7 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-function projectUserContent(value: unknown): {
+function projectUserContent(value: unknown, messageId: string): {
   text: string;
   imageRefs: ConversationHistoryImageReference[];
 } {
@@ -65,7 +69,10 @@ function projectUserContent(value: unknown): {
     if (!chunk) continue;
     const offset = text ? text.length + 1 : 0;
     if (block?.type === "image") {
-      imageRefs.push({ offset, ordinal: imageOrdinal });
+      imageRefs.push({
+        offset,
+        source: { messageId, imageOrdinal },
+      });
       imageOrdinal += 1;
     }
     text += `${text ? "\n" : ""}${chunk}`;
@@ -210,6 +217,14 @@ function compactHistoryMessage(
       toolName: toolName.value,
       ...(tool.args === undefined ? {} : { args: args.value }),
       ...(tool.result === undefined ? {} : { result: result.value }),
+      ...(tool.resultImageRefs === undefined
+        ? {}
+        : {
+          resultImageRefs: tool.resultImageRefs.map((reference) => ({
+            contentIndex: reference.contentIndex,
+            source: { ...reference.source },
+          })),
+        }),
       status: tool.status,
     };
   });
@@ -349,7 +364,7 @@ function projectConversationHistorySlots(
 
     if (message.role === "user") {
       assistant = undefined;
-      const { text, imageRefs } = projectUserContent(message.content);
+      const { text, imageRefs } = projectUserContent(message.content, entry.id);
       messages.push({
         anchorEntryId: entry.id,
         sourceMessages: [{ entryId: entry.id, message: entry.message }],
@@ -446,11 +461,13 @@ function projectConversationHistorySlots(
       message.role === "toolResult"
       && typeof message.toolCallId === "string"
     ) {
-      let target = [...messages].reverse().find((item) =>
+      let targetSlot = [...messages].reverse().find((item) =>
         item.message.role === "assistant"
         && item.message.tools.some((tool) => tool.toolCallId === message.toolCallId)
-      )?.message;
-      target ??= requireAssistant(entry.id).message;
+      );
+      targetSlot ??= requireAssistant(entry.id);
+      targetSlot.sourceMessages.push({ entryId: entry.id, message: entry.message });
+      const target = targetSlot.message;
       let tool = target.tools.find((item) => item.toolCallId === message.toolCallId);
       if (!tool) {
         tool = {
@@ -464,10 +481,19 @@ function projectConversationHistorySlots(
           toolCallId: message.toolCallId,
         });
       }
-      tool.result = toWireValue({
+      const projection = projectToolResultForWire({
         content: message.content,
         details: message.details,
       });
+      tool.result = projection.value;
+      if (projection.imageContentIndexes.length > 0) {
+        tool.resultImageRefs = projection.imageContentIndexes.map(
+          (contentIndex, imageOrdinal): ConversationHistoryToolImageReference => ({
+            contentIndex,
+            source: { messageId: entry.id, imageOrdinal },
+          }),
+        );
+      }
       tool.status = message.isError === true ? "error" : "done";
     }
   }
@@ -476,7 +502,13 @@ function projectConversationHistorySlots(
     ...slot,
     message: {
       ...slot.message,
-      tools: slot.message.tools.map((tool): ConversationHistoryTool => ({ ...tool })),
+      tools: slot.message.tools.map((tool): ConversationHistoryTool => ({
+        ...tool,
+        resultImageRefs: tool.resultImageRefs?.map((reference) => ({
+          contentIndex: reference.contentIndex,
+          source: { ...reference.source },
+        })),
+      })),
       parts: slot.message.parts.map((part) => ({ ...part })),
       usage: slot.message.usage ? { ...slot.message.usage } : undefined,
     },

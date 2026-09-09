@@ -1,10 +1,15 @@
 import type { ReactNode } from "react";
+import { PROMPT_IMAGE_PLACEHOLDER } from "../../shared/protocol";
 import type { ToolItem } from "../chat/reducer";
 import {
   conversationTargetTitle,
   type ConversationTitleLookup,
 } from "../lib/conversation-display";
 import { ActivitySpinner } from "./ActivitySpinner";
+import {
+  HistoricalImageLink,
+  type HistoricalImageOpenHandler,
+} from "./HistoricalImageLink";
 
 type ToolRecord = Record<string, unknown>;
 
@@ -297,17 +302,6 @@ function ReadableValue({
   </dl>;
 }
 
-function contentText(value: unknown): string[] {
-  const content = asRecord(value)?.content;
-  if (!Array.isArray(content)) return [];
-  return content.flatMap((item) => {
-    const block = asRecord(item);
-    return block?.type === "text" && typeof block.text === "string"
-      ? [block.text]
-      : [];
-  });
-}
-
 function parsedJson(text: string): unknown | undefined {
   const trimmed = text.trim();
   if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return undefined;
@@ -318,22 +312,74 @@ function parsedJson(text: string): unknown | undefined {
   }
 }
 
-function ToolResult({ name, result }: { name: string; result: unknown }) {
+function ToolResult({
+  name,
+  result,
+  resultImageRefs,
+  onOpenImage,
+}: {
+  name: string;
+  result: unknown;
+  resultImageRefs: ToolItem["resultImageRefs"];
+  onOpenImage?: HistoricalImageOpenHandler;
+}) {
   const record = asRecord(result);
   const details = record?.details;
-  const textBlocks = contentText(result);
+  const content = Array.isArray(record?.content) ? record.content : undefined;
   const preferDetails = META_TOOL_NAMES.has(name) && details !== undefined;
+  const refsByContentIndex = new Map(
+    resultImageRefs?.map((reference) => [reference.contentIndex, reference]) ?? [],
+  );
+  const renderedRefIndexes = new Set<number>();
+  const contentNodes = content?.flatMap((item, index): ReactNode[] => {
+    const block = asRecord(item);
+    if (
+      block?.type === "text"
+      && typeof block.text === "string"
+      && !preferDetails
+    ) {
+      const structured = parsedJson(block.text);
+      return [structured === undefined
+        ? <pre className="tool-text" key={`text:${index}`}>
+            {block.text || "无输出"}
+          </pre>
+        : <ReadableValue value={structured} key={`text:${index}`} />];
+    }
+    if (block?.type !== "image") return [];
+    const reference = refsByContentIndex.get(index);
+    if (reference !== undefined) renderedRefIndexes.add(index);
+    return [reference !== undefined && onOpenImage !== undefined
+      ? <HistoricalImageLink
+          key={`image:${index}`}
+          source={reference.source}
+          onOpenImage={onOpenImage}
+        />
+      : <span className="tool-value" key={`image:${index}`}>
+          {PROMPT_IMAGE_PLACEHOLDER}
+        </span>];
+  }) ?? [];
+  const remainingImageNodes = (resultImageRefs ?? [])
+    .filter((reference) => !renderedRefIndexes.has(reference.contentIndex))
+    .map((reference) => onOpenImage !== undefined
+      ? <HistoricalImageLink
+          key={`image-ref:${reference.contentIndex}`}
+          source={reference.source}
+          onOpenImage={onOpenImage}
+        />
+      : <span className="tool-value" key={`image-ref:${reference.contentIndex}`}>
+          {PROMPT_IMAGE_PLACEHOLDER}
+        </span>);
 
-  if (preferDetails) return <ReadableValue value={details} />;
+  if (preferDetails && contentNodes.length === 0 && remainingImageNodes.length === 0) {
+    return <ReadableValue value={details} />;
+  }
 
-  if (textBlocks.length > 0) {
+  if (contentNodes.length > 0 || remainingImageNodes.length > 0) {
     return <>
-      {textBlocks.map((text, index) => {
-        const structured = parsedJson(text);
-        return structured === undefined
-          ? <pre className="tool-text" key={index}>{text || "无输出"}</pre>
-          : <ReadableValue value={structured} key={index} />;
-      })}
+      {contentNodes.length > 0
+        ? contentNodes
+        : <ReadableValue value={result} />}
+      {remainingImageNodes}
       {details !== undefined && Object.keys(asRecord(details) ?? {}).length > 0
         ? <div className="tool-result-details">
             <h5>补充信息</h5>
@@ -343,7 +389,7 @@ function ToolResult({ name, result }: { name: string; result: unknown }) {
     </>;
   }
 
-  if (record && Array.isArray(record.content)) {
+  if (record && content) {
     if (details !== undefined) return <ReadableValue value={details} />;
     return <span className="tool-value">无输出</span>;
   }
@@ -351,7 +397,13 @@ function ToolResult({ name, result }: { name: string; result: unknown }) {
   return <ReadableValue value={result} />;
 }
 
-export function ToolDetails({ tool }: { tool: ToolItem }) {
+export function ToolDetails({
+  tool,
+  onOpenImage,
+}: {
+  tool: ToolItem;
+  onOpenImage?: HistoricalImageOpenHandler;
+}) {
   return <div className="tool-body">
     {tool.args !== undefined
       ? <section className="tool-section">
@@ -362,7 +414,12 @@ export function ToolDetails({ tool }: { tool: ToolItem }) {
     {tool.result !== undefined
       ? <section className="tool-section">
           <h4>结果</h4>
-          <ToolResult name={tool.name} result={tool.result} />
+          <ToolResult
+            name={tool.name}
+            result={tool.result}
+            resultImageRefs={tool.resultImageRefs}
+            onOpenImage={onOpenImage}
+          />
         </section>
       : null}
   </div>;
@@ -371,9 +428,11 @@ export function ToolDetails({ tool }: { tool: ToolItem }) {
 export function ToolCard({
   tool,
   conversationTitleLookup,
+  onOpenImage,
 }: {
   tool: ToolItem;
   conversationTitleLookup?: ConversationTitleLookup;
+  onOpenImage?: HistoricalImageOpenHandler;
 }) {
   const presentation = toolPresentation(tool, conversationTitleLookup);
   const status = statusLabel(tool.status);
@@ -401,6 +460,6 @@ export function ToolCard({
       </span>
       <span className="tool-chevron" aria-hidden="true">⌄</span>
     </summary>
-    <ToolDetails tool={tool} />
+    <ToolDetails tool={tool} onOpenImage={onOpenImage} />
   </details>;
 }

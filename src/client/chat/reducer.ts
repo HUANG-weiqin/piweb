@@ -13,6 +13,7 @@ export interface ToolItem {
   name: string;
   args?: unknown;
   result?: unknown;
+  resultImageRefs?: ConversationHistoryMessage["tools"][number]["resultImageRefs"];
   status: "pending" | "running" | "done" | "error";
 }
 
@@ -179,6 +180,7 @@ function historyMessageToItem(
       name: tool.toolName,
       args: tool.args,
       result: tool.result,
+      resultImageRefs: tool.resultImageRefs,
       status: tool.status,
     })),
     parts,

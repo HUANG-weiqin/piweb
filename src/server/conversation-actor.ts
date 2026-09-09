@@ -12,8 +12,9 @@ import { Type } from "typebox";
 import {
   DEFAULT_COMPACTION_THRESHOLD_PERCENT,
   MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
-  parsePromptImage,
+  parseConversationImage,
   type ConversationActivity,
+  type ConversationImage,
   type ConversationHistoryItem,
   type ConversationHistoryMessage,
   type ConversationHistoryMessagePart,
@@ -98,7 +99,7 @@ function hasImagePrefix(bytes: Uint8Array, prefix: readonly number[]): boolean {
     && prefix.every((value, index) => bytes[index] === value);
 }
 
-function promptImageHasExpectedSignature(image: PromptImage): boolean {
+function imageHasExpectedSignature(image: ConversationImage): boolean {
   const bytes = Buffer.from(image.data, "base64");
   switch (image.mimeType) {
     case "image/png":
@@ -124,7 +125,7 @@ function promptImagesForModel(
     throw new Error("The current model does not support image input");
   }
   for (const image of images) {
-    if (!promptImageHasExpectedSignature(image)) {
+    if (!imageHasExpectedSignature(image)) {
       throw new Error(`Image data does not match ${image.mimeType}`);
     }
   }
@@ -199,7 +200,7 @@ export type ConversationActorEvent =
       runId: string;
     }
   | {
-      /** A durable user image is available for an immediate history projection. */
+      /** A durable user/tool-result image is ready for history projection. */
       type: "image_message_persisted";
       conversationId: string;
     }
@@ -644,7 +645,7 @@ function hasContextBearingEntry(entry: unknown): boolean {
     || entry.type === "branch_summary";
 }
 
-function rawUserMessageIsPersisted(
+function rawMessageIsPersisted(
   entries: readonly unknown[],
   message: unknown,
 ): boolean {
@@ -658,12 +659,12 @@ function rawUserMessageIsPersisted(
   ));
 }
 
-function rawUserMessageHasImage(message: unknown): boolean {
+function rawMessageHasImage(message: unknown): boolean {
   if (typeof message !== "object" || message === null) return false;
-  const user = message as { role?: unknown; content?: unknown };
-  return user.role === "user"
-    && Array.isArray(user.content)
-    && user.content.some((content) => (
+  const candidate = message as { role?: unknown; content?: unknown };
+  return (candidate.role === "user" || candidate.role === "toolResult")
+    && Array.isArray(candidate.content)
+    && candidate.content.some((content) => (
       typeof content === "object"
       && content !== null
       && "type" in content
@@ -995,7 +996,10 @@ export class ConversationActor {
     return structuredClone(this.loopListSnapshot);
   }
 
-  readPersistedImage(messageId: string, imageOrdinal: number): PromptImage {
+  readPersistedImage(
+    messageId: string,
+    imageOrdinal: number,
+  ): ConversationImage {
     this.assertUsable();
     const entry = this.sessionManager.getBranch().find((candidate) => (
       candidate.id === messageId && candidate.type === "message"
@@ -1004,7 +1008,10 @@ export class ConversationActor {
       throw new Error("The requested image is no longer available");
     }
     const message = entry.message;
-    if (message.role !== "user" || !Array.isArray(message.content)) {
+    if (
+      (message.role !== "user" && message.role !== "toolResult")
+      || !Array.isArray(message.content)
+    ) {
       throw new Error("The requested image is no longer available");
     }
 
@@ -1012,11 +1019,11 @@ export class ConversationActor {
     for (const content of message.content) {
       if (content.type !== "image") continue;
       if (ordinal++ !== imageOrdinal) continue;
-      const image = parsePromptImage({
+      const image = parseConversationImage({
         mimeType: content.mimeType,
         data: content.data,
       });
-      if (image === undefined || !promptImageHasExpectedSignature(image)) {
+      if (image === undefined || !imageHasExpectedSignature(image)) {
         throw new Error("The stored image data is invalid");
       }
       return image;
@@ -2808,7 +2815,7 @@ export class ConversationActor {
       const index = ticket.guidanceDeliveries.indexOf(steer);
       if (index >= 0) ticket.guidanceDeliveries.splice(index, 1);
       queueMicrotask(() => {
-        if (!rawUserMessageIsPersisted(
+        if (!rawMessageIsPersisted(
           this.sessionManager.getEntries(),
           rawMessage,
         )) {
@@ -2828,7 +2835,7 @@ export class ConversationActor {
       const index = this.pendingAdmissions.indexOf(admission);
       if (index >= 0) this.pendingAdmissions.splice(index, 1);
       queueMicrotask(() => {
-        if (!rawUserMessageIsPersisted(
+        if (!rawMessageIsPersisted(
           this.sessionManager.getEntries(),
           rawMessage,
         )) {
@@ -3564,7 +3571,7 @@ export class ConversationActor {
       if (ticket.expectsInitialPromptRawUserMessage) {
         ticket.expectsInitialPromptRawUserMessage = false;
         queueMicrotask(() => {
-          if (!rawUserMessageIsPersisted(
+          if (!rawMessageIsPersisted(
             this.sessionManager.getEntries(),
             rawMessage,
           )) {
@@ -3591,6 +3598,29 @@ export class ConversationActor {
       }
       // A mismatched raw user end (e.g. an extension user message) must not
       // consume or overtake host guidance records.
+    }
+
+    if (
+      event.type === "message_end"
+      && event.message.role === "toolResult"
+      && rawMessageHasImage(event.message)
+    ) {
+      const rawMessage = event.message;
+      queueMicrotask(() => {
+        if (!rawMessageIsPersisted(
+          this.sessionManager.getEntries(),
+          rawMessage,
+        )) {
+          this.emitError(
+            new Error(
+              "Pi did not durably append the image tool result before history projection",
+            ),
+            ticket.id,
+          );
+          return;
+        }
+        this.emitImageMessagePersisted(rawMessage);
+      });
     }
 
     if (event.type === "message_end" && event.message.role === "assistant") {
@@ -4090,7 +4120,7 @@ export class ConversationActor {
   }
 
   private emitImageMessagePersisted(rawMessage: unknown): void {
-    if (!rawUserMessageHasImage(rawMessage)) return;
+    if (!rawMessageHasImage(rawMessage)) return;
     this.emit({
       type: "image_message_persisted",
       conversationId: this.conversationId,

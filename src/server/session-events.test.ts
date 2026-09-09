@@ -220,6 +220,62 @@ describe("SessionEventProjector", () => {
     }]);
   });
 
+  it("redacts only top-level tool-result image blocks before live wire bounding", () => {
+    const projector = new SessionEventProjector();
+    const result = {
+      content: [
+        { type: "text", text: "before" },
+        {
+          type: "image",
+          mimeType: "image/png",
+          data: "secret-base64".repeat(30_000),
+        },
+        { type: "text", text: "after" },
+      ],
+      details: {
+        nestedBusinessValue: {
+          type: "image",
+          data: "business-data",
+        },
+      },
+    };
+
+    const [updated] = projector.project(nativeEvent({
+      type: "tool_execution_update",
+      toolCallId: "tool-image",
+      toolName: "custom",
+      partialResult: result,
+    }));
+    const [finished] = projector.project(nativeEvent({
+      type: "tool_execution_end",
+      toolCallId: "tool-image",
+      toolName: "custom",
+      result,
+      isError: false,
+    }));
+
+    for (const event of [updated, finished]) {
+      expect(event).toMatchObject({
+        toolCallId: "tool-image",
+        result: {
+          content: [
+            { type: "text", text: "before" },
+            { type: "image" },
+            { type: "text", text: "after" },
+          ],
+          details: {
+            nestedBusinessValue: {
+              type: "image",
+              data: "business-data",
+            },
+          },
+        },
+      });
+      expect(JSON.stringify(event)).not.toContain("secret-base64");
+      expect(JSON.stringify(event)).toContain("business-data");
+    }
+  });
+
   it("splits live assistant output around a delivered session message", () => {
     const projector = new SessionEventProjector();
     projector.project(nativeEvent({ type: "agent_start" }));

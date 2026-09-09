@@ -2,7 +2,7 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import { fireEvent } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ConversationSummary } from "../../shared/protocol";
 import type { ToolItem } from "../chat/reducer";
 import { createConversationTitleLookup } from "../lib/conversation-display";
@@ -208,6 +208,48 @@ describe("ToolCard", () => {
     expect(screen.getByText("运行中")).toBeInTheDocument();
     expect(screen.getByText("最后活跃")).toBeInTheDocument();
     expect(container).not.toHaveTextContent("\"sessions\"");
+  });
+
+  it("renders mixed and image-only result blocks through durable image locators", () => {
+    const onOpenImage = vi.fn();
+    const imageTool: ToolItem = {
+      id: "image-tool",
+      name: "custom_image_tool",
+      args: {},
+      result: {
+        content: [
+          { type: "text", text: "before" },
+          { type: "image" },
+          { type: "text", text: "after" },
+          { type: "image" },
+        ],
+      },
+      resultImageRefs: [{
+        contentIndex: 1,
+        source: { messageId: "tool-result-entry", imageOrdinal: 0 },
+      }, {
+        contentIndex: 3,
+        source: { messageId: "tool-result-entry", imageOrdinal: 1 },
+      }],
+      status: "done",
+    };
+    const { container } = render(
+      <ToolCard tool={imageTool} onOpenImage={onOpenImage} />,
+    );
+
+    fireEvent.click(container.querySelector("summary") as HTMLElement);
+    const links = screen.getAllByRole("button", {
+      name: /在新标签页中打开图片/,
+    });
+    expect(links).toHaveLength(2);
+    expect(container.querySelector(".tool-section:last-child")?.textContent)
+      .toBe("结果before[图片]after[图片]");
+
+    fireEvent.click(links[1]!);
+    expect(onOpenImage).toHaveBeenCalledWith({
+      messageId: "tool-result-entry",
+      imageOrdinal: 1,
+    });
   });
 
   it("describes an empty tool result without exposing implementation values", () => {

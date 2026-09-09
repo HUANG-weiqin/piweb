@@ -4,6 +4,7 @@ import {
   MAX_PROJECT_ACTIVITY_SUMMARIES,
   MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
   type ConversationHistoryItem,
+  type ConversationImage,
   type ConversationRoleSnapshot,
   type ConversationSummary,
   type ConversationWindowCoverage,
@@ -1615,7 +1616,7 @@ export class ProjectSessionCoordinator {
     conversationId: string,
     messageId: string,
     imageOrdinal: number,
-  ): Promise<PromptImage> {
+  ): Promise<ConversationImage> {
     const context = this.requireContext(handle);
     return this.runLifecycle(context, () => {
       if (context.deleting.has(conversationId)) {

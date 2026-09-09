@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  MAX_CONVERSATION_IMAGE_DATA_CHARACTERS,
   MAX_MESSAGE_BYTES,
   MAX_MODEL_REFERENCE_BYTES,
   MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
@@ -40,7 +41,7 @@ const transitionDiagnostics = {
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(53);
+    expect(PROTOCOL_VERSION).toBe(54);
   });
 
   it("accepts supported commands", () => {
@@ -699,6 +700,43 @@ describe("parseClientCommand", () => {
       parentPath: null,
       directories: [],
       truncated: false,
+    })).toThrow();
+  });
+
+  it("uses a separate bounded payload for durable conversation images", () => {
+    const largeReadImage = "A".repeat(
+      MAX_CONVERSATION_IMAGE_DATA_CHARACTERS,
+    );
+    expect(parseClientCommand({
+      type: "open_image",
+      sessionId,
+      conversationId,
+      focusId,
+      commandId,
+      messageId: "tool-result-entry",
+      imageOrdinal: 7,
+    })).toMatchObject({ imageOrdinal: 7 });
+    expect(parseServerEvent({
+      type: "conversation_image",
+      sessionId,
+      conversationId,
+      focusId,
+      commandId,
+      messageId: "tool-result-entry",
+      imageOrdinal: 7,
+      mimeType: "image/png",
+      data: largeReadImage,
+    })).toMatchObject({ data: largeReadImage });
+    expect(() => parseServerEvent({
+      type: "conversation_image",
+      sessionId,
+      conversationId,
+      focusId,
+      commandId,
+      messageId: "tool-result-entry",
+      imageOrdinal: 0,
+      mimeType: "image/png",
+      data: "A".repeat(MAX_CONVERSATION_IMAGE_DATA_CHARACTERS + 4),
     })).toThrow();
   });
 
@@ -1460,6 +1498,13 @@ describe("parseClientCommand", () => {
           toolCallId: "tool-1",
           toolName: "read",
           status: "done",
+          resultImageRefs: [{
+            contentIndex: 1,
+            source: {
+              messageId: "tool-result-entry",
+              imageOrdinal: 0,
+            },
+          }],
         }, {
           toolCallId: "tool-error",
           toolName: "bash",
@@ -1470,6 +1515,13 @@ describe("parseClientCommand", () => {
           { kind: "tool", toolCallId: "tool-1" },
           { kind: "text", offset: 0, length: 6 },
         ],
+        imageRefs: [{
+          offset: 0,
+          source: {
+            messageId: "user-image-entry",
+            imageOrdinal: 0,
+          },
+        }],
       }],
       window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
     })).toMatchObject({

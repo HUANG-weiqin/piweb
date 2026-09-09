@@ -18,6 +18,7 @@ import {
   MIN_COMPACTION_THRESHOLD_PERCENT,
   promptImageMimeType,
   type ConversationCompactionMarker,
+  type ConversationImageLocator,
   type ConversationMessageCard,
   type ConversationRoleSnapshot,
   type PendingPromptAdmissionSnapshot as PendingAdmission,
@@ -186,7 +187,7 @@ interface ChatProps {
   onChangeCwd(): void;
   onOpenConversation?(conversationId: string): void;
   onBlockingModalChange?(blocking: boolean): void;
-  onOpenImage?(messageId: string, imageOrdinal: number): void;
+  onOpenImage?(source: ConversationImageLocator): void;
   onRewind(messageId: string, text: string): void;
   rewindingMessageId?: string;
 }
@@ -1076,7 +1077,7 @@ function ChatView({
         return <Message
           key={`${transcriptRenderScopeKey}:message:${block.message.id}`}
           message={block.message}
-          onOpenImage={block.message.role === "user" ? onOpenImage : undefined}
+          onOpenImage={onOpenImage}
           onRewind={block.message.role === "user" ? handleRewind : undefined}
           rewindDisabled={
             busy

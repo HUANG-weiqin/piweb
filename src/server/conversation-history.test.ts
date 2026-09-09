@@ -105,6 +105,104 @@ describe("projectConversationHistory", () => {
     ]);
   });
 
+  it("projects mixed tool-result images as durable data-free references", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    manager.appendMessage(message({
+      role: "assistant",
+      content: [{
+        type: "toolCall",
+        id: "image-call",
+        name: "custom_image_tool",
+        arguments: {},
+      }],
+      stopReason: "toolUse",
+      timestamp: 1,
+    }));
+    const toolResultId = manager.appendMessage(message({
+      role: "toolResult",
+      toolCallId: "image-call",
+      toolName: "custom_image_tool",
+      content: [
+        { type: "text", text: "before" },
+        { type: "image", mimeType: "image/png", data: "secret-first" },
+        { type: "text", text: "after" },
+        { type: "image", mimeType: "image/jpeg", data: "secret-second" },
+      ],
+      details: { source: "extension" },
+      isError: false,
+      timestamp: 2,
+    }));
+
+    const tool = projectConversationHistory(manager)[0]?.tools[0];
+    expect(tool).toEqual({
+      toolCallId: "image-call",
+      toolName: "custom_image_tool",
+      args: {},
+      result: {
+        content: [
+          { type: "text", text: "before" },
+          { type: "image" },
+          { type: "text", text: "after" },
+          { type: "image" },
+        ],
+        details: { source: "extension" },
+      },
+      resultImageRefs: [{
+        contentIndex: 1,
+        source: { messageId: toolResultId, imageOrdinal: 0 },
+      }, {
+        contentIndex: 3,
+        source: { messageId: toolResultId, imageOrdinal: 1 },
+      }],
+      status: "done",
+    });
+    expect(JSON.stringify(tool)).not.toContain("secret-first");
+    expect(JSON.stringify(tool)).not.toContain("secret-second");
+  });
+
+  it("retains tool image references when oversized generic result text is omitted", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    manager.appendMessage(message({
+      role: "assistant",
+      content: [{
+        type: "toolCall",
+        id: "large-image-call",
+        name: "custom_image_tool",
+        arguments: {},
+      }],
+      stopReason: "toolUse",
+      timestamp: 1,
+    }));
+    const toolResultId = manager.appendMessage(message({
+      role: "toolResult",
+      toolCallId: "large-image-call",
+      toolName: "custom_image_tool",
+      content: [
+        { type: "text", text: "x".repeat(9_000) },
+        { type: "image", mimeType: "image/png", data: "secret-image" },
+      ],
+      isError: false,
+      timestamp: 2,
+    }));
+
+    const snapshot = projectConversationItemsSnapshot(manager);
+    const assistant = snapshot.items.find((item) => item.kind === "message");
+    expect(assistant).toMatchObject({ kind: "message" });
+    if (assistant?.kind !== "message") throw new Error("expected message item");
+    expect(assistant.tools[0]).toMatchObject({
+      result: "[历史工具数据过大，已省略]",
+      resultImageRefs: [{
+        contentIndex: 1,
+        source: { messageId: toolResultId, imageOrdinal: 0 },
+      }],
+    });
+    expect(assistant.parts).toContainEqual({
+      kind: "tool",
+      toolCallId: "large-image-call",
+    });
+    expect(JSON.stringify(snapshot)).not.toContain("secret-image");
+  });
+
   it("uses settlement boundaries to identify restored runs", () => {
     const manager = SessionManager.inMemory("E:\\work");
     const runId = randomUUID();
@@ -329,7 +427,10 @@ describe("projectConversationHistory", () => {
     const history = projectConversationHistory(manager);
     expect(history[0]).toMatchObject({
       text: "root\n[图片]",
-      imageRefs: [{ offset: 5, ordinal: 0 }],
+      imageRefs: [{
+        offset: 5,
+        source: { messageId: root, imageOrdinal: 0 },
+      }],
     });
     expect(JSON.stringify(history)).not.toContain("iVBORw0KGgo=");
     expect(history.some((item) => item.text === "abandoned")).toBe(false);

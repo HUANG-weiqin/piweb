@@ -17,6 +17,10 @@ import type { ConversationTitleLookup } from "../lib/conversation-display";
 import { ActivitySpinner } from "./ActivitySpinner";
 import { CommitmentCard, isCommitmentTool } from "./CommitmentCard";
 import {
+  HistoricalImageLink,
+  type HistoricalImageOpenHandler,
+} from "./HistoricalImageLink";
+import {
   getMermaidSourceAnalysis,
   MarkdownContent,
   MERMAID_MAX_BLOCKS_PER_CONTENT,
@@ -215,9 +219,11 @@ function StreamingMarkdown({
 function ToolsPanel({
   tools,
   conversationTitleLookup,
+  onOpenImage,
 }: {
   tools: ChatMessage["tools"];
   conversationTitleLookup?: ConversationTitleLookup;
+  onOpenImage?: HistoricalImageOpenHandler;
 }) {
   const [showAllTools, setShowAllTools] = useState(false);
   const hasOverflow = tools.length > TOOL_PREVIEW_LIMIT;
@@ -241,6 +247,7 @@ function ToolsPanel({
         key={tool.id}
         tool={tool}
         conversationTitleLookup={conversationTitleLookup}
+        onOpenImage={onOpenImage}
       />)}
       {hasOverflow ? <button className="ghost tool-toggle" type="button" onClick={() => setShowAllTools((current) => !current)}>{showAllTools ? `收起到最近 ${TOOL_PREVIEW_LIMIT} 条` : expandLabel}</button> : null}
     </div>
@@ -451,11 +458,13 @@ function ActivityGroup({
   tools,
   activeThinking,
   conversationTitleLookup,
+  onOpenImage,
 }: {
   parts: ChatMessagePart[];
   tools: ToolItem[];
   activeThinking: boolean;
   conversationTitleLookup?: ConversationTitleLookup;
+  onOpenImage?: HistoricalImageOpenHandler;
 }) {
   const runs = activityRuns(parts, tools);
   const summary = activitySummary(
@@ -522,6 +531,7 @@ function ActivityGroup({
             key={`tools:${index}`}
             tools={run.tools}
             conversationTitleLookup={conversationTitleLookup}
+            onOpenImage={onOpenImage}
           />)}
     </div>
   </details>;
@@ -561,16 +571,11 @@ function renderUserMessageText(
   let cursor = 0;
   for (const reference of message.imageRefs) {
     nodes.push(message.text.slice(cursor, reference.offset));
-    nodes.push(<button
-      key={`image:${reference.ordinal}`}
-      type="button"
-      className="message-image-link"
-      aria-label={`在新标签页中打开图片 ${reference.ordinal + 1}`}
-      title="在新标签页中打开图片"
-      onClick={() => onOpenImage(message.id, reference.ordinal)}
-    >
-      {PROMPT_IMAGE_PLACEHOLDER}
-    </button>);
+    nodes.push(<HistoricalImageLink
+      key={`image:${reference.source.messageId}:${reference.source.imageOrdinal}`}
+      source={reference.source}
+      onOpenImage={onOpenImage}
+    />);
     cursor = reference.offset + PROMPT_IMAGE_PLACEHOLDER.length;
   }
   nodes.push(message.text.slice(cursor));
@@ -579,7 +584,7 @@ function renderUserMessageText(
 
 interface MessageProps {
   message: ChatMessage;
-  onOpenImage?(messageId: string, imageOrdinal: number): void;
+  onOpenImage?: HistoricalImageOpenHandler;
   onRewind?(messageId: string, text: string): void;
   rewindDisabled?: boolean;
   rewinding?: boolean;
@@ -784,6 +789,7 @@ function MessageView({
         tools={message.tools}
         activeThinking={activeThinking && index === lastActivityIndex}
         conversationTitleLookup={conversationTitleLookup}
+        onOpenImage={onOpenImage}
       />;
     })}
     {actions}

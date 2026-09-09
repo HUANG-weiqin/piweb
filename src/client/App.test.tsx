@@ -616,7 +616,13 @@ describe("App", () => {
         text: "[图片]",
         thinking: "",
         tools: [],
-        imageRefs: [{ offset: 0, ordinal: 0 }],
+        imageRefs: [{
+          offset: 0,
+          source: {
+            messageId: "durable-image-message",
+            imageOrdinal: 0,
+          },
+        }],
       }]),
       window: completeConversationWindow,
     }));

@@ -15,6 +15,7 @@ import {
   type AuthRequest,
   type ClientCommand,
   type ColorScheme,
+  type ConversationImageLocator,
   type ConversationRoleSnapshot,
   type ConversationSummary,
   type DirectoryListing,
@@ -3033,7 +3034,10 @@ export function App() {
       setColorSchemeSaveError("配色已在本地预览，但尚未保存；请重试。");
     }
   };
-  const openImage = useCallback((messageId: string, imageOrdinal: number) => {
+  const openImage = useCallback(({
+    messageId,
+    imageOrdinal,
+  }: ConversationImageLocator) => {
     const focus = focusRef.current;
     if (!focus || !conversationReadyRef.current || !protocolReady) {
       setError("当前对话尚未准备好打开图片");

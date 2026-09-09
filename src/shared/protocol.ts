@@ -19,6 +19,8 @@ export const MAX_PROMPT_CHARACTERS = 200_000;
 /** 每条浏览器 prompt 最多携带四张小型本地图片，合计解码后不超过 512 KiB。 */
 export const MAX_PROMPT_IMAGE_COUNT = 4;
 export const MAX_PROMPT_IMAGE_BYTES = 512 * 1024;
+/** One-shot durable image responses are bounded independently from prompt uploads. */
+export const MAX_CONVERSATION_IMAGE_DATA_CHARACTERS = 5 * 1024 * 1024;
 /** Durable history renders image input as this marker; image bytes stay out of snapshots. */
 export const PROMPT_IMAGE_PLACEHOLDER = "[图片]";
 export const MAX_PENDING_PROMPTS_PER_CONVERSATION = 64;
@@ -29,6 +31,8 @@ export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
+// v54: durable user and tool-result images share an exact physical-entry
+// locator while placement remains specific to message text or tool content.
 // v53: process-global UI preferences travel in hello and converge through a
 // durable, command-correlated color-scheme update.
 // v52: durable user-image placeholders carry bounded references; image bytes
@@ -68,7 +72,7 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
-export const PROTOCOL_VERSION = 53;
+export const PROTOCOL_VERSION = 54;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 export const COLOR_SCHEMES = ["quiet-rebel", "classic-rebel"] as const;
 export type ColorScheme = typeof COLOR_SCHEMES[number];
@@ -137,23 +141,75 @@ export function promptImageMimeType(
 const promptImageMimeTypeSchema = z.enum(PROMPT_IMAGE_MIME_TYPES);
 const MAX_PROMPT_IMAGE_DATA_CHARACTERS =
   Math.ceil(MAX_PROMPT_IMAGE_BYTES / 3) * 4;
-const canonicalBase64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+function isCanonicalBase64(data: string): boolean {
+  if (data.length % 4 !== 0) return false;
+  let paddingLength = 0;
+  if (data.endsWith("==")) paddingLength = 2;
+  else if (data.endsWith("=")) paddingLength = 1;
+  const contentLength = data.length - paddingLength;
+  for (let index = 0; index < contentLength; index += 1) {
+    const code = data.charCodeAt(index);
+    const isAlphabet = (code >= 0x41 && code <= 0x5a)
+      || (code >= 0x61 && code <= 0x7a)
+      || (code >= 0x30 && code <= 0x39)
+      || code === 0x2b
+      || code === 0x2f;
+    if (!isAlphabet) return false;
+  }
+  return !data.slice(contentLength).includes("=")
+    || data.slice(contentLength) === "="
+    || data.slice(contentLength) === "==";
+}
 export function decodedPromptImageBytes(data: string): number {
   return (data.length / 4) * 3
     - (data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0);
 }
-const promptImageSchema = z.object({
-  mimeType: promptImageMimeTypeSchema,
-  data: z.string()
-    .min(4)
-    .max(MAX_PROMPT_IMAGE_DATA_CHARACTERS)
-    .regex(canonicalBase64, "image data must be canonical base64"),
-}).strict();
-export type PromptImage = z.infer<typeof promptImageSchema>;
+function imagePayloadSchema(maximumDataCharacters: number) {
+  return z.object({
+    mimeType: promptImageMimeTypeSchema,
+    data: z.string().superRefine((data, context) => {
+      if (data.length < 4) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "image data is too short",
+        });
+        return;
+      }
+      if (data.length > maximumDataCharacters) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "image data exceeds its bounded payload",
+        });
+        return;
+      }
+      if (!isCanonicalBase64(data)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "image data must be canonical base64",
+        });
+      }
+    }),
+  }).strict();
+}
 
-/** Parses one stored image at the durable JSONL boundary without retaining unknown fields. */
+const promptImageSchema = imagePayloadSchema(MAX_PROMPT_IMAGE_DATA_CHARACTERS);
+const conversationImageSchema = imagePayloadSchema(
+  MAX_CONVERSATION_IMAGE_DATA_CHARACTERS,
+);
+export type PromptImage = z.infer<typeof promptImageSchema>;
+export type ConversationImage = z.infer<typeof conversationImageSchema>;
+
+/** Parses one uploaded image without retaining unknown fields. */
 export function parsePromptImage(value: unknown): PromptImage | undefined {
   const parsed = promptImageSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
+
+/** Parses one stored image for a bounded, one-shot durable response. */
+export function parseConversationImage(
+  value: unknown,
+): ConversationImage | undefined {
+  const parsed = conversationImageSchema.safeParse(value);
   return parsed.success ? parsed.data : undefined;
 }
 
@@ -426,7 +482,7 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
     conversationId: conversationIdSchema,
     focusId: focusIdSchema,
     messageId: conversationMessageIdSchema,
-    imageOrdinal: z.number().int().min(0).max(MAX_PROMPT_IMAGE_COUNT - 1),
+    imageOrdinal: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   }),
   z.object({
     type: z.literal("create_role"),
@@ -612,11 +668,26 @@ export type AuthRequest =
   | { kind: "manual"; message: string; placeholder?: string; allowEmpty?: boolean }
   | { kind: "select"; message: string; options: Array<{ id: string; label: string }> };
 
+export interface ConversationImageLocator {
+  /** Exact physical Pi JSONL message entry on the currently active branch. */
+  messageId: string;
+  /** Ordinal among top-level image content blocks in that durable message. */
+  imageOrdinal: number;
+}
+
+export interface ConversationHistoryToolImageReference {
+  /** Position of the data-free image marker in the projected result content. */
+  contentIndex: number;
+  source: ConversationImageLocator;
+}
+
 export interface ConversationHistoryTool {
   toolCallId: string;
   toolName: string;
   args?: unknown;
   result?: unknown;
+  /** Metadata only; tool-result image bytes are fetched on demand. */
+  resultImageRefs?: ConversationHistoryToolImageReference[];
   status: "pending" | "running" | "done" | "error";
 }
 
@@ -627,8 +698,7 @@ export type ConversationHistoryMessagePart =
 export interface ConversationHistoryImageReference {
   /** UTF-16 offset of the matching PROMPT_IMAGE_PLACEHOLDER in text. */
   offset: number;
-  /** Ordinal among the durable user message's image content blocks. */
-  ordinal: number;
+  source: ConversationImageLocator;
 }
 
 export interface ConversationHistoryMessage {
@@ -1311,10 +1381,20 @@ const sessionMessageEndpointSchema: z.ZodType<SessionMessageEndpoint> = z.object
     ),
   }),
 });
+const conversationImageLocatorSchema: z.ZodType<ConversationImageLocator> =
+  z.object({
+    messageId: conversationMessageIdSchema,
+    imageOrdinal: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  }).strict();
 const conversationImageReferenceSchema: z.ZodType<ConversationHistoryImageReference> =
   z.object({
     offset: z.number().int().nonnegative(),
-    ordinal: z.number().int().min(0).max(MAX_PROMPT_IMAGE_COUNT - 1),
+    source: conversationImageLocatorSchema,
+  }).strict();
+const conversationToolImageReferenceSchema: z.ZodType<ConversationHistoryToolImageReference> =
+  z.object({
+    contentIndex: z.number().int().nonnegative().max(1_999),
+    source: conversationImageLocatorSchema,
   }).strict();
 const conversationHistoryMessageSchema = z.object({
   id: z.string(),
@@ -1327,6 +1407,9 @@ const conversationHistoryMessageSchema = z.object({
     toolName: z.string(),
     args: z.unknown().optional(),
     result: z.unknown().optional(),
+    resultImageRefs: z.array(conversationToolImageReferenceSchema)
+      .max(2_000)
+      .optional(),
     status: z.enum(["pending", "running", "done", "error"]),
   })),
   parts: z.array(z.discriminatedUnion("kind", [
@@ -1571,14 +1654,14 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     promptId: z.string().uuid(),
     runId: runIdSchema,
   }).strict(),
-  promptImageSchema.extend({
+  conversationImageSchema.extend({
     type: z.literal("conversation_image"),
     sessionId: sessionIdSchema,
     conversationId: conversationIdSchema,
     focusId: focusIdSchema,
     commandId: commandIdSchema,
     messageId: conversationMessageIdSchema,
-    imageOrdinal: z.number().int().min(0).max(MAX_PROMPT_IMAGE_COUNT - 1),
+    imageOrdinal: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   }).strict(),
   z.object({
     type: z.literal("conversation_snapshot"),

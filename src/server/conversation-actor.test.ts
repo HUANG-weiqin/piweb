@@ -720,12 +720,180 @@ describe("ConversationActor", () => {
           id: messageId,
           role: "user",
           text: "[图片]",
-          imageRefs: [{ offset: 0, ordinal: 0 }],
+          imageRefs: [{
+            offset: 0,
+            source: { messageId, imageOrdinal: 0 },
+          }],
         }),
       );
 
       promptFinished.resolve();
       await running;
+      await fixture.actor.dispose();
+    });
+
+    it("publishes tool-result image references only after the exact raw object persists", async () => {
+      const fixture = await openActor();
+      const promptStarted = deferred<void>();
+      const promptFinished = deferred<void>();
+      fixture.runtime.session.promptImplementation = async () => {
+        promptStarted.resolve();
+        await promptFinished.promise;
+      };
+      const running = fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "run image tool",
+        origin: "browser",
+      });
+      await promptStarted.promise;
+      const assistantEntryId = fixture.manager.appendMessage(agentMessage({
+        role: "assistant",
+        content: [{
+          type: "toolCall",
+          id: "image-call",
+          name: "custom_image_tool",
+          arguments: {},
+        }],
+        stopReason: "toolUse",
+        timestamp: 1,
+      }));
+      const raw = agentMessage({
+        role: "toolResult",
+        toolCallId: "image-call",
+        toolName: "custom_image_tool",
+        content: [{
+          type: "image",
+          mimeType: "image/png",
+          data: "iVBORw0KGgo=",
+        }],
+        isError: false,
+        timestamp: 2,
+      });
+      const toolResultEntryId = fixture.manager.appendMessage(raw);
+      fixture.runtime.session.eventListener?.(nativeEvent({
+        type: "message_end",
+        message: raw,
+      }));
+
+      await vi.waitFor(() => expect(fixture.events).toContainEqual({
+        type: "image_message_persisted",
+        conversationId: CONVERSATION_ID,
+      }));
+      expect(fixture.actor.projectConversationItems().items).toContainEqual(
+        expect.objectContaining({
+          kind: "message",
+          id: `assistant:${assistantEntryId}`,
+          tools: [expect.objectContaining({
+            toolCallId: "image-call",
+            resultImageRefs: [{
+              contentIndex: 0,
+              source: { messageId: toolResultEntryId, imageOrdinal: 0 },
+            }],
+          })],
+        }),
+      );
+
+      promptFinished.resolve();
+      await running;
+      await fixture.actor.dispose();
+    });
+
+    it("does not publish a locator for an equal but unpersisted raw tool result", async () => {
+      const fixture = await openActor();
+      const promptStarted = deferred<void>();
+      const promptFinished = deferred<void>();
+      fixture.runtime.session.promptImplementation = async () => {
+        promptStarted.resolve();
+        await promptFinished.promise;
+      };
+      const running = fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "run image tool",
+        origin: "browser",
+      });
+      await promptStarted.promise;
+      const persisted = agentMessage({
+        role: "toolResult",
+        toolCallId: "image-call",
+        toolName: "custom_image_tool",
+        content: [{
+          type: "image",
+          mimeType: "image/png",
+          data: "iVBORw0KGgo=",
+        }],
+        isError: false,
+        timestamp: 2,
+      });
+      fixture.manager.appendMessage(persisted);
+      const rawCopy = structuredClone(persisted);
+      fixture.runtime.session.eventListener?.(nativeEvent({
+        type: "message_end",
+        message: rawCopy,
+      }));
+
+      await vi.waitFor(() => expect(fixture.events).toContainEqual(
+        expect.objectContaining({
+          type: "error",
+          runId: RUN_A,
+          message: "Pi did not durably append the image tool result before history projection",
+        }),
+      ));
+      expect(fixture.events).not.toContainEqual({
+        type: "image_message_persisted",
+        conversationId: CONVERSATION_ID,
+      });
+
+      promptFinished.resolve();
+      await running;
+      await fixture.actor.dispose();
+    });
+
+    it("opens larger durable tool images but fails closed past 5 MiB and off branch", async () => {
+      const fixture = await openActor();
+      const root = fixture.manager.appendMessage(agentMessage({
+        role: "user",
+        content: "root",
+        timestamp: 1,
+      }));
+      const largeData = Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        Buffer.alloc(600_000),
+      ]).toString("base64");
+      const largeImageEntryId = fixture.manager.appendMessage(agentMessage({
+        role: "toolResult",
+        toolCallId: "large-image",
+        toolName: "custom_image_tool",
+        content: [{ type: "image", mimeType: "image/png", data: largeData }],
+        isError: false,
+        timestamp: 2,
+      }));
+      expect(fixture.actor.readPersistedImage(largeImageEntryId, 0)).toEqual({
+        mimeType: "image/png",
+        data: largeData,
+      });
+
+      const oversizedData = Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        Buffer.alloc(4 * 1024 * 1024),
+      ]).toString("base64");
+      const oversizedEntryId = fixture.manager.appendMessage(agentMessage({
+        role: "toolResult",
+        toolCallId: "oversized-image",
+        toolName: "custom_image_tool",
+        content: [{
+          type: "image",
+          mimeType: "image/png",
+          data: oversizedData,
+        }],
+        isError: false,
+        timestamp: 3,
+      }));
+      expect(() => fixture.actor.readPersistedImage(oversizedEntryId, 0))
+        .toThrow("The stored image data is invalid");
+
+      fixture.manager.branch(root);
+      expect(() => fixture.actor.readPersistedImage(largeImageEntryId, 0))
+        .toThrow("The requested image is no longer available");
       await fixture.actor.dispose();
     });
 

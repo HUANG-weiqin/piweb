@@ -73,7 +73,10 @@ describe("Message", () => {
       thinking: "",
       tools: [],
       parts: [{ kind: "text", text: "先看[图片]再说" }],
-      imageRefs: [{ offset: 2, ordinal: 0 }],
+      imageRefs: [{
+        offset: 2,
+        source: { messageId: "image-message", imageOrdinal: 0 },
+      }],
     };
     render(<Message message={message} onOpenImage={onOpenImage} />);
 
@@ -81,7 +84,10 @@ describe("Message", () => {
       name: "在新标签页中打开图片 1",
     }));
 
-    expect(onOpenImage).toHaveBeenCalledWith("image-message", 0);
+    expect(onOpenImage).toHaveBeenCalledWith({
+      messageId: "image-message",
+      imageOrdinal: 0,
+    });
   });
 
   it("keeps a completed work process collapsed while summarizing its last action", () => {

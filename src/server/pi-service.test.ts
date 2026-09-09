@@ -6394,7 +6394,10 @@ describe("PiConnection coordinated project view", () => {
               id: messageId,
               role: "user",
               text: "[图片]",
-              imageRefs: [{ offset: 0, ordinal: 0 }],
+              imageRefs: [{
+                offset: 0,
+                source: { messageId, imageOrdinal: 0 },
+              }],
             }),
           ]),
         }),

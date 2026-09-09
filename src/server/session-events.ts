@@ -268,6 +268,78 @@ function ownDataProperty(value: unknown, key: string): unknown {
   }
 }
 
+export interface ToolResultWireProjection {
+  value: unknown;
+  /** Content-array positions of stripped top-level image blocks. */
+  imageContentIndexes: number[];
+}
+
+/**
+ * Redacts only standard top-level tool-result image content blocks before the
+ * generic wire sanitizer can retain or preview their base64 data.
+ */
+export function projectToolResultForWire(
+  value: unknown,
+): ToolResultWireProjection {
+  const content = ownDataProperty(value, "content");
+  if (!Array.isArray(content) || nodeTypes.isProxy(content)) {
+    return { value: toWireValue(value), imageContentIndexes: [] };
+  }
+
+  let projectedContent: unknown[];
+  try {
+    projectedContent = new Array(content.length);
+  } catch {
+    return { value: toWireValue(value), imageContentIndexes: [] };
+  }
+  const imageContentIndexes: number[] = [];
+  const inspectedLength = Math.min(content.length, MAX_COLLECTION_ITEMS);
+  for (let index = 0; index < inspectedLength; index += 1) {
+    let block: unknown;
+    try {
+      const descriptor = Object.getOwnPropertyDescriptor(content, String(index));
+      block = descriptor?.enumerable === true && "value" in descriptor
+        ? descriptor.value
+        : undefined;
+    } catch {
+      block = "[Uninspectable]";
+    }
+    if (ownDataProperty(block, "type") === "image") {
+      projectedContent[index] = { type: "image" };
+      imageContentIndexes.push(index);
+    } else {
+      projectedContent[index] = block;
+    }
+  }
+
+  if (imageContentIndexes.length === 0) {
+    return { value: toWireValue(value), imageContentIndexes };
+  }
+
+  const projected: Record<string, unknown> = {};
+  try {
+    for (const key of Reflect.ownKeys(value as object)) {
+      if (typeof key !== "string") continue;
+      const descriptor = Object.getOwnPropertyDescriptor(value as object, key);
+      if (!descriptor?.enumerable) continue;
+      projected[key] = key === "content"
+        ? projectedContent
+        : "value" in descriptor
+        ? descriptor.value
+        : "[Uninspectable]";
+    }
+  } catch {
+    // The recognized image blocks remain redacted even when sibling extension
+    // fields cannot be inspected safely.
+    projected.content = projectedContent;
+  }
+  projected.content = projectedContent;
+  return {
+    value: toWireValue(projected),
+    imageContentIndexes,
+  };
+}
+
 function retainedEditBudgetDetails(
   value: unknown,
 ): { piwebEditBudget: Record<string, number | boolean> } | undefined {
@@ -488,7 +560,7 @@ export class SessionEventProjector {
       return [{
         type: "tool_updated",
         toolCallId: String(event.toolCallId),
-        result: toWireValue(event.partialResult),
+        result: projectToolResultForWire(event.partialResult).value,
       }];
     }
 
@@ -496,7 +568,7 @@ export class SessionEventProjector {
       return [{
         type: "tool_finished",
         toolCallId: String(event.toolCallId),
-        result: toWireValue(event.result),
+        result: projectToolResultForWire(event.result).value,
         isError: event.isError,
       }];
     }
