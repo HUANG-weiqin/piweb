@@ -823,6 +823,30 @@ describe("ProjectSessionCoordinator", () => {
     await fixture.coordinator.close();
   });
 
+  it("completes a reload target whose durable conversation no longer exists", async () => {
+    const fixture = await createFixture();
+    const conversationId = randomUUID();
+    const onTargetCompleted = vi.fn(async () => undefined);
+
+    await expect(fixture.coordinator.resumeAfterReload(
+      randomUUID(),
+      [{
+        cwd: fixture.cwd,
+        conversationId,
+        continueTask: true,
+        continuationRunId: randomUUID(),
+      }],
+      onTargetCompleted,
+    )).resolves.toEqual([{
+      cwd: fixture.cwd,
+      conversationId,
+      disposition: "completed",
+    }]);
+
+    expect(onTargetCompleted).not.toHaveBeenCalled();
+    await fixture.coordinator.close();
+  });
+
   it("skips disk presentation for warm/opening actors and aborts stale reads", async () => {
     const fixture = await createFixture();
     const warm = await fixture.coordinator.createUserConversation(

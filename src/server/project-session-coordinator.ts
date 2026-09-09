@@ -68,6 +68,7 @@ import {
   type InboxEnvelopeInput,
 } from "./project-inbox.js";
 import {
+  ConversationNotFoundError,
   ProjectStoreRegistry,
   type ConversationDeletionLease,
   type ProjectStore,
@@ -2197,14 +2198,17 @@ export class ProjectSessionCoordinator {
         ) {
           attemptContext!.reloadAdoptions.delete(target.conversationId);
         }
-        console.warn(
-          `Failed to resume reloaded conversation ${target.conversationId}:`,
-          error instanceof Error ? error.message : String(error),
-        );
+        const missingConversation = error instanceof ConversationNotFoundError;
+        if (!missingConversation) {
+          console.warn(
+            `Failed to resume reloaded conversation ${target.conversationId}:`,
+            error instanceof Error ? error.message : String(error),
+          );
+        }
         const disposition: ReloadResumeDisposition = {
           cwd: target.cwd,
           conversationId: target.conversationId,
-          disposition: "retry",
+          disposition: missingConversation ? "completed" : "retry",
         };
         dispositions.push(disposition);
         this.recordReloadDisposition(requestId, disposition);

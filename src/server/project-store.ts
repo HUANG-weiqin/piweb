@@ -223,6 +223,12 @@ class SessionFileChangedError extends Error {
   }
 }
 
+export class ConversationNotFoundError extends Error {
+  constructor(conversationId: string) {
+    super(`Conversation not found: ${conversationId}`);
+  }
+}
+
 function sessionFileIdentitiesEqual(
   first: Readonly<SessionFileFingerprint>,
   second: Readonly<SessionFileFingerprint>,
@@ -2013,7 +2019,7 @@ export class ProjectStore {
           (entry) => entry.conversationId === conversationId,
         );
         if (candidates.length === 0) {
-          throw new Error(`Conversation not found: ${conversationId}`);
+          throw new ConversationNotFoundError(conversationId);
         }
         if (candidates.length > 1) {
           throw new Error(
