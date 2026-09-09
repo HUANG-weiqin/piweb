@@ -51,10 +51,9 @@ export function RoleSelectionPage({
         <button
           type="button"
           className="ghost"
-          disabled={pending}
           onClick={onSettings}
         >
-          模型连接
+          设置
         </button>
       </div>
     </header>

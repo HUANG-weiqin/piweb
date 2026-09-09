@@ -42,6 +42,7 @@ describe("PiSocket", () => {
         type: "hello",
         protocolVersion: PROTOCOL_VERSION,
         startupCwd: "E:\\work",
+        uiPreferences: { colorScheme: "quiet-rebel" },
       }),
     } as MessageEvent);
     transport.onmessage?.({ data: "{" } as MessageEvent);

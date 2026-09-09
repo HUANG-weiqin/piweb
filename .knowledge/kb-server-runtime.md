@@ -1,6 +1,6 @@
 # 服务端运行时
 
-`updated: 2026-09-07`
+`updated: 2026-09-09`
 
 ## 这个模块是干什么的
 
@@ -43,6 +43,8 @@
 - 用共享模型目录动态计算模板可用性；显式 `compactionModel` 必须可用、contextWindow 为有限正数且不小于 primary，create/update/switch 都重验；目录漂移可令模板 unavailable，但不阻止 frozen conversation 打开，默认压缩每次仍 fresh-resolve/revalidate 且无 fallback；
 - 创建或切换会话角色时返回完整深快照，不把模板对象引用交给 session；角色默认思考强度必须属于固定模型实际支持的档位，无可调档位的模型使用唯一有效值。工作台投影模型可选思考档位必须与 Pi SDK 的 `getSupportedThinkingLevels()` 语义一致：`null` 表示禁用，`xhigh/max` 只有显式映射时才可选。
 - 未携带角色快照的旧会话迁移为独立“旧会话”快照；可复用其历史模型或任一现存角色模型，但不依赖、也不重建已删除的初始化模板。
+
+`UiPreferencesStore` 是进程级用户界面偏好 owner：严格 v1 读写同一 `<Pi agent dir>/piweb/ui-preferences.json`，当前只接受 `quiet-rebel | classic-rebel`。缺失、不可读或 schema 损坏都以 `quiet-rebel` 安全启动并保留启动 warning；损坏状态要求下一次显式选择修复，即使用户选择默认值也不能短路。每次提交在进程级 tail 上串行，以同目录独占临时文件写完后原子 rename；磁盘成功后才替换内存快照并允许 socket 广播，失败会清理临时文件且不得改变旧快照。socket server 会在 reload/close 同步冻结新偏好修改：普通 reload 先 drain 已接受写入再公开 admission-frozen，force reload 则按 best-effort 合同不等待旧写入；重复 reload 若 coordinator 在 freeze callback 前拒绝，外层也必须立即失败而不能悬挂。它不进入项目 `.piweb`、RoleCatalog、conversation lifecycle 或浏览器持久状态。
 
 `ProjectSessionCoordinator` 是 conversation 生命周期拥有者：
 

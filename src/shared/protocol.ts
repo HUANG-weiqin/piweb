@@ -29,6 +29,8 @@ export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
+// v53: process-global UI preferences travel in hello and converge through a
+// durable, command-correlated color-scheme update.
 // v52: durable user-image placeholders carry bounded references; image bytes
 // travel only in a correlated one-shot response.
 // v51: wait-for-session activity always projects a target count; the legacy
@@ -66,8 +68,17 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
-export const PROTOCOL_VERSION = 52;
+export const PROTOCOL_VERSION = 53;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
+export const COLOR_SCHEMES = ["quiet-rebel", "classic-rebel"] as const;
+export type ColorScheme = typeof COLOR_SCHEMES[number];
+export interface UiPreferences {
+  colorScheme: ColorScheme;
+}
+const colorSchemeSchema = z.enum(COLOR_SCHEMES);
+const uiPreferencesSchema: z.ZodType<UiPreferences> = z.object({
+  colorScheme: colorSchemeSchema,
+}).strict();
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
 const conversationIdSchema = z.string()
@@ -270,6 +281,11 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
     commandId: commandIdSchema,
     path: required.max(4096).optional(),
   }),
+  z.object({
+    type: z.literal("set_color_scheme"),
+    commandId: commandIdSchema,
+    colorScheme: colorSchemeSchema,
+  }).strict(),
   z.object({
     type: z.literal("initialize"),
     commandId: commandIdSchema,
@@ -835,7 +851,18 @@ export interface TransitionDiagnostics {
 }
 
 export type ServerEvent =
-  | { type: "hello"; protocolVersion: number; startupCwd: string }
+  | {
+      type: "hello";
+      protocolVersion: number;
+      startupCwd: string;
+      uiPreferences: UiPreferences;
+    }
+  | {
+      type: "ui_preferences_changed";
+      uiPreferences: UiPreferences;
+      /** Present only for the browser whose command durably committed. */
+      commandId?: string;
+    }
   | ({ type: "directory_listing"; commandId: string } & DirectoryListing)
   | { type: "state"; state: PublicState }
   | {
@@ -1160,6 +1187,7 @@ const sessionEventSchema: z.ZodType<SessionEvent> = z.discriminatedUnion("type",
 ]);
 const commandTypeSchema = z.enum([
   "browse_directory",
+  "set_color_scheme",
   "initialize",
   "focus_conversation",
   "refresh_view",
@@ -1428,7 +1456,13 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     type: z.literal("hello"),
     protocolVersion: z.number().int().nonnegative(),
     startupCwd: z.string(),
-  }),
+    uiPreferences: uiPreferencesSchema,
+  }).strict(),
+  z.object({
+    type: z.literal("ui_preferences_changed"),
+    uiPreferences: uiPreferencesSchema,
+    commandId: commandIdSchema.optional(),
+  }).strict(),
   z.object({
     type: z.literal("directory_listing"),
     commandId: commandIdSchema,

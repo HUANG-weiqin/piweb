@@ -41,7 +41,7 @@ const scenes: Array<{
   surface: "drawer",
   group: "A",
   assertSurface: (container) => {
-    const dialog = screen.getByRole("dialog", { name: "模型连接" });
+    const dialog = screen.getByRole("dialog", { name: "设置" });
     expect(dialog).toBeInTheDocument();
     expect(container.querySelector(".drawer")).toBeInTheDocument();
     expect(within(dialog).getAllByText("GPT-5.6 Luna")).toHaveLength(2);
@@ -272,7 +272,7 @@ describe("SecondarySurfaceFixture", () => {
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("dialog", { name: "OpenAI API Key" }))
       .not.toBeInTheDocument();
-    expect(screen.getByRole("dialog", { name: "模型连接" }))
+    expect(screen.getByRole("dialog", { name: "设置" }))
       .toBeInTheDocument();
   });
 

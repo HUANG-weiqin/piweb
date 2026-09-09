@@ -1,16 +1,24 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import type {
   AcknowledgedSettingOperation,
+  ColorScheme,
   PublicState,
 } from "../../shared/protocol";
 import { useModalFocus } from "../lib/use-modal-focus";
 
 interface ConnectionDrawerProps {
-  state: PublicState;
+  state?: PublicState;
   open: boolean;
   /** The drawer remains live beneath a higher-priority modal. */
   covered?: boolean;
+  /** Whether conversation-scoped connection controls can mutate runtime state. */
   online: boolean;
+  /** Whether process-global preferences can be persisted. */
+  preferencesOnline: boolean;
+  colorScheme: ColorScheme;
+  colorSchemePending: boolean;
+  colorSchemeUnsaved: boolean;
+  colorSchemeError: string;
   settingResult?: {
     operation: AcknowledgedSettingOperation;
     commandId: string;
@@ -18,6 +26,8 @@ interface ConnectionDrawerProps {
     message: string;
   };
   onClose(): void;
+  onColorSchemeChange(colorScheme: ColorScheme): void;
+  onRetryColorScheme(): void;
   onKey(provider: string, key: string): string | undefined;
   onOAuth(provider: string): void;
   onLogout(provider: string): void;
@@ -26,16 +36,19 @@ interface ConnectionDrawerProps {
   onKeyDialogChange(open: boolean): void;
 }
 
-function initialProviderId(state: PublicState): string {
+const EMPTY_PROVIDERS: PublicState["providers"] = [];
+
+function initialProviderId(state?: PublicState): string {
   if (
-    state.selectedModel?.provider
+    state?.selectedModel?.provider
     && state.providers.some((provider) => provider.id === state.selectedModel?.provider)
   ) {
     return state.selectedModel.provider;
   }
-  const configured = state.providers.find((provider) => provider.configured);
+  const providers = state?.providers ?? EMPTY_PROVIDERS;
+  const configured = providers.find((provider) => provider.configured);
   if (configured) return configured.id;
-  return state.providers.length === 1 ? state.providers[0]?.id ?? "" : "";
+  return providers.length === 1 ? providers[0]?.id ?? "" : "";
 }
 
 function formatContextWindow(tokens: number): string {
@@ -54,8 +67,15 @@ export function ConnectionDrawer({
   open,
   covered = false,
   online,
+  preferencesOnline,
+  colorScheme,
+  colorSchemePending,
+  colorSchemeUnsaved,
+  colorSchemeError,
   settingResult,
   onClose,
+  onColorSchemeChange,
+  onRetryColorScheme,
   onKey,
   onOAuth,
   onLogout,
@@ -81,16 +101,20 @@ export function ConnectionDrawer({
     commandId: string;
   }>();
   const [refreshStatus, setRefreshStatus] = useState<{ ok: boolean; message: string }>();
+  const providers = state?.providers ?? EMPTY_PROVIDERS;
+  const sessionId = state?.sessionId ?? "";
+  const busy = state?.busy ?? true;
+  const selectedModel = state?.selectedModel;
 
   useEffect(() => {
-    if (providerId && state.providers.some((provider) => provider.id === providerId)) return;
+    if (providerId && providers.some((provider) => provider.id === providerId)) return;
     setProviderId(initialProviderId(state));
-  }, [providerId, state]);
+  }, [providerId, providers, state]);
 
   useEffect(() => {
     if (
       !savingKey
-      || savingKey.sessionId !== state.sessionId
+      || savingKey.sessionId !== sessionId
       || settingResult?.operation !== "set_api_key"
       || settingResult.commandId !== savingKey.commandId
     ) return;
@@ -112,13 +136,13 @@ export function ConnectionDrawer({
     onKeyDialogChange,
     savingKey,
     settingResult,
-    state.sessionId,
+    sessionId,
   ]);
 
   useEffect(() => {
     if (
       !refreshingModels
-      || refreshingModels.sessionId !== state.sessionId
+      || refreshingModels.sessionId !== sessionId
       || settingResult?.operation !== "refresh_models"
       || settingResult.commandId !== refreshingModels.commandId
     ) return;
@@ -130,26 +154,26 @@ export function ConnectionDrawer({
         : settingResult.message || "远程供应商模型目录刷新失败。",
     });
     onClearSettingResult();
-  }, [onClearSettingResult, refreshingModels, settingResult, state.sessionId]);
+  }, [onClearSettingResult, refreshingModels, settingResult, sessionId]);
 
   useEffect(() => {
-    if (!savingKey || savingKey.sessionId === state.sessionId) return;
+    if (!savingKey || savingKey.sessionId === sessionId) return;
     setSavingKey(undefined);
     setKey("");
     setShowKey(false);
     setKeyError("观察会话已更换，保存状态未确认；请重试。");
     onClearSettingResult();
-  }, [onClearSettingResult, savingKey, state.sessionId]);
+  }, [onClearSettingResult, savingKey, sessionId]);
 
   useEffect(() => {
-    if (!refreshingModels || refreshingModels.sessionId === state.sessionId) return;
+    if (!refreshingModels || refreshingModels.sessionId === sessionId) return;
     setRefreshingModels(undefined);
     setRefreshStatus({
       ok: false,
       message: "观察会话已更换，刷新状态未确认；请重试。",
     });
     onClearSettingResult();
-  }, [onClearSettingResult, refreshingModels, state.sessionId]);
+  }, [onClearSettingResult, refreshingModels, sessionId]);
 
   useEffect(() => {
     if (online) return;
@@ -169,13 +193,13 @@ export function ConnectionDrawer({
     onClearSettingResult();
   }, [online, onClearSettingResult, refreshingModels, savingKey]);
 
-  const selectedProvider = state.providers.find((provider) => provider.id === providerId);
-  const keyProvider = state.providers.find((provider) => provider.id === keyProviderId);
-  const currentModel = state.providers
+  const selectedProvider = providers.find((provider) => provider.id === providerId);
+  const keyProvider = providers.find((provider) => provider.id === keyProviderId);
+  const currentModel = providers
     .flatMap((provider) => provider.models)
     .find((model) => (
-      model.provider === state.selectedModel?.provider
-      && model.id === state.selectedModel.id
+      model.provider === selectedModel?.provider
+      && model.id === selectedModel.id
     ));
   const availableModels = useMemo(
     () => selectedProvider?.models.filter((model) => model.available) ?? [],
@@ -197,15 +221,15 @@ export function ConnectionDrawer({
 
   useEffect(() => {
     if (!savedKeyProviderId) return;
-    const provider = state.providers.find(({ id }) => id === savedKeyProviderId);
+    const provider = providers.find(({ id }) => id === savedKeyProviderId);
     if (!provider?.configured) setSavedKeyProviderId("");
-  }, [savedKeyProviderId, state.providers]);
+  }, [providers, savedKeyProviderId]);
 
   useEffect(() => {
     if (!confirmLogoutProviderId) return;
-    const provider = state.providers.find(({ id }) => id === confirmLogoutProviderId);
+    const provider = providers.find(({ id }) => id === confirmLogoutProviderId);
     if (!provider?.configured) setConfirmLogoutProviderId("");
-  }, [confirmLogoutProviderId, state.providers]);
+  }, [confirmLogoutProviderId, providers]);
 
   useEffect(() => {
     if (!keyProviderId || keyProvider) return;
@@ -225,7 +249,7 @@ export function ConnectionDrawer({
   };
   const drawerFocusRef = useModalFocus<HTMLElement>(
     open,
-    "connection-drawer",
+    "settings-drawer",
     onClose,
   );
   const keyFocusRef = useModalFocus<HTMLFormElement>(
@@ -244,7 +268,7 @@ export function ConnectionDrawer({
     if (commandId) {
       setSavingKey({
         providerId: keyProvider.id,
-        sessionId: state.sessionId,
+        sessionId,
         commandId,
       });
       setKey("");
@@ -280,31 +304,89 @@ export function ConnectionDrawer({
       role={keyProvider || covered ? undefined : "dialog"}
       aria-modal={keyProvider || covered ? undefined : true}
       aria-hidden={keyProvider || covered ? true : undefined}
-      aria-label="模型连接"
+      aria-label="设置"
       tabIndex={-1}
     >
       <header className="drawer-header">
         <div>
-          <p className="eyebrow">MODEL CONNECTIONS</p>
-          <h2>模型连接</h2>
-          <p>连接服务提供商并查看可用模型</p>
+          <p className="eyebrow">SETTINGS</p>
+          <h2>设置</h2>
+          <p>调整工作台外观并管理本机模型连接</p>
         </div>
         <button className="icon-button" onClick={onClose} aria-label="关闭">×</button>
       </header>
 
-      <section className="settings-section model-settings">
+      <section className="settings-section appearance-settings" aria-labelledby="appearance-heading">
+        <div className="settings-section-heading">
+          <p className="eyebrow">APPEARANCE</p>
+          <h3 id="appearance-heading">配色</h3>
+          <p className="setting-note">只改变这个用户的 Pi Web 外观，不写入项目。</p>
+        </div>
+        <fieldset className="color-scheme-options" disabled={colorSchemePending}>
+          <legend>选择配色</legend>
+          <label className="color-scheme-option">
+            <input
+              type="radio"
+              name="color-scheme"
+              value="quiet-rebel"
+              checked={colorScheme === "quiet-rebel"}
+              onChange={() => onColorSchemeChange("quiet-rebel")}
+            />
+            <span className="color-scheme-swatch quiet-rebel-swatch" aria-hidden="true">
+              <i /><i /><i />
+            </span>
+            <span><strong>Quiet Rebel</strong><small>低对比深色，保留克制的氧化红强调</small></span>
+          </label>
+          <label className="color-scheme-option">
+            <input
+              type="radio"
+              name="color-scheme"
+              value="classic-rebel"
+              checked={colorScheme === "classic-rebel"}
+              onChange={() => onColorSchemeChange("classic-rebel")}
+            />
+            <span className="color-scheme-swatch classic-rebel-swatch" aria-hidden="true">
+              <i /><i /><i />
+            </span>
+            <span><strong>Classic Rebel</strong><small>原有的高反差暗色与纸张色</small></span>
+          </label>
+        </fieldset>
+        {colorSchemePending && <p className="inline-status" role="status">正在保存配色…</p>}
+        {colorSchemeUnsaved && !colorSchemePending && <div className="preference-unsaved">
+          <p className="inline-status error" role="alert">
+            {colorSchemeError || "当前配色尚未保存。"}
+          </p>
+          <button
+            type="button"
+            className="ghost"
+            disabled={!preferencesOnline}
+            onClick={onRetryColorScheme}
+          >重试保存</button>
+        </div>}
+      </section>
+
+      <section className="settings-section model-settings" aria-labelledby="connections-heading">
+        <div className="settings-section-heading">
+          <p className="eyebrow">MODEL CONNECTIONS</p>
+          <h3 id="connections-heading">模型连接</h3>
+          <p className="setting-note">连接服务提供商并查看可用模型。</p>
+        </div>
+        {!state ? <div className="setting-empty">
+          <strong>当前没有可管理的会话</strong>
+          <p>恢复工作区后可管理凭据和模型目录；配色设置仍可使用。</p>
+        </div> : <>
         <div className="current-model">
           <div>
             <span className="setting-label">当前模型</span>
-            <strong>{currentModel?.name ?? state.selectedModel?.id ?? "尚未选择"}</strong>
+            <strong>{currentModel?.name ?? selectedModel?.id ?? "尚未选择"}</strong>
             <small>
-              {state.selectedModel
-                ? state.selectedModel.id
+              {selectedModel
+                ? selectedModel.id
                 : "连接一个提供商，然后选择模型"}
             </small>
           </div>
-          <span className={state.selectedModel ? "status-badge success" : "status-badge"}>
-            {state.selectedModel ? "可用" : "待设置"}
+          <span className={selectedModel ? "status-badge success" : "status-badge"}>
+            {selectedModel ? "可用" : "待设置"}
           </span>
         </div>
 
@@ -320,7 +402,7 @@ export function ConnectionDrawer({
             onChange={(event) => chooseProvider(event.target.value)}
           >
             <option value="">选择提供商…</option>
-            {state.providers.map((provider) => <option key={provider.id} value={provider.id}>
+            {providers.map((provider) => <option key={provider.id} value={provider.id}>
               {provider.name}{provider.configured ? " · 已配置" : ""}
             </option>)}
           </select>
@@ -342,14 +424,14 @@ export function ConnectionDrawer({
             <div className="provider-actions">
               {selectedProvider.oauth && <button
                 type="button"
-                disabled={!online || state.busy}
+                disabled={!online || busy}
                 onClick={() => onOAuth(selectedProvider.id)}
               >
                 {selectedProvider.configured ? "重新登录" : "登录订阅账户"}
               </button>}
               {!selectedProvider.oauth && <button
                 type="button"
-                disabled={!online || state.busy}
+                disabled={!online || busy}
                 onClick={() => openKeyDialog(selectedProvider.id)}
               >
                 {selectedProvider.configured ? "更新 API Key" : "使用 API Key"}
@@ -359,7 +441,7 @@ export function ConnectionDrawer({
                 && <button
                 type="button"
                 className="ghost danger"
-                disabled={!online || state.busy}
+                disabled={!online || busy}
                 onClick={() => setConfirmLogoutProviderId(selectedProvider.id)}
               >
                 移除本机凭据
@@ -381,7 +463,7 @@ export function ConnectionDrawer({
                 <button
                   type="button"
                   className="danger-button"
-                  disabled={!online || state.busy}
+                  disabled={!online || busy}
                   onClick={() => {
                     setSavedKeyProviderId("");
                     setConfirmLogoutProviderId("");
@@ -417,11 +499,11 @@ export function ConnectionDrawer({
             <button
               type="button"
               className="ghost"
-              disabled={!online || state.busy || Boolean(refreshingModels)}
+              disabled={!online || busy || Boolean(refreshingModels)}
               onClick={() => {
                 const commandId = onRefresh();
                 if (!commandId) return;
-                setRefreshingModels({ sessionId: state.sessionId, commandId });
+                setRefreshingModels({ sessionId, commandId });
                 setRefreshStatus(undefined);
               }}
             >
@@ -453,8 +535,8 @@ export function ConnectionDrawer({
             </div>}
             {models.map((model) => {
               const modelKey = `${model.provider}/${model.id}`;
-              const selected = state.selectedModel?.provider === model.provider
-                && state.selectedModel.id === model.id;
+              const selected = selectedModel?.provider === model.provider
+                && selectedModel.id === model.id;
               const metadata = [
                 model.id === model.name ? "" : model.id,
                 model.reasoning ? "支持推理" : "",
@@ -474,6 +556,7 @@ export function ConnectionDrawer({
             })}
           </div>
         </div>
+        </>}
       </section>
     </aside>
     {keyProvider && <div

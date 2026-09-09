@@ -9,7 +9,9 @@ import {
   PROTOCOL_VERSION,
   serverEventSchema,
   type ClientCommand,
+  type ColorScheme,
   type ServerEvent,
+  type UiPreferences,
 } from "../shared/protocol.js";
 import {
   listDirectory,
@@ -28,6 +30,12 @@ import {
 } from "./pi-service.js";
 import { ProjectStoreRegistry } from "./project-store.js";
 import { RoleCatalog } from "./role-catalog.js";
+import { UiPreferencesStore } from "./ui-preferences-store.js";
+
+export interface UiPreferencesStoreLike {
+  get(): UiPreferences;
+  setColorScheme(colorScheme: ColorScheme): Promise<UiPreferences>;
+}
 
 export interface SocketServerHandle {
   readonly sockets: WebSocketServer;
@@ -48,7 +56,7 @@ export interface SocketServerHandle {
   close(): Promise<void>;
 }
 
-interface DirectoryBrowserState {
+interface SocketControlState {
   usedCommandIds: Set<string>;
 }
 
@@ -139,6 +147,7 @@ export function attachSocketServer(
   runtime: PiRuntimeLike,
   directoryBrowser: DirectoryBrowser = listDirectory,
   blockStartupAdmission = false,
+  uiPreferences: UiPreferencesStoreLike = UiPreferencesStore.memory(),
 ): SocketServerHandle {
   const sockets = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES });
   const connections = new Map<WebSocket, PiConnection>();
@@ -147,6 +156,13 @@ export function attachSocketServer(
   let coordinationPromise: Promise<PiConnectionCoordination> | undefined;
   let closePromise: Promise<void> | undefined;
   let startupAdmissionBlocked = blockStartupAdmission;
+  let socketMutationAdmissionFrozen = false;
+  const activeColorSchemeCommands = new Set<Promise<void>>();
+  const waitForColorSchemeCommands = async (): Promise<void> => {
+    while (activeColorSchemeCommands.size > 0) {
+      await Promise.all([...activeColorSchemeCommands]);
+    }
+  };
 
   const coordination = (): Promise<PiConnectionCoordination> => {
     coordinationPromise ??= RoleCatalog.open(runtime).then((roles) => ({
@@ -202,10 +218,15 @@ export function attachSocketServer(
       coordination,
     );
     connections.set(socket, connection);
-    const directoryBrowserState: DirectoryBrowserState = {
+    const socketControlState: SocketControlState = {
       usedCommandIds: new Set(),
     };
-    safeSend(socket, { type: "hello", protocolVersion: PROTOCOL_VERSION, startupCwd });
+    safeSend(socket, {
+      type: "hello",
+      protocolVersion: PROTOCOL_VERSION,
+      startupCwd,
+      uiPreferences: uiPreferences.get(),
+    });
 
     socket.on("message", (data, isBinary) => {
       if (isBinary) {
@@ -222,9 +243,25 @@ export function attachSocketServer(
           void handleDirectoryBrowserCommand(
             socket,
             command,
-            directoryBrowserState,
+            socketControlState,
             directoryBrowser,
             startupCwd,
+          );
+          return;
+        }
+        if (command.type === "set_color_scheme") {
+          const task = handleColorSchemeCommand(
+            socket,
+            command,
+            socketControlState,
+            uiPreferences,
+            sockets,
+            !socketMutationAdmissionFrozen,
+          );
+          activeColorSchemeCommands.add(task);
+          void task.then(
+            () => activeColorSchemeCommands.delete(task),
+            () => activeColorSchemeCommands.delete(task),
           );
           return;
         }
@@ -273,12 +310,27 @@ export function attachSocketServer(
   return {
     sockets,
     async prepareReload(force, onAdmissionFrozen) {
+      socketMutationAdmissionFrozen = true;
       if (!coordinationPromise) {
+        if (!force) await waitForColorSchemeCommands();
         onAdmissionFrozen();
         return [];
       }
       const { coordinator } = await coordinationPromise;
-      return coordinator.prepareReload(force, onAdmissionFrozen);
+      let signalCoordinatorFrozen: (() => void) | undefined;
+      let rejectCoordinatorFrozen: ((error: unknown) => void) | undefined;
+      const coordinatorFrozen = new Promise<void>((resolve, reject) => {
+        signalCoordinatorFrozen = resolve;
+        rejectCoordinatorFrozen = reject;
+      });
+      const targets = coordinator.prepareReload(force, () => {
+        signalCoordinatorFrozen?.();
+      });
+      void targets.catch((error) => rejectCoordinatorFrozen?.(error));
+      await coordinatorFrozen;
+      if (!force) await waitForColorSchemeCommands();
+      onAdmissionFrozen();
+      return targets;
     },
     async resumeAfterReload(requestId, targets, onTargetCompleted) {
       if (targets.length === 0) return [];
@@ -301,6 +353,7 @@ export function attachSocketServer(
     },
     close() {
       if (closePromise) return closePromise;
+      socketMutationAdmissionFrozen = true;
       closePromise = (async () => {
         server.off("upgrade", onUpgrade);
         const activeConnections = [...connections.entries()];
@@ -312,7 +365,10 @@ export function attachSocketServer(
           sockets.close((error) => error ? reject(error) : resolve());
         });
         for (const socket of sockets.clients) socket.terminate();
-        const results = await Promise.allSettled(disposals);
+        const results = await Promise.allSettled([
+          ...disposals,
+          waitForColorSchemeCommands(),
+        ]);
         await socketsClosed;
         const failures: unknown[] = results
           .filter((result): result is PromiseRejectedResult => result.status === "rejected")
@@ -341,7 +397,7 @@ export function attachSocketServer(
 async function handleDirectoryBrowserCommand(
   socket: WebSocket,
   command: Extract<ClientCommand, { type: "browse_directory" }>,
-  state: DirectoryBrowserState,
+  state: SocketControlState,
   directoryBrowser: DirectoryBrowser,
   startupCwd: string,
 ): Promise<void> {
@@ -351,7 +407,7 @@ async function handleDirectoryBrowserCommand(
       scope: "command",
       operation: command.type,
       commandId: command.commandId,
-      message: "目录选择命令标识不能重复使用",
+      message: "命令标识不能重复使用",
     });
     return;
   }
@@ -368,6 +424,56 @@ async function handleDirectoryBrowserCommand(
     safeSend(socket, {
       type: "error",
       scope: "command",
+      operation: command.type,
+      commandId: command.commandId,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+async function handleColorSchemeCommand(
+  socket: WebSocket,
+  command: Extract<ClientCommand, { type: "set_color_scheme" }>,
+  state: SocketControlState,
+  store: UiPreferencesStoreLike,
+  sockets: WebSocketServer,
+  admissionAllowed: boolean,
+): Promise<void> {
+  if (state.usedCommandIds.has(command.commandId)) {
+    safeSend(socket, {
+      type: "error",
+      scope: "command",
+      operation: command.type,
+      commandId: command.commandId,
+      message: "命令标识不能重复使用",
+    });
+    return;
+  }
+  state.usedCommandIds.add(command.commandId);
+  if (!admissionAllowed) {
+    safeSend(socket, {
+      type: "error",
+      scope: "command",
+      operation: command.type,
+      commandId: command.commandId,
+      message: "服务正在重新加载，暂不接受新的设置修改",
+    });
+    return;
+  }
+
+  try {
+    const preferences = await store.setColorScheme(command.colorScheme);
+    for (const client of sockets.clients) {
+      safeSend(client, {
+        type: "ui_preferences_changed",
+        uiPreferences: preferences,
+        ...(client === socket ? { commandId: command.commandId } : {}),
+      });
+    }
+  } catch (error) {
+    safeSend(socket, {
+      type: "error",
+      scope: "settings",
       operation: command.type,
       commandId: command.commandId,
       message: error instanceof Error ? error.message : String(error),

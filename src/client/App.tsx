@@ -15,6 +15,7 @@ import {
   type AcknowledgedSettingOperation,
   type AuthRequest,
   type ClientCommand,
+  type ColorScheme,
   type ConversationRoleSnapshot,
   type ConversationSummary,
   type DirectoryListing,
@@ -387,6 +388,11 @@ interface SupersededFocusCommand {
   targetConversationId: string;
 }
 
+interface PendingColorScheme {
+  commandId: string;
+  colorScheme: ColorScheme;
+}
+
 type ConversationSnapshotEvent = Extract<
   ServerEvent,
   { type: "conversation_snapshot" }
@@ -674,6 +680,32 @@ export function App() {
     setConversationSyncing(syncing);
   };
   const [drawer, setDrawer] = useState(false);
+  const [committedColorScheme, setCommittedColorSchemeState] =
+    useState<ColorScheme>("quiet-rebel");
+  const committedColorSchemeRef = useRef<ColorScheme>("quiet-rebel");
+  const [unsavedColorScheme, setUnsavedColorSchemeState] =
+    useState<ColorScheme>();
+  const unsavedColorSchemeRef = useRef<ColorScheme | undefined>(undefined);
+  const [pendingColorScheme, setPendingColorSchemeState] =
+    useState<PendingColorScheme>();
+  const pendingColorSchemeRef = useRef<PendingColorScheme | undefined>(undefined);
+  const [colorSchemeSaveError, setColorSchemeSaveError] = useState("");
+  const updateCommittedColorScheme = (colorScheme: ColorScheme) => {
+    committedColorSchemeRef.current = colorScheme;
+    setCommittedColorSchemeState(colorScheme);
+  };
+  const updateUnsavedColorScheme = (colorScheme: ColorScheme | undefined) => {
+    unsavedColorSchemeRef.current = colorScheme;
+    setUnsavedColorSchemeState(colorScheme);
+  };
+  const updatePendingColorScheme = (pending: PendingColorScheme | undefined) => {
+    pendingColorSchemeRef.current = pending;
+    setPendingColorSchemeState(pending);
+  };
+  const visibleColorScheme = unsavedColorScheme ?? committedColorScheme;
+  useLayoutEffect(() => {
+    document.documentElement.dataset.colorScheme = visibleColorScheme;
+  }, [visibleColorScheme]);
   const [roleManagerOpen, setRoleManagerOpen] = useState(false);
   const [roleManagerInitialRoleId, setRoleManagerInitialRoleId] =
     useState<string | null>();
@@ -1529,6 +1561,10 @@ export function App() {
           socket.close();
           return;
         }
+        updateCommittedColorScheme(event.uiPreferences.colorScheme);
+        if (unsavedColorSchemeRef.current && !pendingColorSchemeRef.current) {
+          setColorSchemeSaveError("此配色尚未保存；请重试。");
+        }
         setProtocolError("");
         const handshakeOrigin: TransitionOrigin = hasCompletedInitialHandshakeRef.current
           ? "reconnect"
@@ -1657,6 +1693,21 @@ export function App() {
           });
           requestTransitionFrame(timingAttempt, cached ? "cache" : "placeholder");
           replayTransitionEvents(events);
+        }
+      } else if (event.type === "ui_preferences_changed") {
+        updateCommittedColorScheme(event.uiPreferences.colorScheme);
+        if (!event.commandId) return;
+        const pending = pendingColorSchemeRef.current;
+        if (!pending || pending.commandId !== event.commandId) return;
+        updatePendingColorScheme(undefined);
+        if (
+          pending.colorScheme === event.uiPreferences.colorScheme
+          && unsavedColorSchemeRef.current === event.uiPreferences.colorScheme
+        ) {
+          updateUnsavedColorScheme(undefined);
+          setColorSchemeSaveError("");
+        } else {
+          setColorSchemeSaveError("服务端确认的配色与本地预览不同；请重试。");
         }
       } else if (event.type === "directory_listing") {
         const current = directoryBrowserRef.current;
@@ -2467,6 +2518,13 @@ export function App() {
           }
           return;
         }
+        if (event.operation === "set_color_scheme" && event.commandId) {
+          const pending = pendingColorSchemeRef.current;
+          if (!pending || pending.commandId !== event.commandId) return;
+          updatePendingColorScheme(undefined);
+          setColorSchemeSaveError(`配色未保存：${event.message}`);
+          return;
+        }
         if (event.sessionId && event.sessionId !== sessionIdRef.current) return;
         const supersededFocusError = event.commandId
           && event.operation === "focus_conversation"
@@ -2797,6 +2855,10 @@ export function App() {
         setProjectActivityByWorkspace(new Map());
         setProjectActivityTruncated(false);
         setSettingResult(undefined);
+        if (pendingColorSchemeRef.current) {
+          updatePendingColorScheme(undefined);
+          setColorSchemeSaveError("连接已断开，无法确认配色是否保存；重连后请重试。");
+        }
         updateDirectoryBrowser(undefined);
         markPendingPromptUnconfirmed();
         const pendingRoleOperation = pendingRoleOperationRef.current;
@@ -2914,6 +2976,31 @@ export function App() {
     const ok = socketRef.current?.send(command) ?? false;
     if (!ok) setError("本地服务未连接");
     return ok;
+  };
+
+  const saveColorScheme = (colorScheme: ColorScheme, force = false) => {
+    if (pendingColorSchemeRef.current) return;
+    if (!force && colorScheme === committedColorSchemeRef.current) {
+      updateUnsavedColorScheme(undefined);
+      setColorSchemeSaveError("");
+      return;
+    }
+    updateUnsavedColorScheme(colorScheme);
+    setColorSchemeSaveError("");
+    if (!protocolReady || !transportOnline) {
+      setColorSchemeSaveError("配色已在本地预览，但尚未保存；重连后请重试。");
+      return;
+    }
+    const pending = { commandId: crypto.randomUUID(), colorScheme };
+    updatePendingColorScheme(pending);
+    if (!socketRef.current?.send({
+      type: "set_color_scheme",
+      commandId: pending.commandId,
+      colorScheme,
+    })) {
+      updatePendingColorScheme(undefined);
+      setColorSchemeSaveError("配色已在本地预览，但尚未保存；请重试。");
+    }
   };
   const openImage = useCallback((messageId: string, imageOrdinal: number) => {
     const focus = focusRef.current;
@@ -3883,13 +3970,7 @@ export function App() {
   const handleChatSend = useLatestCallback((text: string, images: PromptImage[]) =>
     submitPrompt(text, images));
   const handleChatAbort = useLatestCallback(abortCurrentRun);
-  const handleChatSettings = useLatestCallback(() => {
-    if (
-      !workspaceSyncingRef.current
-      && !conversationSyncingRef.current
-      && !focusedConversationNeedsSnapshot()
-    ) setDrawer(true);
-  });
+  const handleChatSettings = useLatestCallback(() => setDrawer(true));
   const handleChatThinking = useLatestCallback(setThinkingLevel);
   const handleChatServiceTier = useLatestCallback(setServiceTier);
   const handleChatCompactionThreshold = useLatestCallback(setCompactionThreshold);
@@ -4445,9 +4526,7 @@ export function App() {
                 setRoleManagerInitialRoleId(null);
                 setRoleManagerOpen(true);
               }}
-              onSettings={() => {
-                if (settingsEnabled) setDrawer(true);
-              }}
+              onSettings={() => setDrawer(true)}
             />
           : <Chat
               chat={visibleChat}
@@ -4527,13 +4606,23 @@ export function App() {
             />}
       </div>
     </div>
-    {runtimeState && <ConnectionDrawer
+    <ConnectionDrawer
       state={runtimeState}
-      open={drawer && !transitioning}
+      open={drawer}
       covered={blockingModalVisible}
       online={online && settingsEnabled}
+      preferencesOnline={online}
+      colorScheme={visibleColorScheme}
+      colorSchemePending={Boolean(pendingColorScheme)}
+      colorSchemeUnsaved={Boolean(unsavedColorScheme)}
+      colorSchemeError={colorSchemeSaveError}
       settingResult={settingResult}
       onClose={() => setDrawer(false)}
+      onColorSchemeChange={(colorScheme) => saveColorScheme(colorScheme)}
+      onRetryColorScheme={() => {
+        const colorScheme = unsavedColorSchemeRef.current;
+        if (colorScheme) saveColorScheme(colorScheme, true);
+      }}
       onKey={(provider, key) => {
         const commandId = crypto.randomUUID();
         const sessionId = sessionIdRef.current;
@@ -4569,7 +4658,7 @@ export function App() {
        }}
       onClearSettingResult={clearSettingResult}
       onKeyDialogChange={setSettingsDialogOpen}
-    />}
+    />
     <RoleManagerDialog
       open={roleManagerOpen && !blockingModalVisible && !transitioning}
       roles={roles}
