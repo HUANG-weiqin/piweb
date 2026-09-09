@@ -1,33 +1,82 @@
 :root {
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: #24221d;
-  background: #f3f1eb;
+  color: #e6e0d5;
+  background: #141719;
   font-synthesis: none;
-  color-scheme: light dark;
-  --canvas: #f3f1eb;
-  --panel: #fbfaf7;
-  --panel-strong: #ffffff;
-  --soft: #efede6;
-  --soft-hover: #e7e4da;
-  --line: #dad6cb;
-  --line-strong: #aaa397;
-  --muted: #716d63;
-  --intent: #5d57a5;
-  --intent-soft: #f0eef9;
-  --intent-line: #cbc6e8;
-  --accent: #24221d;
-  --accent-hover: #3a372f;
-  --on-accent: #ffffff;
-  --success: #24744e;
-  --success-soft: #e5f2ea;
-  --warning: #7a5a08;
-  --warning-soft: #fff3cc;
-  --danger: #b8423b;
-  --danger-solid: #b8423b;
-  --danger-soft: #fae9e7;
-  --focus: #746e61;
-  --shadow-sm: 0 8px 24px rgb(35 31 23 / 8%);
-  --shadow-lg: 0 24px 80px rgb(28 25 19 / 22%);
+  color-scheme: dark;
+  --canvas: #141719;
+  --panel: #181c1e;
+  --panel-strong: #1d2225;
+  --soft: #242a2d;
+  --soft-hover: #2c3438;
+  --line: #374044;
+  --line-strong: #69757a;
+  --muted: #aaa69d;
+  --intent: #aaa9df;
+  --intent-soft: #27283a;
+  --intent-line: #545678;
+  --accent: #d97965;
+  --accent-hover: #a75042;
+  --on-accent: #141719;
+  --success: #73b98f;
+  --success-soft: #183127;
+  --warning: #d2a85f;
+  --warning-soft: #352b1b;
+  --danger: #e17a70;
+  --danger-solid: #a75042;
+  --danger-soft: #3a2221;
+  --focus: #9cb7c9;
+  --shadow-sm: 0 8px 24px rgb(0 0 0 / 18%);
+  --shadow-lg: 0 24px 80px rgb(0 0 0 / 38%);
+  --scheme-rebel-black: #141719;
+  --scheme-rebel-rail-raised: #1d2225;
+  --scheme-rebel-app-raised: #1d2225;
+  --scheme-rebel-overlay-raised: #1d2225;
+  --scheme-rebel-paper: #e6e0d5;
+  --scheme-rebel-paper-muted: #aaa69d;
+  --scheme-rebel-on-oxide: #141719;
+  --scheme-rebel-red: #d97965;
+  --scheme-rebel-red-dark: #a75042;
+  --scheme-rebel-rail-line: rgb(105 117 122 / 52%);
+  --scheme-rebel-line: #374044;
+}
+
+html[data-color-scheme="classic-rebel"] {
+  color: #d8d1c1;
+  background: #171a1b;
+  --canvas: #171a1b;
+  --panel: #202526;
+  --panel-strong: #272d2d;
+  --soft: #303636;
+  --soft-hover: #394141;
+  --line: #454b4b;
+  --line-strong: #737979;
+  --muted: #a39d91;
+  --intent: #d8d1c1;
+  --intent-soft: #2c3031;
+  --intent-line: #68675f;
+  --accent: #b94f43;
+  --accent-hover: #9b4138;
+  --on-accent: #fff;
+  --success: #8eb49a;
+  --success-soft: #24332a;
+  --warning: #d0aa66;
+  --warning-soft: #382e20;
+  --danger: #d87368;
+  --danger-solid: #b94f43;
+  --danger-soft: #442724;
+  --focus: #d8d1c1;
+  --scheme-rebel-black: #171a1b;
+  --scheme-rebel-rail-raised: #1d2222;
+  --scheme-rebel-app-raised: #202526;
+  --scheme-rebel-overlay-raised: #272d2d;
+  --scheme-rebel-paper: #d8d1c1;
+  --scheme-rebel-paper-muted: #a39d91;
+  --scheme-rebel-on-oxide: #fff;
+  --scheme-rebel-red: #b94f43;
+  --scheme-rebel-red-dark: #71332e;
+  --scheme-rebel-rail-line: rgb(216 209 193 / 22%);
+  --scheme-rebel-line: #454b4b;
 }
 
 * {
@@ -42,8 +91,9 @@ body,
 }
 
 body {
+  color: inherit;
   background:
-    radial-gradient(circle at 12% -10%, rgb(255 255 255 / 70%), transparent 34rem),
+    radial-gradient(circle at 12% -10%, color-mix(in srgb, var(--panel-strong) 72%, transparent), transparent 34rem),
     var(--canvas);
 }
 
@@ -1999,14 +2049,14 @@ pre {
 
 .workspace-rail,
 .conversation-sidebar {
-  --rebel-black: #171a1b;
-  --rebel-raised: #1d2222;
-  --rebel-paper: #d8d1c1;
-  --rebel-paper-muted: #ada596;
-  --rebel-on-oxide: #fff;
-  --rebel-red: #b94f43;
-  --rebel-red-dark: #71332e;
-  --rebel-line: rgb(216 209 193 / 22%);
+  --rebel-black: var(--scheme-rebel-black);
+  --rebel-raised: var(--scheme-rebel-rail-raised);
+  --rebel-paper: var(--scheme-rebel-paper);
+  --rebel-paper-muted: var(--scheme-rebel-paper-muted);
+  --rebel-on-oxide: var(--scheme-rebel-on-oxide);
+  --rebel-red: var(--scheme-rebel-red);
+  --rebel-red-dark: var(--scheme-rebel-red-dark);
+  --rebel-line: var(--scheme-rebel-rail-line);
 }
 
 .workspace-rail {
@@ -3877,14 +3927,14 @@ pre {
 /* Rebel conversation identity and command-event timeline */
 
 .app-shell {
-  --rebel-black: #171a1b;
-  --rebel-raised: #202526;
-  --rebel-paper: #d8d1c1;
-  --rebel-paper-muted: #a39d91;
-  --rebel-on-oxide: #fff;
-  --rebel-red: #b94f43;
-  --rebel-red-dark: #71332e;
-  --rebel-line: #454b4b;
+  --rebel-black: var(--scheme-rebel-black);
+  --rebel-raised: var(--scheme-rebel-app-raised);
+  --rebel-paper: var(--scheme-rebel-paper);
+  --rebel-paper-muted: var(--scheme-rebel-paper-muted);
+  --rebel-on-oxide: var(--scheme-rebel-on-oxide);
+  --rebel-red: var(--scheme-rebel-red);
+  --rebel-red-dark: var(--scheme-rebel-red-dark);
+  --rebel-line: var(--scheme-rebel-line);
   isolation: isolate;
   background: var(--rebel-black);
 }
@@ -5151,6 +5201,107 @@ pre {
   border-top: 0;
 }
 
+.settings-section-heading {
+  display: grid;
+  gap: 4px;
+}
+
+.settings-section-heading h3 {
+  font-size: 18px;
+}
+
+.color-scheme-options {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.color-scheme-options legend {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.color-scheme-option {
+  display: grid;
+  grid-template-columns: auto 66px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  min-height: 72px;
+  padding: 11px 13px;
+  border: 1px solid var(--rebel-line, var(--line));
+  color: var(--rebel-paper, inherit);
+  background: var(--rebel-raised, var(--panel-strong));
+  cursor: pointer;
+}
+
+.color-scheme-option:has(input:checked) {
+  border-color: var(--rebel-red, var(--accent));
+  box-shadow: inset 4px 0 0 var(--rebel-red, var(--accent));
+}
+
+.color-scheme-option:has(input:focus-visible) {
+  outline: 3px solid color-mix(in srgb, var(--focus) 48%, transparent);
+  outline-offset: 2px;
+}
+
+.color-scheme-option input {
+  width: 18px;
+  min-height: 18px;
+  margin: 0;
+  accent-color: var(--rebel-red, var(--accent));
+}
+
+.color-scheme-option > span:last-child {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.color-scheme-option small {
+  color: var(--rebel-paper-muted, var(--muted));
+  line-height: 1.4;
+}
+
+.color-scheme-swatch {
+  height: 42px;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  padding: 5px;
+  border: 1px solid var(--line-strong);
+  background: #141719;
+}
+
+.color-scheme-swatch i:nth-child(1) { background: #181c1e; }
+.color-scheme-swatch i:nth-child(2) { background: #1d2225; }
+.color-scheme-swatch i:nth-child(3) { background: #d97965; }
+.classic-rebel-swatch { background: #171a1b; }
+.classic-rebel-swatch i:nth-child(1) { background: #1d2222; }
+.classic-rebel-swatch i:nth-child(2) { background: #d8d1c1; }
+.classic-rebel-swatch i:nth-child(3) { background: #b94f43; }
+
+.preference-unsaved {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.preference-unsaved .inline-status {
+  flex: 1 1 auto;
+}
+
+.preference-unsaved button {
+  flex: 0 0 auto;
+}
+
 .current-model {
   display: flex;
   align-items: flex-start;
@@ -6050,43 +6201,6 @@ pre {
   }
 
 
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #e9e7df;
-    background: #171a1b;
-    --canvas: #171a1b;
-    --panel: #1b1c18;
-    --panel-strong: #20211d;
-    --soft: #282923;
-    --soft-hover: #31322b;
-    --line: #3b3c34;
-    --line-strong: #6d6b61;
-    --muted: #aaa69b;
-    --intent: #aaa4f0;
-    --intent-soft: #29263d;
-    --intent-line: #4b4769;
-    --accent: #efede5;
-    --accent-hover: #ffffff;
-    --on-accent: #1b1a16;
-    --success: #70c698;
-    --success-soft: #193327;
-    --warning: #e7c46d;
-    --warning-soft: #3a311b;
-    --danger: #ef8179;
-    --danger-solid: #a8443e;
-    --danger-soft: #3b211f;
-    --focus: #c8c2b4;
-    --shadow-sm: 0 8px 26px rgb(0 0 0 / 20%);
-    --shadow-lg: 0 24px 90px rgb(0 0 0 / 48%);
-  }
-
-  body {
-    background:
-      radial-gradient(circle at 12% -10%, rgb(255 255 255 / 4%), transparent 34rem),
-      var(--canvas);
-  }
 }
 
 @media (max-width: 960px) {
@@ -7277,7 +7391,7 @@ pre {
 /* Gate 5: workbench shell and topbar integration */
 
 .workbench {
-  background: #171a1b;
+  background: var(--scheme-rebel-black);
 }
 
 @media (min-width: 1921px) {
@@ -7395,7 +7509,7 @@ pre {
   top: 7px;
   left: 11px;
   color: var(--rebel-red);
-  content: "MODEL";
+  content: "SETTINGS";
   font-family: "Cascadia Code", Consolas, monospace;
   font-size: 8px;
   font-weight: 900;
@@ -7624,14 +7738,14 @@ pre {
   .workspace-placeholder,
   .toast-stack
 ) {
-  --rebel-black: #171a1b;
-  --rebel-raised: #272d2d;
-  --rebel-paper: #d8d1c1;
-  --rebel-paper-muted: #a39d91;
-  --rebel-on-oxide: #fff;
-  --rebel-red: #b94f43;
-  --rebel-red-dark: #71332e;
-  --rebel-line: #454b4b;
+  --rebel-black: var(--scheme-rebel-black);
+  --rebel-raised: var(--scheme-rebel-overlay-raised);
+  --rebel-paper: var(--scheme-rebel-paper);
+  --rebel-paper-muted: var(--scheme-rebel-paper-muted);
+  --rebel-on-oxide: var(--scheme-rebel-on-oxide);
+  --rebel-red: var(--scheme-rebel-red);
+  --rebel-red-dark: var(--scheme-rebel-red-dark);
+  --rebel-line: var(--scheme-rebel-line);
 }
 
 /* Lifecycle pages are posters, not detached application cards. */
@@ -9075,4 +9189,358 @@ pre {
   .app-shell > .mission-command-surface {
     display: none;
   }
+}
+
+/* Quiet Rebel keeps everyday work surfaces dark and reserves oxide for edges
+   and primary actions. Classic Rebel intentionally retains the poster palette. */
+html:not([data-color-scheme="classic-rebel"]) .conversation-sidebar-item.selected::before {
+  background: var(--intent-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"]) .conversation-sidebar-item.selected::after {
+  background: var(--intent);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .conversation-sidebar-item.selected :is(
+    .conversation-sidebar-title,
+    .conversation-sidebar-primary,
+    .conversation-sidebar-identity,
+    .conversation-sidebar-updated
+  ) {
+  color: var(--rebel-paper);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .conversation-sidebar-item.selected .conversation-sidebar-kind {
+  color: var(--rebel-paper-muted);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .conversation-sidebar-item.selected .conversation-sidebar-ordinal {
+  color: var(--intent);
+}
+
+html:not([data-color-scheme="classic-rebel"]) .topbar-conversation-status {
+  color: var(--intent);
+  background: var(--intent-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"]) .topbar-conversation-status > span {
+  color: var(--intent);
+}
+
+html:not([data-color-scheme="classic-rebel"]) .topbar-conversation-status.status-idle {
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .topbar-conversation-status.status-idle > span {
+  color: var(--rebel-paper-muted);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .mission-objective.is-active {
+  color: var(--intent);
+  background: var(--intent-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .mission-objective.is-active :is(.mission-objective-mark, .mission-objective-copy small) {
+  border-color: var(--intent);
+  color: var(--intent);
+  background: var(--intent);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .conversation-activity-indicator:is(.activity-running, .activity-queued) {
+  border-color: var(--intent);
+  color: var(--intent);
+  background: var(--intent-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .conversation-activity-indicator.activity-waiting,
+html:not([data-color-scheme="classic-rebel"])
+  .conversation-sidebar-item.activity-waiting.selected .conversation-activity-indicator {
+  border-color: var(--warning);
+  color: var(--warning);
+  background: var(--warning-soft);
+  box-shadow: none;
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .conversation-activity-indicator.activity-cancelling {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"]) .app-shell .composer,
+html:not([data-color-scheme="classic-rebel"]) .app-shell .composer-actions {
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+html:not([data-color-scheme="classic-rebel"]) .app-shell .composer textarea {
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .app-shell .composer:focus-within textarea {
+  background: var(--soft);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .app-shell .composer textarea::placeholder {
+  color: var(--rebel-paper-muted);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .commitment-card.is-edit-budget > summary {
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .commitment-card.is-edit-budget > summary strong {
+  color: var(--intent);
+}
+
+html:not([data-color-scheme="classic-rebel"]) .drawer {
+  background:
+    repeating-linear-gradient(135deg, rgb(230 224 213 / 0.7%) 0 1px, transparent 1px 16px),
+    var(--rebel-black);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .modal:not(.role-manager-dialog):not(.conversation-role-dialog) {
+  border-color: var(--rebel-line);
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+  box-shadow: 8px 8px 0 color-mix(in srgb, var(--rebel-red) 32%, transparent);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .modal:not(.role-manager-dialog):not(.conversation-role-dialog)
+  :is(.modal-description, .progress, small, .directory-browser-note) {
+  color: var(--rebel-paper-muted);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .modal:not(.role-manager-dialog):not(.conversation-role-dialog)
+  :is(input, textarea, select, .directory-browser-location code, .directory-browser-list) {
+  border-color: var(--rebel-line);
+  color: var(--rebel-paper);
+  background: var(--panel-strong);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .modal:not(.role-manager-dialog):not(.conversation-role-dialog)
+  :is(button.ghost, .option-button, .directory-browser-entry) {
+  color: var(--rebel-paper);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .modal:not(.role-manager-dialog):not(.conversation-role-dialog)
+  .directory-browser-entry:not(:disabled):hover {
+  color: var(--rebel-paper);
+  background: var(--soft-hover);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  :is(.inline-status.success, .status-badge.success) {
+  border-color: var(--success);
+  color: var(--success);
+  background: var(--success-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  :is(.inline-status.error, .credential-confirm, .directory-browser-error) {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  :is(.topbar-conversation-status, .mobile-chat-identity small):is(
+    .status-queued,
+    .status-waiting
+  ) {
+  color: var(--warning);
+  background: var(--warning-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .topbar-conversation-status:is(.status-queued, .status-waiting) > span {
+  color: var(--warning);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  :is(.topbar-conversation-status, .mobile-chat-identity small).status-cancelling {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .topbar-conversation-status.status-cancelling > span {
+  color: var(--danger);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .mobile-chat-identity small:is(
+    .status-in-progress,
+    .status-active,
+    .status-compacting
+  ) {
+  color: var(--intent);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .workspace-rail-item.running:not(.active) {
+  background: var(--intent-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .workspace-rail-item.running:not(.active) :is(.workspace-rail-state, .workspace-rail-busy) {
+  color: var(--intent);
+  background: var(--intent);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .message-event-header.is-running .message-event-state {
+  color: var(--intent);
+  background: var(--intent-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .assistant-activity-group.is-active :is(
+    .activity-group-label,
+    .activity-group-status
+  ) {
+  color: var(--intent);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .assistant-activity-group.is-complete .activity-group-status,
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .tool-done .tool-status {
+  color: var(--success);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .assistant-activity-group.is-error :is(
+    .activity-group-label,
+    .activity-group-status
+  ),
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .tool-error .tool-status {
+  color: var(--danger);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .tool-running .tool-status {
+  color: var(--intent);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .tool-pending .tool-status {
+  color: var(--warning);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .message.error {
+  border-left-color: var(--danger);
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .commitment-card > summary {
+  border-color: var(--rebel-line);
+  border-left-color: var(--intent);
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .commitment-card.is-warning > summary {
+  border-left-color: var(--warning);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .commitment-card.is-error > summary {
+  border-color: var(--rebel-line);
+  border-left-color: var(--danger);
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .commitment-card > summary:hover {
+  background: var(--soft-hover);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .commitment-card.is-error > summary:hover {
+  background: color-mix(in srgb, var(--danger-soft) 82%, var(--soft-hover));
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript > .session-message-card:is(.state-failed, .state-aborted) {
+  border-left-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .app-shell .pending-admission-item {
+  border-left-color: var(--warning);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .app-shell .pending-admission-status {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .app-shell .loop-list-status.executing,
+html:not([data-color-scheme="classic-rebel"])
+  .app-shell .loop-list-item.active .loop-list-item-marker {
+  border-color: var(--intent);
+  color: var(--intent);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .app-shell .loop-list-item.active .loop-list-item-text {
+  color: color-mix(in srgb, var(--intent) 82%, var(--rebel-paper));
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .app-shell .loop-list-status.completed {
+  color: var(--success);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .app-shell .loop-list-item.completed .loop-list-item-marker,
+html:not([data-color-scheme="classic-rebel"])
+  .mission-objective.is-completed .mission-objective-mark {
+  border-color: var(--success);
+  color: var(--on-accent);
+  background: var(--success);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .mobile-chat-header button:not(:disabled):hover,
+html:not([data-color-scheme="classic-rebel"])
+  .mobile-composer-launchers button[aria-expanded="true"] {
+  border-color: var(--intent);
+  color: var(--intent);
+  background: var(--intent-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .mobile-composer-launchers button[aria-expanded="true"] span {
+  color: var(--intent);
 }

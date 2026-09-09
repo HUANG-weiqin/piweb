@@ -4,6 +4,7 @@ import express from "express";
 import { refreshModelCatalogOnStartup } from "./model-refresh.js";
 import { PiRuntime } from "./pi-runtime.js";
 import { attachSocketServer } from "./socket-server.js";
+import { UiPreferencesStore } from "./ui-preferences-store.js";
 import type {
   ReloadConversationTarget,
   ReloadTargetCompletion,
@@ -23,6 +24,10 @@ app.get("/{*path}", (_request, response) => response.sendFile(
 ));
 
 const runtime = await PiRuntime.create({ allowModelNetwork: false });
+const uiPreferences = await UiPreferencesStore.open();
+if (uiPreferences.getLoadWarning()) {
+  console.warn(uiPreferences.getLoadWarning());
+}
 const server = app.listen(port, host, () => {
   console.log(`Pi Web: http://${host}:${port}`);
   process.send?.({ type: "piweb_ready" });
@@ -34,6 +39,7 @@ const socketServer = attachSocketServer(
   runtime,
   undefined,
   process.send !== undefined,
+  uiPreferences,
 );
 const startupAbortController = new AbortController();
 const startupModelRefresh = refreshModelCatalogOnStartup(

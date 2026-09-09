@@ -78,7 +78,10 @@ interface ProjectSnapshotRefresh {
   trailing: boolean;
 }
 
-type ConnectionCommand = Exclude<ClientCommand, { type: "browse_directory" }>;
+type ConnectionCommand = Exclude<
+  ClientCommand,
+  { type: "browse_directory" | "set_color_scheme" }
+>;
 function assertNever(value: never): never {
   const type = (value as { type?: unknown }).type;
   throw new Error(`Unhandled command type: ${String(type)}`);

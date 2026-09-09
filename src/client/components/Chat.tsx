@@ -536,6 +536,7 @@ function ChatView({
   else if (activeRun?.phase === "waiting") conversationStatus = "WAITING";
   else if (activeRun?.phase === "cancelling") conversationStatus = "CANCELLING";
   else if (busy) conversationStatus = "ACTIVE";
+  const conversationStatusClass = `status-${conversationStatus.toLowerCase().replace(" ", "-")}`;
   const transcriptRef = useRef<HTMLElement>(null);
   const composerWrapRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -934,7 +935,7 @@ function ChatView({
           }}
         >返回</button>
         <div className="mobile-chat-identity">
-          <small>{conversationStatus}</small>
+          <small className={conversationStatusClass}>{conversationStatus}</small>
           <strong>{mobile.title}</strong>
         </div>
         <button
@@ -990,9 +991,7 @@ function ChatView({
           </span>}
         </span>
         <span
-          className={`topbar-conversation-status${
-            conversationStatus === "IDLE" ? " status-idle" : ""
-          }`}
+          className={`topbar-conversation-status ${conversationStatusClass}`}
           aria-label={`会话状态：${conversationStatus}`}
         >
           <span>STATUS</span>
@@ -1002,11 +1001,10 @@ function ChatView({
       <div className="topbar-controls">
         <button
           className="model-button"
-          title="模型连接"
-          disabled={!controlsEnabled}
+          title="设置"
           onClick={onSettings}
         >
-          {model?.id ?? "模型连接"}<span>⌄</span>
+          设置<span hidden>{model?.id}</span><span aria-hidden="true">⌄</span>
         </button>
       </div>
     </header>
@@ -1297,12 +1295,11 @@ function ChatView({
         {mobile && <button
           type="button"
           className="mobile-model-settings"
-          disabled={!controlsEnabled}
           onClick={() => {
             closeMobileSheet();
             onSettings();
           }}
-        >打开模型设置</button>}
+        >打开设置</button>}
         {role && <button
           type="button"
           className="conversation-role-pill"

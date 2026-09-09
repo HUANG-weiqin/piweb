@@ -134,7 +134,7 @@ describe("RoleSelectionPage", () => {
     expect(screen.getByRole("button", { name: "添加角色" })).toBeDisabled();
   });
 
-  it("keeps only provider settings in the page header", () => {
+  it("opens the global settings surface from the page header", () => {
     const settings = vi.fn();
     render(<RoleSelectionPage
       roles={[]}
@@ -142,7 +142,7 @@ describe("RoleSelectionPage", () => {
       onSettings={settings}
     />);
 
-    fireEvent.click(screen.getByRole("button", { name: "模型连接" }));
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
     expect(settings).toHaveBeenCalledOnce();
     expect(screen.queryByRole("button", { name: "切换项目" }))
       .not.toBeInTheDocument();

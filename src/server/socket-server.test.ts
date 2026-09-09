@@ -194,6 +194,7 @@ describe("isAllowedOrigin", () => {
       type: "hello",
       protocolVersion: PROTOCOL_VERSION,
       startupCwd: "E:\\work",
+      uiPreferences: { colorScheme: "quiet-rebel" },
     });
 
     const clientClosed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
@@ -239,6 +240,7 @@ describe("isAllowedOrigin", () => {
       type: "hello",
       protocolVersion: PROTOCOL_VERSION,
       startupCwd: "E:\\work",
+      uiPreferences: { colorScheme: "quiet-rebel" },
     });
 
     const clientClosed = new Promise<void>((resolve) => admitted.once("close", () => resolve()));
@@ -395,6 +397,232 @@ describe("isAllowedOrigin", () => {
     await Promise.all([socketServer.close(), httpClosed, clientClosed]);
   });
 
+  it("broadcasts committed UI preferences and correlates only the source command", async () => {
+    const server = createServer();
+    const runtime = new SocketTestRuntime();
+    let colorScheme: "quiet-rebel" | "classic-rebel" = "quiet-rebel";
+    let failWrite = false;
+    let blockWrite = false;
+    let releaseWrite: (() => void) | undefined;
+    let markWriteStarted: (() => void) | undefined;
+    const writeStarted = new Promise<void>((resolve) => {
+      markWriteStarted = resolve;
+    });
+    const setColorScheme = vi.fn(async (next: typeof colorScheme) => {
+      if (blockWrite) {
+        markWriteStarted?.();
+        await new Promise<void>((resolve) => {
+          releaseWrite = resolve;
+        });
+      }
+      if (failWrite) throw new Error("disk unavailable");
+      colorScheme = next;
+      return { colorScheme };
+    });
+    const preferences = {
+      get: () => ({ colorScheme }),
+      setColorScheme,
+    };
+    const socketServer = attachSocketServer(
+      server,
+      "E:\\work",
+      runtime,
+      undefined,
+      false,
+      preferences,
+    );
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("server did not bind a TCP port");
+    const url = `ws://127.0.0.1:${address.port}/ws`;
+    const origin = `http://127.0.0.1:${address.port}`;
+    const source = new WebSocket(url, { origin });
+    const observer = new WebSocket(url, { origin });
+    await expect(nextEvent(source)).resolves.toMatchObject({
+      type: "hello",
+      uiPreferences: { colorScheme: "quiet-rebel" },
+    });
+    await expect(nextEvent(observer)).resolves.toMatchObject({
+      type: "hello",
+      uiPreferences: { colorScheme: "quiet-rebel" },
+    });
+
+    const commandId = randomUUID();
+    const sourceChanged = nextEvent(source);
+    const observerChanged = nextEvent(observer);
+    source.send(JSON.stringify({
+      type: "set_color_scheme",
+      commandId,
+      colorScheme: "classic-rebel",
+    }));
+    await expect(sourceChanged).resolves.toEqual({
+      type: "ui_preferences_changed",
+      uiPreferences: { colorScheme: "classic-rebel" },
+      commandId,
+    });
+    await expect(observerChanged).resolves.toEqual({
+      type: "ui_preferences_changed",
+      uiPreferences: { colorScheme: "classic-rebel" },
+    });
+
+    const duplicateError = nextEvent(source);
+    source.send(JSON.stringify({
+      type: "set_color_scheme",
+      commandId,
+      colorScheme: "quiet-rebel",
+    }));
+    await expect(duplicateError).resolves.toMatchObject({
+      type: "error",
+      scope: "command",
+      operation: "set_color_scheme",
+      commandId,
+    });
+
+    failWrite = true;
+    const failedCommandId = randomUUID();
+    const writeError = nextEvent(source);
+    source.send(JSON.stringify({
+      type: "set_color_scheme",
+      commandId: failedCommandId,
+      colorScheme: "quiet-rebel",
+    }));
+    await expect(writeError).resolves.toMatchObject({
+      type: "error",
+      scope: "settings",
+      operation: "set_color_scheme",
+      commandId: failedCommandId,
+      message: "disk unavailable",
+    });
+    expect(colorScheme).toBe("classic-rebel");
+
+    failWrite = false;
+    blockWrite = true;
+    const admittedCommandId = randomUUID();
+    const admittedChange = nextEvent(source);
+    source.send(JSON.stringify({
+      type: "set_color_scheme",
+      commandId: admittedCommandId,
+      colorScheme: "quiet-rebel",
+    }));
+    await writeStarted;
+    const admissionFrozen = vi.fn();
+    const reload = socketServer.prepareReload(false, admissionFrozen);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(admissionFrozen).not.toHaveBeenCalled();
+
+    releaseWrite?.();
+    await expect(admittedChange).resolves.toMatchObject({
+      type: "ui_preferences_changed",
+      commandId: admittedCommandId,
+      uiPreferences: { colorScheme: "quiet-rebel" },
+    });
+    await reload;
+    expect(admissionFrozen).toHaveBeenCalledOnce();
+
+    const frozenCommandId = randomUUID();
+    const frozenError = nextEvent(source);
+    source.send(JSON.stringify({
+      type: "set_color_scheme",
+      commandId: frozenCommandId,
+      colorScheme: "classic-rebel",
+    }));
+    await expect(frozenError).resolves.toMatchObject({
+      type: "error",
+      scope: "command",
+      operation: "set_color_scheme",
+      commandId: frozenCommandId,
+    });
+    expect(colorScheme).toBe("quiet-rebel");
+    expect(setColorScheme).toHaveBeenCalledTimes(3);
+
+    const sourceClosed = new Promise<void>((resolve) => source.once("close", () => resolve()));
+    const observerClosed = new Promise<void>((resolve) => observer.once("close", () => resolve()));
+    const httpClosed = new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+    await Promise.all([
+      socketServer.close(),
+      httpClosed,
+      sourceClosed,
+      observerClosed,
+    ]);
+  });
+
+  it("freezes preference admission without waiting for an in-flight write on force reload", async () => {
+    const server = createServer();
+    const runtime = new SocketTestRuntime();
+    let releaseWrite: (() => void) | undefined;
+    let markWriteStarted: (() => void) | undefined;
+    const writeStarted = new Promise<void>((resolve) => {
+      markWriteStarted = resolve;
+    });
+    const preferences = {
+      get: () => ({ colorScheme: "quiet-rebel" as const }),
+      setColorScheme: async () => {
+        markWriteStarted?.();
+        await new Promise<void>((resolve) => {
+          releaseWrite = resolve;
+        });
+        return { colorScheme: "classic-rebel" as const };
+      },
+    };
+    const socketServer = attachSocketServer(
+      server,
+      "E:\\work",
+      runtime,
+      undefined,
+      false,
+      preferences,
+    );
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("server did not bind a TCP port");
+    const socket = new WebSocket(`ws://127.0.0.1:${address.port}/ws`, {
+      origin: `http://127.0.0.1:${address.port}`,
+    });
+    await nextEvent(socket);
+
+    const admittedCommandId = randomUUID();
+    socket.send(JSON.stringify({
+      type: "set_color_scheme",
+      commandId: admittedCommandId,
+      colorScheme: "classic-rebel",
+    }));
+    await writeStarted;
+
+    const admissionFrozen = vi.fn();
+    await expect(Promise.race([
+      socketServer.prepareReload(true, admissionFrozen).then(() => "ready"),
+      new Promise<string>((resolve) => setTimeout(() => resolve("blocked"), 100)),
+    ])).resolves.toBe("ready");
+    expect(admissionFrozen).toHaveBeenCalledOnce();
+
+    const frozenCommandId = randomUUID();
+    const frozenError = nextEvent(socket);
+    socket.send(JSON.stringify({
+      type: "set_color_scheme",
+      commandId: frozenCommandId,
+      colorScheme: "quiet-rebel",
+    }));
+    await expect(frozenError).resolves.toMatchObject({
+      type: "error",
+      operation: "set_color_scheme",
+      commandId: frozenCommandId,
+    });
+
+    const admittedChange = nextEvent(socket);
+    releaseWrite?.();
+    await expect(admittedChange).resolves.toMatchObject({
+      type: "ui_preferences_changed",
+      commandId: admittedCommandId,
+    });
+    const socketClosed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+    const httpClosed = new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+    await Promise.all([socketServer.close(), httpClosed, socketClosed]);
+  });
+
   it("negotiates the versioned protocol and scopes malformed command errors", async () => {
     const server = createServer();
     const runtime = new SocketTestRuntime();
@@ -411,6 +639,7 @@ describe("isAllowedOrigin", () => {
       type: "hello",
       protocolVersion: PROTOCOL_VERSION,
       startupCwd: "E:\\work",
+      uiPreferences: { colorScheme: "quiet-rebel" },
     });
 
     const errorEvent = nextEvent(socket);

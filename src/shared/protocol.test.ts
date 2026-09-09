@@ -40,7 +40,7 @@ const transitionDiagnostics = {
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(52);
+    expect(PROTOCOL_VERSION).toBe(53);
   });
 
   it("accepts supported commands", () => {
@@ -49,6 +49,26 @@ describe("parseClientCommand", () => {
       commandId,
       path: "E:\\work",
     }).type).toBe("browse_directory");
+    expect(parseClientCommand({
+      type: "set_color_scheme",
+      commandId,
+      colorScheme: "classic-rebel",
+    })).toEqual({
+      type: "set_color_scheme",
+      commandId,
+      colorScheme: "classic-rebel",
+    });
+    expect(() => parseClientCommand({
+      type: "set_color_scheme",
+      commandId,
+      colorScheme: "unknown",
+    })).toThrow();
+    expect(() => parseClientCommand({
+      type: "set_color_scheme",
+      commandId,
+      colorScheme: "quiet-rebel",
+      projectId,
+    })).toThrow();
     expect(parseClientCommand({
       type: "initialize",
       commandId,
@@ -611,7 +631,21 @@ describe("parseClientCommand", () => {
       type: "hello",
       protocolVersion: PROTOCOL_VERSION,
       startupCwd: "E:\\work",
+      uiPreferences: { colorScheme: "quiet-rebel" },
     }).type).toBe("hello");
+    expect(parseServerEvent({
+      type: "ui_preferences_changed",
+      uiPreferences: { colorScheme: "classic-rebel" },
+      commandId,
+    })).toEqual({
+      type: "ui_preferences_changed",
+      uiPreferences: { colorScheme: "classic-rebel" },
+      commandId,
+    });
+    expect(() => parseServerEvent({
+      type: "ui_preferences_changed",
+      uiPreferences: { colorScheme: "sepia" },
+    })).toThrow();
     expect(() => parseServerEvent({
       type: "session_event",
       sessionId,

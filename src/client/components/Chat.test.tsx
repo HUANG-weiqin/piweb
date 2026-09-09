@@ -185,7 +185,7 @@ describe("Chat", () => {
     fireEvent.click(screen.getByRole("button", { name: "打开控制" }));
     expect(screen.getByRole("dialog", { name: "控制" })).toBeInTheDocument();
     expect(rendered.container.querySelectorAll(".composer-meta")).toHaveLength(1);
-    fireEvent.click(screen.getByRole("button", { name: "打开模型设置" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
     expect(onSettings).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("dialog", { name: "控制" })).not.toBeInTheDocument();
 
@@ -934,7 +934,7 @@ describe("Chat", () => {
     expect(progress).toHaveTextContent(
       "Pi 默认摘要请求管线目标：summary-provider / shared-id · 专用配置",
     );
-    expect(screen.getByRole("button", { name: /shared-id/ }))
+    expect(screen.getByRole("button", { name: "设置" }))
       .toHaveTextContent("shared-id");
     expect(progress).not.toHaveTextContent("primary-provider");
   });
@@ -1931,8 +1931,8 @@ describe("Chat", () => {
     };
     render(view(emptyChat, "", role));
 
-    expect(screen.getByRole("button", { name: /^model\s*⌄$/ }))
-      .toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "设置" }))
+      .toHaveTextContent("model");
     expect(screen.queryByText("provider / model")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", {

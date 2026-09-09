@@ -213,7 +213,14 @@ function DrawerSurface() {
       state={drawerState}
       open={open}
       online
+      preferencesOnline
+      colorScheme="quiet-rebel"
+      colorSchemePending={false}
+      colorSchemeUnsaved={false}
+      colorSchemeError=""
       onClose={() => setOpen(false)}
+      onColorSchemeChange={noOp}
+      onRetryColorScheme={noOp}
       onKey={() => undefined}
       onOAuth={noOp}
       onLogout={noOp}

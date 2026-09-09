@@ -72,6 +72,10 @@ type TestState = Omit<
   PublicState,
   "projectId" | "conversationId" | "selectedServiceTier"
 >>;
+type RelaxedHello = Omit<
+  Extract<ServerEvent, { type: "hello" }>,
+  "uiPreferences"
+> & { uiPreferences?: { colorScheme: "quiet-rebel" | "classic-rebel" } };
 type RelaxedProjectSnapshot = Omit<
   Extract<ServerEvent, { type: "project_snapshot" }>,
   "coverage"
@@ -90,11 +94,13 @@ type RelaxedConversationItem = Omit<
 > & { focusId?: string };
 type TestServerEvent = Exclude<
   ServerEvent,
+  | { type: "hello" }
   | { type: "state" }
   | { type: "conversation_snapshot" }
   | { type: "session_event" }
   | { type: "conversation_item" }
 >
+  | RelaxedHello
   | { type: "state"; state: TestState }
   | RelaxedProjectSnapshot
   | RelaxedConversationSnapshot
@@ -128,6 +134,12 @@ function snapshotItems(
 }
 
 function completeEvent(event: TestServerEvent): TestServerEvent {
+  if (event.type === "hello") {
+    return {
+      ...event,
+      uiPreferences: event.uiPreferences ?? { colorScheme: "quiet-rebel" },
+    };
+  }
   if (event.type === "project_snapshot") {
     return { ...event, coverage: event.coverage ?? "complete" };
   }
@@ -657,6 +669,78 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "打开工作区 first" }))
       .toHaveAttribute("aria-current", "true");
     expect(target).not.toHaveClass("unavailable");
+  });
+
+  it("previews, durably confirms, and follows broadcast color schemes", () => {
+    startFocusReplacementProject();
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+
+    fireEvent.click(screen.getByRole("radio", { name: /Classic Rebel/ }));
+    expect(document.documentElement).toHaveAttribute(
+      "data-color-scheme",
+      "classic-rebel",
+    );
+    const command = latestCommand("set_color_scheme");
+    expect(command.colorScheme).toBe("classic-rebel");
+    expect(screen.getByRole("radio", { name: /Quiet Rebel/ })).toBeDisabled();
+
+    act(() => socketMock.rawEmit?.({
+      type: "ui_preferences_changed",
+      uiPreferences: { colorScheme: "classic-rebel" },
+      commandId: command.commandId,
+    }));
+    expect(screen.queryByRole("button", { name: "重试保存" }))
+      .not.toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /Classic Rebel/ })).toBeEnabled();
+
+    act(() => socketMock.rawEmit?.({
+      type: "ui_preferences_changed",
+      uiPreferences: { colorScheme: "quiet-rebel" },
+    }));
+    expect(document.documentElement).toHaveAttribute(
+      "data-color-scheme",
+      "quiet-rebel",
+    );
+    expect(screen.getByRole("radio", { name: /Quiet Rebel/ })).toBeChecked();
+  });
+
+  it("keeps an offline color preview unsaved until an explicit retry is confirmed", () => {
+    startFocusReplacementProject();
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    act(() => socketMock.status?.(false));
+
+    fireEvent.click(screen.getByRole("radio", { name: /Classic Rebel/ }));
+    expect(document.documentElement).toHaveAttribute(
+      "data-color-scheme",
+      "classic-rebel",
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent("尚未保存");
+    expect(screen.getByRole("button", { name: "重试保存" })).toBeDisabled();
+
+    act(() => {
+      socketMock.status?.(true);
+      socketMock.emit?.({
+        type: "hello",
+        protocolVersion: PROTOCOL_VERSION,
+        startupCwd: "E:\\default",
+        uiPreferences: { colorScheme: "quiet-rebel" },
+      });
+    });
+    expect(document.documentElement).toHaveAttribute(
+      "data-color-scheme",
+      "classic-rebel",
+    );
+    const retry = screen.getByRole("button", { name: "重试保存" });
+    expect(retry).toBeEnabled();
+    fireEvent.click(retry);
+    const command = latestCommand("set_color_scheme");
+    act(() => socketMock.rawEmit?.({
+      type: "ui_preferences_changed",
+      uiPreferences: { colorScheme: "classic-rebel" },
+      commandId: command.commandId,
+    }));
+    expect(screen.queryByRole("button", { name: "重试保存" }))
+      .not.toBeInTheDocument();
   });
 
   it("keeps the current workspace projection when rail navigation is offline", () => {
@@ -1942,7 +2026,7 @@ describe("App", () => {
         providers: [],
       },
     }));
-    expect(screen.getByTitle("模型连接")).toHaveTextContent("current-model");
+    expect(screen.getByTitle("设置")).toHaveTextContent("current-model");
 
     act(() => socketMock.rawEmit?.({
       type: "state",
@@ -1960,8 +2044,8 @@ describe("App", () => {
         providers: [],
       },
     }));
-    expect(screen.getByTitle("模型连接")).toHaveTextContent("current-model");
-    expect(screen.getByTitle("模型连接")).not.toHaveTextContent("foreign-model");
+    expect(screen.getByTitle("设置")).toHaveTextContent("current-model");
+    expect(screen.getByTitle("设置")).not.toHaveTextContent("foreign-model");
   });
 
   it("applies a matching target state deferred while conversation focus is pending", () => {
@@ -1997,7 +2081,7 @@ describe("App", () => {
       focusId: targetFocusId,
     }));
 
-    expect(screen.getByTitle("模型连接")).toHaveTextContent("deferred-model");
+    expect(screen.getByTitle("设置")).toHaveTextContent("deferred-model");
   });
 
   it("plays one project-scoped chime for a completed user run", () => {
@@ -2536,7 +2620,7 @@ describe("App", () => {
       .toBeInTheDocument();
     expect(screen.getByRole("button", { name: "查看会话角色 Preview Reader" }))
       .toBeInTheDocument();
-    expect(screen.getByTitle("模型连接")).toBeDisabled();
+    expect(screen.getByTitle("设置")).toBeEnabled();
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
       .toBeDisabled();
     expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
@@ -2548,7 +2632,9 @@ describe("App", () => {
     })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "停止" })).not.toBeInTheDocument();
     const commandCount = socketMock.send.mock.calls.length;
-    fireEvent.click(screen.getByTitle("模型连接"));
+    fireEvent.click(screen.getByTitle("设置"));
+    expect(screen.getByRole("dialog", { name: "设置" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     fireEvent.click(screen.getByRole("button", { name: "手动压缩上下文" }));
     expect(socketMock.send).toHaveBeenCalledTimes(commandCount);
@@ -3273,7 +3359,7 @@ describe("App", () => {
       .toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "给 Pi 发送消息" }))
       .not.toBeInTheDocument();
-    expect(screen.queryByTitle("模型连接")).not.toBeInTheDocument();
+    expect(screen.queryByTitle("设置")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "新建会话" })).toBeDisabled();
     for (const button of screen.getAllByRole("button", {
       name: /^(重命名|删除)会话 /,
@@ -3329,7 +3415,7 @@ describe("App", () => {
     expect(screen.queryByRole("status", { name: "正在同步会话…" }))
       .not.toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeEnabled();
-    expect(screen.getByTitle("模型连接")).toBeEnabled();
+    expect(screen.getByTitle("设置")).toBeEnabled();
     expect(screen.getByRole("button", { name: "新建会话" })).toBeEnabled();
     expect(sentFocusCommandCount()).toBe(focusCommandsBeforeCurrentClick);
 
@@ -6007,7 +6093,7 @@ describe("App", () => {
       .toHaveTextContent(
         "Pi 默认摘要请求管线目标：summary-provider / summary-model · 专用配置",
       );
-    expect(screen.getByTitle("模型连接")).toHaveTextContent("primary-model");
+    expect(screen.getByTitle("设置")).toHaveTextContent("primary-model");
 
     socketMock.autoFocus = false;
     fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
@@ -6054,7 +6140,7 @@ describe("App", () => {
         providers: [],
       },
     }));
-    expect(screen.getByTitle("模型连接")).toHaveTextContent("primary-model");
+    expect(screen.getByTitle("设置")).toHaveTextContent("primary-model");
 
     const secondAttempt = {
       ...firstAttempt,
@@ -6081,7 +6167,7 @@ describe("App", () => {
     }));
     expect(screen.getByRole("status", { name: "正在压缩上下文" }))
       .toHaveTextContent("second-provider / second-summary");
-    expect(screen.getByTitle("模型连接")).toHaveTextContent("primary-model");
+    expect(screen.getByTitle("设置")).toHaveTextContent("primary-model");
 
     act(() => socketMock.rawEmit?.({
       type: "state",
@@ -6573,7 +6659,7 @@ describe("App", () => {
         }],
       },
     }));
-    fireEvent.click(screen.getByRole("button", { name: /^model\s*⌄$/ }));
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
 
     fireEvent.click(screen.getByRole("button", { name: "刷新模型" }));
     const command = latestCommand("refresh_models");
@@ -6641,10 +6727,10 @@ describe("App", () => {
         providers: [],
       },
     }));
-    fireEvent.click(screen.getByRole("button", { name: /^model\s*⌄$/ }));
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
     const drawerClose = screen.getByRole("button", { name: "关闭" });
     drawerClose.focus();
-    expect(screen.getByRole("dialog", { name: "模型连接" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "设置" })).toBeInTheDocument();
 
     act(() => socketMock.emit?.({
       type: "extension_ui_request",
@@ -6652,7 +6738,7 @@ describe("App", () => {
       requestId: EXTENSION_REQUEST_A,
       request: { kind: "confirm", title: "Extension question", message: "Continue?" },
     }));
-    expect(screen.queryByRole("dialog", { name: "模型连接" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "设置" })).not.toBeInTheDocument();
     expect(drawerClose).toBeInTheDocument();
     expect(drawerClose.closest(".drawer")).toHaveAttribute("aria-hidden", "true");
     expect(screen.getByRole("dialog", { name: "Extension question" })).toBeInTheDocument();
@@ -6663,7 +6749,7 @@ describe("App", () => {
       requestId: EXTENSION_REQUEST_A,
     }));
     await waitFor(() => {
-      expect(screen.getByRole("dialog", { name: "模型连接" })).toBeInTheDocument();
+      expect(screen.getByRole("dialog", { name: "设置" })).toBeInTheDocument();
       expect(drawerClose).toHaveFocus();
     });
   });
@@ -8678,7 +8764,7 @@ describe("App", () => {
         }],
       },
     }));
-    fireEvent.click(screen.getByRole("button", { name: /^model\s*⌄$/ }));
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
     fireEvent.click(screen.getByRole("button", { name: "登录订阅账户" }));
     const first = latestCommand("login_oauth");
     fireEvent.keyDown(document, { key: "Escape" });
@@ -8837,9 +8923,9 @@ describe("App", () => {
       ([command]) => command.type === "create_conversation",
     )).toBe(false);
     expect(screen.getByRole("button", { name: "新建会话" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "模型连接" })).toBeEnabled();
-    fireEvent.click(screen.getByRole("button", { name: "模型连接" }));
-    expect(screen.getByRole("dialog", { name: "模型连接" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "设置" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    expect(screen.getByRole("dialog", { name: "设置" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "关闭" }));
 
     fireEvent.click(screen.getByRole("button", {

@@ -37,7 +37,14 @@ function drawerProps(overrides: Partial<Parameters<typeof ConnectionDrawer>[0]> 
     state,
     open: true,
     online: true,
+    preferencesOnline: true,
+    colorScheme: "quiet-rebel" as const,
+    colorSchemePending: false,
+    colorSchemeUnsaved: false,
+    colorSchemeError: "",
     onClose: () => undefined,
+    onColorSchemeChange: () => undefined,
+    onRetryColorScheme: () => undefined,
     onKey: () => commandId,
     onOAuth: () => undefined,
     onLogout: () => undefined,
@@ -91,11 +98,15 @@ describe("ConnectionDrawer", () => {
     expect(screen.queryByText("locked")).not.toBeInTheDocument();
   });
 
-  it("contains only provider connection and model catalog controls", () => {
+  it("places appearance before the complete model connection controls", () => {
     renderDrawer();
 
-    expect(screen.getByRole("dialog", { name: "模型连接" }))
-      .toBeInTheDocument();
+    const dialog = screen.getByRole("dialog", { name: "设置" });
+    expect(dialog).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /Quiet Rebel/ })).toBeChecked();
+    expect(screen.getByRole("radio", { name: /Classic Rebel/ })).not.toBeChecked();
+    expect(screen.getByRole("heading", { name: "配色" }))
+      .toAppearBefore(screen.getByRole("heading", { name: "模型连接" }));
     expect(screen.getByRole("combobox", { name: "提供商" }))
       .toBeInTheDocument();
     expect(screen.queryByRole("combobox", { name: "工具权限" }))
@@ -112,7 +123,7 @@ describe("ConnectionDrawer", () => {
     const close = vi.fn();
     renderDrawer({ onClose: close });
 
-    expect(screen.getByRole("dialog", { name: "模型连接" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "设置" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "关闭" })).toHaveFocus();
     fireEvent.keyDown(document, { key: "Escape" });
     expect(close).toHaveBeenCalledOnce();
@@ -133,7 +144,7 @@ describe("ConnectionDrawer", () => {
     const launcher = screen.getByRole("button", { name: "打开模型连接测试" });
     launcher.focus();
     fireEvent.click(launcher);
-    const dialog = screen.getByRole("dialog", { name: "模型连接" });
+    const dialog = screen.getByRole("dialog", { name: "设置" });
     const backdrop = dialog.parentElement!;
     await waitFor(() => expect(screen.getByRole("button", {
       name: "关闭",
@@ -155,7 +166,7 @@ describe("ConnectionDrawer", () => {
     expect(backdropMouseDown.defaultPrevented).toBe(true);
 
     await waitFor(() => {
-      expect(screen.queryByRole("dialog", { name: "模型连接" }))
+      expect(screen.queryByRole("dialog", { name: "设置" }))
         .not.toBeInTheDocument();
       expect(launcher.isConnected).toBe(true);
       expect(launcher).toHaveFocus();
@@ -203,7 +214,7 @@ describe("ConnectionDrawer", () => {
     fireEvent.click(drawerClose);
 
     await waitFor(() => {
-      expect(screen.queryByRole("dialog", { name: "模型连接" }))
+      expect(screen.queryByRole("dialog", { name: "设置" }))
         .not.toBeInTheDocument();
       expect(launcher.isConnected).toBe(true);
       expect(launcher).toHaveFocus();
