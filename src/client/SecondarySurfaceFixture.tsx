@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type {
   ConversationRoleSnapshot,
   PublicProvider,
@@ -6,7 +6,7 @@ import type {
   RoleTemplate,
 } from "../shared/protocol";
 import { AuthDialog } from "./components/AuthDialog";
-import { ConnectionDrawer } from "./components/ConnectionDrawer";
+import { SettingsDrawer } from "./components/SettingsDrawer";
 import { ConversationRoleDialog } from "./components/ConversationRoleDialog";
 import { DirectoryBrowserDialog } from "./components/DirectoryBrowserDialog";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -22,6 +22,8 @@ const FIXTURE_CWD = "E:\\workspaces\\piweb";
 const FIXTURE_TIMESTAMP = "2026-09-04T12:00:00.000Z";
 const GROUP_A_SURFACES: readonly string[] = [
   "drawer",
+  "drawer-appearance",
+  "drawer-model-connections",
   "role-manager",
   "role-switch",
   "directory",
@@ -205,11 +207,19 @@ function WorkbenchOverlay({
   </>;
 }
 
-function DrawerSurface() {
+function DrawerSurface({ page = "home" }: {
+  page?: "home" | "appearance" | "model-connections";
+}) {
   const [open, setOpen] = useState(true);
 
+  useEffect(() => {
+    if (page === "home") return;
+    const label = page === "appearance" ? "打开外观设置" : "打开模型连接设置";
+    document.querySelector<HTMLButtonElement>(`.drawer button[aria-label="${label}"]`)?.click();
+  }, [page]);
+
   return <WorkbenchOverlay>
-    <ConnectionDrawer
+    <SettingsDrawer
       state={drawerState}
       open={open}
       online
@@ -424,6 +434,10 @@ function renderSurface(surface: string): ReactNode {
   switch (surface) {
     case "drawer":
       return <DrawerSurface />;
+    case "drawer-appearance":
+      return <DrawerSurface page="appearance" />;
+    case "drawer-model-connections":
+      return <DrawerSurface page="model-connections" />;
     case "role-manager":
       return <RoleManagerSurface />;
     case "role-switch":

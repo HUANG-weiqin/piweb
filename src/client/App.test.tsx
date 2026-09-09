@@ -674,6 +674,7 @@ describe("App", () => {
   it("previews, durably confirms, and follows broadcast color schemes", () => {
     startFocusReplacementProject();
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开外观设置" }));
 
     fireEvent.click(screen.getByRole("radio", { name: /Classic Rebel/ }));
     expect(document.documentElement).toHaveAttribute(
@@ -707,6 +708,7 @@ describe("App", () => {
   it("keeps an offline color preview unsaved until an explicit retry is confirmed", () => {
     startFocusReplacementProject();
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开外观设置" }));
     act(() => socketMock.status?.(false));
 
     fireEvent.click(screen.getByRole("radio", { name: /Classic Rebel/ }));
@@ -1149,17 +1151,26 @@ describe("App", () => {
     fireEvent.click(settingsLauncher);
     await waitFor(() => expect(screen.getByRole("button", { name: "关闭" }))
       .toHaveFocus());
+    fireEvent.click(screen.getByRole("button", { name: "打开外观设置" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "外观" }))
+      .toHaveFocus());
     act(() => viewport.setPhoneViewport(false));
     const desktopSettingsLauncher = screen.getByRole("button", { name: "设置" });
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.getByRole("button", { name: "打开外观设置" }))
+      .toHaveFocus());
     fireEvent.keyDown(document, { key: "Escape" });
     await waitFor(() => expect(desktopSettingsLauncher).toHaveFocus());
 
     fireEvent.click(desktopSettingsLauncher);
     await waitFor(() => expect(screen.getByRole("button", { name: "关闭" }))
       .toHaveFocus());
+    fireEvent.click(screen.getByRole("button", { name: "打开模型连接设置" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "模型连接" }))
+      .toHaveFocus());
     act(() => viewport.setPhoneViewport(true));
     const responsiveSettingsLauncher = screen.getByRole("button", { name: "打开设置" });
-    fireEvent.keyDown(document, { key: "Escape" });
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
     await waitFor(() => expect(responsiveSettingsLauncher).toHaveFocus());
 
     const sentBeforeBack = socketMock.send.mock.calls.length;
@@ -6687,6 +6698,7 @@ describe("App", () => {
       },
     }));
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开模型连接设置" }));
 
     fireEvent.click(screen.getByRole("button", { name: "刷新模型" }));
     const command = latestCommand("refresh_models");
@@ -6802,6 +6814,7 @@ describe("App", () => {
         }],
       },
     }));
+    fireEvent.click(screen.getByRole("button", { name: "打开模型连接设置" }));
     fireEvent.click(screen.getByRole("button", { name: "使用 API Key" }));
     fireEvent.change(screen.getByLabelText("API Key"), {
       target: { value: "draft-key" },
@@ -8792,6 +8805,7 @@ describe("App", () => {
       },
     }));
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开模型连接设置" }));
     fireEvent.click(screen.getByRole("button", { name: "登录订阅账户" }));
     const first = latestCommand("login_oauth");
     fireEvent.keyDown(document, { key: "Escape" });
@@ -8863,6 +8877,7 @@ describe("App", () => {
         providers: [provider],
       },
     }));
+    fireEvent.click(screen.getByRole("button", { name: "打开模型连接设置" }));
     fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
     fireEvent.change(screen.getByLabelText("API Key"), {
       target: { value: "replacement-key" },

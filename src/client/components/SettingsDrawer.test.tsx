@@ -4,7 +4,7 @@ import { useState } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PublicProvider, PublicState } from "../../shared/protocol";
-import { ConnectionDrawer } from "./ConnectionDrawer";
+import { SettingsDrawer } from "./SettingsDrawer";
 
 afterEach(cleanup);
 
@@ -32,7 +32,7 @@ const state: PublicState = {
   }],
 };
 
-function drawerProps(overrides: Partial<Parameters<typeof ConnectionDrawer>[0]> = {}) {
+function settingsProps(overrides: Partial<Parameters<typeof SettingsDrawer>[0]> = {}) {
   return {
     state,
     open: true,
@@ -52,24 +52,34 @@ function drawerProps(overrides: Partial<Parameters<typeof ConnectionDrawer>[0]> 
     onClearSettingResult: () => undefined,
     onKeyDialogChange: () => undefined,
     ...overrides,
-  } satisfies Parameters<typeof ConnectionDrawer>[0];
+  } satisfies Parameters<typeof SettingsDrawer>[0];
 }
 
-function renderDrawer(overrides: Partial<Parameters<typeof ConnectionDrawer>[0]> = {}) {
-  return render(<ConnectionDrawer {...drawerProps(overrides)} />);
+function renderSettings(overrides: Partial<Parameters<typeof SettingsDrawer>[0]> = {}) {
+  return render(<SettingsDrawer {...settingsProps(overrides)} />);
 }
 
-function ConnectionDrawerBackdropFixture({
+function openModelConnections() {
+  fireEvent.click(screen.getByRole("button", { name: "打开模型连接设置" }));
+}
+
+function renderDrawer(overrides: Partial<Parameters<typeof SettingsDrawer>[0]> = {}) {
+  const view = renderSettings(overrides);
+  openModelConnections();
+  return view;
+}
+
+function SettingsDrawerBackdropFixture({
   onKey,
   onOAuth,
   onLogout,
   onRefresh,
-}: Pick<Parameters<typeof ConnectionDrawer>[0],
+}: Pick<Parameters<typeof SettingsDrawer>[0],
   "onKey" | "onOAuth" | "onLogout" | "onRefresh">) {
   const [open, setOpen] = useState(false);
   return <>
-    <button onClick={() => setOpen(true)}>打开模型连接测试</button>
-    <ConnectionDrawer {...drawerProps({
+    <button onClick={() => setOpen(true)}>打开设置测试</button>
+    <SettingsDrawer {...settingsProps({
       open,
       onClose: () => setOpen(false),
       onKey,
@@ -80,48 +90,133 @@ function ConnectionDrawerBackdropFixture({
   </>;
 }
 
-function ConnectionDrawerFocusOwnerFixture() {
+function SettingsDrawerFocusOwnerFixture() {
   const [open, setOpen] = useState(false);
   return <>
-    <button onClick={() => setOpen(true)}>打开模型连接测试</button>
-    <ConnectionDrawer {...drawerProps({
+    <button onClick={() => setOpen(true)}>打开设置测试</button>
+    <SettingsDrawer {...settingsProps({
       open,
       onClose: () => setOpen(false),
     })} />
   </>;
 }
 
-describe("ConnectionDrawer", () => {
-  it("shows only models Pi reports as available", () => {
+describe("SettingsDrawer", () => {
+  it("opens on a HOME with only category summaries", () => {
+    renderSettings({
+      state: { ...state, selectedModel: { provider: "test", id: "ready" } },
+    });
+
+    const dialog = screen.getByRole("dialog", { name: "设置" });
+    expect(dialog).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "打开外观设置" }))
+      .toHaveTextContent("Quiet Rebel");
+    expect(screen.getByRole("button", { name: "打开模型连接设置" }))
+      .toHaveTextContent("Ready");
+    expect(screen.queryByRole("radio")).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "搜索模型" }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "刷新模型" }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "更新 API Key" }))
+      .not.toBeInTheDocument();
+  });
+
+  it("reports pending preferences and offline runtime truth in HOME summaries", () => {
+    renderSettings({
+      state: { ...state, selectedModel: { provider: "test", id: "ready" } },
+      colorScheme: "classic-rebel",
+      colorSchemePending: true,
+      online: false,
+      preferencesOnline: false,
+    });
+
+    expect(screen.getByRole("button", { name: "打开外观设置" }))
+      .toHaveTextContent(/Classic Rebel.*正在保存/);
+    expect(screen.getByRole("button", { name: "打开模型连接设置" }))
+      .toHaveTextContent(/离线.*Ready/);
+  });
+
+  it("shows only models Pi reports as available on the dedicated page", () => {
     renderDrawer();
     expect(screen.getByText("Ready")).toBeInTheDocument();
     expect(screen.queryByText("locked")).not.toBeInTheDocument();
   });
 
-  it("places appearance before the complete model connection controls", () => {
-    renderDrawer();
-
+  it("focuses each dedicated page and restores its originating HOME row", async () => {
+    renderSettings();
     const dialog = screen.getByRole("dialog", { name: "设置" });
-    expect(dialog).toBeInTheDocument();
+    const appearanceRow = screen.getByRole("button", { name: "打开外观设置" });
+    expect(appearanceRow.tagName).toBe("BUTTON");
+
+    appearanceRow.focus();
+    fireEvent.click(appearanceRow);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "外观" })).toHaveFocus());
     expect(screen.getByRole("radio", { name: /Quiet Rebel/ })).toBeChecked();
-    expect(screen.getByRole("radio", { name: /Classic Rebel/ })).not.toBeChecked();
-    expect(screen.getByRole("heading", { name: "配色" }))
-      .toAppearBefore(screen.getByRole("heading", { name: "模型连接" }));
-    expect(screen.getByRole("combobox", { name: "提供商" }))
-      .toBeInTheDocument();
-    expect(screen.queryByRole("combobox", { name: "工具权限" }))
-      .not.toBeInTheDocument();
-    expect(screen.queryByRole("combobox", { name: "思考级别" }))
-      .not.toBeInTheDocument();
-    expect(screen.queryByRole("textbox", { name: "当前会话名称" }))
-      .not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "管理角色" }))
-      .not.toBeInTheDocument();
+
+    dialog.scrollTop = 96;
+    fireEvent.click(screen.getByRole("button", { name: "返回设置" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "打开外观设置" })).toHaveFocus());
+    expect(dialog.scrollTop).toBe(0);
+    expect(screen.queryByRole("radio")).not.toBeInTheDocument();
+  });
+
+  it("uses Escape as nested page navigation before closing and reopens at HOME", async () => {
+    render(<SettingsDrawerBackdropFixture
+      onKey={() => undefined}
+      onOAuth={() => undefined}
+      onLogout={() => undefined}
+      onRefresh={() => undefined}
+    />);
+    const launcher = screen.getByRole("button", { name: "打开设置测试" });
+    launcher.focus();
+    fireEvent.click(launcher);
+    await waitFor(() => expect(screen.getByRole("button", { name: "关闭" })).toHaveFocus());
+
+    openModelConnections();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "模型连接" })).toHaveFocus());
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.getByRole("button", { name: "打开模型连接设置" })).toHaveFocus());
+    expect(screen.getByRole("dialog", { name: "设置" })).toBeInTheDocument();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(launcher).toHaveFocus());
+    expect(screen.queryByRole("dialog", { name: "设置" })).not.toBeInTheDocument();
+
+    fireEvent.click(launcher);
+    expect(screen.getByRole("button", { name: "打开外观设置" })).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "提供商" })).not.toBeInTheDocument();
+  });
+
+  it("shows and settles a pending refresh while HOME is projected", async () => {
+    const refresh = vi.fn(() => commandId);
+    const view = renderDrawer({ onRefresh: refresh });
+    fireEvent.click(screen.getByRole("button", { name: "刷新模型" }));
+    fireEvent.click(screen.getByRole("button", { name: "返回设置" }));
+
+    expect(screen.getByRole("button", { name: "打开模型连接设置" }))
+      .toHaveTextContent("正在刷新模型");
+
+    view.rerender(<SettingsDrawer {...settingsProps({
+      onRefresh: refresh,
+      settingResult: {
+        operation: "refresh_models",
+        commandId,
+        ok: true,
+        message: "",
+      },
+    })} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "打开模型连接设置" }))
+      .not.toHaveTextContent("正在刷新模型"));
+    openModelConnections();
+    expect(screen.getByRole("status"))
+      .toHaveTextContent("远程供应商模型目录已刷新");
   });
 
   it("owns modal focus and closes safely with Escape", () => {
     const close = vi.fn();
-    renderDrawer({ onClose: close });
+    renderSettings({ onClose: close });
 
     expect(screen.getByRole("dialog", { name: "设置" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "关闭" })).toHaveFocus();
@@ -134,14 +229,14 @@ describe("ConnectionDrawer", () => {
     const onOAuth = vi.fn();
     const onLogout = vi.fn();
     const onRefresh = vi.fn(() => undefined);
-    render(<ConnectionDrawerBackdropFixture
+    render(<SettingsDrawerBackdropFixture
       onKey={onKey}
       onOAuth={onOAuth}
       onLogout={onLogout}
       onRefresh={onRefresh}
     />);
 
-    const launcher = screen.getByRole("button", { name: "打开模型连接测试" });
+    const launcher = screen.getByRole("button", { name: "打开设置测试" });
     launcher.focus();
     fireEvent.click(launcher);
     const dialog = screen.getByRole("dialog", { name: "设置" });
@@ -178,9 +273,9 @@ describe("ConnectionDrawer", () => {
   });
 
   it("restores exact focus owners through the nested API Key modal", async () => {
-    render(<ConnectionDrawerFocusOwnerFixture />);
+    render(<SettingsDrawerFocusOwnerFixture />);
 
-    const launcher = screen.getByRole("button", { name: "打开模型连接测试" });
+    const launcher = screen.getByRole("button", { name: "打开设置测试" });
     expect(launcher.isConnected).toBe(true);
     launcher.focus();
     expect(launcher).toHaveFocus();
@@ -188,6 +283,8 @@ describe("ConnectionDrawer", () => {
 
     const drawerClose = screen.getByRole("button", { name: "关闭" });
     await waitFor(() => expect(drawerClose).toHaveFocus());
+    openModelConnections();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "模型连接" })).toHaveFocus());
 
     const keyTrigger = screen.getByRole("button", { name: "更新 API Key" });
     expect(keyTrigger.isConnected).toBe(true);
@@ -323,7 +420,7 @@ describe("ConnectionDrawer", () => {
     expect(keyInput).toHaveFocus();
     expect(saveKey).toHaveBeenCalledOnce();
 
-    view.rerender(<ConnectionDrawer {...drawerProps({
+    view.rerender(<SettingsDrawer {...settingsProps({
       state,
       onKey: saveKey,
       settingResult: {
@@ -347,7 +444,7 @@ describe("ConnectionDrawer", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "显示" }));
     fireEvent.click(screen.getByRole("button", { name: "保存 API Key" }));
-    view.rerender(<ConnectionDrawer {...drawerProps({
+    view.rerender(<SettingsDrawer {...settingsProps({
       onKey: saveKey,
       settingResult: {
         operation: "set_api_key",
@@ -433,7 +530,7 @@ describe("ConnectionDrawer", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "保存 API Key" }));
 
-    view.rerender(<ConnectionDrawer {...drawerProps({
+    view.rerender(<SettingsDrawer {...settingsProps({
       onKey: saveKey,
       settingResult: {
         operation: "set_api_key",
@@ -459,7 +556,7 @@ describe("ConnectionDrawer", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "保存 API Key" }));
 
-    view.rerender(<ConnectionDrawer {...drawerProps({
+    view.rerender(<SettingsDrawer {...settingsProps({
       online: false,
       onKey: () => commandId,
     })} />);
@@ -477,7 +574,7 @@ describe("ConnectionDrawer", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "保存 API Key" }));
 
-    view.rerender(<ConnectionDrawer {...drawerProps({
+    view.rerender(<SettingsDrawer {...settingsProps({
       state: { ...state, sessionId: "session-2" },
       onKey: saveKey,
       settingResult: {
@@ -520,7 +617,7 @@ describe("ConnectionDrawer", () => {
     expect(refresh).toHaveBeenCalledOnce();
     expect(screen.getByRole("button", { name: "正在刷新模型…" })).toBeDisabled();
 
-    view.rerender(<ConnectionDrawer {...drawerProps({
+    view.rerender(<SettingsDrawer {...settingsProps({
       onRefresh: refresh,
       settingResult: {
         operation: "refresh_models",
@@ -531,7 +628,7 @@ describe("ConnectionDrawer", () => {
     })} />);
     expect(screen.getByRole("button", { name: "正在刷新模型…" })).toBeDisabled();
 
-    view.rerender(<ConnectionDrawer {...drawerProps({
+    view.rerender(<SettingsDrawer {...settingsProps({
       onRefresh: refresh,
       settingResult: {
         operation: "refresh_models",
@@ -545,7 +642,7 @@ describe("ConnectionDrawer", () => {
     expect(screen.getByRole("button", { name: "刷新模型" })).toBeEnabled();
 
     fireEvent.click(screen.getByRole("button", { name: "刷新模型" }));
-    view.rerender(<ConnectionDrawer {...drawerProps({
+    view.rerender(<SettingsDrawer {...settingsProps({
       onRefresh: refresh,
       settingResult: {
         operation: "refresh_models",
@@ -563,7 +660,7 @@ describe("ConnectionDrawer", () => {
     const view = renderDrawer({ onRefresh: () => commandId });
     fireEvent.click(screen.getByRole("button", { name: "刷新模型" }));
 
-    view.rerender(<ConnectionDrawer {...drawerProps({
+    view.rerender(<SettingsDrawer {...settingsProps({
       state: { ...state, sessionId: "session-2" },
       onRefresh: () => commandId,
     })} />);
@@ -581,14 +678,14 @@ describe("ConnectionDrawer", () => {
     fireEvent.click(screen.getByRole("button", { name: "刷新模型" }));
     expect(refresh).toHaveBeenCalledOnce();
 
-    view.rerender(<ConnectionDrawer {...drawerProps({
+    view.rerender(<SettingsDrawer {...settingsProps({
       state: { ...state, providers: [] },
       online: false,
       onRefresh: refresh,
     })} />);
     expect(screen.getByRole("button", { name: "刷新模型" })).toBeDisabled();
 
-    view.rerender(<ConnectionDrawer {...drawerProps({
+    view.rerender(<SettingsDrawer {...settingsProps({
       state: { ...state, busy: true },
       onRefresh: refresh,
     })} />);
