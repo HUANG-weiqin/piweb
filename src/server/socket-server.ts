@@ -156,7 +156,7 @@ export function attachSocketServer(
   let coordinationPromise: Promise<PiConnectionCoordination> | undefined;
   let closePromise: Promise<void> | undefined;
   let startupAdmissionBlocked = blockStartupAdmission;
-  let socketMutationAdmissionFrozen = false;
+  let socketAdmissionFrozen = false;
   const activeColorSchemeCommands = new Set<Promise<void>>();
   const waitForColorSchemeCommands = async (): Promise<void> => {
     while (activeColorSchemeCommands.size > 0) {
@@ -165,6 +165,11 @@ export function attachSocketServer(
   };
 
   const coordination = (): Promise<PiConnectionCoordination> => {
+    if (socketAdmissionFrozen && coordinationPromise === undefined) {
+      return Promise.reject(
+        new Error("Server admission is frozen; project coordination cannot be initialized"),
+      );
+    }
     coordinationPromise ??= RoleCatalog.open(runtime).then((roles) => ({
       roles,
       coordinator: new ProjectSessionCoordinator(
@@ -212,15 +217,17 @@ export function attachSocketServer(
   server.on("upgrade", onUpgrade);
 
   sockets.on("connection", (socket) => {
+    const socketControlState: SocketControlState = {
+      usedCommandIds: new Set(),
+    };
     const connection = new PiConnection(
       (event) => safeSend(socket, event),
       runtime,
       coordination,
+      undefined,
+      socketControlState.usedCommandIds,
     );
     connections.set(socket, connection);
-    const socketControlState: SocketControlState = {
-      usedCommandIds: new Set(),
-    };
     safeSend(socket, {
       type: "hello",
       protocolVersion: PROTOCOL_VERSION,
@@ -256,7 +263,7 @@ export function attachSocketServer(
             socketControlState,
             uiPreferences,
             sockets,
-            !socketMutationAdmissionFrozen,
+            !socketAdmissionFrozen,
           );
           activeColorSchemeCommands.add(task);
           void task.then(
@@ -310,7 +317,7 @@ export function attachSocketServer(
   return {
     sockets,
     async prepareReload(force, onAdmissionFrozen) {
-      socketMutationAdmissionFrozen = true;
+      socketAdmissionFrozen = true;
       if (!coordinationPromise) {
         if (!force) await waitForColorSchemeCommands();
         onAdmissionFrozen();
@@ -353,7 +360,7 @@ export function attachSocketServer(
     },
     close() {
       if (closePromise) return closePromise;
-      socketMutationAdmissionFrozen = true;
+      socketAdmissionFrozen = true;
       closePromise = (async () => {
         server.off("upgrade", onUpgrade);
         const activeConnections = [...connections.entries()];

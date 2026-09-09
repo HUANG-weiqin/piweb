@@ -272,7 +272,7 @@ export class PiConnection {
   private requestedSessionId?: string;
   private readonly usedSessionIds = new Set<string>();
   private readonly runIdsBySession = new Map<string, Set<string>>();
-  private readonly usedCommandIds = new Set<string>();
+  private readonly usedCommandIds: Set<string>;
   private readonly usedAuthFlowIds = new Set<string>();
   private readonly pendingAuthFlowIds = new Set<string>();
   private readonly cancelledAuthFlowIds = new Set<string>();
@@ -289,7 +289,9 @@ export class PiConnection {
     private readonly runtime: PiRuntimeLike,
     private readonly coordinationProvider: PiConnectionCoordinationProvider,
     private readonly monotonicNow: () => number = () => performance.now(),
+    usedCommandIds: Set<string> = new Set(),
   ) {
+    this.usedCommandIds = usedCommandIds;
     this.extensionUI = new ExtensionUIBroker(emit);
     this.unsubscribeRuntime = runtime.subscribe(() => {
       this.publishCoordinatedState();
