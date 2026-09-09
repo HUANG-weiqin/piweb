@@ -675,6 +675,60 @@ describe("ConversationActor", () => {
       await fixture.actor.dispose();
     });
 
+    it("publishes a durable image projection after the initial raw user message persists", async () => {
+      const fixture = await openActor();
+      const promptStarted = deferred<void>();
+      const promptFinished = deferred<void>();
+      fixture.runtime.session.promptImplementation = async () => {
+        promptStarted.resolve();
+        await promptFinished.promise;
+      };
+
+      const running = fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "",
+        images: [{ mimeType: "image/png", data: "iVBORw0KGgo=" }],
+        origin: "browser",
+      });
+      await promptStarted.promise;
+      const raw = agentMessage({
+        role: "user",
+        content: [{
+          type: "image",
+          mimeType: "image/png",
+          data: "iVBORw0KGgo=",
+        }],
+        timestamp: 1,
+      });
+      fixture.runtime.session.eventListener?.(nativeEvent({
+        type: "message_start",
+        message: raw,
+      }));
+      const messageId = fixture.manager.appendMessage(raw);
+      fixture.runtime.session.eventListener?.(nativeEvent({
+        type: "message_end",
+        message: raw,
+      }));
+
+      await vi.waitFor(() => expect(fixture.events).toContainEqual({
+        type: "image_message_persisted",
+        conversationId: CONVERSATION_ID,
+      }));
+      expect(fixture.actor.projectConversationItems().items).toContainEqual(
+        expect.objectContaining({
+          kind: "message",
+          id: messageId,
+          role: "user",
+          text: "[图片]",
+          imageRefs: [{ offset: 0, ordinal: 0 }],
+        }),
+      );
+
+      promptFinished.resolve();
+      await running;
+      await fixture.actor.dispose();
+    });
+
     it("rejects a MIME/signature mismatch before starting a run", async () => {
       const fixture = await openActor();
       expect(() => fixture.actor.startPrompt({
