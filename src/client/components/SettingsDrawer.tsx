@@ -16,6 +16,19 @@ import { useModalFocus } from "../lib/use-modal-focus";
 type SettingsRoute = "home" | "appearance" | "model-connections";
 type SettingsPageRoute = Exclude<SettingsRoute, "home">;
 
+export interface SettingOperationResult {
+  operation: AcknowledgedSettingOperation;
+  sessionId: string;
+  commandId: string;
+  ok: boolean;
+  message: string;
+}
+
+export type SettingOperationResults = Readonly<Partial<Record<
+  AcknowledgedSettingOperation,
+  SettingOperationResult
+>>>;
+
 interface SettingsDrawerProps {
   state?: PublicState;
   open: boolean;
@@ -31,12 +44,7 @@ interface SettingsDrawerProps {
   colorSchemePending: boolean;
   colorSchemeUnsaved: boolean;
   colorSchemeError: string;
-  settingResult?: {
-    operation: AcknowledgedSettingOperation;
-    commandId: string;
-    ok: boolean;
-    message: string;
-  };
+  settingResults: SettingOperationResults;
   onClose(): void;
   onColorSchemeChange(colorScheme: ColorScheme): void;
   onRetryColorScheme(): void;
@@ -44,7 +52,7 @@ interface SettingsDrawerProps {
   onOAuth(provider: string): void;
   onLogout(provider: string): void;
   onRefresh(): string | undefined;
-  onClearSettingResult(): void;
+  onConsumeSettingResult(result: SettingOperationResult): void;
   onKeyDialogChange(open: boolean): void;
 }
 
@@ -485,7 +493,7 @@ export function SettingsDrawer({
   colorSchemePending,
   colorSchemeUnsaved,
   colorSchemeError,
-  settingResult,
+  settingResults,
   onClose,
   onColorSchemeChange,
   onRetryColorScheme,
@@ -493,12 +501,12 @@ export function SettingsDrawer({
   onOAuth,
   onLogout,
   onRefresh,
-  onClearSettingResult,
+  onConsumeSettingResult,
   onKeyDialogChange,
 }: SettingsDrawerProps) {
   const [route, setRoute] = useState<SettingsRoute>("home");
   const [providerId, setProviderId] = useState(() => initialProviderId(state));
-  const [keyProviderId, setKeyProviderId] = useState("");
+  const [keyProvider, setKeyProvider] = useState<{ id: string; name: string }>();
   const [key, setKey] = useState("");
   const [showKey, setShowKey] = useState(false);
   const [keyError, setKeyError] = useState("");
@@ -526,7 +534,20 @@ export function SettingsDrawer({
   };
   const providers = state?.providers ?? EMPTY_PROVIDERS;
   const sessionId = state?.sessionId ?? "";
-  const keyProvider = providers.find((provider) => provider.id === keyProviderId);
+  const keyProviderAvailable = keyProvider !== undefined
+    && providers.some((provider) => provider.id === keyProvider.id);
+  const keyCandidate = settingResults.set_api_key;
+  const keyResult = savingKey
+    && keyCandidate?.sessionId === savingKey.sessionId
+    && keyCandidate.commandId === savingKey.commandId
+    ? keyCandidate
+    : undefined;
+  const refreshCandidate = settingResults.refresh_models;
+  const refreshResult = refreshingModels
+    && refreshCandidate?.sessionId === refreshingModels.sessionId
+    && refreshCandidate.commandId === refreshingModels.commandId
+    ? refreshCandidate
+    : undefined;
 
   useEffect(() => {
     if (providerId && providers.some((provider) => provider.id === providerId)) return;
@@ -534,43 +555,33 @@ export function SettingsDrawer({
   }, [providerId, providers, state]);
 
   useEffect(() => {
-    if (
-      !savingKey
-      || savingKey.sessionId !== sessionId
-      || settingResult?.operation !== "set_api_key"
-      || settingResult.commandId !== savingKey.commandId
-    ) return;
-    if (!settingResult.ok) {
+    if (!savingKey || savingKey.sessionId !== sessionId || !keyResult) return;
+    if (!keyResult.ok) {
       setSavingKey(undefined);
-      setKeyError(settingResult.message || "API Key 保存失败");
-      onClearSettingResult();
+      setKeyError(keyResult.message || "API Key 保存失败");
+      onConsumeSettingResult(keyResult);
       return;
     }
     setSavedKeyProviderId(savingKey.providerId);
     setSavingKey(undefined);
     setKey("");
-    setKeyProviderId("");
+    setKeyProvider(undefined);
     setShowKey(false);
     onKeyDialogChange(false);
-    onClearSettingResult();
-  }, [onClearSettingResult, onKeyDialogChange, savingKey, settingResult, sessionId]);
+    onConsumeSettingResult(keyResult);
+  }, [keyResult, onConsumeSettingResult, onKeyDialogChange, savingKey, sessionId]);
 
   useEffect(() => {
-    if (
-      !refreshingModels
-      || refreshingModels.sessionId !== sessionId
-      || settingResult?.operation !== "refresh_models"
-      || settingResult.commandId !== refreshingModels.commandId
-    ) return;
+    if (!refreshingModels || refreshingModels.sessionId !== sessionId || !refreshResult) return;
     setRefreshingModels(undefined);
     setRefreshStatus({
-      ok: settingResult.ok,
-      message: settingResult.ok
+      ok: refreshResult.ok,
+      message: refreshResult.ok
         ? "远程供应商模型目录已刷新。"
-        : settingResult.message || "远程供应商模型目录刷新失败。",
+        : refreshResult.message || "远程供应商模型目录刷新失败。",
     });
-    onClearSettingResult();
-  }, [onClearSettingResult, refreshingModels, settingResult, sessionId]);
+    onConsumeSettingResult(refreshResult);
+  }, [onConsumeSettingResult, refreshResult, refreshingModels, sessionId]);
 
   useEffect(() => {
     if (!savingKey || savingKey.sessionId === sessionId) return;
@@ -578,15 +589,13 @@ export function SettingsDrawer({
     setKey("");
     setShowKey(false);
     setKeyError("观察会话已更换，保存状态未确认；请重试。");
-    onClearSettingResult();
-  }, [onClearSettingResult, savingKey, sessionId]);
+  }, [savingKey, sessionId]);
 
   useEffect(() => {
     if (!refreshingModels || refreshingModels.sessionId === sessionId) return;
     setRefreshingModels(undefined);
     setRefreshStatus({ ok: false, message: "观察会话已更换，刷新状态未确认；请重试。" });
-    onClearSettingResult();
-  }, [onClearSettingResult, refreshingModels, sessionId]);
+  }, [refreshingModels, sessionId]);
 
   useEffect(() => {
     if (online) return;
@@ -600,8 +609,7 @@ export function SettingsDrawer({
       setRefreshingModels(undefined);
       setRefreshStatus({ ok: false, message: "连接已断开，刷新状态未确认；请重连后重试。" });
     }
-    onClearSettingResult();
-  }, [online, onClearSettingResult, refreshingModels, savingKey]);
+  }, [online, refreshingModels, savingKey]);
 
   useEffect(() => {
     if (!savedKeyProviderId) return;
@@ -620,14 +628,6 @@ export function SettingsDrawer({
     const provider = providers.find(({ id }) => id === confirmLogoutProviderId);
     if (!provider?.configured) setConfirmLogoutProviderId("");
   }, [confirmLogoutProviderId, providers]);
-
-  useEffect(() => {
-    if (!keyProviderId || keyProvider) return;
-    setKeyProviderId("");
-    setKey("");
-    setSavingKey(undefined);
-    onKeyDialogChange(false);
-  }, [keyProvider, keyProviderId, onKeyDialogChange]);
 
   useEffect(() => {
     if (open) return;
@@ -668,13 +668,13 @@ export function SettingsDrawer({
     if (savingKey) return;
     setKey("");
     setKeyError("");
-    setKeyProviderId("");
+    setKeyProvider(undefined);
     setShowKey(false);
     onKeyDialogChange(false);
   };
   const keyFocusRef = useModalFocus<HTMLFormElement>(
     Boolean(open && keyProvider),
-    keyProviderId,
+    keyProvider?.id ?? "",
     closeKeyDialog,
   );
 
@@ -683,7 +683,7 @@ export function SettingsDrawer({
   const submitKey = (event: FormEvent) => {
     event.preventDefault();
     const value = key.trim();
-    if (!online || !keyProvider || !value || savingKey) return;
+    if (!online || !keyProvider || !keyProviderAvailable || !value || savingKey) return;
     setKeyError("");
     const commandId = onKey(keyProvider.id, value);
     if (commandId) {
@@ -698,17 +698,17 @@ export function SettingsDrawer({
     setSavedKeyProviderId("");
     setConfirmLogoutProviderId("");
     setRefreshStatus(undefined);
-    onClearSettingResult();
   };
   const openKeyDialog = (nextProviderId: string) => {
+    const provider = providers.find(({ id }) => id === nextProviderId);
+    if (!provider) return;
     setProviderId(nextProviderId);
-    setKeyProviderId(nextProviderId);
+    setKeyProvider({ id: provider.id, name: provider.name });
     setKey("");
     setShowKey(false);
     setKeyError("");
     setSavingKey(undefined);
     onKeyDialogChange(true);
-    onClearSettingResult();
   };
   const openPage = (nextRoute: SettingsPageRoute) => {
     returnToRowRef.current = undefined;
@@ -863,7 +863,7 @@ export function SettingsDrawer({
         </button>
       </div>
       {keyError && <p className="inline-status error" role="alert">{keyError}</p>}
-      <button disabled={!online || !key.trim() || Boolean(savingKey)}>
+      <button disabled={!online || !keyProviderAvailable || !key.trim() || Boolean(savingKey)}>
         {savingKey ? "正在保存…" : "保存 API Key"}
       </button>
       <button

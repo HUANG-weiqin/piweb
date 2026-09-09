@@ -589,6 +589,9 @@ function ChatView({
     draftImagesRef.current = draftImages;
     onImagesChangeRef.current = onImagesChange;
   }, [attachmentScope, draftImages, onImagesChange]);
+  useLayoutEffect(() => () => {
+    attachmentScopeRef.current = "";
+  }, []);
   const contextTokenText = useMemo(() => formatContextUsage({
     contextTokenCount,
     contextWindow,

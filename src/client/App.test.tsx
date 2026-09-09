@@ -6750,6 +6750,104 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "刷新模型" })).toBeDisabled();
   });
 
+  it("settles concurrent exact model refresh and API Key acknowledgements independently", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        providers: [{
+          id: "provider",
+          name: "Provider",
+          configured: true,
+          oauth: false,
+          models: [],
+        }],
+      },
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开模型连接设置" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新模型" }));
+    const refreshCommand = latestCommand("refresh_models");
+    fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "replacement-key" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存 API Key" }));
+    const keyCommand = latestCommand("set_api_key");
+
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "command_complete",
+        operation: "refresh_models",
+        commandId: refreshCommand.commandId,
+        sessionId,
+      });
+      socketMock.rawEmit?.({
+        type: "command_complete",
+        operation: "set_api_key",
+        commandId: keyCommand.commandId,
+        sessionId,
+      });
+    });
+
+    expect(screen.queryByRole("dialog", { name: "Provider API Key" }))
+      .not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "刷新模型" })).toBeEnabled();
+    expect(screen.getAllByRole("status").map((status) => status.textContent))
+      .toEqual(expect.arrayContaining([
+        expect.stringContaining("API Key 已保存"),
+        expect.stringContaining("远程供应商模型目录已刷新"),
+      ]));
+  });
+
+  it("ignores an unmatched stale setting completion without displacing the exact owner result", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        providers: [],
+      },
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开模型连接设置" }));
+    fireEvent.click(screen.getByRole("button", { name: "刷新模型" }));
+    const refreshCommand = latestCommand("refresh_models");
+
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "command_complete",
+        operation: "refresh_models",
+        commandId: refreshCommand.commandId,
+        sessionId,
+      });
+      socketMock.rawEmit?.({
+        type: "command_complete",
+        operation: "refresh_models",
+        commandId: "8ee64aa3-c8a8-4e21-b521-66029ce3673b",
+        sessionId,
+      });
+    });
+
+    expect(screen.getByRole("button", { name: "刷新模型" })).toBeEnabled();
+    expect(screen.getByRole("status"))
+      .toHaveTextContent("远程供应商模型目录已刷新");
+  });
+
   it("keeps the model drawer live but covered while extension UI owns focus", async () => {
     render(<App />);
     const sessionId = startFromSetup();

@@ -4,7 +4,10 @@ import { useState } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PublicProvider, PublicState } from "../../shared/protocol";
-import { SettingsDrawer } from "./SettingsDrawer";
+import {
+  SettingsDrawer,
+  type SettingOperationResult,
+} from "./SettingsDrawer";
 
 afterEach(cleanup);
 
@@ -32,7 +35,13 @@ const state: PublicState = {
   }],
 };
 
-function settingsProps(overrides: Partial<Parameters<typeof SettingsDrawer>[0]> = {}) {
+type SettingsDrawerProps = Parameters<typeof SettingsDrawer>[0];
+type SettingsDrawerTestOverrides = Partial<SettingsDrawerProps> & {
+  settingResult?: Omit<SettingOperationResult, "sessionId"> & { sessionId?: string };
+};
+
+function settingsProps(overrides: SettingsDrawerTestOverrides = {}) {
+  const { settingResult, settingResults, ...props } = overrides;
   return {
     state,
     open: true,
@@ -42,6 +51,12 @@ function settingsProps(overrides: Partial<Parameters<typeof SettingsDrawer>[0]> 
     colorSchemePending: false,
     colorSchemeUnsaved: false,
     colorSchemeError: "",
+    settingResults: settingResults ?? (settingResult ? {
+      [settingResult.operation]: {
+        ...settingResult,
+        sessionId: settingResult.sessionId ?? props.state?.sessionId ?? state.sessionId,
+      },
+    } : {}),
     onClose: () => undefined,
     onColorSchemeChange: () => undefined,
     onRetryColorScheme: () => undefined,
@@ -49,13 +64,13 @@ function settingsProps(overrides: Partial<Parameters<typeof SettingsDrawer>[0]> 
     onOAuth: () => undefined,
     onLogout: () => undefined,
     onRefresh: () => undefined,
-    onClearSettingResult: () => undefined,
+    onConsumeSettingResult: () => undefined,
     onKeyDialogChange: () => undefined,
-    ...overrides,
-  } satisfies Parameters<typeof SettingsDrawer>[0];
+    ...props,
+  } satisfies SettingsDrawerProps;
 }
 
-function renderSettings(overrides: Partial<Parameters<typeof SettingsDrawer>[0]> = {}) {
+function renderSettings(overrides: SettingsDrawerTestOverrides = {}) {
   return render(<SettingsDrawer {...settingsProps(overrides)} />);
 }
 
@@ -63,7 +78,7 @@ function openModelConnections() {
   fireEvent.click(screen.getByRole("button", { name: "打开模型连接设置" }));
 }
 
-function renderDrawer(overrides: Partial<Parameters<typeof SettingsDrawer>[0]> = {}) {
+function renderDrawer(overrides: SettingsDrawerTestOverrides = {}) {
   const view = renderSettings(overrides);
   openModelConnections();
   return view;
@@ -496,6 +511,40 @@ describe("SettingsDrawer", () => {
       .toBeInTheDocument();
     expect(keyInput).toHaveValue("unsaved-key");
     expect(saveKey).not.toHaveBeenCalled();
+  });
+
+  it("keeps the pending API Key owner through same-session provider catalog drift", () => {
+    const saveKey = vi.fn(() => commandId);
+    const view = renderDrawer({ onKey: saveKey });
+
+    fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "pending-key" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存 API Key" }));
+
+    view.rerender(<SettingsDrawer {...settingsProps({
+      state: { ...state, providers: [] },
+      onKey: saveKey,
+    })} />);
+    expect(screen.getByRole("dialog", { name: "Test API Key" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "正在保存…" })).toBeDisabled();
+    expect(screen.getByLabelText("API Key")).toHaveValue("");
+
+    view.rerender(<SettingsDrawer {...settingsProps({
+      state: { ...state, providers: [] },
+      onKey: saveKey,
+      settingResult: {
+        operation: "set_api_key",
+        commandId,
+        ok: false,
+        message: "Key 保存失败",
+      },
+    })} />);
+    expect(screen.getByRole("dialog", { name: "Test API Key" })).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("Key 保存失败");
+    expect(screen.getByLabelText("API Key")).toHaveValue("");
+    expect(screen.getByRole("button", { name: "保存 API Key" })).toBeDisabled();
   });
 
   it("keeps the API Key backdrop inert while an exact save is pending", () => {

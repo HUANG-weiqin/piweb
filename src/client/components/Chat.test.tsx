@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -1030,6 +1031,63 @@ describe("Chat", () => {
       { mimeType: "image/png", data: "iVBORw0KGgo=" },
       { mimeType: "image/png", data: "R0lGODlh" },
     ]));
+  });
+
+  it("does not publish completed image reads after focus replacement or unmount", async () => {
+    class ControlledFileReader {
+      static pending: ControlledFileReader[] = [];
+      result: string | ArrayBuffer | null = null;
+      onerror: (() => void) | null = null;
+      onload: (() => void) | null = null;
+
+      readAsDataURL(): void {
+        ControlledFileReader.pending.push(this);
+      }
+
+      finish(data: string): void {
+        this.result = data;
+        this.onload?.();
+      }
+    }
+    vi.stubGlobal("FileReader", ControlledFileReader);
+    const onImagesChange = vi.fn();
+    const focusA = {
+      sessionId: "session-a",
+      conversationId: "conversation-a",
+      focusId: "focus-a",
+    };
+    const rendered = render(view({ items: [], focus: focusA }, "", undefined, {
+      onImagesChange,
+    }));
+    fireEvent.paste(screen.getByRole("textbox", { name: "给 Pi 发送消息" }), {
+      clipboardData: { files: [new File(["A"], "a.png", { type: "image/png" })] },
+    });
+    await waitFor(() => expect(ControlledFileReader.pending).toHaveLength(1));
+
+    rendered.rerender(view({
+      items: [],
+      focus: {
+        sessionId: "session-b",
+        conversationId: "conversation-b",
+        focusId: "focus-b",
+      },
+    }, "", undefined, { onImagesChange }));
+    await act(async () => {
+      ControlledFileReader.pending[0]!.finish("data:image/png;base64,iVBORw0KGgo=");
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    });
+    expect(onImagesChange).not.toHaveBeenCalled();
+
+    fireEvent.paste(screen.getByRole("textbox", { name: "给 Pi 发送消息" }), {
+      clipboardData: { files: [new File(["B"], "b.png", { type: "image/png" })] },
+    });
+    await waitFor(() => expect(ControlledFileReader.pending).toHaveLength(2));
+    rendered.unmount();
+    await act(async () => {
+      ControlledFileReader.pending[1]!.finish("data:image/png;base64,R0lGODlh");
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    });
+    expect(onImagesChange).not.toHaveBeenCalled();
   });
 
   it("shows admitted prompts above Tasks while the agent is busy", () => {
