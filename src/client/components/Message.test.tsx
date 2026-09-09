@@ -63,6 +63,27 @@ describe("Message", () => {
     ],
   };
 
+  it("turns durable image placeholders into exact open requests", () => {
+    const onOpenImage = vi.fn();
+    const message: ChatMessage = {
+      id: "image-message",
+      runId: "image-run",
+      role: "user",
+      text: "先看[图片]再说",
+      thinking: "",
+      tools: [],
+      parts: [{ kind: "text", text: "先看[图片]再说" }],
+      imageRefs: [{ offset: 2, ordinal: 0 }],
+    };
+    render(<Message message={message} onOpenImage={onOpenImage} />);
+
+    fireEvent.click(screen.getByRole("button", {
+      name: "在新标签页中打开图片 1",
+    }));
+
+    expect(onOpenImage).toHaveBeenCalledWith("image-message", 0);
+  });
+
   it("keeps a completed work process collapsed while summarizing its last action", () => {
     const { container } = render(<Message message={toolsMessage} />);
     const details = container.querySelector("details.assistant-activity-group") as HTMLDetailsElement;

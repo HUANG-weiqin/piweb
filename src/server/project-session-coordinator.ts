@@ -1610,6 +1610,24 @@ export class ProjectSessionCoordinator {
     });
   }
 
+  readPersistedImage(
+    handle: ProjectSessionHandle,
+    conversationId: string,
+    messageId: string,
+    imageOrdinal: number,
+  ): Promise<PromptImage> {
+    const context = this.requireContext(handle);
+    return this.runLifecycle(context, () => {
+      if (context.deleting.has(conversationId)) {
+        throw new Error(`Conversation is being deleted: ${conversationId}`);
+      }
+      return this.requireActor(context, conversationId).readPersistedImage(
+        messageId,
+        imageOrdinal,
+      );
+    });
+  }
+
   async compactContext(
     handle: ProjectSessionHandle,
     conversationId: string,

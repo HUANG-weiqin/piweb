@@ -32,6 +32,7 @@ export interface ChatMessage {
   thinking: string;
   tools: ToolItem[];
   parts: ChatMessagePart[];
+  imageRefs?: ConversationHistoryMessage["imageRefs"];
   usage?: TokenUsage;
 }
 
@@ -181,6 +182,7 @@ function historyMessageToItem(
       status: tool.status,
     })),
     parts,
+    imageRefs: message.imageRefs,
     usage: message.usage,
   };
 }

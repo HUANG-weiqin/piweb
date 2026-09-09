@@ -461,6 +461,57 @@ describe("ConversationSidebar", () => {
     expect(memberOrder()).toEqual([recent.id, older.id]);
   });
 
+  it("keeps tied collaboration member positions stable across selected snapshots", () => {
+    const root = conversation("tied-root", "稳定任务");
+    const first = conversation("a-member", "稳定 Agent", {
+      rootConversationId: root.id,
+    });
+    const selected = conversation("z-member", "目标 Agent", {
+      rootConversationId: root.id,
+    });
+    const onSelect = vi.fn();
+    const props = {
+      collapsed: false,
+      truncated: false,
+      navigationEnabled: true,
+      actionsEnabled: true,
+      onToggleCollapsed: vi.fn(),
+      onSelect,
+      onCreate: vi.fn(),
+      onRename: vi.fn(),
+      onDelete: vi.fn(() => true),
+    };
+    const { container, rerender } = render(
+      <ConversationSidebar
+        {...props}
+        conversations={[root, first, selected]}
+        currentConversationId={first.id}
+        focusedConversationId={root.id}
+      />,
+    );
+    const memberOrder = () => Array.from(
+      container.querySelectorAll<HTMLElement>(".hierarchy-member"),
+      (row) => row.dataset.conversationId,
+    );
+
+    expect(memberOrder()).toEqual([first.id, selected.id]);
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 目标 Agent" }));
+    expect(onSelect).toHaveBeenCalledWith(selected.id);
+
+    rerender(
+      <ConversationSidebar
+        {...props}
+        conversations={[root, selected, first]}
+        currentConversationId={selected.id}
+        focusedConversationId={root.id}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "当前会话 目标 Agent" }))
+      .toHaveAttribute("aria-current", "page");
+    expect(memberOrder()).toEqual([first.id, selected.id]);
+  });
+
   it.each(["queued", "running"] as const)(
     "uses a semantic spinner for %s conversations",
     (kind) => {

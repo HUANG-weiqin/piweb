@@ -1,5 +1,7 @@
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import { PROMPT_IMAGE_PLACEHOLDER } from "../shared/protocol.js";
 import type {
+  ConversationHistoryImageReference,
   ConversationHistoryItem,
   ConversationHistoryMessage,
   ConversationHistoryMessagePart,
@@ -43,15 +45,32 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-function contentText(value: unknown): string {
-  if (typeof value === "string") return value;
-  if (!Array.isArray(value)) return "";
-  return value.map((item) => {
+function projectUserContent(value: unknown): {
+  text: string;
+  imageRefs: ConversationHistoryImageReference[];
+} {
+  if (typeof value === "string") return { text: value, imageRefs: [] };
+  if (!Array.isArray(value)) return { text: "", imageRefs: [] };
+
+  let text = "";
+  let imageOrdinal = 0;
+  const imageRefs: ConversationHistoryImageReference[] = [];
+  for (const item of value) {
     const block = record(item);
-    if (block?.type === "text" && typeof block.text === "string") return block.text;
-    if (block?.type === "image") return "[图片]";
-    return "";
-  }).filter(Boolean).join("\n");
+    const chunk = block?.type === "text" && typeof block.text === "string"
+      ? block.text
+      : block?.type === "image"
+      ? PROMPT_IMAGE_PLACEHOLDER
+      : "";
+    if (!chunk) continue;
+    const offset = text ? text.length + 1 : 0;
+    if (block?.type === "image") {
+      imageRefs.push({ offset, ordinal: imageOrdinal });
+      imageOrdinal += 1;
+    }
+    text += `${text ? "\n" : ""}${chunk}`;
+  }
+  return { text, imageRefs };
 }
 
 function appendParagraph(current: string, next: string): string {
@@ -194,6 +213,12 @@ function compactHistoryMessage(
       status: tool.status,
     };
   });
+  const imageRefs = message.imageRefs?.filter((reference) => (
+    reference.offset + PROMPT_IMAGE_PLACEHOLDER.length <= text.value.length
+  ));
+  if (imageRefs !== undefined && imageRefs.length !== message.imageRefs!.length) {
+    truncated = true;
+  }
   const compactedParts = selectedParts.flatMap((part): ConversationHistoryMessagePart[] => {
     if (part.kind === "tool") {
       const toolCallId = compactedToolIds.get(part.toolCallId);
@@ -226,6 +251,7 @@ function compactHistoryMessage(
       thinking: thinking.value,
       tools,
       parts: compactedParts,
+      imageRefs,
       usage: message.usage ? { ...message.usage } : undefined,
     },
     truncated,
@@ -323,7 +349,7 @@ function projectConversationHistorySlots(
 
     if (message.role === "user") {
       assistant = undefined;
-      const text = contentText(message.content);
+      const { text, imageRefs } = projectUserContent(message.content);
       messages.push({
         anchorEntryId: entry.id,
         sourceMessages: [{ entryId: entry.id, message: entry.message }],
@@ -336,6 +362,7 @@ function projectConversationHistorySlots(
           parts: text
             ? [{ kind: "text", offset: 0, length: text.length }]
             : [],
+          ...(imageRefs.length > 0 ? { imageRefs } : {}),
         },
       });
       continue;
@@ -801,6 +828,7 @@ function minimalConversationItem(
       thinking: "",
       tools: [],
       parts: [],
+      imageRefs: [],
     };
   }
   if (item.kind === "compaction") return { ...item };
@@ -848,9 +876,13 @@ function fitConversationItem(
       const shortened = shortenPrefix(value);
       const text = field === "text" ? shortened : item.text;
       const thinking = field === "thinking" ? shortened : item.thinking;
+      const imageRefs = item.imageRefs?.filter((reference) => (
+        reference.offset + PROMPT_IMAGE_PLACEHOLDER.length <= text.length
+      ));
       item = {
         ...item,
         [field]: shortened,
+        imageRefs,
         parts: item.parts.flatMap((part): ConversationHistoryMessagePart[] => {
           if (part.kind === "tool") return [part];
           const aggregateLength = part.kind === "text"

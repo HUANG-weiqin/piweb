@@ -402,6 +402,50 @@ export class PiConnection {
         return Promise.reject(error);
       }
     }
+    if (command.type === "open_image") {
+      try {
+        if (this.usedCommandIds.has(command.commandId)) {
+          return Promise.reject(
+            new Error("Command ID was already used on this connection"),
+          );
+        }
+        this.usedCommandIds.add(command.commandId);
+        const generation = this.generation;
+        const view = this.requireCoordinatedFocus(
+          command.sessionId,
+          command.conversationId,
+          command.focusId,
+        );
+        return this.requireCoordination().then(({ coordinator }) =>
+          coordinator.readPersistedImage(
+            view.handle,
+            command.conversationId,
+            command.messageId,
+            command.imageOrdinal,
+          )
+        ).then((image) => {
+          if (!this.isCoordinatedSession(command.sessionId, generation)) return;
+          const current = this.coordinatedView;
+          if (
+            current !== view
+            || current.conversationId !== command.conversationId
+            || current.focusId !== command.focusId
+          ) return;
+          this.emit({
+            type: "conversation_image",
+            sessionId: command.sessionId,
+            conversationId: command.conversationId,
+            focusId: command.focusId,
+            commandId: command.commandId,
+            messageId: command.messageId,
+            imageOrdinal: command.imageOrdinal,
+            ...image,
+          });
+        });
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    }
     if (command.type === "compact_context") {
       try {
         if (this.usedCommandIds.has(command.commandId)) {
@@ -867,6 +911,7 @@ export class PiConnection {
       | { type: "compact_context" }
       | { type: "extension_ui_response" }
       | { type: "initialize" }
+      | { type: "open_image" }
       | { type: "prompt" }
       | { type: "refresh_view" }
       | { type: "steer" }
@@ -1418,6 +1463,13 @@ case "set_thinking":
             runId: event.runId,
           });
         }
+      }
+      return;
+    }
+
+    if (event.type === "image_message_persisted") {
+      if (event.conversationId === view.conversationId && view.focusId !== undefined) {
+        this.publishFocusedConversationSnapshot();
       }
       return;
     }

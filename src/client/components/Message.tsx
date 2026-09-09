@@ -6,6 +6,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { PROMPT_IMAGE_PLACEHOLDER } from "../../shared/protocol";
 import {
   orderedMessageParts,
   type ChatMessage,
@@ -549,8 +550,36 @@ const MarkdownBlock = memo(function MarkdownBlock({
   />;
 });
 
+function renderUserMessageText(
+  message: ChatMessage,
+  onOpenImage: MessageProps["onOpenImage"],
+): ReactNode {
+  if (onOpenImage === undefined || !message.imageRefs?.length) {
+    return message.text;
+  }
+  const nodes: ReactNode[] = [];
+  let cursor = 0;
+  for (const reference of message.imageRefs) {
+    nodes.push(message.text.slice(cursor, reference.offset));
+    nodes.push(<button
+      key={`image:${reference.ordinal}`}
+      type="button"
+      className="message-image-link"
+      aria-label={`在新标签页中打开图片 ${reference.ordinal + 1}`}
+      title="在新标签页中打开图片"
+      onClick={() => onOpenImage(message.id, reference.ordinal)}
+    >
+      {PROMPT_IMAGE_PLACEHOLDER}
+    </button>);
+    cursor = reference.offset + PROMPT_IMAGE_PLACEHOLDER.length;
+  }
+  nodes.push(message.text.slice(cursor));
+  return nodes;
+}
+
 interface MessageProps {
   message: ChatMessage;
+  onOpenImage?(messageId: string, imageOrdinal: number): void;
   onRewind?(messageId: string, text: string): void;
   rewindDisabled?: boolean;
   rewinding?: boolean;
@@ -566,6 +595,7 @@ interface MessageProps {
 
 function MessageView({
   message,
+  onOpenImage,
   onRewind,
   rewindDisabled = false,
   rewinding = false,
@@ -661,7 +691,7 @@ function MessageView({
   if (isUser) {
     return <article className="message user">
       {eventHeader}
-      {message.text}
+      {renderUserMessageText(message, onOpenImage)}
       {actions}
     </article>;
   }

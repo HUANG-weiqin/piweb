@@ -19,6 +19,8 @@ export const MAX_PROMPT_CHARACTERS = 200_000;
 /** 每条浏览器 prompt 最多携带四张小型本地图片，合计解码后不超过 512 KiB。 */
 export const MAX_PROMPT_IMAGE_COUNT = 4;
 export const MAX_PROMPT_IMAGE_BYTES = 512 * 1024;
+/** Durable history renders image input as this marker; image bytes stay out of snapshots. */
+export const PROMPT_IMAGE_PLACEHOLDER = "[图片]";
 export const MAX_PENDING_PROMPTS_PER_CONVERSATION = 64;
 export const MAX_LOOP_LIST_ITEMS = 100;
 export const MAX_LOOP_LIST_ITEM_ID_CHARACTERS = 128;
@@ -27,6 +29,8 @@ export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
+// v52: durable user-image placeholders carry bounded references; image bytes
+// travel only in a correlated one-shot response.
 // v51: wait-for-session activity always projects a target count; the legacy
 // single-target activity shape is no longer accepted.
 // v50: session-message cards project a bounded user-facing summary; legacy
@@ -62,7 +66,7 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
-export const PROTOCOL_VERSION = 51;
+export const PROTOCOL_VERSION = 52;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
@@ -135,6 +139,13 @@ const promptImageSchema = z.object({
     .regex(canonicalBase64, "image data must be canonical base64"),
 }).strict();
 export type PromptImage = z.infer<typeof promptImageSchema>;
+
+/** Parses one stored image at the durable JSONL boundary without retaining unknown fields. */
+export function parsePromptImage(value: unknown): PromptImage | undefined {
+  const parsed = promptImageSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
+
 const promptImagesSchema = z.array(promptImageSchema)
   .max(MAX_PROMPT_IMAGE_COUNT)
   .superRefine((images, context) => {
@@ -393,6 +404,15 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
     messageId: conversationMessageIdSchema,
   }),
   z.object({
+    type: z.literal("open_image"),
+    commandId: commandIdSchema,
+    sessionId: sessionIdSchema,
+    conversationId: conversationIdSchema,
+    focusId: focusIdSchema,
+    messageId: conversationMessageIdSchema,
+    imageOrdinal: z.number().int().min(0).max(MAX_PROMPT_IMAGE_COUNT - 1),
+  }),
+  z.object({
     type: z.literal("create_role"),
     commandId: commandIdSchema,
     sessionId: sessionIdSchema,
@@ -588,6 +608,13 @@ export type ConversationHistoryMessagePart =
   | { kind: "text" | "thinking"; offset: number; length: number }
   | { kind: "tool"; toolCallId: string };
 
+export interface ConversationHistoryImageReference {
+  /** UTF-16 offset of the matching PROMPT_IMAGE_PLACEHOLDER in text. */
+  offset: number;
+  /** Ordinal among the durable user message's image content blocks. */
+  ordinal: number;
+}
+
 export interface ConversationHistoryMessage {
   id: string;
   runId?: string;
@@ -596,6 +623,8 @@ export interface ConversationHistoryMessage {
   thinking: string;
   tools: ConversationHistoryTool[];
   parts: ConversationHistoryMessagePart[];
+  /** Metadata only; durable image bytes are fetched on demand. */
+  imageRefs?: ConversationHistoryImageReference[];
   usage?: TokenUsage;
 }
 
@@ -879,6 +908,18 @@ export type ServerEvent =
       runId: string;
     }
   | {
+      type: "conversation_image";
+      sessionId: string;
+      conversationId: string;
+      focusId: string;
+      commandId: string;
+      messageId: string;
+      imageOrdinal: number;
+      mimeType: PromptImageMimeType;
+      /** One-shot response only; never included in a history or state snapshot. */
+      data: string;
+    }
+  | {
       type: "conversation_snapshot";
       sessionId: string;
       conversationId: string;
@@ -1135,6 +1176,7 @@ const commandTypeSchema = z.enum([
   "rename_conversation",
   "delete_conversation",
   "truncate_conversation",
+  "open_image",
   "create_role",
   "update_role",
   "delete_role",
@@ -1241,6 +1283,11 @@ const sessionMessageEndpointSchema: z.ZodType<SessionMessageEndpoint> = z.object
     ),
   }),
 });
+const conversationImageReferenceSchema: z.ZodType<ConversationHistoryImageReference> =
+  z.object({
+    offset: z.number().int().nonnegative(),
+    ordinal: z.number().int().min(0).max(MAX_PROMPT_IMAGE_COUNT - 1),
+  }).strict();
 const conversationHistoryMessageSchema = z.object({
   id: z.string(),
   runId: runIdSchema.optional(),
@@ -1265,6 +1312,9 @@ const conversationHistoryMessageSchema = z.object({
       toolCallId: z.string(),
     }),
   ])).max(200),
+  imageRefs: z.array(conversationImageReferenceSchema)
+    .max(MAX_PROMPT_IMAGE_COUNT)
+    .optional(),
   usage: tokenUsageSchema.optional(),
 });
 const conversationHistoryItemSchema: z.ZodType<ConversationHistoryItem> =
@@ -1486,6 +1536,15 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     focusId: focusIdSchema,
     promptId: z.string().uuid(),
     runId: runIdSchema,
+  }).strict(),
+  promptImageSchema.extend({
+    type: z.literal("conversation_image"),
+    sessionId: sessionIdSchema,
+    conversationId: conversationIdSchema,
+    focusId: focusIdSchema,
+    commandId: commandIdSchema,
+    messageId: conversationMessageIdSchema,
+    imageOrdinal: z.number().int().min(0).max(MAX_PROMPT_IMAGE_COUNT - 1),
   }).strict(),
   z.object({
     type: z.literal("conversation_snapshot"),
@@ -1755,7 +1814,10 @@ export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.
     if (
       event.type === "error"
       && event.scope === "command"
-      && event.operation === "set_service_tier"
+      && (
+        event.operation === "set_service_tier"
+        || event.operation === "open_image"
+      )
       && (
         event.sessionId === undefined
         || event.commandId === undefined
@@ -1778,6 +1840,7 @@ export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.
         || event.operation === "refresh_models"
         || event.operation === "delete_conversation"
         || event.operation === "truncate_conversation"
+        || event.operation === "open_image"
       )
       && !event.sessionId
     ) {

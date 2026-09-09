@@ -6341,6 +6341,123 @@ describe("PiConnection coordinated project view", () => {
     }
   });
 
+  it("publishes a durable image snapshot as soon as the initial prompt persists", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      const focused = await initializeNewConversation(harness);
+      const session = harness.runtime.created[0]!;
+      const manager = session.persistentManager!;
+      session.model = {
+        ...session.model,
+        input: ["text", "image"],
+      } as typeof session.model;
+      const promptStarted = deferred();
+      const promptFinished = deferred();
+      session.prompt = async () => {
+        promptStarted.resolve();
+        await promptFinished.promise;
+      };
+
+      const running = harness.connection.handle({
+        type: "prompt",
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+        runId: RUN_A,
+        promptId: randomUUID(),
+        text: "",
+        images: [{ mimeType: "image/png", data: "iVBORw0KGgo=" }],
+      });
+      await promptStarted.promise;
+      const raw = agentMessage({
+        role: "user",
+        content: [{
+          type: "image",
+          mimeType: "image/png",
+          data: "iVBORw0KGgo=",
+        }],
+        timestamp: 1,
+      });
+      session.eventListener?.(nativeEvent({ type: "message_start", message: raw }));
+      const messageId = manager.appendMessage(raw);
+      const eventStart = harness.events.length;
+      session.eventListener?.(nativeEvent({ type: "message_end", message: raw }));
+
+      await vi.waitFor(() => expect(harness.events.slice(eventStart)).toContainEqual(
+        expect.objectContaining({
+          type: "conversation_snapshot",
+          conversationId: focused.conversationId,
+          focusId: focused.focusId,
+          items: expect.arrayContaining([
+            expect.objectContaining({
+              kind: "message",
+              id: messageId,
+              role: "user",
+              text: "[图片]",
+              imageRefs: [{ offset: 0, ordinal: 0 }],
+            }),
+          ]),
+        }),
+      ));
+      const snapshot = harness.events.findLast((event) => (
+        event.type === "conversation_snapshot"
+        && event.conversationId === focused.conversationId
+      ));
+      expect(JSON.stringify(snapshot)).not.toContain("iVBORw0KGgo=");
+
+      promptFinished.resolve();
+      await running;
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("reads exactly one durable user image through a one-shot response", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      const focused = await initializeNewConversation(harness);
+      const manager = harness.runtime.created[0]!.persistentManager!;
+      const messageId = manager.appendMessage({
+        role: "user",
+        content: [{
+          type: "image",
+          mimeType: "image/png",
+          data: "iVBORw0KGgo=",
+        }],
+        timestamp: 1,
+      });
+      const commandId = randomUUID();
+      const eventStart = harness.events.length;
+
+      await harness.connection.handle({
+        type: "open_image",
+        commandId,
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+        messageId,
+        imageOrdinal: 0,
+      });
+
+      expect(harness.events.slice(eventStart)).toContainEqual({
+        type: "conversation_image",
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId,
+        focusId: focused.focusId,
+        commandId,
+        messageId,
+        imageOrdinal: 0,
+        mimeType: "image/png",
+        data: "iVBORw0KGgo=",
+      });
+      expect(harness.events.slice(eventStart)).not.toContainEqual(
+        expect.objectContaining({ type: "command_complete", commandId }),
+      );
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
   it("settles role CRUD with the exact command identity", async () => {
     const harness = await coordinatedConnectionHarness();
     try {

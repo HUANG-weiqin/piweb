@@ -292,7 +292,14 @@ describe("projectConversationHistory", () => {
     const manager = SessionManager.inMemory("E:\\work");
     const root = manager.appendMessage(message({
       role: "user",
-      content: [{ type: "text", text: "root" }, { type: "image", data: "x", mimeType: "image/png" }],
+      content: [{
+        type: "text",
+        text: "root",
+      }, {
+        type: "image",
+        data: "iVBORw0KGgo=",
+        mimeType: "image/png",
+      }],
       timestamp: 1,
     }));
     manager.appendMessage(message({
@@ -320,7 +327,11 @@ describe("projectConversationHistory", () => {
     }));
 
     const history = projectConversationHistory(manager);
-    expect(history[0]?.text).toBe("root\n[图片]");
+    expect(history[0]).toMatchObject({
+      text: "root\n[图片]",
+      imageRefs: [{ offset: 5, ordinal: 0 }],
+    });
+    expect(JSON.stringify(history)).not.toContain("iVBORw0KGgo=");
     expect(history.some((item) => item.text === "abandoned")).toBe(false);
     expect(history[1]?.tools[0]).toMatchObject({
       toolCallId: "tool-error",

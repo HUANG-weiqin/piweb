@@ -228,6 +228,13 @@ interface DirectPendingPrompt extends ActiveFocus {
   images: PromptImage[];
 }
 
+interface PendingImageOpen extends ActiveFocus {
+  commandId: string;
+  messageId: string;
+  imageOrdinal: number;
+  target: Window;
+}
+
 interface UnconfirmedPromptDraft {
   text: string;
   images: PromptImage[];
@@ -557,6 +564,7 @@ export function App() {
       : "",
   );
   const focusRef = useRef<ActiveFocus | undefined>(undefined);
+  const pendingImageOpensRef = useRef(new Map<string, PendingImageOpen>());
   const [pendingFocus, setPendingFocus] = useState<PendingFocus>();
   const pendingFocusRef = useRef<PendingFocus | undefined>(undefined);
   const pendingFocusedStateRef = useRef<PublicState | undefined>(undefined);
@@ -893,10 +901,11 @@ export function App() {
     const existingIndex = current.findIndex(
       (candidate) => workspaceKey(candidate) === key,
     );
-    const next = [
-      cwd,
-      ...current.filter((_, index) => index !== existingIndex),
-    ].slice(0, MAX_WORKSPACES);
+    const next = existingIndex === -1
+      ? [...current, cwd].slice(-MAX_WORKSPACES)
+      : current.map((candidate, index) =>
+          index === existingIndex ? cwd : candidate
+        );
     workspacesRef.current = next;
     setWorkspaces(next);
     writeStoredString(WORKSPACES_KEY, JSON.stringify(next));
@@ -1051,6 +1060,12 @@ export function App() {
       && conversationId === focus.conversationId
       && focusId === focus.focusId;
   };
+  const closePendingImageOpens = () => {
+    for (const pending of pendingImageOpensRef.current.values()) {
+      pending.target.close();
+    }
+    pendingImageOpensRef.current.clear();
+  };
   const attachFocus = (
     sessionId: string,
     projectId: string,
@@ -1059,6 +1074,7 @@ export function App() {
     preservePresentation = false,
     preserveDraft = false,
   ) => {
+    closePendingImageOpens();
     updatePendingCompactionThreshold(undefined);
     updatePendingServiceTier(undefined);
     updatePendingConversationTruncation(undefined);
@@ -1193,6 +1209,7 @@ export function App() {
     for (const event of events) socketEventHandlerRef.current(event);
   };
   const clearSessionProjection = () => {
+    closePendingImageOpens();
     clearFocusReplacementAuthority();
     clearTemporaryWorkspacePresentation();
     clearTemporaryConversationPresentation();
@@ -2090,6 +2107,32 @@ export function App() {
       } else if (event.type === "prompt_delivered") {
         if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;
         removePendingAdmission(event.promptId);
+      } else if (event.type === "conversation_image") {
+        const pending = pendingImageOpensRef.current.get(event.commandId);
+        if (!pending) return;
+        pendingImageOpensRef.current.delete(event.commandId);
+        if (
+          pending.sessionId !== event.sessionId
+          || pending.conversationId !== event.conversationId
+          || pending.focusId !== event.focusId
+          || pending.messageId !== event.messageId
+          || pending.imageOrdinal !== event.imageOrdinal
+          || !matchesFocus(event.sessionId, event.conversationId, event.focusId)
+        ) {
+          pending.target.close();
+          return;
+        }
+        try {
+          const binary = window.atob(event.data);
+          const bytes = Uint8Array.from(binary, (byte) => byte.charCodeAt(0));
+          const url = URL.createObjectURL(new Blob([bytes], {
+            type: event.mimeType,
+          }));
+          pending.target.location.replace(url);
+        } catch {
+          pending.target.close();
+          setError("无法打开图片");
+        }
       } else if (event.type === "loop_list_update") {
         if (pendingFocusRef.current) return;
         if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;
@@ -2362,6 +2405,26 @@ export function App() {
           message: "",
         });
       } else if (event.type === "error") {
+        const pendingImageOpen = event.operation === "open_image" && event.commandId
+          ? pendingImageOpensRef.current.get(event.commandId)
+          : undefined;
+        if (
+          pendingImageOpen
+          && pendingImageOpen.sessionId === event.sessionId
+          && pendingImageOpen.conversationId === event.conversationId
+          && pendingImageOpen.focusId === event.focusId
+        ) {
+          pendingImageOpensRef.current.delete(pendingImageOpen.commandId);
+          pendingImageOpen.target.close();
+          if (matchesFocus(
+            pendingImageOpen.sessionId,
+            pendingImageOpen.conversationId,
+            pendingImageOpen.focusId,
+          )) {
+            setError(`打开图片失败：${event.message}`);
+          }
+          return;
+        }
         if (event.sessionId && event.sessionId !== sessionIdRef.current) return;
         const supersededFocusError = event.commandId
           && event.operation === "focus_conversation"
@@ -2681,6 +2744,7 @@ export function App() {
       if (!isCurrentSocket()) return;
       setTransportOnline(connected);
       if (!connected) {
+        closePendingImageOpens();
         transitionTiming.cancel("disconnect");
         setProtocolReady(false);
         setProjectActivityByWorkspace(new Map());
@@ -2730,6 +2794,7 @@ export function App() {
     socketRef.current = socket;
     socket.connect();
     return () => {
+      closePendingImageOpens();
       transitionTiming.cancel("destroyed");
       if (socketEpochRef.current === epoch) socketEpochRef.current++;
       socket.close();
@@ -2803,6 +2868,41 @@ export function App() {
     if (!ok) setError("本地服务未连接");
     return ok;
   };
+  const openImage = useCallback((messageId: string, imageOrdinal: number) => {
+    const focus = focusRef.current;
+    if (!focus || !conversationReadyRef.current || !protocolReady) {
+      setError("当前对话尚未准备好打开图片");
+      return;
+    }
+    const target = window.open("about:blank", "_blank");
+    if (!target) {
+      setError("浏览器阻止了图片窗口");
+      return;
+    }
+    const commandId = crypto.randomUUID();
+    const pending: PendingImageOpen = {
+      ...focus,
+      commandId,
+      messageId,
+      imageOrdinal,
+      target,
+    };
+    pendingImageOpensRef.current.set(commandId, pending);
+    const sent = socketRef.current?.send({
+      type: "open_image",
+      commandId,
+      sessionId: focus.sessionId,
+      conversationId: focus.conversationId,
+      focusId: focus.focusId,
+      messageId,
+      imageOrdinal,
+    }) ?? false;
+    if (!sent) {
+      pendingImageOpensRef.current.delete(commandId);
+      target.close();
+      setError("本地服务未连接");
+    }
+  }, [protocolReady]);
   useEffect(() => {
     if (
       !chat.projectionGap
@@ -4367,6 +4467,7 @@ export function App() {
               onSwitchRole={handleChatSwitchRole}
               onChangeCwd={handleWorkspaceAdd}
               onOpenConversation={handleConversationSelect}
+              onOpenImage={openImage}
               onRewind={handleChatRewind}
               rewindingMessageId={pendingConversationTruncation?.messageId}
             />}

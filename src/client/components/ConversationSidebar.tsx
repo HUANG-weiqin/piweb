@@ -144,7 +144,7 @@ function groupProjection(
     const root = summariesById.get(rootConversationId);
     if (root === undefined) continue;
     const members = descendants
-      .map((conversation, index) => ({ conversation, index }))
+      .map((conversation) => ({ conversation }))
       .sort((left, right) => {
         const attentionDifference =
           Number(Boolean(right.conversation.attention))
@@ -167,7 +167,7 @@ function groupProjection(
           - Date.parse(left.conversation.updatedAt);
         return Number.isFinite(updatedDifference) && updatedDifference !== 0
           ? updatedDifference
-          : left.index - right.index;
+          : left.conversation.id.localeCompare(right.conversation.id);
       })
       .map(({ conversation }) => conversation);
     const groupedConversations = [root, ...members];

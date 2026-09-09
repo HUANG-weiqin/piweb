@@ -574,6 +574,43 @@ function sentFocusCommandCount(): number {
 }
 
 describe("App", () => {
+  it("sends an exact durable image request from a clicked placeholder", () => {
+    const target = {
+      close: vi.fn(),
+      location: { replace: vi.fn() },
+    } as unknown as Window;
+    vi.spyOn(window, "open").mockReturnValue(target);
+    const sessionId = startFocusReplacementProject();
+
+    act(() => socketMock.rawEmit?.({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      items: snapshotItems([{
+        id: "durable-image-message",
+        role: "user",
+        text: "[图片]",
+        thinking: "",
+        tools: [],
+        imageRefs: [{ offset: 0, ordinal: 0 }],
+      }]),
+      window: completeConversationWindow,
+    }));
+    fireEvent.click(screen.getByRole("button", {
+      name: "在新标签页中打开图片 1",
+    }));
+
+    expect(window.open).toHaveBeenCalledWith("about:blank", "_blank");
+    expect(latestCommand("open_image")).toMatchObject({
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      messageId: "durable-image-message",
+      imageOrdinal: 0,
+    });
+  });
+
   it("opens an initial phone chat route with an exact conversation open", () => {
     mockPhoneViewport();
     phoneRoute({
@@ -2025,12 +2062,12 @@ describe("App", () => {
       .toHaveAttribute("aria-current", "true");
   });
 
-  it("switches workspaces through the left rail", () => {
+  it("switches workspaces through the left rail without reordering them", () => {
     localStorage.setItem("piweb.workspaces", JSON.stringify([
       "E:\\first",
       "E:\\second",
     ]));
-    render(<App />);
+    const { container } = render(<App />);
     const firstSessionId = latestCommand("initialize").sessionId;
 
     fireEvent.click(screen.getByRole("button", {
@@ -2047,8 +2084,12 @@ describe("App", () => {
       cwd: "E:\\second",
       conversation: { kind: "recent" },
     });
+    expect(Array.from(
+      container.querySelectorAll<HTMLButtonElement>(".workspace-rail-item"),
+      ({ ariaLabel }) => ariaLabel,
+    )).toEqual(["打开工作区 first", "打开工作区 second"]);
     expect(JSON.parse(localStorage.getItem("piweb.workspaces") ?? "[]"))
-      .toEqual(["E:\\second", "E:\\first"]);
+      .toEqual(["E:\\first", "E:\\second"]);
   });
 
   it("closes the current workspace without opening another until the next startup", () => {
@@ -5217,7 +5258,7 @@ describe("App", () => {
     }));
     expect(latestCommand("initialize").cwd).toBe("E:\\other");
     expect(JSON.parse(localStorage.getItem("piweb.workspaces") ?? "[]"))
-      .toEqual(["E:\\other", "E:\\missing"]);
+      .toEqual(["E:\\missing", "E:\\other"]);
   });
 
   it("keeps a newer directory request authoritative over stale listing outcomes", () => {

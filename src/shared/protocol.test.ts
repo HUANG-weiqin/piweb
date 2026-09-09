@@ -40,7 +40,7 @@ const transitionDiagnostics = {
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(51);
+    expect(PROTOCOL_VERSION).toBe(52);
   });
 
   it("accepts supported commands", () => {
@@ -217,6 +217,15 @@ describe("parseClientCommand", () => {
       focusId,
       messageId,
     }).type).toBe("truncate_conversation");
+    expect(parseClientCommand({
+      type: "open_image",
+      commandId,
+      sessionId,
+      conversationId,
+      focusId,
+      messageId,
+      imageOrdinal: 0,
+    })).toMatchObject({ type: "open_image", imageOrdinal: 0 });
     expect(parseClientCommand({
       type: "set_api_key",
       commandId,
@@ -638,6 +647,17 @@ describe("parseClientCommand", () => {
       }],
       truncated: false,
     }).type).toBe("directory_listing");
+    expect(parseServerEvent({
+      type: "conversation_image",
+      sessionId,
+      conversationId,
+      focusId,
+      commandId,
+      messageId,
+      imageOrdinal: 0,
+      mimeType: "image/png",
+      data: "iVBORw0KGgo=",
+    })).toMatchObject({ type: "conversation_image", data: "iVBORw0KGgo=" });
     expect(() => parseServerEvent({
       type: "directory_listing",
       commandId: "not-a-uuid",

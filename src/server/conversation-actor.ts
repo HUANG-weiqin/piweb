@@ -12,6 +12,7 @@ import { Type } from "typebox";
 import {
   DEFAULT_COMPACTION_THRESHOLD_PERCENT,
   MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
+  parsePromptImage,
   type ConversationActivity,
   type ConversationHistoryItem,
   type ConversationHistoryMessage,
@@ -196,6 +197,11 @@ export type ConversationActorEvent =
       conversationId: string;
       promptId: string;
       runId: string;
+    }
+  | {
+      /** A durable user image is available for an immediate history projection. */
+      type: "image_message_persisted";
+      conversationId: string;
     }
   | {
       type: "error";
@@ -652,6 +658,19 @@ function rawUserMessageIsPersisted(
   ));
 }
 
+function rawUserMessageHasImage(message: unknown): boolean {
+  if (typeof message !== "object" || message === null) return false;
+  const user = message as { role?: unknown; content?: unknown };
+  return user.role === "user"
+    && Array.isArray(user.content)
+    && user.content.some((content) => (
+      typeof content === "object"
+      && content !== null
+      && "type" in content
+      && content.type === "image"
+    ));
+}
+
 function isCancelling(ticket: RunTicket): boolean {
   return ticket.state.phase === "cancelling";
 }
@@ -974,6 +993,35 @@ export class ConversationActor {
 
   getLoopList(): LoopList {
     return structuredClone(this.loopListSnapshot);
+  }
+
+  readPersistedImage(messageId: string, imageOrdinal: number): PromptImage {
+    this.assertUsable();
+    const entry = this.sessionManager.getBranch().find((candidate) => (
+      candidate.id === messageId && candidate.type === "message"
+    ));
+    if (entry === undefined || entry.type !== "message") {
+      throw new Error("The requested image is no longer available");
+    }
+    const message = entry.message;
+    if (message.role !== "user" || !Array.isArray(message.content)) {
+      throw new Error("The requested image is no longer available");
+    }
+
+    let ordinal = 0;
+    for (const content of message.content) {
+      if (content.type !== "image") continue;
+      if (ordinal++ !== imageOrdinal) continue;
+      const image = parsePromptImage({
+        mimeType: content.mimeType,
+        data: content.data,
+      });
+      if (image === undefined || !promptImageHasExpectedSignature(image)) {
+        throw new Error("The stored image data is invalid");
+      }
+      return image;
+    }
+    throw new Error("The requested image is no longer available");
   }
 
   private restoreLoopList(
@@ -2771,6 +2819,7 @@ export class ConversationActor {
           this.emitError(error, ticket.id);
           return;
         }
+        this.emitImageMessagePersisted(rawMessage);
         steer.delivery.resolve();
       });
       return;
@@ -2791,6 +2840,7 @@ export class ConversationActor {
           );
           return;
         }
+        this.emitImageMessagePersisted(rawMessage);
         this.emit({
           type: "prompt_delivered",
           conversationId: this.conversationId,
@@ -3526,6 +3576,7 @@ export class ConversationActor {
             );
             return;
           }
+          this.emitImageMessagePersisted(rawMessage);
         });
         return;
       }
@@ -4036,6 +4087,14 @@ export class ConversationActor {
       const assistant = this.ensureLiveAssistant(ticket);
       assistant.usage = addUsage(assistant.usage, event.usage);
     }
+  }
+
+  private emitImageMessagePersisted(rawMessage: unknown): void {
+    if (!rawUserMessageHasImage(rawMessage)) return;
+    this.emit({
+      type: "image_message_persisted",
+      conversationId: this.conversationId,
+    });
   }
 
   private emitSessionEvent(
