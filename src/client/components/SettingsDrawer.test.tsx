@@ -513,6 +513,24 @@ describe("SettingsDrawer", () => {
     expect(saveKey).not.toHaveBeenCalled();
   });
 
+  it("clears an unsubmitted Key when its provider leaves the catalog", () => {
+    const view = renderDrawer();
+    fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "catalog-secret" },
+    });
+
+    view.rerender(<SettingsDrawer {...settingsProps({
+      state: { ...state, providers: [] },
+    })} />);
+    expect(screen.queryByRole("dialog", { name: "Test API Key" }))
+      .not.toBeInTheDocument();
+
+    view.rerender(<SettingsDrawer {...settingsProps()} />);
+    fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
+    expect(screen.getByLabelText("API Key")).toHaveValue("");
+  });
+
   it("keeps the pending API Key owner through same-session provider catalog drift", () => {
     const saveKey = vi.fn(() => commandId);
     const view = renderDrawer({ onKey: saveKey });
@@ -541,10 +559,8 @@ describe("SettingsDrawer", () => {
         message: "Key 保存失败",
       },
     })} />);
-    expect(screen.getByRole("dialog", { name: "Test API Key" })).toBeInTheDocument();
-    expect(screen.getByRole("alert")).toHaveTextContent("Key 保存失败");
-    expect(screen.getByLabelText("API Key")).toHaveValue("");
-    expect(screen.getByRole("button", { name: "保存 API Key" })).toBeDisabled();
+    expect(screen.queryByRole("dialog", { name: "Test API Key" }))
+      .not.toBeInTheDocument();
   });
 
   it("keeps the API Key backdrop inert while an exact save is pending", () => {
@@ -597,43 +613,45 @@ describe("SettingsDrawer", () => {
     expect(screen.getByRole("button", { name: "保存 API Key" })).toBeEnabled();
   });
 
-  it("clears an unsubmitted Key and provider owner across drawer and observation lifecycles", () => {
-    const onKeyDialogChange = vi.fn();
-    const view = renderDrawer({ onKeyDialogChange });
+  it("clears an unsubmitted Key and provider owner when the drawer closes", () => {
+    const view = renderDrawer();
     fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
     fireEvent.change(screen.getByLabelText("API Key"), {
       target: { value: "drawer-secret" },
     });
 
-    view.rerender(<SettingsDrawer {...settingsProps({
-      open: false,
-      onKeyDialogChange,
-    })} />);
-    view.rerender(<SettingsDrawer {...settingsProps({ onKeyDialogChange })} />);
+    view.rerender(<SettingsDrawer {...settingsProps({ open: false })} />);
+    view.rerender(<SettingsDrawer {...settingsProps()} />);
     openModelConnections();
     fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
     expect(screen.getByLabelText("API Key")).toHaveValue("");
+  });
+
+  it("clears an unsubmitted Key and provider owner after disconnect", () => {
+    const view = renderDrawer();
+    fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
     fireEvent.change(screen.getByLabelText("API Key"), {
-      target: { value: "never-submitted-key" },
+      target: { value: "offline-secret" },
     });
 
-    view.rerender(<SettingsDrawer {...settingsProps({
-      online: false,
-      onKeyDialogChange,
-    })} />);
+    view.rerender(<SettingsDrawer {...settingsProps({ online: false })} />);
     expect(screen.queryByRole("dialog", { name: "Test API Key" }))
       .not.toBeInTheDocument();
 
-    view.rerender(<SettingsDrawer {...settingsProps({ onKeyDialogChange })} />);
+    view.rerender(<SettingsDrawer {...settingsProps()} />);
     fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
     expect(screen.getByLabelText("API Key")).toHaveValue("");
+  });
+
+  it("clears an unsubmitted Key when its opening session is replaced", () => {
+    const view = renderDrawer();
+    fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
     fireEvent.change(screen.getByLabelText("API Key"), {
-      target: { value: "second-secret" },
+      target: { value: "old-session-secret" },
     });
 
     view.rerender(<SettingsDrawer {...settingsProps({
       state: { ...state, sessionId: "session-2" },
-      onKeyDialogChange,
     })} />);
     expect(screen.queryByRole("dialog", { name: "Test API Key" }))
       .not.toBeInTheDocument();

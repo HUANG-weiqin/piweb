@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -557,6 +558,14 @@ export function SettingsDrawer({
     && refreshCandidate.commandId === refreshingModels.commandId
     ? refreshCandidate
     : undefined;
+  const clearKeyDialogState = useCallback(() => {
+    setKeyProvider(undefined);
+    setKey("");
+    setSavingKey(undefined);
+    setShowKey(false);
+    setKeyError("");
+    onKeyDialogChange(false);
+  }, [onKeyDialogChange]);
 
   useEffect(() => {
     if (providerId && providers.some((provider) => provider.id === providerId)) return;
@@ -566,13 +575,13 @@ export function SettingsDrawer({
   useEffect(() => {
     if (!keyProvider) return;
     if (open && online && keyProvider.sessionId === sessionId) return;
-    setKeyProvider(undefined);
-    setKey("");
-    setSavingKey(undefined);
-    setShowKey(false);
-    setKeyError("");
-    onKeyDialogChange(false);
-  }, [keyProvider, online, onKeyDialogChange, open, sessionId]);
+    clearKeyDialogState();
+  }, [clearKeyDialogState, keyProvider, online, open, sessionId]);
+
+  useEffect(() => {
+    if (!keyProvider || keyProviderAvailable || savingKey) return;
+    clearKeyDialogState();
+  }, [clearKeyDialogState, keyProvider, keyProviderAvailable, savingKey]);
 
   useEffect(() => {
     if (!savingKey || savingKey.sessionId !== sessionId || !keyResult) return;
@@ -670,11 +679,7 @@ export function SettingsDrawer({
 
   const closeKeyDialog = () => {
     if (savingKey) return;
-    setKey("");
-    setKeyError("");
-    setKeyProvider(undefined);
-    setShowKey(false);
-    onKeyDialogChange(false);
+    clearKeyDialogState();
   };
   const keyFocusRef = useModalFocus<HTMLFormElement>(
     Boolean(open && keyProvider),
