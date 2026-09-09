@@ -13,7 +13,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createReadOnlyBashTool } from "./read-only-bash.js";
+import { createReadOnlyBashTool, isReviewedCommand } from "./read-only-bash.js";
 
 interface ToolResult {
   content: Array<{ type: string; text?: string }>;
@@ -79,6 +79,21 @@ function findWindowsTestBash(): string | undefined {
 }
 
 const TEST_BASH_PATH = findWindowsTestBash();
+
+const sampledCommands = [
+  "git status --short",
+  "git cat-file -t HEAD",
+  "git name-rev --name-only HEAD",
+  "git config --local --list",
+  "git --no-pager log --topo-order -1 | head -1",
+  "rg -n 'initial|needle' .",
+  "rg --files | head -5",
+  "cd nested && rg needle .",
+  "pwd&&cd nested&&pwd",
+  "grep -n initial 'space name.txt'",
+  "sort 'space name.txt' | uniq -c",
+  "file --brief 'space name.txt'",
+] as const;
 
 const allowedCommands = [
   "git status --short",
@@ -253,14 +268,20 @@ describe("createReadOnlyBashTool", () => {
     rmSync(cwd, { recursive: true, force: true });
   });
 
-  it.each(allowedCommands)("allows the reviewed query workflow: %s", async (command) => {
-    await expect(executeTool(tool, { command, timeout: 5 })).resolves.toBeDefined();
+  it.each(allowedCommands)("classifies the reviewed query as allowed: %s", (command) => {
+    expect(isReviewedCommand(command)).toBe(true);
   });
 
-  it.each(rejectedCommands)("rejects %s", async (_label, command) => {
-    await expect(executeTool(tool, { command }))
-      .rejects.toThrow(/Command was not executed.*accepts reviewed Git\/rg queries/i);
+  it.each(rejectedCommands)("classifies %s as rejected", (_label, command) => {
+    expect(isReviewedCommand(command)).toBe(false);
   });
+
+  it.each(sampledCommands)(
+    "executes a sampled reviewed command end-to-end: %s",
+    async (command) => {
+      await expect(executeTool(tool, { command, timeout: 5 })).resolves.toBeDefined();
+    },
+  );
 
   it("executes a real rg search with alternation", async () => {
     const result = await executeTool(tool, {

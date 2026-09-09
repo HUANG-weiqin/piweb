@@ -211,6 +211,34 @@ describe("reload manifest v2", () => {
     ]);
   });
 
+  it("removes a terminal unadopted target after exact reconciliation", async () => {
+    const path = await manifestPath();
+    await recordReloadTargets(path, REPO_ROOT, APP_PORT, REQUEST_ID, [{
+      cwd: REPO_ROOT,
+      conversationId: CONVERSATION_ID,
+      continueTask: true,
+    }]);
+
+    const manifest = await readReloadManifest(path, REPO_ROOT, APP_PORT);
+    const sent = reloadTargetsForChild(manifest, false);
+    await expect(applyReloadResumeDispositions(
+      path,
+      REPO_ROOT,
+      APP_PORT,
+      REQUEST_ID,
+      sent,
+      [{
+        cwd: REPO_ROOT,
+        conversationId: CONVERSATION_ID,
+        disposition: "completed",
+      }],
+    )).resolves.toMatchObject({
+      stale: false,
+      manifest: { targets: [] },
+    });
+    await expect(access(path)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("ignores stale completion identity and unlinks only the exact completed target", async () => {
     const path = await manifestPath();
     await recordReloadTargets(path, REPO_ROOT, APP_PORT, REQUEST_ID, [{

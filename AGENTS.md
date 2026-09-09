@@ -108,4 +108,6 @@ npm run build
 git diff --check
 ```
 
+日常 `npm test` 默认排除 `**/*.slow.test.ts`：这些是真实落盘、整体跑起来很慢的协调器测试（`project-session-coordinator.slow.test.ts` 覆盖会话生命周期、inbox、steering/wait，`project-session-budget*.slow.test.ts` 覆盖 inbox 容量耗尽/释放与 `MAX_PEER_SESSIONS_PER_RUN`、`MAX_LIVE_DELEGATION_DESCENDANTS` 等硬边界）。只有改动触及 `project-session-coordinator` 相关逻辑（会话生命周期、inbox、steering/wait、容量/预算边界）或直接影响其持久化协作模块（conversation-actor、project-store、conversation-meta 的会话/目录路径）时，才需要补跑 `npm run test:slow`；改动其它模块不需要。
+
 涉及 WebSocket 的集成测试需要允许监听临时的 `127.0.0.1` 端口。涉及 UI 行为时，还应覆盖对应组件测试；涉及生产启动时，再验证 `/health` 和一次浏览器主流程。

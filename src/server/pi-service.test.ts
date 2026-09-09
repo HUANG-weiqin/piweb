@@ -63,10 +63,28 @@ async function temporaryDirectory(prefix: string): Promise<string> {
 afterEach(async () => {
   await Promise.all(
     temporaryDirectories.splice(0).map((directory) =>
-      rm(directory, { force: true, recursive: true }),
+      removeTemporaryDirectory(directory),
     ),
   );
 });
+
+async function removeTemporaryDirectory(directory: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await rm(directory, { force: true, recursive: true });
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (
+        (code !== "ENOTEMPTY" && code !== "EBUSY" && code !== "EPERM")
+        || attempt >= 4
+      ) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  }
+}
 
 interface FakeSession extends AgentSession {
   abortCalls: number;
