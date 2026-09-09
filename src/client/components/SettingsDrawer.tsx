@@ -91,14 +91,16 @@ function modelConnectionsSummary(
   state: PublicState | undefined,
   online: boolean,
   preferencesOnline: boolean,
+  refreshing: boolean,
 ): string {
+  const pending = refreshing ? "正在刷新模型 · " : "";
   if (!preferencesOnline) {
-    return state ? `离线 · ${modelStateSummary(state)}` : "离线 · 无可管理会话";
+    return state ? `${pending}离线 · ${modelStateSummary(state)}` : `${pending}离线 · 无可管理会话`;
   }
-  if (!state) return "当前会话未就绪";
-  if (!online) return `当前会话暂不可管理 · ${modelStateSummary(state)}`;
-  if (state.busy) return `会话运行中 · ${modelStateSummary(state)}`;
-  return modelStateSummary(state);
+  if (!state) return `${pending}当前会话未就绪`;
+  if (!online) return `${pending}当前会话暂不可管理 · ${modelStateSummary(state)}`;
+  if (state.busy) return `${pending}会话运行中 · ${modelStateSummary(state)}`;
+  return `${pending}${modelStateSummary(state)}`;
 }
 
 function modelStateSummary(state: PublicState): string {
@@ -758,7 +760,12 @@ export function SettingsDrawer({
 
       {route === "home" && <SettingsHome
         appearance={appearanceSummary(colorScheme, colorSchemePending, colorSchemeUnsaved)}
-        modelConnections={modelConnectionsSummary(state, online, preferencesOnline)}
+        modelConnections={modelConnectionsSummary(
+          state,
+          online,
+          preferencesOnline,
+          Boolean(refreshingModels),
+        )}
         rowRefs={rowRefs}
         onOpen={openPage}
       />}

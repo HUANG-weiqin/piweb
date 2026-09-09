@@ -189,11 +189,14 @@ describe("SettingsDrawer", () => {
     expect(screen.queryByRole("combobox", { name: "提供商" })).not.toBeInTheDocument();
   });
 
-  it("settles a pending refresh while HOME is projected", () => {
+  it("shows and settles a pending refresh while HOME is projected", async () => {
     const refresh = vi.fn(() => commandId);
     const view = renderDrawer({ onRefresh: refresh });
     fireEvent.click(screen.getByRole("button", { name: "刷新模型" }));
     fireEvent.click(screen.getByRole("button", { name: "返回设置" }));
+
+    expect(screen.getByRole("button", { name: "打开模型连接设置" }))
+      .toHaveTextContent("正在刷新模型");
 
     view.rerender(<SettingsDrawer {...settingsProps({
       onRefresh: refresh,
@@ -204,8 +207,8 @@ describe("SettingsDrawer", () => {
         message: "",
       },
     })} />);
-    expect(screen.getByRole("button", { name: "打开模型连接设置" }))
-      .toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "打开模型连接设置" }))
+      .not.toHaveTextContent("正在刷新模型"));
     openModelConnections();
     expect(screen.getByRole("status"))
       .toHaveTextContent("远程供应商模型目录已刷新");
