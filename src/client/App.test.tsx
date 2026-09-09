@@ -573,6 +573,17 @@ function sentFocusCommandCount(): number {
   ).length;
 }
 
+async function pasteDraftImage(name = "draft.png"): Promise<void> {
+  fireEvent.paste(screen.getByRole("textbox", { name: "给 Pi 发送消息" }), {
+    clipboardData: {
+      files: [new File(["draft-image"], name, { type: "image/png" })],
+    },
+  });
+  await waitFor(() => expect(screen.getByRole("img", {
+    name: "待发送图片 1",
+  })).toBeVisible());
+}
+
 describe("App", () => {
   it("sends an exact durable image request from a clicked placeholder", () => {
     const target = {
@@ -1122,6 +1133,61 @@ describe("App", () => {
     expect(screen.getByRole("navigation", { name: "工作区" }))
       .toBeInTheDocument();
     expect(latestCommand("initialize").cwd).toBe("E:\\other");
+  });
+
+  it("keeps one text-and-image draft while phone scenes hide and reveal the mounted chat", async () => {
+    mockPhoneViewport();
+    localStorage.setItem("piweb.workspaces", JSON.stringify(["E:\\work"]));
+    render(<App />);
+    const sessionId = latestCommand("initialize").sessionId;
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversations: [
+          conversationSummary(CONVERSATION_ID, "A"),
+          conversationSummary(CONVERSATION_B, "B"),
+        ],
+        truncated: false,
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "当前会话 A" }));
+    const input = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
+    fireEvent.change(input, { target: { value: "phone draft for A" } });
+    await pasteDraftImage("phone-a.png");
+    const focusCommandsBeforeNavigation = sentFocusCommandCount();
+
+    fireEvent.click(screen.getByRole("button", { name: "返回会话列表" }));
+    await waitFor(() => expect(screen.getByRole("complementary", {
+      name: "项目会话栏",
+    })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "显示工作区" }));
+    await waitFor(() => expect(screen.getByRole("navigation", {
+      name: "工作区",
+    })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "打开工作区 work" }));
+    fireEvent.click(screen.getByRole("button", { name: "当前会话 A" }));
+
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("phone draft for A");
+    expect(screen.getByRole("img", { name: "待发送图片 1" })).toBeVisible();
+    expect(sentFocusCommandCount()).toBe(focusCommandsBeforeNavigation);
+    expect(latestSessionId()).toBe(sessionId);
   });
 
   it("leaves initial phone focus alone until an empty project opens role selection", () => {
@@ -4230,9 +4296,13 @@ describe("App", () => {
         window,
       });
     });
+    const composer = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
+    fireEvent.change(composer, { target: { value: "source A draft" } });
     socketMock.autoFocus = false;
     fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
     expect(screen.queryByText("source A")).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("");
     const transitionStatuses = screen.getAllByRole("status");
     expect(transitionStatuses).toHaveLength(1);
     expect(transitionStatuses[0]).toHaveAccessibleName(
@@ -4296,12 +4366,16 @@ describe("App", () => {
     }));
     expect(screen.queryByRole("status", { name: "正在同步会话…" })).not.toBeInTheDocument();
     expect(screen.getByText("source A")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("source A draft");
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeEnabled();
 
     socketMock.send.mockReturnValueOnce(false);
     fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
     expect(screen.queryByRole("status", { name: "正在同步会话…" })).not.toBeInTheDocument();
     expect(screen.getByText("source A")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("source A draft");
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeEnabled();
     socketMock.send.mockReturnValue(true);
   });
@@ -7081,6 +7155,171 @@ describe("App", () => {
     )).toHaveLength(1);
   });
 
+  it("isolates and restores an ordinary text-and-image draft across workspace A-B-A", async () => {
+    const firstProjectId = "f25ee8d8-34f0-4c30-a045-000000000201";
+    const secondProjectId = "f25ee8d8-34f0-4c30-a045-000000000202";
+    const secondFocusId = "ae301850-745d-44dd-a30f-000000000203";
+    const returnedFocusId = "ae301850-745d-44dd-a30f-000000000204";
+    localStorage.setItem("piweb.workspaces", JSON.stringify([
+      "E:\\first",
+      "E:\\second",
+    ]));
+    socketMock.autoFocus = false;
+    render(<App />);
+    const firstInitialize = latestCommand("initialize");
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "focus_attached",
+        operation: "initialize",
+        commandId: firstInitialize.commandId!,
+        sessionId: firstInitialize.sessionId,
+        projectId: firstProjectId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+      });
+      socketMock.rawEmit?.({
+        type: "state",
+        state: {
+          sessionId: firstInitialize.sessionId,
+          projectId: firstProjectId,
+          conversationId: CONVERSATION_ID,
+          focusId: FOCUS_A,
+          cwd: "E:\\first",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "project_snapshot",
+        sessionId: firstInitialize.sessionId,
+        projectId: firstProjectId,
+        conversations: [conversationSummary(CONVERSATION_ID, "Shared ID in first")],
+        truncated: false,
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId: firstInitialize.sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        items: [],
+        window: completeConversationWindow,
+      });
+    });
+
+    fireEvent.change(screen.getByRole("textbox", { name: "给 Pi 发送消息" }), {
+      target: { value: "ordinary draft in first" },
+    });
+    await pasteDraftImage("first.png");
+
+    fireEvent.click(screen.getByRole("button", { name: "打开工作区 second" }));
+    // A cache miss owns no target composer before attach; the source draft must
+    // not remain visible in the opening placeholder.
+    expect(screen.queryByRole("textbox", { name: "给 Pi 发送消息" }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "待发送图片 1" }))
+      .not.toBeInTheDocument();
+    const secondInitialize = latestCommand("initialize");
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "focus_attached",
+        operation: "initialize",
+        commandId: secondInitialize.commandId!,
+        sessionId: secondInitialize.sessionId,
+        projectId: secondProjectId,
+        conversationId: CONVERSATION_ID,
+        focusId: secondFocusId,
+      });
+      socketMock.rawEmit?.({
+        type: "state",
+        state: {
+          sessionId: secondInitialize.sessionId,
+          projectId: secondProjectId,
+          conversationId: CONVERSATION_ID,
+          focusId: secondFocusId,
+          cwd: "E:\\second",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "project_snapshot",
+        sessionId: secondInitialize.sessionId,
+        projectId: secondProjectId,
+        conversations: [conversationSummary(CONVERSATION_ID, "Shared ID in second")],
+        truncated: false,
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId: secondInitialize.sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: secondFocusId,
+        items: [],
+        window: completeConversationWindow,
+      });
+    });
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("");
+    expect(screen.queryByRole("img", { name: "待发送图片 1" }))
+      .not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole("textbox", { name: "给 Pi 发送消息" }), {
+      target: { value: "ordinary draft in second" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "打开工作区 first" }));
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("ordinary draft in first");
+    expect(screen.getByRole("img", { name: "待发送图片 1" })).toBeVisible();
+    const returnedInitialize = latestCommand("initialize");
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "focus_attached",
+        operation: "initialize",
+        commandId: returnedInitialize.commandId!,
+        sessionId: returnedInitialize.sessionId,
+        projectId: firstProjectId,
+        conversationId: CONVERSATION_ID,
+        focusId: returnedFocusId,
+      });
+      socketMock.rawEmit?.({
+        type: "state",
+        state: {
+          sessionId: returnedInitialize.sessionId,
+          projectId: firstProjectId,
+          conversationId: CONVERSATION_ID,
+          focusId: returnedFocusId,
+          cwd: "E:\\first",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId: returnedInitialize.sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: returnedFocusId,
+        items: [],
+        window: completeConversationWindow,
+      });
+    });
+
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("ordinary draft in first");
+    expect(screen.getByRole("img", { name: "待发送图片 1" })).toBeVisible();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("restores an unacknowledged prompt after switching projects without leaking it", () => {
     localStorage.setItem("piweb.workspaces", JSON.stringify([
       "E:\\first",
@@ -8969,6 +9208,170 @@ describe("App", () => {
     expect(input).toHaveValue("draft for A");
     expect(screen.getByRole("status", { name: "运行中" })).toBeInTheDocument();
     expect(screen.getByRole("status", { name: "需要处理" })).toBeInTheDocument();
+  });
+
+  it("isolates and restores text-and-image drafts across an A-B-A focus change", async () => {
+    const sessionId = startFocusReplacementProject([
+      conversationSummary(CONVERSATION_B, "B"),
+    ]);
+    const input = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
+    fireEvent.change(input, { target: { value: "draft for A" } });
+    await pasteDraftImage("a.png");
+
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("");
+    expect(screen.queryByRole("img", { name: "待发送图片 1" }))
+      .not.toBeInTheDocument();
+    const focusB = latestCommand("focus_conversation");
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "focus_attached",
+        operation: "focus_conversation",
+        commandId: focusB.commandId,
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_B,
+        focusId: FOCUS_A_SECOND,
+      });
+      socketMock.rawEmit?.({
+        type: "state",
+        state: {
+          sessionId,
+          projectId: PROJECT_ID,
+          conversationId: CONVERSATION_B,
+          focusId: FOCUS_A_SECOND,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_B,
+        focusId: FOCUS_A_SECOND,
+        items: [],
+        window: completeConversationWindow,
+      });
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "给 Pi 发送消息" }), {
+      target: { value: "draft for B" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 A" }));
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("draft for A");
+    expect(screen.getByRole("img", { name: "待发送图片 1" })).toBeVisible();
+    const focusA = latestCommand("focus_conversation");
+    const returnedFocusId = "ae301850-745d-44dd-a30f-000000000104";
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "focus_attached",
+        operation: "focus_conversation",
+        commandId: focusA.commandId,
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_ID,
+        focusId: returnedFocusId,
+      });
+      socketMock.rawEmit?.({
+        type: "state",
+        state: {
+          sessionId,
+          projectId: PROJECT_ID,
+          conversationId: CONVERSATION_ID,
+          focusId: returnedFocusId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: returnedFocusId,
+        items: [],
+        window: completeConversationWindow,
+      });
+    });
+
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("draft for A");
+    expect(screen.getByRole("img", { name: "待发送图片 1" })).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    const acceptedPrompt = latestCommand("prompt");
+    act(() => socketMock.rawEmit?.({
+      type: "session_event",
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: returnedFocusId,
+      runId: acceptedPrompt.runId,
+      event: { type: "run_queued" },
+    }));
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("");
+    expect(screen.queryByRole("img", { name: "待发送图片 1" }))
+      .not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("draft for B");
+    expect(screen.queryByRole("img", { name: "待发送图片 1" }))
+      .not.toBeInTheDocument();
+    const focusBAgain = latestCommand("focus_conversation");
+    const returnedBFocusId = "ae301850-745d-44dd-a30f-000000000105";
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "focus_attached",
+        operation: "focus_conversation",
+        commandId: focusBAgain.commandId,
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_B,
+        focusId: returnedBFocusId,
+      });
+      socketMock.rawEmit?.({
+        type: "state",
+        state: {
+          sessionId,
+          projectId: PROJECT_ID,
+          conversationId: CONVERSATION_B,
+          focusId: returnedBFocusId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_B,
+        focusId: returnedBFocusId,
+        items: [],
+        window: completeConversationWindow,
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 A" }));
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("");
+    expect(screen.queryByRole("img", { name: "待发送图片 1" }))
+      .not.toBeInTheDocument();
   });
 
   it("returns to role selection only for an exact focus invalidation", () => {

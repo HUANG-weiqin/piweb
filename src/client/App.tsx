@@ -235,9 +235,10 @@ interface PendingImageOpen extends ActiveFocus {
   target: Window;
 }
 
-interface UnconfirmedPromptDraft {
+interface ConversationComposerDraft {
   text: string;
   images: PromptImage[];
+  status: "editing" | "unconfirmed";
 }
 
 /** busy 时已接受、尚未投递的浏览器 prompt（服务端内存态）。 */
@@ -579,15 +580,15 @@ export function App() {
   const updateDraft = (text: string) => setDraft(text);
   const [draftImages, setDraftImages] = useState<PromptImage[]>([]);
   const updateDraftImages = (images: PromptImage[]) => setDraftImages(images);
-  const clearDraft = () => {
+  const conversationDraftByScopeRef = useRef(
+    new Map<string, ConversationComposerDraft>(),
+  );
+  const clearDraftProjection = () => {
     updateDraft("");
     updateDraftImages([]);
   };
   const [pendingPrompt, setPendingPrompt] = useState<DirectPendingPrompt>();
   const pendingPromptRef = useRef<DirectPendingPrompt | undefined>(undefined);
-  const unconfirmedPromptByConversationRef = useRef(
-    new Map<string, UnconfirmedPromptDraft>(),
-  );
   const [pendingAdmissions, setPendingAdmissions] = useState<PendingAdmission[]>([]);
   const pendingAdmissionsRef = useRef<PendingAdmission[]>([]);
   const replacePendingAdmissions = (admissions: PendingAdmission[]) => {
@@ -740,8 +741,6 @@ export function App() {
     focus.projectId,
     focus.conversationId,
   );
-  const unconfirmedPromptKey = (focus: Pick<ActiveFocus, "projectId" | "conversationId">) =>
-    conversationKey(focus);
   const conversationIsConfirmedMissing = (
     projectId: string,
     conversationId: string,
@@ -872,28 +871,46 @@ export function App() {
     discardCachedWorkspacePresentation();
     updateWorkspaceSyncing(false);
   };
-  const showUnconfirmedPrompt = (focus: ActiveFocus | undefined) => {
-    if (!focus) return;
-    const unconfirmed = unconfirmedPromptByConversationRef.current.get(
-      unconfirmedPromptKey(focus),
+  const showConversationDraft = (scope: {
+    workspaceKey: string;
+    projectId: string;
+    conversationId: string;
+  }) => {
+    const key = pendingConversationKey(scope);
+    const savedDraft = conversationDraftByScopeRef.current.get(key);
+    updateDraft(savedDraft?.text ?? "");
+    updateDraftImages(savedDraft?.images ?? []);
+    setPromptNotice(
+      savedDraft?.status === "unconfirmed" ? UNCONFIRMED_PROMPT_NOTICE : "",
     );
-    if (unconfirmed === undefined) return;
-    updateDraft(unconfirmed.text);
-    updateDraftImages(unconfirmed.images);
-    setPromptNotice(UNCONFIRMED_PROMPT_NOTICE);
+  };
+  const updateConversationDraft = (next: Pick<
+    ConversationComposerDraft,
+    "text" | "images"
+  >) => {
+    const focus = focusRef.current;
+    if (!focus) return;
+    const key = conversationKey(focus);
+    const savedDraft = conversationDraftByScopeRef.current.get(key);
+    if (!next.text && next.images.length === 0) {
+      conversationDraftByScopeRef.current.delete(key);
+    } else {
+      conversationDraftByScopeRef.current.set(key, {
+        ...next,
+        status: savedDraft?.status ?? "editing",
+      });
+    }
   };
   const rememberUnconfirmedPrompt = (pending: DirectPendingPrompt) => {
-    unconfirmedPromptByConversationRef.current.set(
+    conversationDraftByScopeRef.current.set(
       pendingConversationKey(pending),
-      { text: pending.text, images: pending.images },
+      { text: pending.text, images: pending.images, status: "unconfirmed" },
     );
   };
-  const forgetUnconfirmedPrompt = (
+  const forgetConversationDraft = (
     focus: Pick<DirectPendingPrompt, "workspaceKey" | "projectId" | "conversationId">,
   ) => {
-    unconfirmedPromptByConversationRef.current.delete(
-      pendingConversationKey(focus),
-    );
+    conversationDraftByScopeRef.current.delete(pendingConversationKey(focus));
   };
   const rememberWorkspace = (cwd: string) => {
     const current = workspacesRef.current;
@@ -1089,6 +1106,8 @@ export function App() {
       setLoopList({ items: [], armed: false });
       updateConversationReady(false);
       setSelectingRole(true);
+      clearDraftProjection();
+      setPromptNotice("");
       dispatchChat({ type: "reset" });
       return;
     }
@@ -1106,11 +1125,15 @@ export function App() {
     updateConversationReady(false);
     setSelectingRole(false);
     if (changedConversation) {
-      if (!preserveDraft) clearDraft();
-      setPromptNotice("");
       updatePendingPrompt(undefined);
       showPendingContextCompaction(focus);
-      showUnconfirmedPrompt(focus);
+    }
+    if (!preserveDraft) {
+      showConversationDraft({
+        workspaceKey: currentWorkspaceKey(),
+        projectId,
+        conversationId,
+      });
     }
     updateOutstandingRunId("");
   };
@@ -1132,8 +1155,8 @@ export function App() {
       text: pending.text || "[图片]",
       ...focus,
     });
-    forgetUnconfirmedPrompt(pending);
-    clearDraft();
+    forgetConversationDraft(pending);
+    clearDraftProjection();
     setPromptNotice("");
     updatePendingPrompt(undefined);
     updateOutstandingRunId(runId);
@@ -1600,6 +1623,20 @@ export function App() {
           conversationIdRef.current = conversation.kind === "open"
             ? conversation.conversationId
             : "";
+          const targetDraftProjectId = cached?.projectId
+            ?? (reconnectDraftOwner?.conversationId === conversationIdRef.current
+              ? reconnectDraftOwner.projectId
+              : undefined);
+          if (conversation.kind === "open" && targetDraftProjectId) {
+            showConversationDraft({
+              workspaceKey: activeWorkspaceKey,
+              projectId: targetDraftProjectId,
+              conversationId: conversation.conversationId,
+            });
+          } else {
+            clearDraftProjection();
+            setPromptNotice("");
+          }
           updateOutstandingRunId("");
           setAuth({});
           dispatchChat({ type: "reset" });
@@ -1778,6 +1815,7 @@ export function App() {
             fallbackFocus.conversationId,
             fallbackFocus.focusId,
             true,
+            true,
           );
           const nextPending = {
             ...pending,
@@ -1803,7 +1841,11 @@ export function App() {
             || correlatedReconnectDraftOwner.conversationId !== event.conversationId
           )
         ) {
-          clearDraft();
+          conversationDraftByScopeRef.current.delete(
+            pendingConversationKey(correlatedReconnectDraftOwner),
+          );
+          clearDraftProjection();
+          setPromptNotice("");
         }
         if (
           !pending
@@ -1976,7 +2018,7 @@ export function App() {
         conversationPresentationCacheRef.current.delete(invalidatedConversationKey);
         clearTemporaryConversationPresentation();
         updateConversationSyncing(false);
-        unconfirmedPromptByConversationRef.current.delete(
+        conversationDraftByScopeRef.current.delete(
           conversationScopeKey(
             currentWorkspaceKey(),
             event.projectId,
@@ -2000,7 +2042,7 @@ export function App() {
               busy: false,
             }
           : current);
-        clearDraft();
+        clearDraftProjection();
         setPromptNotice("");
         updatePendingPrompt(undefined);
         updateOutstandingRunId("");
@@ -2095,8 +2137,8 @@ export function App() {
           && pending.conversationId === event.conversationId
           && pending.focusId === event.focusId
         ) {
-          forgetUnconfirmedPrompt(pending);
-          clearDraft();
+          forgetConversationDraft(pending);
+          clearDraftProjection();
           setPromptNotice("");
           updatePendingPrompt(undefined);
           if (outstandingRunIdRef.current === pending.runId) {
@@ -2314,9 +2356,9 @@ export function App() {
             clearTemporaryConversationPresentation();
           }
 
-          unconfirmedPromptByConversationRef.current.delete(targetKey);
+          conversationDraftByScopeRef.current.delete(targetKey);
           if (affectedFocusKey) {
-            unconfirmedPromptByConversationRef.current.delete(affectedFocusKey);
+            conversationDraftByScopeRef.current.delete(affectedFocusKey);
           }
           if (
             pending.affectedFocus !== undefined
@@ -2343,7 +2385,7 @@ export function App() {
                   busy: false,
                 }
               : current);
-            clearDraft();
+            clearDraftProjection();
             setPromptNotice("");
             updatePendingPrompt(undefined);
             const deletedCompaction =
@@ -2641,6 +2683,11 @@ export function App() {
             && focusRef.current
             && sameFocus(focusRef.current, pending.sourceFocus)
           ) {
+            showConversationDraft({
+              workspaceKey: pending.workspaceKey,
+              projectId: pending.sourceFocus.projectId,
+              conversationId: pending.sourceFocus.conversationId,
+            });
             updateConversationReady(true);
           }
           if (event.operation === "initialize") {
@@ -2994,7 +3041,7 @@ export function App() {
     updateDirectoryBrowser(undefined);
     setError("");
     markPendingPromptUnconfirmed();
-    clearDraft();
+    clearDraftProjection();
     setPromptNotice("");
     clearSessionProjection();
     setSetupOpen(false);
@@ -3007,6 +3054,13 @@ export function App() {
     conversationIdRef.current = conversation?.kind === "open"
       ? conversation.conversationId
       : "";
+    if (cached && conversation?.kind === "open") {
+      showConversationDraft({
+        workspaceKey: currentWorkspaceKey(),
+        projectId: cached.projectId,
+        conversationId: conversation.conversationId,
+      });
+    }
     authFlowIdRef.current = "";
     updateOutstandingRunId("");
     setAuth({});
@@ -3191,6 +3245,16 @@ export function App() {
     setError("");
     clearPendingAdmissions();
     cacheCurrentConversationPresentation();
+    if (targetProjectId) {
+      showConversationDraft({
+        workspaceKey: workspaceKeyValue,
+        projectId: targetProjectId,
+        conversationId,
+      });
+    } else {
+      clearDraftProjection();
+      setPromptNotice("");
+    }
     const sourceFocus = focusRef.current;
     const sourceReady = conversationReadyRef.current || Boolean(
       replacingPendingFocus
@@ -3387,6 +3451,7 @@ export function App() {
       messageId,
     })) {
       updateDraft(text);
+      updateConversationDraft({ text, images: draftImages });
       setPromptNotice("");
       return true;
     }
@@ -3805,25 +3870,14 @@ export function App() {
   });
   const handleConversationRename = useLatestCallback(renameConversation);
   const handleConversationDelete = useLatestCallback(deleteConversation);
-  const updateUnconfirmedPromptDraft = (next: UnconfirmedPromptDraft) => {
-    const focus = focusRef.current;
-    if (!focus) return;
-    const key = unconfirmedPromptKey(focus);
-    if (!unconfirmedPromptByConversationRef.current.has(key)) return;
-    if (!next.text && next.images.length === 0) {
-      unconfirmedPromptByConversationRef.current.delete(key);
-    } else {
-      unconfirmedPromptByConversationRef.current.set(key, next);
-    }
-  };
   const handleChatDraftChange = useLatestCallback((text: string) => {
     updateDraft(text);
-    updateUnconfirmedPromptDraft({ text, images: draftImages });
+    updateConversationDraft({ text, images: draftImages });
     if (promptNotice) setPromptNotice("");
   });
   const handleChatImagesChange = useLatestCallback((images: PromptImage[]) => {
     updateDraftImages(images);
-    updateUnconfirmedPromptDraft({ text: draft, images });
+    updateConversationDraft({ text: draft, images });
     if (promptNotice) setPromptNotice("");
   });
   const handleChatSend = useLatestCallback((text: string, images: PromptImage[]) =>
