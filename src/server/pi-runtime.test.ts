@@ -941,13 +941,11 @@ describe("PiRuntime session ownership", () => {
     await created.dispose();
   });
 
-  it("keeps read-only projection across extension tool refreshes", async () => {
+  it("freezes the prompt-affecting tool topology after extension startup", async () => {
     const cwd = await temporaryDirectory("piweb-runtime-dynamic-read-only-tools-");
     const staticMarker = "STATIC_SHADOW_TOOL_MARKER";
     const startMarker = "SESSION_START_SHADOW_TOOL_MARKER";
     const dynamicMarker = "DYNAMIC_SHADOW_TOOL_MARKER";
-    const dynamicBashMarker = "DYNAMIC_BASH_SHADOW_TOOL_MARKER";
-    const shutdownMarker = "SHUTDOWN_SHADOW_TOOL_MARKER";
     let extensionApi: ExtensionAPI | undefined;
     let sessionStarted = false;
     let shutdownActiveTools: string[] | undefined;
@@ -962,8 +960,6 @@ describe("PiRuntime session ownership", () => {
           pi.setActiveTools(["read", "find", "grep", "ls", "bash"]);
         });
         pi.on("session_shutdown", (_event, context) => {
-          pi.registerTool(shadowReadTool(cwd, "ls", shutdownMarker));
-          pi.setActiveTools(["read", "find", "grep", "ls", "bash"]);
           shutdownActiveTools = pi.getActiveTools();
           shutdownSystemPrompt = context.getSystemPrompt();
         });
@@ -984,18 +980,89 @@ describe("PiRuntime session ownership", () => {
     expect(created.session.systemPrompt).not.toContain(staticMarker);
     expect(created.session.systemPrompt).not.toContain(startMarker);
 
-    extensionApi?.registerTool(shadowReadTool(cwd, "grep", dynamicMarker));
-    extensionApi?.registerTool(shadowReadTool(cwd, "bash", dynamicBashMarker));
-    extensionApi?.setActiveTools(["read", "find", "grep", "ls", "bash"]);
-    expect(created.session.getActiveToolNames()).toEqual(["ls", "bash"]);
+    const activeToolNames = created.session.getActiveToolNames();
+    const allTools = created.session.getAllTools();
+    const systemPrompt = created.session.systemPrompt;
+    expect(extensionApi).toBeDefined();
+    expect(() => extensionApi!.registerTool(shadowReadTool(cwd, "grep", dynamicMarker)))
+      .toThrow("Runtime system prompt changes are not supported");
+    expect(() => extensionApi!.setActiveTools(["read", "find", "grep", "ls", "bash"]))
+      .toThrow("Runtime system prompt changes are not supported");
+    expect(() => created.session.setActiveToolsByName(["bash"]))
+      .toThrow("Runtime system prompt changes are not supported");
+    expect(created.session.getActiveToolNames()).toEqual(activeToolNames);
+    expect(created.session.getAllTools()).toEqual(allTools);
+    expect(created.session.systemPrompt).toBe(systemPrompt);
     expect(created.session.systemPrompt).not.toContain(dynamicMarker);
-    expect(created.session.systemPrompt).not.toContain(dynamicBashMarker);
 
     const projectedSetter = created.session.setActiveToolsByName;
     await created.dispose();
-    expect(shutdownActiveTools).toEqual(["bash"]);
-    expect(shutdownSystemPrompt).not.toContain(shutdownMarker);
+    expect(shutdownActiveTools).toEqual(activeToolNames);
+    expect(shutdownSystemPrompt).toBe(systemPrompt);
     expect(created.session.setActiveToolsByName).not.toBe(projectedSetter);
+  });
+
+  it("keeps system prompt overrides rejected while extension startup configures tools", async () => {
+    const cwd = await temporaryDirectory("piweb-runtime-startup-prompt-override-");
+    let startupOverrideError: unknown;
+    const runtime = await testRuntime(
+      () => [
+        (pi) => {
+          pi.on("before_agent_start", () => ({
+            systemPrompt: "UNSUPPORTED_STARTUP_PROMPT_OVERRIDE",
+          }));
+        },
+      ],
+      async (created) => {
+        const nativeBindExtensions = created.session.bindExtensions.bind(created.session);
+        created.session.bindExtensions = async (bindings) => {
+          await nativeBindExtensions(bindings);
+          try {
+            await created.session.extensionRunner.emitBeforeAgentStart(
+              "request",
+              undefined,
+              created.session.systemPrompt,
+              {} as never,
+            );
+          } catch (error) {
+            startupOverrideError = error;
+          }
+        };
+      },
+    );
+    const created = await runtime.createSession(cwd);
+    await created.activateExtensions();
+
+    expect(startupOverrideError).toBeInstanceOf(Error);
+    expect((startupOverrideError as Error).message)
+      .toBe("Runtime system prompt changes are not supported");
+    expect(created.session.systemPrompt).not.toContain("UNSUPPORTED_STARTUP_PROMPT_OVERRIDE");
+
+    await created.dispose();
+  });
+
+  it("rejects extension per-turn system prompt overrides after activation", async () => {
+    const cwd = await temporaryDirectory("piweb-runtime-prompt-override-");
+    const runtime = await testRuntime(() => [
+      (pi) => {
+        pi.on("before_agent_start", () => ({
+          systemPrompt: "UNSUPPORTED_RUNTIME_PROMPT_OVERRIDE",
+        }));
+      },
+    ]);
+    const created = await runtime.createSession(cwd);
+    await created.activateExtensions();
+    const systemPrompt = created.session.systemPrompt;
+
+    await expect(created.session.extensionRunner.emitBeforeAgentStart(
+      "request",
+      undefined,
+      systemPrompt,
+      {} as never,
+    )).rejects.toThrow("Runtime system prompt changes are not supported");
+    expect(created.session.systemPrompt).toBe(systemPrompt);
+
+    await created.dispose();
   });
 
   it("reports an extension that shadows read as a non-builtin tool", async () => {

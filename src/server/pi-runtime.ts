@@ -86,6 +86,18 @@ interface ToolProjectionAdapter {
   dispose(): void;
 }
 
+interface RuntimePromptMutationAdapter {
+  allowToolTopologyChanges(): void;
+  rejectToolTopologyChanges(): void;
+  dispose(): void;
+}
+
+const RUNTIME_PROMPT_MUTATION_ERROR = "Runtime system prompt changes are not supported";
+
+interface MutablePromptToolSession {
+  _refreshToolRegistry(...args: unknown[]): unknown;
+}
+
 function installReadOnlyToolProjection(
   session: AgentSession,
 ): ToolProjectionAdapter {
@@ -111,6 +123,68 @@ function installReadOnlyToolProjection(
     dispose(): void {
       if (session.setActiveToolsByName === projectedSetActiveTools) {
         session.setActiveToolsByName = nativeSetActiveTools;
+      }
+    },
+  };
+}
+
+/**
+ * Pi rebuilds its base system prompt whenever the active tool set changes.
+ * Extension startup is the one initialization boundary allowed to shape that
+ * set. Later tool refreshes and all per-turn prompt overrides must fail before
+ * they can perturb the provider request prefix.
+ */
+function installRuntimePromptMutationBoundary(
+  session: AgentSession,
+): RuntimePromptMutationAdapter {
+  const mutableSession = session as unknown as MutablePromptToolSession;
+  const nativeSetActiveTools = session.setActiveToolsByName;
+  const nativeRefreshTools = mutableSession._refreshToolRegistry;
+  const runner = session.extensionRunner;
+  const nativeEmitBeforeAgentStart = runner.emitBeforeAgentStart;
+  let toolTopologyFrozen = true;
+  let disposed = false;
+
+  const rejectMutation = (): never => {
+    throw new Error(RUNTIME_PROMPT_MUTATION_ERROR);
+  };
+  const guardedSetActiveTools: AgentSession["setActiveToolsByName"] = (toolNames) => {
+    if (toolTopologyFrozen) rejectMutation();
+    nativeSetActiveTools.call(session, toolNames);
+  };
+  const guardedRefreshTools: MutablePromptToolSession["_refreshToolRegistry"] = (...args) => {
+    if (toolTopologyFrozen) rejectMutation();
+    return nativeRefreshTools.call(session, ...args);
+  };
+  const guardedEmitBeforeAgentStart: typeof runner.emitBeforeAgentStart = async (...args) => {
+    const result = await nativeEmitBeforeAgentStart.call(runner, ...args);
+    if (result?.systemPrompt !== undefined) rejectMutation();
+    return result;
+  };
+
+  session.setActiveToolsByName = guardedSetActiveTools;
+  mutableSession._refreshToolRegistry = guardedRefreshTools;
+  runner.emitBeforeAgentStart = guardedEmitBeforeAgentStart;
+
+  return {
+    allowToolTopologyChanges(): void {
+      if (!disposed) toolTopologyFrozen = false;
+    },
+    rejectToolTopologyChanges(): void {
+      if (!disposed) toolTopologyFrozen = true;
+    },
+    dispose(): void {
+      if (disposed) return;
+      disposed = true;
+      toolTopologyFrozen = false;
+      if (session.setActiveToolsByName === guardedSetActiveTools) {
+        session.setActiveToolsByName = nativeSetActiveTools;
+      }
+      if (mutableSession._refreshToolRegistry === guardedRefreshTools) {
+        mutableSession._refreshToolRegistry = nativeRefreshTools;
+      }
+      if (runner.emitBeforeAgentStart === guardedEmitBeforeAgentStart) {
+        runner.emitBeforeAgentStart = nativeEmitBeforeAgentStart;
       }
     },
   };
@@ -983,6 +1057,7 @@ export class PiRuntime implements PiRuntimeLike {
       ];
     }
     let toolProjectionAdapter: ToolProjectionAdapter | undefined;
+    let runtimePromptMutationAdapter: RuntimePromptMutationAdapter | undefined;
     let extensionSessionManagerAdapter: SessionBoundaryAdapter | undefined;
     let fixedModelAdapter: SessionBoundaryAdapter | undefined;
     let steeringCaptureAdapter: SteeringCaptureAdapter | undefined;
@@ -1026,6 +1101,7 @@ export class PiRuntime implements PiRuntimeLike {
     const disposeSessionBoundaryAdapters = (): void => {
       const failures: unknown[] = [];
       for (const adapter of [
+        runtimePromptMutationAdapter,
         fixedModelAdapter,
         extensionSessionManagerAdapter,
         steeringCaptureAdapter,
@@ -1189,6 +1265,7 @@ export class PiRuntime implements PiRuntimeLike {
           `Pi session did not activate workbench tool "${inactiveWorkbenchTool.name}"`,
         );
       }
+      runtimePromptMutationAdapter = installRuntimePromptMutationBoundary(createdSession);
       if (options.toolCallGate) {
         this.installToolCallGate(createdSession, options.toolCallGate);
       }
@@ -1313,16 +1390,23 @@ export class PiRuntime implements PiRuntimeLike {
               ...options.extensionUI,
             }
           : undefined;
-        activationPromise ??= session.bindExtensions({
-          uiContext,
-          mode: uiContext ? "rpc" : "print",
-          commandContextActions,
-          abortHandler: options.extensionAbort,
-          onError: (error) => {
-            if (extensionErrorHandler) extensionErrorHandler(error);
-            else pendingExtensionErrors.push(error);
-          },
-        }).catch(async (error) => {
+        activationPromise ??= (async () => {
+          runtimePromptMutationAdapter?.allowToolTopologyChanges();
+          try {
+            await session.bindExtensions({
+              uiContext,
+              mode: uiContext ? "rpc" : "print",
+              commandContextActions,
+              abortHandler: options.extensionAbort,
+              onError: (error) => {
+                if (extensionErrorHandler) extensionErrorHandler(error);
+                else pendingExtensionErrors.push(error);
+              },
+            });
+          } finally {
+            runtimePromptMutationAdapter?.rejectToolTopologyChanges();
+          }
+        })().catch(async (error) => {
           try {
             await dispose();
           } catch (teardownError) {
