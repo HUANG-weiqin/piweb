@@ -5173,6 +5173,101 @@ pre {
   line-height: 1.45;
 }
 
+.settings-drawer-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+}
+
+.settings-drawer-header:has(.settings-back) {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.settings-header-copy {
+  min-width: 0;
+}
+
+.settings-header-copy h2[tabindex="-1"]:focus {
+  outline: 0;
+}
+
+.settings-back {
+  min-width: 44px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 10px;
+  border-color: var(--line);
+  color: inherit;
+  background: transparent;
+  font-size: 12px;
+}
+
+.settings-back > span:first-child {
+  font-size: 24px;
+  line-height: 1;
+}
+
+.settings-home {
+  display: grid;
+  gap: 12px;
+  padding: 2px 0 24px;
+}
+
+.settings-menu-row {
+  width: 100%;
+  min-height: 112px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 17px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  color: inherit;
+  background: color-mix(in srgb, var(--soft) 48%, var(--panel-strong));
+  text-align: left;
+}
+
+.settings-menu-copy {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.settings-menu-copy > strong {
+  font-size: 18px;
+}
+
+.settings-menu-copy > small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.settings-menu-summary {
+  margin-top: 4px;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.45;
+}
+
+.settings-menu-chevron {
+  color: var(--muted);
+  font-size: 32px;
+  font-weight: 300;
+  line-height: 1;
+}
+
+.settings-menu-row:not(:disabled):hover {
+  border-color: color-mix(in srgb, var(--accent) 72%, var(--line));
+  background: var(--soft);
+}
+
 .icon-button {
   min-width: 36px;
   min-height: 36px;
@@ -6545,7 +6640,46 @@ pre {
     min-width: 0;
   }
 
+  .settings-drawer-header {
+    gap: 8px;
+  }
+
+  .settings-drawer-header:has(.settings-back) {
+    grid-template-columns: auto minmax(0, 1fr) 44px;
+  }
+
+  .settings-back {
+    min-width: 44px;
+    padding: 0 7px;
+  }
+
+  .settings-back > span:last-child {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+  .settings-home {
+    gap: 10px;
+    padding-top: 10px;
+  }
+
+  .settings-menu-row {
+    min-height: 118px;
+    padding: 17px 15px;
+    border-radius: 0;
+  }
+
+  .settings-menu-copy > strong {
+    font-size: 17px;
+  }
+
   .drawer-header p:last-child,
+  .drawer .settings-menu-copy small,
+  .drawer .settings-menu-summary,
   .drawer .current-model strong,
   .drawer .current-model small,
   .drawer .provider-identity strong,

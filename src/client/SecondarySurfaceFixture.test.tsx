@@ -43,8 +43,29 @@ const scenes: Array<{
   assertSurface: (container) => {
     const dialog = screen.getByRole("dialog", { name: "设置" });
     expect(dialog).toBeInTheDocument();
-    expect(container.querySelector(".drawer")).toBeInTheDocument();
-    expect(within(dialog).getAllByText("GPT-5.6 Luna")).toHaveLength(2);
+    expect(container.querySelector(".drawer[data-settings-route='home']"))
+      .toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "打开外观设置" }))
+      .toHaveTextContent("Quiet Rebel");
+    expect(within(dialog).queryByRole("radio")).not.toBeInTheDocument();
+  },
+}, {
+  surface: "drawer-appearance",
+  group: "A",
+  assertSurface: (container) => {
+    expect(container.querySelector(".drawer[data-settings-route='appearance']"))
+      .toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "外观" })).toHaveFocus();
+    expect(screen.getByRole("radio", { name: /Quiet Rebel/ })).toBeChecked();
+  },
+}, {
+  surface: "drawer-model-connections",
+  group: "A",
+  assertSurface: (container) => {
+    expect(container.querySelector(".drawer[data-settings-route='model-connections']"))
+      .toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "模型连接" })).toHaveFocus();
+    expect(screen.getByRole("combobox", { name: "提供商" })).toBeInTheDocument();
   },
 }, {
   surface: "role-manager",
@@ -259,10 +280,12 @@ describe("SecondarySurfaceFixture", () => {
     },
   );
 
-  it("keeps the real drawer nested-dialog focus and Escape lifecycle", () => {
+  it("keeps the real Settings nested-dialog focus and Escape lifecycle", () => {
     renderSurface("drawer");
 
     expect(screen.getByRole("button", { name: "关闭" })).toHaveFocus();
+    fireEvent.click(screen.getByRole("button", { name: "打开模型连接设置" }));
+    expect(screen.getByRole("heading", { name: "模型连接" })).toHaveFocus();
     fireEvent.click(screen.getByRole("button", { name: "更新 API Key" }));
 
     const keyDialog = screen.getByRole("dialog", { name: "OpenAI API Key" });

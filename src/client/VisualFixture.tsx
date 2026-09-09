@@ -7,7 +7,7 @@ import type {
 } from "../shared/protocol";
 import type { ChatState } from "./chat/reducer";
 import { Chat } from "./components/Chat";
-import { ConnectionDrawer } from "./components/ConnectionDrawer";
+import { SettingsDrawer } from "./components/SettingsDrawer";
 import { createConversationTitleLookup } from "./lib/conversation-display";
 import { usePhoneViewport } from "./lib/use-phone-viewport";
 import {
@@ -541,7 +541,7 @@ export function VisualFixture({
         onRewind={noOp}
       />
     </div>
-    <ConnectionDrawer
+    <SettingsDrawer
       state={drawerState}
       open={settingsOpen}
       resolveReturnFocus={settingsReturnFocusRef.current ?? undefined}

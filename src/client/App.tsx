@@ -36,7 +36,7 @@ import {
 import { ActivitySpinner } from "./components/ActivitySpinner";
 import { AuthDialog } from "./components/AuthDialog";
 import { Chat } from "./components/Chat";
-import { ConnectionDrawer } from "./components/ConnectionDrawer";
+import { SettingsDrawer } from "./components/SettingsDrawer";
 import {
   ConversationSidebar,
   conversationDisplayOrdinal,
@@ -4616,7 +4616,7 @@ export function App() {
             />}
       </div>
     </div>
-    <ConnectionDrawer
+    <SettingsDrawer
       state={runtimeState}
       open={drawer}
       covered={blockingModalVisible}

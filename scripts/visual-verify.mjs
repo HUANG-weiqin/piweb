@@ -31,7 +31,17 @@ const settingsViewports = [[1440, 900], [390, 844], [320, 600]];
 const secondarySurfaceDefinitions = {
   drawer: {
     group: "A",
-    expectedSelector: '.drawer[role="dialog"]',
+    expectedSelector: '.drawer[role="dialog"][data-settings-route="home"]',
+    viewports: settingsViewports,
+  },
+  "drawer-appearance": {
+    group: "A",
+    expectedSelector: '.drawer[role="dialog"][data-settings-route="appearance"]',
+    viewports: settingsViewports,
+  },
+  "drawer-model-connections": {
+    group: "A",
+    expectedSelector: '.drawer[role="dialog"][data-settings-route="model-connections"]',
     viewports: settingsViewports,
   },
   "role-manager": { group: "A", expectedSelector: ".role-manager-dialog" },
@@ -1351,6 +1361,8 @@ async function inspectMobileSettings(client, scrolled = false) {
     const backdrop = drawer?.parentElement;
     const header = drawer?.querySelector(".drawer-header");
     const close = drawer?.querySelector('button[aria-label="关闭"]');
+    const route = drawer?.getAttribute("data-settings-route") ?? "";
+    const menuRows = [...(drawer?.querySelectorAll(".settings-menu-row") ?? [])];
     const options = [...(drawer?.querySelectorAll(".color-scheme-option") ?? [])];
     const modelHeading = [...(drawer?.querySelectorAll("h3") ?? [])]
       .find((heading) => heading.textContent?.trim() === "模型目录");
@@ -1378,7 +1390,18 @@ async function inspectMobileSettings(client, scrolled = false) {
     if (!closeRect || closeRect.width < 44 || closeRect.height < 44) {
       issues.push("Settings close target is smaller than 44px");
     }
-    if (options.length !== 2) issues.push("expected two single-column theme cards");
+    if (route === "home") {
+      if (menuRows.length !== 2) issues.push("Settings HOME does not have exactly two menu rows");
+      if (options.length > 0 || drawer?.querySelector('select[aria-label="提供商"], button[aria-label="刷新模型"]')) {
+        issues.push("Settings HOME exposes dedicated-page controls");
+      }
+    } else if (route === "appearance") {
+      if (options.length !== 2) issues.push("expected two single-column theme cards");
+    } else if (route === "model-connections") {
+      if (!drawer?.querySelector('select[aria-label="提供商"]')) issues.push("model provider control is missing");
+    } else {
+      issues.push("Settings has an unknown route");
+    }
     options.forEach((option, index) => {
       const rect = rectOf(option);
       if (!rect || rect.height < 44 || rect.left < -1 || rect.right > innerWidth + 1) {
@@ -1404,7 +1427,9 @@ async function inspectMobileSettings(client, scrolled = false) {
     if (overflow) issues.push("Settings introduced horizontal overflow");
     if ((document.scrollingElement?.scrollTop ?? 0) !== 0) issues.push("background document scrolled");
     if (expectScrolled) {
-      if ((drawer?.scrollTop ?? 0) <= 0) issues.push("Settings did not scroll");
+      if (route !== "model-connections") issues.push("Settings scrolled check is not on model connections");
+      const scrollRange = drawer ? drawer.scrollHeight - drawer.clientHeight : 0;
+      if (scrollRange > 1 && (drawer?.scrollTop ?? 0) <= 0) issues.push("Settings did not scroll");
       if (!modelHeadingRect || modelHeadingRect.bottom <= (headerRect?.bottom ?? 0)
         || modelHeadingRect.top >= innerHeight) {
         issues.push("model directory is not reachable after scrolling");
@@ -1412,6 +1437,7 @@ async function inspectMobileSettings(client, scrolled = false) {
     }
     return {
       issues,
+      route,
       drawer: drawerRect,
       header: headerRect,
       close: closeRect,
@@ -1523,9 +1549,11 @@ async function exerciseMobileWorkbench(client, outputPath, width, height, index,
   const settings = await inspectMobileSettings(client);
   if (shouldCapture) {
     captures.push(await captureMobileScene(
-      client, outputPath, width, height, index + captures.length, "settings", settings,
+      client, outputPath, width, height, index + captures.length, "settings-home", settings,
     ));
   }
+  await clickVisibleButton(client, '.drawer button[aria-label="打开模型连接设置"]');
+  await waitForSecondaryInteraction();
   await client.call("Input.dispatchMouseEvent", {
     type: "mouseWheel",
     x: Math.max(1, width - 18),
@@ -1541,6 +1569,15 @@ async function exerciseMobileWorkbench(client, outputPath, width, height, index,
       "settings-connections", settingsScrolled,
     ));
   }
+  await client.call("Input.dispatchKeyEvent", {
+    type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27,
+  });
+  await client.call("Input.dispatchKeyEvent", {
+    type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27,
+  });
+  await waitForSecondaryInteraction();
+  const settingsHomeFocus = await client.evaluate(`document.activeElement === document.querySelector('.drawer button[aria-label="打开模型连接设置"]')`);
+  if (!settingsHomeFocus) throw new Error("Mobile Settings Escape did not return to HOME row");
   await client.call("Input.dispatchKeyEvent", {
     type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27,
   });
