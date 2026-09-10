@@ -2477,6 +2477,58 @@ describe("ProjectSessionCoordinator", () => {
     await running;
   });
 
+  it("rejects a queued role switch after deletion reserves its target", async () => {
+    const fixture = await createFixture();
+    const role = await fixture.roles.createRole({
+      name: "Builder",
+      description: "",
+      systemPrompt: "",
+      model: { provider: "test", id: "model-b" },
+      compactionModel: null,
+      defaultThinkingLevel: "off",
+      defaultServiceTier: null,
+      toolMode: "read_only",
+      canManageSessions: false,
+    });
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const switchRole = vi.spyOn(actor, "switchRole");
+    const refreshStarted = deferred();
+    const releaseRefresh = deferred();
+    const refreshConversations = fixture.handle.project.refreshConversations
+      .bind(fixture.handle.project);
+    vi.spyOn(fixture.handle.project, "refreshConversations")
+      .mockImplementationOnce(async () => {
+        refreshStarted.resolve();
+        await releaseRefresh.promise;
+        return refreshConversations();
+      });
+
+    const blocker = fixture.coordinator.renameConversation(
+      fixture.handle,
+      actor.conversationId,
+      "hold lifecycle",
+    );
+    await refreshStarted.promise;
+    const switching = fixture.coordinator.switchConversationRole(
+      fixture.handle,
+      actor.conversationId,
+      role.id,
+    );
+    const deleting = fixture.coordinator.deleteConversation(
+      fixture.handle,
+      actor.conversationId,
+    );
+
+    releaseRefresh.resolve();
+    await blocker;
+    await expect(switching).rejects.toThrow(/being deleted/i);
+    expect(switchRole).not.toHaveBeenCalled();
+    await expect(deleting).resolves.toBe(true);
+  });
+
   it("restores the previous role when the replacement runtime cannot open", async () => {
     const fixture = await createFixture();
     const role = await fixture.roles.createRole({

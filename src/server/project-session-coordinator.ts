@@ -1117,6 +1117,9 @@ export class ProjectSessionCoordinator {
   ): Promise<ConversationActor> {
     const context = this.requireContext(handle);
     return this.runLifecycle(context, async () => {
+      if (context.deleting.has(conversationId)) {
+        throw new Error(`Conversation is being deleted: ${conversationId}`);
+      }
       const actor = this.requireActor(context, conversationId);
       const role = this.resolveAvailableConversationRole(
         roleId,
