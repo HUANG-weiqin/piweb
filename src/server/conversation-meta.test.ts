@@ -312,17 +312,67 @@ describe("conversation reserved entries", () => {
     ])).toThrow(/service tier updatedAt cannot regress/i);
   });
 
-  it("accepts only v2 LoopList snapshots and continuations", () => {
-    expect(() => parseReservedConversationEntry({
+  it("normalizes strict v1 LoopList history into the v2 internal form", () => {
+    const legacyItems = [
+      { id: "implement", text: "Implement LoopList", checked: false },
+      { id: "verify", text: "Verify recovery", checked: true },
+    ];
+    const legacy = {
       customType: "piweb.loop_list.v1",
-      data: { items: [], armed: true, updatedAt: timestamp },
-    })).toThrow(/unknown piweb reserved custom type/i);
-    expect(() => parseReservedConversationEntry({
+      data: { items: legacyItems, armed: true, updatedAt: timestamp },
+    };
+    const legacyContinuation = {
       customType: "piweb.loop_list_continue.v1",
-      content: "legacy",
+      content: [
+        "Current LoopList snapshot:",
+        "[ ] Implement LoopList (implement)",
+        "[x] Verify recovery (verify)",
+        "Continue working through the unchecked items. Update the list with todo_write as progress changes.",
+      ].join("\n"),
       display: false,
-      details: { runId: randomUUID(), continuation: 1, items: [] },
-    })).toThrow(/unknown piweb reserved custom type/i);
+      details: { runId: randomUUID(), continuation: 1, items: legacyItems },
+    };
+
+    expect(parseReservedConversationEntry(legacy)).toEqual({
+      kind: "loop_list",
+      entry: {
+        customType: LOOP_LIST_CUSTOM_TYPE,
+        data: {
+          items: [
+            { id: "implement", text: "Implement LoopList", status: "pending" },
+            { id: "verify", text: "Verify recovery", status: "completed" },
+          ],
+          armed: true,
+          updatedAt: timestamp,
+        },
+      },
+    });
+    expect(parseReservedConversationEntry(legacyContinuation)).toMatchObject({
+      kind: "loop_list_continue",
+      entry: {
+        customType: LOOP_LIST_CONTINUE_CUSTOM_TYPE,
+        details: {
+          items: [
+            { id: "implement", text: "Implement LoopList", status: "pending" },
+            { id: "verify", text: "Verify recovery", status: "completed" },
+          ],
+        },
+      },
+    });
+    expect(() => parseReservedConversationEntry({
+      ...legacy,
+      data: { ...legacy.data, items: [{ ...legacyItems[0], extra: true }] },
+    })).toThrow();
+    expect(() => parseReservedConversationEntry({
+      ...legacy,
+      data: { ...legacy.data, items: [{ ...legacyItems[0], checked: "false" }] },
+    })).toThrow();
+    expect(() => parseReservedConversationEntry({
+      ...legacyContinuation,
+      content: "tampered",
+    })).toThrow(/must match/i);
+    expect(() => parseLoopListEntry(legacy)).toThrow();
+    expect(() => parseLoopListContinueEntry(legacyContinuation)).toThrow();
     for (const customType of [
       "piweb.pending_prompt_delivery.v1",
       "piweb.pending_prompt_batch.v1",

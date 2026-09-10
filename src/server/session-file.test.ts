@@ -611,6 +611,67 @@ describe("validatePiSessionFile", () => {
     )).toBe(conversationId);
   });
 
+  it("accepts strict v1 LoopList history after normalizing it to v2", () => {
+    const conversationId = randomUUID();
+    const runId = randomUUID();
+    const items = [{ id: "implement", text: "Implement the change", checked: false }];
+    const session = serialize([
+      {
+        type: "session",
+        version: 3,
+        id: conversationId,
+        timestamp,
+        cwd: "E:\\work",
+      },
+      {
+        type: "custom",
+        id: "00000001",
+        parentId: null,
+        timestamp,
+        customType: "piweb.loop_list.v1",
+        data: { items, armed: true, updatedAt: timestamp },
+      },
+      {
+        type: "custom_message",
+        id: "00000002",
+        parentId: "00000001",
+        timestamp,
+        customType: "piweb.loop_list_continue.v1",
+        content: [
+          "Current LoopList snapshot:",
+          "[ ] Implement the change (implement)",
+          "Continue working through the unchecked items. Update the list with todo_write as progress changes.",
+        ].join("\n"),
+        display: false,
+        details: { runId, continuation: 1, items },
+      },
+      loopListContinuationEntry(
+        "00000003",
+        "00000002",
+        runId,
+        2,
+        [{ id: "implement", text: "Implement the change", status: "pending" }],
+      ),
+    ]);
+
+    expect(inspectPiSessionFile(
+      session,
+      "legacy-loop-list.jsonl",
+      conversationId,
+    )).toMatchObject({
+      loopList: {
+        items: [{ id: "implement", text: "Implement the change", status: "pending" }],
+        armed: true,
+        updatedAt: timestamp,
+      },
+    });
+    expect(validatePiSessionFile(
+      session,
+      "legacy-loop-list.jsonl",
+      conversationId,
+    )).toBe(conversationId);
+  });
+
   it.each([
     {
       name: "whose item snapshot differs from the latest LoopList",

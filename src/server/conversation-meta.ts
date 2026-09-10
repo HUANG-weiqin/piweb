@@ -37,6 +37,8 @@ const COMPACTION_RESUME_CUSTOM_TYPE =
   "piweb.compaction_resume.v1";
 export const LOOP_LIST_CUSTOM_TYPE = "piweb.loop_list.v2";
 export const LOOP_LIST_CONTINUE_CUSTOM_TYPE = "piweb.loop_list_continue.v2";
+const LEGACY_LOOP_LIST_CUSTOM_TYPE = "piweb.loop_list.v1";
+const LEGACY_LOOP_LIST_CONTINUE_CUSTOM_TYPE = "piweb.loop_list_continue.v1";
 export const MAX_LOOP_LIST_CONTINUATIONS_PER_RUN = 8;
 export const CONVERSATION_ROLE_CHANGE_CUSTOM_TYPE =
   "piweb.conversation_role_change.v1";
@@ -477,6 +479,46 @@ const loopListEntrySchema = z.object({
   }).strict(),
 }).strict();
 
+const legacyLoopListItemSchema = z.object({
+  id: z.string(),
+  text: z.string(),
+  checked: z.boolean(),
+}).strict();
+
+type LegacyLoopListItem = z.infer<typeof legacyLoopListItemSchema>;
+
+function normalizeLegacyLoopListItems(
+  items: readonly LegacyLoopListItem[],
+): LoopList["items"] {
+  return items.map(({ id, text, checked }) => ({
+    id,
+    text,
+    status: checked ? "completed" : "pending",
+  }));
+}
+
+const legacyLoopListItemsSchema = z.array(legacyLoopListItemSchema)
+  .superRefine((items, context) => {
+    const result = loopListSchema.shape.items.safeParse(
+      normalizeLegacyLoopListItems(items),
+    );
+    if (!result.success) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Invalid legacy LoopList items: ${result.error.issues[0]?.message ?? "unknown error"}`,
+      });
+    }
+  });
+
+const legacyLoopListEntrySchema = z.object({
+  customType: z.literal(LEGACY_LOOP_LIST_CUSTOM_TYPE),
+  data: z.object({
+    items: legacyLoopListItemsSchema,
+    armed: z.boolean(),
+    updatedAt: canonicalTimestampSchema("updatedAt"),
+  }).strict(),
+}).strict();
+
 function formatLoopListItems(items: LoopList["items"]): string {
   const marker = {
     pending: "[ ]",
@@ -508,6 +550,62 @@ const loopListContinueEntrySchema = z.object({
     });
   }
 });
+
+function formatLegacyLoopListItems(items: readonly LegacyLoopListItem[]): string {
+  return [
+    "Current LoopList snapshot:",
+    ...items.map((item) => `${item.checked ? "[x]" : "[ ]"} ${item.text} (${item.id})`),
+    "Continue working through the unchecked items. Update the list with todo_write as progress changes.",
+  ].join("\n");
+}
+
+const legacyLoopListContinueEntrySchema = z.object({
+  customType: z.literal(LEGACY_LOOP_LIST_CONTINUE_CUSTOM_TYPE),
+  content: limitedString("content", MAX_CONVERSATION_MESSAGE_CONTENT_BYTES),
+  display: z.literal(false),
+  details: z.object({
+    runId: uuidSchema("runId"),
+    continuation: z.number().int().min(1).max(MAX_LOOP_LIST_CONTINUATIONS_PER_RUN),
+    items: legacyLoopListItemsSchema,
+  }).strict(),
+}).strict().superRefine((value, context) => {
+  if (value.content !== formatLegacyLoopListItems(value.details.items)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Legacy LoopList continuation content must match its item snapshot",
+      path: ["content"],
+    });
+  }
+});
+
+function normalizeLegacyLoopListEntry(value: unknown): LoopListEntry {
+  const legacy = legacyLoopListEntrySchema.parse(value);
+  return loopListEntrySchema.parse({
+    customType: LOOP_LIST_CUSTOM_TYPE,
+    data: {
+      items: normalizeLegacyLoopListItems(legacy.data.items),
+      armed: legacy.data.armed,
+      updatedAt: legacy.data.updatedAt,
+    },
+  });
+}
+
+function normalizeLegacyLoopListContinueEntry(
+  value: unknown,
+): LoopListContinueEntry {
+  const legacy = legacyLoopListContinueEntrySchema.parse(value);
+  const items = normalizeLegacyLoopListItems(legacy.details.items);
+  return loopListContinueEntrySchema.parse({
+    customType: LOOP_LIST_CONTINUE_CUSTOM_TYPE,
+    content: formatLoopListItems(items),
+    display: false,
+    details: {
+      runId: legacy.details.runId,
+      continuation: legacy.details.continuation,
+      items,
+    },
+  });
+}
 
 const compactionResumeEntrySchema = z.object({
   customType: z.literal(COMPACTION_RESUME_CUSTOM_TYPE),
@@ -1076,10 +1174,19 @@ export function parseReservedConversationEntry(
   if (customType === LOOP_LIST_CUSTOM_TYPE) {
     return { kind: "loop_list", entry: parseLoopListEntry(payload) };
   }
+  if (customType === LEGACY_LOOP_LIST_CUSTOM_TYPE) {
+    return { kind: "loop_list", entry: normalizeLegacyLoopListEntry(payload) };
+  }
   if (customType === LOOP_LIST_CONTINUE_CUSTOM_TYPE) {
     return {
       kind: "loop_list_continue",
       entry: parseLoopListContinueEntry(payload),
+    };
+  }
+  if (customType === LEGACY_LOOP_LIST_CONTINUE_CUSTOM_TYPE) {
+    return {
+      kind: "loop_list_continue",
+      entry: normalizeLegacyLoopListContinueEntry(payload),
     };
   }
   if (customType === COMPACTION_RESUME_CUSTOM_TYPE) {
