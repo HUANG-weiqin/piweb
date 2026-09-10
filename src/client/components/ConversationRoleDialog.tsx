@@ -26,6 +26,8 @@ interface ConversationRoleDialogProps {
   roles: RoleTemplate[];
   /** Opaque identity of the executable focus, supplied by App. */
   focusKey?: string;
+  /** A higher-priority external modal owns accessibility and focus. */
+  covered?: boolean;
   switchDisabled: boolean;
   switching: boolean;
   onSwitch(roleId: string, focusKey: string): void;
@@ -37,6 +39,7 @@ export function ConversationRoleDialog({
   role,
   roles,
   focusKey,
+  covered,
   switchDisabled,
   switching,
   onSwitch,
@@ -83,8 +86,9 @@ export function ConversationRoleDialog({
     <section
       ref={focusRef}
       className="modal conversation-role-dialog"
-      role="dialog"
-      aria-modal="true"
+      role={covered ? undefined : "dialog"}
+      aria-modal={covered ? undefined : "true"}
+      aria-hidden={covered ? "true" : undefined}
       aria-label="更换会话角色"
       tabIndex={-1}
     >

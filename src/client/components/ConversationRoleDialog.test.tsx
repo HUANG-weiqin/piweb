@@ -4,7 +4,9 @@ import { useState } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ConversationRoleSnapshot } from "../../shared/protocol";
+import { AuthDialog } from "./AuthDialog";
 import { ConversationRoleDialog } from "./ConversationRoleDialog";
+import { ExtensionDialog } from "./ExtensionDialog";
 
 afterEach(cleanup);
 
@@ -54,6 +56,47 @@ function ConversationRoleBackdropFixture({
   </>;
 }
 
+function ExternalRoleCoverFixture({
+  external,
+  covered,
+}: {
+  external?: "auth" | "extension";
+  covered: boolean;
+}) {
+  return <>
+    <ConversationRoleDialog
+      open
+      role={role}
+      roles={roles}
+      focusKey={FOCUS_KEY}
+      covered={covered}
+      switchDisabled={false}
+      switching={false}
+      onSwitch={() => undefined}
+      onClose={() => undefined}
+    />
+    {external === "auth" && <AuthDialog
+      requestId="auth-request"
+      request={{ kind: "prompt", message: "认证代码" }}
+      onRespond={() => undefined}
+      onCancel={() => undefined}
+    />}
+    {external === "extension" && <ExtensionDialog
+      pending={{
+        requestId: "extension-request",
+        request: {
+          kind: "confirm",
+          title: "扩展确认",
+          message: "继续吗？",
+        },
+      }}
+      pendingCount={1}
+      online
+      onRespond={() => true}
+    />}
+  </>;
+}
+
 describe("ConversationRoleDialog", () => {
   it("dismisses only from the exact backdrop and restores its launcher", async () => {
     const onSwitch = vi.fn();
@@ -91,6 +134,35 @@ describe("ConversationRoleDialog", () => {
     });
     expect(onSwitch).not.toHaveBeenCalled();
   });
+  it.each([
+    ["auth", "登录订阅账户"],
+    ["extension", "扩展确认"],
+  ] as const)("stays mounted but inaccessible beneath %s UI", (
+    external,
+    externalLabel,
+  ) => {
+    const view = render(<ExternalRoleCoverFixture external={external} covered />);
+    const coveredDialog = document.querySelector<HTMLElement>(
+      ".conversation-role-dialog",
+    );
+    if (!coveredDialog) throw new Error("role dialog missing");
+
+    expect(screen.queryByRole("dialog", { name: "更换会话角色" }))
+      .not.toBeInTheDocument();
+    expect(coveredDialog).toHaveAttribute("aria-hidden", "true");
+    expect(coveredDialog).not.toHaveAttribute("role");
+    expect(coveredDialog).not.toHaveAttribute("aria-modal");
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(screen.getByRole("dialog", { name: externalLabel })).toBeInTheDocument();
+
+    view.rerender(<ExternalRoleCoverFixture covered={false} />);
+    expect(screen.getByRole("dialog", { name: "更换会话角色" }))
+      .toBe(coveredDialog);
+    expect(coveredDialog).not.toHaveAttribute("aria-hidden");
+    expect(coveredDialog).toHaveAttribute("role", "dialog");
+    expect(coveredDialog).toHaveAttribute("aria-modal", "true");
+  });
+
   it("shows the current role and disables reapplying the same revision", () => {
     render(<ConversationRoleDialog
       open

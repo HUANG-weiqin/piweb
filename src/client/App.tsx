@@ -4618,6 +4618,7 @@ export function App() {
               role={visibleConversationRole}
               roles={roles}
               roleSwitchFocusKey={roleSwitchFocusKey}
+              roleDialogCovered={externalModalVisible}
               roleSwitchDisabled={
                 !runtimeState
                 || transitioning

@@ -141,6 +141,7 @@ interface ChatProps {
   role?: ConversationRoleSnapshot;
   roles: RoleTemplate[];
   roleSwitchFocusKey?: string;
+  roleDialogCovered?: boolean;
   roleSwitchDisabled: boolean;
   roleSwitching: boolean;
   thinkingLevel: ThinkingLevel;
@@ -478,6 +479,7 @@ function ChatView({
   role,
   roles,
   roleSwitchFocusKey,
+  roleDialogCovered,
   roleSwitchDisabled,
   roleSwitching,
   thinkingLevel,
@@ -1445,6 +1447,7 @@ function ChatView({
       role={role}
       roles={roles}
       focusKey={roleSwitchFocusKey}
+      covered={roleDialogCovered}
       switchDisabled={roleSwitchDisabled}
       switching={roleSwitching}
       onSwitch={onSwitchRole}

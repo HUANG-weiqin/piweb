@@ -6236,7 +6236,7 @@ describe("App", () => {
       .not.toBeInTheDocument();
   });
 
-  it("switches an idle focused conversation role with exact command correlation", () => {
+  it("switches an idle focused conversation role with exact command correlation", async () => {
     render(<App />);
     const sessionId = startFromSetup();
     const nextRole = defaultRole({
@@ -6292,11 +6292,41 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", {
       name: "查看会话角色 Default",
     }));
+    const roleDialog = screen.getByRole("dialog", { name: "更换会话角色" });
+    const roleClose = screen.getByRole("button", { name: "关闭" });
+    roleClose.focus();
     fireEvent.change(screen.getByRole("combobox", {
       name: "选择新的会话角色",
     }), {
       target: { value: nextRole.id },
     });
+
+    act(() => socketMock.emit?.({
+      type: "extension_ui_request",
+      sessionId,
+      requestId: EXTENSION_REQUEST_A,
+      request: { kind: "confirm", title: "Extension question", message: "Continue?" },
+    }));
+    expect(screen.queryByRole("dialog", { name: "更换会话角色" }))
+      .not.toBeInTheDocument();
+    expect(roleDialog).toHaveAttribute("aria-hidden", "true");
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(screen.getByRole("dialog", { name: "Extension question" }))
+      .toBeInTheDocument();
+
+    act(() => socketMock.emit?.({
+      type: "extension_ui_closed",
+      sessionId,
+      requestId: EXTENSION_REQUEST_A,
+    }));
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "更换会话角色" }))
+        .toBe(roleDialog);
+      expect(roleClose).toHaveFocus();
+    });
+    expect(screen.getByRole("combobox", {
+      name: "选择新的会话角色",
+    })).toHaveValue(nextRole.id);
     fireEvent.click(screen.getByRole("button", { name: "应用角色" }));
 
     const command = latestCommand("switch_conversation_role");
