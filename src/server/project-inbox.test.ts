@@ -136,6 +136,19 @@ function queuedEnvelopeBytes(value: ReturnType<typeof input>): number {
   return Buffer.byteLength(`${JSON.stringify(createInboxEnvelope(value), null, 2)}\n`, "utf8");
 }
 
+function artifactPath(
+  directory: string,
+  targetPath: string,
+  operation: "create" | "replace" | "delete",
+  transactionId: string,
+  stage: "tmp" | "quarantine",
+): string {
+  return join(
+    directory,
+    `.${targetPath.slice(directory.length + 1)}.${operation}.${transactionId}.${stage}`,
+  );
+}
+
 function tombstonePath(
   directory: string,
   conversationId: string,
@@ -410,6 +423,346 @@ describe("ProjectInbox", () => {
     );
   });
 
+  it("treats a replace as successful when post-commit cleanup recovery preserves the new state", async () => {
+    const { inbox } = await temporaryInbox("piweb-inbox-replace-cleanup-");
+    const value = input();
+    const runId = randomUUID();
+    await inbox.put(value);
+
+    let quarantineProofs = 0;
+    vi.mocked(lstat).mockImplementation(async (...args) => {
+      const path = String(args[0]);
+      if (
+        path.includes(`.${value.messageId}.json.replace.`)
+        && path.endsWith(".quarantine")
+      ) {
+        quarantineProofs++;
+        if (quarantineProofs === 2) {
+          throw new Error("post-commit quarantine cleanup proof failed");
+        }
+      }
+      return nativeFs.lstat(...args);
+    });
+
+    await expect(inbox.updateState(value.messageId, {
+      state: "processing",
+      processingRunId: runId,
+    })).resolves.toMatchObject({
+      state: "processing",
+      processingRunId: runId,
+    });
+    expect(quarantineProofs).toBeGreaterThanOrEqual(2);
+    await expect(inbox.get(value.messageId)).resolves.toMatchObject({
+      state: "processing",
+      processingRunId: runId,
+    });
+  });
+
+  it("recovers typed create artifacts before scanning and rejects divergent publication", async () => {
+    const { directory } = await temporaryInbox("piweb-inbox-create-recovery-");
+    const abandoned = input();
+    const abandonedPath = join(directory, `${abandoned.messageId}.json`);
+    const abandonedTemporary = artifactPath(
+      directory,
+      abandonedPath,
+      "create",
+      randomUUID(),
+      "tmp",
+    );
+    await writeFile(abandonedTemporary, `${JSON.stringify(
+      createInboxEnvelope(abandoned),
+      null,
+      2,
+    )}\n`);
+
+    await expect(ProjectInbox.open(directory)).resolves.toBeInstanceOf(ProjectInbox);
+    await expect(lstat(abandonedTemporary)).rejects.toMatchObject({ code: "ENOENT" });
+
+    const committed = input();
+    const committedPath = join(directory, `${committed.messageId}.json`);
+    const committedTemporary = artifactPath(
+      directory,
+      committedPath,
+      "create",
+      randomUUID(),
+      "tmp",
+    );
+    const committedRaw = `${JSON.stringify(createInboxEnvelope(committed), null, 2)}\n`;
+    await writeFile(committedTemporary, committedRaw);
+    await link(committedTemporary, committedPath);
+
+    const recovered = await ProjectInbox.open(directory);
+    await expect(readFile(committedPath, "utf8")).resolves.toBe(committedRaw);
+    await expect(lstat(committedTemporary)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(recovered.get(committed.messageId)).resolves.toMatchObject({
+      messageId: committed.messageId,
+    });
+
+    const conflict = input();
+    const conflictPath = join(directory, `${conflict.messageId}.json`);
+    await writeEnvelope(directory, conflict);
+    await writeFile(artifactPath(
+      directory,
+      conflictPath,
+      "create",
+      randomUUID(),
+      "tmp",
+    ), "different inode\n");
+    await expect(ProjectInbox.open(directory)).rejects.toThrow(/conflicts/i);
+  });
+
+  it("recovers typed replace artifacts at each crash boundary", async () => {
+    const { directory } = await temporaryInbox("piweb-inbox-replace-recovery-");
+    const beforeRename = input();
+    const beforeRenamePath = join(directory, `${beforeRename.messageId}.json`);
+    const oldRaw = `${JSON.stringify(createInboxEnvelope(beforeRename), null, 2)}\n`;
+    const newRaw = `${JSON.stringify(createInboxEnvelope({
+      ...beforeRename,
+      body: "new body",
+    }), null, 2)}\n`;
+    await writeFile(beforeRenamePath, oldRaw);
+    const beforeRenameTemporary = artifactPath(
+      directory,
+      beforeRenamePath,
+      "replace",
+      randomUUID(),
+      "tmp",
+    );
+    await writeFile(beforeRenameTemporary, newRaw);
+
+    await ProjectInbox.open(directory);
+    await expect(readFile(beforeRenamePath, "utf8")).resolves.toBe(oldRaw);
+    await expect(lstat(beforeRenameTemporary)).rejects.toMatchObject({ code: "ENOENT" });
+
+    const betweenRenameAndCommit = input();
+    const betweenRenameAndCommitPath = join(
+      directory,
+      `${betweenRenameAndCommit.messageId}.json`,
+    );
+    const interruptedTransactionId = randomUUID();
+    const interruptedQuarantine = artifactPath(
+      directory,
+      betweenRenameAndCommitPath,
+      "replace",
+      interruptedTransactionId,
+      "quarantine",
+    );
+    const interruptedTemporary = artifactPath(
+      directory,
+      betweenRenameAndCommitPath,
+      "replace",
+      interruptedTransactionId,
+      "tmp",
+    );
+    const interruptedOldRaw = `${JSON.stringify(
+      createInboxEnvelope(betweenRenameAndCommit),
+      null,
+      2,
+    )}\n`;
+    await writeFile(interruptedQuarantine, interruptedOldRaw);
+    await writeFile(interruptedTemporary, `${JSON.stringify(
+      createInboxEnvelope({
+        ...betweenRenameAndCommit,
+        body: "interrupted replacement",
+      }),
+      null,
+      2,
+    )}\n`);
+
+    await ProjectInbox.open(directory);
+    await expect(readFile(betweenRenameAndCommitPath, "utf8")).resolves.toBe(
+      interruptedOldRaw,
+    );
+    await expect(lstat(interruptedQuarantine)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(interruptedTemporary)).rejects.toMatchObject({ code: "ENOENT" });
+
+    const rollbackRestored = input();
+    const rollbackRestoredPath = join(
+      directory,
+      `${rollbackRestored.messageId}.json`,
+    );
+    const rollbackTransactionId = randomUUID();
+    const rollbackQuarantine = artifactPath(
+      directory,
+      rollbackRestoredPath,
+      "replace",
+      rollbackTransactionId,
+      "quarantine",
+    );
+    const rollbackTemporary = artifactPath(
+      directory,
+      rollbackRestoredPath,
+      "replace",
+      rollbackTransactionId,
+      "tmp",
+    );
+    const rollbackOldRaw = `${JSON.stringify(
+      createInboxEnvelope(rollbackRestored),
+      null,
+      2,
+    )}\n`;
+    await writeFile(rollbackQuarantine, rollbackOldRaw);
+    await writeFile(rollbackTemporary, `${JSON.stringify(
+      createInboxEnvelope({
+        ...rollbackRestored,
+        body: "recovery must discard this staged replacement",
+      }),
+      null,
+      2,
+    )}\n`);
+    // This is the crash boundary inside recovery after link(Q, F), before Q
+    // cleanup. F and Q are intentionally the same inode.
+    await link(rollbackQuarantine, rollbackRestoredPath);
+
+    await ProjectInbox.open(directory);
+    await expect(readFile(rollbackRestoredPath, "utf8")).resolves.toBe(
+      rollbackOldRaw,
+    );
+    await expect(lstat(rollbackQuarantine)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(rollbackTemporary)).rejects.toMatchObject({ code: "ENOENT" });
+
+    const afterCommit = input();
+    const afterCommitPath = join(directory, `${afterCommit.messageId}.json`);
+    const transactionId = randomUUID();
+    const afterCommitTemporary = artifactPath(
+      directory,
+      afterCommitPath,
+      "replace",
+      transactionId,
+      "tmp",
+    );
+    const afterCommitQuarantine = artifactPath(
+      directory,
+      afterCommitPath,
+      "replace",
+      transactionId,
+      "quarantine",
+    );
+    const afterCommitRaw = `${JSON.stringify(createInboxEnvelope(afterCommit), null, 2)}\n`;
+    await writeFile(afterCommitTemporary, afterCommitRaw);
+    await link(afterCommitTemporary, afterCommitPath);
+    await writeFile(afterCommitQuarantine, newRaw.replace(
+      beforeRename.messageId,
+      afterCommit.messageId,
+    ));
+
+    await ProjectInbox.open(directory);
+    await expect(readFile(afterCommitPath, "utf8")).resolves.toBe(afterCommitRaw);
+    await expect(lstat(afterCommitTemporary)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(afterCommitQuarantine)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("fails closed on conflicting typed replace and delete artifacts", async () => {
+    const { directory } = await temporaryInbox("piweb-inbox-artifact-conflict-");
+    const replace = input();
+    const replacePath = join(directory, `${replace.messageId}.json`);
+    await writeEnvelope(directory, replace);
+    await writeFile(artifactPath(
+      directory,
+      replacePath,
+      "replace",
+      randomUUID(),
+      "quarantine",
+    ), "orphan replacement\n");
+    await expect(ProjectInbox.open(directory)).rejects.toThrow(
+      /quarantine has no matching temporary/i,
+    );
+
+    const qOnlyDirectory = (await temporaryInbox(
+      "piweb-inbox-replace-q-only-",
+    )).directory;
+    const qOnly = input();
+    const qOnlyPath = join(qOnlyDirectory, `${qOnly.messageId}.json`);
+    await writeFile(artifactPath(
+      qOnlyDirectory,
+      qOnlyPath,
+      "replace",
+      randomUUID(),
+      "quarantine",
+    ), `${JSON.stringify(createInboxEnvelope(qOnly), null, 2)}\n`);
+    await expect(ProjectInbox.open(qOnlyDirectory)).rejects.toThrow(
+      /no matching temporary/i,
+    );
+
+    const sharedDirectory = (await temporaryInbox(
+      "piweb-inbox-replace-shared-artifacts-",
+    )).directory;
+    const shared = input();
+    const sharedPath = join(sharedDirectory, `${shared.messageId}.json`);
+    const sharedTransactionId = randomUUID();
+    const sharedQuarantine = artifactPath(
+      sharedDirectory,
+      sharedPath,
+      "replace",
+      sharedTransactionId,
+      "quarantine",
+    );
+    await writeFile(sharedQuarantine, `${JSON.stringify(
+      createInboxEnvelope(shared),
+      null,
+      2,
+    )}\n`);
+    await link(sharedQuarantine, artifactPath(
+      sharedDirectory,
+      sharedPath,
+      "replace",
+      sharedTransactionId,
+      "tmp",
+    ));
+    await expect(ProjectInbox.open(sharedDirectory)).rejects.toThrow(
+      /share an inode/i,
+    );
+
+    const secondDirectory = (await temporaryInbox(
+      "piweb-inbox-delete-artifact-conflict-",
+    )).directory;
+    const deleted = input();
+    const deletedPath = join(secondDirectory, `${deleted.messageId}.json`);
+    await writeEnvelope(secondDirectory, deleted);
+    await writeFile(artifactPath(
+      secondDirectory,
+      deletedPath,
+      "delete",
+      randomUUID(),
+      "quarantine",
+    ), "deleted copy\n");
+    await expect(ProjectInbox.open(secondDirectory)).rejects.toThrow(/conflicts/i);
+
+    const legacyDirectory = (await temporaryInbox(
+      "piweb-inbox-legacy-artifact-",
+    )).directory;
+    const legacy = input();
+    await writeFile(
+      join(
+        legacyDirectory,
+        `.${legacy.messageId}.json.${process.pid}.${randomUUID()}.tmp`,
+      ),
+      "legacy mutation artifact\n",
+    );
+    await expect(ProjectInbox.open(legacyDirectory)).rejects.toThrow(
+      /invalid inbox entry name/i,
+    );
+  });
+
+  it("forwards a typed delete quarantine during recovery", async () => {
+    const { directory } = await temporaryInbox("piweb-inbox-delete-recovery-");
+    const deleted = input();
+    const deletedPath = join(directory, `${deleted.messageId}.json`);
+    const quarantine = artifactPath(
+      directory,
+      deletedPath,
+      "delete",
+      randomUUID(),
+      "quarantine",
+    );
+    await writeFile(quarantine, `${JSON.stringify(createInboxEnvelope(deleted), null, 2)}\n`);
+
+    const recovered = await ProjectInbox.open(directory);
+    await expect(lstat(deletedPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(quarantine)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(recovered.get(deleted.messageId)).resolves.toBeUndefined();
+  });
+
   it("reports a committed tombstone when its post-write verification fails", async () => {
     const { inbox } = await temporaryInbox("piweb-inbox-tombstone-commit-");
     const target = randomUUID();
@@ -474,6 +827,49 @@ describe("ProjectInbox", () => {
 
     await expect(inbox.markTargetDeleted(target)).resolves.toBeUndefined();
     await expect(nativeFs.lstat(tombstonePath(directory, target))).resolves.toBeDefined();
+  });
+
+  it("accepts a link error after publication when the stable census proves the tombstone is present", async () => {
+    const { directory, inbox } = await temporaryInbox(
+      "piweb-inbox-tombstone-link-ambiguous-",
+    );
+    const target = randomUUID();
+    vi.mocked(link).mockImplementationOnce(async (source, destination) => {
+      await nativeFs.link(source, destination);
+      const error = new Error("link response interrupted") as NodeJS.ErrnoException;
+      error.code = "EIO";
+      throw error;
+    });
+
+    await expect(inbox.markTargetDeleted(target)).resolves.toBeUndefined();
+    await expect(nativeFs.lstat(tombstonePath(directory, target))).resolves.toBeDefined();
+  });
+
+  it("keeps a published tombstone committed when temporary cleanup and recovery both fail", async () => {
+    const { directory, inbox } = await temporaryInbox(
+      "piweb-inbox-tombstone-cleanup-failure-",
+    );
+    const target = randomUUID();
+    let temporaryProofs = 0;
+    vi.mocked(lstat).mockImplementation(async (...args) => {
+      const path = String(args[0]);
+      if (path.includes(".create.") && path.endsWith(".tmp")) {
+        temporaryProofs++;
+        if (temporaryProofs >= 2) {
+          throw new Error("temporary cleanup proof failed");
+        }
+      }
+      return nativeFs.lstat(...args);
+    });
+
+    await expect(inbox.markTargetDeleted(target)).rejects.toMatchObject({
+      constructor: InboxTargetTombstoneCommittedError,
+      conversationId: target,
+    });
+    await expect(nativeFs.lstat(tombstonePath(directory, target))).resolves.toBeDefined();
+
+    vi.mocked(lstat).mockReset().mockImplementation(nativeFs.lstat);
+    await expect(inbox.markTargetDeleted(target)).resolves.toBeUndefined();
   });
 
   it("keeps a tombstone committed when post-link proof fails", async () => {
@@ -599,6 +995,66 @@ describe("ProjectInbox", () => {
       messageId: randomUUID(),
       cardId: randomUUID(),
     })).resolves.toMatchObject({ status: "created" });
+  });
+
+  it("treats a tombstone clear as successful when post-commit cleanup recovery removes its quarantine", async () => {
+    const { inbox, directory } = await temporaryInbox(
+      "piweb-inbox-tombstone-clear-recovery-",
+    );
+    const target = randomUUID();
+    await inbox.markTargetDeleted(target);
+
+    let quarantineProofs = 0;
+    vi.mocked(lstat).mockImplementation(async (...args) => {
+      const path = String(args[0]);
+      if (
+        path.includes(".delete.")
+        && path.endsWith(".quarantine")
+      ) {
+        quarantineProofs++;
+        if (quarantineProofs === 2) {
+          throw new Error("post-commit tombstone cleanup proof failed");
+        }
+      }
+      return nativeFs.lstat(...args);
+    });
+
+    await expect(inbox.clearTargetTombstone(target)).resolves.toBe(true);
+    expect(quarantineProofs).toBeGreaterThanOrEqual(2);
+    await expect(inbox.listDeletedTargets()).resolves.not.toContain(target);
+    await expect(lstat(tombstonePath(directory, target))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("treats a tombstone clear as successful when its first post-rename quarantine proof fails", async () => {
+    const { inbox, directory } = await temporaryInbox(
+      "piweb-inbox-tombstone-first-quarantine-proof-",
+    );
+    const target = randomUUID();
+    await inbox.markTargetDeleted(target);
+
+    let quarantineProofs = 0;
+    vi.mocked(lstat).mockImplementation(async (...args) => {
+      const path = String(args[0]);
+      if (
+        path.includes(".delete.")
+        && path.endsWith(".quarantine")
+      ) {
+        quarantineProofs++;
+        if (quarantineProofs === 1) {
+          throw new Error("first post-rename quarantine proof failed");
+        }
+      }
+      return nativeFs.lstat(...args);
+    });
+
+    await expect(inbox.clearTargetTombstone(target)).resolves.toBe(true);
+    expect(quarantineProofs).toBeGreaterThanOrEqual(1);
+    await expect(inbox.listDeletedTargets()).resolves.not.toContain(target);
+    await expect(lstat(tombstonePath(directory, target))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
 
   it("prunes only completed tombstones whose conversations no longer exist", async () => {

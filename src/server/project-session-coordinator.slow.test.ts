@@ -2462,6 +2462,49 @@ describe("ProjectSessionCoordinator", () => {
     )).rejects.toThrow(/being deleted/i);
   });
 
+  it("releases the deletion fence when tombstone quarantine cleanup recovers before clear returns", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const inbox = coordinatorInbox(fixture.handle);
+    const internals = inbox as unknown as {
+      unlinkVerified(path: string, expected: unknown): Promise<void>;
+    };
+    const originalUnlinkVerified = internals.unlinkVerified.bind(inbox);
+    let injected = false;
+    internals.unlinkVerified = async (path, expected) => {
+      if (
+        !injected
+        && path.includes(".delete.")
+        && path.endsWith(".quarantine")
+      ) {
+        injected = true;
+        throw new Error("post-commit tombstone cleanup proof failed");
+      }
+      return originalUnlinkVerified(path, expected);
+    };
+
+    try {
+      await expect(fixture.coordinator.deleteConversation(
+        fixture.handle,
+        actor.conversationId,
+      )).resolves.toBe(true);
+    } finally {
+      internals.unlinkVerified = originalUnlinkVerified;
+    }
+
+    expect(injected).toBe(true);
+    await expect(inbox.listDeletedTargets()).resolves.not.toContain(
+      actor.conversationId,
+    );
+    const context = (fixture.handle as unknown as {
+      context: { deleting: Set<string> };
+    }).context;
+    expect(context.deleting).not.toContain(actor.conversationId);
+  });
+
   it("rebuilds from the exact session when rewind commits before catalog refresh fails", async () => {
     const fixture = await createFixture();
     const actor = await fixture.coordinator.createUserConversation(

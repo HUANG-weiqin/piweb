@@ -47,6 +47,8 @@ const INBOX_FILE_PATTERN =
   /^([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.json$/;
 const TARGET_TOMBSTONE_FILE_PATTERN =
   /^target-([0-9a-f]{64})\.tombstone\.json$/;
+const INBOX_ARTIFACT_PATTERN =
+  /^\.((?:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json)|(?:target-[0-9a-f]{64}\.tombstone\.json))\.(create|replace|delete)\.([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.(tmp|quarantine)$/;
 
 const uuidSchema = (field: string) =>
   z.string().regex(UUID_PATTERN, `${field} must be a canonical UUID`);
@@ -215,6 +217,18 @@ class InboxFilePublishedError extends Error {
   }
 }
 
+/** rename() removed the original inode, but its cleanup could not be verified. */
+class InboxFileDeletedError extends Error {
+  constructor(
+    readonly targetPath: string,
+    cause: unknown,
+  ) {
+    super(`Inbox entry deleted but could not be verified: ${targetPath}`, {
+      cause,
+    });
+  }
+}
+
 interface StoredInboxFile {
   path: string;
   information: Stats;
@@ -235,10 +249,32 @@ interface StoredTargetTombstone extends StoredInboxFile {
   tombstone: InboxTargetTombstone;
 }
 
+type InboxMutationOperation = "create" | "replace" | "delete";
+type InboxArtifactStage = "tmp" | "quarantine";
+
+interface StagedInboxFile {
+  originalPath: string;
+  temporaryPath: string;
+  information: Stats;
+  operation: InboxMutationOperation;
+  transactionId: string;
+}
+
 interface QuarantinedInboxFile {
   originalPath: string;
   quarantinePath: string;
   information: Stats;
+  operation: InboxMutationOperation;
+  transactionId: string;
+}
+
+interface InboxArtifact {
+  originalPath: string;
+  path: string;
+  information: Stats;
+  operation: InboxMutationOperation;
+  transactionId: string;
+  stage: InboxArtifactStage;
 }
 
 interface InboxScan {
@@ -893,6 +929,7 @@ export class ProjectInbox {
   }
 
   private async scan(): Promise<InboxScan> {
+    await this.recoverArtifacts();
     await assertOwnedDirectory(this.directory);
     const namesBefore = (await readdir(this.directory)).sort();
     if (
@@ -1100,34 +1137,272 @@ export class ProjectInbox {
     }
   }
 
+  private async recoverArtifacts(): Promise<void> {
+    await assertOwnedDirectory(this.directory);
+    const names = (await readdir(this.directory)).sort();
+    if (
+      names.length
+      > MAX_INBOX_MESSAGES_PER_PROJECT + MAX_INBOX_TOMBSTONES_PER_PROJECT + 2
+    ) {
+      throw new Error("Inbox project entry limit exceeded");
+    }
+
+    const artifacts: InboxArtifact[] = [];
+    for (const name of names) {
+      const match = INBOX_ARTIFACT_PATTERN.exec(name);
+      if (match === null) continue;
+      const originalPath = join(this.directory, match[1]!);
+      const path = join(this.directory, name);
+      artifacts.push({
+        originalPath,
+        path,
+        information: await assertOwnedFile(this.directory, path),
+        operation: match[2]! as InboxMutationOperation,
+        transactionId: match[3]!,
+        stage: match[4]! as InboxArtifactStage,
+      });
+    }
+    if (artifacts.length === 0) return;
+
+    const groups = new Map<string, InboxArtifact[]>();
+    for (const artifact of artifacts) {
+      const key = [
+        artifact.originalPath,
+        artifact.operation,
+        artifact.transactionId,
+      ].join("\u0000");
+      const group = groups.get(key) ?? [];
+      group.push(artifact);
+      groups.set(key, group);
+    }
+    if (groups.size !== 1) {
+      throw new Error("Inbox recovery found multiple mutation transactions");
+    }
+    const group = [...groups.values()][0]!;
+    const temporary = group.filter(({ stage }) => stage === "tmp");
+    const quarantine = group.filter(({ stage }) => stage === "quarantine");
+    if (temporary.length > 1 || quarantine.length > 1) {
+      throw new Error("Inbox recovery found duplicate mutation artifacts");
+    }
+
+    const operation = group[0]!.operation;
+    const targetPath = group[0]!.originalPath;
+    if (operation === "create") {
+      if (temporary.length !== 1 || quarantine.length !== 0) {
+        throw new Error("Invalid create mutation artifacts");
+      }
+      await this.recoverCreateArtifact(targetPath, temporary[0]!);
+    } else if (operation === "replace") {
+      await this.recoverReplaceArtifacts(
+        targetPath,
+        temporary[0],
+        quarantine[0],
+      );
+    } else {
+      if (temporary.length !== 0 || quarantine.length !== 1) {
+        throw new Error("Invalid delete mutation artifacts");
+      }
+      await this.recoverDeleteArtifact(targetPath, quarantine[0]!);
+    }
+
+    const remaining = (await readdir(this.directory)).filter((name) =>
+      INBOX_ARTIFACT_PATTERN.test(name),
+    );
+    if (remaining.length !== 0) {
+      throw new Error("Inbox recovery could not clear mutation artifacts");
+    }
+  }
+
+  private async recoverCreateArtifact(
+    targetPath: string,
+    temporary: InboxArtifact,
+  ): Promise<void> {
+    const current = await this.ownedFileIfPresent(targetPath);
+    if (
+      current !== undefined
+      && !statsAreIdentical(temporary.information, current)
+    ) {
+      throw new Error(
+        `Inbox create artifact conflicts with published entry: ${targetPath}`,
+      );
+    }
+    await this.unlinkVerified(temporary.path, temporary.information);
+  }
+
+  private async recoverReplaceArtifacts(
+    targetPath: string,
+    temporary: InboxArtifact | undefined,
+    quarantine: InboxArtifact | undefined,
+  ): Promise<void> {
+    const current = await this.ownedFileIfPresent(targetPath);
+    if (temporary !== undefined && quarantine !== undefined) {
+      if (current === undefined) {
+        if (statsAreIdentical(temporary.information, quarantine.information)) {
+          throw new Error(
+            `Inbox replace artifacts share an inode before publication: ${targetPath}`,
+          );
+        }
+        await this.restoreArtifact(quarantine);
+        await this.unlinkVerified(temporary.path, temporary.information);
+        return;
+      }
+      const committed = statsAreIdentical(temporary.information, current)
+        && !statsAreIdentical(quarantine.information, current);
+      const rollbackRestored = statsAreIdentical(quarantine.information, current)
+        && !statsAreIdentical(temporary.information, current);
+      if (!committed && !rollbackRestored) {
+        throw new Error(
+          `Inbox replace artifacts conflict with published entry: ${targetPath}`,
+        );
+      }
+      await this.unlinkVerified(quarantine.path, quarantine.information);
+      await this.unlinkVerified(temporary.path, temporary.information);
+      return;
+    }
+    if (temporary !== undefined) {
+      if (current === undefined) {
+        throw new Error(
+          `Inbox replace temporary has no original entry: ${targetPath}`,
+        );
+      }
+      await this.unlinkVerified(temporary.path, temporary.information);
+      return;
+    }
+    if (quarantine !== undefined) {
+      throw new Error(
+        `Inbox replace quarantine has no matching temporary: ${targetPath}`,
+      );
+    }
+    throw new Error("Invalid replace mutation artifacts");
+  }
+
+  private async recoverDeleteArtifact(
+    targetPath: string,
+    quarantine: InboxArtifact,
+  ): Promise<void> {
+    if (await this.ownedFileIfPresent(targetPath) !== undefined) {
+      throw new Error(
+        `Inbox delete quarantine conflicts with original entry: ${targetPath}`,
+      );
+    }
+    await this.unlinkVerified(quarantine.path, quarantine.information);
+  }
+
+  private async restoreArtifact(artifact: InboxArtifact): Promise<void> {
+    const current = await assertOwnedFile(this.directory, artifact.path);
+    if (!statsAreIdentical(artifact.information, current)) {
+      throw new Error(`Inbox recovery artifact changed: ${artifact.path}`);
+    }
+    if (await this.ownedFileIfPresent(artifact.originalPath) !== undefined) {
+      throw new Error(
+        `Inbox recovery target already exists: ${artifact.originalPath}`,
+      );
+    }
+    await link(artifact.path, artifact.originalPath);
+    const restored = await assertOwnedFile(this.directory, artifact.originalPath);
+    if (!statsAreIdentical(current, restored)) {
+      throw new Error(
+        `Inbox recovery target changed while being restored: ${artifact.originalPath}`,
+      );
+    }
+    await this.unlinkVerified(artifact.path, current);
+  }
+
+  private async ownedFileIfPresent(path: string): Promise<Stats | undefined> {
+    try {
+      return await assertOwnedFile(this.directory, path);
+    } catch (error) {
+      if (isNodeError(error, "ENOENT")) return undefined;
+      throw error;
+    }
+  }
+
+  private async unlinkVerified(path: string, expected: Stats): Promise<void> {
+    const current = await assertOwnedFile(this.directory, path);
+    if (!statsAreIdentical(expected, current)) {
+      throw new Error(`Inbox mutation artifact changed: ${path}`);
+    }
+    await unlink(path);
+  }
+
+  private async recoverMutationFailure(failure: unknown): Promise<void> {
+    try {
+      await this.recoverArtifacts();
+    } catch (recoveryError) {
+      const aggregate = new AggregateError(
+        [failure, recoveryError],
+        "Inbox mutation failed and recovery could not be completed",
+      );
+      if (failure instanceof InboxFilePublishedError) {
+        throw new InboxFilePublishedError(failure.targetPath, aggregate);
+      }
+      if (failure instanceof InboxFileDeletedError) {
+        throw new InboxFileDeletedError(failure.targetPath, aggregate);
+      }
+      throw aggregate;
+    }
+  }
+
+  private async recoveryReachedPublishedFile(
+    targetPath: string,
+    expected: Stats,
+    failure: InboxFilePublishedError,
+  ): Promise<boolean> {
+    try {
+      const current = await this.ownedFileIfPresent(targetPath);
+      return current !== undefined && statsAreIdentical(expected, current);
+    } catch (proofError) {
+      throw new InboxFilePublishedError(targetPath, new AggregateError(
+        [failure, proofError],
+        "Inbox publication recovery outcome could not be proved",
+      ));
+    }
+  }
+
+  private async recoveryReachedAbsentPath(
+    targetPath: string,
+    failure: InboxFileDeletedError,
+  ): Promise<boolean> {
+    try {
+      return await this.ownedFileIfPresent(targetPath) === undefined;
+    } catch (proofError) {
+      throw new InboxFileDeletedError(targetPath, new AggregateError(
+        [failure, proofError],
+        "Inbox deletion recovery outcome could not be proved",
+      ));
+    }
+  }
+
   private async writeNewAtomically(
     targetPath: string,
     content: string,
   ): Promise<void> {
-    const temporaryPath = this.temporaryPath(targetPath);
-    const temporaryDirectory = dirname(this.directory);
+    let staged: StagedInboxFile | undefined;
     let published = false;
     try {
-      await assertOwnedDirectory(temporaryDirectory);
-      await writeFile(temporaryPath, content, {
-        encoding: "utf8",
-        flag: "wx",
-      });
-      const temporary = await assertOwnedFile(
-        temporaryDirectory,
-        temporaryPath,
-      );
-      await link(temporaryPath, targetPath);
+      staged = await this.stageNewFile(targetPath, content, "create");
+      await this.publishStagedFile(staged);
       published = true;
-      const current = await assertOwnedFile(this.directory, targetPath);
-      if (!statsAreIdentical(temporary, current)) {
-        throw new Error(`Inbox entry changed while being published: ${targetPath}`);
-      }
+      await this.unlinkVerified(staged.temporaryPath, staged.information);
     } catch (error) {
-      if (published) throw new InboxFilePublishedError(targetPath, error);
-      throw error;
-    } finally {
-      await unlink(temporaryPath).catch(() => undefined);
+      const failure = error instanceof InboxFilePublishedError
+        ? error
+        : published && staged !== undefined
+        ? new InboxFilePublishedError(targetPath, error)
+        : undefined;
+      if (failure === undefined) {
+        await this.recoverMutationFailure(error);
+        throw error;
+      }
+      await this.recoverMutationFailure(failure);
+      if (staged !== undefined && await this.recoveryReachedPublishedFile(
+        targetPath,
+        staged.information,
+        failure,
+      )) {
+        return;
+      }
+      throw failure;
     }
   }
 
@@ -1135,30 +1410,130 @@ export class ProjectInbox {
     stored: StoredInboxFile,
     content: string,
   ): Promise<void> {
-    const quarantined = await this.quarantineStoredFile(stored);
+    let staged: StagedInboxFile | undefined;
     let published = false;
     try {
-      await this.writeNewAtomically(quarantined.originalPath, content);
+      staged = await this.stageNewFile(stored.path, content, "replace");
+      const quarantined = await this.quarantineStoredFile(
+        stored,
+        "replace",
+        staged.transactionId,
+      );
+      await this.publishStagedFile(staged);
       published = true;
-      await unlink(quarantined.quarantinePath);
+      await this.unlinkVerified(
+        quarantined.quarantinePath,
+        quarantined.information,
+      );
+      await this.unlinkVerified(staged.temporaryPath, staged.information);
     } catch (error) {
-      if (!published) {
-        await this.restoreQuarantinedFileAfterFailure(quarantined, error);
+      const failure = error instanceof InboxFilePublishedError
+        ? error
+        : published && staged !== undefined
+        ? new InboxFilePublishedError(stored.path, error)
+        : undefined;
+      if (failure === undefined) {
+        await this.recoverMutationFailure(error);
+        throw error;
       }
-      throw error;
+      await this.recoverMutationFailure(failure);
+      if (staged !== undefined && await this.recoveryReachedPublishedFile(
+        stored.path,
+        staged.information,
+        failure,
+      )) {
+        return;
+      }
+      throw failure;
     }
   }
 
   private async deleteStoredFile(stored: StoredInboxFile): Promise<void> {
-    const quarantined = await this.quarantineStoredFile(stored);
-    let removed = false;
+    let deleted = false;
     try {
-      await unlink(quarantined.quarantinePath);
-      removed = true;
+      const quarantined = await this.quarantineStoredFile(
+        stored,
+        "delete",
+        randomUUID(),
+      );
+      deleted = true;
+      await this.unlinkVerified(
+        quarantined.quarantinePath,
+        quarantined.information,
+      );
       await this.assertOriginalPathAbsent(quarantined.originalPath);
     } catch (error) {
-      if (!removed) {
-        await this.restoreQuarantinedFileAfterFailure(quarantined, error);
+      const failure = error instanceof InboxFileDeletedError
+        ? error
+        : deleted
+        ? new InboxFileDeletedError(stored.path, error)
+        : undefined;
+      if (failure === undefined) {
+        await this.recoverMutationFailure(error);
+        throw error;
+      }
+      await this.recoverMutationFailure(failure);
+      if (await this.recoveryReachedAbsentPath(stored.path, failure)) return;
+      throw failure;
+    }
+  }
+
+  private async stageNewFile(
+    targetPath: string,
+    content: string,
+    operation: "create" | "replace",
+  ): Promise<StagedInboxFile> {
+    const transactionId = randomUUID();
+    const temporaryPath = this.artifactPath(
+      targetPath,
+      operation,
+      transactionId,
+      "tmp",
+    );
+    await assertOwnedDirectory(this.directory);
+    await writeFile(temporaryPath, content, {
+      encoding: "utf8",
+      flag: "wx",
+    });
+    const information = await assertOwnedFile(this.directory, temporaryPath);
+    return {
+      originalPath: targetPath,
+      temporaryPath,
+      information,
+      operation,
+      transactionId,
+    };
+  }
+
+  private async publishStagedFile(staged: StagedInboxFile): Promise<void> {
+    let linked = false;
+    try {
+      await link(staged.temporaryPath, staged.originalPath);
+      linked = true;
+      const current = await assertOwnedFile(this.directory, staged.originalPath);
+      if (!statsAreIdentical(staged.information, current)) {
+        throw new Error(
+          `Inbox entry changed while being published: ${staged.originalPath}`,
+        );
+      }
+    } catch (error) {
+      if (linked) {
+        throw new InboxFilePublishedError(staged.originalPath, error);
+      }
+      try {
+        const current = await this.ownedFileIfPresent(staged.originalPath);
+        if (
+          current !== undefined
+          && statsAreIdentical(staged.information, current)
+        ) {
+          throw new InboxFilePublishedError(staged.originalPath, error);
+        }
+      } catch (proofError) {
+        if (proofError instanceof InboxFilePublishedError) throw proofError;
+        throw new InboxFilePublishedError(staged.originalPath, new AggregateError(
+          [error, proofError],
+          "Inbox publication outcome could not be proved",
+        ));
       }
       throw error;
     }
@@ -1166,75 +1541,57 @@ export class ProjectInbox {
 
   private async quarantineStoredFile(
     stored: StoredInboxFile,
+    operation: "replace" | "delete",
+    transactionId: string,
   ): Promise<QuarantinedInboxFile> {
-    const quarantinePath = this.quarantinePath(stored.path);
-    let moved: QuarantinedInboxFile | undefined;
+    const quarantinePath = this.artifactPath(
+      stored.path,
+      operation,
+      transactionId,
+      "quarantine",
+    );
+    await assertOwnedDirectory(this.directory);
+    let renamed = false;
+    let quarantined: QuarantinedInboxFile | undefined;
     try {
-      await assertOwnedDirectory(this.directory);
       await rename(stored.path, quarantinePath);
-      const information = await assertOwnedFile(
-        this.directory,
-        quarantinePath,
-      );
-      moved = {
+      renamed = true;
+      const information = await assertOwnedFile(this.directory, quarantinePath);
+      quarantined = {
         originalPath: stored.path,
         quarantinePath,
         information,
+        operation,
+        transactionId,
       };
       if (!statsAreIdentical(stored.information, information)) {
         throw new Error(`Inbox entry changed before mutation: ${stored.path}`);
       }
-      return moved;
+      return quarantined;
     } catch (error) {
-      if (moved !== undefined) {
-        await this.restoreQuarantinedFileAfterFailure(moved, error);
+      if (quarantined !== undefined) {
+        try {
+          await this.restoreArtifact({
+            originalPath: quarantined.originalPath,
+            path: quarantined.quarantinePath,
+            information: quarantined.information,
+            operation: quarantined.operation,
+            transactionId: quarantined.transactionId,
+            stage: "quarantine",
+          });
+        } catch (recoveryError) {
+          throw new InboxFileDeletedError(stored.path, new AggregateError(
+            [error, recoveryError],
+            "Inbox quarantine recovery could not be completed",
+          ));
+        }
+        throw error;
+      }
+      if (renamed) {
+        throw new InboxFileDeletedError(stored.path, error);
       }
       throw error;
     }
-  }
-
-  private async restoreQuarantinedFileAfterFailure(
-    quarantined: QuarantinedInboxFile,
-    failure: unknown,
-  ): Promise<void> {
-    try {
-      await this.restoreQuarantinedFile(quarantined);
-    } catch (recoveryError) {
-      throw new AggregateError(
-        [failure, recoveryError],
-        `Inbox entry mutation failed and recovery could not be completed: ${quarantined.originalPath}`,
-      );
-    }
-  }
-
-  private async restoreQuarantinedFile(
-    quarantined: QuarantinedInboxFile,
-  ): Promise<void> {
-    const current = await assertOwnedFile(
-      this.directory,
-      quarantined.quarantinePath,
-    );
-    if (!statsAreIdentical(quarantined.information, current)) {
-      throw new Error(
-        `Inbox quarantine changed while it was being recovered: ${quarantined.quarantinePath}`,
-      );
-    }
-    try {
-      await link(quarantined.quarantinePath, quarantined.originalPath);
-    } catch (error) {
-      if (!isNodeError(error, "EEXIST")) throw error;
-      const original = await assertOwnedFile(
-        this.directory,
-        quarantined.originalPath,
-      );
-      if (!statsAreIdentical(current, original)) {
-        throw new Error(
-          `Inbox quarantine remains at ${quarantined.quarantinePath}`,
-          { cause: error },
-        );
-      }
-    }
-    await unlink(quarantined.quarantinePath);
   }
 
   private async assertOriginalPathAbsent(path: string): Promise<void> {
@@ -1247,17 +1604,18 @@ export class ProjectInbox {
     throw new Error(`Inbox entry reappeared while it was being deleted: ${path}`);
   }
 
-  private temporaryPath(targetPath: string): string {
-    return join(
-      dirname(this.directory),
-      `.${basename(targetPath)}.${process.pid}.${randomUUID()}.tmp`,
-    );
-  }
-
-  private quarantinePath(targetPath: string): string {
+  private artifactPath(
+    targetPath: string,
+    operation: InboxMutationOperation,
+    transactionId: string,
+    stage: InboxArtifactStage,
+  ): string {
+    if (!pathsAreIdentical(dirname(resolve(targetPath)), this.directory)) {
+      throw new Error(`Inbox mutation target is outside its directory: ${targetPath}`);
+    }
     return join(
       this.directory,
-      `.${basename(targetPath)}.${process.pid}.${randomUUID()}.quarantine`,
+      `.${basename(targetPath)}.${operation}.${transactionId}.${stage}`,
     );
   }
 }
