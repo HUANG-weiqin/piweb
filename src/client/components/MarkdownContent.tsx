@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useRef } from "react";
-import DOMPurify from "dompurify";
+import DOMPurify, { type ElementHook } from "dompurify";
 import { marked, type Tokens } from "marked";
 
 const MERMAID_MAX_SOURCE_LENGTH = 50_000;
@@ -143,6 +143,27 @@ export function getMermaidSourceAnalysis(markdown: string): {
   return { hasMermaidFence, sourceLengths };
 }
 
+function isWebUrl(value: string): boolean {
+  if (!/^(?:https?:|\/\/)/i.test(value.trim())) return false;
+  try {
+    const protocol = new URL(value, "http://piweb.invalid").protocol;
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+const decorateWebLink: ElementHook = (currentNode) => {
+  if (
+    currentNode.localName !== "a"
+    || currentNode.namespaceURI !== "http://www.w3.org/1999/xhtml"
+  ) return;
+  const href = currentNode.getAttribute("href");
+  if (href === null || !isWebUrl(href)) return;
+  currentNode.setAttribute("target", "_blank");
+  currentNode.setAttribute("rel", "noopener noreferrer");
+};
+
 function renderMarkdown(markdown: string, mermaidMarker?: string): string {
   const renderer = new marked.Renderer();
   if (mermaidMarker) {
@@ -154,10 +175,15 @@ function renderMarkdown(markdown: string, mermaidMarker?: string): string {
         : html;
     };
   }
-  return DOMPurify.sanitize(marked.parse(markdown, {
-    async: false,
-    renderer,
-  }) as string);
+  DOMPurify.addHook("afterSanitizeAttributes", decorateWebLink);
+  try {
+    return DOMPurify.sanitize(marked.parse(markdown, {
+      async: false,
+      renderer,
+    }) as string);
+  } finally {
+    DOMPurify.removeHook("afterSanitizeAttributes", decorateWebLink);
+  }
 }
 
 function createMarker(): string {

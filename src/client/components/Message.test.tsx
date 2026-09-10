@@ -509,8 +509,36 @@ describe("Message", () => {
     expect(markdown).toContainElement(table);
     expect(table.querySelectorAll("tbody tr")).toHaveLength(6);
     expect(table.querySelector("tbody td strong")).toHaveTextContent("物品类型");
-    expect(screen.getByRole("link", { name: "链接" })).toHaveAttribute("href", "https://example.com");
+    const webLink = screen.getByRole("link", { name: "链接" });
+    expect(webLink).toHaveAttribute("href", "https://example.com");
+    expect(webLink).toHaveAttribute("target", "_blank");
+    expect(webLink).toHaveAttribute("rel", "noopener noreferrer");
     expect(markdown.querySelector("pre code")).toHaveTextContent("const wideValue = true;");
+  });
+
+  it("decorates sanitized raw web links without enabling blocked schemes", () => {
+    const text = [
+      '<a href="https://raw.example/path">原始网页链接</a>',
+      "[本机文件](file:///E:/screenshots/result.png)",
+      "[脚本](javascript:alert(1))",
+    ].join(" ");
+    const message: ChatMessage = {
+      id: "safe-links",
+      runId: "run-safe-links",
+      role: "assistant",
+      text,
+      thinking: "",
+      tools: [],
+      parts: [{ kind: "text", text }],
+    };
+
+    render(<Message message={message} />);
+    const rawWebLink = screen.getByRole("link", { name: "原始网页链接" });
+
+    expect(rawWebLink).toHaveAttribute("target", "_blank");
+    expect(rawWebLink).toHaveAttribute("rel", "noopener noreferrer");
+    expect(screen.getByText("本机文件").closest("a")).not.toHaveAttribute("href");
+    expect(screen.getByText("脚本").closest("a")).not.toHaveAttribute("href");
   });
 
   it("renders fenced Mermaid diagrams through the lazy sanitized pipeline", async () => {
