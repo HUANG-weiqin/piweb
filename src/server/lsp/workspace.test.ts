@@ -864,6 +864,44 @@ describe("WorkspaceLsp", () => {
     await workspace.dispose();
   });
 
+  it("ignores a retired watcher's late change event", async () => {
+    const cwd = await temporaryDirectory();
+    const file = join(cwd, "entry.ts");
+    await writeFile(file, "export const value = 1;\n");
+    const firstWatcher = new FakeWatcher();
+    const secondWatcher = new FakeWatcher();
+    const first = new FakeConnection({ textDocumentSync: 1 });
+    const second = new FakeConnection({ textDocumentSync: 1 });
+    const response = deferred<unknown>();
+    second.requestResult = () => response.promise;
+    let watcherCount = 0;
+    let connectionCount = 0;
+    const workspace = new WorkspaceLsp(cwd, {
+      resolveServer: async () => server(cwd),
+      createConnection: async () => connectionCount++ === 0 ? first : second,
+      watcherFactory: () => {
+        const watcher = watcherCount++ === 0 ? firstWatcher : secondWatcher;
+        queueMicrotask(() => watcher.emit("ready"));
+        return watcher;
+      },
+    });
+
+    try {
+      await workspace.query(symbols(file), new AbortController().signal);
+      firstWatcher.emit("error", new Error("watch failed"));
+
+      const rebuilt = workspace.query(symbols(file), new AbortController().signal);
+      await waitFor(() => second.requests.length === 1);
+      firstWatcher.emit("all", "change", file);
+      response.resolve([]);
+
+      await expect(rebuilt).resolves.toMatchObject({ value: [] });
+    } finally {
+      response.resolve([]);
+      await workspace.dispose();
+    }
+  });
+
   it("rejects every borrowed waiter when a failed watcher sync invalidates the old entry", async () => {
     const cwd = await temporaryDirectory();
     const file = join(cwd, "entry.ts");

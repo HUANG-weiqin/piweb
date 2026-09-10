@@ -1257,7 +1257,7 @@ export class WorkspaceLsp implements LspQueryService {
     const state: WatcherState = { watcher, ready, readyObserved: false, rejectReady };
     this.watcher = state;
     watcher.on("all", (event: unknown, path: unknown) => {
-      if (!state.readyObserved || typeof event !== "string" || typeof path !== "string") return;
+      if (this.watcher !== state || !state.readyObserved || typeof event !== "string" || typeof path !== "string") return;
       if (event !== "add" && event !== "change" && event !== "unlink") return;
       this.recordWatchChange(cwd, event, path);
     });
