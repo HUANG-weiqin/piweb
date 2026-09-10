@@ -118,6 +118,8 @@ export type ChatAction =
       type: "session";
       runId: string;
       event: SessionEvent;
+      /** Captured once when the socket event enters the client. */
+      observedAt: number;
       projectionSeq?: number;
     } & ChatFocus)
   | ({ type: "error"; runId: string; message: string } & ChatFocus)
@@ -566,7 +568,10 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   if (event.type === "assistant_message_started") {
     const items = state.items;
     const outputRateMeasurement = state.outputRateMeasurement?.runId === action.runId
-      ? { ...state.outputRateMeasurement, segmentStartedAt: Date.now() }
+      ? {
+          ...state.outputRateMeasurement,
+          segmentStartedAt: action.observedAt,
+        }
       : state.outputRateMeasurement;
     if (items.some((item) => item.id === event.projectionId)) return state;
     const placeholderIndex = items.findIndex((item) => (
@@ -711,7 +716,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       state.outputRateMeasurement,
       action.runId,
       event.estimatedOutputTokens,
-      Date.now(),
+      action.observedAt,
     );
     return liveOutputRate === undefined
       ? state
@@ -727,7 +732,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       state.outputRateMeasurement,
       action.runId,
       event.usage.output,
-      Date.now(),
+      action.observedAt,
     );
     const nextState = withItems(state, items);
     return outputRateMeasurement === state.outputRateMeasurement

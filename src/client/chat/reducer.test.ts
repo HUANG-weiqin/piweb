@@ -5,8 +5,9 @@ import type {
   TokenUsage,
 } from "../../shared/protocol";
 import {
-  chatReducer,
+  chatReducer as reduceChat,
   initialChatState,
+  type ChatAction,
   type ChatMessageItem,
   type ChatState,
 } from "./reducer";
@@ -27,6 +28,18 @@ const FOCUS_B = {
   conversationId: "conversation-b",
   focusId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
 };
+
+type TestChatAction = Exclude<ChatAction, { type: "session" }> | (
+  Omit<Extract<ChatAction, { type: "session" }>, "observedAt">
+  & { observedAt?: number }
+);
+
+/** Mimics App's socket ingress for fixtures that do not test clock behavior. */
+function chatReducer(state: ChatState, action: TestChatAction): ChatState {
+  return reduceChat(state, action.type === "session"
+    ? { ...action, observedAt: action.observedAt ?? Date.now() }
+    : action);
+}
 
 function usage(total: number): TokenUsage {
   return {
@@ -1079,6 +1092,59 @@ describe("chatReducer", () => {
     }
 
     expect(messageItems(state).at(-1)?.usage?.total).toBe(48);
+  });
+
+  it("replays output timing from its ingress timestamp", () => {
+    const now = vi.spyOn(Date, "now").mockImplementation(() => {
+      throw new Error("session timing must come from ingress");
+    });
+    try {
+      let state = chatReducer(focusedState(), {
+        ...FOCUS_A_1,
+        type: "session",
+        runId: RUN_1,
+        observedAt: 0,
+        event: { type: "run_started" },
+      });
+      const started = {
+        ...FOCUS_A_1,
+        type: "session" as const,
+        runId: RUN_1,
+        observedAt: 1_000,
+        event: { type: "assistant_message_started" as const, projectionId: "assistant-1" },
+      };
+      const firstReplay = chatReducer(state, started);
+      expect(chatReducer(state, started)).toEqual(firstReplay);
+
+      const estimateEvent = {
+        ...FOCUS_A_1,
+        type: "session" as const,
+        runId: RUN_1,
+        observedAt: 2_000,
+        event: { type: "output_estimate" as const, estimatedOutputTokens: 8 },
+      };
+      state = chatReducer(firstReplay, estimateEvent);
+      expect(chatReducer(firstReplay, estimateEvent)).toEqual(state);
+      expect(state.liveOutputRate).toMatchObject({
+        outputElapsedMs: 1_000,
+        tokensPerSecond: 8,
+      });
+
+      const usageEvent = {
+        ...FOCUS_A_1,
+        type: "session" as const,
+        runId: RUN_1,
+        observedAt: 3_000,
+        event: {
+          type: "usage" as const,
+          usage: { input: 0, output: 8, cacheRead: 0, cacheWrite: 0, total: 8 },
+        },
+      };
+      const firstUsage = chatReducer(state, usageEvent);
+      expect(chatReducer(state, usageEvent)).toEqual(firstUsage);
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it("derives a live Pi-base output rate and replaces it with final usage", () => {

@@ -2267,10 +2267,12 @@ export function App() {
         }
         const focus = focusRef.current;
         if (!focus) return;
+        const observedAt = Date.now();
         dispatchChat({
           type: "session",
           runId: event.runId,
           event: event.event,
+          observedAt,
           projectionSeq: event.projectionSeq,
           ...focus,
         });
