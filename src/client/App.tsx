@@ -425,6 +425,10 @@ function sameFocus(
     && left.focusId === right.focusId;
 }
 
+function activeFocusKey(focus: ActiveFocus): string {
+  return `${focus.sessionId}\u0000${focus.projectId}\u0000${focus.conversationId}\u0000${focus.focusId}`;
+}
+
 function stateMatchesFocus(
   state: PublicState,
   focus: ActiveFocus,
@@ -3685,10 +3689,14 @@ export function App() {
     removePendingContextCompaction(pending);
     return false;
   };
-  const switchConversationRole = (roleId: string): boolean => {
+  const switchConversationRole = (
+    roleId: string,
+    expectedFocusKey: string,
+  ): boolean => {
     const focus = focusRef.current;
     if (
       !focus
+      || activeFocusKey(focus) !== expectedFocusKey
       || workspaceSyncingRef.current
       || conversationSyncingRef.current
       || !conversationReadyRef.current
@@ -4242,6 +4250,9 @@ export function App() {
     || pendingFocus?.operation === "create_conversation";
   const visibleConversationReady =
     !switchingFocus && !transitioning && conversationReady;
+  const roleSwitchFocusKey = visibleConversationReady && runtimeState && currentFocus
+    ? activeFocusKey(currentFocus)
+    : undefined;
   const pendingTargetConversationId = pendingFocus?.operation === "focus_conversation"
     ? pendingFocus.targetConversationId
     : undefined;
@@ -4606,6 +4617,7 @@ export function App() {
               model={visiblePresentation.selectedModel}
               role={visibleConversationRole}
               roles={roles}
+              roleSwitchFocusKey={roleSwitchFocusKey}
               roleSwitchDisabled={
                 !runtimeState
                 || transitioning

@@ -140,6 +140,7 @@ interface ChatProps {
   model?: { provider: string; id: string };
   role?: ConversationRoleSnapshot;
   roles: RoleTemplate[];
+  roleSwitchFocusKey?: string;
   roleSwitchDisabled: boolean;
   roleSwitching: boolean;
   thinkingLevel: ThinkingLevel;
@@ -183,7 +184,7 @@ interface ChatProps {
   onServiceTier(serviceTier: ServiceTier | null): void;
   onCompactionThreshold(percent: number): boolean;
   onCompact(): void;
-  onSwitchRole(roleId: string): void;
+  onSwitchRole(roleId: string, focusKey: string): void;
   onChangeCwd(): void;
   onOpenConversation?(conversationId: string): void;
   onBlockingModalChange?(blocking: boolean): void;
@@ -476,6 +477,7 @@ function ChatView({
   model,
   role,
   roles,
+  roleSwitchFocusKey,
   roleSwitchDisabled,
   roleSwitching,
   thinkingLevel,
@@ -1442,6 +1444,7 @@ function ChatView({
       open={roleDetailsOpen}
       role={role}
       roles={roles}
+      focusKey={roleSwitchFocusKey}
       switchDisabled={roleSwitchDisabled}
       switching={roleSwitching}
       onSwitch={onSwitchRole}

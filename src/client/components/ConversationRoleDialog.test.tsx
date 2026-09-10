@@ -24,6 +24,7 @@ const role: ConversationRoleSnapshot = {
   toolMode: "read_only",
   canManageSessions: true,
 };
+const FOCUS_KEY = "focus-a";
 const roles = [{
   ...role,
   model: { ...role.model },
@@ -44,6 +45,7 @@ function ConversationRoleBackdropFixture({
       open={open}
       role={role}
       roles={roles}
+      focusKey={FOCUS_KEY}
       switchDisabled={false}
       switching={false}
       onSwitch={onSwitch}
@@ -94,6 +96,7 @@ describe("ConversationRoleDialog", () => {
       open
       role={role}
       roles={roles}
+      focusKey={FOCUS_KEY}
       switchDisabled={false}
       switching={false}
       onSwitch={() => true}
@@ -118,6 +121,7 @@ describe("ConversationRoleDialog", () => {
       open
       role={explicitRole}
       roles={roles}
+      focusKey={FOCUS_KEY}
       switchDisabled={false}
       switching={false}
       onSwitch={() => true}
@@ -144,6 +148,7 @@ describe("ConversationRoleDialog", () => {
       open
       role={role}
       roles={[...roles, alternative]}
+      focusKey={FOCUS_KEY}
       switchDisabled={false}
       switching={false}
       onSwitch={onSwitch}
@@ -157,7 +162,65 @@ describe("ConversationRoleDialog", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "应用角色" }));
 
-    expect(onSwitch).toHaveBeenCalledWith(alternative.id);
+    expect(onSwitch).toHaveBeenCalledWith(alternative.id, FOCUS_KEY);
+  });
+
+  it("disables applying without an executable focus key", () => {
+    const alternative = {
+      ...roles[0]!,
+      id: "21f01ca1-e28e-4f5e-bb46-442a2fdadafd",
+      revision: 1,
+      name: "Builder",
+    };
+    render(<ConversationRoleDialog
+      open
+      role={role}
+      roles={[...roles, alternative]}
+      switchDisabled={false}
+      switching={false}
+      onSwitch={() => undefined}
+      onClose={() => undefined}
+    />);
+
+    fireEvent.change(screen.getByRole("combobox", {
+      name: "选择新的会话角色",
+    }), { target: { value: alternative.id } });
+    expect(screen.getByRole("button", { name: "应用角色" })).toBeDisabled();
+  });
+
+  it("resets its draft and submits the current focus key on scope replacement", async () => {
+    const onSwitch = vi.fn();
+    const alternative = {
+      ...roles[0]!,
+      id: "21f01ca1-e28e-4f5e-bb46-442a2fdadafd",
+      revision: 1,
+      name: "Builder",
+    };
+    const props = {
+      open: true,
+      role,
+      roles: [...roles, alternative],
+      switchDisabled: false,
+      switching: false,
+      onSwitch,
+      onClose: () => undefined,
+    };
+    const view = render(<ConversationRoleDialog {...props} focusKey="focus-a" />);
+    const select = () => screen.getByRole("combobox", {
+      name: "选择新的会话角色",
+    });
+
+    fireEvent.change(select(), { target: { value: alternative.id } });
+    select().focus();
+    view.rerender(<ConversationRoleDialog {...props} focusKey="focus-b" />);
+
+    expect(select()).toHaveValue(role.id);
+    await waitFor(() => expect(screen.getByRole("button", {
+      name: "关闭",
+    })).toHaveFocus());
+    fireEvent.change(select(), { target: { value: alternative.id } });
+    fireEvent.click(screen.getByRole("button", { name: "应用角色" }));
+    expect(onSwitch).toHaveBeenCalledWith(alternative.id, "focus-b");
   });
 
   it("closes without modifying the snapshot", () => {
@@ -166,6 +229,7 @@ describe("ConversationRoleDialog", () => {
       open
       role={role}
       roles={roles}
+      focusKey={FOCUS_KEY}
       switchDisabled={false}
       switching={false}
       onSwitch={() => true}
@@ -179,6 +243,7 @@ describe("ConversationRoleDialog", () => {
       open={false}
       role={role}
       roles={roles}
+      focusKey={FOCUS_KEY}
       switchDisabled={false}
       switching={false}
       onSwitch={() => true}
@@ -200,6 +265,7 @@ describe("ConversationRoleDialog", () => {
     const props = {
       role,
       roles: [...roles, alternative],
+      focusKey: FOCUS_KEY,
       switchDisabled: false,
       switching: false,
       onSwitch,
@@ -224,6 +290,6 @@ describe("ConversationRoleDialog", () => {
     fireEvent.change(select(), { target: { value: alternative.id } });
     fireEvent.click(screen.getByRole("button", { name: "应用角色" }));
     expect(onSwitch).toHaveBeenCalledOnce();
-    expect(onSwitch).toHaveBeenCalledWith(alternative.id);
+    expect(onSwitch).toHaveBeenCalledWith(alternative.id, FOCUS_KEY);
   });
 });

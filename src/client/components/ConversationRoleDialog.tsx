@@ -24,9 +24,11 @@ interface ConversationRoleDialogProps {
   open: boolean;
   role: ConversationRoleSnapshot;
   roles: RoleTemplate[];
+  /** Opaque identity of the executable focus, supplied by App. */
+  focusKey?: string;
   switchDisabled: boolean;
   switching: boolean;
-  onSwitch(roleId: string): void;
+  onSwitch(roleId: string, focusKey: string): void;
   onClose(): void;
 }
 
@@ -34,6 +36,7 @@ export function ConversationRoleDialog({
   open,
   role,
   roles,
+  focusKey,
   switchDisabled,
   switching,
   onSwitch,
@@ -53,7 +56,7 @@ export function ConversationRoleDialog({
       ?? availableRoles[0]?.id
       ?? "",
     );
-  }, [availableRoles, open, role.id, role.revision]);
+  }, [availableRoles, focusKey, open, role.id, role.revision]);
   const selectedRole = availableRoles.find(
     ({ id }) => id === selectedRoleId,
   );
@@ -63,7 +66,7 @@ export function ConversationRoleDialog({
   );
   const focusRef = useModalFocus<HTMLElement>(
     open,
-    `${role.id}:${role.revision}`,
+    `${focusKey ?? ""}:${role.id}:${role.revision}`,
     onClose,
   );
   if (!open) return null;
@@ -124,10 +127,13 @@ export function ConversationRoleDialog({
           disabled={
             switchDisabled
             || switching
+            || !focusKey
             || !selectedRoleId
             || selectedRoleIsCurrent
           }
-          onClick={() => onSwitch(selectedRoleId)}
+          onClick={() => {
+            if (focusKey) onSwitch(selectedRoleId, focusKey);
+          }}
         >
           {switching ? "正在更换…" : "应用角色"}
         </button>
