@@ -1132,6 +1132,11 @@ export class ProjectSessionCoordinator {
       await actor.switchRole(
         role,
         this.createActorSessionOptions(context, conversationId, profile),
+        () => {
+          if (context.deleting.has(conversationId)) {
+            throw new Error(`Conversation is being deleted: ${conversationId}`);
+          }
+        },
       );
       context.profiles.set(conversationId, cloneProfile(actor.profile));
       this.emit(context, { type: "project_changed" });

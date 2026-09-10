@@ -1373,6 +1373,7 @@ export class ConversationActor {
     role: ConversationRoleSnapshot,
     createSessionOptions:
       NonNullable<ConversationActorOpenOptions["createSessionOptions"]>,
+    assertRoleSwitchPersistence?: () => void,
   ): Promise<void> {
     this.assertUsable();
     if (this.activeRun) {
@@ -1403,7 +1404,6 @@ export class ConversationActor {
     this.switchingRole = true;
     return this.operations.run(async () => {
       const previousOptions = this.createSessionOptions;
-      let persisted = false;
       try {
         this.assertUsable();
         if (this.activeRun) {
@@ -1412,6 +1412,14 @@ export class ConversationActor {
         if (!roleChanged) return;
 
         await this.stopRuntimeSession();
+        this.profileSnapshot = nextProfile;
+        this.serviceTierSelection = nextServiceTier;
+        this.createSessionOptions = createSessionOptions;
+        const pendingErrors = await this.startRuntimeSession(
+          createSessionOptions,
+        );
+        for (const error of pendingErrors) this.handleExtensionError(error);
+        assertRoleSwitchPersistence?.();
         appendReservedCustomEntry(
           this.sessionManager,
           createConversationRoleChangeEntry({
@@ -1420,29 +1428,10 @@ export class ConversationActor {
             changedAt: this.now().toISOString(),
           }),
         );
-        persisted = true;
-        this.profileSnapshot = nextProfile;
-        this.serviceTierSelection = nextServiceTier;
-        this.createSessionOptions = createSessionOptions;
-        const pendingErrors = await this.startRuntimeSession(
-          createSessionOptions,
-        );
-        for (const error of pendingErrors) this.handleExtensionError(error);
       } catch (error) {
         const failures: unknown[] = [error];
         try {
           if (this.created) await this.stopRuntimeSession();
-          if (persisted) {
-            appendReservedCustomEntry(
-              this.sessionManager,
-              createConversationRoleChangeEntry({
-                role: previousProfile.role,
-                selectedServiceTier: previousServiceTier,
-                changedAt: this.now().toISOString(),
-              }),
-            );
-            this.sessionManager.appendThinkingLevelChange(previousThinkingLevel);
-          }
           this.profileSnapshot = previousProfile;
           this.serviceTierSelection = previousServiceTier;
           const restoredOptions = {

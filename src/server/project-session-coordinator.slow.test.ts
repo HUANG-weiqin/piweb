@@ -2529,6 +2529,95 @@ describe("ProjectSessionCoordinator", () => {
     await expect(deleting).resolves.toBe(true);
   });
 
+  it("rejects a role switch when deletion reserves during its runtime stop", async () => {
+    const fixture = await createFixture();
+    const role = await fixture.roles.createRole({
+      name: "Builder",
+      description: "",
+      systemPrompt: "",
+      model: { provider: "test", id: "model-b" },
+      compactionModel: null,
+      defaultThinkingLevel: "off",
+      defaultServiceTier: null,
+      toolMode: "read_only",
+      canManageSessions: false,
+    });
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const appendCustomEntry = vi.spyOn(actor.sessionManager, "appendCustomEntry");
+    const runtimeStopStarted = deferred();
+    const releaseRuntimeStop = deferred();
+    let blockDispose = true;
+    fixture.runtime.beforeDisposeSession = async (conversationId) => {
+      if (conversationId !== actor.conversationId || !blockDispose) return;
+      blockDispose = false;
+      runtimeStopStarted.resolve();
+      await releaseRuntimeStop.promise;
+    };
+
+    const switching = fixture.coordinator.switchConversationRole(
+      fixture.handle,
+      actor.conversationId,
+      role.id,
+    );
+    await runtimeStopStarted.promise;
+    const deleting = fixture.coordinator.deleteConversation(
+      fixture.handle,
+      actor.conversationId,
+    );
+
+    releaseRuntimeStop.resolve();
+    await expect(switching).rejects.toThrow(/being deleted/i);
+    expect(appendCustomEntry).not.toHaveBeenCalled();
+    await expect(deleting).resolves.toBe(true);
+  });
+
+  it("does not append role history when deletion reserves before replacement startup fails", async () => {
+    const fixture = await createFixture();
+    const role = await fixture.roles.createRole({
+      name: "Builder",
+      description: "",
+      systemPrompt: "",
+      model: { provider: "test", id: "model-b" },
+      compactionModel: null,
+      defaultThinkingLevel: "off",
+      defaultServiceTier: null,
+      toolMode: "read_only",
+      canManageSessions: false,
+    });
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const appendCustomEntry = vi.spyOn(actor.sessionManager, "appendCustomEntry");
+    const replacementStarted = deferred();
+    const failReplacement = deferred();
+    fixture.runtime.beforeCreateSession = async (_conversationId, options) => {
+      if (options.model?.id !== "model-b") return;
+      replacementStarted.resolve();
+      await failReplacement.promise;
+      throw new Error("replacement activation failed");
+    };
+
+    const switching = fixture.coordinator.switchConversationRole(
+      fixture.handle,
+      actor.conversationId,
+      role.id,
+    );
+    await replacementStarted.promise;
+    const deleting = fixture.coordinator.deleteConversation(
+      fixture.handle,
+      actor.conversationId,
+    );
+
+    failReplacement.resolve();
+    await expect(switching).rejects.toThrow("replacement activation failed");
+    expect(appendCustomEntry).not.toHaveBeenCalled();
+    await expect(deleting).resolves.toBe(true);
+  });
+
   it("restores the previous role when the replacement runtime cannot open", async () => {
     const fixture = await createFixture();
     const role = await fixture.roles.createRole({
