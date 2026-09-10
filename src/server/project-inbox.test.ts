@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  link,
   lstat,
   mkdtemp,
   readFile,
@@ -14,7 +15,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...actual, rename: vi.fn(actual.rename) };
+  return {
+    ...actual,
+    link: vi.fn(actual.link),
+    lstat: vi.fn(actual.lstat),
+    rename: vi.fn(actual.rename),
+  };
 });
 const nativeFs = await vi.importActual<typeof import("node:fs/promises")>(
   "node:fs/promises",
@@ -40,6 +46,8 @@ async function temporaryDirectory(prefix: string): Promise<string> {
 }
 
 afterEach(async () => {
+  vi.mocked(link).mockReset().mockImplementation(nativeFs.link);
+  vi.mocked(lstat).mockReset().mockImplementation(nativeFs.lstat);
   vi.mocked(rename).mockReset().mockImplementation(nativeFs.rename);
   await Promise.all(
     temporaryDirectories.splice(0).map((directory) =>
@@ -417,6 +425,78 @@ describe("ProjectInbox", () => {
       constructor: InboxTargetTombstoneCommittedError,
       conversationId: target,
     });
+  });
+
+  it("treats an EEXIST whose stable census is absent as unpublished", async () => {
+    const { inbox } = await temporaryInbox("piweb-inbox-tombstone-absent-");
+    const target = randomUUID();
+    const error = new Error("target appeared then disappeared") as NodeJS.ErrnoException;
+    error.code = "EEXIST";
+    vi.mocked(link).mockRejectedValueOnce(error);
+
+    await expect(inbox.markTargetDeleted(target)).rejects.toThrow(
+      /was not persisted/i,
+    );
+    await expect(inbox.listDeletedTargets()).resolves.not.toContain(target);
+  });
+
+  it("treats a vanished post-link target as unpublished after a stable census", async () => {
+    const { directory, inbox } = await temporaryInbox(
+      "piweb-inbox-tombstone-vanished-",
+    );
+    const target = randomUUID();
+    const path = tombstonePath(directory, target);
+    let removed = false;
+    vi.mocked(lstat).mockImplementation(async (...args) => {
+      if (!removed && String(args[0]) === path) {
+        removed = true;
+        await nativeFs.unlink(path);
+        throw new Error("post-link ownership proof failed");
+      }
+      return nativeFs.lstat(...args);
+    });
+
+    await expect(inbox.markTargetDeleted(target)).rejects.toThrow(
+      /was not persisted/i,
+    );
+    await expect(inbox.listDeletedTargets()).resolves.not.toContain(target);
+  });
+
+  it("accepts an EEXIST when the stable census proves the tombstone is present", async () => {
+    const { directory, inbox } = await temporaryInbox("piweb-inbox-tombstone-present-");
+    const target = randomUUID();
+    vi.mocked(link).mockImplementationOnce(async (source, destination) => {
+      await nativeFs.link(source, destination);
+      const error = new Error("link response interrupted") as NodeJS.ErrnoException;
+      error.code = "EEXIST";
+      throw error;
+    });
+
+    await expect(inbox.markTargetDeleted(target)).resolves.toBeUndefined();
+    await expect(nativeFs.lstat(tombstonePath(directory, target))).resolves.toBeDefined();
+  });
+
+  it("keeps a tombstone committed when post-link proof fails", async () => {
+    const { directory, inbox } = await temporaryInbox(
+      "piweb-inbox-tombstone-post-link-",
+    );
+    const target = randomUUID();
+    const path = tombstonePath(directory, target);
+    vi.mocked(lstat).mockImplementation(async (...args) => {
+      if (String(args[0]) === path) {
+        throw new Error("post-link ownership proof failed");
+      }
+      return nativeFs.lstat(...args);
+    });
+
+    await expect(inbox.markTargetDeleted(target)).rejects.toMatchObject({
+      constructor: InboxTargetTombstoneCommittedError,
+      conversationId: target,
+    });
+    await expect(nativeFs.lstat(path)).resolves.toBeDefined();
+
+    vi.mocked(lstat).mockReset().mockImplementation(nativeFs.lstat);
+    await expect(inbox.markTargetDeleted(target)).resolves.toBeUndefined();
   });
 
   it("persists a target tombstone before exact pending cleanup and rejects future puts after reopen", async () => {

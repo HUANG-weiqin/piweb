@@ -2398,6 +2398,70 @@ describe("ProjectSessionCoordinator", () => {
     )).rejects.toThrow(/being deleted/i);
   });
 
+  it("releases an uncertain warm fence after a stable absent census", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const inbox = coordinatorInbox(fixture.handle);
+    inbox.markTargetDeleted = async (conversationId) => {
+      throw new InboxTargetTombstoneCommittedError(
+        conversationId,
+        new Error("census temporarily unavailable"),
+      );
+    };
+
+    await expect(fixture.coordinator.deleteConversation(
+      fixture.handle,
+      actor.conversationId,
+    )).rejects.toThrow(/committed but could not be verified/i);
+
+    const internals = fixture.coordinator as unknown as {
+      retryBlockedDeletions(context: unknown): Promise<void>;
+    };
+    const context = (fixture.handle as unknown as {
+      context: { deleting: Set<string> };
+    }).context;
+    expect(context.deleting).toContain(actor.conversationId);
+
+    await internals.retryBlockedDeletions(context);
+
+    expect(context.deleting).not.toContain(actor.conversationId);
+    expect(await inbox.listDeletedTargets()).not.toContain(actor.conversationId);
+  });
+
+  it("retains a warm deletion fence when tombstone cleanup fails", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const inbox = coordinatorInbox(fixture.handle);
+    inbox.clearTargetTombstone = async () => {
+      throw new Error("tombstone cleanup failed");
+    };
+
+    await expect(fixture.coordinator.deleteConversation(
+      fixture.handle,
+      actor.conversationId,
+    )).rejects.toThrow("tombstone cleanup failed");
+
+    expect(await inbox.listDeletedTargets()).toContain(actor.conversationId);
+    const internals = fixture.coordinator as unknown as {
+      retryBlockedDeletions(context: unknown): Promise<void>;
+    };
+    const context = (fixture.handle as unknown as { context: unknown }).context;
+    await internals.retryBlockedDeletions(context);
+
+    await expect(fixture.coordinator.prompt(
+      fixture.handle,
+      actor.conversationId,
+      randomUUID(),
+      "must not cross the retained deletion fence",
+    )).rejects.toThrow(/being deleted/i);
+  });
+
   it("leaves the actor fatal when rewind commits before catalog refresh fails", async () => {
     const fixture = await createFixture();
     const actor = await fixture.coordinator.createUserConversation(

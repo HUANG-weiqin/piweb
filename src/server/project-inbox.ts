@@ -203,6 +203,18 @@ export class InboxTargetTombstoneCommittedError extends Error {
   }
 }
 
+/** link() published the new inode, but its post-publication proof failed. */
+class InboxFilePublishedError extends Error {
+  constructor(
+    readonly targetPath: string,
+    cause: unknown,
+  ) {
+    super(`Inbox entry published but could not be verified: ${targetPath}`, {
+      cause,
+    });
+  }
+}
+
 interface StoredInboxFile {
   path: string;
   information: Stats;
@@ -825,17 +837,28 @@ export class ProjectInbox {
       );
     }
     const path = this.pathForTargetTombstone(conversationId);
-    let committed = false;
+    let publicationSucceeded = false;
+    let publicationWasAmbiguous = false;
+    let ambiguousPublication: unknown;
     try {
       await this.writeNewAtomically(path, serialized);
-      committed = true;
+      publicationSucceeded = true;
     } catch (error) {
-      if (!isNodeError(error, "EEXIST")) throw error;
+      if (
+        !(error instanceof InboxFilePublishedError)
+        && !isNodeError(error, "EEXIST")
+      ) {
+        throw error;
+      }
+      // A completed link whose proof failed, or EEXIST, has no durable
+      // meaning until a stable census observes its target.
+      publicationWasAmbiguous = true;
+      ambiguousPublication = error;
     }
     try {
       scan = await this.scan();
     } catch (error) {
-      if (committed) {
+      if (publicationSucceeded || publicationWasAmbiguous) {
         throw new InboxTargetTombstoneCommittedError(
           conversationId,
           error,
@@ -843,15 +866,19 @@ export class ProjectInbox {
       }
       throw error;
     }
-    if (!scan.tombstones.some(
+    if (scan.tombstones.some(
       ({ tombstone: persisted }) =>
         persisted.conversationId === conversationId,
     )) {
-      throw new Error(
-        `Inbox target tombstone was not persisted: ${conversationId}`,
-      );
+      return scan;
     }
-    return scan;
+    // A stable census without the target is terminal evidence that no
+    // deletion fence is currently durable. It is safe to release the warm
+    // reservation rather than maroon it behind an ambiguous syscall error.
+    throw new Error(
+      `Inbox target tombstone was not persisted: ${conversationId}`,
+      { cause: ambiguousPublication },
+    );
   }
 
   private pathForMessage(messageId: string): string {
@@ -1079,6 +1106,7 @@ export class ProjectInbox {
   ): Promise<void> {
     const temporaryPath = this.temporaryPath(targetPath);
     const temporaryDirectory = dirname(this.directory);
+    let published = false;
     try {
       await assertOwnedDirectory(temporaryDirectory);
       await writeFile(temporaryPath, content, {
@@ -1090,10 +1118,14 @@ export class ProjectInbox {
         temporaryPath,
       );
       await link(temporaryPath, targetPath);
-      const published = await assertOwnedFile(this.directory, targetPath);
-      if (!statsAreIdentical(temporary, published)) {
+      published = true;
+      const current = await assertOwnedFile(this.directory, targetPath);
+      if (!statsAreIdentical(temporary, current)) {
         throw new Error(`Inbox entry changed while being published: ${targetPath}`);
       }
+    } catch (error) {
+      if (published) throw new InboxFilePublishedError(targetPath, error);
+      throw error;
     } finally {
       await unlink(temporaryPath).catch(() => undefined);
     }

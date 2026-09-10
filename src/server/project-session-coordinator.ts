@@ -229,6 +229,8 @@ interface ProjectContext {
   readonly profiles: Map<string, ConversationMeta>;
   readonly attention: Set<string>;
   readonly deleting: Set<string>;
+  /** In-memory source for a tombstone write whose stable census was unknown. */
+  readonly uncertainDeletionFences: Set<string>;
   readonly listeners: Set<ProjectSessionCoordinatorListener>;
   readonly completionWaiters: Map<string, Set<CompletionWaiter>>;
   readonly completions: Map<string, RunSettlement>;
@@ -754,6 +756,7 @@ export class ProjectSessionCoordinator {
         profiles: new Map(),
         attention: new Set(),
         deleting: new Set(),
+        uncertainDeletionFences: new Set(),
         listeners: new Set(),
         completionWaiters: new Map(),
         completions: new Map(),
@@ -3167,7 +3170,40 @@ export class ProjectSessionCoordinator {
   private async retryBlockedDeletions(
     context: ProjectContext,
   ): Promise<void> {
+    await this.retryUncertainDeletionFences(context);
     await this.retryDurableDeletions(context);
+  }
+
+  private async retryUncertainDeletionFences(
+    context: ProjectContext,
+  ): Promise<void> {
+    for (const conversationId of [...context.uncertainDeletionFences]) {
+      if (context.closing) return;
+      try {
+        const persisted = await context.inbox.listDeletedTargets();
+        if (!persisted.includes(conversationId)) {
+          // A successful full inbox census proves the ambiguous write did not
+          // leave a durable fence. No deletion can be resumed for this ID.
+          context.uncertainDeletionFences.delete(conversationId);
+          context.deleting.delete(conversationId);
+          context.attention.delete(conversationId);
+          continue;
+        }
+        context.uncertainDeletionFences.delete(conversationId);
+        if (!context.deleting.has(conversationId)) {
+          context.deleting.add(conversationId);
+        }
+        await this.deleteConversationInternal(
+          context,
+          conversationId,
+          true,
+          undefined,
+          true,
+        );
+      } catch {
+        context.attention.add(conversationId);
+      }
+    }
   }
 
   private async retryDurableDeletions(
@@ -5949,12 +5985,9 @@ export class ProjectSessionCoordinator {
     const known = context.project.listConversations()
       .some(({ id }) => id === conversationId);
     if (!known && !context.actors.has(conversationId)) {
-      try {
-        await context.inbox.clearTargetTombstone(conversationId);
-        return false;
-      } finally {
-        context.deleting.delete(conversationId);
-      }
+      await context.inbox.clearTargetTombstone(conversationId);
+      context.deleting.delete(conversationId);
+      return false;
     }
 
     const preexistingDurableFenceIds = reservedByDurableTombstone
@@ -6051,6 +6084,7 @@ export class ProjectSessionCoordinator {
             && error.conversationId === cascadeId
           ) {
             durableFenceIds.add(cascadeId);
+            context.uncertainDeletionFences.add(cascadeId);
           }
           throw error;
         }
@@ -6091,12 +6125,9 @@ export class ProjectSessionCoordinator {
     const known = context.project.listConversations()
       .some(({ id }) => id === conversationId);
     if (!known && !context.actors.has(conversationId)) {
-      try {
-        await context.inbox.clearTargetTombstone(conversationId);
-        return false;
-      } finally {
-        context.deleting.delete(conversationId);
-      }
+      await context.inbox.clearTargetTombstone(conversationId);
+      context.deleting.delete(conversationId);
+      return false;
     }
     const actor = context.actors.get(conversationId);
     if (
@@ -6146,6 +6177,7 @@ export class ProjectSessionCoordinator {
           && error.conversationId === conversationId
         ) {
           durableDeletionIntent = true;
+          context.uncertainDeletionFences.add(conversationId);
         }
         throw error;
       }
