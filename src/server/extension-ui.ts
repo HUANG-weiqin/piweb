@@ -237,14 +237,15 @@ export class ExtensionUIBroker {
   private settle(pending: PendingDialog, value: unknown): void {
     if (this.pending.get(pending.requestId) !== pending) return;
     this.remove(pending);
+    pending.resolve(value);
     try {
       this.emit({
         type: "extension_ui_closed",
         sessionId: pending.sessionId,
         requestId: pending.requestId,
       });
-    } finally {
-      pending.resolve(value);
+    } catch {
+      // The dialog settlement is authoritative; its projection is best effort.
     }
   }
 

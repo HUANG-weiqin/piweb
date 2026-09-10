@@ -167,6 +167,40 @@ describe("ExtensionUIBroker", () => {
     });
   });
 
+  it("drains every dialog when close observations throw", async () => {
+    const ids = [REQUEST_A, REQUEST_B];
+    const closedRequestIds: string[] = [];
+    const broker = new ExtensionUIBroker(
+      (event) => {
+        if (event.type !== "extension_ui_closed") return;
+        closedRequestIds.push(event.requestId);
+        throw new Error("close projection failed");
+      },
+      () => ids.shift() ?? crypto.randomUUID(),
+    );
+    const ui = broker.context({
+      sessionId: SESSION_A,
+      generation: 1,
+    });
+    const input = ui.input("Input");
+    const confirmation = ui.confirm("Confirm", "Continue?");
+
+    expect(() => broker.cancelAll()).not.toThrow();
+    await expect(input).resolves.toBeUndefined();
+    await expect(confirmation).resolves.toBe(false);
+    expect(closedRequestIds).toEqual([REQUEST_A, REQUEST_B]);
+    expect(broker.respond({
+      sessionId: SESSION_A,
+      requestId: REQUEST_A,
+      response: { kind: "input", value: "late" },
+    })).toBe(false);
+    expect(broker.respond({
+      sessionId: SESSION_A,
+      requestId: REQUEST_B,
+      response: { kind: "confirm", confirmed: true },
+    })).toBe(false);
+  });
+
   it("bounds one-time request identities for the lifetime of a connection", async () => {
     let sequence = 0;
     const broker = new ExtensionUIBroker(
