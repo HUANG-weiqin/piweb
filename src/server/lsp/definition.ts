@@ -85,6 +85,14 @@ async function readDeclarations(configPath: string): Promise<Declaration[]> {
   }
 }
 
+function equivalentLanguageMappings(
+  left: Readonly<Record<string, string>>,
+  right: Readonly<Record<string, string>>,
+): boolean {
+  const keys = Object.keys(left);
+  return keys.length === Object.keys(right).length && keys.every((key) => left[key] === right[key]);
+}
+
 async function selectDeclarations(declarations: Declaration[], cwd: string): Promise<Declaration[]> {
   const selected = new Map<string, { declaration: Declaration; scoped: boolean }>();
   for (const declaration of declarations) {
@@ -171,6 +179,10 @@ export async function resolveLspServer(
     const declarations = await selectDeclarations(await readDeclarations(configPath), cwd);
     const candidates = declarations.map((declaration) => {
       const profile = lspServerProfiles.find((entry) => entry.id === declaration.id);
+      if (profile?.adaptConnection && declaration.extensionToLanguage !== undefined &&
+        !equivalentLanguageMappings(declaration.extensionToLanguage, profile.extensionToLanguage)) {
+        throw new LspError("misconfigured", `Adapted LSP declaration must retain the ${declaration.id} language mapping`);
+      }
       const extensionToLanguage = declaration.extensionToLanguage ?? profile?.extensionToLanguage;
       if (!extensionToLanguage || !(declaration.command ?? profile?.command)
         || (!declaration.root && !(declaration.rootMarkers ?? profile?.rootMarkers))) {

@@ -69,7 +69,7 @@ ConversationActor 的 workbenchCustomTools
 ```
 
 - 条目存在即 opt-in；`enabled:false` 禁用。`workspace` 可省略，表示适用于所有已信任工作区；同 ID 的精确 workspace 条目替代全局条目，同作用域重复 ID 拒绝。
-- 内置 profile 提供默认 command、语言映射、root markers、初始化选项和 settings。配置中的字段整体替换对应 profile 字段，不做隐式深合并。
+- 内置 profile 提供默认 command、语言映射、root markers、初始化选项和 settings。配置中的字段整体替换对应 profile 字段，不做隐式深合并。带局部 `adaptConnection` 的 profile 以其 `id` 绑定服务器语义：可省略 `extensionToLanguage` 并继承默认映射；一旦显式提供，键和值必须与该 profile 的完整映射完全相等，增删或改写均以 `misconfigured` 拒绝。`command`、argv、env、root 等部署字段仍可覆盖；用户 JSON 不能选择或提供适配器代码。
 - 支持字段：`id / enabled / workspace / command / env / extensionToLanguage / rootMarkers / root / initializationOptions / settings / watchFiles`；未知字段拒绝。
 - 自定义语言服务器同样是数据条目，须给出 command、扩展名到 language ID 的映射，以及 root 或 rootMarkers。无需改工具、传输或工作区类。
 - command 是可执行程序和字面 argv，不是 shell 字符串。只接受绝对可执行路径或 PATH 名称，拒绝 `.cmd/.bat/.ps1` 和相对可执行路径；Windows 的 npm 包应使用 `node.exe + 绝对 JS 入口 + argv`。环境继承宿主环境，再应用用户声明的 env，并进入冻结指纹。

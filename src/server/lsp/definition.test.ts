@@ -9,6 +9,7 @@ let cwd: string;
 let file: string;
 let config: string;
 const command = [process.execPath, "server.js"];
+const roslynExtensionToLanguage = { ".cs": "csharp" };
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "piweb-lsp-config-"));
@@ -45,6 +46,30 @@ describe("LSP user-owned declarations", () => {
     expect(result.adaptConnection).toBeTypeOf("function");
   });
 
+  it("keeps an adapted profile's language mapping semantic while allowing deployment overrides", async () => {
+    await configure([{ id: "roslyn", command }]);
+    expect((await resolveLspServer(cwd, file, config)).adaptConnection).toBeTypeOf("function");
+
+    const overriddenCommand = [...command, "--deployment"];
+    await configure([{
+      id: "roslyn",
+      command: overriddenCommand,
+      extensionToLanguage: roslynExtensionToLanguage,
+    }]);
+    const equivalent = await resolveLspServer(cwd, file, config);
+    expect(equivalent.command).toEqual(overriddenCommand);
+    expect(equivalent.adaptConnection).toBeTypeOf("function");
+
+    for (const extensionToLanguage of [
+      { ".cs": "custom" },
+      { ".csx": "csharp" },
+      { ".cs": "csharp", ".csx": "csharp" },
+    ]) {
+      await configure([{ id: "roslyn", command, extensionToLanguage }]);
+      await expect(resolveLspServer(cwd, file, config)).rejects.toMatchObject({ code: "misconfigured" });
+    }
+  });
+
   it("fingerprints every effective setting deterministically, including environment and arguments", async () => {
     await configure([{ id: "roslyn", command, env: { EXAMPLE: "one" }, settings: { a: 1, b: 2 } }]);
     const first = await resolveLspServer(cwd, file, config);
@@ -56,11 +81,14 @@ describe("LSP user-owned declarations", () => {
       { initializationOptions: { option: true } },
       { settings: { a: 2 } },
       { watchFiles: ["**/*.cs"] },
-      { extensionToLanguage: { ".cs": "other" } },
     ]) {
       await configure([{ id: "roslyn", command, env: { EXAMPLE: "one" }, settings: { a: 1, b: 2 }, ...change }]);
       expect((await resolveLspServer(cwd, file, config)).fingerprint).not.toBe(first.fingerprint);
     }
+    await configure([{ id: "custom", command, extensionToLanguage: { ".cs": "one" }, rootMarkers: [["*.sln"]] }]);
+    const custom = await resolveLspServer(cwd, file, config);
+    await configure([{ id: "custom", command, extensionToLanguage: { ".cs": "two" }, rootMarkers: [["*.sln"]] }]);
+    expect((await resolveLspServer(cwd, file, config)).fingerprint).not.toBe(custom.fingerprint);
   });
 
   it("does not choose an ambiguous server or marker by registration order", async () => {
