@@ -75,6 +75,10 @@ function safeFirstKeptEntryId(
 export function installCompactionBoundary(
   manager: SessionManager,
 ): CompactionBoundaryAdapter {
+  const originalDescriptor = Object.getOwnPropertyDescriptor(
+    manager,
+    "appendCompaction",
+  );
   const original = manager.appendCompaction;
   const wrapped: SessionManager["appendCompaction"] = function (
     summary,
@@ -95,12 +99,13 @@ export function installCompactionBoundary(
     );
   };
 
-  Object.defineProperty(manager, "appendCompaction", {
+  const installedDescriptor = {
     configurable: true,
     enumerable: false,
     writable: true,
     value: wrapped,
-  });
+  };
+  Object.defineProperty(manager, "appendCompaction", installedDescriptor);
 
   let installed = true;
   return {
@@ -114,11 +119,18 @@ export function installCompactionBoundary(
       if (
         !currentDescriptor
         || !("value" in currentDescriptor)
-        || currentDescriptor.value !== wrapped
+        || currentDescriptor.value !== installedDescriptor.value
+        || currentDescriptor.configurable !== installedDescriptor.configurable
+        || currentDescriptor.enumerable !== installedDescriptor.enumerable
+        || currentDescriptor.writable !== installedDescriptor.writable
       ) {
         return;
       }
-      delete (manager as Partial<SessionManager>).appendCompaction;
+      if (originalDescriptor) {
+        Object.defineProperty(manager, "appendCompaction", originalDescriptor);
+      } else {
+        delete (manager as Partial<SessionManager>).appendCompaction;
+      }
     },
   };
 }

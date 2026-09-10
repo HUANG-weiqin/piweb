@@ -217,6 +217,27 @@ describe("installCompactionBoundary", () => {
     adapter.dispose();
   });
 
+  it("restores an existing own descriptor exactly", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    const inheritedMethod = manager.appendCompaction;
+    const originalDescriptor = {
+      configurable: true,
+      enumerable: true,
+      writable: false,
+      value: inheritedMethod,
+    };
+    Object.defineProperty(manager, "appendCompaction", originalDescriptor);
+
+    const adapter = installCompactionBoundary(manager);
+    expect(manager.appendCompaction).not.toBe(inheritedMethod);
+
+    adapter.dispose();
+
+    expect(Object.getOwnPropertyDescriptor(manager, "appendCompaction")).toEqual(
+      originalDescriptor,
+    );
+  });
+
   it("restores the inherited method and disposes idempotently", () => {
     const manager = SessionManager.inMemory("E:\\work");
     const inheritedMethod = manager.appendCompaction;
@@ -239,5 +260,23 @@ describe("installCompactionBoundary", () => {
     adapter.dispose();
 
     expect(manager.appendCompaction).toBe(replacement);
+  });
+
+  it("does not overwrite a descriptor changed by a later owner", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    const adapter = installCompactionBoundary(manager);
+    const wrapped = manager.appendCompaction;
+    const laterDescriptor = {
+      configurable: false,
+      enumerable: true,
+      writable: true,
+      value: wrapped,
+    };
+    Object.defineProperty(manager, "appendCompaction", laterDescriptor);
+
+    expect(() => adapter.dispose()).not.toThrow();
+    expect(Object.getOwnPropertyDescriptor(manager, "appendCompaction")).toEqual(
+      laterDescriptor,
+    );
   });
 });
