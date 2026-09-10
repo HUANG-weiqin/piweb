@@ -77,9 +77,31 @@ ConversationActor 的 workbenchCustomTools
 
 ## 语言声明
 
+### C#
+
 内置 `roslyn` 使用官方 `roslyn-language-server --stdio --autoLoadProjects`，匹配 `.cs → csharp`，root 优先 `.sln/.slnx` 再 `.csproj`。服务器及匹配的 .NET 运行时由用户独立安装，不属于 Pi Web npm 依赖。被分析项目还需可用的 SDK、targeting packs 与已 restore 的项目依赖；宿主不代替项目执行 restore/build。普通 `.cs` 是首个支持范围；虚拟生成源码和反编译 URI 不会被工作台读取。
 
 Roslyn 5.12 的定义导航优先使用 frozen partial semantics，单独 watcher 或文本同步不能证明跨文件语义已更新。`servers/roslyn.ts` 的局部适配器在 definition 前对同位置执行一次 references（含声明），准备完整语义后才发 definition；不是重试。两阶段保留同一 caller signal、共享连接、wire/总时限与门外等待，准备期间另一调用者同步文档则返回 `content_modified`。references 和 symbols 本身仍是单次请求。适配器仅来自受信内置 profile，在初始化的清理边界内绑定；用户 JSON 不能提供可执行适配代码。
+
+### TypeScript / JavaScript
+
+内置 `typescript` 使用 `typescript-language-server --stdio`，不是 raw `tsserver`。映射为 `.ts/.mts/.cts → typescript`、`.tsx → typescriptreact`、`.js/.mjs/.cjs → javascript`、`.jsx → javascriptreact`。root 优先 `tsconfig.json/jsconfig.json` 同组，再回退 `package.json`；同层同时存在两个配置 marker 时仍拒绝猜测，可显式配置 `root`。
+
+例如在 `servers` 中增加一个 Windows 工作区条目：
+
+```json
+{
+  "id": "typescript",
+  "workspace": "E:/projects/web",
+  "command": [
+    "C:/Program Files/nodejs/node.exe",
+    "C:/tools/tls/node_modules/typescript-language-server/lib/cli.mjs",
+    "--stdio"
+  ]
+}
+```
+
+TLS 及可用的 TypeScript 库由用户独立准备；不会加入 Pi Web 的运行依赖或修改全局 PATH。profile 没有局部适配器，也不臆造静态 watch 覆盖。已知源文件内容变化复用通用有界 mirror；add/delete/config 等变化若缺少实际同步覆盖，按通用规则失效旧连接并由后续显式查询重建，不能把服务器自己的文件观察当作宿主已确认的同步。
 
 新增语言只修改 `src/server/lsp/servers/` 内的声明或必要局部适配；不得在 tools、workspace 或 connection 根据语言名称分支。
 
@@ -112,5 +134,12 @@ npx vitest run src/server/lsp/roslyn.integration.test.ts
 ```
 
 fixture 的启动与项目加载有界轮询是显式的后续工具调用，不是运行时自动重试；`initialize` 不承诺索引已就绪。已关闭 Helper 的变更验收则在真实 watcher 观察到 change 后只调用一次 definition，要求新范围、最新文本已同步且连接未重建；不以独立的磁盘片段更新冒充索引同步。
+
+`typescript.integration.test.ts` 同样默认跳过，显式传入真实 TLS 的 argv 后运行私有多文件 fixture；测试不安装工具、不修改用户配置。验证版本为 `typescript-language-server 4.3.3` 与 TypeScript `5.7.3`。第二语言只增加声明、目录注册与测试，不修改通用传输、工具、工作区或会话层。
+
+```bash
+PIWEB_LSP_TYPESCRIPT_COMMAND='["C:/Program Files/nodejs/node.exe","C:/tools/tls/node_modules/typescript-language-server/lib/cli.mjs","--stdio"]' \
+ npx vitest run src/server/lsp/typescript.integration.test.ts
+```
 
 关联：[服务端运行时](kb-server-runtime.md)、[工具权限](kb-tool-policy.md)。

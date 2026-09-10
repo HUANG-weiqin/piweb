@@ -89,7 +89,12 @@
 
 语言服务器由用户预先安装，再配置 `<Pi agent dir>/piweb/lsp.json`；工作台不会自动下载或运行安装命令。首次使用须通过既有项目信任检查，即使项目没有 `.pi` 扩展资源也不跳过。只读角色可用这三个查询工具，但语言服务可能运行构建工具/插件或写缓存，不是 OS 只读沙箱。
 
-C# 使用官方 `roslyn-language-server --stdio --autoLoadProjects`（需要匹配的 .NET 运行时），不使用 raw 编译器协议。配置、root 选择、UTF-16 位置、同步和资源限制见 [本机 LSP 查询](.knowledge/kb-lsp.md)。没有用户配置时返回 `not_enabled`；未支持的能力与成功的空结果明确区分。
+内置声明支持：
+
+- C#：官方 `roslyn-language-server --stdio --autoLoadProjects`，需要匹配的 .NET 运行时及项目 SDK。
+- TypeScript / JavaScript：`typescript-language-server --stdio` 和可用的 TypeScript 库，不直接连接 raw `tsserver`。Windows 的 npm 入口须配置为 `node.exe + 绝对 cli.mjs 路径 + --stdio`，不执行 `.cmd` shim。
+
+配置、root 选择、UTF-16 位置、同步和资源限制见 [本机 LSP 查询](.knowledge/kb-lsp.md)。没有用户配置时返回 `not_enabled`；未支持的能力与成功的空结果明确区分。
 
 ## 开发运行
 
