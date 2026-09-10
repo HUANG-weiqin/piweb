@@ -482,6 +482,67 @@ async function initializeNewConversation(
   return latestState(harness.events);
 }
 
+async function pauseCommittedCatalogFailure(
+  harness: CoordinatedHarness,
+  focused: ReturnType<typeof latestState>,
+): Promise<{
+  retainedId: string;
+  selectedId: string;
+  recoveryStarted: Promise<void>;
+  releaseRecovery(): void;
+}> {
+  const manager = harness.runtime.created[0]?.persistentManager;
+  if (!manager) throw new Error("persistent SessionManager was not provided");
+  const retainedId = manager.appendMessage({
+    role: "user",
+    content: "retained",
+    timestamp: 1,
+  });
+  const selectedId = manager.appendMessage({
+    role: "user",
+    content: "rewind from here",
+    timestamp: 2,
+  });
+  await harness.connection.handle({
+    type: "refresh_view",
+    sessionId: SESSION_A,
+    projectId: focused.projectId,
+    conversationId: focused.conversationId!,
+    focusId: focused.focusId!,
+  });
+  await vi.waitFor(() => {
+    expect(harness.events.findLast(
+      (event) => event.type === "project_snapshot",
+    )).toMatchObject({ coverage: "complete" });
+  });
+
+  const handle = await harness.coordinator.acquireProject(harness.cwd, "read_only");
+  const project = handle.project;
+  const internals = project as unknown as {
+    scanConversations(): Promise<unknown>;
+  };
+  vi.spyOn(internals, "scanConversations").mockRejectedValueOnce(
+    new Error("catalog refresh failed"),
+  );
+  const openConversation = project.openConversation.bind(project);
+  const recoveryStarted = deferred();
+  const releaseRecovery = deferred();
+  vi.spyOn(project, "openConversation").mockImplementationOnce(
+    async (...args) => {
+      recoveryStarted.resolve();
+      await releaseRecovery.promise;
+      return openConversation(...args);
+    },
+  );
+  handle.release();
+  return {
+    retainedId,
+    selectedId,
+    recoveryStarted: recoveryStarted.promise,
+    releaseRecovery: releaseRecovery.resolve,
+  };
+}
+
 function exposeModelProvider(
   runtime: FakeRuntime,
   provider: string,
@@ -3981,6 +4042,217 @@ describe("PiConnection coordinated project view", () => {
     } finally {
       finishReplacement.resolve();
       await rewinding?.catch(() => undefined);
+      await harness.cleanup();
+    }
+  });
+
+  it("projects unknown catalog coverage and the rewound snapshot after a committed catalog failure", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      const focused = await initializeNewConversation(harness);
+      const manager = harness.runtime.created[0]?.persistentManager;
+      if (!manager) throw new Error("persistent SessionManager was not provided");
+      const retainedId = manager.appendMessage({
+        role: "user",
+        content: "retained",
+        timestamp: 1,
+      });
+      const selectedId = manager.appendMessage({
+        role: "user",
+        content: "rewind from here",
+        timestamp: 2,
+      });
+      await harness.connection.handle({
+        type: "refresh_view",
+        sessionId: SESSION_A,
+        projectId: focused.projectId,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+      });
+      await vi.waitFor(() => {
+        expect(harness.events.findLast(
+          (event) => event.type === "project_snapshot",
+        )).toMatchObject({ coverage: "complete" });
+      });
+      const handle = await harness.coordinator.acquireProject(
+        harness.cwd,
+        "read_only",
+      );
+      const projectInternals = handle.project as unknown as {
+        scanConversations(): Promise<unknown>;
+      };
+      vi.spyOn(projectInternals, "scanConversations").mockRejectedValueOnce(
+        new Error("catalog refresh failed"),
+      );
+      handle.release();
+
+      const eventStart = harness.events.length;
+      const commandId = randomUUID();
+      await harness.connection.handle({
+        type: "truncate_conversation",
+        commandId,
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+        messageId: selectedId,
+      });
+
+      const commandEvents = harness.events.slice(eventStart);
+      const unknownIndex = commandEvents.findIndex(
+        (event) => event.type === "project_snapshot"
+          && event.coverage === "unknown",
+      );
+      const snapshotIndex = commandEvents.findIndex(
+        (event) => event.type === "conversation_snapshot"
+          && event.conversationId === focused.conversationId,
+      );
+      expect(unknownIndex).toBeGreaterThanOrEqual(0);
+      expect(snapshotIndex).toBeGreaterThan(unknownIndex);
+      expect(commandEvents[snapshotIndex]).toMatchObject({
+        type: "conversation_snapshot",
+        conversationId: focused.conversationId,
+        items: expect.arrayContaining([
+          expect.objectContaining({ id: retainedId, text: "retained" }),
+        ]),
+      });
+      expect((commandEvents[snapshotIndex] as Extract<
+        ServerEvent,
+        { type: "conversation_snapshot" }
+      >).items.some(({ id }) => id === selectedId)).toBe(false);
+      const commandCompleteIndex = commandEvents.findIndex(
+        (event) => event.type === "command_complete"
+          && event.operation === "truncate_conversation"
+          && event.commandId === commandId,
+      );
+      expect(commandCompleteIndex).toBeGreaterThan(snapshotIndex);
+      expect(commandEvents[commandCompleteIndex]).toEqual({
+        type: "command_complete",
+        operation: "truncate_conversation",
+        commandId,
+        sessionId: SESSION_A,
+      });
+      await vi.waitFor(() => {
+        expect(harness.events.slice(eventStart).some(
+          (event) => event.type === "project_snapshot"
+            && event.coverage === "complete",
+        )).toBe(true);
+      });
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("suppresses a committed catalog-failure rewind after reinitialize supersedes its view", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const releaseRecovery: Array<() => void> = [];
+    let rewinding: Promise<void> | undefined;
+    let reinitializing: Promise<void> | undefined;
+    try {
+      const focused = await initializeNewConversation(harness);
+      const paused = await pauseCommittedCatalogFailure(harness, focused);
+      releaseRecovery.push(paused.releaseRecovery);
+      const eventStart = harness.events.length;
+      const commandId = randomUUID();
+      rewinding = harness.connection.handle({
+        type: "truncate_conversation",
+        commandId,
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+        messageId: paused.selectedId,
+      });
+      await paused.recoveryStarted;
+
+      reinitializing = harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_B,
+        cwd: harness.cwd,
+        conversation: {
+          kind: "open",
+          conversationId: focused.conversationId!,
+        },
+      });
+      paused.releaseRecovery();
+      await Promise.all([rewinding, reinitializing]);
+      rewinding = undefined;
+      reinitializing = undefined;
+
+      const supersededEvents = harness.events.slice(eventStart).filter(
+        (event) => "sessionId" in event && event.sessionId === SESSION_A,
+      );
+      expect(supersededEvents).toEqual([]);
+      const currentSnapshot = harness.events.findLast((event) =>
+        event.type === "conversation_snapshot" && event.sessionId === SESSION_B
+      );
+      expect(currentSnapshot).toMatchObject({
+        type: "conversation_snapshot",
+        conversationId: focused.conversationId,
+        items: expect.arrayContaining([
+          expect.objectContaining({ id: paused.retainedId, text: "retained" }),
+        ]),
+      });
+      expect((currentSnapshot as Extract<
+        ServerEvent,
+        { type: "conversation_snapshot" }
+      >).items.some(({ id }) => id === paused.selectedId)).toBe(false);
+    } finally {
+      for (const release of releaseRecovery) release();
+      await rewinding?.catch(() => undefined);
+      await reinitializing?.catch(() => undefined);
+      await harness.cleanup();
+    }
+  });
+
+  it("suppresses a committed catalog-failure rewind after close supersedes its view", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const releaseRecovery: Array<() => void> = [];
+    let rewinding: Promise<void> | undefined;
+    let closing: Promise<void> | undefined;
+    try {
+      const focused = await initializeNewConversation(harness);
+      const paused = await pauseCommittedCatalogFailure(harness, focused);
+      releaseRecovery.push(paused.releaseRecovery);
+      const eventStart = harness.events.length;
+      rewinding = harness.connection.handle({
+        type: "truncate_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+        messageId: paused.selectedId,
+      });
+      await paused.recoveryStarted;
+
+      closing = harness.connection.handle({
+        type: "close_session",
+        sessionId: SESSION_A,
+      });
+      paused.releaseRecovery();
+      await Promise.all([rewinding, closing]);
+      rewinding = undefined;
+      closing = undefined;
+
+      expect(harness.events.slice(eventStart).filter(
+        (event) => "sessionId" in event && event.sessionId === SESSION_A,
+      )).toEqual([]);
+      const handle = await harness.coordinator.acquireProject(harness.cwd, "read_only");
+      try {
+        const manager = await handle.project.openConversation(
+          focused.conversationId!,
+          { updateRecent: false },
+        );
+        expect(manager.getEntries().some(({ id }) => id === paused.selectedId))
+          .toBe(false);
+        expect(manager.getEntries().some(({ id }) => id === paused.retainedId))
+          .toBe(true);
+      } finally {
+        handle.release();
+      }
+    } finally {
+      for (const release of releaseRecovery) release();
+      await rewinding?.catch(() => undefined);
+      await closing?.catch(() => undefined);
       await harness.cleanup();
     }
   });

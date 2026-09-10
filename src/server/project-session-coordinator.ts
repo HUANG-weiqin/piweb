@@ -114,7 +114,7 @@ const INBOX_LIFECYCLE_GUIDANCE = [
 
 export type ProjectSessionCoordinatorEvent =
   | ConversationActorEvent
-  | { type: "project_changed" };
+  | { type: "project_changed"; catalogInvalidated?: true };
 
 export type ProjectSessionCoordinatorListener = (
   event: ProjectSessionCoordinatorEvent,
@@ -1728,9 +1728,14 @@ export class ProjectSessionCoordinator {
           "Cannot rewind while this conversation has an unsettled cross-session delivery",
         );
       }
-      await actor.truncateFromMessage(entryId);
+      const result = await actor.truncateFromMessage(entryId);
       context.profiles.set(conversationId, cloneProfile(actor.profile));
-      this.emit(context, { type: "project_changed" });
+      this.emit(
+        context,
+        result.catalogInvalidated
+          ? { type: "project_changed", catalogInvalidated: true }
+          : { type: "project_changed" },
+      );
     });
   }
 

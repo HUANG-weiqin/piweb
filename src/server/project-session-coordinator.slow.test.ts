@@ -2462,7 +2462,81 @@ describe("ProjectSessionCoordinator", () => {
     )).rejects.toThrow(/being deleted/i);
   });
 
-  it("leaves the actor fatal when rewind commits before catalog refresh fails", async () => {
+  it("rebuilds from the exact session when rewind commits before catalog refresh fails", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const retainedId = actor.sessionManager.appendMessage({
+      role: "user",
+      content: "retained",
+      timestamp: 1,
+    });
+    const selectedId = actor.sessionManager.appendMessage({
+      role: "user",
+      content: "rewind from here",
+      timestamp: 2,
+    });
+    const previousManager = actor.sessionManager;
+    const setSessionFile = vi.spyOn(previousManager, "setSessionFile");
+    const sessionFile = previousManager.getSessionFile()!;
+    const previousRuntime = fixture.runtime.control(actor.conversationId);
+    const projectInternals = fixture.handle.project as unknown as {
+      scanConversations(): Promise<unknown>;
+    };
+    vi.spyOn(projectInternals, "scanConversations").mockRejectedValueOnce(
+      new Error("catalog refresh failed"),
+    );
+    const openConversation = fixture.handle.project.openConversation.bind(
+      fixture.handle.project,
+    );
+    let exactSessionManager: SessionManager | undefined;
+    const reopen = vi.spyOn(fixture.handle.project, "openConversation")
+      .mockImplementation(async (conversationId, options) => {
+        exactSessionManager = await openConversation(conversationId, options);
+        return exactSessionManager;
+      });
+    const projectChanges: Array<{ catalogInvalidated?: true }> = [];
+    const unsubscribe = fixture.coordinator.subscribe(fixture.handle, (event) => {
+      if (event.type === "project_changed") projectChanges.push(event);
+    });
+
+    try {
+      await expect(fixture.coordinator.truncateConversation(
+        fixture.handle,
+        actor.conversationId,
+        selectedId,
+      )).resolves.toBeUndefined();
+
+      expect(reopen).toHaveBeenCalledWith(actor.conversationId, {
+        updateRecent: false,
+      });
+      expect(exactSessionManager).toBeDefined();
+      expect(actor.sessionManager).toBe(exactSessionManager);
+      expect(setSessionFile).not.toHaveBeenCalled();
+      expect(previousRuntime.disposeCalls).toBe(1);
+      expect(fixture.runtime.control(actor.conversationId)).not.toBe(previousRuntime);
+      expect(actor.getState().fatalError).toBeUndefined();
+      expect(actor.sessionManager.getBranch().map(({ id }) => id)).toContain(
+        retainedId,
+      );
+      expect(actor.sessionManager.getBranch().map(({ id }) => id)).not.toContain(
+        selectedId,
+      );
+      expect(projectChanges).toContainEqual({
+        type: "project_changed",
+        catalogInvalidated: true,
+      });
+      const persisted = await readFile(sessionFile, "utf8");
+      expect(persisted).toContain(retainedId);
+      expect(persisted).not.toContain(selectedId);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("becomes fatal when exact rewind proof fails after catalog indexing fails", async () => {
     const fixture = await createFixture();
     const actor = await fixture.coordinator.createUserConversation(
       fixture.handle,
@@ -2486,15 +2560,18 @@ describe("ProjectSessionCoordinator", () => {
     vi.spyOn(projectInternals, "scanConversations").mockRejectedValueOnce(
       new Error("catalog refresh failed"),
     );
+    vi.spyOn(fixture.handle.project, "openConversation").mockRejectedValueOnce(
+      new Error("exact rewind proof failed"),
+    );
 
     await expect(fixture.coordinator.truncateConversation(
       fixture.handle,
       actor.conversationId,
       selectedId,
-    )).rejects.toThrow(/committed but catalog refresh failed/i);
+    )).rejects.toThrow("exact rewind proof failed");
 
     expect(previousRuntime.disposeCalls).toBe(1);
-    expect(actor.getState().fatalError).toMatch(/committed but catalog refresh failed/i);
+    expect(actor.getState().fatalError).toMatch("exact rewind proof failed");
     const persisted = await readFile(sessionFile, "utf8");
     expect(persisted).toContain(retainedId);
     expect(persisted).not.toContain(selectedId);

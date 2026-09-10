@@ -239,6 +239,7 @@ export interface ConversationActorOpenOptions {
     ProjectStore,
     | "cwd"
     | "hasPersistedConversationNameIntent"
+    | "openConversation"
     | "refreshConversations"
     | "truncateConversation"
   >;
@@ -844,7 +845,11 @@ function latestLoopListContinuationForRun(
  */
 export class ConversationActor {
   readonly conversationId: string;
-  readonly sessionManager: SessionManager;
+  private sessionManagerValue: SessionManager;
+
+  get sessionManager(): SessionManager {
+    return this.sessionManagerValue;
+  }
 
   private readonly project: ConversationActorOpenOptions["project"];
   private readonly conversationLease: ConversationLease;
@@ -891,7 +896,7 @@ export class ConversationActor {
 
   private constructor(options: ConversationActorOpenOptions) {
     this.conversationId = options.conversationId;
-    this.sessionManager = options.sessionManager;
+    this.sessionManagerValue = options.sessionManager;
     this.project = options.project;
     this.conversationLease = options.conversationLease;
     this.runtime = options.runtime;
@@ -1461,7 +1466,9 @@ export class ConversationActor {
     });
   }
 
-  truncateFromMessage(entryId: string): Promise<void> {
+  truncateFromMessage(
+    entryId: string,
+  ): Promise<{ catalogInvalidated: boolean }> {
     this.assertUsable();
     if (this.activeRun) {
       return Promise.reject(
@@ -1478,6 +1485,7 @@ export class ConversationActor {
     return this.operations.run(async () => {
       const previousOptions = this.createSessionOptions;
       const previousProfile = structuredClone(this.profileSnapshot);
+      let catalogInvalidated = false;
       let persisted = false;
       let runtimeStopped = false;
       try {
@@ -1489,12 +1497,24 @@ export class ConversationActor {
         }
         runtimeStopped = true;
         await this.stopRuntimeSession();
-        const sessionFile = await this.project.truncateConversation(
-          this.conversationId,
-          entryId,
-        );
-        persisted = true;
-        this.sessionManager.setSessionFile(sessionFile);
+        try {
+          const sessionFile = await this.project.truncateConversation(
+            this.conversationId,
+            entryId,
+          );
+          persisted = true;
+          this.sessionManager.setSessionFile(sessionFile);
+        } catch (error) {
+          if (!(error instanceof ConversationTruncateCommittedError)) {
+            throw error;
+          }
+          persisted = true;
+          catalogInvalidated = true;
+          this.sessionManagerValue = await this.project.openConversation(
+            this.conversationId,
+            { updateRecent: false },
+          );
+        }
         const branch = this.sessionManager.getBranch();
         const branchReserved = aggregateReservedConversationEntries(branch);
         const retainedProfile = branchReserved.conversationMeta;
@@ -1539,10 +1559,8 @@ export class ConversationActor {
         for (const extensionError of pendingErrors) {
           this.handleExtensionError(extensionError);
         }
+        return { catalogInvalidated };
       } catch (error) {
-        if (error instanceof ConversationTruncateCommittedError) {
-          persisted = true;
-        }
         if (!persisted) {
           if (!runtimeStopped) throw error;
           const failures: unknown[] = [error];

@@ -1188,6 +1188,7 @@ case "set_thinking":
           command.conversationId,
           entryId,
         );
+        if (!this.isCurrentCoordinatedView(view)) return;
         this.publishCoordinatedState();
         this.publishProjectSnapshotCoordinated();
         this.publishFocusedConversationSnapshot();
@@ -1407,8 +1408,15 @@ case "set_thinking":
     view: CoordinatedProjectView,
     event: ProjectSessionCoordinatorEvent,
   ): void {
-    if (this.coordinatedView !== view || this.disposed) return;
+    if (!this.isCurrentCoordinatedView(view)) return;
     if (event.type === "project_changed") {
+      if (event.catalogInvalidated) {
+        this.emitProjectSnapshot(
+          view,
+          view.coordinator.projectSessionsFromCurrentIndex(view.handle),
+          "unknown",
+        );
+      }
       if (view.actor?.getState().disposed === true) {
         const deleted = view.conversationId !== undefined
           && !view.handle.project.listConversations().some(
