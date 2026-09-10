@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
-import { open, realpath, stat } from "node:fs/promises";
-import { extname, isAbsolute, relative, resolve, sep } from "node:path";
+import { realpath, stat } from "node:fs/promises";
+import { extname, isAbsolute, normalize, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { TextDecoder } from "node:util";
 import chokidar from "chokidar";
 import { createLspConnection } from "./connection.js";
+import { readWorkspaceFile } from "./read-workspace-file.js";
 import {
   LSP_DEFAULT_RESULTS,
   LSP_MAX_RESULTS,
@@ -116,6 +117,7 @@ type PoolEntry = {
   gateActive: boolean;
   readonly gate: Array<GateWaiter<unknown>>;
   invalidated: boolean;
+  invalidationError?: LspError;
   closing: boolean;
   idleSince?: number;
   idleTimer?: ReturnType<typeof setTimeout>;
@@ -329,6 +331,7 @@ export class WorkspaceLsp implements LspQueryService {
     private readonly cwd: string,
     options: WorkspaceLspOptions,
   ) {
+    this.cwd = normalize(resolve(cwd));
     this.resolveServer = options.resolveServer;
     this.createConnection = options.createConnection ?? createLspConnection;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -363,9 +366,6 @@ export class WorkspaceLsp implements LspQueryService {
       }
       const cwd = await deadline.wait(this.canonicalCwd(), signal);
       const target = await deadline.wait(this.readTarget(cwd, input.path), signal);
-      retainedTarget = target.file;
-      this.retainPath(target.file);
-      await deadline.wait(this.ensureWatcher(cwd), signal);
       const server = await deadline.wait(this.resolveServer(target.file), signal);
       const root = await deadline.wait(this.canonicalRoot(cwd, server.root), signal);
       if (!isWithin(cwd, root) || !isWithin(root, target.file)) {
@@ -374,9 +374,12 @@ export class WorkspaceLsp implements LspQueryService {
       const languageId = this.languageId(server, target.file);
       const selector = { uri: pathToFileURL(target.file).href, languageId };
       const request = this.requestFor(input, target, selector);
+      retainedTarget = target.file;
+      this.retainPath(target.file);
+      await deadline.wait(this.ensureWatcher(cwd), signal);
       entry = await this.borrow(server, root, deadline, signal);
       if (this.disposed || entry.closing || !entry.connection || !entry.connection.alive) {
-        this.invalidate(entry);
+        this.invalidate(entry, unavailableError("The LSP server is unavailable"));
         throw unavailableError("The LSP server is unavailable");
       }
       if (!entry.connection.supports(request.method, selector)) {
@@ -384,6 +387,8 @@ export class WorkspaceLsp implements LspQueryService {
       }
       const dispatched = await deadline.wait(this.enqueueGate(entry, signal, deadline, async () => {
         deadline.throwIfCancelled(signal);
+        const invalidation = entry!.invalidationError;
+        if (invalidation) throw invalidation;
         try {
           await this.assertSnapshotCurrent(entry!, target, deadline);
           const syncState = await this.synchronize(entry!, target, selector, deadline);
@@ -409,7 +414,7 @@ export class WorkspaceLsp implements LspQueryService {
             watchId: entry!.processedWatchId,
           } satisfies RequestDispatch;
         } catch (error) {
-          if (!(error instanceof LspError) || error.code !== "cancelled") this.invalidate(entry!);
+          if (!(error instanceof LspError) || error.code !== "cancelled") this.invalidate(entry!, asLspError(error));
           throw error;
         }
       }), signal);
@@ -419,7 +424,7 @@ export class WorkspaceLsp implements LspQueryService {
       } catch (error) {
         if (entry.connection && !entry.connection.alive) {
           this.recordReconnectCooldown(entry.key);
-          this.invalidate(entry);
+          this.invalidate(entry, unavailableError("The LSP server exited"));
         }
         throw error;
       } finally {
@@ -472,10 +477,10 @@ export class WorkspaceLsp implements LspQueryService {
   private canonicalCwd(): Promise<string> {
     this.cwdPromise ??= (async () => {
       try {
-        const canonical = await realpath(resolve(this.cwd));
-        const info = await stat(canonical);
-        if (!info.isDirectory()) throw new Error("not a directory");
-        return canonical;
+        const current = await realpath(this.cwd);
+        const info = await stat(current);
+        if (!info.isDirectory() || current !== this.cwd) throw new Error("not the owning workspace directory");
+        return this.cwd;
       } catch (error) {
         throw new LspError("misconfigured", "The LSP workspace cwd is not an existing directory", { cause: error });
       }
@@ -485,7 +490,7 @@ export class WorkspaceLsp implements LspQueryService {
 
   private async readTarget(cwd: string, inputPath: string): Promise<DiskSnapshot> {
     const file = await this.canonicalFile(resolve(cwd, inputPath), cwd, "invalid_path");
-    return this.readSnapshot(file);
+    return this.readSnapshot(file, cwd);
   }
 
   private async canonicalRoot(cwd: string, root: string): Promise<string> {
@@ -521,35 +526,11 @@ export class WorkspaceLsp implements LspQueryService {
 
   private async readSnapshot(
     file: string,
+    workspace: string,
     code: "invalid_path" | "content_modified" = "invalid_path",
   ): Promise<DiskSnapshot> {
-    let handle: Awaited<ReturnType<typeof open>> | undefined;
     try {
-      const before = await stat(file);
-      if (!before.isFile()) throw new Error("not a regular file");
-      if (before.size > this.maxDocumentBytes) {
-        throw new LspError("resource_limit", "The LSP document exceeds the mirror size limit");
-      }
-      handle = await open(file, "r");
-      const opened = await handle.stat();
-      if (!opened.isFile()) throw new Error("not a regular file");
-      if (opened.size > this.maxDocumentBytes) {
-        throw new LspError("resource_limit", "The LSP document exceeds the mirror size limit");
-      }
-      const bytes = Buffer.allocUnsafe(this.maxDocumentBytes + 1);
-      let length = 0;
-      while (length < bytes.byteLength) {
-        const { bytesRead } = await handle.read(bytes, length, bytes.byteLength - length, length);
-        if (bytesRead === 0) break;
-        length += bytesRead;
-      }
-      const after = await handle.stat();
-      if (!after.isFile()) throw new Error("not a regular file");
-      if (length > this.maxDocumentBytes || after.size > this.maxDocumentBytes) {
-        throw new LspError("resource_limit", "The LSP document exceeds the mirror size limit");
-      }
-      if (after.size !== length) throw contentModifiedError();
-      const content = bytes.subarray(0, length);
+      const content = await readWorkspaceFile(workspace, file, this.maxDocumentBytes);
       return {
         file,
         text: UTF8_DECODER.decode(content),
@@ -557,11 +538,13 @@ export class WorkspaceLsp implements LspQueryService {
         bytes: content.byteLength,
       };
     } catch (error) {
-      if (error instanceof LspError) throw error;
+      if (error instanceof LspError) {
+        if (error.code === "resource_limit" || error.code === "content_modified") throw error;
+        if (error.code === "invalid_path" || code === "content_modified") throw contentModifiedError();
+        throw error;
+      }
       if (code === "content_modified") throw contentModifiedError();
       throw new LspError("invalid_path", "Unable to read a valid UTF-8 LSP target", { cause: error });
-    } finally {
-      if (handle) await handle.close();
     }
   }
 
@@ -572,7 +555,7 @@ export class WorkspaceLsp implements LspQueryService {
   ): Promise<void> {
     const canonical = await deadline.wait(this.canonicalFile(target.file, entry.root, "content_modified"));
     if (!samePath(canonical, target.file)) throw contentModifiedError();
-    const current = await deadline.wait(this.readSnapshot(target.file, "content_modified"));
+    const current = await deadline.wait(this.readSnapshot(target.file, entry.root, "content_modified"));
     if (current.hash !== target.hash) throw contentModifiedError();
   }
 
@@ -642,7 +625,7 @@ export class WorkspaceLsp implements LspQueryService {
     let entry = this.currentEntries.get(key);
     if (entry?.connection && !entry.connection.alive) {
       this.recordReconnectCooldown(entry.key);
-      this.invalidate(entry);
+      this.invalidate(entry, unavailableError("The LSP server exited"));
       throw unavailableError("The LSP server exited");
     }
     if (!entry) {
@@ -682,7 +665,7 @@ export class WorkspaceLsp implements LspQueryService {
       const resolved = await deadline.wait(connection, signal);
       if (!resolved.alive) {
         this.recordReconnectCooldown(entry.key);
-        this.invalidate(entry);
+        this.invalidate(entry, unavailableError("The LSP server exited during startup"));
         throw unavailableError("The LSP server exited during startup");
       }
       return entry;
@@ -703,7 +686,7 @@ export class WorkspaceLsp implements LspQueryService {
       },
       (error: unknown) => {
         if (shouldCooldown(error)) this.recordReconnectCooldown(entry.key);
-        this.invalidate(entry);
+        this.invalidate(entry, asLspError(error));
         throw error;
       },
     );
@@ -753,15 +736,20 @@ export class WorkspaceLsp implements LspQueryService {
   private invalidateDifferentFingerprint(root: string, fingerprint: string): void {
     const rootKey = pathKey(root);
     for (const entry of this.entries) {
-      if (entry.rootKey === rootKey && entry.fingerprint !== fingerprint) this.invalidate(entry);
+      if (entry.rootKey === rootKey && entry.fingerprint !== fingerprint) this.retire(entry);
     }
   }
 
-  private invalidate(entry: PoolEntry): void {
+  private retire(entry: PoolEntry): void {
     if (entry.invalidated) return;
     entry.invalidated = true;
     this.removeCurrent(entry);
     this.maybeDispose(entry);
+  }
+
+  private invalidate(entry: PoolEntry, error: LspError): void {
+    entry.invalidationError ??= error;
+    this.retire(entry);
   }
 
   private removeCurrent(entry: PoolEntry): void {
@@ -961,7 +949,7 @@ export class WorkspaceLsp implements LspQueryService {
         fileRevision: this.fileRevisions.get(targetKey) ?? 0,
       };
     } catch (error) {
-      this.invalidate(entry);
+      this.invalidate(entry, asLspError(error));
       throw error;
     }
   }
@@ -984,7 +972,7 @@ export class WorkspaceLsp implements LspQueryService {
       await this.closeDocument(entry, document, deadline);
       throw contentModifiedError();
     }
-    return deadline.wait(this.readSnapshot(document.file, "content_modified"));
+    return deadline.wait(this.readSnapshot(document.file, entry.root, "content_modified"));
   }
 
   private async openDocument(
@@ -1133,7 +1121,7 @@ export class WorkspaceLsp implements LspQueryService {
       if (entry.server.extensionToLanguage[extname(file).toLowerCase()] !== source.languageId) {
         throw contentModifiedError();
       }
-      const snapshot = await deadline.wait(this.readSnapshot(file, "content_modified"));
+      const snapshot = await deadline.wait(this.readSnapshot(file, entry.root, "content_modified"));
       const document = entry.documents.get(pathKey(snapshot.file));
       if (document) {
         await this.updateDocument(entry, document, snapshot, sync, deadline);
@@ -1186,6 +1174,8 @@ export class WorkspaceLsp implements LspQueryService {
     try {
       const dispatch = await deadline.wait(this.enqueueGate(entry, signal, deadline, async () => {
         deadline.throwIfCancelled(signal);
+        const invalidation = entry.invalidationError;
+        if (invalidation) throw invalidation;
         const connection = entry.connection;
         if (!connection || !connection.alive || entry.closing || entry.generation !== this.generation) {
           throw unavailableError("The LSP server is unavailable");
@@ -1206,10 +1196,12 @@ export class WorkspaceLsp implements LspQueryService {
     signal: AbortSignal,
   ): Promise<void> {
     if (this.disposed || entry.closing) throw unavailableError("The LSP workspace was disposed");
+    const invalidation = entry.invalidationError;
+    if (invalidation) throw invalidation;
     if (entry.generation !== this.generation) throw contentModifiedError();
     const canonical = await deadline.wait(this.canonicalFile(target.file, entry.root, "content_modified"), signal);
     if (!samePath(canonical, target.file)) throw contentModifiedError();
-    const current = await deadline.wait(this.readSnapshot(target.file, "content_modified"), signal);
+    const current = await deadline.wait(this.readSnapshot(target.file, entry.root, "content_modified"), signal);
     if (current.hash !== target.hash ||
       (this.fileRevisions.get(pathKey(target.file)) ?? 0) !== dispatched.fileRevision ||
       this.nextWatchId !== dispatched.watchId) {
@@ -1219,6 +1211,8 @@ export class WorkspaceLsp implements LspQueryService {
       entry.documents.get(pathKey(target.file))?.version !== dispatched.documentVersion) {
       throw contentModifiedError();
     }
+    const invalidationAfterFreshness = entry.invalidationError;
+    if (invalidationAfterFreshness) throw invalidationAfterFreshness;
   }
 
   private retainPath(path: string): void {
@@ -1320,7 +1314,7 @@ export class WorkspaceLsp implements LspQueryService {
     this.generation += 1;
     this.watchChanges.length = 0;
     this.fileRevisions.clear();
-    for (const entry of this.entries) this.invalidate(entry);
+    for (const entry of this.entries) this.invalidate(entry, contentModifiedError());
   }
 
   private pruneWatchChanges(): void {

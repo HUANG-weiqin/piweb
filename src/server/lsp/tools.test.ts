@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -6,12 +6,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LSP_MAX_RESULT_BYTES, LspError, type LspQueryResponse } from "./contracts.js";
 import { createLspTools } from "./tools.js";
 
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, open: vi.fn(actual.open) };
+});
+const nativeFs = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+
 let cwd: string;
 let file: string;
 let uri: string;
 const range = { start: { line: 0, character: 2 }, end: { line: 0, character: 4 } };
 beforeEach(async () => {
-  cwd = await mkdtemp(join(tmpdir(), "piweb-lsp-tools-"));
+  vi.mocked(open).mockReset().mockImplementation(nativeFs.open);
+  cwd = await realpath(await mkdtemp(join(tmpdir(), "piweb-lsp-tools-")));
   file = join(cwd, "source.cs");
   uri = pathToFileURL(file).href;
   await writeFile(file, "😀class Example {}\r\n");
@@ -79,6 +86,52 @@ describe("bounded, read-only LSP SDK tools", () => {
       { readStatus: "non_file_uri" },
       { readStatus: "non_local_uri" },
     ] });
+  });
+
+  it("does not read a target replaced by an external directory junction after path checks", async () => {
+    const directory = join(cwd, "nested");
+    await mkdir(directory);
+    const target = join(directory, "target.cs");
+    await writeFile(target, "class Internal {}\n");
+    const outside = await mkdtemp(join(tmpdir(), "piweb-lsp-outside-"));
+    await writeFile(join(outside, "target.cs"), "class ExternalSecret {}\n");
+    let externalRead: ReturnType<typeof vi.fn> | undefined;
+    vi.mocked(open).mockImplementationOnce(async (...args) => {
+      expect(args[0]).toBe(target);
+      await rename(directory, join(cwd, "original"));
+      await symlink(outside, directory, process.platform === "win32" ? "junction" : "dir");
+      const handle = await nativeFs.open(...args);
+      externalRead = vi.spyOn(handle, "read");
+      return handle;
+    });
+    try {
+      const fixture = tools([{ uri: pathToFileURL(target).href, range }]);
+      const output = await invoke(fixture.tools[1]!, { path: file, line: 1, column: 3 });
+      expect(JSON.stringify(output.details)).not.toContain("ExternalSecret");
+      expect(output.details).toMatchObject({ items: [{ readStatus: "unavailable" }] });
+      expect(externalRead).toBeDefined();
+      expect(externalRead).not.toHaveBeenCalled();
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the owner's canonical workspace when a query replaces the entire cwd", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "piweb-lsp-rebased-"));
+    const external = join(outside, "external.cs");
+    await writeFile(external, "class ExternalSecret {}\n");
+    const fixture = tools(null);
+    fixture.query.mockImplementationOnce(async () => {
+      await rename(cwd, join(outside, "original"));
+      await symlink(outside, cwd, process.platform === "win32" ? "junction" : "dir");
+      return { server: "test", root: cwd, uri, value: [{ uri: pathToFileURL(external).href, range }] };
+    });
+    try {
+      const output = await invoke(fixture.tools[1]!, { path: file, line: 1, column: 3 });
+      expect(JSON.stringify(output.details)).not.toContain("ExternalSecret");
+      expect(output.details).toMatchObject({ items: [{ readStatus: "outside_workspace" }] });
+      expect(open).not.toHaveBeenCalled();
+    } finally { await rm(outside, { recursive: true, force: true }); }
   });
 
   it("distinguishes successful emptiness from unsupported and other failures", async () => {

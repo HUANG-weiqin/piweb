@@ -1,5 +1,5 @@
-import { open, realpath, stat } from "node:fs/promises";
-import { isAbsolute, relative, sep } from "node:path";
+import { realpath } from "node:fs/promises";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -8,6 +8,7 @@ import {
   LSP_DEFAULT_RESULTS, LSP_MAX_RESULTS, LSP_MAX_RESULT_BYTES, LspError,
   type LspQuery, type LspQueryResponse, type LspQueryService,
 } from "./contracts.js";
+import { readWorkspaceFile } from "./read-workspace-file.js";
 
 const pathParameter = Type.String({ minLength: 1, maxLength: 4096, description: "Existing source file inside this workspace; also selects the server and root." });
 const limitParameter = Type.Optional(Type.Integer({ minimum: 1, maximum: LSP_MAX_RESULTS }));
@@ -124,12 +125,11 @@ function contains(root: string, path: string): boolean {
   return suffix === "" || (suffix !== ".." && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix));
 }
 
-async function projectResponse(cwd: string, response: LspQueryResponse, query: LspQuery, signal: AbortSignal): Promise<Projection> {
+async function projectResponse(workspace: string, response: LspQueryResponse, query: LspQuery, signal: AbortSignal): Promise<Projection> {
   const projection: Projection = {
     status: "ok", server: response.server, root: response.root,
     positionEncoding: "utf-16", items: [], truncated: false,
   };
-  const workspace = await realpath(cwd);
   const disk = new Map<string, string[] | undefined>();
   let diskBytes = 0;
   const addDiskObservation = async (item: Item) => {
@@ -146,19 +146,14 @@ async function projectResponse(cwd: string, response: LspQueryResponse, query: L
       item.path = relative(workspace, path).split(sep).join("/");
       if (!item.range) { item.readStatus = "position_unavailable"; return; }
       if (!disk.has(path)) {
-        const info = await stat(path);
-        if (!info.isFile()) { item.readStatus = "unavailable"; return; }
-        if (info.size > 2 * 1024 * 1024 || diskBytes + info.size > 4 * 1024 * 1024) {
-          item.readStatus = "resource_limit"; return;
-        }
-        const handle = await open(path, "r");
         try {
-          const buffer = Buffer.alloc(Math.min(2 * 1024 * 1024, 4 * 1024 * 1024 - diskBytes) + 1);
-          const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-          diskBytes += bytesRead;
-          if (bytesRead === buffer.length) { item.readStatus = "resource_limit"; disk.set(path, undefined); return; }
-          disk.set(path, new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buffer.subarray(0, bytesRead)).split(/\r\n|\r|\n/));
-        } finally { await handle.close(); }
+          const buffer = await readWorkspaceFile(workspace, path,
+            Math.min(2 * 1024 * 1024, 4 * 1024 * 1024 - diskBytes), (bytes) => { diskBytes += bytes; });
+          disk.set(path, new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buffer).split(/\r\n|\r|\n/));
+        } catch (error) {
+          if (!(error instanceof LspError) || error.code !== "resource_limit") throw error;
+          disk.set(path, undefined);
+        }
       }
       const lines = disk.get(path);
       if (lines === undefined) { item.readStatus = "resource_limit"; return; }
@@ -189,13 +184,15 @@ async function projectResponse(cwd: string, response: LspQueryResponse, query: L
 }
 
 export function createLspTools(cwd: string, service: LspQueryService): ToolDefinition[] {
+  // ProjectContext supplies its canonical identity; a later junction must not rebase it.
+  const workspace = resolve(cwd);
   const execute = async (schema: unknown, name: string, operation: LspQuery["operation"], input: unknown, signal?: AbortSignal) => {
     if (!Check(schema as never, input)) throw new Error(`Invalid ${name} input`);
     try {
       if (!signal || signal.aborted) throw new LspError("cancelled", "LSP query requires a live run");
       const query = { ...input as object, operation } as LspQuery;
       const response = await service.query(query, signal);
-      const details = await projectResponse(cwd, response, query, signal);
+      const details = await projectResponse(workspace, response, query, signal);
       return { content: [{ type: "text" as const, text: JSON.stringify(details) }], details };
     } catch (error) {
       const failure = error instanceof LspError ? error : new LspError("unavailable", "LSP query failed", { cause: error });

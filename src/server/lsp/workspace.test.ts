@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ServerCapabilities } from "vscode-languageserver-protocol";
@@ -13,15 +13,22 @@ import type {
 import { LspError } from "./contracts.js";
 import { WorkspaceLsp } from "./workspace.js";
 
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, open: vi.fn(actual.open) };
+});
+const nativeFs = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+
 const temporaryDirectories: string[] = [];
 
 async function temporaryDirectory(): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), "piweb-lsp-workspace-"));
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "piweb-lsp-workspace-")));
   temporaryDirectories.push(directory);
   return directory;
 }
 
 afterEach(async () => {
+  vi.mocked(open).mockReset().mockImplementation(nativeFs.open);
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, {
     force: true,
     recursive: true,
@@ -353,6 +360,45 @@ describe("WorkspaceLsp", () => {
     await workspace.dispose();
   });
 
+  it("rejects a whole workspace replacement before configuration, connection, or an external fd read", async () => {
+    const parent = await temporaryDirectory();
+    const cwd = join(parent, "workspace");
+    const original = join(parent, "original");
+    const outside = await temporaryDirectory();
+    const internal = join(cwd, "entry.ts");
+    const external = join(outside, "entry.ts");
+    await mkdir(cwd);
+    await Promise.all([
+      writeFile(internal, "export const internal = true;\n"),
+      writeFile(external, "export const external = true;\n"),
+    ]);
+    const connection = new FakeConnection({ textDocumentSync: 1 });
+    const resolveServer = vi.fn(async () => server(cwd));
+    const createConnection = vi.fn(async () => connection);
+    const workspace = fakeWorkspace(cwd, connection, { resolveServer, createConnection });
+    let externalRead: ReturnType<typeof vi.fn> | undefined;
+    vi.mocked(open).mockImplementation(async (...args) => {
+      if (args[0] === external) {
+        const handle = await nativeFs.open(...args);
+        externalRead = vi.spyOn(handle, "read");
+        return handle;
+      }
+      return nativeFs.open(...args);
+    });
+    await rename(cwd, original);
+    await symlink(outside, cwd, process.platform === "win32" ? "junction" : "dir");
+
+    try {
+      const result = await workspace.query(symbols("entry.ts"), new AbortController().signal).catch((error: unknown) => error);
+      expect(externalRead).toBeUndefined();
+      expect(resolveServer).not.toHaveBeenCalled();
+      expect(createConnection).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ code: "misconfigured" });
+    } finally {
+      await workspace.dispose();
+    }
+  });
+
   it("rechecks a target snapshot after delayed initialization before any sync notification or request", async () => {
     const cwd = await temporaryDirectory();
     const file = join(cwd, "entry.ts");
@@ -381,24 +427,27 @@ describe("WorkspaceLsp", () => {
     await writeFile(second, "export const second = 1;\n");
     const connection = new FakeConnection({ textDocumentSync: 1 });
     const firstOpen = deferred<void>();
+    const leadingResponse = deferred<unknown>();
     connection.notifyResult = (_method, params) => {
       const uri = (params as { textDocument?: { uri?: string } }).textDocument?.uri;
       return uri?.endsWith("first.ts") ? firstOpen.promise : Promise.resolve();
     };
+    connection.requestResult = () => leadingResponse.promise;
     const resolveServer = vi.fn(async () => server(cwd));
     const workspace = fakeWorkspace(cwd, connection, { resolveServer });
 
     const leading = workspace.query(symbols(first), new AbortController().signal);
     await waitFor(() => connection.notifications.some(({ method }) => method === "textDocument/didOpen"));
     const queued = workspace.query(symbols(second), new AbortController().signal);
-    const queuedResult = expect(queued).rejects.toMatchObject({ code: "content_modified" });
+    const queuedResult = queued.catch((error: unknown) => error);
     await waitFor(() => resolveServer.mock.calls.length === 2);
     await new Promise<void>((resolve) => setTimeout(resolve, 25));
     await writeFile(second, "export const second = 2;\n");
     firstOpen.resolve();
 
-    await expect(leading).resolves.toMatchObject({ uri: expect.stringContaining("first.ts") });
-    await queuedResult;
+    await expect(queuedResult).resolves.toMatchObject({ code: "content_modified" });
+    leadingResponse.resolve([]);
+    await expect(leading).rejects.toMatchObject({ code: "content_modified" });
     expect(connection.notifications.filter(({ method }) => method === "textDocument/didOpen")).toHaveLength(1);
     await workspace.dispose();
   });
@@ -445,6 +494,84 @@ describe("WorkspaceLsp", () => {
       position: { line: 0, character: 1 },
     });
     await bomWorkspace.dispose();
+  });
+
+  it("rejects an initial target replaced by an external directory symlink before its fd is read", async () => {
+    const cwd = await temporaryDirectory();
+    const directory = join(cwd, "nested");
+    const target = join(directory, "target.ts");
+    const outside = await temporaryDirectory();
+    await Promise.all([
+      mkdir(directory),
+      writeFile(join(outside, "target.ts"), "export const external = true;\n"),
+    ]);
+    await writeFile(target, "export const internal = true;\n");
+    const connection = new FakeConnection({ textDocumentSync: 1 });
+    const createConnection = vi.fn(async () => connection);
+    const workspace = fakeWorkspace(cwd, connection, { createConnection });
+    let externalRead: ReturnType<typeof vi.fn> | undefined;
+    vi.mocked(open).mockImplementationOnce(async (...args) => {
+      expect(args[0]).toBe(target);
+      await rename(directory, join(cwd, "original"));
+      await symlink(outside, directory, process.platform === "win32" ? "junction" : "dir");
+      const handle = await nativeFs.open(...args);
+      externalRead = vi.spyOn(handle, "read");
+      return handle;
+    });
+
+    try {
+      await expect(workspace.query(symbols(target), new AbortController().signal)).rejects.toMatchObject({
+        code: "content_modified",
+      });
+      expect(externalRead).toBeDefined();
+      expect(externalRead).not.toHaveBeenCalled();
+      expect(createConnection).not.toHaveBeenCalled();
+    } finally {
+      await workspace.dispose();
+    }
+  });
+
+  it("fails closed when a later mirror read opens a replaced directory", async () => {
+    const cwd = await temporaryDirectory();
+    const directory = join(cwd, "nested");
+    const mirrored = join(directory, "mirrored.ts");
+    const target = join(cwd, "entry.ts");
+    const outside = await temporaryDirectory();
+    await Promise.all([
+      mkdir(directory),
+      writeFile(target, "export const entry = true;\n"),
+      writeFile(join(outside, "mirrored.ts"), "export const external = true;\n"),
+    ]);
+    await writeFile(mirrored, "export const internal = true;\n");
+    const connection = new FakeConnection({ textDocumentSync: 1 });
+    const workspace = fakeWorkspace(cwd, connection);
+
+    try {
+      await workspace.query(symbols(mirrored), new AbortController().signal);
+      let replaced = false;
+      let externalRead: ReturnType<typeof vi.fn> | undefined;
+      vi.mocked(open).mockImplementation(async (...args) => {
+        if (!replaced && args[0] === mirrored) {
+          replaced = true;
+          await rename(directory, join(cwd, "original"));
+          await symlink(outside, directory, process.platform === "win32" ? "junction" : "dir");
+          const handle = await nativeFs.open(...args);
+          externalRead = vi.spyOn(handle, "read");
+          return handle;
+        }
+        return nativeFs.open(...args);
+      });
+
+      await expect(workspace.query(symbols(target), new AbortController().signal)).rejects.toMatchObject({
+        code: "content_modified",
+      });
+      expect(replaced).toBe(true);
+      expect(externalRead).toBeDefined();
+      expect(externalRead).not.toHaveBeenCalled();
+      expect(connection.requests).toHaveLength(1);
+    } finally {
+      await workspace.dispose();
+    }
   });
 
   it("notifies a no-sync server about a changed previously seen file while querying another file", async () => {
@@ -735,6 +862,106 @@ describe("WorkspaceLsp", () => {
 
     expect(createConnection).toHaveBeenCalledTimes(2);
     await workspace.dispose();
+  });
+
+  it("rejects every borrowed waiter when a failed watcher sync invalidates the old entry", async () => {
+    const cwd = await temporaryDirectory();
+    const file = join(cwd, "entry.ts");
+    const changed = join(cwd, "project.fixture");
+    await writeFile(file, "export const value = 1;\n");
+    const watcher = new FakeWatcher();
+    const connection = new FakeConnection({ textDocumentSync: 1 });
+    const watchSync = deferred<void>();
+    connection.notifyResult = (method) => method === "workspace/didChangeWatchedFiles"
+      ? watchSync.promise
+      : Promise.resolve();
+    const workspace = fakeWorkspace(cwd, connection, { watcher });
+
+    try {
+      await workspace.query(symbols(file), new AbortController().signal);
+      await writeFile(changed, "changed\n");
+      watcher.emit("all", "change", changed);
+
+      const first = workspace.query(symbols(file), new AbortController().signal);
+      await waitFor(() => connection.notifications.some(({ method }) => method === "workspace/didChangeWatchedFiles"));
+      const second = workspace.query(symbols(file), new AbortController().signal);
+      const third = workspace.query(symbols(file), new AbortController().signal);
+      await waitFor(() => connection.supports.mock.calls.length === 4);
+      watchSync.reject(new LspError("content_modified", "watch synchronization failed"));
+
+      const settled = await Promise.allSettled([first, second, third]);
+      for (const result of settled) {
+        expect(result).toMatchObject({ status: "rejected", reason: { code: "content_modified" } });
+      }
+      expect(connection.requests).toHaveLength(1);
+    } finally {
+      watchSync.resolve();
+      await workspace.dispose();
+    }
+  });
+
+  it("lets an in-flight caller finish when a new fingerprint retires its entry", async () => {
+    const cwd = await temporaryDirectory();
+    const file = join(cwd, "entry.ts");
+    await writeFile(file, "export const value = 1;\n");
+    const first = new FakeConnection({ textDocumentSync: 1 });
+    const second = new FakeConnection({ textDocumentSync: 1 });
+    const firstResponse = deferred<unknown>();
+    first.requestResult = () => firstResponse.promise;
+    let fingerprint = "config-a";
+    let connectionCalls = 0;
+    const createConnection = vi.fn(async () => {
+      connectionCalls += 1;
+      return connectionCalls === 1 ? first : second;
+    });
+    const workspace = fakeWorkspace(cwd, first, {
+      createConnection,
+      resolveServer: async () => server(cwd, fingerprint),
+    });
+
+    try {
+      const old = workspace.query(symbols(file), new AbortController().signal);
+      await waitFor(() => first.requests.length === 1);
+      fingerprint = "config-b";
+      await expect(workspace.query(symbols(file), new AbortController().signal)).resolves.toMatchObject({
+        server: "typescript",
+      });
+      firstResponse.resolve(["old"]);
+      await expect(old).resolves.toMatchObject({ value: ["old"] });
+      expect(createConnection).toHaveBeenCalledTimes(2);
+    } finally {
+      firstResponse.resolve([]);
+      await workspace.dispose();
+    }
+  });
+
+  it.each([
+    ["a ready watcher", "not_enabled", true],
+    ["a never-ready watcher", "misconfigured", false],
+  ] as const)("rejects %s configuration before allocating a watcher", async (_watcherState, code, emitReady) => {
+    const cwd = await temporaryDirectory();
+    const file = join(cwd, "entry.ts");
+    await writeFile(file, "export const value = 1;\n");
+    const watcher = new FakeWatcher();
+    const watcherFactory = vi.fn(() => {
+      if (emitReady) queueMicrotask(() => watcher.emit("ready"));
+      return watcher;
+    });
+    const workspace = new WorkspaceLsp(cwd, {
+      resolveServer: async () => {
+        throw new LspError(code, "LSP configuration rejected");
+      },
+      createConnection: async () => new FakeConnection({ textDocumentSync: 1 }),
+      watcherFactory,
+      timeoutMs: 30,
+    });
+
+    try {
+      await expect(workspace.query(symbols(file), new AbortController().signal)).rejects.toMatchObject({ code });
+      expect(watcherFactory).not.toHaveBeenCalled();
+    } finally {
+      await workspace.dispose();
+    }
   });
 
   it("uses real chokidar events to notify a server about an unopened external file", async () => {

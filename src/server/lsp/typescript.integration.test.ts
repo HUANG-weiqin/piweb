@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
@@ -223,7 +223,7 @@ suite("official TypeScript Language Server 4.3.3 production integration", () => 
     const command = parseCommand();
     const serverPath = tsserverPath(command);
     expect((await stat(serverPath)).isFile()).toBe(true);
-    temporaryRoot = await mkdtemp(join(tmpdir(), "piweb-typescript-integration-"));
+    temporaryRoot = await realpath(await mkdtemp(join(tmpdir(), "piweb-typescript-integration-")));
     const fixtureRoot = join(temporaryRoot, "fixture");
     const sourceRoot = join(fixtureRoot, "src");
     const featureRoot = join(fixtureRoot, "feature");

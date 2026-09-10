@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -474,7 +474,7 @@ function toolsFor(service: WorkspaceLsp): {
 const suite = describe.skipIf(!optedIn);
 suite("official Roslyn 5.12.0-1.26426.8 production LSP integration", () => {
   beforeEach(async () => {
-    temporaryRoot = await mkdtemp(join(tmpdir(), "piweb-roslyn-integration-"));
+    temporaryRoot = await realpath(await mkdtemp(join(tmpdir(), "piweb-roslyn-integration-")));
     fixtureRoot = join(temporaryRoot, "fixture");
     configPath = join(temporaryRoot, "lsp.json");
     await mkdir(fixtureRoot, { recursive: true });

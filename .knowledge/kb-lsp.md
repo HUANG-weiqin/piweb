@@ -23,6 +23,7 @@ ConversationActor 的 workbenchCustomTools
 → 最终 SDK 来源/角色 host gate
 → PiRuntime 强制解析既有 project execution trust
 → ProjectContext 惰性持有 WorkspaceLsp
+→ 先解析配置、root 与查询适用性，再创建/等待工作区 watcher
 → canonical root + resolved configuration fingerprint 选共享连接
 → 短串行门：磁盘复核、didOpen/change/save/close、watch 通知、请求派发
 → 门外等待响应
@@ -35,8 +36,8 @@ ConversationActor 的 workbenchCustomTools
 - 不把响应等待放进串行门；反向 RPC 也独立处理，避免请求互相堵住。被取消但尚无 wire response 的请求仍计入 pending cap，迟到响应仅释放对应 slot。
 - focus、断线、actor 角色重建或单个 actor 关闭不释放工作区服务。coordinator 关闭先封 LSP admission，等待 actor teardown，再 dispose 工作区。空闲连接会回收；没有后台自动重试或持久化 LSP 状态。
 - 清理先标准 shutdown/exit，再有界强停。Windows 的进程树强停只在自有父进程仍存活时有 `taskkill /T` 证明；父进程先退出且子进程脱离 stdio 的 daemon/launcher 不属于支持范围。没有 Windows Job Object 或跨进程 PID 跟踪，不能声称 OS 级隔离或无条件回收逃逸后代。
-- watcher 已知的 root 内同语言源文件 change，先通过已有有界镜像发送最新 didOpen/didChange，最后才同步并派发本次 target；不预开或扫描整个项目。add/unlink 仍需项目成员通知，unlink 还会关闭已有镜像。watch 覆盖同时校验 glob 与事件的 WatchKind；派发记录已处理游标，而非尚未同步的最新事件号。
-- 已知变化若不能通过实际 opened-document 同步或有效的静态/动态 watch 通知覆盖，旧连接不再允许新调用借用，待调用退出后重建；不把过期索引伪装成成功。真正退出/启动失败有有界的同配置冷却，下一次显式查询才可重连。
+- watcher 已知的 root 内同语言源文件 change，先通过已有有界镜像发送最新 didOpen/didChange，最后才同步并派发本次 target；不预读或预开整个项目的源码。watcher 本身会递归注册工作区目录，不承诺目录数量或首次 ready 耗时与工作区大小无关。add/unlink 仍需项目成员通知，unlink 还会关闭已有镜像。watch 覆盖同时校验 glob 与事件的 WatchKind；派发记录已处理游标，而非尚未同步的最新事件号。
+- 已知变化若不能通过实际 opened-document 同步或有效的静态/动态 watch 通知覆盖，连接被标记为不可安全使用：既不接受新借用，也拒绝已借用的排队派发和旧响应，不能因 watch 游标已推进而跳过失败事件。配置 fingerprint 变更则只让旧 entry 退休，仍允许旧配置的在途调用合法完成；这两种生命周期不得混用。真正退出/启动失败有有界的同配置冷却，下一次显式查询才可重连。
 
 ## 信任与工具权限
 
@@ -48,7 +49,7 @@ ConversationActor 的 workbenchCustomTools
 
 ## 用户级配置
 
-文件位置：`<Pi agent dir>/piweb/lsp.json`，通常为 `~/.pi/agent/piweb/lsp.json`。工作台只读取，不自动创建；没有配置就是 `not_enabled`。项目内的配置不参与解析。
+文件位置：`<Pi agent dir>/piweb/lsp.json`，通常为 `~/.pi/agent/piweb/lsp.json`。工作台只读取，不自动创建；没有配置就是 `not_enabled`。项目内的配置不参与解析。配置拒绝发生在 watcher 分配和 ready 等待之前，不会为未启用/错误配置创建递归 watcher，也不会被该 watcher 的启动超时遮蔽。
 
 ```json
 {
@@ -105,6 +106,15 @@ TLS 及可用的 TypeScript 库由用户独立准备；不会加入 Pi Web 的�
 
 新增语言只修改 `src/server/lsp/servers/` 内的声明或必要局部适配；不得在 tools、workspace 或 connection 根据语言名称分支。
 
+## 磁盘读取绑定
+
+初始 target、镜像复核、watch 同步与响应后片段统一经过 `read-workspace-file.ts`。授权 namespace 来自 `ProjectContext` 已冻结的 canonical cwd；首查询只能验证它仍解析到自身，响应投影也不能再次 `realpath(cwd)` 把整个 cwd 的 junction 替换认成新工作区。路径 `realpath/stat` 只用于选择，不能授权之后按相同字符串重新打开得到的对象。读取器打开一个 fd 后，先从该 fd 获取实际路径，要求它与预期 canonical 文件精确一致且位于冻结的 canonical workspace/root 内，然后仅用这个 fd 做常规文件检查、有界读取和 BigInt `fstat`。读取后再次绑定路径、复核 identity/size/mtime/ctime，通过后才交给调用者解码；被换为外部 junction/symlink、移动、变化或无法证明的结果不返回源码。POSIX 打开使用 nonblocking 标志，避免 regular file 被换成 FIFO 后卡在 open。
+
+- Windows：通过当前 Node 进程导出的 `uv_get_osfhandle` 使用 Node 自己的 CRT fd 表，再调用 `GetFinalPathNameByHandleW`；不能换成另一份 `ucrtbase.dll` 的 `_get_osfhandle`。只处理可比较的规范 DOS/UNC 路径，保持 canonical 大小写精确一致，不用小写折叠合并大小写敏感目录。只由 Node `FileHandle.close()` 关闭 fd，不另行 `CloseHandle`。
+- Linux：读取 `/proc/self/fd/<fd>` 的内核链接，不按返回路径重开文件；缺少可用 procfs 或已删除/不匹配的路径即拒绝。
+- Darwin：通过现有 Koffi 调用 libSystem 的 `fcntl(fd, F_GETPATH)`，要求 1024-byte 上限内的有效、NUL 结尾 UTF-8 路径。原生失败不能回退为无绑定的路径读取。
+- 其它未实现可靠 fd 路径绑定的平台（例如 FreeBSD）或原生能力缺失返回 `unavailable`，不静默读文件。这里不是 OS sandbox、全项目原子快照、hard-link 隔离或对任意并发内容写入的事务保证；磁盘片段仍只是独立的读取观察。
+
 ## 有界性与失败语义
 
 - 用户配置最多 64 KiB、32 个声明；根查找有目录层数和单目录 entry 上限。
@@ -120,6 +130,7 @@ TLS 及可用的 TypeScript 库由用户独立准备；不会加入 Pi Web 的�
 - `definition.ts`、`servers/`：用户声明、根/可执行解析、深快照与指纹。
 - `connection.ts`：微软 JSON-RPC stdio、能力、反向 RPC、取消和进程清理。
 - `workspace.ts`：共享池、短串行门、磁盘同步和 watcher。
+- `read-workspace-file.ts`：共享的 fd/path 绑定与有界源码读取。
 - `tools.ts`：三个 SDK 工具与有界投影。
 - 对应 `*.test.ts` 分别证明配置边界、真实 fake-stdio 协议、工作区竞态/磁盘同步和结果边界；coordinator/runtime/policy 测试证明宿主所有权与信任/来源 gate。
 
