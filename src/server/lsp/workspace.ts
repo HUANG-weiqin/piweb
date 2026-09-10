@@ -1220,9 +1220,9 @@ export class WorkspaceLsp implements LspQueryService {
     const retained = this.retainedPaths.get(key);
     if (retained) {
       retained.count += 1;
-    } else {
-      this.retainedPaths.set(key, { path, count: 1 });
+      return;
     }
+    this.retainedPaths.set(key, { path, count: 1 });
     this.watcher?.watcher.add?.(path);
   }
 

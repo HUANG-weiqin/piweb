@@ -902,6 +902,39 @@ describe("WorkspaceLsp", () => {
     }
   });
 
+  it("adds a retained path once per watcher", async () => {
+    const cwd = await temporaryDirectory();
+    const file = join(cwd, "entry.ts");
+    await writeFile(file, "export const value = 1;\n");
+    const firstWatcher = new FakeWatcher();
+    const secondWatcher = new FakeWatcher();
+    const first = new FakeConnection({ textDocumentSync: 1 });
+    const second = new FakeConnection({ textDocumentSync: 1 });
+    let watcherCount = 0;
+    let connectionCount = 0;
+    const workspace = new WorkspaceLsp(cwd, {
+      resolveServer: async () => server(cwd),
+      createConnection: async () => connectionCount++ === 0 ? first : second,
+      watcherFactory: () => {
+        const watcher = watcherCount++ === 0 ? firstWatcher : secondWatcher;
+        queueMicrotask(() => watcher.emit("ready"));
+        return watcher;
+      },
+    });
+
+    try {
+      await workspace.query(symbols(file), new AbortController().signal);
+      await workspace.query(symbols(file), new AbortController().signal);
+      expect(firstWatcher.add).toHaveBeenCalledTimes(1);
+
+      firstWatcher.emit("error", new Error("watch failed"));
+      await workspace.query(symbols(file), new AbortController().signal);
+      expect(secondWatcher.add).toHaveBeenCalledTimes(1);
+    } finally {
+      await workspace.dispose();
+    }
+  });
+
   it("rejects every borrowed waiter when a failed watcher sync invalidates the old entry", async () => {
     const cwd = await temporaryDirectory();
     const file = join(cwd, "entry.ts");
