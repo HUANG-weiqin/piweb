@@ -1,3 +1,4 @@
+import { writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -301,6 +302,110 @@ describe("FileCredentialStore read cache regression", () => {
     await expect(store.read("alpha")).resolves.toEqual({ type: "api_key", key: "new" });
     await expect(store.list()).resolves.toEqual([{ providerId: "alpha", type: "api_key" }]);
     expect(spy.mock.calls.length).toBe(0);
+  });
+
+  it("retries when a noncooperating writer changes the file during a cache reload", async () => {
+    const authPath = await makeAuthPath();
+    await writeAuth(authPath, { alpha: { type: "api_key", key: "old" } });
+    const store = new FileCredentialStore(authPath);
+    await expect(store.read("alpha")).resolves.toEqual({ type: "api_key", key: "old" });
+    await writeAuth(authPath, { alpha: { type: "api_key", key: "intermediate" } });
+
+    const mutableStore = store as unknown as {
+      getFileRevision(): string | undefined;
+    };
+    const originalGetFileRevision = mutableStore.getFileRevision.bind(store);
+    let revisionReads = 0;
+    mutableStore.getFileRevision = () => {
+      const revision = originalGetFileRevision();
+      revisionReads += 1;
+      if (revisionReads === 2) {
+        writeFileSync(
+          authPath,
+          JSON.stringify({ alpha: { type: "api_key", key: "final" } }),
+          { mode: 0o600 },
+        );
+      }
+      return revision;
+    };
+
+    await expect(store.read("alpha")).resolves.toEqual({ type: "api_key", key: "final" });
+  });
+
+  it("fails closed after the bounded stable-snapshot retries", async () => {
+    const authPath = await makeAuthPath();
+    await writeAuth(authPath, { alpha: { type: "api_key", key: "initial" } });
+    const store = new FileCredentialStore(authPath);
+    const mutableStore = store as unknown as {
+      getFileRevision(): string | undefined;
+    };
+    const originalGetFileRevision = mutableStore.getFileRevision.bind(store);
+    let revisionReads = 0;
+    let generation = 0;
+    mutableStore.getFileRevision = () => {
+      const revision = originalGetFileRevision();
+      revisionReads += 1;
+      if (revisionReads % 2 === 0) {
+        generation += 1;
+        writeFileSync(
+          authPath,
+          JSON.stringify({ alpha: { type: "api_key", key: `generation-${generation}` } }),
+          { mode: 0o600 },
+        );
+      }
+      return revision;
+    };
+
+    await expect(store.read("alpha")).rejects.toThrow("changed while reading");
+
+    mutableStore.getFileRevision = originalGetFileRevision;
+    await expect(store.read("alpha")).resolves.toEqual({
+      type: "api_key",
+      key: `generation-${generation}`,
+    });
+  });
+
+  it("does not cache a no-op update under an external writer's later revision", async () => {
+    const authPath = await makeAuthPath();
+    await writeAuth(authPath, { alpha: { type: "api_key", key: "original" } });
+    const store = new FileCredentialStore(authPath);
+    let callbackStarted!: () => void;
+    const callbackStartedPromise = new Promise<void>((resolve) => {
+      callbackStarted = resolve;
+    });
+    let finishCallback!: () => void;
+    const callbackMayFinish = new Promise<void>((resolve) => {
+      finishCallback = resolve;
+    });
+
+    const update = store.modify("alpha", async (current) => {
+      expect(current).toEqual({ type: "api_key", key: "original" });
+      callbackStarted();
+      await callbackMayFinish;
+      return undefined;
+    });
+    await callbackStartedPromise;
+    await writeAuth(authPath, { alpha: { type: "api_key", key: "external" } });
+    finishCallback();
+
+    await expect(update).resolves.toEqual({ type: "api_key", key: "original" });
+    await expect(store.read("alpha")).resolves.toEqual({ type: "api_key", key: "external" });
+  });
+
+  it("fails closed when stat cannot establish a stable revision", async () => {
+    const authPath = await makeAuthPath();
+    await writeAuth(authPath, { alpha: { type: "api_key", key: "original" } });
+    const store = new FileCredentialStore(authPath);
+    const mutableStore = store as unknown as {
+      getFileRevision(): string | undefined;
+    };
+    const originalGetFileRevision = mutableStore.getFileRevision.bind(store);
+    mutableStore.getFileRevision = () => undefined;
+
+    await expect(store.read("alpha")).rejects.toThrow("changed while reading");
+
+    mutableStore.getFileRevision = originalGetFileRevision;
+    await expect(store.read("alpha")).resolves.toEqual({ type: "api_key", key: "original" });
   });
 
   it("corrupt external change must reject rather than return stale cache", async () => {

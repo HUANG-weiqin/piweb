@@ -17,6 +17,7 @@ const AUTH_DIRECTORY_MODE = 0o700;
 const LOCK_STALE_MS = 30_000;
 const LOCK_MAX_RETRY_DELAY_MS = 2_000;
 const COMMAND_TIMEOUT_MS = 10_000;
+const MAX_STABLE_AUTH_SNAPSHOT_ATTEMPTS = 3;
 const commandResultCache = new Map<string, string | undefined>();
 
 interface AuthData {
@@ -274,7 +275,7 @@ function raceWithAbortSignal<T>(
 }
 
 type ReloadState = {
-  promise: Promise<{ data: AuthData; revision: string | undefined }>;
+  promise: Promise<{ data: AuthData; revision: string }>;
   abortController: AbortController;
   readers: number;
 };
@@ -351,9 +352,25 @@ export class FileCredentialStore implements CredentialStore {
     }
   }
 
+  private readStableAuthSnapshot(
+    options: AuthOperationOptions | undefined,
+  ): { data: AuthData; revision: string } {
+    for (let attempt = 0; attempt < MAX_STABLE_AUTH_SNAPSHOT_ATTEMPTS; attempt += 1) {
+      abortIfNeeded(options);
+      const before = this.getFileRevision();
+      const data = parseAuthData(readFileSync(this.authPath, "utf8"));
+      const revision = this.getFileRevision();
+      if (before !== undefined && before === revision) return { data, revision };
+    }
+    throw new Error("Failed to read auth.json: changed while reading");
+  }
+
   private async withLock<T>(
     options: AuthOperationOptions | undefined,
-    operation: (data: AuthData) => Promise<{ result: T; next?: AuthData }>,
+    operation: (
+      data: AuthData,
+      revision: string,
+    ) => Promise<{ result: T; next?: AuthData }>,
   ): Promise<T> {
     abortIfNeeded(options);
     this.ensureParentDirectory();
@@ -369,8 +386,8 @@ export class FileCredentialStore implements CredentialStore {
         writeFileSync(this.authPath, "{}", { encoding: "utf8", mode: AUTH_FILE_MODE });
         chmodSync(this.authPath, AUTH_FILE_MODE);
       }
-      const data = parseAuthData(readFileSync(this.authPath, "utf8"));
-      const { result, next } = await operation(data);
+      const { data, revision } = this.readStableAuthSnapshot(options);
+      const { result, next } = await operation(data, revision);
       if (compromised) throw compromised;
       abortIfNeeded(options);
       if (next !== undefined) {
@@ -391,12 +408,9 @@ export class FileCredentialStore implements CredentialStore {
 
   private reloadUnderLock(
     signal: AbortSignal,
-  ): Promise<{ data: AuthData; revision: string | undefined }> {
-    return this.withLock({ signal }, async (data) => ({
-      result: {
-        data,
-        revision: this.getFileRevision(),
-      },
+  ): Promise<{ data: AuthData; revision: string }> {
+    return this.withLock({ signal }, async (data, revision) => ({
+      result: { data, revision },
     }));
   }
 
@@ -498,13 +512,13 @@ export class FileCredentialStore implements CredentialStore {
     let snapshot!: AuthData;
     let snapshotRevision: string | undefined;
     let wrote = false;
-    const result = await this.withLock(options, async (data) => {
+    const result = await this.withLock(options, async (data, revision) => {
       const current = cloneCredential(getCredential(data, providerId));
       const next = await fn(current);
       abortIfNeeded(options);
       if (next === undefined) {
         snapshot = data;
-        snapshotRevision = this.getFileRevision();
+        snapshotRevision = revision;
         return { result: cloneCredential(getCredential(data, providerId)) };
       }
       if (!isCredential(next)) {
