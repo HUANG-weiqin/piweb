@@ -3,17 +3,27 @@ import {
   lstat,
   mkdtemp,
   readFile,
+  rename,
   rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { dirname, join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, rename: vi.fn(actual.rename) };
+});
+const nativeFs = await vi.importActual<typeof import("node:fs/promises")>(
+  "node:fs/promises",
+);
 import {
   MAX_INBOX_MESSAGES_PER_PROJECT,
   MAX_INBOX_MESSAGES_PER_TARGET,
   MAX_INBOX_TOTAL_BYTES,
+  InboxTargetTombstoneCommittedError,
   ProjectInbox,
   createInboxEnvelope,
   inboxEnvelopePayloadFingerprint,
@@ -30,6 +40,7 @@ async function temporaryDirectory(prefix: string): Promise<string> {
 }
 
 afterEach(async () => {
+  vi.mocked(rename).mockReset().mockImplementation(nativeFs.rename);
   await Promise.all(
     temporaryDirectories.splice(0).map((directory) =>
       rm(directory, { force: true, recursive: true }),
@@ -319,6 +330,32 @@ describe("ProjectInbox", () => {
     ]);
   });
 
+  it("does not overwrite a path replacement after validating an envelope", async () => {
+    const { directory, inbox } = await temporaryInbox("piweb-inbox-replace-");
+    const value = input();
+    await inbox.put(value);
+    const target = join(directory, `${value.messageId}.json`);
+    const displaced = join(dirname(directory), ".displaced-envelope.json");
+    const replacement = join(dirname(directory), ".replacement-envelope.json");
+    const replacementRaw = `${JSON.stringify(createInboxEnvelope({
+      ...value,
+      body: "replacement envelope",
+    }), null, 2)}\n`;
+    await writeFile(replacement, replacementRaw);
+
+    vi.mocked(rename).mockImplementationOnce(async (source, destination) => {
+      await nativeFs.rename(source, displaced);
+      await nativeFs.rename(replacement, source);
+      await nativeFs.rename(source, destination);
+    });
+
+    await expect(inbox.updateState(value.messageId, {
+      state: "processing",
+      processingRunId: randomUUID(),
+    })).rejects.toThrow(/changed before mutation/i);
+    await expect(readFile(target, "utf8")).resolves.toBe(replacementRaw);
+  });
+
   it("updates state atomically without making a sender retry conflict", async () => {
     const { inbox } = await temporaryInbox("piweb-inbox-state-");
     const value = input();
@@ -363,6 +400,23 @@ describe("ProjectInbox", () => {
         waitedByRunId: expect.anything(),
       }),
     );
+  });
+
+  it("reports a committed tombstone when its post-write verification fails", async () => {
+    const { inbox } = await temporaryInbox("piweb-inbox-tombstone-commit-");
+    const target = randomUUID();
+    const internals = inbox as unknown as {
+      scan(): Promise<unknown>;
+    };
+    const scan = internals.scan.bind(inbox);
+    vi.spyOn(internals, "scan")
+      .mockImplementationOnce(scan)
+      .mockRejectedValueOnce(new Error("post-write verification failed"));
+
+    await expect(inbox.markTargetDeleted(target)).rejects.toMatchObject({
+      constructor: InboxTargetTombstoneCommittedError,
+      conversationId: target,
+    });
   });
 
   it("persists a target tombstone before exact pending cleanup and rejects future puts after reopen", async () => {

@@ -93,7 +93,7 @@ focus 切换先 exact open：warm actor 直接复用；cold actor 在取得 writ
 - snapshot 的 user ID 直接对应 Pi message entry，assistant 聚合 ID 的 `assistant:` 后缀对应该聚合首个物理 message entry；所选 entry 及其后 context-bearing branch entry 会删除，更早行保持字节不变。唯一 ledger 例外是 suffix 中的 `piweb.message_delivery_receipt.v1` 及其引用的 `piweb.run_settlement.v1`：它们必须原子保留并重挂到 retained parent，避免 rewind 令已投递消息或已结算 run 复活。
 - 只允许 idle actor 执行；目标还有 queued/processing inbox 时拒绝，避免截断恢复账本后重复投递。已经送达其它 conversation 的外部效果不回滚。
 - store 在项目会话串行边界内完整验证原文件与候选前缀，复验路径及扫描期间文件身份，写临时文件后原子替换；候选不是 message、文件变化、链接、损坏或身份错配都不覆盖原文件。
-- durable 替换后，同一 actor 必须 reload SessionManager，并从其 active context 重建 Agent 内存 messages、runId 集合和压缩阈值。若磁盘已提交但内存同步失败，actor 进入 fatal 状态，禁止用旧 parent 继续追加。
+- durable 替换后，同一 actor 必须 reload SessionManager，并从其 active context 重建 Agent 内存 messages、runId 集合和压缩阈值。若原子替换已提交但随后 catalog refresh 或内存同步失败，store 必须明确报告已提交，actor 进入 fatal 状态，禁止用旧 parent 继续追加。
 
 Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 在项目 actor 生命周期内保留一个共享 handle，socket server 关闭时统一释放。registry 末次 release 后逐出 store；相同路径随后代表一个新项目时必须重新读取磁盘身份，不能让缓存反向覆盖项目生命周期。
 
@@ -133,7 +133,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 - wait 在项目 lifecycle 内把 cycle check、waiter 注册与 durable inbox 补查原子化：发送先赢时按目标 conversation + `fromRunId` 找回未被当前 receiving run receipt 的消息，注册先赢时发送直接结算 waiter，避免消息或 settlement 在订阅前到达而永久错过或同一 messageId 被连续 wait 重放。异常路径必须 remove+detach waiter；目标 exact run 在 durable settlement 前 fatal 时也必须按 runId reject 全部 waiter。wait tool result 只返回消息 metadata；消息正文只通过 incoming message 注入一次，已 receipt 的消息不会被再次投递。
 - 启动恢复会扫描全部 sidecar、profile 和 settlement：修复 inbox 已提交而来源卡片仍是 sending 的窗口，恢复 processing batch，恢复可恢复的 inbox delivery，并只执行尚未 settled 的 run。
 - 删除 conversation 先冻结并 fence 目标及其 metadata descendants，任何成员 busy 都拒绝整次删除；随后先持久化目标 tombstone，再持久化 descendants tombstone，并按子孙到祖先顺序终结/删除每个目标的 pending envelope、删除 JSONL。事务中的后到消息明确失败，已发往 cascade set 之外的 outbound envelope 不受来源删除影响。删除完成后回收 tombstone，重启时也会安全清理“目标已不存在且无 pending”的残留标记。
-- tombstone 从磁盘恢复到内存 deleting set 后才允许 actor open/create 和 inbox pump；因此进程在删除中途退出也不能让目标短暂复活。持久删除失败时 fence 与 tombstone 保留，直到后续恢复真正完成。
+- tombstone 从磁盘恢复到内存 deleting set 后才允许 actor open/create 和 inbox pump；因此进程在删除中途退出也不能让目标短暂复活。tombstone 文件已创建但后续 scan/verify 失败同样是已提交删除意图，当前 coordinator 必须保留 warm `deleting` fence；持久删除失败时 fence 与 tombstone 保留，直到后续恢复真正完成。
 - 恢复会在任何 inbox actor pump 前扫描 `piweb.meta_operation.v1`。若发现 started 但未 completed 的精确 abort intent，会先中止仍匹配的活动 run，或把崩溃中断的 processing run 结算为 aborted，再完成来源卡片/sidecar/ledger 对账。
 - inactive `peek_session` 的短暂 writer lease 也进入项目 lifecycle 串行边界；若同一目标同时删除，先开始者完整释放 lease 后后一个才进入 tombstone/deletion lease 阶段。
 

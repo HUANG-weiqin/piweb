@@ -4,7 +4,7 @@ import {
   link,
   lstat,
   mkdir,
-  readFile,
+  open,
   readdir,
   realpath,
   rename,
@@ -190,11 +190,27 @@ export interface InboxListOptions {
   toConversationId?: string;
 }
 
-interface StoredEnvelope {
-  envelope: InboxEnvelope;
+/** The deletion fence is durable even though its post-write proof failed. */
+export class InboxTargetTombstoneCommittedError extends Error {
+  readonly conversationId: string;
+
+  constructor(conversationId: string, cause: unknown) {
+    super(
+      `Inbox target tombstone committed but could not be verified: ${conversationId}`,
+      { cause },
+    );
+    this.conversationId = conversationId;
+  }
+}
+
+interface StoredInboxFile {
   path: string;
-  bytes: number;
   information: Stats;
+}
+
+interface StoredEnvelope extends StoredInboxFile {
+  envelope: InboxEnvelope;
+  bytes: number;
 }
 
 interface InboxTargetTombstone {
@@ -203,9 +219,14 @@ interface InboxTargetTombstone {
   deletedAt: string;
 }
 
-interface StoredTargetTombstone {
+interface StoredTargetTombstone extends StoredInboxFile {
   tombstone: InboxTargetTombstone;
-  path: string;
+}
+
+interface QuarantinedInboxFile {
+  originalPath: string;
+  quarantinePath: string;
+  information: Stats;
 }
 
 interface InboxScan {
@@ -367,6 +388,32 @@ async function assertOwnedFile(
     );
   }
   return information;
+}
+
+async function readOwnedFile(
+  directory: string,
+  path: string,
+  expected: Stats,
+): Promise<string> {
+  const handle = await open(path, "r");
+  try {
+    const opened = await handle.stat();
+    if (!statsAreIdentical(expected, opened)) {
+      throw new Error(`Inbox entry changed while scanning: ${path}`);
+    }
+    const raw = await handle.readFile({ encoding: "utf8" });
+    const afterRead = await handle.stat();
+    const current = await assertOwnedFile(directory, path);
+    if (
+      !statsAreIdentical(expected, afterRead)
+      || !statsAreIdentical(expected, current)
+    ) {
+      throw new Error(`Inbox entry changed while scanning: ${path}`);
+    }
+    return raw;
+  } finally {
+    await handle.close();
+  }
 }
 
 export function parseInboxEnvelope(value: unknown): InboxEnvelope {
@@ -578,8 +625,7 @@ export class ProjectInbox {
           ({ envelope: candidate }) => candidate.messageId === envelope.messageId,
         );
         if (pending !== undefined) {
-          await this.assertStoredFileUnchanged(pending);
-          await unlink(pending.path);
+          await this.deleteStoredFile(pending);
         }
         throw new Error(
           `Inbox target has been deleted: ${envelope.toConversationId}`,
@@ -660,8 +706,7 @@ export class ProjectInbox {
         ({ envelope }) => envelope.messageId === messageId,
       );
       if (match === undefined) return false;
-      await this.assertStoredFileUnchanged(match);
-      await unlink(match.path);
+      await this.deleteStoredFile(match);
       return true;
     });
   }
@@ -683,8 +728,7 @@ export class ProjectInbox {
           envelope.toConversationId === conversationId,
       );
       for (const envelope of pending) {
-        await this.assertStoredFileUnchanged(envelope);
-        await unlink(envelope.path);
+        await this.deleteStoredFile(envelope);
       }
       return pending.length;
     });
@@ -718,8 +762,7 @@ export class ProjectInbox {
           `Cannot clear inbox target tombstone with pending messages: ${conversationId}`,
         );
       }
-      await assertOwnedFile(this.directory, existing.path);
-      await unlink(existing.path);
+      await this.deleteStoredFile(existing);
       return true;
     });
   }
@@ -741,8 +784,7 @@ export class ProjectInbox {
             `Deleted inbox target still has pending messages: ${conversationId}`,
           );
         }
-        await assertOwnedFile(this.directory, existing.path);
-        await unlink(existing.path);
+        await this.deleteStoredFile(existing);
         removed++;
       }
       return removed;
@@ -783,12 +825,24 @@ export class ProjectInbox {
       );
     }
     const path = this.pathForTargetTombstone(conversationId);
+    let committed = false;
     try {
       await this.writeNewAtomically(path, serialized);
+      committed = true;
     } catch (error) {
       if (!isNodeError(error, "EEXIST")) throw error;
     }
-    scan = await this.scan();
+    try {
+      scan = await this.scan();
+    } catch (error) {
+      if (committed) {
+        throw new InboxTargetTombstoneCommittedError(
+          conversationId,
+          error,
+        );
+      }
+      throw error;
+    }
     if (!scan.tombstones.some(
       ({ tombstone: persisted }) =>
         persisted.conversationId === conversationId,
@@ -854,11 +908,7 @@ export class ProjectInbox {
           `Inbox tombstone byte limit exceeded: ${MAX_INBOX_TOMBSTONE_TOTAL_BYTES}`,
         );
       }
-      const raw = await readFile(path, "utf8");
-      const informationAfterRead = await lstat(path);
-      if (!statsAreIdentical(information, informationAfterRead)) {
-        throw new Error(`Inbox entry changed while scanning: ${path}`);
-      }
+      const raw = await readOwnedFile(this.directory, path, information);
       if (!raw.endsWith("\n")) {
         throw new Error(`Inbox entry must end with a newline: ${path}`);
       }
@@ -893,7 +943,7 @@ export class ProjectInbox {
             `Inbox tombstone filename identity does not match target ${tombstone.conversationId}: ${path}`,
           );
         }
-        tombstones.push({ tombstone, path });
+        tombstones.push({ tombstone, path, information });
         tombstoneBytes += information.size;
         if (tombstoneBytes > MAX_INBOX_TOMBSTONE_TOTAL_BYTES) {
           throw new Error(
@@ -992,8 +1042,7 @@ export class ProjectInbox {
         `Inbox total byte limit exceeded: ${MAX_INBOX_TOTAL_BYTES}`,
       );
     }
-    await this.assertStoredFileUnchanged(match);
-    await this.replaceAtomically(match.path, serialized);
+    await this.replaceStoredFile(match, serialized);
     return cloneEnvelope(next);
   }
 
@@ -1029,32 +1078,141 @@ export class ProjectInbox {
     content: string,
   ): Promise<void> {
     const temporaryPath = this.temporaryPath(targetPath);
+    const temporaryDirectory = dirname(this.directory);
     try {
+      await assertOwnedDirectory(temporaryDirectory);
       await writeFile(temporaryPath, content, {
         encoding: "utf8",
         flag: "wx",
       });
+      const temporary = await assertOwnedFile(
+        temporaryDirectory,
+        temporaryPath,
+      );
       await link(temporaryPath, targetPath);
+      const published = await assertOwnedFile(this.directory, targetPath);
+      if (!statsAreIdentical(temporary, published)) {
+        throw new Error(`Inbox entry changed while being published: ${targetPath}`);
+      }
     } finally {
       await unlink(temporaryPath).catch(() => undefined);
     }
   }
 
-  private async replaceAtomically(
-    targetPath: string,
+  private async replaceStoredFile(
+    stored: StoredInboxFile,
     content: string,
   ): Promise<void> {
-    const temporaryPath = this.temporaryPath(targetPath);
+    const quarantined = await this.quarantineStoredFile(stored);
+    let published = false;
     try {
-      await writeFile(temporaryPath, content, {
-        encoding: "utf8",
-        flag: "wx",
-      });
-      await rename(temporaryPath, targetPath);
+      await this.writeNewAtomically(quarantined.originalPath, content);
+      published = true;
+      await unlink(quarantined.quarantinePath);
     } catch (error) {
-      await unlink(temporaryPath).catch(() => undefined);
+      if (!published) {
+        await this.restoreQuarantinedFileAfterFailure(quarantined, error);
+      }
       throw error;
     }
+  }
+
+  private async deleteStoredFile(stored: StoredInboxFile): Promise<void> {
+    const quarantined = await this.quarantineStoredFile(stored);
+    let removed = false;
+    try {
+      await unlink(quarantined.quarantinePath);
+      removed = true;
+      await this.assertOriginalPathAbsent(quarantined.originalPath);
+    } catch (error) {
+      if (!removed) {
+        await this.restoreQuarantinedFileAfterFailure(quarantined, error);
+      }
+      throw error;
+    }
+  }
+
+  private async quarantineStoredFile(
+    stored: StoredInboxFile,
+  ): Promise<QuarantinedInboxFile> {
+    const quarantinePath = this.quarantinePath(stored.path);
+    let moved: QuarantinedInboxFile | undefined;
+    try {
+      await assertOwnedDirectory(this.directory);
+      await rename(stored.path, quarantinePath);
+      const information = await assertOwnedFile(
+        this.directory,
+        quarantinePath,
+      );
+      moved = {
+        originalPath: stored.path,
+        quarantinePath,
+        information,
+      };
+      if (!statsAreIdentical(stored.information, information)) {
+        throw new Error(`Inbox entry changed before mutation: ${stored.path}`);
+      }
+      return moved;
+    } catch (error) {
+      if (moved !== undefined) {
+        await this.restoreQuarantinedFileAfterFailure(moved, error);
+      }
+      throw error;
+    }
+  }
+
+  private async restoreQuarantinedFileAfterFailure(
+    quarantined: QuarantinedInboxFile,
+    failure: unknown,
+  ): Promise<void> {
+    try {
+      await this.restoreQuarantinedFile(quarantined);
+    } catch (recoveryError) {
+      throw new AggregateError(
+        [failure, recoveryError],
+        `Inbox entry mutation failed and recovery could not be completed: ${quarantined.originalPath}`,
+      );
+    }
+  }
+
+  private async restoreQuarantinedFile(
+    quarantined: QuarantinedInboxFile,
+  ): Promise<void> {
+    const current = await assertOwnedFile(
+      this.directory,
+      quarantined.quarantinePath,
+    );
+    if (!statsAreIdentical(quarantined.information, current)) {
+      throw new Error(
+        `Inbox quarantine changed while it was being recovered: ${quarantined.quarantinePath}`,
+      );
+    }
+    try {
+      await link(quarantined.quarantinePath, quarantined.originalPath);
+    } catch (error) {
+      if (!isNodeError(error, "EEXIST")) throw error;
+      const original = await assertOwnedFile(
+        this.directory,
+        quarantined.originalPath,
+      );
+      if (!statsAreIdentical(current, original)) {
+        throw new Error(
+          `Inbox quarantine remains at ${quarantined.quarantinePath}`,
+          { cause: error },
+        );
+      }
+    }
+    await unlink(quarantined.quarantinePath);
+  }
+
+  private async assertOriginalPathAbsent(path: string): Promise<void> {
+    try {
+      await lstat(path);
+    } catch (error) {
+      if (isNodeError(error, "ENOENT")) return;
+      throw error;
+    }
+    throw new Error(`Inbox entry reappeared while it was being deleted: ${path}`);
   }
 
   private temporaryPath(targetPath: string): string {
@@ -1064,17 +1222,10 @@ export class ProjectInbox {
     );
   }
 
-  private async assertStoredFileUnchanged(
-    stored: StoredEnvelope,
-  ): Promise<void> {
-    const current = await assertOwnedFile(
+  private quarantinePath(targetPath: string): string {
+    return join(
       this.directory,
-      stored.path,
+      `.${basename(targetPath)}.${process.pid}.${randomUUID()}.quarantine`,
     );
-    if (!statsAreIdentical(stored.information, current)) {
-      throw new Error(
-        `Inbox entry changed before mutation: ${stored.path}`,
-      );
-    }
   }
 }

@@ -1,9 +1,24 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Check } from "typebox/value";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, rename: vi.fn(actual.rename) };
+});
+const nativeFs = await vi.importActual<typeof import("node:fs/promises")>(
+  "node:fs/promises",
+);
 import {
   MAX_NOTE_CONTENT_BYTES,
   MAX_NOTE_COUNT,
@@ -45,6 +60,7 @@ async function executeTool<Details>(
 }
 
 afterEach(async () => {
+  vi.mocked(rename).mockReset().mockImplementation(nativeFs.rename);
   await Promise.all(
     temporaryDirectories.splice(0).map((directory) =>
       rm(directory, { recursive: true, force: true })
@@ -87,6 +103,48 @@ describe("createNotebookTools", () => {
       pattern: "lease",
       limit: 10,
     })).toBe(false);
+  });
+
+  it("does not overwrite a notebook replacement after validation", async () => {
+    const stateDir = await createStateDir();
+    const tools = createNotebookTools(stateDir, "conversation-a");
+    const write = toolByName(tools, "notebook_write");
+    await executeTool(write, { title: "Original", content: "original" });
+    const file = join(stateDir, "notebooks", "conversation-a.json");
+    const replacement = join(stateDir, "notebooks", ".replacement.json");
+    const displaced = join(stateDir, "notebooks", ".displaced.json");
+    const replacementRaw = (await readFile(file, "utf8"))
+      .replace("original", "replacement");
+    await writeFile(replacement, replacementRaw);
+
+    vi.mocked(rename).mockImplementationOnce(async (source, destination) => {
+      await nativeFs.rename(source, displaced);
+      await nativeFs.rename(replacement, source);
+      await nativeFs.rename(source, destination);
+    });
+
+    await expect(executeTool(write, {
+      title: "Original",
+      content: "updated",
+    })).rejects.toThrow(/changed before mutation/i);
+    await expect(readFile(file, "utf8")).resolves.toBe(replacementRaw);
+  });
+
+  it("fails closed on a leftover notebook mutation quarantine", async () => {
+    const stateDir = await createStateDir();
+    const tools = createNotebookTools(stateDir, "conversation-a");
+    const write = toolByName(tools, "notebook_write");
+    const list = toolByName(tools, "notebook_list");
+    await executeTool(write, { title: "Original", content: "original" });
+    const file = join(stateDir, "notebooks", "conversation-a.json");
+    await nativeFs.rename(
+      file,
+      join(stateDir, "notebooks", ".conversation-a.json.crash.quarantine"),
+    );
+
+    await expect(executeTool(list, {})).rejects.toThrow(
+      /mutation quarantine requires recovery/i,
+    );
   });
 
   it("writes, lists, greps, reads, archives, and restores notes", async () => {

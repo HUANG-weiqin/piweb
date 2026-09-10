@@ -27,7 +27,11 @@ import {
   type ConversationMeta,
 } from "./conversation-meta.js";
 import { ConversationNotebook } from "./conversation-notebook.js";
-import { ProjectStore, ProjectStoreRegistry } from "./project-store.js";
+import {
+  ConversationTruncateCommittedError,
+  ProjectStore,
+  ProjectStoreRegistry,
+} from "./project-store.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -854,6 +858,36 @@ describe("ProjectStore", () => {
       { updateRecent: false },
     );
     expect(reopened.getEntries().map(({ id }) => id)).toEqual([retainedId]);
+  });
+
+  it("reports a committed truncate when its post-commit catalog refresh fails", async () => {
+    const cwd = await createTemporaryDirectory("piweb-truncate-post-commit-");
+    const store = await ProjectStore.open(cwd);
+    const conversation = await store.createConversation();
+    const retainedId = conversation.appendMessage({
+      role: "user",
+      content: "retained",
+      timestamp: 1,
+    });
+    const selectedId = conversation.appendMessage({
+      role: "user",
+      content: "rewind from here",
+      timestamp: 2,
+    });
+    const sessionFile = conversation.getSessionFile()!;
+    const internals = store as unknown as {
+      scanConversations(): Promise<unknown>;
+    };
+    vi.spyOn(internals, "scanConversations").mockRejectedValueOnce(
+      new Error("catalog refresh failed"),
+    );
+
+    await expect(store.truncateConversation(
+      conversation.getSessionId(),
+      selectedId,
+    )).rejects.toBeInstanceOf(ConversationTruncateCommittedError);
+    expect((await readFile(sessionFile, "utf8"))).toContain(retainedId);
+    expect((await readFile(sessionFile, "utf8"))).not.toContain(selectedId);
   });
 
   it("rejects a message anchor that is no longer on the active branch", async () => {

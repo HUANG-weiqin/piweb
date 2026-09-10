@@ -67,6 +67,7 @@ import type {
 import type { PortableExtensionUI } from "./extension-ui.js";
 import {
   inboxEnvelopePayloadFingerprint,
+  InboxTargetTombstoneCommittedError,
   ProjectInbox,
   type InboxEnvelope,
   type InboxEnvelopeInput,
@@ -6032,12 +6033,19 @@ export class ProjectSessionCoordinator {
       }
 
       const deletedAt = this.now().toISOString();
-      await context.inbox.markTargetDeleted(conversationId, deletedAt);
-      durableFenceIds.add(conversationId);
       for (const cascadeId of cascadeIds) {
-        if (cascadeId === conversationId) continue;
-        await context.inbox.markTargetDeleted(cascadeId, deletedAt);
-        durableFenceIds.add(cascadeId);
+        try {
+          await context.inbox.markTargetDeleted(cascadeId, deletedAt);
+          durableFenceIds.add(cascadeId);
+        } catch (error) {
+          if (
+            error instanceof InboxTargetTombstoneCommittedError
+            && error.conversationId === cascadeId
+          ) {
+            durableFenceIds.add(cascadeId);
+          }
+          throw error;
+        }
       }
 
       for (const cascadeId of cascadeIds) {
@@ -6118,11 +6126,21 @@ export class ProjectSessionCoordinator {
     let deletionLease: ConversationDeletionLease | undefined;
     let durableDeletionIntent = false;
     try {
-      await context.inbox.markTargetDeleted(
-        conversationId,
-        this.now().toISOString(),
-      );
-      durableDeletionIntent = true;
+      try {
+        await context.inbox.markTargetDeleted(
+          conversationId,
+          this.now().toISOString(),
+        );
+        durableDeletionIntent = true;
+      } catch (error) {
+        if (
+          error instanceof InboxTargetTombstoneCommittedError
+          && error.conversationId === conversationId
+        ) {
+          durableDeletionIntent = true;
+        }
+        throw error;
+      }
       const pending = await context.inbox.list({
         toConversationId: conversationId,
       });

@@ -229,6 +229,19 @@ export class ConversationNotFoundError extends Error {
   }
 }
 
+/** The transcript replacement is durable even though its catalog refresh failed. */
+export class ConversationTruncateCommittedError extends Error {
+  readonly sessionFile: string;
+
+  constructor(sessionFile: string, cause: unknown) {
+    super(
+      `Conversation truncate committed but catalog refresh failed: ${sessionFile}`,
+      { cause },
+    );
+    this.sessionFile = sessionFile;
+  }
+}
+
 function sessionFileIdentitiesEqual(
   first: Readonly<SessionFileFingerprint>,
   second: Readonly<SessionFileFingerprint>,
@@ -1510,7 +1523,11 @@ export class ProjectStore {
       } finally {
         await unlink(temporaryPath).catch(() => undefined);
       }
-      await this.scanConversations();
+      try {
+        await this.scanConversations();
+      } catch (error) {
+        throw new ConversationTruncateCommittedError(safePath, error);
+      }
       return safePath;
     });
   }

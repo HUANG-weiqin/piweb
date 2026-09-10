@@ -76,6 +76,7 @@ import {
   type ToolCallGateInput,
 } from "./pi-runtime.js";
 import {
+  ConversationTruncateCommittedError,
   type ConversationDeletionLease,
   type ConversationLease,
   type ProjectStore,
@@ -1550,6 +1551,9 @@ export class ConversationActor {
           this.handleExtensionError(extensionError);
         }
       } catch (error) {
+        if (error instanceof ConversationTruncateCommittedError) {
+          persisted = true;
+        }
         if (!persisted) {
           if (!runtimeStopped) throw error;
           const failures: unknown[] = [error];

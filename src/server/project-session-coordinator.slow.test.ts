@@ -52,7 +52,10 @@ import type {
 } from "./pi-runtime.js";
 import type { PortableExtensionUI } from "./extension-ui.js";
 import { WorkspaceLsp } from "./lsp/workspace.js";
-import { ProjectInbox } from "./project-inbox.js";
+import {
+  InboxTargetTombstoneCommittedError,
+  ProjectInbox,
+} from "./project-inbox.js";
 import {
   MAX_DELEGATION_DEPTH,
   MAX_LIVE_DELEGATION_DESCENDANTS,
@@ -2365,6 +2368,74 @@ describe("ProjectSessionCoordinator", () => {
     expect(actor.session.model?.id).toBe("model-a");
   });
 
+  it("retains a warm deletion fence after tombstone verification fails", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const inbox = coordinatorInbox(fixture.handle);
+    const markTargetDeleted = inbox.markTargetDeleted.bind(inbox);
+    inbox.markTargetDeleted = async (...args) => {
+      await markTargetDeleted(...args);
+      throw new InboxTargetTombstoneCommittedError(
+        args[0],
+        new Error("post-write verification failed"),
+      );
+    };
+
+    await expect(fixture.coordinator.deleteConversation(
+      fixture.handle,
+      actor.conversationId,
+    )).rejects.toThrow(/committed but could not be verified/i);
+
+    expect(await inbox.listDeletedTargets()).toContain(actor.conversationId);
+    await expect(fixture.coordinator.prompt(
+      fixture.handle,
+      actor.conversationId,
+      randomUUID(),
+      "must not reach the warm actor",
+    )).rejects.toThrow(/being deleted/i);
+  });
+
+  it("leaves the actor fatal when rewind commits before catalog refresh fails", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const retainedId = actor.sessionManager.appendMessage({
+      role: "user",
+      content: "retained",
+      timestamp: 1,
+    });
+    const selectedId = actor.sessionManager.appendMessage({
+      role: "user",
+      content: "rewind from here",
+      timestamp: 2,
+    });
+    const sessionFile = actor.sessionManager.getSessionFile()!;
+    const previousRuntime = fixture.runtime.control(actor.conversationId);
+    const projectInternals = fixture.handle.project as unknown as {
+      scanConversations(): Promise<unknown>;
+    };
+    vi.spyOn(projectInternals, "scanConversations").mockRejectedValueOnce(
+      new Error("catalog refresh failed"),
+    );
+
+    await expect(fixture.coordinator.truncateConversation(
+      fixture.handle,
+      actor.conversationId,
+      selectedId,
+    )).rejects.toThrow(/committed but catalog refresh failed/i);
+
+    expect(previousRuntime.disposeCalls).toBe(1);
+    expect(actor.getState().fatalError).toMatch(/committed but catalog refresh failed/i);
+    const persisted = await readFile(sessionFile, "utf8");
+    expect(persisted).toContain(retainedId);
+    expect(persisted).not.toContain(selectedId);
+  });
+
   it("rejects switching the role of a running conversation", async () => {
     const fixture = await createFixture();
     const role = await fixture.roles.createRole({
@@ -3634,9 +3705,9 @@ describe("ProjectSessionCoordinator", () => {
     const inbox = coordinatorInbox(fixture.handle);
     const replace = vi.spyOn(
       inbox as unknown as {
-        replaceAtomically(path: string, content: string): Promise<void>;
+        replaceStoredFile(...args: unknown[]): Promise<void>;
       },
-      "replaceAtomically",
+      "replaceStoredFile",
     ).mockRejectedValue(new Error("processing state rewrite must not occur"));
 
     const started = await fixture.coordinator.startPeerSession(

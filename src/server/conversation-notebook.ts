@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
+import type { Stats } from "node:fs";
 import {
+  link,
   lstat,
   mkdir,
+  open,
   readdir,
-  readFile,
   realpath,
   rename,
   unlink,
@@ -11,6 +13,7 @@ import {
 } from "node:fs/promises";
 import {
   basename,
+  dirname,
   isAbsolute,
   join,
   relative,
@@ -130,6 +133,14 @@ function pathIdentity(path: string): string {
 
 function pathsAreIdentical(first: string, second: string): boolean {
   return pathIdentity(first) === pathIdentity(second);
+}
+
+function statsAreIdentical(first: Stats, second: Stats): boolean {
+  return first.dev === second.dev
+    && first.ino === second.ino
+    && first.size === second.size
+    && first.mtimeMs === second.mtimeMs
+    && first.isFile() === second.isFile();
 }
 
 async function assertCanonicalOwnedDirectory(
@@ -372,43 +383,266 @@ async function ensureNotebookDirectory(paths: NotebookPaths): Promise<void> {
   );
 }
 
+async function assertNotebookOwnedFile(
+  directory: string,
+  filePath: string,
+  label: string,
+): Promise<Stats> {
+  const lexicalPath = resolve(filePath);
+  if (!pathsAreIdentical(dirname(lexicalPath), directory)) {
+    throw new Error(`${label} escapes notebook directory: ${filePath}`);
+  }
+  const information = await lstat(lexicalPath);
+  if (information.isSymbolicLink() || !information.isFile()) {
+    throw new Error(`${label} is not a regular file: ${filePath}`);
+  }
+  const [root, file] = await Promise.all([
+    realpath(directory),
+    realpath(lexicalPath),
+  ]);
+  if (!isPathInside(root, file)) {
+    throw new Error(`${label} escapes notebook directory: ${filePath}`);
+  }
+  return information;
+}
+
 async function assertNotebookFileIfPresent(
   paths: NotebookPaths,
-): Promise<boolean> {
+): Promise<Stats | undefined> {
   const hasDirectory = await assertNotebookDirectoryIfPresent(paths);
-  if (!hasDirectory) return false;
+  if (!hasDirectory) return;
+  const quarantinePrefix = `.${basename(paths.file)}.`;
+  const quarantine = (await readdir(paths.notebookDir)).find((name) =>
+    name.startsWith(quarantinePrefix) && name.endsWith(".quarantine")
+  );
+  if (quarantine !== undefined) {
+    throw new Error(
+      `Notebook mutation quarantine requires recovery: ${join(paths.notebookDir, quarantine)}`,
+    );
+  }
   try {
-    const information = await lstat(paths.file);
-    if (information.isSymbolicLink()) {
-      throw new Error(
-        `Notebook file must not be a symbolic link: ${paths.file}`,
-      );
-    }
-    if (!information.isFile()) {
-      throw new Error(`Notebook file is not a regular file: ${paths.file}`);
-    }
-    const [root, file] = await Promise.all([
-      realpath(paths.notebookDir),
-      realpath(paths.file),
-    ]);
-    if (!isPathInside(root, file)) {
-      throw new Error(`Notebook file escapes notebook directory: ${paths.file}`);
-    }
-    return true;
+    return await assertNotebookOwnedFile(
+      paths.notebookDir,
+      paths.file,
+      "Notebook file",
+    );
   } catch (error) {
-    if (isNodeError(error, "ENOENT")) return false;
+    if (isNodeError(error, "ENOENT")) return;
     throw error;
   }
 }
 
+interface LoadedNotebook {
+  notes: NotebookNote[];
+  information?: Stats;
+}
+
+async function loadNotebook(paths: NotebookPaths): Promise<LoadedNotebook> {
+  const information = await assertNotebookFileIfPresent(paths);
+  if (information === undefined) return { notes: [] };
+  const handle = await open(paths.file, "r");
+  try {
+    const opened = await handle.stat();
+    if (!statsAreIdentical(information, opened)) {
+      throw new Error(`Notebook file changed while being read: ${paths.file}`);
+    }
+    const raw = await handle.readFile({ encoding: "utf8" });
+    const afterRead = await handle.stat();
+    const current = await assertNotebookFileIfPresent(paths);
+    if (
+      current === undefined
+      || !statsAreIdentical(information, afterRead)
+      || !statsAreIdentical(information, current)
+    ) {
+      throw new Error(`Notebook file changed while being read: ${paths.file}`);
+    }
+    return {
+      notes: parseNotebookFile(raw, paths.file),
+      information,
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
 async function readNotes(paths: NotebookPaths): Promise<NotebookNote[]> {
-  const exists = await assertNotebookFileIfPresent(paths);
-  if (!exists) return [];
-  return parseNotebookFile(await readFile(paths.file, "utf8"), paths.file);
+  return (await loadNotebook(paths)).notes;
+}
+
+function temporaryNotebookPath(filePath: string): string {
+  return join(
+    dirname(filePath),
+    `.${basename(filePath)}.${process.pid}.${randomUUID()}.tmp`,
+  );
+}
+
+function quarantineNotebookPath(filePath: string): string {
+  return join(
+    dirname(filePath),
+    `.${basename(filePath)}.${process.pid}.${randomUUID()}.quarantine`,
+  );
+}
+
+async function writeNewNotebookFile(
+  paths: NotebookPaths,
+  serialized: string,
+): Promise<void> {
+  const temporaryPath = temporaryNotebookPath(paths.file);
+  try {
+    await writeFile(temporaryPath, serialized, { encoding: "utf8", flag: "wx" });
+    const temporary = await assertNotebookOwnedFile(
+      paths.notebookDir,
+      temporaryPath,
+      "Notebook temporary file",
+    );
+    await link(temporaryPath, paths.file);
+    const published = await assertNotebookOwnedFile(
+      paths.notebookDir,
+      paths.file,
+      "Notebook file",
+    );
+    if (!statsAreIdentical(temporary, published)) {
+      throw new Error(`Notebook file changed while being published: ${paths.file}`);
+    }
+  } finally {
+    await unlink(temporaryPath).catch(() => undefined);
+  }
+}
+
+interface QuarantinedNotebookFile {
+  originalPath: string;
+  quarantinePath: string;
+  information: Stats;
+}
+
+async function restoreQuarantinedNotebookFile(
+  paths: NotebookPaths,
+  quarantined: QuarantinedNotebookFile,
+): Promise<void> {
+  const current = await assertNotebookOwnedFile(
+    paths.notebookDir,
+    quarantined.quarantinePath,
+    "Notebook quarantine",
+  );
+  if (!statsAreIdentical(quarantined.information, current)) {
+    throw new Error(
+      `Notebook quarantine changed while it was being recovered: ${quarantined.quarantinePath}`,
+    );
+  }
+  try {
+    await link(quarantined.quarantinePath, quarantined.originalPath);
+  } catch (error) {
+    if (!isNodeError(error, "EEXIST")) throw error;
+    const original = await assertNotebookOwnedFile(
+      paths.notebookDir,
+      quarantined.originalPath,
+      "Notebook file",
+    );
+    if (!statsAreIdentical(current, original)) {
+      throw new Error(
+        `Notebook quarantine remains at ${quarantined.quarantinePath}`,
+        { cause: error },
+      );
+    }
+  }
+  await unlink(quarantined.quarantinePath);
+}
+
+async function quarantineNotebookFile(
+  paths: NotebookPaths,
+  originalPath: string,
+  expected: Stats,
+): Promise<QuarantinedNotebookFile> {
+  const quarantinePath = quarantineNotebookPath(originalPath);
+  let moved: QuarantinedNotebookFile | undefined;
+  try {
+    await rename(originalPath, quarantinePath);
+    const information = await assertNotebookOwnedFile(
+      paths.notebookDir,
+      quarantinePath,
+      "Notebook quarantine",
+    );
+    moved = { originalPath, quarantinePath, information };
+    if (!statsAreIdentical(expected, information)) {
+      throw new Error(`Notebook file changed before mutation: ${originalPath}`);
+    }
+    return moved;
+  } catch (error) {
+    if (moved !== undefined) {
+      try {
+        await restoreQuarantinedNotebookFile(paths, moved);
+      } catch (recoveryError) {
+        throw new AggregateError(
+          [error, recoveryError],
+          `Notebook mutation failed and recovery could not be completed: ${originalPath}`,
+        );
+      }
+    }
+    throw error;
+  }
+}
+
+async function replaceNotebookFile(
+  paths: NotebookPaths,
+  expected: Stats,
+  serialized: string,
+): Promise<void> {
+  const quarantined = await quarantineNotebookFile(paths, paths.file, expected);
+  let published = false;
+  try {
+    await writeNewNotebookFile(paths, serialized);
+    published = true;
+    await unlink(quarantined.quarantinePath);
+  } catch (error) {
+    if (!published) {
+      try {
+        await restoreQuarantinedNotebookFile(paths, quarantined);
+      } catch (recoveryError) {
+        throw new AggregateError(
+          [error, recoveryError],
+          `Notebook mutation failed and recovery could not be completed: ${paths.file}`,
+        );
+      }
+    }
+    throw error;
+  }
+}
+
+async function deleteNotebookFile(
+  paths: NotebookPaths,
+  filePath: string,
+  expected: Stats,
+): Promise<void> {
+  const quarantined = await quarantineNotebookFile(paths, filePath, expected);
+  let removed = false;
+  try {
+    await unlink(quarantined.quarantinePath);
+    removed = true;
+    try {
+      await lstat(filePath);
+      throw new Error(`Notebook file reappeared while it was being deleted: ${filePath}`);
+    } catch (error) {
+      if (isNodeError(error, "ENOENT")) return;
+      throw error;
+    }
+  } catch (error) {
+    if (!removed) {
+      try {
+        await restoreQuarantinedNotebookFile(paths, quarantined);
+      } catch (recoveryError) {
+        throw new AggregateError(
+          [error, recoveryError],
+          `Notebook mutation failed and recovery could not be completed: ${filePath}`,
+        );
+      }
+    }
+    throw error;
+  }
 }
 
 async function writeNotes(
   paths: NotebookPaths,
+  previous: Stats | undefined,
   notes: readonly NotebookNote[],
 ): Promise<void> {
   const file: NotebookFileV1 = {
@@ -423,24 +657,10 @@ async function writeNotes(
   }
 
   await ensureNotebookDirectory(paths);
-  const temporaryPath = join(
-    paths.notebookDir,
-    `.${basename(paths.file)}.${process.pid}.${randomUUID()}.tmp`,
-  );
-  if (!isPathInside(paths.notebookDir, temporaryPath)) {
-    throw new Error(
-      `Notebook temporary path escapes notebook directory: ${temporaryPath}`,
-    );
-  }
-  try {
-    await writeFile(
-      temporaryPath,
-      serialized,
-      { encoding: "utf8", flag: "wx" },
-    );
-    await rename(temporaryPath, paths.file);
-  } finally {
-    await unlink(temporaryPath).catch(() => undefined);
+  if (previous === undefined) {
+    await writeNewNotebookFile(paths, serialized);
+  } else {
+    await replaceNotebookFile(paths, previous, serialized);
   }
 }
 
@@ -544,7 +764,8 @@ export class ConversationNotebook {
         );
       }
 
-      const notes = await readNotes(this.paths);
+      const loaded = await loadNotebook(this.paths);
+      const notes = loaded.notes;
       const index = notes.findIndex((note) => note.title === title);
       const updatedAt = new Date().toISOString();
       let next: NotebookNote;
@@ -571,7 +792,7 @@ export class ConversationNotebook {
         };
         notes[index] = next;
       }
-      await writeNotes(this.paths, notes);
+      await writeNotes(this.paths, loaded.information, notes);
       return metadata(next);
     });
   }
@@ -705,10 +926,10 @@ export async function deleteConversationNotebook(
   const hasDirectory = await assertNotebookDirectoryIfPresent(paths);
   if (!hasDirectory) return;
 
-  const hasFile = await assertNotebookFileIfPresent(paths);
+  const file = await assertNotebookFileIfPresent(paths);
   const temporaryPrefix = `.${basename(paths.file)}.`;
   const entries = await readdir(paths.notebookDir, { withFileTypes: true });
-  const staleTemporaryPaths: string[] = [];
+  const staleTemporaryFiles: Array<{ path: string; information: Stats }> = [];
   for (const entry of entries) {
     if (
       !entry.name.startsWith(temporaryPrefix)
@@ -720,17 +941,22 @@ export async function deleteConversationNotebook(
         `Notebook temporary entry must be a regular file: ${temporaryPath}`,
       );
     }
-    const canonicalPath = await realpath(temporaryPath);
-    if (!isPathInside(paths.notebookDir, canonicalPath)) {
-      throw new Error(
-        `Notebook temporary entry escapes notebook directory: ${temporaryPath}`,
-      );
-    }
-    staleTemporaryPaths.push(temporaryPath);
+    staleTemporaryFiles.push({
+      path: temporaryPath,
+      information: await assertNotebookOwnedFile(
+        paths.notebookDir,
+        temporaryPath,
+        "Notebook temporary entry",
+      ),
+    });
   }
 
-  if (hasFile) await unlink(paths.file);
-  await Promise.all(staleTemporaryPaths.map((path) => unlink(path)));
+  if (file !== undefined) {
+    await deleteNotebookFile(paths, paths.file, file);
+  }
+  for (const stale of staleTemporaryFiles) {
+    await deleteNotebookFile(paths, stale.path, stale.information);
+  }
 }
 
 export const notebookResultText = {
