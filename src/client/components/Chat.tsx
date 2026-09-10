@@ -586,6 +586,7 @@ function ChatView({
     if (attachmentScopeRef.current !== attachmentScope) {
       attachmentScopeRef.current = attachmentScope;
       attachmentReadQueueRef.current = Promise.resolve();
+      setAttachmentError("");
     }
     draftImagesRef.current = draftImages;
     onImagesChangeRef.current = onImagesChange;

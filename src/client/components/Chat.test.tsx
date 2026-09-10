@@ -1033,6 +1033,29 @@ describe("Chat", () => {
     ]));
   });
 
+  it("clears attachment errors when the exact focus scope changes", async () => {
+    const focus = {
+      sessionId: "session-a",
+      conversationId: "conversation-a",
+      focusId: "focus-a",
+    };
+    const rendered = render(view({ items: [], focus }));
+    fireEvent.paste(screen.getByRole("textbox", { name: "给 Pi 发送消息" }), {
+      clipboardData: {
+        files: [new File(["not an image"], "note.txt", { type: "text/plain" })],
+      },
+    });
+    await waitFor(() => expect(screen.getByRole("alert"))
+      .toHaveTextContent("只支持 PNG、JPEG、WebP 或 GIF 图片。"));
+
+    rendered.rerender(view({
+      items: [],
+      focus: { ...focus, focusId: "focus-b" },
+    }));
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("does not publish completed image reads after focus replacement or unmount", async () => {
     class ControlledFileReader {
       static pending: ControlledFileReader[] = [];
