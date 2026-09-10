@@ -139,7 +139,6 @@ type RequestDispatch = {
   readonly response: Promise<unknown>;
   readonly releaseSignal: () => void;
   readonly documentVersion?: number;
-  readonly fileRevision: number;
   readonly watchId: number;
 };
 
@@ -323,7 +322,6 @@ export class WorkspaceLsp implements LspQueryService {
   private watcher?: WatcherState;
   private watcherCwd?: string;
   private readonly watchChanges: WatchChange[] = [];
-  private readonly fileRevisions = new Map<string, number>();
   private nextWatchId = 0;
   private nextUse = 0;
 
@@ -410,7 +408,6 @@ export class WorkspaceLsp implements LspQueryService {
             response,
             releaseSignal: requestSignal.release,
             documentVersion: syncState.documentVersion,
-            fileRevision: syncState.fileRevision,
             watchId: entry!.processedWatchId,
           } satisfies RequestDispatch;
         } catch (error) {
@@ -899,7 +896,7 @@ export class WorkspaceLsp implements LspQueryService {
     target: DiskSnapshot,
     selector: LspDocumentSelector,
     deadline: Deadline,
-  ): Promise<{ documentVersion?: number; fileRevision: number }> {
+  ): Promise<{ documentVersion?: number }> {
     const connection = entry.connection;
     if (this.disposed || entry.closing || !connection) {
       throw unavailableError("The LSP server is unavailable");
@@ -944,10 +941,7 @@ export class WorkspaceLsp implements LspQueryService {
         }
         this.rememberSeenFile(entry, target);
       }
-      return {
-        documentVersion: entry.documents.get(targetKey)?.version,
-        fileRevision: this.fileRevisions.get(targetKey) ?? 0,
-      };
+      return { documentVersion: entry.documents.get(targetKey)?.version };
     } catch (error) {
       this.invalidate(entry, asLspError(error));
       throw error;
@@ -1202,9 +1196,7 @@ export class WorkspaceLsp implements LspQueryService {
     const canonical = await deadline.wait(this.canonicalFile(target.file, entry.root, "content_modified"), signal);
     if (!samePath(canonical, target.file)) throw contentModifiedError();
     const current = await deadline.wait(this.readSnapshot(target.file, entry.root, "content_modified"), signal);
-    if (current.hash !== target.hash ||
-      (this.fileRevisions.get(pathKey(target.file)) ?? 0) !== dispatched.fileRevision ||
-      this.nextWatchId !== dispatched.watchId) {
+    if (current.hash !== target.hash || this.nextWatchId !== dispatched.watchId) {
       throw contentModifiedError();
     }
     if (dispatched.documentVersion !== undefined &&
@@ -1232,7 +1224,6 @@ export class WorkspaceLsp implements LspQueryService {
     if (!retained) return;
     if (retained.count === 1) {
       this.retainedPaths.delete(key);
-      this.fileRevisions.delete(key);
     } else {
       retained.count -= 1;
     }
@@ -1295,9 +1286,6 @@ export class WorkspaceLsp implements LspQueryService {
       return;
     }
     const key = pathKey(absolute);
-    if (this.retainedPaths.has(key)) {
-      this.fileRevisions.set(key, (this.fileRevisions.get(key) ?? 0) + 1);
-    }
     this.nextWatchId += 1;
     this.watchChanges.push({ id: this.nextWatchId, path: absolute, key, event });
   }
@@ -1313,7 +1301,6 @@ export class WorkspaceLsp implements LspQueryService {
   private invalidateGeneration(): void {
     this.generation += 1;
     this.watchChanges.length = 0;
-    this.fileRevisions.clear();
     for (const entry of this.entries) this.invalidate(entry, contentModifiedError());
   }
 
