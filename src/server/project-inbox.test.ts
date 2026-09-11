@@ -30,6 +30,7 @@ import {
   MAX_INBOX_MESSAGES_PER_TARGET,
   MAX_INBOX_TOTAL_BYTES,
   InboxPutOperationError,
+  InboxTargetTombstoneBatchClearError,
   InboxTargetTombstoneBatchError,
   InboxTargetTombstoneCommittedError,
   ProjectInbox,
@@ -1039,6 +1040,71 @@ describe("ProjectInbox", () => {
       uncertainConversationIds: [second],
     });
   });
+
+  it.each([
+    ["leaf", 1],
+    ["middle", 2],
+    ["root", 3],
+  ] as const)(
+    "records only exact completed fence clears when the %s unlink cannot prove absence",
+    async (failurePosition, failedTombstoneUnlink) => {
+      const { inbox } = await temporaryInbox(
+        "piweb-inbox-batch-partial-clear-",
+      );
+      const root = randomUUID();
+      const child = randomUUID();
+      const leaf = randomUUID();
+      const batch = await inbox.beginTargetDeletionBatch(
+        [root, child, leaf],
+        timestamp,
+      );
+      const internals = inbox as unknown as {
+        deleteStoredFile(stored: { path: string }): Promise<void>;
+      };
+      const originalDeleteStoredFile = internals.deleteStoredFile.bind(inbox);
+      let tombstoneUnlinks = 0;
+      const deleteStoredFile = vi.spyOn(
+        internals,
+        "deleteStoredFile",
+      ).mockImplementation(async (stored) => {
+        if (stored.path.endsWith(".tombstone.json")) {
+          tombstoneUnlinks += 1;
+          if (tombstoneUnlinks === failedTombstoneUnlink) {
+            throw new Error(
+              `injected ${failurePosition} tombstone unlink cannot prove absence`,
+            );
+          }
+        }
+        await originalDeleteStoredFile(stored);
+      });
+
+      let failure: unknown;
+      try {
+        await inbox.clearTargetDeletionBatch(batch);
+      } catch (error) {
+        failure = error;
+      } finally {
+        deleteStoredFile.mockRestore();
+      }
+
+      expect(failure).toBeInstanceOf(InboxTargetTombstoneBatchClearError);
+      const clearError = failure as InboxTargetTombstoneBatchClearError;
+      const rootLastClearOrder = [leaf, child, root];
+      const clearedIds = rootLastClearOrder.slice(
+        0,
+        failedTombstoneUnlink - 1,
+      );
+      const failedId = rootLastClearOrder[failedTombstoneUnlink - 1]!;
+      expect(tombstoneUnlinks).toBe(failedTombstoneUnlink);
+      expect(clearError.clearedConversationIds).toEqual(clearedIds);
+      // A throwing deleteStoredFile() has not established path absence, so its
+      // target must not be in the receipt even if earlier leaf clears were.
+      expect(clearError.clearedConversationIds).not.toContain(failedId);
+      expect(await inbox.listDeletedTargets()).toEqual(
+        rootLastClearOrder.slice(failedTombstoneUnlink - 1).sort(),
+      );
+    },
+  );
 
   it("rejects captured target sidecar or fence replacements", async () => {
     const { directory, inbox } = await temporaryInbox(

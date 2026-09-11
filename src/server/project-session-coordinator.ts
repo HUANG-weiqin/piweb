@@ -69,6 +69,7 @@ import type { PortableExtensionUI } from "./extension-ui.js";
 import {
   inboxEnvelopePayloadFingerprint,
   InboxPutOperationError,
+  InboxTargetTombstoneBatchClearError,
   InboxTargetTombstoneBatchError,
   ProjectInbox,
   type InboxEnvelope,
@@ -3477,6 +3478,7 @@ export class ProjectSessionCoordinator {
     );
     if (absentIds.length === 0) return new Set();
     const absentIdSet = new Set(absentIds);
+    const clearedDuringFailedClear = new Set<string>();
     try {
       const batch = await context.inbox.beginTargetDeletionBatch(
         absentIds.sort(),
@@ -3504,22 +3506,73 @@ export class ProjectSessionCoordinator {
         }
       }
       await context.inbox.deleteCapturedTargetMessages(batch);
-      await context.inbox.clearTargetDeletionBatch(batch);
+      try {
+        await context.inbox.clearTargetDeletionBatch(batch);
+      } catch (error) {
+        for (const conversationId of this.finalizeClearedTargetFences(
+          context,
+          batch,
+          error,
+        )) {
+          clearedDuringFailedClear.add(conversationId);
+        }
+        if (clearedDuringFailedClear.size > 0) {
+          this.emit(context, { type: "project_changed" });
+        }
+        throw error;
+      }
       for (const conversationId of absentIds) {
-        context.extensionUIRouters.get(conversationId)?.clear();
-        context.extensionUIRouters.delete(conversationId);
-        context.profiles.delete(conversationId);
-        context.attention.delete(conversationId);
-        this.releaseDeletionReservation(context, conversationId);
+        this.finalizeDeletedConversation(context, conversationId);
       }
       this.emit(context, { type: "project_changed" });
       return new Set(absentIds);
     } catch {
       for (const conversationId of absentIds) {
-        context.attention.add(conversationId);
+        if (!clearedDuringFailedClear.has(conversationId)) {
+          context.attention.add(conversationId);
+        }
       }
+      return clearedDuringFailedClear;
+    }
+  }
+
+  /**
+   * Finalizes only conversation IDs whose target fences were exactly removed
+   * after the caller already proved their transcripts absent and cleared the
+   * captured sidecars. No fence absence inferred from a failed operation can
+   * enter this path.
+   */
+  private finalizeClearedTargetFences(
+    context: ProjectContext,
+    batch: InboxTargetDeletionBatch,
+    error: unknown,
+  ): Set<string> {
+    if (!(error instanceof InboxTargetTombstoneBatchClearError)) {
       return new Set();
     }
+    const expectedIds = new Set(batch.conversationIds);
+    const clearedIds = new Set(error.clearedConversationIds);
+    if (
+      clearedIds.size !== error.clearedConversationIds.length
+      || [...clearedIds].some((conversationId) => !expectedIds.has(conversationId))
+    ) {
+      return new Set();
+    }
+    for (const conversationId of clearedIds) {
+      this.finalizeDeletedConversation(context, conversationId);
+    }
+    return clearedIds;
+  }
+
+  private finalizeDeletedConversation(
+    context: ProjectContext,
+    conversationId: string,
+  ): void {
+    context.extensionUIRouters.get(conversationId)?.clear();
+    context.extensionUIRouters.delete(conversationId);
+    context.profiles.delete(conversationId);
+    context.attention.delete(conversationId);
+    this.releaseDeletionReservation(context, conversationId);
   }
 
   private async retryDurableDeletion(
@@ -6616,13 +6669,24 @@ export class ProjectSessionCoordinator {
         }
       }
       await context.inbox.deleteCapturedTargetMessages(inboxBatch);
-      await context.inbox.clearTargetDeletionBatch(inboxBatch);
+      try {
+        await context.inbox.clearTargetDeletionBatch(inboxBatch);
+      } catch (error) {
+        const clearedIds = this.finalizeClearedTargetFences(
+          context,
+          inboxBatch,
+          error,
+        );
+        for (const conversationId of deletionConversationIds) {
+          if (!clearedIds.has(conversationId)) {
+            context.attention.add(conversationId);
+          }
+        }
+        this.emit(context, { type: "project_changed" });
+        throw error;
+      }
       for (const conversationId of deletionConversationIds) {
-        context.extensionUIRouters.get(conversationId)?.clear();
-        context.extensionUIRouters.delete(conversationId);
-        context.profiles.delete(conversationId);
-        context.attention.delete(conversationId);
-        this.releaseDeletionReservation(context, conversationId);
+        this.finalizeDeletedConversation(context, conversationId);
       }
       this.emit(context, { type: "project_changed" });
     } finally {

@@ -244,6 +244,22 @@ export class InboxTargetTombstoneBatchError extends Error {
   }
 }
 
+/**
+ * A target-fence clear stopped after exact deletes had already completed.
+ * Only IDs in this receipt returned successfully from deleteStoredFile().
+ */
+export class InboxTargetTombstoneBatchClearError extends Error {
+  readonly clearedConversationIds: readonly string[];
+
+  constructor(clearedConversationIds: readonly string[], cause: unknown) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    super(`Inbox target tombstone batch cleanup could not be completed: ${detail}`, {
+      cause,
+    });
+    this.clearedConversationIds = Object.freeze([...clearedConversationIds]);
+  }
+}
+
 export interface InboxTargetDeletionBatch {
   readonly conversationIds: readonly string[];
   readonly pending: readonly InboxEnvelope[];
@@ -1052,9 +1068,20 @@ export class ProjectInbox {
         );
       }
       // The coordinator publishes root-first and clears root-last, keeping a
-      // recoverable root intent until every descendant fence is gone.
+      // recoverable root intent until every descendant fence is gone. A
+      // returned deleteStoredFile() is the only proof an individual fence was
+      // fully removed; preserve that exact receipt if a later clear fails.
+      const clearedConversationIds: string[] = [];
       for (const stored of [...captured.tombstoneFiles].reverse()) {
-        await this.deleteStoredFile(stored);
+        try {
+          await this.deleteStoredFile(stored);
+          clearedConversationIds.push(stored.tombstone.conversationId);
+        } catch (error) {
+          throw new InboxTargetTombstoneBatchClearError(
+            clearedConversationIds,
+            error,
+          );
+        }
       }
     });
   }

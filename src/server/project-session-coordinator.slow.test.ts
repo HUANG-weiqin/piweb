@@ -12685,6 +12685,145 @@ describe("ProjectSessionCoordinator", () => {
       }, "partial cascade retry and tombstone cleanup after restart");
     });
 
+    it.each([
+      ["leaf", 1],
+      ["middle", 2],
+      ["root", 3],
+    ] as const)(
+      "recovers a same-process partial root-last tombstone clear at the %s without marooning reservations",
+      async (failurePosition, failedTombstoneUnlink) => {
+        const fixture = await createFixture();
+        const retained = await fixture.coordinator.createUserConversation(
+          fixture.handle,
+          { roleId: "default" },
+        );
+        const root = await fixture.coordinator.createUserConversation(
+          fixture.handle,
+          { roleId: "default" },
+        );
+        const childId = deterministicTestUuid(
+          "cascade-partial-fence-clear",
+          "child",
+        );
+        const grandchildId = deterministicTestUuid(
+          "cascade-partial-fence-clear",
+          "grandchild",
+        );
+        await fixture.handle.project.createConversation(
+          childId,
+          defaultProfile(fixture.roles, {
+            createdBy: {
+              kind: "conversation",
+              conversationId: root.conversationId,
+            },
+            orchestration: {
+              rootConversationId: root.conversationId,
+              depth: 1,
+            },
+          }),
+        );
+        await fixture.handle.project.createConversation(
+          grandchildId,
+          defaultProfile(fixture.roles, {
+            createdBy: { kind: "conversation", conversationId: childId },
+            orchestration: {
+              rootConversationId: root.conversationId,
+              depth: 2,
+            },
+          }),
+        );
+        await fixture.handle.project.refreshConversations();
+
+        const inbox = coordinatorInbox(fixture.handle);
+        const inboxInternals = inbox as unknown as {
+          deleteStoredFile(stored: { path: string }): Promise<void>;
+        };
+        const originalDeleteStoredFile = inboxInternals.deleteStoredFile.bind(
+          inbox,
+        );
+        let tombstoneUnlinks = 0;
+        const deleteStoredFile = vi.spyOn(
+          inboxInternals,
+          "deleteStoredFile",
+        ).mockImplementation(async (stored) => {
+          if (stored.path.endsWith(".tombstone.json")) {
+            tombstoneUnlinks += 1;
+            if (tombstoneUnlinks === failedTombstoneUnlink) {
+              throw new Error(
+                `injected ${failurePosition} tombstone unlink failure`,
+              );
+            }
+          }
+          await originalDeleteStoredFile(stored);
+        });
+
+        try {
+          await expect(fixture.coordinator.deleteConversation(
+            fixture.handle,
+            root.conversationId,
+          )).rejects.toThrow(
+            `injected ${failurePosition} tombstone unlink failure`,
+          );
+        } finally {
+          deleteStoredFile.mockRestore();
+        }
+
+        const cascadeIds = [root.conversationId, childId, grandchildId];
+        const rootLastClearOrder = [...cascadeIds].reverse();
+        const clearedIds = rootLastClearOrder.slice(
+          0,
+          failedTombstoneUnlink - 1,
+        );
+        const remainingFenceIds = rootLastClearOrder.slice(
+          failedTombstoneUnlink - 1,
+        );
+        const fencesAtFailure = await inbox.listDeletedTargets();
+        // The root remains durable through every failed root-last clear. The
+        // exact receipt must contain only deleteStoredFile() calls that
+        // returned; the failed (unproven-absent) fence remains both durable
+        // and reserved.
+        expect(tombstoneUnlinks).toBe(failedTombstoneUnlink);
+        expect(fencesAtFailure).toContain(root.conversationId);
+        for (const conversationId of clearedIds) {
+          expect(fencesAtFailure).not.toContain(conversationId);
+        }
+        for (const conversationId of remainingFenceIds) {
+          expect(fencesAtFailure).toContain(conversationId);
+        }
+        expect(
+          fixture.handle.project.listConversations().map(({ id }) => id),
+        ).not.toEqual(expect.arrayContaining(cascadeIds));
+        const context = (fixture.handle as unknown as {
+          context: { deleting: Set<string>; attention: Set<string> };
+        }).context;
+        for (const conversationId of clearedIds) {
+          expect(context.deleting).not.toContain(conversationId);
+          expect(context.attention).not.toContain(conversationId);
+        }
+        for (const conversationId of remainingFenceIds) {
+          expect(context.deleting).toContain(conversationId);
+          expect(context.attention).toContain(conversationId);
+        }
+
+        // A normal same-process lifecycle operation must retry the retained
+        // root rather than require a coordinator restart to release any leaf.
+        vi.spyOn(retained, "compactContext").mockResolvedValueOnce();
+        await fixture.coordinator.compactContext(
+          fixture.handle,
+          retained.conversationId,
+        );
+
+        expect(await inbox.listDeletedTargets()).toEqual([]);
+        expect(
+          fixture.handle.project.listConversations().map(({ id }) => id),
+        ).not.toEqual(expect.arrayContaining(cascadeIds));
+        for (const conversationId of cascadeIds) {
+          expect(context.deleting).not.toContain(conversationId);
+          expect(context.attention).not.toContain(conversationId);
+        }
+      },
+    );
+
     it("terminalizes a source with a separate durable fence before clearing an absent target sidecar", async () => {
       const fixture = await createFixture();
       const source = await fixture.coordinator.createUserConversation(
