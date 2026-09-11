@@ -1375,11 +1375,9 @@ export function App() {
       : undefined;
     setConversationRole(event.role);
     setLoopList(event.loopList ?? { items: [], armed: false });
-    if (event.pendingPrompts !== undefined) {
-      replacePendingAdmissions(
-        event.pendingPrompts.map(({ promptId, text }) => ({ promptId, text })),
-      );
-    }
+    replacePendingAdmissions(
+      event.pendingPrompts.map(({ promptId, text }) => ({ promptId, text })),
+    );
     if (settleReadiness && !pendingFocusRef.current) {
       updateConversationReady(true);
       requestTransitionFrame(snapshotAttempt, "snapshot", {

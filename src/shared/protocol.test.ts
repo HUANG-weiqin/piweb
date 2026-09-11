@@ -41,7 +41,7 @@ const transitionDiagnostics = {
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(56);
+    expect(PROTOCOL_VERSION).toBe(57);
   });
 
   it("accepts supported commands", () => {
@@ -746,7 +746,9 @@ describe("parseClientCommand", () => {
       sessionId,
       conversationId,
       focusId,
+      projectionSeq: 0,
       items: [],
+      pendingPrompts: [],
       window: {
         omittedBefore: false,
         startsMidTurn: false,
@@ -793,7 +795,9 @@ describe("parseClientCommand", () => {
       sessionId,
       conversationId,
       focusId,
+      projectionSeq: 0,
       items: [],
+      pendingPrompts: [],
       window: {
         omittedBefore: false,
         startsMidTurn: false,
@@ -1162,6 +1166,8 @@ describe("parseClientCommand", () => {
       sessionId,
       conversationId,
       focusId,
+      projectionSeq: 0,
+      pendingPrompts: [],
       role: {
         id: "default",
         revision: 1,
@@ -1494,6 +1500,8 @@ describe("parseClientCommand", () => {
       sessionId,
       conversationId,
       focusId,
+      projectionSeq: 0,
+      pendingPrompts: [],
       items: [{
         kind: "message",
         id: "assistant-ordered",
@@ -1545,6 +1553,8 @@ describe("parseClientCommand", () => {
       sessionId,
       conversationId,
       focusId,
+      projectionSeq: 0,
+      pendingPrompts: [],
       items: [{
         kind: "message",
         id: "assistant-waiting",
@@ -1568,6 +1578,8 @@ describe("parseClientCommand", () => {
       sessionId,
       conversationId,
       focusId,
+      projectionSeq: 0,
+      pendingPrompts: [],
       messages: [message],
       window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
     })).toThrow("items");
@@ -1576,6 +1588,8 @@ describe("parseClientCommand", () => {
       sessionId,
       conversationId,
       focusId,
+      projectionSeq: 0,
+      pendingPrompts: [],
       window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
     })).toThrow("items");
     expect(() => parseServerEvent({
@@ -1583,6 +1597,8 @@ describe("parseClientCommand", () => {
       sessionId,
       conversationId,
       focusId,
+      projectionSeq: 0,
+      pendingPrompts: [],
       items: [{
         kind: "message",
         id: "message-without-parts",
@@ -1652,7 +1668,9 @@ describe("parseServerEvent", () => {
       sessionId,
       conversationId,
       focusId,
+      projectionSeq: 0,
       items: [],
+      pendingPrompts: [],
       loopList,
       window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
     })).toMatchObject({ type: "conversation_snapshot", loopList });
@@ -1701,6 +1719,27 @@ describe("parseServerEvent", () => {
     })).toThrow();
   });
 
+  it("requires a transcript checkpoint and complete pending prompt FIFO", () => {
+    const snapshot = {
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId,
+      focusId,
+      projectionSeq: 0,
+      items: [],
+      pendingPrompts: [],
+      window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
+    };
+    expect(parseServerEvent(snapshot)).toMatchObject({
+      projectionSeq: 0,
+      pendingPrompts: [],
+    });
+    const { projectionSeq: _projectionSeq, ...withoutProjectionSeq } = snapshot;
+    expect(() => parseServerEvent(withoutProjectionSeq)).toThrow("projectionSeq");
+    const { pendingPrompts: _pendingPrompts, ...withoutPendingPrompts } = snapshot;
+    expect(() => parseServerEvent(withoutPendingPrompts)).toThrow("pendingPrompts");
+  });
+
   it("requires explicit tri-state peer presence on session message cards", () => {
     const card = {
       kind: "session_message" as const,
@@ -1726,7 +1765,9 @@ describe("parseServerEvent", () => {
       sessionId,
       conversationId,
       focusId,
+      projectionSeq: 0,
       items: [card],
+      pendingPrompts: [],
       window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
     };
 
@@ -1803,7 +1844,9 @@ describe("parseServerEvent", () => {
       sessionId,
       conversationId,
       focusId,
+      projectionSeq: 0,
       items: [],
+      pendingPrompts: [],
       window,
     })).toMatchObject({ type: "conversation_snapshot", window });
   });
@@ -1814,7 +1857,9 @@ describe("parseServerEvent", () => {
       sessionId,
       conversationId,
       focusId,
+      projectionSeq: 0,
       items: [],
+      pendingPrompts: [],
       window: {
         omittedBefore: false,
         startsMidTurn: true,
@@ -1829,7 +1874,9 @@ describe("parseServerEvent", () => {
       sessionId,
       conversationId,
       focusId,
+      projectionSeq: 0,
       items: [],
+      pendingPrompts: [],
       window: {
         omittedBefore: false,
         startsMidTurn: false,
@@ -1914,6 +1961,8 @@ describe("parseServerEvent", () => {
       sessionId,
       conversationId,
       focusId,
+      projectionSeq: 0,
+      pendingPrompts: [],
       items: [{
         kind: "compaction" as const,
         id: "compaction-entry",
@@ -1955,7 +2004,9 @@ describe("parseServerEvent", () => {
       sessionId,
       conversationId: legacyConversationId,
       focusId,
+      projectionSeq: 0,
       items: [],
+      pendingPrompts: [],
       window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
     })).toMatchObject({
       type: "conversation_snapshot",

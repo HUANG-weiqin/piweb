@@ -4786,6 +4786,7 @@ describe("ConversationActor", () => {
       focusId: FOCUS_ID,
       projectionSeq: projection.projectionSeq,
       items: projection.items,
+      pendingPrompts: fixture.actor.pendingPromptAdmissions(),
       window: projection.window,
     }));
     expect(parsed.type).toBe("conversation_snapshot");

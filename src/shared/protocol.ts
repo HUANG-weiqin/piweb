@@ -31,6 +31,8 @@ export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
+// v57: focused conversation snapshots always carry their transcript checkpoint
+// and complete admitted-but-undelivered prompt FIFO.
 // v56: project conversation summaries carry required compacting state, projected
 // independently from activity and focused runtime state.
 // v55: session-message cards carry a required tri-state peer-presence
@@ -76,7 +78,7 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
-export const PROTOCOL_VERSION = 56;
+export const PROTOCOL_VERSION = 57;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 export const COLOR_SCHEMES = ["quiet-rebel", "classic-rebel"] as const;
 export type ColorScheme = typeof COLOR_SCHEMES[number];
@@ -1031,10 +1033,11 @@ export type ServerEvent =
       conversationId: string;
       focusId: string;
       role?: ConversationRoleSnapshot;
-      projectionSeq?: number;
+      /** Transcript checkpoint; it advances only with session events. */
+      projectionSeq: number;
       items: ConversationHistoryItem[];
       /** busy 时已接受、尚未投递的浏览器 prompt（服务端内存态，重启丢失为接受项）。 */
-      pendingPrompts?: PendingPromptAdmissionSnapshot[];
+      pendingPrompts: PendingPromptAdmissionSnapshot[];
       loopList?: LoopList;
       window: ConversationWindowCoverage;
       transitionDiagnostics?: TransitionDiagnostics;
@@ -1679,12 +1682,12 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     conversationId: conversationIdSchema,
     focusId: focusIdSchema,
     role: conversationRoleSnapshotSchema.optional(),
-    projectionSeq: z.number().int().nonnegative().optional(),
+    projectionSeq: z.number().int().nonnegative(),
     items: z.array(conversationHistoryItemSchema),
     pendingPrompts: z.array(z.object({
       promptId: z.string().uuid(),
       text: required.max(MAX_PROMPT_CHARACTERS),
-    }).strict()).max(MAX_PENDING_PROMPTS_PER_CONVERSATION).optional(),
+    }).strict()).max(MAX_PENDING_PROMPTS_PER_CONVERSATION),
     loopList: loopListSchema.optional(),
     window: conversationWindowCoverageSchema,
     transitionDiagnostics: transitionDiagnosticsSchema.optional(),

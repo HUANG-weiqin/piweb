@@ -735,6 +735,8 @@ describe("PiConnection coordinated controls", () => {
         && event.focusId === initializedAttach.focusId
       );
       expect(initializedSnapshot).toMatchObject({
+        projectionSeq: expect.any(Number),
+        pendingPrompts: [],
         transitionDiagnostics: {
           version: 1,
           commandId: COMMAND_B,

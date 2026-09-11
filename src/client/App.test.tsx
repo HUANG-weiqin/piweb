@@ -82,8 +82,15 @@ type RelaxedProjectSnapshot = Omit<
 > & { coverage?: "complete" | "unknown" };
 type RelaxedConversationSnapshot = Omit<
   Extract<ServerEvent, { type: "conversation_snapshot" }>,
-  "focusId"
-> & { focusId?: string };
+  "focusId" | "projectionSeq" | "pendingPrompts"
+> & {
+  focusId?: string;
+  projectionSeq?: number;
+  pendingPrompts?: Extract<
+    ServerEvent,
+    { type: "conversation_snapshot" }
+  >["pendingPrompts"];
+};
 type RelaxedSessionEvent = Omit<
   Extract<ServerEvent, { type: "session_event" }>,
   "conversationId" | "focusId"
@@ -142,6 +149,12 @@ function completeEvent(event: TestServerEvent): TestServerEvent {
   }
   if (event.type === "project_snapshot") {
     return { ...event, coverage: event.coverage ?? "complete" };
+  }
+  if (event.type === "conversation_snapshot") {
+    return {
+      ...event,
+      pendingPrompts: event.pendingPrompts ?? [],
+    };
   }
   if (event.type !== "state") return event;
   return {
@@ -266,14 +279,14 @@ vi.mock("./lib/socket", () => ({
           if (snapshottedConversations.has(snapshotKey)) return;
           snapshottedConversations.add(snapshotKey);
           if (!completed.state.focusId) return;
-          onEvent({
+          onEvent(completeEvent({
             type: "conversation_snapshot",
             sessionId: completed.state.sessionId,
             conversationId: completed.state.conversationId,
             focusId: completed.state.focusId,
             items: [],
             window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
-          });
+          }) as ServerEvent);
         }
       };
       socketMock.instances.push({ emit, rawEmit, status: onStatus });
@@ -10430,7 +10443,7 @@ describe("App", () => {
       .not.toBeInTheDocument();
   });
 
-  it("restores waiting prompts from the conversation snapshot", () => {
+  it("replaces waiting prompts from each accepted conversation snapshot", () => {
     render(<App />);
     const sessionId = startFromSetup();
     act(() => {
@@ -10452,6 +10465,7 @@ describe("App", () => {
       sessionId,
       conversationId: CONVERSATION_ID,
       focusId: FOCUS_A,
+      projectionSeq: 0,
       items: [],
       pendingPrompts: [{
         promptId: "3c5b3e7a-1f2a-4b6e-8d0c-9a1b2c3d4e5f",
@@ -10463,6 +10477,36 @@ describe("App", () => {
 
     expect(screen.getByRole("region", { name: "等待处理的消息" }))
       .toHaveTextContent("still waiting");
+
+    act(() => socketMock.emit?.({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      projectionSeq: 0,
+      items: [],
+      pendingPrompts: [{
+        promptId: "f3c5b3e7a-1f2a-4b6e-8d0c-9a1b2c3d4e5f",
+        text: "replacement waiting",
+      }],
+      window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
+    }));
+    expect(screen.getByRole("region", { name: "等待处理的消息" }))
+      .toHaveTextContent("replacement waiting");
+    expect(screen.queryByText("still waiting")).not.toBeInTheDocument();
+
+    act(() => socketMock.emit?.({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      projectionSeq: 0,
+      items: [],
+      pendingPrompts: [],
+      window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
+    }));
+    expect(screen.queryByRole("region", { name: "等待处理的消息" }))
+      .not.toBeInTheDocument();
   });
 
   it("clears waiting prompts when the run is aborted", () => {
