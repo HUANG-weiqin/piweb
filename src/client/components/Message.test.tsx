@@ -118,6 +118,7 @@ describe("Message", () => {
       updatedAt: "2026-07-19T09:00:00.000Z",
       messageCount: 1,
       activity: { kind: "idle" },
+      compacting: false,
     };
     const message: ChatMessage = {
       ...toolsMessage,

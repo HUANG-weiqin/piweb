@@ -31,6 +31,8 @@ export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
+// v56: project conversation summaries carry required compacting state, projected
+// independently from activity and focused runtime state.
 // v55: session-message cards carry a required tri-state peer-presence
 // projection derived from a stable complete session-header census.
 // v54: durable user and tool-result images share an exact physical-entry
@@ -74,7 +76,7 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
-export const PROTOCOL_VERSION = 55;
+export const PROTOCOL_VERSION = 56;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 export const COLOR_SCHEMES = ["quiet-rebel", "classic-rebel"] as const;
 export type ColorScheme = typeof COLOR_SCHEMES[number];
@@ -857,6 +859,8 @@ export interface ConversationSummary {
   messageCount: number;
   role?: Omit<ConversationRoleSnapshot, "systemPrompt">;
   activity?: ConversationActivity;
+  /** Whether this conversation is currently compacting context. */
+  compacting: boolean;
   attention?: boolean;
   unread?: boolean;
   createdBy?: ConversationCreatedBy;
@@ -1606,6 +1610,7 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
       messageCount: z.number().int().nonnegative(),
       role: conversationRoleSummarySchema.optional(),
       activity: conversationActivitySchema.optional(),
+      compacting: z.boolean(),
       attention: z.boolean().optional(),
       unread: z.boolean().optional(),
       createdBy: z.discriminatedUnion("kind", [

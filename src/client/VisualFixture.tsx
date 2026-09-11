@@ -97,6 +97,7 @@ function conversation(
     messageCount: 12,
     role: conversationRole,
     activity: { kind: "idle" },
+    compacting: false,
     createdBy: { kind: "user" },
     ...overrides,
   };

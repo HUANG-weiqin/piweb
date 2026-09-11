@@ -442,6 +442,7 @@ function conversationSummary(
     updatedAt,
     messageCount: 1,
     activity: { kind: "idle" },
+    compacting: false,
   };
 }
 
@@ -3735,6 +3736,7 @@ describe("App", () => {
           createdAt: "2026-07-19T08:00:00.000Z",
           updatedAt: "2026-07-19T08:00:00.000Z",
           messageCount: 1,
+          compacting: false,
         }, {
           id: CONVERSATION_B,
           name: "B",
@@ -3742,6 +3744,7 @@ describe("App", () => {
           createdAt: "2026-07-19T08:00:00.000Z",
           updatedAt: "2026-07-19T09:00:00.000Z",
           messageCount: 1,
+          compacting: false,
         }],
         truncated: false,
       });
@@ -3878,6 +3881,7 @@ describe("App", () => {
       createdAt: "2026-07-19T08:00:00.000Z",
       updatedAt: "2026-07-19T08:00:00.000Z",
       messageCount: 1,
+      compacting: false,
     };
     const conversationB = {
       id: CONVERSATION_B,
@@ -3886,6 +3890,7 @@ describe("App", () => {
       createdAt: "2026-07-19T08:00:00.000Z",
       updatedAt: "2026-07-19T09:00:00.000Z",
       messageCount: 1,
+      compacting: false,
     };
     act(() => {
       socketMock.emit?.({
@@ -4005,6 +4010,7 @@ describe("App", () => {
       createdAt: "2026-07-19T08:00:00.000Z",
       updatedAt: "2026-07-19T08:00:00.000Z",
       messageCount: 1,
+      compacting: false,
     };
     const conversationB = {
       id: CONVERSATION_B,
@@ -4013,6 +4019,7 @@ describe("App", () => {
       createdAt: "2026-07-19T08:00:00.000Z",
       updatedAt: "2026-07-19T09:00:00.000Z",
       messageCount: 1,
+      compacting: false,
     };
     act(() => {
       socketMock.emit?.({
@@ -4237,6 +4244,7 @@ describe("App", () => {
           createdAt: "2026-07-19T08:00:00.000Z",
           updatedAt: "2026-07-19T08:00:00.000Z",
           messageCount: 1,
+          compacting: false,
         }, {
           id: CONVERSATION_B,
           name: "B",
@@ -4244,6 +4252,7 @@ describe("App", () => {
           createdAt: "2026-07-19T08:00:00.000Z",
           updatedAt: "2026-07-19T09:00:00.000Z",
           messageCount: 1,
+          compacting: false,
         }],
         truncated: false,
       });
@@ -4400,6 +4409,7 @@ describe("App", () => {
           createdAt: "2026-07-19T08:00:00.000Z",
           updatedAt: "2026-07-19T08:00:00.000Z",
           messageCount: 1,
+          compacting: false,
         }, {
           id: CONVERSATION_B,
           name: "B",
@@ -4407,6 +4417,7 @@ describe("App", () => {
           createdAt: "2026-07-19T08:00:00.000Z",
           updatedAt: "2026-07-19T09:00:00.000Z",
           messageCount: 0,
+          compacting: false,
         }],
         truncated: false,
       });
@@ -4529,6 +4540,7 @@ describe("App", () => {
         createdAt: "2026-07-19T08:00:00.000Z",
         updatedAt: "2026-07-19T08:00:00.000Z",
         messageCount: 1,
+        compacting: false,
       }, {
         id: CONVERSATION_B,
         name: "B",
@@ -4536,6 +4548,7 @@ describe("App", () => {
         createdAt: "2026-07-19T08:00:00.000Z",
         updatedAt: "2026-07-19T09:00:00.000Z",
         messageCount: 1,
+        compacting: false,
       }],
       truncated: false,
     };
@@ -8021,6 +8034,7 @@ describe("App", () => {
       createdAt: "2026-07-18T12:00:00.000Z",
       updatedAt: "2026-07-18T12:01:00.000Z",
       messageCount: 2,
+      compacting: false,
     }, {
       id: CONVERSATION_B,
       name: "Older work",
@@ -8028,6 +8042,7 @@ describe("App", () => {
       createdAt: "2026-07-17T12:00:00.000Z",
       updatedAt: "2026-07-17T12:01:00.000Z",
       messageCount: 4,
+      compacting: false,
     }];
     act(() => socketMock.emit?.({
       type: "project_snapshot",
@@ -8134,6 +8149,7 @@ describe("App", () => {
           createdAt: "2026-07-18T12:00:00.000Z",
           updatedAt: "2026-07-18T12:01:00.000Z",
           messageCount: 0,
+          compacting: false,
           activity: { kind: "idle" },
         }, {
           id: CONVERSATION_B,
@@ -8142,6 +8158,7 @@ describe("App", () => {
           createdAt: "2026-07-17T12:00:00.000Z",
           updatedAt: "2026-07-17T12:01:00.000Z",
           messageCount: 0,
+          compacting: false,
           activity: { kind: "idle" },
         }],
         truncated: false,
@@ -8179,6 +8196,7 @@ describe("App", () => {
           createdAt: "2026-07-20T12:00:00.000Z",
           updatedAt: "2026-07-20T12:01:00.000Z",
           messageCount: 0,
+          compacting: false,
           activity: { kind: "idle" },
         }],
         truncated: false,
@@ -8225,6 +8243,7 @@ describe("App", () => {
           createdAt: "2026-07-17T12:00:00.000Z",
           updatedAt: "2026-07-18T12:02:00.000Z",
           messageCount: 2,
+          compacting: false,
           activity: { kind: "idle" },
         }, {
           id: CONVERSATION_ID,
@@ -8233,6 +8252,7 @@ describe("App", () => {
           createdAt: "2026-07-18T12:00:00.000Z",
           updatedAt: "2026-07-18T12:01:00.000Z",
           messageCount: 2,
+          compacting: false,
           activity: { kind: "idle" },
           rootConversationId: CONVERSATION_B,
         }],
@@ -8333,6 +8353,7 @@ describe("App", () => {
           createdAt: "2026-07-17T12:00:00.000Z",
           updatedAt: "2026-07-18T12:03:00.000Z",
           messageCount: 3,
+          compacting: false,
           activity: { kind: "idle" },
         }, {
           id: CONVERSATION_C,
@@ -8341,6 +8362,7 @@ describe("App", () => {
           createdAt: "2026-07-18T12:00:00.000Z",
           updatedAt: "2026-07-18T12:02:00.000Z",
           messageCount: 2,
+          compacting: false,
           activity: { kind: "idle" },
           rootConversationId: CONVERSATION_B,
         }, {
@@ -8350,6 +8372,7 @@ describe("App", () => {
           createdAt: "2026-07-18T12:01:00.000Z",
           updatedAt: "2026-07-18T12:01:00.000Z",
           messageCount: 2,
+          compacting: false,
           activity: { kind: "idle" },
           rootConversationId: CONVERSATION_B,
         }],
@@ -8545,6 +8568,7 @@ describe("App", () => {
           createdAt: "2026-07-19T08:00:00.000Z",
           updatedAt: "2026-07-19T08:00:00.000Z",
           messageCount: 0,
+          compacting: false,
           activity: { kind: "idle" },
         }, {
           id: CONVERSATION_B,
@@ -8553,6 +8577,7 @@ describe("App", () => {
           createdAt: "2026-07-19T08:00:00.000Z",
           updatedAt: "2026-07-19T09:00:00.000Z",
           messageCount: 0,
+          compacting: false,
           activity: { kind: "idle" },
         }],
         truncated: false,
@@ -8628,6 +8653,7 @@ describe("App", () => {
           createdAt: "2026-07-19T08:00:00.000Z",
           updatedAt: "2026-07-19T08:00:00.000Z",
           messageCount: 0,
+          compacting: false,
           activity: { kind: "idle" },
         }, {
           id: CONVERSATION_B,
@@ -8636,6 +8662,7 @@ describe("App", () => {
           createdAt: "2026-07-19T08:00:00.000Z",
           updatedAt: "2026-07-19T09:00:00.000Z",
           messageCount: 0,
+          compacting: false,
           activity: { kind: "idle" },
         }],
         truncated: false,
@@ -8765,6 +8792,7 @@ describe("App", () => {
           createdAt: "2026-07-19T08:00:00.000Z",
           updatedAt: "2026-07-19T08:00:00.000Z",
           messageCount: 0,
+          compacting: false,
           activity: { kind: "idle" },
         }, {
           id: CONVERSATION_B,
@@ -8773,6 +8801,7 @@ describe("App", () => {
           createdAt: "2026-07-19T08:00:00.000Z",
           updatedAt: "2026-07-19T09:00:00.000Z",
           messageCount: 0,
+          compacting: false,
           activity: { kind: "idle" },
         }],
         truncated: false,
@@ -9188,6 +9217,7 @@ describe("App", () => {
           createdAt: "2026-07-19T08:00:00.000Z",
           updatedAt: "2026-07-19T08:00:00.000Z",
           messageCount: 0,
+          compacting: false,
           activity: { kind: "idle" },
         }, {
           id: CONVERSATION_B,
@@ -9196,6 +9226,7 @@ describe("App", () => {
           createdAt: "2026-07-19T08:00:00.000Z",
           updatedAt: "2026-07-19T09:00:00.000Z",
           messageCount: 0,
+          compacting: false,
           activity: { kind: "running", runId: RUN_ID },
         }],
         truncated: false,
@@ -9243,6 +9274,7 @@ describe("App", () => {
           createdAt: "2026-07-19T08:00:00.000Z",
           updatedAt: "2026-07-19T08:00:00.000Z",
           messageCount: 0,
+          compacting: false,
           activity: { kind: "idle" },
         }, {
           id: CONVERSATION_B,
@@ -9251,6 +9283,7 @@ describe("App", () => {
           createdAt: "2026-07-19T08:00:00.000Z",
           updatedAt: "2026-07-19T09:00:00.000Z",
           messageCount: 0,
+          compacting: false,
           activity: { kind: "idle" },
         }],
         truncated: false,
@@ -9494,6 +9527,7 @@ describe("App", () => {
         createdAt: "2026-07-19T08:00:00.000Z",
         updatedAt: "2026-07-19T08:00:00.000Z",
         messageCount: 0,
+        compacting: false,
         activity: { kind: "idle" },
       }, {
         id: CONVERSATION_B,
@@ -9502,6 +9536,7 @@ describe("App", () => {
         createdAt: "2026-07-19T08:00:00.000Z",
         updatedAt: "2026-07-19T09:00:00.000Z",
         messageCount: 0,
+        compacting: false,
         attention: true,
         activity: { kind: "running", runId: RUN_ID },
       }],
@@ -9763,6 +9798,7 @@ describe("App", () => {
           createdAt: "2026-07-19T08:00:00.000Z",
           updatedAt: "2026-07-19T08:00:00.000Z",
           messageCount: 0,
+          compacting: false,
         }, {
           id: CONVERSATION_B,
           name: "B",
@@ -9770,6 +9806,7 @@ describe("App", () => {
           createdAt: "2026-07-19T08:00:00.000Z",
           updatedAt: "2026-07-19T09:00:00.000Z",
           messageCount: 0,
+          compacting: false,
         }],
         truncated: false,
       });

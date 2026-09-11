@@ -36,6 +36,7 @@ const baseConversation: ConversationSummary = {
     canManageSessions: true,
   },
   activity: { kind: "idle" },
+  compacting: false,
 };
 
 function conversation(
@@ -1024,6 +1025,130 @@ describe("ConversationSidebar", () => {
       .toBeDisabled();
     expect(screen.getByRole("button", { name: "重命名会话 接口设计" }))
       .toBeDisabled();
+  });
+
+  it("projects compaction independently from activity for indicators, counts, and action gates", () => {
+    const root = conversation("compacting-root", "压缩任务");
+    const running = conversation("running-member", "运行 Agent", {
+      rootConversationId: root.id,
+      createdBy: { kind: "conversation", conversationId: root.id },
+      activity: { kind: "running", runId: "run-member" },
+    });
+    const compacting = conversation("compacting-member", "压缩 Agent", {
+      rootConversationId: root.id,
+      createdBy: { kind: "conversation", conversationId: root.id },
+      compacting: true,
+    });
+    const idle = conversation("idle-member", "空闲 Agent", {
+      rootConversationId: root.id,
+      createdBy: { kind: "conversation", conversationId: root.id },
+    });
+    const standalone = conversation("compacting-standalone", "独立压缩", {
+      compacting: true,
+    });
+
+    render(
+      <ConversationSidebar
+        conversations={[root, idle, standalone, compacting, running]}
+        currentConversationId={compacting.id}
+        focusedConversationId={root.id}
+        collapsed={false}
+        truncated={false}
+        navigationEnabled
+        actionsEnabled
+        onToggleCollapsed={vi.fn()}
+        onSelect={vi.fn()}
+        onCreate={vi.fn()}
+        onRename={vi.fn()}
+        onDelete={vi.fn(() => true)}
+      />,
+    );
+
+    expect(screen.getByRole("status", {
+      name: "正在压缩上下文：2 个会话",
+    })).toHaveTextContent("2 压缩");
+    expect(screen.getByText(/3 个 Agent · 1 运行 · 1 压缩/))
+      .toBeInTheDocument();
+
+    const compactingRow = screen.getByText("压缩 Agent")
+      .closest<HTMLElement>("[data-conversation-id]");
+    expect(compactingRow).not.toBeNull();
+    expect(within(compactingRow!).getByRole("status", {
+      name: "正在压缩上下文",
+    })).toHaveTextContent("压缩");
+    expect(within(compactingRow!).getByRole("button", {
+      name: "当前会话 压缩 Agent",
+    })).toBeEnabled();
+    expect(within(compactingRow!).getByRole("button", {
+      name: "重命名会话 压缩 Agent",
+    })).toBeDisabled();
+    expect(within(compactingRow!).getByRole("button", {
+      name: "删除会话 压缩 Agent",
+    })).toBeDisabled();
+
+    const rootRow = screen.getByText("压缩任务")
+      .closest<HTMLElement>("[data-conversation-id]");
+    expect(rootRow).not.toBeNull();
+    expect(within(rootRow!).getByRole("button", {
+      name: "打开会话 压缩任务",
+    })).toBeEnabled();
+    expect(within(rootRow!).getByRole("button", {
+      name: "重命名会话 压缩任务",
+    })).toBeEnabled();
+    expect(within(rootRow!).getByRole("button", {
+      name: "删除会话 压缩任务",
+    })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "新建会话" })).toBeEnabled();
+
+  });
+
+  it("prioritizes compacting standalone and group entries ahead of newer idle entries", () => {
+    const compactingRoot = conversation("compacting-root", "较早压缩组", {
+      createdAt: "2026-07-19T08:00:00.000Z",
+    });
+    const compactingChild = conversation("compacting-child", "压缩 Agent", {
+      rootConversationId: compactingRoot.id,
+      createdBy: { kind: "conversation", conversationId: compactingRoot.id },
+      compacting: true,
+    });
+    const compactingStandalone = conversation("compacting-standalone", "较早独立压缩", {
+      createdAt: "2026-07-19T09:00:00.000Z",
+      compacting: true,
+    });
+    const newerIdle = conversation("newer-idle", "较新空闲", {
+      createdAt: "2026-07-19T12:00:00.000Z",
+    });
+
+    render(
+      <ConversationSidebar
+        conversations={[
+          newerIdle,
+          compactingRoot,
+          compactingChild,
+          compactingStandalone,
+        ]}
+        collapsed={false}
+        truncated={false}
+        navigationEnabled
+        actionsEnabled
+        onToggleCollapsed={vi.fn()}
+        onSelect={vi.fn()}
+        onCreate={vi.fn()}
+        onRename={vi.fn()}
+        onDelete={vi.fn(() => true)}
+      />,
+    );
+
+    expect(Array.from(
+      document.querySelectorAll<HTMLElement>(
+        ".hierarchy-root, .hierarchy-standalone",
+      ),
+      ({ dataset }) => dataset.conversationId,
+    )).toEqual([
+      compactingStandalone.id,
+      compactingRoot.id,
+      newerIdle.id,
+    ]);
   });
 
   it("groups two roots, orders aggregate state, and navigates root and child", () => {

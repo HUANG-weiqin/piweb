@@ -41,7 +41,7 @@ const transitionDiagnostics = {
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(55);
+    expect(PROTOCOL_VERSION).toBe(56);
   });
 
   it("accepts supported commands", () => {
@@ -1057,6 +1057,7 @@ describe("parseClientCommand", () => {
             canManageSessions: true,
           },
           activity: { kind: "running", runId },
+          compacting: true,
           attention: false,
           unread: true,
           createdBy: {
@@ -1073,6 +1074,7 @@ describe("parseClientCommand", () => {
     }
     expect(projectSnapshot.conversations[0]).toMatchObject({
       rootConversationId: "legacy.root-1",
+      compacting: true,
       createdBy: {
         kind: "conversation",
         conversationId: targetConversationId,
@@ -1089,8 +1091,10 @@ describe("parseClientCommand", () => {
         createdAt: "2026-07-18T12:00:00.000Z",
         updatedAt: "2026-07-18T12:01:00.000Z",
         messageCount: 1,
+        compacting: false,
       }],
       truncated: false,
+      coverage: "complete",
     })).toThrow();
     expect(parseServerEvent({
       type: "project_snapshot",
@@ -1103,6 +1107,7 @@ describe("parseClientCommand", () => {
         updatedAt: "2026-07-18T12:01:00.000Z",
         messageCount: 1,
         activity: { kind: "waiting", runId, targetCount: 2 },
+        compacting: false,
       }],
       truncated: false,
       coverage: "unknown",
@@ -1122,6 +1127,7 @@ describe("parseClientCommand", () => {
         createdAt: "2026-07-18T12:00:00.000Z",
         updatedAt: "2026-07-18T12:01:00.000Z",
         messageCount: 1,
+        compacting: false,
         activity: {
           kind: "waiting",
           runId,
@@ -1597,8 +1603,10 @@ describe("parseClientCommand", () => {
         createdAt: "2026-07-18T12:00:00.000Z",
         updatedAt: "2026-07-18T12:00:00.000Z",
         messageCount: 0,
+        compacting: false,
       })),
       truncated: true,
+      coverage: "complete",
     })).toThrow();
     expect(() => parseServerEvent({
       type: "project_activity_snapshot",
@@ -1621,8 +1629,10 @@ describe("parseClientCommand", () => {
         createdAt: "2026-07-18T12:00:00.000Z",
         updatedAt: "2026-07-18T12:00:00.000Z",
         messageCount: 0,
+        compacting: false,
       }],
       truncated: true,
+      coverage: "complete",
     })).toThrow();
   });
 });

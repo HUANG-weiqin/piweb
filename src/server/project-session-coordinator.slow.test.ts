@@ -716,6 +716,74 @@ describe("ProjectSessionCoordinator", () => {
     });
   });
 
+  it("rejects rename while context compaction is active", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const setSessionName = vi.spyOn(actor.session, "setSessionName");
+    const actorInternals = actor as unknown as {
+      updateCompacting(compacting: boolean): void;
+    };
+    actorInternals.updateCompacting(true);
+
+    await expect(fixture.coordinator.renameConversation(
+      fixture.handle,
+      actor.conversationId,
+      "must not rename",
+    )).rejects.toThrow(/compacting/i);
+    expect(setSessionName).not.toHaveBeenCalled();
+  });
+
+  it("resyncs compacting summary when a deletion reservation rolls back", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const actorInternals = actor as unknown as {
+      updateCompacting(compacting: boolean): void;
+    };
+    const context = (fixture.handle as unknown as { context: object }).context;
+    const coordinatorInternals = fixture.coordinator as unknown as {
+      hydrateConversationProfiles(context: object): Promise<void>;
+    };
+    const originalHydrate = coordinatorInternals.hydrateConversationProfiles
+      .bind(coordinatorInternals);
+    const profilesStarted = deferred();
+    const releaseProfiles = deferred();
+    vi.spyOn(coordinatorInternals, "hydrateConversationProfiles")
+      .mockImplementationOnce(async (input) => {
+        profilesStarted.resolve();
+        await releaseProfiles.promise;
+        await originalHydrate(input);
+      });
+    let summaryChanges = 0;
+    const unsubscribe = fixture.coordinator.subscribe(fixture.handle, (event) => {
+      if (event.type === "project_summary_changed") summaryChanges++;
+    });
+    const deleting = fixture.coordinator.deleteConversation(
+      fixture.handle,
+      actor.conversationId,
+    );
+    try {
+      await profilesStarted.promise;
+      actorInternals.updateCompacting(true);
+      releaseProfiles.resolve();
+
+      await expect(deleting).rejects.toThrow(/compacting/i);
+      await vi.waitFor(() => expect(summaryChanges).toBe(1));
+      expect(fixture.coordinator.projectSessionsFromCurrentIndex(
+        fixture.handle,
+      ).find(({ id }) => id === actor.conversationId)?.compacting).toBe(true);
+    } finally {
+      releaseProfiles.resolve();
+      await deleting.catch(() => undefined);
+      unsubscribe();
+    }
+  });
+
   it("starts a stable hidden continuation for a reloaded browser target", async () => {
     const fixture = await createFixture();
     const actor = await fixture.coordinator.createUserConversation(

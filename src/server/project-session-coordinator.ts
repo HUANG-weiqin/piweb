@@ -117,7 +117,9 @@ const INBOX_LIFECYCLE_GUIDANCE = [
 
 export type ProjectSessionCoordinatorEvent =
   | ConversationActorEvent
-  | { type: "project_changed"; catalogInvalidated?: true };
+  | { type: "project_changed"; catalogInvalidated?: true }
+  /** A runtime summary changed without changing project membership or focus. */
+  | { type: "project_summary_changed" };
 
 export type ProjectSessionCoordinatorListener = (
   event: ProjectSessionCoordinatorEvent,
@@ -932,12 +934,14 @@ export class ProjectSessionCoordinator {
     const context = this.requireContext(handle);
     return context.project.listConversations().map((summary) => {
       const actor = context.actors.get(summary.id);
+      const actorState = actor?.getState();
       const profile = actor?.profile ?? context.profiles.get(summary.id);
       if (profile === undefined) {
         return {
           ...summary,
           rootConversationId: summary.id,
-          activity: actor?.getActivity() ?? { kind: "idle" },
+          activity: actorState?.activity ?? { kind: "idle" },
+          compacting: actorState?.compacting ?? false,
           attention: context.attention.has(summary.id),
         };
       }
@@ -951,11 +955,13 @@ export class ProjectSessionCoordinator {
   ): ConversationSummary[] {
     return summaries.map((summary) => {
       const actor = context.actors.get(summary.id);
+      const actorState = actor?.getState();
       const profile = actor?.profile ?? context.profiles.get(summary.id);
       if (profile === undefined) {
         throw new Error(`Conversation ${summary.id} profile metadata is missing`);
       }
-      const activity = actor?.getActivity() ?? { kind: "idle" };
+      const activity = actorState?.activity ?? { kind: "idle" };
+      const compacting = actorState?.compacting ?? false;
       const rootConversationId = this.resolveOrchestration(
         context,
         summary.id,
@@ -980,6 +986,7 @@ export class ProjectSessionCoordinator {
         },
         createdBy: structuredClone(profile.createdBy),
         activity,
+        compacting,
         attention: context.attention.has(summary.id),
       };
     });
@@ -1690,7 +1697,6 @@ export class ProjectSessionCoordinator {
     try {
       await actor.compactContext();
     } finally {
-      this.emit(context, { type: "project_changed" });
       await this.runLifecycle(context, () =>
         this.retryBlockedDeletions(context)
       );
@@ -1714,6 +1720,9 @@ export class ProjectSessionCoordinator {
     const context = this.requireContext(handle);
     await this.runLifecycle(context, async () => {
       const actor = await this.getOrOpenActor(context, conversationId);
+      if (actor.isCompacting()) {
+        throw new Error("Cannot rename while context is compacting");
+      }
       actor.session.setSessionName(normalizedTitle(title, "新会话"));
       await context.project.refreshConversations();
     });
@@ -2653,6 +2662,7 @@ export class ProjectSessionCoordinator {
     }
     context.actors.set(conversationId, actor);
     context.profiles.set(conversationId, cloneProfile(profile));
+    let projectedCompacting = actor.isCompacting();
     const unsubscribe = actor.subscribe((event) => {
       if (
         event.type === "session_event"
@@ -2669,6 +2679,20 @@ export class ProjectSessionCoordinator {
             await this.reconcileInbox(context, conversationId);
           }),
         );
+      }
+      if (
+        event.type === "compaction"
+        && event.compacting !== projectedCompacting
+      ) {
+        projectedCompacting = event.compacting;
+        if (
+          !context.closing
+          && !context.deleting.has(conversationId)
+          && context.actors.get(conversationId) === actor
+          && !actor.getState().disposed
+        ) {
+          this.emit(context, { type: "project_summary_changed" });
+        }
       }
       if (
         event.type === "compaction"
@@ -6174,7 +6198,7 @@ export class ProjectSessionCoordinator {
           !startedDeletionIds.has(reservedId)
           && !durableFenceIds.has(reservedId)
         ) {
-          context.deleting.delete(reservedId);
+          this.releaseDeletionReservation(context, reservedId);
         }
       }
       throw error;
@@ -6291,8 +6315,23 @@ export class ProjectSessionCoordinator {
     } finally {
       deletionLease?.release();
       if (!durableDeletionIntent) {
-        context.deleting.delete(conversationId);
+        this.releaseDeletionReservation(context, conversationId);
       }
+    }
+  }
+
+  private releaseDeletionReservation(
+    context: ProjectContext,
+    conversationId: string,
+  ): void {
+    const released = context.deleting.delete(conversationId);
+    if (
+      released
+      && !context.closing
+      && !this.disposed
+      && context.actors.get(conversationId)?.getState().disposed !== true
+    ) {
+      this.emit(context, { type: "project_summary_changed" });
     }
   }
 

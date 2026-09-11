@@ -1422,6 +1422,16 @@ case "set_thinking":
     event: ProjectSessionCoordinatorEvent,
   ): void {
     if (!this.isCurrentCoordinatedView(view)) return;
+    if (event.type === "project_summary_changed") {
+      const refresh = this.projectSnapshotRefresh;
+      if (refresh?.view === view) refresh.trailing = true;
+      this.emitProjectSnapshot(
+        view,
+        view.coordinator.projectSessionsFromCurrentIndex(view.handle),
+        "unknown",
+      );
+      return;
+    }
     if (event.type === "project_changed") {
       if (event.catalogInvalidated) {
         this.emitProjectSnapshot(

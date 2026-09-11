@@ -84,6 +84,9 @@ function compareConversationPriority(
     Number((right.activity?.kind ?? "idle") !== "idle")
     - Number((left.activity?.kind ?? "idle") !== "idle");
   if (activeDifference !== 0) return activeDifference;
+  const compactingDifference =
+    Number(right.compacting) - Number(left.compacting);
+  if (compactingDifference !== 0) return compactingDifference;
   const attentionDifference =
     Number(right.attention === true)
     - Number(left.attention === true);
@@ -100,6 +103,7 @@ interface ConversationGroup {
   conversations: ConversationSummary[];
   current: boolean;
   active: boolean;
+  compacting: boolean;
   attention: boolean;
   unread: boolean;
   updatedAt: number;
@@ -159,6 +163,7 @@ export function projectConversationIndex(
         active: ordered.some(
           ({ activity }) => (activity?.kind ?? "idle") !== "idle",
         ),
+        compacting: ordered.some(({ compacting }) => compacting),
         attention: ordered.some(({ attention }) => attention === true),
         unread: ordered.some(({ unread }) => unread === true),
         updatedAt: Math.max(...ordered.map(({ updatedAt }) =>
@@ -171,6 +176,9 @@ export function projectConversationIndex(
     if (currentDifference !== 0) return currentDifference;
     const activeDifference = Number(right.active) - Number(left.active);
     if (activeDifference !== 0) return activeDifference;
+    const compactingDifference =
+      Number(right.compacting) - Number(left.compacting);
+    if (compactingDifference !== 0) return compactingDifference;
     const attentionDifference =
       Number(right.attention) - Number(left.attention);
     if (attentionDifference !== 0) return attentionDifference;

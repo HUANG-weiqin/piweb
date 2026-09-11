@@ -19,6 +19,7 @@ function conversation(index: number): ConversationSummary {
     createdAt: "2026-07-18T12:00:00.000Z",
     updatedAt: "2026-07-18T12:01:00.000Z",
     messageCount: index,
+    compacting: false,
   };
 }
 
@@ -200,7 +201,7 @@ describe("projectConversationIndex", () => {
     expect(snapshot.truncated).toBe(true);
   });
 
-  it("prioritizes the current, active, attention, and unread conversations", () => {
+  it("prioritizes the current, active, compacting, attention, and unread conversations", () => {
     const source = Array.from(
       { length: MAX_PROJECT_CONVERSATIONS + 20 },
       (_, index) => ({
@@ -214,25 +215,74 @@ describe("projectConversationIndex", () => {
     );
     const current = source.at(-1)!;
     const active = source.at(-2)!;
-    const attention = source.at(-3)!;
-    const unread = source.at(-4)!;
+    const compacting = source.at(-3)!;
+    const attention = source.at(-4)!;
+    const unread = source.at(-5)!;
     active.activity = { kind: "running", runId: active.id };
+    compacting.compacting = true;
     attention.attention = true;
     unread.unread = true;
 
     const snapshot = projectConversationIndex(source, current.id);
     const retainedIds = new Set(snapshot.conversations.map(({ id }) => id));
 
-    expect(snapshot.conversations.slice(0, 4).map(({ id }) => id)).toEqual([
+    expect(snapshot.conversations.slice(0, 5).map(({ id }) => id)).toEqual([
       current.id,
       active.id,
+      compacting.id,
       attention.id,
       unread.id,
     ]);
     expect(retainedIds.has(current.id)).toBe(true);
     expect(retainedIds.has(active.id)).toBe(true);
+    expect(retainedIds.has(compacting.id)).toBe(true);
     expect(retainedIds.has(attention.id)).toBe(true);
     expect(retainedIds.has(unread.id)).toBe(true);
+    expect(snapshot.truncated).toBe(true);
+  });
+
+  it("retains an older group with a compacting member in a capped index", () => {
+    const root = {
+      ...conversation(10_000),
+      name: "Compacting root",
+      preview: "Compacting root",
+      rootConversationId: conversation(10_000).id,
+      updatedAt: "2026-07-18T08:00:00.000Z",
+    };
+    const compactingChild = {
+      ...conversation(10_001),
+      name: "Compacting child",
+      preview: "Compacting child",
+      rootConversationId: root.id,
+      updatedAt: "2026-07-18T08:01:00.000Z",
+      compacting: true,
+    };
+    const newerIdleSingletons = Array.from(
+      { length: MAX_PROJECT_CONVERSATIONS - 1 },
+      (_, index) => ({
+        ...conversation(index),
+        name: `Newer idle ${index}`,
+        preview: `Newer idle ${index}`,
+        updatedAt: new Date(
+          Date.UTC(2026, 6, 18, 12, 0, index),
+        ).toISOString(),
+      }),
+    );
+
+    const snapshot = projectConversationIndex([
+      ...newerIdleSingletons,
+      root,
+      compactingChild,
+    ]);
+    const retainedIds = new Set(snapshot.conversations.map(({ id }) => id));
+
+    expect(snapshot.conversations).toHaveLength(MAX_PROJECT_CONVERSATIONS);
+    expect(retainedIds.has(root.id)).toBe(true);
+    expect(retainedIds.has(compactingChild.id)).toBe(true);
+    expect(snapshot.conversations).toContainEqual(expect.objectContaining({
+      id: compactingChild.id,
+      compacting: true,
+    }));
     expect(snapshot.truncated).toBe(true);
   });
 });

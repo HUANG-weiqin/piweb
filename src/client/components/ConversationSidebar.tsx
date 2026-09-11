@@ -110,6 +110,12 @@ type GroupedEntry =
   | { kind: "group"; group: ConversationGroup }
   | { kind: "conversation"; conversation: ConversationSummary };
 
+function entryIsCompacting(entry: GroupedEntry): boolean {
+  return entry.kind === "group"
+    ? entry.group.conversations.some(({ compacting }) => compacting)
+    : entry.conversation.compacting;
+}
+
 function groupProjection(
   conversations: ConversationSummary[],
   busyConversationId?: string,
@@ -188,6 +194,9 @@ function groupProjection(
       })),
   ];
   entries.sort((left, right) => {
+    const compactingDifference = Number(entryIsCompacting(right))
+      - Number(entryIsCompacting(left));
+    if (compactingDifference !== 0) return compactingDifference;
     const leftRoot = left.kind === "group" ? left.group.root : left.conversation;
     const rightRoot = right.kind === "group" ? right.group.root : right.conversation;
     const createdDifference = Date.parse(rightRoot.createdAt)
@@ -270,6 +279,7 @@ const ConversationRow = memo(function ConversationRow({
   navigationEnabled,
   actionsEnabled,
   deletionBlocked,
+  cascadeDeleteBlocked = false,
   busy,
   onSelect,
   onRequestRename,
@@ -282,6 +292,7 @@ const ConversationRow = memo(function ConversationRow({
   navigationEnabled: boolean;
   actionsEnabled: boolean;
   deletionBlocked: boolean;
+  cascadeDeleteBlocked?: boolean;
   busy: boolean;
   onSelect(conversationId: string): void;
   onRequestRename(conversation: ConversationSummary): void;
@@ -289,6 +300,8 @@ const ConversationRow = memo(function ConversationRow({
 }) {
   const title = conversationDisplayTitle(conversation);
   const active = busy || (conversation.activity?.kind ?? "idle") !== "idle";
+  const compacting = conversation.compacting;
+  const actionBlocked = active || compacting;
   const classes = [
     "conversation-sidebar-item",
     `hierarchy-${hierarchy}`,
@@ -332,6 +345,16 @@ const ConversationRow = memo(function ConversationRow({
                 </span>
               )}
             <ActivityIndicator activity={conversation.activity} />
+            {compacting && (
+              <span
+                className="conversation-compacting-indicator"
+                role="status"
+                aria-label="正在压缩上下文"
+                title="正在压缩上下文"
+              >
+                压缩
+              </span>
+            )}
             {conversation.attention && (
               <span
                 className="conversation-attention-indicator"
@@ -385,8 +408,12 @@ const ConversationRow = memo(function ConversationRow({
           type="button"
           className="conversation-sidebar-rename ghost"
           aria-label={`重命名会话 ${title}`}
-          disabled={!actionsEnabled || deletionBlocked || active}
-          title={active ? "活跃会话结算后可以重命名" : "重命名会话"}
+          disabled={!actionsEnabled || deletionBlocked || actionBlocked}
+          title={active
+            ? "活跃会话结算后可以重命名"
+            : compacting
+            ? "上下文压缩完成后可以重命名"
+            : "重命名会话"}
           onClick={() => onRequestRename(conversation)}
         >
           改名
@@ -395,8 +422,17 @@ const ConversationRow = memo(function ConversationRow({
           type="button"
           className="conversation-sidebar-delete ghost danger"
           aria-label={`删除会话 ${title}`}
-          disabled={!actionsEnabled || deletionBlocked || active}
-          title={active ? "活跃会话需先终止并等待结算" : "删除会话"}
+          disabled={
+            !actionsEnabled
+            || deletionBlocked
+            || cascadeDeleteBlocked
+            || actionBlocked
+          }
+          title={active
+            ? "活跃会话需先终止并等待结算"
+            : compacting || cascadeDeleteBlocked
+            ? "上下文压缩完成后可以删除"
+            : "删除会话"}
           onClick={() => onRequestDelete(conversation.id)}
         >
           删除
@@ -443,6 +479,7 @@ function ConversationGroupCard({
   const ordinaryIdle = members.filter((conversation) =>
     conversation.id !== currentConversationId
     && !isActive(conversation, busyConversationId)
+    && !conversation.compacting
     && !conversation.attention
     && !conversation.unread
   );
@@ -453,6 +490,7 @@ function ConversationGroupCard({
           ...members.filter((conversation) =>
             conversation.id === currentConversationId
             || isActive(conversation, busyConversationId)
+            || conversation.compacting
             || conversation.attention
             || conversation.unread
           ),
@@ -470,11 +508,13 @@ function ConversationGroupCard({
   const waitingCount = conversations.filter(
     ({ activity }) => activity?.kind === "waiting",
   ).length;
+  const compactingCount = conversations.filter(({ compacting }) => compacting).length;
   const attentionCount = conversations.filter(({ attention }) => attention).length;
   const unreadCount = conversations.filter(({ unread }) => unread).length;
   const summaryParts = [`${members.length} 个 Agent`];
   if (runningCount > 0) summaryParts.push(`${runningCount} 运行`);
   if (waitingCount > 0) summaryParts.push(`${waitingCount} 等待`);
+  if (compactingCount > 0) summaryParts.push(`${compactingCount} 压缩`);
   if (attentionCount > 0) summaryParts.push(`${attentionCount} 需处理`);
   if (unreadCount > 0) summaryParts.push(`${unreadCount} 未读`);
   summaryParts.push(`最近 ${formatLastActive(
@@ -497,6 +537,7 @@ function ConversationGroupCard({
           navigationEnabled={navigationEnabled}
           actionsEnabled={actionsEnabled}
           deletionBlocked={deletionBlocked}
+          cascadeDeleteBlocked={conversations.some(({ compacting }) => compacting)}
           busy={root.id === busyConversationId}
           onSelect={onSelect}
           onRequestRename={onRequestRename}
@@ -597,16 +638,25 @@ function ConversationSidebarView({
   );
   const deleteCandidateActive = deleteCandidate !== undefined
     && isActive(deleteCandidate, busyConversationId);
+  const deleteCandidateCompacting = deleteCandidate?.compacting === true;
+  const deleteCandidateCascadeCompacting = deleteCandidate !== undefined
+    && grouped.entries.some((entry) =>
+      entry.kind === "group"
+      && entry.group.root.id === deleteCandidate.id
+      && entry.group.conversations.some(({ compacting }) => compacting)
+    );
   const renameCandidate = conversations.find(
     ({ id }) => id === renameConversationId,
   );
   const renameCandidateActive = renameCandidate !== undefined
     && isActive(renameCandidate, busyConversationId);
+  const renameCandidateCompacting = renameCandidate?.compacting === true;
   const renameName = renameDraft.trim();
-  const renameBlocked = !actionsEnabled || renameCandidateActive;
+  const renameBlocked = !actionsEnabled || renameCandidateActive || renameCandidateCompacting;
   const renameUnchanged = renameCandidate
     ? renameName === conversationDisplayTitle(renameCandidate)
     : false;
+  const compactingCount = conversations.filter(({ compacting }) => compacting).length;
   const sidebarStyle = {
     "--conversation-sidebar-width": `${sidebarWidth}px`,
   } as CSSProperties;
@@ -788,6 +838,15 @@ function ConversationSidebarView({
       </header>}
       <header className="conversation-sidebar-header">
         {!sidebarCollapsed && <h2>SESSIONS</h2>}
+        {!sidebarCollapsed && compactingCount > 0 && (
+          <span
+            className="conversation-sidebar-compacting-count"
+            role="status"
+            aria-label={`正在压缩上下文：${compactingCount} 个会话`}
+          >
+            {compactingCount} 压缩
+          </span>
+        )}
         <button
           type="button"
           className="conversation-sidebar-toggle"
@@ -909,7 +968,13 @@ function ConversationSidebarView({
           <button
             type="button"
             className="danger-button"
-            disabled={!actionsEnabled || deletionBlocked || deleteCandidateActive}
+            disabled={
+              !actionsEnabled
+              || deletionBlocked
+              || deleteCandidateActive
+              || deleteCandidateCompacting
+              || deleteCandidateCascadeCompacting
+            }
             onClick={() => {
               if (onDelete(deleteCandidate.id)) {
                 setConfirmDeleteConversationId("");

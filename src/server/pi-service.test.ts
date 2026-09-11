@@ -4541,6 +4541,7 @@ describe("PiConnection coordinated project view", () => {
             model: { provider: "test", id: "model" },
           },
           activity: { kind: "idle" },
+          compacting: false,
         }),
       );
       const current: ConversationSummary = {
@@ -4671,6 +4672,7 @@ describe("PiConnection coordinated project view", () => {
               canManageSessions: false,
             },
             activity: { kind: "idle" },
+            compacting: false,
           });
         }
       }
@@ -5455,6 +5457,7 @@ describe("PiConnection coordinated project view", () => {
     const finish = deferred();
     const compactionStarted = deferred();
     const finishCompaction = deferred();
+    const releaseStaleRefresh = deferred();
     let run: Promise<void> | undefined;
     let compacting: Promise<void> | undefined;
     try {
@@ -5575,6 +5578,27 @@ describe("PiConnection coordinated project view", () => {
         await finishCompaction.promise;
         return {};
       };
+      const staleRefreshStarted = deferred();
+      const originalListSessions = harness.coordinator.listSessions.bind(
+        harness.coordinator,
+      );
+      let holdStaleRefresh = true;
+      const listSessions = vi.spyOn(harness.coordinator, "listSessions")
+        .mockImplementation(async (handle, signal) => {
+          const summaries = await originalListSessions(handle, signal);
+          if (holdStaleRefresh) {
+            holdStaleRefresh = false;
+            staleRefreshStarted.resolve();
+            await releaseStaleRefresh.promise;
+          }
+          return summaries;
+        });
+      (harness.connection as unknown as {
+        publishProjectSnapshotCoordinated(): void;
+      }).publishProjectSnapshotCoordinated();
+      await staleRefreshStarted.promise;
+
+      const compactionRefreshStart = harness.events.length;
       compacting = harness.connection.handle({
         type: "compact_context",
         commandId: randomUUID(),
@@ -5583,29 +5607,85 @@ describe("PiConnection coordinated project view", () => {
         focusId: attached.focusId,
       });
       await compactionStarted.promise;
-      const compactionRefreshStart = harness.events.length;
-
-      await harness.connection.handle(exactRefresh);
       await vi.waitFor(() => {
-        expect(harness.events.slice(compactionRefreshStart).some(
-          (event) => event.type === "project_snapshot",
-        )).toBe(true);
+        expect(harness.events.slice(compactionRefreshStart)).toContainEqual(
+          expect.objectContaining({
+            type: "project_snapshot",
+            conversations: expect.arrayContaining([
+              expect.objectContaining({
+                id: attached.conversationId,
+                compacting: true,
+              }),
+            ]),
+          }),
+        );
       });
+      const compactionStartEvents = harness.events.slice(
+        compactionRefreshStart,
+      );
+      const firstCompactingProjectSnapshot = compactionStartEvents.findIndex(
+        (event) => event.type === "project_snapshot"
+          && event.conversations.some((conversation) =>
+            conversation.id === attached.conversationId && conversation.compacting
+          ),
+      );
+      expect(firstCompactingProjectSnapshot).toBeGreaterThanOrEqual(0);
+      expect(compactionStartEvents.slice(0, firstCompactingProjectSnapshot + 1))
+        .not.toContainEqual(expect.objectContaining({
+          type: "conversation_snapshot",
+        }));
+      expect(compactionStartEvents.filter(
+        (event) => event.type === "state",
+      )).toHaveLength(1);
       expect(harness.events.slice(compactionRefreshStart)).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
             type: "state",
             state: expect.objectContaining({ compacting: true }),
           }),
-          expect.objectContaining({ type: "project_snapshot" }),
         ]),
       );
-      expect(harness.events.slice(compactionRefreshStart).some(
-        (event) => event.type === "conversation_snapshot",
-      )).toBe(false);
+      releaseStaleRefresh.resolve();
+      await vi.waitFor(() => expect(listSessions).toHaveBeenCalledTimes(2));
+      const projectSnapshotsDuringCompaction = harness.events
+        .slice(compactionRefreshStart)
+        .filter((event) => event.type === "project_snapshot");
+      const compactingSnapshotIndex = projectSnapshotsDuringCompaction.findIndex(
+        (event) => event.conversations.some((conversation) =>
+          conversation.id === attached.conversationId && conversation.compacting
+        ),
+      );
+      expect(compactingSnapshotIndex).toBeGreaterThanOrEqual(0);
+      expect(projectSnapshotsDuringCompaction.slice(compactingSnapshotIndex + 1))
+        .not.toContainEqual(expect.objectContaining({
+          conversations: expect.arrayContaining([
+            expect.objectContaining({
+              id: attached.conversationId,
+              compacting: false,
+            }),
+          ]),
+        }));
+
+      finishCompaction.resolve();
+      await compacting;
+      compacting = undefined;
+      await vi.waitFor(() => {
+        expect(harness.events.slice(compactionRefreshStart)).toContainEqual(
+          expect.objectContaining({
+            type: "project_snapshot",
+            conversations: expect.arrayContaining([
+              expect.objectContaining({
+                id: attached.conversationId,
+                compacting: false,
+              }),
+            ]),
+          }),
+        );
+      });
     } finally {
       finish.resolve();
       finishCompaction.resolve();
+      releaseStaleRefresh.resolve();
       await run?.catch(() => undefined);
       await compacting?.catch(() => undefined);
       await harness.cleanup();

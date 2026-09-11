@@ -838,6 +838,7 @@ function toConversationSummary(
     createdAt: new Date(createdAt).toISOString(),
     updatedAt: new Date(updatedAt).toISOString(),
     messageCount: information.messageCount,
+    compacting: false,
   };
 }
 
@@ -978,7 +979,7 @@ export class ProjectStore {
       .flatMap((observation) =>
         observation.summary === undefined
           ? []
-          : [{ ...observation.summary }]
+          : [{ ...observation.summary, compacting: false }]
       )
       .sort((first, second) => {
         const byModified = Date.parse(second.updatedAt) - Date.parse(first.updatedAt);

@@ -552,6 +552,7 @@ function conversationSummaries(
     createdAt: "2026-08-30T00:00:00.000Z",
     updatedAt: "2026-08-30T00:00:00.000Z",
     messageCount: 0,
+    compacting: false,
   }];
 }
 

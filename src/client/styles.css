@@ -2580,6 +2580,18 @@ pre {
   white-space: nowrap;
 }
 
+.conversation-sidebar-compacting-count {
+  flex: 0 0 auto;
+  padding: 3px 5px;
+  border: 1px solid var(--rebel-red);
+  color: var(--rebel-red);
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  line-height: 1;
+  white-space: nowrap;
+}
+
 .conversation-sidebar-toggle {
   width: 44px;
   min-height: 44px;
@@ -2994,6 +3006,24 @@ pre {
   box-shadow: 2px 2px 0 var(--rebel-black);
   clip-path: none;
   transform: none;
+}
+
+.conversation-compacting-indicator {
+  display: inline-flex;
+  align-items: center;
+  min-height: 16px;
+  padding: 0 4px;
+  border: 1px solid var(--rebel-paper-muted);
+  color: var(--rebel-paper-muted);
+  font-size: 8px;
+  font-weight: 900;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.conversation-sidebar-item.selected .conversation-compacting-indicator {
+  border-color: var(--rebel-black);
+  color: var(--rebel-black);
 }
 
 .conversation-activity-spinner {
