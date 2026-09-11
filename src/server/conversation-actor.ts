@@ -239,6 +239,7 @@ export interface ConversationActorOpenOptions {
     ProjectStore,
     | "cwd"
     | "hasPersistedConversationNameIntent"
+    | "projectConversationSession"
     | "openConversation"
     | "refreshConversations"
     | "truncateConversation"
@@ -891,6 +892,7 @@ export class ConversationActor {
   private disposing = false;
   private disposed = false;
   private fatalError?: Error;
+  private sessionPersistenceQuarantined = false;
   private manualCompaction?: Promise<void>;
   private disposePromise?: Promise<ConversationDeletionLease | undefined>;
 
@@ -1623,6 +1625,24 @@ export class ConversationActor {
           targetCount: state.attempt.targets.length,
         };
     }
+  }
+
+  /**
+   * Stops this actor before another SDK append can use an in-memory entry whose
+   * persistence failed. Recovery must open a fresh manager from validated disk.
+   */
+  quarantineSessionPersistence(error: unknown): void {
+    if (this.activeRun || this.compacting) {
+      throw new Error("Cannot quarantine a busy conversation actor");
+    }
+    if (this.fatalError !== undefined) return;
+    this.sessionPersistenceQuarantined = true;
+    this.fatalError = error instanceof Error ? error : new Error(String(error));
+    this.emitActivity();
+  }
+
+  isSessionPersistenceQuarantined(): boolean {
+    return this.sessionPersistenceQuarantined;
   }
 
   getState(): ConversationActorState {
@@ -3217,10 +3237,10 @@ export class ConversationActor {
         setterFailure === undefined ? undefined : { cause: setterFailure },
       );
     }
-    // Catalog projection is best-effort and never substitutes for the
-    // target-file proof above. Normal project changes and run settlement
-    // will retry it if another session file is concurrently being created.
-    void this.project.refreshConversations().catch(() => undefined);
+    // The target-file proof above is authoritative. Update only this actor's
+    // in-memory project projection; a later background catalog scan may
+    // rebuild whole-directory presentation without delaying the run.
+    this.project.projectConversationSession(this.sessionManager);
   }
 
   private async compactAtThreshold(ticket: RunTicket): Promise<void> {

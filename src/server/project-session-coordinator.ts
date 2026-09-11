@@ -125,6 +125,10 @@ export type ProjectSessionCoordinatorListener = (
   event: ProjectSessionCoordinatorEvent,
 ) => void;
 
+export type ConversationRenameResult =
+  | { outcome: "saved" }
+  | { outcome: "persistence_unknown"; error: unknown };
+
 export interface ProjectActivityCatalogSnapshot {
   projects: readonly ProjectActivitySummary[];
   truncated: boolean;
@@ -234,6 +238,8 @@ interface ProjectContext {
   readonly profiles: Map<string, ConversationMeta>;
   readonly attention: Set<string>;
   readonly deleting: Set<string>;
+  /** A failed memory-first persistence write requires an explicit open recovery. */
+  readonly quarantinedOpenFences: Set<string>;
   /** In-memory source for a tombstone write whose stable census was unknown. */
   readonly uncertainDeletionFences: Set<string>;
   readonly listeners: Set<ProjectSessionCoordinatorListener>;
@@ -761,6 +767,7 @@ export class ProjectSessionCoordinator {
         profiles: new Map(),
         attention: new Set(),
         deleting: new Set(),
+        quarantinedOpenFences: new Set(),
         uncertainDeletionFences: new Set(),
         listeners: new Set(),
         completionWaiters: new Map(),
@@ -1074,11 +1081,28 @@ export class ProjectSessionCoordinator {
   ): Promise<ConversationActor> {
     const context = this.requireContext(handle);
     this.throwIfAborted(options.signal);
-    const actor = await raceWithAbort(
-      this.getOrOpenActor(context, conversationId),
+    let recoveringQuarantinedActor = context.quarantinedOpenFences.has(
+      conversationId,
+    );
+    let actor = await raceWithAbort(
+      this.getOrOpenActor(context, conversationId, {
+        allowQuarantinedRecovery: true,
+      }),
       options.signal,
     );
     this.throwIfAborted(options.signal);
+    if (actor.isSessionPersistenceQuarantined()) {
+      recoveringQuarantinedActor = true;
+      context.quarantinedOpenFences.add(conversationId);
+      await this.discardFaultedActorForExplicitOpen(context, actor);
+      actor = await raceWithAbort(
+        this.getOrOpenActor(context, conversationId, {
+          allowQuarantinedRecovery: true,
+        }),
+        options.signal,
+      );
+      this.throwIfAborted(options.signal);
+    }
     if (context.deleting.has(conversationId) || actor.getState().disposed) {
       throw new Error(`Conversation is being deleted: ${conversationId}`);
     }
@@ -1092,6 +1116,17 @@ export class ProjectSessionCoordinator {
         this.throwIfAborted(options.signal);
         this.acknowledgeConversationFocus(context, conversationId);
       }
+    }
+    if (recoveringQuarantinedActor) {
+      if (
+        context.actors.get(conversationId) !== actor
+        || actor.isSessionPersistenceQuarantined()
+      ) {
+        throw new Error(
+          `Conversation recovery did not acquire a validated actor: ${conversationId}`,
+        );
+      }
+      context.quarantinedOpenFences.delete(conversationId);
     }
     return actor;
   }
@@ -1221,8 +1256,6 @@ export class ProjectSessionCoordinator {
           profile,
           input.title,
         );
-        this.throwIfAborted(input.signal);
-        await context.project.setLastConversation(actor.conversationId);
         this.throwIfAborted(input.signal);
         return actor;
       } catch (error) {
@@ -1716,15 +1749,53 @@ export class ProjectSessionCoordinator {
     handle: ProjectSessionHandle,
     conversationId: string,
     title: string,
-  ): Promise<void> {
+  ): Promise<ConversationRenameResult> {
     const context = this.requireContext(handle);
-    await this.runLifecycle(context, async () => {
+    return this.runLifecycle(context, async () => {
       const actor = await this.getOrOpenActor(context, conversationId);
+      const actorState = actor.getState();
+      if (actorState.fatalError !== undefined) {
+        throw new Error(`Conversation actor is faulted: ${actorState.fatalError}`);
+      }
       if (actor.isCompacting()) {
         throw new Error("Cannot rename while context is compacting");
       }
-      actor.session.setSessionName(normalizedTitle(title, "新会话"));
-      await context.project.refreshConversations();
+      if (actorState.activity.kind !== "idle") {
+        throw new Error("Cannot rename a busy conversation");
+      }
+      const name = normalizedTitle(title, "新会话");
+      // A memory-first setter may have applied this value while its JSONL
+      // append failed. Do not append again: its next parent can reference the
+      // unpersisted entry. Instead prove the existing durable title exactly.
+      if (actor.sessionManager.getSessionName() === name) {
+        const persisted = await context.project.hasPersistedConversationNameIntent(
+          conversationId,
+          actor.sessionManager.getSessionFile(),
+          name,
+        );
+        if (persisted) {
+          context.project.projectConversationSession(actor.sessionManager);
+          return { outcome: "saved" };
+        }
+        return {
+          outcome: "persistence_unknown",
+          error: new Error("Conversation name is not durably persisted"),
+        };
+      }
+      try {
+        actor.session.setSessionName(name);
+      } catch (error) {
+        if (actor.sessionManager.getSessionName() !== name) throw error;
+        // The SDK appends to its in-memory tree before writing JSONL. Once that
+        // write fails, any later append can point at the absent entry. Keep the
+        // failure correlated, but quarantine this actor until an explicit open
+        // rebuilds it from validated disk.
+        actor.quarantineSessionPersistence(error);
+        context.quarantinedOpenFences.add(conversationId);
+        return { outcome: "persistence_unknown", error };
+      }
+      context.project.projectConversationSession(actor.sessionManager);
+      return { outcome: "saved" };
     });
   }
 
@@ -2517,12 +2588,17 @@ export class ProjectSessionCoordinator {
     );
     let manager;
     let actor: ConversationActor | undefined;
+    // Only a resolved create with its projection-free options has published a
+    // file owned by this attempt. In particular, an EEXIST collision must not
+    // fall through to destructive cleanup of another writer's conversation.
+    let published = false;
     try {
       manager = await context.project.createConversation(
         conversationId,
         profile,
-        { updateRecent: profile.createdBy.kind === "user" },
+        { updateRecent: false, refreshIndex: false },
       );
+      published = true;
       actor = await this.openOwnedActor(
         context,
         conversationId,
@@ -2531,28 +2607,38 @@ export class ProjectSessionCoordinator {
         profile,
       );
       if (title) actor.session.setSessionName(title);
-      await context.project.refreshConversations();
+      context.project.projectConversationSession(manager);
+      if (profile.createdBy.kind === "user") {
+        // The final writer wins recent ordering, and any failure remains inside
+        // the same rollback boundary as the actor, lease, and JSONL file.
+        await context.project.setLastConversation(actor.conversationId);
+      }
       return actor;
     } catch (error) {
       let deletion;
       try {
-        if (actor) {
-          context.actorUnsubscribes.get(conversationId)?.();
-          context.actorUnsubscribes.delete(conversationId);
-          context.actors.delete(conversationId);
-          context.profiles.delete(conversationId);
-          deletion = await actor.dispose({
-            transferLeaseForDeletion: true,
-          });
-        } else {
+        if (!published) {
           lease.release();
-          const cleanup = this.projects.acquireConversation(
-            context.project.cwd,
-            conversationId,
-          );
-          deletion = cleanup.upgradeToDeletion();
+        } else {
+          const attachedActor = actor ?? context.actors.get(conversationId);
+          if (attachedActor) {
+            context.actorUnsubscribes.get(conversationId)?.();
+            context.actorUnsubscribes.delete(conversationId);
+            context.actors.delete(conversationId);
+            context.profiles.delete(conversationId);
+            deletion = await attachedActor.dispose({
+              transferLeaseForDeletion: true,
+            });
+          } else {
+            lease.release();
+            const cleanup = this.projects.acquireConversation(
+              context.project.cwd,
+              conversationId,
+            );
+            deletion = cleanup.upgradeToDeletion();
+          }
+          await context.project.deleteConversation(conversationId);
         }
-        await context.project.deleteConversation(conversationId);
       } catch {
         // Preserve the original creation failure.
       } finally {
@@ -2562,10 +2648,37 @@ export class ProjectSessionCoordinator {
     }
   }
 
+  /** An explicit open is the only recovery path for a quarantined actor. */
+  private async discardFaultedActorForExplicitOpen(
+    context: ProjectContext,
+    actor: ConversationActor,
+  ): Promise<void> {
+    if (context.actors.get(actor.conversationId) !== actor) return;
+    context.actorUnsubscribes.get(actor.conversationId)?.();
+    context.actorUnsubscribes.delete(actor.conversationId);
+    try {
+      await actor.dispose();
+    } finally {
+      if (context.actors.get(actor.conversationId) === actor) {
+        context.actors.delete(actor.conversationId);
+        context.profiles.delete(actor.conversationId);
+      }
+    }
+  }
+
   private getOrOpenActor(
     context: ProjectContext,
     conversationId: string,
+    options: { allowQuarantinedRecovery?: boolean } = {},
   ): Promise<ConversationActor> {
+    if (
+      context.quarantinedOpenFences.has(conversationId)
+      && !options.allowQuarantinedRecovery
+    ) {
+      return Promise.reject(new Error(
+        `Conversation persistence recovery requires an explicit open: ${conversationId}`,
+      ));
+    }
     if (context.closing || this.disposed) {
       return Promise.reject(new Error("Project context is closing"));
     }
@@ -3981,6 +4094,7 @@ export class ProjectSessionCoordinator {
     conversationId: string,
     limit: number,
   ): Promise<ReturnType<typeof projectAgentConversationPeek>> {
+    this.assertConversationWorkAllowed(context, conversationId);
     const active = context.actors.get(conversationId);
     if (active) {
       return projectAgentConversationPeek(active.sessionManager, limit);
@@ -5763,6 +5877,27 @@ export class ProjectSessionCoordinator {
     );
   }
 
+  private assertConversationWorkAllowed(
+    context: ProjectContext,
+    conversationId: string,
+  ): void {
+    if (context.quarantinedOpenFences.has(conversationId)) {
+      throw new Error(
+        "Conversation session persistence is quarantined until an explicit reopen",
+      );
+    }
+  }
+
+  private assertManagerWorkAllowed(
+    actor: ConversationActor,
+  ): void {
+    if (actor.isSessionPersistenceQuarantined()) {
+      throw new Error(
+        "Conversation session persistence is quarantined until an explicit reopen",
+      );
+    }
+  }
+
   private async withStoredConversationManager<T>(
     context: ProjectContext,
     conversationId: string,
@@ -5770,10 +5905,18 @@ export class ProjectSessionCoordinator {
       manager: ConversationActor["sessionManager"],
     ) => Promise<T> | T,
   ): Promise<T | undefined> {
+    this.assertConversationWorkAllowed(context, conversationId);
     const active = context.actors.get(conversationId);
-    if (active) return await work(active.sessionManager);
+    if (active) {
+      this.assertManagerWorkAllowed(active);
+      return await work(active.sessionManager);
+    }
     const opening = context.actorOpenings.get(conversationId);
-    if (opening) return await work((await opening).sessionManager);
+    if (opening) {
+      const actor = await opening;
+      this.assertManagerWorkAllowed(actor);
+      return await work(actor.sessionManager);
+    }
     if (!context.project.listConversations().some(
       ({ id }) => id === conversationId
     )) {
@@ -5788,10 +5931,15 @@ export class ProjectSessionCoordinator {
       );
     } catch (error) {
       const racedActive = context.actors.get(conversationId);
-      if (racedActive) return await work(racedActive.sessionManager);
+      if (racedActive) {
+        this.assertManagerWorkAllowed(racedActive);
+        return await work(racedActive.sessionManager);
+      }
       const racedOpening = context.actorOpenings.get(conversationId);
       if (racedOpening) {
-        return await work((await racedOpening).sessionManager);
+        const actor = await racedOpening;
+        this.assertManagerWorkAllowed(actor);
+        return await work(actor.sessionManager);
       }
       throw error;
     }
@@ -5813,8 +5961,12 @@ export class ProjectSessionCoordinator {
       manager: ConversationActor["sessionManager"],
     ) => Promise<T> | T,
   ): Promise<T> {
+    this.assertConversationWorkAllowed(context, conversationId);
     const active = context.actors.get(conversationId);
-    if (active) return work(active.sessionManager);
+    if (active) {
+      this.assertManagerWorkAllowed(active);
+      return work(active.sessionManager);
+    }
     let actor: ConversationActor;
     try {
       actor = await this.getOrOpenActor(context, conversationId);
@@ -5840,6 +5992,7 @@ export class ProjectSessionCoordinator {
         lease.release();
       }
     }
+    this.assertManagerWorkAllowed(actor);
     return await work(actor.sessionManager);
   }
 

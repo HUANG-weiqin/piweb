@@ -1241,6 +1241,154 @@ describe("PiConnection coordinated controls", () => {
     }
   });
 
+  it("does not let a stale refresh reserve the current session's slot", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      await initializeNewConversation(harness);
+      const refresh = vi.spyOn(harness.runtime, "refreshConfiguration");
+      const stale = harness.connection.handle({
+        type: "refresh_models",
+        commandId: COMMAND_A,
+        sessionId: SESSION_B,
+      });
+      const current = harness.connection.handle({
+        type: "refresh_models",
+        commandId: COMMAND_B,
+        sessionId: SESSION_A,
+      });
+
+      await expect(stale).rejects.toThrow("Session was not initialized");
+      await expect(current).resolves.toBeUndefined();
+      await expect(harness.connection.handle({
+        type: "refresh_models",
+        commandId: COMMAND_A,
+        sessionId: SESSION_A,
+      })).rejects.toThrow("Command ID was already used on this connection");
+      expect(refresh).toHaveBeenCalledTimes(1);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("lets focus and create advance while a launched model refresh is unresolved", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const refreshStarted = deferred();
+    const releaseRefresh = deferred();
+    let refreshing: Promise<void> | undefined;
+    try {
+      const first = await initializeNewConversation(harness);
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        roleId: "default",
+      });
+      const second = latestState(harness.events);
+      if (!first.conversationId || !second.conversationId) {
+        throw new Error("test conversations were not created");
+      }
+      const refresh = vi.spyOn(harness.runtime, "refreshConfiguration")
+        .mockImplementation(async () => {
+          refreshStarted.resolve();
+          await releaseRefresh.promise;
+        });
+
+      const refreshCommandId = randomUUID();
+      refreshing = harness.connection.handle({
+        type: "refresh_models",
+        commandId: refreshCommandId,
+        sessionId: SESSION_A,
+      });
+      await refreshStarted.promise;
+
+      await expect(harness.connection.handle({
+        type: "focus_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId: first.conversationId,
+      })).resolves.toBeUndefined();
+      expect(latestState(harness.events).conversationId).toBe(first.conversationId);
+
+      await expect(harness.connection.handle({
+        type: "create_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        roleId: "default",
+      })).resolves.toBeUndefined();
+      expect(latestState(harness.events).conversationId).not.toBe(first.conversationId);
+      expect(refresh).toHaveBeenCalledTimes(1);
+      expect(harness.events).not.toContainEqual(expect.objectContaining({
+        type: "command_complete",
+        operation: "refresh_models",
+        commandId: refreshCommandId,
+      }));
+
+      releaseRefresh.resolve();
+      await expect(refreshing).resolves.toBeUndefined();
+      expect(harness.events).toContainEqual(expect.objectContaining({
+        type: "command_complete",
+        operation: "refresh_models",
+        commandId: refreshCommandId,
+        sessionId: SESSION_A,
+      }));
+    } finally {
+      releaseRefresh.resolve();
+      await refreshing?.catch(() => undefined);
+      await harness.cleanup();
+    }
+  });
+
+  it("releases a timed-out queued refresh slot before it launches", async () => {
+    vi.useFakeTimers();
+    const harness = await coordinatedConnectionHarness();
+    const credentialStarted = deferred();
+    const releaseCredential = deferred();
+    try {
+      await initializeNewConversation(harness);
+      exposeModelProvider(harness.runtime, "provider");
+      vi.spyOn(harness.runtime, "commitCredentialChange")
+        .mockImplementation(async (_intent, change) => {
+          credentialStarted.resolve();
+          await releaseCredential.promise;
+          await change();
+          return true;
+        });
+      const credential = harness.connection.handle({
+        type: "set_api_key",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        provider: "provider",
+        key: "queued",
+      });
+      await credentialStarted.promise;
+
+      const refresh = vi.spyOn(harness.runtime, "refreshConfiguration");
+      const timedOut = harness.connection.handle({
+        type: "refresh_models",
+        commandId: COMMAND_A,
+        sessionId: SESSION_A,
+      });
+      const timedOutAssertion = expect(timedOut)
+        .rejects.toThrow("Model refresh timed out; please retry");
+      await vi.advanceTimersByTimeAsync(15_000);
+      await timedOutAssertion;
+
+      const retry = harness.connection.handle({
+        type: "refresh_models",
+        commandId: COMMAND_B,
+        sessionId: SESSION_A,
+      });
+      releaseCredential.resolve();
+      await expect(credential).resolves.toBeUndefined();
+      await expect(retry).resolves.toBeUndefined();
+      expect(refresh).toHaveBeenCalledTimes(1);
+    } finally {
+      releaseCredential.resolve();
+      await harness.cleanup();
+      vi.useRealTimers();
+    }
+  });
+
   it("maps a manual model refresh timeout and keeps correlation occupied until it drains", async () => {
     vi.useFakeTimers();
     const harness = await coordinatedConnectionHarness();
@@ -1266,9 +1414,62 @@ describe("PiConnection coordinated controls", () => {
         commandId: COMMAND_B,
         sessionId: SESSION_A,
       })).rejects.toThrow("already pending");
+      expect(refresh).toHaveBeenCalledTimes(1);
     } finally {
       releaseRefresh();
       await Promise.resolve();
+      await harness.cleanup();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps credential writes behind an abort-ignoring timed-out refresh", async () => {
+    vi.useFakeTimers();
+    const harness = await coordinatedConnectionHarness();
+    const refreshStarted = deferred();
+    const releaseRefresh = deferred();
+    try {
+      await initializeNewConversation(harness);
+      exposeModelProvider(harness.runtime, "provider");
+      const refresh = vi.spyOn(harness.runtime, "refreshConfiguration")
+        .mockImplementation(async () => {
+          refreshStarted.resolve();
+          await releaseRefresh.promise;
+        });
+      const modify = vi.spyOn(harness.runtime.credentialStore, "modify");
+      const refreshCommandId = randomUUID();
+      const timedOut = harness.connection.handle({
+        type: "refresh_models",
+        commandId: refreshCommandId,
+        sessionId: SESSION_A,
+      });
+      const timeoutAssertion = expect(timedOut)
+        .rejects.toThrow("Model refresh timed out; please retry");
+      await refreshStarted.promise;
+      await vi.advanceTimersByTimeAsync(15_000);
+      await timeoutAssertion;
+
+      const credential = harness.connection.handle({
+        type: "set_api_key",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        provider: "provider",
+        key: "after-timeout",
+      });
+      await Promise.resolve();
+      expect(modify).not.toHaveBeenCalled();
+
+      releaseRefresh.resolve();
+      await expect(credential).resolves.toBeUndefined();
+      expect(refresh).toHaveBeenCalledTimes(1);
+      expect(modify).toHaveBeenCalledTimes(1);
+      expect(harness.events).not.toContainEqual(expect.objectContaining({
+        type: "command_complete",
+        operation: "refresh_models",
+        commandId: refreshCommandId,
+      }));
+    } finally {
+      releaseRefresh.resolve();
       await harness.cleanup();
       vi.useRealTimers();
     }
@@ -1373,29 +1574,242 @@ describe("PiConnection coordinated controls", () => {
     }
   });
 
-  it("keeps an in-memory conversation name when its session entry cannot persist", async () => {
+  it("correlates rename persistence uncertainty without projecting or retrying its ghost title", async () => {
     const harness = await coordinatedConnectionHarness();
     try {
       const state = await initializeNewConversation(harness);
       const manager = harness.runtime.created[0]?.persistentManager;
       if (!manager) throw new Error("persistent SessionManager was not provided");
+      const originalPersist = (manager as unknown as {
+        _persist: () => void;
+      })._persist;
       Object.assign(manager, {
         _persist: () => { throw new Error("session name entry could not be written"); },
       });
+      const commandId = randomUUID();
+      const eventStart = harness.events.length;
 
       await expect(harness.connection.handle({
         type: "rename_conversation",
+        commandId,
         sessionId: SESSION_A,
         conversationId: state.conversationId,
         name: "Renamed in memory",
       })).resolves.toBeUndefined();
-      expect(latestState(harness.events).conversationName).toBe("Renamed in memory");
+      expect(latestState(harness.events).conversationName).toBeUndefined();
+      const partialEvents = harness.events.slice(eventStart);
+      const stateIndex = partialEvents.findIndex((event) => (
+        event.type === "state"
+        && event.state.conversationName === undefined
+      ));
+      const errorIndex = partialEvents.findIndex((event) => (
+        event.type === "error"
+        && event.scope === "settings"
+        && event.operation === "rename_conversation"
+        && event.commandId === commandId
+      ));
+      expect(stateIndex).toBeGreaterThanOrEqual(0);
+      expect(errorIndex).toBeGreaterThan(stateIndex);
       expect(harness.events).toContainEqual(expect.objectContaining({
         type: "error",
         scope: "settings",
+        operation: "rename_conversation",
+        commandId,
         sessionId: SESSION_A,
         message: expect.stringContaining("对话名称已用于当前会话"),
       }));
+      expect(harness.events).not.toContainEqual(expect.objectContaining({
+        type: "command_complete",
+        operation: "rename_conversation",
+        commandId,
+      }));
+
+      Object.assign(manager, { _persist: originalPersist });
+      const retryCommandId = randomUUID();
+      await expect(harness.connection.handle({
+        type: "rename_conversation",
+        commandId: retryCommandId,
+        sessionId: SESSION_A,
+        conversationId: state.conversationId,
+        name: "Renamed in memory",
+      })).rejects.toThrow(/faulted|explicit open/);
+      expect(harness.events).not.toContainEqual(expect.objectContaining({
+        type: "command_complete",
+        operation: "rename_conversation",
+        commandId: retryCommandId,
+      }));
+      const handle = await harness.coordinator.acquireProject(harness.cwd);
+      try {
+        const reopened = await handle.project.openConversation(
+          state.conversationId,
+          { updateRecent: false },
+        );
+        expect(reopened.getSessionName()).toBeUndefined();
+      } finally {
+        handle.release();
+      }
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("quarantines a failed rename append until an explicit reopen restores the validated disk", async () => {
+    const harness = await coordinatedConnectionHarness();
+    let reconnect: PiConnection | undefined;
+    try {
+      const state = await initializeNewConversation(harness);
+      await harness.connection.handle({
+        type: "rename_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId: state.conversationId,
+        name: "Durable N",
+      });
+      const manager = harness.runtime.created[0]?.persistentManager;
+      if (!manager) throw new Error("persistent SessionManager was not provided");
+      const originalPersist = (manager as unknown as {
+        _persist: () => void;
+      })._persist;
+      const failedPersist = vi.fn(() => {
+        throw new Error("session name entry could not be written");
+      });
+      Object.assign(manager, { _persist: failedPersist });
+      const failedRenameId = randomUUID();
+
+      await expect(harness.connection.handle({
+        type: "rename_conversation",
+        commandId: failedRenameId,
+        sessionId: SESSION_A,
+        conversationId: state.conversationId,
+        name: "Unpersisted M",
+      })).resolves.toBeUndefined();
+      expect(latestState(harness.events).conversationName).toBeUndefined();
+      expect(harness.events).toContainEqual(expect.objectContaining({
+        type: "error",
+        scope: "settings",
+        operation: "rename_conversation",
+        commandId: failedRenameId,
+        sessionId: SESSION_A,
+      }));
+
+      await expect(harness.connection.handle({
+        type: "prompt",
+        sessionId: SESSION_A,
+        conversationId: state.conversationId,
+        focusId: state.focusId,
+        runId: RUN_A,
+        promptId: randomUUID(),
+        text: "must not append through the faulted manager",
+      })).rejects.toThrow(/quarantined|faulted/);
+      await expect(harness.connection.handle({
+        type: "set_thinking",
+        sessionId: SESSION_A,
+        level: "high",
+      })).rejects.toThrow(/quarantined|faulted/);
+      await expect(harness.connection.handle({
+        type: "rename_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId: state.conversationId,
+        name: "Durable N",
+      })).rejects.toThrow(/quarantined|faulted|explicit open/);
+      // This blocks the reviewer counterexample's second ghost rename and all
+      // later parented appends through the original manager.
+      expect(failedPersist).toHaveBeenCalledTimes(1);
+
+      Object.assign(manager, { _persist: originalPersist });
+      const projectHandle = await harness.coordinator.acquireProject(harness.cwd);
+      try {
+        const diskActor = await projectHandle.project.openConversation(
+          state.conversationId,
+          { updateRecent: false },
+        );
+        expect(diskActor.getSessionName()).toBe("Durable N");
+      } finally {
+        projectHandle.release();
+      }
+
+      const reconnectEvents: ServerEvent[] = [];
+      await harness.connection.dispose();
+      reconnect = new PiConnection(
+        (event) => reconnectEvents.push(event),
+        harness.runtime,
+        async () => ({
+          coordinator: harness.coordinator,
+          roles: harness.roles,
+        }),
+      );
+      await reconnect.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_B,
+        cwd: harness.cwd,
+        conversation: { kind: "open", conversationId: state.conversationId },
+      });
+      const reopenedState = [...reconnectEvents].reverse().find(
+        (event): event is Extract<ServerEvent, { type: "state" }> =>
+          event.type === "state",
+      );
+      expect(reopenedState?.state.conversationName).toBe("Durable N");
+    } finally {
+      await reconnect?.dispose();
+      await harness.cleanup();
+    }
+  });
+
+  it("rejects a rename before its setter applies a title", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      const state = await initializeNewConversation(harness);
+      const session = harness.runtime.created[0];
+      if (!session) throw new Error("persistent session was not provided");
+      session.setSessionName = () => {
+        throw new Error("setter rejected before mutation");
+      };
+      const commandId = randomUUID();
+
+      await expect(harness.connection.handle({
+        type: "rename_conversation",
+        commandId,
+        sessionId: SESSION_A,
+        conversationId: state.conversationId,
+        name: "Rejected title",
+      })).rejects.toThrow("setter rejected before mutation");
+      expect(latestState(harness.events).conversationName).not.toBe("Rejected title");
+      expect(harness.events).not.toContainEqual(expect.objectContaining({
+        type: "error",
+        scope: "settings",
+        operation: "rename_conversation",
+        commandId,
+      }));
+      expect(harness.events).not.toContainEqual(expect.objectContaining({
+        type: "command_complete",
+        operation: "rename_conversation",
+        commandId,
+      }));
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("acknowledges a durable rename with its exact command ID", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      const state = await initializeNewConversation(harness);
+      const commandId = randomUUID();
+      await harness.connection.handle({
+        type: "rename_conversation",
+        commandId,
+        sessionId: SESSION_A,
+        conversationId: state.conversationId,
+        name: "Saved title",
+      });
+      expect(harness.events).toContainEqual({
+        type: "command_complete",
+        operation: "rename_conversation",
+        commandId,
+        sessionId: SESSION_A,
+      });
     } finally {
       await harness.cleanup();
     }
@@ -4939,6 +5353,7 @@ describe("PiConnection coordinated project view", () => {
       ).length;
       await harness.connection.handle({
         type: "rename_conversation",
+        commandId: randomUUID(),
         sessionId: SESSION_A,
         conversationId: source.conversationId,
         name: "source renamed",

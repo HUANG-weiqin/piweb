@@ -464,6 +464,7 @@ interface ActorFixture {
     cwd: string;
     toolMode: ToolMode;
     hasPersistedConversationNameIntent(): Promise<boolean>;
+    projectConversationSession(): void;
     refreshConversations(): Promise<ConversationSummary[]>;
   };
 }
@@ -484,6 +485,7 @@ async function openActor(
     toolMode: "full_access" as ToolMode,
     hasPersistedConversationNameIntent: async () =>
       hasPersistedConversationNameIntent(manager),
+    projectConversationSession: () => undefined,
     refreshConversations: async () => conversationSummaries(manager),
   };
   const actor = await ConversationActor.open({
@@ -930,6 +932,9 @@ describe("ConversationActor", () => {
           order.push("verify");
           return hasPersistedConversationNameIntent(manager);
         },
+        projectConversationSession: () => {
+          order.push("project");
+        },
         refreshConversations: async () => {
           order.push("refresh");
           return conversationSummaries(manager);
@@ -985,7 +990,7 @@ describe("ConversationActor", () => {
         "title",
         "name",
         "verify",
-        "refresh",
+        "project",
         "prompt",
       ]);
       expect(fixture.events.filter((event) => (
@@ -1056,6 +1061,7 @@ describe("ConversationActor", () => {
             proofCalls += 1;
             return hasPersistedConversationNameIntent(manager);
           },
+          projectConversationSession: () => undefined,
           refreshConversations: async () => conversationSummaries(manager),
         },
       });
@@ -5626,6 +5632,7 @@ describe("ConversationActor", () => {
         cwd: process.cwd(),
         toolMode: "full_access",
         hasPersistedConversationNameIntent: async () => false,
+        projectConversationSession: () => undefined,
         refreshConversations: async () => [],
       },
       sessionManager: manager,
@@ -5655,6 +5662,7 @@ describe("ConversationActor", () => {
         cwd: process.cwd(),
         toolMode: "full_access",
         hasPersistedConversationNameIntent: async () => false,
+        projectConversationSession: () => undefined,
         refreshConversations: async () => [],
       },
       sessionManager: SessionManager.inMemory(process.cwd(), {

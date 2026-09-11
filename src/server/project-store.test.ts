@@ -258,6 +258,54 @@ describe("ProjectStore", () => {
     expect(reopened.getCwd()).toBe(store.cwd);
   });
 
+  it("keeps repeated create/delete targets projected through a stale catalog scan", async () => {
+    const cwd = await createTemporaryDirectory("piweb-projected-create-");
+    const store = await ProjectStore.open(cwd);
+    const scanStarted = createDeferred<void>();
+    const releaseScan = createDeferred<void>();
+    const listAll = vi.spyOn(SessionManager, "listAll")
+      .mockImplementationOnce(async () => {
+        scanStarted.resolve(undefined);
+        await releaseScan.promise;
+        return [];
+      });
+
+    const staleRefresh = store.refreshConversations();
+    await scanStarted.promise;
+    const firstId = randomUUID();
+    const callsBeforeFirstCreate = listAll.mock.calls.length;
+    await store.createConversation(firstId, undefined, {
+      updateRecent: false,
+      refreshIndex: false,
+    });
+    expect(listAll).toHaveBeenCalledTimes(callsBeforeFirstCreate);
+    expect(store.listConversations()).toEqual([
+      expect.objectContaining({ id: firstId }),
+    ]);
+
+    releaseScan.resolve(undefined);
+    await staleRefresh;
+    expect(store.listConversations()).toEqual([
+      expect.objectContaining({ id: firstId }),
+    ]);
+    await store.deleteConversation(firstId);
+    expect(store.listConversations()).toEqual([]);
+
+    for (const conversationId of [randomUUID(), randomUUID()]) {
+      const callsBeforeCreate = listAll.mock.calls.length;
+      await store.createConversation(conversationId, undefined, {
+        updateRecent: false,
+        refreshIndex: false,
+      });
+      expect(listAll).toHaveBeenCalledTimes(callsBeforeCreate);
+      expect(store.listConversations()).toEqual([
+        expect.objectContaining({ id: conversationId }),
+      ]);
+      await store.deleteConversation(conversationId);
+      expect(store.listConversations()).toEqual([]);
+    }
+  });
+
   it("validates metadata and normally opens deeply nested custom entry data", async () => {
     const cwd = await createTemporaryDirectory("piweb-deep-session-entry-");
     const store = await ProjectStore.open(cwd);
@@ -297,6 +345,39 @@ describe("ProjectStore", () => {
     open.mockRestore();
     expect(await readdir(store.sessionDir)).toEqual(before);
     expect(store.listConversations()).toEqual([]);
+  });
+
+  it("does not unlink a replacement after initial SDK open fails", async () => {
+    const cwd = await createTemporaryDirectory("piweb-create-replacement-");
+    const store = await ProjectStore.open(cwd);
+    const conversationId = randomUUID();
+    const internals = store as unknown as ProjectStoreIntegrityInternals;
+    const renameSessionFile = internals.renameSessionFile.bind(internals);
+    let replacementPath: string | undefined;
+    let replacementContent: string | undefined;
+    vi.spyOn(internals, "renameSessionFile").mockImplementationOnce(
+      async (source, destination) => {
+        replacementContent = await readFile(source, "utf8");
+        replacementPath = source;
+        const replacement = join(store.sessionDir, ".foreign-replacement.jsonl");
+        const publishedBackup = join(store.sessionDir, ".published-backup.jsonl");
+        await writeFile(replacement, replacementContent);
+        await rename(source, publishedBackup);
+        await rename(replacement, source);
+        await renameSessionFile(source, destination);
+      },
+    );
+    vi.spyOn(SessionManager, "open").mockImplementationOnce(() => {
+      throw new Error("SDK refused the replaced session");
+    });
+
+    await expect(store.createConversation(conversationId))
+      .rejects.toThrow("Failed to discard a conversation after its initial SDK open failed");
+    if (!replacementPath || replacementContent === undefined) {
+      throw new Error("replacement was not installed");
+    }
+    await expect(readFile(replacementPath, "utf8"))
+      .resolves.toBe(replacementContent);
   });
 
   it("creates the header and immutable role metadata in one initial file", async () => {

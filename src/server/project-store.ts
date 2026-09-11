@@ -842,17 +842,90 @@ function toConversationSummary(
   };
 }
 
+function compareConversationSummaries(
+  first: ConversationSummary,
+  second: ConversationSummary,
+): number {
+  const byModified = Date.parse(second.updatedAt) - Date.parse(first.updatedAt);
+  if (byModified !== 0) return byModified;
+  return second.id.localeCompare(first.id);
+}
+
 function toConversationSummaries(
   information: readonly SessionInfo[],
 ): ConversationSummary[] {
-  return information
-    .map(toConversationSummary)
-    .sort((first, second) => {
-      const byModified =
-        Date.parse(second.updatedAt) - Date.parse(first.updatedAt);
-      if (byModified !== 0) return byModified;
-      return second.id.localeCompare(first.id);
-    });
+  return information.map(toConversationSummary).sort(compareConversationSummaries);
+}
+
+function projectedMessageText(message: Record<string, unknown>): string {
+  const content = message.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .flatMap((block) => (
+      isRecord(block)
+      && block.type === "text"
+      && typeof block.text === "string"
+        ? [block.text]
+        : []
+    ))
+    .join(" ");
+}
+
+function projectedMessageActivityAt(
+  entryTimestamp: string,
+  message: Record<string, unknown>,
+): number | undefined {
+  if (
+    (message.role !== "user" && message.role !== "assistant")
+    || !("content" in message)
+  ) {
+    return undefined;
+  }
+  if (typeof message.timestamp === "number") return message.timestamp;
+  const timestamp = Date.parse(entryTimestamp);
+  return Number.isFinite(timestamp) ? timestamp : undefined;
+}
+
+/**
+ * Mirrors Pi's per-file display summary without asking its whole-directory
+ * index to rescan. Callers already own a verified SessionManager; this only
+ * creates a disposable presentation projection from that manager's entries.
+ */
+function toProjectedConversationSummary(
+  conversation: SessionManager,
+): ConversationSummary | undefined {
+  const header = conversation.getHeader();
+  const conversationId = conversation.getSessionId();
+  if (header === null || header.id !== conversationId) return undefined;
+  const createdAt = Date.parse(header.timestamp);
+  if (!Number.isFinite(createdAt)) return undefined;
+
+  let messageCount = 0;
+  let firstMessage = "";
+  let updatedAt = createdAt;
+  for (const entry of conversation.getEntries()) {
+    if (entry.type !== "message") continue;
+    messageCount += 1;
+    const message = entry.message as unknown;
+    if (!isRecord(message)) continue;
+    const activityAt = projectedMessageActivityAt(entry.timestamp, message);
+    if (activityAt !== undefined) updatedAt = Math.max(updatedAt, activityAt);
+    if (firstMessage || message.role !== "user") continue;
+    firstMessage = projectedMessageText(message);
+  }
+
+  return {
+    id: conversationId,
+    ...(conversation.getSessionName() === undefined
+      ? {}
+      : { name: conversation.getSessionName() }),
+    preview: messageCount === 0 ? "" : firstMessage || "(no messages)",
+    createdAt: new Date(createdAt).toISOString(),
+    updatedAt: new Date(updatedAt).toISOString(),
+    messageCount,
+    compacting: false,
+  };
 }
 
 export class ProjectStore {
@@ -868,6 +941,16 @@ export class ProjectStore {
   private conversations: ConversationSummary[] = [];
   private verifiedCatalog?: VerifiedSessionCatalog;
   private conversationCatalog?: ConversationCatalog;
+  /**
+   * Direct actor projections can race a pre-existing whole-directory scan.
+   * Keep the newer target summary through that stale scan, then let the next
+   * scan re-observe it from disk normally.
+   */
+  private conversationProjectionRevision = 0;
+  private readonly conversationProjectionOverrides = new Map<
+    string,
+    { revision: number; summary: ConversationSummary }
+  >();
   private writeTail: Promise<void> = Promise.resolve();
   private refreshTail: Promise<void> = Promise.resolve();
   private catalogWriteTail: Promise<void> = Promise.resolve();
@@ -1037,10 +1120,59 @@ export class ProjectStore {
   }
 
   private async scanConversations(): Promise<ConversationSummary[]> {
+    const projectionRevision = this.conversationProjectionRevision;
     const information = await this.listSafeSessionInformation();
-    const conversations = toConversationSummaries(information);
-    this.replaceConversations(conversations);
+    const overrides = [...this.conversationProjectionOverrides.values()]
+      .filter((override) => override.revision > projectionRevision);
+    const summariesById = new Map(
+      toConversationSummaries(information).map((summary) => [summary.id, summary]),
+    );
+    for (const override of overrides) {
+      summariesById.set(override.summary.id, { ...override.summary });
+    }
+    this.replaceConversations(
+      [...summariesById.values()].sort(compareConversationSummaries),
+    );
+    for (const override of overrides) {
+      const current = this.conversationProjectionOverrides.get(
+        override.summary.id,
+      );
+      if (current?.revision === override.revision) {
+        this.conversationProjectionOverrides.delete(override.summary.id);
+      }
+    }
     return this.listConversations();
+  }
+
+  /**
+   * Updates the in-memory project projection for a verified, actor-owned
+   * session without treating the mutable SDK directory index as authority.
+   * The catalog cache is deliberately discarded: it could otherwise preserve
+   * an older title across a later low-priority scrub.
+   */
+  projectConversationSession(conversation: SessionManager): void {
+    const sessionFile = conversation.getSessionFile();
+    if (sessionFile === undefined) return;
+    try {
+      this.assertLexicallyInsideSessionDirectory(sessionFile);
+    } catch {
+      return;
+    }
+    const summary = toProjectedConversationSummary(conversation);
+    if (summary === undefined) return;
+    const revision = ++this.conversationProjectionRevision;
+    this.conversationProjectionOverrides.set(summary.id, {
+      revision,
+      summary: { ...summary },
+    });
+    this.replaceConversations(
+      [
+        ...this.conversations.filter(({ id }) => id !== summary.id),
+        summary,
+      ].sort(compareConversationSummaries),
+    );
+    this.verifiedCatalog = undefined;
+    this.conversationCatalog = undefined;
   }
 
   private replaceConversations(conversations: ConversationSummary[]): void {
@@ -1163,7 +1295,7 @@ export class ProjectStore {
   async createConversation(
     conversationId?: string,
     conversationMeta?: ConversationMeta,
-    options: { updateRecent?: boolean } = {},
+    options: { updateRecent?: boolean; refreshIndex?: boolean } = {},
   ): Promise<SessionManager> {
     if (conversationId !== undefined) {
       assertSessionId(conversationId, "conversationId");
@@ -1206,6 +1338,10 @@ export class ProjectStore {
     );
     await createFileAtomically(sessionFile, initialContent);
     this.verifiedCatalog = undefined;
+    // Atomic creation proves publication, not that a later cleanup may unlink
+    // whatever is now at this pathname. Retain this file identity so an SDK
+    // open failure can use the normal verified quarantine deletion path.
+    const published = await this.fingerprintSafeSessionPath(sessionFile);
     let conversation: SessionManager;
     try {
       conversation = SessionManager.open(
@@ -1215,7 +1351,15 @@ export class ProjectStore {
       );
     } catch (error) {
       try {
-        await unlink(sessionFile);
+        const quarantined = await this.quarantineSessionFile(
+          {
+            path: published.path,
+            raw: initialContent,
+            fingerprint: published,
+          },
+          pending.getSessionId(),
+        );
+        await this.unlinkSessionFile(quarantined.quarantinePath);
       } catch (cleanupError) {
         throw new AggregateError(
           [error, cleanupError],
@@ -1224,10 +1368,13 @@ export class ProjectStore {
       }
       throw error;
     }
+    this.projectConversationSession(conversation);
     if (options.updateRecent !== false) {
       await this.setLastConversation(conversation.getSessionId());
     }
-    await this.refreshConversations();
+    if (options.refreshIndex !== false) {
+      await this.refreshConversations();
+    }
     return conversation;
   }
 
@@ -1299,6 +1446,7 @@ export class ProjectStore {
   async hasPersistedConversationNameIntent(
     conversationId: string,
     sessionPath: string | undefined,
+    expectedName?: string,
   ): Promise<boolean> {
     assertSessionId(conversationId, "conversationId");
     if (sessionPath === undefined) {
@@ -1328,7 +1476,11 @@ export class ProjectStore {
             || !("type" in entry)
             || entry.type !== "session_info"
           ) continue;
-          return true;
+          if (expectedName === undefined) return true;
+          const persistedName = "name" in entry && typeof entry.name === "string"
+            ? entry.name.trim() || undefined
+            : undefined;
+          return persistedName === expectedName;
         }
         return false;
       } catch (error) {

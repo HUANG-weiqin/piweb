@@ -2765,56 +2765,27 @@ describe("ProjectSessionCoordinator", () => {
     await running;
   });
 
-  it("rejects a queued role switch after deletion reserves its target", async () => {
+  it("projects a rename without waiting for a full conversation scan", async () => {
     const fixture = await createFixture();
-    const role = await fixture.roles.createRole({
-      name: "Builder",
-      description: "",
-      systemPrompt: "",
-      model: { provider: "test", id: "model-b" },
-      compactionModel: null,
-      defaultThinkingLevel: "off",
-      defaultServiceTier: null,
-      toolMode: "read_only",
-      canManageSessions: false,
-    });
     const actor = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
     );
-    const switchRole = vi.spyOn(actor, "switchRole");
-    const refreshStarted = deferred();
-    const releaseRefresh = deferred();
-    const refreshConversations = fixture.handle.project.refreshConversations
-      .bind(fixture.handle.project);
-    vi.spyOn(fixture.handle.project, "refreshConversations")
-      .mockImplementationOnce(async () => {
-        refreshStarted.resolve();
-        await releaseRefresh.promise;
-        return refreshConversations();
-      });
+    const refresh = vi.spyOn(fixture.handle.project, "refreshConversations")
+      .mockRejectedValue(new Error("full scan must not be on rename's path"));
 
-    const blocker = fixture.coordinator.renameConversation(
+    await expect(fixture.coordinator.renameConversation(
       fixture.handle,
       actor.conversationId,
-      "hold lifecycle",
+      "incremental title",
+    )).resolves.toEqual({ outcome: "saved" });
+    expect(refresh).not.toHaveBeenCalled();
+    expect(fixture.handle.project.listConversations()).toContainEqual(
+      expect.objectContaining({
+        id: actor.conversationId,
+        name: "incremental title",
+      }),
     );
-    await refreshStarted.promise;
-    const switching = fixture.coordinator.switchConversationRole(
-      fixture.handle,
-      actor.conversationId,
-      role.id,
-    );
-    const deleting = fixture.coordinator.deleteConversation(
-      fixture.handle,
-      actor.conversationId,
-    );
-
-    releaseRefresh.resolve();
-    await blocker;
-    await expect(switching).rejects.toThrow(/being deleted/i);
-    expect(switchRole).not.toHaveBeenCalled();
-    await expect(deleting).resolves.toBe(true);
   });
 
   it("rejects a role switch when deletion reserves during its runtime stop", async () => {
@@ -3623,6 +3594,68 @@ describe("ProjectSessionCoordinator", () => {
     expect(
       runtime.createConversationIds.filter((id) => id === conversationId),
     ).toHaveLength(1);
+  });
+
+  it("does not delete a target when create rejects before publishing it", async () => {
+    const fixture = await createFixture();
+    const createConversation = fixture.handle.project.createConversation.bind(
+      fixture.handle.project,
+    );
+    let foreignConversationId: string | undefined;
+    vi.spyOn(fixture.handle.project, "createConversation").mockImplementation(
+      async (conversationId, profile, options) => {
+        if (!conversationId) throw new Error("test create did not receive an ID");
+        foreignConversationId = conversationId;
+        await createConversation(conversationId, profile, options);
+        const error = new Error("foreign conversation already exists") as Error & {
+          code?: string;
+        };
+        error.code = "EEXIST";
+        throw error;
+      },
+    );
+
+    await expect(fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    )).rejects.toThrow("foreign conversation already exists");
+    if (!foreignConversationId) throw new Error("foreign ID was not captured");
+
+    await expect(fixture.handle.project.openConversation(
+      foreignConversationId,
+      { updateRecent: false },
+    )).resolves.toMatchObject({
+      getSessionId: expect.any(Function),
+    });
+    const lease = fixture.registry.acquireConversation(
+      fixture.cwd,
+      foreignConversationId,
+    );
+    lease.release();
+  });
+
+  it("rolls back the actor, writer lease, and JSONL when user-create recent persistence fails", async () => {
+    const fixture = await createFixture();
+    let conversationId: string | undefined;
+    fixture.runtime.beforeCreateSession = async (id) => {
+      conversationId = id;
+    };
+    vi.spyOn(fixture.handle.project, "setLastConversation")
+      .mockRejectedValueOnce(new Error("recent pointer write failed"));
+
+    await expect(fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    )).rejects.toThrow("recent pointer write failed");
+    if (!conversationId) throw new Error("created ID was not captured");
+
+    await expect(fixture.handle.project.openConversation(
+      conversationId,
+      { updateRecent: false },
+    )).rejects.toThrow();
+    expect(fixture.runtime.control(conversationId).disposeCalls).toBe(1);
+    const lease = fixture.registry.acquireConversation(fixture.cwd, conversationId);
+    lease.release();
   });
 
   it("reuses the same running actor and writer when a browser focuses it", async () => {
@@ -5835,6 +5868,197 @@ describe("ProjectSessionCoordinator", () => {
       ({ content }) => messages.findIndex(({ body }) => content.includes(body)),
     )).toEqual([0, 1]);
 
+    sourceRun.release.resolve();
+    await sourceRun.completion;
+  });
+
+  it("defers receipt-card writes from a quarantined source until explicit reopen", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const role = fixture.roles.getConversationRole("default");
+    const messageId = randomUUID();
+    const cardId = randomUUID();
+    const receipt = {
+      messageId,
+      cardId,
+      fromConversationId: source.conversationId,
+      toConversationId: target.conversationId,
+      sourceRunId: randomUUID(),
+      targetRunId: randomUUID(),
+      kind: "message" as const,
+      sentAt: "2026-09-11T00:00:00.000Z",
+      payloadFingerprint: "receipt-payload",
+      deliveredAt: "2026-09-11T00:01:00.000Z",
+    };
+    appendReservedCustomEntry(
+      source.sessionManager,
+      createConversationCardEntry({
+        messageId,
+        cardId,
+        body: "do not parent a receipt card below a failed rename",
+        kind: "message",
+        fromSnapshot: {
+          conversationId: source.conversationId,
+          role: { id: role.id, name: role.name },
+        },
+        toSnapshot: {
+          conversationId: target.conversationId,
+          role: { id: role.id, name: role.name },
+        },
+        state: "queued",
+        updatedAt: receipt.sentAt,
+      }),
+    );
+    const manager = source.sessionManager as unknown as {
+      appendCustomEntry(customType: string, data: unknown): string;
+    };
+    const originalAppend = manager.appendCustomEntry.bind(manager);
+    let cardAppends = 0;
+    manager.appendCustomEntry = (customType, data) => {
+      if (customType === CONVERSATION_CARD_CUSTOM_TYPE) cardAppends++;
+      return originalAppend(customType, data);
+    };
+    source.quarantineSessionPersistence(
+      new Error("simulated memory-first rename persistence failure"),
+    );
+    const internals = fixture.coordinator as unknown as {
+      projectReceiptSourceCardBestEffort(
+        context: unknown,
+        receipt: typeof receipt,
+      ): Promise<void>;
+    };
+    const context = (fixture.handle as unknown as { context: unknown }).context;
+    await internals.projectReceiptSourceCardBestEffort(context, receipt);
+    expect(cardAppends).toBe(0);
+    expect(aggregateReservedConversationEntries(source.sessionManager.getEntries())
+      .cards.find((card) => card.cardId === cardId)?.state).toBe("queued");
+
+    const reopened = await fixture.coordinator.openConversation(
+      fixture.handle,
+      source.conversationId,
+      { updateRecent: false },
+    );
+    expect(reopened).not.toBe(source);
+    await internals.projectReceiptSourceCardBestEffort(context, receipt);
+    expect(aggregateReservedConversationEntries(reopened.sessionManager.getEntries())
+      .cards.find((card) => card.cardId === cardId)?.state).toBe("delivered");
+  });
+
+  it("removes a quarantined actor after failed explicit-reopen teardown", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    actor.quarantineSessionPersistence(
+      new Error("simulated memory-first rename persistence failure"),
+    );
+    let failDispose = true;
+    fixture.runtime.beforeDisposeSession = (conversationId) => {
+      if (conversationId !== actor.conversationId || !failDispose) return;
+      failDispose = false;
+      throw new Error("simulated quarantined runtime dispose failure");
+    };
+    await expect(fixture.coordinator.openConversation(
+      fixture.handle,
+      actor.conversationId,
+      { updateRecent: false },
+    )).rejects.toThrow("Failed to dispose conversation actor");
+    const context = (fixture.handle as unknown as {
+      context: { actors: Map<string, ConversationActor> };
+    }).context;
+    expect(context.actors.has(actor.conversationId)).toBe(false);
+
+    const reopened = await fixture.coordinator.openConversation(
+      fixture.handle,
+      actor.conversationId,
+      { updateRecent: false },
+    );
+    expect(reopened).not.toBe(actor);
+    expect(reopened.getState().fatalError).toBeUndefined();
+  });
+
+  it("keeps peer delivery fenced after failed recovery until an explicit reopen", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const sourceRun = await startBlockedSourceRun(
+      fixture,
+      source.conversationId,
+    );
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    target.quarantineSessionPersistence(
+      new Error("simulated memory-first rename persistence failure"),
+    );
+    let failDispose = true;
+    fixture.runtime.beforeDisposeSession = (conversationId) => {
+      if (conversationId !== target.conversationId || !failDispose) return;
+      failDispose = false;
+      throw new Error("simulated quarantined runtime dispose failure");
+    };
+    await expect(fixture.coordinator.openConversation(
+      fixture.handle,
+      target.conversationId,
+      { updateRecent: false },
+    )).rejects.toThrow("Failed to dispose conversation actor");
+
+    const inbox = coordinatorInbox(fixture.handle);
+    await expect(executeTool(
+      fixture.runtime.control(source.conversationId),
+      "send_session_message",
+      "fenced-target-peer",
+      {
+        conversationId: target.conversationId,
+        summary: "do not recover a quarantined target",
+        message: "this must not create an actor or append an inbox entry",
+      },
+    )).rejects.toThrow("requires an explicit open");
+    expect(fixture.runtime.createConversationIds.filter(
+      (conversationId) => conversationId === target.conversationId,
+    )).toHaveLength(1);
+    expect(await inbox.list({ toConversationId: target.conversationId })).toEqual([]);
+    expect(aggregateReservedConversationEntries(source.sessionManager.getEntries())
+      .cards.find(({ body }) =>
+        body === "this must not create an actor or append an inbox entry"
+      )).toBeUndefined();
+    await expect(executeTool(
+      fixture.runtime.control(source.conversationId),
+      "peek_session",
+      "fenced-target-peek",
+      { conversationId: target.conversationId, limit: 1 },
+    )).rejects.toThrow("quarantined until an explicit reopen");
+    expect(fixture.runtime.createConversationIds.filter(
+      (conversationId) => conversationId === target.conversationId,
+    )).toHaveLength(1);
+
+    const reopened = await fixture.coordinator.openConversation(
+      fixture.handle,
+      target.conversationId,
+      { updateRecent: false },
+    );
+    expect(reopened.getState().fatalError).toBeUndefined();
+    await expect(executeTool(
+      fixture.runtime.control(source.conversationId),
+      "send_session_message",
+      "fenced-target-peer-after-open",
+      {
+        conversationId: target.conversationId,
+        summary: "the explicit open restored normal delivery",
+        message: "this may now become durable work",
+      },
+    )).resolves.toMatchObject({ conversationId: target.conversationId });
     sourceRun.release.resolve();
     await sourceRun.completion;
   });
