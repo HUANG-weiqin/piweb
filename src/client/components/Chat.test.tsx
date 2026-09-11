@@ -102,6 +102,7 @@ function view(
     conversationReady
     draft={draft}
     draftImages={[]}
+    draftEditable
     submitting={false}
     pendingAdmissions={[]}
     onDraftChange={() => undefined}
@@ -939,6 +940,28 @@ describe("Chat", () => {
     expect(screen.getByRole("button", { name: "设置" }))
       .toHaveTextContent("shared-id");
     expect(progress).not.toHaveTextContent("primary-provider");
+  });
+
+  it("keeps a frozen scoped draft editable while send authority is unavailable", () => {
+    const onDraftChange = vi.fn();
+    const onSend = vi.fn(() => true);
+    render(view(emptyChat, "local next draft", undefined, {
+      online: false,
+      interactive: false,
+      conversationReady: false,
+      submitting: true,
+      draftEditable: true,
+      onDraftChange,
+      onSend,
+    }));
+
+    const input = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
+    expect(input).toBeEnabled();
+    expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+    fireEvent.change(input, { target: { value: "revised local draft" } });
+    expect(onDraftChange).toHaveBeenCalledWith("revised local draft");
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onSend).not.toHaveBeenCalled();
   });
 
   it("keeps send and stop available while the Agent is busy", () => {

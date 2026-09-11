@@ -240,10 +240,32 @@ interface PendingImageOpen extends ActiveFocus {
   target: Window;
 }
 
+interface SubmittedPromptOwner {
+  promptId: string;
+  text: string;
+  images: PromptImage[];
+  status: "rejected" | "unknown";
+}
+
 interface ConversationComposerDraft {
   text: string;
   images: PromptImage[];
-  status: "editing" | "unconfirmed";
+  submittedOwner?: SubmittedPromptOwner;
+}
+
+interface ConversationDraftScope {
+  workspaceKey: string;
+  projectId: string;
+  conversationId: string;
+}
+
+interface PendingAbort extends ActiveFocus {
+  runId: string;
+}
+
+interface SessionControlReady {
+  sessionId: string;
+  projectId: string;
 }
 
 /** busy 时已接受、尚未投递的浏览器 prompt（服务端内存态）。 */
@@ -262,6 +284,16 @@ interface PendingConversationDeletion {
     conversationId: string;
     focusId: string;
   };
+}
+
+interface ConversationRenamePresentation {
+  commandId: string;
+  sessionId: string;
+  workspaceKey: string;
+  projectId: string;
+  conversationId: string;
+  name: string;
+  status: "syncing" | "unknown" | "committed";
 }
 
 interface PendingConversationTruncation {
@@ -591,18 +623,35 @@ export function App() {
   );
   const authFlowIdRef = useRef("");
   const [draft, setDraft] = useState("");
-  const updateDraft = (text: string) => setDraft(text);
+  const draftRef = useRef("");
+  const updateDraft = (text: string) => {
+    draftRef.current = text;
+    setDraft(text);
+  };
   const [draftImages, setDraftImages] = useState<PromptImage[]>([]);
-  const updateDraftImages = (images: PromptImage[]) => setDraftImages(images);
+  const draftImagesRef = useRef<PromptImage[]>([]);
+  const updateDraftImages = (images: PromptImage[]) => {
+    draftImagesRef.current = images;
+    setDraftImages(images);
+  };
+  const [draftScope, setDraftScopeState] = useState<ConversationDraftScope | undefined>(undefined);
+  const draftScopeRef = useRef<ConversationDraftScope | undefined>(undefined);
+  const updateDraftScope = (scope: ConversationDraftScope | undefined) => {
+    draftScopeRef.current = scope;
+    setDraftScopeState(scope);
+  };
   const conversationDraftByScopeRef = useRef(
     new Map<string, ConversationComposerDraft>(),
   );
   const clearDraftProjection = () => {
+    updateDraftScope(undefined);
     updateDraft("");
     updateDraftImages([]);
   };
   const [pendingPrompt, setPendingPrompt] = useState<DirectPendingPrompt>();
   const pendingPromptRef = useRef<DirectPendingPrompt | undefined>(undefined);
+  const [pendingAbort, setPendingAbortState] = useState<PendingAbort>();
+  const pendingAbortRef = useRef<PendingAbort | undefined>(undefined);
   const [pendingAdmissions, setPendingAdmissions] = useState<PendingAdmission[]>([]);
   const pendingAdmissionsRef = useRef<PendingAdmission[]>([]);
   const replacePendingAdmissions = (admissions: PendingAdmission[]) => {
@@ -624,6 +673,11 @@ export function App() {
     useState<PendingConversationDeletion>();
   const pendingConversationDeletionRef =
     useRef<PendingConversationDeletion | undefined>(undefined);
+  const [conversationRenamePresentations, setConversationRenamePresentations] =
+    useState(new Map<string, ConversationRenamePresentation>());
+  const conversationRenamePresentationsRef = useRef(
+    new Map<string, ConversationRenamePresentation>(),
+  );
   const [pendingConversationTruncation, setPendingConversationTruncationState] =
     useState<PendingConversationTruncation>();
   const pendingConversationTruncationRef =
@@ -663,6 +717,9 @@ export function App() {
   );
   const [conversationReady, setConversationReady] = useState(false);
   const conversationReadyRef = useRef(false);
+  const [sessionControlReady, setSessionControlReadyState] =
+    useState<SessionControlReady | undefined>(undefined);
+  const sessionControlReadyRef = useRef<SessionControlReady | undefined>(undefined);
   const workspaceProjectionCacheRef = useRef(
     new Map<string, CachedWorkspaceProjection>(),
   );
@@ -764,16 +821,17 @@ export function App() {
     pendingPromptRef.current = prompt;
     setPendingPrompt(prompt);
   };
+  const updatePendingAbort = (pending: PendingAbort | undefined) => {
+    pendingAbortRef.current = pending;
+    setPendingAbortState(pending);
+  };
+  const updateSessionControlReady = (ready: SessionControlReady | undefined) => {
+    sessionControlReadyRef.current = ready;
+    setSessionControlReadyState(ready);
+  };
   const currentWorkspaceKey = () => workspaceKey(activeCwdRef.current);
   const focusedConversationNeedsSnapshot = () =>
     Boolean(focusRef.current) && !conversationReadyRef.current;
-  const conversationKey = (
-    focus: Pick<ActiveFocus, "projectId" | "conversationId">,
-  ) => conversationScopeKey(
-    currentWorkspaceKey(),
-    focus.projectId,
-    focus.conversationId,
-  );
   const pendingConversationKey = (
     focus: Pick<ActiveFocus, "projectId" | "conversationId"> & { workspaceKey: string },
   ) => conversationScopeKey(
@@ -911,46 +969,96 @@ export function App() {
     discardCachedWorkspacePresentation();
     updateWorkspaceSyncing(false);
   };
-  const showConversationDraft = (scope: {
-    workspaceKey: string;
-    projectId: string;
-    conversationId: string;
-  }) => {
+  const showConversationDraft = (scope: ConversationDraftScope) => {
+    updateDraftScope(scope);
     const key = pendingConversationKey(scope);
     const savedDraft = conversationDraftByScopeRef.current.get(key);
     updateDraft(savedDraft?.text ?? "");
     updateDraftImages(savedDraft?.images ?? []);
-    setPromptNotice(
-      savedDraft?.status === "unconfirmed" ? UNCONFIRMED_PROMPT_NOTICE : "",
-    );
+    setPromptNotice(savedDraft?.submittedOwner?.status === "unknown"
+      ? UNCONFIRMED_PROMPT_NOTICE
+      : savedDraft?.submittedOwner?.status === "rejected"
+      ? "消息未被服务端接收。内容已保留，可以修改后重试。"
+      : "");
   };
   const updateConversationDraft = (next: Pick<
     ConversationComposerDraft,
     "text" | "images"
   >) => {
-    const focus = focusRef.current;
-    if (!focus) return;
-    const key = conversationKey(focus);
+    const scope = draftScopeRef.current;
+    if (!scope) return;
+    const key = pendingConversationKey(scope);
     const savedDraft = conversationDraftByScopeRef.current.get(key);
-    if (!next.text && next.images.length === 0) {
+    if (!next.text && next.images.length === 0 && !savedDraft?.submittedOwner) {
       conversationDraftByScopeRef.current.delete(key);
     } else {
       conversationDraftByScopeRef.current.set(key, {
         ...next,
-        status: savedDraft?.status ?? "editing",
+        ...(savedDraft?.submittedOwner
+          ? { submittedOwner: savedDraft.submittedOwner }
+          : {}),
       });
     }
   };
-  const rememberUnconfirmedPrompt = (pending: DirectPendingPrompt) => {
-    conversationDraftByScopeRef.current.set(
-      pendingConversationKey(pending),
-      { text: pending.text, images: pending.images, status: "unconfirmed" },
-    );
-  };
-  const forgetConversationDraft = (
-    focus: Pick<DirectPendingPrompt, "workspaceKey" | "projectId" | "conversationId">,
+  const rememberSubmittedPrompt = (
+    pending: DirectPendingPrompt,
+    status: SubmittedPromptOwner["status"],
   ) => {
-    conversationDraftByScopeRef.current.delete(pendingConversationKey(focus));
+    const key = pendingConversationKey(pending);
+    const savedDraft = conversationDraftByScopeRef.current.get(key);
+    const submittedOwner = {
+      promptId: pending.promptId,
+      text: pending.text,
+      images: pending.images,
+      status,
+    };
+    const activeScope = draftScopeRef.current;
+    const isVisibleEmptyDraft = activeScope !== undefined
+      && pendingConversationKey(activeScope) === key
+      && !draftRef.current
+      && draftImagesRef.current.length === 0;
+    const text = isVisibleEmptyDraft ? pending.text : savedDraft?.text ?? "";
+    const images = isVisibleEmptyDraft ? pending.images : savedDraft?.images ?? [];
+    conversationDraftByScopeRef.current.set(key, { text, images, submittedOwner });
+    if (isVisibleEmptyDraft) {
+      updateDraft(text);
+      updateDraftImages(images);
+    }
+  };
+  const settleAcceptedPromptDraft = (pending: DirectPendingPrompt) => {
+    const scope = draftScopeRef.current;
+    if (!scope || pendingConversationKey(scope) !== pendingConversationKey(pending)) {
+      return;
+    }
+    const currentImages = draftImagesRef.current;
+    const stillShowingSubmittedPayload = draftRef.current.trim() === pending.text
+      && currentImages.length === pending.images.length
+      && currentImages.every((image, index) => (
+        image.mimeType === pending.images[index]?.mimeType
+        && image.data === pending.images[index]?.data
+      ));
+    if (!stillShowingSubmittedPayload) return;
+    conversationDraftByScopeRef.current.delete(pendingConversationKey(scope));
+    updateDraft("");
+    updateDraftImages([]);
+  };
+  const alignVisibleDraftScopeWorkspace = (cwd: string, focus: ActiveFocus) => {
+    const scope = draftScopeRef.current;
+    if (
+      !scope
+      || scope.projectId !== focus.projectId
+      || scope.conversationId !== focus.conversationId
+    ) return;
+    const nextWorkspaceKey = workspaceKey(cwd);
+    if (scope.workspaceKey === nextWorkspaceKey) return;
+    const previousKey = pendingConversationKey(scope);
+    const nextScope = { ...scope, workspaceKey: nextWorkspaceKey };
+    const draft = conversationDraftByScopeRef.current.get(previousKey);
+    if (draft) {
+      conversationDraftByScopeRef.current.delete(previousKey);
+      conversationDraftByScopeRef.current.set(pendingConversationKey(nextScope), draft);
+    }
+    updateDraftScope(nextScope);
   };
   const rememberWorkspace = (cwd: string) => {
     const current = workspacesRef.current;
@@ -981,6 +1089,51 @@ export function App() {
   ) => {
     pendingConversationDeletionRef.current = pending;
     setPendingConversationDeletionState(pending);
+  };
+  const updateConversationRenamePresentation = (
+    key: string,
+    presentation: ConversationRenamePresentation | undefined,
+  ) => {
+    const next = new Map(conversationRenamePresentationsRef.current);
+    if (presentation) next.set(key, presentation);
+    else next.delete(key);
+    conversationRenamePresentationsRef.current = next;
+    setConversationRenamePresentations(next);
+  };
+  const markSyncingRenamesUnknown = () => {
+    const next = new Map(conversationRenamePresentationsRef.current);
+    let changed = false;
+    for (const [key, presentation] of next) {
+      if (presentation.status !== "syncing") continue;
+      next.set(key, { ...presentation, status: "unknown" });
+      changed = true;
+    }
+    if (!changed) return;
+    conversationRenamePresentationsRef.current = next;
+    setConversationRenamePresentations(next);
+  };
+  const clearRenamesConfirmedByProjectSnapshot = (
+    projectId: string,
+    conversations: readonly ConversationSummary[],
+  ) => {
+    const namesByConversationId = new Map(
+      conversations.map((conversation) => [conversation.id, conversation.name]),
+    );
+    const workspaceKeyValue = currentWorkspaceKey();
+    const next = new Map(conversationRenamePresentationsRef.current);
+    let changed = false;
+    for (const [key, presentation] of next) {
+      if (
+        presentation.workspaceKey !== workspaceKeyValue
+        || presentation.projectId !== projectId
+        || namesByConversationId.get(presentation.conversationId) !== presentation.name
+      ) continue;
+      next.delete(key);
+      changed = true;
+    }
+    if (!changed) return;
+    conversationRenamePresentationsRef.current = next;
+    setConversationRenamePresentations(next);
   };
   const updatePendingConversationTruncation = (
     pending: PendingConversationTruncation | undefined,
@@ -1132,6 +1285,20 @@ export function App() {
     preserveDraft = false,
   ) => {
     closePendingImageOpens();
+    const pendingAbort = pendingAbortRef.current;
+    if (
+      pendingAbort
+      && (
+        !conversationId
+        || !focusId
+        || !sameFocus(pendingAbort, {
+          sessionId,
+          projectId,
+          conversationId,
+          focusId,
+        })
+      )
+    ) updatePendingAbort(undefined);
     updatePendingCompactionThreshold(undefined);
     updatePendingServiceTier(undefined);
     updatePendingConversationTruncation(undefined);
@@ -1195,9 +1362,8 @@ export function App() {
       text: pending.text || "[图片]",
       ...focus,
     });
-    forgetConversationDraft(pending);
-    clearDraftProjection();
     setPromptNotice("");
+    settleAcceptedPromptDraft(pending);
     updatePendingPrompt(undefined);
     updateOutstandingRunId(runId);
   };
@@ -1205,14 +1371,12 @@ export function App() {
     const pending = pendingPromptRef.current;
     if (!pending) return;
     updatePendingPrompt(undefined);
-    const currentFocus = focusRef.current;
-    const pendingIsCurrent = currentFocus?.projectId === pending.projectId
-      && currentFocus.conversationId === pending.conversationId
-      && currentFocus.focusId === pending.focusId;
-    rememberUnconfirmedPrompt(pending);
-    if (pendingIsCurrent) {
-      updateDraft(pending.text);
-      updateDraftImages(pending.images);
+    rememberSubmittedPrompt(pending, "unknown");
+    const activeScope = draftScopeRef.current;
+    if (
+      activeScope
+      && pendingConversationKey(activeScope) === pendingConversationKey(pending)
+    ) {
       setPromptNotice(UNCONFIRMED_PROMPT_NOTICE);
     }
   };
@@ -1295,6 +1459,8 @@ export function App() {
     updatePendingConversationTruncation(undefined);
     updatePendingConversationDeletion(undefined);
     clearPendingAdmissions();
+    updatePendingAbort(undefined);
+    updateSessionControlReady(undefined);
     setRoleOperationResult(undefined);
     updatePendingRoleOperation(undefined);
     setSettingsDialogOpen(false);
@@ -1320,8 +1486,21 @@ export function App() {
     if (nextState.activeRun?.id === outstandingRunIdRef.current) {
       updateOutstandingRunId("");
     }
+    const pendingAbort = pendingAbortRef.current;
+    if (
+      pendingAbort
+      && nextState.sessionId === pendingAbort.sessionId
+      && nextState.projectId === pendingAbort.projectId
+      && nextState.conversationId === pendingAbort.conversationId
+      && nextState.focusId === pendingAbort.focusId
+      && nextState.activeRun?.id !== pendingAbort.runId
+    ) updatePendingAbort(undefined);
     setActiveCwd(nextState.cwd);
     activeCwdRef.current = nextState.cwd;
+    if (
+      currentFocus
+      && stateMatchesFocus(nextState, currentFocus)
+    ) alignVisibleDraftScopeWorkspace(nextState.cwd, currentFocus);
     setSetupCwd(nextState.cwd);
     rememberWorkspace(nextState.cwd);
     markWorkspaceAvailable(nextState.cwd);
@@ -1359,6 +1538,18 @@ export function App() {
       projectionSeq: event.projectionSeq,
       historyWindow: event.window,
     })) return;
+    const scope = draftScopeRef.current;
+    if (
+      !scope
+      || scope.projectId !== focus.projectId
+      || scope.conversationId !== focus.conversationId
+    ) {
+      showConversationDraft({
+        workspaceKey: currentWorkspaceKey(),
+        projectId: focus.projectId,
+        conversationId: focus.conversationId,
+      });
+    }
     const snapshotObservation = {
       sessionId: event.sessionId,
       conversationId: event.conversationId,
@@ -1962,6 +2153,12 @@ export function App() {
           }, event.transitionDiagnostics);
         }
         updatePendingFocus(undefined);
+        if (event.operation === "initialize") {
+          updateSessionControlReady({
+            sessionId: event.sessionId,
+            projectId: event.projectId,
+          });
+        }
         updateConversationSyncing(
           event.operation === "focus_conversation"
           || event.operation === "create_conversation",
@@ -2130,6 +2327,10 @@ export function App() {
         const membershipIsAuthoritative = event.coverage === "complete"
           && !event.truncated;
         if (membershipIsAuthoritative) {
+          clearRenamesConfirmedByProjectSnapshot(
+            event.projectId,
+            event.conversations,
+          );
           authoritativeProjectMembershipRef.current.set(
             event.projectId,
             existingConversationIds,
@@ -2196,9 +2397,8 @@ export function App() {
           && pending.conversationId === event.conversationId
           && pending.focusId === event.focusId
         ) {
-          forgetConversationDraft(pending);
-          clearDraftProjection();
           setPromptNotice("");
+          settleAcceptedPromptDraft(pending);
           updatePendingPrompt(undefined);
           if (outstandingRunIdRef.current === pending.runId) {
             updateOutstandingRunId("");
@@ -2260,6 +2460,13 @@ export function App() {
         if (event.event.type === "run_finished" && event.runId === outstandingRunIdRef.current) {
           updateOutstandingRunId("");
         }
+        const pendingAbort = pendingAbortRef.current;
+        if (
+          pendingAbort
+          && event.event.type === "run_finished"
+          && event.runId === pendingAbort.runId
+          && sameFocus(pendingAbort, focusRef.current ?? pendingAbort)
+        ) updatePendingAbort(undefined);
         if (
           event.event.type === "run_finished"
           && event.event.outcome === "aborted"
@@ -2321,6 +2528,26 @@ export function App() {
         setAuth({});
       } else if (event.type === "command_complete") {
         if (event.sessionId !== sessionIdRef.current) return;
+        if (event.operation === "rename_conversation") {
+          for (const [key, presentation] of conversationRenamePresentationsRef.current) {
+            if (
+              presentation.sessionId === event.sessionId
+              && presentation.commandId === event.commandId
+            ) {
+              updateConversationRenamePresentation(key, {
+                ...presentation,
+                status: "committed",
+              });
+              setNotification({
+                id: ++notificationIdRef.current,
+                level: "info",
+                message: "对话名称已保存",
+              });
+              return;
+            }
+          }
+          return;
+        }
         if (event.operation === "set_service_tier") {
           const pending = pendingServiceTierRef.current;
           if (
@@ -2418,8 +2645,10 @@ export function App() {
           }
 
           conversationDraftByScopeRef.current.delete(targetKey);
+          updateConversationRenamePresentation(targetKey, undefined);
           if (affectedFocusKey) {
             conversationDraftByScopeRef.current.delete(affectedFocusKey);
+            updateConversationRenamePresentation(affectedFocusKey, undefined);
           }
           if (
             pending.affectedFocus !== undefined
@@ -2550,6 +2779,34 @@ export function App() {
           return;
         }
         if (event.sessionId && event.sessionId !== sessionIdRef.current) return;
+        if (
+          event.operation === "rename_conversation"
+          && event.sessionId
+          && event.commandId
+        ) {
+          for (const [key, presentation] of conversationRenamePresentationsRef.current) {
+            if (
+              presentation.sessionId !== event.sessionId
+              || presentation.commandId !== event.commandId
+              || (
+                event.conversationId !== undefined
+                && presentation.conversationId !== event.conversationId
+              )
+            ) continue;
+            if (event.scope === "settings") {
+              updateConversationRenamePresentation(key, {
+                ...presentation,
+                status: "unknown",
+              });
+              setError(`对话名称已用于当前会话，但可能未保存到项目历史：${event.message}`);
+            } else {
+              updateConversationRenamePresentation(key, undefined);
+              setError(`重命名对话失败：${event.message}`);
+            }
+            return;
+          }
+          return;
+        }
         const supersededFocusError = event.commandId
           && event.operation === "focus_conversation"
           ? supersededFocusCommandsRef.current.get(event.commandId)
@@ -2611,6 +2868,20 @@ export function App() {
             commandId: "",
             error: event.message,
           });
+          return;
+        }
+        if (event.operation === "abort") {
+          const pendingAbort = pendingAbortRef.current;
+          if (
+            pendingAbort
+            && event.sessionId === pendingAbort.sessionId
+            && event.conversationId === pendingAbort.conversationId
+            && event.focusId === pendingAbort.focusId
+            && event.runId === pendingAbort.runId
+          ) {
+            updatePendingAbort(undefined);
+            setError(`停止请求失败：${event.message}`);
+          }
           return;
         }
         if (event.operation === "set_service_tier" && event.commandId) {
@@ -2820,6 +3091,7 @@ export function App() {
           ) {
             promptRejectedBeforeAcceptance = true;
             updatePendingPrompt(undefined);
+            rememberSubmittedPrompt(pending, "rejected");
             setPromptNotice(
               `消息未被服务端接收：${event.message}。内容已保留，可以修改后重试。`,
             );
@@ -2891,6 +3163,9 @@ export function App() {
         setProjectActivityTruncated(false);
         pendingSettingCommandsRef.current = {};
         setSettingResults({});
+        updateSessionControlReady(undefined);
+        markSyncingRenamesUnknown();
+        updatePendingAbort(undefined);
         if (pendingColorSchemeRef.current) {
           updatePendingColorScheme(undefined);
           setColorSchemeSaveError("连接已断开，无法确认配色是否保存；重连后请重试。");
@@ -3242,7 +3517,15 @@ export function App() {
     if (pendingConversationTruncationRef.current) return false;
     const sessionId = sessionIdRef.current;
     const focus = focusRef.current;
-    if (!sessionId || !focus || focus.sessionId !== sessionId) return false;
+    const scope = draftScopeRef.current;
+    if (
+      !sessionId
+      || !focus
+      || focus.sessionId !== sessionId
+      || !scope
+      || scope.projectId !== focus.projectId
+      || scope.conversationId !== focus.conversationId
+    ) return false;
     const knownRunOwnerId = state?.activeRun?.id || outstandingRunIdRef.current;
     const runId = crypto.randomUUID();
     const promptId = crypto.randomUUID();
@@ -3260,13 +3543,14 @@ export function App() {
       setPromptNotice("图片和消息合计超过单条传输上限，请移除图片或缩短消息。");
       return false;
     }
+    const submittedImages = [...images];
     const pending: DirectPendingPrompt = {
       ...focus,
-      workspaceKey: currentWorkspaceKey(),
+      workspaceKey: scope.workspaceKey,
       runId,
       promptId,
       text: trimmed,
-      images,
+      images: submittedImages,
     };
     setPromptNotice("");
     updatePendingPrompt(pending);
@@ -3276,8 +3560,9 @@ export function App() {
       updatePendingPrompt(undefined);
       if (outstandingRunIdRef.current === runId) updateOutstandingRunId("");
       setPromptNotice("消息未发送，内容已保留，可以重试。");
+      return false;
     }
-    return ok;
+    return true;
   };
   const submitPrompt = (text: string, images: PromptImage[]): boolean => {
     const trimmed = text.trim();
@@ -3297,15 +3582,24 @@ export function App() {
     const runId = state?.activeRun?.id || outstandingRunIdRef.current;
     const sessionId = sessionIdRef.current;
     const focus = focusRef.current;
-    if (sessionId && runId && focus) {
-      send({
-        type: "abort",
-        sessionId,
-        conversationId: focus.conversationId,
-        focusId: focus.focusId,
-        runId,
-      });
-    }
+    const existingAbort = pendingAbortRef.current;
+    if (
+      !sessionId
+      || !runId
+      || !focus
+      || (
+        existingAbort?.runId === runId
+        && sameFocus(existingAbort, focus)
+      )
+    ) return;
+    const pending = { ...focus, runId };
+    if (send({
+      type: "abort",
+      sessionId,
+      conversationId: focus.conversationId,
+      focusId: focus.focusId,
+      runId,
+    })) updatePendingAbort(pending);
   };
   const focusConversation = (conversationId: string) => {
     const sessionId = sessionIdRef.current;
@@ -3496,6 +3790,16 @@ export function App() {
           focusId: focus.focusId,
         }
       : undefined;
+    const knownBusyDescendant = conversations.some((candidate) => (
+      candidate.rootConversationId === conversationId
+      && (
+        candidate.compacting
+        || (candidate.activity?.kind ?? "idle") !== "idle"
+      )
+    ));
+    const renamePresentation = conversationRenamePresentationsRef.current.get(
+      conversationScopeKey(currentWorkspaceKey(), projectId, conversationId),
+    );
     if (
       !sessionId
       || workspaceSyncingRef.current
@@ -3504,6 +3808,9 @@ export function App() {
       || !projectId
       || !conversation
       || (conversation.activity?.kind ?? "idle") !== "idle"
+      || knownBusyDescendant
+      || renamePresentation?.status === "syncing"
+      || renamePresentation?.status === "unknown"
       || (
         affectedFocus
         && (Boolean(state?.busy) || Boolean(outstandingRunIdRef.current))
@@ -3544,20 +3851,40 @@ export function App() {
     updatePendingConversationDeletion(undefined);
     return false;
   };
-  const renameConversation = (conversationId: string, name: string) => {
+  const renameConversation = (conversationId: string, name: string): boolean => {
     const sessionId = sessionIdRef.current;
+    const projectId = projectIdRef.current;
+    const workspaceKeyValue = currentWorkspaceKey();
+    const key = conversationScopeKey(workspaceKeyValue, projectId, conversationId);
+    const existing = conversationRenamePresentationsRef.current.get(key);
     if (
       !sessionId
+      || !projectId
+      || !conversations.some(({ id }) => id === conversationId)
       || workspaceSyncingRef.current
       || conversationSyncingRef.current
       || focusedConversationNeedsSnapshot()
-    ) return;
-    send({
+      || existing?.status === "syncing"
+      || existing?.status === "unknown"
+    ) return false;
+    const commandId = crypto.randomUUID();
+    if (!send({
       type: "rename_conversation",
+      commandId,
       sessionId,
       conversationId,
       name,
+    })) return false;
+    updateConversationRenamePresentation(key, {
+      commandId,
+      sessionId,
+      workspaceKey: workspaceKeyValue,
+      projectId,
+      conversationId,
+      name,
+      status: "syncing",
     });
+    return true;
   };
   const truncateConversation = (messageId: string, text: string): boolean => {
     const focus = focusRef.current;
@@ -4017,12 +4344,12 @@ export function App() {
   const handleConversationDelete = useLatestCallback(deleteConversation);
   const handleChatDraftChange = useLatestCallback((text: string) => {
     updateDraft(text);
-    updateConversationDraft({ text, images: draftImages });
+    updateConversationDraft({ text, images: draftImagesRef.current });
     if (promptNotice) setPromptNotice("");
   });
   const handleChatImagesChange = useLatestCallback((images: PromptImage[]) => {
     updateDraftImages(images);
-    updateConversationDraft({ text: draft, images });
+    updateConversationDraft({ text: draftRef.current, images });
     if (promptNotice) setPromptNotice("");
   });
   const handleChatSend = useLatestCallback((text: string, images: PromptImage[]) =>
@@ -4219,6 +4546,17 @@ export function App() {
   const visiblePresentationConversationId = runtimeState?.conversationId
     ?? transitionPresentation?.conversationId
     ?? currentFocus?.conversationId;
+  const sidebarRenamePresentations = useMemo(() => new Map(
+    [...conversationRenamePresentations.values()]
+      .filter((presentation) => (
+        presentation.workspaceKey === workspaceKey(activeCwd)
+        && presentation.projectId === visibleProjectId
+      ))
+      .map((presentation) => [presentation.conversationId, {
+        name: presentation.name,
+        status: presentation.status,
+      }]),
+  ), [activeCwd, conversationRenamePresentations, visibleProjectId]);
   const attachedRuntimeUnknown = Boolean(currentFocus && !runtimeState);
   const showRoleSelection = selectingRole || (
     !currentFocus && !visiblePresentationConversationId
@@ -4433,11 +4771,37 @@ export function App() {
   const visibleActiveRun = transitioning || switchingFocus || !runtimeState
     ? undefined
     : runtimeState.activeRun;
+  const visibleStopping = Boolean(
+    pendingAbort
+    && currentFocus
+    && runtimeState
+    && sameFocus(pendingAbort, currentFocus)
+    && (runtimeState.activeRun?.id ?? outstandingRunId) === pendingAbort.runId,
+  );
+  const draftScopeMatchesCurrentFocus = Boolean(
+    draftScope
+    && currentFocus
+    && draftScope.workspaceKey === currentWorkspaceKey()
+    && draftScope.projectId === currentFocus.projectId
+    && draftScope.conversationId === currentFocus.conversationId,
+  );
+  const draftScopeMatchesPendingFocus = Boolean(
+    draftScope
+    && pendingFocus
+    && draftScope.workspaceKey === pendingFocus.workspaceKey
+    && draftScope.projectId === pendingFocus.targetProjectId
+    && draftScope.conversationId === pendingFocus.targetConversationId,
+  );
+  const draftEditable = !pendingConversationTruncation
+    && (draftScopeMatchesCurrentFocus || draftScopeMatchesPendingFocus);
   const focusAwaitingSnapshot = Boolean(currentFocus) && !conversationReady;
   const settingsEnabled = Boolean(runtimeState)
     && !transitioning
     && !focusAwaitingSnapshot
     && !attachedRuntimeUnknown;
+  const sessionControlsEnabled = online
+    && sessionControlReady?.sessionId === sessionIdRef.current
+    && sessionControlReady?.projectId === projectIdRef.current;
   const visibleCompacting = transitioning ? false : conversationCompacting;
   const visibleCompactionAttempt = runtimeState?.compacting === true
     ? runtimeState.compactionAttempt
@@ -4456,6 +4820,7 @@ export function App() {
         focusedConversationId={focusedConversationId}
         scopeKey={sidebarScopeKey}
         busyConversationId={visibleBusyConversationId}
+        renamePresentations={sidebarRenamePresentations}
         collapsed={sidebarCollapsed}
         navigationEnabled={
           online
@@ -4655,6 +5020,8 @@ export function App() {
               conversationReady={visibleConversationReady}
               draft={draft}
               draftImages={draftImages}
+              draftEditable={draftEditable}
+              draftScopeKey={draftScope ? pendingConversationKey(draftScope) : undefined}
               submitting={Boolean(pendingPrompt)}
               pendingAdmissions={pendingAdmissions}
               promptNotice={promptNotice || undefined}
@@ -4662,6 +5029,7 @@ export function App() {
               onImagesChange={handleChatImagesChange}
               onSend={handleChatSend}
               onAbort={handleChatAbort}
+              stopping={visibleStopping}
               onSettings={handleChatSettings}
               onThinking={handleChatThinking}
               onServiceTier={handleChatServiceTier}
@@ -4681,7 +5049,7 @@ export function App() {
       open={drawer}
       covered={blockingModalVisible}
       resolveReturnFocus={drawerReturnFocusRef.current ?? undefined}
-      online={online && settingsEnabled}
+      online={sessionControlsEnabled}
       preferencesOnline={online}
       colorScheme={visibleColorScheme}
       colorSchemePending={Boolean(pendingColorScheme)}
@@ -4700,7 +5068,7 @@ export function App() {
       onKey={(provider, key) => {
         const commandId = crypto.randomUUID();
         const sessionId = sessionIdRef.current;
-        if (!sessionId || focusedConversationNeedsSnapshot()) return undefined;
+        if (!sessionId || !sessionControlsEnabled) return undefined;
         setSettingResults((current) => ({ ...current, set_api_key: undefined }));
         pendingSettingCommandsRef.current.set_api_key = { sessionId, commandId };
         if (send({ type: "set_api_key", commandId, sessionId, provider, key })) {
@@ -4710,7 +5078,7 @@ export function App() {
         return undefined;
       }}
       onOAuth={(provider) => {
-        if (focusedConversationNeedsSnapshot()) return;
+        if (!sessionControlsEnabled) return;
         const authFlowId = crypto.randomUUID();
         authFlowIdRef.current = authFlowId;
         setAuth({ progress: "正在启动登录…" });
@@ -4720,14 +5088,14 @@ export function App() {
         }
       }}
       onLogout={(provider) => (
-        focusedConversationNeedsSnapshot()
-          ? false
-          : send({ type: "logout", provider })
+        sessionControlsEnabled
+          ? send({ type: "logout", provider })
+          : false
       )}
       onRefresh={() => {
          const commandId = crypto.randomUUID();
          const sessionId = sessionIdRef.current;
-         if (!sessionId || focusedConversationNeedsSnapshot()) return undefined;
+         if (!sessionId || !sessionControlsEnabled) return undefined;
          setSettingResults((current) => ({ ...current, refresh_models: undefined }));
          pendingSettingCommandsRef.current.refresh_models = { sessionId, commandId };
          if (send({ type: "refresh_models", commandId, sessionId })) return commandId;

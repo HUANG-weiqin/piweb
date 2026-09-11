@@ -172,6 +172,9 @@ interface ChatProps {
   conversationReady: boolean;
   draft: string;
   draftImages: PromptImage[];
+  /** A frozen conversation scope may accept local draft edits before send authority returns. */
+  draftEditable: boolean;
+  draftScopeKey?: string;
   submitting: boolean;
   /** busy 时已接受、尚未投递的浏览器 prompt（显示为对话流中的等待中消息）。 */
   pendingAdmissions: PendingAdmission[];
@@ -180,6 +183,7 @@ interface ChatProps {
   onImagesChange(images: PromptImage[]): void;
   onSend(text: string, images: PromptImage[]): void;
   onAbort(): void;
+  stopping?: boolean;
   onSettings(resolveReturnFocus?: () => HTMLElement | null): void;
   onThinking(level: ThinkingLevel): void;
   onServiceTier(serviceTier: ServiceTier | null): void;
@@ -500,6 +504,8 @@ function ChatView({
   conversationReady,
   draft,
   draftImages,
+  draftEditable,
+  draftScopeKey,
   submitting,
   pendingAdmissions,
   promptNotice,
@@ -507,6 +513,7 @@ function ChatView({
   onImagesChange,
   onSend,
   onAbort,
+  stopping = false,
   onSettings,
   onThinking,
   onServiceTier,
@@ -551,7 +558,9 @@ function ChatView({
     [],
   );
   const [attachmentError, setAttachmentError] = useState("");
-  const attachmentScope = chat.focus
+  const attachmentScope = draftScopeKey
+    ? `draft:${observationSessionId}:${draftScopeKey}`
+    : chat.focus
     ? `${observationSessionId}:${chat.focus.sessionId}:${chat.focus.conversationId}:${chat.focus.focusId}`
     : `unfocused:${observationSessionId}`;
   const attachmentScopeRef = useRef(attachmentScope);
@@ -905,6 +914,7 @@ function ChatView({
     onImagesChangeRef.current(nextImages);
   };
   const pasteImages = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    if (!draftEditable) return;
     const files = Array.from(event.clipboardData.files);
     if (files.length === 0) return;
     event.preventDefault();
@@ -920,6 +930,7 @@ function ChatView({
       || !model
       || !controlsEnabled
       || !conversationReady
+      || !draftEditable
     ) return;
     onSend(value, draftImages);
   };
@@ -1248,6 +1259,9 @@ function ChatView({
       >
         正在彻底删除所选消息及之后的内容…
       </div>}
+      {stopping && <div className="composer-notice pending" role="status">
+        停止请求已发送，正在等待运行状态更新…
+      </div>}
       {promptNotice && <div className="composer-notice" role="alert">{promptNotice}</div>}
       {attachmentError && <div className="composer-notice" role="alert">{attachmentError}</div>}
       {draftImages.length > 0 && <div className="composer-attachments" aria-label="待发送图片">
@@ -1257,20 +1271,21 @@ function ChatView({
             type="button"
             aria-label={`移除图片 ${index + 1}`}
             onClick={() => removeImage(index)}
+            disabled={!draftEditable}
           >×</button>
         </div>)}
       </div>}
       <div className="composer">
         <span className="composer-command-label" aria-hidden="true">COMMAND</span>
-        <textarea ref={textareaRef} aria-label="给 Pi 发送消息" value={draft} onChange={(e) => onDraftChange(e.target.value)} onKeyDown={keyDown} onPaste={pasteImages} placeholder={composerPlaceholder} disabled={!controlsEnabled || !conversationReady || !model || submitting || compacting || roleSwitching || Boolean(rewindingMessageId)} rows={1} />
+        <textarea ref={textareaRef} aria-label="给 Pi 发送消息" value={draft} onChange={(e) => onDraftChange(e.target.value)} onKeyDown={keyDown} onPaste={pasteImages} placeholder={composerPlaceholder} disabled={!draftEditable} rows={1} />
         <div className="composer-actions">
           {busy && <button
             className="send stop"
             onClick={onAbort}
-            aria-label="停止"
-            disabled={!controlsEnabled || !conversationReady}
-          >STOP</button>}
-          <button className="send" onClick={send} disabled={!controlsEnabled || !conversationReady || !model || submitting || compacting || roleSwitching || Boolean(rewindingMessageId) || (!draft.trim() && draftImages.length === 0)} aria-label="发送">SEND</button>
+            aria-label={stopping ? "停止请求已发送" : "停止"}
+            disabled={!controlsEnabled || !conversationReady || stopping}
+          >{stopping ? "STOPPING…" : "STOP"}</button>}
+          <button className="send" onClick={send} disabled={!draftEditable || !controlsEnabled || !conversationReady || !model || submitting || compacting || roleSwitching || Boolean(rewindingMessageId) || (!draft.trim() && draftImages.length === 0)} aria-label="发送">SEND</button>
         </div>
       </div>
       {mobile && <div className="mobile-composer-launchers" aria-label="会话辅助面板">

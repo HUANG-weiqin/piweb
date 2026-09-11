@@ -42,6 +42,11 @@ function clampSidebarWidth(width: number): number {
   );
 }
 
+interface RenamePresentation {
+  name: string;
+  status: "syncing" | "unknown" | "committed";
+}
+
 interface ConversationSidebarProps {
   conversations: ConversationSummary[];
   truncated: boolean;
@@ -49,6 +54,8 @@ interface ConversationSidebarProps {
   focusedConversationId?: string;
   scopeKey?: string;
   busyConversationId?: string;
+  /** Exact rename command settlement owns this local presentation, not a catalog snapshot. */
+  renamePresentations?: ReadonlyMap<string, RenamePresentation>;
   collapsed: boolean;
   navigationEnabled: boolean;
   actionsEnabled: boolean;
@@ -61,7 +68,7 @@ interface ConversationSidebarProps {
   onToggleCollapsed(collapsed: boolean): void;
   onSelect(conversationId: string): void;
   onCreate(): void;
-  onRename(conversationId: string, name: string): void;
+  onRename(conversationId: string, name: string): boolean;
   onDelete(conversationId: string): boolean;
   onBlockingModalChange?(blocking: boolean): void;
 }
@@ -280,6 +287,7 @@ const ConversationRow = memo(function ConversationRow({
   actionsEnabled,
   deletionBlocked,
   cascadeDeleteBlocked = false,
+  renamePresentation,
   busy,
   onSelect,
   onRequestRename,
@@ -293,15 +301,18 @@ const ConversationRow = memo(function ConversationRow({
   actionsEnabled: boolean;
   deletionBlocked: boolean;
   cascadeDeleteBlocked?: boolean;
+  renamePresentation?: RenamePresentation;
   busy: boolean;
   onSelect(conversationId: string): void;
   onRequestRename(conversation: ConversationSummary): void;
   onRequestDelete(conversationId: string): void;
 }) {
-  const title = conversationDisplayTitle(conversation);
+  const title = renamePresentation?.name ?? conversationDisplayTitle(conversation);
   const active = busy || (conversation.activity?.kind ?? "idle") !== "idle";
   const compacting = conversation.compacting;
   const actionBlocked = active || compacting;
+  const renameUnresolved = renamePresentation?.status === "syncing"
+    || renamePresentation?.status === "unknown";
   const classes = [
     "conversation-sidebar-item",
     `hierarchy-${hierarchy}`,
@@ -365,6 +376,22 @@ const ConversationRow = memo(function ConversationRow({
                 !
               </span>
             )}
+            {renamePresentation?.status === "syncing" && (
+              <span
+                className="conversation-activity-indicator activity-waiting"
+                role="status"
+                aria-label="名称同步中"
+                title="名称同步中"
+              >⌛</span>
+            )}
+            {renamePresentation?.status === "unknown" && (
+              <span
+                className="conversation-attention-indicator"
+                role="status"
+                aria-label="名称保存状态未确认"
+                title="名称保存状态未确认"
+              >!</span>
+            )}
             {conversation.unread && (
               <span
                 className="conversation-unread-indicator"
@@ -408,11 +435,18 @@ const ConversationRow = memo(function ConversationRow({
           type="button"
           className="conversation-sidebar-rename ghost"
           aria-label={`重命名会话 ${title}`}
-          disabled={!actionsEnabled || deletionBlocked || actionBlocked}
+          disabled={
+            !actionsEnabled
+            || deletionBlocked
+            || actionBlocked
+            || renameUnresolved
+          }
           title={active
             ? "活跃会话结算后可以重命名"
             : compacting
             ? "上下文压缩完成后可以重命名"
+            : renameUnresolved
+            ? "名称状态确定后可以重命名"
             : "重命名会话"}
           onClick={() => onRequestRename(conversation)}
         >
@@ -449,6 +483,7 @@ function ConversationGroupCard({
   idleRevealed,
   currentConversationId,
   busyConversationId,
+  renamePresentations,
   navigationEnabled,
   actionsEnabled,
   deletionBlocked,
@@ -464,6 +499,7 @@ function ConversationGroupCard({
   idleRevealed: boolean;
   currentConversationId?: string;
   busyConversationId?: string;
+  renamePresentations?: ReadonlyMap<string, RenamePresentation>;
   navigationEnabled: boolean;
   actionsEnabled: boolean;
   deletionBlocked: boolean;
@@ -521,7 +557,8 @@ function ConversationGroupCard({
     new Date(latestTimestamp(conversations)).toISOString(),
   )}`);
   const summary = summaryParts.join(" · ");
-  const title = conversationDisplayTitle(root);
+  const title = renamePresentations?.get(root.id)?.name
+    ?? conversationDisplayTitle(root);
 
   return (
     <li
@@ -537,7 +574,11 @@ function ConversationGroupCard({
           navigationEnabled={navigationEnabled}
           actionsEnabled={actionsEnabled}
           deletionBlocked={deletionBlocked}
-          cascadeDeleteBlocked={conversations.some(({ compacting }) => compacting)}
+          cascadeDeleteBlocked={conversations.some((conversation) => (
+            conversation.id !== root.id
+            && (conversation.compacting || isActive(conversation, busyConversationId))
+          ))}
+          renamePresentation={renamePresentations?.get(root.id)}
           busy={root.id === busyConversationId}
           onSelect={onSelect}
           onRequestRename={onRequestRename}
@@ -551,7 +592,6 @@ function ConversationGroupCard({
         aria-expanded={expanded}
         aria-controls={controlsId}
         aria-describedby={summaryId}
-        disabled={!navigationEnabled || deletionBlocked}
         onClick={() => onToggleExpanded(root.id)}
       >
         <span id={summaryId} className="conversation-group-summary">
@@ -573,6 +613,7 @@ function ConversationGroupCard({
               navigationEnabled={navigationEnabled}
               actionsEnabled={actionsEnabled}
               deletionBlocked={deletionBlocked}
+              renamePresentation={renamePresentations?.get(conversation.id)}
               busy={conversation.id === busyConversationId}
               onSelect={onSelect}
               onRequestRename={onRequestRename}
@@ -583,7 +624,6 @@ function ConversationGroupCard({
         {hiddenIdleCount > 0 && <button
           type="button"
           className="conversation-group-reveal ghost"
-          disabled={!navigationEnabled || deletionBlocked}
           onClick={() => onRevealIdle(root.id)}
         >
           显示其余 {hiddenIdleCount} 个空闲 Agent
@@ -600,6 +640,7 @@ function ConversationSidebarView({
   focusedConversationId,
   scopeKey = "",
   busyConversationId,
+  renamePresentations,
   collapsed,
   navigationEnabled,
   actionsEnabled,
@@ -639,11 +680,14 @@ function ConversationSidebarView({
   const deleteCandidateActive = deleteCandidate !== undefined
     && isActive(deleteCandidate, busyConversationId);
   const deleteCandidateCompacting = deleteCandidate?.compacting === true;
-  const deleteCandidateCascadeCompacting = deleteCandidate !== undefined
+  const deleteCandidateCascadeBlocked = deleteCandidate !== undefined
     && grouped.entries.some((entry) =>
       entry.kind === "group"
       && entry.group.root.id === deleteCandidate.id
-      && entry.group.conversations.some(({ compacting }) => compacting)
+      && entry.group.conversations.some((conversation) => (
+        conversation.id !== deleteCandidate.id
+        && (conversation.compacting || isActive(conversation, busyConversationId))
+      ))
     );
   const renameCandidate = conversations.find(
     ({ id }) => id === renameConversationId,
@@ -661,7 +705,7 @@ function ConversationSidebarView({
     "--conversation-sidebar-width": `${sidebarWidth}px`,
   } as CSSProperties;
   const startResize = (event: PointerEvent<HTMLDivElement>) => {
-    if (!navigationEnabled || event.button !== 0) return;
+    if (event.button !== 0) return;
     resizeState.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
@@ -670,7 +714,6 @@ function ConversationSidebarView({
     event.preventDefault();
   };
   const resizeWithKeyboard = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (!navigationEnabled) return;
     let nextWidth: number | undefined;
     if (event.key === "ArrowLeft") {
       nextWidth = sidebarWidth - SIDEBAR_KEYBOARD_STEP;
@@ -781,17 +824,20 @@ function ConversationSidebarView({
     };
   }, []);
   useEffect(() => {
-    if (sidebarCollapsed || !navigationEnabled) resizeState.current = undefined;
-  }, [navigationEnabled, sidebarCollapsed]);
+    if (sidebarCollapsed) resizeState.current = undefined;
+  }, [sidebarCollapsed]);
   useEffect(() => {
     if (!renameConversationId || renameCandidate) return;
     setRenameConversationId("");
   }, [renameConversationId, renameCandidate]);
 
   const requestRename = useCallback((conversation: ConversationSummary) => {
-    setRenameDraft(conversationDisplayTitle(conversation));
+    setRenameDraft(
+      renamePresentations?.get(conversation.id)?.name
+      ?? conversationDisplayTitle(conversation),
+    );
     setRenameConversationId(conversation.id);
-  }, []);
+  }, [renamePresentations]);
   const requestDelete = useCallback((conversationId: string) => {
     setConfirmDeleteConversationId(conversationId);
   }, []);
@@ -852,7 +898,6 @@ function ConversationSidebarView({
           className="conversation-sidebar-toggle"
           aria-label={sidebarCollapsed ? "展开会话栏" : "收起会话栏"}
           aria-expanded={!sidebarCollapsed}
-          disabled={!navigationEnabled}
           onClick={() => onToggleCollapsed(!sidebarCollapsed)}
         >
           {sidebarCollapsed ? "›" : "‹"}
@@ -873,6 +918,7 @@ function ConversationSidebarView({
                   idleRevealed={revealedIdleRoots.has(entry.group.root.id)}
                   currentConversationId={currentConversationId}
                   busyConversationId={busyConversationId}
+                  renamePresentations={renamePresentations}
                   navigationEnabled={navigationEnabled}
                   actionsEnabled={actionsEnabled}
                   deletionBlocked={deletionBlocked}
@@ -892,6 +938,7 @@ function ConversationSidebarView({
                 navigationEnabled={navigationEnabled}
                 actionsEnabled={actionsEnabled}
                 deletionBlocked={deletionBlocked}
+                renamePresentation={renamePresentations?.get(entry.conversation.id)}
                 busy={entry.conversation.id === busyConversationId}
                 onSelect={onSelect}
                 onRequestRename={requestRename}
@@ -926,8 +973,8 @@ function ConversationSidebarView({
         aria-valuemax={MAX_SIDEBAR_WIDTH}
         aria-valuenow={sidebarWidth}
         aria-valuetext={`${sidebarWidth} 像素`}
-        aria-disabled={!navigationEnabled}
-        tabIndex={navigationEnabled ? 0 : -1}
+        aria-disabled="false"
+        tabIndex={0}
         title="拖动调整会话栏宽度"
         onKeyDown={resizeWithKeyboard}
         onPointerDown={startResize}
@@ -973,7 +1020,7 @@ function ConversationSidebarView({
               || deletionBlocked
               || deleteCandidateActive
               || deleteCandidateCompacting
-              || deleteCandidateCascadeCompacting
+              || deleteCandidateCascadeBlocked
             }
             onClick={() => {
               if (onDelete(deleteCandidate.id)) {
@@ -1005,8 +1052,7 @@ function ConversationSidebarView({
         onSubmit={(event) => {
           event.preventDefault();
           if (renameBlocked || !renameName || renameUnchanged) return;
-          onRename(renameCandidate.id, renameName);
-          closeRenameDialog();
+          if (onRename(renameCandidate.id, renameName)) closeRenameDialog();
         }}
       >
         <header className="modal-header">

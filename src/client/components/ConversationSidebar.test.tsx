@@ -70,7 +70,7 @@ function backdropSidebarProps(
     onToggleCollapsed: () => undefined,
     onSelect: () => undefined,
     onCreate: () => undefined,
-    onRename: () => undefined,
+    onRename: () => true,
     onDelete: () => true,
     ...overrides,
   };
@@ -92,7 +92,7 @@ describe("ConversationSidebar", () => {
       }, []);
       const onToggleCollapsed = useCallback(() => undefined, []);
       const onCreate = useCallback(() => undefined, []);
-      const onRename = useCallback(() => undefined, []);
+      const onRename = useCallback(() => true, []);
       const onDelete = useCallback(() => true, []);
       return <>
         <button type="button" onClick={() => setUnrelated((value) => value + 1)}>
@@ -666,7 +666,7 @@ describe("ConversationSidebar", () => {
       .not.toBeInTheDocument();
   });
 
-  it("keeps navigation available while lifecycle actions are locked and disables all controls offline", () => {
+  it("keeps local presentation controls available while navigation and lifecycle actions are locked", () => {
     const onSelect = vi.fn();
     const onToggleCollapsed = vi.fn();
     const { rerender } = render(
@@ -707,6 +707,7 @@ describe("ConversationSidebar", () => {
     expect(sidebar.style.getPropertyValue("--conversation-sidebar-width"))
       .toBe("306px");
 
+    fireEvent.pointerUp(enabledHandle, { pointerId: 1 });
     rerender(
       <ConversationSidebar
         conversations={[baseConversation]}
@@ -723,32 +724,13 @@ describe("ConversationSidebar", () => {
     );
     expect(screen.getByRole("button", { name: "打开会话 接口设计" }))
       .toBeDisabled();
-    expect(screen.getByRole("button", { name: "收起会话栏" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "收起会话栏" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "新建会话" })).toBeDisabled();
-    const disabledHandle = screen.getByRole("separator", { name: "调整会话栏宽度" });
-    const expectUnchangedWidth = () => {
-      expect(disabledHandle).toHaveAttribute("aria-valuenow", "306");
-      expect(sidebar.style.getPropertyValue("--conversation-sidebar-width"))
-        .toBe("306px");
-    };
-    expect(disabledHandle).toHaveAttribute("aria-disabled", "true");
-    expect(disabledHandle).toHaveAttribute("tabindex", "-1");
-    expectUnchangedWidth();
-
-    fireEvent.pointerMove(disabledHandle, { clientX: 500, pointerId: 1 });
-    expectUnchangedWidth();
-    fireEvent.pointerUp(disabledHandle, { pointerId: 1 });
-    expectUnchangedWidth();
-    fireEvent.pointerDown(disabledHandle, { button: 0, clientX: 306, pointerId: 2 });
-    expectUnchangedWidth();
-    fireEvent.pointerMove(disabledHandle, { clientX: 500, pointerId: 2 });
-    expectUnchangedWidth();
-    fireEvent.pointerUp(disabledHandle, { pointerId: 2 });
-    expectUnchangedWidth();
-    for (const key of ["ArrowLeft", "ArrowRight", "Home", "End"]) {
-      fireEvent.keyDown(disabledHandle, { key });
-      expectUnchangedWidth();
-    }
+    const localHandle = screen.getByRole("separator", { name: "调整会话栏宽度" });
+    expect(localHandle).toHaveAttribute("aria-disabled", "false");
+    expect(localHandle).toHaveAttribute("tabindex", "0");
+    fireEvent.keyDown(localHandle, { key: "ArrowRight" });
+    expect(localHandle).toHaveAttribute("aria-valuenow", "322");
   });
 
   it("resizes the expanded sidebar within fixed pointer and keyboard bounds", () => {
@@ -975,7 +957,7 @@ describe("ConversationSidebar", () => {
   });
 
   it("renames an idle conversation from its sidebar lifecycle actions", () => {
-    const onRename = vi.fn();
+    const onRename = vi.fn(() => true);
     render(
       <ConversationSidebar
         conversations={[baseConversation]}
@@ -1001,6 +983,36 @@ describe("ConversationSidebar", () => {
     fireEvent.change(nameInput, { target: { value: "新名称" } });
     fireEvent.click(screen.getByRole("button", { name: "保存名称" }));
     expect(onRename).toHaveBeenCalledWith(baseConversation.id, "新名称");
+    expect(screen.queryByRole("dialog", { name: "重命名会话" })).not.toBeInTheDocument();
+  });
+
+  it.each(["syncing", "unknown"] as const)(
+    "blocks another rename while the current title is %s",
+    (status) => {
+      render(<ConversationSidebar {...backdropSidebarProps({
+        renamePresentations: new Map([[baseConversation.id, {
+          name: "待确认名称",
+          status,
+        }]]),
+      })} />);
+
+      expect(screen.getByRole("button", { name: "重命名会话 待确认名称" }))
+        .toBeDisabled();
+    },
+  );
+
+  it("retains a rename modal and its draft when the command is not sent", () => {
+    const onRename = vi.fn(() => false);
+    render(<ConversationSidebar {...backdropSidebarProps({ onRename })} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "重命名会话 接口设计" }));
+    const nameInput = screen.getByRole("textbox", { name: "会话名称" });
+    fireEvent.change(nameInput, { target: { value: "本地保留名称" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存名称" }));
+
+    expect(onRename).toHaveBeenCalledWith(baseConversation.id, "本地保留名称");
+    expect(screen.getByRole("dialog", { name: "重命名会话" })).toBeInTheDocument();
+    expect(nameInput).toHaveValue("本地保留名称");
   });
 
   it("blocks deletion while the focused runtime is busy even before its summary refreshes", () => {
@@ -1026,6 +1038,35 @@ describe("ConversationSidebar", () => {
     expect(screen.getByRole("button", { name: "重命名会话 接口设计" }))
       .toBeDisabled();
   });
+
+  it.each(["queued", "running", "waiting", "cancelling"] as const)(
+    "blocks a root delete for a known %s descendant",
+    (kind) => {
+      const root = conversation(`root-${kind}`, "根任务");
+      const child = conversation(`child-${kind}`, "忙碌 Agent", {
+        rootConversationId: root.id,
+        createdBy: { kind: "conversation", conversationId: root.id },
+        activity: kind === "waiting"
+          ? { kind, runId: `run-${kind}`, targetCount: 1 }
+          : { kind, runId: `run-${kind}` },
+      });
+      render(<ConversationSidebar
+        conversations={[root, child]}
+        collapsed={false}
+        truncated={false}
+        navigationEnabled
+        actionsEnabled
+        onToggleCollapsed={vi.fn()}
+        onSelect={vi.fn()}
+        onCreate={vi.fn()}
+        onRename={vi.fn(() => true)}
+        onDelete={vi.fn(() => true)}
+      />);
+
+      expect(screen.getByRole("button", { name: "删除会话 根任务" }))
+        .toBeDisabled();
+    },
+  );
 
   it("projects compaction independently from activity for indicators, counts, and action gates", () => {
     const root = conversation("compacting-root", "压缩任务");
@@ -1416,7 +1457,7 @@ describe("ConversationSidebar", () => {
       />,
     );
     expect(screen.getByRole("button", { name: /协作组 受控任务/ }))
-      .toBeDisabled();
+      .toBeEnabled();
     expect(screen.getByRole("button", { name: "重命名会话 受控任务" }))
       .toBeDisabled();
     expect(screen.getByRole("button", { name: "删除会话 受控任务" }))

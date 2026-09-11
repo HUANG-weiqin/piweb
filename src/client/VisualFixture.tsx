@@ -448,7 +448,7 @@ export function VisualFixture({
       onToggleCollapsed={() => setSidebarCollapsed((collapsed) => !collapsed)}
       onSelect={() => setMobileScene("chat")}
       onCreate={noOp}
-      onRename={noOp}
+      onRename={() => true}
       onDelete={() => true}
     />
     <div
@@ -522,6 +522,7 @@ export function VisualFixture({
           mimeType: "image/png",
           data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLh+QAAAABJRU5ErkJggg==",
         }]}
+        draftEditable
         submitting={false}
         pendingAdmissions={showComposerStates
           ? [{
