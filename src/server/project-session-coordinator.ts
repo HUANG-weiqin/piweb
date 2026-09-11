@@ -7,6 +7,7 @@ import {
   type ConversationImage,
   type ConversationRoleSnapshot,
   type ConversationSummary,
+  type PeerPresenceResolution,
   type ConversationWindowCoverage,
   type ProjectActivitySummary,
   type PromptImage,
@@ -1111,6 +1112,37 @@ export class ProjectSessionCoordinator {
       context,
       this.markConversationRecent(context, actor.conversationId),
     );
+  }
+
+  resolveConversationPeerPresence(
+    handle: ProjectSessionHandle,
+    actor: ConversationActor,
+    conversationIds: readonly string[],
+  ): Promise<ReadonlyMap<string, PeerPresenceResolution>> {
+    let context: ProjectContext;
+    try {
+      context = this.requireContext(handle);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    const ids = [...new Set(conversationIds)];
+    return this.runLifecycle(context, () => {
+      if (!this.isContextConversationActive(context, actor)) {
+        throw new Error(`Conversation is not active: ${actor.conversationId}`);
+      }
+      return context.project.peerPresence(ids);
+    });
+  }
+
+  isConversationActive(
+    handle: ProjectSessionHandle,
+    actor: ConversationActor,
+  ): boolean {
+    try {
+      return this.isContextConversationActive(this.requireContext(handle), actor);
+    } catch {
+      return false;
+    }
   }
 
   async switchConversationRole(
@@ -6266,6 +6298,15 @@ export class ProjectSessionCoordinator {
     const actor = context.actors.get(conversationId);
     if (!actor) throw new Error(`Conversation is not active: ${conversationId}`);
     return actor;
+  }
+
+  private isContextConversationActive(
+    context: ProjectContext,
+    actor: ConversationActor,
+  ): boolean {
+    return context.actors.get(actor.conversationId) === actor
+      && !context.deleting.has(actor.conversationId)
+      && !actor.getState().disposed;
   }
 
   private resolveAvailableConversationRole(

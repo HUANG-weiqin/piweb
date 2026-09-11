@@ -5,7 +5,9 @@ import type {
   AcknowledgedCommandOperation,
   ClientCommand,
   ConversationActivity,
+  ConversationHistoryItem,
   ConversationSummary,
+  PeerPresenceResolution,
   FocusAttachedOperation,
   PublicState,
   ProjectSnapshotCoverage,
@@ -71,11 +73,21 @@ interface CoordinatedProjectView {
   readonly seenMessageCounts: Map<string, number>;
   readonly unreadConversationIds: Set<string>;
   projectSnapshotInitialized: boolean;
+  peerPresenceEpoch: number;
+  peerPresenceRefresh?: PeerPresenceRefresh;
+  peerPresenceTrailing?: PeerPresenceRefresh;
 }
 
 interface ProjectSnapshotRefresh {
   readonly view: CoordinatedProjectView;
   trailing: boolean;
+}
+
+interface PeerPresenceRefresh {
+  readonly actor: ConversationActor;
+  readonly focusId: string;
+  readonly epoch: number;
+  readonly conversationIds: readonly string[];
 }
 
 type ConnectionCommand = Exclude<
@@ -841,6 +853,7 @@ export class PiConnection {
         seenMessageCounts: new Map(),
         unreadConversationIds: new Set(),
         projectSnapshotInitialized: false,
+        peerPresenceEpoch: 0,
         ...(actor === undefined
           ? {}
           : {
@@ -1834,12 +1847,23 @@ case "set_thinking":
         event.transitionDiagnostics = diagnostics.finish(true);
       }
       this.emit(event);
+      this.scheduleFocusedPeerPresence(
+        view,
+        actor,
+        focusId,
+        event.items ?? [],
+      );
     } catch (error) {
       this.emitError("session", error, view.sessionId);
     }
   }
 
-  private publishFocusedConversationItems(): void {
+  private publishFocusedConversationItems(
+    peerPresenceByConversationId?: ReadonlyMap<
+      string,
+      PeerPresenceResolution
+    >,
+  ): void {
     const view = this.coordinatedView;
     const actor = view?.actor;
     if (
@@ -1856,6 +1880,7 @@ case "set_thinking":
         projectConversationPeers(
           items,
           view.handle.project.listConversations(),
+          peerPresenceByConversationId,
         )
       ));
       const items = projection.items;
@@ -1884,9 +1909,108 @@ case "set_thinking":
           item,
         });
       }
+      this.scheduleFocusedPeerPresence(
+        view,
+        actor,
+        view.focusId,
+        items,
+        peerPresenceByConversationId,
+      );
     } catch (error) {
       this.emitError("session", error, view.sessionId);
     }
+  }
+
+  private scheduleFocusedPeerPresence(
+    view: CoordinatedProjectView,
+    actor: ConversationActor,
+    focusId: string,
+    items: readonly ConversationHistoryItem[],
+    peerPresenceByConversationId?: ReadonlyMap<
+      string,
+      PeerPresenceResolution
+    >,
+  ): void {
+    const peerConversationIds = [...new Set(items.flatMap((item) => {
+      if (item.kind !== "session_message") return [];
+      return [item.direction === "incoming"
+        ? item.from.conversationId
+        : item.to.conversationId];
+    }))];
+    if (
+      peerPresenceByConversationId !== undefined
+      && peerConversationIds.every((id) => peerPresenceByConversationId.has(id))
+    ) {
+      return;
+    }
+
+    const request: PeerPresenceRefresh = {
+      actor,
+      focusId,
+      epoch: ++view.peerPresenceEpoch,
+      conversationIds: peerConversationIds,
+    };
+    if (request.conversationIds.length === 0) {
+      view.peerPresenceTrailing = undefined;
+      return;
+    }
+    if (view.peerPresenceRefresh !== undefined) {
+      view.peerPresenceTrailing = request;
+      return;
+    }
+    this.runFocusedPeerPresence(view, request);
+  }
+
+  private runFocusedPeerPresence(
+    view: CoordinatedProjectView,
+    request: PeerPresenceRefresh,
+  ): void {
+    view.peerPresenceRefresh = request;
+    void view.coordinator.resolveConversationPeerPresence(
+      view.handle,
+      request.actor,
+      request.conversationIds,
+    ).then(
+      (peerPresence) => {
+        if (!this.isCurrentFocusedPeerView(
+          view,
+          request.actor,
+          request.focusId,
+          request.epoch,
+        )) return;
+        this.publishFocusedConversationItems(peerPresence);
+      },
+      () => undefined,
+    ).finally(() => {
+      if (view.peerPresenceRefresh !== request) return;
+      view.peerPresenceRefresh = undefined;
+      const trailing = view.peerPresenceTrailing;
+      view.peerPresenceTrailing = undefined;
+      if (
+        trailing === undefined
+        || !this.isCurrentFocusedPeerView(
+          view,
+          trailing.actor,
+          trailing.focusId,
+          trailing.epoch,
+        )
+      ) return;
+      this.runFocusedPeerPresence(view, trailing);
+    });
+  }
+
+  private isCurrentFocusedPeerView(
+    view: CoordinatedProjectView,
+    actor: ConversationActor,
+    focusId: string,
+    epoch: number,
+  ): boolean {
+    return this.isCurrentCoordinatedView(view)
+      && view.coordinator.isConversationActive(view.handle, actor)
+      && view.peerPresenceEpoch === epoch
+      && view.actor === actor
+      && view.conversationId === actor.conversationId
+      && view.focusId === focusId;
   }
 
   private async setCoordinatedThinking(

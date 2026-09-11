@@ -4,6 +4,7 @@ import {
   MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS,
   type ConversationHistoryItem,
   type ConversationSummary,
+  type PeerPresenceResolution,
   type SessionMessageEndpoint,
 } from "../shared/protocol.js";
 
@@ -11,6 +12,7 @@ import {
 export function projectConversationPeers(
   items: readonly ConversationHistoryItem[],
   conversations: readonly ConversationSummary[],
+  peerPresenceByConversationId?: ReadonlyMap<string, PeerPresenceResolution>,
 ): ConversationHistoryItem[] {
   const summaries = new Map(
     conversations.map((conversation) => [conversation.id, conversation]),
@@ -40,7 +42,8 @@ export function projectConversationPeers(
       ...item,
       from,
       to,
-      peerExists: summaries.has(peer.conversationId),
+      peerPresence: peerPresenceByConversationId?.get(peer.conversationId)
+        ?? "unknown",
     };
   });
 }

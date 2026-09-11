@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   MAX_PROJECT_CONVERSATIONS,
+  type ConversationHistoryItem,
   type ConversationSummary,
+  type PeerPresenceResolution,
 } from "../shared/protocol.js";
 import {
   conversationDisplayTitle,
   projectConversationIndex,
+  projectConversationPeers,
 } from "./project-snapshot.js";
 
 function conversation(index: number): ConversationSummary {
@@ -83,6 +86,33 @@ describe("projectConversationIndex", () => {
     expect(projectConversationIndex(source)).toEqual({
       conversations: source,
       truncated: false,
+    });
+  });
+
+  it("keeps peer presence unknown without a census and applies only explicit proof", () => {
+    const source = conversation(1);
+    const target = { ...conversation(2), name: "Target" };
+    const card = {
+      kind: "session_message",
+      id: "card-entry-1",
+      cardId: "6790e721-6f5c-4692-8949-4d3fd2cf0dfc",
+      direction: "outgoing",
+      state: "queued",
+      body: "Review the implementation.",
+      from: { conversationId: source.id, role: { id: "lead", name: "Lead" } },
+      to: { conversationId: target.id, role: { id: "reviewer", name: "Reviewer" } },
+      sentAt: "2026-07-19T10:00:00.000Z",
+      updatedAt: "2026-07-19T10:00:00.000Z",
+      peerPresence: "unknown",
+    } satisfies ConversationHistoryItem;
+
+    expect(projectConversationPeers([card], [target])[0]).toMatchObject({
+      peerPresence: "unknown",
+      to: { title: "Target" },
+    });
+    const presence = new Map<string, PeerPresenceResolution>([[target.id, "present"]]);
+    expect(projectConversationPeers([card], [], presence)[0]).toMatchObject({
+      peerPresence: "present",
     });
   });
 

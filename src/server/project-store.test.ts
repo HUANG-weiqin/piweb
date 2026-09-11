@@ -44,6 +44,7 @@ interface ProjectStoreIntegrityInternals {
   clearLastConversationIf(conversationId: string): Promise<void>;
   renameSessionFile(source: string, destination: string): Promise<void>;
   unlinkSessionFile(path: string): Promise<void>;
+  readStableNamespaceHeaderCensus(): Promise<unknown>;
 }
 
 async function createTemporaryDirectory(prefix: string): Promise<string> {
@@ -1451,6 +1452,77 @@ describe("ProjectStore", () => {
     ).resolves.toMatchObject({
       getSessionId: expect.any(Function),
     });
+  });
+
+  it("resolves peer presence only from stable complete header claims", async () => {
+    const cwd = await createTemporaryDirectory("piweb-peer-presence-");
+    const store = await ProjectStore.open(cwd);
+    const target = await store.createConversation();
+    const corruptId = randomUUID();
+    const corruptPath = join(store.sessionDir, "corrupt-body.jsonl");
+    await writeSessionHeader(corruptPath, corruptId, store.cwd);
+    await writeFile(
+      corruptPath,
+      `${await readFile(corruptPath, "utf8")}{"type":"message"\n`,
+    );
+    const missingId = randomUUID();
+
+    await expect(store.peerPresence([
+      target.getSessionId(),
+      corruptId,
+      missingId,
+    ])).resolves.toEqual(new Map([
+      [target.getSessionId(), "present"],
+      [corruptId, "present"],
+      [missingId, "absent"],
+    ]));
+  });
+
+  it("rejects peer presence when a header claim changes during its census", async () => {
+    const cwd = await createTemporaryDirectory("piweb-peer-header-race-");
+    const store = await ProjectStore.open(cwd);
+    const target = await store.createConversation();
+    const targetPath = target.getSessionFile();
+    if (!targetPath) throw new Error("target did not persist a session file");
+    const replacementId = randomUUID();
+    const internals = store as unknown as ProjectStoreIntegrityInternals;
+    const originalCensus = internals.readStableNamespaceHeaderCensus.bind(store);
+    let censuses = 0;
+    vi.spyOn(internals, "readStableNamespaceHeaderCensus").mockImplementation(
+      async () => {
+        const census = await originalCensus();
+        censuses += 1;
+        if (censuses === 1) {
+          await writeSessionHeader(targetPath, replacementId, store.cwd);
+        }
+        return census;
+      },
+    );
+
+    await expect(store.peerPresence([target.getSessionId()])).rejects.toThrow(
+      "header claims changed while peer presence was being read",
+    );
+  });
+
+  it("does not invalidate peer presence when only a transcript body appends", async () => {
+    const cwd = await createTemporaryDirectory("piweb-peer-body-append-");
+    const store = await ProjectStore.open(cwd);
+    const target = await store.createConversation();
+    const internals = store as unknown as ProjectStoreIntegrityInternals;
+    const originalCensus = internals.readStableNamespaceHeaderCensus.bind(store);
+    let censuses = 0;
+    vi.spyOn(internals, "readStableNamespaceHeaderCensus").mockImplementation(
+      async () => {
+        const census = await originalCensus();
+        censuses += 1;
+        if (censuses === 1) target.appendSessionInfo("body append during census");
+        return census;
+      },
+    );
+
+    await expect(store.peerPresence([target.getSessionId()])).resolves.toEqual(
+      new Map([[target.getSessionId(), "present"]]),
+    );
   });
 
   it("persists a disposable path-keyed catalog and rebuilds past corruption", async () => {

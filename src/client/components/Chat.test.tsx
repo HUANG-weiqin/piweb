@@ -2299,6 +2299,7 @@ describe("Chat", () => {
       },
       sentAt: "2026-07-19T10:00:00.000Z",
       updatedAt: "2026-07-19T10:01:00.000Z",
+      peerPresence: "unknown",
       result: "Review complete",
     };
     const { container } = render(view({
@@ -2367,6 +2368,7 @@ describe("Chat", () => {
       },
       sentAt: "2026-07-19T10:01:00.000Z",
       updatedAt: "2026-07-19T10:01:00.000Z",
+      peerPresence: "unknown",
     };
     const { container } = render(view({
       items: [messageItem({

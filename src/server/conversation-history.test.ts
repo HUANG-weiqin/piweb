@@ -893,6 +893,7 @@ describe("projectConversationHistory", () => {
         state: "queued",
         body: "Review the parser",
         summary: "",
+        peerPresence: "unknown",
         sentAt: outgoing.data.updatedAt,
       }),
       expect.objectContaining({
@@ -907,6 +908,7 @@ describe("projectConversationHistory", () => {
         state: "delivered",
         body: "Parser review complete",
         summary: "解析器审查已完成，等待你决定下一步。",
+        peerPresence: "unknown",
         sentAt: incoming.details.sentAt,
       }),
     ]);

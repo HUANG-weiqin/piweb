@@ -105,6 +105,7 @@ function sessionMessageCard(
     },
     sentAt: "2026-07-19T08:00:00.000Z",
     updatedAt: "2026-07-19T08:01:00.000Z",
+    peerPresence: "unknown",
     ...(state === "completed" ? { result: "all good" } : {}),
   };
 }

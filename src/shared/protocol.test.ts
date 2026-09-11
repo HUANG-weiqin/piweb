@@ -41,7 +41,7 @@ const transitionDiagnostics = {
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(54);
+    expect(PROTOCOL_VERSION).toBe(55);
   });
 
   it("accepts supported commands", () => {
@@ -1189,7 +1189,7 @@ describe("parseClientCommand", () => {
           },
           sentAt: "2026-07-18T12:00:00.000Z",
           updatedAt: "2026-07-18T12:00:01.000Z",
-          peerExists: true,
+          peerPresence: "present",
         },
         {
           kind: "compaction",
@@ -1688,6 +1688,51 @@ describe("parseServerEvent", () => {
         items: [{ id: "invalid", text: "Bad state", status: "running" }],
         armed: true,
       },
+    })).toThrow();
+  });
+
+  it("requires explicit tri-state peer presence on session message cards", () => {
+    const card = {
+      kind: "session_message" as const,
+      id: "card-entry-1",
+      cardId: "6790e721-6f5c-4692-8949-4d3fd2cf0dfc",
+      direction: "incoming" as const,
+      state: "queued" as const,
+      body: "Please review the actor.",
+      summary: "",
+      from: {
+        conversationId: targetConversationId,
+        role: { id: "default", name: "Default" },
+      },
+      to: {
+        conversationId,
+        role: { id: roleId, name: "Reviewer" },
+      },
+      sentAt: "2026-07-18T12:00:00.000Z",
+      updatedAt: "2026-07-18T12:00:01.000Z",
+    };
+    const event = {
+      type: "conversation_snapshot" as const,
+      sessionId,
+      conversationId,
+      focusId,
+      items: [card],
+      window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
+    };
+
+    for (const peerPresence of ["present", "absent", "unknown"] as const) {
+      expect(parseServerEvent({
+        ...event,
+        items: [{ ...card, peerPresence }],
+      })).toMatchObject({
+        type: "conversation_snapshot",
+        items: [expect.objectContaining({ peerPresence })],
+      });
+    }
+    expect(() => parseServerEvent(event)).toThrow();
+    expect(() => parseServerEvent({
+      ...event,
+      items: [{ ...card, peerPresence: true }],
     })).toThrow();
   });
 

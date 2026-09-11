@@ -4721,7 +4721,7 @@ describe("PiConnection coordinated project view", () => {
     }
   });
 
-  it("bounds durable card titles and repairs missing peer titles for the wire", async () => {
+  it("bounds durable card titles and reprojects peer presence for the wire", async () => {
     const harness = await coordinatedConnectionHarness();
     let externalHandle:
       Awaited<ReturnType<ProjectSessionCoordinator["acquireProject"]>>
@@ -4853,7 +4853,7 @@ describe("PiConnection coordinated project view", () => {
       );
       expect(card).toMatchObject({
         kind: "session_message",
-        peerExists: true,
+        peerPresence: "unknown",
       });
       if (card?.kind !== "session_message") {
         throw new Error("source card was not projected");
@@ -4865,6 +4865,17 @@ describe("PiConnection coordinated project view", () => {
         type: "conversation_snapshot",
         conversationId: source.conversationId,
       });
+      await vi.waitFor(() => {
+        expect(harness.events).toContainEqual(expect.objectContaining({
+          type: "conversation_item",
+          conversationId: source.conversationId,
+          item: expect.objectContaining({
+            kind: "session_message",
+            cardId,
+            peerPresence: "present",
+          }),
+        }));
+      });
 
       const itemCount = harness.events.filter(
         (event) => event.type === "conversation_item",
@@ -4874,17 +4885,27 @@ describe("PiConnection coordinated project view", () => {
         target.conversationId,
       );
       await vi.waitFor(() => {
-        expect(harness.events.filter(
+        const peerUpdates = harness.events.filter(
           (event) => event.type === "conversation_item",
-        ).length).toBeGreaterThan(itemCount);
+        ).slice(itemCount);
+        expect(peerUpdates).toContainEqual(expect.objectContaining({
+          conversationId: source.conversationId,
+          item: expect.objectContaining({
+            kind: "session_message",
+            cardId,
+            peerPresence: "absent",
+          }),
+        }));
       });
-      expect(harness.events).toContainEqual(expect.objectContaining({
-        type: "conversation_item",
+      const peerUpdates = harness.events.filter(
+        (event) => event.type === "conversation_item",
+      ).slice(itemCount);
+      expect(peerUpdates).toContainEqual(expect.objectContaining({
         conversationId: source.conversationId,
         item: expect.objectContaining({
           kind: "session_message",
           cardId,
-          peerExists: false,
+          peerPresence: "unknown",
         }),
       }));
 
@@ -4936,6 +4957,237 @@ describe("PiConnection coordinated project view", () => {
       }
       expect(membershipSnapshot.items?.some((item) => item.id === `session-message:${cardId}`))
         .toBe(false);
+    } finally {
+      externalHandle?.release();
+      await harness.cleanup();
+    }
+  });
+
+  it("drops a completed stale peer-presence census after focus switches", async () => {
+    const harness = await coordinatedConnectionHarness();
+    let externalHandle:
+      Awaited<ReturnType<ProjectSessionCoordinator["acquireProject"]>>
+      | undefined;
+    const releaseSourceCensus = deferred();
+    const releaseTargetCensus = deferred();
+    try {
+      const sourceState = await initializeNewConversation(harness);
+      if (
+        sourceState.conversationId === undefined
+        || sourceState.projectId === undefined
+        || sourceState.focusId === undefined
+      ) {
+        throw new Error("source conversation was not attached");
+      }
+      externalHandle = await harness.coordinator.acquireProject(
+        harness.cwd,
+        "full_access",
+      );
+      const source = await harness.coordinator.openConversation(
+        externalHandle,
+        sourceState.conversationId,
+        { updateRecent: false },
+      );
+      const target = await harness.coordinator.createUserConversation(
+        externalHandle,
+        { roleId: "default", title: "target" },
+      );
+      const peer = await harness.coordinator.createUserConversation(
+        externalHandle,
+        { roleId: "default", title: "shared peer" },
+      );
+      const cardId = randomUUID();
+      appendReservedCustomEntry(
+        source.sessionManager,
+        createConversationCardEntry({
+          cardId,
+          kind: "message",
+          body: "wait for the census",
+          fromSnapshot: {
+            conversationId: source.conversationId,
+            role: { id: source.profile.role.id, name: source.profile.role.name },
+          },
+          toSnapshot: {
+            conversationId: peer.conversationId,
+            role: { id: peer.profile.role.id, name: peer.profile.role.name },
+          },
+          state: "queued",
+          messageId: randomUUID(),
+          updatedAt: "2026-07-19T12:00:00.000Z",
+        }),
+      );
+      const targetCardId = randomUUID();
+      appendReservedCustomEntry(
+        target.sessionManager,
+        createConversationCardEntry({
+          cardId: targetCardId,
+          kind: "message",
+          body: "current focus must not receive stale proof",
+          fromSnapshot: {
+            conversationId: target.conversationId,
+            role: { id: target.profile.role.id, name: target.profile.role.name },
+          },
+          toSnapshot: {
+            conversationId: peer.conversationId,
+            role: { id: peer.profile.role.id, name: peer.profile.role.name },
+          },
+          state: "queued",
+          messageId: randomUUID(),
+          updatedAt: "2026-07-19T12:00:00.000Z",
+        }),
+      );
+      let sourceCensus: Promise<ReadonlyMap<string, "present">> | undefined;
+      let targetCensus: Promise<ReadonlyMap<string, "present">> | undefined;
+      vi.spyOn(harness.coordinator, "resolveConversationPeerPresence")
+        .mockImplementation((_handle, actor, peerIds) => {
+          const release = actor.conversationId === source.conversationId
+            ? releaseSourceCensus
+            : releaseTargetCensus;
+          const result = release.promise.then(() => new Map(
+            [...peerIds].map((peerId) => [peerId, "present" as const]),
+          ));
+          if (actor.conversationId === source.conversationId) {
+            sourceCensus = result;
+          } else if (actor.conversationId === target.conversationId) {
+            targetCensus = result;
+          }
+          return result;
+        });
+
+      await harness.connection.handle({
+        type: "refresh_view",
+        sessionId: SESSION_A,
+        projectId: sourceState.projectId,
+        conversationId: source.conversationId,
+        focusId: sourceState.focusId,
+      });
+      await vi.waitFor(() => expect(sourceCensus).toBeDefined());
+      await harness.connection.handle({
+        type: "focus_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId: target.conversationId,
+      });
+      releaseSourceCensus.resolve();
+      await sourceCensus;
+      await vi.waitFor(() => expect(targetCensus).toBeDefined());
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(harness.events).not.toContainEqual(expect.objectContaining({
+        type: "conversation_item",
+        conversationId: target.conversationId,
+        item: expect.objectContaining({
+          kind: "session_message",
+          cardId: targetCardId,
+          peerPresence: "present",
+        }),
+      }));
+      releaseTargetCensus.resolve();
+      await targetCensus;
+    } finally {
+      releaseSourceCensus.resolve();
+      releaseTargetCensus.resolve();
+      externalHandle?.release();
+      await harness.cleanup();
+    }
+  });
+
+  it("coalesces peer-presence refreshes into active and latest censuses", async () => {
+    const harness = await coordinatedConnectionHarness();
+    let externalHandle:
+      Awaited<ReturnType<ProjectSessionCoordinator["acquireProject"]>>
+      | undefined;
+    try {
+      const sourceState = await initializeNewConversation(harness);
+      if (
+        sourceState.conversationId === undefined
+        || sourceState.projectId === undefined
+        || sourceState.focusId === undefined
+      ) {
+        throw new Error("source conversation was not attached");
+      }
+      externalHandle = await harness.coordinator.acquireProject(
+        harness.cwd,
+        "full_access",
+      );
+      const source = await harness.coordinator.openConversation(
+        externalHandle,
+        sourceState.conversationId,
+        { updateRecent: false },
+      );
+      const firstTarget = await harness.coordinator.createUserConversation(
+        externalHandle,
+        { roleId: "default", title: "first target" },
+      );
+      const secondTarget = await harness.coordinator.createUserConversation(
+        externalHandle,
+        { roleId: "default", title: "second target" },
+      );
+      const appendCard = (target: typeof firstTarget) => {
+        appendReservedCustomEntry(
+          source.sessionManager,
+          createConversationCardEntry({
+            cardId: randomUUID(),
+            kind: "message",
+            body: "coalesce",
+            fromSnapshot: {
+              conversationId: source.conversationId,
+              role: { id: source.profile.role.id, name: source.profile.role.name },
+            },
+            toSnapshot: {
+              conversationId: target.conversationId,
+              role: { id: target.profile.role.id, name: target.profile.role.name },
+            },
+            state: "queued",
+            messageId: randomUUID(),
+            updatedAt: "2026-07-19T12:00:00.000Z",
+          }),
+        );
+      };
+      appendCard(firstTarget);
+      const releaseFirst = deferred();
+      const calls: string[][] = [];
+      let firstCensus: Promise<ReadonlyMap<string, "present">> | undefined;
+      vi.spyOn(harness.coordinator, "resolveConversationPeerPresence")
+        .mockImplementation((_handle, _actor, peerIds) => {
+          const request = [...peerIds];
+          calls.push(request);
+          const result = calls.length === 1
+            ? releaseFirst.promise.then(() => new Map(
+              request.map((peerId) => [peerId, "present" as const]),
+            ))
+            : Promise.resolve(new Map(
+              request.map((peerId) => [peerId, "present" as const]),
+            ));
+          if (calls.length === 1) firstCensus = result;
+          return result;
+        });
+
+      await harness.connection.handle({
+        type: "refresh_view",
+        sessionId: SESSION_A,
+        projectId: sourceState.projectId,
+        conversationId: source.conversationId,
+        focusId: sourceState.focusId,
+      });
+      await vi.waitFor(() => expect(firstCensus).toBeDefined());
+      appendCard(secondTarget);
+      await harness.connection.handle({
+        type: "refresh_view",
+        sessionId: SESSION_A,
+        projectId: sourceState.projectId,
+        conversationId: source.conversationId,
+        focusId: sourceState.focusId,
+      });
+      expect(calls).toHaveLength(1);
+      releaseFirst.resolve();
+      await firstCensus;
+      await vi.waitFor(() => expect(calls).toHaveLength(2));
+      expect(calls[0]).toEqual([firstTarget.conversationId]);
+      expect(calls[1]).toEqual([
+        firstTarget.conversationId,
+        secondTarget.conversationId,
+      ]);
     } finally {
       externalHandle?.release();
       await harness.cleanup();

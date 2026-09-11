@@ -552,6 +552,7 @@ function projectOutgoingCard(
     // Legacy durable cards have no summary; the browser receives a stable
     // empty value rather than inferring one from the body or endpoint.
     summary: card.summary ?? "",
+    peerPresence: "unknown",
     from: card.fromSnapshot,
     to: card.toSnapshot,
     sentAt,
@@ -581,6 +582,7 @@ function projectIncomingCard(
     // Legacy delivered markers have no summary; preserve that absence as an
     // empty browser projection rather than inventing user-facing content.
     summary: message.summary ?? "",
+    peerPresence: "unknown",
     from: message.fromSnapshot,
     to: message.toSnapshot,
     sentAt: message.sentAt,

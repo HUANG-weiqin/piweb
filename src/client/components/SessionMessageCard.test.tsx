@@ -32,7 +32,7 @@ const outgoingCard: ConversationMessageCard = {
   sentAt: "2026-07-19T08:00:00.000Z",
   updatedAt: "2026-07-19T08:01:00.000Z",
   messageId: "message-1",
-  peerExists: true,
+  peerPresence: "present",
 };
 
 afterEach(cleanup);
@@ -162,7 +162,7 @@ describe("SessionMessageCard", () => {
     expect(screen.getByText("结果")).toBeInTheDocument();
   });
 
-  it("opens the peer session only while that conversation still exists", () => {
+  it("opens the peer session unless a stable census proves it absent", () => {
     const openConversation = vi.fn();
     const { rerender } = render(
       <SessionMessageCard
@@ -183,10 +183,19 @@ describe("SessionMessageCard", () => {
 
     rerender(
       <SessionMessageCard
+        card={{ ...outgoingCard, peerPresence: "unknown" }}
+        onOpenConversation={openConversation}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "打开会话" }));
+    expect(openConversation).toHaveBeenCalledTimes(2);
+
+    rerender(
+      <SessionMessageCard
         card={{
           ...outgoingCard,
           state: "completed",
-          peerExists: false,
+          peerPresence: "absent",
         }}
         onOpenConversation={openConversation}
       />,

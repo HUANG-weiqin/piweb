@@ -31,6 +31,8 @@ export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
+// v55: session-message cards carry a required tri-state peer-presence
+// projection derived from a stable complete session-header census.
 // v54: durable user and tool-result images share an exact physical-entry
 // locator while placement remains specific to message text or tool content.
 // v53: process-global UI preferences travel in hello and converge through a
@@ -72,7 +74,7 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
-export const PROTOCOL_VERSION = 54;
+export const PROTOCOL_VERSION = 55;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 export const COLOR_SCHEMES = ["quiet-rebel", "classic-rebel"] as const;
 export type ColorScheme = typeof COLOR_SCHEMES[number];
@@ -816,8 +818,11 @@ export interface ConversationMessageCard {
   /**
    * Browser projection only. Durable cards do not own peer lifecycle state.
    */
-  peerExists?: boolean;
+  peerPresence: PeerPresence;
 }
+
+export type PeerPresence = "present" | "absent" | "unknown";
+export type PeerPresenceResolution = Exclude<PeerPresence, "unknown">;
 
 export interface ConversationCompactionMarker {
   kind: "compaction";
@@ -1476,7 +1481,7 @@ const conversationHistoryItemSchema: z.ZodType<ConversationHistoryItem> =
       delegationId: z.string().uuid().optional(),
       runId: runIdSchema.optional(),
       result: z.string().max(200_000).optional(),
-      peerExists: z.boolean(),
+      peerPresence: z.enum(["present", "absent", "unknown"]),
     }),
   ]);
 const loopListItemSchema = z.object({

@@ -1265,6 +1265,41 @@ describe("ProjectSessionCoordinator", () => {
     setLastConversation.mockRestore();
   });
 
+  it("drains a pending peer-presence census during close", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const peerId = randomUUID();
+    const gate = deferred();
+    let started = false;
+    vi.spyOn(fixture.handle.project, "peerPresence").mockImplementation(
+      async () => {
+        started = true;
+        await gate.promise;
+        return new Map([[peerId, "present" as const]]);
+      },
+    );
+
+    const presence = fixture.coordinator.resolveConversationPeerPresence(
+      fixture.handle,
+      actor,
+      [peerId],
+    );
+    await waitUntil(() => started, "peer-presence census");
+    let closed = false;
+    const closing = fixture.coordinator.close().then(() => {
+      closed = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(closed).toBe(false);
+    gate.resolve();
+    await expect(presence).resolves.toEqual(new Map([[peerId, "present"]]));
+    await expect(closing).resolves.toBeUndefined();
+    expect(closed).toBe(true);
+  });
+
   it("does not let a delayed recent write clear newer attention", async () => {
     const fixture = await createFixture();
     const actor = await fixture.coordinator.createUserConversation(

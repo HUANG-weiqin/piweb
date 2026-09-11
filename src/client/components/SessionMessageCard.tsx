@@ -51,7 +51,7 @@ export function SessionMessageCard({
   const statusLabel = STATE_LABELS[card.state];
   const peer = card.direction === "incoming" ? card.from : card.to;
   const canOpen = onOpenConversation !== undefined
-    && card.peerExists === true;
+    && card.peerPresence !== "absent";
   const [expanded, setExpanded] = useState(false);
   const detailsId = useId();
   const peerTitle = peer.title?.trim() || "未命名会话";

@@ -47,7 +47,7 @@ git diff --check
 2. 升级协议版本。
 3. 定义 `RoleSummary`、`ConversationRoleSnapshot`、`ConversationActivity`、`ConversationHistoryItem` 和卡片 DTO。
 4. 扩展 acknowledged operation，保持 commandId 不可复用。
-5. 让 project snapshot 同时限制条数、字段和总字节；当前/活跃/attention/unread 会话优先保留，卡片可达性使用独立 `peerExists`，不依赖被截断侧栏。
+5. 让 project snapshot 同时限制条数、字段和总字节；当前/活跃/attention/unread 会话优先保留，卡片可达性使用独立必填三态 `peerPresence`（`present | absent | unknown`），不依赖被截断侧栏；同步投影先为 `unknown`，只有完整稳定 header census 才能解析为 `present/absent`。
 6. 运行 `npm test -- src/shared/protocol.test.ts` 与 typecheck。
 
 **成功标准：** 浏览器需要的所有状态都有唯一身份和有界 schema；没有 SDK event 类型泄漏。

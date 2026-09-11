@@ -25,7 +25,10 @@ import {
   SessionManager,
   type SessionInfo,
 } from "@earendil-works/pi-coding-agent";
-import type { ConversationSummary } from "../shared/protocol.js";
+import type {
+  ConversationSummary,
+  PeerPresenceResolution,
+} from "../shared/protocol.js";
 import {
   MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
   MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS,
@@ -182,6 +185,7 @@ interface NamespaceHeaderCensus {
   evidence: readonly Readonly<NamespaceHeaderEvidence>[];
 }
 
+
 interface VerifiedTargetSessionFileRead {
   target: VerifiedSessionFileRead;
   namespace: NamespaceHeaderCensus;
@@ -278,6 +282,23 @@ function sessionFileIdentitySetsEqual(
     && first.every((file, index) => {
       const other = second[index];
       return other !== undefined && sessionFileIdentitiesEqual(file, other);
+    });
+}
+
+/**
+ * Namespace proof deliberately ignores mutable transcript bodies, but a
+ * header claim must be unchanged across the peer-membership observation.
+ */
+function namespaceHeaderEvidenceSetsEqual(
+  first: NamespaceHeaderCensus,
+  second: NamespaceHeaderCensus,
+): boolean {
+  return first.evidence.length === second.evidence.length
+    && first.evidence.every((entry, index) => {
+      const other = second.evidence[index];
+      return other !== undefined
+        && entry.conversationId === other.conversationId
+        && sessionFileIdentitiesEqual(entry.file, other.file);
     });
 }
 
@@ -968,6 +989,40 @@ export class ProjectStore {
 
   listConversations(): ConversationSummary[] {
     return this.conversations.map(cloneSummary);
+  }
+
+  /**
+   * Resolves only header-level membership from one complete stable census.
+   * This is intentionally weaker than an exact open: a present header does
+   * not prove the full body is usable.
+   */
+  async peerPresence(
+    conversationIds: readonly string[],
+  ): Promise<Map<string, PeerPresenceResolution>> {
+    const ids = new Set(conversationIds);
+    for (const conversationId of ids) {
+      assertSessionId(conversationId, "conversationId");
+    }
+    return this.enqueueConversationOperation(async () => {
+      const census = await this.readStableNamespaceHeaderCensus();
+      const confirmedCensus = await this.readStableNamespaceHeaderCensus();
+      if (!namespaceHeaderEvidenceSetsEqual(census, confirmedCensus)) {
+        throw new SessionDirectoryChangedError(
+          "Project session header claims changed while peer presence was being read",
+        );
+      }
+      const presentIds = new Set(
+        census.evidence.flatMap(({ conversationId }) =>
+          conversationId === undefined ? [] : [conversationId]
+        ),
+      );
+      return new Map<string, PeerPresenceResolution>(
+        [...ids].map((conversationId): [string, PeerPresenceResolution] => [
+          conversationId,
+          presentIds.has(conversationId) ? "present" : "absent",
+        ]),
+      );
+    });
   }
 
   /** Waits for disposable observation writes scheduled by an owned operation. */

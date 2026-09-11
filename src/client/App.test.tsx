@@ -9887,7 +9887,7 @@ describe("App", () => {
       },
       sentAt: "2026-07-19T09:00:00.000Z",
       updatedAt: "2026-07-19T09:00:00.000Z",
-      peerExists: true,
+      peerPresence: "present" as const,
     };
     act(() => socketMock.emit?.({
       type: "conversation_snapshot",
@@ -9915,7 +9915,7 @@ describe("App", () => {
         state: "completed",
         result: "looks good",
         updatedAt: "2026-07-19T09:01:00.000Z",
-        peerExists: false,
+        peerPresence: "absent",
       },
     }));
 
