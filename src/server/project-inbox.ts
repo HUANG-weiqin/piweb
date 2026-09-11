@@ -224,6 +224,31 @@ export class InboxTargetTombstoneCommittedError extends Error {
   }
 }
 
+/**
+ * A batch started writing deletion fences but did not complete its final
+ * census. Every listed durable ID must remain reserved; uncertain IDs may
+ * have published even though their final census could not prove it.
+ */
+export class InboxTargetTombstoneBatchError extends Error {
+  constructor(
+    readonly durableConversationIds: readonly string[],
+    readonly uncertainConversationIds: readonly string[],
+    cause: unknown,
+  ) {
+    super(
+      uncertainConversationIds.length > 0
+        ? "Inbox target tombstone batch committed but could not be verified"
+        : "Inbox target tombstone batch could not be completed",
+      { cause },
+    );
+  }
+}
+
+export interface InboxTargetDeletionBatch {
+  readonly conversationIds: readonly string[];
+  readonly pending: readonly InboxEnvelope[];
+}
+
 /** link() published the new inode, but its post-publication proof failed. */
 class InboxFilePublishedError extends Error {
   constructor(
@@ -304,6 +329,12 @@ interface InboxScan {
   reservedBytes: number;
 }
 
+interface CapturedInboxTargetDeletionBatch extends InboxTargetDeletionBatch {
+  owner: ProjectInbox;
+  pendingFiles: readonly StoredEnvelope[];
+  tombstoneFiles: readonly StoredTargetTombstone[];
+}
+
 function isNodeError(error: unknown, code: string): boolean {
   return (
     error instanceof Error
@@ -331,6 +362,14 @@ function statsAreIdentical(first: Stats, second: Stats): boolean {
     && first.mtimeMs === second.mtimeMs
     && first.isFile() === second.isFile()
   );
+}
+
+function storedFilesAreIdentical(
+  first: StoredInboxFile,
+  second: StoredInboxFile,
+): boolean {
+  return pathsAreIdentical(first.path, second.path)
+    && statsAreIdentical(first.information, second.information);
 }
 
 function cloneEnvelope(envelope: InboxEnvelope): InboxEnvelope {
@@ -849,6 +888,177 @@ export class ProjectInbox {
     });
   }
 
+  /**
+   * Captures one stable inbox view for a frozen delete set, then publishes all
+   * missing durable target fences before returning any pending sidecars.
+   */
+  beginTargetDeletionBatch(
+    conversationIds: readonly string[],
+    deletedAt = new Date().toISOString(),
+  ): Promise<InboxTargetDeletionBatch> {
+    return this.operations.run(async () => {
+      const uniqueConversationIds = [...new Set(conversationIds)];
+      if (uniqueConversationIds.length === 0) {
+        throw new Error("At least one inbox target is required");
+      }
+      for (const conversationId of uniqueConversationIds) {
+        conversationIdSchema("conversationId").parse(conversationId);
+      }
+      canonicalTimestampSchema("deletedAt").parse(deletedAt);
+
+      const initial = await this.scan();
+      const existing = new Map(initial.tombstones.map((stored) => [
+        stored.tombstone.conversationId,
+        stored,
+      ]));
+      const missingConversationIds = uniqueConversationIds.filter(
+        (conversationId) => !existing.has(conversationId),
+      );
+      const serializedTombstones = missingConversationIds.map(
+        (conversationId) => serializeTargetTombstone({
+          version: INBOX_TARGET_TOMBSTONE_VERSION,
+          conversationId,
+          deletedAt,
+        }),
+      );
+      if (
+        initial.tombstones.length + missingConversationIds.length
+        > MAX_INBOX_TOMBSTONES_PER_PROJECT
+      ) {
+        throw new Error(
+          `Inbox target tombstone limit exceeded: ${MAX_INBOX_TOMBSTONES_PER_PROJECT}`,
+        );
+      }
+      const addedBytes = serializedTombstones.reduce(
+        (total, serialized) => total + Buffer.byteLength(serialized, "utf8"),
+        0,
+      );
+      if (
+        initial.tombstoneBytes + addedBytes
+        > MAX_INBOX_TOMBSTONE_TOTAL_BYTES
+      ) {
+        throw new Error(
+          `Inbox tombstone byte limit exceeded: ${MAX_INBOX_TOMBSTONE_TOTAL_BYTES}`,
+        );
+      }
+
+      // A failed batch must retain only its own fences. Unrelated durable
+      // tombstones are independently recoverable and must not be adopted by
+      // this caller's reservation/error path.
+      const durableConversationIds = new Set(uniqueConversationIds.filter(
+        (conversationId) => existing.has(conversationId),
+      ));
+      for (let index = 0; index < missingConversationIds.length; index += 1) {
+        const conversationId = missingConversationIds[index]!;
+        try {
+          await this.writeNewAtomically(
+            this.pathForTargetTombstone(conversationId),
+            serializedTombstones[index]!,
+          );
+          durableConversationIds.add(conversationId);
+        } catch (error) {
+          // EEXIST is also publication-ambiguous: a concurrent writer may
+          // have created this exact target fence. Keep the reservation until a
+          // later stable census can distinguish it from a failed link.
+          const uncertainConversationIds = (
+            error instanceof InboxFilePublishedError || isNodeError(error, "EEXIST")
+          )
+            ? [conversationId]
+            : [];
+          if (uncertainConversationIds.length > 0) {
+            durableConversationIds.add(conversationId);
+          }
+          if (durableConversationIds.size > 0) {
+            throw new InboxTargetTombstoneBatchError(
+              [...durableConversationIds].sort(),
+              uncertainConversationIds,
+              error,
+            );
+          }
+          throw error;
+        }
+      }
+
+      let committed: InboxScan;
+      try {
+        committed = await this.scan();
+      } catch (error) {
+        throw new InboxTargetTombstoneBatchError(
+          uniqueConversationIds,
+          uniqueConversationIds,
+          error,
+        );
+      }
+      const tombstoneFiles = uniqueConversationIds.map((conversationId) =>
+        committed.tombstones.find(
+          ({ tombstone }) => tombstone.conversationId === conversationId,
+        )
+      );
+      if (tombstoneFiles.some((stored) => stored === undefined)) {
+        throw new InboxTargetTombstoneBatchError(
+          uniqueConversationIds,
+          uniqueConversationIds,
+          new Error("Inbox target tombstone was not persisted"),
+        );
+      }
+      const targetIds = new Set(uniqueConversationIds);
+      const pendingFiles = committed.envelopes.filter(({ envelope }) =>
+        targetIds.has(envelope.toConversationId)
+      );
+      const batch: CapturedInboxTargetDeletionBatch = {
+        owner: this,
+        conversationIds: Object.freeze([...uniqueConversationIds]),
+        pending: Object.freeze(pendingFiles.map(({ envelope }) =>
+          cloneEnvelope(envelope)
+        )),
+        pendingFiles: Object.freeze([...pendingFiles]),
+        tombstoneFiles: Object.freeze(
+          tombstoneFiles as StoredTargetTombstone[],
+        ),
+      };
+      return batch;
+    });
+  }
+
+  /** Deletes only sidecars captured by beginTargetDeletionBatch(). */
+  deleteCapturedTargetMessages(batch: InboxTargetDeletionBatch): Promise<void> {
+    return this.operations.run(async () => {
+      const captured = this.requireCapturedTargetDeletionBatch(batch);
+      const scan = await this.scan();
+      this.assertCapturedTargetTombstones(captured, scan);
+      const targetIds = new Set(captured.conversationIds);
+      const currentPending = scan.envelopes.filter(({ envelope }) =>
+        targetIds.has(envelope.toConversationId)
+      );
+      this.assertCapturedPendingMessages(captured, currentPending);
+      for (const stored of captured.pendingFiles) {
+        await this.deleteStoredFile(stored);
+      }
+    });
+  }
+
+  /** Clears only the exact durable fences captured by beginTargetDeletionBatch(). */
+  clearTargetDeletionBatch(batch: InboxTargetDeletionBatch): Promise<void> {
+    return this.operations.run(async () => {
+      const captured = this.requireCapturedTargetDeletionBatch(batch);
+      const scan = await this.scan();
+      this.assertCapturedTargetTombstones(captured, scan);
+      const targetIds = new Set(captured.conversationIds);
+      if (scan.envelopes.some(({ envelope }) =>
+        targetIds.has(envelope.toConversationId)
+      )) {
+        throw new Error(
+          "Cannot clear inbox target tombstones with pending messages",
+        );
+      }
+      // The coordinator publishes root-first and clears root-last, keeping a
+      // recoverable root intent until every descendant fence is gone.
+      for (const stored of [...captured.tombstoneFiles].reverse()) {
+        await this.deleteStoredFile(stored);
+      }
+    });
+  }
+
   pruneCompletedTargetTombstones(
     existingConversationIds: ReadonlySet<string>,
   ): Promise<number> {
@@ -871,6 +1081,69 @@ export class ProjectInbox {
       }
       return removed;
     });
+  }
+
+  private requireCapturedTargetDeletionBatch(
+    batch: InboxTargetDeletionBatch,
+  ): CapturedInboxTargetDeletionBatch {
+    const captured = batch as CapturedInboxTargetDeletionBatch;
+    if (
+      captured.owner !== this
+      || !Array.isArray(captured.pendingFiles)
+      || !Array.isArray(captured.tombstoneFiles)
+    ) {
+      throw new Error("Inbox target deletion batch does not belong to this inbox");
+    }
+    return captured;
+  }
+
+  private assertCapturedTargetTombstones(
+    captured: CapturedInboxTargetDeletionBatch,
+    scan: InboxScan,
+  ): void {
+    const currentByConversationId = new Map(scan.tombstones.map((stored) => [
+      stored.tombstone.conversationId,
+      stored,
+    ]));
+    for (const expected of captured.tombstoneFiles) {
+      const current = currentByConversationId.get(
+        expected.tombstone.conversationId,
+      );
+      if (
+        current === undefined
+        || !storedFilesAreIdentical(expected, current)
+        || JSON.stringify(expected.tombstone) !== JSON.stringify(current.tombstone)
+      ) {
+        throw new Error(
+          `Inbox target tombstone changed after deletion was fenced: ${expected.tombstone.conversationId}`,
+        );
+      }
+    }
+  }
+
+  private assertCapturedPendingMessages(
+    captured: CapturedInboxTargetDeletionBatch,
+    currentPending: readonly StoredEnvelope[],
+  ): void {
+    if (currentPending.length !== captured.pendingFiles.length) {
+      throw new Error("Inbox target messages changed after deletion was fenced");
+    }
+    const currentByMessageId = new Map(currentPending.map((stored) => [
+      stored.envelope.messageId,
+      stored,
+    ]));
+    for (const expected of captured.pendingFiles) {
+      const current = currentByMessageId.get(expected.envelope.messageId);
+      if (
+        current === undefined
+        || !storedFilesAreIdentical(expected, current)
+        || JSON.stringify(expected.envelope) !== JSON.stringify(current.envelope)
+      ) {
+        throw new Error(
+          `Inbox target message changed after deletion was fenced: ${expected.envelope.messageId}`,
+        );
+      }
+    }
   }
 
   private async persistTargetTombstone(

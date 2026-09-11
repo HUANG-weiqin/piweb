@@ -54,7 +54,7 @@ import type { PortableExtensionUI } from "./extension-ui.js";
 import { WorkspaceLsp } from "./lsp/workspace.js";
 import {
   InboxPutOperationError,
-  InboxTargetTombstoneCommittedError,
+  InboxTargetTombstoneBatchError,
   ProjectInbox,
 } from "./project-inbox.js";
 import {
@@ -102,6 +102,67 @@ import {
   waitUntil,
   type Fixture,
 } from "./coordinator-test-fixture.js";
+
+async function createPendingExternalEnvelope(
+  fixture: Fixture,
+  seed: string,
+) {
+  const source = await fixture.coordinator.createUserConversation(
+    fixture.handle,
+    { roleId: "default" },
+  );
+  const targetId = deterministicTestUuid("cascade-external-source", seed);
+  await fixture.handle.project.createConversation(
+    targetId,
+    defaultProfile(fixture.roles),
+  );
+  await fixture.handle.project.refreshConversations();
+  const role = fixture.roles.getConversationRole("default");
+  const messageId = deterministicTestUuid(
+    "cascade-external-source-message",
+    seed,
+  );
+  const cardId = deterministicTestUuid("cascade-external-source-card", seed);
+  const body = `external source ${seed}`;
+  const fromSnapshot = {
+    conversationId: source.conversationId,
+    role: { id: role.id, name: role.name },
+  };
+  const toSnapshot = {
+    conversationId: targetId,
+    role: { id: role.id, name: role.name },
+  };
+  appendReservedCustomEntry(
+    source.sessionManager,
+    createConversationCardEntry({
+      cardId,
+      kind: "message",
+      summary: body,
+      body,
+      fromSnapshot,
+      toSnapshot,
+      state: "sending",
+      messageId,
+      updatedAt: "2026-09-11T00:00:00.000Z",
+    }),
+  );
+  const inbox = coordinatorInbox(fixture.handle);
+  await inbox.put({
+    messageId,
+    cardId,
+    fromConversationId: source.conversationId,
+    toConversationId: targetId,
+    sentAt: "2026-09-11T00:00:00.000Z",
+    kind: "message",
+    summary: body,
+    body,
+    fromRunId: RUN_A,
+    fromSnapshot,
+    toSnapshot,
+  });
+  return { source, targetId, messageId, inbox };
+}
+
 describe("ProjectSessionCoordinator", () => {
   it("owns one trusted LSP workspace across actors and disposes it only after actor teardown", async () => {
     const fixture = await createFixture();
@@ -2479,11 +2540,12 @@ describe("ProjectSessionCoordinator", () => {
       { roleId: "default" },
     );
     const inbox = coordinatorInbox(fixture.handle);
-    const markTargetDeleted = inbox.markTargetDeleted.bind(inbox);
-    inbox.markTargetDeleted = async (...args) => {
-      await markTargetDeleted(...args);
-      throw new InboxTargetTombstoneCommittedError(
-        args[0],
+    const beginTargetDeletionBatch = inbox.beginTargetDeletionBatch.bind(inbox);
+    inbox.beginTargetDeletionBatch = async (...args) => {
+      await beginTargetDeletionBatch(...args);
+      throw new InboxTargetTombstoneBatchError(
+        [actor.conversationId],
+        [actor.conversationId],
         new Error("post-write verification failed"),
       );
     };
@@ -2509,9 +2571,10 @@ describe("ProjectSessionCoordinator", () => {
       { roleId: "default" },
     );
     const inbox = coordinatorInbox(fixture.handle);
-    inbox.markTargetDeleted = async (conversationId) => {
-      throw new InboxTargetTombstoneCommittedError(
-        conversationId,
+    inbox.beginTargetDeletionBatch = async () => {
+      throw new InboxTargetTombstoneBatchError(
+        [],
+        [actor.conversationId],
         new Error("census temporarily unavailable"),
       );
     };
@@ -2542,7 +2605,7 @@ describe("ProjectSessionCoordinator", () => {
       { roleId: "default" },
     );
     const inbox = coordinatorInbox(fixture.handle);
-    inbox.clearTargetTombstone = async () => {
+    inbox.clearTargetDeletionBatch = async () => {
       throw new Error("tombstone cleanup failed");
     };
 
@@ -10116,15 +10179,16 @@ describe("ProjectSessionCoordinator", () => {
       { roleId: "default" },
     );
     const inbox = coordinatorInbox(fixture.handle);
-    const originalMarkDeleted = inbox.markTargetDeleted.bind(inbox);
+    const beginTargetDeletionBatch = inbox.beginTargetDeletionBatch.bind(inbox);
     const deletionMarked = deferred();
     const releaseDeletion = deferred();
-    inbox.markTargetDeleted = async (...args) => {
-      await originalMarkDeleted(...args);
-      if (args[0] === deletingTarget.conversationId) {
+    inbox.beginTargetDeletionBatch = async (...args) => {
+      const batch = await beginTargetDeletionBatch(...args);
+      if (batch.conversationIds.includes(deletingTarget.conversationId)) {
         deletionMarked.resolve();
         await releaseDeletion.promise;
       }
+      return batch;
     };
     const deleting = fixture.coordinator.deleteConversation(
       fixture.handle,
@@ -10152,7 +10216,7 @@ describe("ProjectSessionCoordinator", () => {
     );
     await expect(deleting).resolves.toBe(true);
     await expect(lateSend).rejects.toThrow(/not found/i);
-    inbox.markTargetDeleted = originalMarkDeleted;
+    inbox.beginTargetDeletionBatch = beginTargetDeletionBatch;
     expect(
       await inbox.list({
         toConversationId: deletingTarget.conversationId,
@@ -11226,7 +11290,7 @@ describe("ProjectSessionCoordinator", () => {
     const store = await ProjectStore.open(cwd, "full_access");
     const sourceId = randomUUID();
     const targetId = randomUUID();
-    await store.createConversation(sourceId, defaultProfile(roles));
+    const source = await store.createConversation(sourceId, defaultProfile(roles));
     const target = await store.createConversation(
       targetId,
       defaultProfile(roles),
@@ -11257,6 +11321,25 @@ describe("ProjectSessionCoordinator", () => {
         role: { id: "default", name: "Default" },
       },
     });
+    appendReservedCustomEntry(
+      source,
+      createConversationCardEntry({
+        cardId,
+        kind: "message",
+        body: "this message must never cross the deletion fence",
+        fromSnapshot: {
+          conversationId: sourceId,
+          role: { id: "default", name: "Default" },
+        },
+        toSnapshot: {
+          conversationId: targetId,
+          role: { id: "default", name: "Default" },
+        },
+        state: "sending",
+        messageId,
+        updatedAt: "2026-07-19T12:00:00.000Z",
+      }),
+    );
     await inbox.markTargetDeleted(
       targetId,
       "2026-07-19T12:00:01.000Z",
@@ -11295,16 +11378,20 @@ describe("ProjectSessionCoordinator", () => {
     await expect(readFile(quarantinePath, "utf8")).rejects.toMatchObject({
       code: "ENOENT",
     });
-    const source = await coordinator.openConversation(
+    const reopenedSource = await coordinator.openConversation(
       handle,
       sourceId,
       { updateRecent: false },
     );
     expect(
       aggregateReservedConversationEntries(
-        source.sessionManager.getEntries(),
+        reopenedSource.sessionManager.getEntries(),
       ).cards,
-    ).not.toContainEqual(expect.objectContaining({ cardId }));
+    ).toContainEqual(expect.objectContaining({
+      cardId,
+      state: "failed",
+      result: "目标会话已删除，消息未被处理。",
+    }));
   });
 
   it("recovers a root deletion tombstone by cascading to descendants", async () => {
@@ -11356,6 +11443,101 @@ describe("ProjectSessionCoordinator", () => {
     await waitUntil(async () =>
       (await coordinatorInbox(handle).listDeletedTargets()).length === 0,
     "cascade tombstone cleanup");
+  });
+
+  it("keeps startup durable-tombstone recovery proofs independent of cascade size", async () => {
+    async function recoverAndCountWork(
+      memberCount: number,
+    ): Promise<{ catalogProofs: number; inboxCensuses: number }> {
+      const cwd = await mkdtemp(join(
+        tmpdir(),
+        "piweb-session-cascade-startup-recovery-work-",
+      ));
+      temporaryDirectories.push(cwd);
+      const runtime = new FakeRuntime();
+      const roles = await RoleCatalog.open(
+        runtime,
+        join(cwd, "user", "roles.json"),
+      );
+      const store = await ProjectStore.open(cwd, "full_access");
+      const rootId = deterministicTestUuid(
+        "cascade-startup-recovery-root",
+        String(memberCount),
+      );
+      const conversationIds = [rootId];
+      await store.createConversation(rootId, defaultProfile(roles, {
+        orchestration: { rootConversationId: rootId, depth: 0 },
+      }));
+      for (let index = 1; index < memberCount; index += 1) {
+        const childId = deterministicTestUuid(
+          "cascade-startup-recovery-child",
+          `${memberCount}:${index}`,
+        );
+        conversationIds.push(childId);
+        await store.createConversation(childId, defaultProfile(roles, {
+          createdBy: { kind: "conversation", conversationId: rootId },
+          orchestration: { rootConversationId: rootId, depth: 1 },
+        }));
+      }
+      const inbox = await ProjectInbox.open(join(store.stateDir, "inbox"));
+      // Mimic a crash after the whole root-first durable intent, before any
+      // transcript quarantine. The recovery owner must process all K together.
+      for (const conversationId of conversationIds) {
+        await inbox.markTargetDeleted(conversationId, "2026-09-11T00:00:00.000Z");
+      }
+
+      const projectPrototype = ProjectStore.prototype as unknown as {
+        scanSafeSessionInformation(...args: unknown[]): Promise<unknown>;
+      };
+      const inboxPrototype = ProjectInbox.prototype as unknown as {
+        scan(...args: unknown[]): Promise<unknown>;
+      };
+      const catalogScan = vi.spyOn(projectPrototype, "scanSafeSessionInformation");
+      const inboxScan = vi.spyOn(inboxPrototype, "scan");
+      const coordinator = new ProjectSessionCoordinator(runtime, roles);
+      const handle = await coordinator.acquireProject(cwd);
+      fixtures.push({
+        cwd,
+        runtime,
+        roles,
+        registry: new ProjectStoreRegistry(),
+        coordinator,
+        handle,
+      });
+      try {
+        await waitUntil(() => {
+          const context = (handle as unknown as {
+            context: {
+              deleting: Set<string>;
+              backgroundTasks: Set<Promise<void>>;
+              project: ProjectStore;
+            };
+          }).context;
+          const remaining = new Set(context.project.listConversations().map(
+            ({ id }) => id,
+          ));
+          return context.backgroundTasks.size === 0
+            && conversationIds.every((conversationId) =>
+              !remaining.has(conversationId)
+              && !context.deleting.has(conversationId)
+            );
+        }, "batched startup cascade tombstone recovery");
+        return {
+          catalogProofs: catalogScan.mock.calls.length,
+          inboxCensuses: inboxScan.mock.calls.length,
+        };
+      } finally {
+        catalogScan.mockRestore();
+        inboxScan.mockRestore();
+      }
+    }
+
+    const one = await recoverAndCountWork(1);
+    const three = await recoverAndCountWork(3);
+
+    expect(one.catalogProofs).toBeGreaterThan(0);
+    expect(one.inboxCensuses).toBeGreaterThan(0);
+    expect(three).toEqual(one);
   });
 
   it("records a started abort intent before retrying its unreceipted inbox work", async () => {
@@ -12303,6 +12485,577 @@ describe("ProjectSessionCoordinator", () => {
       expect(remainingIds).not.toContain(grandchild.conversationId);
     });
 
+    it("keeps complete catalog and empty-inbox censuses independent of cascade size", async () => {
+      async function deleteAndCountWork(
+        memberCount: number,
+      ): Promise<{ catalogProofs: number; inboxCensuses: number }> {
+        const fixture = await createFixture();
+        const root = await fixture.coordinator.createUserConversation(
+          fixture.handle,
+          { roleId: "default" },
+        );
+        const role = fixture.roles.getConversationRole("default");
+        for (let index = 1; index < memberCount; index += 1) {
+          await fixture.handle.project.createConversation(
+            deterministicTestUuid("cascade-work-count", `${memberCount}:${index}`),
+            {
+              role,
+              lifecycle: { kind: "normal" },
+              createdBy: {
+                kind: "conversation",
+                conversationId: root.conversationId,
+              },
+            },
+          );
+        }
+        await fixture.handle.project.refreshConversations();
+
+        const inbox = coordinatorInbox(fixture.handle) as unknown as {
+          scan(): Promise<unknown>;
+        };
+        const project = fixture.handle.project as unknown as {
+          scanSafeSessionInformation(...args: unknown[]): Promise<unknown>;
+        };
+        const inboxScan = vi.spyOn(inbox, "scan");
+        const catalogScan = vi.spyOn(project, "scanSafeSessionInformation");
+        try {
+          await expect(fixture.coordinator.deleteConversation(
+            fixture.handle,
+            root.conversationId,
+          )).resolves.toBe(true);
+          return {
+            catalogProofs: catalogScan.mock.calls.length,
+            inboxCensuses: inboxScan.mock.calls.length,
+          };
+        } finally {
+          catalogScan.mockRestore();
+          inboxScan.mockRestore();
+        }
+      }
+
+      const one = await deleteAndCountWork(1);
+      const three = await deleteAndCountWork(3);
+
+      expect(one).toEqual({ catalogProofs: 1, inboxCensuses: 5 });
+      expect(three).toEqual(one);
+    });
+
+    it("persists the root fence before a later cascade fence can fail", async () => {
+      const fixture = await createFixture();
+      const root = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const childId = deterministicTestUuid("cascade-root-fence", "child");
+      await fixture.handle.project.createConversation(
+        childId,
+        defaultProfile(fixture.roles, {
+          createdBy: {
+            kind: "conversation",
+            conversationId: root.conversationId,
+          },
+          orchestration: {
+            rootConversationId: root.conversationId,
+            depth: 1,
+          },
+        }),
+      );
+      await fixture.handle.project.refreshConversations();
+
+      const inbox = coordinatorInbox(fixture.handle);
+      const internals = inbox as unknown as {
+        writeNewAtomically(path: string, content: string): Promise<void>;
+      };
+      const writeNewAtomically = internals.writeNewAtomically.bind(inbox);
+      const writes: string[] = [];
+      let tombstoneWrites = 0;
+      internals.writeNewAtomically = async (path, content) => {
+        writes.push(path);
+        if (path.endsWith(".tombstone.json")) {
+          tombstoneWrites += 1;
+          if (tombstoneWrites === 2) {
+            throw new Error("child fence write failed");
+          }
+        }
+        await writeNewAtomically(path, content);
+      };
+      try {
+        await expect(fixture.coordinator.deleteConversation(
+          fixture.handle,
+          root.conversationId,
+        )).rejects.toThrow("Inbox target tombstone batch could not be completed");
+      } finally {
+        internals.writeNewAtomically = writeNewAtomically;
+      }
+
+      expect(writes).toHaveLength(2);
+      expect(tombstoneWrites).toBe(2);
+      expect(await inbox.listDeletedTargets()).toEqual([root.conversationId]);
+      await expect(fixture.coordinator.prompt(
+        fixture.handle,
+        root.conversationId,
+        randomUUID(),
+        "must remain blocked behind the root fence",
+      )).rejects.toThrow(/being deleted/i);
+    });
+
+    it("recovers a partially unlinked frozen cascade after restart", async () => {
+      const fixture = await createFixture();
+      const root = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const childId = deterministicTestUuid("cascade-partial-unlink", "child");
+      const grandchildId = deterministicTestUuid(
+        "cascade-partial-unlink",
+        "grandchild",
+      );
+      await fixture.handle.project.createConversation(
+        childId,
+        defaultProfile(fixture.roles, {
+          createdBy: {
+            kind: "conversation",
+            conversationId: root.conversationId,
+          },
+          orchestration: {
+            rootConversationId: root.conversationId,
+            depth: 1,
+          },
+        }),
+      );
+      await fixture.handle.project.createConversation(
+        grandchildId,
+        defaultProfile(fixture.roles, {
+          createdBy: { kind: "conversation", conversationId: childId },
+          orchestration: {
+            rootConversationId: root.conversationId,
+            depth: 2,
+          },
+        }),
+      );
+      await fixture.handle.project.refreshConversations();
+
+      const internals = fixture.handle.project as unknown as {
+        unlinkSessionFile(path: string): Promise<void>;
+      };
+      const originalUnlinkSessionFile = internals.unlinkSessionFile.bind(
+        fixture.handle.project,
+      );
+      let unlinkAttempts = 0;
+      const unlink = vi.spyOn(internals, "unlinkSessionFile").mockImplementation(
+        async (path) => {
+          unlinkAttempts += 1;
+          if (unlinkAttempts === 2) {
+            throw new Error("injected cascade batch unlink failure");
+          }
+          await originalUnlinkSessionFile(path);
+        },
+      );
+      try {
+        await expect(fixture.coordinator.deleteConversation(
+          fixture.handle,
+          root.conversationId,
+        )).rejects.toThrow("injected cascade batch unlink failure");
+      } finally {
+        unlink.mockRestore();
+      }
+
+      const cascadeIds = [root.conversationId, childId, grandchildId];
+      expect(await coordinatorInbox(fixture.handle).listDeletedTargets())
+        .toEqual(expect.arrayContaining(cascadeIds));
+      await fixture.coordinator.close();
+      fixture.registry = new ProjectStoreRegistry();
+      fixture.coordinator = new ProjectSessionCoordinator(
+        fixture.runtime,
+        fixture.roles,
+        fixture.registry,
+      );
+      fixture.handle = await fixture.coordinator.acquireProject(
+        fixture.cwd,
+        "full_access",
+      );
+
+      await waitUntil(async () => {
+        const remaining = new Set(
+          fixture.handle.project.listConversations().map(({ id }) => id),
+        );
+        return cascadeIds.every((conversationId) => !remaining.has(conversationId))
+          && (await coordinatorInbox(fixture.handle).listDeletedTargets())
+            .length === 0;
+      }, "partial cascade retry and tombstone cleanup after restart");
+    });
+
+    it("terminalizes a source with a separate durable fence before clearing an absent target sidecar", async () => {
+      const fixture = await createFixture();
+      const source = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const targetId = deterministicTestUuid(
+        "cascade-recovery-external-source",
+        "target",
+      );
+      await fixture.handle.project.createConversation(
+        targetId,
+        defaultProfile(fixture.roles),
+      );
+      await fixture.handle.project.refreshConversations();
+      const role = fixture.roles.getConversationRole("default");
+      const messageId = deterministicTestUuid(
+        "cascade-recovery-external-source",
+        "message",
+      );
+      const cardId = deterministicTestUuid(
+        "cascade-recovery-external-source",
+        "card",
+      );
+      const fromSnapshot = {
+        conversationId: source.conversationId,
+        role: { id: role.id, name: role.name },
+      };
+      const toSnapshot = {
+        conversationId: targetId,
+        role: { id: role.id, name: role.name },
+      };
+      appendReservedCustomEntry(
+        source.sessionManager,
+        createConversationCardEntry({
+          cardId,
+          kind: "message",
+          summary: "recover external source",
+          body: "recover external source",
+          fromSnapshot,
+          toSnapshot,
+          state: "sending",
+          messageId,
+          updatedAt: "2026-09-11T00:00:00.000Z",
+        }),
+      );
+      const inbox = coordinatorInbox(fixture.handle);
+      await inbox.put({
+        messageId,
+        cardId,
+        fromConversationId: source.conversationId,
+        toConversationId: targetId,
+        sentAt: "2026-09-11T00:00:00.000Z",
+        kind: "message",
+        summary: "recover external source",
+        body: "recover external source",
+        fromRunId: RUN_A,
+        fromSnapshot,
+        toSnapshot,
+      });
+      await inbox.markTargetDeleted(source.conversationId);
+      await inbox.markTargetDeleted(targetId);
+      await fixture.handle.project.deleteConversation(targetId);
+      await fixture.coordinator.close();
+
+      const appendTerminal = vi.spyOn(
+        ProjectSessionCoordinator.prototype as unknown as {
+          appendTerminalSourceCardState(...args: unknown[]): Promise<void>;
+        },
+        "appendTerminalSourceCardState",
+      );
+      try {
+        fixture.registry = new ProjectStoreRegistry();
+        fixture.coordinator = new ProjectSessionCoordinator(
+          fixture.runtime,
+          fixture.roles,
+          fixture.registry,
+        );
+        fixture.handle = await fixture.coordinator.acquireProject(
+          fixture.cwd,
+          "full_access",
+        );
+        await waitUntil(async () => {
+          const terminalized = appendTerminal.mock.calls.some(([, envelope]) =>
+            (envelope as { fromConversationId?: unknown }).fromConversationId
+              === source.conversationId
+          );
+          return terminalized
+            && !(await coordinatorInbox(fixture.handle).listDeletedTargets())
+              .includes(targetId);
+        }, "external source terminalization before target cleanup after restart");
+      } finally {
+        appendTerminal.mockRestore();
+      }
+    });
+
+    it("keeps P-dependent sidecar work targeted while terminalizing every external source", async () => {
+      async function deleteWithPendingExternalMessages(pendingCount: number) {
+        const fixture = await createFixture();
+        const source = await fixture.coordinator.createUserConversation(
+          fixture.handle,
+          { roleId: "default" },
+        );
+        const targetId = deterministicTestUuid(
+          "cascade-external-terminal-target",
+          String(pendingCount),
+        );
+        await fixture.handle.project.createConversation(
+          targetId,
+          defaultProfile(fixture.roles),
+        );
+        await fixture.handle.project.refreshConversations();
+        const role = fixture.roles.getConversationRole("default");
+        const fromSnapshot = {
+          conversationId: source.conversationId,
+          role: { id: role.id, name: role.name },
+        };
+        const toSnapshot = {
+          conversationId: targetId,
+          role: { id: role.id, name: role.name },
+        };
+        const inbox = coordinatorInbox(fixture.handle);
+        const cardIds: string[] = [];
+        for (let index = 0; index < pendingCount; index += 1) {
+          const cardId = deterministicTestUuid(
+            "cascade-external-terminal-card",
+            `${pendingCount}:${index}`,
+          );
+          const messageId = deterministicTestUuid(
+            "cascade-external-terminal-message",
+            `${pendingCount}:${index}`,
+          );
+          const body = `external pending ${index}`;
+          cardIds.push(cardId);
+          appendReservedCustomEntry(
+            source.sessionManager,
+            createConversationCardEntry({
+              cardId,
+              kind: "message",
+              summary: body,
+              body,
+              fromSnapshot,
+              toSnapshot,
+              state: "sending",
+              messageId,
+              updatedAt: "2026-09-11T00:00:00.000Z",
+            }),
+          );
+          await inbox.put({
+            messageId,
+            cardId,
+            fromConversationId: source.conversationId,
+            toConversationId: targetId,
+            sentAt: "2026-09-11T00:00:00.000Z",
+            kind: "message",
+            summary: body,
+            body,
+            fromRunId: RUN_A,
+            fromSnapshot,
+            toSnapshot,
+          });
+        }
+        // The pre-existing outbound cards are durable before deletion starts;
+        // refresh outside the witness so only delete-path work is measured.
+        await fixture.handle.project.refreshConversations();
+        const inboxInternals = inbox as unknown as {
+          scan(): Promise<unknown>;
+          deleteStoredFile(...args: unknown[]): Promise<void>;
+        };
+        const projectInternals = fixture.handle.project as unknown as {
+          scanSafeSessionInformation(...args: unknown[]): Promise<unknown>;
+        };
+        const inboxScan = vi.spyOn(inboxInternals, "scan");
+        const catalogScan = vi.spyOn(projectInternals, "scanSafeSessionInformation");
+        const sidecarDelete = vi.spyOn(inboxInternals, "deleteStoredFile");
+        try {
+          await expect(fixture.coordinator.deleteConversation(
+            fixture.handle,
+            targetId,
+          )).resolves.toBe(true);
+          const cards = aggregateReservedConversationEntries(
+            source.sessionManager.getEntries(),
+          ).cards;
+          expect(cards.filter(({ cardId }) => cardIds.includes(cardId))).toEqual(
+            cardIds.map((cardId) => expect.objectContaining({
+              cardId,
+              state: "failed",
+              result: "目标会话已删除，消息未被处理。",
+            })),
+          );
+          return {
+            catalogProofs: catalogScan.mock.calls.length,
+            inboxCensuses: inboxScan.mock.calls.length,
+            sidecarDeletes: sidecarDelete.mock.calls.length,
+          };
+        } finally {
+          sidecarDelete.mockRestore();
+          catalogScan.mockRestore();
+          inboxScan.mockRestore();
+        }
+      }
+
+      const none = await deleteWithPendingExternalMessages(0);
+      const two = await deleteWithPendingExternalMessages(2);
+
+      expect(two).toMatchObject({
+        catalogProofs: none.catalogProofs,
+        inboxCensuses: none.inboxCensuses,
+      });
+      expect(two.sidecarDeletes).toBe(none.sidecarDeletes + 2);
+    });
+
+    it("uses final catalog absence to clean a target sidecar left by an independently deleted source", async () => {
+      const fixture = await createFixture();
+      const { source, targetId, messageId, inbox } =
+        await createPendingExternalEnvelope(fixture, "normal-absent-source");
+
+      await expect(fixture.coordinator.deleteConversation(
+        fixture.handle,
+        source.conversationId,
+      )).resolves.toBe(true);
+      expect(await inbox.list({ toConversationId: targetId })).toEqual([
+        expect.objectContaining({ messageId }),
+      ]);
+
+      await expect(fixture.coordinator.deleteConversation(
+        fixture.handle,
+        targetId,
+      )).resolves.toBe(true);
+
+      expect(await inbox.list({ toConversationId: targetId })).toEqual([]);
+      expect(await inbox.listDeletedTargets()).not.toContain(targetId);
+    });
+
+    it("retains a present source sidecar and target fence when terminal append is unavailable", async () => {
+      const fixture = await createFixture();
+      const { targetId, messageId, inbox } =
+        await createPendingExternalEnvelope(fixture, "present-source-unavailable");
+      const internals = fixture.coordinator as unknown as {
+        withStoredConversationManager(...args: unknown[]): Promise<unknown>;
+      };
+      const withStoredConversationManager =
+        internals.withStoredConversationManager.bind(fixture.coordinator);
+      internals.withStoredConversationManager = async () => undefined;
+
+      try {
+        await expect(fixture.coordinator.deleteConversation(
+          fixture.handle,
+          targetId,
+        )).rejects.toThrow(`Cannot terminalize inbox source card`);
+      } finally {
+        internals.withStoredConversationManager = withStoredConversationManager;
+      }
+
+      expect(await inbox.list({ toConversationId: targetId })).toEqual([
+        expect.objectContaining({ messageId }),
+      ]);
+      expect(await inbox.listDeletedTargets()).toContain(targetId);
+    });
+
+    it("recovers an absent external source by the fresh final catalog proof", async () => {
+      const fixture = await createFixture();
+      const { source, targetId, messageId, inbox } =
+        await createPendingExternalEnvelope(fixture, "recovery-absent-source");
+
+      await expect(fixture.coordinator.deleteConversation(
+        fixture.handle,
+        source.conversationId,
+      )).resolves.toBe(true);
+      expect(await inbox.list({ toConversationId: targetId })).toEqual([
+        expect.objectContaining({ messageId }),
+      ]);
+      await inbox.markTargetDeleted(targetId);
+      await fixture.handle.project.deleteConversation(targetId);
+      await fixture.coordinator.close();
+
+      fixture.registry = new ProjectStoreRegistry();
+      fixture.coordinator = new ProjectSessionCoordinator(
+        fixture.runtime,
+        fixture.roles,
+        fixture.registry,
+      );
+      fixture.handle = await fixture.coordinator.acquireProject(
+        fixture.cwd,
+        "full_access",
+      );
+      await waitUntil(async () =>
+        (await coordinatorInbox(fixture.handle).list({
+          toConversationId: targetId,
+        })).length === 0
+        && !(await coordinatorInbox(fixture.handle).listDeletedTargets())
+          .includes(targetId),
+      "absent external source recovery cleanup",
+      );
+    });
+
+    it("skips terminalization only for a source inside the frozen deletion set", async () => {
+      const fixture = await createFixture();
+      const root = await fixture.coordinator.createUserConversation(
+        fixture.handle,
+        { roleId: "default" },
+      );
+      const childId = deterministicTestUuid("cascade-internal-source", "child");
+      await fixture.handle.project.createConversation(
+        childId,
+        defaultProfile(fixture.roles, {
+          createdBy: {
+            kind: "conversation",
+            conversationId: root.conversationId,
+          },
+          orchestration: {
+            rootConversationId: root.conversationId,
+            depth: 1,
+          },
+        }),
+      );
+      await fixture.handle.project.refreshConversations();
+      const role = fixture.roles.getConversationRole("default");
+      const cardId = randomUUID();
+      const messageId = randomUUID();
+      const body = "this source is deleted with its target";
+      const fromSnapshot = {
+        conversationId: root.conversationId,
+        role: { id: role.id, name: role.name },
+      };
+      const toSnapshot = {
+        conversationId: childId,
+        role: { id: role.id, name: role.name },
+      };
+      appendReservedCustomEntry(
+        root.sessionManager,
+        createConversationCardEntry({
+          cardId,
+          kind: "message",
+          summary: body,
+          body,
+          fromSnapshot,
+          toSnapshot,
+          state: "sending",
+          messageId,
+          updatedAt: "2026-09-11T00:00:00.000Z",
+        }),
+      );
+      const inbox = coordinatorInbox(fixture.handle);
+      await inbox.put({
+        messageId,
+        cardId,
+        fromConversationId: root.conversationId,
+        toConversationId: childId,
+        sentAt: "2026-09-11T00:00:00.000Z",
+        kind: "message",
+        summary: body,
+        body,
+        fromRunId: RUN_A,
+        fromSnapshot,
+        toSnapshot,
+      });
+      const internals = fixture.coordinator as unknown as {
+        appendTerminalSourceCardState(...args: unknown[]): Promise<void>;
+      };
+      const terminalize = vi.spyOn(internals, "appendTerminalSourceCardState");
+
+      await expect(fixture.coordinator.deleteConversation(
+        fixture.handle,
+        root.conversationId,
+      )).resolves.toBe(true);
+
+      expect(terminalize).not.toHaveBeenCalled();
+      expect(await inbox.list({ toConversationId: childId })).toEqual([]);
+    });
+
     it("rejects malformed lineage before destructive cascade deletion", async () => {
       const fixture = await createFixture();
       const firstId = randomUUID();
@@ -12491,16 +13244,14 @@ describe("ProjectSessionCoordinator", () => {
       registry.events.length = 0;
       const acquireConversation = vi.spyOn(registry, "acquireConversation");
       const inbox = coordinatorInbox(fixture.handle);
-      const markTargetDeleted = inbox.markTargetDeleted.bind(inbox);
+      const beginTargetDeletionBatch = inbox.beginTargetDeletionBatch.bind(inbox);
       let childPreflightBeforeRootTombstone = false;
-      inbox.markTargetDeleted = async (...args) => {
-        if (args[0] === root.conversationId) {
-          childPreflightBeforeRootTombstone = registry.events.some(
-            ({ conversationId, kind }) =>
-              conversationId === childId && kind === "upgrade",
-          );
-        }
-        await markTargetDeleted(...args);
+      inbox.beginTargetDeletionBatch = async (...args) => {
+        childPreflightBeforeRootTombstone = registry.events.some(
+          ({ conversationId, kind }) =>
+            conversationId === childId && kind === "upgrade",
+        );
+        return beginTargetDeletionBatch(...args);
       };
 
       await expect(fixture.coordinator.deleteConversation(

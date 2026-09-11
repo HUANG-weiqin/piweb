@@ -69,9 +69,10 @@ import type { PortableExtensionUI } from "./extension-ui.js";
 import {
   inboxEnvelopePayloadFingerprint,
   InboxPutOperationError,
-  InboxTargetTombstoneCommittedError,
+  InboxTargetTombstoneBatchError,
   ProjectInbox,
   type InboxEnvelope,
+  type InboxTargetDeletionBatch,
   type InboxEnvelopeInput,
 } from "./project-inbox.js";
 import {
@@ -3342,61 +3343,205 @@ export class ProjectSessionCoordinator {
   private async retryBlockedDeletions(
     context: ProjectContext,
   ): Promise<void> {
-    await this.retryUncertainDeletionFences(context);
-    await this.retryDurableDeletions(context);
+    const durableConversationIds = new Set(
+      await context.inbox.listDeletedTargets(),
+    );
+    this.reconcileUncertainDeletionFences(context, durableConversationIds);
+    await this.retryDurableDeletions(context, durableConversationIds);
   }
 
-  private async retryUncertainDeletionFences(
+  private reconcileUncertainDeletionFences(
     context: ProjectContext,
-  ): Promise<void> {
+    durableConversationIds: ReadonlySet<string>,
+  ): void {
     for (const conversationId of [...context.uncertainDeletionFences]) {
-      if (context.closing) return;
-      try {
-        const persisted = await context.inbox.listDeletedTargets();
-        if (!persisted.includes(conversationId)) {
-          // A successful full inbox census proves the ambiguous write did not
-          // leave a durable fence. No deletion can be resumed for this ID.
-          context.uncertainDeletionFences.delete(conversationId);
-          context.deleting.delete(conversationId);
-          context.attention.delete(conversationId);
-          continue;
-        }
+      if (durableConversationIds.has(conversationId)) {
         context.uncertainDeletionFences.delete(conversationId);
-        if (!context.deleting.has(conversationId)) {
-          context.deleting.add(conversationId);
-        }
-        await this.deleteConversationInternal(
-          context,
-          conversationId,
-          true,
-          undefined,
-          true,
-        );
-      } catch {
-        context.attention.add(conversationId);
+        context.deleting.add(conversationId);
+        continue;
       }
+      // A successful full inbox census proves the ambiguous write did not
+      // leave a durable fence. No deletion can be resumed for this ID.
+      context.uncertainDeletionFences.delete(conversationId);
+      context.deleting.delete(conversationId);
+      context.attention.delete(conversationId);
     }
   }
 
   private async retryDurableDeletions(
     context: ProjectContext,
+    durableConversationIds?: ReadonlySet<string>,
   ): Promise<void> {
-    for (const conversationId of await context.inbox.listDeletedTargets()) {
-      if (context.closing) return;
-      if (!context.deleting.has(conversationId)) {
-        context.deleting.add(conversationId);
-      }
-      try {
-        await this.deleteConversationInternal(
-          context,
-          conversationId,
-          true,
-          undefined,
-          true,
-        );
-      } catch {
+    const durableIdsSnapshot = durableConversationIds ?? new Set(
+      await context.inbox.listDeletedTargets(),
+    );
+    if (durableIdsSnapshot.size === 0 || context.closing) return;
+    const clearedAbsentIds = await this.clearFullyDeletedTargetFences(
+      context,
+      durableIdsSnapshot,
+    );
+    const remainingDurableIds = new Set(
+      [...durableIdsSnapshot].filter((conversationId) =>
+        !clearedAbsentIds.has(conversationId)
+      ),
+    );
+    if (remainingDurableIds.size === 0 || context.closing) return;
+    try {
+      await this.hydrateConversationProfiles(context);
+    } catch {
+      for (const conversationId of remainingDurableIds) {
         context.attention.add(conversationId);
       }
+      return;
+    }
+
+    const durableIds = [...remainingDurableIds].sort();
+    const cascades = new Map<string, readonly string[]>();
+    for (const conversationId of durableIds) {
+      try {
+        cascades.set(
+          conversationId,
+          this.collectCascadeDeletionIds(context, conversationId),
+        );
+      } catch {
+        // Keep a malformed lineage as a one-item fallback. Its normal delete
+        // path will fail closed without preventing unrelated ready roots.
+      }
+    }
+    const roots = durableIds.filter((conversationId) => !durableIds.some(
+      (candidateId) =>
+        candidateId !== conversationId
+        && cascades.get(candidateId)?.includes(conversationId) === true,
+    ));
+    const attempted = new Set<string>();
+    const completed = new Set<string>();
+
+    for (const rootId of roots) {
+      if (context.closing) return;
+      attempted.add(rootId);
+      const cascade = cascades.get(rootId) ?? [rootId];
+      const succeeded = await this.retryDurableDeletion(
+        context,
+        rootId,
+        remainingDurableIds,
+      );
+      if (succeeded) {
+        for (const conversationId of cascade) {
+          if (remainingDurableIds.has(conversationId)) {
+            completed.add(conversationId);
+          }
+        }
+      }
+    }
+
+    // A maximal root may be blocked by a busy/opening member. Its descendants
+    // remain independently recoverable, so preserve the prior single-target
+    // fallback rather than leaving their durable fences stranded.
+    for (const conversationId of durableIds) {
+      if (context.closing) return;
+      if (completed.has(conversationId) || attempted.has(conversationId)) {
+        continue;
+      }
+      attempted.add(conversationId);
+      await this.retryDurableDeletion(
+        context,
+        conversationId,
+        remainingDurableIds,
+      );
+    }
+  }
+
+  /**
+   * Once all durable targets in a subset are already physically absent, no
+   * lineage inspection or per-target retry is necessary. Capture their exact
+   * sidecars once, dispose any stragglers, and clear the fences as one batch.
+   */
+  private async clearFullyDeletedTargetFences(
+    context: ProjectContext,
+    durableConversationIds: ReadonlySet<string>,
+  ): Promise<Set<string>> {
+    // This fresh complete catalog is the only evidence that an external source
+    // has no transcript left to receive its terminal card.
+    let finalCatalog: ConversationSummary[];
+    try {
+      finalCatalog = await context.project.refreshConversations();
+    } catch {
+      for (const conversationId of durableConversationIds) {
+        context.attention.add(conversationId);
+      }
+      return new Set();
+    }
+    const presentIds = new Set(finalCatalog.map(({ id }) => id));
+    const absentIds = [...durableConversationIds].filter((conversationId) =>
+      !presentIds.has(conversationId) && !context.actors.has(conversationId)
+    );
+    if (absentIds.length === 0) return new Set();
+    const absentIdSet = new Set(absentIds);
+    try {
+      const batch = await context.inbox.beginTargetDeletionBatch(
+        absentIds.sort(),
+        this.now().toISOString(),
+      );
+      for (const envelope of batch.pending) {
+        // An in-batch source is being cleaned with its target. An external
+        // source may skip a card only when this same complete catalog proved
+        // its transcript absent; present sources must durably terminalize.
+        if (
+          absentIdSet.has(envelope.fromConversationId)
+          || !presentIds.has(envelope.fromConversationId)
+        ) continue;
+        const terminalized = await this.appendTerminalSourceCardState(
+          context,
+          envelope,
+          "failed",
+          envelope.processingRunId,
+          "目标会话已删除，消息未被处理。",
+        );
+        if (!terminalized) {
+          throw new Error(
+            `Cannot terminalize inbox source card: ${envelope.fromConversationId}`,
+          );
+        }
+      }
+      await context.inbox.deleteCapturedTargetMessages(batch);
+      await context.inbox.clearTargetDeletionBatch(batch);
+      for (const conversationId of absentIds) {
+        context.extensionUIRouters.get(conversationId)?.clear();
+        context.extensionUIRouters.delete(conversationId);
+        context.profiles.delete(conversationId);
+        context.attention.delete(conversationId);
+        this.releaseDeletionReservation(context, conversationId);
+      }
+      this.emit(context, { type: "project_changed" });
+      return new Set(absentIds);
+    } catch {
+      for (const conversationId of absentIds) {
+        context.attention.add(conversationId);
+      }
+      return new Set();
+    }
+  }
+
+  private async retryDurableDeletion(
+    context: ProjectContext,
+    conversationId: string,
+    durableConversationIds: ReadonlySet<string>,
+  ): Promise<boolean> {
+    if (!context.deleting.has(conversationId)) {
+      context.deleting.add(conversationId);
+    }
+    try {
+      return await this.deleteConversationInternal(
+        context,
+        conversationId,
+        true,
+        undefined,
+        true,
+        durableConversationIds,
+      );
+    } catch {
+      context.attention.add(conversationId);
+      return false;
     }
   }
 
@@ -4830,18 +4975,18 @@ export class ProjectSessionCoordinator {
     state: "completed" | "failed" | "aborted",
     runId?: string,
     result?: string,
-  ): Promise<void> {
-    const append = (manager: ConversationActor["sessionManager"]) => {
+  ): Promise<boolean> {
+    const append = (manager: ConversationActor["sessionManager"]): boolean => {
       const existing = aggregateReservedConversationEntries(
         manager.getEntries(),
       ).cards.find(({ cardId }) => cardId === envelope.cardId);
-      if (!existing) return;
+      if (!existing) return false;
       if (
         existing.state === state
         && existing.runId === runId
         && existing.result === result
       ) {
-        return;
+        return true;
       }
       appendReservedCustomEntry(
         manager,
@@ -4853,13 +4998,14 @@ export class ProjectSessionCoordinator {
           updatedAt: this.now().toISOString(),
         }),
       );
+      return true;
     };
 
-    await this.withStoredConversationManager(
+    return (await this.withStoredConversationManager(
       context,
       envelope.fromConversationId,
       append,
-    );
+    )) ?? false;
   }
 
   private removeEnvelopeFromProcessingBatches(
@@ -5613,27 +5759,12 @@ export class ProjectSessionCoordinator {
   private async recoverProject(context: ProjectContext): Promise<void> {
     if (context.closing) return;
     let summaries = await context.project.refreshConversations();
-    const existingIds = new Set(summaries.map(({ id }) => id));
-    await context.inbox.pruneCompletedTargetTombstones(existingIds);
-    for (const conversationId of await context.inbox.listDeletedTargets()) {
-      if (context.closing) return;
-      if (!existingIds.has(conversationId)) {
-        await context.inbox.clearTargetTombstone(conversationId);
-        context.deleting.delete(conversationId);
-        continue;
-      }
-      try {
-        await this.deleteConversationInternal(
-          context,
-          conversationId,
-          true,
-          undefined,
-          true,
-        );
-      } catch {
-        context.attention.add(conversationId);
-      }
-    }
+    // Startup recovery shares the same frozen-set batch path as ordinary
+    // retries. In particular, an absent target may still have captured
+    // sidecars whose external source must record a terminal card before the
+    // exact sidecar is removed; pruneCompletedTargetTombstones cannot prove
+    // that ordering or preserve a root fence across a cascade.
+    await this.retryBlockedDeletions(context);
     const blockedTargets = new Set(
       await context.inbox.listDeletedTargets(),
     );
@@ -6208,6 +6339,7 @@ export class ProjectSessionCoordinator {
     deletionReserved = false,
     protectedConversationId?: string,
     reservedByDurableTombstone = false,
+    knownDurableFenceIds?: ReadonlySet<string>,
   ): Promise<boolean> {
     const ownedReservationIds = new Set<string>();
     const durableFenceIds = new Set<string>();
@@ -6230,13 +6362,27 @@ export class ProjectSessionCoordinator {
     const known = context.project.listConversations()
       .some(({ id }) => id === conversationId);
     if (!known && !context.actors.has(conversationId)) {
-      await context.inbox.clearTargetTombstone(conversationId);
+      if (reservedByDurableTombstone) {
+        // Durable recovery batches missing targets through
+        // clearFullyDeletedTargetFences(), which verifies exact captured
+        // tombstones instead of clearing one potentially replaced sidecar.
+        return false;
+      }
+      const durableFenceIds = new Set(await context.inbox.listDeletedTargets());
+      if (durableFenceIds.has(conversationId)) {
+        // A normal idempotent delete can race an older durable intent. Resume
+        // its captured batch rather than clearing this one fence out of order.
+        await this.retryDurableDeletions(context, durableFenceIds);
+        return false;
+      }
       context.deleting.delete(conversationId);
       return false;
     }
 
     const preexistingDurableFenceIds = reservedByDurableTombstone
-      ? new Set(await context.inbox.listDeletedTargets())
+      ? new Set(
+        knownDurableFenceIds ?? await context.inbox.listDeletedTargets(),
+      )
       : new Set<string>();
     for (const durableId of preexistingDurableFenceIds) {
       durableFenceIds.add(durableId);
@@ -6318,31 +6464,34 @@ export class ProjectSessionCoordinator {
         }
       }
 
-      const deletedAt = this.now().toISOString();
-      for (const cascadeId of cascadeIds) {
-        try {
-          await context.inbox.markTargetDeleted(cascadeId, deletedAt);
+      let inboxBatch: InboxTargetDeletionBatch;
+      try {
+        // collectCascadeDeletionIds is leaf-first for safe physical teardown;
+        // publish the root durable fence first so any interrupted intent is
+        // recoverable as the complete frozen cascade.
+        inboxBatch = await context.inbox.beginTargetDeletionBatch(
+          [...cascadeIds].reverse(),
+          this.now().toISOString(),
+        );
+        for (const cascadeId of cascadeIds) {
           durableFenceIds.add(cascadeId);
-        } catch (error) {
-          if (
-            error instanceof InboxTargetTombstoneCommittedError
-            && error.conversationId === cascadeId
-          ) {
-            durableFenceIds.add(cascadeId);
-            context.uncertainDeletionFences.add(cascadeId);
-          }
-          throw error;
+          startedDeletionIds.add(cascadeId);
         }
+      } catch (error) {
+        this.recordBatchDeletionFenceFailure(
+          context,
+          durableFenceIds,
+          error,
+        );
+        throw error;
       }
 
-      for (const cascadeId of cascadeIds) {
-        startedDeletionIds.add(cascadeId);
-        await this.deleteSingleConversationInternal(
-          context,
-          cascadeId,
-          deletionPreflights,
-        );
-      }
+      await this.deleteConversationBatchInternal(
+        context,
+        inboxBatch,
+        deletionPreflights,
+        cascadeIds,
+      );
       await this.retryBlockedDeletions(context);
       return true;
     } catch (error) {
@@ -6362,114 +6511,122 @@ export class ProjectSessionCoordinator {
     }
   }
 
-  private async deleteSingleConversationInternal(
+  private recordBatchDeletionFenceFailure(
     context: ProjectContext,
-    conversationId: string,
+    durableFenceIds: Set<string>,
+    error: unknown,
+  ): void {
+    if (!(error instanceof InboxTargetTombstoneBatchError)) return;
+    for (const conversationId of error.durableConversationIds) {
+      durableFenceIds.add(conversationId);
+    }
+    for (const conversationId of error.uncertainConversationIds) {
+      durableFenceIds.add(conversationId);
+      context.uncertainDeletionFences.add(conversationId);
+    }
+  }
+
+  private async deleteConversationBatchInternal(
+    context: ProjectContext,
+    inboxBatch: InboxTargetDeletionBatch,
     deletionPreflights: Map<string, DeletionLeasePreflight>,
-  ): Promise<boolean> {
-    const known = context.project.listConversations()
-      .some(({ id }) => id === conversationId);
-    if (!known && !context.actors.has(conversationId)) {
-      await context.inbox.clearTargetTombstone(conversationId);
-      context.deleting.delete(conversationId);
-      return false;
-    }
-    const actor = context.actors.get(conversationId);
+    deletionConversationIds: readonly string[],
+  ): Promise<void> {
+    const deletionIds = new Set(deletionConversationIds);
     if (
-      actor
-      && (
-        actor.getActivity().kind !== "idle"
-        || actor.isCompacting()
-      )
+      deletionIds.size !== inboxBatch.conversationIds.length
+      || inboxBatch.conversationIds.some((conversationId) => !deletionIds.has(
+        conversationId,
+      ))
     ) {
-      throw new Error(
-        "Cannot delete a busy conversation or one that is compacting; wait first",
-      );
+      throw new Error("Inbox deletion fence does not match the frozen cascade");
     }
-    const preflight = deletionPreflights.get(conversationId);
-    if (preflight === undefined) {
-      throw new Error(
-        `Conversation deletion lease preflight was lost: ${conversationId}`,
-      );
-    }
-    let coldDeletionLease: ConversationDeletionLease | undefined;
-    if (actor !== undefined) {
-      if (preflight.kind !== "actor" || preflight.actor !== actor) {
-        throw new Error(
-          `Conversation deletion lease preflight changed: ${conversationId}`,
-        );
-      }
-    } else {
-      if (preflight.kind !== "cold") {
-        throw new Error(
-          `Conversation deletion lease preflight changed: ${conversationId}`,
-        );
-      }
-      coldDeletionLease = preflight.lease;
-    }
-    let deletionLease: ConversationDeletionLease | undefined;
-    let durableDeletionIntent = false;
+    const deletionLeases: ConversationDeletionLease[] = [];
     try {
-      try {
-        await context.inbox.markTargetDeleted(
-          conversationId,
-          this.now().toISOString(),
-        );
-        durableDeletionIntent = true;
-      } catch (error) {
+      for (const conversationId of deletionConversationIds) {
+        const actor = context.actors.get(conversationId);
         if (
-          error instanceof InboxTargetTombstoneCommittedError
-          && error.conversationId === conversationId
+          actor !== undefined
+          && (
+            actor.getActivity().kind !== "idle"
+            || actor.isCompacting()
+          )
         ) {
-          durableDeletionIntent = true;
-          context.uncertainDeletionFences.add(conversationId);
+          throw new Error(
+            "Cannot delete a busy conversation or one that is compacting; wait first",
+          );
         }
-        throw error;
+        const preflight = deletionPreflights.get(conversationId);
+        if (preflight === undefined) {
+          throw new Error(
+            `Conversation deletion lease preflight was lost: ${conversationId}`,
+          );
+        }
+        if (actor !== undefined) {
+          if (preflight.kind !== "actor" || preflight.actor !== actor) {
+            throw new Error(
+              `Conversation deletion lease preflight changed: ${conversationId}`,
+            );
+          }
+          context.actorUnsubscribes.get(conversationId)?.();
+          context.actorUnsubscribes.delete(conversationId);
+          const lease = await actor.dispose({ transferLeaseForDeletion: true });
+          if (lease === undefined) {
+            throw new Error("Conversation deletion lease was not transferred");
+          }
+          deletionPreflights.delete(conversationId);
+          context.actors.delete(conversationId);
+          deletionLeases.push(lease);
+          continue;
+        }
+        if (preflight.kind !== "cold") {
+          throw new Error(
+            `Conversation deletion lease preflight changed: ${conversationId}`,
+          );
+        }
+        deletionPreflights.delete(conversationId);
+        deletionLeases.push(preflight.lease);
       }
-      const pending = await context.inbox.list({
-        toConversationId: conversationId,
-      });
-      for (const envelope of pending) {
-        await this.appendTerminalSourceCardState(
+
+      // Keep the project catalog proof independent of P. It also supplies
+      // explicit evidence for an external source which is already absent and
+      // therefore has no transcript that could record a terminal card.
+      const finalCatalog = await context.project.deleteConversations(
+        deletionConversationIds,
+      );
+      const presentIds = new Set(finalCatalog.remainingConversationIds);
+      for (const envelope of inboxBatch.pending) {
+        // A source inside this frozen delete set will be physically removed;
+        // an external absent source is allowed only by this final proof.
+        if (
+          deletionIds.has(envelope.fromConversationId)
+          || !presentIds.has(envelope.fromConversationId)
+        ) continue;
+        const terminalized = await this.appendTerminalSourceCardState(
           context,
           envelope,
           "failed",
           envelope.processingRunId,
           "目标会话已删除，消息未被处理。",
         );
-        await context.inbox.delete(envelope.messageId);
+        if (!terminalized) {
+          throw new Error(
+            `Cannot terminalize inbox source card: ${envelope.fromConversationId}`,
+          );
+        }
       }
-      if (actor) {
-        context.actorUnsubscribes.get(conversationId)?.();
-        context.actorUnsubscribes.delete(conversationId);
-        deletionLease = await actor.dispose({
-          transferLeaseForDeletion: true,
-        });
-        deletionPreflights.delete(conversationId);
-        context.actors.delete(conversationId);
-      } else {
-        deletionLease = coldDeletionLease;
-        deletionPreflights.delete(conversationId);
-      }
-      if (!deletionLease) {
-        throw new Error("Conversation deletion lease was not transferred");
-      }
-      await context.inbox.tombstoneTarget(conversationId);
-      await context.project.deleteConversation(conversationId);
-      await context.inbox.clearTargetTombstone(conversationId);
-      durableDeletionIntent = false;
-      context.extensionUIRouters.get(conversationId)?.clear();
-      context.extensionUIRouters.delete(conversationId);
-      context.profiles.delete(conversationId);
-      context.attention.delete(conversationId);
-
-      this.emit(context, { type: "project_changed" });
-      return true;
-    } finally {
-      deletionLease?.release();
-      if (!durableDeletionIntent) {
+      await context.inbox.deleteCapturedTargetMessages(inboxBatch);
+      await context.inbox.clearTargetDeletionBatch(inboxBatch);
+      for (const conversationId of deletionConversationIds) {
+        context.extensionUIRouters.get(conversationId)?.clear();
+        context.extensionUIRouters.delete(conversationId);
+        context.profiles.delete(conversationId);
+        context.attention.delete(conversationId);
         this.releaseDeletionReservation(context, conversationId);
       }
+      this.emit(context, { type: "project_changed" });
+    } finally {
+      for (const lease of deletionLeases) lease.release();
     }
   }
 

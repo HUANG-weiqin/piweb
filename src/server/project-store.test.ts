@@ -41,7 +41,7 @@ interface ProjectStoreIntegrityInternals {
     expectedFile: { path: string },
     conversationId: string,
   ): Promise<unknown>;
-  clearLastConversationIf(conversationId: string): Promise<void>;
+  clearLastConversationsIf(conversationIds: ReadonlySet<string>): Promise<void>;
   renameSessionFile(source: string, destination: string): Promise<void>;
   unlinkSessionFile(path: string): Promise<void>;
   readStableNamespaceHeaderCensus(): Promise<unknown>;
@@ -943,11 +943,11 @@ describe("ProjectStore", () => {
     const addedId = randomUUID();
     const addedPath = join(store.sessionDir, "added-after-proof.jsonl");
     const internals = store as unknown as ProjectStoreIntegrityInternals;
-    const originalClearLastConversation =
-      internals.clearLastConversationIf.bind(store);
-    vi.spyOn(internals, "clearLastConversationIf").mockImplementationOnce(
-      async (id) => {
-        await originalClearLastConversation(id);
+    const originalClearLastConversations =
+      internals.clearLastConversationsIf.bind(store);
+    vi.spyOn(internals, "clearLastConversationsIf").mockImplementationOnce(
+      async (conversationIds) => {
+        await originalClearLastConversations(conversationIds);
         await writeSessionHeader(addedPath, addedId, store.cwd);
       },
     );
@@ -959,6 +959,99 @@ describe("ProjectStore", () => {
     );
   });
 
+  it("recovers a partially unlinked batch across restart", async () => {
+    const cwd = await createTemporaryDirectory("piweb-delete-batch-partial-");
+    const store = await ProjectStore.open(cwd);
+    const retained = await store.createConversation();
+    const first = await store.createConversation();
+    const second = await store.createConversation();
+    const third = await store.createConversation();
+    const deletedIds = [
+      first.getSessionId(),
+      second.getSessionId(),
+      third.getSessionId(),
+    ];
+    const internals = store as unknown as ProjectStoreIntegrityInternals;
+    const originalUnlinkSessionFile = internals.unlinkSessionFile.bind(store);
+    let unlinkAttempts = 0;
+    const unlink = vi.spyOn(internals, "unlinkSessionFile").mockImplementation(
+      async (path) => {
+        unlinkAttempts += 1;
+        if (unlinkAttempts === 2) {
+          throw new Error("injected batch unlink failure");
+        }
+        await originalUnlinkSessionFile(path);
+      },
+    );
+
+    await expect(store.deleteConversations(deletedIds)).rejects.toThrow(
+      "injected batch unlink failure",
+    );
+    unlink.mockRestore();
+
+    await expect(readFile(first.getSessionFile()!, "utf8"))
+      .rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(second.getSessionFile()!, "utf8"))
+      .resolves.toContain(second.getSessionId());
+    await expect(readFile(third.getSessionFile()!, "utf8"))
+      .resolves.toContain(third.getSessionId());
+    expect((await readdir(store.sessionDir)).some((name) =>
+      name.includes(".delete-quarantine.jsonl")
+    )).toBe(false);
+
+    const reopened = await ProjectStore.open(cwd);
+    await reopened.deleteConversations(deletedIds);
+    expect(reopened.listConversations().map(({ id }) => id)).toEqual(
+      expect.arrayContaining([retained.getSessionId()]),
+    );
+    for (const conversationId of deletedIds) {
+      expect(reopened.listConversations().map(({ id }) => id)).not.toContain(
+        conversationId,
+      );
+    }
+  });
+
+  it("fails final batch proof when a deleted identity reappears and retries safely", async () => {
+    const cwd = await createTemporaryDirectory("piweb-delete-batch-final-proof-");
+    const store = await ProjectStore.open(cwd);
+    const retained = await store.createConversation();
+    const first = await store.createConversation();
+    const second = await store.createConversation();
+    const deletedIds = [first.getSessionId(), second.getSessionId()];
+    const firstPath = first.getSessionFile()!;
+    const internals = store as unknown as ProjectStoreIntegrityInternals;
+    const originalUnlinkSessionFile = internals.unlinkSessionFile.bind(store);
+    let unlinkAttempts = 0;
+    const unlink = vi.spyOn(internals, "unlinkSessionFile").mockImplementation(
+      async (path) => {
+        await originalUnlinkSessionFile(path);
+        unlinkAttempts += 1;
+        if (unlinkAttempts === deletedIds.length) {
+          await writeSessionHeader(firstPath, first.getSessionId(), store.cwd);
+        }
+      },
+    );
+
+    await expect(store.deleteConversations(deletedIds)).rejects.toThrow(
+      `Conversation reappeared during deletion: ${first.getSessionId()}`,
+    );
+    unlink.mockRestore();
+    await expect(readFile(firstPath, "utf8")).resolves.toContain(
+      first.getSessionId(),
+    );
+
+    const reopened = await ProjectStore.open(cwd);
+    await reopened.deleteConversations(deletedIds);
+    expect(reopened.listConversations().map(({ id }) => id)).toEqual(
+      expect.arrayContaining([retained.getSessionId()]),
+    );
+    for (const conversationId of deletedIds) {
+      expect(reopened.listConversations().map(({ id }) => id)).not.toContain(
+        conversationId,
+      );
+    }
+  });
+
   it("restores quarantine when an unrelated file becomes corrupt after proof", async () => {
     const cwd = await createTemporaryDirectory("piweb-delete-post-proof-corrupt-");
     const store = await ProjectStore.open(cwd);
@@ -967,11 +1060,11 @@ describe("ProjectStore", () => {
     const deletedPath = deleted.getSessionFile()!;
     const corruptPath = join(store.sessionDir, "corrupt-after-proof.jsonl");
     const internals = store as unknown as ProjectStoreIntegrityInternals;
-    const originalClearLastConversation =
-      internals.clearLastConversationIf.bind(store);
-    vi.spyOn(internals, "clearLastConversationIf").mockImplementationOnce(
-      async (id) => {
-        await originalClearLastConversation(id);
+    const originalClearLastConversations =
+      internals.clearLastConversationsIf.bind(store);
+    vi.spyOn(internals, "clearLastConversationsIf").mockImplementationOnce(
+      async (conversationIds) => {
+        await originalClearLastConversations(conversationIds);
         await writeFile(corruptPath, '{"type":"session"\n');
       },
     );

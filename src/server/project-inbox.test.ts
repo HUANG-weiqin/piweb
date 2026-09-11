@@ -30,6 +30,7 @@ import {
   MAX_INBOX_MESSAGES_PER_TARGET,
   MAX_INBOX_TOTAL_BYTES,
   InboxPutOperationError,
+  InboxTargetTombstoneBatchError,
   InboxTargetTombstoneCommittedError,
   ProjectInbox,
   createInboxEnvelope,
@@ -950,6 +951,121 @@ describe("ProjectInbox", () => {
 
     vi.mocked(lstat).mockReset().mockImplementation(nativeFs.lstat);
     await expect(inbox.markTargetDeleted(target)).resolves.toBeUndefined();
+  });
+
+  it("retains all attempted batch fences when the publish census is ambiguous", async () => {
+    const { inbox } = await temporaryInbox("piweb-inbox-batch-tombstone-census-");
+    const first = randomUUID();
+    const second = randomUUID();
+    const internals = inbox as unknown as {
+      scan(): Promise<unknown>;
+    };
+    const scan = internals.scan.bind(inbox);
+    vi.spyOn(internals, "scan")
+      .mockImplementationOnce(scan)
+      .mockRejectedValueOnce(new Error("batch publish census unavailable"));
+
+    await expect(inbox.beginTargetDeletionBatch(
+      [first, second],
+      timestamp,
+    )).rejects.toMatchObject({
+      constructor: InboxTargetTombstoneBatchError,
+      durableConversationIds: [first, second],
+      uncertainConversationIds: [first, second],
+    });
+
+    vi.restoreAllMocks();
+    expect(await inbox.listDeletedTargets()).toEqual([first, second].sort());
+  });
+
+  it("does not adopt unrelated fences when a batch fence write fails", async () => {
+    const { directory, inbox } = await temporaryInbox(
+      "piweb-inbox-batch-unrelated-fence-",
+    );
+    const unrelated = randomUUID();
+    const first = randomUUID();
+    const second = randomUUID();
+    await inbox.markTargetDeleted(unrelated, timestamp);
+    const internals = inbox as unknown as {
+      writeNewAtomically(path: string, content: string): Promise<void>;
+    };
+    const writeNewAtomically = internals.writeNewAtomically.bind(inbox);
+    vi.spyOn(internals, "writeNewAtomically").mockImplementation(
+      async (path, content) => {
+        if (path === tombstonePath(directory, second)) {
+          throw new Error("injected second fence failure");
+        }
+        await writeNewAtomically(path, content);
+      },
+    );
+
+    await expect(inbox.beginTargetDeletionBatch(
+      [first, second],
+      timestamp,
+    )).rejects.toMatchObject({
+      constructor: InboxTargetTombstoneBatchError,
+      durableConversationIds: [first],
+      uncertainConversationIds: [],
+    });
+  });
+
+  it("retains an EEXIST batch fence as publication-ambiguous", async () => {
+    const { directory, inbox } = await temporaryInbox(
+      "piweb-inbox-batch-eexist-fence-",
+    );
+    const first = randomUUID();
+    const second = randomUUID();
+    const internals = inbox as unknown as {
+      writeNewAtomically(path: string, content: string): Promise<void>;
+    };
+    const writeNewAtomically = internals.writeNewAtomically.bind(inbox);
+    vi.spyOn(internals, "writeNewAtomically").mockImplementation(
+      async (path, content) => {
+        if (path === tombstonePath(directory, second)) {
+          throw Object.assign(new Error("target already exists"), {
+            code: "EEXIST",
+          });
+        }
+        await writeNewAtomically(path, content);
+      },
+    );
+
+    await expect(inbox.beginTargetDeletionBatch(
+      [first, second],
+      timestamp,
+    )).rejects.toMatchObject({
+      constructor: InboxTargetTombstoneBatchError,
+      durableConversationIds: [first, second].sort(),
+      uncertainConversationIds: [second],
+    });
+  });
+
+  it("rejects captured target sidecar or fence replacements", async () => {
+    const { directory, inbox } = await temporaryInbox(
+      "piweb-inbox-batch-captured-identity-",
+    );
+    const target = randomUUID();
+    const message = input({ toConversationId: target });
+    await inbox.put(message);
+    const sidecarBatch = await inbox.beginTargetDeletionBatch([target], timestamp);
+    await inbox.updateState(message.messageId, {
+      state: "processing",
+      processingRunId: randomUUID(),
+    });
+    await expect(inbox.deleteCapturedTargetMessages(sidecarBatch)).rejects.toThrow(
+      "Inbox target message changed after deletion was fenced",
+    );
+    await expect(inbox.get(message.messageId)).resolves.toMatchObject({
+      state: "processing",
+    });
+
+    const fenceBatch = await inbox.beginTargetDeletionBatch([target], timestamp);
+    await writeTombstone(directory, target, {
+      deletedAt: "2026-07-19T11:00:00.000Z",
+    });
+    await expect(inbox.clearTargetDeletionBatch(fenceBatch)).rejects.toThrow(
+      "Inbox target tombstone changed after deletion was fenced",
+    );
   });
 
   it("persists a target tombstone before exact pending cleanup and rejects future puts after reopen", async () => {

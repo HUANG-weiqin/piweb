@@ -127,6 +127,11 @@ export interface ProjectStoreHandle {
   release(): void;
 }
 
+/** A complete catalog proof taken after a delete batch commits. */
+export interface ConversationDeletionFinalCatalogProof {
+  readonly remainingConversationIds: readonly string[];
+}
+
 export interface ConversationLeaseWaitOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -1546,68 +1551,103 @@ export class ProjectStore {
     return inspections;
   }
 
-  deleteConversation(conversationId: string): Promise<void> {
-    assertSessionId(conversationId, "conversationId");
+  async deleteConversation(conversationId: string): Promise<void> {
+    await this.deleteConversations([conversationId]);
+  }
+
+  /**
+   * Deletes one frozen set of conversations through one complete catalog
+   * transaction and returns the final complete catalog proof. Callers must
+   * already own every matching deletion lease.
+   */
+  deleteConversations(
+    conversationIds: readonly string[],
+  ): Promise<ConversationDeletionFinalCatalogProof> {
+    const uniqueConversationIds = [...new Set(conversationIds)];
+    if (uniqueConversationIds.length === 0) {
+      return Promise.reject(new Error("At least one conversation is required"));
+    }
+    for (const conversationId of uniqueConversationIds) {
+      assertSessionId(conversationId, "conversationId");
+    }
     return this.enqueueConversationOperation(async () => {
       await this.recoverAbandonedSessionQuarantines();
       const batch = await this.readVerifiedSessionFileBatch(
-        [conversationId],
+        uniqueConversationIds,
         { allowMissing: true },
       );
-      const target = batch.targets.get(conversationId);
-      let quarantined: QuarantinedSessionFile | undefined;
+      const quarantined: QuarantinedSessionFile[] = [];
 
       try {
-        if (target !== undefined) {
-          quarantined = await this.quarantineSessionFile(
-            target,
-            conversationId,
-          );
+        for (const conversationId of uniqueConversationIds) {
+          const target = batch.targets.get(conversationId);
+          if (target !== undefined) {
+            quarantined.push(await this.quarantineSessionFile(
+              target,
+              conversationId,
+            ));
+          }
         }
+        const quarantinePaths = quarantined.map(
+          ({ quarantinePath }) => quarantinePath,
+        );
 
         // Quarantine changes the controlled JSONL set, so prove the remaining
         // project before any unrelated durable side effect.
-        await this.getVerifiedSessionCatalog(quarantined?.quarantinePath);
-        await deleteConversationNotebook(this.stateDir, conversationId);
-        await this.clearLastConversationIf(conversationId);
+        await this.getVerifiedSessionCatalog(quarantinePaths);
+        for (const conversationId of uniqueConversationIds) {
+          await deleteConversationNotebook(this.stateDir, conversationId);
+        }
+        await this.clearLastConversationsIf(new Set(uniqueConversationIds));
 
         // Side effects may have yielded to writers. Revalidate all remaining
-        // JSONL files before the irreversible quarantine unlink.
-        await this.getVerifiedSessionCatalog(quarantined?.quarantinePath);
-        if (quarantined !== undefined) {
+        // JSONL files before the irreversible quarantine unlinks.
+        await this.getVerifiedSessionCatalog(quarantinePaths);
+        for (const entry of quarantined) {
           await this.readStableExpectedSessionFile(
-            quarantined.quarantineFingerprint,
-            conversationId,
+            entry.quarantineFingerprint,
+            entry.conversationId,
           );
         }
-        if (quarantined !== undefined) {
-          await this.unlinkSessionFile(quarantined.quarantinePath);
-          quarantined = undefined;
+        for (let index = 0; index < quarantined.length;) {
+          const entry = quarantined[index]!;
+          await this.unlinkSessionFile(entry.quarantinePath);
+          quarantined.splice(index, 1);
         }
 
         // A successful delete is projected only from a complete proof taken
-        // after the captured quarantine has been unlinked.
+        // after every captured quarantine has been unlinked.
         const committedCatalog = await this.getVerifiedSessionCatalog();
-        if (
-          committedCatalog.information.some(({ id }) => id === conversationId)
-        ) {
+        const reappeared = committedCatalog.information.find(({ id }) =>
+          uniqueConversationIds.includes(id)
+        );
+        if (reappeared !== undefined) {
           throw new Error(
-            `Conversation reappeared during deletion: ${conversationId}`,
+            `Conversation reappeared during deletion: ${reappeared.id}`,
           );
         }
         this.replaceConversations(toConversationSummaries(
           committedCatalog.information,
         ));
+        return {
+          remainingConversationIds: Object.freeze(
+            committedCatalog.information.map(({ id }) => id).sort(),
+          ),
+        };
       } catch (error) {
-        if (quarantined !== undefined) {
+        const recoveryErrors: unknown[] = [];
+        for (const entry of [...quarantined].reverse()) {
           try {
-            await this.recoverQuarantinedSessionFile(quarantined);
+            await this.recoverQuarantinedSessionFile(entry);
           } catch (recoveryError) {
-            throw new AggregateError(
-              [error, recoveryError],
-              `Conversation deletion failed and recovery could not be completed: ${conversationId}`,
-            );
+            recoveryErrors.push(recoveryError);
           }
+        }
+        if (recoveryErrors.length > 0) {
+          throw new AggregateError(
+            [error, ...recoveryErrors],
+            "Conversation deletion failed and recovery could not be completed",
+          );
         }
         throw error;
       }
@@ -1740,9 +1780,15 @@ export class ProjectStore {
     });
   }
 
-  private clearLastConversationIf(conversationId: string): Promise<void> {
+  private clearLastConversationsIf(
+    conversationIds: ReadonlySet<string>,
+  ): Promise<void> {
     return this.enqueueWrite(async () => {
-      if (this.manifest.lastConversationId !== conversationId) return;
+      const lastConversationId = this.manifest.lastConversationId;
+      if (
+        lastConversationId === undefined
+        || !conversationIds.has(lastConversationId)
+      ) return;
       await this.assertStateDirectorySafe();
       const next: ProjectManifest = {
         version: MANIFEST_VERSION,
@@ -1953,7 +1999,7 @@ export class ProjectStore {
   }
 
   private async getVerifiedSessionCatalog(
-    allowedQuarantinePath?: string,
+    allowedQuarantinePaths?: readonly string[] | string,
   ): Promise<VerifiedSessionCatalog> {
     for (
       let attempt = 0;
@@ -1963,7 +2009,7 @@ export class ProjectStore {
       let currentFiles: SessionFileFingerprint[];
       try {
         currentFiles = await this.listSafeSessionFiles(
-          allowedQuarantinePath,
+          allowedQuarantinePaths,
         );
       } catch (error) {
         this.verifiedCatalog = undefined;
@@ -1979,7 +2025,7 @@ export class ProjectStore {
       try {
         return await this.scanSafeSessionInformation(
           currentFiles,
-          allowedQuarantinePath,
+          allowedQuarantinePaths,
         );
       } catch (error) {
         if (
@@ -1995,7 +2041,7 @@ export class ProjectStore {
 
   private async scanSafeSessionInformation(
     filesBeforeScan: readonly SessionFileFingerprint[],
-    allowedQuarantinePath?: string,
+    allowedQuarantinePaths?: readonly string[] | string,
   ): Promise<VerifiedSessionCatalog> {
     const information = await SessionManager.listAll(this.sessionDir);
     const validatedByPath = new Map<string, string>();
@@ -2058,7 +2104,7 @@ export class ProjectStore {
     }
 
     const filesAfterScan = await this.listSafeSessionFiles(
-      allowedQuarantinePath,
+      allowedQuarantinePaths,
     );
     if (!fingerprintSetsEqual(filesBeforeScan, filesAfterScan)) {
       throw new SessionDirectoryChangedError();
@@ -2091,13 +2137,15 @@ export class ProjectStore {
   }
 
   private async listSafeSessionFiles(
-    allowedQuarantinePath?: string,
+    allowedQuarantinePaths?: readonly string[] | string,
   ): Promise<SessionFileFingerprint[]> {
     await this.assertSessionDirectorySafe();
     const entries = await readdir(this.sessionDir, { withFileTypes: true });
-    const allowedQuarantinePathKey = allowedQuarantinePath === undefined
-      ? undefined
-      : pathIdentity(allowedQuarantinePath);
+    const allowedQuarantinePathKeys = new Set(
+      (typeof allowedQuarantinePaths === "string"
+        ? [allowedQuarantinePaths]
+        : allowedQuarantinePaths ?? []).map(pathIdentity),
+    );
     const files: SessionFileFingerprint[] = [];
     for (const entry of entries) {
       const entryPath = join(this.sessionDir, entry.name);
@@ -2109,7 +2157,7 @@ export class ProjectStore {
           );
         }
         const quarantine = await this.fingerprintSafeSessionPath(entryPath);
-        if (quarantine.pathKey !== allowedQuarantinePathKey) {
+        if (!allowedQuarantinePathKeys.has(quarantine.pathKey)) {
           throw new Error(
             `Abandoned conversation deletion quarantine requires recovery: ${entryPath}`,
           );
