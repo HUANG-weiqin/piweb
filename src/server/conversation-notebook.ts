@@ -40,6 +40,26 @@ const MAX_NOTEBOOK_FILE_BYTES = MAX_NOTE_COUNT * (
 );
 const PREVIEW_CHARS = 160;
 const SNIPPET_CHARS = 200;
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+type NotebookMutationOperation = "create" | "replace" | "delete";
+type NotebookArtifactStage = "tmp" | "quarantine";
+
+interface NotebookArtifact {
+  path: string;
+  information: Stats;
+  operation: NotebookMutationOperation;
+  transactionId: string;
+  stage: NotebookArtifactStage;
+}
+
+interface NotebookOperationQueue {
+  queue: SerialTaskQueue;
+  pending: number;
+}
+
+const notebookOperationQueues = new Map<string, NotebookOperationQueue>();
 
 export type NotebookStatus = "active" | "archived" | "all";
 
@@ -406,30 +426,80 @@ async function assertNotebookOwnedFile(
   return information;
 }
 
-async function assertNotebookFileIfPresent(
+function notebookArtifactPrefix(paths: NotebookPaths): string {
+  return `.${basename(paths.file)}.`;
+}
+
+function parseNotebookArtifact(
   paths: NotebookPaths,
-): Promise<Stats | undefined> {
-  const hasDirectory = await assertNotebookDirectoryIfPresent(paths);
-  if (!hasDirectory) return;
-  const quarantinePrefix = `.${basename(paths.file)}.`;
-  const quarantine = (await readdir(paths.notebookDir)).find((name) =>
-    name.startsWith(quarantinePrefix) && name.endsWith(".quarantine")
+  name: string,
+): Omit<NotebookArtifact, "path" | "information"> | undefined {
+  const prefix = notebookArtifactPrefix(paths);
+  if (!name.startsWith(prefix)) return;
+  const match = /^(create|replace|delete)\.([^.]+)\.(tmp|quarantine)$/.exec(
+    name.slice(prefix.length),
   );
-  if (quarantine !== undefined) {
+  if (match === null || !UUID_PATTERN.test(match[2]!)) {
     throw new Error(
-      `Notebook mutation quarantine requires recovery: ${join(paths.notebookDir, quarantine)}`,
+      `Invalid legacy notebook mutation artifact: ${join(paths.notebookDir, name)}`,
     );
   }
+  return {
+    operation: match[1]! as NotebookMutationOperation,
+    transactionId: match[2]!,
+    stage: match[3]! as NotebookArtifactStage,
+  };
+}
+
+async function listNotebookArtifacts(
+  paths: NotebookPaths,
+): Promise<NotebookArtifact[]> {
+  if (!await assertNotebookDirectoryIfPresent(paths)) return [];
+  const artifacts: NotebookArtifact[] = [];
+  for (const entry of await readdir(paths.notebookDir, { withFileTypes: true })) {
+    const parsed = parseNotebookArtifact(paths, entry.name);
+    if (parsed === undefined) continue;
+    const path = join(paths.notebookDir, entry.name);
+    if (entry.isSymbolicLink() || !entry.isFile()) {
+      throw new Error(`Notebook mutation artifact must be a regular file: ${path}`);
+    }
+    artifacts.push({
+      ...parsed,
+      path,
+      information: await assertNotebookOwnedFile(
+        paths.notebookDir,
+        path,
+        "Notebook mutation artifact",
+      ),
+    });
+  }
+  return artifacts;
+}
+
+async function notebookOwnedFileIfPresent(
+  paths: NotebookPaths,
+  filePath: string,
+  label: string,
+): Promise<Stats | undefined> {
   try {
-    return await assertNotebookOwnedFile(
-      paths.notebookDir,
-      paths.file,
-      "Notebook file",
-    );
+    return await assertNotebookOwnedFile(paths.notebookDir, filePath, label);
   } catch (error) {
     if (isNodeError(error, "ENOENT")) return;
     throw error;
   }
+}
+
+async function assertNotebookFileIfPresent(
+  paths: NotebookPaths,
+): Promise<Stats | undefined> {
+  if (!await assertNotebookDirectoryIfPresent(paths)) return;
+  const artifacts = await listNotebookArtifacts(paths);
+  if (artifacts.length > 0) {
+    throw new Error(
+      `Notebook mutation artifacts require recovery: ${artifacts[0]!.path}`,
+    );
+  }
+  return notebookOwnedFileIfPresent(paths, paths.file, "Notebook file");
 }
 
 interface LoadedNotebook {
@@ -469,117 +539,397 @@ async function readNotes(paths: NotebookPaths): Promise<NotebookNote[]> {
   return (await loadNotebook(paths)).notes;
 }
 
-function temporaryNotebookPath(filePath: string): string {
+function notebookArtifactPath(
+  filePath: string,
+  operation: NotebookMutationOperation,
+  transactionId: string,
+  stage: NotebookArtifactStage,
+): string {
   return join(
     dirname(filePath),
-    `.${basename(filePath)}.${process.pid}.${randomUUID()}.tmp`,
+    `.${basename(filePath)}.${operation}.${transactionId}.${stage}`,
   );
 }
 
-function quarantineNotebookPath(filePath: string): string {
-  return join(
-    dirname(filePath),
-    `.${basename(filePath)}.${process.pid}.${randomUUID()}.quarantine`,
+async function assertNotebookArtifactCurrent(
+  paths: NotebookPaths,
+  artifact: NotebookArtifact,
+): Promise<Stats> {
+  const current = await assertNotebookOwnedFile(
+    paths.notebookDir,
+    artifact.path,
+    "Notebook mutation artifact",
   );
+  if (!statsAreIdentical(artifact.information, current)) {
+    throw new Error(`Notebook mutation artifact changed: ${artifact.path}`);
+  }
+  return current;
+}
+
+async function unlinkNotebookArtifact(
+  paths: NotebookPaths,
+  artifact: NotebookArtifact,
+): Promise<void> {
+  await assertNotebookArtifactCurrent(paths, artifact);
+  await unlink(artifact.path);
+}
+
+async function restoreNotebookQuarantine(
+  paths: NotebookPaths,
+  quarantine: NotebookArtifact,
+): Promise<void> {
+  const current = await assertNotebookArtifactCurrent(paths, quarantine);
+  try {
+    await link(quarantine.path, paths.file);
+  } catch (error) {
+    if (!isNodeError(error, "EEXIST")) throw error;
+  }
+  const restored = await assertNotebookOwnedFile(
+    paths.notebookDir,
+    paths.file,
+    "Notebook file",
+  );
+  if (!statsAreIdentical(current, restored)) {
+    throw new Error(`Notebook recovery target changed: ${paths.file}`);
+  }
+}
+
+async function recoverCreateArtifact(
+  paths: NotebookPaths,
+  temporary: NotebookArtifact,
+): Promise<void> {
+  const current = await notebookOwnedFileIfPresent(
+    paths,
+    paths.file,
+    "Notebook file",
+  );
+  if (
+    current !== undefined
+    && !statsAreIdentical(temporary.information, current)
+  ) {
+    throw new Error(
+      `Notebook create artifact conflicts with published file: ${paths.file}`,
+    );
+  }
+  await unlinkNotebookArtifact(paths, temporary);
+}
+
+async function recoverReplaceArtifacts(
+  paths: NotebookPaths,
+  temporary: NotebookArtifact | undefined,
+  quarantine: NotebookArtifact | undefined,
+): Promise<void> {
+  if (temporary === undefined) {
+    throw new Error("Notebook replace quarantine has no matching temporary");
+  }
+  const current = await notebookOwnedFileIfPresent(
+    paths,
+    paths.file,
+    "Notebook file",
+  );
+  if (quarantine === undefined) {
+    if (current === undefined) {
+      throw new Error(
+        `Notebook replace temporary has no original file: ${paths.file}`,
+      );
+    }
+    await unlinkNotebookArtifact(paths, temporary);
+    return;
+  }
+
+  const temporaryCurrent = await assertNotebookArtifactCurrent(paths, temporary);
+  const quarantineCurrent = await assertNotebookArtifactCurrent(paths, quarantine);
+  if (statsAreIdentical(temporaryCurrent, quarantineCurrent)) {
+    throw new Error(
+      `Notebook replace artifacts share an inode: ${paths.file}`,
+    );
+  }
+  if (current === undefined) {
+    await restoreNotebookQuarantine(paths, quarantine);
+  } else if (
+    !statsAreIdentical(temporaryCurrent, current)
+    && !statsAreIdentical(quarantineCurrent, current)
+  ) {
+    throw new Error(
+      `Notebook replace artifacts conflict with published file: ${paths.file}`,
+    );
+  }
+  await unlinkNotebookArtifact(paths, quarantine);
+  await unlinkNotebookArtifact(paths, temporary);
+}
+
+async function recoverDeleteArtifacts(
+  paths: NotebookPaths,
+  temporary: NotebookArtifact | undefined,
+  quarantine: NotebookArtifact | undefined,
+): Promise<void> {
+  const current = await notebookOwnedFileIfPresent(
+    paths,
+    paths.file,
+    "Notebook file",
+  );
+  if (temporary === undefined) {
+    throw new Error("Notebook delete quarantine has no matching temporary");
+  }
+  const temporaryCurrent = await assertNotebookArtifactCurrent(paths, temporary);
+  if (quarantine === undefined) {
+    if (current === undefined) {
+      throw new Error(
+        `Notebook delete temporary has no quarantine evidence: ${paths.file}`,
+      );
+    }
+    if (!statsAreIdentical(temporaryCurrent, current)) {
+      throw new Error(
+        `Notebook delete temporary conflicts with original file: ${paths.file}`,
+      );
+    }
+    await unlinkNotebookArtifact(paths, temporary);
+    return;
+  }
+
+  const quarantineCurrent = await assertNotebookArtifactCurrent(paths, quarantine);
+  if (
+    current !== undefined
+    || !statsAreIdentical(temporaryCurrent, quarantineCurrent)
+  ) {
+    throw new Error(
+      `Notebook delete artifacts conflict with expected file: ${paths.file}`,
+    );
+  }
+  await unlinkNotebookArtifact(paths, temporary);
+  await unlinkNotebookArtifact(paths, quarantine);
+}
+
+async function recoverNotebookArtifacts(paths: NotebookPaths): Promise<void> {
+  const artifacts = await listNotebookArtifacts(paths);
+  if (artifacts.length === 0) return;
+
+  const groups = new Map<string, NotebookArtifact[]>();
+  for (const artifact of artifacts) {
+    const key = `${artifact.operation}\0${artifact.transactionId}`;
+    const group = groups.get(key);
+    if (group === undefined) groups.set(key, [artifact]);
+    else group.push(artifact);
+  }
+  if (groups.size !== 1) {
+    throw new Error("Notebook recovery found multiple mutation transactions");
+  }
+  const group = [...groups.values()][0]!;
+  const operation = group[0]!.operation;
+  const temporary = group.filter(({ stage }) => stage === "tmp");
+  const quarantine = group.filter(({ stage }) => stage === "quarantine");
+  if (temporary.length > 1 || quarantine.length > 1) {
+    throw new Error("Notebook recovery found duplicate mutation artifacts");
+  }
+
+  if (operation === "create") {
+    if (temporary.length !== 1 || quarantine.length !== 0) {
+      throw new Error("Invalid notebook create mutation artifacts");
+    }
+    await recoverCreateArtifact(paths, temporary[0]!);
+  } else if (operation === "replace") {
+    await recoverReplaceArtifacts(paths, temporary[0], quarantine[0]);
+  } else {
+    await recoverDeleteArtifacts(paths, temporary[0], quarantine[0]);
+  }
+  if ((await listNotebookArtifacts(paths)).length !== 0) {
+    throw new Error("Notebook recovery could not clear mutation artifacts");
+  }
+}
+
+function runNotebookOperation<T>(
+  paths: NotebookPaths,
+  operation: () => Promise<T> | T,
+): Promise<T> {
+  const key = pathIdentity(paths.file);
+  let entry = notebookOperationQueues.get(key);
+  if (entry === undefined) {
+    entry = { queue: new SerialTaskQueue(), pending: 0 };
+    notebookOperationQueues.set(key, entry);
+  }
+  entry.pending++;
+  return entry.queue.run(async () => {
+    await recoverNotebookArtifacts(paths);
+    try {
+      return await operation();
+    } catch (error) {
+      try {
+        await recoverNotebookArtifacts(paths);
+      } catch (recoveryError) {
+        throw new AggregateError(
+          [error, recoveryError],
+          `Notebook operation failed and recovery could not be completed: ${paths.file}`,
+        );
+      }
+      throw error;
+    }
+  }).finally(() => {
+    entry!.pending--;
+    if (entry!.pending === 0) notebookOperationQueues.delete(key);
+  });
+}
+
+interface StagedNotebookFile extends NotebookArtifact {
+  stage: "tmp";
+}
+
+class NotebookQuarantineProofError extends Error {
+  constructor(
+    operation: NotebookMutationOperation,
+    cause: unknown,
+  ) {
+    super(`Notebook ${operation} quarantine could not be proven`, { cause });
+  }
+}
+
+async function stageNotebookFile(
+  paths: NotebookPaths,
+  serialized: string,
+  operation: "create" | "replace",
+): Promise<StagedNotebookFile> {
+  const transactionId = randomUUID();
+  const path = notebookArtifactPath(paths.file, operation, transactionId, "tmp");
+  await writeFile(path, serialized, { encoding: "utf8", flag: "wx" });
+  return {
+    path,
+    information: await assertNotebookOwnedFile(
+      paths.notebookDir,
+      path,
+      "Notebook temporary file",
+    ),
+    operation,
+    transactionId,
+    stage: "tmp",
+  };
+}
+
+async function stageDeleteGuard(
+  paths: NotebookPaths,
+  expected: Stats,
+): Promise<NotebookArtifact> {
+  const transactionId = randomUUID();
+  const path = notebookArtifactPath(paths.file, "delete", transactionId, "tmp");
+  await link(paths.file, path);
+  const [temporary, current] = await Promise.all([
+    assertNotebookOwnedFile(paths.notebookDir, path, "Notebook delete temporary"),
+    assertNotebookOwnedFile(paths.notebookDir, paths.file, "Notebook file"),
+  ]);
+  if (
+    !statsAreIdentical(expected, temporary)
+    || !statsAreIdentical(expected, current)
+  ) {
+    throw new Error(`Notebook file changed before mutation: ${paths.file}`);
+  }
+  return {
+    path,
+    information: temporary,
+    operation: "delete",
+    transactionId,
+    stage: "tmp",
+  };
+}
+
+async function quarantineNotebookFile(
+  paths: NotebookPaths,
+  expected: Stats,
+  operation: "replace" | "delete",
+  transactionId: string,
+): Promise<NotebookArtifact> {
+  const path = notebookArtifactPath(
+    paths.file,
+    operation,
+    transactionId,
+    "quarantine",
+  );
+  await rename(paths.file, path);
+  let information: Stats;
+  try {
+    information = await assertNotebookOwnedFile(
+      paths.notebookDir,
+      path,
+      "Notebook quarantine",
+    );
+  } catch (error) {
+    throw new NotebookQuarantineProofError(operation, error);
+  }
+  const quarantine: NotebookArtifact = {
+    path,
+    information,
+    operation,
+    transactionId,
+    stage: "quarantine",
+  };
+  if (!statsAreIdentical(expected, information)) {
+    throw new Error(`Notebook file changed before mutation: ${paths.file}`);
+  }
+  return quarantine;
+}
+
+async function recoverPublishedNotebook(
+  paths: NotebookPaths,
+  staged: StagedNotebookFile,
+  error: unknown,
+): Promise<void> {
+  try {
+    await recoverNotebookArtifacts(paths);
+    const current = await notebookOwnedFileIfPresent(
+      paths,
+      paths.file,
+      "Notebook file",
+    );
+    if (
+      current === undefined
+      || !statsAreIdentical(staged.information, current)
+    ) {
+      throw new Error(`Notebook publication could not be proven: ${paths.file}`);
+    }
+  } catch (recoveryError) {
+    throw new AggregateError(
+      [error, recoveryError],
+      `Notebook committed mutation could not be completed: ${paths.file}`,
+    );
+  }
+}
+
+async function publishStagedNotebookFile(
+  paths: NotebookPaths,
+  staged: StagedNotebookFile,
+): Promise<void> {
+  await link(staged.path, paths.file);
+  try {
+    const [temporary, published] = await Promise.all([
+      assertNotebookArtifactCurrent(paths, staged),
+      assertNotebookOwnedFile(paths.notebookDir, paths.file, "Notebook file"),
+    ]);
+    if (!statsAreIdentical(temporary, published)) {
+      throw new Error(`Notebook file changed while being published: ${paths.file}`);
+    }
+  } catch (error) {
+    await recoverPublishedNotebook(paths, staged, error);
+  }
+}
+
+async function cleanPublishedNotebookArtifacts(
+  paths: NotebookPaths,
+  staged: StagedNotebookFile,
+  artifacts: readonly NotebookArtifact[],
+): Promise<void> {
+  try {
+    for (const artifact of artifacts) {
+      await unlinkNotebookArtifact(paths, artifact);
+    }
+  } catch (error) {
+    await recoverPublishedNotebook(paths, staged, error);
+  }
 }
 
 async function writeNewNotebookFile(
   paths: NotebookPaths,
   serialized: string,
 ): Promise<void> {
-  const temporaryPath = temporaryNotebookPath(paths.file);
-  try {
-    await writeFile(temporaryPath, serialized, { encoding: "utf8", flag: "wx" });
-    const temporary = await assertNotebookOwnedFile(
-      paths.notebookDir,
-      temporaryPath,
-      "Notebook temporary file",
-    );
-    await link(temporaryPath, paths.file);
-    const published = await assertNotebookOwnedFile(
-      paths.notebookDir,
-      paths.file,
-      "Notebook file",
-    );
-    if (!statsAreIdentical(temporary, published)) {
-      throw new Error(`Notebook file changed while being published: ${paths.file}`);
-    }
-  } finally {
-    await unlink(temporaryPath).catch(() => undefined);
-  }
-}
-
-interface QuarantinedNotebookFile {
-  originalPath: string;
-  quarantinePath: string;
-  information: Stats;
-}
-
-async function restoreQuarantinedNotebookFile(
-  paths: NotebookPaths,
-  quarantined: QuarantinedNotebookFile,
-): Promise<void> {
-  const current = await assertNotebookOwnedFile(
-    paths.notebookDir,
-    quarantined.quarantinePath,
-    "Notebook quarantine",
-  );
-  if (!statsAreIdentical(quarantined.information, current)) {
-    throw new Error(
-      `Notebook quarantine changed while it was being recovered: ${quarantined.quarantinePath}`,
-    );
-  }
-  try {
-    await link(quarantined.quarantinePath, quarantined.originalPath);
-  } catch (error) {
-    if (!isNodeError(error, "EEXIST")) throw error;
-    const original = await assertNotebookOwnedFile(
-      paths.notebookDir,
-      quarantined.originalPath,
-      "Notebook file",
-    );
-    if (!statsAreIdentical(current, original)) {
-      throw new Error(
-        `Notebook quarantine remains at ${quarantined.quarantinePath}`,
-        { cause: error },
-      );
-    }
-  }
-  await unlink(quarantined.quarantinePath);
-}
-
-async function quarantineNotebookFile(
-  paths: NotebookPaths,
-  originalPath: string,
-  expected: Stats,
-): Promise<QuarantinedNotebookFile> {
-  const quarantinePath = quarantineNotebookPath(originalPath);
-  let moved: QuarantinedNotebookFile | undefined;
-  try {
-    await rename(originalPath, quarantinePath);
-    const information = await assertNotebookOwnedFile(
-      paths.notebookDir,
-      quarantinePath,
-      "Notebook quarantine",
-    );
-    moved = { originalPath, quarantinePath, information };
-    if (!statsAreIdentical(expected, information)) {
-      throw new Error(`Notebook file changed before mutation: ${originalPath}`);
-    }
-    return moved;
-  } catch (error) {
-    if (moved !== undefined) {
-      try {
-        await restoreQuarantinedNotebookFile(paths, moved);
-      } catch (recoveryError) {
-        throw new AggregateError(
-          [error, recoveryError],
-          `Notebook mutation failed and recovery could not be completed: ${originalPath}`,
-        );
-      }
-    }
-    throw error;
-  }
+  const staged = await stageNotebookFile(paths, serialized, "create");
+  await publishStagedNotebookFile(paths, staged);
+  await cleanPublishedNotebookArtifacts(paths, staged, [staged]);
 }
 
 async function replaceNotebookFile(
@@ -587,56 +937,168 @@ async function replaceNotebookFile(
   expected: Stats,
   serialized: string,
 ): Promise<void> {
-  const quarantined = await quarantineNotebookFile(paths, paths.file, expected);
-  let published = false;
+  const staged = await stageNotebookFile(paths, serialized, "replace");
+  const quarantined = await quarantineNotebookFile(
+    paths,
+    expected,
+    "replace",
+    staged.transactionId,
+  );
+  await publishStagedNotebookFile(paths, staged);
+  await cleanPublishedNotebookArtifacts(paths, staged, [quarantined, staged]);
+}
+
+async function recoverDeletedNotebook(
+  paths: NotebookPaths,
+  error: unknown,
+): Promise<void> {
   try {
-    await writeNewNotebookFile(paths, serialized);
-    published = true;
-    await unlink(quarantined.quarantinePath);
-  } catch (error) {
-    if (!published) {
-      try {
-        await restoreQuarantinedNotebookFile(paths, quarantined);
-      } catch (recoveryError) {
-        throw new AggregateError(
-          [error, recoveryError],
-          `Notebook mutation failed and recovery could not be completed: ${paths.file}`,
-        );
-      }
+    await recoverNotebookArtifacts(paths);
+    if (await notebookOwnedFileIfPresent(paths, paths.file, "Notebook file") !== undefined) {
+      throw new Error(`Notebook file reappeared while being deleted: ${paths.file}`);
     }
-    throw error;
+  } catch (recoveryError) {
+    throw new AggregateError(
+      [error, recoveryError],
+      `Notebook committed deletion could not be completed: ${paths.file}`,
+    );
+  }
+}
+
+async function recoverDeleteQuarantineCleanup(
+  paths: NotebookPaths,
+  temporary: NotebookArtifact,
+  quarantine: NotebookArtifact,
+  error: unknown,
+): Promise<void> {
+  try {
+    const current = await notebookOwnedFileIfPresent(
+      paths,
+      quarantine.path,
+      "Notebook deletion quarantine",
+    );
+    if (current === undefined) {
+      await recoverDeletedNotebook(paths, error);
+      return;
+    }
+    if (!statsAreIdentical(quarantine.information, current)) {
+      throw new Error(`Notebook deletion quarantine changed: ${quarantine.path}`);
+    }
+    const existingTemporary = await notebookOwnedFileIfPresent(
+      paths,
+      temporary.path,
+      "Notebook delete temporary",
+    );
+    if (existingTemporary !== undefined) {
+      throw new Error(`Notebook delete temporary changed: ${temporary.path}`);
+    }
+    const provisionalTransactionId = randomUUID();
+    const provisionalPath = notebookArtifactPath(
+      paths.file,
+      "delete",
+      provisionalTransactionId,
+      "tmp",
+    );
+    await link(quarantine.path, provisionalPath);
+    const [provisional] = await Promise.all([
+      assertNotebookOwnedFile(
+        paths.notebookDir,
+        provisionalPath,
+        "Notebook provisional delete temporary",
+      ),
+      assertNotebookArtifactCurrent(paths, quarantine),
+    ]);
+    if (!statsAreIdentical(quarantine.information, provisional)) {
+      throw new Error(`Notebook deletion quarantine changed: ${quarantine.path}`);
+    }
+    await link(provisionalPath, temporary.path);
+    const [restoredTemporary, , restoredProvisional] = await Promise.all([
+      assertNotebookOwnedFile(
+        paths.notebookDir,
+        temporary.path,
+        "Notebook delete temporary",
+      ),
+      assertNotebookArtifactCurrent(paths, quarantine),
+      assertNotebookOwnedFile(
+        paths.notebookDir,
+        provisionalPath,
+        "Notebook provisional delete temporary",
+      ),
+    ]);
+    if (
+      !statsAreIdentical(quarantine.information, restoredTemporary)
+      || !statsAreIdentical(quarantine.information, restoredProvisional)
+    ) {
+      throw new Error(`Notebook delete temporary changed: ${temporary.path}`);
+    }
+    const provisionalArtifact: NotebookArtifact = {
+      path: provisionalPath,
+      information: provisional,
+      operation: "delete",
+      transactionId: provisionalTransactionId,
+      stage: "tmp",
+    };
+    try {
+      await unlinkNotebookArtifact(paths, provisionalArtifact);
+    } catch (cleanupError) {
+      if (await notebookOwnedFileIfPresent(
+        paths,
+        provisionalPath,
+        "Notebook provisional delete temporary",
+      ) === undefined) {
+        await link(temporary.path, provisionalPath);
+        const restoredProvisional = await assertNotebookOwnedFile(
+          paths.notebookDir,
+          provisionalPath,
+          "Notebook provisional delete temporary",
+        );
+        if (!statsAreIdentical(quarantine.information, restoredProvisional)) {
+          throw new Error(`Notebook provisional delete temporary changed: ${provisionalPath}`);
+        }
+      }
+      throw cleanupError;
+    }
+    await recoverDeletedNotebook(paths, error);
+  } catch (recoveryError) {
+    throw new AggregateError(
+      [error, recoveryError],
+      `Notebook committed deletion could not be completed: ${paths.file}`,
+    );
   }
 }
 
 async function deleteNotebookFile(
   paths: NotebookPaths,
-  filePath: string,
   expected: Stats,
 ): Promise<void> {
-  const quarantined = await quarantineNotebookFile(paths, filePath, expected);
-  let removed = false;
+  const temporary = await stageDeleteGuard(paths, expected);
+  let quarantined: NotebookArtifact;
   try {
-    await unlink(quarantined.quarantinePath);
-    removed = true;
-    try {
-      await lstat(filePath);
-      throw new Error(`Notebook file reappeared while it was being deleted: ${filePath}`);
-    } catch (error) {
-      if (isNodeError(error, "ENOENT")) return;
-      throw error;
-    }
+    quarantined = await quarantineNotebookFile(
+      paths,
+      expected,
+      "delete",
+      temporary.transactionId,
+    );
   } catch (error) {
-    if (!removed) {
-      try {
-        await restoreQuarantinedNotebookFile(paths, quarantined);
-      } catch (recoveryError) {
-        throw new AggregateError(
-          [error, recoveryError],
-          `Notebook mutation failed and recovery could not be completed: ${filePath}`,
-        );
-      }
-    }
-    throw error;
+    if (!(error instanceof NotebookQuarantineProofError)) throw error;
+    await recoverDeletedNotebook(paths, error);
+    return;
+  }
+  try {
+    await unlinkNotebookArtifact(paths, temporary);
+  } catch (error) {
+    await recoverDeletedNotebook(paths, error);
+    return;
+  }
+  try {
+    await unlinkNotebookArtifact(paths, quarantined);
+  } catch (error) {
+    await recoverDeleteQuarantineCleanup(paths, temporary, quarantined, error);
+    return;
+  }
+  if (await notebookOwnedFileIfPresent(paths, paths.file, "Notebook file") !== undefined) {
+    throw new Error(`Notebook file reappeared while being deleted: ${paths.file}`);
   }
 }
 
@@ -747,14 +1209,13 @@ function formatRead(result: NotebookReadResult): string {
 
 export class ConversationNotebook {
   private readonly paths: NotebookPaths;
-  private readonly queue = new SerialTaskQueue();
 
   constructor(stateDir: string, conversationId: string) {
     this.paths = notebookPaths(stateDir, conversationId);
   }
 
   write(input: NotebookWriteInput): Promise<NotebookNoteMetadata> {
-    return this.queue.run(async () => {
+    return runNotebookOperation(this.paths, async () => {
       const title = normalizeNotebookTitle(input.title);
       const content = input.content;
       if (content !== undefined) assertContentBudget(content);
@@ -798,7 +1259,7 @@ export class ConversationNotebook {
   }
 
   list(statusInput?: NotebookStatus): Promise<NotebookListResult> {
-    return this.queue.run(async () => {
+    return runNotebookOperation(this.paths, async () => {
       const status = statusInput ?? "active";
       const notes = sortByUpdatedThenTitle(
         (await readNotes(this.paths))
@@ -818,7 +1279,7 @@ export class ConversationNotebook {
     pattern: string,
     statusInput?: NotebookStatus,
   ): Promise<NotebookGrepResult> {
-    return this.queue.run(async () => {
+    return runNotebookOperation(this.paths, async () => {
       if (pattern.length === 0) {
         throw new Error("Notebook grep pattern is required");
       }
@@ -872,7 +1333,7 @@ export class ConversationNotebook {
   }
 
   read(titles: readonly string[]): Promise<NotebookReadResult> {
-    return this.queue.run(async () => {
+    return runNotebookOperation(this.paths, async () => {
       if (titles.length === 0) throw new Error("notebook_read requires titles");
       if (titles.length > MAX_NOTEBOOK_READ_TITLES) {
         throw new Error(
@@ -918,45 +1379,16 @@ export class ConversationNotebook {
   }
 }
 
-export async function deleteConversationNotebook(
+export function deleteConversationNotebook(
   stateDir: string,
   conversationId: string,
 ): Promise<void> {
   const paths = notebookPaths(stateDir, conversationId);
-  const hasDirectory = await assertNotebookDirectoryIfPresent(paths);
-  if (!hasDirectory) return;
-
-  const file = await assertNotebookFileIfPresent(paths);
-  const temporaryPrefix = `.${basename(paths.file)}.`;
-  const entries = await readdir(paths.notebookDir, { withFileTypes: true });
-  const staleTemporaryFiles: Array<{ path: string; information: Stats }> = [];
-  for (const entry of entries) {
-    if (
-      !entry.name.startsWith(temporaryPrefix)
-      || !entry.name.endsWith(".tmp")
-    ) continue;
-    const temporaryPath = join(paths.notebookDir, entry.name);
-    if (entry.isSymbolicLink() || !entry.isFile()) {
-      throw new Error(
-        `Notebook temporary entry must be a regular file: ${temporaryPath}`,
-      );
-    }
-    staleTemporaryFiles.push({
-      path: temporaryPath,
-      information: await assertNotebookOwnedFile(
-        paths.notebookDir,
-        temporaryPath,
-        "Notebook temporary entry",
-      ),
-    });
-  }
-
-  if (file !== undefined) {
-    await deleteNotebookFile(paths, paths.file, file);
-  }
-  for (const stale of staleTemporaryFiles) {
-    await deleteNotebookFile(paths, stale.path, stale.information);
-  }
+  return runNotebookOperation(paths, async () => {
+    if (!await assertNotebookDirectoryIfPresent(paths)) return;
+    const file = await assertNotebookFileIfPresent(paths);
+    if (file !== undefined) await deleteNotebookFile(paths, file);
+  });
 }
 
 export const notebookResultText = {

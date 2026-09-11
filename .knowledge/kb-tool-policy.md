@@ -60,6 +60,8 @@ V1 只有四个工具：
 
 Archive 是可恢复隐藏，不是删除：默认 list 不显示 archived，但 `status=archived/all` 仍可发现，read 也能按精确标题打开。会话删除通过 project store 级联删除对应 sidecar 文件。单 note 内容和 note 数量之外，宿主还在写临时文件前按最终 JSON 的 UTF-8 字节数复核总文件预算；NUL 等 JSON escape 膨胀也计入，不能提交一个下一次读取会因超限而拒绝的 sidecar。
 
+同一 canonical sidecar 的读写和 cascade delete 共用进程内操作队列；仅在该队列的操作入口恢复严格命名的 `.<conversationId>.json.<create|replace|delete>.<uuid>.<tmp|quarantine>` artifact，不在 project open 或全局扫描时触碰它们。F 为正式 sidecar、T 为 staged file、Q 为 quarantine：create 的 `link(T,F)`、replace 的 `link(T,F)` 是提交切点；delete 先以 `link(F,T)` 保留预提交 inode guard，再以 `rename(F,Q)` 提交。replace 在清理 Q 前保留 T；delete 先清理经验证的 T，仍保留 Q guard，再清理 Q：`T=F` 无 Q 是可清理的预提交状态，`T=Q` 且 F 缺席是可清理的已提交状态。若同进程的 Q cleanup 报错，只有 Q 仍匹配保存 inode 时才允许以 fresh transaction 的 provisional typed T 重建 guard、证明 Q 与 provisional 都匹配保存 inode，再以 no-clobber `link(P,T)` 安装原 transaction 的 T，并证明 `T=Q=P` 后才删除经验证的 P、恢复；provisional 只属于该同步 repair path，generic/open recovery 从不由 bare Q 重建。rebuild/proof/P cleanup 中任一失败会留下 distinct transaction 或 inode mismatch 并永久 fail closed。Q-only、T-only/F 缺席或任一未能证明的 T/F/Q inode 关系都 fail closed，不能恢复或消费可能被换入的 sidecar。故进程恰在 T unlink 后退出会留下须人工处理的 bare Q；这是安全优先限制，不承诺全 crash cut 自动修复。恢复按完整 filename owner、operation、transaction 与 inode 关系判定，多个 transaction、重复 stage、legacy/近似名或矛盾 inode 均 fail closed，且不清理其它 conversation 的 artifact。清理报错后，只有 recovery 已证明期望最终状态且本 transaction artifact 已消失才可成功返回；否则保留现场供下一次同一 sidecar 操作恢复。
+
 ## Agent 宿主工具
 
 ConversationActor 按角色模式和会话管理能力注入宿主工具：

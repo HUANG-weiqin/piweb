@@ -574,7 +574,7 @@ describe("ProjectStore", () => {
     );
   });
 
-  it("deletes a conversation-scoped notebook sidecar with its conversation", async () => {
+  it("deletes a conversation-scoped notebook sidecar after recovering its typed delete artifact", async () => {
     const cwd = await createTemporaryDirectory("piweb-delete-notebook-");
     const store = await ProjectStore.open(cwd);
     const retained = await store.createConversation();
@@ -587,12 +587,24 @@ describe("ProjectStore", () => {
       store.stateDir,
       deleted.getSessionId(),
     ).write({ title: "Deleted", content: "remove me" });
-    const staleTemporaryPath = join(
+    const deleteTransactionId = randomUUID();
+    const deleteTemporaryPath = join(
       store.stateDir,
       "notebooks",
-      `.${deleted.getSessionId()}.json.123.tmp`,
+      `.${deleted.getSessionId()}.json.delete.${deleteTransactionId}.tmp`,
     );
-    await writeFile(staleTemporaryPath, "stale temp", "utf8");
+    const deleteArtifactPath = join(
+      store.stateDir,
+      "notebooks",
+      `.${deleted.getSessionId()}.json.delete.${deleteTransactionId}.quarantine`,
+    );
+    const deletedNotebookPath = join(
+      store.stateDir,
+      "notebooks",
+      `${deleted.getSessionId()}.json`,
+    );
+    await link(deletedNotebookPath, deleteTemporaryPath);
+    await rename(deletedNotebookPath, deleteArtifactPath);
 
     await store.deleteConversation(deleted.getSessionId());
 
@@ -600,12 +612,90 @@ describe("ProjectStore", () => {
       join(store.stateDir, "notebooks", `${deleted.getSessionId()}.json`),
       "utf8",
     )).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(readFile(staleTemporaryPath, "utf8"))
+    await expect(readFile(deleteArtifactPath, "utf8"))
+      .rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(deleteTemporaryPath, "utf8"))
       .rejects.toMatchObject({ code: "ENOENT" });
     await expect(readFile(
       join(store.stateDir, "notebooks", `${retained.getSessionId()}.json`),
       "utf8",
     )).resolves.toContain("keep me");
+  });
+
+  it("fails before deleting the transcript on divergent typed delete inode evidence", async () => {
+    const cwd = await createTemporaryDirectory("piweb-divergent-notebook-delete-");
+    const store = await ProjectStore.open(cwd);
+    const conversation = await store.createConversation();
+    const conversationId = conversation.getSessionId();
+    const sessionFile = conversation.getSessionFile();
+    if (!sessionFile) throw new Error("conversation did not expose its session file");
+    await new ConversationNotebook(store.stateDir, conversationId).write({
+      title: "Existing note",
+      content: "original notebook inode",
+    });
+    const notebookPath = join(
+      store.stateDir,
+      "notebooks",
+      `${conversationId}.json`,
+    );
+    const original = await readFile(notebookPath, "utf8");
+    const transactionId = randomUUID();
+    const temporaryPath = join(
+      store.stateDir,
+      "notebooks",
+      `.${conversationId}.json.delete.${transactionId}.tmp`,
+    );
+    const quarantinePath = join(
+      store.stateDir,
+      "notebooks",
+      `.${conversationId}.json.delete.${transactionId}.quarantine`,
+    );
+    const swappedPath = join(store.stateDir, "notebooks", ".swapped.json");
+    await link(notebookPath, temporaryPath);
+    await writeFile(
+      swappedPath,
+      original.replace("original notebook inode", "swapped notebook inode"),
+      "utf8",
+    );
+    await rm(notebookPath);
+    await rename(swappedPath, quarantinePath);
+
+    await expect(store.deleteConversation(conversationId))
+      .rejects.toThrow(/delete artifacts conflict/i);
+
+    await expect(readFile(sessionFile, "utf8")).resolves.toContain(
+      `\"id\":\"${conversationId}\"`,
+    );
+    await expect(readFile(temporaryPath, "utf8")).resolves.toBe(original);
+    await expect(readFile(quarantinePath, "utf8"))
+      .resolves.toContain("swapped notebook inode");
+  });
+
+  it("fails before deleting the transcript when notebook artifact recovery is unsafe", async () => {
+    const cwd = await createTemporaryDirectory("piweb-legacy-notebook-delete-");
+    const store = await ProjectStore.open(cwd);
+    const conversation = await store.createConversation();
+    const conversationId = conversation.getSessionId();
+    const sessionFile = conversation.getSessionFile();
+    if (!sessionFile) throw new Error("conversation did not expose its session file");
+    await new ConversationNotebook(store.stateDir, conversationId).write({
+      title: "Existing note",
+      content: "must preserve the transcript",
+    });
+    const legacyArtifact = join(
+      store.stateDir,
+      "notebooks",
+      `.${conversationId}.json.legacy.tmp`,
+    );
+    await writeFile(legacyArtifact, "legacy", "utf8");
+
+    await expect(store.deleteConversation(conversationId))
+      .rejects.toThrow(/legacy notebook mutation artifact/i);
+
+    await expect(readFile(sessionFile, "utf8")).resolves.toContain(
+      `\"id\":\"${conversationId}\"`,
+    );
+    await expect(readFile(legacyArtifact, "utf8")).resolves.toBe("legacy");
   });
 
   it("fails before deleting the transcript when its notebook path is not a file", async () => {
