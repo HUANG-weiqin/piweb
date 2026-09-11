@@ -41,7 +41,7 @@ const transitionDiagnostics = {
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(57);
+    expect(PROTOCOL_VERSION).toBe(58);
   });
 
   it("accepts supported commands", () => {
@@ -220,6 +220,7 @@ describe("parseClientCommand", () => {
     }).type).toBe("switch_conversation_role");
     expect(parseClientCommand({
       type: "rename_conversation",
+      commandId,
       sessionId,
       conversationId,
       name: "Architecture",
@@ -299,12 +300,14 @@ describe("parseClientCommand", () => {
     })).toMatchObject({ title });
     expect(parseClientCommand({
       type: "rename_conversation",
+      commandId,
       sessionId,
       conversationId,
       name: title,
     })).toMatchObject({ name: title });
     expect(() => parseClientCommand({
       type: "rename_conversation",
+      commandId,
       sessionId,
       conversationId,
       name: `${title}😀`,
@@ -438,10 +441,17 @@ describe("parseClientCommand", () => {
     })).toThrow();
     expect(() => parseClientCommand({
       type: "rename_conversation",
+      commandId,
       sessionId,
       conversationId,
       name: " ",
     })).toThrow();
+    expect(() => parseClientCommand({
+      type: "rename_conversation",
+      sessionId,
+      conversationId,
+      name: "valid title",
+    })).toThrow("commandId");
     expect(() => parseClientCommand({
       type: "delete_conversation",
       commandId: "not-a-uuid",
@@ -1300,6 +1310,12 @@ describe("parseClientCommand", () => {
       sessionId,
     }).type).toBe("command_complete");
     expect(parseServerEvent({
+      type: "command_complete",
+      operation: "rename_conversation",
+      commandId,
+      sessionId,
+    }).type).toBe("command_complete");
+    expect(parseServerEvent({
       type: "error",
       message: "failed",
       scope: "command",
@@ -1373,6 +1389,21 @@ describe("parseClientCommand", () => {
       sessionId,
       message: "failed",
     }).type).toBe("error");
+    expect(parseServerEvent({
+      type: "error",
+      scope: "settings",
+      operation: "rename_conversation",
+      commandId,
+      sessionId,
+      message: "title applied but persistence is unknown",
+    }).type).toBe("error");
+    expect(() => parseServerEvent({
+      type: "error",
+      scope: "command",
+      operation: "rename_conversation",
+      sessionId,
+      message: "rejected before mutation",
+    })).toThrow("commandId");
     expect(() => parseServerEvent({
       type: "error",
       message: "failed",

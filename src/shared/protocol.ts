@@ -31,6 +31,8 @@ export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
+// v58: rename commands are command-correlated and settle through the existing
+// command completion/error envelope.
 // v57: focused conversation snapshots always carry their transcript checkpoint
 // and complete admitted-but-undelivered prompt FIFO.
 // v56: project conversation summaries carry required compacting state, projected
@@ -78,7 +80,7 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
-export const PROTOCOL_VERSION = 57;
+export const PROTOCOL_VERSION = 58;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 export const COLOR_SCHEMES = ["quiet-rebel", "classic-rebel"] as const;
 export type ColorScheme = typeof COLOR_SCHEMES[number];
@@ -460,6 +462,7 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
   }),
   z.object({
     type: z.literal("rename_conversation"),
+    commandId: commandIdSchema,
     sessionId: sessionIdSchema,
     conversationId: conversationIdSchema,
     name: requiredBoundedCharactersString(
@@ -571,6 +574,7 @@ const ACKNOWLEDGED_COMMAND_OPERATIONS = [
   "set_service_tier",
   "compact_context",
   "switch_conversation_role",
+  "rename_conversation",
   "delete_conversation",
   "truncate_conversation",
   "create_role",
@@ -1968,6 +1972,7 @@ export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.
         event.operation === "steer"
         || event.operation === "set_api_key"
         || event.operation === "refresh_models"
+        || event.operation === "rename_conversation"
         || event.operation === "delete_conversation"
         || event.operation === "truncate_conversation"
         || event.operation === "open_image"
@@ -1976,8 +1981,19 @@ export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.
     ) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "Setting command errors require a sessionId",
+        message: "Acknowledged command errors require a sessionId",
         path: ["sessionId"],
+      });
+    }
+    if (
+      event.type === "error"
+      && event.operation === "rename_conversation"
+      && (event.sessionId === undefined || event.commandId === undefined)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Rename command errors require a sessionId and commandId",
+        path: [event.sessionId === undefined ? "sessionId" : "commandId"],
       });
     }
   },
