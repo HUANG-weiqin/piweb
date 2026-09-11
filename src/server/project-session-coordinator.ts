@@ -68,6 +68,7 @@ import type {
 import type { PortableExtensionUI } from "./extension-ui.js";
 import {
   inboxEnvelopePayloadFingerprint,
+  InboxPutOperationError,
   InboxTargetTombstoneCommittedError,
   ProjectInbox,
   type InboxEnvelope,
@@ -108,6 +109,7 @@ export const MAX_DELEGATION_DEPTH = 3;
 export const MAX_LIVE_DELEGATION_DESCENDANTS = 32;
 const START_SESSION_ADMISSION_FAILURE_PREFIX =
   "start_session inbox admission failed: ";
+
 const INBOX_LIFECYCLE_GUIDANCE = [
   "生命周期提醒：你负责管理自己创建的会话生命周期；会话不会被系统自动终止或删除。",
   "收到结果后，请自行决定继续工作、等待运行、终止活动运行或删除空闲会话。",
@@ -1490,16 +1492,12 @@ export class ProjectSessionCoordinator {
           processingRunId: runId,
         });
       } catch (error) {
-        let committedEnvelope: InboxEnvelope | undefined;
-        try {
-          committedEnvelope = await context.inbox.get(messageId);
-        } catch (inspectionError) {
-          throw new AggregateError(
-            [error, inspectionError],
-            "Failed to determine whether start_session inbox admission committed",
-          );
+        if (
+          !(error instanceof InboxPutOperationError)
+          || error.outcome !== "definitely_noncommitted"
+        ) {
+          throw error;
         }
-        if (committedEnvelope !== undefined) throw error;
 
         const cleanupErrors: unknown[] = [];
         const detail = (error instanceof Error ? error.message : String(error))
@@ -4430,40 +4428,108 @@ export class ProjectSessionCoordinator {
     status: "created" | "existing" | "delivered";
     envelope: InboxEnvelope;
   }> {
-    const preexistingEnvelope = await context.inbox.get(input.messageId);
-    if (!await this.reconcileInbox(context, target.conversationId)) {
-      throw new Error(
-        `Inbox target requires attention before admitting new work: ${target.conversationId}`,
+    // start_session may delete a newly-created target after a rejected admission.
+    // Before this operation observes an existing exact key or starts put(), that
+    // cleanup is safe; from either point forward publication is durable or
+    // ambiguous and the child/card must be retained for recovery.
+    let admissionMayBeCommitted = false;
+    try {
+      const preexistingEnvelope = await context.inbox.get(input.messageId);
+      admissionMayBeCommitted = preexistingEnvelope !== undefined;
+      if (!await this.reconcileInbox(context, target.conversationId)) {
+        throw new Error(
+          `Inbox target requires attention before admitting new work: ${target.conversationId}`,
+        );
+      }
+      const existingCard = aggregateReservedConversationEntries(
+        source.sessionManager.getEntries(),
+      ).cards.find(({ cardId }) => cardId === input.cardId);
+      const fromSnapshot = existingCard?.fromSnapshot
+        ?? this.endpoint(context, source);
+      const toSnapshot = existingCard?.toSnapshot
+        ?? this.endpoint(context, target);
+      const receipt = aggregateReservedConversationEntries(
+        target.sessionManager.getEntries(),
+      ).messageDeliveryReceipts.find(
+        ({ messageId }) => messageId === input.messageId,
       );
-    }
-    const existingCard = aggregateReservedConversationEntries(
-      source.sessionManager.getEntries(),
-    ).cards.find(({ cardId }) => cardId === input.cardId);
-    const fromSnapshot = existingCard?.fromSnapshot
-      ?? this.endpoint(context, source);
-    const toSnapshot = existingCard?.toSnapshot
-      ?? this.endpoint(context, target);
-    const receipt = aggregateReservedConversationEntries(
-      target.sessionManager.getEntries(),
-    ).messageDeliveryReceipts.find(
-      ({ messageId }) => messageId === input.messageId,
-    );
-    if (receipt) {
-      const deliveredEnvelope: InboxEnvelope = preexistingEnvelope
-        ? {
-            ...preexistingEnvelope,
-            state: "processing",
-            processingRunId: preexistingEnvelope.state === "processing"
-              ? preexistingEnvelope.processingRunId
-              : receipt.targetRunId,
-          }
-        : {
-        version: 1,
+      if (receipt) {
+        admissionMayBeCommitted = true;
+        const deliveredEnvelope: InboxEnvelope = preexistingEnvelope
+          ? {
+              ...preexistingEnvelope,
+              state: "processing",
+              processingRunId: preexistingEnvelope.state === "processing"
+                ? preexistingEnvelope.processingRunId
+                : receipt.targetRunId,
+            }
+          : {
+          version: 1,
+          messageId: input.messageId,
+          cardId: input.cardId,
+          fromConversationId: source.conversationId,
+          toConversationId: target.conversationId,
+          sentAt: receipt.sentAt,
+          kind: input.kind,
+          ...(input.summary === undefined ? {} : { summary: input.summary }),
+          body: input.body,
+          ...(input.delegationId === undefined
+            ? {}
+            : { delegationId: input.delegationId }),
+          ...(input.requestFingerprint === undefined
+            ? {}
+            : { requestFingerprint: input.requestFingerprint }),
+          fromRunId: input.fromRunId,
+          fromSnapshot,
+          toSnapshot,
+          state: "processing",
+          processingRunId: receipt.targetRunId,
+        };
+        this.assertReceiptMatchesEnvelope(receipt, deliveredEnvelope);
+        return {
+          status: "delivered",
+          envelope: deliveredEnvelope,
+        };
+      }
+      if (
+        preexistingEnvelope
+        && await context.inbox.get(input.messageId) === undefined
+      ) {
+        throw new Error(
+          `Inbox envelope disappeared without a receipt: ${input.messageId}`,
+        );
+      }
+      const baseCard: ConversationCard = existingCard ?? {
+          cardId: input.cardId,
+          kind: input.kind,
+          ...(input.summary === undefined ? {} : { summary: input.summary }),
+          body: input.body,
+          fromSnapshot,
+          toSnapshot,
+          state: "sending",
+          messageId: input.messageId,
+          ...(input.delegationId === undefined
+            ? {}
+            : { delegationId: input.delegationId }),
+          ...(input.requestFingerprint === undefined
+            ? {}
+            : { requestFingerprint: input.requestFingerprint }),
+          ...(input.requestedRole === undefined
+            ? {}
+            : { requestedRole: input.requestedRole }),
+          ...(input.orchestration === undefined
+            ? {}
+            : { orchestration: input.orchestration }),
+          updatedAt: input.sentAt,
+        };
+      this.appendCard(source, baseCard);
+      admissionMayBeCommitted = true;
+      const result = await context.inbox.put({
         messageId: input.messageId,
         cardId: input.cardId,
         fromConversationId: source.conversationId,
         toConversationId: target.conversationId,
-        sentAt: receipt.sentAt,
+        sentAt: input.sentAt,
         kind: input.kind,
         ...(input.summary === undefined ? {} : { summary: input.summary }),
         body: input.body,
@@ -4476,84 +4542,49 @@ export class ProjectSessionCoordinator {
         fromRunId: input.fromRunId,
         fromSnapshot,
         toSnapshot,
-        state: "processing",
-        processingRunId: receipt.targetRunId,
-      };
-      this.assertReceiptMatchesEnvelope(receipt, deliveredEnvelope);
+      }, input.processingRunId === undefined
+        ? undefined
+        : {
+            initialState: {
+              state: "processing",
+              processingRunId: input.processingRunId,
+            },
+          });
+      const envelope = result.envelope;
+      try {
+        this.appendCard(source, {
+          ...baseCard,
+          state: "queued",
+          updatedAt: this.now().toISOString(),
+        });
+      } catch (cardError) {
+        if (input.processingRunId === undefined) throw cardError;
+        try {
+          this.appendSourceCardState(context, envelope, "queued");
+        } catch (reconciliationError) {
+          throw new InboxPutOperationError("committed_or_unknown", new AggregateError(
+            [cardError, reconciliationError],
+            "Inbox admission committed but source card reconciliation failed",
+          ));
+        }
+      }
+      this.emit(context, { type: "project_changed" });
       return {
-        status: "delivered",
-        envelope: deliveredEnvelope,
+        status: result.status,
+        envelope,
       };
-    }
-    if (
-      preexistingEnvelope
-      && await context.inbox.get(input.messageId) === undefined
-    ) {
-      throw new Error(
-        `Inbox envelope disappeared without a receipt: ${input.messageId}`,
+    } catch (error) {
+      if (input.processingRunId === undefined) {
+        throw error instanceof InboxPutOperationError ? error.cause : error;
+      }
+      if (error instanceof InboxPutOperationError) throw error;
+      throw new InboxPutOperationError(
+        admissionMayBeCommitted
+          ? "committed_or_unknown"
+          : "definitely_noncommitted",
+        error,
       );
     }
-    const baseCard: ConversationCard = existingCard ?? {
-        cardId: input.cardId,
-        kind: input.kind,
-        ...(input.summary === undefined ? {} : { summary: input.summary }),
-        body: input.body,
-        fromSnapshot,
-        toSnapshot,
-        state: "sending",
-        messageId: input.messageId,
-        ...(input.delegationId === undefined
-          ? {}
-          : { delegationId: input.delegationId }),
-        ...(input.requestFingerprint === undefined
-          ? {}
-          : { requestFingerprint: input.requestFingerprint }),
-        ...(input.requestedRole === undefined
-          ? {}
-          : { requestedRole: input.requestedRole }),
-        ...(input.orchestration === undefined
-          ? {}
-          : { orchestration: input.orchestration }),
-        updatedAt: input.sentAt,
-      };
-    this.appendCard(source, baseCard);
-    const result = await context.inbox.put({
-      messageId: input.messageId,
-      cardId: input.cardId,
-      fromConversationId: source.conversationId,
-      toConversationId: target.conversationId,
-      sentAt: input.sentAt,
-      kind: input.kind,
-      ...(input.summary === undefined ? {} : { summary: input.summary }),
-      body: input.body,
-      ...(input.delegationId === undefined
-        ? {}
-        : { delegationId: input.delegationId }),
-      ...(input.requestFingerprint === undefined
-        ? {}
-        : { requestFingerprint: input.requestFingerprint }),
-      fromRunId: input.fromRunId,
-      fromSnapshot,
-      toSnapshot,
-    }, input.processingRunId === undefined
-      ? undefined
-      : {
-          initialState: {
-            state: "processing",
-            processingRunId: input.processingRunId,
-          },
-        });
-    const envelope = result.envelope;
-    this.appendCard(source, {
-      ...baseCard,
-      state: "queued",
-      updatedAt: this.now().toISOString(),
-    });
-    this.emit(context, { type: "project_changed" });
-    return {
-      status: result.status,
-      envelope,
-    };
   }
 
   private endpoint(

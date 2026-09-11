@@ -188,6 +188,25 @@ export interface InboxPutResult {
   envelope: InboxEnvelope;
 }
 
+/**
+ * Whether this put operation can still prove it made no durable publication.
+ * Callers must not infer this from a later global inbox census: another actor
+ * may have consumed a sidecar that this operation already published.
+ */
+export type InboxPutOutcome =
+  | "definitely_noncommitted"
+  | "committed_or_unknown";
+
+export class InboxPutOperationError extends Error {
+  constructor(
+    readonly outcome: InboxPutOutcome,
+    cause: unknown,
+  ) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    super(`Inbox put ${outcome}: ${detail}`, { cause });
+  }
+}
+
 export interface InboxListOptions {
   toConversationId?: string;
 }
@@ -607,82 +626,97 @@ export class ProjectInbox {
     options: InboxPutOptions = {},
   ): Promise<InboxPutResult> {
     return this.operations.run(async () => {
-      const requestedState = options.initialState === undefined
-        ? undefined
-        : stateUpdateSchema.parse(options.initialState);
-      const envelope = createInboxEnvelope(input, requestedState);
-      const scan = await this.scan();
-      if (scan.tombstones.some(
-        ({ tombstone }) =>
-          tombstone.conversationId === envelope.toConversationId,
-      )) {
-        throw new Error(
-          `Inbox target has been deleted: ${envelope.toConversationId}`,
-        );
-      }
-      const existing = scan.envelopes.find(
-        ({ envelope: candidate }) => candidate.messageId === envelope.messageId,
-      );
-      if (existing !== undefined) {
-        if (!payloadsEqual(existing.envelope, envelope)) {
-          throw new Error(
-            `Inbox message conflict for messageId ${envelope.messageId}`,
-          );
-        }
-        return {
-          status: "existing",
-          envelope: requestedState === undefined
-            ? cloneEnvelope(existing.envelope)
-            : await this.updateStoredState(scan, existing, requestedState),
-        };
-      }
-
-      this.assertCapacityForCreate(scan, envelope);
-      const path = this.pathForMessage(envelope.messageId);
-      const serialized = serializeEnvelope(envelope);
+      let outcome: InboxPutOutcome = "definitely_noncommitted";
       try {
-        await this.writeNewAtomically(path, serialized);
-      } catch (error) {
-        if (!isNodeError(error, "EEXIST")) throw error;
-        const raced = await this.scan();
-        const match = raced.envelopes.find(
+        const requestedState = options.initialState === undefined
+          ? undefined
+          : stateUpdateSchema.parse(options.initialState);
+        const envelope = createInboxEnvelope(input, requestedState);
+        const scan = await this.scan();
+        if (scan.tombstones.some(
+          ({ tombstone }) =>
+            tombstone.conversationId === envelope.toConversationId,
+        )) {
+          throw new Error(
+            `Inbox target has been deleted: ${envelope.toConversationId}`,
+          );
+        }
+        const existing = scan.envelopes.find(
           ({ envelope: candidate }) => candidate.messageId === envelope.messageId,
         );
-        if (
-          match === undefined
-          || !payloadsEqual(match.envelope, envelope)
-        ) {
+        if (existing !== undefined) {
+          if (!payloadsEqual(existing.envelope, envelope)) {
+            throw new Error(
+              `Inbox message conflict for messageId ${envelope.messageId}`,
+            );
+          }
+          if (requestedState !== undefined) {
+            outcome = "committed_or_unknown";
+          }
+          return {
+            status: "existing",
+            envelope: requestedState === undefined
+              ? cloneEnvelope(existing.envelope)
+              : await this.updateStoredState(scan, existing, requestedState),
+          };
+        }
+
+        this.assertCapacityForCreate(scan, envelope);
+        const path = this.pathForMessage(envelope.messageId);
+        const serialized = serializeEnvelope(envelope);
+        try {
+          await this.writeNewAtomically(path, serialized);
+          outcome = "committed_or_unknown";
+        } catch (error) {
+          if (
+            error instanceof InboxFilePublishedError
+            || isNodeError(error, "EEXIST")
+          ) {
+            outcome = "committed_or_unknown";
+          }
+          if (!isNodeError(error, "EEXIST")) throw error;
+          const raced = await this.scan();
+          const match = raced.envelopes.find(
+            ({ envelope: candidate }) => candidate.messageId === envelope.messageId,
+          );
+          if (
+            match === undefined
+            || !payloadsEqual(match.envelope, envelope)
+          ) {
+            throw new Error(
+              `Inbox message conflict for messageId ${envelope.messageId}`,
+              { cause: error },
+            );
+          }
+          return {
+            status: "existing",
+            envelope: requestedState === undefined
+              ? cloneEnvelope(match.envelope)
+              : await this.updateStoredState(raced, match, requestedState),
+          };
+        }
+        const committed = await this.scan();
+        if (committed.tombstones.some(
+          ({ tombstone }) =>
+            tombstone.conversationId === envelope.toConversationId,
+        )) {
+          const pending = committed.envelopes.find(
+            ({ envelope: candidate }) => candidate.messageId === envelope.messageId,
+          );
+          if (pending !== undefined) {
+            await this.deleteStoredFile(pending);
+          }
           throw new Error(
-            `Inbox message conflict for messageId ${envelope.messageId}`,
-            { cause: error },
+            `Inbox target has been deleted: ${envelope.toConversationId}`,
           );
         }
         return {
-          status: "existing",
-          envelope: requestedState === undefined
-            ? cloneEnvelope(match.envelope)
-            : await this.updateStoredState(raced, match, requestedState),
+          status: "created",
+          envelope: cloneEnvelope(envelope),
         };
+      } catch (error) {
+        throw new InboxPutOperationError(outcome, error);
       }
-      const committed = await this.scan();
-      if (committed.tombstones.some(
-        ({ tombstone }) =>
-          tombstone.conversationId === envelope.toConversationId,
-      )) {
-        const pending = committed.envelopes.find(
-          ({ envelope: candidate }) => candidate.messageId === envelope.messageId,
-        );
-        if (pending !== undefined) {
-          await this.deleteStoredFile(pending);
-        }
-        throw new Error(
-          `Inbox target has been deleted: ${envelope.toConversationId}`,
-        );
-      }
-      return {
-        status: "created",
-        envelope: cloneEnvelope(envelope),
-      };
     });
   }
 

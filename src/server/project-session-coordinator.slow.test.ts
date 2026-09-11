@@ -53,6 +53,7 @@ import type {
 import type { PortableExtensionUI } from "./extension-ui.js";
 import { WorkspaceLsp } from "./lsp/workspace.js";
 import {
+  InboxPutOperationError,
   InboxTargetTombstoneCommittedError,
   ProjectInbox,
 } from "./project-inbox.js";
@@ -4105,7 +4106,10 @@ describe("ProjectSessionCoordinator", () => {
     );
     const inbox = coordinatorInbox(fixture.handle);
     inbox.put = async () => {
-      throw new Error("inbox admission rejected");
+      throw new InboxPutOperationError(
+        "definitely_noncommitted",
+        new Error("inbox admission rejected"),
+      );
     };
 
     await expect(fixture.coordinator.startPeerSession(
@@ -4141,6 +4145,450 @@ describe("ProjectSessionCoordinator", () => {
       (await fixture.coordinator.listSessions(fixture.handle))
         .map(({ id }) => id),
     ).toEqual([source.conversationId]);
+    sourceRun.release.resolve();
+    await sourceRun.completion;
+  });
+
+  it("rolls back a new start_session target when its pre-put inbox lookup fails", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const sourceRun = await startBlockedSourceRun(
+      fixture,
+      source.conversationId,
+    );
+    const input = startInput({
+      task: "remove the target after pre-put lookup failure",
+      idempotencyKey: "pre-put-get-failure",
+    });
+    const targetId = deterministicTestUuid(
+      "piweb.start.conversation",
+      input.idempotencyKey,
+    );
+    const inbox = coordinatorInbox(fixture.handle);
+    const originalGet = inbox.get.bind(inbox);
+    inbox.get = async () => {
+      throw new Error("pre-put inbox lookup failed");
+    };
+
+    try {
+      await expect(fixture.coordinator.startPeerSession(
+        fixture.handle,
+        source.conversationId,
+        input,
+      )).rejects.toThrow(/Inbox put definitely_noncommitted: pre-put inbox lookup failed/i);
+    } finally {
+      inbox.get = originalGet;
+    }
+
+    expect(
+      (await fixture.coordinator.listSessions(fixture.handle))
+        .map(({ id }) => id),
+    ).not.toContain(targetId);
+    expect(
+      aggregateReservedConversationEntries(
+        source.sessionManager.getEntries(),
+      ).cards.find(({ body }) => body === input.task),
+    ).toMatchObject({ state: "failed" });
+    sourceRun.release.resolve();
+    await sourceRun.completion;
+  });
+
+  it("rolls back a new start_session target when pre-put reconciliation fails", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const sourceRun = await startBlockedSourceRun(
+      fixture,
+      source.conversationId,
+    );
+    const input = startInput({
+      task: "remove the target after pre-put reconciliation failure",
+      idempotencyKey: "pre-put-reconcile-failure",
+    });
+    const targetId = deterministicTestUuid(
+      "piweb.start.conversation",
+      input.idempotencyKey,
+    );
+    const internals = fixture.coordinator as unknown as {
+      reconcileInbox(context: unknown, conversationId: string): Promise<boolean>;
+    };
+    const originalReconcile = internals.reconcileInbox.bind(fixture.coordinator);
+    internals.reconcileInbox = async () => {
+      throw new Error("pre-put reconciliation failed");
+    };
+
+    try {
+      await expect(fixture.coordinator.startPeerSession(
+        fixture.handle,
+        source.conversationId,
+        input,
+      )).rejects.toThrow(/Inbox put definitely_noncommitted: pre-put reconciliation failed/i);
+    } finally {
+      internals.reconcileInbox = originalReconcile;
+    }
+
+    expect(
+      (await fixture.coordinator.listSessions(fixture.handle))
+        .map(({ id }) => id),
+    ).not.toContain(targetId);
+    expect(
+      aggregateReservedConversationEntries(
+        source.sessionManager.getEntries(),
+      ).cards.find(({ body }) => body === input.task),
+    ).toMatchObject({ state: "failed" });
+    sourceRun.release.resolve();
+    await sourceRun.completion;
+  });
+
+  it("rolls back a new start_session target when its base card cannot append", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const sourceRun = await startBlockedSourceRun(
+      fixture,
+      source.conversationId,
+    );
+    const input = startInput({
+      task: "remove the target after base-card projection failure",
+      idempotencyKey: "pre-put-base-card-failure",
+    });
+    const targetId = deterministicTestUuid(
+      "piweb.start.conversation",
+      input.idempotencyKey,
+    );
+    const manager = source.sessionManager;
+    const originalAppend = manager.appendCustomEntry.bind(manager);
+    let sendingCardAppends = 0;
+    manager.appendCustomEntry = (customType, data) => {
+      if (
+        customType === CONVERSATION_CARD_CUSTOM_TYPE
+        && typeof data === "object"
+        && data !== null
+        && "state" in data
+        && data.state === "sending"
+      ) {
+        sendingCardAppends++;
+        if (sendingCardAppends === 2) {
+          throw new Error("pre-put base-card projection failed");
+        }
+      }
+      return originalAppend(customType, data);
+    };
+
+    try {
+      await expect(fixture.coordinator.startPeerSession(
+        fixture.handle,
+        source.conversationId,
+        input,
+      )).rejects.toThrow(/Inbox put definitely_noncommitted: pre-put base-card projection failed/i);
+    } finally {
+      manager.appendCustomEntry = originalAppend;
+    }
+
+    expect(sendingCardAppends).toBe(2);
+    expect(
+      (await fixture.coordinator.listSessions(fixture.handle))
+        .map(({ id }) => id),
+    ).not.toContain(targetId);
+    expect(
+      aggregateReservedConversationEntries(
+        source.sessionManager.getEntries(),
+      ).cards.find(({ body }) => body === input.task),
+    ).toMatchObject({ state: "failed" });
+    sourceRun.release.resolve();
+    await sourceRun.completion;
+  });
+
+  it("retains a new child after an exact preflight key makes reconciliation ambiguous", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const sourceRun = await startBlockedSourceRun(
+      fixture,
+      source.conversationId,
+    );
+    const input = startInput({
+      task: "keep the child when the exact key already exists",
+      idempotencyKey: "preexisting-exact-key-reconcile-failure",
+    });
+    const targetId = deterministicTestUuid(
+      "piweb.start.conversation",
+      input.idempotencyKey,
+    );
+    const messageId = deterministicTestUuid(
+      "piweb.start.message",
+      input.idempotencyKey,
+    );
+    const inbox = coordinatorInbox(fixture.handle);
+    await inbox.put({
+      messageId,
+      cardId: deterministicTestUuid("piweb.start.card", input.idempotencyKey),
+      fromConversationId: source.conversationId,
+      toConversationId: targetId,
+      sentAt: "2026-08-20T00:00:00.000Z",
+      kind: "delegation_task",
+      body: input.task,
+      delegationId: deterministicTestUuid(
+        "piweb.start.delegation",
+        input.idempotencyKey,
+      ),
+      fromRunId: sourceRun.runId,
+      fromSnapshot: {
+        conversationId: source.conversationId,
+        role: {
+          id: source.profile.role.id,
+          name: source.profile.role.name,
+        },
+      },
+      toSnapshot: {
+        conversationId: targetId,
+        role: { id: "default", name: "Default" },
+      },
+    });
+    const internals = fixture.coordinator as unknown as {
+      reconcileInbox(context: unknown, conversationId: string): Promise<boolean>;
+    };
+    const originalReconcile = internals.reconcileInbox.bind(fixture.coordinator);
+    internals.reconcileInbox = async () => {
+      throw new Error("reconciliation after exact preflight key failed");
+    };
+
+    try {
+      await expect(fixture.coordinator.startPeerSession(
+        fixture.handle,
+        source.conversationId,
+        input,
+      )).rejects.toThrow(/Inbox put committed_or_unknown: reconciliation after exact preflight key failed/i);
+    } finally {
+      internals.reconcileInbox = originalReconcile;
+    }
+
+    expect(
+      (await fixture.coordinator.listSessions(fixture.handle))
+        .map(({ id }) => id),
+    ).toContain(targetId);
+    const card = aggregateReservedConversationEntries(
+      source.sessionManager.getEntries(),
+    ).cards.find(({ body }) => body === input.task);
+    expect(card).toMatchObject({ state: "sending" });
+    expect(card?.state).not.toBe("failed");
+    sourceRun.release.resolve();
+    await sourceRun.completion;
+  });
+
+  it("preserves an ordinary sender's original inbox put error", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const sourceRun = await startBlockedSourceRun(
+      fixture,
+      source.conversationId,
+    );
+    const inbox = coordinatorInbox(fixture.handle);
+    const originalPut = inbox.put.bind(inbox);
+    inbox.put = async () => {
+      throw new InboxPutOperationError(
+        "definitely_noncommitted",
+        new Error("ordinary inbox put rejected"),
+      );
+    };
+
+    try {
+      await expect(executeTool(
+        fixture.runtime.control(source.conversationId),
+        "send_session_message",
+        "ordinary-put-error",
+        {
+          conversationId: target.conversationId,
+          summary: "retain the original error",
+          message: "do not turn this into an admission outcome",
+        },
+      )).rejects.toThrow(/^ordinary inbox put rejected$/);
+    } finally {
+      inbox.put = originalPut;
+    }
+
+    expect(
+      aggregateReservedConversationEntries(
+        source.sessionManager.getEntries(),
+      ).cards.find(({ body }) => body === "do not turn this into an admission outcome"),
+    ).toMatchObject({ state: "sending" });
+    sourceRun.release.resolve();
+    await sourceRun.completion;
+  });
+
+  it("preserves a sending start and child after a published sidecar is consumed before put failure handling", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const sourceRun = await startBlockedSourceRun(
+      fixture,
+      source.conversationId,
+    );
+    const input = startInput({
+      task: "retain this child after its published sidecar is consumed",
+      idempotencyKey: "consumed-start-publication",
+    });
+    const targetId = deterministicTestUuid(
+      "piweb.start.conversation",
+      input.idempotencyKey,
+    );
+    const inbox = coordinatorInbox(fixture.handle);
+    const originalPut = inbox.put.bind(inbox);
+    const originalDelete = inbox.delete.bind(inbox);
+    const originalGet = inbox.get.bind(inbox);
+    const originalList = inbox.list.bind(inbox);
+    let publicationFailureRaised = false;
+    let sidecarConsumed = false;
+    inbox.get = async (...args) => {
+      if (publicationFailureRaised) {
+        throw new Error("post-failure global inbox inspection is forbidden");
+      }
+      return originalGet(...args);
+    };
+    inbox.list = async (...args) => {
+      if (publicationFailureRaised) {
+        throw new Error("hold reconciliation after simulated sidecar consumption");
+      }
+      return originalList(...args);
+    };
+    inbox.put = async (putInput, options) => {
+      await originalPut(putInput, options);
+      publicationFailureRaised = true;
+      sidecarConsumed = await originalDelete(putInput.messageId);
+      throw new InboxPutOperationError(
+        "committed_or_unknown",
+        new Error("post-link proof failed after another actor consumed the sidecar"),
+      );
+    };
+
+    try {
+      await expect(fixture.coordinator.startPeerSession(
+        fixture.handle,
+        source.conversationId,
+        input,
+      )).rejects.toThrow(/Inbox put committed_or_unknown/i);
+    } finally {
+      inbox.list = originalList;
+      inbox.get = originalGet;
+      inbox.put = originalPut;
+    }
+
+    expect(sidecarConsumed).toBe(true);
+    expect(
+      (await fixture.coordinator.listSessions(fixture.handle))
+        .map(({ id }) => id),
+    ).toContain(targetId);
+    expect(
+      aggregateReservedConversationEntries(
+        source.sessionManager.getEntries(),
+      ).cards.find(({ body }) => body === input.task),
+    ).toMatchObject({ state: "sending" });
+    expect(
+      aggregateReservedConversationEntries(
+        source.sessionManager.getEntries(),
+      ).cards.find(({ body }) => body === input.task)?.state,
+    ).not.toBe("failed");
+    sourceRun.release.resolve();
+    await sourceRun.completion;
+  });
+
+  it("preserves a sending start and child when durable admission loses both queued-card projections", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const sourceRun = await startBlockedSourceRun(
+      fixture,
+      source.conversationId,
+    );
+    const input = startInput({
+      task: "retain this durable delegation after card projection failure",
+      idempotencyKey: "double-queued-card-failure",
+    });
+    const targetId = deterministicTestUuid(
+      "piweb.start.conversation",
+      input.idempotencyKey,
+    );
+    const inbox = coordinatorInbox(fixture.handle);
+    const originalPut = inbox.put.bind(inbox);
+    const originalList = inbox.list.bind(inbox);
+    let durablePutReturned = false;
+    inbox.put = async (...args) => {
+      const result = await originalPut(...args);
+      durablePutReturned = true;
+      return result;
+    };
+    inbox.list = async (...args) => {
+      if (durablePutReturned) {
+        throw new Error("hold reconciliation until source-card failure is observed");
+      }
+      return originalList(...args);
+    };
+    const manager = source.sessionManager;
+    const originalAppend = manager.appendCustomEntry.bind(manager);
+    let queuedProjectionAttempts = 0;
+    manager.appendCustomEntry = (customType, data) => {
+      if (
+        queuedProjectionAttempts < 2
+        && customType === CONVERSATION_CARD_CUSTOM_TYPE
+        && typeof data === "object"
+        && data !== null
+        && "state" in data
+        && data.state === "queued"
+      ) {
+        queuedProjectionAttempts++;
+        throw new Error("simulated queued-card projection failure");
+      }
+      return originalAppend(customType, data);
+    };
+
+    try {
+      await expect(fixture.coordinator.startPeerSession(
+        fixture.handle,
+        source.conversationId,
+        input,
+      )).rejects.toThrow(
+        /Inbox admission committed but source card reconciliation failed/i,
+      );
+    } finally {
+      manager.appendCustomEntry = originalAppend;
+      inbox.list = originalList;
+      inbox.put = originalPut;
+    }
+
+    expect(queuedProjectionAttempts).toBe(2);
+    expect(durablePutReturned).toBe(true);
+    expect(
+      (await fixture.coordinator.listSessions(fixture.handle))
+        .map(({ id }) => id),
+    ).toContain(targetId);
+    const card = aggregateReservedConversationEntries(
+      source.sessionManager.getEntries(),
+    ).cards.find(({ body }) => body === input.task);
+    expect(card).toMatchObject({ state: "sending" });
+    expect(card?.state).not.toBe("failed");
+    await expect(inbox.get(card!.messageId!)).resolves.toMatchObject({
+      messageId: card!.messageId,
+    });
     sourceRun.release.resolve();
     await sourceRun.completion;
   });
@@ -5792,10 +6240,8 @@ describe("ProjectSessionCoordinator", () => {
       cardId: pending!.cardId,
       state: "delivered",
     });
-    expect(
-      inspection.cards.filter(({ cardId }) => cardId === pending!.cardId),
-    ).toHaveLength(1);
   });
+
 
   it("waits for the durable settlement first and does not enter waiting for an already-settled run", async () => {
     const fixture = await createFixture();

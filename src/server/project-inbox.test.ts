@@ -29,6 +29,7 @@ import {
   MAX_INBOX_MESSAGES_PER_PROJECT,
   MAX_INBOX_MESSAGES_PER_TARGET,
   MAX_INBOX_TOTAL_BYTES,
+  InboxPutOperationError,
   InboxTargetTombstoneCommittedError,
   ProjectInbox,
   createInboxEnvelope,
@@ -331,6 +332,62 @@ describe("ProjectInbox", () => {
     expect((await inbox.list()).map(({ messageId }) => messageId)).toEqual([
       value.messageId,
     ]);
+  });
+
+  it("returns a created envelope after post-link recovery confirms publication", async () => {
+    const { directory, inbox } = await temporaryInbox(
+      "piweb-inbox-post-link-recovery-",
+    );
+    const value = input();
+    const path = join(directory, `${value.messageId}.json`);
+    let proofFailed = false;
+    vi.mocked(lstat).mockImplementation(async (...args) => {
+      if (!proofFailed && String(args[0]) === path) {
+        proofFailed = true;
+        throw new Error("post-link ownership proof failed");
+      }
+      return nativeFs.lstat(...args);
+    });
+
+    await expect(inbox.put(value)).resolves.toMatchObject({
+      status: "created",
+      envelope: { messageId: value.messageId },
+    });
+    expect(proofFailed).toBe(true);
+    await expect(inbox.get(value.messageId)).resolves.toMatchObject({
+      messageId: value.messageId,
+    });
+  });
+
+  it("reports committed_or_unknown when post-link publication cannot be proven", async () => {
+    const { directory, inbox } = await temporaryInbox(
+      "piweb-inbox-post-link-unknown-",
+    );
+    const value = input();
+    const path = join(directory, `${value.messageId}.json`);
+    vi.mocked(lstat).mockImplementation(async (...args) => {
+      if (String(args[0]) === path) {
+        throw new Error("post-link ownership proof remains unavailable");
+      }
+      return nativeFs.lstat(...args);
+    });
+
+    await expect(inbox.put(value)).rejects.toMatchObject({
+      outcome: "committed_or_unknown",
+    } satisfies Partial<InboxPutOperationError>);
+  });
+
+  it("reports committed_or_unknown when EEXIST publication is ambiguous", async () => {
+    const { inbox } = await temporaryInbox("piweb-inbox-eexist-unknown-");
+    const value = input();
+    const error = new Error("publication response interrupted") as NodeJS.ErrnoException;
+    error.code = "EEXIST";
+    vi.mocked(link).mockRejectedValueOnce(error);
+
+    await expect(inbox.put(value)).rejects.toMatchObject({
+      outcome: "committed_or_unknown",
+    } satisfies Partial<InboxPutOperationError>);
+    await expect(inbox.get(value.messageId)).resolves.toBeUndefined();
   });
 
   it("rejects the same message ID with a different immutable payload", async () => {
