@@ -388,8 +388,8 @@ const ConversationRow = memo(function ConversationRow({
               <span
                 className="conversation-attention-indicator"
                 role="status"
-                aria-label="名称保存状态未确认"
-                title="名称保存状态未确认"
+                aria-label="名称保存状态未确认；点击会话重新检查"
+                title="名称保存状态未确认；点击会话重新检查"
               >!</span>
             )}
             {conversation.unread && (
@@ -461,11 +461,14 @@ const ConversationRow = memo(function ConversationRow({
             || deletionBlocked
             || cascadeDeleteBlocked
             || actionBlocked
+            || renameUnresolved
           }
           title={active
             ? "活跃会话需先终止并等待结算"
             : compacting || cascadeDeleteBlocked
             ? "上下文压缩完成后可以删除"
+            : renameUnresolved
+            ? "名称状态确定后可以删除"
             : "删除会话"}
           onClick={() => onRequestDelete(conversation.id)}
         >

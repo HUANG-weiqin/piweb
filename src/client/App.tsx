@@ -294,6 +294,8 @@ interface ConversationRenamePresentation {
   conversationId: string;
   name: string;
   status: "syncing" | "unknown" | "committed";
+  recoverySessionId?: string;
+  recoveryFocusId?: string;
 }
 
 interface PendingConversationTruncation {
@@ -1105,7 +1107,12 @@ export function App() {
     let changed = false;
     for (const [key, presentation] of next) {
       if (presentation.status !== "syncing") continue;
-      next.set(key, { ...presentation, status: "unknown" });
+      next.set(key, {
+        ...presentation,
+        status: "unknown",
+        recoverySessionId: undefined,
+        recoveryFocusId: undefined,
+      });
       changed = true;
     }
     if (!changed) return;
@@ -1126,6 +1133,7 @@ export function App() {
       if (
         presentation.workspaceKey !== workspaceKeyValue
         || presentation.projectId !== projectId
+        || presentation.status === "unknown"
         || namesByConversationId.get(presentation.conversationId) !== presentation.name
       ) continue;
       next.delete(key);
@@ -1587,6 +1595,16 @@ export function App() {
       === snapshotPresentationKey
     ) {
       clearTemporaryConversationPresentation();
+    }
+    const renamePresentation = conversationRenamePresentationsRef.current.get(
+      snapshotPresentationKey,
+    );
+    if (
+      renamePresentation?.status === "unknown"
+      && renamePresentation.recoverySessionId === event.sessionId
+      && renamePresentation.recoveryFocusId === event.focusId
+    ) {
+      updateConversationRenamePresentation(snapshotPresentationKey, undefined);
     }
     if (
       settleReadiness
@@ -2116,6 +2134,33 @@ export function App() {
               || event.focusId === undefined
             ))
         ) return;
+        if (
+          event.conversationId
+          && event.focusId
+          && (
+            event.operation === "focus_conversation"
+            || (
+              event.operation === "initialize"
+              && pending.initializeConversationKind === "open"
+            )
+          )
+        ) {
+          const renameKey = conversationScopeKey(
+            pending.workspaceKey,
+            event.projectId,
+            event.conversationId,
+          );
+          const renamePresentation = conversationRenamePresentationsRef.current.get(
+            renameKey,
+          );
+          if (renamePresentation?.status === "unknown") {
+            updateConversationRenamePresentation(renameKey, {
+              ...renamePresentation,
+              recoverySessionId: event.sessionId,
+              recoveryFocusId: event.focusId,
+            });
+          }
+        }
         clearFocusReplacementAuthority();
         const cachedProjectMismatch = Boolean(
           pending.cachedProjectId
@@ -2797,8 +2842,10 @@ export function App() {
               updateConversationRenamePresentation(key, {
                 ...presentation,
                 status: "unknown",
+                recoverySessionId: undefined,
+                recoveryFocusId: undefined,
               });
-              setError(`对话名称已用于当前会话，但可能未保存到项目历史：${event.message}`);
+              setError(event.message);
             } else {
               updateConversationRenamePresentation(key, undefined);
               setError(`重命名对话失败：${event.message}`);
@@ -3630,9 +3677,19 @@ export function App() {
       replacingPendingFocus
       && previousPending.targetConversationId !== conversationId,
     );
+    const currentFocus = focusRef.current;
+    const reopenUnknownRename = Boolean(
+      currentFocus?.conversationId === conversationId
+      && conversationRenamePresentationsRef.current.get(conversationScopeKey(
+        workspaceKeyValue,
+        currentFocus.projectId,
+        conversationId,
+      ))?.status === "unknown",
+    );
     if (
       !replacingDifferentPendingTarget
-      && focusRef.current?.conversationId === conversationId
+      && currentFocus?.conversationId === conversationId
+      && !reopenUnknownRename
     ) {
       setSelectingRole(false);
       return true;

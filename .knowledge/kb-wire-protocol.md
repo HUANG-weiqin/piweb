@@ -49,7 +49,7 @@ ClientCommand
 - 当前 focus 被其它 Agent 删除时，服务端发送带完整 `sessionId + projectId + conversationId + focusId` 的 `focus_invalidated(reason=deleted)`；客户端只结算精确匹配的观察身份，然后回到角色选择页。不能从缺少当前项的截断列表猜测删除。
 - 创建新 conversation 必须显式 roleId。`default` 只是角色 ID，不是省略选择时的隐含值。
 - 工具模式只有 `read_only | full_access`，由角色模板持有并复制到 conversation 当前角色快照；角色 CRUD payload 必须同时携带模型默认思考强度和工具模式。v27 不接受 `initialize.toolMode` 与 `set_tool_mode`，协议仍没有逐工具询问命令或待回答状态。
-- `rename_conversation` 同时匹配当前 sessionId 和目标 conversationId。
+- v58 的 `rename_conversation` 必须携带一次性 `commandId`，并同时匹配当前 `sessionId` 和目标 `conversationId`；成功只由同一 `sessionId + commandId` 的 `command_complete(rename_conversation)` 结算，失败也必须用相同关联身份的 command/settings error。settings error 专指内存标题已应用但 durable persistence 未获证明，不能被普通项目快照或未关联错误冒充成功/失败。
 - `delete_conversation` 携带 sessionId、一次性 commandId 和目标 conversationId；浏览器不能提交文件路径。成功和失败都用同一 sessionId + commandId 精确结算。
 - `truncate_conversation` 携带一次性 commandId、精确 `sessionId + conversationId + focusId` 和 snapshot 中的 durable messageId。assistant 聚合 ID 使用 `assistant:<entryId>`，仅由服务端剥离前缀并解析物理锚点；锚点必须属于最终物理 leaf 定义的 active branch，截断只保留它之前的 active-branch 前缀，并重新接上不可 rewind 的 delivery receipt 及其所需 settlement ledger。成功前服务端先发布截断后的完整 focused snapshot，再发送同 commandId 的完成事件，客户端不得本地猜测删除结果。
 - 角色 CRUD 使用 `create_role/update_role/delete_role + sessionId + commandId`；create/update 的 role payload 必须包含 nullable `compactionModel`、nullable `defaultServiceTier` 与 `canManageSessions`，update/delete 还携带 expectedRevision；`update_role` 另携带当前 UI base 的必填 `expectedSystemPrompt`，服务端在串行边界重新读取并拒绝外部 prompt 冲突，不能用迟到 snapshot 冒充提交成功。初始化模板没有删除特权。

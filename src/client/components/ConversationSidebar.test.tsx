@@ -998,6 +998,8 @@ describe("ConversationSidebar", () => {
 
       expect(screen.getByRole("button", { name: "重命名会话 待确认名称" }))
         .toBeDisabled();
+      expect(screen.getByRole("button", { name: "删除会话 待确认名称" }))
+        .toBeDisabled();
     },
   );
 

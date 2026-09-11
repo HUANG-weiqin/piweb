@@ -10316,6 +10316,96 @@ describe("App", () => {
     expect(rename.commandId).toMatch(/^[0-9a-f-]{36}$/);
   });
 
+  it("rechecks an unknown rename through an explicit reopen before restoring its durable title", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "project_snapshot",
+        sessionId,
+        projectId: PROJECT_ID,
+        conversations: [conversationSummary(CONVERSATION_ID, "A")],
+        truncated: false,
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "重命名会话 A" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "会话名称" }), {
+      target: { value: "Renamed A" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存名称" }));
+    const rename = latestCommand("rename_conversation");
+    const persistenceFailure = "对话名称已用于当前会话，但可能未保存到项目历史：模拟写入失败";
+
+    act(() => socketMock.rawEmit?.({
+      type: "error",
+      scope: "settings",
+      operation: "rename_conversation",
+      sessionId,
+      commandId: rename.commandId,
+      conversationId: CONVERSATION_ID,
+      message: persistenceFailure,
+    }));
+    expect(screen.getByRole("status", {
+      name: "名称保存状态未确认；点击会话重新检查",
+    })).toBeInTheDocument();
+    expect(screen.getByText(persistenceFailure)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "删除会话 Renamed A" }))
+      .toBeDisabled();
+
+    act(() => socketMock.rawEmit?.({
+      type: "project_snapshot",
+      sessionId,
+      projectId: PROJECT_ID,
+      conversations: [conversationSummary(CONVERSATION_ID, "A")],
+      truncated: false,
+    }));
+    expect(screen.getByRole("button", { name: "当前会话 Renamed A" }))
+      .toBeInTheDocument();
+
+    const focusCount = sentFocusCommandCount();
+    fireEvent.click(screen.getByRole("button", { name: "当前会话 Renamed A" }));
+    expect(sentFocusCommandCount()).toBe(focusCount + 1);
+    expect(latestCommand("focus_conversation")).toMatchObject({
+      sessionId,
+      conversationId: CONVERSATION_ID,
+    });
+
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+    expect(screen.queryByRole("status", {
+      name: "名称保存状态未确认；点击会话重新检查",
+    })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "当前会话 A" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重命名会话 A" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "删除会话 A" })).toBeEnabled();
+  });
+
   it("settles a non-current conversation rename error by its exact command", () => {
     render(<App />);
     const sessionId = startFromSetup();
