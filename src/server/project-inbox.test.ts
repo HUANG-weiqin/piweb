@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   link,
   lstat,
+  mkdir,
   mkdtemp,
   readFile,
   rename,
@@ -334,6 +335,121 @@ describe("ProjectInbox", () => {
     expect((await inbox.list()).map(({ messageId }) => messageId)).toEqual([
       value.messageId,
     ]);
+  });
+
+  it("invalidates a list operation snapshot after an inbox mutation or external replacement", async () => {
+    const { directory, inbox } = await temporaryInbox("piweb-inbox-list-operation-");
+    const internals = inbox as unknown as { scan(): Promise<unknown> };
+    const scan = vi.spyOn(internals, "scan");
+    await inbox.withListSnapshot(async (list) => {
+      await expect(list()).resolves.toEqual([]);
+      expect(scan).toHaveBeenCalledTimes(1);
+
+      const value = input();
+      await inbox.put(value);
+      scan.mockClear();
+      await expect(list()).resolves.toEqual([
+        expect.objectContaining({ messageId: value.messageId, state: "queued" }),
+      ]);
+      expect(scan).toHaveBeenCalledTimes(1);
+
+      const replacement = createInboxEnvelope(value, {
+        state: "processing",
+        processingRunId: randomUUID(),
+      });
+      await writeFile(
+        join(directory, `${value.messageId}.json`),
+        `${JSON.stringify(replacement, null, 2)}\n`,
+      );
+      scan.mockClear();
+      await expect(list()).resolves.toEqual([
+        expect.objectContaining({
+          messageId: value.messageId,
+          state: "processing",
+          processingRunId: replacement.processingRunId,
+        }),
+      ]);
+      expect(scan).toHaveBeenCalledTimes(1);
+
+      await writeTombstone(directory, randomUUID());
+      scan.mockClear();
+      await expect(list()).resolves.toEqual([
+        expect.objectContaining({
+          messageId: value.messageId,
+          state: "processing",
+        }),
+      ]);
+      expect(scan).toHaveBeenCalledTimes(1);
+
+      await writeFile(join(directory, "unknown-inbox-entry"), "unexpected\n");
+      await expect(list()).rejects.toThrow("Invalid inbox entry name");
+    });
+  });
+
+  it("rescans a list snapshot when its owned inbox directory is replaced", async () => {
+    const { directory, inbox } = await temporaryInbox("piweb-inbox-directory-snapshot-");
+    const internals = inbox as unknown as { scan(): Promise<unknown> };
+    const scan = vi.spyOn(internals, "scan");
+
+    await inbox.withListSnapshot(async (list) => {
+      await expect(list()).resolves.toEqual([]);
+      scan.mockClear();
+      await rename(directory, `${directory}-replaced`);
+      await mkdir(directory);
+
+      await expect(list()).resolves.toEqual([]);
+      expect(scan).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("rescans a list snapshot when only its captured file ctime changes", async () => {
+    const { directory, inbox } = await temporaryInbox("piweb-inbox-ctime-snapshot-");
+    const value = input();
+    await inbox.put(value);
+    const path = join(directory, `${value.messageId}.json`);
+    const original = await nativeFs.lstat(path);
+    const replacement = createInboxEnvelope({
+      ...value,
+      body: "Please implement the parser!",
+    });
+    const replacementSerialized = `${JSON.stringify(replacement, null, 2)}\n`;
+    expect(Buffer.byteLength(replacementSerialized, "utf8")).toBe(
+      Buffer.byteLength(await nativeFs.readFile(path, "utf8"), "utf8"),
+    );
+    const internals = inbox as unknown as { scan(): Promise<unknown> };
+    const scan = vi.spyOn(internals, "scan");
+
+    await inbox.withListSnapshot(async (list) => {
+      await expect(list()).resolves.toEqual([
+        expect.objectContaining({ body: value.body }),
+      ]);
+      await writeFile(path, replacementSerialized);
+      let injectChangedCtime = true;
+      vi.mocked(lstat).mockImplementation(async (...args) => {
+        const current = await nativeFs.lstat(...args);
+        if (injectChangedCtime && String(args[0]) === path) {
+          injectChangedCtime = false;
+          return new Proxy(current, {
+            get(target, property, receiver) {
+              if (property === "dev") return original.dev;
+              if (property === "ino") return original.ino;
+              if (property === "size") return original.size;
+              if (property === "mtimeMs") return original.mtimeMs;
+              if (property === "ctimeMs") return original.ctimeMs + 1;
+              return Reflect.get(target, property, receiver);
+            },
+          });
+        }
+        return current;
+      });
+      scan.mockClear();
+
+      await expect(list()).resolves.toEqual([
+        expect.objectContaining({ body: replacement.body }),
+      ]);
+      expect(injectChangedCtime).toBe(false);
+      expect(scan).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("returns a created envelope after post-link recovery confirms publication", async () => {

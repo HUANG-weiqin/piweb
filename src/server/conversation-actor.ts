@@ -238,7 +238,6 @@ export interface ConversationActorOpenOptions {
   project: Pick<
     ProjectStore,
     | "cwd"
-    | "hasPersistedConversationNameIntent"
     | "projectConversationSession"
     | "openConversation"
     | "refreshConversations"
@@ -456,9 +455,8 @@ interface RunTicket {
   readonly reloadContinuation?: ReloadContinuationInput;
   /** The first raw user message belongs to startPrompt(), never guidance. */
   expectsInitialPromptRawUserMessage: boolean;
-  /** Original first prompt used by the queued host naming preflight. */
+  /** Original first prompt used by the background title candidate. */
   autoTitlePrompt?: string;
-  autoTitleAbortController?: AbortController;
   customSteerFlush?: Promise<void>;
   /** Replaced atomically on each run lifecycle transition. */
   state: RunState;
@@ -882,6 +880,11 @@ export class ConversationActor {
   private created?: CreatedPiSession;
   private unsubscribeSession?: () => void;
   private activeRun?: RunTicket;
+  private initialTitle?: {
+    runtime: CreatedPiSession;
+    controller: AbortController;
+    title?: string;
+  };
   private opening = true;
   private compacting = false;
   private compactionAttempt?: PublicCompactionAttempt;
@@ -1370,6 +1373,7 @@ export class ConversationActor {
     const clearOperation = () => {
       if (this.manualCompaction === operation) {
         this.manualCompaction = undefined;
+        this.commitInitialTitleIfIdle();
       }
     };
     void operation.then(clearOperation, clearOperation);
@@ -1636,6 +1640,7 @@ export class ConversationActor {
       throw new Error("Cannot quarantine a busy conversation actor");
     }
     if (this.fatalError !== undefined) return;
+    this.cancelInitialTitle();
     this.sessionPersistenceQuarantined = true;
     this.fatalError = error instanceof Error ? error : new Error(String(error));
     this.emitActivity();
@@ -2946,6 +2951,7 @@ export class ConversationActor {
   ): Promise<ConversationDeletionLease | undefined> {
     if (this.disposePromise) return this.disposePromise;
     this.disposing = true;
+    this.cancelInitialTitle();
     const transferLeaseForDeletion =
       options.transferLeaseForDeletion === true;
     const ticket = this.activeRun;
@@ -3032,7 +3038,9 @@ export class ConversationActor {
       return;
     }
     if (ticket.autoTitlePrompt !== undefined) {
-      await this.prepareInitialTitle(ticket, ticket.autoTitlePrompt);
+      void this.generateInitialTitle(ticket.autoTitlePrompt).catch((error) => {
+        this.emitError(error);
+      });
     }
     if (this.activeRun !== ticket) return;
     if (isCancelling(ticket)) {
@@ -3162,28 +3170,34 @@ export class ConversationActor {
       && !entries.some(hasContextBearingEntry);
   }
 
-  private async prepareInitialTitle(
-    ticket: RunTicket,
-    prompt: string,
-  ): Promise<void> {
-    let setterFailure: unknown;
-    if (!this.sessionManager.getEntries().some(hasSessionNameIntent)) {
-      const controller = new AbortController();
-      ticket.autoTitleAbortController = controller;
-      const timeout = setTimeout(
-        () => controller.abort(),
-        AUTO_TITLE_TIMEOUT_MS,
-      );
-      let generatedTitle = AUTO_TITLE_FALLBACK;
-      try {
-        const session = this.session;
-        const model = session.model;
-        if (model !== undefined) {
-          // The session stream owns SDK auth, provider request headers and
-          // retry policy; an isolated title request must not skip them or
-          // start an Agent turn. The durable Pi session identity is what
-          // providers such as OpenCode use to attribute the request.
-          const stream = await session.agent.streamFunction(
+  private async generateInitialTitle(prompt: string): Promise<void> {
+    if (
+      this.initialTitle
+      || this.sessionManager.getEntries().some(hasSessionNameIntent)
+    ) return;
+    const controller = new AbortController();
+    const work = {
+      runtime: this.requireCreated(),
+      controller,
+    };
+    this.initialTitle = work;
+    const timeout = setTimeout(() => controller.abort(), AUTO_TITLE_TIMEOUT_MS);
+    timeout.unref();
+    let abort!: () => void;
+    const aborted = new Promise<undefined>((resolve) => {
+      abort = () => resolve(undefined);
+      controller.signal.addEventListener("abort", abort, { once: true });
+    });
+    let generatedTitle = AUTO_TITLE_FALLBACK;
+    try {
+      const session = work.runtime.session;
+      const model = session.model;
+      if (model !== undefined) {
+        // Keep SDK auth, request headers and transport on the captured session
+        // stream without starting an Agent turn. The race also bounds providers
+        // that ignore cancellation before returning a stream or its result.
+        const response = await Promise.race([
+          Promise.resolve(session.agent.streamFunction(
             model,
             {
               systemPrompt: AUTO_TITLE_SYSTEM_PROMPT,
@@ -3203,51 +3217,65 @@ export class ConversationActor {
               sessionId: session.sessionId,
               transport: session.agent.transport,
             },
-          );
-          const response = await stream.result();
+          )).then((stream) => stream.result()),
+          aborted,
+        ]);
+        if (response !== undefined) {
           generatedTitle = automaticTitleFrom(response) ?? AUTO_TITLE_FALLBACK;
         }
-      } catch {
-        generatedTitle = AUTO_TITLE_FALLBACK;
-      } finally {
-        clearTimeout(timeout);
-        if (ticket.autoTitleAbortController === controller) {
-          ticket.autoTitleAbortController = undefined;
-        }
       }
-
-      if (this.activeRun !== ticket || isCancelling(ticket)) return;
-      if (!this.sessionManager.getEntries().some(hasSessionNameIntent)) {
-        try {
-          this.session.setSessionName(generatedTitle);
-        } catch (error) {
-          setterFailure = error;
-        }
-      }
+    } catch {
+      // Provider failure is auxiliary; storage failure below is not.
+    } finally {
+      clearTimeout(timeout);
+      controller.signal.removeEventListener("abort", abort);
     }
+    if (this.initialTitle !== work) return;
+    this.initialTitle.title = generatedTitle;
+    this.commitInitialTitleIfIdle();
+  }
 
-    let persistedIntent;
+  private cancelInitialTitle(): void {
+    const work = this.initialTitle;
+    if (!work) return;
+    this.initialTitle = undefined;
+    work.controller.abort();
+  }
+
+  private commitInitialTitleIfIdle(): void {
+    const work = this.initialTitle;
+    if (!work || work.title === undefined) return;
+    if (
+      this.created !== work.runtime || this.disposing || this.disposed
+      || this.fatalError !== undefined
+    ) {
+      this.cancelInitialTitle();
+      return;
+    }
+    if (
+      this.activeRun || this.compacting || this.manualCompaction
+      || this.truncating || this.switchingRole
+    ) return;
+    this.initialTitle = undefined;
+    // This check and the setter are synchronous at the idle writer boundary.
+    // Any explicit session_info (including a cleared name) supersedes us.
+    if (this.sessionManager.getEntries().some(hasSessionNameIntent)) return;
     try {
-      persistedIntent = await this.project.hasPersistedConversationNameIntent(
-        this.conversationId,
-        this.sessionManager.getSessionFile(),
-      );
+      this.session.setSessionName(work.title);
     } catch (error) {
-      throw new Error(
-        "Failed to verify the initial conversation title",
-        { cause: setterFailure ?? error },
-      );
+      if (this.sessionManager.getSessionName() === work.title) {
+        this.quarantineSessionPersistence(error);
+      }
+      this.emitError(error, undefined, this.isSessionPersistenceQuarantined());
+      return;
     }
-    if (!persistedIntent) {
-      throw new Error(
-        "The initial conversation title was not durably persisted",
-        setterFailure === undefined ? undefined : { cause: setterFailure },
-      );
+    // Host-created/opened managers are already persistent and flushed. Like
+    // manual rename, a successful synchronous setter is the append boundary.
+    try {
+      this.project.projectConversationSession(this.sessionManager);
+    } catch (error) {
+      this.emitError(error);
     }
-    // The target-file proof above is authoritative. Update only this actor's
-    // in-memory project projection; a later background catalog scan may
-    // rebuild whole-directory presentation without delaying the run.
-    this.project.projectConversationSession(this.sessionManager);
   }
 
   private async compactAtThreshold(ticket: RunTicket): Promise<void> {
@@ -3371,6 +3399,7 @@ export class ConversationActor {
     ticket: RunTicket,
     outcome: RunSettlement["outcome"],
   ): Promise<RunSettlement> {
+    if (outcome === "aborted") this.cancelInitialTitle();
     if (outcome !== "completed" && ticket.state.phase !== "cancelling") {
       this.tryPauseLoopList(ticket);
     }
@@ -3446,6 +3475,9 @@ export class ConversationActor {
     }
     ticket.completion.resolve(settlement);
     ticket.reloadStop?.ready.resolve();
+    // Neither the run's durable settlement nor its completion waits for title
+    // generation or persistence. A newer run may occupy the writer first.
+    queueMicrotask(() => this.commitInitialTitleIfIdle());
     void this.project.refreshConversations().catch((error) => {
       this.emitError(error, ticket.id);
     });
@@ -3453,6 +3485,7 @@ export class ConversationActor {
   }
 
   private failRunInfrastructure(ticket: RunTicket, error: unknown): void {
+    this.cancelInitialTitle();
     void this.created?.computerUse?.release().catch((releaseError) => {
       this.emitError(releaseError, ticket.id);
     });
@@ -3495,8 +3528,7 @@ export class ConversationActor {
       this.emitError(error, ticket.id);
     });
     this.tryPauseLoopList(ticket);
-    ticket.autoTitleAbortController?.abort();
-    ticket.autoTitleAbortController = undefined;
+    this.cancelInitialTitle();
     this.cancelScope(ticket.id);
     if (this.compacting) {
       try {
@@ -4368,6 +4400,7 @@ export class ConversationActor {
   }
 
   private async stopRuntimeSession(): Promise<void> {
+    this.cancelInitialTitle();
     this.invalidateCompactionAttemptRuntime();
     const failures: unknown[] = [];
     try {

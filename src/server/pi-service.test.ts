@@ -1372,6 +1372,7 @@ describe("PiConnection coordinated controls", () => {
         .rejects.toThrow("Model refresh timed out; please retry");
       await vi.advanceTimersByTimeAsync(15_000);
       await timedOutAssertion;
+      vi.useRealTimers();
 
       const retry = harness.connection.handle({
         type: "refresh_models",
@@ -1392,12 +1393,14 @@ describe("PiConnection coordinated controls", () => {
   it("maps a manual model refresh timeout and keeps correlation occupied until it drains", async () => {
     vi.useFakeTimers();
     const harness = await coordinatedConnectionHarness();
+    const refreshStarted = deferred();
     let releaseRefresh = () => undefined;
     try {
       await initializeNewConversation(harness);
       const refresh = vi.spyOn(harness.runtime, "refreshConfiguration")
         .mockImplementation(() => new Promise<void>((resolve) => {
           releaseRefresh = resolve;
+          refreshStarted.resolve();
         }));
 
       const pending = harness.connection.handle({
@@ -1406,6 +1409,7 @@ describe("PiConnection coordinated controls", () => {
         sessionId: SESSION_A,
       });
       const timedOut = expect(pending).rejects.toThrow("Model refresh timed out; please retry");
+      await refreshStarted.promise;
       await vi.advanceTimersByTimeAsync(15_000);
       expect(refresh.mock.calls[0]?.[0]?.signal.aborted).toBe(true);
       await timedOut;
@@ -1448,6 +1452,7 @@ describe("PiConnection coordinated controls", () => {
       await refreshStarted.promise;
       await vi.advanceTimersByTimeAsync(15_000);
       await timeoutAssertion;
+      vi.useRealTimers();
 
       const credential = harness.connection.handle({
         type: "set_api_key",

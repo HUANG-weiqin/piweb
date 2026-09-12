@@ -338,11 +338,17 @@ interface InboxArtifact {
 }
 
 interface InboxScan {
+  directoryInformation: Stats;
   envelopes: StoredEnvelope[];
   tombstones: StoredTargetTombstone[];
   totalBytes: number;
   tombstoneBytes: number;
   reservedBytes: number;
+}
+
+interface InboxListSnapshot {
+  scan: InboxScan;
+  mutationRevision: number;
 }
 
 interface CapturedInboxTargetDeletionBatch extends InboxTargetDeletionBatch {
@@ -378,6 +384,10 @@ function statsAreIdentical(first: Stats, second: Stats): boolean {
     && first.mtimeMs === second.mtimeMs
     && first.isFile() === second.isFile()
   );
+}
+
+function snapshotStatsAreIdentical(first: Stats, second: Stats): boolean {
+  return statsAreIdentical(first, second) && first.ctimeMs === second.ctimeMs;
 }
 
 function storedFilesAreIdentical(
@@ -466,7 +476,7 @@ function payloadsEqual(
   );
 }
 
-async function assertOwnedDirectory(path: string): Promise<void> {
+async function assertOwnedDirectory(path: string): Promise<Stats> {
   const lexicalPath = resolve(path);
   const information = await lstat(lexicalPath);
   if (information.isSymbolicLink()) {
@@ -483,6 +493,7 @@ async function assertOwnedDirectory(path: string): Promise<void> {
       `Inbox directory resolves outside its project-owned path: ${lexicalPath} -> ${canonicalPath}`,
     );
   }
+  return information;
 }
 
 async function assertOwnedFile(
@@ -659,6 +670,8 @@ export class ProjectInbox {
 
   private readonly operations = new SerialTaskQueue();
 
+  private mutationRevision = 0;
+
   private constructor(directory: string) {
     this.directory = resolve(directory);
   }
@@ -680,7 +693,7 @@ export class ProjectInbox {
     input: InboxEnvelopeInput,
     options: InboxPutOptions = {},
   ): Promise<InboxPutResult> {
-    return this.operations.run(async () => {
+    return this.runMutation(async () => {
       let outcome: InboxPutOutcome = "definitely_noncommitted";
       try {
         const requestedState = options.initialState === undefined
@@ -778,21 +791,39 @@ export class ProjectInbox {
   list(options: InboxListOptions = {}): Promise<InboxEnvelope[]> {
     return this.operations.run(async () => {
       const filter = listOptionsSchema.parse(options);
-      const scan = await this.scan();
-      return scan.envelopes
-        .map(({ envelope }) => envelope)
-        .filter((envelope) =>
-          filter.toConversationId === undefined
-          || envelope.toConversationId === filter.toConversationId
-        )
-        .sort((first, second) => {
-          const bySentAt =
-            Date.parse(first.sentAt) - Date.parse(second.sentAt);
-          if (bySentAt !== 0) return bySentAt;
-          return first.messageId.localeCompare(second.messageId);
-        })
-        .map(cloneEnvelope);
+      return this.listFromScan(await this.scan(), filter);
     });
+  }
+
+  async withListSnapshot<T>(
+    work: (
+      list: (options?: InboxListOptions) => Promise<InboxEnvelope[]>,
+    ) => Promise<T> | T,
+  ): Promise<T> {
+    let active = true;
+    let snapshot: InboxListSnapshot | undefined;
+    const list = (options: InboxListOptions = {}) => this.operations.run(async () => {
+      if (!active) {
+        throw new Error("Inbox list snapshot is no longer active");
+      }
+      const filter = listOptionsSchema.parse(options);
+      if (
+        snapshot !== undefined
+        && snapshot.mutationRevision === this.mutationRevision
+        && await this.snapshotIsCurrent(snapshot.scan)
+      ) {
+        return this.listFromScan(snapshot.scan, filter);
+      }
+      const scan = await this.scan();
+      snapshot = { scan, mutationRevision: this.mutationRevision };
+      return this.listFromScan(scan, filter);
+    });
+    try {
+      return await work(list);
+    } finally {
+      active = false;
+      snapshot = undefined;
+    }
   }
 
   listDeletedTargets(): Promise<string[]> {
@@ -821,7 +852,7 @@ export class ProjectInbox {
     messageId: string,
     update: InboxStateUpdate,
   ): Promise<InboxEnvelope> {
-    return this.operations.run(async () => {
+    return this.runMutation(async () => {
       uuidSchema("messageId").parse(messageId);
       const state = stateUpdateSchema.parse(update);
       const scan = await this.scan();
@@ -836,7 +867,7 @@ export class ProjectInbox {
   }
 
   delete(messageId: string): Promise<boolean> {
-    return this.operations.run(async () => {
+    return this.runMutation(async () => {
       uuidSchema("messageId").parse(messageId);
       const scan = await this.scan();
       const match = scan.envelopes.find(
@@ -852,7 +883,7 @@ export class ProjectInbox {
     conversationId: string,
     deletedAt = new Date().toISOString(),
   ): Promise<number> {
-    return this.operations.run(async () => {
+    return this.runMutation(async () => {
       conversationIdSchema("conversationId").parse(conversationId);
       canonicalTimestampSchema("deletedAt").parse(deletedAt);
       const scan = await this.persistTargetTombstone(
@@ -875,7 +906,7 @@ export class ProjectInbox {
     conversationId: string,
     deletedAt = new Date().toISOString(),
   ): Promise<void> {
-    return this.operations.run(async () => {
+    return this.runMutation(async () => {
       conversationIdSchema("conversationId").parse(conversationId);
       canonicalTimestampSchema("deletedAt").parse(deletedAt);
       await this.persistTargetTombstone(conversationId, deletedAt);
@@ -883,7 +914,7 @@ export class ProjectInbox {
   }
 
   clearTargetTombstone(conversationId: string): Promise<boolean> {
-    return this.operations.run(async () => {
+    return this.runMutation(async () => {
       conversationIdSchema("conversationId").parse(conversationId);
       const scan = await this.scan();
       const existing = scan.tombstones.find(
@@ -912,7 +943,7 @@ export class ProjectInbox {
     conversationIds: readonly string[],
     deletedAt = new Date().toISOString(),
   ): Promise<InboxTargetDeletionBatch> {
-    return this.operations.run(async () => {
+    return this.runMutation(async () => {
       const uniqueConversationIds = [...new Set(conversationIds)];
       if (uniqueConversationIds.length === 0) {
         throw new Error("At least one inbox target is required");
@@ -1038,7 +1069,7 @@ export class ProjectInbox {
 
   /** Deletes only sidecars captured by beginTargetDeletionBatch(). */
   deleteCapturedTargetMessages(batch: InboxTargetDeletionBatch): Promise<void> {
-    return this.operations.run(async () => {
+    return this.runMutation(async () => {
       const captured = this.requireCapturedTargetDeletionBatch(batch);
       const scan = await this.scan();
       this.assertCapturedTargetTombstones(captured, scan);
@@ -1055,7 +1086,7 @@ export class ProjectInbox {
 
   /** Clears only the exact durable fences captured by beginTargetDeletionBatch(). */
   clearTargetDeletionBatch(batch: InboxTargetDeletionBatch): Promise<void> {
-    return this.operations.run(async () => {
+    return this.runMutation(async () => {
       const captured = this.requireCapturedTargetDeletionBatch(batch);
       const scan = await this.scan();
       this.assertCapturedTargetTombstones(captured, scan);
@@ -1089,7 +1120,7 @@ export class ProjectInbox {
   pruneCompletedTargetTombstones(
     existingConversationIds: ReadonlySet<string>,
   ): Promise<number> {
-    return this.operations.run(async () => {
+    return this.runMutation(async () => {
       const scan = await this.scan();
       let removed = 0;
       for (const existing of scan.tombstones) {
@@ -1108,6 +1139,67 @@ export class ProjectInbox {
       }
       return removed;
     });
+  }
+
+  private runMutation<T>(
+    operation: () => Promise<T> | T,
+  ): Promise<T> {
+    return this.operations.run(async () => {
+      try {
+        return await operation();
+      } finally {
+        this.mutationRevision++;
+      }
+    });
+  }
+
+  private listFromScan(
+    scan: InboxScan,
+    filter: InboxListOptions,
+  ): InboxEnvelope[] {
+    return scan.envelopes
+      .map(({ envelope }) => envelope)
+      .filter((envelope) =>
+        filter.toConversationId === undefined
+        || envelope.toConversationId === filter.toConversationId
+      )
+      .sort((first, second) => {
+        const bySentAt = Date.parse(first.sentAt) - Date.parse(second.sentAt);
+        if (bySentAt !== 0) return bySentAt;
+        return first.messageId.localeCompare(second.messageId);
+      })
+      .map(cloneEnvelope);
+  }
+
+  private async snapshotIsCurrent(scan: InboxScan): Promise<boolean> {
+    const directoryBefore = await assertOwnedDirectory(this.directory);
+    if (!snapshotStatsAreIdentical(scan.directoryInformation, directoryBefore)) {
+      return false;
+    }
+    const expectedNames = [
+      ...scan.envelopes.map(({ path }) => basename(path)),
+      ...scan.tombstones.map(({ path }) => basename(path)),
+    ].sort();
+    const namesBefore = (await readdir(this.directory)).sort();
+    if (
+      namesBefore.length !== expectedNames.length
+      || namesBefore.some((name, index) => name !== expectedNames[index])
+    ) {
+      return false;
+    }
+    for (const stored of [...scan.envelopes, ...scan.tombstones]) {
+      const current = await assertOwnedFile(this.directory, stored.path);
+      if (!snapshotStatsAreIdentical(stored.information, current)) return false;
+    }
+    const namesAfter = (await readdir(this.directory)).sort();
+    if (
+      namesAfter.length !== expectedNames.length
+      || namesAfter.some((name, index) => name !== expectedNames[index])
+    ) {
+      return false;
+    }
+    const directoryAfter = await assertOwnedDirectory(this.directory);
+    return snapshotStatsAreIdentical(scan.directoryInformation, directoryAfter);
   }
 
   private requireCapturedTargetDeletionBatch(
@@ -1263,8 +1355,10 @@ export class ProjectInbox {
   }
 
   private async scan(): Promise<InboxScan> {
-    await this.recoverArtifacts();
-    await assertOwnedDirectory(this.directory);
+    if (await this.recoverArtifacts()) {
+      this.mutationRevision++;
+    }
+    const directoryBefore = await assertOwnedDirectory(this.directory);
     const namesBefore = (await readdir(this.directory)).sort();
     if (
       namesBefore.length
@@ -1409,8 +1503,12 @@ export class ProjectInbox {
     ) {
       throw new Error("Inbox directory changed while scanning");
     }
-    await assertOwnedDirectory(this.directory);
+    const directoryAfter = await assertOwnedDirectory(this.directory);
+    if (!snapshotStatsAreIdentical(directoryBefore, directoryAfter)) {
+      throw new Error("Inbox directory changed while scanning");
+    }
     return {
+      directoryInformation: directoryAfter,
       envelopes: stored,
       tombstones,
       totalBytes,
@@ -1471,7 +1569,7 @@ export class ProjectInbox {
     }
   }
 
-  private async recoverArtifacts(): Promise<void> {
+  private async recoverArtifacts(): Promise<boolean> {
     await assertOwnedDirectory(this.directory);
     const names = (await readdir(this.directory)).sort();
     if (
@@ -1496,7 +1594,7 @@ export class ProjectInbox {
         stage: match[4]! as InboxArtifactStage,
       });
     }
-    if (artifacts.length === 0) return;
+    if (artifacts.length === 0) return false;
 
     const groups = new Map<string, InboxArtifact[]>();
     for (const artifact of artifacts) {
@@ -1545,6 +1643,7 @@ export class ProjectInbox {
     if (remaining.length !== 0) {
       throw new Error("Inbox recovery could not clear mutation artifacts");
     }
+    return true;
   }
 
   private async recoverCreateArtifact(
