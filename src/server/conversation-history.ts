@@ -668,6 +668,7 @@ export function projectConversationItemSlots(
       || reserved.kind === "compaction_resume"
       || reserved.kind === "loop_list"
       || reserved.kind === "loop_list_continue"
+      || reserved.kind === "fork_context"
     ) {
       continue;
     }

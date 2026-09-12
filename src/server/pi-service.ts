@@ -586,6 +586,7 @@ export class PiConnection {
     if (
       command.type === "focus_conversation"
       || command.type === "create_conversation"
+      || command.type === "fork_conversation"
     ) {
       this.cancelCoordinatedTransition();
       transitionAbort = new AbortController();
@@ -610,6 +611,7 @@ export class PiConnection {
         if (
           command.type !== "focus_conversation"
           && command.type !== "create_conversation"
+          && command.type !== "fork_conversation"
         ) {
           await this.waitForManualRefreshBarrier();
         }
@@ -1116,6 +1118,66 @@ export class PiConnection {
         }
         return;
       }
+      case "fork_conversation": {
+        const view = this.requireCoordinatedView(command.sessionId);
+        const { coordinator } = await this.requireCoordination();
+        const extensionScope = ++this.extensionScope;
+        const extensionAbort = transitionAbort ?? new AbortController();
+        const extensionUI = this.extensionUI.context({
+          sessionId: view.sessionId,
+          generation: extensionScope,
+          signal: extensionAbort.signal,
+        });
+        let detachExtensionUI: (() => void) | undefined;
+        let createdConversationId: string | undefined;
+        let transferred = false;
+        try {
+          const actor = await coordinator.forkCurrentLeafConversation(
+            view.handle,
+            command.conversationId,
+            { signal: extensionAbort.signal },
+          );
+          createdConversationId = actor.conversationId;
+          if (
+            extensionAbort.signal.aborted
+            || this.coordinatedView !== view
+          ) return;
+          detachExtensionUI = coordinator.attachExtensionUI(
+            view.handle,
+            actor.conversationId,
+            extensionUI,
+          );
+          this.attachCoordinatedFocus(
+            view,
+            actor,
+            "fork_conversation",
+            command.commandId,
+            detachExtensionUI,
+            extensionScope,
+            extensionAbort,
+          );
+          transferred = true;
+        } catch (error) {
+          if (
+            extensionAbort.signal.aborted
+            && error instanceof Error
+            && error.name === "AbortError"
+          ) return;
+          throw error;
+        } finally {
+          if (!transferred) {
+            detachExtensionUI?.();
+            this.extensionUI.cancelScope(view.sessionId, extensionScope);
+            if (createdConversationId) {
+              await coordinator.deleteConversation(
+                view.handle,
+                createdConversationId,
+              );
+            }
+          }
+        }
+        return;
+      }
 case "set_thinking":
         await this.setCoordinatedThinking(command.level);
         return;
@@ -1319,7 +1381,7 @@ case "set_thinking":
   private attachCoordinatedFocus(
     view: CoordinatedProjectView,
     actor: ConversationActor,
-    operation: "focus_conversation" | "create_conversation",
+    operation: "focus_conversation" | "create_conversation" | "fork_conversation",
     commandId: string,
     unsubscribeExtensionUI: () => void,
     extensionScope: number,

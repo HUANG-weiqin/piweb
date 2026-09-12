@@ -395,7 +395,7 @@ const UNCONFIRMED_PROMPT_NOTICE =
 
 interface PendingFocus {
   commandId: string;
-  operation: "initialize" | "focus_conversation" | "create_conversation";
+  operation: "initialize" | "focus_conversation" | "create_conversation" | "fork_conversation";
   workspaceKey: string;
   sourceFocus?: ActiveFocus;
   sourceReady?: boolean;
@@ -1677,7 +1677,8 @@ export function App() {
       phoneRouteRef.current = route;
       phoneHistoryEntriesRef.current = { entries: [route], index: 0 };
       const continuingRoleCreation = selectingRole || (
-        pendingFocusRef.current?.operation === "create_conversation"
+        (pendingFocusRef.current?.operation === "create_conversation"
+          || pendingFocusRef.current?.operation === "fork_conversation")
         && pendingFocusRef.current.workspaceKey === currentWorkspaceKey()
       );
       setPhoneScene(continuingRoleCreation ? "chat" : route.screen);
@@ -2198,7 +2199,8 @@ export function App() {
         }
         updateConversationSyncing(
           event.operation === "focus_conversation"
-          || event.operation === "create_conversation",
+          || event.operation === "create_conversation"
+          || event.operation === "fork_conversation",
         );
         const preserveReconnectDraft = Boolean(
           correlatedReconnectDraftOwner
@@ -2237,7 +2239,8 @@ export function App() {
             conversationId: event.conversationId,
             focusId: event.focusId,
           }, pendingState);
-          if (event.operation === "create_conversation") {
+          if (event.operation === "create_conversation"
+            || event.operation === "fork_conversation") {
             phoneCreateRouteHandlerRef.current(event.conversationId);
           }
         } else {
@@ -3003,7 +3006,8 @@ export function App() {
         if (
           (event.operation === "initialize"
             || event.operation === "focus_conversation"
-            || event.operation === "create_conversation")
+            || event.operation === "create_conversation"
+            || event.operation === "fork_conversation")
           && event.commandId
         ) {
           const pending = pendingFocusRef.current;
@@ -4234,7 +4238,10 @@ export function App() {
   phoneRouteFailureHandlerRef.current = (pending) => {
     if (!phoneViewport) return;
     const route = phoneRouteRef.current;
-    if (pending.operation === "create_conversation") {
+    if (
+      pending.operation === "create_conversation"
+      || pending.operation === "fork_conversation"
+    ) {
       if (route?.screen === "conversations") {
         setSelectingRole(false);
         setPhoneScene("conversations");
@@ -4390,6 +4397,58 @@ export function App() {
   });
   const handleConversationRename = useLatestCallback(renameConversation);
   const handleConversationDelete = useLatestCallback(deleteConversation);
+  const forkConversation = (conversationId: string): boolean => {
+    const sessionId = sessionIdRef.current;
+    const projectId = projectIdRef.current;
+    const conversation = conversations.find(({ id }) => id === conversationId);
+    if (
+      !sessionId
+      || !projectId
+      || !conversation
+      || workspaceSyncingRef.current
+      || conversationSyncingRef.current
+      || focusedConversationNeedsSnapshot()
+      || (conversation.activity?.kind ?? "idle") !== "idle"
+      || conversation.compacting
+      || pendingFocusRef.current
+      || pendingConversationDeletionRef.current
+      || pendingConversationTruncationRef.current
+      || pendingConversationRoleSwitchRef.current
+    ) {
+      return false;
+    }
+    const commandId = crypto.randomUUID();
+    const timingAttempt = transitionTiming.candidate({
+      kind: "conversation",
+      sessionId,
+      commandId,
+      origin: "user",
+      intentViewport: phoneViewport ? "mobile" : "desktop",
+      cacheAtIntent: "n/a",
+    });
+    const { sent, events } = sendTransitionCommand(() => send({
+      type: "fork_conversation",
+      commandId,
+      sessionId,
+      conversationId,
+    }));
+    if (!sent) {
+      transitionTiming.fail(timingAttempt, "send-failed");
+      return false;
+    }
+    transitionTiming.promote(timingAttempt);
+    updateDirectoryBrowser(undefined);
+    updatePendingFocus({
+      commandId,
+      operation: "fork_conversation",
+      workspaceKey: currentWorkspaceKey(),
+    });
+    setError("");
+    requestTransitionFrame(timingAttempt, "placeholder");
+    replayTransitionEvents(events);
+    return true;
+  };
+  const handleConversationFork = useLatestCallback(forkConversation);
   const handleChatDraftChange = useLatestCallback((text: string) => {
     updateDraft(text);
     updateConversationDraft({ text, images: draftImagesRef.current });
@@ -4675,7 +4734,8 @@ export function App() {
     ],
   );
   const switchingFocus = pendingFocus?.operation === "focus_conversation"
-    || pendingFocus?.operation === "create_conversation";
+    || pendingFocus?.operation === "create_conversation"
+    || pendingFocus?.operation === "fork_conversation";
   const visibleConversationReady =
     !switchingFocus && !transitioning && conversationReady;
   const roleSwitchFocusKey = visibleConversationReady && runtimeState && currentFocus
@@ -4948,6 +5008,7 @@ export function App() {
         onCreate={handleConversationCreate}
         onRename={handleConversationRename}
         onDelete={handleConversationDelete}
+        onFork={handleConversationFork}
         onBlockingModalChange={phoneViewport ? setSidebarBlockingModal : undefined}
       />
       <div

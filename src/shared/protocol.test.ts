@@ -41,7 +41,7 @@ const transitionDiagnostics = {
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(58);
+    expect(PROTOCOL_VERSION).toBe(59);
   });
 
   it("accepts supported commands", () => {
@@ -90,6 +90,18 @@ describe("parseClientCommand", () => {
       sessionId,
       conversationId,
     }).type).toBe("focus_conversation");
+    expect(parseClientCommand({
+      type: "fork_conversation",
+      commandId,
+      sessionId,
+      conversationId,
+    }).type).toBe("fork_conversation");
+    expect(() => parseClientCommand({
+      type: "fork_conversation",
+      commandId,
+      sessionId,
+      conversationId: "",
+    })).toThrow();
     expect(parseClientCommand({
       type: "refresh_view",
       sessionId,
@@ -839,7 +851,7 @@ describe("parseClientCommand", () => {
       focusId,
       transitionDiagnostics: emptyDiagnostics,
     })).toThrow("matching empty initialize");
-    for (const operation of ["focus_conversation", "create_conversation"] as const) {
+    for (const operation of ["focus_conversation", "create_conversation", "fork_conversation"] as const) {
       expect(() => parseServerEvent({
         type: "focus_attached",
         operation,

@@ -1285,6 +1285,107 @@ export class ProjectSessionCoordinator {
     });
   }
 
+  /**
+   * Fork the idle current leaf of a source conversation.
+   *
+   * The source snapshot is frozen and released immediately; the child is
+   * then published atomically, reopened through the SDK, and attached as a
+   * fresh actor. Post-publish failures discard the exact published inode by
+   * fingerprint and report an AggregateError instead of swallowing cleanup.
+   */
+  async forkCurrentLeafConversation(
+    handle: ProjectSessionHandle,
+    sourceConversationId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ConversationActor> {
+    const context = this.requireContext(handle);
+    return this.runLifecycle(context, async () => {
+      this.throwIfAborted(options.signal);
+      const source = await this.getOrOpenActor(context, sourceConversationId);
+      const snapshot = await source.captureForkSnapshot();
+      this.throwIfAborted(options.signal);
+      const conversationId = randomUUID();
+      const targetLease = this.projects.acquireConversation(
+        context.project.cwd,
+        conversationId,
+      );
+      let published:
+        | Awaited<
+          ReturnType<ProjectStore["createConversationFromSeed"]>
+        >["publication"]
+        | undefined;
+      let manager:
+        | Awaited<ReturnType<ProjectStore["openConversation"]>>
+        | undefined;
+      let actor: ConversationActor | undefined;
+      try {
+        const seeded = await context.project.createConversationFromSeed(
+          snapshot,
+          conversationId,
+          { updateRecent: false, refreshIndex: false },
+        );
+        manager = seeded.manager;
+        published = seeded.publication;
+        const profile = this.loadProfile(manager);
+        actor = await this.openOwnedActor(
+          context,
+          conversationId,
+          manager,
+          targetLease,
+          profile,
+        );
+        context.project.projectConversationSession(manager);
+        await context.project.setLastConversation(conversationId);
+        return actor;
+      } catch (error) {
+        const failures: unknown[] = [error];
+        try {
+          if (actor) {
+            context.actorUnsubscribes.get(conversationId)?.();
+            context.actorUnsubscribes.delete(conversationId);
+            context.actors.delete(conversationId);
+            context.profiles.delete(conversationId);
+            const deletion = await actor.dispose({
+              transferLeaseForDeletion: true,
+            });
+            try {
+              if (published) {
+                await context.project.discardPublishedSeed(
+                  published,
+                  conversationId,
+                );
+              }
+              await context.project.refreshConversations();
+            } finally {
+              deletion?.release();
+            }
+          } else if (published && manager) {
+            try {
+              await context.project.discardPublishedSeed(
+                published,
+                conversationId,
+              );
+              await context.project.refreshConversations();
+            } finally {
+              targetLease.release();
+            }
+          } else {
+            targetLease.release();
+          }
+        } catch (cleanupError) {
+          failures.push(cleanupError);
+        }
+        if (failures.length > 1) {
+          throw new AggregateError(
+            failures,
+            "Failed to fork conversation and clean up its partial commit",
+          );
+        }
+        throw error;
+      }
+    });
+  }
+
   attachExtensionUI(
     handle: ProjectSessionHandle,
     conversationId: string,
@@ -2660,8 +2761,11 @@ export class ProjectSessionCoordinator {
           }
           await context.project.deleteConversation(conversationId);
         }
-      } catch {
-        // Preserve the original creation failure.
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Failed to create conversation and clean up its partial commit",
+        );
       } finally {
         deletion?.release();
       }

@@ -38,6 +38,10 @@ import {
   parseReservedConversationEntry,
   type ConversationMeta,
 } from "./conversation-meta.js";
+import {
+  applyForkSeedToManager,
+  type ForkSourceSnapshot,
+} from "./conversation-fork.js";
 import { deleteConversationNotebook } from "./conversation-notebook.js";
 import {
   createReadonlySessionEntriesAdapter,
@@ -1409,6 +1413,108 @@ export class ProjectStore {
       await this.refreshConversations();
     }
     return conversation;
+  }
+
+  async createConversationFromSeed(
+    snapshot: ForkSourceSnapshot,
+    conversationId: string,
+    options: { updateRecent?: boolean; refreshIndex?: boolean } = {},
+  ): Promise<{
+    manager: SessionManager;
+    publication: {
+      path: string;
+      fingerprint: SessionFileFingerprint;
+      content: string;
+    };
+  }> {
+    assertSessionId(conversationId, "conversationId");
+    await this.assertSessionDirectorySafe();
+    const staging = SessionManager.inMemory(this.cwd, { id: conversationId });
+    if (staging.getSessionId() !== conversationId) {
+      throw new Error(
+        `Pi staged an unexpected fork identity: ${staging.getSessionId()}`,
+      );
+    }
+    const forkedAt = new Date().toISOString();
+    applyForkSeedToManager(staging, snapshot, {
+      forkedAt,
+      compactionThresholdUpdatedAt: forkedAt,
+      serviceTierUpdatedAt: forkedAt,
+    });
+    const header = staging.getHeader();
+    if (header === null || header.id !== conversationId) {
+      throw new Error("Pi did not stage a persistent fork header");
+    }
+    const initialEntries = [header, ...staging.getEntries()];
+    const initialContent = `${initialEntries.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
+    const fileTimestamp = header.timestamp.replace(/[:.]/g, "-");
+    const sessionFile = join(this.sessionDir, `${fileTimestamp}_${conversationId}.jsonl`);
+    this.assertLexicallyInsideSessionDirectory(sessionFile);
+    validatePiSessionFile(initialContent, sessionFile, conversationId);
+    await createFileAtomically(sessionFile, initialContent);
+    this.verifiedCatalog = undefined;
+    const published = await this.fingerprintSafeSessionPath(sessionFile);
+    let conversation: SessionManager;
+    try {
+      conversation = SessionManager.open(sessionFile, this.sessionDir, this.cwd);
+      if (conversation.getSessionId() !== conversationId) {
+        throw new Error(
+          `Fork identity changed while opening: ${conversationId}`,
+        );
+      }
+    } catch (error) {
+      try {
+        const quarantined = await this.quarantineSessionFile(
+          { path: published.path, raw: initialContent, fingerprint: published },
+          conversationId,
+        );
+        await this.unlinkSessionFile(quarantined.quarantinePath);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Failed to discard a forked conversation after its initial SDK open failed",
+        );
+      }
+      throw error;
+    }
+    this.projectConversationSession(conversation);
+    if (options.updateRecent !== false) {
+      await this.setLastConversation(conversation.getSessionId());
+    }
+    if (options.refreshIndex !== false) {
+      await this.refreshConversations();
+    }
+    return {
+      manager: conversation,
+      publication: { path: published.path, fingerprint: published, content: initialContent },
+    };
+  }
+
+  /**
+   * Precisely discard a just-published fork seed by its publication
+   * fingerprint. Fails closed when the current file is no longer the exact
+   * published inode, so a replacement is never unlinked.
+   */
+  async discardPublishedSeed(
+    publication: { path: string; fingerprint: SessionFileFingerprint; content: string },
+    conversationId: string,
+  ): Promise<void> {
+    assertSessionId(conversationId, "conversationId");
+    await this.assertSessionDirectorySafe();
+    const current = await this.fingerprintSafeSessionPath(publication.path);
+    if (!fingerprintsEqual(current, publication.fingerprint)) {
+      throw new SessionFileChangedError(conversationId);
+    }
+    const quarantined = await this.quarantineSessionFile(
+      {
+        path: publication.path,
+        raw: publication.content,
+        fingerprint: publication.fingerprint,
+      },
+      conversationId,
+    );
+    await this.unlinkSessionFile(quarantined.quarantinePath);
+    this.verifiedCatalog = undefined;
   }
 
   async openConversation(

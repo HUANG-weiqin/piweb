@@ -42,6 +42,7 @@ const LEGACY_LOOP_LIST_CONTINUE_CUSTOM_TYPE = "piweb.loop_list_continue.v1";
 export const MAX_LOOP_LIST_CONTINUATIONS_PER_RUN = 8;
 export const CONVERSATION_ROLE_CHANGE_CUSTOM_TYPE =
   "piweb.conversation_role_change.v1";
+export const FORK_CONTEXT_CUSTOM_TYPE = "piweb.fork_context.v1";
 
 const MAX_ROLE_NAME_CHARACTERS = 80;
 const MAX_ROLE_DESCRIPTION_CHARACTERS = 1_000;
@@ -258,11 +259,21 @@ const orchestrationSchema = z.object({
   sourceRunId: uuidSchema("sourceRunId").optional(),
 }).strict();
 
+const forkedFromSchema = z.object({
+  sourceConversationId: conversationIdSchema("forkedFrom.sourceConversationId"),
+  sourceLeafId: z.string().regex(
+    SESSION_ID_PATTERN,
+    "forkedFrom.sourceLeafId must be a valid Pi entry id",
+  ).optional(),
+  forkedAt: canonicalTimestampSchema("forkedAt"),
+}).strict();
+
 const conversationMetaSchema = z.object({
   role: roleSnapshotSchema,
   lifecycle: lifecycleSchema,
   createdBy: createdBySchema,
   orchestration: orchestrationSchema.optional(),
+  forkedFrom: forkedFromSchema.optional(),
 }).strict();
 
 const conversationMetaEntrySchema = z.object({
@@ -622,6 +633,18 @@ const compactionResumeEntrySchema = z.object({
   }).strict(),
 }).strict();
 
+const forkContextDetailsSchema = z.object({
+  forkedFromConversationId: conversationIdSchema("forkedFromConversationId"),
+  forkedAt: canonicalTimestampSchema("forkedAt"),
+}).strict();
+
+const forkContextEntrySchema = z.object({
+  customType: z.literal(FORK_CONTEXT_CUSTOM_TYPE),
+  content: z.unknown(),
+  display: z.literal(false),
+  details: forkContextDetailsSchema,
+}).strict();
+
 const runSettlementSchema = z.object({
   runId: uuidSchema("runId"),
   outcome: z.enum(["completed", "aborted", "failed"]),
@@ -739,6 +762,8 @@ export type ConversationKind = z.infer<typeof conversationKindSchema>;
 export type ConversationReferenceSnapshot =
   z.infer<typeof conversationReferenceSnapshotSchema>;
 export type ConversationMeta = z.infer<typeof conversationMetaSchema>;
+export type ConversationForkedFrom = z.infer<typeof forkedFromSchema>;
+export type ForkContextEntry = z.infer<typeof forkContextEntrySchema>;
 export type ConversationOrchestration = z.infer<typeof orchestrationSchema>;
 export type ConversationMetaEntry =
   z.infer<typeof conversationMetaEntrySchema>;
@@ -830,6 +855,10 @@ export type ReservedConversationEntry =
   | {
       kind: "service_tier";
       entry: ServiceTierSelectionEntry;
+    }
+  | {
+      kind: "fork_context";
+      entry: ForkContextEntry;
     };
 
 export interface ReservedConversationAggregate {
@@ -951,6 +980,12 @@ function parseCompactionResumeEntry(
   value: unknown,
 ): CompactionResumeEntry {
   return compactionResumeEntrySchema.parse(value);
+}
+
+export function parseForkContextEntry(
+  value: unknown,
+): ForkContextEntry {
+  return forkContextEntrySchema.parse(value);
 }
 
 /**
@@ -1078,6 +1113,7 @@ export function appendReservedCustomEntry(
     || reserved.kind === "conversation_message"
     || reserved.kind === "compaction_resume"
     || reserved.kind === "loop_list_continue"
+    || reserved.kind === "fork_context"
   ) {
     throw new Error("Expected a non-context piweb reserved custom entry");
   }
@@ -1223,6 +1259,12 @@ export function parseReservedConversationEntry(
     return {
       kind: "service_tier",
       entry: parseServiceTierSelectionEntry(payload),
+    };
+  }
+  if (customType === FORK_CONTEXT_CUSTOM_TYPE) {
+    return {
+      kind: "fork_context",
+      entry: parseForkContextEntry(payload),
     };
   }
   throw new Error(`Unknown piweb reserved custom type: ${customType}`);
@@ -1435,6 +1477,7 @@ export function aggregateReservedConversationEntries(
     if (
       reserved.kind === "compaction_resume"
       || reserved.kind === "loop_list_continue"
+      || reserved.kind === "fork_context"
     ) {
       continue;
     }

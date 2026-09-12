@@ -59,6 +59,10 @@ import {
 } from "./conversation-meta.js";
 import { createLoopListTools } from "./loop-list-tools.js";
 import {
+  createForkSourceSnapshot,
+  type ForkSourceSnapshot,
+} from "./conversation-fork.js";
+import {
   canonicalMutationPathKey,
   createEditBudgetLedger,
   restoreEditBudgetLedger,
@@ -1143,6 +1147,45 @@ export class ConversationActor {
 
   isRuntimeReady(): boolean {
     return this.created !== undefined;
+  }
+
+  /**
+   * Capture an idle current-leaf fork snapshot inside the actor serial
+   * boundary. The snapshot is frozen and the boundary is released
+   * immediately; child creation must not hold the source lock.
+   */
+  captureForkSnapshot(): Promise<ForkSourceSnapshot> {
+    return this.operations.run(async () => {
+      this.assertUsable();
+      if (this.activeRun) {
+        throw new Error("Cannot fork a busy conversation; abort and wait first");
+      }
+      if (this.compacting) {
+        throw new Error("Cannot fork while compacting");
+      }
+      if (this.truncating) {
+        throw new Error("Cannot fork during rewind");
+      }
+      if (this.switchingRole) {
+        throw new Error("Cannot fork during a role switch");
+      }
+      if (this.sessionPersistenceQuarantined) {
+        throw new Error("Cannot fork a quarantined conversation; reopen it first");
+      }
+      const branch = structuredClone(this.sessionManager.getBranch());
+      const profile = structuredClone(this.profileSnapshot);
+      const thinkingLevel = this.session.thinkingLevel as ThinkingLevel;
+      return createForkSourceSnapshot({
+        sourceConversationId: this.conversationId,
+        sourceLeafId: this.sessionManager.getLeafId(),
+        branch,
+        profile,
+        thinkingLevel,
+        serviceTier: this.serviceTierSelection,
+        compactionThresholdPercent: this.compactionThresholdPercent,
+        capturedAt: this.now().toISOString(),
+      });
+    });
   }
 
   setCompactionThresholdPercent(percent: number): void {

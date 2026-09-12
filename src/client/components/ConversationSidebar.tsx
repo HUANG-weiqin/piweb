@@ -70,6 +70,7 @@ interface ConversationSidebarProps {
   onCreate(): void;
   onRename(conversationId: string, name: string): boolean;
   onDelete(conversationId: string): boolean;
+  onFork?(conversationId: string): boolean;
   onBlockingModalChange?(blocking: boolean): void;
 }
 
@@ -292,6 +293,7 @@ const ConversationRow = memo(function ConversationRow({
   onSelect,
   onRequestRename,
   onRequestDelete,
+  onRequestFork,
 }: {
   conversation: ConversationSummary;
   hierarchy: ConversationRowHierarchy;
@@ -306,6 +308,7 @@ const ConversationRow = memo(function ConversationRow({
   onSelect(conversationId: string): void;
   onRequestRename(conversation: ConversationSummary): void;
   onRequestDelete(conversationId: string): void;
+  onRequestFork?(conversationId: string): void;
 }) {
   const title = renamePresentation?.name ?? conversationDisplayTitle(conversation);
   const active = busy || (conversation.activity?.kind ?? "idle") !== "idle";
@@ -433,6 +436,24 @@ const ConversationRow = memo(function ConversationRow({
       <div className="conversation-sidebar-actions">
         <button
           type="button"
+          className="conversation-sidebar-fork ghost"
+          aria-label={`分支会话 ${title}`}
+          disabled={
+            !actionsEnabled
+            || !onRequestFork
+            || actionBlocked
+          }
+          title={active
+            ? "活跃会话结算后可以分支"
+            : compacting
+            ? "上下文压缩完成后可以分支"
+            : "分支当前上下文为新会话"}
+          onClick={() => onRequestFork?.(conversation.id)}
+        >
+          分支
+        </button>
+        <button
+          type="button"
           className="conversation-sidebar-rename ghost"
           aria-label={`重命名会话 ${title}`}
           disabled={
@@ -494,6 +515,7 @@ function ConversationGroupCard({
   onRevealIdle,
   onRequestRename,
   onRequestDelete,
+  onRequestFork,
 }: {
   group: ConversationGroup;
   ordinal: string;
@@ -510,6 +532,7 @@ function ConversationGroupCard({
   onRevealIdle(rootConversationId: string): void;
   onRequestRename(conversation: ConversationSummary): void;
   onRequestDelete(conversationId: string): void;
+  onRequestFork?(conversationId: string): void;
 }) {
   const { root, members, conversations } = group;
   const controlsId = `conversation-group-${root.id}`;
@@ -585,6 +608,7 @@ function ConversationGroupCard({
           onSelect={onSelect}
           onRequestRename={onRequestRename}
           onRequestDelete={onRequestDelete}
+          onRequestFork={onRequestFork}
         />
       </ul>
       <button
@@ -620,6 +644,7 @@ function ConversationGroupCard({
               onSelect={onSelect}
               onRequestRename={onRequestRename}
               onRequestDelete={onRequestDelete}
+              onRequestFork={onRequestFork}
             />
           ))}
         </ul>
@@ -653,6 +678,7 @@ function ConversationSidebarView({
   onCreate,
   onRename,
   onDelete,
+  onFork,
   onBlockingModalChange,
 }: ConversationSidebarProps) {
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
@@ -929,6 +955,7 @@ function ConversationSidebarView({
                   onRevealIdle={revealIdle}
                   onRequestRename={requestRename}
                   onRequestDelete={requestDelete}
+                  onRequestFork={onFork}
                 />;
               }
               return <ConversationRow
@@ -945,6 +972,7 @@ function ConversationSidebarView({
                 onSelect={onSelect}
                 onRequestRename={requestRename}
                 onRequestDelete={requestDelete}
+                onRequestFork={onFork}
               />;
             })}
           </ul>

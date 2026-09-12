@@ -80,7 +80,9 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
-export const PROTOCOL_VERSION = 58;
+// v59: idle current-leaf fork copies LLM-effective context into a fresh host
+// lifecycle via `fork_conversation`; history anchors stay unsupported.
+export const PROTOCOL_VERSION = 59;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 export const COLOR_SCHEMES = ["quiet-rebel", "classic-rebel"] as const;
 export type ColorScheme = typeof COLOR_SCHEMES[number];
@@ -386,6 +388,12 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
       MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
       "createConversation.title",
     ).optional(),
+  }),
+  z.object({
+    type: z.literal("fork_conversation"),
+    commandId: commandIdSchema,
+    sessionId: sessionIdSchema,
+    conversationId: conversationIdSchema,
   }),
   z.object({
     type: z.literal("prompt"),
@@ -916,6 +924,7 @@ const FOCUS_ATTACHED_OPERATIONS = [
   "initialize",
   "focus_conversation",
   "create_conversation",
+  "fork_conversation",
 ] as const;
 export type FocusAttachedOperation =
   typeof FOCUS_ATTACHED_OPERATIONS[number];
@@ -1278,6 +1287,7 @@ const commandTypeSchema = z.enum([
   "focus_conversation",
   "refresh_view",
   "create_conversation",
+  "fork_conversation",
   "prompt",
   "steer",
   "abort",
