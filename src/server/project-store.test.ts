@@ -247,6 +247,68 @@ describe("ProjectStore", () => {
     });
   });
 
+  it("reuses the last body validation for unchanged project sessions", async () => {
+    const cwd = await createTemporaryDirectory("piweb-validation-receipt-");
+    const store = await ProjectStore.open(cwd);
+    const first = await store.createConversation(randomUUID(), undefined, {
+      updateRecent: false,
+      refreshIndex: false,
+    });
+    const second = await store.createConversation(randomUUID(), undefined, {
+      updateRecent: false,
+      refreshIndex: false,
+    });
+    const readValidatedSessionFile = vi.spyOn(
+      store as unknown as {
+        readValidatedSessionFile(
+          path: string,
+          fingerprint: unknown,
+        ): Promise<string>;
+      },
+      "readValidatedSessionFile",
+    );
+
+    await store.refreshConversations();
+    expect(readValidatedSessionFile).toHaveBeenCalledTimes(2);
+
+    readValidatedSessionFile.mockClear();
+    second.appendMessage({ role: "user", content: "appended", timestamp: 1 });
+    const summaries = await store.refreshConversations();
+
+    // Only the appended body is re-read; the untouched session reuses its
+    // receipt while membership and summaries stay fully re-proved.
+    expect(readValidatedSessionFile).toHaveBeenCalledTimes(1);
+    expect(basename(readValidatedSessionFile.mock.calls[0]![0])).toBe(
+      basename(second.getSessionFile()!),
+    );
+    expect(summaries.map(({ id }) => id).sort()).toEqual([
+      first.getSessionId(),
+      second.getSessionId(),
+    ].sort());
+  });
+
+  it("rejects a changed project session whose body is no longer valid", async () => {
+    const cwd = await createTemporaryDirectory(
+      "piweb-validation-receipt-invalid-",
+    );
+    const store = await ProjectStore.open(cwd);
+    const conversation = await store.createConversation(randomUUID(), undefined, {
+      updateRecent: false,
+      refreshIndex: false,
+    });
+    await store.refreshConversations();
+
+    const sessionFile = conversation.getSessionFile()!;
+    await writeFile(
+      sessionFile,
+      `${await readFile(sessionFile, "utf8")}{"type": "message"\n`,
+    );
+
+    await expect(store.refreshConversations()).rejects.toThrow(
+      "invalid JSON",
+    );
+  });
+
   it("persists and lists a conversation before it has an assistant message", async () => {
     const cwd = await createTemporaryDirectory("piweb-empty-conversation-");
     const store = await ProjectStore.open(cwd);

@@ -160,7 +160,8 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 - 列举使用 `SessionManager.listAll(sessionDir)`，避免项目移动后被旧 header cwd 过滤；但不能信任它的完整性，因为 SDK 会静默跳过部分损坏文件。
 - 完整索引刷新、显式 audit 与 cascade delete 都先后快照受控目录中的全部常规 `.jsonl`，目录在 SDK 扫描期间变化会 fail closed。宿主完整读取每个文件，验证尾换行、逐行 JSON、有限数值、header identity，以及当前格式的 entry payload / tree 引用；随后要求 SDK 索引与该磁盘全集按规范路径和 ID 精确一一对应。
 - 单目标 preview/open 不依赖该完整索引：用 file descriptor 读取每个受控常规文件的有界首行，只把能通过 session header 验证的同 ID 文件当作 collision candidate；随后稳定读取并完整验证目标。头行无法在上限内解析的文件没有 identity claim；I/O、路径或扫描期不确定性不能被当作无关。proof commit 复验所有 target candidate 的 path/inode/header claim，正常无关 body append 不改变该 scope。
-- 同一 operation 的稳定 raw 只做一次完整 parse/inspection，结果随 verified read 返回给 metadata 或 presentation 消费者；常规 metadata 不保留物理 entries，只有 presentation 显式 opt-in。namespace/header census 与前后 fingerprint 校验保持独立，不把该复用扩展成跨 lease 或跨 operation 的完整性证明缓存。
+- 同一 operation 的稳定 raw 只做一次完整 parse/inspection，结果随 verified read 返回给 metadata 或 presentation 消费者；常规 metadata 不保留物理 entries，只有 presentation 显式 opt-in。namespace/header census 与前后 fingerprint 校验保持独立，不把该复用扩展成跨 lease 或跨 operation 的 raw/inspection 缓存；跨 operation 只允许复用下述 fingerprint 校验回执。
+- 完整证明按文件保存进程内校验回执：键是规范路径，值是最近一次成功完整证明观测到的 fingerprint（`dev/ino/size/mtimeNs/ctimeNs`，不含 atime）及它证明出的 conversationId。下一轮只对 fingerprint 逐字段相同的文件跳过 `readFile` + `validatePiSessionFile`；指纹变化、路径缺失或路径安全失败一律完整重读重证，并且每轮仍重新证明当前安全文件全集、重复 ID、SDK 索引一一对应、全部 summary 与 before/after 集合相等。回执是文件版本身份令牌，随 `ProjectStore` 生命周期消失，不落盘、不跨 lease、不跨进程；same-fingerprint ABA（伪造 mtime/ctime 以隐藏损坏）不在保证内，不接受该假设时只能退回每次完整重读。
 - 打开时第三个参数传当前 canonical cwd；JSONL header 保留原 cwd，运行态使用新位置。旧会话允许 header cwd 缺失或为空，但存在时必须是字符串。
 - 新 Pi manager 默认要到首条 assistant 消息才创建文件。工作台一次写入合法 header 和 conversation metadata 后丢弃 pending manager，再用公开 `open()` 重开。
 - `SessionManager` 没有 flush/close/fsync，也没有内建锁；正常 append 是同步 JSONL 写入。
@@ -203,7 +204,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 ## 当前边界
 
 - 没有 archive、用户多选批量删除、fork/import、附件和跨设备同步；Agent 会话列表只有有界 cursor，不构成浏览器历史分页。
-- 完整列表、显式 audit 与 cascade delete 仍由宿主完整验证项目全部 JSONL，并由 Pi `listAll()` 再扫描一次；这不是显式 target open/preview 的前置条件。path-keyed catalog v2 是原子版本化、可损坏即丢弃的展示/诊断 observation：summary 按 `(relativePath, dev, ino, header claim)` 保留为可陈旧的 display cache，body 的 `valid | invalid | unverified` 只证明当前完整 fingerprint；同 inode/header 的 append 会保留 summary 并重新验证 body，file/header identity 改变才丢弃它。`SessionFileChangedError` 不记为 invalid，而是放弃该轮写入并由下一次 census 重试；scrub 提交按当前 catalog CAS，不能覆盖期间完成的完整 proof。cold current-index 只以 `coverage: "unknown"` 投影缓存；它不能替代当次 target proof。
+- 完整列表、显式 audit 与 cascade delete 仍由宿主完整验证项目全部 JSONL（未变文件复用进程内 fingerprint 回执，变更文件完整重读重证），并由 Pi `listAll()` 再扫描一次；这不是显式 target open/preview 的前置条件。path-keyed catalog v2 是原子版本化、可损坏即丢弃的展示/诊断 observation：summary 按 `(relativePath, dev, ino, header claim)` 保留为可陈旧的 display cache，body 的 `valid | invalid | unverified` 只证明当前完整 fingerprint；同 inode/header 的 append 会保留 summary 并重新验证 body，file/header identity 改变才丢弃它。`SessionFileChangedError` 不记为 invalid，而是放弃该轮写入并由下一次 census 重试；scrub 提交按当前 catalog CAS，不能覆盖期间完成的完整 proof。cold current-index 只以 `coverage: "unknown"` 投影缓存；它不能替代当次 target proof。
 - 没有跨进程 writer lock 和断电级 durability。
 - Pi JSONL header eager materialization 依赖锁定 SDK 的 v3 session format；升级 SDK 时必须用测试验证 header/open/list 行为。
 - `.piweb` 可能包含敏感内容；Git 忽略策略由项目所有者决定。

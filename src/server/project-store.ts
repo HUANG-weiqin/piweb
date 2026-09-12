@@ -164,6 +164,17 @@ interface VerifiedSessionCatalog {
   >;
 }
 
+/**
+ * Body-validation receipt for one project JSONL file. It is a version token:
+ * the cached conversation identity stays reusable only while every field of
+ * the file fingerprint is unchanged, and it never outlives the store that
+ * produced it. Same-fingerprint ABA is outside the deletion contract.
+ */
+interface ValidatedSessionReceipt {
+  fingerprint: Readonly<SessionFileFingerprint>;
+  conversationId: string;
+}
+
 interface VerifiedSessionFileRead {
   path: string;
   raw: string;
@@ -226,7 +237,7 @@ interface ConversationLeaseState {
   waiters: ConversationLeaseWaiter[];
 }
 
-class SessionDirectoryChangedError extends Error {
+export class SessionDirectoryChangedError extends Error {
   constructor(
     message = "Project session directory changed while it was being scanned",
   ) {
@@ -954,6 +965,15 @@ export class ProjectStore {
   private conversations: ConversationSummary[] = [];
   private verifiedCatalog?: VerifiedSessionCatalog;
   private conversationCatalog?: ConversationCatalog;
+  /**
+   * Receipts from the last successful complete proof. Unchanged files reuse
+   * their receipt instead of re-reading the body, so a proof costs the bytes
+   * that actually changed rather than every project byte.
+   */
+  private validatedSessionReceipts = new Map<
+    string,
+    ValidatedSessionReceipt
+  >();
   /**
    * Direct actor projections can race a pre-existing whole-directory scan.
    * Keep the newer target summary through that stale scan, then let the next
@@ -2047,17 +2067,18 @@ export class ProjectStore {
     const validatedByPath = new Map<string, string>();
     const pathsByConversation = new Map<string, string>();
 
+    const provedReceipts: ValidatedSessionReceipt[] = [];
     for (const file of filesBeforeScan) {
       const beforeRead = await this.fingerprintSafeSessionPath(file.path);
       if (!fingerprintsEqual(file, beforeRead)) {
         throw new SessionDirectoryChangedError();
       }
-      const raw = await readFile(file.path, "utf8");
-      const afterRead = await this.fingerprintSafeSessionPath(file.path);
-      if (!fingerprintsEqual(beforeRead, afterRead)) {
-        throw new SessionDirectoryChangedError();
-      }
-      const conversationId = validatePiSessionFile(raw, file.path);
+      const receipt = this.validatedSessionReceipts.get(file.pathKey);
+      const conversationId = receipt !== undefined
+          && fingerprintsEqual(receipt.fingerprint, beforeRead)
+        ? receipt.conversationId
+        : await this.readValidatedSessionFile(file.path, beforeRead);
+      provedReceipts.push({ fingerprint: beforeRead, conversationId });
       const previousPath = pathsByConversation.get(conversationId);
       if (
         previousPath !== undefined
@@ -2111,6 +2132,12 @@ export class ProjectStore {
     }
     // Validate all SDK-derived summary fields before publishing the proof.
     toConversationSummaries(normalizedInformation);
+    this.validatedSessionReceipts = new Map(
+      provedReceipts.map((receipt) => [
+        receipt.fingerprint.pathKey,
+        receipt,
+      ]),
+    );
 
     const catalogInformation = normalizedInformation.map((item) =>
       Object.freeze(cloneSessionInformation(item))
@@ -2134,6 +2161,22 @@ export class ProjectStore {
       this.conversationCatalog = undefined;
     }
     return catalog;
+  }
+
+  /**
+   * Reads one project JSONL body and proves it was stable around the read.
+   * Callers that hold a matching receipt skip this entirely.
+   */
+  private async readValidatedSessionFile(
+    path: string,
+    beforeRead: Readonly<SessionFileFingerprint>,
+  ): Promise<string> {
+    const raw = await readFile(path, "utf8");
+    const afterRead = await this.fingerprintSafeSessionPath(path);
+    if (!fingerprintsEqual(beforeRead, afterRead)) {
+      throw new SessionDirectoryChangedError();
+    }
+    return validatePiSessionFile(raw, path);
   }
 
   private async listSafeSessionFiles(
