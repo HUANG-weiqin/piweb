@@ -243,6 +243,50 @@ describe("PiRuntime session ownership", () => {
     expect(Object.hasOwn(created.modelRuntime, "streamSimple")).toBe(false);
   });
 
+  it("attributes an out-of-loop session stream request to its OpenCode session", async () => {
+    const cwd = await temporaryDirectory("piweb-runtime-opencode-attribution-");
+    const runtime = await testRuntime(() => []);
+    const created = await runtime.createSession(cwd);
+    const sessionStream = created.session.agent.streamFunction;
+    const streamSimple = vi.spyOn(created.modelRuntime, "streamSimple")
+      .mockReturnValue({ source: "raw-session-stream" } as never);
+    const model = {
+      provider: "opencode-go",
+      id: "deepseek-v4.1-flash",
+      api: "openai-completions",
+      baseUrl: "https://opencode.ai/api/v1",
+      reasoning: true,
+      input: ["text"],
+      cost: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 },
+      contextWindow: 200_000,
+      maxTokens: 8_192,
+    };
+    const context = { systemPrompt: "", messages: [], tools: [] };
+
+    await sessionStream(model as never, context as never, {
+      sessionId: created.session.sessionId,
+      transport: created.session.agent.transport,
+    });
+
+    const options = streamSimple.mock.calls[0]?.[2];
+    expect(await options?.transformHeaders?.({ "x-kept": "1" })).toMatchObject({
+      "x-kept": "1",
+      "x-opencode-session": created.session.sessionId,
+      "x-opencode-client": "pi",
+    });
+
+    streamSimple.mockClear();
+    await sessionStream(
+      { ...model, provider: "test", baseUrl: "https://example.invalid" } as never,
+      context as never,
+      { sessionId: created.session.sessionId },
+    );
+    expect(await streamSimple.mock.calls[0]?.[2]?.transformHeaders?.({}))
+      .toEqual({});
+
+    await created.dispose();
+  });
+
   it("does not resolve an explicit compaction model when Pi's manual hook supplies the summary", async () => {
     const cwd = await temporaryDirectory("piweb-runtime-compaction-hook-");
     const manager = SessionManager.inMemory(cwd);

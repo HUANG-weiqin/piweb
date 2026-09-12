@@ -199,10 +199,12 @@ class FakeSessionControl {
     this.session = {
       isStreaming: false,
       messages,
+      sessionId: this.manager.getSessionId(),
       agent: {
         state: {
           messages,
         },
+        transport: "sse",
       },
       model: options.model === undefined
         ? { provider: "test", id: "model-a" }
@@ -513,17 +515,14 @@ async function startPeerFromActiveSource(
   }
 }
 
+type TitleStreamCall = Parameters<AgentSession["agent"]["streamFunction"]>;
+
 class FakeRuntime implements PiRuntimeLike {
   readonly credentialStore = new InMemoryCredentialStore();
-  titleImplementation: ModelRuntime["completeSimple"] = async () =>
-    automaticTitleMessage("测试任务");
-  readonly titleCalls: Array<Parameters<ModelRuntime["completeSimple"]>> = [];
-  readonly modelRuntime = {
-    completeSimple: (...args: Parameters<ModelRuntime["completeSimple"]>) => {
-      this.titleCalls.push(args);
-      return this.titleImplementation(...args);
-    },
-  } as unknown as ModelRuntime;
+  titleImplementation: (...args: TitleStreamCall) => Promise<AssistantMessage> =
+    async () => automaticTitleMessage("测试任务");
+  readonly titleCalls: TitleStreamCall[] = [];
+  readonly modelRuntime = {} as unknown as ModelRuntime;
   readonly modelRegistry: ModelRegistry;
   sessionModelRegistry?: ModelRegistry;
   projectModelRegistry?: ModelRegistry;
@@ -601,6 +600,18 @@ class FakeRuntime implements PiRuntimeLike {
       options,
       this.nextSessionBehaviors.shift() ?? [],
     );
+    // The actor issues the isolated title request through the public session
+    // stream function, so capture calls at that boundary.
+    control.session.agent.streamFunction = ((
+      model: TitleStreamCall[0],
+      context: TitleStreamCall[1],
+      options_: TitleStreamCall[2],
+    ) => {
+      this.titleCalls.push([model, context, options_]);
+      return {
+        result: () => this.titleImplementation(model, context, options_),
+      };
+    }) as unknown as AgentSession["agent"]["streamFunction"];
     this.controls.set(conversationId, control);
     this.createOptions.set(conversationId, options);
     return {

@@ -1493,6 +1493,10 @@ describe("ProjectSessionCoordinator", () => {
         content: "实现新会话首次运行前自动命名",
       }],
     });
+    expect(fixture.runtime.titleCalls[0]?.[2]).toMatchObject({
+      sessionId: actor.sessionManager.getSessionId(),
+      transport: "sse",
+    });
     expect(persistedAtAcknowledgement).toBeDefined();
     await expect(persistedAtAcknowledgement).resolves.toBe(false);
     expect(fixture.runtime.control(actor.conversationId).promptTexts).toEqual([]);

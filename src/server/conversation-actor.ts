@@ -3176,28 +3176,35 @@ export class ConversationActor {
       );
       let generatedTitle = AUTO_TITLE_FALLBACK;
       try {
-        const model = this.session.model;
+        const session = this.session;
+        const model = session.model;
         if (model !== undefined) {
-          const response = await this.requireCreated().modelRuntime
-            .completeSimple(
-              model,
-              {
-                systemPrompt: AUTO_TITLE_SYSTEM_PROMPT,
-                messages: [{
-                  role: "user",
-                  content: clipUnicode(prompt, AUTO_TITLE_INPUT_CHARACTERS),
-                  timestamp: this.now().getTime(),
-                }],
-              },
-              {
-                signal: controller.signal,
-                timeoutMs: AUTO_TITLE_TIMEOUT_MS,
-                maxRetries: 0,
-                maxTokens: AUTO_TITLE_MAX_TOKENS,
-                reasoning: "minimal",
-                cacheRetention: "none",
-              },
-            );
+          // The session stream owns SDK auth, provider request headers and
+          // retry policy; an isolated title request must not skip them or
+          // start an Agent turn. The durable Pi session identity is what
+          // providers such as OpenCode use to attribute the request.
+          const stream = await session.agent.streamFunction(
+            model,
+            {
+              systemPrompt: AUTO_TITLE_SYSTEM_PROMPT,
+              messages: [{
+                role: "user",
+                content: clipUnicode(prompt, AUTO_TITLE_INPUT_CHARACTERS),
+                timestamp: this.now().getTime(),
+              }],
+            },
+            {
+              signal: controller.signal,
+              timeoutMs: AUTO_TITLE_TIMEOUT_MS,
+              maxRetries: 0,
+              maxTokens: AUTO_TITLE_MAX_TOKENS,
+              reasoning: "minimal",
+              cacheRetention: "none",
+              sessionId: session.sessionId,
+              transport: session.agent.transport,
+            },
+          );
+          const response = await stream.result();
           generatedTitle = automaticTitleFrom(response) ?? AUTO_TITLE_FALLBACK;
         }
       } catch {

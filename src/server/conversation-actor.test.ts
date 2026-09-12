@@ -83,6 +83,8 @@ function deferred<T = void>(): Deferred<T> {
   return { promise, resolve, reject };
 }
 
+type TitleStreamCall = Parameters<AgentSession["agent"]["streamFunction"]>;
+
 interface FakeSession extends AgentSession {
   abortCalls: number;
   abortCompactionCalls: number;
@@ -133,11 +135,13 @@ function fakeSession(): FakeSession {
     steerCalls: [],
     isStreaming: false,
     messages: [],
+    sessionId: "fake-session-id",
     agent: {
       state: {
         messages: [],
         thinkingLevel: "off",
       },
+      transport: "sse",
     },
     model: {
       provider: "test",
@@ -236,17 +240,25 @@ function fakeSession(): FakeSession {
 
 class FakeRuntime implements PiRuntimeLike {
   readonly credentialStore = new InMemoryCredentialStore();
-  titleImplementation: ModelRuntime["completeSimple"] = async () =>
-    automaticTitleMessage("测试任务");
-  readonly titleCalls: Array<Parameters<ModelRuntime["completeSimple"]>> = [];
-  readonly modelRuntime = {
-    completeSimple: (...args: Parameters<ModelRuntime["completeSimple"]>) => {
-      this.titleCalls.push(args);
-      return this.titleImplementation(...args);
-    },
-  } as unknown as ModelRuntime;
+  titleImplementation: (...args: TitleStreamCall) => Promise<AssistantMessage> =
+    async () => automaticTitleMessage("测试任务");
+  readonly titleCalls: TitleStreamCall[] = [];
+  readonly modelRuntime = {} as unknown as ModelRuntime;
   readonly modelRegistry = {} as ModelRegistry;
   readonly session = fakeSession();
+
+  constructor() {
+    // The actor issues the isolated title request through the public session
+    // stream function, so the fake must capture calls at that boundary.
+    this.session.agent.streamFunction = ((
+      model: TitleStreamCall[0],
+      context: TitleStreamCall[1],
+      options?: TitleStreamCall[2],
+    ) => {
+      this.titleCalls.push([model, context, options]);
+      return { result: () => this.titleImplementation(model, context, options) };
+    }) as unknown as AgentSession["agent"]["streamFunction"];
+  }
   readonly settings = fakeSettings();
   createOptions?: CreatePiSessionOptions;
   disposeCalls = 0;
@@ -979,6 +991,16 @@ describe("ConversationActor", () => {
         }],
       });
       expect(runtime.titleCalls[0]?.[1].tools).toBeUndefined();
+      expect(runtime.titleCalls[0]?.[2]).toMatchObject({
+        sessionId: "fake-session-id",
+        transport: "sse",
+        cacheRetention: "none",
+        maxRetries: 0,
+        maxTokens: 256,
+        reasoning: "minimal",
+        timeoutMs: expect.any(Number),
+        signal: expect.any(AbortSignal),
+      });
 
       titleResult.resolve(automaticTitleMessage(
         "  会话首轮自动命名  \n这行解释不应进入标题",
