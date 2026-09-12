@@ -240,17 +240,10 @@ interface PendingImageOpen extends ActiveFocus {
   target: Window;
 }
 
-interface SubmittedPromptOwner {
-  promptId: string;
-  text: string;
-  images: PromptImage[];
-  status: "rejected" | "unknown";
-}
-
 interface ConversationComposerDraft {
   text: string;
   images: PromptImage[];
-  submittedOwner?: SubmittedPromptOwner;
+  submittedStatus?: "rejected" | "unknown";
 }
 
 interface ConversationDraftScope {
@@ -728,7 +721,6 @@ export function App() {
   const conversationReadyRef = useRef(false);
   const [sessionControlReady, setSessionControlReadyState] =
     useState<SessionControlReady | undefined>(undefined);
-  const sessionControlReadyRef = useRef<SessionControlReady | undefined>(undefined);
   const workspaceProjectionCacheRef = useRef(
     new Map<string, CachedWorkspaceProjection>(),
   );
@@ -835,7 +827,6 @@ export function App() {
     setPendingAbortState(pending);
   };
   const updateSessionControlReady = (ready: SessionControlReady | undefined) => {
-    sessionControlReadyRef.current = ready;
     setSessionControlReadyState(ready);
   };
   const currentWorkspaceKey = () => workspaceKey(activeCwdRef.current);
@@ -984,9 +975,9 @@ export function App() {
     const savedDraft = conversationDraftByScopeRef.current.get(key);
     updateDraft(savedDraft?.text ?? "");
     updateDraftImages(savedDraft?.images ?? []);
-    setPromptNotice(savedDraft?.submittedOwner?.status === "unknown"
+    setPromptNotice(savedDraft?.submittedStatus === "unknown"
       ? UNCONFIRMED_PROMPT_NOTICE
-      : savedDraft?.submittedOwner?.status === "rejected"
+      : savedDraft?.submittedStatus === "rejected"
       ? "消息未被服务端接收。内容已保留，可以修改后重试。"
       : "");
   };
@@ -998,29 +989,23 @@ export function App() {
     if (!scope) return;
     const key = pendingConversationKey(scope);
     const savedDraft = conversationDraftByScopeRef.current.get(key);
-    if (!next.text && next.images.length === 0 && !savedDraft?.submittedOwner) {
+    if (!next.text && next.images.length === 0 && !savedDraft?.submittedStatus) {
       conversationDraftByScopeRef.current.delete(key);
     } else {
       conversationDraftByScopeRef.current.set(key, {
         ...next,
-        ...(savedDraft?.submittedOwner
-          ? { submittedOwner: savedDraft.submittedOwner }
+        ...(savedDraft?.submittedStatus
+          ? { submittedStatus: savedDraft.submittedStatus }
           : {}),
       });
     }
   };
   const rememberSubmittedPrompt = (
     pending: DirectPendingPrompt,
-    status: SubmittedPromptOwner["status"],
+    status: "rejected" | "unknown",
   ) => {
     const key = pendingConversationKey(pending);
     const savedDraft = conversationDraftByScopeRef.current.get(key);
-    const submittedOwner = {
-      promptId: pending.promptId,
-      text: pending.text,
-      images: pending.images,
-      status,
-    };
     const activeScope = draftScopeRef.current;
     const isVisibleEmptyDraft = activeScope !== undefined
       && pendingConversationKey(activeScope) === key
@@ -1028,7 +1013,7 @@ export function App() {
       && draftImagesRef.current.length === 0;
     const text = isVisibleEmptyDraft ? pending.text : savedDraft?.text ?? "";
     const images = isVisibleEmptyDraft ? pending.images : savedDraft?.images ?? [];
-    conversationDraftByScopeRef.current.set(key, { text, images, submittedOwner });
+    conversationDraftByScopeRef.current.set(key, { text, images, submittedStatus: status });
     if (isVisibleEmptyDraft) {
       updateDraft(text);
       updateDraftImages(images);
