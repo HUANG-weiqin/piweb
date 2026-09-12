@@ -31,6 +31,7 @@ import {
   type ProjectSessionCoordinatorEvent,
   type ProjectSessionHandle,
 } from "./project-session-coordinator.js";
+import { SessionDirectoryChangedError } from "./project-store.js";
 import {
   projectConversationIndex,
   projectConversationPeers,
@@ -1738,7 +1739,18 @@ case "set_thinking":
         && this.isCurrentCoordinatedView(view)
       );
       if (latestFailed && this.isCurrentCoordinatedView(view)) {
-        this.emitError("session", latestError, view.sessionId);
+        if (latestError instanceof SessionDirectoryChangedError) {
+          // A concurrent writer only invalidated this proof attempt. Project
+          // the last successful index as non-authoritative instead of
+          // reporting a project failure the operator cannot act on.
+          this.emitProjectSnapshot(
+            view,
+            view.coordinator.projectSessionsFromCurrentIndex(view.handle),
+            "unknown",
+          );
+        } else {
+          this.emitError("session", latestError, view.sessionId);
+        }
       }
     } finally {
       if (this.projectSnapshotRefresh === refresh) {

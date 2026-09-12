@@ -39,7 +39,10 @@ import {
   createConversationCardEntry,
   createLoopListEntry,
 } from "./conversation-meta.js";
-import { ProjectStoreRegistry } from "./project-store.js";
+import {
+  ProjectStoreRegistry,
+  SessionDirectoryChangedError,
+} from "./project-store.js";
 import { ProjectSessionCoordinator } from "./project-session-coordinator.js";
 import { RoleCatalog } from "./role-catalog.js";
 
@@ -4557,6 +4560,93 @@ describe("PiConnection coordinated project view", () => {
           (event) => event.type === "project_snapshot"
             && event.coverage === "complete",
         )).toBe(true);
+      });
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("projects unknown coverage instead of a session error when a concurrent writer voids the refresh proof", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      const focused = await initializeNewConversation(harness);
+      await vi.waitFor(() => {
+        expect(harness.events.findLast(
+          (event) => event.type === "project_snapshot",
+        )).toMatchObject({ coverage: "complete" });
+      });
+      const handle = await harness.coordinator.acquireProject(
+        harness.cwd,
+        "read_only",
+      );
+      const projectInternals = handle.project as unknown as {
+        scanConversations(): Promise<unknown>;
+      };
+      vi.spyOn(projectInternals, "scanConversations").mockRejectedValue(
+        new SessionDirectoryChangedError(),
+      );
+      handle.release();
+
+      const eventStart = harness.events.length;
+      await harness.connection.handle({
+        type: "refresh_view",
+        sessionId: SESSION_A,
+        projectId: focused.projectId,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+      });
+
+      await vi.waitFor(() => {
+        expect(harness.events.slice(eventStart).some(
+          (event) => event.type === "project_snapshot"
+            && event.coverage === "unknown",
+        )).toBe(true);
+      });
+      expect(harness.events.slice(eventStart).some(
+        (event) => event.type === "error" && event.scope === "session",
+      )).toBe(false);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("keeps reporting the project refresh failure when it is not a writer contention", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      const focused = await initializeNewConversation(harness);
+      await vi.waitFor(() => {
+        expect(harness.events.findLast(
+          (event) => event.type === "project_snapshot",
+        )).toMatchObject({ coverage: "complete" });
+      });
+      const handle = await harness.coordinator.acquireProject(
+        harness.cwd,
+        "read_only",
+      );
+      const projectInternals = handle.project as unknown as {
+        scanConversations(): Promise<unknown>;
+      };
+      vi.spyOn(projectInternals, "scanConversations").mockRejectedValue(
+        new Error("catalog refresh failed"),
+      );
+      handle.release();
+
+      const eventStart = harness.events.length;
+      await harness.connection.handle({
+        type: "refresh_view",
+        sessionId: SESSION_A,
+        projectId: focused.projectId,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+      });
+
+      await vi.waitFor(() => {
+        expect(harness.events.slice(eventStart)).toContainEqual({
+          type: "error",
+          scope: "session",
+          sessionId: SESSION_A,
+          message: "catalog refresh failed",
+        });
       });
     } finally {
       await harness.cleanup();
