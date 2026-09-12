@@ -46,6 +46,9 @@ import {
 } from "./conversation-meta.js";
 import { ConversationNotebook } from "./conversation-notebook.js";
 import {
+  createForkSourceSnapshot,
+} from "./conversation-fork.js";
+import {
   ConversationTruncateCommittedError,
   ProjectStore,
   ProjectStoreRegistry,
@@ -2608,4 +2611,150 @@ describe("ProjectStoreRegistry", () => {
       lease.release();
     },
   );
+
+  it("forks carry over the session name and notebook, and discard cleans both", async () => {
+    const cwd = await createTemporaryDirectory("piweb-fork-follow-");
+    const store = await ProjectStore.open(cwd);
+    const sourceId = randomUUID();
+    const meta: ConversationMeta = {
+      role: {
+        id: "971080c4-e889-4860-a10f-26fdaffaee32",
+        revision: 3,
+        name: "Reviewer",
+        description: "Reviews lifecycle code",
+        systemPrompt: "Review carefully.",
+        model: { provider: "provider", id: "model" },
+        compactionModel: null,
+        defaultThinkingLevel: "off",
+        defaultServiceTier: null,
+        toolMode: "read_only",
+        canManageSessions: false,
+      },
+      lifecycle: { kind: "normal" },
+      createdBy: { kind: "user" },
+    };
+    const source = await store.createConversation(sourceId, meta);
+    source.appendSessionInfo("Source Task");
+    await new ConversationNotebook(store.stateDir, sourceId).write({
+      title: "plan",
+      content: "steps",
+    });
+
+    const targetId = randomUUID();
+    const snapshot = createForkSourceSnapshot({
+      sourceConversationId: sourceId,
+      sourceLeafId: source.getLeafId(),
+      branch: source.getBranch(),
+      profile: meta,
+      thinkingLevel: "off",
+      serviceTier: null,
+      compactionThresholdPercent: 70,
+      capturedAt: new Date().toISOString(),
+      sessionName: source.getSessionName(),
+    });
+    const { manager: child, publication } =
+      await store.createConversationFromSeed(snapshot, targetId, {
+        updateRecent: false,
+        refreshIndex: false,
+      });
+
+    expect(child.getSessionName()).toBe("Source Task");
+    await expect(
+      new ConversationNotebook(store.stateDir, targetId).read(["plan"]),
+    ).resolves.toMatchObject({
+      notes: [{ title: "plan", content: "steps" }],
+    });
+    expect(source.getSessionName()).toBe("Source Task");
+    await expect(
+      new ConversationNotebook(store.stateDir, sourceId).read(["plan"]),
+    ).resolves.toMatchObject({
+      notes: [{ title: "plan", content: "steps" }],
+    });
+
+    const childFile = child.getSessionFile();
+    if (!childFile) throw new Error("fork did not expose its session file");
+    await store.discardPublishedSeed(publication, targetId);
+    await expect(readFile(childFile, "utf8")).rejects.toThrow();
+    await expect(
+      new ConversationNotebook(store.stateDir, targetId).read(["plan"]),
+    ).rejects.toThrow();
+  });
+
+  const forkSeedMeta = (): ConversationMeta => ({
+    role: {
+      id: "971080c4-e889-4860-a10f-26fdaffaee32",
+      revision: 3,
+      name: "Reviewer",
+      description: "Reviews lifecycle code",
+      systemPrompt: "Review carefully.",
+      model: { provider: "provider", id: "model" },
+      compactionModel: null,
+      defaultThinkingLevel: "off",
+      defaultServiceTier: null,
+      toolMode: "read_only",
+      canManageSessions: false,
+    },
+    lifecycle: { kind: "normal" },
+    createdBy: { kind: "user" },
+  });
+
+  const forkSeedSnapshot = (source: SessionManager, sourceId: string) =>
+    createForkSourceSnapshot({
+      sourceConversationId: sourceId,
+      sourceLeafId: source.getLeafId(),
+      branch: source.getBranch(),
+      profile: forkSeedMeta(),
+      thinkingLevel: "off",
+      serviceTier: null,
+      compactionThresholdPercent: 70,
+      capturedAt: new Date().toISOString(),
+      sessionName: source.getSessionName(),
+    });
+
+  it("fails a fork closed on a corrupt source notebook without orphans", async () => {
+    const cwd = await createTemporaryDirectory("piweb-fork-badnotes-");
+    const store = await ProjectStore.open(cwd);
+    const sourceId = randomUUID();
+    const source = await store.createConversation(sourceId, forkSeedMeta());
+    const notebookDir = join(cwd, ".piweb", "notebooks");
+    await mkdir(notebookDir, { recursive: true });
+    await writeFile(join(notebookDir, `${sourceId}.json`), "not json");
+
+    const targetId = randomUUID();
+    await expect(
+      store.createConversationFromSeed(
+        forkSeedSnapshot(source, sourceId),
+        targetId,
+        { updateRecent: false, refreshIndex: false },
+      ),
+    ).rejects.toThrow();
+    const sessionNames = await readdir(join(cwd, ".piweb", "sessions"));
+    expect(sessionNames.filter((name) => name.includes(targetId)))
+      .toHaveLength(0);
+    await expect(
+      new ConversationNotebook(store.stateDir, targetId).read(["plan"]),
+    ).rejects.toThrow();
+  });
+
+  it("forks without a source notebook without creating a target file", async () => {
+    const cwd = await createTemporaryDirectory("piweb-fork-nonotes-");
+    const store = await ProjectStore.open(cwd);
+    const sourceId = randomUUID();
+    const source = await store.createConversation(sourceId, forkSeedMeta());
+
+    const targetId = randomUUID();
+    const { manager: child } = await store.createConversationFromSeed(
+      forkSeedSnapshot(source, sourceId),
+      targetId,
+      { updateRecent: false, refreshIndex: false },
+    );
+    expect(child.getSessionId()).toBe(targetId);
+    let names: string[] = [];
+    try {
+      names = await readdir(join(cwd, ".piweb", "notebooks"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+    }
+    expect(names).not.toContain(`${targetId}.json`);
+  });
 });

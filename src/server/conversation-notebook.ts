@@ -1391,6 +1391,44 @@ export function deleteConversationNotebook(
   });
 }
 
+/**
+ * Copies one conversation notebook to a fresh conversation identity.
+ * Returns true when notes were carried over, false when the source has none.
+ * A corrupt source fails closed before the caller publishes anything else.
+ */
+export function copyConversationNotebook(
+  stateDir: string,
+  sourceConversationId: string,
+  targetConversationId: string,
+): Promise<boolean> {
+  const sourcePaths = notebookPaths(stateDir, sourceConversationId);
+  const targetPaths = notebookPaths(stateDir, targetConversationId);
+  if (pathsAreIdentical(sourcePaths.file, targetPaths.file)) {
+    throw new Error("Notebook fork source and target must differ");
+  }
+  // Lock ordering is always target-outer/source-inner, and fork only ever
+  // copies toward a fresh UUID, so the reverse order (and any lock cycle)
+  // is unreachable from this entry point.
+  return runNotebookOperation(targetPaths, async () => {
+    const existing = await notebookOwnedFileIfPresent(
+      targetPaths,
+      targetPaths.file,
+      "Notebook file",
+    );
+    if (existing !== undefined) {
+      throw new Error(
+        `Notebook fork target already exists: ${targetPaths.file}`,
+      );
+    }
+    return runNotebookOperation(sourcePaths, async () => {
+      const notes = await readNotes(sourcePaths);
+      if (notes.length === 0) return false;
+      await writeNotes(targetPaths, undefined, notes);
+      return true;
+    });
+  });
+}
+
 export const notebookResultText = {
   write(note: NotebookNoteMetadata): string {
     return [

@@ -57,6 +57,8 @@ export interface ForkSourceSnapshot {
   readonly serviceTier: ServiceTier | null;
   readonly compactionThresholdPercent: number;
   readonly capturedAt: string;
+  /** Latest session_info name; undefined stays nameless. */
+  readonly sessionName: string | undefined;
 }
 
 export function createForkSourceSnapshot(input: {
@@ -68,6 +70,7 @@ export function createForkSourceSnapshot(input: {
   serviceTier: ServiceTier | null;
   compactionThresholdPercent: number;
   capturedAt: string;
+  sessionName: string | undefined;
 }): ForkSourceSnapshot {
   if (!SESSION_ID_PATTERN.test(input.sourceConversationId)) {
     throw new Error("Fork source conversationId must be a valid Pi session id");
@@ -93,6 +96,7 @@ export function createForkSourceSnapshot(input: {
     serviceTier: input.serviceTier,
     compactionThresholdPercent: input.compactionThresholdPercent,
     capturedAt: input.capturedAt,
+    sessionName: input.sessionName,
   };
 }
 
@@ -304,6 +308,10 @@ export function applyForkSeedToManager(
     percent: snapshot.compactionThresholdPercent,
     updatedAt: options.compactionThresholdUpdatedAt,
   });
+
+  if (snapshot.sessionName !== undefined) {
+    manager.appendSessionInfo(snapshot.sessionName);
+  }
 
   const appendPlanned = (entry: PlannedForkEntry): string => {
     if (entry.kind === "message") {

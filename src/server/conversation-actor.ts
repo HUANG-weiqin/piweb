@@ -1184,6 +1184,7 @@ export class ConversationActor {
         serviceTier: this.serviceTierSelection,
         compactionThresholdPercent: this.compactionThresholdPercent,
         capturedAt: this.now().toISOString(),
+        sessionName: this.sessionManager.getSessionName(),
       });
     });
   }

@@ -42,7 +42,7 @@ import {
   applyForkSeedToManager,
   type ForkSourceSnapshot,
 } from "./conversation-fork.js";
-import { deleteConversationNotebook } from "./conversation-notebook.js";
+import { copyConversationNotebook, deleteConversationNotebook } from "./conversation-notebook.js";
 import {
   createReadonlySessionEntriesAdapter,
   inspectPiSessionFile,
@@ -1451,9 +1451,62 @@ export class ProjectStore {
     const sessionFile = join(this.sessionDir, `${fileTimestamp}_${conversationId}.jsonl`);
     this.assertLexicallyInsideSessionDirectory(sessionFile);
     validatePiSessionFile(initialContent, sessionFile, conversationId);
-    await createFileAtomically(sessionFile, initialContent);
+    // The notebook follows the fork before any durable publication, so a
+    // copy failure leaves no orphan conversation behind.
+    try {
+      await copyConversationNotebook(
+        this.stateDir,
+        snapshot.sourceConversationId,
+        conversationId,
+      );
+    } catch (error) {
+      try {
+        await deleteConversationNotebook(this.stateDir, conversationId);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Failed to fork conversation notebook and clean up its partial copy",
+        );
+      }
+      throw error;
+    }
+    // Compensate publication failures: the notebook sidecar may already
+    // exist while the JSONL was never durably published (or its identity
+    // can no longer be proven). The target lease is held throughout and the
+    // UUID is fresh, so no legitimate replacement can exist here.
+    try {
+      await createFileAtomically(sessionFile, initialContent);
+    } catch (error) {
+      try {
+        await deleteConversationNotebook(this.stateDir, conversationId);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Failed to publish a forked conversation and clean up its notebook",
+        );
+      }
+      throw error;
+    }
     this.verifiedCatalog = undefined;
-    const published = await this.fingerprintSafeSessionPath(sessionFile);
+    let published: SessionFileFingerprint;
+    try {
+      published = await this.fingerprintSafeSessionPath(sessionFile);
+    } catch (error) {
+      try {
+        await deleteConversationNotebook(this.stateDir, conversationId);
+        try {
+          await this.unlinkSessionFile(sessionFile);
+        } catch (unlinkError) {
+          if (!isNodeError(unlinkError, "ENOENT")) throw unlinkError;
+        }
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Failed to fingerprint a forked conversation and clean up its partial publication",
+        );
+      }
+      throw error;
+    }
     let conversation: SessionManager;
     try {
       conversation = SessionManager.open(sessionFile, this.sessionDir, this.cwd);
@@ -1464,6 +1517,7 @@ export class ProjectStore {
       }
     } catch (error) {
       try {
+        await deleteConversationNotebook(this.stateDir, conversationId);
         const quarantined = await this.quarantineSessionFile(
           { path: published.path, raw: initialContent, fingerprint: published },
           conversationId,
@@ -1502,6 +1556,12 @@ export class ProjectStore {
     assertSessionId(conversationId, "conversationId");
     await this.assertSessionDirectorySafe();
     const current = await this.fingerprintSafeSessionPath(publication.path);
+    if (!fingerprintsEqual(current, publication.fingerprint)) {
+      throw new SessionFileChangedError(conversationId);
+    }
+    // Proven ours above: removing the sidecar only after the fingerprint
+    // keeps every failure path fail-closed and symmetric.
+    await deleteConversationNotebook(this.stateDir, conversationId);
     if (!fingerprintsEqual(current, publication.fingerprint)) {
       throw new SessionFileChangedError(conversationId);
     }

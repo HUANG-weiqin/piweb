@@ -72,6 +72,7 @@ function snapshotOf(
     serviceTier: null,
     compactionThresholdPercent: 70,
     capturedAt: new Date().toISOString(),
+    sessionName: manager.getSessionName(),
     ...overrides,
   });
 }
@@ -106,6 +107,7 @@ describe("current-leaf fork", () => {
       serviceTierUpdatedAt: new Date().toISOString(),
     });
     expect(applied.compactionEntryId).toBeNull();
+    expect(child.getSessionName()).toBeUndefined();
 
     const childMessages = child.buildSessionContext().messages;
     const sourceMessages = source.buildSessionContext().messages;
@@ -379,5 +381,29 @@ describe("current-leaf fork", () => {
     } as SessionEntry);
     const snapshot = snapshotOf(source, { branch });
     expect(() => planForkEntries(snapshot)).toThrow();
+  });
+
+  it("inherits the source session name without touching model context", () => {
+    const source = SessionManager.inMemory("E:\\work", { id: randomUUID() });
+    source.appendSessionInfo("Source Task");
+    source.appendMessage(user("hello"));
+    source.appendMessage(assistant("world"));
+    const before = structuredClone(source.getBranch());
+
+    const snapshot = snapshotOf(source);
+    expect(snapshot.sessionName).toBe("Source Task");
+
+    const child = SessionManager.inMemory("E:\\work", { id: randomUUID() });
+    applyForkSeedToManager(child, snapshot, {
+      forkedAt: new Date().toISOString(),
+      compactionThresholdUpdatedAt: new Date().toISOString(),
+      serviceTierUpdatedAt: new Date().toISOString(),
+    });
+
+    expect(child.getSessionName()).toBe("Source Task");
+    expect(llmComparable(child.buildSessionContext().messages)).toEqual(
+      llmComparable(source.buildSessionContext().messages),
+    );
+    expect(JSON.stringify(source.getBranch())).toEqual(JSON.stringify(before));
   });
 });
