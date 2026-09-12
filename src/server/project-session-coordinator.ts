@@ -257,7 +257,7 @@ interface ProjectContext {
   readonly unsubscribeProject: () => void;
   modelCatalog?: CreatedProjectModelCatalog;
   modelCatalogOpening?: Promise<CreatedProjectModelCatalog>;
-  /** Exists only after positive project execution trust; survives actor rebuild/focus changes. */
+  /** Created on the first LSP query; survives actor rebuild/focus changes. */
   lsp?: WorkspaceLsp;
   closing: boolean;
 }
@@ -2874,21 +2874,9 @@ export class ProjectSessionCoordinator {
         ...createLspTools(context.project.cwd, {
           query: async (input, signal) => {
             if (context.closing) throw new LspError("unavailable", "LSP workspace is closing");
-            if (!context.lsp) {
-              // Dialogs belong to the caller; shared initialization does not. A cancelled
-              // dialog neither grants trust nor poisons another actor's own decision.
-              const trusted = await this.runtime.ensureProjectAnalysisTrust?.(
-                context.project.cwd,
-                this.extensionUIRouter(context, conversationId).ui,
-                signal,
-              );
-              if (signal.aborted) throw new LspError("cancelled", "LSP trust request cancelled");
-              if (context.closing) throw new LspError("unavailable", "LSP workspace is closing");
-              if (!trusted) throw new LspError("untrusted", "Project execution trust is required for local language servers");
-              context.lsp ??= new WorkspaceLsp(context.project.cwd, {
-                resolveServer: (file) => resolveLspServer(context.project.cwd, file),
-              });
-            }
+            context.lsp ??= new WorkspaceLsp(context.project.cwd, {
+              resolveServer: (file) => resolveLspServer(context.project.cwd, file),
+            });
             return context.lsp.query(input, signal);
           },
         }),

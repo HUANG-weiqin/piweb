@@ -1,6 +1,6 @@
 # 服务端运行时
 
-`updated: 2026-09-11`
+`updated: 2026-09-12`
 
 ## 这个模块是干什么的
 
@@ -11,7 +11,7 @@
 `PiRuntime` 是进程级对象：
 
 - 唯一持有共享 `CredentialStore` 与基线 `ModelRuntime` / `ModelRegistry`；认证和模型缓存由 Pi 0.85.1 runtime 统一读取。文件凭据按文件 identity/size/高精度时间戳复用已验证快照，同一 revision 的 provider 扇出读取不得重复取得跨进程排他锁；revision 变化时只允许一轮可取消的共享 reload 在锁内重新解析，写入仍锁定并让下一次读取重新验证磁盘。
-- 持有 Pi 用户级 `ProjectTrustStore`；受保护的项目资源在 trust resolution 前不能进入最终 resource loader。`ensureProjectAnalysisTrust()` 为本机语言服务复用同一 store/global default/UI，但强制解析，不走无 SDK 资源的直接通过捷径；项目不能自授执行信任。
+- 持有 Pi 用户级 `ProjectTrustStore`；受保护的项目资源在 trust resolution 前不能进入最终 resource loader。这条检查不适用于本机 LSP：用户级配置中已启用的语言服务直接可用，不读写项目 trust store，也不弹信任询问。
 - 为每个 session 或 project model catalog 创建独立 `ModelRuntime` / `ModelRegistry`，隔离 cwd 扩展的静态模型、base URL 和 headers；owner 必须在 AgentSession 创建后确认其 `modelRuntime` 身份。
 - 服务层级要区分请求适配器能力与账号/模型资格：`src/server/service-tier.ts` 只在 `model.api` 为 Pi 官方 `openai-codex-responses` 请求路由时投影 `priority`，不按 provider 或 model ID 维护清单；因此同一路由的未来模型自动获得选项。角色目录用同一请求路由能力验证非空默认层级；ConversationActor 没有会话覆盖记录时读取冻结角色默认，有记录时连显式 `null` 也必须优先，并在角色切换时重置到新默认。账号与具体模型是否接受 priority 仍由供应商在 dispatch 时裁决，错误不得被捕获后降级。Pi Web 固定使用未修改的官方 Pi 0.85.1 包；由于官方 `streamSimple()` 尚不传播 tier，这个唯一依赖适配边界复用官方 `buildBaseOptions` / `clampThinkingLevel` 后调用 session 自己的 `ModelRuntime.stream()` 并传入 tier，让认证、transport、响应解析和计费继续由官方低层适配器拥有。
 - 默认 context compaction 固定接入 Pi 0.85.1 的私有 `_runDefaultCompaction`，位置在 custom `session_before_compact` hook 之后；custom 结果直接采用并跳过 resolver，否则每次 attempt fresh-resolve 冻结的 compaction identity。`null` 使用冻结 primary，显式 B 必须可用且有限正 contextWindow `>=` 本次 primary A，否则明确失败、绝不 fallback。Pi 原生 preparation、previous summary、split-turn、files、usage、abort、persistence 和 continuation 不被重写；普通 turn 仍使用冻结 primary。显式 B 会清除 A 的 positional apiKey/headers/env，由 session-local `ModelRuntime` 重新解析认证且不继承 A service tier；request-local marker 在 provider 前剥离，Codex hint 保留但只含 B model，socket fence 仍生效。压缩失败不追加 compaction entry 或成功 rebuild，但 Pi seam 前已有的 transient overflow-recovery 内存变化可能保留。
@@ -49,7 +49,7 @@
 `ProjectSessionCoordinator` 是 conversation 生命周期拥有者：
 
 - 按 canonical cwd 维护 project context、无 AgentSession 的 project model catalog、持久 inbox、恢复任务和 observers；
-- project context 在正面执行信任之后惰性持有 `WorkspaceLsp`，跨 actor 共享同 root/config 的本机 stdio 连接。三个 LSP SDK 工具在 `createActorSessionOptions()` 注入；actor rebuild/focus 不释放池，coordinator close 先封 admission、actor teardown 后再 dispose。取消只针对调用，磁盘同步/派发串行而响应等待在门外。详细合同见 [kb-lsp.md](kb-lsp.md)；
+- project context 在首次 LSP 查询时直接惰性持有 `WorkspaceLsp`，跨 actor 共享同 root/config 的本机 stdio 连接；只运行用户级配置中已启用的语言服务，不依赖 project trust。三个 LSP SDK 工具在 `createActorSessionOptions()` 注入；actor rebuild/focus 不释放池，coordinator close 先封 admission、actor teardown 后再 dispose。取消只针对调用，磁盘同步/派发串行而响应等待在门外。详细合同见 [kb-lsp.md](kb-lsp.md)；
 - 按 `canonical cwd + conversationId` singleflight 打开唯一 `ConversationActor`；
 - actor 持有 `SessionManager + writer lease + settings/model registry + AgentSession + activeRun` 及完整冻结 role identity（含 primary/compaction model），与 WebSocket 是否连接无关；coordinator 在 create/reopen/switch/rollback/peer 每条 runtime 路径都显式传递该 identity，meta tools 也保留它；
 - inbox、permanent delivery receipt、完成 ledger、waiter、reload adoption/reservation 和删除都经过项目/actor 串行边界；project context acquisition 先安装 inbox tombstone fence 并把全项目 transcript audit 放入后台，不能让无关 JSONL body 阻塞一个已有 target 的 exact activation；

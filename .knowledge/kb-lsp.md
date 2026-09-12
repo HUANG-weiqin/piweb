@@ -1,6 +1,6 @@
 # 本机 LSP 查询
 
-`updated: 2026-09-10`
+`updated: 2026-09-12`
 
 ## 支持边界
 
@@ -21,8 +21,7 @@ LSP 接入是服务端的工作区资源，不是 Pi 内核扩展、浏览器 ID
 ```text
 ConversationActor 的 workbenchCustomTools
 → 最终 SDK 来源/角色 host gate
-→ PiRuntime 强制解析既有 project execution trust
-→ ProjectContext 惰性持有 WorkspaceLsp
+→ ProjectContext 直接惰性持有 WorkspaceLsp（无信任询问）
 → 先解析配置、root 与查询适用性，再创建/等待工作区 watcher
 → canonical root + resolved configuration fingerprint 选共享连接
 → 短串行门：磁盘复核、didOpen/change/save/close、watch 通知、请求派发
@@ -43,9 +42,9 @@ ConversationActor 的 workbenchCustomTools
 
 `read_only` 和 `full_access` 都可使用三个工具，但只读角色只能使用最终来源为 SDK 的宿主工具；同名 builtin/project/extension 工具不能冒充。
 
-语言服务可能执行 MSBuild、加载插件或写缓存；只读查询不等于进程、文件系统或网络 sandbox。启动前调用 `PiRuntime.ensureProjectAnalysisTrust()`，复用 Pi 的用户级 trust store、**global** default 与现有 UI 选择。它刻意不走“没有受保护 SDK 资源就直接 true”的捷径，也不读取项目文件里的自授信任。没有 resolver 或没有正面决定时 fail closed。
+用户级配置中已启用的语言服务允许所有角色直接使用，不查询或写入 Pi project trust store，不读取全局 `defaultProjectTrust`，也不弹信任询问。已有项目拒绝决定不阻止 LSP；项目设置、skills 和 extensions 仍走独立的原信任检查。未配置或禁用的服务器仍不可用，项目内文件不能提供 LSP 配置。
 
-“仅本次信任”覆盖当前工作区服务生命周期；取消对话框不持久化拒绝，也不能给其他 caller 或后续调用缓存一个授权。信任交互属于调用者；共享服务器启动属于工作区。没有新增 trust 类别、角色字段、浏览器命令或持久 schema。
+语言服务可能执行 MSBuild、加载插件或写缓存；只读查询不等于进程、文件系统或网络 sandbox。共享服务器启动仍属于工作区，caller 取消只影响本次查询。没有新增 trust 类别、角色字段、浏览器命令或持久 schema。
 
 ## 用户级配置
 
@@ -68,7 +67,7 @@ ConversationActor 的 workbenchCustomTools
 }
 ```
 
-- 条目存在即 opt-in；`enabled:false` 禁用。`workspace` 可省略，表示适用于所有已信任工作区；同 ID 的精确 workspace 条目替代全局条目，同作用域重复 ID 拒绝。
+- 条目存在即 opt-in；`enabled:false` 禁用。`workspace` 可省略，表示适用于所有工作区；同 ID 的精确 workspace 条目替代全局条目，同作用域重复 ID 拒绝。
 - 内置 profile 提供默认 command、语言映射、root markers、初始化选项和 settings。配置中的字段整体替换对应 profile 字段，不做隐式深合并。带局部 `adaptConnection` 的 profile 以其 `id` 绑定服务器语义：可省略 `extensionToLanguage` 并继承默认映射；一旦显式提供，键和值必须与该 profile 的完整映射完全相等，增删或改写均以 `misconfigured` 拒绝。`command`、argv、env、root 等部署字段仍可覆盖；用户 JSON 不能选择或提供适配器代码。
 - 支持字段：`id / enabled / workspace / command / env / extensionToLanguage / rootMarkers / root / initializationOptions / settings / watchFiles`；未知字段拒绝。
 - 自定义语言服务器同样是数据条目，须给出 command、扩展名到 language ID 的映射，以及 root 或 rootMarkers。无需改工具、传输或工作区类。
@@ -118,11 +117,11 @@ TLS 及可用的 TypeScript 库由用户独立准备；不会加入 Pi Web 的�
 ## 有界性与失败语义
 
 - 用户配置最多 64 KiB、32 个声明；根查找有目录层数和单目录 entry 上限。
-- 每工作区最多 8 个连接；每连接最多 64 个 wire pending；反向 configuration 单次最多 128 项（官方 Roslyn 初始化会请求 75 项），动态注册/反注册每批及注册存量最多 64 项、watcher 最多 256 项。默认初始化 60 秒、单 RPC 20 秒、工作区查询总等待 90 秒。UI 信任交互不属于共享初始化。
+- 每工作区最多 8 个连接；每连接最多 64 个 wire pending；反向 configuration 单次最多 128 项（官方 Roslyn 初始化会请求 75 项），动态注册/反注册每批及注册存量最多 64 项、watcher 最多 256 项。默认初始化 60 秒、单 RPC 20 秒、工作区查询总等待 90 秒。
 - 已打开文档镜像最多 64 个、单文件 2 MiB、合计 16 MiB；只保留同步所需文本/hash/version，不是第二套索引。更新也检查总量，不只检查首次打开。
 - watcher 队列有界，error/overflow 使现有 generation 失效。默认排除 `.git/.piweb/node_modules` 树；显式 target 和已打开文档仍逐次复核，不承诺覆盖被排除的依赖目录、远程文件或全项目原子快照。
 - 每次默认输出 30 条，最多 100 条；最终序列化 JSON 最多 24 KiB。名称/片段/列表截断均明确标记。磁盘片段单文件最多读取 2 MiB、单次总量 4 MiB。
-- `ok` 加空 items 仅代表成功的空结果。`unsupported / not_enabled / misconfigured / unavailable / timeout / cancelled / content_modified / resource_limit / invalid_path / ambiguous_server / untrusted` 分别表达失败原因；工具抛异常让 SDK 标 `isError`，不能把失败变成空列表。
+- `ok` 加空 items 仅代表成功的空结果。`unsupported / not_enabled / misconfigured / unavailable / timeout / cancelled / content_modified / resource_limit / invalid_path / ambiguous_server` 分别表达失败原因；工具抛异常让 SDK 标 `isError`，不能把失败变成空列表。
 
 ## 代码与验证入口
 
@@ -132,7 +131,7 @@ TLS 及可用的 TypeScript 库由用户独立准备；不会加入 Pi Web 的�
 - `workspace.ts`：共享池、短串行门、磁盘同步和 watcher。
 - `read-workspace-file.ts`：共享的 fd/path 绑定与有界源码读取。
 - `tools.ts`：三个 SDK 工具与有界投影。
-- 对应 `*.test.ts` 分别证明配置边界、真实 fake-stdio 协议、工作区竞态/磁盘同步和结果边界；coordinator/runtime/policy 测试证明宿主所有权与信任/来源 gate。
+- 对应 `*.test.ts` 分别证明配置边界、真实 fake-stdio 协议、工作区竞态/磁盘同步和结果边界；coordinator/policy 测试证明宿主所有权、无交互直接查询与来源 gate；runtime 测试保留项目 SDK 资源的信任检查。
 
 ## 真服务器 fixture
 

@@ -2084,65 +2084,6 @@ describe("PiRuntime session ownership", () => {
     await created.dispose();
   });
 
-  it("requires positive execution trust even without protected SDK resources", async () => {
-    const cwd = await temporaryDirectory("piweb-runtime-analysis-project-");
-    const agentDir = await temporaryDirectory("piweb-runtime-analysis-agent-");
-    const remembered = new Map<string, boolean>();
-    const runtime = await PiRuntime.create({
-      credentialStore: new InMemoryCredentialStore(),
-      modelsStore: new InMemoryModelsStore(),
-      createSettings: (projectCwd) => SettingsManager.create(projectCwd, agentDir, { projectTrusted: false }),
-      projectTrustStore: {
-        get: (projectCwd) => remembered.get(projectCwd) ?? null,
-        set: (projectCwd, trusted) => {
-          if (trusted !== null) remembered.set(projectCwd, trusted);
-        },
-      },
-    });
-    expect(await runtime.ensureProjectAnalysisTrust(cwd)).toBe(false);
-    const abort = new AbortController();
-    const ui = {
-      select: vi.fn(async (_title: string, options: string[]) => options[1]),
-      confirm: async () => false,
-      input: async () => undefined,
-      editor: async () => undefined,
-      notify: vi.fn(),
-    };
-    expect(await runtime.ensureProjectAnalysisTrust(cwd, ui, abort.signal)).toBe(true);
-    expect(ui.select.mock.calls[0]?.[0]).toContain("当前工作区服务生命周期");
-    expect(remembered.size).toBe(0);
-    ui.select.mockImplementation(async (_title, options) => {
-      abort.abort();
-      return options[0]; // Even an uncooperative UI cannot persist after abort.
-    });
-    expect(await runtime.ensureProjectAnalysisTrust(cwd, ui, abort.signal)).toBe(false);
-    expect(remembered.size).toBe(0);
-    remembered.set(cwd, true);
-    expect(await runtime.ensureProjectAnalysisTrust(cwd)).toBe(true);
-    remembered.set(cwd, false);
-    expect(await runtime.ensureProjectAnalysisTrust(cwd, ui)).toBe(false);
-  });
-
-  it("ignores a project's self-declared default execution trust", async () => {
-    const cwd = await temporaryDirectory("piweb-runtime-analysis-self-trust-");
-    const agentDir = await temporaryDirectory("piweb-runtime-analysis-user-trust-");
-    await mkdir(join(cwd, ".pi"));
-    await writeFile(join(cwd, ".pi", "settings.json"), JSON.stringify({ defaultProjectTrust: "always" }));
-    const settings = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
-    const runtime = await PiRuntime.create({
-      credentialStore: new InMemoryCredentialStore(),
-      modelsStore: new InMemoryModelsStore(),
-      createSettings: () => settings,
-      projectTrustStore: { get: () => null, set: () => undefined },
-    });
-    expect(await runtime.ensureProjectAnalysisTrust(cwd)).toBe(false);
-    settings.setDefaultProjectTrust("always");
-    expect(await runtime.ensureProjectAnalysisTrust(cwd)).toBe(true);
-    settings.setDefaultProjectTrust("never");
-    expect(await runtime.ensureProjectAnalysisTrust(cwd)).toBe(false);
-    await settings.flush();
-  });
-
   it("registers project providers before restoring a persisted model", async () => {
     const cwd = await temporaryDirectory("piweb-runtime-restore-provider-");
     const credentialStore = new InMemoryCredentialStore();

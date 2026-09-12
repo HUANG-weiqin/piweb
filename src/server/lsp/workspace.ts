@@ -294,7 +294,7 @@ function isWorkspaceSymbolWithoutRange(value: unknown): value is { location: { u
 
 /**
  * One workspace-owned LSP pool. It intentionally has no process-global state:
- * roots and servers are meaningful only within the trusted owner workspace.
+ * roots and servers are meaningful only within the owner workspace.
  */
 export class WorkspaceLsp implements LspQueryService {
   private readonly createConnection: LspConnectionFactory;

@@ -92,7 +92,6 @@ export type LspFailureCode =
   | "resource_limit"
   | "invalid_path"
   | "ambiguous_server"
-  | "untrusted"
   | "not_enabled";
 
 export class LspError extends Error {

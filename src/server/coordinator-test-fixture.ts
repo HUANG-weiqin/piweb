@@ -515,7 +515,6 @@ async function startPeerFromActiveSource(
 
 class FakeRuntime implements PiRuntimeLike {
   readonly credentialStore = new InMemoryCredentialStore();
-  ensureProjectAnalysisTrust?: PiRuntimeLike["ensureProjectAnalysisTrust"];
   titleImplementation: ModelRuntime["completeSimple"] = async () =>
     automaticTitleMessage("测试任务");
   readonly titleCalls: Array<Parameters<ModelRuntime["completeSimple"]>> = [];

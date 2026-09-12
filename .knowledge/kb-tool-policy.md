@@ -1,6 +1,6 @@
 # 工具权限
 
-`updated: 2026-09-09`
+`updated: 2026-09-12`
 
 ## 这个模块是干什么的
 
@@ -70,7 +70,7 @@ ConversationActor 按角色模式和会话管理能力注入宿主工具：
 read_only only: bash（受审查的 Git/rg/文件查询 shell 包装器）
 all roles: notebook_write / notebook_list / notebook_grep / notebook_read
 all roles: current_time（本机 RFC 3339 offset 时间与 IANA 时区）
-all roles: lsp_symbols / lsp_definition / lsp_references（已配置且信任的本机 LSP）
+all roles: lsp_symbols / lsp_definition / lsp_references（已配置启用的本机 LSP，无信任询问）
 all roles: todo_read / todo_write / todo_pause
 full_access only: request_edit_budget
 all roles: request_context_compaction
@@ -97,7 +97,7 @@ canManageSessions only: wait_for_session / abort_session / delete_session
 - `read_only` 允许读取所有用户级角色 prompt，它们会进入调用模型与当前 transcript，因此角色 prompt 不能保存秘密；`propose_role_revision` 的 Agent 参数只包含目标、expected revision、完整替换 prompt 和理由，名称、模型及权限字段不存在于 schema。取消有效到 `RoleStore` commit 开始；CAS queue race 返回 `stale`，commit 开始后按已授权提交处理；用户取消或中止 run 在此之前都不会落版；
 - `read_only` 不因 list/peek 看似只读而部分开放会话控制面；八个会话编排工具仍全部拒绝；
 - `full_access` 才允许 Agent 创建、通信、等待、中止和删除 peer conversation；删除会级联 metadata descendants，但 self delete、级联删除自身、self abort/wait、busy delete、stale runId 等生命周期约束仍由 coordinator 独立校验；
-- 三个 LSP 工具也要求最终 `source=sdk`；参数没有 cwd/command/method，且在启动本机进程前强制解析同一用户级 project trust。只读查询不是语言服务进程的 OS sandbox；工作区池的取消、磁盘同步和有界结果见 [kb-lsp.md](kb-lsp.md)；
+- 三个 LSP 工具也要求最终 `source=sdk`；参数没有 cwd/command/method，只运行用户级配置中已启用的语言服务，不查询 project trust 或弹出信任询问；项目 SDK 资源信任检查保持独立。只读查询不是语言服务进程的 OS sandbox；工作区池的取消、磁盘同步和有界结果见 [kb-lsp.md](kb-lsp.md)；
 - 用户从 UI 发起的角色管理、焦点切换和宿主持久化不经过 Agent tool gate，仍受协议身份与各自串行边界约束。
 
 `full_access` 是执行许可，不是无限生命周期权限或文件系统 sandbox。会话编排能力只限当前项目，不能通过 meta 工具改认证、trust 或既有会话的角色/模型；但通用 `bash/edit/write` 仍可访问进程有权访问的项目外路径，包括用户级角色文件，所以人工确认只保证 `propose_role_revision` 这条宿主工作流，不能替代 OS 隔离。
