@@ -329,7 +329,7 @@ const ConversationRow = memo(function ConversationRow({
         className="conversation-sidebar-conversation"
         aria-current={selected ? "page" : undefined}
         aria-label={selected ? `当前会话 ${title}` : `打开会话 ${title}`}
-        disabled={!navigationEnabled || deletionBlocked}
+        disabled={!navigationEnabled}
         onClick={() => onSelect(conversation.id)}
       >
         {ordinal && (
@@ -437,7 +437,6 @@ const ConversationRow = memo(function ConversationRow({
           aria-label={`重命名会话 ${title}`}
           disabled={
             !actionsEnabled
-            || deletionBlocked
             || actionBlocked
             || renameUnresolved
           }
@@ -960,7 +959,7 @@ function ConversationSidebarView({
           type="button"
           className="conversation-sidebar-create"
           aria-label="新建会话"
-          disabled={!actionsEnabled || deletionBlocked}
+          disabled={!actionsEnabled}
           onClick={onCreate}
         >
           <span aria-hidden="true">+</span>

@@ -1460,8 +1460,10 @@ describe("ConversationSidebar", () => {
     );
     expect(screen.getByRole("button", { name: /协作组 受控任务/ }))
       .toBeEnabled();
+    // Only the delete action belongs to an in-flight deletion; unrelated
+    // conversation actions stay available.
     expect(screen.getByRole("button", { name: "重命名会话 受控任务" }))
-      .toBeDisabled();
+      .toBeEnabled();
     expect(screen.getByRole("button", { name: "删除会话 受控任务" }))
       .toBeDisabled();
 

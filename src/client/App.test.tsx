@@ -8089,7 +8089,7 @@ describe("App", () => {
     })).not.toBeInTheDocument();
     expect(screen.getByRole("status", { name: "正在删除对话…" }))
       .toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "新建会话" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "新建会话" })).toBeEnabled();
 
     act(() => socketMock.emit?.({
       type: "project_snapshot",
@@ -8136,6 +8136,71 @@ describe("App", () => {
     })).toBeEnabled();
     expect(screen.getByText("删除对话失败：delete blocked"))
       .toBeInTheDocument();
+  });
+
+  it("keeps unrelated conversations operable while a deletion is in flight", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_ID,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+    act(() => socketMock.emit?.({
+      type: "project_snapshot",
+      sessionId,
+      projectId: PROJECT_ID,
+      conversationId: CONVERSATION_ID,
+      conversations: [{
+        id: CONVERSATION_ID,
+        name: "Current",
+        preview: "current",
+        createdAt: "2026-07-18T12:00:00.000Z",
+        updatedAt: "2026-07-18T12:01:00.000Z",
+        messageCount: 2,
+        compacting: false,
+      }, {
+        id: CONVERSATION_B,
+        name: "Older work",
+        preview: "older",
+        createdAt: "2026-07-17T12:00:00.000Z",
+        updatedAt: "2026-07-17T12:01:00.000Z",
+        messageCount: 4,
+        compacting: false,
+      }],
+      truncated: false,
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: "删除会话 Current" }));
+    fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
+    expect(latestCommand("delete_conversation")).toMatchObject({
+      sessionId,
+      conversationId: CONVERSATION_ID,
+    });
+    expect(screen.getByRole("status", { name: "正在删除对话…" }))
+      .toBeInTheDocument();
+
+    // The deleting conversation owns the workspace pane, but unrelated rows
+    // stay fully usable.
+    const unrelatedRow = screen.getByRole("button", {
+      name: "打开会话 Older work",
+    });
+    expect(unrelatedRow).toBeEnabled();
+    fireEvent.click(unrelatedRow);
+    expect(latestCommand("focus_conversation")).toMatchObject({
+      sessionId,
+      conversationId: CONVERSATION_B,
+    });
   });
 
   it("does not carry a pending deletion into another workspace", () => {

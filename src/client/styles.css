@@ -2446,10 +2446,6 @@ pre {
   stroke-opacity: 0.2;
 }
 
-.workbench-main > .conversation-deletion-placeholder {
-  margin-left: 0;
-}
-
 .workspace-setup-dialog {
   position: relative;
   width: min(520px, 100%);

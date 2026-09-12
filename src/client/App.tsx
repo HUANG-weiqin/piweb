@@ -675,6 +675,13 @@ export function App() {
     useState<PendingConversationDeletion>();
   const pendingConversationDeletionRef =
     useRef<PendingConversationDeletion | undefined>(undefined);
+  /**
+   * Conversations the in-flight deletion owns. Only these may block other
+   * client operations; unrelated conversations stay operable.
+   */
+  const pendingConversationDeletionScopeRef = useRef<ReadonlySet<string>>(
+    new Set<string>(),
+  );
   const [conversationRenamePresentations, setConversationRenamePresentations] =
     useState(new Map<string, ConversationRenamePresentation>());
   const conversationRenamePresentationsRef = useRef(
@@ -3664,7 +3671,7 @@ export function App() {
       || workspaceSyncingRef.current
       || (conversationSyncingRef.current && !replacingFocus)
       || (previousPending && !replacingPendingFocus)
-      || pendingConversationDeletionRef.current
+      || pendingConversationDeletionScopeRef.current.has(conversationId)
       || pendingConversationTruncationRef.current
       || pendingPromptRef.current
       || pendingConversationRoleSwitchRef.current
@@ -3796,7 +3803,6 @@ export function App() {
       || workspaceSyncingRef.current
       || conversationSyncingRef.current
       || pendingFocusRef.current
-      || pendingConversationDeletionRef.current
       || pendingConversationTruncationRef.current
       || pendingPromptRef.current
       || pendingConversationRoleSwitchRef.current
@@ -3955,7 +3961,7 @@ export function App() {
       || Boolean(pendingPromptRef.current)
       || pendingAdmissionsRef.current.length > 0
       || Boolean(pendingConversationTruncationRef.current)
-      || Boolean(pendingConversationDeletionRef.current)
+      || pendingConversationDeletionScopeRef.current.has(focus.conversationId)
     ) {
       return false;
     }
@@ -4088,7 +4094,7 @@ export function App() {
       || pendingAdmissionsRef.current.length > 0
       || Boolean(pendingConversationRoleSwitchRef.current)
       || Boolean(pendingConversationTruncationRef.current)
-      || Boolean(pendingConversationDeletionRef.current)
+      || pendingConversationDeletionScopeRef.current.has(focus.conversationId)
     ) {
       return false;
     }
@@ -4625,6 +4631,52 @@ export function App() {
     && pendingConversationDeletion.projectId === runtimeState.projectId
     ? pendingConversationDeletion
     : undefined;
+  const pendingConversationDeletionScope = useMemo(() => {
+    const scope = new Set<string>();
+    if (!visiblePendingConversationDeletion) return scope;
+    scope.add(visiblePendingConversationDeletion.conversationId);
+    // Cascade membership is display-grade evidence: only a complete project
+    // snapshot may widen the scope beyond the explicit delete target, and the
+    // server still decides the authoritative cascade.
+    if (conversationIndexTruncated) return scope;
+    const target = visiblePendingConversationDeletion.conversationId;
+    let expanded = true;
+    while (expanded) {
+      expanded = false;
+      for (const conversation of conversations) {
+        if (scope.has(conversation.id)) continue;
+        const creator = conversation.createdBy;
+        const belongsToTarget = conversation.rootConversationId === target
+          || (
+            creator?.kind === "conversation"
+            && scope.has(creator.conversationId)
+          );
+        if (belongsToTarget) {
+          scope.add(conversation.id);
+          expanded = true;
+        }
+      }
+    }
+    return scope;
+  }, [
+    conversationIndexTruncated,
+    conversations,
+    visiblePendingConversationDeletion,
+  ]);
+  useEffect(() => {
+    pendingConversationDeletionScopeRef.current =
+      pendingConversationDeletionScope;
+  }, [pendingConversationDeletionScope]);
+  const focusedConversationIsDeleting = currentFocus !== undefined
+    && pendingConversationDeletionScope.has(currentFocus.conversationId);
+  // The deletion owns the workspace pane only when it removed the focused
+  // conversation. Unrelated conversations keep their normal pane.
+  const showConversationDeletionProgress =
+    visiblePendingConversationDeletion !== undefined
+    && (
+      visiblePendingConversationDeletion.affectedFocus !== undefined
+      || focusedConversationIsDeleting
+    );
   const sidebarConversations = useMemo(
     () => projectConversationsDuringDeletion(
       conversations,
@@ -4637,8 +4689,6 @@ export function App() {
       visiblePendingConversationDeletion?.affectedFocus?.conversationId,
     ],
   );
-  const showConversationDeletionProgress =
-    visiblePendingConversationDeletion?.affectedFocus !== undefined;
   const switchingFocus = pendingFocus?.operation === "focus_conversation"
     || pendingFocus?.operation === "create_conversation";
   const visibleConversationReady =
@@ -4950,9 +5000,7 @@ export function App() {
             正在删除对话…
           </div>}
         {showConversationDeletionProgress
-          ? <main
-              className="workspace-placeholder conversation-deletion-placeholder"
-            >
+          ? <main className="app-shell workspace-placeholder">
               <div
                 className="workspace-placeholder-content"
                 role="status"
@@ -4964,7 +5012,7 @@ export function App() {
                 />
                 <p className="eyebrow">DELETING CONVERSATION</p>
                 <h1>正在删除对话</h1>
-                <p>正在完成安全删除；若操作失败，会恢复仍可用的会话。</p>
+                <p>该会话正在删除；其他会话仍可继续使用。</p>
               </div>
             </main>
           : !visiblePresentation
