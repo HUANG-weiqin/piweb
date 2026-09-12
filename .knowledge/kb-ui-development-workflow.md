@@ -24,6 +24,7 @@
 
 6. 在干净的 integration worktree 中用 `--no-ff` 合并到 `main`；`main` 有未提交改动时不要合并。
 7. 合并后再次运行上述门槛，并做 `/health` 与浏览器主流程 smoke。仅当运行中的服务需要加载新代码时执行 `npm run reload`。
+8. Windows 清理 worktree 前先检查 reparse point。若 `<worktree>/node_modules` 是指向共享根的 Junction，必须先用 `cmd /d /c rmdir "<worktree>\node_modules"` 只解除链接，再运行 `git worktree remove`；不能让 Git、PowerShell 递归删除或通用目录清理遍历该 Junction。随后在共享根运行 `npm ls`、关键包动态 import 及 typecheck/build，不能以单个 `package.json` 存在作为依赖完整性证明。
 
 ## 真实交互隔离验收
 
