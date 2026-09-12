@@ -170,9 +170,15 @@ interface VerifiedSessionFileRead {
   fingerprint: SessionFileFingerprint;
 }
 
+interface InspectedSessionFileRead<
+  Inspection extends PiSessionFileInspection = PiSessionFileInspection,
+> extends VerifiedSessionFileRead {
+  inspection: Inspection;
+}
+
 interface VerifiedSessionReadBatch {
   catalog: VerifiedSessionCatalog;
-  targets: ReadonlyMap<string, VerifiedSessionFileRead>;
+  targets: ReadonlyMap<string, InspectedSessionFileRead>;
 }
 
 /**
@@ -191,8 +197,10 @@ interface NamespaceHeaderCensus {
 }
 
 
-interface VerifiedTargetSessionFileRead {
-  target: VerifiedSessionFileRead;
+interface VerifiedTargetSessionFileRead<
+  Inspection extends PiSessionFileInspection = PiSessionFileInspection,
+> {
+  target: InspectedSessionFileRead<Inspection>;
   namespace: NamespaceHeaderCensus;
 }
 
@@ -1507,7 +1515,7 @@ export class ProjectStore {
   ): Promise<PiSessionFileInspection> {
     assertSessionId(conversationId, "conversationId");
     const { target } = await this.readVerifiedTargetSessionFile(conversationId);
-    return inspectPiSessionFile(target.raw, target.path, conversationId);
+    return target.inspection;
   }
 
   /**
@@ -1518,12 +1526,11 @@ export class ProjectStore {
     conversationId: string,
   ): Promise<PiSessionFilePresentationInspection> {
     assertSessionId(conversationId, "conversationId");
-    const { target } = await this.readVerifiedTargetSessionFile(conversationId);
-    return inspectPiSessionFilePresentation(
-      target.raw,
-      target.path,
+    const { target } = await this.readVerifiedTargetSessionFile(
       conversationId,
+      true,
     );
+    return target.inspection;
   }
 
   async inspectConversations(
@@ -1539,14 +1546,7 @@ export class ProjectStore {
     const inspections = new Map<string, PiSessionFileInspection>();
     for (const conversationId of uniqueConversationIds) {
       const target = batch.targets.get(conversationId)!;
-      inspections.set(
-        conversationId,
-        inspectPiSessionFile(
-          target.raw,
-          target.path,
-          conversationId,
-        ),
-      );
+      inspections.set(conversationId, target.inspection);
     }
     return inspections;
   }
@@ -2277,9 +2277,21 @@ export class ProjectStore {
     }
   }
 
+  private readVerifiedTargetSessionFile(
+    conversationId: string,
+    includeEntries: true,
+  ): Promise<VerifiedTargetSessionFileRead<PiSessionFilePresentationInspection>>;
+  private readVerifiedTargetSessionFile(
+    conversationId: string,
+    includeEntries?: false,
+  ): Promise<VerifiedTargetSessionFileRead>;
   private async readVerifiedTargetSessionFile(
     conversationId: string,
-  ): Promise<VerifiedTargetSessionFileRead> {
+    includeEntries = false,
+  ): Promise<
+    | VerifiedTargetSessionFileRead
+    | VerifiedTargetSessionFileRead<PiSessionFilePresentationInspection>
+  > {
     assertSessionId(conversationId, "conversationId");
     for (
       let attempt = 0;
@@ -2300,10 +2312,16 @@ export class ProjectStore {
           );
         }
 
-        const target = await this.readStableExpectedSessionFile(
-          candidates[0]!.file,
-          conversationId,
-        );
+        const target = includeEntries === true
+          ? await this.readStableExpectedSessionFile(
+            candidates[0]!.file,
+            conversationId,
+            true,
+          )
+          : await this.readStableExpectedSessionFile(
+            candidates[0]!.file,
+            conversationId,
+          );
         const namespaceAfterTarget = await this.readStableNamespaceHeaderCensus();
         if (!namespaceTargetEvidenceEqual(
           namespaceBeforeTarget,
@@ -2344,7 +2362,7 @@ export class ProjectStore {
       const informationById = new Map(
         catalog.information.map((item) => [item.id, item]),
       );
-      const targets = new Map<string, VerifiedSessionFileRead>();
+      const targets = new Map<string, InspectedSessionFileRead>();
 
       try {
         for (const conversationId of conversationIds) {
@@ -2393,10 +2411,24 @@ export class ProjectStore {
     throw new SessionDirectoryChangedError();
   }
 
+  private readStableExpectedSessionFile(
+    expectedFile: Readonly<SessionFileFingerprint>,
+    conversationId: string,
+    includeEntries: true,
+  ): Promise<InspectedSessionFileRead<PiSessionFilePresentationInspection>>;
+  private readStableExpectedSessionFile(
+    expectedFile: Readonly<SessionFileFingerprint>,
+    conversationId: string,
+    includeEntries?: false,
+  ): Promise<InspectedSessionFileRead>;
   private async readStableExpectedSessionFile(
     expectedFile: Readonly<SessionFileFingerprint>,
     conversationId: string,
-  ): Promise<VerifiedSessionFileRead> {
+    includeEntries = false,
+  ): Promise<
+    | InspectedSessionFileRead
+    | InspectedSessionFileRead<PiSessionFilePresentationInspection>
+  > {
     try {
       const beforeRead = await this.fingerprintSafeSessionPath(
         expectedFile.path,
@@ -2409,8 +2441,19 @@ export class ProjectStore {
       if (!fingerprintsEqual(beforeRead, afterRead)) {
         throw new SessionFileChangedError(conversationId);
       }
-      validatePiSessionFile(raw, afterRead.path, conversationId);
-      return { path: afterRead.path, raw, fingerprint: afterRead };
+      const inspection = includeEntries === true
+        ? inspectPiSessionFilePresentation(
+          raw,
+          afterRead.path,
+          conversationId,
+        )
+        : inspectPiSessionFile(raw, afterRead.path, conversationId);
+      return {
+        path: afterRead.path,
+        raw,
+        fingerprint: afterRead,
+        inspection,
+      };
     } catch (error) {
       this.verifiedCatalog = undefined;
       throw error;

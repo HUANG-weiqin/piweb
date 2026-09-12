@@ -117,6 +117,10 @@ const INBOX_LIFECYCLE_GUIDANCE = [
   "收到结果后，请自行决定继续工作、等待运行、终止活动运行或删除空闲会话。",
 ].join("\n");
 
+type InboxList = (
+  options?: { toConversationId?: string },
+) => Promise<InboxEnvelope[]>;
+
 export type ProjectSessionCoordinatorEvent =
   | ConversationActorEvent
   | { type: "project_changed"; catalogInvalidated?: true }
@@ -1599,6 +1603,21 @@ export class ProjectSessionCoordinator {
     images?: readonly PromptImage[],
   ): Promise<RunSettlement | { outcome: "admitted" }> {
     const context = this.requireContext(handle);
+    if (context.deleting.has(conversationId)) {
+      throw new Error(`Conversation is being deleted: ${conversationId}`);
+    }
+    const liveActor = context.actors.get(conversationId);
+    const liveActivity = liveActor?.getActivity();
+    if (
+      liveActor !== undefined
+      && this.isContextConversationActive(context, liveActor)
+      && (liveActivity?.kind === "running" || liveActivity?.kind === "waiting")
+    ) {
+      if (promptId === undefined) {
+        throw new Error("promptId is required while the agent is busy");
+      }
+      return liveActor.admitBrowserPrompt({ promptId, runId, text, images });
+    }
     const admitted = await this.runLifecycle(context, async () => {
       if (context.deleting.has(conversationId)) {
         throw new Error(`Conversation is being deleted: ${conversationId}`);
@@ -1613,29 +1632,29 @@ export class ProjectSessionCoordinator {
         }
         return actor.admitBrowserPrompt({ promptId, runId, text, images });
       }
-      const pump = await this.pumpTarget(context, conversationId);
-      if (pump === "blocked_by_deletion" || context.deleting.has(conversationId)) {
-        throw new Error(`Conversation is being deleted: ${conversationId}`);
-      }
-      const pendingInbox = await context.inbox.list({
-        toConversationId: conversationId,
+      return context.inbox.withListSnapshot(async (list) => {
+        const pump = await this.pumpTarget(context, conversationId, list);
+        if (pump === "blocked_by_deletion" || context.deleting.has(conversationId)) {
+          throw new Error(`Conversation is being deleted: ${conversationId}`);
+        }
+        const pendingInbox = await list({ toConversationId: conversationId });
+        if (
+          pump === "started"
+          || pendingInbox.length > 0
+        ) {
+          throw new Error(
+            "Durable conversation work was admitted before this browser prompt",
+          );
+        }
+        return {
+          completion: actor.startPrompt({
+            runId,
+            text,
+            images,
+            origin: "browser",
+          }),
+        };
       });
-      if (
-        pump === "started"
-        || pendingInbox.length > 0
-      ) {
-        throw new Error(
-          "Durable conversation work was admitted before this browser prompt",
-        );
-      }
-      return {
-        completion: actor.startPrompt({
-          runId,
-          text,
-          images,
-          origin: "browser",
-        }),
-      };
     });
     if ("completion" in admitted) return admitted.completion;
     return admitted;
@@ -5267,11 +5286,20 @@ export class ProjectSessionCoordinator {
   private async reconcileInbox(
     context: ProjectContext,
     targetConversationId?: string,
+    list?: InboxList,
   ): Promise<boolean> {
     let blocked = false;
-    const envelopes = await context.inbox.list(
-      targetConversationId === undefined ? undefined : { toConversationId: targetConversationId },
-    );
+    const envelopes = await (list === undefined
+      ? context.inbox.list(
+        targetConversationId === undefined
+          ? undefined
+          : { toConversationId: targetConversationId },
+      )
+      : list(
+        targetConversationId === undefined
+          ? undefined
+          : { toConversationId: targetConversationId },
+      ));
     for (const envelope of envelopes) {
       if (envelope.fromRunId === undefined) {
         blocked = true;
@@ -6171,12 +6199,13 @@ export class ProjectSessionCoordinator {
   private async pumpTarget(
     context: ProjectContext,
     conversationId: string,
+    list?: InboxList,
   ): Promise<"blocked_by_deletion" | "no_work" | "settled" | "started"> {
     if (context.closing) return "no_work";
     if (context.deleting.has(conversationId)) return "blocked_by_deletion";
     const actor = context.actors.get(conversationId);
     if (!actor) return "no_work";
-    if (!await this.reconcileInbox(context, conversationId)) return "no_work";
+    if (!await this.reconcileInbox(context, conversationId, list)) return "no_work";
     const receiptRunIds = await this.reconcileReceiptLedger(
       context,
       conversationId,
@@ -6202,9 +6231,9 @@ export class ProjectSessionCoordinator {
       ));
       return "started";
     }
-    const pending = await context.inbox.list({
-      toConversationId: conversationId,
-    });
+    const pending = await (list === undefined
+      ? context.inbox.list({ toConversationId: conversationId })
+      : list({ toConversationId: conversationId }));
     if (context.closing) return "no_work";
     if (context.deleting.has(conversationId)) return "blocked_by_deletion";
     if (pending.length === 0) return "no_work";

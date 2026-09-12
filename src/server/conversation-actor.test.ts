@@ -1,3 +1,6 @@
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type {
   AgentMessage,
   AgentSession,
@@ -51,9 +54,10 @@ import type {
   PiRuntimeLike,
   ToolCallGate,
 } from "./pi-runtime.js";
-import type {
-  ConversationDeletionLease,
-  ConversationLease,
+import {
+  ProjectStore,
+  type ConversationDeletionLease,
+  type ConversationLease,
 } from "./project-store.js";
 
 const SESSION_ID = "f74fedb8-ea07-49a6-bd47-3036f7b06a27";
@@ -475,7 +479,6 @@ interface ActorFixture {
   project: {
     cwd: string;
     toolMode: ToolMode;
-    hasPersistedConversationNameIntent(): Promise<boolean>;
     projectConversationSession(): void;
     refreshConversations(): Promise<ConversationSummary[]>;
   };
@@ -495,8 +498,6 @@ async function openActor(
   const project = overrides.project ?? {
     cwd: process.cwd(),
     toolMode: "full_access" as ToolMode,
-    hasPersistedConversationNameIntent: async () =>
-      hasPersistedConversationNameIntent(manager),
     projectConversationSession: () => undefined,
     refreshConversations: async () => conversationSummaries(manager),
   };
@@ -547,12 +548,6 @@ function automaticTitleMessage(text: string): AssistantMessage {
     stopReason: "stop",
     timestamp: Date.now(),
   };
-}
-
-function hasPersistedConversationNameIntent(
-  manager: SessionManagerType,
-): boolean {
-  return manager.getEntries().some((entry) => entry.type === "session_info");
 }
 
 function conversationSummaries(
@@ -926,7 +921,7 @@ describe("ConversationActor", () => {
   });
 
   describe("initial automatic title", () => {
-    it("acknowledges an eligible first prompt before naming, then names it before the Agent starts", async () => {
+    it("starts and settles the first Agent run without waiting for its automatic title", async () => {
       const runtime = new FakeRuntime();
       const manager = SessionManager.inMemory(process.cwd(), {
         id: CONVERSATION_ID,
@@ -940,10 +935,6 @@ describe("ConversationActor", () => {
       const project = {
         cwd: process.cwd(),
         toolMode: "full_access" as ToolMode,
-        hasPersistedConversationNameIntent: async () => {
-          order.push("verify");
-          return hasPersistedConversationNameIntent(manager);
-        },
         projectConversationSession: () => {
           order.push("project");
         },
@@ -980,47 +971,49 @@ describe("ConversationActor", () => {
         kind: "queued",
         runId: RUN_A,
       });
-      await vi.waitFor(() => expect(runtime.titleCalls).toHaveLength(1));
+      try {
+        await vi.waitFor(() => expect(runtime.session.promptCalls).toHaveLength(1));
+        await expect(running).resolves.toMatchObject({ outcome: "completed" });
+        expect(manager.getSessionName()).toBeUndefined();
+        expect(runtime.titleCalls[0]?.[1]).toMatchObject({
+          messages: [{
+            role: "user",
+            content: "让首轮会话自动生成简短标题",
+          }],
+        });
+        expect(runtime.titleCalls[0]?.[1].tools).toBeUndefined();
 
-      expect(runtime.session.promptCalls).toEqual([]);
-      expect(manager.getSessionName()).toBeUndefined();
-      expect(runtime.titleCalls[0]?.[1]).toMatchObject({
-        messages: [{
-          role: "user",
-          content: "让首轮会话自动生成简短标题",
-        }],
-      });
-      expect(runtime.titleCalls[0]?.[1].tools).toBeUndefined();
-      expect(runtime.titleCalls[0]?.[2]).toMatchObject({
-        sessionId: "fake-session-id",
-        transport: "sse",
-        cacheRetention: "none",
-        maxRetries: 0,
-        maxTokens: 256,
-        reasoning: "minimal",
-        timeoutMs: expect.any(Number),
-        signal: expect.any(AbortSignal),
-      });
+        expect(runtime.titleCalls[0]?.[2]).toMatchObject({
+          sessionId: "fake-session-id",
+          transport: "sse",
+          cacheRetention: "none",
+          maxRetries: 0,
+          maxTokens: 256,
+          reasoning: "minimal",
+          timeoutMs: expect.any(Number),
+          signal: expect.any(AbortSignal),
+        });
 
-      titleResult.resolve(automaticTitleMessage(
-        "  会话首轮自动命名  \n这行解释不应进入标题",
-      ));
-      await expect(running).resolves.toMatchObject({ outcome: "completed" });
-
-      expect(manager.getSessionName()).toBe("会话首轮自动命名");
-      expect(order.slice(0, 5)).toEqual([
-        "title",
-        "name",
-        "verify",
-        "project",
-        "prompt",
-      ]);
-      expect(fixture.events.filter((event) => (
-        event.type === "session_event"
-        && event.runId === RUN_A
-        && event.event.type === "run_queued"
-      ))).toHaveLength(1);
-      await fixture.actor.dispose();
+        titleResult.resolve(automaticTitleMessage(
+          "  会话首轮自动命名  \n这行解释不应进入标题",
+        ));
+        await vi.waitFor(() => expect(manager.getSessionName()).toBe("会话首轮自动命名"));
+        expect(order.filter((step) => step !== "refresh")).toEqual([
+          "title",
+          "prompt",
+          "name",
+          "project",
+        ]);
+        expect(fixture.events.filter((event) => (
+          event.type === "session_event"
+          && event.runId === RUN_A
+          && event.event.type === "run_queued"
+        ))).toHaveLength(1);
+      } finally {
+        titleResult.resolve(automaticTitleMessage("cleanup"));
+        await running.catch(() => undefined);
+        await fixture.actor.dispose();
+      }
     });
 
     it("bounds and sanitizes a generated title", async () => {
@@ -1036,7 +1029,7 @@ describe("ConversationActor", () => {
         origin: "browser",
       });
 
-      expect(fixture.manager.getSessionName()).toBe("界".repeat(24));
+      await vi.waitFor(() => expect(fixture.manager.getSessionName()).toBe("界".repeat(24)));
       await fixture.actor.dispose();
     });
 
@@ -1053,7 +1046,7 @@ describe("ConversationActor", () => {
         origin: "browser",
       })).resolves.toMatchObject({ outcome: "completed" });
 
-      expect(fixture.manager.getSessionName()).toBe("新任务");
+      await vi.waitFor(() => expect(fixture.manager.getSessionName()).toBe("新任务"));
       expect(runtime.session.promptCalls).toEqual([{
         text: "continue despite title failure",
         streamingBehavior: undefined,
@@ -1061,14 +1054,46 @@ describe("ConversationActor", () => {
       await fixture.actor.dispose();
     });
 
-    it("lets a durably proved explicit name win while generation is pending", async () => {
+    it.each(["stream", "result"] as const)("bounds a hung title %s without delaying the completed run", async (boundary) => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const runtime = new FakeRuntime();
+      const title = deferred<AssistantMessage>();
+      const releaseStream = deferred();
+      runtime.titleImplementation = async () => title.promise;
+      if (boundary === "stream") {
+        const streamFunction = runtime.session.agent.streamFunction;
+        runtime.session.agent.streamFunction = async (...args) => {
+          const stream = streamFunction(...args);
+          await releaseStream.promise;
+          return stream;
+        };
+      }
+      const fixture = await openActor({ runtime });
+      try {
+        await expect(fixture.actor.startPrompt({
+          runId: RUN_A, text: "ignore a hung title", origin: "browser",
+        })).resolves.toMatchObject({ outcome: "completed" });
+        expect(fixture.manager.getSessionName()).toBeUndefined();
+        await vi.advanceTimersByTimeAsync(15_000);
+        expect(runtime.titleCalls[0]?.[2]?.signal?.aborted).toBe(true);
+        expect(fixture.manager.getSessionName()).toBe("新任务");
+        releaseStream.resolve();
+        title.resolve(automaticTitleMessage("Too late"));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(fixture.manager.getSessionName()).toBe("新任务");
+      } finally {
+        await fixture.actor.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it.each(["人工标题", ""])("lets an explicit name %j win over a late automatic result", async (name) => {
       const runtime = new FakeRuntime();
       const manager = SessionManager.inMemory(process.cwd(), {
         id: CONVERSATION_ID,
       });
       const titleStarted = deferred();
       const releaseTitle = deferred<AssistantMessage>();
-      let proofCalls = 0;
       runtime.titleImplementation = async () => {
         titleStarted.resolve();
         return releaseTitle.promise;
@@ -1079,10 +1104,6 @@ describe("ConversationActor", () => {
         project: {
           cwd: process.cwd(),
           toolMode: "full_access",
-          hasPersistedConversationNameIntent: async () => {
-            proofCalls += 1;
-            return hasPersistedConversationNameIntent(manager);
-          },
           projectConversationSession: () => undefined,
           refreshConversations: async () => conversationSummaries(manager),
         },
@@ -1094,43 +1115,61 @@ describe("ConversationActor", () => {
         origin: "browser",
       });
       await titleStarted.promise;
-      manager.appendSessionInfo("人工标题");
-      releaseTitle.resolve(automaticTitleMessage("自动标题"));
       await running;
+      manager.appendSessionInfo(name);
+      releaseTitle.resolve(automaticTitleMessage("自动标题"));
+      await new Promise<void>((resolve) => setImmediate(resolve));
 
-      expect(manager.getSessionName()).toBe("人工标题");
-      expect(proofCalls).toBe(1);
+      expect(manager.getSessionName()).toBe(name || undefined);
       expect(runtime.session.promptCalls).toHaveLength(1);
       await fixture.actor.dispose();
     });
 
-    it("cancels pending title generation without starting the Agent", async () => {
+    it("cancels a pending title when its started run is aborted", async () => {
       const runtime = new FakeRuntime();
       const titleStarted = deferred();
-      runtime.titleImplementation = async (_model, _context, options) => {
+      const title = deferred<AssistantMessage>();
+      const promptStarted = deferred();
+      const finishPrompt = deferred();
+      const projectTitle = vi.fn(async () => undefined);
+      runtime.titleImplementation = async () => {
         titleStarted.resolve();
-        return new Promise<AssistantMessage>((_resolve, reject) => {
-          options?.signal?.addEventListener("abort", () => {
-            const error = new Error("aborted");
-            error.name = "AbortError";
-            reject(error);
-          }, { once: true });
-        });
+        return title.promise; // A provider may ignore the cancelled signal.
       };
-      const fixture = await openActor({ runtime });
-
+      runtime.session.promptImplementation = async () => {
+        promptStarted.resolve();
+        await finishPrompt.promise;
+      };
+      const fixture = await openActor({
+        runtime,
+        project: { projectConversationSession: projectTitle },
+      });
       const running = fixture.actor.startPrompt({
         runId: RUN_A,
         text: "cancel while naming",
         origin: "browser",
       });
-      await titleStarted.promise;
-      await fixture.actor.abort(RUN_A);
-      await expect(running).resolves.toMatchObject({ outcome: "aborted" });
+      try {
+        await Promise.all([titleStarted.promise, promptStarted.promise]);
+        expect(fixture.actor.getActivity()).toEqual({ kind: "running", runId: RUN_A });
+        await fixture.actor.abort(RUN_A);
+        finishPrompt.resolve();
+        await expect(running).resolves.toMatchObject({ outcome: "aborted" });
+        expect(runtime.session.promptCalls).toHaveLength(1);
+        expect(runtime.session.abortCalls).toBe(1);
+        expect(runtime.titleCalls[0]?.[2]?.signal?.aborted).toBe(true);
 
-      expect(runtime.session.promptCalls).toEqual([]);
-      expect(fixture.manager.getSessionName()).toBeUndefined();
-      await fixture.actor.dispose();
+        title.resolve(automaticTitleMessage("Too late after abort"));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(fixture.manager.getSessionName()).toBeUndefined();
+        expect(fixture.manager.getEntries().some((entry) => entry.type === "session_info")).toBe(false);
+        expect(projectTitle).not.toHaveBeenCalled();
+      } finally {
+        finishPrompt.resolve();
+        title.resolve(automaticTitleMessage("cleanup"));
+        await running.catch(() => undefined);
+        await fixture.actor.dispose();
+      }
     });
 
     it("does not rename an unnamed conversation that already has transcript content", async () => {
@@ -1229,35 +1268,135 @@ describe("ConversationActor", () => {
       await fixture.actor.dispose();
     });
 
-    it("fails an acknowledged run before Agent start when title persistence cannot be proved", async () => {
+    it("defers a ready title until the active SDK writer is idle", async () => {
       const runtime = new FakeRuntime();
+      const title = deferred<AssistantMessage>();
+      const started = deferred();
+      const finish = deferred();
+      runtime.titleImplementation = async () => title.promise;
       const fixture = await openActor({ runtime });
-      runtime.session.setSessionNameImplementation = () => {
+      runtime.session.promptImplementation = async () => {
+        started.resolve();
+        await finish.promise;
+      };
+      const running = fixture.actor.startPrompt({ runId: RUN_A, text: "work first", origin: "browser" });
+      await started.promise;
+      title.resolve(automaticTitleMessage("Ready title"));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(fixture.manager.getSessionName()).toBeUndefined();
+      finish.resolve();
+      await running;
+      await vi.waitFor(() => expect(fixture.manager.getSessionName()).toBe("Ready title"));
+      await fixture.actor.dispose();
+    });
+
+    it.each([false, true])("discards a late provider result on abort (later run: %s)", async (laterRun) => {
+      const runtime = new FakeRuntime();
+      const title = deferred<AssistantMessage>();
+      const started = deferred();
+      const finish = deferred();
+      runtime.titleImplementation = async () => title.promise; // Deliberately ignores abort.
+      const fixture = await openActor({ runtime });
+      if (laterRun) await fixture.actor.startPrompt({ runId: RUN_A, text: "first run finishes", origin: "browser" });
+      const runId = laterRun ? RUN_B : RUN_A;
+      runtime.session.promptImplementation = async () => {
+        started.resolve();
+        await finish.promise;
+      };
+      const running = fixture.actor.startPrompt({ runId, text: "cancel work", origin: "browser" });
+      await started.promise;
+      await fixture.actor.abort(runId);
+      finish.resolve();
+      await expect(running).resolves.toMatchObject({ outcome: "aborted" });
+      title.resolve(automaticTitleMessage("Must not append"));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(runtime.titleCalls[0]?.[2]?.signal?.aborted).toBe(true);
+      expect(fixture.manager.getSessionName()).toBeUndefined();
+      await fixture.actor.dispose();
+    });
+
+    it.each(["dispose", "switchRole", "quarantine"] as const)(
+      "discards a late idle title after %s invalidates its owner",
+      async (invalidation) => {
+        const runtime = new FakeRuntime();
+        const title = deferred<AssistantMessage>();
+        runtime.titleImplementation = async () => title.promise;
+        const fixture = await openActor({ runtime });
+        await fixture.actor.startPrompt({ runId: RUN_A, text: "finish early", origin: "browser" });
+        if (invalidation === "dispose") await fixture.actor.dispose();
+        else if (invalidation === "switchRole") await fixture.actor.switchRole({ ...profile().role, revision: 2 }, {});
+        else fixture.actor.quarantineSessionPersistence(new Error("storage failed"));
+        const entries = fixture.manager.getEntries();
+        title.resolve(automaticTitleMessage("Must not append"));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(runtime.titleCalls[0]?.[2]?.signal?.aborted).toBe(true);
+        expect(fixture.manager.getEntries()).toEqual(entries);
+        expect(fixture.manager.getSessionName()).toBeUndefined();
+        await fixture.actor.dispose();
+      },
+    );
+
+    it("quarantines a partial title append without changing the completed run", async () => {
+      const runtime = new FakeRuntime();
+      const title = deferred<AssistantMessage>();
+      runtime.titleImplementation = async () => title.promise;
+      const fixture = await openActor({ runtime });
+      runtime.session.setSessionNameImplementation = (name) => {
+        fixture.manager.appendSessionInfo(name);
         throw new Error("simulated title append failure");
       };
-
       await expect(fixture.actor.startPrompt({
-        runId: RUN_A,
-        text: "must have a durable title",
-        origin: "browser",
-      })).rejects.toThrow("not durably persisted");
-
-      expect(runtime.session.promptCalls).toEqual([]);
-      expect(fixture.events).toContainEqual(expect.objectContaining({
-        type: "session_event",
-        runId: RUN_A,
-        event: { type: "run_queued" },
-      }));
-      expect(
-        aggregateReservedConversationEntries(fixture.manager.getEntries())
-          .runSettlements,
-      ).toEqual([]);
+        runId: RUN_A, text: "work does not depend on title persistence", origin: "browser",
+      })).resolves.toMatchObject({ outcome: "completed" });
+      title.resolve(automaticTitleMessage("Uncertain title"));
+      await vi.waitFor(() => expect(fixture.actor.isSessionPersistenceQuarantined()).toBe(true));
+      expect(aggregateReservedConversationEntries(fixture.manager.getEntries()).runSettlements)
+        .toEqual([expect.objectContaining({ runId: RUN_A, outcome: "completed" })]);
+      expect(fixture.events).toContainEqual(expect.objectContaining({ type: "error", fatal: true }));
       expect(() => fixture.actor.startPrompt({
-        runId: RUN_B,
-        text: "cannot reuse a poisoned actor",
-        origin: "browser",
-      })).toThrow("not durably persisted");
+        runId: RUN_B, text: "cannot reuse a poisoned actor", origin: "browser",
+      })).toThrow("simulated title append failure");
       await fixture.actor.dispose();
+    });
+
+    it("persists an idle title on a host-created manager even if the first run failed without an assistant", async () => {
+      const cwd = await mkdtemp(join(tmpdir(), "piweb-idle-title-"));
+      let fixture: ActorFixture | undefined;
+      try {
+        const store = await ProjectStore.open(cwd);
+        const manager = await store.createConversation(CONVERSATION_ID, profile(), {
+          updateRecent: false, refreshIndex: false,
+        });
+        const runtime = new FakeRuntime();
+        const title = deferred<AssistantMessage>();
+        runtime.titleImplementation = async () => title.promise;
+        fixture = await openActor({
+          runtime, sessionManager: manager,
+          project: {
+            cwd: store.cwd,
+            projectConversationSession: store.projectConversationSession.bind(store),
+            refreshConversations: async () => conversationSummaries(manager),
+          },
+        });
+        runtime.session.promptImplementation = async () => { throw new Error("main provider failed"); };
+        await expect(fixture.actor.startPrompt({
+          runId: RUN_A, text: "first request fails", origin: "browser",
+        })).resolves.toMatchObject({ outcome: "failed" });
+        expect(manager.getEntries().some((entry) => entry.type === "message" && entry.message.role === "assistant"))
+          .toBe(false);
+        title.resolve(automaticTitleMessage("Persist after failed run"));
+        await vi.waitFor(() => expect(manager.getSessionName()).toBe("Persist after failed run"));
+        const raw = await readFile(manager.getSessionFile()!, "utf8");
+        expect(raw.endsWith("\n")).toBe(true);
+        expect(raw.trim().split("\n").map((line) => JSON.parse(line))).toContainEqual(
+          expect.objectContaining({ type: "session_info", name: "Persist after failed run" }),
+        );
+        expect(SessionManager.open(manager.getSessionFile()!, store.sessionDir, store.cwd).getSessionName())
+          .toBe("Persist after failed run");
+      } finally {
+        await fixture?.actor.dispose();
+        await rm(cwd, { recursive: true, force: true });
+      }
     });
   });
 
@@ -5140,9 +5279,11 @@ describe("ConversationActor", () => {
 
   it("keeps a queued peer message out of an unowned extension turn", async () => {
     const runtime = new FakeRuntime();
-    const titleResult = deferred<AssistantMessage>();
-    runtime.titleImplementation = async () => titleResult.promise;
+    const compactionFinished = deferred();
     const fixture = await openActor({ runtime });
+    fixture.manager.appendSessionInfo("Owned conversation");
+    runtime.session.contextPercent = 90;
+    runtime.session.compactImplementation = async () => compactionFinished.promise;
     // Model the real SDK abort window: abort() requests cancellation, but
     // isStreaming remains true until the rogue physical run becomes idle.
     runtime.session.abort = async () => {
@@ -5177,10 +5318,10 @@ describe("ConversationActor", () => {
 
     const completion = fixture.actor.startPrompt({
       runId: RUN_A,
-      text: "name this conversation before starting",
+      text: "compact the inherited context before starting",
       origin: "browser",
     });
-    await vi.waitFor(() => expect(runtime.titleCalls).toHaveLength(1));
+    await vi.waitFor(() => expect(runtime.session.compactCalls).toBe(1));
     expect(fixture.actor.getActivity()).toEqual({
       kind: "queued",
       runId: RUN_A,
@@ -5215,7 +5356,7 @@ describe("ConversationActor", () => {
     expect(runtime.session.resumeCalls).toBe(0);
     runtime.session.isStreaming = false;
 
-    titleResult.resolve(automaticTitleMessage("Owned conversation"));
+    compactionFinished.resolve();
     await ownedStarted.promise;
     await expect(Promise.all([delivery, lateDelivery])).resolves.toEqual([
       undefined,
@@ -5653,7 +5794,6 @@ describe("ConversationActor", () => {
       project: {
         cwd: process.cwd(),
         toolMode: "full_access",
-        hasPersistedConversationNameIntent: async () => false,
         projectConversationSession: () => undefined,
         refreshConversations: async () => [],
       },
@@ -5683,7 +5823,6 @@ describe("ConversationActor", () => {
       project: {
         cwd: process.cwd(),
         toolMode: "full_access",
-        hasPersistedConversationNameIntent: async () => false,
         projectConversationSession: () => undefined,
         refreshConversations: async () => [],
       },

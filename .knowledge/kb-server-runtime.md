@@ -51,6 +51,7 @@
 - 按 canonical cwd 维护 project context、无 AgentSession 的 project model catalog、持久 inbox、恢复任务和 observers；
 - project context 在首次 LSP 查询时直接惰性持有 `WorkspaceLsp`，跨 actor 共享同 root/config 的本机 stdio 连接；只运行用户级配置中已启用的语言服务，不依赖 project trust。三个 LSP SDK 工具在 `createActorSessionOptions()` 注入；actor rebuild/focus 不释放池，coordinator close 先封 admission、actor teardown 后再 dispose。取消只针对调用，磁盘同步/派发串行而响应等待在门外。详细合同见 [kb-lsp.md](kb-lsp.md)；
 - 按 `canonical cwd + conversationId` singleflight 打开唯一 `ConversationActor`；
+- 已 live busy actor 的 browser admission 走同步 owner/control 路径，不等待无关 actor 的项目 lifecycle 长任务；idle admission 仍在 lifecycle 内按 inbox-first 排序，只在本次回调内以 owner revision 和完整目录/文件 fingerprint 复核后复用 inbox scan。不能把这个窄路径用于 actor activation、idle start 或持久 inbox mutation；
 - actor 持有 `SessionManager + writer lease + settings/model registry + AgentSession + activeRun` 及完整冻结 role identity（含 primary/compaction model），与 WebSocket 是否连接无关；coordinator 在 create/reopen/switch/rollback/peer 每条 runtime 路径都显式传递该 identity，meta tools 也保留它；
 - inbox、permanent delivery receipt、完成 ledger、waiter、reload adoption/reservation 和删除都经过项目/actor 串行边界；project context acquisition 先安装 inbox tombstone fence 并把全项目 transcript audit 放入后台，不能让无关 JSONL body 阻塞一个已有 target 的 exact activation；
 - 维护进程级项目活动目录，每个 context 的摘要独立缓存，只在 busy/compacting/attention 汇总真正变化时通知全局 observer；高频 `session_event` 不触发目录扫描，可发布目录始终限制为 100 项，遗漏项目一旦变化就进入目录并优先替换最旧的低活动项；
@@ -97,6 +98,7 @@
 - 静默 wait 的 source-local open attempt 可持有一个四分钟、已 `unref` 的 poll timer；timer 到期进入 project lifecycle，复核 opaque attempt identity、source run ownership、accepted input、settlement 与 reachability，再返回 `{ outcome: "checkpoint" }`。Agent 若仍需要结果可再次 wait，次数不设额度；宿主不自行重试。checkpoint 不是 target result；任一其它 terminal CAS 使 timer inert。
 - 取消 run 必须先清空 SDK 尚未消费的 steering/follow-up queue 再 abort；否则旧引导可能跨越结算边界污染下一次 prompt。持久跨会话消息仍由 inbox delivery marker 决定是否重投，不能把 SDK 内存队列当成 durable truth。
 - 注册不可复用 runId、安装 active RunTicket 后立即发送 `run_queued`；它既是生命周期事件，也是 idle browser prompt 的接收回执。busy prompt 则只在 SDK 接受 steering 后发送 `prompt_admitted`。
+- 首轮自动标题是 Actor 持有的易失辅助工作，不是 prompt 或 run settlement 的准入门；生成只产候选，健康且 same-runtime 的安全 idle writer 边界才同步提交，人工标题/清空优先。abort、fatal、dispose 和 runtime loss 取消候选，setter 部分持久化失败沿用 quarantine。详细条件见 [kb-project-sessions.md](kb-project-sessions.md)。
 - SDK 异步 preflight 结束时会再次检查 run ticket；若期间已取消，会在真正启动 agent 前阻断。
 - AgentSession 构造完成后，工作台在 SDK extension hook 外再包一层 host tool gate；扩展先修改/阻止，工作台再用最终 validated args 决策。PiRuntime 还在 extension/result-compression hook 之后安装对称的 host completion callback，传回同一调用的最终 args/source、原始 execute `isError` 与有效 details；extension post-hook 已抛错时仍先做观察性记账，再保持原异常传播。
 - ConversationActor 的每个 RunTicket 持有易失 edit ledger。`full_access` Agent 必须先让权威 LoopList 至少有一个 active 项，再用 `request_edit_budget` 声明本 run 预计修改的 distinct file 总数和理由；active 检查发生在每次实际授予前，拒绝不改变 ledger，成功申请以 `fileCount` 覆盖先前总额度而非累加，并把已修改路径计入新总数。只有 builtin `edit/write` 受门控，首次成功修改 canonical path 才消耗，失败和同路径重试不消耗。准入与 completion 用 run-scoped signal + toolCallId 关联；ledger 不持久化，也不是文件系统 sandbox。

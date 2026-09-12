@@ -19,6 +19,24 @@ import {
   type SessionInfo,
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+const { aggregateReservedConversationEntriesMock } = vi.hoisted(() => ({
+  aggregateReservedConversationEntriesMock: vi.fn(),
+}));
+
+vi.mock("./conversation-meta.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./conversation-meta.js")>();
+  return {
+    ...actual,
+    aggregateReservedConversationEntries: (
+      ...args: Parameters<typeof actual.aggregateReservedConversationEntries>
+    ) => {
+      aggregateReservedConversationEntriesMock(...args);
+      return actual.aggregateReservedConversationEntries(...args);
+    },
+  };
+});
+
 import {
   CONVERSATION_META_CUSTOM_TYPE,
   createConversationMessageEntry,
@@ -304,6 +322,45 @@ describe("ProjectStore", () => {
       await store.deleteConversation(conversationId);
       expect(store.listConversations()).toEqual([]);
     }
+  });
+
+  it.each([
+    [
+      "metadata",
+      (store: ProjectStore, conversationId: string) =>
+        store.inspectConversation(conversationId),
+    ],
+    [
+      "presentation",
+      (store: ProjectStore, conversationId: string) =>
+        store.inspectConversationPresentation(conversationId),
+    ],
+    [
+      "metadata batch",
+      async (store: ProjectStore, conversationId: string) =>
+        (await store.inspectConversations([conversationId])).get(conversationId)!,
+    ],
+  ] as const)("aggregates an immutable raw once for $0 inspection", async (
+    _kind,
+    inspect,
+  ) => {
+    const cwd = await createTemporaryDirectory("piweb-single-inspection-");
+    const store = await ProjectStore.open(cwd);
+    const conversation = await store.createConversation();
+    conversation.appendSessionInfo("one immutable raw");
+    await store.refreshConversations();
+
+    aggregateReservedConversationEntriesMock.mockClear();
+    const inspection = await inspect(store, conversation.getSessionId());
+
+    if (_kind === "presentation") {
+      expect(inspection).toHaveProperty("entries", expect.any(Array));
+    } else {
+      expect(inspection).not.toHaveProperty("entries");
+    }
+    expect(aggregateReservedConversationEntriesMock.mock.calls.filter(
+      ([entries]) => Array.isArray(entries) && entries.length > 1,
+    )).toHaveLength(1);
   });
 
   it("validates metadata and normally opens deeply nested custom entry data", async () => {

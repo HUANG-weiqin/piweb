@@ -1462,6 +1462,7 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: "default" },
     );
+    const promptText = "实现新会话首次运行前自动命名";
     let persistedAtAcknowledgement: Promise<boolean> | undefined;
     actor.subscribe((event) => {
       if (
@@ -1483,15 +1484,12 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       actor.conversationId,
       randomUUID(),
-      "实现新会话首次运行前自动命名",
+      promptText,
     );
 
     await vi.waitFor(() => expect(fixture.runtime.titleCalls).toHaveLength(1));
     expect(fixture.runtime.titleCalls[0]?.[1]).toMatchObject({
-      messages: [{
-        role: "user",
-        content: "实现新会话首次运行前自动命名",
-      }],
+      messages: [{ role: "user", content: promptText }],
     });
     expect(fixture.runtime.titleCalls[0]?.[2]).toMatchObject({
       sessionId: actor.sessionManager.getSessionId(),
@@ -1499,11 +1497,17 @@ describe("ProjectSessionCoordinator", () => {
     });
     expect(persistedAtAcknowledgement).toBeDefined();
     await expect(persistedAtAcknowledgement).resolves.toBe(false);
-    expect(fixture.runtime.control(actor.conversationId).promptTexts).toEqual([]);
+    await expect(running).resolves.toMatchObject({ outcome: "completed" });
+    expect(fixture.runtime.control(actor.conversationId).promptTexts).toEqual([
+      promptText,
+    ]);
+    expect(actor.getActivity().kind).toBe("idle");
 
     titleResult.resolve(automaticTitleMessage("自动生成标题"));
-    await running;
-    expect(actor.sessionManager.getSessionName()).toBe("自动生成标题");
+    await waitUntil(
+      () => actor.sessionManager.getSessionName() === "自动生成标题",
+      "the automatic title safe-idle application",
+    );
     await waitUntil(
       () => fixture.handle.project.listConversations()
         .find(({ id }) => id === actor.conversationId)?.name === "自动生成标题",
@@ -4800,6 +4804,97 @@ describe("ProjectSessionCoordinator", () => {
     ).toContain("run before the browser admission");
     sourceRun.release.resolve();
     await sourceRun.completion;
+  });
+
+  it("uses one full inbox scan for a stable empty idle browser admission", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    // Drain the actor-open pump before measuring this one browser operation.
+    await fixture.coordinator.listSessions(fixture.handle);
+    const inbox = coordinatorInbox(fixture.handle);
+    const internals = inbox as unknown as { scan(): Promise<unknown> };
+    const scan = vi.spyOn(internals, "scan");
+    const control = fixture.runtime.control(actor.conversationId);
+    const preflightStarted = deferred();
+    const releasePreflight = deferred();
+    const originalPrompt = control.session.prompt.bind(control.session);
+    control.session.prompt = async (...args) => {
+      preflightStarted.resolve();
+      await releasePreflight.promise;
+      return originalPrompt(...args);
+    };
+
+    const completion = fixture.coordinator.prompt(
+      fixture.handle,
+      actor.conversationId,
+      randomUUID(),
+      "start browser work after a stable empty inbox check",
+    );
+    await preflightStarted.promise;
+    expect(scan).toHaveBeenCalledTimes(1);
+
+    releasePreflight.resolve();
+    await completion;
+  });
+
+  it("admits a live busy browser prompt before an unrelated activation releases the lifecycle", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const runningStarted = deferred();
+    const releaseRunning = deferred();
+    fixture.runtime.control(actor.conversationId).enqueue(
+      blocksUntil(runningStarted, releaseRunning, "busy work completed"),
+    );
+    const running = fixture.coordinator.prompt(
+      fixture.handle,
+      actor.conversationId,
+      randomUUID(),
+      "keep A live while B activates",
+    );
+    await runningStarted.promise;
+
+    const activationStarted = deferred();
+    const releaseActivation = deferred();
+    fixture.runtime.beforeCreateSession = async () => {
+      activationStarted.resolve();
+      await releaseActivation.promise;
+    };
+    const activating = fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    await activationStarted.promise;
+
+    const promptId = "busy-admission-before-unrelated-activation";
+    const admitted = fixture.coordinator.prompt(
+      fixture.handle,
+      actor.conversationId,
+      randomUUID(),
+      "admit this before B becomes live",
+      promptId,
+    );
+    try {
+      await waitUntil(
+        () => actor.pendingPromptAdmissions().some(
+          (admission) => admission.promptId === promptId,
+        ),
+        "the busy browser admission before B releases",
+        500,
+      );
+      await expect(admitted).resolves.toEqual({ outcome: "admitted" });
+    } finally {
+      releaseActivation.resolve();
+      await activating;
+      releaseRunning.resolve();
+      await running;
+      fixture.runtime.beforeCreateSession = undefined;
+    }
   });
 
   it("rejects start_session replays that change role or title under the same idempotency key", async () => {
@@ -9225,17 +9320,7 @@ describe("ProjectSessionCoordinator", () => {
     );
     await Promise.all([firstStarted.promise, secondStarted.promise]);
 
-    const inbox = coordinatorInbox(fixture.handle);
-    const originalList = inbox.list.bind(inbox);
-    let listCalls = 0;
-    inbox.list = async (...args) => {
-      listCalls++;
-      if (listCalls === 2) {
-        throw new Error("simulated wait reconciliation scan failure");
-      }
-      return originalList(...args);
-    };
-    await expect(executeTool(
+    const firstWait = executeTool(
       fixture.runtime.control(first.conversationId),
       "wait_for_session",
       "wait-with-reconciliation-failure",
@@ -9245,9 +9330,51 @@ describe("ProjectSessionCoordinator", () => {
           runId: secondRunId,
         }],
       },
-    )).rejects.toThrow("wait reconciliation scan failure");
-    inbox.list = originalList;
+    );
+    await waitUntil(
+      () => first.getActivity().kind === "waiting"
+        && first.getCurrentWaitAttempt() !== undefined,
+      "the registered source wait attempt",
+    );
+
+    const inbox = coordinatorInbox(fixture.handle);
+    const originalList = inbox.list.bind(inbox);
+    const reconciliationMessage = "trigger post-registration inbox reconciliation";
+    let injectedFailure = false;
+    inbox.list = async (...args) => {
+      const envelopes = await originalList(...args);
+      // Fail after durable admission, not an incidental numbered preflight read.
+      if (
+        !injectedFailure
+        && args[0]?.toConversationId === first.conversationId
+        && envelopes.some(({ body }) => body === reconciliationMessage)
+      ) {
+        expect(first.getCurrentWaitAttempt()).toBeDefined();
+        injectedFailure = true;
+        throw new Error("simulated wait reconciliation scan failure");
+      }
+      return envelopes;
+    };
+    const firstWaitRejected = expect(firstWait).rejects.toThrow(
+      "wait reconciliation scan failure",
+    );
+    try {
+      await expect(executeTool(
+        fixture.runtime.control(second.conversationId),
+        "send_session_message",
+        "send-to-wait-with-reconciliation-failure",
+        {
+          conversationId: first.conversationId,
+          message: reconciliationMessage,
+        },
+      )).rejects.toThrow("wait reconciliation scan failure");
+      await firstWaitRejected;
+    } finally {
+      inbox.list = originalList;
+    }
+    expect(injectedFailure).toBe(true);
     expect(first.getActivity().kind).toBe("running");
+    expect(first.getCurrentWaitAttempt()).toBeUndefined();
 
     const reverseAbort = new AbortController();
     const reverseWait = executeTool(
