@@ -2658,7 +2658,7 @@ describe("ProjectStoreRegistry", () => {
         refreshIndex: false,
       });
 
-    expect(child.getSessionName()).toBe("Source Task");
+    expect(child.getSessionName()).toBe("Source Task 副本");
     await expect(
       new ConversationNotebook(store.stateDir, targetId).read(["plan"]),
     ).resolves.toMatchObject({

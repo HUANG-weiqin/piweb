@@ -400,10 +400,27 @@ describe("current-leaf fork", () => {
       serviceTierUpdatedAt: new Date().toISOString(),
     });
 
-    expect(child.getSessionName()).toBe("Source Task");
+    expect(child.getSessionName()).toBe("Source Task 副本");
     expect(llmComparable(child.buildSessionContext().messages)).toEqual(
       llmComparable(source.buildSessionContext().messages),
     );
     expect(JSON.stringify(source.getBranch())).toEqual(JSON.stringify(before));
+  });
+
+  it("clips long source names within the title budget when suffixing", () => {
+    const source = SessionManager.inMemory("E:\\work", { id: randomUUID() });
+    source.appendSessionInfo("名".repeat(24));
+    source.appendMessage(user("hello"));
+
+    const child = SessionManager.inMemory("E:\\work", { id: randomUUID() });
+    applyForkSeedToManager(child, snapshotOf(source), {
+      forkedAt: new Date().toISOString(),
+      compactionThresholdUpdatedAt: new Date().toISOString(),
+      serviceTierUpdatedAt: new Date().toISOString(),
+    });
+
+    const forked = child.getSessionName();
+    expect(forked).toBe(`${"名".repeat(21)} 副本`);
+    expect([...forked!].length).toBe(24);
   });
 });

@@ -8,9 +8,10 @@ import {
   createConversationMetaEntry,
   type ConversationMeta,
 } from "./conversation-meta.js";
-import type {
-  ServiceTier,
-  ThinkingLevel,
+import {
+  MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
+  type ServiceTier,
+  type ThinkingLevel,
 } from "../shared/protocol.js";
 
 /**
@@ -32,6 +33,28 @@ const COMPACTION_SUMMARY_SUFFIX = "\n</summary>";
 const BRANCH_SUMMARY_PREFIX =
   "The following is a summary of a branch that this conversation came back from:\n\n<summary>\n";
 const BRANCH_SUMMARY_SUFFIX = "</summary>";
+
+const FORK_SESSION_NAME_SUFFIX = " 副本";
+
+/**
+ * Keep fork titles distinguishable from their source in grouped views that
+ * fall back to the session name.
+ */
+function forkSessionName(sourceName: string): string {
+  const suffixChars = [...FORK_SESSION_NAME_SUFFIX];
+  const nameChars = [...sourceName];
+  if (
+    nameChars.length + suffixChars.length
+      <= MAX_PROJECT_CONVERSATION_NAME_CHARACTERS
+  ) {
+    return `${sourceName}${FORK_SESSION_NAME_SUFFIX}`;
+  }
+  return `${
+    nameChars
+      .slice(0, MAX_PROJECT_CONVERSATION_NAME_CHARACTERS - suffixChars.length)
+      .join("")
+  }${FORK_SESSION_NAME_SUFFIX}`;
+}
 
 const forkContextDetailsSchema = z.object({
   forkedFromConversationId: z.string().min(1).max(256),
@@ -310,7 +333,7 @@ export function applyForkSeedToManager(
   });
 
   if (snapshot.sessionName !== undefined) {
-    manager.appendSessionInfo(snapshot.sessionName);
+    manager.appendSessionInfo(forkSessionName(snapshot.sessionName));
   }
 
   const appendPlanned = (entry: PlannedForkEntry): string => {
