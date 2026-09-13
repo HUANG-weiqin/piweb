@@ -4582,9 +4582,8 @@ describe("PiConnection coordinated project view", () => {
       const projectInternals = handle.project as unknown as {
         scanConversations(): Promise<unknown>;
       };
-      vi.spyOn(projectInternals, "scanConversations").mockRejectedValue(
-        new SessionDirectoryChangedError(),
-      );
+      const scans = vi.spyOn(projectInternals, "scanConversations")
+        .mockRejectedValue(new SessionDirectoryChangedError());
       handle.release();
 
       const eventStart = harness.events.length;
@@ -4601,7 +4600,68 @@ describe("PiConnection coordinated project view", () => {
           (event) => event.type === "project_snapshot"
             && event.coverage === "unknown",
         )).toBe(true);
+      }, { timeout: 5_000 });
+      // Exhaustion retries the proof but stays bounded and still falls back.
+      expect(scans.mock.calls.length).toBeGreaterThan(1);
+      expect(harness.events.slice(eventStart).some(
+        (event) => event.type === "error" && event.scope === "session",
+      )).toBe(false);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("re-proves project membership after a concurrent writer voids one refresh scan", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      const focused = await initializeNewConversation(harness);
+      await vi.waitFor(() => {
+        expect(harness.events.findLast(
+          (event) => event.type === "project_snapshot",
+        )).toMatchObject({ coverage: "complete" });
       });
+      const handle = await harness.coordinator.acquireProject(
+        harness.cwd,
+        "read_only",
+      );
+      const projectInternals = handle.project as unknown as {
+        scanConversations(): Promise<unknown>;
+      };
+      const scanConversations = projectInternals.scanConversations.bind(
+        handle.project,
+      );
+      let voidedProofs = 0;
+      const scans = vi.spyOn(projectInternals, "scanConversations")
+        .mockImplementation(async () => {
+          if (voidedProofs === 0) {
+            voidedProofs += 1;
+            throw new SessionDirectoryChangedError();
+          }
+          return scanConversations();
+        });
+      handle.release();
+
+      const eventStart = harness.events.length;
+      await harness.connection.handle({
+        type: "refresh_view",
+        sessionId: SESSION_A,
+        projectId: focused.projectId,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+      });
+
+      await vi.waitFor(() => {
+        expect(harness.events.slice(eventStart).findLast(
+          (event) => event.type === "project_snapshot",
+        )).toMatchObject({ coverage: "complete" });
+      }, { timeout: 5_000 });
+      expect(voidedProofs).toBe(1);
+      expect(scans).toHaveBeenCalledTimes(2);
+      // The voided proof is never published as a downgraded membership claim.
+      expect(harness.events.slice(eventStart).some(
+        (event) => event.type === "project_snapshot"
+          && event.coverage !== "complete",
+      )).toBe(false);
       expect(harness.events.slice(eventStart).some(
         (event) => event.type === "error" && event.scope === "session",
       )).toBe(false);
