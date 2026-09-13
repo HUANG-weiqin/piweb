@@ -1145,53 +1145,92 @@ describe("ConversationSidebar", () => {
 
   });
 
-  it("prioritizes compacting standalone and group entries ahead of newer idle entries", () => {
-    const compactingRoot = conversation("compacting-root", "较早压缩组", {
+  it("keeps top-level positions and ordinals stable while compaction changes", () => {
+    const olderRoot = conversation("older-root", "较早协作组", {
       createdAt: "2026-07-19T08:00:00.000Z",
     });
-    const compactingChild = conversation("compacting-child", "压缩 Agent", {
-      rootConversationId: compactingRoot.id,
-      createdBy: { kind: "conversation", conversationId: compactingRoot.id },
-      compacting: true,
+    const child = conversation("child", "协作 Agent", {
+      rootConversationId: olderRoot.id,
+      createdBy: { kind: "conversation", conversationId: olderRoot.id },
     });
-    const compactingStandalone = conversation("compacting-standalone", "较早独立压缩", {
+    const olderStandalone = conversation("older-standalone", "较早独立会话", {
       createdAt: "2026-07-19T09:00:00.000Z",
-      compacting: true,
     });
-    const newerIdle = conversation("newer-idle", "较新空闲", {
+    const newerStandalone = conversation("newer-standalone", "较新独立会话", {
       createdAt: "2026-07-19T12:00:00.000Z",
     });
-
-    render(
+    const props = {
+      collapsed: false,
+      truncated: false,
+      navigationEnabled: true,
+      actionsEnabled: true,
+      onToggleCollapsed: vi.fn(),
+      onSelect: vi.fn(),
+      onCreate: vi.fn(),
+      onRename: vi.fn(),
+      onDelete: vi.fn(() => true),
+    };
+    const { container, rerender } = render(
       <ConversationSidebar
-        conversations={[
-          newerIdle,
-          compactingRoot,
-          compactingChild,
-          compactingStandalone,
-        ]}
-        collapsed={false}
-        truncated={false}
-        navigationEnabled
-        actionsEnabled
-        onToggleCollapsed={vi.fn()}
-        onSelect={vi.fn()}
-        onCreate={vi.fn()}
-        onRename={vi.fn()}
-        onDelete={vi.fn(() => true)}
+        {...props}
+        conversations={[newerStandalone, olderRoot, child, olderStandalone]}
       />,
     );
-
-    expect(Array.from(
-      document.querySelectorAll<HTMLElement>(
+    const topLevelOrder = () => Array.from(
+      container.querySelectorAll<HTMLElement>(
         ".hierarchy-root, .hierarchy-standalone",
       ),
       ({ dataset }) => dataset.conversationId,
-    )).toEqual([
-      compactingStandalone.id,
-      compactingRoot.id,
-      newerIdle.id,
+    );
+    const ordinals = () => Array.from(
+      container.querySelectorAll(".conversation-sidebar-ordinal"),
+      (ordinal) => ordinal.textContent,
+    );
+
+    expect(topLevelOrder()).toEqual([
+      newerStandalone.id,
+      olderStandalone.id,
+      olderRoot.id,
     ]);
+    expect(ordinals()).toEqual(["01", "02", "03"]);
+
+    const compactingChild = { ...child, compacting: true };
+    const compactingStandalone = { ...olderStandalone, compacting: true };
+    rerender(
+      <ConversationSidebar
+        {...props}
+        conversations={[
+          compactingStandalone,
+          compactingChild,
+          newerStandalone,
+          olderRoot,
+        ]}
+      />,
+    );
+
+    expect(topLevelOrder()).toEqual([
+      newerStandalone.id,
+      olderStandalone.id,
+      olderRoot.id,
+    ]);
+    expect(ordinals()).toEqual(["01", "02", "03"]);
+    expect(conversationDisplayOrdinal(
+      [compactingStandalone, compactingChild, newerStandalone, olderRoot],
+      child.id,
+    )).toBe(3);
+
+    rerender(
+      <ConversationSidebar
+        {...props}
+        conversations={[olderRoot, newerStandalone, olderStandalone, child]}
+      />,
+    );
+    expect(topLevelOrder()).toEqual([
+      newerStandalone.id,
+      olderStandalone.id,
+      olderRoot.id,
+    ]);
+    expect(ordinals()).toEqual(["01", "02", "03"]);
   });
 
   it("groups two roots, orders aggregate state, and navigates root and child", () => {

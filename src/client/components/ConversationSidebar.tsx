@@ -118,12 +118,6 @@ type GroupedEntry =
   | { kind: "group"; group: ConversationGroup }
   | { kind: "conversation"; conversation: ConversationSummary };
 
-function entryIsCompacting(entry: GroupedEntry): boolean {
-  return entry.kind === "group"
-    ? entry.group.conversations.some(({ compacting }) => compacting)
-    : entry.conversation.compacting;
-}
-
 function groupProjection(
   conversations: ConversationSummary[],
   busyConversationId?: string,
@@ -202,9 +196,6 @@ function groupProjection(
       })),
   ];
   entries.sort((left, right) => {
-    const compactingDifference = Number(entryIsCompacting(right))
-      - Number(entryIsCompacting(left));
-    if (compactingDifference !== 0) return compactingDifference;
     const leftRoot = left.kind === "group" ? left.group.root : left.conversation;
     const rightRoot = right.kind === "group" ? right.group.root : right.conversation;
     const createdDifference = Date.parse(rightRoot.createdAt)
