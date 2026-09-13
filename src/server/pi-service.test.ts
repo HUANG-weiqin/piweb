@@ -5063,6 +5063,102 @@ describe("PiConnection coordinated project view", () => {
     }
   });
 
+  it("publishes an authoritative membership result when only previews are clipped", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      const role = await harness.roles.createRole({
+        name: "Orchestrator 4",
+        description: "review",
+        systemPrompt: "",
+        model: { provider: "test", id: "model" },
+        compactionModel: null,
+        defaultThinkingLevel: "off",
+        defaultServiceTier: null,
+        toolMode: "full_access",
+        canManageSessions: true,
+      });
+      await harness.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        cwd: harness.cwd,
+        conversation: { kind: "new", roleId: role.id },
+      });
+      const sourceState = latestState(harness.events);
+      const sourceManager = harness.runtime.created[0]?.persistentManager;
+      if (!sourceManager) throw new Error("source manager missing");
+      sourceManager.appendMessage(agentMessage({
+        role: "user",
+        content: "p".repeat(600),
+        timestamp: 1,
+      }));
+      const deleteTool = harness.runtime.lastCreateOptions
+        ?.workbenchCustomTools?.find(
+          (tool) => tool.name === "delete_session",
+        );
+      if (!deleteTool) throw new Error("delete_session tool was not registered");
+
+      const peerCommandId = randomUUID();
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: peerCommandId,
+        sessionId: SESSION_A,
+        roleId: "default",
+      });
+      const peerAttached = harness.events.findLast(
+        (event) => event.type === "focus_attached"
+          && event.commandId === peerCommandId,
+      );
+      if (
+        peerAttached?.type !== "focus_attached"
+        || peerAttached.conversationId === undefined
+      ) {
+        throw new Error("peer was not created");
+      }
+      const peerId = peerAttached.conversationId;
+      await harness.connection.handle({
+        type: "focus_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId: sourceState.conversationId!,
+      });
+      await vi.waitFor(() => {
+        const snapshot = harness.events.findLast(
+          (event): event is Extract<ServerEvent, { type: "project_snapshot" }> =>
+            event.type === "project_snapshot",
+        );
+        expect(snapshot?.conversations.some(({ id }) => id === peerId))
+          .toBe(true);
+        expect(snapshot?.conversations.some(
+          ({ preview }) => [...preview].length >= 500,
+        )).toBe(true);
+      });
+      harness.events.splice(0);
+
+      const execute = (deleteTool as unknown as {
+        execute(...args: unknown[]): Promise<unknown>;
+      }).execute;
+      await execute.call(
+        deleteTool,
+        "authoritative-membership-delete",
+        { conversationId: peerId },
+        undefined,
+        undefined,
+      );
+
+      await vi.waitFor(() => {
+        const snapshot = harness.events.filter(
+          (event): event is Extract<ServerEvent, { type: "project_snapshot" }> =>
+            event.type === "project_snapshot",
+        ).at(-1);
+        expect(snapshot).toMatchObject({ coverage: "complete", truncated: false });
+        expect(snapshot?.conversations.map(({ id }) => id)).not.toContain(peerId);
+      });
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
   it("publishes a prioritized project index within its count and frame budgets", async () => {
     const harness = await coordinatedConnectionHarness();
     try {

@@ -210,6 +210,9 @@ export function projectConversationIndex(
 
   const projected: ConversationSummary[] = [];
   for (const conversation of selected) {
+    // Field values are bounded for display only. They must not mark the
+    // snapshot as truncated: that flag means the membership list may be
+    // incomplete, and the browser needs it to retract deleted conversations.
     const preview = clip(
       conversation.preview,
       MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS,
@@ -226,11 +229,6 @@ export function projectConversationIndex(
           conversation.autoTitlePreview,
           MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
         );
-    if (
-      preview.truncated
-      || name?.truncated === true
-      || autoTitlePreview?.truncated === true
-    ) truncated = true;
     projected.push({
       ...conversation,
       ...(name === undefined ? {} : { name: name.value }),

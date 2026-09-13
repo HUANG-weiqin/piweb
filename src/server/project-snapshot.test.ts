@@ -80,6 +80,17 @@ describe("projectConversationIndex", () => {
     expect(source[0]?.preview).toHaveLength(600);
   });
 
+  it("keeps field-value clipping out of the membership truncation flag", () => {
+    const snapshot = projectConversationIndex([{
+      ...conversation(1),
+      name: "Short",
+      preview: "p".repeat(600),
+    }]);
+
+    expect([...snapshot.conversations[0]!.preview]).toHaveLength(500);
+    expect(snapshot.truncated).toBe(false);
+  });
+
   it("preserves a small index exactly", () => {
     const source = [{
       ...conversation(1),
