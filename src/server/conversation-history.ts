@@ -1100,6 +1100,8 @@ export function snapshotConversationItems(
   const window: ConversationWindowCoverage = {
     omittedBefore: selected[0]?.sourceIndex !== undefined && selected[0].sourceIndex > 0,
     startsMidTurn,
+    // Aggregates dropped items/parts and clipped field text alike: it is a
+    // display notice, never evidence that the window covers the transcript.
     contentTruncated: selected.some((item) => item.truncated),
   };
   return { items, window };

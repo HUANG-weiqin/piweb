@@ -856,6 +856,11 @@ export type ConversationHistoryItem =
 export interface ConversationWindowCoverage {
   omittedBefore: boolean;
   startsMidTurn: boolean;
+  /**
+   * Display-only bounding: this window dropped older items *or* clipped some
+   * field text. Only `omittedBefore` describes window coverage, so this flag
+   * must never gate an authority decision.
+   */
   contentTruncated: boolean;
 }
 
@@ -991,12 +996,19 @@ export type ServerEvent =
       projectId: string;
       conversationId?: string;
       conversations: ConversationSummary[];
+      /**
+       * The conversation list may be clipped (count, byte, or whole-group
+       * budget). Field-value clipping of preview/name must not set it: the
+       * browser only accepts an absent conversation as deleted when the
+       * snapshot is `complete` and not truncated.
+       */
       truncated: boolean;
       coverage: ProjectSnapshotCoverage;
     }
   | {
       type: "project_activity_snapshot";
       projects: ProjectActivitySummary[];
+      /** Only the shared activity catalog may be clipped, never one project's counters. */
       truncated: boolean;
     }
   | {
