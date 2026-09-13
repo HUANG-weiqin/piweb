@@ -155,21 +155,6 @@ const scenes: Array<{
     expect(tools.open).toBe(true);
     expect(tools.querySelectorAll("details.tool")).toHaveLength(7);
   },
-}, {
-  surface: "commitment-expanded",
-  group: "A",
-  assertSurface: (container) => {
-    const card = container.querySelector(
-      "details.commitment-card",
-    ) as HTMLDetailsElement;
-    const summary = card.querySelector("summary") as HTMLElement;
-
-    expect(card.open).toBe(false);
-    fireEvent.click(summary);
-    expect(card.open).toBe(true);
-    expect(container.querySelector(".tool-text"))
-      .toHaveTextContent("边界行 24 / 24");
-  },
 }, ...(["jump-latest", "jump-latest-focus"] as const).map((surface) => ({
   surface,
   group: "A" as const,

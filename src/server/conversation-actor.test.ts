@@ -34,13 +34,13 @@ import {
   appendReservedCustomEntry,
   createConversationCardEntry,
   createConversationMetaEntry,
-  createEditBudgetEntry,
+  createEditGateEntry,
   createLoopListContinueEntry,
   createLoopListEntry,
   createServiceTierSelectionEntry,
   LOOP_LIST_CUSTOM_TYPE,
 } from "./conversation-meta.js";
-import { canonicalMutationPathKey } from "./edit-budget.js";
+import { EDIT_BUDGET_CUSTOM_TYPE } from "./edit-budget.js";
 import {
   ConversationActor,
   type ConversationActorEvent,
@@ -5837,173 +5837,61 @@ describe("ConversationActor", () => {
     expect(lease.releases).toBe(1);
   });
 
-  it("requires active work, then replaces and consumes a run-scoped edit budget", async () => {
+  it("requires active work only for the first builtin edit or write of each run", async () => {
     const fullAccessProfile = {
       ...profile(),
       role: { ...profile().role, toolMode: "full_access" as const },
     };
     const fixture = await openActor({ profile: fullAccessProfile });
-    const budgetTool = fixture.runtime.createOptions?.workbenchCustomTools?.find(
-      ({ name }) => name === "request_edit_budget",
-    );
-    const todoWrite = fixture.runtime.createOptions?.workbenchCustomTools?.find(
-      ({ name }) => name === "todo_write",
-    );
-    expect(budgetTool).toBeDefined();
-    expect(todoWrite).toBeDefined();
-
+    const tools = fixture.runtime.createOptions?.workbenchCustomTools ?? [];
+    const todoWrite = tools.find(({ name }) => name === "todo_write");
     const gate = fixture.runtime.createOptions?.toolCallGate;
-    const complete = fixture.runtime.createOptions?.toolCallCompleted;
     const signal = new AbortController().signal;
-    const decisions: Array<unknown> = [];
-    const completions: Array<unknown> = [];
-    const editRemainingFiles: Array<unknown> = [];
+    const decisions: Array<{ block?: boolean; reason?: string } | undefined> = [];
+
+    expect(tools.map(({ name }) => name)).not.toContain("request_edit_budget");
+    expect(todoWrite).toBeDefined();
     fixture.runtime.session.promptImplementation = async () => {
-      await expect(budgetTool!.execute("no-list", {
-        fileCount: 1,
-        reason: "No task has been selected yet.",
-      })).rejects.toThrow(/active LoopList item/i);
+      decisions.push(await gate?.({
+        toolCallId: "no-active",
+        toolName: "edit",
+        toolSource: "builtin",
+        args: { path: "src/server/conversation-actor.ts" },
+        signal,
+      }));
       await todoWrite!.execute("pending-list", {
         items: [{ id: "edit", text: "Edit the actor", status: "pending" }],
       });
-      await expect(budgetTool!.execute("pending-only", {
-        fileCount: 1,
-        reason: "Pending work is not current work.",
-      })).rejects.toThrow(/active LoopList item/i);
-      await todoWrite!.execute("completed-list", {
-        items: [{ id: "edit", text: "Edit the actor", status: "completed" }],
-      });
-      await expect(budgetTool!.execute("completed-only", {
-        fileCount: 1,
-        reason: "Completed work is not current work.",
-      })).rejects.toThrow(/active LoopList item/i);
+      decisions.push(await gate?.({
+        toolCallId: "pending-only",
+        toolName: "write",
+        toolSource: "builtin",
+        args: { path: "src/server/conversation-actor.ts" },
+        signal,
+      }));
       await todoWrite!.execute("active-list", {
         items: [{ id: "edit", text: "Edit the actor", status: "active" }],
       });
-      editRemainingFiles.push(
-        fixture.runtime.createOptions?.getEditBudgetRemainingFiles?.(),
-      );
-
       decisions.push(await gate?.({
-        toolCallId: "blocked-before-grant",
-        toolName: "edit",
+        toolCallId: "invalid-path-does-not-latch",
+        toolName: "write",
         toolSource: "builtin",
-        args: { path: "src/server/conversation-actor.ts" },
+        args: {},
         signal,
       }));
-      await expect(budgetTool!.execute("invalid-count", {
-        fileCount: 101,
-        reason: "A transformed request must keep the declared bounds.",
-      })).rejects.toThrow("fileCount must be an integer from 1 to 100");
-      await expect(budgetTool!.execute("invalid-reason", {
-        fileCount: 1,
-        reason: ` ${"x".repeat(2_001)} `,
-      })).rejects.toThrow("reason exceeds 2000 characters after trimming");
-      const grant = await budgetTool?.execute("grant-1", {
-        fileCount: 1,
-        reason: ` ${"x".repeat(2_000)} `,
-      });
-      completions.push(grant?.details);
-      editRemainingFiles.push(
-        fixture.runtime.createOptions?.getEditBudgetRemainingFiles?.(),
-      );
-
       decisions.push(await gate?.({
-        toolCallId: "first-edit",
-        toolName: "edit",
+        toolCallId: "first-admitted-write",
+        toolName: "write",
         toolSource: "builtin",
         args: { path: "src/server/conversation-actor.ts" },
         signal,
       }));
-      completions.push(await complete?.({
-        toolCallId: "first-edit",
-        toolName: "edit",
-        toolSource: "builtin",
-        args: { path: "src/server/conversation-actor.ts" },
-        signal: new AbortController().signal,
-        isError: false,
-        details: undefined,
-      }));
-      completions.push(await complete?.({
-        toolCallId: "first-edit",
-        toolName: "edit",
-        toolSource: "builtin",
-        args: { path: "src/server/conversation-actor.ts" },
-        signal,
-        isError: true,
-        details: { retained: true },
-      }));
-
-      decisions.push(await gate?.({
-        toolCallId: "retry-edit",
-        toolName: "edit",
-        toolSource: "builtin",
-        args: { path: "src/server/conversation-actor.ts" },
-        signal,
-      }));
-      completions.push(await complete?.({
-        toolCallId: "retry-edit",
-        toolName: "edit",
-        toolSource: "builtin",
-        args: { path: "src/server/conversation-actor.ts" },
-        signal,
-        isError: false,
-        details: undefined,
-      }));
-      editRemainingFiles.push(
-        fixture.runtime.createOptions?.getEditBudgetRemainingFiles?.(),
-      );
-      const replacement = await budgetTool?.execute("replace-grant", {
-        fileCount: 2,
-        reason: "Replace the run total after modifying the first file.",
-      });
-      completions.push(replacement?.details);
-      editRemainingFiles.push(
-        fixture.runtime.createOptions?.getEditBudgetRemainingFiles?.(),
-      );
-      await todoWrite!.execute("complete-after-grant", {
+      await todoWrite!.execute("completed-list", {
         items: [{ id: "edit", text: "Edit the actor", status: "completed" }],
       });
-
       decisions.push(await gate?.({
-        toolCallId: "same-file-alias",
-        toolName: "write",
-        toolSource: "builtin",
-        args: { path: "src/server/../server/conversation-actor.ts" },
-        signal,
-      }));
-      completions.push(await complete?.({
-        toolCallId: "same-file-alias",
-        toolName: "write",
-        toolSource: "builtin",
-        args: { path: "src/server/../server/conversation-actor.ts" },
-        signal,
-        isError: false,
-        details: undefined,
-      }));
-
-      decisions.push(await gate?.({
-        toolCallId: "second-file",
+        toolCallId: "later-edit",
         toolName: "edit",
-        toolSource: "builtin",
-        args: { path: "src/server/meta-tools.ts" },
-        signal,
-      }));
-      completions.push(await complete?.({
-        toolCallId: "second-file",
-        toolName: "edit",
-        toolSource: "builtin",
-        args: { path: "src/server/meta-tools.ts" },
-        signal,
-        isError: false,
-        details: undefined,
-      }));
-      editRemainingFiles.push(
-        fixture.runtime.createOptions?.getEditBudgetRemainingFiles?.(),
-      );
-      decisions.push(await gate?.({
-        toolCallId: "third-file",
-        toolName: "write",
         toolSource: "builtin",
         args: { path: "src/server/pi-runtime.ts" },
         signal,
@@ -6012,126 +5900,94 @@ describe("ConversationActor", () => {
 
     await fixture.actor.startPrompt({
       runId: RUN_A,
-      text: "edit with an explicit scope",
+      text: "write after recording current work",
       origin: "browser",
     });
 
     expect(decisions[0]).toMatchObject({
       block: true,
-      reason: expect.stringContaining("request_edit_budget"),
+      reason: expect.stringContaining("active LoopList item"),
     });
-    expect(completions[0]).toMatchObject({
-      outcome: "edit_budget_granted",
-      grantedFiles: 1,
-      remainingFiles: 1,
-      blockedAttempts: 1,
+    expect(decisions[1]).toMatchObject({
+      block: true,
+      reason: expect.stringContaining("active LoopList item"),
     });
-    expect(decisions[1]).toBeUndefined();
-    expect(completions[1]).toBeUndefined();
-    expect(completions[2]).toMatchObject({
-      details: {
-        retained: true,
-        piwebEditBudget: {
-          countedNewFile: false,
-          touchedFiles: 0,
-          remainingFiles: 0,
-        },
-      },
+    expect(decisions[2]).toMatchObject({
+      block: true,
+      reason: expect.stringContaining("path argument is invalid"),
     });
-    expect(decisions[2]).toBeUndefined();
-    expect(completions[3]).toMatchObject({
-      details: {
-        piwebEditBudget: {
-          countedNewFile: true,
-          touchedFiles: 1,
-          remainingFiles: 0,
-        },
-      },
-    });
-    expect(completions[4]).toMatchObject({
-      outcome: "edit_budget_granted",
-      grantedFiles: 2,
-      touchedFiles: 1,
-      remainingFiles: 1,
-      blockedAttempts: 1,
-    });
-    expect(decisions[3]).toBeUndefined();
-    expect(completions[5]).toMatchObject({
-      details: {
-        piwebEditBudget: {
-          countedNewFile: false,
-          touchedFiles: 1,
-          remainingFiles: 1,
-        },
-      },
-    });
-    expect(decisions[4]).toBeUndefined();
-    expect(completions[6]).toMatchObject({
-      details: {
-        piwebEditBudget: {
-          countedNewFile: true,
-          touchedFiles: 2,
-          remainingFiles: 0,
-        },
-      },
-    });
-    expect(decisions[5]).toMatchObject({ block: true });
-    expect(editRemainingFiles).toEqual([0, 1, 0, 1, 0]);
-    await fixture.actor.dispose();
-  });
+    expect(decisions.slice(3)).toEqual([undefined, undefined]);
+    expect(aggregateReservedConversationEntries(
+      fixture.manager.getBranch(),
+    ).editGateRunIds).toEqual([RUN_A]);
 
-  it("restores exact-run edit charges before an inbox recovery can mutate", async () => {
-    const manager = SessionManager.inMemory(process.cwd(), {
-      id: CONVERSATION_ID,
-    });
-    const chargedPath = await canonicalMutationPathKey(process.cwd(), {
-      path: "src/server/conversation-actor.ts",
-    });
-    expect(chargedPath).toBeDefined();
-    appendReservedCustomEntry(manager, createEditBudgetEntry({
-      kind: "grant",
-      runId: RUN_A,
-      fileCount: 1,
-    }));
-    appendReservedCustomEntry(manager, createEditBudgetEntry({
-      kind: "charge",
-      runId: RUN_A,
-      pathKey: chargedPath!,
-    }));
-    const fullAccessProfile = {
-      ...profile(),
-      role: { ...profile().role, toolMode: "full_access" as const },
-    };
-    const fixture = await openActor({
-      profile: fullAccessProfile,
-      sessionManager: manager,
-    });
-    const gate = fixture.runtime.createOptions?.toolCallGate;
-    const signal = new AbortController().signal;
-    const decisions: Array<{ block?: boolean } | undefined> = [];
-    fixture.runtime.session.resumeImplementation = async () => {
-      fixture.runtime.session.eventListener?.(nativeEvent({ type: "agent_start" }));
+    fixture.runtime.session.promptImplementation = async () => {
       decisions.push(await gate?.({
-        toolCallId: "charged-retry",
+        toolCallId: "new-run-without-active-work",
         toolName: "edit",
         toolSource: "builtin",
         args: { path: "src/server/conversation-actor.ts" },
         signal,
       }));
-      decisions.push(await gate?.({
-        toolCallId: "new-after-recovery",
-        toolName: "write",
-        toolSource: "builtin",
-        args: { path: "src/server/meta-tools.ts" },
-        signal,
-      }));
-      fixture.runtime.session.eventListener?.(nativeEvent({ type: "agent_end" }));
+    };
+    await fixture.actor.startPrompt({
+      runId: RUN_B,
+      text: "new run must establish work again",
+      origin: "browser",
+    });
+    expect(decisions.at(-1)).toMatchObject({
+      block: true,
+      reason: expect.stringContaining("active LoopList item"),
+    });
+    await fixture.actor.dispose();
+  });
+
+  it("restores first-write admission from its marker and legacy charge", async () => {
+    const fullAccessProfile = {
+      ...profile(),
+      role: { ...profile().role, toolMode: "full_access" as const },
     };
 
-    await fixture.actor.resumeMessages({ runId: RUN_A });
+    for (const evidence of ["marker", "legacy charge"] as const) {
+      const manager = SessionManager.inMemory(process.cwd(), {
+        id: CONVERSATION_ID,
+      });
+      if (evidence === "marker") {
+        appendReservedCustomEntry(manager, createEditGateEntry({ runId: RUN_A }));
+      } else {
+        manager.appendCustomEntry(EDIT_BUDGET_CUSTOM_TYPE, {
+          kind: "grant",
+          runId: RUN_A,
+          fileCount: 1,
+        });
+        manager.appendCustomEntry(EDIT_BUDGET_CUSTOM_TYPE, {
+          kind: "charge",
+          runId: RUN_A,
+          pathKey: "/project/already-admitted.ts",
+        });
+      }
+      const fixture = await openActor({
+        profile: fullAccessProfile,
+        sessionManager: manager,
+      });
+      const gate = fixture.runtime.createOptions?.toolCallGate;
+      const decisions: Array<{ block?: boolean } | undefined> = [];
+      fixture.runtime.session.resumeImplementation = async () => {
+        fixture.runtime.session.eventListener?.(nativeEvent({ type: "agent_start" }));
+        decisions.push(await gate?.({
+          toolCallId: `${evidence}-retry`,
+          toolName: "edit",
+          toolSource: "builtin",
+          args: { path: "src/server/conversation-actor.ts" },
+          signal: new AbortController().signal,
+        }));
+        fixture.runtime.session.eventListener?.(nativeEvent({ type: "agent_end" }));
+      };
 
-    expect(decisions).toEqual([undefined, expect.objectContaining({ block: true })]);
-    await fixture.actor.dispose();
+      await fixture.actor.resumeMessages({ runId: RUN_A });
+      expect(decisions).toEqual([undefined]);
+      await fixture.actor.dispose();
+    }
   });
 
   it("uses the frozen role tool policy instead of mutable project state", async () => {

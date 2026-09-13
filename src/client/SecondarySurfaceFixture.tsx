@@ -179,30 +179,17 @@ const drawerState: PublicState = {
   providers,
 };
 
-const LONG_COMMITMENT_REASON = [
-  "验证真实展开披露在长内容下的正文密度、内部滚动与视口边界。",
-  ...Array.from(
-    { length: 24 },
-    (_, index) => `边界行 ${String(index + 1).padStart(2, "0")} / 24 · 保持工具参数完整可读，不截断真实生产投影。`,
-  ),
-].join("\n");
-
 const noOp = () => undefined;
 
 function WorkbenchOverlay({
   children,
-  commitmentReason,
   showComposerStates,
 }: {
   children?: ReactNode;
-  commitmentReason?: string;
   showComposerStates?: boolean;
 }) {
   return <>
-    <VisualFixture
-      commitmentReason={commitmentReason}
-      showComposerStates={showComposerStates}
-    />
+    <VisualFixture showComposerStates={showComposerStates} />
     {children}
   </>;
 }
@@ -378,10 +365,6 @@ function ContextTooltipSurface() {
   return <WorkbenchOverlay />;
 }
 
-function CommitmentExpandedSurface() {
-  return <WorkbenchOverlay commitmentReason={LONG_COMMITMENT_REASON} />;
-}
-
 function ComposerStatesSurface() {
   return <WorkbenchOverlay showComposerStates />;
 }
@@ -457,8 +440,6 @@ function renderSurface(surface: string): ReactNode {
     case "jump-latest":
     case "jump-latest-focus":
       return <WorkbenchOverlay />;
-    case "commitment-expanded":
-      return <CommitmentExpandedSurface />;
     case "composer-states":
       return <ComposerStatesSurface />;
     case "setup":

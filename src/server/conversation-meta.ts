@@ -28,6 +28,8 @@ export const MESSAGE_DELIVERY_RECEIPT_CUSTOM_TYPE =
   "piweb.message_delivery_receipt.v1";
 export const RUN_SETTLEMENT_CUSTOM_TYPE =
   "piweb.run_settlement.v1";
+/** Durable proof that a run has passed its one-time first-write gate. */
+export const EDIT_GATE_CUSTOM_TYPE = "piweb.edit_gate.v1";
 export const META_OPERATION_CUSTOM_TYPE =
   "piweb.meta_operation.v1";
 export const COMPACTION_THRESHOLD_CUSTOM_TYPE =
@@ -661,6 +663,13 @@ const runSettlementEntrySchema = z.object({
   data: runSettlementSchema,
 }).strict();
 
+const editGateEntrySchema = z.object({
+  customType: z.literal(EDIT_GATE_CUSTOM_TYPE),
+  data: z.object({
+    runId: uuidSchema("runId"),
+  }).strict(),
+}).strict();
+
 const editBudgetEventSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("grant"),
@@ -787,7 +796,9 @@ export type LoopListContinueEntry = z.infer<typeof loopListContinueEntrySchema>;
 export type RunSettlement = z.infer<typeof runSettlementSchema>;
 export type RunSettlementEntry =
   z.infer<typeof runSettlementEntrySchema>;
-export type EditBudgetEntry = z.infer<typeof editBudgetEntrySchema>;
+export type EditGateEntry = z.infer<typeof editGateEntrySchema>;
+/** Compatibility-only entry type for existing piweb.edit_budget.v1 records. */
+type EditBudgetEntry = z.infer<typeof editBudgetEntrySchema>;
 export type MetaOperation = z.infer<typeof metaOperationSchema>;
 export type MetaOperationEntry =
   z.infer<typeof metaOperationEntrySchema>;
@@ -841,6 +852,10 @@ export type ReservedConversationEntry =
       entry: RunSettlementEntry;
     }
   | {
+      kind: "edit_gate";
+      entry: EditGateEntry;
+    }
+  | {
       kind: "edit_budget";
       entry: EditBudgetEntry;
     }
@@ -867,6 +882,9 @@ export interface ReservedConversationAggregate {
   deliveredMessageIds: string[];
   messageDeliveryReceipts: MessageDeliveryReceipt[];
   runSettlements: RunSettlement[];
+  /** Present only when the supplied entries contain a first-write gate marker. */
+  editGateRunIds?: string[];
+  /** Compatibility-only journal facts from legacy piweb.edit_budget.v1 records. */
   editBudgetEvents: EditBudgetEvent[];
   metaOperations: MetaOperation[];
   compactionThreshold?: CompactionThreshold;
@@ -1020,17 +1038,21 @@ export function parseRunSettlementEntry(
   return runSettlementEntrySchema.parse(value);
 }
 
-export function parseEditBudgetEntry(value: unknown): EditBudgetEntry {
-  return editBudgetEntrySchema.parse(value);
+export function parseEditGateEntry(value: unknown): EditGateEntry {
+  return editGateEntrySchema.parse(value);
 }
 
-export function createEditBudgetEntry(
-  data: EditBudgetEvent,
-): EditBudgetEntry {
-  return parseEditBudgetEntry({
-    customType: EDIT_BUDGET_CUSTOM_TYPE,
+export function createEditGateEntry(
+  data: EditGateEntry["data"],
+): EditGateEntry {
+  return parseEditGateEntry({
+    customType: EDIT_GATE_CUSTOM_TYPE,
     data,
   });
+}
+
+function parseEditBudgetEntry(value: unknown): EditBudgetEntry {
+  return editBudgetEntrySchema.parse(value);
 }
 
 export function createRunSettlementEntry(
@@ -1101,7 +1123,7 @@ export function appendReservedCustomEntry(
     | ConversationCardEntry
     | MessageDeliveryReceiptEntry
     | RunSettlementEntry
-    | EditBudgetEntry
+    | EditGateEntry
     | MetaOperationEntry
     | CompactionThresholdEntry
     | ServiceTierSelectionEntry
@@ -1235,6 +1257,12 @@ export function parseReservedConversationEntry(
     return {
       kind: "run_settlement",
       entry: parseRunSettlementEntry(payload),
+    };
+  }
+  if (customType === EDIT_GATE_CUSTOM_TYPE) {
+    return {
+      kind: "edit_gate",
+      entry: parseEditGateEntry(payload),
     };
   }
   if (customType === EDIT_BUDGET_CUSTOM_TYPE) {
@@ -1393,6 +1421,7 @@ export function aggregateReservedConversationEntries(
     MessageDeliveryReceipt
   >();
   const runSettlements = new Map<string, RunSettlement>();
+  const editGateRunIds = new Set<string>();
   const editBudgetEvents: EditBudgetEvent[] = [];
   const metaOperations = new Map<string, MetaOperation>();
   let compactionThreshold: CompactionThreshold | undefined;
@@ -1496,6 +1525,10 @@ export function aggregateReservedConversationEntries(
         reserved.entry.data.updatedAt,
       );
       loopList = reserved.entry.data;
+      continue;
+    }
+    if (reserved.kind === "edit_gate") {
+      editGateRunIds.add(reserved.entry.data.runId);
       continue;
     }
     if (reserved.kind === "edit_budget") {
@@ -1613,6 +1646,9 @@ export function aggregateReservedConversationEntries(
     deliveredMessageIds: [...deliveredMessageIds],
     messageDeliveryReceipts: [...messageDeliveryReceipts.values()],
     runSettlements: [...runSettlements.values()],
+    ...(editGateRunIds.size === 0
+      ? {}
+      : { editGateRunIds: [...editGateRunIds] }),
     editBudgetEvents,
     metaOperations: [...metaOperations.values()],
     ...(compactionThreshold === undefined

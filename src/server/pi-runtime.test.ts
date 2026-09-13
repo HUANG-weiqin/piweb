@@ -819,13 +819,10 @@ describe("PiRuntime session ownership", () => {
       armed: true,
     };
     const getLoopList = vi.fn(() => loopList);
-    let editBudgetRemainingFiles = 2;
-    const getEditBudgetRemainingFiles = vi.fn(() => editBudgetRemainingFiles);
     let elapsedMinutes = { activeMin: 4, listMin: 12 };
     const getLoopListElapsedMinutes = vi.fn(() => elapsedMinutes);
     const created = await runtime.createSession(cwd, {
       getLoopList,
-      getEditBudgetRemainingFiles,
       getLoopListElapsedMinutes,
     });
     const getContextUsage = vi.spyOn(created.session, "getContextUsage");
@@ -837,7 +834,6 @@ describe("PiRuntime session ownership", () => {
     const sessionMessagesBefore = [...created.session.messages];
 
     const first = await created.session.agent.convertToLlm(input);
-    editBudgetRemainingFiles = 1;
     elapsedMinutes = { activeMin: 0, listMin: 13 };
     loopList = {
       items: [{ id: "second", text: "Latest active item", status: "active" }],
@@ -856,7 +852,7 @@ describe("PiRuntime session ownership", () => {
         { type: "text", text: "input" },
         {
           type: "text",
-          text: "piweb_work={\"active\":[{\"id\":\"first\",\"text\":\"First active item\"}],\"activeElapsedMinutes\":4,\"loopListElapsedMinutes\":12,\"editLeft\":2}",
+          text: "piweb_work={\"active\":[{\"id\":\"first\",\"text\":\"First active item\"}],\"activeElapsedMinutes\":4,\"loopListElapsedMinutes\":12}",
         },
       ],
     });
@@ -866,7 +862,7 @@ describe("PiRuntime session ownership", () => {
         { type: "text", text: "input" },
         {
           type: "text",
-          text: "piweb_work={\"active\":[{\"id\":\"second\",\"text\":\"Latest active item\"}],\"activeElapsedMinutes\":0,\"loopListElapsedMinutes\":13,\"editLeft\":1}",
+          text: "piweb_work={\"active\":[{\"id\":\"second\",\"text\":\"Latest active item\"}],\"activeElapsedMinutes\":0,\"loopListElapsedMinutes\":13}",
         },
       ],
     });
@@ -875,7 +871,6 @@ describe("PiRuntime session ownership", () => {
       content: [{ type: "text", text: "input" }],
     });
     expect(getLoopList).toHaveBeenCalledTimes(3);
-    expect(getEditBudgetRemainingFiles).toHaveBeenCalledTimes(2);
     expect(getLoopListElapsedMinutes).toHaveBeenCalledTimes(2);
     expect(getContextUsage).not.toHaveBeenCalled();
     expect(created.session.messages).toEqual(sessionMessagesBefore);
@@ -1163,15 +1158,7 @@ describe("PiRuntime session ownership", () => {
       content: [{ type: "text" as const, text: originalText }],
       details: { executed: true },
     };
-    const completed = vi.fn((input: { details: unknown }) => ({
-      details: {
-        ...(input.details as Record<string, unknown>),
-        observed: true,
-      },
-    }));
-    const created = await runtime.createSession(cwd, {
-      toolCallCompleted: completed,
-    });
+    const created = await runtime.createSession(cwd);
     const afterToolCall = created.session.agent.afterToolCall;
     if (!afterToolCall) throw new Error("tool result hook was not installed");
 
@@ -1186,50 +1173,8 @@ describe("PiRuntime session ownership", () => {
       type: "text",
       text: expect.stringContaining("[... omitted"),
     }]);
-    expect(patch?.details).toEqual({ executed: true, observed: true });
-    expect(completed).toHaveBeenCalledWith(expect.objectContaining({
-      toolCallId: "grep-call",
-      toolName: "grep",
-      toolSource: "builtin",
-      args: { pattern: "x" },
-      isError: false,
-      details: { executed: true },
-    }));
+    expect(patch?.details).toBeUndefined();
     expect(original.content).toEqual([{ type: "text", text: originalText }]);
-    await created.dispose();
-  });
-
-  it("reports the original execution to completion accounting when an extension result hook fails", async () => {
-    const cwd = await temporaryDirectory("piweb-runtime-tool-completion-error-");
-    const extensionError = new Error("extension result hook failed");
-    const runtime = await testRuntime(
-      () => [],
-      async (result) => {
-        result.session.agent.afterToolCall = async () => {
-          throw extensionError;
-        };
-      },
-    );
-    const completed = vi.fn();
-    const created = await runtime.createSession(cwd, {
-      toolCallCompleted: completed,
-    });
-    const afterToolCall = created.session.agent.afterToolCall;
-    if (!afterToolCall) throw new Error("tool result hook was not installed");
-
-    await expect(afterToolCall({
-      toolCall: { id: "edit-call", name: "edit" },
-      args: { path: "src/index.ts" },
-      result: { content: [], details: { executed: true } },
-      isError: false,
-    } as Parameters<typeof afterToolCall>[0])).rejects.toBe(extensionError);
-
-    expect(completed).toHaveBeenCalledWith(expect.objectContaining({
-      toolCallId: "edit-call",
-      toolName: "edit",
-      isError: false,
-      details: { executed: true },
-    }));
     await created.dispose();
   });
 

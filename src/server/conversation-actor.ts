@@ -41,7 +41,7 @@ import {
   appendReservedCustomEntry,
   createCompactionThresholdEntry,
   createCompactionResumeEntry,
-  createEditBudgetEntry,
+  createEditGateEntry,
   createLoopListContinueEntry,
   createLoopListEntry,
   createConversationMetaEntry,
@@ -63,20 +63,9 @@ import {
   type ForkSourceSnapshot,
 } from "./conversation-fork.js";
 import {
-  canonicalMutationPathKey,
-  createEditBudgetLedger,
-  restoreEditBudgetLedger,
-  type EditBudgetLedger,
-  isBuiltinFileMutation,
-  MAX_EDIT_BUDGET_FILES_PER_REQUEST,
-  MAX_EDIT_BUDGET_REASON_CHARACTERS,
-  snapshotEditBudget,
-} from "./edit-budget.js";
-import {
   type CreatedPiSession,
   type CreatePiSessionOptions,
   type PiRuntimeLike,
-  type ToolCallCompletedInput,
   type ToolCallGateInput,
 } from "./pi-runtime.js";
 import {
@@ -98,6 +87,20 @@ type AgentMessage = Extract<
   Parameters<AgentSession["agent"]["steer"]>[0],
   { role: "user" }
 >;
+
+function isBuiltinFileMutation(toolName: string, toolSource: string): boolean {
+  return toolSource === "builtin"
+    && (toolName === "edit" || toolName === "write");
+}
+
+/** Keep malformed calls from consuming the one-time admission latch. */
+function hasBuiltinMutationPath(args: unknown): boolean {
+  if (typeof args !== "object" || args === null || Array.isArray(args)) {
+    return false;
+  }
+  const { path } = args as { path?: unknown };
+  return typeof path === "string" && path.trim().length > 0;
+}
 
 function hasImagePrefix(bytes: Uint8Array, prefix: readonly number[]): boolean {
   return bytes.length >= prefix.length
@@ -253,7 +256,7 @@ export interface ConversationActorOpenOptions {
   toolPolicy?: ToolPolicy;
   createSessionOptions?: Omit<
     CreatePiSessionOptions,
-    "sessionManager" | "toolCallGate" | "toolCallCompleted" | "extensionAbort"
+    "sessionManager" | "toolCallGate" | "extensionAbort"
   >;
   createSessionOptionsForProfile: (
     profile: ConversationMeta,
@@ -471,11 +474,8 @@ interface RunTicket {
    * removed when its raw user message_end is observed.
    */
   readonly pendingGuidanceObservations: PendingGuidanceObservation[];
-  readonly editBudget: EditBudgetLedger;
-  readonly pendingMutationPathKeys: Map<
-    string,
-    { pathKey: string; runSignal: AbortSignal | undefined }
-  >;
+  /** Latches once the host has admitted this run's first builtin edit/write. */
+  firstWriteGatePassed: boolean;
   toolMode: ToolMode;
   extensionErrorMessage?: string;
   sawSdkCompactionAttempt: boolean;
@@ -1267,89 +1267,6 @@ export class ConversationActor {
     });
     appendReservedCustomEntry(this.sessionManager, entry);
     this.serviceTierSelection = entry.data.tier;
-  }
-
-  private createEditBudgetTool() {
-    return defineTool({
-      name: "request_edit_budget",
-      label: "Request edit budget",
-      description:
-        "Set this run's total distinct-file edit budget before using builtin edit or write. At least one LoopList item must already be active. Each successful request replaces the previous total instead of adding to it; fileCount includes canonical paths already modified in this run. Each successful first modification consumes one slot; repeat edits to that file do not. This gates only builtin edit/write and is not a filesystem sandbox.",
-      promptSnippet:
-        "Before builtin edit/write, mark current LoopList work active, then set the run's total distinct-file budget and explain why.",
-      promptGuidelines: [
-        "Before requesting edit budget, use todo_write so at least one current task is active.",
-        "Call request_edit_budget before the first builtin edit or write in each run; fileCount is the total distinct-file scope, including files already modified.",
-        "A successful request replaces the prior total instead of adding to it. If scope changes, request the revised total before touching another new path.",
-        "Do not use bash, scripts, or extension tools to evade the budget; the host gate only covers builtin edit/write.",
-      ],
-      parameters: Type.Object({
-        fileCount: Type.Integer({
-          minimum: 1,
-          maximum: MAX_EDIT_BUDGET_FILES_PER_REQUEST,
-        }),
-        reason: Type.String({
-          minLength: 1,
-          description:
-            `Reason after trimming must contain 1 to ${MAX_EDIT_BUDGET_REASON_CHARACTERS} characters`,
-        }),
-      }, { additionalProperties: false }),
-      execute: async (_toolCallId, input) => {
-        const ticket = this.activeRun;
-        if (!ticket || ticket.state.phase !== "running") {
-          throw new Error(
-            "Edit budget can only be requested by the active running conversation",
-          );
-        }
-        const finalInput = input as { fileCount?: unknown; reason?: unknown };
-        if (
-          typeof finalInput.fileCount !== "number"
-          || !Number.isInteger(finalInput.fileCount)
-          || finalInput.fileCount < 1
-          || finalInput.fileCount > MAX_EDIT_BUDGET_FILES_PER_REQUEST
-        ) {
-          throw new Error(
-            `fileCount must be an integer from 1 to ${MAX_EDIT_BUDGET_FILES_PER_REQUEST}`,
-          );
-        }
-        if (typeof finalInput.reason !== "string") {
-          throw new Error("reason must be a string");
-        }
-        const reason = finalInput.reason.trim();
-        if (reason.length === 0) {
-          throw new Error("reason must contain a non-whitespace explanation");
-        }
-        if (reason.length > MAX_EDIT_BUDGET_REASON_CHARACTERS) {
-          throw new Error(
-            `reason exceeds ${MAX_EDIT_BUDGET_REASON_CHARACTERS} characters after trimming`,
-          );
-        }
-        if (!this.loopListSnapshot.items.some(
-          (item) => item.status === "active",
-        )) {
-          throw new Error(
-            "Edit budget requires at least one active LoopList item. Call todo_write first and mark current work active.",
-          );
-        }
-        appendReservedCustomEntry(this.sessionManager, createEditBudgetEntry({
-          kind: "grant",
-          runId: ticket.id,
-          fileCount: finalInput.fileCount,
-        }));
-        ticket.editBudget.grantedFiles = finalInput.fileCount;
-        const details = {
-          outcome: "edit_budget_granted" as const,
-          ...snapshotEditBudget(ticket.editBudget),
-        };
-        return {
-          content: [{
-            type: "text" as const,
-            text: JSON.stringify(details),
-          }],
-          details,
-        };
-      },
-    });
   }
 
   private createContextCompactionTool() {
@@ -2472,12 +2389,12 @@ export class ConversationActor {
     const branchReserved = aggregateReservedConversationEntries(
       this.sessionManager.getBranch(),
     );
-    const editBudget = input.recovered
-      ? restoreEditBudgetLedger(
-        branchReserved.editBudgetEvents,
-        input.runId,
+    const firstWriteGatePassed = input.recovered && (
+      branchReserved.editGateRunIds?.includes(input.runId)
+      || branchReserved.editBudgetEvents.some(
+        (event) => event.runId === input.runId && event.kind === "charge",
       )
-      : createEditBudgetLedger();
+    );
     if (input.origin === "browser") this.rearmLoopList();
     this.usedRunIds.add(input.runId);
     const ownership: ConversationRunOwnership = Object.freeze({
@@ -2509,8 +2426,7 @@ export class ConversationActor {
         ? {}
         : { autoTitlePrompt: input.autoTitlePrompt }),
       state: { phase: "queued" },
-      editBudget,
-      pendingMutationPathKeys: new Map(),
+      firstWriteGatePassed,
       toolMode: this.profileSnapshot.role.toolMode,
       sawSdkCompactionAttempt: false,
       compactionErrorReported: false,
@@ -3867,97 +3783,39 @@ export class ConversationActor {
     if (policy.action === "deny") {
       return { block: true, reason: policy.reason };
     }
-    if (isBuiltinFileMutation(input.toolName, input.toolSource)) {
-      const pathKey = await canonicalMutationPathKey(this.project.cwd, input.args);
-      if (
-        input.signal?.aborted
-        || this.activeRun !== ticket
-        || ticket.state.phase !== "running"
-      ) {
-        return {
-          block: true,
-          reason: "Run cancelled before edit budget validation",
-        };
-      }
-      if (pathKey === undefined) {
+    if (
+      isBuiltinFileMutation(input.toolName, input.toolSource)
+      && !ticket.firstWriteGatePassed
+    ) {
+      if (!hasBuiltinMutationPath(input.args)) {
         return {
           block: true,
           reason: "Edit was not executed because its final path argument is invalid",
         };
       }
-      const snapshot = snapshotEditBudget(ticket.editBudget);
-      const isNewCharge = !ticket.editBudget.chargedPathKeys.has(pathKey);
-      if (isNewCharge && snapshot.remainingFiles === 0) {
-        ticket.editBudget.blockedAttempts += 1;
+      if (!this.loopListSnapshot.items.some((item) => item.status === "active")) {
         return {
           block: true,
           reason:
-            "Edit was not executed because this run has no budget for a new file. Call request_edit_budget with the expected distinct file count and a concise reason, then retry.",
+            "The first builtin edit or write in this run requires an active LoopList item. Call todo_write first and mark current work active.",
         };
       }
-      if (isNewCharge) {
-        try {
-          appendReservedCustomEntry(this.sessionManager, createEditBudgetEntry({
-            kind: "charge",
-            runId: ticket.id,
-            pathKey,
-          }));
-        } catch (error) {
-          this.emitError(
-            `Could not persist edit budget charge: ${errorMessage(error)}`,
-            ticket.id,
-          );
-          return {
-            block: true,
-            reason:
-              "Edit was not executed because its budget charge could not be recorded durably",
-          };
-        }
-        ticket.editBudget.chargedPathKeys.add(pathKey);
+      try {
+        appendReservedCustomEntry(this.sessionManager, createEditGateEntry({
+          runId: ticket.id,
+        }));
+      } catch (error) {
+        this.emitError(
+          `Could not persist first-write gate: ${errorMessage(error)}`,
+          ticket.id,
+        );
+        return {
+          block: true,
+          reason:
+            "Edit was not executed because its first-write authorization could not be recorded durably",
+        };
       }
-      ticket.pendingMutationPathKeys.set(input.toolCallId, {
-        pathKey,
-        runSignal: input.signal,
-      });
-    }
-    return undefined;
-  }
-
-  private completeToolCall(
-    input: ToolCallCompletedInput,
-  ): { details?: unknown } | undefined {
-    const ticket = this.activeRun;
-    if (!ticket || !isBuiltinFileMutation(input.toolName, input.toolSource)) {
-      return undefined;
-    }
-    const pending = ticket.pendingMutationPathKeys.get(input.toolCallId);
-    if (pending === undefined || pending.runSignal !== input.signal) {
-      return undefined;
-    }
-    ticket.pendingMutationPathKeys.delete(input.toolCallId);
-
-    let countedNewFile = false;
-    if (
-      !input.isError
-      && !ticket.editBudget.touchedPathKeys.has(pending.pathKey)
-    ) {
-      ticket.editBudget.touchedPathKeys.add(pending.pathKey);
-      countedNewFile = true;
-    }
-    const budgetDetails = {
-      countedNewFile,
-      ...snapshotEditBudget(ticket.editBudget),
-    };
-    if (input.details === undefined) {
-      return { details: { piwebEditBudget: budgetDetails } };
-    }
-    if (isPlainDetails(input.details)) {
-      return {
-        details: {
-          ...input.details,
-          piwebEditBudget: budgetDetails,
-        },
-      };
+      ticket.firstWriteGatePassed = true;
     }
     return undefined;
   }
@@ -4364,14 +4222,10 @@ export class ConversationActor {
               write: (items) => this.writeLoopList(items),
               pause: () => this.pauseLoopList(),
             }),
-            ...(this.profileSnapshot.role.toolMode === "full_access"
-              ? [this.createEditBudgetTool()]
-              : []),
             this.createContextCompactionTool(),
           ],
           sessionManager: this.sessionManager,
           toolCallGate: (input) => this.authorizeToolCall(input),
-          toolCallCompleted: (input) => this.completeToolCall(input),
           extensionAbort: () => {
             void this.abortCurrentRun().catch((error) => {
               this.emitError(error);
@@ -4381,12 +4235,6 @@ export class ConversationActor {
           getCompactionThresholdPercent: () => this.compactionThresholdPercent,
           getLoopList: () => this.getLoopList(),
           getLoopListElapsedMinutes: () => this.getLoopListElapsedMinutes(),
-          getEditBudgetRemainingFiles: () => {
-            const ticket = this.activeRun;
-            return ticket?.toolMode === "full_access"
-              ? snapshotEditBudget(ticket.editBudget).remainingFiles
-              : undefined;
-          },
           getServiceTier: () => this.serviceTierSelection,
           ...(this.profileSnapshot.role.toolMode === "full_access"
             ? {

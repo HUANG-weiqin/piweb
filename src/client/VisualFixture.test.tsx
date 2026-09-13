@@ -90,14 +90,11 @@ describe("VisualFixture", () => {
     ).closest(".message-event-header");
     expect(activeAgentEvent).toHaveTextContent("AGENTTech LeadRUNNING");
     expect(screen.getByText("正在运行命令")).toBeInTheDocument();
-    expect(screen.getByText("预计修改 5 个文件")).toBeInTheDocument();
     expect(screen.getByText("2 个会话 · 核对组件状态覆盖 · 历史验证记录"))
       .toHaveAttribute(
         "title",
         "2 个会话 · 核对组件状态覆盖 · 历史验证记录",
       );
-    expect(screen.getByLabelText("4 / 5 FILES LEFT"))
-      .toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Tasks" }))
       .toHaveTextContent("1/4 · 3 项未完成");
     const mission = screen.getByRole("complementary", {

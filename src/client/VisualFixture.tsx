@@ -208,13 +208,13 @@ const activityByWorkspace = new Map<string, ProjectActivitySummary>([
   }],
 ]);
 
-const DEFAULT_COMMITMENT_REASON = "只添加开发 fixture、截图入口与对应验证。";
+const DEFAULT_ACTIVE_TASK = "只添加开发 fixture、截图入口与对应验证。";
 const LONG_TOOL_OUTPUT = Array.from(
   { length: 28 },
   (_, index) => `${String(index + 1).padStart(2, "0")} | visual-ledger-check | ${index % 3 === 0 ? "PASS" : "STABLE"}`,
 ).join("\n");
 
-function createChat(commitmentReason: string): ChatState {
+function createChat(): ChatState {
   return {
   focus: {
     sessionId: "session-visual-fixture",
@@ -261,17 +261,23 @@ function createChat(commitmentReason: string): ChatState {
       }],
       status: "done",
     }, {
-      id: "tool-budget",
-      name: "request_edit_budget",
+      id: "tool-todo-write",
+      name: "todo_write",
       args: {
-        fileCount: 5,
-        reason: commitmentReason,
+        items: [{
+          id: "visual-fixture",
+          text: DEFAULT_ACTIVE_TASK,
+          status: "active",
+        }],
       },
       result: {
         details: {
-          outcome: "edit_budget_granted",
-          grantedFiles: 5,
-          remainingFiles: 4,
+          items: [{
+            id: "visual-fixture",
+            text: DEFAULT_ACTIVE_TASK,
+            status: "active",
+          }],
+          armed: true,
         },
       },
       status: "done",
@@ -348,7 +354,7 @@ function createChat(commitmentReason: string): ChatState {
       text: "生产 DOM 与 CSS 边界已就位。",
     }, {
       kind: "tool",
-      toolId: "tool-budget",
+      toolId: "tool-todo-write",
     }, {
       kind: "text",
       text: "编辑范围已经锁定，现在运行视觉验证。",
@@ -385,7 +391,7 @@ function createChat(commitmentReason: string): ChatState {
   };
 }
 
-const chat = createChat(DEFAULT_COMMITMENT_REASON);
+const chat = createChat();
 const noOp = () => undefined;
 const activeConversationOrdinal = conversationDisplayOrdinal(
   conversations,
@@ -397,10 +403,8 @@ const conversationTitleLookup = createConversationTitleLookup(
 );
 
 export function VisualFixture({
-  commitmentReason,
   showComposerStates = false,
 }: {
-  commitmentReason?: string;
   showComposerStates?: boolean;
 } = {}) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -410,9 +414,7 @@ export function VisualFixture({
   const [mobileScene, setMobileScene] = useState<"workspaces" | "conversations" | "chat">(
     "conversations",
   );
-  const fixtureChat = commitmentReason === undefined
-    ? chat
-    : createChat(commitmentReason);
+  const fixtureChat = chat;
 
   return <div className="workbench" data-visual-fixture="populated-workbench">
     <WorkspaceRail

@@ -5,12 +5,14 @@ import {
   MAX_SESSION_MESSAGE_SUMMARY_BYTES,
   MAX_SESSION_MESSAGE_SUMMARY_CHARACTERS,
 } from "../shared/protocol.js";
+import { EDIT_BUDGET_CUSTOM_TYPE } from "./edit-budget.js";
 import {
   COMPACTION_THRESHOLD_CUSTOM_TYPE,
   CONVERSATION_CARD_CUSTOM_TYPE,
   CONVERSATION_MESSAGE_CUSTOM_TYPE,
   CONVERSATION_META_CUSTOM_TYPE,
   CONVERSATION_ROLE_CHANGE_CUSTOM_TYPE,
+  EDIT_GATE_CUSTOM_TYPE,
   MAX_CONVERSATION_BODY_BYTES,
   MAX_CONVERSATION_MESSAGE_CONTENT_BYTES,
   MAX_ROLE_SYSTEM_PROMPT_BYTES,
@@ -26,7 +28,7 @@ import {
   createCompactionThresholdEntry,
   createConversationCardEntry,
   createConversationMessageEntry,
-  createEditBudgetEntry,
+  createEditGateEntry,
   createConversationMetaEntry,
   createConversationRoleChangeEntry,
   createMetaOperationEntry,
@@ -38,7 +40,7 @@ import {
   normalizeConversationMessageSummary,
   parseConversationCardEntry,
   parseCompactionThresholdEntry,
-  parseEditBudgetEntry,
+  parseEditGateEntry,
   parseConversationMessageEntry,
   parseConversationMetaEntry,
   parseConversationRoleChangeEntry,
@@ -228,18 +230,23 @@ describe("conversation reserved entries", () => {
 
   it("keeps edit-budget grants and irreversible charges as reserved entries", () => {
     const runId = randomUUID();
-    const grant = createEditBudgetEntry({
-      kind: "grant",
-      runId,
-      fileCount: 1,
-    });
-    const charge = createEditBudgetEntry({
-      kind: "charge",
-      runId,
-      pathKey: "/project/src/file.ts",
-    });
+    const grant = {
+      customType: EDIT_BUDGET_CUSTOM_TYPE,
+      data: {
+        kind: "grant" as const,
+        runId,
+        fileCount: 1,
+      },
+    };
+    const charge = {
+      customType: EDIT_BUDGET_CUSTOM_TYPE,
+      data: {
+        kind: "charge" as const,
+        runId,
+        pathKey: "/project/src/file.ts",
+      },
+    };
 
-    expect(parseEditBudgetEntry(grant)).toEqual(grant);
     expect(parseReservedConversationEntry(charge)).toEqual({
       kind: "edit_budget",
       entry: charge,
@@ -249,11 +256,25 @@ describe("conversation reserved entries", () => {
     expect(() => aggregateReservedConversationEntries([charge])).toThrow(
       /exceeds the granted file count/i,
     );
-    expect(() => createEditBudgetEntry({
-      kind: "charge",
-      runId,
-      pathKey: "\0",
+    expect(() => parseReservedConversationEntry({
+      customType: EDIT_BUDGET_CUSTOM_TYPE,
+      data: { kind: "charge", runId, pathKey: "\0" },
     })).toThrow(/pathKey/i);
+  });
+
+  it("persists a one-time first-write gate without entering model context", () => {
+    const entry = createEditGateEntry({ runId: randomUUID() });
+
+    expect(entry.customType).toBe(EDIT_GATE_CUSTOM_TYPE);
+    expect(parseEditGateEntry(entry)).toEqual(entry);
+    expect(parseReservedConversationEntry(entry)).toEqual({
+      kind: "edit_gate",
+      entry,
+    });
+    expect(aggregateReservedConversationEntries([entry]))
+      .toMatchObject({ editGateRunIds: [entry.data.runId] });
+    expect(() => createEditGateEntry({ runId: "not-a-run-id" }))
+      .toThrow(/runId/i);
   });
 
   it("keeps the latest valid conversation compaction threshold", () => {

@@ -51,7 +51,7 @@ export function createLoopListTools(service: LoopListToolService): ToolDefinitio
       description: "Replace this conversation's full bounded task list. Each item is pending, active, or completed; multiple items may be active. Preserve stable item IDs for continuing items. Writing arms or resumes non-completed work.",
       promptGuidelines: [
         "Replace the full list; there are no item-by-item mutation tools.",
-        "Mark at least one current task active before requesting edit budget, and update statuses as progress changes.",
+        "Before the first builtin edit or write in a run, mark at least one current task active; update statuses as progress changes.",
       ],
       parameters: writeSchema,
       async execute(_toolCallId, input) {

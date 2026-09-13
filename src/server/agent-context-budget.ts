@@ -88,7 +88,6 @@ function createTelemetry(
 function createWorkHint(
   active: Array<{ id: string; text: string }>,
   elapsed?: LoopListElapsedMinutes,
-  editLeft?: number,
 ): string {
   const elapsedFields = elapsed === undefined
     ? {}
@@ -102,7 +101,6 @@ function createWorkHint(
       active: active.slice(0, included),
       ...(omitted > 0 ? { omitted } : {}),
       ...elapsedFields,
-      ...(editLeft === undefined ? {} : { editLeft }),
     })}`;
     if (Buffer.byteLength(record, "utf8") <= PIWEB_WORK_RECORD_MAX_BYTES) {
       return record;
@@ -113,7 +111,6 @@ function createWorkHint(
     active: [],
     omitted: active.length,
     ...elapsedFields,
-    ...(editLeft === undefined ? {} : { editLeft }),
   })}`;
 }
 
@@ -179,7 +176,6 @@ export function installAgentContextBudget(
   session: AgentSession,
   getLoopList: () => LoopList,
   getCompactionThresholdPercent?: () => number,
-  getEditBudgetRemainingFiles?: () => number | undefined,
   getLoopListElapsedMinutes?: () => LoopListElapsedMinutes | undefined,
   computerProviderImage?: ComputerProviderImageResolver,
 ): AgentContextBudgetController {
@@ -231,19 +227,7 @@ export function installAgentContextBudget(
         // The active-work reminder remains useful without this optional fact.
       }
     }
-    let editBudgetRemainingFiles: number | undefined;
-    if (getEditBudgetRemainingFiles) {
-      try {
-        editBudgetRemainingFiles = getEditBudgetRemainingFiles();
-      } catch {
-        // The active-work reminder remains useful without this optional fact.
-      }
-    }
-    const workHint = createWorkHint(
-      active,
-      elapsedMinutes,
-      editBudgetRemainingFiles,
-    );
+    const workHint = createWorkHint(active, elapsedMinutes);
 
     let telemetry: string | undefined;
     if (getCompactionThresholdPercent) {

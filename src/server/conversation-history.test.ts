@@ -4,6 +4,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import { MAX_MODEL_REFERENCE_BYTES } from "../shared/protocol.js";
 import { COMPACTION_PROVENANCE_NAMESPACE } from "./compaction-provenance.js";
+import { EDIT_BUDGET_CUSTOM_TYPE } from "./edit-budget.js";
 import {
   MAX_AGENT_PEEK_BYTES,
   MAX_AGENT_PEEK_ITEMS,
@@ -20,7 +21,6 @@ import {
   createConversationCardEntry,
   createConversationMessageEntry,
   createConversationMetaEntry,
-  createEditBudgetEntry,
   createRunSettlementEntry,
 } from "./conversation-meta.js";
 
@@ -1171,11 +1171,11 @@ describe("projectConversationHistory", () => {
       finalText: "Internal settlement",
       settledAt: "2026-07-19T10:03:00.000Z",
     }));
-    appendReservedCustomEntry(manager, createEditBudgetEntry({
+    manager.appendCustomEntry(EDIT_BUDGET_CUSTOM_TYPE, {
       kind: "grant",
       runId: randomUUID(),
       fileCount: 1,
-    }));
+    });
     const resume = createCompactionResumeEntry({
       content:
         "Continue the unfinished task from the retained context.",

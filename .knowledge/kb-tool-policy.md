@@ -33,7 +33,7 @@ conversation role snapshot
 
 ## 策略
 
-- `full_access` 在角色授权层允许所有工具和命令，不区分来源或目标位置；项目外路径和 `.piweb` 也不额外拦截。ConversationActor 另对 builtin `edit/write` 执行 run-scoped 编辑额度门，它是认知承诺而不是权限或路径 sandbox，`bash`、脚本和扩展工具仍可绕过。
+- `full_access` 在角色授权层允许所有工具和命令，不区分来源或目标位置；项目外路径和 `.piweb` 也不额外拦截。ConversationActor 另对 builtin `edit/write` 执行 run-scoped 首次写入 LoopList 门，它是认知承诺而不是权限或路径 sandbox，`bash`、脚本和扩展工具仍可绕过。
 - `read_only` 对模型只展示 `source=builtin` 的 Pi 原生 `read / grep / find / ls`，以及 `source=sdk` 的宿主受审查 `bash`、conversation-scoped `notebook_write / notebook_list / notebook_grep / notebook_read`、本机时间 `current_time`、只读 LSP `lsp_symbols / lsp_definition / lsp_references`、LoopList `todo_read / todo_write / todo_pause`、`request_context_compaction` 和 `list_roles / read_role / propose_role_revision`；builtin `bash`、`edit / write`、会话编排 meta 和其他扩展工具不进入有效 registry、model tools 或 system prompt。
 - 执行 gate 独立重复同一 identity 约束；`read_only` 直接拒绝项目写入、unknown、会话编排 meta，以及同名 builtin/extension/project Bash。宿主 Bash、`current_time` 和三个角色工具只有 `source=sdk` 时放行；工具不可见不是权限边界，硬拒绝仍不可删除。
 - 扩展可以用 `read` 等名称覆盖内置工具；策略必须同时检查最终 `toolName` 和 SDK `ToolInfo.sourceInfo.source`，不能只按名称放行。PiRuntime 对每次 `setActiveToolsByName`（包括 extension refresh 和 `setActiveTools`）重新做 source-aware 投影，同名覆盖发生后宁可移除该工具，也不把扩展 schema/snippet 暴露给只读模型。
@@ -72,7 +72,6 @@ all roles: notebook_write / notebook_list / notebook_grep / notebook_read
 all roles: current_time（本机 RFC 3339 offset 时间与 IANA 时区）
 all roles: lsp_symbols / lsp_definition / lsp_references（已配置启用的本机 LSP，无信任询问）
 all roles: todo_read / todo_write / todo_pause
-full_access only: request_edit_budget
 all roles: request_context_compaction
 all roles: list_roles / read_role / propose_role_revision
 canManageSessions only: list_sessions / current_session / peek_session
@@ -82,11 +81,11 @@ canManageSessions only: wait_for_session / abort_session / delete_session
 
 这些宿主 schema 同样避免 `anyOf/oneOf`，以兼容对工具 schema 子集较严格的 provider。`current_time` 在单次调用中读取本机 civil clock，返回带 offset 的 RFC 3339 `localTime` 和 IANA `timeZone`；它不从模型知识推测时间、不持久化，也不扩大浏览器协议。
 
-### 编辑额度承诺
+### 首次写入 LoopList 门控
 
-新 RunTicket 从零额度开始；recovered exact run 则从 active branch 的 durable journal 回放。`request_edit_budget(fileCount, reason)` 只在 `full_access` 会话注册，单次声明本 run 预计修改的 1–100 个 distinct file 总数，理由 trim 后必须非空且不超过 2000 字符；每次实际授予前，ConversationActor 的权威 LoopList 都必须至少有一个 `status=active` 项。参数或 active 前置条件拒绝时不改变 ledger；成功申请先追加 exact-run `piweb.edit_budget.v1` `grant`，再把 `fileCount` 覆盖为当前总额度而非累加；已经 charged 的 canonical path 仍计入该总数，因此缩小到不大于 charged 数会留下零剩余额度。即使列表随后暂停或完成，已授予额度也不追溯撤销；再次覆盖仍重新检查当时的 active 状态。角色 ToolPolicy 先决策，随后只有最终来源为 builtin 的 `edit/write` 才检查额度。目标路径按 Pi 的 path 规范化相对 canonical project cwd 解析；存在文件使用 realpath，不存在目标从最近存在父目录的 realpath 加上未解析后缀得到身份；若路径穿过 dangling symlink chain，则递归按其 target 推导该身份，因而经目录或 final symlink 创建后仍与同一路径重试相同；遇到非目录父项时保留 Pi 的规范化绝对路径并让 builtin 报错。Windows identity 大小写折叠。每个新的 canonical path 都必须在 builtin 调用前同步追加不可逆 `charge`；无论调用随后成功、报错、abort 或进程崩溃，该 charge 都占一格，同路径重试不重复占用。因为 Pi 的写入可在错误前已生效，不能按错误释放额度；completion 只记录当前进程实际观察到的成功 touch，并以同一 run 的 AbortSignal + toolCallId 关联，旧 run 的迟到结果不能修改新 ticket。
+角色 ToolPolicy 先决策；只有 `full_access` run 中最终来源为 builtin 的 `edit/write` 才受此门控。同一逻辑 run 的第一次这类调用前，ConversationActor 的权威 LoopList 必须至少有一个 `status=active` 项。路径参数为非空 string 且条件满足时，宿主在真正 builtin 执行前同步追加 non-context 的 exact-run `piweb.edit_gate.v1` marker；持久化失败就 fail closed，不执行写入。marker 一旦写成，当前 run 后续所有 builtin `edit/write` 都直接通过这项检查，即使 LoopList 随后暂停、完成或没有 active 项。它是一次性“已获准尝试”的记录，不等工具成功、路径可写或 provider 结果返回，以免部分写入、错误或进程替换后重新收紧同一 run。
 
-工具结果只报告 `grantedFiles / chargedFiles / touchedFiles / remainingFiles / blockedAttempts` 等可观察事实；`chargedFiles` 是已获准执行而保守占位的 distinct path 数，`touchedFiles` 仅是本进程实际观察成功的数，二者不得互相伪装。`grantedFiles` 是本次覆盖后的总额度，不把声明时刻伪装成“已遵守”。SDK extension 的 `tool_result` hook 先运行；即使该 hook 在 builtin 已成功后抛错，ledger 仍按原始 execute 状态记账，而原异常继续传播。普通 object details 可附加 `piwebEditBudget`，非对象 details 不覆盖。`grant` 与 `charge` 是 raw non-context reserved entries，不进入模型或聊天投影；同一 active branch 的 recovered exact run 从它们回放 cap 与 charged paths，旧无记录 run 的 cap 为零，不能从工具卡、Git 或文件状态猜测。它仍不宣称覆盖 `bash` 或进程内项目扩展。
+recovered exact run 从 active branch 的 marker 恢复该 latch。为保持旧 JSONL 可打开，解析器仍严格验证历史 `piweb.edit_budget.v1` 的 `grant/charge` journal；同一 run 的有效 legacy `charge` 也作为过去已经通过写入准入的兼容证据。旧条目不再注册工具、不产生新条目、不授予新 run 权限，也不投影额度。没有 path canonicalization、distinct-file cap、completion accounting、`piwebEditBudget` details 或 provider `editLeft` 提示；该门控仍不宣称覆盖 `bash` 或进程内项目扩展。
 
 它们仍是 Agent 工具调用，不是绕过 gate 的内部 RPC：
 

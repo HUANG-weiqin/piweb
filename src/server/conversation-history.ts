@@ -660,6 +660,7 @@ export function projectConversationItemSlots(
       reserved.kind === "conversation_meta"
       || reserved.kind === "conversation_role_change"
       || reserved.kind === "run_settlement"
+      || reserved.kind === "edit_gate"
       || reserved.kind === "edit_budget"
       || reserved.kind === "message_delivery_receipt"
       || reserved.kind === "meta_operation"

@@ -212,7 +212,6 @@ describe("installAgentContextBudget", () => {
         armed: true,
       }),
       () => 70,
-      () => 0,
       () => ({ activeMin: 3, listMin: 11 }),
     );
 
@@ -227,7 +226,7 @@ describe("installAgentContextBudget", () => {
           type: "text",
           text: [
             "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
-            "piweb_work={\"active\":[{\"id\":\"inspect\",\"text\":\"Inspect image\"}],\"activeElapsedMinutes\":3,\"loopListElapsedMinutes\":11,\"editLeft\":0}",
+            "piweb_work={\"active\":[{\"id\":\"inspect\",\"text\":\"Inspect image\"}],\"activeElapsedMinutes\":3,\"loopListElapsedMinutes\":11}",
           ].join("\n"),
         },
       ],
@@ -314,7 +313,6 @@ describe("installAgentContextBudget", () => {
       session,
       getLoopList,
       () => 70,
-      undefined,
       getElapsedMinutes,
     );
 
@@ -341,7 +339,6 @@ describe("installAgentContextBudget", () => {
       contextWindow: 100_000,
       percent: 10,
     }));
-    const getEditBudgetRemainingFiles = vi.fn(() => 3);
     const getElapsedMinutes = vi.fn(() => ({ activeMin: 2, listMin: 10 }));
     const { session } = fakeSession({
       original: async () => originalResult,
@@ -354,13 +351,11 @@ describe("installAgentContextBudget", () => {
         armed: true,
       }),
       () => 70,
-      getEditBudgetRemainingFiles,
       getElapsedMinutes,
     );
 
     await expect(session.agent.convertToLlm([])).resolves.toBe(originalResult);
     expect(getContextUsage).not.toHaveBeenCalled();
-    expect(getEditBudgetRemainingFiles).not.toHaveBeenCalled();
     expect(getElapsedMinutes).not.toHaveBeenCalled();
   });
 
@@ -375,7 +370,6 @@ describe("installAgentContextBudget", () => {
       session,
       () => ({ items, armed: true }),
       undefined,
-      () => 7,
       () => ({ activeMin: 9, listMin: 42 }),
     );
 
@@ -386,7 +380,6 @@ describe("installAgentContextBudget", () => {
       omitted: number;
       activeElapsedMinutes: number;
       loopListElapsedMinutes: number;
-      editLeft: number;
     };
 
     expect(Buffer.byteLength(record, "utf8")).toBeLessThanOrEqual(4096);
@@ -395,7 +388,6 @@ describe("installAgentContextBudget", () => {
       "omitted",
       "activeElapsedMinutes",
       "loopListElapsedMinutes",
-      "editLeft",
     ]);
     expect(payload.active).toEqual(
       items.slice(0, payload.active.length).map(({ id, text }) => ({ id, text })),
@@ -404,7 +396,6 @@ describe("installAgentContextBudget", () => {
     expect(payload.omitted).toBeGreaterThan(0);
     expect(payload.activeElapsedMinutes).toBe(9);
     expect(payload.loopListElapsedMinutes).toBe(42);
-    expect(payload.editLeft).toBe(7);
 
     const next = items[payload.active.length]!;
     const oneMore = `piweb_work=${JSON.stringify({
@@ -412,7 +403,6 @@ describe("installAgentContextBudget", () => {
       ...(payload.omitted > 1 ? { omitted: payload.omitted - 1 } : {}),
       activeElapsedMinutes: payload.activeElapsedMinutes,
       loopListElapsedMinutes: payload.loopListElapsedMinutes,
-      editLeft: payload.editLeft,
     })}`;
     expect(Buffer.byteLength(oneMore, "utf8")).toBeGreaterThan(4096);
   });
@@ -692,7 +682,6 @@ describe("installAgentContextBudget", () => {
       () => ({ items: [], armed: false }),
       undefined,
       undefined,
-      undefined,
       {
         get: () => ({
           sourceToolCallId: "capture-call",
@@ -764,7 +753,6 @@ describe("installAgentContextBudget", () => {
       () => ({ items: [], armed: false }),
       undefined,
       undefined,
-      undefined,
       {
         get: () => ({
           sourceToolCallId: "capture-call",
@@ -808,7 +796,6 @@ describe("installAgentContextBudget", () => {
     installAgentContextBudget(
       session,
       () => ({ items: [], armed: false }),
-      undefined,
       undefined,
       undefined,
       {
@@ -855,7 +842,6 @@ describe("installAgentContextBudget", () => {
     installAgentContextBudget(
       session,
       () => ({ items: [], armed: false }),
-      undefined,
       undefined,
       undefined,
       {
