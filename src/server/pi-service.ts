@@ -103,9 +103,6 @@ function assertNever(value: never): never {
 
 export const MAX_PROJECT_SNAPSHOT_BYTES = 750_000;
 
-const MAX_PROJECT_SNAPSHOT_PROOF_RETRIES = 6;
-const PROJECT_SNAPSHOT_PROOF_RETRY_DELAY_MS = 250;
-
 type ProjectSnapshotEvent = Extract<
   ServerEvent,
   { type: "project_snapshot" }
@@ -1784,7 +1781,6 @@ case "set_thinking":
     const view = refresh.view;
     let latestError: unknown;
     let latestFailed = false;
-    let proofRetries = 0;
     try {
       do {
         refresh.trailing = false;
@@ -1799,22 +1795,6 @@ case "set_thinking":
         } catch (error) {
           latestError = error;
           latestFailed = true;
-          // A concurrent writer voids the scan's proof, not its obligation:
-          // the browser still needs an authoritative membership result so a
-          // deleted conversation can leave its list. Retry past the store's
-          // tight fingerprint retries, then fall back to the index projection
-          // so a permanently busy directory cannot hold this refresh forever.
-          if (
-            error instanceof SessionDirectoryChangedError
-            && proofRetries < MAX_PROJECT_SNAPSHOT_PROOF_RETRIES
-          ) {
-            proofRetries += 1;
-            await new Promise<void>((resolve) => {
-              setTimeout(resolve, PROJECT_SNAPSHOT_PROOF_RETRY_DELAY_MS);
-            });
-            if (!this.isCurrentCoordinatedView(view)) return;
-            refresh.trailing = true;
-          }
         }
       } while (
         refresh.trailing
