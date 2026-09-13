@@ -1,6 +1,6 @@
 # 项目与持久会话
 
-`updated: 2026-09-11`
+`updated: 2026-09-13`
 
 ## 这个模块是干什么的
 
@@ -143,7 +143,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 消息与忙闲无关，随时可发；工作台不再拥有持久 pending prompt 队列、pump 或 batch guidance。
 
 - normal 且由用户创建的 conversation 在首次 browser run 启动时可异步生成标题：仅当从未出现 `session_info` 且没有 message/custom-message/compaction context 时，使用冻结模型，经 captured runtime 的 `AgentSession.agent.streamFunction` 发起无工具、无 transcript 的隔离请求，携带该 Pi session 的 `sessionId` 与 `transport`，保留 SDK 认证、provider 请求头与重试边界，不启动 Agent turn。输出清理为单行并按 24 个 Unicode 字符裁剪；普通失败、15 秒超时或空输出使用候选“新任务”。actor 仍同步发布 `run_queued`，正式 `AgentSession.prompt(originalText)` 与主 run settlement 都不等待标题请求或标题持久化。
-- 标题候选仅由 ConversationActor 易失持有；同一 captured runtime 仍健康、没有 active run/compaction/rewind/role switch 时才同步提交。任何 `session_info`（包括人工清空）都优先；任一 actor run 的 abort、fatal、dispose 或 runtime 替换都会取消候选，迟到或忽略 signal 的 provider 结果没有追加权。正常或失败的主 run 结算不取消标题，候选可在随后安全 idle 边界提交；不增加后台 run、持久队列或恢复状态。
+- 标题候选仅由 ConversationActor 易失持有；同一 captured runtime 仍健康、没有 active run/compaction/rewind/role switch 时才同步提交。任何 `session_info`（包括人工清空）都优先；任一 actor run 的 abort、fatal、dispose 或 runtime 替换都会取消候选，迟到或忽略 signal 的 provider 结果没有追加权。正常或失败的主 run 结算不取消标题，候选可在随后安全 idle 边界提交；不增加后台 run、持久队列或恢复状态。候选生成后，Coordinator 只可为仍存活 actor 的浏览器项目列表临时投影其名称，便于首轮长 run 及时显示；该 preview 不进入 ProjectStore catalog、JSONL、恢复或自动命名资格，失效时必须撤回。
 - 提交沿用当前 writer-owned、已由宿主落盘并 reopen 的 SessionManager 的同步 `setSessionName()` 边界，不再另做完整 JSONL inspection 门。成功后更新项目展示；若 setter 已改内存再抛错，使用现有 session-persistence quarantine 拒绝后续写入并报告错误，不能回滚或改写已经完成的主 run settlement。此保证不泛化到尚未持久化的新建 Pi manager；全项目 catalog refresh 也不是 durable proof。
 - Coordinator 对已经确认 live 且 `running | waiting` 的 exact actor 无 await 地直调 admission，不排在无关 conversation 的项目 lifecycle 长任务后；closing/deleting、actor identity 与 Actor 自身 gate 仍逐层校验。idle、queued 或 race-to-idle 不经此捷径启动新 run，仍走既有 lifecycle 与 inbox-first 路径。
 - busy 时浏览器 `prompt`（带 promptId）只在 actor phase 为 `running | waiting` 且 `session.isStreaming=true` 时由 actor 调用 `session.prompt(text, { streamingBehavior: "steer", preflightResult })`；pre-stream 窗口必须在触碰 SDK 前拒绝，否则 SDK 会把 steer-mode prompt 当成新 run。busy 的 `/` 前缀 prompt 也在 SDK 前拒绝，因为 Pi 会先 await command lookup，越过宿主的同步对象身份捕获边界；idle slash 仍由普通 run 路径处理。注册了 input extension handler 时同样拒绝 busy browser prompt，因为 handler 可 `handled` 而不入队。真正接受后，消息在当前 assistant turn 工具调用全部结束、下一次模型调用前注入。会话创建时把 `steeringMode` 固定为 `all`：排队消息一次模型轮次全部注入，inbox 消息同队列同样批量。宿主零 pump/零重建。idle 时经 project lifecycle 起新 run，且不越过已有 inbox 工作。

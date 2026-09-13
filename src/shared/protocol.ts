@@ -867,6 +867,8 @@ export interface ConversationSummary {
   id: string;
   rootConversationId?: string;
   name?: string;
+  /** Volatile generated title for an active, not-yet-durable first run. */
+  autoTitlePreview?: string;
   preview: string;
   createdAt: string;
   updatedAt: string;
@@ -1619,6 +1621,10 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
       name: boundedCharactersString(
         MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
         "conversation.name",
+      ).optional(),
+      autoTitlePreview: boundedCharactersString(
+        MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
+        "conversation.autoTitlePreview",
       ).optional(),
       preview: z.string()
         .max(MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS),

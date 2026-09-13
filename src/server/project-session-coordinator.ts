@@ -982,6 +982,11 @@ export class ProjectSessionCoordinator {
       ).rootConversationId;
       return {
         ...summary,
+        ...(
+          summary.name === undefined && actorState?.autoTitlePreview !== undefined
+            ? { autoTitlePreview: actorState.autoTitlePreview }
+            : {}
+        ),
         rootConversationId,
         role: {
           id: profile.role.id,
@@ -2917,6 +2922,15 @@ export class ProjectSessionCoordinator {
             await this.reconcileInbox(context, conversationId);
           }),
         );
+      }
+      if (
+        event.type === "summary_changed"
+        && !context.closing
+        && !context.deleting.has(conversationId)
+        && context.actors.get(conversationId) === actor
+        && !actor.getState().disposed
+      ) {
+        this.emit(context, { type: "project_summary_changed" });
       }
       if (
         event.type === "compaction"

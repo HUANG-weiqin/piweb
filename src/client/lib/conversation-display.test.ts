@@ -46,6 +46,10 @@ describe("conversation display titles", () => {
     expect(conversationDisplayTitle(summary("long", {
       name: "会".repeat(30),
     }))).toBe(`${"会".repeat(23)}…`);
+    expect(conversationDisplayTitle(summary("pending-title", {
+      name: undefined,
+      autoTitlePreview: "生成中的自动标题",
+    }))).toBe("生成中的自动标题");
     expect(lookup.get(first.id)).toBe("重复标题 #11111111");
     expect(lookup.get(second.id)).toBe("重复标题 #22222222");
     expect(lookup.get(untitled.id)).toBe("新会话");

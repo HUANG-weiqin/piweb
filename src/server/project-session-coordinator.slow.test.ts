@@ -785,6 +785,55 @@ describe("ProjectSessionCoordinator", () => {
     expect(setSessionName).not.toHaveBeenCalled();
   });
 
+  it("projects a ready automatic title before its writer becomes idle", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const title = deferred<AssistantMessage>();
+    const started = deferred();
+    const release = deferred();
+    fixture.runtime.titleImplementation = async () => title.promise;
+    fixture.runtime.control(actor.conversationId).enqueue(
+      blocksUntil(started, release),
+    );
+    let summaryChanges = 0;
+    const unsubscribe = fixture.coordinator.subscribe(fixture.handle, (event) => {
+      if (event.type === "project_summary_changed") summaryChanges++;
+    });
+    const running = fixture.coordinator.prompt(
+      fixture.handle,
+      actor.conversationId,
+      RUN_A,
+      "Generate a visible title before this work finishes",
+    );
+    try {
+      await started.promise;
+      title.resolve(automaticTitleMessage("Visible before settle"));
+      await vi.waitFor(() => {
+        expect(summaryChanges).toBeGreaterThan(0);
+        const summary = fixture.coordinator.projectSessionsFromCurrentIndex(
+          fixture.handle,
+        ).find(({ id }) => id === actor.conversationId);
+        expect(summary?.name).toBeUndefined();
+        expect(summary?.autoTitlePreview).toBe("Visible before settle");
+      });
+      expect(actor.sessionManager.getSessionName()).toBeUndefined();
+
+      release.resolve();
+      await running;
+      await vi.waitFor(() => expect(actor.sessionManager.getSessionName())
+        .toBe("Visible before settle"));
+      expect(actor.getState()).not.toHaveProperty("autoTitlePreview");
+    } finally {
+      release.resolve();
+      title.resolve(automaticTitleMessage("cleanup"));
+      await running.catch(() => undefined);
+      unsubscribe();
+    }
+  });
+
   it("resyncs compacting summary when a deletion reservation rolls back", async () => {
     const fixture = await createFixture();
     const actor = await fixture.coordinator.createUserConversation(

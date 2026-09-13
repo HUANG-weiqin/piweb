@@ -220,10 +220,25 @@ export function projectConversationIndex(
           conversation.name,
           MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
         );
-    if (preview.truncated || name?.truncated === true) truncated = true;
+    const autoTitlePreview = conversation.autoTitlePreview === undefined
+      ? undefined
+      : clip(
+          conversation.autoTitlePreview,
+          MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
+        );
+    if (
+      preview.truncated
+      || name?.truncated === true
+      || autoTitlePreview?.truncated === true
+    ) truncated = true;
     projected.push({
       ...conversation,
       ...(name === undefined ? {} : { name: name.value }),
+      ...(
+        autoTitlePreview === undefined
+          ? {}
+          : { autoTitlePreview: autoTitlePreview.value }
+      ),
       preview: preview.value,
     });
   }

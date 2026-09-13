@@ -151,6 +151,8 @@ export interface ConversationActorState {
   profile: ConversationMeta;
   activity: ConversationActivity;
   compacting: boolean;
+  /** Generated auto-title available for live presentation, not yet durable. */
+  autoTitlePreview?: string;
   compactionAttempt?: PublicCompactionAttempt;
   fatalError?: string;
   disposed: boolean;
@@ -178,6 +180,11 @@ export type ConversationActorEvent =
       type: "compaction";
       conversationId: string;
       compacting: boolean;
+    }
+  | {
+      /** A presentation-only conversation summary value changed. */
+      type: "summary_changed";
+      conversationId: string;
     }
   | {
       type: "context_usage";
@@ -1613,11 +1620,18 @@ export class ConversationActor {
 
   getState(): ConversationActorState {
     const compactionAttempt = this.getCompactionAttempt();
+    const autoTitlePreview = this.initialTitle?.title;
     return {
       conversationId: this.conversationId,
       profile: this.profile,
       activity: this.getActivity(),
       compacting: this.compacting,
+      ...(
+        autoTitlePreview === undefined
+        || this.sessionManager.getEntries().some(hasSessionNameIntent)
+          ? {}
+          : { autoTitlePreview }
+      ),
       ...(compactionAttempt === undefined ? {} : { compactionAttempt }),
       ...(this.fatalError === undefined
         ? {}
@@ -3193,13 +3207,19 @@ export class ConversationActor {
     if (this.initialTitle !== work) return;
     this.initialTitle.title = generatedTitle;
     this.commitInitialTitleIfIdle();
+    // The durable writer remains busy, but the generated candidate is useful
+    // to the browser immediately. It stays actor-owned and disappears on any
+    // invalidation; the actual session name is still set only at idle.
+    if (this.initialTitle === work) this.emitSummaryChanged();
   }
 
   private cancelInitialTitle(): void {
     const work = this.initialTitle;
     if (!work) return;
+    const hadPreview = work.title !== undefined;
     this.initialTitle = undefined;
     work.controller.abort();
+    if (hadPreview) this.emitSummaryChanged();
   }
 
   private commitInitialTitleIfIdle(): void {
@@ -4131,6 +4151,13 @@ export class ConversationActor {
       type: "compaction",
       conversationId: this.conversationId,
       compacting: this.compacting,
+    });
+  }
+
+  private emitSummaryChanged(): void {
+    this.emit({
+      type: "summary_changed",
+      conversationId: this.conversationId,
     });
   }
 

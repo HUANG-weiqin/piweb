@@ -10,9 +10,10 @@ export function shortConversationHandle(conversationId: string): string {
 }
 
 export function conversationDisplayTitle(
-  conversation: Pick<ConversationSummary, "name" | "preview">,
+  conversation: Pick<ConversationSummary, "name" | "autoTitlePreview" | "preview">,
 ): string {
   const title = conversation.name?.trim()
+    || conversation.autoTitlePreview?.trim()
     || conversation.preview.trim()
     || "新会话";
   const characters = [...title];

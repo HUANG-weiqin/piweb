@@ -1282,12 +1282,53 @@ describe("ConversationActor", () => {
       const running = fixture.actor.startPrompt({ runId: RUN_A, text: "work first", origin: "browser" });
       await started.promise;
       title.resolve(automaticTitleMessage("Ready title"));
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      await vi.waitFor(() => expect(fixture.actor.getState().autoTitlePreview).toBe("Ready title"));
+      expect(fixture.events).toContainEqual({
+        type: "summary_changed",
+        conversationId: CONVERSATION_ID,
+      });
       expect(fixture.manager.getSessionName()).toBeUndefined();
       finish.resolve();
       await running;
       await vi.waitFor(() => expect(fixture.manager.getSessionName()).toBe("Ready title"));
+      expect(fixture.actor.getState()).not.toHaveProperty("autoTitlePreview");
       await fixture.actor.dispose();
+    });
+
+    it("withdraws a ready title preview when its started run is aborted", async () => {
+      const runtime = new FakeRuntime();
+      const title = deferred<AssistantMessage>();
+      const started = deferred();
+      const finish = deferred();
+      runtime.titleImplementation = async () => title.promise;
+      const fixture = await openActor({ runtime });
+      runtime.session.promptImplementation = async () => {
+        started.resolve();
+        await finish.promise;
+      };
+      const running = fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "cancel after showing a title",
+        origin: "browser",
+      });
+      try {
+        await started.promise;
+        title.resolve(automaticTitleMessage("Temporary title"));
+        await vi.waitFor(() => expect(fixture.actor.getState().autoTitlePreview)
+          .toBe("Temporary title"));
+        await fixture.actor.abort(RUN_A);
+        finish.resolve();
+        await expect(running).resolves.toMatchObject({ outcome: "aborted" });
+        expect(fixture.actor.getState()).not.toHaveProperty("autoTitlePreview");
+        expect(fixture.manager.getSessionName()).toBeUndefined();
+        expect(fixture.events.filter((event) => event.type === "summary_changed"))
+          .toHaveLength(2);
+      } finally {
+        finish.resolve();
+        title.resolve(automaticTitleMessage("cleanup"));
+        await running.catch(() => undefined);
+        await fixture.actor.dispose();
+      }
     });
 
     it.each([false, true])("discards a late provider result on abort (later run: %s)", async (laterRun) => {

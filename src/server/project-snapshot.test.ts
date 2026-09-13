@@ -52,11 +52,14 @@ describe("projectConversationIndex", () => {
     const clipped = projectConversationIndex([{
       ...conversation(1),
       name: emoji.repeat(25),
+      autoTitlePreview: emoji.repeat(25),
       preview: emoji.repeat(501),
     }]);
     expect([...clipped.conversations[0]!.name!]).toHaveLength(24);
+    expect([...(clipped.conversations[0]!.autoTitlePreview!)]).toHaveLength(24);
     expect([...clipped.conversations[0]!.preview]).toHaveLength(500);
     expect(clipped.conversations[0]?.name).toBe(`${emoji.repeat(23)}…`);
+    expect(clipped.conversations[0]?.autoTitlePreview).toBe(`${emoji.repeat(23)}…`);
     expect(clipped.conversations[0]?.preview).toBe(`${emoji.repeat(499)}…`);
     expect(() => encodeURIComponent(clipped.conversations[0]!.name!)).not.toThrow();
     expect(() => encodeURIComponent(clipped.conversations[0]!.preview)).not.toThrow();
