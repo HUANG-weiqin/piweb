@@ -2,9 +2,13 @@ import type {
   AgentSession,
   ContextUsage,
 } from "@earendil-works/pi-coding-agent";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LoopList } from "../shared/protocol.js";
-import { installAgentContextBudget } from "./agent-context-budget.js";
+import {
+  CONTEXT_HINT_CUSTOM_TYPE,
+  CONTEXT_HINT_MIN_INTERVAL_MS,
+  installAgentContextBudget,
+} from "./agent-context-budget.js";
 
 type ConvertToLlm = AgentSession["agent"]["convertToLlm"];
 type AgentMessage = Parameters<ConvertToLlm>[0][number];
@@ -45,13 +49,17 @@ function fakeSession({
     percent: 10,
   }),
   agent,
+  streaming = true,
 }: {
   original?: ConvertToLlm;
   getContextUsage?: () => ContextUsage | undefined;
   agent?: AgentSession["agent"];
+  streaming?: boolean;
 } = {}) {
   const sessionMessages = [userMessage("persisted session message")];
   const managerMessages = [userMessage("persisted manager message")];
+  const injections: Array<{ message: Record<string, unknown>; options: unknown }> = [];
+  lastInjections = injections;
   const session = {
     agent: agent ?? {
       convertToLlm: original,
@@ -60,28 +68,52 @@ function fakeSession({
     getContextUsage,
     messages: sessionMessages,
     sessionManager: { messages: managerMessages },
+    isStreaming: streaming,
+    async sendCustomMessage(message: Record<string, unknown>, options?: unknown) {
+      injections.push({ message, options });
+    },
   } as unknown as AgentSession;
-  return { session, sessionMessages, managerMessages };
+  return { session, sessionMessages, managerMessages, injections };
 }
 
-function providerTailText(messages: LlmMessages): string {
-  const last = messages.at(-1);
-  if (!last || (last.role !== "user" && last.role !== "toolResult")) {
-    throw new Error("Expected a final user or tool-result message");
-  }
-  const content = typeof last.content === "string"
-    ? [{ type: "text" as const, text: last.content }]
-    : last.content;
-  const providerTail = content.at(-1);
-  if (providerTail?.type !== "text") throw new Error("Expected provider-tail text");
-  return providerTail.text;
+let lastInjections: Array<{ message: Record<string, unknown>; options: unknown }> = [];
+
+function hintAt(index: number): string {
+  const content = lastInjections[index]?.message.content;
+  if (typeof content !== "string") throw new Error(`No injected context hint at ${index}`);
+  return content;
+}
+
+function telemetryAt(index: number): string {
+  return hintAt(index).split("\n", 1)[0]!;
+}
+
+function providerTailText(_messages: LlmMessages): string {
+  return hintAt(lastInjections.length - 1);
 }
 
 function telemetryText(messages: LlmMessages): string {
   return providerTailText(messages).split("\n", 1)[0]!;
 }
 
+async function withFakeClock<T>(
+  run: (advance: (ms: number) => void) => Promise<T>,
+): Promise<T> {
+  const advance = (ms: number): void => {
+    vi.setSystemTime(new Date(Date.now() + ms));
+  };
+  return await run(advance);
+}
+
 describe("installAgentContextBudget", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-16T00:00:00.000Z"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
   it("calls the original converter first with its receiver and preserves message order", async () => {
     const events: string[] = [];
     const first = {
@@ -130,14 +162,14 @@ describe("installAgentContextBudget", () => {
     expect(receivedMessages).toBe(input);
     expect(result).toHaveLength(originalResult.length);
     expect(result[0]).toBe(first);
-    expect(result[1]).not.toBe(second);
-    expect(result[1]).toMatchObject({ role: "user" });
+    expect(result[1]).toBe(second);
+    expect(result).toBe(originalResult);
   });
 
-  it("appends exact telemetry after the final user content without creating a new turn", async () => {
+  it("injects exact telemetry as a hidden history hint without touching the converted context", async () => {
     const originalMessage = llmUser("continue the long task");
     const originalResult = [originalMessage];
-    const { session } = fakeSession({
+    const { session, injections } = fakeSession({
       original: async () => originalResult,
       getContextUsage: () => ({
         tokens: 51_900,
@@ -149,52 +181,63 @@ describe("installAgentContextBudget", () => {
 
     const result = await session.agent.convertToLlm([userMessage("input")]);
 
-    expect(result).toEqual([{
-      role: "user",
+    expect(result).toBe(originalResult);
+    expect(injections).toHaveLength(1);
+    expect(injections[0]!.message).toEqual({
+      customType: CONTEXT_HINT_CUSTOM_TYPE,
       content: [
-        { type: "text", text: "continue the long task" },
-        {
-          type: "text",
-          text: [
-            "<piweb_ctx used=\"51.9k/272k\" auto_compact=\"70%\" remaining=\"138.5k\" />",
-            ACTIVE_WORK_HINT,
-          ].join("\n"),
-        },
-      ],
-      timestamp: 1,
-    }]);
-    expect(result).toHaveLength(originalResult.length);
+        "<piweb_ctx used=\"51.9k/272k\" auto_compact=\"70%\" remaining=\"138.5k\" />",
+        ACTIVE_WORK_HINT,
+      ].join("\n"),
+      display: false,
+    });
+    expect(injections[0]!.options).toEqual({ triggerTurn: true });
     expect(originalResult).toEqual([originalMessage]);
   });
 
-  it("keeps string content before the appended telemetry", async () => {
-    const originalMessage: LlmMessages[number] = {
-      role: "user",
-      content: "plain context",
-      timestamp: 1,
-    };
-    const { session } = fakeSession({ original: async () => [originalMessage] });
-    installAgentContextBudget(session, getActiveLoopList, () => 70);
+  it("injects at most one hint per minute", async () => {
+    await withFakeClock(async (advance) => {
+      const { session, injections } = fakeSession();
+      installAgentContextBudget(session, getActiveLoopList, () => 70);
 
-    const result = await session.agent.convertToLlm([]);
+      await session.agent.convertToLlm([]);
+      advance(59_000);
+      await session.agent.convertToLlm([]);
+      expect(injections).toHaveLength(1);
 
-    expect(result).toEqual([{
-      ...originalMessage,
-      content: [
-        { type: "text", text: "plain context" },
-        {
-          type: "text",
-          text: [
-            "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
-            ACTIVE_WORK_HINT,
-          ].join("\n"),
-        },
-      ],
-    }]);
-    expect(originalMessage.content).toBe("plain context");
+      advance(1_000);
+      await session.agent.convertToLlm([]);
+      expect(injections).toHaveLength(2);
+
+      advance(600_000);
+      await session.agent.convertToLlm([]);
+      expect(injections).toHaveLength(3);
+    });
   });
 
-  it("keeps mixed content before one combined provider-tail part", async () => {
+  it("keeps a non-streaming session on the append-only hint path", async () => {
+    const { session, injections } = fakeSession({ streaming: false });
+    installAgentContextBudget(session, getActiveLoopList, () => 70);
+
+    await session.agent.convertToLlm([]);
+
+    expect(injections).toHaveLength(1);
+    expect(injections[0]!.options).toEqual({ triggerTurn: false });
+  });
+
+  it("fails open when the hint cannot be persisted", async () => {
+    const originalResult = [llmUser("converted")];
+    const { session, injections } = fakeSession({ original: async () => originalResult });
+    session.sendCustomMessage = async () => {
+      throw new Error("history unavailable");
+    };
+    installAgentContextBudget(session, getActiveLoopList, () => 70);
+
+    await expect(session.agent.convertToLlm([])).resolves.toBe(originalResult);
+    expect(injections).toHaveLength(0);
+  });
+
+  it("combines telemetry and elapsed work into one hidden hint", async () => {
     const originalMessage: LlmMessages[number] = {
       role: "user",
       content: [
@@ -204,7 +247,8 @@ describe("installAgentContextBudget", () => {
       timestamp: 1,
     };
     const originalSnapshot = structuredClone(originalMessage);
-    const { session } = fakeSession({ original: async () => [originalMessage] });
+    const originalResult = [originalMessage];
+    const { session } = fakeSession({ original: async () => originalResult });
     installAgentContextBudget(
       session,
       () => ({
@@ -217,24 +261,15 @@ describe("installAgentContextBudget", () => {
 
     const result = await session.agent.convertToLlm([]);
 
-    expect(result).toEqual([{
-      ...originalMessage,
-      content: [
-        { type: "text", text: "inspect this image" },
-        { type: "image", data: "image-data", mimeType: "image/png" },
-        {
-          type: "text",
-          text: [
-            "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
-            "piweb_work={\"active\":[{\"id\":\"inspect\",\"text\":\"Inspect image\"}],\"activeElapsedMinutes\":3,\"loopListElapsedMinutes\":11}",
-          ].join("\n"),
-        },
-      ],
-    }]);
+    expect(result).toBe(originalResult);
+    expect(providerTailText(result)).toBe([
+      "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
+      "piweb_work={\"active\":[{\"id\":\"inspect\",\"text\":\"Inspect image\"}],\"activeElapsedMinutes\":3,\"loopListElapsedMinutes\":11}",
+    ].join("\n"));
     expect(originalMessage).toEqual(originalSnapshot);
   });
 
-  it("preserves a final tool-result role and protocol position for a work-only tail", async () => {
+  it("leaves a final tool-result message untouched for a work-only hint", async () => {
     const toolResult: LlmMessages[number] = {
       role: "toolResult",
       toolCallId: "call-1",
@@ -243,7 +278,8 @@ describe("installAgentContextBudget", () => {
       isError: false,
       timestamp: 1,
     };
-    const { session } = fakeSession({ original: async () => [toolResult] });
+    const originalResult = [toolResult];
+    const { session } = fakeSession({ original: async () => originalResult });
     installAgentContextBudget(session, () => ({
       items: [{ id: "verify", text: "Verify output", status: "active" }],
       armed: true,
@@ -251,16 +287,10 @@ describe("installAgentContextBudget", () => {
 
     const result = await session.agent.convertToLlm([]);
 
-    expect(result).toEqual([{
-      ...toolResult,
-      content: [
-        { type: "text", text: "tool output" },
-        {
-          type: "text",
-          text: "piweb_work={\"active\":[{\"id\":\"verify\",\"text\":\"Verify output\"}]}",
-        },
-      ],
-    }]);
+    expect(result).toBe(originalResult);
+    expect(providerTailText(result)).toBe(
+      "piweb_work={\"active\":[{\"id\":\"verify\",\"text\":\"Verify output\"}]}",
+    );
     expect(result).toHaveLength(1);
   });
 
@@ -317,13 +347,14 @@ describe("installAgentContextBudget", () => {
     );
 
     const first = await session.agent.convertToLlm([]);
+    vi.setSystemTime(new Date(Date.now() + 60_000));
     const second = await session.agent.convertToLlm([]);
     const neither = await session.agent.convertToLlm([]);
 
-    expect(telemetryText(first)).toBe(
+    expect(hintAt(0)).toBe(
       "piweb_work={\"active\":[{\"id\":\"first\",\"text\":\"First snapshot\"}],\"activeElapsedMinutes\":2,\"loopListElapsedMinutes\":10}",
     );
-    expect(telemetryText(second)).toBe(
+    expect(hintAt(1)).toBe(
       "piweb_work={\"active\":[{\"id\":\"second\",\"text\":\"Latest snapshot\"}],\"activeElapsedMinutes\":3,\"loopListElapsedMinutes\":11}",
     );
     expect(neither).toBe(originalResult);
@@ -332,7 +363,7 @@ describe("installAgentContextBudget", () => {
     expect(getElapsedMinutes).toHaveBeenCalledTimes(2);
   });
 
-  it("omits the whole transient tail when no work is active", async () => {
+  it("omits the hint when no work is active", async () => {
     const originalResult = [llmUser("converted")];
     const getContextUsage = vi.fn(() => ({
       tokens: 10_000,
@@ -355,6 +386,7 @@ describe("installAgentContextBudget", () => {
     );
 
     await expect(session.agent.convertToLlm([])).resolves.toBe(originalResult);
+    expect(lastInjections).toHaveLength(0);
     expect(getContextUsage).not.toHaveBeenCalled();
     expect(getElapsedMinutes).not.toHaveBeenCalled();
   });
@@ -423,9 +455,10 @@ describe("installAgentContextBudget", () => {
     installAgentContextBudget(session, getActiveLoopList, () => 70);
 
     const below = await session.agent.convertToLlm([]);
+    vi.setSystemTime(new Date(Date.now() + 60_000));
     const at = await session.agent.convertToLlm([]);
 
-    expect(telemetryText(below)).toBe(
+    expect(telemetryAt(0)).toBe(
       "<piweb_ctx used=\"65k/100k\" auto_compact=\"70%\" remaining=\"5k\" />",
     );
     expect(telemetryText(at)).toBe(
@@ -449,12 +482,13 @@ describe("installAgentContextBudget", () => {
     installAgentContextBudget(session, getActiveLoopList, () => 70);
 
     const beforeCompaction = await session.agent.convertToLlm([]);
+    vi.setSystemTime(new Date(Date.now() + 60_000));
     const afterCompaction = await session.agent.convertToLlm([]);
 
-    expect(telemetryText(beforeCompaction)).toContain(
+    expect(telemetryAt(0)).toContain(
       "warning=\"Compaction soon; consider updating Agent Notebook.\"",
     );
-    expect(telemetryText(afterCompaction)).toBe(
+    expect(telemetryAt(1)).toBe(
       "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
     );
   });
@@ -472,12 +506,13 @@ describe("installAgentContextBudget", () => {
     installAgentContextBudget(session, getActiveLoopList, getThreshold);
 
     const first = await session.agent.convertToLlm([]);
+    vi.setSystemTime(new Date(Date.now() + 60_000));
     const second = await session.agent.convertToLlm([]);
 
-    expect(telemetryText(first)).toBe(
+    expect(telemetryAt(0)).toBe(
       "<piweb_ctx used=\"60k/100k\" auto_compact=\"70%\" remaining=\"10k\" />",
     );
-    expect(telemetryText(second)).toBe(
+    expect(telemetryAt(1)).toBe(
       "<piweb_ctx used=\"60k/100k\" auto_compact=\"80%\" remaining=\"20k\" />",
     );
     expect(getContextUsage).toHaveBeenCalledTimes(2);
@@ -520,7 +555,9 @@ describe("installAgentContextBudget", () => {
 
     for (let index = 0; index < 4; index += 1) {
       const result = await session.agent.convertToLlm([]);
-      expect(providerTailText(result)).toBe(ACTIVE_WORK_HINT);
+      expect(result).toBe(originalResult);
+      expect(hintAt(index)).toBe(ACTIVE_WORK_HINT);
+      vi.setSystemTime(new Date(Date.now() + 60_000));
     }
     expect(getContextUsage).toHaveBeenCalledTimes(4);
     expect(getThreshold).toHaveBeenCalledTimes(4);
@@ -563,13 +600,13 @@ describe("installAgentContextBudget", () => {
 
     expect(input).toEqual(inputBefore);
     expect(converted).toEqual(convertedBefore);
-    expect(result).not.toBe(converted);
+    expect(result).toBe(converted);
     expect(sessionMessages).toEqual(sessionBefore);
     expect(managerMessages).toEqual(managerBefore);
     expect(loopList).toEqual(loopListBefore);
   });
 
-  it("fails open when the converted context has no safe final input role", async () => {
+  it("injects the hint even when the final converted message has no user role", async () => {
     const assistant = {
       role: "assistant" as const,
       content: [],
@@ -588,10 +625,15 @@ describe("installAgentContextBudget", () => {
       timestamp: 1,
     };
     const originalResult: LlmMessages = [assistant];
-    const { session } = fakeSession({ original: async () => originalResult });
+    const { session, injections } = fakeSession({ original: async () => originalResult });
     installAgentContextBudget(session, getActiveLoopList, () => 70);
 
     await expect(session.agent.convertToLlm([])).resolves.toBe(originalResult);
+    expect(injections).toHaveLength(1);
+    expect(injections[0]!.message).toMatchObject({
+      customType: CONTEXT_HINT_CUSTOM_TYPE,
+      display: false,
+    });
   });
 
   it("disposes idempotently and restores own and inherited property shapes", () => {

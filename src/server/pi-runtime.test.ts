@@ -700,7 +700,8 @@ describe("PiRuntime session ownership", () => {
     expect(manager.appendCompaction).toBe(nativeAppendCompaction);
   });
 
-  it("projects live context-budget telemetry without creating a trailing user turn", async () => {
+  it("persists the context-budget hint as hidden history and restores the converter", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
     const cwd = await temporaryDirectory("piweb-runtime-context-budget-");
     const manager = SessionManager.inMemory(cwd);
     const projectMessage = {
@@ -756,54 +757,52 @@ describe("PiRuntime session ownership", () => {
     const firstTransformed = await created.session.agent.transformContext!(input);
     const first = await created.session.agent.convertToLlm(firstTransformed);
     thresholdPercent = 80;
+    vi.setSystemTime(new Date(Date.now() + 60_000));
     const secondTransformed = await created.session.agent.transformContext!(input);
     const second = await created.session.agent.convertToLlm(secondTransformed);
 
     expect(firstTransformed).toEqual([input[0], projectMessage]);
     expect(secondTransformed).toEqual([input[0], projectMessage]);
-    expect(first).toEqual([
+    const converted = [
       input[0],
       {
         role: "user",
-        content: [
-          { type: "text", text: "project context" },
-          {
-            type: "text",
-            text: [
-              "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
-              "piweb_work={\"active\":[{\"id\":\"work\",\"text\":\"Active work\"}]}",
-            ].join("\n"),
-          },
-        ],
+        content: [{ type: "text", text: "project context" }],
         timestamp: 1,
       },
-    ]);
-    expect(second.at(-1)).toMatchObject({
-      role: "user",
+    ];
+    expect(first).toEqual(converted);
+    expect(second).toEqual(converted);
+    const hints = manager.getEntries().filter((entry) => entry.type === "custom_message");
+    expect(hints).toHaveLength(2);
+    expect(hints[0]).toMatchObject({
+      customType: "piweb.context_hint.v1",
+      display: false,
       content: [
-        { type: "text", text: "project context" },
-        {
-          type: "text",
-          text: [
-            "<piweb_ctx used=\"10k/100k\" auto_compact=\"80%\" remaining=\"70k\" />",
-            "piweb_work={\"active\":[{\"id\":\"work\",\"text\":\"Active work\"}]}",
-          ].join("\n"),
-        },
-      ],
+        "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
+        "piweb_work={\"active\":[{\"id\":\"work\",\"text\":\"Active work\"}]}",
+      ].join("\n"),
     });
-    expect(second).toHaveLength(secondTransformed.length);
-    expect(created.session.messages).toEqual(sessionMessagesBefore);
-    expect(manager.getEntries()).toEqual(entriesBefore);
+    expect(hints[1]).toMatchObject({
+      content: [
+        "<piweb_ctx used=\"10k/100k\" auto_compact=\"80%\" remaining=\"70k\" />",
+        "piweb_work={\"active\":[{\"id\":\"work\",\"text\":\"Active work\"}]}",
+      ].join("\n"),
+    });
+    expect(created.session.messages.length).toBe(sessionMessagesBefore.length + 2);
     expect(created.session.agent.transformContext).toBe(originalTransform);
     expect(created.session.agent.convertToLlm).not.toBe(originalConverter);
 
     await created.dispose();
     expect(created.session.agent.transformContext).toBe(originalTransform);
     expect(created.session.agent.convertToLlm).toBe(originalConverter);
+    vi.useRealTimers();
   });
 
-  it("projects the latest active LoopList without telemetry and restores the converter", async () => {
+  it("persists the latest active LoopList hint and skips it without active work", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
     const cwd = await temporaryDirectory("piweb-runtime-work-hint-");
+    const manager = SessionManager.inMemory(cwd);
     let originalConverter: unknown;
     const runtime = await testRuntime(
       () => [],
@@ -822,6 +821,7 @@ describe("PiRuntime session ownership", () => {
     let elapsedMinutes = { activeMin: 4, listMin: 12 };
     const getLoopListElapsedMinutes = vi.fn(() => elapsedMinutes);
     const created = await runtime.createSession(cwd, {
+      sessionManager: manager,
       getLoopList,
       getLoopListElapsedMinutes,
     });
@@ -839,6 +839,7 @@ describe("PiRuntime session ownership", () => {
       items: [{ id: "second", text: "Latest active item", status: "active" }],
       armed: true,
     };
+    vi.setSystemTime(new Date(Date.now() + 60_000));
     const second = await created.session.agent.convertToLlm(input);
     loopList = {
       items: [{ id: "done", text: "Finished", status: "completed" }],
@@ -846,38 +847,28 @@ describe("PiRuntime session ownership", () => {
     };
     const noActive = await created.session.agent.convertToLlm(input);
 
-    expect(first.at(-1)).toMatchObject({
-      role: "user",
-      content: [
-        { type: "text", text: "input" },
-        {
-          type: "text",
-          text: "piweb_work={\"active\":[{\"id\":\"first\",\"text\":\"First active item\"}],\"activeElapsedMinutes\":4,\"loopListElapsedMinutes\":12}",
-        },
-      ],
+    expect(first).toEqual(input);
+    expect(second).toEqual(input);
+    expect(noActive).toEqual(input);
+    const hints = manager.getEntries().filter((entry) => entry.type === "custom_message");
+    expect(hints).toHaveLength(2);
+    expect(hints[0]).toMatchObject({
+      customType: "piweb.context_hint.v1",
+      display: false,
+      content: "piweb_work={\"active\":[{\"id\":\"first\",\"text\":\"First active item\"}],\"activeElapsedMinutes\":4,\"loopListElapsedMinutes\":12}",
     });
-    expect(second.at(-1)).toMatchObject({
-      role: "user",
-      content: [
-        { type: "text", text: "input" },
-        {
-          type: "text",
-          text: "piweb_work={\"active\":[{\"id\":\"second\",\"text\":\"Latest active item\"}],\"activeElapsedMinutes\":0,\"loopListElapsedMinutes\":13}",
-        },
-      ],
-    });
-    expect(noActive.at(-1)).toMatchObject({
-      role: "user",
-      content: [{ type: "text", text: "input" }],
+    expect(hints[1]).toMatchObject({
+      content: "piweb_work={\"active\":[{\"id\":\"second\",\"text\":\"Latest active item\"}],\"activeElapsedMinutes\":0,\"loopListElapsedMinutes\":13}",
     });
     expect(getLoopList).toHaveBeenCalledTimes(3);
     expect(getLoopListElapsedMinutes).toHaveBeenCalledTimes(2);
     expect(getContextUsage).not.toHaveBeenCalled();
-    expect(created.session.messages).toEqual(sessionMessagesBefore);
+    expect(created.session.messages.length).toBe(sessionMessagesBefore.length + 2);
     expect(created.session.agent.convertToLlm).not.toBe(originalConverter);
 
     await created.dispose();
     expect(created.session.agent.convertToLlm).toBe(originalConverter);
+    vi.useRealTimers();
   });
 
   it("activates Pi's structured read-only tools by default", async () => {

@@ -8,6 +8,21 @@ type LlmMessages = Awaited<ReturnType<ConvertToLlm>>;
 
 const PIWEB_WORK_RECORD_MAX_BYTES = 4096;
 
+/**
+ * Hidden custom-message type for the per-minute context/work hint.
+ *
+ * The hint is written into session history instead of being attached to the
+ * last provider message as an ephemeral suffix. An ephemeral suffix disappears
+ * on the next request, which stops the provider prefix from being a strict
+ * extension of the previous request and makes the ChatGPT Codex prompt cache
+ * stall (re-billed input grows with every turn). Persisted hints keep every
+ * request append-only.
+ */
+export const CONTEXT_HINT_CUSTOM_TYPE = "piweb.context_hint.v1";
+
+/** At most one hint per minute; the fields it carries are minute-granular. */
+export const CONTEXT_HINT_MIN_INTERVAL_MS = 60_000;
+
 export interface AgentContextBudgetController {
   dispose(): void;
 }
@@ -150,28 +165,6 @@ function appendProviderEvidence(
   };
 }
 
-function appendProviderTail(
-  messages: LlmMessages,
-  providerTail: string,
-): LlmMessages {
-  const lastMessage = messages.at(-1);
-  if (
-    !lastMessage
-    || (lastMessage.role !== "user" && lastMessage.role !== "toolResult")
-  ) {
-    return messages;
-  }
-
-  const tailPart = { type: "text" as const, text: providerTail };
-  const content = typeof lastMessage.content === "string"
-    ? [{ type: "text" as const, text: lastMessage.content }, tailPart]
-    : [...lastMessage.content, tailPart];
-  return [
-    ...messages.slice(0, -1),
-    { ...lastMessage, content },
-  ];
-}
-
 export function installAgentContextBudget(
   session: AgentSession,
   getLoopList: () => LoopList,
@@ -186,6 +179,8 @@ export function installAgentContextBudget(
   }
 
   const hadOwnConverter = Object.hasOwn(agent, "convertToLlm");
+  let lastHintAt: number | undefined;
+
   async function convertToLlm(
     this: AgentSession["agent"],
     messages: AgentMessage[],
@@ -241,8 +236,32 @@ export function installAgentContextBudget(
       }
     }
 
+    const now = Date.now();
+    if (
+      lastHintAt !== undefined
+      && now - lastHintAt < CONTEXT_HINT_MIN_INTERVAL_MS
+    ) {
+      return providerMessages;
+    }
+
     const providerTail = telemetry ? `${telemetry}\n${workHint}` : workHint;
-    return appendProviderTail(providerMessages, providerTail);
+    try {
+      // Durable hint: a streaming session queues it as steering for the next
+      // model call, an idle session appends it for the next run. Either way it
+      // stays in history, so later requests remain strict extensions.
+      await session.sendCustomMessage(
+        {
+          customType: CONTEXT_HINT_CUSTOM_TYPE,
+          content: providerTail,
+          display: false,
+        },
+        session.isStreaming ? { triggerTurn: true } : { triggerTurn: false },
+      );
+      lastHintAt = now;
+    } catch {
+      // The hint is best-effort and must not block a model call.
+    }
+    return providerMessages;
   }
 
   agent.convertToLlm = convertToLlm;
