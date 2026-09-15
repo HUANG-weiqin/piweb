@@ -222,6 +222,7 @@ const socketMock = vi.hoisted(() => ({
   rawEmit: undefined as ((event: TestServerEvent) => void) | undefined,
   status: undefined as ((online: boolean) => void) | undefined,
   send: vi.fn((_command: ClientCommand) => true),
+  resume: vi.fn((_replaceCurrent = false) => false),
   close: vi.fn(),
   helloVersion: 0,
   autoFocus: true,
@@ -337,6 +338,10 @@ vi.mock("./lib/socket", () => ({
       return ok;
     }
 
+    resume(replaceCurrent = false) {
+      return socketMock.resume(replaceCurrent);
+    }
+
     close() {
       socketMock.close();
     }
@@ -359,6 +364,8 @@ afterEach(() => {
   renderIsolationMock.message.mockClear();
   socketMock.send.mockReset();
   socketMock.send.mockReturnValue(true);
+  socketMock.resume.mockReset();
+  socketMock.resume.mockReturnValue(false);
   socketMock.close.mockReset();
   socketMock.helloVersion = PROTOCOL_VERSION;
   socketMock.autoFocus = true;
@@ -7753,6 +7760,8 @@ describe("App", () => {
     await waitFor(() => {
       expect(socketMock.send).toHaveBeenCalledTimes(1);
     });
+    expect(socketMock.resume).toHaveBeenCalledTimes(1);
+    expect(socketMock.resume).toHaveBeenCalledWith(false);
     expect(latestCommand("refresh_view")).toEqual({
       type: "refresh_view",
       sessionId,
@@ -7760,6 +7769,37 @@ describe("App", () => {
       conversationId: CONVERSATION_ID,
       focusId: FOCUS_A,
     });
+  });
+
+  it("reconnects immediately instead of refreshing after a long background suspension", async () => {
+    let now = 1_000;
+    let visibilityState: DocumentVisibilityState = "visible";
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    vi.spyOn(document, "visibilityState", "get")
+      .mockImplementation(() => visibilityState);
+    render(<App />);
+    startFromSetup();
+    socketMock.send.mockClear();
+    socketMock.resume.mockReturnValue(true);
+
+    act(() => {
+      visibilityState = "hidden";
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    now += 60_000;
+    act(() => {
+      visibilityState = "visible";
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new Event("focus"));
+    });
+
+    await waitFor(() => {
+      expect(socketMock.resume).toHaveBeenCalledTimes(1);
+    });
+    expect(socketMock.resume).toHaveBeenCalledWith(true);
+    expect(socketMock.send).not.toHaveBeenCalledWith(expect.objectContaining({
+      type: "refresh_view",
+    }));
   });
 
   it("retries a projection-gap refresh after compaction finishes", async () => {

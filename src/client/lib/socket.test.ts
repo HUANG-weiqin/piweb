@@ -7,7 +7,10 @@ import {
 import { PiSocket } from "./socket";
 
 class FakeWebSocket {
+  static readonly CONNECTING = 0;
   static readonly OPEN = 1;
+  static readonly CLOSING = 2;
+  static readonly CLOSED = 3;
   static instances: FakeWebSocket[] = [];
 
   readyState = FakeWebSocket.OPEN;
@@ -85,6 +88,56 @@ describe("PiSocket", () => {
     vi.advanceTimersByTime(0);
 
     expect(FakeWebSocket.instances).toHaveLength(2);
+  });
+
+  it("resumes a delayed reconnect immediately", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const socket = new PiSocket(vi.fn(), vi.fn());
+    socket.connect();
+
+    FakeWebSocket.instances[0]!.onclose?.();
+    vi.advanceTimersByTime(0);
+    FakeWebSocket.instances[1]!.onclose?.();
+    expect(FakeWebSocket.instances).toHaveLength(2);
+
+    expect(socket.resume()).toBe(true);
+    expect(FakeWebSocket.instances).toHaveLength(3);
+    vi.advanceTimersByTime(250);
+    expect(FakeWebSocket.instances).toHaveLength(3);
+  });
+
+  it("keeps a healthy connection on an ordinary resume", () => {
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const socket = new PiSocket(vi.fn(), vi.fn());
+    socket.connect();
+    const transport = FakeWebSocket.instances[0]!;
+
+    expect(socket.resume()).toBe(false);
+    expect(transport.close).not.toHaveBeenCalled();
+    expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
+  it("replaces an apparently open connection after a long suspension", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const statuses = vi.fn();
+    const socket = new PiSocket(vi.fn(), statuses);
+    socket.connect();
+    const stale = FakeWebSocket.instances[0]!;
+    stale.onopen?.();
+
+    expect(socket.resume(true)).toBe(true);
+    expect(stale.close).toHaveBeenCalledOnce();
+    expect(statuses.mock.calls).toEqual([[true], [false]]);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+
+    stale.onclose?.();
+    vi.advanceTimersByTime(10_000);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+
+    FakeWebSocket.instances[1]!.onopen?.();
+    expect(statuses.mock.calls).toEqual([[true], [false], [true]]);
   });
 
   it("uses bounded backoff for consecutive connection failures", () => {
@@ -190,6 +243,7 @@ describe("PiSocket", () => {
     vi.advanceTimersByTime(10_000);
 
     expect(statuses.mock.calls).toEqual([[true], [false]]);
+    expect(socket.resume()).toBe(false);
     expect(FakeWebSocket.instances).toHaveLength(1);
   });
 

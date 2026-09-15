@@ -98,6 +98,7 @@ export const MAX_CACHED_WORKSPACES = 4;
 export const MAX_CACHED_CONVERSATION_PRESENTATIONS = 8;
 const MAX_SUPERSEDED_FOCUS_COMMANDS = 64;
 const RESUME_REFRESH_DELAY_MS = 16;
+const RESUME_RECONNECT_AFTER_HIDDEN_MS = 30_000;
 const MAX_PHONE_HISTORY_ENTRIES = 8;
 const EMPTY_SERVICE_TIERS: readonly ServiceTier[] = [];
 type MobileScene = "workspaces" | "conversations" | "chat";
@@ -582,6 +583,7 @@ export function App() {
   const timingFrameRevisionRef = useRef(0);
   const transitionEventBufferRef = useRef<ServerEvent[] | undefined>(undefined);
   const socketEventHandlerRef = useRef<(event: ServerEvent) => void>(() => undefined);
+  const backgroundedAtRef = useRef<number | undefined>(undefined);
   const hasCompletedInitialHandshakeRef = useRef(false);
   const [transportOnline, setTransportOnline] = useState(false);
   const [protocolReady, setProtocolReady] = useState(false);
@@ -3266,12 +3268,22 @@ export function App() {
 
   useEffect(() => {
     let refreshTimer: number | undefined;
+    let replaceConnectionOnResume = false;
+    if (
+      document.visibilityState === "hidden"
+      && backgroundedAtRef.current === undefined
+    ) {
+      backgroundedAtRef.current = Date.now();
+    }
     const flush = () => {
       refreshTimer = undefined;
+      if (document.visibilityState === "hidden") return;
+      const replaceCurrent = replaceConnectionOnResume;
+      replaceConnectionOnResume = false;
+      if (socketRef.current?.resume(replaceCurrent)) return;
       if (
         !transportOnline
         || !protocolReady
-        || document.visibilityState === "hidden"
         || pendingFocusRef.current
         || workspaceSyncingRef.current
         || conversationSyncingRef.current
@@ -3296,20 +3308,40 @@ export function App() {
             }),
       });
     };
+    const noteBackgrounded = () => {
+      backgroundedAtRef.current ??= Date.now();
+    };
     const schedule = () => {
+      if (document.visibilityState === "hidden") {
+        noteBackgrounded();
+        return;
+      }
+      const backgroundedAt = backgroundedAtRef.current;
+      backgroundedAtRef.current = undefined;
       if (
-        document.visibilityState === "hidden"
-        || refreshTimer !== undefined
-      ) return;
+        backgroundedAt !== undefined
+        && Date.now() - backgroundedAt >= RESUME_RECONNECT_AFTER_HIDDEN_MS
+      ) {
+        replaceConnectionOnResume = true;
+      }
+      if (refreshTimer !== undefined) return;
       refreshTimer = window.setTimeout(flush, RESUME_REFRESH_DELAY_MS);
     };
+    const handlePageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) replaceConnectionOnResume = true;
+      schedule();
+    };
     window.addEventListener("focus", schedule);
-    window.addEventListener("pageshow", schedule);
+    window.addEventListener("online", schedule);
+    window.addEventListener("pagehide", noteBackgrounded);
+    window.addEventListener("pageshow", handlePageShow);
     document.addEventListener("visibilitychange", schedule);
     return () => {
       if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
       window.removeEventListener("focus", schedule);
-      window.removeEventListener("pageshow", schedule);
+      window.removeEventListener("online", schedule);
+      window.removeEventListener("pagehide", noteBackgrounded);
+      window.removeEventListener("pageshow", handlePageShow);
       document.removeEventListener("visibilitychange", schedule);
     };
   }, [protocolReady, transportOnline]);

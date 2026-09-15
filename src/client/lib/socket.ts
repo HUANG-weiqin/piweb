@@ -71,7 +71,11 @@ export class PiSocket {
         this.reconnectResetTimer = undefined;
       }
       this.onStatus(false);
-      if (!this.stopped && event?.code !== OBSERVATION_FATAL_CLOSE_CODE) {
+      if (event?.code === OBSERVATION_FATAL_CLOSE_CODE) {
+        this.stopped = true;
+        return;
+      }
+      if (!this.stopped) {
         const delay = this.nextReconnectDelayMs;
         this.nextReconnectDelayMs = delay === 0
           ? RECONNECT_BASE_DELAY_MS
@@ -83,6 +87,27 @@ export class PiSocket {
       }
     };
     socket.onerror = () => socket.close();
+  }
+
+  resume(replaceCurrent = false): boolean {
+    if (this.stopped) return false;
+    const socket = this.socket;
+    if (
+      socket
+      && !replaceCurrent
+      && (
+        socket.readyState === WebSocket.CONNECTING
+        || socket.readyState === WebSocket.OPEN
+      )
+    ) return false;
+
+    if (socket) {
+      this.socket = undefined;
+      if (socket.readyState !== WebSocket.CONNECTING) this.onStatus(false);
+      socket.close();
+    }
+    this.connect();
+    return true;
   }
 
   send(command: ClientCommand): boolean {
