@@ -7,7 +7,11 @@ import {
   type SessionManager,
   type SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
+import {
+  clampThinkingLevel,
+  type AssistantMessage,
+  type ImageContent,
+} from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import {
   DEFAULT_COMPACTION_THRESHOLD_PERCENT,
@@ -3167,6 +3171,12 @@ export class ConversationActor {
       const session = work.runtime.session;
       const model = session.model;
       if (model !== undefined) {
+        // 标题是辅助请求，只取模型最省的思考档位：部分模型的 minimal 不受支持，
+        // 会被 SDK 向上钳到 high/max（deepseek v4.1 的 minimal/low/medium 均为
+        // null），而思考与回答共享 max_tokens，思考吃光预算后标题即为空。
+        // clamp 到 off 后由 SDK 选择该模型最省的可用档位；强制思考的模型仍会
+        // 得到最小的支持档位。
+        const reasoning = clampThinkingLevel(model, "off");
         // Keep SDK auth, request headers and transport on the captured session
         // stream without starting an Agent turn. The race also bounds providers
         // that ignore cancellation before returning a stream or its result.
@@ -3186,7 +3196,7 @@ export class ConversationActor {
               timeoutMs: AUTO_TITLE_TIMEOUT_MS,
               maxRetries: 0,
               maxTokens: AUTO_TITLE_MAX_TOKENS,
-              reasoning: "minimal",
+              reasoning: reasoning === "off" ? undefined : reasoning,
               cacheRetention: "none",
               sessionId: session.sessionId,
               transport: session.agent.transport,

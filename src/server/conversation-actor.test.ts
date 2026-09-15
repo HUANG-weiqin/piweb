@@ -989,10 +989,11 @@ describe("ConversationActor", () => {
           cacheRetention: "none",
           maxRetries: 0,
           maxTokens: 256,
-          reasoning: "minimal",
           timeoutMs: expect.any(Number),
           signal: expect.any(AbortSignal),
         });
+        // A non-reasoning model must not be asked to think.
+        expect(runtime.titleCalls[0]?.[2]?.reasoning).toBeUndefined();
 
         titleResult.resolve(automaticTitleMessage(
           "  会话首轮自动命名  \n这行解释不应进入标题",
@@ -1012,6 +1013,73 @@ describe("ConversationActor", () => {
       } finally {
         titleResult.resolve(automaticTitleMessage("cleanup"));
         await running.catch(() => undefined);
+        await fixture.actor.dispose();
+      }
+    });
+
+    it("asks for the cheapest thinking level the title model supports", async () => {
+      const runtime = new FakeRuntime();
+      const fixture = await openActor({ runtime });
+      try {
+        // DeepSeek V4.1 style: minimal/low/medium are unsupported, so the SDK
+        // would otherwise clamp a "minimal" request up to "high"; reasoning
+        // and the answer share max_tokens, so the title never arrives.
+        Object.assign(runtime.session, {
+          model: {
+            provider: "opencode-go",
+            id: "deepseek-v4.1-flash",
+            api: "openai-completions",
+            baseUrl: "https://opencode.ai/zen/go/v1",
+            reasoning: true,
+            thinkingLevelMap: {
+              minimal: null,
+              low: null,
+              medium: null,
+              high: "high",
+              max: "max",
+            },
+            input: ["text"],
+            cost: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 },
+            contextWindow: 1_000_000,
+            maxTokens: 384_000,
+          },
+        });
+        await fixture.actor.startPrompt({
+          runId: RUN_A,
+          text: "fix the deepseek auto title",
+          origin: "browser",
+        });
+        expect(runtime.titleCalls[0]?.[2]?.reasoning).toBeUndefined();
+      } finally {
+        await fixture.actor.dispose();
+      }
+    });
+
+    it("falls back to the model's cheapest forced thinking level", async () => {
+      const runtime = new FakeRuntime();
+      const fixture = await openActor({ runtime });
+      try {
+        Object.assign(runtime.session, {
+          model: {
+            provider: "test",
+            id: "thinking-only",
+            api: "openai-completions",
+            baseUrl: "https://example.invalid/v1",
+            reasoning: true,
+            thinkingLevelMap: { off: null },
+            input: ["text"],
+            cost: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 },
+            contextWindow: 1_000,
+            maxTokens: 1_000,
+          },
+        });
+        await fixture.actor.startPrompt({
+          runId: RUN_A,
+          text: "title a forced-thinking model",
+          origin: "browser",
+        });
+        expect(runtime.titleCalls[0]?.[2]?.reasoning).toBe("minimal");
+      } finally {
         await fixture.actor.dispose();
       }
     });
