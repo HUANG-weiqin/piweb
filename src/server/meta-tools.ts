@@ -7,6 +7,7 @@ import {
   MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
   MAX_SESSION_MESSAGE_SUMMARY_CHARACTERS,
 } from "../shared/protocol.js";
+import { MAX_PEER_SESSIONS } from "./collaboration-limits.js";
 import {
   MAX_CONVERSATION_BODY_BYTES,
   normalizeConversationMessageSummary,
@@ -20,7 +21,7 @@ interface MetaToolSessionRef {
 
 type MetaToolWaitInput = { targets: readonly MetaToolSessionRef[] };
 
-export const MAX_SESSION_MESSAGE_TARGETS = 32;
+export const MAX_SESSION_MESSAGE_TARGETS = MAX_PEER_SESSIONS;
 
 function formatLocalTimestamp(value: Date): string {
   const offsetMinutes = -value.getTimezoneOffset();
@@ -374,7 +375,7 @@ export function createMetaTools(
       name: "send_session_message",
       label: "Send session message",
       description:
-        "Durably send the same first-class session message to one peer (conversationId) or 2-32 peers (conversationIds). Each target is accepted and reported independently. A busy target receives it as steering after its current tool turn and before its next model request; it remains durable until Pi records the target message and the exact run settles. If a peer is currently waiting (wait_for_session), the delivered message also resolves that wait immediately, even when the wait targets a different conversation or run.",
+        `Durably send the same first-class session message to one peer (conversationId) or 2-${MAX_SESSION_MESSAGE_TARGETS} peers (conversationIds). Each target is accepted and reported independently. A busy target receives it as steering after its current tool turn and before its next model request; it remains durable until Pi records the target message and the exact run settles. If a peer is currently waiting (wait_for_session), the delivered message also resolves that wait immediately, even when the wait targets a different conversation or run.`,
       promptSnippet: "Send one durable message to one or more Agent sessions.",
       promptGuidelines: [
         "Set exactly one of conversationId or conversationIds. Use conversationIds only when every target should receive the identical message.",

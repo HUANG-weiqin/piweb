@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   createMetaTools,
+  MAX_SESSION_MESSAGE_TARGETS,
   type MetaToolService,
 } from "./meta-tools.js";
 import { MAX_CONVERSATION_BODY_BYTES } from "./conversation-meta.js";
@@ -259,9 +260,10 @@ describe("createMetaTools", () => {
       };
     };
 
+    expect(MAX_SESSION_MESSAGE_TARGETS).toBe(64);
     expect(parameters.properties.conversationIds).toMatchObject({
       minItems: 2,
-      maxItems: 32,
+      maxItems: MAX_SESSION_MESSAGE_TARGETS,
     });
     await send.execute(
       "send-many",
@@ -290,6 +292,34 @@ describe("createMetaTools", () => {
       conversationIds: readonly string[];
     };
     expect(Object.isFrozen(forwarded.conversationIds)).toBe(true);
+
+    const maximumTargets = Array.from(
+      { length: MAX_SESSION_MESSAGE_TARGETS },
+      (_, index) => `target-${index}`,
+    );
+    await expect(send.execute(
+      "send-maximum",
+      {
+        conversationIds: maximumTargets,
+        summary: "通知所有 peer。",
+        message: "Apply the same update.",
+      },
+      signal,
+      undefined,
+      {} as never,
+    )).resolves.toBeDefined();
+    await expect(send.execute(
+      "send-over-limit",
+      {
+        conversationIds: [...maximumTargets, "target-over-limit"],
+        summary: "目标过多。",
+        message: "This must be rejected before forwarding.",
+      },
+      signal,
+      undefined,
+      {} as never,
+    )).rejects.toThrow(/2 to 64 items/i);
+    expect(fake.sendSessionMessage).toHaveBeenCalledTimes(2);
   });
 
   it("rejects ambiguous or duplicate message target inputs", async () => {

@@ -15,6 +15,7 @@ import {
   type ThinkingLevel,
   type ToolMode,
 } from "../shared/protocol.js";
+import { MAX_PEER_SESSIONS } from "./collaboration-limits.js";
 import {
   aggregateReservedConversationEntries,
   appendReservedCustomEntry,
@@ -107,9 +108,9 @@ const MAX_BATCH_MESSAGES = 8;
 const MAX_COMPLETION_CACHE = 256;
 export const WAIT_POLL_DELAY_MS = 240_000;
 
-export const MAX_PEER_SESSIONS_PER_RUN = 64;
+export const MAX_PEER_SESSIONS_PER_RUN = MAX_PEER_SESSIONS;
 export const MAX_DELEGATION_DEPTH = 3;
-export const MAX_LIVE_DELEGATION_DESCENDANTS = 64;
+export const MAX_LIVE_DELEGATION_DESCENDANTS = MAX_PEER_SESSIONS;
 const START_SESSION_ADMISSION_FAILURE_PREFIX =
   "start_session inbox admission failed: ";
 
