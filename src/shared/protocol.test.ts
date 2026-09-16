@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  MAX_CONVERSATION_IMAGE_BYTES,
   MAX_CONVERSATION_IMAGE_DATA_CHARACTERS,
   MAX_MESSAGE_BYTES,
   MAX_MODEL_REFERENCE_BYTES,
@@ -726,7 +727,10 @@ describe("parseClientCommand", () => {
   });
 
   it("uses a separate bounded payload for durable conversation images", () => {
-    const largeReadImage = "A".repeat(
+    const largeReadImage = Buffer.alloc(
+      MAX_CONVERSATION_IMAGE_BYTES,
+    ).toString("base64");
+    expect(largeReadImage).toHaveLength(
       MAX_CONVERSATION_IMAGE_DATA_CHARACTERS,
     );
     expect(parseClientCommand({
@@ -749,17 +753,22 @@ describe("parseClientCommand", () => {
       mimeType: "image/png",
       data: largeReadImage,
     })).toMatchObject({ data: largeReadImage });
-    expect(() => parseServerEvent({
-      type: "conversation_image",
-      sessionId,
-      conversationId,
-      focusId,
-      commandId,
-      messageId: "tool-result-entry",
-      imageOrdinal: 0,
-      mimeType: "image/png",
-      data: "A".repeat(MAX_CONVERSATION_IMAGE_DATA_CHARACTERS + 4),
-    })).toThrow();
+    for (const oversizedData of [
+      "A".repeat(MAX_CONVERSATION_IMAGE_DATA_CHARACTERS),
+      "A".repeat(MAX_CONVERSATION_IMAGE_DATA_CHARACTERS + 4),
+    ]) {
+      expect(() => parseServerEvent({
+        type: "conversation_image",
+        sessionId,
+        conversationId,
+        focusId,
+        commandId,
+        messageId: "tool-result-entry",
+        imageOrdinal: 0,
+        mimeType: "image/png",
+        data: oversizedData,
+      })).toThrow();
+    }
   });
 
   it("accepts only bounded transition diagnostics on their authority envelope", () => {

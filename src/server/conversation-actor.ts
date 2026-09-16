@@ -2912,8 +2912,8 @@ export class ConversationActor {
       }
       return existing.ready.promise;
     }
-    // A handoff has no right to carry a provider-only picture into the new
-    // runtime, even while the old turn waits for its safe boundary.
+    // A handoff has no right to carry transient coordinate authority into the
+    // new runtime, even while the old turn waits for its safe boundary.
     this.created?.computerUse?.clearObservation();
     const ready = deferred<void>();
     ticket.reloadStop = { preserveSettlement, ready };

@@ -19,8 +19,10 @@ export const MAX_PROMPT_CHARACTERS = 200_000;
 /** 每条浏览器 prompt 最多携带四张小型本地图片，合计解码后不超过 512 KiB。 */
 export const MAX_PROMPT_IMAGE_COUNT = 4;
 export const MAX_PROMPT_IMAGE_BYTES = 512 * 1024;
-/** One-shot durable image responses are bounded independently from prompt uploads. */
-export const MAX_CONVERSATION_IMAGE_DATA_CHARACTERS = 5 * 1024 * 1024;
+/** One-shot durable images cover the full bounded desktop-capture payload. */
+export const MAX_CONVERSATION_IMAGE_BYTES = 16 * 1024 * 1024;
+export const MAX_CONVERSATION_IMAGE_DATA_CHARACTERS =
+  Math.ceil(MAX_CONVERSATION_IMAGE_BYTES / 3) * 4;
 /** Durable history renders image input as this marker; image bytes stay out of snapshots. */
 export const PROMPT_IMAGE_PLACEHOLDER = "[图片]";
 export const MAX_PENDING_PROMPTS_PER_CONVERSATION = 64;
@@ -174,7 +176,10 @@ export function decodedPromptImageBytes(data: string): number {
   return (data.length / 4) * 3
     - (data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0);
 }
-function imagePayloadSchema(maximumDataCharacters: number) {
+function imagePayloadSchema(
+  maximumDataCharacters: number,
+  maximumDecodedBytes: number,
+) {
   return z.object({
     mimeType: promptImageMimeTypeSchema,
     data: z.string().superRefine((data, context) => {
@@ -197,14 +202,25 @@ function imagePayloadSchema(maximumDataCharacters: number) {
           code: z.ZodIssueCode.custom,
           message: "image data must be canonical base64",
         });
+        return;
+      }
+      if (decodedPromptImageBytes(data) > maximumDecodedBytes) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "decoded image data exceeds its bounded payload",
+        });
       }
     }),
   }).strict();
 }
 
-const promptImageSchema = imagePayloadSchema(MAX_PROMPT_IMAGE_DATA_CHARACTERS);
+const promptImageSchema = imagePayloadSchema(
+  MAX_PROMPT_IMAGE_DATA_CHARACTERS,
+  MAX_PROMPT_IMAGE_BYTES,
+);
 const conversationImageSchema = imagePayloadSchema(
   MAX_CONVERSATION_IMAGE_DATA_CHARACTERS,
+  MAX_CONVERSATION_IMAGE_BYTES,
 );
 export type PromptImage = z.infer<typeof promptImageSchema>;
 export type ConversationImage = z.infer<typeof conversationImageSchema>;

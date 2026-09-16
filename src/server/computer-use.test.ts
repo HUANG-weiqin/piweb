@@ -6,13 +6,13 @@ import {
   createWindowsDesktopInputAdapterForTest,
   DesktopController,
   MAX_COMPUTER_CALL_MS,
+  type ComputerToolResult,
   type DesktopCapture,
   type DesktopCaptureScope,
   type DesktopClick,
   type DesktopForegroundIdentity,
   type DesktopForegroundWindowBinding,
   type DesktopPrimitiveDispatch,
-  type DesktopProviderEvidence,
   type DesktopScroll,
   type WindowsDesktopAdapter,
   type WindowsDesktopCaptureTestNative,
@@ -368,20 +368,23 @@ const NATIVE_POINT = {
   inputBounds: PRIMARY_BOUNDS,
 };
 
-function providerEvidence(
-  controller: DesktopController,
-  owner: object,
-  toolCallId: string,
-): DesktopProviderEvidence | undefined {
-  return controller.prepareProviderEvidence(owner, toolCallId);
+/** Durable image payloads, in order, exactly as they were returned to the caller. */
+function resultImages(result: ComputerToolResult): string[] {
+  const images: string[] = [];
+  for (const part of result.content) {
+    if (part.type === "image") images.push(part.data);
+  }
+  return images;
 }
 
-function markProviderEvidencePresented(
-  controller: DesktopController,
-  owner: object,
-  toolCallId: string,
-): boolean {
-  return controller.markProviderEvidencePresented(owner, toolCallId);
+/** The safe observation label, present only when the result carries a durable image. */
+function resultObservationLabel(result: ComputerToolResult): string | undefined {
+  for (const part of result.content) {
+    if (part.type === "text" && part.text.startsWith("[computer observation")) {
+      return part.text;
+    }
+  }
+  return undefined;
 }
 
 describe("DesktopController", () => {
@@ -434,8 +437,10 @@ describe("DesktopController", () => {
     expect(adapter.calls).toEqual(["capture"]);
   });
 
-  it("keeps image delivery correlated by source call ID, then grants only the completed assistant tool calls a frame", async () => {
+  it("returns durable labeled image content and grants the pending frame only to a listed call of the same owner", async () => {
     const adapter = new FakeDesktopAdapter();
+    const sourcePng = Uint8Array.from(PNG);
+    adapter.captures = [capture({ png: sourcePng })];
     const controller = new DesktopController(adapter);
     const owner = {};
     const sourceToolCallId = ["observe", "source"].join("-");
@@ -444,26 +449,28 @@ describe("DesktopController", () => {
       actions: [],
       observe: true,
     }));
-    expect(controller.authorizeFrame(owner, ["premature-click"])).toBe(false);
-    const evidence = providerEvidence(controller, owner, sourceToolCallId);
-    expect(evidence).toMatchObject({
-      sourceToolCallId,
-      images: [{
-        sourceToolCallId,
-        mimeType: "image/png",
-        width: 100,
-        height: 50,
-      }],
+    expect(observed.details).toMatchObject({
+      outcome: "completed",
+      actions: [],
+      observation: { status: "captured", width: 100, height: 50 },
     });
-    expect(providerEvidence(controller, {}, sourceToolCallId)).toBeUndefined();
-    expect(providerEvidence(controller, owner, "other-source")).toBeUndefined();
-    evidence!.images[0]!.png[0] = 0;
-    expect(providerEvidence(controller, owner, sourceToolCallId)!.images[0]!.png[0]).toBe(137);
+    expect(observed.content[0]).toEqual({
+      type: "text",
+      text: JSON.stringify(observed.details),
+    });
+    expect(resultObservationLabel(observed))
+      .toBe("[computer observation current; scope=primary_display; size=100x50 px]");
+    expect(resultImages(observed)).toEqual([Buffer.from(PNG).toString("base64")]);
 
-    expect(controller.authorizeFrame(owner, ["click-call"])).toBe(false);
-    expect(markProviderEvidencePresented(controller, owner, sourceToolCallId)).toBe(true);
+    // The pending frame is owner-scoped and needs at least one listed call.
+    expect(controller.authorizeFrame({}, ["click-call"])).toBe(false);
+    expect(controller.authorizeFrame(owner, [])).toBe(false);
     expect(controller.authorizeFrame(owner, ["click-call"])).toBe(true);
-    expect(providerEvidence(controller, owner, sourceToolCallId)).toBeUndefined();
+
+    // The durable payload no longer depends on the adapter's mutable buffer.
+    sourcePng[0] = 0;
+    expect(resultImages(observed)).toEqual([Buffer.from(PNG).toString("base64")]);
+
     await expect(controller.execute(request(owner, "wrong-call", {
       actions: [{ kind: "click", x: 1, y: 1 }],
       observe: false,
@@ -478,15 +485,12 @@ describe("DesktopController", () => {
       actions: [{ index: 0, kind: "click", status: "sent" }],
       observation: { status: "unavailable" },
     });
-    expect(adapter.calls).toEqual(["capture", "click"]);
-
-    const serialized = JSON.stringify(observed);
-    expect(serialized).not.toContain("iVBOR");
-    expect(serialized).not.toContain("png");
-    expect(observed.content).toEqual([{
+    expect(clicked.content).toEqual([{
       type: "text",
-      text: JSON.stringify(observed.details),
+      text: JSON.stringify(clicked.details),
     }]);
+    expect(controller.authorizeFrame(owner, ["click-call"])).toBe(false);
+    expect(adapter.calls).toEqual(["capture", "click"]);
   });
 
   it("invalidates an authorized frame before its first primitive and never reuses it", async () => {
@@ -494,8 +498,6 @@ describe("DesktopController", () => {
     const controller = new DesktopController(adapter);
     const owner = {};
     await controller.execute(request(owner, "observe", { actions: [], observe: true }));
-    providerEvidence(controller, owner, "observe");
-    markProviderEvidencePresented(controller, owner, "observe");
     expect(controller.authorizeFrame(owner, ["first", "second"])).toBe(true);
 
     let nestedOutcome: "error" | "result" | undefined;
@@ -740,7 +742,6 @@ describe("DesktopController", () => {
         actions: [],
         observe: true,
       }));
-      markProviderEvidencePresented(foregroundController, foregroundOwner, "foreground-before");
       expect(foregroundController.authorizeFrame(foregroundOwner, ["foreground-failure"])).toBe(true);
       foregroundAdapter.getForegroundIdentity = async () => {
         elapsed = MAX_COMPUTER_CALL_MS + 1;
@@ -769,8 +770,6 @@ describe("DesktopController", () => {
     const controller = new DesktopController(adapter);
     const owner = {};
     await controller.execute(request(owner, "observe", { actions: [], observe: true }));
-    providerEvidence(controller, owner, "observe");
-    markProviderEvidencePresented(controller, owner, "observe");
     controller.authorizeFrame(owner, ["batch"]);
     await expect(controller.execute(request(owner, "batch", {
       actions: [{ kind: "click", x: 200, y: 0 }],
@@ -824,8 +823,6 @@ describe("DesktopController", () => {
     const owner = {};
     const signalController = new AbortController();
     await abortController.execute(request(owner, "observe", { actions: [], observe: true }));
-    providerEvidence(abortController, owner, "observe");
-    markProviderEvidencePresented(abortController, owner, "observe");
     abortController.authorizeFrame(owner, ["abort-batch"]);
     abortAdapter.onClick = () => signalController.abort();
 
@@ -868,14 +865,14 @@ describe("DesktopController", () => {
     expect(partialAdapter.calls).toEqual(["type"]);
   });
 
-  it("replaces old image state on every capture attempt and never keeps a failed capture", async () => {
+  it("replaces the pending frame on every capture attempt and never keeps a failed capture", async () => {
     const adapter = new FakeDesktopAdapter();
     adapter.captures = [capture(), new Error("capture failed"), capture({ width: 101 })];
     const controller = new DesktopController(adapter);
     const owner = {};
 
-    await controller.execute(request(owner, "first", { actions: [], observe: true }));
-    expect(providerEvidence(controller, owner, "first")).toBeDefined();
+    const first = await controller.execute(request(owner, "first", { actions: [], observe: true }));
+    expect(resultImages(first)).toEqual([Buffer.from(PNG).toString("base64")]);
 
     controller.beginAssistantDecision(owner);
     const failed = await controller.execute(request(owner, "second", { actions: [], observe: true }));
@@ -883,15 +880,17 @@ describe("DesktopController", () => {
       outcome: "interrupted",
       observation: { status: "unavailable" },
     });
-    expect(providerEvidence(controller, owner, "first")).toBeUndefined();
-    expect(providerEvidence(controller, owner, "second")).toBeUndefined();
+    expect(resultImages(failed)).toEqual([]);
+    expect(controller.authorizeFrame(owner, ["second"])).toBe(false);
 
     controller.beginAssistantDecision(owner);
-    await controller.execute(request(owner, "third", { actions: [], observe: true }));
-    expect(providerEvidence(controller, owner, "first")).toBeUndefined();
-    expect(providerEvidence(controller, owner, "third")).toMatchObject({
-      images: [{ width: 101 }],
+    const third = await controller.execute(request(owner, "third", { actions: [], observe: true }));
+    expect(third.details).toMatchObject({
+      outcome: "completed",
+      observation: { status: "captured", width: 101, height: 50 },
     });
+    expect(resultImages(third)).toEqual([Buffer.from(PNG).toString("base64")]);
+    expect(controller.authorizeFrame(owner, ["third"])).toBe(true);
   });
 
   it("rejects a capture whose image dimensions do not equal its physical crop", async () => {
@@ -911,7 +910,7 @@ describe("DesktopController", () => {
     });
   });
 
-  it("keeps initial current evidence separate from A/B pair evidence and grants only B coordinates", async () => {
+  it("returns only the latest post-action image and grants its coordinates to the next batch", async () => {
     const adapter = new FakeDesktopAdapter();
     const before = Uint8Array.from([...PNG, 1]);
     const after = Uint8Array.from([...PNG, 2]);
@@ -941,10 +940,10 @@ describe("DesktopController", () => {
     const controller = new DesktopController(adapter);
     const owner = {};
 
-    await controller.execute(request(owner, "initial", { actions: [], observe: true }));
-    expect(providerEvidence(controller, owner, "initial")?.images.map(({ kind }) => kind))
-      .toEqual(["current"]);
-    expect(markProviderEvidencePresented(controller, owner, "initial")).toBe(true);
+    const initial = await controller.execute(request(owner, "initial", { actions: [], observe: true }));
+    expect(resultImages(initial)).toEqual([Buffer.from(before).toString("base64")]);
+    expect(resultObservationLabel(initial))
+      .toBe("[computer observation current; scope=primary_display; size=10x10 px]");
     expect(controller.authorizeFrame(owner, ["batch"])).toBe(true);
 
     const paired = await controller.execute(request(owner, "batch", {
@@ -953,17 +952,11 @@ describe("DesktopController", () => {
     }));
     expect(paired.details).toMatchObject({
       outcome: "completed",
-      observation: {
-        status: "captured",
-        comparison: "paired",
-        before: { status: "captured", width: 10, height: 10 },
-        after: { status: "captured", width: 20, height: 20 },
-      },
+      observation: { status: "captured", width: 20, height: 20 },
     });
-    const pair = providerEvidence(controller, owner, "batch");
-    expect(pair?.images.map(({ kind }) => kind)).toEqual(["before", "after"]);
-    expect(pair?.images.map(({ png }) => [...png])).toEqual([[...before], [...after]]);
-    expect(markProviderEvidencePresented(controller, owner, "batch")).toBe(true);
+    expect(resultImages(paired)).toEqual([Buffer.from(after).toString("base64")]);
+    expect(resultObservationLabel(paired))
+      .toBe("[computer observation after action batch; scope=primary_display; size=20x20 px]");
     expect(controller.authorizeFrame(owner, ["b-to-c"])).toBe(true);
 
     const bToC = await controller.execute(request(owner, "b-to-c", {
@@ -973,19 +966,14 @@ describe("DesktopController", () => {
     }));
     expect(bToC.details).toMatchObject({
       outcome: "completed",
-      observation: {
-        comparison: "paired",
-        before: { width: 20, height: 20 },
-        after: { width: 30, height: 30 },
-      },
+      observation: { status: "captured", width: 30, height: 30 },
     });
     expect(adapter.clicks.at(-1)?.point).toMatchObject({ x: 19, y: 19 });
-    const bToCPair = providerEvidence(controller, owner, "b-to-c");
-    expect(bToCPair?.images.map(({ kind }) => kind)).toEqual(["before", "after"]);
-    expect(bToCPair?.images.map(({ png }) => [...png])).toEqual([[...after], [...PNG, 3]]);
+    expect(resultImages(bToC))
+      .toEqual([Buffer.from(Uint8Array.from([...PNG, 3])).toString("base64")]);
   });
 
-  it("uses explicit after_only and historical-before after_missing evidence without coordinate resurrection", async () => {
+  it("returns a single after image for post-action capture and never resurrects coordinates after a failed one", async () => {
     const afterOnlyAdapter = new FakeDesktopAdapter();
     afterOnlyAdapter.captures = [capture({ width: 12, height: 12 })];
     const afterOnly = new DesktopController(afterOnlyAdapter);
@@ -997,15 +985,11 @@ describe("DesktopController", () => {
     }));
     expect(afterOnlyResult.details).toMatchObject({
       outcome: "completed",
-      observation: {
-        status: "captured",
-        comparison: "after_only",
-        after: { status: "captured", width: 12, height: 12 },
-      },
+      observation: { status: "captured", width: 12, height: 12 },
     });
-    expect(providerEvidence(afterOnly, afterOnlyOwner, "keyboard")?.images.map(({ kind }) => kind))
-      .toEqual(["after"]);
-    expect(markProviderEvidencePresented(afterOnly, afterOnlyOwner, "keyboard")).toBe(true);
+    expect(resultImages(afterOnlyResult)).toEqual([Buffer.from(PNG).toString("base64")]);
+    expect(resultObservationLabel(afterOnlyResult))
+      .toBe("[computer observation after action batch; scope=primary_display; size=12x12 px]");
     expect(afterOnly.authorizeFrame(afterOnlyOwner, ["after-coordinate"])).toBe(true);
     await expect(afterOnly.execute(request(afterOnlyOwner, "after-coordinate", {
       actions: [{ kind: "click", x: 11, y: 11 }],
@@ -1017,7 +1001,6 @@ describe("DesktopController", () => {
     const missing = new DesktopController(missingAdapter);
     const missingOwner = {};
     await missing.execute(request(missingOwner, "before", { actions: [], observe: true }));
-    markProviderEvidencePresented(missing, missingOwner, "before");
     expect(missing.authorizeFrame(missingOwner, ["failed-after"])).toBe(true);
 
     const afterMissing = await missing.execute(request(missingOwner, "failed-after", {
@@ -1026,16 +1009,9 @@ describe("DesktopController", () => {
     }));
     expect(afterMissing.details).toMatchObject({
       outcome: "interrupted",
-      observation: {
-        status: "unavailable",
-        comparison: "after_missing",
-        before: { status: "captured", width: 10, height: 10 },
-        after: { status: "unavailable" },
-      },
+      observation: { status: "unavailable" },
     });
-    expect(providerEvidence(missing, missingOwner, "failed-after")?.images.map(({ kind }) => kind))
-      .toEqual(["historical_before"]);
-    expect(markProviderEvidencePresented(missing, missingOwner, "failed-after")).toBe(true);
+    expect(resultImages(afterMissing)).toEqual([]);
     expect(missing.authorizeFrame(missingOwner, ["must-not-authorize"])).toBe(false);
     await expect(missing.execute(request(missingOwner, "must-not-authorize", {
       actions: [{ kind: "click", x: 1, y: 1 }],
@@ -1050,7 +1026,6 @@ describe("DesktopController", () => {
     const controller = new DesktopController(adapter);
     const owner = {};
     await controller.execute(request(owner, "observe", { actions: [], observe: true }));
-    markProviderEvidencePresented(controller, owner, "observe");
     expect(controller.authorizeFrame(owner, ["bad-preflight", "admitted", "sibling"])).toBe(true);
 
     await expect(controller.execute(request(owner, "bad-preflight", {
@@ -1069,21 +1044,19 @@ describe("DesktopController", () => {
     });
   });
 
-  it("spends a decision after one admitted batch, preserving its pair and rearming only at the next boundary", async () => {
+  it("spends a decision after one admitted batch, keeps its durable after image, and rearms only at the next boundary", async () => {
     const adapter = new FakeDesktopAdapter();
     adapter.captures = [capture(), capture()];
     const controller = new DesktopController(adapter);
     const owner = {};
 
     await controller.execute(request(owner, "initial", { actions: [], observe: true }));
-    markProviderEvidencePresented(controller, owner, "initial");
     expect(controller.authorizeFrame(owner, ["paired", "type-sibling"])).toBe(true);
-    await controller.execute(request(owner, "paired", {
+    const paired = await controller.execute(request(owner, "paired", {
       actions: [{ kind: "click", x: 1, y: 1 }],
       observe: true,
     }));
-    expect(providerEvidence(controller, owner, "paired")?.images.map(({ kind }) => kind))
-      .toEqual(["before", "after"]);
+    expect(resultImages(paired)).toEqual([Buffer.from(PNG).toString("base64")]);
     await expect(controller.execute(request(owner, "type-sibling", {
       actions: [{ kind: "type", text: "must not run" }],
       observe: false,
@@ -1091,8 +1064,8 @@ describe("DesktopController", () => {
       details: { outcome: "rejected", reason: "decision_consumed" },
     });
     expect(adapter.typed).toEqual([]);
-    expect(providerEvidence(controller, owner, "paired")?.images.map(({ kind }) => kind))
-      .toEqual(["before", "after"]);
+    // The already returned durable content is unaffected by the rejected sibling.
+    expect(resultImages(paired)).toEqual([Buffer.from(PNG).toString("base64")]);
 
     controller.beginAssistantDecision(owner);
     await controller.execute(request(owner, "first-no-observe", {
@@ -1125,7 +1098,6 @@ describe("DesktopController", () => {
     const owner = {};
 
     await controller.execute(request(owner, "initial", { actions: [], observe: true }));
-    markProviderEvidencePresented(controller, owner, "initial");
     expect(controller.authorizeFrame(owner, ["mismatch", "paired"])).toBe(true);
     adapter.foregroundResult = { hwnd: "101", processId: 101 };
     await expect(controller.execute(request(owner, "mismatch", {
@@ -1140,7 +1112,6 @@ describe("DesktopController", () => {
     // a new decision and its after image binds the new foreground identity.
     controller.beginAssistantDecision(owner);
     await controller.execute(request(owner, "fresh", { actions: [], observe: true }));
-    markProviderEvidencePresented(controller, owner, "fresh");
     expect(controller.authorizeFrame(owner, ["new-window"])).toBe(true);
     adapter.foregroundResult = { hwnd: "200", processId: 200 };
     const result = await controller.execute(request(owner, "new-window", {
@@ -1152,7 +1123,8 @@ describe("DesktopController", () => {
     expect(adapter.clicks).toHaveLength(1);
     expect(adapter.foregroundChecks).toBe(2);
     expect(JSON.stringify(result.details)).not.toContain("200");
-    expect(JSON.stringify(providerEvidence(controller, owner, "new-window"))).not.toContain("200");
+    expect(resultObservationLabel(result))
+      .toBe("[computer observation after action batch; scope=primary_display; size=100x50 px]");
   });
 
   it("maps a foreground-window crop locally while preserving primary-display input normalization", async () => {
@@ -1163,16 +1135,15 @@ describe("DesktopController", () => {
     const controller = new DesktopController(adapter);
     const owner = {};
 
-    await controller.execute(request(owner, "window-observe", {
+    const windowObserved = await controller.execute(request(owner, "window-observe", {
       actions: [],
       observe: true,
       foregroundWindow: true,
     }));
     expect(adapter.captureScopes).toEqual(["foreground_window"]);
-    expect(providerEvidence(controller, owner, "window-observe")?.images).toMatchObject([
-      { kind: "current", scope: "foreground_window", width: 40, height: 20 },
-    ]);
-    markProviderEvidencePresented(controller, owner, "window-observe");
+    expect(resultObservationLabel(windowObserved))
+      .toBe("[computer observation current; scope=foreground_window; size=40x20 px]");
+    expect(resultImages(windowObserved)).toEqual([Buffer.from(PNG).toString("base64")]);
     expect(controller.authorizeFrame(owner, ["window-clicks"])).toBe(true);
 
     await expect(controller.execute(request(owner, "window-clicks", {
@@ -1213,7 +1184,6 @@ describe("DesktopController", () => {
       observe: true,
       foregroundWindow: true,
     }));
-    markProviderEvidencePresented(controller, owner, "window-observe");
     expect(controller.authorizeFrame(owner, ["window-batch"])).toBe(true);
 
     await expect(controller.execute(request(owner, "window-batch", {
@@ -1255,7 +1225,6 @@ describe("DesktopController", () => {
       observe: true,
       foregroundWindow: true,
     }));
-    markProviderEvidencePresented(controller, owner, "window-observe");
     expect(controller.authorizeFrame(owner, ["window-first-coordinate"])).toBe(true);
 
     await expect(controller.execute(request(owner, "window-first-coordinate", {
@@ -1278,7 +1247,6 @@ describe("DesktopController", () => {
     const controller = new DesktopController(adapter);
     const owner = {};
     await controller.execute(request(owner, "observe", { actions: [], observe: true }));
-    markProviderEvidencePresented(controller, owner, "observe");
     expect(controller.authorizeFrame(owner, ["invalid-scope", "sibling"])).toBe(true);
 
     await expect(controller.execute(request(owner, "invalid-scope", {
@@ -1297,7 +1265,6 @@ describe("DesktopController", () => {
     const controller = new DesktopController(adapter);
     const owner = {};
     await controller.execute(request(owner, "initial", { actions: [], observe: true }));
-    markProviderEvidencePresented(controller, owner, "initial");
     expect(controller.authorizeFrame(owner, ["invalid-foreground"])).toBe(true);
     adapter.getForegroundIdentity = async () => ({ hwnd: "", processId: 0 } as DesktopForegroundIdentity);
 
@@ -1310,42 +1277,12 @@ describe("DesktopController", () => {
     expect(adapter.clicks).toEqual([]);
   });
 
-  it("bounds retained A/B evidence instead of silently degrading an oversized pair", async () => {
-    const largePng = (): Uint8Array => {
-      const value = Buffer.alloc(9 * 1024 * 1024);
-      Buffer.from(PNG).copy(value);
-      return value;
-    };
-    const adapter = new FakeDesktopAdapter();
-    adapter.captures = [
-      capture({ png: largePng(), width: 10, height: 10 }),
-      capture({ png: largePng(), width: 10, height: 10 }),
-    ];
-    const controller = new DesktopController(adapter);
-    const owner = {};
-    await controller.execute(request(owner, "before", { actions: [], observe: true }));
-    markProviderEvidencePresented(controller, owner, "before");
-    expect(controller.authorizeFrame(owner, ["oversized"])).toBe(true);
-
-    const result = await controller.execute(request(owner, "oversized", {
-      actions: [{ kind: "click", x: 1, y: 1 }],
-      observe: true,
-    }));
-    expect(result.details).toMatchObject({
-      outcome: "interrupted",
-      reason: "pair_too_large",
-      observation: { status: "unavailable", comparison: "pair_too_large" },
-    });
-    expect(providerEvidence(controller, owner, "oversized")).toBeUndefined();
-  });
-
   it("runs the default 150ms settle after sent actions and routes call-scoped move, hold, and drag primitives", async () => {
     const adapter = new FakeDesktopAdapter();
     adapter.captures = [capture(), capture()];
     const controller = new DesktopController(adapter);
     const owner = {};
     await controller.execute(request(owner, "before", { actions: [], observe: true }));
-    markProviderEvidencePresented(controller, owner, "before");
     expect(controller.authorizeFrame(owner, ["expanded"])).toBe(true);
 
     const result = await controller.execute(request(owner, "expanded", {
@@ -1384,14 +1321,13 @@ describe("DesktopController", () => {
     expect(adapter.drags).toHaveLength(1);
   });
 
-  it("keeps sent actions sent across settle abort, but makes their after evidence historical only", async () => {
+  it("keeps sent actions sent across settle abort but attaches no after image", async () => {
     const adapter = new FakeDesktopAdapter();
     adapter.captures = [capture()];
     const controller = new DesktopController(adapter);
     const owner = {};
     const signal = new AbortController();
     await controller.execute(request(owner, "before", { actions: [], observe: true }));
-    markProviderEvidencePresented(controller, owner, "before");
     expect(controller.authorizeFrame(owner, ["settle-abort"])).toBe(true);
     adapter.onWait = async () => {
       signal.abort();
@@ -1407,10 +1343,10 @@ describe("DesktopController", () => {
       outcome: "interrupted",
       reason: "aborted",
       actions: [{ index: 0, status: "sent" }],
-      observation: { status: "unavailable", comparison: "after_missing" },
+      observation: { status: "unavailable" },
     });
-    expect(providerEvidence(controller, owner, "settle-abort")?.images.map(({ kind }) => kind))
-      .toEqual(["historical_before"]);
+    expect(resultImages(result)).toEqual([]);
+    expect(controller.authorizeFrame(owner, ["after-abort"])).toBe(false);
   });
 
   it("permanently fails closed only when a possibly pressed state remains uncertain", async () => {

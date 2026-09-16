@@ -20,6 +20,7 @@ import {
   type AssistantMessage,
 } from "@earendil-works/pi-ai";
 import {
+  MAX_CONVERSATION_IMAGE_DATA_CHARACTERS,
   MAX_PROMPT_CHARACTERS,
   parseServerEvent,
   type ConversationSummary,
@@ -858,7 +859,7 @@ describe("ConversationActor", () => {
       await fixture.actor.dispose();
     });
 
-    it("opens larger durable tool images but fails closed past 5 MiB and off branch", async () => {
+    it("opens bounded durable tool images but fails closed past the shared limit and off branch", async () => {
       const fixture = await openActor();
       const root = fixture.manager.appendMessage(agentMessage({
         role: "user",
@@ -882,10 +883,9 @@ describe("ConversationActor", () => {
         data: largeData,
       });
 
-      const oversizedData = Buffer.concat([
-        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-        Buffer.alloc(4 * 1024 * 1024),
-      ]).toString("base64");
+      const oversizedData = "A".repeat(
+        MAX_CONVERSATION_IMAGE_DATA_CHARACTERS + 4,
+      );
       const oversizedEntryId = fixture.manager.appendMessage(agentMessage({
         role: "toolResult",
         toolCallId: "oversized-image",

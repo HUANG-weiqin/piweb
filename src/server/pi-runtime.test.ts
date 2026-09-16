@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import {
   InMemoryCredentialStore,
   InMemoryModelsStore,
@@ -1472,16 +1472,16 @@ describe("PiRuntime session ownership", () => {
     expect(computer.description).toContain("foregroundWindow:true");
     expect(computer.description).toContain("at least one nonzero scroll delta");
     expect(computer.description).toContain("settleMs 0-2000");
-    expect(computer.description).toContain("current from an initial single image, or after from paired/after-only evidence");
-    expect(computer.description).toContain("before and historical_before are comparison-only");
-    expect(computer.description).toContain("about twice the visual tokens");
+    expect(computer.description).toContain("immediately preceding computer result");
+    expect(computer.description).toContain("stored in its tool result and replayed until compaction");
+    expect(computer.description).toContain("one post-action image");
     expect(computer.description).toContain("foreground_mismatch");
     expect(computer.description).toContain("sent means Windows accepted host dispatch");
     expect(computer.promptGuidelines).toContain(
-      "foregroundWindow?: boolean defaults false and requires observe:true. It captures only the current foreground window's intersection with the primary display; after evidence uses the then-current foreground window. observe:true captures provider-only evidence (default post-action settle is 150ms); an action pair carries two images and about twice the visual-token cost. observe:false does not capture. Actions are sequential; sent is host dispatch, not UI/business success.",
+      "foregroundWindow?: boolean defaults false and requires observe:true. It captures only the current foreground window's intersection with the primary display; a post-action capture uses the then-current foreground window. observe:true stores one durable image in the tool result (default post-action settle is 150ms), so later provider requests replay identical image content until compaction. observe:false does not capture. Actions are sequential; sent is host dispatch, not UI/business success.",
     );
     expect(computer.promptGuidelines).toContain(
-      "Call observe first before coordinate actions. Use current only for an initial single image, and after only for paired/after-only evidence; before and historical_before never authorize coordinates. Coordinates are image-local pixels: (0,0) is the visible current/after image's top-left, including a foreground-window crop; never use desktop-global coordinates.",
+      "Call observe first before coordinate actions. Only the current/after image from the immediately preceding computer result authorizes coordinates for the next assistant decision. Coordinates are image-local pixels: (0,0) is that image's top-left, including a foreground-window crop; never use desktop-global coordinates.",
     );
     expect(computer.promptGuidelines).toContain(
       "A foreground_mismatch may follow prior sent actions; its first not_started action and all remaining actions were not dispatched. Inspect per-action statuses, then re-observe before any coordinate retry.",
@@ -1550,8 +1550,64 @@ describe("PiRuntime session ownership", () => {
     }
   });
 
-  it("preserves preflighted frames for exact siblings and retires them at the next provider conversion", async () => {
+  it("rejects computer use before capture when image delivery is blocked", async () => {
+    const cwd = await temporaryDirectory("piweb-runtime-computer-blocked-images-");
+    let factoryCalls = 0;
+    const runtime = await testRuntime(
+      () => [],
+      undefined,
+      async (modelRuntime) => {
+        modelRuntime.registerProvider("computer-vision-blocked", {
+          baseUrl: "https://example.invalid/v1",
+          apiKey: "test-key",
+          api: "openai-completions",
+          models: [{
+            ...providerModel("computer-vision-blocked"),
+            input: ["text", "image"],
+          }],
+        });
+        await modelRuntime.refresh({ allowNetwork: false });
+      },
+      () => {
+        const settings = SettingsManager.inMemory();
+        settings.setBlockImages(true);
+        return settings;
+      },
+      {
+        createWindowsDesktopAdapter: async () => {
+          factoryCalls += 1;
+          throw new Error("adapter must not be created");
+        },
+      },
+    );
+    const created = await runtime.createSession(cwd, {
+      toolMode: "full_access",
+      model: { provider: "computer-vision-blocked", id: "computer-vision-blocked" },
+      computerUse: { getOwner: () => ({}) },
+    });
+    const computer = created.session.getToolDefinition("computer");
+    if (!computer) throw new Error("Computer tool was not installed");
+    const execute = computer.execute as (
+      toolCallId: string,
+      params: unknown,
+      signal: AbortSignal,
+    ) => Promise<unknown>;
+
+    try {
+      await expect(execute(
+        "blocked-images",
+        { actions: [], observe: true },
+        new AbortController().signal,
+      )).rejects.toThrow("image delivery to be enabled");
+      expect(factoryCalls).toBe(0);
+    } finally {
+      await created.dispose();
+    }
+  });
+
+  it("persists computer images append-only while preserving exact-decision frame authority", async () => {
     const cwd = await temporaryDirectory("piweb-runtime-computer-frame-");
+    const sessionManager = SessionManager.create(cwd, cwd);
     let captureIndex = 0;
     const primaryBounds = { x: 0, y: 0, width: 30, height: 20 };
     const windowBinding = {
@@ -1566,6 +1622,9 @@ describe("PiRuntime session ownership", () => {
       captureBounds: { x: 5, y: 2, width: 20, height: 5 },
       inputBounds: primaryBounds,
     };
+    const settings = SettingsManager.inMemory();
+    let stripComputerResult = false;
+    const clickedPoints: Array<{ x: number; y: number }> = [];
     const adapter: WindowsDesktopAdapter = {
       capture: async (scope) => {
         const index = ++captureIndex;
@@ -1586,7 +1645,10 @@ describe("PiRuntime session ownership", () => {
       },
       getForegroundIdentity: async () => ({ hwnd: "10", processId: 10 }),
       getForegroundWindowBinding: async () => windowBinding,
-      click: async () => "sent",
+      click: async ({ point }) => {
+        clickedPoints.push({ x: point.x, y: point.y });
+        return "sent";
+      },
       move: async () => "sent",
       mouseHold: async () => "sent",
       drag: async () => "sent",
@@ -1596,7 +1658,13 @@ describe("PiRuntime session ownership", () => {
       wait: async () => "sent",
     };
     const runtime = await testRuntime(
-      () => [],
+      () => [(pi) => {
+        pi.on("tool_result", (event) => {
+          if (stripComputerResult && event.toolName === "computer") {
+            return { content: [{ type: "text", text: "extension removed observation" }] };
+          }
+        });
+      }],
       undefined,
       async (modelRuntime) => {
         modelRuntime.registerProvider("computer-vision", {
@@ -1610,7 +1678,7 @@ describe("PiRuntime session ownership", () => {
         });
         await modelRuntime.refresh({ allowNetwork: false });
       },
-      undefined,
+      () => settings,
       { createWindowsDesktopAdapter: async () => adapter },
     );
     const owner = {};
@@ -1618,6 +1686,7 @@ describe("PiRuntime session ownership", () => {
       toolMode: "full_access",
       model: { provider: "computer-vision", id: "computer-vision" },
       computerUse: { getOwner: () => owner },
+      sessionManager,
     });
     const computer = created.session.getToolDefinition("computer");
     if (!computer || !created.computerUse) throw new Error("Computer tool was not installed");
@@ -1627,25 +1696,25 @@ describe("PiRuntime session ownership", () => {
       signal: AbortSignal,
     ) => Promise<ComputerToolResult>;
     const signal = new AbortController().signal;
+    const installedComputerConverter = created.session.agent.convertToLlm;
 
     try {
+      const beforePng = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1]).toString("base64");
+      const afterPng = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 2]).toString("base64");
       const observed = await execute("observe-call", {
         actions: [],
         observe: true,
         foregroundWindow: true,
       }, signal);
-      const source = {
-        role: "toolResult",
-        toolCallId: "observe-call",
-        toolName: "computer",
-        content: observed.content,
-        isError: false,
-        timestamp: 1,
-      };
-      // The only image copy is still transient. Ordinary tool event,
-      // SessionManager/history, and JSON wire fixture all receive this exact
-      // PNG-free result object.
-      created.session.sessionManager.appendMessage({
+      expect(observed.content).toEqual([
+        expect.objectContaining({ type: "text" }),
+        {
+          type: "text",
+          text: "[computer observation current; scope=foreground_window; size=10x10 px]",
+        },
+        { type: "image", mimeType: "image/png", data: beforePng },
+      ]);
+      const observeCall = {
         role: "assistant",
         content: [{
           type: "toolCall",
@@ -1656,62 +1725,122 @@ describe("PiRuntime session ownership", () => {
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
         stopReason: "toolUse",
         timestamp: 0,
-      } as never);
-      created.session.sessionManager.appendMessage({ ...source, details: observed.details } as never);
-      const history = projectConversationHistory(created.session.sessionManager);
-      const ordinaryChain = JSON.stringify({
-        toolEvent: { ...source, details: observed.details },
-        historySnapshot: history,
-        websocketFixture: { type: "conversation_snapshot", history },
-      });
-      expect(ordinaryChain).not.toContain("iVBOR");
-      expect(ordinaryChain).not.toContain("image");
-      expect(ordinaryChain).not.toContain("png");
+      };
+      const source = {
+        role: "toolResult",
+        toolCallId: "observe-call",
+        toolName: "computer",
+        content: observed.content,
+        isError: false,
+        timestamp: 1,
+      };
+      const persistedSource = { ...source, details: observed.details };
+      created.session.sessionManager.appendMessage(observeCall as never);
+      const imageEntryId = created.session.sessionManager.appendMessage(
+        persistedSource as never,
+      );
 
-      const providerInput = await created.session.agent.convertToLlm([source] as never);
+      // JSONL/provider context owns the bytes, while bounded wire history keeps
+      // only a locator and a shape-only image marker.
+      expect(JSON.stringify(persistedSource)).toContain(beforePng);
+      const historyJson = JSON.stringify(projectConversationHistory(created.session.sessionManager));
+      expect(historyJson).not.toContain(beforePng);
+      expect(historyJson).toContain("resultImageRefs");
+      expect(historyJson).toContain(imageEntryId);
+
+      const providerInput = await created.session.agent.convertToLlm([
+        observeCall,
+        persistedSource,
+      ] as never);
       const providerJson = JSON.stringify(providerInput);
-      expect(providerJson).toContain("iVBOR");
+      expect(providerJson).toContain(beforePng);
       expect(providerJson).toContain("[computer observation current; scope=foreground_window; size=10x10 px]");
       expect(providerJson).not.toContain("\\\"hwnd\\\"");
       expect(providerJson).not.toContain("\\\"rawBounds\\\"");
+
+      const sessionFile = sessionManager.getSessionFile();
+      if (!sessionFile) throw new Error("Computer image session was not persisted");
+      expect(await readFile(sessionFile, "utf8")).toContain(beforePng);
+      const reopened = SessionManager.open(sessionFile, cwd, cwd);
+      expect(await created.session.agent.convertToLlm(
+        reopened.buildSessionContext().messages,
+      )).toEqual(providerInput);
+
       created.computerUse.completeAssistantDecision([
         "rejected-before-execute",
         "admitted-sibling",
       ]);
 
-      // The controller rejects malformed local input before any desktop
-      // primitive. That must leave the same assistant decision's exact sibling
-      // capability intact.
+      // Promoting the transient coordinate capability must not rewrite durable
+      // history: a retry converts to byte-for-byte equivalent model input.
+      expect(await created.session.agent.convertToLlm([
+        observeCall,
+        persistedSource,
+      ] as never)).toEqual(providerInput);
+
+      // A malformed sibling reaches no primitive and leaves the same exact
+      // assistant decision's authorized frame intact.
       await expect(execute("rejected-before-execute", {
         actions: [{ kind: "click", x: "not-a-coordinate", y: 1 }],
         observe: false,
       }, signal)).rejects.toThrow("integer");
-      const paired = await execute("admitted-sibling", {
+      const after = await execute("admitted-sibling", {
         actions: [{ kind: "click", x: 1, y: 1 }],
         observe: true,
         foregroundWindow: true,
         settleMs: 0,
       }, signal);
-      expect(paired.details).toMatchObject({
+      expect(after.details).toMatchObject({
         outcome: "completed",
-        observation: { comparison: "paired" },
+        observation: { status: "captured", width: 20, height: 5 },
       });
-      const pairProviderInput = await created.session.agent.convertToLlm([{
-        ...source,
+      expect(after.content).toContainEqual({
+        type: "text",
+        text: "[computer observation after action batch; scope=foreground_window; size=20x5 px]",
+      });
+      expect(after.content).toContainEqual({
+        type: "image",
+        mimeType: "image/png",
+        data: afterPng,
+      });
+      expect(JSON.stringify(after.content)).not.toContain(beforePng);
+
+      const actionCall = {
+        role: "assistant",
+        content: [{
+          type: "toolCall",
+          id: "admitted-sibling",
+          name: "computer",
+          arguments: {
+            actions: [{ kind: "click", x: 1, y: 1 }],
+            observe: true,
+            foregroundWindow: true,
+            settleMs: 0,
+          },
+        }],
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+        stopReason: "toolUse",
+        timestamp: 2,
+      };
+      const afterSource = {
+        ...persistedSource,
         toolCallId: "admitted-sibling",
-        content: paired.content,
-      }] as never);
-      const pairProviderJson = JSON.stringify(pairProviderInput);
-      const beforeLabel = "[computer observation before action batch; scope=foreground_window; size=10x10 px]";
-      const afterLabel = "[computer observation after action batch; scope=foreground_window; size=20x5 px]";
-      const beforePng = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1]).toString("base64");
-      const afterPng = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 2]).toString("base64");
-      const pairParts = [beforeLabel, beforePng, afterLabel, afterPng]
-        .map((part) => pairProviderJson.indexOf(part));
-      expect(pairParts.every((index) => index >= 0)).toBe(true);
-      expect(pairParts).toEqual([...pairParts].sort((left, right) => left - right));
-      expect(pairProviderJson).not.toContain("\"hwnd\"");
-      expect(pairProviderJson).not.toContain("\"processId\"");
+        content: after.content,
+        details: after.details,
+        timestamp: 3,
+      };
+      const extendedProviderInput = await created.session.agent.convertToLlm([
+        observeCall,
+        persistedSource,
+        actionCall,
+        afterSource,
+      ] as never);
+      expect(extendedProviderInput.slice(0, providerInput.length)).toEqual(providerInput);
+      const extendedJson = JSON.stringify(extendedProviderInput);
+      expect(extendedJson.split(beforePng)).toHaveLength(2);
+      expect(extendedJson.split(afterPng)).toHaveLength(2);
+      expect(extendedJson).not.toContain("\"hwnd\"");
+      expect(extendedJson).not.toContain("\"processId\"");
       await expect(execute("sibling-after-admission", {
         actions: [{ kind: "click", x: 1, y: 1 }],
         observe: false,
@@ -1719,31 +1848,28 @@ describe("PiRuntime session ownership", () => {
         details: { outcome: "rejected", reason: "decision_consumed" },
       });
 
-      // By contrast, an unused capability is retired only when a new provider
-      // conversion begins, not merely because a local sibling was preflighted.
-      const observedAgain = await execute("observe-next-decision", { actions: [], observe: true }, signal);
-      const nextSource = {
-        ...source,
-        toolCallId: "observe-next-decision",
-        content: observedAgain.content,
-      };
-      await created.session.agent.convertToLlm([nextSource] as never);
+      // A new assistant decision can use B. If its exact call is rejected before
+      // controller admission, the following decision retires B rather than
+      // carrying stale coordinates forward.
       created.computerUse.completeAssistantDecision(["unexecuted-next-decision"]);
-      await created.session.agent.convertToLlm([{
-        ...nextSource,
-        toolCallId: "next-provider-request",
-        content: [{ type: "text", text: "next decision" }],
-      }] as never);
       await expect(execute("unexecuted-next-decision", {
+        actions: [{ kind: "click", x: "not-a-coordinate", y: 1 }],
+        observe: false,
+      }, signal)).rejects.toThrow("integer");
+      created.computerUse.completeAssistantDecision(["stale-frame-call"]);
+      await expect(execute("stale-frame-call", {
         actions: [{ kind: "click", x: 1, y: 1 }],
         observe: false,
       }, signal)).rejects.toThrow("authorized current observation");
 
-      // An already-aborted invocation likewise reaches no primitive and leaves
-      // an exact sibling usable until its decision boundary.
+      // An already-aborted invocation reaches no primitive and leaves another
+      // exact sibling from the same decision usable.
       const observedThird = await execute("observe-aborted", { actions: [], observe: true }, signal);
-      const abortedSource = { ...source, toolCallId: "observe-aborted", content: observedThird.content };
-      await created.session.agent.convertToLlm([abortedSource] as never);
+      await created.session.agent.convertToLlm([{
+        ...source,
+        toolCallId: "observe-aborted",
+        content: observedThird.content,
+      }] as never);
       created.computerUse.completeAssistantDecision([
         "aborted-before-admission",
         "after-abort-sibling",
@@ -1758,8 +1884,212 @@ describe("PiRuntime session ownership", () => {
         actions: [{ kind: "click", x: 1, y: 1 }],
         observe: false,
       }, signal)).resolves.toMatchObject({ details: { outcome: "completed" } });
+
+      // Blocking image delivery at either decision completion or execution
+      // retires any frame that the model can no longer be trusted to have seen.
+      created.computerUse.completeAssistantDecision(["observe-before-policy-block"]);
+      await execute("observe-before-policy-block", { actions: [], observe: true }, signal);
+      settings.setBlockImages(true);
+      created.computerUse.completeAssistantDecision(["not-authorized-while-blocked"]);
+      settings.setBlockImages(false);
+      await expect(execute("not-authorized-while-blocked", {
+        actions: [{ kind: "click", x: 1, y: 1 }],
+        observe: false,
+      }, signal)).rejects.toThrow("authorized current observation");
+
+      created.computerUse.completeAssistantDecision(["observe-before-execution-block"]);
+      await execute("observe-before-execution-block", { actions: [], observe: true }, signal);
+      created.computerUse.completeAssistantDecision([
+        "blocked-after-authorization",
+        "sibling-after-block",
+      ]);
+      settings.setBlockImages(true);
+      await expect(execute("blocked-after-authorization", {
+        actions: [{ kind: "click", x: 1, y: 1 }],
+        observe: false,
+      }, signal)).rejects.toThrow("image delivery to be enabled");
+      settings.setBlockImages(false);
+      await expect(execute("sibling-after-block", {
+        actions: [{ kind: "click", x: 1, y: 1 }],
+        observe: false,
+      }, signal)).rejects.toThrow("authorized current observation");
+
+      // Normalize before Pi's own afterToolCall pass so a >2000px capture is
+      // persisted unchanged by the SDK and coordinates use displayed pixels.
+      const largePng = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAB9EAAAABCAYAAABpP15DAAAAH0lEQVR4nO3DAQ0AAADCoPcvrUVgo2qqqqqqqqqqmjuIfsmZmN+U4AAAAABJRU5ErkJggg==",
+        "base64",
+      );
+      const largeBounds = { x: 0, y: 0, width: 2001, height: 1 };
+      adapter.capture = async (scope) => ({
+        png: largePng,
+        width: largeBounds.width,
+        height: largeBounds.height,
+        scope,
+        captureBounds: largeBounds,
+        inputBounds: largeBounds,
+        foreground: windowBinding.foreground,
+      });
+      created.computerUse.clearObservation();
+      const normalizedResult = await execute(
+        "large-observe",
+        { actions: [], observe: true },
+        signal,
+      );
+      expect(normalizedResult.details.observation).toEqual({
+        status: "captured",
+        width: 2000,
+        height: 1,
+      });
+      expect(normalizedResult.content).toContainEqual({
+        type: "text",
+        text: "[computer observation current; scope=primary_display; size=2000x1 px]",
+      });
+      const afterToolCall = created.session.agent.afterToolCall;
+      if (!afterToolCall) throw new Error("Computer result boundary was not installed");
+      const normalizedPatch = await afterToolCall({
+        toolCall: { id: "large-observe", name: "computer" },
+        args: { actions: [], observe: true },
+        result: normalizedResult,
+        isError: false,
+      } as Parameters<typeof afterToolCall>[0], signal);
+      expect(normalizedPatch?.content ?? normalizedResult.content).toEqual(
+        normalizedResult.content,
+      );
+      await created.session.agent.convertToLlm([{
+        ...source,
+        toolCallId: "large-observe",
+        content: normalizedResult.content,
+      }] as never);
+      created.computerUse.completeAssistantDecision([
+        "outside-normalized-image",
+        "normalized-image-edge",
+      ]);
+      await expect(execute("outside-normalized-image", {
+        actions: [{ kind: "click", x: 2000, y: 0 }],
+        observe: false,
+      }, signal)).rejects.toThrow("outside the current observation");
+      await execute("normalized-image-edge", {
+        actions: [{ kind: "click", x: 1999, y: 0 }],
+        observe: false,
+      }, signal);
+      expect(clickedPoints.at(-1)).toEqual({ x: 2000, y: 0 });
+
+      // A context/message-end rewrite is detected at the final converter
+      // boundary even when the earlier tool-result hook kept the image.
+      created.computerUse.completeAssistantDecision(["presentation-source"]);
+      const presentationSource = await execute(
+        "presentation-source",
+        { actions: [], observe: true },
+        signal,
+      );
+      await created.session.agent.convertToLlm([{
+        ...source,
+        toolCallId: "presentation-source",
+        content: [{ type: "text", text: "image removed before provider conversion" }],
+      }] as never);
+      created.computerUse.completeAssistantDecision(["after-missing-presentation"]);
+      await expect(execute("after-missing-presentation", {
+        actions: [{ kind: "click", x: 1, y: 0 }],
+        observe: false,
+      }, signal)).rejects.toThrow("authorized current observation");
+      expect(presentationSource.content.some((part) => part.type === "image")).toBe(true);
+
+      // Keeping the same details/label/MIME is insufficient when the image
+      // bytes differ from the exact pending frame.
+      created.computerUse.completeAssistantDecision(["hash-source"]);
+      const hashSource = await execute("hash-source", {
+        actions: [],
+        observe: true,
+      }, signal);
+      const changedImageContent = hashSource.content.map((part) => (
+        part.type === "image"
+          ? { ...part, data: largePng.toString("base64") }
+          : { ...part }
+      ));
+      await created.session.agent.convertToLlm([{
+        ...source,
+        toolCallId: "hash-source",
+        content: changedImageContent,
+      }] as never);
+      created.computerUse.completeAssistantDecision(["after-changed-image"]);
+      await expect(execute("after-changed-image", {
+        actions: [{ kind: "click", x: 1, y: 0 }],
+        observe: false,
+      }, signal)).rejects.toThrow("authorized current observation");
+
+      // The structured details text is part of the same coordinate contract.
+      created.computerUse.completeAssistantDecision(["details-source"]);
+      const detailsSource = await execute("details-source", {
+        actions: [],
+        observe: true,
+      }, signal);
+      const changedDetailsContent = detailsSource.content.map((part, index) => (
+        index === 0 && part.type === "text"
+          ? { ...part, text: "{}" }
+          : { ...part }
+      ));
+      await created.session.agent.convertToLlm([{
+        ...source,
+        toolCallId: "details-source",
+        content: changedDetailsContent,
+      }] as never);
+      created.computerUse.completeAssistantDecision(["after-changed-details"]);
+      await expect(execute("after-changed-details", {
+        actions: [{ kind: "click", x: 1, y: 0 }],
+        observe: false,
+      }, signal)).rejects.toThrow("authorized current observation");
+
+      // Project hooks may alter ordinary tool results, but a changed computer
+      // image/label cannot leave authority for coordinates the model did not see.
+      created.computerUse.completeAssistantDecision(["observe-before-result-hook"]);
+      const guardedResult = await execute(
+        "observe-before-result-hook",
+        { actions: [], observe: true },
+        signal,
+      );
+      stripComputerResult = true;
+      await expect(afterToolCall({
+        toolCall: { id: "observe-before-result-hook", name: "computer" },
+        args: { actions: [], observe: true },
+        result: guardedResult,
+        isError: false,
+      } as Parameters<typeof afterToolCall>[0], signal)).rejects.toThrow(
+        "Computer observation content was modified after capture",
+      );
+      stripComputerResult = false;
+      created.computerUse.completeAssistantDecision(["after-modified-result"]);
+      await expect(execute("after-modified-result", {
+        actions: [{ kind: "click", x: 1, y: 1 }],
+        observe: false,
+      }, signal)).rejects.toThrow("authorized current observation");
+
+      // An oversized capture that cannot be decoded must never fall through
+      // to Pi's pass-through-on-normalization-failure behavior.
+      adapter.capture = async (scope) => ({
+        png: Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 99]),
+        width: largeBounds.width,
+        height: largeBounds.height,
+        scope,
+        captureBounds: largeBounds,
+        inputBounds: largeBounds,
+        foreground: windowBinding.foreground,
+      });
+      created.computerUse.completeAssistantDecision(["invalid-large-observe"]);
+      await expect(execute("invalid-large-observe", {
+        actions: [],
+        observe: true,
+      }, signal)).rejects.toThrow(
+        "Computer observation could not be normalized for image delivery",
+      );
+      created.computerUse.completeAssistantDecision(["after-invalid-large"]);
+      await expect(execute("after-invalid-large", {
+        actions: [{ kind: "click", x: 1, y: 0 }],
+        observe: false,
+      }, signal)).rejects.toThrow("authorized current observation");
     } finally {
       await created.dispose();
+      expect(created.session.agent.convertToLlm).not.toBe(installedComputerConverter);
     }
   });
 

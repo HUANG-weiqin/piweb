@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { deflateSync } from "node:zlib";
+import { MAX_CONVERSATION_IMAGE_BYTES } from "../shared/protocol.js";
 
 export const MAX_COMPUTER_ACTIONS = 8;
 export const MAX_COMPUTER_TYPE_BYTES = 4_096;
@@ -12,9 +14,7 @@ export const DEFAULT_COMPUTER_SETTLE_MS = 150;
 /** Bounds one whole capture/action batch, not merely one wait primitive. */
 export const MAX_COMPUTER_CALL_MS = 15_000;
 export const MAX_COMPUTER_SCROLL_DELTA = 10_000;
-export const MAX_DESKTOP_PNG_BYTES = 16 * 1024 * 1024;
-/** A comparison retains no more raw PNG bytes than the prior single-image limit. */
-export const MAX_COMPUTER_PAIR_PNG_BYTES = MAX_DESKTOP_PNG_BYTES;
+export const MAX_DESKTOP_PNG_BYTES = MAX_CONVERSATION_IMAGE_BYTES;
 
 const MAX_CAPTURE_DIMENSION = 32_768;
 const MAX_CAPTURE_PIXELS = 32 * 1024 * 1024;
@@ -122,7 +122,7 @@ export interface DesktopForegroundWindowBinding {
 }
 
 export interface DesktopCapture {
-  /** A complete PNG. The controller copies and bounds it before retaining it. */
+  /** A complete PNG. The controller copies and bounds it before result encoding. */
   png: Uint8Array;
   width: number;
   height: number;
@@ -208,30 +208,6 @@ export interface WindowsDesktopAdapter {
   dispose?(): Promise<void> | void;
 }
 
-export type DesktopProviderEvidenceKind =
-  | "current"
-  | "before"
-  | "after"
-  | "historical_before";
-
-export interface DesktopProviderImage {
-  sourceToolCallId: string;
-  kind: DesktopProviderEvidenceKind;
-  mimeType: "image/png";
-  /** A caller-owned copy. Mutating it cannot alter retained evidence. */
-  png: Uint8Array;
-  width: number;
-  height: number;
-  /** Safe provider-only description; no window identity or physical geometry. */
-  scope: DesktopCaptureScope;
-}
-
-export interface DesktopProviderEvidence {
-  sourceToolCallId: string;
-  /** One image for current/after-only/historical-before, two for a pair. */
-  images: readonly DesktopProviderImage[];
-}
-
 export interface DesktopControllerRequest {
   owner: object;
   toolCallId: string;
@@ -257,16 +233,8 @@ export type ComputerCapturedObservation = {
 export type ComputerUnavailableObservation = { status: "unavailable" };
 
 export type ComputerObservation =
-  | (ComputerCapturedObservation & {
-      before?: ComputerCapturedObservation;
-      after?: ComputerCapturedObservation;
-      comparison?: "paired" | "after_only";
-    })
-  | (ComputerUnavailableObservation & {
-      before?: ComputerCapturedObservation;
-      after?: ComputerUnavailableObservation;
-      comparison?: "after_missing" | "pair_too_large";
-    });
+  | ComputerCapturedObservation
+  | ComputerUnavailableObservation;
 
 export interface ComputerResultDetails {
   outcome: "completed" | "interrupted" | "desktop_busy" | "rejected";
@@ -277,14 +245,17 @@ export interface ComputerResultDetails {
     | "controller_disposed"
     | "pressed_state_uncertain"
     | "decision_consumed"
-    | "pair_too_large"
     | "foreground_mismatch"
     | "aborted"
     | "timed_out";
 }
 
+export type ComputerToolResultContent =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: "image/png" | "image/jpeg" };
+
 export interface ComputerToolResult {
-  content: readonly { type: "text"; text: string }[];
+  content: readonly ComputerToolResultContent[];
   details: ComputerResultDetails;
 }
 
@@ -333,29 +304,32 @@ interface Frame {
   foregroundWindow?: DesktopForegroundWindowBinding;
 }
 
-interface RetainedImage {
+interface CapturedImage {
   png: Buffer;
   frame: Frame;
 }
 
-interface PendingEvidence {
-  state: "pending_evidence";
+interface PendingFrame {
+  state: "pending_frame";
   owner: object;
   sourceToolCallId: string;
-  /** True only after the converter appended every evidence part to a provider request. */
+  frame: Frame;
+  providerDetailsText: string;
+  providerLabel: string;
+  providerMimeType: "image/png" | "image/jpeg";
+  providerImageSha256: string;
+  /** Every real assistant decision refreshes this at the converter boundary. */
   presented: boolean;
-  images: readonly { kind: DesktopProviderEvidenceKind; image: RetainedImage }[];
-  /** Only current/after evidence can become a future coordinate frame. */
-  coordinateImage?: RetainedImage;
 }
 
-interface AuthorizedFrame extends RetainedImage {
+interface AuthorizedFrame {
   state: "authorized_frame";
   owner: object;
+  frame: Frame;
   toolCallIds: ReadonlySet<string>;
 }
 
-type ObservationState = PendingEvidence | AuthorizedFrame;
+type ObservationState = PendingFrame | AuthorizedFrame;
 
 interface ActiveOperation {
   owner: object;
@@ -823,7 +797,22 @@ function actionResults(actions: readonly ValidatedAction[]): ComputerActionResul
   }));
 }
 
-function makeResult(details: ComputerResultDetails): ComputerToolResult {
+function computerObservationLabel(
+  kind: "current" | "after",
+  frame: Frame,
+): string {
+  const position = kind === "current" ? "current" : "after action batch";
+  return `[computer observation ${position}; scope=${frame.scope}; size=${frame.width}x${frame.height} px]`;
+}
+
+function imageSha256(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("base64url");
+}
+
+function makeResult(
+  details: ComputerResultDetails,
+  captured?: { kind: "current" | "after"; image: CapturedImage },
+): ComputerToolResult {
   const frozenActions = Object.freeze(details.actions.map((action) => Object.freeze({ ...action })));
   const frozenObservation = details.observation && Object.freeze({ ...details.observation });
   const frozenDetails = Object.freeze({
@@ -831,11 +820,26 @@ function makeResult(details: ComputerResultDetails): ComputerToolResult {
     actions: frozenActions,
     ...(frozenObservation === undefined ? {} : { observation: frozenObservation }),
   }) as ComputerResultDetails;
+  const content: ComputerToolResultContent[] = [{
+    type: "text",
+    text: JSON.stringify(frozenDetails),
+  }];
+  if (captured !== undefined) {
+    const { frame, png } = captured.image;
+    content.push(
+      {
+        type: "text",
+        text: computerObservationLabel(captured.kind, frame),
+      },
+      {
+        type: "image",
+        data: png.toString("base64"),
+        mimeType: "image/png",
+      },
+    );
+  }
   return Object.freeze({
-    content: Object.freeze([Object.freeze({
-      type: "text" as const,
-      text: JSON.stringify(frozenDetails),
-    })]),
+    content: Object.freeze(content.map((part) => Object.freeze(part))),
     details: frozenDetails,
   });
 }
@@ -902,10 +906,15 @@ function createActiveOperation(owner: object): ActiveOperation {
 }
 
 /**
- * Process-wide desktop lease and run-scoped transient image/frame state.
+ * Process-wide desktop lease and run-scoped coordinate-frame authority.
  * Owners are compared only by object identity; caller-generated string IDs are
  * deliberately never used as lease keys.
  */
+export interface DesktopControllerOptions {
+  /** PiRuntime enables this so only a verified provider conversion can authorize coordinates. */
+  requireProviderPresentation?: boolean;
+}
+
 export class DesktopController {
   private leaseOwner: object | undefined;
   private releaseOwner: object | undefined;
@@ -918,57 +927,19 @@ export class DesktopController {
   private disposed = false;
   private disposePromise: Promise<void> | undefined;
 
-  constructor(private readonly adapter: WindowsDesktopAdapter) {}
+  private readonly requireProviderPresentation: boolean;
 
-  /**
-   * Returns fresh provider-only evidence for one exact converted tool result.
-   * The stored bytes stay retained for a converter retry until presentation
-   * succeeds; no AgentMessage or persisted tool result is mutated.
-   */
-  prepareProviderEvidence(
-    owner: object,
-    sourceToolCallId: string,
-  ): DesktopProviderEvidence | undefined {
-    const observation = this.observation;
-    if (
-      observation?.state !== "pending_evidence"
-      || observation.owner !== owner
-      || observation.sourceToolCallId !== sourceToolCallId
-    ) {
-      return undefined;
-    }
-    return Object.freeze({
-      sourceToolCallId,
-      images: Object.freeze(observation.images.map(({ kind, image }) => Object.freeze({
-        sourceToolCallId,
-        kind,
-        mimeType: "image/png" as const,
-        png: Uint8Array.from(image.png),
-        width: image.frame.width,
-        height: image.frame.height,
-        scope: image.frame.scope,
-      }))),
-    });
-  }
-
-  /** The converter calls this only after all evidence parts were appended. */
-  markProviderEvidencePresented(owner: object, sourceToolCallId: string): boolean {
-    const observation = this.observation;
-    if (
-      observation?.state !== "pending_evidence"
-      || observation.owner !== owner
-      || observation.sourceToolCallId !== sourceToolCallId
-    ) {
-      return false;
-    }
-    observation.presented = true;
-    return true;
+  constructor(
+    private readonly adapter: WindowsDesktopAdapter,
+    options: DesktopControllerOptions = {},
+  ) {
+    this.requireProviderPresentation = options.requireProviderPresentation === true;
   }
 
   /**
-   * Called only after a provider assistant decision. Historical before-only
-   * evidence deliberately authorizes nothing; current/after evidence grants
-   * coordinates only to the listed sibling computer calls.
+   * Called only after the next provider assistant decision while image
+   * delivery remains enabled. Coordinates are granted only to that decision's
+   * listed sibling computer calls.
    */
   authorizeFrame(owner: object, computerToolCallIds: readonly string[]): boolean {
     const toolCallIds = new Set<string>();
@@ -981,28 +952,111 @@ export class DesktopController {
 
     const observation = this.observation;
     if (
-      observation?.state !== "pending_evidence"
+      observation?.state !== "pending_frame"
       || observation.owner !== owner
       || !observation.presented
+      || toolCallIds.size === 0
     ) {
       return false;
     }
-    const coordinateImage = observation.coordinateImage;
-    if (toolCallIds.size === 0 || coordinateImage === undefined) {
-      this.observation = undefined;
-      return false;
-    }
-    // A successfully projected image necessarily belongs to the next
-    // assistant decision, so it re-arms that owner's single admitted batch.
     this.spentDecisionOwners.delete(owner);
     this.observation = {
       state: "authorized_frame",
       owner,
+      frame: observation.frame,
       toolCallIds,
-      png: coordinateImage.png,
-      frame: coordinateImage.frame,
     };
     return true;
+  }
+
+  /**
+   * Rebinds one pending frame to the exact image dimensions delivered to the
+   * model after host normalization. Physical capture/input bounds stay fixed.
+   */
+  resizePendingFrame(
+    owner: object,
+    sourceToolCallId: string,
+    width: number,
+    height: number,
+    providerImage: Readonly<{
+      detailsText: string;
+      label: string;
+      mimeType: "image/png" | "image/jpeg";
+      data: string;
+    }>,
+  ): boolean {
+    const observation = this.observation;
+    if (
+      observation?.state !== "pending_frame"
+      || observation.owner !== owner
+      || observation.sourceToolCallId !== sourceToolCallId
+      || !Number.isSafeInteger(width)
+      || width < 1
+      || width > MAX_CAPTURE_DIMENSION
+      || !Number.isSafeInteger(height)
+      || height < 1
+      || height > MAX_CAPTURE_DIMENSION
+      || width * height > MAX_CAPTURE_PIXELS
+    ) {
+      return false;
+    }
+    this.observation = {
+      ...observation,
+      frame: Object.freeze({ ...observation.frame, width, height }),
+      providerDetailsText: providerImage.detailsText,
+      providerLabel: providerImage.label,
+      providerMimeType: providerImage.mimeType,
+      providerImageSha256: imageSha256(Buffer.from(providerImage.data, "base64")),
+      presented: !this.requireProviderPresentation,
+    };
+    return true;
+  }
+
+  pendingFrameSourceToolCallId(owner: object): string | undefined {
+    const observation = this.observation;
+    return observation?.state === "pending_frame" && observation.owner === owner
+      ? observation.sourceToolCallId
+      : undefined;
+  }
+
+  recordFramePresentation(
+    owner: object,
+    sourceToolCallId: string,
+    presented: Readonly<{
+      detailsText: string;
+      label: string;
+      mimeType: string;
+      data: string;
+    }> | undefined,
+  ): boolean {
+    const observation = this.observation;
+    if (
+      observation?.state !== "pending_frame"
+      || observation.owner !== owner
+      || observation.sourceToolCallId !== sourceToolCallId
+    ) {
+      return false;
+    }
+    let matches = false;
+    if (
+      presented !== undefined
+      && typeof presented.detailsText === "string"
+      && typeof presented.label === "string"
+      && typeof presented.mimeType === "string"
+      && typeof presented.data === "string"
+      && presented.detailsText === observation.providerDetailsText
+      && presented.label === observation.providerLabel
+      && presented.mimeType === observation.providerMimeType
+    ) {
+      try {
+        matches = imageSha256(Buffer.from(presented.data, "base64"))
+          === observation.providerImageSha256;
+      } catch {
+        matches = false;
+      }
+    }
+    this.observation = { ...observation, presented: matches };
+    return matches;
   }
 
   clearObservation(owner: object): void {
@@ -1088,13 +1142,6 @@ export class DesktopController {
         validateActionCoordinates(coordinateFrame, action);
       }
     }
-    // Any actual action from this decision may produce an after comparison
-    // against the image the decision saw, even if the action itself has no
-    // coordinates (for example type or keypress).
-    const before = input.observe && input.actions.length > 0 && authorized !== undefined
-      ? this.copyRetainedImage(authorized)
-      : undefined;
-
     if (this.disposed) {
       return makeResult({
         outcome: "rejected",
@@ -1196,7 +1243,6 @@ export class DesktopController {
         return await this.captureResult(
           effectiveRequest,
           results,
-          undefined,
           "current",
           input.foregroundWindow ? "foreground_window" : "primary_display",
           input.settleMs,
@@ -1212,7 +1258,6 @@ export class DesktopController {
           return this.interruptedResult(
             effectiveRequest,
             results,
-            admitted ? before : undefined,
             interruptionReason(),
           );
         }
@@ -1245,7 +1290,7 @@ export class DesktopController {
           const foreground = await verifyForegroundWindow(coordinateFrame);
           if (foreground === "aborted") {
             return admitted
-              ? this.interruptedResult(effectiveRequest, results, before, interruptionReason())
+              ? this.interruptedResult(effectiveRequest, results, interruptionReason())
               : makeResult({
                   outcome: "interrupted",
                   reason: interruptionReason(),
@@ -1256,7 +1301,7 @@ export class DesktopController {
             this.spentDecisionOwners.add(request.owner);
             this.clearObservation(request.owner);
             return admitted
-              ? this.interruptedResult(effectiveRequest, results, before, "foreground_mismatch")
+              ? this.interruptedResult(effectiveRequest, results, "foreground_mismatch")
               : makeResult({
                   outcome: "rejected",
                   reason: "foreground_mismatch",
@@ -1279,7 +1324,6 @@ export class DesktopController {
           return this.interruptedResult(
             effectiveRequest,
             results,
-            before,
             interruptionReason(),
           );
         }
@@ -1293,7 +1337,6 @@ export class DesktopController {
           return this.interruptedResult(
             effectiveRequest,
             results,
-            before,
             deadlineExpired || effectiveRequest.signal.aborted ? interruptionReason() : undefined,
           );
         }
@@ -1304,13 +1347,12 @@ export class DesktopController {
           return this.interruptedResult(
             effectiveRequest,
             results,
-            before,
             deadlineExpired || effectiveRequest.signal.aborted ? interruptionReason() : undefined,
           );
         }
         results[index]!.status = "sent";
         if (deadlineExpired || effectiveRequest.signal.aborted) {
-          return this.interruptedResult(effectiveRequest, results, before, interruptionReason());
+          return this.interruptedResult(effectiveRequest, results, interruptionReason());
         }
       }
 
@@ -1324,7 +1366,6 @@ export class DesktopController {
       return await this.captureResult(
         effectiveRequest,
         results,
-        before,
         "after",
         input.foregroundWindow ? "foreground_window" : "primary_display",
         input.settleMs,
@@ -1362,33 +1403,28 @@ export class DesktopController {
       : undefined;
   }
 
-  private copyRetainedImage(image: RetainedImage): RetainedImage {
-    return { png: image.png, frame: image.frame };
-  }
-
-  private installEvidence(
+  private installFrame(
     owner: object,
     sourceToolCallId: string,
-    images: readonly { kind: DesktopProviderEvidenceKind; image: RetainedImage }[],
-    coordinateImage?: RetainedImage,
+    frame: Frame,
+    kind: "current" | "after",
+    png: Buffer,
+    detailsText: string,
   ): void {
-    if (images.length < 1 || images.length > 2) {
-      throw new Error("computer evidence must contain one or two images");
-    }
     this.observation = {
-      state: "pending_evidence",
+      state: "pending_frame",
       owner,
       sourceToolCallId,
-      presented: false,
-      images: Object.freeze(images.map(({ kind, image }) => Object.freeze({
-        kind,
-        image: this.copyRetainedImage(image),
-      }))),
-      ...(coordinateImage === undefined ? {} : { coordinateImage: this.copyRetainedImage(coordinateImage) }),
+      frame,
+      providerDetailsText: detailsText,
+      providerLabel: computerObservationLabel(kind, frame),
+      providerMimeType: "image/png",
+      providerImageSha256: imageSha256(png),
+      presented: !this.requireProviderPresentation,
     };
   }
 
-  private capturedObservation(image: RetainedImage): ComputerCapturedObservation {
+  private capturedObservation(image: CapturedImage): ComputerCapturedObservation {
     return Object.freeze({
       status: "captured" as const,
       width: image.frame.width,
@@ -1399,32 +1435,14 @@ export class DesktopController {
   private interruptedResult(
     request: DesktopControllerRequest,
     results: ComputerActionResult[],
-    before: RetainedImage | undefined,
     reason: "aborted" | "timed_out" | "foreground_mismatch" | undefined,
   ): ComputerToolResult {
-    if (before === undefined) {
-      this.clearObservation(request.owner);
-      return makeResult({
-        outcome: "interrupted",
-        reason,
-        actions: results,
-        observation: { status: "unavailable" },
-      });
-    }
-    this.installEvidence(request.owner, request.toolCallId, [{
-      kind: "historical_before",
-      image: before,
-    }]);
+    this.clearObservation(request.owner);
     return makeResult({
       outcome: "interrupted",
       reason,
       actions: results,
-      observation: {
-        status: "unavailable",
-        before: this.capturedObservation(before),
-        after: { status: "unavailable" },
-        comparison: "after_missing",
-      },
+      observation: { status: "unavailable" },
     });
   }
 
@@ -1484,7 +1502,6 @@ export class DesktopController {
   private async captureResult(
     request: DesktopControllerRequest,
     results: ComputerActionResult[],
-    before: RetainedImage | undefined,
     mode: "current" | "after",
     scope: DesktopCaptureScope,
     settleMs: number,
@@ -1493,7 +1510,7 @@ export class DesktopController {
     finishAfterQuiescence: (pending: Promise<unknown>) => void,
   ): Promise<ComputerToolResult> {
     const interrupted = (reason: "aborted" | "timed_out" | undefined): ComputerToolResult =>
-      this.interruptedResult(request, results, mode === "after" ? before : undefined, reason);
+      this.interruptedResult(request, results, reason);
     try {
       if (expireDeadline() || request.signal.aborted) return interrupted(interruptionReason());
       if (settleMs > 0) {
@@ -1527,50 +1544,28 @@ export class DesktopController {
       }
       if (deadlineExpired || request.signal.aborted) return interrupted(interruptionReason());
 
-      const after: RetainedImage = {
+      const captured: CapturedImage = {
         frame: validateFrame(attempt.value, scope),
         png: validatePng(attempt.value.png),
       };
-      if (before !== undefined && before.png.byteLength + after.png.byteLength > MAX_COMPUTER_PAIR_PNG_BYTES) {
-        this.clearObservation(request.owner);
-        return makeResult({
-          outcome: "interrupted",
-          reason: "pair_too_large",
-          actions: results,
-          observation: { status: "unavailable", comparison: "pair_too_large" },
-        });
-      }
-
-      if (before !== undefined) {
-        this.installEvidence(request.owner, request.toolCallId, [
-          { kind: "before", image: before },
-          { kind: "after", image: after },
-        ], after);
-        return makeResult({
-          outcome: "completed",
-          actions: results,
-          observation: {
-            ...this.capturedObservation(after),
-            before: this.capturedObservation(before),
-            after: this.capturedObservation(after),
-            comparison: "paired",
-          },
-        });
-      }
-
-      const kind: DesktopProviderEvidenceKind = mode === "current" ? "current" : "after";
-      this.installEvidence(request.owner, request.toolCallId, [{ kind, image: after }], after);
-      return makeResult({
+      const result = makeResult({
         outcome: "completed",
         actions: results,
-        observation: mode === "current"
-          ? this.capturedObservation(after)
-          : {
-              ...this.capturedObservation(after),
-              after: this.capturedObservation(after),
-              comparison: "after_only",
-            },
-      });
+        observation: this.capturedObservation(captured),
+      }, { kind: mode, image: captured });
+      const detailsText = result.content[0];
+      if (detailsText?.type !== "text") {
+        throw new Error("Computer capture produced invalid result details");
+      }
+      this.installFrame(
+        request.owner,
+        request.toolCallId,
+        captured.frame,
+        mode,
+        captured.png,
+        detailsText.text,
+      );
+      return result;
     } catch {
       const deadlineExpired = expireDeadline();
       return interrupted(deadlineExpired || request.signal.aborted ? interruptionReason() : undefined);

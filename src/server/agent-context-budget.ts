@@ -1,5 +1,4 @@
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import type { ImageContent } from "@earendil-works/pi-ai";
 import type { LoopList } from "../shared/protocol.js";
 import { CONTEXT_HINT_CUSTOM_TYPE } from "./conversation-meta.js";
 
@@ -19,26 +18,6 @@ export interface AgentContextBudgetController {
 export interface LoopListElapsedMinutes {
   activeMin: number;
   listMin: number;
-}
-
-/**
- * Run-scoped computer evidence copied only into the provider request. It never
- * becomes an AgentMessage or a persisted tool result.
- */
-export interface ComputerProviderImagePart {
-  readonly label: string;
-  readonly image: ImageContent;
-}
-
-export interface ComputerProviderImage {
-  readonly sourceToolCallId: string;
-  /** PiRuntime supplies one or two ordered, labeled evidence images. */
-  readonly images: readonly ComputerProviderImagePart[];
-}
-
-export interface ComputerProviderImageResolver {
-  get(): ComputerProviderImage | undefined;
-  presented(sourceToolCallId: string): void;
 }
 
 function formatTokens(tokens: number): string {
@@ -118,48 +97,11 @@ function createWorkHint(
   })}`;
 }
 
-function appendProviderEvidence(
-  messages: LlmMessages,
-  candidate: ComputerProviderImage | undefined,
-): { messages: LlmMessages; presented?: string } {
-  if (!candidate) return { messages };
-  let index = -1;
-  for (let cursor = messages.length - 1; cursor >= 0; cursor -= 1) {
-    const message = messages[cursor]!;
-    if (
-      message.role === "toolResult"
-      && message.toolCallId === candidate.sourceToolCallId
-    ) {
-      index = cursor;
-      break;
-    }
-  }
-  if (index < 0) return { messages };
-  const target = messages[index]!;
-  if (target.role !== "toolResult") return { messages };
-  const evidenceParts = candidate.images.flatMap(({ label, image }) => [
-    { type: "text" as const, text: label },
-    image,
-  ]);
-  const content = typeof target.content === "string"
-    ? [{ type: "text" as const, text: target.content }, ...evidenceParts]
-    : [...target.content, ...evidenceParts];
-  return {
-    messages: [
-      ...messages.slice(0, index),
-      { ...target, content },
-      ...messages.slice(index + 1),
-    ],
-    presented: candidate.sourceToolCallId,
-  };
-}
-
 export function installAgentContextBudget(
   session: AgentSession,
   getLoopList: () => LoopList,
   getCompactionThresholdPercent?: () => number,
   getLoopListElapsedMinutes?: () => LoopListElapsedMinutes | undefined,
-  computerProviderImage?: ComputerProviderImageResolver,
 ): AgentContextBudgetController {
   const agent = session.agent;
   const original = agent.convertToLlm;
@@ -175,32 +117,16 @@ export function installAgentContextBudget(
     messages: AgentMessage[],
   ): Promise<LlmMessages> {
     const converted = await original.call(this, messages);
-    let providerMessages = converted;
-    let candidate: ComputerProviderImage | undefined;
-    try {
-      candidate = computerProviderImage?.get();
-    } catch {
-      // A stale image boundary must not block unrelated model traffic.
-      candidate = undefined;
-    }
-    const injected = appendProviderEvidence(providerMessages, candidate);
-    providerMessages = injected.messages;
-    if (injected.presented !== undefined) {
-      // Mark only after every ordered evidence part was copied to its exact
-      // converted tool result. A mark failure rejects conversion, so this
-      // logical decision retries with the same retained bytes and labels.
-      computerProviderImage?.presented(injected.presented);
-    }
 
     let active: Array<{ id: string; text: string }>;
     try {
       active = getLoopList().items
         .filter((item) => item.status === "active")
         .map(({ id, text }) => ({ id, text }));
-      if (active.length === 0) return providerMessages;
+      if (active.length === 0) return converted;
     } catch {
       // Active work is the admission boundary for the LoopList hint only.
-      return providerMessages;
+      return converted;
     }
 
     let elapsedMinutes: LoopListElapsedMinutes | undefined;
@@ -230,7 +156,7 @@ export function installAgentContextBudget(
       lastHintAt !== undefined
       && now - lastHintAt < CONTEXT_HINT_MIN_INTERVAL_MS
     ) {
-      return providerMessages;
+      return converted;
     }
 
     const providerTail = telemetry ? `${telemetry}\n${workHint}` : workHint;
@@ -250,7 +176,7 @@ export function installAgentContextBudget(
     } catch {
       // The hint is best-effort and must not block a model call.
     }
-    return providerMessages;
+    return converted;
   }
 
   agent.convertToLlm = convertToLlm;

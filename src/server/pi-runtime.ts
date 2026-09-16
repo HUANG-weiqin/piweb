@@ -8,6 +8,7 @@ import {
   ModelRegistry,
   ModelRuntime,
   ProjectTrustStore,
+  resizeImage,
   SessionManager,
   SettingsManager,
   type AgentSession,
@@ -33,7 +34,6 @@ import type { PortableExtensionUI } from "./extension-ui.js";
 import { applyCodexAutoTransportPolicy } from "./codex-transport-policy.js";
 import {
   type AgentContextBudgetController,
-  type ComputerProviderImageResolver,
   installAgentContextBudget,
   type LoopListElapsedMinutes,
 } from "./agent-context-budget.js";
@@ -76,6 +76,10 @@ import {
   isReadOnlyToolIdentity,
   READ_ONLY_TOOL_NAME_CEILING,
 } from "./tool-policy.js";
+
+const MAX_PROVIDER_COMPUTER_IMAGE_DIMENSION = 2_000;
+/** Pi's image normalizer measures this limit in encoded base64 characters. */
+const MAX_PROVIDER_COMPUTER_IMAGE_CHARACTERS = 4.5 * 1024 * 1024;
 
 type AgentMessage = Extract<
   Parameters<AgentSession["agent"]["steer"]>[0],
@@ -360,9 +364,9 @@ export interface ComputerUseSessionOptions {
 }
 
 export interface ComputerUseSessionLifecycle {
-  /** Grants a consumed frame to only the computer calls from this decision. */
+  /** Grants the latest durable observation frame only to this decision's computer calls. */
   completeAssistantDecision(toolCallIds: readonly string[]): void;
-  /** Drops transient pixels/frame without releasing the process desktop lease. */
+  /** Drops transient coordinate authority without releasing the process desktop lease. */
   clearObservation(): void;
   /** Drops transient state and releases the exact run's lease after quiescence. */
   release(): Promise<void>;
@@ -742,7 +746,9 @@ export class PiRuntime implements PiRuntimeLike {
 
   private getDesktopController(): Promise<DesktopController> {
     this.desktopControllerPromise ??= this.createDesktopAdapter()
-      .then((adapter) => new DesktopController(adapter));
+      .then((adapter) => new DesktopController(adapter, {
+        requireProviderPresentation: true,
+      }));
     return this.desktopControllerPromise;
   }
 
@@ -813,94 +819,233 @@ export class PiRuntime implements PiRuntimeLike {
     };
   }
 
+  private async normalizeComputerUseResult(
+    controller: DesktopController,
+    owner: object,
+    toolCallId: string,
+    result: ComputerToolResult,
+  ): Promise<ComputerToolResult> {
+    const imageIndex = result.content.findIndex((part) => part.type === "image");
+    if (imageIndex < 0) return result;
+
+    const image = result.content[imageIndex];
+    const observation = result.details.observation;
+    if (image.type !== "image" || observation?.status !== "captured") {
+      controller.clearObservation(owner);
+      throw new Error("Computer capture produced an inconsistent image result");
+    }
+    if (
+      observation.width <= MAX_PROVIDER_COMPUTER_IMAGE_DIMENSION
+      && observation.height <= MAX_PROVIDER_COMPUTER_IMAGE_DIMENSION
+      && image.data.length < MAX_PROVIDER_COMPUTER_IMAGE_CHARACTERS
+    ) {
+      return result;
+    }
+
+    let normalized: Awaited<ReturnType<typeof resizeImage>>;
+    try {
+      normalized = await resizeImage(
+        Buffer.from(image.data, "base64"),
+        image.mimeType,
+        {
+          maxWidth: MAX_PROVIDER_COMPUTER_IMAGE_DIMENSION,
+          maxHeight: MAX_PROVIDER_COMPUTER_IMAGE_DIMENSION,
+          maxBytes: MAX_PROVIDER_COMPUTER_IMAGE_CHARACTERS,
+        },
+      );
+    } catch {
+      controller.clearObservation(owner);
+      throw new Error("Computer observation could not be normalized for image delivery");
+    }
+    if (
+      normalized === null
+      || normalized.originalWidth !== observation.width
+      || normalized.originalHeight !== observation.height
+      || normalized.data.length >= MAX_PROVIDER_COMPUTER_IMAGE_CHARACTERS
+      || (
+        normalized.mimeType !== "image/png"
+        && normalized.mimeType !== "image/jpeg"
+      )
+    ) {
+      controller.clearObservation(owner);
+      throw new Error("Computer observation could not be normalized for image delivery");
+    }
+
+    const labelIndex = imageIndex - 1;
+    const label = result.content[labelIndex];
+    if (label?.type !== "text" || !/size=\d+x\d+ px\]$/.test(label.text)) {
+      controller.clearObservation(owner);
+      throw new Error("Computer capture produced an inconsistent observation label");
+    }
+    const normalizedMimeType = normalized.mimeType;
+    const normalizedLabel = label.text.replace(
+      /size=\d+x\d+ px\]$/,
+      `size=${normalized.width}x${normalized.height} px]`,
+    );
+    const details = Object.freeze({
+      ...result.details,
+      observation: Object.freeze({
+        ...observation,
+        width: normalized.width,
+        height: normalized.height,
+      }),
+    });
+    const detailsText = JSON.stringify(details);
+    if (!controller.resizePendingFrame(
+      owner,
+      toolCallId,
+      normalized.width,
+      normalized.height,
+      {
+        detailsText,
+        label: normalizedLabel,
+        mimeType: normalizedMimeType,
+        data: normalized.data,
+      },
+    )) {
+      controller.clearObservation(owner);
+      throw new Error("Computer observation frame expired during image normalization");
+    }
+    const content = result.content.map((part) => ({ ...part }));
+    content[0] = { type: "text", text: detailsText };
+    content[labelIndex] = { type: "text", text: normalizedLabel };
+    content[imageIndex] = {
+      type: "image",
+      data: normalized.data,
+      mimeType: normalizedMimeType,
+    };
+    return Object.freeze({
+      content: Object.freeze(content.map((part) => Object.freeze(part))),
+      details,
+    });
+  }
+
+  private installComputerUseResultBoundary(
+    session: AgentSession,
+    lifecycle: ComputerUseSessionLifecycle,
+  ): void {
+    const previousAfterToolCall = session.agent.afterToolCall;
+    session.agent.afterToolCall = async (context, signal) => {
+      if (context.toolCall.name !== "computer") {
+        return previousAfterToolCall?.(context, signal);
+      }
+
+      const expectedContent = context.result.content.map((part) => ({ ...part }));
+      const hasCapturedImage = expectedContent.some((part) => part.type === "image");
+      try {
+        const patch = await previousAfterToolCall?.(context, signal);
+        if (!hasCapturedImage) return patch;
+
+        const effectiveContent = patch?.content ?? context.result.content;
+        const unchanged = effectiveContent.length === expectedContent.length
+          && expectedContent.every((expected, index) => {
+            const effective = effectiveContent[index];
+            if (expected.type === "text") {
+              return effective?.type === "text" && expected.text === effective.text;
+            }
+            return effective?.type === "image"
+              && expected.mimeType === effective.mimeType
+              && expected.data === effective.data;
+          });
+        if (!unchanged) {
+          throw new Error("Computer observation content was modified after capture");
+        }
+        return patch;
+      } catch (error) {
+        lifecycle.clearObservation();
+        throw error;
+      }
+    };
+  }
+
   private createComputerUseBinding(
     options: ComputerUseSessionOptions,
     supportsVision: () => boolean,
+    blocksImages: () => boolean,
   ): {
     tool: ToolDefinition;
-    resolver: ComputerProviderImageResolver;
     lifecycle: ComputerUseSessionLifecycle;
+    installPresentationBoundary(session: AgentSession): SessionBoundaryAdapter;
   } {
     let controller: DesktopController | undefined;
     let leaseOwner: object | undefined;
-    let pendingImage: { owner: object; sourceToolCallId: string } | undefined;
-    // A frame outlives PNG delivery only until the assistant's exact tool
-    // batch starts. If preflight rejects that batch, the next provider
-    // decision must clear it before it can reuse stale coordinates.
-    let authorizedFrameOwner: object | undefined;
 
     const clearObservation = (): void => {
-      const owner = pendingImage?.owner ?? authorizedFrameOwner ?? leaseOwner;
-      pendingImage = undefined;
-      authorizedFrameOwner = undefined;
-      if (owner !== undefined) controller?.clearObservation(owner);
+      if (leaseOwner !== undefined) controller?.clearObservation(leaseOwner);
     };
-    const resolver: ComputerProviderImageResolver = {
-      get: () => {
-        const pending = pendingImage;
-        if (!pending || !controller) {
-          // This is the boundary after a rejected/preflighted computer call:
-          // no new PNG is entering this decision, so an unexecuted old frame
-          // cannot survive to a later assistant decision.
-          if (authorizedFrameOwner !== undefined) clearObservation();
-          return undefined;
-        }
-        const evidence = controller.prepareProviderEvidence(
-          pending.owner,
-          pending.sourceToolCallId,
-        );
-        if (!evidence) return undefined;
-        return {
-          sourceToolCallId: evidence.sourceToolCallId,
-          images: evidence.images.map((image) => {
-            const description = `scope=${image.scope}; size=${image.width}x${image.height} px`;
-            return {
-              label: image.kind === "current"
-                ? `[computer observation current; ${description}]`
-                : image.kind === "before"
-                  ? `[computer observation before action batch; ${description}]`
-                  : image.kind === "after"
-                    ? `[computer observation after action batch; ${description}]`
-                    : `[computer observation before action batch; after unavailable; ${description}]`,
-              image: {
-                type: "image" as const,
-                data: Buffer.from(image.png).toString("base64"),
+    const installPresentationBoundary = (session: AgentSession): SessionBoundaryAdapter => {
+      const agent = session.agent;
+      const original = agent.convertToLlm;
+      if (typeof original !== "function") {
+        throw new Error("Pi Agent does not expose convertToLlm");
+      }
+      const hadOwnConverter = Object.hasOwn(agent, "convertToLlm");
+      const convertToLlm: typeof original = async function (
+        this: AgentSession["agent"],
+        messages: Parameters<typeof original>[0],
+      ) {
+        const converted = await original.call(this, messages);
+        const owner = leaseOwner;
+        const desktop = controller;
+        if (owner === undefined || desktop === undefined) return converted;
+        const sourceToolCallId = desktop.pendingFrameSourceToolCallId(owner);
+        if (sourceToolCallId === undefined) return converted;
+
+        const matchingResults = converted.filter((message) => (
+          message.role === "toolResult" && message.toolCallId === sourceToolCallId
+        ));
+        let presented: {
+          detailsText: string;
+          label: string;
+          mimeType: string;
+          data: string;
+        } | undefined;
+        if (matchingResults.length === 1) {
+          const content = matchingResults[0]!.content;
+          if (Array.isArray(content)) {
+            for (let index = 0; index + 2 < content.length; index += 1) {
+              const details = content[index];
+              const label = content[index + 1];
+              const image = content[index + 2];
+              if (
+                details?.type !== "text"
+                || label?.type !== "text"
+                || image?.type !== "image"
+              ) {
+                continue;
+              }
+              if (presented !== undefined) {
+                presented = undefined;
+                break;
+              }
+              presented = {
+                detailsText: details.text,
+                label: label.text,
                 mimeType: image.mimeType,
-              },
-            };
-          }),
-        };
-      },
-      presented: (sourceToolCallId) => {
-        const pending = pendingImage;
-        if (
-          !pending
-          || pending.sourceToolCallId !== sourceToolCallId
-          || !controller?.markProviderEvidencePresented(
-            pending.owner,
-            sourceToolCallId,
-          )
-        ) {
-          throw new Error("Computer image was not available for provider delivery");
+                data: image.data,
+              };
+            }
+          }
         }
-      },
+        desktop.recordFramePresentation(owner, sourceToolCallId, presented);
+        return converted;
+      };
+      agent.convertToLlm = convertToLlm;
+      return {
+        dispose(): void {
+          if (agent.convertToLlm !== convertToLlm) return;
+          if (hadOwnConverter) agent.convertToLlm = original;
+          else delete (agent as { convertToLlm?: typeof original }).convertToLlm;
+        },
+      };
     };
     const lifecycle: ComputerUseSessionLifecycle = {
       completeAssistantDecision: (toolCallIds) => {
-        const pending = pendingImage;
-        const decisionOwner = pending?.owner ?? authorizedFrameOwner ?? leaseOwner;
-        pendingImage = undefined;
-        if (decisionOwner !== undefined) controller?.beginAssistantDecision(decisionOwner);
-        if (!pending || !controller) {
-          // A later successful assistant decision closes a frame whose first
-          // call was rejected before it reached this custom tool.
-          clearObservation();
-          return;
-        }
-        if (controller.authorizeFrame(pending.owner, toolCallIds)) {
-          authorizedFrameOwner = pending.owner;
-        } else {
-          controller.clearObservation(pending.owner);
+        const owner = leaseOwner;
+        if (owner === undefined || controller === undefined) return;
+        controller.beginAssistantDecision(owner);
+        if (blocksImages() || !controller.authorizeFrame(owner, toolCallIds)) {
+          controller.clearObservation(owner);
         }
       },
       clearObservation,
@@ -937,15 +1082,15 @@ export class PiRuntime implements PiRuntimeLike {
         "Kinds: click{x,y,button?}; move{x,y}; mouseHold{x,y,button?,holdMs?}; drag{fromX,fromY,toX,toY,button?,durationMs?}; type{text}; keypress{keys,holdMs?}; scroll{x,y,deltaX?,deltaY?}; wait{ms}.",
         `button is left or right. keypress keys (1-4) are: ${supportedComputerKeys}.`,
         `Limits: type ${MAX_COMPUTER_TYPE_BYTES} UTF-8 bytes; holdMs <= ${MAX_COMPUTER_HOLD_MS}; durationMs <= ${MAX_COMPUTER_DRAG_DURATION_MS}; wait ms <= ${MAX_COMPUTER_WAIT_MS}; abs scroll delta <= ${MAX_COMPUTER_SCROLL_DELTA} with at least one nonzero scroll delta; settleMs 0-${MAX_COMPUTER_SETTLE_MS}.`,
-        "Coordinate actions use only current from an initial single image, or after from paired/after-only evidence. before and historical_before are comparison-only and never authorize coordinates. foregroundWindow defaults false and is valid only with observe:true; it crops a provider-only observation to the then-current foreground window's primary-display intersection, not a window selector. observe:true captures current (no actions) or post-action evidence after a short settle; an action observation can attach before and after images and therefore costs about twice the visual tokens. observe:false returns no image. sent means Windows accepted host dispatch, not that the app succeeded.",
+        "Coordinate actions use only the current/after image returned by the immediately preceding computer result; earlier history images never authorize coordinates. foregroundWindow defaults false and is valid only with observe:true; it crops the observation to the then-current foreground window's primary-display intersection, not a window selector. observe:true captures current (no actions) or one post-action image after a short settle. Each captured image is stored in its tool result and replayed until compaction; observe:false returns no image. sent means Windows accepted host dispatch, not that the app succeeded.",
         "If the result is foreground_mismatch, prior sent statuses may have run; the first not_started action and all remaining actions were not dispatched. Inspect per-action statuses, then re-observe before retrying coordinate input.",
       ].join(" "),
       promptSnippet:
-        "Use computer({ actions: [], observe: true, foregroundWindow: true }) for a smaller foreground-window observation when it intersects the primary display; otherwise omit foregroundWindow. Only use current-provider-image coordinates. Re-observe after UI-changing actions; do not infer application success from sent.",
+        "Use computer({ actions: [], observe: true, foregroundWindow: true }) for a smaller foreground-window observation when it intersects the primary display; otherwise omit foregroundWindow. Only use coordinates from the latest computer result's current/after image. Re-observe after UI-changing actions; do not infer application success from sent.",
       promptGuidelines: [
         "Use only the listed flat action fields; unsupported fields, keys, buttons, or out-of-range durations are rejected before desktop input.",
-        "Call observe first before coordinate actions. Use current only for an initial single image, and after only for paired/after-only evidence; before and historical_before never authorize coordinates. Coordinates are image-local pixels: (0,0) is the visible current/after image's top-left, including a foreground-window crop; never use desktop-global coordinates.",
-        "foregroundWindow?: boolean defaults false and requires observe:true. It captures only the current foreground window's intersection with the primary display; after evidence uses the then-current foreground window. observe:true captures provider-only evidence (default post-action settle is 150ms); an action pair carries two images and about twice the visual-token cost. observe:false does not capture. Actions are sequential; sent is host dispatch, not UI/business success.",
+        "Call observe first before coordinate actions. Only the current/after image from the immediately preceding computer result authorizes coordinates for the next assistant decision. Coordinates are image-local pixels: (0,0) is that image's top-left, including a foreground-window crop; never use desktop-global coordinates.",
+        "foregroundWindow?: boolean defaults false and requires observe:true. It captures only the current foreground window's intersection with the primary display; a post-action capture uses the then-current foreground window. observe:true stores one durable image in the tool result (default post-action settle is 150ms), so later provider requests replay identical image content until compaction. observe:false does not capture. Actions are sequential; sent is host dispatch, not UI/business success.",
         "A foreground_mismatch may follow prior sent actions; its first not_started action and all remaining actions were not dispatched. Inspect per-action statuses, then re-observe before any coordinate retry.",
       ],
       parameters: Type.Object({
@@ -962,6 +1107,10 @@ export class PiRuntime implements PiRuntimeLike {
         if (!supportsVision()) {
           throw new Error("Computer use requires a model that supports image input");
         }
+        if (blocksImages()) {
+          clearObservation();
+          throw new Error("Computer use requires image delivery to be enabled");
+        }
         if (signal === undefined) {
           throw new Error("Computer use requires the run abort signal");
         }
@@ -969,44 +1118,26 @@ export class PiRuntime implements PiRuntimeLike {
         // Record the exact candidate before execute so abort/reload cleanup can
         // wait for a native primitive that has already acquired its lease.
         leaseOwner = owner;
-        let result: ComputerToolResult;
-        try {
-          result = await controller.execute({
-            owner,
-            toolCallId,
-            input,
-            signal,
-            visionSupported: true,
-          });
-        } catch (error) {
-          // Schema, extension, and host preflight failures happen before a
-          // controller primitive/capture attempt. Keep this decision's frame
-          // for an exact sibling; resolver.get retires it at the next provider
-          // conversion boundary if nothing was admitted.
-          throw error;
-        }
-        const evidence = controller.prepareProviderEvidence(owner, toolCallId);
-        if (evidence) {
-          // Includes a completed pair/current/after-only observation and the
-          // deliberately non-authorizing historical-before after_missing case.
-          pendingImage = { owner, sourceToolCallId: toolCallId };
-          authorizedFrameOwner = undefined;
-        } else if (
-          result.details.outcome === "completed"
-          || result.details.outcome === "interrupted"
-        ) {
-          // Do not clear an unconsumed authorized frame here. A pre-admission
-          // abort has no desktop side effect and retains it for its sibling;
-          // the next conversion boundary still retires it if unused.
-          pendingImage = undefined;
-        }
+        const captured: ComputerToolResult = await controller.execute({
+          owner,
+          toolCallId,
+          input,
+          signal,
+          visionSupported: true,
+        });
+        const result = await this.normalizeComputerUseResult(
+          controller,
+          owner,
+          toolCallId,
+          captured,
+        );
         return {
           content: result.content.map((part) => ({ ...part })),
           details: result.details,
         };
       },
     });
-    return { tool, resolver, lifecycle };
+    return { tool, lifecycle, installPresentationBoundary };
   }
 
   async createSession(cwd: string, options: CreatePiSessionOptions = {}): Promise<CreatedPiSession> {
@@ -1031,15 +1162,18 @@ export class PiRuntime implements PiRuntimeLike {
     let resolvedTransport: ReturnType<SettingsManager["getTransport"]>;
     let created: CreateAgentSessionResult;
     let createdSession: AgentSession | undefined;
-    let computerProviderImage: ComputerProviderImageResolver | undefined;
     let computerUseLifecycle: ComputerUseSessionLifecycle | undefined;
+    let installComputerPresentationBoundary:
+      | ((session: AgentSession) => SessionBoundaryAdapter)
+      | undefined;
     if (options.computerUse && options.toolMode === "full_access") {
       const binding = this.createComputerUseBinding(
         options.computerUse,
         () => createdSession?.model?.input.includes("image") === true,
+        () => settings.getBlockImages(),
       );
-      computerProviderImage = binding.resolver;
       computerUseLifecycle = binding.lifecycle;
+      installComputerPresentationBoundary = binding.installPresentationBoundary;
       workbenchCustomTools = [
         ...(workbenchCustomTools ?? []),
         binding.tool,
@@ -1051,6 +1185,7 @@ export class PiRuntime implements PiRuntimeLike {
     let fixedModelAdapter: SessionBoundaryAdapter | undefined;
     let steeringCaptureAdapter: SteeringCaptureAdapter | undefined;
     let contextBudgetController: AgentContextBudgetController | undefined;
+    let computerPresentationAdapter: SessionBoundaryAdapter | undefined;
     let turnBoundaryController: AgentTurnBoundaryController | undefined;
     let compactionRequestOverride: DefaultCompactionRequestOverride | undefined;
     let serviceTierOverride: ServiceTierOverride | undefined;
@@ -1060,6 +1195,11 @@ export class PiRuntime implements PiRuntimeLike {
       const failures: unknown[] = [];
       try {
         contextBudgetController?.dispose();
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
+        computerPresentationAdapter?.dispose();
       } catch (error) {
         failures.push(error);
       }
@@ -1170,15 +1310,16 @@ export class PiRuntime implements PiRuntimeLike {
       // Agent.steeringMode 公开 setter 直接改 PendingMessageQueue.mode（drain 时实时读取）。
       createdSession.agent.steeringMode = "all";
       installToolResultCompression(createdSession);
-      if (options.getLoopList || computerProviderImage) {
-        // This host converter runs after the SDK extension transform and keeps
-        // transient hints inside the existing final input instead of creating a new turn.
+      if (computerUseLifecycle) {
+        this.installComputerUseResultBoundary(createdSession, computerUseLifecycle);
+        computerPresentationAdapter = installComputerPresentationBoundary?.(createdSession);
+      }
+      if (options.getLoopList) {
         contextBudgetController = installAgentContextBudget(
           createdSession,
-          options.getLoopList ?? (() => ({ items: [], armed: false })),
+          options.getLoopList,
           options.getCompactionThresholdPercent,
           options.getLoopListElapsedMinutes,
-          computerProviderImage,
         );
       }
       if (readOnlyToolProjection) {

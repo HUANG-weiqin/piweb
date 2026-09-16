@@ -1,165 +1,193 @@
 # Computer Use 观察与输入能力升级设计稿
 
 日期：2026-09-07
+最近修订：2026-09-16
 状态：**已实现并验收**
 范围：Windows 主显示器、`full_access` conversation 的 `computer` custom tool
 
-## 0. 已实施合同（2026-09-07）
+> 2026-09-16 修订取代早期的 provider-only `before + after` 临时图片对方案。当前合同没有图片滑动窗口，也不在 provider conversion 时改写历史。
 
-- 初始 observe 产生 `current`；带动作且有已授权前图时产生有序 `before + after` pair；没有前图的带动作 observe 产生 `after_only`。图片只复制到 provider request，绝不进入 tool result、JSONL 或线协议。
-- after capture 失败、settle 中断或动作不完整时，只为该 action tool call 保留一次性 `historical_before`，结果为 `after_missing`；它永不形成 coordinate frame。
-- local schema/extension/host preflight 不消费同一 assistant decision 的 frame；第一个 controller primitive/capture 才消费。未消费 frame 在下一次 provider conversion 边界退休。
-- pair 两张原始 PNG 合计上限为 16 MiB；超限显式 `pair_too_large`，不降级伪装成单图或 pair。
-- 非空 `observe:true` action batch 默认在 after capture 前 settle 150ms；初始 observe 与 `observe:false` 保持零等待。
-- `keypress` hold、`mouseHold`、`drag` 在 adapter 内完成 down/hold/move/up；仅无法确认可能已按下的 key/button 已释放时永久 taint controller，普通 `unknown` 不阻止后续 lease。
-- capture 内部以归一化 HWND + PID 绑定前台身份：capture 前后必须一致，授权批在第一个实际 primitive 前再次核对；不一致即零派发、清除 stale frame 并返回 `foreground_mismatch`。该身份仅为内部安全判断，绝不进入 provider、tool result、JSONL 或 wire；HWND/PID reuse 与 check→SendInput 的 TOCTOU 仍是已知剩余限制。
+## 0. 已实施合同
 
-### 0.1 前台窗口观察 focus（2026-09-07）
+一次成功截图直接成为当前 `computer` tool result 的标准 image content：
 
-`computer` 新增可选的 `foregroundWindow?: boolean`，默认 `false`；只有 `observe:true` 可使用，`foregroundWindow:true + observe:false` 在 controller primitive 前拒绝且不消费 sibling frame。省略时严格保持完整主显示器行为。
+```text
+[结果 JSON text]
+[安全标签 text]
+[image/png 或 image/jpeg]
+```
 
-- `true` 截取**当时**前台顶层窗口的 `GetWindowRect` 与主显示器的非空矩形交集。`IsIconic`、空交集、几何/API 读取失败或 capture 前后 binding 漂移都 fail closed；绝不退回完整屏、selector、`PrintWindow` 或隐藏/遮挡内容读取。action 的 after 在动作/settle 后重新取当时前台窗口，因此 A 可产生 popup B 的 after。
-- image-local 坐标先经 `captureBounds`（PNG 的物理 crop）映射，再以完整主显示器 `inputBounds` 归一化给 `SendInput`。两者刻意分离；本版 PNG `width/height` 必须精确等于 `captureBounds` 尺寸。仅允许主显示器交集，故不支持 secondary-only capture、`region/scale` 或 `MOUSEEVENTF_VIRTUALDESK`。
-- window binding 只在进程内保存：opaque HWND/PID、raw `GetWindowRect`、crop 和 primary input bounds。capture 在同一 PMv2 DPI context 前后比较完整 binding。已有的身份检查仍紧邻首个实际 primitive；此外每个 coordinate action 紧邻 dispatch 前都重读并比较完整 window binding。任何 `foreground_mismatch` 都可能已有 `sent`；第一个 `not_started` action 和所有余项均未派发，结果必须检查逐项 status 后重新 observe。
-- provider-only label 对每图仅说明 `scope=primary_display|foreground_window` 和 `size=WxH px`；不包含 HWND/PID、title、物理 origin/raw bounds。PNG、binding 和 label 均不进入 wire/JSONL/result details；pair 的 before/after 可有不同 scope/size。
+- `actions: [] + observe:true` 产生一张 `current` 图。
+- `actions.length > 0 + observe:true` 在动作和 settle 后产生一张 `after action batch` 图。
+- `observe:false` 不产生图片。
+- 前一张图已经存在于持久 transcript；动作结果不再复制它。连续观察自然形成 `A → B → C` 的 append-only 历史，而不是 `(A,B) → (B,C)` 的临时窗口。
+- image block 由 Pi `SessionManager` 写入 JSONL，并在后续 provider 请求中按原顺序和原字节重放。只要源 entry 仍在有效模型上下文中，retry 和后续请求看到完全相同的 block；compaction 可把较早 entry 排除出有效模型上下文，但不删除持久 JSONL。
+- 浏览器线协议不携带 base64。实时 tool event 只投影 shape-only image marker；history 使用 `(messageId, imageOrdinal)` 的 `resultImageRefs`，用户需要时再通过 `open_image` 读取持久字节。
+- 图片持久化与坐标授权是两个不同状态。Controller 只瞬态保留不含图片字节的 `Frame` 几何、前台绑定和 label/MIME/hash 交付证据；持久图片本身永不授权输入。
+- 每个 assistant decision 只授权其列出的 exact computer tool-call IDs；首个实际 controller primitive 或 capture 消费该 decision。schema/extension/host preflight 拒绝不消费 sibling 的授权。
+- capture 失败、abort、compaction、reload、run terminal、dispose 或没有 computer call 的下一 decision 都清除瞬态 frame。旧持久图片不能复活为 coordinate frame。
+- 非 vision model 与 `images.blockImages=true` 都在创建 desktop adapter 或产生桌面副作用前拒绝 computer use。
+- 原始 desktop PNG 与通用 durable image 读取合同共享 16 MiB decoded-byte 上限；computer 在 tool 返回前进一步归一化到最大 2000×2000、base64 严格小于 4.5 MiB，持久化的是归一化结果。
+
+### 0.1 前台窗口观察
+
+`foregroundWindow?: boolean` 默认 `false`，且只有 `observe:true` 可使用。
+
+- `false` 截取完整主显示器。
+- `true` 截取**当时**前台顶层窗口 `GetWindowRect` 与主显示器的非空交集，不是窗口 selector，也不读取隐藏或遮挡内容。
+- `IsIconic`、空交集、几何/API 失败或 capture 前后绑定漂移均 fail closed，绝不退回完整屏。
+- action batch 的 after capture 在动作和 settle 后重新读取当时前台窗口，因此窗口 A 可以产生 popup B 的 after 图。
+- model-image-local 坐标先经 `captureBounds` 映射，再以完整主显示器 `inputBounds` 归一化给 `SendInput`。原始 PNG 宽高必须精确等于 capture bounds；归一化持久图可等比缩小，Frame 的模型尺寸随实际持久图更新。
+- HWND、PID、raw bounds、capture bounds 和 input bounds 仅存在于进程内 frame；tool result 的安全标签只含 `scope` 与 `size`。
 
 ## 1. 核心目标
 
-Computer use 的可靠闭环不是“输入已经发送”，而是：
+Computer use 的可靠闭环是：
 
 ```text
-观察操作前状态
-→ 执行一个有界动作批次
-→ 取得操作后状态
-→ 用前后状态验证结果
-→ 再决定下一步
+观察 A
+→ 基于 A 决定一个有界动作批次
+→ 执行动作并观察 B
+→ provider 历史自然包含 A、动作结果、B
+→ 基于 B 决定下一步
 ```
 
-当前实现已经能在 `observe=true` 时取得操作后截图，但下一次模型请求只收到新图，不能同时对照操作前图。本设计优先补齐这个观察边界，再补充长按、悬停、拖拽等输入能力。
+必须同时满足两个独立性质：
+
+1. **观察历史可重放**：同一 transcript 的 provider 输入保持 append-only，使 SSE prompt cache 和 Codex WebSocket continuation 能复用稳定前缀。
+2. **输入能力不过期**：坐标只来自紧邻 decision 的最新 frame，不能从持久历史任取旧图来点击。
 
 ## 2. 非目标与硬边界
 
 - 不做 OS、VM、容器或文件系统 sandbox；`full_access` 仍表示宿主完整授权。
-- 不新增浏览器 WebSocket command/event，不把 PNG 写入 Pi JSONL、tool result details、snapshot、localStorage 或项目文件。
-- 不建立无限截图历史、录像回放或截图账本。
-- 不自动判断“游戏已经胜利”或任意应用业务是否成功；工具只报告输入和截图事实，模型负责业务判断。
-- 不允许跨 conversation 共享桌面观察、坐标 frame 或鼠标按下状态。
-- 不支持跨调用无限保持按键/鼠标按下；所有新增长按和拖拽必须是一次调用内可清理的原子动作。
+- 不新增浏览器 WebSocket command/event，不把 base64 放进 history snapshot、PublicState、localStorage 或普通 tool event。
+- 不建立第二套截图账本、图片滑动窗口或 provider-only image injector。持久 transcript 是唯一图片历史。
+- 不在 compaction 后继续把被压缩掉的旧图强行注入 provider context。
+- 不自动判断应用或游戏业务是否成功；`sent` 只表示 Windows 接受了宿主派发。
+- 不允许跨 conversation 共享观察 frame、坐标授权或鼠标按下状态。
+- 不支持跨调用无限保持按键或鼠标按下；长按和拖拽必须在一个调用内清理。
+- 不公开 HWND/PID、窗口标题或桌面物理 origin。
 
-## 3. 关键术语
+## 3. 三类状态
 
-- **decision frame**：模型作出本批动作决策时实际看到的最新截图。
-- **before image**：本批动作对应的 decision frame 的 PNG。它不是动作开始前偷偷重新截取的第二张图。
-- **after image**：本批动作全部发送完成、可选 settle 等待结束后捕获的 PNG。
-- **coordinate frame**：允许下一批坐标动作使用的 frame。只有 after image 成功后形成的 frame 才有资格成为 coordinate frame。
-- **comparison pair**：`before image + after image + 动作结果`。图片只进入 provider-only 输入，不持久化。
+### 3.1 持久观察记录
 
-最重要的区分：
+图片 owner 是 tool-result message；身份是 `(messageId, imageOrdinal)`，生命周期随 branch、truncate 和 conversation 删除。
 
-```text
-before/after 是比较证据
-coordinate frame 是输入授权
-```
+它包含：
 
-前图可以帮助模型理解变化，但不能授权模型继续点击旧坐标；下一批坐标只能使用 after frame。
+- 一条 JSON 结果 text；
+- 一条安全标签，例如 `[computer observation current; scope=primary_display; size=1920x1080 px]`；
+- 一条经有界归一化的 `image/png` 或 `image/jpeg` base64 content。
 
-## 4. 前后截图合同
+相同像素出现在不同 tool result 中仍是不同观察记录，不按内容去重。
 
-### 4.1 初始观察
+### 3.2 瞬态坐标 frame
+
+`Frame` 只保存坐标映射和安全复核所需数据：
+
+- image width/height；
+- scope；
+- capture/input bounds；
+- foreground identity；
+- 可选 foreground-window binding。
+
+它不保存 PNG，不进入 provider、JSONL 或 wire。
+
+### 3.3 Assistant-decision 授权
+
+授权由 `{ owner, frame, exact toolCallIds }` 组成，只服务一个 assistant decision。持久图片只是模型输入事实，不能替代该能力。
+
+## 4. Tool result 与 provider 历史
+
+### 4.1 成功截图
+
+初始观察：
 
 ```ts
 computer({ actions: [], observe: true })
 ```
 
-返回一个单独的当前观察：
+返回：
 
 ```text
-initial frame → provider 只收到 current image
+{"outcome":"completed","actions":[],"observation":{"status":"captured","width":1920,"height":1080}}
+[computer observation current; scope=primary_display; size=1920x1080 px]
+<durable image A>
 ```
 
-它可以成为第一批动作的 coordinate frame。此时不存在 before/after pair。
-
-### 4.2 带动作的观察
-
-保留现有 `observe: boolean` 字段，采用以下语义：
-
-- `actions: [] + observe:true`：捕获单张 current image。
-- `actions.length > 0 + observe:true`：捕获 after image，并在下一次 provider decision 注入 before + after 两张图。
-- `observe:false`：不捕获 after；建议只保留给不需要画面确认的纯键盘/文本动作。坐标动作和可能改变 UI 的动作默认由工具 prompt 要求使用 `observe:true`。
-- 后续可把默认值改为 `observe:true`，但第一版先保留现有字段兼容性。
-
-一次完整链路：
+带动作观察只返回新捕获的 after 图：
 
 ```text
-provider decision sees A
-→ assistant calls computer(actions, observe:true)
-→ execute actions against A's authorized coordinate frame
-→ capture B
-→ next provider decision sees:
-   [computer tool result text]
-   [before image A]
-   [after image B]
-→ assistant may issue next computer call using B coordinates
+<此前持久的 durable image A>
+assistant → computer(actions, observe:true)
+{"outcome":"completed", ... "observation":{"status":"captured", ...}}
+[computer observation after action batch; ...]
+<durable image B>
 ```
 
-下一轮滑动窗口为：
+下一 provider request 通过普通 transcript conversion 看到 A 和 B。它不复制 A，也不在 converter 尾部临时插图。
+
+### 4.2 Append-only 约束
+
+- `computer` execute 返回的 image content 必须由 Pi 正常持久化后再参与 history projection。
+- computer 在 tool 返回前完成一次有界归一化，使项目 `tool_result` hook 之后的 Pi SDK normalization 成为 no-op；宿主随后复核完整标准 content，label/image 被删除、替换、重排或 hook 抛错时 fail closed 并清除 frame。
+- 最终 `convertToLlm` 边界只校验、不注入：source toolCallId 对应的规范 details text、label、MIME 与图片哈希必须匹配 pending frame；`context` / `message_end` 改写、`blockImages` 或缺图会撤销交付证明。
+- provider retry 对同一消息产生相同标签、MIME、顺序和 base64。
+- 追加 B 后，追加前的 provider input 必须是追加后 input 的严格前缀；不能删除 A、把 A 改写成比较标签或把 B 重复成下一轮 before。
+- `agent-context-budget.ts` 只负责 LoopList/context hint，不拥有 desktop image。
+- `images.blockImages=true` 时不能生成一个“模型未看到但仍可授权坐标”的 frame，因此整个 computer call fail closed。
+
+### 4.3 Wire 与按需读取
+
+三种投影故意不同：
+
+| 边界 | 图片表示 |
+|---|---|
+| Pi JSONL / provider history | 完整标准 image content |
+| tool event / history snapshot | image marker + `resultImageRefs`，无 base64 |
+| `open_image` 一次性响应 | 从当前 branch 的精确 message/ordinal 读取 base64 |
+
+`details` 中禁止放 PNG/base64；通用 wire redaction 只处理标准 content image block。
+
+### 4.4 Compaction
+
+Compaction summary 不复制图片。被 cut point 排除的 image entry 不再进入后续 provider context，因此 cache 的新稳定前缀从 summary 和保留 tail 开始。原 JSONL entry 仍用于审计/history/open-image，直到 branch 或 conversation 删除。
+
+## 5. Frame 状态迁移
 
 ```text
-(A, B) → action → (B, C)
+successful raw capture
+  ↓ one-time provider normalization
+pending_frame(owner, displayed frame, sourceToolCallId, details/label/MIME/hash)
+  ↓ final convertToLlm finds the exact durable block
+presented pending_frame
+  ↓ next assistant message_end with toolUse
+beginAssistantDecision(owner)
+  ↓ exact computer call IDs are non-empty and presentation still matches
+authorized_frame(owner, frame, toolCallIds)
+  ↓ first real primitive or capture
+spent decision + clear authorized frame
+  ↓ optional successful observe
+new pending_frame(owner, new frame)
 ```
 
-最多保留当前 pair；不得继续积累 A、B、C 历史。
+规则：
 
-### 4.3 Provider-only 注入
+1. 只有 pending frame 的 owner 可以授权它。
+2. 只有该 assistant decision 中列出的 exact computer call 可使用授权。
+3. validation/preflight 在任何 lease、frame consumption 或桌面副作用前完成。
+4. 首个实际 primitive/capture 使该 decision 成为 spent；同一 decision 的第二个 batch 即使列在 sibling IDs 中也拒绝。
+5. 同一次 validated after/current capture 先归一化为最终 image result，并让 pending frame 的模型坐标尺寸等于该图；物理 capture/input bounds 不变。
+6. 只有普通 Pi 持久化成功且最终 converter 看到 exact source/details/label/MIME/hash 后，pending frame 才具有下一 decision 的交付证明。
+7. failed capture/normalization 清除 frame，并返回 unavailable 或 fail closed；不会回退到历史图。
+7. `observe:false` 不产生新 frame；执行完后下一坐标动作必须重新 observe。
+8. 普通 assistant 结束、没有 computer call 的 tool decision、abort、compaction、reload、terminal 和 dispose 都清理 frame。
+9. desktop native primitive 尚未 settle 时仍保留 lease，不能让另一 run 使用未知桌面状态。
 
-`agent-context-budget.ts` 的 provider-only clone 扩展为支持最多两个 image part，并添加明确的文字标签：
+## 6. 结果 DTO 与失败语义
 
-```text
-[computer observation before action batch; scope=foreground_window; size=800x600 px]
-<before image>
-[computer observation after action batch; scope=foreground_window; size=640x480 px]
-<after image>
-```
-
-标签和图片只存在 provider 输入副本中；原始 tool result 仍然是纯文本 JSON。两张图必须：
-
-- 使用同一个 source computer toolCallId 关联。
-- 在 provider retry 中保持相同 PNG bytes、顺序和标签。
-- 只在精确匹配的 computer tool result 存在时注入。
-- provider 成功 assistant message 后才完成该 pair 的生命周期迁移。
-
-### 4.4 Frame 状态迁移
-
-建议将现有单图状态扩展为以下语义，不必暴露新的公共协议：
-
-```text
-current/authorized frame
-  └─ assistant 成功产生 computer tool call
-       ↓
-authorized before frame
-  └─ computer 执行成功并 capture after
-       ↓
-pending comparison pair(before, after)
-  └─ provider converter 成功注入 pair
-       ↓
-presented pair
-  └─ assistant 成功结束并产生下一 computer tool call
-       ↓
-authorized after frame
-```
-
-实现要求：
-
-1. `completeAssistantDecision()` 只授权该 assistant decision 中精确的 computer call IDs。
-2. 对下一批坐标动作，只授权 pair 的 after frame。
-3. after frame 的 PNG 可作为下一批的 before image；旧 before image 在迁移后释放。
-4. assistant tool call 被 schema、extension 或 host gate 预检拒绝时，不消费当前 assistant decision 的 frame；同一 decision 的精确 sibling 仍可使用它。只有下一 provider conversion boundary 才清除未消费 frame。
-5. 普通成功 assistant message、abort、compaction、reload、run terminal 和 dispose 清除图片及授权。
-6. native primitive 尚未 settle 时，仍保留 desktop lease；不能让另一 run 使用旧或未知状态的 frame。
-
-### 4.5 操作结果 DTO
-
-现有文字结果保持兼容，增加可选的 pair 描述。PNG 不进入其中：
+结果 metadata 只描述本次调用：
 
 ```json
 {
@@ -168,14 +196,14 @@ authorized after frame
     { "index": 0, "kind": "click", "status": "sent" }
   ],
   "observation": {
-    "before": { "status": "captured", "width": 3440, "height": 1440 },
-    "after": { "status": "captured", "width": 3440, "height": 1440 },
-    "comparison": "paired"
+    "status": "captured",
+    "width": 1920,
+    "height": 1080
   }
 }
 ```
 
-允许的失败状态：
+capture 失败或未请求观察：
 
 ```json
 {
@@ -184,163 +212,20 @@ authorized after frame
     { "index": 0, "kind": "click", "status": "sent" },
     { "index": 1, "kind": "drag", "status": "unknown" }
   ],
-  "observation": {
-    "before": { "status": "captured", "width": 3440, "height": 1440 },
-    "after": { "status": "unavailable" },
-    "comparison": "after_missing"
-  }
+  "observation": { "status": "unavailable" },
+  "reason": "aborted"
 }
 ```
 
-`sent` 只表示宿主向 Windows adapter 发出了完整 primitive；它不表示应用已经处理。`after` 截图也只表示某个采样时刻，不表示业务成功。
+- `sent`：宿主完成该 adapter primitive 的派发，不证明应用处理或业务成功。
+- `unknown`：不能确认 primitive 是否完整完成。
+- `not_started`：该 action 没有派发。
+- `foreground_mismatch` 可能发生在若干 action 已 sent 之后；第一个 not_started 及余项未派发，调用方必须检查逐项状态并重新 observe。
+- capture 失败时 content 只有结果 JSON text，不附安全标签或 image。
 
-### 4.6 失败处理
+## 7. 输入动作
 
-- before 已存在、动作部分发送、after 捕获失败：可以把 before 作为“历史比较图”提供给下一 decision，但不得把它当 current/coordinate frame。
-- abort、compaction、reload、run terminal：直接丢弃 before/after，不向后续 decision 提供旧桌面图。
-- after 捕获失败：明确 `after_missing`，不能复活旧图冒充 after。
-- `observe:false`：不生成 pair，也不保留旧坐标授权；下一次坐标操作必须重新获得有效 after/current frame。
-- 任何图片注入失败不能阻塞无关模型请求，但必须使坐标动作 fail closed。
-
-## 5. 长按与扩展输入动作
-
-### 5.1 原则
-
-不开放跨 tool call 的裸 `keyDown` / `keyUp` 或 `mouseDown` / `mouseUp` 状态。因为模型中断、abort、窗口切换或进程退出时容易留下卡键。
-
-第一版只开放“调用内完成并释放”的原子动作。
-
-### 5.2 键盘长按
-
-在现有 `keypress` 上增加可选 `holdMs`：
-
-```json
-{
-  "kind": "keypress",
-  "keys": ["SPACE"],
-  "holdMs": 1000
-}
-```
-
-语义：
-
-1. 按声明顺序发送所有 key down。
-2. 保持 `holdMs`。
-3. 按逆序发送所有 key up。
-4. 无论正常完成、abort、超时还是 native 异常，都尽力释放本动作已经按下的键。
-
-约束：
-
-- `holdMs` 为有限非负整数，建议上限 5000ms，并受整批 15000ms deadline 约束。
-- 缺省或 `0` 保持当前瞬时 keypress 语义。
-- 结果仍使用 `sent / unknown / not_started`；释放不确定时不能报告完整 sent。
-- 记录中可增加 `holdMs`，但不记录图片或 native 输入字节。
-
-### 5.3 鼠标移动与悬停
-
-新增：
-
-```json
-{ "kind": "move", "x": 1000, "y": 500 }
-```
-
-语义是移动鼠标，不点击。适用于：
-
-- 检查 hover tooltip。
-- 检查目标格高亮。
-- 在点击前让应用显示瞄准预览。
-
-`move` 必须使用当前有效 screenshot frame 的坐标；动作后如果需要确认必须 `observe:true`。
-
-### 5.4 鼠标长按
-
-新增原子动作：
-
-```json
-{
-  "kind": "mouseHold",
-  "x": 1000,
-  "y": 500,
-  "button": "left",
-  "holdMs": 1200
-}
-```
-
-语义：move → mouse down → 保持 → mouse up。不能跨调用保持按下。
-
-### 5.5 拖拽
-
-新增原子动作：
-
-```json
-{
-  "kind": "drag",
-  "fromX": 500,
-  "fromY": 500,
-  "toX": 900,
-  "toY": 700,
-  "button": "left",
-  "durationMs": 600
-}
-```
-
-要求：
-
-- 起点和终点都必须来自同一有效 before/current frame。
-- move → down → 有界移动 → up 必须由一次 adapter primitive 拥有。
-- 中断发生在 down 后时，必须尽力发送 up；up 未确认则结果为 `unknown`。
-- 不允许把 down 和 up 分散到两个 tool call。
-
-### 5.6 双击（明确 deferred）
-
-`doubleClick` 和 `intervalMs` **不在本次已实现 schema 或 prompt 中**。未来若实现，必须由 adapter 作为单个可清理 primitive 处理；不得把两个独立 click 伪装成原子双击。
-
-## 6. 操作后稳定采样
-
-新增 tool-level 可选参数：
-
-```ts
-settleMs?: number
-```
-
-建议：
-
-- 范围 `0..2000`，受整批总 deadline 约束。
-- 动作全部发送成功后等待 `settleMs`，再捕获 after。
-- 非空 `observe:true` action batch 默认 150ms；模型可针对动画或加载界面显式增加。
-- 这是固定延迟，不是“等待应用完成”的证明。
-- 不做第一版的像素稳定检测、OCR 等隐式成功判断。
-
-批次内部的 `wait` 仍可保留，用于动作之间的间隔；但最终 after capture 的等待应由 `settleMs` 明确表达。
-
-## 7. 局部高清观察与窗口安全
-
-### 7.1 局部截图（明确 deferred）
-
-`region` / `scale` 及其坐标映射 **不在本次实现中**；在双图稳定后才可增加可选观察区域：
-
-```ts
-region?: { x: number; y: number; width: number; height: number }
-scale?: number
-```
-
-要求：
-
-- region 坐标必须来自当前全屏 frame。
-- 返回裁剪原点、宽高、缩放比例和原始 frame identity。
-- before 与 after 必须明确是否使用同一区域和缩放。
-- 坐标动作仍以全屏物理坐标映射为权威，不能把裁剪图像坐标直接当屏幕坐标。
-- 全屏概览与局部图不同时建立第二套坐标真相。
-
-### 7.2 前台窗口身份
-
-本次已实现内部 opaque HWND + PID frame binding、capture 前后稳定校验及首个输入前复核；不匹配则零派发、返回 `foreground_mismatch` 并要求重新观察。身份数据不向 provider 或任何持久/线协议投影。
-
-窗口标题、窗口边界、公开 expected-window schema 和由模型声明预期身份 **明确 deferred**。人工仍可能在观察后切换窗口，因此每个授权批仍须重新核对。
-
-## 8. Schema 与验证
-
-当前 `kind` 是宽泛字符串，建议继续使用 provider 兼容的 flat object，但在服务端做完整二次校验：
+支持的 flat action：
 
 ```ts
 type ComputerActionKind =
@@ -354,113 +239,115 @@ type ComputerActionKind =
   | "wait";
 ```
 
-工具说明必须列出：
+### 7.1 坐标动作
 
-- 每种 kind 的必填字段。
-- 支持的键名和按钮。
-- 坐标来自哪一张图。
-- `holdMs`、`durationMs`、`settleMs` 上限。
-- `observe:true` 对动作批的意义。
-- `sent` 不等于应用成功。
-- action batch 最多 8 项；scroll 至少一个 delta 非零；动作 pair 的双图约消耗两倍视觉 token；`foreground_mismatch` 表示零派发，必须重新 observe。
+`click`、`move`、`mouseHold`、`drag` 和 `scroll` 必须使用本 decision 的 authorized frame。坐标是 image-local 像素，`(0,0)` 为返回图片左上角，绝不能直接使用桌面全局坐标。
 
-非法批次必须在任何 desktop lease、副作用、旧 frame 清理前完整拒绝。动作按顺序执行，最多 8 项，整批保留现有 15000ms deadline。
+完整 foreground identity 在首个 primitive 前复核；foreground-window frame 还在每个坐标 primitive 紧邻 dispatch 前复核完整 binding。
 
-## 9. 内存与 provider 成本
+### 7.2 长按与拖拽
 
-- 每个 exact run 最多保留一组 comparison pair；不能积累历史。
-- 每张 PNG 保持现有限制；新增 pair 总字节数也必须有界。
-- 超出 pair 内存或 provider image 限制时，优先明确失败；不要偷偷只保留 after 却宣称 paired。
-- provider retry 使用相同 immutable before/after bytes。
-- 图片仍不进入 `SessionManager`、JSONL、history snapshot、wire、PublicState 或浏览器。
-- 双图会增加视觉 token 成本，必须在工具描述和实现文档中明确；局部截图是降低成本的后续手段。
+- `keypress.holdMs`：按声明顺序 key down，等待，再逆序 key up。
+- `mouseHold`：move → down → hold → up。
+- `drag`：move start → down → bounded move/end → up。
+- 无论正常、abort、deadline 或 native error，都尽力释放已经按下的 key/button。
+- 只有无法确认可能已按下状态已释放时才永久 taint controller；普通 `unknown` 不永久占有 lease。
+- 不开放跨 tool call 的裸 `keyDown/keyUp` 或 `mouseDown/mouseUp`。
 
-## 10. 实现边界
+## 8. 操作后稳定采样
+
+`settleMs?: number` 范围为 `0..2000`，受整批 15000ms deadline 约束。
+
+- 非空 `actions + observe:true` 默认在 after capture 前等待 150ms。
+- 初始空 observe 和 `observe:false` 不自动等待。
+- settle 是固定延迟，不证明应用已经稳定或业务完成。
+- 批内 `wait` 用于 action 之间的显式间隔；最终 capture 延迟仍由 settleMs 表达。
+
+## 9. Schema、容量与成本
+
+- action batch 最多 8 项。
+- `type` 最多 4096 UTF-8 bytes。
+- `holdMs <= 5000`、`durationMs <= 5000`、`wait.ms <= 5000`。
+- scroll delta 绝对值不超过 10000，且至少一个 delta 非零。
+- 原始 desktop PNG 必须有合法 signature、正尺寸，且 decoded bytes 不超过共享的 16 MiB image cap。
+- computer 的持久结果最大 2000×2000，base64 严格小于 4.5 MiB，可为 PNG 或 JPEG；Pi SDK 的第二次 normalization 必须是 no-op。
+- 通用 `open_image` 仍允许最多 16 MiB decoded bytes（canonical base64 最大约 21.34 MiB），低于 64 MiB server event envelope。
+- 每张图在 compaction 前会随 transcript 重放并消耗视觉 token。这是 append-only/cache-stable 合同的直接成本；实现不得用滑动窗口或重复 before 图来隐藏或扩大该成本。
+- 本修订没有另设 provider request 的累计图片字节预算。密集的大截图可能在 token-based compaction 之前触及 provider/transport 总请求上限；当前诚实暴露该错误，后续若治理应在 compaction/admission 边界处理，不能静默删改持久前缀。
+- JSONL 会保留完整图片，compaction 不物理删除旧 entry。项目没有另建 retention policy；Git/branch/conversation 生命周期仍是持久数据管理边界。
+
+## 10. 实现所有权
 
 ### `src/server/computer-use.ts`
 
-- 将单 `ObservationState` 扩展为 before/after pair 与 authorized coordinate frame。
-- 保留 exact owner、toolCallId、lease、abort、deadline 规则。
-- `execute()` 在动作批前保存可比较的 authorized before image；动作结束后按 `settleMs` 捕获 after。
-- 增加 move、mouseHold、drag、keypress hold 的验证和 adapter dispatch。
-- 处理中断后的释放与 quiescence，不能提前转移 desktop lease。
+- 校验 action、管理 lease/deadline/pressed-state 与 foreground safety。
+- 捕获原始 PNG，构造标准 tool-result content，并只保留无图片字节的 pending/authorized frame 及小型交付摘要。
+- 维护 one-decision/one-batch 消费语义。
 
 ### `src/server/pi-runtime.ts`
 
-- 更新 flat tool schema 和 prompt guideline。
-- 将 pair provider image resolver 传给 converter。
-- `completeAssistantDecision()` 只授权 after frame。
-- 处理旧工具调用的兼容结果，禁止被拒调用复用旧坐标。
-
-### `src/server/agent-context-budget.ts`
-
-- 将单 `ComputerProviderImage` 扩展为有序 before/after image parts。
-- 只修改 provider-only clone，不修改原 AgentMessage。
-- 只有 exact source toolResult 才注入 pair。
-- provider retry 保持 pair 不变。
+- 注册 tool schema、说明与 image-delivery admission。
+- 在 tool 返回前一次性归一化图片并同步 Frame 的模型坐标尺寸，使 Pi SDK normalization 成为 no-op。
+- 在项目 tool-result hook 后保护标准 content，并在最终 converter 边界校验 exact source/details/label/MIME/hash；不一致时清除或拒绝 frame。
+- 在 assistant decision 边界传递 exact computer tool-call IDs。
+- converter 不缓存、不注入也不改写图片。
 
 ### `src/server/conversation-actor.ts`
 
-- 复核 assistant message_end、abort、compaction、reload、settle、dispose 的清理路径。
-- 确保正常 assistant toolUse 后只把 after frame 交给后续 coordinate call。
+- 在 assistant `message_end` 驱动 decision 完成。
+- 在 abort、compaction、reload、settle 和 dispose 清理 frame/lease。
+- 通过通用 durable-image 路径证明 image tool result 已写入，再刷新 history projection。
 
-### 文档
+### `src/server/conversation-history.ts` / `session-events.ts`
 
-- 更新 `docs/plans/2026-09-07-minimal-computer-use-design.md` 的单图约束，标注已被本设计替换的部分。
-- 不修改 `src/shared/protocol.ts` 或 `PROTOCOL_VERSION`。
+- 从 wire 投影删除 base64，生成精确 `resultImageRefs`。
+- 不改变 JSONL 中的标准 image content。
+
+### `src/shared/protocol.ts`
+
+- 继续使用既有 `open_image` / `conversation_image` 命令事件，不新增协议命令。
+- durable image schema 精确限制 16 MiB decoded bytes，覆盖通用持久图片与 raw desktop 输入；computer 的正常持久结果另受更严的 provider normalization 边界约束。`PROTOCOL_VERSION` 不因向后兼容的上限扩大而变化。
+
+### `src/server/agent-context-budget.ts`
+
+- 不参与 computer image 生命周期；只负责 conversation context hint/LoopList 预算。
 
 ## 11. 测试矩阵
 
-### 双图
+### 持久图片与缓存
 
-1. 初始 observe 只有 current image。
-2. A → actions → B 后，provider 输入按 before=A、after=B 顺序包含两图。
-3. 下一批变为 B、C，不再包含 A。
-4. 只有 B 的 frame 可用于下一批坐标；A 坐标被拒绝。
-5. provider retry 收到完全相同的 A/B bytes。
-6. tool result、history、JSONL、wire fixture 不包含 PNG/base64/image part。
-7. after 捕获失败返回 `after_missing`，不伪造 paired。
-8. partial dispatch、abort、timeout 不复活旧 after，也不把 before 授权为坐标 frame。
-9. schema/extension/host gate 预检拒绝不消费同一 decision 的 exact sibling frame；下一 provider conversion 清除未消费 frame。
-10. compaction、reload、terminal、dispose 清除 pair 和 lease。
+1. initial observe 返回 JSON、current label 和一张 PNG/JPEG。
+2. action observe 返回 JSON、after label 和仅一张新图，不复制前图。
+3. >2000px 的真实 PNG 在 tool 返回前归一化；Pi `afterToolCall` 不再改写它，Frame 显示尺寸与持久图一致且仍映射到完整物理 bounds；同尺寸不可解码输入 fail closed 并清 frame。
+4. SessionManager/JSONL 保存最终 base64；wire/history 不含 base64，只含 ref。
+5. 相同 history 重复 `convertToLlm` 得到逐字节相同 image block。
+6. 追加下一 observation 后，旧 provider input 是新 input 的严格前缀；A、B 各出现一次。
+7. `open_image(messageId, ordinal)` 返回持久字节；超共享上限与 off-branch locator fail closed。
+8. `blockImages=true` 和非 vision model 在 desktop adapter 创建前拒绝。
+9. project `tool_result` hook 改写/丢弃 content 时调用失败并清 frame；最终 converter 的 details、label、MIME、图片 hash 任一不同或缺图也不能授权。
 
-### 长按与输入
+### Frame 与失败
 
-11. keypress `holdMs` 按下顺序正确、释放逆序正确。
-12. mouseHold 正常结束释放鼠标。
-13. mouseHold 在 abort/native unknown 后尽力释放，结果为 unknown 而非 sent。
-14. drag 起点/终点均校验，跨调用无法遗留按下状态。
-15. move/hover 不产生点击。
-16. duration、hold、settle 超限在副作用前拒绝。
-17. `sent / unknown / not_started` 在每个动作阶段准确。
+10. pending frame 只授权同 owner、下一 decision 的 exact computer IDs。
+11. local validation/preflight 不消费 sibling；首个实际 batch 消费 decision。
+12. capture 失败、abort、timeout、observe:false 不保留或复活旧 frame。
+13. post-action 结果只有 after 图；它对应的 frame 驱动下一 decision 坐标映射。
+14. foreground identity/binding 漂移在正确边界返回 mismatch，且逐 action status 准确。
+15. compaction、reload、terminal 和 dispose 清除瞬态能力，不删除持久 transcript 事实。
 
-### 边界
+### 输入与并发
 
-18. 前台窗口不匹配时不发送输入。
-19. **Deferred：**region/scale 映射及裁剪坐标合同尚未实现，不能把本项当作本次验收。
-20. 两个 conversation 仍由 desktop lease fail-fast 互斥。
-21. 非 vision model、read_only、无 exact active run 仍在副作用前拒绝。
-22. 真实 Windows adapter 的人工 smoke 覆盖键盘长按、鼠标长按、拖拽和前后截图；CI 只使用 fake adapter。（本次按任务约束未执行真实桌面 I/O。）
+16. keypress/mouseHold/drag 在正常与中断路径尽力释放。
+17. move 不点击，drag 两端都经过同一 frame 映射。
+18. 两个 conversation 由 desktop lease fail-fast 互斥。
+19. 真实 Windows adapter 的人工 smoke 覆盖观察、点击、键盘长按、鼠标长按、拖拽和前台窗口裁剪；CI 使用 fake adapter。
 
 ## 12. 验收标准
 
-实现完成必须满足：
-
-- Agent 能看到动作前后两张明确标注的图，并根据差异继续决策。
-- 后图是下一批唯一可用坐标依据。
-- 长按、悬停、拖拽在一次调用内可完成并可清理。
-- 输入发送、截图取得、应用响应、业务成功不会被混为一个状态。
-- abort、retry、compaction、reload、窗口切换和多 run 竞争不会泄露旧图、旧坐标或按下状态。
-- 截图不进入持久历史或浏览器协议。
-- 现有短按、点击、输入文本和滚动保持兼容。
-
-推荐实现顺序：
-
-```text
-1. before/after pair 与 provider-only 注入
-2. after 默认采样与 settleMs
-3. keypress holdMs
-4. move / mouseHold / drag
-5. 明确 schema 与内部 foreground identity 保护
-6. **Deferred：**局部高清截图/region/scale、公开 expected-window schema 和双击
-```
+- provider history 对追加消息保持严格 append-only；retry 重放完全相同的 image block。
+- 每次 capture 只持久化一张当前事实，不存在图片滑动窗口、重复 before 图或 provider-only injector。
+- 浏览器 snapshot/event 不携带 base64，按需读取仍能得到持久化的精确归一化图。
+- 最新 frame 是下一 assistant decision 唯一坐标依据；旧持久图片没有授权能力。
+- capture、输入发送、应用响应和业务成功不会被混为同一状态。
+- abort、retry、compaction、reload、窗口切换和多 run 竞争不会泄露 stale frame 或按下状态。
+- 现有点击、移动、长按、拖拽、文本、滚动、wait 和 foreground-window crop 保持兼容。
