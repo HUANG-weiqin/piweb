@@ -272,6 +272,12 @@ function isNonChatNativeType(value: unknown): boolean {
   return typeof value === "string" && value.toLowerCase() === "embedding";
 }
 
+/** LM Studio 的 `capabilities.reasoning` 是对象（含 allowed_options/default），不能按布尔判断。 */
+function reportsReasoningCapability(value: unknown): boolean {
+  if (value === true) return true;
+  return typeof value === "object" && value !== null;
+}
+
 /** LM Studio 原生端点：命中时以已加载上下文覆盖通用 item 值。 */
 async function applyLmStudioContext(
   fetchImpl: typeof fetch,
@@ -321,7 +327,7 @@ async function applyLmStudioContext(
     const name = normalizedName(native.display_name);
     if (name !== undefined) model.name = name;
     const capabilities = isRecord(native.capabilities) ? native.capabilities : undefined;
-    if (capabilities?.reasoning === true) model.reasoning = true;
+    if (reportsReasoningCapability(capabilities?.reasoning)) model.reasoning = true;
     model.input = capabilities?.vision === true ? ["text", "image"] : ["text"];
   }
 }

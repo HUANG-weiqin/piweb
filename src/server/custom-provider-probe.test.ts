@@ -177,7 +177,7 @@ describe("probeOpenAiCompatibleModels", () => {
               display_name: "Native One",
               max_context_length: 4096,
               loaded_instances: [{ config: { context_length: 8192 } }],
-              capabilities: { reasoning: true, vision: true },
+              capabilities: { reasoning: { allowed_options: ["off", "on"], default: "on" }, vision: true },
             },
             {
               key: "m2",
