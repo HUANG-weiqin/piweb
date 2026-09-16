@@ -6040,6 +6040,12 @@ pre {
   min-width: 0;
 }
 
+.custom-provider-context-hint {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .custom-provider-model-actions {
   display: flex;
   flex-wrap: wrap;

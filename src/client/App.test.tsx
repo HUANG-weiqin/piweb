@@ -11083,13 +11083,18 @@ describe("App custom providers", () => {
       baseUrl: probe.baseUrl,
       models: [
         { id: "qwen2.5:7b", name: "Qwen 7B" },
-        { id: "qwen2.5-coder", contextWindow: 32_768 },
+        {
+          id: "qwen2.5-coder",
+          contextWindow: 32_768,
+          contextSource: "/api/ps",
+        },
       ],
       truncated: false,
     }));
     expect(screen.getAllByLabelText("模型 id").map(
       (input) => (input as HTMLInputElement).value,
     )).toEqual(["qwen2.5:7b", "qwen2.5-coder"]);
+    expect(screen.getByText("自动探测：/api/ps")).toBeInTheDocument();
   });
 
   it("keeps a failed custom provider save retryable with the typed form", () => {

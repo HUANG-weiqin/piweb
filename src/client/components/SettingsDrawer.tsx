@@ -503,6 +503,8 @@ interface CustomProviderModelDraft {
   id: string;
   name: string;
   contextWindow: string;
+  /** 当前 contextWindow 来自端点探测的路径；用户手改后立即清空。 */
+  contextSource: string;
   maxTokens: string;
   reasoning: boolean;
   imageInput: boolean;
@@ -531,6 +533,7 @@ function emptyCustomProviderModelDraft(): CustomProviderModelDraft {
     id: "",
     name: "",
     contextWindow: "",
+    contextSource: "",
     maxTokens: "",
     reasoning: false,
     imageInput: false,
@@ -583,6 +586,7 @@ function editCustomProviderEditor(
           contextWindow: model.contextWindow === undefined
             ? ""
             : String(model.contextWindow),
+          contextSource: "",
           maxTokens: model.maxTokens === undefined ? "" : String(model.maxTokens),
           reasoning: model.reasoning === true,
           imageInput: model.input?.includes("image") === true,
@@ -646,6 +650,13 @@ function storedAuthLabel(provider: CustomProviderSnapshot): string {
   return "未写入密钥";
 }
 
+function customProviderContextHint(row: CustomProviderModelDraft): string {
+  if (row.contextSource) return `自动探测：${row.contextSource}`;
+  return row.contextWindow.trim()
+    ? "留空则用 Pi 默认 128000"
+    : "未探测到上下文（留空则用 Pi 默认 128000）";
+}
+
 function mergeProbedModels(
   rows: CustomProviderModelDraft[],
   probed: CustomProviderProbedModel[],
@@ -663,6 +674,7 @@ function mergeProbedModels(
       if (!existing.name.trim() && model.name) existing.name = model.name;
       if (!existing.contextWindow.trim() && model.contextWindow !== undefined) {
         existing.contextWindow = String(model.contextWindow);
+        existing.contextSource = model.contextSource ?? "";
       }
       if (!existing.maxTokens.trim() && model.maxTokens !== undefined) {
         existing.maxTokens = String(model.maxTokens);
@@ -686,6 +698,9 @@ function mergeProbedModels(
       contextWindow: model.contextWindow === undefined
         ? ""
         : String(model.contextWindow),
+      contextSource: model.contextWindow === undefined
+        ? ""
+        : model.contextSource ?? "",
       maxTokens: model.maxTokens === undefined ? "" : String(model.maxTokens),
       reasoning: model.reasoning === true,
       imageInput: model.input?.includes("image") === true,
@@ -792,7 +807,15 @@ function CustomProvidersSettingsPage({
       ? {
           ...current,
           models: current.models.map((row) => (
-            row.key === key ? { ...row, ...patch } : row
+            row.key === key
+              ? {
+                  ...row,
+                  ...patch,
+                  contextSource: patch.contextWindow === undefined
+                    ? row.contextSource
+                    : "",
+                }
+              : row
           )),
         }
       : current);
@@ -1135,16 +1158,22 @@ function CustomProvidersSettingsPage({
                   onChange={(event) => updateModel(row.key, { name: event.target.value })}
                 />
               </label>
-              <label className="setting-field">
-                上下文窗口
+              <div className="setting-field">
+                <label htmlFor={`custom-provider-context-${row.key}`}>
+                  上下文窗口
+                </label>
                 <input
+                  id={`custom-provider-context-${row.key}`}
                   value={row.contextWindow}
                   inputMode="numeric"
                   onChange={(event) => updateModel(row.key, {
                     contextWindow: event.target.value,
                   })}
                 />
-              </label>
+                <small className="custom-provider-context-hint">
+                  {customProviderContextHint(row)}
+                </small>
+              </div>
               <label className="setting-field">
                 最大输出
                 <input

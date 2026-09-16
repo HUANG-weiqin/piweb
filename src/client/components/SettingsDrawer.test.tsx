@@ -1171,6 +1171,58 @@ describe("SettingsDrawer custom providers", () => {
     expect(screen.getAllByLabelText("模型名称").map(
       (input) => (input as HTMLInputElement).value,
     )).toEqual(["Llama 3.1 8B", "Qwen Coder"]);
+    expect(screen.queryByText(/自动探测：/)).not.toBeInTheDocument();
+  });
+
+  it("shows the probed context source and clears it after a manual edit", () => {
+    const probe = vi.fn(() => probeCommandId);
+    const rendered = openCustomProviders(customProvidersView(), {
+      onProbeCustomProviderModels: probe,
+    });
+    fireEvent.click(within(providerEntry("Local Llama"))
+      .getByRole("button", { name: "编辑" }));
+    expect(screen.getByText("留空则用 Pi 默认 128000")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("上下文窗口"), {
+      target: { value: "" },
+    });
+    expect(screen.getByText("未探测到上下文（留空则用 Pi 默认 128000）"))
+      .toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "从端点拉取模型列表" }));
+
+    rendered.rerender(<SettingsDrawer {...settingsProps({
+      customProviders: customProvidersView(),
+      customProviderProbeResult: {
+        commandId: probeCommandId,
+        baseUrl: "http://127.0.0.1:8065/v1",
+        models: [{
+          id: "llama-3.1-8b",
+          contextWindow: 256_000,
+          contextSource: "/api/v1/models",
+        }, {
+          id: "qwen2.5-coder",
+          contextWindow: 32_768,
+          contextSource: "models[].max_model_len",
+        }],
+        truncated: false,
+        error: "",
+      },
+      onProbeCustomProviderModels: probe,
+    })} />);
+
+    expect(screen.getAllByLabelText("上下文窗口")[0]).toHaveValue("256000");
+    expect(screen.getByText("自动探测：/api/v1/models")).toBeInTheDocument();
+    expect(screen.getByText("自动探测：models[].max_model_len"))
+      .toBeInTheDocument();
+
+    fireEvent.change(screen.getAllByLabelText("上下文窗口")[0], {
+      target: { value: "128000" },
+    });
+    expect(screen.queryByText("自动探测：/api/v1/models"))
+      .not.toBeInTheDocument();
+    expect(screen.getByText("自动探测：models[].max_model_len"))
+      .toBeInTheDocument();
+    expect(screen.getByText("留空则用 Pi 默认 128000")).toBeInTheDocument();
   });
 
   it("confirms before deleting a provider", () => {
