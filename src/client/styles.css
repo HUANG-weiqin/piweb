@@ -6013,12 +6013,53 @@ pre {
   text-transform: uppercase;
 }
 
+/* 鉴权与复选控件必须显式复位全局 input 尺寸，否则 radio/checkbox 会被撑成
+   整行大输入框（与 .color-scheme-option 同一范式：卡片行 + 左侧小控件）。 */
 .custom-provider-auth-option {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
-  gap: 8px;
-  min-height: 30px;
-  font-size: 12px;
+  gap: 10px;
+  min-height: 44px;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel-strong) 82%, transparent);
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.custom-provider-auth-option:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+}
+
+.custom-provider-auth-option:has(input:checked) {
+  border-color: color-mix(in srgb, var(--accent) 70%, var(--line));
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.custom-provider-auth-option:has(input:focus-visible) {
+  outline: 3px solid color-mix(in srgb, var(--focus) 48%, transparent);
+  outline-offset: 2px;
+}
+
+.custom-provider-auth-option input {
+  width: 16px;
+  min-height: 16px;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  box-shadow: none;
+  accent-color: var(--accent);
+}
+
+.custom-provider-auth-option span {
+  min-width: 0;
+  line-height: 1.35;
 }
 
 .custom-provider-model {
@@ -6060,10 +6101,40 @@ pre {
 }
 
 .custom-provider-check {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
-  gap: 6px;
+  gap: 7px;
+  min-height: 30px;
+  padding: 4px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel-strong) 70%, transparent);
+  cursor: pointer;
   font-size: 12px;
+  transition: border-color 120ms ease;
+}
+
+.custom-provider-check:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+}
+
+.custom-provider-check:has(input:checked) {
+  border-color: color-mix(in srgb, var(--accent) 70%, var(--line));
+}
+
+.custom-provider-check:has(input:focus-visible) {
+  outline: 3px solid color-mix(in srgb, var(--focus) 48%, transparent);
+  outline-offset: 2px;
+}
+
+.custom-provider-check input {
+  width: 15px;
+  min-height: 15px;
+  padding: 0;
+  margin: 0;
+  border-radius: 4px;
+  accent-color: var(--accent);
 }
 
 .custom-provider-editor-actions {
