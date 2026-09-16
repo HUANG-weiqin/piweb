@@ -82,12 +82,16 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
+// v61: probed custom provider models may carry the endpoint source of a
+// detected context window; probing also reads generic model-item fields,
+// llama.cpp `/props` and Ollama loaded-model metadata, not only LM Studio's
+// native catalog.
 // v60: process-global custom model providers are authored through
 // models.json, projected as a bounded secret-free snapshot, and probed for
 // their OpenAI-compatible model list before saving.
 // v59: idle current-leaf fork copies LLM-effective context into a fresh host
 // lifecycle via `fork_conversation`; history anchors stay unsupported.
-export const PROTOCOL_VERSION = 60;
+export const PROTOCOL_VERSION = 61;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 export const COLOR_SCHEMES = ["quiet-rebel", "classic-rebel"] as const;
 export type ColorScheme = typeof COLOR_SCHEMES[number];
@@ -202,6 +206,8 @@ export interface CustomProviderProbedModel {
   maxTokens?: number;
   reasoning?: boolean;
   input?: ("text" | "image")[];
+  /** contextWindow 的端点来源（路径或字段名），供用户判断是否可信；缺失即没有探测到。 */
+  contextSource?: string;
 }
 
 const customProviderIdSchema = z.string().trim()
@@ -282,6 +288,7 @@ const customProviderProbedModelSchema: z.ZodType<CustomProviderProbedModel> = z.
   maxTokens: z.number().int().positive().max(100_000_000).optional(),
   reasoning: z.boolean().optional(),
   input: z.array(z.enum(["text", "image"])).min(1).max(2).optional(),
+  contextSource: z.string().min(1).max(64).optional(),
 }).strict();
 
 const required = z.string().trim().min(1);

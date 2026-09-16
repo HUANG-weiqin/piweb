@@ -42,7 +42,7 @@ const transitionDiagnostics = {
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(60);
+    expect(PROTOCOL_VERSION).toBe(61);
   });
 
   it("accepts supported commands", () => {
@@ -367,9 +367,16 @@ describe("parseClientCommand", () => {
       type: "custom_provider_models_probe",
       commandId,
       baseUrl: "http://127.0.0.1:1234/v1",
-      models: [{ id: "qwen3", contextWindow: 118_000 }],
+      models: [{ id: "qwen3", contextWindow: 118_000, contextSource: "/api/v1/models" }],
       truncated: true,
     })).toMatchObject({ truncated: true });
+    expect(() => parseServerEvent({
+      type: "custom_provider_models_probe",
+      commandId,
+      baseUrl: "http://127.0.0.1:1234/v1",
+      models: [{ id: "qwen3", contextSource: "x".repeat(65) }],
+      truncated: false,
+    })).toThrow();
     expect(() => parseServerEvent({
       type: "custom_provider_models_probe",
       commandId,

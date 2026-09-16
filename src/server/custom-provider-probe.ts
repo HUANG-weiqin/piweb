@@ -3,10 +3,21 @@
  *
  * The probe reads `${baseUrl}/models` without credentials, accepts both the
  * OpenAI `{data:[...]}` and the LM Studio native `{models:[...]}` shapes, and
- * bounds every response to 1 MiB by streaming and aborting early. Enrichment
- * fields (context window, display name, capabilities) come from a separate
- * best-effort call to the LM Studio native endpoint at the URL origin; any
- * failure there is silently ignored.
+ * bounds every response to 1 MiB by streaming and aborting early.
+ *
+ * Context windows follow a fixed priority ladder. Every enrichment request is
+ * serial, shares the probe's single deadline, and is silently ignored on
+ * failure:
+ *   1. the model item itself (`max_model_len`, then `context_length`, then
+ *      `max_context_length`), reported as `models[].<field>`;
+ *   2. the LM Studio native endpoint at the URL origin (`/api/v1/models`),
+ *      which keeps its existing behavior and may override the item value;
+ *   3. llama.cpp `/props` (`default_generation_settings.n_ctx`, then `n_ctx`);
+ *   4. Ollama `/api/ps` for models that are currently loaded.
+ * Levels 3-4 only fill a missing `contextWindow`. Ollama's `/api/ps` shape is
+ * taken from its public API documentation and has not been verified against a
+ * local Ollama; it is strictly shape-checked and never changes existing
+ * behavior when the endpoint is absent or malformed.
  */
 import {
   MAX_CUSTOM_PROVIDER_PROBED_MODELS,
@@ -24,10 +35,26 @@ const MAX_CONTEXT_WINDOW = 100_000_000;
 const MAX_MODEL_NAME_CHARACTERS = 256;
 /** 与 `customProviderProbedModelSchema` 的 id 上限一致：超出线协议的条目不能投影。 */
 const MAX_MODEL_ID_CHARACTERS = 256;
+const LM_STUDIO_CONTEXT_SOURCE = "/api/v1/models";
+const LLAMA_CPP_CONTEXT_SOURCE = "/props";
+const OLLAMA_CONTEXT_SOURCE = "/api/ps";
+/** 最显式到最间接：命中第一个能用的字段。 */
+const CONTEXT_WINDOW_ITEM_FIELDS = [
+  "max_model_len",
+  "context_length",
+  "max_context_length",
+] as const;
+const MAX_TOKENS_ITEM_FIELDS = [
+  "max_output_tokens",
+  "max_completion_tokens",
+] as const;
 
 interface ProbedEntry {
   id: string;
   name?: string;
+  contextWindow?: number;
+  contextSource?: string;
+  maxTokens?: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -109,6 +136,13 @@ function isNonLlmType(value: unknown): boolean {
   return typeof value === "string" && value !== "llm";
 }
 
+function isBoundedPositiveInteger(value: unknown): value is number {
+  return typeof value === "number"
+    && Number.isInteger(value)
+    && value > 0
+    && value <= MAX_CONTEXT_WINDOW;
+}
+
 function normalizedName(value: unknown): string | undefined {
   return typeof value === "string"
     && value.length > 0
@@ -117,11 +151,47 @@ function normalizedName(value: unknown): string | undefined {
     : undefined;
 }
 
+/** 通用 item 字段：返回第一个可用字段及其来源字符串。 */
+function itemContextWindow(entry: Record<string, unknown>): {
+  value: number;
+  source: string;
+} | undefined {
+  for (const field of CONTEXT_WINDOW_ITEM_FIELDS) {
+    const value = entry[field];
+    if (isBoundedPositiveInteger(value)) {
+      return { value, source: `models[].${field}` };
+    }
+  }
+  return undefined;
+}
+
+function itemMaxTokens(entry: Record<string, unknown>): number | undefined {
+  for (const field of MAX_TOKENS_ITEM_FIELDS) {
+    const value = entry[field];
+    if (isBoundedPositiveInteger(value)) return value;
+  }
+  return undefined;
+}
+
+function withItemFields(entry: ProbedEntry, value: Record<string, unknown>): ProbedEntry {
+  const contextWindow = itemContextWindow(value);
+  if (contextWindow !== undefined) {
+    entry.contextWindow = contextWindow.value;
+    entry.contextSource = contextWindow.source;
+  }
+  const maxTokens = itemMaxTokens(value);
+  if (maxTokens !== undefined) entry.maxTokens = maxTokens;
+  return entry;
+}
+
 function parseOpenAiEntry(value: unknown): ProbedEntry | undefined {
   if (!isRecord(value)) return undefined;
   if (typeof value.id !== "string" || value.id.length === 0) return undefined;
   if (isNonLlmType(value.type)) return undefined;
-  return { id: value.id, name: normalizedName(value.name) };
+  const entry: ProbedEntry = { id: value.id };
+  const name = normalizedName(value.name);
+  if (name !== undefined) entry.name = name;
+  return withItemFields(entry, value);
 }
 
 function parseNativeEntry(value: unknown): ProbedEntry | undefined {
@@ -132,10 +202,10 @@ function parseNativeEntry(value: unknown): ProbedEntry | undefined {
       ? value.id
       : undefined;
   if (id === undefined || isNonLlmType(value.type)) return undefined;
-  return {
-    id,
-    name: normalizedName(value.display_name) ?? normalizedName(value.name),
-  };
+  const entry: ProbedEntry = { id };
+  const name = normalizedName(value.display_name) ?? normalizedName(value.name);
+  if (name !== undefined) entry.name = name;
+  return withItemFields(entry, value);
 }
 
 function extractProbedEntries(payload: unknown): ProbedEntry[] {
@@ -172,46 +242,52 @@ function limitProbedModels(entries: readonly ProbedEntry[]): {
       break;
     }
     seen.add(entry.id);
-    models.push(entry.name === undefined ? { id: entry.id } : { id: entry.id, name: entry.name });
+    const model: CustomProviderProbedModel = { id: entry.id };
+    if (entry.name !== undefined) model.name = entry.name;
+    if (entry.contextWindow !== undefined) model.contextWindow = entry.contextWindow;
+    if (entry.contextSource !== undefined) model.contextSource = entry.contextSource;
+    if (entry.maxTokens !== undefined) model.maxTokens = entry.maxTokens;
+    models.push(model);
   }
   return { models, truncated };
 }
 
-function isRepresentableContextWindow(value: unknown): value is number {
-  return typeof value === "number"
-    && Number.isInteger(value)
-    && value > 0
-    && value <= MAX_CONTEXT_WINDOW;
-}
-
-function nativeContextWindow(entry: Record<string, unknown>): number | undefined {
+/**
+ * 只采信**已加载实例**的上下文：LM Studio 的 `max_context_length` 是模型架构上限，
+ * 与实际分配无关（同一个模型重新加载后可能是 29696，也可能是 182272），先报大了
+ * 反而会造成运行时溢出。未加载的模型宁可没有数值，由用户手填或等加载后再探测。
+ */
+function nativeLoadedContextWindow(entry: Record<string, unknown>): number | undefined {
   const loaded = Array.isArray(entry.loaded_instances) ? entry.loaded_instances[0] : undefined;
   if (isRecord(loaded) && isRecord(loaded.config)) {
-    if (isRepresentableContextWindow(loaded.config.context_length)) {
+    if (isBoundedPositiveInteger(loaded.config.context_length)) {
       return loaded.config.context_length;
     }
   }
-  return isRepresentableContextWindow(entry.max_context_length)
-    ? entry.max_context_length
-    : undefined;
+  return undefined;
 }
 
-/** 失败静默忽略：探测结果只允许被补充，不允许被富化请求破坏。 */
-async function enrichProbedModels(
+/** 原生列表里显式标记为 embedding 的条目不能作为聊天模型提供。 */
+function isNonChatNativeType(value: unknown): boolean {
+  return typeof value === "string" && value.toLowerCase() === "embedding";
+}
+
+/** LM Studio 原生端点：命中时以已加载上下文覆盖通用 item 值。 */
+async function applyLmStudioContext(
   fetchImpl: typeof fetch,
-  baseUrl: string,
+  url: string,
   models: CustomProviderProbedModel[],
   signal: AbortSignal,
 ): Promise<void> {
-  if (models.length === 0) return;
   let payload: unknown;
   try {
-    payload = await fetchJson(fetchImpl, `${new URL(baseUrl).origin}/api/v1/models`, signal);
+    payload = await fetchJson(fetchImpl, url, signal);
   } catch {
     return;
   }
   if (!isRecord(payload) || !Array.isArray(payload.models)) return;
   const nativeById = new Map<string, Record<string, unknown>>();
+  const nonChatIds = new Set<string>();
   for (const value of payload.models) {
     if (!isRecord(value)) continue;
     const id = typeof value.key === "string" && value.key.length > 0
@@ -219,19 +295,136 @@ async function enrichProbedModels(
       : typeof value.id === "string" && value.id.length > 0
         ? value.id
         : undefined;
-    if (id !== undefined && !nativeById.has(id)) nativeById.set(id, value);
+    if (id === undefined) continue;
+    if (isNonChatNativeType(value.type)) {
+      nonChatIds.add(id);
+      continue;
+    }
+    if (!nativeById.has(id)) nativeById.set(id, value);
+  }
+  if (nonChatIds.size > 0) {
+    for (let index = models.length - 1; index >= 0; index -= 1) {
+      const candidate = models[index];
+      if (candidate !== undefined && nonChatIds.has(candidate.id)) {
+        models.splice(index, 1);
+      }
+    }
   }
   for (const model of models) {
     const native = nativeById.get(model.id);
     if (native === undefined) continue;
-    const contextWindow = nativeContextWindow(native);
-    if (contextWindow !== undefined) model.contextWindow = contextWindow;
+    const contextWindow = nativeLoadedContextWindow(native);
+    if (contextWindow !== undefined) {
+      model.contextWindow = contextWindow;
+      model.contextSource = LM_STUDIO_CONTEXT_SOURCE;
+    }
     const name = normalizedName(native.display_name);
     if (name !== undefined) model.name = name;
     const capabilities = isRecord(native.capabilities) ? native.capabilities : undefined;
     if (capabilities?.reasoning === true) model.reasoning = true;
     model.input = capabilities?.vision === true ? ["text", "image"] : ["text"];
   }
+}
+
+/** llama.cpp /props：形状不符则整级放弃，只填空缺。 */
+function llamaCppContextWindow(payload: unknown): number | undefined {
+  if (!isRecord(payload)) return undefined;
+  const generation = isRecord(payload.default_generation_settings)
+    ? payload.default_generation_settings
+    : undefined;
+  if (isBoundedPositiveInteger(generation?.n_ctx)) return generation.n_ctx;
+  return isBoundedPositiveInteger(payload.n_ctx) ? payload.n_ctx : undefined;
+}
+
+async function applyLlamaCppContext(
+  fetchImpl: typeof fetch,
+  url: string,
+  models: CustomProviderProbedModel[],
+  signal: AbortSignal,
+): Promise<void> {
+  let payload: unknown;
+  try {
+    payload = await fetchJson(fetchImpl, url, signal);
+  } catch {
+    return;
+  }
+  const contextWindow = llamaCppContextWindow(payload);
+  if (contextWindow === undefined) return;
+  for (const model of models) {
+    if (model.contextWindow !== undefined) continue;
+    model.contextWindow = contextWindow;
+    model.contextSource = LLAMA_CPP_CONTEXT_SOURCE;
+  }
+}
+
+interface OllamaLoadedContext {
+  id: string;
+  contextWindow: number;
+}
+
+/** Ollama /api/ps 严格形状：任一条目不符即整级放弃。 */
+function ollamaLoadedContexts(payload: unknown): OllamaLoadedContext[] | undefined {
+  if (!isRecord(payload) || !Array.isArray(payload.models)) return undefined;
+  const loaded: OllamaLoadedContext[] = [];
+  for (const value of payload.models) {
+    if (!isRecord(value)) return undefined;
+    const id = typeof value.name === "string" && value.name.length > 0
+      ? value.name
+      : typeof value.model === "string" && value.model.length > 0
+        ? value.model
+        : undefined;
+    if (id === undefined || !isBoundedPositiveInteger(value.context_length)) {
+      return undefined;
+    }
+    loaded.push({ id, contextWindow: value.context_length });
+  }
+  return loaded;
+}
+
+function matchesLoadedModelId(candidate: string, modelId: string): boolean {
+  return candidate === modelId
+    || (candidate.endsWith(":latest") && candidate.slice(0, -":latest".length) === modelId)
+    || `${candidate}:latest` === modelId;
+}
+
+async function applyOllamaContext(
+  fetchImpl: typeof fetch,
+  url: string,
+  models: CustomProviderProbedModel[],
+  signal: AbortSignal,
+): Promise<void> {
+  let payload: unknown;
+  try {
+    payload = await fetchJson(fetchImpl, url, signal);
+  } catch {
+    return;
+  }
+  const loaded = ollamaLoadedContexts(payload);
+  if (loaded === undefined) return;
+  for (const model of models) {
+    if (model.contextWindow !== undefined) continue;
+    const match = loaded.find((entry) => matchesLoadedModelId(entry.id, model.id));
+    if (match === undefined) continue;
+    model.contextWindow = match.contextWindow;
+    model.contextSource = OLLAMA_CONTEXT_SOURCE;
+  }
+}
+
+/**
+ * 失败静默忽略：探测结果只允许被补充，不允许被富化请求破坏。
+ * 三级请求串行共用同一 deadline，某级失败不阻止后续级继续尝试。
+ */
+async function enrichProbedModels(
+  fetchImpl: typeof fetch,
+  baseUrl: string,
+  models: CustomProviderProbedModel[],
+  signal: AbortSignal,
+): Promise<void> {
+  if (models.length === 0) return;
+  const origin = new URL(baseUrl).origin;
+  await applyLmStudioContext(fetchImpl, `${origin}/api/v1/models`, models, signal);
+  await applyLlamaCppContext(fetchImpl, `${origin}/props`, models, signal);
+  await applyOllamaContext(fetchImpl, `${origin}/api/ps`, models, signal);
 }
 
 export async function probeOpenAiCompatibleModels(
