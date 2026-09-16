@@ -39,6 +39,7 @@ const FIELD_LABELS: Record<string, string> = {
   command: "命令",
   content: "内容",
   conversationId: "会话句柄",
+  conversationIds: "会话句柄列表",
   createdAt: "创建时间",
   createdBy: "创建者",
   createdByMe: "由我创建",
@@ -47,6 +48,7 @@ const FIELD_LABELS: Record<string, string> = {
   details: "详情",
   diff: "变更预览",
   edits: "编辑",
+  error: "错误",
   file: "文件",
   fileCount: "预计文件数",
   glob: "文件范围",
@@ -151,6 +153,16 @@ export function toolPresentation(
         : "",
     };
   };
+  const conversationTargets = (conversationIds: readonly string[]) => ({
+    target: conversationIds.length === 0
+      ? ""
+      : `${conversationIds.length} 个会话 · ${conversationIds
+          .map((conversationId) => conversationTargetTitle(
+            conversationTitleLookup,
+            conversationId,
+          ))
+          .join(" · ")}`,
+  });
   switch (name) {
     case "read":
       return { label: "读取文件", target: stringField(record, "path") };
@@ -194,8 +206,19 @@ export function toolPresentation(
         label: "启动 Agent 会话",
         target: stringField(record, "title") || stringField(record, "roleId"),
       };
-    case "send_session_message":
-      return { label: "发送会话消息", ...conversationTarget() };
+    case "send_session_message": {
+      const conversationIds = Array.isArray(record?.conversationIds)
+        ? record.conversationIds.filter(
+            (value): value is string => typeof value === "string" && value.length > 0,
+          )
+        : [];
+      return {
+        label: "发送会话消息",
+        ...(conversationIds.length > 0
+          ? conversationTargets(conversationIds)
+          : conversationTarget()),
+      };
+    }
     case "wait_for_session": {
       const targets = Array.isArray(record?.targets)
         ? record.targets.flatMap((target) => {
@@ -203,17 +226,10 @@ export function toolPresentation(
             return conversationId ? [conversationId] : [];
           })
         : [];
-      return targets.length === 0
-        ? { label: "等待 Agent 会话", target: "" }
-        : {
-            label: "等待 Agent 会话",
-            target: `${targets.length} 个会话 · ${targets
-              .map((conversationId) => conversationTargetTitle(
-                conversationTitleLookup,
-                conversationId,
-              ))
-              .join(" · ")}`,
-          };
+      return {
+        label: "等待 Agent 会话",
+        ...conversationTargets(targets),
+      };
     }
     case "abort_session":
       return { label: "终止 Agent 会话", ...conversationTarget() };

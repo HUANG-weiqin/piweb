@@ -97,7 +97,7 @@ describe("ProjectSessionCoordinator slow paths", () => {
 
     releaseBusy.resolve();
     await busyCompletion;
-  }, 15_000);
+  }, 30_000);
 
   it("rejects a failed sending precommit that would exceed the live cap on replay after restart", async () => {
     const fixture = await createFixture();
@@ -161,4 +161,5 @@ describe("ProjectSessionCoordinator slow paths", () => {
     expect(sendingCards).toHaveLength(1);
 
     await restarted.close();
-  }, 15_000);});
+  }, 30_000);
+});

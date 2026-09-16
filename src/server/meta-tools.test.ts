@@ -237,13 +237,102 @@ describe("createMetaTools", () => {
     expect(fake.sendSessionMessage).toHaveBeenCalledWith(
       sourceConversationId,
       {
-        conversationId: targetConversationId,
+        conversationIds: [targetConversationId],
         summary: "请审查持久消息路径。\n并报告风险。",
         message: "Review the durable message path.",
         idempotencyKey: `${sourceConversationId.length}:${sourceConversationId}:summary`,
       },
       undefined,
     );
+  });
+
+  it("forwards one bounded unique target list for a multi-target message", async () => {
+    const fake = service();
+    const send = tool(
+      createMetaTools(sourceConversationId, fake, true),
+      "send_session_message",
+    );
+    const signal = new AbortController().signal;
+    const parameters = send.parameters as unknown as {
+      properties: {
+        conversationIds: { minItems: number; maxItems: number };
+      };
+    };
+
+    expect(parameters.properties.conversationIds).toMatchObject({
+      minItems: 2,
+      maxItems: 32,
+    });
+    await send.execute(
+      "send-many",
+      {
+        conversationIds: [targetConversationId, secondTargetConversationId],
+        summary: "请同时检查。",
+        message: "Inspect the same invariant independently.",
+      },
+      signal,
+      undefined,
+      {} as never,
+    );
+
+    expect(fake.sendSessionMessage).toHaveBeenCalledWith(
+      sourceConversationId,
+      {
+        conversationIds: [targetConversationId, secondTargetConversationId],
+        summary: "请同时检查。",
+        message: "Inspect the same invariant independently.",
+        idempotencyKey:
+          `${sourceConversationId.length}:${sourceConversationId}:send-many`,
+      },
+      signal,
+    );
+    const forwarded = vi.mocked(fake.sendSessionMessage).mock.calls[0]?.[1] as {
+      conversationIds: readonly string[];
+    };
+    expect(Object.isFrozen(forwarded.conversationIds)).toBe(true);
+  });
+
+  it("rejects ambiguous or duplicate message target inputs", async () => {
+    const fake = service();
+    const send = tool(
+      createMetaTools(sourceConversationId, fake, true),
+      "send_session_message",
+    );
+    const base = {
+      summary: "检查目标。",
+      message: "Inspect the target selection.",
+    };
+
+    await expect(send.execute(
+      "missing-target",
+      base as never,
+      undefined,
+      undefined,
+      {} as never,
+    )).rejects.toThrow(/exactly one/i);
+    await expect(send.execute(
+      "both-targets",
+      {
+        ...base,
+        conversationId: targetConversationId,
+        conversationIds: [targetConversationId, secondTargetConversationId],
+      },
+      undefined,
+      undefined,
+      {} as never,
+    )).rejects.toThrow(/exactly one/i);
+    await expect(send.execute(
+      "duplicate-targets",
+      {
+        ...base,
+        conversationIds: [targetConversationId, targetConversationId],
+      },
+      undefined,
+      undefined,
+      {} as never,
+    )).rejects.toThrow(/unique/i);
+
+    expect(fake.sendSessionMessage).not.toHaveBeenCalled();
   });
 
   it("aligns task and message limits with the durable UTF-8 byte contract", async () => {

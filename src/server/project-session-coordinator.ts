@@ -52,6 +52,7 @@ import {
 
 import {
   createMetaTools,
+  MAX_SESSION_MESSAGE_TARGETS,
   type MetaToolService,
   type MetaToolSessionScope,
 } from "./meta-tools.js";
@@ -106,9 +107,9 @@ const MAX_BATCH_MESSAGES = 8;
 const MAX_COMPLETION_CACHE = 256;
 export const WAIT_POLL_DELAY_MS = 240_000;
 
-export const MAX_PEER_SESSIONS_PER_RUN = 32;
+export const MAX_PEER_SESSIONS_PER_RUN = 64;
 export const MAX_DELEGATION_DEPTH = 3;
-export const MAX_LIVE_DELEGATION_DESCENDANTS = 32;
+export const MAX_LIVE_DELEGATION_DESCENDANTS = 64;
 const START_SESSION_ADMISSION_FAILURE_PREFIX =
   "start_session inbox admission failed: ";
 
@@ -465,6 +466,25 @@ function startRequestFingerprint(input: StartPeerSessionInput): string {
     input.task,
     input.title ?? null,
   ])).digest("hex");
+}
+
+function sessionMessageBatchFingerprint(
+  conversationIds: readonly string[],
+  summary: string,
+  message: string,
+): string {
+  return createHash("sha256").update(JSON.stringify([
+    conversationIds,
+    summary,
+    message,
+  ])).digest("hex");
+}
+
+function sessionMessageBatchTargetKey(
+  idempotencyKey: string,
+  index: number,
+): string {
+  return `${idempotencyKey.length}:${idempotencyKey}:target:${index}`;
 }
 
 interface RoutedDialogOptions {
@@ -3940,10 +3960,10 @@ export class ProjectSessionCoordinator {
         sourceConversationId,
         input,
         signal,
-      ) => this.sendSessionMessage(
+      ) => this.sendSessionMessages(
         context,
         sourceConversationId,
-        input.conversationId,
+        input.conversationIds,
         input.summary,
         input.message,
         input.idempotencyKey,
@@ -4443,7 +4463,124 @@ export class ProjectSessionCoordinator {
     }
   }
 
-  private async sendSessionMessage(
+  private async sendSessionMessages(
+    context: ProjectContext,
+    sourceConversationId: string,
+    targetConversationIds: readonly string[],
+    summary: string,
+    message: string,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ) {
+    return this.runLifecycle(context, async () => {
+      const normalizedSummary = normalizeConversationMessageSummary(summary);
+      this.throwIfAborted(signal);
+      if (
+        targetConversationIds.length < 1
+        || targetConversationIds.length > MAX_SESSION_MESSAGE_TARGETS
+      ) {
+        throw new Error(
+          `send_session_message requires 1 to ${MAX_SESSION_MESSAGE_TARGETS} targets`,
+        );
+      }
+      if (new Set(targetConversationIds).size !== targetConversationIds.length) {
+        throw new Error("send_session_message targets must be unique");
+      }
+      if (targetConversationIds.includes(sourceConversationId)) {
+        throw new Error(
+          "Use the current conversation directly instead of messaging itself",
+        );
+      }
+
+      const source = this.requireActor(context, sourceConversationId);
+      const cards = aggregateReservedConversationEntries(
+        source.sessionManager.getEntries(),
+      ).cards;
+      const legacyCardId = deterministicUuid("piweb.card", idempotencyKey);
+      const batchCardIds = Array.from(
+        { length: MAX_SESSION_MESSAGE_TARGETS },
+        (_, index) => deterministicUuid(
+          "piweb.card",
+          sessionMessageBatchTargetKey(idempotencyKey, index),
+        ),
+      );
+      const existingLegacyCard = cards.find(({ cardId }) => (
+        cardId === legacyCardId
+      ));
+      const existingBatchCards = cards.filter(({ cardId }) => (
+        batchCardIds.includes(cardId)
+      ));
+
+      if (targetConversationIds.length === 1) {
+        if (existingBatchCards.length > 0) {
+          throw new Error(
+            "send_session_message idempotency key conflicts with an earlier request",
+          );
+        }
+        return this.sendSessionMessageWithinLifecycle(
+          context,
+          sourceConversationId,
+          targetConversationIds[0]!,
+          normalizedSummary,
+          message,
+          idempotencyKey,
+          signal,
+        );
+      }
+
+      const requestFingerprint = sessionMessageBatchFingerprint(
+        targetConversationIds,
+        normalizedSummary,
+        message,
+      );
+      if (
+        existingLegacyCard
+        || existingBatchCards.some((card) => (
+          card.requestFingerprint !== requestFingerprint
+        ))
+      ) {
+        throw new Error(
+          "send_session_message idempotency key conflicts with an earlier request",
+        );
+      }
+
+      const results: unknown[] = [];
+      for (const [index, targetConversationId] of targetConversationIds.entries()) {
+        this.throwIfAborted(signal);
+        try {
+          results.push(await this.sendSessionMessageWithinLifecycle(
+            context,
+            sourceConversationId,
+            targetConversationId,
+            normalizedSummary,
+            message,
+            sessionMessageBatchTargetKey(idempotencyKey, index),
+            signal,
+            requestFingerprint,
+          ));
+        } catch (error) {
+          if (
+            signal?.aborted
+            || (error instanceof Error && error.name === "AbortError")
+          ) {
+            throw error;
+          }
+          const detail = (error instanceof Error ? error.message : String(error))
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 1_000);
+          results.push({
+            conversationId: targetConversationId,
+            status: "error",
+            error: detail || "Unknown delivery error",
+          });
+        }
+      }
+      return { results };
+    });
+  }
+
+  private async sendSessionMessageWithinLifecycle(
     context: ProjectContext,
     sourceConversationId: string,
     targetConversationId: string,
@@ -4451,8 +4588,8 @@ export class ProjectSessionCoordinator {
     message: string,
     idempotencyKey: string,
     signal?: AbortSignal,
+    requestFingerprint?: string,
   ) {
-    return this.runLifecycle(context, async () => {
       const normalizedSummary = normalizeConversationMessageSummary(summary);
       this.throwIfAborted(signal);
       if (sourceConversationId === targetConversationId) {
@@ -4474,6 +4611,7 @@ export class ProjectSessionCoordinator {
           || existingCard.summary !== normalizedSummary
           || existingCard.body !== message
           || existingCard.toSnapshot.conversationId !== targetConversationId
+          || existingCard.requestFingerprint !== requestFingerprint
         )
       ) {
         throw new Error(
@@ -4524,6 +4662,7 @@ export class ProjectSessionCoordinator {
         summary: normalizedSummary,
         body: message,
         fromRunId,
+        ...(requestFingerprint === undefined ? {} : { requestFingerprint }),
       });
       const envelope = queued.envelope;
       if (queued.status === "delivered") {
@@ -4602,7 +4741,6 @@ export class ProjectSessionCoordinator {
           ? {}
           : { activeRunId: activity.runId }),
       };
-    });
   }
 
   private async deliverEnvelopeToWaitingRun(

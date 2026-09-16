@@ -20,6 +20,8 @@ interface MetaToolSessionRef {
 
 type MetaToolWaitInput = { targets: readonly MetaToolSessionRef[] };
 
+export const MAX_SESSION_MESSAGE_TARGETS = 32;
+
 function formatLocalTimestamp(value: Date): string {
   const offsetMinutes = -value.getTimezoneOffset();
   const local = new Date(value.getTime() + offsetMinutes * 60_000)
@@ -76,7 +78,7 @@ export interface MetaToolService {
   sendSessionMessage(
     sourceConversationId: string,
     input: {
-      conversationId: string;
+      conversationIds: readonly string[];
       summary: string;
       message: string;
       idempotencyKey: string;
@@ -159,6 +161,34 @@ function normalizeWaitInput(input: {
     }));
   }
   return { targets: Object.freeze(targets) };
+}
+
+function normalizeSendTargets(input: {
+  conversationId?: string;
+  conversationIds?: string[];
+}): readonly string[] {
+  const hasSingle = input.conversationId !== undefined;
+  const hasMany = input.conversationIds !== undefined;
+  if (hasSingle === hasMany) {
+    throw new Error(
+      "send_session_message requires exactly one of conversationId or conversationIds",
+    );
+  }
+  if (hasSingle) return Object.freeze([input.conversationId!]);
+
+  const conversationIds = input.conversationIds!;
+  if (
+    conversationIds.length < 2
+    || conversationIds.length > MAX_SESSION_MESSAGE_TARGETS
+  ) {
+    throw new Error(
+      `send_session_message conversationIds must contain 2 to ${MAX_SESSION_MESSAGE_TARGETS} items`,
+    );
+  }
+  if (new Set(conversationIds).size !== conversationIds.length) {
+    throw new Error("send_session_message conversationIds must be unique");
+  }
+  return Object.freeze([...conversationIds]);
 }
 
 function normalizeSessionScope(scope: string | undefined): MetaToolSessionScope | undefined {
@@ -344,13 +374,18 @@ export function createMetaTools(
       name: "send_session_message",
       label: "Send session message",
       description:
-        "Durably send a first-class session message to a peer. A busy target receives it as steering after its current tool turn and before its next model request; it remains durable until Pi records the target message and the exact run settles. If that peer is currently waiting (wait_for_session), the delivered message also resolves that wait immediately, even when the wait targets a different conversation or run.",
-      promptSnippet: "Send a durable message to another Agent session.",
+        "Durably send the same first-class session message to one peer (conversationId) or 2-32 peers (conversationIds). Each target is accepted and reported independently. A busy target receives it as steering after its current tool turn and before its next model request; it remains durable until Pi records the target message and the exact run settles. If a peer is currently waiting (wait_for_session), the delivered message also resolves that wait immediately, even when the wait targets a different conversation or run.",
+      promptSnippet: "Send one durable message to one or more Agent sessions.",
       promptGuidelines: [
+        "Set exactly one of conversationId or conversationIds. Use conversationIds only when every target should receive the identical message.",
         "Always provide summary: a plain-language explanation for the user of what this message asks or reports. It appears on the collapsed message card; keep the full task or evidence in message.",
       ],
       parameters: Type.Object({
-        conversationId: Type.String({ minLength: 1, maxLength: 256 }),
+        conversationId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+        conversationIds: Type.Optional(Type.Array(
+          Type.String({ minLength: 1, maxLength: 256 }),
+          { minItems: 2, maxItems: MAX_SESSION_MESSAGE_TARGETS },
+        )),
         summary: Type.String({
           minLength: 1,
           // TypeBox counts UTF-16 code units; the shared runtime validator
@@ -365,9 +400,10 @@ export function createMetaTools(
       }, { additionalProperties: false }),
       async execute(toolCallId, input, signal) {
         assertConversationBody(input.message, "message");
+        const conversationIds = normalizeSendTargets(input);
         const summary = normalizeConversationMessageSummary(input.summary);
         return result(await service.sendSessionMessage(sourceConversationId, {
-          conversationId: input.conversationId,
+          conversationIds,
           summary,
           message: input.message,
           idempotencyKey: sideEffectKey(sourceConversationId, toolCallId),

@@ -131,6 +131,54 @@ describe("ToolCard", () => {
     expect(summary).toHaveTextContent("视觉核对");
   });
 
+  it("keeps a multi-target send aggregate while resolving every current title", () => {
+    const firstId = "11111111-1111-4111-8111-111111111111";
+    const secondId = "22222222-2222-4222-8222-222222222222";
+    const conversations = [
+      { id: firstId, name: "安全审查" },
+      { id: secondId, name: "视觉核对" },
+    ].map(({ id, name }): ConversationSummary => ({
+      id,
+      name,
+      preview: "",
+      createdAt: "2026-07-19T08:00:00.000Z",
+      updatedAt: "2026-07-19T09:00:00.000Z",
+      messageCount: 1,
+      activity: { kind: "idle" },
+      compacting: false,
+    }));
+    const aggregateTool: ToolItem = {
+      id: "send-many",
+      name: "send_session_message",
+      args: {
+        conversationIds: [firstId, secondId],
+        summary: "同时核对",
+        message: "Review the same change.",
+      },
+      status: "pending",
+    };
+    const { container } = render(
+      <ToolCard
+        tool={aggregateTool}
+        conversationTitleLookup={createConversationTitleLookup(
+          conversations,
+          false,
+        )}
+      />,
+    );
+    const summary = container.querySelector("summary") as HTMLElement;
+
+    expect(summary).toHaveTextContent("2 个会话");
+    expect(summary).toHaveTextContent("安全审查");
+    expect(summary).toHaveTextContent("视觉核对");
+    expect(summary).not.toHaveTextContent(firstId);
+
+    fireEvent.click(summary);
+    expect(screen.getByText("会话句柄列表")).toBeInTheDocument();
+    expect(screen.getByText(firstId)).toBeInTheDocument();
+    expect(screen.getByText(secondId)).toBeInTheDocument();
+  });
+
   it("expands to reveal readable fields instead of raw JSON", () => {
     const { container } = render(<ToolCard tool={tool} />);
     const details = container.querySelector("details") as HTMLDetailsElement;

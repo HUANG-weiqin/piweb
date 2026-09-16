@@ -6329,6 +6329,195 @@ describe("ProjectSessionCoordinator", () => {
     await expect(inbox.get(sent.messageId)).resolves.toBeUndefined();
   });
 
+  it("fans one send_session_message call out to multiple durable targets without duplicate replay", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const sourceRun = await startBlockedSourceRun(
+      fixture,
+      source.conversationId,
+    );
+    const firstTarget = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const secondTarget = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const firstStarted = deferred();
+    const firstRelease = deferred();
+    const secondStarted = deferred();
+    const secondRelease = deferred();
+    fixture.runtime.control(firstTarget.conversationId).enqueue(
+      blocksUntil(firstStarted, firstRelease, "first batch target complete"),
+    );
+    fixture.runtime.control(secondTarget.conversationId).enqueue(
+      blocksUntil(secondStarted, secondRelease, "second batch target complete"),
+    );
+    const input = {
+      conversationIds: [
+        firstTarget.conversationId,
+        secondTarget.conversationId,
+      ],
+      message: "Deliver this identical update to both targets",
+    };
+
+    const first = await executeTool(
+      fixture.runtime.control(source.conversationId),
+      "send_session_message",
+      "stable-send-many-tool-call",
+      input,
+    ) as {
+      results: Array<{
+        conversationId: string;
+        messageId: string;
+        status: string;
+      }>;
+    };
+    await Promise.all([firstStarted.promise, secondStarted.promise]);
+    expect(first.results.map(({ conversationId }) => conversationId)).toEqual([
+      firstTarget.conversationId,
+      secondTarget.conversationId,
+    ]);
+    expect(first.results.every(({ status }) => status !== "error")).toBe(true);
+
+    const replay = await executeTool(
+      fixture.runtime.control(source.conversationId),
+      "send_session_message",
+      "stable-send-many-tool-call",
+      input,
+    ) as typeof first;
+    expect(replay.results.map(({ messageId }) => messageId)).toEqual(
+      first.results.map(({ messageId }) => messageId),
+    );
+    expect(fixture.runtime.control(firstTarget.conversationId).received)
+      .toHaveLength(1);
+    expect(fixture.runtime.control(secondTarget.conversationId).received)
+      .toHaveLength(1);
+    expect(fixture.runtime.control(firstTarget.conversationId).received[0]?.content)
+      .toContain(input.message);
+    expect(fixture.runtime.control(secondTarget.conversationId).received[0]?.content)
+      .toContain(input.message);
+
+    await expect(executeTool(
+      fixture.runtime.control(source.conversationId),
+      "send_session_message",
+      "stable-send-many-tool-call",
+      {
+        ...input,
+        conversationIds: [...input.conversationIds].reverse(),
+      },
+    )).rejects.toThrow(/idempotency key conflicts/i);
+
+    firstRelease.resolve();
+    secondRelease.resolve();
+    sourceRun.release.resolve();
+    await sourceRun.completion;
+  });
+
+  it("reports one rejected multi-target admission without skipping later targets", async () => {
+    const fixture = await createFixture();
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const sourceRun = await startBlockedSourceRun(
+      fixture,
+      source.conversationId,
+    );
+    const rejectedTarget = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const acceptedTarget = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const started = deferred();
+    const release = deferred();
+    fixture.runtime.control(acceptedTarget.conversationId).enqueue(
+      blocksUntil(started, release, "valid batch target complete"),
+    );
+    const inbox = coordinatorInbox(fixture.handle);
+    const originalPut = inbox.put.bind(inbox);
+    inbox.put = async (...args) => {
+      if (args[0].toConversationId === rejectedTarget.conversationId) {
+        throw new InboxPutOperationError(
+          "definitely_noncommitted",
+          new Error("simulated target inbox capacity rejection"),
+        );
+      }
+      return originalPut(...args);
+    };
+
+    const input = {
+      conversationIds: [
+        rejectedTarget.conversationId,
+        acceptedTarget.conversationId,
+      ],
+      message: "Continue fan-out after one target rejects delivery",
+    };
+    let sent!: {
+      results: Array<{
+        conversationId: string;
+        messageId?: string;
+        status: string;
+        error?: string;
+      }>;
+    };
+    try {
+      sent = await executeTool(
+        fixture.runtime.control(source.conversationId),
+        "send_session_message",
+        "partial-send-many-tool-call",
+        input,
+      ) as typeof sent;
+      await started.promise;
+    } finally {
+      inbox.put = originalPut;
+    }
+
+    expect(sent.results[0]).toMatchObject({
+      conversationId: rejectedTarget.conversationId,
+      status: "error",
+    });
+    expect(sent.results[0]?.error).toMatch(/capacity rejection/i);
+    expect(sent.results[1]).toMatchObject({
+      conversationId: acceptedTarget.conversationId,
+    });
+    expect(sent.results[1]?.status).not.toBe("error");
+    expect(fixture.runtime.control(acceptedTarget.conversationId).received)
+      .toHaveLength(1);
+    expect(aggregateReservedConversationEntries(
+      source.sessionManager.getEntries(),
+    ).cards.find(({ toSnapshot }) => (
+      toSnapshot.conversationId === rejectedTarget.conversationId
+    ))).toMatchObject({ state: "sending" });
+
+    const replay = await executeTool(
+      fixture.runtime.control(source.conversationId),
+      "send_session_message",
+      "partial-send-many-tool-call",
+      input,
+    ) as typeof sent;
+    await waitUntil(
+      () => fixture.runtime.control(rejectedTarget.conversationId).received.length
+        === 1,
+      "the recovered batch target delivery",
+    );
+    expect(replay.results[0]?.status).not.toBe("error");
+    expect(replay.results[1]?.messageId).toBe(sent.results[1]?.messageId);
+    expect(fixture.runtime.control(acceptedTarget.conversationId).received)
+      .toHaveLength(1);
+
+    release.resolve();
+    sourceRun.release.resolve();
+    await sourceRun.completion;
+  });
+
   it("retries one send_session_message tool call while running and after settlement without duplicate delivery", async () => {
     const fixture = await createFixture();
     const source = await fixture.coordinator.createUserConversation(

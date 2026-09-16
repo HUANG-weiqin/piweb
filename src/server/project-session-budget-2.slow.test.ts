@@ -21,6 +21,11 @@ import {
   type Fixture,
 } from "./coordinator-test-fixture.js";
 describe("ProjectSessionCoordinator slow paths", () => {
+  it("supports up to 64 peers per run and delegation root", () => {
+    expect(MAX_PEER_SESSIONS_PER_RUN).toBe(64);
+    expect(MAX_LIVE_DELEGATION_DESCENDANTS).toBe(64);
+  });
+
   it("enforces MAX_PEER_SESSIONS_PER_RUN within one run; delete doesn't free slot", async () => {
     const fixture = await createFixture();
     const source = await fixture.coordinator.createUserConversation(
@@ -28,7 +33,7 @@ describe("ProjectSessionCoordinator slow paths", () => {
       { roleId: "default" },
     );
     const peerIds: string[] = [];
-    let fifthError: unknown;
+    let exceededError: unknown;
     let retriedConversationId: string | undefined;
 
     fixture.runtime.control(source.conversationId).enqueue(
@@ -64,7 +69,7 @@ describe("ProjectSessionCoordinator slow paths", () => {
             },
           );
         } catch (error) {
-          fifthError = error;
+          exceededError = error;
         }
         const retry = await executeTool(
           control,
@@ -87,8 +92,8 @@ describe("ProjectSessionCoordinator slow paths", () => {
       "exercise one run budget",
     );
     expect(settlement.outcome).toBe("completed");
-    expect(fifthError).toBeInstanceOf(Error);
-    expect((fifthError as Error).message).toMatch(/limit|maximum/i);
+    expect(exceededError).toBeInstanceOf(Error);
+    expect((exceededError as Error).message).toMatch(/limit|maximum/i);
     expect(retriedConversationId).toBe(peerIds[0]);
 
     let freshConversationId: string | undefined;
@@ -115,7 +120,7 @@ describe("ProjectSessionCoordinator slow paths", () => {
     );
     expect(freshSettlement.outcome).toBe("completed");
     expect(freshConversationId).toEqual(expect.any(String));
-  }, 15_000);
+  }, 30_000);
 
   it("enforces MAX_LIVE_DELEGATION_DESCENDANTS and allows creation after deletion", async () => {
     const fixture = await createFixture();
@@ -161,5 +166,5 @@ describe("ProjectSessionCoordinator slow paths", () => {
       }),
     );
     expect(afterDeletion).toMatchObject({ conversationId: expect.any(String) });
-  }, 15_000);
+  }, 30_000);
 });
