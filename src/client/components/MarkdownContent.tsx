@@ -1,6 +1,16 @@
-import { memo, useEffect, useMemo, useRef } from "react";
+import {
+  memo,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
+import { createPortal } from "react-dom";
 import DOMPurify, { type ElementHook } from "dompurify";
 import { marked, type Tokens } from "marked";
+import { useModalFocus } from "../lib/use-modal-focus";
 
 const MERMAID_MAX_SOURCE_LENGTH = 50_000;
 export const MERMAID_MAX_BLOCKS_PER_CONTENT = 8;
@@ -253,10 +263,132 @@ function createDiagram(svg: string): HTMLDivElement {
   ) {
     svgElement.setAttribute("aria-label", "Mermaid 图");
   }
+  const expandButton = document.createElement("button");
+  expandButton.type = "button";
+  expandButton.className = "ghost mermaid-diagram-expand";
+  expandButton.dataset.piwebMermaidExpand = "";
+  expandButton.setAttribute("aria-haspopup", "dialog");
+  expandButton.setAttribute("aria-label", "全屏查看 Mermaid 图");
+  expandButton.title = "全屏查看";
+  expandButton.textContent = "全屏查看";
+
+  const toolbar = document.createElement("div");
+  toolbar.className = "mermaid-diagram-toolbar";
+  toolbar.append(expandButton);
+
+  const viewport = document.createElement("div");
+  viewport.className = "mermaid-diagram-viewport";
+  viewport.append(svgElement);
+
   const diagram = document.createElement("div");
   diagram.className = "mermaid-diagram";
-  diagram.append(svgElement);
+  diagram.append(toolbar, viewport);
   return diagram;
+}
+
+type MermaidViewerMode = "fit" | "actual";
+
+function restoreSvgStyle(svg: SVGSVGElement, style: string | null): void {
+  if (style === null) svg.removeAttribute("style");
+  else svg.setAttribute("style", style);
+}
+
+function MermaidViewer({
+  sourceSvg,
+  onClose,
+}: {
+  sourceSvg: SVGSVGElement;
+  onClose(): void;
+}) {
+  const [mode, setMode] = useState<MermaidViewerMode>("fit");
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const originalStyleRef = useRef(sourceSvg.getAttribute("style"));
+  const focusRef = useModalFocus<HTMLElement>(
+    true,
+    sourceSvg.id || "mermaid-viewer",
+    onClose,
+  );
+
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const bounds = sourceSvg.getBoundingClientRect();
+    const placeholder = document.createElement("div");
+    placeholder.className = "mermaid-diagram-placeholder";
+    placeholder.setAttribute("aria-hidden", "true");
+    placeholder.style.width = bounds.width > 0
+      ? `${bounds.width}px`
+      : sourceSvg.style.width || "100%";
+    placeholder.style.height = `${bounds.height}px`;
+    sourceSvg.replaceWith(placeholder);
+    canvas.append(sourceSvg);
+
+    return () => {
+      restoreSvgStyle(sourceSvg, originalStyleRef.current);
+      if (placeholder.isConnected) placeholder.replaceWith(sourceSvg);
+    };
+  }, [sourceSvg]);
+
+  useLayoutEffect(() => {
+    restoreSvgStyle(sourceSvg, originalStyleRef.current);
+    if (mode !== "fit") return;
+    sourceSvg.style.setProperty("width", "100%", "important");
+    sourceSvg.style.setProperty("height", "100%", "important");
+    sourceSvg.style.setProperty("max-width", "100%", "important");
+    sourceSvg.style.setProperty("max-height", "100%", "important");
+  }, [mode, sourceSvg]);
+
+  const showingActualSize = mode === "actual";
+  return createPortal(<div
+    className="mermaid-viewer-backdrop"
+    role="presentation"
+    onMouseDown={(event) => {
+      if (event.target !== event.currentTarget) return;
+      event.preventDefault();
+      onClose();
+    }}
+  >
+    <section
+      ref={focusRef}
+      className="mermaid-viewer"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Mermaid 图全屏查看"
+      tabIndex={-1}
+    >
+      <header className="mermaid-viewer-header">
+        <div>
+          <p className="eyebrow">DIAGRAM</p>
+          <h2>Mermaid 图</h2>
+        </div>
+        <div className="mermaid-viewer-actions">
+          <button
+            type="button"
+            className="ghost mermaid-viewer-size"
+            aria-label={showingActualSize
+              ? "适应窗口查看 Mermaid 图"
+              : "按原始大小查看 Mermaid 图"}
+            onClick={() => setMode(showingActualSize ? "fit" : "actual")}
+          >
+            {showingActualSize ? "适应窗口" : "原始大小"}
+          </button>
+          <button
+            type="button"
+            className="ghost mermaid-viewer-close"
+            aria-label="关闭 Mermaid 图全屏查看"
+            data-modal-autofocus
+            onClick={onClose}
+          >×</button>
+        </div>
+      </header>
+      <div
+        ref={canvasRef}
+        className={`mermaid-viewer-canvas is-${mode}`}
+        aria-label="Mermaid 图查看区域"
+        tabIndex={0}
+      />
+    </section>
+  </div>, document.body);
 }
 
 function showFallback(pre: HTMLPreElement, message: string): void {
@@ -287,6 +419,7 @@ function MarkdownContentView({
   onRenderSettled,
 }: MarkdownContentProps) {
   const rootRef = useRef<HTMLDivElement>(null);
+  const [expandedSvg, setExpandedSvg] = useState<SVGSVGElement | null>(null);
   const rendered = useMemo(() => {
     const marker = renderMermaid ? createMarker() : undefined;
     return {
@@ -299,6 +432,16 @@ function MarkdownContentView({
     mermaidMaxTotalSourceLength,
     renderMermaid,
   ]);
+  // The rendered diagrams live inside this opaque subtree. Keep the prop stable
+  // so opening the viewer does not make React restore the original code fences.
+  const dangerousHtml = useMemo(
+    () => ({ __html: rendered.html }),
+    [rendered.html],
+  );
+
+  useEffect(() => {
+    setExpandedSvg(null);
+  }, [rendered.marker]);
 
   useEffect(() => {
     const root = rootRef.current;
@@ -352,11 +495,30 @@ function MarkdownContentView({
     rendered,
   ]);
 
-  return <div
-    ref={rootRef}
-    className={className}
-    dangerouslySetInnerHTML={{ __html: rendered.html }}
-  />;
+  const openMermaidViewer = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (!(event.target instanceof Element)) return;
+    const trigger = event.target.closest<HTMLButtonElement>(
+      "button[data-piweb-mermaid-expand]",
+    );
+    if (!trigger || !event.currentTarget.contains(trigger)) return;
+    const svg = trigger
+      .closest(".mermaid-diagram")
+      ?.querySelector<SVGSVGElement>("svg");
+    if (svg) setExpandedSvg(svg);
+  };
+
+  return <>
+    <div
+      ref={rootRef}
+      className={className}
+      onClick={openMermaidViewer}
+      dangerouslySetInnerHTML={dangerousHtml}
+    />
+    {expandedSvg && <MermaidViewer
+      sourceSvg={expandedSvg}
+      onClose={() => setExpandedSvg(null)}
+    />}
+  </>;
 }
 
 export const MarkdownContent = memo(MarkdownContentView);

@@ -1,6 +1,13 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ConversationSummary } from "../../shared/protocol";
@@ -606,6 +613,61 @@ describe("Message", () => {
     expect(diagram.querySelector("rect")).toHaveAttribute("fill", "url(#safe-gradient)");
     expect(container.querySelector("pre[data-piweb-mermaid]"))
       .not.toBeInTheDocument();
+    expect(onContentSettled).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens Mermaid in a fit-to-window viewer and restores the inline diagram", async () => {
+    mermaidMock.render.mockReset().mockResolvedValue({
+      svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2400 240"><text>wide diagram</text></svg>',
+    });
+    const message: ChatMessage = {
+      id: "mermaid-viewer",
+      runId: "run-mermaid-viewer",
+      role: "assistant",
+      text: "```mermaid\nflowchart LR\nA --> B\n```",
+      thinking: "",
+      tools: [],
+      parts: [{ kind: "text", text: "```mermaid\nflowchart LR\nA --> B\n```" }],
+    };
+
+    const onContentSettled = vi.fn();
+    const { container } = render(
+      <Message message={message} onContentSettled={onContentSettled} />,
+    );
+    const openButton = await screen.findByRole("button", {
+      name: "全屏查看 Mermaid 图",
+    });
+    expect(openButton).toHaveAttribute("aria-haspopup", "dialog");
+    openButton.focus();
+    fireEvent.click(openButton);
+
+    const dialog = screen.getByRole("dialog", { name: "Mermaid 图全屏查看" });
+    const canvas = screen.getByLabelText("Mermaid 图查看区域");
+    const diagram = within(dialog).getByRole("img", { name: "Mermaid 图" });
+    expect(canvas).toHaveAttribute("tabindex", "0");
+    expect(canvas).toHaveClass("is-fit");
+    expect(diagram.style.width).toBe("100%");
+    expect(diagram.style.getPropertyPriority("width")).toBe("important");
+    expect(mermaidMock.render).toHaveBeenCalledTimes(1);
+    expect(onContentSettled).toHaveBeenCalledTimes(1);
+    expect(within(dialog).getByRole("button", {
+      name: "关闭 Mermaid 图全屏查看",
+    })).toHaveFocus();
+
+    fireEvent.click(within(dialog).getByRole("button", {
+      name: "按原始大小查看 Mermaid 图",
+    }));
+    expect(canvas).toHaveClass("is-actual");
+    expect(diagram.style.width).toBe("2400px");
+    expect(diagram.style.maxWidth).toBe("none");
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", {
+      name: "Mermaid 图全屏查看",
+    })).not.toBeInTheDocument());
+    expect(openButton).toHaveFocus();
+    expect(container.querySelector(".mermaid-diagram-viewport svg"))
+      .toBe(diagram);
     expect(onContentSettled).toHaveBeenCalledTimes(1);
   });
 
