@@ -17,6 +17,7 @@ import {
   type ConversationHistoryMessage,
   type ConversationRoleSnapshot,
   type ConversationSummary,
+  type CustomProviderSnapshot,
   type PublicState,
   type RoleTemplate,
   type ServerEvent,
@@ -10934,5 +10935,256 @@ describe("App", () => {
 
     expect(screen.queryByRole("region", { name: "等待处理的消息" }))
       .not.toBeInTheDocument();
+  });
+});
+
+function customProviderSnapshot(
+  overrides: Partial<CustomProviderSnapshot> = {},
+): CustomProviderSnapshot {
+  return {
+    id: "local-qwen",
+    baseUrl: "http://127.0.0.1:11434/v1",
+    api: "openai-completions",
+    storedAuth: "none",
+    authEnvNames: [],
+    models: [{
+      id: "qwen2.5:7b",
+      contextWindow: 32_768,
+      maxTokens: 4_096,
+      reasoning: false,
+      input: ["text"],
+      extraFields: [],
+    }],
+    extraFields: [],
+    editable: true,
+    builtinOverride: false,
+    ...overrides,
+  };
+}
+
+function openCustomProviderSettings() {
+  fireEvent.click(screen.getByRole("button", { name: "设置" }));
+  fireEvent.click(screen.getByRole("button", { name: "打开自定义提供商设置" }));
+}
+
+describe("App custom providers", () => {
+  it("re-requests the snapshot on the surviving StrictMode connection", () => {
+    render(<StrictMode><App /></StrictMode>);
+    const refreshes = socketMock.send.mock.calls
+      .map(([command]) => command)
+      .filter((command) => command.type === "refresh_custom_providers");
+    expect(refreshes).toHaveLength(2);
+  });
+
+  it("refreshes after hello, saves with the snapshotted revision, and deletes with the broadcast revision", () => {
+    startFocusReplacementProject();
+    const initialRefresh = latestCommand("refresh_custom_providers");
+    act(() => socketMock.rawEmit?.({
+      type: "custom_providers_snapshot",
+      revision: "absent",
+      providers: [],
+      truncated: false,
+      commandId: initialRefresh.commandId,
+    }));
+
+    openCustomProviderSettings();
+    const pageRefresh = latestCommand("refresh_custom_providers");
+    expect(pageRefresh.commandId).not.toBe(initialRefresh.commandId);
+    act(() => socketMock.rawEmit?.({
+      type: "custom_providers_snapshot",
+      revision: "rev-1",
+      providers: [],
+      truncated: false,
+      commandId: pageRefresh.commandId,
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: "新建提供商" }));
+    fireEvent.change(screen.getByLabelText("提供商 id"), {
+      target: { value: "local-qwen" },
+    });
+    fireEvent.change(screen.getByLabelText("Base URL"), {
+      target: { value: "http://127.0.0.1:11434/v1" },
+    });
+    fireEvent.change(screen.getByLabelText("模型 id"), {
+      target: { value: "qwen2.5:7b" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    const save = latestCommand("save_custom_provider");
+    expect(save.expectedRevision).toBe("rev-1");
+    expect(save.provider).toMatchObject({
+      id: "local-qwen",
+      baseUrl: "http://127.0.0.1:11434/v1",
+      api: "openai-completions",
+      auth: { kind: "local" },
+      models: [{ id: "qwen2.5:7b", reasoning: false, input: ["text"] }],
+    });
+    expect(screen.getByRole("button", { name: "正在保存…" })).toBeDisabled();
+    expect(screen.getByLabelText("提供商 id")).toBeDisabled();
+
+    act(() => socketMock.rawEmit?.({
+      type: "custom_providers_snapshot",
+      revision: "rev-2",
+      providers: [customProviderSnapshot({ name: "Local Qwen" })],
+      truncated: false,
+      commandId: save.commandId,
+    }));
+    expect(screen.getByText("自定义提供商已保存。")).toBeInTheDocument();
+    expect(screen.queryByLabelText("提供商 id")).not.toBeInTheDocument();
+    expect(screen.getByText("Local Qwen")).toBeInTheDocument();
+    expect(screen.getByText("id：local-qwen")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+    const remove = latestCommand("delete_custom_provider");
+    expect(remove.expectedRevision).toBe("rev-2");
+    expect(remove.providerId).toBe("local-qwen");
+
+    act(() => socketMock.rawEmit?.({
+      type: "custom_providers_snapshot",
+      revision: "rev-3",
+      providers: [],
+      truncated: false,
+      commandId: remove.commandId,
+    }));
+    expect(screen.getByText("自定义提供商已删除。")).toBeInTheDocument();
+    expect(screen.queryByText("Local Qwen")).not.toBeInTheDocument();
+  });
+
+  it("probes a custom provider endpoint and fills the model rows", () => {
+    startFocusReplacementProject();
+    const initialRefresh = latestCommand("refresh_custom_providers");
+    act(() => socketMock.rawEmit?.({
+      type: "custom_providers_snapshot",
+      revision: "rev-1",
+      providers: [customProviderSnapshot()],
+      truncated: false,
+      commandId: initialRefresh.commandId,
+    }));
+
+    openCustomProviderSettings();
+    const pageRefresh = latestCommand("refresh_custom_providers");
+    act(() => socketMock.rawEmit?.({
+      type: "custom_providers_snapshot",
+      revision: "rev-1",
+      providers: [customProviderSnapshot()],
+      truncated: false,
+      commandId: pageRefresh.commandId,
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+    fireEvent.click(screen.getByRole("button", { name: "从端点拉取模型列表" }));
+    const probe = latestCommand("probe_custom_provider_models");
+    expect(probe.baseUrl).toBe("http://127.0.0.1:11434/v1");
+
+    act(() => socketMock.rawEmit?.({
+      type: "custom_provider_models_probe",
+      commandId: probe.commandId,
+      baseUrl: probe.baseUrl,
+      models: [
+        { id: "qwen2.5:7b", name: "Qwen 7B" },
+        { id: "qwen2.5-coder", contextWindow: 32_768 },
+      ],
+      truncated: false,
+    }));
+    expect(screen.getAllByLabelText("模型 id").map(
+      (input) => (input as HTMLInputElement).value,
+    )).toEqual(["qwen2.5:7b", "qwen2.5-coder"]);
+  });
+
+  it("keeps a failed custom provider save retryable with the typed form", () => {
+    startFocusReplacementProject();
+    const initialRefresh = latestCommand("refresh_custom_providers");
+    act(() => socketMock.rawEmit?.({
+      type: "custom_providers_snapshot",
+      revision: "rev-1",
+      providers: [],
+      truncated: false,
+      commandId: initialRefresh.commandId,
+    }));
+
+    openCustomProviderSettings();
+    const pageRefresh = latestCommand("refresh_custom_providers");
+    act(() => socketMock.rawEmit?.({
+      type: "custom_providers_snapshot",
+      revision: "rev-1",
+      providers: [],
+      truncated: false,
+      commandId: pageRefresh.commandId,
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: "新建提供商" }));
+    fireEvent.change(screen.getByLabelText("提供商 id"), {
+      target: { value: "local-qwen" },
+    });
+    fireEvent.change(screen.getByLabelText("Base URL"), {
+      target: { value: "http://127.0.0.1:11434/v1" },
+    });
+    fireEvent.change(screen.getByLabelText("模型 id"), {
+      target: { value: "qwen2.5:7b" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    const save = latestCommand("save_custom_provider");
+
+    act(() => socketMock.rawEmit?.({
+      type: "error",
+      scope: "settings",
+      operation: "save_custom_provider",
+      commandId: save.commandId,
+      message: "models.json 已被外部修改",
+    }));
+    expect(screen.getByText(/models\.json 已被外部修改/)).toBeInTheDocument();
+    expect(screen.getByLabelText("提供商 id")).toHaveValue("local-qwen");
+    const retrySave = screen.getByRole("button", { name: "保存" });
+    expect(retrySave).toBeEnabled();
+    fireEvent.click(retrySave);
+    expect(socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "save_custom_provider",
+    )).toHaveLength(2);
+  });
+
+  it("surfaces custom provider read failures on HOME and in the page", () => {
+    startFocusReplacementProject();
+    const initialRefresh = latestCommand("refresh_custom_providers");
+    act(() => socketMock.rawEmit?.({
+      type: "error",
+      scope: "command",
+      operation: "refresh_custom_providers",
+      commandId: initialRefresh.commandId,
+      message: "服务正在重新加载，暂不接受新的设置修改",
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    expect(screen.getByRole("button", { name: "打开自定义提供商设置" }))
+      .toHaveTextContent("读取失败");
+
+    fireEvent.click(screen.getByRole("button", { name: "打开自定义提供商设置" }));
+    const pageRefresh = latestCommand("refresh_custom_providers");
+    expect(pageRefresh.commandId).not.toBe(initialRefresh.commandId);
+    expect(screen.getByText("正在读取模型配置…")).toBeInTheDocument();
+
+    act(() => socketMock.rawEmit?.({
+      type: "custom_providers_snapshot",
+      revision: "absent",
+      providers: [],
+      error: "models.json 无法解析",
+      truncated: false,
+      commandId: pageRefresh.commandId,
+    }));
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "读取本机 models.json 失败：models.json 无法解析",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "重试读取" }));
+    const retry = latestCommand("refresh_custom_providers");
+    expect(retry.commandId).not.toBe(pageRefresh.commandId);
+
+    act(() => socketMock.rawEmit?.({
+      type: "custom_providers_snapshot",
+      revision: "rev-1",
+      providers: [],
+      truncated: false,
+      commandId: retry.commandId,
+    }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });

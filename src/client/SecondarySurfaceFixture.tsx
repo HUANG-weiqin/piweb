@@ -215,10 +215,21 @@ function DrawerSurface({ page = "home" }: {
       colorSchemePending={false}
       colorSchemeUnsaved={false}
       colorSchemeError=""
+      customProviders={undefined}
+      customProvidersRefreshing={false}
+      customProvidersRefreshError=""
+      customProviderMutationPending={false}
+      customProviderMutationResult={undefined}
+      customProviderProbePending={false}
+      customProviderProbeResult={undefined}
       settingResults={{}}
       onClose={() => setOpen(false)}
       onColorSchemeChange={noOp}
       onRetryColorScheme={noOp}
+      onRefreshCustomProviders={noOp}
+      onSaveCustomProvider={() => undefined}
+      onDeleteCustomProvider={() => undefined}
+      onProbeCustomProviderModels={() => undefined}
       onKey={() => undefined}
       onOAuth={noOp}
       onLogout={noOp}

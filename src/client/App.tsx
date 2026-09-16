@@ -18,6 +18,7 @@ import {
   type ConversationImageLocator,
   type ConversationRoleSnapshot,
   type ConversationSummary,
+  type CustomProviderSaveInput,
   type DirectoryListing,
   type LoopList,
   type PublicState,
@@ -38,6 +39,9 @@ import { AuthDialog } from "./components/AuthDialog";
 import { Chat } from "./components/Chat";
 import {
   SettingsDrawer,
+  type CustomProviderMutationResult,
+  type CustomProviderProbeResult,
+  type CustomProvidersView,
   type SettingOperationResult,
   type SettingOperationResults,
 } from "./components/SettingsDrawer";
@@ -425,6 +429,22 @@ interface PendingColorScheme {
   colorScheme: ColorScheme;
 }
 
+interface PendingCustomProvidersRefresh {
+  commandId: string;
+  /** 命令标识只在接收它的连接上有意义；失效连接不能阻住新连接的重读。 */
+  socket: PiSocket;
+}
+
+interface PendingCustomProviderMutation {
+  commandId: string;
+  operation: "save_custom_provider" | "delete_custom_provider";
+}
+
+interface PendingCustomProviderProbe {
+  commandId: string;
+  baseUrl: string;
+}
+
 type ConversationSnapshotEvent = Extract<
   ServerEvent,
   { type: "conversation_snapshot" }
@@ -770,6 +790,48 @@ export function App() {
   const updatePendingColorScheme = (pending: PendingColorScheme | undefined) => {
     pendingColorSchemeRef.current = pending;
     setPendingColorSchemeState(pending);
+  };
+  const [customProviders, setCustomProviders] = useState<CustomProvidersView>();
+  const pendingCustomProvidersRefreshRef = useRef<
+    PendingCustomProvidersRefresh | undefined
+  >(undefined);
+  const [customProvidersRefreshing, setCustomProvidersRefreshing] = useState(false);
+  const [customProvidersRefreshError, setCustomProvidersRefreshError] = useState("");
+  const pendingCustomProviderMutationRef = useRef<
+    PendingCustomProviderMutation | undefined
+  >(undefined);
+  const [customProviderMutationPending, setCustomProviderMutationPending] = useState(false);
+  const [customProviderMutationResult, setCustomProviderMutationResult] =
+    useState<CustomProviderMutationResult>();
+  const pendingCustomProviderProbeRef = useRef<
+    PendingCustomProviderProbe | undefined
+  >(undefined);
+  const [customProviderProbePending, setCustomProviderProbePending] = useState(false);
+  const [customProviderProbeResult, setCustomProviderProbeResult] =
+    useState<CustomProviderProbeResult>();
+  const updatePendingCustomProviderMutation = (
+    pending: PendingCustomProviderMutation | undefined,
+  ) => {
+    pendingCustomProviderMutationRef.current = pending;
+    setCustomProviderMutationPending(Boolean(pending));
+  };
+  const updatePendingCustomProviderProbe = (
+    pending: PendingCustomProviderProbe | undefined,
+  ) => {
+    pendingCustomProviderProbeRef.current = pending;
+    setCustomProviderProbePending(Boolean(pending));
+  };
+  const beginCustomProvidersRefresh = (socket: PiSocket) => {
+    if (pendingCustomProvidersRefreshRef.current?.socket === socket) return;
+    const commandId = crypto.randomUUID();
+    pendingCustomProvidersRefreshRef.current = { commandId, socket };
+    setCustomProvidersRefreshing(true);
+    setCustomProvidersRefreshError("");
+    if (!socket.send({ type: "refresh_custom_providers", commandId })) {
+      pendingCustomProvidersRefreshRef.current = undefined;
+      setCustomProvidersRefreshing(false);
+      setCustomProvidersRefreshError("本地服务未连接；无法读取本机模型配置。");
+    }
   };
   const visibleColorScheme = unsavedColorScheme ?? committedColorScheme;
   useLayoutEffect(() => {
@@ -1784,6 +1846,7 @@ export function App() {
         hasCompletedInitialHandshakeRef.current = true;
         setProtocolReady(true);
         setSetupCwd((current) => current || event.startupCwd);
+        beginCustomProvidersRefresh(socket);
         if (activeCwdRef.current) {
           const activeWorkspaceKey = currentWorkspaceKey();
           const reconnectFocus = focusRef.current;
@@ -1921,6 +1984,41 @@ export function App() {
         } else {
           setColorSchemeSaveError("服务端确认的配色与本地预览不同；请重试。");
         }
+      } else if (event.type === "custom_providers_snapshot") {
+        setCustomProviders({
+          revision: event.revision,
+          providers: event.providers,
+          error: event.error ?? "",
+          truncated: event.truncated,
+        });
+        if (!event.commandId) return;
+        const pendingRefresh = pendingCustomProvidersRefreshRef.current;
+        if (pendingRefresh?.commandId === event.commandId) {
+          pendingCustomProvidersRefreshRef.current = undefined;
+          setCustomProvidersRefreshing(false);
+          setCustomProvidersRefreshError("");
+          return;
+        }
+        const pendingMutation = pendingCustomProviderMutationRef.current;
+        if (!pendingMutation || pendingMutation.commandId !== event.commandId) return;
+        updatePendingCustomProviderMutation(undefined);
+        setCustomProviderMutationResult({
+          ok: true,
+          message: pendingMutation.operation === "delete_custom_provider"
+            ? "自定义提供商已删除。"
+            : "自定义提供商已保存。",
+        });
+      } else if (event.type === "custom_provider_models_probe") {
+        const pending = pendingCustomProviderProbeRef.current;
+        if (!pending || pending.commandId !== event.commandId) return;
+        updatePendingCustomProviderProbe(undefined);
+        setCustomProviderProbeResult({
+          commandId: event.commandId,
+          baseUrl: event.baseUrl,
+          models: event.models,
+          truncated: event.truncated,
+          error: "",
+        });
       } else if (event.type === "directory_listing") {
         const current = directoryBrowserRef.current;
         if (!current || event.commandId !== current.commandId) return;
@@ -2820,6 +2918,44 @@ export function App() {
           setColorSchemeSaveError(`配色未保存：${event.message}`);
           return;
         }
+        if (
+          event.commandId
+          && (
+            event.operation === "save_custom_provider"
+            || event.operation === "delete_custom_provider"
+          )
+        ) {
+          const pending = pendingCustomProviderMutationRef.current;
+          if (!pending || pending.commandId !== event.commandId) return;
+          updatePendingCustomProviderMutation(undefined);
+          setCustomProviderMutationResult({
+            ok: false,
+            message: event.message
+              || (pending.operation === "delete_custom_provider" ? "删除失败" : "保存失败"),
+          });
+          return;
+        }
+        if (event.operation === "probe_custom_provider_models" && event.commandId) {
+          const pending = pendingCustomProviderProbeRef.current;
+          if (!pending || pending.commandId !== event.commandId) return;
+          updatePendingCustomProviderProbe(undefined);
+          setCustomProviderProbeResult({
+            commandId: event.commandId,
+            baseUrl: pending.baseUrl,
+            models: [],
+            truncated: false,
+            error: event.message || "拉取模型列表失败",
+          });
+          return;
+        }
+        if (event.operation === "refresh_custom_providers" && event.commandId) {
+          const pending = pendingCustomProvidersRefreshRef.current;
+          if (!pending || pending.commandId !== event.commandId) return;
+          pendingCustomProvidersRefreshRef.current = undefined;
+          setCustomProvidersRefreshing(false);
+          setCustomProvidersRefreshError(`读取本机模型配置失败：${event.message}`);
+          return;
+        }
         if (event.sessionId && event.sessionId !== sessionIdRef.current) return;
         if (
           event.operation === "rename_conversation"
@@ -3215,6 +3351,32 @@ export function App() {
           updatePendingColorScheme(undefined);
           setColorSchemeSaveError("连接已断开，无法确认配色是否保存；重连后请重试。");
         }
+        if (pendingCustomProvidersRefreshRef.current) {
+          pendingCustomProvidersRefreshRef.current = undefined;
+          setCustomProvidersRefreshing(false);
+          setCustomProvidersRefreshError(
+            "连接已断开，未能读取本机模型配置；重连后请重试。",
+          );
+        }
+        const pendingCustomProviderMutation = pendingCustomProviderMutationRef.current;
+        if (pendingCustomProviderMutation) {
+          updatePendingCustomProviderMutation(undefined);
+          setCustomProviderMutationResult({
+            ok: false,
+            message: "连接已断开，保存结果未确认；重连后请检查 models.json 或重试。",
+          });
+        }
+        const pendingCustomProviderProbe = pendingCustomProviderProbeRef.current;
+        if (pendingCustomProviderProbe) {
+          updatePendingCustomProviderProbe(undefined);
+          setCustomProviderProbeResult({
+            commandId: pendingCustomProviderProbe.commandId,
+            baseUrl: pendingCustomProviderProbe.baseUrl,
+            models: [],
+            truncated: false,
+            error: "连接已断开，模型列表未确认；重连后请重试。",
+          });
+        }
         updateDirectoryBrowser(undefined);
         markPendingPromptUnconfirmed();
         const pendingRoleOperation = pendingRoleOperationRef.current;
@@ -3387,6 +3549,120 @@ export function App() {
       updatePendingColorScheme(undefined);
       setColorSchemeSaveError("配色已在本地预览，但尚未保存；请重试。");
     }
+  };
+  const refreshCustomProviders = () => {
+    const socket = socketRef.current;
+    if (!protocolReady || !transportOnline || !socket) {
+      setCustomProvidersRefreshing(false);
+      setCustomProvidersRefreshError("本地服务未连接；无法读取本机模型配置，重连后请重试。");
+      return;
+    }
+    beginCustomProvidersRefresh(socket);
+  };
+  const customProviderCommandPending = () => (
+    Boolean(pendingCustomProviderMutationRef.current)
+    || Boolean(pendingCustomProviderProbeRef.current)
+  );
+  const saveCustomProvider = (
+    provider: CustomProviderSaveInput,
+  ): string | undefined => {
+    const revision = customProviders?.revision;
+    if (!revision) {
+      setCustomProviderMutationResult({
+        ok: false,
+        message: "尚未读取本机模型配置；请先读取最新配置再保存。",
+      });
+      return undefined;
+    }
+    if (customProviderCommandPending()) return undefined;
+    if (!protocolReady || !transportOnline) {
+      setCustomProviderMutationResult({
+        ok: false,
+        message: "本地服务未连接；配置未保存，重连后请重试。",
+      });
+      return undefined;
+    }
+    const commandId = crypto.randomUUID();
+    updatePendingCustomProviderMutation({
+      commandId,
+      operation: "save_custom_provider",
+    });
+    setCustomProviderMutationResult(undefined);
+    if (!socketRef.current?.send({
+      type: "save_custom_provider",
+      commandId,
+      expectedRevision: revision,
+      provider,
+    })) {
+      updatePendingCustomProviderMutation(undefined);
+      setCustomProviderMutationResult({
+        ok: false,
+        message: "本地服务未连接；配置未保存，请重试。",
+      });
+      return undefined;
+    }
+    return commandId;
+  };
+  const deleteCustomProvider = (providerId: string): string | undefined => {
+    const revision = customProviders?.revision;
+    if (!revision) {
+      setCustomProviderMutationResult({
+        ok: false,
+        message: "尚未读取本机模型配置；请先读取最新配置再删除。",
+      });
+      return undefined;
+    }
+    if (customProviderCommandPending()) return undefined;
+    if (!protocolReady || !transportOnline) {
+      setCustomProviderMutationResult({
+        ok: false,
+        message: "本地服务未连接；未删除，重连后请重试。",
+      });
+      return undefined;
+    }
+    const commandId = crypto.randomUUID();
+    updatePendingCustomProviderMutation({
+      commandId,
+      operation: "delete_custom_provider",
+    });
+    setCustomProviderMutationResult(undefined);
+    if (!socketRef.current?.send({
+      type: "delete_custom_provider",
+      commandId,
+      expectedRevision: revision,
+      providerId,
+    })) {
+      updatePendingCustomProviderMutation(undefined);
+      setCustomProviderMutationResult({
+        ok: false,
+        message: "本地服务未连接；未删除，请重试。",
+      });
+      return undefined;
+    }
+    return commandId;
+  };
+  const probeCustomProviderModels = (baseUrl: string): string | undefined => {
+    if (customProviderCommandPending()) return undefined;
+    if (!protocolReady || !transportOnline) return undefined;
+    const commandId = crypto.randomUUID();
+    updatePendingCustomProviderProbe({ commandId, baseUrl });
+    setCustomProviderProbeResult(undefined);
+    if (!socketRef.current?.send({
+      type: "probe_custom_provider_models",
+      commandId,
+      baseUrl,
+    })) {
+      updatePendingCustomProviderProbe(undefined);
+      setCustomProviderProbeResult({
+        commandId,
+        baseUrl,
+        models: [],
+        truncated: false,
+        error: "本地服务未连接；无法拉取模型列表。",
+      });
+      return undefined;
+    }
+    return commandId;
   };
   const openImage = useCallback(({
     messageId,
@@ -5238,6 +5514,13 @@ export function App() {
       colorSchemePending={Boolean(pendingColorScheme)}
       colorSchemeUnsaved={Boolean(unsavedColorScheme)}
       colorSchemeError={colorSchemeSaveError}
+      customProviders={customProviders}
+      customProvidersRefreshing={customProvidersRefreshing}
+      customProvidersRefreshError={customProvidersRefreshError}
+      customProviderMutationPending={customProviderMutationPending}
+      customProviderMutationResult={customProviderMutationResult}
+      customProviderProbePending={customProviderProbePending}
+      customProviderProbeResult={customProviderProbeResult}
       settingResults={settingResults}
       onClose={() => {
         setDrawer(false);
@@ -5248,6 +5531,10 @@ export function App() {
         const colorScheme = unsavedColorSchemeRef.current;
         if (colorScheme) saveColorScheme(colorScheme, true);
       }}
+      onRefreshCustomProviders={refreshCustomProviders}
+      onSaveCustomProvider={saveCustomProvider}
+      onDeleteCustomProvider={deleteCustomProvider}
+      onProbeCustomProviderModels={probeCustomProviderModels}
       onKey={(provider, key) => {
         const commandId = crypto.randomUUID();
         const sessionId = sessionIdRef.current;

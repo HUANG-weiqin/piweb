@@ -1,11 +1,19 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import { useState } from "react";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PublicProvider, PublicState } from "../../shared/protocol";
 import {
   SettingsDrawer,
+  type CustomProvidersView,
   type SettingOperationResult,
 } from "./SettingsDrawer";
 
@@ -57,9 +65,20 @@ function settingsProps(overrides: SettingsDrawerTestOverrides = {}) {
         sessionId: settingResult.sessionId ?? props.state?.sessionId ?? state.sessionId,
       },
     } : {}),
+    customProviders: undefined,
+    customProvidersRefreshing: false,
+    customProvidersRefreshError: "",
+    customProviderMutationPending: false,
+    customProviderMutationResult: undefined,
+    customProviderProbePending: false,
+    customProviderProbeResult: undefined,
     onClose: () => undefined,
     onColorSchemeChange: () => undefined,
     onRetryColorScheme: () => undefined,
+    onRefreshCustomProviders: () => undefined,
+    onSaveCustomProvider: () => undefined,
+    onDeleteCustomProvider: () => undefined,
+    onProbeCustomProviderModels: () => undefined,
     onKey: () => commandId,
     onOAuth: () => undefined,
     onLogout: () => undefined,
@@ -825,5 +844,366 @@ describe("SettingsDrawer", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "刷新模型" }));
     expect(refresh).toHaveBeenCalledOnce();
+  });
+});
+
+const probeCommandId = "2b0f4fcb-7c62-49e5-92ca-6f8b6af0aab2";
+
+function customProvidersView(
+  overrides: Partial<CustomProvidersView> = {},
+): CustomProvidersView {
+  return {
+    revision: "rev-1",
+    providers: [
+      {
+        id: "local-llama",
+        name: "Local Llama",
+        baseUrl: "http://127.0.0.1:8065/v1",
+        api: "openai-completions",
+        storedAuth: "none",
+        authEnvNames: [],
+        models: [{
+          id: "llama-3.1-8b",
+          name: "Llama 3.1 8B",
+          contextWindow: 131_072,
+          maxTokens: 8_192,
+          reasoning: false,
+          input: ["text"],
+          extraFields: [],
+        }],
+        extraFields: [],
+        editable: true,
+        builtinOverride: false,
+      },
+      {
+        id: "vendor:legacy",
+        name: "Legacy",
+        baseUrl: "http://127.0.0.1:9000/v1",
+        api: "anthropic-messages",
+        storedAuth: "literal",
+        authEnvNames: [],
+        models: [],
+        extraFields: ["headers"],
+        editable: false,
+        builtinOverride: false,
+      },
+      {
+        id: "anthropic",
+        name: "Anthropic",
+        baseUrl: "https://api.anthropic.com",
+        api: "anthropic-messages",
+        storedAuth: "env",
+        authEnvNames: ["ANTHROPIC_API_KEY"],
+        models: [],
+        extraFields: [],
+        editable: true,
+        builtinOverride: true,
+      },
+    ],
+    error: "",
+    truncated: false,
+    ...overrides,
+  };
+}
+
+function openCustomProviders(
+  view: CustomProvidersView | undefined,
+  overrides: SettingsDrawerTestOverrides = {},
+) {
+  const rendered = renderSettings({ customProviders: view, ...overrides });
+  fireEvent.click(screen.getByRole("button", { name: "打开自定义提供商设置" }));
+  return rendered;
+}
+
+function providerEntry(name: string): HTMLElement {
+  const entry = screen.getAllByRole("article").find((element) => (
+    element.textContent?.includes(name)
+  ));
+  if (!entry) throw new Error(`provider entry ${name} not found`);
+  return entry;
+}
+
+describe("SettingsDrawer custom providers", () => {
+  it("shows a HOME row with the custom provider summary", () => {
+    renderSettings({ customProviders: customProvidersView() });
+    expect(screen.getByRole("button", { name: "打开自定义提供商设置" }))
+      .toHaveTextContent("3 个自定义提供商 · 已保存");
+
+    cleanup();
+    renderSettings({
+      customProviders: customProvidersView(),
+      preferencesOnline: false,
+    });
+    expect(screen.getByRole("button", { name: "打开自定义提供商设置" }))
+      .toHaveTextContent("离线 · 3 个自定义提供商");
+  });
+
+  it("reads the latest snapshot when the page opens and renders provider rows", () => {
+    const refresh = vi.fn();
+    openCustomProviders(customProvidersView(), {
+      onRefreshCustomProviders: refresh,
+    });
+    expect(refresh).toHaveBeenCalledOnce();
+
+    const local = providerEntry("Local Llama");
+    expect(within(local).getByText("id：local-llama")).toBeInTheDocument();
+    expect(local).toHaveTextContent("Base URL：http://127.0.0.1:8065/v1");
+    expect(local).toHaveTextContent("模型：1 个");
+    expect(local).toHaveTextContent("密钥：未写入密钥");
+
+    const legacy = providerEntry("Legacy");
+    expect(legacy).toHaveTextContent("密钥：文件内已写入字面量密钥");
+    expect(legacy).toHaveTextContent("该条目含表单不支持的字段，请直接编辑文件。");
+    expect(legacy).toHaveTextContent("表单未管理的字段：headers");
+    expect(within(legacy).getByRole("button", { name: "编辑" })).toBeDisabled();
+    expect(within(legacy).getByRole("button", { name: "删除" })).toBeDisabled();
+
+    const builtin = providerEntry("anthropic");
+    expect(builtin).toHaveTextContent("内置覆盖");
+    expect(builtin).toHaveTextContent(
+      "该 id 同时是内置提供商；表单不能覆盖它，请直接编辑文件。",
+    );
+    expect(builtin).toHaveTextContent("密钥：环境变量 $ANTHROPIC_API_KEY");
+  });
+
+  it("renders the read error and truncation banners with a retry", () => {
+    const refresh = vi.fn();
+    openCustomProviders(customProvidersView({
+      error: "models.json 不是合法 JSON",
+      truncated: true,
+    }), { onRefreshCustomProviders: refresh });
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "读取本机 models.json 失败：models.json 不是合法 JSON",
+    );
+    expect(screen.getByText(/条目多于可展示上限/)).toBeInTheDocument();
+    expect(refresh).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "重试读取" }));
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it("edits an existing provider and saves the exact payload", () => {
+    const save = vi.fn(() => commandId);
+    openCustomProviders(customProvidersView(), { onSaveCustomProvider: save });
+    fireEvent.click(within(providerEntry("Local Llama"))
+      .getByRole("button", { name: "编辑" }));
+
+    expect(screen.getByLabelText("提供商 id")).toBeDisabled();
+    expect(screen.getByLabelText("提供商 id")).toHaveValue("local-llama");
+    expect(screen.getByRole("radio", { name: "保持不变" })).toBeChecked();
+
+    fireEvent.change(screen.getByLabelText("显示名"), {
+      target: { value: "本地 Llama" },
+    });
+    fireEvent.click(screen.getByLabelText("支持推理"));
+    fireEvent.click(screen.getByLabelText("图片输入"));
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(save).toHaveBeenCalledWith({
+      id: "local-llama",
+      name: "本地 Llama",
+      baseUrl: "http://127.0.0.1:8065/v1",
+      api: "openai-completions",
+      auth: { kind: "keep" },
+      models: [{
+        id: "llama-3.1-8b",
+        name: "Llama 3.1 8B",
+        contextWindow: 131_072,
+        maxTokens: 8_192,
+        reasoning: true,
+        input: ["text", "image"],
+      }],
+    });
+  });
+
+  it("validates a new provider before calling save", () => {
+    const save = vi.fn(() => commandId);
+    openCustomProviders(customProvidersView(), { onSaveCustomProvider: save });
+    fireEvent.click(screen.getByRole("button", { name: "新建提供商" }));
+
+    expect(screen.queryByRole("radio", { name: "保持不变" }))
+      .not.toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "本地服务无需鉴权（写入占位值）" }))
+      .toBeChecked();
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(save).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent("提供商 id");
+
+    fireEvent.change(screen.getByLabelText("提供商 id"), {
+      target: { value: "本地 模型" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(save).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText("提供商 id"), {
+      target: { value: "local-qwen" },
+    });
+    fireEvent.change(screen.getByLabelText("Base URL"), {
+      target: { value: "not-a-url" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(save).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent("Base URL");
+
+    fireEvent.change(screen.getByLabelText("Base URL"), {
+      target: { value: "http://127.0.0.1:11434/v1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(save).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent("至少需要填写一个模型");
+
+    fireEvent.change(screen.getByLabelText("模型 id"), {
+      target: { value: "qwen2.5:7b" },
+    });
+    fireEvent.change(screen.getByLabelText("上下文窗口"), {
+      target: { value: "three" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(save).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent("上下文窗口必须是正整数");
+
+    fireEvent.change(screen.getByLabelText("上下文窗口"), {
+      target: { value: "32768" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(save).toHaveBeenCalledWith({
+      id: "local-qwen",
+      baseUrl: "http://127.0.0.1:11434/v1",
+      api: "openai-completions",
+      auth: { kind: "local" },
+      models: [{
+        id: "qwen2.5:7b",
+        contextWindow: 32_768,
+        reasoning: false,
+        input: ["text"],
+      }],
+    });
+  });
+
+  it("switches auth kinds and validates the env variable name", () => {
+    const save = vi.fn(() => commandId);
+    openCustomProviders(customProvidersView(), { onSaveCustomProvider: save });
+    fireEvent.click(within(providerEntry("Local Llama"))
+      .getByRole("button", { name: "编辑" }));
+
+    fireEvent.click(screen.getByRole("radio", { name: "环境变量" }));
+    expect(screen.getByLabelText("环境变量名")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("环境变量名"), {
+      target: { value: "1BAD" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(save).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent("环境变量名");
+
+    fireEvent.change(screen.getByLabelText("环境变量名"), {
+      target: { value: "LOCAL_API_KEY" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(save).toHaveBeenLastCalledWith(expect.objectContaining({
+      auth: { kind: "env", envName: "LOCAL_API_KEY" },
+    }));
+
+    fireEvent.click(screen.getByRole("radio", {
+      name: "不写入，改用模型连接里保存的 Key",
+    }));
+    expect(screen.queryByLabelText("环境变量名")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(save).toHaveBeenLastCalledWith(expect.objectContaining({
+      auth: { kind: "credential" },
+    }));
+  });
+
+  it("probes the endpoint and only fills missing model fields", () => {
+    const probe = vi.fn(() => probeCommandId);
+    const rendered = openCustomProviders(customProvidersView(), {
+      onProbeCustomProviderModels: probe,
+    });
+    fireEvent.click(within(providerEntry("Local Llama"))
+      .getByRole("button", { name: "编辑" }));
+    fireEvent.change(screen.getByLabelText("最大输出"), {
+      target: { value: "" },
+    });
+    fireEvent.click(screen.getByRole("button", {
+      name: "从端点拉取模型列表",
+    }));
+    expect(probe).toHaveBeenCalledWith("http://127.0.0.1:8065/v1");
+
+    rendered.rerender(<SettingsDrawer {...settingsProps({
+      customProviders: customProvidersView(),
+      customProviderProbePending: true,
+      onProbeCustomProviderModels: probe,
+    })} />);
+    expect(screen.getByRole("button", { name: "正在拉取模型列表…" }))
+      .toBeDisabled();
+
+    rendered.rerender(<SettingsDrawer {...settingsProps({
+      customProviders: customProvidersView(),
+      customProviderProbeResult: {
+        commandId: probeCommandId,
+        baseUrl: "http://127.0.0.1:8065/v1",
+        models: [{
+          id: "llama-3.1-8b",
+          name: "Probed Llama",
+          contextWindow: 256_000,
+          maxTokens: 4_096,
+          reasoning: true,
+          input: ["text", "image"],
+        }, {
+          id: "qwen2.5-coder",
+          name: "Qwen Coder",
+          contextWindow: 32_768,
+        }],
+        truncated: true,
+        error: "",
+      },
+      onProbeCustomProviderModels: probe,
+    })} />);
+
+    expect(screen.getAllByLabelText("最大输出")[0]).toHaveValue("4096");
+    expect(screen.getAllByLabelText("上下文窗口")[0]).toHaveValue("131072");
+    expect(screen.getAllByLabelText("支持推理")[0]).toBeChecked();
+    expect(screen.getByRole("status"))
+      .toHaveTextContent("端点返回的模型多于上限");
+    expect(screen.getAllByLabelText("模型 id").map(
+      (input) => (input as HTMLInputElement).value,
+    )).toEqual(["llama-3.1-8b", "qwen2.5-coder"]);
+    expect(screen.getAllByLabelText("模型名称").map(
+      (input) => (input as HTMLInputElement).value,
+    )).toEqual(["Llama 3.1 8B", "Qwen Coder"]);
+  });
+
+  it("confirms before deleting a provider", () => {
+    const remove = vi.fn(() => commandId);
+    openCustomProviders(customProvidersView(), { onDeleteCustomProvider: remove });
+
+    fireEvent.click(within(providerEntry("Local Llama"))
+      .getByRole("button", { name: "删除" }));
+    expect(remove).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent("此操作无法撤销");
+
+    fireEvent.click(screen.getByRole("button", { name: "保留" }));
+    expect(remove).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "确认删除" }))
+      .not.toBeInTheDocument();
+
+    fireEvent.click(within(providerEntry("Local Llama"))
+      .getByRole("button", { name: "删除" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+    expect(remove).toHaveBeenCalledWith("local-llama");
+    expect(screen.queryByRole("button", { name: "确认删除" }))
+      .not.toBeInTheDocument();
+  });
+
+  it("keeps the page read-only while offline", () => {
+    openCustomProviders(customProvidersView(), { preferencesOnline: false });
+
+    expect(screen.getByText(/本机服务离线/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "新建提供商" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "读取最新配置" })).toBeDisabled();
+    expect(within(providerEntry("Local Llama"))
+      .getByRole("button", { name: "编辑" })).toBeDisabled();
+    expect(within(providerEntry("Local Llama"))
+      .getByRole("button", { name: "删除" })).toBeDisabled();
   });
 });

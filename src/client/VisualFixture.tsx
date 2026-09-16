@@ -573,6 +573,13 @@ export function VisualFixture({
       colorSchemePending={false}
       colorSchemeUnsaved={false}
       colorSchemeError=""
+      customProviders={undefined}
+      customProvidersRefreshing={false}
+      customProvidersRefreshError=""
+      customProviderMutationPending={false}
+      customProviderMutationResult={undefined}
+      customProviderProbePending={false}
+      customProviderProbeResult={undefined}
       settingResults={{}}
       onClose={() => {
         setSettingsOpen(false);
@@ -580,6 +587,10 @@ export function VisualFixture({
       }}
       onColorSchemeChange={noOp}
       onRetryColorScheme={noOp}
+      onRefreshCustomProviders={noOp}
+      onSaveCustomProvider={() => undefined}
+      onDeleteCustomProvider={() => undefined}
+      onProbeCustomProviderModels={() => undefined}
       onKey={() => undefined}
       onOAuth={noOp}
       onLogout={noOp}
