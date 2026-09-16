@@ -9,8 +9,186 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import DOMPurify, { type ElementHook } from "dompurify";
-import { marked, type Tokens } from "marked";
+import katex, { type KatexOptions } from "katex";
+import {
+  Marked,
+  Renderer,
+  type MarkedExtension,
+  type Tokens,
+} from "marked";
 import { useModalFocus } from "../lib/use-modal-focus";
+
+const KATEX_OPTIONS = {
+  maxExpand: 1_000,
+  maxSize: 20,
+  strict: "ignore",
+  throwOnError: false,
+  trust: false,
+} satisfies KatexOptions;
+const MAX_KATEX_SOURCE_LENGTH = 20_000;
+const DISPLAY_MATH_OPEN = String.raw`\[`;
+const DISPLAY_MATH_CLOSE = String.raw`\]`;
+const INLINE_MATH_OPEN = String.raw`\(`;
+const INLINE_MATH_CLOSE = String.raw`\)`;
+const DISPLAY_DOLLAR_BLOCK = /^\$\$[\t ]*\n([\s\S]*?)\n\$\$[\t ]*(?:\n|$)/;
+
+interface MathDelimiter {
+  opening: string;
+  closing: string;
+  displayMode: boolean;
+}
+
+const INLINE_MATH_DELIMITERS: readonly MathDelimiter[] = [{
+  opening: DISPLAY_MATH_OPEN,
+  closing: DISPLAY_MATH_CLOSE,
+  displayMode: true,
+}, {
+  opening: INLINE_MATH_OPEN,
+  closing: INLINE_MATH_CLOSE,
+  displayMode: false,
+}, {
+  opening: "$$",
+  closing: "$$",
+  displayMode: true,
+}, {
+  opening: "$",
+  closing: "$",
+  displayMode: false,
+}];
+
+function inlineMathStart(source: string): number | undefined {
+  let earliest: number | undefined;
+  for (const delimiter of [DISPLAY_MATH_OPEN, INLINE_MATH_OPEN, "$"]) {
+    const index = source.indexOf(delimiter);
+    if (index >= 0 && (earliest === undefined || index < earliest)) {
+      earliest = index;
+    }
+  }
+  return earliest;
+}
+
+function isEscapedDelimiter(source: string, index: number): boolean {
+  let precedingBackslashes = 0;
+  for (let offset = index - 1; offset >= 0 && source[offset] === "\\"; offset -= 1) {
+    precedingBackslashes += 1;
+  }
+  return precedingBackslashes % 2 === 1;
+}
+
+function findClosingDelimiter(
+  source: string,
+  delimiter: string,
+  fromIndex: number,
+): number {
+  let index = source.indexOf(delimiter, fromIndex);
+  while (index >= 0 && isEscapedDelimiter(source, index)) {
+    index = source.indexOf(delimiter, index + delimiter.length);
+  }
+  if (index < 0) return -1;
+  if (delimiter === "$" && source[index + 1] === "$") return -1;
+  if (
+    delimiter === "$$"
+    && (source[index - 1] === "$" || source[index + 2] === "$")
+  ) return -1;
+  return index;
+}
+
+function getMathDelimiter(source: string): MathDelimiter | undefined {
+  const delimiter = INLINE_MATH_DELIMITERS.find(({ opening }) => (
+    source.startsWith(opening)
+  ));
+  if (!delimiter) return undefined;
+  if (delimiter.opening === "$$" && source.startsWith("$$$")) return undefined;
+  if (
+    delimiter.opening === "$"
+    && (source[1] === undefined || /\s/u.test(source[1]))
+  ) return undefined;
+  return delimiter;
+}
+
+function tokenizeInlineMath(source: string): Tokens.Generic | undefined {
+  const delimiter = getMathDelimiter(source);
+  if (!delimiter) return undefined;
+  const closingIndex = findClosingDelimiter(
+    source,
+    delimiter.closing,
+    delimiter.opening.length,
+  );
+  if (closingIndex < 0) return undefined;
+
+  const untrimmedText = source.slice(delimiter.opening.length, closingIndex);
+  if (!untrimmedText.trim() || untrimmedText.includes("`")) return undefined;
+  if (
+    delimiter.opening === "$"
+    && (
+      untrimmedText.includes("\n")
+      || /\s$/u.test(untrimmedText)
+      || /[0-9]/u.test(source[closingIndex + 1] ?? "")
+    )
+  ) return undefined;
+
+  return {
+    type: "inlineKatex",
+    raw: source.slice(0, closingIndex + delimiter.closing.length),
+    text: untrimmedText.trim(),
+    displayMode: delimiter.displayMode,
+  };
+}
+
+function tokenizeDisplayDollarBlock(source: string): Tokens.Generic | undefined {
+  const match = DISPLAY_DOLLAR_BLOCK.exec(source);
+  const text = match?.[1]?.trim();
+  if (!match || !text) return undefined;
+  return {
+    type: "blockKatex",
+    raw: match[0],
+    text,
+    displayMode: true,
+  };
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => {
+    switch (character) {
+      case "&": return "&amp;";
+      case "<": return "&lt;";
+      case ">": return "&gt;";
+      case "\"": return "&quot;";
+      default: return "&#39;";
+    }
+  });
+}
+
+function renderKatex(token: Tokens.Generic): string {
+  if (token.text.length > MAX_KATEX_SOURCE_LENGTH) {
+    return escapeHtml(token.raw);
+  }
+  try {
+    return katex.renderToString(token.text, {
+      ...KATEX_OPTIONS,
+      displayMode: token.displayMode,
+    });
+  } catch {
+    return escapeHtml(token.raw);
+  }
+}
+
+const mathExtension: MarkedExtension = {
+  extensions: [{
+    name: "blockKatex",
+    level: "block",
+    tokenizer: tokenizeDisplayDollarBlock,
+    renderer: renderKatex,
+  }, {
+    name: "inlineKatex",
+    level: "inline",
+    start: inlineMathStart,
+    tokenizer: tokenizeInlineMath,
+    renderer: renderKatex,
+  }],
+};
+
+const markdownParser = new Marked(mathExtension);
 
 const MERMAID_MAX_SOURCE_LENGTH = 50_000;
 export const MERMAID_MAX_BLOCKS_PER_CONTENT = 8;
@@ -139,7 +317,7 @@ export function getMermaidSourceAnalysis(markdown: string): {
 } {
   let hasMermaidFence = false;
   const sourceLengths: number[] = [];
-  marked.walkTokens(marked.lexer(markdown), (token) => {
+  markdownParser.walkTokens(markdownParser.lexer(markdown), (token) => {
     if (token.type !== "code" || !isMermaidFence(token as Tokens.Code)) return;
     hasMermaidFence = true;
     const source = (token as Tokens.Code).text.replace(/\n$/, "") + "\n";
@@ -175,7 +353,7 @@ const decorateWebLink: ElementHook = (currentNode) => {
 };
 
 function renderMarkdown(markdown: string, mermaidMarker?: string): string {
-  const renderer = new marked.Renderer();
+  const renderer = new Renderer();
   if (mermaidMarker) {
     const renderCode = renderer.code;
     renderer.code = function renderCodeToken(token) {
@@ -187,7 +365,7 @@ function renderMarkdown(markdown: string, mermaidMarker?: string): string {
   }
   DOMPurify.addHook("afterSanitizeAttributes", decorateWebLink);
   try {
-    return DOMPurify.sanitize(marked.parse(markdown, {
+    return DOMPurify.sanitize(markdownParser.parse(markdown, {
       async: false,
       renderer,
     }) as string);

@@ -524,6 +524,132 @@ describe("Message", () => {
     expect(markdown.querySelector("pre code")).toHaveTextContent("const wideValue = true;");
   });
 
+  it("renders standard inline and display math without changing code literals", () => {
+    const text = [
+      String.raw`行内公式：\(x^2\) 与 $y^2$。`,
+      String.raw`中文相邻：设$x=1$为实数；其解为 $y=2$；`,
+      "",
+      String.raw`\[ \frac{\partial L}{\partial w}=+0.5 \]`,
+      "",
+      "推导如下：",
+      "$$",
+      String.raw`\int_0^1 x\,dx`,
+      "$$",
+      "",
+      String.raw`转义：\\(not math\\) 与 \$100；价格 $10 与 $5；价格 $20/$35。`,
+      String.raw`普通方括号：[ \frac{a}{b} ]`,
+      "",
+      "代码：`\\(not math\\)`",
+      "",
+      "```tex",
+      "\\[not math\\]",
+      "```",
+    ].join("\n");
+    const message: ChatMessage = {
+      id: "math-markdown",
+      runId: "run-math-markdown",
+      role: "assistant",
+      text,
+      thinking: "",
+      tools: [],
+      parts: [{ kind: "text", text }],
+    };
+
+    const { container } = render(<Message message={message} />);
+    const markdown = container.querySelector(".markdown") as HTMLElement;
+    const formulas = markdown.querySelectorAll(".katex");
+    const displays = markdown.querySelectorAll(".katex-display");
+    const code = markdown.querySelectorAll("code");
+
+    expect(formulas).toHaveLength(6);
+    expect(displays).toHaveLength(2);
+    expect(displays[0].querySelector("mfrac")).not.toBeNull();
+    expect(markdown).toHaveTextContent(String.raw`转义：\(not math\) 与 $100；价格 $10 与 $5；价格 $20/$35。`);
+    expect(markdown).toHaveTextContent(String.raw`普通方括号：[ \frac{a}{b} ]`);
+    expect(code[0]).toHaveTextContent(String.raw`\(not math\)`);
+    expect(code[1]).toHaveTextContent(String.raw`\[not math\]`);
+  });
+
+  it("does not let an unmatched math opener consume a later code span", () => {
+    const text = String.raw`未闭合：\( a ` + "`" + String.raw`\)` + "`" + String.raw` b \)`;
+    const message: ChatMessage = {
+      id: "math-before-code",
+      runId: "run-math-before-code",
+      role: "assistant",
+      text,
+      thinking: "",
+      tools: [],
+      parts: [{ kind: "text", text }],
+    };
+
+    const { container } = render(<Message message={message} />);
+
+    expect(container.querySelector(".katex")).not.toBeInTheDocument();
+    expect(container.querySelector("code")).toHaveTextContent(String.raw`\)`);
+  });
+
+  it("falls back to escaped source when a formula exceeds its input budget", () => {
+    const source = "x".repeat(20_001);
+    const text = String.raw`\(` + source + String.raw`\)`;
+    const message: ChatMessage = {
+      id: "oversized-math",
+      runId: "run-oversized-math",
+      role: "assistant",
+      text,
+      thinking: "",
+      tools: [],
+      parts: [{ kind: "text", text }],
+    };
+
+    const { container } = render(<Message message={message} />);
+
+    expect(container.querySelector(".katex")).not.toBeInTheDocument();
+    expect(container.querySelector(".markdown")).toHaveTextContent(text);
+  });
+
+  it("does not enable trusted links in math", () => {
+    const text = String.raw`$\href{https://example.com}{outside}$`;
+    const message: ChatMessage = {
+      id: "untrusted-math",
+      runId: "run-untrusted-math",
+      role: "assistant",
+      text,
+      thinking: "",
+      tools: [],
+      parts: [{ kind: "text", text }],
+    };
+
+    const { container } = render(<Message message={message} />);
+
+    expect(container.querySelector(".katex")).toHaveTextContent(String.raw`\href`);
+    expect(container.querySelector(".markdown a")).not.toBeInTheDocument();
+  });
+
+  it("renders a completed display formula before a later streaming tail", () => {
+    const text = [
+      String.raw`\[`,
+      String.raw`\frac{\partial L}{\partial w}=+0.5`,
+      String.raw`\]`,
+      "",
+      "继续生成",
+    ].join("\n");
+    const message: ChatMessage = {
+      id: "streaming-math",
+      runId: "run-streaming-math",
+      role: "assistant",
+      text,
+      thinking: "",
+      tools: [],
+      parts: [{ kind: "text", text }],
+    };
+
+    const { container } = render(<Message message={message} streamingText />);
+
+    expect(container.querySelector(".streaming-stable .katex-display"))
+      .toBeInTheDocument();
+    expect(container.querySelector(".streaming-tail")).toHaveTextContent("继续生成");
+  });
+
   it("decorates sanitized raw web links without enabling blocked schemes", () => {
     const text = [
       '<a href="https://raw.example/path">原始网页链接</a>',

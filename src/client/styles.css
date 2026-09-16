@@ -972,6 +972,14 @@ pre {
   overflow-wrap: anywhere;
 }
 
+.markdown .katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.2em 0;
+  scrollbar-width: thin;
+}
+
 .markdown .mermaid-diagram {
   max-width: 100%;
   margin: 0 0 1em;
