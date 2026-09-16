@@ -130,12 +130,18 @@ const visualFixture = args.has("fixture");
 const motionEvidence = args.has("motion");
 const surfaceMode = args.has("surfaces");
 const surfaceOption = args.get("surfaces");
-const normalizedSurfaceOption = typeof surfaceOption === "string"
-  ? surfaceOption.trim().toUpperCase()
+const normalizedSurfaceName = typeof surfaceOption === "string"
+  ? surfaceOption.trim()
   : "";
-const requestedSurfaceGroup = normalizedSurfaceOption === "ALL"
-  ? "all"
-  : normalizedSurfaceOption;
+const normalizedSurfaceOption = normalizedSurfaceName.toUpperCase();
+const requestedSurfaceName = Object.hasOwn(
+  secondarySurfaceDefinitions,
+  normalizedSurfaceName,
+)
+  ? normalizedSurfaceName
+  : undefined;
+const requestedSurfaceGroup = requestedSurfaceName
+  ?? (normalizedSurfaceOption === "ALL" ? "all" : normalizedSurfaceOption);
 let baseUrl = String(args.get("url") ?? "http://127.0.0.1:5173/");
 if (visualFixture) {
   const fixtureUrl = new URL(baseUrl);
@@ -500,6 +506,9 @@ async function expandActivityLedger(client) {
     const ledger = document.querySelector(".assistant-activity-group.is-active");
     if (!ledger?.matches("details")) return false;
     if (!ledger.open) ledger.querySelector(":scope > summary")?.click();
+    const thinking = ledger.querySelector(".activity-timeline > details.thinking");
+    if (!thinking?.matches("details")) return false;
+    if (!thinking.open) thinking.querySelector(":scope > summary")?.click();
     const tools = ledger.querySelector(".activity-timeline > details.tools");
     if (!tools?.matches("details")) return false;
     if (!tools.open) tools.querySelector(":scope > summary")?.click();
@@ -526,6 +535,8 @@ async function expandActivityLedger(client) {
   await waitForSecondaryInteraction();
   const result = await client.evaluate(`(() => {
     const ledger = document.querySelector(".assistant-activity-group.is-active");
+    const thinking = ledger?.querySelector(".activity-timeline > details.thinking");
+    const thinkingBody = thinking?.querySelector(".thinking-body");
     const tools = ledger?.querySelector(".activity-timeline > details.tools");
     const toolCards = [...(tools?.querySelectorAll("details.tool") ?? [])];
     const outputTool = toolCards.find((tool) => tool.querySelector(".tool-target")
@@ -533,11 +544,16 @@ async function expandActivityLedger(client) {
     ledger?.scrollIntoView({ block: "start", inline: "nearest", behavior: "instant" });
     const text = outputTool?.querySelector(".tool-text");
     const ledgerRect = ledger?.getBoundingClientRect();
+    const thinkingBodyRect = thinkingBody?.getBoundingClientRect();
     const transcript = document.querySelector(".transcript");
     const issues = [];
     if (!ledger?.open) issues.push("activity ledger did not open after summary click");
+    if (!thinking?.open) issues.push("nested thinking ledger did not open after summary click");
+    if (!thinkingBody || (thinkingBody.textContent?.trim().length ?? 0) < 120) {
+      issues.push("thinking fixture is missing long markdown content");
+    }
     if (!tools?.open) issues.push("nested tool ledger did not open after summary click");
-    if (toolCards.length !== 6) issues.push("expected six tool ledger rows, found " + toolCards.length);
+    if (toolCards.length !== 7) issues.push("expected seven tool ledger rows, found " + toolCards.length);
     if (!outputTool?.open) issues.push("long-output tool did not open after summary click");
     if (!text) issues.push("missing long local tool output");
     if (text && text.scrollHeight <= text.clientHeight + 1) {
@@ -547,9 +563,18 @@ async function expandActivityLedger(client) {
     if (!ledgerRect || ledgerRect.left < -1 || ledgerRect.right > innerWidth + 1) {
       issues.push("expanded activity ledger crosses the viewport");
     }
+    if (!thinkingBodyRect || !ledgerRect
+      || thinkingBodyRect.left < ledgerRect.left - 1
+      || thinkingBodyRect.right > ledgerRect.right + 1
+      || (thinking && thinking.scrollWidth > thinking.clientWidth + 1)) {
+      issues.push("expanded thinking content crosses the activity ledger");
+    }
     return {
       issues,
       open: ledger?.open ?? false,
+      thinkingOpen: thinking?.open ?? false,
+      thinkingScrollWidth: thinking?.scrollWidth ?? null,
+      thinkingClientWidth: thinking?.clientWidth ?? null,
       toolsOpen: tools?.open ?? false,
       toolCount: toolCards.length,
       outputOpen: outputTool?.open ?? false,
@@ -2262,8 +2287,12 @@ async function main() {
     || surfaceOption.trim() === "")) {
     throw new Error("--surfaces requires a value");
   }
-  if (surfaceMode && !["A", "B", "ALL"].includes(normalizedSurfaceOption)) {
-    throw new Error("--surfaces must be A, B, or all");
+  if (
+    surfaceMode
+    && requestedSurfaceName === undefined
+    && !["A", "B", "ALL"].includes(normalizedSurfaceOption)
+  ) {
+    throw new Error("--surfaces must be A, B, all, or a named surface");
   }
   if (surfaceMode && motionEvidence) {
     throw new Error("--surfaces cannot be combined with --motion");
@@ -2314,8 +2343,10 @@ async function main() {
     const captures = [];
     if (surfaceMode) {
       const surfaceNames = Object.entries(secondarySurfaceDefinitions)
-        .filter(([, definition]) => normalizedSurfaceOption === "ALL"
-          || definition.group === normalizedSurfaceOption)
+        .filter(([surfaceName, definition]) => requestedSurfaceName !== undefined
+          ? surfaceName === requestedSurfaceName
+          : normalizedSurfaceOption === "ALL"
+            || definition.group === normalizedSurfaceOption)
         .map(([surfaceName]) => surfaceName);
       let index = 0;
       for (const surfaceName of surfaceNames) {

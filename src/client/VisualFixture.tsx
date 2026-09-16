@@ -209,6 +209,15 @@ const activityByWorkspace = new Map<string, ProjectActivitySummary>([
 ]);
 
 const DEFAULT_ACTIVE_TASK = "只添加开发 fixture、截图入口与对应验证。";
+const LONG_THINKING = [
+  "kb-repo-overview already has the directory ownership list and all key entries. Let me add a product/ entry to the existing guidance without widening the owning message column.",
+  "",
+  "```markdown",
+  "## GDS 文件与拆分",
+  "- 写 GDS 前先选 owner 文件；不得把新功能塞进 root.gd，而应放到对应模块并通过显式参数交互，新增 flow/policy 一律放到对应 owner。",
+  "- 单文件目标保持清晰；接近上限时先拆出等价模块，再继续添加能力与验证，不得复制第二份 authority。",
+  "```",
+].join("\n");
 const LONG_TOOL_OUTPUT = Array.from(
   { length: 28 },
   (_, index) => `${String(index + 1).padStart(2, "0")} | visual-ledger-check | ${index % 3 === 0 ? "PASS" : "STABLE"}`,
@@ -249,7 +258,7 @@ function createChat(): ChatState {
     runId: "run-visual-fixture",
     role: "assistant",
     text: "生产 DOM 与 CSS 边界已就位。\n\n编辑范围已经锁定，现在运行视觉验证。",
-    thinking: "先核对入口、侧栏和 Chat 的真实组合，再锁定最小编辑面。",
+    thinking: LONG_THINKING,
     tools: [{
       id: "tool-read",
       name: "read",
@@ -344,9 +353,6 @@ function createChat(): ChatState {
       status: "running",
     }],
     parts: [{
-      kind: "thinking",
-      text: "先核对入口、侧栏和 Chat 的真实组合，再锁定最小编辑面。",
-    }, {
       kind: "tool",
       toolId: "tool-read",
     }, {
@@ -358,6 +364,9 @@ function createChat(): ChatState {
     }, {
       kind: "text",
       text: "编辑范围已经锁定，现在运行视觉验证。",
+    }, {
+      kind: "thinking",
+      text: LONG_THINKING,
     }, {
       kind: "tool",
       toolId: "tool-wait-review",

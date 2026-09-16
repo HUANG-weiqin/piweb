@@ -1128,7 +1128,9 @@ pre {
 
 .activity-timeline {
   position: relative;
+  min-width: 0;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   padding: 1px 0 6px 30px;
 }
 
@@ -1146,6 +1148,7 @@ pre {
 .activity-timeline > .tools {
   position: relative;
   z-index: 0;
+  min-width: 0;
   margin: 0;
 }
 
