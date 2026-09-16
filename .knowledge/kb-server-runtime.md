@@ -44,6 +44,8 @@
 - 创建或切换会话角色时返回完整深快照，不把模板对象引用交给 session；角色默认思考强度必须属于固定模型实际支持的档位，无可调档位的模型使用唯一有效值。工作台投影模型可选思考档位必须与 Pi SDK 的 `getSupportedThinkingLevels()` 语义一致：`null` 表示禁用，`xhigh/max` 只有显式映射时才可选。
 - 未携带角色快照的旧会话迁移为独立“旧会话”快照；可复用其历史模型或任一现存角色模型，但不依赖、也不重建已删除的初始化模板。
 
+`CustomProviderStore` 是进程级用户模型端点 owner：以 Pi 自己的 `<Pi agent dir>/models.json` 为唯一真相（与 `pi` CLI 共享，不建第二份 provider 格式），负责快照投影（只暴露鉴权形态与 `extraFields`，永不回传 apiKey 值）、只针对 `providers.<id>` 的外科文本编辑（保留注释、sibling 与未知字段）、文件字节 sha256 的 revision CAS 与原子写。真实实例由服务入口注入 `modelsPath` 与 `builtinProviderIds`（`@earendil-works/pi-ai/providers/all`）；socket server 的默认参数是只读 memory 实例，避免测试误写用户文件。写入必须经 `PiRuntime.updateConfiguration` 的共享配置队列，随后 `refreshAll` 重读文件并重组基线 + 每个 session/project 模型目录，因此保存后模型列表、角色可用性与凭据视图在同一帧收敛。端点探测（`custom-provider-probe.ts`）以 8 秒 deadline、1 MiB 上限 GET `${baseUrl}/models`，并对 LM Studio 原生 `/api/v1/models` 做 best-effort 富化；细节与坑点见 [kb-custom-providers.md](kb-custom-providers.md)。
+
 `UiPreferencesStore` 是进程级用户界面偏好 owner：严格 v1 读写同一 `<Pi agent dir>/piweb/ui-preferences.json`，当前只接受 `quiet-rebel | classic-rebel`。文件缺失是正常首次启动，以 `quiet-rebel` 开始且不产生 warning；不可读或 schema 损坏同样安全回退并保留启动 warning。损坏状态要求下一次显式选择修复，即使用户选择默认值也不能短路。每次提交在进程级 tail 上串行，以同目录独占临时文件写完后原子 rename；磁盘成功后才替换内存快照并允许 socket 广播，失败会 best-effort 清理临时文件且不得改变旧快照。socket server 会在 reload/close 同步冻结新偏好修改和新的 lazy coordination acquisition：普通 reload 先 drain 已接受写入再公开 admission-frozen，且等待期间不能从 absent coordinator 新建出未安装 latch 的 run；force reload 则按 best-effort 合同不等待旧写入。重复 reload 若 coordinator 在 freeze callback 前拒绝，外层也必须立即失败而不能悬挂。它不进入项目 `.piweb`、RoleCatalog、conversation lifecycle 或浏览器持久状态。
 
 `ProjectSessionCoordinator` 是 conversation 生命周期拥有者：
@@ -178,6 +180,7 @@
 ## 关联模块
 
 - [kb-wire-protocol.md](kb-wire-protocol.md)
+- [kb-custom-providers.md](kb-custom-providers.md)
 - [kb-client-state.md](kb-client-state.md)
 - [kb-tool-policy.md](kb-tool-policy.md)
 - [kb-project-sessions.md](kb-project-sessions.md)

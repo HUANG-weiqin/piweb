@@ -11,6 +11,7 @@
 | [kb-repo-overview.md](kb-repo-overview.md) | 先理解产品边界、核心循环和模块关系 |
 | [kb-wire-protocol.md](kb-wire-protocol.md) | 修改 WebSocket 命令、事件、版本或 session epoch |
 | [kb-server-runtime.md](kb-server-runtime.md) | 修改 Pi SDK、认证、模型缓存、会话、并发控制或热重载 |
+| [kb-custom-providers.md](kb-custom-providers.md) | 修改自定义提供商、models.json 读写、端点探测或模型上下文来源 |
 | [kb-project-sessions.md](kb-project-sessions.md) | 修改 `.piweb`、项目身份、持久对话、恢复、索引或租约 |
 | [kb-agent-collaboration.md](kb-agent-collaboration.md) | 修改角色、conversation actor、跨会话消息、等待或临时会话 |
 | [kb-client-state.md](kb-client-state.md) | 修改 React App、聊天 reducer、重连和 UI 状态 |
@@ -28,6 +29,7 @@ src/client
 src/server/socket-server.ts
   → PiRuntime（进程共享）
   → RoleCatalog（用户级角色目录）
+  → CustomProviderStore（用户级 models.json）
   → ProjectStoreRegistry（按项目共享）
   → ProjectSessionCoordinator（按项目共享 conversation actor）
       → WorkspaceLsp（惰性、本机 stdio、按 root/config 共享）
