@@ -15,6 +15,16 @@ import {
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createReadOnlyBashTool, isReviewedCommand } from "./read-only-bash.js";
 
+/**
+ * Real Git Bash spawns occasionally stall for seconds while the whole suite is
+ * running in parallel; bound every spawn generously so only a genuine hang
+ * fails. The tool's command timeout stays below the per-test ceiling so its own
+ * error surfaces instead of vitest's.
+ */
+const SYNC_SPAWN_TIMEOUT_MS = 30_000;
+const COMMAND_TIMEOUT_SECONDS = 30;
+const TEST_TIMEOUT_MS = 60_000;
+
 interface ToolResult {
   content: Array<{ type: string; text?: string }>;
   details?: unknown;
@@ -27,6 +37,7 @@ function git(cwd: string, ...arguments_: string[]): string {
     cwd,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
+    timeout: SYNC_SPAWN_TIMEOUT_MS,
   });
 }
 
@@ -73,7 +84,10 @@ function shellPath(path: string): string {
 
 function findWindowsTestBash(): string | undefined {
   if (process.platform !== "win32") return undefined;
-  const gitExecPath = execFileSync("git", ["--exec-path"], { encoding: "utf8" }).trim();
+  const gitExecPath = execFileSync("git", ["--exec-path"], {
+    encoding: "utf8",
+    timeout: SYNC_SPAWN_TIMEOUT_MS,
+  }).trim();
   const candidate = resolve(gitExecPath, "..", "..", "..", "usr", "bin", "bash.exe");
   return existsSync(candidate) ? candidate : undefined;
 }
@@ -255,18 +269,18 @@ const rejectedCommands = [
   ["an overlong command", `rg '${"a".repeat(4_096)}'`],
 ] as const;
 
-describe("createReadOnlyBashTool", () => {
+describe("createReadOnlyBashTool", { timeout: TEST_TIMEOUT_MS }, () => {
   let cwd: string;
   let tool: ReturnType<typeof createReadOnlyBashTool>;
 
   beforeAll(() => {
     cwd = createRepository();
     tool = createReadOnlyBashTool(cwd, TEST_BASH_PATH);
-  });
+  }, TEST_TIMEOUT_MS);
 
   afterAll(() => {
     rmSync(cwd, { recursive: true, force: true });
-  });
+  }, TEST_TIMEOUT_MS);
 
   it.each(allowedCommands)("classifies the reviewed query as allowed: %s", (command) => {
     expect(isReviewedCommand(command)).toBe(true);
@@ -279,14 +293,14 @@ describe("createReadOnlyBashTool", () => {
   it.each(sampledCommands)(
     "executes a sampled reviewed command end-to-end: %s",
     async (command) => {
-      await expect(executeTool(tool, { command, timeout: 5 })).resolves.toBeDefined();
+      await expect(executeTool(tool, { command, timeout: COMMAND_TIMEOUT_SECONDS })).resolves.toBeDefined();
     },
   );
 
   it("executes a real rg search with alternation", async () => {
     const result = await executeTool(tool, {
       command: "rg -n 'initial|needle' .",
-      timeout: 5,
+      timeout: COMMAND_TIMEOUT_SECONDS,
     });
 
     expect(outputText(result)).toContain("initial content");
@@ -296,7 +310,7 @@ describe("createReadOnlyBashTool", () => {
   it("supports call-scoped cd and a real query pipeline", async () => {
     const result = await executeTool(tool, {
       command: "cd nested && rg -n needle . | head -1",
-      timeout: 5,
+      timeout: COMMAND_TIMEOUT_SECONDS,
     });
 
     expect(outputText(result)).toContain("needle.txt:1:nested needle");
@@ -305,7 +319,7 @@ describe("createReadOnlyBashTool", () => {
   it("supports a realistic Git query pipeline", async () => {
     const result = await executeTool(tool, {
       command: "git --no-pager log --format='%s' -1 | head -1",
-      timeout: 5,
+      timeout: COMMAND_TIMEOUT_SECONDS,
     });
 
     expect(outputText(result)).toContain("initial commit");
@@ -358,7 +372,7 @@ describe("createReadOnlyBashTool", () => {
     const previous = process.env.BASH_ENV;
     process.env.BASH_ENV = shellPath(startup);
     try {
-      await executeTool(tool, { command: "pwd", timeout: 5 });
+      await executeTool(tool, { command: "pwd", timeout: COMMAND_TIMEOUT_SECONDS });
     } finally {
       if (previous === undefined) delete process.env.BASH_ENV;
       else process.env.BASH_ENV = previous;
@@ -373,7 +387,7 @@ describe("createReadOnlyBashTool", () => {
     const previous = process.env[key];
     process.env[key] = "() { printf injected > bash-function-marker; }";
     try {
-      const result = await executeTool(tool, { command: "pwd", timeout: 5 });
+      const result = await executeTool(tool, { command: "pwd", timeout: COMMAND_TIMEOUT_SECONDS });
       expect(outputText(result)).toMatch(/piweb-read-only-bash-/u);
     } finally {
       if (previous === undefined) delete process.env[key];
@@ -391,7 +405,7 @@ describe("createReadOnlyBashTool", () => {
     try {
       const result = await executeTool(tool, {
         command: "rg initial 'space name.txt'",
-        timeout: 5,
+        timeout: COMMAND_TIMEOUT_SECONDS,
       });
       expect(outputText(result)).toContain("initial content");
     } finally {
@@ -406,7 +420,7 @@ describe("createReadOnlyBashTool", () => {
       tool,
       {
         command: "git log --format='%s' -1 -- 'space name.txt'",
-        timeout: 5,
+        timeout: COMMAND_TIMEOUT_SECONDS,
       },
       new AbortController().signal,
       (update) => updates.push(update),
