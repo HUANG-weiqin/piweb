@@ -82,9 +82,12 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // conversation-scoped LoopList without adding it to high-frequency state.
 // v33: cold conversation navigation may emit a correlated read-only preview
 // before executable focus ownership is attached.
+// v60: process-global custom model providers are authored through
+// models.json, projected as a bounded secret-free snapshot, and probed for
+// their OpenAI-compatible model list before saving.
 // v59: idle current-leaf fork copies LLM-effective context into a fresh host
 // lifecycle via `fork_conversation`; history anchors stay unsupported.
-export const PROTOCOL_VERSION = 59;
+export const PROTOCOL_VERSION = 60;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 export const COLOR_SCHEMES = ["quiet-rebel", "classic-rebel"] as const;
 export type ColorScheme = typeof COLOR_SCHEMES[number];
@@ -95,6 +98,192 @@ const colorSchemeSchema = z.enum(COLOR_SCHEMES);
 const uiPreferencesSchema: z.ZodType<UiPreferences> = z.object({
   colorScheme: colorSchemeSchema,
 }).strict();
+
+/** models.json 允许的 API 类型；设置页只写入这四种之一。 */
+export const CUSTOM_PROVIDER_APIS = [
+  "openai-completions",
+  "openai-responses",
+  "anthropic-messages",
+  "google-generative-ai",
+] as const;
+export type CustomProviderApi = typeof CUSTOM_PROVIDER_APIS[number];
+const customProviderApiSchema = z.enum(CUSTOM_PROVIDER_APIS);
+
+/**
+ * 设置页可以写入的鉴权形态。密钥值永不进入浏览器协议：
+ * literal/command 形态只能由手写文件产生，编辑时按 `keep` 原样保留。
+ */
+export const CUSTOM_PROVIDER_AUTH_KINDS = [
+  /** 本地服务无需鉴权：写入占位值，Pi 才把 provider 视为已配置。 */
+  "local",
+  /** 写入 `$NAME`，由请求时的进程环境解析。 */
+  "env",
+  /** 不写入 apiKey，改用模型连接里保存的凭据（auth.json）。 */
+  "credential",
+  /** 保留文件中现有 apiKey 原值；仅对已有条目有效。 */
+  "keep",
+] as const;
+export type CustomProviderAuthKind = typeof CUSTOM_PROVIDER_AUTH_KINDS[number];
+
+/** models.json 中既有 apiKey 的形态；只报告形态，不回传值。 */
+export type CustomProviderStoredAuthKind =
+  | "none"
+  | "literal"
+  | "env"
+  | "command";
+
+export const MAX_CUSTOM_PROVIDERS = 32;
+export const MAX_CUSTOM_PROVIDER_MODELS = 64;
+export const MAX_CUSTOM_PROVIDER_ID_CHARACTERS = 128;
+export const MAX_CUSTOM_PROVIDER_PROBED_MODELS = 256;
+/** 设置页只能创建/编辑这个形状的 id；其余条目只能直接编辑文件。 */
+export function isEditableCustomProviderId(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value)
+    && value.length > 0
+    && value.length <= MAX_CUSTOM_PROVIDER_ID_CHARACTERS;
+}
+
+export interface CustomProviderModelInput {
+  id: string;
+  name?: string;
+  contextWindow?: number;
+  maxTokens?: number;
+  reasoning?: boolean;
+  input?: ("text" | "image")[];
+}
+
+export type CustomProviderAuthInput =
+  | { kind: "local" }
+  | { kind: "env"; envName: string }
+  | { kind: "credential" }
+  | { kind: "keep" };
+
+export interface CustomProviderSaveInput {
+  id: string;
+  name?: string;
+  baseUrl: string;
+  api: CustomProviderApi;
+  auth: CustomProviderAuthInput;
+  models: CustomProviderModelInput[];
+}
+
+/** 表单不管理但必须原样保留的字段名，用于如实告知用户。 */
+export interface CustomProviderModelSnapshot {
+  id: string;
+  name?: string;
+  api?: string;
+  contextWindow?: number;
+  maxTokens?: number;
+  reasoning?: boolean;
+  input?: string[];
+  extraFields: string[];
+}
+
+export interface CustomProviderSnapshot {
+  id: string;
+  name?: string;
+  baseUrl?: string;
+  api?: string;
+  storedAuth: CustomProviderStoredAuthKind;
+  authEnvNames: string[];
+  models: CustomProviderModelSnapshot[];
+  extraFields: string[];
+  /** false 表示该条目含表单无法忠实表示的形态，只能直接编辑文件。 */
+  editable: boolean;
+  /** 该 id 同时是内置提供商：覆盖内置提供商只能直接编辑文件。 */
+  builtinOverride: boolean;
+}
+
+/** 端点探测结果：只有 id 必然存在，其余字段是最佳努力的补充。 */
+export interface CustomProviderProbedModel {
+  id: string;
+  name?: string;
+  contextWindow?: number;
+  maxTokens?: number;
+  reasoning?: boolean;
+  input?: ("text" | "image")[];
+}
+
+const customProviderIdSchema = z.string().trim()
+  .min(1)
+  .max(MAX_CUSTOM_PROVIDER_ID_CHARACTERS)
+  .refine(
+    isEditableCustomProviderId,
+    "provider id must be a simple ASCII identifier",
+  );
+const customProviderEnvNameSchema = z.string().trim()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "envName must be a shell variable name");
+const customProviderRevisionSchema = z.string().min(1).max(128);
+const customProviderBaseUrlSchema = z.string().trim().min(1)
+  .max(4096)
+  .refine((value) => {
+    try {
+      const url = new URL(value);
+      return (url.protocol === "http:" || url.protocol === "https:")
+        && url.hostname.length > 0;
+    } catch {
+      return false;
+    }
+  }, "baseUrl must be an absolute http or https URL");
+const customProviderModelInputSchema = z.object({
+  id: z.string().trim().min(1).max(256),
+  name: z.string().trim().min(1).max(256).optional(),
+  contextWindow: z.number().int().positive().max(100_000_000).optional(),
+  maxTokens: z.number().int().positive().max(100_000_000).optional(),
+  reasoning: z.boolean().optional(),
+  input: z.array(z.enum(["text", "image"])).min(1).max(2).optional(),
+}).strict();
+const customProviderAuthInputSchema: z.ZodType<CustomProviderAuthInput> =
+  z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("local") }).strict(),
+    z.object({ kind: z.literal("env"), envName: customProviderEnvNameSchema }).strict(),
+    z.object({ kind: z.literal("credential") }).strict(),
+    z.object({ kind: z.literal("keep") }).strict(),
+  ]);
+const customProviderSaveInputSchema: z.ZodType<CustomProviderSaveInput> = z.object({
+  id: customProviderIdSchema,
+  name: z.string().trim().min(1).max(256).optional(),
+  baseUrl: customProviderBaseUrlSchema,
+  api: customProviderApiSchema,
+  auth: customProviderAuthInputSchema,
+  models: z.array(customProviderModelInputSchema)
+    .min(1)
+    .max(MAX_CUSTOM_PROVIDER_MODELS),
+}).strict();
+const customProviderModelSnapshotSchema: z.ZodType<CustomProviderModelSnapshot> = z.object({
+  id: z.string().min(1).max(256),
+  name: z.string().max(256).optional(),
+  api: z.string().max(128).optional(),
+  contextWindow: z.number().int().nonnegative().optional(),
+  maxTokens: z.number().int().nonnegative().optional(),
+  reasoning: z.boolean().optional(),
+  input: z.array(z.string().max(32)).max(8).optional(),
+  extraFields: z.array(z.string().max(128)).max(64),
+}).strict();
+const customProviderSnapshotSchema: z.ZodType<CustomProviderSnapshot> = z.object({
+  id: z.string().min(1).max(MAX_CUSTOM_PROVIDER_ID_CHARACTERS),
+  name: z.string().max(256).optional(),
+  baseUrl: z.string().max(4096).optional(),
+  api: z.string().max(128).optional(),
+  storedAuth: z.enum(["none", "literal", "env", "command"]),
+  authEnvNames: z.array(z.string().max(128)).max(64),
+  models: z.array(customProviderModelSnapshotSchema)
+    .max(MAX_CUSTOM_PROVIDER_MODELS),
+  extraFields: z.array(z.string().max(128)).max(64),
+  editable: z.boolean(),
+  builtinOverride: z.boolean(),
+}).strict();
+const customProviderProbedModelSchema: z.ZodType<CustomProviderProbedModel> = z.object({
+  id: z.string().min(1).max(256),
+  name: z.string().max(256).optional(),
+  contextWindow: z.number().int().positive().max(100_000_000).optional(),
+  maxTokens: z.number().int().positive().max(100_000_000).optional(),
+  reasoning: z.boolean().optional(),
+  input: z.array(z.enum(["text", "image"])).min(1).max(2).optional(),
+}).strict();
+
 const required = z.string().trim().min(1);
 const sessionIdSchema = z.string().uuid();
 const conversationIdSchema = z.string()
@@ -367,6 +556,28 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
     type: z.literal("set_color_scheme"),
     commandId: commandIdSchema,
     colorScheme: colorSchemeSchema,
+  }).strict(),
+  z.object({
+    type: z.literal("save_custom_provider"),
+    commandId: commandIdSchema,
+    /** 上一次快照的 revision；期间被外部改动时拒绝写入。 */
+    expectedRevision: customProviderRevisionSchema,
+    provider: customProviderSaveInputSchema,
+  }).strict(),
+  z.object({
+    type: z.literal("refresh_custom_providers"),
+    commandId: commandIdSchema,
+  }).strict(),
+  z.object({
+    type: z.literal("delete_custom_provider"),
+    commandId: commandIdSchema,
+    expectedRevision: customProviderRevisionSchema,
+    providerId: customProviderIdSchema,
+  }).strict(),
+  z.object({
+    type: z.literal("probe_custom_provider_models"),
+    commandId: commandIdSchema,
+    baseUrl: customProviderBaseUrlSchema,
   }).strict(),
   z.object({
     type: z.literal("initialize"),
@@ -980,6 +1191,26 @@ export type ServerEvent =
       /** Present only for the browser whose command durably committed. */
       commandId?: string;
     }
+  | {
+      type: "custom_providers_snapshot";
+      /** 文件内容版本；写入必须回传同一值。 */
+      revision: string;
+      providers: CustomProviderSnapshot[];
+      /** models.json 读取或校验失败时的诊断；此时 providers 为空。 */
+      error?: string;
+      /** 文件中的条目多于有界投影上限。 */
+      truncated: boolean;
+      /** Present only for the browser whose command durably committed. */
+      commandId?: string;
+    }
+  | {
+      type: "custom_provider_models_probe";
+      commandId: string;
+      baseUrl: string;
+      models: CustomProviderProbedModel[];
+      /** 端点返回的模型多于有界上限。 */
+      truncated: boolean;
+    }
   | ({ type: "directory_listing"; commandId: string } & DirectoryListing)
   | { type: "state"; state: PublicState }
   | {
@@ -1313,6 +1544,10 @@ const sessionEventSchema: z.ZodType<SessionEvent> = z.discriminatedUnion("type",
 const commandTypeSchema = z.enum([
   "browse_directory",
   "set_color_scheme",
+  "save_custom_provider",
+  "refresh_custom_providers",
+  "delete_custom_provider",
+  "probe_custom_provider_models",
   "initialize",
   "focus_conversation",
   "refresh_view",
@@ -1601,6 +1836,22 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     type: z.literal("ui_preferences_changed"),
     uiPreferences: uiPreferencesSchema,
     commandId: commandIdSchema.optional(),
+  }).strict(),
+  z.object({
+    type: z.literal("custom_providers_snapshot"),
+    revision: customProviderRevisionSchema,
+    providers: z.array(customProviderSnapshotSchema).max(MAX_CUSTOM_PROVIDERS),
+    error: z.string().max(20_000).optional(),
+    truncated: z.boolean(),
+    commandId: commandIdSchema.optional(),
+  }).strict(),
+  z.object({
+    type: z.literal("custom_provider_models_probe"),
+    commandId: commandIdSchema,
+    baseUrl: required.max(4096),
+    models: z.array(customProviderProbedModelSchema)
+      .max(MAX_CUSTOM_PROVIDER_PROBED_MODELS),
+    truncated: z.boolean(),
   }).strict(),
   z.object({
     type: z.literal("directory_listing"),

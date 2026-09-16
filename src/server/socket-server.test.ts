@@ -14,8 +14,10 @@ import {
   OBSERVATION_FATAL_CLOSE_CODE,
   parseServerEvent,
   PROTOCOL_VERSION,
+  type CustomProviderSaveInput,
   type ServerEvent,
 } from "../shared/protocol.js";
+import type { CustomProviderSnapshotView } from "./custom-provider-store.js";
 import type { DirectoryBrowser } from "./directory-browser.js";
 import type {
   CreatedPiSession,
@@ -26,6 +28,7 @@ import {
   attachSocketServer,
   isAllowedOrigin,
   safeSend,
+  type CustomProviderStoreLike,
 } from "./socket-server.js";
 
 class SocketTestRuntime implements PiRuntimeLike {
@@ -956,5 +959,364 @@ describe("safeSend", () => {
       OBSERVATION_FATAL_CLOSE_CODE,
       "Invalid server observation",
     );
+  });
+});
+
+describe("custom provider commands", () => {
+  class FakeCustomProviderStore implements CustomProviderStoreLike {
+    view: CustomProviderSnapshotView = {
+      revision: "rev-1",
+      providers: [{
+        id: "lmstudio",
+        name: "LM Studio",
+        baseUrl: "http://127.0.0.1:1234/v1",
+        api: "openai-completions",
+        storedAuth: "literal",
+        authEnvNames: [],
+        models: [{
+          id: "local-model",
+          name: "Local Model",
+          contextWindow: 8192,
+          extraFields: [],
+        }],
+        extraFields: [],
+        editable: true,
+        builtinOverride: false,
+      }],
+      truncated: false,
+    };
+
+    saved: { input: CustomProviderSaveInput; expectedRevision: string }[] = [];
+    deleted: { providerId: string; expectedRevision: string }[] = [];
+    readCount = 0;
+    failRead: Error | undefined;
+    failWrite: Error | undefined;
+
+    async read(): Promise<CustomProviderSnapshotView> {
+      this.readCount++;
+      if (this.failRead) throw this.failRead;
+      return this.view;
+    }
+
+    async save(
+      input: CustomProviderSaveInput,
+      expectedRevision: string,
+    ): Promise<CustomProviderSnapshotView> {
+      this.saved.push({ input, expectedRevision });
+      if (this.failWrite) throw this.failWrite;
+      return this.view;
+    }
+
+    async delete(
+      providerId: string,
+      expectedRevision: string,
+    ): Promise<CustomProviderSnapshotView> {
+      this.deleted.push({ providerId, expectedRevision });
+      if (this.failWrite) throw this.failWrite;
+      return this.view;
+    }
+  }
+
+  async function startFixture(
+    store: FakeCustomProviderStore,
+    runtime: PiRuntimeLike = new SocketTestRuntime(),
+  ): Promise<{
+    socketServer: ReturnType<typeof attachSocketServer>;
+    url: string;
+    origin: string;
+    close(): Promise<void>;
+  }> {
+    const server = createServer();
+    const socketServer = attachSocketServer(
+      server,
+      "E:\\work",
+      runtime,
+      undefined,
+      false,
+      undefined,
+      store,
+    );
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("server did not bind a TCP port");
+    return {
+      socketServer,
+      url: `ws://127.0.0.1:${address.port}/ws`,
+      origin: `http://127.0.0.1:${address.port}`,
+      async close() {
+        const httpClosed = new Promise<void>((resolve, reject) => {
+          server.close((error) => error ? reject(error) : resolve());
+        });
+        await Promise.all([socketServer.close(), httpClosed]);
+      },
+    };
+  }
+
+  it("projects the models.json snapshot on demand and correlates read failures", async () => {
+    const store = new FakeCustomProviderStore();
+    const fixture = await startFixture(store);
+    const socket = new WebSocket(fixture.url, { origin: fixture.origin });
+    await nextEvent(socket);
+
+    const commandId = randomUUID();
+    const snapshot = nextEvent(socket);
+    socket.send(JSON.stringify({ type: "refresh_custom_providers", commandId }));
+    await expect(snapshot).resolves.toEqual({
+      type: "custom_providers_snapshot",
+      revision: "rev-1",
+      providers: store.view.providers,
+      truncated: false,
+      commandId,
+    });
+
+    store.failRead = new Error("models.json is not readable");
+    const failureId = randomUUID();
+    const failure = nextEvent(socket);
+    socket.send(JSON.stringify({
+      type: "refresh_custom_providers",
+      commandId: failureId,
+    }));
+    const event = await failure;
+    expect(event).toMatchObject({
+      type: "custom_providers_snapshot",
+      commandId: failureId,
+      revision: "absent",
+      providers: [],
+    });
+    expect((event as { error?: string }).error).toContain("not readable");
+
+    await fixture.close();
+    socket.terminate();
+  });
+
+  it("commits a provider through the shared configuration queue and broadcasts it", async () => {
+    const store = new FakeCustomProviderStore();
+    const fixture = await startFixture(store);
+    const source = new WebSocket(fixture.url, { origin: fixture.origin });
+    const observer = new WebSocket(fixture.url, { origin: fixture.origin });
+    await nextEvent(source);
+    await nextEvent(observer);
+
+    const commandId = randomUUID();
+    const input: CustomProviderSaveInput = {
+      id: "lmstudio",
+      name: "LM Studio",
+      baseUrl: "http://127.0.0.1:1234/v1",
+      api: "openai-completions",
+      auth: { kind: "local" },
+      models: [{ id: "local-model", contextWindow: 8192 }],
+    };
+    const sourceCommitted = nextEvent(source);
+    const observerCommitted = nextEvent(observer);
+    source.send(JSON.stringify({
+      type: "save_custom_provider",
+      commandId,
+      expectedRevision: "rev-1",
+      provider: input,
+    }));
+
+    await expect(sourceCommitted).resolves.toMatchObject({
+      type: "custom_providers_snapshot",
+      revision: "rev-1",
+      commandId,
+    });
+    await expect(observerCommitted).resolves.toMatchObject({
+      type: "custom_providers_snapshot",
+      revision: "rev-1",
+    });
+    expect(store.saved).toEqual([{ input, expectedRevision: "rev-1" }]);
+
+    const deleteId = randomUUID();
+    const deleted = nextEvent(source);
+    source.send(JSON.stringify({
+      type: "delete_custom_provider",
+      commandId: deleteId,
+      expectedRevision: "rev-1",
+      providerId: "lmstudio",
+    }));
+    await expect(deleted).resolves.toMatchObject({
+      type: "custom_providers_snapshot",
+      commandId: deleteId,
+    });
+    expect(store.deleted).toEqual([{ providerId: "lmstudio", expectedRevision: "rev-1" }]);
+
+    await fixture.close();
+    source.terminate();
+    observer.terminate();
+  });
+
+  it("reports a rejected write without broadcasting a snapshot", async () => {
+    const store = new FakeCustomProviderStore();
+    store.failWrite = new Error("models.json 已被外部修改");
+    const fixture = await startFixture(store);
+    const socket = new WebSocket(fixture.url, { origin: fixture.origin });
+    await nextEvent(socket);
+
+    const commandId = randomUUID();
+    const rejected = nextEvent(socket);
+    socket.send(JSON.stringify({
+      type: "save_custom_provider",
+      commandId,
+      expectedRevision: "stale",
+      provider: {
+        id: "lmstudio",
+        baseUrl: "http://127.0.0.1:1234/v1",
+        api: "openai-completions",
+        auth: { kind: "keep" },
+        models: [{ id: "local-model" }],
+      },
+    }));
+    await expect(rejected).resolves.toMatchObject({
+      type: "error",
+      scope: "settings",
+      operation: "save_custom_provider",
+      commandId,
+      message: expect.stringContaining("已被外部修改"),
+    });
+
+    // 下一个读取必须立即到达：失败写入不得广播任何快照。
+    const refreshId = randomUUID();
+    const refreshed = nextEvent(socket);
+    socket.send(JSON.stringify({
+      type: "refresh_custom_providers",
+      commandId: refreshId,
+    }));
+    await expect(refreshed).resolves.toMatchObject({
+      type: "custom_providers_snapshot",
+      commandId: refreshId,
+    });
+
+    await fixture.close();
+    socket.terminate();
+  });
+
+  it("reports the write failure even when the shared refresh also fails", async () => {
+    class AggregatingRuntime extends SocketTestRuntime {
+      override async updateConfiguration<T>(change: () => Promise<T> | T): Promise<T> {
+        try {
+          return await change();
+        } catch (error) {
+          throw new AggregateError([error, new Error("refresh failed")], "Configuration update failed");
+        }
+      }
+    }
+
+    const store = new FakeCustomProviderStore();
+    store.failWrite = new Error("models.json 已被外部修改，请刷新后重试");
+    const fixture = await startFixture(store, new AggregatingRuntime());
+    const socket = new WebSocket(fixture.url, { origin: fixture.origin });
+    await nextEvent(socket);
+
+    const commandId = randomUUID();
+    const rejected = nextEvent(socket);
+    socket.send(JSON.stringify({
+      type: "save_custom_provider",
+      commandId,
+      expectedRevision: "stale",
+      provider: {
+        id: "lmstudio",
+        baseUrl: "http://127.0.0.1:1234/v1",
+        api: "openai-completions",
+        auth: { kind: "keep" },
+        models: [{ id: "local-model" }],
+      },
+    }));
+    await expect(rejected).resolves.toMatchObject({
+      type: "error",
+      scope: "settings",
+      operation: "save_custom_provider",
+      commandId,
+      message: "models.json 已被外部修改，请刷新后重试",
+    });
+
+    await fixture.close();
+    socket.terminate();
+  });
+
+  it("rejects a reused command id", async () => {
+    const store = new FakeCustomProviderStore();
+    const fixture = await startFixture(store);
+    const socket = new WebSocket(fixture.url, { origin: fixture.origin });
+    await nextEvent(socket);
+
+    const commandId = randomUUID();
+    const first = nextEvent(socket);
+    socket.send(JSON.stringify({ type: "refresh_custom_providers", commandId }));
+    await expect(first).resolves.toMatchObject({
+      type: "custom_providers_snapshot",
+      commandId,
+    });
+    const duplicate = nextEvent(socket);
+    socket.send(JSON.stringify({ type: "refresh_custom_providers", commandId }));
+    await expect(duplicate).resolves.toMatchObject({
+      type: "error",
+      commandId,
+      message: "命令标识不能重复使用",
+    });
+
+    await fixture.close();
+    socket.terminate();
+  });
+
+  it("probes an OpenAI-compatible model list and reports unreachable endpoints", async () => {
+    const modelServer = createServer((request, response) => {
+      if (request.url === "/v1/models") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({
+          object: "list",
+          data: [{ id: "probe-one" }, { id: "probe-two" }],
+        }));
+        return;
+      }
+      response.writeHead(404);
+      response.end();
+    });
+    await new Promise<void>((resolve) => modelServer.listen(0, "127.0.0.1", resolve));
+    const modelAddress = modelServer.address();
+    if (!modelAddress || typeof modelAddress === "string") {
+      throw new Error("fake model server did not bind a TCP port");
+    }
+
+    const store = new FakeCustomProviderStore();
+    const fixture = await startFixture(store);
+    const socket = new WebSocket(fixture.url, { origin: fixture.origin });
+    await nextEvent(socket);
+
+    const commandId = randomUUID();
+    const probed = nextEvent(socket);
+    const baseUrl = `http://127.0.0.1:${modelAddress.port}/v1`;
+    socket.send(JSON.stringify({
+      type: "probe_custom_provider_models",
+      commandId,
+      baseUrl,
+    }));
+    await expect(probed).resolves.toEqual({
+      type: "custom_provider_models_probe",
+      commandId,
+      baseUrl,
+      models: [{ id: "probe-one" }, { id: "probe-two" }],
+      truncated: false,
+    });
+    expect(store.saved).toEqual([]);
+
+    const failureId = randomUUID();
+    const failed = nextEvent(socket);
+    socket.send(JSON.stringify({
+      type: "probe_custom_provider_models",
+      commandId: failureId,
+      baseUrl: "http://127.0.0.1:1/v1",
+    }));
+    await expect(failed).resolves.toMatchObject({
+      type: "error",
+      scope: "settings",
+      operation: "probe_custom_provider_models",
+      commandId: failureId,
+    });
+
+    await fixture.close();
+    socket.terminate();
+    await new Promise<void>((resolve, reject) => {
+      modelServer.close((error) => error ? reject(error) : resolve());
+    });
   });
 });

@@ -93,7 +93,15 @@ interface PeerPresenceRefresh {
 
 type ConnectionCommand = Exclude<
   ClientCommand,
-  { type: "browse_directory" | "set_color_scheme" }
+  {
+    type:
+      | "browse_directory"
+      | "set_color_scheme"
+      | "save_custom_provider"
+      | "refresh_custom_providers"
+      | "delete_custom_provider"
+      | "probe_custom_provider_models";
+  }
 >;
 function assertNever(value: never): never {
   const type = (value as { type?: unknown }).type;

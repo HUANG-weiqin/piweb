@@ -10,9 +10,15 @@ import {
   serverEventSchema,
   type ClientCommand,
   type ColorScheme,
+  type CustomProviderSaveInput,
   type ServerEvent,
   type UiPreferences,
 } from "../shared/protocol.js";
+import {
+  CustomProviderStore,
+  type CustomProviderSnapshotView,
+} from "./custom-provider-store.js";
+import { probeOpenAiCompatibleModels } from "./custom-provider-probe.js";
 import {
   listDirectory,
   type DirectoryBrowser,
@@ -35,6 +41,19 @@ import { UiPreferencesStore } from "./ui-preferences-store.js";
 export interface UiPreferencesStoreLike {
   get(): UiPreferences;
   setColorScheme(colorScheme: ColorScheme): Promise<UiPreferences>;
+}
+
+/** 进程级 models.json 用户配置；真实实例由服务入口注入。 */
+export interface CustomProviderStoreLike {
+  read(): Promise<CustomProviderSnapshotView>;
+  save(
+    input: CustomProviderSaveInput,
+    expectedRevision: string,
+  ): Promise<CustomProviderSnapshotView>;
+  delete(
+    providerId: string,
+    expectedRevision: string,
+  ): Promise<CustomProviderSnapshotView>;
 }
 
 export interface SocketServerHandle {
@@ -148,6 +167,7 @@ export function attachSocketServer(
   directoryBrowser: DirectoryBrowser = listDirectory,
   blockStartupAdmission = false,
   uiPreferences: UiPreferencesStoreLike = UiPreferencesStore.memory(),
+  customProviders: CustomProviderStoreLike = CustomProviderStore.memory(),
 ): SocketServerHandle {
   const sockets = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES });
   const connections = new Map<WebSocket, PiConnection>();
@@ -158,9 +178,14 @@ export function attachSocketServer(
   let startupAdmissionBlocked = blockStartupAdmission;
   let socketAdmissionFrozen = false;
   const activeColorSchemeCommands = new Set<Promise<void>>();
-  const waitForColorSchemeCommands = async (): Promise<void> => {
-    while (activeColorSchemeCommands.size > 0) {
-      await Promise.all([...activeColorSchemeCommands]);
+  // 只有会写盘的控制命令需要参与 reload/close 的 drain；只读探测不阻塞冻结。
+  const activeDurableControlCommands = new Set<Promise<void>>();
+  const waitForControlCommands = async (): Promise<void> => {
+    while (activeColorSchemeCommands.size > 0 || activeDurableControlCommands.size > 0) {
+      await Promise.all([
+        ...activeColorSchemeCommands,
+        ...activeDurableControlCommands,
+      ]);
     }
   };
 
@@ -272,6 +297,51 @@ export function attachSocketServer(
           );
           return;
         }
+        if (command.type === "probe_custom_provider_models") {
+          void handleCustomProviderCommand(
+            socket,
+            command,
+            socketControlState,
+            customProviders,
+            runtime,
+            sockets,
+            !socketAdmissionFrozen,
+          );
+          return;
+        }
+        if (command.type === "refresh_custom_providers") {
+          // 只读，不参与 reload/close 的写盘 drain；客户端在连接后与每次打开设置页时自行拉取。
+          void handleCustomProviderCommand(
+            socket,
+            command,
+            socketControlState,
+            customProviders,
+            runtime,
+            sockets,
+            !socketAdmissionFrozen,
+          );
+          return;
+        }
+        if (
+          command.type === "save_custom_provider"
+          || command.type === "delete_custom_provider"
+        ) {
+          const task = handleCustomProviderCommand(
+            socket,
+            command,
+            socketControlState,
+            customProviders,
+            runtime,
+            sockets,
+            !socketAdmissionFrozen,
+          );
+          activeDurableControlCommands.add(task);
+          void task.then(
+            () => activeDurableControlCommands.delete(task),
+            () => activeDurableControlCommands.delete(task),
+          );
+          return;
+        }
         const sessionId = "sessionId" in command ? command.sessionId : undefined;
         const runId = "runId" in command ? command.runId : undefined;
         const conversationId = "conversationId" in command
@@ -279,8 +349,7 @@ export function attachSocketServer(
           : undefined;
         const focusId = "focusId" in command ? command.focusId : undefined;
         const authFlowId = "authFlowId" in command ? command.authFlowId : undefined;
-        const commandId = "commandId" in command ? command.commandId : undefined;
-        void connection.handle(command).catch((error) => safeSend(socket, {
+        const commandId = "commandId" in command ? command.commandId : undefined;        void connection.handle(command).catch((error) => safeSend(socket, {
           type: "error",
           scope: "command",
           operation: command.type,
@@ -319,7 +388,7 @@ export function attachSocketServer(
     async prepareReload(force, onAdmissionFrozen) {
       socketAdmissionFrozen = true;
       if (!coordinationPromise) {
-        if (!force) await waitForColorSchemeCommands();
+        if (!force) await waitForControlCommands();
         onAdmissionFrozen();
         return [];
       }
@@ -335,7 +404,7 @@ export function attachSocketServer(
       });
       void targets.catch((error) => rejectCoordinatorFrozen?.(error));
       await coordinatorFrozen;
-      if (!force) await waitForColorSchemeCommands();
+      if (!force) await waitForControlCommands();
       onAdmissionFrozen();
       return targets;
     },
@@ -374,7 +443,7 @@ export function attachSocketServer(
         for (const socket of sockets.clients) socket.terminate();
         const results = await Promise.allSettled([
           ...disposals,
-          waitForColorSchemeCommands(),
+          waitForControlCommands(),
         ]);
         await socketsClosed;
         const failures: unknown[] = results
@@ -486,4 +555,149 @@ async function handleColorSchemeCommand(
       message: error instanceof Error ? error.message : String(error),
     });
   }
+}
+
+function customProvidersSnapshotEvent(
+  view: CustomProviderSnapshotView,
+): Extract<ServerEvent, { type: "custom_providers_snapshot" }> {
+  return {
+    type: "custom_providers_snapshot",
+    revision: view.revision,
+    providers: view.providers,
+    ...(view.error === undefined ? {} : { error: view.error }),
+    truncated: view.truncated,
+  };
+}
+
+function controlCommandRejection(
+  state: SocketControlState,
+  command: { commandId: string; type: string },
+  admissionAllowed: boolean,
+): string | undefined {
+  if (state.usedCommandIds.has(command.commandId)) return "命令标识不能重复使用";
+  state.usedCommandIds.add(command.commandId);
+  if (!admissionAllowed) return "服务正在重新加载，暂不接受新的设置修改";
+  return undefined;
+}
+
+async function handleCustomProviderCommand(
+  socket: WebSocket,
+  command: Extract<
+    ClientCommand,
+    {
+      type:
+        | "save_custom_provider"
+        | "refresh_custom_providers"
+        | "delete_custom_provider"
+        | "probe_custom_provider_models";
+    }
+  >,
+  state: SocketControlState,
+  store: CustomProviderStoreLike,
+  runtime: PiRuntimeLike,
+  sockets: WebSocketServer,
+  admissionAllowed: boolean,
+): Promise<void> {
+  const rejection = controlCommandRejection(state, command, admissionAllowed);
+  if (rejection) {
+    safeSend(socket, {
+      type: "error",
+      scope: "command",
+      operation: command.type,
+      commandId: command.commandId,
+      message: rejection,
+    });
+    return;
+  }
+
+  const fail = (message: string): void => {
+    safeSend(socket, {
+      type: "error",
+      scope: "settings",
+      operation: command.type,
+      commandId: command.commandId,
+      message,
+    });
+  };
+  const broadcast = (
+    view: CustomProviderSnapshotView,
+    commandId?: string,
+  ): void => {
+    for (const client of sockets.clients) {
+      safeSend(client, {
+        ...customProvidersSnapshotEvent(view),
+        ...(client === socket && commandId !== undefined ? { commandId } : {}),
+      });
+    }
+  };
+  const readCurrent = async (): Promise<CustomProviderSnapshotView> => {
+    try {
+      return await store.read();
+    } catch (error) {
+      return {
+        revision: "absent",
+        providers: [],
+        error: error instanceof Error ? error.message : String(error),
+        truncated: false,
+      };
+    }
+  };
+
+  if (command.type === "refresh_custom_providers") {
+    safeSend(socket, {
+      ...customProvidersSnapshotEvent(await readCurrent()),
+      commandId: command.commandId,
+    });
+    return;
+  }
+
+  if (command.type === "probe_custom_provider_models") {
+    try {
+      const result = await probeOpenAiCompatibleModels(command.baseUrl);
+      safeSend(socket, {
+        type: "custom_provider_models_probe",
+        commandId: command.commandId,
+        baseUrl: command.baseUrl,
+        models: result.models,
+        truncated: result.truncated,
+      });
+    } catch (error) {
+      fail(error instanceof Error ? error.message : String(error));
+    }
+    return;
+  }
+
+  // 写入必须经过共享配置队列：models.json 与凭据同属进程级模型配置，
+  // 刷新基线/每个 session 目录也在同一串行边界内完成。
+  let written: CustomProviderSnapshotView | undefined;
+  let writeError: unknown;
+  try {
+    await runtime.updateConfiguration(async () => {
+      try {
+        written = command.type === "save_custom_provider"
+          ? await store.save(command.provider, command.expectedRevision)
+          : await store.delete(command.providerId, command.expectedRevision);
+      } catch (error) {
+        writeError = error;
+        throw error;
+      }
+    });
+  } catch (error) {
+    // 共享配置队列会把写入错误与随后的刷新错误聚合成 AggregatedError；
+    // 写入失败的具体原因（例如 revision 过期）必须优先告知浏览器。
+    const message = writeError instanceof Error
+      ? writeError.message
+      : error instanceof Error
+        ? error.message
+        : String(error);
+    if (written) {
+      // 文件已提交，只是运行时刷新失败：如实广播新状态并说明生效条件。
+      broadcast(written);
+      fail(`已写入 models.json，但运行时刷新失败：${message}`);
+    } else {
+      fail(message);
+    }
+    return;
+  }
+  broadcast(written ?? await readCurrent(), command.commandId);
 }

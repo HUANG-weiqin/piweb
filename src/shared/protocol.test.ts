@@ -42,7 +42,7 @@ const transitionDiagnostics = {
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(59);
+    expect(PROTOCOL_VERSION).toBe(60);
   });
 
   it("accepts supported commands", () => {
@@ -272,6 +272,111 @@ describe("parseClientCommand", () => {
     expect(parseClientCommand({ type: "auth_response", authFlowId, requestId: "1", value: "code" }).type).toBe("auth_response");
     expect(parseClientCommand({ type: "cancel_auth", authFlowId }).type).toBe("cancel_auth");
     expect(parseClientCommand({ type: "close_session", sessionId }).type).toBe("close_session");
+  });
+
+  it("validates custom provider commands and their bounded inputs", () => {
+    const provider = {
+      id: "lmstudio",
+      name: "LM Studio",
+      baseUrl: "http://127.0.0.1:1234/v1",
+      api: "openai-completions",
+      auth: { kind: "env", envName: "LMSTUDIO_KEY" },
+      models: [{ id: "qwen3", contextWindow: 32_768, input: ["text", "image"] }],
+    };
+    expect(parseClientCommand({
+      type: "save_custom_provider",
+      commandId,
+      expectedRevision: "absent",
+      provider,
+    }).type).toBe("save_custom_provider");
+    expect(parseClientCommand({
+      type: "delete_custom_provider",
+      commandId,
+      expectedRevision: "absent",
+      providerId: "lmstudio",
+    }).type).toBe("delete_custom_provider");
+    expect(parseClientCommand({
+      type: "refresh_custom_providers",
+      commandId,
+    }).type).toBe("refresh_custom_providers");
+    expect(parseClientCommand({
+      type: "probe_custom_provider_models",
+      commandId,
+      baseUrl: "http://127.0.0.1:1234/v1",
+    }).type).toBe("probe_custom_provider_models");
+
+    for (const invalid of [
+      { ...provider, id: "bad id" },
+      { ...provider, baseUrl: "file:///tmp/models" },
+      { ...provider, baseUrl: "not a url" },
+      { ...provider, api: "openai-chat" },
+      { ...provider, auth: { kind: "env", envName: "1BAD" } },
+      { ...provider, auth: { kind: "literal", key: "secret" } },
+      { ...provider, models: [] },
+      { ...provider, models: [{ id: "" }] },
+      { ...provider, unexpected: true },
+    ]) {
+      expect(() => parseClientCommand({
+        type: "save_custom_provider",
+        commandId,
+        expectedRevision: "absent",
+        provider: invalid,
+      })).toThrow();
+    }
+    expect(parseClientCommand({
+      type: "probe_custom_provider_models",
+      commandId,
+      baseUrl: "https://example.com",
+    }).type).toBe("probe_custom_provider_models");
+    expect(() => parseClientCommand({
+      type: "probe_custom_provider_models",
+      commandId,
+      baseUrl: "ftp://example.com",
+    })).toThrow();
+  });
+
+  it("validates custom provider snapshots without exposing secret values", () => {
+    const snapshot = {
+      type: "custom_providers_snapshot" as const,
+      revision: "ab".repeat(32),
+      truncated: false,
+      providers: [{
+        id: "lmstudio",
+        name: "LM Studio",
+        baseUrl: "http://127.0.0.1:1234/v1",
+        api: "openai-completions",
+        storedAuth: "env" as const,
+        authEnvNames: ["LMSTUDIO_KEY"],
+        models: [{ id: "qwen3", contextWindow: 32_768, extraFields: ["cost"] }],
+        extraFields: ["headers"],
+        editable: true,
+        builtinOverride: false,
+      }],
+      commandId,
+    };
+    expect(parseServerEvent(snapshot)).toEqual(snapshot);
+    expect(() => parseServerEvent({
+      ...snapshot,
+      providers: [{ ...snapshot.providers[0], storedAuth: "key-value" }],
+    })).toThrow();
+    expect(() => parseServerEvent({
+      ...snapshot,
+      providers: [{ ...snapshot.providers[0], apiKey: "secret" }],
+    })).toThrow();
+    expect(parseServerEvent({
+      type: "custom_provider_models_probe",
+      commandId,
+      baseUrl: "http://127.0.0.1:1234/v1",
+      models: [{ id: "qwen3", contextWindow: 118_000 }],
+      truncated: true,
+    })).toMatchObject({ truncated: true });
+    expect(() => parseServerEvent({
+      type: "custom_provider_models_probe",
+      commandId,
+      baseUrl: "http://127.0.0.1:1234/v1",
+      models: [{ id: "" }],
+      truncated: false,
+    })).toThrow();
   });
 
   it("requires a nullable compaction model in role commands", () => {

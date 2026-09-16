@@ -1,6 +1,9 @@
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
+import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { CustomProviderStore } from "./custom-provider-store.js";
 import { refreshModelCatalogOnStartup } from "./model-refresh.js";
 import { PiRuntime } from "./pi-runtime.js";
 import { attachSocketServer } from "./socket-server.js";
@@ -40,6 +43,12 @@ const socketServer = attachSocketServer(
   undefined,
   process.send !== undefined,
   uiPreferences,
+  // models.json 是 Pi 自己的用户级配置：与 pi CLI 共享同一份真相，
+  // 已注册为内置 provider 的 id 只投影为不可表单编辑。
+  new CustomProviderStore({
+    modelsPath: join(getAgentDir(), "models.json"),
+    builtinProviderIds: new Set(builtinProviders().map((provider) => provider.id)),
+  }),
 );
 const startupAbortController = new AbortController();
 const startupModelRefresh = refreshModelCatalogOnStartup(
