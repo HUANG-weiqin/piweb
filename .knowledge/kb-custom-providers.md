@@ -23,7 +23,12 @@
 
 - 读：基线 `ModelRegistry` 与每个 session 的 registry 都用 SDK 默认 `modelsPath=<agentDir>/models.json`；`updateConfiguration/refreshConfiguration` 会重新 `ModelConfig.load(modelsPath)` 并重组 provider，因此写完文件后所有已打开会话与角色可用性在同一帧收敛，无需重启。
 - 写：`CustomProviderStore` 只改写 `providers.<id>` 那段文本，其它 provider、注释、缩进与未知字段逐字节保留；以文件原始字节 sha256 作 revision 做 CAS，过期写入拒绝；落盘前自检（重新去注释/尾逗号解析并比对期望结构）再原子替换（同目录 `wx` 临时文件 + rename，保留原 mode）。
-- 探测：`probeOpenAiCompatibleModels(baseUrl)` GET `${baseUrl}/models`（不带认证头、1 MiB 响应上限、8 秒总 deadline），同时接受 OpenAI `{data:[]}` 与 LM Studio 原生 `{models:[]}` 形状；随后 best-effort 用 `<origin>/api/v1/models` 富化 contextWindow / name / reasoning / input。
+- 探测：`probeOpenAiCompatibleModels(baseUrl)` GET `${baseUrl}/models`（不带认证头、1 MiB 响应上限、8 秒总 deadline），同时接受 OpenAI `{data:[]}` 与 LM Studio 原生 `{models:[]}` 形状；随后按固定顺序、共用同一 deadline 做四级 best-effort 富化（每级失败只放弃自己）：
+  1. 通用 model item 字段（零额外请求）：`max_model_len`（vLLM/SGLang）→ `context_length` → `max_context_length` 取上下文，`max_output_tokens`/`max_completion_tokens` 取输出上限；
+  2. LM Studio 原生 `<origin>/api/v1/models`：**只采信已加载实例**的 `loaded_instances[0].config.context_length`，并补 name/reasoning/input，同时丢弃显式标记为 `embedding` 的条目；
+  3. llama.cpp `<origin>/props`：`default_generation_settings.n_ctx`（per-slot，即单次请求可用量）→ 顶层 `n_ctx`；
+  4. Ollama `<origin>/api/ps`：已加载模型的 `context_length`（`<id>:latest` 与 `<id>` 双向归一）。
+  每级写入的 `contextSource` 是路径或字段名（如 `models[].max_model_len`、`/api/v1/models`、`/props`、`/api/ps`），保留给用户判断数值是否可信。
 
 ## 决策
 
@@ -34,6 +39,7 @@
 5. 客户端按需拉取（`refresh_custom_providers`），服务端不主动推送；只有 save/delete 成功后才广播快照。连接时无脑推送会打乱既有事件序列，也会把文件读取塞进握手路径。
 6. 写盘必须位于 `PiRuntime.updateConfiguration` 的共享配置队列内：`models.json` 与凭据同属进程级模型配置，写入后的刷新与通知也在同一串行边界完成。写入失败与刷新失败同时发生时，回执优先报告写入失败的具体原因。
 7. 探测得到的模型 id 必须满足线协议上限（≤256 字符），超出即丢弃：宁可少列一个模型，也不能发出一个会被发送边界判为非法并以 4002 关闭连接的事件。
+8. 上下文只写“能站得住脚”的来源：LM Studio 只用**已加载实例**的 context（`max_context_length` 是架构上限，不等于实际分配）；llama.cpp 用 per-slot 的 `n_ctx`；Ollama 用已加载模型的 `context_length`。未加载或不提供时宁可不写，由用户手填或使用 Pi 默认值（128000）。
 
 ## 认知模型
 
@@ -58,7 +64,8 @@
 - `CustomProviderStore.memory()` 是只读实例（save/delete 必抛），socket-server 的默认参数故意用它以免测试误写用户文件；生产必须由 `index.ts` 注入真实 store。
 - 不要把 apiKey 值放上线协议：wire schema 没有该字段，靠投影保证只出现 `storedAuth` 形态与变量名。
 - contextWindow 必须对齐端点**实际加载**的配置：LM Studio 的模型可能宣称 262144，而 loaded context 是 29696 或 182272；写大了会被服务端拒绝（Pi 能识别 llama.cpp/LM Studio 的溢出文案并自动压缩重试，代价是一轮失败），写小了只是少用上下文。探测值只是写入时的快照，端点上重新加载模型后需要再次探测或手改。
-- 通用 OpenAI 兼容 `/v1/models` 只有 `id/object/owned_by`，没有上下文或能力字段；只有 LM Studio 原生接口这类额外端点才提供。其它实现的拿法各不相同（vLLM/SGLang 在 item 上带 `max_model_len`、llama.cpp 有 `/props`、Ollama 需要 POST `/api/show`、TGI 有 `/info`），不要假定一个通用形状。
+- 通用 OpenAI 兼容 `/v1/models` 只有 `id/object/owned_by`，没有上下文或能力字段；只有 LM Studio 原生接口这类额外端点才提供。探测因此是四级阶梯（通用 item 字段 → LM Studio 原生 → llama.cpp `/props` → Ollama `/api/ps`），每级都必须在严格形状校验后只填空缺。Ollama 的 `/api/ps` 形状来自公开 API 文档，本仓库没有可用实例实测；它只做 best-effort 补值，缺失不影响任何现有行为。Ollama 的 `/api/show`（模型元数据里的 `context_length`）是**模型支持的上限**而不是 Ollama 实际分配的 `num_ctx`，且每模型一次 POST，所以不进入阶梯，只保留为按需查询的未来入口。
+- embedding 类条目（LM Studio 原生列表里 `type: "embedding"`）不能作为聊天模型提供给用户；未加载的模型不能借用架构上限充当实际上下文——这两条都是“不能诚实回答时就不要给数字”的具体化。
 - 探测失败（连接错误、非 JSON、两种形状都不匹配）必须以 error 回告，不能谎报为空列表；只有富化失败才静默降级——探测结果只允许被补充，不允许被富化请求破坏。
 - 本地端点离线时模型仍可能显示 available（只要有文件内占位或 `auth.json` 凭据）：这是 Pi 的语义，请求失败在运行时呈现。
 
@@ -67,3 +74,5 @@
 - [kb-server-runtime.md](kb-server-runtime.md)
 - [kb-wire-protocol.md](kb-wire-protocol.md)
 - [kb-client-state.md](kb-client-state.md)
+
+`contextSource` 是 v61 的线协议字段：设置页把它显示为“自动探测：<source>”，并在用户手动修改该行上下文后立即清除，避免展示与数值不匹配的来源。
