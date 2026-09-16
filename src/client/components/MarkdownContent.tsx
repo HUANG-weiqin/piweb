@@ -384,6 +384,8 @@ function MermaidViewer({
       <div
         ref={canvasRef}
         className={`mermaid-viewer-canvas is-${mode}`}
+        aria-label="Mermaid 图查看区域"
+        tabIndex={0}
       />
     </section>
   </div>, document.body);

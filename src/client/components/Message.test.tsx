@@ -642,8 +642,9 @@ describe("Message", () => {
     fireEvent.click(openButton);
 
     const dialog = screen.getByRole("dialog", { name: "Mermaid 图全屏查看" });
-    const canvas = dialog.querySelector(".mermaid-viewer-canvas") as HTMLElement;
+    const canvas = screen.getByLabelText("Mermaid 图查看区域");
     const diagram = within(dialog).getByRole("img", { name: "Mermaid 图" });
+    expect(canvas).toHaveAttribute("tabindex", "0");
     expect(canvas).toHaveClass("is-fit");
     expect(diagram.style.width).toBe("100%");
     expect(diagram.style.getPropertyPriority("width")).toBe("important");
