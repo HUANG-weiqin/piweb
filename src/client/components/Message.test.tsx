@@ -630,7 +630,10 @@ describe("Message", () => {
       parts: [{ kind: "text", text: "```mermaid\nflowchart LR\nA --> B\n```" }],
     };
 
-    const { container } = render(<Message message={message} />);
+    const onContentSettled = vi.fn();
+    const { container } = render(
+      <Message message={message} onContentSettled={onContentSettled} />,
+    );
     const openButton = await screen.findByRole("button", {
       name: "全屏查看 Mermaid 图",
     });
@@ -645,6 +648,7 @@ describe("Message", () => {
     expect(diagram.style.width).toBe("100%");
     expect(diagram.style.getPropertyPriority("width")).toBe("important");
     expect(mermaidMock.render).toHaveBeenCalledTimes(1);
+    expect(onContentSettled).toHaveBeenCalledTimes(1);
     expect(within(dialog).getByRole("button", {
       name: "关闭 Mermaid 图全屏查看",
     })).toHaveFocus();
@@ -663,6 +667,7 @@ describe("Message", () => {
     expect(openButton).toHaveFocus();
     expect(container.querySelector(".mermaid-diagram-viewport svg"))
       .toBe(diagram);
+    expect(onContentSettled).toHaveBeenCalledTimes(1);
   });
 
   it("does not submit a stale Mermaid render during StrictMode remounting", async () => {
