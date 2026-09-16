@@ -1,24 +1,13 @@
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import type { LoopList } from "../shared/protocol.js";
+import { CONTEXT_HINT_CUSTOM_TYPE } from "./conversation-meta.js";
 
 type ConvertToLlm = AgentSession["agent"]["convertToLlm"];
 type AgentMessage = Parameters<ConvertToLlm>[0][number];
 type LlmMessages = Awaited<ReturnType<ConvertToLlm>>;
 
 const PIWEB_WORK_RECORD_MAX_BYTES = 4096;
-
-/**
- * Hidden custom-message type for the per-minute context/work hint.
- *
- * The hint is written into session history instead of being attached to the
- * last provider message as an ephemeral suffix. An ephemeral suffix disappears
- * on the next request, which stops the provider prefix from being a strict
- * extension of the previous request and makes the ChatGPT Codex prompt cache
- * stall (re-billed input grows with every turn). Persisted hints keep every
- * request append-only.
- */
-export const CONTEXT_HINT_CUSTOM_TYPE = "piweb.context_hint.v1";
 
 /** At most one hint per minute; the fields it carries are minute-granular. */
 export const CONTEXT_HINT_MIN_INTERVAL_MS = 60_000;

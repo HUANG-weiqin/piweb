@@ -5,10 +5,10 @@ import type {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LoopList } from "../shared/protocol.js";
 import {
-  CONTEXT_HINT_CUSTOM_TYPE,
   CONTEXT_HINT_MIN_INTERVAL_MS,
   installAgentContextBudget,
 } from "./agent-context-budget.js";
+import { CONTEXT_HINT_CUSTOM_TYPE } from "./conversation-meta.js";
 
 type ConvertToLlm = AgentSession["agent"]["convertToLlm"];
 type AgentMessage = Parameters<ConvertToLlm>[0][number];

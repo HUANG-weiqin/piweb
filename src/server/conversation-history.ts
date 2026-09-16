@@ -670,6 +670,7 @@ export function projectConversationItemSlots(
       || reserved.kind === "loop_list"
       || reserved.kind === "loop_list_continue"
       || reserved.kind === "fork_context"
+      || reserved.kind === "context_hint"
     ) {
       continue;
     }

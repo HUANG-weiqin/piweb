@@ -5,6 +5,7 @@ import {
   CONVERSATION_CARD_CUSTOM_TYPE,
   CONVERSATION_MESSAGE_CUSTOM_TYPE,
   CONVERSATION_META_CUSTOM_TYPE,
+  CONTEXT_HINT_CUSTOM_TYPE,
   RUN_SETTLEMENT_CUSTOM_TYPE,
   LOOP_LIST_CUSTOM_TYPE,
   MESSAGE_DELIVERY_RECEIPT_CUSTOM_TYPE,
@@ -808,6 +809,45 @@ describe("validatePiSessionFile", () => {
       "regressed-card.jsonl",
       conversationId,
     )).toThrow(/state cannot regress/i);
+  });
+
+  it("accepts the hidden LoopList context hint without letting it carry host state", () => {
+    const conversationId = randomUUID();
+    const header = {
+      type: "session",
+      version: 3,
+      id: conversationId,
+      timestamp,
+      cwd: "E:\\work",
+    };
+    const hint = {
+      type: "custom_message",
+      id: "00000001",
+      parentId: null,
+      timestamp,
+      customType: CONTEXT_HINT_CUSTOM_TYPE,
+      content: [
+        "<piweb_ctx used=\"51.9k/272k\" auto_compact=\"70%\" remaining=\"138.5k\" />",
+        "piweb_work={\"active\":[{\"id\":\"work\",\"text\":\"Active work\"}]}",
+      ].join("\n"),
+      display: false,
+    };
+
+    expect(inspectPiSessionFile(serialize([header, hint]), "hint.jsonl"))
+      .toMatchObject({ conversationId });
+    expect(validatePiSessionFile(
+      serialize([header, hint]),
+      "hint.jsonl",
+      conversationId,
+    )).toBe(conversationId);
+    expect(() => inspectPiSessionFile(serialize([
+      header,
+      { ...hint, display: true },
+    ]), "visible-hint.jsonl")).toThrow();
+    expect(() => inspectPiSessionFile(serialize([
+      header,
+      { ...hint, details: { unexpected: true } },
+    ]), "detailed-hint.jsonl")).toThrow();
   });
 
   it("fails closed for unknown or incorrectly-carried reserved entries", () => {

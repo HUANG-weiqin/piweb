@@ -8,6 +8,7 @@ import {
 import { EDIT_BUDGET_CUSTOM_TYPE } from "./edit-budget.js";
 import {
   COMPACTION_THRESHOLD_CUSTOM_TYPE,
+  CONTEXT_HINT_CUSTOM_TYPE,
   CONVERSATION_CARD_CUSTOM_TYPE,
   CONVERSATION_MESSAGE_CUSTOM_TYPE,
   CONVERSATION_META_CUSTOM_TYPE,
@@ -972,6 +973,35 @@ describe("conversation reserved entries", () => {
       deliveredMessageIds: [],
       runSettlements: [],
     });
+    const hint = {
+      customType: CONTEXT_HINT_CUSTOM_TYPE,
+      content: "piweb_work={\"active\":[{\"id\":\"work\",\"text\":\"Active work\"}]}",
+      display: false,
+    };
+    expect(parseReservedConversationEntry(hint)).toEqual({
+      kind: "context_hint",
+      entry: hint,
+    });
+    expect(aggregateReservedConversationEntries([hint])).toMatchObject({
+      deliveredMessageIds: [],
+      runSettlements: [],
+    });
+    expect(() => parseReservedConversationEntry({
+      ...hint,
+      display: true,
+    })).toThrow();
+    expect(() => parseReservedConversationEntry({
+      ...hint,
+      details: { unexpected: true },
+    })).toThrow();
+    expect(() => parseReservedConversationEntry({
+      type: "custom",
+      id: "00000001",
+      parentId: null,
+      timestamp,
+      customType: CONTEXT_HINT_CUSTOM_TYPE,
+      data: {},
+    })).toThrow();
     expect(parseReservedConversationEntry({
       customType: "extension.state",
       data: {},

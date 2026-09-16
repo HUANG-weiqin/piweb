@@ -17,6 +17,7 @@ import {
 } from "./conversation-history.js";
 import {
   appendReservedCustomEntry,
+  CONTEXT_HINT_CUSTOM_TYPE,
   createCompactionResumeEntry,
   createConversationCardEntry,
   createConversationMessageEntry,
@@ -1384,6 +1385,39 @@ describe("projectConversationHistory", () => {
     expect(() => projectConversationItems(manager)).toThrow(
       /unknown piweb reserved/i,
     );
+  });
+
+  it("skips the persisted LoopList context hint in the projection", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    manager.appendMessage(message({
+      role: "user",
+      content: "Start a long task",
+      timestamp: 1,
+    }));
+    manager.appendCustomMessageEntry(
+      CONTEXT_HINT_CUSTOM_TYPE,
+      "piweb_work={\"active\":[{\"id\":\"work\",\"text\":\"Active work\"}]}",
+      false,
+      undefined,
+    );
+    manager.appendMessage(message({
+      role: "assistant",
+      content: [{ type: "text", text: "Acknowledged." }],
+      timestamp: 2,
+    }));
+
+    expect(projectConversationItems(manager)).toEqual([
+      expect.objectContaining({
+        kind: "message",
+        role: "user",
+        text: "Start a long task",
+      }),
+      expect.objectContaining({
+        kind: "message",
+        role: "assistant",
+        text: "Acknowledged.",
+      }),
+    ]);
   });
 
   it("projects only visible message text and session-message cards for Agent peek", () => {

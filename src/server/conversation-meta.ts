@@ -45,6 +45,17 @@ export const MAX_LOOP_LIST_CONTINUATIONS_PER_RUN = 8;
 export const CONVERSATION_ROLE_CHANGE_CUSTOM_TYPE =
   "piweb.conversation_role_change.v1";
 export const FORK_CONTEXT_CUSTOM_TYPE = "piweb.fork_context.v1";
+/**
+ * Hidden custom-message type for the per-minute LoopList/context hint written
+ * by `agent-context-budget.ts`.
+ *
+ * The hint persists in session history so provider requests stay append-only
+ * (an ephemeral suffix disappears next request and stalls the prompt cache).
+ * Every reader must therefore accept it: the fail-closed reserved-entry
+ * validation rejects unregistered `piweb.*` types and would otherwise make
+ * the whole session unreadable.
+ */
+export const CONTEXT_HINT_CUSTOM_TYPE = "piweb.context_hint.v1";
 
 const MAX_ROLE_NAME_CHARACTERS = 80;
 const MAX_ROLE_DESCRIPTION_CHARACTERS = 1_000;
@@ -635,6 +646,18 @@ const compactionResumeEntrySchema = z.object({
   }).strict(),
 }).strict();
 
+const contextHintEntrySchema = z.object({
+  customType: z.literal(CONTEXT_HINT_CUSTOM_TYPE),
+  content: limitedString(
+    "content",
+    MAX_CONVERSATION_MESSAGE_CONTENT_BYTES,
+  ),
+  display: z.literal(false),
+  // The writer never attaches details; a future shape must extend this schema
+  // explicitly instead of riding through as unvalidated host state.
+  details: z.undefined().optional(),
+}).strict();
+
 const forkContextDetailsSchema = z.object({
   forkedFromConversationId: conversationIdSchema("forkedFromConversationId"),
   forkedAt: canonicalTimestampSchema("forkedAt"),
@@ -791,6 +814,7 @@ export type MessageDeliveryReceiptEntry =
   z.infer<typeof messageDeliveryReceiptEntrySchema>;
 export type CompactionResumeEntry =
   z.infer<typeof compactionResumeEntrySchema>;
+export type ContextHintEntry = z.infer<typeof contextHintEntrySchema>;
 export type LoopListEntry = z.infer<typeof loopListEntrySchema>;
 export type LoopListContinueEntry = z.infer<typeof loopListContinueEntrySchema>;
 export type RunSettlement = z.infer<typeof runSettlementSchema>;
@@ -874,6 +898,10 @@ export type ReservedConversationEntry =
   | {
       kind: "fork_context";
       entry: ForkContextEntry;
+    }
+  | {
+      kind: "context_hint";
+      entry: ContextHintEntry;
     };
 
 export interface ReservedConversationAggregate {
@@ -998,6 +1026,12 @@ function parseCompactionResumeEntry(
   value: unknown,
 ): CompactionResumeEntry {
   return compactionResumeEntrySchema.parse(value);
+}
+
+function parseContextHintEntry(
+  value: unknown,
+): ContextHintEntry {
+  return contextHintEntrySchema.parse(value);
 }
 
 export function parseForkContextEntry(
@@ -1136,6 +1170,7 @@ export function appendReservedCustomEntry(
     || reserved.kind === "compaction_resume"
     || reserved.kind === "loop_list_continue"
     || reserved.kind === "fork_context"
+    || reserved.kind === "context_hint"
   ) {
     throw new Error("Expected a non-context piweb reserved custom entry");
   }
@@ -1293,6 +1328,12 @@ export function parseReservedConversationEntry(
     return {
       kind: "fork_context",
       entry: parseForkContextEntry(payload),
+    };
+  }
+  if (customType === CONTEXT_HINT_CUSTOM_TYPE) {
+    return {
+      kind: "context_hint",
+      entry: parseContextHintEntry(payload),
     };
   }
   throw new Error(`Unknown piweb reserved custom type: ${customType}`);
@@ -1507,6 +1548,7 @@ export function aggregateReservedConversationEntries(
       reserved.kind === "compaction_resume"
       || reserved.kind === "loop_list_continue"
       || reserved.kind === "fork_context"
+      || reserved.kind === "context_hint"
     ) {
       continue;
     }
