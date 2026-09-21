@@ -1,6 +1,6 @@
 # 客户端状态
 
-`updated: 2026-09-16`
+`updated: 2026-09-21`
 
 ## 这个模块是干什么的
 
@@ -9,6 +9,8 @@
 ## 架构
 
 `App` 持有当前 project observation sessionId/projectId、focused conversationId/focusId、服务端 `PublicState`、低频角色/会话索引、连接状态、认证弹窗和当前 focus 的 extension UI 队列。`chatReducer` 只持有当前 focus 的 message/card transcript、工具投影和 token fallback。
+
+页面级组件只接收显式 props：`SettingsDrawer` 保留 route、焦点和命令结果协调，`settings/` 下的页面只拥有各自表单或纯展示；`Chat` 保留滚动、composer 和展开状态，`transcript-blocks` 与 `MissionCommandSurface` 只做纯投影；`ConversationSidebar` 保留展开、resize 和对话框状态，分组/活跃判定与单行渲染分别位于 `conversation-grouping`、`ConversationSidebarRow`。全局 CSS 由 `styles.css` 以固定 import 顺序聚合 `styles/` 的连续职责区段，顺序就是 cascade 合同。
 
 ```text
 ServerEvent
@@ -115,8 +117,14 @@ ServerEvent
 - `src/client/App.tsx`
 - `src/client/lib/socket.ts`
 - `src/client/chat/reducer.ts`
+- `src/client/chat/transcript-blocks.ts`
 - `src/client/components/Chat.tsx`
+- `src/client/components/MissionCommandSurface.tsx`
 - `src/client/components/ConversationSidebar.tsx`
+- `src/client/components/ConversationSidebarRow.tsx`
+- `src/client/lib/conversation-grouping.ts`
+- `src/client/components/SettingsDrawer.tsx` 与 `src/client/components/settings/`
+- `src/client/styles.css` 与 `src/client/styles/`
 - `src/client/components/RoleSelectionPage.tsx`
 - `src/client/components/RoleManagerDialog.tsx`
 - `src/client/components/SessionMessageCard.tsx`

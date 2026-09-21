@@ -1,6 +1,6 @@
 # 服务端运行时
 
-`updated: 2026-09-16`
+`updated: 2026-09-21`
 
 ## 这个模块是干什么的
 
@@ -134,10 +134,13 @@
 
 共享配置、角色与 trust 归进程；conversation 与 inbox pump 归 coordinator/actor；浏览器临时交互归 focus generation；socket 归传输。任何新增状态都应先决定属于哪一层，再决定由哪条队列修改。
 
+结构模块不得改变这些 lifetime：每个 `ConversationActor` 持有一份 `ConversationProjection`，后者只拥有跨 run 单调的 projectionSeq、当前 live suffix 与基于 raw SDK message 对象身份的 durable handoff，不拥有 activeRun 或事件订阅；`ConversationExtensionUIRouter` 仍按 project conversation 生存而非按连接生存；每个 `PiConnection` 持有一份 `ManualModelRefreshGate`，它只封装单次 refresh 的 admission、公开结算与底层 drain barrier，连接仍拥有命令队列、session/generation 校验和 wire 回执。
+
 ## 入口
 
 - `src/server/pi-runtime.ts`
 - `src/server/model-refresh.ts`
+- `src/server/manual-model-refresh.ts`
 - `src/server/agent-turn-boundary.ts`
 - `src/server/agent-context-budget.ts`
 - `src/server/pi-service.ts`
@@ -145,6 +148,8 @@
 - `src/server/role-store.ts`
 - `src/server/role-catalog.ts`
 - `src/server/conversation-actor.ts`
+- `src/server/conversation-projection.ts`
+- `src/server/conversation-extension-ui-router.ts`
 - `src/server/project-session-coordinator.ts`
 - `src/server/directory-browser.ts`
 - `src/server/serial-task-queue.ts`

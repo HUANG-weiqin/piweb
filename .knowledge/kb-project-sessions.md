@@ -1,6 +1,6 @@
 # 项目与持久会话
 
-`updated: 2026-09-16`
+`updated: 2026-09-21`
 
 ## 这个模块是干什么的
 
@@ -95,7 +95,7 @@ focus 切换先 exact open：warm actor 直接复用；cold actor 在取得 writ
 - store 在项目会话串行边界内完整验证原文件与候选前缀，复验路径及扫描期间文件身份，写临时文件后原子替换；候选不是 message、文件变化、链接、损坏或身份错配都不覆盖原文件。
 - durable 替换后，同一 actor 必须 reload SessionManager，并从其 active context 重建 Agent 内存 messages、runId 集合和压缩阈值。若原子替换已提交但随后 catalog refresh 或内存同步失败，store 必须明确报告已提交，actor 进入 fatal 状态，禁止用旧 parent 继续追加。
 
-Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 在项目 actor 生命周期内保留一个共享 handle，socket server 关闭时统一释放。registry 末次 release 后逐出 store；相同路径随后代表一个新项目时必须重新读取磁盘身份，不能让缓存反向覆盖项目生命周期。
+Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 在项目 actor 生命周期内保留一个共享 handle，socket server 关闭时统一释放。`project-store-registry.ts` 整体拥有 handle 复用/refcount 与 conversation writer/deletion lease 的 FIFO 状态机；磁盘 namespace、catalog 和 proof 仍只归 `ProjectStore`。registry 末次 release 后逐出 store；相同路径随后代表一个新项目时必须重新读取磁盘身份，不能让缓存反向覆盖项目生命周期。
 
 ## Conversation profile 与 reserved entries
 
@@ -213,14 +213,17 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 ## 入口
 
 - `src/server/project-store.ts`
+- `src/server/project-store-registry.ts`
 - `src/server/session-file.ts`
 - `src/server/project-snapshot.ts`
 - `src/server/conversation-history.ts`
+- `src/server/conversation-projection.ts`
 - `src/server/conversation-meta.ts`
 - `src/server/project-inbox.ts`
 - `src/server/conversation-notebook.ts`
 - `src/server/notebook-tools.ts`
 - `src/server/project-session-coordinator.ts`
+- `src/server/conversation-extension-ui-router.ts`
 - `src/server/role-store.ts`
 - `src/server/pi-service.ts`
 - `src/server/pi-runtime.ts`
