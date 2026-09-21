@@ -312,15 +312,15 @@ function recordOutputUsage(
   outputTokens: number,
   outputElapsedMs: number | undefined,
 ): RunOutputRateMeasurement | undefined {
-  if (
-    measurement?.runId !== runId
-    || outputElapsedMs === undefined
-  ) return measurement;
+  if (outputElapsedMs === undefined) return measurement;
+  const current = measurement?.runId === runId
+    ? measurement
+    : { runId, outputTokens: 0, outputElapsedMs: 0 };
 
   return {
-    ...measurement,
-    outputTokens: measurement.outputTokens + outputTokens,
-    outputElapsedMs: measurement.outputElapsedMs + outputElapsedMs,
+    ...current,
+    outputTokens: current.outputTokens + outputTokens,
+    outputElapsedMs: current.outputElapsedMs + outputElapsedMs,
   };
 }
 
@@ -330,12 +330,14 @@ function estimateOutputRate(
   estimatedOutputTokens: number,
   segmentOutputElapsedMs: number,
 ): LiveOutputRate | undefined {
-  if (measurement?.runId !== runId || estimatedOutputTokens <= 0) return;
-
-  const outputElapsedMs = measurement.outputElapsedMs + segmentOutputElapsedMs;
+  if (estimatedOutputTokens <= 0) return;
+  const current = measurement?.runId === runId
+    ? measurement
+    : { outputTokens: 0, outputElapsedMs: 0 };
+  const outputElapsedMs = current.outputElapsedMs + segmentOutputElapsedMs;
   if (outputElapsedMs <= 0) return;
 
-  const outputTokens = measurement.outputTokens + estimatedOutputTokens;
+  const outputTokens = current.outputTokens + estimatedOutputTokens;
   return {
     runId,
     outputTokens,
@@ -553,7 +555,6 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             ...items.slice(0, placeholderIndex),
             { ...placeholder, id: event.projectionId },
           ]),
-          liveOutputRate: undefined,
         };
       }
     }
@@ -574,7 +575,6 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         tools: [],
         parts: [],
       }]),
-      liveOutputRate: undefined,
     };
   }
   if (event.type === "run_queued") {
@@ -708,9 +708,12 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       event.outputElapsedMs,
     );
     const nextState = withItems(state, items);
-    return outputRateMeasurement === state.outputRateMeasurement
-      ? { ...nextState, liveOutputRate: undefined }
-      : { ...nextState, outputRateMeasurement, liveOutputRate: undefined };
+    if (outputRateMeasurement === state.outputRateMeasurement) return nextState;
+    return {
+      ...nextState,
+      outputRateMeasurement,
+      liveOutputRate: completeOutputRate(outputRateMeasurement, action.runId),
+    };
   }
 
   return state;

@@ -1123,6 +1123,23 @@ describe("chatReducer", () => {
         outputElapsedMs: 750,
       },
     });
+    expect(state.liveOutputRate).toEqual({
+      runId: RUN_1,
+      outputTokens: 6,
+      outputElapsedMs: 750,
+      tokensPerSecond: 8,
+    });
+    state = chatReducer(state, {
+      ...FOCUS_A_1,
+      type: "session",
+      runId: RUN_1,
+      event: {
+        type: "assistant_message_started",
+        projectionId: "assistant-after-tool",
+      },
+    });
+    expect(state.liveOutputRate?.tokensPerSecond).toBe(8);
+
     state = chatReducer(state, {
       ...FOCUS_A_1,
       type: "session",
@@ -1133,6 +1150,60 @@ describe("chatReducer", () => {
       runId: RUN_1,
       outputTokens: 6,
       outputElapsedMs: 750,
+      tokensPerSecond: 8,
+    });
+  });
+
+  it("restarts a live rate from estimates after an active-run snapshot", () => {
+    let state = chatReducer(focusedState(), {
+      ...FOCUS_A_1,
+      type: "hydrate",
+      projectionSeq: 0,
+      items: [],
+    });
+    state = chatReducer(state, {
+      ...FOCUS_A_1,
+      type: "session",
+      runId: RUN_1,
+      projectionSeq: 1,
+      event: { type: "run_started" },
+    });
+    state = chatReducer(state, {
+      ...FOCUS_A_1,
+      type: "session",
+      runId: RUN_1,
+      projectionSeq: 2,
+      event: {
+        type: "output_estimate",
+        estimatedOutputTokens: 4,
+        outputElapsedMs: 500,
+      },
+    });
+    expect(state.liveOutputRate?.tokensPerSecond).toBe(8);
+
+    state = chatReducer(state, {
+      ...FOCUS_A_1,
+      type: "hydrate",
+      projectionSeq: 2,
+      items: [],
+    });
+    expect(state.outputRateMeasurement).toBeUndefined();
+    state = chatReducer(state, {
+      ...FOCUS_A_1,
+      type: "session",
+      runId: RUN_1,
+      projectionSeq: 3,
+      event: {
+        type: "output_estimate",
+        estimatedOutputTokens: 8,
+        outputElapsedMs: 1_000,
+      },
+    });
+
+    expect(state.liveOutputRate).toEqual({
+      runId: RUN_1,
+      outputTokens: 8,
+      outputElapsedMs: 1_000,
       tokensPerSecond: 8,
     });
   });
