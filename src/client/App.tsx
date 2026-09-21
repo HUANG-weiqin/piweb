@@ -45,10 +45,7 @@ import {
   type SettingOperationResult,
   type SettingOperationResults,
 } from "./components/SettingsDrawer";
-import {
-  ConversationSidebar,
-  conversationDisplayOrdinal,
-} from "./components/ConversationSidebar";
+import { ConversationSidebar } from "./components/ConversationSidebar";
 import { DirectoryBrowserDialog } from "./components/DirectoryBrowserDialog";
 import {
   ExtensionDialog,
@@ -73,6 +70,7 @@ import {
   conversationTitleLookupKey,
   createConversationTitleLookup,
 } from "./lib/conversation-display";
+import { conversationDisplayOrdinal } from "./lib/conversation-grouping";
 import {
   decodePhoneHistoryRoute,
   phoneHistoryRouteEquals,

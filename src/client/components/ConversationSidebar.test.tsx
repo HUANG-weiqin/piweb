@@ -11,10 +11,8 @@ import {
 import { useCallback, useState, type ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ConversationSummary } from "../../shared/protocol";
-import {
-  ConversationSidebar,
-  conversationDisplayOrdinal,
-} from "./ConversationSidebar";
+import { conversationDisplayOrdinal } from "../lib/conversation-grouping";
+import { ConversationSidebar } from "./ConversationSidebar";
 
 const baseConversation: ConversationSummary = {
   id: "01234567-89ab-cdef-0123-456789abcdef",

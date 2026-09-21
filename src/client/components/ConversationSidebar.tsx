@@ -26,8 +26,6 @@ import {
   type ConversationRowRenamePresentation,
 } from "./ConversationSidebarRow";
 
-export { conversationDisplayOrdinal } from "../lib/conversation-grouping";
-
 const DEFAULT_SIDEBAR_WIDTH = 306;
 const MIN_SIDEBAR_WIDTH = 240;
 const MAX_SIDEBAR_WIDTH = 640;
@@ -128,7 +126,8 @@ function ConversationGroupCard({
   onRequestDelete(conversationId: string): void;
   onRequestFork?(conversationId: string): void;
 }) {
-  const { root, members, conversations } = group;
+  const { root, members } = group;
+  const conversations = [root, ...members];
   const controlsId = `conversation-group-${root.id}`;
   const summaryId = `${controlsId}-summary`;
   const ordinaryIdle = members.filter((conversation) =>
@@ -311,12 +310,9 @@ function ConversationSidebarView({
     && grouped.entries.some((entry) =>
       entry.kind === "group"
       && entry.group.root.id === deleteCandidate.id
-      && entry.group.conversations.some((conversation) => (
-        conversation.id !== deleteCandidate.id
-        && (
-          conversation.compacting
-          || isConversationActive(conversation, busyConversationId)
-        )
+      && entry.group.members.some((conversation) => (
+        conversation.compacting
+        || isConversationActive(conversation, busyConversationId)
       ))
     );
   const renameCandidate = conversations.find(

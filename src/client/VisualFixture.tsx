@@ -7,14 +7,12 @@ import type {
 } from "../shared/protocol";
 import type { ChatState } from "./chat/reducer";
 import { Chat } from "./components/Chat";
+import { ConversationSidebar } from "./components/ConversationSidebar";
 import { SettingsDrawer } from "./components/SettingsDrawer";
-import { createConversationTitleLookup } from "./lib/conversation-display";
-import { usePhoneViewport } from "./lib/use-phone-viewport";
-import {
-  ConversationSidebar,
-  conversationDisplayOrdinal,
-} from "./components/ConversationSidebar";
 import { WorkspaceRail, workspaceKey } from "./components/WorkspaceRail";
+import { createConversationTitleLookup } from "./lib/conversation-display";
+import { conversationDisplayOrdinal } from "./lib/conversation-grouping";
+import { usePhoneViewport } from "./lib/use-phone-viewport";
 
 const ACTIVE_CWD = "E:\\workspaces\\piweb";
 const ACTIVE_CONVERSATION_ID = "11111111-1111-4111-8111-111111111111";

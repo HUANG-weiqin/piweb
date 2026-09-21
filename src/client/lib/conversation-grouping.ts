@@ -6,14 +6,13 @@ import {
 export interface ConversationGroup {
   root: ConversationSummary;
   members: ConversationSummary[];
-  conversations: ConversationSummary[];
 }
 
-export type GroupedConversationEntry =
+type GroupedConversationEntry =
   | { kind: "group"; group: ConversationGroup }
   | { kind: "conversation"; conversation: ConversationSummary };
 
-export interface ConversationGrouping {
+interface ConversationGrouping {
   entries: GroupedConversationEntry[];
   rootByConversationId: Map<string, string>;
 }
@@ -93,12 +92,11 @@ export function groupConversations(
           : left.conversation.id.localeCompare(right.conversation.id);
       })
       .map(({ conversation }) => conversation);
-    const groupedConversations = [root, ...members];
     rootByConversationId.set(root.id, root.id);
     for (const member of members) {
       rootByConversationId.set(member.id, root.id);
     }
-    groups.push({ root, members, conversations: groupedConversations });
+    groups.push({ root, members });
   }
 
   const entries: GroupedConversationEntry[] = [
