@@ -12,15 +12,21 @@ import {
 } from "react";
 import {
   MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
-  type ConversationActivity,
   type ConversationSummary,
 } from "../../shared/protocol";
+import { conversationDisplayTitle } from "../lib/conversation-display";
 import {
-  conversationDisplayTitle,
-  shortConversationHandle,
-} from "../lib/conversation-display";
+  groupConversations,
+  isConversationActive,
+  type ConversationGroup,
+} from "../lib/conversation-grouping";
 import { useModalFocus } from "../lib/use-modal-focus";
-import { ActivitySpinner } from "./ActivitySpinner";
+import {
+  ConversationRow,
+  type ConversationRowRenamePresentation,
+} from "./ConversationSidebarRow";
+
+export { conversationDisplayOrdinal } from "../lib/conversation-grouping";
 
 const DEFAULT_SIDEBAR_WIDTH = 306;
 const MIN_SIDEBAR_WIDTH = 240;
@@ -42,10 +48,7 @@ function clampSidebarWidth(width: number): number {
   );
 }
 
-interface RenamePresentation {
-  name: string;
-  status: "syncing" | "unknown" | "committed";
-}
+type RenamePresentation = ConversationRowRenamePresentation;
 
 interface ConversationSidebarProps {
   conversations: ConversationSummary[];
@@ -86,409 +89,9 @@ function formatLastActive(value: string): string {
   return LAST_ACTIVE_FORMATTER.format(date);
 }
 
-function activityRank(activity: ConversationActivity | undefined): number {
-  switch (activity?.kind) {
-    case "running": return 0;
-    case "queued": return 1;
-    case "cancelling": return 2;
-    case "waiting": return 3;
-    default: return 4;
-  }
-}
-
-function isActive(
-  conversation: ConversationSummary,
-  busyConversationId?: string,
-): boolean {
-  return conversation.id === busyConversationId
-    || activityRank(conversation.activity) < 4;
-}
-
 function latestTimestamp(conversations: readonly ConversationSummary[]): number {
   return Math.max(...conversations.map(({ updatedAt }) => Date.parse(updatedAt)));
 }
-
-interface ConversationGroup {
-  root: ConversationSummary;
-  members: ConversationSummary[];
-  conversations: ConversationSummary[];
-}
-
-type GroupedEntry =
-  | { kind: "group"; group: ConversationGroup }
-  | { kind: "conversation"; conversation: ConversationSummary };
-
-function groupProjection(
-  conversations: ConversationSummary[],
-  busyConversationId?: string,
-): {
-  entries: GroupedEntry[];
-  rootByConversationId: Map<string, string>;
-} {
-  const summariesById = new Map(
-    conversations.map((conversation) => [conversation.id, conversation]),
-  );
-  const descendantsByRoot = new Map<string, ConversationSummary[]>();
-  for (const conversation of conversations) {
-    const rootConversationId = conversation.rootConversationId;
-    if (
-      rootConversationId === undefined
-      || rootConversationId === conversation.id
-      || !summariesById.has(rootConversationId)
-    ) {
-      continue;
-    }
-    const descendants = descendantsByRoot.get(rootConversationId);
-    if (descendants === undefined) {
-      descendantsByRoot.set(rootConversationId, [conversation]);
-    } else {
-      descendants.push(conversation);
-    }
-  }
-
-  const rootByConversationId = new Map<string, string>();
-  const groups: ConversationGroup[] = [];
-  for (const [rootConversationId, descendants] of descendantsByRoot) {
-    const root = summariesById.get(rootConversationId);
-    if (root === undefined) continue;
-    const members = descendants
-      .map((conversation) => ({ conversation }))
-      .sort((left, right) => {
-        const attentionDifference =
-          Number(Boolean(right.conversation.attention))
-          - Number(Boolean(left.conversation.attention));
-        if (attentionDifference !== 0) return attentionDifference;
-        const activeDifference =
-          Number(isActive(right.conversation, busyConversationId))
-          - Number(isActive(left.conversation, busyConversationId));
-        if (activeDifference !== 0) return activeDifference;
-        const activityDifference =
-          activityRank(left.conversation.activity)
-          - activityRank(right.conversation.activity);
-        if (activityDifference !== 0) return activityDifference;
-        const unreadDifference =
-          Number(Boolean(right.conversation.unread))
-          - Number(Boolean(left.conversation.unread));
-        if (unreadDifference !== 0) return unreadDifference;
-        const updatedDifference =
-          Date.parse(right.conversation.updatedAt)
-          - Date.parse(left.conversation.updatedAt);
-        return Number.isFinite(updatedDifference) && updatedDifference !== 0
-          ? updatedDifference
-          : left.conversation.id.localeCompare(right.conversation.id);
-      })
-      .map(({ conversation }) => conversation);
-    const groupedConversations = [root, ...members];
-    rootByConversationId.set(root.id, root.id);
-    for (const member of members) {
-      rootByConversationId.set(member.id, root.id);
-    }
-    groups.push({ root, members, conversations: groupedConversations });
-  }
-
-  const entries: GroupedEntry[] = [
-    ...groups.map((group) => ({ kind: "group" as const, group })),
-    ...conversations
-      .filter(({ id }) => !rootByConversationId.has(id))
-      .map((conversation) => ({
-        kind: "conversation" as const,
-        conversation,
-      })),
-  ];
-  entries.sort((left, right) => {
-    const leftRoot = left.kind === "group" ? left.group.root : left.conversation;
-    const rightRoot = right.kind === "group" ? right.group.root : right.conversation;
-    const createdDifference = Date.parse(rightRoot.createdAt)
-      - Date.parse(leftRoot.createdAt);
-    if (createdDifference !== 0) return createdDifference;
-    if (leftRoot.id === rightRoot.id) return 0;
-    return leftRoot.id < rightRoot.id ? -1 : 1;
-  });
-  return { entries, rootByConversationId };
-}
-
-export function conversationDisplayOrdinal(
-  conversations: ConversationSummary[],
-  conversationId: string,
-): number | undefined {
-  const grouped = groupProjection(conversations);
-  const rootConversationId = grouped.rootByConversationId.get(conversationId)
-    ?? conversationId;
-  const index = grouped.entries.findIndex((entry) => entry.kind === "group"
-    ? entry.group.root.id === rootConversationId
-    : entry.conversation.id === rootConversationId
-  );
-  return index < 0 ? undefined : index + 1;
-}
-
-function ActivityIndicator({
-  activity,
-}: {
-  activity: ConversationActivity | undefined;
-}) {
-  if (activity?.kind === "queued" || activity?.kind === "running") {
-    const label = activity.kind === "queued" ? "排队中" : "运行中";
-    return (
-      <span
-        className={`conversation-activity-indicator activity-${activity.kind}`}
-        role="status"
-        aria-label={label}
-        title={label}
-      >
-        <ActivitySpinner className="conversation-activity-spinner" />
-      </span>
-    );
-  }
-
-  switch (activity?.kind) {
-    case "waiting":
-      return (
-        <span
-          className="conversation-activity-indicator activity-waiting"
-          role="status"
-          aria-label="等待其他会话"
-          title="等待其他会话"
-        >
-          ⌛
-        </span>
-      );
-    case "cancelling":
-      return (
-        <span
-          className="conversation-activity-indicator activity-cancelling"
-          role="status"
-          aria-label="正在终止"
-          title="正在终止"
-        >
-          ■
-        </span>
-      );
-    default:
-      return null;
-  }
-}
-
-type ConversationRowHierarchy = "root" | "member" | "standalone";
-
-const ConversationRow = memo(function ConversationRow({
-  conversation,
-  hierarchy,
-  ordinal,
-  selected,
-  navigationEnabled,
-  actionsEnabled,
-  deletionBlocked,
-  cascadeDeleteBlocked = false,
-  renamePresentation,
-  busy,
-  onSelect,
-  onRequestRename,
-  onRequestDelete,
-  onRequestFork,
-}: {
-  conversation: ConversationSummary;
-  hierarchy: ConversationRowHierarchy;
-  ordinal?: string;
-  selected: boolean;
-  navigationEnabled: boolean;
-  actionsEnabled: boolean;
-  deletionBlocked: boolean;
-  cascadeDeleteBlocked?: boolean;
-  renamePresentation?: RenamePresentation;
-  busy: boolean;
-  onSelect(conversationId: string): void;
-  onRequestRename(conversation: ConversationSummary): void;
-  onRequestDelete(conversationId: string): void;
-  onRequestFork?(conversationId: string): void;
-}) {
-  const title = renamePresentation?.name ?? conversationDisplayTitle(conversation);
-  const active = busy || (conversation.activity?.kind ?? "idle") !== "idle";
-  const compacting = conversation.compacting;
-  const actionBlocked = active || compacting;
-  const renameUnresolved = renamePresentation?.status === "syncing"
-    || renamePresentation?.status === "unknown";
-  const classes = [
-    "conversation-sidebar-item",
-    `hierarchy-${hierarchy}`,
-    `activity-${conversation.activity?.kind ?? "idle"}`,
-    selected ? "selected" : "",
-    conversation.attention ? "needs-attention" : "",
-    conversation.unread ? "has-unread" : "",
-  ].filter(Boolean).join(" ");
-
-  return (
-    <li className={classes} data-conversation-id={conversation.id}>
-      <button
-        type="button"
-        className="conversation-sidebar-conversation"
-        aria-current={selected ? "page" : undefined}
-        aria-label={selected ? `当前会话 ${title}` : `打开会话 ${title}`}
-        disabled={!navigationEnabled}
-        onClick={() => onSelect(conversation.id)}
-      >
-        {ordinal && (
-          <span className="conversation-sidebar-ordinal" aria-hidden="true">
-            {ordinal}
-          </span>
-        )}
-        {hierarchy !== "member" && (
-          <span className="conversation-sidebar-kind">
-            {hierarchy === "root" ? "主任务" : "主会话"}
-          </span>
-        )}
-        <span className="conversation-sidebar-primary">
-          <span className="conversation-sidebar-title">{title}</span>
-          <span className="conversation-sidebar-indicators">
-            {hierarchy !== "member"
-              && conversation.createdBy?.kind === "conversation"
-              && (
-                <span
-                  className="conversation-agent-badge"
-                  title="由 Agent 创建"
-                >
-                  Agent
-                </span>
-              )}
-            <ActivityIndicator activity={conversation.activity} />
-            {compacting && (
-              <span
-                className="conversation-compacting-indicator"
-                role="status"
-                aria-label="正在压缩上下文"
-                title="正在压缩上下文"
-              >
-                压缩
-              </span>
-            )}
-            {conversation.attention && (
-              <span
-                className="conversation-attention-indicator"
-                role="status"
-                aria-label="需要处理"
-                title="需要处理"
-              >
-                !
-              </span>
-            )}
-            {renamePresentation?.status === "syncing" && (
-              <span
-                className="conversation-activity-indicator activity-waiting"
-                role="status"
-                aria-label="名称同步中"
-                title="名称同步中"
-              >⌛</span>
-            )}
-            {renamePresentation?.status === "unknown" && (
-              <span
-                className="conversation-attention-indicator"
-                role="status"
-                aria-label="名称保存状态未确认；点击会话重新检查"
-                title="名称保存状态未确认；点击会话重新检查"
-              >!</span>
-            )}
-            {conversation.unread && (
-              <span
-                className="conversation-unread-indicator"
-                role="status"
-                aria-label="未读消息"
-                title="未读消息"
-              />
-            )}
-          </span>
-        </span>
-        <span className="conversation-sidebar-identity">
-          <span className="conversation-sidebar-role">
-            {conversation.role?.name ?? "角色加载中"}
-          </span>
-          <span
-            className="conversation-sidebar-handle"
-            title={conversation.id}
-          >
-            {shortConversationHandle(conversation.id)}
-          </span>
-          {hierarchy === "member"
-            && conversation.createdBy?.kind === "conversation"
-            && (
-              <span
-                className="conversation-agent-badge"
-                title="由 Agent 创建"
-              >
-                Agent
-              </span>
-            )}
-        </span>
-        <time
-          className="conversation-sidebar-updated"
-          dateTime={conversation.updatedAt}
-        >
-          最后活跃 {formatLastActive(conversation.updatedAt)}
-        </time>
-      </button>
-      <div className="conversation-sidebar-actions">
-        <button
-          type="button"
-          className="conversation-sidebar-fork ghost"
-          aria-label={`分支会话 ${title}`}
-          disabled={
-            !actionsEnabled
-            || !onRequestFork
-            || actionBlocked
-          }
-          title={active
-            ? "活跃会话结算后可以分支"
-            : compacting
-            ? "上下文压缩完成后可以分支"
-            : "分支当前上下文为新会话"}
-          onClick={() => onRequestFork?.(conversation.id)}
-        >
-          分支
-        </button>
-        <button
-          type="button"
-          className="conversation-sidebar-rename ghost"
-          aria-label={`重命名会话 ${title}`}
-          disabled={
-            !actionsEnabled
-            || actionBlocked
-            || renameUnresolved
-          }
-          title={active
-            ? "活跃会话结算后可以重命名"
-            : compacting
-            ? "上下文压缩完成后可以重命名"
-            : renameUnresolved
-            ? "名称状态确定后可以重命名"
-            : "重命名会话"}
-          onClick={() => onRequestRename(conversation)}
-        >
-          改名
-        </button>
-        <button
-          type="button"
-          className="conversation-sidebar-delete ghost danger"
-          aria-label={`删除会话 ${title}`}
-          disabled={
-            !actionsEnabled
-            || deletionBlocked
-            || cascadeDeleteBlocked
-            || actionBlocked
-            || renameUnresolved
-          }
-          title={active
-            ? "活跃会话需先终止并等待结算"
-            : compacting || cascadeDeleteBlocked
-            ? "上下文压缩完成后可以删除"
-            : renameUnresolved
-            ? "名称状态确定后可以删除"
-            : "删除会话"}
-          onClick={() => onRequestDelete(conversation.id)}
-        >
-          删除
-        </button>
-      </div>
-    </li>
-  );
-});
 
 function ConversationGroupCard({
   group,
@@ -530,7 +133,7 @@ function ConversationGroupCard({
   const summaryId = `${controlsId}-summary`;
   const ordinaryIdle = members.filter((conversation) =>
     conversation.id !== currentConversationId
-    && !isActive(conversation, busyConversationId)
+    && !isConversationActive(conversation, busyConversationId)
     && !conversation.compacting
     && !conversation.attention
     && !conversation.unread
@@ -541,7 +144,7 @@ function ConversationGroupCard({
       : [
           ...members.filter((conversation) =>
             conversation.id === currentConversationId
-            || isActive(conversation, busyConversationId)
+            || isConversationActive(conversation, busyConversationId)
             || conversation.compacting
             || conversation.attention
             || conversation.unread
@@ -592,10 +195,14 @@ function ConversationGroupCard({
           deletionBlocked={deletionBlocked}
           cascadeDeleteBlocked={conversations.some((conversation) => (
             conversation.id !== root.id
-            && (conversation.compacting || isActive(conversation, busyConversationId))
+            && (
+              conversation.compacting
+              || isConversationActive(conversation, busyConversationId)
+            )
           ))}
           renamePresentation={renamePresentations?.get(root.id)}
           busy={root.id === busyConversationId}
+          formatLastActive={formatLastActive}
           onSelect={onSelect}
           onRequestRename={onRequestRename}
           onRequestDelete={onRequestDelete}
@@ -632,6 +239,7 @@ function ConversationGroupCard({
               deletionBlocked={deletionBlocked}
               renamePresentation={renamePresentations?.get(conversation.id)}
               busy={conversation.id === busyConversationId}
+              formatLastActive={formatLastActive}
               onSelect={onSelect}
               onRequestRename={onRequestRename}
               onRequestDelete={onRequestDelete}
@@ -690,14 +298,14 @@ function ConversationSidebarView({
   const observedFocusedConversationId = useRef<string | undefined>(undefined);
   const lastFocusedRoot = useRef<string | undefined>(undefined);
   const grouped = useMemo(
-    () => groupProjection(conversations, busyConversationId),
+    () => groupConversations(conversations, busyConversationId),
     [conversations, busyConversationId],
   );
   const deleteCandidate = conversations.find(
     ({ id }) => id === confirmDeleteConversationId,
   );
   const deleteCandidateActive = deleteCandidate !== undefined
-    && isActive(deleteCandidate, busyConversationId);
+    && isConversationActive(deleteCandidate, busyConversationId);
   const deleteCandidateCompacting = deleteCandidate?.compacting === true;
   const deleteCandidateCascadeBlocked = deleteCandidate !== undefined
     && grouped.entries.some((entry) =>
@@ -705,14 +313,17 @@ function ConversationSidebarView({
       && entry.group.root.id === deleteCandidate.id
       && entry.group.conversations.some((conversation) => (
         conversation.id !== deleteCandidate.id
-        && (conversation.compacting || isActive(conversation, busyConversationId))
+        && (
+          conversation.compacting
+          || isConversationActive(conversation, busyConversationId)
+        )
       ))
     );
   const renameCandidate = conversations.find(
     ({ id }) => id === renameConversationId,
   );
   const renameCandidateActive = renameCandidate !== undefined
-    && isActive(renameCandidate, busyConversationId);
+    && isConversationActive(renameCandidate, busyConversationId);
   const renameCandidateCompacting = renameCandidate?.compacting === true;
   const renameName = renameDraft.trim();
   const renameBlocked = !actionsEnabled || renameCandidateActive || renameCandidateCompacting;
@@ -960,6 +571,7 @@ function ConversationSidebarView({
                 deletionBlocked={deletionBlocked}
                 renamePresentation={renamePresentations?.get(entry.conversation.id)}
                 busy={entry.conversation.id === busyConversationId}
+                formatLastActive={formatLastActive}
                 onSelect={onSelect}
                 onRequestRename={requestRename}
                 onRequestDelete={requestDelete}
