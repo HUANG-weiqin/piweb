@@ -448,6 +448,7 @@ function renderSurface(surface: string): ReactNode {
     case "context-tooltip":
       return <ContextTooltipSurface />;
     case "activity-expanded":
+    case "commitment-expanded":
     case "jump-latest":
     case "jump-latest-focus":
       return <WorkbenchOverlay />;

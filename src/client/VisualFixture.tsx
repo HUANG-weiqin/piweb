@@ -220,6 +220,10 @@ const LONG_TOOL_OUTPUT = Array.from(
   { length: 28 },
   (_, index) => `${String(index + 1).padStart(2, "0")} | visual-ledger-check | ${index % 3 === 0 ? "PASS" : "STABLE"}`,
 ).join("\n");
+const LONG_EDIT_BUDGET_OUTPUT = Array.from(
+  { length: 18 },
+  (_, index) => `${String(index + 1).padStart(2, "0")} | visual-edit-budget | file boundary ${index + 1} verified`,
+).join("\n");
 
 function createChat(): ChatState {
   return {
@@ -286,6 +290,17 @@ function createChat(): ChatState {
           }],
           armed: true,
         },
+      },
+      status: "done",
+    }, {
+      id: "tool-edit-budget",
+      name: "request_edit_budget",
+      args: {
+        fileCount: 3,
+        reason: "固定长内容的展开、滚动与对齐边界。",
+      },
+      result: {
+        content: [{ type: "text", text: LONG_EDIT_BUDGET_OUTPUT }],
       },
       status: "done",
     }, {
@@ -359,6 +374,9 @@ function createChat(): ChatState {
     }, {
       kind: "tool",
       toolId: "tool-todo-write",
+    }, {
+      kind: "tool",
+      toolId: "tool-edit-budget",
     }, {
       kind: "text",
       text: "编辑范围已经锁定，现在运行视觉验证。",

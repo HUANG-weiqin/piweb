@@ -45,8 +45,11 @@ const scenes: Array<{
     expect(dialog).toBeInTheDocument();
     expect(container.querySelector(".drawer[data-settings-route='home']"))
       .toBeInTheDocument();
+    expect(dialog.querySelectorAll(".settings-menu-row")).toHaveLength(3);
     expect(within(dialog).getByRole("button", { name: "打开外观设置" }))
       .toHaveTextContent("Quiet Rebel");
+    expect(within(dialog).getByRole("button", { name: "打开自定义提供商设置" }))
+      .toBeInTheDocument();
     expect(within(dialog).queryByRole("radio")).not.toBeInTheDocument();
   },
 }, {
@@ -154,6 +157,20 @@ const scenes: Array<{
     expect(ledger.open).toBe(true);
     expect(tools.open).toBe(true);
     expect(tools.querySelectorAll("details.tool")).toHaveLength(7);
+  },
+}, {
+  surface: "commitment-expanded",
+  group: "A",
+  assertSurface: (container) => {
+    const card = container.querySelector(
+      "details.commitment-card.is-edit-budget",
+    ) as HTMLDetailsElement;
+    expect(card).toBeInTheDocument();
+    fireEvent.click(card.querySelector(":scope > summary") as HTMLElement);
+
+    expect(card.open).toBe(true);
+    expect(card.querySelector(".tool-text"))
+      .toHaveTextContent("visual-edit-budget");
   },
 }, ...(["jump-latest", "jump-latest-focus"] as const).map((surface) => ({
   surface,

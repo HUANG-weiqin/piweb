@@ -78,6 +78,9 @@ describe("VisualFixture", () => {
     }
     expect(screen.getByRole("separator", { name: "上下文已压缩：模型未记录" }))
       .toBeInTheDocument();
+    expect(container.querySelectorAll("details.commitment-card"))
+      .toHaveLength(1);
+    expect(screen.getByText("BUDGET ESTIMATE")).toBeInTheDocument();
     expect(screen.getByText("01", { selector: ".topbar-session-ordinal" }))
       .toBeInTheDocument();
     expect(screen.getByText("4 AGENTS")).toBeInTheDocument();

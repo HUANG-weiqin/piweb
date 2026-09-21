@@ -1416,7 +1416,7 @@ async function inspectMobileSettings(client, scrolled = false) {
       issues.push("Settings close target is smaller than 44px");
     }
     if (route === "home") {
-      if (menuRows.length !== 2) issues.push("Settings HOME does not have exactly two menu rows");
+      if (menuRows.length !== 3) issues.push("Settings HOME does not have exactly three menu rows");
       if (options.length > 0 || drawer?.querySelector('select[aria-label="提供商"], button[aria-label="刷新模型"]')) {
         issues.push("Settings HOME exposes dedicated-page controls");
       }
