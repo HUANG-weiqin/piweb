@@ -424,6 +424,12 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       )
     ) return state;
     const items = normalizeHistory(action.items);
+    const preserveActiveOutputRate = action.completedOutputRate === undefined
+      && sameFocus(state.focus, action)
+      && (
+        state.liveOutputRate !== undefined
+        || state.outputRateMeasurement !== undefined
+      );
     return {
       ...withItems(state, items),
       focus: {
@@ -441,8 +447,12 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             contentTruncated: action.historyWindow.contentTruncated,
           },
       completedOutputRate: action.completedOutputRate,
-      liveOutputRate: undefined,
-      outputRateMeasurement: undefined,
+      liveOutputRate: preserveActiveOutputRate
+        ? state.liveOutputRate
+        : undefined,
+      outputRateMeasurement: preserveActiveOutputRate
+        ? state.outputRateMeasurement
+        : undefined,
     };
   }
 

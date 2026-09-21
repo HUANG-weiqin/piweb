@@ -1187,7 +1187,7 @@ describe("chatReducer", () => {
       projectionSeq: 2,
       items: [],
     });
-    expect(state.outputRateMeasurement).toBeUndefined();
+    expect(state.outputRateMeasurement).toMatchObject({ runId: RUN_1 });
     state = chatReducer(state, {
       ...FOCUS_A_1,
       type: "session",
@@ -1206,6 +1206,46 @@ describe("chatReducer", () => {
       outputElapsedMs: 1_000,
       tokensPerSecond: 8,
     });
+    state = chatReducer(state, {
+      ...FOCUS_A_1,
+      type: "session",
+      runId: RUN_1,
+      projectionSeq: 4,
+      event: {
+        type: "usage",
+        usage: { input: 0, output: 6, cacheRead: 0, cacheWrite: 0, total: 6 },
+        outputElapsedMs: 750,
+      },
+    });
+    state = chatReducer(state, {
+      ...FOCUS_A_1,
+      type: "hydrate",
+      projectionSeq: 4,
+      items: [],
+    });
+    expect(state.liveOutputRate?.tokensPerSecond).toBe(8);
+  });
+
+  it("bootstraps a live rate when a snapshot arrived before run_started", () => {
+    let state = chatReducer(focusedState(), {
+      ...FOCUS_A_1,
+      type: "hydrate",
+      projectionSeq: 2,
+      items: [],
+    });
+    state = chatReducer(state, {
+      ...FOCUS_A_1,
+      type: "session",
+      runId: RUN_1,
+      projectionSeq: 3,
+      event: {
+        type: "output_estimate",
+        estimatedOutputTokens: 8,
+        outputElapsedMs: 1_000,
+      },
+    });
+
+    expect(state.liveOutputRate?.tokensPerSecond).toBe(8);
   });
 
   it("does not invent a settled rate when decode timing is unavailable", () => {
