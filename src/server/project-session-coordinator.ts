@@ -81,11 +81,13 @@ import {
 } from "./project-inbox.js";
 import {
   ConversationNotFoundError,
+  type ProjectStore,
+} from "./project-store.js";
+import {
   ProjectStoreRegistry,
   type ConversationDeletionLease,
-  type ProjectStore,
   type ProjectStoreHandle,
-} from "./project-store.js";
+} from "./project-store-registry.js";
 import {
   conversationDisplayTitle,
   projectConversationPeers,

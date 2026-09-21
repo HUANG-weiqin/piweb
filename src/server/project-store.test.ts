@@ -51,8 +51,8 @@ import {
 import {
   ConversationTruncateCommittedError,
   ProjectStore,
-  ProjectStoreRegistry,
 } from "./project-store.js";
+import { ProjectStoreRegistry } from "./project-store-registry.js";
 
 const temporaryDirectories: string[] = [];
 

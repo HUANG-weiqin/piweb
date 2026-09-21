@@ -65,14 +65,14 @@ import {
   WAIT_POLL_DELAY_MS,
   type StartPeerSessionInput,
 } from "./project-session-coordinator.js";
+import { ProjectStore } from "./project-store.js";
 import {
-  ProjectStore,
   ProjectStoreRegistry,
   type ConversationDeletionLease,
   type ConversationLease,
   type ConversationLeaseWaitOptions,
   type ProjectStoreHandle,
-} from "./project-store.js";
+} from "./project-store-registry.js";
 import type { SerialTaskQueue } from "./serial-task-queue.js";
 import {
   RoleCatalog,

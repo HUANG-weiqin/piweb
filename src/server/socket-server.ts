@@ -34,7 +34,7 @@ import {
   PiConnection,
   type PiConnectionCoordination,
 } from "./pi-service.js";
-import { ProjectStoreRegistry } from "./project-store.js";
+import { ProjectStoreRegistry } from "./project-store-registry.js";
 import { RoleCatalog } from "./role-catalog.js";
 import { UiPreferencesStore } from "./ui-preferences-store.js";
 

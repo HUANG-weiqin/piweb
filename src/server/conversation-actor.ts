@@ -74,10 +74,12 @@ import {
 } from "./pi-runtime.js";
 import {
   ConversationTruncateCommittedError,
-  type ConversationDeletionLease,
-  type ConversationLease,
   type ProjectStore,
 } from "./project-store.js";
+import type {
+  ConversationDeletionLease,
+  ConversationLease,
+} from "./project-store-registry.js";
 import { SerialTaskQueue } from "./serial-task-queue.js";
 import { assertModelSupportsServiceTier } from "./service-tier.js";
 import { SessionEventProjector, snapshotWireValue } from "./session-events.js";

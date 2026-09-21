@@ -55,11 +55,11 @@ import type {
   PiRuntimeLike,
   ToolCallGate,
 } from "./pi-runtime.js";
-import {
-  ProjectStore,
-  type ConversationDeletionLease,
-  type ConversationLease,
-} from "./project-store.js";
+import { ProjectStore } from "./project-store.js";
+import type {
+  ConversationDeletionLease,
+  ConversationLease,
+} from "./project-store-registry.js";
 
 const SESSION_ID = "f74fedb8-ea07-49a6-bd47-3036f7b06a27";
 const FOCUS_ID = "cab0af06-a001-45f7-9084-2a4ac5a1ed56";

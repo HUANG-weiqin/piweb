@@ -39,10 +39,8 @@ import {
   createConversationCardEntry,
   createLoopListEntry,
 } from "./conversation-meta.js";
-import {
-  ProjectStoreRegistry,
-  SessionDirectoryChangedError,
-} from "./project-store.js";
+import { SessionDirectoryChangedError } from "./project-store.js";
+import { ProjectStoreRegistry } from "./project-store-registry.js";
 import { ProjectSessionCoordinator } from "./project-session-coordinator.js";
 import { RoleCatalog } from "./role-catalog.js";
 
