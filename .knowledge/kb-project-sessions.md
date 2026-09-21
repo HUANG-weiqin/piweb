@@ -1,6 +1,6 @@
 # 项目与持久会话
 
-`updated: 2026-09-21`
+`updated: 2026-09-22`
 
 ## 这个模块是干什么的
 
@@ -90,7 +90,7 @@ focus 切换先 exact open：warm actor 直接复用；cold actor 在取得 writ
 
 “回到此处”是当前 conversation 内的物理后缀截断，不是 branch 或浏览器隐藏：
 
-- snapshot 的 user ID 直接对应 Pi message entry，assistant 聚合 ID 的 `assistant:` 后缀对应该聚合首个物理 message entry；所选 entry 及其后 context-bearing branch entry 会删除，更早行保持字节不变。唯一 ledger 例外是 suffix 中的 `piweb.message_delivery_receipt.v1` 及其引用的 `piweb.run_settlement.v1`：它们必须原子保留并重挂到 retained parent，避免 rewind 令已投递消息或已结算 run 复活。
+- snapshot 的 user ID 直接对应 Pi message entry，assistant 聚合 ID 的 `assistant:` 后缀对应该聚合首个物理 message entry；所选 entry 及其后 context-bearing branch entry 会删除，更早行保持字节不变。唯一 ledger 例外是 suffix 中的 `piweb.message_delivery_receipt.v1` 及其引用的 `piweb.run_settlement.v1`：它们必须原子保留并重挂到 retained parent，避免 rewind 令已投递消息或已结算 run 复活；这种只为 receipt 保留的已剪枝 settlement 必须剥离 output metrics，不能把已删除 run 的 UI 速率复活。
 - 只允许 idle actor 执行；目标还有 queued/processing inbox 时拒绝，避免截断恢复账本后重复投递。已经送达其它 conversation 的外部效果不回滚。
 - store 在项目会话串行边界内完整验证原文件与候选前缀，复验路径及扫描期间文件身份，写临时文件后原子替换；候选不是 message、文件变化、链接、损坏或身份错配都不覆盖原文件。
 - durable 替换后，同一 actor 必须 reload SessionManager，并从其 active context 重建 Agent 内存 messages、runId 集合和压缩阈值。若原子替换已提交但随后 catalog refresh 或内存同步失败，store 必须明确报告已提交，actor 进入 fatal 状态，禁止用旧 parent 继续追加。
@@ -111,7 +111,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 - `piweb.conversation_card.v1`：发送方可见的 outgoing/委派状态；
 - `piweb.conversation_message.v1`：进入目标 LLM context 的 incoming 消息；
 - `piweb.message_delivery_receipt.v1`：不可 rewind 的 transport ledger；
-- `piweb.run_settlement.v1`：精确 run outcome 与 final text；
+- `piweb.run_settlement.v1`：精确 run outcome 与 final text；可选 `outputMetrics` 只保存服务端单调钟观测到的成功 assistant segment 的 provider output token 总数与首 token→完成时长总和，用于 active branch 的 focused snapshot 恢复，不进入跨会话 wait 结果；
 - `piweb.meta_operation.v1`：破坏性 meta 工具的 started/completed 幂等状态；
 - `piweb.compaction_threshold.v1`：当前会话 20%–90% 的自动压缩阈值，缺省为 70%，最后一条单调时间记录生效。
 - `piweb.compaction_resume.v1`：压缩后继续同一 workbench run 的隐藏 `custom_message`，必须 `display=false` 且只携带合法 `runId`，只校验不投影为卡片或 settlement。默认压缩由 Pi 0.85.1 私有 `_runDefaultCompaction` 在 `session_before_compact` 后执行；custom 结果直接采用并跳过模型解析，否则每次 attempt fresh-resolve 冻结的 compaction identity。显式模型必须可用、contextWindow 为有限正数且不小于本次 primary，失败无 fallback；缺少当前必填 role snapshot 字段的 JSONL 一律 fail closed，不做读时补值或语义迁移。

@@ -1916,6 +1916,7 @@ case "set_thinking":
           )
         ));
         const items = projection.items;
+        const completedOutputRate = actor.getCompletedOutputRate();
         this.focusedItemFingerprints.clear();
         for (const item of items) {
           this.focusedItemFingerprints.set(item.id, JSON.stringify(item));
@@ -1928,6 +1929,9 @@ case "set_thinking":
           role: actor.profile.role,
           projectionSeq: projection.projectionSeq,
           items,
+          ...(completedOutputRate === undefined
+            ? {}
+            : { completedOutputRate }),
           pendingPrompts: actor.pendingPromptAdmissions().map((admission) => ({
             promptId: admission.promptId,
             text: admission.text,

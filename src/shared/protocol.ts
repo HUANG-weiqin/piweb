@@ -33,6 +33,8 @@ export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
+// v62: output-rate timing is measured at the server's first-token/completion
+// boundary and the latest settled run is recoverable from focused snapshots.
 // v58: rename commands are command-correlated and settle through the existing
 // command completion/error envelope.
 // v57: focused conversation snapshots always carry their transcript checkpoint
@@ -91,7 +93,7 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // their OpenAI-compatible model list before saving.
 // v59: idle current-leaf fork copies LLM-effective context into a fresh host
 // lifecycle via `fork_conversation`; history anchors stay unsupported.
-export const PROTOCOL_VERSION = 61;
+export const PROTOCOL_VERSION = 62;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 export const COLOR_SCHEMES = ["quiet-rebel", "classic-rebel"] as const;
 export type ColorScheme = typeof COLOR_SCHEMES[number];
@@ -966,6 +968,13 @@ export interface ConversationHistoryMessage {
   usage?: TokenUsage;
 }
 
+export interface AverageOutputRate {
+  runId: string;
+  outputTokens: number;
+  outputElapsedMs: number;
+  tokensPerSecond: number;
+}
+
 /** busy 时已接受、尚未投递的浏览器 prompt（服务端内存态）。 */
 export interface PendingPromptAdmissionSnapshot {
   promptId: string;
@@ -1157,8 +1166,18 @@ export type SessionEvent =
   | { type: "tool_prepared"; toolCallId: string; args?: unknown }
   | { type: "tool_updated"; toolCallId: string; result?: unknown }
   | { type: "tool_finished"; toolCallId: string; result?: unknown; isError: boolean }
-  | { type: "output_estimate"; estimatedOutputTokens: number }
-  | { type: "usage"; usage: TokenUsage };
+  | {
+      type: "output_estimate";
+      estimatedOutputTokens: number;
+      /** Server-observed decode time for the open assistant segment. */
+      outputElapsedMs: number;
+    }
+  | {
+      type: "usage";
+      usage: TokenUsage;
+      /** Present only when a successful segment had an observable token delta. */
+      outputElapsedMs?: number;
+    };
 
 type ErrorScope = "auth" | "command" | "protocol" | "session" | "settings";
 const FOCUS_ATTACHED_OPERATIONS = [
@@ -1317,6 +1336,8 @@ export type ServerEvent =
       /** Transcript checkpoint; it advances only with session events. */
       projectionSeq: number;
       items: ConversationHistoryItem[];
+      /** Latest settled run; omitted while a run is active or timing was unavailable. */
+      completedOutputRate?: AverageOutputRate;
       /** busy 时已接受、尚未投递的浏览器 prompt（服务端内存态，重启丢失为接受项）。 */
       pendingPrompts: PendingPromptAdmissionSnapshot[];
       loopList?: LoopList;
@@ -1545,8 +1566,13 @@ const sessionEventSchema: z.ZodType<SessionEvent> = z.discriminatedUnion("type",
   z.object({
     type: z.literal("output_estimate"),
     estimatedOutputTokens: z.number().int().nonnegative(),
+    outputElapsedMs: z.number().finite().nonnegative(),
   }),
-  z.object({ type: z.literal("usage"), usage: tokenUsageSchema }),
+  z.object({
+    type: z.literal("usage"),
+    usage: tokenUsageSchema,
+    outputElapsedMs: z.number().finite().positive().optional(),
+  }),
 ]);
 const commandTypeSchema = z.enum([
   "browse_directory",
@@ -1990,6 +2016,12 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     role: conversationRoleSnapshotSchema.optional(),
     projectionSeq: z.number().int().nonnegative(),
     items: z.array(conversationHistoryItemSchema),
+    completedOutputRate: z.object({
+      runId: runIdSchema,
+      outputTokens: z.number().finite().nonnegative(),
+      outputElapsedMs: z.number().finite().positive(),
+      tokensPerSecond: z.number().finite().nonnegative(),
+    }).strict().optional(),
     pendingPrompts: z.array(z.object({
       promptId: z.string().uuid(),
       text: required.max(MAX_PROMPT_CHARACTERS),

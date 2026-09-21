@@ -1599,6 +1599,7 @@ export function App() {
       items: event.items,
       projectionSeq: event.projectionSeq,
       historyWindow: event.window,
+      completedOutputRate: event.completedOutputRate,
     })) return;
     const scope = draftScopeRef.current;
     if (
@@ -2614,12 +2615,10 @@ export function App() {
         }
         const focus = focusRef.current;
         if (!focus) return;
-        const observedAt = Date.now();
         dispatchChat({
           type: "session",
           runId: event.runId,
           event: event.event,
-          observedAt,
           projectionSeq: event.projectionSeq,
           ...focus,
         });

@@ -1,4 +1,5 @@
 import type {
+  AverageOutputRate,
   ConversationCompactionMarker,
   ConversationHistoryItem,
   ConversationHistoryMessage,
@@ -57,18 +58,10 @@ interface RunOutputRateMeasurement {
   runId: string;
   outputTokens: number;
   outputElapsedMs: number;
-  segmentStartedAt?: number;
 }
 
-interface OutputRate {
-  runId: string;
-  outputTokens: number;
-  outputElapsedMs: number;
-  tokensPerSecond: number;
-}
-
-type CompletedOutputRate = OutputRate;
-type LiveOutputRate = OutputRate;
+type CompletedOutputRate = AverageOutputRate;
+type LiveOutputRate = AverageOutputRate;
 
 export interface ChatState {
   /**
@@ -79,10 +72,7 @@ export interface ChatState {
   projectionGap?: boolean;
   /** Coverage declared by the last accepted authoritative history snapshot. */
   historyWindow?: ConversationWindowCoverage;
-  /**
-   * Ephemeral average output rate from the most recently settled run.
-   * It never enters history snapshots or final token accounting.
-   */
+  /** Average output rate from the latest settled run and focused snapshot. */
   completedOutputRate?: CompletedOutputRate;
   /** Ephemeral Pi-base estimate for the active assistant segment only. */
   liveOutputRate?: LiveOutputRate;
@@ -107,6 +97,7 @@ export type ChatAction =
       items: ConversationHistoryItem[];
       projectionSeq?: number;
       historyWindow?: ConversationWindowCoverage;
+      completedOutputRate?: AverageOutputRate;
     } & ChatFocus)
   | ({
       type: "conversation_item";
@@ -118,8 +109,6 @@ export type ChatAction =
       type: "session";
       runId: string;
       event: SessionEvent;
-      /** Captured once when the socket event enters the client. */
-      observedAt: number;
       projectionSeq?: number;
     } & ChatFocus)
   | ({ type: "error"; runId: string; message: string } & ChatFocus)
@@ -306,7 +295,6 @@ function completeOutputRate(
 ): CompletedOutputRate | undefined {
   if (
     measurement?.runId !== runId
-    || measurement.outputTokens <= 0
     || measurement.outputElapsedMs <= 0
   ) return;
 
@@ -322,19 +310,17 @@ function recordOutputUsage(
   measurement: RunOutputRateMeasurement | undefined,
   runId: string,
   outputTokens: number,
-  observedAt: number,
+  outputElapsedMs: number | undefined,
 ): RunOutputRateMeasurement | undefined {
   if (
     measurement?.runId !== runId
-    || measurement.segmentStartedAt === undefined
+    || outputElapsedMs === undefined
   ) return measurement;
 
   return {
     ...measurement,
     outputTokens: measurement.outputTokens + outputTokens,
-    outputElapsedMs: measurement.outputElapsedMs
-      + Math.max(0, observedAt - measurement.segmentStartedAt),
-    segmentStartedAt: undefined,
+    outputElapsedMs: measurement.outputElapsedMs + outputElapsedMs,
   };
 }
 
@@ -342,16 +328,11 @@ function estimateOutputRate(
   measurement: RunOutputRateMeasurement | undefined,
   runId: string,
   estimatedOutputTokens: number,
-  observedAt: number,
+  segmentOutputElapsedMs: number,
 ): LiveOutputRate | undefined {
-  if (
-    measurement?.runId !== runId
-    || measurement.segmentStartedAt === undefined
-    || estimatedOutputTokens <= 0
-  ) return;
+  if (measurement?.runId !== runId || estimatedOutputTokens <= 0) return;
 
-  const outputElapsedMs = measurement.outputElapsedMs
-    + Math.max(0, observedAt - measurement.segmentStartedAt);
+  const outputElapsedMs = measurement.outputElapsedMs + segmentOutputElapsedMs;
   if (outputElapsedMs <= 0) return;
 
   const outputTokens = measurement.outputTokens + estimatedOutputTokens;
@@ -441,11 +422,6 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       )
     ) return state;
     const items = normalizeHistory(action.items);
-    // A completion snapshot follows its terminal session event at the same
-    // projection sequence. Preserve its client-only settled rate, while a
-    // newer snapshot still drops a value whose lifecycle we did not observe.
-    const preservesSettledOutputRate = state.lastProjectionSeq !== undefined
-      && action.projectionSeq === state.lastProjectionSeq;
     return {
       ...withItems(state, items),
       focus: {
@@ -462,9 +438,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             startsMidTurn: action.historyWindow.startsMidTurn,
             contentTruncated: action.historyWindow.contentTruncated,
           },
-      completedOutputRate: preservesSettledOutputRate
-        ? state.completedOutputRate
-        : undefined,
+      completedOutputRate: action.completedOutputRate,
       liveOutputRate: undefined,
       outputRateMeasurement: undefined,
     };
@@ -567,12 +541,6 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   }
   if (event.type === "assistant_message_started") {
     const items = state.items;
-    const outputRateMeasurement = state.outputRateMeasurement?.runId === action.runId
-      ? {
-          ...state.outputRateMeasurement,
-          segmentStartedAt: action.observedAt,
-        }
-      : state.outputRateMeasurement;
     if (items.some((item) => item.id === event.projectionId)) return state;
     const placeholderIndex = items.findIndex((item) => (
       isEmptyAssistantPlaceholder(item, action.runId)
@@ -585,7 +553,6 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             ...items.slice(0, placeholderIndex),
             { ...placeholder, id: event.projectionId },
           ]),
-          outputRateMeasurement,
           liveOutputRate: undefined,
         };
       }
@@ -607,11 +574,17 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         tools: [],
         parts: [],
       }]),
-      outputRateMeasurement,
       liveOutputRate: undefined,
     };
   }
-  if (event.type === "run_queued") return state;
+  if (event.type === "run_queued") {
+    return {
+      ...state,
+      completedOutputRate: undefined,
+      liveOutputRate: undefined,
+      outputRateMeasurement: undefined,
+    };
+  }
   if (event.type === "run_finished") {
     return {
       ...state,
@@ -716,7 +689,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       state.outputRateMeasurement,
       action.runId,
       event.estimatedOutputTokens,
-      action.observedAt,
+      event.outputElapsedMs,
     );
     return liveOutputRate === undefined
       ? state
@@ -732,7 +705,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       state.outputRateMeasurement,
       action.runId,
       event.usage.output,
-      action.observedAt,
+      event.outputElapsedMs,
     );
     const nextState = withItems(state, items);
     return outputRateMeasurement === state.outputRateMeasurement

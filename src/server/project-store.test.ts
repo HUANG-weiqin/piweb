@@ -1366,7 +1366,7 @@ describe("ProjectStore", () => {
     ]);
   });
 
-  it("rewinds context while preserving delivery receipts and their exact run settlements", async () => {
+  it("rewinds context while preserving receipt settlements without pruned output metrics", async () => {
     const cwd = await createTemporaryDirectory("piweb-truncate-receipt-");
     const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation();
@@ -1433,6 +1433,7 @@ describe("ProjectStore", () => {
       outcome: "completed",
       finalText: "done",
       settledAt: "2026-01-01T00:03:00.000Z",
+      outputMetrics: { outputTokens: 25, outputElapsedMs: 1_500 },
     });
     const referencedSettlementId = conversation.appendCustomEntry(
       referencedSettlement.customType,
@@ -1472,13 +1473,24 @@ describe("ProjectStore", () => {
     });
     expect(persisted.find(({ id }) => id === referencedSettlementId)).toEqual({
       ...before.find(({ id }) => id === referencedSettlementId),
+      data: {
+        runId: targetRunId,
+        outcome: "completed",
+        finalText: "done",
+        settledAt: "2026-01-01T00:03:00.000Z",
+      },
       parentId: receiptId,
     });
 
     const inspection = await store.inspectConversation(conversationId);
     expect(inspection.deliveredMessageIds).toEqual([]);
     expect(inspection.messageDeliveryReceipts).toEqual([receipt.data]);
-    expect(inspection.runSettlements).toEqual([referencedSettlement.data]);
+    expect(inspection.runSettlements).toEqual([{
+      runId: targetRunId,
+      outcome: "completed",
+      finalText: "done",
+      settledAt: "2026-01-01T00:03:00.000Z",
+    }]);
     const reopened = await store.openConversation(conversationId, {
       updateRecent: false,
     });

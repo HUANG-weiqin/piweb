@@ -402,8 +402,15 @@ function roleRevisionEditorTitle(
   }`;
 }
 
+// Coordinator completions are an Agent-facing projection. Host-only output
+// metrics remain in the durable record and focused browser snapshot.
 function cloneSettlement(settlement: RunSettlement): RunSettlement {
-  return { ...settlement };
+  return {
+    runId: settlement.runId,
+    outcome: settlement.outcome,
+    finalText: settlement.finalText,
+    settledAt: settlement.settledAt,
+  };
 }
 
 function cloneProfile(profile: ConversationMeta): ConversationMeta {

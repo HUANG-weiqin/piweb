@@ -42,7 +42,7 @@ const transitionDiagnostics = {
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(61);
+    expect(PROTOCOL_VERSION).toBe(62);
   });
 
   it("accepts supported commands", () => {
@@ -794,9 +794,9 @@ describe("parseClientCommand", () => {
       conversationId,
       focusId,
       runId,
-      event: { type: "output_estimate", estimatedOutputTokens: 2 },
+      event: { type: "output_estimate", estimatedOutputTokens: 2, outputElapsedMs: 250 },
     })).toMatchObject({
-      event: { type: "output_estimate", estimatedOutputTokens: 2 },
+      event: { type: "output_estimate", estimatedOutputTokens: 2, outputElapsedMs: 250 },
     });
     expect(() => parseServerEvent({
       type: "session_event",
@@ -804,7 +804,31 @@ describe("parseClientCommand", () => {
       conversationId,
       focusId,
       runId,
-      event: { type: "output_estimate", estimatedOutputTokens: -1 },
+      event: { type: "output_estimate", estimatedOutputTokens: -1, outputElapsedMs: 250 },
+    })).toThrow();
+    expect(parseServerEvent({
+      type: "session_event",
+      sessionId,
+      conversationId,
+      focusId,
+      runId,
+      event: {
+        type: "usage",
+        usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, total: 3 },
+        outputElapsedMs: 250,
+      },
+    })).toMatchObject({ event: { type: "usage", outputElapsedMs: 250 } });
+    expect(() => parseServerEvent({
+      type: "session_event",
+      sessionId,
+      conversationId,
+      focusId,
+      runId,
+      event: {
+        type: "usage",
+        usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, total: 3 },
+        outputElapsedMs: 0,
+      },
     })).toThrow();
     expect(parseServerEvent({
       type: "directory_listing",
@@ -1891,11 +1915,18 @@ describe("parseServerEvent", () => {
       focusId,
       projectionSeq: 0,
       items: [],
+      completedOutputRate: {
+        runId,
+        outputTokens: 25,
+        outputElapsedMs: 1_500,
+        tokensPerSecond: 25_000 / 1_500,
+      },
       pendingPrompts: [],
       window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
     };
     expect(parseServerEvent(snapshot)).toMatchObject({
       projectionSeq: 0,
+      completedOutputRate: { runId, outputTokens: 25, outputElapsedMs: 1_500 },
       pendingPrompts: [],
     });
     const { projectionSeq: _projectionSeq, ...withoutProjectionSeq } = snapshot;

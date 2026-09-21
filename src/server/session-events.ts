@@ -458,6 +458,11 @@ export function toWireValue(value: unknown): unknown {
   }
 }
 
+export interface OutputMetrics {
+  outputTokens: number;
+  outputElapsedMs: number;
+}
+
 /**
  * Stateful adapter from Pi's event model to the workbench wire contract.
  * A run may contain multiple assistant segments separated by user steering;
@@ -471,10 +476,19 @@ export class SessionEventProjector {
   private finalErrorMessage?: string;
   private finalAborted = false;
   private lastOutputEstimateAt?: number;
+  private segmentFirstTokenAt?: number;
+  private runOutputTokens = 0;
+  private runOutputElapsedMs = 0;
+  private sampledOutputSegment = false;
   private suppressNextUserMessage: boolean;
+  private readonly monotonicNow: () => number;
 
-  constructor(options: { suppressNextUserMessage?: boolean } = {}) {
+  constructor(options: {
+    suppressNextUserMessage?: boolean;
+    monotonicNow?: () => number;
+  } = {}) {
     this.suppressNextUserMessage = options.suppressNextUserMessage === true;
+    this.monotonicNow = options.monotonicNow ?? (() => performance.now());
   }
 
   get errorMessage(): string | undefined {
@@ -489,10 +503,18 @@ export class SessionEventProjector {
     return this.runCompletedText.length === 0 ? null : this.runCompletedText;
   }
 
+  get outputMetrics(): OutputMetrics | undefined {
+    if (!this.sampledOutputSegment || this.runOutputElapsedMs <= 0) return;
+    return {
+      outputTokens: this.runOutputTokens,
+      outputElapsedMs: this.runOutputElapsedMs,
+    };
+  }
+
   private projectOutputEstimate(
     partial: Parameters<typeof estimateMessageTokens>[0],
+    observedAt: number,
   ): SessionEvent[] {
-    const observedAt = Date.now();
     if (
       this.lastOutputEstimateAt !== undefined
       && observedAt - this.lastOutputEstimateAt < 250
@@ -502,6 +524,9 @@ export class SessionEventProjector {
     return [{
       type: "output_estimate",
       estimatedOutputTokens: estimateMessageTokens(partial),
+      outputElapsedMs: this.segmentFirstTokenAt === undefined
+        ? 0
+        : Math.max(0, observedAt - this.segmentFirstTokenAt),
     }];
   }
 
@@ -513,6 +538,7 @@ export class SessionEventProjector {
       this.segmentCompletedText = "";
       this.currentMessageText = "";
       this.lastOutputEstimateAt = undefined;
+      this.segmentFirstTokenAt = undefined;
       this.finalErrorMessage = undefined;
       this.finalAborted = false;
       return [];
@@ -546,6 +572,7 @@ export class SessionEventProjector {
       this.segmentCompletedText = "";
       this.currentMessageText = "";
       this.lastOutputEstimateAt = undefined;
+      this.segmentFirstTokenAt = undefined;
       return [{
         type: "assistant_message_started",
         projectionId: randomUUID(),
@@ -554,26 +581,39 @@ export class SessionEventProjector {
 
     if (event.type === "message_update") {
       const delta = event.assistantMessageEvent;
+      if (
+        delta.type !== "thinking_delta"
+        && delta.type !== "text_delta"
+        && delta.type !== "toolcall_delta"
+      ) return [];
+
+      const text = String(delta.delta ?? "");
+      const observedAt = this.monotonicNow();
+      if (text && this.segmentFirstTokenAt === undefined) {
+        this.segmentFirstTokenAt = observedAt;
+      }
+      if (delta.type === "toolcall_delta") {
+        return this.projectOutputEstimate(delta.partial, observedAt);
+      }
       if (delta.type === "thinking_delta") {
         return [
-          { type: "thinking_delta", delta: String(delta.delta ?? "") },
-          ...this.projectOutputEstimate(delta.partial),
+          { type: "thinking_delta", delta: text },
+          ...this.projectOutputEstimate(delta.partial, observedAt),
         ];
       }
-      if (delta.type !== "text_delta") return [];
 
       const prefix = this.segmentCompletedText && !this.currentMessageText
         ? "\n\n"
         : "";
-      const text = String(delta.delta ?? "");
       this.currentMessageText += text;
       return [
         { type: "text_delta", delta: prefix + text },
-        ...this.projectOutputEstimate(delta.partial),
+        ...this.projectOutputEstimate(delta.partial, observedAt),
       ];
     }
 
     if (event.type === "message_end" && event.message.role === "assistant") {
+      const completedAt = this.monotonicNow();
       const projected: SessionEvent[] = [];
       const message = record(event.message);
       this.finalErrorMessage = message?.stopReason === "error"
@@ -601,7 +641,22 @@ export class SessionEventProjector {
       this.currentMessageText = "";
 
       const usage = projectUsage(event.message.usage);
-      if (usage) projected.push({ type: "usage", usage });
+      const successful = message?.stopReason !== "error"
+        && message?.stopReason !== "aborted";
+      const outputElapsedMs = successful && this.segmentFirstTokenAt !== undefined
+        ? Math.max(0, completedAt - this.segmentFirstTokenAt)
+        : 0;
+      if (usage) {
+        if (outputElapsedMs > 0) {
+          this.runOutputTokens += usage.output;
+          this.runOutputElapsedMs += outputElapsedMs;
+          this.sampledOutputSegment = true;
+          projected.push({ type: "usage", usage, outputElapsedMs });
+        } else {
+          projected.push({ type: "usage", usage });
+        }
+      }
+      this.segmentFirstTokenAt = undefined;
       return projected;
     }
 

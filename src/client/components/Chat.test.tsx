@@ -1706,7 +1706,6 @@ describe("Chat", () => {
         type: "session",
         runId,
         event,
-        observedAt: projectionSeq,
         projectionSeq,
         ...focus,
       });

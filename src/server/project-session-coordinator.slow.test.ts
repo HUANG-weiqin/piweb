@@ -10151,6 +10151,7 @@ describe("ProjectSessionCoordinator", () => {
         outcome: "completed",
         finalText: "durable result without a live target model",
         settledAt: "2026-07-19T12:02:00.000Z",
+        outputMetrics: { outputTokens: 25, outputElapsedMs: 1_500 },
       }),
     );
     runtime.beforeCreateSession = async (conversationId) => {
@@ -10224,6 +10225,7 @@ describe("ProjectSessionCoordinator", () => {
       outcome: "completed",
       finalText: "durable result without a live target model",
     });
+    expect(waited).not.toHaveProperty("outputMetrics");
     expect(
       runtime.createConversationIds.filter(
         (conversationId) => conversationId === targetConversationId,

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type {
   ConversationHistoryItem,
   ConversationMessageCard,
@@ -29,16 +29,8 @@ const FOCUS_B = {
   focusId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
 };
 
-type TestChatAction = Exclude<ChatAction, { type: "session" }> | (
-  Omit<Extract<ChatAction, { type: "session" }>, "observedAt">
-  & { observedAt?: number }
-);
-
-/** Mimics App's socket ingress for fixtures that do not test clock behavior. */
-function chatReducer(state: ChatState, action: TestChatAction): ChatState {
-  return reduceChat(state, action.type === "session"
-    ? { ...action, observedAt: action.observedAt ?? Date.now() }
-    : action);
+function chatReducer(state: ChatState, action: ChatAction): ChatState {
+  return reduceChat(state, action);
 }
 
 function usage(total: number): TokenUsage {
@@ -1095,256 +1087,170 @@ describe("chatReducer", () => {
     expect(messageItems(state).at(-1)?.usage?.total).toBe(48);
   });
 
-  it("replays output timing from its ingress timestamp", () => {
-    const now = vi.spyOn(Date, "now").mockImplementation(() => {
-      throw new Error("session timing must come from ingress");
+  it("derives output rate only from server-observed decode timing", () => {
+    let state = chatReducer(focusedState(), {
+      ...FOCUS_A_1,
+      type: "session",
+      runId: RUN_1,
+      event: { type: "run_started" },
     });
-    try {
-      let state = chatReducer(focusedState(), {
-        ...FOCUS_A_1,
-        type: "session",
-        runId: RUN_1,
-        observedAt: 0,
-        event: { type: "run_started" },
-      });
-      const started = {
-        ...FOCUS_A_1,
-        type: "session" as const,
-        runId: RUN_1,
-        observedAt: 1_000,
-        event: { type: "assistant_message_started" as const, projectionId: "assistant-1" },
-      };
-      const firstReplay = chatReducer(state, started);
-      expect(chatReducer(state, started)).toEqual(firstReplay);
-
-      const estimateEvent = {
-        ...FOCUS_A_1,
-        type: "session" as const,
-        runId: RUN_1,
-        observedAt: 2_000,
-        event: { type: "output_estimate" as const, estimatedOutputTokens: 8 },
-      };
-      state = chatReducer(firstReplay, estimateEvent);
-      expect(chatReducer(firstReplay, estimateEvent)).toEqual(state);
-      expect(state.liveOutputRate).toMatchObject({
+    const estimateEvent = {
+      ...FOCUS_A_1,
+      type: "session" as const,
+      runId: RUN_1,
+      event: {
+        type: "output_estimate" as const,
+        estimatedOutputTokens: 8,
         outputElapsedMs: 1_000,
-        tokensPerSecond: 8,
-      });
+      },
+    };
+    const firstEstimate = chatReducer(state, estimateEvent);
+    expect(chatReducer(state, estimateEvent)).toEqual(firstEstimate);
+    expect(firstEstimate.liveOutputRate).toEqual({
+      runId: RUN_1,
+      outputTokens: 8,
+      outputElapsedMs: 1_000,
+      tokensPerSecond: 8,
+    });
 
-      const usageEvent = {
-        ...FOCUS_A_1,
-        type: "session" as const,
-        runId: RUN_1,
-        observedAt: 3_000,
-        event: {
-          type: "usage" as const,
-          usage: { input: 0, output: 8, cacheRead: 0, cacheWrite: 0, total: 8 },
-        },
-      };
-      const firstUsage = chatReducer(state, usageEvent);
-      expect(chatReducer(state, usageEvent)).toEqual(firstUsage);
-    } finally {
-      now.mockRestore();
-    }
+    state = chatReducer(firstEstimate, {
+      ...FOCUS_A_1,
+      type: "session",
+      runId: RUN_1,
+      event: {
+        type: "usage",
+        usage: { input: 0, output: 6, cacheRead: 0, cacheWrite: 0, total: 6 },
+        outputElapsedMs: 750,
+      },
+    });
+    state = chatReducer(state, {
+      ...FOCUS_A_1,
+      type: "session",
+      runId: RUN_1,
+      event: { type: "run_finished", outcome: "completed" },
+    });
+    expect(state.completedOutputRate).toEqual({
+      runId: RUN_1,
+      outputTokens: 6,
+      outputElapsedMs: 750,
+      tokensPerSecond: 8,
+    });
   });
 
-  it("derives a live Pi-base output rate and replaces it with final usage", () => {
-    vi.useFakeTimers();
-    try {
-      vi.setSystemTime(new Date("2026-09-06T16:00:00.000Z"));
-      let state = focusedState();
-      state = chatReducer(state, {
-        ...FOCUS_A_1,
-        type: "session",
-        runId: RUN_1,
-        event: { type: "run_started" },
-      });
-      state = chatReducer(state, {
-        ...FOCUS_A_1,
-        type: "session",
-        runId: RUN_1,
-        event: { type: "assistant_message_started", projectionId: "assistant-1" },
-      });
-      vi.advanceTimersByTime(1_000);
-      state = chatReducer(state, {
-        ...FOCUS_A_1,
-        type: "session",
-        runId: RUN_1,
-        event: { type: "output_estimate", estimatedOutputTokens: 8 },
-      });
-      expect(state.liveOutputRate).toMatchObject({
-        runId: RUN_1,
-        outputTokens: 8,
-        outputElapsedMs: 1_000,
-        tokensPerSecond: 8,
-      });
-
-      state = chatReducer(state, {
-        ...FOCUS_A_1,
-        type: "session",
-        runId: RUN_1,
-        event: {
-          type: "usage",
-          usage: { input: 0, output: 6, cacheRead: 0, cacheWrite: 0, total: 6 },
-        },
-      });
-      expect(state.liveOutputRate).toBeUndefined();
-      state = chatReducer(state, {
-        ...FOCUS_A_1,
-        type: "session",
-        runId: RUN_1,
-        event: { type: "run_finished", outcome: "completed" },
-      });
-      expect(state.completedOutputRate).toMatchObject({
-        runId: RUN_1,
-        outputTokens: 6,
-        outputElapsedMs: 1_000,
-        tokensPerSecond: 6,
-      });
-    } finally {
-      vi.useRealTimers();
-    }
+  it("does not invent a settled rate when decode timing is unavailable", () => {
+    let state = chatReducer(focusedState(), {
+      ...FOCUS_A_1,
+      type: "session",
+      runId: RUN_1,
+      event: { type: "run_started" },
+    });
+    state = chatReducer(state, {
+      ...FOCUS_A_1,
+      type: "session",
+      runId: RUN_1,
+      event: {
+        type: "usage",
+        usage: { input: 0, output: 6, cacheRead: 0, cacheWrite: 0, total: 6 },
+      },
+    });
+    state = chatReducer(state, {
+      ...FOCUS_A_1,
+      type: "session",
+      runId: RUN_1,
+      event: { type: "run_finished", outcome: "completed" },
+    });
+    expect(state.completedOutputRate).toBeUndefined();
   });
 
-  it("derives a settled average output rate from final usage across assistant segments", () => {
-    vi.useFakeTimers();
-    try {
-      vi.setSystemTime(new Date("2026-09-06T16:00:00.000Z"));
-      let state = focusedState();
-      state = chatReducer(state, {
-        ...FOCUS_A_1,
-        type: "session",
-        runId: RUN_1,
-        event: { type: "run_started" },
-      });
-      state = chatReducer(state, {
-        ...FOCUS_A_1,
-        type: "session",
-        runId: RUN_1,
-        event: { type: "assistant_message_started", projectionId: "assistant-1" },
-      });
-      vi.advanceTimersByTime(1_000);
-      state = chatReducer(state, {
-        ...FOCUS_A_1,
-        type: "session",
-        runId: RUN_1,
-        event: {
-          type: "usage",
-          usage: { input: 0, output: 10, cacheRead: 0, cacheWrite: 0, total: 10 },
-        },
-      });
-      state = chatReducer(state, {
-        ...FOCUS_A_1,
-        type: "session",
-        runId: RUN_1,
-        event: { type: "tool_started", toolCallId: "tool-1", toolName: "read" },
-      });
-      vi.advanceTimersByTime(4_000);
-      state = chatReducer(state, {
-        ...FOCUS_A_1,
-        type: "session",
-        runId: RUN_1,
-        event: { type: "assistant_message_started", projectionId: "assistant-2" },
-      });
-      vi.advanceTimersByTime(500);
-      state = chatReducer(state, {
-        ...FOCUS_A_1,
-        type: "session",
-        runId: RUN_1,
-        event: {
-          type: "usage",
-          usage: { input: 0, output: 15, cacheRead: 0, cacheWrite: 0, total: 15 },
-        },
-      });
-      state = chatReducer(state, {
-        ...FOCUS_A_1,
-        type: "session",
-        runId: RUN_1,
-        event: { type: "run_finished", outcome: "completed" },
-      });
+  it("derives a settled average output rate across timed assistant segments", () => {
+    let state = focusedState();
+    state = chatReducer(state, {
+      ...FOCUS_A_1,
+      type: "session",
+      runId: RUN_1,
+      event: { type: "run_started" },
+    });
+    state = chatReducer(state, {
+      ...FOCUS_A_1,
+      type: "session",
+      runId: RUN_1,
+      event: {
+        type: "usage",
+        usage: { input: 0, output: 10, cacheRead: 0, cacheWrite: 0, total: 10 },
+        outputElapsedMs: 1_000,
+      },
+    });
+    state = chatReducer(state, {
+      ...FOCUS_A_1,
+      type: "session",
+      runId: RUN_1,
+      event: { type: "tool_started", toolCallId: "tool-1", toolName: "read" },
+    });
+    state = chatReducer(state, {
+      ...FOCUS_A_1,
+      type: "session",
+      runId: RUN_1,
+      event: {
+        type: "usage",
+        usage: { input: 0, output: 15, cacheRead: 0, cacheWrite: 0, total: 15 },
+        outputElapsedMs: 500,
+      },
+    });
+    state = chatReducer(state, {
+      ...FOCUS_A_1,
+      type: "session",
+      runId: RUN_1,
+      event: { type: "run_finished", outcome: "completed" },
+    });
 
-      expect(state.completedOutputRate).toMatchObject({
-        runId: RUN_1,
-        outputTokens: 25,
-        outputElapsedMs: 1_500,
-      });
-      expect(state.completedOutputRate?.tokensPerSecond).toBeCloseTo(25_000 / 1_500);
-      expect(state.outputRateMeasurement).toBeUndefined();
+    expect(state.completedOutputRate).toMatchObject({
+      runId: RUN_1,
+      outputTokens: 25,
+      outputElapsedMs: 1_500,
+    });
+    expect(state.completedOutputRate?.tokensPerSecond).toBeCloseTo(25_000 / 1_500);
+    expect(state.outputRateMeasurement).toBeUndefined();
 
-      state = chatReducer(state, {
-        ...FOCUS_A_1,
-        type: "session",
-        runId: RUN_2,
-        event: { type: "run_started" },
-      });
-      expect(state.completedOutputRate).toBeUndefined();
-    } finally {
-      vi.useRealTimers();
-    }
+    state = chatReducer(state, {
+      ...FOCUS_A_1,
+      type: "session",
+      runId: RUN_2,
+      event: { type: "run_queued" },
+    });
+    expect(state.completedOutputRate).toBeUndefined();
+
+    state = chatReducer(state, {
+      ...FOCUS_A_1,
+      type: "session",
+      runId: RUN_2,
+      event: { type: "run_started" },
+    });
+    expect(state.outputRateMeasurement).toMatchObject({ runId: RUN_2 });
   });
 
-  it("keeps a settled output rate through its same-sequence completion snapshot", () => {
-    vi.useFakeTimers();
-    try {
-      vi.setSystemTime(new Date("2026-09-06T16:00:00.000Z"));
-      let state = chatReducer(focusedState(), {
-        ...FOCUS_A_1,
-        type: "hydrate",
-        projectionSeq: 0,
-        items: [],
-      });
-      state = chatReducer(state, {
-        ...FOCUS_A_1,
-        type: "session",
-        runId: RUN_1,
-        projectionSeq: 1,
-        event: { type: "run_started" },
-      });
-      state = chatReducer(state, {
-        ...FOCUS_A_1,
-        type: "session",
-        runId: RUN_1,
-        projectionSeq: 2,
-        event: { type: "assistant_message_started", projectionId: "assistant-1" },
-      });
-      vi.advanceTimersByTime(1_000);
-      state = chatReducer(state, {
-        ...FOCUS_A_1,
-        type: "session",
-        runId: RUN_1,
-        projectionSeq: 3,
-        event: {
-          type: "usage",
-          usage: { input: 0, output: 10, cacheRead: 0, cacheWrite: 0, total: 10 },
-        },
-      });
-      state = chatReducer(state, {
-        ...FOCUS_A_1,
-        type: "session",
-        runId: RUN_1,
-        projectionSeq: 4,
-        event: { type: "run_finished", outcome: "completed" },
-      });
-      expect(state.completedOutputRate?.tokensPerSecond).toBe(10);
+  it("hydrates a settled output rate from the authoritative snapshot", () => {
+    const completedOutputRate = {
+      runId: RUN_1,
+      outputTokens: 25,
+      outputElapsedMs: 1_500,
+      tokensPerSecond: 25_000 / 1_500,
+    };
+    let state = chatReducer(focusedState(), {
+      ...FOCUS_A_1,
+      type: "hydrate",
+      projectionSeq: 4,
+      items: [],
+      completedOutputRate,
+    });
+    expect(state.completedOutputRate).toEqual(completedOutputRate);
 
-      state = chatReducer(state, {
-        ...FOCUS_A_1,
-        type: "hydrate",
-        projectionSeq: 4,
-        items: [],
-      });
-      expect(state.completedOutputRate?.tokensPerSecond).toBe(10);
-
-      state = chatReducer(state, {
-        ...FOCUS_A_1,
-        type: "hydrate",
-        projectionSeq: 5,
-        items: [],
-      });
-      expect(state.completedOutputRate).toBeUndefined();
-    } finally {
-      vi.useRealTimers();
-    }
+    state = chatReducer(state, {
+      ...FOCUS_A_1,
+      type: "hydrate",
+      projectionSeq: 5,
+      items: [],
+    });
+    expect(state.completedOutputRate).toBeUndefined();
   });
 
   it("uses the final assistant message when no streaming delta arrived", () => {

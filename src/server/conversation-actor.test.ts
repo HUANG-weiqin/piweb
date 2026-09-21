@@ -38,6 +38,7 @@ import {
   createEditGateEntry,
   createLoopListContinueEntry,
   createLoopListEntry,
+  createRunSettlementEntry,
   createServiceTierSelectionEntry,
   LOOP_LIST_CUSTOM_TYPE,
 } from "./conversation-meta.js";
@@ -603,6 +604,102 @@ function checkToolTurnBoundary(runtime: FakeRuntime): boolean {
 }
 
 describe("ConversationActor", () => {
+  it("restores the latest settled output rate from the durable branch", async () => {
+    const manager = SessionManager.inMemory(process.cwd(), { id: CONVERSATION_ID });
+    appendReservedCustomEntry(manager, createRunSettlementEntry({
+      runId: RUN_A,
+      outcome: "completed",
+      finalText: "done",
+      settledAt: "2026-07-19T12:00:00.000Z",
+      outputMetrics: { outputTokens: 25, outputElapsedMs: 1_500 },
+    }));
+    const fixture = await openActor({ sessionManager: manager });
+
+    expect(fixture.actor.getCompletedOutputRate()).toEqual({
+      runId: RUN_A,
+      outputTokens: 25,
+      outputElapsedMs: 1_500,
+      tokensPerSecond: 25_000 / 1_500,
+    });
+
+    const run = await startHeldActorRun(fixture, RUN_B);
+    expect(fixture.actor.getCompletedOutputRate()).toBeUndefined();
+    await run.finish();
+    await fixture.actor.dispose();
+  });
+
+  it("persists sampled output metrics and projects the settled rate", async () => {
+    let monotonicNow = 1_000;
+    const clock = vi.spyOn(performance, "now")
+      .mockImplementation(() => monotonicNow);
+    const fixture = await openActor({
+      now: () => new Date("2026-07-19T12:00:00.000Z"),
+    });
+    try {
+      fixture.runtime.session.promptImplementation = async () => {
+        const emit = fixture.runtime.session.eventListener;
+        emit?.(nativeEvent({ type: "agent_start" }));
+        emit?.(nativeEvent({
+          type: "message_start",
+          message: { role: "assistant", content: [] },
+        }));
+        const partial = {
+          role: "assistant",
+          content: [{ type: "text", text: "reply" }],
+        };
+        emit?.(nativeEvent({
+          type: "message_update",
+          assistantMessageEvent: {
+            type: "text_delta",
+            delta: "reply",
+            partial,
+          },
+        }));
+        monotonicNow = 1_750;
+        emit?.(nativeEvent({
+          type: "message_end",
+          message: {
+            ...partial,
+            stopReason: "stop",
+            usage: {
+              input: 1,
+              output: 6,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: 7,
+            },
+          },
+        }));
+        emit?.(nativeEvent({ type: "agent_end" }));
+      };
+
+      const settlement = await fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "measure output",
+        origin: "browser",
+      });
+      expect(settlement.outputMetrics).toEqual({
+        outputTokens: 6,
+        outputElapsedMs: 750,
+      });
+      expect(aggregateReservedConversationEntries(
+        fixture.manager.getBranch(),
+      ).runSettlements.at(-1)?.outputMetrics).toEqual({
+        outputTokens: 6,
+        outputElapsedMs: 750,
+      });
+      expect(fixture.actor.getCompletedOutputRate()).toEqual({
+        runId: RUN_A,
+        outputTokens: 6,
+        outputElapsedMs: 750,
+        tokensPerSecond: 8,
+      });
+    } finally {
+      clock.mockRestore();
+      await fixture.actor.dispose();
+    }
+  });
+
   describe("computer lifecycle", () => {
     it("authorizes only this assistant's computer calls and clears/release on lifecycle boundaries", async () => {
       const runtime = new FakeRuntime();

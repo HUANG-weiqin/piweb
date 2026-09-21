@@ -1875,8 +1875,21 @@ export class ProjectStore {
         ) {
           continue;
         }
+        // A receipt keeps terminal delivery proof, not UI facts from the
+        // context-bearing run that this truncate removes.
+        const preservedEntry = reserved.kind === "run_settlement"
+          ? {
+              ...entry,
+              data: {
+                runId: reserved.entry.data.runId,
+                outcome: reserved.entry.data.outcome,
+                finalText: reserved.entry.data.finalText,
+                settledAt: reserved.entry.data.settledAt,
+              },
+            }
+          : entry;
         const preserved = {
-          ...entry,
+          ...preservedEntry,
           parentId: retainedParentId,
         };
         retainedLines.push(JSON.stringify(preserved));

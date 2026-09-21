@@ -679,6 +679,10 @@ const runSettlementSchema = z.object({
     { allowEmpty: true },
   ).nullable(),
   settledAt: canonicalTimestampSchema("settledAt"),
+  outputMetrics: z.object({
+    outputTokens: z.number().finite().nonnegative(),
+    outputElapsedMs: z.number().finite().positive(),
+  }).strict().optional(),
 }).strict();
 
 const runSettlementEntrySchema = z.object({

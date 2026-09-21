@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import {
   SessionEventProjector,
@@ -36,6 +36,7 @@ describe("SessionEventProjector", () => {
         usage: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 },
       },
     ]);
+    expect(projector.outputMetrics).toBeUndefined();
   });
 
   it("projects streamed text with an ephemeral Pi-base output estimate", () => {
@@ -56,48 +57,202 @@ describe("SessionEventProjector", () => {
       },
     }))).toEqual([
       { type: "text_delta", delta: "reply" },
-      { type: "output_estimate", estimatedOutputTokens: 2 },
+      { type: "output_estimate", estimatedOutputTokens: 2, outputElapsedMs: 0 },
     ]);
   });
 
   it("caps Pi-base output estimates at one projection per 250ms", () => {
-    vi.useFakeTimers();
-    try {
-      vi.setSystemTime(new Date("2026-09-06T16:00:00.000Z"));
-      const projector = new SessionEventProjector();
-      projector.project(nativeEvent({ type: "agent_start" }));
-      const first = {
-        role: "assistant",
-        content: [{ type: "text", text: "first" }],
-      };
-      expect(projector.project(nativeEvent({
-        type: "message_update",
-        assistantMessageEvent: { type: "text_delta", delta: "first", partial: first },
-      }))).toHaveLength(2);
+    let now = 1_000;
+    const projector = new SessionEventProjector({ monotonicNow: () => now });
+    projector.project(nativeEvent({ type: "agent_start" }));
+    const first = {
+      role: "assistant",
+      content: [{ type: "text", text: "first" }],
+    };
+    expect(projector.project(nativeEvent({
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", delta: "first", partial: first },
+    }))).toHaveLength(2);
 
-      vi.advanceTimersByTime(249);
-      const second = {
-        role: "assistant",
-        content: [{ type: "text", text: "second" }],
-      };
-      expect(projector.project(nativeEvent({
-        type: "message_update",
-        assistantMessageEvent: { type: "text_delta", delta: "second", partial: second },
-      }))).toEqual([{ type: "text_delta", delta: "second" }]);
+    now += 249;
+    const second = {
+      role: "assistant",
+      content: [{ type: "text", text: "second" }],
+    };
+    expect(projector.project(nativeEvent({
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", delta: "second", partial: second },
+    }))).toEqual([{ type: "text_delta", delta: "second" }]);
 
-      vi.advanceTimersByTime(1);
-      const third = {
-        role: "assistant",
-        content: [{ type: "text", text: "third" }],
-      };
-      expect(projector.project(nativeEvent({
-        type: "message_update",
-        assistantMessageEvent: { type: "text_delta", delta: "third", partial: third },
-      }))).toHaveLength(2);
-    } finally {
-      vi.useRealTimers();
-    }
+    now += 1;
+    const third = {
+      role: "assistant",
+      content: [{ type: "text", text: "third" }],
+    };
+    expect(projector.project(nativeEvent({
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", delta: "third", partial: third },
+    }))).toHaveLength(2);
   });
+
+  it("measures successful segments from first non-empty token and excludes gaps", () => {
+    let now = 100;
+    const projector = new SessionEventProjector({ monotonicNow: () => now });
+    projector.project(nativeEvent({
+      type: "message_start",
+      message: { role: "assistant", content: [] },
+    }));
+    const partial = {
+      role: "assistant",
+      content: [{ type: "text", text: "reply" }],
+    };
+
+    now = 500;
+    projector.project(nativeEvent({
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", delta: "", partial },
+    }));
+    now = 1_000;
+    expect(projector.project(nativeEvent({
+      type: "message_update",
+      assistantMessageEvent: {
+        type: "text_delta",
+        delta: "reply",
+        partial,
+      },
+    }))).toContainEqual({
+      type: "output_estimate",
+      estimatedOutputTokens: 2,
+      outputElapsedMs: 0,
+    });
+
+    now = 1_750;
+    expect(projector.project(nativeEvent({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "reply" }],
+        stopReason: "stop",
+        usage: {
+          input: 1,
+          output: 6,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 7,
+        },
+      },
+    }))).toContainEqual({
+      type: "usage",
+      usage: { input: 1, output: 6, cacheRead: 0, cacheWrite: 0, total: 7 },
+      outputElapsedMs: 750,
+    });
+
+    now = 10_000;
+    projector.project(nativeEvent({
+      type: "message_start",
+      message: { role: "assistant", content: [] },
+    }));
+    now = 12_000;
+    projector.project(nativeEvent({
+      type: "message_update",
+      assistantMessageEvent: {
+        type: "toolcall_delta",
+        delta: "{\"path\":",
+        partial: {
+          role: "assistant",
+          content: [{ type: "toolCall", name: "read", arguments: { path: "" } }],
+        },
+      },
+    }));
+    now = 12_500;
+    projector.project(nativeEvent({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "toolCall", name: "read", arguments: { path: "x" } }],
+        stopReason: "toolUse",
+        usage: {
+          input: 1,
+          output: 4,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 5,
+        },
+      },
+    }));
+
+    expect(projector.outputMetrics).toEqual({
+      outputTokens: 10,
+      outputElapsedMs: 1_250,
+    });
+  });
+
+  it("starts timing on non-empty thinking output", () => {
+    let now = 1_000;
+    const projector = new SessionEventProjector({ monotonicNow: () => now });
+    projector.project(nativeEvent({
+      type: "message_start",
+      message: { role: "assistant", content: [] },
+    }));
+    projector.project(nativeEvent({
+      type: "message_update",
+      assistantMessageEvent: {
+        type: "thinking_delta",
+        delta: "reason",
+        partial: {
+          role: "assistant",
+          content: [{ type: "thinking", thinking: "reason" }],
+        },
+      },
+    }));
+    now = 1_600;
+    projector.project(nativeEvent({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "reason" }],
+        stopReason: "stop",
+        usage: { input: 1, output: 3, totalTokens: 4 },
+      },
+    }));
+
+    expect(projector.outputMetrics).toEqual({
+      outputTokens: 3,
+      outputElapsedMs: 600,
+    });
+  });
+
+  it.each(["error", "aborted"] as const)(
+    "does not sample a %s assistant segment",
+    (stopReason) => {
+      let now = 1_000;
+      const projector = new SessionEventProjector({ monotonicNow: () => now });
+      const partial = {
+        role: "assistant",
+        content: [{ type: "text", text: "partial" }],
+      };
+      projector.project(nativeEvent({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "partial", partial },
+      }));
+      now = 1_500;
+      const events = projector.project(nativeEvent({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "partial" }],
+          stopReason,
+          usage: { input: 1, output: 3, totalTokens: 4 },
+        },
+      }));
+
+      expect(events).toContainEqual({
+        type: "usage",
+        usage: { input: 1, output: 3, cacheRead: 0, cacheWrite: 0, total: 4 },
+      });
+      expect(projector.outputMetrics).toBeUndefined();
+    },
+  );
 
   it("calibrates streamed text from the final assistant message", () => {
     const projector = new SessionEventProjector();

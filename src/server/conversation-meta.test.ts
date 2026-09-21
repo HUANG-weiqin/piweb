@@ -829,10 +829,18 @@ describe("conversation reserved entries", () => {
   });
 
   it("records exact run settlements", () => {
-    const pending = createRunSettlementEntry(settlement());
+    const pending = createRunSettlementEntry({
+      ...settlement(),
+      outputMetrics: { outputTokens: 25, outputElapsedMs: 1_500 },
+    });
 
     expect(pending.customType).toBe(RUN_SETTLEMENT_CUSTOM_TYPE);
     expect(parseRunSettlementEntry(pending)).toEqual(pending);
+    expect(createRunSettlementEntry(settlement()).data.outputMetrics).toBeUndefined();
+    expect(() => createRunSettlementEntry({
+      ...settlement(),
+      outputMetrics: { outputTokens: 1, outputElapsedMs: 0 },
+    })).toThrow(/outputElapsedMs/i);
     expect(() => createRunSettlementEntry({
       ...settlement(),
       finalText: Number.NaN,

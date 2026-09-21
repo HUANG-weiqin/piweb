@@ -17,6 +17,7 @@ import {
   DEFAULT_COMPACTION_THRESHOLD_PERCENT,
   MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
   parseConversationImage,
+  type AverageOutputRate,
   type ConversationActivity,
   type ConversationImage,
   type ConversationHistoryItem,
@@ -1604,6 +1605,25 @@ export class ConversationActor {
       this.activeRun !== undefined,
       enrich,
     );
+  }
+
+  getCompletedOutputRate(): AverageOutputRate | undefined {
+    if (this.activeRun !== undefined) return;
+    const settlements = aggregateReservedConversationEntries(
+      this.sessionManager.getBranch(),
+    ).runSettlements;
+    const latest = settlements.at(-1);
+    const metrics = latest?.outputMetrics;
+    if (latest === undefined || metrics === undefined) return;
+    const tokensPerSecond = metrics.outputTokens * 1_000
+      / metrics.outputElapsedMs;
+    if (!Number.isFinite(tokensPerSecond)) return;
+    return {
+      runId: latest.runId,
+      outputTokens: metrics.outputTokens,
+      outputElapsedMs: metrics.outputElapsedMs,
+      tokensPerSecond,
+    };
   }
 
   subscribe(listener: ConversationActorListener): () => void {
@@ -3302,11 +3322,13 @@ export class ConversationActor {
     } catch (error) {
       this.emitError(error, ticket.id);
     }
+    const outputMetrics = ticket.projector.outputMetrics;
     const settlement = createRunSettlementEntry({
       runId: ticket.id,
       outcome,
       finalText: ticket.projector.finalText,
       settledAt: this.now().toISOString(),
+      ...(outputMetrics === undefined ? {} : { outputMetrics }),
     }).data;
 
     // Ordering is intentional: durable truth precedes browser terminal
